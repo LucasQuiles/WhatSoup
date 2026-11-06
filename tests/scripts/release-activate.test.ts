@@ -5,6 +5,7 @@
  * launchd world (tests/helpers/release-activate-world.ts). All identifiers are
  * fabricated.
  */
+import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   lstatSync,
@@ -34,6 +35,7 @@ const fsFaults = vi.hoisted(() => ({
   /** Runs before fsyncSync with the path its fd was opened on (a directory fsync opens the directory). */
   fsync: null as null | ((openedPath: string) => void),
   opened: new Map<number, string>(),
+  beforeReadOpen: null as null | ((target: string) => void),
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -48,7 +50,12 @@ vi.mock('node:fs', async (importOriginal) => {
       fsFaults.write?.(args[0], args[1]);
       return actual.writeFileSync(...args);
     },
+    readFileSync: (...args: Parameters<typeof actual.readFileSync>) => {
+      fsFaults.beforeReadOpen?.(String(args[0]));
+      return actual.readFileSync(...args);
+    },
     openSync: (...args: Parameters<typeof actual.openSync>) => {
+      fsFaults.beforeReadOpen?.(String(args[0]));
       const fd = actual.openSync(...args);
       fsFaults.opened.set(fd, String(args[0]));
       return fd;
@@ -65,9 +72,11 @@ import {
 } from '../../scripts/release-activate.ts';
 import { argvNamesEntrypoint } from '../../scripts/lib/release-activation/apply.ts';
 import { classifyAuthenticatedHealth } from '../../scripts/lib/release-activation/host.ts';
+import { parsePlist } from '../../scripts/check-service-units.ts';
 import { stageInstancePlist } from '../../scripts/lib/release-activation/plan.ts';
 import {
   activationArgs,
+  botErrorsHealthPrint,
   CURRENT_BLOCK,
   DECLARED_INVARIANTS,
   diagnosticBody,
@@ -100,6 +109,7 @@ import {
   TOOL_COMMIT,
   UID,
   type WorldOptions,
+  writeBotErrorsRuntime,
   writeRelease,
 } from '../helpers/release-activate-world.ts';
 
@@ -130,7 +140,53 @@ afterEach(() => {
   fsFaults.rename = null;
   fsFaults.write = null;
   fsFaults.fsync = null;
+  fsFaults.beforeReadOpen = null;
 });
+
+function directHealthDefinition(programArguments: string[], workingDirectory: string, plistPath: string, program = programArguments[0] ?? ''): string {
+  return [
+    'com.bot-errors.health = {',
+    `\tpath = ${plistPath}`,
+    '\ttype = LaunchAgent',
+    '\tstate = not running',
+    `\tprogram = ${program}`,
+    '\targuments = {',
+    ...programArguments.map((arg) => `\t\t${arg}`),
+    '\t}',
+    `\tworking directory = ${workingDirectory}`,
+    '}',
+    '',
+  ].join('\n');
+}
+
+function directHealthArguments(root: string, home: string, python: string): string[] {
+  return [
+    python, path.join(root, 'deploy', 'scripts', 'bot-errors-runner.py'),
+    '--instance', 'bot-errors-health',
+    '--source', 'service-exit',
+    '--summary', 'BOT ERRORS daily health command failed',
+    '--log-hint', path.join(home, '.local', 'state', 'bot-errors', 'logs', 'health.err.log'),
+    '--diagnostic', 'launchd_label=com.bot-errors.health',
+    '--', python, path.join(root, 'deploy', 'scripts', 'bot-errors-health-check.py'), '--daily',
+  ];
+}
+
+function directHealthDefinitionFromPlist(plistText: string, plistPath: string): string {
+  const parsed = parsePlist(plistText);
+  const workingDirectory = parsed?.scalarKeys['WorkingDirectory'];
+  if (parsed === null || workingDirectory === undefined) {
+    throw new Error('health installer plist is not a parseable direct-Python definition');
+  }
+  return directHealthDefinition(parsed.programArguments, workingDirectory, plistPath);
+}
+
+function trustedHealthPython(name = 'python3'): string {
+  const bin = path.join(fixture.base, 'health & bin');
+  mkdirSync(bin, { recursive: true });
+  const python = path.join(bin, name);
+  writeFileSync(python, '', { mode: 0o700 });
+  return python;
+}
 
 describe('release:activate arguments', () => {
   it('registers the npm script on the pinned-node runner', () => {
@@ -184,7 +240,10 @@ describe('release:activate --plan', () => {
     expect(plists[0]!.edits).toEqual([`WorkingDirectory: ${fixture.oldRelease} -> ${fixture.newRelease}`]);
     const steps = (result.json.actions as Array<{ step: string }>).map((action) => action.step);
     expect(steps).toEqual([
+      'acquire-activation-lock',
       'create-backup-dir', 'backup-database', 'record-schema-level', 'record-symlink', 'backup-plists', 'write-staged-plists',
+      'recheck-refresh-rollback-fence-requirement-before-switch',
+      'recheck-live-identity-before-switch',
       'switch-symlink', 'install-plists', 'reload', 'reload', 'reload', 'verify', 'rollback-on-failure',
     ]);
     expect(result.stdout).not.toContain(TOKEN);
@@ -234,6 +293,439 @@ describe('release:activate --plan', () => {
     expect(result.stderr).toMatch(/macOS launchd only/);
     expect(result.json).toEqual({ mode: 'plan', ready: false, refused: 'platform-not-macos-launchd' });
     expect(world.calls).toEqual([]);
+  });
+});
+
+describe('release:activate BOT ERRORS consumer compatibility', () => {
+  it('allows the observed loaded wrapper grammar when a consumer advertises a newer compatible selector capability', async () => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: () => ({ code: 0, stdout: botErrorsHealthPrint(fixture, fixture.oldRelease), stderr: '' }),
+    });
+
+    const result = await run(world, activationArgs(fixture));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    expect(result.json.ready).toBe(true);
+    expect(world.botErrorsHealthPrintReads).toBe(1);
+    expect(world.mutatingCalls()).toEqual([]);
+  });
+
+  it('accepts the real direct-Python health installer definition without starting a real service', async () => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+    const shimDir = path.join(fixture.base, 'installer-shims');
+    mkdirSync(shimDir);
+    for (const command of ['launchctl', 'plutil']) {
+      writeFileSync(path.join(shimDir, command), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+    }
+    const python = trustedHealthPython();
+    const profile = path.join(fixture.base, 'health-profile.json');
+    const stateDir = path.join(fixture.home, '.local', 'state', 'bot-errors');
+    const envFile = path.join(fixture.base, 'bot-errors.env');
+    writeFileSync(profile, '{}\n');
+    writeFileSync(envFile, '');
+    execFileSync('/bin/bash', ['deploy/scripts/install-bot-errors-health-launchd.sh'], {
+      cwd: process.cwd(),
+      env: {
+        HOME: fixture.home,
+        PATH: `${shimDir}:/usr/bin:/bin`,
+        BOT_ERRORS_REPO_ROOT: fixture.oldRelease,
+        BOT_ERRORS_PYTHON: python,
+        BOT_ERRORS_HEALTH_PROFILE: profile,
+        BOT_ERRORS_STATE_DIR: stateDir,
+        BOT_ERRORS_ENV_FILE: envFile,
+        BOT_ERRORS_HEALTH_LABEL: 'com.bot-errors.health',
+        BOT_ERRORS_HEALTH_HOUR: '7',
+        BOT_ERRORS_HEALTH_MINUTE: '20',
+      },
+      timeout: 5_000,
+    });
+    const plistPath = path.join(fixture.launchAgents, 'com.bot-errors.health.plist');
+    const installed = readFileSync(plistPath, 'utf8');
+    const directDefinition = directHealthDefinitionFromPlist(installed, plistPath);
+    expect(parsePlist(installed)?.programArguments).toHaveLength(16);
+    expect(installed).toContain('health &amp; bin');
+    expect(parsePlist(installed)?.programArguments[0]).toBe(python);
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: () => ({
+        code: 0,
+        stdout: directDefinition,
+        stderr: '',
+      }),
+    });
+
+    const result = await run(world, activationArgs(fixture));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    expect(result.json.ready).toBe(true);
+    expect(world.botErrorsHealthPrintReads).toBe(1);
+    expect(world.mutatingCalls()).toEqual([]);
+  });
+
+  it.each(['program mismatch', 'checker interpreter mismatch', 'checker path mismatch', 'unsafe Python'])(
+    'refuses a direct health grammar with %s', async (kind) => {
+      writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+      writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+      const python = trustedHealthPython();
+      const args = directHealthArguments(fixture.oldRelease, fixture.home, python);
+      if (kind === 'checker interpreter mismatch') args[13] = trustedHealthPython('python3.15');
+      if (kind === 'checker path mismatch') args[14] = path.join(fixture.oldRelease, 'deploy', 'scripts', 'other-check.py');
+      if (kind === 'unsafe Python') args[0] = 'relative/python3';
+      const world = new SimulatedLaunchd(fixture, {
+        botErrorsHealthPrint: () => ({
+          code: 0,
+          stdout: directHealthDefinition(
+            args,
+            fixture.oldRelease,
+            path.join(fixture.launchAgents, 'com.bot-errors.health.plist'),
+            kind === 'program mismatch' ? '/bin/bash' : args[0]!,
+          ),
+          stderr: '',
+        }),
+      });
+      const before = snapshotTree(fixture.base);
+
+      const result = await run(world, activationArgs(fixture));
+
+      expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+      expect((result.json.preconditions as Array<{ id: string; ok: boolean }>)
+        .find((entry) => entry.id === 'bot-errors-health-consumer-compatible')).toMatchObject({ ok: false });
+      expect(world.mutatingCalls()).toEqual([]);
+      expect(snapshotTree(fixture.base)).toEqual(before);
+    },
+  );
+
+  it('rechecks a direct health consumer immediately before switching', async () => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+    const python = trustedHealthPython();
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: (read) => {
+        const root = read === 1 ? fixture.oldRelease : fixture.newRelease;
+        return {
+          code: 0,
+          stdout: directHealthDefinition(
+            directHealthArguments(root, fixture.home, python),
+            root,
+            path.join(fixture.launchAgents, 'com.bot-errors.health.plist'),
+          ),
+          stderr: '',
+        };
+      },
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect(result.json.outcome).toBe('refused');
+    expect(readlinkSync(fixture.wrapperLink)).toBe(path.join(fixture.oldRelease, 'deploy', 'whatsoup'));
+    expect(world.botErrorsHealthPrintReads).toBe(2);
+    expect(world.mutatingCalls()).toEqual([]);
+  });
+
+  it.each(['regular file', 'symlink'])('accepts a trusted configured Python interpreter: %s', async (kind) => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+    const bin = path.join(fixture.base, 'bin');
+    mkdirSync(bin);
+    const target = path.join(bin, 'python3.15');
+    writeFileSync(target, '', { mode: 0o700 });
+    const python = kind === 'symlink' ? path.join(bin, 'python3') : target;
+    if (kind === 'symlink') symlinkSync(target, python);
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: () => ({ code: 0, stdout: botErrorsHealthPrint(fixture, fixture.oldRelease, 'workstation.json', python), stderr: '' }),
+    });
+
+    const result = await run(world, activationArgs(fixture));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    expect(result.json.ready).toBe(true);
+    expect(world.botErrorsHealthPrintReads).toBe(1);
+    expect(world.mutatingCalls()).toEqual([]);
+  });
+
+  it('refuses different runner and checker Python interpreters', async () => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+    const bin = path.join(fixture.base, 'bin');
+    mkdirSync(bin);
+    const python = path.join(bin, 'python3');
+    const other = path.join(bin, 'python3.15');
+    for (const interpreter of [python, other]) writeFileSync(interpreter, '', { mode: 0o700 });
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: () => ({
+        code: 0,
+        stdout: botErrorsHealthPrint(fixture, fixture.oldRelease, 'workstation.json', python)
+          .replace(`\t\t--\n\t\t${python}\n`, `\t\t--\n\t\t${other}\n`),
+        stderr: '',
+      }),
+    });
+    const before = snapshotTree(fixture.base);
+
+    const result = await run(world, activationArgs(fixture));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect((result.json.preconditions as Array<{ id: string; ok: boolean }>)
+      .find((entry) => entry.id === 'bot-errors-health-consumer-compatible')).toMatchObject({ ok: false });
+    expect(world.mutatingCalls()).toEqual([]);
+    expect(snapshotTree(fixture.base)).toEqual(before);
+  });
+
+  it.each(['relative', 'noncanonical', 'missing', 'directory', 'non-executable', 'group-writable', 'world-writable', 'wrong-name'])(
+    'refuses an unsafe configured Python interpreter: %s', async (kind) => {
+      writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+      writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+      const bin = path.join(fixture.base, 'bin');
+      mkdirSync(bin);
+      let python = path.join(bin, kind === 'wrong-name' ? 'bash' : 'python3');
+      if (kind === 'directory') mkdirSync(python);
+      else if (kind !== 'missing') writeFileSync(python, '', { mode: 0o700 });
+      if (kind === 'non-executable') chmodSync(python, 0o600);
+      if (kind === 'group-writable') chmodSync(python, 0o720);
+      if (kind === 'world-writable') chmodSync(python, 0o702);
+      if (kind === 'relative') python = 'bin/python3';
+      if (kind === 'noncanonical') python = `${bin}/../bin/python3`;
+      const world = new SimulatedLaunchd(fixture, {
+        botErrorsHealthPrint: () => ({ code: 0, stdout: botErrorsHealthPrint(fixture, fixture.oldRelease, 'workstation.json', python), stderr: '' }),
+      });
+      const before = snapshotTree(fixture.base);
+
+      const result = await run(world, activationArgs(fixture));
+
+      expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+      expect((result.json.preconditions as Array<{ id: string; ok: boolean }>)
+        .find((entry) => entry.id === 'bot-errors-health-consumer-compatible')).toMatchObject({ ok: false });
+      expect(world.mutatingCalls()).toEqual([]);
+      expect(snapshotTree(fixture.base)).toEqual(before);
+    },
+  );
+
+  it('rechecks interpreter permissions immediately before switching', async () => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+    const bin = path.join(fixture.base, 'bin');
+    mkdirSync(bin);
+    const python = path.join(bin, 'python3');
+    writeFileSync(python, '', { mode: 0o700 });
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: (read) => {
+        if (read === 2) chmodSync(python, 0o720);
+        return { code: 0, stdout: botErrorsHealthPrint(fixture, fixture.oldRelease, 'workstation.json', python), stderr: '' };
+      },
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect(result.json.outcome).toBe('refused');
+    expect(readlinkSync(fixture.wrapperLink)).toBe(path.join(fixture.oldRelease, 'deploy', 'whatsoup'));
+    expect(world.botErrorsHealthPrintReads).toBe(2);
+    expect(world.mutatingCalls()).toEqual([]);
+  });
+
+  it.each(['health-prod.json', 'HOST_2.json'])('accepts a safe loaded health profile filename %s', async (profileName) => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: () => ({ code: 0, stdout: botErrorsHealthPrint(fixture, fixture.oldRelease, profileName), stderr: '' }),
+    });
+
+    const result = await run(world, activationArgs(fixture));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    expect(result.json.ready).toBe(true);
+    expect(world.botErrorsHealthPrintReads).toBe(1);
+    expect(world.mutatingCalls()).toEqual([]);
+  });
+
+  it.each([
+    '../outside.json',
+    'nested/profile.json',
+    'profile.json; echo unexpected',
+    'profile.json; fi; echo unexpected; if true',
+  ])('refuses a health profile outside the fixed wrapper grammar: %s', async (profileName) => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: () => ({ code: 0, stdout: botErrorsHealthPrint(fixture, fixture.oldRelease, profileName), stderr: '' }),
+    });
+    const before = snapshotTree(fixture.base);
+
+    const result = await run(world, activationArgs(fixture));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect((result.json.preconditions as Array<{ id: string; ok: boolean }>)
+      .find((entry) => entry.id === 'bot-errors-health-consumer-compatible')).toMatchObject({ ok: false });
+    expect(world.botErrorsHealthPrintReads).toBe(1);
+    expect(world.mutatingCalls()).toEqual([]);
+    expect(snapshotTree(fixture.base)).toEqual(before);
+  });
+
+  it('refuses an unknown BOT ERRORS loaded-service grammar before a switch', async () => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: () => ({
+        code: 0,
+        stdout: botErrorsHealthPrint(fixture, fixture.oldRelease).replace('\tprogram = /bin/bash', '\tprogram = /usr/bin/python3'),
+        stderr: '',
+      }),
+    });
+    const before = snapshotTree(fixture.base);
+
+    const result = await run(world, activationArgs(fixture));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect((result.json.preconditions as Array<{ id: string; ok: boolean }>)
+      .find((entry) => entry.id === 'bot-errors-health-consumer-compatible')).toMatchObject({ ok: false });
+    expect(world.botErrorsHealthPrintReads).toBe(1);
+    expect(world.mutatingCalls()).toEqual([]);
+    expect(snapshotTree(fixture.base)).toEqual(before);
+  });
+
+  it('refuses a consumer below the sealed selector capability floor', async () => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 2 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 1 });
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: () => ({ code: 0, stdout: botErrorsHealthPrint(fixture, fixture.oldRelease), stderr: '' }),
+    });
+
+    const result = await run(world, activationArgs(fixture));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect((result.json.preconditions as Array<{ id: string; ok: boolean }>)
+      .find((entry) => entry.id === 'bot-errors-health-consumer-compatible')).toMatchObject({ ok: false });
+    expect(world.mutatingCalls()).toEqual([]);
+  });
+
+  it('refuses a selector-blind checker even when its capability and hash agree', async () => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2, checkerBody: '# old checker without the required selector\n' });
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: () => ({ code: 0, stdout: botErrorsHealthPrint(fixture, fixture.oldRelease), stderr: '' }),
+    });
+    const before = snapshotTree(fixture.base);
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect((result.json.preconditions as Array<{ id: string; ok: boolean }>)
+      .find((entry) => entry.id === 'bot-errors-health-consumer-compatible')).toMatchObject({ ok: false });
+    expect(snapshotTree(fixture.base)).toEqual(before);
+    expect(world.mutatingCalls()).toEqual([]);
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['empty', []],
+    ['non-array', 'CLAUDE_SECURESTORAGE_CONFIG_DIR'],
+    ['non-string', ['CLAUDE_SECURESTORAGE_CONFIG_DIR', 1]],
+    ['empty-marker', ['CLAUDE_SECURESTORAGE_CONFIG_DIR', '']],
+    ['blank-marker', ['CLAUDE_SECURESTORAGE_CONFIG_DIR', ' ']],
+    ['unfulfilled', ['CLAUDE_SECURESTORAGE_CONFIG_DIR', 'missing-contract-marker']],
+  ])('refuses a %s checker marker contract with matching hashes', async (_name, markers) => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+    const manifestPath = path.join(fixture.oldRelease, 'deploy/bot-errors-runtime-manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { files: Array<Record<string, unknown>> };
+    const checker = manifest.files.find((entry) => entry.path === 'deploy/scripts/bot-errors-health-check.py')!;
+    checker.mustContain = markers;
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: () => ({ code: 0, stdout: botErrorsHealthPrint(fixture, fixture.oldRelease), stderr: '' }),
+    });
+    const before = snapshotTree(fixture.base);
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect((result.json.preconditions as Array<{ id: string; ok: boolean }>)
+      .find((entry) => entry.id === 'bot-errors-health-consumer-compatible')).toMatchObject({ ok: false });
+    expect(snapshotTree(fixture.base)).toEqual(before);
+    expect(world.mutatingCalls()).toEqual([]);
+  });
+
+  it.each([
+    ['invalid marker', '# old checker without the required selector\n'],
+    ['valid replacement', '# replacement forwards CLAUDE_SECURESTORAGE_CONFIG_DIR\n'],
+  ])('refuses a same-root consumer changed to an %s after planning', async (_kind, checkerBody) => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: (read) => {
+        if (read === 2) writeBotErrorsRuntime(fixture.oldRelease, { capability: 2, checkerBody });
+        return { code: 0, stdout: botErrorsHealthPrint(fixture, fixture.oldRelease), stderr: '' };
+      },
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect(result.json.outcome).toBe('refused');
+    expect(readlinkSync(fixture.wrapperLink)).toBe(path.join(fixture.oldRelease, 'deploy', 'whatsoup'));
+    expect(world.botErrorsHealthPrintReads).toBe(2);
+    expect(world.mutatingCalls()).toEqual([]);
+  });
+
+  it('refuses a consumer checker replaced by a symlink at its read-open boundary', async () => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+    const checker = path.join(fixture.oldRelease, 'deploy/scripts/bot-errors-health-check.py');
+    const substitute = path.join(fixture.base, 'substitute-checker.py');
+    writeFileSync(substitute, readFileSync(checker));
+    let substituted = false;
+    fsFaults.beforeReadOpen = (target) => {
+      if (target !== checker) return;
+      fsFaults.beforeReadOpen = null;
+      unlinkSync(checker);
+      symlinkSync(substitute, checker);
+      substituted = true;
+    };
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: () => ({ code: 0, stdout: botErrorsHealthPrint(fixture, fixture.oldRelease), stderr: '' }),
+    });
+    const result = await run(world, activationArgs(fixture));
+    expect(substituted).toBe(true);
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect(readlinkSync(fixture.wrapperLink)).toBe(path.join(fixture.oldRelease, 'deploy', 'whatsoup'));
+    expect(world.mutatingCalls()).toEqual([]);
+  });
+
+  it('refuses a loaded consumer whose checker does not match its runtime manifest hash', async () => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2, checkerHashMismatch: true });
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: () => ({ code: 0, stdout: botErrorsHealthPrint(fixture, fixture.oldRelease), stderr: '' }),
+    });
+
+    const result = await run(world, activationArgs(fixture));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect((result.json.preconditions as Array<{ id: string; ok: boolean }>)
+      .find((entry) => entry.id === 'bot-errors-health-consumer-compatible')).toMatchObject({ ok: false });
+    expect(world.mutatingCalls()).toEqual([]);
+  });
+
+  it('rechecks the loaded consumer immediately before switching and refuses a changed consumer', async () => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: (read) => ({
+        code: 0,
+        stdout: botErrorsHealthPrint(fixture, read === 1 ? fixture.oldRelease : fixture.newRelease),
+        stderr: '',
+      }),
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect(result.json.outcome).toBe('refused');
+    expect(readlinkSync(fixture.wrapperLink)).toBe(path.join(fixture.oldRelease, 'deploy', 'whatsoup'));
+    expect(world.botErrorsHealthPrintReads).toBe(2);
+    expect(world.mutatingCalls()).toEqual([]);
   });
 });
 
@@ -663,6 +1155,7 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
 
     const result = await run(world, activationArgs(fixture, ['--apply']));
     fsFaults.fsync = null;
+  fsFaults.beforeReadOpen = null;
 
     // The final receipt was published: its bytes carry the helper status.
     expect(receiptOf().invariants).toMatchObject({ alert: { attempted: true, kind: 'warning', status: 1 } });

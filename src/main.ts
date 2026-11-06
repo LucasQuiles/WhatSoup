@@ -8,11 +8,16 @@ import { cleanupOldRateLimits, cleanupOldAttempts } from './runtimes/chat/rate-l
 import { getMessagesBySender, getMessageCount, getUnprocessedCount } from './core/messages.ts';
 import { processHistoryBatch, type HistoryInput } from './core/history-sync.ts';
 import { createConnection } from './transport/factory.ts';
+import { createProtectedOperationsAuthorityClient } from './transport/operations-authority-client.ts';
 import { classifyStreamedProviderFailure } from './runtimes/agent/failure-taxonomy.ts';
 import type { RuntimeConnection } from './transport/runtime-connection.ts';
 import { isFullyConnected } from './transport/runtime-connection.ts';
 import { ChatRuntime } from './runtimes/chat/runtime.ts';
 import { AgentRuntime } from './runtimes/agent/runtime.ts';
+import {
+  clearChatAndDeleteHandoffArtifact,
+  deleteMessagesAndHandoffArtifacts,
+} from './runtimes/agent/handoff-artifact.ts';
 import { consumeIntentionalRestartMarker } from './runtimes/agent/self-restart.ts';
 import { emitAlertChecked } from './lib/emit-alert.ts';
 import { extractExpectedAccountDigest } from './lib/service-identity-config.ts';
@@ -78,6 +83,7 @@ import { backfillMetrics, collectHourlyMetrics } from './core/metrics-collector.
 import { startModelCurrencyMonitor } from './lib/model-advisor.ts';
 import { buildMemoryReadinessLogFields } from './lib/memory-operation-telemetry.ts';
 import { runShutdownSequence, shutdownExitCode, type ShutdownSequenceOutcome } from './main-shutdown-policy.ts';
+import { awaitActiveClaudeRefreshes } from './runtimes/agent/providers/claude-refresh-ahead.ts';
 import { markCleanExit, restartLoopGuardPath } from './runtimes/agent/restart-loop-guard.ts';
 import { formatClockForUser } from './runtimes/agent/runtime-presentation.ts';
 import { acquireCoordinationLease, defaultLeaseProbes, releaseCoordinationLease, renewCoordinationLease } from './transport/coordination-lease.ts';
@@ -461,6 +467,22 @@ strictStartupConnectionReady = (): boolean => isFullyConnected(connectionManager
 // outbound governor. main.ts is the composition root (may import runtimes);
 // transport receives the classifier via DI so it need not import runtimes.
 connectionManager.setOutboundContentClassifier?.(classifyStreamedProviderFailure);
+if (config.transportAuthority?.enabled) {
+  const installAuthority = connectionManager.setOperationsAuthorityClient;
+  if (typeof installAuthority !== 'function') {
+    throw new Error('transport authority is enabled but the selected connection has no final authority seam');
+  }
+  // The bearer is read only by this transport-service process after strict
+  // owner/mode/UID checks. Agent workers never receive it through env or tools.
+  const authority = createProtectedOperationsAuthorityClient({
+    baseUrl: config.transportAuthority.baseUrl,
+    accountId: config.transportAuthority.accountId,
+    credentialFile: config.transportAuthority.credentialFile,
+    serviceUid: config.transportAuthority.serviceUid,
+    workerUid: config.transportAuthority.workerUid,
+  });
+  installAuthority.call(connectionManager, authority);
+}
 
 // 5. Runtime — selected by instance type
 let runtime: Runtime;
@@ -485,13 +507,21 @@ if (instanceType === 'agent') {
     pluginDirs?: string[];
     enabledPlugins?: Record<string, boolean>;
     allowM365Mutations?: boolean;
+    m365Bridge?: {
+      tenantId: string;
+      accountId?: string;
+      accountEmail?: string;
+      origin: string;
+      profile: 'user-full-v1';
+    };
     autoCompactInputTokens?: number;
     turnRecoveryCatchupReconcile?: { enabled: boolean; groupLimit?: number };
   } | undefined;
   const cwdResolved = agentOpts?.cwd ? resolveTilde(agentOpts.cwd) : undefined;
   const agentModel = resolveAgentModel(instanceConfig);
-  runtime = new AgentRuntime(db, connectionManager, config.botName, {
+  const agentRuntime = new AgentRuntime(db, connectionManager, config.botName, {
     shared: agentOpts?.sessionScope === 'shared',
+    providerProcessIsolation: config.providerProcessIsolation ?? undefined,
     sessionScope: agentOpts?.sessionScope as 'single' | 'shared' | 'per_chat' | undefined,
     cwd: cwdResolved,
     configSystemPrompt: instanceConfig?.systemPrompt as string | undefined,
@@ -512,8 +542,13 @@ if (instanceType === 'agent') {
     }),
     enabledPlugins: agentOpts?.enabledPlugins,
     allowM365Mutations: agentOpts?.allowM365Mutations,
+    m365Bridge: agentOpts?.m365Bridge,
     autoCompactInputTokens: agentOpts?.autoCompactInputTokens,
     turnRecoveryCatchupReconcile: agentOpts?.turnRecoveryCatchupReconcile,
+    handoffDistill: config.handoffDistill,
+    // The memory guidance prompt block needs memory usable; this startup
+    // observation says whether it was ready or failed only transiently.
+    memoryReadiness: pineconeReadiness,
     // Composition root owns the fleet/systemd binding; inject it so the runtimes
     // layer (which cannot import fleet) can offer the restart_self tool.
     serviceRestarter: createServiceManager(),
@@ -522,6 +557,7 @@ if (instanceType === 'agent') {
     // with a half-valid expectation.
     expectedAccountDigest: extractExpectedAccountDigest(instanceConfig),
   });
+  runtime = agentRuntime;
   // Wire the capability-grant manager over this agent's .claude/settings.json.
   // Groups are config-driven (empty by default → /grant reports "unknown group").
   // Fail closed to "grants disabled" on a floor-violating group config rather
@@ -532,7 +568,7 @@ if (instanceType === 'agent') {
       const claudeDir = join(cwdResolved, '.claude');
       grantManager = createCapabilityGrantManager({
         groups: config.capabilityGrantGroups,
-        policy: createSettingsPolicyAdapter(claudeDir),
+        policy: createSettingsPolicyAdapter(claudeDir, () => agentRuntime.getM365SettingsPolicy()),
         store: createFileGrantStore(join(claudeDir, 'capability-grant.json')),
         onError: (err, operation) => {
           log.error(
@@ -620,6 +656,12 @@ if (grantManager) await grantManager.reconcile();
 // 6. Wire durability to runtime and message handler
 runtime.setDurability(durability);
 
+const invalidateAgentHandoffArtifacts = instanceType === 'agent'
+  ? (conversationKeys: readonly string[]) => (
+    (runtime as AgentRuntime).invalidateHandoffArtifacts(conversationKeys)
+  )
+  : undefined;
+
 // Self-restart resume: if a fresh intentional-restart marker is present, the
 // previous shutdown was a deliberate restart (not a crash). Consume the marker,
 // emit an info-severity completion alert with measured downtime, and queue the
@@ -669,22 +711,22 @@ connectionManager.onMessage = createIngestHandler(
 connectionManager.on('chatCleared', (jid: string) => {
   const conversationKey = toConversationKey(jid);
   try {
-    const count = db.clearChat(conversationKey);
-    log.info({ jid, conversationKey, count }, 'chatCleared: soft-deleted messages');
+    const result = clearChatAndDeleteHandoffArtifact(db, conversationKey, invalidateAgentHandoffArtifacts);
+    log.info({ jid, conversationKey, ...result }, 'chatCleared: soft-deleted messages and handoff artifact');
   } catch (err) {
-    log.error({ err, jid, conversationKey }, 'chatCleared: failed to soft-delete messages');
+    log.error({ err, jid, conversationKey }, 'chatCleared: failed to clear messages and handoff artifact');
   }
 });
 
 connectionManager.on('messageDeleted', (messageIds: string[]) => {
   try {
-    const count = db.markMessagesDeleted(messageIds);
+    const result = deleteMessagesAndHandoffArtifacts(db, messageIds, invalidateAgentHandoffArtifacts);
     log.info(
-      { count, requested: messageIds.length },
-      'messageDeleted: soft-deleted revoked messages',
+      { ...result, requested: messageIds.length },
+      'messageDeleted: soft-deleted revoked messages and handoff artifacts',
     );
   } catch (err) {
-    log.error({ err, messageIds }, 'messageDeleted: failed to soft-delete revoked messages');
+    log.error({ err, messageIds }, 'messageDeleted: failed to delete revoked messages and handoff artifacts');
   }
 });
 
@@ -1349,6 +1391,7 @@ async function shutdown(signal: string): Promise<void> {
   shutdownInProgress = true;
   log.info({ signal }, 'shutting down');
 
+  const deadlineAt = Date.now() + 10_000;
   const timeout = setTimeout(() => {
     log.error('shutdown timed out, forcing exit');
     process.exit(1);
@@ -1387,6 +1430,8 @@ async function shutdown(signal: string): Promise<void> {
       // Flush runtime queue before closing transport so queued messages can be delivered
       // runtime.shutdown() stops enrichment poller internally
       shutdownRuntime: () => runtime.shutdown(),
+      refreshDrainDeadlineAt: deadlineAt - 2_000,
+      drainRefreshChildren: awaitActiveClaudeRefreshes,
       shutdownTransport: () => connectionManager.shutdown(),
       // C5 restart-loop guard: a completed graceful shutdown clears the crash
       // marker — the next boot will not count as crash-interrupted. No-op for
@@ -1425,14 +1470,12 @@ process.on('uncaughtException', (err) => {
   log.fatal({ err, shutdownInProgress }, 'uncaught exception');
   if (shutdownInProgress) return;  // Don't race with an in-progress shutdown's exit code
   const done = shutdown('uncaughtException');
-  setTimeout(() => { log.error('shutdown hung after uncaughtException — forcing exit'); process.exit(1); }, 5_000).unref();
   done.catch(() => process.exit(1));
 });
 process.on('unhandledRejection', (reason) => {
   log.fatal({ reason, shutdownInProgress }, 'unhandled rejection');
   if (shutdownInProgress) return;  // Don't race with an in-progress shutdown's exit code
   const done = shutdown('unhandledRejection');
-  setTimeout(() => { log.error('shutdown hung after unhandledRejection — forcing exit'); process.exit(1); }, 5_000).unref();
   done.catch(() => process.exit(1));
 });
 // Diagnostic: log actual exit code (uses stderr to avoid writing to closed pino transport)

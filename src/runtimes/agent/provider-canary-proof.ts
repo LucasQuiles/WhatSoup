@@ -89,6 +89,16 @@ export interface ProviderAdmission {
   proxyScriptSha256: string;
 }
 
+/**
+ * Identity of the executable that a readiness probe will actually invoke.
+ * Unlike ProviderAdmission, this is usable for every CLI mode and does not
+ * require a canary receipt or a version subprocess.
+ */
+export interface ProviderBinaryIdentity {
+  readonly resolvedPath: string;
+  readonly sha256: string;
+}
+
 function isSafeReceiptShape(value: unknown): value is ProviderCanaryReceipt {
   if (!isRecord(value)) return false;
   if (Object.keys(value).some((key) => !ALLOWED_KEYS.has(key))) return false;
@@ -243,7 +253,7 @@ function readBinaryVersion(entrypoint: string): string {
 }
 
 // env-allowed: ambient OS PATH contract for executable resolution
-function resolveExecutable(binary: string, pathValue = process.env.PATH ?? ''): string {
+export function resolveExecutable(binary: string, pathValue = process.env.PATH ?? ''): string {
   if (binary.includes('/')) {
     accessSync(binary, constants.X_OK);
     return realpathSync(binary);
@@ -259,6 +269,15 @@ function resolveExecutable(binary: string, pathValue = process.env.PATH ?? ''): 
     }
   }
   throw new Error('provider binary is unavailable');
+}
+
+/** Resolve and hash the exact executable selected by the effective child PATH. */
+export function resolveProviderBinaryIdentity(
+  binary: string,
+  pathValue?: string,
+): ProviderBinaryIdentity {
+  const resolvedPath = resolveExecutable(binary, pathValue);
+  return { resolvedPath, sha256: sha256File(resolvedPath) };
 }
 
 export function collectProviderCanaryEvidence(

@@ -28,6 +28,16 @@ const TRUST_PATHS = [
   'scripts/lib/cli-args.ts',
   'src/lib/git-env.ts',
   'src/lib/type-guards.ts',
+  'src/lib/handoff-distill-config.ts',
+  'src/lib/time-units.ts',
+  'deploy/m365-bridge-credential-projection.ts',
+  'deploy/lib/read-private-credential.mjs',
+  'deploy/lib/read-agent-handoff-distill-config.mjs',
+  'src/core/m365-bridge-policy.ts',
+  'src/fleet/instance-name.ts',
+  'src/core/private-config-file.ts',
+  'src/lib/process-lock.ts',
+  'src/lib/private-fs.ts',
 ];
 
 /** Extract the trust-check block: from the checker-var declaration up to (not including) the checker invocation. */

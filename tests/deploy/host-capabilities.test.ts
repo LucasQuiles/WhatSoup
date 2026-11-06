@@ -37,6 +37,7 @@ interface DoctorReceipt {
 interface Fixture {
   home: string;
   bin: string;
+  identityPython: string;
   env: NodeJS.ProcessEnv;
 }
 
@@ -106,10 +107,13 @@ function fixture(overrides: NodeJS.ProcessEnv = {}): Fixture {
   tool(bin, 'zsh', 'zsh 5.9');
   tool(bin, 'shellcheck', 'ShellCheck 0.10.0');
   tool(bin, 'gtimeout', 'timeout (GNU coreutils) 9.7');
+  const identityPython = join(home, 'identity-python');
+  executable(identityPython, 'exit "${FAKE_IDENTITY_PYTHON_EXIT:-0}"');
 
   return {
     home,
     bin,
+    identityPython,
     env: {
       ...process.env,
       HOME: home,
@@ -124,7 +128,14 @@ function runDoctor(
   fx: Fixture,
   args: string[],
 ): { status: number | null; stdout: string; stderr: string; receipt: DoctorReceipt | null } {
-  const result = spawnSync('/bin/bash', [doctor, ...args], {
+  const script = [
+    'identity_candidate="$2"',
+    '. "$1"',
+    'whatsoup_process_identity_python_candidates() { printf "%s\\n" "$identity_candidate"; }',
+    'shift 2',
+    'whatsoup_host_doctor_main "$@"',
+  ].join('\n');
+  const result = spawnSync('/bin/bash', ['-c', script, 'doctor-test', doctor, fx.identityPython, ...args], {
     cwd: repoRoot,
     env: fx.env,
     encoding: 'utf8',
@@ -140,6 +151,62 @@ function runDoctor(
     stdout: result.stdout ?? '',
     stderr: result.stderr ?? '',
     receipt,
+  };
+}
+
+function runDoctorWithIdentityCandidateFunction(
+  fx: Fixture,
+  candidate: string,
+): { status: number | null; stdout: string; stderr: string; receipt: DoctorReceipt | null } {
+  const script = [
+    'identity_candidate="$4"',
+    '. "$1" --profile "$2" --node-policy "$3" --json',
+    'whatsoup_process_identity_python_candidates() { printf "%s\\n" "$identity_candidate"; }',
+    'whatsoup_host_doctor_main --profile "$2" --node-policy "$3" --json',
+  ].join('\n');
+  const result = spawnSync('/bin/bash', [
+    '-c', script, 'doctor-test', doctor, 'runtime', 'exact', candidate,
+  ], { cwd: repoRoot, env: fx.env, encoding: 'utf8' });
+  let parsed: DoctorReceipt | null = null;
+  try {
+    parsed = JSON.parse(result.stdout) as DoctorReceipt;
+  } catch {
+    parsed = null;
+  }
+  return {
+    status: result.status,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+    receipt: parsed,
+  };
+}
+
+function runDoctorAndContinueInCaller(
+  fx: Fixture,
+): { status: number | null; stdout: string; stderr: string } {
+  const script = [
+    'unset profile json CAP_STATUS SCRIPT_DIR caller_unset',
+    '. "$1"',
+    'identity_candidate="$2"',
+    'whatsoup_process_identity_python_candidates() { printf "%s\\n" "$identity_candidate"; }',
+    'whatsoup_host_doctor_main --profile runtime --node-policy exact --json >/dev/null',
+    'main_status="$?"',
+    '[ -z "${profile+x}" ] || exit 90',
+    '[ -z "${json+x}" ] || exit 91',
+    '[ -z "${CAP_STATUS+x}" ] || exit 92',
+    '[ -z "${SCRIPT_DIR+x}" ] || exit 93',
+    '[ -n "${WHATSOUP_CAPABILITY_ROOT:-}" ] || exit 94',
+    'printf "main-status=%s caller-unset=%s\\n" "$main_status" "$caller_unset"',
+  ].join('\n');
+  const result = spawnSync('/bin/bash', ['-c', script, 'doctor-test', doctor, fx.identityPython], {
+    cwd: repoRoot,
+    env: fx.env,
+    encoding: 'utf8',
+  });
+  return {
+    status: result.status,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
   };
 }
 
@@ -279,6 +346,49 @@ describe('portable host capability doctor', () => {
       status: 'available',
       versionRule: 'exact:24.15.0',
     });
+  });
+
+  it.each([
+    { name: 'is missing', expectedStatus: 'missing', expectedOutcome: 'blocked', expectedExit: 1 },
+    { name: 'cannot execute', expectedStatus: 'inconclusive', expectedOutcome: 'inconclusive', expectedExit: 2 },
+  ])('makes the real Darwin runtime doctor non-ready when its trusted identity interpreter $name', ({
+    name, expectedStatus, expectedOutcome, expectedExit,
+  }) => {
+    const fx = fixture();
+    const candidate = join(fx.home, `identity-python-${name.replaceAll(' ', '-')}`);
+    if (name === 'cannot execute') executable(candidate, 'exit 127');
+
+    const result = runDoctorWithIdentityCandidateFunction(fx, candidate);
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(expectedExit);
+    expect(result.receipt?.outcome).toBe(expectedOutcome);
+    expect(record(result.receipt, 'process_identity_python')).toMatchObject({
+      status: expectedStatus,
+    });
+  });
+
+  it('remains inconclusive when a non-directory ancestor precedes a working trusted identity interpreter', () => {
+    const fx = fixture();
+    const ancestor = join(fx.home, 'identity-python-not-a-directory');
+    writeFileSync(ancestor, 'not a directory', 'utf8');
+
+    const result = runDoctorWithIdentityCandidateFunction(
+      fx,
+      `${join(ancestor, 'python3')}\n${fx.identityPython}`,
+    );
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(2);
+    expect(result.receipt?.outcome).toBe('inconclusive');
+    expect(record(result.receipt, 'process_identity_python')).toMatchObject({
+      status: 'inconclusive',
+    });
+  });
+
+  it('leaves the sourced caller shell usable after main returns', () => {
+    const result = runDoctorAndContinueInCaller(fixture());
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toBe('main-status=0 caller-unset=\n');
   });
 
   it('rejects a version-correct-major Node that misses the exact patch pin', () => {

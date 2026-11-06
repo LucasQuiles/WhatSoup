@@ -32,6 +32,7 @@ export const REF_POLICY_TOOL_SOURCE_PATHS = [
   'scripts/ci-control-ref-policy.ts',
   'scripts/lib/ci-control/manifest.ts',
   'scripts/lib/ci-control/git-input-core.ts',
+  'scripts/lib/ci-control/input-limits.ts',
   'scripts/lib/ci-control/reasons.ts',
   'scripts/lib/ci-control/ref-policy.ts',
   'scripts/lib/ci-control/trusted-git.ts',

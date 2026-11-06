@@ -31,9 +31,6 @@ import {
 } from './model-resolver.ts';
 import { errorMessage } from './error-message.ts';
 import { resolveApiKey } from './api-key-resolver.ts';
-import { readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { MS_PER_DAY } from './time-units.ts';
 import { isNonEmptyString } from './type-guards.ts';
 
@@ -43,6 +40,7 @@ const ALERT_SOURCE = 'model-currency';
 const LIVE_SCAN_ALERT_SOURCE = 'model-currency-live-scan';
 const CHECK_INTERVAL_MS = MS_PER_DAY;
 const FETCH_TIMEOUT_MS = 5_000;
+const MAX_RESPONSE_BYTES = 1024 * 1024;
 // Backoff between retries of a transient model-list fetch failure. One length
 // entry per retry, so a vendor must fail 3 times before it degrades the scan.
 const FETCH_RETRY_BACKOFF_MS = [2_000, 8_000];
@@ -128,6 +126,27 @@ function isRetryableStatus(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;
 }
 
+async function readModelsResponse(response: Response): Promise<ModelsListResponse> {
+  if (!response.body) throw new SyntaxError('models API returned an empty response');
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let complete = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) { complete = true; break; }
+      total += value.byteLength;
+      if (total > MAX_RESPONSE_BYTES) throw new RangeError('models API response exceeds byte limit');
+      chunks.push(value);
+    }
+    return JSON.parse(Buffer.concat(chunks, total).toString('utf8')) as ModelsListResponse;
+  } finally {
+    if (!complete) await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
 async function fetchModelIdsOnce(
   url: string,
   headers: Record<string, string>,
@@ -135,15 +154,16 @@ async function fetchModelIdsOnce(
 ): Promise<VendorModelFetchResult & { retryable: boolean }> {
   let parsed = false;
   try {
-    const res = await fetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    const res = await fetch(url, { headers, redirect: 'error', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (!res.ok) {
+      await res.body?.cancel().catch(() => {});
       return {
         ids: [],
         failure: { vendor, status: res.status, reason: `HTTP ${res.status}` },
         retryable: isRetryableStatus(res.status),
       };
     }
-    const body = (await res.json()) as ModelsListResponse;
+    const body = await readModelsResponse(res);
     parsed = true;
     const ids = (body.data ?? [])
       .map((m) => m.id)
@@ -153,12 +173,12 @@ async function fetchModelIdsOnce(
   } catch (err) {
     // A timeout, abort or socket error, whether connecting or while the body
     // streams in, is transient and worth a retry. Malformed JSON, or a parsed
-    // body of the wrong shape, fails the same way on every attempt.
+    // body of the wrong shape or excessive size, fails on every attempt.
     const reason = sanitizeFetchFailureReason(err);
     return {
       ids: [],
       failure: { vendor, reason },
-      retryable: !parsed && !(err instanceof SyntaxError),
+      retryable: !parsed && !(err instanceof SyntaxError) && !(err instanceof RangeError),
     };
   }
 }
@@ -271,73 +291,6 @@ export function classifyModelFetchFailure(failure: { status?: number; reason: st
 
 const ANTHROPIC_MODELS_URL = 'https://api.anthropic.com/v1/models?limit=100';
 
-/**
- * The claude-cli's OWN OAuth credential state, read from its credentials file.
- * The subscription CLI authenticates `/v1/models` with `Authorization: Bearer`
- * (verified live on the WhatSoup host 2026-07-20 — a Bearer OAuth token, NOT an x-api-key,
- * returns the org catalogue), so q needs no separate anthropic API key to list
- * models — it reuses the credential the harness already has.
- *   - `present` → an unexpired accessToken to send as `Bearer`;
- *   - `expired` → an accessToken past `expiresAt`; the CLI refreshes it on the
- *     next agent turn, so this is a benign, self-healing TRANSIENT state (never
- *     rendered as "credential rejected");
- *   - `absent`  → no creds file / no token → the caller falls back to an
- *     explicit ANTHROPIC_API_KEY, and if that is also missing, `no-key`.
- */
-export type ClaudeOAuthCredResult =
-  | { status: 'present'; token: string }
-  // `hasRefreshToken` distinguishes expired-refreshable (the CLI refreshes at
-  // spawn → routable) from expired-no-refresh (not routable). Presence only —
-  // a present token may still be revoked/aged, which surfaces at spawn, not here.
-  | { status: 'expired'; hasRefreshToken: boolean }
-  | { status: 'absent' };
-
-/** Path to the claude-cli credentials file (honors CLAUDE_CONFIG_DIR like the CLI). */
-function claudeCredentialsPath(): string {
-  // env-allowed: external-tool interop; must track the env the spawned claude CLI sees
-  const configDir = process.env['CLAUDE_CONFIG_DIR'] || join(homedir(), '.claude');
-  return join(configDir, '.credentials.json');
-}
-
-/** Default reader: the raw credentials-file text, or null if unreadable/missing. */
-function defaultReadCredentialsText(path: string): string | null {
-  try {
-    return readFileSync(path, 'utf8');
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Resolve the claude-cli OAuth credential, read FRESH from disk each call (the
- * CLI rewrites the refreshed token in place, so a cached token would go stale).
- * Never logs or returns the token except in the `present` result the caller
- * hands straight to the single `/v1/models` GET. `readFileText` + `nowMs` are
- * injectable so unit tests need no real creds file or wall clock.
- */
-export function resolveClaudeOAuthCred(
-  deps: { readFileText?: (path: string) => string | null; nowMs?: number } = {},
-): ClaudeOAuthCredResult {
-  const readFileText = deps.readFileText ?? defaultReadCredentialsText;
-  const nowMs = deps.nowMs ?? Date.now();
-  const raw = readFileText(claudeCredentialsPath());
-  if (!raw) return { status: 'absent' };
-  let oauth: { accessToken?: unknown; expiresAt?: unknown; refreshToken?: unknown } | undefined;
-  try {
-    oauth = (JSON.parse(raw) as { claudeAiOauth?: typeof oauth }).claudeAiOauth;
-  } catch {
-    return { status: 'absent' };
-  }
-  const token = oauth?.accessToken;
-  if (typeof token !== 'string' || token.length === 0) return { status: 'absent' };
-  const expiresAt = oauth?.expiresAt;
-  if (typeof expiresAt === 'number' && expiresAt <= nowMs) {
-    const refresh = oauth?.refreshToken;
-    return { status: 'expired', hasRefreshToken: typeof refresh === 'string' && refresh.length > 0 };
-  }
-  return { status: 'present', token };
-}
-
 /** Anthropic-only live model listing, classified. */
 export type AnthropicModelsResult =
   | { status: 'ok'; ids: string[] }
@@ -353,30 +306,12 @@ export type AnthropicModelsResult =
  * under an `anthropic /v1/models` provenance label would make the source line
  * lie (Q 2b).
  *
- * Credential precedence for the claude-cli harness (Q 2026-07-20, "this uses
- * oauth — we don't need a key"): prefer the CLI's OWN OAuth token (`Bearer`, no
- * separate key needed), fall back to an explicit ANTHROPIC_API_KEY (`x-api-key`).
- * The returned set is the credential's ORG catalogue, not "what the harness can
- * run" — the caller labels it as such. `readOAuthCred` is injectable for tests.
+ * Discovery uses an explicit API key. CLI credential files do not establish
+ * the selected native login, and may belong to another account. The returned
+ * API organization catalogue does not establish CLI execution eligibility.
  */
-export async function fetchAnthropicModelIdsWithStatus(
-  deps: { readOAuthCred?: () => ClaudeOAuthCredResult } = {},
-): Promise<AnthropicModelsResult> {
-  const cred = (deps.readOAuthCred ?? (() => resolveClaudeOAuthCred()))();
-  // Expired OAuth token → benign transient (self-heals when the CLI refreshes);
-  // do not spend a request that would 401 and read as "rejected".
-  if (cred.status === 'expired') return { status: 'credential-expired' };
-
-  let headers: Record<string, string>;
-  if (cred.status === 'present') {
-    headers = { Authorization: `Bearer ${cred.token}`, 'anthropic-version': '2023-06-01' };
-  } else {
-    const anthropicKey = resolveApiKey({ envVar: 'ANTHROPIC_API_KEY' });
-    if (!anthropicKey) return { status: 'no-key' };
-    headers = { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01' };
-  }
-
-  return fetchAnthropicModelsWithHeaders(headers);
+export async function fetchAnthropicModelIdsWithStatus(): Promise<AnthropicModelsResult> {
+  return fetchAnthropicApiModelIdsWithStatus();
 }
 
 async function fetchAnthropicModelsWithHeaders(

@@ -262,6 +262,44 @@ function classifyReadinessError(
   return 'unknown';
 }
 
+/** undici's connection failure: a TypeError 'fetch failed' anywhere in the cause chain. */
+function isFetchFailed(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 4 && typeof current === 'object' && current !== null; depth += 1) {
+    if (current instanceof TypeError && current.message === 'fetch failed') return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/**
+ * Classify a failed readiness probe. Pinecone SDK 8 errors carry no HTTP status
+ * (an exhausted 5xx arrives as PineconeMaxRetriesExceededError, a 429 as
+ * PineconeUnmappedHttpError, a 401 as PineconeAuthorizationError), so the
+ * status the probe's own fetch wrapper last saw decides first: 5xx, 429 and 408
+ * are transient, 401/403 an auth rejection, any other 4xx definitive. Without a
+ * status, a 'fetch failed' TypeError is a connection failure; everything else
+ * falls back to the shared classifiers.
+ */
+function classifyReadinessFailure(
+  err: unknown,
+  httpStatus: number | undefined,
+): { state: PineconeReadinessState; failure: MemoryOperationFailure } {
+  if (httpStatus !== undefined && httpStatus >= 400) {
+    const state = classifyReadinessError({ status: httpStatus });
+    if (httpStatus === 401 || httpStatus === 403) return { state, failure: { code: 'auth_failed', retryable: false } };
+    if (httpStatus === 408) return { state, failure: { code: 'timeout', retryable: true } };
+    if (httpStatus === 429) return { state, failure: { code: 'rate_limited', retryable: true } };
+    if (httpStatus >= 500) return { state, failure: { code: 'provider_unavailable', retryable: true } };
+    return { state, failure: { code: 'invalid_request', retryable: false } };
+  }
+  const failure = classifyMemoryOperationFailure(err);
+  if (failure.code === 'unknown' && isFetchFailed(err)) {
+    return { state: 'network_error', failure: { code: 'network_error', retryable: true } };
+  }
+  return { state: classifyReadinessError(err), failure };
+}
+
 export async function getPineconeReadinessObservation(
   indexName: string = config.pineconeIndex,
 ): Promise<PineconeReadinessObservation> {
@@ -315,12 +353,18 @@ export async function getPineconeReadinessObservation(
 
   const controller = new AbortController();
   let timeout: ReturnType<typeof setTimeout> | null = null;
+  // Status of the latest HTTP response, cleared before each attempt so a
+  // connection failure on a retry is not read as the previous attempt's status.
+  let lastHttpStatus: number | undefined;
   try {
     const client = new Pinecone({
       apiKey,
-      fetchApi: (input, init) => {
+      fetchApi: async (input, init) => {
         const signal = combinedSignal(init?.signal, controller.signal);
-        return globalThis.fetch(input, { ...init, ...(signal ? { signal } : {}) });
+        lastHttpStatus = undefined;
+        const response = await globalThis.fetch(input, { ...init, ...(signal ? { signal } : {}) });
+        lastHttpStatus = response.status;
+        return response;
       },
     });
     // Named AbortError so the existing classifiers report it as a retryable
@@ -375,8 +419,7 @@ export async function getPineconeReadinessObservation(
     });
     return readinessObservation('index_missing', targetIndex, 'none', false, 'provider_response');
   } catch (err) {
-    const state = classifyReadinessError(err);
-    const failure = classifyMemoryOperationFailure(err);
+    const { state, failure } = classifyReadinessFailure(err, lastHttpStatus);
     logMemoryOperation(operation, {
       stage: 'request',
       status: 'failed',

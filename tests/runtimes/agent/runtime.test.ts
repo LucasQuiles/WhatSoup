@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { prepareRuntimeHome, ownedRuntimeCwd } from '../../helpers/runtime-home-fixture.ts';
 import { registerRuntimeHomeConfinementTests } from './runtime-home-confinement.cases.ts';
+import { registerRuntimeSettingsPolicyTests } from './runtime-settings-policy.cases.ts';
+import { registerRuntimeProviderProcessIsolationTest } from './runtime-provider-process-isolation.case.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -477,9 +479,13 @@ vi.mock('../../../src/runtimes/agent/providers/primary-model-usability.ts', asyn
   };
 });
 
-vi.mock('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts', () => ({
-  createPrimaryModelProbeAdapters: mockCreatePrimaryModelProbeAdapters,
-}));
+vi.mock('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts')>();
+  return {
+    ...actual,
+    createPrimaryModelProbeAdapters: mockCreatePrimaryModelProbeAdapters,
+  };
+});
 
 vi.mock('../../../src/core/provider-mcp-config.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../src/core/provider-mcp-config.ts')>();
@@ -992,21 +998,10 @@ describe('AgentRuntime', () => {
     expect(mockQueue.setTextAggregateDelayMs).toHaveBeenCalledWith(30_000);
   });
 
-  it('start() calls ensurePermissionsSettings with agent type', async () => {
-    const { ensurePermissionsSettings } = await import('../../../src/core/workspace.ts');
-    const db = makeDb();
-    const { messenger } = makeMessenger();
-
-    const runtime = new AgentRuntime(db, messenger);
-    await runtime.start();
-
-    expect(ensurePermissionsSettings).toHaveBeenCalledWith(
-      expect.stringContaining('.claude'),
-      'agent',
-      undefined, // no enabledPlugins configured
-      { hasSandbox: false }, // no sandbox config → reconciler strips any orphaned sandbox hook
-    );
-  });
+  registerRuntimeSettingsPolicyTests(
+    options => new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', options),
+    mockConfig,
+  );
 
   it('start() uses the read-only inspector for user-level ~/.claude when cwd != home', async () => {
     const cwd = await ownedRuntimeCwd('whatsoup-non-home-cwd');
@@ -1058,6 +1053,12 @@ describe('AgentRuntime', () => {
     expect(capturedSessionManagerOptsRef.current).toMatchObject({
       allowM365Mutations: true,
     });
+  });
+
+  registerRuntimeProviderProcessIsolationTest({
+    createRuntime: (isolation) => new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { providerProcessIsolation: isolation }),
+    sendAndDrain: (runtime) => sendAndDrain(runtime, makeMsg({ content: 'hello claude' })),
+    capturedSessionManagerOptions: () => capturedSessionManagerOptsRef.current,
   });
 
   it('auto-compacts silently and advances baseline only after compact_boundary', async () => {

@@ -7,6 +7,10 @@ import { expireOverdueCompletedDeliveryIdentityAdmissions } from './durability.t
 import { deleteOldMessages } from './messages.ts';
 import { maintainOutboundSends } from './outbound-sends.ts';
 import { systemClock } from '../lib/clock.ts';
+import {
+  HANDOFF_ARTIFACT_RETENTION_MS,
+  deleteExpiredHandoffArtifacts,
+} from './handoff-artifact-retention.ts';
 
 const log = createChildLogger('database:retention');
 
@@ -81,6 +85,8 @@ export interface DatabaseRetentionResult {
   messages: number;
   triggerRuns: number;
   triggerOccurrences: number;
+  /** Expired cross-provider continuity artifacts deleted from the optional agent table. */
+  handoffArtifacts: number;
   /** Reliability 4.1: quarantined identity admissions terminalized (state
    * transition with preserved receipt — not deletions). */
   identityAdmissionsExpired: number;
@@ -139,6 +145,15 @@ export function runDatabaseRetention(
   const factCutoff = daysModifier(retention.exportedFactDays);
 
   const result = withTransaction(db, () => {
+    // Handoff data is only continuity cache state. At 24 hours it becomes
+    // eligible for this sweep; successful sweeps drain that eligible backlog.
+    // The helper treats non-agent databases without the optional table as a
+    // legitimate zero-result state.
+    const handoffArtifacts = deleteExpiredHandoffArtifacts(
+      db,
+      systemClock.now() - HANDOFF_ARTIFACT_RETENTION_MS,
+    );
+
     const completedRecoveryTerminals = db.raw.prepare(`
       DELETE FROM turn_recovery_jobs
        WHERE state = 'completed'
@@ -478,6 +493,7 @@ export function runDatabaseRetention(
       messages,
       triggerRuns,
       triggerOccurrences,
+      handoffArtifacts,
       identityAdmissionsExpired,
     };
   });
