@@ -31,7 +31,8 @@ const SUMMARY_SYSTEM = `Summarize the conversation below in at most ${SUMMARY_TA
 const summaryResponse = z.object({
   choices: z.array(z.object({
     message: z.object({ content: z.string().nullish() }),
-    finish_reason: z.string().nullish(),
+    // Read only to refuse a truncated reply; an absent or odd value rejects nothing new.
+    finish_reason: z.unknown().optional(),
   })).min(1),
   usage: z.object({ total_tokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER) }),
 });

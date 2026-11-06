@@ -328,9 +328,9 @@ describe('buildHandoffDistill', () => {
     expect((failure as HandoffDistillUsageError).tokensUsed).toBe(42);
   });
 
-  it('still accepts a complete reply that stopped on finish_reason stop', async () => {
+  it.each([['stop'], [null], [7]])('still accepts a complete reply whose finish_reason is %j', async (finishReason) => {
     const fetchImpl = vi.fn(async () => response('summary', {
-      choices: [{ message: { content: 'summary' }, finish_reason: 'stop' }],
+      choices: [{ message: { content: 'summary' }, finish_reason: finishReason }],
     }));
     const distill = buildHandoffDistill({ ...baseDeps(), fetchImpl: fetchImpl as unknown as typeof fetch });
     await expect(distill(acceptReservation)).resolves.toEqual({ summary: 'summary', seededArtifacts: null, tokensUsed: 42 });
