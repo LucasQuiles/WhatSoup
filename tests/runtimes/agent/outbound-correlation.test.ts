@@ -19,7 +19,14 @@ vi.mock('../../../src/lib/emit-alert.ts', () => ({
 }));
 
 const CHAT = 'test@s.whatsapp.net';
-type OutboundRow = { id: number; status: string; wa_message_id: string | null; retry_count: number };
+const CONVERSATION_KEY = 'test';
+type OutboundRow = {
+  id: number;
+  status: string;
+  conversation_key: string;
+  wa_message_id: string | null;
+  retry_count: number;
+};
 
 describe('outbound correlation after ambiguous sends', () => {
   let db: Database;
@@ -68,7 +75,7 @@ describe('outbound correlation after ambiguous sends', () => {
   }
 
   function row(): OutboundRow {
-    return db.raw.prepare('SELECT id, status, wa_message_id, retry_count FROM outbound_ops').get() as OutboundRow;
+    return db.raw.prepare('SELECT id, status, conversation_key, wa_message_id, retry_count FROM outbound_ops').get() as OutboundRow;
   }
 
   async function exhaust(): Promise<void> {
@@ -78,13 +85,14 @@ describe('outbound correlation after ambiguous sends', () => {
     expect(new Set(requestedIds).size).toBe(1);
     expect(row().status).toBe('maybe_sent');
     expect(row().retry_count).toBe(3);
+    expect(row().conversation_key).toBe(CONVERSATION_KEY);
   }
 
   it('matches a late echo after exhaustion only when the transport preserves the requested ID', async () => {
     start(true);
     await exhaust();
     expect(row().wa_message_id).toBe(requestedIds[0]);
-    expect(durability.matchEcho(requestedIds[0]!)).toBe(true);
+    expect(durability.matchEcho(requestedIds[0]!, CONVERSATION_KEY)).toBe(true);
     expect(row().status).toBe('echoed');
     expect(requestedIds).toHaveLength(3);
   });
@@ -93,7 +101,7 @@ describe('outbound correlation after ambiguous sends', () => {
     start(equivalent);
     await exhaust();
     expect(row().wa_message_id).toBeNull();
-    expect(durability.matchEcho(requestedIds[0]!)).toBe(false);
+    expect(durability.matchEcho(requestedIds[0]!, CONVERSATION_KEY)).toBe(false);
     expect(row().status).toBe('maybe_sent');
   });
 
@@ -111,11 +119,11 @@ describe('outbound correlation after ambiguous sends', () => {
     start(true);
     await vi.advanceTimersByTimeAsync(0);
     expect(storeMessageIfNew(db, {
-      chatJid: CHAT, conversationKey: CHAT, senderJid: CHAT, senderName: null,
+      chatJid: CHAT, conversationKey: CONVERSATION_KEY, senderJid: CHAT, senderName: null,
       messageId: requestedIds[0]!, content: 'answer', contentType: 'text',
       isFromMe: true, timestamp: Math.floor(Date.now() / 1000), quotedMessageId: null,
     })).toBe(true);
-    expect(durability.matchEcho(requestedIds[0]!)).toBe(false);
+    expect(durability.matchEcho(requestedIds[0]!, CONVERSATION_KEY)).toBe(false);
     await exhaust();
     durability.postConnectRecovery();
     expect(row().status).toBe('echoed');
@@ -127,7 +135,7 @@ describe('outbound correlation after ambiguous sends', () => {
     await exhaust();
     durability.postConnectRecovery();
     expect(row().status).toBe('quarantined');
-    expect(durability.matchEcho(requestedIds[0]!)).toBe(true);
+    expect(durability.matchEcho(requestedIds[0]!, CONVERSATION_KEY)).toBe(true);
     expect(row().status).toBe('echoed');
     expect(requestedIds).toHaveLength(3);
   });
@@ -166,7 +174,7 @@ describe('outbound correlation after ambiguous sends', () => {
     });
     durability.postConnectRecovery();
     expect(row().status).toBe('quarantined');
-    expect(durability.matchEcho(requestedIds[0]!)).toBe(equivalent === true);
+    expect(durability.matchEcho(requestedIds[0]!, CONVERSATION_KEY)).toBe(equivalent === true);
     expect(row().status).toBe(equivalent === true ? 'echoed' : 'quarantined');
     expect(requestedIds).toHaveLength(2);
   });

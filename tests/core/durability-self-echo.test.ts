@@ -6,6 +6,7 @@ import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
 import { storeMessageIfNew } from '../../src/core/messages.ts';
 import { processHistoryBatch } from '../../src/core/history-sync.ts';
+import { toConversationKey } from '../../src/core/conversation-key.ts';
 
 describe.each(['startup', 'live'] as const)('%s stored echo reconciliation', (phase) => {
   let directory: string;
@@ -32,9 +33,10 @@ describe.each(['startup', 'live'] as const)('%s stored echo reconciliation', (ph
     { name: 'existing self body preserved against peer history', initialFromMe: true, bodyFromMe: false, placeholder: false, status: 'echoed' },
   ] as const)('$name retains the full message authorship', ({ initialFromMe, bodyFromMe, placeholder, status }) => {
     const chatJid = 'peer@s.whatsapp.net';
-    const seq = engine.journalInbound('request', 'conversation', chatJid, 'agent');
+    const conversationKey = toConversationKey(chatJid);
+    const seq = engine.journalInbound('request', conversationKey, chatJid, 'agent');
     const op = engine.createOutboundOp({
-      conversationKey: 'conversation', chatJid, opType: 'text', payload: '{"text":"answer"}',
+      conversationKey, chatJid, opType: 'text', payload: '{"text":"answer"}',
       replayPolicy: 'safe', sourceInboundSeq: seq, isTerminal: true,
     });
     expect(engine.markSending(op)).toBe(true);
@@ -86,7 +88,7 @@ describe.each(['startup', 'live'] as const)('%s stored echo reconciliation', (ph
     { name: 'absent matching ID preserves read-only replay', isFromMe: true, replayPolicy: 'read_only', status: 'pending', chatJid: 'peer@imessage', contentType: 'text', storedId: 'different-receipt' },
     { name: 'self row with a different ID does not confirm the send', isFromMe: true, replayPolicy: 'unsafe', status: 'quarantined', chatJid: 'peer@imessage', contentType: 'text', storedId: 'different-receipt' },
   ] as const)('$name', ({ isFromMe, replayPolicy, status, chatJid, contentType, storedId }) => {
-    const conversationKey = 'conversation';
+    const conversationKey = toConversationKey(chatJid);
     const seq = engine.journalInbound('request', conversationKey, chatJid, 'agent');
     const op = engine.createOutboundOp({
       conversationKey, chatJid, opType: 'text', payload: '{"text":"answer"}',

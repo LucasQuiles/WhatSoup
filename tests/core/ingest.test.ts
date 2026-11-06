@@ -668,10 +668,12 @@ describe('Echo correlation: isFromMe messages', () => {
     const db = makeTempDb();
     const durability = new DurabilityEngine(db);
     let storedWhenCorrelated = false;
-    vi.spyOn(durability, 'matchEcho').mockImplementation((messageId) => {
+    let correlatedConversationKey: string | null = null;
+    vi.spyOn(durability, 'matchEcho').mockImplementation((messageId, conversationKey) => {
       const row = db.raw.prepare('SELECT is_from_me FROM messages WHERE message_id = ?')
         .get(messageId) as { is_from_me: number } | undefined;
       storedWhenCorrelated = row?.is_from_me === 1;
+      correlatedConversationKey = conversationKey;
       return false;
     });
 
@@ -679,6 +681,7 @@ describe('Echo correlation: isFromMe messages', () => {
     await runIngest(handler, makeIncomingMessage({ isFromMe: true }));
 
     expect(storedWhenCorrelated).toBe(true);
+    expect(correlatedConversationKey).toBe('15551230008');
   });
 
   it('still attempts echo correlation when storing the outgoing message fails', async () => {
@@ -691,10 +694,10 @@ describe('Echo correlation: isFromMe messages', () => {
     const msg = makeIncomingMessage({ isFromMe: true });
     await runIngest(handler, msg);
 
-    expect(matchEchoSpy).toHaveBeenCalledWith(msg.messageId);
+    expect(matchEchoSpy).toHaveBeenCalledWith(msg.messageId, '15551230008');
   });
 
-  it('isFromMe message calls durabilityEngine.matchEcho with messageId', async () => {
+  it('isFromMe message calls durabilityEngine.matchEcho with its canonical conversation key', async () => {
     const db = makeTempDb();
     const messenger = makeMessenger();
     const runtime = makeRuntime();
@@ -707,7 +710,21 @@ describe('Echo correlation: isFromMe messages', () => {
     await runIngest(handler, msg);
 
     expect(matchEchoSpy).toHaveBeenCalledOnce();
-    expect(matchEchoSpy).toHaveBeenCalledWith(msg.messageId);
+    expect(matchEchoSpy).toHaveBeenCalledWith(msg.messageId, '15551230008');
+  });
+
+  it('does not correlate an outgoing echo when its canonical conversation key is invalid', async () => {
+    const db = makeTempDb();
+    const durability = new DurabilityEngine(db);
+    const matchEchoSpy = vi.spyOn(durability, 'matchEcho').mockReturnValue(false);
+    const handler = makeIngest(db, makeMessenger(), makeRuntime(), BOT_JID, BOT_LID, durability);
+
+    await runIngest(handler, makeIncomingMessage({
+      isFromMe: true,
+      chatJid: 'invalid-without-jid-domain',
+    }));
+
+    expect(matchEchoSpy).not.toHaveBeenCalled();
   });
 
   it('isFromMe message does NOT dispatch to runtime', async () => {
@@ -767,6 +784,110 @@ describe('Echo correlation: isFromMe messages', () => {
       `SELECT status FROM outbound_ops WHERE id = ?`,
     ).get(opId) as { status: string } | undefined;
     expect(rows?.status).toBe('echoed');
+  });
+
+  it('does not settle A when a normal B self echo shares A\'s provider ID', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const durability = new DurabilityEngine(db);
+    const conversationA = '15551230008';
+    const chatA = '15551230008@s.whatsapp.net';
+    const conversationB = '15551230009';
+    const chatB = '15551230009@s.whatsapp.net';
+    const sharedProviderId = 'WA-CROSS-CONVERSATION-3841';
+    const sourceInboundSeq = durability.journalInbound(
+      'source-request-A', conversationA, chatA, 'agent',
+    );
+    const opId = durability.createOutboundOp({
+      conversationKey: conversationA,
+      chatJid: chatA,
+      opType: 'send_message',
+      payload: 'answer A',
+      replayPolicy: 'safe',
+      sourceInboundSeq,
+      isTerminal: true,
+    });
+    expect(durability.markSending(opId)).toBe(true);
+    durability.markSubmitted(opId, sharedProviderId);
+
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
+    await runIngest(handler, makeIncomingMessage({
+      isFromMe: true,
+      messageId: sharedProviderId,
+      chatJid: chatB,
+      senderJid: chatB,
+    }));
+
+    expect(db.raw.prepare(
+      'SELECT conversation_key, is_from_me FROM messages WHERE message_id = ?',
+    ).get(sharedProviderId)).toEqual({ conversation_key: conversationB, is_from_me: 1 });
+    const outbound = db.raw.prepare(
+      'SELECT status FROM outbound_ops WHERE id = ?',
+    ).get(opId) as { status: string } | undefined;
+    expect(outbound).toBeDefined();
+    expect(outbound?.status).toBe('submitted');
+    expect(durability.getInboundStatus(sourceInboundSeq)).toBe('processing');
+    expect(vi.mocked(messenger.sendMessage)).not.toHaveBeenCalled();
+  });
+
+  it('settles a historical LID operation when its mapped phone conversation echoes the send', async () => {
+    const db = makeTempDb();
+    const durability = new DurabilityEngine(db);
+    const lid = '155500000000042';
+    const lidJid = `${lid}@lid`;
+    const phone = '15550004242';
+    const phoneJid = `${phone}@s.whatsapp.net`;
+    const providerId = 'WA-LID-ALIAS-3841';
+    const seq = durability.journalInbound('historical-lid-request', lid, lidJid, 'agent');
+    const op = durability.createOutboundOp({
+      conversationKey: lid, chatJid: lidJid, opType: 'send_message',
+      payload: 'answer', replayPolicy: 'unsafe', sourceInboundSeq: seq, isTerminal: true,
+    });
+    expect(durability.markSending(op)).toBe(true);
+    durability.markSubmitted(op, providerId);
+    db.raw.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)').run(lid, phoneJid);
+
+    const handler = makeIngest(db, makeMessenger(), makeRuntime(), BOT_JID, BOT_LID, durability);
+    await runIngest(handler, makeIncomingMessage({
+      isFromMe: true, messageId: providerId, chatJid: phoneJid, senderJid: phoneJid,
+    }));
+
+    expect(db.raw.prepare('SELECT conversation_key FROM messages WHERE message_id = ?')
+      .get(providerId)).toEqual({ conversation_key: phone });
+    expect(db.raw.prepare('SELECT conversation_key, status FROM outbound_ops WHERE id = ?')
+      .get(op)).toEqual({ conversation_key: lid, status: 'echoed' });
+    expect(durability.getInboundStatus(seq)).toBe('complete');
+  });
+
+  it('settles a historical LID operation from a mapped phone echo when storing that echo fails', async () => {
+    const db = makeTempDb();
+    const durability = new DurabilityEngine(db);
+    const lid = '155500000000043';
+    const lidJid = `${lid}@lid`;
+    const phone = '15550004343';
+    const phoneJid = `${phone}@s.whatsapp.net`;
+    const providerId = 'WA-LID-ALIAS-STORE-FAILURE-3841';
+    const seq = durability.journalInbound('historical-lid-store-failure-request', lid, lidJid, 'agent');
+    const op = durability.createOutboundOp({
+      conversationKey: lid, chatJid: lidJid, opType: 'send_message',
+      payload: 'answer', replayPolicy: 'unsafe', sourceInboundSeq: seq, isTerminal: true,
+    });
+    expect(durability.markSending(op)).toBe(true);
+    durability.markSubmitted(op, providerId);
+    db.raw.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)').run(lid, phoneJid);
+    db.raw.exec("CREATE TRIGGER deny_message_store BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'store denied'); END;");
+
+    const handler = makeIngest(db, makeMessenger(), makeRuntime(), BOT_JID, BOT_LID, durability);
+    await runIngest(handler, makeIncomingMessage({
+      isFromMe: true, messageId: providerId, chatJid: phoneJid, senderJid: phoneJid,
+    }));
+
+    expect(db.raw.prepare('SELECT message_id FROM messages WHERE message_id = ?')
+      .get(providerId)).toBeUndefined();
+    expect(db.raw.prepare('SELECT conversation_key, status FROM outbound_ops WHERE id = ?')
+      .get(op)).toEqual({ conversation_key: lid, status: 'echoed' });
+    expect(durability.getInboundStatus(seq)).toBe('complete');
   });
 });
 

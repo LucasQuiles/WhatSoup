@@ -121,7 +121,7 @@ function echoOnSubmit(durability: DurabilityEngine): void {
   const markSubmitted = durability.markSubmitted.bind(durability);
   vi.spyOn(durability, 'markSubmitted').mockImplementation((id, waMessageId, logicalAttemptCount) => {
     markSubmitted(id, waMessageId, logicalAttemptCount);
-    if (waMessageId !== null) durability.matchEcho(waMessageId);
+    if (waMessageId !== null) durability.matchEcho(waMessageId, CONVERSATION_KEY);
   });
 }
 

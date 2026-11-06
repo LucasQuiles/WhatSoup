@@ -94,6 +94,9 @@ describe.each(['signal', 'imessage', 'sms'] as const)('%s outbound correlation',
     await queue.flush();
 
     const row = db.raw.prepare('SELECT status, wa_message_id FROM outbound_ops').get() as Row;
+    const echoScope = (db.raw.prepare('SELECT conversation_key FROM outbound_ops').get() as {
+      conversation_key: string;
+    }).conversation_key;
     const requestedId = sends.mock.calls[0]?.[2]?.messageId;
     expect(requestedId).toMatch(/^[A-F0-9]{32}$/);
     expect(requestedId).not.toBe(expectedId);
@@ -102,7 +105,7 @@ describe.each(['signal', 'imessage', 'sms'] as const)('%s outbound correlation',
       expect(row).toEqual({ status: 'submitted', wa_message_id: expectedId });
     } else {
       expect(row).toEqual({ status: 'maybe_sent', wa_message_id: null });
-      expect(durability.matchEcho(requestedId!)).toBe(false);
+      expect(durability.matchEcho(requestedId!, echoScope)).toBe(false);
     }
   });
 });

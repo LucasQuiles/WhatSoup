@@ -633,8 +633,8 @@ describe('deferred-turn admission (#3295 S2)', () => {
     expect(sessionDoubles.flatMap((session) => session.turnsSent)).toEqual([]);
     expect(admissionRejectedAlerts()).toBe(0);
 
-    engine.matchEcho('wamid-original-answer');
-    engine.matchEcho('wamid-original-answer');
+    engine.matchEcho('wamid-original-answer', conversationKey);
+    engine.matchEcho('wamid-original-answer', conversationKey);
     expect(engine.getTurnRecoveryJob(jobId)?.state).toBe('completed');
     for (let i = 0; i < contents.length; i++) {
       await vi.waitFor(() => expect(sessionDoubles.flatMap((session) => session.turnsSent)).toHaveLength(i + 1));
@@ -713,7 +713,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
     clock.mockReturnValue(1_780_000_010_000);
     await vi.waitFor(() => expect(status(seq)).toBe('failed'));
     expect(terminalRows(seq)).toEqual([{ attempt_kind: 'admission_rejected', attempt_failure_class: 'pre_dispatch_error' }]);
-    engine.matchEcho('wamid-original-answer');
+    engine.matchEcho('wamid-original-answer', conversationKey);
     await queue.idle();
     expect(sessionDoubles.flatMap((session) => session.turnsSent)).toEqual([]);
     expect(obligationRows()).toEqual([]);
@@ -727,7 +727,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
     const { queue, mapKey } = await waitForLiveQueue(seq);
     const context = queue.activeTurn!.runtimeContext!;
     await liveState().runtimeTurnCoordinator.terminalizeUndispatchedRuntimeCrash(context, { value: mapKey });
-    engine.matchEcho('wamid-original-answer');
+    engine.matchEcho('wamid-original-answer', conversationKey);
     await queue.idle();
     expect(status(seq)).toBe('failed');
     expect(terminalRows(seq)).toHaveLength(1);
@@ -749,7 +749,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
 
     await runtime.handleMessage(makeMsg({ messageId: 'waiting-operator-stop-control', content: '/stop' }));
     await vi.waitFor(() => expect(status(seq)).toBe('failed'));
-    engine.matchEcho('wamid-original-answer');
+    engine.matchEcho('wamid-original-answer', conversationKey);
     await queue.idle();
 
     expect(terminalRows(seq)).toEqual([{ attempt_kind: 'failed', attempt_failure_class: 'operator_cancelled' }]);
@@ -765,7 +765,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
     const second = await arriveFollower('waiting-shutdown-b', { contentType: 'document' });
     const { queue } = await waitForLiveQueue(first);
     await runtime.shutdown();
-    engine.matchEcho('wamid-original-answer');
+    engine.matchEcho('wamid-original-answer', conversationKey);
     await queue.idle();
     expect([status(first), status(second)]).toEqual(['failed', 'failed']);
     expect(terminalRows(first)).toHaveLength(1);
@@ -815,7 +815,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
     await firstArrival;
     await vi.waitFor(() => expect(queue.pending).toBe(1));
     expect([status(firstSeq), status(secondSeq)]).toEqual(['processing', 'processing']);
-    engine.matchEcho('wamid-original-answer');
+    engine.matchEcho('wamid-original-answer', conversationKey);
     for (const [i, expected] of [other, caption].entries()) {
       await vi.waitFor(() => expect(sessionDoubles.flatMap((session) => session.turnsSent)).toHaveLength(i + 1));
       const active = sessionDoubles.find((session) => session.turnInFlight)!;
@@ -859,7 +859,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
     });
     const seq = await arriveFollower('shutdown-at-ready-handoff', { contentType: 'document' });
     const { queue } = await waitForLiveQueue(seq);
-    engine.matchEcho('wamid-original-answer');
+    engine.matchEcho('wamid-original-answer', conversationKey);
     await ready;
     try {
       await runtime.shutdown();

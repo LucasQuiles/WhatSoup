@@ -13,6 +13,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
+import { toConversationKey } from '../../src/core/conversation-key.ts';
 import { createInternalOutboundFailureEvidence } from '../../src/core/outbound-failure-disposition.ts';
 
 const emitAlert = vi.hoisted(() => vi.fn(() => true));
@@ -38,11 +39,16 @@ function makeDb(): Database {
 }
 
 /** Insert a raw message into the messages table (simulating an ingest echo). */
-function insertMessage(db: Database, messageId: string, chatJid = 'jid-1@s.whatsapp.net'): void {
+function insertMessage(
+  db: Database,
+  messageId: string,
+  conversationKey = 'k1',
+  chatJid = 'jid-1@s.whatsapp.net',
+): void {
   db.raw.prepare(
     `INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp)
      VALUES (?, ?, ?, ?, 'text', 1, ?)`,
-  ).run(chatJid, chatJid, 'bot@s.whatsapp.net', messageId, Date.now());
+  ).run(chatJid, conversationKey, 'bot@s.whatsapp.net', messageId, Date.now());
 }
 
 /** Read a single row from tool_calls by id. */
@@ -78,6 +84,634 @@ function makeSubmittedStale(db: Database, id: number): void {
     `UPDATE outbound_ops SET submitted_at = datetime('now', '-60 seconds') WHERE id = ?`,
   ).run(id);
 }
+
+function mapLidToPhone(db: Database, lidJid: string, phoneJid: string): void {
+  db.raw.prepare(
+    `INSERT INTO lid_mappings (lid, phone_jid, updated_at)
+     VALUES (?, ?, datetime('now'))`,
+  ).run(toConversationKey(lidJid), phoneJid);
+}
+
+function createTerminalSubmitted(
+  engine: DurabilityEngine,
+  messageId: string,
+  conversationKey: string,
+  chatJid: string,
+  replayPolicy: 'safe' | 'read_only' | 'unsafe' = 'unsafe',
+): { op: number; sourceInboundSeq: number } {
+  const sourceInboundSeq = engine.journalInbound(
+    `source-${messageId}`, conversationKey, chatJid, 'agent',
+  );
+  const op = engine.createOutboundOp({
+    conversationKey, chatJid, opType: 'text', payload: 'answer', replayPolicy,
+    sourceInboundSeq, isTerminal: true,
+  });
+  expect(engine.markSending(op)).toBe(true);
+  engine.markSubmitted(op, messageId);
+  return { op, sourceInboundSeq };
+}
+
+function createTerminalMaybeSent(
+  engine: DurabilityEngine,
+  messageId: string,
+  conversationKey: string,
+  chatJid: string,
+  replayPolicy: 'safe' | 'read_only' | 'unsafe' = 'unsafe',
+): { op: number; sourceInboundSeq: number } {
+  return createTerminalMaybeSentForProvider(
+    engine, `source-${messageId}`, messageId, conversationKey, chatJid, replayPolicy,
+  );
+}
+
+function createTerminalMaybeSentForProvider(
+  engine: DurabilityEngine,
+  sourceMessageId: string,
+  providerMessageId: string,
+  conversationKey: string,
+  chatJid: string,
+  replayPolicy: 'safe' | 'read_only' | 'unsafe' = 'unsafe',
+): { op: number; sourceInboundSeq: number } {
+  const sourceInboundSeq = engine.journalInbound(
+    sourceMessageId, conversationKey, chatJid, 'agent',
+  );
+  const op = engine.createOutboundOp({
+    conversationKey, chatJid, opType: 'text', payload: 'answer', replayPolicy,
+    sourceInboundSeq, isTerminal: true,
+  });
+  expect(engine.markSending(op)).toBe(true);
+  engine.markSubmitted(op, providerMessageId);
+  expect(engine.markMaybeSent(op, 'controlled uncertainty', providerMessageId)).toBe(true);
+  return { op, sourceInboundSeq };
+}
+
+function reconcileMaybeSent(
+  engine: DurabilityEngine,
+  db: Database,
+  op: number,
+  phase: 'startup' | 'live',
+) {
+  db.raw.prepare("UPDATE outbound_ops SET ambiguity_at = datetime('now', '-60 seconds') WHERE id = ?")
+    .run(op);
+  return phase === 'startup' ? engine.postConnectRecovery() : engine.reconcileLiveMaybeSent();
+}
+
+const ALIAS_LID_JID = '81536414179557@lid';
+const ALIAS_PHONE_JID = '15555551234@s.whatsapp.net';
+const UNRELATED_LID_JID = '81536414179558@lid';
+const UNRELATED_PHONE_JID = '15555551235@s.whatsapp.net';
+const HISTORICAL_PHONE_JID = '15555551236@s.whatsapp.net';
+const CURRENT_PHONE_JID = '15555551237@s.whatsapp.net';
+const MALFORMED_LID_JID = 'foo@evil@lid';
+const MALFORMED_PHONE_JID = '15555551238@s.whatsapp.net';
+
+describe.each(['startup', 'live'] as const)('%s recovery with incomplete or conflicting echo identity', (phase) => {
+  describe.each(['safe', 'read_only', 'unsafe'] as const)('%s replay policy', (replayPolicy) => {
+    it.each([
+      { name: 'empty conversation key', conversationKey: '', isFromMe: 1 },
+      { name: 'non-self authorship', conversationKey: 'k1', isFromMe: 0 },
+    ])('quarantines $name at the exact provider ID', ({ conversationKey, isFromMe }) => {
+      const db = makeDb();
+      try {
+        const engine = new DurabilityEngine(db);
+        const seq = engine.journalInbound('source-conflicting-echo', 'k1', 'jid-1@s.whatsapp.net', 'agent');
+        const op = engine.createOutboundOp({
+          conversationKey: 'k1', chatJid: 'jid-1@s.whatsapp.net', opType: 'text',
+          payload: 'answer', replayPolicy, sourceInboundSeq: seq, isTerminal: true,
+        });
+        expect(engine.markSending(op)).toBe(true);
+        engine.markSubmitted(op, 'same-provider-id');
+        expect(engine.markMaybeSent(op, 'controlled uncertainty', 'same-provider-id')).toBe(true);
+        insertMessage(db, 'same-provider-id');
+        db.raw.prepare('UPDATE messages SET conversation_key = ?, is_from_me = ? WHERE message_id = ?')
+          .run(conversationKey, isFromMe, 'same-provider-id');
+        expect(db.raw.prepare('SELECT conversation_key, is_from_me FROM messages WHERE message_id = ?')
+          .get('same-provider-id')).toEqual({ conversation_key: conversationKey, is_from_me: isFromMe });
+        db.raw.prepare("UPDATE outbound_ops SET ambiguity_at = datetime('now', '-60 seconds') WHERE id = ?").run(op);
+
+        const recovery = phase === 'startup' ? engine.postConnectRecovery() : engine.reconcileLiveMaybeSent();
+
+        expect(getOutbound(db, op).status).toBe('quarantined');
+        expect(engine.getInboundStatus(seq)).toBe('processing');
+        expect(recovery.outboundReplayed).toBe(0);
+        expect(recovery.outboundQuarantined).toBe(1);
+      } finally {
+        db.close();
+      }
+    });
+  });
+});
+
+describe.each(['startup', 'live'] as const)('%s recovery resolves trusted LID aliases without rewriting history', (phase) => {
+  it.each([
+    {
+      name: 'a historical LID-keyed op against a phone-keyed self echo',
+      outboundJid: ALIAS_LID_JID,
+      echoJid: ALIAS_PHONE_JID,
+    },
+    {
+      name: 'a historical phone-keyed op against an LID-keyed self echo',
+      outboundJid: ALIAS_PHONE_JID,
+      echoJid: ALIAS_LID_JID,
+    },
+  ])('confirms $name', ({ outboundJid, echoJid }) => {
+    const db = makeDb();
+    try {
+      const engine = new DurabilityEngine(db);
+      mapLidToPhone(db, ALIAS_LID_JID, ALIAS_PHONE_JID);
+      const outboundKey = toConversationKey(outboundJid);
+      const echoKey = toConversationKey(echoJid);
+      const messageId = `alias-confirm-${phase}-${outboundKey}`;
+      const { op, sourceInboundSeq } = createTerminalMaybeSent(
+        engine, messageId, outboundKey, outboundJid,
+      );
+      insertMessage(db, messageId, echoKey, echoJid);
+
+      const recovery = reconcileMaybeSent(engine, db, op, phase);
+
+      expect(getOutbound(db, op)).toMatchObject({
+        status: 'echoed', conversation_key: outboundKey, chat_jid: outboundJid,
+      });
+      expect(getInbound(db, sourceInboundSeq)).toMatchObject({
+        processing_status: 'complete', conversation_key: outboundKey, chat_jid: outboundJid,
+      });
+      expect(recovery.outboundReconciled).toBe(1);
+      expect(recovery.outboundReplayed).toBe(0);
+      expect(recovery.outboundQuarantined).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe.each(['startup', 'live'] as const)('%s recovery rejects ambiguous LID identity evidence', (phase) => {
+  describe.each(['safe', 'read_only', 'unsafe'] as const)('%s replay policy', (replayPolicy) => {
+    it.each([
+      {
+        name: 'an unrelated mapped phone',
+        map(db: Database): void {
+          mapLidToPhone(db, ALIAS_LID_JID, ALIAS_PHONE_JID);
+          mapLidToPhone(db, UNRELATED_LID_JID, UNRELATED_PHONE_JID);
+        },
+        outboundJid: ALIAS_LID_JID,
+        echoJid: UNRELATED_PHONE_JID,
+      },
+      {
+        name: 'a phone echo with no LID mapping',
+        map(): void {},
+        outboundJid: ALIAS_LID_JID,
+        echoJid: ALIAS_PHONE_JID,
+      },
+      {
+        name: 'a historical phone key with raw LID chat after the LID mapping flips',
+        map(db: Database): void {
+          mapLidToPhone(db, ALIAS_LID_JID, CURRENT_PHONE_JID);
+        },
+        outboundKeyJid: HISTORICAL_PHONE_JID,
+        outboundJid: ALIAS_LID_JID,
+        echoJid: CURRENT_PHONE_JID,
+      },
+      {
+        name: 'a malformed LID namespace mapped to a raw phone self echo',
+        map(db: Database): void {
+          db.raw.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+            .run('foo', MALFORMED_PHONE_JID);
+        },
+        persistedOutboundKey: 'foo',
+        outboundJid: MALFORMED_LID_JID,
+        echoJid: MALFORMED_PHONE_JID,
+      },
+    ])('quarantines $name without replaying or mutating persisted identity', ({
+      map, outboundKeyJid, persistedOutboundKey, outboundJid, echoJid,
+    }) => {
+      const db = makeDb();
+      try {
+        const engine = new DurabilityEngine(db);
+        map(db);
+        const outboundKey = persistedOutboundKey ?? toConversationKey(outboundKeyJid ?? outboundJid);
+        const echoKey = toConversationKey(echoJid);
+        const messageId = `alias-conflict-${phase}-${replayPolicy}-${outboundKey}`;
+        const { op, sourceInboundSeq } = createTerminalMaybeSent(
+          engine, messageId, outboundKey, outboundJid, replayPolicy,
+        );
+        insertMessage(db, messageId, echoKey, echoJid);
+
+        const recovery = reconcileMaybeSent(engine, db, op, phase);
+
+        expect(getOutbound(db, op)).toMatchObject({
+          status: 'quarantined', conversation_key: outboundKey, chat_jid: outboundJid,
+        });
+        expect(getInbound(db, sourceInboundSeq)).toMatchObject({
+          processing_status: 'processing', conversation_key: outboundKey, chat_jid: outboundJid,
+        });
+        expect(recovery.outboundReplayed).toBe(0);
+        expect(recovery.outboundQuarantined).toBe(1);
+      } finally {
+        db.close();
+      }
+    });
+  });
+});
+
+describe.each(['startup', 'live'] as const)('%s recovery requires one LID alias candidate per phone echo', (phase) => {
+  describe.each(['safe', 'read_only', 'unsafe'] as const)('%s replay policy', (replayPolicy) => {
+    it('quarantines two historical raw LID candidates for one phone self echo without replaying either', () => {
+      const db = makeDb();
+      try {
+        const engine = new DurabilityEngine(db);
+        const providerId = `duplicate-lid-recovery-${phase}-${replayPolicy}`;
+        const aliasKey = toConversationKey(ALIAS_LID_JID);
+        const phoneKey = toConversationKey(ALIAS_PHONE_JID);
+        mapLidToPhone(db, ALIAS_LID_JID, ALIAS_PHONE_JID);
+
+        const createAliasCandidate = (sourceMessageId: string) => {
+          const sourceInboundSeq = engine.journalInbound(
+            sourceMessageId, aliasKey, ALIAS_LID_JID, 'agent',
+          );
+          const op = engine.createOutboundOp({
+            conversationKey: aliasKey, chatJid: ALIAS_LID_JID, opType: 'text',
+            payload: 'answer', replayPolicy, sourceInboundSeq, isTerminal: true,
+          });
+          expect(engine.markSending(op)).toBe(true);
+          engine.markSubmitted(op, providerId);
+          expect(engine.markMaybeSent(op, 'controlled uncertainty', providerId)).toBe(true);
+          return { op, sourceInboundSeq };
+        };
+        const first = createAliasCandidate('duplicate-lid-recovery-source-one');
+        const second = createAliasCandidate('duplicate-lid-recovery-source-two');
+        insertMessage(db, providerId, phoneKey, ALIAS_PHONE_JID);
+        for (const candidate of [first, second]) {
+          db.raw.prepare("UPDATE outbound_ops SET ambiguity_at = datetime('now', '-60 seconds') WHERE id = ?")
+            .run(candidate.op);
+        }
+
+        const recovery = phase === 'startup'
+          ? engine.postConnectRecovery()
+          : engine.reconcileLiveMaybeSent();
+
+        for (const candidate of [first, second]) {
+          expect(getOutbound(db, candidate.op)).toMatchObject({
+            status: 'quarantined', conversation_key: aliasKey, chat_jid: ALIAS_LID_JID,
+          });
+          expect(getInbound(db, candidate.sourceInboundSeq)).toMatchObject({
+            processing_status: 'processing', conversation_key: aliasKey, chat_jid: ALIAS_LID_JID,
+          });
+        }
+        expect(recovery.outboundReconciled).toBe(2);
+        expect(recovery.outboundReplayed).toBe(0);
+        expect(recovery.outboundQuarantined).toBe(2);
+      } finally {
+        db.close();
+      }
+    });
+  });
+});
+
+describe.each(['startup', 'live'] as const)('%s recovery gives an exact witness claim priority over an alias claim', (phase) => {
+  describe.each(['safe', 'read_only', 'unsafe'] as const)('%s replay policy', (replayPolicy) => {
+    it.each([
+      {
+        name: 'with a PN witness and exact PN op first',
+        claimOrder: ['exact', 'alias'] as const,
+        witnessJid: ALIAS_PHONE_JID,
+        exactJid: ALIAS_PHONE_JID,
+        aliasJid: ALIAS_LID_JID,
+      },
+      {
+        name: 'with a PN witness and alias LID op first',
+        claimOrder: ['alias', 'exact'] as const,
+        witnessJid: ALIAS_PHONE_JID,
+        exactJid: ALIAS_PHONE_JID,
+        aliasJid: ALIAS_LID_JID,
+      },
+      {
+        name: 'with an LID witness and exact LID op first',
+        claimOrder: ['exact', 'alias'] as const,
+        witnessJid: ALIAS_LID_JID,
+        exactJid: ALIAS_LID_JID,
+        aliasJid: ALIAS_PHONE_JID,
+      },
+      {
+        name: 'with an LID witness and alias PN op first',
+        claimOrder: ['alias', 'exact'] as const,
+        witnessJid: ALIAS_LID_JID,
+        exactJid: ALIAS_LID_JID,
+        aliasJid: ALIAS_PHONE_JID,
+      },
+    ])('echoes the exact op and quarantines the alias $name', ({
+      claimOrder, witnessJid, exactJid, aliasJid,
+    }) => {
+      const db = makeDb();
+      try {
+        const engine = new DurabilityEngine(db);
+        const providerId = `mixed-claim-${phase}-${replayPolicy}-${toConversationKey(witnessJid)}-${claimOrder[0]}`;
+        const exactKey = toConversationKey(exactJid);
+        const aliasKey = toConversationKey(aliasJid);
+        mapLidToPhone(db, ALIAS_LID_JID, ALIAS_PHONE_JID);
+        const claims = {
+          exact: { key: exactKey, jid: exactJid, source: 'mixed-exact-source' },
+          alias: { key: aliasKey, jid: aliasJid, source: 'mixed-alias-source' },
+        };
+        const created: Partial<Record<'exact' | 'alias', { op: number; sourceInboundSeq: number }>> = {};
+        for (const kind of claimOrder) {
+          const claim = claims[kind];
+          created[kind] = createTerminalMaybeSentForProvider(
+            engine, `${claim.source}-${phase}-${replayPolicy}-${claimOrder[0]}`,
+            providerId, claim.key, claim.jid, replayPolicy,
+          );
+        }
+        const exact = created.exact!;
+        const alias = created.alias!;
+        insertMessage(db, providerId, toConversationKey(witnessJid), witnessJid);
+        for (const candidate of [exact, alias]) {
+          db.raw.prepare("UPDATE outbound_ops SET ambiguity_at = datetime('now', '-60 seconds') WHERE id = ?")
+            .run(candidate.op);
+        }
+
+        const recovery = phase === 'startup'
+          ? engine.postConnectRecovery()
+          : engine.reconcileLiveMaybeSent();
+
+        expect(getOutbound(db, exact.op)).toMatchObject({
+          status: 'echoed', conversation_key: exactKey, chat_jid: exactJid,
+        });
+        expect(getInbound(db, exact.sourceInboundSeq)).toMatchObject({
+          processing_status: 'complete', conversation_key: exactKey, chat_jid: exactJid,
+        });
+        expect(getOutbound(db, alias.op)).toMatchObject({
+          status: 'quarantined', conversation_key: aliasKey, chat_jid: aliasJid,
+        });
+        expect(getInbound(db, alias.sourceInboundSeq)).toMatchObject({
+          processing_status: 'processing', conversation_key: aliasKey, chat_jid: aliasJid,
+        });
+        expect(recovery.outboundReconciled).toBe(2);
+        expect(recovery.outboundReplayed).toBe(0);
+        expect(recovery.outboundQuarantined).toBe(1);
+      } finally {
+        db.close();
+      }
+    });
+  });
+});
+
+describe.each(['startup', 'live'] as const)('%s recovery treats an echoed equivalent claim as an alias blocker', (phase) => {
+  it.each([
+    {
+      name: 'an exact phone claim',
+      priorKey: toConversationKey(ALIAS_PHONE_JID),
+      priorJid: ALIAS_PHONE_JID,
+    },
+    {
+      name: 'an aliased raw LID claim',
+      priorKey: toConversationKey(ALIAS_LID_JID),
+      priorJid: ALIAS_LID_JID,
+    },
+  ])('quarantines a later raw LID alias after $name', ({ priorKey, priorJid }) => {
+    const db = makeDb();
+    try {
+      const engine = new DurabilityEngine(db);
+      const providerId = `echoed-claim-blocker-${phase}-${priorKey}`;
+      const aliasKey = toConversationKey(ALIAS_LID_JID);
+      const phoneKey = toConversationKey(ALIAS_PHONE_JID);
+      mapLidToPhone(db, ALIAS_LID_JID, ALIAS_PHONE_JID);
+      const prior = createTerminalSubmitted(
+        engine, providerId, priorKey, priorJid,
+      );
+      engine.markEchoed(prior.op);
+      const later = createTerminalMaybeSentForProvider(
+        engine, `later-alias-source-${phase}-${priorKey}`, providerId,
+        aliasKey, ALIAS_LID_JID, 'safe',
+      );
+      insertMessage(db, providerId, phoneKey, ALIAS_PHONE_JID);
+      db.raw.prepare("UPDATE outbound_ops SET ambiguity_at = datetime('now', '-60 seconds') WHERE id = ?")
+        .run(later.op);
+
+      const recovery = phase === 'startup'
+        ? engine.postConnectRecovery()
+        : engine.reconcileLiveMaybeSent();
+
+      expect(getOutbound(db, prior.op).status).toBe('echoed');
+      expect(getOutbound(db, later.op)).toMatchObject({
+        status: 'quarantined', conversation_key: aliasKey, chat_jid: ALIAS_LID_JID,
+      });
+      expect(getInbound(db, later.sourceInboundSeq)).toMatchObject({
+        processing_status: 'processing', conversation_key: aliasKey, chat_jid: ALIAS_LID_JID,
+      });
+      expect(recovery.outboundReplayed).toBe(0);
+      expect(recovery.outboundQuarantined).toBe(1);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe.each(['startup', 'live'] as const)('%s recovery ignores non-equivalent same-ID claims', (phase) => {
+  it('settles a valid alias despite a prior echoed wrong-chat claim', () => {
+    const db = makeDb();
+    try {
+      const engine = new DurabilityEngine(db);
+      const providerId = `wrong-chat-does-not-block-${phase}`;
+      const aliasKey = toConversationKey(ALIAS_LID_JID);
+      const phoneKey = toConversationKey(ALIAS_PHONE_JID);
+      const wrongKey = toConversationKey(UNRELATED_PHONE_JID);
+      mapLidToPhone(db, ALIAS_LID_JID, ALIAS_PHONE_JID);
+      const wrong = createTerminalSubmitted(
+        engine, providerId, wrongKey, UNRELATED_PHONE_JID,
+      );
+      engine.markEchoed(wrong.op);
+      const valid = createTerminalMaybeSentForProvider(
+        engine, `valid-alias-source-${phase}`, providerId,
+        aliasKey, ALIAS_LID_JID, 'safe',
+      );
+      insertMessage(db, providerId, phoneKey, ALIAS_PHONE_JID);
+      db.raw.prepare("UPDATE outbound_ops SET ambiguity_at = datetime('now', '-60 seconds') WHERE id = ?")
+        .run(valid.op);
+
+      const recovery = phase === 'startup'
+        ? engine.postConnectRecovery()
+        : engine.reconcileLiveMaybeSent();
+
+      expect(getOutbound(db, wrong.op)).toMatchObject({
+        status: 'echoed', conversation_key: wrongKey, chat_jid: UNRELATED_PHONE_JID,
+      });
+      expect(getOutbound(db, valid.op)).toMatchObject({
+        status: 'echoed', conversation_key: aliasKey, chat_jid: ALIAS_LID_JID,
+      });
+      expect(getInbound(db, valid.sourceInboundSeq)).toMatchObject({
+        processing_status: 'complete', conversation_key: aliasKey, chat_jid: ALIAS_LID_JID,
+      });
+      expect(recovery.outboundReplayed).toBe(0);
+      expect(recovery.outboundQuarantined).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe('DurabilityEngine — direct echo matching requires a trusted nonempty identity', () => {
+  it('does not settle an unknown LID alias from an exact provider ID', () => {
+    const db = makeDb();
+    try {
+      const engine = new DurabilityEngine(db);
+      const outboundKey = toConversationKey(ALIAS_LID_JID);
+      const { op, sourceInboundSeq } = createTerminalSubmitted(
+        engine, 'unknown-lid-direct-echo', outboundKey, ALIAS_LID_JID,
+      );
+
+      expect(engine.matchEcho('unknown-lid-direct-echo', toConversationKey(ALIAS_PHONE_JID))).toBe(false);
+      expect(getOutbound(db, op)).toMatchObject({
+        status: 'submitted', conversation_key: outboundKey, chat_jid: ALIAS_LID_JID,
+      });
+      expect(getInbound(db, sourceInboundSeq)).toMatchObject({ processing_status: 'processing' });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('does not settle a mapped malformed LID namespace from a phone candidate', () => {
+    const db = makeDb();
+    try {
+      const engine = new DurabilityEngine(db);
+      const malformedKey = 'foo';
+      const phoneKey = toConversationKey(MALFORMED_PHONE_JID);
+      db.raw.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+        .run(malformedKey, MALFORMED_PHONE_JID);
+      const { op, sourceInboundSeq } = createTerminalSubmitted(
+        engine, 'malformed-lid-direct-echo', malformedKey, MALFORMED_LID_JID,
+      );
+
+      expect(engine.matchEcho('malformed-lid-direct-echo', phoneKey)).toBe(false);
+      expect(getOutbound(db, op)).toMatchObject({
+        status: 'submitted', conversation_key: malformedKey, chat_jid: MALFORMED_LID_JID,
+      });
+      expect(getInbound(db, sourceInboundSeq)).toMatchObject({
+        processing_status: 'processing', conversation_key: malformedKey, chat_jid: MALFORMED_LID_JID,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('does not reinterpret a historical phone key with raw LID chat after an LID mapping changes', () => {
+    const db = makeDb();
+    try {
+      const engine = new DurabilityEngine(db);
+      mapLidToPhone(db, ALIAS_LID_JID, CURRENT_PHONE_JID);
+      const outboundKey = toConversationKey(HISTORICAL_PHONE_JID);
+      const { op, sourceInboundSeq } = createTerminalSubmitted(
+        engine, 'mapping-flip-direct-echo', outboundKey, ALIAS_LID_JID,
+      );
+
+      expect(engine.matchEcho('mapping-flip-direct-echo', toConversationKey(CURRENT_PHONE_JID))).toBe(false);
+      expect(getOutbound(db, op)).toMatchObject({
+        status: 'submitted', conversation_key: outboundKey, chat_jid: ALIAS_LID_JID,
+      });
+      expect(getInbound(db, sourceInboundSeq)).toMatchObject({ processing_status: 'processing' });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('does not settle either historical raw LID op when one provider ID has two alias candidates', () => {
+    const db = makeDb();
+    try {
+      const engine = new DurabilityEngine(db);
+      const providerId = 'ambiguous-lid-alias-direct-echo';
+      const aliasKey = toConversationKey(ALIAS_LID_JID);
+      const phoneKey = toConversationKey(ALIAS_PHONE_JID);
+      mapLidToPhone(db, ALIAS_LID_JID, ALIAS_PHONE_JID);
+
+      const createAliasCandidate = (sourceMessageId: string) => {
+        const sourceInboundSeq = engine.journalInbound(
+          sourceMessageId, aliasKey, ALIAS_LID_JID, 'agent',
+        );
+        const op = engine.createOutboundOp({
+          conversationKey: aliasKey, chatJid: ALIAS_LID_JID, opType: 'text',
+          payload: 'answer', replayPolicy: 'unsafe', sourceInboundSeq, isTerminal: true,
+        });
+        expect(engine.markSending(op)).toBe(true);
+        engine.markSubmitted(op, providerId);
+        return { op, sourceInboundSeq };
+      };
+      const first = createAliasCandidate('ambiguous-lid-source-one');
+      const second = createAliasCandidate('ambiguous-lid-source-two');
+
+      expect(engine.matchEcho(providerId, phoneKey)).toBe(false);
+      for (const candidate of [first, second]) {
+        expect(getOutbound(db, candidate.op)).toMatchObject({
+          status: 'submitted', conversation_key: aliasKey, chat_jid: ALIAS_LID_JID,
+        });
+        expect(getInbound(db, candidate.sourceInboundSeq)).toMatchObject({
+          processing_status: 'processing', conversation_key: aliasKey, chat_jid: ALIAS_LID_JID,
+        });
+      }
+    } finally {
+      db.close();
+    }
+  });
+
+  it.each([
+    {
+      name: 'exact phone claim',
+      priorKey: toConversationKey(ALIAS_PHONE_JID),
+      priorJid: ALIAS_PHONE_JID,
+    },
+    {
+      name: 'aliased raw LID claim',
+      priorKey: toConversationKey(ALIAS_LID_JID),
+      priorJid: ALIAS_LID_JID,
+    },
+  ])('does not settle a later raw LID alias after an echoed $name', ({ priorKey, priorJid }) => {
+    const db = makeDb();
+    try {
+      const engine = new DurabilityEngine(db);
+      const providerId = `direct-echoed-claim-blocker-${priorKey}`;
+      const aliasKey = toConversationKey(ALIAS_LID_JID);
+      const phoneKey = toConversationKey(ALIAS_PHONE_JID);
+      mapLidToPhone(db, ALIAS_LID_JID, ALIAS_PHONE_JID);
+      const prior = createTerminalSubmitted(engine, providerId, priorKey, priorJid);
+      engine.markEchoed(prior.op);
+      const laterSourceInboundSeq = engine.journalInbound(
+        `later-direct-alias-source-${priorKey}`, aliasKey, ALIAS_LID_JID, 'agent',
+      );
+      const laterOp = engine.createOutboundOp({
+        conversationKey: aliasKey, chatJid: ALIAS_LID_JID, opType: 'text',
+        payload: 'answer', replayPolicy: 'unsafe', sourceInboundSeq: laterSourceInboundSeq,
+        isTerminal: true,
+      });
+      expect(engine.markSending(laterOp)).toBe(true);
+      engine.markSubmitted(laterOp, providerId);
+
+      expect(engine.matchEcho(providerId, phoneKey)).toBe(false);
+      expect(getOutbound(db, prior.op).status).toBe('echoed');
+      expect(getOutbound(db, laterOp)).toMatchObject({
+        status: 'submitted', conversation_key: aliasKey, chat_jid: ALIAS_LID_JID,
+      });
+      expect(getInbound(db, laterSourceInboundSeq)).toMatchObject({
+        processing_status: 'processing', conversation_key: aliasKey, chat_jid: ALIAS_LID_JID,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('does not settle an empty persisted identity even when the candidate is also empty', () => {
+    const db = makeDb();
+    try {
+      const engine = new DurabilityEngine(db);
+      const { op, sourceInboundSeq } = createTerminalSubmitted(
+        engine, 'empty-identity-direct-echo', '', '',
+      );
+
+      expect(engine.matchEcho('empty-identity-direct-echo', '')).toBe(false);
+      expect(getOutbound(db, op)).toMatchObject({
+        status: 'submitted', conversation_key: '', chat_jid: '',
+      });
+      expect(getInbound(db, sourceInboundSeq)).toMatchObject({ processing_status: 'processing' });
+    } finally {
+      db.close();
+    }
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -611,7 +1245,7 @@ describe('DurabilityEngine — postConnectRecovery()', () => {
 
     expect(engine.reconcileLiveMaybeSent().outboundReconciled).toBe(0);
     insertMessage(db, 'WA_FRESH_ECHO');
-    expect(engine.matchEcho('WA_FRESH_ECHO')).toBe(true);
+    expect(engine.matchEcho('WA_FRESH_ECHO', 'k1')).toBe(true);
     expect(getOutbound(db, opId)['status']).toBe('echoed');
   });
 

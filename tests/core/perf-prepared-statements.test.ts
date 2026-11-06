@@ -28,9 +28,10 @@ describe('prepared statement caching', () => {
 
     // The engine and its stores prepare fixed SQL in the constructor, including
     // synthetic-source classification, scheduled-turn loss counts and late-echo
-    // checkpoint identity. Recovery and lifecycle methods must reuse those
+    // checkpoint identity, provider-ID claims and current LID mappings.
+    // Recovery and lifecycle methods must reuse those
     // statements without preparing more.
-    expect(prepareSpy).toHaveBeenCalledTimes(168);
+    expect(prepareSpy).toHaveBeenCalledTimes(170);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');
@@ -68,7 +69,22 @@ describe('prepared statement caching', () => {
     });
     engine.markSending(outboundId);
     engine.markSubmitted(outboundId, 'wa-1');
-    engine.matchEcho('wa-1');
+    engine.matchEcho('wa-1', 'conv-1');
+
+    db.raw.exec(
+      "INSERT INTO lid_mappings (lid, phone_jid) VALUES ('12345', '15551234567@s.whatsapp.net')",
+    );
+    const aliasId = engine.createOutboundOp({
+      conversationKey: '12345',
+      chatJid: '12345@lid',
+      opType: 'text',
+      payload: '{"text":"alias"}',
+      replayPolicy: 'unsafe',
+    });
+    engine.markSending(aliasId);
+    engine.markSubmitted(aliasId, 'wa-alias');
+    expect(engine.matchEcho('wa-alias', '15551234567')).toBe(true);
+    expect(engine.matchEcho('wa-alias', '15551234567')).toBe(false);
 
     const maybeSentId = engine.createOutboundOp({
       conversationKey: 'conv-2',
