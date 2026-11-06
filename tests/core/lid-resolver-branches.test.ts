@@ -426,9 +426,12 @@ describe('resolveLid + setLidAuthDir — L1.5 disk fallback branches', () => {
     dir = mkdtempSync(join(tmpdir(), 'ws-lid-disk-'));
   });
   afterEach(() => {
-    db.close();
-    setLidAuthDir(''); // reset module state so other suites stay disabled
-    rmSync(dir, { recursive: true, force: true });
+    try {
+      db.close();
+    } finally {
+      setLidAuthDir(''); // reset module state so other suites stay disabled
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('returns null on DB miss when auth dir is disabled (empty string)', () => {
@@ -470,8 +473,12 @@ describe('resolveLid + setLidAuthDir — L1.5 disk fallback branches', () => {
 
     expect(resolvePersistedLidToJid(db, LID_1)).toBeNull();
 
-    const row = db.raw.prepare('SELECT phone_jid FROM lid_mappings WHERE lid = ?').get(LID_1);
-    expect(row).toBeUndefined();
+    const rows = db.raw.prepare('SELECT phone_jid FROM lid_mappings WHERE lid = ?');
+    expect(rows.all(LID_1)).toEqual([]);
+
+    expect(resolveLid(db, LID_1)).toBe('15550001');
+    expect(rows.all(LID_1)).toEqual([{ phone_jid: PHONE_1 }]);
+    expect(resolvePersistedLidToJid(db, LID_1)).toBe(PHONE_1);
   });
 
   it('does not fall back when an existing mapping has an empty phone JID', () => {
