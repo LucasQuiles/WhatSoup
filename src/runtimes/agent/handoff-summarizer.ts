@@ -24,9 +24,15 @@ const MAX_SUMMARY_BYTES = 4096;
 const MAX_SUMMARY_WORDS = 120;
 const MAX_COMPLETION_TOKENS = 512;
 const MESSAGE_FRAMING_RESERVE = 256;
-const SUMMARY_SYSTEM = 'Summarize the conversation below into <=120 words of durable context for an assistant resuming this chat. State facts, open tasks, and the user goal. No preamble.';
+// Asking for exactly MAX_SUMMARY_WORDS left no room for ordinary model overshoot,
+// so the strict check rejected and nothing persisted (#3833). The check stays strict.
+const SUMMARY_TARGET_WORDS = 90;
+const SUMMARY_SYSTEM = `Summarize the conversation below in at most ${SUMMARY_TARGET_WORDS} words of durable context for an assistant resuming this chat. State facts, open tasks, and the user goal. No preamble.`;
 const summaryResponse = z.object({
-  choices: z.array(z.object({ message: z.object({ content: z.string().nullish() }) })).min(1),
+  choices: z.array(z.object({
+    message: z.object({ content: z.string().nullish() }),
+    finish_reason: z.string().nullish(),
+  })).min(1),
   usage: z.object({ total_tokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER) }),
 });
 
@@ -105,6 +111,10 @@ export function buildHandoffDistill(cfg: HandoffDistillConfig): (reserveTokens: 
       }
       const parsed = summaryResponse.safeParse(await readSummaryResponse(res));
       if (!parsed.success) throw new Error('handoff summarizer returned invalid response or token usage');
+      // A reply cut off at the output cap is a fragment, not a summary; never persist it.
+      if (parsed.data.choices[0]?.finish_reason === 'length') {
+        throw new HandoffDistillUsageError('handoff summarizer reply stopped at the output token limit', parsed.data.usage.total_tokens);
+      }
       // Provider reasoning is not user-facing content and must never be persisted.
       const summary = parsed.data.choices[0]?.message.content?.trim() ?? '';
       if (!summary) throw new HandoffDistillUsageError('handoff summarizer returned empty summary', parsed.data.usage.total_tokens);
