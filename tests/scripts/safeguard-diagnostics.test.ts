@@ -312,7 +312,7 @@ const requiredQualityWorkflow = [
   '      - name: Console compatibility build',
   '        run: npm --prefix console run build',
   '  bot-errors-health-macos:',
-  '    runs-on: macos-14',
+  '    runs-on: macos-15-intel',
   '    steps:',
   '      - name: Portable Python and release-proof prerequisites (real macOS)',
   '        run: npm test -- tests/helpers/python-interpreter.test.ts tests/scripts/bot-errors-python-atomic-write-guard.test.ts tests/scripts/bot-errors-release-proof-installer.test.ts tests/scripts/bot-errors-release-proof-run.test.ts --pool=forks --maxWorkers=1',
@@ -1086,6 +1086,24 @@ describe('safeguard diagnostics', () => {
       ),
       evidence: 'quality workflow must not retain masked unconditional disk cleanup',
     },
+    {
+      name: 'uses the retired macOS 14 runner for x64 health qualification',
+      mutate: (workflow: string) => workflow.replace('    runs-on: macos-15-intel', '    runs-on: macos-14'),
+      evidence: 'bot-errors-health-macos must run on macos-15-intel for x64 health qualification',
+    },
+    {
+      name: 'uses the architecture-ambiguous macOS 15 runner for x64 health qualification',
+      mutate: (workflow: string) => workflow.replace('    runs-on: macos-15-intel', '    runs-on: macos-15'),
+      evidence: 'bot-errors-health-macos must run on macos-15-intel for x64 health qualification',
+    },
+    {
+      name: 'changes the macOS prerequisite test command',
+      mutate: (workflow: string) => workflow.replace(
+        'tests/scripts/bot-errors-release-proof-run.test.ts',
+        'tests/scripts/bot-errors-release-proof-run-retired.test.ts',
+      ),
+      evidence: 'bot-errors-health-macos must run the portable Python and release-proof prerequisite suites exactly once',
+    },
   ])('fails when Quality $name', ({ mutate, evidence }) => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const mutated = mutate(workflow);
@@ -1096,6 +1114,13 @@ describe('safeguard diagnostics', () => {
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.id === 'quality-ci-lane-partition'))
       .toMatchObject({ status: 'fail', evidence: expect.arrayContaining([evidence]) });
+  });
+
+  it('accepts the Intel macOS 15 health lane with its exact prerequisite test command', () => {
+    const result = checkSafeguards(makeRepo());
+
+    expect(result.checks.find((check) => check.id === 'quality-ci-lane-partition'))
+      .toMatchObject({ status: 'pass' });
   });
 
   it('fails when the quality job loses its bounded timeout', () => {
