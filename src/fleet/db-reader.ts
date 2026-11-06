@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { statSync } from 'node:fs';
 import { SQLITE_BUSY_TIMEOUT_PRAGMA } from '../lib/sqlite-constants.ts';
 import { buildSafeFtsMatchQuery } from '../lib/sql-fts.ts';
 import { queryAll, queryOne } from '../lib/db-query.ts';
@@ -156,6 +157,37 @@ const READ_ONLY_DATABASE_OPTIONS: ConstructorParameters<typeof DatabaseSync>[1] 
   readOnly: true,
 };
 
+export interface LatestMarkers {
+  latestMessagePk: number | null;
+  latestMessageMarker: string | null;
+  latestAccessMarker: string | null;
+}
+
+function readLatestMarkers(db: DatabaseSync): LatestMarkers {
+  const columns = db.prepare("PRAGMA table_info('messages')").all() as Array<{ name: string }>;
+  const hasUpdatedAt = columns.some((column) => column.name === 'updated_at');
+  const msgRow = db.prepare(
+    hasUpdatedAt
+      ? 'SELECT MAX(pk) AS pk, MAX(updated_at) AS updatedAt FROM messages'
+      : 'SELECT MAX(pk) AS pk, NULL AS updatedAt FROM messages',
+  ).get() as { pk: number | null; updatedAt: string | null } | undefined;
+
+  const accessRow = db.prepare(
+    'SELECT MAX(COALESCE(decided_at, requested_at)) AS marker FROM access_list',
+  ).get() as { marker: string | null } | undefined;
+
+  const latestMessagePk = msgRow?.pk ?? null;
+  const latestMessageUpdatedAt = msgRow?.updatedAt ?? null;
+
+  return {
+    latestMessagePk,
+    latestMessageMarker: latestMessagePk == null
+      ? null
+      : `${latestMessagePk}:${latestMessageUpdatedAt ?? ''}`,
+    latestAccessMarker: accessRow?.marker ?? null,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // FleetDbReader
 // ---------------------------------------------------------------------------
@@ -165,6 +197,10 @@ export class FleetDbReader {
   private selfDb: DatabaseSync;
   /** #2200: the metrics window and its hour buckets are derived from this clock. */
   private readonly clock: Clock;
+  /** Persistent read-only handles for getLatestMarkers, keyed by dbPath. */
+  private readonly markerHandles = new Map<string, { db: DatabaseSync; dev: number; ino: number }>();
+  /** Last markers per instance with the change token they were computed under. */
+  private readonly markerCache = new Map<string, { token: string; markers: LatestMarkers }>();
 
   constructor(selfName: string, selfDb: DatabaseSync, clock: Clock = systemClock) {
     this.selfName = selfName;
@@ -631,35 +667,68 @@ export class FleetDbReader {
     });
   }
 
-  /** Lightweight markers for realtime snapshot-diff (O(1) indexed queries). */
-  getLatestMarkers(
-    name: string,
-    dbPath: string,
-  ): DbResult<{ latestMessagePk: number | null; latestMessageMarker: string | null; latestAccessMarker: string | null }> {
-    return this.query(name, dbPath, (db) => {
-      const columns = db.prepare("PRAGMA table_info('messages')").all() as Array<{ name: string }>;
-      const hasUpdatedAt = columns.some((column) => column.name === 'updated_at');
-      const msgRow = db.prepare(
-        hasUpdatedAt
-          ? 'SELECT MAX(pk) AS pk, MAX(updated_at) AS updatedAt FROM messages'
-          : 'SELECT MAX(pk) AS pk, NULL AS updatedAt FROM messages',
-      ).get() as { pk: number | null; updatedAt: string | null } | undefined;
+  /**
+   * Markers for the realtime snapshot-diff, polled every 2 s per instance.
+   *
+   * MAX(updated_at) has no index, so computing the markers scans messages.
+   * They are therefore recomputed only when the database changed: each
+   * instance keeps one persistent read-only handle, and `PRAGMA data_version`
+   * (commits by other connections) plus `total_changes()` (this connection's
+   * own writes, for the shared self handle) form the change token. An
+   * unchanged database is answered from the last result.
+   */
+  getLatestMarkers(name: string, dbPath: string): DbResult<LatestMarkers> {
+    const isSelf = name === this.selfName;
+    const cacheKey = isSelf ? `self:${name}` : dbPath;
+    try {
+      const db = isSelf ? this.selfDb : this.markerHandle(dbPath);
+      // Read the token before the markers: a commit landing in between moves
+      // the token again, so the next poll recomputes instead of missing it.
+      const version = db.prepare('PRAGMA data_version').get() as { data_version: number };
+      const own = db.prepare('SELECT total_changes() AS n').get() as { n: number };
+      const token = `${version.data_version}:${own.n}`;
+      const cached = this.markerCache.get(cacheKey);
+      if (cached?.token === token) return { ok: true, data: cached.markers };
+      const markers = readLatestMarkers(db);
+      this.markerCache.set(cacheKey, { token, markers });
+      return { ok: true, data: markers };
+    } catch (err) {
+      const msg = (err as Error).message;
+      this.markerCache.delete(cacheKey);
+      if (!isSelf) this.dropMarkerHandle(dbPath);
+      log.warn({ instance: name, dbPath, error: msg }, 'latest-marker query failed');
+      return { ok: false, error: msg };
+    }
+  }
 
-      const accessRow = db.prepare(
-        'SELECT MAX(COALESCE(decided_at, requested_at)) AS marker FROM access_list',
-      ).get() as { marker: string | null } | undefined;
+  /** Close the persistent marker handles. Call when the realtime poller stops. */
+  close(): void {
+    for (const dbPath of [...this.markerHandles.keys()]) this.dropMarkerHandle(dbPath);
+    this.markerCache.clear();
+  }
 
-      const latestMessagePk = msgRow?.pk ?? null;
-      const latestMessageUpdatedAt = msgRow?.updatedAt ?? null;
+  /**
+   * The persistent read-only handle for `dbPath`, reopened when the path now
+   * names a different file (restore, VACUUM INTO swap). A missing file throws.
+   */
+  private markerHandle(dbPath: string): DatabaseSync {
+    const { dev, ino } = statSync(dbPath);
+    const existing = this.markerHandles.get(dbPath);
+    if (existing && existing.dev === dev && existing.ino === ino) return existing.db;
+    if (existing) this.dropMarkerHandle(dbPath);
+    const db = new DatabaseSync(dbPath, READ_ONLY_DATABASE_OPTIONS);
+    this.markerHandles.set(dbPath, { db, dev, ino });
+    // A new connection starts its own data_version sequence; never compare
+    // it with a token taken on the previous handle.
+    this.markerCache.delete(dbPath);
+    return db;
+  }
 
-      return {
-        latestMessagePk,
-        latestMessageMarker: latestMessagePk == null
-          ? null
-          : `${latestMessagePk}:${latestMessageUpdatedAt ?? ''}`,
-        latestAccessMarker: accessRow?.marker ?? null,
-      };
-    });
+  private dropMarkerHandle(dbPath: string): void {
+    const handle = this.markerHandles.get(dbPath);
+    this.markerHandles.delete(dbPath);
+    this.markerCache.delete(dbPath);
+    try { handle?.db.close(); } catch { /* already closed */ }
   }
 
   /** Fetch messages by a set of message_ids (for feed preview enrichment). */
