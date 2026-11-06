@@ -216,112 +216,138 @@ describe('typed ingest admission contract', () => {
       const runtime = makeRuntime(handleMessage);
       const { durability, matchEcho } = makeDurability();
       const handler = makeHandler(db, runtime, durability);
+      let drained = false;
+      let primaryFailure: unknown;
 
-      db.raw.prepare(`
-        INSERT INTO messages
-          (message_id, chat_jid, conversation_key, sender_jid, content, content_type, is_from_me, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        'echo-duplicate',
-        '15551230008@s.whatsapp.net',
-        '15551230008',
-        BOT_JID,
-        'already stored',
-        'text',
-        1,
-        1,
-      );
+      try {
+        db.raw.prepare(`
+          INSERT INTO messages
+            (message_id, chat_jid, conversation_key, sender_jid, content, content_type, is_from_me, timestamp)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          'echo-duplicate',
+          '15551230008@s.whatsapp.net',
+          '15551230008',
+          BOT_JID,
+          'already stored',
+          'text',
+          1,
+          1,
+        );
 
-      handler(makeMessage({ messageId: 'echo-anchor' }));
-      await waitForStats((stats) => expect(stats.active).toBe(1));
+        handler(makeMessage({ messageId: 'echo-anchor' }));
+        await waitForStats((stats) => expect(stats.active).toBe(1));
 
-      handler(makeMessage({ messageId: 'ordinary-victim' }));
-      await waitForStats((stats) => expect(stats.queued).toBe(1));
+        handler(makeMessage({ messageId: 'ordinary-victim' }));
+        await waitForStats((stats) => expect(stats.queued).toBe(1));
 
-      const admissionBeforeEcho = getIngestStats();
-      const missedEcho = makeMessage({
-        messageId: 'echo-new',
-        content: 'echo\uD800body',
-        contentText: 'echo\uD800text',
-        senderName: 'Echo\uD800Sender',
-        isFromMe: true,
-        senderJid: BOT_JID,
-      });
-      handler(missedEcho);
-      await vi.waitFor(() => expect(matchEcho).toHaveBeenCalledWith('echo-new'));
-      const admissionAfterFirstEcho = getIngestStats();
+        const admissionBeforeEcho = getIngestStats();
+        const missedEcho = makeMessage({
+          messageId: 'echo-new',
+          content: 'echo\uD800body',
+          contentText: 'echo\uD800text',
+          senderName: 'Echo\uD800Sender',
+          isFromMe: true,
+          senderJid: BOT_JID,
+        });
+        handler(missedEcho);
+        await vi.waitFor(() => expect(matchEcho).toHaveBeenCalledWith('echo-new', '15551230008'));
+        const admissionAfterFirstEcho = getIngestStats();
 
-      handler(makeMessage({ messageId: 'echo-duplicate', isFromMe: true, senderJid: BOT_JID }));
-      await vi.waitFor(() => expect(matchEcho).toHaveBeenCalledTimes(2));
-      const admissionAfterDuplicateEcho = getIngestStats();
+        handler(makeMessage({ messageId: 'echo-duplicate', isFromMe: true, senderJid: BOT_JID }));
+        await vi.waitFor(() => expect(matchEcho).toHaveBeenCalledTimes(2));
+        const admissionAfterDuplicateEcho = getIngestStats();
 
-      const storedBeforeRedelivery = db.raw.prepare(
-        `SELECT COUNT(*) AS count, MAX(content) AS content,
-                MAX(content_text) AS contentText, MAX(sender_name) AS senderName
-           FROM messages WHERE message_id = ?`,
-      ).get('echo-new') as {
-        count: number;
-        content: string | null;
-        contentText: string | null;
-        senderName: string | null;
-      };
+        const storedBeforeRedelivery = db.raw.prepare(
+          `SELECT COUNT(*) AS count, MAX(content) AS content,
+                  MAX(content_text) AS contentText, MAX(sender_name) AS senderName
+             FROM messages WHERE message_id = ?`,
+        ).get('echo-new') as {
+          count: number;
+          content: string | null;
+          contentText: string | null;
+          senderName: string | null;
+        };
 
-      anchor.resolve();
-      await waitForIdle();
+        anchor.resolve();
+        await waitForIdle();
+        drained = true;
 
-      handler(makeMessage({
-        messageId: 'echo-new',
-        content: 'redelivered body',
-        contentText: 'redelivered text',
-        senderName: 'Redelivered Sender',
-        isFromMe: true,
-        senderJid: BOT_JID,
-      }));
-      await vi.waitFor(() => expect(matchEcho).toHaveBeenCalledTimes(3));
-      await vi.waitFor(() => expect(mockLog.debug).toHaveBeenCalledWith(
-        { messageId: 'echo-new', reason: 'duplicate' },
-        'skipping duplicate message delivery',
-      ));
+        handler(makeMessage({
+          messageId: 'echo-new',
+          content: 'redelivered body',
+          contentText: 'redelivered text',
+          senderName: 'Redelivered Sender',
+          isFromMe: true,
+          senderJid: BOT_JID,
+        }));
+        await vi.waitFor(() => expect(matchEcho).toHaveBeenCalledTimes(3));
+        await vi.waitFor(() => expect(mockLog.debug).toHaveBeenCalledWith(
+          { messageId: 'echo-new', reason: 'duplicate' },
+          'skipping duplicate message delivery',
+        ));
 
-      expect(matchEcho.mock.calls.map(([messageId]) => messageId)).toStrictEqual([
-        'echo-new',
-        'echo-duplicate',
-        'echo-new',
-      ]);
-      expect(admissionAfterFirstEcho).toStrictEqual(admissionBeforeEcho);
-      expect(admissionAfterDuplicateEcho).toStrictEqual(admissionBeforeEcho);
-      expect(matchEcho).toHaveNthReturnedWith(1, false);
-      expect(missedEcho.content).toBe('echo\uFFFDbody');
-      expect(missedEcho.contentText).toBe('echo\uFFFDtext');
-      expect(missedEcho.senderName).toBe('Echo\uFFFDSender');
-      expect(handleMessage.mock.calls.map(([msg]) => (msg as IncomingMessage).messageId)).toStrictEqual([
-        'echo-anchor',
-        'ordinary-victim',
-      ]);
-      expect(storedBeforeRedelivery.count).toBe(1);
-      expect(storedBeforeRedelivery.content).toBe('echo\uFFFDbody');
-      expect(storedBeforeRedelivery.contentText).toBe('echo\uFFFDtext');
-      expect(storedBeforeRedelivery.senderName).toBe('Echo\uFFFDSender');
-      expect(
-        (db.raw.prepare('SELECT COUNT(*) AS count FROM messages WHERE message_id = ?').get('echo-duplicate') as { count: number }).count,
-      ).toBe(1);
-      const storedAfterRedelivery = db.raw.prepare(
-        `SELECT COUNT(*) AS count, MAX(content) AS content,
-                MAX(content_text) AS contentText, MAX(sender_name) AS senderName
-           FROM messages WHERE message_id = ?`,
-      ).get('echo-new') as {
-        count: number;
-        content: string | null;
-        contentText: string | null;
-        senderName: string | null;
-      };
-      expect(storedAfterRedelivery.count).toBe(1);
-      expect(storedAfterRedelivery.content).toBe('echo\uFFFDbody');
-      expect(storedAfterRedelivery.contentText).toBe('echo\uFFFDtext');
-      expect(storedAfterRedelivery.senderName).toBe('Echo\uFFFDSender');
-      expect(getIngestStats().dropped).toBe(admissionBeforeEcho.dropped);
-
-      db.raw.close();
+        expect(matchEcho.mock.calls).toStrictEqual([
+          ['echo-new', '15551230008'],
+          ['echo-duplicate', '15551230008'],
+          ['echo-new', '15551230008'],
+        ]);
+        expect(admissionAfterFirstEcho).toStrictEqual(admissionBeforeEcho);
+        expect(admissionAfterDuplicateEcho).toStrictEqual(admissionBeforeEcho);
+        expect(matchEcho).toHaveNthReturnedWith(1, false);
+        expect(missedEcho.content).toBe('echo\uFFFDbody');
+        expect(missedEcho.contentText).toBe('echo\uFFFDtext');
+        expect(missedEcho.senderName).toBe('Echo\uFFFDSender');
+        expect(handleMessage.mock.calls.map(([msg]) => (msg as IncomingMessage).messageId)).toStrictEqual([
+          'echo-anchor',
+          'ordinary-victim',
+        ]);
+        expect(storedBeforeRedelivery.count).toBe(1);
+        expect(storedBeforeRedelivery.content).toBe('echo\uFFFDbody');
+        expect(storedBeforeRedelivery.contentText).toBe('echo\uFFFDtext');
+        expect(storedBeforeRedelivery.senderName).toBe('Echo\uFFFDSender');
+        expect(
+          (db.raw.prepare('SELECT COUNT(*) AS count FROM messages WHERE message_id = ?').get('echo-duplicate') as { count: number }).count,
+        ).toBe(1);
+        const storedAfterRedelivery = db.raw.prepare(
+          `SELECT COUNT(*) AS count, MAX(content) AS content,
+                  MAX(content_text) AS contentText, MAX(sender_name) AS senderName
+             FROM messages WHERE message_id = ?`,
+        ).get('echo-new') as {
+          count: number;
+          content: string | null;
+          contentText: string | null;
+          senderName: string | null;
+        };
+        expect(storedAfterRedelivery.count).toBe(1);
+        expect(storedAfterRedelivery.content).toBe('echo\uFFFDbody');
+        expect(storedAfterRedelivery.contentText).toBe('echo\uFFFDtext');
+        expect(storedAfterRedelivery.senderName).toBe('Echo\uFFFDSender');
+        expect(getIngestStats().dropped).toBe(admissionBeforeEcho.dropped);
+      } catch (error) {
+        primaryFailure = error;
+        throw error;
+      } finally {
+        anchor.resolve();
+        let cleanupFailure: unknown;
+        try {
+          if (!drained) await waitForIdle();
+        } catch (error) {
+          cleanupFailure = error;
+        }
+        try {
+          db.raw.close();
+        } catch (error) {
+          cleanupFailure = cleanupFailure === undefined
+            ? error
+            : new AggregateError([cleanupFailure, error], 'admission fixture cleanup failed');
+        }
+        if (cleanupFailure !== undefined) {
+          throw primaryFailure === undefined
+            ? cleanupFailure
+            : new AggregateError([primaryFailure, cleanupFailure], 'admission assertion and cleanup failed');
+        }
+      }
     });
   });
 

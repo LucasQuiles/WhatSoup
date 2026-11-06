@@ -11,9 +11,13 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
 import { toConversationKey } from '../../src/core/conversation-key.ts';
+import { setLidAuthDir } from '../../src/core/lid-resolver.ts';
 import { createInternalOutboundFailureEvidence } from '../../src/core/outbound-failure-disposition.ts';
 
 const emitAlert = vi.hoisted(() => vi.fn(() => true));
@@ -548,6 +552,70 @@ describe.each(['startup', 'live'] as const)('%s recovery ignores non-equivalent 
 });
 
 describe('DurabilityEngine — direct echo matching requires a trusted nonempty identity', () => {
+  it('does not settle a disk-only LID mapping', () => {
+    const db = makeDb();
+    const authDir = mkdtempSync(join(tmpdir(), 'ws-durability-lid-'));
+    try {
+      setLidAuthDir(authDir);
+      writeFileSync(
+        join(authDir, `lid-mapping-${toConversationKey(ALIAS_LID_JID)}_reverse.json`),
+        '"15555551234"',
+      );
+      const engine = new DurabilityEngine(db);
+      const aliasKey = toConversationKey(ALIAS_LID_JID);
+      const phoneKey = toConversationKey(ALIAS_PHONE_JID);
+      const { op, sourceInboundSeq } = createTerminalSubmitted(
+        engine,
+        'disk-only-lid-direct-echo',
+        aliasKey,
+        ALIAS_LID_JID,
+      );
+
+      expect(engine.matchEcho('disk-only-lid-direct-echo', phoneKey)).toBe(false);
+      expect(getOutbound(db, op)).toMatchObject({
+        status: 'submitted', conversation_key: aliasKey, chat_jid: ALIAS_LID_JID,
+      });
+      expect(getInbound(db, sourceInboundSeq)).toMatchObject({
+        processing_status: 'processing', conversation_key: aliasKey, chat_jid: ALIAS_LID_JID,
+      });
+      expect(db.raw.prepare('SELECT phone_jid FROM lid_mappings WHERE lid = ?').get(aliasKey)).toBeUndefined();
+    } finally {
+      setLidAuthDir('');
+      try {
+        db.close();
+      } finally {
+        rmSync(authDir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('does not settle a LID alias through a malformed persisted phone JID', () => {
+    const db = makeDb();
+    try {
+      const engine = new DurabilityEngine(db);
+      const aliasKey = toConversationKey(ALIAS_LID_JID);
+      const phoneKey = toConversationKey(ALIAS_PHONE_JID);
+      db.raw.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+        .run(aliasKey, '15555551234@evil@s.whatsapp.net');
+      const { op, sourceInboundSeq } = createTerminalSubmitted(
+        engine,
+        'malformed-persisted-phone-direct-echo',
+        aliasKey,
+        ALIAS_LID_JID,
+      );
+
+      expect(engine.matchEcho('malformed-persisted-phone-direct-echo', phoneKey)).toBe(false);
+      expect(getOutbound(db, op)).toMatchObject({
+        status: 'submitted', conversation_key: aliasKey, chat_jid: ALIAS_LID_JID,
+      });
+      expect(getInbound(db, sourceInboundSeq)).toMatchObject({
+        processing_status: 'processing', conversation_key: aliasKey, chat_jid: ALIAS_LID_JID,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
   it('does not settle an unknown LID alias from an exact provider ID', () => {
     const db = makeDb();
     try {

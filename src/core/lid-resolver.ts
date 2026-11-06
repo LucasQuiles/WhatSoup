@@ -21,7 +21,17 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import { createChildLogger } from '../logger.ts';
-import { DOMAIN_PERSONAL, DOMAIN_GROUP, DOMAIN_LID, bareNumber, normalizeLid, isLidJid, isPnJid, isGroupJid } from './jid-constants.ts';
+import {
+  DOMAIN_PERSONAL,
+  DOMAIN_GROUP,
+  DOMAIN_LID,
+  bareNumber,
+  normalizeLid,
+  isLidJid,
+  isPnJid,
+  isGroupJid,
+  parseWhatsAppDeliveryNamespace,
+} from './jid-constants.ts';
 import type { Database } from './database.ts';
 import { sqliteUtcToEpochMs } from '../lib/sqlite-time.ts';
 
@@ -817,11 +827,8 @@ function lookupLidFromDisk(db: Database, lid: string): string | null {
 let _resolveLidStmt: ReturnType<typeof import('node:sqlite').DatabaseSync.prototype.prepare> | null = null;
 let _resolveLidDb: Database | null = null;
 
-export function resolveLid(db: Database, rawLid: string): string | null {
-  // Normalize: strip colon-device suffix (e.g. '12345:67' → '12345')
-  const lid = normalizeLid(rawLid);
-
-  // Cache the prepared statement — invalidate if db instance changes
+function lookupPersistedLidPhoneJid(db: Database, normalizedLid: string): string | null {
+  // Cache the prepared statement — invalidate if db instance changes.
   if (_resolveLidDb !== db) {
     _resolveLidStmt = null;
     _resolveLidDb = db;
@@ -830,8 +837,26 @@ export function resolveLid(db: Database, rawLid: string): string | null {
     _resolveLidStmt = db.raw.prepare('SELECT phone_jid FROM lid_mappings WHERE lid = ?');
   }
 
-  const row = _resolveLidStmt.get(lid) as { phone_jid: string } | undefined;
-  if (row) return bareNumber(row.phone_jid);
+  const row = _resolveLidStmt.get(normalizedLid) as { phone_jid: string } | undefined;
+  return row ? row.phone_jid : null;
+}
+
+/**
+ * Resolve only an already-persisted LID mapping to its exact personal JID.
+ * This intentionally does not use L1.5 disk fallback or write any mapping.
+ */
+export function resolvePersistedLidToJid(db: Database, rawLid: string): string | null {
+  const phoneJid = lookupPersistedLidPhoneJid(db, normalizeLid(bareNumber(rawLid)));
+  return phoneJid !== null && parseWhatsAppDeliveryNamespace(phoneJid) === DOMAIN_PERSONAL
+    ? phoneJid
+    : null;
+}
+
+export function resolveLid(db: Database, rawLid: string): string | null {
+  // Normalize: strip colon-device suffix (e.g. '12345:67' → '12345')
+  const lid = normalizeLid(rawLid);
+  const phoneJid = lookupPersistedLidPhoneJid(db, lid);
+  if (phoneJid !== null) return bareNumber(phoneJid);
 
   // L1.5: lazy disk fallback for mappings Baileys wrote after startup hydration.
   return lookupLidFromDisk(db, lid);

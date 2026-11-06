@@ -49,6 +49,7 @@ import {
   setLidAuthDir,
   resolveLid,
   resolveLidToJid,
+  resolvePersistedLidToJid,
   getAllLidMappings,
   canonicalizeChatJid,
 } from '../../src/core/lid-resolver.ts';
@@ -462,6 +463,28 @@ describe('resolveLid + setLidAuthDir — L1.5 disk fallback branches', () => {
     const row = db.raw.prepare('SELECT phone_jid FROM lid_mappings WHERE lid = ?').get(LID_1);
     expect(row).toEqual({ phone_jid: '15550001@s.whatsapp.net' });
   });
+
+  it('does not use L1.5 disk fallback for a persisted-only lookup', () => {
+    setLidAuthDir(dir);
+    writeFileSync(join(dir, `lid-mapping-${LID_1}_reverse.json`), '"15550001"');
+
+    expect(resolvePersistedLidToJid(db, LID_1)).toBeNull();
+
+    const row = db.raw.prepare('SELECT phone_jid FROM lid_mappings WHERE lid = ?').get(LID_1);
+    expect(row).toBeUndefined();
+  });
+
+  it('does not fall back when an existing mapping has an empty phone JID', () => {
+    setLidAuthDir(dir);
+    writeFileSync(join(dir, `lid-mapping-${LID_1}_reverse.json`), '"15550001"');
+    setPhone(db, LID_1, '');
+
+    expect(resolveLid(db, LID_1)).toBe('');
+    expect(resolvePersistedLidToJid(db, LID_1)).toBeNull();
+    expect(db.raw.prepare('SELECT phone_jid FROM lid_mappings WHERE lid = ?').get(LID_1)).toEqual({
+      phone_jid: '',
+    });
+  });
 });
 
 // ── resolveLidToJid / getAllLidMappings ──────────────────────────────────────
@@ -478,6 +501,16 @@ describe('resolveLidToJid + getAllLidMappings', () => {
   it('resolveLidToJid builds the full personal JID for a mapped LID', () => {
     setPhone(db, LID_1, PHONE_1);
     expect(resolveLidToJid(db, `${LID_1}@lid`)).toBe('15550001@s.whatsapp.net');
+  });
+
+  it.each([
+    { name: 'personal JID', phoneJid: PHONE_1, expected: PHONE_1 },
+    { name: 'LID JID', phoneJid: `${LID_1}@lid`, expected: null },
+    { name: 'multi-separator JID', phoneJid: '15550001@evil@s.whatsapp.net', expected: null },
+  ])('resolvePersistedLidToJid accepts only a canonical $name', ({ phoneJid, expected }) => {
+    setPhone(db, LID_1, phoneJid);
+
+    expect(resolvePersistedLidToJid(db, `${LID_1}@lid`)).toBe(expected);
   });
 
   it('getAllLidMappings returns the full lid → phone-digits map', () => {

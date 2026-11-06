@@ -31,6 +31,7 @@ import type { InboundStatus } from './inbound-status.ts';
 import type { Messenger } from './types.ts';
 import type { GuardCaller } from './outbound-identity/types.ts';
 import { toConversationKey } from './conversation-key.ts';
+import { resolvePersistedLidToJid } from './lid-resolver.ts';
 import {
   DOMAIN_LID,
   DOMAIN_PERSONAL,
@@ -746,7 +747,6 @@ type DurabilityStatements = {
   selectOutboundTerminalIdentity: PreparedStatement;
   selectOutboundForEchoMatch: PreparedStatement;
   selectOutboundClaimsByWaMessageId: PreparedStatement;
-  getCurrentLidMapping: PreparedStatement;
   recordToolCall: PreparedStatement;
   markToolExecuting: PreparedStatement;
   markToolComplete: PreparedStatement;
@@ -1026,9 +1026,6 @@ export class DurabilityEngine {
       selectOutboundClaimsByWaMessageId: prepare(
         `SELECT id, status, conversation_key, chat_jid FROM outbound_ops
          WHERE wa_message_id = ?`,
-      ),
-      getCurrentLidMapping: prepare(
-        `SELECT phone_jid FROM lid_mappings WHERE lid = ?`,
       ),
       recordToolCall: prepare(
         `INSERT INTO tool_calls (
@@ -2727,12 +2724,8 @@ export class DurabilityEngine {
       const lid = toConversationKey(lidChatJid);
       if (lid === '' || lidKey !== lid) return false;
 
-      const mapping = this.statements.getCurrentLidMapping.get(lid) as
-        | { phone_jid: string }
-        | undefined;
-      return !!mapping
-        && parseWhatsAppDeliveryNamespace(mapping.phone_jid) === DOMAIN_PERSONAL
-        && toConversationKey(mapping.phone_jid) === phoneKey;
+      const phoneJid = resolvePersistedLidToJid(this.db, lid);
+      return phoneJid !== null && toConversationKey(phoneJid) === phoneKey;
     } catch {
       return false;
     }
