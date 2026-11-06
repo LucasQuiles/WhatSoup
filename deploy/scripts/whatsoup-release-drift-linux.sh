@@ -28,7 +28,24 @@ fail(){ echo "whatsoup-release-drift-linux: $1" >&2; exit "${2:-2}"; }
 
 # Resolve deployed release root from the launcher symlink:
 #   <root>/deploy/whatsoup  ->  strip trailing /deploy/whatsoup
-target="$(readlink -f "$LAUNCHER" 2>/dev/null)" || fail "cannot resolve launcher $LAUNCHER"
+# Portable symlink resolution (GNU-only canonicalising flags are avoided): follow each link hop,
+# then canonicalise the final directory with `pwd -P`.
+resolve_path() {
+  local path="$1" link hops=0
+  while [ -L "$path" ]; do
+    [ "$hops" -lt 40 ] || return 1
+    link="$(readlink -- "$path")" || return 1
+    case "$link" in
+      /*) path="$link" ;;
+      *) path="$(dirname -- "$path")/$link" ;;
+    esac
+    hops=$((hops + 1))
+  done
+  [ -e "$path" ] || return 1
+  printf '%s/%s\n' "$(cd -P -- "$(dirname -- "$path")" && pwd -P)" "$(basename -- "$path")"
+}
+
+target="$(resolve_path "$LAUNCHER")" || fail "cannot resolve launcher $LAUNCHER"
 case "$target" in
   */deploy/whatsoup) RELEASE_ROOT="${target%/deploy/whatsoup}" ;;
   *) fail "launcher target has unexpected shape: $target" ;;
