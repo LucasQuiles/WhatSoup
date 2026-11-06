@@ -26,6 +26,7 @@
  */
 import { createChildLogger } from '../../logger.ts';
 import { MS_PER_MINUTE, MS_PER_HOUR } from '../../lib/time-units.ts';
+import { ContextGaugeStore } from './context-gauge.ts';
 
 // Same component name as AgentRuntime: the rapid-rearm / next-turn warnings keep
 // their existing `component: 'agent-runtime'` log binding (no observable change).
@@ -102,6 +103,8 @@ export class AutoCompactController {
   readonly compactionOutcomeRecordedForCompactAt = new Map<string, number>();
   /** Scope → in-flight auto-compact waiter (promise + resolve + timeout timer). */
   readonly waiters = new Map<string, AutoCompactWaiter>();
+  /** #3717c: per-scope, per-generation context of the last distinct request. */
+  readonly contextGauge = new ContextGaugeStore();
 
   /** Cumulative count of rapid re-arms observed (health metric). */
   ineffective = 0;
@@ -257,14 +260,19 @@ export class AutoCompactController {
       >= AUTO_COMPACT_CONVERGENCE_LIMIT;
   }
 
+  /**
+   * #3717c P4: `contextTokens` is the context gauge (undefined = unknown, which
+   * records nothing). `summedInputTokens` is the turn's summed usage, logged only.
+   */
   recordAutoCompactNextTurnIfNeeded(
     scopeKey: string,
-    inputTokens: number | undefined,
+    contextTokens: number | undefined,
     consumeWhenNotOverThreshold = true,
+    summedInputTokens?: number,
   ): void {
     if (this.inputTokens === undefined) return;
     if (!this.measureNextTurn.has(scopeKey)) return;
-    if (inputTokens === undefined || inputTokens <= this.inputTokens) {
+    if (contextTokens === undefined || contextTokens <= this.inputTokens) {
       if (consumeWhenNotOverThreshold) this.measureNextTurn.delete(scopeKey);
       return;
     }
@@ -277,8 +285,14 @@ export class AutoCompactController {
       this.recordAutoCompactRapidRearm(scopeKey, lastSuccessAt, now);
     }
     log.warn(
-      { scopeKey, inputTokens: inputTokens ?? 0, threshold: this.inputTokens },
-      'auto compact next turn input exceeded threshold',
+      {
+        scopeKey,
+        contextTokens,
+        summedInputTokens: summedInputTokens ?? null,
+        threshold: this.inputTokens,
+        crossed: 'context',
+      },
+      'auto compact next turn context exceeded threshold',
     );
   }
 
@@ -298,6 +312,7 @@ export class AutoCompactController {
     this.consecutiveNonConvergentCompactions.delete(scopeKey);
     this.compactionOutcomeRecordedForCompactAt.delete(scopeKey);
     this.measureNextTurn.delete(scopeKey);
+    this.contextGauge.delete(scopeKey);
     this.finishAutoCompact(scopeKey);
     this.clearSilentCompact(scopeKey);
   }
@@ -347,6 +362,8 @@ export class AutoCompactController {
       this.measureNextTurn.delete(oldKey);
       this.measureNextTurn.add(newKey);
     }
+    // #3717c: the context gauge is the same conversation's context; it moves too.
+    this.contextGauge.rekey(oldKey, newKey);
   }
 
   /**
@@ -372,5 +389,6 @@ export class AutoCompactController {
     this.consecutiveNonConvergentCompactions.clear();
     this.compactionOutcomeRecordedForCompactAt.clear();
     this.measureNextTurn.clear();
+    this.contextGauge.clear();
   }
 }

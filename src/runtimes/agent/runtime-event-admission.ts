@@ -64,7 +64,7 @@ export function decideProviderEventAdmission(
     return { admit: false, reason: 'accounting_only' };
   }
 
-  if (event.type === 'token_usage' || event.type === 'result') {
+  if (event.type === 'token_usage' || event.type === 'request_usage' || event.type === 'result') {
     return { admit: true, reason: 'owned' };
   }
   if (event.type === 'compact_boundary' && COMPACT_SYSTEM_PURPOSES.has(owner.purpose)) {

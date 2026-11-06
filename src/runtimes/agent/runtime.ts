@@ -437,6 +437,12 @@ const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * MS_PER_MINUTE;
 // Single-sourced from conversation-key.ts so the tool/crash scope keys and the
 // tool_calls telemetry sentinel can never drift apart.
 const GLOBAL_TOOL_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
+
+/** #3717c G4: the context gauge belongs to one session generation (its DB row). */
+function contextGeneration(session: SessionManager | null | undefined): string {
+  const rowId = session?.getDbRowId() ?? null;
+  return rowId === null ? 'none' : `row:${rowId}`;
+}
 const GLOBAL_CRASH_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
 // (TOOL_FAILURE_ALERT_EXCERPT_CHARS moved to ./tool-update.ts with alertExcerpt.)
 
@@ -1035,12 +1041,23 @@ export class AgentRuntime implements Runtime {
     this.autoCompact.recordAutoCompactRapidRearm(scopeKey, lastSuccessAt, now);
   }
 
+  /**
+   * #3717c P4: the next-turn check measures the context gauge (last distinct
+   * request), never the summed turn usage passed as `summedInputTokens` (kept for
+   * the G8 log only). Unknown context records nothing.
+   */
   private recordAutoCompactNextTurnIfNeeded(
     scopeKey: string,
-    inputTokens: number | undefined,
+    summedInputTokens: number | undefined,
     consumeWhenNotOverThreshold = true,
+    generation?: string,
   ): void {
-    this.autoCompact.recordAutoCompactNextTurnIfNeeded(scopeKey, inputTokens, consumeWhenNotOverThreshold);
+    this.autoCompact.recordAutoCompactNextTurnIfNeeded(
+      scopeKey,
+      this.autoCompact.contextGauge.read(scopeKey, generation),
+      consumeWhenNotOverThreshold,
+      summedInputTokens,
+    );
   }
 
   /**
@@ -1173,7 +1190,18 @@ export class AgentRuntime implements Runtime {
     const lastCompactCombined = snapshot.lastCompactInputTokens + snapshot.lastCompactCacheReadTokens;
     const inputSinceCompact = Math.max(0, totalCombined - lastCompactCombined);
     const scopeKey = mapKey ?? GLOBAL_TOOL_SCOPE_KEY;
-    const overAutoCompactThreshold = inputSinceCompact >= this.autoCompactInputTokens;
+    // #3717c G6: the context gauge (last distinct request of this generation) is
+    // the convergence measure. Summed traffic since the compact is NOT context
+    // size: seven 76k requests sum past the threshold while the context is 76k.
+    // Known gauge -> it alone decides the verdict (P1), the rapid re-arm (P2) and
+    // the trigger (P3). Unknown gauge -> no verdict and no re-arm count; the
+    // cumulative trigger stays as the safety fallback so context still compacts.
+    const contextTokens = this.autoCompact.contextGauge.read(scopeKey, contextGeneration(session));
+    const contextKnown = contextTokens !== undefined;
+    const cumulativeOver = inputSinceCompact >= this.autoCompactInputTokens;
+    const overAutoCompactThreshold = contextKnown
+      ? contextTokens >= this.autoCompactInputTokens
+      : cumulativeOver;
 
     // #3523 layer 1 (iteration 1): record whether the LAST compaction converged.
     // This is the first eligibility evaluation after a compact_boundary (the
@@ -1187,7 +1215,8 @@ export class AgentRuntime implements Runtime {
     // rapid-rearm counter can never accumulate at the incident's ~30-minute cadence.
     // Skipped while a compact is in flight — that turn's tokens are not a verdict.
     const compactedAt = this.autoCompact.lastSuccessAt.get(scopeKey);
-    if (compactedAt !== undefined && !this.autoCompact.waiters.has(scopeKey)) {
+    // #3717c: only a known context gives a verdict; unknown leaves the streak as is.
+    if (contextKnown && compactedAt !== undefined && !this.autoCompact.waiters.has(scopeKey)) {
       this.autoCompact.recordCompactionOutcome(scopeKey, compactedAt, overAutoCompactThreshold);
     }
     if (!overAutoCompactThreshold) return false;
@@ -1225,7 +1254,9 @@ export class AgentRuntime implements Runtime {
       const alreadyRecordedForSuccess =
         this.autoCompact.rapidRearmRecordedForSuccessAt.get(scopeKey) === lastSuccessAt;
       if (withinRapidRearmWindow && !alreadyRecordedForSuccess) {
-        this.recordAutoCompactRapidRearm(scopeKey, lastSuccessAt, now);
+        // #3717c: a re-arm counts only when the known context is over; an unknown
+        // context inside the success cooldown records nothing and does not compact.
+        if (contextKnown) this.recordAutoCompactRapidRearm(scopeKey, lastSuccessAt, now);
         return false;
       }
       if (!withinRapidRearmWindow && !alreadyRecordedForSuccess) {
@@ -1312,8 +1343,10 @@ export class AgentRuntime implements Runtime {
     log.info({
       scopeKey,
       rowId,
+      contextTokens: contextTokens ?? null,
       inputSinceCompact,
       threshold: this.autoCompactInputTokens,
+      crossed: contextKnown ? 'context' : 'cumulative_fallback',
     }, 'auto compact triggered');
 
     compactLease = this.markSystemTurn(
@@ -6819,6 +6852,11 @@ export class AgentRuntime implements Runtime {
     event: Extract<AgentEvent, { type: 'result' }>,
     tracker: OperationTracker | null,
   ): void {
+    // #3717c: restricted results (every /compact result) bypass the event switch,
+    // so the context gauge's turn close runs here. Without it the compact_boundary
+    // seal outlives the compact: the next user turn's requests are dropped and the
+    // scope reads unknown until that turn's own result lifts the seal.
+    this.autoCompact.contextGauge.observeResult(scopeKey, contextGeneration(sourceSession));
     sourceSession.completeProviderTurn(event.providerTurnOwnerToken);
     tracker?.onTurnComplete();
     const rowId = sourceSession.getDbRowId();
@@ -7340,6 +7378,16 @@ export class AgentRuntime implements Runtime {
     switch (event.type) {
       case 'init':
         log.debug({ sessionId: event.sessionId }, 'session init');
+        this.autoCompact.contextGauge.observeInit(
+          mapKey ?? GLOBAL_TOOL_SCOPE_KEY, contextGeneration(session), event.sessionId,
+        );
+        break;
+
+      case 'request_usage':
+        // #3717c: one API request's context (not billing; billing stays on result usage).
+        this.autoCompact.contextGauge.observeRequest(
+          mapKey ?? GLOBAL_TOOL_SCOPE_KEY, contextGeneration(session), event.messageId, event.contextTokens,
+        );
         break;
 
       case 'assistant_text':
@@ -7469,6 +7517,7 @@ export class AgentRuntime implements Runtime {
         session?.tickWatchdog();
         tracker?.onAnyActivity();
         this.autoCompact.compactBoundaryScopes.add(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
+        this.autoCompact.contextGauge.observeCompactBoundary(mapKey ?? GLOBAL_TOOL_SCOPE_KEY, contextGeneration(session));
         if (this.isSilentCompact(mapKey)) {
           log.info({ chatJid: queue.targetChatJid }, 'silent agent compact boundary observed');
           break;
@@ -7531,6 +7580,7 @@ export class AgentRuntime implements Runtime {
         break;
 
       case 'result':
+        this.autoCompact.contextGauge.observeResult(mapKey ?? GLOBAL_TOOL_SCOPE_KEY, contextGeneration(session));
         if (scheduledScopeKey !== undefined && scheduledAgentJobDeliversFinalText(sessionProviderId(session))) {
           this.settleScheduledFinalAnswer(event, queue, scheduledScopeKey, isSystemResult);
         }
@@ -7559,7 +7609,7 @@ export class AgentRuntime implements Runtime {
           !isSystemResult &&
           this.pendingSystemResults.count(mapKey) === 0
         ) {
-          this.recordAutoCompactNextTurnIfNeeded(mapKey, event.inputTokens, false);
+          this.recordAutoCompactNextTurnIfNeeded(mapKey, event.inputTokens, false, contextGeneration(session));
         }
         if (event.inputTokens !== undefined || event.outputTokens !== undefined) {
           const rowId = session?.getDbRowId() ?? null;
@@ -12253,6 +12303,16 @@ export class AgentRuntime implements Runtime {
     switch (event.type) {
       case 'init':
         log.debug({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, sessionId: event.sessionId }, 'session init');
+        this.autoCompact.contextGauge.observeInit(
+          GLOBAL_TOOL_SCOPE_KEY, contextGeneration(sourceSession), event.sessionId,
+        );
+        break;
+
+      case 'request_usage':
+        // #3717c: one API request's context (not billing; billing stays on result usage).
+        this.autoCompact.contextGauge.observeRequest(
+          GLOBAL_TOOL_SCOPE_KEY, contextGeneration(sourceSession), event.messageId, event.contextTokens,
+        );
         break;
 
       case 'assistant_text':
@@ -12374,6 +12434,7 @@ export class AgentRuntime implements Runtime {
         this.session?.tickWatchdog();
         tracker?.onAnyActivity();
         this.autoCompact.compactBoundaryScopes.add(GLOBAL_TOOL_SCOPE_KEY);
+        this.autoCompact.contextGauge.observeCompactBoundary(GLOBAL_TOOL_SCOPE_KEY, contextGeneration(sourceSession));
         if (this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY)) {
           log.info({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid }, 'silent agent compact boundary observed');
           break;
@@ -12437,6 +12498,7 @@ export class AgentRuntime implements Runtime {
         break;
 
       case 'result':
+        this.autoCompact.contextGauge.observeResult(GLOBAL_TOOL_SCOPE_KEY, contextGeneration(sourceSession));
         if (scheduledScopeKey !== undefined && scheduledAgentJobDeliversFinalText(sessionProviderId(this.session))) {
           this.settleScheduledFinalAnswer(event, queue, scheduledScopeKey, consumedSystemTurn !== null);
         }
@@ -12455,7 +12517,9 @@ export class AgentRuntime implements Runtime {
           !this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY) &&
           this.pendingSystemResults.count(GLOBAL_TOOL_SCOPE_KEY) === 0
         ) {
-          this.recordAutoCompactNextTurnIfNeeded(GLOBAL_TOOL_SCOPE_KEY, event.inputTokens, false);
+          this.recordAutoCompactNextTurnIfNeeded(
+            GLOBAL_TOOL_SCOPE_KEY, event.inputTokens, false, contextGeneration(sourceSession),
+          );
         }
         if (event.inputTokens !== undefined || event.outputTokens !== undefined) {
           const rowId = this.session?.getDbRowId() ?? null;

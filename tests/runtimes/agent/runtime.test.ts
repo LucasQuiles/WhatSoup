@@ -650,6 +650,16 @@ async function emitTokenUsage(inputTokens: number): Promise<void> {
   await Promise.resolve();
 }
 
+// #3717c: one API request's context. The convergence guards (verdict, rapid re-arm,
+// next-turn count) measure only a KNOWN context, so a fixture that means "this turn's
+// context was N" emits it here; a result or token_usage figure alone is unknown context.
+let requestUsageSeq = 0;
+async function emitRequestUsage(contextTokens: number): Promise<void> {
+  requestUsageSeq += 1;
+  capturedOnEventRef.current?.({ type: 'request_usage', messageId: `req-${requestUsageSeq}`, contextTokens });
+  await Promise.resolve();
+}
+
 async function emitSuccessfulCompactResult(inputTokens = 0): Promise<void> {
   capturedOnEventRef.current?.({ type: 'compact_boundary' });
   await emitAgentResult(inputTokens);
@@ -1771,6 +1781,7 @@ describe('AgentRuntime', () => {
           messageId: `msg-escalation-${userTurn}`,
           content: `escalation turn ${userTurn}`,
         }));
+        await emitRequestUsage(inputTokens); // #3717c: the turn's known context
         await emitAgentResult(inputTokens);
       };
 
@@ -1844,6 +1855,7 @@ describe('AgentRuntime', () => {
           messageId: `msg-recovery-${userTurn}`,
           content: `recovery turn ${userTurn}`,
         }));
+        await emitRequestUsage(inputTokens); // #3717c: the turn's known context
         await emitAgentResult(inputTokens);
       };
 
@@ -1908,6 +1920,7 @@ describe('AgentRuntime', () => {
         messageId: 'msg-large-follow-up',
         content: 'large follow-up',
       }));
+      await emitRequestUsage(250); // #3717c: known context over threshold
       await emitAgentResult(250, 'ok');
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(1);
       expect(runtime.getHealthSnapshot().details.autoCompactIneffective).toBe(1);
@@ -1916,6 +1929,7 @@ describe('AgentRuntime', () => {
         messageId: 'msg-second-follow-up',
         content: 'second follow-up',
       }));
+      await emitRequestUsage(250); // still over: only the FIRST post-compact turn counts
       await emitAgentResult(250, 'still ok');
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(1);
     } finally {
@@ -1944,6 +1958,8 @@ describe('AgentRuntime', () => {
         messageId: 'msg-large-codex-follow-up',
         content: 'large codex follow-up',
       }));
+      // #3717c: token_usage is the measurement point; the value is the known context.
+      await emitRequestUsage(250);
       await emitTokenUsage(250);
       await emitAgentResultWithoutTokens('ok');
 
@@ -1979,6 +1995,7 @@ describe('AgentRuntime', () => {
         'manual_compact_silent',
         'test@s.whatsapp.net',
       );
+      await emitRequestUsage(250); // #3717c: a KNOWN over context, so the system-turn guard is what keeps this 0
       await emitTokenUsage(250);
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(0);
       expect(state.autoCompact.measureNextTurn.has(globalKey)).toBe(true);
@@ -1988,6 +2005,7 @@ describe('AgentRuntime', () => {
         messageId: 'msg-single-token-measurement',
         content: 'real user turn after compact',
       }));
+      await emitRequestUsage(250); // #3717c: the real user turn's known context
       await emitTokenUsage(250);
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(1);
       await emitAgentResultWithoutTokens('done');
@@ -2028,6 +2046,7 @@ describe('AgentRuntime', () => {
         'manual_compact_silent',
         chatJid,
       );
+      await emitRequestUsage(250); // #3717c: a KNOWN over context, so the system-turn guard is what keeps this 0
       await emitTokenUsage(250);
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(0);
       expect(state.autoCompact.measureNextTurn.has(chatJid)).toBe(true);
@@ -2043,6 +2062,7 @@ describe('AgentRuntime', () => {
         }),
         chatJid,
       );
+      await emitRequestUsage(250); // #3717c: the real user turn's known context
       await emitTokenUsage(250);
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(1);
       await emitAgentResultWithoutTokens('done');

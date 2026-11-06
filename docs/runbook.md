@@ -3274,7 +3274,9 @@ The default `autoCompactInputTokens` threshold is 150,000 tokens. This triggers 
 
 After a successful auto-compact, the runtime applies a 5-minute success cooldown. If the same scope becomes eligible again inside that rapid re-arm window, the runtime treats the compact as operationally ineffective and escalates the cooldown: 15 minutes, then 30 minutes, then 60 minutes capped. This bounds the slow-response spiral where a high-volume chat repeatedly spends turns compacting instead of replying.
 
-The next real user turn after a successful compact is measured separately. If that turn's own input exceeds `autoCompactInputTokens`, `runtime.agent.autoCompactNextTurnOverThreshold` increments. If it happens inside the rapid re-arm window, it also counts as the rapid re-arm for that compact cycle. If it happens later, it remains telemetry only; delayed eligibility is not the spiral condition.
+The trigger compares `autoCompactInputTokens` with the session's known context: the size of the last distinct API request, not the sum of a turn's requests. When the context is unknown (see `autoCompactInputTokens` in docs/configuration.md), it falls back to the cumulative input since the last compact; the `auto compact triggered` log shows which in `crossed` (`context` or `cumulative_fallback`).
+
+The next real user turn after a successful compact is measured separately. If that turn's known context exceeds `autoCompactInputTokens`, `runtime.agent.autoCompactNextTurnOverThreshold` increments. An unknown context records nothing. If it happens inside the rapid re-arm window, it also counts as the rapid re-arm for that compact cycle. If it happens later, it remains telemetry only; delayed eligibility is not the spiral condition.
 
 The three counters `autoCompactIneffective`,
 `autoCompactConsecutiveRapidRearmsMax`, and
@@ -3308,7 +3310,7 @@ rg "prompt too long" "$LOG_DIR"
 rg "auto compact triggered|auto compact timed out" "$LOG_DIR"
 
 # Check bounded-spiral detections
-rg "auto compact rapid re-arm detected|auto compact next turn input exceeded threshold" "$LOG_DIR"
+rg "auto compact rapid re-arm detected|auto compact next turn (context|input) exceeded threshold" "$LOG_DIR"
 
 # Check current state followed by lifetime counters
 curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:<port>/health | python3 -c "import json,sys; a=json.load(sys.stdin)['runtime']['agent']; print(a['autoCompactState'], a['autoCompactActiveBackoffScopes'], a['autoCompactWorstCurrentBackoffTier'], a['autoCompactIneffective'], a['autoCompactConsecutiveRapidRearmsMax'], a['autoCompactNextTurnOverThreshold'])"
