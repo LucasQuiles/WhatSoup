@@ -2408,6 +2408,10 @@ private async runUndispatchedRuntimeTurnFinalization(
           === context.identity.inboundSeq,
     ...(scopeRef === undefined ? {} : { scopeRef }),
   });
+  // Only the published singleton owns global activity. A rejected shared
+  // follower must not clear the active predecessor's presentation or sequence.
+  const ownsPendingSingleton = scopeRef === undefined
+    && this.host.pendingSingletonRuntimeTurnContext === context;
   const result = finalizeRuntimeTurn({
     instanceName: this.host.instanceName,
     durability: this.host.durability,
@@ -2420,7 +2424,7 @@ private async runUndispatchedRuntimeTurnFinalization(
   if (result.kind === 'reclaimed_by_sweep') {
     // The sweep owns the durable terminal: retire the in-memory state only.
     onOwnershipProven?.();
-    if (scopeRef !== undefined) {
+    if (scopeRef !== undefined || ownsPendingSingleton) {
       await this.applyRuntimeTurnPostEffects(result, context, postEffects);
     } else {
       this.host.replyGuarantee?.disarm(context.identity.inboundSeq ?? undefined);
@@ -2444,7 +2448,7 @@ private async runUndispatchedRuntimeTurnFinalization(
       return result;
     }
     if (result.kind === 'durable_failure_incident') {
-      if (scopeRef === undefined) {
+      if (scopeRef === undefined && !ownsPendingSingleton) {
         this.host.replyGuarantee?.disarm(context.identity.inboundSeq ?? undefined);
       } else {
         await this.applyRuntimeTurnPostEffects(result, context, postEffects);
@@ -2458,7 +2462,7 @@ private async runUndispatchedRuntimeTurnFinalization(
     this.host.runtimeTurnSupervisor.markDegraded(context);
     throw new Error(`Runtime turn terminal proof did not authorize FIFO release for ${scopeKey}`);
   }
-  if (scopeRef !== undefined) {
+  if (scopeRef !== undefined || ownsPendingSingleton) {
     await this.applyRuntimeTurnPostEffects(result, context, postEffects);
   } else if (result.effectiveReplyGuaranteeDisarmed) {
     this.host.replyGuarantee?.disarm(context.identity.inboundSeq ?? undefined);
@@ -2540,6 +2544,15 @@ async waitForUndispatchedRuntimeCrash(context: RuntimeTurnContext): Promise<void
 
 finalizeMessageProcessingFailure(inboundSeq: number | undefined): boolean {
   if (inboundSeq === undefined) return false;
+  const pendingSingleton = this.host.pendingSingletonRuntimeTurnContext;
+  if (
+    pendingSingleton?.identity.inboundSeq === inboundSeq
+    && this.isUndispatchedRuntimeTurnCancelled(pendingSingleton)
+  ) {
+    // A rejected cancellation barrier still has its original retry owner.
+    // The outer handler must not replace it with a legacy failed-row write.
+    return true;
+  }
   let mapKey: string | undefined;
   let context = this.host.currentRuntimeTurnContext?.identity.inboundSeq === inboundSeq
     ? this.host.currentRuntimeTurnContext
