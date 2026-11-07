@@ -2373,6 +2373,8 @@ async finalizeUndispatchedRuntimeTurn(
   attemptOutcome: AttemptOutcome = { kind: 'admission_rejected' },
   onOwnershipProven?: () => void,
 ): Promise<FinalizeRuntimeTurnResult> {
+  const active = this.activeFinalizations.get(context.identity.logicalTurnId);
+  if (active) return active;
   const existing = this.undispatchedTerminalFinalizations.get(context);
   if (existing) {
     const result = await existing.finalization;
@@ -2519,6 +2521,9 @@ terminalizeUndispatchedRuntimeCrash(
   operatorCancellation?: typeof OPERATOR_CANCELLATION_ATTEMPT_OUTCOME,
 ): Promise<FinalizeRuntimeTurnResult> {
   const turnId = context.identity.logicalTurnId;
+  // A published result can still own teardown after its FIFO context is shifted.
+  const active = this.activeFinalizations.get(turnId);
+  if (active) return active;
   const interruption = operatorCancellation ? 'operator cancellation' : 'crash';
   this.cancelledUndispatchedTurnIds.add(turnId);
   const initialFinalization = this.finalizeUndispatchedRuntimeTurn(
