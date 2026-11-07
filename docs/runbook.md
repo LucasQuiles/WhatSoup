@@ -3114,6 +3114,16 @@ machine-readable disposition registry for sources that participate in fault clas
 | `remote-claim-failed` | `deploy/scripts/bot-errors-collector.py` | Collector claim/lease state and target reachability |
 | `stale-autoclose` | `deploy/scripts/bot-errors-dispatcher.py` | Incident ledger transition and explicit source clear evidence |
 
+The reply-guarantee observer requires an **echoed terminal** outbound operation
+to cover a continuity mark without a terminal record or recovery job. A status
+notice or an uncertain send cannot hide the obligation. This preserves legacy
+terminal-only completion while exposing previously hidden debt. Before rollout,
+compare marked rows by terminal/recovery ownership and echoed-terminal coverage
+in each target database's normal read-only view; the increase is historical debt,
+not evidence of a new runtime outage or permission to replay. A consumed mark
+alone does not clear the observer. Preserve the database and WAL and inspect
+the existing ownership chain before any separately authorized repair.
+
 ### Who owns a stale `processing` inbound
 
 `scripts/inbound-ownership-snapshot.ts` (#3560) answers, per row, who owns every inbound that has sat

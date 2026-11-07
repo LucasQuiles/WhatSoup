@@ -79,6 +79,14 @@ RGP is decomposed into independently reviewable layers, all now shipped:
    `inconclusive` without replaying or modifying durable rows. Historical failed
    terminals and continuity candidates are recovery debt with no runtime-health
    impact; only stale open inbound or recovery work is an operational breach.
+   A continuity mark is covered by a terminal record, a recovery job, or an
+   echoed terminal outbound operation linked to that same inbound sequence.
+   Status notices, non-terminal echoes and uncertain terminal sends do not
+   resolve it. Terminal-only echo coverage preserves legacy delivery paths
+   that complete an inbound without creating a terminal record. The observer
+   evaluates this evidence independently of `continuity_candidate_consumed_at`;
+   a consumed stamp alone is not proof of settlement. Failed terminal records
+   remain subject to the separate failed-terminal debt check.
    A turn an operator cancelled with `/stop` (`operator_cancelled`) is a
    requested outcome, not debt, so its failed terminal is not counted.
    A continuity candidate whose inbound is a synthetic scheduled-job turn
