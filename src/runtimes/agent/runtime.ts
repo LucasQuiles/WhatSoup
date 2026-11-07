@@ -353,14 +353,17 @@ import {
 } from './auto-respawn-policy.ts';
 import type { AgentRuntimeOptions, SandboxPolicy, SessionScope } from './runtime-options.ts';
 export type { AgentRuntimeOptions, SandboxPolicy, SessionScope } from './runtime-options.ts';
+import type { ProviderProcessIsolationConfig } from './provider-process-isolation.ts';
+import { InboundTurnCompletionTracker } from './inbound-turn-completion.ts';
+import { extractUsageLimitResetTime } from './usage-limit-reset-time.ts';
 import {
   deriveModelUsable,
-  MODEL_USABILITY_FRESHNESS_MS,
   type RuntimePrimaryModelUsability,
   type RuntimeTurnCapability,
 } from './model-usability.ts';
 export { deriveModelUsable } from './model-usability.ts';
 export type { RuntimePrimaryModelUsability, RuntimeTurnCapability } from './model-usability.ts';
+export { extractUsageLimitResetTime } from './usage-limit-reset-time.ts';
 import {
   logAmbientProviderFailureOutcome,
   suppressStreamedProviderFailure as gateStreamedProviderFailure,
@@ -373,11 +376,11 @@ import { probePrimaryModelUsability, type PrimaryProbeServiceContext } from './p
 import {
   buildRuntimePrimaryProbeServiceContext,
   createRuntimePrimaryProbeAdapters,
-  expectedProbeDeadlineFromDueMs,
-  expectedProbeDeadlineMs,
+  resolveModelUsabilityFreshnessMs,
   periodicProbeBackoffMultiple,
   probeRuntimePrimaryProviderRecovered,
 } from './primary-readiness-probe.ts';
+export { resolveModelUsabilityFreshnessMs } from './primary-readiness-probe.ts';
 import {
   MessageHandlerDrainTimeoutError,
   drainMessageHandlersForShutdown,
@@ -458,31 +461,6 @@ class AgentCommandRuntimeError extends Error {
   }
 }
 
-/**
- * Freshness window for `deriveModelUsable`. While the periodic primary-readiness
- * probe is armed the evidence can legitimately be as old as the scheduler's
- * next fire (interval × backoff, plus the full jitter band and a grace), so the
- * window follows the scheduler via `expectedProbeDeadlineMs`; a flat 30min
- * window declared it stale for up to 3 minutes every cycle and for the back
- * half of every backoff>=2 cycle (the canary `turn_capability_evidence_stale`
- * flap). With no periodic probe armed the flat window is preserved unchanged.
- * Pure + exported for direct unit testing.
- */
-export function resolveModelUsabilityFreshnessMs(
-  periodicProbeExpected: boolean,
-  backoffMultiple: number,
-  schedule: { nextProbeDueAt: number | null; checkedAt: number | null } | null = null,
-): number {
-  if (!periodicProbeExpected) return MODEL_USABILITY_FRESHNESS_MS;
-  // The armed timer's due instant is the source of truth when known: cadence
-  // and window can then never diverge (a manual probe that resets the backoff
-  // re-arms the timer and moves this instant with it). The scheduler formula
-  // is the fallback only while no due instant has been recorded.
-  if (schedule !== null && schedule.nextProbeDueAt !== null && schedule.checkedAt !== null) {
-    return expectedProbeDeadlineFromDueMs(schedule.nextProbeDueAt, schedule.checkedAt);
-  }
-  return expectedProbeDeadlineMs(backoffMultiple);
-}
 // ---------------------------------------------------------------------------
 // AskUserQuestion → Poll formatting / resolution helpers
 //
@@ -568,80 +546,6 @@ import { errorMessage } from '../../lib/error-message.ts';
 
 
 
-/**
- * Extract the usage-limit reset time from a provider usage-limit message.
- *
- * Claude usage-limit notices often name when the cap resets — e.g.
- *   "resets at 3pm", "resets at 15:00", "try again at 9:30am",
- *   "will be available at 11pm", or a raw Unix-epoch seconds value.
- * The fallback state machine uses this to schedule auto-revert to the primary
- * provider. Parsing is conservative: anything it cannot confidently interpret
- * yields `null`, and the caller then applies a default rolling-window estimate.
- *
- * Returned times are always in the future relative to `now` — a clock time like
- * "3pm" that has already passed today is rolled forward to tomorrow.
- *
- * @param text the usage-limit message text
- * @param now  injectable clock for deterministic tests (defaults to Date.now)
- * @returns the reset Date, or null when unparseable
- */
-export function extractUsageLimitResetTime(text: string, now: Date = new Date()): Date | null {
-  if (typeof text !== 'string' || text.length === 0) return null;
-  const lower = text.toLowerCase();
-
-  // 1) Clock time after a reset cue: "resets at 3pm", "available at 15:00",
-  //    "come back at 9:30am", "try again at 11 pm".
-  //    Parsed FIRST so an explicit clock cue always wins over an incidental
-  //    long number elsewhere in the message (e.g. an order/quota figure).
-  //    The trailing (?!\d) prevents the clock hour from matching the leading
-  //    digits of a longer number (e.g. "5551234567").
-  const cue = /(?:reset[s]?|available|come\s+back|try\s+again|back)\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?(?!\d)\s*(am|pm)?/i;
-  const m = lower.match(cue);
-  if (m) {
-    let hour = Number.parseInt(m[1]!, 10);
-    const minute = m[2] ? Number.parseInt(m[2], 10) : 0;
-    const meridiem = m[3];
-    if (
-      Number.isFinite(hour) &&
-      Number.isFinite(minute) &&
-      hour >= 0 &&
-      minute >= 0 &&
-      minute < 60 &&
-      (meridiem ? hour >= 1 && hour <= 12 : hour <= 23)
-    ) {
-      if (meridiem === 'pm' && hour < 12) hour += 12;
-      if (meridiem === 'am' && hour === 12) hour = 0;
-      const candidate = new Date(now);
-      candidate.setHours(hour, minute, 0, 0);
-      // A clock time already past today rolls forward to tomorrow.
-      if (candidate.getTime() <= now.getTime()) {
-        candidate.setDate(candidate.getDate() + 1);
-      }
-      return candidate;
-    }
-  }
-
-  // 2) Raw Unix epoch (seconds, 10 digits) — e.g. "resets at 1771000000".
-  //    Milliseconds (13 digits) are also accepted. Cue-anchored: the epoch must
-  //    directly follow a reset cue, so an incidental long number (order/quota
-  //    figure) is never mistaken for a reset time.
-  const epochMatch = lower.match(
-    /(?:reset[s]?|available|try\s+again|come\s+back|back)\D{0,12}(1[5-9]\d{8}|[2-9]\d{9})(\d{3})?\b/,
-  );
-  if (epochMatch) {
-    const seconds = epochMatch[1]!;
-    const millis = epochMatch[2];
-    const epochMs = millis
-      ? Number.parseInt(seconds + millis, 10)
-      : Number.parseInt(seconds, 10) * 1000;
-    if (Number.isFinite(epochMs) && epochMs > now.getTime()) {
-      return new Date(epochMs);
-    }
-  }
-
-  return null;
-}
-
 // `isPromptTooLongMessage` lives in `./failure-taxonomy.ts` (imported + re-exported above).
 
 /**
@@ -709,6 +613,7 @@ export class AgentRuntime implements Runtime {
   private pluginDirs: string[];
   private readonly enabledPlugins: Record<string, boolean> | undefined;
   private readonly allowM365Mutations: boolean | undefined;
+  private readonly providerProcessIsolation: ProviderProcessIsolationConfig | undefined;
   private readonly m365MutationPolicy: M365MutationPolicy | undefined;
   private m365SettingsPolicyReady = false;
   private readonly autoCompactInputTokens: number | undefined;
@@ -2137,6 +2042,8 @@ export class AgentRuntime implements Runtime {
   /** Exact-source teardowns for terminal results that could not be safely attributed. */
   private readonly rejectedTerminalTeardowns = new WeakMap<SessionManager, Promise<boolean>>();
   private readonly activeMessageHandlers = new Set<Promise<void>>();
+  /** Ingest-owned leases settle only when the exact admitted turn is terminal. */
+  private readonly inboundTurnCompletions = new InboundTurnCompletionTracker();
   private readonly routeRecycleCommandWork = this.routeRecycleLifecycle.commandWork;
   private readonly routeRecyclePublicationWork = this.routeRecycleLifecycle.publicationWork;
   private shutdownRequested = false;
@@ -2747,6 +2654,7 @@ export class AgentRuntime implements Runtime {
     this.pluginDirs = options?.pluginDirs ?? [];
     this.enabledPlugins = options?.enabledPlugins;
     this.allowM365Mutations = options?.allowM365Mutations;
+    this.providerProcessIsolation = options?.providerProcessIsolation;
     this.autoCompactInputTokens =
       typeof options?.autoCompactInputTokens === 'number' &&
       Number.isFinite(options.autoCompactInputTokens) &&
@@ -2818,9 +2726,9 @@ export class AgentRuntime implements Runtime {
     const turnQueue = new TurnQueue({
       maxDepth: config.agentMaxQueueDepth,
       onReject: (turn, reason) => {
-        this.finalizeRejectedRuntimeTurn(turn, reason);
         log.warn({ chatJid: turn.chatJid, senderJid: turn.senderJid, reason },
           'turn rejected — agent queue full');
+        return this.finalizeRejectedRuntimeTurn(turn, reason);
       },
       onProcessorError: (turn, error) => this.finalizeSharedProcessorError(turn, error),
     });
@@ -4779,13 +4687,23 @@ export class AgentRuntime implements Runtime {
     }
   }
 
+  beginInboundTurnCompletion(messageId: string): void {
+    this.inboundTurnCompletions.begin(messageId);
+  }
+
+  async awaitInboundTurnCompletion(messageId: string): Promise<void> {
+    return this.inboundTurnCompletions.await(messageId);
+  }
+
   handleMessage(msg: IncomingMessage): Promise<void> {
     try {
       this.db.assertWritableCompatibility();
     } catch (err) {
+      this.inboundTurnCompletions.settle(msg.messageId);
       return Promise.reject(err);
     }
     if (this.shutdownRequested) {
+      this.inboundTurnCompletions.settle(msg.messageId);
       return Promise.reject(new Error('Agent runtime is shutting down; new turns are not accepted'));
     }
     const initialClassification = msg.content === null
@@ -4808,6 +4726,7 @@ export class AgentRuntime implements Runtime {
     }
     void processing.finally(() => {
       this.activeMessageHandlers.delete(processing);
+      this.inboundTurnCompletions.settleUnadopted(msg.messageId);
       if (tracksRouteRecycle) {
         this.routeRecycleLifecycle.untrackRouteCommand(processing);
       }
@@ -4939,9 +4858,17 @@ export class AgentRuntime implements Runtime {
       log.warn({ err, messageId: msg.messageId }, 'inline extractor hook failed (continuing)');
     }
 
+    // Keep pre-admission work inside the ingest limit. Single scope has no
+    // TurnQueue, so its provider boundary releases admission separately from
+    // the exact queued work that still owns terminal completion.
+    const finishAdmission = this.inboundTurnCompletions.holdForAdmission(msg.messageId);
+    let onAdmitted: (() => void) | undefined;
+    const admitted = finishAdmission && this.sessionScope === 'single'
+      ? new Promise<void>((resolve) => { onAdmitted = resolve; })
+      : undefined;
     const queuedWork = this.turnChain
-      .then(() => this._handleMessageInner(msg))
-      .catch((err) => {
+      .then(() => this._handleMessageInner(msg, onAdmitted))
+      .catch(async (err) => {
         // #3374 ask 2 (single scope): a wedged-lane release is a DESIGNED
         // settlement of a turn the W2 sweep already terminalized, not a
         // processing failure. It reaches this catch because single mode has no
@@ -4965,8 +4892,15 @@ export class AgentRuntime implements Runtime {
         }
         // Admitted turns have one terminal owner; pre-admission failures retain
         // the legacy inbound owner so they cannot stay stuck in processing.
+        const failedTurnCompletion = this.currentRuntimeTurnCompletion;
         if (this.runtimeTurnCoordinator.finalizeMessageProcessingFailure(msg.inboundSeq)) {
-          // Coordinator owns terminal persistence and reply-guarantee disarm.
+          // A following single turn must not replace the context while the
+          // coordinator still owns terminal persistence and post-effects.
+          if (
+            this.sessionScope === 'single'
+            && failedTurnCompletion
+            && failedTurnCompletion.context.identity.inboundSeq === msg.inboundSeq
+          ) await failedTurnCompletion.promise;
         } else if (!wedgedReclaim && this.durability && msg.inboundSeq !== undefined) {
           this.markRuntimeFaultContinuityCandidate(msg.inboundSeq);
           this.replyGuarantee?.disarm(msg.inboundSeq);
@@ -4977,7 +4911,8 @@ export class AgentRuntime implements Runtime {
         if (!wedgedReclaim && msg.isSyntheticJob !== true) {
           this.sendDirect(msg.chatJid, 'Something went wrong processing that message. Try again?', 'status');
         }
-      });
+      })
+      .then(() => finishAdmission?.());
     const recycleScopeKey = this.sessionScope === 'per_chat'
       ? resolveAgentTurnMapKey(
           this.resolvePerChatMapKey(msg.chatJid),
@@ -4986,10 +4921,12 @@ export class AgentRuntime implements Runtime {
       : GLOBAL_TOOL_SCOPE_KEY;
     this.routeRecycleLifecycle.trackPublication(queuedWork, recycleScopeKey);
     this.turnChain = queuedWork;
-    if (awaitQueuedRouteCommand) await queuedWork;
+    if (awaitQueuedRouteCommand || finishAdmission) {
+      await (admitted && !awaitQueuedRouteCommand ? Promise.race([queuedWork, admitted]) : queuedWork);
+    }
   }
 
-  private async _handleMessageInner(msg: IncomingMessage): Promise<void> {
+  private async _handleMessageInner(msg: IncomingMessage, onAdmitted?: () => void): Promise<void> {
     let content = msg.content;
     const chatJid = msg.chatJid;
     // The key the inbound row was journaled under. A caller that journaled the
@@ -5523,6 +5460,7 @@ export class AgentRuntime implements Runtime {
         session: this.session!,
         toolScopeKey: GLOBAL_TOOL_SCOPE_KEY,
       });
+      const onSettled = this.inboundTurnCompletions.bind(msg.messageId);
       this.runtimeTurnCoordinator.enqueueSharedRuntimeTurn({
         sourceMessageId: msg.messageId,
         receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
@@ -5537,6 +5475,7 @@ export class AgentRuntime implements Runtime {
         purpose: msg.isSyntheticJob === true ? 'scheduled-agent-job' : undefined,
         ...(runtimeContext ? { runtimeContext } : {}),
         inboundSeq: msg.inboundSeq,
+        ...(onSettled === undefined ? {} : { onSettled }),
       });
     } else if (this.sessionScope === 'per_chat') {
       const mapKey = perChatMapKey!;
@@ -5544,7 +5483,11 @@ export class AgentRuntime implements Runtime {
       // Image coalescing: batch rapid image sends into a single turn.
       // For coalesced images, defer seq/state setup until flush time — only
       // the representative turn gets a seq entry, preventing desync.
-      if (msg.contentType === 'image') {
+      // A coalesced batch has several authenticated inbound contexts but only
+      // one later provider turn. Under transport authority, keep each media
+      // event as an exact queued turn so its reply grant and lease cannot be
+      // inherited from whichever image happened to arm the coalesce timer.
+      if (msg.contentType === 'image' && !config.transportAuthority?.enabled) {
         await this.coalesceImageTurn(mapKey, chatJid, text, msg);
       } else {
         // Flush any pending image buffer first (text message after images = done uploading).
@@ -5573,6 +5516,7 @@ export class AgentRuntime implements Runtime {
           mapKey,
         });
 
+        const onSettled = this.inboundTurnCompletions.bind(msg.messageId);
         this.enqueuePerChatRuntimeTurn(mapKey, {
           sourceMessageId: msg.messageId,
           receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
@@ -5587,6 +5531,7 @@ export class AgentRuntime implements Runtime {
           purpose: msg.isSyntheticJob === true ? 'scheduled-agent-job' : undefined,
           ...(runtimeContext ? { runtimeContext } : {}),
           inboundSeq: msg.inboundSeq,
+          ...(onSettled === undefined ? {} : { onSettled }),
         });
       }
     } else {
@@ -5611,7 +5556,7 @@ export class AgentRuntime implements Runtime {
         contentType: msg.contentType,
         isGroup: msg.isGroup,
         ...(msg.isGroup ? { groupName: chatJid } : {}),
-      }, msg.inboundSeq, msg.isSyntheticJob === true ? 'scheduled-agent-job' : undefined);
+      }, msg.inboundSeq, msg.isSyntheticJob === true ? 'scheduled-agent-job' : undefined, onAdmitted);
     }
   }
 
@@ -5629,8 +5574,8 @@ export class AgentRuntime implements Runtime {
     return admitted;
   }
 
-  private finalizeRejectedRuntimeTurn(turn: QueuedTurn, reason?: TurnRejectReason): void {
-    this.runtimeTurnCoordinator.finalizeRejectedRuntimeTurn(turn, reason);
+  private finalizeRejectedRuntimeTurn(turn: QueuedTurn, reason?: TurnRejectReason): Promise<void> {
+    return this.runtimeTurnCoordinator.finalizeRejectedRuntimeTurn(turn, reason);
   }
 
   private finalizePerChatProcessorError(
@@ -6112,6 +6057,7 @@ export class AgentRuntime implements Runtime {
     source?: RuntimeTurnSourceSnapshot,
     inboundSeq?: number,
     purpose?: SessionContext['purpose'],
+    onAdmitted?: () => void,
   ): Promise<void> {
     // Clear post-turn gate for shared session scope
     this.postTurnGate.delete(GLOBAL_TOOL_SCOPE_KEY);
@@ -6158,6 +6104,18 @@ export class AgentRuntime implements Runtime {
       this.pendingSingletonRuntimeTurnContext = context;
     }
     let legacyOwner: LegacyProviderTurnOwner | null = null;
+    let retainUndispatchedContext = false;
+    const finalizeUndispatched = async (pending: RuntimeTurnContext): Promise<void> => {
+      const settleInbound = source && this.inboundTurnCompletions.bind(source.sourceMessageId);
+      retainUndispatchedContext = true;
+      if (!this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(pending)) {
+        this.runtimeTurnCoordinator.terminalizeUndispatchedRuntimeCrash(pending);
+      }
+      await this.runtimeTurnCoordinator.waitForUndispatchedRuntimeCrash(pending);
+      this.runtimeTurnCoordinator.clearUndispatchedRuntimeTurnCancellation(pending);
+      retainUndispatchedContext = false;
+      settleInbound?.();
+    };
     try {
       await this.sendTurnToSession(this.session!, chatJid, text, undefined, actorJid, () => {
         if (!context) {
@@ -6166,31 +6124,50 @@ export class AgentRuntime implements Runtime {
             GLOBAL_TOOL_SCOPE_KEY,
             chatJid,
           );
+          onAdmitted?.();
           return;
         }
         this.runtimeTurnCoordinator.beginRuntimeTurnEvidence(this.queue!, context);
         this.currentRuntimeTurnContext = context;
         this.pendingSingletonRuntimeTurnContext = null;
-        completion.value = this.runtimeTurnCoordinator.createRuntimeTurnCompletion(context);
+        const turnCompletion = this.runtimeTurnCoordinator.createRuntimeTurnCompletion(context);
+        const settleInbound = source && this.inboundTurnCompletions.bind(source.sourceMessageId);
+        completion.value = {
+          ...turnCompletion,
+          resolve: () => {
+            turnCompletion.resolve();
+            // The coordinator calls resolve only after terminal post-effects.
+            settleInbound?.();
+          },
+        };
         this.currentRuntimeTurnCompletion = completion.value;
+        onAdmitted?.();
       }, undefined, () => (
         !this.shutdownRequested
         && (context === null || !this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context))
       ), context ?? undefined, 'live', purpose);
       if (context && completion.value === null) {
-        if (!this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context)) {
-          this.runtimeTurnCoordinator.terminalizeUndispatchedRuntimeCrash(context);
-        }
+        await finalizeUndispatched(context);
         return;
       }
       if (completion.value !== null) await completion.value.promise;
     } catch (err) {
+      if (context && completion.value === null && !retainUndispatchedContext) {
+        log.error({ err, chatJid, inboundSeq }, 'single turn failed before provider admission');
+        await finalizeUndispatched(context);
+        // This context now has a proven terminal owner; do not fall through to
+        // the outer handler's legacy failed-row write.
+        if (purpose !== 'scheduled-agent-job') {
+          this.sendDirect(chatJid, 'Something went wrong processing that message. Try again?', 'status');
+        }
+        return;
+      }
       if (legacyOwner) {
         this.clearLegacyProviderTurn(GLOBAL_TOOL_SCOPE_KEY, legacyOwner);
       }
       throw err;
     } finally {
-      if (this.pendingSingletonRuntimeTurnContext === context) {
+      if (!retainUndispatchedContext && this.pendingSingletonRuntimeTurnContext === context) {
         this.pendingSingletonRuntimeTurnContext = null;
       }
     }
@@ -10660,6 +10637,7 @@ export class AgentRuntime implements Runtime {
       routePolicy: route ?? undefined,
       egressProxyPort: this.egressProxy?.port,
       providerExecutionGate: this.providerExecutionGate,
+      providerProcessIsolation: this.providerProcessIsolation,
       providerMcpConfigArgs: this.globalMcpSocketPath
         ? buildProviderMcpConfigArgs(
             sessionProvider,

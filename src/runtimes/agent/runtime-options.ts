@@ -2,6 +2,7 @@
 import type { TurnRecoveryCatchupReconcileOptions } from '../../core/turn-recovery-catchup-config.ts';
 import type { fetchAnthropicModelIdsWithStatus } from '../../lib/model-advisor.ts';
 import type { AccountIdentityVerifyFn } from './account-identity-verifier.ts';
+import type { ProviderProcessIsolationConfig } from './provider-process-isolation.ts';
 import type { listModelCatalog } from './providers/binary-preflight.ts';
 import type { ServiceRestarter } from './self-restart.ts';
 import type { M365BridgeBinding } from '../../core/m365-bridge-policy.ts';
@@ -50,6 +51,8 @@ export interface AgentRuntimeOptions {
   enabledPlugins?: Record<string, boolean>;
   /** Required alongside m365Bridge before the runtime can grant M365 mutation access. */
   allowM365Mutations?: boolean;
+  /** Required Linux launcher contract for every CLI provider child, including fallback sessions. */
+  providerProcessIsolation?: ProviderProcessIsolationConfig;
   /** Account-bound Agent365 bridge required for the M365 mutation exception. */
   m365Bridge?: M365BridgeBinding;
   /** Automatically run a silent /compact after this many input tokens since the last compact. */

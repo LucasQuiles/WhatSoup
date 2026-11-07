@@ -88,6 +88,119 @@ describe('validateInstanceConfig — transport field', () => {
   });
 });
 
+describe('validateInstanceConfig — transportAuthority pilot', () => {
+  const authority = {
+    enabled: true,
+    baseUrl: 'https://authority.example',
+    accountId: 'pilot-account',
+    credentialFile: '/var/db/whatsoup/authority.bearer',
+    serviceUid: 501,
+    workerUid: 502,
+  };
+  const isolation = {
+    controllerUid: 501,
+    controllerGid: 20,
+    workerUid: 502,
+    workerGid: 502,
+    launcherPath: '/usr/local/libexec/whatsoup-agent-isolation-launcher',
+    launcherSha256: 'a'.repeat(64),
+    policyPath: '/etc/whatsoup/agent-isolation.policy',
+    policySha256: 'b'.repeat(64),
+    homeDir: '/var/lib/whatsoup-agent',
+    configHome: '/var/lib/whatsoup-agent/.config',
+    dataHome: '/var/lib/whatsoup-agent/.local/share',
+    protectedPaths: ['/var/db/whatsoup/authority.bearer'],
+    readinessMode: 'disabled',
+  };
+
+  it('blocks authority activation until the launcher has a kernel-enforced egress boundary', () => {
+    expect(validateInstanceConfig(baseRaw({
+      transport: 'baileys',
+      transportAuthority: authority,
+      agentOptions: { sessionScope: 'single', providerProcessIsolation: isolation },
+    }), ctx())).toMatchObject({ field: 'agentOptions.providerProcessIsolation' });
+  });
+
+  it('requires a matching process-isolation contract before authority activation', () => {
+    expect(validateInstanceConfig(baseRaw({ transport: 'baileys', transportAuthority: authority }), ctx()))
+      .toMatchObject({ field: 'agentOptions.providerProcessIsolation' });
+  });
+
+  it('refuses managed API primary and fallback routes before they can bypass the launcher', () => {
+    expect(validateInstanceConfig(baseRaw({
+      transport: 'baileys',
+      transportAuthority: authority,
+      agentOptions: { sessionScope: 'single', provider: 'openai-api', providerProcessIsolation: isolation },
+    }), ctx())).toMatchObject({ field: 'agentOptions.provider' });
+    expect(validateInstanceConfig(baseRaw({
+      transport: 'baileys',
+      transportAuthority: authority,
+      agentOptions: {
+        sessionScope: 'single',
+        providerProcessIsolation: isolation,
+        fallbacks: [{ provider: 'anthropic-api' }],
+      },
+    }), ctx())).toMatchObject({ field: 'agentOptions.fallbacks[0].provider' });
+  });
+
+  it('rejects incomplete or non-Baileys enabled authority before CREATE persists it', () => {
+    expect(validateInstanceConfig(baseRaw({ transportAuthority: { enabled: true } }), ctx()))
+      .toMatchObject({ field: 'transportAuthority.baseUrl' });
+    expect(validateInstanceConfig(baseRaw({ transport: 'signal', transportAuthority: authority }), ctx()))
+      .toMatchObject({ field: 'transportAuthority' });
+  });
+
+  it.each([
+    'http://authority.example',
+    'http://localhost:8080',
+    'http://127.1:8080',
+    'https://operator:secret@authority.example',
+    'https://authority.example/?unexpected=query',
+    'https://authority.example/#unexpected-fragment',
+  ])('rejects unsafe authority URL %s before an instance can be persisted', (baseUrl) => {
+    expect(validateInstanceConfig(baseRaw({
+      transport: 'baileys',
+      transportAuthority: { ...authority, baseUrl },
+      agentOptions: { sessionScope: 'single', providerProcessIsolation: isolation },
+    }), ctx())).toMatchObject({ field: 'transportAuthority.baseUrl' });
+  });
+
+  it.each([
+    'https://authority.example',
+    'http://127.0.0.1:8080',
+    'http://[::1]:8080',
+  ])('permits HTTPS and literal-loopback authority URL %s through URL validation', (baseUrl) => {
+    expect(validateInstanceConfig(baseRaw({
+      transport: 'baileys',
+      transportAuthority: { ...authority, baseUrl },
+      agentOptions: { sessionScope: 'single', providerProcessIsolation: isolation },
+    }), ctx())).toMatchObject({ field: 'agentOptions.providerProcessIsolation' });
+  });
+
+  it('rejects root as a provider isolation identity', () => {
+    expect(validateInstanceConfig(baseRaw({
+      agentOptions: {
+        sessionScope: 'single',
+        providerProcessIsolation: { ...isolation, workerUid: 0 },
+      },
+    }), ctx())).toMatchObject({
+      field: 'agentOptions.providerProcessIsolation.workerUid',
+      message: 'agentOptions.providerProcessIsolation.workerUid must be a positive non-root integer',
+    });
+  });
+
+  it.each(['serviceUid', 'workerUid'] as const)('rejects root as authority %s', (field) => {
+    expect(validateInstanceConfig(baseRaw({
+      transport: 'baileys',
+      transportAuthority: { ...authority, [field]: 0 },
+      agentOptions: { sessionScope: 'single', providerProcessIsolation: isolation },
+    }), ctx())).toMatchObject({
+      field: `transportAuthority.${field}`,
+      message: `transportAuthority.${field} must be a positive non-root integer when transportAuthority.enabled is true`,
+    });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // twilioConfig presence rules
 // ---------------------------------------------------------------------------

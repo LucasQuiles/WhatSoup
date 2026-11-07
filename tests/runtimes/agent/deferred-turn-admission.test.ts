@@ -322,6 +322,7 @@ import { prepareContentForAgent } from '../../../src/runtimes/agent/media-prep.t
 import { AgentRuntime, type AgentRuntimeOptions } from '../../../src/runtimes/agent/runtime.ts';
 import { toTurnFinalizationPersistence, toTurnRecoveryJobPersistence, type TurnTerminalResult } from '../../../src/runtimes/agent/turn-terminal.ts';
 import { installFakePerChatMcpSocketManager } from './helpers/fake-per-chat-mcp-socket-manager.ts';
+import { registerInboundAuthorityCompletionCases } from './helpers/inbound-authority-completion-cases.ts';
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -366,6 +367,32 @@ function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
 function TIMING(waitMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, waitMs));
 }
+
+registerInboundAuthorityCompletionCases({
+  makeMsg,
+  sessions: () => sessionDoubles,
+  holdStartup: (hold, onEnter) => {
+    sessionConstructHooks.push((session) => {
+      const spawn = session.spawnSession.getMockImplementation()!;
+      session.spawnSession.mockImplementation(async () => {
+        onEnter();
+        await hold;
+        await spawn();
+      });
+    });
+  },
+  createHarness: (sessionScope = 'per_chat') => {
+    resetDoubles();
+    const db = new Database(':memory:');
+    db.open();
+    const engine = new DurabilityEngine(db);
+    const runtime = new AgentRuntime(db, makeMessenger(), 'test', { sessionScope });
+    installFakePerChatMcpSocketManager(runtime);
+    runtime.setDurability(engine);
+    const ingest = createIngestHandler(db, makeMessenger(), runtime, () => '15550000@s.whatsapp.net', () => null, engine);
+    return { db, engine, runtime, ingest };
+  },
+});
 
 describe('deferred-turn admission (#3295 S2)', () => {
   let db: Database;

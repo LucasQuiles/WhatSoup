@@ -943,7 +943,7 @@ describe('durability.ts uncovered-branch coverage', () => {
   });
 
   // ── postConnectRecovery: maybe_sent with wa_message_id found in messages → echoed (lines 722-727) ──
-  it('postConnectRecovery confirms maybe_sent when its wa_message_id is present in messages', () => {
+  it('postConnectRecovery confirms maybe_sent when its self-authored echo is present in messages', () => {
     const opId = engine.createOutboundOp({
       conversationKey: 'key-found', chatJid: '15550000009@s.whatsapp.net', opType: 'text',
       payload: '{"text":"f"}', replayPolicy: 'safe',
@@ -952,8 +952,8 @@ describe('durability.ts uncovered-branch coverage', () => {
       `UPDATE outbound_ops SET status='maybe_sent', wa_message_id='WA_FOUND_1' WHERE id=${opId}`,
     );
     db.raw.exec(
-      `INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, timestamp)
-       VALUES ('15550000009@s.whatsapp.net', 'key-found', '15550000009@s.whatsapp.net', 'WA_FOUND_1', 1)`,
+      `INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, timestamp, is_from_me)
+       VALUES ('15550000009@s.whatsapp.net', 'key-found', '15550000009@s.whatsapp.net', 'WA_FOUND_1', 1, 1)`,
     );
     engine.postConnectRecovery();
     const op = db.raw.prepare('SELECT status FROM outbound_ops WHERE id = ?').get(opId) as any;

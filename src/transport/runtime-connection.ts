@@ -11,6 +11,7 @@ import type { ContactsDirectory } from '../core/mentions.ts';
 import type { PresenceCache } from './presence-cache.ts';
 import type { WhatsAppSocket, ConnectionStateSnapshot } from './connection.ts';
 import type { OutboundBannerClassifier } from './outbound-content-egress.ts';
+import type { OperationsAuthorityPort } from './operations-authority-client.ts';
 
 /**
  * Optional observability projection of the connection state.
@@ -40,7 +41,7 @@ export interface RuntimeConnection extends EventEmitter, Messenger {
   /** Bot's LID — null for transports that don't use LIDs. */
   botLid: string | null;
   /** Callback invoked for every parsed incoming message. Set by the ingest layer. */
-  onMessage: ((msg: IncomingMessage) => void) | null;
+  onMessage: ((msg: IncomingMessage) => void | Promise<void>) | null;
   /** Contacts directory for @mention resolution and history seeding. */
   readonly contactsDir: ContactsDirectory;
   /** In-memory presence cache. */
@@ -56,6 +57,8 @@ export interface RuntimeConnection extends EventEmitter, Messenger {
    * the Baileys `ConnectionManager` runs an outbound governor; Twilio omits it.
    */
   setOutboundContentClassifier?(classify: OutboundBannerClassifier): void;
+  /** Wire protected transport authority; only the Baileys socket implements it. */
+  setOperationsAuthorityClient?(authority: OperationsAuthorityPort): void;
   connect(): Promise<void>;
   shutdown(): void;
   sendRaw(chatJid: string, content: Record<string, unknown>): Promise<SubmissionReceipt>;

@@ -6,6 +6,7 @@ import { rowToMessage, type MessageRow } from '../../core/messages.ts';
 import type { Database } from '../../core/database.ts';
 import { createChildLogger } from '../../logger.ts';
 import { isBaileysEncryptedTmpEnoent } from '../../transport/baileys-media-errors.ts';
+import { TransportAuthorityProviderOutcomeUnknownError } from '../../transport/outbound-governor.ts';
 import type { ToolRegistry } from '../registry.ts';
 import { isPathWithinAllowedRoot, type SessionContext, type ToolDeclaration, type ExtendedBaileysSocket } from '../types.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
@@ -133,7 +134,12 @@ async function sendStatusWithRetry(
     try {
       return await sock.sendMessage(STATUS_BROADCAST_JID, content as any, options as any);
     } catch (err) {
-      if (statusType === 'text' || attempt > 0 || !isBaileysEncryptedTmpEnoent(err)) {
+      if (
+        err instanceof TransportAuthorityProviderOutcomeUnknownError
+        || statusType === 'text'
+        || attempt > 0
+        || !isBaileysEncryptedTmpEnoent(err)
+      ) {
         throw err;
       }
 
