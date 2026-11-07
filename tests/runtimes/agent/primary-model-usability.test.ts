@@ -583,6 +583,16 @@ describe('primary-model-usability.ts uncovered-branch coverage', () => {
       expect(primaryModelUsabilityRequiresAlert(result)).toBe(false);
     });
 
+    it('does not require an alert when a claude-cli lacks strict MCP configuration support', () => {
+      const result: PrimaryModelUsabilityResult = {
+        status: 'unknown',
+        provider: 'claude-cli',
+        model: 'primary-model-a',
+        reason: 'claude-cli-lacks-strict-mcp-config',
+      };
+      expect(primaryModelUsabilityRequiresAlert(result)).toBe(false);
+    });
+
     it('requires an alert for an unknown status carrying a non-suppressed reason', () => {
       const result: PrimaryModelUsabilityResult = {
         status: 'unknown',
