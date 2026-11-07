@@ -1,5 +1,7 @@
 # WhatSoup contributor instructions
 
+@AGENTS.md
+
 Follow [AGENTS.md](AGENTS.md) for the shared project commands, conventions and
 verification requirements.
 
