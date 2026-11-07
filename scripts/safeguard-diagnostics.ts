@@ -1040,6 +1040,9 @@ function qualityCiLanePartitionFailures(text: string): string[] {
   ]);
 
   const macos = asRecord(jobs?.['bot-errors-health-macos']);
+  if (macos?.['runs-on'] !== 'macos-15-intel') {
+    failures.push('bot-errors-health-macos must run on macos-15-intel for x64 health qualification');
+  }
   const macosSteps = Array.isArray(macos?.steps) ? macos.steps.map(asRecord).filter(Boolean) as Record<string, unknown>[] : [];
   const macosPortableRun = 'npm test -- tests/helpers/python-interpreter.test.ts tests/scripts/bot-errors-python-atomic-write-guard.test.ts tests/scripts/bot-errors-release-proof-installer.test.ts tests/scripts/bot-errors-release-proof-run.test.ts --pool=forks --maxWorkers=1';
   if (exactRunCount(macosSteps, macosPortableRun) !== 1) {
