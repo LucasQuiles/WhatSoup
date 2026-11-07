@@ -21,6 +21,16 @@ import type {
 
 // ─── View types ────────────────────────────────────────────────────────────────
 
+export type CapturedCrashInfo = {
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  sessionId: string | null;
+  dbRowId: number | null;
+  provider?: string;
+  crashClass?: string;
+  stderrPreview?: string;
+};
+
 export type AutoCompactView = {
   cooldownUntil: Map<string, number>;
   lastSuccessAt: Map<string, number>;

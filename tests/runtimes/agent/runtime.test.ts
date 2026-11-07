@@ -29,15 +29,6 @@ import { hoistedLoggerMock, type SingletonLoggerMock } from '../../helpers/logge
 // vi.hoisted values are available inside vi.mock factory callbacks.
 
 const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRef, capturedOnResumeFailedRef, capturedOnCrashRef, capturedNotifyUserRef } = vi.hoisted(() => {
-  type CapturedCrashInfo = {
-    exitCode: number | null;
-    signal: NodeJS.Signals | null;
-    sessionId: string | null;
-    dbRowId: number | null;
-    provider?: string;
-    crashClass?: string;
-    stderrPreview?: string;
-  };
   const capturedSessionManagerOptsRef: {
     current: {
       allowM365Mutations?: boolean;
@@ -556,7 +547,7 @@ import {
   getPerChatCleanupState, setOwnedTestSession, type PendingSystemResultTrackerView,
   pendingSystemResults, markOwnedSystemTurn, publishSingletonTestOwner,
   handlePerChatProviderEvent, currentCrashIdentity, awaitDispatchedTurn, retireDispatchedTurn,
-  type AutoCompactView, type ImageCoalescerView,
+  type AutoCompactView, type ImageCoalescerView, type CapturedCrashInfo,
 } from './lib/runtime-mock-scaffold.ts';
 
 // ─── Coupled helpers (hoisting-pinned, cannot leave this file) ────────────────
