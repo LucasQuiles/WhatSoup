@@ -1,3 +1,4 @@
+import { registerRuntimeToolTrackingTests } from './runtime-tool-tracking.cases.ts';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { prepareRuntimeHome, ownedRuntimeCwd } from '../../helpers/runtime-home-fixture.ts';
 import { registerRuntimeHomeConfinementTests } from './runtime-home-confinement.cases.ts';
@@ -6952,6 +6953,10 @@ describe('AgentRuntime', () => {
       'ask-user-shared',
       'AskUserQuestion',
       expect.any(String),
+      { question: 'Pick one', options: ['A', 'B'] },
+    );
+    expect(sourceSession.trackToolStart).toHaveBeenCalledWith(
+      'ask-user-shared', 'AskUserQuestion', { question: 'Pick one', options: ['A', 'B'] },
     );
 
     state.handleEvent(sourceSession, { type: 'compact_boundary' });
@@ -6980,6 +6985,7 @@ describe('AgentRuntime', () => {
       toolInput: { command: 'date' },
     });
 
+    expect(sourceSession.trackToolStart).toHaveBeenCalledTimes(1);
     expect(queue.enqueueToolUpdate).not.toHaveBeenCalled();
     expect(mockRuntimeLogger.info).toHaveBeenCalledWith(
       { toolName: 'Bash' },
@@ -7199,62 +7205,7 @@ describe('AgentRuntime', () => {
     expect(mockQueue.enqueueToolUpdate).toHaveBeenCalledWith({ category: 'error', detail: 'error msg' });
   });
 
-  it('scoped result-only tool events preserve identity and make replay unsafe without a tracker start', () => {
-    const db = makeDb();
-    const { messenger } = makeMessenger();
-    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
-    const queue = makeQueueMock('scoped@s.whatsapp.net');
-    const tracker = {
-      onToolStart: vi.fn(),
-      onToolEnd: vi.fn(),
-    };
-    const mapKey = 'scoped@s.whatsapp.net';
-    const toolScopeKey = `${mapKey}#1`;
-    const context = makeRuntimeTurnContext('per_chat', 'scoped', queue.targetChatJid, 41, 'turn-scoped');
-    const state = runtime as unknown as {
-      operationTrackers: Map<string, typeof tracker>;
-      perChatRuntimeTurnContexts: Map<string, Array<typeof context>>;
-      turnHadToolActivity: Set<string>;
-      activeToolNames: Map<string, Map<string, string>>;
-      handleEventWithContext(
-        event: AgentEvent,
-        queue: IOutboundQueue,
-        session: null,
-        conversationKey: string,
-        inboundSeq: number,
-        mapKey: string,
-        toolScopeKey: string,
-      ): void;
-    };
-    state.operationTrackers.set(mapKey, tracker);
-    state.perChatRuntimeTurnContexts.set(mapKey, [context]);
-
-    state.handleEventWithContext(
-      {
-        type: 'tool_result',
-        toolId: 'call_edit_rejected',
-        toolName: 'edit',
-        isError: true,
-        content: 'permission requested: edit; auto-rejecting',
-      },
-      queue,
-      null,
-      'scoped',
-      41,
-      mapKey,
-      toolScopeKey,
-    );
-
-    expect(queue.enqueueToolUpdate).toHaveBeenCalledWith(expect.objectContaining({
-      category: 'error',
-      detail: expect.stringContaining('edit'),
-    }));
-    expect(state.turnHadToolActivity.has(toolScopeKey)).toBe(true);
-    expect(state.perChatRuntimeTurnContexts.get(mapKey)?.[0]?.replay.replaySafe).toBe(false);
-    expect(tracker.onToolEnd).toHaveBeenCalledWith('call_edit_rejected');
-    expect(tracker.onToolStart).not.toHaveBeenCalled();
-    expect(state.activeToolNames.has(toolScopeKey)).toBe(false);
-  });
+  registerRuntimeToolTrackingTests();
 
   it('global result-only tool events preserve identity and make replay unsafe without a tracker start', () => {
     const db = makeDb();

@@ -11,6 +11,7 @@ import type { ToolCallCallerEvidence } from '../core/durability-evidence-contrac
 import { safeStringEqual } from '../lib/safe-compare.ts';
 import { isNonEmptyString, isRecord } from '../lib/type-guards.ts';
 import type { CallerAttribution, ResolvedSessionContext } from './types.ts';
+import type { PollWaitOwner } from './poll-wait-owner.ts';
 
 /**
  * The line a session's own MCP helper (the stdio proxy or a session hook) writes
@@ -22,36 +23,38 @@ export const SESSION_TOKEN_NOTIFICATION = 'notifications/whatsoup/session';
 /** Anything that can say whether a presented token belongs to a live session. */
 export interface SessionTokenVerifier {
   verify(presented: unknown): boolean;
+  resolvePollWaitOwner?(presented: unknown): PollWaitOwner | undefined;
 }
 
 /** How many live session tokens are kept before the oldest is forgotten. */
 export const SESSION_TOKEN_CAPACITY = 4096;
 
 /**
- * Tokens minted for the runtime's own sessions. One per session; handed to the
+ * Tokens minted for the runtime's own sessions, or each OpenCode process; handed to the
  * child only through its environment and never written to disk or the database.
  *
  * Tokens are not revoked at session shutdown, because a suspended session can
- * spawn again. The set is bounded instead: past its capacity the oldest token is
+ * spawn again. The registry is bounded instead: past its capacity the oldest token is
  * forgotten, and a caller still holding it is recorded as an outside caller.
  * That can only make the evidence more conservative.
  *
  * A same-user process can read another process's environment, so a match is
- * attribution evidence, not authentication.
+ * attribution evidence, not authentication. A current OpenCode token can also
+ * associate a bounded poll wait with its turn; it does not grant tool access.
  */
 export class SessionTokenRegistry implements SessionTokenVerifier {
-  private readonly live = new Set<string>();
+  private readonly live = new Map<string, PollWaitOwner | undefined>();
   private readonly capacity: number;
 
   constructor(capacity: number = SESSION_TOKEN_CAPACITY) {
     this.capacity = capacity;
   }
 
-  mint(): string {
+  mint(owner?: PollWaitOwner): string {
     const token = randomBytes(32).toString('hex');
-    this.live.add(token);
+    this.live.set(token, owner);
     while (this.live.size > this.capacity) {
-      const oldest = this.live.values().next().value;
+      const oldest = this.live.keys().next().value;
       if (oldest === undefined) break;
       this.live.delete(oldest);
     }
@@ -61,8 +64,17 @@ export class SessionTokenRegistry implements SessionTokenVerifier {
   verify(presented: unknown): boolean {
     if (!isNonEmptyString(presented)) return false;
     let matched = false;
-    for (const token of this.live) {
+    for (const token of this.live.keys()) {
       if (safeStringEqual(token, presented)) matched = true;
+    }
+    return matched;
+  }
+
+  resolvePollWaitOwner(presented: unknown): PollWaitOwner | undefined {
+    if (!isNonEmptyString(presented)) return undefined;
+    let matched: PollWaitOwner | undefined;
+    for (const [token, owner] of this.live) {
+      if (safeStringEqual(token, presented)) matched = owner;
     }
     return matched;
   }

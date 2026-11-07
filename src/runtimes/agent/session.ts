@@ -23,6 +23,7 @@ import {
 } from '../../core/provider-data-policy.ts';
 import type { M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
 import type { SessionContext } from '../../mcp/types.ts';
+import type { PollWaitOwner } from '../../mcp/poll-wait-owner.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
 import { MS_PER_HOUR } from '../../lib/time-units.ts';
@@ -47,6 +48,7 @@ import {
   type BuildBaseChildEnvOptions,
 } from './providers/child-env.ts';
 import { ProviderBudget, type BudgetConfig } from './providers/budget.ts';
+import { blockingPollWaitMs } from './poll-timeouts.ts';
 import { watchdogHardMsForProvider } from './providers/watchdog-policy.ts';
 import { providerConfigEffort, providerHasNativeReasoningControl } from './reasoning-control.ts';
 import type { ProviderMcpBridge, ProviderSession } from './providers/types.ts';
@@ -314,6 +316,7 @@ export interface SessionManagerOptions {
   whatsoupMcpSocket?: string;
   /** #3421 step 1: this session's MCP token, passed to its child env only. */
   whatsoupMcpSessionToken?: string;
+  mintOpenCodeMcpSessionToken?: (owner: PollWaitOwner | undefined) => string;
   providerTransitionReady?: Promise<void>;
   handoffSystemBlock?: () => string | null;
   /**
@@ -737,6 +740,7 @@ export class SessionManager {
   private readonly whatsoupInstance: string | undefined;
   private readonly whatsoupMcpSocket: string | undefined;
   private readonly whatsoupMcpSessionToken: string | undefined;
+  private readonly mintOpenCodeMcpSessionToken: SessionManagerOptions['mintOpenCodeMcpSessionToken'];
   private readonly providerTransitionReady: Promise<void> | undefined;
   private readonly handoffSystemBlock: (() => string | null) | undefined;
   private readonly degradedCapabilitiesBlock: (() => string | null) | undefined;
@@ -804,7 +808,7 @@ export class SessionManager {
   private intentionalKill:
     | { child: ReturnType<typeof spawn>; signal: NodeJS.Signals; reason: SessionTerminationReason }
     | null = null;
-  private pendingToolIds: Set<string> = new Set();
+  private pendingToolIds = new Map<string | symbol, number>();
   /** Codex app-server thread ID for persistent sessions. */
   private codexThreadId: string | null = null;
   /** Monotonic counter for Codex JSON-RPC request IDs. */
@@ -963,6 +967,7 @@ export class SessionManager {
     this.whatsoupInstance = opts.whatsoupInstance;
     this.whatsoupMcpSocket = opts.whatsoupMcpSocket;
     this.whatsoupMcpSessionToken = opts.whatsoupMcpSessionToken;
+    this.mintOpenCodeMcpSessionToken = opts.mintOpenCodeMcpSessionToken;
     this.providerTransitionReady = opts.providerTransitionReady;
     this.handoffSystemBlock = opts.handoffSystemBlock;
     this.degradedCapabilitiesBlock = opts.degradedCapabilitiesBlock;
@@ -1456,6 +1461,7 @@ export class SessionManager {
     args: readonly string[],
     cwd: string,
     expectedExecutableSha256?: string,
+    providerTurnToken?: number,
   ): ChildProcessWithoutNullStreams | Promise<ChildProcessWithoutNullStreams> {
     // Security: explicit env allowlist prevents credential leakage to child processes.
     // Without this, Node.js inherits process.env in full — meaning ALL secrets
@@ -1468,7 +1474,9 @@ export class SessionManager {
         m365MutationPolicy: this.m365MutationPolicy,
         whatsoupInstance: this.whatsoupInstance,
         whatsoupMcpSocket: this.whatsoupMcpSocket,
-        whatsoupMcpSessionToken: this.whatsoupMcpSessionToken,
+        whatsoupMcpSessionToken: this.provider === 'opencode-cli' && this.mintOpenCodeMcpSessionToken
+          ? this.mintOpenCodeMcpSessionToken(this.capturePollWaitOwner(providerTurnToken))
+          : this.whatsoupMcpSessionToken,
         configRoot: this.configRoot,
         egressProxyPort: this.egressProxyPort,
       },
@@ -2023,12 +2031,43 @@ export class SessionManager {
     return this.dbRowId;
   }
 
-  trackToolStart(toolId: string): void {
-    this.pendingToolIds.add(toolId);
+  trackToolStart(toolId: string, toolName = '', toolInput?: Record<string, unknown>): void {
+    if (this.pendingToolIds.has(toolId)) return;
+    const waitMs = blockingPollWaitMs(toolName, toolInput);
+    this.pendingToolIds.set(toolId, waitMs > 0 ? performance.now() + waitMs : 0);
   }
 
   trackToolEnd(toolId: string): void {
     this.pendingToolIds.delete(toolId);
+  }
+
+  private capturePollWaitOwner(providerTurnToken: number | undefined): PollWaitOwner | undefined {
+    if (!this.providerTurnInFlight || providerTurnToken === undefined
+      || this.activeProviderTurnToken !== providerTurnToken) return undefined;
+    const binding = this.captureEvidenceBinding();
+    return binding === null ? undefined
+      : SessionManager.makePollWaitOwner(new WeakRef(this), binding, providerTurnToken);
+  }
+
+  // Static construction prevents retained tokens from keeping a manager alive.
+  private static makePollWaitOwner(
+    reference: WeakRef<SessionManager>, binding: object, providerTurnToken: number,
+  ): PollWaitOwner {
+    return {
+      begin(timeoutMs) {
+        const manager = reference.deref();
+        if (!manager?.providerTurnInFlight || manager.activeProviderTurnToken !== providerTurnToken
+          || !manager.isEvidenceBindingCurrent(binding)) return undefined;
+        const key = Symbol();
+        const waitMs = blockingPollWaitMs('send_poll', { awaitResult: true, timeoutMs });
+        manager.pendingToolIds.set(key, performance.now() + waitMs);
+        return () => {
+          const current = reference.deref();
+          if (current?.providerTurnInFlight && current.activeProviderTurnToken === providerTurnToken
+            && current.isEvidenceBindingCurrent(binding)) current.pendingToolIds.delete(key);
+        };
+      },
+    };
   }
 
   get hasPendingTools(): boolean {
@@ -3422,13 +3461,17 @@ export class SessionManager {
   }
 
   clearTurnWatchdog(): void {
+    this.clearWatchdogTimers();
+    this.pendingToolIds.clear();
+  }
+
+  private clearWatchdogTimers(): void {
     clearTimeout(this.watchdogSoft ?? undefined);
     clearTimeout(this.watchdogWarn ?? undefined);
     clearTimeout(this.watchdogHard ?? undefined);
     this.watchdogSoft = null;
     this.watchdogWarn = null;
     this.watchdogHard = null;
-    this.pendingToolIds.clear();
   }
 
   private releaseProviderExecutionLease(child: ReturnType<typeof spawn>): void {
@@ -3496,7 +3539,7 @@ export class SessionManager {
     // Real stream events also close the current quiet stretch: the long-op ceiling
     // anchors to the NEXT stall/watchdog fire, not to one from a finished step.
     this.longOpGateStartedAt = null;
-    this.clearTurnWatchdog();
+    this.clearWatchdogTimers();
     this.armWatchdog();
   }
 
@@ -3733,6 +3776,16 @@ export class SessionManager {
     if (expectedWatchdog !== undefined && this.watchdogHard !== expectedWatchdog) return;
     this.watchdogHard = null;
     if (!this.active) return;
+
+    // A bounded human vote wait is quiet by design; other stalled tools retain their kill timers.
+    const remainingWaitMs = Math.max(0, ...this.pendingToolIds.values()) - performance.now();
+    if (remainingWaitMs > 0) {
+      this.armWatchdog(
+        managedProviderSession, managedProviderGeneration,
+        remainingWaitMs + watchdogHardMsForProvider(this.provider),
+      );
+      return;
+    }
 
     const inactivityMinutes = Math.round(watchdogHardMsForProvider(this.provider) / 60_000);
     const terminationNotice = `_Session terminated after ${inactivityMinutes} minutes of inactivity — restarting._`;
@@ -4116,7 +4169,7 @@ export class SessionManager {
       try {
         cwd = this.admitConfiguredCwd();
         args = this.buildSpawnPerTurnArgs(cwd, input);
-        const spawned = this.spawnProviderChild(binary, args, cwd, expectedExecutableSha256);
+        const spawned = this.spawnProviderChild(binary, args, cwd, expectedExecutableSha256, providerTurnToken);
         // Keep direct-spawn setup synchronous: existing callers and child error
         // handlers rely on the process being attached in this same turn.
         child = spawned instanceof Promise ? await spawned : spawned;

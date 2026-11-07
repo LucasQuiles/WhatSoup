@@ -1,6 +1,7 @@
 import { createChildLogger } from '../../logger.ts';
 import type { ToolCategory } from './providers/tool-mapping.ts';
 import type { OperationTrackerConfig, ToolThreshold } from '../../config.ts';
+import { blockingPollWaitMs } from './poll-timeouts.ts';
 
 const log = createChildLogger('operation-tracker');
 
@@ -73,7 +74,7 @@ export class OperationTracker {
     this.callbacks = callbacks;
   }
 
-  onToolStart(toolId: string, toolName: string, category: ToolCategory): void {
+  onToolStart(toolId: string, toolName: string, category: ToolCategory, toolInput?: Record<string, unknown>): void {
     this.clearThinkingTimers();
     // A phantom/replayed tool_use can re-arm a toolId that is still tracked. Clear the
     // previous op's timers before overwriting, otherwise they are orphaned but keep
@@ -96,7 +97,7 @@ export class OperationTracker {
       stallTimer: null,
     };
     this.operations.set(toolId, op);
-    this.armOperationTimers(op, threshold);
+    this.armOperationTimers(op, threshold, blockingPollWaitMs(toolName, toolInput));
     this.lastActivityAt = Date.now();
   }
 
@@ -135,9 +136,9 @@ export class OperationTracker {
 
   // ─── Timer management ───────────────────────────────────────────────────────
 
-  private armOperationTimers(op: TrackedOperationInternal, threshold: ToolThreshold): void {
-    const slowMs = threshold.expectedMs * threshold.slowMultiplier;
-    const stallMs = threshold.expectedMs * threshold.stallMultiplier;
+  private armOperationTimers(op: TrackedOperationInternal, threshold: ToolThreshold, waitMs: number): void {
+    const slowMs = waitMs + threshold.expectedMs * threshold.slowMultiplier;
+    const stallMs = waitMs + threshold.expectedMs * threshold.stallMultiplier;
 
     // Periodic progress
     op.progressTimer = setInterval(() => {

@@ -8,7 +8,10 @@ import type { Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { ProviderMcpBridge } from '../../../src/runtimes/agent/providers/types.ts';
 import { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
+import { OperationTracker } from '../../../src/runtimes/agent/operation-tracker.ts';
+import { config } from '../../../src/config.ts';
 import { shortHash } from '../../../src/lib/short-hash.ts';
+import type { PollWaitOwner } from '../../../src/mcp/poll-wait-owner.ts';
 import { outsideRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
 import {
   CONFIG_ROOT_ISOLATION_FLAG,
@@ -743,6 +746,136 @@ describe('SessionManager', () => {
 
     expect([persistentEnv?.WHATSOUP_MCP_SESSION_TOKEN, perTurnEnv?.WHATSOUP_MCP_SESSION_TOKEN])
       .toEqual(['session-token-persistent', 'session-token-per-turn']);
+  });
+
+  it('mints one OpenCode poll-wait owner per live turn and fences stale incarnations', async () => {
+    const firstChild = makeMockChild(34211);
+    const secondChild = makeMockChild(34212);
+    const thirdChild = makeMockChild(34213);
+    vi.mocked(spawn)
+      .mockReturnValueOnce(firstChild as never)
+      .mockReturnValueOnce(secondChild as never)
+      .mockReturnValueOnce(thirdChild as never);
+    const mintedOwners: PollWaitOwner[] = [];
+    const mintOpenCodeMcpSessionToken = vi.fn((owner: PollWaitOwner | undefined) => {
+      expect(owner).toBeDefined();
+      mintedOwners.push(owner!);
+      return `turn-token-${mintedOwners.length}`;
+    });
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+      mintOpenCodeMcpSessionToken,
+    });
+    const finishedChildren = new Set<MockChild>();
+    const finishTurn = (child: MockChild): void => {
+      if (finishedChildren.has(child)) return;
+      finishedChildren.add(child);
+      child.stdout.emit('data', Buffer.from(`${JSON.stringify({
+        type: 'step_finish',
+        part: { type: 'step-finish', reason: 'stop', tokens: { input: 1, output: 1 } },
+      })}\n`));
+      child._exitCb?.(0, null);
+      child._closeCb?.(0, null);
+    };
+
+    try {
+      await sm.spawnSession();
+      await sm.sendTurn('first owned poll wait');
+      const firstOwner = mintedOwners[0]!;
+      const firstEnd = firstOwner.begin(60_000);
+      expect(lastSpawnEnv().WHATSOUP_MCP_SESSION_TOKEN).toBe('turn-token-1');
+      expect(sm.hasPendingTools).toBe(true);
+
+      finishTurn(firstChild);
+      await sm.sendTurn('second owned poll wait in the same incarnation');
+      const secondOwner = mintedOwners[1]!;
+      expect(lastSpawnEnv().WHATSOUP_MCP_SESSION_TOKEN).toBe('turn-token-2');
+
+      // The first owner is tied to the exact closed turn, not merely this
+      // SessionManager object or its active incarnation.
+      expect(firstOwner.begin(60_000)).toBeUndefined();
+      expect(sm.hasPendingTools).toBe(false);
+
+      const secondEnd = secondOwner.begin(60_000);
+      expect(sm.hasPendingTools).toBe(true);
+      firstEnd?.();
+      expect(sm.hasPendingTools).toBe(true);
+      secondEnd?.();
+      expect(sm.hasPendingTools).toBe(false);
+
+      finishTurn(secondChild);
+      await sm.handleNew();
+      await sm.sendTurn('third owned poll wait in a replacement incarnation');
+      const thirdOwner = mintedOwners[2]!;
+      expect(lastSpawnEnv().WHATSOUP_MCP_SESSION_TOKEN).toBe('turn-token-3');
+
+      expect(secondOwner.begin(60_000)).toBeUndefined();
+      const thirdEnd = thirdOwner.begin(60_000);
+      expect(sm.hasPendingTools).toBe(true);
+      secondEnd?.();
+      expect(sm.hasPendingTools).toBe(true);
+      thirdEnd?.();
+      expect(sm.hasPendingTools).toBe(false);
+      finishTurn(thirdChild);
+    } finally {
+      finishTurn(firstChild);
+      finishTurn(secondChild);
+      finishTurn(thirdChild);
+      await sm.shutdown();
+    }
+  });
+
+  it('does not mint OpenCode ownership for persistent CLIs and preserves a static token without the callback', async () => {
+    const persistentChild = makeMockChild(34221);
+    const openCodeChild = makeMockChild(34222);
+    vi.mocked(spawn)
+      .mockReturnValueOnce(persistentChild as never)
+      .mockReturnValueOnce(openCodeChild as never);
+    const mintOpenCodeMcpSessionToken = vi.fn(() => 'must-not-be-minted');
+    const persistent = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      whatsoupMcpSessionToken: 'persistent-static-token',
+      mintOpenCodeMcpSessionToken,
+    });
+    const perTurn = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+      whatsoupMcpSessionToken: 'opencode-static-token',
+    });
+    const closeChild = (child: MockChild): void => {
+      child._exitCb?.(0, null);
+      child._closeCb?.(0, null);
+    };
+
+    try {
+      await persistent.spawnSession();
+      expect(lastSpawnEnv().WHATSOUP_MCP_SESSION_TOKEN).toBe('persistent-static-token');
+      expect(mintOpenCodeMcpSessionToken).not.toHaveBeenCalled();
+
+      await perTurn.spawnSession();
+      await perTurn.sendTurn('static-token fallback');
+      expect(lastSpawnEnv().WHATSOUP_MCP_SESSION_TOKEN).toBe('opencode-static-token');
+    } finally {
+      closeChild(persistentChild);
+      closeChild(openCodeChild);
+      const shutdowns = await Promise.allSettled([persistent.shutdown(), perTurn.shutdown()]);
+      const cleanupErrors = shutdowns.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+      if (cleanupErrors.length > 0) {
+        throw new AggregateError(cleanupErrors, 'session token test cleanup failed');
+      }
+    }
   });
 
   it('spawnSession propagates ALLOW_M365_MUTATIONS when fail-closed mode is unset', async () => {
@@ -2212,6 +2345,153 @@ describe('SessionManager', () => {
     expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
 
     vi.useRealTimers();
+  });
+
+  it('a blocking poll survives both watchdogs until its bounded vote wait ends', async () => {
+    vi.useFakeTimers();
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), instanceName: 'personal', notifyUser: vi.fn(),
+    });
+    const tracker = new OperationTracker('personal', config.operationTracker, {
+      onProgress: () => {},
+      onStalled: (id, name) => sm.recoverStalledOperation(id, name),
+      onThinkingStalled: () => sm.probeLiveness(),
+    });
+    try {
+      await sm.spawnSession();
+      await sm.sendTurn('wait for the poll answer');
+      const input = { awaitResult: true, timeoutMs: 3_600_000 };
+      sm.trackToolStart('poll', 'mcp__whatsoup__send_poll', input);
+      sm.tickWatchdog();
+      tracker.onToolStart('poll', 'mcp__whatsoup__send_poll', 'other', input);
+      await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+      expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+      await vi.advanceTimersByTimeAsync(3_600_000 - WATCHDOG_HARD_MS - 2);
+      expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+      // A missing tool result after the poll deadline still reaches ordinary stalled recovery.
+      await vi.advanceTimersByTimeAsync(75_000 + STALLED_OP_KILL_GRACE_MS + 2);
+      expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    } finally {
+      tracker.shutdown();
+      sm.clearTurnWatchdog();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not terminate a bounded poll early after a forward wall-clock correction', async () => {
+    vi.useFakeTimers();
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), instanceName: 'personal', notifyUser: vi.fn(),
+    });
+    try {
+      await sm.spawnSession();
+      await sm.sendTurn('wait for the poll answer');
+      sm.trackToolStart('poll', 'mcp__whatsoup__send_poll', { awaitResult: true, timeoutMs: 3_600_000 });
+      vi.setSystemTime(Date.now() + 3_600_001);
+
+      await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+
+      expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+      expect(sm.getStatus().active).toBe(true);
+    } finally {
+      sm.clearTurnWatchdog();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not extend bounded-poll recovery after a backward wall-clock correction', async () => {
+    vi.useFakeTimers();
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), instanceName: 'personal', notifyUser: vi.fn(),
+    });
+    try {
+      await sm.spawnSession();
+      await sm.sendTurn('wait for the poll answer');
+      sm.trackToolStart('poll', 'mcp__whatsoup__send_poll', { awaitResult: true, timeoutMs: 3_600_000 });
+      vi.setSystemTime(Date.now() - 3_600_000);
+
+      await vi.advanceTimersByTimeAsync(3_600_000 + WATCHDOG_HARD_MS + 1);
+
+      expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    } finally {
+      sm.clearTurnWatchdog();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['openai-api', 'anthropic-api'])('%s protects a bounded poll and still terminates a missing result', async (provider) => {
+    vi.useFakeTimers();
+    const Provider = provider === 'openai-api' ? OpenAIApiProvider : AnthropicApiProvider;
+    const killSpy = vi.spyOn(Provider.prototype, 'kill').mockImplementation(() => {});
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), notifyUser: vi.fn(), provider,
+    });
+    try {
+      await sm.spawnSession();
+      const state = sm as unknown as { managedProviderSession: { sendTurn: ReturnType<typeof vi.fn> } };
+      state.managedProviderSession.sendTurn = vi.fn(async () => {});
+      await sm.sendTurn('wait for a managed poll');
+      sm.trackToolStart('poll', 'send_poll', { awaitResult: true, timeoutMs: 3_600_000 });
+      sm.tickWatchdog();
+      await vi.advanceTimersByTimeAsync(600_001);
+      expect(killSpy).not.toHaveBeenCalled();
+      expect(sm.getStatus().active).toBe(true);
+      await vi.advanceTimersByTimeAsync(3_600_000 - 600_001);
+      expect(killSpy).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(600_001);
+      expect(killSpy).toHaveBeenCalledTimes(1);
+      expect(sm.getStatus().active).toBe(false);
+      expect(sm.hasPendingTools).toBe(false);
+    } finally {
+      sm.clearTurnWatchdog();
+      vi.useRealTimers();
+    }
+  });
+
+  it('a settled poll restores the ordinary session watchdog deadline', async () => {
+    vi.useFakeTimers();
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), notifyUser: vi.fn(),
+    });
+    try {
+      await sm.spawnSession();
+      await sm.sendTurn('wait for the poll answer');
+      sm.trackToolStart('poll', 'mcp__whatsoup__send_poll', { awaitResult: true, timeoutMs: 3_600_000 });
+      sm.tickWatchdog();
+      expect(sm.hasPendingTools).toBe(true);
+      sm.trackToolEnd('poll');
+      sm.tickWatchdog();
+      expect(sm.hasPendingTools).toBe(false);
+      await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+      expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    } finally {
+      sm.clearTurnWatchdog();
+      vi.useRealTimers();
+    }
+  });
+
+  it('a pending poll does not excuse a different stalled tool', async () => {
+    vi.useFakeTimers();
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), notifyUser: vi.fn(),
+    });
+    try {
+      await sm.spawnSession();
+      await sm.sendTurn('wait for the poll answer');
+      sm.trackToolStart('poll', 'mcp__whatsoup__send_poll', { awaitResult: true, timeoutMs: 3_600_000 });
+      sm.recoverStalledOperation('hung', 'Bash');
+      await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+      expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    } finally {
+      sm.clearTurnWatchdog();
+      vi.useRealTimers();
+    }
   });
 
   it('a stalled operation is SIGKILLed after the grace period, long before the 30-min hard watchdog', async () => {
