@@ -61,22 +61,35 @@ Every outbound op declares one of three replay policies:
 
 | Policy | Meaning | When matching stored evidence is absent |
 |---|---|---|
-| `safe` | Re-sending is idempotent (same text produces same observable result) | Reset to `pending`, then re-sent by the pending drainer (§4.4) |
+| `safe` | Caller declares re-sending safe | Reset to `pending` unless typed send ambiguity blocks replay; then re-sent by the pending drainer (§4.4) |
 | `unsafe` | Re-sending would cause a duplicate visible to the recipient | Quarantine — require manual resolution |
-| `read_only` | Op has no side effects visible to the recipient (e.g., presence, read receipt) | Reset to `pending`, then re-sent by the pending drainer (§4.4) |
+| `read_only` | Op has no side effects visible to the recipient (e.g., presence, read receipt) | Reset to `pending` unless typed send ambiguity blocks replay; then re-sent by the pending drainer (§4.4) |
+
+A typed `transport.send_ambiguous` result blocks automatic replay regardless of
+the caller's policy. The transition to `maybe_sent` atomically persists `unsafe`
+as the effective replay policy, so older recovery code also quarantines the row
+after a rollback. A caller label does not prove provider deduplication.
+Pre-connect recovery also persists this policy for historical `maybe_sent` rows
+with valid typed send-ambiguity evidence, without the live sweep's age or batch
+limits. It preserves corroborated immutable proof and changes no other row fields.
+An update failure rolls back the policy batch and leaves recovery incomplete.
+Existing delivery corroboration or a matching stored self-authored message can still confirm
+the operation; otherwise recovery quarantines it. Other failure classes retain
+their existing replay-policy behavior.
 
 The evidence check precedes replay policy: a matching self-authored row settles as
 `echoed`; a matching non-self or unknown-authorship row quarantines under every
 policy (§4.2). The table applies only when matching evidence is absent.
 
-**Replay duplicate-delivery tradeoff.** Because only `safe`/`read_only` ops are ever
-reset to `pending` (`unsafe` ops — including terminal user replies — are quarantined, never
-replayed), a replay that re-sends an op which *was* actually delivered produces at most a
-duplicate of an idempotent/side-effect-free message. That duplicate is the accepted tradeoff
-for recovering safe/read_only ops with missing evidence; it is never incurred for
-user-terminal replies.
+**Replay duplicate-delivery tradeoff.** Outside that typed-ambiguity exception,
+the existing recovery policy can reset `safe`/`read_only` ops to `pending` and
+repeat an effect that already occurred. Callers must justify accepting that
+tradeoff. Unconfirmed `unsafe` operations quarantine instead of replaying.
 
-The policy is set at creation time by the caller. Autonomous bot responses (via `sendTracked`) typically use `safe` because the text is deterministic for a given conversation state. MCP tool sends are excluded from the durability journal by design (gap-matrix item 92) — those use direct Baileys calls and do not go through `sendTracked`.
+The caller sets the initial policy at creation time. Some `sendTracked` callers use
+`safe`; deterministic text alone does not establish provider idempotence. MCP tool
+sends are excluded from the durability journal by design (gap-matrix item 92) —
+those use direct Baileys calls and do not go through `sendTracked`.
 
 ---
 
@@ -151,10 +164,10 @@ Note: `completeInbound()` is a guarded helper — if the row is still `processin
                                                        ├─ matching row + is_from_me != 1
                                                        │  → quarantined (any replay policy)
                                                        │
-                                                       ├─ not found + safe/read_only
+                                                       ├─ not found + replay-eligible safe/read_only
                                                        │  → pending  (replay)
                                                        │
-                                                       └─ not found + unsafe
+                                                       └─ not found + unsafe or typed send ambiguity
                                                           → quarantined
 
   pending ─── drainPendingOutbound() ──► sending → submitted   (re-send, §4.4)
@@ -260,11 +273,11 @@ For each `maybe_sent` op (including those promoted in Step 1):
 - **Has `wa_message_id`**: query `messages` for the matching `message_id` and its persisted authorship. Startup and live reconciliation share this check, including stored history.
   - Found with `is_from_me != 1`: conflicting evidence; quarantine regardless of replay policy. Global message-ID uniqueness may have displaced our own echo, so an occupied ID is not missing evidence and cannot authorize automatic replay. Existing delivery-risk quarantine review and retention apply.
   - Found with `is_from_me = 1`: `markEchoed()` — our own message was observed and stored. This is not proof of recipient delivery. It also completes the linked legacy inbound if the op is terminal; immutable terminal records retain their own settlement rules.
-  - Not found + `safe`/`read_only`: reset to `pending` for replay (re-sent by the drainer, §4.4).
-  - Not found + `unsafe`: `markQuarantined()`.
+  - Not found + `safe`/`read_only`, without typed `transport.send_ambiguous`: reset to `pending` for replay (re-sent by the drainer, §4.4).
+  - Not found + `unsafe` or typed `transport.send_ambiguous`: `markQuarantined()`.
 - **No `wa_message_id`**: no provider receipt was recorded; delivery remains unconfirmed.
-  - `safe`/`read_only`: reset to `pending` for replay (re-sent by the drainer, §4.4).
-  - `unsafe`: `markQuarantined()`.
+  - `safe`/`read_only`, without typed `transport.send_ambiguous`: reset to `pending` for replay (re-sent by the drainer, §4.4).
+  - `unsafe` or typed `transport.send_ambiguous`: `markQuarantined()`.
 
 Self-authorship is necessary but does not establish provider account or conversation identity. This check does not resolve same-ID self messages in different conversations, Signal UUID/number aliases, or rows lost to the message store's global ID uniqueness; those remain tracked in #3841. A provider or historical row that omits self-authorship is conflicting evidence and requires quarantine review, including for caller-declared safe/read-only operations. Only an absent matching row retains the existing missing-evidence replay policy. This can increase manual recovery work for legacy history; qualify adapter history behavior before rollout.
 
@@ -328,8 +341,9 @@ creation; missing, malformed, or future chronology is treated as stale rather
 than fresh. Each pass selects the oldest 200 eligible rows so a large backlog
 cannot monopolize the maintenance tick. The evidence rules in §4.2 apply:
 self-authored matching rows settle as `echoed`; conflicting stored rows quarantine
-regardless of replay policy; only missing evidence permits `safe`/`read_only` ops
-to reset to `pending`. Missing evidence for unsafe ops also quarantines.
+regardless of replay policy. Only missing evidence without typed
+`transport.send_ambiguous` permits `safe`/`read_only` ops to reset to `pending`.
+Missing evidence for unsafe or typed send-ambiguous ops quarantines.
 Corroborated selected-delivery proof is excluded before applying the page limit
 so intentionally preserved rows neither create repeated recovery evidence nor
 starve actionable debt. An empty scan creates no recovery plan or run. The
@@ -340,8 +354,9 @@ same interval and immediately after each recovery pass.
 
 ### 4.4 Pending Drainer (`drainPendingOutbound`)
 
-`postConnectRecovery` resets `safe`/`read_only` ops with missing evidence to `pending`
-(conflicting stored rows quarantine under §4.2), but the reset
+`postConnectRecovery` resets eligible `safe`/`read_only` ops with missing evidence
+and no typed `transport.send_ambiguous` to `pending` (conflicting stored rows
+quarantine under §4.2), but the reset
 alone does not re-deliver them. `drainPendingOutbound(messenger, durability)` is the step
 that re-sends them. It is wired in two places (`main.ts`):
 
