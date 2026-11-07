@@ -4,7 +4,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import { Database } from '../../../src/core/database.ts';
 import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
-import { registerMessagingTools, type MessagingDeps, type PollRegistrar } from '../../../src/mcp/tools/messaging.ts';
+import { registerMessagingTools, type MessagingDeps } from '../../../src/mcp/tools/messaging.ts';
+import { depsWithRegistrar, makeFakePollRegistrar } from '../../helpers/poll-registrar.ts';
 import { createProfileRegistry } from '../../../src/core/profiles.ts';
 import { createOutboundSendsWriter } from '../../../src/core/outbound-sends.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
@@ -114,57 +115,6 @@ function makeConnection(calls: string[]) {
 
 function chatSession(conversationKey: string, deliveryJid: string): SessionContext {
   return { tier: 'chat-scoped', conversationKey, deliveryJid };
-}
-
-type FakeRegisterCall = {
-  pollId: string;
-  chatJid: string;
-  options: string[];
-  resolution: string;
-  timeoutMs: number;
-  abortSignal: AbortSignal | undefined;
-};
-
-type FakePollRegistrar = PollRegistrar & {
-  calls: FakeRegisterCall[];
-  resolveLast(answer: string): void;
-  rejectLast(err: Error): void;
-};
-
-function makeFakePollRegistrar(): FakePollRegistrar {
-  const calls: FakeRegisterCall[] = [];
-  let pendingResolve: ((answer: string) => void) | null = null;
-  let pendingReject: ((err: Error) => void) | null = null;
-  const registrar: FakePollRegistrar = {
-    calls,
-    resolveLast(answer: string): void {
-      if (!pendingResolve) throw new Error('no pending registrar call to resolve');
-      pendingResolve(answer);
-      pendingResolve = null;
-      pendingReject = null;
-    },
-    rejectLast(err: Error): void {
-      if (!pendingReject) throw new Error('no pending registrar call to reject');
-      pendingReject(err);
-      pendingResolve = null;
-      pendingReject = null;
-    },
-    async register(pollId, chatJid, options, resolution, timeoutMs, abortSignal) {
-      calls.push({ pollId, chatJid, options, resolution, timeoutMs, abortSignal });
-      return new Promise<string>((resolve, reject) => {
-        pendingResolve = resolve;
-        pendingReject = reject;
-        if (abortSignal) {
-          abortSignal.addEventListener('abort', () => reject(new Error('aborted')));
-        }
-      });
-    },
-  };
-  return registrar;
-}
-
-function depsWithRegistrar(base: MessagingDeps, registrar: FakePollRegistrar): MessagingDeps {
-  return Object.assign({}, base, { pollRegistrar: registrar });
 }
 
 // ---------------------------------------------------------------------------
@@ -1197,7 +1147,8 @@ describe('registerMessagingTools', () => {
       );
 
       const body = JSON.parse(result.content[0].text);
-      expect(body).toMatchObject({ sent: true, emoji: '✅', messageId: 'latest-inbound', resolved: 'last_inbound' });
+      expect(body).toMatchObject({ sent: true, emoji: '✅', messageId: 'latest-inbound' });
+      expect(body.resolved).toBe('last_inbound');
       const call = JSON.parse(calls[0]);
       expect(call.content.react.key.id).toBe('latest-inbound');
     });
