@@ -181,6 +181,7 @@ describe('imsg send failure recovery', () => {
     await expect(sendTracked(connection, CHAT, 'safe-policy witness', engine, { replayPolicy }))
       .rejects.toMatchObject({ payload: { code: 'transport.send_ambiguous' } });
     expect(engine.getOutboundByStatus('maybe_sent')).toHaveLength(1);
+    expect(engine.getOutboundByStatus('maybe_sent')[0].replay_policy).toBe('unsafe');
     expect(effects).toEqual(['safe-policy witness']);
 
     await connection.shutdown();
@@ -190,6 +191,7 @@ describe('imsg send failure recovery', () => {
     connection.setIdentityStore(new SqliteIdentityStore(db.raw), 'enforce');
     await connection.connect();
     const recovered = new DurabilityEngine(db);
+    expect(recovered.getOutboundByStatus('maybe_sent')[0].replay_policy).toBe('unsafe');
     recovered.preConnectRecovery();
     recovered.postConnectRecovery();
     expect(recovered.getOutboundByStatus('pending')).toHaveLength(0);

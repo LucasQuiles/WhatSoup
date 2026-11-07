@@ -249,8 +249,13 @@ when a caller declares `replayPolicy: safe` or `read_only`: that label does not
 prove provider deduplication. Existing matching delivery evidence may still
 confirm the send. Socket-to-SQLite tests prove one send across database reopen
 and pending drain for these policies, not a real process kill or the complete
-turn-finalizer/supervisor lifecycle. Rolling back to older recovery code may
-re-enable replay of these uncertain rows and requires separate qualification.
+turn-finalizer/supervisor lifecycle. Typed ambiguity atomically persists an
+`unsafe` replay policy that older recovery code understands. Pre-connect recovery
+applies the same policy to historical typed `maybe_sent` rows, while retaining
+immutable corroborated proof. Before rollback, require successful pre-connect
+recovery and qualification of the target version. Rows already reset to `pending`
+by older recovery, or written after the last successful upgrade recovery, are
+outside that historical-row protection.
 Service-route qualification remains separate: this mapping does not force
 iMessage, prevent upstream bridge/AppleScript fallback or prove delivery. See
 [#3841](https://github.com/LucasQuiles/WhatSoup/issues/3841) and

@@ -728,6 +728,7 @@ type DurabilityStatements = {
   markEchoed: PreparedStatement;
   selectEchoedOutboundInbound: PreparedStatement;
   markMaybeSent: PreparedStatement;
+  preserveAmbiguousReplayPolicy: PreparedStatement;
   markFailedPermanent: PreparedStatement;
   markDeferred: PreparedStatement;
   markQuarantined: PreparedStatement;
@@ -972,9 +973,24 @@ export class DurabilityEngine {
                ELSE datetime('now')
              END,
              error = ?, wa_message_id = COALESCE(?, wa_message_id),
-             retry_count = MAX(retry_count, ?)
+             retry_count = MAX(retry_count, ?),
+             replay_policy = CASE
+               WHEN ? = 'transport.send_ambiguous' THEN 'unsafe'
+               ELSE replay_policy
+             END
          WHERE id = ?
            AND status IN ('pending', 'sending', 'submitted', 'maybe_sent')`,
+      ),
+      preserveAmbiguousReplayPolicy: prepare(
+        `UPDATE outbound_ops SET replay_policy = 'unsafe'
+         WHERE id = ? AND status = 'maybe_sent' AND error = ?
+           AND replay_policy IN ('safe', 'read_only')
+           AND NOT EXISTS (
+             SELECT 1
+             FROM turn_terminal_records t
+             JOIN turn_delivery_corroboration c ON c.terminal_record_id = t.id
+             WHERE t.delivery_op_id = outbound_ops.id
+           )`,
       ),
       markFailedPermanent: prepare(
         `UPDATE outbound_ops
@@ -2423,6 +2439,7 @@ export class DurabilityEngine {
       encodeOutboundFailureEvidence(evidence),
       waMessageId ?? null,
       evidence.logical_attempt_count,
+      evidence.failure_code,
       id,
     ).changes === 1;
   }
@@ -2818,6 +2835,22 @@ export class DurabilityEngine {
       'Pre-connect durability recovery',
     );
     const { receipt: recovery, stats } = recoveryRun;
+
+    // Persist the prohibition before reconnect so rollback cannot replay rows
+    // written by older binaries, including those outside the live sweep window.
+    try {
+      withImmediateTransaction(this.db, () => {
+        for (const op of this.getOutboundByStatus('maybe_sent')) {
+          if (op.failure_evidence.schema === OUTBOUND_FAILURE_EVIDENCE_SCHEMA
+            && op.failure_evidence.failure_code === 'transport.send_ambiguous'
+            && (op.replay_policy === 'safe' || op.replay_policy === 'read_only')) {
+            this.statements.preserveAmbiguousReplayPolicy.run(op.id, op.error);
+          }
+        }
+      });
+    } catch (err) {
+      recoveryRun.failImmediately('preserve_ambiguous_replay_policy', err);
+    }
 
     // Settle recovery deliveries before generic stuck-inbound handling.
     try {

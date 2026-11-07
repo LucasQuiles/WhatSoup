@@ -66,7 +66,13 @@ Every outbound op declares one of three replay policies:
 | `read_only` | Op has no side effects visible to the recipient (e.g., presence, read receipt) | Reset to `pending` unless typed send ambiguity blocks replay; then re-sent by the pending drainer (§4.4) |
 
 A typed `transport.send_ambiguous` result blocks automatic replay regardless of
-the caller's policy. A caller label does not prove provider deduplication.
+the caller's policy. The transition to `maybe_sent` atomically persists `unsafe`
+as the effective replay policy, so older recovery code also quarantines the row
+after a rollback. A caller label does not prove provider deduplication.
+Pre-connect recovery also persists this policy for historical `maybe_sent` rows
+with valid typed send-ambiguity evidence, without the live sweep's age or batch
+limits. It preserves corroborated immutable proof and changes no other row fields.
+An update failure rolls back the policy batch and leaves recovery incomplete.
 Existing delivery corroboration or a matching stored message can still confirm
 the operation; otherwise recovery quarantines it. Other failure classes retain
 their existing replay-policy behavior.
@@ -76,7 +82,7 @@ the existing recovery policy can reset `safe`/`read_only` ops to `pending` and
 repeat an effect that already occurred. Callers must justify accepting that
 tradeoff. Unconfirmed `unsafe` operations quarantine instead of replaying.
 
-The policy is set at creation time by the caller. Some `sendTracked` callers use
+The caller sets the initial policy at creation time. Some `sendTracked` callers use
 `safe`; deterministic text alone does not establish provider idempotence. MCP tool
 sends are excluded from the durability journal by design (gap-matrix item 92) —
 those use direct Baileys calls and do not go through `sendTracked`.
