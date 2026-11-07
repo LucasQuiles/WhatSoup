@@ -1,5 +1,6 @@
 interface InboundTurnCompletion {
   adopted: boolean;
+  admissionPending: boolean;
   completion: Promise<void>;
   settle: () => void;
 }
@@ -17,6 +18,7 @@ export class InboundTurnCompletionTracker {
     });
     this.completions.set(messageId, {
       adopted: false,
+      admissionPending: false,
       completion,
       settle: () => {
         if (resolved) return;
@@ -45,12 +47,22 @@ export class InboundTurnCompletionTracker {
     return pending.settle;
   }
 
+  holdForAdmission(messageId: string): (() => void) | undefined {
+    const pending = this.completions.get(messageId);
+    if (!pending) return undefined;
+    pending.admissionPending = true;
+    return () => {
+      pending.admissionPending = false;
+      if (!pending.adopted) pending.settle();
+    };
+  }
+
   settle(messageId: string): void {
     this.completions.get(messageId)?.settle();
   }
 
   settleUnadopted(messageId: string): void {
     const pending = this.completions.get(messageId);
-    if (pending && !pending.adopted) pending.settle();
+    if (pending && !pending.adopted && !pending.admissionPending) pending.settle();
   }
 }
