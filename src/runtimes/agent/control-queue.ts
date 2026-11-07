@@ -141,6 +141,10 @@ export class ControlQueue implements IOutboundQueue {
     // intentional no-op
   }
 
+  detachTurnEvidence(_turnId: string): void {
+    // Control sessions create no outbound operations to attribute.
+  }
+
   /** Always returns undefined — control sessions create no outbound ops. */
   getLastOpId(): number | undefined {
     return undefined;

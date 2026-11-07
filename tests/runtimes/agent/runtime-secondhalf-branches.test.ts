@@ -94,6 +94,7 @@ const {
     markLastTerminal: vi.fn(),
     clearLastOpId: vi.fn(),
     beginTurnEvidence: vi.fn(),
+    detachTurnEvidence: vi.fn(),
     flushTurnEvidence: vi.fn(async (turnId: string) => ({
       turnId, answerOpIds: [], lifecycleOpIds: [], statusOpIds: [],
     })),
@@ -3345,6 +3346,7 @@ describe('AgentRuntime route recycle publication and shutdown ownership', () => 
       markLastTerminal: vi.fn(),
       clearLastOpId: vi.fn(),
       beginTurnEvidence: vi.fn(),
+      detachTurnEvidence: vi.fn(),
       flushTurnEvidence: vi.fn(async (turnId: string) => ({
         turnId,
         answerOpIds: [] as number[],

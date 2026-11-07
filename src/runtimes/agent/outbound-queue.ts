@@ -336,6 +336,8 @@ export interface IOutboundQueue {
   clearLastOpId(): void;
   /** Start collecting durability op ids for one logical turn; its ops carry `attribution` when given. */
   beginTurnEvidence(turnId: string, attribution?: TurnOutboundAttribution): void;
+  /** Stop attributing new output to this turn; already queued chunks retain their evidence. */
+  detachTurnEvidence(turnId: string): void;
   /** Flush all sends and consume an immutable durability evidence snapshot for the turn. */
   flushTurnEvidence(turnId: string): Promise<TurnDeliveryEvidence>;
   /** Mark the last outbound op created by this queue as terminal. */
@@ -376,6 +378,7 @@ export class OutboundQueue implements IOutboundQueue {
   private lastOpId: number | undefined;
   /** Mutable evidence for the sole turn currently owned by this queue. */
   private activeTurnEvidence: MutableTurnDeliveryEvidence | undefined;
+  private turnEvidenceDetached = false;
   private nextTurnEvidenceEpoch = 0;
   /** Last consumed snapshot, retained only to make a repeated flush idempotent. */
   private completedTurnEvidence: TurnDeliveryEvidence | undefined;
@@ -537,6 +540,7 @@ export class OutboundQueue implements IOutboundQueue {
       throw new Error(`Turn evidence for ${turnId} was already completed`);
     }
     this.completedTurnEvidence = undefined;
+    this.turnEvidenceDetached = false;
     this.activeTurnEvidence = {
       turnId,
       epoch: ++this.nextTurnEvidenceEpoch,
@@ -548,6 +552,10 @@ export class OutboundQueue implements IOutboundQueue {
       },
       withheldAnswerCount: 0,
     };
+  }
+
+  detachTurnEvidence(turnId: string): void {
+    if (this.activeTurnEvidence?.turnId === turnId) this.turnEvidenceDetached = true;
   }
 
   async flushTurnEvidence(turnId: string): Promise<TurnDeliveryEvidence> {
@@ -610,11 +618,12 @@ export class OutboundQueue implements IOutboundQueue {
     // A turn's ops carry its own inbound key and chat JID, which the delivery proofs compare with;
     // ops outside a turn keep the queue's frozen key and current JID.
     const turn = this.activeTurnEvidence?.attribution;
+    const owner = this.turnEvidenceDetached ? undefined : this.activeTurnEvidence;
     return {
       authorityContext: getTransportInboundContext(),
       role,
-      turnId: this.activeTurnEvidence?.turnId,
-      turnEvidenceEpoch: this.activeTurnEvidence?.epoch,
+      turnId: owner?.turnId,
+      turnEvidenceEpoch: owner?.epoch,
       chatJid: turn?.chatJid ?? this.deliveryJid,
       conversationKey: turn?.conversationKey ?? this.conversationKey,
       sourceInboundSeq: this.currentInboundSeq,
