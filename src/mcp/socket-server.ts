@@ -8,6 +8,8 @@ import { createChildLogger } from '../logger.ts';
 import { toConversationKey } from '../core/conversation-key.ts';
 import { type Clock, systemClock } from '../lib/clock.ts';
 import type { ToolRegistry } from './registry.ts';
+import { isRecord } from '../lib/type-guards.ts';
+import { attachPollWaitOwner, type PollWaitOwner } from './poll-wait-owner.ts';
 import {
   initialSocketAttribution,
   SESSION_TOKEN_NOTIFICATION,
@@ -170,6 +172,7 @@ export class WhatSoupSocketServer {
       const clientId = ++clientCounter;
       // SP11: Clone base session for this connection
       const abortController = new AbortController();
+      let pollWaitOwner: PollWaitOwner | undefined;
       const connSession: SessionContext = {
         ...this.baseSession,
         abortSignal: abortController.signal,
@@ -251,6 +254,9 @@ export class WhatSoupSocketServer {
           // notification.
           if (req.id === undefined && req.method === SESSION_TOKEN_NOTIFICATION && connSession.callerAttribution) {
             connSession.callerAttribution = withPresentedToken(connSession.callerAttribution, req.params, this.sessionTokens);
+            pollWaitOwner = connSession.callerAttribution.tokenResult === 'match'
+              ? this.sessionTokens?.resolvePollWaitOwner?.(isRecord(req.params) ? req.params['token'] : undefined)
+              : undefined;
             continue;
           }
 
@@ -278,6 +284,7 @@ export class WhatSoupSocketServer {
             connSession,
             this.executingSessionResolver(),
           );
+          attachPollWaitOwner(requestSession, pollWaitOwner);
           void this.handleRequest(req, requestSession).then((response) => {
             if (response !== null) {
               writeResponse(response, 'failed to write response');

@@ -10,7 +10,7 @@ export function clampPollTimeoutMs(timeoutMs: number): number {
 }
 
 export function blockingPollWaitMs(toolName: string, toolInput: Record<string, unknown> | undefined): number {
-  if (toolName !== 'send_poll' && !toolName.endsWith('__send_poll')) return 0;
+  if (toolName !== 'send_poll' && toolName !== 'mcp__whatsoup__send_poll') return 0;
   if (toolInput?.['awaitResult'] !== true) return 0;
   const timeoutMs = toolInput['timeoutMs'];
   return clampPollTimeoutMs(typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) ? timeoutMs : DEFAULT_POLL_TIMEOUT_MS);

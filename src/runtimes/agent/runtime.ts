@@ -10600,6 +10600,7 @@ export class AgentRuntime implements Runtime {
       whatsoupInstance: this.instanceName,
       whatsoupMcpSocket: mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
       whatsoupMcpSessionToken: this.sessionTokens.mint(),
+      mintOpenCodeMcpSessionToken: (owner) => this.sessionTokens.mint(owner),
       providerTransitionReady,
       handoffSystemBlock: this.buildHandoffSystemBlock(sessionConversationKey, route ? route.provider : this.effectiveProvider),
       degradedCapabilitiesBlock: managedLoopDegraded

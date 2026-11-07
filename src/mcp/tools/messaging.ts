@@ -48,6 +48,7 @@ import type { ResolutionStrategy } from '../../runtimes/agent/runtime.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 import { CrossConversationDenied } from '../cross-conversation-guard.ts';
+import { beginPollWait } from '../poll-wait-owner.ts';
 
 // ---------------------------------------------------------------------------
 // Error sanitization — prevent raw API/protocol errors from leaking to agents
@@ -874,14 +875,19 @@ export function registerMessagingTools(
           if (abortSignal?.aborted) {
             return { sent: true, pollId: result.waMessageId, question: safeQuestion, options: safeOptions, selectableCount: resolvedSelectableCount, error: 'Poll cancelled before await began', awaitFailed: true };
           }
+          let finishWait: (() => void) | undefined;
           try {
-            const answer = await deps.pollRegistrar.register(
+            const pendingAnswer = deps.pollRegistrar.register(
               result.waMessageId, chatJid, safeOptions,
               resolvedResolution, resolvedTimeoutMs, abortSignal,
             );
+            finishWait = beginPollWait(_session, resolvedTimeoutMs);
+            const answer = await pendingAnswer;
             return { sent: true, pollId: result.waMessageId, question: safeQuestion, options: safeOptions, selectableCount: resolvedSelectableCount, answer };
           } catch (err) {
             return { sent: true, pollId: result.waMessageId, question: safeQuestion, options: safeOptions, selectableCount: resolvedSelectableCount, error: 'Poll timed out or was cancelled', awaitFailed: true };
+          } finally {
+            finishWait?.();
           }
         }
 

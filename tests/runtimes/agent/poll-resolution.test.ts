@@ -53,6 +53,7 @@ describe('blockingPollWaitMs', () => {
   it.each([
     ['send_poll', { awaitResult: true }, 3_600_000],
     ['mcp__whatsoup__send_poll', { awaitResult: true, timeoutMs: 600_000 }, 600_000],
+    ['mcp__unrelated__send_poll', { awaitResult: true, timeoutMs: 600_000 }, 0],
     ['send_poll', { awaitResult: true, timeoutMs: 0 }, 1_000],
     ['send_poll', { awaitResult: true, timeoutMs: 100_000_000 }, 86_400_000],
     ['send_poll', { awaitResult: true, timeoutMs: Number.NaN }, 3_600_000],

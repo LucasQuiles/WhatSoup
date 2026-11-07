@@ -9,6 +9,9 @@ import { createProfileRegistry } from '../../../src/core/profiles.ts';
 import { createOutboundSendsWriter } from '../../../src/core/outbound-sends.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import { emitAlertChecked } from '../../../src/lib/emit-alert.ts';
+import { ToolRegistry as ProductionToolRegistry } from '../../../src/mcp/registry.ts';
+import { resolveSessionContext } from '../../../src/mcp/types.ts';
+import { attachPollWaitOwner } from '../../../src/mcp/poll-wait-owner.ts';
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlertChecked: vi.fn(() => true),
@@ -1526,6 +1529,63 @@ describe('registerMessagingTools', () => {
   // ── send_poll ─────────────────────────────────────────────────────────────
 
   describe('send_poll', () => {
+    it.each(['vote', 'expiry', 'abort'] as const)('releases the requesting turn wait after %s', async (outcome) => {
+      const localRegistry = new ProductionToolRegistry();
+      const registrar = makeFakePollRegistrar();
+      registerMessagingTools(localRegistry, depsWithRegistrar(deps, registrar));
+      const controller = new AbortController();
+      const session = resolveSessionContext(
+        { ...chatSession('poll-owner', 'poll-owner@s.whatsapp.net'), abortSignal: controller.signal },
+        { actorJid: undefined, purpose: undefined, conversationKey: 'poll-owner' },
+      );
+      const finish = vi.fn();
+      const begin = vi.fn(() => {
+        expect(registrar.calls).toHaveLength(1);
+        return finish;
+      });
+      attachPollWaitOwner(session, { begin });
+
+      const pending = localRegistry.call('send_poll', {
+        question: 'Pick', options: ['A', 'B'], awaitResult: true, timeoutMs: 5000,
+      }, session);
+      await vi.waitFor(() => expect(begin).toHaveBeenCalledWith(5000));
+      expect(finish).not.toHaveBeenCalled();
+      if (outcome === 'vote') registrar.resolveLast('A');
+      else if (outcome === 'expiry') registrar.rejectLast(new Error('expired'));
+      else controller.abort();
+
+      const result = await pending;
+      const body = JSON.parse(result.content[0].text);
+      expect(body.sent).toBe(true);
+      if (outcome === 'vote') expect(body.answer).toBe('A');
+      else expect(body.awaitFailed).toBe(true);
+      expect(begin).toHaveBeenCalledOnce();
+      expect(finish).toHaveBeenCalledOnce();
+    });
+
+    it.each(['nonblocking', 'untracked', 'registration-error'] as const)(
+      'does not extend the requesting turn for a %s poll', async (condition) => {
+        const localRegistry = new ProductionToolRegistry();
+        const registrar = makeFakePollRegistrar();
+        const localDeps = condition === 'untracked' ? deps : depsWithRegistrar(deps, registrar);
+        if (condition === 'registration-error') {
+          registrar.register = () => { throw new Error('registration failed'); };
+        }
+        registerMessagingTools(localRegistry, localDeps);
+        const session = resolveSessionContext(
+          chatSession('poll-owner', 'poll-owner@s.whatsapp.net'),
+          { actorJid: undefined, purpose: undefined, conversationKey: 'poll-owner' },
+        );
+        const begin = vi.fn();
+        attachPollWaitOwner(session, { begin });
+        const result = await localRegistry.call('send_poll', {
+          question: 'Pick', options: ['A', 'B'], awaitResult: condition !== 'nonblocking',
+        }, session);
+        expect(JSON.parse(result.content[0].text)).toMatchObject({ sent: true });
+        expect(begin).not.toHaveBeenCalled();
+      },
+    );
+
     it('advertises portable usage guidance in the MCP schema', () => {
       const session = chatSession('poll-chat', 'poll-chat@s.whatsapp.net');
       const tool = registry.listTools(session).find((candidate) => candidate.name === 'send_poll');
