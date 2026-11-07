@@ -8,6 +8,11 @@ import {
   type DurabilityEngine,
 } from '../../core/durability.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
+import {
+  getTransportInboundContext,
+  withTransportInboundContext,
+  type TransportInboundContext,
+} from '../../core/transport-inbound-context.ts';
 import { createChildLogger } from '../../logger.ts';
 import { jitteredDelay, MAX_TIMER_DELAY_MS } from '../../core/retry.ts';
 import { canSendToGroup, recordGroupOutbound } from '../../core/echo-guard.ts';
@@ -98,8 +103,8 @@ export interface OutboundQueueOptions {
   readonly clientOutputPolicies?: ClientOutputPolicyRegistry;
 }
 
-interface QueuedOutboundChunk {
-  readonly text: string;
+interface OutboundAttribution {
+  readonly authorityContext: TransportInboundContext | undefined;
   readonly role: OutboundMessageRole;
   readonly turnId: string | undefined;
   readonly turnEvidenceEpoch: number | undefined;
@@ -108,28 +113,18 @@ interface QueuedOutboundChunk {
   readonly sourceInboundSeq: number | undefined;
 }
 
-interface BufferedStreamPart {
+interface QueuedOutboundChunk extends OutboundAttribution {
+  readonly text: string;
+}
+
+interface BufferedStreamPart extends OutboundAttribution {
   readonly text: string;
   readonly onCommit?: () => void;
-  readonly role: OutboundMessageRole;
-  readonly turnId: string | undefined;
-  readonly turnEvidenceEpoch: number | undefined;
-  readonly chatJid: string;
-  readonly conversationKey: string;
-  readonly sourceInboundSeq: number | undefined;
 }
 
-interface BufferedToolUpdate {
+interface BufferedToolUpdate extends OutboundAttribution {
   readonly update: ToolUpdate;
-  readonly role: OutboundMessageRole;
-  readonly turnId: string | undefined;
-  readonly turnEvidenceEpoch: number | undefined;
-  readonly chatJid: string;
-  readonly conversationKey: string;
-  readonly sourceInboundSeq: number | undefined;
 }
-
-type OutboundAttribution = Omit<QueuedOutboundChunk, 'text'>;
 
 // QR-126 chunk cap (MAX_CHUNKS) and message shaping live in whatsapp-format.ts.
 // Exported so tests can import the exact values rather than hardcoding them.
@@ -625,6 +620,7 @@ export class OutboundQueue implements IOutboundQueue {
     const turn = this.activeTurnEvidence?.attribution;
     const owner = this.turnEvidenceDetached ? undefined : this.activeTurnEvidence;
     return {
+      authorityContext: getTransportInboundContext(),
       role,
       turnId: owner?.turnId,
       turnEvidenceEpoch: owner?.epoch,
@@ -638,7 +634,9 @@ export class OutboundQueue implements IOutboundQueue {
     left: OutboundAttribution,
     right: OutboundAttribution,
   ): boolean {
-    return left.role === right.role
+    return left.authorityContext?.inbound_event_id === right.authorityContext?.inbound_event_id
+      && left.authorityContext?.operation_id === right.authorityContext?.operation_id
+      && left.role === right.role
       && left.turnId === right.turnId
       && left.turnEvidenceEpoch === right.turnEvidenceEpoch
       && left.chatJid === right.chatJid
@@ -850,7 +848,9 @@ export class OutboundQueue implements IOutboundQueue {
         // replay and the empty-turn fallback. The policy decision satisfies the
         // reply guarantee (#3613); the turn evidence records the withholding.
         this.enqueuePreparedText(text, attribution);
-        for (const part of group) part.onCommit?.();
+        for (const part of group) {
+          withTransportInboundContext(part.authorityContext, () => part.onCommit?.());
+        }
       }
       group = [];
     };
@@ -1310,15 +1310,24 @@ export class OutboundQueue implements IOutboundQueue {
           0,
         );
         if (options.salvageOwedReply === true) {
-          const lastBatch = owed[owed.length - 1];
-          const { text: _text, onCommit: _onCommit, ...batchAttribution } = lastBatch[0];
-          const attribution: OutboundAttribution = { ...batchAttribution, role: 'status' };
-          this.enqueuePreparedText(
-            `${SALVAGED_REPLY_NOTICE}\n\n${owed
-              .map((batch) => batch.map((part) => part.text).join(''))
-              .join('\n\n')}`,
-            attribution,
-          );
+          const groups: Array<{ attribution: OutboundAttribution; texts: string[] }> = [];
+          for (const batch of owed) {
+            const { text: _text, onCommit: _onCommit, ...batchAttribution } = batch[0];
+            const attribution: OutboundAttribution = { ...batchAttribution, role: 'status' };
+            const text = batch.map((part) => part.text).join('');
+            const group = groups.at(-1);
+            if (group && OutboundQueue.sameAttribution(group.attribution, attribution)) {
+              group.texts.push(text);
+            } else {
+              groups.push({ attribution, texts: [text] });
+            }
+          }
+          for (const group of groups) {
+            this.enqueuePreparedText(
+              `${SALVAGED_REPLY_NOTICE}\n\n${group.texts.join('\n\n')}`,
+              group.attribution,
+            );
+          }
           log.warn(
             { chatJid: this.deliveryJid, batchCount, characterCount },
             'crash abort salvaged undelivered assistant text as owed-reply fallback',
@@ -1591,23 +1600,6 @@ export class OutboundQueue implements IOutboundQueue {
 
     const buffered = this.toolBuffer;
     this.toolBuffer = [];
-    if (this.toolUpdateRedirectJid !== null) {
-      const redirectJid = this.toolUpdateRedirectJid;
-      const statusText = this.renderToolUpdates(buffered.map(({ update }) => update));
-      const safeStatusText = redactInternalArtifacts(
-        statusText,
-        resolveOutboundAudience(redirectJid),
-      ).text;
-      this.chain = this.chain.then(async () => {
-        try {
-          await this.messenger.sendMessage(redirectJid, safeStatusText);
-        } catch (err) {
-          log.warn({ err, target: redirectJid, textLength: safeStatusText.length }, 'tool-status redirect send failed');
-        }
-      });
-      return;
-    }
-
     const batches: Array<{ attribution: OutboundAttribution; updates: ToolUpdate[] }> = [];
     for (const item of buffered) {
       const batch = batches.at(-1);
@@ -1620,6 +1612,21 @@ export class OutboundQueue implements IOutboundQueue {
     }
 
     for (const batch of batches) {
+      if (this.toolUpdateRedirectJid !== null) {
+        const redirectJid = this.toolUpdateRedirectJid;
+        const safeStatusText = redactInternalArtifacts(
+          this.renderToolUpdates(batch.updates),
+          resolveOutboundAudience(redirectJid),
+        ).text;
+        this.chain = this.chain.then(() => withTransportInboundContext(batch.attribution.authorityContext, async () => {
+          try {
+            await this.messenger.sendMessage(redirectJid, safeStatusText);
+          } catch (err) {
+            log.warn({ err, target: redirectJid, textLength: safeStatusText.length }, 'tool-status redirect send failed');
+          }
+        }));
+        continue;
+      }
       if (this.statusBudgetExhausted(batch.attribution)) continue;
       this.flushStreamBuffer();
       this.markVisibleTextDelivered();
@@ -1686,7 +1693,7 @@ export class OutboundQueue implements IOutboundQueue {
       .then(async () => {
         while (this.sendQueue.length > 0) {
           const chunk = this.sendQueue[0]!;
-          await this.sendWithPacing(chunk);
+          await withTransportInboundContext(chunk.authorityContext, () => this.sendWithPacing(chunk));
           this.sendQueue.shift();
           // WA clears the composing indicator on message delivery. Re-assert
           // it immediately so there's no visible gap between mid-turn messages

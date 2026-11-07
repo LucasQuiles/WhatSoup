@@ -15,6 +15,7 @@
 import { REQUIRES_WHATSAPP_DETAIL, UnsupportedTransportOperationError } from '../unsupported-operation.ts';
 import { EventEmitter } from 'node:events';
 import { createChildLogger } from '../../logger.ts';
+import { dispatchInboundMessage } from '../inbound-dispatch.ts';
 import { isNonEmptyString } from '../../lib/type-guards.ts';
 import type { InboundMessage as ContractInboundMessage } from '../contract/events.ts';
 import type { RuntimeConnection } from '../runtime-connection.ts';
@@ -98,7 +99,7 @@ export class ImessageConnection extends EventEmitter implements RuntimeConnectio
   botLid: string | null = null;
 
   /** Consumer: main.ts:333 (createIngestHandler wires this); ingest.ts:138 */
-  onMessage: ((msg: IncomingMessage) => void) | null = null;
+  onMessage: ((msg: IncomingMessage) => void | Promise<void>) | null = null;
 
   /** Consumer: main.ts:745/754/757 */
   readonly contactsDir = new ContactsDirectory();
@@ -139,9 +140,10 @@ export class ImessageConnection extends EventEmitter implements RuntimeConnectio
     // deliver each message twice.
     this.messageSubscription?.dispose();
     this.messageSubscription = this.adapter.on('message', (msg: ContractInboundMessage) => {
-      if (this.onMessage !== null) {
-        this.onMessage(contractToIncoming(msg, this.adapter.isGroupConversation(msg.conversation)));
-      }
+      dispatchInboundMessage(
+        () => this.onMessage?.(contractToIncoming(msg, this.adapter.isGroupConversation(msg.conversation))),
+        (err) => this.log.error({ err, messageId: msg.ref.id }, 'inbound message handler failed'),
+      );
     });
 
     // Surface background transport errors (poll failures, auth-stop) in the
