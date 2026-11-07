@@ -2026,8 +2026,11 @@ async applyRuntimeTurnPostEffects(
     ledger.presentationCleared = true;
     if (result.kind === 'terminal' && !ledger.afterTerminalActionRun) {
       ledger.afterTerminalActionRun = true;
-      const action = this.runRuntimeTurnAfterTerminalAction(context, result);
-      if (action) await action;
+      let action = this.runRuntimeTurnAfterTerminalAction(context, result);
+      while (action) {
+        await action;
+        action = this.runRuntimeTurnAfterTerminalAction(context, result);
+      }
     }
     if (!ledger.completionSettled) {
       if (!this.resolveOwnedPerChatCompletion(context)) {
@@ -2087,8 +2090,11 @@ async applyRuntimeTurnPostEffects(
     }
     if (result.kind === 'terminal' && !ledger.afterTerminalActionRun) {
       ledger.afterTerminalActionRun = true;
-      const action = this.runRuntimeTurnAfterTerminalAction(context, result);
-      if (action) await action;
+      let action = this.runRuntimeTurnAfterTerminalAction(context, result);
+      while (action) {
+        await action;
+        action = this.runRuntimeTurnAfterTerminalAction(context, result);
+      }
     }
     if (!ledger.completionSettled) {
       // Settled after the after-terminal action so the next turn sees any
@@ -2129,8 +2135,11 @@ async applyRuntimeTurnPostEffects(
     }
     if (result.kind === 'terminal' && !ledger.afterTerminalActionRun) {
       ledger.afterTerminalActionRun = true;
-      const action = this.runRuntimeTurnAfterTerminalAction(context, result);
-      if (action) await action;
+      let action = this.runRuntimeTurnAfterTerminalAction(context, result);
+      while (action) {
+        await action;
+        action = this.runRuntimeTurnAfterTerminalAction(context, result);
+      }
     }
     if (!ledger.completionSettled) {
       const completion = this.host.currentRuntimeTurnCompletion;
@@ -2163,14 +2172,20 @@ runRuntimeTurnAfterTerminalAction(
   result: Extract<FinalizeRuntimeTurnResult, { kind: 'terminal' }>,
 ): Promise<void> | null {
   const turnId = context.identity.logicalTurnId;
-  const action = this.host.runtimeTurnAfterTerminal.get(turnId);
+  let action = this.host.runtimeTurnAfterTerminal.get(turnId);
   if (!action) return null;
   this.host.runtimeTurnAfterTerminal.delete(turnId);
-  return Promise.resolve()
-    .then(() => action(result))
-    .catch((err: unknown) => {
-      log.error({ err, logicalTurnId: turnId }, 'runtime after-terminal action failed');
-    });
+  return Promise.resolve().then(async () => {
+    while (action) {
+      try {
+        await action(result);
+      } catch (err: unknown) {
+        log.error({ err, logicalTurnId: turnId }, 'runtime after-terminal action failed');
+      }
+      action = this.host.runtimeTurnAfterTerminal.get(turnId);
+      if (action) this.host.runtimeTurnAfterTerminal.delete(turnId);
+    }
+  });
 }
 
 flushUnownedRuntimeResult(

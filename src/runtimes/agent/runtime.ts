@@ -3578,7 +3578,13 @@ export class AgentRuntime implements Runtime {
           .find((context) => context.identity.conversationKey === conversationKey)
         ?? [...this.perChatTurnQueues.values()]
           .map((queue) => queue.activeTurn?.runtimeContext)
-          .find((context) => context?.identity.conversationKey === conversationKey);
+          // A processor can retain its active turn after completion ownership ends.
+          .find((context) => (
+            context?.identity.conversationKey === conversationKey
+            && [...this.perChatRuntimeTurnCompletions.values()].some(
+              (completion) => completion.context.identity.logicalTurnId === context.identity.logicalTurnId,
+            )
+          ));
     if (deferIfActive && activeContext) {
       const turnId = activeContext.identity.logicalTurnId;
       const priorAction = this.runtimeTurnAfterTerminal.get(turnId);
