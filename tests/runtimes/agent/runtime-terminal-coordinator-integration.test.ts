@@ -1432,6 +1432,8 @@ describe('runtime terminal coordinator integration', () => {
         '15550199924@s.whatsapp.net',
       );
       expect(queue.updateDeliveryJid).not.toHaveBeenCalled();
+      expect(state.chatQueues.get(mapKey)).toBe(queue);
+      expect(state.perChatTurnQueues.get(mapKey)?.activeTurn).toBe(turn);
 
       await expect(state.runtimeTurnCoordinator.retryRuntimeTurnFinalizations()).resolves.toMatchObject({
         recovered: 1,
