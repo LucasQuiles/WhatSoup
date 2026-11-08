@@ -227,7 +227,11 @@ import {
   markRuntimeTurnReplayUnsafe,
   type RuntimeTurnContext,
 } from './runtime-turn-context.ts';
-import { resolveResumeIdentity, type PersistedResumeIdentity } from './resume-identity.ts';
+import {
+  resolveResumeIdentity,
+  completedDeliveryIdentityAdmissionReason,
+  type PersistedResumeIdentity,
+} from './resume-identity.ts';
 import type { FinalizeRuntimeTurnResult } from './turn-finalizer.ts';
 import { OPERATOR_CANCELLATION_ATTEMPT_OUTCOME } from './turn-terminal.ts';
 import { RuntimeTurnSupervisor } from './runtime-turn-supervisor.ts';
@@ -251,6 +255,7 @@ import {
 } from './pending-system-result-tracker.ts';
 import {
   decideProviderEventAdmission,
+  resolveProviderEventOwner,
   systemPurposeAllowsOutput,
   type ProviderEventOwner,
 } from './runtime-event-admission.ts';
@@ -3878,35 +3883,6 @@ export class AgentRuntime implements Runtime {
     return checkpointCompletedIdentityIsAdmissionRejected(this.db, checkpoint) ? null : identity;
   }
 
-  private completedDeliveryIdentityAdmissionReason(
-    checkpoint: SessionCheckpointRow | undefined,
-    expectedScope: PersistedResumeIdentity['scope'],
-  ): 'missing' | 'invalid' | 'scope_mismatch' {
-    if (checkpoint === undefined) return 'missing';
-    const fields = [
-      checkpoint.completed_scope,
-      checkpoint.completed_delivery_jid,
-      checkpoint.completed_delivery_namespace,
-      checkpoint.completed_inbound_seq,
-      checkpoint.completed_logical_turn_id,
-      checkpoint.completed_manager_id,
-      checkpoint.completed_generation,
-    ];
-    if (fields.some((field) => field === null || field === undefined)) return 'missing';
-    const identity = resolveResumeIdentity({
-      scope: checkpoint.completed_scope,
-      conversationKey: checkpoint.conversation_key,
-      deliveryJid: checkpoint.completed_delivery_jid,
-      deliveryNamespace: checkpoint.completed_delivery_namespace,
-      inboundSeq: checkpoint.completed_inbound_seq,
-      logicalTurnId: checkpoint.completed_logical_turn_id,
-      managerId: checkpoint.completed_manager_id,
-      generation: checkpoint.completed_generation,
-    });
-    if (identity === null) return 'invalid';
-    return identity.scope === expectedScope ? 'invalid' : 'scope_mismatch';
-  }
-
   private completedDeliveryIdentityAdmissionHealth(): {
     unresolvedCount: number;
     oldestTransitionAt: string | null;
@@ -4213,7 +4189,7 @@ export class AgentRuntime implements Runtime {
 
         const resumeIdentity = this.checkpointResumeIdentity(full, 'per_chat');
         if (!resumeIdentity) {
-          const admissionReason = this.completedDeliveryIdentityAdmissionReason(full, 'per_chat');
+          const admissionReason = completedDeliveryIdentityAdmissionReason(full, 'per_chat');
           this.recordProactiveResumeIdentityReject(
             cp.conversation_key,
             admissionReason === 'scope_mismatch'
@@ -4403,7 +4379,7 @@ export class AgentRuntime implements Runtime {
         ? this.checkpointResumeIdentity(checkpoint, expectedScope)
         : null;
       if (!priorResumeIdentity) {
-        const admissionReason = this.completedDeliveryIdentityAdmissionReason(checkpoint, expectedScope);
+        const admissionReason = completedDeliveryIdentityAdmissionReason(checkpoint, expectedScope);
         this.recordProactiveResumeIdentityReject(
           checkpoint?.conversation_key ?? null,
           admissionReason === 'scope_mismatch'
@@ -6641,34 +6617,6 @@ export class AgentRuntime implements Runtime {
    * Resolves queue and session locally from the mapKey to avoid mutating shared
    * instance fields that another concurrent chat could overwrite.
    */
-  private resolveProviderEventOwner(
-    event: AgentEvent,
-    logicalOwnerMatches: boolean,
-    systemTurn: PendingSystemTurnSnapshot | null,
-  ): { owner: ProviderEventOwner; systemTurn: PendingSystemTurnSnapshot | null } {
-    if (systemTurn) {
-      const systemOwner: ProviderEventOwner = {
-        kind: 'system_request',
-        purpose: systemTurn.purpose,
-      };
-      const systemDecision = decideProviderEventAdmission(event, systemOwner);
-      if (
-        event.type === 'result'
-        || !logicalOwnerMatches
-        || (event.type === 'compact_boundary' && systemDecision.admit)
-      ) {
-        return { owner: systemOwner, systemTurn };
-      }
-    }
-    if (logicalOwnerMatches) {
-      return { owner: { kind: 'logical_turn' }, systemTurn: null };
-    }
-    if (event.type === 'init') {
-      return { owner: { kind: 'session_accounting' }, systemTurn: null };
-    }
-    return { owner: { kind: 'none' }, systemTurn: null };
-  }
-
   private rejectProviderEvent(
     eventType: AgentEvent['type'],
     runtimeScope: 'per_chat' | 'singleton_shared',
@@ -7116,7 +7064,7 @@ export class AgentRuntime implements Runtime {
       && systemTurn.owner.managerId === managerId
       && systemTurn.owner.generation === generationOwner.generation
       && systemTurn.owner.toolScopeKey === toolScopeKey;
-    const resolved = this.resolveProviderEventOwner(
+    const resolved = resolveProviderEventOwner(
       event,
       logicalOwnerMatches,
       systemOwnerMatches ? systemTurn : null,
@@ -12189,7 +12137,7 @@ export class AgentRuntime implements Runtime {
       && systemTurn.owner.managerId === managerId
       && systemTurn.owner.generation === 1
       && systemTurn.owner.toolScopeKey === GLOBAL_TOOL_SCOPE_KEY;
-    const resolved = this.resolveProviderEventOwner(
+    const resolved = resolveProviderEventOwner(
       event,
       logicalOwnerMatches,
       systemOwnerMatches ? systemTurn : null,

@@ -534,13 +534,12 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 // ─── Import after mocks ───────────────────────────────────────────────────────
 
 import * as registerAllModule from '../../../src/mcp/register-all.ts';
-import { AgentRuntime, serializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
+import { AgentRuntime, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
 import { parseGeminiAcpEvent } from '../../../src/runtimes/agent/providers/gemini-acp-parser.ts';
 import { __resetModelCatalogueCacheForTest } from '../../../src/runtimes/agent/model-catalogue-resolver.ts';
 import { providerServerErrorNoFallbackNotice, providerUnknownTerminalNotice, renderUserMessage } from '../../../src/runtimes/agent/response-templates.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { TurnQueue } from '../../../src/runtimes/agent/turn-queue.ts';
-import type { SessionContext } from '../../../src/mcp/types.ts';
 import { Database as RealDatabase } from '../../../src/core/database.ts';
 import { DurabilityEngine, type SessionCheckpointRow } from '../../../src/core/durability.ts';
 import { getRecentMessages } from '../../../src/core/messages.ts';
@@ -555,7 +554,8 @@ import {
   getPerChatCleanupState, setOwnedTestSession, type PendingSystemResultTrackerView,
   pendingSystemResults, markOwnedSystemTurn, publishSingletonTestOwner,
   handlePerChatProviderEvent, currentCrashIdentity, awaitDispatchedTurn, retireDispatchedTurn,
-  type AutoCompactView, type ImageCoalescerView,
+  type AutoCompactView, type ImageCoalescerView, makePollMessenger, makeRealDb, buildPayload,
+  insertRow, makeDbWithTokenRow, makeBindingRuntime,
 } from './lib/runtime-mock-scaffold.ts';
 
 // ─── Coupled helpers (hoisting-pinned, cannot leave this file) ────────────────
@@ -12090,38 +12090,6 @@ describe('AgentRuntime', () => {
   // ═══════════════════════════════════════════════════════════════════════════
 
   describe('AskUserQuestion poll bridge queue behavior', () => {
-    // Build a messenger with sendPollMessage and event subscription support
-    function makePollMessenger(
-      sendResult: { waMessageId: string | null; hasSecret: boolean }
-        | Array<{ waMessageId: string | null; hasSecret: boolean }>,
-    ) {
-      const sentMessages: Array<{ jid: string; text: string }> = [];
-      const pollSends: Array<{ chatJid: string; name: string; values: string[]; selectableCount: number }> = [];
-      const eventHandlers = new Map<string, Function>();
-      let sendIndex = 0;
-
-      const messenger = {
-        sendMessage: vi.fn(async (jid: string, text: string) => {
-          sentMessages.push({ jid, text });
-          return { waMessageId: null };
-        }),
-        sendMedia: vi.fn(async () => ({ waMessageId: null })),
-        // ConnectionManager-shaped additions for poll bridge
-        sendPollMessage: vi.fn(async (chatJid: string, name: string, values: string[], selectableCount: number) => {
-          pollSends.push({ chatJid, name, values, selectableCount });
-          if (Array.isArray(sendResult)) {
-            return sendResult[Math.min(sendIndex++, sendResult.length - 1)];
-          }
-          return sendResult;
-        }),
-        on: vi.fn((event: string, handler: Function) => {
-          eventHandlers.set(event, handler);
-          return messenger;
-        }),
-      };
-      return { messenger: messenger as unknown as Messenger, sentMessages, pollSends, eventHandlers };
-    }
-
     function sendTurnTexts(): string[] {
       return mockSession.sendTurn.mock.calls.map((call) => String((call as unknown as [unknown])[0]));
     }
@@ -14190,52 +14158,6 @@ describe('AgentRuntime', () => {
   // ── P2 hardening: rehydrate consolidation + persistence error counter ─────
 
   describe('poll persistence hardening', () => {
-    function makeRealDb(): RealDatabase {
-      const db = new RealDatabase(':memory:');
-      db.open();
-      return db;
-    }
-
-    function buildPayload(overrides: Partial<PendingPollQuestion>): string {
-      const pending: PendingPollQuestion = {
-        questions: [{
-          question: 'Pick',
-          header: 'H',
-          options: [{ label: 'A', description: '' }, { label: 'B', description: '' }],
-          multiSelect: false,
-        }],
-        toolId: 'tool-x',
-        chatJid: 'chat@g.us',
-        chatJidAliases: new Set(['chat@g.us']),
-        mode: 'poll',
-        pollMessageIdToQuestionIndex: new Map([['POLL_X', 0]]),
-        currentQuestionIndex: 0,
-        answersCollected: {},
-        createdAt: 1_700_000_000_000,
-        resolution: 'first-vote-wins',
-        timeoutMs: 3_600_000,
-        votesByQuestion: new Map(),
-        adminJids: null,
-        source: 'askuser',
-        sentPollMessageIds: ['POLL_X'],
-        ...overrides,
-      };
-      return JSON.stringify(serializePendingPoll(pending));
-    }
-
-    function insertRow(
-      db: RealDatabase,
-      mapKey: string,
-      chatJid: string,
-      hardClosesAt: number | null,
-      payload: string,
-    ): void {
-      db.raw.prepare(
-        `INSERT INTO pending_polls (map_key, chat_jid, tool_id, source, resolution, payload, created_at, closes_at, hard_closes_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(mapKey, chatJid, mapKey, 'askuser', 'first-vote-wins', payload, 1_700_000_000_000, hardClosesAt, hardClosesAt);
-    }
-
     it('rehydrate consolidates expired-during-downtime notices to one message per chat', async () => {
       const db = makeRealDb();
       const { messenger, sentMessages } = makeMessenger();
@@ -14550,23 +14472,6 @@ describe('AgentRuntime', () => {
   describe('admin session commands', () => {
     const adminSender = '15550100001@s.whatsapp.net';
     const nonAdminSender = '15559998888@s.whatsapp.net';
-
-    /**
-     * Mock Database whose prepared SELECT against agent_sessions returns a
-     * controlled token row. Used to exercise the token-formatting branches in
-     * the /sessions handler (>1000 → "k" suffix vs raw count).
-     */
-    function makeDbWithTokenRow(
-      tokenRow: { total_input_tokens: number | null; total_output_tokens: number | null } | undefined,
-    ): Database {
-      return {
-        assertWritableCompatibility: vi.fn(),
-        raw: {
-          prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn(() => tokenRow) })),
-          exec: vi.fn(),
-        },
-      } as unknown as Database;
-    }
 
     function makePerChatSession(active: boolean, dbRowId: number | null, startedAt: string | null) {
       return {
@@ -15454,26 +15359,6 @@ describe('AgentRuntime', () => {
   describe('cross-conversation binding invariant (#1095)', () => {
     const ALICE_JID = '15550100001@s.whatsapp.net';
     const BOB_JID = '15550100002@s.whatsapp.net';
-
-    type BindView = {
-      singletonProviderToolSession: SessionContext | null;
-      globalSocketServer: { updateConversationKey: (k: string | undefined) => void } | null;
-      enforceGlobalConversationBinding: (chatJid: string) => void;
-    };
-
-    function makeBindingRuntime(sessionScope: 'single' | 'shared' | 'per_chat'): {
-      view: BindView;
-      socketUpdates: Array<string | undefined>;
-    } {
-      const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { sessionScope });
-      const view = runtime as unknown as BindView;
-      const socketUpdates: Array<string | undefined> = [];
-      // singletonProviderToolSession is only ever tracked for single/shared spawns
-      // (trackSingletonMcpSession: true) — per_chat never sets it in production.
-      view.singletonProviderToolSession = sessionScope === 'per_chat' ? null : { tier: 'global' };
-      view.globalSocketServer = { updateConversationKey: (k) => { socketUpdates.push(k); } };
-      return { view, socketUpdates };
-    }
 
     it('pins an unbound shared/global session to the originating chat at turn dispatch (no drift error)', () => {
       const { view, socketUpdates } = makeBindingRuntime('shared');
@@ -16649,11 +16534,6 @@ describe('B3 inline imperative extractor — QR-143 transport gate', () => {
   const ADMIN_SMS = '+15550100001@sms'; // spoofable: same bare digits as admin
   const IMPERATIVE = 'remind me to call Alex Friday';
 
-  function makeRealDb(): RealDatabase {
-    const db = new RealDatabase(':memory:');
-    db.open();
-    return db;
-  }
   function proposedCount(db: RealDatabase): number {
     return (db.raw.prepare("SELECT COUNT(*) AS c FROM beads WHERE status = 'proposed'").get() as { c: number }).c;
   }

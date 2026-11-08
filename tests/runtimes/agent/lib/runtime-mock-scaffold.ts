@@ -10,7 +10,9 @@ import type { AgentEvent } from '../../../../src/runtimes/agent/stream-parser.ts
 import type { IOutboundQueue } from '../../../../src/runtimes/agent/outbound-queue.ts';
 import { createRuntimeTurnContext } from '../../../../src/runtimes/agent/runtime-turn-context.ts';
 import { createOpenCodeParser } from '../../../../src/runtimes/agent/providers/opencode-parser.ts';
-import { AgentRuntime, type PendingPollQuestion } from '../../../../src/runtimes/agent/runtime.ts';
+import { AgentRuntime, serializePendingPoll, type PendingPollQuestion } from '../../../../src/runtimes/agent/runtime.ts';
+import { Database as RealDatabase } from '../../../../src/core/database.ts';
+import type { SessionContext } from '../../../../src/mcp/types.ts';
 import type { SessionCheckpointRow } from '../../../../src/core/durability.ts';
 import type {
   MarkSystemTurnInput,
@@ -513,4 +515,121 @@ export function currentCrashIdentity(runtime: AgentRuntime, mapKey: string): {
       generation: owner.generation,
     },
   };
+}
+
+// ─── Suite fixtures moved from runtime.test.ts (#3717 file-size headroom) ──────
+
+// Build a messenger with sendPollMessage and event subscription support
+export function makePollMessenger(
+  sendResult: { waMessageId: string | null; hasSecret: boolean }
+    | Array<{ waMessageId: string | null; hasSecret: boolean }>,
+) {
+  const sentMessages: Array<{ jid: string; text: string }> = [];
+  const pollSends: Array<{ chatJid: string; name: string; values: string[]; selectableCount: number }> = [];
+  const eventHandlers = new Map<string, Function>();
+  let sendIndex = 0;
+
+  const messenger = {
+    sendMessage: vi.fn(async (jid: string, text: string) => {
+      sentMessages.push({ jid, text });
+      return { waMessageId: null };
+    }),
+    sendMedia: vi.fn(async () => ({ waMessageId: null })),
+    // ConnectionManager-shaped additions for poll bridge
+    sendPollMessage: vi.fn(async (chatJid: string, name: string, values: string[], selectableCount: number) => {
+      pollSends.push({ chatJid, name, values, selectableCount });
+      if (Array.isArray(sendResult)) {
+        return sendResult[Math.min(sendIndex++, sendResult.length - 1)];
+      }
+      return sendResult;
+    }),
+    on: vi.fn((event: string, handler: Function) => {
+      eventHandlers.set(event, handler);
+      return messenger;
+    }),
+  };
+  return { messenger: messenger as unknown as Messenger, sentMessages, pollSends, eventHandlers };
+}
+
+export function makeRealDb(): RealDatabase {
+  const db = new RealDatabase(':memory:');
+  db.open();
+  return db;
+}
+
+export function buildPayload(overrides: Partial<PendingPollQuestion>): string {
+  const pending: PendingPollQuestion = {
+    questions: [{
+      question: 'Pick',
+      header: 'H',
+      options: [{ label: 'A', description: '' }, { label: 'B', description: '' }],
+      multiSelect: false,
+    }],
+    toolId: 'tool-x',
+    chatJid: 'chat@g.us',
+    chatJidAliases: new Set(['chat@g.us']),
+    mode: 'poll',
+    pollMessageIdToQuestionIndex: new Map([['POLL_X', 0]]),
+    currentQuestionIndex: 0,
+    answersCollected: {},
+    createdAt: 1_700_000_000_000,
+    resolution: 'first-vote-wins',
+    timeoutMs: 3_600_000,
+    votesByQuestion: new Map(),
+    adminJids: null,
+    source: 'askuser',
+    sentPollMessageIds: ['POLL_X'],
+    ...overrides,
+  };
+  return JSON.stringify(serializePendingPoll(pending));
+}
+
+export function insertRow(
+  db: RealDatabase,
+  mapKey: string,
+  chatJid: string,
+  hardClosesAt: number | null,
+  payload: string,
+): void {
+  db.raw.prepare(
+    `INSERT INTO pending_polls (map_key, chat_jid, tool_id, source, resolution, payload, created_at, closes_at, hard_closes_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(mapKey, chatJid, mapKey, 'askuser', 'first-vote-wins', payload, 1_700_000_000_000, hardClosesAt, hardClosesAt);
+}
+
+/**
+ * Mock Database whose prepared SELECT against agent_sessions returns a
+ * controlled token row. Used to exercise the token-formatting branches in
+ * the /sessions handler (>1000 → "k" suffix vs raw count).
+ */
+export function makeDbWithTokenRow(
+  tokenRow: { total_input_tokens: number | null; total_output_tokens: number | null } | undefined,
+): Database {
+  return {
+    assertWritableCompatibility: vi.fn(),
+    raw: {
+      prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn(() => tokenRow) })),
+      exec: vi.fn(),
+    },
+  } as unknown as Database;
+}
+
+export type BindView = {
+  singletonProviderToolSession: SessionContext | null;
+  globalSocketServer: { updateConversationKey: (k: string | undefined) => void } | null;
+  enforceGlobalConversationBinding: (chatJid: string) => void;
+};
+
+export function makeBindingRuntime(sessionScope: 'single' | 'shared' | 'per_chat'): {
+  view: BindView;
+  socketUpdates: Array<string | undefined>;
+} {
+  const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { sessionScope });
+  const view = runtime as unknown as BindView;
+  const socketUpdates: Array<string | undefined> = [];
+  // singletonProviderToolSession is only ever tracked for single/shared spawns
+  // (trackSingletonMcpSession: true) — per_chat never sets it in production.
+  view.singletonProviderToolSession = sessionScope === 'per_chat' ? null : { tier: 'global' };
+  view.globalSocketServer = { updateConversationKey: (k) => { socketUpdates.push(k); } };
+  return { view, socketUpdates };
 }

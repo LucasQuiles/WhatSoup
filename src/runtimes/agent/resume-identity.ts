@@ -1,4 +1,5 @@
 import { toConversationKey } from '../../core/conversation-key.ts';
+import type { SessionCheckpointRow } from '../../core/durability.ts';
 import {
   parseWhatsAppDeliveryNamespace,
   type WhatsAppDeliveryNamespace,
@@ -74,4 +75,33 @@ export function resolveResumeIdentity(candidate: unknown): PersistedResumeIdenti
     managerId,
     generation,
   });
+}
+
+export function completedDeliveryIdentityAdmissionReason(
+  checkpoint: SessionCheckpointRow | undefined,
+  expectedScope: PersistedResumeIdentity['scope'],
+): 'missing' | 'invalid' | 'scope_mismatch' {
+  if (checkpoint === undefined) return 'missing';
+  const fields = [
+    checkpoint.completed_scope,
+    checkpoint.completed_delivery_jid,
+    checkpoint.completed_delivery_namespace,
+    checkpoint.completed_inbound_seq,
+    checkpoint.completed_logical_turn_id,
+    checkpoint.completed_manager_id,
+    checkpoint.completed_generation,
+  ];
+  if (fields.some((field) => field === null || field === undefined)) return 'missing';
+  const identity = resolveResumeIdentity({
+    scope: checkpoint.completed_scope,
+    conversationKey: checkpoint.conversation_key,
+    deliveryJid: checkpoint.completed_delivery_jid,
+    deliveryNamespace: checkpoint.completed_delivery_namespace,
+    inboundSeq: checkpoint.completed_inbound_seq,
+    logicalTurnId: checkpoint.completed_logical_turn_id,
+    managerId: checkpoint.completed_manager_id,
+    generation: checkpoint.completed_generation,
+  });
+  if (identity === null) return 'invalid';
+  return identity.scope === expectedScope ? 'invalid' : 'scope_mismatch';
 }
