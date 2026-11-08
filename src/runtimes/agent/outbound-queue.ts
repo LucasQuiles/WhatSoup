@@ -30,7 +30,7 @@ import { formatProviderErrorForUser } from '../../lib/provider-errors.ts';
 import { MS_PER_SECOND, MS_PER_MINUTE } from '../../lib/time-units.ts';
 import { isGroupJid } from '../../core/jid-constants.ts';
 import { config } from '../../config.ts';
-import { FRIENDLY_CATEGORY_META, hasVisibleToolText, TOOL_CATEGORY_META } from './tool-update.ts';
+import { formatElapsed, FRIENDLY_CATEGORY_META, hasVisibleToolText, TOOL_CATEGORY_META } from './tool-update.ts';
 import { preprocessText, repairChunkFormatting, splitMessage } from './whatsapp-format.ts';
 import type { ToolCategory } from './providers/tool-mapping.ts';
 export type { ToolCategory } from './providers/tool-mapping.ts';
@@ -266,15 +266,6 @@ function statusMessageWindowState(senderToken: string, now: number): StatusMessa
   };
   statusMessageWindows.set(senderToken, created);
   return created;
-}
-
-/** Format milliseconds as human-readable elapsed: "30s", "1m", "2m 15s". */
-function formatElapsed(ms: number): string {
-  const totalSeconds = Math.round(ms / 1000);
-  if (totalSeconds < 60) return `${totalSeconds}s`;
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
 }
 
 /**

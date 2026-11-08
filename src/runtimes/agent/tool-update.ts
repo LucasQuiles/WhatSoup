@@ -60,6 +60,15 @@ function truncateDisplayText(text: string, maxChars: number): string {
   return `${prefix}…`;
 }
 
+/** Format milliseconds as human-readable elapsed: "30s", "1m", "2m 15s". */
+export function formatElapsed(ms: number): string {
+  const totalSeconds = Math.round(ms / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
+}
+
 export function hasVisibleToolText(text: string): boolean {
   return text.replace(NON_VISIBLE_OR_CONTROL, '').length > 0;
 }

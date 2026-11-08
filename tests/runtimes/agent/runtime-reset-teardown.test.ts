@@ -49,7 +49,6 @@ const {
     trackToolEnd: vi.fn((_toolId: string) => {}),
     getDbRowId: vi.fn((): number | null => null),
     setDurability: vi.fn((_durability: unknown) => {}),
-    getSendFailureCount: vi.fn(() => 0),
     bindGenerationOwnership: vi.fn((_resolve: () => unknown) => {}),
     getProviderId: vi.fn((): string => 'claude-cli'),
     getSpawnedEffort: vi.fn((): string | null => null),

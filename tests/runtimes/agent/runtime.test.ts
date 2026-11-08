@@ -76,7 +76,6 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
     trackToolEnd: vi.fn((_toolId: string) => {}),
     getDbRowId: vi.fn((): number | null => null),
     setDurability: vi.fn((_durability: unknown) => {}),
-    getSendFailureCount: vi.fn(() => 0),
     bindGenerationOwnership: vi.fn((_resolve: () => unknown) => {}),
     getProviderId: vi.fn((): string => 'claude-cli'),
     captureEvidenceBinding: vi.fn(() => Object.freeze({})),
@@ -536,7 +535,7 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 // ─── Import after mocks ───────────────────────────────────────────────────────
 
 import * as registerAllModule from '../../../src/mcp/register-all.ts';
-import { AgentRuntime, serializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
+import { AgentRuntime, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
 import { parseGeminiAcpEvent } from '../../../src/runtimes/agent/providers/gemini-acp-parser.ts';
 import { __resetModelCatalogueCacheForTest } from '../../../src/runtimes/agent/model-catalogue-resolver.ts';
 import { providerServerErrorNoFallbackNotice, providerUnknownTerminalNotice, renderUserMessage } from '../../../src/runtimes/agent/response-templates.ts';
@@ -559,6 +558,7 @@ import {
   handlePerChatProviderEvent, currentCrashIdentity, awaitDispatchedTurn, retireDispatchedTurn,
   type AutoCompactView, type ImageCoalescerView,
 } from './lib/runtime-mock-scaffold.ts';
+import { buildPayload, insertRow, makeRealDb } from './lib/pending-poll-fixtures.ts';
 
 // ─── Coupled helpers (hoisting-pinned, cannot leave this file) ────────────────
 
@@ -14081,52 +14081,6 @@ describe('AgentRuntime', () => {
   // ── P2 hardening: rehydrate consolidation + persistence error counter ─────
 
   describe('poll persistence hardening', () => {
-    function makeRealDb(): RealDatabase {
-      const db = new RealDatabase(':memory:');
-      db.open();
-      return db;
-    }
-
-    function buildPayload(overrides: Partial<PendingPollQuestion>): string {
-      const pending: PendingPollQuestion = {
-        questions: [{
-          question: 'Pick',
-          header: 'H',
-          options: [{ label: 'A', description: '' }, { label: 'B', description: '' }],
-          multiSelect: false,
-        }],
-        toolId: 'tool-x',
-        chatJid: 'chat@g.us',
-        chatJidAliases: new Set(['chat@g.us']),
-        mode: 'poll',
-        pollMessageIdToQuestionIndex: new Map([['POLL_X', 0]]),
-        currentQuestionIndex: 0,
-        answersCollected: {},
-        createdAt: 1_700_000_000_000,
-        resolution: 'first-vote-wins',
-        timeoutMs: 3_600_000,
-        votesByQuestion: new Map(),
-        adminJids: null,
-        source: 'askuser',
-        sentPollMessageIds: ['POLL_X'],
-        ...overrides,
-      };
-      return JSON.stringify(serializePendingPoll(pending));
-    }
-
-    function insertRow(
-      db: RealDatabase,
-      mapKey: string,
-      chatJid: string,
-      hardClosesAt: number | null,
-      payload: string,
-    ): void {
-      db.raw.prepare(
-        `INSERT INTO pending_polls (map_key, chat_jid, tool_id, source, resolution, payload, created_at, closes_at, hard_closes_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(mapKey, chatJid, mapKey, 'askuser', 'first-vote-wins', payload, 1_700_000_000_000, hardClosesAt, hardClosesAt);
-    }
-
     it('rehydrate consolidates expired-during-downtime notices to one message per chat', async () => {
       const db = makeRealDb();
       const { messenger, sentMessages } = makeMessenger();
