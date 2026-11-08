@@ -18,7 +18,7 @@ There are two poll paths with different semantics:
    - Set `selectableCount` above `1` for multi-select polls.
    - By default, `send_poll` returns after sending. With `awaitResult: true`, it stays open until a vote, expiry, or cancellation and returns the result.
    - A blocking wait uses the tool timeout (default one hour, clamped to one second through 24 hours). The operation tracker and session hard watchdog allow that bounded wait. Unrelated stalled tools retain their normal deadlines.
-   - During that bounded wait, periodic progress retains the typing indicator without sending “still working” text for the waiting operation. Unrelated operations keep their normal progress behavior.
+   - When the provider reports a tool start and operation tracking is enabled, periodic progress during that bounded wait refreshes the typing indicator without sending “still working” text for the waiting operation. Unrelated operations keep their normal progress behavior.
    - After the wait expires, a missing tool result still reaches ordinary stall recovery for child-process providers. Managed API providers use their hard-watchdog fallback. The session hard watchdog also bounds recovery when operation tracking is disabled.
 
 ## Agent Guidance
@@ -71,6 +71,10 @@ The destination chat does not identify the requesting session. External callers
 can still await polls without extending an agent's watchdog. These tokens provide
 attribution, not authentication: a same-user process that obtains a current token
 can request the same bounded extension. Existing tool permissions remain in force.
+
+This OpenCode attribution protects watchdog continuity only; it does not start
+periodic operation progress. The typing indicator can therefore stop during an
+unresolved poll wait. Continuous typing is not guaranteed for OpenCode awaits.
 
 The `pending_polls` table is bounded in normal operation: rows are deleted on settle, hard-expiry, and cancellation, so steady-state row count tracks the number of genuinely in-flight polls (typically single digits). A row count that grows without settling indicates polls that are never resolving — investigate stuck sessions or a transport that stopped delivering `pollVoteReceived`.
 
