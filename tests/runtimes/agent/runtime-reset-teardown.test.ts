@@ -49,6 +49,7 @@ const {
     trackToolEnd: vi.fn((_toolId: string) => {}),
     getDbRowId: vi.fn((): number | null => null),
     setDurability: vi.fn((_durability: unknown) => {}),
+    getSendFailureCount: vi.fn(() => 0),
     bindGenerationOwnership: vi.fn((_resolve: () => unknown) => {}),
     getProviderId: vi.fn((): string => 'claude-cli'),
     getSpawnedEffort: vi.fn((): string | null => null),
@@ -88,6 +89,7 @@ const {
     targetChatJid: 'test@s.whatsapp.net',
     getLastOpId: vi.fn(() => undefined),
     setDurability: vi.fn(),
+    getSendFailureCount: vi.fn(() => 0),
   };
   return {
     mockSession,
@@ -325,6 +327,7 @@ function makeQueueMock(targetChatJid: string): IOutboundQueue {
     targetChatJid,
     getLastOpId: vi.fn(() => undefined),
     setDurability: vi.fn(),
+    getSendFailureCount: vi.fn(() => 0),
   };
 }
 
