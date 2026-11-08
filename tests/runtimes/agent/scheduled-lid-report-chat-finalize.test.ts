@@ -535,11 +535,11 @@ describe('scheduled agent job reporting to a mapped @lid chat', () => {
     return runtime;
   }
 
-  function dispatchJob(agent: AgentRuntime): number {
+  function dispatchJob(agent: AgentRuntime, occurrenceId = 11): number {
     const ack = agent.dispatchAgentJob({
       beadId: 7,
       triggerId: 5,
-      occurrenceId: 11,
+      occurrenceId,
       prompt: 'Summarize the overnight queue.',
       title: 'Overnight summary',
       reportChatJid: LID_JID,
@@ -959,6 +959,81 @@ describe('scheduled agent job reporting to a mapped @lid chat', () => {
     expect(supervisorHealth()).toMatchObject({ retainedRetries: 0, degradedScopes: 0 });
 
     await expectCleanShutdown();
+  });
+
+  it.each([false, true])('per_chat: keeps one scheduled provider lane across a completed-job alias change (alias=%s)', async (alias) => {
+    dropMapping();
+    const agent = makeRuntime({ sessionScope: 'per_chat' });
+    const firstSeq = dispatchJob(agent);
+    const firstSession = await waitForScheduledTurn();
+    const firstQueue = laneQueue(`${LID_JID}::scheduled-agent-job`)!;
+    expect(firstQueue).toBeDefined();
+
+    if (alias) {
+      agent.handleJidAliasChanged(LID_LOCAL, PHONE_JID);
+      upsertLidMapping(db, LID_LOCAL, PHONE_JID);
+    }
+    suppressReply(firstSession);
+    await expectFinalizedNoReply(firstSeq, LID_LOCAL);
+    await firstQueue.idle();
+
+    const secondSeq = dispatchJob(agent, 12);
+    const secondSession = await waitForScheduledTurn();
+    const currentKey = `${alias ? PHONE_JID : LID_JID}::scheduled-agent-job`;
+    const secondQueue = (laneQueue(currentKey) ?? laneQueue(`${LID_JID}::scheduled-agent-job`))!;
+    expect(secondQueue).toBeDefined();
+    const scheduledKeys = [...(agent as unknown as {
+      chatSessions: Map<string, unknown>;
+    }).chatSessions.keys()].filter((key) => key.endsWith('::scheduled-agent-job'));
+
+    suppressReply(secondSession);
+    await expectFinalizedNoReply(secondSeq, alias ? PHONE_DIGITS : LID_LOCAL);
+    await secondQueue.idle();
+    await expectCleanShutdown();
+
+    expect(secondSession, 'scheduled alias must retain the existing provider manager').toBe(firstSession);
+    expect(secondQueue).toBe(firstQueue);
+    expect(scheduledKeys).toHaveLength(1);
+    expect(canonicalConversationKey(scheduledKeys[0].replace(/::scheduled-agent-job$/, ''), db))
+      .toBe(alias ? PHONE_DIGITS : LID_LOCAL);
+  });
+
+  it.each([false, true])('per_chat: queues a following scheduled job behind the active job across an alias change (alias=%s)', async (alias) => {
+    dropMapping();
+    const agent = makeRuntime({ sessionScope: 'per_chat' });
+    const firstSeq = dispatchJob(agent);
+    const firstSession = await waitForScheduledTurn();
+    const firstQueue = laneQueue(`${LID_JID}::scheduled-agent-job`)!;
+    expect(firstQueue).toBeDefined();
+
+    if (alias) {
+      agent.handleJidAliasChanged(LID_LOCAL, PHONE_JID);
+      upsertLidMapping(db, LID_LOCAL, PHONE_JID);
+    }
+    const secondSeq = dispatchJob(agent, 12);
+    // Wait for admission to either the existing queue or a distinct provider,
+    // so an early assertion cannot mistake undispatched work for serialization.
+    await vi.waitFor(() => {
+      expect(firstQueue.pending > 0 || sessionDoubles.some((s) => s !== firstSession && s.turnInFlight)).toBe(true);
+    }, { timeout: 4_000 });
+    const inFlightBeforeFirstTerminal = sessionDoubles.filter((s) => s.turnInFlight).length;
+    const pendingBeforeFirstTerminal = firstQueue.pending;
+
+    suppressReply(firstSession);
+    await expectFinalizedNoReply(firstSeq, LID_LOCAL);
+    const secondSession = await waitForScheduledTurn();
+    suppressReply(secondSession);
+    await expectFinalizedNoReply(secondSeq, alias ? PHONE_DIGITS : LID_LOCAL);
+    const currentKey = `${alias ? PHONE_JID : LID_JID}::scheduled-agent-job`;
+    const secondQueue = (laneQueue(currentKey) ?? laneQueue(`${LID_JID}::scheduled-agent-job`))!;
+    expect(secondQueue).toBeDefined();
+    await Promise.all([firstQueue.idle(), secondQueue.idle()]);
+    await expectCleanShutdown();
+
+    expect(inFlightBeforeFirstTerminal, 'scheduled alias must serialize provider turns on the existing lane').toBe(1);
+    expect(pendingBeforeFirstTerminal).toBe(1);
+    expect(secondSession).toBe(firstSession);
+    expect(secondQueue).toBe(firstQueue);
   });
 
   describe('per_chat: a wedged lane is matched to the reclaimed row by sequence', () => {

@@ -206,6 +206,7 @@ import {
   isolateScheduledAgentJobPrompt,
   isScheduledAgentJobMapKey,
   resolveAgentTurnMapKey,
+  scheduledAgentJobBaseMapKey,
 } from './scheduled-agent-job-isolation.ts';
 import {
   resolveScheduledFinalAnswer,
@@ -4926,10 +4927,7 @@ export class AgentRuntime implements Runtime {
       })
       .then(() => finishAdmission?.());
     const recycleScopeKey = this.sessionScope === 'per_chat'
-      ? resolveAgentTurnMapKey(
-          this.resolvePerChatMapKey(msg.chatJid),
-          msg.isSyntheticJob === true && !this.sandboxPerChat,
-        )
+      ? this.resolvePerChatMapKey(msg.chatJid, msg.isSyntheticJob === true)
       : GLOBAL_TOOL_SCOPE_KEY;
     this.routeRecycleLifecycle.trackPublication(queuedWork, recycleScopeKey);
     this.turnChain = queuedWork;
@@ -4947,10 +4945,7 @@ export class AgentRuntime implements Runtime {
     const journalConversationKey = msg.journaledConversationKey
       ?? canonicalConversationKey(chatJid, this.db);
     const perChatMapKey = this.sessionScope === 'per_chat'
-      ? resolveAgentTurnMapKey(
-          this.resolvePerChatMapKey(chatJid),
-          msg.isSyntheticJob === true && !this.sandboxPerChat,
-        )
+      ? this.resolvePerChatMapKey(chatJid, msg.isSyntheticJob === true)
       : undefined;
 
     // Substrate slice 1: propagate sender identity to every MCP session so
@@ -8512,11 +8507,16 @@ export class AgentRuntime implements Runtime {
     return chatJid === null ? this.getActiveQueue() : this.getQueueForChat(chatJid);
   }
 
-  private resolvePerChatMapKey(chatJid: string): string {
+  private resolvePerChatMapKey(chatJid: string, isSyntheticJob = false): string {
     if (this.sandboxPerChat) {
       return chatJidToWorkspace(this.cwd ?? homedir(), chatJid).workspaceKey;
     }
-    return canonicalizeChatJid(chatJid, this.db);
+    const canonical = canonicalizeChatJid(chatJid, this.db);
+    const requested = resolveAgentTurnMapKey(canonical, isSyntheticJob);
+    if (!isSyntheticJob || this.chatSessions.has(requested)) return requested;
+    // Scheduled work must keep its queue when an alias changes during a turn.
+    return [...this.chatSessions.keys()].find((key) => isScheduledAgentJobMapKey(key)
+      && canonicalizeChatJid(scheduledAgentJobBaseMapKey(key), this.db) === canonical) ?? requested;
   }
 
   private finalizeRuntimeTurnContext(
