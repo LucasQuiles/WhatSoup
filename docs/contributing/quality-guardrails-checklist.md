@@ -66,6 +66,16 @@ required. Remove the repository-scoped scanner secret only after the trusted che
 is operational and Quality no longer consumes that secret. Local adapter tests or
 a parsed workflow contract do not establish those hosted guarantees.
 
+Public native capture fixtures run separately from the pure adapter tests:
+`npm test -- --pool=forks tests/scripts/private-test-integrity-native.test.ts`.
+The test invokes `tools/private-test-integrity/run_native_tests.py`, which uses the
+existing process-group supervisor and validates the canary's five-case receipt,
+source hashes and scratch cleanup. Omission and failing child/group assertions are
+negative controls. The pure `run_tests.py` keeps its no-child/no-network audit guard.
+These synthetic fixtures need POSIX and an outer deadline; they do not qualify the
+private scanner, its Linux/Python ABI, hosted credentials or escaped descendants.
+The caller owns and removes the scratch `TMPDIR` and result file.
+
 Before the Node 24 toolchain setup, `scripts/ci-disk-reclaim.sh` records free
 space and enforces a 30 GiB budget. Sufficient runners skip mutation with a
 structured receipt. Low-space runners remove only the allowlisted unused
