@@ -53,9 +53,10 @@ describe('self-restart core', () => {
     expect(intentionalRestartMarkerPath('/data/q')).toBe('/data/q/intentional-restart.marker');
   });
 
-  it('writes a marker with the full taxonomy shape and calls restart with the instance', async () => {
+  it('writes a marker with the full taxonomy shape and calls restartSelf with the instance', async () => {
     const restart = vi.fn(async () => {});
-    const sm = makeServiceManager({ restart });
+    const restartSelf = vi.fn(async () => {});
+    const sm = makeServiceManager({ restart, restartSelf });
 
     const result = await triggerSelfRestart({
       instance: 'q',
@@ -70,7 +71,10 @@ describe('self-restart core', () => {
 
     expect(result.ok).toBe(true);
     expect(result.markerPath).toBe(intentionalRestartMarkerPath(dataRoot));
-    expect(restart).toHaveBeenCalledWith('q');
+    // #3829: restart() boots out a launchd caller before its bootstrap runs.
+    expect(restartSelf).toHaveBeenCalledTimes(1);
+    expect(restartSelf).toHaveBeenCalledWith('q');
+    expect(restart).not.toHaveBeenCalled();
 
     const marker = JSON.parse(readFileSync(result.markerPath, 'utf-8')) as IntentionalRestartMarker;
     expect(marker.code).toBe('redeploy');
@@ -128,6 +132,20 @@ describe('self-restart core', () => {
     expect(marker.chatJid).toBe('15551234567@s.whatsapp.net');
   });
 
+  // #3829: an @lid DM lost its "back online" notice because the marker dropped it.
+  it('keeps an @lid DM chatJid as the continuity target', async () => {
+    const result = await triggerSelfRestart({
+      instance: 'q',
+      dataRoot,
+      reason: 'r',
+      chatJid: '111111100000001@lid',
+      requestedBy: 'agent',
+      serviceManager: makeServiceManager(),
+    });
+    const marker = JSON.parse(readFileSync(result.markerPath, 'utf-8')) as IntentionalRestartMarker;
+    expect(marker.chatJid).toBe('111111100000001@lid');
+  });
+
   it('drops an invalid chatJid (writes marker without it, does not throw)', async () => {
     const result = await triggerSelfRestart({
       instance: 'q',
@@ -146,8 +164,8 @@ describe('self-restart core', () => {
   });
 
   it('re-entrancy guard makes a second call a no-op', async () => {
-    const restart = vi.fn(async () => {});
-    const sm = makeServiceManager({ restart });
+    const restartSelf = vi.fn(async () => {});
+    const sm = makeServiceManager({ restartSelf });
 
     const first = await triggerSelfRestart({
       instance: 'q', dataRoot, reason: 'first', requestedBy: 'agent', serviceManager: sm,
@@ -158,12 +176,12 @@ describe('self-restart core', () => {
 
     expect(first.ok).toBe(true);
     expect(second.ok).toBe(false);
-    expect(restart).toHaveBeenCalledTimes(1);
+    expect(restartSelf).toHaveBeenCalledTimes(1);
   });
 
-  it('leaves the marker written and rethrows when restart throws', async () => {
-    const restart = vi.fn(async () => { throw new Error('systemctl boom'); });
-    const sm = makeServiceManager({ restart });
+  it('leaves the marker written and rethrows when restartSelf throws', async () => {
+    const restartSelf = vi.fn(async () => { throw new Error('launchctl boom'); });
+    const sm = makeServiceManager({ restartSelf });
 
     await expect(triggerSelfRestart({
       instance: 'q', dataRoot, reason: 'r', requestedBy: 'agent', serviceManager: sm,

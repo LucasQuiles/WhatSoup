@@ -4537,7 +4537,10 @@ export class AgentRuntime implements Runtime {
       restartSelf: serviceRestarter ? {
         instanceName: this.instanceName,
         dataRoot: config.dataRoot,
-        resolveChatJid: () => this.currentTurnChatJid ?? this.activeChatJid ?? undefined,
+        // #3829: the executing global turn's own delivery JID (an @lid DM keeps
+        // its @lid). activeChatJid is consulted only when no turn is in flight,
+        // so the ack and "back online" notice cannot go to another chat.
+        resolveChatJid: () => this.getGlobalInterruptChatJid() ?? undefined,
         sendAck: async (chatJid, text) => {
           await sendTracked(this.messenger, chatJid, text, this.durability ?? undefined, { replayPolicy: 'unsafe' });
         },

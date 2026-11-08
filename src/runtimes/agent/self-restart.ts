@@ -2,12 +2,16 @@
 // Agent-triggered safe self-restart.
 //
 // Routes a deliberate restart through the EXISTING graceful shutdown by asking
-// the ServiceManager to restart the instance's own unit (systemctl --user
-// restart whatsoup@<name>). A private intentional-restart marker is written
-// first so the error taxonomy (heal-notify / bot-errors) can distinguish a
-// deliberate restart from a crash, and so the next boot can announce continuity
-// with a measured downtime. No new child-process usage and no parallel teardown
-// — the marker + ServiceManager.restart are the whole mechanism.
+// the service manager to restart the instance's own job with one command that
+// it carries out by itself: `systemctl --user restart` on systemd and
+// `launchctl kickstart -k` on launchd (ServiceManager.restartSelf, #3829). The
+// manager sends SIGTERM to this process and starts the job again, so nothing
+// has to run here after the request. A private intentional-restart marker is
+// written first so the error taxonomy (heal-notify / bot-errors) can distinguish
+// a deliberate restart from a crash, and so the next boot can announce
+// continuity with a measured downtime. No new child-process usage and no
+// parallel teardown — the marker + ServiceManager.restartSelf are the whole
+// mechanism.
 
 import { unlinkSync } from 'node:fs';
 import { join } from 'node:path';
@@ -17,7 +21,7 @@ import { z } from 'zod';
 import { emitAlertChecked } from '../../lib/emit-alert.ts';
 import { readFreshMarkerSync, writePrivateJsonMarkerSync } from '../../lib/private-fs.ts';
 import { createChildLogger } from '../../logger.ts';
-import { isPnJid, isGroupJid } from '../../core/jid-constants.ts';
+import { isPnJid, isGroupJid, isLidJid } from '../../core/jid-constants.ts';
 import { resolvePhoneFromJidForGrant } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
 import { MS_PER_MINUTE, MS_PER_SECOND } from '../../lib/time-units.ts';
@@ -27,14 +31,19 @@ import type { SessionContext, ToolDeclaration } from '../../mcp/types.ts';
 const log = createChildLogger('self-restart');
 
 /**
- * Minimal structural capability the self-restart needs: restart a named unit.
- * The fleet `ServiceManager` satisfies this interface, but we declare it locally
- * (rather than importing fleet/platform) so the runtimes layer does not depend
- * on the fleet layer — the concrete manager is injected from the composition
- * root (main.ts), which owns the systemd binding. See the import-boundary matrix.
+ * Minimal structural capability the self-restart needs: restart the job of the
+ * calling process. The fleet `ServiceManager` satisfies this interface, but we
+ * declare it locally (rather than importing fleet/platform) so the runtimes
+ * layer does not depend on the fleet layer — the concrete manager is injected
+ * from the composition root (main.ts), which owns the platform binding. See the
+ * import-boundary matrix.
+ *
+ * #3829: only `restartSelf` is exposed. `ServiceManager.restart` is for
+ * restarting another process; on launchd it boots out the job and bootstraps it
+ * from the caller, and the bootout kills a caller inside that job first.
  */
 export interface ServiceRestarter {
-  restart(name: string): Promise<void>;
+  restartSelf(name: string): Promise<void>;
 }
 
 /** Stable filename of the intentional-restart marker inside an instance dataRoot. */
@@ -89,10 +98,13 @@ export interface TriggerSelfRestartOptions {
 
 /**
  * Write the intentional-restart marker, emit an info-severity alert, then ask the
- * ServiceManager to restart this instance's own unit. The restart routes through
- * systemd's SIGTERM into the existing graceful shutdown (exit 0), so no crash
- * alert fires. A module-level guard makes a repeat call a no-op. If the restart
- * call throws, the marker stays written and a clear error is rethrown.
+ * service manager to restart this instance's own job (`restartSelf`). On systemd
+ * and launchd the manager sends SIGTERM into the existing graceful shutdown
+ * (exit 0) and then starts the job again itself, so no crash alert fires.
+ * Platforms that cannot restart the calling process (docker supervisor, Linux
+ * without systemd) reject the request instead. A module-level guard makes a
+ * repeat call a no-op. If the restart call throws, the marker is marked rejected
+ * and a clear error is rethrown.
  */
 export async function triggerSelfRestart(
   opts: TriggerSelfRestartOptions,
@@ -110,7 +122,9 @@ export async function triggerSelfRestart(
 
   let chatJid: string | undefined;
   if (opts.chatJid !== undefined) {
-    if (isPnJid(opts.chatJid) || isGroupJid(opts.chatJid)) {
+    // #3829: a DM can be addressed by its @lid JID; dropping it lost the
+    // "back online" notice for that chat.
+    if (isPnJid(opts.chatJid) || isLidJid(opts.chatJid) || isGroupJid(opts.chatJid)) {
       chatJid = opts.chatJid;
     } else {
       log.warn({ instance: opts.instance, chatJidSuffix: opts.chatJid.split('@').at(-1) ?? 'missing' }, 'self-restart chatJid is not a valid WhatsApp JID; dropping continuity target');
@@ -138,18 +152,19 @@ export async function triggerSelfRestart(
     'info',
   );
 
-  // `systemctl --user restart` delivers SIGTERM to THIS process and blocks until
-  // we exit, so on a successful restart the call is torn down mid-flight and never
-  // resolves here — awaiting it would surface a spurious failure on EVERY good
-  // restart. Race the invocation against a short grace timer: still-pending at the
-  // timer means the restart is underway (success); a fast rejection means a real
-  // invocation failure (masked/unknown unit, missing systemctl) worth surfacing.
-  // Either way the marker stays written for crash suppression.
+  // The restart delivers SIGTERM to THIS process, and `systemctl --user restart`
+  // also blocks until we exit, so on a successful restart the call may be torn
+  // down mid-flight and never resolve here — awaiting it would surface a spurious
+  // failure on a good restart. Race the invocation against a short grace timer:
+  // resolved or still pending at the timer means the restart is underway
+  // (success); a fast rejection means a real invocation failure (masked/unknown
+  // unit or job, missing systemctl/launchctl, unsupported platform) worth
+  // surfacing. Either way the marker stays written for crash suppression.
   const RESTART_INVOKE_GRACE_MS = 2 * MS_PER_SECOND;
   let invocationError: unknown;
   let graceTimer: NodeJS.Timeout | undefined;
   const restartCall = opts.serviceManager
-    .restart(opts.instance)
+    .restartSelf(opts.instance)
     .catch((err: unknown) => { invocationError = err; });
   const grace = new Promise<void>((resolve) => {
     graceTimer = setTimeout(resolve, RESTART_INVOKE_GRACE_MS);
@@ -254,7 +269,7 @@ export interface RestartSelfToolDeps {
   resolveChatJid: () => string | undefined;
   /** Send the immediate pre-restart ack to the originating chat. */
   sendAck: (chatJid: string, text: string) => Promise<void>;
-  /** Systemd restart capability, injected from the composition root (fleet-owned). */
+  /** Self-restart capability, injected from the composition root (fleet-owned). */
   serviceManager: ServiceRestarter;
   /** Injected for tests; defaults to the real triggerSelfRestart bound by the runtime. */
   trigger: (opts: TriggerSelfRestartOptions) => Promise<{ ok: boolean; markerPath: string }>;
@@ -271,7 +286,7 @@ export interface RestartSelfToolDeps {
 /**
  * Build the `restart_self` tool declaration. The handler is intentionally thin:
  * resolve the originating chat, send an immediate ack, then delegate to
- * `triggerSelfRestart` (marker write + alert + ServiceManager.restart).
+ * `triggerSelfRestart` (marker write + alert + ServiceManager.restartSelf).
  */
 export function buildRestartSelfTool(deps: RestartSelfToolDeps): ToolDeclaration {
   return {
@@ -303,6 +318,9 @@ export function buildRestartSelfTool(deps: RestartSelfToolDeps): ToolDeclaration
         } catch (err) {
           log.warn({ instance: deps.instanceName, chatJid, err }, 'failed to send pre-restart ack; continuing with restart');
         }
+      } else {
+        // #3829: make a missing continuity target visible in the log.
+        log.warn({ instance: deps.instanceName }, 'restart_self found no originating chat; no pre-restart ack or back-online notice will be sent');
       }
 
       const result = await deps.trigger({

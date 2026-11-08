@@ -1,7 +1,21 @@
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('../../../src/lib/emit-alert.ts', () => ({
+  emitAlert: vi.fn(() => true),
+  emitAlertChecked: vi.fn(() => true),
+  emitObservationChecked: vi.fn(() => true),
+  clearAlertSource: vi.fn(() => true),
+  clearAlertSourceChecked: vi.fn(() => true),
+}));
 
 import {
   buildRestartSelfTool,
+  triggerSelfRestart,
+  _resetSelfRestartGuard,
+  type IntentionalRestartMarker,
   type RestartSelfToolDeps,
   type TriggerSelfRestartOptions,
 } from '../../../src/runtimes/agent/self-restart.ts';
@@ -11,11 +25,11 @@ function deps(overrides: Partial<RestartSelfToolDeps> = {}): {
   deps: RestartSelfToolDeps;
   trigger: ReturnType<typeof vi.fn>;
   sendAck: ReturnType<typeof vi.fn>;
-  serviceManager: { restart: ReturnType<typeof vi.fn> };
+  serviceManager: { restartSelf: ReturnType<typeof vi.fn> };
 } {
   const trigger = vi.fn(async (_opts: TriggerSelfRestartOptions) => ({ ok: true, markerPath: '/d/m' }));
   const sendAck = vi.fn(async (_chatJid: string, _text: string) => {});
-  const serviceManager = { restart: vi.fn(async (_name: string) => {}) };
+  const serviceManager = { restartSelf: vi.fn(async (_name: string) => {}) };
   const base: RestartSelfToolDeps = {
     instanceName: 'q',
     dataRoot: '/data/q',
@@ -94,5 +108,52 @@ describe('restart_self MCP tool', () => {
     const opts = trigger.mock.calls[0][0] as TriggerSelfRestartOptions;
     expect(opts.chatJid).toBeUndefined();
     expect(opts.reason).toBe('r');
+  });
+
+  describe('with the real trigger', () => {
+    let dataRoot: string;
+
+    beforeEach(() => {
+      dataRoot = mkdtempSync(join(tmpdir(), 'restart-self-tool-'));
+      _resetSelfRestartGuard();
+    });
+
+    afterEach(() => {
+      rmSync(dataRoot, { recursive: true, force: true });
+      _resetSelfRestartGuard();
+    });
+
+    // #3829: a DM addressed by its @lid JID got no "back online" notice.
+    it('acks an @lid DM and keeps it in the marker for the back-online notice', async () => {
+      const lidJid = '111111100000001@lid';
+      const { deps: d, sendAck, serviceManager } = deps({
+        dataRoot,
+        resolveChatJid: () => lidJid,
+        trigger: triggerSelfRestart,
+      });
+
+      const result = await buildRestartSelfTool(d).handler({ reason: 'load merged main' }, SESSION);
+
+      expect(result).toMatchObject({ ok: true, restarting: true });
+      expect(sendAck).toHaveBeenCalledTimes(1);
+      expect(sendAck.mock.calls[0][0]).toBe(lidJid);
+      expect(serviceManager.restartSelf).toHaveBeenCalledWith('q');
+      const marker = JSON.parse(
+        readFileSync(join(dataRoot, 'intentional-restart.marker'), 'utf-8'),
+      ) as IntentionalRestartMarker;
+      expect(marker.chatJid).toBe(lidJid);
+    });
+
+    it('stays a no-op on a repeat call in the same process', async () => {
+      const { deps: d, serviceManager } = deps({ dataRoot, trigger: triggerSelfRestart });
+      const tool = buildRestartSelfTool(d);
+
+      const first = await tool.handler({ reason: 'first' }, SESSION);
+      const second = await tool.handler({ reason: 'second' }, SESSION);
+
+      expect(first).toMatchObject({ ok: true, restarting: true });
+      expect(second).toMatchObject({ ok: false, restarting: false });
+      expect(serviceManager.restartSelf).toHaveBeenCalledTimes(1);
+    });
   });
 });

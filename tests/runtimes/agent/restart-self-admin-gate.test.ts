@@ -25,7 +25,7 @@ const ADMIN_JID = '15550100111@s.whatsapp.net';
 function harness(overrides: Partial<RestartSelfToolDeps> = {}) {
   const trigger = vi.fn(async (_opts: TriggerSelfRestartOptions) => ({ ok: true, markerPath: '/d/m' }));
   const sendAck = vi.fn(async (_chatJid: string, _text: string) => {});
-  const serviceManager = { restart: vi.fn(async (_name: string) => {}) };
+  const serviceManager = { restartSelf: vi.fn(async (_name: string) => {}) };
   // Realistic gate: only ADMIN_JID passes; anyone else is rejected fail-closed.
   const assertAdmin = vi.fn((session: SessionContext) => {
     if (session.actorJid !== ADMIN_JID) {
