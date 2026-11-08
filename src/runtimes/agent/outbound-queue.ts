@@ -316,7 +316,9 @@ export interface IOutboundQueue {
    * is for PROVIDER-CRASH finalization only: when the dying turn produced no
    * visible text, its undelivered buffered/deferred narration is delivered as a
    * status-role salvage message (never answer evidence) instead of being
-   * destroyed. Interrupt/reset/fence-lost callers must NOT pass it.
+   * destroyed. Interrupt/reset/fence-lost callers must NOT pass it. restart_self
+   * passes it too (#3829): its restart aborts the turn next and nothing else
+   * would deliver that text.
    */
   abortTurn(options?: { preserveEvidence?: boolean; salvageOwedReply?: boolean }): void;
   /** The chat JID this queue is currently targeting. */

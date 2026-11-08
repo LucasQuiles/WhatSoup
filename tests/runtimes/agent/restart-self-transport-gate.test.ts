@@ -124,6 +124,7 @@ function minimalDeps(): RestartSelfToolDeps {
     instanceName: 'q',
     dataRoot: '/data/q',
     resolveChatJid: () => undefined,
+    deliverOwedReply: async () => {},
     sendAck: async () => {},
     serviceManager: { restartSelf: async () => {} },
     trigger: async () => ({ ok: true, markerPath: '/d/m' }),

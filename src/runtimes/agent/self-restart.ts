@@ -27,6 +27,7 @@ import { isAdminPhone } from '../../lib/phone.ts';
 import { MS_PER_MINUTE, MS_PER_SECOND } from '../../lib/time-units.ts';
 import type { Database } from '../../core/database.ts';
 import type { SessionContext, ToolDeclaration } from '../../mcp/types.ts';
+import type { IOutboundQueue } from './outbound-queue.ts';
 
 const log = createChildLogger('self-restart');
 
@@ -51,6 +52,9 @@ export const INTENTIONAL_RESTART_MARKER = 'intentional-restart.marker';
 
 /** Default freshness window for the marker (matches the exhausted.marker window). */
 const DEFAULT_MAX_AGE_MS = 5 * MS_PER_MINUTE;
+
+/** Longest wait for owed text before the restart, so a dead transport cannot hold it. */
+export const OWED_REPLY_FLUSH_GRACE_MS = 10 * MS_PER_SECOND;
 
 /** Taxonomy code distinguishing deliberate restart causes. */
 export type RestartReasonCode = 'self_restart' | 'redeploy' | 'config_reload';
@@ -211,6 +215,34 @@ export function consumeIntentionalRestartMarker(
   return marker;
 }
 
+/**
+ * #3829: deliver the text the running turn owes before its process is replaced.
+ * Text the model wrote before calling restart_self is still in the queue — in
+ * minimal mode it is deferred at the tool boundary — and the turn abort in the
+ * restart's graceful shutdown destroys it. Commit the live stream buffer as a
+ * normal send, let the #3398 salvage path send the deferred text of a turn that
+ * has shown nothing yet, and wait up to OWED_REPLY_FLUSH_GRACE_MS for the sends.
+ * The restart aborts this turn anyway; aborting it here first only adds the
+ * salvage. A send still pending at the grace limit is left to the shutdown flush.
+ */
+export async function deliverOwedReplyBeforeRestart(queue: IOutboundQueue | null): Promise<void> {
+  if (!queue) return;
+  queue.commitStreamingText();
+  queue.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
+  let graceTimer: NodeJS.Timeout | undefined;
+  const grace = new Promise<'timeout'>((resolve) => {
+    graceTimer = setTimeout(() => resolve('timeout'), OWED_REPLY_FLUSH_GRACE_MS);
+    graceTimer.unref?.();
+  });
+  try {
+    if (await Promise.race([queue.flush(), grace]) === 'timeout') {
+      log.warn({ chatJid: queue.targetChatJid }, 'owed reply still sending at the self-restart grace limit; restarting anyway');
+    }
+  } finally {
+    if (graceTimer) clearTimeout(graceTimer);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Admin gate (QR-047 + QR-143)
 // ---------------------------------------------------------------------------
@@ -259,14 +291,20 @@ export const RestartSelfSchema = z.object({
 
 /**
  * Runtime-supplied bindings for the `restart_self` tool. The runtime injects its
- * own instance name, dataRoot, originating-chat resolver, an ack sender, and the
- * trigger fn so the tool declaration stays thin and unit-testable.
+ * own instance name, dataRoot, originating-chat resolver, an owed-reply flush,
+ * an ack sender, and the trigger fn so the tool declaration stays thin and
+ * unit-testable.
  */
 export interface RestartSelfToolDeps {
   instanceName: string;
   dataRoot: string;
   /** Resolve the originating chat for the current turn, or undefined if none. */
   resolveChatJid: () => string | undefined;
+  /**
+   * #3829: send the text the current turn owes before the restart destroys it.
+   * Wired by the runtime to `deliverOwedReplyBeforeRestart` on the turn's queue.
+   */
+  deliverOwedReply: () => Promise<void>;
   /** Send the immediate pre-restart ack to the originating chat. */
   sendAck: (chatJid: string, text: string) => Promise<void>;
   /** Self-restart capability, injected from the composition root (fleet-owned). */
@@ -285,8 +323,9 @@ export interface RestartSelfToolDeps {
 
 /**
  * Build the `restart_self` tool declaration. The handler is intentionally thin:
- * resolve the originating chat, send an immediate ack, then delegate to
- * `triggerSelfRestart` (marker write + alert + ServiceManager.restartSelf).
+ * resolve the originating chat, deliver the turn's owed text, send an immediate
+ * ack, then delegate to `triggerSelfRestart` (marker write + alert +
+ * ServiceManager.restartSelf).
  */
 export function buildRestartSelfTool(deps: RestartSelfToolDeps): ToolDeclaration {
   return {
@@ -311,6 +350,14 @@ export function buildRestartSelfTool(deps: RestartSelfToolDeps): ToolDeclaration
       deps.assertAdmin(session);
       const { reason, code } = RestartSelfSchema.parse(params);
       const chatJid = deps.resolveChatJid();
+
+      // #3829: before the ack, so the reply the model wrote arrives first and
+      // before the restart, whose shutdown abort would destroy it.
+      try {
+        await deps.deliverOwedReply();
+      } catch (err) {
+        log.warn({ instance: deps.instanceName, err }, 'failed to deliver owed reply before restart; continuing with restart');
+      }
 
       if (chatJid) {
         try {

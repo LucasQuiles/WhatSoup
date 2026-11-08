@@ -72,6 +72,7 @@ function restartDeps(): RestartSelfToolDeps {
     instanceName: 'inst',
     dataRoot: '/tmp/dr',
     resolveChatJid: () => undefined,
+    deliverOwedReply: async () => {},
     sendAck: async () => {},
     serviceManager: { restartSelf: async () => {} },
     trigger: async () => ({ ok: true, markerPath: '/tmp/dr/marker' }),

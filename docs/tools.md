@@ -3712,10 +3712,17 @@ the runtime supplies `restartSelf`. The declaration and input schema live in
 | `reason` | string | yes | Non-empty reason for the restart. |
 | `code` | enum | no | `self_restart` (default), `redeploy`, or `config_reload`. |
 
-The handler attempts an acknowledgement to the originating chat, writes an
-intentional-restart marker, emits an alert and requests a service restart. An
-acknowledgement failure is logged and does not stop the restart. A repeated
-request in the same process returns `ok: false` / `restarting: false`.
+The handler first sends the text the current turn still owes: buffered streaming
+text goes out as a normal message, and text that minimal mode deferred at the tool
+boundary goes out as an interrupted-turn salvage message. It waits up to 10 seconds
+for those sends. It then attempts an acknowledgement to the originating chat,
+which can be a phone, `@lid` or group JID. It writes an intentional-restart
+marker, emits an alert and asks the service manager to restart its own job:
+`systemctl --user restart` on systemd and one `launchctl kickstart -k` on
+launchd, so the manager both stops and starts the job. The docker supervisor
+and Linux without systemd reject the request. An owed-text or acknowledgement
+failure is logged and does not stop the restart. A repeated request in the same
+process returns `ok: false` / `restarting: false`.
 
 **Returns:** `{ ok, restarting, reason, code, text }` when the caller survives
 long enough to receive a result. A fast service-manager rejection throws and marks

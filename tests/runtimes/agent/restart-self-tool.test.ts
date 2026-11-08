@@ -13,34 +13,40 @@ vi.mock('../../../src/lib/emit-alert.ts', () => ({
 
 import {
   buildRestartSelfTool,
+  deliverOwedReplyBeforeRestart,
   triggerSelfRestart,
   _resetSelfRestartGuard,
   type IntentionalRestartMarker,
   type RestartSelfToolDeps,
   type TriggerSelfRestartOptions,
 } from '../../../src/runtimes/agent/self-restart.ts';
+import { OutboundQueue, SALVAGED_REPLY_NOTICE } from '../../../src/runtimes/agent/outbound-queue.ts';
+import type { Messenger } from '../../../src/core/types.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 
 function deps(overrides: Partial<RestartSelfToolDeps> = {}): {
   deps: RestartSelfToolDeps;
   trigger: ReturnType<typeof vi.fn>;
   sendAck: ReturnType<typeof vi.fn>;
+  deliverOwedReply: ReturnType<typeof vi.fn>;
   serviceManager: { restartSelf: ReturnType<typeof vi.fn> };
 } {
   const trigger = vi.fn(async (_opts: TriggerSelfRestartOptions) => ({ ok: true, markerPath: '/d/m' }));
   const sendAck = vi.fn(async (_chatJid: string, _text: string) => {});
+  const deliverOwedReply = vi.fn(async () => {});
   const serviceManager = { restartSelf: vi.fn(async (_name: string) => {}) };
   const base: RestartSelfToolDeps = {
     instanceName: 'q',
     dataRoot: '/data/q',
     resolveChatJid: () => '1111111000000000@g.us',
+    deliverOwedReply,
     sendAck,
     serviceManager,
     trigger,
     assertAdmin: () => {}, // gate covered separately in restart-self-admin-gate.test.ts
     ...overrides,
   };
-  return { deps: base, trigger, sendAck, serviceManager };
+  return { deps: base, trigger, sendAck, deliverOwedReply, serviceManager };
 }
 
 const SESSION: SessionContext = { tier: 'admin' as SessionContext['tier'] };
@@ -154,6 +160,87 @@ describe('restart_self MCP tool', () => {
       expect(first).toMatchObject({ ok: true, restarting: true });
       expect(second).toMatchObject({ ok: false, restarting: false });
       expect(serviceManager.restartSelf).toHaveBeenCalledTimes(1);
+    });
+
+    it('delivers owed text before the ack and before restartSelf', async () => {
+      const order: string[] = [];
+      const { deps: d } = deps({
+        dataRoot,
+        trigger: triggerSelfRestart,
+        deliverOwedReply: vi.fn(async () => { order.push('owed'); }),
+        sendAck: vi.fn(async () => { order.push('ack'); }),
+        serviceManager: { restartSelf: vi.fn(async () => { order.push('restartSelf'); }) },
+      });
+
+      await buildRestartSelfTool(d).handler({ reason: 'r' }, SESSION);
+
+      expect(order).toEqual(['owed', 'ack', 'restartSelf']);
+    });
+
+    it('still restarts when delivering the owed text fails', async () => {
+      const { deps: d, serviceManager } = deps({
+        dataRoot,
+        trigger: triggerSelfRestart,
+        deliverOwedReply: vi.fn(async () => { throw new Error('queue poisoned'); }),
+      });
+
+      const result = await buildRestartSelfTool(d).handler({ reason: 'r' }, SESSION);
+
+      expect(result).toMatchObject({ ok: true, restarting: true });
+      expect(serviceManager.restartSelf).toHaveBeenCalledTimes(1);
+    });
+
+    // #3829 (21:22Z case): minimal mode deferred the model's pre-tool text at the
+    // restart_self tool boundary, and the shutdown abort destroyed it unsent.
+    it('sends the deferred pre-tool text through the salvage path before restartSelf', async () => {
+      const order: string[] = [];
+      const sent: string[] = [];
+      const messenger: Messenger = {
+        sendMessage: vi.fn(async (_jid: string, text: string) => {
+          order.push('send');
+          sent.push(text);
+          return { waMessageId: null };
+        }),
+        sendMedia: vi.fn(async () => ({ waMessageId: null })),
+        setTyping: vi.fn(async () => {}),
+      };
+      const queue = new OutboundQueue(messenger, '15550100111@s.whatsapp.net');
+      queue.setToolUpdateMode('minimal');
+      queue.enqueueStreamingText('Restarting now to load the fix.', 'answer');
+      queue.discardPreToolAssistantText();
+      expect(sent).toEqual([]);
+
+      const { deps: d } = deps({
+        dataRoot,
+        trigger: triggerSelfRestart,
+        deliverOwedReply: () => deliverOwedReplyBeforeRestart(queue),
+        serviceManager: { restartSelf: vi.fn(async () => { order.push('restartSelf'); }) },
+      });
+
+      await buildRestartSelfTool(d).handler({ reason: 'r' }, SESSION);
+
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toContain(SALVAGED_REPLY_NOTICE);
+      expect(sent[0]).toContain('Restarting now to load the fix.');
+      expect(order).toEqual(['send', 'restartSelf']);
+    });
+
+    it('sends buffered streaming text as a normal message before restartSelf', async () => {
+      const sent: string[] = [];
+      const messenger: Messenger = {
+        sendMessage: vi.fn(async (_jid: string, text: string) => {
+          sent.push(text);
+          return { waMessageId: null };
+        }),
+        sendMedia: vi.fn(async () => ({ waMessageId: null })),
+        setTyping: vi.fn(async () => {}),
+      };
+      const queue = new OutboundQueue(messenger, '15550100111@s.whatsapp.net');
+      queue.enqueueStreamingText('On it, restarting.', 'answer');
+
+      await deliverOwedReplyBeforeRestart(queue);
+
+      expect(sent).toEqual(['On it, restarting.']);
     });
   });
 });
