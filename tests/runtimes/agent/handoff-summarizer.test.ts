@@ -358,4 +358,31 @@ describe('buildHandoffDistill', () => {
     expect(degraded).toHaveLength(1);
   });
 
+  // The 90-word prompt target is guidance only; a complete reply between the
+  // target and the hard limit must still persist (#3833).
+  it.each([[91], [MAX_SUMMARY_WORDS]])('accepts a complete %i-word reply between the prompt target and the hard limit', async (words) => {
+    const content = Array.from({ length: words }, () => 'word').join(' ');
+    const fetchImpl = vi.fn(async () => response(content, {
+      choices: [{ message: { content }, finish_reason: 'stop' }],
+    }));
+    const distill = buildHandoffDistill({ ...baseDeps(), fetchImpl: fetchImpl as unknown as typeof fetch });
+    await expect(distill(acceptReservation)).resolves.toEqual({ summary: content, seededArtifacts: null, tokensUsed: 42 });
+  });
+
+  // The length check runs before the empty check, so an empty reply cut off at
+  // the output cap reports the cap, while a complete empty reply reports empty.
+  it.each([
+    ['length', /^handoff summarizer reply stopped at the output token limit$/],
+    ['stop', /^handoff summarizer returned empty summary$/],
+  ])('reports an empty reply with finish_reason %s by the check that runs first', async (finishReason, message) => {
+    const fetchImpl = vi.fn(async () => response('', {
+      choices: [{ message: { content: '' }, finish_reason: finishReason }],
+    }));
+    const distill = buildHandoffDistill({ ...baseDeps(), fetchImpl: fetchImpl as unknown as typeof fetch });
+    const failure = await distill(acceptReservation).then(() => null, (err: unknown) => err);
+    expect(failure).toBeInstanceOf(HandoffDistillUsageError);
+    expect((failure as Error).message).toMatch(message);
+    expect((failure as HandoffDistillUsageError).tokensUsed).toBe(42);
+  });
+
 });
