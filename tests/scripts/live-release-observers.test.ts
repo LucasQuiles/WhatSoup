@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -40,7 +40,7 @@ function fixture(drift = false): { releasePath: string; fakeBin: string; fakeGit
   return { releasePath: plan.manifest.release.path, fakeBin, fakeGit };
 }
 
-function runObserver(releasePath: string, fakeBin: string, fakeGit: string, targetSha: string, fakeExit = '0') {
+function runObserver(releasePath: string, fakeBin: string, fakeGit: string, targetSha: string, fakeExit = '0', emitRepoRoot?: string) {
   writeFileSync(fakeGit, `#!/bin/bash\nif [[ "${fakeExit}" != 0 ]]; then exit "${fakeExit}"; fi\nprintf "%s\\t%s\\n" "${targetSha}" "\${@: -1}"\n`);
   chmodSync(fakeGit, 0o755);
   const scriptPath = path.join(process.cwd(), 'scripts/live-release-observers.ts');
@@ -50,7 +50,7 @@ function runObserver(releasePath: string, fakeBin: string, fakeGit: string, targ
     scriptPath,
     '--release', releasePath,
     '--target-url', 'https://github.com/LucasQuiles/WhatSoup.git',
-    '--no-emit',
+    ...(emitRepoRoot ? ['--repo-root', emitRepoRoot] : ['--no-emit']),
     '--json',
   ], {
     cwd: process.cwd(),
@@ -59,6 +59,7 @@ function runObserver(releasePath: string, fakeBin: string, fakeGit: string, targ
       PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
     },
     encoding: 'utf8',
+    timeout: 10_000,
   });
 }
 
@@ -107,5 +108,46 @@ describe('live release observers', () => {
     const result = JSON.parse(proc.stdout) as any;
     expect(result.drift.ok).toBe(false);
     expect(result.currency.state).toBe('inconclusive');
+  });
+
+  it.each([
+    { driftEmitStatus: 0, expectedExit: 1, outcome: 'drift' },
+    { driftEmitStatus: 23, expectedExit: 2, outcome: 'emit_failed' },
+  ])('returns $expectedExit when drift emission exits $driftEmitStatus and currency emission succeeds', ({ driftEmitStatus, expectedExit, outcome }) => {
+    const { releasePath, fakeBin, fakeGit } = fixture(true);
+    const emitRepoRoot = path.join(tmpRoot, 'emit-repo');
+    const helperDir = path.join(emitRepoRoot, 'deploy', 'scripts');
+    mkdirSync(helperDir, { recursive: true });
+    // Only the external outbox boundary is substituted; both observers and
+    // the combined command's exit classification execute their real code.
+    writeFileSync(path.join(helperDir, 'bot-errors-emit.py'), [
+      'import sys',
+      'from pathlib import Path',
+      'source = sys.argv[sys.argv.index("--source") + 1]',
+      'with (Path(__file__).parents[2] / "calls.txt").open("a") as calls:',
+      '    calls.write(source + "\\n")',
+      `sys.exit(${driftEmitStatus} if source == "release-drift" else 0)`,
+      '',
+    ].join('\n'));
+
+    const proc = runObserver(releasePath, fakeBin, fakeGit,
+      '2222222222222222222222222222222222222222', '0', emitRepoRoot);
+
+    expect(proc.error).toBeUndefined();
+    expect(proc.signal).toBeNull();
+    const result = JSON.parse(proc.stdout) as any;
+    expect(result.drift).toMatchObject({
+      ok: false,
+      record: { outcome },
+      alert: { attempted: true, status: driftEmitStatus },
+    });
+    expect(result.drift.issues.length).toBeGreaterThan(0);
+    expect(result.currency).toMatchObject({
+      state: 'target-differs',
+      alert: { attempted: true, status: 0 },
+    });
+    expect(readFileSync(path.join(emitRepoRoot, 'calls.txt'), 'utf8'))
+      .toBe('release-drift\nrelease-currency\n');
+    expect(proc.status, proc.stderr || proc.stdout).toBe(expectedExit);
   });
 });

@@ -116,7 +116,8 @@ export async function run(argv: string[] = process.argv.slice(2)): Promise<LiveR
     console.log(`release currency: ${currency.state} (${currency.reason})`);
   }
 
-  const driftInconclusive = !drift.ok && drift.issues.length === 0;
+  const driftInconclusive = drift.record.outcome === 'emit_failed'
+    || (!drift.ok && drift.issues.length === 0);
   if (driftInconclusive || currency.state === 'inconclusive') process.exitCode = 2;
   else if (!drift.ok || currency.state === 'target-differs') process.exitCode = 1;
   return result;
