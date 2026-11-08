@@ -136,6 +136,7 @@ function mockServiceManager() {
     start: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
     restart: vi.fn().mockResolvedValue(undefined),
+    restartSelf: vi.fn().mockResolvedValue(undefined),
     startFire: vi.fn((_name: string, onComplete?: (err: Error | null) => void) => onComplete?.(null)),
   };
 }

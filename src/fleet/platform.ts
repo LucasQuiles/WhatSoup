@@ -693,6 +693,13 @@ export interface ServiceManager {
   start(name: string): Promise<void>;
   stop(name: string): Promise<void>;
   restart(name: string): Promise<void>;
+  /**
+   * #3829: restart the job of the process that makes this call. The service
+   * manager must own both the stop and the start, because stopping the job
+   * terminates the caller: after the one command is issued nothing may need to
+   * run in the caller. Restarts issued from another process use restart().
+   */
+  restartSelf(name: string): Promise<void>;
   /** Fire-and-forget start with optional error callback (used in auth flow). */
   startFire(name: string, onError?: (err: Error | null) => void): void;
   /** Optional auth teardown hook; false means there was no job to restore after a failed pairing. */
@@ -716,6 +723,7 @@ abstract class BaseServiceManager implements ServiceManager {
   abstract start(name: string): Promise<void>;
   abstract stop(name: string): Promise<void>;
   abstract restart(name: string): Promise<void>;
+  abstract restartSelf(name: string): Promise<void>;
 
   startFire(name: string, onError?: (err: Error | null) => void): void {
     this.start(name).then(
@@ -757,6 +765,11 @@ class SystemdServiceManager extends BaseServiceManager {
   }
 
   async restart(name: string): Promise<void> {
+    await execFileAsync('systemctl', ['--user', 'restart', this.unit(name)]);
+  }
+
+  /** systemd performs the whole restart, so one command serves an in-unit caller too. */
+  async restartSelf(name: string): Promise<void> {
     await execFileAsync('systemctl', ['--user', 'restart', this.unit(name)]);
   }
 }
@@ -888,6 +901,22 @@ class LaunchdServiceManager extends BaseServiceManager {
     await this.stop(name);
     await this.start(name);
   }
+
+  /**
+   * #3829: restart() boots out the job and then bootstraps it from the calling
+   * process. Called from inside the job, the bootout terminates the caller, so
+   * the bootstrap never runs and the job stays unloaded (KeepAlive does not
+   * apply to an unloaded job). `kickstart -k` asks launchd to kill and relaunch
+   * the loaded job itself; the caller issues nothing after it. There is no
+   * bootstrap fallback: an absent job means this process is not that job.
+   */
+  async restartSelf(name: string): Promise<void> {
+    assertValidLaunchdInstanceName(name);
+    if (readExpectedGeneratedLaunchdPlist(name, plistPath(name)) === null) {
+      throw new Error('launchd plist is installed only after successful authentication; authenticate the instance before starting');
+    }
+    await execFileAsync('launchctl', ['kickstart', '-k', launchdServiceTarget(name)]);
+  }
 }
 
 // ---- Fallback for Linux without systemd (WSL1, containers) ----
@@ -911,6 +940,7 @@ class NoSystemdServiceManager implements ServiceManager {
   async start(): Promise<void> { this.fail(); }
   async stop(): Promise<void> { this.fail(); }
   async restart(): Promise<void> { this.fail(); }
+  async restartSelf(): Promise<void> { this.fail(); }
   startFire(): void { this.fail(); }
 }
 
@@ -965,6 +995,17 @@ export class DockerSupervisorServiceManager extends BaseServiceManager {
   async restart(name: string): Promise<void> {
     await this.stop(name);
     await this.start(name);
+  }
+
+  /**
+   * #3829: fails closed. The child map lives only in the process that spawned
+   * the instances, so an instance asking its own manager finds no child to
+   * stop and restart() would spawn a second copy beside the running one. The
+   * container entrypoint does not restart a child in place either
+   * (docker/entrypoint.sh), so no single command can replace this process.
+   */
+  async restartSelf(name: string): Promise<void> {
+    throw new Error(`self-restart is not supported under the docker supervisor (instance ${name}); restart the container instead`);
   }
 }
 

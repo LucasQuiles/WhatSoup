@@ -29,6 +29,7 @@ function makeServiceManager(overrides: Partial<ServiceManager> = {}): ServiceMan
     start: vi.fn(async () => {}),
     stop: vi.fn(async () => {}),
     restart: vi.fn(async () => {}),
+    restartSelf: vi.fn(async () => {}),
     startFire: vi.fn(() => {}),
     ...overrides,
   };
