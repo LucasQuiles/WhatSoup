@@ -701,6 +701,14 @@ export class FleetDbReader {
     }
   }
 
+  /** Release connections whose database paths are no longer discovered. */
+  retainMarkerHandles(dbPaths: Iterable<string>): void {
+    const retained = new Set(dbPaths);
+    for (const dbPath of this.markerHandles.keys()) {
+      if (!retained.has(dbPath)) this.dropMarkerHandle(dbPath);
+    }
+  }
+
   /** Close the persistent marker handles. Call when the realtime poller stops. */
   close(): void {
     for (const dbPath of [...this.markerHandles.keys()]) this.dropMarkerHandle(dbPath);
