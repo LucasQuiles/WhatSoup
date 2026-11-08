@@ -21,8 +21,9 @@ function make(opts: Partial<BoundedNdjsonSinkOptions> & { dir: string }): Bounde
   return sink;
 }
 
-// Startup does fs work on the libuv threadpool; under full-suite load the first start took 2.06 s
-// against vi.waitFor's 1 s default. 5 s stays under the 10 s testTimeout with drained() at 1 s.
+// In a full-suite run the first test failed here after 2.06 s of test time, its sink still
+// 'starting' when vi.waitFor's 1 s default ran out. Why startup was slow is unknown. 5 s stays
+// under the 10 s testTimeout with drained() at its 1 s default.
 async function settled(sink: BoundedNdjsonSink): Promise<void> {
   await vi.waitFor(() => {
     expect(sink.state()).not.toBe('starting');
