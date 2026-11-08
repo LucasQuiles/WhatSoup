@@ -324,6 +324,7 @@ import { toTurnFinalizationPersistence, toTurnRecoveryJobPersistence, type TurnT
 import { installFakePerChatMcpSocketManager } from './helpers/fake-per-chat-mcp-socket-manager.ts';
 import { registerInboundAuthorityCompletionCases } from './helpers/inbound-authority-completion-cases.ts';
 import { registerAfterTerminalAliasCases } from './helpers/after-terminal-alias-cases.ts';
+import { registerPreProviderAliasCases } from './helpers/pre-provider-alias-cases.ts';
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -1816,6 +1817,26 @@ describe('deferred-turn admission (#3295 S2)', () => {
         // Test hygiene only: a stranded held awaiter would block shutdown.
         releaseHeldAwaiter?.();
       }
+    });
+
+    registerPreProviderAliasCases({
+      lidJid,
+      canonicalJid: lidCanonicalJid,
+      otherJid: dmJid,
+      senderJid,
+      db: () => db,
+      runtime: () => runtime,
+      makeRuntime,
+      lifecycle,
+      queueFor,
+      echoNextAnswer,
+      admitTurn,
+      enqueueTurn: async (jid, messageId, content) => {
+        const seq = engine.journalInbound(messageId, toConversationKey(jid), jid, 'agent');
+        await runtime.handleMessage(makeMsg({ messageId, chatJid: jid, isGroup: false, content, inboundSeq: seq }));
+        return seq;
+      },
+      status,
     });
 
     registerAfterTerminalAliasCases({

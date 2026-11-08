@@ -1539,6 +1539,7 @@ describe('runtime terminal coordinator integration', () => {
       });
       const session = sessionStub();
       const beforeUserSend = vi.fn();
+      state.chatSessions.set('chat-system-barrier', session);
       state.pendingSystemResults.mark('chat-system-barrier');
 
       const sending = state.sendTurnToSession(
@@ -1557,6 +1558,41 @@ describe('runtime terminal coordinator integration', () => {
       await sending;
       expect(beforeUserSend).toHaveBeenCalledOnce();
       expect(session.sendTurn).toHaveBeenCalledWith('real user turn');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('refuses a user dispatch when its session is replaced during a system-result wait', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makeRuntimeState(db, { sessionScope: 'per_chat' });
+      const mapKey = 'chat-system-barrier';
+      const session = sessionStub();
+      const replacement = sessionStub();
+      const beforeUserSend = vi.fn();
+      state.chatSessions.set(mapKey, session);
+      state.pendingSystemResults.mark(mapKey);
+      const pending = state.pendingSystemResults as typeof state.pendingSystemResults & {
+        waitUntilDispatchable(scopeKey: string): Promise<void>;
+      };
+      const wait = vi.spyOn(pending, 'waitUntilDispatchable');
+      const sending = state.sendTurnToSession(
+        session, `${mapKey}@s.whatsapp.net`, 'real user turn', mapKey, undefined, beforeUserSend,
+      );
+      await vi.waitFor(() => expect(wait).toHaveBeenCalledWith(mapKey, undefined));
+      expect(beforeUserSend).not.toHaveBeenCalled();
+      expect(session.sendTurn).not.toHaveBeenCalled();
+
+      state.chatSessions.set(mapKey, replacement);
+      const rejected = expect(sending).rejects.toThrow('TURN_RECOVERY_DISPATCH_TARGET_SUPERSEDED');
+      state.pendingSystemResults.consumeIfPending(mapKey);
+      await rejected;
+      expect(beforeUserSend).not.toHaveBeenCalled();
+      expect(session.sendTurn).not.toHaveBeenCalled();
+      expect(replacement.sendTurn).not.toHaveBeenCalled();
+      expect(state.chatSessions.get(mapKey)).toBe(replacement);
     } finally {
       db.close();
     }

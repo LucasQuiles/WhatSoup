@@ -5960,6 +5960,15 @@ export class AgentRuntime implements Runtime {
       if (dispatchCancelled()) {
         throw new Error('TURN_RECOVERY_DISPATCH_TARGET_SUPERSEDED');
       }
+      if (effectiveMapKey !== undefined) {
+        // Alias migration can move an active manager during the dispatch waits.
+        // Resolve that manager directly; a stale-key fallback may name its replacement.
+        const currentMapKey = this.findMapKeyForSession(session);
+        if (currentMapKey === null) {
+          throw new Error('TURN_RECOVERY_DISPATCH_TARGET_SUPERSEDED');
+        }
+        effectiveMapKey = currentMapKey;
+      }
       if (systemTurnLease) this.requireSystemTurnProviderBoundary(systemTurnLease);
       // #3658: a held notice goes out at the first boundary that admits its
       // deferred start, before beforeUserSend opens this turn's answer
