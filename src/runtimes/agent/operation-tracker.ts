@@ -19,7 +19,7 @@ export interface TrackedOperation {
 }
 
 export type ProgressEvent =
-  | { type: 'operation_progress'; toolId: string; toolName: string; category: ToolCategory; elapsedMs: number; state: 'running' | 'slow' }
+  | { type: 'operation_progress'; toolId: string; toolName: string; category: ToolCategory; elapsedMs: number; state: 'running' | 'slow'; awaitingPoll?: boolean }
   | { type: 'operation_slow'; toolId: string; toolName: string; category: ToolCategory; elapsedMs: number; expectedMs: number }
   | { type: 'operation_stalled'; toolId: string; toolName: string; category: ToolCategory; elapsedMs: number }
   | { type: 'thinking_long'; gapMs: number }
@@ -150,6 +150,7 @@ export class OperationTracker {
         category: op.category,
         elapsedMs: elapsed,
         state: op.state as 'running' | 'slow',
+        ...(waitMs > 0 && elapsed < waitMs ? { awaitingPoll: true } : {}),
       });
     }, this.config.progressIntervalMs);
 

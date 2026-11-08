@@ -18,6 +18,7 @@ There are two poll paths with different semantics:
    - Set `selectableCount` above `1` for multi-select polls.
    - By default, `send_poll` returns after sending. With `awaitResult: true`, it stays open until a vote, expiry, or cancellation and returns the result.
    - A blocking wait uses the tool timeout (default one hour, clamped to one second through 24 hours). The operation tracker and session hard watchdog allow that bounded wait. Unrelated stalled tools retain their normal deadlines.
+   - During that bounded wait, periodic progress retains the typing indicator without sending “still working” text for the waiting operation. Unrelated operations keep their normal progress behavior.
    - After the wait expires, a missing tool result still reaches ordinary stall recovery for child-process providers. Managed API providers use their hard-watchdog fallback. The session hard watchdog also bounds recovery when operation tracking is disabled.
 
 ## Agent Guidance
@@ -82,9 +83,11 @@ The `pending_polls` table is bounded in normal operation: rows are deleted on se
 
 | Scope | `AskUserQuestion` poll bridge | Default Other | `send_poll` | Group voting |
 | --- | --- | --- | --- | --- |
-| Per-chat DM | Blocking, correlated, answer injected | Auto-appended when under cap and no escape hatch | `awaitResult: true` waits with vote tracking; otherwise returns `awaitFailed` | Not applicable |
-| Per-chat group | Blocking, correlated via voter policy, answer injected (default `first-vote-wins`) | Auto-appended when under cap and no escape hatch | `awaitResult: true` waits with vote tracking; otherwise returns `awaitFailed`; `resolution` selects strategy | 4 strategies shipped: `first-vote-wins`, `admin-only`, `admin-wins`, `majority-after-timeout` |
-| Shared/global session | Falls through to provider-native behavior | Not applied | `awaitResult: true` waits with vote tracking; otherwise returns `awaitFailed` | Not applicable |
+| Per-chat DM | Blocking, correlated, answer injected | Auto-appended when under cap and no escape hatch | Returns after sending by default; `awaitResult: true` waits with vote tracking | Not applicable |
+| Per-chat group | Blocking, correlated via voter policy, answer injected (default `first-vote-wins`) | Auto-appended when under cap and no escape hatch | Returns after sending by default; `awaitResult: true` waits with vote tracking; `resolution` selects strategy | 4 strategies shipped: `first-vote-wins`, `admin-only`, `admin-wins`, `majority-after-timeout` |
+| Shared/global session | Falls through to provider-native behavior | Not applied | Returns after sending by default; `awaitResult: true` waits with vote tracking | Not applicable |
+
+`awaitFailed` reports an explicitly requested wait that could not complete, including unavailable vote tracking, timeout or cancellation. An ordinary successful `send_poll` does not return `awaitFailed`.
 
 Group polls support the four resolution strategies via `send_poll`'s `resolution` parameter, or via the instance-level `pollResolution.defaultStrategy` config for `AskUserQuestion`. Each strategy:
 
