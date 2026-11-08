@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -8,7 +8,10 @@ import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 const repoRoot = path.resolve(import.meta.dirname, '../..');
 const unitPath = path.join(repoRoot, 'deploy/whatsoup-release-drift.service');
 const wrapperPath = path.join(repoRoot, 'deploy/scripts/whatsoup-release-drift-linux.sh');
+const runnerPath = path.join(repoRoot, 'scripts/run-with-pinned-node.sh');
+const schedulerPath = path.join(repoRoot, 'deploy/scripts/run-release-drift-schedule.sh');
 const tmp = trackTmpDirs('release-drift-unit-');
+const MAIN_GUARD_MARKER = 'fixture-observer-main-guard-ran';
 
 // Exit statuses systemd records as success for this oneshot unit.
 function successExitStatuses(): Set<number> {
@@ -44,6 +47,52 @@ function runWrapper(env: Record<string, string>) {
   });
 }
 
+function actualRelease(observerSource?: string): {
+  launcher: string;
+  logDir: string;
+  releaseRoot: string;
+} {
+  const root = tmp.make('actual-release');
+  const releaseRoot = path.join(root, 'WhatSoup-release-test');
+  mkdirSync(path.join(releaseRoot, 'deploy/scripts'), { recursive: true });
+  mkdirSync(path.join(releaseRoot, 'scripts'), { recursive: true });
+  copyFileSync(runnerPath, path.join(releaseRoot, 'scripts/run-with-pinned-node.sh'));
+  copyFileSync(schedulerPath, path.join(releaseRoot, 'deploy/scripts/run-release-drift-schedule.sh'));
+  writeFileSync(path.join(releaseRoot, 'deploy/scripts/rotate-release-drift-logs.sh'), '#!/usr/bin/env bash\nexit 0\n');
+  writeFileSync(path.join(releaseRoot, 'deploy/whatsoup'), '#!/usr/bin/env bash\nexit 0\n');
+  writeFileSync(path.join(releaseRoot, '.nvmrc'), '24.15.0\n');
+  writeFileSync(
+    path.join(releaseRoot, 'package.json'),
+    JSON.stringify({ name: 'release-drift-fixture', type: 'module', engines: { node: '>=24.0.0 <26' } }),
+  );
+  if (observerSource !== undefined) {
+    writeFileSync(path.join(releaseRoot, 'scripts/live-release-observers.ts'), observerSource);
+  }
+  for (const script of [
+    path.join(releaseRoot, 'scripts/run-with-pinned-node.sh'),
+    path.join(releaseRoot, 'deploy/scripts/run-release-drift-schedule.sh'),
+    path.join(releaseRoot, 'deploy/scripts/rotate-release-drift-logs.sh'),
+    path.join(releaseRoot, 'deploy/whatsoup'),
+  ]) chmodSync(script, 0o755);
+
+  const launcher = path.join(root, 'whatsoup');
+  symlinkSync(path.join(releaseRoot, 'deploy/whatsoup'), launcher);
+  return { launcher, logDir: path.join(root, 'logs'), releaseRoot };
+}
+
+function runPinnedRunner(releaseRoot: string, args: string[], env: Record<string, string> = {}) {
+  return spawnSync('bash', [path.join(releaseRoot, 'scripts/run-with-pinned-node.sh'), ...args], {
+    encoding: 'utf8',
+    cwd: releaseRoot,
+    env: {
+      PATH: process.env.PATH ?? '/usr/bin:/bin',
+      HOME: tmp.make('runner-home'),
+      WHATSOUP_NODE: process.execPath,
+      ...env,
+    },
+  });
+}
+
 describe('whatsoup-release-drift systemd unit', () => {
   it('treats only clean (0) and alerted drift (1) as success; inconclusive (2) fails the unit', () => {
     // Exit 1 is the documented "drifted, alert emitted through BOT ERRORS" outcome.
@@ -76,5 +125,108 @@ describe('whatsoup-release-drift systemd unit', () => {
       return successExitStatuses().has(code);
     });
     expect(outcomes).toEqual([true, true, false]);
+  });
+
+  it('rejects a release with a scheduler but no observer before systemd can accept exit 1', () => {
+    const release = actualRelease();
+    const result = runWrapper({
+      WHATSOUP_INSTANCE: 'test',
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+      WHATSOUP_NODE: process.execPath,
+    });
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('release root missing observer entrypoints');
+    expect(successExitStatuses().has(result.status ?? -1)).toBe(false);
+  });
+
+  it('classifies runner bootstrap failure as inconclusive through the real wrapper, scheduler, and pinned runner', () => {
+    const release = actualRelease('process.exitCode = 0;\n');
+    const result = runWrapper({
+      WHATSOUP_INSTANCE: 'test',
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+      WHATSOUP_NODE: path.join(release.releaseRoot, 'missing-node'),
+    });
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('FATAL: node not found');
+    expect(successExitStatuses().has(result.status ?? -1)).toBe(false);
+  });
+
+  it('preserves a completed observer exit 1 through the real wrapper, scheduler, and runner', () => {
+    const release = actualRelease("process.stdout.write('fixture-observer-completed\\n');\nprocess.exitCode = 1;\n");
+    const result = runWrapper({
+      WHATSOUP_INSTANCE: 'test',
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+      WHATSOUP_NODE: process.execPath,
+    });
+
+    expect(result.stdout).toContain('fixture-observer-completed');
+    expect(result.status).toBe(1);
+    expect(successExitStatuses().has(result.status ?? -1)).toBe(true);
+  });
+
+  it('keeps the runner default bootstrap exit and rejects unsupported bootstrap classifications', () => {
+    const release = actualRelease('process.exitCode = 0;\n');
+    const defaultFailure = runPinnedRunner(release.releaseRoot, ['scripts/missing-observer.ts']);
+    expect(defaultFailure.status).toBe(1);
+
+    const unsupported = runPinnedRunner(release.releaseRoot, [
+      '--bootstrap-exit-code',
+      '7',
+      'scripts/missing-observer.ts',
+    ]);
+    expect(unsupported.status).toBe(64);
+  });
+
+  it('classifies malformed observer syntax as inconclusive after the shell bootstrap succeeds', () => {
+    const release = actualRelease('export const malformed = ;\n');
+    const result = runWrapper({
+      WHATSOUP_INSTANCE: 'test',
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+      WHATSOUP_NODE: process.execPath,
+    });
+
+    expect(result.status).toBe(2);
+    expect(successExitStatuses().has(result.status ?? -1)).toBe(false);
+  });
+
+  it('classifies an observer static-import failure as inconclusive after the shell bootstrap succeeds', () => {
+    const release = actualRelease("import './missing-observer-dependency.ts';\n");
+    const result = runWrapper({
+      WHATSOUP_INSTANCE: 'test',
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+      WHATSOUP_NODE: process.execPath,
+    });
+
+    expect(result.status).toBe(2);
+    expect(successExitStatuses().has(result.status ?? -1)).toBe(false);
+  });
+
+  it('preserves the observer main-module argv guard while classifying observer loading', () => {
+    const release = actualRelease([
+      "import { pathToFileURL } from 'node:url';",
+      '',
+      'if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {',
+      `  process.stdout.write('${MAIN_GUARD_MARKER}\\n');`,
+      '  process.exitCode = 1;',
+      '}',
+      '',
+    ].join('\n'));
+    const result = runWrapper({
+      WHATSOUP_INSTANCE: 'test',
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+      WHATSOUP_NODE: process.execPath,
+    });
+
+    expect(result.stdout).toContain(MAIN_GUARD_MARKER);
+    expect(result.status).toBe(1);
+    expect(successExitStatuses().has(result.status ?? -1)).toBe(true);
   });
 });

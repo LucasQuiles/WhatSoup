@@ -51,7 +51,7 @@ case "$target" in
   *) fail "launcher target has unexpected shape: $target" ;;
 esac
 [ -d "$RELEASE_ROOT" ] || fail "resolved release root does not exist: $RELEASE_ROOT"
-[ -f "$RELEASE_ROOT/scripts/live-release-observers.ts" ] || \
+[ -f "$RELEASE_ROOT/scripts/live-release-observers.ts" ] && \
   [ -f "$RELEASE_ROOT/deploy/scripts/run-release-drift-schedule.sh" ] || \
   fail "release root missing observer entrypoints: $RELEASE_ROOT"
 
