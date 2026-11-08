@@ -249,9 +249,10 @@ of the running instance.
   `failed`. There is no special terminal-failure routing for
   unsupported-transport errors yet — they burn the normal retry budget first.
 - **No outbound-status events.** The adapter's `extensions` set is empty;
-  delivery confirmation uses the inbound echo path instead (the bot's own
-  sends arrive as `fromMe: true` records via polling and settle durability
-  through `matchEcho`).
+  the bot's own sends arrive as `fromMe: true` records via polling and settle
+  durability through `matchEcho`. This records an own-message observation,
+  not recipient delivery. The port returns the provider's message status, but
+  the adapter does not carry that status into the echo or emit delivery receipts.
 - **No instance-type gate.** The validator does not restrict
   `transport: "twilio"` by instance type, so a `type: "agent"` SMS instance
   starts normally — but its MCP media/poll tools reject at runtime (above).

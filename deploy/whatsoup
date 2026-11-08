@@ -58,7 +58,7 @@ keyring_lookup() {
   local service="$1"
   local envvar="${2:-}"
   shift 2 || true
-  local account="$USER"
+  local account="${USER:-}"
   local env_first=true
   if [ "$service" = "whatsoup-health-token" ] || [ "$service" = "whatsoup_health" ]; then
     env_first=false

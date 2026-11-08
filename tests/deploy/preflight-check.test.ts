@@ -502,29 +502,32 @@ function convertWrapperFixtureToRelease(fixture: WrapperFixture): void {
 function runWrapper(
   fixture: WrapperFixture,
   env: Record<string, string> = {},
+  unset: readonly string[] = [],
 ): { status: number; stderr: string; stdout: string; trace: string[] } {
+  const childEnv: NodeJS.ProcessEnv = {
+    ...cleanGitEnv(),
+    PATH: [join(dirname(fixture.wrapper), '..', 'sbin'), '/usr/bin:/bin'].join(':'),
+    HOME: fixture.home,
+    USER: 'test-user',
+    XDG_CONFIG_HOME: fixture.configHome,
+    XDG_DATA_HOME: fixture.dataHome,
+    WHATSOUP_NODE: fixture.fakeNode,
+    WHATSOUP_TEST_TRACE: fixture.trace,
+    WHATSOUP_TEST_DB_MODE: 'ready',
+    WHATSOUP_TEST_PREFLIGHT_RC: '0',
+    WHATSOUP_SKIP_PREFLIGHT: '',
+    WHATSOUP_TEST_STUB_CALLS: join(fixture.root, 'secret-tool-calls.log'),
+    WHATSOUP_TEST_KEYCHAIN_CALLS: join(fixture.root, 'keychain-calls.log'),
+    WHATSOUP_HEALTH_TOKEN: 'test-health-token',
+    OPENAI_API_KEY: 'test-openai-key',
+    PINECONE_API_KEY: 'test-pinecone-key',
+    ...env,
+  };
+  for (const name of unset) delete childEnv[name];
   const result = spawnSync('bash', [fixture.wrapper, 'q-bot'], {
     encoding: 'utf8',
     timeout: SPAWN_TIMEOUT_MS,
-    env: {
-      ...cleanGitEnv(),
-      PATH: [join(dirname(fixture.wrapper), '..', 'sbin'), '/usr/bin:/bin'].join(':'),
-      HOME: fixture.home,
-      USER: 'test-user',
-      XDG_CONFIG_HOME: fixture.configHome,
-      XDG_DATA_HOME: fixture.dataHome,
-      WHATSOUP_NODE: fixture.fakeNode,
-      WHATSOUP_TEST_TRACE: fixture.trace,
-      WHATSOUP_TEST_DB_MODE: 'ready',
-      WHATSOUP_TEST_PREFLIGHT_RC: '0',
-      WHATSOUP_SKIP_PREFLIGHT: '',
-      WHATSOUP_TEST_STUB_CALLS: join(fixture.root, 'secret-tool-calls.log'),
-      WHATSOUP_TEST_KEYCHAIN_CALLS: join(fixture.root, 'keychain-calls.log'),
-      WHATSOUP_HEALTH_TOKEN: 'test-health-token',
-      OPENAI_API_KEY: 'test-openai-key',
-      PINECONE_API_KEY: 'test-pinecone-key',
-      ...env,
-    },
+    env: childEnv,
   });
   const trace = existsSync(fixture.trace)
     ? readFileSync(fixture.trace, 'utf8').trim().split('\n').filter(Boolean)
@@ -878,6 +881,16 @@ describe.skipIf(!NODE_IN_PIN)('deploy/whatsoup — black-box startup ordering', 
 
     expect(result.status, result.stderr).toBe(0);
     expect(result.trace).toEqual(['db-check', 'preflight', 'runtime']);
+  });
+
+  it('runs the actual wrapper when USER is absent', () => {
+    const fixture = makeWrapperFixture();
+
+    const result = runWrapper(fixture, {}, ['USER']);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.trace).toEqual(['db-check', 'preflight', 'runtime']);
+    expect(result.stderr).not.toContain('USER: unbound variable');
   });
 
   it('removes every protected credential name before the first child process', () => {

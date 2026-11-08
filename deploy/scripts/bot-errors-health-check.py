@@ -5565,7 +5565,7 @@ COMMON_FUNCTIONAL_ENV_KEYS = (
 # The service can select a per-instance configuration/authentication root for
 # the default provider, and the probe is meant to exercise that same identity.
 # Provider credentials stay excluded.
-CLAUDE_FUNCTIONAL_ENV_KEYS = COMMON_FUNCTIONAL_ENV_KEYS + ("CLAUDE_CONFIG_DIR",)
+CLAUDE_FUNCTIONAL_ENV_KEYS = COMMON_FUNCTIONAL_ENV_KEYS + ("CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR")
 
 # The opencode probe child must never be WIDER than the production opencode
 # child. buildOpenCodeBaseChildEnv (src/runtimes/agent/providers/child-env.ts) is

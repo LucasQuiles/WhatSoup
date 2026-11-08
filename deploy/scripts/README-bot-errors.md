@@ -1567,6 +1567,13 @@ policy choice. Set it in the bot host's private profile, not in a tracked profil
 the private copy in step with tracked profile changes. The daily evidence line
 `profile: role=… path=…` shows which profile file a run used.
 
+Remote-desktop settings (`expectRustDesk`, `rustDeskCommand`, `expectedRustDeskId`,
+`rustDeskService`, `rustDeskServiceScope`, `rustDeskDirectPort`, `rustDeskRendezvous`)
+are host configuration, so they go only in a host's private profile. A tracked profile
+does not carry them. When you copy or update a private profile from a tracked one, keep
+these keys. Without `expectRustDesk: true` the remote-desktop checks do not run, and no
+evidence line reports that they were left out.
+
 At runtime the health check and the heartbeat watchdog resolve the profile through
 `deploy/scripts/lib/fleet_config.py`, in this order: `BOT_ERRORS_HEALTH_PROFILE_JSON`
 (health check only), `BOT_ERRORS_HEALTH_PROFILE`, `~/.config/whatsoup/health-profile.json`,
@@ -1651,6 +1658,44 @@ The expected successful shape is:
 - A stamped Git-backed runtime manifest should produce a `git_head_sha: ... expected=...
   match` evidence line. If `expected_head_sha` is unset, runtime-skew is only observable,
   not enforcing.
+
+### Credential-selector consumer-first transition
+
+When a runtime release begins forwarding `CLAUDE_SECURESTORAGE_CONFIG_DIR`, install
+and qualify the BOT ERRORS health consumer before activating that runtime producer.
+An older consumer forwards `CLAUDE_CONFIG_DIR` but not the secure-storage selector
+and can therefore check a different credential store.
+
+1. Use the existing `whatsoup-bot-errors-deploy.sh deploy <root> <staging-dir>`
+   followed by `whatsoup-bot-errors-deploy.sh verify <root>` to install the candidate
+   consumer. Require `verify` to pass the candidate runtime manifest's SHA-256 entry
+   for `deploy/scripts/bot-errors-health-check.py`. An active
+   `WhatSoup-health-<source12>` export instead stays on its separately pinned staged
+   package procedure; do not overwrite it with the generic deployer.
+2. For a configured macOS instance, first verify that the installed health
+   LaunchAgent plist `Label` and its loaded `gui/<uid>/<Label>` job agree with the
+   deployment receipt. Then kickstart that verified label with
+   `launchctl kickstart -k "gui/$(id -u)/<verified-health-label>"`; the placeholder
+   is deliberate, so do not trust a caller-provided `BOT_ERRORS_HEALTH_LABEL` shell
+   value. Require the configured health output timestamp-correlated with that
+   invocation to contain a fresh `provider_probe <instance> ... status=ok` completion.
+   The probe reads that instance's loaded `com.whatsoup.<instance>` launchd
+   environment, not the health job's parent environment. A profile with no bot or
+   zero configured instances cannot qualify this transition. On Linux or any platform
+   without an equally verified installed per-instance probe route, hold that target;
+   do not substitute a manually assembled environment or infer selector parity from
+   the health job's environment.
+3. Only after those two checks may the separately authorized runtime activation enable
+   the new `child-env.ts` producer.
+
+For rollback, restore or deactivate that producer first. Then use the existing
+`whatsoup-bot-errors-deploy.sh rollback <root> <backup-dir>` or
+`whatsoup-bot-errors-deploy.sh rollback-lkg <root>` contract for the consumer. Do
+not use the candidate's `verify` for old bytes: it resolves the candidate manifest
+hash. Verify the restored consumer with its retained prior manifest, pin, and deployer
+contract, then run the old installed provider probe. If that prior verifier is not
+retained, hold the rollback rather than relabeling hashes. Do not roll the consumer
+back first while the new producer remains active.
 
 The daily health check's `/health` and fleet API probes refuse HTTP redirects
 with `redirect_refused`. They send no second request and do not report the

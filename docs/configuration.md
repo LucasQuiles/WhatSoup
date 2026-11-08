@@ -184,6 +184,18 @@ reach that fence. If an active terminal or recovery handoff lacks exact durable 
 session, outbound queue, FIFO identity, and reply-guarantee ownership remain attached and shutdown
 fails visibly instead of clearing the evidence needed for diagnosis or retry.
 
+Process shutdown then closes refresh-ahead admission and waits for tracked Claude
+refresh children to emit `close`. It retains this wait after a child passes its
+ten-minute hard cap (`REFRESH_AHEAD_HARD_CAP_MS`). The wait ends two seconds before the shared ten-second shutdown deadline
+to leave time for transport and log cleanup. A pending child makes shutdown
+incomplete; the wait never signals the child or releases its credential-store claim.
+Fatal exceptions and rejected promises use that same shutdown watchdog.
+
+The systemd unit retains its 15-second stop timeout and `KillMode=mixed`. A detached
+process group does not escape its service cgroup: a supervisor's forced stop can
+still interrupt a refresh. These bounds reduce ordinary shutdown exposure; they do
+not guarantee completion after the application deadline, a crash or a forced stop.
+
 ### Access Control
 
 | Variable | Type | Default | Description |
@@ -780,8 +792,22 @@ with the account the owner ratified?**
 
 - **Observed identity.** The runtime spawns `claude auth status --json` with the
   same scrubbed allow-list environment the model probe and real turns use
-  (`HOME`, `PATH`, `USER`, `NO_COLOR`, and `CLAUDE_CONFIG_DIR` when set) and
-  reduces the answer to an opaque digest. The CLI's `email` and `orgId` are
+  (`HOME`, `PATH`, `USER`, `NO_COLOR`, `CLAUDE_CONFIG_DIR` and
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR` when set) and
+  reduces the answer to an opaque digest. Before probing, shared refresh-ahead
+  may refresh and persist an existing CLI-managed login; it never starts an
+  interactive login. `npm run --silent claude-account-digest` uses this same
+  observation and returns exit 4 if the binary/probe fails, a refresh is still
+  running, refresh ownership is unavailable, or the refresh fails.
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR` selects credential storage before
+  `CLAUDE_CONFIG_DIR`; a defined empty value selects the default
+  `$HOME/.claude` store. The BOT ERRORS functional probe preserves both
+  selectors, including that empty override. It does not forward credential values.
+  Non-turn command probes accept at most 64 KiB combined stdout and stderr,
+  counted before decoding. Overflow fails the observation and discards its output;
+  termination still respects refresh-lock grace and process ownership lasts until
+  the child closes. Later output is discarded after the result settles.
+  The CLI's `email` and `orgId` are
   read only inside the parser; nothing downstream — config, logs, alerts,
   health, this repository's tests — ever carries a raw identifier.
 - **Ratified expectation.** `sha256:` + SHA-256 over a versioned canonical
@@ -796,7 +822,8 @@ with the account the owner ratified?**
   degraded with reason `runtime.credential_identity_mismatch` / cause
   `credential_identity_mismatch`. `unverifiable` (not logged in, identity
   fields missing, output unparseable, binary missing, probe failed or
-  threw, malformed expectation, stale receipt, never verified) → warning
+  threw, refresh in flight, refresh owner unavailable, refresh failed, malformed expectation,
+  stale receipt, never verified) → warning
   alert `credential_identity_unverifiable` + the matching reason/cause pair.
   Unverifiable is never treated as a match, and it never clears an open
   mismatch. A match older than the model-usability freshness window is
@@ -1075,6 +1102,27 @@ Each logical attempt receives a random opaque receipt. Rows retain only caller a
 The unified database retention sweep removes terminal rows older than 30 days and keeps at most 10,000 terminal rows by default. Unresolved `intent` rows are never pruned by those bounds. Operators can preview or apply the same policy through the sensitive global `maintain_outbound_audit` tool.
 
 Authenticated `GET /health` exposes aggregate-only `outbound_sends`, `tool_durability`, and `retention.database` blocks. A failed database observation reports `readable: false` and null counts rather than manufacturing zero. No receipt, destination, provider ID, or error prose appears in these blocks.
+
+### `transportAuthority` pilot
+
+`transportAuthority` enables the Agent365 operation-authority check at the final Baileys `sendMessage` seam. It is opt-in and disabled by default. Enabling it changes outbound behavior: normal replies inherit their destination only from the protected current inbound turn; outgoing work without that binding is staged by Agent365 for human review. Every media, poll, raw, control, fleet, health, and scheduler send reaches the same final gate after content redaction and attachment-byte freezing.
+
+```json
+"transportAuthority": {
+  "enabled": true,
+  "baseUrl": "https://authority.example.internal",
+  "accountId": "pilot-account",
+  "credentialFile": "/var/db/whatsoup/transport-authority.bearer",
+  "serviceUid": 501,
+  "workerUid": 502
+}
+```
+
+All fields are required when `enabled` is `true`. `credentialFile` must be absolute, owned by `serviceUid`, a regular non-symlink file, and mode `0600`; startup rechecks the opened file to reject replacement races. The bearer is read only into the transport service client and is never copied into environment variables or agent tools. `serviceUid` must match the running transport process and differ from the declared `workerUid`. A protected launcher must actually run every agent worker and descendant with the declared worker identity; this configuration attests the required separation but does not itself perform an OS account switch. Qualification for a pilot requires a separate live launcher proof before cutover.
+
+Activation remains deliberately blocked until the requirements in the [send-approval activation handoff](security-handoffs/send-approval-activation.md) are met. The current launcher prototype is Linux-specific and does not qualify a macOS pilot.
+
+An unavailable file, wrong owner or mode, a symlink, a mismatched service UID, identical service/worker UIDs, a missing client, a malformed authority response, or an authority request failure stops the send before the provider call. The authority records inbound events before the conversation queue receives them. `/stop`, `/review`, `/approve`, and `/reject` are parsed from that stored authenticated inbound text by Agent365, never by the model. A persisted stop can send only the one-use fixed `whatsapp.control_receipt` returned by the authority for that exact inbound event; the client has no local acknowledgement template or general paused-account exemption. Review cards are rendered directly from authority JSON on the authenticated turn. An approved stored WhatsApp operation is retried with its `operation_id` at the admission envelope's top level; the reply context remains only the inbound event ID.
 
 ### Handoff artifact retention
 
@@ -1505,9 +1553,33 @@ result after the provider starts invalidates that provider's prior receipt.
 
 #### Primary model usability probe
 
-Agent runtimes launch a non-blocking startup probe for the configured primary conversation model. CLI model probes have a 15-second deadline so cold Claude/OpenCode startup does not create false degraded health. The result is surfaced in the `/health` `instance.primaryModelUsability` block with `status`, `provider`, `model`, optional `reason` / `suggestion`, `checkedAt`, and `probeInFlight`. A configured primary that returns `model-unavailable`, `credential-unavailable`, `provider-unavailable`, `timeout`, or an inconclusive `unknown` probe emits the `primary_model_unusable` operator alert. The alert evidence includes only safe metadata (provider, model, status, reason/suggestion) and never includes raw provider output or credential values.
+Refresh ownership initializes an absent final credential-store directory with
+mode `0700` before reading credentials or starting the refresh. Its resolved
+parent must already exist, belong to the current user, and deny group and other
+write access; a conventional `0755` home directory is supported. Ancestors must
+be owned by that user or root and deny group/other writes, except for sticky
+shared directories that protect owned entries. Missing
+intermediate directories and dangling links are refused. Initialization assumes
+cooperating processes under the same user account. A concurrent parent exchange
+can leave an empty directory, but a detected identity change prevents credential
+access and refresh admission. Existing credential contents are never copied or
+repaired by this initialization. An existing selected store must itself be
+current-user-owned and mode `0700`-private; its resolved parent and physical
+ancestors receive the same ownership, symlink, and writable-ancestor checks as
+an initialized store. A final symlink remains a supported canonical alias only
+when both its parent chain and its resolved target are safe; a dangling alias
+is refused. The original selector remains in the child environment, preserving
+the CLI's configured storage/keychain namespace. Selectors must be absolute
+and contain no `.` or `..` path segments. Refresh admission checks their original
+ancestry before resolving the store and refuses intermediate symlinks, except
+the verified root-owned macOS `/var` and `/tmp` prefix aliases. A final alias in
+a private parent keeps its exact selector spelling. These checks assume
+cooperating same-user writers; they do not prevent that user from retargeting a
+private alias or renaming a directory after admission.
 
-Probe mechanism is provider-specific and intentionally separate from fallback activation: `claude-cli` performs a cheap model-addressed CLI probe, `opencode-cli` performs a minimal model-addressed `opencode run` probe from the agent cwd using the same model routing and credential env as normal turns, and `openai-api` / `anthropic-api` POST a minimal generation-class probe (`/chat/completions` / `/messages`) to the configured endpoint — `providerConfig.baseUrl` when set, else the provider default — authenticated with the key resolved via `providerConfig.apiKeyService` when set (`src/runtimes/agent/providers/primary-model-usability-adapters.ts`). A custom-endpoint instance therefore probes the endpoint it will actually serve from, not the provider's public API. This probe makes the startup surface explicit about account/model access.
+Agent runtimes launch a non-blocking startup probe for the configured primary conversation model. The killable CLI probe child has a 15-second deadline so cold Claude/OpenCode startup does not create false degraded health. Claude refresh-ahead preparation may wait up to 60 seconds for `claude auth status --json`; WhatSoup does not signal that preparation child. Graceful shutdown closes new refresh admission and joins tracked children within the shutdown deadline; a supervisor forced stop can still kill them. A verified live durable refresh owner in the current parent defers the CLI probe with `deferred-refresh-in-flight` and suppresses the primary alert. A verified owner adopted after a parent restart has no bounded elapsed duration, so it retains its fence and defers the probe with alert-worthy `refresh-failed` instead of suppressing alerts indefinitely. Version 3 ownership records the host, child PID, and boot-bound process identity. On macOS, `python3` resolved through the fixed system-only path `/usr/bin:/bin:/usr/sbin:/sbin`, with its standard-library `ctypes`, reads the native process unique identifier from `libproc`; missing Python, an unsupported native query, or an unreadable identifier leaves ownership unavailable. There is no fallback to the whole-second `ps` start display. A live legacy macOS claim remains unavailable until the recorded PID is proven absent or operators reconcile it; the new record version also prevents older readers from reclaiming a live upgraded claim. After a parent restart, proven child absence or PID reuse permits recovery; a legacy claim, foreign host, unreadable identity, or uncertain publication remains unavailable rather than being presumed live. Unsafe or unavailable ownership instead reports `refresh-owner-unavailable`; a failed completed refresh or thrown refresh reports `refresh-failed`. Both failures block the killable probe and remain alert-worthy. Verified close may release that child's ownership claim, but does not establish that refreshing the login succeeded. A synchronous failure of the native spawn releases only its matching claim when no child was created; uncertain child outcomes retain ownership. The 10-minute hard cap stops local waiting without releasing the claim or permitting a new probe. A verified child still alive at that cap remains fenced and unsignalled. Later readiness checks, and verified owners adopted after a parent restart, report the bounded `hung` refresh outcome so they defer the killable probe with an alert-worthy failure instead of indefinitely suppressing the primary alert. A short exclusive mutation guard serializes claim recovery and successor publication. A crash during that guarded transition can leave the guard or an unpublished legacy claim; these require operator reconciliation only after all refresh owners and callers are proven stopped. The guard is never reclaimed automatically, and age alone never permits either file to be removed. The result is surfaced in the `/health` `instance.primaryModelUsability` block with `status`, `provider`, `model`, optional `reason` / `suggestion`, `checkedAt`, and `probeInFlight`. A configured primary that returns `model-unavailable`, `credential-unavailable`, `provider-unavailable`, `timeout`, or an inconclusive `unknown` probe emits the `primary_model_unusable` operator alert. The alert evidence includes only safe metadata (provider, model, status, reason/suggestion) and never includes raw provider output or credential values.
+
+Probe mechanism is provider-specific and intentionally separate from fallback activation: `claude-cli` performs a cheap model-addressed CLI probe, `opencode-cli` performs a minimal model-addressed `opencode run` probe from the agent cwd using the same model routing and credential env as normal turns, and `openai-api` / `anthropic-api` POST a minimal generation-class probe (`/chat/completions` / `/messages`) to the configured endpoint — `providerConfig.baseUrl` when set, else the provider default — authenticated with the key resolved via `providerConfig.apiKeyService` when set (`src/runtimes/agent/providers/primary-model-usability-adapters.ts`). A custom-endpoint instance therefore probes the endpoint it will actually serve from, not the provider's public API. This probe makes the startup surface explicit about account/model access. API generation probes refuse redirects, and read non-success diagnostic bodies through a 64 KiB byte cap that cancels the stream at the limit. Successful probes cancel the unused response body without waiting for cancellation to settle and abort their request at completion.
 
 Probe deadlines are cancellation boundaries, not detached result timers. A queued OpenCode probe is removed from the shared execution gate before its `timeout` result completes. If its process has already started, cancellation terminates the process and retains the execution lease until process closure, so later turns cannot overlap a timed-out probe. Diagnostic primary-usability and recovery probes use the same cancellation path. A cancelled probe's `timeout` carries a bounded `reason` naming the cause (the probe deadline or the caller's abort) and the probe stage in flight at that moment, for example `deadline-credential-heal`, `deadline-gate-wait`, `caller-abort-child-run`, or `caller-pre-aborted`; the full vocabulary is in `docs/public-surface.md` (`http:health.status`).
 

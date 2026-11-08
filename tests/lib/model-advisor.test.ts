@@ -91,10 +91,7 @@ describe('fetchLiveModelIds', () => {
   it('returns model IDs from the vendor list endpoint', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
     vi.stubEnv('OPENAI_API_KEY', '');
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ data: [{ id: 'claude-opus-4-9' }, { id: 'claude-fable-5' }] }),
-    }));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ data: [{ id: 'claude-opus-4-9' }, { id: 'claude-fable-5' }] })));
     expect(await fetchLiveModelIds()).toEqual(['claude-opus-4-9', 'claude-fable-5']);
   });
 
@@ -136,7 +133,7 @@ describe('fetchLiveModelIds', () => {
     runTimersInline();
     const fetchSpy = vi.fn()
       .mockRejectedValueOnce(new Error('The operation was aborted due to timeout'))
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ data: [{ id: 'claude-opus-4-9' }] }) });
+      .mockResolvedValueOnce(Response.json({ data: [{ id: 'claude-opus-4-9' }] }));
     vi.stubGlobal('fetch', fetchSpy);
     const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
     expect(fetchSpy).toHaveBeenCalledTimes(2);
@@ -177,7 +174,7 @@ describe('fetchLiveModelIds', () => {
     runTimersInline();
     const fetchSpy = vi.fn()
       .mockResolvedValueOnce({ ok: false, status: 429 })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ data: [{ id: 'claude-opus-4-9' }] }) });
+      .mockResolvedValueOnce(Response.json({ data: [{ id: 'claude-opus-4-9' }] }));
     vi.stubGlobal('fetch', fetchSpy);
     const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
     expect(fetchSpy).toHaveBeenCalledTimes(2);
@@ -190,7 +187,7 @@ describe('fetchLiveModelIds', () => {
     runTimersInline();
     const fetchSpy = vi.fn()
       .mockResolvedValueOnce({ ok: false, status: 408 })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ data: [{ id: 'claude-opus-4-9' }] }) });
+      .mockResolvedValueOnce(Response.json({ data: [{ id: 'claude-opus-4-9' }] }));
     vi.stubGlobal('fetch', fetchSpy);
     const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
     expect(fetchSpy).toHaveBeenCalledTimes(2);
@@ -203,16 +200,13 @@ describe('fetchLiveModelIds', () => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
     vi.stubEnv('OPENAI_API_KEY', '');
     runTimersInline();
-    const fetchSpy = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => { throw new SyntaxError('Unexpected token < in JSON at position 0'); },
-    });
+    const fetchSpy = vi.fn().mockResolvedValue(new Response('<html>not json</html>'));
     vi.stubGlobal('fetch', fetchSpy);
     const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(result.liveScan).toMatchObject({
       mode: 'degraded',
-      degradedVendors: [{ vendor: 'anthropic', reason: 'Unexpected token < in JSON at position 0' }],
+      degradedVendors: [{ vendor: 'anthropic', reason: expect.stringContaining('not valid JSON') }],
     });
   });
 
@@ -220,10 +214,7 @@ describe('fetchLiveModelIds', () => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
     vi.stubEnv('OPENAI_API_KEY', '');
     runTimersInline();
-    const fetchSpy = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ data: { id: 'claude-opus-4-9' } }),
-    });
+    const fetchSpy = vi.fn().mockResolvedValue(Response.json({ data: { id: 'claude-opus-4-9' } }));
     vi.stubGlobal('fetch', fetchSpy);
     const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
@@ -235,11 +226,12 @@ describe('fetchLiveModelIds', () => {
     vi.stubEnv('OPENAI_API_KEY', '');
     runTimersInline();
     const fetchSpy = vi.fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => { throw new DOMException('The operation was aborted due to timeout', 'TimeoutError'); },
-      })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ data: [{ id: 'claude-opus-4-9' }] }) });
+      .mockResolvedValueOnce(new Response(new ReadableStream({
+        start(controller) {
+          controller.error(new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+        },
+      })))
+      .mockResolvedValueOnce(Response.json({ data: [{ id: 'claude-opus-4-9' }] }));
     vi.stubGlobal('fetch', fetchSpy);
     const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
     expect(fetchSpy).toHaveBeenCalledTimes(2);
@@ -252,7 +244,7 @@ describe('startModelCurrencyMonitor startup deferral', () => {
   it('does not scan during the cold-start window', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', '');
     vi.stubEnv('OPENAI_API_KEY', 'fake-openai-key');
-    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: [] }) });
+    const fetchSpy = vi.fn().mockResolvedValue(Response.json({ data: [] }));
     vi.stubGlobal('fetch', fetchSpy);
     const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
       .mockReturnValue({ unref: () => {} } as unknown as NodeJS.Timeout);
@@ -299,10 +291,7 @@ describe('checkModelCurrency', () => {
 
   it('recommends live-discovered models newer than the static catalog', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ data: [{ id: 'claude-opus-4-9' }] }),
-    }));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ data: [{ id: 'claude-opus-4-9' }] })));
     const advisories = await checkModelCurrency({ conversation: 'claude-opus-4-8' });
     expect(advisories[0]).toMatchObject({ level: 'upgrade-available', recommended: 'claude-opus-4-9' });
   });
@@ -472,10 +461,7 @@ describe('model-advisor.ts uncovered-branch coverage', () => {
   it('fetches model ids from the OpenAI vendor when only OPENAI_API_KEY is set', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', '');
     vi.stubEnv('OPENAI_API_KEY', 'fake-openai-key');
-    const fetchSpy = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ data: [{ id: 'gpt-5.4' }, { id: 'gpt-5.5-mini' }] }),
-    });
+    const fetchSpy = vi.fn().mockResolvedValue(Response.json({ data: [{ id: 'gpt-5.4' }, { id: 'gpt-5.5-mini' }] }));
     vi.stubGlobal('fetch', fetchSpy);
     const result = await fetchLiveModelIdsWithStatus();
     expect(result.ids).toEqual(['gpt-5.4', 'gpt-5.5-mini']);
@@ -495,14 +481,11 @@ describe('model-advisor.ts uncovered-branch coverage', () => {
   it('records both vendors as attempted and fetches in parallel when both keys are set', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'fake-anthropic-key');
     vi.stubEnv('OPENAI_API_KEY', 'fake-openai-key');
-    const fetchSpy = vi.fn().mockImplementation((url: string) => Promise.resolve({
-      ok: true,
-      json: async () => ({
-        data: new URL(url).hostname === 'api.openai.com'
-          ? [{ id: 'gpt-5.4' }]
-          : [{ id: 'claude-opus-4-8' }],
-      }),
-    }));
+    const fetchSpy = vi.fn().mockImplementation((url: string) => Promise.resolve(Response.json({
+      data: new URL(url).hostname === 'api.openai.com'
+        ? [{ id: 'gpt-5.4' }]
+        : [{ id: 'claude-opus-4-8' }],
+    })));
     vi.stubGlobal('fetch', fetchSpy);
     const result = await fetchLiveModelIdsWithStatus();
     expect(fetchSpy).toHaveBeenCalledTimes(2);
@@ -585,12 +568,9 @@ describe('model-advisor.ts uncovered-branch coverage', () => {
 
 describe('resolveModelRole (symbolic model resolution)', () => {
   // The acceptance live-list from the bead spec.
-  const OPENAI_LIVE_RESPONSE = {
-    ok: true,
-    json: async () => ({
-      data: [{ id: 'gpt-5.5' }, { id: 'gpt-5.5-codex' }, { id: 'gpt-5.4' }, { id: 'gpt-5.6-preview' }],
-    }),
-  };
+  const openaiLiveResponse = () => Response.json({
+    data: [{ id: 'gpt-5.5' }, { id: 'gpt-5.5-codex' }, { id: 'gpt-5.4' }, { id: 'gpt-5.6-preview' }],
+  });
 
   it('returns literal IDs unchanged without touching the network', async () => {
     const fetchSpy = vi.fn();
@@ -603,7 +583,7 @@ describe('resolveModelRole (symbolic model resolution)', () => {
   it('resolves latest-stable from the live list and caches the fetch', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', '');
     vi.stubEnv('OPENAI_API_KEY', 'fake-openai-key');
-    const fetchSpy = vi.fn().mockResolvedValue(OPENAI_LIVE_RESPONSE);
+    const fetchSpy = vi.fn().mockImplementation(openaiLiveResponse);
     vi.stubGlobal('fetch', fetchSpy);
     expect(await resolveModelRole('openai:gpt:latest-stable')).toBe('gpt-5.5');
     expect(await resolveModelRole('openai:gpt:latest-stable')).toBe('gpt-5.5');
@@ -613,7 +593,7 @@ describe('resolveModelRole (symbolic model resolution)', () => {
   it('resolves latest (unfiltered) to the newest served ID including preview', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', '');
     vi.stubEnv('OPENAI_API_KEY', 'fake-openai-key');
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(OPENAI_LIVE_RESPONSE));
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(openaiLiveResponse));
     expect(await resolveModelRole('openai:gpt:latest')).toBe('gpt-5.6-preview');
   });
 
@@ -636,7 +616,7 @@ describe('resolveModelRole (symbolic model resolution)', () => {
   it('fetchLiveModelIdsCached refreshes on miss and reuses within the TTL', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', '');
     vi.stubEnv('OPENAI_API_KEY', 'fake-openai-key');
-    const fetchSpy = vi.fn().mockResolvedValue(OPENAI_LIVE_RESPONSE);
+    const fetchSpy = vi.fn().mockImplementation(openaiLiveResponse);
     vi.stubGlobal('fetch', fetchSpy);
     const first = await fetchLiveModelIdsCached();
     const second = await fetchLiveModelIdsCached();
@@ -648,7 +628,7 @@ describe('resolveModelRole (symbolic model resolution)', () => {
   it('checkModelCurrencyStatus advises on the RESOLVED target and re-primes the shared cache', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', '');
     vi.stubEnv('OPENAI_API_KEY', 'fake-openai-key');
-    const fetchSpy = vi.fn().mockResolvedValue(OPENAI_LIVE_RESPONSE);
+    const fetchSpy = vi.fn().mockImplementation(openaiLiveResponse);
     vi.stubGlobal('fetch', fetchSpy);
     // The symbolic role resolves to the newest stable (gpt-5.5), which IS
     // current on the live list — so no advisory fires for it, even though the
@@ -669,7 +649,7 @@ describe('resolveModelRole (symbolic model resolution)', () => {
     // resolves to gpt-5.5 and no upgrade advisory fires (preview lines are a
     // different comparison family) — but a LITERAL gpt-5.4 in another role is
     // still flagged against the live list.
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(OPENAI_LIVE_RESPONSE));
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(openaiLiveResponse));
     const result = await checkModelCurrencyStatus({
       fallback: 'openai:gpt:latest-stable',
       conversation: 'gpt-5.4',

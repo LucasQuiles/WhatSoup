@@ -520,7 +520,9 @@ if [ "$PLATFORM" = "Darwin" ]; then
     rendered="$(sed -e "s|__WHATSOUP_REPO_ROOT__|$REPO_ROOT|g" -e "s|__HOME__|$HOME|g" -e "s|\${WHATSOUP_REPO_ROOT}|$REPO_ROOT|g" -e "s|\${HOME}|$HOME|g" "$src")"
     # Carry the host's single service.claudeConfigDir (if any) so the job's
     # provider CLI uses the bot's credential store; with none configured, keep
-    # the value the installed plist already has. scripts/check-launchd-drift.sh
+    # the value the installed plist already has. harness-maintenance instead
+    # always gets its own $HOME/.claude-maint: its agent CLI must never share
+    # (and so be able to refresh) a bot's login. scripts/check-launchd-drift.sh
     # applies the same filter, so its render of this job matches what setup
     # installs. A carried-forward value is re-rendered in the template's layout;
     # a hand-edited plist's own formatting is not kept.

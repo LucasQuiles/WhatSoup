@@ -117,7 +117,7 @@ describe('TwilioConnection bridge', () => {
       const { bridge, port } = makeBridge();
 
       const received: IncomingMessage[] = [];
-      bridge.onMessage = (msg) => received.push(msg);
+      bridge.onMessage = (msg) => { received.push(msg); };
 
       port.injectInbound(makeInboundSms({
         sid: 'SMabc123',
@@ -174,7 +174,7 @@ describe('TwilioConnection bridge', () => {
       const { bridge, port } = makeBridge();
 
       const received: IncomingMessage[] = [];
-      bridge.onMessage = (msg) => received.push(msg);
+      bridge.onMessage = (msg) => { received.push(msg); };
 
       await bridge.connect();
       bridge.shutdown();
@@ -287,7 +287,7 @@ describe('TwilioConnection sms jid scheme (ingest round-trip)', () => {
     vi.useFakeTimers({ now: 0 });
     const { bridge, port } = makeBridge();
     const received: IncomingMessage[] = [];
-    bridge.onMessage = (m) => received.push(m);
+    bridge.onMessage = (m) => { received.push(m); };
 
     await bridge.connect();
     port.injectInbound(makeInboundSms({ sid: 'SMrt1', body: 'hi' }));
@@ -305,7 +305,7 @@ describe('TwilioConnection sms jid scheme (ingest round-trip)', () => {
     vi.useFakeTimers({ now: 0 });
     const { bridge, port } = makeBridge();
     const received: IncomingMessage[] = [];
-    bridge.onMessage = (m) => received.push(m);
+    bridge.onMessage = (m) => { received.push(m); };
 
     await bridge.connect();
     port.injectInbound(makeInboundSms({ sid: 'SMrt2', body: 'q' }));
@@ -325,7 +325,7 @@ describe('TwilioConnection event/lifecycle robustness', () => {
     vi.useFakeTimers({ now: 0 });
     const { bridge, port } = makeBridge();
     const received: IncomingMessage[] = [];
-    bridge.onMessage = (m) => received.push(m);
+    bridge.onMessage = (m) => { received.push(m); };
 
     await bridge.connect();
     await bridge.connect();
@@ -349,7 +349,7 @@ describe('TwilioConnection bridge — fromMe echo mapping', () => {
     const { bridge, port } = makeBridge();
 
     const received: IncomingMessage[] = [];
-    bridge.onMessage = (msg) => received.push(msg);
+    bridge.onMessage = (msg) => { received.push(msg); };
 
     await bridge.connect();
 
@@ -389,7 +389,7 @@ describe('TwilioConnection bridge — fromMe echo mapping', () => {
     const { toConversationKey } = await import('../../../src/core/conversation-key.ts');
 
     const received: IncomingMessage[] = [];
-    bridge.onMessage = (msg) => received.push(msg);
+    bridge.onMessage = (msg) => { received.push(msg); };
 
     await bridge.connect();
 
@@ -435,7 +435,7 @@ describe('TwilioConnection isResponseWorthy derivation', () => {
     vi.useFakeTimers({ now: 0 });
     const { bridge, port } = makeBridge();
     const received: IncomingMessage[] = [];
-    bridge.onMessage = (m) => received.push(m);
+    bridge.onMessage = (m) => { received.push(m); };
 
     await bridge.connect();
     port.injectInbound(makeInboundSms({ sid: 'SMblank', body: '' }));
@@ -479,7 +479,7 @@ describe('TwilioConnection voice message mapping', () => {
     vi.useFakeTimers({ now: 0 });
     const { bridge, adapter } = makeBridge({ voice: { enabled: true, voicemailMaxLengthSec: 120 } });
     const received: IncomingMessage[] = [];
-    bridge.onMessage = (m) => received.push(m);
+    bridge.onMessage = (m) => { received.push(m); };
     await bridge.connect();
     adapter.handleTranscript({
       text: 'voicemail words', recordingSid: 'RE00000000000000000000000000000001',

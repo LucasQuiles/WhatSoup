@@ -212,6 +212,29 @@ function runOpenCodeFallbackProbeInventory(
   ].join('\n'))) as string[];
 }
 
+describe('Claude provider-probe credential selector', () => {
+  it('forwards the secure-storage selector, including its defined-empty default override', () => {
+    const result = JSON.parse(python([
+      importHealthModulePrelude(),
+      'import json',
+      'base = {"HOME": "/fixture/home", "PATH": "/fixture/bin:/usr/bin:/bin", "USER": "fixture", "CLAUDE_CONFIG_DIR": "/fixture/config", "CLAUDE_SECURESTORAGE_CONFIG_DIR": "/fixture/secure", "PRIVATE_SENTINEL": "not-forwarded"}',
+      'selected = m.governed_child_environment("/fixture/bin:/usr/bin:/bin", "agent-alpha", None, base, env_keys=m.CLAUDE_FUNCTIONAL_ENV_KEYS)',
+      'empty_override = dict(base)',
+      'empty_override["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = ""',
+      'default_selected = m.governed_child_environment("/fixture/bin:/usr/bin:/bin", "agent-alpha", None, empty_override, env_keys=m.CLAUDE_FUNCTIONAL_ENV_KEYS)',
+      'print(json.dumps({"config": selected.get("CLAUDE_CONFIG_DIR"), "secure": selected.get("CLAUDE_SECURESTORAGE_CONFIG_DIR"), "default_secure": default_selected.get("CLAUDE_SECURESTORAGE_CONFIG_DIR"), "default_key_present": "CLAUDE_SECURESTORAGE_CONFIG_DIR" in default_selected, "secret_present": "PRIVATE_SENTINEL" in selected}))',
+    ].join('\n'))) as Record<string, unknown>;
+
+    expect(result).toEqual({
+      config: '/fixture/config',
+      secure: '/fixture/secure',
+      default_secure: '',
+      default_key_present: true,
+      secret_present: false,
+    });
+  });
+});
+
 function runDeadman(tmpRoot: string, extraEnv: Record<string, string> = {}) {
   return spawnSync('python3', [
     'deploy/scripts/bot-errors-health-check.py',
@@ -722,7 +745,7 @@ print(json.dumps(samples, sort_keys=True))
         BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
         BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
         BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
-        BOT_ERRORS_DRY_RUSTDESK_ID: '1076834574',
+        BOT_ERRORS_DRY_RUSTDESK_ID: '1234567890',
         BOT_ERRORS_DRY_RUSTDESK_SERVICE_STATUS: 'active',
         BOT_ERRORS_DRY_RUSTDESK_PORT_STATUS: 'ok',
         BOT_ERRORS_DRY_RUSTDESK_RENDEZVOUS_STATUS: 'ok',
@@ -737,7 +760,7 @@ print(json.dumps(samples, sort_keys=True))
           expectRuntimeManifest: false,
           expectAlertTarget: false,
           expectRustDesk: true,
-          expectedRustDeskId: '1076834574',
+          expectedRustDeskId: '1234567890',
           rustDeskCommand: '/usr/bin/rustdesk',
           rustDeskService: 'rustdesk.service',
           rustDeskDirectPort: 21118,
@@ -756,13 +779,13 @@ print(json.dumps(samples, sort_keys=True))
     };
     expect(event.eventType).toBe('clear');
     expect(event.severity).toBe('info');
-    expect(event.evidence).toContain('rustdesk: id=1076834574 expected_id=1076834574');
+    expect(event.evidence).toContain('rustdesk: id=1234567890 expected_id=1234567890');
     expect(event.evidence).toContain('rustdesk_service: active (rustdesk.service) scope=user');
     expect(event.evidence).toContain('rustdesk_direct: host=127.0.0.1 port=21118 status=ok');
     expect(event.evidence).toContain('rustdesk_rendezvous: endpoint=rs-ny.rustdesk.com:21116 status=ok');
   });
 
-  it('fails daily health when the RustDesk ID drifts from the pinned Nucles ID', () => {
+  it('fails daily health when the RustDesk ID drifts from the pinned ID', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
 
     execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
@@ -790,7 +813,7 @@ print(json.dumps(samples, sort_keys=True))
           expectRuntimeManifest: false,
           expectAlertTarget: false,
           expectRustDesk: true,
-          expectedRustDeskId: '1076834574',
+          expectedRustDeskId: '1234567890',
           rustDeskCommand: '/usr/bin/rustdesk',
           rustDeskService: 'rustdesk.service',
           rustDeskDirectPort: 21118,
@@ -807,7 +830,7 @@ print(json.dumps(samples, sort_keys=True))
       evidence: string;
     };
     expect(event.severity).toBe('warning'); // F7: rustdesk is infra-class, de-conflated from critical
-    expect(event.evidence).toContain('FAIL rustdesk: id=999999999 expected_id=1076834574');
+    expect(event.evidence).toContain('FAIL rustdesk: id=999999999 expected_id=1234567890');
   });
 
   it('reports profile-driven DNS checks when expected addresses resolve', () => {

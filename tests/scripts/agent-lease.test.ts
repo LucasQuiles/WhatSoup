@@ -121,7 +121,20 @@ function runCli(cwd: string, args: string[]): { code: number; stdout: string; st
     ['--disable-warning=ExperimentalWarning', '--experimental-strip-types', cliPath, ...args],
     { cwd, encoding: 'utf8' },
   );
-  return { code: r.status ?? -1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+  const stdout = r.stdout ?? '';
+  const stderr = r.stderr ?? '';
+  if (r.status === null) {
+    const error = r.error as NodeJS.ErrnoException | undefined;
+    throw new Error(
+      'agent-lease CLI missing numeric exit status: '
+        + `errorName=${error?.name ?? 'none'} `
+        + `errorCode=${error?.code ?? 'none'} `
+        + `signal=${r.signal ?? 'none'} `
+        + `stdoutBytes=${Buffer.byteLength(stdout)} `
+        + `stderrBytes=${Buffer.byteLength(stderr)}`,
+    );
+  }
+  return { code: r.status, stdout, stderr };
 }
 
 beforeEach(() => {

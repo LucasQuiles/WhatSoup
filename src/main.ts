@@ -8,6 +8,7 @@ import { cleanupOldRateLimits, cleanupOldAttempts } from './runtimes/chat/rate-l
 import { getMessagesBySender, getMessageCount, getUnprocessedCount } from './core/messages.ts';
 import { processHistoryBatch, type HistoryInput } from './core/history-sync.ts';
 import { createConnection } from './transport/factory.ts';
+import { createProtectedOperationsAuthorityClient } from './transport/operations-authority-client.ts';
 import { classifyStreamedProviderFailure } from './runtimes/agent/failure-taxonomy.ts';
 import type { RuntimeConnection } from './transport/runtime-connection.ts';
 import { isFullyConnected } from './transport/runtime-connection.ts';
@@ -82,6 +83,7 @@ import { backfillMetrics, collectHourlyMetrics } from './core/metrics-collector.
 import { startModelCurrencyMonitor } from './lib/model-advisor.ts';
 import { buildMemoryReadinessLogFields } from './lib/memory-operation-telemetry.ts';
 import { runShutdownSequence, shutdownExitCode, type ShutdownSequenceOutcome } from './main-shutdown-policy.ts';
+import { awaitActiveClaudeRefreshes } from './runtimes/agent/providers/claude-refresh-ahead.ts';
 import { markCleanExit, restartLoopGuardPath } from './runtimes/agent/restart-loop-guard.ts';
 import { formatClockForUser } from './runtimes/agent/runtime-presentation.ts';
 import { acquireCoordinationLease, defaultLeaseProbes, releaseCoordinationLease, renewCoordinationLease } from './transport/coordination-lease.ts';
@@ -465,6 +467,22 @@ strictStartupConnectionReady = (): boolean => isFullyConnected(connectionManager
 // outbound governor. main.ts is the composition root (may import runtimes);
 // transport receives the classifier via DI so it need not import runtimes.
 connectionManager.setOutboundContentClassifier?.(classifyStreamedProviderFailure);
+if (config.transportAuthority?.enabled) {
+  const installAuthority = connectionManager.setOperationsAuthorityClient;
+  if (typeof installAuthority !== 'function') {
+    throw new Error('transport authority is enabled but the selected connection has no final authority seam');
+  }
+  // The bearer is read only by this transport-service process after strict
+  // owner/mode/UID checks. Agent workers never receive it through env or tools.
+  const authority = createProtectedOperationsAuthorityClient({
+    baseUrl: config.transportAuthority.baseUrl,
+    accountId: config.transportAuthority.accountId,
+    credentialFile: config.transportAuthority.credentialFile,
+    serviceUid: config.transportAuthority.serviceUid,
+    workerUid: config.transportAuthority.workerUid,
+  });
+  installAuthority.call(connectionManager, authority);
+}
 
 // 5. Runtime — selected by instance type
 let runtime: Runtime;
@@ -503,6 +521,7 @@ if (instanceType === 'agent') {
   const agentModel = resolveAgentModel(instanceConfig);
   const agentRuntime = new AgentRuntime(db, connectionManager, config.botName, {
     shared: agentOpts?.sessionScope === 'shared',
+    providerProcessIsolation: config.providerProcessIsolation ?? undefined,
     sessionScope: agentOpts?.sessionScope as 'single' | 'shared' | 'per_chat' | undefined,
     cwd: cwdResolved,
     configSystemPrompt: instanceConfig?.systemPrompt as string | undefined,
@@ -1372,6 +1391,7 @@ async function shutdown(signal: string): Promise<void> {
   shutdownInProgress = true;
   log.info({ signal }, 'shutting down');
 
+  const deadlineAt = Date.now() + 10_000;
   const timeout = setTimeout(() => {
     log.error('shutdown timed out, forcing exit');
     process.exit(1);
@@ -1410,6 +1430,8 @@ async function shutdown(signal: string): Promise<void> {
       // Flush runtime queue before closing transport so queued messages can be delivered
       // runtime.shutdown() stops enrichment poller internally
       shutdownRuntime: () => runtime.shutdown(),
+      refreshDrainDeadlineAt: deadlineAt - 2_000,
+      drainRefreshChildren: awaitActiveClaudeRefreshes,
       shutdownTransport: () => connectionManager.shutdown(),
       // C5 restart-loop guard: a completed graceful shutdown clears the crash
       // marker — the next boot will not count as crash-interrupted. No-op for
@@ -1448,14 +1470,12 @@ process.on('uncaughtException', (err) => {
   log.fatal({ err, shutdownInProgress }, 'uncaught exception');
   if (shutdownInProgress) return;  // Don't race with an in-progress shutdown's exit code
   const done = shutdown('uncaughtException');
-  setTimeout(() => { log.error('shutdown hung after uncaughtException — forcing exit'); process.exit(1); }, 5_000).unref();
   done.catch(() => process.exit(1));
 });
 process.on('unhandledRejection', (reason) => {
   log.fatal({ reason, shutdownInProgress }, 'unhandled rejection');
   if (shutdownInProgress) return;  // Don't race with an in-progress shutdown's exit code
   const done = shutdown('unhandledRejection');
-  setTimeout(() => { log.error('shutdown hung after unhandledRejection — forcing exit'); process.exit(1); }, 5_000).unref();
   done.catch(() => process.exit(1));
 });
 // Diagnostic: log actual exit code (uses stderr to avoid writing to closed pino transport)
