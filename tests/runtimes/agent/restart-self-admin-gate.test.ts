@@ -36,7 +36,7 @@ function harness(overrides: Partial<RestartSelfToolDeps> = {}) {
     instanceName: 'q',
     dataRoot: '/data/q',
     resolveChatJid: () => '1111111000000000@g.us',
-    deliverOwedReply: async () => {},
+    deliverOwedReply: async () => ({ delivered: true }),
     sendAck,
     serviceManager,
     trigger,

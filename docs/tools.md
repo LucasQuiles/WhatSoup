@@ -3715,16 +3715,22 @@ the runtime supplies `restartSelf`. The declaration and input schema live in
 The handler first sends the text the current turn still owes: buffered streaming
 text goes out as a normal message, and text that minimal mode deferred at the tool
 boundary goes out as an interrupted-turn salvage message. It waits up to 10 seconds
-for those sends. It then attempts an acknowledgement to the originating chat,
-which can be a phone, `@lid` or group JID. It writes an intentional-restart
-marker, emits an alert and asks the service manager to restart its own job:
-`systemctl --user restart` on systemd and one `launchctl kickstart -k` on
-launchd, so the manager both stops and starts the job. The docker supervisor
-and Linux without systemd reject the request. An owed-text or acknowledgement
-failure is logged and does not stop the restart. A repeated request in the same
-process returns `ok: false` / `restarting: false`.
+for those sends. The restart continues only when every one of those sends reached
+provider submission within that time. If the wait expires, the flush rejects, or
+a send ends failed or ambiguous, the handler sends no acknowledgement, writes no
+marker, does not restart, and returns `ok: false` / `restarting: false` with a
+`cause` of `timeout`, `flush_rejected` or `send_failed`. Pending sends stay in the
+queue and finish on their own; nothing is sent again. Otherwise it attempts an
+acknowledgement to the originating chat, which can be a phone, `@lid` or group
+JID. It writes an intentional-restart marker, emits an alert and asks the service
+manager to restart its own job: `systemctl --user restart` on systemd and one
+`launchctl kickstart -k` on launchd, so the manager both stops and starts the
+job. The docker supervisor and Linux without systemd reject the request. An
+acknowledgement failure is logged and does not stop the restart. A repeated
+request in the same process returns `ok: false` / `restarting: false`.
 
-**Returns:** `{ ok, restarting, reason, code, text }` when the caller survives
-long enough to receive a result. A fast service-manager rejection throws and marks
+**Returns:** `{ ok, restarting, reason, code, text }`, plus `cause` when an
+unconfirmed owed reply stopped the restart, when the caller survives long
+enough to receive a result. A fast service-manager rejection throws and marks
 the intent rejected. A successful request is not proof of a healthy reboot;
 verify service health and continuity after startup.

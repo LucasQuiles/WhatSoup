@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -16,13 +16,17 @@ import {
   deliverOwedReplyBeforeRestart,
   triggerSelfRestart,
   _resetSelfRestartGuard,
+  OWED_REPLY_FLUSH_GRACE_MS,
   type IntentionalRestartMarker,
+  type OwedReplyDelivery,
   type RestartSelfToolDeps,
   type TriggerSelfRestartOptions,
 } from '../../../src/runtimes/agent/self-restart.ts';
-import { OutboundQueue, SALVAGED_REPLY_NOTICE } from '../../../src/runtimes/agent/outbound-queue.ts';
+import { OutboundQueue, SALVAGED_REPLY_NOTICE, type IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { Messenger } from '../../../src/core/types.ts';
+import type { DurabilityEngine } from '../../../src/core/durability.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
+import { WhatSoupError } from '../../../src/errors.ts';
 
 function deps(overrides: Partial<RestartSelfToolDeps> = {}): {
   deps: RestartSelfToolDeps;
@@ -33,7 +37,7 @@ function deps(overrides: Partial<RestartSelfToolDeps> = {}): {
 } {
   const trigger = vi.fn(async (_opts: TriggerSelfRestartOptions) => ({ ok: true, markerPath: '/d/m' }));
   const sendAck = vi.fn(async (_chatJid: string, _text: string) => {});
-  const deliverOwedReply = vi.fn(async () => {});
+  const deliverOwedReply = vi.fn(async (): Promise<OwedReplyDelivery> => ({ delivered: true }));
   const serviceManager = { restartSelf: vi.fn(async (_name: string) => {}) };
   const base: RestartSelfToolDeps = {
     instanceName: 'q',
@@ -50,6 +54,24 @@ function deps(overrides: Partial<RestartSelfToolDeps> = {}): {
 }
 
 const SESSION: SessionContext = { tier: 'admin' as SessionContext['tier'] };
+
+interface RestartSelfResult {
+  ok: boolean;
+  restarting: boolean;
+  cause?: string;
+  text: string;
+}
+
+/** Queue double for the owed-reply flush: only the members deliverOwedReplyBeforeRestart uses. */
+function flushQueue(flush: () => Promise<void>): IOutboundQueue {
+  return {
+    targetChatJid: '15550100111@s.whatsapp.net',
+    commitStreamingText: vi.fn(),
+    abortTurn: vi.fn(),
+    flush: vi.fn(flush),
+    getSendFailureCount: vi.fn(() => 0),
+  } as unknown as IOutboundQueue;
+}
 
 describe('restart_self MCP tool', () => {
   beforeEach(() => { vi.restoreAllMocks(); });
@@ -167,7 +189,7 @@ describe('restart_self MCP tool', () => {
       const { deps: d } = deps({
         dataRoot,
         trigger: triggerSelfRestart,
-        deliverOwedReply: vi.fn(async () => { order.push('owed'); }),
+        deliverOwedReply: vi.fn(async (): Promise<OwedReplyDelivery> => { order.push('owed'); return { delivered: true }; }),
         sendAck: vi.fn(async () => { order.push('ack'); }),
         serviceManager: { restartSelf: vi.fn(async () => { order.push('restartSelf'); }) },
       });
@@ -177,8 +199,25 @@ describe('restart_self MCP tool', () => {
       expect(order).toEqual(['owed', 'ack', 'restartSelf']);
     });
 
-    it('still restarts when delivering the owed text fails', async () => {
-      const { deps: d, serviceManager } = deps({
+    // #3829: an unconfirmed owed reply must stop the restart — no ack, no
+    // marker, no restartSelf — so the shutdown cannot destroy or orphan it.
+    function expectRestartNotStarted(
+      result: unknown,
+      sendAck: ReturnType<typeof vi.fn>,
+      restartSelf: ReturnType<typeof vi.fn>,
+      cause: string,
+    ): void {
+      const r = result as RestartSelfResult;
+      expect(r).toMatchObject({ ok: false, restarting: false, cause });
+      expect(r.text).toContain('Restart not started');
+      expect(r.text).toContain('could not be confirmed sent');
+      expect(sendAck).not.toHaveBeenCalled();
+      expect(restartSelf).not.toHaveBeenCalled();
+      expect(existsSync(join(dataRoot, 'intentional-restart.marker'))).toBe(false);
+    }
+
+    it('does not restart when delivering the owed text throws', async () => {
+      const { deps: d, sendAck, serviceManager } = deps({
         dataRoot,
         trigger: triggerSelfRestart,
         deliverOwedReply: vi.fn(async () => { throw new Error('queue poisoned'); }),
@@ -186,8 +225,120 @@ describe('restart_self MCP tool', () => {
 
       const result = await buildRestartSelfTool(d).handler({ reason: 'r' }, SESSION);
 
-      expect(result).toMatchObject({ ok: true, restarting: true });
-      expect(serviceManager.restartSelf).toHaveBeenCalledTimes(1);
+      expectRestartNotStarted(result, sendAck, serviceManager.restartSelf, 'flush_rejected');
+    });
+
+    it('does not restart when the owed-reply flush is still pending at the 10 s grace limit', async () => {
+      vi.useFakeTimers();
+      try {
+        const queue = flushQueue(() => new Promise<void>(() => { /* never settles */ }));
+        const { deps: d, sendAck, serviceManager } = deps({
+          dataRoot,
+          trigger: triggerSelfRestart,
+          deliverOwedReply: () => deliverOwedReplyBeforeRestart(queue),
+        });
+
+        const pending = buildRestartSelfTool(d).handler({ reason: 'r' }, SESSION);
+        await vi.advanceTimersByTimeAsync(OWED_REPLY_FLUSH_GRACE_MS);
+        const result = await pending;
+
+        expect(OWED_REPLY_FLUSH_GRACE_MS).toBe(10_000);
+        expect(queue.flush).toHaveBeenCalledTimes(1);
+        expectRestartNotStarted(result, sendAck, serviceManager.restartSelf, 'timeout');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not restart when the owed-reply flush rejects (poisoned queue)', async () => {
+      const queue = flushQueue(async () => { throw new Error('drain queue failed — queue poisoned'); });
+      const { deps: d, sendAck, serviceManager } = deps({
+        dataRoot,
+        trigger: triggerSelfRestart,
+        deliverOwedReply: () => deliverOwedReplyBeforeRestart(queue),
+      });
+
+      const result = await buildRestartSelfTool(d).handler({ reason: 'r' }, SESSION);
+
+      expectRestartNotStarted(result, sendAck, serviceManager.restartSelf, 'flush_rejected');
+    });
+
+    it('does not restart when the owed send fails terminally, sends it once and keeps its failure disposition', async () => {
+      const owedText = 'On it, restarting.';
+      const sent: string[] = [];
+      const messenger: Messenger = {
+        // A governor shed is a terminal, never-submitted failure: the queue stops
+        // after one attempt and flush() still resolves.
+        sendMessage: vi.fn(async (_jid: string, text: string) => {
+          sent.push(text);
+          throw new WhatSoupError('outbound governor shed', 'OUTBOUND_GOVERNOR_SHED');
+        }),
+        sendMedia: vi.fn(async () => ({ waMessageId: null })),
+        setTyping: vi.fn(async () => {}),
+      };
+      const durability = {
+        createOutboundOp: vi.fn(() => 1),
+        markSending: vi.fn(),
+        markSubmitted: vi.fn(),
+        markMaybeSent: vi.fn(),
+        markFailedPermanent: vi.fn(),
+        markDeferred: vi.fn(),
+        markTerminal: vi.fn(),
+      };
+      const queue = new OutboundQueue(messenger, '15550100111@s.whatsapp.net');
+      queue.setDurability(durability as unknown as DurabilityEngine);
+      queue.enqueueStreamingText(owedText, 'answer');
+
+      const { deps: d, sendAck, serviceManager } = deps({
+        dataRoot,
+        trigger: triggerSelfRestart,
+        deliverOwedReply: () => deliverOwedReplyBeforeRestart(queue),
+      });
+
+      const result = await buildRestartSelfTool(d).handler({ reason: 'r' }, SESSION);
+
+      expectRestartNotStarted(result, sendAck, serviceManager.restartSelf, 'send_failed');
+      expect(sent.filter((text) => text === owedText)).toHaveLength(1);
+      expect(queue.getSendFailureCount()).toBe(1);
+      expect(durability.createOutboundOp).toHaveBeenCalledTimes(1);
+      expect(durability.markSubmitted).not.toHaveBeenCalled();
+      expect(durability.markFailedPermanent).toHaveBeenCalledTimes(1);
+      expect(durability.markFailedPermanent).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({
+          failure_code: 'outbound.governor_shed',
+          mutation_state: 'not_started',
+          provider_submission_count: 0,
+        }),
+      );
+      expect(durability.markTerminal).not.toHaveBeenCalled();
+    });
+
+    it('still restarts when the owed-reply flush settles just under the 10 s grace limit', async () => {
+      vi.useFakeTimers();
+      try {
+        const order: string[] = [];
+        const queue = flushQueue(() => new Promise<void>((resolve) => {
+          setTimeout(() => { order.push('owed'); resolve(); }, OWED_REPLY_FLUSH_GRACE_MS - 1);
+        }));
+        const { deps: d } = deps({
+          dataRoot,
+          trigger: triggerSelfRestart,
+          deliverOwedReply: () => deliverOwedReplyBeforeRestart(queue),
+          sendAck: vi.fn(async () => { order.push('ack'); }),
+          serviceManager: { restartSelf: vi.fn(async () => { order.push('restartSelf'); }) },
+        });
+
+        const pending = buildRestartSelfTool(d).handler({ reason: 'r' }, SESSION);
+        await vi.advanceTimersByTimeAsync(OWED_REPLY_FLUSH_GRACE_MS - 1);
+        const result = await pending;
+
+        expect(result).toMatchObject({ ok: true, restarting: true });
+        expect(order).toEqual(['owed', 'ack', 'restartSelf']);
+        expect(existsSync(join(dataRoot, 'intentional-restart.marker'))).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     // #3829 (21:22Z case): minimal mode deferred the model's pre-tool text at the
@@ -238,7 +389,7 @@ describe('restart_self MCP tool', () => {
       const queue = new OutboundQueue(messenger, '15550100111@s.whatsapp.net');
       queue.enqueueStreamingText('On it, restarting.', 'answer');
 
-      await deliverOwedReplyBeforeRestart(queue);
+      expect(await deliverOwedReplyBeforeRestart(queue)).toEqual({ delivered: true });
 
       expect(sent).toEqual(['On it, restarting.']);
     });

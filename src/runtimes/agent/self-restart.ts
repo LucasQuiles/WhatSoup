@@ -53,8 +53,17 @@ export const INTENTIONAL_RESTART_MARKER = 'intentional-restart.marker';
 /** Default freshness window for the marker (matches the exhausted.marker window). */
 const DEFAULT_MAX_AGE_MS = 5 * MS_PER_MINUTE;
 
-/** Longest wait for owed text before the restart, so a dead transport cannot hold it. */
+/** Longest wait for owed text before the restart; past it the restart is not started. */
 export const OWED_REPLY_FLUSH_GRACE_MS = 10 * MS_PER_SECOND;
+
+/**
+ * #3829: outcome of the owed-reply flush before a restart. `delivered` means the
+ * flush settled inside OWED_REPLY_FLUSH_GRACE_MS and every send in it reached
+ * provider submission. Any other outcome must stop the restart.
+ */
+export type OwedReplyDelivery =
+  | { delivered: true }
+  | { delivered: false; cause: 'timeout' | 'send_failed' | 'flush_rejected' };
 
 /** Taxonomy code distinguishing deliberate restart causes. */
 export type RestartReasonCode = 'self_restart' | 'redeploy' | 'config_reload';
@@ -222,22 +231,38 @@ export function consumeIntentionalRestartMarker(
  * restart's graceful shutdown destroys it. Commit the live stream buffer as a
  * normal send, let the #3398 salvage path send the deferred text of a turn that
  * has shown nothing yet, and wait up to OWED_REPLY_FLUSH_GRACE_MS for the sends.
- * The restart aborts this turn anyway; aborting it here first only adds the
- * salvage. A send still pending at the grace limit is left to the shutdown flush.
+ *
+ * A send that stops with a failure disposition returns without throwing, so a
+ * resolved flush alone does not prove delivery; the queue's send-failure count
+ * is compared across the flush. The result is `delivered: false` when the flush
+ * is still pending at the grace limit, rejects, or any send in it failed. The
+ * caller must then not restart. Pending sends stay in the queue and finish on
+ * their own; nothing is re-enqueued, so the reply is never sent twice.
  */
-export async function deliverOwedReplyBeforeRestart(queue: IOutboundQueue | null): Promise<void> {
-  if (!queue) return;
-  queue.commitStreamingText();
-  queue.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
+export async function deliverOwedReplyBeforeRestart(queue: IOutboundQueue | null): Promise<OwedReplyDelivery> {
+  if (!queue) return { delivered: true };
   let graceTimer: NodeJS.Timeout | undefined;
-  const grace = new Promise<'timeout'>((resolve) => {
-    graceTimer = setTimeout(() => resolve('timeout'), OWED_REPLY_FLUSH_GRACE_MS);
-    graceTimer.unref?.();
-  });
   try {
+    const failuresBefore = queue.getSendFailureCount();
+    queue.commitStreamingText();
+    queue.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
+    const grace = new Promise<'timeout'>((resolve) => {
+      graceTimer = setTimeout(() => resolve('timeout'), OWED_REPLY_FLUSH_GRACE_MS);
+      graceTimer.unref?.();
+    });
     if (await Promise.race([queue.flush(), grace]) === 'timeout') {
-      log.warn({ chatJid: queue.targetChatJid }, 'owed reply still sending at the self-restart grace limit; restarting anyway');
+      log.warn({ chatJid: queue.targetChatJid }, 'owed reply still sending at the self-restart grace limit; restart not started');
+      return { delivered: false, cause: 'timeout' };
     }
+    const failedSends = queue.getSendFailureCount() - failuresBefore;
+    if (failedSends > 0) {
+      log.warn({ chatJid: queue.targetChatJid, failedSends }, 'owed reply send stopped without provider submission; restart not started');
+      return { delivered: false, cause: 'send_failed' };
+    }
+    return { delivered: true };
+  } catch (err) {
+    log.warn({ chatJid: queue.targetChatJid, err }, 'owed reply flush rejected; restart not started');
+    return { delivered: false, cause: 'flush_rejected' };
   } finally {
     if (graceTimer) clearTimeout(graceTimer);
   }
@@ -303,8 +328,9 @@ export interface RestartSelfToolDeps {
   /**
    * #3829: send the text the current turn owes before the restart destroys it.
    * Wired by the runtime to `deliverOwedReplyBeforeRestart` on the turn's queue.
+   * The restart proceeds only on `{ delivered: true }`.
    */
-  deliverOwedReply: () => Promise<void>;
+  deliverOwedReply: () => Promise<OwedReplyDelivery>;
   /** Send the immediate pre-restart ack to the originating chat. */
   sendAck: (chatJid: string, text: string) => Promise<void>;
   /** Self-restart capability, injected from the composition root (fleet-owned). */
@@ -325,7 +351,8 @@ export interface RestartSelfToolDeps {
  * Build the `restart_self` tool declaration. The handler is intentionally thin:
  * resolve the originating chat, deliver the turn's owed text, send an immediate
  * ack, then delegate to `triggerSelfRestart` (marker write + alert +
- * ServiceManager.restartSelf).
+ * ServiceManager.restartSelf). If the owed text is not confirmed sent, it stops
+ * before the ack and returns `ok: false` / `restarting: false`.
  */
 export function buildRestartSelfTool(deps: RestartSelfToolDeps): ToolDeclaration {
   return {
@@ -352,11 +379,25 @@ export function buildRestartSelfTool(deps: RestartSelfToolDeps): ToolDeclaration
       const chatJid = deps.resolveChatJid();
 
       // #3829: before the ack, so the reply the model wrote arrives first and
-      // before the restart, whose shutdown abort would destroy it.
+      // before the restart, whose shutdown abort would destroy or orphan it. An
+      // unconfirmed reply stops the restart: no ack, no marker, no restartSelf.
+      let owed: OwedReplyDelivery;
       try {
-        await deps.deliverOwedReply();
+        owed = await deps.deliverOwedReply();
       } catch (err) {
-        log.warn({ instance: deps.instanceName, err }, 'failed to deliver owed reply before restart; continuing with restart');
+        log.warn({ instance: deps.instanceName, err }, 'owed reply delivery threw before restart');
+        owed = { delivered: false, cause: 'flush_rejected' };
+      }
+      if (!owed.delivered) {
+        log.warn({ instance: deps.instanceName, cause: owed.cause }, 'owed reply not confirmed sent; restart not started');
+        return {
+          ok: false,
+          restarting: false,
+          reason,
+          code: code ?? 'self_restart',
+          cause: owed.cause,
+          text: `Restart not started: the reply could not be confirmed sent (${owed.cause}), so the service was not restarted for: ${reason}.`,
+        };
       }
 
       if (chatJid) {

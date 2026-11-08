@@ -317,8 +317,8 @@ export interface IOutboundQueue {
    * visible text, its undelivered buffered/deferred narration is delivered as a
    * status-role salvage message (never answer evidence) instead of being
    * destroyed. Interrupt/reset/fence-lost callers must NOT pass it. restart_self
-   * passes it too (#3829): its restart aborts the turn next and nothing else
-   * would deliver that text.
+   * passes it too (#3829): the restart's shutdown abort would destroy that text
+   * and nothing else would deliver it.
    */
   abortTurn(options?: { preserveEvidence?: boolean; salvageOwedReply?: boolean }): void;
   /** The chat JID this queue is currently targeting. */
@@ -348,6 +348,14 @@ export interface IOutboundQueue {
   hasPendingWork?(): boolean;
   /** Whether a genuine send or durability failure has permanently poisoned this queue. */
   isPoisoned(): boolean;
+  /**
+   * Monotonic count of text sends that stopped with a failure disposition
+   * (failed, ambiguous or deferred) instead of a confirmed provider submission.
+   * Such a send returns without throwing, so flush() still resolves; #3829:
+   * restart_self compares this count across its owed-reply flush to tell a
+   * delivered reply from a lost one.
+   */
+  getSendFailureCount(): number;
   /**
    * Turn-end choke point. Called unconditionally when a `result` event is
    * received, so the typing indicator is cleared even on early-return branches
@@ -445,6 +453,8 @@ export class OutboundQueue implements IOutboundQueue {
   private readonly shutdownDeadlineSignal: Promise<typeof OUTBOUND_SHUTDOWN_DEADLINE>;
   private resolveShutdownDeadlineSignal: (() => void) | null = null;
   private shutdownDeadlineReached = false;
+  /** #3829: see IOutboundQueue.getSendFailureCount. */
+  private sendFailureCount = 0;
 
   /** Controls tool update verbosity. 'minimal' suppresses noise, 'friendly' shows all in plain language. */
   private toolUpdateMode: 'full' | 'minimal' | 'friendly' = 'full';
@@ -1371,6 +1381,10 @@ export class OutboundQueue implements IOutboundQueue {
     return this.drainFailure !== undefined;
   }
 
+  getSendFailureCount(): number {
+    return this.sendFailureCount;
+  }
+
   /** Retarget subsequent sends without changing durable conversation attribution. */
   updateDeliveryJid(jid: string): void {
     this.deliveryJid = jid;
@@ -1891,6 +1905,7 @@ export class OutboundQueue implements IOutboundQueue {
         stage: lastEvidence.stage,
         mutationState: lastEvidence.mutation_state,
       }, 'outbound send stopped at runtime shutdown deadline');
+      this.sendFailureCount += 1;
       if (opId !== undefined && this.durability) {
         persistOutboundFailureDisposition(
           this.durability,
@@ -1911,6 +1926,7 @@ export class OutboundQueue implements IOutboundQueue {
       mutationState: lastEvidence.mutation_state,
       retryDecision: lastEvidence.retry_decision,
     }, 'outbound send stopped with bounded failure disposition');
+    this.sendFailureCount += 1;
 
     if (opId !== undefined && this.durability) {
       persistOutboundFailureDisposition(this.durability, opId, lastEvidence);
