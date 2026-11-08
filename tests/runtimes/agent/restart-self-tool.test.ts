@@ -53,7 +53,7 @@ function deps(overrides: Partial<RestartSelfToolDeps> = {}): {
   return { deps: base, trigger, sendAck, deliverOwedReply, serviceManager };
 }
 
-const SESSION: SessionContext = { tier: 'admin' as SessionContext['tier'] };
+const SESSION: SessionContext = { tier: 'global' };
 
 interface RestartSelfResult {
   ok: boolean;

@@ -232,10 +232,11 @@ export function consumeIntentionalRestartMarker(
  * normal send, let the #3398 salvage path send the deferred text of a turn that
  * has shown nothing yet, and wait up to OWED_REPLY_FLUSH_GRACE_MS for the sends.
  *
- * A send that stops with a failure disposition returns without throwing, so a
- * resolved flush alone does not prove delivery; the queue's send-failure count
- * is compared across the flush. The result is `delivered: false` when the flush
- * is still pending at the grace limit, rejects, or any send in it failed. The
+ * A send that stops with a failure disposition, or that the echo guard drops,
+ * returns without throwing, so a resolved flush alone does not prove delivery;
+ * the queue's send-failure count is compared across the flush. The result is
+ * `delivered: false` when the flush is still pending at the grace limit,
+ * rejects, or any send in it failed or was dropped. The
  * caller must then not restart. Pending sends stay in the queue and finish on
  * their own; nothing is re-enqueued, so the reply is never sent twice.
  */

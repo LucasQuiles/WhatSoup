@@ -41,7 +41,7 @@ const STATUS_JID = 'status-log@g.us';
 const OWED = 'On it, restarting.';
 const LATER = 'Restart did not start, here is where things stand.';
 const NEXT = 'Next turn reply.';
-const SESSION = { tier: 'admin' } as SessionContext;
+const SESSION: SessionContext = { tier: 'global' };
 /** Covers MIN_SEND_GAP_MS pacing and flush spins; well under the 10 s grace. */
 const SETTLE_MS = 1_000;
 
@@ -203,10 +203,10 @@ describe('restart_self owed reply through a real OutboundQueue (#3829)', () => {
   });
 
   describe('(b) send outcomes that do not change getSendFailureCount', () => {
-    // expected-red: sendWithPacing returns at outbound-queue.ts:1754-1755 when the
-    // echo guard (core/echo-guard.ts:37-52) holds a cross-session cooldown for the
-    // group. No send, no failure count, so self-restart.ts:257-258 reports
-    // delivered: true and the restart starts with the owed reply never sent.
+    // guard (was expected-red on c1815df9, failed in its slot run): sendWithPacing
+    // drops the chunk when the echo guard (core/echo-guard.ts:37-52) holds a
+    // cross-session cooldown for the group. The drop must count as undelivered so
+    // self-restart.ts refuses the restart; the guard itself must still drop it.
     it('echo guard: an owed group reply dropped by the cross-session cooldown stops the restart', async () => {
       recordGroupOutbound(GROUP_JID, 'another-queue-token');
       const { messenger, attempts } = makeMessenger();
@@ -215,9 +215,10 @@ describe('restart_self owed reply through a real OutboundQueue (#3829)', () => {
 
       const { result, trigger, sendAck } = await callRestart(queue);
 
-      // Premise: the owed reply never reached the transport.
+      // Echo guard preserved: the owed reply never reached the transport.
       expect(attempts).toEqual([]);
-      expect(result).toMatchObject({ ok: false, restarting: false });
+      expect(queue.getSendFailureCount()).toBe(1);
+      expect(result).toMatchObject({ ok: false, restarting: false, cause: 'send_failed' });
       expect(sendAck).not.toHaveBeenCalled();
       expect(trigger).not.toHaveBeenCalled();
     });

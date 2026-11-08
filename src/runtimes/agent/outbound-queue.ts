@@ -340,8 +340,8 @@ export interface IOutboundQueue {
   /** Whether a genuine send or durability failure has permanently poisoned this queue. */
   isPoisoned(): boolean;
   /**
-   * Monotonic count of text sends that stopped with a failure disposition
-   * (failed, ambiguous or deferred) instead of a confirmed provider submission.
+   * Monotonic count of text sends that ended without a confirmed provider
+   * submission: failed, ambiguous, deferred, or dropped by the echo guard.
    * Such a send returns without throwing, so flush() still resolves; #3829:
    * restart_self compares this count across its owed-reply flush to tell a
    * delivered reply from a lost one.
@@ -1751,8 +1751,10 @@ export class OutboundQueue implements IOutboundQueue {
     }
     // AE4: Echo guard — suppress cross-session group echo loops.
     // Passes senderToken so intra-session rapid sends (tool status + text) are exempt.
+    // #3829: the dropped chunk never reached the provider, so it counts as undelivered.
     if (!canSendToGroup(chunk.chatJid, config.echoGuard, this.senderToken)) {
-      return; // silently drop
+      this.sendFailureCount += 1;
+      return;
     }
     await this.sendWithRetry(chunk);
     this.lastSentAt = Date.now();
