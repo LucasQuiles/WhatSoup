@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Database } from '../../../src/core/database.ts';
-import type { Messenger } from '../../../src/core/types.ts';
+import type { Messenger, TypingState } from '../../../src/core/types.ts';
 import type { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { resolveSessionContext } from '../../../src/mcp/types.ts';
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
@@ -30,7 +30,7 @@ describe('awaited poll progress through runtime settlement', () => {
   let tracker: OperationTracker;
   let abort: AbortController;
   let sends: Array<{ jid: string; text: string }>;
-  let typing: Array<{ jid: string; active: boolean }>;
+  let typing: Array<{ jid: string; active: TypingState }>;
   let nextPoll: number;
 
   beforeEach(() => {
@@ -111,7 +111,7 @@ describe('awaited poll progress through runtime settlement', () => {
       await vi.advanceTimersByTimeAsync(101);
       expect(state.pendingPolls.questions.size).toBe(1);
       const leaked = sends.filter(({ text }) => text.includes('running send_poll'));
-      const composing = typing.some(({ jid, active }) => jid === OWNER && active);
+      const composing = typing.some(({ jid, active }) => jid === OWNER && active === true);
 
       // An unrelated operation targeting the same queue must remain visible.
       tracker.onToolStart('ordinary-tool', 'Read', 'reading');
