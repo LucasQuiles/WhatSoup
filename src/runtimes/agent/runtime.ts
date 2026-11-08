@@ -8109,7 +8109,7 @@ export class AgentRuntime implements Runtime {
   async shutdown(): Promise<void> {
     const shutdownFailures: unknown[] = [];
     const failedPerChatSessions = new Map<string, SessionManager>();
-    const recycleShutdownSkipOwners = new Set<SessionManager>();
+    const sessionShutdownSkipOwners = new Set<SessionManager>();
     let singletonSessionShutdownFailed = false;
     let preserveRuntimeTurnState = false;
     this.shutdownRequested = true;
@@ -8235,14 +8235,14 @@ export class AgentRuntime implements Runtime {
       for (const session of this.routeRecycleLifecycle.retainedOwners((scopeKey) =>
         scopeKey === GLOBAL_TOOL_SCOPE_KEY ? this.session ?? undefined : this.chatSessions.get(scopeKey)
       )) {
-        recycleShutdownSkipOwners.add(session);
+        sessionShutdownSkipOwners.add(session);
       }
     }
     const recycleFailures = this.routeRecycleLifecycle.takeFailures();
     if (recycleFailures.length > 0) {
       preserveRuntimeTurnState = true;
       for (const failure of recycleFailures) {
-        recycleShutdownSkipOwners.add(failure.session);
+        sessionShutdownSkipOwners.add(failure.session);
         shutdownFailures.push(failure.error);
       }
       log.error(
@@ -8252,17 +8252,17 @@ export class AgentRuntime implements Runtime {
     }
 
     // Shutdown per_chat sessions
-    let perChatKeys: Set<string> | null = null;
-    if (this.sessionScope === 'per_chat') {
-      perChatKeys = new Set<string>([
-        ...this.chatSessions.keys(),
-        ...this.chatQueues.keys(),
-        ...this.imageCoalesce.buffers.keys(),
-      ]);
+    const perChatKeys = this.sessionScope === 'per_chat' ? new Set<string>([
+      ...this.chatSessions.keys(), ...this.chatQueues.keys(), ...this.imageCoalesce.buffers.keys(),
+    ]) : null;
+    // A failed finalization join does not transfer an unfinished reset's teardown ownership.
+    for (const [mapKey, session] of this.chatSessions) {
+      const owner = this.sessionOwnership.get(mapKey);
+      if (preserveRuntimeTurnState && owner?.state === 'resetting' && owner.managerId === this.managerIdFor(session)) sessionShutdownSkipOwners.add(session);
     }
     const ownedSessionShutdown = await shutdownOwnedSessions(
       this.sessionLifecycleHost,
-      recycleShutdownSkipOwners,
+      sessionShutdownSkipOwners,
     );
     shutdownFailures.push(...ownedSessionShutdown.failures);
     for (const [mapKey, session] of ownedSessionShutdown.failedPerChatSessions) {
@@ -9153,6 +9153,7 @@ export class AgentRuntime implements Runtime {
       ) {
         throw new Error(`Per-chat session "${mapKey}" lost ownership during reset shutdown`);
       }
+      if (this.shutdownRequested) throw new Error(`Cannot restart per-chat session "${mapKey}" during shutdown`);
 
       this.cleanupPerChatGenerationState(mapKey);
       this.chatQueues.delete(mapKey);

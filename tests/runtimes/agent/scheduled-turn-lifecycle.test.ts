@@ -38,6 +38,7 @@ import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { RuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import type { RuntimeTurnCompletion } from '../../../src/runtimes/agent/runtime-turn-completion.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
+import { RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS } from '../../../src/runtimes/agent/runtime-turn-coordinator.ts';
 
 // ─── Hoisted per-construction provider-boundary doubles ─────────────────────
 
@@ -715,7 +716,7 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       await driveInteractiveToComplete({ messageId: 'human-after-scheduled-reset' });
     });
 
-    it('does not dispatch a queued scheduled turn when shutdown overlaps its predecessor reset', async () => {
+    it.each([false, true])('does not overlap scheduled reset shutdown when the runtime deadline expires (expired=%s)', async (expireDeadline) => {
       const state = runtime as unknown as {
         autoCompactInputTokens: number;
         autoCompact: AutoCompactController;
@@ -725,6 +726,7 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       const first = dispatchScheduled('Reset before shutdown', 51);
       const queued = dispatchScheduled('Must not run during shutdown', 52);
       const session = await waitForInFlightTurn((text) => text.includes('Reset before shutdown'));
+      const spawnCount = session.spawnSession.mock.calls.length;
       const getStatus = session.getStatus.getMockImplementation()!;
       session.getStatus.mockImplementation(() => ({ ...getStatus(), pid: null }));
       state.autoCompact.consecutiveNonConvergentCompactions.set(scheduledMapKey, 3);
@@ -733,21 +735,43 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
         lastCompactInputTokens: 70, lastCompactOutputTokens: 0, lastCompactCacheReadTokens: 0,
       });
       let releaseShutdown!: () => void;
+      const shutdownCount = session.shutdown.mock.calls.length;
       session.shutdown.mockImplementationOnce(() => new Promise<void>((resolve) => { releaseShutdown = resolve; }));
       emitTerminal(session);
-      await vi.waitFor(() => expect(session.shutdown).toHaveBeenCalledWith(false));
-      const stopping = runtime.shutdown();
+      await vi.waitFor(() => expect(releaseShutdown).toBeTypeOf('function'));
+      expect(session.shutdown).toHaveBeenLastCalledWith(false);
+      if (expireDeadline) vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+      const stopping = runtime.shutdown().then(() => null, (error: unknown) => error);
       let stoppingSettled = false;
-      void stopping.then(() => { stoppingSettled = true; }, () => { stoppingSettled = true; });
+      void stopping.then(() => { stoppingSettled = true; });
+      let callsWhileResetPending = 0;
+      let shutdownResult: unknown;
       try {
         await vi.waitFor(() => expect(status(queued)).toBe('failed'));
         expect(status(first)).toBe('complete');
         expect(session.turnsSent).toHaveLength(1);
         expect(stoppingSettled).toBe(false);
+        if (expireDeadline) {
+          await vi.advanceTimersByTimeAsync(RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS + 1);
+        }
+        callsWhileResetPending = session.shutdown.mock.calls.length - shutdownCount;
       } finally {
         releaseShutdown();
-        await stopping;
+        try {
+          shutdownResult = await stopping;
+          await vi.waitFor(() => expect(scheduledQueue()?.activeTurn ?? null).toBeNull());
+        } finally {
+          if (expireDeadline) vi.useRealTimers();
+        }
+        // A deadline failure retains runtime state; finish cleanup after the reset settles.
+        if (expireDeadline) await runtime.shutdown();
         shutdownFinished = true;
+      }
+      if (expireDeadline) {
+        expect(shutdownResult).toBeInstanceOf(Error);
+        expect((shutdownResult as Error).message).toBe('Runtime turn shutdown finalization deadline expired');
+      } else {
+        expect(shutdownResult).toBeNull();
       }
       expect(session.turnsSent).toHaveLength(1);
       expect(scheduledQueue()?.activeTurn ?? null).toBeNull();
@@ -760,6 +784,8 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       }
       expect(db.raw.prepare('SELECT attempt_kind FROM turn_terminal_records WHERE inbound_seq = ?').get(first))
         .toEqual({ attempt_kind: 'completed' });
+      expect(callsWhileResetPending, 'runtime shutdown must not overlap the pending reset shutdown').toBe(1);
+      expect(session.spawnSession, 'reset must not spawn a replacement after shutdown begins').toHaveBeenCalledTimes(spawnCount);
     });
 
     it('fails a queued scheduled successor before provider dispatch when compaction reset closure is unproven', async () => {
