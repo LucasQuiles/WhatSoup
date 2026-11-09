@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import stat
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -464,9 +465,24 @@ if [[ "$*" == *" show "* ]]; then echo not-found; fi
 exit 0
 '''
     command, environment, _, installed = install_fixture(tmp_path, platform, body)
+    observer = tmp_path / "release/deploy/scripts/fleet/fleet_reliability_observer.py"
+    observer.write_bytes((FLEET / "fleet_reliability_observer.py").read_bytes())
+    state = tmp_path / "missing-parent" / "state"
+    command[command.index("--state-dir") + 1] = str(state)
     config = tmp_path / "private-config.json"
+    config.write_text(json.dumps({
+        "state_dir": str(state), "hosts": [], "instance": "operations",
+        "emitter_command": ["/synthetic/emitter"], "delivery_command": ["/synthetic/delivery"],
+    }))
     before = config.read_bytes()
-    result = subprocess.run(command, env=environment, capture_output=True, text=True)
+    preflight = subprocess.run(
+        [sys.executable, str(observer), "--config", str(config), "--state-dir", str(state), "--check-config"],
+        env=environment, capture_output=True, text=True, timeout=10,
+    )
+    assert preflight.returncode == 0, preflight.stderr
+    assert json.loads(preflight.stdout) == {"config_valid": True}
+    assert not state.parent.exists()
+    result = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls").read_text().splitlines()
     if platform == "launchd":
@@ -480,7 +496,9 @@ exit 0
         assert any(" link " in line and str(installed) in line for line in calls)
         assert len(list(installed.iterdir())) == 4
     assert config.read_bytes() == before
-    assert not (tmp_path / "state" / "fleet-observer.json").exists()
+    assert stat.S_IMODE(state.stat().st_mode) == 0o700
+    assert stat.S_IMODE(state.parent.stat().st_mode) == 0o700
+    assert list(state.iterdir()) == []
 
 
 def test_failed_second_launchd_activation_stops_first_job_and_keeps_definitions(tmp_path):
