@@ -1034,6 +1034,8 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       rowId: 9,
       conversationKey: 'unscoped',
     }, 'cannot retire stale shared/single resume without exact workspace identity');
+    // start() armed the runtime's probe and sweep timers: stop it so they end with the case.
+    await runtime.shutdown();
   });
 
   it('capDedupeMap evicts oldest-first over an object-valued map (BEAD-050)', () => {
@@ -1769,13 +1771,16 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
           stallKill(first.runtime, first.state, dmJid);
           stopService(first.state);
 
-          const { injectMissedMessages } = await restart(saved.durability);
+          const { runtime, injectMissedMessages } = await restart(saved.durability);
 
           expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);
           expect(mockSession.spawnSession).toHaveBeenCalledWith('sess-1');
           expect(injectMissedMessages).not.toHaveBeenCalled();
           expect(mockSession.sendTurn).not.toHaveBeenCalled();
           expect(restartHoldLogs()).toHaveLength(1);
+          // start() armed the restarted runtime's timers: stop every runtime this case created.
+          await first.runtime.shutdown();
+          await runtime.shutdown();
         });
 
         it('a restart after the respawn resumes once and sends nothing; a second restart does the same', async () => {
@@ -1797,6 +1802,10 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
           expect(mockSession.sendTurn).not.toHaveBeenCalled();
           expect(restartHoldLogs()).toHaveLength(2);
           expect(saved.holdWrites(), 'restarts do not rewrite the hold').toHaveLength(1);
+          // start() armed each restarted runtime's timers: stop every runtime this case created.
+          await first.runtime.shutdown();
+          await second.runtime.shutdown();
+          await third.runtime.shutdown();
         });
 
         it('the next real request after a restart is dispatched, its reply is delivered, and it releases the hold', async () => {
@@ -1820,19 +1829,27 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
           expect(saved.watchdogState()).toEqual({ providerRoutePolicy: { provider: 'p' } });
 
           // Released: a later restart resumes the ordinary way again.
-          await restart(saved.durability);
+          const third = await restart(saved.durability);
           await vi.waitFor(() => { expect(restartSends()).toHaveLength(1); });
           expect(restartHoldLogs()).toHaveLength(1);
+          // start() armed each restarted runtime's timers and the last one's continuation
+          // turn waits on its result deadline: stop every runtime this case created.
+          await first.runtime.shutdown();
+          await runtime.shutdown();
+          await third.runtime.shutdown();
         });
 
         it('control: a restart with no saved hold still sends its continuation turn', async () => {
           const saved = savedSession();
 
-          const { injectMissedMessages } = await restart(saved.durability);
+          const { runtime, injectMissedMessages } = await restart(saved.durability);
 
           expect(injectMissedMessages).toHaveBeenCalledOnce();
           await vi.waitFor(() => { expect(restartSends()).toHaveLength(1); });
           expect(restartHoldLogs()).toHaveLength(0);
+          // start() armed the runtime's timers and its continuation turn waits on its
+          // result deadline: stop the runtime.
+          await runtime.shutdown();
         });
       });
     });
@@ -2544,6 +2561,8 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       expect(liveAbandonedCount(observed.runtime), 'chat A is still abandoned').toBe(1);
       expect(mockClearAlertSource, 'a recovery elsewhere must not retract a page that is still true')
         .not.toHaveBeenCalledWith('test', 'agent_respawn_failed');
+      // Chat B's continuation turn still waits on its result deadline: stop the runtime.
+      await observed.runtime.shutdown();
     });
 
     it('an abandonment that ages out clears the alert exactly once', async () => {
@@ -2656,6 +2675,8 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);
       expect(mockSession.spawnSession).toHaveBeenCalledWith('sess-control', 13);
       expect(state.pendingRespawnTimers.size).toBe(0);
+      // The continuation turn still waits on its result deadline: stop the runtime.
+      await runtime.shutdown();
     });
 
     /** Every decline reason this suite pins, asserted as an exact list so a
@@ -2904,6 +2925,8 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       await vi.waitFor(() => {
         expect(mockClearAlertSource).toHaveBeenCalledWith('test', 'agent_respawn_failed');
       });
+      // The continuation turn still waits on its result deadline: stop the runtime.
+      await runtime.shutdown();
     });
 
     it('successful respawn that retires an exhausted owner retains a refused clear for health retry without double reconciliation', async () => {
