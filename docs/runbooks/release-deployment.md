@@ -919,7 +919,20 @@ cannot redirect those operations. Serialization or replacement failure leaves
 the previous destination unchanged and removes the writer's temporary file.
 A sync failure after replacement is reported as an error; the new state may
 already be visible, and crash durability is then unverified. Pending-event
-overflow and subprocess-output bounds remain separate unresolved obligations.
+overflow remains a separate unresolved obligation.
+
+The supervisor command helper and local/SSH probe wrapper read stdout and
+stderr concurrently with byte limits. General command stdout permits one MiB;
+delivery lookup requires less than 64 KiB, and fleet probe stdout permits up
+to 64 KiB. Stderr permits up to 64 KiB for all these commands. Oversized output
+fails the operation without exposing captured output. Delivery remains
+unresolved, emission remains unconfirmed and a fleet probe reports transport
+failure. The helper closes its pipes and kills and reaps its direct child on
+timeout or output overflow, allowing up to five seconds for cleanup. It keeps
+the inherited process group. This does not guarantee termination of descendants
+or remote commands, or establish a deadline for the complete cycle.
+Receipt directory scans, aggregate reads and returned receipt sizes still need
+independent bounds.
 
 The optional service supervisor records malformed or truncated HTTP framing as
 an `invalid_response` liveness failure, so that fault does not abort the cycle.

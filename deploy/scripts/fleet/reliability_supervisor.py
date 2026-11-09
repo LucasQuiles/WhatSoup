@@ -10,9 +10,11 @@ import fcntl
 import hashlib
 import http.client
 import json
+import math
 import os
 from pathlib import Path
 import re
+import selectors
 import shutil
 import socket
 import stat
@@ -26,6 +28,10 @@ from urllib.parse import urlsplit, quote
 
 
 class StateError(RuntimeError):
+    pass
+
+
+class CommandOutputError(StateError):
     pass
 
 
@@ -202,10 +208,50 @@ def maintenance_active(path: Path) -> bool:
         os.close(fd)
 
 
-def run_command(command: list[str], timeout: float) -> subprocess.CompletedProcess:
+def run_command(
+    command: list[str], timeout: float, *, max_stdout: int = 1024 * 1024
+) -> subprocess.CompletedProcess:
     if not command or not Path(command[0]).is_absolute():
         raise StateError("command_not_absolute")
-    return subprocess.run(command, capture_output=True, timeout=timeout, check=False)
+    if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+        raise StateError("command_timeout_invalid")
+    if type(max_stdout) is not int or not 0 < max_stdout <= 1024 * 1024:
+        raise StateError("command_output_limit_invalid")
+    deadline = time.monotonic() + timeout
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    output = {"stdout": bytearray(), "stderr": bytearray()}
+    limits = {"stdout": max_stdout, "stderr": 64 * 1024}
+    try:
+        with selectors.DefaultSelector() as ready:
+            for name in output:
+                stream = getattr(process, name)
+                os.set_blocking(stream.fileno(), False)
+                ready.register(stream, selectors.EVENT_READ, name)
+            while ready.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                for key, _ in ready.select(remaining):
+                    name = key.data
+                    try:
+                        chunk = os.read(key.fd, min(4096, limits[name] + 1 - len(output[name])))
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        ready.unregister(key.fileobj)
+                        continue
+                    output[name].extend(chunk)
+                    if len(output[name]) > limits[name]:
+                        raise CommandOutputError("command_output_oversized")
+            returncode = process.wait(timeout=max(0, deadline - time.monotonic()))
+        return subprocess.CompletedProcess(command, returncode, bytes(output["stdout"]), bytes(output["stderr"]))
+    finally:
+        # Keep the inherited process group so the outer observer can still cancel it.
+        process.stdout.close()
+        process.stderr.close()
+        if process.returncode is None:
+            process.kill()
+            process.wait(timeout=5)
 
 
 def restart_service(config: dict) -> dict:
@@ -294,7 +340,7 @@ def publish_event(config: dict, event: dict) -> dict:
             "event_id": event["event_id"],
             "file": Path(output).name,
         }
-    except (OSError, subprocess.TimeoutExpired, UnicodeError):
+    except (OSError, subprocess.TimeoutExpired, UnicodeError, CommandOutputError):
         return {"published": False}
 
 
@@ -562,7 +608,10 @@ def sentinel_conditions(snapshot, *, now=None):
 
 
 def remote_observation(config):
-    result = run_command(config["observe_command"], 20)
+    try:
+        result = run_command(config["observe_command"], 20)
+    except CommandOutputError as exc:
+        raise StateError("remote_observation_failed") from exc
     if result.returncode or len(result.stdout) > 1024 * 1024:
         raise StateError("remote_observation_failed")
     snapshot = json.loads(result.stdout)
@@ -641,8 +690,10 @@ MAX_UNDELIVERED_AGE_SECONDS = 86400
 def _resolve_batch(config, batch):
     try:
         delivery = run_command(
-            [*config["delivery_command"], *(a["event_id"] for a in batch)], 15
+            [*config["delivery_command"], *(a["event_id"] for a in batch)], 15, max_stdout=65535
         )
+    except CommandOutputError:
+        return {"code": "output_oversized", "returncode": None}
     except (OSError, subprocess.TimeoutExpired, StateError):
         return {"code": "command_failed", "returncode": None}
     if delivery.returncode:

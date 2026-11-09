@@ -13,7 +13,7 @@ from unittest.mock import patch
 from tempfile import TemporaryDirectory
 
 import pytest
-from hypothesis import given, strategies as st
+from hypothesis import example, given, settings, strategies as st
 
 FLEET = pathlib.Path(__file__).resolve().parents[1]
 LIB = FLEET.parent / "lib"
@@ -25,6 +25,59 @@ def adapter():
     module.__dict__["__file__"] = str(ROOT / "fleet_probe.py")
     exec(compile((ROOT / "fleet_probe.py").read_text(), "adapter", "exec"), module.__dict__)
     return module
+
+
+@pytest.mark.parametrize("descriptor", [1, 2], ids=["stdout", "stderr"])
+@pytest.mark.parametrize("local", [True, False], ids=["local", "ssh-arguments"])
+def test_adapter_stops_output_before_full_capture(tmp_path, monkeypatch, descriptor, local):
+    module = adapter()
+    marker = tmp_path / "all-output-written"
+    code = f"""import os, pathlib
+for _ in range(64):
+    os.write({descriptor}, b' ' * 65536)
+pathlib.Path({str(marker)!r}).write_text('completed')
+print('{{"checks": {{"ssh_reachable": true}}, "codes": []}}')
+"""
+    (tmp_path / "fleet_probe_remote.py").write_text(code)
+    (tmp_path / "mcp_probe_remote.py").write_text("")
+    module.ROOT = tmp_path
+    started = []
+    original = module.subprocess.Popen
+
+    def spawn(command, *args, **kwargs):
+        started.append(command)
+        # Exercise SSH argument construction without contacting any host.
+        if command[0] == "/usr/bin/ssh":
+            command = [sys.executable, "-c", code]
+        return original(command, *args, **kwargs)
+
+    monkeypatch.setattr(module.subprocess, "Popen", spawn)
+    result = module.run_target({"local": local, "target": "synthetic.invalid"})
+    assert result["checks"] == {"ssh_reachable": False}
+    assert result["codes"] == ["probe_transport_or_execution_failed"]
+    assert not marker.exists()
+    assert len(started) == 1
+    if not local:
+        assert started[0][-3:-1] == ["--", "synthetic.invalid"]
+
+
+@settings(max_examples=8)
+@given(size=st.integers(min_value=64, max_value=65538), padding=st.sampled_from([b" ", b"\t", b"\n"]))
+@example(size=65535, padding=b" ")
+@example(size=65536, padding=b"\n")
+@example(size=65537, padding=b"\t")
+def test_adapter_preserves_output_byte_boundary(size, padding):
+    with TemporaryDirectory() as directory:
+        root = pathlib.Path(directory)
+        module = adapter()
+        payload = b'{"checks":{"ssh_reachable":true},"codes":[]}'
+        code = f"import os; raw={payload!r}; os.write(1, raw+{padding!r}*({size}-len(raw)))"
+        (root / "fleet_probe_remote.py").write_text(code)
+        (root / "mcp_probe_remote.py").write_text("")
+        module.ROOT = root
+        result = module.run_target({"local": True})
+        assert result["checks"] == {"ssh_reachable": size <= 65536}
+        assert result["codes"] == ([] if size <= 65536 else ["probe_transport_or_execution_failed"])
 
 def remote_probe(tmp_path, statuses, warmer=False, instances=None):
     request = {
@@ -216,8 +269,9 @@ def test_synchronous_remote_observation_uses_local_completion_clock():
     remote={'checked_at':future,'checks':{'ssh_reachable':True},'codes':[]}
     result=types.SimpleNamespace(returncode=0,stdout=json.dumps(remote).encode())
     before=time.time()
-    with patch('subprocess.run',return_value=result):
-        observed=adapter().run_target({'local': True})
+    module = adapter()
+    with patch.object(module.supervisor, 'run_command', return_value=result):
+        observed=module.run_target({'local': True})
     assert before<=observed['checked_at']<=time.time()
     assert observed['checks']==remote['checks']
 
@@ -401,8 +455,9 @@ def test_malformed_instance_config_crashes_the_probe_so_the_wrapper_reports_fail
     with pytest.raises(ValueError):
         remote_probe(tmp_path, {'health': (200, {'status': 'ok'}), 'ready': (200, {'status': 'ready'})}, instances=['bad'])
     failed = types.SimpleNamespace(returncode=1, stdout=b'')
-    with patch('subprocess.run', return_value=failed):
-        wrapper = adapter().run_target({'local': True})
+    module = adapter()
+    with patch.object(module.supervisor, 'run_command', return_value=failed):
+        wrapper = module.run_target({'local': True})
     assert wrapper['checks'] == {'ssh_reachable': False}
     assert 'instances' not in wrapper
 

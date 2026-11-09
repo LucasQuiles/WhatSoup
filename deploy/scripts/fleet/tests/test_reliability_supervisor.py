@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -19,6 +20,142 @@ def load_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.mark.parametrize("descriptor", [1, 2], ids=["stdout", "stderr"])
+def test_command_output_limit_stops_and_reaps_child(tmp_path, monkeypatch, descriptor):
+    supervisor = load_module()
+    completed = tmp_path / "all-output-written"
+    command = [sys.executable, "-c", """
+import os, pathlib, sys
+for _ in range(64):
+    os.write(int(sys.argv[1]), b'x' * 65536)
+pathlib.Path(sys.argv[2]).write_text('completed')
+""", str(descriptor), str(completed)]
+    started = []
+    original = subprocess.Popen
+
+    def spawn(*args, **kwargs):
+        process = original(*args, **kwargs)
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", spawn)
+    with pytest.raises(supervisor.StateError, match="output_oversized"):
+        supervisor.run_command(command, 5)
+    assert not completed.exists()
+    assert len(started) == 1 and started[0].returncode is not None
+    assert started[0].stdout.closed and started[0].stderr.closed
+
+
+def test_command_preserves_one_mib_stdout_and_both_pipe_bytes():
+    supervisor = load_module()
+    command = [sys.executable, "-c", """
+import os
+for _ in range(256):
+    os.write(1, b'o' * 4096)
+    os.write(2, b'e' * 256)
+raise SystemExit(7)
+"""]
+    result = supervisor.run_command(command, 5)
+    assert result.returncode == 7
+    assert result.stdout == b'o' * (1024 * 1024)
+    assert result.stderr == b'e' * 65536
+
+
+@pytest.mark.parametrize("close_pipes", [False, True])
+def test_command_timeout_reaps_direct_child_and_closes_pipes(monkeypatch, close_pipes):
+    supervisor = load_module()
+    code = "import os, time; " + ("os.close(1); os.close(2); " if close_pipes else "") + "time.sleep(15)"
+    started = []
+    original = subprocess.Popen
+
+    def spawn(*args, **kwargs):
+        process = original(*args, **kwargs)
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", spawn)
+    with pytest.raises(subprocess.TimeoutExpired):
+        supervisor.run_command([sys.executable, "-c", code], 0.3)
+    assert len(started) == 1 and started[0].returncode is not None
+    assert started[0].stdout.closed and started[0].stderr.closed
+
+
+def test_publishing_oversized_output_retains_failure_without_raw_bytes(tmp_path):
+    supervisor = load_module()
+    marker = tmp_path / "all-output-written"
+    command = [sys.executable, "-c", """
+import os, pathlib, sys
+for _ in range(64):
+    os.write(2, b'private-diagnostic-' * 4096)
+pathlib.Path(sys.argv[1]).write_text('completed')
+print('/synthetic/accepted.json')
+""", str(marker)]
+    result = supervisor.publish_event({"emitter_command": command, "instance": "synthetic"}, {
+        "kind": "alert", "reason": "synthetic_failure", "event_id": "synthetic-event", "incident_id": "synthetic-incident",
+    })
+    assert result == {"published": False}
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("descriptor", [1, 2], ids=["stdout", "stderr"])
+def test_delivery_output_limit_keeps_alert_unresolved(tmp_path, descriptor):
+    supervisor = load_module()
+    marker = tmp_path / "all-output-written"
+    identifier = "11111111-1111-1111-1111-111111111111"
+    receipt = json.dumps({identifier: {"status": "sent", "audit_receipt": "synthetic"}})
+    code = f"""import os, pathlib
+for _ in range(64):
+    os.write({descriptor}, b' ' * 65536)
+pathlib.Path({str(marker)!r}).write_text('completed')
+print({receipt!r})
+"""
+    alert = {"event_id": identifier, "delivery": "pending"}
+    result = supervisor.resolve_alert_delivery({"delivery_command": [sys.executable, "-c", code]}, [alert])
+    assert result == [{"code": "output_oversized", "returncode": None}]
+    assert alert == {"event_id": identifier, "delivery": "pending"}
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("size", [65535, 65536])
+def test_delivery_preserves_output_boundary(size):
+    supervisor = load_module()
+    identifier = "11111111-1111-1111-1111-111111111111"
+    receipt = json.dumps({identifier: {"status": "sent", "audit_receipt": "synthetic"}})
+    code = f"import os; raw={receipt.encode()!r}; os.write(1, raw+b' '*({size}-len(raw)))"
+    alert = {"event_id": identifier, "delivery": "pending"}
+    result = supervisor.resolve_alert_delivery({"delivery_command": [sys.executable, "-c", code]}, [alert])
+    if size == 65535:
+        assert result == []
+        assert alert["delivery"] == "channel_delivered"
+    else:
+        assert result == [{"code": "output_oversized", "returncode": None}]
+        assert alert["delivery"] == "pending"
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan")])
+def test_command_refuses_invalid_timeout_before_spawn(monkeypatch, timeout):
+    supervisor = load_module()
+
+    def refuse_spawn(*args, **kwargs):
+        pytest.fail("invalid timeout started a child")
+
+    monkeypatch.setattr(subprocess, "Popen", refuse_spawn)
+    with pytest.raises(supervisor.StateError, match="command_timeout_invalid"):
+        supervisor.run_command([sys.executable, "-c", "pass"], timeout)
+
+
+@pytest.mark.parametrize("size", [1024 * 1024, 1024 * 1024 + 1])
+def test_remote_observation_preserves_size_boundary_and_failure_code(size):
+    supervisor = load_module()
+    code = f"import os; os.write(1, b'{{}}'+b' '*({size}-2))"
+    config = {"observe_command": [sys.executable, "-c", code]}
+    if size == 1024 * 1024:
+        assert supervisor.remote_observation(config) == {"delivery_resolution": []}
+    else:
+        with pytest.raises(supervisor.StateError, match="^remote_observation_failed$"):
+            supervisor.remote_observation(config)
 
 
 @pytest.fixture
@@ -653,7 +790,7 @@ def test_delivery_resolution_failure_returns_code_without_ids_or_output(
     monkeypatch.setattr(
         supervisor,
         "run_command",
-        lambda argv, timeout: subprocess.CompletedProcess(
+        lambda argv, timeout, *, max_stdout: subprocess.CompletedProcess(
             argv, returncode, stdout, b""
         ),
     )
@@ -677,7 +814,7 @@ def test_delivery_resolution_ignores_malformed_receipts(supervisor, monkeypatch)
     monkeypatch.setattr(
         supervisor,
         "run_command",
-        lambda argv, timeout: subprocess.CompletedProcess(
+        lambda argv, timeout, *, max_stdout: subprocess.CompletedProcess(
             argv, 0, json.dumps(receipts).encode(), b""
         ),
     )
@@ -795,7 +932,7 @@ def test_only_storm_collapse_is_a_terminal_dispatcher_disposition(
     monkeypatch.setattr(
         supervisor,
         "run_command",
-        lambda argv, timeout: subprocess.CompletedProcess(
+        lambda argv, timeout, *, max_stdout: subprocess.CompletedProcess(
             argv, 0, json.dumps(receipts).encode(), b""
         ),
     )
@@ -823,7 +960,7 @@ def test_quarantined_alert_stays_undelivered_and_pages_stale(supervisor, monkeyp
     monkeypatch.setattr(
         supervisor,
         "run_command",
-        lambda argv, timeout: subprocess.CompletedProcess(
+        lambda argv, timeout, *, max_stdout: subprocess.CompletedProcess(
             argv, 0, json.dumps(receipts).encode(), b""
         ),
     )

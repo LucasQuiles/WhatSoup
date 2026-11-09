@@ -99,14 +99,14 @@ def run_target(request: dict[str, Any]) -> dict[str, Any]:
             remote,
         ]
     try:
-        result = subprocess.run(command, capture_output=True, timeout=80, check=False)
+        result = supervisor.run_command(command, 80, max_stdout=64 * 1024)
         if result.returncode == 0 and len(result.stdout) <= 64 * 1024:
             value = json.loads(result.stdout)
             if isinstance(value, dict):
                 # The observer compares samples in its own clock domain.
                 value["checked_at"] = time.time()
                 return value
-    except (OSError, ValueError, subprocess.TimeoutExpired):
+    except (OSError, ValueError, subprocess.TimeoutExpired, supervisor.StateError):
         pass
     return failure_payload()
 

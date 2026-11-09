@@ -96,11 +96,12 @@ def test_probe_ssh_destination_cannot_add_transport_options(monkeypatch):
     probe = load_module("fleet_transport_arguments", FLEET / "fleet_probe.py")
     commands = []
 
-    def capture_transport(command, **kwargs):
+    def capture_transport(command, timeout, *, max_stdout):
+        assert timeout == 80 and max_stdout == 65536
         commands.append(command)
         return subprocess.CompletedProcess(command, 255, stdout=b"", stderr=b"")
 
-    monkeypatch.setattr(probe.subprocess, "run", capture_transport)
+    monkeypatch.setattr(probe.supervisor, "run_command", capture_transport)
     result = probe.run_target({"target": "-oProxyCommand=unexpected", "instances": []})
     assert result["checks"]["ssh_reachable"] is False
     assert len(commands) == 1
