@@ -1,12 +1,16 @@
-import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { describe, expect, it, vi } from 'vitest';
+import { cleanGitEnv } from '../../src/lib/git-env.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import {
   BRANCH_STEPS,
   CI_ONLY_GUARDS,
   CURATED_TEST_PATHS,
   NEUTRALIZED_SKIP_VARS,
   RELEASE_STEPS,
+  runStep,
 } from '../../scripts/push-gate.ts';
 
 /**
@@ -47,6 +51,58 @@ const pipelineGuards = new Set(
 );
 
 const ciOnlyNames = new Set(CI_ONLY_GUARDS.map((entry) => entry.name));
+const gateTmp = trackTmpDirs('push-gate-outcomes-');
+
+describe('push-gate child outcomes', () => {
+  it.each([['SIGTERM', 143], ['SIGKILL', 137]] as const)('preserves and identifies %s', async (signal, exitCode) => {
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const result = await runStep({ name: 'signal-probe', cmd: `${process.execPath} -e process.kill(process.pid,'${signal}')` });
+      expect(result).toBe(exitCode);
+      expect(diagnostic.mock.calls).toHaveLength(1);
+      expect(diagnostic.mock.calls[0]?.[0]).toMatch(new RegExp(`^push-gate: signal-probe terminated by ${signal} \\(pid \\d+\\); exit ${exitCode}$`));
+    } finally {
+      diagnostic.mockRestore();
+    }
+  });
+
+  it('reports an unavailable executable as inconclusive', async () => {
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(await runStep({ name: 'unavailable-probe', cmd: '/whatsoup-nonexistent-test-executable' })).toBe(125);
+      expect(diagnostic.mock.calls).toEqual([['push-gate: unavailable-probe could not start (ENOENT); exit 125']]);
+    } finally {
+      diagnostic.mockRestore();
+    }
+  });
+
+  it('preserves a completed check failure', async () => {
+    expect(await runStep({ name: 'failed-check', cmd: `${process.execPath} -e process.exit(7)` })).toBe(7);
+  });
+
+  it.each([
+    ['exit 7', 7],
+    ['exit 125', 125],
+    ['kill -TERM "$$"', 143],
+  ] as const)('propagates %s through the normal release entry point', (body, exitCode) => {
+    const cwd = gateTmp.make('repo');
+    execFileSync('git', ['init', '--quiet', cwd], { env: cleanGitEnv(), timeout: 5_000 });
+    writeFileSync(join(cwd, 'npm'), `#!/bin/sh\necho fixture-step >&2\n${body}\n`, { mode: 0o700 });
+    const result = spawnSync(process.execPath, [resolve('scripts/push-gate.ts'), 'release'], {
+      cwd,
+      env: { ...cleanGitEnv(), PATH: `${cwd}:${process.env.PATH}` },
+      encoding: 'utf8',
+      timeout: 5_000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status).toBe(exitCode);
+    expect(result.stderr.match(/^fixture-step$/gm)).toHaveLength(1);
+    expect(result.stderr).toContain(`FAIL at step 1/${RELEASE_STEPS.length}`);
+    expect(result.stderr).toContain(`(exit ${exitCode})`);
+    expect(result.stdout).not.toContain('steps passed');
+  });
+});
 
 describe('push-gate manifest registry (#2224)', () => {
   it('every package.json guard:* script is in a pipeline or explicitly CI-only', () => {

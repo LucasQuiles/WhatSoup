@@ -118,8 +118,10 @@ Do not increase the shared host cap to get past contention.
 With `--json`, stdout contains one document and child diagnostics remain on stderr.
 Use `npm run --silent` as above to suppress npm's own non-JSON command banner.
 Reports include each command's outcome and duration. Direct Vitest steps also
-report files, passed/failed/pending tests from the actual runner report. An
-all-skipped or missing report cannot become a successful affected run. Counts
+report files, passed/failed/pending tests from the actual runner report. Push and
+release gates report a terminated child's PID and signal, preserve `128 + signal`
+exits, and return 125 when an executable cannot start. Direct Vitest steps
+with an all-skipped or missing report cannot become a successful affected run. Counts
 measure execution, not assertion quality or exact semantic coverage.
 
 The runner creates and removes its own scratch `TMPDIR`. Tests should use

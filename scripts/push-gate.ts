@@ -21,6 +21,7 @@
  * gate-drop is a test failure, not a scrolling accident.
  */
 import { spawn } from 'node:child_process';
+import { constants as osConstants } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { cleanGitEnv } from '../src/lib/git-env.ts';
 import { assertRepositoryInputUnchanged, captureRepositoryInputSnapshot } from './lib/source-mutation.ts';
@@ -347,15 +348,27 @@ function tokenize(cmd: string): { exe: string; args: string[] } {
   return { exe, args };
 }
 
-function runStep(gateStep: GateStep): Promise<number> {
+export function runStep(gateStep: GateStep): Promise<number> {
   return new Promise((resolvePromise) => {
     const { exe, args } = tokenize(gateStep.cmd);
     const child = spawn(exe, args, {
       stdio: 'inherit',
       env: pushGateChildEnv(),
     });
-    child.on('close', (code) => resolvePromise(code ?? 1));
-    child.on('error', () => resolvePromise(1));
+    child.on('close', (code, signal) => {
+      if (signal !== null) {
+        const signalNumber = osConstants.signals[signal];
+        const exitCode = signalNumber === undefined ? 125 : 128 + signalNumber;
+        console.error(`push-gate: ${gateStep.name} terminated by ${signal} (pid ${child.pid}); exit ${exitCode}`);
+        resolvePromise(exitCode);
+        return;
+      }
+      resolvePromise(code ?? 125);
+    });
+    child.on('error', (error: NodeJS.ErrnoException) => {
+      console.error(`push-gate: ${gateStep.name} could not start (${error.code ?? 'UNKNOWN'}); exit 125`);
+      resolvePromise(125);
+    });
   });
 }
 
@@ -388,7 +401,7 @@ export async function main(argv: readonly string[]): Promise<number> {
           + ` [${gateStep.name}] after ${formatElapsed(elapsed)} (exit ${code});`
           + ` ${steps.length - completed - 1} step(s) not run`,
       );
-      gateExit = 1;
+      gateExit = code;
       break;
     }
     completed += 1;
