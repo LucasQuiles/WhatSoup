@@ -1,4 +1,4 @@
-import type { SystemTurnPurpose } from './pending-system-result-tracker.ts';
+import type { PendingSystemTurnSnapshot, SystemTurnPurpose } from './pending-system-result-tracker.ts';
 import type { AgentEvent } from './stream-parser.ts';
 
 export type ProviderEventOwner =
@@ -74,4 +74,38 @@ export function decideProviderEventAdmission(
     return { admit: true, reason: 'owned' };
   }
   return { admit: false, reason: 'purpose_disallows_effect' };
+}
+
+/**
+ * The owner a provider event is admitted under: the pending system turn (its
+ * result, any event once the logical owner has moved on, or an admitted
+ * compact boundary), else the logical turn, else session accounting for init.
+ * Returns the system turn only when it owns the event.
+ */
+export function resolveProviderEventOwner(
+  event: AgentEvent,
+  logicalOwnerMatches: boolean,
+  systemTurn: PendingSystemTurnSnapshot | null,
+): { owner: ProviderEventOwner; systemTurn: PendingSystemTurnSnapshot | null } {
+  if (systemTurn) {
+    const systemOwner: ProviderEventOwner = {
+      kind: 'system_request',
+      purpose: systemTurn.purpose,
+    };
+    const systemDecision = decideProviderEventAdmission(event, systemOwner);
+    if (
+      event.type === 'result'
+      || !logicalOwnerMatches
+      || (event.type === 'compact_boundary' && systemDecision.admit)
+    ) {
+      return { owner: systemOwner, systemTurn };
+    }
+  }
+  if (logicalOwnerMatches) {
+    return { owner: { kind: 'logical_turn' }, systemTurn: null };
+  }
+  if (event.type === 'init') {
+    return { owner: { kind: 'session_accounting' }, systemTurn: null };
+  }
+  return { owner: { kind: 'none' }, systemTurn: null };
 }
