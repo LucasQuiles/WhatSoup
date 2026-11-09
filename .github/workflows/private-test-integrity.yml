@@ -11,9 +11,13 @@ jobs:
   private-scanner:
     if: >-
       github.repository == 'LucasQuiles/WhatSoup' &&
-      github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.status == 'completed' &&
-      github.event.workflow_run.head_repository.full_name == github.repository
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      (
+        github.event.workflow_run.event == 'pull_request' ||
+        (github.event.workflow_run.event == 'push' && (github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'v'))) ||
+        (github.event.workflow_run.event == 'schedule' && github.event.workflow_run.head_branch == 'main')
+      )
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: private-scanner-trusted
@@ -103,6 +107,11 @@ jobs:
         env:
           SCANNER_ROOT: ${{ steps.scratch.outputs.root }}
           QUALITY_RUN_ID: ${{ github.event.workflow_run.id }}
+          QUALITY_EVENT: ${{ github.event.workflow_run.event }}
+          QUALITY_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          QUALITY_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -114,16 +123,44 @@ jobs:
           python_sha="$(sha256sum "$python_bin" | cut -d ' ' -f 1)"
           bash_sha="$(sha256sum "$bash_bin" | cut -d ' ' -f 1)"
           git_sha="$(sha256sum "$git_bin" | cut -d ' ' -f 1)"
+          RECEIPT_PATH=''
+          receipt_args=()
+          if [[ "$QUALITY_EVENT" != 'pull_request' ]]; then
+            receipt_dir="$RUNNER_TEMP/private-integrity"
+            RECEIPT_PATH="$SCANNER_ROOT/receipt.json"
+            test ! -e "$receipt_dir"
+            mkdir -m 700 -- "$receipt_dir"
+            test "$(realpath "$receipt_dir")" = "$receipt_dir"
+            receipt_args=(--receipt "$RECEIPT_PATH")
+          fi
           cd "$SCANNER_ROOT"
+          set +e
           env -i PATH="$trusted_path" LANG=C LC_ALL=C TMPDIR="$SCANNER_ROOT" GITHUB_TOKEN="$GITHUB_TOKEN" \
+            QUALITY_RUN_ID="$QUALITY_RUN_ID" QUALITY_EVENT="$QUALITY_EVENT" QUALITY_RUN_ATTEMPT="$QUALITY_RUN_ATTEMPT" QUALITY_HEAD_SHA="$QUALITY_HEAD_SHA" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" RECEIPT_PATH="$RECEIPT_PATH" \
             "$timeout_bin" --signal=TERM --kill-after=30s 20m \
             "$python_bin" -I -S -B "$SCANNER_ROOT/driver/run_workflow.py" \
             --run-id "$QUALITY_RUN_ID" --private-checkout "$SCANNER_ROOT/private-checkout" \
             --git "$git_bin" --git-sha256 "$git_sha" \
             --python "$python_bin" --python-sha256 "$python_sha" \
-            --bash "$bash_bin" --bash-sha256 "$bash_sha" --trusted-path "$trusted_path" >/dev/null 2>&1
+            --bash "$bash_bin" --bash-sha256 "$bash_sha" --trusted-path "$trusted_path" "${receipt_args[@]}" >/dev/null 2>&1
+          scanner_exit="$?"
+          set -e
+          case "$scanner_exit" in
+            0|1|2) ;;
+            *) scanner_exit=2 ;;
+          esac
+          if [[ "$QUALITY_EVENT" != 'pull_request' ]]; then
+            test -s "$RECEIPT_PATH"
+            test ! -e "$RUNNER_TEMP/private-integrity/receipt.json"
+            mv -- "$RECEIPT_PATH" "$RUNNER_TEMP/private-integrity/receipt.json"
+            test -f "$RUNNER_TEMP/private-integrity/receipt.json"
+            chmod 600 "$RUNNER_TEMP/private-integrity/receipt.json"
+          fi
+          printf 'scanner-exit=%s\n' "$scanner_exit" >> "$GITHUB_OUTPUT"
 
       - name: Remove owned scanner scratch
+        id: cleanup
         if: always()
         shell: bash
         env:
@@ -136,3 +173,25 @@ jobs:
           test "$(realpath "$SCANNER_ROOT")" = "$SCANNER_ROOT"
           rm -rf -- "$SCANNER_ROOT"
           test ! -e "$SCANNER_ROOT"
+
+      - name: Upload private integrity receipt
+        if: always() && github.event.workflow_run.event != 'pull_request' && steps.cleanup.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: private-integrity-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          path: ${{ runner.temp }}/private-integrity/receipt.json
+          if-no-files-found: error
+          # A retry replaces only this run's receipt; consumers recheck the producer attempt.
+          overwrite: true
+          retention-days: 30
+
+      - name: Enforce private scanner conclusion
+        if: always()
+        shell: bash
+        env:
+          SCANNER_EXIT: ${{ steps.scan.outputs.scanner-exit }}
+        run: |
+          case "$SCANNER_EXIT" in
+            0|1|2) exit "$SCANNER_EXIT" ;;
+            *) exit 2 ;;
+          esac

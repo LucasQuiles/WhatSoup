@@ -6,8 +6,8 @@
 
 > **This table is a curated subset.** `.github/workflows/quality.yml` owns the current step inventory: the `guard:*` family, coverage (`coverage:check`), browser/Playwright suites, console design checks, mutation via `deploy/scripts/run-sentinel-tests.sh` (pytest `--cov-fail-under=98` + deployer mutation drill — note `stryker.conf.json` is dormant/unwired), and tokenomics/drills. `scripts/lib/fitness/registry.ts` owns the architectural-fitness rule inventory. Its blocking authority lives in the **guard ring** (`verify:push:branch`); the ESLint fitness mirror is warn-only. Semantic-quality (`semantic-quality-check.ts`) runs in **shadow mode** (exit 0) everywhere it is wired; its enforce path is unwired/on-demand.
 
-The `Quality` workflow (`.github/workflows/quality.yml`) runs on every PR and
-every push to `main`, with two explicit required-context jobs:
+The `Quality` workflow (`.github/workflows/quality.yml`) runs on every PR,
+push to `main`, and `v*` tag, with two explicit required-context jobs:
 
 - `quality (24.x)` is the full enforcement authority. It owns all static,
   Python, guard, coverage, console-design, and browser checks listed below.
@@ -46,13 +46,18 @@ path, and exact savings vary with runner scheduling and step duration.
 
 The private scanner migration adds `.github/workflows/private-test-integrity.yml`.
 It requires the `private-scanner-trusted` environment to admit only `main`, with a
-read-only scanner deploy key stored in that environment. A completed same-repository
-pull request run of Quality triggers trusted default-branch code. Candidate test
+read-only scanner deploy key stored in that environment. Completed same-repository
+pull request, main and tag runs of Quality trigger trusted default-branch code. Candidate test
 files are retrieved as immutable Git data; candidate code, hooks, configuration and
 package scripts are not executed. The scanner and its diagnostics remain private.
 The driver validates the current pull request head and base, qualifies the pinned
 Linux/Python 3.12 scanner runtime, removes its owned private checkout and temporary
 bundle, and rechecks the pull request before publishing `test-integrity (private)`.
+Main and tag scans publish a bounded receipt instead. The receipt binds the source
+run and attempt, commit, scanner run and attempt, and conclusion. Tag scans also
+verify the tag target and main ancestry before and after scanning. Receipt upload
+follows private scratch cleanup; rerunning the scanner replaces its own receipt
+with a new artifact identity and current attempt. Receipts expire after thirty days.
 Operational or cleanup failures cannot produce a successful local conclusion.
 The 20-minute watchdog can leave an inconclusive or missing check; a failed readback
 after a remote write is an observability gap, not proof that no check was created.
@@ -61,7 +66,12 @@ Fork and merge-queue inputs remain unsupported by this workflow.
 Keep the existing Quality scanner step and required checks during qualification.
 Only after hosted canaries prove current-head publication, stale-head refusal,
 credential confinement, cleanup and failure handling should the private check be
-required. Remove the repository-scoped scanner secret only after the trusted check
+required. Qualify the tag receipt with the existing `scripts/private-integrity-release.ts`
+`select` and `verify` commands before the testing pipeline connects that consumer
+as its release gate. Quality tags run the full existing suite during this staged
+qualification; the existing tag guard workflow remains active. This is temporary
+overlap owned by the testing pipeline cutover and ends when its receipt-based tag
+gate is verified. Remove the repository-scoped scanner secret only after the trusted check
 is operational and Quality no longer consumes that secret. Local adapter tests or
 a parsed workflow contract do not establish those hosted guarantees.
 

@@ -11,6 +11,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
 
 # Cancel superseded runs for the same ref. A new push/PR-sync supersedes the
 # in-flight run instead of leaving it orphaned at "pending 0s" for hours (the
@@ -20,7 +22,7 @@ on:
 # queue runs must always finish (same reasoning as tag-release-gate.yml).
 concurrency:
   group: quality-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' && !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
   contents: read
@@ -121,7 +123,12 @@ jobs:
             base="HEAD^"
           fi
           npm run guard:semantic-quality -- --mode shadow --base "$base" --receipt "$SEMANTIC_RECEIPT"
-          node -e 'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(process.env.SEMANTIC_RECEIPT,"utf8")); process.stdout.write(`### Semantic quality (shadow)\n\nDecision: **${r.decision}**\n\nFindings: ${r.findings.length}\n`)' >> "$GITHUB_STEP_SUMMARY"
+          node --input-type=module <<'NODE' >> "$GITHUB_STEP_SUMMARY"
+          import { readFileSync } from 'node:fs';
+
+          const receipt = JSON.parse(readFileSync(process.env.SEMANTIC_RECEIPT, 'utf8'));
+          process.stdout.write(`### Semantic quality (shadow)\n\nDecision: **${receipt.decision}**\n\nFindings: ${receipt.findings.length}\n`);
+          NODE
 
       - name: qSesh lint
         run: npm run lint:qsesh

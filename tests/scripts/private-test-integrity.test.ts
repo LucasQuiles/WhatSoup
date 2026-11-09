@@ -169,9 +169,11 @@ it('confines the private scanner credential to the trusted default-branch workfl
   });
   expect(job.if.replace(/\s+/g, ' ').trim()).toBe([
     "github.repository == 'LucasQuiles/WhatSoup' &&",
-    "github.event.workflow_run.event == 'pull_request' &&",
     "github.event.workflow_run.status == 'completed' &&",
-    'github.event.workflow_run.head_repository.full_name == github.repository',
+    'github.event.workflow_run.head_repository.full_name == github.repository && (',
+    "github.event.workflow_run.event == 'pull_request' ||",
+    "(github.event.workflow_run.event == 'push' && (github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'v'))) ||",
+    "(github.event.workflow_run.event == 'schedule' && github.event.workflow_run.head_branch == 'main') )",
   ].join(' '));
 
   const checkouts = job.steps.filter((step: { uses?: string }) => step.uses?.startsWith('actions/checkout@'));
@@ -199,7 +201,20 @@ it('confines the private scanner credential to the trusted default-branch workfl
   expect(scan.env.GITHUB_TOKEN).toBe('${{ github.token }}');
   expect(scan.run).toContain('-I -S -B');
   expect(scan.run).toContain('>/dev/null 2>&1');
+  const cleanupIndex = job.steps.findIndex((step: { id?: string }) => step.id === 'cleanup');
+  const uploadIndex = job.steps.findIndex((step: { uses?: string }) => step.uses?.startsWith('actions/upload-artifact@'));
+  expect(cleanupIndex).toBeGreaterThan(job.steps.indexOf(scan));
+  expect(job.steps[cleanupIndex].if).toBe('always()');
+  expect(uploadIndex).toBeGreaterThan(cleanupIndex);
+  expect(job.steps[uploadIndex].with.path).toBe('${{ runner.temp }}/private-integrity/receipt.json');
+  expect(job.steps.at(-1).name).toBe('Enforce private scanner conclusion');
   expect(job.steps.at(-1).if).toBe('always()');
+});
+
+it('provides an uncancelled Quality producer for tag receipt qualification', () => {
+  const workflow = parse(readFileSync(join(repoRoot, '.github/workflows/quality.yml'), 'utf8'));
+  expect(workflow.on.push.tags).toEqual(['v*']);
+  expect(workflow.concurrency['cancel-in-progress']).toBe("${{ github.event_name != 'merge_group' && !startsWith(github.ref, 'refs/tags/') }}");
 });
 
 it('refuses an old curl before trusted-driver downloads and executes the supported bootstrap path', () => {

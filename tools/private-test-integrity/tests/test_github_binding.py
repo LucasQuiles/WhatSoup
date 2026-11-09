@@ -20,13 +20,17 @@ from github_binding import (  # noqa: E402
     EXPECTED_WORKFLOW_NAME,
     GitHubPublicationTarget,
     VerifiedGitHubBinding,
+    VerifiedNonPRGitHubBinding,
     bind_authenticated_quality_run,
+    bind_authenticated_non_pr_quality_run,
 )
 
 
 BASE_SHA = "a" * 40
 HEAD_SHA = "b" * 40
 QUALITY_RUN_ID = 41752012595
+RUN_ATTEMPT = 3
+TRUSTED_MAIN_SHA = "c" * 40
 
 
 def workflow_run() -> dict[str, object]:
@@ -55,6 +59,27 @@ def current_pull_request() -> dict[str, object]:
             "sha": HEAD_SHA,
             "repo": {"full_name": EXPECTED_REPOSITORY},
         },
+    }
+
+
+def non_pr_workflow_run(
+    *,
+    event: str = "push",
+    head_branch: str = "v1.2.3",
+    run_attempt: object = RUN_ATTEMPT,
+) -> dict[str, object]:
+    return {
+        "id": QUALITY_RUN_ID,
+        "run_attempt": run_attempt,
+        "workflow_id": EXPECTED_WORKFLOW_ID,
+        "name": EXPECTED_WORKFLOW_NAME,
+        "path": ".github/workflows/quality.yml",
+        "event": event,
+        "status": "completed",
+        "head_sha": HEAD_SHA,
+        "head_branch": head_branch,
+        "repository": {"full_name": EXPECTED_REPOSITORY},
+        "head_repository": {"full_name": EXPECTED_REPOSITORY},
     }
 
 
@@ -263,6 +288,82 @@ class GitHubBindingTests(unittest.TestCase):
             with self.subTest(name=name):
                 with self.assertRaises(BoundaryError):
                     self._bind(run, pull_requests, publication_recheck=publication_recheck)
+
+    def test_binds_completed_main_schedule_and_exact_version_tag_with_immutable_parent_baseline(self) -> None:
+        cases = (
+            ("push-main", non_pr_workflow_run(head_branch="main"), "refs/heads/main"),
+            ("schedule-main", non_pr_workflow_run(event="schedule", head_branch="main"), "refs/heads/main"),
+            ("push-tag", non_pr_workflow_run(), "refs/tags/v1.2.3"),
+        )
+        for name, run, source_ref in cases:
+            with self.subTest(name=name):
+                binding = bind_authenticated_non_pr_quality_run(
+                    run,
+                    expected_run_id=QUALITY_RUN_ID,
+                    trusted_main_sha=TRUSTED_MAIN_SHA,
+                    candidate_ref_sha=HEAD_SHA,
+                    baseline_sha=BASE_SHA,
+                    candidate_is_ancestor=True,
+                )
+                self.assertEqual(
+                    binding,
+                    VerifiedNonPRGitHubBinding(
+                        repository=EXPECTED_REPOSITORY,
+                        base_sha=BASE_SHA,
+                        head_sha=HEAD_SHA,
+                        source_run_id=QUALITY_RUN_ID,
+                        source_run_attempt=RUN_ATTEMPT,
+                        source_ref=source_ref,
+                        trusted_main_sha=TRUSTED_MAIN_SHA,
+                        check_name=CHECK_NAME,
+                    ),
+                )
+
+    def test_rejects_non_pr_metadata_ref_and_ancestry_mismatches(self) -> None:
+        cases: dict[str, tuple[dict[str, object], dict[str, object]]] = {}
+        wrong_event = non_pr_workflow_run(event="workflow_dispatch")
+        cases["wrong-event"] = (wrong_event, {})
+        wrong_repository = non_pr_workflow_run()
+        wrong_repository["repository"] = {"full_name": "LucasQuiles/other"}
+        cases["wrong-repository"] = (wrong_repository, {})
+        wrong_workflow = non_pr_workflow_run()
+        wrong_workflow["workflow_id"] = EXPECTED_WORKFLOW_ID + 1
+        cases["wrong-workflow"] = (wrong_workflow, {})
+        wrong_path = non_pr_workflow_run()
+        wrong_path["path"] = ".github/workflows/other.yml"
+        cases["wrong-path"] = (wrong_path, {})
+        schedule_tag = non_pr_workflow_run(event="schedule", head_branch="v1.2.3")
+        cases["schedule-tag"] = (schedule_tag, {})
+        bad_attempt = non_pr_workflow_run(run_attempt=True)
+        cases["boolean-attempt"] = (bad_attempt, {})
+        for name, (run, overrides) in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaises(BoundaryError):
+                    bind_authenticated_non_pr_quality_run(
+                        run,
+                        expected_run_id=QUALITY_RUN_ID,
+                        trusted_main_sha=TRUSTED_MAIN_SHA,
+                        candidate_ref_sha=overrides.get("candidate_ref_sha", HEAD_SHA),
+                        baseline_sha=BASE_SHA,
+                        candidate_is_ancestor=overrides.get("candidate_is_ancestor", True),
+                    )
+
+        for name, overrides in {
+            "run-id": {"expected_run_id": QUALITY_RUN_ID + 1},
+            "tag-tip": {"candidate_ref_sha": "d" * 40},
+            "non-main-ancestor": {"candidate_is_ancestor": False},
+            "root-baseline": {"baseline_sha": HEAD_SHA},
+        }.items():
+            with self.subTest(name=name):
+                with self.assertRaises(BoundaryError):
+                    bind_authenticated_non_pr_quality_run(
+                        non_pr_workflow_run(),
+                        expected_run_id=overrides.get("expected_run_id", QUALITY_RUN_ID),
+                        trusted_main_sha=TRUSTED_MAIN_SHA,
+                        candidate_ref_sha=overrides.get("candidate_ref_sha", HEAD_SHA),
+                        baseline_sha=overrides.get("baseline_sha", BASE_SHA),
+                        candidate_is_ancestor=overrides.get("candidate_is_ancestor", True),
+                    )
 
 
 if __name__ == "__main__":
