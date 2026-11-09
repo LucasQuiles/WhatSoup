@@ -185,6 +185,7 @@ type CrashInfo = {
   sessionId?: string | null;
   dbRowId?: number | null;
   generationIdentity?: { managerId: string; generation: number };
+  terminationReason?: 'idle_watchdog' | 'stalled_operation' | 'suspend' | 'ended';
 };
 
 type RuntimeView = {
@@ -326,6 +327,42 @@ describe('fallback chain advance on turn process failure', () => {
     const args = replaySpy.mock.calls[0]![0] as { chatJid: string; mapKey?: string };
     expect(args.chatJid).toBe(CHAT);
     expect(args.mapKey).toBe(CHAT);
+  });
+
+  it('F7: a stalled-operation kill of the active fallback entry neither advances the chain nor replays the stopped turn', () => {
+    const runtime = makeRuntime([
+      { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+      { provider: 'opencode-cli', model: 'glm/glm-5.2' },
+    ]);
+    const { rv, owner } = armIncidentShape(runtime);
+    rv.pendingTurnText.set(CHAT, 'compare this to our existing tools');
+    const replaySpy = vi
+      .spyOn(rv as unknown as { scheduleFallbackReplay(args: unknown): boolean }, 'scheduleFallbackReplay')
+      .mockReturnValue(true);
+
+    rv.handlePerChatCrash(CHAT, CHAT, { ...crashInfo(owner), terminationReason: 'stalled_operation' });
+
+    expect(replaySpy, 'the stopped turn is not replayed').not.toHaveBeenCalled();
+    expect(rv.fallbackWindow.activeEntry?.model, 'the entry is not charged with the kill').toBe('kimi/kimi-k3');
+    expect(rv.fallbackChain.failedKeys.size).toBe(0);
+    expect(alertsFor('fallback_provider_failed')).toHaveLength(0);
+  });
+
+  it('control: the same exit without a stalled-operation kill advances and replays', () => {
+    const runtime = makeRuntime([
+      { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+      { provider: 'opencode-cli', model: 'glm/glm-5.2' },
+    ]);
+    const { rv, owner } = armIncidentShape(runtime);
+    rv.pendingTurnText.set(CHAT, 'compare this to our existing tools');
+    const replaySpy = vi
+      .spyOn(rv as unknown as { scheduleFallbackReplay(args: unknown): boolean }, 'scheduleFallbackReplay')
+      .mockReturnValue(true);
+
+    rv.handlePerChatCrash(CHAT, CHAT, crashInfo(owner));
+
+    expect(replaySpy).toHaveBeenCalledTimes(1);
+    expect(rv.fallbackWindow.activeEntry?.model).toBe('glm/glm-5.2');
   });
 
   it('a crash with no fallback window active changes no chain state', () => {

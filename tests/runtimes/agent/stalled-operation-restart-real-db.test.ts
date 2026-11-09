@@ -625,6 +625,67 @@ describe('F7: a stalled-operation kill survives a real service restart', () => {
     );
   });
 
+  /**
+   * The next request does not reach the provider: `refused` before the provider
+   * boundary (the canary refusal), `write_failed` after it (the stdin write fails).
+   */
+  async function undeliveredRequest(
+    ingest: (msg: IncomingMessage) => void,
+    session: SessionDouble,
+    messageId: string,
+    content: string,
+    mode: 'refused' | 'write_failed',
+  ): Promise<void> {
+    const attempts = session.sendTurn.mock.calls.length;
+    const refusal = vi.fn(async () => {
+      throw new Error('provider MCP canary proof unavailable');
+    });
+    if (mode === 'refused') {
+      Object.assign(session, { sendTurnAtProviderBoundary: refusal });
+    } else {
+      session.sendTurn.mockImplementationOnce((input: unknown) => {
+        session.turnsSent.push(input);
+        return Promise.reject(new Error('STDIN_WRITE_TIMEOUT: provider stdin write timed out'));
+      });
+    }
+    ingest(customerMsg(DM_JID, messageId, content));
+    await drainIngest();
+    await vi.waitFor(() => {
+      if (mode === 'refused') expect(refusal).toHaveBeenCalled();
+      else expect(session.sendTurn.mock.calls.length).toBeGreaterThan(attempts);
+    }, SEND_WAIT);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    if (mode === 'refused') delete (session as { sendTurnAtProviderBoundary?: unknown }).sendTurnAtProviderBoundary;
+  }
+
+  for (const mode of ['refused', 'write_failed'] as const) {
+    it(`a ${mode === 'refused' ? 'refused' : 'failed'} next request keeps the hold; a restart still sends no context or continuation turn`, async () => {
+      const first = makeRuntime();
+      const ingest = makeIngest(first);
+      const { session } = await deliveredExchange(ingest, `wamid-f7-${mode}-1`, 'start the export', 'Export started.');
+      const sessionId = session.getStatus().sessionId!;
+      reportCrash(session, { terminationReason: 'stalled_operation' });
+      await waitForRespawn(session, sessionId);
+
+      await undeliveredRequest(ingest, session, `wamid-f7-${mode}-2`, 'try the export again', mode);
+      expect(checkpoint().watchdog, 'an undelivered request does not release the hold').toMatchObject({
+        stalledOperationResumeHold: { sessionId },
+      });
+
+      const { booted } = await restartService(first);
+      const resumed = booted.find((s) => s.ctorOpts.chatJid === DM_JID);
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      const sent = resumed ? sentTexts(resumed) : [];
+      expect(
+        sent.filter((t) => t.includes(RESTART_CONTINUATION) || t.includes('[Recent chat context')),
+        'no context or continuation turn',
+      ).toEqual([]);
+      expect(checkpoint().watchdog, 'still held after the restart').toMatchObject({
+        stalledOperationResumeHold: { sessionId },
+      });
+    });
+  }
+
   function failHoldWrites(): ReturnType<typeof vi.spyOn> {
     const upsert = engine.upsertSessionCheckpoint.bind(engine);
     return vi.spyOn(engine, 'upsertSessionCheckpoint').mockImplementation((key, fields) => {
