@@ -18,6 +18,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { Messenger, IncomingMessage } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
+import { resetLoggerMock, type SingletonLoggerMock } from '../../helpers/logger-mock.ts';
 
 // ─── Hoisted provider-boundary doubles ──────────────────────────────────────
 
@@ -158,9 +159,16 @@ const { mockConfig } = vi.hoisted(() => ({
 
 // ─── Module mocks (provider boundary + side-effect surfaces) ────────────────
 
+// Only the runtime's own logger is captured: proactive resume reports the
+// stalled-operation hold on it. Every other component keeps the no-op logger
+// loggerMock() hands out.
+const runtimeLogger = vi.hoisted(() => ({ log: undefined as unknown as SingletonLoggerMock }));
+
 vi.mock('../../../src/logger.ts', async () => {
-  const { loggerMock } = await import('../../helpers/logger-mock.ts');
-  return loggerMock();
+  const { componentLoggerMock, loggerMock } = await import('../../helpers/logger-mock.ts');
+  const mock = componentLoggerMock('agent-runtime', () => loggerMock().createChildLogger());
+  runtimeLogger.log = mock.log;
+  return { createChildLogger: mock.createChildLogger };
 });
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
@@ -507,6 +515,28 @@ describe('F7: a stalled-operation kill survives a real service restart', () => {
     return (db.raw.prepare('SELECT COUNT(*) AS n FROM turn_terminal_records WHERE inbound_seq = ?').get(seq) as { n: number }).n;
   }
 
+  type RuntimeTurnState = {
+    chatSessions: Map<string, unknown>;
+    perChatTurnQueues: Map<string, { isProcessing: boolean; activeTurn: unknown; pending: number }>;
+  };
+
+  /** The chat's turn queue has returned from its last turn: nothing active, processing or pending. */
+  function expectTurnQueueIdle(agent: AgentRuntime): void {
+    const queue = (agent as unknown as RuntimeTurnState).perChatTurnQueues.get(DM_JID);
+    expect(queue, 'the chat keeps its turn queue').toBeDefined();
+    expect(queue!.isProcessing).toBe(false);
+    expect(queue!.activeTurn).toBeNull();
+    expect(queue!.pending).toBe(0);
+  }
+
+  /** Proactive resume took the hold branch for this session, which returns before any turn. */
+  async function waitForResumeHeld(sessionId: string): Promise<void> {
+    await vi.waitFor(() => expect(runtimeLogger.log.info).toHaveBeenCalledWith(
+      { chatJid: DM_JID, sessionId },
+      'proactive resume after a stalled-operation kill — no context or continuation turn sent',
+    ), SEND_WAIT);
+  }
+
   /** The in-process auto-respawn after the kill: the same manager resumes its session. */
   async function waitForRespawn(session: SessionDouble, sessionId: string): Promise<void> {
     await vi.waitFor(() => {
@@ -575,6 +605,8 @@ describe('F7: a stalled-operation kill survives a real service restart', () => {
     engine = new DurabilityEngine(db);
     await prepareRuntimeHome();
     const bootIndex = sessionDoubles.length;
+    // A runtime log line read after this boot comes from this boot.
+    resetLoggerMock(runtimeLogger.log);
     mockConfig.proactiveResumeOnStartup = true;
     const agent = makeRuntime();
     await agent.start();
@@ -654,7 +686,15 @@ describe('F7: a stalled-operation kill survives a real service restart', () => {
       if (mode === 'refused') expect(refusal).toHaveBeenCalled();
       else expect(session.sendTurn.mock.calls.length).toBeGreaterThan(attempts);
     }, SEND_WAIT);
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    // Done with the request: it has a terminal record (refused finalizes as a
+    // pre-dispatch rejection, write_failed as a failed processor turn; neither
+    // has an answer to wait for) and the turn queue has returned from it, so
+    // no later step of this turn can reach the provider boundary.
+    const seq = inboundSeqByMessageId(messageId);
+    await vi.waitFor(() => {
+      expect(terminalCount(seq)).toBe(1);
+      expectTurnQueueIdle(runtime!);
+    }, SEND_WAIT);
     if (mode === 'refused') delete (session as { sendTurnAtProviderBoundary?: unknown }).sendTurnAtProviderBoundary;
   }
 
@@ -674,8 +714,9 @@ describe('F7: a stalled-operation kill survives a real service restart', () => {
 
       const { booted } = await restartService(first);
       const resumed = booted.find((s) => s.ctorOpts.chatJid === DM_JID);
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-      const sent = resumed ? sentTexts(resumed) : [];
+      expect(resumed, 'the held session is resumed at boot').toBeDefined();
+      await waitForResumeHeld(sessionId);
+      const sent = sentTexts(resumed!);
       expect(
         sent.filter((t) => t.includes(RESTART_CONTINUATION) || t.includes('[Recent chat context')),
         'no context or continuation turn',
@@ -718,7 +759,14 @@ describe('F7: a stalled-operation kill survives a real service restart', () => {
     openBoundary();
     await drainIngest();
     await vi.waitFor(() => expect(readyError).toBeDefined(), SEND_WAIT);
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    // Done with the cancelled request: /stop retires the chat's turn queue only
+    // after the queue has returned from the cancelled turn
+    // (retirePerChatTurnQueueAfterKill awaits its quiescence), then drops the session.
+    await vi.waitFor(() => {
+      const state = first as unknown as RuntimeTurnState;
+      expect(state.perChatTurnQueues.has(DM_JID)).toBe(false);
+      expect(state.chatSessions.has(DM_JID)).toBe(false);
+    }, SEND_WAIT);
     delete (session as { sendTurnAtProviderBoundary?: unknown }).sendTurnAtProviderBoundary;
 
     expect(String(readyError), 'the cancellation stops the dispatch at the provider boundary')
@@ -728,9 +776,15 @@ describe('F7: a stalled-operation kill survives a real service restart', () => {
       stalledOperationResumeHold: { sessionId },
     });
 
-    const { booted } = await restartService(first);
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
-    const sent = booted.filter((s) => s.ctorOpts.chatJid === DM_JID).flatMap(sentTexts);
+    // /stop shut the session down as ended, so its checkpoint is not resumable
+    // and the boot creates no session for this chat (start() decides every
+    // proactive resume before it returns). No session means no turn can be sent.
+    const { booted } = await restartService(first, () => {
+      expect(resumableKeys(), '/stop ended the session; the boot has nothing to resume').not.toContain(DM_KEY);
+    });
+    const bootedForChat = booted.filter((s) => s.ctorOpts.chatJid === DM_JID);
+    expect(bootedForChat, 'no session resumed for the chat at boot').toEqual([]);
+    const sent = bootedForChat.flatMap(sentTexts);
     expect(
       sent.filter((t) => t.includes(RESTART_CONTINUATION) || t.includes('[Recent chat context')),
       'no context or continuation turn',
