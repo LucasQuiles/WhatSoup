@@ -70,9 +70,17 @@ describe('renderUserMessage — content', () => {
     expect(msg).toContain("I'll continue here.");
   });
 
-  it('falls back to activeUntil for the ETA when no parsed reset exists', () => {
+  it('omits the quota ETA when the reset time is unknown, even with a fallback window', () => {
     const msg = renderUserMessage('usage-limit', ctx({ bundle: bundle({ resetAt: null }) }));
-    expect(msg).toContain('T1781000009999');
+    expect(msg).not.toContain('until about');
+    // The fallback-window expiry (activeUntil) must not pose as a quota expiry.
+    expect(msg).not.toContain('T1781000009999');
+  });
+
+  it('displays the parsed quota reset time when it is known', () => {
+    const msg = renderUserMessage('usage-limit', ctx());
+    expect(msg).toContain('until about T1781000003600');
+    expect(msg).not.toContain('T1781000009999');
   });
 
   it('omits the backup clause and ETA when none are available', () => {

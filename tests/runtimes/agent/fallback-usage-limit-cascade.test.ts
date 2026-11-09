@@ -285,7 +285,11 @@ describe('fallback-provider usage-limit cascade', () => {
     ];
     expect(allEnqueued).toHaveLength(1);
     const notice = String(allEnqueued[0]);
-    expect(notice).toContain('Primary model hit a usage/quota limit until about');
+    // USAGE_LIMIT_TEXT carries no machine-readable reset, so resetAt is unknown
+    // here. The notice must state the limit WITHOUT any ETA claim: the fallback
+    // window (activeUntil) is not the quota reset and must not pose as one.
+    expect(notice).toContain('Primary model hit a usage/quota limit.');
+    expect(notice).not.toContain('until about');
     expect(notice).toContain('Switching to OpenCode / minimax/minimax-m2.');
     expect(notice).toContain('Please resend your last message.');
   });
