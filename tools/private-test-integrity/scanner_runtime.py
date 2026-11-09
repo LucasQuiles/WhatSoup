@@ -90,10 +90,13 @@ def validate_probe_outputs(
         raise BoundaryError("private runtime parser is unavailable")
     observed = {
         row["file_path"] for row in invalid
-        if row["rule_id"] == PARSER_ERROR and row["severity"] == "block"
+        if row["rule_id"] == PARSER_ERROR and row["severity"] in {"block", "advisory"}
     }
     if observed != invalid_paths:
         raise BoundaryError("private runtime negative parser coverage is incomplete")
+    if not any(row["rule_id"] == "test-file-syntax-error" and row["severity"] == "block"
+               and row["file_path"] == "runtime-invalid/python_test.py" for row in invalid):
+        raise BoundaryError("private runtime Python syntax error is not blocking")
 
 
 def _verify_executable(path: Path, expected: str, name: str, trusted_path: str) -> None:

@@ -75,7 +75,7 @@ def parser_errors_for_invalid_probes() -> list[dict[str, str]]:
             "severity": "block",
         }
         for path in INVALID_PATHS
-    ]
+    ] + [{"rule_id": SYNTAX_ERROR, "file_path": INVALID_PATHS[0], "severity": "block"}]
 
 
 class ScannerRuntimeOutputContractTests(unittest.TestCase):
@@ -219,14 +219,30 @@ class ScannerRuntimeOutputContractTests(unittest.TestCase):
 
         self.assert_rejected(valid_doctor(), [], {"not": "a-list"})
 
-    def test_requires_complete_blocking_parser_errors_for_only_invalid_probes(self) -> None:
+    def test_accepts_detected_parser_errors_with_the_pinned_advisory_policy(self) -> None:
+        invalid = parser_errors_for_invalid_probes()
+        for finding in invalid:
+            if finding["rule_id"] == PARSER_ERROR:
+                finding["severity"] = "advisory"
+        self.assertIsNone(self.validator()(valid_doctor(), [], invalid, scanner_root=SCANNER_ROOT, python=PYTHON))
+
+    def test_requires_the_python_syntax_error_to_remain_blocking(self) -> None:
+        for severity in (None, "advisory"):
+            with self.subTest(severity=severity):
+                invalid = parser_errors_for_invalid_probes()[:-1]
+                if severity is not None:
+                    invalid.append({"rule_id": SYNTAX_ERROR, "file_path": INVALID_PATHS[0], "severity": severity})
+                self.assert_rejected(valid_doctor(), [], invalid)
+
+    def test_requires_complete_parser_errors_for_only_invalid_probes(self) -> None:
         complete = parser_errors_for_invalid_probes()
         self.assert_rejected(valid_doctor(), [], [])
         self.assert_rejected(valid_doctor(), [], complete[:-1])
+        self.assert_rejected(valid_doctor(), [], complete[1:])
 
-        no_block = parser_errors_for_invalid_probes()
-        no_block[0]["severity"] = "advisory"
-        self.assert_rejected(valid_doctor(), [], no_block)
+        unknown_severity = parser_errors_for_invalid_probes()
+        unknown_severity[0]["severity"] = "unknown"
+        self.assert_rejected(valid_doctor(), [], unknown_severity)
 
         wrong_rule = parser_errors_for_invalid_probes()
         wrong_rule[0]["rule_id"] = SYNTAX_ERROR

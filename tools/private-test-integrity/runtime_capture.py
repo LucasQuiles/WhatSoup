@@ -1,10 +1,10 @@
-"""Internal exec helper; the existing scanner supervisor owns its process group."""
+"""Bound probe output; the existing scanner supervisor owns the process group."""
 
 import os
 from pathlib import Path
 import resource
+import subprocess
 import sys
-from typing import NoReturn
 
 
 MAX_OUTPUT_BYTES = 262_144
@@ -18,7 +18,7 @@ PROBE_PATHS = frozenset(
 )
 
 
-def capture(output: Path, command: tuple[str, ...]) -> NoReturn:
+def capture(output: Path, command: tuple[str, ...]) -> int:
     """Capture fixed probes; caller must discard stderr and supervise the group."""
     if (
         not isinstance(output, Path)
@@ -53,20 +53,31 @@ def capture(output: Path, command: tuple[str, ...]) -> NoReturn:
     if not doctor and not scan:
         raise ValueError("private capture command is invalid")
 
-    resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_OUTPUT_BYTES, MAX_OUTPUT_BYTES))
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    try:
-        os.dup2(descriptor, 1, inheritable=True)
-    finally:
-        if descriptor != 1:
-            os.close(descriptor)
-    os.execve(str(entrypoint), command, dict(os.environ))
-    raise RuntimeError("private capture did not execute")
+    # A process-wide file limit also truncates the scanner's parser libraries.
+    # Bound this stream while dependency writes retain the runner's disk policy.
+    with os.fdopen(descriptor, "wb") as destination:
+        child = subprocess.Popen(
+            command, env=dict(os.environ), stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, close_fds=True,
+        )
+        try:
+            content = child.stdout.read(MAX_OUTPUT_BYTES)
+            destination.write(content)
+            if len(content) >= MAX_OUTPUT_BYTES:
+                raise ValueError("private capture output exceeds its limit")
+            returncode = child.wait()
+            return returncode if returncode in (0, 1) else 2
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.stdout.close()
+            child.wait(timeout=5)
 
 
 if __name__ == "__main__":
     try:
-        capture(Path(sys.argv[1]), tuple(sys.argv[2:]))
+        raise SystemExit(capture(Path(sys.argv[1]), tuple(sys.argv[2:])))
     except Exception:
         raise SystemExit(2) from None

@@ -1,8 +1,9 @@
-"""RED contract for the private scanner runtime-capture exec boundary."""
+"""Capture bounds and command admission; real execution has native canaries."""
 
 from __future__ import annotations
 
 import importlib
+import io
 import os
 from pathlib import Path
 import stat
@@ -24,15 +25,6 @@ PROBE_PATHS = tuple(
     for directory in ("runtime-valid", "runtime-invalid")
     for filename in PROBE_FILENAMES
 )
-
-
-class ExecveCalled(BaseException):
-    """Sentinel proving the helper reached its no-return exec boundary."""
-
-    def __init__(self, path: object, argv: object, environment: object) -> None:
-        self.path = path
-        self.argv = argv
-        self.environment = environment
 
 
 def load_runtime_capture():
@@ -69,98 +61,69 @@ class RuntimeCaptureTests(unittest.TestCase):
             "LANG": "C",
         }
 
-    def _expect_exec(
-        self,
-        module: object,
-        capture: object,
-        output: Path,
-        command: tuple[str, ...],
-        environment: dict[str, str],
-    ) -> ExecveCalled:
+    def _expect_exec(self, module, capture, output, command, environment):
+        child = mock.Mock()
+        child.stdout = io.BytesIO(b'{"status":"ok"}\n')
+        child.wait.return_value = 0
+        child.poll.return_value = 0
         with mock.patch.dict(module.os.environ, environment, clear=True):
             with mock.patch.object(module.resource, "setrlimit"):
-                with mock.patch.object(module.os, "dup2"):
-                    with mock.patch.object(
-                        module.os,
-                        "execve",
-                        side_effect=lambda path, argv, env: (_ for _ in ()).throw(
-                            ExecveCalled(path, argv, env)
-                        ),
-                    ):
-                        with self.assertRaises(ExecveCalled) as raised:
-                            capture(output, command)
-        return raised.exception
+                with mock.patch.object(module.subprocess, "Popen", return_value=child) as launch:
+                    self.assertEqual(capture(output, command), 0)
+        self.assertEqual(output.read_bytes(), b'{"status":"ok"}\n')
+        self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+        self.assertTrue(child.stdout.closed)
+        self.assertEqual(launch.call_args.args, (command,))
+        self.assertEqual(launch.call_args.kwargs["env"], environment)
+        self.assertEqual(launch.call_args.kwargs["stdin"], module.subprocess.DEVNULL)
+        self.assertEqual(launch.call_args.kwargs["stdout"], module.subprocess.PIPE)
+        self.assertEqual(launch.call_args.kwargs["stderr"], module.subprocess.DEVNULL)
+        self.assertNotIn("start_new_session", launch.call_args.kwargs)
 
-    def test_doctor_exec_is_exact_and_sets_limits_output_and_fd_before_exec(self) -> None:
+    def test_doctor_preserves_arguments_environment_and_private_output(self):
         module, capture = load_runtime_capture()
         with tempfile.TemporaryDirectory(prefix="runtime-capture-test-") as temporary:
             root = Path(temporary).resolve()
             entrypoint = make_entrypoint(root)
-            output = root / "doctor.json"
-            environment = self._environment(root)
-            events: list[tuple[object, ...]] = []
-            opened: list[int] = []
-            real_open = os.open
-            real_close = os.close
+            self._expect_exec(module, capture, root / "doctor.json",
+                              (str(entrypoint), "doctor", "parsers", "--json"), self._environment(root))
 
-            def tracked_open(path: object, flags: int, mode: int = 0o777) -> int:
-                events.append(("open", path, flags, mode))
-                descriptor = real_open(path, flags, mode)
-                opened.append(descriptor)
-                return descriptor
+    def test_output_bound_refuses_exact_limit_and_overflow_and_reaps_child(self):
+        module, capture = load_runtime_capture()
+        with tempfile.TemporaryDirectory(prefix="runtime-capture-test-") as temporary:
+            root = Path(temporary).resolve()
+            entrypoint = make_entrypoint(root)
+            for count in (MAX_OUTPUT_BYTES, MAX_OUTPUT_BYTES + 1):
+                with self.subTest(count=count):
+                    child = mock.Mock()
+                    child.stdout = io.BytesIO(b"x" * count)
+                    child.poll.return_value = None
+                    output = root / f"overflow-{count}.json"
+                    with mock.patch.object(module.resource, "setrlimit"):
+                        with mock.patch.object(module.subprocess, "Popen", return_value=child):
+                            with self.assertRaisesRegex(ValueError, "output exceeds"):
+                                capture(output, (str(entrypoint), "doctor", "parsers", "--json"))
+                    self.assertEqual(output.read_bytes(), b"x" * MAX_OUTPUT_BYTES)
+                    self.assertTrue(child.stdout.closed)
+                    child.kill.assert_called_once()
+                    child.wait.assert_called_once_with(timeout=5)
 
-            def tracked_close(descriptor: int) -> None:
-                events.append(("close", descriptor))
-                real_close(descriptor)
-
-            def tracked_limit(resource_id: int, limits: tuple[int, int]) -> None:
-                events.append(("limit", resource_id, limits))
-
-            def tracked_dup2(old: int, new: int, inheritable: bool = True) -> int:
-                events.append(("dup2", old, new, inheritable))
-                return new
-
-            def intercepted_exec(path: object, argv: object, env: object) -> None:
-                events.append(("execve", path, argv, env))
-                raise ExecveCalled(path, argv, env)
-
-            with mock.patch.dict(module.os.environ, environment, clear=True):
-                with mock.patch.object(module.resource, "setrlimit", side_effect=tracked_limit):
-                    with mock.patch.object(module.os, "open", side_effect=tracked_open):
-                        with mock.patch.object(module.os, "close", side_effect=tracked_close):
-                            with mock.patch.object(module.os, "dup2", side_effect=tracked_dup2):
-                                with mock.patch.object(module.os, "execve", side_effect=intercepted_exec):
-                                    with self.assertRaises(ExecveCalled) as raised:
-                                        capture(output, (str(entrypoint), "doctor", "parsers", "--json"))
-
-            outcome = raised.exception
-            self.assertEqual(outcome.path, str(entrypoint))
-            self.assertEqual(tuple(outcome.argv), (str(entrypoint), "doctor", "parsers", "--json"))
-            self.assertEqual(outcome.environment, environment)
-            self.assertEqual(output.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(output.read_bytes(), b"")
-            self.assertEqual(len(opened), 1)
-            with self.assertRaises(OSError):
-                os.fstat(opened[0])
-
-            opened_index = next(index for index, event in enumerate(events) if event[0] == "open")
-            duped_index = next(index for index, event in enumerate(events) if event[0] == "dup2")
-            closed_index = next(index for index, event in enumerate(events) if event[0] == "close")
-            executed_index = next(index for index, event in enumerate(events) if event[0] == "execve")
-            self.assertLess(opened_index, duped_index)
-            self.assertLess(duped_index, closed_index)
-            self.assertLess(closed_index, executed_index)
-            open_event = events[opened_index]
-            self.assertEqual(open_event[3], 0o600)
-            self.assertTrue(open_event[2] & module.os.O_CREAT)
-            self.assertTrue(open_event[2] & module.os.O_EXCL)
-            self.assertTrue(open_event[2] & module.os.O_WRONLY)
-            self.assertTrue(open_event[2] & module.os.O_NOFOLLOW)
-            self.assertEqual(events[duped_index][2:], (1, True))
-            limits = [event[1:] for event in events if event[0] == "limit"]
-            self.assertIn((module.resource.RLIMIT_FSIZE, (MAX_OUTPUT_BYTES, MAX_OUTPUT_BYTES)), limits)
-            self.assertIn((module.resource.RLIMIT_CORE, (0, 0)), limits)
-            self.assertLess(max(index for index, event in enumerate(events) if event[0] == "limit"), opened_index)
+    def test_preserves_policy_exit_and_rejects_operational_or_signal_exit(self):
+        module, capture = load_runtime_capture()
+        with tempfile.TemporaryDirectory(prefix="runtime-capture-test-") as temporary:
+            root = Path(temporary).resolve()
+            entrypoint = make_entrypoint(root)
+            for returned, expected in ((0, 0), (1, 1), (2, 2), (-9, 2), (127, 2)):
+                with self.subTest(returned=returned):
+                    child = mock.Mock()
+                    child.stdout = io.BytesIO(b"[]")
+                    child.wait.return_value = returned
+                    child.poll.return_value = returned
+                    with mock.patch.object(module.resource, "setrlimit"):
+                        with mock.patch.object(module.subprocess, "Popen", return_value=child):
+                            result = capture(root / f"exit-{returned}.json", (str(entrypoint), "doctor", "parsers", "--json"))
+                    self.assertEqual(result, expected)
+                    child.kill.assert_not_called()
 
     def test_all_fixed_probe_paths_are_accepted_by_the_exact_scan_shape(self) -> None:
         module, capture = load_runtime_capture()
@@ -179,8 +142,7 @@ class RuntimeCaptureTests(unittest.TestCase):
                         "--",
                         probe_path,
                     )
-                    outcome = self._expect_exec(module, capture, root / f"probe-{index}.json", command, environment)
-                    self.assertEqual(tuple(outcome.argv), command)
+                    self._expect_exec(module, capture, root / f"probe-{index}.json", command, environment)
 
     def test_refuses_malformed_or_unsafe_commands_before_exec(self) -> None:
         module, capture = load_runtime_capture()
@@ -213,10 +175,9 @@ class RuntimeCaptureTests(unittest.TestCase):
                     output = root / f"invalid-{index}.json"
                     with mock.patch.dict(module.os.environ, environment, clear=True):
                         with mock.patch.object(module.resource, "setrlimit"):
-                            with mock.patch.object(module.os, "dup2"):
-                                with mock.patch.object(module.os, "execve") as execve:
-                                    with self.assertRaises(Exception):
-                                        capture(output, command)
+                            with mock.patch.object(module.subprocess, "Popen") as execve:
+                                with self.assertRaises(Exception):
+                                    capture(output, command)
                     execve.assert_not_called()
                     self.assertFalse(output.exists())
 
@@ -245,10 +206,9 @@ class RuntimeCaptureTests(unittest.TestCase):
                 with self.subTest(output=str(output)):
                     with mock.patch.dict(module.os.environ, environment, clear=True):
                         with mock.patch.object(module.resource, "setrlimit"):
-                            with mock.patch.object(module.os, "dup2"):
-                                with mock.patch.object(module.os, "execve") as execve:
-                                    with self.assertRaises(Exception):
-                                        capture(output, (str(entrypoint), "doctor", "parsers", "--json"))
+                            with mock.patch.object(module.subprocess, "Popen") as execve:
+                                with self.assertRaises(Exception):
+                                    capture(output, (str(entrypoint), "doctor", "parsers", "--json"))
                     execve.assert_not_called()
             self.assertEqual(existing.read_bytes(), b"preserve-existing")
             self.assertEqual(target.read_bytes(), b"preserve-target")
@@ -273,40 +233,35 @@ class RuntimeCaptureTests(unittest.TestCase):
                     with mock.patch.dict(module.os.environ, environment, clear=True):
                         with mock.patch.object(module.resource, "setrlimit"):
                             with mock.patch.object(module.os, "open", side_effect=forbidden_open):
-                                with mock.patch.object(module.os, "dup2"):
-                                    with mock.patch.object(module.os, "execve") as execve:
-                                        with self.assertRaises(Exception):
-                                            capture(output, (str(entrypoint), "doctor", "parsers", "--json"))
+                                with mock.patch.object(module.subprocess, "Popen") as execve:
+                                    with self.assertRaises(Exception):
+                                        capture(output, (str(entrypoint), "doctor", "parsers", "--json"))
                     self.assertEqual(opened, [])
                     execve.assert_not_called()
 
-    def test_closes_capture_descriptor_when_duplication_fails(self) -> None:
+    def test_closes_capture_descriptor_when_child_launch_fails(self):
         module, capture = load_runtime_capture()
         with tempfile.TemporaryDirectory(prefix="runtime-capture-test-") as temporary:
             root = Path(temporary).resolve()
             entrypoint = make_entrypoint(root)
-            output = root / "dup2-error.json"
-            environment = self._environment(root)
+            output = root / "launch-error.json"
             real_open = os.open
-            opened: list[int] = []
+            opened = []
 
-            def tracked_open(path: object, flags: int, mode: int = 0o777) -> int:
-                descriptor = real_open(path, flags, mode)
+            def tracked_open(*args):
+                descriptor = real_open(*args)
                 opened.append(descriptor)
                 return descriptor
 
-            with mock.patch.dict(module.os.environ, environment, clear=True):
-                with mock.patch.object(module.resource, "setrlimit"):
-                    with mock.patch.object(module.os, "open", side_effect=tracked_open):
-                        with mock.patch.object(module.os, "dup2", side_effect=OSError("synthetic dup2 failure")):
-                            with mock.patch.object(module.os, "execve") as execve:
-                                with self.assertRaises(Exception):
-                                    capture(output, (str(entrypoint), "doctor", "parsers", "--json"))
-            execve.assert_not_called()
+            with mock.patch.object(module.resource, "setrlimit"):
+                with mock.patch.object(module.os, "open", side_effect=tracked_open):
+                    with mock.patch.object(module.subprocess, "Popen", side_effect=OSError("launch failed")):
+                        with self.assertRaisesRegex(OSError, "launch failed"):
+                            capture(output, (str(entrypoint), "doctor", "parsers", "--json"))
             self.assertEqual(len(opened), 1)
             with self.assertRaises(OSError):
                 os.fstat(opened[0])
-            self.assertTrue(output.exists())
+            self.assertEqual(output.read_bytes(), b"")
             self.assertEqual(output.stat().st_mode & stat.S_IRWXU, 0o600)
 
 
