@@ -78,12 +78,20 @@ a parsed workflow contract do not establish those hosted guarantees.
 Public native capture fixtures run separately from the pure adapter tests:
 `npm test -- --pool=forks tests/scripts/private-test-integrity-native.test.ts`.
 The test invokes `tools/private-test-integrity/run_native_tests.py`, which uses the
-existing process-group supervisor and validates the canary's five-case receipt,
+existing process-group supervisor and validates the canary's six-case receipt,
 source hashes and scratch cleanup. Omission and failing child/group assertions are
 negative controls. The pure `run_tests.py` keeps its no-child/no-network audit guard.
 These synthetic fixtures need POSIX and an outer deadline; they do not qualify the
 private scanner, its Linux/Python ABI, hosted credentials or escaped descendants.
 The caller owns and removes the scratch `TMPDIR` and result file.
+Capture bounds apply to stdout, so parser dependency writes can exceed the 256 KiB
+capture limit. The dependency-write canary verifies a complete 512 KiB file while
+the overflow canary must remain inconclusive. Runtime qualification requires parse
+errors for every malformed probe; the pinned scanner reports these as advisory
+findings, with Python syntax errors separately blocking. Qualification verifies
+parser detection and does not change scanner policy severity. The language pack
+downloads parser libraries on demand into the isolated HOME; those release assets
+are not covered by the private repository's Git manifest pin.
 
 Before the Node 24 toolchain setup, `scripts/ci-disk-reclaim.sh` records free
 space and enforces a 30 GiB budget. Sufficient runners skip mutation with a

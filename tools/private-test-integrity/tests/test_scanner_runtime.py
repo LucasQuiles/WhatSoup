@@ -219,14 +219,21 @@ class ScannerRuntimeOutputContractTests(unittest.TestCase):
 
         self.assert_rejected(valid_doctor(), [], {"not": "a-list"})
 
-    def test_requires_complete_blocking_parser_errors_for_only_invalid_probes(self) -> None:
+    def test_accepts_detected_parser_errors_with_the_pinned_advisory_policy(self) -> None:
+        invalid = parser_errors_for_invalid_probes()
+        for finding in invalid:
+            finding["severity"] = "advisory"
+        invalid.append({"rule_id": SYNTAX_ERROR, "file_path": INVALID_PATHS[0], "severity": "block"})
+        self.assertIsNone(self.validator()(valid_doctor(), [], invalid, scanner_root=SCANNER_ROOT, python=PYTHON))
+
+    def test_requires_complete_parser_errors_for_only_invalid_probes(self) -> None:
         complete = parser_errors_for_invalid_probes()
         self.assert_rejected(valid_doctor(), [], [])
         self.assert_rejected(valid_doctor(), [], complete[:-1])
 
-        no_block = parser_errors_for_invalid_probes()
-        no_block[0]["severity"] = "advisory"
-        self.assert_rejected(valid_doctor(), [], no_block)
+        unknown_severity = parser_errors_for_invalid_probes()
+        unknown_severity[0]["severity"] = "unknown"
+        self.assert_rejected(valid_doctor(), [], unknown_severity)
 
         wrong_rule = parser_errors_for_invalid_probes()
         wrong_rule[0]["rule_id"] = SYNTAX_ERROR

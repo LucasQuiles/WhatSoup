@@ -90,7 +90,7 @@ def validate_probe_outputs(
         raise BoundaryError("private runtime parser is unavailable")
     observed = {
         row["file_path"] for row in invalid
-        if row["rule_id"] == PARSER_ERROR and row["severity"] == "block"
+        if row["rule_id"] == PARSER_ERROR and row["severity"] in {"block", "advisory"}
     }
     if observed != invalid_paths:
         raise BoundaryError("private runtime negative parser coverage is incomplete")

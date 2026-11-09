@@ -132,6 +132,7 @@ def main(result_path: Path) -> int:
             scratch = Path(temporary)
             os.environ["TMPDIR"] = str(scratch)
             good = make_entrypoint(scratch, "small", "[ \"$1\" = doctor ] && [ \"$2\" = parsers ] && [ \"$3\" = --json ] || exit 2\nprintf '%s\\n' '{\"status\":\"ok\"}'")
+            dependency = make_entrypoint(scratch, "dependency", "head -c 524288 /dev/zero > \"$HOME/parser.so\" || exit 2\nprintf '%s\\n' '{\"status\":\"ok\"}'")
             overflow = make_entrypoint(scratch, "overflow", "printf '{}'\ni=0\nwhile [ \"$i\" -lt 270000 ]; do printf ' '; i=$((i + 1)); done")
             marker = scratch / "malformed-executed"
             malformed = make_entrypoint(scratch, "malformed", "printf executed > \"$HOME/malformed-executed\"\nexit 0")
@@ -172,8 +173,15 @@ def main(result_path: Path) -> int:
             success["validator"] = "accepted"
             cases.append(success)
 
+            dependency_output = scratch / "dependency.json"
+            dependency_case = run_case("dependency-write", dependency, ("doctor", "parsers", "--json"), "pass", dependency_output)
+            require(_read_capture(dependency_output) == {"status": "ok"}, "dependency probe JSON differs")
+            require((scratch / "parser.so").read_bytes() == bytes(524288), "dependency bytes were truncated")
+            dependency_case["dependency_bytes"] = 524288
+            cases.append(dependency_case)
+
             overflow_output = scratch / "overflow.json"
-            overflow_case = run_case("bounded-overflow", overflow, ("doctor", "parsers", "--json"), ("pass", "fail", "inconclusive"), overflow_output)
+            overflow_case = run_case("bounded-overflow", overflow, ("doctor", "parsers", "--json"), "inconclusive", overflow_output)
             overflow_case["status"] = "inconclusive"
             cases.append(overflow_case)
             require(overflow_case["capture_bytes"] == MAX_OUTPUT_BYTES, "overflow did not reach the exact capture limit")

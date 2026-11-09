@@ -35,10 +35,10 @@ def validate_receipt(value: object, pins: dict[str, str], scratch: Path) -> None
     if not isinstance(value, dict):
         raise ValueError("native receipt is not an object")
     cases = value.get("cases")
-    if not isinstance(cases, list) or len(cases) != 5 or not isinstance(cases[1], dict):
+    if not isinstance(cases, list) or len(cases) != 6 or not isinstance(cases[2], dict):
         raise ValueError("native case inventory differs")
-    overflow_conclusion = cases[1].get("conclusion")
-    if overflow_conclusion not in ("pass", "fail", "inconclusive"):
+    overflow_conclusion = cases[2].get("conclusion")
+    if overflow_conclusion != "inconclusive":
         raise ValueError("overflow conclusion differs")
     expected = {
         "status": "passed", "error": None, "scratch_removed": True,
@@ -46,6 +46,7 @@ def validate_receipt(value: object, pins: dict[str, str], scratch: Path) -> None
         "limits": ["outer watchdog required", "escaped descendant containment is not claimed"],
         "cases": [
             {"case": "small-json", "capture_bytes": 16, "conclusion": "pass", "status": "passed", "validator": "accepted"},
+            {"case": "dependency-write", "capture_bytes": 16, "conclusion": "pass", "status": "passed", "dependency_bytes": 524288},
             {"case": "bounded-overflow", "capture_bytes": 262144, "conclusion": overflow_conclusion, "status": "passed", "validator": "refused"},
             {"case": "existing-output", "capture_bytes": 17, "conclusion": "inconclusive", "status": "passed"},
             {"case": "symlink-output", "capture_bytes": 15, "conclusion": "inconclusive", "status": "passed"},
