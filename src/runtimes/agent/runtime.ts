@@ -11579,6 +11579,24 @@ export class AgentRuntime implements Runtime {
           );
         }
       };
+      // F7: a stalled-operation kill already told the user to send the message
+      // again, and the killed request is finalized as failed. Both system
+      // turns below are provider turns the agent may act on: the missed-message
+      // context invites a reply to the window that holds the stopped request,
+      // and the continuation re-runs the stopped work. Either one runs that work
+      // on the agent's own initiative, unbound to any request, so neither is
+      // sent. Nothing is lost: a message that arrived during the backoff already
+      // started its own turn (the inactive-session dispatch spawns in place, and
+      // this attempt then finds ownership moved on). The resume above restores
+      // the conversation, so the user's next message is served normally.
+      if (args.terminationReason === 'stalled_operation') {
+        log.info(
+          { mapKey: activeMapKey, sessionId: args.sessionId },
+          'auto-respawn resumed after a stalled-operation kill — no context or continuation turn sent',
+        );
+        publishRespawnRecovery();
+        return;
+      }
       let contextLease: SystemTurnLeaseToken | null = null;
       let continuationLease: SystemTurnLeaseToken | null = null;
       try {
@@ -11603,19 +11621,6 @@ export class AgentRuntime implements Runtime {
             await this.waitForSystemTurnQuarantine(activeMapKey);
             if (!args.session.getStatus().active) return;
           }
-        }
-        // F7: a stalled-operation kill already told the user to send the
-        // message again, and the killed request is finalized as failed. A
-        // continuation turn would re-run the stopped work on the agent's own
-        // initiative, unbound to any request. The resume above still restores
-        // the conversation, so the user's next message is served normally.
-        if (args.terminationReason === 'stalled_operation') {
-          log.info(
-            { mapKey: activeMapKey, sessionId: args.sessionId },
-            'auto-respawn resumed after a stalled-operation kill — continuation turn not sent',
-          );
-          publishRespawnRecovery();
-          return;
         }
         // #3398: the post-turn gate armed by the pre-crash turn's completed
         // result survives the crash — no new user message has arrived to clear
