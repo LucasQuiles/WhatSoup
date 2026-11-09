@@ -1995,6 +1995,10 @@ export class RuntimeFallbackCoordinator {
       fallbackModel: fallbackEntry.model,
       reason,
       resetAt,
+      // Tier, not the stored window value, decides provenance: the no-window
+      // fallback-tier arm above also stores its resetAt, so only a
+      // primary-tier activation may hand its reset to the user as the ETA.
+      primaryResetAt: failureTier === 'primary' ? (resetAt?.getTime() ?? null) : null,
       activeUntil: until,
       extended: wasActive,
       keyPresent,

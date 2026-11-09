@@ -25,7 +25,8 @@ function bundle(over: Partial<DiagnosticBundle> = {}): DiagnosticBundle {
       { id: 'health-snapshot', ok: true, confidence: 'confirmed', summary: 'healthy' },
       { id: 'account-auth-status', ok: false, confidence: 'confirmed', summary: 'auth required' },
     ],
-    resetAt: 1_781_000_003_600,
+    // Deliberately differs from the ctx primaryResetAt: the bundle is not an ETA source.
+    resetAt: 1_781_000_007_200,
     collectedAt: 1_781_000_000_000,
     ...over,
   };
@@ -36,6 +37,7 @@ function ctx(over: Partial<RenderContext> = {}): RenderContext {
     hasContinuation: true,
     backupCard: 'OpenCode / minimax',
     activeUntil: 1_781_000_009_999,
+    primaryResetAt: 1_781_000_003_600,
     bundle: bundle(),
     formatClock: fixedClock,
     ...over,
@@ -70,21 +72,24 @@ describe('renderUserMessage — content', () => {
     expect(msg).toContain("I'll continue here.");
   });
 
-  it('omits the quota ETA when the reset time is unknown, even with a fallback window', () => {
-    const msg = renderUserMessage('usage-limit', ctx({ bundle: bundle({ resetAt: null }) }));
+  it('omits the quota ETA when the primary reset is unknown, even with a fallback window', () => {
+    const msg = renderUserMessage('usage-limit', ctx({ primaryResetAt: null }));
     expect(msg).not.toContain('until about');
-    // The fallback-window expiry (activeUntil) must not pose as a quota expiry.
+    // Neither the fallback-window expiry (activeUntil) nor the diagnostics
+    // bundle's reset may stand in for the primary's own reset.
     expect(msg).not.toContain('T1781000009999');
+    expect(msg).not.toContain('T1781000007200');
   });
 
-  it('displays the parsed quota reset time when it is known', () => {
+  it('displays the primary reset time when it is known, and only that time', () => {
     const msg = renderUserMessage('usage-limit', ctx());
     expect(msg).toContain('until about T1781000003600');
     expect(msg).not.toContain('T1781000009999');
+    expect(msg).not.toContain('T1781000007200');
   });
 
   it('omits the backup clause and ETA when none are available', () => {
-    const msg = renderUserMessage('rate-limit', ctx({ backupCard: null, activeUntil: null, bundle: bundle({ resetAt: null }) }));
+    const msg = renderUserMessage('rate-limit', ctx({ backupCard: null, activeUntil: null, primaryResetAt: null }));
     expect(msg).not.toContain('Switching to');
     expect(msg).not.toContain('until about');
   });

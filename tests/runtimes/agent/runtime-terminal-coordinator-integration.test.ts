@@ -479,6 +479,7 @@ describe('runtime terminal coordinator integration', () => {
     fallbackModel: undefined,
     reason: 'usage-limit' as const,
     resetAt: null,
+    primaryResetAt: null,
     activeUntil: Date.now() + 60_000,
     extended: false,
     keyPresent: true,

@@ -326,6 +326,7 @@ describe('runtime terminal transaction reachability', () => {
           fallbackModel: undefined,
           reason: 'usage-limit',
           resetAt: null,
+          primaryResetAt: null,
           activeUntil: Date.now() + 60_000,
           extended: false,
           keyPresent: true,

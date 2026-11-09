@@ -27,7 +27,12 @@ export interface RenderContext {
    * resets, so it must never be presented as a quota expiry.
    */
   activeUntil?: number | null;
-  /** Diagnostics gathered for this failure; drives the compact digest + reset ETA. */
+  /**
+   * Quota reset parsed from the PRIMARY provider's own failure (epoch ms), or
+   * null when unknown. The sole ETA source (see ProviderFallbackActivation.primaryResetAt).
+   */
+  primaryResetAt?: number | null;
+  /** Diagnostics gathered for this failure; drives the compact digest only. */
   bundle?: DiagnosticBundle | null;
   /** Injected, deterministic clock formatter (epoch ms → short local time). */
   formatClock: (epochMs: number) => string;
@@ -59,10 +64,10 @@ function toolActivityBlockedClause(): string {
 }
 
 function etaClause(ctx: RenderContext): string {
-  // Only a parsed quota reset may carry an ETA. When resetAt is unknown we say
-  // nothing rather than borrow the fallback-window expiry (activeUntil), which
-  // is not the quota reset and must not be presented as one.
-  const reset = ctx.bundle?.resetAt ?? null;
+  // Only the primary's own parsed reset may carry an ETA. When it is unknown we
+  // say nothing rather than borrow the fallback-window expiry (activeUntil) or
+  // a diagnostics/fallback-entry reset, none of which is the primary's reset.
+  const reset = ctx.primaryResetAt ?? null;
   return reset !== null ? ` until about ${ctx.formatClock(reset)}` : '';
 }
 

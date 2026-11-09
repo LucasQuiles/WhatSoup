@@ -9919,6 +9919,7 @@ export class AgentRuntime implements Runtime {
       hasContinuation,
       backupCard: credentialsMissing ? null : card,
       activeUntil: activation.activeUntil,
+      primaryResetAt: activation.primaryResetAt,
       bundle: null,
       formatClock: formatClockForUser,
       blockedByToolActivity,
