@@ -1,7 +1,17 @@
 import { vi } from 'vitest';
 
-/** A bound on wait steps, so a capture that never settles fails the test instead of hanging it. */
-const MAX_TURNS = 50_000;
+/**
+ * Real-time bound, so a capture that never settles fails here with a named error
+ * before the 10 s test timeout. Vitest 4 fakes hrtime and performance too, so
+ * the real clock is captured when this module loads (static imports run before
+ * any test installs fake timers). A step count is not a usable bound: each fake-timer step
+ * yields one real setImmediate turn, so 50,000 steps lasted about 0.2 s and a
+ * capture whose file I/O waited on a busy libuv threadpool (a loaded test slot)
+ * "did not settle" although it would have.
+ */
+const SETTLE_BUDGET_NS = 8_000_000_000n;
+const realNowNs = process.hrtime.bigint;
+if (vi.isFakeTimers()) throw new Error('auth-bond-capture helper loaded under fake timers; its real clock would be fake');
 
 interface CaptureHolder {
   authSnapshotCapture: Promise<void> | null;
@@ -30,8 +40,11 @@ export async function settleAuthBondCapture(
     if (pending === null) return;
     let settled = false;
     void pending.then(() => { settled = true; });
-    for (let turn = 0; !settled; turn += 1) {
-      if (turn >= MAX_TURNS) throw new Error('auth-bond capture did not settle');
+    const startedNs = realNowNs();
+    while (!settled) {
+      if (realNowNs() - startedNs >= SETTLE_BUDGET_NS) {
+        throw new Error('auth-bond capture did not settle within 8 s of real time');
+      }
       if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(advanceClockMs);
       else await pending;
     }
