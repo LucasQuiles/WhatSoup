@@ -35,7 +35,12 @@
  *   (b) the key store is quiescent — zero tracked operations in flight across a
  *       full macrotask turn (setImmediate), re-checked after each settle, and no
  *       tracked write rejected;
- *   (c) when `creds.me.lid` and `creds.me.id` are set (exactly Baileys' gate at
+ *   (c) key-store tracking is complete: `set` and every other seam the store
+ *       exposes were wrapped. Quiescence in (b) is only as good as what is
+ *       wrapped, and the own-LID markers in (d) cannot show that an unrelated
+ *       write settled, so a refused or missing seam is a failure, never a
+ *       degraded success;
+ *   (d) when `creds.me.lid` and `creds.me.id` are set (exactly Baileys' gate at
  *       socket.js:764, because the creds.update at :761 overwrites `me.lid` with
  *       the success node's attribute), the store holds the writes listed above.
  * The deadline turns an unmet condition into a typed rejection that names it.
@@ -55,6 +60,7 @@ export type PairingCompletionCondition =
   | 'creds-save-pending'
   | 'key-store-write-failed'
   | 'key-store-quiescence'
+  | 'key-store-tracking-incomplete'
   | 'own-lid-state';
 
 export class PairingCompletionError extends Error {
@@ -85,6 +91,11 @@ export interface PairingWriteSnapshot {
   epoch: number;
 }
 
+/**
+ * 'full': `set` and every other present seam are wrapped. 'partial': `set` is
+ * wrapped but another seam was refused. 'none': `set` is not wrapped, so no write
+ * is observable. Only 'full' can reach a successful completion.
+ */
 export type KeyStoreTracking = 'full' | 'partial' | 'none';
 
 export interface PairingWriteTracker {
@@ -104,7 +115,7 @@ export interface PairingWriteTracker {
 }
 
 export interface PairingWriteTrackerOptions {
-  /** A seam that cannot be wrapped. Tracking degrades; it never throws. */
+  /** A seam that cannot be wrapped. Wrapping never throws; the completion gate then fails. */
   onSeamRefused?: (seam: KeyStoreSeam, err: unknown) => void;
 }
 
@@ -122,7 +133,7 @@ export function createPairingWriteTracker(options: PairingWriteTrackerOptions = 
   let keyStoreOpsInFlight = 0;
   let keyStoreWriteFailure: PairingWriteSnapshot['keyStoreWriteFailure'] = null;
   let epoch = 0;
-  let wrappedSeams = 0;
+  let setWrapped = false;
   let refusedSeams = 0;
   let rawGet: KeyStoreRead | null = null;
   const waiters = new Set<() => void>();
@@ -174,8 +185,9 @@ export function createPairingWriteTracker(options: PairingWriteTrackerOptions = 
       // Same in-place wrap and degrade-on-refusal contract as
       // ConnectionManager.invalidatingKeyStore (src/transport/connection.ts). It is
       // mirrored rather than shared so this pairing-only fix leaves the daemon's
-      // source and its runtime pin untouched. A refused seam reduces what this
-      // module can observe; it must not fail the pairing connect.
+      // source and its runtime pin untouched. A refused seam must not fail the
+      // pairing connect itself; it makes the completion gate fail instead, since
+      // writes through that seam would be invisible to the quiescence check.
       const store = keys as Record<string, unknown>;
       const originalGet = store['get'];
       if (typeof originalGet === 'function') {
@@ -188,7 +200,7 @@ export function createPairingWriteTracker(options: PairingWriteTrackerOptions = 
         if (typeof original !== 'function') continue;
         try {
           store[seam] = wrapSeam(original as (...args: unknown[]) => unknown, seam);
-          wrappedSeams += 1;
+          if (seam === 'set') setWrapped = true;
         } catch (err) {
           refusedSeams += 1;
           options.onSeamRefused?.(seam, err);
@@ -227,7 +239,7 @@ export function createPairingWriteTracker(options: PairingWriteTrackerOptions = 
     readUntracked: () => rawGet,
 
     keyStoreTracking(): KeyStoreTracking {
-      if (wrappedSeams === 0) return 'none';
+      if (!setWrapped) return 'none';
       return refusedSeams === 0 ? 'full' : 'partial';
     },
 
@@ -424,6 +436,16 @@ export async function awaitPairingCompletion(options: PairingCompletionOptions):
       await waitOrExpire(timers.yieldMacrotask());
       macrotaskTurns += 1;
       if (tracker.snapshot().epoch !== before.epoch) continue;
+
+      // Everything observable has settled. With incomplete tracking that is not
+      // proof that every write settled, and no later state read can supply it.
+      const tracking = tracker.keyStoreTracking();
+      if (tracking !== 'full') {
+        throw new PairingCompletionError(
+          'key-store-tracking-incomplete',
+          `key-store write tracking is ${tracking}; quiescence cannot be proven`,
+        );
+      }
 
       const plan = planOwnLidState(getCreds());
       if (plan.kind === 'not-applicable') {

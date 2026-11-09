@@ -263,12 +263,6 @@ async function startSocket(): Promise<void> {
       try {
         const completion = await awaitPairingCompletion({ tracker: pairingWrites, getCreds: () => state.creds });
         log.info(completion, 'pairing reached a durable state');
-        if (completion.keyStoreTracking !== 'full') {
-          log.warn(
-            { keyStoreTracking: completion.keyStoreTracking },
-            'key-store quiescence was only partly observable; completion relied on the state check',
-          );
-        }
       } catch (err) {
         const reason = err instanceof PairingCompletionError
           ? err.message

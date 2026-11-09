@@ -8,8 +8,9 @@
  * writes do, and assert on observed state:
  *   - the gate resolves only after a write scheduled via process.nextTick landed;
  *   - every unmet condition becomes a typed rejection that names it;
- *   - a store that refuses wrapping degrades without throwing and the gate then
- *     depends on the own-LID state check.
+ *   - a store that refuses wrapping does not throw at wrap time, and the gate
+ *     then fails with key-store-tracking-incomplete, even when the own-LID
+ *     markers are present and even while an unobserved write is still pending.
  *
  * Not covered here: whether WhatsApp accepts the next connection. That requires
  * a live-line reconnect qualification.
@@ -386,7 +387,7 @@ describe('awaitPairingCompletion', () => {
   });
 
   describe('wrapper refusal', () => {
-    it('degrades without throwing on a frozen store and then relies on the state check', async () => {
+    it('fails on a frozen store even when the own LID markers are present', async () => {
       const { store } = memoryKeyStore(Object.assign({}, ...ownLidWrites()));
       const frozen = Object.freeze({ get: store.get, set: store.set });
       const onSeamRefused = vi.fn();
@@ -397,24 +398,84 @@ describe('awaitPairingCompletion', () => {
       expect(tracker.keyStoreTracking()).toBe('none');
 
       const deadline = controlledDeadline();
-      const report = await awaitPairingCompletion({ tracker, getCreds: lidCreds, timers: deadline.timers });
-      expect(report.keyStoreTracking).toBe('none');
-      expect(report.ownLidState).toBe('verified');
+      const err = await expectCompletionError(
+        awaitPairingCompletion({ tracker, getCreds: lidCreds, timers: deadline.timers }),
+      );
+      expect(err.condition).toBe('key-store-tracking-incomplete');
+      expect(err.detail).toContain('none');
     });
 
-    it('still rejects on a frozen store when the own LID state is missing', async () => {
-      const { store } = memoryKeyStore();
-      const frozen = Object.freeze({ get: store.get, set: store.set });
+    it('fails on a frozen store while an unrelated write is still pending', async () => {
+      const { store, data } = memoryKeyStore(Object.assign({}, ...ownLidWrites()));
+      const unrelated = deferred<void>();
+      const frozen = Object.freeze({
+        get: store.get,
+        set: async (update: KeyData): Promise<void> => {
+          await unrelated.promise;
+          await store.set(update);
+        },
+      });
       const tracker = createPairingWriteTracker({ onSeamRefused: vi.fn() });
       tracker.wrapKeyStore(frozen);
       const deadline = controlledDeadline();
 
-      const gate = awaitPairingCompletion({ tracker, getCreds: lidCreds, timers: deadline.timers });
-      await settleTurns(20);
-      deadline.fire();
+      const pendingWrite = frozen.set({ 'pre-key': { '1': { public: 'x' } } });
+      const err = await expectCompletionError(
+        awaitPairingCompletion({ tracker, getCreds: lidCreds, timers: deadline.timers }),
+      );
+      expect(err.condition).toBe('key-store-tracking-incomplete');
+      // The gate could not see this write, and it had not landed when the gate decided.
+      expect(tracker.snapshot().keyStoreOpsInFlight).toBe(0);
+      expect(data.has('pre-key/1')).toBe(false);
 
-      const err = await expectCompletionError(gate);
-      expect(err.condition).toBe('own-lid-state');
+      unrelated.resolve();
+      await pendingWrite;
+      expect(data.has('pre-key/1')).toBe(true);
+    });
+
+    it('fails without a LID when the store is frozen', async () => {
+      const { store } = memoryKeyStore();
+      const tracker = createPairingWriteTracker({ onSeamRefused: vi.fn() });
+      tracker.wrapKeyStore(Object.freeze({ get: store.get, set: store.set }));
+      const deadline = controlledDeadline();
+
+      const err = await expectCompletionError(
+        awaitPairingCompletion({ tracker, getCreds: () => ({}), timers: deadline.timers }),
+      );
+      expect(err.condition).toBe('key-store-tracking-incomplete');
+    });
+
+    it('fails when only some seams could be wrapped', async () => {
+      const { store } = memoryKeyStore(Object.assign({}, ...ownLidWrites()));
+      const partly: Record<string, unknown> = { set: store.set };
+      Object.defineProperty(partly, 'get', { value: store.get, writable: false, enumerable: true });
+      const onSeamRefused = vi.fn();
+      const tracker = createPairingWriteTracker({ onSeamRefused });
+      tracker.wrapKeyStore(partly);
+      expect(onSeamRefused.mock.calls.map(([seam]) => seam)).toEqual(['get']);
+      expect(tracker.keyStoreTracking()).toBe('partial');
+      const deadline = controlledDeadline();
+
+      const err = await expectCompletionError(
+        awaitPairingCompletion({ tracker, getCreds: lidCreds, timers: deadline.timers }),
+      );
+      expect(err.condition).toBe('key-store-tracking-incomplete');
+      expect(err.detail).toContain('partial');
+    });
+
+    it('fails when the store was never wrapped or has no set', async () => {
+      const unwrapped = createPairingWriteTracker();
+      expect(unwrapped.keyStoreTracking()).toBe('none');
+      const noSet = track({ get: async () => ({}) });
+      expect(noSet.keyStoreTracking()).toBe('none');
+
+      for (const tracker of [unwrapped, noSet]) {
+        const deadline = controlledDeadline();
+        const err = await expectCompletionError(
+          awaitPairingCompletion({ tracker, getCreds: () => ({}), timers: deadline.timers }),
+        );
+        expect(err.condition).toBe('key-store-tracking-incomplete');
+      }
     });
   });
 
