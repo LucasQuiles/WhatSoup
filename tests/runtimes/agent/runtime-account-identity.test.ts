@@ -73,6 +73,7 @@ const MINUTE = 60_000;
 const START = 1_790_000_000_000;
 const EXPECTED = `sha256:${'a'.repeat(64)}`;
 const USABLE: PrimaryModelUsabilityResult = { status: 'usable', provider: 'claude-cli', model: null };
+const TIMEOUT: PrimaryModelUsabilityResult = { status: 'timeout', provider: 'claude-cli', model: null, reason: 'probe-timeout' };
 
 type ProbeTrigger = 'startup' | 'manual' | 'periodic';
 type IdentityState = RuntimeState & {
@@ -136,11 +137,11 @@ describe('AgentRuntime — account identity rides the usability probe seam', () 
     return { runtime, state, snapshot, identity, reasons };
   }
 
-  async function runProbe(state: IdentityState, trigger: ProbeTrigger): Promise<void> {
+  async function runProbe(state: IdentityState, trigger: ProbeTrigger, result = USABLE): Promise<void> {
     state.fallback.schedulePrimaryModelUsabilityProbe(trigger);
     await settle();
     expect(probeControl.resolvers).toHaveLength(1);
-    probeControl.resolvers.pop()!(USABLE);
+    probeControl.resolvers.pop()!(result);
     await settle();
   }
 
@@ -282,12 +283,16 @@ describe('AgentRuntime — account identity rides the usability probe seam', () 
     expect(reasons()).toContain('credential_identity_unverifiable');
   });
 
-  it('keeps the scheduled identity grace while a periodic probe is pending, then expires', async () => {
+  it.each([
+    { trigger: 'startup' as const, result: USABLE, dueMinutes: 33 },
+    { trigger: 'periodic' as const, result: TIMEOUT, dueMinutes: 5 },
+  ])('keeps identity grace while the $dueMinutes-minute periodic probe is pending, then expires', async ({ trigger, result, dueMinutes }) => {
     const verify = vi.fn(async (_expected: string | null) => verification({ checkedAt: Date.now() }));
     const { state, identity, reasons, snapshot } = build({ expectedAccountDigest: EXPECTED, accountIdentityVerify: verify });
-    await runProbe(state, 'startup');
-    state.fallback.scheduleNextPeriodicUsabilityProbe();
-    await vi.advanceTimersByTimeAsync(33 * MINUTE);
+    await runProbe(state, trigger, result);
+    if (trigger === 'startup') state.fallback.scheduleNextPeriodicUsabilityProbe();
+    expect(state.periodicUsabilityProbeDueAt).toBe(START + dueMinutes * MINUTE);
+    await vi.advanceTimersByTimeAsync(dueMinutes * MINUTE);
     expect(probeControl.resolvers).toHaveLength(1);
     expect(state.periodicUsabilityProbeTimer).toBeNull();
     expect((snapshot().details as Record<string, unknown>).turnCapability).toMatchObject({ periodicProbeExpected: true });
@@ -316,6 +321,20 @@ describe('AgentRuntime — account identity rides the usability probe seam', () 
     await settle();
     expect(identity()).toMatchObject({ status: 'mismatch', stale: false });
     expect(reasons()).toContain('credential_identity_mismatch');
+  });
+
+  it('a turn success while a timeout retry is pending does not age the identity receipt early', async () => {
+    const verify = vi.fn(async (_expected: string | null) => verification({ checkedAt: Date.now() }));
+    const { state, identity, reasons } = build({ expectedAccountDigest: EXPECTED, accountIdentityVerify: verify });
+    // Periodic probe times out: the retry is due in 5 min, and the identity
+    // receipt is stamped now. Its real deadline is the retry plus grace.
+    await runProbe(state, 'periodic', TIMEOUT);
+    expect(identity()).toMatchObject({ status: 'match', stale: false });
+    vi.advanceTimersByTime(4 * MINUTE);
+    // The turn moves the usability checkedAt, not the identity receipt.
+    state.recordTurnCapabilitySuccess(true);
+    expect(identity()).toMatchObject({ status: 'match', stale: false });
+    expect(reasons()).not.toContain('credential_identity_unverifiable');
   });
 
   it('req-03: the identity path never reaches the credential heal seam, on any outcome', async () => {
