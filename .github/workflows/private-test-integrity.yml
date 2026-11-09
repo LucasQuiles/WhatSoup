@@ -34,6 +34,7 @@ jobs:
 
       - name: Create owned scanner scratch
         id: scratch
+        timeout-minutes: 1
         shell: bash
         run: |
           set -euo pipefail
@@ -42,6 +43,43 @@ jobs:
           test "$(realpath "$scanner_root")" = "$scanner_root"
           printf 'root=%s\n' "$scanner_root" >> "$GITHUB_OUTPUT"
           printf 'checkout=%s/private-checkout\n' "${scanner_root#"$GITHUB_WORKSPACE"/}" >> "$GITHUB_OUTPUT"
+          sudo -n mount -t tmpfs -o "size=512m,nr_inodes=16384,nodev,nosuid,mode=0700,uid=$(id -u),gid=$(id -g)" tmpfs "$scanner_root"
+          test "$(stat -f --format=%T "$scanner_root")" = tmpfs
+          python3 -I -S -B - "$scanner_root" <<'PY'
+          import errno
+          import os
+          from pathlib import Path
+          import sys
+
+          root = Path(sys.argv[1])
+          filesystem = os.statvfs(root)
+          limit = 512 * 1024 * 1024
+          if not 0 < filesystem.f_blocks * filesystem.f_frsize <= limit or not 0 < filesystem.f_files <= 16384:
+              raise SystemExit("scanner filesystem budget is unavailable")
+          probe = root / ".budget-probe"
+          chunk = bytes(1024 * 1024)
+          written = 0
+          try:
+              with probe.open("xb", buffering=0) as output:
+                  try:
+                      while written <= limit:
+                          written += output.write(chunk)
+                  except OSError as error:
+                      if error.errno != errno.ENOSPC:
+                          raise
+                  else:
+                      raise SystemExit("scanner filesystem accepted an over-budget write")
+          finally:
+              probe.unlink()
+          with probe.open("xb") as output:
+              output.write(chunk)
+          try:
+              if probe.read_bytes() != chunk:
+                  raise SystemExit("scanner filesystem did not recover after quota rejection")
+          finally:
+              probe.unlink()
+          print("scanner scratch: 512 MiB and 16384 inodes; over-budget write rejected; recovery passed")
+          PY
 
       # workflow_run supplies the default-branch revision; no candidate checkout is used.
       - name: Read exact trusted driver files
@@ -171,7 +209,10 @@ jobs:
           [[ "$SCANNER_ROOT" == "$GITHUB_WORKSPACE"/.private-scanner.* ]]
           test "$(dirname "$SCANNER_ROOT")" = "$GITHUB_WORKSPACE"
           test "$(realpath "$SCANNER_ROOT")" = "$SCANNER_ROOT"
-          rm -rf -- "$SCANNER_ROOT"
+          if mountpoint -q -- "$SCANNER_ROOT"; then
+            sudo -n umount -- "$SCANNER_ROOT"
+          fi
+          rmdir -- "$SCANNER_ROOT"
           test ! -e "$SCANNER_ROOT"
 
       - name: Upload private integrity receipt

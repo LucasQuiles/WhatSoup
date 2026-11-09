@@ -217,6 +217,35 @@ it('provides an uncancelled Quality producer for tag receipt qualification', () 
   expect(workflow.concurrency['cancel-in-progress']).toBe("${{ github.event_name != 'merge_group' && !startsWith(github.ref, 'refs/tags/') }}");
 });
 
+it.each(['scratch', 'cleanup'])('refuses a failed filesystem operation during %s', (stepId) => {
+  const workflow = parse(readFileSync(join(repoRoot, '.github/workflows/private-test-integrity.yml'), 'utf8'));
+  const step = workflow.jobs['private-scanner'].steps.find((item: { id?: string }) => item.id === stepId);
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'private-scanner-filesystem-')));
+  const workspace = join(scratch, 'workspace');
+  const scannerRoot = join(workspace, '.private-scanner.fixture');
+  try {
+    mkdirSync(scannerRoot, { recursive: true });
+    writeFileSync(join(scannerRoot, 'preserved'), 'owned scanner data');
+    writeFileSync(join(scratch, 'sudo'), '#!/bin/sh\nprintf "%s\\n" "$*" >> "$OPERATION_LOG"\nexit 23\n');
+    writeFileSync(join(scratch, 'mountpoint'), '#!/bin/sh\nexit 0\n');
+    chmodSync(join(scratch, 'sudo'), 0o700);
+    chmodSync(join(scratch, 'mountpoint'), 0o700);
+    const result = spawnSync('/bin/bash', ['-c', step.run], {
+      env: { PATH: `${scratch}:${process.env.PATH}`, GITHUB_WORKSPACE: workspace,
+        GITHUB_OUTPUT: join(scratch, 'output'), SCANNER_ROOT: scannerRoot,
+        OPERATION_LOG: join(scratch, 'operations'), TMPDIR: scratch },
+      encoding: 'utf8', timeout: 10_000, shell: false,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status, result.stderr).toBe(23);
+    expect(readFileSync(join(scratch, 'operations'), 'utf8')).toContain(stepId === 'scratch' ? 'mount -t tmpfs' : 'umount --');
+    expect(readFileSync(join(scannerRoot, 'preserved'), 'utf8')).toBe('owned scanner data');
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
 it('refuses an old curl before trusted-driver downloads and executes the supported bootstrap path', () => {
   const workflow = parse(readFileSync(join(repoRoot, '.github/workflows/private-test-integrity.yml'), 'utf8'));
   const bootstrap = workflow.jobs['private-scanner'].steps.find((step: { id?: string }) => step.id === 'trusted-driver');
