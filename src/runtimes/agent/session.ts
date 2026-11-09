@@ -1535,6 +1535,7 @@ export class SessionManager {
         isolation: this.providerProcessIsolation,
       }).then((child) => {
         this.trackChildGeneration(child, generation);
+        this.captureChildTreeAuthority(child);
         return child as ChildProcessWithoutNullStreams;
       });
     }

@@ -217,6 +217,56 @@ describe('SessionManager host work admission', () => {
     expect(session.getStatus()).toMatchObject({ active: false, providerTerminated: true });
   });
 
+  it.each(['boundary failure', 'start invalidation'] as const)('reaps an isolated child through real authority checks after %s', async (mode) => {
+    const reaper = await vi.importActual<typeof import('../../../src/runtimes/agent/process-tree.ts')>(
+      '../../../src/runtimes/agent/process-tree.ts',
+    );
+    vi.mocked(killSessionTree).mockImplementationOnce(reaper.killSessionTree);
+    const child = makeChild();
+    let alive = true;
+    child.kill.mockImplementation(() => { alive = false; return true; });
+    processObservation.census.mockImplementation(() => [
+      'PID PPID PGID STARTED COMMAND',
+      `${process.pid} 1 ${process.pid} Fri Jul 10 08:00:00 2026 vitest-parent`,
+      ...(alive ? [`${child.pid} ${process.pid} ${child.pid} Fri Jul 10 08:00:00 2026 provider-root`] : []),
+    ].join('\n'));
+    let finishIsolation!: () => void;
+    processIsolation.launch.mockImplementationOnce(() => new Promise((resolve) => {
+      finishIsolation = () => resolve(child);
+    }));
+    const session = makeSession(mode === 'boundary failure' ? 'opencode-cli' : 'claude-cli', {
+      providerProcessIsolation: {
+        controllerUid: 501,
+        controllerGid: 20,
+        workerUid: 502,
+        workerGid: 502,
+        launcherPath: '/usr/local/libexec/whatsoup-agent-isolation-launcher',
+        launcherSha256: 'a'.repeat(64),
+        policyPath: '/etc/whatsoup/agent-isolation.policy',
+        policySha256: 'b'.repeat(64),
+        homeDir: '/var/lib/whatsoup-agent',
+        configHome: '/var/lib/whatsoup-agent/.config',
+        dataHome: '/var/lib/whatsoup-agent/.local/share',
+        protectedPaths: ['/var/db/whatsoup/transport-authority.bearer'],
+      },
+      providerCanaryAdmission: verifiedCanaryAdmission(),
+    });
+    await session.spawnSession();
+    const turn = mode === 'boundary failure'
+      ? session.sendTurnAtProviderBoundary('obsolete turn', () => { throw new Error('boundary invalidated'); })
+      : session.sendTurn('obsolete turn');
+    void turn.catch(() => {});
+    await vi.waitFor(() => expect(processIsolation.launch).toHaveBeenCalledOnce());
+    const reset = mode === 'start invalidation' ? session.handleNew() : Promise.resolve();
+    finishIsolation();
+    const [resetResult, turnResult] = await Promise.allSettled([reset, turn]);
+
+    expect(alive).toBe(false);
+    expect(resetResult.status).toBe('fulfilled');
+    expect(turnResult.status).toBe('rejected');
+    expect(admission.spawn).not.toHaveBeenCalled();
+  });
+
   it('routes spawn-per-turn providers through the checked UID/GID launcher instead of the host-admission or direct-spawn path', async () => {
     const child = makeChild();
     processIsolation.launch.mockResolvedValueOnce(child);
