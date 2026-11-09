@@ -55,8 +55,8 @@ def capture(output: Path, command: tuple[str, ...]) -> int:
 
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    # A process-wide file limit also truncates the scanner's parser libraries.
-    # Bound this stream while dependency writes retain the runner's disk policy.
+    # Parser libraries need a larger budget than stdout. The trusted workflow
+    # bounds their aggregate scratch allocation with a separate tmpfs mount.
     with os.fdopen(descriptor, "wb") as destination:
         child = subprocess.Popen(
             command, env=dict(os.environ), stdin=subprocess.DEVNULL,

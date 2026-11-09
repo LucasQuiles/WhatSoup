@@ -86,7 +86,14 @@ private scanner, its Linux/Python ABI, hosted credentials or escaped descendants
 The caller owns and removes the scratch `TMPDIR` and result file.
 Capture bounds apply to stdout, so parser dependency writes can exceed the 256 KiB
 capture limit. The dependency-write canary verifies a complete 512 KiB file while
-the overflow canary must remain inconclusive. Runtime qualification requires parse
+the overflow canary must remain inconclusive. The trusted Linux workflow mounts
+owned scratch with a 512 MiB aggregate allocation limit and 16384-inode limit.
+Before downloading drivers or private code, it verifies the actual filesystem,
+requires an over-budget write to fail with ENOSPC, and verifies a normal write
+after recovery. Mount, quota-probe and unmount failures fail the job. Cleanup
+unmounts this exact scratch before removing the empty mountpoint. Local synthetic
+capture tests do not establish this hosted filesystem limit.
+Runtime qualification requires parse
 errors for every malformed probe; the pinned scanner reports these as advisory
 findings, with Python syntax errors separately blocking. Qualification verifies
 parser detection and does not change scanner policy severity. The language pack
