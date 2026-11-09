@@ -119,6 +119,11 @@ import {
   type CheckpointAdoption,
 } from './checkpoint-adoption.ts';
 import { checkpointCompletedIdentityIsAdmissionRejected } from './admission-rejected-checkpoint.ts';
+import {
+  stalledOperationResumeHoldApplies,
+  withStalledOperationResumeHold,
+  withoutStalledOperationResumeHold,
+} from './stalled-operation-resume-hold.ts';
 import { reconcileResidentSessionStatuses } from './resident-session-reconciler.ts';
 import {
   ensureFallbackStateSchema,
@@ -2174,9 +2179,55 @@ export class AgentRuntime implements Runtime {
     // (workspaceKey = toConversationKey), while in canonical-JID mode it is a
     // JID that must be reduced. Reconcile so teardown reaches these maps and
     // they cannot grow unbounded (LEAK-15).
-    const conversationKey = mapKey.includes('@') ? toConversationKey(mapKey) : mapKey;
+    const conversationKey = this.checkpointConversationKey(mapKey);
     this.lastSpawnRouteProvider.delete(conversationKey);
     this.lastPinBlockNotice.delete(conversationKey);
+  }
+
+  /** The session_checkpoints key for a per-chat map key (sandbox map keys already are one). */
+  private checkpointConversationKey(mapKey: string): string {
+    return mapKey.includes('@') ? toConversationKey(mapKey) : mapKey;
+  }
+
+  /**
+   * F7: save the stalled-operation kill on the checkpoint of the killed
+   * provider session, so a service restart does not continue the work either
+   * (stalled-operation-resume-hold.ts). Only an existing checkpoint for that
+   * exact session is marked; a missing or moved checkpoint has nothing to hold.
+   */
+  private recordStalledOperationResumeHold(mapKey: string, sessionId: string): void {
+    const durability = this.durability;
+    if (!durability || typeof durability.getSessionCheckpoint !== 'function') return;
+    const conversationKey = this.checkpointConversationKey(mapKey);
+    try {
+      const checkpoint = durability.getSessionCheckpoint(conversationKey);
+      if (!checkpoint || checkpoint.session_id !== sessionId) {
+        log.warn({ mapKey, sessionId }, 'stalled-operation resume hold not recorded — no checkpoint for the killed session');
+        return;
+      }
+      durability.upsertSessionCheckpoint(conversationKey, {
+        watchdogState: withStalledOperationResumeHold(checkpoint.watchdog_state, sessionId),
+      });
+    } catch (err) {
+      log.warn({ err, mapKey, sessionId }, 'failed to record the stalled-operation resume hold');
+    }
+  }
+
+  /** F7: the user's next request releases the hold; later restarts resume normally. */
+  private clearStalledOperationResumeHold(mapKey: string): void {
+    const durability = this.durability;
+    if (!durability || typeof durability.getSessionCheckpoint !== 'function') return;
+    const conversationKey = this.checkpointConversationKey(mapKey);
+    try {
+      const watchdogState = withoutStalledOperationResumeHold(
+        durability.getSessionCheckpoint(conversationKey)?.watchdog_state,
+      );
+      if (watchdogState === null) return;
+      durability.upsertSessionCheckpoint(conversationKey, { watchdogState });
+      log.info({ mapKey }, 'stalled-operation resume hold cleared by the next request');
+    } catch (err) {
+      log.warn({ err, mapKey }, 'failed to clear the stalled-operation resume hold');
+    }
   }
 
   /** Clear resources owned by one child generation while preserving its logical owner. */
@@ -4291,6 +4342,16 @@ export class AgentRuntime implements Runtime {
           // Small delay to let the init event propagate (confirms resume succeeded)
           await sleep(MS_PER_SECOND);
           if (!session.getStatus().active) return; // resume failed, onResumeFailed handles it
+          // F7: the last thing on this session was a stalled-operation kill.
+          // The user was told to send the message again, so the resumed
+          // session waits for that message: no context or continuation turn.
+          if (stalledOperationResumeHoldApplies(full.watchdog_state, full.session_id)) {
+            log.info(
+              { chatJid, sessionId: full.session_id },
+              'proactive resume after a stalled-operation kill — no context or continuation turn sent',
+            );
+            return;
+          }
           try {
             // Inject messages that arrived while the service was down.
             // Without this, the agent resumes with stale context — it has no
@@ -6288,6 +6349,7 @@ export class AgentRuntime implements Runtime {
 
     // Clear post-turn gate — legitimate new user turn begins
     this.postTurnGate.delete(mapKey);
+    if (systemTurnLease === undefined) this.clearStalledOperationResumeHold(mapKey);
 
     // When sandboxPerChat=true maps are keyed by workspaceKey, not raw chatJid
     // Store the turn text so it can be replayed if a session resume fails
@@ -11289,6 +11351,10 @@ export class AgentRuntime implements Runtime {
         info,
         crashContext !== undefined || journaledCrashSeq !== undefined,
       );
+    }
+
+    if (info?.terminationReason === 'stalled_operation' && info.sessionId) {
+      this.recordStalledOperationResumeHold(currentMapKey, info.sessionId);
     }
 
     // Auto-respawn: if we haven't hit the crash limit, try to resume the session
