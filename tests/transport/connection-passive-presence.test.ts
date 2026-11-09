@@ -42,22 +42,11 @@ import {
   effectiveClientRegistry,
   resolveEffectiveClientEvidence,
 } from '../../src/transport/effective-client-receipt.ts';
-
-function mockSocket() {
-  return {
-    ev: { process: vi.fn() },
-    sendMessage: vi.fn().mockResolvedValue({ key: { id: 'wa-msg-1' } }),
-    query: vi.fn().mockResolvedValue({}),
-    end: vi.fn(),
-    sendPresenceUpdate: vi.fn().mockResolvedValue(undefined),
-    ws: { isOpen: true },
-    user: { id: '15551230004:1@s.whatsapp.net', name: 'WhatSoup' },
-  };
-}
+import { makeMockSocket } from '../helpers/baileys-mock.ts';
 
 async function connectAs(instanceType: 'passive' | 'chat' | 'agent') {
   mockConfig.instanceType = instanceType;
-  vi.mocked(makeWASocket).mockReturnValue(mockSocket() as any);
+  vi.mocked(makeWASocket).mockReturnValue(makeMockSocket().mockSock as any);
   await new ConnectionManager().connect();
   expect(makeWASocket).toHaveBeenCalledTimes(1);
   const socketConfig = vi.mocked(makeWASocket).mock.calls[0]![0] as Record<string, unknown>;

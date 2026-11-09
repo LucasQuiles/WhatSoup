@@ -25,11 +25,14 @@
 // (`lib/Defaults/index.js`).
 //
 // PRECISELY: the two paths are independently maintained and CAN diverge on any
-// field, with nothing detecting it. They are not currently known to diverge for
-// `q` — the runtime config defaults `generateHighQualityLinkPreview` to false, `q`
-// does not override it, and the pairing CLI passes false, so on the one field that
-// differs in FORM the observed values AGREE. The defect is the unreconciled
-// structure plus the total absence of a record, not a demonstrated difference.
+// field, with nothing detecting it. Two fields differ in FORM. On
+// `generateHighQualityLinkPreview` the observed values agree for `q`: the runtime
+// config defaults it to false, `q` does not override it, and the pairing CLI passes
+// false. On `markOnlineOnConnect` the values differ BY DESIGN for passive lines:
+// the pairing CLI inherits `true` (library_default) and the runtime passes `false`
+// (explicit), so the phone keeps its notifications once the daemon runs. Treat that
+// difference as expected, not as evidence of a different client. The original
+// defect was the unreconciled structure plus the total absence of a record.
 //
 // DESIGN RULE, learned from the sock-tool factory defect fixed earlier the same
 // day: the receipt is derived FROM the very object handed to `makeWASocket`, never

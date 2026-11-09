@@ -1120,7 +1120,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         // A passive line is a person's own number. While the account is online,
         // the phone app stops showing notifications, so a passive line connects
         // as unavailable. This sets presence only; delivery and linking are
-        // unaffected. Chat and agent lines stay online (the library default).
+        // unaffected. Chat and agent lines stay online, matching the library default.
         markOnlineOnConnect: config.instanceType !== 'passive',
       };
       // Record AFTER makeWASocket returns. Recording first would log an ATTEMPTED
