@@ -481,9 +481,28 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
     mockConfig.toolUpdateMode = 'full';
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.runOnlyPendingTimers();
     vi.useRealTimers();
+    // A case's work must end with the case. Teardown fires its pending fake
+    // timers; whatever they start and then park on a real timer (the respawn's
+    // settle sleep) wakes during a LATER case and drives that case's shared
+    // mocks — on CI it consumed another case's provider-boundary gate and
+    // cleared its alert early. Fail the case that leaked, not its victim.
+    const realSetTimeout = globalThis.setTimeout;
+    const escaped: ReturnType<typeof setTimeout>[] = [];
+    globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+      const handle = realSetTimeout(...args);
+      escaped.push(handle);
+      return handle;
+    }) as unknown as typeof setTimeout;
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
+    for (const handle of escaped) clearTimeout(handle);
+    expect(escaped, 'work started by this case outlived it and armed a real timer').toHaveLength(0);
   });
 
   describe('minimal-mode delivery boundaries', () => {
