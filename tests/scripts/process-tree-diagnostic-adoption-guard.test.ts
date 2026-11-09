@@ -740,8 +740,8 @@ describe('process-tree diagnostic adoption live-tree ratchet', () => {
       session_shutdown: 1,
       stale_session_sweep: 1,
     });
-    // This non-vacuous live-tree scan takes about 7s in isolation and 39.5s in
-    // the four-worker hosted full suite. A finite 120s local bound keeps a hang
+    // This non-vacuous live-tree scan took 84s in the hosted Node 24 full suite.
+    // A finite 120s local bound keeps a hang
     // detector with measured contention headroom; assertions remain unchanged.
   }, 120_000);
 
@@ -749,7 +749,7 @@ describe('process-tree diagnostic adoption live-tree ratchet', () => {
     const output = execFileSync(
       process.execPath,
       ['--disable-warning=ExperimentalWarning', '--experimental-strip-types', GUARD, '--format', 'json', '--verbose'],
-      { cwd: REPO_ROOT, encoding: 'utf8', timeout: 90_000, killSignal: 'SIGKILL' },
+      { cwd: REPO_ROOT, encoding: 'utf8', timeout: 110_000, killSignal: 'SIGKILL' },
     );
     const parsed = JSON.parse(output) as Record<string, unknown>;
     expect(parsed).toMatchObject({
@@ -764,8 +764,9 @@ describe('process-tree diagnostic adoption live-tree ratchet', () => {
       },
       calls_examined: 3,
     });
-    // This CLI also scans the full tree; hosted Node 24 took 11s. Bound the
-    // synchronous child separately so a hung scan cannot block the test worker.
+    // Hosted Node 24 took 11s here and 84s in the in-process production source
+    // scan. A 110s child deadline allows contention headroom below the 120s test
+    // limit; SIGKILL prevents a stalled synchronous child blocking the worker.
   }, 120_000);
 
   it('advertises every observer and traversal failure kind in its schema', () => {
