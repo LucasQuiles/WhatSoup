@@ -55,6 +55,7 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
     trackToolStart: vi.fn((_toolId: string) => {}),
     trackToolEnd: vi.fn((_toolId: string) => {}),
     getDbRowId: vi.fn((): number | null => null),
+    getProcessTreeTerminationLease: vi.fn(() => null),
     setDurability: vi.fn((_durability: unknown) => {}),
     bindGenerationOwnership: vi.fn((_resolve: () => unknown) => {}),
     getProviderId: vi.fn((): string => 'claude-cli'),
