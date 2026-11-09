@@ -3,8 +3,9 @@
  *
  * String limits are UTF-8 bytes. The limits protect admission, persisted-row
  * revalidation, child-process IPC, and the isolated `poll.sqlite` executor.
- * `poll.pinecone` is the only current provider-backed trigger; `top_k` bounds
- * its remote work. The other current kinds have no provider-spend dimension.
+ * `top_k` bounds remote query work for `poll.pinecone`. Scheduled agent jobs
+ * can also incur provider spend through the agent runtime's optional budget;
+ * these trigger limits do not impose a mandatory token or currency-spend ceiling.
  */
 export const TRIGGER_BUDGETS = {
   maxTextBytes: 4_096,
