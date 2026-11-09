@@ -9,7 +9,7 @@
  * when the link opens again, so the next outage gets a fresh card.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { usePerTestBotErrorsMarkerIsolation } from '../../tests/setup/bot-errors-vitest-isolation.ts';
 
@@ -101,10 +101,25 @@ vi.mock('../../src/lib/emit-alert.ts', () => ({
 
 import { makeWASocket } from '@whiskeysockets/baileys';
 import { ConnectionManager } from '../../src/transport/connection.ts';
-import { DEAD_LINK_ALERT_SOURCE, DEAD_LINK_GRACE_MS, DeadLinkAlarm } from '../../src/transport/dead-link-alert.ts';
+import {
+  DEAD_LINK_ALERT_SOURCE,
+  DEAD_LINK_CLEAR_RETRY_MS,
+  DEAD_LINK_GRACE_MS,
+  DeadLinkAlarm,
+} from '../../src/transport/dead-link-alert.ts';
 
 const TEN_MINUTES = 10 * 60_000;
 const OUTAGE_START = '2026-11-09T05:00:00.000Z';
+const MARKER = join(testDataRoot, 'dead-link-outage.json');
+const LOGGED_OUT = { statusCode: 401, reason: 'loggedOut', classification: 'uninspected_401_conservative_exit' };
+
+function readMarker(): Record<string, unknown> {
+  return JSON.parse(readFileSync(MARKER, 'utf8')) as Record<string, unknown>;
+}
+
+function silentLog() {
+  return { warn: vi.fn(), error: vi.fn() };
+}
 
 function makeMockSocket() {
   let evProcessCallback: ((events: Record<string, unknown>) => void) | undefined;
@@ -175,6 +190,8 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date(OUTAGE_START));
   vi.clearAllMocks();
+  emitAlertMock.mockImplementation(() => true);
+  clearAlertSourceMock.mockImplementation(() => true);
   rmSync(testRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 });
 });
 
@@ -332,13 +349,86 @@ describe('dead-link alert', () => {
     expect(existsSync(join(testDataRoot, 'dead-link-outage.json'))).toBe(true);
 
     await vi.advanceTimersByTimeAsync(15 * 60_000);
-    sockets.at(-1)!.emit(closeEvent(401));
-    // The pending clear is retried before the new outage starts.
+    // The pending clear was retried while the link stayed open.
     expect(deadLinkClears()).toHaveLength(2);
+    expect(existsSync(join(testDataRoot, 'dead-link-outage.json'))).toBe(false);
+    sockets.at(-1)!.emit(closeEvent(401));
     await vi.advanceTimersByTimeAsync(TEN_MINUTES);
     expect(deadLinkAlerts()).toHaveLength(2);
     expect(deadLinkAlerts()[1]![2]).toContain('2026-11-09T05:25:');
     await relinked.shutdown();
+  });
+
+  it('asks for an outbox-backed clear, so a legacy helper that merely accepted it does not end the outage', async () => {
+    // emit-alert's contract (tests/lib/emit-alert.test.ts): when the outbox
+    // write fails, the default clear spawns the legacy helper and reports
+    // success on its acceptance alone; requireDurableOutbox reports failure.
+    clearAlertSourceMock.mockImplementation((...args: unknown[]) =>
+      (args[4] as { requireDurableOutbox?: boolean } | undefined)?.requireDurableOutbox !== true);
+    const alarm = new DeadLinkAlarm({ instance: 'dead-link-bot', dataRoot: testDataRoot, log: silentLog() as never });
+    alarm.onLoggedOut(LOGGED_OUT);
+    await vi.advanceTimersByTimeAsync(TEN_MINUTES);
+    expect(deadLinkAlerts()).toHaveLength(1);
+
+    alarm.onConnectionOpen();
+    expect(deadLinkClears()).toHaveLength(1);
+    expect(deadLinkClears()[0]![4]).toEqual({ requireDurableOutbox: true });
+    // The dispatcher has not seen a clear: the recovered marker stays.
+    expect(readMarker()).toMatchObject({ outageStartedAt: OUTAGE_START, linkOpenedAt: '2026-11-09T05:10:00.000Z' });
+
+    // The next outage is held, not folded into the still-open incident.
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    alarm.onLoggedOut(LOGGED_OUT);
+    await vi.advanceTimersByTimeAsync(TEN_MINUTES);
+    expect(deadLinkAlerts()).toHaveLength(1);
+    expect(readMarker()).toMatchObject({ outageStartedAt: OUTAGE_START });
+
+    // The outbox recovers: the clear is queued, then the held outage raises its card.
+    clearAlertSourceMock.mockImplementation(() => true);
+    // +1: the overdue card is a 0 ms timer armed inside the retry, which fake
+    // timers run 1 ms later.
+    await vi.advanceTimersByTimeAsync(DEAD_LINK_CLEAR_RETRY_MS + 1);
+    expect(deadLinkAlerts()).toHaveLength(2);
+    expect(deadLinkAlerts()[1]![2]).toContain('2026-11-09T05:15:00.000Z');
+    alarm.dispose();
+  });
+
+  it('a repeated clear failure keeps the recovered marker and holds the next outage, across a restart', async () => {
+    const first = new DeadLinkAlarm({ instance: 'dead-link-bot', dataRoot: testDataRoot, log: silentLog() as never });
+    first.onLoggedOut(LOGGED_OUT);
+    await vi.advanceTimersByTimeAsync(TEN_MINUTES);
+    expect(deadLinkAlerts()).toHaveLength(1);
+
+    clearAlertSourceMock.mockImplementation(() => false);
+    first.onConnectionOpen();
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    // A new 401 retries the clear; it fails again.
+    first.onLoggedOut(LOGGED_OUT);
+    const recovered = readMarker();
+    expect(recovered).toMatchObject({
+      outageStartedAt: OUTAGE_START,
+      linkOpenedAt: '2026-11-09T05:10:00.000Z',
+    });
+    expect(recovered.alertedAt).not.toBeNull();
+
+    await vi.advanceTimersByTimeAsync(3 * TEN_MINUTES);
+    expect(deadLinkAlerts()).toHaveLength(1);
+    expect(deadLinkClears().length).toBeGreaterThan(3);
+    expect(readMarker()).toMatchObject({ outageStartedAt: OUTAGE_START });
+    first.dispose();
+
+    // A restart keeps holding; once the clear is queued the held outage alerts
+    // at once (its deadline has passed) and names its own start.
+    const second = new DeadLinkAlarm({ instance: 'dead-link-bot', dataRoot: testDataRoot, log: silentLog() as never });
+    second.resume();
+    await vi.advanceTimersByTimeAsync(DEAD_LINK_CLEAR_RETRY_MS);
+    expect(deadLinkAlerts()).toHaveLength(1);
+    clearAlertSourceMock.mockImplementation(() => true);
+    await vi.advanceTimersByTimeAsync(DEAD_LINK_CLEAR_RETRY_MS + 1);
+    expect(deadLinkAlerts()).toHaveLength(2);
+    expect(deadLinkAlerts()[1]![2]).toContain('2026-11-09T05:15:00.000Z');
+    expect(readMarker()).toMatchObject({ outageStartedAt: '2026-11-09T05:15:00.000Z', linkOpenedAt: null });
+    second.dispose();
   });
 
   it('keeps one card per outage when the marker cannot be written', async () => {

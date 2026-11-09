@@ -13,6 +13,13 @@
 // The outage start is persisted beside connection-state.json. A watchdog
 // restart inside the same outage therefore keeps the original start, and the
 // card is raised at most once per outage.
+//
+// The clear must be in the durable outbox before the outage counts as over: a
+// legacy helper that merely accepted it does not prove the dispatcher closed
+// the incident, and a still-open incident would absorb the next outage's card.
+// Until the clear is queued the recovered marker stays, the clear is retried
+// every DEAD_LINK_CLEAR_RETRY_MS, and a new outage is held in the marker; its
+// card is raised, with its own start, once the clear is queued.
 
 import { join } from 'node:path';
 import { hostname } from 'node:os';
@@ -28,18 +35,24 @@ import type { createChildLogger } from '../logger.ts';
 
 export const DEAD_LINK_ALERT_SOURCE = 'whatsapp_link_dead';
 export const DEAD_LINK_GRACE_MS = 10 * 60_000;
+export const DEAD_LINK_CLEAR_RETRY_MS = 60_000;
 export const DEAD_LINK_STATE_FILE = 'dead-link-outage.json';
 const STATE_MAX_BYTES = 16 * 1024;
 
-interface DeadLinkOutageState {
-  version: 1;
+interface OutageStart {
   outageStartedAt: string;
   statusCode: number;
   reason: string;
   classification: string;
+}
+
+interface DeadLinkOutageState extends OutageStart {
+  version: 1;
   alertedAt: string | null;
-  /** Set when the link opened but the card's clear could not be queued. */
+  /** Set when the link opened but the card's clear is not yet in the outbox. */
   linkOpenedAt: string | null;
+  /** A 401 seen while that clear is pending: the outage it starts is held. */
+  heldOutage: OutageStart | null;
 }
 
 export interface DeadLinkAlarmDeps {
@@ -66,29 +79,19 @@ export class DeadLinkAlarm {
 
   /** A 401 loggedOut close: start the outage (or continue the persisted one). */
   onLoggedOut(observation: LoggedOutObservation): void {
-    let state = this.readState();
+    const state = this.readState();
     if (state !== null && state.linkOpenedAt !== null) {
-      // The previous outage ended but its clear was not queued. Retry it so
-      // the open card cannot absorb this outage's card, then start afresh.
-      if (!this.queueClear(state)) {
-        this.deps.log.error(
-          { source: DEAD_LINK_ALERT_SOURCE },
-          'previous dead-link card still open; the dispatcher may fold this outage into it',
-        );
-      }
-      state = null;
+      // The previous outage's clear is still pending. Hold this outage in the
+      // marker (keeping the first held start) and retry the clear now.
+      const heldOutage = state.heldOutage ?? startNow(observation);
+      this.settleClear({ ...state, heldOutage });
+      return;
     }
     if (state === null) {
-      state = {
-        version: 1,
-        outageStartedAt: systemClock.nowIso(),
-        statusCode: observation.statusCode,
-        reason: observation.reason,
-        classification: observation.classification,
-        alertedAt: null,
-        linkOpenedAt: null,
-      };
-      this.writeState(state);
+      const fresh = newOutage(startNow(observation));
+      this.writeState(fresh);
+      this.arm(fresh);
+      return;
     }
     this.arm(state);
   }
@@ -96,7 +99,8 @@ export class DeadLinkAlarm {
   /**
    * Connect start: a restart inside an outage that has not been reported yet
    * keeps the original deadline even if this process never sees a 401 (for
-   * example when it parks before opening a socket).
+   * example when it parks before opening a socket). A pending clear resumes
+   * its retries.
    */
   resume(): void {
     const state = this.readState();
@@ -108,14 +112,12 @@ export class DeadLinkAlarm {
     this.cancelTimer();
     const state = this.readState();
     if (state === null) return;
-    if (state.alertedAt !== null && !this.queueClear(state)) {
-      // Keep the marker: the next open or the next 401 retries the clear,
-      // because a still-open incident would absorb the next outage's card.
-      this.deps.log.error({ source: DEAD_LINK_ALERT_SOURCE }, 'dead-link clear was not queued; will retry');
-      this.writeState({ ...state, linkOpenedAt: state.linkOpenedAt ?? systemClock.nowIso() });
+    if (state.alertedAt === null) {
+      this.deleteState();
       return;
     }
-    this.deleteState();
+    // A held outage ended before it was reported, so only the clear remains.
+    this.settleClear({ ...state, linkOpenedAt: state.linkOpenedAt ?? systemClock.nowIso(), heldOutage: null });
   }
 
   /** Process shutdown: the persisted outage survives for the next process. */
@@ -148,6 +150,31 @@ export class DeadLinkAlarm {
     this.writeState({ ...state, alertedAt: systemClock.nowIso() });
   }
 
+  /**
+   * `state` is a recovered outage. Queue its clear in the durable outbox; on
+   * success drop the marker or start the held outage, otherwise keep the
+   * marker and retry later.
+   */
+  private settleClear(state: DeadLinkOutageState): void {
+    this.cancelTimer();
+    if (!this.queueClear(state)) {
+      this.deps.log.error(
+        { source: DEAD_LINK_ALERT_SOURCE, heldOutage: state.heldOutage !== null },
+        'dead-link clear was not durably queued; keeping the outage marker and retrying',
+      );
+      this.writeState(state);
+      this.arm(state);
+      return;
+    }
+    if (state.heldOutage === null) {
+      this.deleteState();
+      return;
+    }
+    const next = newOutage(state.heldOutage);
+    this.writeState(next);
+    this.arm(next);
+  }
+
   private queueClear(state: DeadLinkOutageState): boolean {
     const evidence = [
       `instance: ${this.deps.instance}`,
@@ -156,11 +183,23 @@ export class DeadLinkAlarm {
       `alerted_at: ${state.alertedAt ?? 'none'}`,
       `link_opened_at: ${state.linkOpenedAt ?? systemClock.nowIso()}`,
     ].join('\n');
-    return clearAlertSourceChecked(this.deps.instance, DEAD_LINK_ALERT_SOURCE, evidence);
+    return clearAlertSourceChecked(this.deps.instance, DEAD_LINK_ALERT_SOURCE, evidence, undefined, {
+      requireDurableOutbox: true,
+    });
   }
 
   private arm(state: DeadLinkOutageState): void {
-    if (state.alertedAt !== null || state.linkOpenedAt !== null || this.timer !== null) return;
+    if (this.timer !== null) return;
+    if (state.linkOpenedAt !== null) {
+      this.timer = setTimeout(() => {
+        this.timer = null;
+        const current = this.readState();
+        if (current !== null && current.linkOpenedAt !== null) this.settleClear(current);
+      }, DEAD_LINK_CLEAR_RETRY_MS);
+      this.timer.unref?.();
+      return;
+    }
+    if (state.alertedAt !== null) return;
     // Clamped so a start stamped in the future (clock step) cannot overflow setTimeout.
     const remaining = Math.min(
       DEAD_LINK_GRACE_MS,
@@ -229,23 +268,38 @@ export class DeadLinkAlarm {
   }
 }
 
-function parseState(value: unknown): DeadLinkOutageState | null {
-  if (!isRecord(value) || value.version !== 1) return null;
+function startNow(observation: LoggedOutObservation): OutageStart {
+  const { statusCode, reason, classification } = observation;
+  return { outageStartedAt: systemClock.nowIso(), statusCode, reason, classification };
+}
+
+function newOutage(start: OutageStart): DeadLinkOutageState {
+  return { version: 1, ...start, alertedAt: null, linkOpenedAt: null, heldOutage: null };
+}
+
+function parseOutageStart(value: unknown): OutageStart | null {
+  if (!isRecord(value)) return null;
   const { outageStartedAt, statusCode, reason, classification } = value;
-  const alertedAt = value.alertedAt ?? null;
-  const linkOpenedAt = value.linkOpenedAt ?? null;
   if (typeof outageStartedAt !== 'string' || !Number.isFinite(Date.parse(outageStartedAt))) return null;
   if (typeof statusCode !== 'number') return null;
-  if (!isNullableString(alertedAt) || !isNullableString(linkOpenedAt)) return null;
   return {
-    version: 1,
     outageStartedAt,
     statusCode,
     reason: typeof reason === 'string' ? reason : 'unknown',
     classification: typeof classification === 'string' ? classification : 'unknown',
-    alertedAt,
-    linkOpenedAt,
   };
+}
+
+function parseState(value: unknown): DeadLinkOutageState | null {
+  if (!isRecord(value) || value.version !== 1) return null;
+  const start = parseOutageStart(value);
+  if (start === null) return null;
+  const alertedAt = value.alertedAt ?? null;
+  const linkOpenedAt = value.linkOpenedAt ?? null;
+  if (!isNullableString(alertedAt) || !isNullableString(linkOpenedAt)) return null;
+  const heldOutage = value.heldOutage == null ? null : parseOutageStart(value.heldOutage);
+  if (value.heldOutage != null && heldOutage === null) return null;
+  return { version: 1, ...start, alertedAt, linkOpenedAt, heldOutage };
 }
 
 function isNullableString(value: unknown): value is string | null {
