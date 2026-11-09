@@ -123,6 +123,7 @@ import {
   stalledOperationResumeHoldApplies,
   withStalledOperationResumeHold,
   withoutStalledOperationResumeHold,
+  type StalledOperationRestartProtection,
 } from './stalled-operation-resume-hold.ts';
 import { reconcileResidentSessionStatuses } from './resident-session-reconciler.ts';
 import {
@@ -720,6 +721,8 @@ export class AgentRuntime implements Runtime {
   private pendingRespawnTimers = new Set<ReturnType<typeof setTimeout>>();
   /** F7: chats whose stalled-operation kill is not yet saved on their checkpoint, by conversation key. */
   private readonly unverifiedStalledOperationHolds = new Map<string, { mapKey: string; sessionId: string }>();
+  /** F7: sessions whose respawn was withheld; the next turn resumes this provider session in place. */
+  private readonly stalledOperationDeferredResumes = new WeakMap<SessionManager, { sessionId: string; rowId: number }>();
   // Provider-fallback window lifecycle scalars (active-until / activated-at /
   // arm-reason / reset-at / recovery-probe-required / active-entry). Owned by the
   // collaborator; the arm / activate / deactivate / revert / probe orchestration
@@ -2200,16 +2203,22 @@ export class AgentRuntime implements Runtime {
    * checkpoint is taken out of proactive resume instead, and the chat stays in
    * `unverifiedStalledOperationHolds` so the respawn and the service shutdown,
    * which both make the checkpoint resumable again, repeat this step.
+   *
+   * Returns what protects a restart: `held` (the hold was read back, or there
+   * is no checkpoint), `withdrawn` (the checkpoint was verified out of
+   * proactive resume) or `unprotected` (both protective writes failed). Only
+   * `held` survives a resume: reactivation keeps watchdog_state but makes the
+   * checkpoint resumable again, so the respawn gate admits `held` alone.
    */
-  private recordStalledOperationResumeHold(mapKey: string, sessionId: string): void {
+  private recordStalledOperationResumeHold(mapKey: string, sessionId: string): StalledOperationRestartProtection {
     const durability = this.durability;
-    if (!durability || typeof durability.getSessionCheckpoint !== 'function') return;
+    if (!durability || typeof durability.getSessionCheckpoint !== 'function') return 'held';
     const conversationKey = this.checkpointConversationKey(mapKey);
     try {
       const checkpoint = durability.getSessionCheckpoint(conversationKey);
       if (!checkpoint) {
         this.unverifiedStalledOperationHolds.delete(conversationKey);
-        return;
+        return 'held';
       }
       if (checkpoint.session_id === sessionId) {
         if (!stalledOperationResumeHoldApplies(checkpoint.watchdog_state, sessionId)) {
@@ -2219,7 +2228,7 @@ export class AgentRuntime implements Runtime {
         }
         if (stalledOperationResumeHoldApplies(durability.getSessionCheckpoint(conversationKey)?.watchdog_state, sessionId)) {
           this.unverifiedStalledOperationHolds.delete(conversationKey);
-          return;
+          return 'held';
         }
         log.warn({ mapKey, sessionId }, 'stalled-operation resume hold not found after the write');
       } else {
@@ -2229,7 +2238,7 @@ export class AgentRuntime implements Runtime {
       log.warn({ err, mapKey, sessionId }, 'failed to save the stalled-operation resume hold');
     }
     this.unverifiedStalledOperationHolds.set(conversationKey, { mapKey, sessionId });
-    this.withdrawCheckpointFromProactiveResume(conversationKey, mapKey, sessionId);
+    return this.withdrawCheckpointFromProactiveResume(conversationKey, mapKey, sessionId) ? 'withdrawn' : 'unprotected';
   }
 
   /**
@@ -2237,7 +2246,7 @@ export class AgentRuntime implements Runtime {
    * startup (getResumableCheckpoints reads active and suspended only); the
    * chat's next message rebuilds it. Verified by reading the resumable set.
    */
-  private withdrawCheckpointFromProactiveResume(conversationKey: string, mapKey: string, sessionId: string): void {
+  private withdrawCheckpointFromProactiveResume(conversationKey: string, mapKey: string, sessionId: string): boolean {
     const durability = this.durability;
     try {
       if (
@@ -2248,7 +2257,7 @@ export class AgentRuntime implements Runtime {
         durability.markSessionOrphaned(conversationKey);
         if (!durability.getResumableCheckpoints().some((cp) => cp.conversation_key === conversationKey)) {
           log.warn({ mapKey, sessionId }, 'stalled-operation resume hold unavailable — checkpoint withdrawn from proactive resume');
-          return;
+          return true;
         }
       }
     } catch (err) {
@@ -2257,6 +2266,37 @@ export class AgentRuntime implements Runtime {
     log.error(
       { mapKey, sessionId },
       'stalled-operation kill not saved and the checkpoint is still resumable — a service restart may continue the stopped work',
+    );
+    return false;
+  }
+
+  /**
+   * F7 gate: without a verified hold the automatic respawn is withheld,
+   * because its resume makes the checkpoint resumable again and a restart
+   * would then continue the stopped work. The chat stays recoverable_dead and
+   * keeps its provider session for the next request: in this process the
+   * next turn resumes it in place (sendTurnToSession); after a restart the
+   * crashed row, marked orphaned here, is what lazy adoption resumes on the
+   * chat's next message (never proactive resume, which reads checkpoints).
+   */
+  private withholdStalledOperationRespawn(
+    mapKey: string,
+    session: SessionManager,
+    sessionId: string,
+    dbRowId: number | null | undefined,
+    protection: StalledOperationRestartProtection,
+  ): void {
+    if (typeof dbRowId === 'number') {
+      this.stalledOperationDeferredResumes.set(session, { sessionId, rowId: dbRowId });
+      try {
+        markOrphaned(this.db, dbRowId);
+      } catch (err) {
+        log.warn({ err, mapKey, sessionId }, 'stalled-operation session row not kept for lazy resume — a restart starts fresh with a notice');
+      }
+    }
+    log[protection === 'unprotected' ? 'error' : 'warn'](
+      { mapKey, sessionId, protection, deferredResume: typeof dbRowId === 'number' },
+      'auto-respawn withheld after a stalled-operation kill — no verified hold; the next request resumes the session',
     );
   }
 
@@ -5923,6 +5963,15 @@ export class AgentRuntime implements Runtime {
         ? await lazyCheckpointAdoption(this.db, this.durability, session, toConversationKey(chatJid))
         : NO_CHECKPOINT_ADOPTION;
       if (dispatchCancelled()) return;
+      // F7: a respawn withheld after a stalled-operation kill resumes here, so
+      // the chat keeps its provider session (withholdStalledOperationRespawn).
+      const deferredResume = this.stalledOperationDeferredResumes.get(session);
+      if (deferredResume !== undefined) {
+        this.stalledOperationDeferredResumes.delete(session);
+        if (adoption.kind === 'none') {
+          adoption = { kind: 'resume', rowId: deferredResume.rowId, sessionId: deferredResume.sessionId, recoveredOwn: false };
+        }
+      }
       announceAdoption(adoption, (notice) => this.sendDirect(chatJid, notice, 'status'));
       const spawnOwnership = effectiveMapKey !== undefined
         ? this.captureOwnedPerChatGeneration(effectiveMapKey, session)
@@ -11410,14 +11459,18 @@ export class AgentRuntime implements Runtime {
       );
     }
 
-    if (info?.terminationReason === 'stalled_operation' && info.sessionId) {
-      this.recordStalledOperationResumeHold(currentMapKey, info.sessionId);
-    }
+    // F7: the stalled-operation hold is saved before any respawn is scheduled.
+    const stalledSessionId = info?.terminationReason === 'stalled_operation' ? info.sessionId : undefined;
+    const stalledOperationProtection = typeof stalledSessionId === 'string'
+      ? this.recordStalledOperationResumeHold(currentMapKey, stalledSessionId)
+      : 'held';
 
     // Auto-respawn: if we haven't hit the crash limit, try to resume the session
     // after a short delay. This lets the agent continue mid-conversation without
     // requiring the user to send a new message.
-    if (crashCount <= AUTO_RESPAWN_MAX_CRASHES && info?.sessionId) {
+    if (crashCount <= AUTO_RESPAWN_MAX_CRASHES && info?.sessionId && stalledOperationProtection !== 'held') {
+      this.withholdStalledOperationRespawn(currentMapKey, session, info.sessionId, info.dbRowId, stalledOperationProtection);
+    } else if (crashCount <= AUTO_RESPAWN_MAX_CRASHES && info?.sessionId) {
       const sessionId = info.sessionId;
       const dbRowId = info.dbRowId;
       const terminationReason = info.terminationReason;
@@ -11642,6 +11695,15 @@ export class AgentRuntime implements Runtime {
         effectiveProvider: this.effectiveProvider,
       }, 'auto-respawn skipped — manager route is stale; recycle pended');
       return;
+    }
+    // F7: re-verify restart protection at the resume itself; time has passed
+    // since the kill, and the resume reactivates the checkpoint.
+    if (args.terminationReason === 'stalled_operation') {
+      const protection = this.recordStalledOperationResumeHold(mapKey, args.sessionId);
+      if (protection !== 'held') {
+        this.withholdStalledOperationRespawn(mapKey, args.session, args.sessionId, args.dbRowId, protection);
+        return;
+      }
     }
 
     this.sessionOwnership.transition(mapKey, args.managerId, 'respawning');
