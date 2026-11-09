@@ -12,7 +12,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from hypothesis import given, settings, strategies as st
+from hypothesis import example, given, settings, strategies as st
 import pytest
 
 
@@ -100,6 +100,40 @@ def test_private_reader_applies_size_limit_to_utf8_bytes(tmp_path, extra_bytes):
             supervisor.read_private(path)
     else:
         assert supervisor.read_private(path) == value
+
+
+@pytest.mark.parametrize("extra_bytes", [0, 1])
+@settings(max_examples=16)
+@given(escaped=st.text(max_size=32))
+@example(escaped="é\n😀")
+@example(escaped="")
+def test_private_write_never_replaces_readable_state_with_oversized_json(extra_bytes, escaped):
+    supervisor = load_module("reliability_supervisor.py")
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = private_file(root / "state.json", {"pending_events": ["preserve-this-id"]})
+        previous = path.read_bytes()
+        value = {"padding": "", "escaped": escaped}
+        overhead = len((json.dumps(value, sort_keys=True) + "\n").encode())
+        value["padding"] = "x" * (1024 * 1024 - overhead + extra_bytes)
+        if extra_bytes:
+            with pytest.raises(supervisor.StateError, match="state_file_oversized"):
+                supervisor.write_private(path, value)
+            assert path.read_bytes() == previous
+            assert supervisor.read_private(path) == {"pending_events": ["preserve-this-id"]}
+        else:
+            supervisor.write_private(path, value)
+            assert path.stat().st_size == 1024 * 1024
+            assert supervisor.read_private(path) == value
+        assert sorted(p.name for p in root.iterdir()) == ["state.json"]
+
+
+def test_oversized_initial_state_is_not_created(tmp_path):
+    supervisor = load_module("reliability_supervisor.py")
+    path = tmp_path / "state.json"
+    with pytest.raises(supervisor.StateError, match="state_file_oversized"):
+        supervisor.write_private(path, {"value": "x" * (1024 * 1024)})
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_private_reader_accepts_root_owned_sticky_temporary_directory():

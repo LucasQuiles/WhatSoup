@@ -27,6 +27,9 @@ from uuid import uuid4
 from urllib.parse import urlsplit, quote
 
 
+PRIVATE_JSON_MAX_BYTES = 1024 * 1024
+
+
 class StateError(RuntimeError):
     pass
 
@@ -117,7 +120,7 @@ def private_parent(path: Path, *, create: bool = False):
 
 
 def read_private(path: Path) -> dict:
-    limit = 1024 * 1024
+    limit = PRIVATE_JSON_MAX_BYTES
     with private_parent(path) as (parent, leaf):
         fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
     try:
@@ -144,15 +147,25 @@ def read_private(path: Path) -> dict:
         os.close(fd)
 
 
+def _bounded_json_bytes(value, limit):
+    encoded = bytearray()
+    for part in json.JSONEncoder(sort_keys=True, allow_nan=False).iterencode(value):
+        chunk = part.encode("utf-8")
+        if len(encoded) + len(chunk) > limit:
+            raise StateError("state_file_oversized")
+        encoded.extend(chunk)
+    return bytes(encoded)
+
+
 def write_private(path: Path, value: dict) -> None:
     with private_parent(path) as (parent, leaf):
         validate_private_directory(parent)
+        payload = _bounded_json_bytes(value, PRIVATE_JSON_MAX_BYTES - 1) + b"\n"
         temporary = f".{leaf}.{uuid4().hex}.tmp"
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump(value, stream, sort_keys=True, allow_nan=False)
-                stream.write("\n")
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(payload)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, leaf, src_dir_fd=parent, dst_dir_fd=parent)
@@ -680,6 +693,8 @@ TERMINAL_DELIVERY = frozenset({"channel_delivered", *DISPATCHER_DISPOSITIONS.val
 # The receipts script refuses more than 128 ids per call.
 DELIVERY_BATCH = 128
 TERMINAL_ALERTS_RETAINED = 128
+# Reserve at least half of the readable state budget for non-receipt fields.
+MAX_RETAINED_RECEIPT_BYTES = PRIVATE_JSON_MAX_BYTES // (2 * TERMINAL_ALERTS_RETAINED)
 # Undelivered alerts are retired by age (an alert with no receipt after a day
 # will not get one) and by count (at most four 15 s delivery calls per cycle,
 # and state well under read_private's 1 MiB limit).
@@ -713,6 +728,10 @@ def _resolve_batch(config, batch):
             continue
         if receipt.get("status") in {"sent", "email_delivered"}:
             if not isinstance(receipt.get("audit_receipt"), str):
+                return {"code": "invalid_output", "returncode": None}
+            try:
+                _bounded_json_bytes(receipt, MAX_RETAINED_RECEIPT_BYTES)
+            except (StateError, ValueError, TypeError, RecursionError):
                 return {"code": "invalid_output", "returncode": None}
             updates.append((alert, {"delivery": "channel_delivered", "delivery_receipt": receipt}))
         elif receipt.get("status") in DISPATCHER_DISPOSITIONS:

@@ -66,6 +66,29 @@ def run(observer, config, now, results, events):
     )
 
 
+def test_oversized_delivery_receipt_retries_lookup_without_republishing(observer, config):
+    directory = Path(config["state_dir"])
+    observer.supervisor.private_directory(directory)
+    path = directory / "fleet-observer.json"
+    identifier = str(uuid4())
+    state = observer.initial_state(100)
+    state["alerts"] = [{"event_id": identifier, "published_at": 100, "delivery": "locally_persisted"}]
+    observer.supervisor.write_private(path, state)
+    receipt = {"status": "sent", "audit_receipt": "a" * 40000}
+    command = [sys.executable, "-c", "print(" + repr(json.dumps({identifier: receipt})) + ")"]
+    config = {**config, "hosts": [], "delivery_command": command}
+    emitted = []
+    for now in [101, 102, 103]:
+        result = observer.run_once(config, now=now, emit=lambda event: emitted.append(event))
+        assert result["delivery_resolution"]["failures"] == [{"code": "invalid_output", "returncode": None}]
+        assert result["pending_events"] == []
+        assert result["alerts"][0]["event_id"] == identifier
+        assert result["alerts"][0]["delivery"] == "locally_persisted"
+        assert observer.supervisor.read_private(path) == result
+    assert result["delivery_resolution"]["consecutive_failed_cycles"] == 3
+    assert emitted == []
+
+
 def test_recovery_never_clears_capability_incident_on_stale_missing_or_unreachable(
     observer, config
 ):

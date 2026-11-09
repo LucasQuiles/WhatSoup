@@ -49,6 +49,72 @@ def test_missing_audit_receipt_cannot_claim_delivery():
     assert alert == {"event_id": identifier, "delivery": "published"}
 
 
+@pytest.mark.parametrize("status", ["sent", "email_delivered"])
+@pytest.mark.parametrize("extra_bytes", [0, 1])
+def test_receipt_storage_budget_preserves_exact_evidence_or_refuses_whole_batch(status, extra_bytes):
+    supervisor = load_module()
+    identifiers = [f"00000000-0000-4000-8000-{index:012d}" for index in range(2)]
+    receipt = {"status": status, "audit_receipt": "", "sent_at": "é\n😀", "extension": [True, 3]}
+    overhead = len(json.dumps(receipt, sort_keys=True).encode())
+    receipt["audit_receipt"] = "a" * (4096 - overhead + extra_bytes)
+    receipts = {identifiers[0]: {"status": "sent", "audit_receipt": "short"}, identifiers[1]: receipt}
+    code = "import sys; sys.stdout.write(" + repr(json.dumps(receipts)) + ")"
+    alerts = [{"event_id": identifier, "delivery": "published"} for identifier in identifiers]
+    failures = supervisor.resolve_alert_delivery({"delivery_command": [sys.executable, "-c", code]}, alerts)
+    if extra_bytes:
+        assert failures == [{"code": "invalid_output", "returncode": None}]
+        assert alerts == [{"event_id": identifier, "delivery": "published"} for identifier in identifiers]
+    else:
+        assert failures == []
+        assert alerts[1]["delivery_receipt"] == receipt
+        assert all(alert["delivery"] == "channel_delivered" for alert in alerts)
+
+
+def test_nonfinite_receipt_metadata_cannot_poison_saved_state():
+    supervisor = load_module()
+    identifier = "00000000-0000-4000-8000-000000000034"
+    receipt = {"status": "sent", "audit_receipt": "valid-receipt", "sent_at": float("nan")}
+    code = "import sys; sys.stdout.write(" + repr(json.dumps({identifier: receipt})) + ")"
+    alert = {"event_id": identifier, "delivery": "published"}
+    assert supervisor.resolve_alert_delivery({"delivery_command": [sys.executable, "-c", code]}, [alert]) == [
+        {"code": "invalid_output", "returncode": None}
+    ]
+    assert alert == {"event_id": identifier, "delivery": "published"}
+
+
+@pytest.mark.parametrize("receipt_bytes, cycles", [(4096, 128), (40000, 30)])
+def test_repeated_delivery_receipts_leave_readable_state(tmp_path, monkeypatch, receipt_bytes, cycles):
+    supervisor = load_module()
+    receipt = {"status": "sent", "audit_receipt": ""}
+    receipt["audit_receipt"] = "a" * (receipt_bytes - len(json.dumps(receipt, sort_keys=True).encode()))
+
+    def command(arguments, timeout, *, max_stdout):
+        output = json.dumps({arguments[-1]: receipt}).encode()
+        assert len(output) <= max_stdout
+        return subprocess.CompletedProcess(arguments, 0, output, b"")
+
+    monkeypatch.setattr(supervisor, "run_command", command)
+    state = {"schema_version": 1, "alerts": []}
+    path = tmp_path / "state.json"
+    for index in range(cycles):
+        alert = {"event_id": f"00000000-0000-4000-8000-{index:012d}", "published_at": 100, "delivery": "published"}
+        failure = supervisor.resolve_alert_delivery({"delivery_command": ["synthetic"]}, [alert])
+        if receipt_bytes > 4096:
+            assert failure == [{"code": "invalid_output", "returncode": None}]
+            assert alert["delivery"] == "published"
+            assert "delivery_receipt" not in alert
+        else:
+            assert failure == []
+            assert alert["delivery_receipt"] == receipt
+        state["alerts"].append(alert)
+        state["alerts"], dropped = supervisor.retain_alerts(state["alerts"], 101)
+        assert dropped == 0
+        supervisor.write_private(path, state)
+        assert supervisor.read_private(path) == state
+    assert len(state["alerts"]) == cycles
+    assert path.stat().st_size < 600000
+
+
 @given(status=st.one_of(st.lists(st.integers()), st.dictionaries(st.text(), st.integers())))
 def test_non_string_receipt_status_stays_unresolved(status):
     supervisor = load_module()

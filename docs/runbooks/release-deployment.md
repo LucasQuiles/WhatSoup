@@ -920,6 +920,11 @@ the previous destination unchanged and removes the writer's temporary file.
 A sync failure after replacement is reported as an error; the new state may
 already be visible, and crash durability is then unverified. Pending-event
 overflow remains a separate unresolved obligation.
+The writer serializes with the same sorted-key, ASCII-escaped JSON encoding
+used to measure receipt metadata. The complete state, including its final
+newline, must fit the reader's one-MiB limit. Oversized state raises
+`state_file_oversized` before a temporary file is created or the previous file
+is replaced. Existing oversized files are not repaired or truncated.
 
 The supervisor command helper and local/SSH probe wrapper read stdout and
 stderr concurrently with byte limits. General command stdout permits one MiB;
@@ -947,9 +952,22 @@ existing published-alert retention rules are unchanged.
 A command response that claims delivery without an audit-receipt string fails
 the batch before any alert is changed. Other malformed receipt rows remain
 unresolved; they cannot establish delivery.
-The accumulated receipt metadata in retained alerts can still exceed the
-one-MiB state-reader limit; per-response limits do not bound persisted history.
-That cumulative state bound remains a separate unresolved obligation.
+Each newly accepted successful receipt must also serialize within 4,096 bytes,
+with no non-finite numbers. The entire receipt object is retained unchanged;
+the audit string is neither truncated nor restricted to a hexadecimal format.
+An oversized or non-serializable receipt produces `invalid_output` for its
+whole batch before any alert is changed. Resolution retries keep the published
+alert and its event ID; they do not put it back into the emission queue.
+This budget limits the metadata in 128 retained terminal receipts to half of
+the readable-state limit. It is a storage allocation, not a measurement of live
+receipt sizes. Custom commands returning larger receipts will remain unresolved.
+Other fields, legacy receipt records and pending events can still exhaust the
+remaining state space. Writer refusal preserves the last readable file but
+does not establish progress or recovery. In particular, a failure after an
+emission can leave the previously saved event pending for retry with the same
+ID. Publication deduplication and post-emission recovery still require
+qualification. No pending-event overflow policy or historical data removal is
+implemented by these limits.
 Large spools may repeatedly exhaust these limits; eventual discovery and live
 capacity are not established. The deadline checks run around filesystem and
 JSON operations and cannot interrupt a blocked kernel call. The supervisor's
