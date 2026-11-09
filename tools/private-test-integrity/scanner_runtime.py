@@ -145,6 +145,7 @@ def qualify_runtime(
     expected_bash_sha256: str,
     trusted_path: str,
     probe_timeout_seconds: float = 30,
+    grammar_cache: Path | None = None,
 ) -> None:
     """Qualify fixed parser probes under the same environment as the final scan.
 
@@ -189,7 +190,7 @@ def qualify_runtime(
                 (root / directory).mkdir(mode=0o700)
                 for name, content in zip(PROBE_FILENAMES, contents, strict=True):
                     (root / directory / name).write_bytes(content)
-            environment = build_scanner_environment(scanner, home, trusted_path)
+            environment = build_scanner_environment(scanner, home, trusted_path, grammar_cache=grammar_cache)
 
             def probe(name: str, tail: tuple[str, ...], conclusions: set[str]) -> object:
                 output = root / f"{name}.json"

@@ -389,17 +389,18 @@ def _scan_binding(
     trusted_path: str,
     timeout_seconds: float,
     runtime_check: Callable[..., None],
+    grammar_cache: Path | None = None,
 ) -> str:
     parent = Path(os.environ.get("TMPDIR", ""))
     if not parent.is_absolute() or parent.resolve(strict=True) != parent or not parent.is_dir():
         raise BoundaryError("private scan temporary directory is invalid")
     with scanner_bundle() as scanner:
-        if runtime_check(scanner, binding, trusted_path=trusted_path) is not None:
+        if runtime_check(scanner, binding, trusted_path=trusted_path, grammar_cache=grammar_cache) is not None:
             raise BoundaryError("private runtime qualification is inconclusive")
         selector = load_verified_selector(scanner)
         with tempfile.TemporaryDirectory(prefix="private-scan-", dir=parent) as temporary:
             plan = prepare_scan_inputs(
-                client, binding, scanner, selector, Path(temporary), trusted_path,
+                client, binding, scanner, selector, Path(temporary), trusted_path, grammar_cache=grammar_cache,
             )
             result = run_scanner_privately(plan, timeout_seconds=timeout_seconds)
             if (
@@ -423,6 +424,7 @@ def evaluate_private_run(
     trusted_path: str,
     timeout_seconds: float,
     runtime_check: Callable[..., None],
+    grammar_cache: Path | None = None,
 ) -> PrivateCheckResult:
     """Qualify and scan only after current admission in an isolated driver.
 
@@ -436,6 +438,7 @@ def evaluate_private_run(
         lambda binding: _scan_binding(
             client, binding, scanner_bundle,
             trusted_path=trusted_path, timeout_seconds=timeout_seconds, runtime_check=runtime_check,
+            grammar_cache=grammar_cache,
         ),
     )
 
@@ -451,6 +454,7 @@ def evaluate_private_non_pr_run(
     receipt_path: Path,
     scanner_run_id: int,
     scanner_run_attempt: int,
+    grammar_cache: Path | None = None,
 ) -> PrivateCheckResult:
     """Run the shared private scanner for a trusted main/schedule/tag Quality run."""
     return evaluate_non_pr_run(
@@ -459,6 +463,7 @@ def evaluate_private_non_pr_run(
         lambda binding: _scan_binding(
             client, binding, scanner_bundle,
             trusted_path=trusted_path, timeout_seconds=timeout_seconds, runtime_check=runtime_check,
+            grammar_cache=grammar_cache,
         ),
         receipt_path=receipt_path,
         scanner_run_id=scanner_run_id,
