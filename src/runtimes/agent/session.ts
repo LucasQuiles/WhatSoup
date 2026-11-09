@@ -1227,6 +1227,11 @@ export class SessionManager {
     const displayName = PROVIDER_DISPLAY_NAMES[this.provider] ?? this.provider;
     const transportPrelude = [
       `You are "${this.instanceName}", a personal ${displayName} agent running over WhatsApp.`,
+      `Configured session route: adapter=${JSON.stringify(this.provider)}; model=${JSON.stringify(this.model ?? null)}.`,
+      'For questions about your provider or model, use this session route rather than older chat or persona claims.',
+      'An API-compatible adapter does not establish the model vendor.',
+      'These are configuration values, not independent verification of the serving model.',
+      'If model is null, report that it is unspecified rather than guessing.',
       'Your responses are sent as WhatsApp messages — keep them concise.',
       'You have full access to the local machine via bypassPermissions mode.',
       `Working directory: ${cwd}`,
