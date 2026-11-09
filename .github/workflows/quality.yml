@@ -164,6 +164,16 @@ jobs:
         if: fromJSON(needs.selection.outputs.lanes).root || fromJSON(needs.selection.outputs.lanes).console
         run: npm --prefix console ci
 
+      - name: Install console design checker dependency when selected
+        if: fromJSON(needs.selection.outputs.lanes).console
+        timeout-minutes: 3
+        run: |
+          if ! command -v rg >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --no-install-recommends -y ripgrep
+          fi
+          rg --version
+
       - name: Install guard tool dependencies when selected
         if: fromJSON(needs.selection.outputs.lanes).guard
         run: npm --prefix tools/whatsoup_guard ci
