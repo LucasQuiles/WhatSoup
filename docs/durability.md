@@ -1501,11 +1501,14 @@ birth observation, so one unrelated unreadable identity cannot retain already-pr
 Census loss, duplicate rows, a missing required birth observation, or any survivor keeps only the
 affected lease fenced; active attempts are never capacity-reclaimed.
 
-Session cleanup preserves the provider's credential-refresh grace before both the initial
-signal and escalation. Each wait precedes a fresh process census and authority check, so a
-process identity observed before the wait cannot authorize a later signal. Signal protection
-that rejects or exceeds the reaper's 60-second bound fails cleanup without signaling; the
-session retains its cleanup obligation and refuses replacement admission.
+SessionManager cleanup preserves the provider's credential-refresh grace before both the
+initial signal and escalation when it retains the child's environment. Isolated Claude
+launches currently lack that retained environment and do not receive this protection;
+stale-session and ownership-loss cleanup also do not supply a refresh-grace callback.
+Each configured wait precedes a fresh process census and authority check, so a process
+identity observed before the wait cannot authorize a later signal. Signal protection that
+rejects or exceeds the reaper's 60-second bound fails cleanup without signaling; the session
+retains its cleanup obligation and refuses replacement admission.
 
 Stale-row classification keeps duplicate live PIDs ambiguous, but confirmed-dead PIDs
 do not prevent checkpointed stale rows from being retired without signaling. A live
