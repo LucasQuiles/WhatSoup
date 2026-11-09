@@ -70,6 +70,11 @@ workflow-identity enforcement. The release consumer verifies the trusted artifac
 producer instead of relying on a matching custom check name.
 
 Keep the existing Quality scanner step and required checks during qualification.
+The scanner bootstrap must land first with its main/tag receipt producer and public
+receipt consumer. Its temporary direct tag trigger provides full Quality evidence
+while the existing tag guard workflow remains active. Qualify real tag receipts
+through `scripts/private-integrity-release.ts select` and `verify` before this
+cutover connects the consumer as the tag gate and removes that duplicate work.
 Only after hosted canaries prove current-head publication, stale-head refusal,
 credential confinement, cleanup, failure handling and tag receipt consumption
 should the private check be required and this Quality cutover merged. Remove the

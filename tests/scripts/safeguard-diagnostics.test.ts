@@ -352,8 +352,8 @@ const requiredQualityWorkflow = [
   '  bot-errors-health-macos:',
   '    needs: selection',
   "    if: needs.selection.outputs.profile == 'full'",
-  '    runs-on: macos-15-intel',
-  '    timeout-minutes: 15',
+  '    runs-on: macos-15',
+  '    timeout-minutes: 10',
   '    steps:',
   '      - name: Portable Python and release-proof prerequisites (real macOS)',
   '        run: npm test -- tests/helpers/python-interpreter.test.ts tests/scripts/bot-errors-python-atomic-write-guard.test.ts tests/scripts/bot-errors-release-proof-installer.test.ts tests/scripts/bot-errors-release-proof-run.test.ts --pool=forks --maxWorkers=1',
@@ -1356,14 +1356,14 @@ describe('safeguard diagnostics', () => {
       evidence: 'quality (25.x) compatibility job must be blocking',
     },
     {
-      name: 'uses the architecture-ambiguous macOS 15 runner for x64 health qualification',
-      mutate: (workflow: string) => workflow.replace('    runs-on: macos-15-intel', '    runs-on: macos-15'),
-      evidence: 'bot-errors-health-macos must run on macos-15-intel for x64 health qualification',
+      name: 'replaces the selected Apple Silicon runner with Intel',
+      mutate: (workflow: string) => workflow.replace('    runs-on: macos-15', '    runs-on: macos-15-intel'),
+      evidence: 'bot-errors-health-macos runs-on must be exactly macos-15',
     },
     {
-      name: 'shortens the macOS combined-qualification budget',
-      mutate: (workflow: string) => workflow.replace('    timeout-minutes: 15', '    timeout-minutes: 10'),
-      evidence: 'bot-errors-health-macos must retain its 15-minute combined-qualification budget',
+      name: 'changes the selected macOS qualification budget',
+      mutate: (workflow: string) => workflow.replace('    timeout-minutes: 10', '    timeout-minutes: 5'),
+      evidence: 'bot-errors-health-macos must retain its 10-minute qualification budget',
     },
     {
       name: 'conditions the Node 25 full suite',
@@ -1393,6 +1393,22 @@ describe('safeguard diagnostics', () => {
         '        run: sudo rm -rf /usr/share/dotnet || true',
       ),
       evidence: 'quality workflow must not retain masked unconditional disk cleanup',
+    },
+    {
+      name: 'reverts the macOS lane to the retired macos-14 image',
+      mutate: (workflow: string) => workflow.replace(
+        '    runs-on: macos-15',
+        '    runs-on: macos-14',
+      ),
+      evidence: 'bot-errors-health-macos runs-on must be exactly macos-15',
+    },
+    {
+      name: 'floats the macOS lane to macos-latest',
+      mutate: (workflow: string) => workflow.replace(
+        '    runs-on: macos-15',
+        '    runs-on: macos-latest',
+      ),
+      evidence: 'bot-errors-health-macos runs-on must be exactly macos-15',
     },
   ])('fails when Quality $name', ({ mutate, evidence }) => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];

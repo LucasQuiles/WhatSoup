@@ -768,10 +768,8 @@ jobs:
   bot-errors-health-macos:
     needs: selection
     if: needs.selection.outputs.profile == 'full'
-    runs-on: macos-15-intel
-    # The real-macOS prerequisite and credential suites share this job; retain
-    # their existing bounds while allowing the combined slow-runner path to finish.
-    timeout-minutes: 15
+    runs-on: macos-15
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
