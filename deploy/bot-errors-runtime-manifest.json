@@ -950,7 +950,7 @@
     },
     {
       "path": "deploy/scripts/fleet/fleet_probe_remote.py",
-      "sha256": "da37a3c0abf2ce0f492515509ead12df0f8f88d2c3d13145a1529d1e19f38063",
+      "sha256": "3844226c9b4d1005655030d8915cb35651369065424a8c6ed5f202c6034bbc87",
       "mustContain": [
         "classify_projection",
         "retired_checks"

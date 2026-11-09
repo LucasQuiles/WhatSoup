@@ -13,13 +13,21 @@ if 'retired_checks' in request:
     retired_checks=[n for n in names or [] if isinstance(n,str) and re.fullmatch('[a-z0-9][a-z0-9_-]{0,79}',n)]
     if names is None or len(retired_checks)!=len(names):codes.append('retired_check_name_invalid')
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,req,fp,code,msg,headers,newurl):
+        return None
+
 def http(port,path,token=None):
     try:
         req=urllib.request.Request('http://127.0.0.1:%d%s'%(port,path),headers={'Authorization':'Bearer '+token} if token else {})
-        try:response=urllib.request.urlopen(req,timeout=5)
+        # Credentials belong only to this loopback endpoint, never a proxy or redirect.
+        opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect)
+        try:response=opener.open(req,timeout=5)
         except urllib.error.HTTPError as e:response=e
-        payload=response.read(1000000)
-        return response.status,json.loads(payload)
+        with response:
+            if 300<=response.status<400:return None,{}
+            payload=response.read(1000000)
+            return response.status,json.loads(payload)
     except Exception:return None,{}
 
 def env_file(path):

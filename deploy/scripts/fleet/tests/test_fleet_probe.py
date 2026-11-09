@@ -35,7 +35,7 @@ def remote_probe(tmp_path, statuses, warmer=False, instances=None):
         response.status = status
         return response
     output = io.StringIO()
-    with patch.object(sys, 'argv', ['probe', json.dumps(request)]), patch('pathlib.Path.home', return_value=tmp_path), patch('urllib.request.urlopen', side_effect=respond), contextlib.redirect_stdout(output):
+    with patch.object(sys, 'argv', ['probe', json.dumps(request)]), patch('pathlib.Path.home', return_value=tmp_path), patch('urllib.request.OpenerDirector.open', side_effect=respond), contextlib.redirect_stdout(output):
         exec(compile((ROOT/'fleet_probe_remote.py').read_text(), 'remote', 'exec'), {})
     return json.loads(output.getvalue())
 
@@ -99,7 +99,7 @@ def broker_probe(tmp_path, request, launch_agent=True):
         reads.append(self)
         return real_bytes(self)
     output = io.StringIO()
-    with patch.object(sys, 'argv', ['probe', json.dumps(request)]), patch('pathlib.Path.home', return_value=tmp_path), patch('urllib.request.urlopen', side_effect=respond), patch('subprocess.run', side_effect=run_command), patch.object(pathlib.Path, 'read_text', read_text), patch.object(pathlib.Path, 'read_bytes', read_bytes), contextlib.redirect_stdout(output):
+    with patch.object(sys, 'argv', ['probe', json.dumps(request)]), patch('pathlib.Path.home', return_value=tmp_path), patch('urllib.request.OpenerDirector.open', side_effect=respond), patch('subprocess.run', side_effect=run_command), patch.object(pathlib.Path, 'read_text', read_text), patch.object(pathlib.Path, 'read_bytes', read_bytes), contextlib.redirect_stdout(output):
         exec(compile(code, 'remote', 'exec'), {})
     return json.loads(output.getvalue()), urls, ran, reads
 
@@ -265,7 +265,7 @@ def test_remote_health_uses_canonical_token_precedence_with_legacy_plist_fallbac
 
         output = io.StringIO()
         environment = {"BOT_ERRORS_HEALTH_TOKEN_EXAMPLE_BOT": override, "WHATSOUP_HEALTH_TOKEN": shared}
-        with patch.dict(os.environ, environment), patch.object(sys, "argv", ["probe", json.dumps(request)]), patch("pathlib.Path.home", return_value=tmp_path), patch("urllib.request.urlopen", side_effect=respond), contextlib.redirect_stdout(output):
+        with patch.dict(os.environ, environment), patch.object(sys, "argv", ["probe", json.dumps(request)]), patch("pathlib.Path.home", return_value=tmp_path), patch("urllib.request.OpenerDirector.open", side_effect=respond), contextlib.redirect_stdout(output):
             exec(compile((ROOT / "fleet_probe_remote.py").read_text(), "remote", "exec"), {})
         result = json.loads(output.getvalue())
         assert result["checks"]["example_bot_health_readable"] is True
@@ -357,7 +357,7 @@ def test_disabled_instance_is_reported_retired_and_never_probed(tmp_path):
         raise AssertionError('probe must not spawn processes in this test')
     request = {'instances': ['retired-i', 'live-i', 'dead-i'],'health_reader_code': HEALTH_READER.read_text()}
     output = io.StringIO()
-    with patch.object(sys, 'argv', ['probe', json.dumps(request)]), patch.object(sys, 'platform', 'darwin'), patch('pathlib.Path.home', return_value=tmp_path), patch('urllib.request.urlopen', side_effect=respond), patch('subprocess.run', side_effect=no_subprocess), contextlib.redirect_stdout(output):
+    with patch.object(sys, 'argv', ['probe', json.dumps(request)]), patch.object(sys, 'platform', 'darwin'), patch('pathlib.Path.home', return_value=tmp_path), patch('urllib.request.OpenerDirector.open', side_effect=respond), patch('subprocess.run', side_effect=no_subprocess), contextlib.redirect_stdout(output):
         exec(compile((ROOT/'fleet_probe_remote.py').read_text(), 'remote', 'exec'), {})
     result = json.loads(output.getvalue())
     checks = result['checks']
@@ -467,7 +467,7 @@ def m365_probe(tmp_path, tools, calls, mcp_code=None, configured=('bot',), liste
         return types.SimpleNamespace(returncode=0, stdout='')
     output = io.StringIO()
     # A listed instance's health read finds no bot listening.
-    with patch.object(sys, 'argv', ['probe', json.dumps(request)]), patch.object(sys, 'platform', 'darwin'), patch('pathlib.Path.home', return_value=tmp_path), patch('subprocess.run', side_effect=run_command), patch('urllib.request.urlopen', side_effect=ConnectionRefusedError), contextlib.redirect_stdout(output):
+    with patch.object(sys, 'argv', ['probe', json.dumps(request)]), patch.object(sys, 'platform', 'darwin'), patch('pathlib.Path.home', return_value=tmp_path), patch('subprocess.run', side_effect=run_command), patch('urllib.request.OpenerDirector.open', side_effect=ConnectionRefusedError), contextlib.redirect_stdout(output):
         exec(compile((ROOT/'fleet_probe_remote.py').read_text(), 'remote', 'exec'), {})
     sent = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
     sent = [m['method'] + (' ' + m['params']['name'] if m['method'] == 'tools/call' else '') for m in sent]
