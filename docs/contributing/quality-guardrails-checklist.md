@@ -93,6 +93,10 @@ parser detection and does not change scanner policy severity. The language pack
 downloads parser libraries on demand into the isolated HOME; those release assets
 are not covered by the private repository's Git manifest pin.
 
+The alert drill harness gives its children a scratch directory inside its own sandbox.
+This prevents a macOS caller's temporary path from being mistaken for leaked test
+evidence in daily-health alerts; the sandbox and child scratch are removed on exit.
+
 Before the Node 24 toolchain setup, `scripts/ci-disk-reclaim.sh` records free
 space and enforces a 30 GiB budget. Sufficient runners skip mutation with a
 structured receipt. Low-space runners remove only the allowlisted unused
