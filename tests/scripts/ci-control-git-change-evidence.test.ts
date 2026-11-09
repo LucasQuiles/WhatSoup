@@ -234,7 +234,8 @@ describe('hostile exact-object inputs', () => {
         if (args[1] === 'cat-file' && args[2] === TREE_TYPE_CHECK) {
           batchTypeCalls += 1;
         }
-        if (args[1] === 'cat-file' && args[2] === COMMIT_CHECK) {
+        if (args[1] === 'cat-file' && args[2] === COMMIT_CHECK
+          && String(options?.input).trim().split('\n').every((oid) => oid === baseOid || oid === candidateOid)) {
           commitCheckCalls += 1;
         }
         return execFileSync(file, args, options as never);
@@ -406,7 +407,8 @@ describe('hostile exact-object inputs', () => {
       await withMockedGitInput((file, args, options) => {
         const key = responseKey(args.slice(1));
         if (key === detectedKey) return forgedCopy;
-        if (key === nestedTypeKey) {
+        if (key === nestedTypeKey || (key === responseKey(['cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)'])
+          && String(options?.input) === `${nestedTreeOid}\n`)) {
           throw Object.assign(new Error('private nested timeout'), { code: 'ETIMEDOUT' });
         }
         return execFileSync(file, args, options as never) as unknown as Buffer;
@@ -724,6 +726,7 @@ describe('exact raw tree identity evidence', () => {
       objectTypes: new Map([[leafOid, 'blob']]),
     });
     let treeReads = 0;
+    let rereadBatches = 0;
     vi.resetModules();
     vi.doMock('node:child_process', () => ({
       execFileSync: (
@@ -734,9 +737,14 @@ describe('exact raw tree identity evidence', () => {
         const key = responseKey(args.slice(1));
         if (key === responseKey(['cat-file', 'tree', '--', rootOid])) {
           treeReads += 1;
-          return treeReads === 1 ? firstBody : secondBody;
+          return firstBody;
         }
-        const response = resolveShimResponse(responses, args.slice(1), options?.input);
+        const reread = key === responseKey(['cat-file', '--batch']) && String(options?.input) === `${rootOid}\n`;
+        if (reread) rereadBatches += 1;
+        const selected = reread
+          ? { ...responses, [responseKey(['cat-file', 'tree', '--', rootOid])]: { stdoutBase64: secondBody.toString('base64') } }
+          : responses;
+        const response = resolveShimResponse(selected, args.slice(1), options?.input);
         if (response === undefined) throw new Error('unexpected synthetic command');
         if (response.stdoutBase64 !== undefined) return Buffer.from(response.stdoutBase64, 'base64');
         return Buffer.from(response.stdout ?? '', 'utf8');
@@ -751,7 +759,8 @@ describe('exact raw tree identity evidence', () => {
         terminalError = error;
       }
       expect(terminalError).toMatchObject({ code: 'ci.input.tree-entry-identity-mismatch' });
-      expect(treeReads).toBe(2);
+      expect(treeReads).toBe(1);
+      expect(rereadBatches).toBe(1);
     } finally {
       vi.doUnmock('node:child_process');
       vi.resetModules();

@@ -97,6 +97,68 @@ whatsoup_resolve_python312() {
   return 1
 }
 
+# The refresh-owner reader has a deliberately fixed trust boundary: it does not
+# inherit a caller PATH or use the quality venv. Tests may replace this zero-arg
+# function after sourcing this library.
+whatsoup_process_identity_python_candidates() {
+  printf '%s\n' /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3
+}
+
+whatsoup_process_identity_python_is_missing() {
+  python_candidate="$1"
+  case "$python_candidate" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+
+  parent_path="${python_candidate%/*}"
+  path_parts="${parent_path#/}"
+  current_path=""
+  while [ -n "$path_parts" ]; do
+    path_part="${path_parts%%/*}"
+    if [ "$path_part" = "$path_parts" ]; then
+      path_parts=""
+    else
+      path_parts="${path_parts#*/}"
+    fi
+    [ -n "$path_part" ] || continue
+    current_path="${current_path}/${path_part}"
+    if [ -e "$current_path" ] || [ -L "$current_path" ]; then
+      [ -d "$current_path" ] && [ -x "$current_path" ] || return 1
+    else
+      return 0
+    fi
+  done
+
+  if [ -e "$python_candidate" ] || [ -L "$python_candidate" ]; then
+    return 1
+  fi
+  return 0
+}
+
+whatsoup_resolve_process_identity_python() {
+  while IFS= read -r python_candidate; do
+    [ -n "$python_candidate" ] || continue
+    if whatsoup_process_identity_python_is_missing "$python_candidate"; then
+      continue
+    fi
+    if [ ! -x "$python_candidate" ]; then
+      CAP_PATH="$python_candidate"
+      CAP_VISIBILITY=fixed_trusted
+      return 2
+    fi
+    CAP_PATH="$python_candidate"
+    CAP_VISIBILITY=fixed_trusted
+    return 0
+  done <<EOF
+$(whatsoup_process_identity_python_candidates)
+EOF
+
+  CAP_PATH=""
+  CAP_VISIBILITY=absent
+  return 1
+}
+
 whatsoup_packages_for_manager() {
   profile="$1"
   platform="$2"
@@ -145,6 +207,7 @@ whatsoup_capability_records() {
   if [ "$platform" = "darwin" ]; then
     printf 'service_manager|required|launchctl|structural||||launchctl is supplied by macOS.\n'
     printf 'credential_store|optional|security|structural||||security is supplied by macOS.\n'
+    printf 'process_identity_python|required|python3|ctypes-libproc|python|||Install Homebrew Python with ctypes support for refresh-owner identity.\n'
   else
     printf 'service_manager|required|systemctl|structural||systemd|systemd|Install the systemd user-service tools.\n'
     printf 'credential_store|optional|secret-tool|structural||libsecret-tools|libsecret|Install the platform credential-store client if required.\n'
@@ -265,6 +328,26 @@ whatsoup_probe_python() {
   esac
 }
 
+whatsoup_probe_process_identity_python() {
+  "$CAP_PATH" -I -S -c '
+import ctypes
+import os
+class Identity(ctypes.Structure):
+    _fields_ = [("uuid", ctypes.c_ubyte * 16), ("unique", ctypes.c_uint64),
+                ("parent", ctypes.c_uint64), ("version", ctypes.c_int32),
+                ("parent_version", ctypes.c_int32), ("reserved2", ctypes.c_uint64),
+                ("reserved3", ctypes.c_uint64)]
+call = ctypes.CDLL("/usr/lib/libproc.dylib").proc_pidinfo
+call.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+call.restype = ctypes.c_int
+identity = Identity()
+raise SystemExit(0 if ctypes.sizeof(identity) == 56 and call(os.getpid(), 17, 0, ctypes.byref(identity), ctypes.sizeof(identity)) == ctypes.sizeof(identity) and identity.unique else 1)
+' >/dev/null 2>&1 || {
+    CAP_STATUS=inconclusive
+    CAP_DETAIL=process-identity-python-probe-failed
+  }
+}
+
 whatsoup_probe_capability() {
   capability_id="$1"
   disposition="$2"
@@ -286,11 +369,19 @@ whatsoup_probe_capability() {
   if [ "$capability_id" = "python" ]; then
     whatsoup_resolve_python312
     resolved_status=$?
+  elif [ "$capability_id" = "process_identity_python" ]; then
+    whatsoup_resolve_process_identity_python
+    resolved_status=$?
   else
     whatsoup_resolve_executable "$probe"
     resolved_status=$?
   fi
   if [ "$resolved_status" -ne 0 ]; then
+    if [ "$capability_id" = "process_identity_python" ] && [ "$resolved_status" -eq 2 ]; then
+      CAP_STATUS=inconclusive
+      CAP_DETAIL=process-identity-python-not-executable
+      return 0
+    fi
     if [ "$disposition" = "optional" ]; then
       CAP_STATUS=optional_missing
     else
@@ -308,6 +399,7 @@ whatsoup_probe_capability() {
   case "$capability_id" in
     node) whatsoup_probe_node "$version_rule" ;;
     python) whatsoup_probe_python ;;
+    process_identity_python) whatsoup_probe_process_identity_python ;;
     npm|git|rg|zsh|shellcheck|timeout)
       CAP_VERSION="$(whatsoup_first_line "$CAP_PATH" --version)" || {
         CAP_STATUS=inconclusive

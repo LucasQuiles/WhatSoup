@@ -21,6 +21,8 @@ import * as opsShim from '../../../src/fleet/routes/ops.ts';
 import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
 import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
+vi.mock('../../../src/lib/keyring.ts', () => ({ lookupCredential: vi.fn(() => null) }));
+
 vi.mock('../../../src/fleet/mcp-client.ts', () => ({ mcpCall: vi.fn() }));
 vi.mock('../../../src/fleet/http-proxy.ts', () => ({ proxyToInstance: vi.fn() }));
 
@@ -119,6 +121,33 @@ describe('ops-lifecycle handlers', () => {
     });
     expect(fs.existsSync(path.join(tmpDir, 'config'))).toBe(false);
     expect(deps.serviceManager.enable).not.toHaveBeenCalled();
+  });
+
+  it('creates a configured M365 agent with the full deny floor before launch', async () => {
+    const { REQUIRED_DENY } = await import('../../../src/core/settings-template.ts');
+    const { lookupCredential } = await import('../../../src/lib/keyring.ts');
+    vi.mocked(lookupCredential).mockClear();
+    const cwd = path.join(tmpDir, 'agent');
+    fs.mkdirSync(cwd, { recursive: true, mode: 0o700 });
+    const enabledPlugins = { 'microsoft_365@microsoft-365-dev': true };
+    const deps = makeDeps<any>({}) as OpsDeps;
+    const res = mockRes();
+    await handleCreateLine(mockReq({ method: 'POST', body: JSON.stringify({
+      name: 'bridge-agent', type: 'agent', adminPhones: ['15551230006'],
+      agentOptions: {
+        cwd, provider: 'claude-cli', allowM365Mutations: true, enabledPlugins,
+        m365Bridge: {
+          tenantId: '11111111-2222-3333-4444-555555555555',
+          accountEmail: 'user@example.test', origin: 'https://127.0.0.1:10000', profile: 'user-full-v1',
+        },
+      },
+    }) }), res, deps);
+    expect(res._status).toBe(201);
+    const settings = JSON.parse(fs.readFileSync(path.join(cwd, '.claude/settings.json'), 'utf8'));
+    expect(settings.permissions.deny).toEqual(expect.arrayContaining([...REQUIRED_DENY]));
+    expect(settings.enabledPlugins).toEqual(enabledPlugins);
+    expect(vi.mocked(lookupCredential).mock.calls.filter(([service]) => service.startsWith('agent365'))).toEqual([]);
+    expect(deps.serviceManager.enable).toHaveBeenCalledWith('bridge-agent');
   });
 
   it('keeps direct file writes off bare utf-8 string encoding (mirrors ops-private-writes)', () => {

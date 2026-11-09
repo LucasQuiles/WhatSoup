@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import {
@@ -12,6 +13,13 @@ import {
   TOOL_RESULT_MARKERS,
 } from '../../src/core/durability-evidence-contract.ts';
 import { createOutboundSendsWriter } from '../../src/core/outbound-sends.ts';
+import {
+  HANDOFF_ARTIFACT_RETENTION_BATCH_SIZE,
+  HANDOFF_ARTIFACT_RETENTION_MS,
+  ensureHandoffArtifactSchema,
+  getHandoffArtifact,
+  upsertHandoffArtifact,
+} from '../../src/runtimes/agent/handoff-artifact.ts';
 
 describe('database retention', () => {
   let db: Database;
@@ -23,6 +31,130 @@ describe('database retention', () => {
 
   afterEach(() => {
     db.close();
+  });
+
+  it('prunes only expired handoff artifacts through the canonical retention sweep', () => {
+    const now = 2_000_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      ensureHandoffArtifactSchema(db);
+      for (const [conversationKey, updatedAt] of [
+        ['handoff-aged', now - HANDOFF_ARTIFACT_RETENTION_MS - 1],
+        ['handoff-exact-cutoff', now - HANDOFF_ARTIFACT_RETENTION_MS],
+        ['handoff-recent', now - HANDOFF_ARTIFACT_RETENTION_MS + 1],
+      ] as const) {
+        upsertHandoffArtifact(db, {
+          conversationKey,
+          summary: 'short-lived handoff summary',
+          seededArtifacts: 'short-lived seed',
+          updatedAt,
+          sourceProvider: 'test-provider',
+          sourceModel: 'test-model',
+          tokenBaseline: 1,
+        });
+      }
+
+      const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+
+      expect(result.handoffArtifacts).toBe(1);
+      expect(getHandoffArtifact(db, 'handoff-aged')).toBeNull();
+      expect(getHandoffArtifact(db, 'handoff-exact-cutoff')).not.toBeNull();
+      expect(getHandoffArtifact(db, 'handoff-recent')).not.toBeNull();
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('reports zero handoff artifacts when the optional agent table is absent', () => {
+    expect(runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION).handoffArtifacts).toBe(0);
+  });
+
+  it('rolls back every bounded handoff batch after a later SQLite failure and drains it once on retry', () => {
+    const now = 2_000_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      ensureHandoffArtifactSchema(db);
+      for (let index = 0; index <= HANDOFF_ARTIFACT_RETENTION_BATCH_SIZE; index += 1) {
+        upsertHandoffArtifact(db, {
+          conversationKey: `handoff-rollback-${String(index).padStart(3, '0')}`,
+          summary: 'must survive rollback',
+          seededArtifacts: null,
+          updatedAt: now - HANDOFF_ARTIFACT_RETENTION_MS - 1,
+          sourceProvider: 'test-provider',
+          sourceModel: null,
+          tokenBaseline: 0,
+        });
+      }
+      const oldBucket = (db.raw.prepare(
+        `SELECT strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now', '-200 days') AS bucket`,
+      ).get() as { bucket: string }).bucket;
+      db.raw.prepare(
+        `INSERT INTO metrics_hourly (bucket, metric, value) VALUES (?, 'messages_in', 1)`,
+      ).run(oldBucket);
+      db.raw.exec(`
+        CREATE TRIGGER handoff_retention_later_failure
+        BEFORE DELETE ON metrics_hourly
+        BEGIN
+          SELECT RAISE(ABORT, 'injected later retention failure');
+        END;
+      `);
+
+      expect(() => runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION))
+        .toThrow('injected later retention failure');
+      expect(getHandoffArtifact(db, 'handoff-rollback-000')).not.toBeNull();
+      expect(getHandoffArtifact(db, `handoff-rollback-${String(HANDOFF_ARTIFACT_RETENTION_BATCH_SIZE).padStart(3, '0')}`)).not.toBeNull();
+
+      db.raw.exec('DROP TRIGGER handoff_retention_later_failure');
+      expect(runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION).handoffArtifacts)
+        .toBe(HANDOFF_ARTIFACT_RETENTION_BATCH_SIZE + 1);
+      expect(getHandoffArtifact(db, 'handoff-rollback-000')).toBeNull();
+      expect(getHandoffArtifact(db, `handoff-rollback-${String(HANDOFF_ARTIFACT_RETENTION_BATCH_SIZE).padStart(3, '0')}`)).toBeNull();
+      expect(runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION).handoffArtifacts).toBe(0);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('drains a restored expired handoff backlog immediately at timer start', async () => {
+    const now = 2_000_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+    const timer = new DatabaseRetentionTimer(db, DEFAULT_DATABASE_RETENTION);
+    try {
+      ensureHandoffArtifactSchema(db);
+      for (let index = 0; index <= HANDOFF_ARTIFACT_RETENTION_BATCH_SIZE; index += 1) {
+        upsertHandoffArtifact(db, {
+          conversationKey: `restored-expired-handoff-${String(index).padStart(3, '0')}`,
+          summary: 'restored artifact',
+          seededArtifacts: null,
+          updatedAt: now - HANDOFF_ARTIFACT_RETENTION_MS - 1,
+          sourceProvider: 'test-provider',
+          sourceModel: null,
+          tokenBaseline: 0,
+        });
+      }
+      upsertHandoffArtifact(db, {
+        conversationKey: 'restored-recent-handoff',
+        summary: 'restored artifact',
+        seededArtifacts: null,
+        updatedAt: now - HANDOFF_ARTIFACT_RETENTION_MS + 1,
+        sourceProvider: 'test-provider',
+        sourceModel: null,
+        tokenBaseline: 0,
+      });
+
+      timer.start();
+      await Promise.resolve();
+
+      expect(getHandoffArtifact(db, 'restored-expired-handoff-000')).toBeNull();
+      expect(getHandoffArtifact(db, `restored-expired-handoff-${String(HANDOFF_ARTIFACT_RETENTION_BATCH_SIZE).padStart(3, '0')}`)).toBeNull();
+      expect(getHandoffArtifact(db, 'restored-recent-handoff')).not.toBeNull();
+      expect(timer.getHealthSnapshot().lastResult).toMatchObject({
+        handoffArtifacts: HANDOFF_ARTIFACT_RETENTION_BATCH_SIZE + 1,
+      });
+    } finally {
+      timer.stop();
+      nowSpy.mockRestore();
+    }
   });
 
   it('deletes old terminal durability rows and exported facts', () => {
@@ -94,6 +226,7 @@ describe('database retention', () => {
       messages: 0,
       triggerRuns: 0,
       triggerOccurrences: 0,
+      handoffArtifacts: 0,
       identityAdmissionsExpired: 0,
     });
     expect(rowCount('inbound_events')).toBe(1);
@@ -509,18 +642,38 @@ describe('database retention', () => {
   });
 
   it('keeps a bucket exactly at the retention boundary (strict <) (#1108 hardening)', () => {
-    const exactCutoff = (db.raw
-      .prepare(`SELECT strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now', '-180 days') AS b`)
-      .get() as { b: string }).b;
-    db.raw.prepare(
-      `INSERT INTO metrics_hourly (bucket, metric, value) VALUES (?, 'messages_in', 9)`,
-    ).run(exactCutoff);
+    const nativeClock = new DatabaseSync(':memory:');
+    let now = '2030-01-01 12:00:00';
+    try {
+      // SQLite's clock is independent of Date.now(); keep native date parsing
+      // while sharing one controlled instant between fixture and sweep.
+      db.raw.function('datetime', { varargs: true }, (...args) => {
+        const row = nativeClock.prepare(
+          `SELECT datetime(${args.map(() => '?').join(',')}) AS value`,
+        ).get(...args.map((arg) => arg === 'now' ? now : arg));
+        return row!.value;
+      });
+      const bucketAt = nativeClock.prepare(
+        `SELECT strftime('%Y-%m-%dT%H:%M:%S.000Z', ?, '-180 days', ?) AS bucket`,
+      );
+      const insert = db.raw.prepare(
+        `INSERT INTO metrics_hourly (bucket, metric, value) VALUES (?, 'messages_in', ?)`,
+      );
+      insert.run(bucketAt.get(now, '-1 second')!.bucket, 1);
+      insert.run(bucketAt.get(now, '+0 seconds')!.bucket, 2);
+      insert.run(bucketAt.get(now, '+1 second')!.bucket, 3);
 
-    const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+      const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+      expect(result.metricsHourly).toBe(1);
+      expect(columnValues('metrics_hourly', 'value')).toEqual([2, 3]);
 
-    // `datetime(bucket) < datetime('now','-180 days')` is false at exact equality → kept.
-    expect(result.metricsHourly).toBe(0);
-    expect(rowCount('metrics_hourly')).toBe(1);
+      now = '2030-01-01 12:00:01';
+      const advanced = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+      expect(advanced.metricsHourly).toBe(1);
+      expect(columnValues('metrics_hourly', 'value')).toEqual([3]);
+    } finally {
+      nativeClock.close();
+    }
   });
 
   it('preserves recoverable and unexported rows regardless of age', () => {
@@ -584,6 +737,7 @@ describe('database retention', () => {
       messages: 0,
       triggerRuns: 0,
       triggerOccurrences: 0,
+      handoffArtifacts: 0,
       identityAdmissionsExpired: 0,
     });
     expect(rowCount('inbound_events')).toBe(2);
@@ -1211,6 +1365,7 @@ describe('database retention', () => {
         messages: 0,
         triggerRuns: 0,
         triggerOccurrences: 0,
+        handoffArtifacts: 0,
         identityAdmissionsExpired: 0,
       };
       const runSpy = vi.spyOn(timer, 'runCleanup')

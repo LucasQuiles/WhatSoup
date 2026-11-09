@@ -78,6 +78,20 @@ describe('agent failure taxonomy detectors', () => {
     expect(isPromptTooLongMessage('Prompt is too long: maximum context length exceeded.')).toBe(true);
   });
 
+  it('classifies the bare CLI credit-balance sentence as a usage limit', () => {
+    // An API-key account with no credit prints only this sentence: no billing_error
+    // token and no provider/billing co-word.
+    expect(isUsageLimitMessage('Credit balance is too low')).toBe(true);
+    expect(classifyProviderFailure('Credit balance is too low\n')).toBe('usage-limit');
+    expect(providerFailureArmsFallback('usage-limit')).toBe(true);
+  });
+
+  it('does not treat other credit-balance wording as a usage limit', () => {
+    expect(isUsageLimitMessage('Your credit balance is $40.')).toBe(false);
+    expect(classifyProviderFailure('Your credit balance is $40.')).toBeNull();
+    expect(isUsageLimitMessage('Credit balance exhausted.')).toBe(false);
+  });
+
   it('does not classify ordinary discussion of quota handling as a provider cap', () => {
     expect(isUsageLimitMessage('Please document how usage limit and quota exceeded errors should be handled.')).toBe(false);
   });
@@ -460,6 +474,12 @@ describe('classifyAgentFailure', () => {
       label: 'provider credit balance exhausted',
       source: 'provider_result' as const,
       message: 'Provider error: insufficient credits. Please add credits to continue.',
+      expected: 'provider_usage_limit' as const,
+    },
+    {
+      label: 'bare CLI credit balance too low',
+      source: 'provider_result' as const,
+      message: 'Credit balance is too low',
       expected: 'provider_usage_limit' as const,
     },
     {

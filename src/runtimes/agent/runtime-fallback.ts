@@ -76,6 +76,7 @@ import { createPrimaryModelProbeAdapters } from './providers/primary-model-usabi
 import {
   primaryModelUsabilityRequiresAlert,
   probePrimaryModelUsability,
+  type PrimaryProbeServiceContext,
   type PrimaryModelUsabilityResult,
 } from './providers/primary-model-usability.ts';
 import { fallbackRequiresPrimaryProbe, isProviderFallbackReason } from './runtime-presentation.ts';
@@ -96,6 +97,8 @@ import type { FallbackEmptyAdvance } from './fallback-empty-advance.ts';
 import type { TurnCapabilityTracker } from './turn-capability-tracker.ts';
 import type { EgressProxy } from './egress-proxy.ts';
 import type { ProviderExecutionGate } from './provider-execution-gate.ts';
+import type { M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
+import type { TypedHandoffDistillConfig } from '../../lib/handoff-distill-config.ts';
 import type { RuntimePrimaryModelUsability, RuntimeTurnCapability } from './runtime.ts';
 
 const log = createChildLogger('agent-runtime');
@@ -218,10 +221,17 @@ export interface RuntimeFallbackPort {
   readonly agentFallbackDiscovery: AgentFallbackDiscoveryConfig | null;
   readonly modelCatalogueListFn: typeof listModelCatalog | undefined;
   readonly allowM365Mutations: boolean | undefined;
+  readonly m365MutationPolicy: M365MutationPolicy | undefined;
+  readonly expectedAccountDigest: string | null;
   readonly runtimeBootPerfMs: number;
   readonly globalMcpSocketPath: string | null;
   readonly egressProxy: EgressProxy | undefined;
+  /** Explicit instance policy, if configured; absence preserves legacy env health. */
+  readonly handoffDistill: TypedHandoffDistillConfig | undefined;
   readonly providerExecutionGate: ProviderExecutionGate;
+  /** Optional for older hand-built coordinator fixtures; production supplies it. */
+  readonly primaryProbeServiceContext?: PrimaryProbeServiceContext | null;
+  currentPrimaryProbeServiceContext?: () => PrimaryProbeServiceContext | null;
   readonly controlSession: SessionManager | null;
   readonly fallbackWindow: FallbackWindowState;
   readonly fallbackMetrics: FallbackWindowMetrics;
@@ -870,9 +880,9 @@ export class RuntimeFallbackCoordinator {
       fallbackRestoredFromPersist: this.host.fallbackWindowRestored,
       turnErrorCounts: Object.fromEntries(this.host.turnCapabilityTracker.errorCounts),
       handoffDistiller: {
-        enabled: handoffDistillerEnabled(),
-        contextInjection: handoffContextEnabled(),
-        model: handoffDistillModel(),
+        enabled: this.host.handoffDistill?.enabled ?? handoffDistillerEnabled(),
+        contextInjection: this.host.handoffDistill?.contextInjection ?? handoffContextEnabled(),
+        model: this.host.handoffDistill?.model ?? handoffDistillModel(),
       },
       fallbackDiscovery: this.host.agentFallbackDiscovery
         ? {
@@ -1278,6 +1288,7 @@ export class RuntimeFallbackCoordinator {
             entry.provider,
             {
               allowM365Mutations: this.host.allowM365Mutations,
+              m365MutationPolicy: this.host.m365MutationPolicy === undefined ? undefined : { status: 'rejected' },
               whatsoupInstance: this.host.instanceName,
               whatsoupMcpSocket: this.host.globalMcpSocketPath ?? undefined,
             },
@@ -1726,6 +1737,7 @@ export class RuntimeFallbackCoordinator {
           fallbackEntry.provider,
           {
             allowM365Mutations: this.host.allowM365Mutations,
+            m365MutationPolicy: this.host.m365MutationPolicy === undefined ? undefined : { status: 'rejected' },
             whatsoupInstance: this.host.instanceName,
             whatsoupMcpSocket: this.host.globalMcpSocketPath ?? undefined,
           },
@@ -2198,7 +2210,20 @@ export class RuntimeFallbackCoordinator {
       probeInFlight: true,
     };
 
-    const adapters = createPrimaryModelProbeAdapters(this.host.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.host.agentProvider, this.host.model, this.host.cwd, this.host.egressProxy?.port, this.host.providerExecutionGate));
+    const adapters = createPrimaryModelProbeAdapters(
+      this.host.agentProviderConfig,
+      buildPrimaryProbeAdapterDeps(
+        this.host.agentProvider,
+        this.host.model,
+        this.host.cwd,
+        this.host.egressProxy?.port,
+        this.host.providerExecutionGate,
+        trigger,
+        this.host.primaryProbeServiceContext ?? undefined,
+        this.host.primaryProbeServiceContext !== undefined,
+        () => this.host.currentPrimaryProbeServiceContext?.() ?? null,
+      ),
+    );
     void Promise.resolve()
       .then(() => probePrimaryModelUsability(target, adapters))
       .then((result) => this.recordPrimaryModelUsability(result, trigger))

@@ -6192,14 +6192,24 @@ def open_renotify_is_nonactionable(event: dict[str, Any], key: str) -> bool:
     return False
 
 
-def mark_stale_incident_suppressed(record: dict[str, Any], event: dict[str, Any], current: int) -> None:
+STALE_SUPPRESSION_DIAGNOSTIC_SECONDS = 300
+
+
+def mark_stale_incident_suppressed(record: dict[str, Any], event: dict[str, Any], current: int) -> bool:
     """Pattern A: record a suppressed (non-sent) stale renotify for audit.
 
     The incident stays in state (audit trail preserved); only the WhatsApp push
     is gated. lastStaleRenotifiedAt is intentionally NOT advanced — we did not
     notify — so the existing renotify cadence still governs if it later becomes
     actionable.
+
+    Repeated diagnostic samples are recorded at most once per five minutes;
+    staleSuppressedCount counts these samples, not dispatcher sweeps. Recovery
+    and hold-expiry decisions are still evaluated on every sweep.
     """
+    previous = int_field(record, "lastStaleSuppressedAt")
+    if record.get("staleSuppressed") and previous > 0 and 0 <= current - previous < STALE_SUPPRESSION_DIAGNOSTIC_SECONDS:
+        return False
     if not record.get("staleAt"):
         record["staleAt"] = current
         record["staleIso"] = now_iso()
@@ -6208,6 +6218,7 @@ def mark_stale_incident_suppressed(record: dict[str, Any], event: dict[str, Any]
     record["lastStaleSuppressedIso"] = now_iso()
     record["lastStaleSuppressedEventId"] = event.get("id")
     record["staleSuppressedCount"] = int_field(record, "staleSuppressedCount") + 1
+    return True
 
 
 def stale_autoclose_summary_event(keys: list[str], current: int) -> dict[str, Any]:
@@ -6967,9 +6978,9 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                     "error": str(exc),
                 })
             if nonactionable:
-                mark_stale_incident_suppressed(record, event, current)
+                before_record = json_snapshot(record)
+                diagnostic_recorded = mark_stale_incident_suppressed(record, event, current)
                 suppressed += 1
-                changed = True
                 opened = int_field(record, "openedAt", current)
                 age = max(0, current - opened)
                 # Safety valve / §10 C5 terminal removal: a non-actionable stale
@@ -7000,8 +7011,9 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                             if held_seconds < AUTOCLOSE_LIVENESS_HOLD_CAP_SECONDS:
                                 will_close = False
                                 held_for_liveness = True
+                                if diagnostic_recorded or not record.get("autocloseHeldForLiveness"):
+                                    record["lastAutocloseHoldAt"] = current
                                 record["autocloseHeldForLiveness"] = True
-                                record["lastAutocloseHoldAt"] = current
                                 append_dispatch_log(paths, {
                                     "type": "autoclose_held_for_liveness",
                                     "incidentKey": key,
@@ -7064,8 +7076,9 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                             if held_seconds < AUTOCLOSE_LIVENESS_HOLD_CAP_SECONDS:
                                 will_close = False
                                 held_for_recovery = True
+                                if diagnostic_recorded or not record.get("autocloseHeldForRecovery"):
+                                    record["lastAutocloseHoldAt"] = current
                                 record["autocloseHeldForRecovery"] = True
-                                record["lastAutocloseHoldAt"] = current
                                 append_dispatch_log(paths, {
                                     "type": "autoclose_held_for_recovery",
                                     "incidentKey": key,
@@ -7106,6 +7119,7 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                         })
                 if will_close:
                     auto_closed.append(str(key))
+                changed = changed or record != before_record
                 bounded_unverified = bool(record.get("autocloseBoundedUnverified"))
                 append_dispatch_log(paths, {
                     "type": "stale_renotify_suppressed",

@@ -103,9 +103,23 @@ describe('distill gate — precedence & outcome folding', () => {
     expect(gate(s, { globalInFlight: 5 }).reason).toBe('global-saturated');
   });
 
-  it('success counts spend and never lets negative tokens reduce the window total', () => {
-    const s = recordDistillSuccess(initialDistillState(NOW), -50, NOW, CONFIG);
-    expect(s.tokensThisWindow).toBe(0);
-    expect(s.callsThisWindow).toBe(1);
+  it.each([-50, NaN, Infinity, -Infinity, 0.5, Number.MAX_SAFE_INTEGER + 1])('rejects invalid token spend %s', (tokens) => {
+    expect(() => recordDistillSuccess(initialDistillState(NOW), tokens, NOW, CONFIG)).toThrow(/token usage/);
+  });
+
+  it.each([NaN, Infinity, -1, 0.5, Number.MAX_SAFE_INTEGER + 1])('denies an invalid accumulated token budget %s', (tokensThisWindow) => {
+    expect(gate({ ...initialDistillState(NOW), tokensThisWindow }).reason).toBe('budget-tokens');
+  });
+
+  it('keeps accumulated spend finite, safe and monotonic across a boundary sweep', () => {
+    for (const previous of [0, 1, 9999, 10000, Number.MAX_SAFE_INTEGER - 1, Number.MAX_SAFE_INTEGER]) {
+      for (const used of [0, 1, 10000, Number.MAX_SAFE_INTEGER]) {
+        const s = recordDistillSuccess({ ...initialDistillState(NOW), tokensThisWindow: previous }, used, NOW, CONFIG);
+        expect(Number.isSafeInteger(s.tokensThisWindow)).toBe(true);
+        expect(s.tokensThisWindow).toBeGreaterThanOrEqual(previous);
+        expect(s.tokensThisWindow).toBe(Math.min(Number.MAX_SAFE_INTEGER, previous + used));
+        expect(gate(s).reason).toBe(previous + used >= CONFIG.maxTokensPerWindow ? 'budget-tokens' : 'ok');
+      }
+    }
   });
 });

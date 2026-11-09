@@ -911,7 +911,14 @@ describe('exact added lines', () => {
           treeReads += 1;
           return treeReads === 1 ? originalTree : substitutedTree;
         }
-        const response = resolveShimResponse(responses, args.slice(1), options?.input);
+        const candidateTreeOid = (JSON.parse(candidateTreeKey) as string[]).at(-1)!;
+        const reread = key === responseKey(['cat-file', '--batch'])
+          && String(options?.input).trim().split('\n').includes(candidateTreeOid);
+        if (reread) treeReads += 1;
+        const selected = reread
+          ? { ...responses, [candidateTreeKey]: { stdoutBase64: substitutedTree.toString('base64') } }
+          : responses;
+        const response = resolveShimResponse(selected, args.slice(1), options?.input);
         if (response === undefined) throw new Error('unexpected synthetic command');
         if (response.stdoutBase64 !== undefined) return Buffer.from(response.stdoutBase64, 'base64');
         return Buffer.from(response.stdout ?? '', 'utf8');

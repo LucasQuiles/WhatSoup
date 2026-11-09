@@ -217,6 +217,22 @@ describe('AgentRuntime periodic probe — a timed-out probe retries once within 
     expect(state.periodicUsabilityProbeDueAt).toBe(t0 + 5 * MINUTE + 66 * MINUTE);
   });
 
+  it('a manual timeout without a periodic timer does not arm or consume the short retry', () => {
+    const { state } = armedRuntime();
+    const t0 = systemClock.now();
+
+    state.fallback.recordPrimaryModelUsability(TIMEOUT, 'manual');
+    expect(state.periodicUsabilityProbeBackoff).toBe(1);
+    expect(state.periodicUsabilityProbeTimer).toBeNull();
+    expect(state.periodicUsabilityProbeDueAt).toBeNull();
+    vi.advanceTimersByTime(5 * MINUTE);
+    expect(probeCalls).toEqual([]);
+
+    state.fallback.scheduleNextPeriodicUsabilityProbe();
+    state.fallback.recordPrimaryModelUsability(TIMEOUT, 'manual');
+    expect(state.periodicUsabilityProbeDueAt).toBe(t0 + 10 * MINUTE);
+  });
+
   it('CONTROL: non-timeout failures keep the doubled cadence', () => {
     const { state } = armedRuntime();
     const t0 = systemClock.now();

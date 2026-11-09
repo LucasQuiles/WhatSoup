@@ -120,6 +120,12 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                     finally: os.close(release)
                     child_released = True
                     record['child_released_after_guard_parked'] = True
+                if mode.startswith('event-order-natural-') and not authority_released and any(line.startswith('C_HOLD ') for line in lines):
+                    release = os.open(root / 'event-order-authority-release', os.O_WRONLY | os.O_NONBLOCK)
+                    try: os.write(release, b'release\n')
+                    finally: os.close(release)
+                    authority_released = True
+                    record['outer_budget_released_after_cleanup_hold'] = True
                 if mode.startswith('event-order-natural-') and not released and any(line.startswith('O_OUTER_CLAIM rc=1 ') for line in lines) and any(line.startswith('C_HOLD ') for line in lines):
                     release = os.open(root / 'event-order-cleanup-release', os.O_WRONLY | os.O_NONBLOCK)
                     try: os.write(release, b'release\n')

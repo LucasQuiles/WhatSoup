@@ -67,6 +67,7 @@ vi.mock('../../src/config.ts', () => ({
     botName: 'WhatSoup',
     accessMode: 'allowlist',
     healthPort: 9090,
+    transportAuthority: { enabled: false, accountId: 'synthetic-account' },
     models: {
       conversation: 'claude-opus-4-5',
       extraction: 'claude-haiku-4-5',
@@ -99,7 +100,9 @@ vi.mock('../../src/lib/emit-alert.ts', () => ({
 
 import { makeWASocket, useMultiFileAuthState } from '@whiskeysockets/baileys';
 import { ConnectionManager } from '../../src/transport/connection.ts';
+import { TransportAuthorityProviderOutcomeUnknownError } from '../../src/transport/outbound-governor.ts';
 import { scheduleBondEventMaintenance } from '../../src/transport/bond-event-log.ts';
+import type { OperationsAuthorityPort } from '../../src/transport/operations-authority-client.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1533,6 +1536,12 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     expect(persistedText).not.toContain(testAuthDir);
     expect(persistedText).not.toContain(testStateRoot);
     expect(persistedText).not.toContain(testDataRoot);
+    // The churn hold stamp is monotonic time, meaningless to another process:
+    // the live snapshot carries it, the persisted window keeps base's shape.
+    expect(manager.getConnectionState().recentDisconnects).toHaveProperty('lastChurnMonotonicMs');
+    expect(Object.keys(persisted.connection.recentDisconnects).sort()).toEqual(
+      ['byReason', 'count', 'lastAt', 'lastReason', 'lastStatusCode', 'windowMs'],
+    );
 
     await manager.shutdown();
   });
@@ -1994,6 +2003,48 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     ).resolves.toEqual({ waMessageId: 'media-retry' });
 
     expect(mockSock.sendMessage).toHaveBeenCalledTimes(2);
+
+    await manager.shutdown();
+  });
+
+  it('sendMedia does not replay an authority-admitted encrypted-tmp failure after provider submission', async () => {
+    const { mockSock } = makeMockSocket();
+    const providerTmpError = Object.assign(
+      new Error('ENOENT: no such file or directory, open /tmp/document123-enc'),
+      { code: 'ENOENT', path: '/tmp/document123-enc' },
+    );
+    let providerEffects = 0;
+    const providerSend = mockSock.sendMessage;
+    providerSend.mockImplementationOnce(async () => {
+      // The provider has accepted the submission before it reports the lost
+      // temporary file; replaying it would make a second external effect.
+      providerEffects += 1;
+      throw providerTmpError;
+    });
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const authority = {
+      readyOperations: vi.fn(async () => []),
+      readyOperation: vi.fn(async () => { throw new Error('no approved work'); }),
+      admit: vi.fn(async () => ({ attemptId: 'media-unknown-1', payloadDigest: 'sha256:media' })),
+      recordReceipt: vi.fn(async () => undefined),
+    };
+    const manager = new ConnectionManager();
+    manager.setOperationsAuthorityClient(authority as unknown as OperationsAuthorityPort);
+    await manager.connect();
+
+    await expect(
+      manager.sendMedia('111@s.whatsapp.net', {
+        type: 'document',
+        buffer: Buffer.from('doc'),
+        filename: 'doc.txt',
+        mimetype: 'text/plain',
+      }),
+    ).rejects.toBeInstanceOf(TransportAuthorityProviderOutcomeUnknownError);
+
+    expect(providerEffects).toBe(1);
+    expect(providerSend).toHaveBeenCalledTimes(1);
+    expect(authority.recordReceipt).toHaveBeenCalledWith({ attemptId: 'media-unknown-1', state: 'unknown' });
 
     await manager.shutdown();
   });

@@ -18,7 +18,7 @@ import {
 } from '@whiskeysockets/baileys';
 import { shortHash } from '../lib/short-hash.ts';
 import { hasTransientAuthReadIssue } from '../lib/auth-bond-policy.ts';
-import { systemClock } from '../lib/clock.ts';
+import { clockDriftHoldExtensionMs, systemClock } from '../lib/clock.ts';
 import { RECONNECT_RESET_REASONS } from '../lib/disconnect-classification.ts';
 import { resolveBondOwnerEvidence } from './bond-actor-receipt.ts';
 import {
@@ -62,6 +62,7 @@ import {
 import { OutboundFloodIncidentLifecycle } from './outbound-flood-incident.ts';
 import { PresenceCache } from './presence-cache.ts';
 import { jitteredDelay } from '../core/retry.ts';
+import { RECENT_DISCONNECT_DEGRADED_THRESHOLD } from '../core/health-reason-hold.ts';
 import {
   buildDisconnectDecisionRecord,
   decideDisconnectAction,
@@ -77,8 +78,23 @@ import { jidPattern } from '../lib/redaction-patterns.ts';
 import { baileysVersionLabel, resolveBaileysVersion } from './baileys-version.ts';
 import { PollVoteDecryptor } from './poll-vote-decryptor.ts';
 import { HistorySyncWatch } from './history-sync-watch.ts';
-import { OutboundGovernor, wrapWithOutboundGovernor } from './outbound-governor.ts';
+import {
+  OutboundGovernor,
+  TransportAuthorityProviderOutcomeUnknownError,
+  wrapWithOutboundGovernor,
+} from './outbound-governor.ts';
 import type { OutboundBannerClassifier } from './outbound-content-egress.ts';
+import {
+  FailClosedTransportAuthorityGate,
+  FinalTransportAuthorityGate,
+  registerTrustedInbound,
+  renderTransportReviewCard,
+  retryApprovedWhatsappOperations,
+  sendFixedControlReceipt,
+  type OutboundAuthorityGate,
+} from './operations-authority-gate.ts';
+import type { OperationsAuthorityPort } from './operations-authority-client.ts';
+import { ApprovedOperationDispatcher } from './approved-operation-dispatcher.ts';
 import { readWhatsoupGitSha } from '../lib/git-env.ts';
 
 export type { IncomingMessage } from '../core/types.ts';
@@ -114,6 +130,20 @@ export interface ConnectionRecentDisconnects {
   lastReason: string | null;
   lastStatusCode: number | null;
   byReason: Record<string, number>;
+  /**
+   * Until when, on the monotonic clock (performance.now()), the latest churn
+   * holds, capped at now: now while it holds, else that instant. Null if
+   * there has been none. Whether churn exists is decided only by `count`, the
+   * wall-clock window above, when a disconnect is recorded; the monotonic
+   * clock only measures how long it holds: until the third-newest counted
+   * disconnect leaves the window, plus clockDriftHoldExtensionMs, and at
+   * least until the disconnect that completed it. Health holds
+   * `connection_churn` from it, so churn is seen whether or not a health read
+   * fell inside it. Only the Baileys manager sets it, on the live snapshot
+   * only: monotonic time means nothing to another process, so the persisted
+   * runtime state omits it.
+   */
+  lastChurnMonotonicMs?: number | null;
 }
 
 /**
@@ -128,6 +158,8 @@ export interface ConnectionOutboundFlood {
   destCount: number;
   worstDestHash: string | null;
   worstCount: number;
+  /** See OutboundFloodStats.lastFloodingMonotonicMs. Only the Baileys manager sets it. */
+  lastFloodingMonotonicMs?: number | null;
 }
 
 export interface ConnectionStateSnapshot {
@@ -609,7 +641,12 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private lastPongAt: number | null = null;
   private lastDisconnectReason: string | null = null;
   private lastStatusCode: number | null = null;
-  private recentDisconnects: Array<{ at: number; reason: string; statusCode: number | null }> = [];
+  /** Each disconnect also carries its monotonic instant, for the health hold
+   * only. It is absent only for an entry this process did not record (none
+   * today: nothing reloads the window). */
+  private recentDisconnects: Array<{ at: number; reason: string; statusCode: number | null; monotonicMs?: number }> = [];
+  /** When the latest churn stops holding (inclusive), on the monotonic clock, or null. */
+  private churnHeldUntilMonotonicMs: number | null = null;
   private lastDisconnectDiagnostic: unknown | null = null;
   private loggedOutAlertEmitted = false;
   private unclassified401ReconnectSpent = false;
@@ -698,7 +735,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private selfMentionRegexLid: RegExp | null = null;
 
   /** Callback invoked for every parsed incoming message. Set by the conversation layer. */
-  onMessage: ((msg: IncomingMessage) => void) | null = null;
+  onMessage: ((msg: IncomingMessage) => void | Promise<void>) | null = null;
 
   /** Contacts directory built from incoming messages — maps names → phone numbers for @mention resolution. */
   readonly contactsDir = new ContactsDirectory();
@@ -733,6 +770,15 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private readonly outboundGovernor: OutboundGovernor | null;
 
   /**
+   * Final egress authority is independent of the outbound governor. When the
+   * pilot flag is enabled this starts fail-closed and is replaced only after the
+   * protected service-principal factory has qualified the authority client.
+   */
+  private outboundAuthorityGate: OutboundAuthorityGate | null;
+  private operationsAuthority: OperationsAuthorityPort | null = null;
+  private approvedOperationDispatcher: ApprovedOperationDispatcher | null = null;
+
+  /**
    * Injected send-seam content classifier (#1783). Wired by the composition root
    * (src/main.ts) from the runtimes `classifyStreamedProviderFailure` — transport
    * may not import runtimes (ring boundary), so the classifier is passed in.
@@ -749,6 +795,34 @@ export class ConnectionManager extends EventEmitter implements Messenger {
    *  live socket on the next reconnect. */
   setOutboundContentClassifier(classify: OutboundBannerClassifier): void {
     this.outboundContentClassifier = classify;
+  }
+
+  /** Wire the protected authority client before connection startup. */
+  setOperationsAuthorityClient(authority: OperationsAuthorityPort): void {
+    if (this.sock !== null || this.connectionState !== 'disconnected') {
+      throw new Error('protected authority must be wired before connection startup');
+    }
+    const accountId = config.transportAuthority?.accountId;
+    if (!accountId) throw new Error('protected authority account identity is unavailable');
+    this.approvedOperationDispatcher?.stop();
+    this.operationsAuthority = authority;
+    this.outboundAuthorityGate = new FinalTransportAuthorityGate(authority);
+    this.approvedOperationDispatcher = new ApprovedOperationDispatcher({
+      accountId,
+      authority,
+      send: async (recipient, content, options) => {
+        const socket = this.sock;
+        if (!socket || this.shuttingDown || this.connectionState !== 'connected') {
+          throw new Error('approved transport work cannot send while disconnected');
+        }
+        return options === undefined
+          ? socket.sendMessage(recipient, content as any)
+          : socket.sendMessage(recipient, content as any, options as any);
+      },
+      onError: (err, operationId) => {
+        this.log.error({ err, operationId }, 'approved transport dispatch held; no fallback send');
+      },
+    });
   }
 
   /** When true, incoming calls are automatically rejected via sock.rejectCall(). */
@@ -816,6 +890,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           globalMaxPerWindow: govCfg.globalMaxPerWindow,
           globalWindowMs: govCfg.globalWindowMs,
         })
+      : null;
+    this.outboundAuthorityGate = config.transportAuthority?.enabled
+      ? new FailClosedTransportAuthorityGate('transport authority is enabled but not qualified')
       : null;
     this.on('exhausted', () => {
       void this.handleExhausted();
@@ -1058,12 +1135,13 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       // bot goes deaf). wrapWithOutboundGovernor mutates + returns the same
       // object; re-running here on every reconnect re-installs on the new socket
       // while the governor STATE persists (created once in the constructor, SS2).
-      this.sock = this.outboundGovernor
+      this.sock = this.outboundGovernor || this.outboundAuthorityGate
         ? wrapWithOutboundGovernor(sock, {
-            governor: this.outboundGovernor,
+            governor: this.outboundGovernor ?? undefined,
             resolveDest: (jid) => this.resolveOutboundDest(jid),
             log: this.log,
             classifyProviderBanner: this.outboundContentClassifier ?? undefined,
+            authorityGate: this.outboundAuthorityGate ?? undefined,
           })
         : sock;
       this.recordCredentialLifecycle('socket_created', { baileysVersion: this.latestBaileysVersion });
@@ -1309,7 +1387,12 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         this.scheduleSettledAuthBondSnapshot('outbound-send-settled');
         return { waMessageId: result?.key?.id ?? null };
       } catch (err) {
-        if (attempt > 0 || !canReplayMediaSend(media) || !isBaileysEncryptedTmpEnoent(err)) {
+        if (
+          err instanceof TransportAuthorityProviderOutcomeUnknownError
+          || attempt > 0
+          || !canReplayMediaSend(media)
+          || !isBaileysEncryptedTmpEnoent(err)
+        ) {
           throw err;
         }
         this.log.warn(
@@ -1731,7 +1814,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       reconnectReset: this.lastReconnectReset === null
         ? null
         : { reason: this.lastReconnectReset.reason, at: toIso(this.lastReconnectReset.at) },
-      recentDisconnects: this.getRecentDisconnectStats(),
+      recentDisconnects: this.getRecentDisconnectSnapshot(),
       outboundFlood: this.getOutboundFloodStats(),
       authBond,
       credentialLifecycle: this.getCredentialLifecycleSnapshot(authBond),
@@ -1783,13 +1866,31 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       destCount: stats.destCount,
       worstDestHash: stats.worstKey ? shortHash(stats.worstKey) : null,
       worstCount: stats.worstCount,
+      lastFloodingMonotonicMs: stats.lastFloodingMonotonicMs,
     };
   }
 
   private recordDisconnect(statusCode: number | null, reason: string): void {
     const now = Date.now();
-    this.recentDisconnects.push({ at: now, reason, statusCode });
+    // Read after the wall clock, so a pause between the two reads can only
+    // lengthen the hold.
+    const monotonicMs = performance.now();
+    this.recentDisconnects.push({ at: now, reason, statusCode, monotonicMs });
     this.pruneRecentDisconnects(now);
+    // Base's own count decides whether churn exists; the monotonic instants
+    // only time it. It holds until the third-newest counted disconnect leaves
+    // the window, extended for clock drift, and at least until now. A counted
+    // disconnect without a monotonic instant holds it one window from now.
+    const counted = this.recentDisconnects;
+    if (counted.length < RECENT_DISCONNECT_DEGRADED_THRESHOLD) return;
+    const windowMs = ConnectionManager.RECENT_DISCONNECT_WINDOW_MS;
+    const holdWindowMs = windowMs + clockDriftHoldExtensionMs(windowMs);
+    const thirdNewestMs = counted.at(-RECENT_DISCONNECT_DEGRADED_THRESHOLD)!.monotonicMs;
+    const allPaired = counted.every((event) => event.monotonicMs !== undefined);
+    const heldUntilMs = allPaired && thirdNewestMs !== undefined
+      ? Math.max(thirdNewestMs + holdWindowMs, monotonicMs)
+      : monotonicMs + holdWindowMs;
+    this.churnHeldUntilMonotonicMs = Math.max(this.churnHeldUntilMonotonicMs ?? heldUntilMs, heldUntilMs);
   }
 
   private pruneRecentDisconnects(now = Date.now()): void {
@@ -1811,6 +1912,15 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       lastReason: last?.reason ?? null,
       lastStatusCode: last?.statusCode ?? null,
       byReason,
+    };
+  }
+
+  /** The live snapshot: base's window plus the churn hold stamp. */
+  private getRecentDisconnectSnapshot(): ConnectionRecentDisconnects {
+    const heldUntilMs = this.churnHeldUntilMonotonicMs ?? null;
+    return {
+      ...this.getRecentDisconnectStats(),
+      lastChurnMonotonicMs: heldUntilMs === null ? null : Math.min(heldUntilMs, performance.now()),
     };
   }
 
@@ -2379,6 +2489,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       const lidBare = this.botLid ? bareNumber(this.botLid) : undefined;
       this.selfMentionRegexLid = (lidBare && lidBare !== bare) ? new RegExp(`@${lidBare}\\b`, 'g') : null;
       this.setConnectionState('connected');
+      this.approvedOperationDispatcher?.start();
       this.lastOpenAt = Date.now();
       this.startKeepalive(sock);
       this.captureAuthBondSnapshot('connection-open');
@@ -2392,6 +2503,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     }
 
     if (connection === 'close') {
+      this.approvedOperationDispatcher?.stop();
       const statusCode: number | undefined = (lastDisconnect?.error as any)?.output?.statusCode;
       const reason = statusCode !== undefined ? (DisconnectReason[statusCode] ?? 'Unknown') : 'Unknown';
       const conflictType = extractStreamErrorConflictType(lastDisconnect);
@@ -3247,14 +3359,106 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         this.contactsDir.observe(parsed.senderJid, parsed.senderName);
 
         if (this.onMessage) {
+          // Outbound echoes retain their storage/correlation path. They are
+          // transport output and cannot establish a human approval context.
+          if (this.operationsAuthority && !parsed.isFromMe) {
+            this.dispatchTrustedInbound(parsed);
+            continue;
+          }
           try {
-            this.onMessage(parsed);
+            void Promise.resolve(this.onMessage(parsed)).catch((err) => {
+              this.log.warn({ err, messageId: parsed.messageId }, 'onMessage callback rejected');
+            });
           } catch (err) {
             this.log.warn({ err, messageId: parsed.messageId }, 'onMessage callback threw');
           }
         }
       }
     }
+  }
+
+  /**
+   * The authority records the authenticated inbound event before the existing
+   * ingest callback can queue conversational work. The callback executes under
+   * the unforgeable async turn binding used by the final send seam and closes
+   * when this handler settles. Owner review/decision commands are rendered and
+   * retried here, without exposing either to conversational/model code.
+   */
+  private dispatchTrustedInbound(parsed: IncomingMessage): void {
+    const authority = this.operationsAuthority;
+    const onMessage = this.onMessage;
+    if (!authority || !onMessage) return;
+    const receivedAt = Number.isFinite(parsed.timestamp) && parsed.timestamp > 0
+      ? new Date(parsed.timestamp * 1_000).toISOString()
+      : systemClock.nowIso();
+    void registerTrustedInbound(authority, {
+      eventId: parsed.messageId,
+      sender: parsed.senderJid,
+      conversation: parsed.chatJid,
+      receivedAt,
+      content: parsed.content,
+    }, async (response) => {
+      if (response.kind === 'inbound') {
+        const accountId = config.transportAuthority?.accountId;
+        if (!accountId) throw new Error('protected authority account identity is unavailable');
+        if (response.automationHolds.length > 0) {
+          this.log.warn({
+            messageId: parsed.messageId,
+            holds: response.automationHolds,
+          }, 'protected inbound automation held; no third-party notification sent');
+        }
+        // Automation is created and bounded by the authority from authenticated
+        // ingress facts. Only exact approved WhatsApp operations are eligible;
+        // mail work remains solely with the protected mail executor.
+        await retryApprovedWhatsappOperations({
+          accountId,
+          inboundEventId: parsed.messageId,
+          operations: response.automationOperations,
+          send: async (recipient, content, options) => {
+            const socket = this.sock;
+            if (!socket) throw new Error('protected inbound automation cannot reply while disconnected');
+            return options === undefined
+              ? socket.sendMessage(recipient, content as any)
+              : socket.sendMessage(recipient, content as any, options as any);
+          },
+        });
+        await onMessage(parsed);
+        return;
+      }
+
+      const sock = this.sock;
+      if (!sock) throw new Error('protected inbound command cannot reply while disconnected');
+      if (response.kind === 'paused') {
+        const accountId = config.transportAuthority?.accountId;
+        if (!accountId) throw new Error('protected authority account identity is unavailable');
+        await sendFixedControlReceipt({
+          accountId,
+          inboundEventId: parsed.messageId,
+          receipt: response.receipt,
+          send: (recipient, content, options) => options === undefined
+            ? sock.sendMessage(recipient, content as any)
+            : sock.sendMessage(recipient, content as any, options as any),
+        });
+        return;
+      }
+      if (response.kind === 'review') {
+        await sock.sendMessage(parsed.chatJid, { text: renderTransportReviewCard(response.review) });
+        return;
+      }
+
+      const accountId = config.transportAuthority?.accountId;
+      if (!accountId) throw new Error('protected authority account identity is unavailable');
+      await retryApprovedWhatsappOperations({
+        accountId,
+        inboundEventId: parsed.messageId,
+        operations: response.operations,
+        send: (recipient, content, options) => options === undefined
+          ? sock.sendMessage(recipient, content as any)
+          : sock.sendMessage(recipient, content as any, options as any),
+      });
+    }).catch((err) => {
+      this.log.error({ err, messageId: parsed.messageId }, 'protected inbound authority registration failed; message was not dispatched');
+    });
   }
 
   /** Atomically clears all grace timers and pendingPolls state for a given poll. */
@@ -3373,6 +3577,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   }
 
   private setConnectionState(state: ConnectionLifecycleState): void {
+    if (state !== 'connected') this.approvedOperationDispatcher?.stop();
     if (this.connectionState === state) return;
     this.connectionState = state;
     this.stateChangedAt = Date.now();
