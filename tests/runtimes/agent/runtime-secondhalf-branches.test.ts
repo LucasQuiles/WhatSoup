@@ -1744,6 +1744,8 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
             stalledOperationResumeHold: { sessionId: 'sess-1' },
           });
           expect(saved.holdWrites(), 'the duplicate callback writes nothing').toHaveLength(1);
+          // The case ends before its respawn: stop the old process as the restart cases do.
+          stopService(state);
         });
 
         it('control: an ordinary crash saves no hold', () => {
@@ -1757,6 +1759,8 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
 
           expect(saved.holdWrites()).toHaveLength(0);
           expect(saved.watchdogState()).toEqual({ providerRoutePolicy: { provider: 'p' } });
+          // The case ends before its respawn: stop the old process as the restart cases do.
+          stopService(state);
         });
 
         it('a restart before the respawn resumes the session and sends no context or continuation turn', async () => {
