@@ -375,6 +375,17 @@ describe('TriggerPoller — poll.sqlite', () => {
     })).resolves.toEqual({ kind: 'ok', rowCount: 2 });
   });
 
+  it.each([
+    ['SELECT with + recursive FROM keyword_columns', []],
+    ['SELECT with recursive FROM keyword_columns', []],
+    ['SELECT abs(with + recursive) FROM keyword_columns WHERE "with" + "recursive" = ?; -- terminal comment', [3]],
+  ] as const)('executes ordinary keyword identifiers without treating them as a recursive clause: %s', async (sql, binds) => {
+    db.raw.exec('CREATE TABLE keyword_columns ("with" INTEGER, "recursive" INTEGER); INSERT INTO keyword_columns VALUES (1, 2)');
+    await expect(runIsolatedSqlite({
+      databasePath: path, sql, binds: [...binds], maxRows: 1, timeoutMs: 1_000,
+    })).resolves.toEqual({ kind: 'ok', rowCount: 1 });
+  });
+
   it('fails closed before execution when no durable main database location exists', async () => {
     const { messenger } = makeMessenger();
     const memory = new Database(':memory:');

@@ -130,10 +130,10 @@ function sqliteTokens(sql: string): SqlToken[] | null {
       const start = index++;
       while (index < sql.length && isSqlWordPart(sql[index])) index++;
       push('word', sql.slice(start, index).toUpperCase(), start, index);
-    } else if (char === '(' || char === ')' || char === ',' || char === ';') {
-      push('punctuation', char, index, index + 1);
-      index++;
     } else {
+      // Operators separate words; dropping them would turn column expressions
+      // such as abs(with + recursive) into an apparent recursive clause.
+      push('punctuation', char, index, index + 1);
       index++;
     }
   }
@@ -195,7 +195,9 @@ function normalizedReadOnlySql(sql: string): string | null {
   const withoutTrailingSemicolon = final.value === ';' ? tokens.slice(0, -1) : tokens;
   if (withoutTrailingSemicolon.length === 0 || withoutTrailingSemicolon.some((token) => token.value === ';')) return null;
   if (withoutTrailingSemicolon.some((token, index) =>
-    tokenIs(token, 'WITH') && tokenIs(withoutTrailingSemicolon[index + 1], 'RECURSIVE'))) return null;
+    (index === 0 || withoutTrailingSemicolon[index - 1].value === '(')
+    && tokenIs(token, 'WITH')
+    && tokenIs(withoutTrailingSemicolon[index + 1], 'RECURSIVE'))) return null;
   const first = withoutTrailingSemicolon[0];
   const outer = tokenIs(first, 'WITH') ? withOuterStatement(withoutTrailingSemicolon) : first;
   if (!tokenIs(outer, 'SELECT')) return null;

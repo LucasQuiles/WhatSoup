@@ -604,6 +604,9 @@ describe('poll.sqlite SQL safety guard (#1096)', () => {
     "SELECT 'WITH RECURSIVE' AS note /* WITH RECURSIVE */",
     'WITH "recursive" AS (SELECT 1 AS x) SELECT x FROM "recursive"',
     'SELECT (WITH ordinary AS (SELECT 1 AS x) SELECT x FROM ordinary)',
+    'SELECT with + recursive FROM keyword_columns',
+    'SELECT with recursive FROM keyword_columns',
+    'SELECT abs(with + recursive) FROM keyword_columns',
   ])('preserves inert recursive text and ordinary nested queries: %s', (sql) => {
     expect(isSafeSqliteSql(sql)).toBe(true);
     expect(() => validateTriggerSpec('poll.sqlite', { sql, fire_when: 'rows_returned' })).not.toThrow();
