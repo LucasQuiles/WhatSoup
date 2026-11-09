@@ -7,7 +7,10 @@
 //
 // Harness: the late-echo real-database harness
 // (late-echo-completed-identity-runtime.test.ts): REAL AgentRuntime + REAL
-// OutboundQueue + REAL SQLite durability + REAL ingest. A reply counts as
+// OutboundQueue + REAL SQLite durability + REAL ingest. The database is a
+// file: a restart closes it and the next service opens it again, so only what
+// reached the file survives. Lazy adoption reads the saved session rows for
+// real (session-db getResumableSessionForChat and markOrphaned stay real). A reply counts as
 // delivered only when its outbound op is `echoed` after the transport's echo
 // came back through ingest. The provider session is a double; a kill is the
 // double reporting a crash through the runtime's own onCrash wiring.
@@ -189,7 +192,10 @@ vi.mock('../../../src/runtimes/agent/media-prep.ts', () => ({
   relocateMediaToWorkspace: vi.fn((content: string) => content),
 }));
 
-vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
+vi.mock('../../../src/runtimes/agent/session-db.ts', async (importOriginal) => ({
+  // Real: getResumableSessionForChat (lazy adoption after a restart) and
+  // markOrphaned (a withheld respawn keeps the session for the next request).
+  ...(await importOriginal<Record<string, unknown>>()),
   ensureAgentSchema: vi.fn(),
   createSession: vi.fn(() => 1),
   accumulateSessionTokens: vi.fn(),
@@ -198,8 +204,6 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   updateSessionStatus: vi.fn(),
   getActiveSession: vi.fn(() => null),
   backfillWorkspaceKeys: vi.fn(),
-  markOrphaned: vi.fn(),
-  getResumableSessionForChat: vi.fn(() => null),
   backfillSessionProvider: vi.fn(),
   accumulateTokensWithEvent: vi.fn(),
   insertTokenEvent: vi.fn(),
@@ -276,11 +280,15 @@ vi.mock('node:fs', async (importOriginal) => {
 
 // ─── Imports under test (after mocks) ───────────────────────────────────────
 
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Database } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { createIngestHandler } from '../../../src/core/ingest.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
+import { CHECKPOINT_NOT_RESTORED_NOTICE } from '../../../src/runtimes/agent/checkpoint-adoption.ts';
 import { installFakePerChatMcpSocketManager } from './helpers/fake-per-chat-mcp-socket-manager.ts';
 import { drainIngest } from '../../core/_helpers/ingest-drain.ts';
 import { prepareRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
@@ -360,6 +368,8 @@ async function waitForInFlightTurn(matches: (text: string) => boolean, timeout =
 }
 
 describe('F7: a stalled-operation kill survives a real service restart', () => {
+  let dbDir: string;
+  let dbPath: string;
   let db: Database;
   let engine: DurabilityEngine;
   let runtime: AgentRuntime | undefined;
@@ -370,7 +380,9 @@ describe('F7: a stalled-operation kill survives a real service restart', () => {
     resetDoubles();
     mockConfig.proactiveResumeOnStartup = false;
     transport = makeRecordingTransport();
-    db = new Database(':memory:');
+    dbDir = mkdtempSync(join(tmpdir(), 'whatsoup-f7-restart-db-'));
+    dbPath = join(dbDir, 'whatsoup.db');
+    db = new Database(dbPath);
     db.open();
     engine = new DurabilityEngine(db);
     lifecycleRef.toConversationKey = toConversationKey;
@@ -418,6 +430,7 @@ describe('F7: a stalled-operation kill survives a real service restart', () => {
       runtime = undefined;
       lifecycleRef.current = null;
       db.close();
+      rmSync(dbDir, { recursive: true, force: true });
     }
   });
 
@@ -463,6 +476,26 @@ describe('F7: a stalled-operation kill survives a real service restart', () => {
       session_status: row.session_status,
       watchdog: row.watchdog_state ? JSON.parse(row.watchdog_state) as Record<string, unknown> : {},
     };
+  }
+
+  function agentRow(rowId: number): { status: string; session_id: string | null } {
+    return db.raw.prepare('SELECT status, session_id FROM agent_sessions WHERE id = ?').get(rowId) as
+      { status: string; session_id: string | null };
+  }
+
+  function resumableKeys(): string[] {
+    return engine.getResumableCheckpoints().map((c) => c.conversation_key);
+  }
+
+  /** The kill scheduled no automatic respawn: no timer, and the chat waits recoverable_dead. */
+  function expectRespawnWithheld(agent: AgentRuntime): void {
+    const state = agent as unknown as {
+      pendingRespawnTimers: Set<unknown>;
+      sessionOwnership: { get: (key: string) => { state: string; respawnTimer?: unknown } | undefined };
+    };
+    expect(state.pendingRespawnTimers.size, 'no respawn timer').toBe(0);
+    expect(state.sessionOwnership.get(DM_JID)?.state).toBe('recoverable_dead');
+    expect(state.sessionOwnership.get(DM_JID)?.respawnTimer ?? null).toBeNull();
   }
 
   function terminalCount(seq: number): number {
@@ -523,7 +556,7 @@ describe('F7: a stalled-operation kill survives a real service restart', () => {
     });
   }
 
-  /** Stop the service and boot a new one over the same database. */
+  /** Stop the service, close the database file, and boot a new service on the reopened file. */
   async function restartService(
     previous: AgentRuntime,
     beforeBoot: () => void = () => {},
@@ -531,6 +564,10 @@ describe('F7: a stalled-operation kill survives a real service restart', () => {
     await previous.shutdown();
     beforeBoot();
     runtime = undefined;
+    db.close();
+    db = new Database(dbPath);
+    db.open();
+    engine = new DurabilityEngine(db);
     await prepareRuntimeHome();
     const bootIndex = sessionDoubles.length;
     mockConfig.proactiveResumeOnStartup = true;
@@ -583,38 +620,84 @@ describe('F7: a stalled-operation kill survives a real service restart', () => {
     );
   });
 
-  it('when the hold cannot be saved, a restart sends no automatic turn and the next request is delivered', async () => {
-    const first = makeRuntime();
-    const { session } = await deliveredExchange(makeIngest(first), 'wamid-f7-w1', 'start the export', 'Export started.');
-    const sessionId = session.getStatus().sessionId!;
+  function failHoldWrites(): ReturnType<typeof vi.spyOn> {
     const upsert = engine.upsertSessionCheckpoint.bind(engine);
-    const holdWrites = vi.spyOn(engine, 'upsertSessionCheckpoint').mockImplementation((key, fields) => {
+    return vi.spyOn(engine, 'upsertSessionCheckpoint').mockImplementation((key, fields) => {
       if (typeof fields.watchdogState === 'string' && fields.watchdogState.includes('stalledOperationResumeHold')) {
         throw new Error('SQLITE_FULL: database or disk is full');
       }
       upsert(key, fields);
     });
+  }
+
+  it('when the hold cannot be saved, no respawn reactivates the session; the next request resumes the same session in place', async () => {
+    const first = makeRuntime();
+    const ingest = makeIngest(first);
+    const { session } = await deliveredExchange(ingest, 'wamid-f7-w1', 'start the export', 'Export started.');
+    const sessionId = session.getStatus().sessionId!;
+    const rowId = session.getDbRowId()!;
+    const turnsBeforeKill = session.turnsSent.length;
+    const holdWrites = failHoldWrites();
 
     reportCrash(session, { terminationReason: 'stalled_operation' });
-    await waitForRespawn(session, sessionId);
 
     expect(holdWrites).toHaveBeenCalled();
-    expect(checkpoint(), 'the respawn reactivated it; the unsaved hold withdraws it again').toMatchObject({
+    expectRespawnWithheld(first);
+    expect(checkpoint(), 'withdrawn, and no respawn makes it resumable again').toMatchObject({
       session_id: sessionId,
       session_status: 'orphaned',
     });
     expect(checkpoint().watchdog).not.toHaveProperty('stalledOperationResumeHold');
-    expect(engine.getResumableCheckpoints().map((c) => c.conversation_key)).not.toContain(DM_KEY);
+    expect(resumableKeys()).not.toContain(DM_KEY);
+    expect(agentRow(rowId), 'the session row is kept for the next request').toEqual({ status: 'orphaned', session_id: sessionId });
+    expect(session.spawnSession, 'only the first spawn; no automatic resume').toHaveBeenCalledTimes(1);
+    holdWrites.mockRestore();
 
-    // The write still fails at shutdown, after the session suspends its checkpoint.
-    const { agent, booted } = await restartService(first, () => {
-      expect(engine.getResumableCheckpoints().map((c) => c.conversation_key)).not.toContain(DM_KEY);
-      holdWrites.mockRestore();
+    const next = await deliveredExchange(ingest, 'wamid-f7-w2', 'try the export again', 'Export finished.');
+    expect(next.session).toBe(session);
+    expect(session.spawnSession, 'the same provider session, so its context is kept').toHaveBeenLastCalledWith(sessionId, rowId);
+    expect(sentTexts(session).slice(turnsBeforeKill), 'only the request; no context or continuation turn').toHaveLength(1);
+    expect(inbound(next.seq)).toEqual({ processing_status: 'complete', terminal_reason: 'response_echoed' });
+  });
+
+  it('when both protective writes fail, no respawn runs, a restart sends nothing, and the next request resumes the same session', async () => {
+    const first = makeRuntime();
+    const { session } = await deliveredExchange(makeIngest(first), 'wamid-f7-b1', 'start the export', 'Export started.');
+    const sessionId = session.getStatus().sessionId!;
+    const rowId = session.getDbRowId()!;
+    const turnsBeforeKill = session.turnsSent.length;
+    const holdWrites = failHoldWrites();
+    const withdrawals = vi.spyOn(engine, 'markSessionOrphaned').mockImplementation(() => {
+      throw new Error('SQLITE_FULL: database or disk is full');
     });
-    expect(booted.flatMap(sentTexts), 'no automatic turn at boot').toEqual([]);
 
-    const next = await deliveredExchange(makeIngest(agent), 'wamid-f7-w2', 'try the export again', 'Export finished.');
-    expect(sentTexts(next.session).filter((t) => t.includes(RESTART_CONTINUATION))).toEqual([]);
+    reportCrash(session, { terminationReason: 'stalled_operation' });
+
+    expect(holdWrites).toHaveBeenCalled();
+    expect(withdrawals).toHaveBeenCalled();
+    expectRespawnWithheld(first);
+    expect(session.spawnSession, 'no automatic reactivation').toHaveBeenCalledTimes(1);
+    expect(session.turnsSent).toHaveLength(turnsBeforeKill);
+    expect(checkpoint(), "only the crash's own write orphaned it").toMatchObject({
+      session_id: sessionId,
+      session_status: 'orphaned',
+    });
+    expect(checkpoint().watchdog).not.toHaveProperty('stalledOperationResumeHold');
+
+    // Both writes still fail at shutdown, and the checkpoint stays out of proactive resume.
+    const { agent, booted } = await restartService(first, () => {
+      expect(resumableKeys()).not.toContain(DM_KEY);
+      holdWrites.mockRestore();
+      withdrawals.mockRestore();
+    });
+    expect(resumableKeys()).not.toContain(DM_KEY);
+    expect(booted, 'no session resumed at boot').toEqual([]);
+    expect(transport.texts.map(([, text]) => text)).not.toContain(CHECKPOINT_NOT_RESTORED_NOTICE);
+
+    const next = await deliveredExchange(makeIngest(agent), 'wamid-f7-b2', 'try the export again', 'Export finished.');
+    expect(next.session.spawnSession, 'lazy adoption resumes the kept session').toHaveBeenCalledWith(sessionId, rowId);
+    expect(sentTexts(next.session), 'only the request; no context or continuation turn').toHaveLength(1);
+    expect(transport.texts.map(([, text]) => text), 'no fresh-start notice').not.toContain(CHECKPOINT_NOT_RESTORED_NOTICE);
     expect(inbound(next.seq)).toEqual({ processing_status: 'complete', terminal_reason: 'response_echoed' });
   });
 
