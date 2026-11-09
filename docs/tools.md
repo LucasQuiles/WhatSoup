@@ -3243,6 +3243,11 @@ Subscribe to presence updates for a WhatsApp contact or group JID. After subscri
 |------|------|----------|-------------|
 | jid | string | required | Contact or group JID to subscribe to |
 
+**Passive lines:** a passive instance connects with presence `unavailable`
+([configuration](configuration.md#passive--mcp-only)). It is not verified whether WhatsApp
+delivers contacts' presence updates to a client in that state. On a passive line, treat an empty
+`get_presence` result as "no update received", not as "the contact is offline".
+
 ---
 
 ### get_presence

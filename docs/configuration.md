@@ -2713,11 +2713,13 @@ bot persona.
 `passive` instances have no `systemPrompt` and are restricted to `self_only` access. No
 `ANTHROPIC_API_KEY` or `PINECONE_API_KEY` is needed.
 
-A passive instance connects with presence `unavailable` (Baileys `markOnlineOnConnect: false`,
-`src/transport/connection.ts`). While a linked device marks the account online, the phone app
-stops showing notifications, and a passive line is usually a person's own number. This changes
-presence only: messages are still delivered and the link is unaffected. Chat and agent instances
-connect as `available`.
+A passive instance connects with Baileys `markOnlineOnConnect: false` (`src/transport/connection.ts`),
+so its connect-time presence update is `unavailable`. Chat and agent instances pass `true` (`available`).
+The reason: a passive line is usually a person's own number, and the Baileys README states that
+WhatsApp does not send push notifications to the phone while a linked client is online. That phone-side
+effect, and whether contacts' presence still reaches a client that is `unavailable` (see
+[`subscribe_presence`](tools.md#subscribe_presence)), are not verified by the test suite. The option
+only selects the presence update; message delivery and the device link do not depend on it.
 
 ---
 
