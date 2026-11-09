@@ -1086,6 +1086,22 @@ describe('safeguard diagnostics', () => {
       ),
       evidence: 'quality workflow must not retain masked unconditional disk cleanup',
     },
+    {
+      name: 'reverts the macOS lane to the retired macos-14 image',
+      mutate: (workflow: string) => workflow.replace(
+        '  bot-errors-health-macos:\n    runs-on: macos-15',
+        '  bot-errors-health-macos:\n    runs-on: macos-14',
+      ),
+      evidence: 'bot-errors-health-macos runs-on must be exactly macos-15',
+    },
+    {
+      name: 'floats the macOS lane to macos-latest',
+      mutate: (workflow: string) => workflow.replace(
+        '  bot-errors-health-macos:\n    runs-on: macos-15',
+        '  bot-errors-health-macos:\n    runs-on: macos-latest',
+      ),
+      evidence: 'bot-errors-health-macos runs-on must be exactly macos-15',
+    },
   ])('fails when Quality $name', ({ mutate, evidence }) => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const mutated = mutate(workflow);
