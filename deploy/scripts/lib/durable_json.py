@@ -255,8 +255,17 @@ def _target_mode_allowed(target: DurableJsonTarget, mode: int) -> bool:
     return not stat.S_IMODE(mode) & forbidden
 
 
-def _open_directory(name: str, *, dir_fd: int) -> int:
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+def _open_directory(name: str, *, dir_fd: int, search_only: bool = False) -> int:
+    """Open one directory component without following symlinks.
+
+    ``search_only`` descriptors are only used to traverse further (openat,
+    fstat); they need search permission on the directory, not read permission.
+    Where O_PATH exists they are opened with it, so ancestors such as a
+    ``drwx--x--x`` /tmp/user stay traversable. The descriptor that is returned
+    as the write parent is fsynced and must be a real O_RDONLY descriptor.
+    """
+    access = (getattr(os, "O_PATH", 0) if search_only else 0) or os.O_RDONLY
+    flags = access | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(name, flags, dir_fd=dir_fd)
     except OSError as exc:
@@ -274,10 +283,26 @@ def _open_directory(name: str, *, dir_fd: int) -> int:
 
 
 def _open_target_parent(target: DurableJsonTarget) -> tuple[int, str]:
-    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    relative_parts = target.relative_path.parts
+    root_parts = target.trusted_root.parts[1:]
+    # The parent that is returned (and fsynced by callers) is the last
+    # directory opened; every earlier one is traversal-only.
+    final_is_root = len(relative_parts) <= 1
+    filesystem_root_is_parent = final_is_root and not root_parts
+    root_access = (
+        os.O_RDONLY
+        if filesystem_root_is_parent
+        else getattr(os, "O_PATH", 0) or os.O_RDONLY
+    )
+    descriptor = os.open("/", root_access | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
-        for component in target.trusted_root.parts[1:]:
-            next_descriptor = _open_directory(component, dir_fd=descriptor)
+        for index, component in enumerate(root_parts):
+            is_last_root = index == len(root_parts) - 1
+            next_descriptor = _open_directory(
+                component,
+                dir_fd=descriptor,
+                search_only=not (final_is_root and is_last_root),
+            )
             os.close(descriptor)
             descriptor = next_descriptor
         root_stat = os.fstat(descriptor)
@@ -286,9 +311,12 @@ def _open_target_parent(target: DurableJsonTarget) -> tuple[int, str]:
             or not _directory_mode_allowed(target, root_stat.st_mode)
         ):
             raise DurableWriteError(ErrorClass.PERMISSION.value)
-        relative_parts = target.relative_path.parts
-        for component in relative_parts[:-1]:
-            next_descriptor = _open_directory(component, dir_fd=descriptor)
+        for index, component in enumerate(relative_parts[:-1]):
+            next_descriptor = _open_directory(
+                component,
+                dir_fd=descriptor,
+                search_only=index < len(relative_parts) - 2,
+            )
             component_stat = os.fstat(next_descriptor)
             if (
                 component_stat.st_uid != os.getuid()
