@@ -200,10 +200,10 @@ describe('#2949 queued receipt: the text is truthful and content-free', () => {
     // Break caught: "Queued behind the current task" read as "some other task is
     // running"; the user asked again and again to cancel tasks that did not exist.
     expect(QUEUED_TURN_RECEIPT_TEXT).toBe(
-      '*Still working on your earlier request.* This message is next. Send /stop to cancel.',
+      '*Still working on your earlier request.* This message is next. Send /stop to cancel the earlier request and anything waiting.',
     );
     expect(QUEUED_TURN_RECEIPT_OTHER_TEXT).toBe(
-      '*Still working on an earlier request.* This message is queued behind it. Send /stop to cancel the request and everything queued.',
+      '*Still working on an earlier request.* This message is queued behind it. Send /stop to cancel that request and anything waiting.',
     );
   });
 

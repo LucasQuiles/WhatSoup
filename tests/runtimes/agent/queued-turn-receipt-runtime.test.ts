@@ -278,7 +278,10 @@ vi.mock('node:fs', async (importOriginal) => {
 import { Database } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { AgentRuntime, type AgentRuntimeOptions } from '../../../src/runtimes/agent/runtime.ts';
-import { QUEUED_TURN_RECEIPT_TEXT } from '../../../src/runtimes/agent/runtime-queued-receipt.ts';
+import {
+  QUEUED_TURN_RECEIPT_OTHER_TEXT,
+  QUEUED_TURN_RECEIPT_TEXT,
+} from '../../../src/runtimes/agent/runtime-queued-receipt.ts';
 import { installFakePerChatMcpSocketManager } from './helpers/fake-per-chat-mcp-socket-manager.ts';
 
 const chatJid = 'queued-receipt-chat@s.whatsapp.net';
@@ -320,9 +323,12 @@ describe('#2949 queued receipt through the real per_chat admission path', () => 
     runtime.setDurability(engine);
   }
 
+  // Either receipt text counts: a cooldown regression on a later message would send the
+  // other-request text (more than one waiting), and must still show up here.
   function receiptSends(): unknown[][] {
+    const receipts: unknown[] = [QUEUED_TURN_RECEIPT_TEXT, QUEUED_TURN_RECEIPT_OTHER_TEXT];
     return vi.mocked(messenger.sendMessage).mock.calls
-      .filter((call) => call[1] === QUEUED_TURN_RECEIPT_TEXT);
+      .filter((call) => receipts.includes(call[1]));
   }
 
   async function arrive(messageId: string, content: string): Promise<number> {
@@ -380,6 +386,7 @@ describe('#2949 queued receipt through the real per_chat admission path', () => 
     // Every enqueueText call's text, whatever role argument rode with it.
     const queuedTexts = queueDoubles.flatMap((queue) => queue.enqueueText.mock.calls.map((call) => call[0]));
     expect(queuedTexts).not.toContain(QUEUED_TURN_RECEIPT_TEXT);
+    expect(queuedTexts).not.toContain(QUEUED_TURN_RECEIPT_OTHER_TEXT);
   });
 
   it('the per-chat cooldown suppresses a second receipt behind the same task', async () => {
@@ -392,6 +399,8 @@ describe('#2949 queued receipt through the real per_chat admission path', () => 
 
     expect(liveQueue()?.pending).toBe(2);
     await vi.waitFor(() => expect(receiptSends()).toHaveLength(1));
+    // The one receipt is the second message's; the third (two waiting) got none.
+    expect(receiptSends()).toEqual([[chatJid, QUEUED_TURN_RECEIPT_TEXT]]);
   });
 
   it('the flag off sends no receipt for a queued message', async () => {

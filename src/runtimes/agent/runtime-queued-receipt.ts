@@ -42,10 +42,10 @@ import type { QueuedTurn, TurnQueue } from './turn-queue.ts';
 const log = createChildLogger('runtime-queued-receipt');
 
 export const QUEUED_TURN_RECEIPT_TEXT =
-  '*Still working on your earlier request.* This message is next. Send /stop to cancel.';
+  '*Still working on your earlier request.* This message is next. Send /stop to cancel the earlier request and anything waiting.';
 
 export const QUEUED_TURN_RECEIPT_OTHER_TEXT =
-  '*Still working on an earlier request.* This message is queued behind it. Send /stop to cancel the request and everything queued.';
+  '*Still working on an earlier request.* This message is queued behind it. Send /stop to cancel that request and anything waiting.';
 
 /** Pick the receipt that is true for this admission (see WORDING above). */
 export function queuedTurnReceiptText(
