@@ -4333,6 +4333,31 @@ def email_fallback(subject: str, body: str, timeout: float = 20) -> bool:
     return proc.returncode == 0
 
 
+# The producer's canonical UTC timestamp (Date#toISOString). ASCII digits only
+# (Python's \d also matches other scripts' digits), and fullmatch, so a trailing
+# newline cannot ride along.
+_OUTAGE_STARTED_AT_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z")
+
+
+def event_outage_started_at(event: dict[str, Any]) -> str | None:
+    """When the reported outage began, from structured diagnostics, or None.
+
+    Confinement turns the summary and evidence that also carry the start into
+    digests, so a card that must name the time reads it here. Anything not
+    shaped like the producer's timestamp is dropped rather than rendered.
+    """
+    diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    value = diagnostics.get("outageStartedAt")
+    if not isinstance(value, str) or not _OUTAGE_STARTED_AT_RE.fullmatch(value):
+        return None
+    try:
+        # Same rule as the producer: an impossible date is dropped.
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
+    except ValueError:
+        return None
+    return value
+
+
 def event_line(label: str, value: Any, limit: int = 700) -> str | None:
     if value is None or value == "":
         return None
@@ -4550,6 +4575,7 @@ def format_event(event: dict[str, Any]) -> str:
         event_line("severity", event.get("severity")),
         event_line("machine", event.get("machine")),
         event_line("instance", event.get("instance")),
+        event_line("outage_started", event_outage_started_at(event)),
         event_line("source", event.get("source")),
         event_line("alert_source", event.get("alertSource")),
         event_line("incident_key", incident_key(event)),

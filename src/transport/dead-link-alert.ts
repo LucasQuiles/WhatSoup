@@ -14,12 +14,22 @@
 // restart inside the same outage therefore keeps the original start, and the
 // card is raised at most once per outage.
 //
-// The clear must be in the durable outbox before the outage counts as over: a
-// legacy helper that merely accepted it does not prove the dispatcher closed
-// the incident, and a still-open incident would absorb the next outage's card.
-// Until the clear is queued the recovered marker stays, the clear is retried
-// every DEAD_LINK_CLEAR_RETRY_MS, and a new outage is held in the marker; its
-// card is raised, with its own start, once the clear is queued.
+// Delivery rule, for the card and the clear alike: it is done only when it is
+// in the durable outbox (status `durably_queued`). The legacy helper and the
+// dry-run sink are never used, because their acceptance does not prove the
+// dispatcher has the event: a card lost that way pages nobody, and a clear
+// lost that way leaves an incident open that absorbs the next outage's card.
+// Every not-done step stays in the marker and is retried every
+// DEAD_LINK_RETRY_MS on this alarm's own timer. A logged-out bot is parked, so
+// no further close or restart can be relied on to retry it.
+//
+// Until a clear is queued the recovered marker stays and a new outage is held
+// in it; the held outage's card is raised, with its own start, once the clear
+// is queued.
+//
+// The outage start rides the event as the structured `outageStartedAt` field:
+// the outbox confines summary and evidence to digests, and the dispatcher
+// renders the field on the card.
 
 import { join } from 'node:path';
 import { hostname } from 'node:os';
@@ -30,12 +40,13 @@ import {
 } from '../lib/private-fs.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { systemClock } from '../lib/clock.ts';
-import { clearAlertSourceChecked, emitAlertChecked } from '../lib/emit-alert.ts';
+import { clearAlertSource, emitAlert } from '../lib/emit-alert.ts';
 import type { createChildLogger } from '../logger.ts';
 
 export const DEAD_LINK_ALERT_SOURCE = 'whatsapp_link_dead';
 export const DEAD_LINK_GRACE_MS = 10 * 60_000;
-export const DEAD_LINK_CLEAR_RETRY_MS = 60_000;
+/** Retry interval for a card or clear that is not yet in the durable outbox. */
+export const DEAD_LINK_RETRY_MS = 60_000;
 export const DEAD_LINK_STATE_FILE = 'dead-link-outage.json';
 const STATE_MAX_BYTES = 16 * 1024;
 
@@ -125,9 +136,8 @@ export class DeadLinkAlarm {
     this.cancelTimer();
   }
 
-  private fire(): void {
-    const state = this.readState();
-    if (state === null || state.alertedAt !== null || state.linkOpenedAt !== null) return;
+  /** The grace window passed with the link still down: raise the card. */
+  private raise(state: DeadLinkOutageState): void {
     const summary =
       `WhatsApp link down: whatsoup@${this.deps.instance} logged out (401) at ${state.outageStartedAt}; ` +
       `no reconnect for ${DEAD_LINK_GRACE_MS / 60_000} minutes, relink required`;
@@ -142,9 +152,17 @@ export class DeadLinkAlarm {
       `observed_at: ${systemClock.nowIso()}`,
       'clear: raised once per outage; cleared by the transport when the WhatsApp link opens again',
     ].join('\n');
-    if (!emitAlertChecked(this.deps.instance, DEAD_LINK_ALERT_SOURCE, summary, evidence, 'critical')) {
-      // Not queued: leave alertedAt unset so the next 401 (or restart) retries.
-      this.deps.log.error({ source: DEAD_LINK_ALERT_SOURCE }, 'dead-link alert was not queued');
+    const result = emitAlert(this.deps.instance, DEAD_LINK_ALERT_SOURCE, summary, evidence, 'critical', undefined, {
+      requireDurableOutbox: true,
+      outageStartedAt: state.outageStartedAt,
+    });
+    if (result.status !== 'durably_queued') {
+      // alertedAt stays unset in the marker; this alarm retries on its own timer.
+      this.deps.log.error(
+        { source: DEAD_LINK_ALERT_SOURCE, status: result.status, outboxError: result.outboxError },
+        'dead-link alert was not durably queued; retrying',
+      );
+      this.schedule(DEAD_LINK_RETRY_MS);
       return;
     }
     this.writeState({ ...state, alertedAt: systemClock.nowIso() });
@@ -158,12 +176,8 @@ export class DeadLinkAlarm {
   private settleClear(state: DeadLinkOutageState): void {
     this.cancelTimer();
     if (!this.queueClear(state)) {
-      this.deps.log.error(
-        { source: DEAD_LINK_ALERT_SOURCE, heldOutage: state.heldOutage !== null },
-        'dead-link clear was not durably queued; keeping the outage marker and retrying',
-      );
       this.writeState(state);
-      this.arm(state);
+      this.schedule(DEAD_LINK_RETRY_MS);
       return;
     }
     if (state.heldOutage === null) {
@@ -183,20 +197,28 @@ export class DeadLinkAlarm {
       `alerted_at: ${state.alertedAt ?? 'none'}`,
       `link_opened_at: ${state.linkOpenedAt ?? systemClock.nowIso()}`,
     ].join('\n');
-    return clearAlertSourceChecked(this.deps.instance, DEAD_LINK_ALERT_SOURCE, evidence, undefined, {
+    const result = clearAlertSource(this.deps.instance, DEAD_LINK_ALERT_SOURCE, evidence, undefined, {
       requireDurableOutbox: true,
     });
+    if (result.status !== 'durably_queued') {
+      this.deps.log.error(
+        {
+          source: DEAD_LINK_ALERT_SOURCE,
+          status: result.status,
+          outboxError: result.outboxError,
+          heldOutage: state.heldOutage !== null,
+        },
+        'dead-link clear was not durably queued; keeping the outage marker and retrying',
+      );
+      return false;
+    }
+    return true;
   }
 
+  /** Schedule the next step that `state` still owes; nothing once it owes none. */
   private arm(state: DeadLinkOutageState): void {
-    if (this.timer !== null) return;
     if (state.linkOpenedAt !== null) {
-      this.timer = setTimeout(() => {
-        this.timer = null;
-        const current = this.readState();
-        if (current !== null && current.linkOpenedAt !== null) this.settleClear(current);
-      }, DEAD_LINK_CLEAR_RETRY_MS);
-      this.timer.unref?.();
+      this.schedule(DEAD_LINK_RETRY_MS);
       return;
     }
     if (state.alertedAt !== null) return;
@@ -205,11 +227,28 @@ export class DeadLinkAlarm {
       DEAD_LINK_GRACE_MS,
       Date.parse(state.outageStartedAt) + DEAD_LINK_GRACE_MS - systemClock.now(),
     );
+    this.schedule(Math.max(0, remaining));
+  }
+
+  private schedule(delayMs: number): void {
+    if (this.timer !== null) return;
     this.timer = setTimeout(() => {
       this.timer = null;
-      this.fire();
-    }, Math.max(0, remaining));
+      this.step();
+    }, delayMs);
     this.timer.unref?.();
+  }
+
+  /** One timer tick: do whatever the persisted marker still owes. */
+  private step(): void {
+    const state = this.readState();
+    if (state === null) return;
+    if (state.linkOpenedAt !== null) {
+      this.settleClear(state);
+      return;
+    }
+    // Armed only for the grace deadline or a retry, so an unreported outage is due.
+    if (state.alertedAt === null) this.raise(state);
   }
 
   private cancelTimer(): void {

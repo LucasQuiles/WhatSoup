@@ -111,3 +111,53 @@ def test_a_repeat_for_the_same_outage_is_not_a_second_card(tmp_path):
     reason = mod.should_suppress_send(_event("outage-1-repeat"), state)
 
     assert reason is not None and "duplicate suppressed" in reason
+
+
+def _card_event(outage_started_at) -> dict:
+    """The event as the outbox emits it: summary and evidence are confined."""
+    event = dict(
+        _event("outage-card"),
+        summary="unknown - 120 chars - digest 0123abcd",
+        evidence="unknown - 240 chars - digest 4567cdef",
+        createdAt="2026-10-22T05:18:35.700Z",
+    )
+    if outage_started_at is not None:
+        event["diagnostics"] = {"queue": "/tmp/outbox", "outageStartedAt": outage_started_at}
+    return event
+
+
+def test_the_card_names_the_bot_and_the_outage_start(tmp_path):
+    """Owner ruling 2026-11-09: one BOT ERRORS card naming the bot and the time.
+
+    Confinement turns the summary and evidence that carried the start into
+    digests, so the start rides a structured field and is rendered from it.
+    """
+    mod = _load(tmp_path)
+
+    card = mod.format_event(_card_event("2026-10-22T05:08:35.688Z"))
+
+    assert f"instance: {_INSTANCE}" in card
+    assert "outage_started: 2026-10-22T05:08:35.688Z" in card
+
+
+def test_a_malformed_outage_start_is_not_rendered(tmp_path):
+    mod = _load(tmp_path)
+
+    malformed = [
+        "+1 (555) 123-4567",
+        "/home/testuser/.config/whatsoup/tokens.env",
+        "yesterday",
+        1761109715,
+        "2026-10-22T05:08:35.688Z\nx",
+        "2026-13-45T25:61:00.000Z",
+        "\u0662\u0660\u0662\u0666-10-22T05:08:35.688Z",  # Arabic-Indic digits
+    ]
+    for value in malformed:
+        card = mod.format_event(_card_event(value))
+        assert "outage_started" not in card, value
+
+
+def test_a_card_without_the_field_renders_as_before(tmp_path):
+    mod = _load(tmp_path)
+
+    assert "outage_started" not in mod.format_event(_card_event(None))

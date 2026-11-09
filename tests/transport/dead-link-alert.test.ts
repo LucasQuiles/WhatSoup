@@ -13,8 +13,13 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { join } from 'node:path';
 import { usePerTestBotErrorsMarkerIsolation } from '../../tests/setup/bot-errors-vitest-isolation.ts';
 
-const emitAlertMock = vi.hoisted(() => vi.fn((..._args: unknown[]) => true));
-const clearAlertSourceMock = vi.hoisted(() => vi.fn((..._args: unknown[]) => true));
+// The alarm calls emitAlert and clearAlertSource directly and advances only on
+// `durably_queued`; the transport's other alerts use the checked wrappers.
+const QUEUED = { ok: true, channel: 'outbox', status: 'durably_queued' } as const;
+const FAILED = { ok: false, channel: 'none', status: 'failed', outboxError: 'outbox unwritable' } as const;
+const emitAlertMock = vi.hoisted(() => vi.fn((..._args: unknown[]): unknown => ({ ok: true, channel: 'outbox', status: 'durably_queued' })));
+const clearAlertSourceMock = vi.hoisted(() => vi.fn((..._args: unknown[]): unknown => ({ ok: true, channel: 'outbox', status: 'durably_queued' })));
+const checkedAlertMock = vi.hoisted(() => vi.fn((..._args: unknown[]) => true));
 const { testAuthDir, testDataRoot, testRoot, testStateRoot } = vi.hoisted(() => {
   const testRoot = `/tmp/wa-test-dead-link-${process.pid}`;
   return {
@@ -93,17 +98,17 @@ vi.mock('../../src/logger.ts', async () => {
 
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   emitAlert: emitAlertMock,
-  emitAlertChecked: emitAlertMock,
+  emitAlertChecked: checkedAlertMock,
   emitObservationChecked: vi.fn(() => true),
   clearAlertSource: clearAlertSourceMock,
-  clearAlertSourceChecked: clearAlertSourceMock,
+  clearAlertSourceChecked: checkedAlertMock,
 }));
 
 import { makeWASocket } from '@whiskeysockets/baileys';
 import { ConnectionManager } from '../../src/transport/connection.ts';
 import {
   DEAD_LINK_ALERT_SOURCE,
-  DEAD_LINK_CLEAR_RETRY_MS,
+  DEAD_LINK_RETRY_MS,
   DEAD_LINK_GRACE_MS,
   DeadLinkAlarm,
 } from '../../src/transport/dead-link-alert.ts';
@@ -190,8 +195,9 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date(OUTAGE_START));
   vi.clearAllMocks();
-  emitAlertMock.mockImplementation(() => true);
-  clearAlertSourceMock.mockImplementation(() => true);
+  emitAlertMock.mockImplementation(() => QUEUED);
+  clearAlertSourceMock.mockImplementation(() => QUEUED);
+  checkedAlertMock.mockImplementation(() => true);
   rmSync(testRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 });
 });
 
@@ -343,7 +349,7 @@ describe('dead-link alert', () => {
 
     const relinked = new ConnectionManager();
     await relinked.connect();
-    clearAlertSourceMock.mockReturnValueOnce(false);
+    clearAlertSourceMock.mockReturnValueOnce(FAILED);
     sockets.at(-1)!.emit(openEvent());
     expect(deadLinkClears()).toHaveLength(1);
     expect(existsSync(join(testDataRoot, 'dead-link-outage.json'))).toBe(true);
@@ -360,11 +366,10 @@ describe('dead-link alert', () => {
   });
 
   it('asks for an outbox-backed clear, so a legacy helper that merely accepted it does not end the outage', async () => {
-    // emit-alert's contract (tests/lib/emit-alert.test.ts): when the outbox
-    // write fails, the default clear spawns the legacy helper and reports
-    // success on its acceptance alone; requireDurableOutbox reports failure.
-    clearAlertSourceMock.mockImplementation((...args: unknown[]) =>
-      (args[4] as { requireDurableOutbox?: boolean } | undefined)?.requireDurableOutbox !== true);
+    // A legacy acceptance is ok:true but not durably_queued; the alarm must not
+    // treat it as a clear. tests/transport/dead-link-alert-delivery.test.ts
+    // drives the same boundary through the real emit-alert.
+    clearAlertSourceMock.mockImplementation(() => ({ ok: true, channel: 'legacy', status: 'legacy_accepted_unconfirmed' }));
     const alarm = new DeadLinkAlarm({ instance: 'dead-link-bot', dataRoot: testDataRoot, log: silentLog() as never });
     alarm.onLoggedOut(LOGGED_OUT);
     await vi.advanceTimersByTimeAsync(TEN_MINUTES);
@@ -384,10 +389,10 @@ describe('dead-link alert', () => {
     expect(readMarker()).toMatchObject({ outageStartedAt: OUTAGE_START });
 
     // The outbox recovers: the clear is queued, then the held outage raises its card.
-    clearAlertSourceMock.mockImplementation(() => true);
+    clearAlertSourceMock.mockImplementation(() => QUEUED);
     // +1: the overdue card is a 0 ms timer armed inside the retry, which fake
     // timers run 1 ms later.
-    await vi.advanceTimersByTimeAsync(DEAD_LINK_CLEAR_RETRY_MS + 1);
+    await vi.advanceTimersByTimeAsync(DEAD_LINK_RETRY_MS + 1);
     expect(deadLinkAlerts()).toHaveLength(2);
     expect(deadLinkAlerts()[1]![2]).toContain('2026-11-09T05:15:00.000Z');
     alarm.dispose();
@@ -399,7 +404,7 @@ describe('dead-link alert', () => {
     await vi.advanceTimersByTimeAsync(TEN_MINUTES);
     expect(deadLinkAlerts()).toHaveLength(1);
 
-    clearAlertSourceMock.mockImplementation(() => false);
+    clearAlertSourceMock.mockImplementation(() => FAILED);
     first.onConnectionOpen();
     await vi.advanceTimersByTimeAsync(5 * 60_000);
     // A new 401 retries the clear; it fails again.
@@ -421,14 +426,65 @@ describe('dead-link alert', () => {
     // at once (its deadline has passed) and names its own start.
     const second = new DeadLinkAlarm({ instance: 'dead-link-bot', dataRoot: testDataRoot, log: silentLog() as never });
     second.resume();
-    await vi.advanceTimersByTimeAsync(DEAD_LINK_CLEAR_RETRY_MS);
+    await vi.advanceTimersByTimeAsync(DEAD_LINK_RETRY_MS);
     expect(deadLinkAlerts()).toHaveLength(1);
-    clearAlertSourceMock.mockImplementation(() => true);
-    await vi.advanceTimersByTimeAsync(DEAD_LINK_CLEAR_RETRY_MS + 1);
+    clearAlertSourceMock.mockImplementation(() => QUEUED);
+    await vi.advanceTimersByTimeAsync(DEAD_LINK_RETRY_MS + 1);
     expect(deadLinkAlerts()).toHaveLength(2);
     expect(deadLinkAlerts()[1]![2]).toContain('2026-11-09T05:15:00.000Z');
     expect(readMarker()).toMatchObject({ outageStartedAt: '2026-11-09T05:15:00.000Z', linkOpenedAt: null });
     second.dispose();
+  });
+
+  it('raises the card only through the durable outbox, with the outage start as a structured field', async () => {
+    const alarm = new DeadLinkAlarm({ instance: 'dead-link-bot', dataRoot: testDataRoot, log: silentLog() as never });
+    alarm.onLoggedOut(LOGGED_OUT);
+    await vi.advanceTimersByTimeAsync(TEN_MINUTES);
+
+    expect(deadLinkAlerts()).toHaveLength(1);
+    expect(deadLinkAlerts()[0]![6]).toEqual({ requireDurableOutbox: true, outageStartedAt: OUTAGE_START });
+    alarm.dispose();
+  });
+
+  it('a card accepted only by the legacy helper is not recorded, and is retried until it is queued', async () => {
+    emitAlertMock.mockImplementation(() => ({ ok: true, channel: 'legacy', status: 'legacy_accepted_unconfirmed' }));
+    const alarm = new DeadLinkAlarm({ instance: 'dead-link-bot', dataRoot: testDataRoot, log: silentLog() as never });
+    alarm.onLoggedOut(LOGGED_OUT);
+    await vi.advanceTimersByTimeAsync(TEN_MINUTES);
+    expect(deadLinkAlerts()).toHaveLength(1);
+    expect(readMarker()).toMatchObject({ alertedAt: null });
+
+    emitAlertMock.mockImplementation(() => QUEUED);
+    await vi.advanceTimersByTimeAsync(DEAD_LINK_RETRY_MS);
+    expect(deadLinkAlerts()).toHaveLength(2);
+    expect(readMarker()).toMatchObject({ alertedAt: '2026-11-09T05:11:00.000Z' });
+    await vi.advanceTimersByTimeAsync(5 * DEAD_LINK_RETRY_MS);
+    expect(deadLinkAlerts()).toHaveLength(2);
+    alarm.dispose();
+  });
+
+  it('a parked bot whose card failed retries every minute with no further close or restart', async () => {
+    // connection.ts parks a logged-out bot: no reconnect, no further close.
+    const sockets = trackSockets();
+    const manager = new ConnectionManager();
+    await manager.connect();
+    sockets[0]!.emit(openEvent());
+    emitAlertMock.mockImplementation(() => FAILED);
+    sockets[0]!.emit(closeEvent(401));
+
+    await vi.advanceTimersByTimeAsync(TEN_MINUTES);
+    expect(deadLinkAlerts()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(3 * DEAD_LINK_RETRY_MS);
+    expect(deadLinkAlerts()).toHaveLength(4);
+    expect(readMarker()).toMatchObject({ outageStartedAt: OUTAGE_START, alertedAt: null });
+
+    emitAlertMock.mockImplementation(() => QUEUED);
+    await vi.advanceTimersByTimeAsync(DEAD_LINK_RETRY_MS);
+    expect(deadLinkAlerts()).toHaveLength(5);
+    await vi.advanceTimersByTimeAsync(10 * DEAD_LINK_RETRY_MS);
+    expect(deadLinkAlerts()).toHaveLength(5);
+    expect(readMarker()).toMatchObject({ alertedAt: expect.any(String) });
+    await manager.shutdown();
   });
 
   it('keeps one card per outage when the marker cannot be written', async () => {
