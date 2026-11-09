@@ -98,6 +98,13 @@ The existing battery kills the child's process group at the bound and records
 cleanup uncertainty. This is separate from Vitest's per-test timeout.
 The planner and affected runner use `--max-workers`; the direct Vitest arguments
 forwarded by `npm test` use `--maxWorkers`.
+
+For an interrupted root suite, set `WHATSOUP_TEST_TRACE=1` on the same command.
+The existing setup emits `test-module:` JSON on stderr with module start/end,
+test path, worker PID, parent PID and timestamp. These events locate active
+modules; an end event is not a passing verdict. Tracing is off by default and
+does not change selection, assertions or timeouts. Process ownership diagnostics
+must also bind PIDs to their start time because the operating system reuses PIDs.
 Maintained nested runners verify their enclosing battery's live process ancestry
 and share its group, so an outer cancellation does not strand another detached
 test tree. Missing or stale ownership evidence refuses nested execution.

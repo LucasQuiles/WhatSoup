@@ -28,11 +28,27 @@ function check(stage: string, expectedDigest: string): void {
   assertSourceMutationUnchanged({ cwd, expectedDigest, stage, spec, report });
 }
 
+function trace(event: 'start' | 'end'): void {
+  if (process.env.WHATSOUP_TEST_TRACE !== '1') return;
+  report(`test-module: ${JSON.stringify({
+    event,
+    spec: expect.getState().testPath ?? 'unknown-spec',
+    pid: process.pid,
+    ppid: process.ppid,
+    at: Date.now(),
+  })}`);
+}
+
 beforeAll(() => {
+  trace('start');
   const anchor = process.env.WHATSOUP_TRIPWIRE_MAIN_SHA256;
   if (anchor) check('enter-vs-suite-anchor', anchor);
 });
 
 afterAll(() => {
-  check('exit-vs-own-entry', entryDigest);
+  try {
+    check('exit-vs-own-entry', entryDigest);
+  } finally {
+    trace('end');
+  }
 });
