@@ -173,7 +173,11 @@ export class StalledOperationHolds {
     }
   }
 
-  /** The user's next request releases the hold; later restarts resume normally. */
+  /**
+   * Release the hold; later restarts resume normally. The runtime calls this
+   * only after the provider accepted a live user turn: a refused, cancelled or
+   * failed dispatch, a recovery or fallback replay and a scheduled turn keep it.
+   */
   clear(mapKey: string): void {
     const conversationKey = checkpointConversationKey(mapKey);
     this.unverified.delete(conversationKey);

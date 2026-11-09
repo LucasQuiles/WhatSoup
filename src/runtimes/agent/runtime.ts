@@ -6041,7 +6041,9 @@ export class AgentRuntime implements Runtime {
       const turnInput = contextPreamble === null
         ? userTurnText
         : withProviderApplicationContext(userTurnText, contextPreamble);
-      await dispatchProviderTurn(session, turnInput, onProviderBoundaryReady);
+      let providerAccepted = false; // F7: only a live user turn the provider accepted releases the stalled-operation hold.
+      await dispatchProviderTurn(session, turnInput, () => { onProviderBoundaryReady(); providerAccepted = true; });
+      if (providerAccepted && systemTurnLease === undefined && deliveryKind !== 'recovery_replay' && !isScheduledDispatch() && effectiveMapKey !== undefined) this.stalledOperationHolds.clear(effectiveMapKey);
     } catch (err) {
       if (actorPushed && pushedExecScopeKey !== undefined) {
         this.removeFailedExecutingActor(
@@ -6307,7 +6309,6 @@ export class AgentRuntime implements Runtime {
 
     // Clear post-turn gate — legitimate new user turn begins
     this.postTurnGate.delete(mapKey);
-    if (systemTurnLease === undefined) this.stalledOperationHolds.clear(mapKey);
 
     // When sandboxPerChat=true maps are keyed by workspaceKey, not raw chatJid
     // Store the turn text so it can be replayed if a session resume fails
@@ -11067,8 +11068,8 @@ export class AgentRuntime implements Runtime {
     // healthy entries wait behind it. recordFallbackTurnProcessFailure
     // attributes the crash (null for primary/other sessions — those take the
     // ordinary machinery below), marks the entry failed, and advances the
-    // window to the next eligible entry.
-    if (info) {
+    // window to the next eligible entry. F7: a stalled-operation kill is not chain evidence and is never replayed.
+    if (info && info.terminationReason !== 'stalled_operation') {
       const processFailure = this.fallback.recordFallbackTurnProcessFailure(
         session,
         `process_exit code=${info.exitCode ?? 'null'} signal=${info.signal ?? 'none'}`
