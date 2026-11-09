@@ -71,7 +71,12 @@ import {
 } from './auth-disconnect-policy.ts';
 import type { DisconnectClassification, DisconnectDecisionRecord } from '../lib/disconnect-classification.ts';
 import { isBaileysEncryptedTmpEnoent } from './baileys-media-errors.ts';
-import { AuthBondGuard, type AuthBondSnapshot } from './auth-bond.ts';
+import {
+  AuthBondCaptureAbortedError,
+  AuthBondGuard,
+  type AuthBondCaptureResult,
+  type AuthBondSnapshot,
+} from './auth-bond.ts';
 import { createAtomicCredsSaver } from './atomic-auth-save.ts';
 import { installThirdPartyConsoleRedaction, SENSITIVE_KEY_RE } from './third-party-console-redaction.ts';
 import { jidPattern } from '../lib/redaction-patterns.ts';
@@ -678,6 +683,14 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private authSnapshotFailureCount = 0;
   private authSnapshotSettledTimer: ReturnType<typeof setTimeout> | null = null;
   private lastSettledAuthSnapshotAttemptAt: number | null = null;
+  /**
+   * The handling of the most recent capture, and the guard promise it handles.
+   * The guard hands every mid-flight caller the same queued re-run, so a
+   * repeat of `authSnapshotCaptureSource` is a coalesced trigger whose result
+   * is already being handled once.
+   */
+  private authSnapshotCapture: Promise<void> | null = null;
+  private authSnapshotCaptureSource: Promise<AuthBondCaptureResult> | null = null;
   private credentialLifecycleEvents: CredentialLifecycleEvent[] = [];
   private readonly authBond = new AuthBondGuard({
     authDir: config.authDir,
@@ -981,7 +994,18 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.log.info('Connecting to WhatsApp');
 
     try {
-      const restore = this.authBond.restoreLatestIfNeeded();
+      let restore = this.authBond.restoreLatestIfNeeded();
+      // A restore never interleaves with a capture (#3677): the guard withholds
+      // one while a capture is in flight. Only a restore that is actually
+      // needed pays for that. The capture still running from the previous
+      // socket is cancelled rather than awaited, because a capture can take far
+      // longer than a reconnect should wait and the next open captures again;
+      // cancelling leaves latest.json valid. Then the restore runs once more.
+      if (restore.deferred === true && this.authBond.isCaptureInFlight()) {
+        await this.authBond.cancelCaptures();
+        if (this.shuttingDown) return;
+        restore = this.authBond.restoreLatestIfNeeded();
+      }
       if (restore.restored) {
         this.recordCredentialLifecycle('auth_restore_succeeded', {
           authBond: restore.snapshot,
@@ -1409,6 +1433,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.persistConnectionRuntimeState('shutdown');
     this.clearReconnectTimers();
     this.clearAuthSnapshotSettledTimer();
+    // Closed first, so no capture starts after shutdown begins; awaited last,
+    // so the socket is not held open while a capture removes its staging.
+    const capturesClosed = this.authBond.closeCaptures();
     this.stopKeepalive();
     // Clear poll vote grace timers to prevent post-shutdown emissions
     this.pollVoteDecryptor.dispose();
@@ -1423,6 +1450,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.sock = null;
     }
     this.clearIdentity();
+    await capturesClosed;
   }
 
   private recordCredentialLifecycle(
@@ -2492,7 +2520,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.approvedOperationDispatcher?.start();
       this.lastOpenAt = Date.now();
       this.startKeepalive(sock);
-      this.captureAuthBondSnapshot('connection-open');
+      void this.captureAuthBondSnapshot('connection-open');
       this.recordCredentialLifecycle('connection_open', { authBond: this.authBond.inspect() });
       // Start the first off-thread walk now rather than letting the earliest
       // health poll be the one to find an empty cache.
@@ -2737,8 +2765,35 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     };
   }
 
-  private captureAuthBondSnapshot(reason: string): void {
-    const result = this.authBond.capture(reason);
+  /**
+   * Start a capture off the event loop and handle its result once. Never
+   * rejects, so callers may `void` it.
+   */
+  private captureAuthBondSnapshot(reason: string): Promise<void> {
+    if (this.shuttingDown) return Promise.resolve();
+    const capture = this.authBond.captureAsync(reason);
+    if (capture === this.authSnapshotCaptureSource && this.authSnapshotCapture !== null) {
+      return this.authSnapshotCapture;
+    }
+    const handled = capture
+      .then((result) => {
+        // A capture cannot outlive the connection: a result that lands after
+        // shutdown began is not reported.
+        if (!this.shuttingDown) this.recordAuthBondCaptureResult(reason, result);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof AuthBondCaptureAbortedError) {
+          this.log.debug({ reason, error: err.message }, 'auth bond snapshot cancelled');
+          return;
+        }
+        this.log.error({ err, reason }, 'auth bond snapshot handling failed');
+      });
+    this.authSnapshotCaptureSource = capture;
+    this.authSnapshotCapture = handled;
+    return handled;
+  }
+
+  private recordAuthBondCaptureResult(reason: string, result: AuthBondCaptureResult): void {
     if (result.ok) {
       this.lastAuthSnapshotAt = Date.now();
       this.authSnapshotCaptureCount += 1;
@@ -2890,8 +2945,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       }
 
       this.lastSettledAuthSnapshotAttemptAt = now;
-      this.captureAuthBondSnapshot(reason);
-      this.persistConnectionRuntimeState('auth_snapshot_settled');
+      void this.captureAuthBondSnapshot(reason).then(() => {
+        if (!this.shuttingDown) this.persistConnectionRuntimeState('auth_snapshot_settled');
+      });
     }, ConnectionManager.AUTH_BOND_SETTLED_SNAPSHOT_DELAY_MS);
     this.authSnapshotSettledTimer.unref?.();
   }

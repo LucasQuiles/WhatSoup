@@ -103,6 +103,7 @@ import { ConnectionManager } from '../../src/transport/connection.ts';
 import { TransportAuthorityProviderOutcomeUnknownError } from '../../src/transport/outbound-governor.ts';
 import { scheduleBondEventMaintenance } from '../../src/transport/bond-event-log.ts';
 import type { OperationsAuthorityPort } from '../../src/transport/operations-authority-client.ts';
+import { settleAuthBondCapture } from '../helpers/auth-bond-capture.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1310,6 +1311,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const manager = new ConnectionManager();
     await manager.connect();
     emit(openEvent());
+    await settleAuthBondCapture(manager);
     const initialLatest = readLatestAuthBond();
 
     writeFileSync(join(testAuthDir, 'sender-key-test.json'), JSON.stringify({ keyData: 'rotated' }));
@@ -1322,6 +1324,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     expect(readLatestAuthBond()).toEqual(initialLatest);
 
     await vi.advanceTimersByTimeAsync(1);
+    await settleAuthBondCapture(manager);
     const refreshedLatest = readLatestAuthBond();
     expect(refreshedLatest.backupPath).not.toBe(initialLatest.backupPath);
     expect(refreshedLatest.reason).toBe('baileys-key-material-settled');
@@ -1347,6 +1350,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const manager = new ConnectionManager();
     await manager.connect();
     emit(openEvent());
+    await settleAuthBondCapture(manager);
 
     writeFileSync(join(testAuthDir, 'sender-key-a.json'), JSON.stringify({ keyData: 'a' }));
     await emit({ 'messages.upsert': { type: 'notify', messages: [] } });
@@ -1358,6 +1362,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     expect(scheduled).toHaveLength(1);
 
     await vi.advanceTimersByTimeAsync(60_000);
+    await settleAuthBondCapture(manager);
     const firstSettled = readLatestAuthBond();
     expect(firstSettled.reason).toBe('baileys-key-material-settled');
 
@@ -1389,6 +1394,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const manager = new ConnectionManager();
     await manager.connect();
     emit(openEvent());
+    await settleAuthBondCapture(manager);
     const initialLatest = readLatestAuthBond();
 
     writeFileSync(join(testAuthDir, 'sender-key-after-logout.json'), JSON.stringify({ keyData: 'do-not-capture' }));
@@ -1437,6 +1443,9 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     await manager.connect();
     await vi.advanceTimersByTimeAsync(100);
     emit(openEvent());
+    // Exact fake timestamps are asserted below, so the clock must not move.
+    // This capture finds no auth tree and never reaches a retry timer.
+    await settleAuthBondCapture(manager, { advanceClockMs: 0 });
 
     expect(manager.getConnectionState()).toMatchObject({
       state: 'connected',
@@ -1665,11 +1674,13 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const manager = new ConnectionManager();
     await manager.connect();
     emit(openEvent());
+    await settleAuthBondCapture(manager);
     clearAlertSourceMock.mockClear();
 
     (manager as any).localAuthAlertEmitted = true;
 
     (manager as any).captureAuthBondSnapshot('connection-open');
+    await settleAuthBondCapture(manager);
     expect(clearAlertSourceMock).not.toHaveBeenCalled();
 
     await manager.sendMessage('15550100001@s.whatsapp.net', 'proof send');
@@ -1728,6 +1739,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const manager = new ConnectionManager();
     await manager.connect();
     emit(openEvent());
+    await settleAuthBondCapture(manager);
     clearAlertSourceMock.mockClear();
 
     (manager as any).localAuthAlertEmitted = true;
@@ -1755,6 +1767,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const manager = new ConnectionManager();
     await manager.connect();
     emit(openEvent());
+    await settleAuthBondCapture(manager);
     clearAlertSourceMock.mockClear();
 
     (manager as any).localAuthAlertEmitted = true;
@@ -1828,6 +1841,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const manager = new ConnectionManager();
     await manager.connect();
     emit(openEvent());
+    await settleAuthBondCapture(manager);
     const initialLatest = readLatestAuthBond();
 
     writeFileSync(join(testAuthDir, 'sender-key-creds.json'), JSON.stringify({ keyData: 'a' }));
@@ -1841,6 +1855,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
       .map(event => event.note)).toEqual(['creds-update-settled', 'creds-update-settled']);
 
     await vi.advanceTimersByTimeAsync(60_000);
+    await settleAuthBondCapture(manager);
     const settled = readLatestAuthBond();
     expect(manager.getConnectionState().credentialLifecycle.recentEvents
       .map(event => `${event.event}:${event.note ?? ''}`)).toEqual(expect.arrayContaining([
@@ -1860,10 +1875,12 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const manager = new ConnectionManager();
     await manager.connect();
     emit(openEvent());
+    await settleAuthBondCapture(manager);
     emitAlertMock.mockClear();
 
     writeFileSync(join(testAuthDir, 'creds.json'), '');
     (manager as any).captureAuthBondSnapshot('creds-update');
+    await settleAuthBondCapture(manager);
 
     expect(emitAlertMock).not.toHaveBeenCalledWith(
       'WhatSoup',

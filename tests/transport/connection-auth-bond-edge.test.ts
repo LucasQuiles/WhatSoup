@@ -70,6 +70,7 @@ vi.mock('../../src/core/retry.ts', () => ({
 }));
 
 vi.mock('../../src/transport/auth-bond.ts', () => ({
+  AuthBondCaptureAbortedError: class AuthBondCaptureAbortedError extends Error {},
   AuthBondGuard: vi.fn(function () {
     return {
       inspect: vi.fn(() => mockAuth.snapshot),
@@ -80,7 +81,7 @@ vi.mock('../../src/transport/auth-bond.ts', () => ({
         snapshot: mockAuth.snapshot,
         error: null,
       }),
-      capture: vi.fn(() => mockAuth.capture ?? {
+      captureAsync: vi.fn(async () => mockAuth.capture ?? {
         ok: true,
         snapshot: mockAuth.snapshot,
         captured: false,
@@ -88,6 +89,11 @@ vi.mock('../../src/transport/auth-bond.ts', () => ({
         path: null,
         error: null,
       }),
+      // The single-flight and shutdown half (#3677): nothing is ever in flight
+      // in this double, because captureAsync settles on the next microtask.
+      isCaptureInFlight: vi.fn(() => false),
+      cancelCaptures: vi.fn(async () => {}),
+      closeCaptures: vi.fn(async () => {}),
       // The tree-cache half of the guard surface. ConnectionManager reaches all
       // three on paths these tests drive: warmTreeCache on socket open,
       // invalidateTreeCache from the credential saver, inspectCached from the
@@ -117,7 +123,9 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeWASocket, useMultiFileAuthState } from '@whiskeysockets/baileys';
 import { ConnectionManager } from '../../src/transport/connection.ts';
-import { AuthBondGuard } from '../../src/transport/auth-bond.ts';
+import { AuthBondCaptureAbortedError, AuthBondGuard } from '../../src/transport/auth-bond.ts';
+import { settleAuthBondCapture } from '../helpers/auth-bond-capture.ts';
+import { deferred } from '../helpers/deferred.ts';
 
 function makeSnapshot(overrides: AuthBondSnapshotOverrides = {}): AuthBondSnapshot {
   const snapshot: AuthBondSnapshot = {
@@ -634,9 +642,10 @@ describe('ConnectionManager auth-bond edge coverage', () => {
       path: null,
       error: 'capture failed',
     };
-    const { emit } = await connectRegistered();
+    const { manager, emit } = await connectRegistered();
 
     emit({ 'connection.update': { connection: 'open' } });
+    await settleAuthBondCapture(manager);
 
     expect(latestCriticalAsset().failure.code).toBe('WA_AUTH_BOND_SNAPSHOT_CAPTURE_FAILED');
     expect(latestCriticalAsset().failure.recoverability).toBe('manual_repair_required');
@@ -842,6 +851,7 @@ describe('ConnectionManager auth-bond edge coverage', () => {
     try {
       const { manager, emit } = await connectRegistered();
       emit(openEvent());
+      await settleAuthBondCapture(manager);
       const scheduledBefore = lifecycleEventCount(manager, 'auth_snapshot_scheduled');
       const capturedBefore = lifecycleEventCount(manager, 'auth_snapshot_captured');
       (manager as any).loggedOutAlertEmitted = true;
@@ -862,6 +872,7 @@ describe('ConnectionManager auth-bond edge coverage', () => {
     try {
       const { manager, emit } = await connectRegistered();
       emit(openEvent());
+      await settleAuthBondCapture(manager);
       const capturedBefore = lifecycleEventCount(manager, 'auth_snapshot_captured');
 
       (manager as any).scheduleSettledAuthBondSnapshot('key-material-settled');
@@ -883,6 +894,7 @@ describe('ConnectionManager auth-bond edge coverage', () => {
     try {
       const { manager, emit } = await connectRegistered();
       emit(openEvent());
+      await settleAuthBondCapture(manager);
       const capturedBefore = lifecycleEventCount(manager, 'auth_snapshot_captured');
 
       (manager as any).scheduleSettledAuthBondSnapshot('key-material-settled');
@@ -1069,6 +1081,141 @@ describe('#2394 auth-bond restart recovery authority', () => {
       expect(clearCalls).toHaveLength(0);
       expect((manager as any).localAuthAlertEmitted).toBe(true);
     });
+  });
+});
+
+// #3677: capture runs off the event loop, so ConnectionManager owns three
+// rules the synchronous call never needed — one result per coalesced trigger,
+// no capture across shutdown, and no restore while a capture is in flight.
+describe('ConnectionManager async auth-bond capture wiring (#3677)', () => {
+  function guardOf(manager: ConnectionManager) {
+    return (manager as any).authBond as {
+      captureAsync: ReturnType<typeof vi.fn>;
+      isCaptureInFlight: ReturnType<typeof vi.fn>;
+      cancelCaptures: ReturnType<typeof vi.fn>;
+      closeCaptures: ReturnType<typeof vi.fn>;
+      restoreLatestIfNeeded: ReturnType<typeof vi.fn>;
+    };
+  }
+
+  function okResult(): AuthBondCaptureResult {
+    return { ok: true, snapshot: mockAuth.snapshot!, captured: true, deferred: false, path: '/tmp/auth-backup/new', error: null };
+  }
+
+  it('handles a coalesced trigger once, because the guard hands both callers one promise', async () => {
+    const { manager, emit } = await connectRegistered();
+    emit(openEvent());
+    await settleAuthBondCapture(manager);
+    const capturedBefore = lifecycleEventCount(manager, 'auth_snapshot_captured');
+    const countBefore = (manager as any).authSnapshotCaptureCount as number;
+    const shared = deferred<AuthBondCaptureResult>();
+    guardOf(manager).captureAsync.mockReturnValue(shared.promise);
+
+    const first = (manager as any).captureAuthBondSnapshot('creds-update-settled') as Promise<void>;
+    const second = (manager as any).captureAuthBondSnapshot('baileys-key-material-settled') as Promise<void>;
+    shared.resolve(okResult());
+    await first;
+
+    expect(second).toBe(first);
+    expect(lifecycleEventCount(manager, 'auth_snapshot_captured')).toBe(capturedBefore + 1);
+    expect((manager as any).authSnapshotCaptureCount).toBe(countBefore + 1);
+  });
+
+  it('closes captures on shutdown and starts none once shutdown has begun', async () => {
+    const { manager, emit } = await connectRegistered();
+    emit(openEvent());
+    await settleAuthBondCapture(manager);
+    const guard = guardOf(manager);
+    const startedBefore = guard.captureAsync.mock.calls.length;
+
+    await manager.shutdown();
+    await (manager as any).captureAuthBondSnapshot('after-shutdown');
+    (manager as any).scheduleSettledAuthBondSnapshot('after-shutdown');
+
+    expect(guard.closeCaptures).toHaveBeenCalledTimes(1);
+    expect(guard.captureAsync).toHaveBeenCalledTimes(startedBefore);
+  });
+
+  it('does not report a capture result that lands after shutdown began', async () => {
+    const { manager, emit } = await connectRegistered();
+    emit(openEvent());
+    await settleAuthBondCapture(manager);
+    const late = deferred<AuthBondCaptureResult>();
+    guardOf(manager).captureAsync.mockReturnValueOnce(late.promise);
+    const handled = (manager as any).captureAuthBondSnapshot('connection-open') as Promise<void>;
+    alertCalls.length = 0;
+
+    await manager.shutdown();
+    late.resolve({ ok: false, snapshot: mockAuth.snapshot!, captured: false, deferred: false, path: null, error: 'late failure' });
+    await handled;
+
+    expect(lifecycleEventCount(manager, 'auth_snapshot_failed')).toBe(0);
+    expect((manager as any).authSnapshotFailureCount).toBe(0);
+    expect(alertCalls).toEqual([]);
+  });
+
+  it('treats a cancelled capture as neither a capture nor a failure', async () => {
+    const { manager, emit } = await connectRegistered();
+    emit(openEvent());
+    await settleAuthBondCapture(manager);
+    const capturedBefore = lifecycleEventCount(manager, 'auth_snapshot_captured');
+    guardOf(manager).captureAsync.mockRejectedValueOnce(new AuthBondCaptureAbortedError('auth bond capture cancelled'));
+    alertCalls.length = 0;
+
+    await (manager as any).captureAuthBondSnapshot('connection-open');
+
+    expect(lifecycleEventCount(manager, 'auth_snapshot_captured')).toBe(capturedBefore);
+    expect(lifecycleEventCount(manager, 'auth_snapshot_failed')).toBe(0);
+    expect(alertCalls).toEqual([]);
+    expect(logger.error).not.toHaveBeenCalledWith(expect.anything(), 'auth bond snapshot handling failed');
+  });
+
+  it('cancels an in-flight capture, then restores once more, when the guard withholds a restore for it', async () => {
+    // The restore results describe the missing bond; the preflight after the
+    // restore reads the repaired one.
+    const snapshot = makeSnapshot({ status: 'missing', issues: ['auth_dir_missing'] });
+    mockAuth.snapshot = makeSnapshot();
+    const { mockSock } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+    const manager = new ConnectionManager();
+    const guard = guardOf(manager);
+    guard.isCaptureInFlight.mockReturnValue(true);
+    guard.restoreLatestIfNeeded
+      .mockReturnValueOnce({
+        attempted: false,
+        restored: false,
+        source: null,
+        snapshot,
+        deferred: true,
+        error: 'auth bond capture in flight; restore withheld until it settles',
+      })
+      .mockReturnValueOnce({ attempted: true, restored: true, source: '/tmp/auth-backup/latest', snapshot, error: null });
+
+    await manager.connect();
+
+    expect(guard.cancelCaptures).toHaveBeenCalledTimes(1);
+    expect(guard.restoreLatestIfNeeded).toHaveBeenCalledTimes(2);
+    const [firstRestore, secondRestore] = guard.restoreLatestIfNeeded.mock.invocationCallOrder;
+    const [cancel] = guard.cancelCaptures.mock.invocationCallOrder;
+    expect(firstRestore).toBeLessThan(cancel!);
+    expect(cancel).toBeLessThan(secondRestore!);
+    expect(lifecycleEventCount(manager, 'auth_restore_succeeded')).toBe(1);
+    expect(lifecycleEventCount(manager, 'auth_restore_deferred')).toBe(0);
+    expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves an in-flight capture alone when no restore is needed', async () => {
+    const { mockSock } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+    const manager = new ConnectionManager();
+    const guard = guardOf(manager);
+    guard.isCaptureInFlight.mockReturnValue(true);
+
+    await manager.connect();
+
+    expect(guard.cancelCaptures).not.toHaveBeenCalled();
+    expect(guard.restoreLatestIfNeeded).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(1);
   });
 });
 
