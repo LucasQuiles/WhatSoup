@@ -211,6 +211,12 @@ it('confines the private scanner credential to the trusted default-branch workfl
   expect(job.steps.at(-1).if).toBe('always()');
 });
 
+it('provides an uncancelled Quality producer for tag receipt qualification', () => {
+  const workflow = parse(readFileSync(join(repoRoot, '.github/workflows/quality.yml'), 'utf8'));
+  expect(workflow.on.push.tags).toEqual(['v*']);
+  expect(workflow.concurrency['cancel-in-progress']).toBe("${{ github.event_name != 'merge_group' && !startsWith(github.ref, 'refs/tags/') }}");
+});
+
 it('refuses an old curl before trusted-driver downloads and executes the supported bootstrap path', () => {
   const workflow = parse(readFileSync(join(repoRoot, '.github/workflows/private-test-integrity.yml'), 'utf8'));
   const bootstrap = workflow.jobs['private-scanner'].steps.find((step: { id?: string }) => step.id === 'trusted-driver');
