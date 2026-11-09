@@ -7,7 +7,10 @@ import { asMockLogger, singletonLoggerMock } from '../helpers/logger-mock.ts';
 
 function socketFor(markOnlineOnConnect: boolean) {
   const base = singletonLoggerMock();
-  const logger = asMockLogger({ ...base, level: 'debug', fatal: vi.fn(), trace: vi.fn(), child: () => logger });
+  const trace = vi.fn();
+  // At level 'trace', the socket's sendNode logs each outgoing stanza as XML before encoding it,
+  // so these tests read exactly what would go to WhatsApp.
+  const logger = asMockLogger({ ...base, level: 'trace', fatal: vi.fn(), trace, child: () => logger });
   const creds = initAuthCreds();
   creds.me = { id: '15555550123:1@s.whatsapp.net', name: 'Stored Name' };
   // A closed local port: the socket never reaches WhatsApp, but its creds.update
@@ -19,36 +22,39 @@ function socketFor(markOnlineOnConnect: boolean) {
     waWebSocketUrl: 'ws://127.0.0.1:9',
     connectTimeoutMs: 1_000,
   } as unknown as Parameters<typeof makeWASocket>[0]);
+  const presenceSent = (): string[] => trace.mock.calls
+    .map(([entry]) => (entry as { xml?: unknown }).xml)
+    .filter((xml): xml is string => typeof xml === 'string' && xml.startsWith('<presence'));
   const newName = () => sock.ev.emit('creds.update', { me: { id: creds.me!.id, name: 'New Name' } });
-  return { sock, debug: base.debug, newName };
+  return { sock, presenceSent, newName };
 }
 
 describe('baileys push-name presence patch', () => {
   it('sends no presence on a partial creds.update', async () => {
-    const { sock, debug } = socketFor(false);
+    const { sock, presenceSent } = socketFor(false);
     try {
       sock.ev.emit('creds.update', { nextPreKeyId: 2 });
-      expect(debug).not.toHaveBeenCalledWith(expect.anything(), 'updated pushName');
+      expect(presenceSent()).toEqual([]);
     } finally {
       await sock.end(undefined);
     }
   });
 
   it('announces a new name as unavailable on a line that connects offline', async () => {
-    const { sock, debug, newName } = socketFor(false);
+    const { sock, presenceSent, newName } = socketFor(false);
     try {
       newName();
-      expect(debug).toHaveBeenCalledWith({ name: 'New Name', type: 'unavailable' }, 'updated pushName');
+      expect(presenceSent()).toEqual(["<presence name='New Name' type='unavailable'/>"]);
     } finally {
       await sock.end(undefined);
     }
   });
 
   it('keeps the library announcement on a line that connects online', async () => {
-    const { sock, debug, newName } = socketFor(true);
+    const { sock, presenceSent, newName } = socketFor(true);
     try {
       newName();
-      expect(debug).toHaveBeenCalledWith({ name: 'New Name' }, 'updated pushName');
+      expect(presenceSent()).toEqual(["<presence name='New Name'/>"]);
     } finally {
       await sock.end(undefined);
     }

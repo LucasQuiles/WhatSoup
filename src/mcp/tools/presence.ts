@@ -30,7 +30,7 @@ const presenceSockConfigs: SockToolConfig<any>[] = [
   {
     name: 'subscribe_presence',
     description:
-      'Subscribe to presence updates for a WhatsApp contact or group JID (global). After subscribing, presence status will be available via get_presence.',
+      'Subscribe to presence updates for a WhatsApp contact or group JID (global). Updates WhatsApp delivers after subscribing are cached for get_presence; none may arrive (for example on a passive line, which connects as unavailable).',
     schema: z.object({
       jid: z.string(),
     }),
