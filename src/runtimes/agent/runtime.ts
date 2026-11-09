@@ -1436,6 +1436,7 @@ export class AgentRuntime implements Runtime {
         // this barrier so the caller observes the outcome and no second reset
         // can interleave. Weaker than the owned path (no generation advance).
         log.warn({ ...logFields, mapKey, trigger }, 'wedged-resident reset has no chat queue — using the session-local reset');
+        this.stalledOperationDeferredResumes.delete(session);
         await session.handleNew();
       } else {
         await this.resetOwnedPerChatSession(mapKey, chatJid, session);
@@ -5268,6 +5269,7 @@ export class AgentRuntime implements Runtime {
               resetSingleSession: async (session) => {
                 this.heldCloseFailedNotices.delete(session);
                 await this.waitForRejectedTerminalTeardown(session);
+                this.stalledOperationDeferredResumes.delete(session);
                 await session.handleNew();
                 this.rejectedTerminalTeardowns.delete(session);
               },
@@ -9205,6 +9207,8 @@ export class AgentRuntime implements Runtime {
     session: SessionManager,
     expected: { managerId: string; generation: number },
   ): Promise<string> {
+    // F7: any spawn supersedes a withheld stalled-operation resume.
+    this.stalledOperationDeferredResumes.delete(session);
     const spawnedPid = session.getStatus().pid;
     try {
       return this.markOwnedPerChatSessionActive(mapKey, session, expected);

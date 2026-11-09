@@ -498,6 +498,11 @@ describe('F7: a stalled-operation kill survives a real service restart', () => {
     expect(state.sessionOwnership.get(DM_JID)?.respawnTimer ?? null).toBeNull();
   }
 
+  /** Past the longest first-attempt respawn backoff (2 s base, +25% jitter). */
+  async function waitPastRespawnBackoff(): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+  }
+
   function terminalCount(seq: number): number {
     return (db.raw.prepare('SELECT COUNT(*) AS n FROM turn_terminal_records WHERE inbound_seq = ?').get(seq) as { n: number }).n;
   }
@@ -650,6 +655,7 @@ describe('F7: a stalled-operation kill survives a real service restart', () => {
     expect(checkpoint().watchdog).not.toHaveProperty('stalledOperationResumeHold');
     expect(resumableKeys()).not.toContain(DM_KEY);
     expect(agentRow(rowId), 'the session row is kept for the next request').toEqual({ status: 'orphaned', session_id: sessionId });
+    await waitPastRespawnBackoff();
     expect(session.spawnSession, 'only the first spawn; no automatic resume').toHaveBeenCalledTimes(1);
     holdWrites.mockRestore();
 
@@ -676,6 +682,7 @@ describe('F7: a stalled-operation kill survives a real service restart', () => {
     expect(holdWrites).toHaveBeenCalled();
     expect(withdrawals).toHaveBeenCalled();
     expectRespawnWithheld(first);
+    await waitPastRespawnBackoff();
     expect(session.spawnSession, 'no automatic reactivation').toHaveBeenCalledTimes(1);
     expect(session.turnsSent).toHaveLength(turnsBeforeKill);
     expect(checkpoint(), "only the crash's own write orphaned it").toMatchObject({
