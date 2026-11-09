@@ -1,7 +1,7 @@
 // Isolated read-only executor for poll.sqlite triggers. The parent owns the
 // deadline and process lifecycle; this child owns only a bounded JSON request
 // and a bounded, content-free result.
-import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
+import { constants, DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { SQLITE_BUSY_TIMEOUT_MS } from '../../lib/sqlite-constants.ts';
 import {
   TRIGGER_BUDGETS,
@@ -107,6 +107,11 @@ async function main(): Promise<void> {
     // connection's main-database location before it grants this path.
     db = new DatabaseSync(request.databasePath, { readOnly: true, timeout: SQLITE_BUSY_TIMEOUT_MS });
     databaseOpened = true;
+    // SQLite permits recursion without RECURSIVE and through stored views, so
+    // the syntax check alone cannot enforce the execution policy.
+    db.setAuthorizer((action) => action === constants.SQLITE_RECURSIVE
+      ? constants.SQLITE_DENY
+      : constants.SQLITE_OK);
     const countSql = sqliteBoundedCountQuery(request.sql, request.maxRows);
     if (!countSql) {
       emit({ status: 'sql_error' }, request.maxOutputBytes);

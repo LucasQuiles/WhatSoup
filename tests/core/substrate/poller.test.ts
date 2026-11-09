@@ -342,6 +342,39 @@ describe('TriggerPoller — poll.sqlite', () => {
     })).resolves.toEqual({ kind: 'unavailable', reason: 'exit' });
   });
 
+  it('rejects an explicit recursive clause nested inside a direct worker request', async () => {
+    await expect(runIsolatedSqlite({
+      databasePath: path,
+      sql: 'SELECT count(*) FROM (WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 3) SELECT x FROM r)',
+      binds: [], maxRows: 1, timeoutMs: 1_000,
+    })).resolves.toEqual({ kind: 'unavailable', reason: 'exit' });
+  });
+
+  it.each([
+    'WITH r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 3) SELECT count(*) FROM r',
+    'SELECT count(*) FROM (WITH r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 3) SELECT x FROM r)',
+  ])('denies implicit recursion in the real SQLite worker: %s', async (sql) => {
+    await expect(runIsolatedSqlite({
+      databasePath: path, sql, binds: [], maxRows: 1, timeoutMs: 1_000,
+    })).resolves.toEqual({ kind: 'sql_error' });
+  });
+
+  it('denies recursion hidden in a stored view without exposing SQL details', async () => {
+    db.raw.exec('CREATE VIEW recursive_probe AS WITH r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 3) SELECT x FROM r');
+    await expect(runIsolatedSqlite({
+      databasePath: path, sql: 'SELECT count(*) FROM recursive_probe',
+      binds: [], maxRows: 1, timeoutMs: 1_000,
+    })).resolves.toEqual({ kind: 'sql_error' });
+  });
+
+  it('executes an ordinary nested CTE with a quoted recursive identifier', async () => {
+    await expect(runIsolatedSqlite({
+      databasePath: path,
+      sql: 'SELECT x FROM (WITH "recursive" AS (SELECT 1 AS x UNION ALL SELECT 2) SELECT x FROM "recursive")',
+      binds: [], maxRows: 2, timeoutMs: 1_000,
+    })).resolves.toEqual({ kind: 'ok', rowCount: 2 });
+  });
+
   it('fails closed before execution when no durable main database location exists', async () => {
     const { messenger } = makeMessenger();
     const memory = new Database(':memory:');

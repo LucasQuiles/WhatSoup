@@ -1669,9 +1669,13 @@ guard makes any late write from the abandoned execution a no-op. The run loop aw
 under `tickBudgetSeconds` (default 600s) and re-arms the timer past stragglers, which keep
 running detached and finalize under their lease.
 
-`poll.sqlite` has a stricter execution boundary. A validated non-recursive `SELECT` (including a
-read-only `WITH … SELECT`) is sent over bounded JSON stdin to a short-lived read-only child
-process for the `main` database location. The parent owns the hard deadline and resolves only
+`poll.sqlite` has a stricter execution boundary. Syntax validation admits one `SELECT` (including a
+read-only `WITH … SELECT`) and rejects explicit `WITH RECURSIVE` clauses at every nesting level.
+The query is sent over bounded JSON stdin to a short-lived read-only child process for the `main`
+database location. Before execution, SQLite's native authorizer denies recursive operations,
+including recursion without the optional keyword and recursion through stored views; those
+denials return the redacted `sql_error` class. Ordinary non-recursive CTEs remain supported.
+The parent owns the hard deadline and resolves only
 after the child closes, so a deadline kills and reaps the process instead of racing a Promise
 around same-thread `DatabaseSync`. The child nests the admitted query under `SELECT 1` with a
 `maxRows + 1` limit, then returns only the fixed `{rowCount}` scalar; SQL text, binds, and caller

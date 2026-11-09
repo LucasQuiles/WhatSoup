@@ -194,6 +194,8 @@ function normalizedReadOnlySql(sql: string): string | null {
   const final = tokens[tokens.length - 1];
   const withoutTrailingSemicolon = final.value === ';' ? tokens.slice(0, -1) : tokens;
   if (withoutTrailingSemicolon.length === 0 || withoutTrailingSemicolon.some((token) => token.value === ';')) return null;
+  if (withoutTrailingSemicolon.some((token, index) =>
+    tokenIs(token, 'WITH') && tokenIs(withoutTrailingSemicolon[index + 1], 'RECURSIVE'))) return null;
   const first = withoutTrailingSemicolon[0];
   const outer = tokenIs(first, 'WITH') ? withOuterStatement(withoutTrailingSemicolon) : first;
   if (!tokenIs(outer, 'SELECT')) return null;
@@ -204,9 +206,9 @@ function normalizedReadOnlySql(sql: string): string | null {
 }
 
 /**
- * Allows exactly one non-recursive read query. This parser makes the decision
- * from SQLite tokens and outer-statement shape, never raw keyword substrings,
- * so keywords inside quoted text or comments stay inert.
+ * Admits one read-query candidate, rejecting explicit recursive clauses at any
+ * depth. The worker's SQLite authorizer also denies implicit or view recursion.
+ * Tokens keep quoted text and comments inert instead of matching raw keywords.
  */
 export function isSafeSqliteSql(sql: string): boolean {
   return normalizedReadOnlySql(sql) !== null;

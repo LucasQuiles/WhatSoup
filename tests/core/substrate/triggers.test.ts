@@ -579,15 +579,34 @@ describe('poll.sqlite SQL safety guard (#1096)', () => {
   });
 
   it('QR-026: isSafeSqliteSql rejects recursive CTEs (unbounded-CPU vector under query_only)', () => {
-    // A count/aggregate over a recursive CTE returns ONE row → the poller row-cap can't
-    // bound it, and node:sqlite DatabaseSync has no statement-time interrupt → whole-process
-    // freeze. Reject at validation so it never executes.
+    // A recursive aggregate returns one row, so the row cap cannot bound its work.
+    // Explicit recursion is rejected before sending a query to the isolated worker.
     expect(
       isSafeSqliteSql('WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM r WHERE x<1000000000) SELECT count(*) FROM r'),
     ).toBe(false);
     expect(isSafeSqliteSql('with recursive cnt(n) as (select 1 union all select n+1 from cnt) select n from cnt')).toBe(false);
-    // A NON-recursive CTE remains allowed — only the recursive keyword is the CPU vector.
+    // Ordinary CTEs remain allowed; the worker also rejects implicit recursion.
     expect(isSafeSqliteSql('WITH recent AS (SELECT id FROM messages LIMIT 10) SELECT * FROM recent')).toBe(true);
+  });
+
+  it.each([
+    'SELECT (WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 3) SELECT count(*) FROM r)',
+    'SELECT count(*) FROM (WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 3) SELECT x FROM r)',
+    'SELECT 1 WHERE EXISTS (WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 3) SELECT x FROM r)',
+    'WITH outer_cte AS (SELECT (WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 3) SELECT count(*) FROM r)) SELECT * FROM outer_cte',
+    'SELECT (WITH /* separated keywords */ ReCuRsIvE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 3) SELECT count(*) FROM r)',
+  ])('rejects recursive clauses at nested admission boundaries: %s', (sql) => {
+    expect(isSafeSqliteSql(sql)).toBe(false);
+    expect(() => validateTriggerSpec('poll.sqlite', { sql, fire_when: 'rows_returned' })).toThrow();
+  });
+
+  it.each([
+    "SELECT 'WITH RECURSIVE' AS note /* WITH RECURSIVE */",
+    'WITH "recursive" AS (SELECT 1 AS x) SELECT x FROM "recursive"',
+    'SELECT (WITH ordinary AS (SELECT 1 AS x) SELECT x FROM ordinary)',
+  ])('preserves inert recursive text and ordinary nested queries: %s', (sql) => {
+    expect(isSafeSqliteSql(sql)).toBe(true);
+    expect(() => validateTriggerSpec('poll.sqlite', { sql, fire_when: 'rows_returned' })).not.toThrow();
   });
 
   it('allows a read-only WITH query but rejects every data-changing outer statement', () => {
