@@ -14,7 +14,7 @@ npm run --silent test:affected -- --base origin/main --max-workers 2 --json
 npm run --silent test:plan -- --files src/lib/short-hash.ts --json
 npm run --silent test:affected -- --files src/lib/short-hash.ts --timeout-ms 120000 --json
 
-# A specific regression, using the existing full-suite battery:
+# A specific regression; this battery path does not acquire the checkout lock:
 npm test -- tests/lib/short-hash.test.ts --maxWorkers=1
 
 # Full root coverage, with the existing floors and console coverage check:
@@ -96,6 +96,8 @@ validation defaults to thirty minutes. `--max-workers` accepts 1–4; browser
 execution stays at one. `--timeout-ms` is a total budget, including admission.
 The existing battery kills the child's process group at the bound and records
 cleanup uncertainty. This is separate from Vitest's per-test timeout.
+The planner and affected runner use `--max-workers`; the direct Vitest arguments
+forwarded by `npm test` use `--maxWorkers`.
 Maintained nested runners verify their enclosing battery's live process ancestry
 and share its group, so an outer cancellation does not strand another detached
 test tree. Missing or stale ownership evidence refuses nested execution.
@@ -117,6 +119,10 @@ Do not increase the shared host cap to get past contention.
 
 With `--json`, stdout contains one document and child diagnostics remain on stderr.
 Use `npm run --silent` as above to suppress npm's own non-JSON command banner.
+Inspect `outcome`, `scope`, `omittedLanes`, and `ciObligations` together. Exit 0
+with `outcome: "not-required"` means no application commands ran; it does not
+qualify CI documentation checks. A `passed` focused lane is still partial evidence
+for a broader gate.
 Reports include each command's outcome and duration. Direct Vitest steps also
 report files, passed/failed/pending tests from the actual runner report. Push and
 release gates report a terminated child's PID and signal, preserve `128 + signal`
@@ -125,6 +131,11 @@ with an all-skipped or missing report cannot become a successful affected run. C
 measure execution, not assertion quality or exact semantic coverage.
 Nested gates preserve busy (75), timeout (124), and inconclusive (125) meanings
 in the affected-run summary; per-command details retain the observed process exit.
+There is no automatic resume or cache of passing verdicts. Completed steps help
+diagnose an interrupted run but cannot complete its required gate. Resolve the
+failure or interruption, verify cleanup, then rerun the required profile. The
+separate scanner retry procedure above can reuse unchanged successful Quality
+evidence because its consumer verifies the source and run identities again.
 
 The runner creates and removes its own scratch `TMPDIR`. Tests should use
 `tests/helpers/tmp-dir.ts`, `tmp_path`, `TemporaryDirectory`, or registered cleanup.
