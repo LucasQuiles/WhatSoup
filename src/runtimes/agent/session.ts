@@ -128,6 +128,8 @@ export const WATCHDOG_HARD_MS  = 1_800_000; // 30 min — SIGKILL
 // Grace after a tool stalls before we SIGKILL the hung stream-json provider. Unlike
 // WATCHDOG_HARD_MS this is NOT reset by inbound messages (see recoverStalledOperation).
 export const STALLED_OP_KILL_GRACE_MS = 180_000; // 3 min after a tool stalls
+/** The user-facing notice for a stalled-tool kill: a failure notice, never task fulfilment. */
+export const STALLED_OPERATION_NOTICE = '_A tool call stalled and was terminated. Send your message again to retry._';
 
 // ─── Long-operation liveness gate ───────────────────────────────────────────
 // Stream silence is NOT proof of a hang: long browser-automation, bash, and MCP
@@ -147,6 +149,11 @@ function positiveIntEnv(name: string, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 export const LONG_OP_CEILING_MS = positiveIntEnv('WHATSOUP_LONG_OP_CEILING_MS', 7_200_000); // 2 h
+
+/** Why the liveness gate let a kill proceed; logged on the kill line (F7). */
+export type LivenessKillBasis =
+  | { readonly liveness: 'idle'; readonly gateElapsedMs: number; readonly cpuDeltaMs: number; readonly pidCount: number }
+  | { readonly liveness: 'unavailable' | 'assessment_failed' | 'ceiling' | 'no_pid'; readonly gateElapsedMs: number };
 /** Floor between successive "long step still running" chat notices. */
 export const LONG_OP_NOTICE_MIN_INTERVAL_MS = 600_000; // 10 min
 
@@ -3571,12 +3578,12 @@ export class SessionManager {
           Math.min(STALLED_OP_KILL_GRACE_MS, maxDelayMs),
         );
       },
-      kill: () => {
+      kill: (basis) => {
         log.warn(
-          { sessionId: this.sessionId, pid: child.pid, toolId, toolName, reason: 'stalled_operation' },
+          { sessionId: this.sessionId, pid: child.pid, toolId, toolName, reason: 'stalled_operation', ...basis },
           'stalled-operation kill fired — SIGKILL hung provider',
         );
-        this.emitUserNotice('_A tool call stalled and was terminated. Send your message again to retry._');
+        this.emitUserNotice(STALLED_OPERATION_NOTICE);
         this.markIntentionalKill(child, 'SIGKILL', 'stalled_operation');
         void this.killChildTree(child, 'SIGKILL').catch((err) => {
           log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap stalled provider process tree');
@@ -3591,12 +3598,15 @@ export class SessionManager {
    * (heavy browser automation / long shell / tool-protocol steps). Assessment
    * failure (tree gone, `ps` unusable) is
    * treated as no-exoneration: the kill proceeds exactly as before this gate existed.
+   * The kill callback receives why the gate did not defer (F7): an idle tree, an
+   * unavailable or failed assessment, the ceiling, or no pid. Without it the kill line
+   * cannot tell a hung tool from a check that never ran.
    */
   private async runLivenessGatedKill(args: {
     child: ReturnType<typeof spawn>;
     reason: 'stalled_operation' | 'turn_watchdog';
     rearm: (maxDelayMs: number) => void;
-    kill: () => void;
+    kill: (basis: LivenessKillBasis) => void;
   }): Promise<void> {
     const assessmentStartedAt = Date.now();
     if (this.longOpGateStartedAt === null) this.longOpGateStartedAt = assessmentStartedAt;
@@ -3606,10 +3616,12 @@ export class SessionManager {
     if (gateElapsed < LONG_OP_CEILING_MS && typeof rootPid === 'number') {
       const assessmentEpoch = this.livenessProgressEpoch;
       let verdict: Awaited<ReturnType<typeof assessTreeLiveness>> = null;
+      let assessmentFailed = false;
       try {
         verdict = await this.treeLivenessAssessor(rootPid);
       } catch (err) {
-        log.debug({ err, rootPid, reason: args.reason }, 'tree liveness assessment failed — proceeding with kill');
+        assessmentFailed = true;
+        log.warn({ err, rootPid, reason: args.reason }, 'tree liveness assessment failed — proceeding with kill');
       }
       // The assessment awaited: the world may have moved (turn completed, session
       // recycled, a newer kill armed). Only act if this child is still the live one.
@@ -3627,7 +3639,7 @@ export class SessionManager {
           { rootPid, reason: args.reason, gateElapsedMs: decisionElapsed, ceilingMs: LONG_OP_CEILING_MS },
           'long-operation ceiling reached — killing despite possible CPU progress',
         );
-        args.kill();
+        args.kill({ liveness: 'ceiling', gateElapsedMs: decisionElapsed });
         return;
       }
       if (verdict?.alive) {
@@ -3643,13 +3655,24 @@ export class SessionManager {
         args.rearm(LONG_OP_CEILING_MS - decisionElapsed);
         return;
       }
-    } else if (gateElapsed >= LONG_OP_CEILING_MS) {
+      args.kill(
+        assessmentFailed
+          ? { liveness: 'assessment_failed', gateElapsedMs: decisionElapsed }
+          : verdict === null
+            ? { liveness: 'unavailable', gateElapsedMs: decisionElapsed }
+            : { liveness: 'idle', gateElapsedMs: decisionElapsed, cpuDeltaMs: verdict.cpuDeltaMs, pidCount: verdict.pidCount },
+      );
+      return;
+    }
+    if (gateElapsed >= LONG_OP_CEILING_MS) {
       log.warn(
         { rootPid: rootPid ?? null, reason: args.reason, gateElapsedMs: gateElapsed, ceilingMs: LONG_OP_CEILING_MS },
         'long-operation ceiling reached — killing despite possible CPU progress',
       );
+      args.kill({ liveness: 'ceiling', gateElapsedMs: gateElapsed });
+      return;
     }
-    args.kill();
+    args.kill({ liveness: 'no_pid', gateElapsedMs: gateElapsed });
   }
 
   /** Record that this manager is about to kill `child` on purpose. Cleared by the exit handler. */
@@ -3765,8 +3788,8 @@ export class SessionManager {
         // Only arm if no newer watchdog was set during the assessment (#2235).
         'only-if-null',
       ),
-      kill: () => {
-        log.warn({ sessionId: this.sessionId, pid: child.pid, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled Claude process');
+      kill: (basis) => {
+        log.warn({ sessionId: this.sessionId, pid: child.pid, reason: 'turn_watchdog', ...basis }, 'turn watchdog fired — killing stalled Claude process');
         // This notice is the ONLY user-facing message for a reap: the intent marker below
         // suppresses the generic crash notice (and the operator page) in the exit handler.
         this.emitUserNotice(terminationNotice);
