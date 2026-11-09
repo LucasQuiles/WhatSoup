@@ -188,7 +188,10 @@ if [[ "$MODE" == "render" ]]; then
   exit 0
 fi
 
-mkdir -p "$INSTALL_DIR" "$STATE_DIR"
+mkdir -p "$INSTALL_DIR"
+# Revalidate during creation because state ancestors can change after preflight.
+"$PYTHON" -c 'import pathlib, runpy, sys; runpy.run_path(sys.argv[1])["private_directory"](pathlib.Path(sys.argv[2]))' \
+  "$RELEASE_ROOT/deploy/scripts/fleet/reliability_supervisor.py" "$STATE_DIR"
 validate_config
 
 activation_failed() {

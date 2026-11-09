@@ -986,7 +986,7 @@
     },
     {
       "path": "deploy/scripts/fleet/reliability_supervisor.py",
-      "sha256": "aa27ccca85276cdfd254dd64380ee86efdb9353a0692884c0c9ffdd122bdd6eb",
+      "sha256": "4626a85b9040a4d0459cf898fc483d653d60ba174f47ddd4fabc5a895bd434ce",
       "mustContain": [
         "legacy_sent_items_probe",
         "resolve_alert_delivery"
@@ -1002,7 +1002,7 @@
     },
     {
       "path": "deploy/scripts/install-fleet-reliability-observer.sh",
-      "sha256": "64b618551dfe218182a2f423cb99823dc8134433a77e47cca2f9deaeb6023aba",
+      "sha256": "15b42f0bfafd9bae1eb6579429642396683614d0dc11560e5b30599f53d9579b",
       "mustContain": [
         "--activate",
         "fleet-deadman"

@@ -245,8 +245,8 @@ def install_fixture(tmp_path, platform, manager_body, mode="install"):
     release = tmp_path / "release"
     fleet = release / "deploy/scripts/fleet"
     fleet.mkdir(parents=True)
-    for name in ("fleet_reliability_observer.py", "reliability_supervisor.py"):
-        (fleet / name).write_text("# synthetic executable fixture\n")
+    (fleet / "fleet_reliability_observer.py").write_text("# synthetic executable fixture\n")
+    (fleet / "reliability_supervisor.py").write_bytes((FLEET / "reliability_supervisor.py").read_bytes())
     config = tmp_path / "private-config.json"
     config.write_text("{}")
     config.chmod(0o600)
@@ -498,3 +498,49 @@ exit 0
     assert len(stopped) == 1 and stopped[0].endswith("/com.whatsoup.fleet-observer")
     assert len(list(installed.iterdir())) == 2
     assert "retain definitions and state" in result.stderr
+
+
+@pytest.mark.parametrize("platform", ["launchd", "systemd"])
+def test_installer_rejects_parent_replacement_after_preflight_without_creating_state(tmp_path, platform):
+    body = '''printf '%s\\n' "$*" >> "$CALLS"
+if [[ "$1" == "print" ]]; then
+  if [[ "$2" == */com.* ]]; then exit 113; else exit 0; fi
+fi
+if [[ "$*" == *" show "* ]]; then echo not-found; fi
+exit 0
+'''
+    command, environment, _, installed = install_fixture(tmp_path, platform, body)
+    parent = tmp_path / "parent"
+    parent.mkdir(mode=0o700)
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    state = parent / "state"
+    command[command.index("--state-dir") + 1] = str(state)
+    config = tmp_path / "private-config.json"
+    config.write_text(json.dumps({
+        "state_dir": str(state), "hosts": [], "instance": "operations",
+        "emitter_command": ["/synthetic/emitter"], "delivery_command": ["/synthetic/delivery"],
+    }))
+    fleet = tmp_path / "release/deploy/scripts/fleet"
+    (fleet / "observer-original.py").write_bytes((FLEET / "fleet_reliability_observer.py").read_bytes())
+    (fleet / "fleet_reliability_observer.py").write_text('''import os, pathlib, runpy
+original = pathlib.Path(__file__).with_name("observer-original.py")
+result = runpy.run_path(str(original))["main"]()
+marker = pathlib.Path(os.environ["SWAP_MARKER"])
+if result == 0 and not marker.exists():
+    parent = pathlib.Path(os.environ["SWAP_PARENT"])
+    parent.rename(parent.with_name("saved-parent"))
+    parent.symlink_to(pathlib.Path(os.environ["SWAP_OUTSIDE"]), target_is_directory=True)
+    marker.write_text("replaced after successful real preflight")
+raise SystemExit(result)
+''')
+    marker = tmp_path / "swapped"
+    environment.update(SWAP_PARENT=str(parent), SWAP_OUTSIDE=str(outside), SWAP_MARKER=str(marker))
+    result = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=10)
+    assert marker.exists(), result.stderr
+    assert result.returncode != 0
+    assert not (outside / "state").exists()
+    assert not (tmp_path / "saved-parent" / "state").exists()
+    assert list(installed.iterdir()) == []
+    calls = (tmp_path / "calls").read_text()
+    assert "bootstrap" not in calls and "enable --now" not in calls

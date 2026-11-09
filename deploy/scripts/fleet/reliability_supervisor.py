@@ -30,14 +30,27 @@ class StateError(RuntimeError):
 
 
 def private_directory(path: Path, *, create: bool = True) -> None:
-    if create:
-        path.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
-        metadata = path.lstat()
+        with private_parent(path, create=create) as (parent, leaf):
+            if create:
+                try:
+                    os.mkdir(leaf, 0o700, dir_fd=parent)
+                except FileExistsError:
+                    pass
+                else:
+                    os.fsync(parent)
+            fd = os.open(leaf, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            try:
+                validate_private_directory(fd)
+            finally:
+                os.close(fd)
     except FileNotFoundError:
-        if not create:
-            return
-        raise
+        if create:
+            raise
+
+
+def validate_private_directory(fd: int) -> None:
+    metadata = os.fstat(fd)
     if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
         raise StateError("state_directory_unsafe")
     if stat.S_IMODE(metadata.st_mode) != 0o700:
@@ -45,7 +58,7 @@ def private_directory(path: Path, *, create: bool = True) -> None:
 
 
 @contextmanager
-def private_parent(path: Path):
+def private_parent(path: Path, *, create: bool = False):
     path = Path(path)
     if ".." in path.parts:
         raise StateError("state_directory_unsafe")
@@ -73,7 +86,18 @@ def private_parent(path: Path):
     try:
         validate(current)
         for part in path.parent.parts[1:]:
-            following = os.open(part, flags, dir_fd=current)
+            try:
+                following = os.open(part, flags, dir_fd=current)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(part, 0o700, dir_fd=current)
+                except FileExistsError:
+                    pass
+                else:
+                    os.fsync(current)
+                following = os.open(part, flags, dir_fd=current)
             try:
                 validate(following)
             except BaseException:
@@ -115,19 +139,22 @@ def read_private(path: Path) -> dict:
 
 
 def write_private(path: Path, value: dict) -> None:
-    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w") as stream:
-        json.dump(value, stream, sort_keys=True, allow_nan=False)
-        stream.write("\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temporary, path)
-    directory_fd = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
+    with private_parent(path) as (parent, leaf):
+        validate_private_directory(parent)
+        temporary = f".{leaf}.{uuid4().hex}.tmp"
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(value, stream, sort_keys=True, allow_nan=False)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, leaf, src_dir_fd=parent, dst_dir_fd=parent)
+            temporary = None
+            os.fsync(parent)
+        finally:
+            if temporary is not None:
+                os.unlink(temporary, dir_fd=parent)
 
 
 def probe_liveness(url: str, timeout: float = 5) -> dict:

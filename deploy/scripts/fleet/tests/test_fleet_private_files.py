@@ -9,6 +9,7 @@ from string import ascii_lowercase, digits
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from hypothesis import given, settings, strategies as st
@@ -243,3 +244,186 @@ def test_unsafe_inventory_returns_failure_without_starting_transport(tmp_path, c
     result = json.loads(capsys.readouterr().out)
     assert result["checks"] == {"ssh_reachable": False}
     assert result["codes"] == ["probe_transport_or_execution_failed"]
+
+
+@pytest.mark.parametrize("operation", ["create", "preflight", "write"])
+@pytest.mark.parametrize("unsafe", ["symlink", "writable", "other_owner"])
+@settings(max_examples=4)
+@given(name=st.text(alphabet=ascii_lowercase, min_size=1, max_size=20))
+def test_state_operations_reject_unsafe_ancestors(operation, unsafe, name):
+    supervisor = load_module("reliability_supervisor.py")
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        parent = root / "parent"
+        parent.mkdir(mode=0o700)
+        state = parent / name
+        if operation != "create":
+            state.mkdir(mode=0o700)
+        configured = state
+        if unsafe == "symlink":
+            alias = root / "alias"
+            alias.symlink_to(parent, target_is_directory=True)
+            configured = alias / name
+        elif unsafe == "writable":
+            parent.chmod(0o777)
+        identity = parent.stat()
+        original_fstat = os.fstat
+        checked_parent = False
+
+        def fstat(fd):
+            nonlocal checked_parent
+            info = original_fstat(fd)
+            if unsafe == "other_owner" and (info.st_dev, info.st_ino) == (identity.st_dev, identity.st_ino):
+                # Simulate foreign ownership without changing real host ownership.
+                fields = list(info)
+                fields[4] = info.st_uid + 1
+                checked_parent = True
+                return os.stat_result(fields)
+            return info
+
+        with patch("os.fstat", side_effect=fstat):
+            with pytest.raises((OSError, supervisor.StateError)):
+                if operation == "write":
+                    supervisor.write_private(configured / "state.json", {"synthetic": name})
+                else:
+                    supervisor.private_directory(configured, create=operation == "create")
+        if unsafe == "other_owner":
+            assert checked_parent
+        if operation == "create":
+            assert not state.exists()
+        assert not (state / "state.json").exists()
+
+
+def test_private_directory_creates_nested_private_directories(tmp_path):
+    supervisor = load_module("reliability_supervisor.py")
+    path = tmp_path / "new-parent" / "state"
+    supervisor.private_directory(path)
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(path.stat().st_mode) == 0o700
+    assert path.stat().st_uid == os.getuid()
+
+
+def test_private_directory_preflight_does_not_create_missing_parents(tmp_path):
+    supervisor = load_module("reliability_supervisor.py")
+    path = tmp_path / "new-parent" / "state"
+    supervisor.private_directory(path, create=False)
+    assert not path.parent.exists()
+
+
+def test_private_directory_creation_stays_in_opened_parent(tmp_path, monkeypatch):
+    supervisor = load_module("reliability_supervisor.py")
+    parent = tmp_path / "parent"
+    parent.mkdir(mode=0o700)
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    saved = tmp_path / "saved-parent"
+    original_mkdir = os.mkdir
+    replaced = False
+
+    def mkdir(path, mode=0o777, *, dir_fd=None):
+        nonlocal replaced
+        if not replaced and Path(path).name == "state":
+            parent.rename(saved)
+            parent.symlink_to(outside, target_is_directory=True)
+            replaced = True
+        return original_mkdir(path, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "mkdir", mkdir)
+    supervisor.private_directory(parent / "state")
+    assert replaced
+    assert (saved / "state").is_dir()
+    assert not (outside / "state").exists()
+
+
+def test_private_write_stays_in_opened_parent_after_file_sync(tmp_path, monkeypatch):
+    supervisor = load_module("reliability_supervisor.py")
+    parent = tmp_path / "parent"
+    parent.mkdir(mode=0o700)
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    saved = tmp_path / "saved-parent"
+    value = {"source": "new-state"}
+    private_file(parent / "state.json", {"source": "old-state"})
+    original_fsync = os.fsync
+    replaced = False
+
+    def fsync(fd):
+        nonlocal replaced
+        original_fsync(fd)
+        if not replaced and stat.S_ISREG(os.fstat(fd).st_mode):
+            parent.rename(saved)
+            parent.symlink_to(outside, target_is_directory=True)
+            replaced = True
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    supervisor.write_private(parent / "state.json", value)
+    assert replaced
+    assert json.loads((saved / "state.json").read_text()) == value
+    assert {p.name for p in saved.iterdir()} == {"state.json"}
+    assert not list(outside.iterdir())
+
+
+@pytest.mark.parametrize("failure", ["serialization", "replacement"])
+def test_private_write_failure_preserves_state_and_removes_owned_temporary(tmp_path, monkeypatch, failure):
+    supervisor = load_module("reliability_supervisor.py")
+    path = private_file(tmp_path / "state.json", {"source": "old-state"})
+    before = path.read_bytes()
+    if failure == "serialization":
+        value = {"invalid": float("nan")}
+        expected = ValueError
+    else:
+        value = {"source": "new-state"}
+        expected = PermissionError
+
+        def refuse_replace(*args, **kwargs):
+            raise PermissionError("synthetic replace failure")
+
+        monkeypatch.setattr(os, "replace", refuse_replace)
+    with pytest.raises(expected):
+        supervisor.write_private(path, value)
+    assert path.read_bytes() == before
+    assert {p.name for p in tmp_path.iterdir()} == {"state.json"}
+
+
+def test_private_write_does_not_remove_a_preexisting_temporary_name(tmp_path, monkeypatch):
+    supervisor = load_module("reliability_supervisor.py")
+    path = private_file(tmp_path / "state.json", {"source": "old-state"})
+    temporary = private_file(tmp_path / ".state.json.collision.tmp", {"source": "another-writer"})
+    before = {p.name: p.read_bytes() for p in (path, temporary)}
+    monkeypatch.setattr(supervisor, "uuid4", lambda: SimpleNamespace(hex="collision"))
+    with pytest.raises(FileExistsError):
+        supervisor.write_private(path, {"source": "new-state"})
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+
+def test_private_write_reports_directory_sync_failure_after_replacement(tmp_path, monkeypatch):
+    supervisor = load_module("reliability_supervisor.py")
+    path = private_file(tmp_path / "state.json", {"source": "old-state"})
+    value = {"source": "new-state"}
+    original_fsync = os.fsync
+
+    def fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("synthetic directory sync failure")
+        original_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    with pytest.raises(OSError, match="synthetic directory sync failure"):
+        supervisor.write_private(path, value)
+    assert json.loads(path.read_text()) == value
+    assert {p.name for p in tmp_path.iterdir()} == {"state.json"}
+
+
+@pytest.mark.parametrize("temporary_root", ["/tmp", "/var/tmp"])
+def test_private_creation_and_write_support_shared_temporary_roots(temporary_root):
+    supervisor = load_module("reliability_supervisor.py")
+    with TemporaryDirectory(dir=temporary_root) as directory:
+        state = Path(directory) / "new-parent" / "state"
+        supervisor.private_directory(state, create=False)
+        assert not state.parent.exists()
+        supervisor.private_directory(state)
+        value = {"source": "private-state"}
+        supervisor.write_private(state / "state.json", value)
+        assert supervisor.read_private(state / "state.json") == value
+        assert stat.S_IMODE(state.stat().st_mode) == 0o700
+        assert stat.S_IMODE((state / "state.json").stat().st_mode) == 0o600

@@ -909,9 +909,17 @@ executing user and must not be writable by other users; root-owned sticky
 temporary directories are allowed. On macOS, the verified root-owned `/tmp`,
 `/var` and `/etc` aliases to `/private` are supported. These are POSIX ownership
 and mode checks; host administrators remain responsible for access-control lists.
-State directory creation and state writes still require trusted, stable
-ancestor directories: their pathname-based write path has not yet been
-qualified against concurrent ancestor replacement.
+The runtime and installer create state directories through the same validated
+directory walk, creating missing parents with mode `0700`. Preflight does not
+create directories.
+State writes require an executing-user-owned `0700` parent and hold its
+descriptor through temporary-file creation, file sync, atomic replacement,
+directory sync and temporary-file cleanup. Replacing an ancestor pathname
+cannot redirect those operations. Serialization or replacement failure leaves
+the previous destination unchanged and removes the writer's temporary file.
+A sync failure after replacement is reported as an error; the new state may
+already be visible, and crash durability is then unverified. Pending-event
+overflow and subprocess-output bounds remain separate unresolved obligations.
 
 The optional service supervisor records malformed or truncated HTTP framing as
 an `invalid_response` liveness failure, so that fault does not abort the cycle.
