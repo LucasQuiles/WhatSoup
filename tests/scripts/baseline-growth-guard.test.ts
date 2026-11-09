@@ -25,6 +25,7 @@ import {
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { runInNewContext } from 'node:vm';
 
 import { describe, expect, it } from 'vitest';
 
@@ -1475,6 +1476,29 @@ describe('exact-revision pinning — the verdict must name what it measured', ()
 });
 
 describe('CI wiring — the guard must be invoked with pinned revisions', () => {
+  it.each(['push', 'schedule'])('checks the previous commit for a %s at the main tip', (eventName) => {
+    const dir = makeRepo(1);
+    writeBoundary(dir, 2);
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'growth']);
+    const candidate = git(dir, ['rev-parse', 'HEAD']).trim();
+    const workflow = readFileSync(resolve(repoRoot, '.github/workflows/quality.yml'), 'utf8');
+    const expression = workflow.match(/BASELINE_BASE_OID: \$\{\{ (.+) \}\}/)?.[1];
+    expect(expression).toBeDefined();
+    // This workflow expression uses only operators shared by JavaScript and Actions.
+    const base = runInNewContext(expression!, {
+      github: {
+        event_name: eventName,
+        ref: eventName === 'push' ? 'refs/tags/v-test' : 'refs/heads/main',
+        event: { before: '0'.repeat(40), merge_group: { base_sha: '' } },
+      },
+    }, { timeout: 1000 });
+    expect(base).toBe('HEAD^');
+    const { status, out } = runGuard(['--repo', dir, '--base', base, '--candidate', candidate]);
+    expect(status, out).toBe(1);
+    expect(out).toMatch(/identity|subset/i);
+  });
+
   it('quality.yml passes both --base and --candidate from event OIDs', () => {
     const workflow = readFileSync(resolve(repoRoot, '.github/workflows/quality.yml'), 'utf8');
     const step = workflow.slice(workflow.indexOf('- name: Baseline growth guard'));

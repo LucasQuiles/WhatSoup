@@ -64,6 +64,9 @@ after a remote write is an observability gap, not proof that no check was create
 Fork and merge-queue inputs remain unsupported by this workflow.
 
 Keep the existing Quality scanner step and required checks during qualification.
+Quality compares tags and scheduled runs against `HEAD^` for baseline growth;
+a new tag's all-zero `before` value cannot identify a previous revision. PRs,
+merge groups and main pushes retain their event-provided base revisions.
 Only after hosted canaries prove current-head publication, stale-head refusal,
 credential confinement, cleanup and failure handling should the private check be
 required. Qualify the tag receipt with the existing `scripts/private-integrity-release.ts`
