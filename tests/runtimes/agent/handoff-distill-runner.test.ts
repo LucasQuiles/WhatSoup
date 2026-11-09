@@ -11,11 +11,14 @@ function harness(over: Partial<ConstructorParameters<typeof HandoffDistillRunner
     now: () => 1000,
     growthThreshold: 500,
     tokenGrowth: () => 600,
-    distillFor: vi.fn(async () => ({ summary: 's', seededArtifacts: null, tokensUsed: 10 })),
     persist: (a) => persisted.push(a),
     onDegraded: vi.fn(),
     sourceFor: () => ({ provider: 'opencode-cli', model: 'deepseek-chat' }),
     ...over,
+    distillFor: async (key, reserve) => {
+      reserve(100);
+      return over.distillFor ? over.distillFor(key, reserve) : { summary: 's', seededArtifacts: null, tokensUsed: 10 };
+    },
   });
   return { runner, persisted };
 }
@@ -50,6 +53,41 @@ describe('HandoffDistillRunner', () => {
     release();
     await first;
     expect(events).toEqual(['persisted', 'succeeded:c1']);
+  });
+
+  it('suppresses an invalidated in-flight distill before it can persist or report success', async () => {
+    let resolve!: (outcome: { summary: string; seededArtifacts: null; tokensUsed: number }) => void;
+    const pending = new Promise<{ summary: string; seededArtifacts: null; tokensUsed: number }>((release) => {
+      resolve = release;
+    });
+    const persist = vi.fn();
+    const onSucceeded = vi.fn();
+    const { runner } = harness({ distillFor: () => pending, persist, onSucceeded });
+
+    const tick = runner.tickConversation('cleared-conversation');
+    runner.invalidateConversation('cleared-conversation');
+    resolve({ summary: 'stale summary', seededArtifacts: null, tokensUsed: 1 });
+    await tick;
+
+    expect(persist).not.toHaveBeenCalled();
+    expect(onSucceeded).not.toHaveBeenCalled();
+  });
+
+  it('treats invalidation during a failed distill as benign and suppresses degradation', async () => {
+    let reject!: (reason: Error) => void;
+    const pending = new Promise<never>((_resolve, fail) => { reject = fail; });
+    const onDegraded = vi.fn();
+    const onSucceeded = vi.fn();
+    const { runner, persisted } = harness({ distillFor: () => pending, onDegraded, onSucceeded });
+
+    const tick = runner.tickConversation('revoked-conversation');
+    runner.invalidateConversation('revoked-conversation');
+    reject(new Error('request canceled by revoke'));
+    await tick;
+
+    expect(persisted).toEqual([]);
+    expect(onDegraded).not.toHaveBeenCalled();
+    expect(onSucceeded).not.toHaveBeenCalled();
   });
 
   it('does not report success when a failed attempt exhausts the call budget', async () => {

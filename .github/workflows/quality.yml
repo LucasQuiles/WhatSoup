@@ -84,6 +84,21 @@ jobs:
         timeout-minutes: 10
         run: docker build --file docker/Dockerfile --tag whatsoup-ci .
 
+      - name: Verify Linux policy ownership and controller readability
+        timeout-minutes: 2
+        run: |
+          policy_scratch="$(mktemp -d "$RUNNER_TEMP/policy-contract.XXXXXX")"
+          trap 'rm -rf -- "$policy_scratch"' EXIT
+          export TMPDIR="$policy_scratch"
+          cc -static -Wall -Wextra -Werror tests/runtimes/agent/provider-policy-reader.integration.c -o "$policy_scratch/policy-reader"
+          docker run --rm --network none --read-only --user 0:0 \
+            --cap-drop ALL --cap-add CHOWN --cap-add FOWNER --cap-add FSETID --cap-add SETUID --cap-add SETGID --cap-add KILL \
+            --tmpfs /opt/policy-probe:rw,nosuid,noexec,size=16m,mode=0755 \
+            --env TMPDIR=/opt/policy-probe \
+            --mount "type=bind,src=$PWD/tests/runtimes/agent/provider-policy-permissions.integration.mjs,dst=/policy-probe.mjs,readonly" \
+            --mount "type=bind,src=$policy_scratch/policy-reader,dst=/policy-reader,readonly" \
+            --entrypoint node whatsoup-ci /policy-probe.mjs /app
+
       - name: Refresh PR base snapshot
         run: |
           if [ -n "${GITHUB_BASE_REF:-}" ]; then
@@ -513,7 +528,7 @@ jobs:
         run: npm --prefix console run build
 
   bot-errors-health-macos:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 10
     steps:
       - name: Checkout

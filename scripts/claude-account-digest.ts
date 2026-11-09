@@ -2,16 +2,18 @@
  * `npm run claude-account-digest` — capture the ratified account-identity
  * digest for `service.expectedAccountDigest` (task-21).
  *
- * Runs the SAME read-only probe the runtime verifier runs
+ * Runs the SAME identity observation the runtime verifier runs
  * (`claude auth status --json`, scrubbed allow-list env, CLAUDE_CONFIG_DIR
- * taken from the invoking shell so the digest is captured for the config
- * root the service resolves) and the SAME canonicalization
+ * and CLAUDE_SECURESTORAGE_CONFIG_DIR taken from the invoking shell so the
+ * digest uses the service's credential store) and the SAME canonicalization
  * (lib/account-identity-digest.ts), then prints exactly one line: the
  * opaque digest. No raw identifier ever reaches stdout or stderr, so the
- * command is safe to run into a shared terminal log. Never logs in.
+ * command is safe to run into a shared terminal log. It may refresh and
+ * persist an existing login before probing; it never starts an interactive login.
  *
  * Exit codes: 0 digest printed; 2 not logged in; 3 identity fields missing
- * or output unparseable; 4 binary missing or probe failed; 64 usage.
+ * or output unparseable; 4 binary/probe failure, refresh in flight,
+ * refresh owner unavailable, or refresh failed; 64 usage.
  */
 import { parseClosedOptions, type ClosedOptionError } from './lib/cli-args.ts';
 import { scrubbedAuthStatusEnv } from '../src/runtimes/agent/providers/account-auth-status.ts';
@@ -59,6 +61,12 @@ const FAILURE_EXITS: Record<
   'binary-missing': { code: 4, message: 'claude binary not found: pass --binary <path> or fix PATH' },
   'probe-threw': { code: 4, message: 'auth-status probe failed to run' },
   'probe-failed': { code: 4, message: 'auth-status probe exited non-zero; no digest captured' },
+  'deferred-refresh-in-flight': {
+    code: 4,
+    message: 'a claude login refresh for this config root is still running; no digest captured — re-run once it has finished',
+  },
+  'refresh-owner-unavailable': { code: 4, message: 'claude refresh ownership unavailable; no digest captured' },
+  'refresh-failed': { code: 4, message: 'claude login refresh failed; no digest captured' },
   'not-logged-in': {
     code: 2,
     message: 'claude CLI reports not logged in for this config root — log in interactively first, then re-run',
@@ -78,10 +86,13 @@ const USAGE = [
   '',
   'Prints ONE line — the opaque sha256 digest of the account the claude CLI is',
   'logged in as — for `service.expectedAccountDigest` in the instance config.',
-  'Run it in the same CLAUDE_CONFIG_DIR context the service resolves, e.g.',
+  'Use the service CLAUDE_CONFIG_DIR and CLAUDE_SECURESTORAGE_CONFIG_DIR context.',
+  'The secure-storage selector takes precedence; a defined empty value uses the default store.',
   '  CLAUDE_CONFIG_DIR=/absolute/claude-root npm run claude-account-digest',
+  'May refresh and persist an existing login; never starts an interactive login.',
   'No raw account identifier is printed. Exit 2 = not logged in, 3 = identity',
-  'unreadable, 4 = binary missing or probe failed.',
+  'unreadable, 4 = binary/probe failure, refresh in flight, refresh owner',
+  'unavailable, or refresh failed.',
 ].join('\n');
 
 export function parseClaudeAccountDigestArgs(argv: readonly string[]): ClaudeAccountDigestArgs {

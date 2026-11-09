@@ -664,6 +664,36 @@ describe('Bot identity passed to shouldRespond', () => {
 // ===========================================================================
 
 describe('Echo correlation: isFromMe messages', () => {
+  it('stores the outgoing message before correlating its echo', async () => {
+    const db = makeTempDb();
+    const durability = new DurabilityEngine(db);
+    let storedWhenCorrelated = false;
+    vi.spyOn(durability, 'matchEcho').mockImplementation((messageId) => {
+      const row = db.raw.prepare('SELECT is_from_me FROM messages WHERE message_id = ?')
+        .get(messageId) as { is_from_me: number } | undefined;
+      storedWhenCorrelated = row?.is_from_me === 1;
+      return false;
+    });
+
+    const handler = makeIngest(db, makeMessenger(), makeRuntime(), BOT_JID, BOT_LID, durability);
+    await runIngest(handler, makeIncomingMessage({ isFromMe: true }));
+
+    expect(storedWhenCorrelated).toBe(true);
+  });
+
+  it('still attempts echo correlation when storing the outgoing message fails', async () => {
+    const db = makeTempDb();
+    const durability = new DurabilityEngine(db);
+    const matchEchoSpy = vi.spyOn(durability, 'matchEcho').mockReturnValue(false);
+    db.raw.exec("CREATE TRIGGER deny_message_store BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'store denied'); END;");
+
+    const handler = makeIngest(db, makeMessenger(), makeRuntime(), BOT_JID, BOT_LID, durability);
+    const msg = makeIncomingMessage({ isFromMe: true });
+    await runIngest(handler, msg);
+
+    expect(matchEchoSpy).toHaveBeenCalledWith(msg.messageId);
+  });
+
   it('isFromMe message calls durabilityEngine.matchEcho with messageId', async () => {
     const db = makeTempDb();
     const messenger = makeMessenger();

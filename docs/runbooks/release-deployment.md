@@ -104,13 +104,34 @@ npm --silent run release:export -- \
   --json
 ```
 
-Export properties (all fail closed):
+The exporter is an operator tool for a trusted checkout and toolchain. Its `git`
+and `tar` executables are selected through `PATH`; use an operator-controlled
+`PATH` and trusted executables. `cleanGitEnv` removes Git configuration overrides
+but does not authenticate those executables. The exact-commit checks below assume
+that toolchain is trusted.
+
+The operator also controls `--release-root` and `--rollback-root`, including every
+ancestor directory. Use non-symlinked directories and keep them free of concurrent
+writers for the whole export. Absolute-path validation is lexical; it does not
+confine writes against another writer replacing an ancestor. A rollback root may
+be separate from the release root by design and must satisfy the same precondition.
+
+Provision memory and disk for the selected commit before export. The archive is
+buffered with a 1 GiB subprocess output limit, the full tree is extracted, and
+each selected file is read into memory for hashing. There is no aggregate staging
+quota or file-count limit. A process crash can leave staging for later inspection;
+it is not evidence of a published or qualified release.
+
+Export properties under those preconditions (all fail closed):
 
 - source bytes come from `git archive <commit>`, so working-tree drift can
   never leak into a release;
 - the release is assembled in a staging directory and self-checked with the
   SAME drift checker the fleet runs (`--check-release` semantics) BEFORE it is
   atomically renamed into place — a failed export leaves no release;
+- when `deploy/source-runtime-manifest.json` is present, its pinned entrypoint
+  graph is also checked against the staged release and its release manifest;
+  a stale source hash refuses publication before restart preflight;
 - secret- and state-shaped paths (`tokens.env`, `*.db`, `auth/**`, ...) are
   excluded even when git-tracked;
 - an existing release is never clobbered: without `--replace` the export
@@ -178,9 +199,10 @@ npm --silent run release:activate -- \
      definition on the new release).
 
   Any failure after the switch restores the symlink and plists, reloads every
-  label, and verifies the rollback the same way — unless the new release
-  changed the database schema (see "Rollback against a migrated database"
-  below). `receipt.json` in the backup directory records the outcome.
+  label, and verifies the rollback the same way — unless database migration or
+  the sealed refresh-fence compatibility gate blocks automatic rollback (see
+  "Rollback" below). `receipt.json` in the backup directory records the
+  outcome.
 
 Preconditions include: the wrapper symlink points at
 `<expect-current>/deploy/whatsoup`; the new manifest is schema-valid, names
@@ -188,6 +210,64 @@ Preconditions include: the wrapper symlink points at
 `deploy/whatsoup`, `src/bootstrap.ts` and `node_modules`; each auxiliary job
 currently runs from `--expect-current`; a health token and port resolve; the
 database exists; and no staged plist still references `--expect-current`.
+
+#### BOT ERRORS health-consumer prerequisite
+
+A candidate release can declare the minimum BOT ERRORS health-consumer
+capability it needs in its sealed runtime manifest:
+
+```json
+{
+  "activationRequirements": {
+    "botErrorsHealth": { "secureStorageSelector": 1 }
+  }
+}
+```
+
+When this positive requirement is present, `release:activate` reads the loaded
+`com.bot-errors.health` definition and accepts only the supported bash wrapper
+shape. It reads the consumer manifest, runner and checker through bounded,
+no-follow file descriptors below one consumer root. Each read requires stable
+file identity and metadata, plus stable root and ancestor directory identities.
+The manifest must record matching runner and checker hashes. The consumer must
+advertise `consumerCapabilities.botErrorsHealth.secureStorageSelector` at or
+above the required value. The checker's `mustContain` contract must include
+`CLAUDE_SECURESTORAGE_CONFIG_DIR`, and every declared marker must be a nonblank
+string present in the checker. This checks the packaged contract; marker
+presence does not prove deployed probe behavior.
+
+A missing consumer, an unrecognised or malformed loaded definition, a lower
+capability, a runner or checker hash mismatch, or a missing or invalid checker
+marker contract makes the plan not ready and
+refuses activation before a switch. When the sealed runtime-manifest entry is
+absent, or its document has no `activationRequirements` declaration, the
+existing activation behaviour remains. A present but malformed or non-positive
+declaration is invalid and refuses activation.
+
+During `--apply`, after backup staging and immediately before the wrapper
+symlink changes, the command reads the consumer again. Its root, capability and
+manifest, runner and checker SHA-256 values must exactly match the plan. A
+compatible capability or byte change requires a new plan. Any mismatch refuses
+activation before the symlink or plist switch. These bounded reads establish
+samples; they do not make later launchd execution bytes immutable. Consumer
+roots must remain deployment-owned and writers must be serialized through
+activation; later execution needs its own controls. This check does not
+establish a generic rollback-to-consumer association.
+
+`--apply` and `reconcile-launchd-restart-policy --apply` serialize on
+`~/.local/state/whatsoup/release-activation.lock`, one lock per HOME. A held lock
+refuses before any backup or live change, and the failure names the lock. A holder
+that died in the current boot is reclaimed by the next run. A recycled holder pid
+or an unreadable lock keeps refusing: confirm no activation or reconcile is
+running, then remove the file. Immediately before the switch, activation refuses
+unless the wrapper target and every installed plist still match the plan. Before
+reporting `activated` it confirms they still match what it installed; a mismatch
+there fails the activation. A rollback restores nothing over state from another
+writer, which ends as `rollback-unverified` for the operator to resolve.
+
+`release:activate` remains macOS launchd only. On every other platform, its
+existing platform precondition refuses before activation work; this consumer
+check supplies no portable replacement.
 
 Renderers (`--aux-label <label>=<renderer>`):
 
@@ -210,7 +290,9 @@ activation failed and the rollback could not be verified, so manual attention
 is required; `4` activation failed and the automatic rollback was blocked
 because the new release changed the database schema migration level (or the
 level could not be read) — outcome `rollback-blocked-migrated`, manual database
-restore required.
+restore required; `5` activation failed and the automatic rollback was blocked
+by an incompatible or unreadable sealed refresh fence — outcome
+`rollback-blocked-refresh-fence`, manual recovery required.
 
 #### Health invariants verdict (report-only, #2481)
 
@@ -609,6 +691,32 @@ launchctl bootstrap gui/"$(id -u)" ~/Library/LaunchAgents/<label>.plist
 
 Never leave a `-wal` or `-shm` file from the migrated database beside the
 restored `bot.db`.
+
+#### Rollback blocked by refresh-fence compatibility (exit `5`)
+
+`deploy/claude-refresh-rollback-fence.json` is a regular, manifest-sealed
+release file. A release that requires `claudeRefreshOwnerV3` records that
+requirement and the capability it provides. This is a compatibility fence for
+automatic rollback, not evidence that a refresh child is live or dead.
+
+An upgrade from a legacy release is allowed: the plan reports that automatic
+rollback is unavailable if verification later fails. Before the live switch,
+the activating release's exact manifest commit, sealed contract digest, and
+requirement are read again. A changed, malformed or unsealed requirement
+refuses before live selection changes.
+
+After a failed verification, the rollback target is checked immediately before
+stopping the new instance and again after that stop, immediately before any
+symlink/plist restore or bootstrapping the old release. Both checks bind the
+target's planned manifest commit, contract digest, and capability. If the
+target is missing, malformed, unsealed, hash-mismatched, changed, or below the
+candidate requirement, the operation exits `5` with
+`rollback-blocked-refresh-fence`. A failure before the stop keeps the new
+instance selected and running; a failure after the stop keeps the new release
+selected but does not start the old release. The result records
+`refreshFenceBlockedAt` as `before-instance-stop` or `after-instance-stop`.
+It neither finds nor kills refresh children; follow the retained receipt and
+the release recovery runbook for manual resolution.
 
 ## Drift Detection
 

@@ -1,5 +1,6 @@
 import { coverageConfigDefaults, defineConfig } from 'vitest/config';
 import path from 'path';
+import { TEST_WORKER_LIMIT } from './scripts/lib/test-worker-limit.ts';
 
 export default defineConfig({
   esbuild: {
@@ -63,6 +64,6 @@ export default defineConfig({
     },
     // vitest 4 removed test.poolOptions; the per-pool maxForks/maxThreads cap is
     // now the unified top-level maxWorkers option (applies to whichever pool runs).
-    maxWorkers: 4,
+    maxWorkers: TEST_WORKER_LIMIT,
   },
 });

@@ -369,6 +369,9 @@ export async function handleCreateLine(
     'models', 'model', 'pineconeIndex', 'pineconeSearchMode', 'pineconeRerank', 'pineconeTopK',
     'pineconeAllowedIndexes', 'memory', 'agentOptions', 'toolUpdateMode', 'controlPeers',
     'transcriptionOptions',
+    // Pilot final-send authority. The shared load/startup config resolver
+    // validates its strict enabled shape and refuses non-Baileys transport.
+    'transportAuthority',
     // service: governed launchd render options (claudeConfigDir, pathPrepend) and
     // the ratified account digest. Passed through so the shared validator below
     // (validateLaunchdServiceConfig / validateServiceIdentityConfig) admits or
@@ -518,4 +521,3 @@ export async function handleCreateLine(
     jsonResponse(res, 500, mutationError(err, { operation: 'instance_create', stage: 'commit', mutationState: 'not_started' }));
   }
 }
-

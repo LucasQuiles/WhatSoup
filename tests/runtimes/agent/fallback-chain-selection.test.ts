@@ -1,3 +1,7 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { provisionWorkspace } from '../../../src/core/workspace.ts';
+import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fallbackStateDb from '../../../src/runtimes/agent/fallback-state-db.ts';
 
@@ -76,7 +80,14 @@ import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import { emitAlert } from '../../../src/lib/emit-alert.ts';
 import { ProviderDataPolicyError } from '../../../src/core/provider-data-policy.ts';
+import type { AgentRuntimeOptions } from '../../../src/runtimes/agent/runtime-options.ts';
+import { m365BridgeCredentialAdmission, type M365MutationPolicy } from '../../../src/core/m365-bridge-policy.ts';
+import { probeFallbackBinary } from '../../../src/runtimes/agent/providers/binary-preflight.ts';
+import { buildChildEnv } from '../../../src/runtimes/agent/session.ts';
+import { applyRequiredDeny, M365_MUTATION_DENY, REQUIRED_DENY } from '../../../src/core/settings-template.ts';
 import type { ChatModelPreference } from '../../../src/runtimes/agent/chat-preference-db.ts';
+
+const sandboxTmp = trackTmpDirs('bridge-sandbox');
 
 function mockConfigRef(): Record<string, unknown> {
   return (globalThis as Record<string, unknown>)['__fallbackChainTestConfig__'] as Record<string, unknown>;
@@ -117,7 +128,7 @@ function makeRuntime(overrides: {
   providerDataPolicy?: 'trusted' | 'restricted' | null;
   providerBoundaryMode?: 'shadow' | 'enforce';
   nlRouting?: boolean;
-} = {}): AgentRuntime {
+} = {}, options: AgentRuntimeOptions = {}): AgentRuntime {
   const config = mockConfigRef();
   config['agentProvider'] = 'claude-cli';
   config['agentProviderConfig'] = undefined;
@@ -130,6 +141,7 @@ function makeRuntime(overrides: {
   config['nlRoutingTiers'] = null;
   return new AgentRuntime(makeDb(), makeMessenger(), 'test', {
     model: overrides.model ?? 'claude-opus-4-8[1m]',
+    ...options,
   });
 }
 
@@ -315,6 +327,79 @@ describe('fallback chain selection', () => {
       expect.any(String),
       expect.stringContaining('entry=0'),
     );
+  });
+
+  it.each([false, true])('withholds bridge credentials and restores mutation denies on same-provider fallback (sandbox=%s)', (sandboxPerChat) => {
+    const tenantId = '11111111-2222-3333-4444-555555555555';
+    const origin = 'https://127.0.0.1:10000';
+    const accountEmail = 'user@example.test';
+    for (const [key, value] of Object.entries({
+      ALLOW_M365_MUTATIONS: '1', MS365_AGENT365_BRIDGE: 'true',
+      MS365_AGENT365_BASE_URL: origin, MS365_HUB_URL: origin,
+      MS365_TENANT_ID: tenantId, MS365_PROFILE: 'user-full-v1',
+      MS365_AGENT365_ACCOUNT_EMAIL: accountEmail, MS365_AGENT365_API_KEY: 'synthetic-key',
+    })) vi.stubEnv(key, value);
+    vi.stubEnv('MS365_AGENT365_ACCOUNT_ID', undefined);
+    vi.stubEnv('WHATSOUP_M365_LAUNCH_ADMISSION', m365BridgeCredentialAdmission({
+      instanceName: 'test', provider: 'claude-cli', allowM365Mutations: true,
+      enabledPlugins: { 'microsoft_365@microsoft-365-dev': true },
+      binding: { tenantId, accountEmail, origin, profile: 'user-full-v1' },
+      env: process.env,
+    }, process.pid) ?? undefined);
+    try {
+      const workspacePath = sandboxPerChat ? sandboxTmp.make('chat') : undefined;
+      if (workspacePath) provisionWorkspace({
+        workspacePath, instanceCwd: workspacePath,
+        sandbox: { allowedPaths: [workspacePath], allowedTools: ['Read'], allowedMcpTools: ['mcp__github__create_issue'], bash: { enabled: false } },
+        hookPath: '/fixture/agent-sandbox.sh', mcpServerPath: '/fixture/proxy.ts',
+      });
+      const runtime = makeRuntime({
+        model: 'primary-model',
+        agentFallbacks: [{ provider: 'claude-cli', model: 'fallback-model' }],
+      }, {
+        sandboxPerChat,
+        allowM365Mutations: true,
+        enabledPlugins: { 'microsoft_365@microsoft-365-dev': true },
+        m365Bridge: { tenantId, accountEmail, origin, profile: 'user-full-v1' },
+      });
+      const session = () => view(runtime).createSessionManager({
+        chatJid: 'bridge-test@s.whatsapp.net', cwd: workspacePath,
+        onEvent: vi.fn(), onCrash: vi.fn(), notifyUser: vi.fn(),
+      }) as { m365MutationPolicy: M365MutationPolicy; allowM365Mutations?: boolean; getProviderArgs(prompt: string, cwd: string): string[] };
+      const primary = session();
+      expect(primary.m365MutationPolicy.status).toBe('approved');
+      expect(buildChildEnv('claude-cli', primary).MS365_AGENT365_API_KEY).toBe('synthetic-key');
+      expect(applyRequiredDeny([], primary.m365MutationPolicy)).not.toContain(M365_MUTATION_DENY[0]);
+      if (workspacePath) {
+        const settings = JSON.parse(readFileSync(join(workspacePath, '.claude/settings.json'), 'utf8'));
+        expect(settings.permissions.deny).toEqual(REQUIRED_DENY.filter((entry) => !M365_MUTATION_DENY.includes(entry)));
+        expect(settings.enabledPlugins).toEqual({ 'microsoft_365@microsoft-365-dev': true });
+        expect(settings.hooks.PreToolUse).toHaveLength(1);
+      }
+      vi.mocked(probeFallbackBinary).mockClear();
+      view(runtime).activateProviderFallback(null, 'usage-limit');
+      expect(view(runtime).effectiveProvider).toBe('claude-cli');
+      expect(view(runtime).effectiveModel).toBe('fallback-model');
+      const fallback = session();
+      expect(fallback.m365MutationPolicy).toEqual({ status: 'rejected' });
+      if (workspacePath) {
+        const settings = JSON.parse(readFileSync(join(workspacePath, '.claude/settings.json'), 'utf8'));
+        expect(new Set(settings.permissions.deny)).toEqual(new Set(REQUIRED_DENY));
+        expect(settings.hooks.PreToolUse).toHaveLength(1);
+      }
+      const env = buildChildEnv('claude-cli', fallback);
+      expect(Object.keys(env).filter((key) => key.startsWith('MS365_') || key === 'ALLOW_M365_MUTATIONS')).toEqual([]);
+      expect(applyRequiredDeny([], fallback.m365MutationPolicy)).toEqual(expect.arrayContaining([...M365_MUTATION_DENY]));
+      const args = fallback.getProviderArgs('test', process.cwd());
+      expect(args).toContain('--disallowedTools');
+      expect(args).toEqual(expect.arrayContaining([...M365_MUTATION_DENY]));
+      expect(primary.getProviderArgs('test', process.cwd())).not.toContain('--disallowedTools');
+      expect(vi.mocked(probeFallbackBinary)).toHaveBeenCalledOnce();
+      const probeEnv = vi.mocked(probeFallbackBinary).mock.calls[0]![1]!;
+      expect(Object.keys(probeEnv).filter((key) => key.startsWith('MS365_') || key === 'ALLOW_M365_MUTATIONS')).toEqual([]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('keeps same-provider model tiers eligible for usage-limit windows', () => {

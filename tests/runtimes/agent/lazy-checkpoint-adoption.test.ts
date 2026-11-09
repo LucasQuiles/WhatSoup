@@ -923,6 +923,73 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
     });
   });
 
+  describe('an idle eviction whose suspend fails after its provider stopped does not wedge the chat', () => {
+    // Production 2026-10-07..12: a scheduled job's turn had written its own
+    // session into the chat's checkpoint (the pre-#3570 writer), so the idle
+    // suspend's durable close threw after the child was already terminated.
+    // The eviction's actor-socket teardown barrier stayed rejected, every new
+    // manager for the chat awaited it in spawnSession, and every later message
+    // was rejected before dispatch until the process restarted.
+    const CLOSE_FAILED = 'Exact session checkpoint lifecycle could not be closed';
+    type EvictView = { evictIdleSession(mapKey: string, session: SessionManager, reason: string): void };
+    const evict = (session: SessionManager) =>
+      (runtime as unknown as EvictView).evictIdleSession(JID, session, 'idle-ttl');
+    function agentStatus(rowId: number | null): string | undefined {
+      return (db.raw.prepare('SELECT status FROM agent_sessions WHERE id = ?').get(rowId) as
+        { status: string } | undefined)?.status;
+    }
+    async function nextTurn(text: string) {
+      view.ensureSessionAndQueueSync(JID, JID);
+      const session = view.chatSessions.get(JID)!;
+      const spawnSpy = vi.spyOn(session, 'spawnSession');
+      const turn = view.sendTurnToSession(session, JID, text, JID);
+      return { session, spawnSpy, turn };
+    }
+
+    it('the next messages start a fresh session with one notice instead of being rejected', async () => {
+      const { session: first } = await firstTurn();
+      const firstRow = first.getDbRowId();
+      expect(firstRow).not.toBeNull();
+      insertRow(SCHEDULED_SID, SCHEDULED, 'active');
+      engine.upsertSessionCheckpoint(PHONE, { sessionId: SCHEDULED_SID, sessionStatus: 'active' });
+      const shutdown = vi.spyOn(first, 'shutdown');
+
+      evict(first);
+      await expect(shutdown.mock.results[0]!.value).rejects.toThrow(CLOSE_FAILED);
+      expect(first.getStatus().providerTerminated).toBe(true);
+      providerSend.mockClear();
+
+      const second = await nextTurn('fixture turn after the failed eviction');
+      await expect(second.turn).resolves.toBeUndefined();
+      expect(second.session).not.toBe(first);
+      expect(second.spawnSpy).toHaveBeenCalledExactlyOnceWith();
+      expect(providerSend).toHaveBeenCalledTimes(1);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED, 'status');
+      // The abandoned generation can never be resumed behind the chat's back,
+      // and the foreign checkpoint's session was not adopted.
+      expect(agentStatus(firstRow)).toBe('ended');
+      expect(second.spawnSpy.mock.calls.flat()).not.toContain(SCHEDULED_SID);
+
+      const third = await nextTurn('fixture later turn');
+      await expect(third.turn).resolves.toBeUndefined();
+      expect(providerSend).toHaveBeenCalledTimes(2);
+    });
+
+    it('a failed eviction whose provider stop is unproven still refuses the next message', async () => {
+      const { session: first } = await firstTurn();
+      vi.spyOn(first, 'shutdown').mockRejectedValueOnce(
+        new AggregateError([new Error('fixture kill failed')], 'fixture termination and closure both failed'),
+      );
+      evict(first);
+      providerSend.mockClear();
+
+      const second = await nextTurn('fixture turn after the unproven stop');
+      await expect(second.turn).rejects.toThrow('fixture termination and closure both failed');
+      expect(providerSend).not.toHaveBeenCalled();
+      expect(notices).not.toHaveBeenCalled();
+    });
+  });
+
   describe('X1: non-sandbox per_chat managers route a provider resume refusal to their own chat', () => {
     // A provider can refuse a resumed session after spawn (exit 1, no init);
     // SessionManager then calls onResumeFailed. Without a target,
