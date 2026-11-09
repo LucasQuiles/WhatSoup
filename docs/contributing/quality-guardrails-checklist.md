@@ -67,6 +67,8 @@ Keep the existing Quality scanner step and required checks during qualification.
 Quality compares tags and scheduled runs against `HEAD^` for baseline growth;
 a new tag's all-zero `before` value cannot identify a previous revision. PRs,
 merge groups and main pushes retain their event-provided base revisions.
+The guard's JSON receipt and reproduction command name the resolved commit OIDs,
+including when the input base is a relative revision such as `HEAD^`.
 Only after hosted canaries prove current-head publication, stale-head refusal,
 credential confinement, cleanup and failure handling should the private check be
 required. Qualify the tag receipt with the existing `scripts/private-integrity-release.ts`
