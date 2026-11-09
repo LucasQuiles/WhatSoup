@@ -528,7 +528,7 @@ jobs:
         run: npm --prefix console run build
 
   bot-errors-health-macos:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 10
     steps:
       - name: Checkout

@@ -312,7 +312,7 @@ const requiredQualityWorkflow = [
   '      - name: Console compatibility build',
   '        run: npm --prefix console run build',
   '  bot-errors-health-macos:',
-  '    runs-on: macos-14',
+  '    runs-on: macos-15',
   '    steps:',
   '      - name: Portable Python and release-proof prerequisites (real macOS)',
   '        run: npm test -- tests/helpers/python-interpreter.test.ts tests/scripts/bot-errors-python-atomic-write-guard.test.ts tests/scripts/bot-errors-release-proof-installer.test.ts tests/scripts/bot-errors-release-proof-run.test.ts --pool=forks --maxWorkers=1',
