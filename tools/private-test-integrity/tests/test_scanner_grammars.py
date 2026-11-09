@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
+from types import SimpleNamespace
 
 import scanner_grammars
 from private_scanner_candidate import RunnerPlan, run_scanner_privately
@@ -61,11 +62,19 @@ class GrammarCacheTests(unittest.TestCase):
             scanner_grammars.verify_grammar_cache(alias)
 
     def test_corrupt_cache_never_starts_scanner_or_download_fallback(self):
-        (self.libs / "libtree_sitter_python.so").write_bytes(b"tampered")
         plan = RunnerPlan(command=("/trusted/scanner",), environment={"XDG_CACHE_HOME": str(self.cache)},
                           cwd=self.root, check_name="private integrity", head_sha="a" * 40)
-        child = mock.Mock(side_effect=AssertionError("native execution is forbidden"))
-        result = run_scanner_privately(plan, timeout_seconds=5, popen=child)
+        child = mock.Mock(return_value=SimpleNamespace(pid=123, wait=mock.Mock(return_value=0)))
+        with mock.patch.dict(os.environ, {"TMPDIR": str(self.root)}):
+            positive = run_scanner_privately(plan, timeout_seconds=5, popen=child,
+                                            killpg=mock.Mock(side_effect=ProcessLookupError))
+            self.assertEqual(positive, {"check_name": "private integrity", "head_sha": "a" * 40,
+                                        "conclusion": "pass"})
+            child.assert_called_once()
+            child.reset_mock()
+            child.side_effect = AssertionError("native execution is forbidden")
+            (self.libs / "libtree_sitter_python.so").write_bytes(b"tampered")
+            result = run_scanner_privately(plan, timeout_seconds=5, popen=child)
         self.assertEqual(result, {"check_name": "private integrity", "head_sha": "a" * 40,
                                   "conclusion": "inconclusive"})
         child.assert_not_called()
