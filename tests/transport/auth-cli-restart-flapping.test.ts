@@ -85,7 +85,9 @@ async function flushPromises() {
 
 describe('auth CLI restartRequired handling', () => {
   beforeEach(() => {
-    vi.useFakeTimers();
+    // setImmediate stays real: the pairing-completion gate needs one real
+    // macrotask turn to observe key-store quiescence (pairing-completion.ts).
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
     vi.resetModules();
     mocks.connectionHandlers.length = 0;
     mocks.sockets.length = 0;
@@ -254,8 +256,9 @@ describe('auth CLI restartRequired handling', () => {
     expect(process.stderr.write).toHaveBeenCalledWith('Saving credentials...\n');
     expect(mocks.saveCreds).toHaveBeenCalledOnce();
 
-    // #2322 M5: saveCreds() is already durable (fsync+rename) when it
-    // resolves, so the socket close + exit happen immediately — no wall-clock
+    // #2322 M5: with no key-store activity and no LID, the completion gate
+    // needs one real macrotask turn, so the socket close + exit follow the
+    // awaited handler directly — no wall-clock
     // wait gates them anymore.
     expect(mocks.sockets[0]!.end).toHaveBeenCalledWith(undefined);
     expect(process.stderr.write).toHaveBeenCalledWith('Done. You can now start the bot.\n');

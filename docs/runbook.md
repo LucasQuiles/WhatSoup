@@ -1673,6 +1673,9 @@ node --experimental-strip-types ./src/transport/auth.ts
 # You have 120 seconds to scan.
 
 # 6. Wait for "Authenticated successfully as <jid>" and "Done. You can now start the bot."
+#    Between them the CLI waits (up to 30 s) for the key material WhatsApp
+#    writes after connect. "FATAL: pairing did not reach a durable state: <condition>"
+#    and exit 1 mean the pairing did not complete: do not start the bot; re-run auth.
 
 # 7. Start the instance
 systemctl --user start whatsoup@sandbox-agent

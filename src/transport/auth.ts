@@ -35,6 +35,7 @@ import { writeAuthGenerationReceipt } from './auth-generation.ts';
 import { errorMessage } from '../lib/error-message.ts';
 import { classifyPairNumber, maskPairingCode, pairingEmissionLine, pairingGate } from './pairing.ts';
 import { acquireCoordinationLease, defaultLeaseProbes, readCoordinationLease, releaseCoordinationLease } from './coordination-lease.ts';
+import { awaitPairingCompletion, createPairingWriteTracker, PairingCompletionError } from './pairing-completion.ts';
 
 const log = createChildLogger('auth-cli');
 
@@ -135,6 +136,10 @@ const timeoutHandle = setTimeout(() => {
 
 let restartRequiredTimestamps: number[] = [];
 let pairingRequested = false;
+// Set while the open branch waits for pairing writes to settle. A reconnect in
+// that window would start a second socket whose writes the gate does not track
+// and that the exit below would interrupt.
+let pairingCompletionPending = false;
 
 function recordRestartRequired(statusCode: number | undefined): number {
   if (statusCode !== DisconnectReason.restartRequired) return 0;
@@ -151,7 +156,14 @@ async function startSocket(): Promise<void> {
   installThirdPartyConsoleRedaction();
 
   const { state } = await useMultiFileAuthState(config.authDir);
-  const saveCreds = createAtomicCredsSaver(config.authDir, () => state.creds);
+  // One tracker per socket: it sees every credential save and every raw key-store
+  // operation of THIS socket, which is what the open branch must wait for.
+  const pairingWrites = createPairingWriteTracker({
+    onSeamRefused: (seam, err) => {
+      log.warn({ err, seam }, 'pairing completion cannot track this key-store seam; member is not writable');
+    },
+  });
+  const saveCreds = pairingWrites.trackCredsSave(createAtomicCredsSaver(config.authDir, () => state.creds));
   const resolvedVersion = await resolveBaileysVersion(config.baileysVersionPinned);
   log.info({ version: resolvedVersion.version, source: resolvedVersion.source }, 'using baileys web version');
   process.stderr.write(`Using Baileys web version ${baileysVersionLabel(resolvedVersion.version)} (${resolvedVersion.source})\n`);
@@ -168,7 +180,9 @@ async function startSocket(): Promise<void> {
     logger: baileysLogger,
     auth: {
       creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, baileysLogger),
+      // Wrapped BELOW the cache so tracking sees the disk-backed operations,
+      // including the write-through every cached `set` performs.
+      keys: makeCacheableSignalKeyStore(pairingWrites.wrapKeyStore(state.keys), baileysLogger),
     },
     generateHighQualityLinkPreview: false,
   };
@@ -234,9 +248,46 @@ async function startSocket(): Promise<void> {
         process.exit(1);
         return;
       }
+      // #2322 M5, corrected: saveCreds() is the durability boundary for creds.json
+      // only. Baileys keeps writing key material after it emits 'open' (own
+      // LID<->PN mapping, own device-list, own-session migration; see
+      // pairing-completion.ts for the rc13 sources), and nothing here awaited
+      // those writes, so exiting straight after saveCreds() could kill them in
+      // flight. A sleep is still not the answer: it guesses at a duration and
+      // passes whether or not the writes landed. The gate below waits on observed
+      // state instead: settled saves, a quiescent key store and, when a LID is
+      // present, the own LID state read back through the store.
+      log.info('waiting for pairing key material to settle');
+      process.stderr.write('Waiting for pairing key material to settle...\n');
+      pairingCompletionPending = true;
+      try {
+        const completion = await awaitPairingCompletion({ tracker: pairingWrites, getCreds: () => state.creds });
+        log.info(completion, 'pairing reached a durable state');
+        if (completion.keyStoreTracking !== 'full') {
+          log.warn(
+            { keyStoreTracking: completion.keyStoreTracking },
+            'key-store quiescence was only partly observable; completion relied on the state check',
+          );
+        }
+      } catch (err) {
+        const reason = err instanceof PairingCompletionError
+          ? err.message
+          : `pairing did not reach a durable state: ${errorMessage(err)}`;
+        log.fatal(
+          { err, condition: err instanceof PairingCompletionError ? err.condition : 'unexpected-error' },
+          'pairing did not reach a durable state',
+        );
+        process.stderr.write(`FATAL: ${redactAuthCliText(reason)}\n`);
+        process.stderr.write(
+          'Pairing did not complete — the auth directory may be missing key material. ' +
+          'Do not start the bot on it; re-run pairing.\n',
+        );
+        process.exit(1);
+        return;
+      }
       // S3: a bond generation now exists, and this is the only moment its creation
-      // instant is OBSERVED rather than derivable. Written after saveCreds()
-      // resolved — a generation whose credentials never landed is not a
+      // instant is OBSERVED rather than derivable. Written after the completion
+      // gate resolved — a generation whose auth material never landed is not a
       // generation — and before the fleet activation signal below. Never throws:
       // pairing must not fail because bookkeeping did.
       const generation = writeAuthGenerationReceipt({
@@ -262,14 +313,10 @@ async function startSocket(): Promise<void> {
       }
 
       // Fleet activation treats this as a persisted credential success signal.
-      // It must not start the managed instance while a failed save is still
-      // possible, because the instance would otherwise race its auth material.
+      // It must not start the managed instance while a failed save or an
+      // in-flight key write is still possible, because the instance would
+      // otherwise race its auth material. Printed only after the gate above.
       process.stdout.write(JSON.stringify({ event: 'connected' }) + '\n');
-      // #2322 M5: saveCreds() already fsync'd + renamed above — durability is
-      // guaranteed by the time the await returns, so there is nothing left to
-      // wait on. A wall-clock sleep here was a TOCTOU-flavored fragility (it
-      // misrepresented where the durability boundary actually is) and added
-      // 2s to every pair flow for no benefit.
       try { sock.end(undefined); } catch { /* best-effort */ }
       log.info('pairing complete; bot can now be started');
       process.stderr.write('Done. You can now start the bot.\n');
@@ -286,6 +333,13 @@ async function startSocket(): Promise<void> {
         log.warn('logged out; auth directory must be deleted before re-running');
         process.stderr.write('Logged out — delete the auth directory and re-run this script.\n');
         process.exit(1);
+        return;
+      }
+
+      if (pairingCompletionPending) {
+        // The open branch owns the outcome now: it exits 0 once the writes are
+        // durable or 1 at its deadline. A new socket here would race that exit.
+        log.warn({ statusCode }, 'connection closed while pairing completion is pending; not reconnecting');
         return;
       }
 
