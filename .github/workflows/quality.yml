@@ -126,8 +126,8 @@ jobs:
           node --input-type=module <<'NODE' >> "$GITHUB_STEP_SUMMARY"
           import { readFileSync } from 'node:fs';
 
-          const receipt = JSON.parse(readFileSync(process.env.SEMANTIC_RECEIPT, 'utf8'));
-          process.stdout.write(`### Semantic quality (shadow)\n\nDecision: **${receipt.decision}**\n\nFindings: ${receipt.findings.length}\n`);
+          const r = JSON.parse(readFileSync(process.env.SEMANTIC_RECEIPT, 'utf8'));
+          process.stdout.write(`### Semantic quality (shadow)\n\nDecision: **${r.decision}**\n\nFindings: ${r.findings.length}\n`);
           NODE
 
       - name: qSesh lint
