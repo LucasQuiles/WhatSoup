@@ -1,4 +1,5 @@
 import importlib.util
+from contextlib import contextmanager
 import io
 import json
 import os
@@ -6,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 import pytest
 from hypothesis import given, strategies as st
@@ -352,3 +354,269 @@ def test_root_path_alias_cannot_hide_a_symlink(suffix):
         assert module.delivery_receipts(str(root) + suffix, [identifier])[identifier] == {
             "status": "unobserved"
         }
+
+
+def _observe_scans(monkeypatch):
+    original = os.scandir
+    observations = []
+
+    @contextmanager
+    def scandir(path):
+        row = {"entries": 0, "closed": False}
+        observations.append(row)
+        with original(path) as entries:
+            def counted():
+                for entry in entries:
+                    row["entries"] += 1
+                    yield entry
+            try:
+                yield counted()
+            finally:
+                row["closed"] = True
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    return observations
+
+
+def test_batch_scans_each_existing_stage_once(tmp_path, monkeypatch):
+    identifiers = [f"00000000-0000-4000-8000-{index:012d}" for index in range(128)]
+    for identifier in identifiers:
+        _place(tmp_path, "outbox", identifier, "")
+    scans = _observe_scans(monkeypatch)
+    result = module.delivery_receipts(tmp_path, identifiers)
+    assert result == {identifier: {"status": "pending"} for identifier in identifiers}
+    assert len(scans) == 1
+    assert scans[0] == {"entries": 128, "closed": True}
+
+
+def test_unrelated_entries_exhaust_the_shared_scan_budget(tmp_path, monkeypatch):
+    identifier = "00000000-0000-4000-8000-000000000020"
+    _place(tmp_path, "sent", identifier, "")
+    _sent_receipt(tmp_path / "sent" / f"{identifier}.json", identifier)
+    (tmp_path / "outbox").mkdir()
+    for index in range(12):
+        (tmp_path / "outbox" / f"unrelated-{index}").touch()
+    monkeypatch.setattr(module, "MAX_LOOKUP_ENTRIES", 8, raising=False)
+    scans = _observe_scans(monkeypatch)
+    with pytest.raises(RuntimeError, match="delivery_lookup_limit"):
+        module.delivery_receipts(tmp_path, [identifier])
+    assert sum(scan["entries"] for scan in scans) <= 9
+    assert all(scan["closed"] for scan in scans)
+
+
+@given(count=st.integers(min_value=1, max_value=12))
+def test_exact_scan_budget_accepts_complete_lookup(count):
+    identifier = "00000000-0000-4000-8000-000000000021"
+    with TemporaryDirectory() as directory, pytest.MonkeyPatch.context() as patch:
+        root = Path(directory)
+        for index in range(count):
+            _place(root, "outbox", identifier, f".{index}")
+        patch.setattr(module, "MAX_LOOKUP_ENTRIES", count, raising=False)
+        assert module.delivery_receipts(root, [identifier])[identifier] == {"status": "pending"}
+
+
+def test_matching_name_overflow_cannot_return_a_partial_disposition(tmp_path):
+    identifier = "00000000-0000-4000-8000-000000000022"
+    for index in range(33):
+        _place(tmp_path, "outbox", identifier, f".{index}")
+    with pytest.raises(RuntimeError, match="delivery_lookup_limit"):
+        module.delivery_receipts(tmp_path, [identifier])
+
+
+def test_aggregate_read_budget_limits_bytes_before_returning_any_receipt(tmp_path, monkeypatch):
+    identifiers = [f"00000000-0000-4000-8000-{index:012d}" for index in range(3)]
+    for identifier in identifiers:
+        _place(tmp_path, "outbox", identifier, "")
+    size = (tmp_path / "outbox" / f"{identifiers[0]}.json").stat().st_size
+    limit = size * 2
+    monkeypatch.setattr(module, "MAX_LOOKUP_BYTES", limit, raising=False)
+    original = os.fdopen
+    reads = []
+
+    @contextmanager
+    def fdopen(*args, **kwargs):
+        with original(*args, **kwargs) as stream:
+            def read(amount):
+                data = stream.read(amount)
+                reads.append(len(data))
+                return data
+            yield SimpleNamespace(read=read)
+
+    monkeypatch.setattr(os, "fdopen", fdopen)
+    with pytest.raises(RuntimeError, match="delivery_lookup_limit"):
+        module.delivery_receipts(tmp_path, identifiers)
+    assert sum(reads) <= limit + 1
+
+
+def test_exact_read_budget_keeps_a_valid_receipt(tmp_path, monkeypatch):
+    identifier = "00000000-0000-4000-8000-000000000023"
+    _place(tmp_path, "sent", identifier, "")
+    path = tmp_path / "sent" / f"{identifier}.json"
+    _sent_receipt(path, identifier)
+    monkeypatch.setattr(module, "MAX_LOOKUP_BYTES", path.stat().st_size, raising=False)
+    assert module.delivery_receipts(tmp_path, [identifier])[identifier]["status"] == "sent"
+
+
+def test_short_reads_reconstruct_the_complete_receipt(tmp_path, monkeypatch):
+    identifier = "00000000-0000-4000-8000-000000000029"
+    _place(tmp_path, "sent", identifier, "")
+    _sent_receipt(tmp_path / "sent" / f"{identifier}.json", identifier)
+    original = os.fdopen
+
+    @contextmanager
+    def fdopen(*args, **kwargs):
+        with original(*args, **kwargs) as stream:
+            yield SimpleNamespace(read=lambda amount: stream.read(min(amount, 7)))
+
+    monkeypatch.setattr(os, "fdopen", fdopen)
+    assert module.delivery_receipts(tmp_path, [identifier])[identifier]["status"] == "sent"
+
+
+def test_elapsed_budget_does_not_return_an_earlier_sent_receipt(tmp_path, monkeypatch):
+    identifier = "00000000-0000-4000-8000-000000000024"
+    _place(tmp_path, "sent", identifier, "")
+    _sent_receipt(tmp_path / "sent" / f"{identifier}.json", identifier)
+    _place(tmp_path, "outbox", identifier, "")
+    clock = [0.0]
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock[0]), raising=False)
+    original = os.scandir
+    outbox = (tmp_path / "outbox").stat()
+
+    @contextmanager
+    def scandir(path):
+        with original(path) as entries:
+            if os.fstat(path).st_ino == outbox.st_ino:
+                clock[0] = 6.0
+            yield entries
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    with pytest.raises(RuntimeError, match="delivery_lookup_limit"):
+        module.delivery_receipts(tmp_path, [identifier])
+
+
+def test_delayed_unavailable_root_does_not_bypass_elapsed_budget(tmp_path, monkeypatch):
+    identifier = "00000000-0000-4000-8000-000000000031"
+    clock = [0.0]
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    original = os.open
+
+    def open_root(path, *args, **kwargs):
+        if path == tmp_path:
+            clock[0] = 6.0
+            raise FileNotFoundError(2, "root disappeared")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", open_root)
+    with pytest.raises(RuntimeError, match="delivery_lookup_limit"):
+        module.delivery_receipts(tmp_path, [identifier])
+
+
+@given(audit=st.text(alphabet=st.sampled_from(["x", "é", "😀", "\"", "\\"]), min_size=20, max_size=80))
+def test_response_budget_counts_json_escaping_and_newline(audit):
+    identifier = "00000000-0000-4000-8000-000000000025"
+    expected = {identifier: {"status": "sent", "sent_at": None, "audit_receipt": audit}}
+    encoded = (json.dumps(expected, sort_keys=True) + "\n").encode()
+    with TemporaryDirectory() as directory, pytest.MonkeyPatch.context() as patch:
+        root = Path(directory)
+        (root / "sent").mkdir()
+        (root / "sent" / f"{identifier}.json").write_text(json.dumps({
+            "id": identifier, "delivery": {"status": "sent", "auditReceipt": audit},
+        }))
+        patch.setattr(module, "MAX_RESPONSE_BYTES", len(encoded), raising=False)
+        assert module.delivery_receipts(root, [identifier]) == expected
+        patch.setattr(module, "MAX_RESPONSE_BYTES", len(encoded) - 1)
+        with pytest.raises(RuntimeError, match="delivery_lookup_limit"):
+            module.delivery_receipts(root, [identifier])
+
+
+def test_cli_oversized_receipt_is_a_small_failure_without_private_output(tmp_path):
+    identifier = "00000000-0000-4000-8000-000000000026"
+    sent = tmp_path / ".local/state/bot-errors/sent"
+    sent.mkdir(parents=True)
+    (sent / f"{identifier}.json").write_text(json.dumps({
+        "id": identifier,
+        "delivery": {"status": "sent", "auditReceipt": "private-" + "x" * 70000},
+    }))
+    result = subprocess.run(
+        [sys.executable, "-B", module.__file__, identifier],
+        env={**os.environ, "HOME": str(tmp_path)}, capture_output=True, timeout=5,
+    )
+    assert result.returncode == 1
+    assert json.loads(result.stdout) == {"code": "delivery_observation_failed"}
+    assert len(result.stdout) < 65536
+    assert b"private" not in result.stdout and identifier.encode() not in result.stdout
+    assert result.stderr == b""
+
+
+def test_scan_error_cannot_return_an_earlier_sent_receipt(tmp_path, monkeypatch):
+    identifier = "00000000-0000-4000-8000-000000000027"
+    _place(tmp_path, "sent", identifier, "")
+    _sent_receipt(tmp_path / "sent" / f"{identifier}.json", identifier)
+    _place(tmp_path, "outbox", identifier, "")
+    original = os.scandir
+    outbox = (tmp_path / "outbox").stat()
+
+    @contextmanager
+    def scandir(path):
+        with original(path) as entries:
+            if os.fstat(path).st_ino == outbox.st_ino:
+                raise OSError("private path must not escape")
+            yield entries
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    with pytest.raises(RuntimeError, match="^delivery_observation_failed$"):
+        module.delivery_receipts(tmp_path, [identifier])
+
+
+def test_unreadable_stage_cannot_return_an_earlier_sent_receipt(tmp_path, monkeypatch):
+    identifier = "00000000-0000-4000-8000-000000000030"
+    _place(tmp_path, "sent", identifier, "")
+    _sent_receipt(tmp_path / "sent" / f"{identifier}.json", identifier)
+    _place(tmp_path, "outbox", identifier, "")
+    original = os.open
+
+    def open_directory(path, *args, **kwargs):
+        if path == "outbox":
+            raise PermissionError("private path must not escape")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", open_directory)
+    with pytest.raises(RuntimeError, match="^delivery_observation_failed$"):
+        module.delivery_receipts(tmp_path, [identifier])
+
+
+def test_combined_response_budget_rejects_individually_small_receipts(tmp_path, monkeypatch):
+    identifiers = [f"00000000-0000-4000-8000-{index:012d}" for index in range(2)]
+    for identifier in identifiers:
+        _place(tmp_path, "sent", identifier, "")
+        (tmp_path / "sent" / f"{identifier}.json").write_text(json.dumps({
+            "id": identifier, "delivery": {"status": "sent", "auditReceipt": "x" * 40000},
+        }))
+        assert module.delivery_receipts(tmp_path, [identifier])[identifier]["status"] == "sent"
+    with pytest.raises(RuntimeError, match="delivery_lookup_limit"):
+        module.delivery_receipts(tmp_path, identifiers)
+
+
+def test_supervisor_keeps_batch_and_event_ids_after_receipt_budget_failure(tmp_path, monkeypatch):
+    supervisor_spec = importlib.util.spec_from_file_location(
+        "reliability_supervisor_receipt_budget", Path(module.__file__).with_name("reliability_supervisor.py")
+    )
+    supervisor = importlib.util.module_from_spec(supervisor_spec)
+    monkeypatch.setitem(sys.modules, supervisor_spec.name, supervisor)
+    supervisor_spec.loader.exec_module(supervisor)
+    identifier = "00000000-0000-4000-8000-000000000028"
+    sent = tmp_path / ".local/state/bot-errors/sent"
+    sent.mkdir(parents=True)
+    leaf = sent / f"{identifier}.json"
+    leaf.write_text(json.dumps({
+        "id": identifier, "delivery": {"status": "sent", "auditReceipt": "x" * 70000},
+    }))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    alert = {"event_id": identifier, "delivery": "published", "published_at": 10}
+    config = {"delivery_command": [sys.executable, "-B", module.__file__]}
+    assert supervisor.resolve_alert_delivery(config, [alert]) == [{"code": "nonzero_exit", "returncode": 1}]
+    assert alert == {"event_id": identifier, "delivery": "published", "published_at": 10}
+    _sent_receipt(leaf, identifier)
+    assert supervisor.resolve_alert_delivery(config, [alert]) == []
+    assert alert["event_id"] == identifier and alert["delivery"] == "channel_delivered"
+    assert alert["delivery_receipt"]["audit_receipt"] == "outside-receipt"

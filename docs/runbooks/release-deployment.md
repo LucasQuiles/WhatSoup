@@ -931,8 +931,29 @@ failure. The helper closes its pipes and kills and reaps its direct child on
 timeout or output overflow, allowing up to five seconds for cleanup. It keeps
 the inherited process group. This does not guarantee termination of descendants
 or remote commands, or establish a deadline for the complete cycle.
-Receipt directory scans, aggregate reads and returned receipt sizes still need
-independent bounds.
+Receipt lookup scans each stage once for the whole batch of at most 128 event
+IDs. Across the batch it permits 4,096 directory entries, eight MiB read and a
+five-second cooperative deadline. One additional entry or byte may be inspected
+to detect overflow. The existing one-MiB per-file limit and 32 matching names
+per event per stage remain; exceeding the matching-name cap now fails the batch
+instead of returning a partial disposition. JSON output, including escaping and
+the final newline, must fit in 65,535 bytes. Audit receipts are never truncated.
+Bytes read from a subsequently rejected file still consume the batch budget.
+Files rejected by metadata before reading consume only the entry budget.
+Scan errors or exhausted budgets fail the whole batch through the existing
+generic command error; they cannot return an earlier partial delivery result.
+The supervisor leaves that batch unresolved with unchanged event IDs. Its
+existing published-alert retention rules are unchanged.
+A command response that claims delivery without an audit-receipt string fails
+the batch before any alert is changed. Other malformed receipt rows remain
+unresolved; they cannot establish delivery.
+The accumulated receipt metadata in retained alerts can still exceed the
+one-MiB state-reader limit; per-response limits do not bound persisted history.
+That cumulative state bound remains a separate unresolved obligation.
+Large spools may repeatedly exhaust these limits; eventual discovery and live
+capacity are not established. The deadline checks run around filesystem and
+JSON operations and cannot interrupt a blocked kernel call. The supervisor's
+15-second command timeout remains necessary. No spool cleanup is performed.
 
 The optional service supervisor records malformed or truncated HTTP framing as
 an `invalid_response` liveness failure, so that fault does not abort the cycle.

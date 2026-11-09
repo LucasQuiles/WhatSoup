@@ -986,7 +986,7 @@
     },
     {
       "path": "deploy/scripts/fleet/reliability_supervisor.py",
-      "sha256": "0654370970b2da1bb8754531ec86bcef75e7d6619ae0cdfd9775b614e0f82cc0",
+      "sha256": "aee923eeb5db7b15761fcf960d6910fade99cfbc61132578b3000a6007fd0f10",
       "mustContain": [
         "legacy_sent_items_probe",
         "resolve_alert_delivery"
@@ -994,7 +994,7 @@
     },
     {
       "path": "deploy/scripts/fleet/bot_errors_delivery_receipts.py",
-      "sha256": "63c4079099d8630319ae27fc6e4217edda17cfec34430bb103e95269e655ecd1",
+      "sha256": "9c8ed61690af10681dad35f2683c2467db7470ed0e4560f2e7f0eefdfa49d3c1",
       "mustContain": [
         "delivery_receipts",
         "storm-collapsed"

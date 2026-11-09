@@ -706,15 +706,20 @@ def _resolve_batch(config, batch):
         receipts = None
     if not isinstance(receipts, dict):
         return {"code": "invalid_output", "returncode": None}
+    updates = []
     for alert in batch:
         receipt = receipts.get(alert["event_id"])
-        if not isinstance(receipt, dict):
+        if not isinstance(receipt, dict) or not isinstance(receipt.get("status"), str):
             continue
         if receipt.get("status") in {"sent", "email_delivered"}:
-            alert["delivery"] = "channel_delivered"
-            alert["delivery_receipt"] = receipt
+            if not isinstance(receipt.get("audit_receipt"), str):
+                return {"code": "invalid_output", "returncode": None}
+            updates.append((alert, {"delivery": "channel_delivered", "delivery_receipt": receipt}))
         elif receipt.get("status") in DISPATCHER_DISPOSITIONS:
-            alert["delivery"] = DISPATCHER_DISPOSITIONS[receipt["status"]]
+            updates.append((alert, {"delivery": DISPATCHER_DISPOSITIONS[receipt["status"]]}))
+    # A later malformed success must not leave an earlier alert marked delivered.
+    for alert, update in updates:
+        alert.update(update)
     return None
 
 

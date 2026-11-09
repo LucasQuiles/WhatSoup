@@ -22,6 +22,43 @@ def load_module():
     return module
 
 
+@given(audit=st.one_of(st.none(), st.booleans(), st.integers(), st.lists(st.text())))
+def test_unaudited_success_does_not_partially_update_a_delivery_batch(audit):
+    supervisor = load_module()
+    identifiers = [f"00000000-0000-4000-8000-{index:012d}" for index in range(2)]
+    receipts = {
+        identifiers[0]: {"status": "sent", "audit_receipt": "valid-receipt"},
+        identifiers[1]: {"status": "email_delivered", "audit_receipt": audit},
+    }
+    code = "import sys; sys.stdout.write(" + repr(json.dumps(receipts)) + ")"
+    alerts = [{"event_id": identifier, "delivery": "published"} for identifier in identifiers]
+    assert supervisor.resolve_alert_delivery({"delivery_command": [sys.executable, "-c", code]}, alerts) == [
+        {"code": "invalid_output", "returncode": None}
+    ]
+    assert alerts == [{"event_id": identifier, "delivery": "published"} for identifier in identifiers]
+
+
+def test_missing_audit_receipt_cannot_claim_delivery():
+    supervisor = load_module()
+    identifier = "00000000-0000-4000-8000-000000000032"
+    code = "import sys; sys.stdout.write(" + repr(json.dumps({identifier: {"status": "sent"}})) + ")"
+    alert = {"event_id": identifier, "delivery": "published"}
+    assert supervisor.resolve_alert_delivery({"delivery_command": [sys.executable, "-c", code]}, [alert]) == [
+        {"code": "invalid_output", "returncode": None}
+    ]
+    assert alert == {"event_id": identifier, "delivery": "published"}
+
+
+@given(status=st.one_of(st.lists(st.integers()), st.dictionaries(st.text(), st.integers())))
+def test_non_string_receipt_status_stays_unresolved(status):
+    supervisor = load_module()
+    identifier = "00000000-0000-4000-8000-000000000033"
+    code = "import sys; sys.stdout.write(" + repr(json.dumps({identifier: {"status": status}})) + ")"
+    alert = {"event_id": identifier, "delivery": "published"}
+    assert supervisor.resolve_alert_delivery({"delivery_command": [sys.executable, "-c", code]}, [alert]) == []
+    assert alert == {"event_id": identifier, "delivery": "published"}
+
+
 @pytest.mark.parametrize("descriptor", [1, 2], ids=["stdout", "stderr"])
 def test_command_output_limit_stops_and_reaps_child(tmp_path, monkeypatch, descriptor):
     supervisor = load_module()
@@ -809,7 +846,7 @@ def test_delivery_resolution_ignores_malformed_receipts(supervisor, monkeypatch)
     alerts = _undelivered(0, 2)
     receipts = {
         alerts[0]["event_id"]: "sent",
-        alerts[1]["event_id"]: {"status": "sent"},
+        alerts[1]["event_id"]: {"status": "sent", "audit_receipt": "valid-receipt"},
     }
     monkeypatch.setattr(
         supervisor,
@@ -832,7 +869,7 @@ def _delivery_stub(tmp_path, *, fail):
         "ids = sys.argv[1:]\n"
         f"if len(ids) > 128 or {fail!r}:\n"
         "    raise SystemExit(3)\n"
-        "print(json.dumps({i: {'status': 'sent'} for i in ids}))\n"
+        "print(json.dumps({i: {'status': 'sent', 'audit_receipt': 'valid-receipt'} for i in ids}))\n"
     )
     return [sys.executable, str(stub)]
 

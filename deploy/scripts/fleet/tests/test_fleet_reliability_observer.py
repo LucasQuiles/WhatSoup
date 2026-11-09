@@ -755,7 +755,7 @@ with pathlib.Path({log!r}).open("a") as log:
     log.write(json.dumps(ids) + "\\n")
 if len(ids) > 128 or set(ids) & set({fail!r}):
     raise SystemExit(3)
-print(json.dumps({{i: {{"status": {status!r}}} for i in ids}}))
+print(json.dumps({{i: {{"status": {status!r}, "audit_receipt": "valid-receipt"}} for i in ids}}))
 """
 
 
