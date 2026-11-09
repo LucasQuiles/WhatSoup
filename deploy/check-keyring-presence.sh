@@ -48,7 +48,7 @@ keyring_present() {
   local value=""
   case "$(uname -s)" in
     Darwin)
-      value="$("$NODE" "$SCRIPT_DIR/lib/read-keychain-secret.mjs" "$service" "$USER" || true)"
+      value="$("$NODE" "$SCRIPT_DIR/lib/read-keychain-secret.mjs" "$service" "${USER:-}" || true)"
       ;;
     *)
       value="$(timeout 3s secret-tool lookup service "$service" 2>/dev/null || true)"

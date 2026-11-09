@@ -23,6 +23,7 @@ import {
   type ShutdownSequenceOutcome,
 } from '../src/main-shutdown-policy.ts';
 import { MessageHandlerDrainTimeoutError } from '../src/runtimes/agent/shutdown-message-handler-drain.ts';
+import { ClaudeRefreshShutdownDeadlineError } from '../src/runtimes/agent/providers/claude-refresh-ahead.ts';
 
 function ports(overrides: Partial<Parameters<typeof runShutdownSequence>[0]> = {}) {
   const log = { info: vi.fn(), error: vi.fn() };
@@ -31,6 +32,8 @@ function ports(overrides: Partial<Parameters<typeof runShutdownSequence>[0]> = {
     ports: {
       auxiliaries: [{ name: 'health-server', stop: vi.fn(() => {}) }],
       shutdownRuntime: vi.fn(async () => {}),
+      refreshDrainDeadlineAt: 8_000,
+      drainRefreshChildren: vi.fn(async () => {}),
       shutdownTransport: vi.fn(() => {}),
       markCleanExit: vi.fn(() => ({ persisted: true as const })),
       log,
@@ -225,5 +228,73 @@ describe('runShutdownSequence', () => {
     expect(source).toContain('auxiliaries: [');
     expect(source).toContain('process.exit(shutdownExitCode(signal, outcome));');
     expect(source).not.toContain('process.exit(shutdownExitCode(signal));');
+  });
+});
+
+
+describe('refresh-child shutdown phase', () => {
+  it('drains refresh children after runtime and before transport, using the cleanup-margin deadline', async () => {
+    const order: string[] = [];
+    const drainRefreshChildren = vi.fn(async (deadlineAt: number) => {
+      expect(deadlineAt).toBe(8_000);
+      order.push('refresh');
+    });
+    const { ports: p } = ports({
+      shutdownRuntime: vi.fn(async () => { order.push('runtime'); }),
+      drainRefreshChildren,
+      shutdownTransport: vi.fn(async () => { order.push('transport'); }),
+    });
+
+    const outcome = await runShutdownSequence(p);
+
+    expect(drainRefreshChildren).toHaveBeenCalledOnce();
+    expect(order).toEqual(['runtime', 'refresh', 'transport']);
+    expect(outcome).toMatchObject({ complete: true });
+  });
+
+  it('classifies only the exported refresh deadline error as refresh_children_deadline while still tearing down transport', async () => {
+    const deadline = new ClaudeRefreshShutdownDeadlineError();
+    deadline.message = 'refresh-child-private-deadline';
+    const { ports: p, log } = ports({
+      drainRefreshChildren: vi.fn(async () => {
+        throw deadline;
+      }),
+    });
+
+    const outcome = await runShutdownSequence(p);
+
+    expect(p.drainRefreshChildren).toHaveBeenCalledWith(8_000);
+    expect(p.shutdownTransport).toHaveBeenCalledOnce();
+    expect(p.markCleanExit).not.toHaveBeenCalled();
+    expect(outcome).toEqual<ShutdownSequenceOutcome>({
+      complete: false,
+      failedPhase: 'refresh',
+      cause: 'refresh_children_deadline',
+      blockers: null,
+    });
+    expect(shutdownExitCode('SIGTERM', outcome)).toBe(1);
+    expect(JSON.stringify(incompleteReceipts(log)[0])).not.toContain('refresh-child-private-deadline');
+  });
+
+  it('classifies an untyped refresh drain failure separately, continues transport teardown, and keeps error contents out of its receipt', async () => {
+    const secret = 'refresh-child-private-diagnostic';
+    const { ports: p, log } = ports({
+      drainRefreshChildren: vi.fn(async () => {
+        throw new Error(secret);
+      }),
+    });
+
+    const outcome = await runShutdownSequence(p);
+
+    expect(p.shutdownTransport).toHaveBeenCalledOnce();
+    expect(p.markCleanExit).not.toHaveBeenCalled();
+    expect(outcome).toEqual<ShutdownSequenceOutcome>({
+      complete: false,
+      failedPhase: 'refresh',
+      cause: 'refresh_phase_failed',
+      blockers: null,
+    });
+    expect(shutdownExitCode('SIGTERM', outcome)).toBe(1);
+    expect(JSON.stringify(incompleteReceipts(log)[0])).not.toContain(secret);
   });
 });

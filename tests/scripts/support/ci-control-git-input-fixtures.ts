@@ -127,7 +127,13 @@ export function expectNoVisibleCause(value: unknown): void {
 }
 
 export function hashBlob(root: string, bytes: Uint8Array): string {
-  return gitWithInput(root, ['hash-object', '-w', '--stdin'], bytes);
+  // Fixture construction must not depend on a synchronous stdin pipe completing.
+  // Keep raw bytes outside the repository so later fixture commits cannot add them.
+  const inputRoot = mkdtempSync(join(tmpdir(), 'ci-control-blob-input-'));
+  registerTemporaryRoot(inputRoot);
+  const inputPath = join(inputRoot, 'blob');
+  writeFileSync(inputPath, bytes, { mode: 0o600 });
+  return git(root, ['hash-object', '-w', '--no-filters', '--', inputPath]);
 }
 
 export function blobOid(bytes: Uint8Array): string {

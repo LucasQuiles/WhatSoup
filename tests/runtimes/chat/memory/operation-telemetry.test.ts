@@ -54,6 +54,11 @@ describe('memory operation telemetry', () => {
       'network_error',
       true,
     ],
+    // undici and OS connection failures (memory guidance readiness, round 3 N2).
+    [Object.assign(new TypeError('SYNTHETIC_PRIVATE_CONNECT_MARKER'), { cause: { code: 'UND_ERR_CONNECT_TIMEOUT' } }), 'network_error', true],
+    [Object.assign(new TypeError('SYNTHETIC_PRIVATE_CONNECT_MARKER'), { cause: { code: 'UND_ERR_SOCKET' } }), 'network_error', true],
+    [Object.assign(new TypeError('SYNTHETIC_PRIVATE_CONNECT_MARKER'), { cause: { code: 'EHOSTUNREACH' } }), 'network_error', true],
+    [Object.assign(new TypeError('SYNTHETIC_PRIVATE_CONNECT_MARKER'), { cause: { code: 'ENETUNREACH' } }), 'network_error', true],
     [new Error('SYNTHETIC_PRIVATE_PROVIDER_MARKER'), 'unknown', true],
   ])(
     'classifies bounded machine evidence without returning prose',

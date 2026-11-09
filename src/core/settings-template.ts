@@ -4,6 +4,7 @@
 // built-in "sensitive file" protection from blocking tool calls.
 
 import { z } from 'zod';
+import { m365MutationExceptionAllowed, type M365MutationPolicy } from './m365-bridge-policy.ts';
 
 export interface PermissionsSettings {
   permissions: {
@@ -39,15 +40,16 @@ export const AGENT_DEFAULT_ALLOW: readonly string[] = Object.freeze([
 ]);
 
 /**
- * Repo-owned deny floor — patterns that must always appear in
- * `permissions.deny` for an agent instance, regardless of caller input.
+ * Repo-owned deny floor — patterns that must appear in `permissions.deny`
+ * for an agent instance, except for an approved account-bound M365 bridge.
  *
  * `mergeSettingsJson` unions this list into the merged deny array, and
- * `isValidPermissionsSettings` asserts that every entry survives.
+ * `isValidPermissionsSettings` asserts that every effective floor entry
+ * survives.
  *
  * Populated from the connector mutation inventory approved for #411.
  * Existing on-disk custom settings are preserved, while the always-run
- * workspace reconciler restores this floor whenever it has drifted.
+ * workspace reconciler restores the effective floor whenever it has drifted.
  */
 export const REQUIRED_DENY: readonly string[] = Object.freeze([
   // Google auth-backed mutation tools.
@@ -182,16 +184,31 @@ export const REQUIRED_DENY: readonly string[] = Object.freeze([
   'mcp__plugin_microsoft_365_microsoft_365__upsert-dataverse-record',
 ]);
 
+/** Exact static subset eligible for a bound Agent365 bridge exception. */
+export const M365_MUTATION_DENY: readonly string[] = Object.freeze(
+  REQUIRED_DENY.filter((entry) => entry.startsWith('mcp__plugin_microsoft_365_microsoft_365__')),
+);
+
 /**
  * Union the caller-provided deny list with `REQUIRED_DENY`, preserving
  * caller order first and appending any floor entries that the caller did
  * not already include. Stable, idempotent, and order-preserving for
  * existing fleets.
  */
-export function applyRequiredDeny(deny: readonly string[]): string[] {
+export function applyRequiredDeny(
+  deny: readonly string[],
+  m365MutationPolicy?: M365MutationPolicy,
+): string[] {
+  const m365Exception = m365MutationExceptionAllowed(m365MutationPolicy);
+  const m365Deny = new Set(M365_MUTATION_DENY);
+  const required = m365Exception
+    ? REQUIRED_DENY.filter((entry) => !m365Deny.has(entry))
+    : REQUIRED_DENY;
+  // Stored entries have no authorship provenance. Approval can omit a generated
+  // floor, but cannot silently erase an operator's restriction or a legacy entry.
   const seen = new Set<string>(deny);
   const out: string[] = [...deny];
-  for (const entry of REQUIRED_DENY) {
+  for (const entry of required) {
     if (!seen.has(entry)) {
       out.push(entry);
       seen.add(entry);
@@ -205,12 +222,15 @@ export function applyRequiredDeny(deny: readonly string[]): string[] {
  * Only agent instances need settings (they run Claude Code subprocesses).
  * Returns null for chat/passive types.
  */
-export function defaultSettingsJson(type: string): PermissionsSettings | null {
+export function defaultSettingsJson(
+  type: string,
+  m365MutationPolicy?: M365MutationPolicy,
+): PermissionsSettings | null {
   if (type !== 'agent') return null;
   return {
     permissions: {
       allow: [...AGENT_DEFAULT_ALLOW],
-      deny: applyRequiredDeny([]),
+      deny: applyRequiredDeny([], m365MutationPolicy),
       defaultMode: 'bypassPermissions',
     },
   };
@@ -240,40 +260,33 @@ const PermissionsSettingsShapeSchema = z.object({
 }) satisfies z.ZodType<PermissionsSettings>;
 
 /**
- * Full schema: shape plus the deny-floor subset check. Every `REQUIRED_DENY`
- * entry must already be present in the supplied deny list. mergeSettingsJson
- * will union them anyway, but rejecting here lets the loader surface drift
- * early (e.g. an operator hand-editing settings.json to drop a floor entry).
+ * Full schema: shape plus the effective deny-floor subset check. The writer
+ * unions the effective floor anyway, but rejecting here lets the loader
+ * surface drift early (e.g. an operator hand-editing settings.json to drop an
+ * entry).
  */
-const PermissionsSettingsSchema = PermissionsSettingsShapeSchema.superRefine((settings, ctx) => {
-  const denySet = new Set(settings.permissions.deny);
-  for (const required of REQUIRED_DENY) {
-    if (!denySet.has(required)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['permissions', 'deny'],
-        message: `missing required deny entry: ${required}`,
-      });
-    }
-  }
-});
-
 /**
  * Validate that a value has the shape of PermissionsSettings.
  * Guards against arbitrary JSON being written to settings.json.
  *
- * Also asserts that the `REQUIRED_DENY` floor is a subset of the deny
- * list — callers cannot strip mandatory deny entries through a custom
- * settings payload.
+ * Also asserts that the effective deny floor is a subset of the deny list —
+ * callers cannot strip mandatory deny entries through a custom settings
+ * payload.
  */
-export function isValidPermissionsSettings(v: unknown): v is PermissionsSettings {
-  return PermissionsSettingsSchema.safeParse(v).success;
+export function isValidPermissionsSettings(
+  v: unknown,
+  m365MutationPolicy?: M365MutationPolicy,
+): v is PermissionsSettings {
+  const parsed = PermissionsSettingsShapeSchema.safeParse(v);
+  if (!parsed.success) return false;
+  const denySet = new Set(parsed.data.permissions.deny);
+  return applyRequiredDeny([], m365MutationPolicy).every((entry) => denySet.has(entry));
 }
 
 /**
  * Merge custom settings with defaults for a given instance type.
  * Custom settings fully replace the permissions block (not merged field-by-field),
- * but the `REQUIRED_DENY` floor is always unioned into the resulting deny list.
+ * but the effective deny floor is always unioned into the resulting deny list.
  * Returns null for non-agent types or invalid input.
  */
 export function mergeSettingsJson(
@@ -302,6 +315,6 @@ export function mergeSettingsJson(
  * `mergeSettingsJson` can union the floor into otherwise-valid payloads
  * without rejecting them outright.
  */
-function isValidPermissionsShape(v: unknown): v is PermissionsSettings {
+export function isValidPermissionsShape(v: unknown): v is PermissionsSettings {
   return PermissionsSettingsShapeSchema.safeParse(v).success;
 }

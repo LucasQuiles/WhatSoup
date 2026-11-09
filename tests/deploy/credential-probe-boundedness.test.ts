@@ -853,7 +853,10 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     '',
   ].join('\n'));
   fs.writeFileSync(path.join(root, 'child.sh'), [
-    'printf "%s %s" "$$" "$PPID" > "$COMMAND_STARTED"',
+    'command_started_tmp="$COMMAND_STARTED.tmp.$$"',
+    'printf "%s %s\\n" "$$" "$PPID" > "$command_started_tmp" || exit 2',
+    'command -p link "$command_started_tmp" "$COMMAND_STARTED" || exit 2',
+    'rm -f "$command_started_tmp"',
     'case "$1" in event-order-*)',
     '  if declare -p control_token outcome_file >/dev/null 2>&1; then',
     '    builtin printf "%s\\n" "CHILD_SECRET_EXPORTED" >> "$EVENT_ORDER_LOG"',

@@ -100,8 +100,8 @@ const EXPECTED_INVENTORY: Readonly<
   Record<string, Readonly<Partial<Record<ProcessTreeDiagnosticSource, number>>>>
 > = {
   'src/runtimes/agent/session.ts': { session_shutdown: 1 },
+  'src/runtimes/agent/stale-session-sweep.ts': { stale_session_sweep: 1 },
   'src/runtimes/agent/runtime.ts': {
-    stale_session_sweep: 1,
     ownership_loss_cleanup: 1,
   },
 };

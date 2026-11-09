@@ -142,6 +142,7 @@ const NETWORK_FAILURE_CODES = new Set([
   'ECONNRESET',
   'ENOTFOUND',
   'EAI_AGAIN',
+  'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET', 'EHOSTUNREACH', 'ENETUNREACH',
 ]);
 
 export function normalizeMemoryTraceId(

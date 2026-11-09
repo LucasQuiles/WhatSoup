@@ -314,6 +314,8 @@ export interface KillSessionTreeOptions {
   readonly diagnosticSessionRowId?: number;
   readonly termGraceMs?: number;
   readonly killGraceMs?: number;
+  /** Await provider-specific protection before a fresh census and each signal phase. */
+  readonly beforeSignal?: (signal: NodeJS.Signals) => void | Promise<void>;
   /**
    * #1755: bounded window to let a transient PID-census ambiguity (a `ps` race, a
    * mid-exit process, or a same-pid/different-command reading) resolve to gone or
@@ -353,6 +355,7 @@ interface CapturedKillSessionTreeOptions {
   readonly diagnosticSessionRowId: unknown;
   readonly termGraceMs: unknown;
   readonly killGraceMs: unknown;
+  readonly beforeSignal: unknown;
   readonly ambiguityResolveMs: unknown;
   readonly onOutcome: unknown;
   readonly onCgroupDivergence: unknown;
@@ -705,6 +708,7 @@ function captureOptions(input: unknown): CapturedKillSessionTreeOptions {
       diagnosticSessionRowId: options.diagnosticSessionRowId,
       termGraceMs: options.termGraceMs,
       killGraceMs: options.killGraceMs,
+      beforeSignal: options.beforeSignal,
       ambiguityResolveMs: options.ambiguityResolveMs,
       onOutcome: options.onOutcome,
       onCgroupDivergence: options.onCgroupDivergence,
@@ -728,6 +732,7 @@ function validateOptions(options: CapturedKillSessionTreeOptions): KillSessionTr
       options.ambiguityResolveMs,
     );
     const onOutcome = options.onOutcome;
+    const beforeSignal = options.beforeSignal;
     const onCgroupDivergence = options.onCgroupDivergence;
     const readCgroupMemberPids = options.readCgroupMemberPids;
 
@@ -762,6 +767,9 @@ function validateOptions(options: CapturedKillSessionTreeOptions): KillSessionTr
     if (onOutcome !== undefined && typeof onOutcome !== 'function') {
       throw invalidOptions('Process-tree outcome observer must be callable');
     }
+    if (beforeSignal !== undefined && typeof beforeSignal !== 'function') {
+      throw invalidOptions('Process-tree signal protection must be callable');
+    }
     if (
       onCgroupDivergence !== undefined
       && typeof onCgroupDivergence !== 'function'
@@ -785,6 +793,9 @@ function validateOptions(options: CapturedKillSessionTreeOptions): KillSessionTr
         : { diagnosticSessionRowId: diagnosticSessionRowId as number }),
       ...(termGraceMs === undefined ? {} : { termGraceMs }),
       ...(killGraceMs === undefined ? {} : { killGraceMs }),
+      ...(beforeSignal === undefined ? {} : {
+        beforeSignal: beforeSignal as (signal: NodeJS.Signals) => void | Promise<void>,
+      }),
       ...(ambiguityResolveMs === undefined ? {} : { ambiguityResolveMs }),
       ...(onOutcome === undefined
         ? {}
@@ -1215,6 +1226,28 @@ async function resolveOwnedInspection(
   return { rows, survivors: inspection.survivors, ambiguous: inspection.ambiguous };
 }
 
+async function waitForSignalProtection(
+  options: KillSessionTreeOptions,
+  signal: NodeJS.Signals,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      options.beforeSignal!(signal),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('Signal protection timed out')), PROCESS_TREE_MAX_DURATION_MS);
+      }),
+    ]);
+  } catch {
+    throw new ProcessTreeTerminationError(
+      'PROCESS_TREE_SIGNAL_FAILED',
+      'Session process signal protection did not complete',
+    );
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 async function runTermination(
   target: NormalizedProcessTreeTarget,
   rootPid: number,
@@ -1227,6 +1260,8 @@ async function runTermination(
   const startedAt = systemClock.now();
   let escalated = false;
   const signaledPids = new Set<number>();
+
+  if (options.beforeSignal) await waitForSignalProtection(options, signal);
 
   // Pre-signal. #1755: resolve transient ambiguity over a bounded window, then
   // signal the CONFIRMED survivors only — never an ambiguous PID (a duplicate-pid
@@ -1266,6 +1301,7 @@ async function runTermination(
     // confirmed survivors get SIGKILL, residual ambiguous is left alone and recorded.
     const pending = [...termCheck.survivors, ...termCheck.ambiguous];
     if (pending.length > 0) {
+      if (options.beforeSignal) await waitForSignalProtection(options, SIGNAL.KILL);
       let kill: ResolvedInspection;
       try {
         kill = await resolveOwnedInspection(

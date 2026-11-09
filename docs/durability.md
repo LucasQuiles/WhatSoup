@@ -14,7 +14,7 @@ WhatSoup addresses this with a write-ahead journal approach: every outbound send
 
 1. **Crash during send** — the process dies after `sendMessage()` is called but before the echo arrives. The `sending → maybe_sent` promotion in pre-connect recovery captures this.
 
-2. **Echo never arrives** — the message was delivered but the WebSocket echo was lost (e.g., brief disconnect). The 30-second sweep (`sweepStaleSubmitted`) and post-connect reconciliation against the messages table handle this.
+2. **Echo never arrives** — no matching own-message echo was observed; the message may or may not have reached the recipient. The 30-second sweep (`sweepStaleSubmitted`) and post-connect reconciliation against the messages table handle this missing-evidence case under the recorded replay policy.
 
 3. **Interrupted inbound processing** — an incoming message started an agent turn but the process crashed before the terminal transaction. Recovery never blindly replays that prompt. A turn with exact immutable identity and unresolved delivery evidence can transfer to a proof-linked recovery job; an arbitrary open inbound with no provable owner is marked `failed` and remains operator-visible instead of risking duplicate provider or tool side effects.
 
@@ -35,7 +35,7 @@ An inbound event becomes terminal from the outcome selected by the immutable tur
 Every message the bot sends is journaled in `outbound_ops` before the network call. The journal entry captures:
 
 - `payload` — the message text (or media descriptor), with a `payload_hash` (SHA-256) for deduplication detection.
-- `replay_policy` — governs what happens if the op is found undelivered after a crash (see §2.4).
+- `replay_policy` — governs recovery when delivery remains unconfirmed after a crash (see §2.4).
 - `source_inbound_seq` — links the outbound op back to the inbound event that caused it.
 - `is_terminal` — marks the op as the "final reply" for a conversation turn. When a terminal op reaches `echoed`, the linked inbound event is automatically advanced to `complete`.
 - `created_at` records queue creation and `submitted_at` records a provider submission receipt. `ambiguity_at` records entry to the current `maybe_sent` episode; it is not a substitute for either of the other clocks.
@@ -59,17 +59,21 @@ If no echo arrives within 30 seconds after submission, the periodic sweep (§4.3
 
 Every outbound op declares one of three replay policies:
 
-| Policy | Meaning | On unconfirmed delivery |
+| Policy | Meaning | When matching stored evidence is absent |
 |---|---|---|
 | `safe` | Re-sending is idempotent (same text produces same observable result) | Reset to `pending`, then re-sent by the pending drainer (§4.4) |
 | `unsafe` | Re-sending would cause a duplicate visible to the recipient | Quarantine — require manual resolution |
 | `read_only` | Op has no side effects visible to the recipient (e.g., presence, read receipt) | Reset to `pending`, then re-sent by the pending drainer (§4.4) |
 
+The evidence check precedes replay policy: a matching self-authored row settles as
+`echoed`; a matching non-self or unknown-authorship row quarantines under every
+policy (§4.2). The table applies only when matching evidence is absent.
+
 **Replay duplicate-delivery tradeoff.** Because only `safe`/`read_only` ops are ever
 reset to `pending` (`unsafe` ops — including terminal user replies — are quarantined, never
 replayed), a replay that re-sends an op which *was* actually delivered produces at most a
 duplicate of an idempotent/side-effect-free message. That duplicate is the accepted tradeoff
-for guaranteeing safe/read_only ops are not silently dropped; it is never incurred for
+for recovering safe/read_only ops with missing evidence; it is never incurred for
 user-terminal replies.
 
 The policy is set at creation time by the caller. Autonomous bot responses (via `sendTracked`) typically use `safe` because the text is deterministic for a given conversation state. MCP tool sends are excluded from the durability journal by design (gap-matrix item 92) — those use direct Baileys calls and do not go through `sendTracked`.
@@ -141,9 +145,11 @@ Note: `completeInbound()` is a guarded helper — if the row is still `processin
                                        ▼               ▼
                                     echoed          maybe_sent
                                   (terminal)           │
-                                                       ├─ wa_message_id found
-                                                       │  in messages table
-                                                       │  → echoed
+                                                       ├─ matching row + is_from_me = 1
+                                                       │  → echoed (own-message observation)
+                                                       │
+                                                       ├─ matching row + is_from_me != 1
+                                                       │  → quarantined (any replay policy)
                                                        │
                                                        ├─ not found + safe/read_only
                                                        │  → pending  (replay)
@@ -251,13 +257,30 @@ This one-time startup pass is an immediate history/corroboration reconciliation 
 
 For each `maybe_sent` op (including those promoted in Step 1):
 
-- **Has `wa_message_id`**: query `messages` table for a matching `message_id`.
-  - Found: `markEchoed()` — the message was delivered and stored by normal ingest. This also completes the linked inbound event if the op is terminal.
+- **Has `wa_message_id`**: query `messages` for the matching `message_id` and its persisted authorship. Startup and live reconciliation share this check, including stored history.
+  - Found with `is_from_me != 1`: conflicting evidence; quarantine regardless of replay policy. Global message-ID uniqueness may have displaced our own echo, so an occupied ID is not missing evidence and cannot authorize automatic replay. Existing delivery-risk quarantine review and retention apply.
+  - Found with `is_from_me = 1`: `markEchoed()` — our own message was observed and stored. This is not proof of recipient delivery. It also completes the linked legacy inbound if the op is terminal; immutable terminal records retain their own settlement rules.
   - Not found + `safe`/`read_only`: reset to `pending` for replay (re-sent by the drainer, §4.4).
   - Not found + `unsafe`: `markQuarantined()`.
-- **No `wa_message_id`** (send never reached WhatsApp): the message was definitely not delivered.
+- **No `wa_message_id`**: no provider receipt was recorded; delivery remains unconfirmed.
   - `safe`/`read_only`: reset to `pending` for replay (re-sent by the drainer, §4.4).
   - `unsafe`: `markQuarantined()`.
+
+Self-authorship is necessary but does not establish provider account or conversation identity. This check does not resolve same-ID self messages in different conversations, Signal UUID/number aliases, or rows lost to the message store's global ID uniqueness; those remain tracked in #3841. A provider or historical row that omits self-authorship is conflicting evidence and requires quarantine review, including for caller-declared safe/read-only operations. Only an absent matching row retains the existing missing-evidence replay policy. This can increase manual recovery work for legacy history; qualify adapter history behavior before rollout.
+
+When a full history message replaces an envelope-only placeholder, its `fromMe`
+value replaces the placeholder's persisted authorship together with the body.
+This corrects either direction of stale authorship. History replay leaves an
+existing non-placeholder row unchanged; previously upgraded rows are not backfilled.
+
+Here, a conflict means a row occupying the exact stored `message_id` used by the
+outbound receipt. Ordinary Signal peer messages use a composite `signal:` storage
+key; self syncs and outbound receipts retain the raw provider timestamp. A peer
+message with the same timestamp therefore does not occupy the self-echo key and
+does not by itself require quarantine. Without a matching self echo, the existing
+missing-evidence replay policy still applies. The composed Signal recovery tests
+cover both arrival orders and database reopening; they use controlled provider
+records, not live delivery evidence. Conversation/account correlation remains #3841.
 
 > The `stale-submitted → maybe_sent` promotion in Step 1 is **not** counted in
 > `outbound_reconciled`; Step 2 re-reads those ops as `maybe_sent` and is the single
@@ -303,8 +326,10 @@ after 30 seconds from that current episode, never from queue creation. Legacy
 rows fall back conservatively to a valid submission timestamp and then queue
 creation; missing, malformed, or future chronology is treated as stale rather
 than fresh. Each pass selects the oldest 200 eligible rows so a large backlog
-cannot monopolize the maintenance tick: confirmed echoes settle,
-`safe`/`read_only` ops reset to `pending`, and non-safe ops quarantine.
+cannot monopolize the maintenance tick. The evidence rules in §4.2 apply:
+self-authored matching rows settle as `echoed`; conflicting stored rows quarantine
+regardless of replay policy; only missing evidence permits `safe`/`read_only` ops
+to reset to `pending`. Missing evidence for unsafe ops also quarantines.
 Corroborated selected-delivery proof is excluded before applying the page limit
 so intentionally preserved rows neither create repeated recovery evidence nor
 starve actionable debt. An empty scan creates no recovery plan or run. The
@@ -315,7 +340,8 @@ same interval and immediately after each recovery pass.
 
 ### 4.4 Pending Drainer (`drainPendingOutbound`)
 
-`postConnectRecovery` resets unconfirmed `safe`/`read_only` ops to `pending`, but the reset
+`postConnectRecovery` resets `safe`/`read_only` ops with missing evidence to `pending`
+(conflicting stored rows quarantine under §4.2), but the reset
 alone does not re-deliver them. `drainPendingOutbound(messenger, durability)` is the step
 that re-sends them. It is wired in two places (`main.ts`):
 
@@ -375,9 +401,10 @@ bounds the class to one outstanding ping per chat; (3) **TTL age-out** — the d
 
 `preConnectRecovery` (§4.1) only runs at process start. An inbound row can also become
 stranded in a non-terminal `processing_status` **while the process is live** — for example a
-reply that was echoed (delivery confirmed) but whose linked-inbound completion step was
+reply whose own-message echo was recorded but whose linked-inbound completion step was
 missed (the QR-102 ordering strand), or a turn that finished with no reply and never
-finalized. Such a row never reaches `complete`/`failed`, so retention (which deletes only
+finalized. An echoed status records own-message observation, without proving recipient
+delivery. Such a row never reaches `complete`/`failed`, so retention (which deletes only
 terminal rows) never reclaims it. `sweepStuckInbound()` is the live counterpart to
 pre-connect recovery. It is wired in `main.ts` to run once at startup and then every
 **15 minutes**, and reconciles four buckets in a single transaction, plus a fifth that it only
@@ -1268,6 +1295,10 @@ policy and a transport-verified decision inbound. Only `open > 0` keeps `continu
 continuity part of `recovery_debt`; malformed, orphaned or conflicting closure rows make the ledger
 unreadable (top-level counts `null`, `recovery_debt` service-blocking), never zero debt.
 `turn_recovery_degraded` is derived independently and is not cleared by a closure.
+An `addressed` closure records the later live reissue and its linked terminal reply; its echoed or
+corroborated evidence does not prove recipient delivery or reading. Those outcomes remain unproven
+by the closure. A stored own-message row alone is insufficient: the non-self live inbound, exact
+terminal linkage, and context witness are still required.
 Admission blocks only `pending` or `claimed` jobs plus orphan transfers, and only on the affected
 per-chat or global scope. When the selected delivery is provably dead (`failed_permanent`/
 `quarantined`) the job can never echo-settle, so the stuck-inbound reclaim (§4.7) drives a
@@ -1469,6 +1500,12 @@ proves a different incarnation. Leases with no census matches are reclaimed befo
 birth observation, so one unrelated unreadable identity cannot retain already-proven-gone leases.
 Census loss, duplicate rows, a missing required birth observation, or any survivor keeps only the
 affected lease fenced; active attempts are never capacity-reclaimed.
+
+Session cleanup preserves the provider's credential-refresh grace before both the initial
+signal and escalation. Each wait precedes a fresh process census and authority check, so a
+process identity observed before the wait cannot authorize a later signal. Signal protection
+that rejects or exceeds the reaper's 60-second bound fails cleanup without signaling; the
+session retains its cleanup obligation and refuses replacement admission.
 
 Stale-row classification keeps duplicate live PIDs ambiguous, but confirmed-dead PIDs
 do not prevent checkpointed stale rows from being retired without signaling. A live

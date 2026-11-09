@@ -496,6 +496,7 @@ type RuntimeView = {
 function makeSession() {
   let resolveGenerationOwnership: (() => SessionGenerationIdentity | null) | null = null;
   return {
+    getProcessTreeTerminationLease: vi.fn(() => null),
     spawnSession: vi.fn(async () => {}),
     sendTurn: vi.fn(async () => {}),
     // QR-105: maybeStartAutoCompact is provider-gated to claude-cli sessions.
@@ -2637,7 +2638,10 @@ describe('AgentRuntime edge coverage', () => {
     );
     await state.flushImageCoalesce(mapKey);
     await drainMicrotasks();
-    await state.perChatTurnQueues.get(mapKey)!.idle();
+    // TurnQueue.idle polls with a 1ms timer, so release that poll under this file's fake clock.
+    const queueIdle = state.perChatTurnQueues.get(mapKey)!.idle();
+    await vi.advanceTimersByTimeAsync(1);
+    await queueIdle;
 
     expect(session.sendTurn).toHaveBeenCalledWith('[image:/tmp/unsequenced.png]');
     expect(queue.setInboundSeq).toHaveBeenCalledWith(undefined);

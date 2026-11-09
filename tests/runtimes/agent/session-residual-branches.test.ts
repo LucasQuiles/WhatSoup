@@ -80,7 +80,8 @@ vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
   ProcessTreeTerminationError: class ProcessTreeTerminationError extends Error {},
 }));
 
-vi.mock('node:fs', () => ({
+vi.mock('node:fs', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:fs')>()),
   readFileSync: vi.fn(() => ''),
 }));
 

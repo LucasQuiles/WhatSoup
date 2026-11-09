@@ -550,7 +550,8 @@ describe('process-tree diagnostic adoption live-tree ratchet', () => {
     }
     for (const [file, sources] of [
       ['session.ts', ['session_shutdown']],
-      ['runtime.ts', ['stale_session_sweep', 'ownership_loss_cleanup']],
+      ['runtime.ts', ['ownership_loss_cleanup']],
+      ['stale-session-sweep.ts', ['stale_session_sweep']],
     ] as const) {
       writeFileSync(path.join(agent, file), [
         "import { killSessionTree } from './process-tree.ts';",

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import type { ToolDeclaration } from '../../../src/mcp/types.ts';
 import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 
@@ -161,6 +162,7 @@ vi.mock('../../../src/lib/keyring.ts', () => ({
 }));
 
 import { registerKnowledgeTools, createPineconeWatchSearch } from '../../../src/mcp/tools/knowledge.ts';
+import { memoryGuidanceSystemBlock } from '../../../src/runtimes/agent/memory-guidance.ts';
 
 beforeEach(() => {
   PineconeMock.mockClear();
@@ -534,6 +536,23 @@ describe('registerKnowledgeTools - registration gating', () => {
     expect(tool.description).toContain('Test index A');
     expect(tool.description).toContain('"index-b"');
     expect(tool.description).toContain('Test index B');
+  });
+
+  it('agent memory guidance reads the indexes this tool accepts (profiled allowedIndexes only)', () => {
+    const registry = registryWithKnowledgeTool(['index-a', 'unknown-index']);
+    registry.register({
+      name: 'memory_write', description: 'stand-in', scope: 'chat', targetMode: 'injected',
+      schema: z.object({ chatJid: z.string() }), handler: async () => ({ ok: true }),
+    });
+    const guidanceFor = (memoryIndex: string): string => memoryGuidanceSystemBlock({
+      readiness: { state: 'ready', failureCode: 'none', evidenceCoverage: 'provider_response' },
+      registry, session: { tier: 'chat-scoped', conversationKey: 'chat' }, instanceName: 'bot', memoryIndex, allowedMcpTools: undefined,
+    })?.() ?? '';
+
+    expect(guidanceFor('index-a')).toContain('Check knowledge_search first');
+    // Dropped by registerKnowledgeTools for lacking a profile, so the tool rejects it.
+    expect(guidanceFor('unknown-index')).not.toContain('knowledge_search');
+    expect(guidanceFor('unknown-index')).toContain('Save only what will matter in a later conversation');
   });
 
   it('builds the Pinecone client with the api key from configured env var', () => {

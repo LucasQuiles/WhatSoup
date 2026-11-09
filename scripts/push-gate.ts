@@ -59,6 +59,7 @@ export const CURATED_TEST_PATHS = [
   'tests/scripts/hooks-installed-guard.test.ts',
   'tests/scripts/ci-control-result.test.ts',
   'tests/scripts/git-estate-guard.test.ts',
+  'tests/scripts/git-estate-guard-scope.test.ts',
   'tests/scripts/source-runtime-drift-check.test.ts',
   'tests/scripts/claude-settings-guard.test.ts',
   'tests/scripts/agent-decision-polls-guard.test.ts',
