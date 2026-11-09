@@ -78,11 +78,11 @@ describe('source-mutation tripwire', () => {
 
   it('fails the actual Vitest hook when a fixture mutates its own src/main.ts', () => {
     const result = runFixture([
-      "import { writeFileSync } from 'node:fs';",
+      "import { readFileSync, writeFileSync } from 'node:fs';",
       "import { expect, it } from 'vitest';",
       "it('changes fixture source', () => {",
       "  writeFileSync('src/main.ts', 'export const changed = true;\\n');",
-      '  expect(true).toBe(true);',
+      "  expect(readFileSync('src/main.ts', 'utf8')).toBe('export const changed = true;\\n');",
       '});',
     ].join('\n'));
 
@@ -93,7 +93,8 @@ describe('source-mutation tripwire', () => {
   it('fails before fixture tests when the supplied suite anchor differs from fixture source', () => {
     const result = runFixture([
       "import { expect, it } from 'vitest';",
-      "it('would pass without the tripwire', () => { expect(true).toBe(true); });",
+      "import { original } from './src/main.ts';",
+      "it('would pass without the tripwire', () => { expect(original).toBe(true); });",
     ].join('\n'), {
       fixtureEnv: {
         WHATSOUP_TRIPWIRE_MAIN_SHA256: 'f'.repeat(64),
@@ -107,11 +108,11 @@ describe('source-mutation tripwire', () => {
   it('drops a real inherited parent anchor so the fixture mutation reaches the exit hook', () => {
     const parentAnchor = establishSourceMutationAnchor({ cwd: repoRoot });
     const result = runFixture([
-      "import { writeFileSync } from 'node:fs';",
+      "import { readFileSync, writeFileSync } from 'node:fs';",
       "import { expect, it } from 'vitest';",
       "it('changes fixture source', () => {",
       "  writeFileSync('src/main.ts', 'export const changed = true;\\n');",
-      '  expect(true).toBe(true);',
+      "  expect(readFileSync('src/main.ts', 'utf8')).toBe('export const changed = true;\\n');",
       '});',
     ].join('\n'), {
       parentEnv: { ...process.env, WHATSOUP_TRIPWIRE_MAIN_SHA256: parentAnchor },

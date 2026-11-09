@@ -602,7 +602,10 @@ To cut a release:
 4. **Wait for CI** — confirm `tag-release-gate` passes in the GitHub Actions tab before publishing any release artifacts.
 5. **Publish** — run `npm run verify:publish` as a final local gate, then proceed with any deployment.
 
-Note: the `tag-release-gate` workflow does NOT run the full test suite (those run on every PR via `quality.yml`). It runs the guard-only subset: typechecks, boundary/hygiene/drift/publication guards, ESLint fitness ring, and console lint + build.
+Quality runs full validation for tags and scheduled runs; PR validation follows the
+change-aware policy in [Testing paths](../testing.md). After cutover,
+`tag-release-gate` verifies the authenticated private-scanner receipt for the exact
+completed Quality attempt. It does not repeat Quality's guards or test suites.
 
 ## Maintenance
 
