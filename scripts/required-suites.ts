@@ -3,6 +3,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { gitList, git, normalizeRepoPath } from './lib/guard-core.ts';
+import { isSafeChangedPath } from './lib/test-selection-policy.ts';
 
 /**
  * Triage aid — compute the REQUIRED local test suites for a change, encoding
@@ -26,11 +27,16 @@ import { gitList, git, normalizeRepoPath } from './lib/guard-core.ts';
  * symbol-referencing vitest subset is therefore NOT sufficient. This script is a
  * FAST triage aid for when the full chain is too slow: it prints the minimum set
  * of suites a change must run locally so the two proven gap classes above cannot
- * recur silently. It is informational (WARN-tier): it always exits 0 and mutates
- * nothing.
+ * recur silently. Successful triage is informational (WARN-tier); malformed input
+ * is inconclusive and exits non-zero rather than silently omitting a changed file.
  */
 
 const TESTS_DIR = 'tests';
+const TEST_SUITE_PATH = /\.test\.[cm]?tsx?$/;
+
+function isTestSuitePath(relPath: string): boolean {
+  return TEST_SUITE_PATH.test(normalizeRepoPath(relPath));
+}
 
 /**
  * A test file is a "fitness / guard" suite (the structural batch that CI runs in
@@ -41,13 +47,13 @@ const TESTS_DIR = 'tests';
  */
 export function isFitnessGuardSuite(relPath: string): boolean {
   const norm = normalizeRepoPath(relPath);
-  if (!norm.endsWith('.test.ts')) return false;
+  if (!isTestSuitePath(norm)) return false;
   if (norm.startsWith(`${TESTS_DIR}/scripts/`)) return true;
   const base = path.basename(norm);
   return /guard|fitness/.test(base);
 }
 
-/** Recursively enumerate every `*.test.ts` under `tests/` (repo-relative, sorted). */
+/** Recursively enumerate every TypeScript test suite under `tests/` (repo-relative, sorted). */
 export function enumerateTestSuites(cwd: string): string[] {
   const root = path.join(cwd, TESTS_DIR);
   const out: string[] = [];
@@ -62,7 +68,7 @@ export function enumerateTestSuites(cwd: string): string[] {
       const abs = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         walk(abs);
-      } else if (entry.isFile() && entry.name.endsWith('.test.ts')) {
+      } else if (entry.isFile() && isTestSuitePath(entry.name)) {
         out.push(normalizeRepoPath(path.relative(cwd, abs)));
       }
     }
@@ -108,10 +114,10 @@ export function functionalSuites(cwd: string, changedFiles: string[]): string[] 
 
   // A changed file that IS a test suite must run.
   for (const f of changedSources) {
-    if (f.endsWith('.test.ts')) result.add(f);
+    if (isTestSuitePath(f)) result.add(f);
   }
 
-  const nonTestSources = changedSources.filter((f) => !f.endsWith('.test.ts'));
+  const nonTestSources = changedSources.filter((f) => !isTestSuitePath(f));
   if (nonTestSources.length === 0) return [...result].sort();
 
   const tokenList = nonTestSources.flatMap(referenceTokens);
@@ -130,19 +136,35 @@ export function functionalSuites(cwd: string, changedFiles: string[]): string[] 
 }
 
 /**
- * Resolve the changed-file set: explicit non-flag args if given, else
+ * Resolve the changed-file set: explicit path args if given, else
  * `git diff --name-only <base>` (base defaults to `origin/main`).
  */
 export function resolveChangedFiles(
   cwd: string,
   argv: string[],
 ): { changed: string[]; source: string } {
-  const positional = argv.filter((a) => !a.startsWith('-'));
+  const positional: string[] = [];
+  let base = 'origin/main';
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === '--json') continue;
+    if (arg === '--base') {
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith('-')) {
+        throw new Error('Missing value for --base');
+      }
+      if (/[\0\r\n]/.test(value)) throw new Error('Unsafe value for --base');
+      base = value;
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith('-')) throw new Error(`Unknown option: ${arg}`);
+    if (!isSafeChangedPath(arg)) throw new Error('Unsafe path argument');
+    positional.push(arg);
+  }
   if (positional.length > 0) {
     return { changed: positional.map(normalizeRepoPath), source: 'args' };
   }
-  const baseIdx = argv.indexOf('--base');
-  const base = baseIdx >= 0 && argv[baseIdx + 1] ? argv[baseIdx + 1] : 'origin/main';
   // Use merge-base so the diff reflects only this branch's changes.
   let range = base;
   try {
@@ -209,7 +231,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     run();
   } catch (err) {
     console.error((err as Error).message);
-    // WARN-tier triage aid: never fail the caller's pipeline.
-    process.exitCode = 0;
+    // Unknown input is inconclusive, not a successful advisory result.
+    process.exitCode = 2;
   }
 }

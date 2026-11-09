@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping as MappingABC, Sequence as SequenceABC
 from dataclasses import dataclass
+import re
 from typing import Mapping, Sequence
 
 from private_scanner_candidate import (
@@ -17,7 +18,10 @@ from private_scanner_candidate import (
 EXPECTED_REPOSITORY = "LucasQuiles/WhatSoup"
 EXPECTED_WORKFLOW_NAME = "Quality"
 EXPECTED_WORKFLOW_ID = 272306769
+EXPECTED_WORKFLOW_PATH = ".github/workflows/quality.yml"
 CHECK_NAME = "test-integrity (private)"
+_FULL_SHA = re.compile(r"[0-9a-f]{40}")
+_VERSION_TAG = re.compile(r"v[0-9A-Za-z._-]{1,127}")
 
 
 @dataclass(frozen=True)
@@ -46,6 +50,34 @@ class VerifiedGitHubBinding:
             head_sha=self.head_sha,
             check_name=self.check_name,
         )
+
+
+@dataclass(frozen=True)
+class AuthenticatedNonPRQualityRun:
+    """Trusted source-run fields used to address only fixed GitHub API paths."""
+
+    repository: str
+    source_run_id: int
+    source_run_attempt: int
+    head_sha: str
+    source_ref: str
+
+
+@dataclass(frozen=True)
+class VerifiedNonPRGitHubBinding:
+    """Non-PR Quality binding; publication is the safe receipt, never a check run."""
+
+    repository: str
+    base_sha: str
+    head_sha: str
+    source_run_id: int
+    source_run_attempt: int
+    source_ref: str
+    trusted_main_sha: str
+    check_name: str
+
+
+VerifiedScannerBinding = VerifiedGitHubBinding | VerifiedNonPRGitHubBinding
 
 
 @dataclass(frozen=True)
@@ -79,6 +111,12 @@ def _required_string(value: object, label: str) -> str:
 
 def _required_positive_int(value: object, label: str) -> int:
     if type(value) is not int or value <= 0:
+        raise BoundaryError(f"{label} is malformed")
+    return value
+
+
+def _required_full_sha(value: object, label: str) -> str:
+    if not isinstance(value, str) or _FULL_SHA.fullmatch(value) is None:
         raise BoundaryError(f"{label} is malformed")
     return value
 
@@ -126,6 +164,96 @@ def _require_equal_recheck(selected: _PullRequestMetadata, rechecked: _PullReque
         raise BoundaryError("PR head repository changed before publication")
     if selected.head_sha != rechecked.head_sha:
         raise BoundaryError("PR head changed before publication")
+
+
+def authenticate_non_pr_quality_run(
+    workflow_run: Mapping[str, object],
+    *,
+    expected_run_id: int,
+) -> AuthenticatedNonPRQualityRun:
+    """Validate fixed Quality metadata before forming a ref request from it."""
+    run = _required_mapping(workflow_run, "workflow run")
+    if _required_positive_int(expected_run_id, "expected workflow run id") != _required_positive_int(
+        _required_value(run, "id", "workflow run id"), "workflow run id",
+    ):
+        raise BoundaryError("workflow run ID differs from the trusted trigger")
+    workflow_id = _required_positive_int(
+        _required_value(run, "workflow_id", "workflow run workflow id"), "workflow run workflow id",
+    )
+    if workflow_id != EXPECTED_WORKFLOW_ID:
+        raise BoundaryError("workflow run is not the trusted Quality workflow")
+    if _required_string(_required_value(run, "name", "workflow run name"), "workflow run name") != EXPECTED_WORKFLOW_NAME:
+        raise BoundaryError("workflow run is not the trusted Quality workflow")
+    if _required_string(_required_value(run, "path", "workflow run path"), "workflow run path") != EXPECTED_WORKFLOW_PATH:
+        raise BoundaryError("workflow run is not the trusted Quality workflow")
+    if _required_string(_required_value(run, "status", "workflow run status"), "workflow run status") != "completed":
+        raise BoundaryError("workflow run has an unsupported state")
+    repository = _repository_name(
+        _required_mapping(_required_value(run, "repository", "workflow run repository"), "workflow run repository"),
+        "workflow run repository",
+    )
+    head_repository = _repository_name(
+        _required_mapping(_required_value(run, "head_repository", "workflow run head repository"), "workflow run head repository"),
+        "workflow run head repository",
+    )
+    _require_expected_repository(repository, "workflow run repository")
+    _require_expected_repository(head_repository, "workflow run head repository")
+    source_event = _required_string(_required_value(run, "event", "workflow run event"), "workflow run event")
+    head_branch = _required_string(_required_value(run, "head_branch", "workflow run head branch"), "workflow run head branch")
+    if source_event == "schedule":
+        if head_branch != "main":
+            raise BoundaryError("scheduled Quality run is not on trusted main")
+        source_ref = "refs/heads/main"
+    elif source_event == "push":
+        if head_branch == "main":
+            source_ref = "refs/heads/main"
+        elif _VERSION_TAG.fullmatch(head_branch) is not None:
+            source_ref = f"refs/tags/{head_branch}"
+        else:
+            raise BoundaryError("push Quality run is not on trusted main or a version tag")
+    else:
+        raise BoundaryError("workflow run has an unsupported event")
+    return AuthenticatedNonPRQualityRun(
+        repository=repository,
+        source_run_id=_required_positive_int(_required_value(run, "id", "workflow run id"), "workflow run id"),
+        source_run_attempt=_required_positive_int(
+            _required_value(run, "run_attempt", "workflow run attempt"), "workflow run attempt",
+        ),
+        head_sha=_required_full_sha(_required_value(run, "head_sha", "workflow run head SHA"), "workflow run head SHA"),
+        source_ref=source_ref,
+    )
+
+
+def bind_authenticated_non_pr_quality_run(
+    workflow_run: Mapping[str, object],
+    *,
+    expected_run_id: int,
+    trusted_main_sha: str,
+    candidate_ref_sha: str,
+    baseline_sha: str,
+    candidate_is_ancestor: bool,
+) -> VerifiedNonPRGitHubBinding:
+    """Bind a completed main/tag Quality run to immutable Git identities."""
+    source = authenticate_non_pr_quality_run(workflow_run, expected_run_id=expected_run_id)
+    trusted_main = _required_full_sha(trusted_main_sha, "trusted main SHA")
+    candidate_ref = _required_full_sha(candidate_ref_sha, "candidate ref SHA")
+    baseline = _required_full_sha(baseline_sha, "candidate first parent")
+    if candidate_ref != source.head_sha:
+        raise BoundaryError("candidate ref differs from the Quality run head")
+    if baseline == source.head_sha:
+        raise BoundaryError("candidate baseline is not an immutable first parent")
+    if candidate_is_ancestor is not True:
+        raise BoundaryError("candidate is not an ancestor of captured trusted main")
+    return VerifiedNonPRGitHubBinding(
+        repository=source.repository,
+        base_sha=baseline,
+        head_sha=source.head_sha,
+        source_run_id=source.source_run_id,
+        source_run_attempt=source.source_run_attempt,
+        source_ref=source.source_ref,
+        trusted_main_sha=trusted_main,
+        check_name=CHECK_NAME,
+    )
 
 
 def bind_authenticated_quality_run(

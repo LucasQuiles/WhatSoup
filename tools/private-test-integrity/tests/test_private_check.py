@@ -16,7 +16,7 @@ from unittest import mock
 
 
 from github_binding import CHECK_NAME, EXPECTED_REPOSITORY, EXPECTED_WORKFLOW_ID  # noqa: E402
-from private_check import CHECK_APP_ID, PrivateCheckResult, evaluate_run  # noqa: E402
+from private_check import CHECK_APP_ID, PrivateCheckResult, evaluate_non_pr_run, evaluate_run  # noqa: E402
 from bounded_github import GitHubClient  # noqa: E402
 import private_check  # noqa: E402
 from private_bundle import GitLsTreeBlob, export_verified_bundle  # noqa: E402
@@ -29,6 +29,12 @@ HEAD_SHA = "b" * 40
 RUN_ID = 41752012595
 PR_NUMBER = 3874
 CHECK_ID = 998877
+RUN_ATTEMPT = 3
+NON_PR_BASE_SHA = "c" * 40
+TRUSTED_MAIN_SHA = "d" * 40
+TAG_OBJECT_SHA = "e" * 40
+SCANNER_RUN_ID = 51827462910
+SCANNER_RUN_ATTEMPT = 2
 SCANNER_ENTRYPOINT = "scripts/test-integrity"
 SCANNER_SELECTOR = "scripts/test_integrity_core.py"
 _SELECTOR_BYTES = b'''\
@@ -56,6 +62,27 @@ def workflow_run(*, head_sha: object = HEAD_SHA, event: str = "pull_request") ->
         "event": event,
         "status": "completed",
         "head_sha": head_sha,
+        "repository": {"full_name": EXPECTED_REPOSITORY},
+        "head_repository": {"full_name": EXPECTED_REPOSITORY},
+    }
+
+
+def non_pr_workflow_run(
+    *,
+    run_attempt: object = RUN_ATTEMPT,
+    event: str = "push",
+    head_branch: str = "v1.2.3",
+) -> dict[str, object]:
+    return {
+        "id": RUN_ID,
+        "run_attempt": run_attempt,
+        "workflow_id": EXPECTED_WORKFLOW_ID,
+        "name": "Quality",
+        "path": ".github/workflows/quality.yml",
+        "event": event,
+        "status": "completed",
+        "head_sha": HEAD_SHA,
+        "head_branch": head_branch,
         "repository": {"full_name": EXPECTED_REPOSITORY},
         "head_repository": {"full_name": EXPECTED_REPOSITORY},
     }
@@ -243,6 +270,56 @@ def client_for(
     )
 
 
+def _git_ref(ref: str, object_type: str, sha: str) -> dict[str, object]:
+    return {"ref": ref, "object": {"type": object_type, "sha": sha}}
+
+
+def _tag_object(sha: str = HEAD_SHA) -> dict[str, object]:
+    return {"sha": TAG_OBJECT_SHA, "object": {"type": "commit", "sha": sha}}
+
+
+def _commit_with_parent(parent: str = NON_PR_BASE_SHA) -> dict[str, object]:
+    return {"sha": HEAD_SHA, "parents": [{"sha": parent}]}
+
+
+def _compare(merge_base: str = HEAD_SHA) -> dict[str, object]:
+    return {"merge_base_commit": {"sha": merge_base}}
+
+
+def non_pr_client(
+    *,
+    run: object | None = None,
+    rechecked_run: object | None = None,
+    tag_tip: str = HEAD_SHA,
+    rechecked_tag_tip: str = HEAD_SHA,
+    trusted_main: str = TRUSTED_MAIN_SHA,
+    rechecked_main: str = TRUSTED_MAIN_SHA,
+    merge_base: str = HEAD_SHA,
+    rechecked_merge_base: str = HEAD_SHA,
+    parent: str = NON_PR_BASE_SHA,
+) -> FakeClient:
+    client = FakeClient(
+        {
+            run_path(): [non_pr_workflow_run() if run is None else run,
+                         non_pr_workflow_run() if rechecked_run is None else rechecked_run],
+            "git/ref/heads/main": [
+                _git_ref("refs/heads/main", "commit", trusted_main),
+                _git_ref("refs/heads/main", "commit", rechecked_main),
+            ],
+            "git/ref/tags/v1.2.3": [
+                _git_ref("refs/tags/v1.2.3", "tag", TAG_OBJECT_SHA),
+                _git_ref("refs/tags/v1.2.3", "tag", TAG_OBJECT_SHA),
+            ],
+            f"git/tags/{TAG_OBJECT_SHA}": [_tag_object(tag_tip), _tag_object(rechecked_tag_tip)],
+            f"git/commits/{HEAD_SHA}": [_commit_with_parent(parent), _commit_with_parent(parent)],
+            f"compare/{HEAD_SHA}...{trusted_main}": [_compare(merge_base), _compare(rechecked_merge_base)],
+        }
+    )
+    if rechecked_main != trusted_main:
+        client.responses[f"compare/{HEAD_SHA}...{rechecked_main}"] = [_compare(rechecked_merge_base)]
+    return client
+
+
 class PrivateCheckTests(unittest.TestCase):
     def test_malformed_scanner_results_require_operator_action(self) -> None:
         for malformed in ([], {}, None, True, 0, "unexpected"):
@@ -420,6 +497,149 @@ class PrivateCheckTests(unittest.TestCase):
                 result = evaluate_run(client, RUN_ID, "refs/heads/main", lambda _binding: "pass")
                 self.assertEqual(result, PrivateCheckResult("inconclusive"))
                 self.assertEqual(len(client.created), 1)
+
+
+class NonPRPrivateCheckTests(unittest.TestCase):
+    def test_tag_remains_valid_when_main_advances_and_ancestry_is_reverified(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="non-pr-private-check-") as temporary:
+            receipt = Path(temporary) / "receipt.json"
+            advanced_main = "f" * 40
+            client = non_pr_client(rechecked_main=advanced_main)
+            result = evaluate_non_pr_run(
+                client, RUN_ID, lambda _binding: "pass", receipt_path=receipt,
+                scanner_run_id=SCANNER_RUN_ID, scanner_run_attempt=SCANNER_RUN_ATTEMPT,
+            )
+            self.assertEqual(result, PrivateCheckResult("pass"))
+            self.assertEqual(json.loads(receipt.read_text(encoding="utf-8"))["head_sha"], HEAD_SHA)
+            self.assertIn(f"compare/{HEAD_SHA}...{advanced_main}", client.reads)
+            self.assertEqual(client.created, [])
+
+    def test_tag_scan_uses_immutable_first_parent_and_writes_only_safe_receipt_after_recheck(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="non-pr-private-check-") as temporary:
+            receipt = Path(temporary) / "receipt.json"
+            client = non_pr_client()
+            observed = []
+
+            result = evaluate_non_pr_run(
+                client,
+                RUN_ID,
+                lambda binding: observed.append(binding) or "pass",
+                receipt_path=receipt,
+                scanner_run_id=SCANNER_RUN_ID,
+                scanner_run_attempt=SCANNER_RUN_ATTEMPT,
+            )
+
+            self.assertEqual(result, PrivateCheckResult("pass"))
+            self.assertEqual(len(observed), 1)
+            self.assertEqual(observed[0].base_sha, NON_PR_BASE_SHA)
+            self.assertEqual(observed[0].head_sha, HEAD_SHA)
+            self.assertEqual(observed[0].trusted_main_sha, TRUSTED_MAIN_SHA)
+            self.assertEqual(observed[0].source_run_attempt, RUN_ATTEMPT)
+            self.assertEqual(
+                json.loads(receipt.read_text(encoding="utf-8")),
+                {
+                    "schema_version": 1,
+                    "source_run_id": RUN_ID,
+                    "source_run_attempt": RUN_ATTEMPT,
+                    "head_sha": HEAD_SHA,
+                    "conclusion": "pass",
+                    "scanner_run_id": SCANNER_RUN_ID,
+                    "scanner_run_attempt": SCANNER_RUN_ATTEMPT,
+                },
+            )
+            self.assertEqual(client.created, [])
+
+    def test_main_push_and_schedule_produce_the_same_safe_receipt(self) -> None:
+        for event in ("push", "schedule"):
+            with self.subTest(event=event), tempfile.TemporaryDirectory(prefix="non-pr-private-check-") as temporary:
+                run = non_pr_workflow_run(event=event, head_branch="main")
+                receipt = Path(temporary) / "receipt.json"
+                result = evaluate_non_pr_run(
+                    non_pr_client(
+                        run=run,
+                        rechecked_run=run,
+                        trusted_main=HEAD_SHA,
+                        rechecked_main=HEAD_SHA,
+                    ),
+                    RUN_ID,
+                    lambda _binding: "pass",
+                    receipt_path=receipt,
+                    scanner_run_id=SCANNER_RUN_ID,
+                    scanner_run_attempt=SCANNER_RUN_ATTEMPT,
+                )
+                self.assertEqual(result, PrivateCheckResult("pass"))
+                self.assertEqual(json.loads(receipt.read_text(encoding="utf-8"))["conclusion"], "pass")
+
+    def test_non_pr_metadata_tag_and_main_ancestry_fail_before_scan_or_receipt(self) -> None:
+        wrong_event = non_pr_workflow_run(event="workflow_dispatch")
+        wrong_repository = non_pr_workflow_run()
+        wrong_repository["repository"] = {"full_name": "LucasQuiles/other"}
+        wrong_workflow = non_pr_workflow_run()
+        wrong_workflow["workflow_id"] = EXPECTED_WORKFLOW_ID + 1
+        cases = {
+            "wrong-event": non_pr_client(run=wrong_event),
+            "wrong-repository": non_pr_client(run=wrong_repository),
+            "wrong-workflow": non_pr_client(run=wrong_workflow),
+            "tag-tip-mismatch": non_pr_client(tag_tip="f" * 40),
+            "not-an-ancestor-of-main": non_pr_client(merge_base=NON_PR_BASE_SHA),
+        }
+        for label, client in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory(prefix="non-pr-private-check-") as temporary:
+                receipt = Path(temporary) / "receipt.json"
+                scans = []
+                result = evaluate_non_pr_run(
+                    client,
+                    RUN_ID,
+                    lambda binding: scans.append(binding) or "pass",
+                    receipt_path=receipt,
+                    scanner_run_id=SCANNER_RUN_ID,
+                    scanner_run_attempt=SCANNER_RUN_ATTEMPT,
+                )
+                self.assertEqual(result, PrivateCheckResult("inconclusive"))
+                self.assertEqual(scans, [])
+                self.assertFalse(receipt.exists())
+                self.assertEqual(client.created, [])
+
+    def test_stale_source_attempt_or_ref_after_scan_prevents_receipt(self) -> None:
+        stale_attempt = non_pr_workflow_run(run_attempt=RUN_ATTEMPT + 1)
+        cases = {
+            "run-attempt": non_pr_client(rechecked_run=stale_attempt),
+            "tag-ref": non_pr_client(rechecked_tag_tip="f" * 40),
+            "lost-main-ancestry": non_pr_client(rechecked_main="f" * 40, rechecked_merge_base=NON_PR_BASE_SHA),
+        }
+        for label, client in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory(prefix="non-pr-private-check-") as temporary:
+                receipt = Path(temporary) / "receipt.json"
+                scans = []
+                result = evaluate_non_pr_run(
+                    client,
+                    RUN_ID,
+                    lambda binding: scans.append(binding) or "pass",
+                    receipt_path=receipt,
+                    scanner_run_id=SCANNER_RUN_ID,
+                    scanner_run_attempt=SCANNER_RUN_ATTEMPT,
+                )
+                self.assertEqual(result, PrivateCheckResult("inconclusive"))
+                self.assertEqual(len(scans), 1)
+                self.assertFalse(receipt.exists())
+
+    def test_cleanup_exception_prevents_receipt_publication(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="non-pr-private-check-") as temporary:
+            receipt = Path(temporary) / "receipt.json"
+
+            def scan_with_cleanup_failure(_binding):
+                try:
+                    return "pass"
+                finally:
+                    raise OSError("private cleanup detail")
+
+            result = evaluate_non_pr_run(
+                non_pr_client(), RUN_ID, scan_with_cleanup_failure, receipt_path=receipt,
+                scanner_run_id=SCANNER_RUN_ID,
+                scanner_run_attempt=SCANNER_RUN_ATTEMPT,
+            )
+            self.assertEqual(result, PrivateCheckResult("inconclusive"))
+            self.assertFalse(receipt.exists())
 
 
 class PrivateCheckCompositionTests(unittest.TestCase):

@@ -1,5 +1,7 @@
 /**
- * arch.file-size warning budget ratchet.
+ * Full-repository fitness scan contracts and arch.file-size warning budget.
+ * The shared scan checks exit semantics, synchronous-command timeout findings,
+ * and the file-size warning identity set.
  *
  * The ESLint fitness ring is warn-only (exits 0) per meta.no-redundant-gates —
  * arch.file-size is already blocked by the guard/ci ring against
@@ -16,7 +18,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { describe, it, expect } from 'vitest';
+import { beforeAll, describe, it, expect } from 'vitest';
 import { runEslintFitness } from '../../scripts/eslint-fitness-check.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -229,21 +231,70 @@ function formatOverBudgetFailure(overBudget: OverBudgetEntry[]): string {
   ].join('\n\n');
 }
 
-describe('arch.file-size warning budget', () => {
-  it('arch.file-size ESLint warning files must match the grandfathered identity set', async () => {
-    const result = await runEslintFitness(process.cwd());
+describe('eslint fitness wrapper — full repository scan', () => {
+  let result: Awaited<ReturnType<typeof runEslintFitness>>;
+
+  beforeAll(async () => {
+    // These assertions share one fresh scan; isolated test files would repeat it.
+    result = await runEslintFitness(repoRoot);
+    // Preserve the warning-budget limit from #1782 (run 29316490688).
+    // At base 1dcf6b4e, coverage job 127508252860 completed this suite in 167s
+    // and the former wrapper suite in 172s. The wrapper had a 420s limit from
+    // #3244; the shared scan retains 300s and still needs candidate CI proof.
+  }, 300_000);
+
+  it('treats warning-only results as non-blocking and reports errors as blocking', () => {
+
+    // The repo currently has known fitness warnings (AgentRuntime god-class,
+    // oversized files, uncategorized skips, fail-open catches) and NO configured
+    // errors. The wrapper must see warnings but zero errors / no fatal parse.
+    expect(result.warningCount).toBeGreaterThan(0);
+    expect(result.errorCount).toBe(0);
+    expect(result.fatal).toBe(false);
+
+    // The flagship dark-ring rule must be live: AgentRuntime is reported.
+    const godClass = result.issues.find(
+      (i) => i.code === 'fitness/god-class' && i.filePath?.endsWith('runtime.ts'),
+    );
+    expect(godClass).toBeDefined();
+
+    // Non-vacuity: the real ring lints hundreds of files, so a pass is not a pass-over-nothing.
+    expect(result.filesLinted).toBeGreaterThan(100);
+  });
+
+  it('no sync exec call in the linted tree lacks a timeout (spread-carried sites pinned)', () => {
+    // The fitness ring is warn-only, so this assertion enforces zero new bare
+    // execSync / execFileSync / spawnSync calls. Fix new offenders by adding
+    // timeout options; do not grow the grandfather set.
+    // These four rule false positives spread keyringExecOptions, which carries
+    // KEYRING_COMMAND_TIMEOUT_MS. Re-verify that timeout before moving a pin.
+    const spreadCarriedTimeoutSites = [
+      'src/lib/keyring.ts:514',
+      'src/lib/keyring.ts:542',
+      'src/lib/keyring.ts:802',
+      'src/lib/keyring.ts:843',
+    ];
+    expect(result.filesLinted).toBeGreaterThan(0);
+    const offenders = result.issues
+      .filter((issue) => issue.code === 'fitness/sync-exec-timeout')
+      .map((issue) => `${issue.filePath}:${issue.line}`)
+      .sort();
+
+    expect(offenders, `Sync exec timeout findings:\n${offenders.join('\n')}`)
+      .toEqual(spreadCarriedTimeoutSites);
+  });
+
+  it('arch.file-size ESLint warning files must match the grandfathered identity set', () => {
     const fileSizeWarningFiles = result.issues
       .filter((issue) => issue.code === 'max-lines')
       .map((issue) => issue.filePath)
       .sort();
 
     expect(fileSizeWarningFiles).toEqual(EXPECTED_FILE_SIZE_WARNING_FILES);
-    // Full-repo ESLint run regularly exceeds the default 10s under coverage
-    // instrumentation or CI load. The prior 120s override was itself hit on
-    // quality(24.x) for PR #1782 (GitHub Actions run 29316490688); 300s gives
-    // durable headroom without masking a genuine hang.
-  }, 300_000);
+  });
+});
 
+describe('arch.file-size warning budget', () => {
   it('the over-ceiling failure message documents the extraction remediation, not a bump', () => {
     // This pins requirement wording so the remediation text stays intact even
     // if the growth-ceiling assertion below never fails in CI. The message must

@@ -118,7 +118,12 @@ class RunWorkflowContractTests(unittest.TestCase):
     def sanitized_environment(self, module, fixture: dict[str, object], token="fixture-token"):
         with mock.patch.dict(
             module.os.environ,
-            {"GITHUB_TOKEN": token, "TMPDIR": str(fixture["root"])},
+            {
+                "GITHUB_TOKEN": token,
+                "TMPDIR": str(fixture["root"]),
+                "GITHUB_RUN_ID": "51827462910",
+                "GITHUB_RUN_ATTEMPT": "2",
+            },
             clear=True,
         ):
             yield
@@ -207,6 +212,40 @@ class RunWorkflowContractTests(unittest.TestCase):
                 self.assertFalse(observed["destination"].exists())
                 self.assertIsNotNone(observed["evaluate"])
                 github_client.assert_called_once_with("fixture-token")
+
+    def test_receipt_mode_routes_non_pr_runs_without_changing_stdout_contract(self) -> None:
+        module, main = self.workflow_module()
+        with self.cli_fixture() as fixture:
+            receipt = fixture["root"] / "receipt.json"
+            observed = []
+
+            def evaluate(
+                client, run_id, scanner_bundle, *, trusted_path, timeout_seconds, runtime_check,
+                receipt_path, scanner_run_id, scanner_run_attempt,
+            ):
+                self.assertEqual(run_id, RUN_ID)
+                self.assertEqual(receipt_path, receipt)
+                self.assertEqual(trusted_path, fixture["trusted_path"])
+                self.assertEqual(timeout_seconds, 300)
+                self.assertEqual((scanner_run_id, scanner_run_attempt), (51827462910, 2))
+                observed.append((client, scanner_bundle, runtime_check))
+                return SimpleNamespace(conclusion="pass")
+
+            with (
+                self.supported_driver(module),
+                self.sanitized_environment(module, fixture),
+                mock.patch.object(module, "evaluate_private_non_pr_run", side_effect=evaluate) as non_pr,
+                mock.patch.object(module, "evaluate_private_run", side_effect=AssertionError("PR path selected")),
+            ):
+                code, records, raw_output = self.invoke(
+                    main, self.argv(fixture) + ["--receipt", str(receipt)],
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(records, [{"check_name": CHECK_NAME, "conclusion": "pass"}])
+            self.assertEqual(raw_output.count("\n"), 1)
+            self.assertEqual(len(observed), 1)
+            non_pr.assert_called_once()
 
     def test_rejects_malformed_or_selectable_cli_arguments_before_any_action(self) -> None:
         module, main = self.workflow_module()

@@ -102,6 +102,8 @@
     "guard:grant-resolver": "bash scripts/run-with-pinned-node.sh scripts/grant-resolver-inventory-guard.ts",
     "guard:resolved-override": "bash scripts/run-with-pinned-node.sh scripts/resolved-override-inventory-guard.ts",
     "triage:required-suites": "bash scripts/run-with-pinned-node.sh scripts/required-suites.ts",
+    "test:plan": "node scripts/test-plan.ts",
+    "test:affected": "node scripts/test-affected.ts",
     "guard:claude-settings": "bash scripts/run-with-pinned-node.sh scripts/claude-settings-guard.ts --check",
     "guard:agent-decision-polls": "bash scripts/run-with-pinned-node.sh scripts/agent-decision-polls-guard.ts",
     "guard:semantic-quality": "bash scripts/run-with-pinned-node.sh scripts/semantic-quality-check.ts",

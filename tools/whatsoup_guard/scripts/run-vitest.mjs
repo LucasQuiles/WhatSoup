@@ -21,7 +21,8 @@ function baseTmpDir() {
   return tmpdir();
 }
 
-const testTmpDir = mkdtempSync(join(baseTmpDir(), 'whatsoup-guard-test-'));
+// Leave room for tsx's IPC socket beneath an enclosing test runner's TMPDIR.
+const testTmpDir = mkdtempSync(join(baseTmpDir(), 'wg-'));
 const binDir = join(process.cwd(), 'node_modules', '.bin');
 const vitestBin = join(binDir, process.platform === 'win32' ? 'vitest.cmd' : 'vitest');
 const args = ['run', '--pool=forks', '--fileParallelism=false', ...process.argv.slice(2)];

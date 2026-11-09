@@ -5,18 +5,33 @@
  * a worker for ~72 minutes. Uses real child processes and real time: a fake timer
  * cannot advance an external process's wall clock.
  */
-import { spawn } from 'node:child_process';
-import { existsSync, realpathSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { buildVitestArgs, classifyGroupMembership, resolveBatteryTimeoutMs, runBoundedBattery } from '../../scripts/full-suite-battery.ts';
+import {
+  buildVitestArgs,
+  classifyGroupMembership,
+  prepareBatteryChildEnv,
+  resolveBatteryTimeoutMs,
+  runBoundedBattery,
+  runBatteryWithRepositoryInputCheck,
+} from '../../scripts/full-suite-battery.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const NODE = process.execPath;
 const tmp = trackTmpDirs('battery-', { base: realpathSync(tmpdir()) });
+
+function makeGitRepository(cwd: string): void {
+  mkdirSync(join(cwd, 'src', 'lib'), { recursive: true });
+  writeFileSync(join(cwd, 'src', 'main.ts'), 'export const main = true;\n');
+  writeFileSync(join(cwd, 'src', 'lib', 'helper.ts'), 'export const helper = true;\n');
+  execFileSync('git', ['init', '--quiet'], { cwd, stdio: 'pipe' });
+  execFileSync('git', ['add', '.'], { cwd, stdio: 'pipe' });
+}
 
 /**
  * Structured timing exemption (test-integrity `js-sleep-in-test`): this test observes
@@ -45,6 +60,62 @@ describe('runBoundedBattery (externally bounded full-suite runner)', () => {
     const r = await runBoundedBattery({ command: NODE, args: ['-e', 'process.exit(7)'], timeoutMs: 10_000, stdio: 'ignore' });
     expect(r).toMatchObject({ outcome: 'failed', timedOut: false, exitCode: 7, wrappedExit: 7 });
   }, 30_000);
+
+  it('routes child stdout and stderr to the wrapper stderr in diagnostic mode without contaminating JSON stdout', () => {
+    const dir = tmp.make('diagnostic-stdio');
+    const runner = join(dir, 'runner.ts');
+    const batteryHref = new URL('../../scripts/full-suite-battery.ts', import.meta.url).href;
+    const diagnosticProgram = 'process.stdout.write("child stdout\\n"); process.stderr.write("child stderr\\n");';
+    writeFileSync(runner, [
+      `import { runBoundedBattery } from ${JSON.stringify(batteryHref)};`,
+      `const result = await runBoundedBattery({ command: process.execPath, args: ['-e', ${JSON.stringify(diagnosticProgram)}], timeoutMs: 10_000, stdio: 'diagnostic' });`,
+      'process.stdout.write(JSON.stringify(result));',
+    ].join('\n'));
+
+    const child = spawnSync(NODE, ['--disable-warning=ExperimentalWarning', '--experimental-strip-types', runner], {
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
+
+    expect(child.error).toBeUndefined();
+    expect(child.status, child.stderr).toBe(0);
+    expect(child.stdout).toContain('"outcome":"passed"');
+    expect(child.stdout).not.toContain('child stdout');
+    expect(child.stdout).not.toContain('child stderr');
+    expect(child.stderr).toContain('child stdout');
+    expect(child.stderr).toContain('child stderr');
+  });
+
+  it('establishes the source-mutation anchor before launching workers and preserves it in the child environment', () => {
+    const dir = tmp.make('source-anchor');
+    mkdirSync(join(dir, 'src'));
+    writeFileSync(join(dir, 'src', 'main.ts'), 'export const original = true;\n');
+
+    const env = prepareBatteryChildEnv(dir, { KEEP: 'yes' });
+
+    expect(env.KEEP).toBe('yes');
+    expect(env.WHATSOUP_TRIPWIRE_MAIN_SHA256).toMatch(/^[a-f0-9]{64}$/);
+    expect(() => prepareBatteryChildEnv(dir, {
+      WHATSOUP_TRIPWIRE_MAIN_SHA256: 'f'.repeat(64),
+    })).toThrow(/does not match/);
+  });
+
+  it('fails after a child persistently mutates a non-main repository input', async () => {
+    const cwd = tmp.make('repository-input-drift');
+    makeGitRepository(cwd);
+    const reports: string[] = [];
+
+    await expect(runBatteryWithRepositoryInputCheck({
+      command: NODE,
+      args: ['-e', 'require("node:fs").writeFileSync("src/lib/helper.ts", "export const helper = false;\\n")'],
+      cwd,
+      timeoutMs: 10_000,
+      stdio: 'ignore',
+    }, (message) => reports.push(message))).rejects.toThrow(
+      'FINAL-SOURCE drift: stage=full-suite-battery changed=src/lib/helper.ts',
+    );
+    expect(reports).toHaveLength(1);
+  });
 
   it('FALSIFIER: a child that outruns the bound is INCONCLUSIVE (timedOut), wrappedExit 124 — not a pass, not a code failure', async () => {
     const dir = tmp.make('bound');
@@ -97,6 +168,47 @@ describe('runBoundedBattery (externally bounded full-suite runner)', () => {
     expect(r).toMatchObject({ outcome: 'passed', timedOut: false, wrappedExit: 0 }); // the child exited 0 — a naive runner stops here
     await TIMING(1_200); // let real time pass the grandchild's 900ms timer
     expect(existsSync(marker)).toBe(false); // reaped on close — the descendant did NOT survive the clean exit
+  }, 30_000);
+
+  it.each(['not-a-pid', '9007199254740991'])('fails closed before spawn for malformed or stale nested owner marker %j', async (ownerPid) => {
+    const dir = tmp.make('stale-nested-owner');
+    const marker = join(dir, 'command-ran');
+
+    const r = await runBoundedBattery({
+      command: NODE,
+      args: ['-e', `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran")`],
+      timeoutMs: 10_000,
+      stdio: 'ignore',
+      env: { ...process.env, WHATSOUP_BOUNDED_BATTERY_OWNER_PID: ownerPid },
+      inheritOuterGroup: true,
+    });
+    expect(r).toMatchObject({ outcome: 'inconclusive', wrappedExit: 125 });
+    expect(r.reapError).toMatch(/ownership could not be verified/);
+    expect(existsSync(marker)).toBe(false);
+  }, 30_000);
+
+  it('fails closed before spawn when nested ownership cannot read process topology', async () => {
+    const dir = tmp.make('nested-owner-no-ps');
+    const marker = join(dir, 'command-ran');
+    const previousPath = process.env.PATH;
+    let r: Awaited<ReturnType<typeof runBoundedBattery>>;
+    try {
+      process.env.PATH = join(dir, 'no-ps-here');
+      r = await runBoundedBattery({
+        command: NODE,
+        args: ['-e', `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran")`],
+        timeoutMs: 10_000,
+        stdio: 'ignore',
+        env: { ...process.env, WHATSOUP_BOUNDED_BATTERY_OWNER_PID: String(process.pid) },
+        inheritOuterGroup: true,
+      });
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+    expect(r).toMatchObject({ outcome: 'inconclusive', wrappedExit: 125 });
+    expect(r.reapError).toContain('cannot read process topology');
+    expect(existsSync(marker)).toBe(false);
   }, 30_000);
 
   it('FALSIFIER (finding 4): when the child never closes (an escaped descendant holds the stdio pipe), the bound resolves NON-ZERO via the terminal grace — never a false 0', async () => {
@@ -246,6 +358,64 @@ describe('runBoundedBattery (externally bounded full-suite runner)', () => {
       expect(existsSync(marker)).toBe(false); // SIGHUP forwarded a group kill → grandchild reaped, never orphaned
     } finally {
       wrapper.kill('SIGKILL'); // ensure no leak regardless of outcome
+    }
+  }, 30_000);
+
+  it('FALSIFIER: cancelling an outer battery reaps a nested battery child before it can do later work', async () => {
+    const dir = tmp.make('nested-cancellation');
+    const marker = join(dir, 'late-work-marker');
+    const worker = join(dir, 'worker.cjs');
+    const nestedRunner = join(dir, 'nested-runner.ts');
+    const outerRunner = join(dir, 'outer-runner.ts');
+    const batteryHref = new URL('../../scripts/full-suite-battery.ts', import.meta.url).href;
+
+    // The worker is the observed leaked work: before the nested ownership fix, it gets its own
+    // detached group, survives the outer cancellation, and writes this marker after 900ms.
+    writeFileSync(worker, 'const fs=require("node:fs");setTimeout(function(){fs.writeFileSync(process.argv[2],"late")},900);');
+    // `runBoundedBattery` spawns synchronously before returning its promise, so READY proves the
+    // nested child exists before the test cancels the OUTER wrapper (no race-based delay).
+    writeFileSync(nestedRunner, [
+      `import { runBoundedBattery } from ${JSON.stringify(batteryHref)};`,
+      'const [worker, marker] = process.argv.slice(2);',
+      'void runBoundedBattery({ command: process.execPath, args: [worker, marker], timeoutMs: 60_000, stdio: "ignore", inheritOuterGroup: process.env.WHATSOUP_BOUNDED_BATTERY_OWNER_PID !== undefined }).then((result) => process.exit(result.wrappedExit));',
+      'process.stdout.write("READY\\n");',
+    ].join('\n'));
+    writeFileSync(outerRunner, [
+      `import { runBoundedBattery } from ${JSON.stringify(batteryHref)};`,
+      'const [nestedRunner, worker, marker] = process.argv.slice(2);',
+      'void runBoundedBattery({ command: process.execPath, args: ["--disable-warning=ExperimentalWarning", "--experimental-strip-types", nestedRunner, worker, marker], timeoutMs: 60_000, stdio: "inherit" }).then((result) => process.exit(result.wrappedExit));',
+    ].join('\n'));
+
+    const wrapper = spawn(NODE, [
+      '--disable-warning=ExperimentalWarning', '--experimental-strip-types', outerRunner, nestedRunner, worker, marker,
+    ], { stdio: ['ignore', 'pipe', 'ignore'] });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let ready = false;
+        const fail = (error: Error): void => { if (!ready) reject(error); };
+        wrapper.stdout.on('data', (chunk: Buffer) => {
+          if (String(chunk).includes('READY')) {
+            ready = true;
+            resolve();
+          }
+        });
+        wrapper.once('error', reject);
+        wrapper.once('close', (code, signal) => fail(new Error(`outer battery exited before READY: code=${code} signal=${signal}`)));
+      });
+
+      const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+        wrapper.once('close', (code, signal) => resolve({ code, signal }));
+        wrapper.once('error', reject);
+      });
+      expect(wrapper.kill('SIGTERM')).toBe(true);
+      const result = await closed;
+      expect(result.code ?? 1).not.toBe(0);
+      // Structured timing exemption: this is the only observable proof that the real delayed
+      // worker did not survive cancellation; fake timers cannot advance its external clock.
+      await TIMING(1_200);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      wrapper.kill('SIGKILL'); // ensure no leak if the readiness/cancellation assertion fails
     }
   }, 30_000);
 });

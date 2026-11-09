@@ -7,12 +7,14 @@
  * `scriptReachability` cannot quietly turn both suites into unconditional passes.
  */
 import { describe, expect, it } from 'vitest';
+import { fileURLToPath } from 'node:url';
 
 import {
   CI_EXEMPT_PUSH_GATE_GUARDS,
   backstopReachability,
   namedInCi,
   pushGateGuards,
+  readGateInputs,
   runsFullSuite,
   scriptReachability,
   type GateInputs,
@@ -24,12 +26,16 @@ const inputs = (overrides: Partial<GateInputs> = {}): GateInputs => ({
     'guard:alpha': 'echo alpha',
     'guard:ssot-patterns': 'echo ssot',
   },
-  // Models quality.yml: a named guard step AND the full suite.
+  // Models Quality's direct non-PR full profile. Tags now start Quality directly;
+  // the trusted receipt consumer only releases after that exact completed run.
   qualityWorkflow:
-    '      - name: Alpha\n        run: npm run guard:alpha\n' +
-    '      - name: Tests\n        run: npm run coverage:check\n',
-  // Models tag-release-gate.yml: discrete guard steps, NO unit suite.
-  tagReleaseWorkflow: '      - name: Alpha\n        run: npm run guard:alpha\n',
+    "on:\n  push:\n    branches: [main]\n    tags: ['v*']\n" +
+    'jobs:\n  selection:\n    steps:\n      - run: |\n          if [ "$GITHUB_EVENT_NAME" = \'pull_request\' ]; then\n            echo pr\n          else\n            node scripts/test-plan.ts --full --json\n          fi\n' +
+    '  full:\n    needs: selection\n    if: needs.selection.outputs.profile == \'full\'\n    steps:\n      - name: Alpha\n        run: npm run guard:alpha\n      - name: Tests\n        run: npm run coverage:check\n',
+  // Models the trusted completion consumer; it cannot execute a tag candidate.
+  tagReleaseWorkflow:
+    'on:\n  workflow_run:\n    workflows: [Quality]\n    types: [completed]\n' +
+    "jobs:\n  release-gate:\n    if: >-\n      github.event.workflow_run.event == 'push' &&\n      startsWith(github.event.workflow_run.head_branch, 'v')\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262\n        with:\n          ref: ${{ github.sha }}\n      - run: node scripts/private-integrity-release.ts select\n      - run: node scripts/private-integrity-release.ts verify --receipt \"$RUNNER_TEMP/private-integrity/receipt.json\"\n",
   ...overrides,
 });
 
@@ -67,6 +73,17 @@ describe('namedInCi', () => {
 });
 
 describe('scriptReachability', () => {
+  it('credits the trusted scanner only while its separate workflow remains connected', () => {
+    const gate = readGateInputs(fileURLToPath(new URL('../..', import.meta.url)));
+    for (const path of ['pull-request', 'tag-release'] as const) {
+      expect(scriptReachability('guard:test-integrity', gate, path).reachable).toBe(true);
+      expect(scriptReachability('guard:test-integrity', { ...gate, privateIntegrityWorkflow: '' }, path).reachable).toBe(false);
+      expect(scriptReachability('guard:test-integrity', {
+        ...gate, privateIntegrityWorkflow: gate.privateIntegrityWorkflow!.replace('types: [completed]', 'types: [requested]'),
+      }, path).reachable).toBe(false);
+    }
+  });
+
   it('reports ci-step for a guard named in the workflow', () => {
     const r = scriptReachability('guard:alpha', inputs());
     expect(r).toMatchObject({ reachable: true, via: 'ci-step' });
@@ -108,26 +125,19 @@ describe('scriptReachability', () => {
   });
 });
 
-describe('per-path reachability — the two gates are NOT equivalent', () => {
-  it('runsFullSuite is derived from the workflow text, not hardcoded per path', () => {
+describe('per-path reachability', () => {
+  it('follows the direct tag Quality run and trusted completion consumer rather than hardcoding either path', () => {
     expect(runsFullSuite('pull-request', inputs())).toBe(true);
-    expect(runsFullSuite('tag-release', inputs())).toBe(false);
-    // If the tag gate ever gains the suite, the answer must follow the bytes.
-    const upgraded = inputs({ tagReleaseWorkflow: 'run: npm run coverage:check\n' });
-    expect(runsFullSuite('tag-release', upgraded)).toBe(true);
+    expect(runsFullSuite('tag-release', inputs())).toBe(true);
   });
 
-  it('an exempted push-gate guard is reachable on pull-request but NOT on tag-release', () => {
-    // The whole point of making this path-aware. The exemption rests on a live-tree test
-    // inside the full suite; the tag gate never runs that suite, so the guard is genuinely
-    // unreachable there while remaining reachable on the PR path.
+  it('an exempted push-gate guard is reachable on both full-suite paths', () => {
     expect(scriptReachability('guard:ssot-patterns', inputs(), 'pull-request').reachable).toBe(true);
     const tag = scriptReachability('guard:ssot-patterns', inputs(), 'tag-release');
-    expect(tag.reachable).toBe(false);
-    expect(tag.detail).toMatch(/does not run the full suite/);
+    expect(tag.reachable).toBe(true);
   });
 
-  it('a guard named in BOTH workflows is reachable on both', () => {
+  it('a guard in the canonical full job is reachable on both paths', () => {
     expect(scriptReachability('guard:alpha', inputs(), 'pull-request').reachable).toBe(true);
     expect(scriptReachability('guard:alpha', inputs(), 'tag-release').reachable).toBe(true);
   });
@@ -138,14 +148,51 @@ describe('per-path reachability — the two gates are NOT equivalent', () => {
     );
   });
 
-  it('a test-file backstop tracks runsFullSuite on each path', () => {
-    // Test-file backstops were handled inline in the calling suite before, which is how the
-    // npm-script half became path-aware while this half silently did not.
+  it('a test-file backstop tracks the callable full job on each path', () => {
     const entry = 'tests/scripts/anything.test.ts';
     expect(backstopReachability(entry, inputs(), 'pull-request').reachable).toBe(true);
     const tag = backstopReachability(entry, inputs(), 'tag-release');
-    expect(tag.reachable).toBe(false);
-    expect(tag.detail).toMatch(/does not run the full suite/);
+    expect(tag.reachable).toBe(true);
+  });
+
+  it('does not borrow Quality coverage when the trusted completion consumer is misdirected', () => {
+    const broken = inputs({
+      tagReleaseWorkflow: inputs().tagReleaseWorkflow.replace(
+        'workflows: [Quality]',
+        'workflows: [Other workflow]',
+      ),
+    });
+    expect(runsFullSuite('tag-release', broken)).toBe(false);
+    expect(scriptReachability('guard:alpha', broken, 'tag-release').reachable).toBe(false);
+  });
+
+  it('does not credit a tag consumer that skips failed Quality runs', () => {
+    const broken = inputs({
+      tagReleaseWorkflow: inputs().tagReleaseWorkflow.replace(
+        "      startsWith(github.event.workflow_run.head_branch, 'v')",
+        "      github.event.workflow_run.conclusion == 'success' &&\n      startsWith(github.event.workflow_run.head_branch, 'v')",
+      ),
+    });
+    expect(runsFullSuite('tag-release', broken)).toBe(false);
+  });
+
+  it('does not borrow Quality coverage when direct v-tag Quality dispatch is removed', () => {
+    const broken = inputs({
+      qualityWorkflow: inputs().qualityWorkflow.replace("    tags: ['v*']\n", ''),
+    });
+    expect(runsFullSuite('tag-release', broken)).toBe(false);
+    expect(backstopReachability('tests/scripts/anything.test.ts', broken, 'tag-release').reachable).toBe(false);
+  });
+
+  it('does not credit an unselected Quality full job to the tag caller', () => {
+    const broken = inputs({
+      qualityWorkflow: inputs().qualityWorkflow.replace(
+        "if: needs.selection.outputs.profile == 'full'",
+        'if: false',
+      ),
+    });
+    expect(runsFullSuite('tag-release', broken)).toBe(false);
+    expect(backstopReachability('tests/scripts/anything.test.ts', broken, 'tag-release').reachable).toBe(false);
   });
 
   it('backstopReachability routes npm scripts to scriptReachability unchanged', () => {

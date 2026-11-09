@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable
 
 from bounded_github import GitHubClient, MAX_BLOB_BATCH_OBJECTS, MAX_BLOB_BATCH_BYTES, MAX_BLOB_BYTES
-from github_binding import CHECK_NAME, EXPECTED_REPOSITORY, VerifiedGitHubBinding
+from github_binding import CHECK_NAME, EXPECTED_REPOSITORY, VerifiedScannerBinding
 from private_scanner_candidate import (
     BoundaryError,
     CandidateBlob,
@@ -40,7 +40,7 @@ _MAX_TEST_BYTES = 50_000_000
 
 def prepare_scan_inputs(
     client: GitHubClient,
-    binding: VerifiedGitHubBinding,
+    binding: VerifiedScannerBinding,
     scanner: VerifiedScannerBundle,
     selector: Selector,
     scratch: Path,
@@ -49,8 +49,8 @@ def prepare_scan_inputs(
     """Build one scanner plan from exact Git objects without executing it."""
     if binding.repository != EXPECTED_REPOSITORY or binding.check_name != CHECK_NAME:
         raise BoundaryError("candidate binding does not match the fixed repository and check")
-    _require_sha(binding.head_sha, "verified PR head")
-    _require_sha(binding.base_sha, "verified PR base")
+    _require_sha(binding.head_sha, "verified candidate head")
+    _require_sha(binding.base_sha, "verified candidate baseline")
     _require_fresh_scratch(scratch)
 
     head_tree = _fetch_commit_tree(client, binding.head_sha)

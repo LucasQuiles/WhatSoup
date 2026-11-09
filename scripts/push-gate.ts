@@ -23,6 +23,7 @@
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { cleanGitEnv } from '../src/lib/git-env.ts';
+import { assertRepositoryInputUnchanged, captureRepositoryInputSnapshot } from './lib/source-mutation.ts';
 import { TEST_WORKER_LIMIT } from './lib/test-worker-limit.ts';
 
 export interface GateStep {
@@ -36,6 +37,7 @@ export const NEUTRALIZED_SKIP_VARS = [
   'WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT',
   'WHATSOUP_SKIP_NODE_PIN_CHECK',
   'WHATSOUP_SKIP_BOUNDARY_CHECK',
+  'WHATSOUP_SKIP_ESLINT_FITNESS',
 ] as const;
 
 /**
@@ -56,6 +58,7 @@ export const CURATED_TEST_PATHS = [
   'tests/scripts/ci-control-ref-policy.test.ts',
   'tests/scripts/ci-control-classifier.test.ts',
   'tests/scripts/ci-required-contexts-guard.test.ts',
+  'tests/scripts/check-test-jobs.test.ts',
   'tests/scripts/hooks-installed-guard.test.ts',
   'tests/scripts/ci-control-result.test.ts',
   'tests/scripts/git-estate-guard.test.ts',
@@ -139,6 +142,9 @@ export const CURATED_TEST_PATHS = [
   'tests/scripts/generate-catch-ratchet.test.ts',
   'tests/eslint-rules/require-catch-justification.test.ts',
   'tests/deploy/watchdog-credential-dead.test.ts',
+  'tests/setup/source-mutation-tripwire.test.ts',
+  'tests/scripts/source-mutation.test.ts',
+  'tests/scripts/private-integrity-release.test.ts',
   // The manifest's own registry test dogfoods into the gate.
   'tests/scripts/push-gate-manifest.test.ts',
 ] as const;
@@ -361,8 +367,17 @@ export async function main(argv: readonly string[]): Promise<number> {
     return 64;
   }
 
+  let inputSnapshot;
+  try {
+    inputSnapshot = captureRepositoryInputSnapshot({ cwd: process.cwd() });
+  } catch (error) {
+    console.error(`push-gate(${lane}): FINAL-SOURCE INCONCLUSIVE — ${error instanceof Error ? error.message : String(error)}`);
+    return 125;
+  }
+
   const startedAt = Date.now();
   let completed = 0;
+  let gateExit = 0;
   for (const gateStep of steps) {
     const stepStarted = Date.now();
     const code = await runStep(gateStep);
@@ -373,11 +388,30 @@ export async function main(argv: readonly string[]): Promise<number> {
           + ` [${gateStep.name}] after ${formatElapsed(elapsed)} (exit ${code});`
           + ` ${steps.length - completed - 1} step(s) not run`,
       );
-      return 1;
+      gateExit = 1;
+      break;
     }
     completed += 1;
     console.log(`push-gate(${lane}): [${completed}/${steps.length}] ${gateStep.name} ok (${formatElapsed(elapsed)})`);
   }
+
+  try {
+    assertRepositoryInputUnchanged({
+      cwd: process.cwd(),
+      snapshot: inputSnapshot,
+      stage: `push-gate-${lane}`,
+      report: (message) => console.error(`push-gate(${lane}): ${message}`),
+    });
+  } catch (error) {
+    // A prior guard failure remains a failure; this check adds drift evidence but never clears it.
+    if (gateExit !== 0) return gateExit;
+    const message = error instanceof Error ? error.message : String(error);
+    const drift = message.startsWith('FINAL-SOURCE drift:');
+    console.error(`push-gate(${lane}): FINAL-SOURCE ${drift ? 'FAILURE' : 'INCONCLUSIVE'} — ${message}`);
+    return drift ? 1 : 125;
+  }
+
+  if (gateExit !== 0) return gateExit;
 
   console.log(
     `push-gate(${lane}): ${completed}/${steps.length} steps passed in ${formatElapsed(Date.now() - startedAt)}`,

@@ -91,7 +91,7 @@ const requiredPackageScripts = {
     'npm run verify:console-design',
   ].join(' && '),
   'verify:release': [
-    'unset WHATSOUP_SKIP_DOC_DRIFT WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT WHATSOUP_SKIP_NODE_PIN_CHECK WHATSOUP_SKIP_BOUNDARY_CHECK',
+    'unset WHATSOUP_SKIP_DOC_DRIFT WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT WHATSOUP_SKIP_NODE_PIN_CHECK WHATSOUP_SKIP_BOUNDARY_CHECK WHATSOUP_SKIP_ESLINT_FITNESS',
     'npm run guard:repo:release-hygiene',
     'npm run guard:repo:commit-authors',
     'npm run guard:publication:all',
@@ -168,8 +168,10 @@ const requiredConsolePackageScripts = {
 };
 
 const qualityCiJobTimeoutBlock = [
-  'quality:',
-  '    name: quality (24.x)',
+  'full:',
+  '    name: Quality full (24.x)',
+  '    needs: selection',
+  "    if: needs.selection.outputs.profile == 'full'",
   '    runs-on: ubuntu-latest',
   '    # Generous cap so it only kills a genuinely hung run, not a slow-but-live',
   '    # one (the quality job runs the full suite + coverage and can take ~40min).',
@@ -208,11 +210,49 @@ const requiredQualityWorkflow = [
   'on:',
   '  pull_request:',
   '  merge_group:',
+  '  push:',
+  '    branches: [main]',
+  '    tags: [\'v*\']',
   'permissions:',
   '  contents: read',
   'jobs:',
-  '  quality:',
-  '    name: quality (24.x)',
+  '  selection:',
+  '    runs-on: ubuntu-latest',
+  '    steps:',
+  '      - run: echo selection',
+  '  docs:',
+  '    needs: selection',
+  "    if: needs.selection.outputs.profile == 'docs'",
+  '    runs-on: ubuntu-latest',
+  '    steps:',
+  '      - name: Documentation drift guard',
+  '        run: node --experimental-strip-types scripts/doc-drift-check.ts',
+  '  affected:',
+  '    name: Quality affected (24.x)',
+  '    needs: selection',
+  "    if: needs.selection.outputs.profile == 'affected'",
+  '    runs-on: ubuntu-latest',
+  '    steps:',
+  '      - name: Import cycle guard when selected',
+  "        if: fromJSON(needs.selection.outputs.lanes).root",
+  '        run: npm run guard:import-cycle',
+  '      - name: Phantom dependency guard when selected',
+  "        if: fromJSON(needs.selection.outputs.lanes).root",
+  '        run: npm run guard:phantom-deps',
+  '      - name: Run affected Quality suites',
+  '        run: npm run test:affected -- --base "$TEST_BASE" --max-workers 2 --timeout-ms 600000',
+  '  compatibility-affected:',
+  '    name: Quality affected (25.x)',
+  '    needs: selection',
+  "    if: needs.selection.outputs.profile == 'affected' && fromJSON(needs.selection.outputs.lanes).compatibility",
+  '    runs-on: ubuntu-latest',
+  '    steps:',
+  '      - name: Run affected compatibility root suite',
+  '        run: npm run test:affected -- --base "$TEST_BASE" --suite root --max-workers 2 --timeout-ms 600000',
+  '  full:',
+  '    name: Quality full (24.x)',
+  '    needs: selection',
+  "    if: needs.selection.outputs.profile == 'full'",
   '    runs-on: ubuntu-latest',
   '    # Generous cap so it only kills a genuinely hung run, not a slow-but-live',
   '    # one (the quality job runs the full suite + coverage and can take ~40min).',
@@ -234,6 +274,12 @@ const requiredQualityWorkflow = [
   '          node -e \'const r=require(process.env.RUNNER_TEMP + "/whatsoup-doctor-quality.json"); if (r.outcome !== "pass") process.exit(1)\'',
   '      - name: Enforce CI disk budget',
   '        run: bash scripts/ci-disk-reclaim.sh',
+  '      - name: Install guard tool dependencies',
+  '        run: npm --prefix tools/whatsoup_guard ci',
+  '      - name: Guard tool typecheck',
+  '        run: npm --prefix tools/whatsoup_guard run typecheck',
+  '      - name: Guard tool tests',
+  '        run: npm --prefix tools/whatsoup_guard test -- --maxWorkers=2',
   '      - name: Semantic quality (shadow)',
   '        env:',
   '          SEMANTIC_RECEIPT: ${{ runner.temp }}/semantic-quality.json',
@@ -245,19 +291,9 @@ const requiredQualityWorkflow = [
   '          fi',
   '          npm run guard:semantic-quality -- --mode shadow --base "$base" --receipt "$SEMANTIC_RECEIPT"',
   '          node -e \'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(process.env.SEMANTIC_RECEIPT,"utf8")); process.stdout.write(`### Semantic quality (shadow)\\n\\nDecision: **${r.decision}**\\n\\nFindings: ${r.findings.length}\\n`)\' >> "$GITHUB_STEP_SUMMARY"',
-  '      - name: Install test-integrity plugin',
-  '        env:',
-  '          TEST_INTEGRITY_COMMIT: ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c',
-  '        run: |',
-  '          mkdir -p "$plugin_dir" "$HOME/.ssh"',
-  '          git -C "$plugin_dir" fetch --depth 1 origin "$TEST_INTEGRITY_COMMIT"',
-  '          git -C "$plugin_dir" switch --detach FETCH_HEAD',
-  '          observed_commit="$(git -C "$plugin_dir" rev-parse HEAD)"',
-  '          if [ "$observed_commit" != "$TEST_INTEGRITY_COMMIT" ]; then',
-  '            exit 2',
-  '          fi',
-  '      - name: Test integrity baseline check',
-  '        run: npm run guard:test-integrity',
+  '      - name: Release hygiene guard (tags)',
+  "        if: startsWith(github.ref, 'refs/tags/')",
+  '        run: npm run guard:repo:release-hygiene',
   '      - name: Install console dependencies',
   '        run: npm --prefix console ci',
   '      - name: Design-system hygiene changed files',
@@ -285,8 +321,10 @@ const requiredQualityWorkflow = [
   '          path: |',
   '            tests/browser/__screenshots__',
   '            tests/browser-motion/__screenshots__',
-  '  compatibility:',
-  '    name: quality (25.x)',
+  '  compatibility-full:',
+  '    name: Quality full (25.x)',
+  '    needs: selection',
+  "    if: needs.selection.outputs.profile == 'full'",
   '    runs-on: ubuntu-latest',
   '    timeout-minutes: 40',
   '    steps:',
@@ -308,45 +346,183 @@ const requiredQualityWorkflow = [
   '      - name: Install console dependencies',
   '        run: npm --prefix console ci',
   '      - name: Full compatibility test suite',
-  '        run: npm test -- --pool=forks',
+  '        run: node --experimental-strip-types scripts/full-suite-battery.ts --pool=forks',
   '      - name: Console compatibility build',
   '        run: npm --prefix console run build',
   '  bot-errors-health-macos:',
-  '    runs-on: macos-14',
+  '    needs: selection',
+  "    if: needs.selection.outputs.profile == 'full'",
+  '    runs-on: macos-15-intel',
+  '    timeout-minutes: 15',
   '    steps:',
   '      - name: Portable Python and release-proof prerequisites (real macOS)',
   '        run: npm test -- tests/helpers/python-interpreter.test.ts tests/scripts/bot-errors-python-atomic-write-guard.test.ts tests/scripts/bot-errors-release-proof-installer.test.ts tests/scripts/bot-errors-release-proof-run.test.ts --pool=forks --maxWorkers=1',
+  '  quality:',
+  '    name: quality (24.x)',
+  '    needs: [selection, docs, affected, full, bot-errors-health-macos]',
+  '    if: always()',
+  '    runs-on: ubuntu-latest',
+  '    steps:',
+  '      - name: Fail closed on selected Node 24 validation',
+  '        env:',
+  '          TEST_JOB_MATRIX: node24',
+  '          TEST_PLAN_JSON: ${{ needs.selection.outputs.plan }}',
+  '          TEST_JOB_RESULTS: ${{ toJSON(needs) }}',
+  '        run: node --experimental-strip-types scripts/check-test-jobs.ts',
+  '  compatibility:',
+  '    name: quality (25.x)',
+  '    needs: [selection, docs, compatibility-affected, compatibility-full]',
+  '    if: always()',
+  '    runs-on: ubuntu-latest',
+  '    steps:',
+  '      - name: Fail closed on selected Node 25 validation',
+  '        env:',
+  '          TEST_JOB_MATRIX: node25',
+  '          TEST_PLAN_JSON: ${{ needs.selection.outputs.plan }}',
+  '          TEST_JOB_RESULTS: ${{ toJSON(needs) }}',
+  '        run: node --experimental-strip-types scripts/check-test-jobs.ts',
 ].join('\n');
 
 const requiredTagReleaseWorkflow = [
   'name: tag-release-gate',
   'on:',
-  '  push:',
-  '    tags:',
-  "      - 'v*'",
+  '  workflow_run:',
+  '    workflows: [Quality]',
+  '    types: [completed]',
+  'concurrency:',
+  '  group: tag-release-${{ github.event.workflow_run.head_branch }}',
+  '  cancel-in-progress: false',
+  'permissions:',
+  '  contents: read',
+  '  actions: read',
   'jobs:',
   '  release-gate:',
+  '    if: >-',
+  "      github.event.workflow_run.event == 'push' &&",
+  "      startsWith(github.event.workflow_run.head_branch, 'v')",
   '    runs-on: ubuntu-latest',
-  '    timeout-minutes: 60',
+  '    timeout-minutes: 35',
   '    steps:',
-  '      - name: Install console dependencies',
-  '        run: npm --prefix console ci',
-  '      - name: Console build',
-  '        run: npm --prefix console run build',
-  '      - name: Console design verification',
-  '        run: npm run verify:console-design',
-  '      - name: Install Playwright chromium',
-  '        run: npx playwright install chromium --with-deps',
-  '      - name: Browser test suite',
-  '        run: npm run test:browser',
-  '      - name: Browser motion test suite',
-  '        run: npm run test:browser:motion',
-  '      - name: Upload browser artifacts',
-  '        uses: actions/upload-artifact@v4',
+  '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
   '        with:',
-  '          path: |',
-  '            tests/browser/__screenshots__',
-  '            tests/browser-motion/__screenshots__',
+  '          ref: ${{ github.sha }}',
+  '      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
+  '        with:',
+  "          node-version-file: '.nvmrc'",
+  '      - id: select',
+  '        env:',
+  '          QUALITY_RUN_ID: ${{ github.event.workflow_run.id }}',
+  '          QUALITY_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}',
+  '          QUALITY_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}',
+  '          GH_TOKEN: ${{ github.token }}',
+  '        run: node scripts/private-integrity-release.ts select',
+  '      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093',
+  '        with:',
+  '          artifact-ids: ${{ steps.select.outputs.artifact-id }}',
+  '          run-id: ${{ steps.select.outputs.scanner-run-id }}',
+  '          path: ${{ runner.temp }}/private-integrity',
+  '          github-token: ${{ github.token }}',
+  '          merge-multiple: true',
+  '      - name: Verify private integrity receipt',
+  '        env:',
+  '          SCANNER_ARTIFACT_ID: ${{ steps.select.outputs.artifact-id }}',
+  '          SCANNER_RUN_ID: ${{ steps.select.outputs.scanner-run-id }}',
+  '        run: node scripts/private-integrity-release.ts verify --receipt "$RUNNER_TEMP/private-integrity/receipt.json"',
+].join('\n');
+
+const requiredPrivateTestIntegrityWorkflow = [
+  'name: Private test integrity',
+  'on:',
+  '  workflow_run:',
+  '    workflows: [Quality]',
+  '    types: [completed]',
+  'permissions: {}',
+  'jobs:',
+  '  private-scanner:',
+  '    if: >-',
+  "      github.repository == 'LucasQuiles/WhatSoup' &&",
+  "      github.event.workflow_run.status == 'completed' &&",
+  '      github.event.workflow_run.head_repository.full_name == github.repository &&',
+  '      (',
+  "        github.event.workflow_run.event == 'pull_request' ||",
+  "        (github.event.workflow_run.event == 'push' && (github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'v'))) ||",
+  "        (github.event.workflow_run.event == 'schedule' && github.event.workflow_run.head_branch == 'main')",
+  '      )',
+  '    environment: private-scanner-trusted',
+  '    runs-on: ubuntu-24.04',
+  '    steps:',
+  '      - name: Qualify runtime and scan exact pull request data',
+  '        env:',
+  '          QUALITY_RUN_ID: ${{ github.event.workflow_run.id }}',
+  '          QUALITY_EVENT: ${{ github.event.workflow_run.event }}',
+  '          QUALITY_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}',
+  '          QUALITY_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}',
+  '          GITHUB_RUN_ID: ${{ github.run_id }}',
+  '          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}',
+  '          GITHUB_TOKEN: ${{ github.token }}',
+  '        run: |',
+  "          RECEIPT_PATH=''",
+  '          receipt_args=()',
+  "          if [[ \"$QUALITY_EVENT\" != 'pull_request' ]]; then",
+  '            RECEIPT_PATH="$SCANNER_ROOT/receipt.json"',
+  '            receipt_args=(--receipt "$RECEIPT_PATH")',
+  '          fi',
+  '          env -i GITHUB_TOKEN="$GITHUB_TOKEN" QUALITY_RUN_ID="$QUALITY_RUN_ID" QUALITY_EVENT="$QUALITY_EVENT" QUALITY_RUN_ATTEMPT="$QUALITY_RUN_ATTEMPT" QUALITY_HEAD_SHA="$QUALITY_HEAD_SHA" GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" RECEIPT_PATH="$RECEIPT_PATH" python3.12 -I -S -B run_workflow.py "${receipt_args[@]}"',
+  "          if [[ \"$QUALITY_EVENT\" != 'pull_request' ]]; then",
+  '            test -s "$RECEIPT_PATH"',
+  '            mkdir -m 700 "$RUNNER_TEMP/private-integrity"',
+  '            mv -- "$RECEIPT_PATH" "$RUNNER_TEMP/private-integrity/receipt.json"',
+  '          fi',
+  '          echo "scanner-exit=0" >> "$GITHUB_OUTPUT"',
+  '      - name: Remove owned scanner scratch',
+  '        id: cleanup',
+  '        if: always()',
+  '        run: rm -rf -- "$SCANNER_ROOT"',
+  '      - name: Upload private integrity receipt',
+  "        if: always() && github.event.workflow_run.event != 'pull_request' && steps.cleanup.outcome == 'success'",
+  '        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
+  '        with:',
+  '          name: private-integrity-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}',
+  '          path: ${{ runner.temp }}/private-integrity/receipt.json',
+  '          if-no-files-found: error',
+  '          overwrite: true',
+  '          retention-days: 30',
+  '      - name: Enforce private scanner conclusion',
+  '        if: always()',
+  '        env:',
+  '          SCANNER_EXIT: ${{ steps.scan.outputs.scanner-exit }}',
+  '        run: |',
+  '          case "$SCANNER_EXIT" in',
+  '            0|1|2) exit "$SCANNER_EXIT" ;;',
+  '            *) exit 2 ;;',
+  '          esac',
+].join('\n');
+
+const requiredWhatsoupGuardWorkflow = [
+  'name: whatsoup-guard',
+  'on:',
+  '  pull_request:',
+  '    paths: [\'tools/whatsoup_guard/**\', \'.github/workflows/whatsoup-guard.yml\']',
+  'permissions:',
+  '  contents: read',
+  'jobs:',
+  '  test:',
+  '    runs-on: ubuntu-latest',
+  '    strategy:',
+  '      fail-fast: false',
+  '      matrix:',
+  "        node: ['25.x']",
+  '    defaults:',
+  '      run:',
+  '        working-directory: tools/whatsoup_guard',
+  '    steps:',
+  '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
+  '      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
+  '        with:',
+  '          node-version: ${{ matrix.node }}',
+  '      - run: npm ci',
+  '      - run: npm run typecheck',
+  '      - run: npm test',
 ].join('\n');
 
 const requiredFiles: Record<string, string> = {
@@ -426,6 +602,8 @@ const requiredFiles: Record<string, string> = {
   'console/src/components/primitives/Modal.tsx': 'useDismissable',
   '.github/workflows/quality.yml': requiredQualityWorkflow,
   '.github/workflows/tag-release-gate.yml': requiredTagReleaseWorkflow,
+  '.github/workflows/private-test-integrity.yml': requiredPrivateTestIntegrityWorkflow,
+  '.github/workflows/whatsoup-guard.yml': requiredWhatsoupGuardWorkflow,
   '.husky/pre-commit': [
     'npm run guard:repo:staged',
     'npm run guard:publication:staged',
@@ -937,7 +1115,7 @@ describe('safeguard diagnostics', () => {
   it('fails when Quality loses the semantic shadow receipt step', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const mutated = workflow.replace(
-      /      - name: Semantic quality \(shadow\)[\s\S]*?(?=      - name: Install test-integrity plugin)/,
+      /      - name: Semantic quality \(shadow\)[\s\S]*?(?=      - name: Release hygiene guard \(tags\))/,
       '',
     );
     expect(mutated).not.toBe(workflow);
@@ -1005,6 +1183,121 @@ describe('safeguard diagnostics', () => {
       evidence: 'jobs.quality name must be exactly quality (24.x)',
     },
     {
+      name: 'makes the Node 24 required-context aggregator advisory',
+      mutate: (workflow: string) => workflow.replace(
+        "  quality:\n    name: quality (24.x)\n    needs: [selection, docs, affected, full, bot-errors-health-macos]\n    if: always()\n    runs-on: ubuntu-latest",
+        "  quality:\n    name: quality (24.x)\n    needs: [selection, docs, affected, full, bot-errors-health-macos]\n    if: always()\n    continue-on-error: true\n    runs-on: ubuntu-latest",
+      ),
+      evidence: 'quality (node24) aggregator must be blocking',
+    },
+    {
+      name: 'makes the Node 25 required-context checker advisory',
+      mutate: (workflow: string) => workflow.replace(
+        '      - name: Fail closed on selected Node 25 validation\n        env:',
+        '      - name: Fail closed on selected Node 25 validation\n        continue-on-error: true\n        env:',
+      ),
+      evidence: 'quality (node25) aggregator checker must be unconditional and blocking',
+    },
+    {
+      name: 'masks the Node 24 required-context checker result',
+      mutate: (workflow: string) => workflow.replace(
+        '      - name: Fail closed on selected Node 24 validation\n        env:\n          TEST_JOB_MATRIX: node24\n          TEST_PLAN_JSON: ${{ needs.selection.outputs.plan }}\n          TEST_JOB_RESULTS: ${{ toJSON(needs) }}\n        run: node --experimental-strip-types scripts/check-test-jobs.ts',
+        '      - name: Fail closed on selected Node 24 validation\n        env:\n          TEST_JOB_MATRIX: node24\n          TEST_PLAN_JSON: ${{ needs.selection.outputs.plan }}\n          TEST_JOB_RESULTS: ${{ toJSON(needs) }}\n        run: node --experimental-strip-types scripts/check-test-jobs.ts || true',
+      ),
+      evidence: 'quality (node24) aggregator must run the exact check-test-jobs command',
+    },
+    {
+      name: 'masks the Node 25 required-context checker result',
+      mutate: (workflow: string) => workflow.replace(
+        '      - name: Fail closed on selected Node 25 validation\n        env:\n          TEST_JOB_MATRIX: node25\n          TEST_PLAN_JSON: ${{ needs.selection.outputs.plan }}\n          TEST_JOB_RESULTS: ${{ toJSON(needs) }}\n        run: node --experimental-strip-types scripts/check-test-jobs.ts',
+        '      - name: Fail closed on selected Node 25 validation\n        env:\n          TEST_JOB_MATRIX: node25\n          TEST_PLAN_JSON: ${{ needs.selection.outputs.plan }}\n          TEST_JOB_RESULTS: ${{ toJSON(needs) }}\n        run: node --experimental-strip-types scripts/check-test-jobs.ts || true',
+      ),
+      evidence: 'quality (node25) aggregator must run the exact check-test-jobs command',
+    },
+    {
+      name: 'replaces the Node 24 checker plan input',
+      mutate: (workflow: string) => workflow.replace(
+        '          TEST_JOB_MATRIX: node24\n          TEST_PLAN_JSON: ${{ needs.selection.outputs.plan }}',
+        '          TEST_JOB_MATRIX: node24\n          TEST_PLAN_JSON: {}',
+      ),
+      evidence: 'quality (node24) aggregator checker must receive TEST_PLAN_JSON from selection',
+    },
+    {
+      name: 'replaces the Node 25 checker result input',
+      mutate: (workflow: string) => workflow.replace(
+        '          TEST_JOB_MATRIX: node25\n          TEST_PLAN_JSON: ${{ needs.selection.outputs.plan }}\n          TEST_JOB_RESULTS: ${{ toJSON(needs) }}',
+        '          TEST_JOB_MATRIX: node25\n          TEST_PLAN_JSON: ${{ needs.selection.outputs.plan }}\n          TEST_JOB_RESULTS: {}',
+      ),
+      evidence: 'quality (node25) aggregator checker must receive TEST_JOB_RESULTS from needs',
+    },
+    {
+      name: 'makes documentation drift advisory',
+      mutate: (workflow: string) => workflow.replace(
+        '      - name: Documentation drift guard\n        run: node --experimental-strip-types scripts/doc-drift-check.ts',
+        '      - name: Documentation drift guard\n        continue-on-error: true\n        run: node --experimental-strip-types scripts/doc-drift-check.ts',
+      ),
+      evidence: 'docs validation terminal step must be unconditional and blocking',
+    },
+    {
+      name: 'makes the Node 24 affected worker advisory',
+      mutate: (workflow: string) => workflow.replace(
+        "    if: needs.selection.outputs.profile == 'affected'\n    runs-on: ubuntu-latest",
+        "    if: needs.selection.outputs.profile == 'affected'\n    continue-on-error: true\n    runs-on: ubuntu-latest",
+      ),
+      evidence: 'affected validation job must be blocking',
+    },
+    {
+      name: 'drops the affected import-cycle guard',
+      mutate: (workflow: string) => workflow.replace(
+        '      - name: Import cycle guard when selected\n' +
+          '        if: fromJSON(needs.selection.outputs.lanes).root\n' +
+          '        run: npm run guard:import-cycle\n',
+        '',
+      ),
+      evidence: 'affected root lane must run exactly once: npm run guard:import-cycle',
+    },
+    {
+      name: 'routes the affected phantom-dependency guard from the wrong lane',
+      mutate: (workflow: string) => workflow.replace(
+        '      - name: Phantom dependency guard when selected\n' +
+          '        if: fromJSON(needs.selection.outputs.lanes).root\n' +
+          '        run: npm run guard:phantom-deps',
+        '      - name: Phantom dependency guard when selected\n' +
+          '        if: fromJSON(needs.selection.outputs.lanes).console\n' +
+          '        run: npm run guard:phantom-deps',
+      ),
+      evidence: 'affected root guard must be selected by root lane: npm run guard:phantom-deps',
+    },
+    {
+      name: 'makes the affected import-cycle guard advisory',
+      mutate: (workflow: string) => workflow.replace(
+        '      - name: Import cycle guard when selected\n' +
+          '        if: fromJSON(needs.selection.outputs.lanes).root\n' +
+          '        run: npm run guard:import-cycle',
+        '      - name: Import cycle guard when selected\n' +
+          '        if: fromJSON(needs.selection.outputs.lanes).root\n' +
+          '        continue-on-error: true\n' +
+          '        run: npm run guard:import-cycle',
+      ),
+      evidence: 'affected root guard must be blocking: npm run guard:import-cycle',
+    },
+    {
+      name: 'changes the Node 25 affected selection condition',
+      mutate: (workflow: string) => workflow.replace(
+        "    if: needs.selection.outputs.profile == 'affected' && fromJSON(needs.selection.outputs.lanes).compatibility",
+        '    if: false',
+      ),
+      evidence: 'compatibility-affected validation job must retain its selection condition',
+    },
+    {
+      name: 'conditions the Node 25 affected terminal suite',
+      mutate: (workflow: string) => workflow.replace(
+        '      - name: Run affected compatibility root suite\n        run: npm run test:affected -- --base "$TEST_BASE" --suite root --max-workers 2 --timeout-ms 600000',
+        '      - name: Run affected compatibility root suite\n        if: github.ref == \'refs/heads/main\'\n        run: npm run test:affected -- --base "$TEST_BASE" --suite root --max-workers 2 --timeout-ms 600000',
+      ),
+      evidence: 'compatibility-affected validation terminal step must be unconditional and blocking',
+    },
+    {
       name: 'drops the merge queue trigger',
       mutate: (workflow: string) => workflow.replace('  merge_group:\n', ''),
       evidence: 'quality workflow must declare the merge_group trigger',
@@ -1057,26 +1350,41 @@ describe('safeguard diagnostics', () => {
     {
       name: 'makes the Node 25 lane advisory',
       mutate: (workflow: string) => workflow.replace(
-        '    timeout-minutes: 40\n    steps:',
-        '    timeout-minutes: 40\n    continue-on-error: true\n    steps:',
+        "    if: needs.selection.outputs.profile == 'full'\n    runs-on: ubuntu-latest",
+        "    if: needs.selection.outputs.profile == 'full'\n    continue-on-error: true\n    runs-on: ubuntu-latest",
       ),
       evidence: 'quality (25.x) compatibility job must be blocking',
     },
     {
-      name: 'conditions the Node 25 full suite',
-      mutate: (workflow: string) => workflow.replace(
-        '        run: npm test -- --pool=forks',
-        '        if: github.ref == \'refs/heads/main\'\n        run: npm test -- --pool=forks',
-      ),
-      evidence: 'quality (25.x) required step must be unconditional and blocking: npm test -- --pool=forks',
+      name: 'uses the architecture-ambiguous macOS 15 runner for x64 health qualification',
+      mutate: (workflow: string) => workflow.replace('    runs-on: macos-15-intel', '    runs-on: macos-15'),
+      evidence: 'bot-errors-health-macos must run on macos-15-intel for x64 health qualification',
     },
     {
-      name: 'floats the Test Integrity revision',
+      name: 'shortens the macOS combined-qualification budget',
+      mutate: (workflow: string) => workflow.replace('    timeout-minutes: 15', '    timeout-minutes: 10'),
+      evidence: 'bot-errors-health-macos must retain its 15-minute combined-qualification budget',
+    },
+    {
+      name: 'conditions the Node 25 full suite',
       mutate: (workflow: string) => workflow.replace(
-        'TEST_INTEGRITY_COMMIT: ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c',
-        'TEST_INTEGRITY_COMMIT: main',
+        '        run: node --experimental-strip-types scripts/full-suite-battery.ts --pool=forks',
+        '        if: github.ref == \'refs/heads/main\'\n        run: node --experimental-strip-types scripts/full-suite-battery.ts --pool=forks',
       ),
-      evidence: 'Test Integrity commit pin must match the reviewed 40-hex object',
+      evidence: 'quality (25.x) required step must be unconditional and blocking: node --experimental-strip-types scripts/full-suite-battery.ts --pool=forks',
+    },
+    {
+      name: 'restores private scanner credentials to Quality',
+      mutate: (workflow: string) => workflow.replace(
+        '      - name: Release hygiene guard (tags)',
+        '      - name: Private scanner credential leak\n        env:\n          TEST_INTEGRITY_DEPLOY_KEY: ${{ secrets.TEST_INTEGRITY_DEPLOY_KEY }}\n        run: echo forbidden\n      - name: Release hygiene guard (tags)',
+      ),
+      evidence: 'quality workflow must not access private Test Integrity credentials',
+    },
+    {
+      name: 'removes the direct v tag Quality trigger',
+      mutate: (workflow: string) => workflow.replace("    tags: ['v*']\n", ''),
+      evidence: 'quality workflow must trigger directly on v* tags',
     },
     {
       name: 'restores masked unconditional disk cleanup',
@@ -1101,8 +1409,10 @@ describe('safeguard diagnostics', () => {
   it('fails when the quality job loses its bounded timeout', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const mutated = workflow.replace(qualityCiJobTimeoutBlock, [
-      'quality:',
-      '    name: quality (24.x)',
+      'full:',
+      '    name: Quality full (24.x)',
+      '    needs: selection',
+      "    if: needs.selection.outputs.profile == 'full'",
       '    runs-on: ubuntu-latest',
       '    # Generous cap so it only kills a genuinely hung run, not a slow-but-live',
       '    # one (the quality job runs the full suite + coverage and can take ~40min).',
@@ -1310,23 +1620,17 @@ describe('safeguard diagnostics', () => {
 
   it('fails when the quality job depends on a skippable job', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
-    const mutated = workflow.replace('jobs:\n  quality:', [
-      'jobs:',
-      '  suppress-quality:',
-      '    runs-on: ubuntu-latest',
-      '    if: false',
-      '    steps:',
-      "      - run: 'true'",
-      '  quality:',
-      '    needs: suppress-quality',
-    ].join('\n'));
+    const mutated = workflow.replace(
+      "  full:\n    name: Quality full (24.x)\n    needs: selection",
+      "  full:\n    name: Quality full (24.x)\n    needs: suppress-quality",
+    );
     expect(mutated).not.toBe(workflow);
     const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
     const result = checkSafeguards(fixture);
 
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
-      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['quality job must not declare needs']) });
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['full job must depend only on selection']) });
   });
 
   it('fails when quality-job run defaults can suppress command execution', () => {
@@ -1464,8 +1768,8 @@ describe('safeguard diagnostics', () => {
   it('fails when the quality job becomes conditional', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const mutated = workflow.replace(
-      '    timeout-minutes: 60\n    steps:',
-      "    timeout-minutes: 60\n    if: github.ref == 'refs/heads/main'\n    steps:",
+      "    if: needs.selection.outputs.profile == 'full'",
+      "    if: github.ref == 'refs/heads/main'",
     );
     expect(mutated).not.toBe(workflow);
     const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
@@ -1475,7 +1779,7 @@ describe('safeguard diagnostics', () => {
     expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
       .toMatchObject({
         status: 'fail',
-        evidence: expect.arrayContaining(['quality job must not declare if']),
+        evidence: expect.arrayContaining(['full job must be gated by the full selection profile']),
       });
   });
 
@@ -1658,14 +1962,14 @@ describe('safeguard diagnostics', () => {
       '      - name: Browser test suite\n        run: echo misplaced',
     );
     expect(removed).not.toBe(workflow);
-    const mutated = removed.replace('jobs:\n  quality:', [
+    const mutated = removed.replace('jobs:\n  selection:', [
       'jobs:',
       '  unrelated:',
       '    runs-on: ubuntu-latest',
       '    steps:',
       '      - name: Misplaced browser proof',
       '        run: npm run test:browser',
-      '  quality:',
+      '  selection:',
     ].join('\n'));
     expect(mutated).not.toBe(removed);
     const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
@@ -1695,117 +1999,162 @@ describe('safeguard diagnostics', () => {
       .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['npm run guard:design-system-hygiene -- --changed-since']) });
   });
 
-  it('fails when tag release CI omits the shared console design verification chain', () => {
-    const fixture = makeRepo({
-      files: {
-        '.github/workflows/tag-release-gate.yml': requiredFiles['.github/workflows/tag-release-gate.yml']
-          .replace('run: npm run verify:console-design', ''),
-      },
-    });
-    const result = checkSafeguards(fixture);
-
-    expect(result.ok).toBe(false);
-    expect(result.checks.find((check) => check.id === 'tag-release-console-design-chain'))
-      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['run: npm run verify:console-design']) });
-  });
-
-  it('fails when tag release CI omits the browser motion proof', () => {
-    const fixture = makeRepo({
-      files: {
-        '.github/workflows/tag-release-gate.yml': requiredFiles['.github/workflows/tag-release-gate.yml']
-          .replace('run: npm run test:browser:motion', ''),
-      },
-    });
-    const result = checkSafeguards(fixture);
-
-    expect(result.ok).toBe(false);
-    expect(result.checks.find((check) => check.id === 'tag-release-console-design-chain'))
-      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['run: npm run test:browser:motion']) });
-  });
-
-  it('fails when tag release CI makes a browser proof conditional', () => {
-    const fixture = makeRepo({
-      files: {
-        '.github/workflows/tag-release-gate.yml': requiredFiles['.github/workflows/tag-release-gate.yml']
-          .replace(
-            'run: npm run test:browser:motion',
-            'if: failure()\n        run: npm run test:browser:motion',
-          ),
-      },
-    });
-    const result = checkSafeguards(fixture);
-
-    expect(result.ok).toBe(false);
-    expect(result.checks.find((check) => check.id === 'tag-release-console-design-chain'))
-      .toMatchObject({
-        status: 'fail',
-        evidence: expect.arrayContaining(['conditional run: npm run test:browser:motion (if: failure())']),
-      });
-  });
-
-  it('fails when a tag-release browser proof overrides its shell', () => {
+  it.each([
+    {
+      name: 'stops consuming completed Quality runs',
+      mutate: (workflow: string) => workflow.replace('workflows: [Quality]', 'workflows: [Other workflow]'),
+      evidence: 'tag release gate must consume completed Quality workflow runs',
+    },
+    {
+      name: 'skips failed Quality tag runs',
+      mutate: (workflow: string) => workflow.replace(
+        "      startsWith(github.event.workflow_run.head_branch, 'v')",
+        "      github.event.workflow_run.conclusion == 'success' &&\n      startsWith(github.event.workflow_run.head_branch, 'v')",
+      ),
+      evidence: 'tag release gate must not skip failed Quality tag runs',
+    },
+    {
+      name: 'permits non-tag push completions',
+      mutate: (workflow: string) => workflow.replace(
+        "      startsWith(github.event.workflow_run.head_branch, 'v')",
+        "      github.event.workflow_run.head_branch == 'main'",
+      ),
+      evidence: 'tag release gate must require a v* Quality source ref',
+    },
+    {
+      name: 'inherits private scanner credentials',
+      mutate: (workflow: string) => workflow.replace(
+        '    runs-on: ubuntu-latest',
+        '    secrets: inherit\n    runs-on: ubuntu-latest',
+      ),
+      evidence: 'tag release gate must not access private scanner credentials',
+    },
+    {
+      name: 'downloads the receipt beneath an artifact-name directory',
+      mutate: (workflow: string) => workflow.replace('          merge-multiple: true\n', ''),
+      evidence: 'tag release gate must download only the authenticated scanner artifact',
+    },
+  ])('fails when tag release CI $name', ({ mutate, evidence }) => {
     const workflow = requiredFiles['.github/workflows/tag-release-gate.yml'];
-    const mutated = workflow.replace(
-      '      - name: Browser test suite\n        run: npm run test:browser',
-      '      - name: Browser test suite\n        shell: bash -n {0}\n        run: npm run test:browser',
-    );
+    const mutated = mutate(workflow);
     expect(mutated).not.toBe(workflow);
     const fixture = makeRepo({ files: { '.github/workflows/tag-release-gate.yml': mutated } });
     const result = checkSafeguards(fixture);
 
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.id === 'tag-release-console-design-chain'))
-      .toMatchObject({
-        status: 'fail',
-        evidence: expect.arrayContaining(['run: npm run test:browser must not declare shell']),
-      });
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining([evidence]) });
   });
 
-  it('fails when a tag-release browser proof runs in the background', () => {
-    const workflow = requiredFiles['.github/workflows/tag-release-gate.yml'];
+  it.each([
+    {
+      name: 'stops admitting v-tag Quality runs to the private scanner',
+      mutate: (workflow: string) => workflow.replace(
+        " || startsWith(github.event.workflow_run.head_branch, 'v')",
+        '',
+      ),
+      evidence: 'private test integrity must admit successful same-repository v* Quality pushes',
+    },
+    {
+      name: 'does not pass the scanner run identity into the isolated driver',
+      mutate: (workflow: string) => workflow.replace(
+        'GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT"',
+        '',
+      ),
+      evidence: 'private test integrity must pass the trusted scanner run identity to the isolated driver',
+    },
+    {
+      name: 'drops the GitHub token from the isolated driver',
+      mutate: (workflow: string) => workflow.replace('GITHUB_TOKEN="$GITHUB_TOKEN" ', ''),
+      evidence: 'private test integrity must pass the GitHub token to the isolated driver',
+    },
+    {
+      name: 'masks the scanner result before receipt publication',
+      mutate: (workflow: string) => workflow.replace(
+        '      - name: Qualify runtime and scan exact pull request data\n        env:',
+        '      - name: Qualify runtime and scan exact pull request data\n        continue-on-error: true\n        env:',
+      ),
+      evidence: 'private test integrity scanner must not mask its terminal result',
+    },
+    {
+      name: 'forces the non-PR receipt route for pull requests',
+      mutate: (workflow: string) => workflow.replace(
+        "if [[ \"$QUALITY_EVENT\" != 'pull_request' ]]; then",
+        'if true; then',
+      ),
+      evidence: 'private test integrity must produce a receipt only for non-PR sources',
+    },
+    {
+      name: 'discards the receipt on scanner failure',
+      mutate: (workflow: string) => workflow.replace(
+        "      - name: Upload private integrity receipt\n        if: always() && github.event.workflow_run.event != 'pull_request' && steps.cleanup.outcome == 'success'",
+        '      - name: Upload private integrity receipt\n        if: success()',
+      ),
+      evidence: 'private test integrity must upload only the receipt after scanner scratch cleanup',
+    },
+    {
+      name: 'publishes after an unverified scratch cleanup',
+      mutate: (workflow: string) => workflow.replace(
+        " && steps.cleanup.outcome == 'success'",
+        '',
+      ),
+      evidence: 'private test integrity must upload only the receipt after scanner scratch cleanup',
+    },
+    {
+      name: 'prevents a scanner retry from replacing its stale receipt',
+      mutate: (workflow: string) => workflow.replace('          overwrite: true', '          overwrite: false'),
+      evidence: 'private test integrity must upload only the receipt after scanner scratch cleanup',
+    },
+  ])('fails when private test integrity $name', ({ mutate, evidence }) => {
+    const workflow = requiredFiles['.github/workflows/private-test-integrity.yml'];
+    const mutated = mutate(workflow);
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/private-test-integrity.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'private-test-integrity-trusted-receipt'))
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining([evidence]) });
+  });
+
+  it.each([
+    {
+      name: 'drops the standalone Node 25 guard compatibility lane',
+      mutate: (workflow: string) => workflow.replace("node: ['25.x']", 'node: []'),
+      evidence: 'whatsoup guard workflow must retain exactly the Node 25 compatibility lane',
+    },
+    {
+      name: 'reintroduces redundant Node 24 guard work',
+      mutate: (workflow: string) => workflow.replace("node: ['25.x']", "node: ['24.x', '25.x']"),
+      evidence: 'whatsoup guard workflow must retain exactly the Node 25 compatibility lane',
+    },
+  ])('fails when the whatsoup guard workflow $name', ({ mutate, evidence }) => {
+    const workflow = requiredFiles['.github/workflows/whatsoup-guard.yml'];
+    const mutated = mutate(workflow);
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/whatsoup-guard.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'whatsoup-guard-node25-compatibility'))
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining([evidence]) });
+  });
+
+  it('fails when full Quality omits tag release hygiene', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
     const mutated = workflow.replace(
-      '      - name: Browser test suite\n        run: npm run test:browser',
-      '      - name: Browser test suite\n        background: true\n        run: npm run test:browser',
+      "      - name: Release hygiene guard (tags)\n        if: startsWith(github.ref, 'refs/tags/')\n        run: npm run guard:repo:release-hygiene\n",
+      '',
     );
     expect(mutated).not.toBe(workflow);
-    const fixture = makeRepo({ files: { '.github/workflows/tag-release-gate.yml': mutated } });
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
     const result = checkSafeguards(fixture);
 
     expect(result.ok).toBe(false);
-    expect(result.checks.find((check) => check.id === 'tag-release-console-design-chain'))
+    expect(result.checks.find((check) => check.id === 'quality-ci-lane-partition'))
       .toMatchObject({
         status: 'fail',
-        evidence: expect.arrayContaining(['run: npm run test:browser must not declare background']),
-      });
-  });
-
-  it('fails when a required browser proof moves outside the tag-release job', () => {
-    const workflow = requiredFiles['.github/workflows/tag-release-gate.yml'];
-    const removed = workflow.replace(
-      '      - name: Browser test suite\n        run: npm run test:browser',
-      '      - name: Browser test suite\n        run: echo misplaced',
-    );
-    expect(removed).not.toBe(workflow);
-    const mutated = removed.replace('jobs:\n  release-gate:', [
-      'jobs:',
-      '  unrelated:',
-      '    runs-on: ubuntu-latest',
-      '    steps:',
-      '      - name: Misplaced browser proof',
-      '        run: npm run test:browser',
-      '  release-gate:',
-    ].join('\n'));
-    expect(mutated).not.toBe(removed);
-    const fixture = makeRepo({ files: { '.github/workflows/tag-release-gate.yml': mutated } });
-    const result = checkSafeguards(fixture);
-
-    expect(result.ok).toBe(false);
-    expect(result.checks.find((check) => check.id === 'tag-release-console-design-chain'))
-      .toMatchObject({
-        status: 'fail',
-        evidence: expect.arrayContaining([
-          'workflow must contain exactly one run: npm run test:browser step (found 0)',
-        ]),
+        evidence: expect.arrayContaining(['full Node 24 worker must run release hygiene on tag refs']),
       });
   });
 

@@ -13,7 +13,7 @@ import sys
 import tempfile
 
 from bounded_github import _reject_constant, _unique_object
-from github_binding import VerifiedGitHubBinding
+from github_binding import VerifiedScannerBinding
 from private_scanner_candidate import (
     BoundaryError, RunnerPlan, VerifiedScannerBundle,
     build_scanner_environment, run_scanner_privately, verify_scanner_bundle,
@@ -134,7 +134,7 @@ def require_supported_driver() -> None:
 
 def qualify_runtime(
     scanner: VerifiedScannerBundle,
-    binding: VerifiedGitHubBinding,
+    binding: VerifiedScannerBinding,
     *,
     python: Path,
     bash: Path,

@@ -149,6 +149,7 @@ describe('push-gate manifest registry (#2224)', () => {
       'WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT',
       'WHATSOUP_SKIP_NODE_PIN_CHECK',
       'WHATSOUP_SKIP_BOUNDARY_CHECK',
+      'WHATSOUP_SKIP_ESLINT_FITNESS',
     ]);
   });
 
@@ -197,16 +198,20 @@ describe('push-gate manifest registry (#2224)', () => {
   it('the child env allowlist excludes the neutralized skip-vars and passes WHATSOUP_* through', async () => {
     const { pushGateChildEnv } = await import('../../scripts/push-gate.ts');
     process.env.WHATSOUP_SKIP_DOC_DRIFT = '1';
+    process.env.WHATSOUP_SKIP_ESLINT_FITNESS = '1';
     process.env.WHATSOUP_TEST_PASSTHROUGH_PROBE = 'probe';
     try {
       const env = pushGateChildEnv();
       expect(env.WHATSOUP_SKIP_DOC_DRIFT).toBeUndefined();
+      expect(env.WHATSOUP_SKIP_ESLINT_FITNESS).toBeUndefined();
       expect(env.WHATSOUP_TEST_PASSTHROUGH_PROBE).toBe('probe');
       expect(typeof env.PATH).toBe('string');
       delete process.env.WHATSOUP_SKIP_DOC_DRIFT;
+      delete process.env.WHATSOUP_SKIP_ESLINT_FITNESS;
       delete process.env.WHATSOUP_TEST_PASSTHROUGH_PROBE;
     } finally {
       delete process.env.WHATSOUP_SKIP_DOC_DRIFT;
+      delete process.env.WHATSOUP_SKIP_ESLINT_FITNESS;
       delete process.env.WHATSOUP_TEST_PASSTHROUGH_PROBE;
     }
   });

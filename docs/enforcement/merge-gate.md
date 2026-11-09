@@ -14,9 +14,11 @@ is **NOT** sufficient and does not substitute for the full gate.
 
 ## Why a vitest subset is not sufficient (the invariant)
 
-CI's `quality` job (`.github/workflows/quality.yml`) runs the **entire** test
-suite via `npm run coverage:check` (`vitest run --coverage`, a strict superset
-of a plain `vitest run`), plus every `guard:*` script. The complete gate is:
+CI's full profile (`.github/workflows/quality.yml`) runs the **entire** root test
+suite via `npm run coverage:check` (`vitest run --coverage`), plus its guard,
+Python, browser and compatibility jobs. Change-aware PR profiles are described
+in [testing paths](../testing.md); they do not change the local push hook's
+curated obligations. The conservative triage union is:
 
 ```
 required = (functional suites that reference the changed files' modules)
@@ -36,7 +38,7 @@ This has bitten us twice:
 
 `verify:push:branch` runs the guard scripts plus a FIXED enumerated subset of
 vitest suites — it is intentionally faster than CI and does **not** itself run
-the full `vitest run`. The invariant is therefore enforced by CI's full suite,
+the full `vitest run`. The union is therefore covered by CI's full profile,
 and locally the safe move is: **run `verify:push:branch`** (which, together with
 its guard scripts, is the proven local proxy), and when in doubt run the full
 `npm run coverage:check` before pushing.
@@ -66,6 +68,11 @@ It prints `required = functional ∪ fitness` for the given change:
   `*guard*` / `*fitness*` suite), regardless of what changed (closes the #1514
   class).
 
-The script is **WARN-tier / informational**: it always exits 0 and mutates
-nothing. It is a triage aid to make the required set explicit, **not** a
+The script is **WARN-tier / informational** on valid input and mutates nothing.
+Malformed arguments or unresolved inputs exit nonzero. It is a triage aid to make the required set explicit, **not** a
 substitute for `npm run verify:push:branch`.
+
+For bounded iteration, `npm run --silent test:plan -- --base origin/main --json` explains
+the selected profile without installing dependencies. `npm run test:affected`
+executes that selection with worker and time limits. A focused `--suite` run
+reports omitted work and cannot substitute for a complete gate.

@@ -10,6 +10,10 @@ Read the relevant specification or runbook before changing its behavior.
   runs through Node's native type stripping; the console has a separate build.
 - Tests: `npm test`. Vitest uses a 10-second test timeout. Use
   `--pool=forks` for stability.
+- For iteration, inspect `npm run --silent test:plan -- --base origin/main --json`, then
+  run `npm run --silent test:affected -- --base origin/main --json`. See
+  [testing paths](docs/testing.md) for scope, worker limits, time budgets and exits.
+  A focused lane is partial evidence; full validation remains required for high-risk work.
 - Type checking: `npm run typecheck`.
 - Source lint: `npm run guard:lint:src`. Architectural fitness warnings are advisory;
   lint errors and configuration faults fail the check.
@@ -40,7 +44,9 @@ read each match in context. Stale claims about shipped behavior block release.
 Local push checks cover a curated subset of CI. Both `verify:push:branch` and
 `verify:release` use [the gate manifest](scripts/push-gate.ts); its
 [registry test](tests/scripts/push-gate-manifest.test.ts) protects membership.
-CI's `coverage:check` runs the full suite. A green push hook alone is insufficient.
+CI selects documentation, affected, or full validation from the changed paths.
+The full profile's `coverage:check` runs the complete root suite. A green push
+hook or focused lane alone is insufficient.
 
 Before pushing changes to tests, file sizes or fitness/coverage surfaces, run the
 affected tests directly with `npx vitest run --pool=forks <test-files>`.

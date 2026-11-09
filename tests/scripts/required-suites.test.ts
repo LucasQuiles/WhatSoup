@@ -1,7 +1,7 @@
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   isFitnessGuardSuite,
@@ -9,7 +9,16 @@ import {
   functionalSuites,
   fitnessGuardSuites,
   computeRequiredSuites,
+  resolveChangedFiles,
 } from '../../scripts/required-suites.ts';
+
+const fixtureDirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of fixtureDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 /**
  * Build a fixture repo with a `tests/` tree. Each entry is a repo-relative test
@@ -17,6 +26,7 @@ import {
  */
 function makeFixture(files: Record<string, string>): string {
   const dir = mkdtempSync(path.join(tmpdir(), 'required-suites-'));
+  fixtureDirs.push(dir);
   for (const [rel, body] of Object.entries(files)) {
     const abs = path.join(dir, rel);
     mkdirSync(path.dirname(abs), { recursive: true });
@@ -43,6 +53,10 @@ describe('isFitnessGuardSuite', () => {
     expect(isFitnessGuardSuite('tests/runtimes/agent/recovery-probe-validity.test.ts')).toBe(false);
     expect(isFitnessGuardSuite('tests/scripts/helper.ts')).toBe(false);
   });
+
+  it('recognizes TSX suites as test suites', () => {
+    expect(isFitnessGuardSuite('tests/scripts/console-policy-guard.test.tsx')).toBe(true);
+  });
 });
 
 describe('referenceTokens', () => {
@@ -61,11 +75,13 @@ describe('fitnessGuardSuites (∪-ALL half — closes the #1514 gap)', () => {
     const dir = makeFixture({
       'tests/scripts/dedup-reaccumulation-guard.test.ts': 'test',
       'tests/scripts/fitness-file-size-warning-budget.test.ts': 'test',
+      'tests/scripts/console-policy-guard.test.tsx': 'test',
       'tests/core/plain.test.ts': 'test',
     });
     const fitness = fitnessGuardSuites(dir);
     expect(fitness).toContain('tests/scripts/dedup-reaccumulation-guard.test.ts');
     expect(fitness).toContain('tests/scripts/fitness-file-size-warning-budget.test.ts');
+    expect(fitness).toContain('tests/scripts/console-policy-guard.test.tsx');
     expect(fitness).not.toContain('tests/core/plain.test.ts');
   });
 });
@@ -90,6 +106,34 @@ describe('functionalSuites (referencing half — closes the #1507 gap)', () => {
     });
     const functional = functionalSuites(dir, ['tests/core/thing.test.ts']);
     expect(functional).toEqual(['tests/core/thing.test.ts']);
+  });
+
+  it('includes a changed TSX suite directly', () => {
+    const dir = makeFixture({
+      'tests/console/thing.test.tsx': 'test',
+    });
+    const functional = functionalSuites(dir, ['tests/console/thing.test.tsx']);
+    expect(functional).toEqual(['tests/console/thing.test.tsx']);
+  });
+});
+
+describe('resolveChangedFiles', () => {
+  it('does not mistake the --base value for a changed path', () => {
+    const result = resolveChangedFiles('/unused', [
+      '--base',
+      'origin/release',
+      'src/console/App.tsx',
+    ]);
+
+    expect(result).toEqual({ changed: ['src/console/App.tsx'], source: 'args' });
+  });
+
+  it('rejects unknown options, missing option values, and unsafe explicit paths', () => {
+    expect(() => resolveChangedFiles('/unused', ['--unexpected'])).toThrow('Unknown option');
+    expect(() => resolveChangedFiles('/unused', ['--base'])).toThrow('Missing value for --base');
+    expect(() => resolveChangedFiles('/unused', ['../src/core/server.ts'])).toThrow('Unsafe path');
+    expect(() => resolveChangedFiles('/unused', ['/tmp/server.ts'])).toThrow('Unsafe path');
+    expect(() => resolveChangedFiles('/unused', ['src/core/server\n.ts'])).toThrow('Unsafe path');
   });
 });
 

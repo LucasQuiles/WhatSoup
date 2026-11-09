@@ -23,7 +23,7 @@ if __name__ == "__main__":
 
 from bounded_github import GitHubClient
 from github_binding import CHECK_NAME
-from private_check import evaluate_private_run
+from private_check import evaluate_private_non_pr_run, evaluate_private_run
 from private_git import PrivateGitSource, acquire_verified_private_bundle, make_bounded_git_runner
 from private_scanner_candidate import BoundaryError
 import scanner_runtime
@@ -48,6 +48,26 @@ def _digest(value: str) -> str:
     return value
 
 
+def _workflow_run_identity(name: str) -> int:
+    value = os.environ.get(name)
+    if not isinstance(value, str) or not value.isascii() or not value.isdecimal() or not 0 < int(value) < 2**63:
+        raise BoundaryError("trusted workflow run identity is invalid")
+    return int(value)
+
+
+def _receipt_path(value: Path, parent: Path) -> Path:
+    if (
+        not isinstance(value, Path)
+        or value.name != "receipt.json"
+        or not value.is_absolute()
+        or value.parent != parent
+        or value.exists()
+        or value.is_symlink()
+    ):
+        raise BoundaryError("private receipt path is invalid")
+    return value
+
+
 def _terminate(signum: int, _frame) -> None:
     # Let the existing bundle and process owners unwind before the watchdog kills.
     raise SystemExit(128 + signum)
@@ -61,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument(f"--{name}", required=True, type=Path)
         parser.add_argument(f"--{name}-sha256", required=True, type=_digest)
     parser.add_argument("--trusted-path", required=True)
+    parser.add_argument("--receipt", type=Path)
     args = parser.parse_args(argv)
     conclusion = "inconclusive"
     previous_handler = signal.signal(signal.SIGTERM, _terminate)
@@ -92,10 +113,23 @@ def main(argv: list[str] | None = None) -> int:
             finally:
                 rmtree(source.checkout)
 
-        result = evaluate_private_run(
-            client, args.run_id, "refs/heads/main", scanner_bundle,
-            trusted_path=args.trusted_path, timeout_seconds=300, runtime_check=runtime_check,
-        )
+        if args.receipt is None:
+            result = evaluate_private_run(
+                client, args.run_id, "refs/heads/main", scanner_bundle,
+                trusted_path=args.trusted_path, timeout_seconds=300, runtime_check=runtime_check,
+            )
+        else:
+            result = evaluate_private_non_pr_run(
+                client,
+                args.run_id,
+                scanner_bundle,
+                trusted_path=args.trusted_path,
+                timeout_seconds=300,
+                runtime_check=runtime_check,
+                receipt_path=_receipt_path(args.receipt, parent),
+                scanner_run_id=_workflow_run_identity("GITHUB_RUN_ID"),
+                scanner_run_attempt=_workflow_run_identity("GITHUB_RUN_ATTEMPT"),
+            )
         if type(result.conclusion) is not str or result.conclusion not in {"pass", "fail", "inconclusive"}:
             raise BoundaryError("private workflow result is invalid")
         conclusion = result.conclusion

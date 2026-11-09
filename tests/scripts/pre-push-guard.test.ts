@@ -26,6 +26,8 @@ import {
   CI_EXEMPT_PUSH_GATE_GUARDS,
   namedInCi as namedInCiWorkflow,
   pushGateGuards as pushGateGuardsOf,
+  readGateInputs,
+  scriptReachability,
 } from '../helpers/gate-membership.ts';
 import { BRANCH_STEPS, RELEASE_STEPS } from '../../scripts/push-gate.ts';
 
@@ -48,6 +50,7 @@ const gateChain = (scriptName: string): string =>
       : packageJson.scripts[scriptName];
 const vitestConfig = readFileSync(resolve(repoRoot, 'vitest.config.ts'), 'utf8');
 const qualityWorkflow = readFileSync(resolve(repoRoot, '.github/workflows/quality.yml'), 'utf8');
+const prMetadataWorkflow = readFileSync(resolve(repoRoot, '.github/workflows/pr-metadata.yml'), 'utf8');
 const qualityGuardrailsChecklist = readFileSync(
   resolve(repoRoot, 'docs/contributing/quality-guardrails-checklist.md'),
   'utf8',
@@ -1094,11 +1097,32 @@ describe('verify chain composition (push-gate manifest)', () => {
     expect(release).not.toMatch(/\bnpm run verify:console-design(?:\s|$)/);
   });
 
-  it('retains design guard tests where no full-suite coverage run precedes design checks', () => {
+  it('starts direct tag Quality validation and consumes its trusted private receipt', () => {
     expect(branchChain).toMatch(
       /\bnpm run verify:console-design(?:\s|$)/,
     );
-    expect(tagReleaseWorkflow).toContain('run: npm run verify:console-design');
+    expect(qualityWorkflow).toContain("tags:\n      - 'v*'");
+    expect(qualityWorkflow).not.toContain('workflow_call:');
+    expect(qualityWorkflow).not.toContain('TEST_INTEGRITY_DEPLOY_KEY');
+    expect(tagReleaseWorkflow).toContain('workflow_run:');
+    expect(tagReleaseWorkflow).toContain('workflows: [Quality]');
+    expect(tagReleaseWorkflow).toContain('types: [completed]');
+    expect(tagReleaseWorkflow).toContain("github.event.workflow_run.event == 'push'");
+    expect(tagReleaseWorkflow).not.toContain("github.event.workflow_run.conclusion == 'success'");
+    expect(tagReleaseWorkflow).toContain("startsWith(github.event.workflow_run.head_branch, 'v')");
+    expect(tagReleaseWorkflow).toContain('ref: ${{ github.sha }}');
+    expect(tagReleaseWorkflow).toContain('node scripts/private-integrity-release.ts select');
+    expect(tagReleaseWorkflow).toContain('node scripts/private-integrity-release.ts verify --receipt');
+    expect(tagReleaseWorkflow).toContain('merge-multiple: true');
+    expect(tagReleaseWorkflow).not.toContain('TEST_INTEGRITY_DEPLOY_KEY');
+    expect(tagReleaseWorkflow).not.toContain('secrets: inherit');
+    expect(tagReleaseWorkflow).toContain('cancel-in-progress: false');
+    expect(qualityWorkflow).toContain('run: npm run verify:console-design:live');
+    expect(qualityWorkflow).toContain("if: startsWith(github.ref, 'refs/tags/')");
+    expect(qualityWorkflow).toContain('run: npm run guard:repo:release-hygiene');
+    expect(qualityWorkflow).toContain(
+      "cancel-in-progress: ${{ github.event_name != 'merge_group' && !startsWith(github.ref, 'refs/tags/') }}",
+    );
   });
 
   it('runs design metadata checks exactly once for branch and release verification', () => {
@@ -1252,27 +1276,29 @@ describe('verify chain composition (push-gate manifest)', () => {
 });
 
 describe('quality workflow composition', () => {
-  it('runs the PR metadata guard only with authoritative pull-request event data', () => {
+  it('runs the standalone PR metadata guard with authoritative pull-request event data', () => {
     expect(packageJson.scripts['guard:pr-metadata']).toBe(
       'bash scripts/run-with-pinned-node.sh scripts/pr-metadata-guard.ts',
     );
     expect(branchChain).toContain(
       'tests/scripts/pr-metadata-guard.test.ts',
     );
-    expect(qualityWorkflow).toMatch(
+    expect(prMetadataWorkflow).toMatch(
+      /on:\n  pull_request:\n    types: \[opened, synchronize, reopened, edited\]/,
+    );
+    expect(prMetadataWorkflow).toMatch(
       /- name: PR metadata guard\n        if: github\.event_name == 'pull_request'\n        env:\n          PR_METADATA_EVENT: \$\{\{ github\.event_path \}\}\n        run: npm run guard:pr-metadata -- --github-event "\$PR_METADATA_EVENT" --json/,
     );
+    expect(qualityWorkflow).toMatch(/pull_request:\n    types: \[opened, synchronize, reopened\]/);
   });
 
-  it('runs one read-only Node 24 semantic shadow step before integrity and expensive suites', () => {
+  it('runs one read-only Node 24 semantic shadow step before expensive suites', () => {
     const semanticMatches = qualityWorkflow.match(/name: Semantic quality \(shadow\)/g) ?? [];
     const semanticIndex = qualityWorkflow.indexOf('name: Semantic quality (shadow)');
-    const integrityInstallIndex = qualityWorkflow.indexOf('name: Install test-integrity plugin');
     const suiteIndex = qualityWorkflow.indexOf('name: Test suite + coverage thresholds');
 
     expect(semanticMatches).toHaveLength(1);
     expect(semanticIndex).toBeGreaterThanOrEqual(0);
-    expect(semanticIndex).toBeLessThan(integrityInstallIndex);
     expect(semanticIndex).toBeLessThan(suiteIndex);
     expect(qualityWorkflow).toContain('name: quality (24.x)');
     expect(qualityWorkflow).not.toContain("if: matrix.node == '24.x'");
@@ -1286,31 +1312,14 @@ describe('quality workflow composition', () => {
     expect(qualityWorkflow).not.toContain('path: semantic-quality.json');
   });
 
-  it('installs the private test-integrity plugin before requiring the baseline gate', () => {
-    const installIndex = qualityWorkflow.indexOf('name: Install test-integrity plugin');
-    const gateIndex = qualityWorkflow.indexOf('name: Test integrity baseline check');
-
-    expect(installIndex).toBeGreaterThanOrEqual(0);
-    expect(gateIndex).toBeGreaterThan(installIndex);
-    expect(qualityWorkflow).toContain('TEST_INTEGRITY_DEPLOY_KEY');
-    expect(qualityWorkflow).toContain('LucasQuiles/test-integrity.git');
-    expect(qualityWorkflow).toContain('TEST_INTEGRITY_COMMIT: ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c');
-    expect(qualityWorkflow).toContain('mkdir -p "$plugin_dir" "$HOME/.ssh"');
-    expect(qualityWorkflow).toContain('fetch --depth 1 origin "$TEST_INTEGRITY_COMMIT"');
-    expect(qualityWorkflow).toContain('if [ "$observed_commit" != "$TEST_INTEGRITY_COMMIT" ]; then');
-    expect(qualityWorkflow).not.toContain('git clone --depth 1');
-    expect(qualityWorkflow).not.toMatch(/git -C "\$plugin_dir" push/);
-    expect(qualityWorkflow).toContain("WHATSOUP_REQUIRE_TEST_INTEGRITY: '1'");
-  });
-
   it('uses the shared quality installer before Python-backed gates run', () => {
     const setupPythonIndex = qualityWorkflow.indexOf('name: Setup Python 3.12');
     const pythonDepsIndex = qualityWorkflow.indexOf('name: Host dependency profile (strict)');
-    const testIntegrityIndex = qualityWorkflow.indexOf('name: Test integrity baseline check');
+    const tokenomicsIndex = qualityWorkflow.indexOf('name: Tokenomics Python tests');
 
     expect(setupPythonIndex).toBeGreaterThanOrEqual(0);
     expect(pythonDepsIndex).toBeGreaterThan(setupPythonIndex);
-    expect(testIntegrityIndex).toBeGreaterThan(pythonDepsIndex);
+    expect(tokenomicsIndex).toBeGreaterThan(pythonDepsIndex);
     expect(qualityWorkflow).toMatch(/uses: actions\/setup-python@[0-9a-f]{40}/);
     expect(qualityWorkflow).toContain("python-version: '3.12'");
     expect(qualityWorkflow).toContain('install-host-dependencies.sh --profile quality --apply --yes --json');
@@ -1319,16 +1328,16 @@ describe('quality workflow composition', () => {
   });
 
   it('preserves exact required contexts while isolating Node 25 compatibility work', () => {
-    const compatibilityStart = qualityWorkflow.indexOf('  compatibility:');
+    const compatibilityStart = qualityWorkflow.indexOf('  compatibility-full:');
     const nextJob = qualityWorkflow.indexOf('  bot-errors-health-macos:', compatibilityStart);
     const compatibility = qualityWorkflow.slice(compatibilityStart, nextJob);
 
     expect(qualityWorkflow).toContain('name: quality (24.x)');
     expect(qualityWorkflow).toContain("node-version-file: '.nvmrc'");
-    expect(compatibility).toContain('name: quality (25.x)');
+    expect(compatibility).toContain('name: Quality full (25.x)');
     expect(qualityWorkflow).not.toContain('matrix:');
     expect(compatibility).toContain("node-version: '25.x'");
-    expect(compatibility).toContain('run: npm test -- --pool=forks');
+    expect(compatibility).toContain('run: node --experimental-strip-types scripts/full-suite-battery.ts --pool=forks');
     expect(compatibility).toContain('run: npm --prefix console run build');
     expect(compatibility).not.toContain('coverage:check');
     expect(compatibility).not.toContain('guard:');
@@ -1368,8 +1377,9 @@ describe('quality workflow composition', () => {
   });
 
   it('fetches one fail-closed PR base snapshot before every authority consumer', () => {
-    const compatibilityIndex = qualityWorkflow.indexOf('  compatibility:');
-    const authority = qualityWorkflow.slice(0, compatibilityIndex);
+    const fullStart = qualityWorkflow.indexOf('  full:');
+    const compatibilityIndex = qualityWorkflow.indexOf('  compatibility-full:', fullStart);
+    const authority = qualityWorkflow.slice(fullStart, compatibilityIndex);
     const fetchCommand =
       'git fetch origin "$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"';
     const fetchLines = authority
@@ -1405,8 +1415,9 @@ describe('quality workflow composition', () => {
   });
 
   it('relies on authoritative coverage instead of rerunning repo-hygiene tests', () => {
-    const compatibilityIndex = qualityWorkflow.indexOf('  compatibility:');
-    const authority = qualityWorkflow.slice(0, compatibilityIndex);
+    const fullStart = qualityWorkflow.indexOf('  full:');
+    const compatibilityIndex = qualityWorkflow.indexOf('  compatibility-full:', fullStart);
+    const authority = qualityWorkflow.slice(fullStart, compatibilityIndex);
     const stagedIndex = authority.indexOf('npm run guard:repo:staged');
     const branchDiffIndex = authority.indexOf('npm run guard:repo:branch-diff');
     const commitAuthorIndex = authority.indexOf('npm run guard:repo:commit-authors');
@@ -1441,20 +1452,15 @@ describe('quality workflow composition', () => {
     expect(qualityWorkflow).toContain('name: BOT ERRORS sentinel coverage and deployer mutation gate');
   });
 
-  it('runs the standalone guard package test workflow', () => {
+  it('keeps the standalone Node 25 guard package compatibility workflow', () => {
+    expect(whatsoupGuardWorkflow).toContain("node: ['25.x']");
+    expect(whatsoupGuardWorkflow).not.toContain("'24.x'");
+    expect(whatsoupGuardWorkflow).toContain('node-version: ${{ matrix.node }}');
+    expect(whatsoupGuardWorkflow).toContain('run: npm run typecheck');
     expect(whatsoupGuardWorkflow).toContain('run: npm test');
     expect(whatsoupGuardWorkflow).not.toContain('npm run coverage:proof');
   });
 
-  it('documents tag commit-author gate range semantics without changing enforcement', () => {
-    const commentIndex = tagReleaseWorkflow.indexOf('keeps guard:repo:commit-authors wired on tag pushes');
-    const stepIndex = tagReleaseWorkflow.indexOf('name: Repo commit-authors');
-
-    expect(commentIndex).toBeGreaterThanOrEqual(0);
-    expect(stepIndex).toBeGreaterThan(commentIndex);
-    expect(tagReleaseWorkflow).toContain('PR and local push gates remain the authoritative non-vacuous author scans.');
-    expect(tagReleaseWorkflow).toContain('run: npm run guard:repo:commit-authors');
-  });
 });
 
 /**
@@ -1493,7 +1499,8 @@ describe('pre-push guard — local/CI enforcement parity for guard steps', () =>
   });
 
   it('every push-gate guard is either a named CI step or an explicitly justified exemption', () => {
-    const unbacked = pushGateGuards.filter((g) => !namedInCi(g) && !(g in CI_EXEMPT_PUSH_GATE_GUARDS));
+    const gate = readGateInputs(repoRoot);
+    const unbacked = pushGateGuards.filter((g) => !scriptReachability(g, gate).reachable);
     expect(
       unbacked,
       unbacked.length === 0

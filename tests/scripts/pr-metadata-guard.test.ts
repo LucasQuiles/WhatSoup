@@ -64,14 +64,17 @@ function makeUnrelatedRootOid(repo: string): string {
 }
 
 describe('PR metadata guard', () => {
-  it('receives fresh PR metadata after edits while preserving normal PR qualification events', () => {
-    const workflow = parse(readFileSync(path.join(REPO_ROOT, '.github/workflows/quality.yml'), 'utf8'));
-    const activities = workflow.on.pull_request?.types ?? ['opened', 'synchronize', 'reopened'];
+  it('receives fresh PR metadata after edits without stalling merge-group required checks', () => {
+    const metadataWorkflow = parse(readFileSync(path.join(REPO_ROOT, '.github/workflows/pr-metadata.yml'), 'utf8'));
+    const qualityWorkflow = parse(readFileSync(path.join(REPO_ROOT, '.github/workflows/quality.yml'), 'utf8'));
+    const activities = metadataWorkflow.on.pull_request?.types ?? ['opened', 'synchronize', 'reopened'];
 
     for (const activity of ['opened', 'synchronize', 'reopened', 'edited']) {
-      expect(activities, `Quality must receive ${activity} PR events`).toContain(activity);
+      expect(activities, `metadata must receive ${activity} PR events`).toContain(activity);
     }
-    const guard = workflow.jobs.quality.steps.find((step: { name: string }) => step.name === 'PR metadata guard');
+    expect(metadataWorkflow.on).toHaveProperty('merge_group');
+    expect(qualityWorkflow.on.pull_request?.types).not.toContain('edited');
+    const guard = metadataWorkflow.jobs.metadata.steps.find((step: { name: string }) => step.name === 'PR metadata guard');
     expect(guard).toMatchObject({
       if: "github.event_name == 'pull_request'",
       env: { PR_METADATA_EVENT: '${{ github.event_path }}' },
