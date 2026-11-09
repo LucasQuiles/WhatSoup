@@ -50,7 +50,6 @@ read-only scanner deploy key stored in that environment. A completed same-reposi
 pull request run of Quality triggers trusted default-branch code. Candidate test
 files are retrieved as immutable Git data; candidate code, hooks, configuration and
 package scripts are not executed. The scanner and its diagnostics remain private.
-
 The driver validates the current pull request head and base, qualifies the pinned
 Linux/Python 3.12 scanner runtime, removes its owned private checkout and temporary
 bundle, and rechecks the pull request before publishing `test-integrity (private)`.
@@ -542,7 +541,7 @@ Two constraints to respect if a queue ever becomes possible:
 - `whatsoup-guard.yml` is path-filtered and must **never** be made a required context while a queue is live — a PR not touching those paths would never report it, stalling the queue.
 - `CodeQL` is GitHub-managed default setup (it runs as event `dynamic`, with no in-repo workflow), so its behaviour on a `merge_group` ref cannot be configured or verified in advance. Treat enabling a queue as a canary exercise on a single low-risk PR, not a fleet-wide switch.
 
-**Action pinning.** All external action `uses:` refs are pinned to 40-hex commit SHAs (R-03, PR #2024) — verified 14/14 pinned, 0 mutable `@vN` tags.
+**Action pinning.** External action `uses:` refs are pinned to 40-hex commit SHAs (R-03, PR #2024); action updates are reviewed source changes, never floating tags.
 
 To inspect: `gh api repos/LucasQuiles/WhatSoup/rulesets/16319133 | jq '.rules[].type'` and `gh api repos/LucasQuiles/WhatSoup/branches/main/protection`.
 To modify the ruleset: `gh api --method PUT repos/LucasQuiles/WhatSoup/rulesets/16319133 --input <json>` (PUT replaces the whole ruleset — include all existing rules or they are dropped).
