@@ -1435,7 +1435,9 @@ export class SessionManager {
   }
 
   private captureChildTreeAuthority(child: ReturnType<typeof spawn>): void {
-    this.childTreeAuthorities.set(child, captureProcessTreeRootAuthority(child));
+    if (!this.childTreeAuthorities.has(child)) {
+      this.childTreeAuthorities.set(child, captureProcessTreeRootAuthority(child));
+    }
   }
 
   private assertLifecycleAdmissionReady(): void {
@@ -1581,6 +1583,7 @@ export class SessionManager {
         pending.child = child;
         this.trackChildGeneration(child, generation);
         this.childEnvs.set(child, env);
+        this.captureChildTreeAuthority(child);
       },
       onAbort: async (child) => {
         await this.killChildTree(child, 'SIGTERM');

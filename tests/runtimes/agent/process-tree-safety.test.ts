@@ -436,6 +436,43 @@ describe('process-tree fail-closed safety', () => {
     expect(killSpy).not.toHaveBeenCalled();
   });
 
+  it('does not signal a later descendant whose PID was reused after an earlier signal', async () => {
+    let childReused = false;
+    let rootAlive = true;
+    let grandchildAlive = true;
+    const target = {
+      pid: ROOT_PID,
+      exitCode: null,
+      signalCode: null,
+      kill: vi.fn(() => { rootAlive = false; return true; }),
+    };
+    birthTokenMock.mockImplementation((pid: number) =>
+      pid === CHILD_PID && childReused ? 'birth:replacement' : `birth:${pid}`,
+    );
+    killSpy.mockImplementation((pid: number) => {
+      if (pid === LATE_CHILD_PID) {
+        grandchildAlive = false;
+        childReused = true;
+      }
+      return true;
+    });
+    execFileSyncMock.mockImplementation(() => census([
+      { pid: process.pid, ppid: 1, pgid: process.pid, command: 'vitest-parent' },
+      ...(rootAlive ? [{ pid: ROOT_PID, ppid: process.pid, pgid: ROOT_PID, command: 'provider-root' }] : []),
+      { pid: CHILD_PID, ppid: ROOT_PID, pgid: ROOT_PID, command: 'provider-child' },
+      ...(grandchildAlive ? [{ pid: LATE_CHILD_PID, ppid: CHILD_PID, pgid: ROOT_PID, command: 'provider-grandchild' }] : []),
+    ]));
+
+    await expect(killSessionTree(target, 'SIGKILL', {
+      generationMarker: 'between-signal-reuse',
+      killGraceMs: 0,
+    })).resolves.toMatchObject({ outcome: 'terminated', signaledProcessCount: 2 });
+
+    expect(killSpy).toHaveBeenCalledWith(LATE_CHILD_PID, 'SIGKILL');
+    expect(killSpy).not.toHaveBeenCalledWith(CHILD_PID, expect.anything());
+    expect(target.kill).toHaveBeenCalledWith('SIGKILL');
+  });
+
   it('does not adopt a foreign numeric root without pre-existing birth authority', async () => {
     const foreign = census([
       { pid: process.pid, ppid: 1, pgid: process.pid, command: 'vitest-parent' },

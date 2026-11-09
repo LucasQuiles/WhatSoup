@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 
 const admission = vi.hoisted(() => ({
@@ -20,16 +20,19 @@ const processIsolation = vi.hoisted(() => ({
   launch: vi.fn(),
 }));
 
+const processObservation = vi.hoisted(() => ({ census: vi.fn() }));
+
 vi.mock('../../../src/logger.ts', async () => (await import('../../helpers/logger-mock.ts')).loggerMock());
 vi.mock('node:os', () => ({ homedir: vi.fn(() => '/mock/home'), userInfo: vi.fn(() => ({ username: 'test' })) }));
 vi.mock('node:fs', () => ({ readFileSync: vi.fn() }));
-vi.mock('node:child_process', () => ({ spawn: vi.fn() }));
-vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
-  captureProcessTreeRootAuthority: vi.fn((target: { pid: number }) => ({
-    pid: target.pid,
-    parentPid: process.pid,
-    birthToken: `birth:${target.pid}`,
-  })),
+vi.mock('node:child_process', () => ({ spawn: vi.fn(), execFileSync: processObservation.census }));
+vi.mock('../../../src/lib/process-identity.ts', () => ({
+  probeProcessBirthToken: (pid: number) => `birth:${pid}`,
+  probeProcessBirthTokens: (pids: readonly number[]) => new Map(pids.map((pid) => [pid, `birth:${pid}`])),
+  processBirthTokenSupportsNumericSignal: () => false,
+}));
+vi.mock('../../../src/runtimes/agent/process-tree.ts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../src/runtimes/agent/process-tree.ts')>(),
   bindProcessTreeRootAuthority: vi.fn(() => true),
   killSessionTree: vi.fn(async (child: { kill(signal: NodeJS.Signals): boolean }, signal: NodeJS.Signals) => {
     child.kill(signal);
@@ -52,12 +55,6 @@ vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
     diagnosticState: 'complete' as const,
     diagnosticCodes: [],
   })),
-  ProcessTreeTerminationError: class ProcessTreeTerminationError extends Error {
-    readonly retryClass = 'census_retryable';
-    constructor(readonly code: string, message: string) {
-      super(message);
-    }
-  },
 }));
 vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   createSession: vi.fn(() => 9), incrementMessageCount: vi.fn(), updateSessionId: vi.fn(),
@@ -81,7 +78,7 @@ vi.mock('../../../src/lib/keyring.ts', async (importOriginal) => {
   return { ...actual, lookupCredential: vi.fn(() => null) };
 });
 
-import { killSessionTree } from '../../../src/runtimes/agent/process-tree.ts';
+import { killSessionTree, resetProcessTreeTerminationLeasesForTesting } from '../../../src/runtimes/agent/process-tree.ts';
 import { resolveResumableAgentSession, updateResumedSessionStatus } from '../../../src/runtimes/agent/session-db.ts';
 import { SessionManager, type SessionManagerOptions } from '../../../src/runtimes/agent/session.ts';
 import { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
@@ -169,6 +166,55 @@ describe('SessionManager host work admission', () => {
     admission.spawn.mockReset();
     admission.enabled.mockReturnValue(true);
     processIsolation.launch.mockReset();
+    processObservation.census.mockReset();
+  });
+
+  afterEach(() => {
+    resetProcessTreeTerminationLeasesForTesting();
+  });
+
+  it.each(['abort', 'invalidation'] as const)('reaps a pending admitted child through real authority checks after %s', async (mode) => {
+    const reaper = await vi.importActual<typeof import('../../../src/runtimes/agent/process-tree.ts')>(
+      '../../../src/runtimes/agent/process-tree.ts',
+    );
+    vi.mocked(killSessionTree).mockImplementationOnce(reaper.killSessionTree);
+    const child = makeChild();
+    let alive = true;
+    child.kill.mockImplementation(() => { alive = false; return true; });
+    processObservation.census.mockImplementation(() => [
+      'PID PPID PGID STARTED COMMAND',
+      `${process.pid} 1 ${process.pid} Fri Jul 10 08:00:00 2026 vitest-parent`,
+      ...(alive ? [`${child.pid} ${process.pid} ${child.pid} Fri Jul 10 08:00:00 2026 provider-root`] : []),
+    ].join('\n'));
+    let finishAdmission!: () => void;
+    admission.spawn.mockImplementationOnce((options: {
+      signal: AbortSignal;
+      onSpawned: (value: typeof child) => void;
+      onAbort: (value: typeof child) => Promise<void>;
+    }) => {
+      options.onSpawned(child);
+      return new Promise((resolve, reject) => {
+        finishAdmission = () => resolve(child);
+        if (mode === 'abort') {
+          options.signal.addEventListener('abort', () => {
+            void options.onAbort(child).then(() => reject(new admission.error()), reject);
+          }, { once: true });
+        }
+      });
+    });
+    const session = makeSession('claude-cli');
+    await session.spawnSession();
+    const turn = session.sendTurn('old turn');
+    void turn.catch(() => {});
+    await vi.waitFor(() => expect(admission.spawn).toHaveBeenCalledOnce());
+    const reset = session.handleNew();
+    if (mode === 'invalidation') finishAdmission();
+    const [resetResult, turnResult] = await Promise.allSettled([reset, turn]);
+
+    expect(alive).toBe(false);
+    expect(resetResult.status).toBe('fulfilled');
+    expect(turnResult.status).toBe('rejected');
+    expect(session.getStatus()).toMatchObject({ active: false, providerTerminated: true });
   });
 
   it('routes spawn-per-turn providers through the checked UID/GID launcher instead of the host-admission or direct-spawn path', async () => {

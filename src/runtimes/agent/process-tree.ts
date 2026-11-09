@@ -1066,6 +1066,11 @@ function signalPid(
   generationMarker: string,
 ): boolean {
   if (currentBirthToken === null || currentBirthToken !== identity.birthToken) return false;
+  // Earlier signals can let a later PID exit and be reused after the batch census.
+  if (
+    processBirthTokenSupportsNumericSignal(identity.birthToken)
+    && probeProcessBirthToken(identity.pid) !== identity.birthToken
+  ) return false;
   try {
     let delivered: unknown;
     if (identity.pid === rootPid) {
