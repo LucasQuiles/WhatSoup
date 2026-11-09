@@ -4,7 +4,8 @@
  * does not have. Materializes a content-addressed release directory from an
  * EXACT commit (never the working tree), writes the v2 release manifest, and
  * self-verifies with the same drift checker the fleet runs, so "exported" and
- * "verifiable" can never diverge.
+ * "verifiable" can never diverge, except for host-built required outputs, which
+ * cannot exist yet and are reported as `pendingHostOutputs`.
  *
  * The approval boundary is preserved: this script creates release bytes on
  * disk and nothing else. Repointing a service at the new release and
@@ -29,6 +30,7 @@ import {
   collectReleaseSnapshotDrift,
   createReleaseSnapshotDriftReport,
   createReleaseSnapshotPlan,
+  missingRequiredOutputs,
   type ReleaseSnapshotDriftReport,
   type ReleaseSnapshotManifest,
 } from './release-snapshot-plan.ts';
@@ -271,7 +273,7 @@ export function exportRelease(options: ReleaseExportOptions): ReleaseExportRepor
       fileCount: manifest.files.length,
       treeSha256: manifestTreeSha256(manifest),
       selfCheck,
-      pendingHostOutputs: selfCheck.issues.filter(isPendingHostOutput).flatMap((issue) => (issue.path ? [issue.path] : [])),
+      pendingHostOutputs: missingRequiredOutputs(releasePath, manifest),
       qualificationBundle: stagedQualificationBundle
         ? {
           ...stagedQualificationBundle.report,
@@ -412,9 +414,10 @@ export function run(argv: string[] = process.argv.slice(2), cwd = process.cwd())
   else {
     console.log(`exported ${report.commit} -> ${report.releasePath}`);
     console.log(`files=${report.fileCount} tree=${report.treeSha256}`);
-    console.log(`self-check ok=${report.selfCheck.ok}`);
     if (report.pendingHostOutputs.length > 0) {
-      console.log(`pending host build: ${report.pendingHostOutputs.join(', ')} (docs/runbooks/release-deployment.md)`);
+      console.log(`self-check ok except pending host build: ${report.pendingHostOutputs.join(', ')} (build them on the host: docs/runbooks/release-deployment.md)`);
+    } else {
+      console.log(`self-check ok=${report.selfCheck.ok}`);
     }
     if (report.qualificationBundle) {
       console.log(`qualification bundle=${report.qualificationBundle.manifestPath} sha256=${report.qualificationBundle.manifestSha256}`);

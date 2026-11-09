@@ -273,7 +273,8 @@ describe('release snapshot planning', () => {
   it('requires the built console when the tree ships a console package', () => {
     // The fleet serves the console from <release>/dist, which is built on the host
     // after export. A tree that ships the console source must require that build,
-    // or a release without it reads clean again (the mini7 console 404).
+    // or a release without it reads clean again (the console 404 that
+    // requiredOutputs was built to catch).
     const sourceRoot = makeFixtureSource();
     mkdirSync(path.join(sourceRoot, 'console'), { recursive: true });
     writeFileSync(path.join(sourceRoot, 'console/package.json'), '{"name":"console-fixture"}\n', 'utf8');

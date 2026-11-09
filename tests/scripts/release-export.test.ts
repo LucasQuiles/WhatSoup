@@ -246,15 +246,32 @@ describe('exportRelease', () => {
     // pending, and the standard drift check keeps flagging them until they exist;
     // release:activate refuses the release meanwhile.
     const fixture = makeGitFixture();
-    const report = exportOk(fixture, { requiredOutputs: ['console/dist/index.html'] });
-    expect(report.pendingHostOutputs).toEqual(['console/dist/index.html']);
+    const report = exportOk(fixture, { requiredOutputs: ['generated/output.txt'] });
+    expect(report.pendingHostOutputs).toEqual(['generated/output.txt']);
     expect(createReleaseSnapshotDriftReport(report.releasePath).issues).toEqual([
-      expect.objectContaining({ kind: 'required-output-missing', path: 'console/dist/index.html' }),
+      expect.objectContaining({ kind: 'required-output-missing', path: 'generated/output.txt' }),
     ]);
 
-    mkdirSync(path.join(report.releasePath, 'console/dist'), { recursive: true });
-    writeFileSync(path.join(report.releasePath, 'console/dist/index.html'), '<!doctype html><html></html>\n', 'utf8');
+    mkdirSync(path.join(report.releasePath, 'generated'), { recursive: true });
+    writeFileSync(path.join(report.releasePath, 'generated/output.txt'), 'built on the host\n', 'utf8');
     expect(createReleaseSnapshotDriftReport(report.releasePath).ok).toBe(true);
+  });
+
+  it('still fails closed and leaves no release on any other drift beside a pending output', () => {
+    // Only required-output-missing is tolerated. With no mutable excludes the
+    // staged manifest file reads as an extra file, which must still refuse.
+    const fixture = makeGitFixture();
+    expect(() =>
+      exportRelease({
+        repoRoot: fixture.sourceRoot,
+        commit: fixture.commit,
+        releaseRoot: fixture.releaseRoot,
+        buildTime: '2026-08-26T17:00:00.000Z',
+        requiredOutputs: ['generated/output.txt'],
+        mutablePathExcludes: [],
+      }),
+    ).toThrow(/self-check failed \(extra-file\)/);
+    expect(existsSync(path.join(fixture.releaseRoot, `WhatSoup-release-${fixture.commit.slice(0, 12)}`))).toBe(false);
   });
 
   it('requires the built console for a commit that ships the console package', () => {

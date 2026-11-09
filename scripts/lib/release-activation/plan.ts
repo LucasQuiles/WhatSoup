@@ -21,6 +21,7 @@ import { configRoot, instancePaths } from '../../../src/fleet/paths.ts';
 import { escapeXml } from '../../../src/fleet/platform.ts';
 import { parsePlist } from '../../check-service-units.ts';
 import {
+  missingRequiredOutputs,
   parseReleaseSnapshotManifest,
   RELEASE_MANIFEST_FILE,
   type ReleaseSnapshotManifest,
@@ -733,6 +734,12 @@ export async function buildActivationContext(host: ActivationHost, args: Activat
     const full = next.commit !== null && FULL_COMMIT.test(next.commit);
     check('release-manifest-commit', full, full ? `commit ${next.commit}` : 'manifest source.commit is not a full 40-hex commit');
     if (full) context.newCommit = next.commit;
+    if (next.manifest !== null) {
+      const missingOutputs = missingRequiredOutputs(args.release, next.manifest);
+      check('release-required-outputs-present', missingOutputs.length === 0, missingOutputs.length === 0
+        ? 'every manifest requiredOutputs path exists in the new release'
+        : `host-built outputs missing from the new release: ${missingOutputs.join(', ')} (build them in the release first)`);
+    }
     const requirement = next.manifest === null
       ? { required: null, detail: 'candidate release manifest is unavailable after validation' }
       : releaseBotErrorsRequirement(args.release, next.manifest);
@@ -759,11 +766,6 @@ export async function buildActivationContext(host: ActivationHost, args: Activat
   check('release-entrypoint-present', isRegularFile(bootstrapEntrypointFor(args.release)), 'src/bootstrap.ts in the new release');
   check('release-dependencies-present', isDirectory(path.join(args.release, 'node_modules')),
     'node_modules in the new release (the restart preflight refuses a release without it)');
-  const missingOutputs = (next.manifest?.requiredOutputs ?? [])
-    .filter((relPath) => !existsSync(path.join(args.release, relPath)));
-  check('release-required-outputs-present', missingOutputs.length === 0, missingOutputs.length === 0
-    ? 'every manifest requiredOutputs path exists in the new release'
-    : `host-built outputs missing from the new release: ${missingOutputs.join(', ')} (build them in the release first)`);
 
   check('rollback-release-present', existsSync(wrapperTargetFor(args.expectCurrent)),
     'deploy/whatsoup in the --expect-current release (the rollback target)');

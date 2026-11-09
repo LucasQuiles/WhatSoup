@@ -122,7 +122,8 @@ each selected file is read into memory for hashing. There is no aggregate stagin
 quota or file-count limit. A process crash can leave staging for later inspection;
 it is not evidence of a published or qualified release.
 
-Export properties under those preconditions (all fail closed):
+Export properties under those preconditions (all fail closed, except the pending
+host-built outputs described below):
 
 - source bytes come from `git archive <commit>`, so working-tree drift can
   never leak into a release;
@@ -758,7 +759,11 @@ Older release snapshots without a manifest are reported as `manifest-missing`
 drift. That finding is evidence to re-cut from reviewed source; it is not
 approval to overwrite the release.
 
-Drift findings mean the release is no longer a faithful copy of reviewed source.
+`required-output-missing` on a freshly exported release is not tampering: the
+host build step (the console under `dist/`) has not run yet. Run it as described
+under Dry-Run Planning; `release:activate` refuses the release until then.
+
+All other drift findings mean the release is no longer a faithful copy of reviewed source.
 They do not by themselves authorize deleting the release or replacing it. Decide
 whether to port the lesson back to source, re-cut from merged source, or roll
 back to the prior release path.
