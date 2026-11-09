@@ -58,7 +58,7 @@ const DURATION_MINUTES_ERROR =
  * preserved on purpose (see tests/fleet/routes/silence-zod-equivalence.test.ts's
  * null-body crash case). Because the schemas below only ever see the
  * already-extracted field VALUE, not the raw `data` object, no
- * `z.object`-level `invalid_type_error` override is needed here — there is
+ * `z.object`-level `error` override is needed here — there is
  * no object-shape node in this conversion for a non-object root to hit.
  *
  * `reason` is deliberately NOT modeled — the original ladder never
@@ -68,8 +68,7 @@ const DURATION_MINUTES_ERROR =
  */
 const InstanceFieldSchema = z
   .string({
-    required_error: 'instance is required',
-    invalid_type_error: 'instance is required',
+    error: 'instance is required',
   })
   .min(1, { message: 'instance is required' });
 
@@ -87,8 +86,7 @@ const InstanceFieldSchema = z
  */
 const DurationMinutesFieldSchema = z
   .number({
-    required_error: DURATION_MINUTES_ERROR,
-    invalid_type_error: DURATION_MINUTES_ERROR,
+    error: DURATION_MINUTES_ERROR,
   })
   .gt(0, { message: DURATION_MINUTES_ERROR })
   .max(MAX_SILENCE_MINUTES, { message: DURATION_MINUTES_ERROR });

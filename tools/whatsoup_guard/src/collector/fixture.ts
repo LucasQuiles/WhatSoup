@@ -28,7 +28,7 @@ export type FixtureDoc = z.infer<typeof FixtureDocSchema>;
 
 export const FixtureCollectorOptionsSchema = z.object({
   id: z.string().min(1),
-  docs: z.record(FixtureDocSchema),
+  docs: z.record(z.string(), FixtureDocSchema),
 }).strict().superRefine((opts, ctx) => {
   for (const scopeId of Object.keys(opts.docs)) {
     if (scopeId.length === 0) {

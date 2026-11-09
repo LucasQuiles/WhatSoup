@@ -5,12 +5,11 @@ import { z } from 'zod';
 import { toolError, type ToolDeclaration } from '../types.ts';
 import type { ExtendedBaileysSocket } from '../types.ts';
 import type { PresenceCache } from '../../transport/presence-cache.ts';
-import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
+import { defineSockTool, registerSockTools } from './sock-tool-factory.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- configs have heterogeneous ZodRawShape types; shared array requires any; expires 2026-12-31
-const presenceSockConfigs: SockToolConfig<any>[] = [
-  {
+const presenceSockConfigs = [
+  defineSockTool({
     name: 'send_typing',
     description:
       'Send a typing indicator to the current chat. Use composing, recording, or paused.',
@@ -26,8 +25,8 @@ const presenceSockConfigs: SockToolConfig<any>[] = [
       await sock.sendPresenceUpdate(type, chatJid);
       return { success: true, type };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'subscribe_presence',
     description:
       'Subscribe to presence updates for a WhatsApp contact or group JID (global). After subscribing, presence status will be available via get_presence.',
@@ -40,7 +39,7 @@ const presenceSockConfigs: SockToolConfig<any>[] = [
       await sock.presenceSubscribe(jid);
       return { success: true, jid };
     },
-  },
+  }),
 ];
 
 // ---------------------------------------------------------------------------

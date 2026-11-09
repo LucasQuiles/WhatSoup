@@ -88,7 +88,7 @@ const SqliteSpec  = z.object({
   }),
   // Prefer an array for positional `?` binds (reliable order). A legacy object
   // is still accepted for back-compat, but is unsafe for 2+ integer-like keys.
-  binds: z.union([z.array(z.unknown()), z.record(z.unknown())]).optional(),
+  binds: z.union([z.array(z.unknown()), z.record(z.string(), z.unknown())]).optional(),
   fire_when: z.enum(['rows_returned','rowcount_changed']),
 });
 const PineconeSpec = z.object({

@@ -8,7 +8,7 @@ import { assertConversationAccess, type SessionContext, type ToolDeclaration } f
 import type { Database } from '../../core/database.ts';
 import type { ExtendedBaileysSocket } from '../types.ts';
 import { createChildLogger } from '../../logger.ts';
-import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
+import { defineSockTool, registerSockTools } from './sock-tool-factory.ts';
 import { config } from '../../config.ts';
 import { applyOutboundIdentityGuard } from '../../core/outbound-identity/guard.ts';
 import { SqliteIdentityStore } from '../../core/outbound-identity/store.ts';
@@ -39,9 +39,8 @@ function assertMessageConversationAccess(
 // request_placeholder_resend
 // ---------------------------------------------------------------------------
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- configs have heterogeneous ZodRawShape types; shared array requires any; expires 2026-12-31
-const chatOperationSockConfigs: SockToolConfig<any>[] = [
-  {
+const chatOperationSockConfigs = [
+  defineSockTool({
     name: 'clear_chat',
     description: 'Clear messages from a WhatsApp chat. Provide the message IDs, fromMe flag, and timestamps of the messages to clear.',
     schema: z.object({
@@ -63,8 +62,8 @@ const chatOperationSockConfigs: SockToolConfig<any>[] = [
       log.info({ chatJid, count: messages.length }, 'chat cleared');
       return { success: true, jid: chatJid, messagesCleared: messages.length };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'delete_chat',
     description: 'Delete an entire WhatsApp chat. Requires the last message key and timestamp.',
     schema: z.object({
@@ -90,8 +89,8 @@ const chatOperationSockConfigs: SockToolConfig<any>[] = [
       log.info({ chatJid }, 'chat deleted');
       return { success: true, jid: chatJid };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'delete_message_for_me',
     description: 'Delete a message for yourself only (not for everyone). The message remains visible to others.',
     schema: z.object({
@@ -118,11 +117,11 @@ const chatOperationSockConfigs: SockToolConfig<any>[] = [
       log.info({ chatJid, messageId: message_id }, 'message deleted for me');
       return { success: true, jid: chatJid, messageId: message_id };
     },
-  },
+  }),
   // QR-067: set_disappearing_messages moved to a db-aware guarded factory
   // (makeSetDisappearingMessages) — it sent to a caller-supplied jid via
   // sock.sendMessage directly, bypassing the outbound identity guard.
-  {
+  defineSockTool({
     name: 'send_event_message',
     description: 'Send a calendar event message to a WhatsApp chat.',
     schema: z.object({
@@ -152,8 +151,8 @@ const chatOperationSockConfigs: SockToolConfig<any>[] = [
       log.info({ chatJid, eventName: name }, 'event message sent');
       return { sent: true, event: name };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'mark_chat_read',
     description: 'Mark a chat as read or unread. Uses chatModify for whole-chat read state.',
     schema: z.object({
@@ -180,8 +179,8 @@ const chatOperationSockConfigs: SockToolConfig<any>[] = [
       log.info({ chatJid, read }, 'chat read state updated');
       return { success: true, jid: chatJid, read };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'update_push_name',
     description: 'Update your WhatsApp push notification name (the name others see).',
     schema: z.object({
@@ -196,8 +195,8 @@ const chatOperationSockConfigs: SockToolConfig<any>[] = [
       log.info({ name }, 'push name updated');
       return { success: true, name };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'fetch_message_history',
     description: 'Request WhatsApp to send additional message history. Results arrive via messaging-history.set event.',
     schema: z.object({
@@ -219,8 +218,8 @@ const chatOperationSockConfigs: SockToolConfig<any>[] = [
       log.info({ count }, 'message history fetch requested');
       return { requested: true, count };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'request_placeholder_resend',
     description: 'Request resend of a placeholder message (message that failed to decrypt).',
     schema: z.object({
@@ -237,7 +236,7 @@ const chatOperationSockConfigs: SockToolConfig<any>[] = [
       log.info({ messageKey: message_key }, 'placeholder resend requested');
       return { requested: true, messageKey: message_key };
     },
-  },
+  }),
 ];
 
 // ---------------------------------------------------------------------------

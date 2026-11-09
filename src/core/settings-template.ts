@@ -236,6 +236,16 @@ export function defaultSettingsJson(
   };
 }
 
+// Preserve Zod 3's object classification while accepting ordinary class instances.
+const SettingsObjectSchema = z.custom<Record<string, unknown>>((value) => {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return !(value instanceof Date
+    || value instanceof Map
+    || value instanceof Set
+    || (typeof record.then === 'function' && typeof record.catch === 'function'));
+});
+
 /**
  * Shape schema for PermissionsSettings.
  *
@@ -251,13 +261,13 @@ export function defaultSettingsJson(
  *
  * `satisfies` pins the schema output to the exported type at compile time.
  */
-const PermissionsSettingsShapeSchema = z.object({
-  permissions: z.object({
+const PermissionsSettingsShapeSchema = SettingsObjectSchema.pipe(z.object({
+  permissions: SettingsObjectSchema.pipe(z.object({
     allow: z.array(z.string()),
     deny: z.array(z.string()),
     defaultMode: z.literal('bypassPermissions'),
-  }).passthrough(),
-}) satisfies z.ZodType<PermissionsSettings>;
+  }).passthrough()),
+})) satisfies z.ZodType<PermissionsSettings>;
 
 /**
  * Full schema: shape plus the effective deny-floor subset check. The writer

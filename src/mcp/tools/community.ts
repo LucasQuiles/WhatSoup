@@ -4,12 +4,11 @@
 import { z } from 'zod';
 import type { ToolDeclaration } from '../types.ts';
 import type { ExtendedBaileysSocket } from '../types.ts';
-import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
+import { defineSockTool, registerSockTools } from './sock-tool-factory.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- configs have heterogeneous ZodRawShape types; shared array requires any; expires 2026-12-31
-const communityConfigs: SockToolConfig<any>[] = [
-  {
+const communityConfigs = [
+  defineSockTool({
     name: 'community_metadata',
     description: 'Get metadata for a WhatsApp community by JID (global).',
     schema: z.object({
@@ -20,8 +19,8 @@ const communityConfigs: SockToolConfig<any>[] = [
     call: async ({ jid }, sock) => {
       return sock.communityMetadata(jid);
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'community_create',
     description: 'Create a new WhatsApp community with the given subject and description body (global).',
     schema: z.object({
@@ -33,8 +32,8 @@ const communityConfigs: SockToolConfig<any>[] = [
     call: async ({ subject, body }, sock) => {
       return sock.communityCreate(subject, body);
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'community_create_group',
     description: 'Create a new group within a community (global).',
     schema: z.object({
@@ -47,8 +46,8 @@ const communityConfigs: SockToolConfig<any>[] = [
     call: async ({ subject, participants, parentJid }, sock) => {
       return sock.communityCreateGroup(subject, participants, parentJid);
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'community_leave',
     description: 'Leave a WhatsApp community (global).',
     schema: z.object({
@@ -60,8 +59,8 @@ const communityConfigs: SockToolConfig<any>[] = [
       await sock.communityLeave(id);
       return { success: true, id };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'community_link_group',
     description: 'Link an existing group into a community (global).',
     schema: z.object({
@@ -73,8 +72,8 @@ const communityConfigs: SockToolConfig<any>[] = [
     call: async ({ groupJid, communityJid }, sock) => {
       return sock.communityLinkGroup(groupJid, communityJid);
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'community_unlink_group',
     description: 'Unlink a group from a community (global).',
     schema: z.object({
@@ -86,8 +85,8 @@ const communityConfigs: SockToolConfig<any>[] = [
     call: async ({ groupJid, communityJid }, sock) => {
       return sock.communityUnlinkGroup(groupJid, communityJid);
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'community_fetch_linked_groups',
     description: 'Fetch all groups linked to a community by JID (global).',
     schema: z.object({
@@ -98,8 +97,8 @@ const communityConfigs: SockToolConfig<any>[] = [
     call: async ({ jid }, sock) => {
       return sock.communityFetchLinkedGroups(jid);
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'community_participants_update',
     description: 'Add, remove, promote, or demote participants in a WhatsApp community (global).',
     schema: z.object({
@@ -113,8 +112,8 @@ const communityConfigs: SockToolConfig<any>[] = [
       const result = await sock.communityParticipantsUpdate(jid, participants, action);
       return { success: true, jid, action, participants, result };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'community_invite_code',
     description:
       'Get, revoke, or accept a WhatsApp community invite. action=get (default) returns the current invite code; action=revoke rotates it and returns the new code; action=accept joins the community via an invite code (requires code param).',
@@ -147,8 +146,8 @@ const communityConfigs: SockToolConfig<any>[] = [
       const communityJid = await sock.communityAcceptInvite(code);
       return { communityJid: communityJid ?? null, code, accepted: true };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'community_settings_update',
     description:
       'Update WhatsApp community settings: announcement mode (only admins can send) or locked (only admins can edit info) (global).',
@@ -162,8 +161,8 @@ const communityConfigs: SockToolConfig<any>[] = [
       await sock.communitySettingUpdate(jid, setting);
       return { success: true, jid, setting };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'community_fetch_all_participating',
     description: 'Fetch all communities the bot is participating in (global).',
     schema: z.object({}),
@@ -174,8 +173,8 @@ const communityConfigs: SockToolConfig<any>[] = [
       const communities = Object.values(communityMap as Record<string, unknown>);
       return { communities };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'community_update_metadata',
     description:
       "Update a WhatsApp community's subject and/or description. Provide at least one of subject or description (global).",
@@ -198,7 +197,7 @@ const communityConfigs: SockToolConfig<any>[] = [
       }
       return { success: true, jid, subject, description };
     },
-  },
+  }),
 ];
 
 // ---------------------------------------------------------------------------

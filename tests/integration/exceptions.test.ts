@@ -374,32 +374,27 @@ describe('ToolRegistry.call always returns ToolCallResult, never throws', () => 
     {
       name: 'null params value',
       params: { conversation_key: null },
-      received: 'null',
-      message: 'Expected string, received null',
+      message: 'Invalid input: expected string, received null',
     },
     {
       name: 'undefined params value',
       params: { conversation_key: undefined },
-      received: 'undefined',
-      message: 'Required',
+      message: 'Invalid input: expected string, received undefined',
     },
     {
       name: 'numeric instead of string',
       params: { conversation_key: 0 },
-      received: 'number',
-      message: 'Expected string, received number',
+      message: 'Invalid input: expected string, received number',
     },
     {
       name: 'object instead of string',
       params: { conversation_key: {} },
-      received: 'object',
-      message: 'Expected string, received object',
+      message: 'Invalid input: expected string, received object',
     },
     {
       name: 'array instead of string',
       params: { conversation_key: [] },
-      received: 'array',
-      message: 'Expected string, received array',
+      message: 'Invalid input: expected string, received array',
     },
   ];
 
@@ -421,9 +416,8 @@ describe('ToolRegistry.call always returns ToolCallResult, never throws', () => 
           type: 'text',
           text: `Invalid parameters for tool "list_messages": ${JSON.stringify([
             {
-              code: 'invalid_type',
               expected: 'string',
-              received: tc.received,
+              code: 'invalid_type',
               path: ['conversation_key'],
               message: tc.message,
             },

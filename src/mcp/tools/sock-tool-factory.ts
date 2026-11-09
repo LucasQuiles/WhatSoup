@@ -36,8 +36,8 @@ export interface SockToolConfig<T extends z.ZodRawShape> {
    * Until 2026-08-17 this field did not exist here and `makeSockTool` did not
    * copy it, which made every tool built through this factory structurally
    * incapable of being gated — setting `sensitive: true` on a config was
-   * silently discarded rather than rejected, because the config array is typed
-   * `SockToolConfig<any>[]` and excess-property checking does not apply. The
+   * silently discarded rather than rejected, because the old heterogeneous
+   * config array erased its member type before excess-property checking. The
    * `logout` gate (S5) is the first consumer; see tests/mcp/logout-gate.test.ts.
    */
   sensitive?: boolean;
@@ -52,6 +52,15 @@ export interface SockToolConfig<T extends z.ZodRawShape> {
 }
 
 /**
+ * A schema-aware builder keeps each config's inferred callback type until the
+ * concrete tool declaration is built. The config array can then be
+ * heterogeneous without contextualising every callback to an erased schema.
+ */
+export type SockToolBuilder = (
+  getSock: () => ExtendedBaileysSocket | null,
+) => ToolDeclaration;
+
+/**
  * Build a single ToolDeclaration from a config object and a socket accessor.
  * The returned handler parses the schema, obtains the socket, and delegates to `config.call`.
  */
@@ -62,9 +71,10 @@ export function makeSockTool<T extends z.ZodRawShape>(
   // Forward every declaration-shaped config field STRUCTURALLY rather than by a
   // hand-maintained whitelist. The whitelist is what caused the R1 defect fixed
   // on 2026-08-17: `sensitive` was absent from it, so no tool built here could be
-  // gated, and because this array is typed `SockToolConfig<any>[]` TypeScript
-  // silently discarded the flag instead of rejecting it. Every field added to the
-  // config from now on reaches the declaration by construction, so that class of
+  // gated, and because the old heterogeneous config array erased its member
+  // type TypeScript silently discarded the flag instead of rejecting it. Every
+  // field added to the config from now on reaches the declaration by
+  // construction, so that class of
   // silent drop cannot recur.
   //
   // `call` is the only config-only member, so it is the only one destructured
@@ -83,19 +93,25 @@ export function makeSockTool<T extends z.ZodRawShape>(
   };
 }
 
+/** Capture one concrete schema/config before heterogeneous registration erases its type. */
+export function defineSockTool<T extends z.ZodRawShape>(
+  config: SockToolConfig<T>,
+): SockToolBuilder {
+  return (getSock) => makeSockTool(getSock, config);
+}
+
 /**
- * Batch-register an array of sock tool configs.
+ * Batch-register an array of schema-aware sock tool builders.
  *
- * Accepts `SockToolConfig<any>` so callers can pass a heterogeneous array of
- * configs with different schema shapes without needing a union type.
+ * Builders preserve each config's schema inference until makeSockTool captures
+ * it; only the completed ToolDeclaration is heterogeneous at this boundary.
  */
 export function registerSockTools(
   getSock: () => ExtendedBaileysSocket | null,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- heterogeneous config array requires any for ZodRawShape variance; expires 2026-12-31
-  configs: SockToolConfig<any>[],
+  configs: readonly SockToolBuilder[],
   register: (tool: ToolDeclaration) => void,
 ): void {
-  for (const config of configs) {
-    register(makeSockTool(getSock, config));
+  for (const build of configs) {
+    register(build(getSock));
   }
 }

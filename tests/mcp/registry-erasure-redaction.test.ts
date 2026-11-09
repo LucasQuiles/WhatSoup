@@ -52,7 +52,7 @@ describe('ToolRegistry.call metadata-only durability routing', () => {
         schema: z.object({
           entity_ref: z.string(),
           text: z.string(),
-          metadata: z.record(z.unknown()).optional(),
+          metadata: z.record(z.string(), z.unknown()).optional(),
         }),
       }),
     );

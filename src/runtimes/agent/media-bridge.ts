@@ -238,7 +238,7 @@ interface BridgeResponse {
  * and a bare `.optional()` would reject on a wrong type instead of
  * matching that cast-through behavior.
  *
- * The `z.object(...)` call also carries `invalid_type_error: 'missing
+ * The `z.object(...)` call also carries `error: 'missing
  * path'` — the original ladder reached `req.path` via plain property
  * access, which is safe (returns `undefined`) on any non-null JS value
  * including primitives and arrays, so a non-object root (e.g. a bare
@@ -251,12 +251,12 @@ interface BridgeResponse {
 const BridgeRequestShapeSchema = z.object(
   {
     path: z
-      .string({ required_error: 'missing path', invalid_type_error: 'missing path' })
+      .string({ error: 'missing path' })
       .min(1, { message: 'missing path' }),
     caption: z.string().optional().catch(undefined),
     filename: z.string().optional().catch(undefined),
   },
-  { invalid_type_error: 'missing path' },
+  { error: 'missing path' },
 );
 
 async function handleRequest(

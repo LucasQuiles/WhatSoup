@@ -5,15 +5,14 @@ import { z } from 'zod';
 import type { ToolDeclaration } from '../types.ts';
 import type { ExtendedBaileysSocket } from '../types.ts';
 import type { Database } from '../../core/database.ts';
-import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
+import { defineSockTool, registerSockTools } from './sock-tool-factory.ts';
 import { config } from '../../config.ts';
 import { applyOutboundIdentityGuard } from '../../core/outbound-identity/guard.ts';
 import { SqliteIdentityStore } from '../../core/outbound-identity/store.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- configs have heterogeneous ZodRawShape types; shared array requires any; expires 2026-12-31
-const groupConfigs: SockToolConfig<any>[] = [
-  {
+const groupConfigs = [
+  defineSockTool({
     name: 'list_groups',
     description: 'List all WhatsApp groups the bot is a member of (global).',
     schema: z.object({}),
@@ -24,8 +23,8 @@ const groupConfigs: SockToolConfig<any>[] = [
       const groupMap = await sock.groupFetchAllParticipating();
       return { groups: Object.values(groupMap) };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'get_group_metadata',
     description: 'Get metadata for a WhatsApp group by JID (global).',
     schema: z.object({
@@ -36,8 +35,8 @@ const groupConfigs: SockToolConfig<any>[] = [
     call: async ({ jid }, sock) => {
       return sock.groupMetadata(jid);
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'group_update_subject',
     description: "Update a WhatsApp group's subject (name) (global).",
     schema: z.object({
@@ -50,8 +49,8 @@ const groupConfigs: SockToolConfig<any>[] = [
       await sock.groupUpdateSubject(jid, subject);
       return { success: true, jid, subject };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'group_update_description',
     description: "Update a WhatsApp group's description (global). Omit description to clear it.",
     schema: z.object({
@@ -64,8 +63,8 @@ const groupConfigs: SockToolConfig<any>[] = [
       await sock.groupUpdateDescription(jid, description);
       return { success: true, jid };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'group_participants_update',
     description:
       'Add, remove, promote, or demote participants in a WhatsApp group (global).',
@@ -80,8 +79,8 @@ const groupConfigs: SockToolConfig<any>[] = [
       const result = await sock.groupParticipantsUpdate(jid, participants, action);
       return { success: true, jid, action, participants, result };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'group_settings_update',
     description:
       'Update WhatsApp group settings: announcement mode (only admins can send) or locked (only admins can edit info) (global).',
@@ -95,8 +94,8 @@ const groupConfigs: SockToolConfig<any>[] = [
       await sock.groupSettingUpdate(jid, setting);
       return { success: true, jid, setting };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'get_group_invite_link',
     description: 'Get the invite link for a WhatsApp group (global).',
     schema: z.object({
@@ -109,8 +108,8 @@ const groupConfigs: SockToolConfig<any>[] = [
       const link = code ? `https://chat.whatsapp.com/${code}` : null;
       return { jid, inviteCode: code ?? null, inviteLink: link };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'group_create',
     description: 'Create a new WhatsApp group with a given subject and initial participants (global).',
     schema: z.object({
@@ -122,8 +121,8 @@ const groupConfigs: SockToolConfig<any>[] = [
     call: async ({ subject, participants }, sock) => {
       return sock.groupCreate(subject, participants);
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'group_leave',
     description: 'Leave a WhatsApp group (global).',
     schema: z.object({
@@ -135,8 +134,8 @@ const groupConfigs: SockToolConfig<any>[] = [
       await sock.groupLeave(id);
       return { success: true, id };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'group_revoke_invite',
     description: 'Revoke the invite link for a WhatsApp group and return the new invite code (global).',
     schema: z.object({
@@ -148,8 +147,8 @@ const groupConfigs: SockToolConfig<any>[] = [
       const newCode = await sock.groupRevokeInvite(jid);
       return { jid, inviteCode: newCode ?? null };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'group_accept_invite',
     description: 'Accept a WhatsApp group invite by code and return the group JID (global).',
     schema: z.object({
@@ -161,8 +160,8 @@ const groupConfigs: SockToolConfig<any>[] = [
       const groupJid = await sock.groupAcceptInvite(code);
       return { code, groupJid: groupJid ?? null };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'group_get_invite_info',
     description: 'Get group metadata preview from a WhatsApp group invite code (global).',
     schema: z.object({
@@ -173,8 +172,8 @@ const groupConfigs: SockToolConfig<any>[] = [
     call: async ({ code }, sock) => {
       return sock.groupGetInviteInfo(code);
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'group_toggle_ephemeral',
     description:
       'Enable or disable disappearing messages in a WhatsApp group (global). Pass expiration in seconds (0 = off).',
@@ -188,8 +187,8 @@ const groupConfigs: SockToolConfig<any>[] = [
       await sock.groupToggleEphemeral(jid, expiration);
       return { success: true, jid, expiration };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'group_member_add_mode',
     description:
       "Set whether all members or only admins can add participants to a WhatsApp group (global). Mode: 'all_member_add' or 'admin_add'.",
@@ -203,8 +202,8 @@ const groupConfigs: SockToolConfig<any>[] = [
       await sock.groupMemberAddMode(jid, mode);
       return { success: true, jid, mode };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'group_join_approval_mode',
     description:
       "Enable or disable join approval (admin must approve new members) for a WhatsApp group (global). Mode: 'on' or 'off'.",
@@ -218,8 +217,8 @@ const groupConfigs: SockToolConfig<any>[] = [
       await sock.groupJoinApprovalMode(jid, mode);
       return { success: true, jid, mode };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'group_request_participants_list',
     description: 'Get the list of pending join requests for a WhatsApp group (global).',
     schema: z.object({
@@ -231,8 +230,8 @@ const groupConfigs: SockToolConfig<any>[] = [
       const participants = await sock.groupRequestParticipantsList(jid);
       return { jid, participants };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'group_request_participants_update',
     description:
       "Approve or reject pending join requests for a WhatsApp group (global). Action: 'approve' or 'reject'.",
@@ -247,12 +246,12 @@ const groupConfigs: SockToolConfig<any>[] = [
       const result = await sock.groupRequestParticipantsUpdate(jid, participants, action);
       return { success: true, jid, action, participants, result };
     },
-  },
+  }),
   // QR-067: send_group_invite moved to a db-aware guarded factory
   // (makeSendGroupInvite) — it sends a group-invite link to a chatJid that is
   // caller-supplied on the global-tier path, so it floors the egress through
   // the outbound identity guard first.
-  {
+  defineSockTool({
     name: 'group_revoke_invite_v4',
     description:
       'Revoke a v4 group invite previously sent to a specific participant (global).',
@@ -266,7 +265,7 @@ const groupConfigs: SockToolConfig<any>[] = [
       await sock.groupRevokeInviteV4(groupJid, invitedJid);
       return { success: true, groupJid, invitedJid };
     },
-  },
+  }),
 ];
 
 // ---------------------------------------------------------------------------

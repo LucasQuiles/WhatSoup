@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import {
+  defineSockTool,
   makeSockTool,
   registerSockTools,
 } from '../../../src/mcp/tools/sock-tool-factory.ts';
@@ -171,24 +172,24 @@ describe('registerSockTools', () => {
   it('registers every config in the input array', () => {
     const registered: ToolDeclaration[] = [];
     const configs = [
-      {
+      defineSockTool({
         name: 'tool_a',
         description: '',
         schema: z.object({}),
         call: async () => null,
-      },
-      {
+      }),
+      defineSockTool({
         name: 'tool_b',
         description: '',
         schema: z.object({ jid: z.string() }),
         call: async () => 'b',
-      },
-      {
+      }),
+      defineSockTool({
         name: 'tool_c',
         description: '',
         schema: z.object({}),
         call: async () => 'c',
-      },
+      }),
     ];
 
     registerSockTools(() => makeFakeSock(), configs, (t) => registered.push(t));
@@ -204,8 +205,8 @@ describe('registerSockTools', () => {
     registerSockTools(
       getSock,
       [
-        { name: 'x', description: '', schema: z.object({}), call: async (_, s) => s },
-        { name: 'y', description: '', schema: z.object({}), call: async (_, s) => s },
+        defineSockTool({ name: 'x', description: '', schema: z.object({}), call: async (_, s) => s }),
+        defineSockTool({ name: 'y', description: '', schema: z.object({}), call: async (_, s) => s }),
       ],
       (t) => registered.push(t),
     );

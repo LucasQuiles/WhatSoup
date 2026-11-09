@@ -103,6 +103,25 @@ function expressionContainsIdentifier(node: ts.Node, name: string): boolean {
   return descendants(node).some((candidate) => ts.isIdentifier(candidate) && candidate.text === name);
 }
 
+function isSchemaDescriptionAccess(node: ts.Node, schemaParameterName: string): boolean {
+  return ts.isPropertyAccessExpression(node)
+    && ts.isIdentifier(node.expression)
+    && node.expression.text === schemaParameterName
+    && node.name.text === 'description';
+}
+
+function expressionUsesSchemaDescriptionValue(expression: ts.Expression, schemaParameterName: string): boolean {
+  if (isSchemaDescriptionAccess(expression, schemaParameterName)) return true;
+  if (ts.isConditionalExpression(expression)) {
+    return expressionUsesSchemaDescriptionValue(expression.whenTrue, schemaParameterName)
+      || expressionUsesSchemaDescriptionValue(expression.whenFalse, schemaParameterName);
+  }
+  if (ts.isParenthesizedExpression(expression)) {
+    return expressionUsesSchemaDescriptionValue(expression.expression, schemaParameterName);
+  }
+  return false;
+}
+
 function stringContent(node: ts.Node): string {
   return descendants(node)
     .filter((candidate): candidate is ts.StringLiteralLike => ts.isStringLiteralLike(candidate))
@@ -272,14 +291,24 @@ function checkRegistryDescriptions(cwd: string, findings: string[]): void {
   } else {
     const schemaParameter = wrapper.parameters[0]?.name;
     const schemaParameterName = schemaParameter && ts.isIdentifier(schemaParameter) ? schemaParameter.text : null;
-    const propagatesDescription = schemaParameterName !== null && descendants(wrapper.body).some((node) => (
-      ts.isPropertyAssignment(node)
-      && propertyNameText(node.name) === 'description'
-      && ts.isPropertyAccessExpression(node.initializer)
-      && ts.isIdentifier(node.initializer.expression)
-      && node.initializer.expression.text === schemaParameterName
-      && node.initializer.name.text === 'description'
-    ));
+    const descriptionBindings = new Set<string>();
+    if (schemaParameterName !== null) {
+      for (const node of descendants(wrapper.body)) {
+        if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer
+          && expressionUsesSchemaDescriptionValue(node.initializer, schemaParameterName)) {
+          descriptionBindings.add(node.name.text);
+        }
+      }
+    }
+    const propagatesDescription = schemaParameterName !== null && descendants(wrapper.body).some((node) => {
+      if (ts.isPropertyAssignment(node) && propertyNameText(node.name) === 'description') {
+        return expressionUsesSchemaDescriptionValue(node.initializer, schemaParameterName)
+          || (ts.isIdentifier(node.initializer) && descriptionBindings.has(node.initializer.text));
+      }
+      return ts.isShorthandPropertyAssignment(node)
+        && propertyNameText(node.name) === 'description'
+        && descriptionBindings.has(node.name.text);
+    });
     if (!propagatesDescription) {
       findings.push(`${rule} ${relativePath}: withZodDescription must propagate the Zod description field`);
     }
