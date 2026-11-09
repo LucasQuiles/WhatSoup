@@ -43,7 +43,11 @@ export class StalledOperationHolds {
   /** Sessions whose respawn was withheld; the next turn resumes this provider session in place. */
   private readonly deferredResumes = new WeakMap<SessionManager, { sessionId: string; rowId: number }>();
 
-  constructor(private readonly deps: StalledOperationHoldsDeps) {}
+  private readonly deps: StalledOperationHoldsDeps;
+
+  constructor(deps: StalledOperationHoldsDeps) {
+    this.deps = deps;
+  }
 
   /**
    * Save the stalled-operation kill on the checkpoint of the killed provider
