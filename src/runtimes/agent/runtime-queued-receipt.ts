@@ -1,8 +1,8 @@
 // src/runtimes/agent/runtime-queued-receipt.ts
 //
-// #2949 first slice (owner decision 63, 2026-09-25): a truthful "queued behind
-// the current task" receipt. It is the queue-honesty half only; it steers
-// nothing and changes no turn ordering.
+// #2949 first slice (owner decision 63, 2026-09-25): a truthful receipt for a
+// message that queued behind a running task. It is the queue-honesty half only;
+// it steers nothing and changes no turn ordering.
 //
 // WHERE IT FIRES. Only after a per_chat inbound was ADMITTED to its chat's
 // runtime TurnQueue and did NOT become that queue's active turn. TurnQueue.drain
@@ -19,8 +19,14 @@
 //
 // WORDING. A per_chat /stop terminalizes the active turn AND every pending turn
 // in that chat's queue (terminalizePerChatTurnQueueForKill finalizes
-// `teardown.pending` as operator-cancelled), so the receipt says exactly that.
-// The text is a constant: it never echoes the queued message's content.
+// `teardown.pending` as operator-cancelled), so the receipt never promises that
+// /stop cancels less. Two constants keep each claim true (owner decision, 2026-11-09):
+// - QUEUED_TURN_RECEIPT_TEXT ("your earlier request ... This message is next")
+//   only when the running turn is the same sender's own request and this
+//   message is the only one waiting, so nothing else can run before it.
+// - QUEUED_TURN_RECEIPT_OTHER_TEXT otherwise: the running turn may be another
+//   group member's or a scheduled job, or other messages wait ahead of this one.
+// Neither text echoes the queued message's content.
 //
 // RATE LIMIT. At most one receipt per chat per cooldown window, so a busy group
 // is not spammed while one long task runs. The cooldown is consumed when the
@@ -36,7 +42,20 @@ import type { QueuedTurn, TurnQueue } from './turn-queue.ts';
 const log = createChildLogger('runtime-queued-receipt');
 
 export const QUEUED_TURN_RECEIPT_TEXT =
-  '*Queued behind the current task.* Send /stop to cancel the running task and everything queued behind it.';
+  '*Still working on your earlier request.* This message is next. Send /stop to cancel.';
+
+export const QUEUED_TURN_RECEIPT_OTHER_TEXT =
+  '*Still working on an earlier request.* This message is queued behind it. Send /stop to cancel the request and everything queued.';
+
+/** Pick the receipt that is true for this admission (see WORDING above). */
+export function queuedTurnReceiptText(
+  active: Pick<QueuedTurn, 'senderJid' | 'purpose'>,
+  queued: Pick<QueuedTurn, 'senderJid'>,
+  pending: number,
+): string {
+  const ownRequest = active.senderJid === queued.senderJid && active.purpose !== 'scheduled-agent-job';
+  return ownRequest && pending <= 1 ? QUEUED_TURN_RECEIPT_TEXT : QUEUED_TURN_RECEIPT_OTHER_TEXT;
+}
 
 export const DEFAULT_QUEUED_TURN_RECEIPT_COOLDOWN_MS = 60_000;
 
@@ -56,7 +75,7 @@ export interface QueuedTurnAdmission {
   readonly scope: SessionScope;
   readonly mapKey: string;
   /** The chat's runtime TurnQueue as it stands right after the enqueue call. */
-  readonly queue: Pick<TurnQueue, 'activeTurn'> | undefined;
+  readonly queue: Pick<TurnQueue, 'activeTurn' | 'pending'> | undefined;
   readonly turn: QueuedTurn;
   /** The boolean the enqueue returned. */
   readonly admitted: boolean;
@@ -93,10 +112,12 @@ export class QueuedTurnReceiptNotifier {
     try {
       const decision = this.decide(admission);
       if (decision !== 'sent') return decision;
-      const { mapKey, turn } = admission;
+      const { mapKey, turn, queue } = admission;
+      // decide() returned 'sent' only with a non-null active turn other than this one.
+      const text = queuedTurnReceiptText(queue!.activeTurn!, turn, queue!.pending);
       this.lastSentAt.set(mapKey, this.clock.now());
       this.pruneExpired();
-      void this.send(turn.chatJid, QUEUED_TURN_RECEIPT_TEXT).catch((err: unknown) => {
+      void this.send(turn.chatJid, text).catch((err: unknown) => {
         log.warn({ err, mapKey, inboundSeq: turn.inboundSeq }, 'queued-turn receipt send failed');
       });
       log.info({ mapKey, inboundSeq: turn.inboundSeq }, 'queued-turn receipt sent');

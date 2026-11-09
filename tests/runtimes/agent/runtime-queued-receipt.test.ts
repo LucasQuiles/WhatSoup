@@ -10,8 +10,10 @@ import { TurnQueue, type QueuedTurn } from '../../../src/runtimes/agent/turn-que
 import { fakeClock, type Clock } from '../../../src/lib/clock.ts';
 import {
   DEFAULT_QUEUED_TURN_RECEIPT_COOLDOWN_MS,
+  QUEUED_TURN_RECEIPT_OTHER_TEXT,
   QUEUED_TURN_RECEIPT_TEXT,
   QueuedTurnReceiptNotifier,
+  queuedTurnReceiptText,
 } from '../../../src/runtimes/agent/runtime-queued-receipt.ts';
 
 const chatJid = 'receipt-chat@s.whatsapp.net';
@@ -195,9 +197,66 @@ describe('#2949 queued receipt: the text is truthful and content-free', () => {
   });
 
   it('says /stop cancels the running task AND what is queued, matching the per_chat teardown', () => {
-    expect(QUEUED_TURN_RECEIPT_TEXT).toContain('Queued behind the current task');
-    expect(QUEUED_TURN_RECEIPT_TEXT).toContain('/stop');
-    expect(QUEUED_TURN_RECEIPT_TEXT).toContain('everything queued behind it');
+    // Break caught: "Queued behind the current task" read as "some other task is
+    // running"; the user asked again and again to cancel tasks that did not exist.
+    expect(QUEUED_TURN_RECEIPT_TEXT).toBe(
+      '*Still working on your earlier request.* This message is next. Send /stop to cancel.',
+    );
+    expect(QUEUED_TURN_RECEIPT_OTHER_TEXT).toBe(
+      '*Still working on an earlier request.* This message is queued behind it. Send /stop to cancel the request and everything queued.',
+    );
+  });
+
+  it('says "your earlier request ... next" only for the sender\'s own request with nothing else waiting', () => {
+    const { queue } = makeBlockingQueue();
+    const { notifier, send } = makeNotifier();
+    queue.enqueue(makeTurn('my long request'));
+
+    expect(admit(notifier, queue, makeTurn('why is it taking so long'))).toBe('sent');
+
+    expect(send.mock.calls).toEqual([[chatJid, QUEUED_TURN_RECEIPT_TEXT]]);
+  });
+
+  it('a group member queued behind someone else\'s request gets the other-request receipt', () => {
+    const { queue } = makeBlockingQueue();
+    const { notifier, send } = makeNotifier();
+    queue.enqueue(makeTurn('alice asks', { senderJid: '15550002@s.whatsapp.net', isGroup: true }));
+
+    admit(notifier, queue, makeTurn('bob asks', { isGroup: true }));
+
+    expect(send.mock.calls).toEqual([[chatJid, QUEUED_TURN_RECEIPT_OTHER_TEXT]]);
+  });
+
+  it('a message queued behind a scheduled job gets the other-request receipt', () => {
+    const { queue } = makeBlockingQueue();
+    const { notifier, send } = makeNotifier();
+    queue.enqueue(makeTurn('daily report', { purpose: 'scheduled-agent-job' }));
+
+    admit(notifier, queue, makeTurn('a question'));
+
+    expect(send.mock.calls).toEqual([[chatJid, QUEUED_TURN_RECEIPT_OTHER_TEXT]]);
+  });
+
+  it('a message with others already waiting ahead of it is not told it is next', () => {
+    const { queue } = makeBlockingQueue();
+    const { notifier, send } = makeNotifier();
+    queue.enqueue(makeTurn('running'));
+    queue.enqueue(makeTurn('waiting ahead', { senderJid: '15550002@s.whatsapp.net' }));
+
+    admit(notifier, queue, makeTurn('mine'));
+
+    expect(queue.pending).toBe(2);
+    expect(send.mock.calls).toEqual([[chatJid, QUEUED_TURN_RECEIPT_OTHER_TEXT]]);
+  });
+
+  it('picks the text from the running turn\'s sender and purpose and the waiting count', () => {
+    const me = { senderJid: '15550001@s.whatsapp.net' };
+    expect(queuedTurnReceiptText(me, me, 1)).toBe(QUEUED_TURN_RECEIPT_TEXT);
+    expect(queuedTurnReceiptText(me, me, 2)).toBe(QUEUED_TURN_RECEIPT_OTHER_TEXT);
+    expect(queuedTurnReceiptText({ senderJid: '15550002@s.whatsapp.net' }, me, 1))
+      .toBe(QUEUED_TURN_RECEIPT_OTHER_TEXT);
+    expect(queuedTurnReceiptText({ ...me, purpose: 'scheduled-agent-job' }, me, 1))
+      .toBe(QUEUED_TURN_RECEIPT_OTHER_TEXT);
   });
 
   it('a failing send is contained: the decision stays sent and nothing throws', async () => {
