@@ -1404,6 +1404,121 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       expect(mockClearAlertSource).toHaveBeenCalledWith('test', 'agent_respawn_failed');
     });
 
+    describe('F7: a stalled-operation kill resumes the session without a continuation turn', () => {
+      const deadStatus = { active: false, pid: null, providerTerminated: true, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null };
+      const liveStatus = { active: true, pid: 321, providerTerminated: false, sessionId: 'sess-1', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null };
+
+      function stallKill(runtime: AgentRuntime, state: PollRuntimeState, mapKey: string): void {
+        state.handlePerChatCrash(mapKey, dmJid, {
+          ...currentCrashIdentity(runtime, mapKey),
+          exitCode: null,
+          signal: 'SIGKILL',
+          sessionId: 'sess-1',
+          dbRowId: 7,
+          provider: 'p',
+          terminationReason: 'stalled_operation',
+        });
+      }
+
+      function continuationSends(): unknown[][] {
+        return mockSession.sendTurn.mock.calls.filter(
+          (c: unknown[]) => typeof c[0] === 'string' && c[0].includes('session resumed after crash'),
+        );
+      }
+
+      function suppressionLogs(): unknown[][] {
+        return (mockRuntimeLogger.info?.mock.calls ?? []).filter(
+          (c: unknown[]) => c[1] === 'auto-respawn resumed after a stalled-operation kill — continuation turn not sent',
+        );
+      }
+
+      async function runRespawn(): Promise<void> {
+        await vi.advanceTimersByTimeAsync(60_000);
+        await vi.advanceTimersByTimeAsync(2_000);
+      }
+
+      function makeStallRuntime() {
+        const db = makeDb();
+        const { messenger } = makeMessenger();
+        const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+        const state = runtime as unknown as PollRuntimeState;
+        seedPerChatSession(state, dmJid);
+        const mark = vi.spyOn(state.pendingSystemResults, 'mark');
+        mockSession.getStatus.mockReturnValueOnce(deadStatus).mockReturnValue(liveStatus);
+        return { runtime, state, mark };
+      }
+
+      it('resumes the session but sends no continuation turn', async () => {
+        const { runtime, state, mark } = makeStallRuntime();
+
+        stallKill(runtime, state, dmJid);
+        await runRespawn();
+
+        expect(mockSession.spawnSession).toHaveBeenCalledWith('sess-1', 7);
+        expect(continuationSends()).toHaveLength(0);
+        expect(mark).not.toHaveBeenCalledWith(expect.objectContaining({ purpose: 'respawn_continuation' }));
+        expect(state.pendingSystemResults.peek(dmJid)).toBeNull();
+        expect(suppressionLogs()).toHaveLength(1);
+        // The resume itself recovered the conversation, so the respawn-failed source still clears.
+        expect(mockClearAlertSource).toHaveBeenCalledWith('test', 'agent_respawn_failed');
+      });
+
+      it('a duplicate stall-kill callback schedules no second respawn and no continuation', async () => {
+        const { runtime, state } = makeStallRuntime();
+
+        stallKill(runtime, state, dmJid);
+        stallKill(runtime, state, dmJid);
+        await runRespawn();
+
+        expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);
+        expect(continuationSends()).toHaveLength(0);
+        expect(suppressionLogs()).toHaveLength(1);
+      });
+
+      it('control: an unmarked SIGKILL of the same shape still gets its continuation turn', async () => {
+        const { runtime, state, mark } = makeStallRuntime();
+
+        state.handlePerChatCrash(dmJid, dmJid, {
+          ...currentCrashIdentity(runtime, dmJid),
+          exitCode: null,
+          signal: 'SIGKILL',
+          sessionId: 'sess-1',
+          dbRowId: 7,
+          provider: 'p',
+        });
+        await runRespawn();
+
+        await vi.waitFor(() => { expect(continuationSends()).toHaveLength(1); });
+        expect(mark).toHaveBeenCalledWith(expect.objectContaining({ purpose: 'respawn_continuation' }));
+        admitPendingSystemResult(state, dmJid, 'respawn_continuation');
+        expect(suppressionLogs()).toHaveLength(0);
+      });
+
+      it('the suppression is per crash: a later ordinary crash on the resumed session continues normally', async () => {
+        const { runtime, state } = makeStallRuntime();
+
+        stallKill(runtime, state, dmJid);
+        await runRespawn();
+        expect(continuationSends()).toHaveLength(0);
+
+        mockSession.getStatus.mockReturnValueOnce(deadStatus).mockReturnValue(liveStatus);
+        state.handlePerChatCrash(dmJid, dmJid, {
+          ...currentCrashIdentity(runtime, dmJid),
+          exitCode: 1,
+          signal: null,
+          sessionId: 'sess-1',
+          dbRowId: 7,
+          provider: 'p',
+        });
+        await runRespawn();
+
+        expect(mockSession.spawnSession).toHaveBeenCalledTimes(2);
+        await vi.waitFor(() => { expect(continuationSends()).toHaveLength(1); });
+        admitPendingSystemResult(state, dmJid, 'respawn_continuation');
+        expect(suppressionLogs()).toHaveLength(1);
+      });
+    });
+
     it('re-arms a respawn refused only because termination is unproven, and recovers once it proves', async () => {
       const db = makeDb();
       const { messenger } = makeMessenger();
