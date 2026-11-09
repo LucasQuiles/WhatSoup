@@ -686,6 +686,60 @@ describe('F7: a stalled-operation kill survives a real service restart', () => {
     });
   }
 
+  it('a next request cancelled by /stop before the provider boundary keeps the hold; a restart still sends no context or continuation turn', async () => {
+    const first = makeRuntime();
+    const ingest = makeIngest(first);
+    const { session } = await deliveredExchange(ingest, 'wamid-f7-cancel-1', 'start the export', 'Export started.');
+    const sessionId = session.getStatus().sessionId!;
+    reportCrash(session, { terminationReason: 'stalled_operation' });
+    await waitForRespawn(session, sessionId);
+
+    // The next request waits at the provider boundary until /stop has cancelled it.
+    let openBoundary!: () => void;
+    const boundaryOpen = new Promise<void>((resolve) => { openBoundary = resolve; });
+    let readyError: unknown;
+    const boundary = vi.fn(async (input: unknown, onReady?: () => void) => {
+      await boundaryOpen;
+      try {
+        onReady?.();
+      } catch (err) {
+        readyError = err;
+        throw err;
+      }
+      session.turnsSent.push(input);
+    });
+    Object.assign(session, { sendTurnAtProviderBoundary: boundary });
+    ingest(customerMsg(DM_JID, 'wamid-f7-cancel-2', 'try the export again'));
+    await vi.waitFor(() => expect(boundary).toHaveBeenCalled(), SEND_WAIT);
+    const seq = inboundSeqByMessageId('wamid-f7-cancel-2');
+
+    ingest(customerMsg(DM_JID, 'wamid-f7-cancel-stop', '/stop'));
+    await vi.waitFor(() => expect(inbound(seq).processing_status).toBe('failed'), SEND_WAIT);
+    openBoundary();
+    await drainIngest();
+    await vi.waitFor(() => expect(readyError).toBeDefined(), SEND_WAIT);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    delete (session as { sendTurnAtProviderBoundary?: unknown }).sendTurnAtProviderBoundary;
+
+    expect(String(readyError), 'the cancellation stops the dispatch at the provider boundary')
+      .toContain('TURN_RECOVERY_DISPATCH_TARGET_SUPERSEDED');
+    expect(sentTexts(session).filter((t) => t.includes('try the export again')), 'the provider never received it').toEqual([]);
+    expect(checkpoint().watchdog, 'a cancelled request does not release the hold').toMatchObject({
+      stalledOperationResumeHold: { sessionId },
+    });
+
+    const { booted } = await restartService(first);
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    const sent = booted.filter((s) => s.ctorOpts.chatJid === DM_JID).flatMap(sentTexts);
+    expect(
+      sent.filter((t) => t.includes(RESTART_CONTINUATION) || t.includes('[Recent chat context')),
+      'no context or continuation turn',
+    ).toEqual([]);
+    expect(checkpoint().watchdog, 'still held after the restart').toMatchObject({
+      stalledOperationResumeHold: { sessionId },
+    });
+  });
+
   function failHoldWrites(): ReturnType<typeof vi.spyOn> {
     const upsert = engine.upsertSessionCheckpoint.bind(engine);
     return vi.spyOn(engine, 'upsertSessionCheckpoint').mockImplementation((key, fields) => {
