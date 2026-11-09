@@ -169,6 +169,7 @@ describe('exportRelease', () => {
     const drift = createReleaseSnapshotDriftReport(report.releasePath);
     expect(drift.ok, JSON.stringify(drift.issues, null, 2)).toBe(true);
     expect(report.selfCheck.ok).toBe(true);
+    expect(report.pendingHostOutputs).toEqual([]);
     expect(report.fileCount).toBeGreaterThan(0);
     expect(report.treeSha256).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -239,19 +240,34 @@ describe('exportRelease', () => {
     ).toThrow(/full 40-hex/i);
   });
 
-  it('fails closed and leaves no release when a required output is missing', () => {
+  it('publishes a release whose required outputs are still to be built on the host, and lists them as pending', () => {
+    // Required outputs (the built console under dist/) are produced on the host
+    // AFTER export, so export can never see them. It publishes, reports them as
+    // pending, and the standard drift check keeps flagging them until they exist;
+    // release:activate refuses the release meanwhile.
     const fixture = makeGitFixture();
-    expect(() =>
-      exportRelease({
-        repoRoot: fixture.sourceRoot,
-        commit: fixture.commit,
-        releaseRoot: fixture.releaseRoot,
-        buildTime: '2026-08-26T17:00:00.000Z',
-        requiredOutputs: ['console/dist/index.html'],
-      }),
-    ).toThrow(/required-output-missing|self-check/i);
-    // Fail-closed: the final release path must not exist after a failed export.
-    expect(existsSync(path.join(fixture.releaseRoot, `WhatSoup-release-${fixture.commit.slice(0, 12)}`))).toBe(false);
+    const report = exportOk(fixture, { requiredOutputs: ['console/dist/index.html'] });
+    expect(report.pendingHostOutputs).toEqual(['console/dist/index.html']);
+    expect(createReleaseSnapshotDriftReport(report.releasePath).issues).toEqual([
+      expect.objectContaining({ kind: 'required-output-missing', path: 'console/dist/index.html' }),
+    ]);
+
+    mkdirSync(path.join(report.releasePath, 'console/dist'), { recursive: true });
+    writeFileSync(path.join(report.releasePath, 'console/dist/index.html'), '<!doctype html><html></html>\n', 'utf8');
+    expect(createReleaseSnapshotDriftReport(report.releasePath).ok).toBe(true);
+  });
+
+  it('requires the built console for a commit that ships the console package', () => {
+    const fixture = makeGitFixture();
+    mkdirSync(path.join(fixture.sourceRoot, 'console'), { recursive: true });
+    writeFileSync(path.join(fixture.sourceRoot, 'console/package.json'), '{"name":"console-fixture"}\n', 'utf8');
+    recommitFixture(fixture, 'console package');
+    const report = exportOk(fixture);
+    expect(report.pendingHostOutputs).toEqual(['dist/index.html']);
+    const manifest = parseReleaseSnapshotManifest(
+      JSON.parse(readFileSync(path.join(report.releasePath, RELEASE_MANIFEST_FILE), 'utf8')),
+    );
+    expect(manifest.requiredOutputs).toEqual(['dist/index.html']);
   });
 
   it('a post-export tamper is caught by the standard drift check', () => {

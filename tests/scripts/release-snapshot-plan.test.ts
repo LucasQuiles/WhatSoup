@@ -270,6 +270,33 @@ describe('release snapshot planning', () => {
     expect(collectReleaseSnapshotDrift(releasePath, plan.manifest)).toEqual([]);
   });
 
+  it('requires the built console when the tree ships a console package', () => {
+    // The fleet serves the console from <release>/dist, which is built on the host
+    // after export. A tree that ships the console source must require that build,
+    // or a release without it reads clean again (the mini7 console 404).
+    const sourceRoot = makeFixtureSource();
+    mkdirSync(path.join(sourceRoot, 'console'), { recursive: true });
+    writeFileSync(path.join(sourceRoot, 'console/package.json'), '{"name":"console-fixture"}\n', 'utf8');
+    const base = {
+      sourceRoot,
+      sourceRef: 'main',
+      sourceCommit: 'abc123def4567890',
+      releaseRoot: path.join(tmpRoot, 'releases'),
+      buildTime: '2026-06-13T06:00:00.000Z',
+    };
+    const withConsole = ['package.json', 'src/main.ts', 'console/package.json'];
+
+    expect(createReleaseSnapshotPlan({ ...base, trackedFiles: withConsole }).manifest.requiredOutputs)
+      .toEqual(['dist/index.html']);
+    expect(createReleaseSnapshotPlan({
+      ...base,
+      trackedFiles: withConsole,
+      requiredOutputs: ['dist/index.html', 'dist/assets/app.js'],
+    }).manifest.requiredOutputs).toEqual(['dist/assets/app.js', 'dist/index.html']);
+    expect(createReleaseSnapshotPlan({ ...base, trackedFiles: ['package.json', 'src/main.ts'] }).manifest.requiredOutputs)
+      .toEqual([]);
+  });
+
   it('accepts a legacy v1 manifest with no requiredOutputs (back-compat)', () => {
     const manifest = parseReleaseSnapshotManifest({
       schemaVersion: 1,

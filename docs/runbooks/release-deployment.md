@@ -128,7 +128,14 @@ Export properties under those preconditions (all fail closed):
   never leak into a release;
 - the release is assembled in a staging directory and self-checked with the
   SAME drift checker the fleet runs (`--check-release` semantics) BEFORE it is
-  atomically renamed into place — a failed export leaves no release;
+  atomically renamed into place — a failed export leaves no release. The one
+  tolerated finding is `required-output-missing` (next item);
+- required outputs are built on the host after export, so export cannot see
+  them. They are the `--required-output` paths, plus `dist/index.html`
+  automatically when the commit tracks `console/package.json`. Export publishes
+  the release without them and lists them in the report as
+  `pendingHostOutputs`. The drift check keeps reporting `required-output-missing`
+  until they exist, and `release:activate` refuses the release meanwhile;
 - when `deploy/source-runtime-manifest.json` is present, its pinned entrypoint
   graph is also checked against the staged release and its release manifest;
   a stale source hash refuses publication before restart preflight;
@@ -140,8 +147,17 @@ Export properties under those preconditions (all fail closed):
   second `--replace` of the same release name refuses while
   `.rollback/<name>-before` is occupied — verify the preserved copy is no
   longer needed, then remove it manually before re-running;
-- dependencies are NOT installed by the export: run `npm ci` inside the release
-  on the host (the restart preflight blocks a release without `node_modules`).
+- dependencies and the console build are NOT produced by the export. On the
+  host, inside the release, run:
+
+  ```bash
+  bash scripts/run-with-pinned-npm.sh ci
+  bash scripts/run-with-pinned-npm.sh --prefix console ci
+  bash scripts/run-with-pinned-npm.sh --prefix console run build   # writes <release>/dist, served by the fleet
+  ```
+
+  The restart preflight blocks a release without `node_modules`, and
+  `release:activate` refuses a release whose required outputs are missing.
 
 The export creates release bytes only. Repointing a service at the new release
 and restarting it remain separately-approved host mutations, and must preserve
@@ -207,7 +223,8 @@ npm --silent run release:activate -- \
 Preconditions include: the wrapper symlink points at
 `<expect-current>/deploy/whatsoup`; the new manifest is schema-valid, names
 `--release` as its path and carries a full commit; the new release has
-`deploy/whatsoup`, `src/bootstrap.ts` and `node_modules`; each auxiliary job
+`deploy/whatsoup`, `src/bootstrap.ts` and `node_modules`; every manifest
+`requiredOutputs` path (the built console) exists in the new release; each auxiliary job
 currently runs from `--expect-current`; a health token and port resolve; the
 database exists; and no staged plist still references `--expect-current`.
 

@@ -39,6 +39,12 @@ export const DEFAULT_RELEASE_MUTABLE_EXCLUDES = [
   RELEASE_MANIFEST_FILE,
 ] as const;
 
+// A tree that ships the console source requires its host build (the `dist/**`
+// exclude above), so a release without it reports `required-output-missing`
+// instead of reading clean.
+const CONSOLE_PACKAGE_FILE = 'console/package.json';
+const CONSOLE_BUILD_OUTPUT = 'dist/index.html';
+
 export interface ReleaseSnapshotFile {
   path: string;
   sha256: string;
@@ -262,12 +268,16 @@ export function createReleaseSnapshotPlan(options: CreateReleaseSnapshotPlanOpti
   const rollbackRoot = requireAbsolute('rollbackRoot', options.rollbackRoot ?? path.join(releaseRoot, '.rollback'));
   const rollbackPath = path.join(rollbackRoot, `${releaseName}-before`);
   const mutablePathExcludes = [...(options.mutablePathExcludes ?? DEFAULT_RELEASE_MUTABLE_EXCLUDES)];
-  const files = [...new Set(options.trackedFiles.map(normalizeRepoPath))]
+  const trackedPaths = [...new Set(options.trackedFiles.map(normalizeRepoPath))];
+  const files = trackedPaths
     .filter((filePath) => !matchesExclude(filePath, mutablePathExcludes))
     .sort()
     .map((filePath) => readSourceFile(sourceRoot, filePath));
 
-  const requiredOutputs = [...new Set((options.requiredOutputs ?? []).map(normalizeRepoPath))].sort();
+  const requiredOutputs = [...new Set([
+    ...(options.requiredOutputs ?? []),
+    ...(trackedPaths.includes(CONSOLE_PACKAGE_FILE) ? [CONSOLE_BUILD_OUTPUT] : []),
+  ].map(normalizeRepoPath))].sort();
 
   const manifest: ReleaseSnapshotManifest = {
     schemaVersion: 2,
