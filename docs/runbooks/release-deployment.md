@@ -968,6 +968,11 @@ emission can leave the previously saved event pending for retry with the same
 ID. Publication deduplication and post-emission recovery still require
 qualification. No pending-event overflow policy or historical data removal is
 implemented by these limits.
+The sentinel stores its local alert records once, in the state's `alerts` list.
+The saved observation snapshot keeps remote alerts. Detection and recovery use
+a temporary combined view of both lists, including local delivery failures and
+recent dropped-alert status. Adding those local summaries does not mutate the
+supplied observation object, so reusing it cannot accumulate stale local copies.
 Large spools may repeatedly exhaust these limits; eventual discovery and live
 capacity are not established. The deadline checks run around filesystem and
 JSON operations and cannot interrupt a blocked kernel call. The supervisor's

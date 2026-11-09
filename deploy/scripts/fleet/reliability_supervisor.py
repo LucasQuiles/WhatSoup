@@ -810,18 +810,23 @@ def run_sentinel(config, *, now=None, observe_remote=None, emit=None):
         except FileNotFoundError:
             state = {"incidents": {}, "counts": {}, "pending_events": [], "alerts": []}
         try:
-            snapshot = (observe_remote or (lambda: remote_observation(config)))()
+            snapshot = {**(observe_remote or (lambda: remote_observation(config)))()}
             snapshot["delivery_resolution"] = [
                 *snapshot.get("delivery_resolution", []),
                 *resolve_alert_delivery(config, state["alerts"]),
             ]
-            snapshot["alerts"] = [*snapshot.get("alerts", []), *state["alerts"]]
             snapshot["delivery_dropped_at"] = state.get("delivery_dropped", {}).get(
                 "last_at"
             )
-            reasons = set(sentinel_conditions(snapshot, now=now))
+            # Local alerts already live in state; combine them only for evaluation.
+            evaluation = {
+                **snapshot,
+                "alerts": [*snapshot.get("alerts", []), *state["alerts"]],
+            }
+            reasons = set(sentinel_conditions(evaluation, now=now))
         except Exception:
             snapshot = {"status": "unavailable"}
+            evaluation = snapshot
             reasons = {"remote_observation_unavailable"}
         for reason in set(state["counts"]) | reasons:
             state["counts"][reason] = (
@@ -838,7 +843,7 @@ def run_sentinel(config, *, now=None, observe_remote=None, emit=None):
             elif (
                 reason not in reasons
                 and reason in state["incidents"]
-                and recovery_confirmed(reason, snapshot, now=now)
+                and recovery_confirmed(reason, evaluation, now=now)
             ):
                 state["incident_id"] = state["incidents"].pop(reason)
                 queue_event(state, "clear", reason, now)

@@ -577,6 +577,91 @@ def test_sentinel_deduplicates_and_clears_persisted_incident(supervisor, config)
     ]
 
 
+@pytest.mark.parametrize("count", [1, 128])
+def test_sentinel_stores_local_receipts_once_and_preserves_remote_input(supervisor, config, count):
+    directory = Path(config["state_dir"])
+    supervisor.private_directory(directory)
+    path = directory / "sentinel.json"
+    receipt = {"status": "sent", "audit_receipt": ""}
+    receipt["audit_receipt"] = "a" * (4096 - len(json.dumps(receipt, sort_keys=True).encode()))
+    alerts = [{"event_id": f"00000000-0000-4000-8000-{index:012d}", "published_at": 100,
+               "delivery": "channel_delivered", "delivery_receipt": receipt} for index in range(count)]
+    supervisor.write_private(path, {"incidents": {}, "counts": {}, "pending_events": [], "alerts": alerts})
+    remote = {"supervisor": {"status": "fresh"}, "worker": {"status": "fresh"},
+              "capabilities": {"status": "fresh", "token": {"ok": True}},
+              "alerts": [{"event_id": "remote-alert", "published_at": 100, "delivery": "channel_delivered"}],
+              "remote_extension": {"opaque": ["preserve", {"value": 7}]}}
+    original = json.loads(json.dumps(remote))
+    emitted = []
+    for now in [101, 102, 103]:
+        result = supervisor.run_sentinel(config, now=now, observe_remote=lambda: remote,
+                                         emit=lambda event: emitted.append(event))
+        assert result["alerts"] == alerts
+        assert result["snapshot"]["alerts"] == original["alerts"]
+        assert result["snapshot"]["remote_extension"] == original["remote_extension"]
+        assert supervisor.read_private(path) == result
+        assert path.stat().st_size < 600000
+        assert remote == original
+    assert emitted == []
+
+
+@pytest.mark.parametrize(("stale_source", "remote_has_alerts"), [("local", True), ("local", False), ("remote", True)])
+@pytest.mark.parametrize("observation_failure", ["unavailable", "exception"])
+@given(uncertain_cycles=st.integers(min_value=1, max_value=8))
+def test_sentinel_combined_delivery_view_preserves_detection_and_recovery(
+    stale_source, remote_has_alerts, observation_failure, uncertain_cycles
+):
+    supervisor = load_module()
+    with TemporaryDirectory() as directory:
+        config = {"state_dir": str(Path(directory) / "state"), "instance": "test-bot"}
+        supervisor.private_directory(config["state_dir"])
+        path = Path(config["state_dir"]) / "sentinel.json"
+        alert = {"event_id": "unresolved-original", "published_at": 0, "delivery": "locally_persisted"}
+        supervisor.write_private(path, {"incidents": {}, "counts": {}, "pending_events": [],
+                                        "alerts": [alert] if stale_source == "local" else []})
+        remote = {"supervisor": {"status": "fresh"}, "worker": {"status": "fresh"},
+                  "capabilities": {"status": "fresh", "token": {"ok": True}},
+                  "alerts": [alert] if stale_source == "remote" else []}
+        if not remote_has_alerts:
+            del remote["alerts"]
+        events = []
+
+        def emit(event):
+            events.append(event)
+            return {"published": True}
+
+        for now in [1000, 1060]:
+            result = supervisor.run_sentinel(config, now=now, observe_remote=lambda: remote, emit=emit)
+        assert "alert_delivery_stale" in result["incidents"]
+
+        def failed_observation():
+            if observation_failure == "exception":
+                raise OSError("synthetic observation failure")
+            return {"status": "unavailable"}
+
+        for cycle in range(uncertain_cycles):
+            unavailable = supervisor.run_sentinel(config, now=1070 + cycle * 10,
+                observe_remote=failed_observation, emit=emit)
+            assert "alert_delivery_stale" in unavailable["incidents"]
+            assert unavailable["snapshot"]["status"] == "unavailable"
+            assert not any(event["kind"] == "clear" and event["reason"] == "alert_delivery_stale"
+                           for event in events)
+        if stale_source == "local":
+            state = supervisor.read_private(path)
+            state["alerts"][0]["delivery"] = "channel_delivered"
+            supervisor.write_private(path, state)
+        else:
+            remote["alerts"][0]["delivery"] = "channel_delivered"
+        result = supervisor.run_sentinel(config, now=1070 + uncertain_cycles * 10,
+            observe_remote=lambda: remote, emit=emit)
+        assert "alert_delivery_stale" not in result["incidents"]
+        if stale_source == "local":
+            assert supervisor.read_private(path)["alerts"][0]["delivery"] == "channel_delivered"
+        assert [(event["kind"], event["reason"]) for event in events
+                if event["reason"] == "alert_delivery_stale"] == [
+            ("alert", "alert_delivery_stale"), ("clear", "alert_delivery_stale")]
+
+
 def test_collector_ack_is_not_channel_delivery(supervisor):
     snapshot = {
         "supervisor": {"status": "fresh"},
