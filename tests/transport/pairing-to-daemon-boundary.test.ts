@@ -133,8 +133,10 @@ describe('S2/S3 — pairing receipt crosses the process boundary', () => {
     mocks.saveCreds.mockResolvedValue(undefined);
     mocks.qrcodeGenerate.mockReset();
     mocks.useMultiFileAuthState.mockReset();
+    // A key store with get/set, like useMultiFileAuthState's. An empty object has no
+    // trackable writes, and the pairing completion gate now refuses success on it.
     mocks.useMultiFileAuthState.mockResolvedValue({
-      state: { creds: {}, keys: {} },
+      state: { creds: {}, keys: { get: async () => ({}), set: async () => {} } },
       saveCreds: mocks.saveCreds,
     });
     mocks.makeWASocket.mockReset();

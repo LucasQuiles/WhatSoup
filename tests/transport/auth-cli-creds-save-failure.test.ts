@@ -86,7 +86,12 @@ describe('#2165 auth CLI credential-save failure', () => {
     mocks.saveCreds.mockResolvedValue(undefined);
     mocks.qrcodeGenerate.mockReset();
     mocks.useMultiFileAuthState.mockReset();
-    mocks.useMultiFileAuthState.mockResolvedValue({ state: { creds: {}, keys: {} }, saveCreds: mocks.saveCreds });
+    // A key store with get/set, like useMultiFileAuthState's. An empty object has no
+    // trackable writes, and the pairing completion gate now refuses success on it.
+    mocks.useMultiFileAuthState.mockResolvedValue({
+      state: { creds: {}, keys: { get: async () => ({}), set: async () => {} } },
+      saveCreds: mocks.saveCreds,
+    });
     mocks.makeWASocket.mockReset();
     mocks.makeWASocket.mockImplementation(() => ({
       ev: {
