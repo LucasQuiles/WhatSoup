@@ -28,6 +28,7 @@ from private_git import PrivateGitSource, acquire_verified_private_bundle, make_
 from private_scanner_candidate import BoundaryError
 import scanner_runtime
 from scanner_runtime import qualify_runtime
+from scanner_grammars import verify_grammar_cache
 
 
 class _Parser(argparse.ArgumentParser):
@@ -90,6 +91,8 @@ def main(argv: list[str] | None = None) -> int:
         parent = Path(os.environ.get("TMPDIR", ""))
         if not parent.is_absolute() or parent.resolve(strict=True) != parent or not parent.is_dir():
             raise BoundaryError("private workflow temporary directory is invalid")
+        grammar_cache = parent / "grammar-cache"
+        verify_grammar_cache(grammar_cache)
         if (
             args.private_checkout != parent / "private-checkout"
             or not args.private_checkout.is_absolute()
@@ -117,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
             result = evaluate_private_run(
                 client, args.run_id, "refs/heads/main", scanner_bundle,
                 trusted_path=args.trusted_path, timeout_seconds=300, runtime_check=runtime_check,
+                grammar_cache=grammar_cache,
             )
         else:
             result = evaluate_private_non_pr_run(
@@ -126,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
                 trusted_path=args.trusted_path,
                 timeout_seconds=300,
                 runtime_check=runtime_check,
+                grammar_cache=grammar_cache,
                 receipt_path=_receipt_path(args.receipt, parent),
                 scanner_run_id=_workflow_run_identity("GITHUB_RUN_ID"),
                 scanner_run_attempt=_workflow_run_identity("GITHUB_RUN_ATTEMPT"),

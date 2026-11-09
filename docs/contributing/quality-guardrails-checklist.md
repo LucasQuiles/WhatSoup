@@ -101,9 +101,24 @@ capture tests do not establish this hosted filesystem limit.
 Runtime qualification requires parse
 errors for every malformed probe; the pinned scanner reports these as advisory
 findings, with Python syntax errors separately blocking. Qualification verifies
-parser detection and does not change scanner policy severity. The language pack
-downloads parser libraries on demand into the isolated HOME; those release assets
-are not covered by the private repository's Git manifest pin.
+parser detection and does not change scanner policy severity. The trusted workflow
+downloads one bounded Linux grammar archive before acquiring private code. The
+maintained `scanner_grammars.py` pins its size and SHA-256 before extraction, then
+verifies the seven required libraries by path, size and hash. Runtime probes and
+the candidate scan share that job's `XDG_CACHE_HOME`; every native child rechecks
+it before execution. Missing or altered libraries are inconclusive, with no
+download fallback. The workflow entrypoint requires this cache; optional cache
+arguments on lower-level adapters support public synthetic fixtures only.
+This closes the release-asset gap outside the private Git manifest and avoids
+repeated downloads into separate temporary homes. The caller excludes concurrent
+cache writers. Hash verification and a private HOME do not isolate same-user
+processes or block network access.
+
+The shell fault fixtures execute repository-owned workflow source, like other
+repository tests execute source code. Their fake privileged commands prove error
+propagation; they are not a sandbox for hostile pull request code. The privileged
+scanner workflow reads only default-branch drivers and treats candidate files as
+data. Real mount, quota and cleanup behavior still requires hosted qualification.
 
 The alert drill harness gives its children a scratch directory inside its own sandbox.
 This prevents a macOS caller's temporary path from being mistaken for leaked test

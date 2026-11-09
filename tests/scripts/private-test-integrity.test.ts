@@ -196,6 +196,13 @@ it('confines the private scanner credential to the trusted default-branch workfl
   const bootstrap = job.steps.find((step: { id?: string }) => step.id === 'trusted-driver');
   expect(bootstrap.env.TRUSTED_SHA).toBe('${{ github.sha }}');
   expect(bootstrap.run).not.toContain('github.event.workflow_run.head_sha');
+  expect(bootstrap.run).toContain('scanner_grammars.py');
+  const grammars = job.steps.find((step: { id?: string }) => step.id === 'grammars');
+  expect(grammars.env).toEqual({ SCANNER_ROOT: '${{ steps.scratch.outputs.root }}' });
+  expect(job.steps.indexOf(grammars)).toBeGreaterThan(job.steps.indexOf(bootstrap));
+  expect(job.steps.indexOf(grammars)).toBeLessThan(job.steps.indexOf(checkouts[0]));
+  expect(grammars.run).toContain('--max-filesize 19134009');
+  expect(grammars.run).toContain('"$SCANNER_ROOT/driver/scanner_grammars.py" "$archive" "$SCANNER_ROOT/grammar-cache"');
   const scan = job.steps.find((step: { id?: string }) => step.id === 'scan');
   expect(scan.env.QUALITY_RUN_ID).toBe('${{ github.event.workflow_run.id }}');
   expect(scan.env.GITHUB_TOKEN).toBe('${{ github.token }}');

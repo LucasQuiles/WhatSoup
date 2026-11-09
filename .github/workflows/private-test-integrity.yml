@@ -104,7 +104,7 @@ jobs:
           mkdir "$SCANNER_ROOT/driver"
           for file in bounded_github.py candidate_scan.py github_binding.py private_bundle.py \
             private_check.py private_git.py private_scanner_candidate.py run_workflow.py \
-            runtime_capture.py scanner_runtime.py; do
+            runtime_capture.py scanner_runtime.py scanner_grammars.py; do
             status="$(curl --silent --fail --proto '=https' --connect-timeout 5 --max-time 30 \
               --max-filesize 1048576 --header 'Accept: application/vnd.github.raw+json' \
               --header "Authorization: Bearer $GITHUB_TOKEN" \
@@ -120,6 +120,21 @@ jobs:
             "https://api.github.com/repos/LucasQuiles/WhatSoup/contents/scripts/resolve-timeout-bin.sh?ref=$TRUSTED_SHA")"
           test "$status" = 200
           test -s "$SCANNER_ROOT/resolve-timeout-bin.sh"
+
+      - name: Prepare pinned native grammar cache
+        id: grammars
+        timeout-minutes: 3
+        shell: bash
+        env:
+          SCANNER_ROOT: ${{ steps.scratch.outputs.root }}
+        run: |
+          set -euo pipefail
+          archive="$SCANNER_ROOT/parsers-linux-x86_64.tar.zst"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --connect-timeout 10 --max-time 90 --max-filesize 19134009 --output "$archive" \
+            'https://github.com/xberg-io/tree-sitter-language-pack/releases/download/v1.6.2/parsers-linux-x86_64.tar.zst'
+          python3.12 -I -S -B "$SCANNER_ROOT/driver/scanner_grammars.py" "$archive" "$SCANNER_ROOT/grammar-cache"
+          rm -- "$archive"
 
       - name: Acquire pinned private scanner over SSH
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262

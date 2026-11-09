@@ -20,7 +20,7 @@ from scanner_runtime import _read_capture
 CANARY = ROOT / "tests" / "native_capture_canary.py"
 SOURCES = (
     ROOT / "private_scanner_candidate.py", ROOT / "runtime_capture.py",
-    ROOT / "scanner_runtime.py", ROOT / "bounded_github.py",
+    ROOT / "scanner_runtime.py", ROOT / "scanner_grammars.py", ROOT / "bounded_github.py",
     ROOT / "github_binding.py", CANARY,
 )
 

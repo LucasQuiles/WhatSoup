@@ -10,7 +10,7 @@ import { resolveTestPython } from '../helpers/python-interpreter.ts';
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const adapter = join(repoRoot, 'tools/private-test-integrity');
 const sources = [
-  'private_scanner_candidate.py', 'runtime_capture.py', 'scanner_runtime.py',
+  'private_scanner_candidate.py', 'runtime_capture.py', 'scanner_runtime.py', 'scanner_grammars.py',
   'bounded_github.py', 'github_binding.py', 'tests/native_capture_canary.py',
 ];
 
