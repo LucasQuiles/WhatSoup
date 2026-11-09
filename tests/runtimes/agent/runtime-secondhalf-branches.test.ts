@@ -262,6 +262,7 @@ import {
   type PollVote,
 } from '../../../src/runtimes/agent/runtime.ts';
 import {
+  completedCheckpoint as savedSessionCheckpoint,
   markOwnedSystemTurn,
   makeRuntimeTurnContext,
   pendingSystemResults,
@@ -1635,6 +1636,181 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
         expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
         expect(contextSends()).toHaveLength(0);
         expect(continuationSends()).toHaveLength(0);
+      });
+
+      describe('a service restart after the kill', () => {
+        const HOLD_LOG = 'proactive resume after a stalled-operation kill — no context or continuation turn sent';
+        // The restart-loop guard counts boots in a state file shared by the
+        // whole file; several boots inside one case are not a loop under test.
+        let restartLoopGuard: typeof mockConfig.restartLoopGuard;
+        beforeEach(() => {
+          restartLoopGuard = mockConfig.restartLoopGuard;
+          mockConfig.restartLoopGuard = { ...restartLoopGuard, enabled: false };
+        });
+        afterEach(() => { mockConfig.restartLoopGuard = restartLoopGuard; });
+
+        /** One saved session (session_checkpoints row) shared across runtime instances, like the database across a restart. */
+        function savedSession() {
+          let row = {
+            ...savedSessionCheckpoint({
+              conversationKey: '15550001',
+              deliveryJid: dmJid,
+              deliveryNamespace: 's.whatsapp.net',
+              scope: 'per_chat',
+              sessionId: 'sess-1',
+              updatedAt: new Date(Date.now() - 60_000).toISOString().slice(0, 19),
+            }),
+            watchdog_state: JSON.stringify({ providerRoutePolicy: { provider: 'p' } }),
+          };
+          const durability = {
+            getResumableCheckpoints: vi.fn(() => [{ conversation_key: row.conversation_key }]),
+            getSessionCheckpoint: vi.fn(() => row),
+            upsertSessionCheckpoint: vi.fn((_key: string, fields: { watchdogState?: string }) => {
+              if (fields.watchdogState !== undefined) row = { ...row, watchdog_state: fields.watchdogState };
+            }),
+            completeTurn: vi.fn(),
+          };
+          const watchdogState = () => JSON.parse(row.watchdog_state ?? '{}') as Record<string, unknown>;
+          const holdWrites = () => durability.upsertSessionCheckpoint.mock.calls.filter(
+            (c) => typeof c[1].watchdogState === 'string' && c[1].watchdogState.includes('stalledOperationResumeHold'),
+          );
+          return { durability, watchdogState, holdWrites };
+        }
+
+        function stallRuntimeWith(durability: unknown) {
+          const made = makeStallRuntime();
+          (made.runtime as unknown as { durability: unknown }).durability = durability;
+          return made;
+        }
+
+        /** The old process stops before its respawn timer fires; only the saved session survives. */
+        function stopService(state: PollRuntimeState): void {
+          for (const timer of state.pendingRespawnTimers) clearTimeout(timer);
+          state.pendingRespawnTimers.clear();
+        }
+
+        /** A fresh runtime over the same saved session: the proactive resume on startup. */
+        async function restart(durability: unknown) {
+          mockSession.spawnSession.mockClear();
+          mockSession.sendTurn.mockClear();
+          mockSession.getStatus.mockReset().mockReturnValue(liveStatus);
+          const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { sessionScope: 'per_chat' });
+          (runtime as unknown as { durability: unknown }).durability = durability;
+          const injectMissedMessages = vi.fn(async () => false);
+          (runtime as unknown as { injectMissedMessages: unknown }).injectMissedMessages = injectMissedMessages;
+          await runtime.start();
+          await vi.advanceTimersByTimeAsync(1_000);
+          return { runtime, state: runtime as unknown as PollRuntimeState, injectMissedMessages };
+        }
+
+        function restartSends(): unknown[][] {
+          return mockSession.sendTurn.mock.calls.filter(
+            (c: unknown[]) => typeof c[0] === 'string' && c[0].includes('resumed after service restart'),
+          );
+        }
+
+        function restartHoldLogs(): unknown[][] {
+          return (mockRuntimeLogger.info?.mock.calls ?? []).filter((c: unknown[]) => c[1] === HOLD_LOG);
+        }
+
+        it('the kill is saved on the session, once, and other saved state is kept', () => {
+          const saved = savedSession();
+          const { runtime, state } = stallRuntimeWith(saved.durability);
+
+          stallKill(runtime, state, dmJid);
+          stallKill(runtime, state, dmJid);
+
+          expect(saved.watchdogState()).toEqual({
+            providerRoutePolicy: { provider: 'p' },
+            stalledOperationResumeHold: { sessionId: 'sess-1' },
+          });
+          expect(saved.holdWrites(), 'the duplicate callback writes nothing').toHaveLength(1);
+        });
+
+        it('control: an ordinary crash saves no hold', () => {
+          const saved = savedSession();
+          const { runtime, state } = stallRuntimeWith(saved.durability);
+
+          state.handlePerChatCrash(dmJid, dmJid, {
+            ...currentCrashIdentity(runtime, dmJid),
+            exitCode: 1, signal: null, sessionId: 'sess-1', dbRowId: 7, provider: 'p',
+          });
+
+          expect(saved.holdWrites()).toHaveLength(0);
+          expect(saved.watchdogState()).toEqual({ providerRoutePolicy: { provider: 'p' } });
+        });
+
+        it('a restart before the respawn resumes the session and sends no context or continuation turn', async () => {
+          const saved = savedSession();
+          const first = stallRuntimeWith(saved.durability);
+          stallKill(first.runtime, first.state, dmJid);
+          stopService(first.state);
+
+          const { injectMissedMessages } = await restart(saved.durability);
+
+          expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);
+          expect(mockSession.spawnSession).toHaveBeenCalledWith('sess-1');
+          expect(injectMissedMessages).not.toHaveBeenCalled();
+          expect(mockSession.sendTurn).not.toHaveBeenCalled();
+          expect(restartHoldLogs()).toHaveLength(1);
+        });
+
+        it('a restart after the respawn resumes once and sends nothing; a second restart does the same', async () => {
+          const saved = savedSession();
+          const first = stallRuntimeWith(saved.durability);
+          stallKill(first.runtime, first.state, dmJid);
+          await runRespawn();
+          expect(suppressionLogs()).toHaveLength(1);
+
+          const second = await restart(saved.durability);
+          expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);
+          expect(second.injectMissedMessages).not.toHaveBeenCalled();
+          expect(mockSession.sendTurn).not.toHaveBeenCalled();
+          expect(second.state.pendingSystemResults.peek(dmJid)).toBeNull();
+
+          const third = await restart(saved.durability);
+          expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);
+          expect(third.injectMissedMessages).not.toHaveBeenCalled();
+          expect(mockSession.sendTurn).not.toHaveBeenCalled();
+          expect(restartHoldLogs()).toHaveLength(2);
+          expect(saved.holdWrites(), 'restarts do not rewrite the hold').toHaveLength(1);
+        });
+
+        it('the next real request after a restart is dispatched, its reply is delivered, and it releases the hold', async () => {
+          const saved = savedSession();
+          const first = stallRuntimeWith(saved.durability);
+          stallKill(first.runtime, first.state, dmJid);
+          stopService(first.state);
+          const { runtime, state } = await restart(saved.durability);
+          expect(mockSession.sendTurn).not.toHaveBeenCalled();
+
+          await sendAndDrain(runtime, makeMsg({ messageId: 'msg-after-restart', content: 'try the export again' }));
+          await vi.advanceTimersByTimeAsync(0);
+          await ownedView(state).perChatTurnQueues.get(dmJid)?.idle();
+
+          expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+          expect(JSON.stringify(mockSession.sendTurn.mock.calls[0])).toContain('try the export again');
+          const toolScopeKey = state.sessionEventToolScopes.get(mockSession);
+          if (!toolScopeKey) throw new Error(`missing tool scope for ${dmJid}`);
+          state.handleEventPerChat(mockSession, { type: 'assistant_text', text: 'Export finished.' }, toolScopeKey);
+          expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Export finished.', 'answer');
+          expect(saved.watchdogState()).toEqual({ providerRoutePolicy: { provider: 'p' } });
+
+          // Released: a later restart resumes the ordinary way again.
+          await restart(saved.durability);
+          await vi.waitFor(() => { expect(restartSends()).toHaveLength(1); });
+          expect(restartHoldLogs()).toHaveLength(1);
+        });
+
+        it('control: a restart with no saved hold still sends its continuation turn', async () => {
+          const saved = savedSession();
+
+          const { injectMissedMessages } = await restart(saved.durability);
+
+          expect(injectMissedMessages).toHaveBeenCalledOnce();
+          await vi.waitFor(() => { expect(restartSends()).toHaveLength(1); });
+          expect(restartHoldLogs()).toHaveLength(0);
+        });
       });
     });
 
