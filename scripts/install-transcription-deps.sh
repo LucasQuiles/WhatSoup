@@ -9,7 +9,7 @@ set -euo pipefail
 # /opt/homebrew/bin/python3.12, an unconditional `brew install`, and `shasum`,
 # which is a Perl utility absent from minimal Linux images. The project targets
 # Linux (systemd), macOS (launchd) and Docker as first-class platforms and CI
-# runs on both ubuntu-latest and macos-14.
+# runs on both ubuntu-latest and macos-15.
 #
 # Tool lookup follows the patterns already used in this repo rather than new
 # machinery: the candidate-loop + `command -v` shape from
