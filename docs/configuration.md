@@ -2713,6 +2713,12 @@ bot persona.
 `passive` instances have no `systemPrompt` and are restricted to `self_only` access. No
 `ANTHROPIC_API_KEY` or `PINECONE_API_KEY` is needed.
 
+A passive instance connects with presence `unavailable` (Baileys `markOnlineOnConnect: false`,
+`src/transport/connection.ts`). While a linked device marks the account online, the phone app
+stops showing notifications, and a passive line is usually a person's own number. This changes
+presence only: messages are still delivered and the link is unaffected. Chat and agent instances
+connect as `available`.
+
 ---
 
 ## Database Migration History

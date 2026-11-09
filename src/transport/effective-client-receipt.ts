@@ -17,10 +17,12 @@
 //
 // Both call `makeWASocket`. `connection.ts` passes
 // `generateHighQualityLinkPreview: config.generateHighQualityLinkPreview`; `auth.ts`
-// hard-codes `false`. Neither passes `browser`, `syncFullHistory`, or
-// `markOnlineOnConnect`, so both silently inherit the library defaults — which in
-// the installed dependency are `Browsers.macOS('Chrome')`, `syncFullHistory: true`
-// and `markOnlineOnConnect: true` (`lib/Defaults/index.js`).
+// hard-codes `false`. `connection.ts` also passes `markOnlineOnConnect` (false for
+// passive lines, true otherwise); `auth.ts` does not. Neither passes `browser` or
+// `syncFullHistory`, so those, and the pairing CLI's `markOnlineOnConnect`, inherit
+// the library defaults — which in the installed dependency are
+// `Browsers.macOS('Chrome')`, `syncFullHistory: true` and `markOnlineOnConnect: true`
+// (`lib/Defaults/index.js`).
 //
 // PRECISELY: the two paths are independently maintained and CAN diverge on any
 // field, with nothing detecting it. They are not currently known to diverge for
