@@ -1,6 +1,10 @@
 import importlib.util
+import io
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
 
 import pytest
@@ -109,3 +113,242 @@ def test_dead_letter_is_reported_as_dead_lettered_not_pending(tmp_path):
         module.delivery_receipts(tmp_path, [identifier])[identifier]["status"]
         == "dead_lettered"
     )
+
+
+def _sent_receipt(path, identifier):
+    path.write_text(json.dumps({
+        "id": identifier,
+        "delivery": {"status": "sent", "auditReceipt": "outside-receipt"},
+    }))
+
+
+def test_symlinked_stage_cannot_supply_a_delivery_receipt(tmp_path):
+    identifier = "00000000-0000-4000-8000-000000000006"
+    root = tmp_path / "queue"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _sent_receipt(outside / f"{identifier}.json", identifier)
+    (root / "sent").symlink_to(outside, target_is_directory=True)
+
+    assert module.delivery_receipts(root, [identifier])[identifier] == {
+        "status": "unobserved"
+    }
+
+
+def test_symlinked_root_cannot_supply_a_delivery_receipt(tmp_path):
+    identifier = "00000000-0000-4000-8000-000000000007"
+    outside = tmp_path / "outside"
+    (outside / "sent").mkdir(parents=True)
+    _sent_receipt(outside / "sent" / f"{identifier}.json", identifier)
+    root = tmp_path / "queue"
+    root.symlink_to(outside, target_is_directory=True)
+
+    assert module.delivery_receipts(root, [identifier])[identifier] == {
+        "status": "unobserved"
+    }
+
+
+def test_leaf_replaced_with_symlink_before_open_is_not_a_receipt(tmp_path, monkeypatch):
+    identifier = "00000000-0000-4000-8000-000000000008"
+    root = tmp_path / "queue"
+    root.mkdir()
+    _place(root, "sent", identifier, "")
+    leaf = root / "sent" / f"{identifier}.json"
+    outside = tmp_path / "outside.json"
+    _sent_receipt(outside, identifier)
+    original_open = os.open
+    original_io_open = io.open
+    replaced = False
+
+    def replace(path):
+        nonlocal replaced
+        if not replaced and not isinstance(path, int) and Path(path).name == leaf.name:
+            leaf.rename(root / "saved-leaf.json")
+            leaf.symlink_to(outside)
+            replaced = True
+
+    def open_descriptor(path, *args, **kwargs):
+        replace(path)
+        return original_open(path, *args, **kwargs)
+
+    def open_stream(path, *args, **kwargs):
+        replace(path)
+        return original_io_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", open_descriptor)
+    monkeypatch.setattr(io, "open", open_stream)
+    result = module.delivery_receipts(root, [identifier])
+    assert replaced, "the replacement must occur at the file-open boundary"
+    assert result[identifier] == {"status": "unobserved"}
+
+
+def test_stage_replacement_after_enumeration_cannot_redirect_leaf_reads(tmp_path, monkeypatch):
+    identifier = "00000000-0000-4000-8000-000000000009"
+    root = tmp_path / "queue"
+    root.mkdir()
+    _place(root, "sent", identifier, "")
+    stage = root / "sent"
+    stage_identity = stage.stat()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _sent_receipt(outside / f"{identifier}.json", identifier)
+    original_scandir = os.scandir
+    replaced = False
+
+    def scandir(path):
+        nonlocal replaced
+        entries = original_scandir(path)
+        info = os.fstat(path) if isinstance(path, int) else os.stat(path)
+        if not replaced and (info.st_dev, info.st_ino) == (
+            stage_identity.st_dev, stage_identity.st_ino
+        ):
+            stage.rename(root / "saved-stage")
+            stage.symlink_to(outside, target_is_directory=True)
+            replaced = True
+        return entries
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    result = module.delivery_receipts(root, [identifier])
+    assert replaced, "the replacement must occur after opening the directory iterator"
+    assert result[identifier] == {"status": "pending"}
+
+
+def test_leaf_replacement_after_validation_keeps_the_opened_bytes(tmp_path, monkeypatch):
+    identifier = "00000000-0000-4000-8000-000000000010"
+    root = tmp_path / "queue"
+    root.mkdir()
+    _place(root, "sent", identifier, "")
+    leaf = root / "sent" / f"{identifier}.json"
+    leaf_identity = leaf.stat()
+    outside = tmp_path / "outside.json"
+    _sent_receipt(outside, identifier)
+    original_fstat = os.fstat
+    original_stat = Path.stat
+    replaced = False
+
+    def replace(info):
+        nonlocal replaced
+        if not replaced and (info.st_dev, info.st_ino) == (
+            leaf_identity.st_dev, leaf_identity.st_ino
+        ):
+            leaf.rename(root / "saved-leaf.json")
+            leaf.symlink_to(outside)
+            replaced = True
+        return info
+
+    def stat_path(path, *args, **kwargs):
+        return replace(original_stat(path, *args, **kwargs))
+
+    monkeypatch.setattr(os, "fstat", lambda fd: replace(original_fstat(fd)))
+    monkeypatch.setattr(Path, "stat", stat_path)
+    result = module.delivery_receipts(root, [identifier])
+    assert replaced, "the replacement must occur after inspecting the original file"
+    assert result[identifier] == {"status": "pending"}
+
+
+@given(value=st.one_of(st.none(), st.booleans(), st.integers(), st.lists(st.integers())))
+def test_non_object_json_is_not_a_delivery_receipt(value):
+    identifier = "00000000-0000-4000-8000-000000000011"
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "sent").mkdir()
+        (root / "sent" / f"{identifier}.json").write_text(json.dumps(value))
+        assert module.delivery_receipts(root, [identifier])[identifier] == {
+            "status": "unobserved"
+        }
+
+
+@given(value=st.one_of(st.none(), st.booleans(), st.integers(), st.lists(st.integers())))
+def test_non_object_delivery_is_not_a_delivery_receipt(value):
+    identifier = "00000000-0000-4000-8000-000000000012"
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "sent").mkdir()
+        (root / "sent" / f"{identifier}.json").write_text(
+            json.dumps({"id": identifier, "delivery": value})
+        )
+        assert module.delivery_receipts(root, [identifier])[identifier] == {
+            "status": "unobserved"
+        }
+
+
+@given(status=st.one_of(st.lists(st.integers()), st.dictionaries(st.text(), st.integers())))
+def test_non_string_status_cannot_claim_delivery_or_abort_observation(status):
+    identifier = "00000000-0000-4000-8000-000000000013"
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        _place(root, "sent", identifier, "", status=status)
+        assert module.delivery_receipts(root, [identifier])[identifier] == {
+            "status": "pending"
+        }
+
+
+def test_receipt_that_grows_after_size_check_is_rejected(tmp_path, monkeypatch):
+    identifier = "00000000-0000-4000-8000-000000000014"
+    (tmp_path / "sent").mkdir()
+    leaf = tmp_path / "sent" / f"{identifier}.json"
+    _sent_receipt(leaf, identifier)
+    before = leaf.stat()
+    original_fstat = os.fstat
+    enlarged = False
+
+    def fstat(descriptor):
+        nonlocal enlarged
+        observed = original_fstat(descriptor)
+        if not enlarged and (observed.st_dev, observed.st_ino) == (
+            before.st_dev, before.st_ino
+        ):
+            with leaf.open("ab") as stream:
+                stream.write(b" " * (1024 * 1024))
+            enlarged = True
+        return observed
+
+    monkeypatch.setattr(os, "fstat", fstat)
+    result = module.delivery_receipts(tmp_path, [identifier])
+    assert enlarged, "the fixture must grow after the descriptor size check"
+    assert result[identifier] == {"status": "unobserved"}
+
+
+def test_fifo_receipt_does_not_wait_for_a_writer(tmp_path):
+    identifier = "00000000-0000-4000-8000-000000000015"
+    (tmp_path / "sent").mkdir()
+    os.mkfifo(tmp_path / "sent" / f"{identifier}.json")
+    program = """
+import json, runpy, sys
+reader = runpy.run_path(sys.argv[1])["delivery_receipts"]
+print(json.dumps(reader(sys.argv[2], [sys.argv[3]])))
+"""
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", program, module.__file__, str(tmp_path), identifier],
+        capture_output=True, text=True, timeout=5, check=True,
+    )
+    assert json.loads(result.stdout)[identifier] == {"status": "unobserved"}
+
+
+def test_deep_json_receipt_does_not_abort_other_stage_observations(tmp_path):
+    identifier = "00000000-0000-4000-8000-000000000016"
+    _place(tmp_path, "outbox", identifier, "")
+    (tmp_path / "sent").mkdir()
+    depth = 10000
+    payload = "[" * depth + "0" + "]" * depth
+    assert len(payload) < 1024 * 1024
+    (tmp_path / "sent" / f"{identifier}.json").write_text(payload)
+    assert module.delivery_receipts(tmp_path, [identifier])[identifier] == {
+        "status": "pending"
+    }
+
+
+@given(suffix=st.sampled_from(["/", "/."]))
+def test_root_path_alias_cannot_hide_a_symlink(suffix):
+    identifier = "00000000-0000-4000-8000-000000000017"
+    with TemporaryDirectory() as directory:
+        parent = Path(directory)
+        outside = parent / "outside"
+        (outside / "sent").mkdir(parents=True)
+        _sent_receipt(outside / "sent" / f"{identifier}.json", identifier)
+        root = parent / "queue"
+        root.symlink_to(outside, target_is_directory=True)
+        assert module.delivery_receipts(str(root) + suffix, [identifier])[identifier] == {
+            "status": "unobserved"
+        }

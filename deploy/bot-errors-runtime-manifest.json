@@ -994,7 +994,7 @@
     },
     {
       "path": "deploy/scripts/fleet/bot_errors_delivery_receipts.py",
-      "sha256": "88f9c11f1cde10c7c11ccc5a42897b29126a2cdc8984ef5104f7a631046f7748",
+      "sha256": "63c4079099d8630319ae27fc6e4217edda17cfec34430bb103e95269e655ecd1",
       "mustContain": [
         "delivery_receipts",
         "storm-collapsed"

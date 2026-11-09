@@ -7,6 +7,8 @@ import plistlib
 import sys
 import time
 import types
+# Import on the real platform before fixtures simulate Darwin on Linux.
+import urllib.request
 from unittest.mock import patch
 from tempfile import TemporaryDirectory
 

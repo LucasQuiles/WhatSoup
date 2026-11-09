@@ -883,6 +883,13 @@ a separately approved live-host mutation.
 
 ### Portable fleet observer and deadman
 
+The delivery-receipt reader opens the queue root, stage directories and receipt
+leaves without following symlinks. It reads regular files through the same
+descriptors it validates, so replacing a pathname cannot redirect the read.
+Each receipt is limited to one MiB, including growth after the initial size
+check. Unreadable or malformed entries do not establish delivery. The queue
+root's ancestor directories remain part of the trusted host configuration.
+
 Release exports include `deploy/scripts/fleet/` through the BOT ERRORS runtime
 manifest and `whatsoup-bot-errors-deploy.sh`. The module has no tracked host
 inventory. An operator supplies an absolute, private target file to
