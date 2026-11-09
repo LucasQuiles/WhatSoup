@@ -28,6 +28,7 @@ import {
 } from './effective-client-receipt.ts';
 import { resolveAuthGenerationEvidence } from './auth-generation.ts';
 import { decideConnectActivation, readTerminalLatchJournal, type ConnectActivationDecision } from './terminal-latch.ts';
+import { DeadLinkAlarm } from './dead-link-alert.ts';
 import { observeActiveTree, resolveAuthGenerationEvidenceV2 } from './auth-generation-v2.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { createTypingStartGuard, type TypingStartGuard } from '../lib/typing-start-guard.ts';
@@ -704,6 +705,13 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
   private readonly log = createChildLogger('connection');
 
+  /** One BOT ERRORS card per 401 outage that no reconnect ends within 10 minutes. */
+  private readonly deadLinkAlarm = new DeadLinkAlarm({
+    instance: config.botName,
+    dataRoot: config.dataRoot ?? null,
+    log: this.log,
+  });
+
   /**
    * #1872: one canonical typing-indicator circuit breaker. All presence
    * (composing/paused) traffic funnels through setTyping, which routes the raw
@@ -978,6 +986,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.connectStartedAt = Date.now();
     this.recordCredentialLifecycle('connect_start');
     this.persistConnectionRuntimeState('connect_start');
+    this.deadLinkAlarm.resume();
     this.log.info('Connecting to WhatsApp');
 
     try {
@@ -1409,6 +1418,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.persistConnectionRuntimeState('shutdown');
     this.clearReconnectTimers();
     this.clearAuthSnapshotSettledTimer();
+    this.deadLinkAlarm.dispose();
     this.stopKeepalive();
     // Clear poll vote grace timers to prevent post-shutdown emissions
     this.pollVoteDecryptor.dispose();
@@ -2498,6 +2508,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       // health poll be the one to find an empty cache.
       void this.authBond.warmTreeCache();
       this.persistConnectionRuntimeState('connection_open');
+      this.deadLinkAlarm.onConnectionOpen();
       this.log.info({ botJid: this.botJid, botLid: this.botLid }, 'WhatsApp connected');
       return;
     }
@@ -2565,6 +2576,14 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         reconnectDecision,
         disconnectClassification: this.lastDisconnectDecision.classification,
       }, 'WhatsApp connection closed');
+
+      if (statusCode === DisconnectReason.loggedOut) {
+        this.deadLinkAlarm.onLoggedOut({
+          statusCode,
+          reason,
+          classification: this.lastDisconnectDecision.classification,
+        });
+      }
 
       if (action.type === 'exit') {
         this.setConnectionState('disconnected');

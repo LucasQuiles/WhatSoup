@@ -1410,6 +1410,11 @@
       "owner": "src/transport/connection.ts",
       "test": "tests/transport/auth-bond.test.ts"
     },
+    "whatsapp_link_dead": {
+      "disposition": "one_card_per_401_outage_cleared_by_link_open",
+      "owner": "src/transport/dead-link-alert.ts",
+      "test": "tests/transport/dead-link-alert.test.ts"
+    },
     "terminal_auth_latch_hold": {
       "disposition": "terminal_latch_holds_activation_until_owner_authorized_supersession",
       "owner": "src/transport/connection.ts",

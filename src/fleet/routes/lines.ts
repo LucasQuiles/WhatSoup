@@ -56,10 +56,14 @@ function dig(obj: Record<string, unknown> | null | undefined, ...keys: string[])
   return cur;
 }
 
-/** Generate a heartbeat array of 20 entries based on consecutive failure count. */
+/**
+ * Generate a heartbeat array of 20 entries based on consecutive failure count.
+ * A logged-out line is down: it still answers its health probe, so its probe
+ * failure count stays 0 while it has no WhatsApp link.
+ */
 function buildHeartbeat(poll: InstanceStatus | undefined): ('up' | 'down')[] {
   const size = 20;
-  if (!poll) return Array(size).fill('down') as ('up' | 'down')[];
+  if (!poll || poll.status === 'logged_out') return Array(size).fill('down') as ('up' | 'down')[];
   const failures = Math.min(poll.consecutiveFailures, size);
   // Most recent entries are at the end of the array.
   // Older entries are 'up', recent failures are 'down'.
