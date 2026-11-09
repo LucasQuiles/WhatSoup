@@ -5,11 +5,15 @@ import io
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+import socket
 import sys
-from threading import Thread
+from string import ascii_letters, digits
+from threading import Event, Thread
+from time import monotonic
 from unittest.mock import patch
 
 import pytest
+from hypothesis import example, given, settings, strategies as st
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,10 +26,17 @@ def isolate_proxy_configuration(monkeypatch):
 
 
 @contextlib.contextmanager
-def endpoint(status=200, payload=None, location=None):
+def endpoint(status=200, payload=None, location=None, connected=None):
     requests = []
 
     class Handler(BaseHTTPRequestHandler):
+        def setup(self):
+            # An incomplete client request must not prevent fixture shutdown.
+            self.request.settimeout(1)
+            super().setup()
+            if connected is not None:
+                connected.set()
+
         def do_GET(self):
             requests.append((self.path, self.headers.get("Authorization")))
             body = json.dumps(payload if payload is not None else {"status": "ok"}).encode()
@@ -50,6 +61,22 @@ def endpoint(status=200, payload=None, location=None):
             assert not thread.is_alive(), "fixture server did not stop"
 
 
+def test_fixture_stops_while_a_client_leaves_its_request_incomplete():
+    connected = Event()
+    client = None
+    started = monotonic()
+    try:
+        with endpoint(connected=connected) as (port, requests):
+            client = socket.create_connection(("127.0.0.1", port), timeout=2)
+            client.sendall(b"GET /health")
+            assert connected.wait(timeout=2), "fixture did not accept the client"
+        assert monotonic() - started < 5
+        assert requests == []
+    finally:
+        if client is not None:
+            client.close()
+
+
 def http_adapter():
     scope = {}
     request = {"health_reader_code": (ROOT.parent / "lib/health_reader.py").read_text()}
@@ -58,13 +85,23 @@ def http_adapter():
     return scope["http"]
 
 
-@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
-def test_redirect_never_sends_health_token_to_another_server(status):
+@example(status=301, token="fixture-secret")
+@example(status=302, token="fixture-secret")
+@example(status=303, token="fixture-secret")
+@example(status=307, token="fixture-secret")
+@example(status=308, token="fixture-secret")
+# Real HTTP fixtures have bounded socket and thread shutdown waits.
+@settings(max_examples=10, deadline=5000)
+@given(
+    status=st.sampled_from([301, 302, 303, 307, 308]),
+    token=st.text(alphabet=ascii_letters + digits, min_size=1, max_size=64),
+)
+def test_redirect_never_sends_health_token_to_another_server(status, token):
     http = http_adapter()
     with endpoint(payload={"whatsapp": {"connected": True}}) as (other_port, other_requests):
         with endpoint(status=status, location=f"http://127.0.0.1:{other_port}/stolen") as (port, requests):
-            result = http(port, "/health", "fixture-secret")
-    assert requests == [("/health", "Bearer fixture-secret")]
+            result = http(port, "/health", token)
+    assert requests == [("/health", "Bearer " + token)]
     assert other_requests == [], "redirect target received the authenticated request"
     assert result == (None, {})
 
