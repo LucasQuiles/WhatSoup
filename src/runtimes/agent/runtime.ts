@@ -11297,6 +11297,7 @@ export class AgentRuntime implements Runtime {
     if (crashCount <= AUTO_RESPAWN_MAX_CRASHES && info?.sessionId) {
       const sessionId = info.sessionId;
       const dbRowId = info.dbRowId;
+      const terminationReason = info.terminationReason;
       const crashedAtSec = Math.floor(Date.now() / 1000);
       // crashCount can be 0 here (#3395: an uncharged intentional exit) —
       // clamp so the backoff exponent never goes negative.
@@ -11313,6 +11314,7 @@ export class AgentRuntime implements Runtime {
           dbRowId,
           crashedAtSec,
           timer,
+          ...(terminationReason !== undefined ? { terminationReason } : {}),
         });
       }, delayMs);
       if (this.sessionOwnership.setRespawnTimer(currentMapKey, managerId, recoveryGeneration, timer)) {
@@ -11601,6 +11603,19 @@ export class AgentRuntime implements Runtime {
             await this.waitForSystemTurnQuarantine(activeMapKey);
             if (!args.session.getStatus().active) return;
           }
+        }
+        // F7: a stalled-operation kill already told the user to send the
+        // message again, and the killed request is finalized as failed. A
+        // continuation turn would re-run the stopped work on the agent's own
+        // initiative, unbound to any request. The resume above still restores
+        // the conversation, so the user's next message is served normally.
+        if (args.terminationReason === 'stalled_operation') {
+          log.info(
+            { mapKey: activeMapKey, sessionId: args.sessionId },
+            'auto-respawn resumed after a stalled-operation kill — continuation turn not sent',
+          );
+          publishRespawnRecovery();
+          return;
         }
         // #3398: the post-turn gate armed by the pre-crash turn's completed
         // result survives the crash — no new user message has arrived to clear

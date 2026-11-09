@@ -1,6 +1,6 @@
 // Limits for the per-chat auto-respawn backoff, and the record of one scheduled attempt.
 import { MS_PER_SECOND } from '../../lib/time-units.ts';
-import type { SessionManager } from './session.ts';
+import type { SessionManager, SessionTerminationReason } from './session.ts';
 
 /** Max consecutive crashes before auto-respawn gives up and waits for user action. */
 export const AUTO_RESPAWN_MAX_CRASHES = 3;
@@ -31,4 +31,6 @@ export interface OwnedPerChatRespawnArgs {
   timer: ReturnType<typeof setTimeout>;
   /** How many times this attempt already re-armed for unproven termination. */
   terminationDeferrals?: number;
+  /** Why the supervisor ended the crashed process; absent for a provider fault. */
+  terminationReason?: SessionTerminationReason;
 }
