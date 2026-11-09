@@ -912,9 +912,13 @@ Instance health tokens use the shared reader's precedence: per-instance
 instance's `tokens.env`. An existing launchd plist token is a compatibility
 fallback only when the shared reader resolves no token. Remote destinations
 must be SSH host aliases or addresses, not command-line options.
-Health and broker HTTP probes connect directly to the local endpoint, ignore
+Local health and broker HTTP probes connect directly to the local endpoint, ignore
 environment proxies and reject redirects, including any body returned with a
 redirect status. Credentials are never forwarded to a different endpoint.
+The optional supervisor uses this direct transport for its liveness and broker
+capability calls. Its liveness URL must use HTTP and the literal `127.0.0.1`
+address without user information, a fragment or port zero. The explicitly
+enabled legacy Microsoft Graph request retains its existing proxy behavior.
 
 Render the jobs from the release that will run them. Rendering writes only the
 named fresh staging directory, after validating the private config and its state

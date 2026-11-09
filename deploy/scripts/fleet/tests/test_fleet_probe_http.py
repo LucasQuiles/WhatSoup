@@ -1,6 +1,7 @@
 """Exercise credential boundaries through the real fleet HTTP adapter."""
 
 import contextlib
+import importlib.util
 import io
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -46,6 +47,8 @@ def endpoint(status=200, payload=None, location=None, connected=None):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        do_POST = do_GET
 
         def log_message(self, *args):
             pass
@@ -147,3 +150,113 @@ def test_existing_fleet_response_limit_accepts_more_than_shared_reader_limit():
         result = http(port, "/health")
     assert requests == [("/health", None)]
     assert result == (200, payload)
+
+
+def supervisor_adapter():
+    spec = importlib.util.spec_from_file_location(
+        "supervisor_http_boundary", ROOT / "reliability_supervisor.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@example(method="GET", token="fixture-secret")
+@example(method="POST", token="fixture-secret")
+@settings(max_examples=8, deadline=5000)
+@given(
+    method=st.sampled_from(["GET", "POST"]),
+    token=st.text(alphabet=ascii_letters + digits, min_size=1, max_size=64),
+)
+def test_supervisor_loopback_capability_bypasses_environment_proxy(method, token):
+    supervisor = supervisor_adapter()
+    with endpoint(payload={"source": "proxy"}) as (proxy_port, proxy_requests):
+        with endpoint(payload={"source": "direct"}) as (port, requests):
+            with patch("urllib.request.getproxies", return_value={"http": f"http://127.0.0.1:{proxy_port}"}), patch("urllib.request.proxy_bypass", return_value=False):
+                telemetry, payload = supervisor.capability_request(
+                    f"http://127.0.0.1:{port}/ready", token, method=method,
+                    body={"profile": "fixture"} if method == "POST" else None,
+                )
+    assert proxy_requests == [], "proxy received the broker bearer"
+    assert requests == [("/ready", "Bearer " + token)]
+    assert telemetry["ok"] is True
+    assert payload == {"source": "direct"}
+
+
+def test_supervisor_liveness_bypasses_environment_proxy():
+    supervisor = supervisor_adapter()
+    with endpoint(payload={"status": "ok"}) as (proxy_port, proxy_requests):
+        with endpoint(payload={"status": "degraded"}) as (port, requests):
+            with patch("urllib.request.getproxies", return_value={"http": f"http://127.0.0.1:{proxy_port}"}), patch("urllib.request.proxy_bypass", return_value=False):
+                result = supervisor.probe_liveness(f"http://127.0.0.1:{port}/live")
+    assert proxy_requests == []
+    assert requests == [("/live", None)]
+    assert result["ok"] is False
+    assert result["code"] == "body_degraded"
+
+
+@example(status=404, reason="not_found")
+@example(status=503, reason="not_ready")
+@settings(max_examples=6, deadline=5000)
+@given(
+    status=st.sampled_from([404, 503]),
+    reason=st.text(alphabet=ascii_letters + digits, min_size=1, max_size=32),
+)
+def test_supervisor_capability_preserves_nonredirect_error_details(status, reason):
+    supervisor = supervisor_adapter()
+    body = {"status": "unready", "reason_codes": [reason]}
+    with endpoint(status=status, payload=body) as (port, requests):
+        telemetry, payload = supervisor.capability_request(
+            f"http://127.0.0.1:{port}/ready", "fixture-secret"
+        )
+    assert requests == [("/ready", "Bearer fixture-secret")]
+    assert telemetry["ok"] is False
+    assert telemetry["code"] == "http_error"
+    assert telemetry["http_status"] == status
+    assert payload == body
+
+
+@example(status=301, suffix="live")
+@example(status=302, suffix="live")
+@example(status=303, suffix="live")
+@example(status=307, suffix="live")
+@example(status=308, suffix="live")
+@settings(max_examples=8, deadline=5000)
+@given(
+    status=st.sampled_from([301, 302, 303, 307, 308]),
+    suffix=st.text(alphabet=ascii_letters + digits, min_size=1, max_size=32),
+)
+@pytest.mark.parametrize("probe_kind", ["liveness", "capability"])
+def test_supervisor_rejects_redirected_responses(probe_kind, status, suffix):
+    supervisor = supervisor_adapter()
+    with endpoint(payload={"status": "ok"}) as (other_port, other_requests):
+        with endpoint(status=status, location=f"http://127.0.0.1:{other_port}/healthy") as (port, requests):
+            url = f"http://127.0.0.1:{port}/{suffix}"
+            if probe_kind == "liveness":
+                result = supervisor.probe_liveness(url)
+            else:
+                result, payload = supervisor.capability_request(url, "fixture-secret")
+    bearer = None if probe_kind == "liveness" else "Bearer fixture-secret"
+    assert requests == [("/" + suffix, bearer)]
+    assert other_requests == []
+    assert result["ok"] is False
+    if probe_kind == "capability":
+        assert payload == {}, "redirect body must not supply broker status"
+
+
+@pytest.mark.parametrize("url", [
+    "https://127.0.0.1/live",
+    "http://localhost/live",
+    "http://example.invalid/live",
+    "http://user@127.0.0.1/live",
+    "http://127.0.0.1:0/live",
+    "http://127.0.0.1/live#fragment",
+])
+@settings(max_examples=8)
+@given(suffix=st.text(alphabet=ascii_letters + digits, min_size=1, max_size=32))
+def test_supervisor_liveness_refuses_noncanonical_loopback_urls(url, suffix):
+    supervisor = supervisor_adapter()
+    with patch("urllib.request.OpenerDirector.open", side_effect=AssertionError("unsafe URL reached transport")):
+        result = supervisor.probe_liveness(url.replace("/live", "/" + suffix))
+    assert result["ok"] is False
+    assert result["code"] == "invalid_response"

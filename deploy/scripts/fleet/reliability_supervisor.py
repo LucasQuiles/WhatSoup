@@ -85,8 +85,9 @@ def probe_liveness(url: str, timeout: float = 5) -> dict:
     start = time.monotonic()
     result = {"ok": False, "code": "unavailable"}
     try:
+        opener = direct_loopback_opener(url)
         request = urllib.request.Request(url, headers={"X-Request-ID": uuid4().hex})
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with opener.open(request, timeout=timeout) as response:
             body = response.read(4097)
             payload = json.loads(body) if len(body) <= 4096 else {}
             result = {
@@ -725,12 +726,32 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def direct_loopback_opener(url):
+    origin = urlsplit(url)
+    if (
+        origin.scheme != "http"
+        or origin.hostname != "127.0.0.1"
+        or origin.username is not None
+        or origin.password is not None
+        or origin.fragment
+        or origin.port == 0
+    ):
+        raise ValueError("loopback_url_invalid")
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)
+
+
 def capability_request(url, bearer, *, method="GET", timeout=10, body=None):
     started = time.monotonic()
     request_id = str(uuid4())
     telemetry = {"ok": False, "code": "unavailable", "request_id": request_id}
     payload = {}
     try:
+        # Broker credentials stay local; the opt-in Graph call keeps its transport.
+        opener = (
+            direct_loopback_opener(url)
+            if urlsplit(url).hostname == "127.0.0.1"
+            else urllib.request.build_opener(NoRedirect)
+        )
         request = urllib.request.Request(
             url,
             data=None if body is None else json.dumps(body).encode(),
@@ -742,9 +763,7 @@ def capability_request(url, bearer, *, method="GET", timeout=10, body=None):
                 "client-request-id": request_id,
             },
         )
-        with urllib.request.build_opener(NoRedirect).open(
-            request, timeout=timeout
-        ) as response:
+        with opener.open(request, timeout=timeout) as response:
             raw = response.read(1024 * 1024 + 1)
             if len(raw) > 1024 * 1024:
                 raise ValueError("response_too_large")
@@ -757,11 +776,14 @@ def capability_request(url, bearer, *, method="GET", timeout=10, body=None):
     except urllib.error.HTTPError as exc:
         telemetry.update(code="http_error", http_status=exc.code)
         try:
-            raw = exc.read(1024 * 1024 + 1)
-            value = json.loads(raw) if len(raw) <= 1024 * 1024 else {}
-            payload = value if isinstance(value, dict) else {}
+            if not 300 <= exc.code < 400:
+                raw = exc.read(1024 * 1024 + 1)
+                value = json.loads(raw) if len(raw) <= 1024 * 1024 else {}
+                payload = value if isinstance(value, dict) else {}
         except (OSError, ValueError):
             pass
+        finally:
+            exc.close()
     except (TimeoutError, socket.timeout):
         telemetry["code"] = "timeout"
     except urllib.error.URLError as exc:
