@@ -104,6 +104,22 @@ describe('affected test execution', () => {
     expect(existsSync(join(cwd, '.local/test-run.lock'))).toBe(false);
   });
 
+  it.each([[75, 'busy'], [124, 'timedOut'], [125, 'inconclusive']] as const)(
+    'preserves the protocol meaning of nested exit %s', async (exitCode, outcome) => {
+      const cwd = tmp.make('nested-outcome');
+      const sentinel = join(cwd, 'must-not-run');
+      const report = await executeTestCommands(cwd, [
+        { name: 'nested-gate', command: process.execPath, args: ['-e', `process.exit(${exitCode})`] },
+        { name: 'later', command: process.execPath, args: ['-e', 'require("node:fs").writeFileSync(process.argv[1],"bad")', sentinel] },
+      ], { timeoutMs: 10_000, json: false });
+      expect(report).toMatchObject({ outcome, exitCode });
+      expect(report.results).toHaveLength(1);
+      expect(report.results[0]).toMatchObject({ name: 'nested-gate', exitCode, signal: null });
+      expect(existsSync(sentinel)).toBe(false);
+      expect(existsSync(join(cwd, '.local/test-run.lock'))).toBe(false);
+    },
+  );
+
   it('turns a persistent non-main source mutation into a failed selected-lane result', async () => {
     const cwd = tmp.make('source-drift');
     makeGitRepository(cwd);

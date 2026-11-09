@@ -100,6 +100,9 @@ describe('push-gate child outcomes', () => {
     expect(result.stderr.match(/^fixture-step$/gm)).toHaveLength(1);
     expect(result.stderr).toContain(`FAIL at step 1/${RELEASE_STEPS.length}`);
     expect(result.stderr).toContain(`(exit ${exitCode})`);
+    if (exitCode === 143) {
+      expect(result.stderr).toMatch(/push-gate: guard:repo:release-hygiene terminated by SIGTERM \(pid \d+\); exit 143/);
+    }
     expect(result.stdout).not.toContain('steps passed');
   });
 });

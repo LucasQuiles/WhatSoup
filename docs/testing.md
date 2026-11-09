@@ -123,6 +123,8 @@ release gates report a terminated child's PID and signal, preserve `128 + signal
 exits, and return 125 when an executable cannot start. Direct Vitest steps
 with an all-skipped or missing report cannot become a successful affected run. Counts
 measure execution, not assertion quality or exact semantic coverage.
+Nested gates preserve busy (75), timeout (124), and inconclusive (125) meanings
+in the affected-run summary; per-command details retain the observed process exit.
 
 The runner creates and removes its own scratch `TMPDIR`. Tests should use
 `tests/helpers/tmp-dir.ts`, `tmp_path`, `TemporaryDirectory`, or registered cleanup.

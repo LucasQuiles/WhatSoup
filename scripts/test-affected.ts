@@ -142,7 +142,11 @@ export async function executeTestCommands(
       }
       results.push({ name: step.name, ...result });
       if (result.wrappedExit !== 0) {
-        return { outcome: result.wrappedExit === 75 ? 'busy' : result.outcome, exitCode: result.wrappedExit, wallMs: Date.now() - start, results };
+        let outcome: TestExecution['outcome'] = result.outcome;
+        if (result.wrappedExit === 75) outcome = 'busy';
+        else if (result.wrappedExit === 124) outcome = 'timedOut';
+        else if (result.wrappedExit === 125) outcome = 'inconclusive';
+        return { outcome, exitCode: result.wrappedExit, wallMs: Date.now() - start, results };
       }
       if (step.vitestReport) {
         try {
