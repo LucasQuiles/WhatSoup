@@ -87,6 +87,10 @@ sentinel gate and the remaining behavioral suite that excludes those files.
 `npm test` and `coverage:check` retain their existing full behavior. Coverage
 requests always use the complete root suite and preserve 95% lines, 90% branches
 and 93% functions. Browser and motion configurations remain separate.
+The browser performance measurements remain report-only by default because their
+budgets are provisional. To enforce the existing 50 ms mount and 16 ms update
+budgets, run `PERF_LANE_ENFORCE=1 npm run test:browser -- tests/browser/perf-budget.test.tsx`.
+A normal browser pass does not establish compliance with those budgets.
 Changes under `tools/whatsoup_guard/**` also run the standalone `whatsoup-guard`
 Node 25 compatibility lane. Quality owns Node 24 guard typechecking and tests;
 the standalone workflow does not repeat that version.

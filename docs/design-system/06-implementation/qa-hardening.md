@@ -137,6 +137,14 @@ Use `/frontend-design` for this review and record the verdict.
 
 ## 6. Coverage Matrix
 
+Browser performance budgets remain provisional and report-only by default.
+`PERF_LANE_ENFORCE=1 npm run test:browser -- tests/browser/perf-budget.test.tsx`
+enforces the existing 50 ms mount and 16 ms update limits through the browser
+configuration. The flag reaches the test through `import.meta.env`; it must not
+be replaced with a constant. Budget overruns return a failed test command when
+enabled. A default browser pass establishes rendering and measurement, not budget
+compliance. No visual, contrast, layout or timing threshold changes with this flag.
+
 Maintain one coverage row per slice-surface combination:
 
 | Slice | Surface | Components | Primitives | Themes | Density modes | Viewports | States | A11y | Static checks | Screenshots | Tests | Enforcement | Exceptions | Verdict |
