@@ -899,6 +899,20 @@ tools. A legacy capability probe can read a mailbox resource only when its
 private config explicitly sets `legacy_sent_items_probe: true`; it is not part
 of the default observer or deadman schedule.
 
+Target inventories, observer configuration and shared state reads require a
+regular file owned by the executing user, with mode `0600`, one hard link and
+at most one MiB of UTF-8 JSON. The reader limits bytes even if the file grows
+after validation and rejects non-regular files without waiting for a writer.
+It opens each ancestor directory and the file without following symlinks,
+and reads through the held descriptors. Ancestors must belong to root or the
+executing user and must not be writable by other users; root-owned sticky
+temporary directories are allowed. On macOS, the verified root-owned `/tmp`,
+`/var` and `/etc` aliases to `/private` are supported. These are POSIX ownership
+and mode checks; host administrators remain responsible for access-control lists.
+State directory creation and state writes still require trusted, stable
+ancestor directories: their pathname-based write path has not yet been
+qualified against concurrent ancestor replacement.
+
 The optional service supervisor records malformed or truncated HTTP framing as
 an `invalid_response` liveness failure, so that fault does not abort the cycle.
 An operating-system error during the response read, including a connection

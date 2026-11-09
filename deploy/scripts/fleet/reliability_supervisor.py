@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from datetime import datetime
 import fcntl
 import hashlib
@@ -16,6 +17,7 @@ import shutil
 import socket
 import stat
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -42,8 +44,52 @@ def private_directory(path: Path, *, create: bool = True) -> None:
         raise StateError("state_directory_not_private")
 
 
+@contextmanager
+def private_parent(path: Path):
+    path = Path(path)
+    if ".." in path.parts:
+        raise StateError("state_directory_unsafe")
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    # macOS exposes these root-owned aliases for its protected /private tree.
+    if sys.platform == "darwin" and len(path.parts) > 2 and path.parts[1] in {"tmp", "var", "etc"}:
+        alias = Path("/") / path.parts[1]
+        info = alias.lstat()
+        if stat.S_ISLNK(info.st_mode) and info.st_uid == 0 and os.readlink(alias) == "private/" + alias.name:
+            path = Path("/private") / Path(*path.parts[1:])
+
+    def validate(fd):
+        info = os.fstat(fd)
+        shared_temporary = info.st_uid == 0 and bool(info.st_mode & stat.S_ISVTX)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid not in {0, os.getuid()}
+            or (stat.S_IMODE(info.st_mode) & 0o022 and not shared_temporary)
+        ):
+            raise StateError("state_directory_unsafe")
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    current = os.open("/", flags)
+    try:
+        validate(current)
+        for part in path.parent.parts[1:]:
+            following = os.open(part, flags, dir_fd=current)
+            try:
+                validate(following)
+            except BaseException:
+                os.close(following)
+                raise
+            os.close(current)
+            current = following
+        yield current, path.name
+    finally:
+        os.close(current)
+
+
 def read_private(path: Path) -> dict:
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    limit = 1024 * 1024
+    with private_parent(path) as (parent, leaf):
+        fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
     try:
         metadata = os.fstat(fd)
         if (
@@ -51,15 +97,18 @@ def read_private(path: Path) -> dict:
             or metadata.st_uid != os.getuid()
             or stat.S_IMODE(metadata.st_mode) != 0o600
             or metadata.st_nlink != 1
-            or metadata.st_size > 1024 * 1024
+            or metadata.st_size > limit
         ):
             raise StateError("state_file_unsafe")
-        with os.fdopen(fd, closefd=False) as stream:
-            result = json.load(stream)
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            raw = stream.read(limit + 1)
+        if len(raw) > limit:
+            raise StateError("state_file_unsafe")
+        result = json.loads(raw.decode("utf-8"))
         if not isinstance(result, dict):
             raise StateError("state_invalid")
         return result
-    except (ValueError, TypeError) as exc:
+    except (ValueError, TypeError, RecursionError) as exc:
         raise StateError("state_invalid") from exc
     finally:
         os.close(fd)

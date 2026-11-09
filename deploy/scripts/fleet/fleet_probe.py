@@ -9,6 +9,7 @@ the rest of the deployed BOT ERRORS runtime.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 from pathlib import Path
 import shlex
@@ -20,15 +21,22 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent
 HEALTH_READER = ROOT.parent / "lib" / "health_reader.py"
+_SUPERVISOR_SPEC = importlib.util.spec_from_file_location(
+    "fleet_probe_supervisor", ROOT / "reliability_supervisor.py"
+)
+supervisor = importlib.util.module_from_spec(_SUPERVISOR_SPEC)
+sys.modules[_SUPERVISOR_SPEC.name] = supervisor
+_SUPERVISOR_SPEC.loader.exec_module(supervisor)
 
 
 def load_target(targets_path: Path, target_name: str) -> dict[str, Any]:
     """Read one target from an explicit absolute private inventory path."""
     if not targets_path.is_absolute():
         raise ValueError("fleet targets path must be absolute")
-    raw = json.loads(targets_path.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict):
-        raise ValueError("fleet targets must be an object")
+    try:
+        raw = supervisor.read_private(targets_path)
+    except supervisor.StateError as exc:
+        raise ValueError("fleet targets must be a safe private JSON object") from exc
     if "schema_version" in raw:
         if raw["schema_version"] != 1 or not isinstance(raw.get("hosts"), dict):
             raise ValueError("fleet targets must be a schema_version 1 hosts object")

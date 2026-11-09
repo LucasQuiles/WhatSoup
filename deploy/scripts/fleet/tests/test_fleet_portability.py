@@ -46,6 +46,7 @@ def test_probe_requires_an_explicit_absolute_private_targets_file(tmp_path: Path
         ),
         encoding="utf-8",
     )
+    targets.chmod(0o600)
 
     request = probe.load_target(targets, "synthetic-host")
 
@@ -59,6 +60,7 @@ def test_probe_accepts_the_existing_private_target_map_without_rewriting_it(tmp_
     inventory = {"synthetic-host": {"target": "operator@synthetic-host", "instances": []}}
     path = tmp_path / "targets.json"
     path.write_text(json.dumps(inventory))
+    path.chmod(0o600)
     before = path.read_bytes()
     assert probe.load_target(path, "synthetic-host")["target"] == "operator@synthetic-host"
     assert path.read_bytes() == before
@@ -68,6 +70,7 @@ def test_existing_local_target_does_not_require_an_ssh_destination(tmp_path):
     probe = load_module("fleet_local_target", FLEET / "fleet_probe.py")
     inventory = tmp_path / "targets.json"
     inventory.write_text(json.dumps({"local-host": {"local": True, "instances": ["example-bot"]}}))
+    inventory.chmod(0o600)
     assert probe.load_target(inventory, "local-host")["local"] is True
 
 
@@ -84,6 +87,7 @@ def test_probe_rejects_option_or_control_characters_in_ssh_destination(target):
     with TemporaryDirectory() as directory:
         inventory = Path(directory) / "targets.json"
         inventory.write_text(json.dumps({"remote": {"target": target, "instances": []}}))
+        inventory.chmod(0o600)
         with pytest.raises(ValueError, match="transport target"):
             probe.load_target(inventory, "remote")
 

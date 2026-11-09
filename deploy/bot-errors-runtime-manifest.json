@@ -953,7 +953,7 @@
     },
     {
       "path": "deploy/scripts/fleet/fleet_probe.py",
-      "sha256": "257f07f446b18071168c83cb140947fc7d07da6b70c71ac10b919b3cebc196e8",
+      "sha256": "fce0ea4d0c2332043066777ac90d610e91822772cea839566810b1cfab1de328",
       "mustContain": [
         "fleet targets path must be absolute",
         "health_reader_code"
@@ -986,7 +986,7 @@
     },
     {
       "path": "deploy/scripts/fleet/reliability_supervisor.py",
-      "sha256": "cce7030b78037559cc20fd33056a504700e1f33c5f6f689efdc8085ebf0b7ca9",
+      "sha256": "aa27ccca85276cdfd254dd64380ee86efdb9353a0692884c0c9ffdd122bdd6eb",
       "mustContain": [
         "legacy_sent_items_probe",
         "resolve_alert_delivery"

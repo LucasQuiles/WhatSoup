@@ -202,6 +202,7 @@ def test_explicit_synthetic_inventory_preserves_retired_checks(tmp_path):
             "retired_checks": RETIRED_HOST_CHECKS,
         }
     }}))
+    inventory.chmod(0o600)
     module = types.ModuleType("fleet_probe_adapter")
     module.__dict__["__file__"] = str(ROOT / "fleet_probe.py")
     exec(compile((ROOT / "fleet_probe.py").read_text(), "adapter", "exec"), module.__dict__)
