@@ -239,8 +239,13 @@ it.each(['scratch', 'cleanup'])('refuses a failed filesystem operation during %s
     expect(result.error).toBeUndefined();
     expect(result.signal).toBeNull();
     expect(result.status, result.stderr).toBe(23);
-    expect(readFileSync(join(scratch, 'operations'), 'utf8')).toContain(stepId === 'scratch' ? 'mount -t tmpfs' : 'umount --');
-    expect(readFileSync(join(scannerRoot, 'preserved'), 'utf8')).toBe('owned scanner data');
+    const operation = readFileSync(join(scratch, 'operations'), 'utf8');
+    expect(operation).toContain(stepId === 'scratch' ? 'mount -t tmpfs' : 'umount --');
+    if (stepId === 'scratch') {
+      expect(operation).toContain('size=512m,nr_inodes=16384');
+    } else {
+      expect(readFileSync(join(scannerRoot, 'preserved'), 'utf8')).toBe('owned scanner data');
+    }
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
