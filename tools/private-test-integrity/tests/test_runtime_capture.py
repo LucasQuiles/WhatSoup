@@ -175,10 +175,9 @@ class RuntimeCaptureTests(unittest.TestCase):
                     output = root / f"invalid-{index}.json"
                     with mock.patch.dict(module.os.environ, environment, clear=True):
                         with mock.patch.object(module.resource, "setrlimit"):
-                            with mock.patch.object(module.os, "dup2"):
-                                with mock.patch.object(module.subprocess, "Popen") as execve:
-                                    with self.assertRaises(Exception):
-                                        capture(output, command)
+                            with mock.patch.object(module.subprocess, "Popen") as execve:
+                                with self.assertRaises(Exception):
+                                    capture(output, command)
                     execve.assert_not_called()
                     self.assertFalse(output.exists())
 
@@ -207,10 +206,9 @@ class RuntimeCaptureTests(unittest.TestCase):
                 with self.subTest(output=str(output)):
                     with mock.patch.dict(module.os.environ, environment, clear=True):
                         with mock.patch.object(module.resource, "setrlimit"):
-                            with mock.patch.object(module.os, "dup2"):
-                                with mock.patch.object(module.subprocess, "Popen") as execve:
-                                    with self.assertRaises(Exception):
-                                        capture(output, (str(entrypoint), "doctor", "parsers", "--json"))
+                            with mock.patch.object(module.subprocess, "Popen") as execve:
+                                with self.assertRaises(Exception):
+                                    capture(output, (str(entrypoint), "doctor", "parsers", "--json"))
                     execve.assert_not_called()
             self.assertEqual(existing.read_bytes(), b"preserve-existing")
             self.assertEqual(target.read_bytes(), b"preserve-target")
@@ -235,10 +233,9 @@ class RuntimeCaptureTests(unittest.TestCase):
                     with mock.patch.dict(module.os.environ, environment, clear=True):
                         with mock.patch.object(module.resource, "setrlimit"):
                             with mock.patch.object(module.os, "open", side_effect=forbidden_open):
-                                with mock.patch.object(module.os, "dup2"):
-                                    with mock.patch.object(module.subprocess, "Popen") as execve:
-                                        with self.assertRaises(Exception):
-                                            capture(output, (str(entrypoint), "doctor", "parsers", "--json"))
+                                with mock.patch.object(module.subprocess, "Popen") as execve:
+                                    with self.assertRaises(Exception):
+                                        capture(output, (str(entrypoint), "doctor", "parsers", "--json"))
                     self.assertEqual(opened, [])
                     execve.assert_not_called()
 
