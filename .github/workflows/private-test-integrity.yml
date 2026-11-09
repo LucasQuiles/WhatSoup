@@ -54,7 +54,7 @@ jobs:
           [[ "$TRUSTED_SHA" =~ ^[0-9a-f]{40}$ ]]
           curl_version="$(curl --version | awk 'NR == 1 { print $2; exit }')"
           [[ "$curl_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          IFS=. read -r curl_major curl_minor curl_patch <<< "$curl_version"
+          IFS=. read -r curl_major curl_minor _curl_patch <<< "$curl_version"
           if ! (( curl_major > 8 || (curl_major == 8 && curl_minor >= 4) )); then
             printf 'curl 8.4.0 or newer is required for bounded trusted-driver downloads\n' >&2
             exit 2
