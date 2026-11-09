@@ -749,7 +749,7 @@ describe('process-tree diagnostic adoption live-tree ratchet', () => {
     const output = execFileSync(
       process.execPath,
       ['--disable-warning=ExperimentalWarning', '--experimental-strip-types', GUARD, '--format', 'json', '--verbose'],
-      { cwd: REPO_ROOT, encoding: 'utf8' },
+      { cwd: REPO_ROOT, encoding: 'utf8', timeout: 90_000, killSignal: 'SIGKILL' },
     );
     const parsed = JSON.parse(output) as Record<string, unknown>;
     expect(parsed).toMatchObject({
@@ -764,7 +764,9 @@ describe('process-tree diagnostic adoption live-tree ratchet', () => {
       },
       calls_examined: 3,
     });
-  });
+    // This CLI also scans the full tree; hosted Node 24 took 11s. Bound the
+    // synchronous child separately so a hung scan cannot block the test worker.
+  }, 120_000);
 
   it('advertises every observer and traversal failure kind in its schema', () => {
     const output = execFileSync(
