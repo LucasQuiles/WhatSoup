@@ -69,7 +69,7 @@ class RuntimeCaptureTests(unittest.TestCase):
         with mock.patch.dict(module.os.environ, environment, clear=True):
             with mock.patch.object(module.resource, "setrlimit"):
                 with mock.patch.object(module.subprocess, "Popen", return_value=child) as launch:
-                    self.assertEqual(capture(output, command), 0)
+                    result = capture(output, command)
         self.assertEqual(output.read_bytes(), b'{"status":"ok"}\n')
         self.assertEqual(output.stat().st_mode & 0o777, 0o600)
         self.assertTrue(child.stdout.closed)
@@ -79,14 +79,15 @@ class RuntimeCaptureTests(unittest.TestCase):
         self.assertEqual(launch.call_args.kwargs["stdout"], module.subprocess.PIPE)
         self.assertEqual(launch.call_args.kwargs["stderr"], module.subprocess.DEVNULL)
         self.assertNotIn("start_new_session", launch.call_args.kwargs)
+        return result
 
     def test_doctor_preserves_arguments_environment_and_private_output(self):
         module, capture = load_runtime_capture()
         with tempfile.TemporaryDirectory(prefix="runtime-capture-test-") as temporary:
             root = Path(temporary).resolve()
             entrypoint = make_entrypoint(root)
-            self._expect_exec(module, capture, root / "doctor.json",
-                              (str(entrypoint), "doctor", "parsers", "--json"), self._environment(root))
+            self.assertEqual(self._expect_exec(module, capture, root / "doctor.json",
+                             (str(entrypoint), "doctor", "parsers", "--json"), self._environment(root)), 0)
 
     def test_output_bound_refuses_exact_limit_and_overflow_and_reaps_child(self):
         module, capture = load_runtime_capture()
@@ -142,7 +143,8 @@ class RuntimeCaptureTests(unittest.TestCase):
                         "--",
                         probe_path,
                     )
-                    self._expect_exec(module, capture, root / f"probe-{index}.json", command, environment)
+                    self.assertEqual(self._expect_exec(
+                        module, capture, root / f"probe-{index}.json", command, environment), 0)
 
     def test_refuses_malformed_or_unsafe_commands_before_exec(self) -> None:
         module, capture = load_runtime_capture()
