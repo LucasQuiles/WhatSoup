@@ -6,10 +6,21 @@ import { settleAuthBondCapture } from '../helpers/auth-bond-capture.ts';
 // capture file I/O, which completes in real time while the fake clock is held.
 const realSetTimeout = globalThis.setTimeout;
 const realClearTimeout = globalThis.clearTimeout;
+// Default fake timers fake hrtime too, so elapsed time under them is read from the real clock.
+const realNowNs = process.hrtime.bigint;
 
+/** A capture that takes `turns` setImmediate turns, as drainYielding does between steps. */
+const captureOverTurns = (turns: number): Promise<void> => (async () => {
+  for (let i = 0; i < turns; i += 1) await new Promise<void>((resolve) => { setImmediate(resolve); });
+})();
+
+// The pinned-clock (advanceClockMs: 0) cases run with real immediates, as the helper requires. The list
+// is the helper's useFakeTimersKeepingImmediates(), stated here so this file runs against any helper.
 describe('settleAuthBondCapture', () => {
   beforeEach(() => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance', 'hrtime'],
+    });
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -37,6 +48,31 @@ describe('settleAuthBondCapture', () => {
     await expect(settleAuthBondCapture(holder, { advanceClockMs: 0 })).rejects.toThrow(
       'auth-bond capture did not settle within 8 s of real time',
     );
+  }, 15_000);
+
+  it('settles a capture that moves over many immediate turns with the clock pinned', async () => {
+    const fakeStart = Date.now();
+    const holder = { authSnapshotCapture: captureOverTurns(50) as Promise<void> | null };
+    await settleAuthBondCapture(holder, { advanceClockMs: 0 });
+    expect(Date.now()).toBe(fakeStart);
+  });
+});
+
+// Under default fake timers an immediate queued from a continuation of a fired immediate is due 1 ms
+// later, so a 0 ms advance stalls such a capture after its first turn (reconnect.test.ts getConnectionState).
+describe('settleAuthBondCapture with a pinned clock and fake immediates', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('refuses at once with the named contract error instead of stalling until the deadline', async () => {
+    vi.useFakeTimers();
+    const holder = { authSnapshotCapture: captureOverTurns(2) as Promise<void> | null };
+    const started = realNowNs();
+    await expect(settleAuthBondCapture(holder, { advanceClockMs: 0 })).rejects.toThrow(
+      'settleAuthBondCapture({ advanceClockMs: 0 }) needs a real setImmediate',
+    );
+    expect(realNowNs() - started).toBeLessThan(1_000_000_000n);
   }, 15_000);
 });
 

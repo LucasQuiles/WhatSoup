@@ -103,7 +103,7 @@ import { ConnectionManager } from '../../src/transport/connection.ts';
 import { TransportAuthorityProviderOutcomeUnknownError } from '../../src/transport/outbound-governor.ts';
 import { scheduleBondEventMaintenance } from '../../src/transport/bond-event-log.ts';
 import type { OperationsAuthorityPort } from '../../src/transport/operations-authority-client.ts';
-import { settleAuthBondCapture } from '../helpers/auth-bond-capture.ts';
+import { settleAuthBondCapture, useFakeTimersKeepingImmediates } from '../helpers/auth-bond-capture.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1414,6 +1414,8 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
   });
 
   it('getConnectionState returns connection, keepalive, and reconnect metadata', async () => {
+    // The capture below is settled with the clock pinned, which needs real immediates.
+    useFakeTimersKeepingImmediates();
     vi.setSystemTime(new Date('2026-05-10T12:00:00.000Z'));
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);

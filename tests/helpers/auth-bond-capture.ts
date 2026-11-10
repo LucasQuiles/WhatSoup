@@ -5,17 +5,34 @@ import { vi } from 'vitest';
  * before the 10 s test timeout, under fake and real timers alike. Vitest 4 fakes
  * hrtime, performance and setTimeout too, so the real clock and timer are
  * captured when this module loads (static imports run before any test installs
- * fake timers). A step count is not a usable bound: each fake-timer step yields
- * one real setImmediate turn, so 50,000 steps lasted about 0.2 s and a capture
- * whose file I/O waited on a busy libuv threadpool (a loaded test slot) "did not
- * settle" although it would have.
+ * fake timers). A step count is not a usable bound either: each fake-timer step
+ * yields one real turn, so 50,000 steps lasted about 0.2 s of real time.
  */
 const SETTLE_BUDGET_NS = 8_000_000_000n;
 const NOT_SETTLED = 'auth-bond capture did not settle within 8 s of real time';
 const realNowNs = process.hrtime.bigint;
 const realSetTimeout = globalThis.setTimeout;
 const realClearTimeout = globalThis.clearTimeout;
+const realSetImmediate = globalThis.setImmediate;
+const PINNED_NEEDS_REAL_IMMEDIATES =
+  'settleAuthBondCapture({ advanceClockMs: 0 }) needs a real setImmediate; install fake timers with useFakeTimersKeepingImmediates()';
 if (vi.isFakeTimers()) throw new Error('auth-bond-capture helper loaded under fake timers; its real clock would be fake');
+
+/**
+ * Fake timers for a test that settles a capture with the clock pinned
+ * (`advanceClockMs: 0`): every default fake except setImmediate/clearImmediate.
+ *
+ * A capture moves between steps on setImmediate. Under fake timers an immediate
+ * queued while the clock is ticking (from a continuation of the immediate that
+ * just fired) is due 1 ms later, not now, so a 0 ms advance never reaches it and
+ * the capture stops after its first step. With real immediates the capture
+ * runs on real turns and the fake clock stays exactly where the test put it.
+ */
+export function useFakeTimersKeepingImmediates(): void {
+  vi.useFakeTimers({
+    toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance', 'hrtime'],
+  });
+}
 
 interface CaptureHolder {
   authSnapshotCapture: Promise<void> | null;
@@ -55,8 +72,9 @@ async function awaitByDeadline(pending: Promise<void>, deadlineNs: bigint, timer
  * file I/O completes in real time. Under fake timers each step therefore
  * advances the fake clock by `advanceClockMs`, and advanceTimersByTimeAsync
  * also yields real turns for the I/O. Pass `advanceClockMs: 0` where a later
- * assertion pins exact fake timestamps; that runs due immediates only, so it
- * cannot drive a capture that waits on a retry timer. Under real timers the
+ * assertion pins exact fake timestamps. That needs a real setImmediate (see
+ * useFakeTimersKeepingImmediates, enforced here) and cannot drive a capture
+ * that waits on a retry timer. Under real timers the
  * capture runs by itself and is awaited against the same real-time bound, on
  * a deadline timer armed through `timers` (the real timers by default).
  */
@@ -72,6 +90,7 @@ export async function settleAuthBondCapture(
     if (pending === null) return;
     const deadlineNs = realNowNs() + SETTLE_BUDGET_NS;
     if (vi.isFakeTimers()) {
+      if (advanceClockMs === 0 && globalThis.setImmediate !== realSetImmediate) throw new Error(PINNED_NEEDS_REAL_IMMEDIATES);
       let settled = false;
       void pending.then(() => { settled = true; });
       while (!settled) {
