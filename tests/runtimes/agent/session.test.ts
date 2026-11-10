@@ -154,7 +154,7 @@ import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { killSessionTree } from '../../../src/runtimes/agent/process-tree.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
-import { formatAge, WATCHDOG_SOFT_MS, WATCHDOG_WARN_MS, WATCHDOG_HARD_MS, STALLED_OP_KILL_GRACE_MS, LONG_OP_CEILING_MS, PROVIDER_DISPLAY_NAMES } from '../../../src/runtimes/agent/session.ts';
+import { formatAge, WATCHDOG_SOFT_MS, WATCHDOG_WARN_MS, WATCHDOG_HARD_MS, STALLED_OP_KILL_GRACE_MS, LONG_OP_CEILING_MS, PROVIDER_DISPLAY_NAMES, MAX_TRACKED_TOOL_IDS } from '../../../src/runtimes/agent/session.ts';
 import { OpenAIApiProvider } from '../../../src/runtimes/agent/providers/openai-api.ts';
 import { AnthropicApiProvider } from '../../../src/runtimes/agent/providers/anthropic-api.ts';
 
@@ -2345,6 +2345,88 @@ describe('SessionManager', () => {
     expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
 
     vi.useRealTimers();
+  });
+
+  it.each([16, 262_144])('keeps ordinary recovery with %i distinct pending tool IDs', async (count) => {
+    vi.useFakeTimers();
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), notifyUser: vi.fn(),
+    });
+    try {
+      await sm.spawnSession();
+      await sm.sendTurn('wait for ordinary tools');
+      // The large input exercises argument-count limits; it is not an admission cap.
+      for (let i = 0; i < count; i += 1) sm.trackToolStart(`pending-${i}`, 'Bash');
+      sm.tickWatchdog();
+      expect(sm.hasPendingTools).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+
+      expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    } finally {
+      sm.clearTurnWatchdog();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([16, 262_144])('preserves the longest active wait among %i distinct pending tool IDs', async (count) => {
+    vi.useFakeTimers();
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), notifyUser: vi.fn(),
+    });
+    try {
+      await sm.spawnSession();
+      await sm.sendTurn('wait for overlapping polls');
+      sm.trackToolStart('first-poll', 'send_poll', { awaitResult: true, timeoutMs: WATCHDOG_HARD_MS * 2 });
+      for (let i = 0; i < count; i += 1) {
+        if (i === count / 2) {
+          sm.trackToolStart('longest-poll', 'send_poll', { awaitResult: true, timeoutMs: WATCHDOG_HARD_MS * 3 });
+        }
+        sm.trackToolStart(`pending-${i}`, 'Bash');
+      }
+      sm.trackToolStart('last-poll', 'send_poll', { awaitResult: true, timeoutMs: WATCHDOG_HARD_MS * 2 });
+      sm.tickWatchdog();
+
+      await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+      expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+      await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS * 2);
+      expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+      expect(sm.hasPendingTools).toBe(true);
+      await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS);
+      expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    } finally {
+      sm.clearTurnWatchdog();
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds tracked tool IDs and still records a poll wait at the cap', async () => {
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), notifyUser: vi.fn(),
+    });
+    const ids = (sm as unknown as { pendingToolIds: Map<string | symbol, number> }).pendingToolIds;
+    for (let i = 0; i < MAX_TRACKED_TOOL_IDS * 4; i += 1) sm.trackToolStart(`pending-${i}`, 'Bash');
+    expect(ids.size).toBe(MAX_TRACKED_TOOL_IDS);
+
+    sm.trackToolStart('late-poll', 'send_poll', { awaitResult: true, timeoutMs: WATCHDOG_HARD_MS * 2 });
+    expect(ids.size).toBe(MAX_TRACKED_TOOL_IDS);
+    expect(ids.get('late-poll')).toBeGreaterThan(0);
+  });
+
+  it('refuses a poll wait once every tracked slot holds a wait', async () => {
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), notifyUser: vi.fn(),
+    });
+    const ids = (sm as unknown as { pendingToolIds: Map<string | symbol, number> }).pendingToolIds;
+    const poll = { awaitResult: true, timeoutMs: WATCHDOG_HARD_MS * 2 };
+    for (let i = 0; i < MAX_TRACKED_TOOL_IDS; i += 1) sm.trackToolStart(`poll-${i}`, 'send_poll', poll);
+    sm.trackToolStart('extra-poll', 'send_poll', poll);
+    expect(ids.size).toBe(MAX_TRACKED_TOOL_IDS);
+    expect(ids.has('extra-poll')).toBe(false);
   });
 
   it('a blocking poll survives both watchdogs until its bounded vote wait ends', async () => {
