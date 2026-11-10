@@ -20,6 +20,11 @@ import {
   releaseProcessLock,
 } from '../../src/lib/process-lock.ts';
 import { systemClock } from '../../src/lib/clock.ts';
+import {
+  groupGone,
+  probeGroupMembership,
+  type GroupMembership,
+} from '../../src/lib/process-group-membership.ts';
 import { buildChildEnv, getProviderBinary } from '../../src/runtimes/agent/session.ts';
 import {
   buildInitializeRequest,
@@ -278,18 +283,6 @@ function hasProxyDescendant(rootPid: number, proxyScriptPath: string): boolean {
   });
 }
 
-function groupExists(pgid: number): boolean {
-  try {
-    process.kill(-pgid, 0);
-    return true;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ESRCH') return false;
-    if (code === 'EPERM') return true;
-    throw error;
-  }
-}
-
 async function waitUntil(predicate: () => boolean, deadlineMs: number): Promise<boolean> {
   while (Date.now() < deadlineMs) {
     if (predicate()) return true;
@@ -298,14 +291,80 @@ async function waitUntil(predicate: () => boolean, deadlineMs: number): Promise<
   return predicate();
 }
 
-async function reapProcessGroup(pgid: number, deadlineMs: number): Promise<boolean> {
-  if (!groupExists(pgid)) return true;
-  try { process.kill(-pgid, 'SIGTERM'); } catch { /* checked below */ }
-  if (await waitUntil(() => !groupExists(pgid), Math.min(deadlineMs, Date.now() + 2_000))) {
-    return true;
-  }
-  try { process.kill(-pgid, 'SIGKILL'); } catch { /* checked below */ }
-  return waitUntil(() => !groupExists(pgid), Math.min(deadlineMs, Date.now() + 2_000));
+/**
+ * What `reapProcessGroup` found. `reapError` names the first failure by error code and probe
+ * answer only, never by message, path or command text.
+ */
+export interface ProcessGroupReap {
+  reaped: boolean;
+  reapError?: string;
+}
+
+/** Test seams for `reapProcessGroup`. */
+export interface ProcessGroupReapDeps {
+  /** Defaults to `process.kill`, looked up at call time. Also sends the signal-0 liveness check. */
+  kill?: (pid: number, signal: NodeJS.Signals | 0) => void;
+  /** Defaults to `probeGroupMembership`. A probe that throws counts as `unknown`. */
+  probeGroup?: (pgid: number) => GroupMembership;
+}
+
+/**
+ * Ends the provider's process group: SIGTERM, then SIGKILL, each followed by a bounded wait
+ * until `groupGone` proves the group gone (issue 3568). A group that holds only zombies is gone;
+ * a live member, or a group the probe cannot read, is not.
+ *
+ * A group kill follows the #3625 contract: ESRCH, or EPERM on a group with no live member, is
+ * fine. Any other kill failure, an unexpected liveness-check error, or a group never proven gone
+ * is recorded in `reapError`, and the canary passes only without one. It never throws, so the
+ * caller's cleanup always runs.
+ */
+export async function reapProcessGroup(
+  pgid: number,
+  deadlineMs: number,
+  deps: ProcessGroupReapDeps = {},
+): Promise<ProcessGroupReap> {
+  const kill = deps.kill ?? ((pid: number, signal: NodeJS.Signals | 0): void => { process.kill(pid, signal); });
+  const probeGroup = (group: number): GroupMembership => {
+    try {
+      return (deps.probeGroup ?? probeGroupMembership)(group);
+    } catch {
+      return 'unknown';
+    }
+  };
+  let reapError: string | undefined;
+  let lastMembership: 'live' | 'unknown' = 'unknown';
+  const gone = (): boolean => {
+    const answer = groupGone(pgid, { kill, probeGroup });
+    if (answer.gone) return true;
+    if ('error' in answer) reapError ??= `group liveness check failed: ${answer.error}`;
+    else lastMembership = answer.membership;
+    return false;
+  };
+  const signalGroup = (signal: NodeJS.Signals): void => {
+    try {
+      kill(-pgid, signal);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | null | undefined)?.code;
+      if (code === 'ESRCH') return;
+      if (code === 'EPERM') {
+        const membership = probeGroup(pgid);
+        if (membership !== 'no-live-members') {
+          reapError ??= `group kill failed: EPERM; group membership probe: ${membership}`;
+        }
+        return;
+      }
+      reapError ??= `group kill failed: ${typeof code === 'string' ? code : 'no error code'}`;
+    }
+  };
+  const result = (reaped: boolean): ProcessGroupReap => (reapError === undefined ? { reaped } : { reaped, reapError });
+  if (gone()) return result(true);
+  signalGroup('SIGTERM');
+  if (await waitUntil(gone, Math.min(deadlineMs, Date.now() + 2_000))) return result(true);
+  signalGroup('SIGKILL');
+  if (await waitUntil(gone, Math.min(deadlineMs, Date.now() + 2_000))) return result(true);
+  // A liveness-check error is already recorded; otherwise name the probe's last answer.
+  reapError ??= `group not proven gone; group membership probe: ${lastMembership}`;
+  return result(false);
 }
 
 export async function executeOwnedProvider(
@@ -390,13 +449,22 @@ export async function executeOwnedProvider(
     // Preflight, spawn, and controller failures remain inconclusive so an
     // earlier exact receipt is not invalidated by infrastructure state.
   } finally {
-    processGroupReaped = pgid > 0
-      ? await reapProcessGroup(pgid, deadline)
-      : false;
-    await Promise.all([
-      dynamicStarted ? dynamic.stop() : Promise.resolve(),
-      staticStarted ? staticSentinel.stop() : Promise.resolve(),
-    ]);
+    try {
+      if (pgid > 0) {
+        const reap = await reapProcessGroup(pgid, deadline);
+        // A recorded failure keeps the proof unproven, even when the group then went (#3625).
+        processGroupReaped = reap.reaped && reap.reapError === undefined;
+        if (reap.reapError !== undefined) {
+          // Content-free: the group id and the failure class, never a path or command text.
+          process.stderr.write(`provider MCP canary: process group ${pgid} not proven reaped (reapError=${reap.reapError})\n`);
+        }
+      }
+    } finally {
+      await Promise.all([
+        dynamicStarted ? dynamic.stop() : Promise.resolve(),
+        staticStarted ? staticSentinel.stop() : Promise.resolve(),
+      ]);
+    }
   }
   return {
     providerStarted,
