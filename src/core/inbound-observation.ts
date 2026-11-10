@@ -82,6 +82,7 @@ function isAlerting(reason: InboundObservationReason): reason is AlertingReason 
 }
 
 interface LocalLossAlertResult {
+  /** Durable acceptance; other accepted sinks remain distinguishable in status. */
   accepted: boolean;
   status: AlertEmissionStatus;
 }
@@ -90,21 +91,22 @@ interface LocalLossAlertResult {
 // fault-taxonomy coverage guard resolves it statically.
 function emitNoConsumerAlert(instance: string): LocalLossAlertResult {
   const result = emitAlert(instance, 'inbound_no_consumer', ALERT_SUMMARIES['transport.no_consumer'], '', 'warning');
-  return { accepted: result.status !== 'failed', status: result.status };
+  return { accepted: result.status === 'durably_queued', status: result.status };
 }
 
 function emitStoreFailedAlert(instance: string): LocalLossAlertResult {
   const result = emitAlert(instance, 'inbound_store_failed', ALERT_SUMMARIES['ingest.store_failed'], '', 'warning');
-  return { accepted: result.status !== 'failed', status: result.status };
+  return { accepted: result.status === 'durably_queued', status: result.status };
 }
 
-function emitLocalLossAlert(instance: string, reason: AlertingReason): { accepted: boolean; status: AlertOutcome } {
+function emitLocalLossAlert(instance: string, reason: AlertingReason): { emissionAccepted: boolean; status: AlertOutcome } {
   // Check the window without recording it; only an accepted emission records.
   const until = nextAlertAt.get(reason);
-  if (until !== undefined && performance.now() < until) return { accepted: false, status: 'rate_limited' };
+  if (until !== undefined && performance.now() < until) return { emissionAccepted: false, status: 'rate_limited' };
   const result = reason === 'transport.no_consumer' ? emitNoConsumerAlert(instance) : emitStoreFailedAlert(instance);
-  if (result.accepted) nextAlertAt.set(reason, performance.now() + INBOUND_OBSERVATION_ALERT_WINDOW_MS);
-  return result;
+  const emissionAccepted = result.accepted || result.status === 'captured' || result.status === 'legacy_accepted_unconfirmed';
+  if (emissionAccepted) nextAlertAt.set(reason, performance.now() + INBOUND_OBSERVATION_ALERT_WINDOW_MS);
+  return { emissionAccepted, status: result.status };
 }
 
 /**
@@ -121,7 +123,7 @@ export function observeInbound(instance: string, reason: InboundObservationReaso
     try {
       const alert = emitLocalLossAlert(instance, reason);
       alerts[alert.status] += 1;
-      alertAccepted = alert.accepted;
+      alertAccepted = alert.emissionAccepted;
       alertStatus = alert.status;
     } catch {
       recorderFailures += 1;
