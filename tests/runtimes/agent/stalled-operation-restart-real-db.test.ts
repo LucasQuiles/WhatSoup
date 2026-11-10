@@ -49,6 +49,8 @@ const { sessionDoubles, resetDoubles, makeSessionDouble, lifecycleRef } = vi.hoi
     let active = false;
     let sessionId: string | null = null;
     let rowId: number | null = null;
+    // Each fresh spawn (the first one, a /new reset) starts a distinct provider session.
+    let freshSpawns = 0;
     let pendingResolve: (() => void) | null = null;
     let pendingPromise: Promise<void> = Promise.resolve();
     const double = {
@@ -76,7 +78,8 @@ const { sessionDoubles, resetDoubles, makeSessionDouble, lifecycleRef } = vi.hoi
           rowId = lifecycleRef.current!.reactivate!(conversationKey, pid, resumeSessionId, resumeRowId);
           return;
         }
-        sessionId = `sess-${conversationKey}-${pid}`;
+        freshSpawns += 1;
+        sessionId = `sess-${conversationKey}-${pid}-${freshSpawns}`;
         rowId = lifecycleRef.current!.begin(conversationKey, opts.chatJid, pid, sessionId);
       }),
       sendTurn: vi.fn((input: unknown) => {
@@ -572,14 +575,22 @@ describe('F7: a stalled-operation kill survives a real service restart', () => {
     return { seq, session };
   }
 
-  /** The supervisor's kill as the runtime receives it: the session manager's crash report. */
-  function reportCrash(session: SessionDouble, crash: Record<string, unknown>): void {
+  /**
+   * The supervisor's kill as the runtime receives it: the session manager's
+   * crash report. `afterExit` runs between the provider exit and the report.
+   */
+  function reportCrash(
+    session: SessionDouble,
+    crash: Record<string, unknown>,
+    afterExit: () => void = () => {},
+  ): void {
     const owner = (runtime as unknown as {
       sessionOwnership: { get: (key: string) => { managerId: string; generation: number } | undefined };
     }).sessionOwnership.get(DM_JID);
     if (!owner) throw new Error('no owner for the chat');
     const sessionId = session.getStatus().sessionId;
     session.killProvider();
+    afterExit();
     session.ctorOpts.onCrash!({
       exitCode: null,
       signal: 'SIGKILL',
@@ -842,7 +853,7 @@ describe('F7: a stalled-operation kill survives a real service restart', () => {
     const rowId = session.getDbRowId()!;
     const turnsBeforeKill = session.turnsSent.length;
     const holdWrites = failHoldWrites();
-    const withdrawals = vi.spyOn(engine, 'markSessionOrphaned').mockImplementation(() => {
+    const withdrawals = vi.spyOn(engine, 'updateExactSessionCheckpointStatus').mockImplementation(() => {
       throw new Error('SQLITE_FULL: database or disk is full');
     });
 
@@ -875,6 +886,54 @@ describe('F7: a stalled-operation kill survives a real service restart', () => {
     expect(sentTexts(next.session), 'only the request; no context or continuation turn').toHaveLength(1);
     expect(transport.texts.map(([, text]) => text), 'no fresh-start notice').not.toContain(CHECKPOINT_NOT_RESTORED_NOTICE);
     expect(inbound(next.seq)).toEqual({ processing_status: 'complete', terminal_reason: 'response_echoed' });
+  });
+
+  it('when the checkpoint names another session at the kill, the shutdown retry does not withdraw the session /new started; its checkpoint stays resumable for the restart', async () => {
+    const first = makeRuntime();
+    const ingest = makeIngest(first);
+    const { session } = await deliveredExchange(ingest, 'wamid-f7-n1', 'start the export', 'Export started.');
+    const stalledSessionId = session.getStatus().sessionId!;
+
+    // The checkpoint names another session when the kill is reported, so no
+    // hold can be saved for the stopped session and the chat stays unverified.
+    reportCrash(session, { terminationReason: 'stalled_operation' }, () => {
+      db.raw.prepare('UPDATE session_checkpoints SET session_id = ? WHERE conversation_key = ?')
+        .run('sess-f7-elsewhere', DM_KEY);
+    });
+    expectRespawnWithheld(first);
+    expect(checkpoint().session_id).toBe('sess-f7-elsewhere');
+    expect(checkpoint().watchdog).not.toHaveProperty('stalledOperationResumeHold');
+
+    // /new starts a fresh provider session on the same chat.
+    ingest(customerMsg(DM_JID, 'wamid-f7-n-new', '/new'));
+    await drainIngest();
+    const state = first as unknown as {
+      chatSessions: Map<string, SessionDouble>;
+      sessionOwnership: { get: (key: string) => { state: string } | undefined };
+    };
+    await vi.waitFor(() => {
+      const current = state.chatSessions.get(DM_JID);
+      expect(current?.spawnSession, 'the first spawn and the /new spawn; no resume').toHaveBeenCalledTimes(2);
+      expect(current?.spawnSession).toHaveBeenLastCalledWith();
+      expect(current?.getStatus().active).toBe(true);
+      expect(state.sessionOwnership.get(DM_JID)?.state).toBe('active');
+    }, SEND_WAIT);
+    const freshSessionId = state.chatSessions.get(DM_JID)!.getStatus().sessionId!;
+    expect(freshSessionId, '/new started another provider session').not.toBe(stalledSessionId);
+    expect(checkpoint()).toMatchObject({ session_id: freshSessionId, session_status: 'active' });
+
+    // Shutdown suspends the fresh session and then repeats the unverified
+    // hold for the stopped session; that retry must leave the fresh
+    // session's checkpoint resumable.
+    await restartService(first, () => {
+      expect(checkpoint(), 'the fresh session is suspended, not withdrawn').toMatchObject({
+        session_id: freshSessionId,
+        session_status: 'suspended',
+      });
+      expect(checkpoint().watchdog).not.toHaveProperty('stalledOperationResumeHold');
+      expect(engine.getResumableCheckpoints().filter((cp) => cp.conversation_key === DM_KEY))
+        .toEqual([expect.objectContaining({ session_id: freshSessionId })]);
+    });
   });
 
   it('control: after an ordinary crash and its respawn, a restart sends its continuation and nothing is held', async () => {

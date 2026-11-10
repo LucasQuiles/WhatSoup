@@ -14,8 +14,8 @@ const HOLD_KEY = 'stalledOperationResumeHold';
 
 /**
  * What keeps a service restart from continuing the stopped work: the hold
- * read back (or no checkpoint), the checkpoint verified out of proactive
- * resume, or neither. Only the hold survives a resume of the session.
+ * read back (or no checkpoint), no resumable checkpoint naming the stopped
+ * session, or neither. Only the hold survives a resume of the session.
  */
 export type StalledOperationRestartProtection = 'held' | 'withdrawn' | 'unprotected';
 

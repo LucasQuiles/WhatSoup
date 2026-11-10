@@ -53,14 +53,15 @@ export class StalledOperationHolds {
    * Save the stalled-operation kill on the checkpoint of the killed provider
    * session, so a service restart does not continue the work either, and read
    * it back. A chat with no checkpoint has nothing a restart could resume.
-   * When the hold cannot be saved or read back, or the checkpoint names
-   * another session, the checkpoint is taken out of proactive resume instead,
-   * and the chat stays unverified so the respawn and the service shutdown,
+   * When the hold cannot be saved or read back, the held session's checkpoint
+   * is taken out of proactive resume instead; when the checkpoint names
+   * another session there is nothing of the held session to withdraw. Either
+   * way the chat stays unverified so the respawn and the service shutdown,
    * which both make the checkpoint resumable again, repeat this step.
    *
    * Returns what protects a restart: `held` (the hold was read back, or there
-   * is no checkpoint), `withdrawn` (the checkpoint was verified out of
-   * proactive resume) or `unprotected` (both protective writes failed). Only
+   * is no checkpoint), `withdrawn` (no resumable checkpoint names the held
+   * session) or `unprotected` (both protective writes failed). Only
    * `held` survives a resume: reactivation keeps watchdog_state but makes the
    * checkpoint resumable again, so the respawn gate admits `held` alone.
    */
@@ -98,19 +99,32 @@ export class StalledOperationHolds {
   /**
    * Fail-closed path: an orphaned checkpoint is not proactively resumed on
    * startup (getResumableCheckpoints reads active and suspended only); the
-   * chat's next message rebuilds it. Verified by reading the resumable set.
+   * chat's next message rebuilds it. Only the held session's checkpoint is
+   * withdrawn. A checkpoint that names another session, such as the fresh
+   * session a /new reset started, cannot resume the stopped work and keeps
+   * its own resume; the unverified chat repeats this step at shutdown, so a
+   * conversation-wide write would orphan that session. Verified by reading
+   * the resumable set for the held session.
    */
   private withdrawFromProactiveResume(conversationKey: string, mapKey: string, sessionId: string): boolean {
     const durability = this.deps.durability();
     try {
       if (
         durability
-        && typeof durability.markSessionOrphaned === 'function'
+        && typeof durability.updateExactSessionCheckpointStatus === 'function'
         && typeof durability.getResumableCheckpoints === 'function'
       ) {
-        durability.markSessionOrphaned(conversationKey);
-        if (!durability.getResumableCheckpoints().some((cp) => cp.conversation_key === conversationKey)) {
-          log.warn({ mapKey, sessionId }, 'stalled-operation resume hold unavailable — checkpoint withdrawn from proactive resume');
+        if (durability.getSessionCheckpoint(conversationKey)?.session_id === sessionId) {
+          durability.updateExactSessionCheckpointStatus({
+            providerSessionId: sessionId,
+            conversationKey,
+            sessionStatus: 'orphaned',
+          });
+        }
+        if (!durability.getResumableCheckpoints().some(
+          (cp) => cp.conversation_key === conversationKey && cp.session_id === sessionId,
+        )) {
+          log.warn({ mapKey, sessionId }, 'stalled-operation resume hold unavailable — no resumable checkpoint names the stopped session');
           return true;
         }
       }
