@@ -227,8 +227,8 @@ function arrayOfStrings(value: unknown): string[] | null {
     : null;
 }
 
-// Same 40-hex full-git-sha shape `FULL_GIT_SHA_RE` enforces in
-// `src/lib/git-env.ts:33`, mirrored here (that constant is not exported) but
+// Same 40-hex full-git-sha shape that `FULL_GIT_SHA_RE` in
+// `src/lib/git-env.ts` enforces, mirrored here (that constant is not exported) but
 // lowercase-only rather than case-insensitive, matching this file's existing
 // lowercase-only hex conventions (e.g. `inventoryBinding.rosterDigest`'s
 // `/^[0-9a-f]{64}$/` check above) since committed manifest identity fields are
