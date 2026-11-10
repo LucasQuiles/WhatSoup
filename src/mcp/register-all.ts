@@ -93,6 +93,8 @@ function knowledgeSearchDeps(
     membership,
     sharedWorkflowGroups: config.sharedWorkflowGroups,
     contactRecallScopes: config.contactRecallScopes,
+    trustedOperatorPhones: (config as { memory?: { pinecone?: { trustedOperatorPhones?: string[] } } })
+      .memory?.pinecone?.trustedOperatorPhones ?? [],
   };
 }
 

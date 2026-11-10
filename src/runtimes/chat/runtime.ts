@@ -37,7 +37,7 @@ import { checkRateLimit } from './rate-limiter.ts';
 import { getConversationWindow } from './window.ts';
 import { summarizeWindowBeforeTrim } from './window-trim.ts';
 import { loadContextDetailed, type ContextLoadResult } from './context.ts';
-import { chatRecallBoundary } from '../../core/memory-scope.ts';
+import { chatRecallBoundary, ownerOnlyRecallAllowed } from '../../core/memory-scope.ts';
 import { isOperatorInstance } from '../../lib/pinecone-project-guard.ts';
 import { ChatQueue } from './queue.ts';
 import { processMedia } from './media/processor.ts';
@@ -407,6 +407,17 @@ export class ChatRuntime implements Runtime {
     // Pinecone is wrapped in a timeout race. The winning bounded outcome is
     // retained for health while the user still gets a response without context.
     const contextStart = Date.now();
+    // Read defensively: partial test configs omit the memory block.
+    const trustedOperatorPhones = (config as { memory?: { pinecone?: { trustedOperatorPhones?: string[] } } })
+      .memory?.pinecone?.trustedOperatorPhones ?? [];
+    const ownerOnly = ownerOnlyRecallAllowed({
+      actorJid: msg.senderJid,
+      conversationKey: msg.chatJid,
+      deliveryJid: msg.chatJid,
+      adminPhones: config.adminPhones,
+      trustedOperatorPhones,
+      db: this.db,
+    });
     let contextBlock: string | null = null;
     let contextTimeout: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -426,6 +437,9 @@ export class ChatRuntime implements Runtime {
             sharedWorkflowGroups: config.sharedWorkflowGroups,
             contactRecallScopes: config.contactRecallScopes,
           }),
+          // Passed only when granted, so every other caller keeps the
+          // pre-visibility call shape (and the provider default excludes).
+          ...(ownerOnly ? [{ ownerOnly: true }] as const : []),
         ),
         new Promise<ContextLoadResult>((resolve) => {
           contextTimeout = setTimeout(

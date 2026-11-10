@@ -108,6 +108,19 @@ describe('memory operation telemetry', () => {
     ).toEqual({ scopeKind: 'global', filterShape: 'unknown' });
   });
 
+  it('a leg filter plus the owner_only visibility exclusion keeps the leg shape', () => {
+    const exclusion = { $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] };
+    expect(classifyMemoryFilter({ chat_jid: { $eq: 'c' }, ...exclusion }))
+      .toEqual({ scopeKind: 'chat', filterShape: 'chat_eq' });
+    expect(classifyMemoryFilter({ sender_jid: { $eq: 's' }, ...exclusion }))
+      .toEqual({ scopeKind: 'sender', filterShape: 'sender_eq' });
+    expect(classifyMemoryFilter({ memory_type: { $eq: 'self_fact' }, ...exclusion }))
+      .toEqual({ scopeKind: 'self', filterShape: 'memory_type_eq' });
+    // Only the pinned exclusion is transparent; any other disjunction stays mixed.
+    expect(classifyMemoryFilter({ chat_jid: { $eq: 'c' }, $or: [{ visibility: { $eq: 'owner_only' } }] }))
+      .toEqual({ scopeKind: 'global', filterShape: 'mixed' });
+  });
+
   it('names the consolidation eligibility filter instead of bucketing it as unknown', () => {
     // The exact shape consolidation source selection sends provider-side
     // (#2569): exclude prior promotion outputs, keep qualifier-less records.

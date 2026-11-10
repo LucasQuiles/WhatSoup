@@ -918,6 +918,47 @@ describe('Media processing', () => {
     );
   });
 
+  it('grants owner_only recall only to a verified admin in a direct chat, never in a group', async () => {
+    const mutable = configModule.config as unknown as { adminPhones: Set<string> };
+    const previousAdmins = mutable.adminPhones;
+    mutable.adminPhones = new Set(['15550001111']);
+    try {
+      const { handler, pinecone } = makeHandler();
+      await handleAndDrain(handler, makeIncomingMessage({
+        chatJid: '15550001111@s.whatsapp.net',
+        senderJid: '15550001111@s.whatsapp.net',
+      }));
+      expect(mockLoadContext).toHaveBeenLastCalledWith(
+        pinecone,
+        '15550001111@s.whatsapp.net',
+        '15550001111@s.whatsapp.net',
+        expect.any(String),
+        expect.any(String),
+        'open',
+        { ownerOnly: true },
+      );
+
+      // Same admin in a group: recall stays open, but no owner_only access
+      // (the access argument is omitted, which loadContextDetailed reads as false).
+      const group = makeHandler();
+      await handleAndDrain(group.handler, makeIncomingMessage({
+        chatJid: '111111100000001@g.us',
+        isGroup: true,
+        senderJid: '15550001111@s.whatsapp.net',
+      }));
+      expect(mockLoadContext).toHaveBeenLastCalledWith(
+        group.pinecone,
+        '111111100000001@g.us',
+        '15550001111@s.whatsapp.net',
+        expect.any(String),
+        expect.any(String),
+        'open',
+      );
+    } finally {
+      mutable.adminPhones = previousAdmins;
+    }
+  });
+
   it('DB content updated when processMedia returns different content than original', async () => {
     const { handler, db } = makeHandler();
     const msg = makeIncomingMessage({ content: 'original', contentType: 'audio' });

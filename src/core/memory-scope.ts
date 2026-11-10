@@ -66,6 +66,12 @@ export interface MemoryScope {
   verifiedSender?: string;
   /** The group is listed in `sharedWorkflowGroups`. */
   sharedWorkflow: boolean;
+  /**
+   * The caller may receive `owner_only` records: a verified instance admin or
+   * a configured trusted operator, over an authenticated transport, in a
+   * direct chat (see ownerOnlyRecallAllowed). Independent of `kind`.
+   */
+  ownerOnlyAccess: boolean;
 }
 
 export interface MemoryIdentityFold {
@@ -277,6 +283,8 @@ export interface MemoryScopeDeps {
   sharedWorkflowGroups: Iterable<string>;
   /** Phone -> recall scope for non-admin direct chats; unset means 'chat'. */
   contactRecallScopes?: Readonly<Record<string, string>>;
+  /** `memory.pinecone.trustedOperatorPhones`: may read owner_only records. */
+  trustedOperatorPhones?: Iterable<string>;
 }
 
 /**
@@ -317,6 +325,45 @@ export function isVerifiedAdminSender(
   return phone !== null && isAdminPhone(phone, adminPhones);
 }
 
+/**
+ * The sender is a configured trusted operator (`memory.pinecone.
+ * trustedOperatorPhones`), proven with the same grant primitive as an admin.
+ */
+export function isTrustedOperatorSender(
+  actorJid: string | undefined,
+  trustedOperatorPhones: Iterable<string> | undefined,
+  db?: Database | null,
+): boolean {
+  if (!actorJid || !db || !trustedOperatorPhones) return false;
+  const phones = new Set(trustedOperatorPhones);
+  if (phones.size === 0) return false;
+  const phone = resolvePhoneFromJidForGrant(actorJid, db);
+  return phone !== null && isAdminPhone(phone, phones);
+}
+
+/**
+ * Whether the caller may receive `owner_only` records. Only a verified admin of
+ * the instance or a configured trusted operator, over an authenticated
+ * transport, in a direct chat. The operator instance, contacts (whatever their
+ * recall scope), every group (even one the admin is in, since other members read
+ * the reply), unverified transports and callers with no pinned direct
+ * conversation are all refused.
+ */
+export function ownerOnlyRecallAllowed(input: {
+  actorJid?: string;
+  conversationKey?: string;
+  deliveryJid?: string;
+  adminPhones: Set<string>;
+  trustedOperatorPhones?: Iterable<string>;
+  db?: Database | null;
+}): boolean {
+  const { actorJid, conversationKey, db } = input;
+  if (!actorJid || !db || !conversationKey) return false;
+  if (isGroupContext(conversationKey, input.deliveryJid) || isGroupJid(conversationKey)) return false;
+  return isVerifiedAdminSender(actorJid, input.adminPhones, db)
+    || isTrustedOperatorSender(actorJid, input.trustedOperatorPhones, db);
+}
+
 function isGroupContext(key: string, deliveryJid: string | undefined): boolean {
   return isGroupConversationKey(key) || (deliveryJid !== undefined && isGroupJid(deliveryJid));
 }
@@ -334,7 +381,15 @@ export async function resolveMemoryScope(
   const rawKey = request.conversationKey;
   const chatKey = rawKey ? foldChatAttribution(rawKey, db) : undefined;
   const chatSpellings = rawKey ? chatAttributionSpellings(rawKey, request.deliveryJid, db) : [];
-  const base = { chatKey, chatSpellings, sharedWorkflow: false };
+  const ownerOnlyAccess = ownerOnlyRecallAllowed({
+    actorJid: request.actorJid,
+    conversationKey: rawKey,
+    deliveryJid: request.deliveryJid,
+    adminPhones: deps.identities.adminPhones,
+    trustedOperatorPhones: deps.trustedOperatorPhones,
+    db,
+  });
+  const base = { chatKey, chatSpellings, sharedWorkflow: false, ownerOnlyAccess };
 
   if (request.operatorInstance) return { ...base, kind: 'unrestricted', reason: 'operator_instance' };
   if (!rawKey || !chatKey) {
@@ -345,6 +400,8 @@ export async function resolveMemoryScope(
   if (isVerifiedAdminSender(request.actorJid, deps.identities.adminPhones, db)) {
     return { ...base, kind: 'unrestricted', reason: 'admin_sender' };
   }
+  // A trusted operator keeps the ordinary contact boundary for chat_scoped
+  // records; only owner_only records widen across chats (memoryHitTier).
   if (!isGroupContext(rawKey, request.deliveryJid)) {
     return contactRecallScope(request.actorJid, deps.contactRecallScopes, db) === 'instance'
       ? { ...base, kind: 'dm', reason: 'contact_scope_instance' }
@@ -403,6 +460,50 @@ export function chatRecallBoundary(input: {
   return shared ? 'this_chat' : 'group';
 }
 
+// ── owner_only visibility ──────────────────────────────────────────────────
+
+/** A record stamped `owner_only`. A record with no visibility field is not. */
+export function isOwnerOnlyRecord(fields: Record<string, unknown>): boolean {
+  return fields['visibility'] === 'owner_only';
+}
+
+/**
+ * Pre-query clause keeping every record except `owner_only` ones. The
+ * `$exists: false` arm is load-bearing: records written before visibility
+ * existed have no such field, and a bare `$ne` is documented to match only
+ * records that carry a differing value (same reasoning as consolidation's
+ * qualifier filter). classifyMemoryFilter recognizes this exact shape.
+ */
+function ownerOnlyExclusion(): { $or: Array<Record<string, unknown>> } {
+  return { $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] };
+}
+
+/**
+ * Add the owner_only exclusion to a search filter unless the caller may read
+ * owner_only records. The pre-query filter only narrows the fetch; the
+ * per-record gate (memoryHitTier, the chat runtime's post-filter) decides.
+ */
+export function withVisibilityFilter(
+  filter: Record<string, unknown> | undefined,
+  ownerOnlyAccess: boolean,
+): Record<string, unknown> | undefined {
+  if (ownerOnlyAccess) return filter;
+  const exclusion = ownerOnlyExclusion();
+  if (!filter || Object.keys(filter).length === 0) return exclusion;
+  // A filter that already has a top-level $or cannot take a second one.
+  if ('$or' in filter) return { $and: [filter, exclusion] };
+  return { ...filter, ...exclusion };
+}
+
+/**
+ * Pre-query filter for the extra leg a caller with owner_only access gets: the
+ * owner_only records of every chat, which the caller's chat_scoped boundary
+ * would otherwise never fetch.
+ */
+export function ownerOnlyLegFilter(): Record<string, unknown> {
+  return { visibility: { $eq: 'owner_only' } };
+}
+
 // ── per-record gate and ranking ────────────────────────────────────────────
 
 /**
@@ -435,6 +536,14 @@ export function memoryHitTier(
 ): MemoryTier | null {
   if (scope.kind === 'no_context') return null;
   const rawChat = typeof fields['chat_jid'] === 'string' ? fields['chat_jid'] : '';
+  if (isOwnerOnlyRecord(fields)) {
+    // owner_only: refused without access; with access (only ever granted in a
+    // direct chat) admitted from any chat, ranked this chat -> other -> untagged.
+    // chat_scoped records keep the scope's own boundary below.
+    if (!scope.ownerOnlyAccess) return null;
+    if (!rawChat.trim()) return 2;
+    return scope.chatKey !== undefined && fold.chat(rawChat) === scope.chatKey ? 0 : 1;
+  }
   if (!rawChat.trim()) return includesUntagged(scope) ? 2 : null;
   const thisChat = scope.chatKey !== undefined && fold.chat(rawChat) === scope.chatKey;
 

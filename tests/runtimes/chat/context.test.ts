@@ -558,6 +558,63 @@ describe('loadContext', () => {
     );
     expect(workflow.text).toContain('another member private fact');
   });
+
+  it('drops owner_only records from every leg unless the caller may read them', async () => {
+    const ownerOnly = (id: string, text: string) => {
+      const result = makeResult(id, text);
+      result.record.chatJid = '15550000002@s.whatsapp.net';
+      result.record.visibility = 'owner_only';
+      return result;
+    };
+    const legacy = makeResult('legacy', 'a legacy fact with no visibility field');
+    legacy.record.chatJid = '15550000002@s.whatsapp.net';
+    const pinecone = makeMockPinecone(
+      [ownerOnly('c', 'private chat fact'), legacy],
+      [ownerOnly('s', 'private sender fact')],
+      [ownerOnly('self', 'private self fact')],
+    );
+
+    const contact = await loadContextDetailed(
+      pinecone as any, '15550000002@s.whatsapp.net', '15550000002@s.whatsapp.net', 'query', undefined, 'open',
+    );
+    expect(contact.text).not.toContain('private');
+    expect(contact.text).toContain('a legacy fact with no visibility field');
+    // An unprivileged caller keeps the exact legacy call shape (provider default excludes owner_only).
+    expect(pinecone.searchForChatDetailed).toHaveBeenLastCalledWith('15550000002@s.whatsapp.net', 'query');
+
+    const owner = await loadContextDetailed(
+      pinecone as any, '15550000002@s.whatsapp.net', '15550000002@s.whatsapp.net', 'query', undefined, 'open',
+      { ownerOnly: true },
+    );
+    expect(owner.text).toContain('private chat fact');
+    expect(owner.text).toContain('private sender fact');
+    expect(owner.text).toContain('private self fact');
+    expect(pinecone.searchForChatDetailed).toHaveBeenLastCalledWith(
+      '15550000002@s.whatsapp.net', 'query', undefined, { includeOwnerOnly: true },
+    );
+    expect(pinecone.searchSelfFactsDetailed).toHaveBeenLastCalledWith('query', undefined, { includeOwnerOnly: true });
+  });
+
+  it('with access under the this_chat boundary, owner_only records from other chats pass; chat_scoped ones do not', async () => {
+    const elsewhere = (id: string, text: string, visibility?: 'owner_only' | 'chat_scoped') => {
+      const result = makeResult(id, text);
+      result.record.chatJid = '15550000003@s.whatsapp.net';
+      if (visibility) result.record.visibility = visibility;
+      return result;
+    };
+    const pinecone = makeMockPinecone([], [
+      elsewhere('p', 'personal line fact from another chat', 'owner_only'),
+      elsewhere('c', 'another contact chat_scoped fact', 'chat_scoped'),
+      elsewhere('l', 'another contact legacy fact'),
+    ]);
+    const trusted = await loadContextDetailed(
+      pinecone as any, '15550000055@s.whatsapp.net', '15550000055@s.whatsapp.net', 'query', undefined, 'this_chat',
+      { ownerOnly: true },
+    );
+    expect(trusted.text).toContain('personal line fact from another chat');
+    expect(trusted.text).not.toContain('another contact chat_scoped fact');
+    expect(trusted.text).not.toContain('another contact legacy fact');
+  });
 });
 
 // ---------------------------------------------------------------------------

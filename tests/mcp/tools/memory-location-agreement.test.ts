@@ -155,6 +155,11 @@ const RECORDS: Array<{ id: string; score: number; fields: Record<string, unknown
   { id: 'untagged', score: 0.99, fields: { text: 'record from before chat attribution' } },
 ];
 
+/** Pre-query clause on memory namespaces for callers without owner_only access. */
+const OWNER_ONLY_EXCLUSION = {
+  $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }],
+};
+
 function seed(records = RECORDS): void {
   store.set('mw-mind/__default__', records.map((r) => ({ ...r, fields: { ...r.fields } })));
 }
@@ -293,8 +298,11 @@ describe('knowledge_search in direct chats', () => {
 
     const defaultLegs = queries.filter((q) => q.namespace === '__default__');
     expect(defaultLegs).toEqual([
-      { namespace: '__default__', filter: { chat_jid: { $in: expect.arrayContaining([MEMBER_A, pn(MEMBER_A)]) } } },
-      { namespace: '__default__' },
+      {
+        namespace: '__default__',
+        filter: { chat_jid: { $in: expect.arrayContaining([MEMBER_A, pn(MEMBER_A)]) }, ...OWNER_ONLY_EXCLUSION },
+      },
+      { namespace: '__default__', filter: OWNER_ONLY_EXCLUSION },
     ]);
     expect(queries.filter((q) => q.namespace === 'onedrive')).toEqual([{ namespace: 'onedrive' }]);
   });
@@ -393,6 +401,56 @@ describe('knowledge_search ranking outside configurable groups', () => {
   });
 });
 
+describe('knowledge_search and owner_only records', () => {
+  const TRUSTED = '15550000055';
+  // The fake index ignores filters, so these prove the post-query gate; the
+  // pre-query filter shape is asserted on the recorded queries.
+  const PERSONAL = [
+    ...RECORDS,
+    { id: 'personal', score: 0.96, fields: { text: 'personal line fact', chat_jid: pn(MEMBER_B), sender_jid: pn(MEMBER_B), visibility: 'owner_only' } },
+  ];
+  const deps = (): KnowledgeSearchDeps => ({ identities: () => identities, db: adminDb(), trustedOperatorPhones: [TRUSTED] });
+  const smsSession = (phone: string): SessionContext => ({
+    tier: 'chat-scoped', conversationKey: phone, deliveryJid: `+${phone}@sms`, actorJid: `+${phone}@sms`,
+  });
+
+  it('the verified owner and a trusted operator receive owner_only records in a direct chat', async () => {
+    seed(PERSONAL);
+    const { knowledgeSearch } = registerTools(deps());
+    expect(await search(knowledgeSearch, dmSession(OWNER))).toContain('personal');
+    // (1) the trusted operator gets the owner_only record from another chat ...
+    const trusted = await search(knowledgeSearch, dmSession(TRUSTED));
+    expect(trusted).toContain('personal');
+    // (2) ... but no other contact's chat_scoped records: its boundary is a contact's.
+    expect(trusted).toEqual(['personal', 'untagged']);
+    // Access lifts the exclusion and adds one owner_only leg per memory namespace.
+    expect(queries.some((q) => JSON.stringify(q.filter ?? {}).includes('"$ne":"owner_only"'))).toBe(false);
+    expect(queries.filter((q) => q.namespace === '__default__' && JSON.stringify(q.filter ?? {}) === '{"visibility":{"$eq":"owner_only"}}'))
+      .toHaveLength(2);
+  });
+
+  it('a contact, a group with the owner in it, and an unverified caller never receive one', async () => {
+    seed(PERSONAL);
+    const { knowledgeSearch } = registerTools({ ...deps(), contactRecallScopes: { [MEMBER_B]: 'instance' } });
+    expect(await search(knowledgeSearch, dmSession(MEMBER_B))).not.toContain('personal');
+    expect(await search(knowledgeSearch, groupSession(pn(OWNER)))).not.toContain('personal');
+    expect(await search(knowledgeSearch, smsSession(OWNER))).not.toContain('personal');
+    expect(await search(knowledgeSearch, { tier: 'global' })).not.toContain('personal');
+    // Every memory-namespace query of these callers carried the exclusion.
+    const memoryQueries = queries.filter((q) => !['local-docs', 'onedrive', 'whatsapp-contacts'].includes(q.namespace));
+    expect(memoryQueries.length).toBeGreaterThan(0);
+    expect(memoryQueries.every((q) => JSON.stringify(q.filter).includes('"$ne":"owner_only"'))).toBe(true);
+  });
+
+  it('records with no visibility field are returned exactly as before', async () => {
+    const { knowledgeSearch } = registerTools({ ...deps(), contactRecallScopes: { [MEMBER_B]: 'instance' } });
+    seed(RECORDS);
+    const before = await search(knowledgeSearch, dmSession(MEMBER_B));
+    seed(PERSONAL);
+    expect(await search(knowledgeSearch, dmSession(MEMBER_B))).toEqual(before);
+  });
+});
+
 describe('knowledge_search in configurable groups', () => {
   it('returns this group\'s shared records and the verified sender\'s own, nothing else', async () => {
     seed();
@@ -406,7 +464,7 @@ describe('knowledge_search in configurable groups', () => {
     for (const query of queries) {
       expect(query.filter).toEqual(documentNamespaces.has(query.namespace)
         ? undefined
-        : { chat_jid: { $in: expect.arrayContaining([GROUP_KEY, GROUP_JID]) } });
+        : { chat_jid: { $in: expect.arrayContaining([GROUP_KEY, GROUP_JID]) }, ...OWNER_ONLY_EXCLUSION });
     }
   });
 
@@ -445,7 +503,10 @@ describe('knowledge_search in configurable groups', () => {
 
     expect(await search(knowledgeSearch, groupSession(pn(MEMBER_A)), { namespace: 'whatsapp-facts' })).toEqual([]);
     expect(queries).toEqual([
-      { namespace: 'whatsapp-facts', filter: { chat_jid: { $in: expect.arrayContaining([GROUP_KEY]) } } },
+      {
+        namespace: 'whatsapp-facts',
+        filter: { chat_jid: { $in: expect.arrayContaining([GROUP_KEY]) }, ...OWNER_ONLY_EXCLUSION },
+      },
     ]);
   });
 

@@ -137,6 +137,11 @@ export interface MemoryConfig {
      * existing records keep their ids and dedup.
      */
     instanceScopedIds: boolean;
+    /**
+     * Phones (besides adminPhones) that may receive owner_only records, in a
+     * direct chat over an authenticated transport (memory-scope.ts).
+     */
+    trustedOperatorPhones: string[];
     index: string;
     namespaces: PineconeNamespaceConfig;
     contextTopK: number;
@@ -1146,6 +1151,7 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
       expectedHostSuffix: stringProp(pinecone, 'expectedHostSuffix') ?? process.env.PINECONE_EXPECTED_HOST_SUFFIX,
       recordVisibility: pineconeRecordVisibility(pinecone?.recordVisibility),
       instanceScopedIds: booleanProp(pinecone, 'instanceScopedIds', false),
+      trustedOperatorPhones: stringArrayProp(pinecone, 'trustedOperatorPhones'),
       index,
       namespaces,
       contextTopK: numberProp(pinecone, 'contextTopK', 10),

@@ -1213,6 +1213,7 @@ The default is a fixed HOME-relative template — it does not consult `LANG`/`LC
 | `memory.pinecone.projectId` | string | env/unset | Optional short project slug guard (not the UUID-form project ID). If the listed index host does not include this slug, readiness returns `project_mismatch` and `knowledge_search` refuses to query. |
 | `memory.pinecone.expectedHostSuffix` | string | env/unset | Optional exact host suffix guard. Use this when two projects have the same index name and you need fail-closed routing. |
 | `memory.pinecone.recordVisibility` | `owner_only` \| `chat_scoped` | `chat_scoped` | Visibility stamped on every memory record this instance writes (see [Memory record provenance](#memory-record-provenance)). A `passive` instance always writes `owner_only`, whatever this says. An unknown value fails config load. |
+| `memory.pinecone.trustedOperatorPhones` | string[] | `[]` | Phones, besides `adminPhones`, allowed to recall `owner_only` records from any chat: in a direct chat, over an authenticated transport, verified like an admin. Their `chat_scoped` recall keeps an ordinary contact's boundary (their own chat). See [owner_only records](#owner_only-records). |
 | `memory.pinecone.instanceScopedIds` | boolean | `false` | Set on every instance that shares a memory index with another instance. Folds the instance name into all three record id schemes (`memory_write` ids, the fact-export `factId` hash, consolidation `durable:` ids), so identical content from two instances cannot overwrite each other. Off keeps every existing id and its dedup unchanged; turning it on mints new ids for later writes and does not rewrite stored records. |
 | `memory.pinecone.index` | string | env/`whatsapp-bot` | Primary chat memory/entity index. |
 | `memory.pinecone.namespaces` | object | WhatsApp defaults | Namespaces used by chat context, fact export, and `mw-mind` intent routing. Every namespace is configurable per instance. |
@@ -1264,6 +1265,33 @@ widen them.
 
 Records written before these fields existed carry none of them and are
 recalled exactly as before.
+
+Set `accountScopeId` on every instance that uses `recordVisibility` or runs as a
+`passive` line, so `source_account` is an opaque configured id rather than the
+hash fallback.
+
+##### owner_only records
+
+A record stamped `owner_only` (a personal line's records, or an instance
+configured that way) is returned only to a caller that
+`ownerOnlyRecallAllowed` (`src/core/memory-scope.ts`) admits: a verified
+`adminPhones` identity or a `memory.pinecone.trustedOperatorPhones` entry,
+proven over an authenticated transport, in a direct chat. Nothing else gets one:
+not ordinary contacts (whatever their `contactRecallScopes`), not any group (even
+one the admin is in, because other members read the reply), not the operator
+instance by itself, not a global session without a conversation, and not an
+unverified transport such as SMS. Access widens recall for `owner_only` records
+only: a caller with access receives them from any chat (`knowledge_search` adds
+one `visibility = owner_only` leg per memory namespace; the chat runtime lets
+them past its this-chat hold), while its `chat_scoped` and untagged recall keeps
+the boundary in the table above. The admin's own scope is unchanged. For callers
+without access, both readers enforce the exclusion twice: a pre-query
+metadata filter (`visibility` absent or not `owner_only`) narrows every memory
+leg (`knowledge_search` memory namespaces and the chat runtime's chat, sender
+and self-fact legs), and a per-record gate drops any `owner_only` hit that still
+arrives. Records with no `visibility` field are unaffected. Tests prove the
+filter shape and the gate; Pinecone's evaluation of `$exists`/`$ne` on live
+metadata is outside unit-test reach.
 
 ##### Memory recall scope
 

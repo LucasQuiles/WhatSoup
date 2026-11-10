@@ -83,6 +83,11 @@ afterEach(() => {
  */
 const DEFAULT_STAMP = { source_instance: '', source_account: '', visibility: 'chat_scoped' } as const;
 
+/** Pre-query clause the context legs add unless the caller may read owner_only records. */
+const OWNER_ONLY_EXCLUSION = {
+  $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }],
+} as const;
+
 function makeMemoryRecord(overrides: Partial<MemoryRecord> = {}): MemoryRecord {
   return {
     id: 'rec-001',
@@ -454,7 +459,7 @@ describe('PineconeMemory', () => {
             query: {
               topK: 10,
               inputs: { text: 'where is the runbook?' },
-              filter: { chat_jid: { $eq: 'chat-42@g.us' } },
+              filter: { chat_jid: { $eq: 'chat-42@g.us' }, ...OWNER_ONLY_EXCLUSION },
             },
             fields: ['*'],
           }],
@@ -462,7 +467,7 @@ describe('PineconeMemory', () => {
             query: {
               topK: 5,
               inputs: { text: 'what does Alice prefer?' },
-              filter: { sender_jid: { $eq: 'sender-17@s.whatsapp.net' } },
+              filter: { sender_jid: { $eq: 'sender-17@s.whatsapp.net' }, ...OWNER_ONLY_EXCLUSION },
             },
             fields: ['*'],
           }],
@@ -470,13 +475,37 @@ describe('PineconeMemory', () => {
             query: {
               topK: 7,
               inputs: { text: 'what should Q remember about itself?' },
-              filter: { memory_type: { $eq: 'self_fact' } },
+              filter: { memory_type: { $eq: 'self_fact' }, ...OWNER_ONLY_EXCLUSION },
             },
             fields: ['*'],
           }],
         ]);
       } finally {
         mutableConfig.pineconeSelfFactTopK = previousSelfFactTopK;
+      }
+    });
+
+    it('context legs include owner_only records only when the caller is allowed to read them', async () => {
+      mockSearchRecords.mockResolvedValue({ result: { hits: [] } });
+      try {
+        // Same three legs twice: default (excluded) and with access (included).
+        // The default half fails on code that never excludes owner_only.
+        await memory.searchForChatDetailed('chat-42@g.us', 'q1');
+        await memory.searchForSenderDetailed('sender-17@s.whatsapp.net', 'q2');
+        await memory.searchSelfFactsDetailed('q3');
+        await memory.searchForChatDetailed('chat-42@g.us', 'q1', undefined, { includeOwnerOnly: true });
+        await memory.searchForSenderDetailed('sender-17@s.whatsapp.net', 'q2', undefined, { includeOwnerOnly: true });
+        await memory.searchSelfFactsDetailed('q3', undefined, { includeOwnerOnly: true });
+        expect(mockSearchRecords.mock.calls.map((call) => call[0].query.filter)).toEqual([
+          { chat_jid: { $eq: 'chat-42@g.us' }, ...OWNER_ONLY_EXCLUSION },
+          { sender_jid: { $eq: 'sender-17@s.whatsapp.net' }, ...OWNER_ONLY_EXCLUSION },
+          { memory_type: { $eq: 'self_fact' }, ...OWNER_ONLY_EXCLUSION },
+          { chat_jid: { $eq: 'chat-42@g.us' } },
+          { sender_jid: { $eq: 'sender-17@s.whatsapp.net' } },
+          { memory_type: { $eq: 'self_fact' } },
+        ]);
+      } finally {
+        mockSearchRecords.mockReset();
       }
     });
 
@@ -558,7 +587,7 @@ describe('PineconeMemory', () => {
           query: {
             topK: 10,
             inputs: { text: 'query' },
-            filter: { chat_jid: { $eq: 'chat-42@g.us' } },
+            filter: { chat_jid: { $eq: 'chat-42@g.us' }, ...OWNER_ONLY_EXCLUSION },
           },
           fields: ['*'],
         },

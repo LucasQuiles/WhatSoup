@@ -20,6 +20,8 @@ import {
   memorySourceAccount,
   narrowestVisibility,
   recordIdScope,
+  ownerOnlyRecallAllowed,
+  withVisibilityFilter,
   type GroupParticipantInfo,
   type InstanceIdentities,
   type MemoryScopeDeps,
@@ -293,6 +295,114 @@ describe('chatRecallBoundary (chat runtime)', () => {
   it('applies the group rule to any other group sender', () => {
     expect(chatRecallBoundary({ ...base, chatJid: GROUP_JID, senderJid: `${MEMBER}@s.whatsapp.net` })).toBe('group');
     expect(chatRecallBoundary({ ...base, chatJid: GROUP_JID, senderJid: `+${OWNER}@sms` })).toBe('group');
+  });
+});
+
+describe('owner_only visibility', () => {
+  const TRUSTED = '15550000055';
+  const OWNER_ONLY = { chat_jid: `${MEMBER}@s.whatsapp.net`, visibility: 'owner_only' };
+  const dmWith = (phone: string, actorJid = `${phone}@s.whatsapp.net`) => ({
+    tier: 'chat-scoped', conversationKey: phone, deliveryJid: `${phone}@s.whatsapp.net`, operatorInstance: false, actorJid,
+  });
+  const withTrusted = (overrides: Partial<MemoryScopeDeps> = {}) => deps({ trustedOperatorPhones: [TRUSTED], ...overrides });
+
+  it('the verified owner and a configured trusted operator read owner_only records in a direct chat', async () => {
+    const f = memoryIdentityFold(db);
+    const owner = await resolveMemoryScope(dmWith(OWNER), withTrusted());
+    expect(owner.ownerOnlyAccess).toBe(true);
+    expect(memoryHitTier(OWNER_ONLY, owner, f)).toBe(1);
+    const trusted = await resolveMemoryScope(dmWith(TRUSTED), withTrusted());
+    expect(trusted.ownerOnlyAccess).toBe(true);
+    // (1) an owner_only record from ANOTHER chat reaches a trusted operator.
+    expect(memoryHitTier(OWNER_ONLY, trusted, f)).toBe(1);
+    expect(memoryHitTier({ ...OWNER_ONLY, chat_jid: `${TRUSTED}@s.whatsapp.net` }, trusted, f)).toBe(0);
+  });
+
+  it('(2) a trusted operator keeps the contact boundary for chat_scoped and legacy records', async () => {
+    const f = memoryIdentityFold(db);
+    const trusted = await resolveMemoryScope(dmWith(TRUSTED), withTrusted());
+    expect(trusted).toMatchObject({ kind: 'dm_chat', ownerOnlyAccess: true });
+    expect(memoryHitTier({ chat_jid: `${MEMBER}@s.whatsapp.net`, visibility: 'chat_scoped' }, trusted, f)).toBeNull();
+    expect(memoryHitTier({ chat_jid: `${MEMBER}@s.whatsapp.net` }, trusted, f)).toBeNull();
+    expect(memoryHitTier({ chat_jid: GROUP_JID, visibility: 'chat_scoped' }, trusted, f)).toBeNull();
+    expect(chatRecallBoundary({
+      adminPhones: identities.adminPhones, db, operatorInstance: false,
+      chatJid: `${TRUSTED}@s.whatsapp.net`, senderJid: `${TRUSTED}@s.whatsapp.net`,
+    })).toBe('this_chat');
+  });
+
+  it('(4) the verified admin keeps its unchanged whole-instance scope for chat_scoped records', async () => {
+    const f = memoryIdentityFold(db);
+    const owner = await resolveMemoryScope(dmWith(OWNER), withTrusted());
+    expect(owner).toMatchObject({ kind: 'unrestricted', reason: 'admin_sender' });
+    expect(memoryHitTier({ chat_jid: `${OWNER}@s.whatsapp.net`, visibility: 'chat_scoped' }, owner, f)).toBe(0);
+    expect(memoryHitTier({ chat_jid: `${MEMBER}@s.whatsapp.net`, visibility: 'chat_scoped' }, owner, f)).toBe(1);
+    expect(memoryHitTier({ chat_jid: GROUP_JID }, owner, f)).toBe(1);
+    expect(memoryHitTier({}, owner, f)).toBe(2);
+  });
+
+  it('an ordinary contact never receives an owner_only record, even from its own chat', async () => {
+    const f = memoryIdentityFold(db);
+    for (const scopes of [undefined, { [MEMBER]: 'instance' }]) {
+      const contact = await resolveMemoryScope(dmWith(MEMBER), withTrusted({ contactRecallScopes: scopes }));
+      expect(contact.ownerOnlyAccess).toBe(false);
+      expect(memoryHitTier(OWNER_ONLY, contact, f)).toBeNull();
+    }
+  });
+
+  it('a group where the admin participates gets no owner_only records', async () => {
+    const f = memoryIdentityFold(db);
+    const group = await resolveMemoryScope(
+      { tier: 'chat-scoped', conversationKey: GROUP_KEY, deliveryJid: GROUP_JID, operatorInstance: false, actorJid: `${OWNER}@s.whatsapp.net` },
+      withTrusted({ membership: reader([{ id: `${OWNER}@s.whatsapp.net` }, { id: `${MEMBER}@s.whatsapp.net` }]) }),
+    );
+    expect(group.kind).toBe('unrestricted');
+    expect(group.ownerOnlyAccess).toBe(false);
+    expect(memoryHitTier({ chat_jid: GROUP_JID, sender_jid: '', visibility: 'owner_only' }, group, f)).toBeNull();
+    expect(memoryHitTier({ ...OWNER_ONLY, chat_jid: GROUP_JID }, group, f)).toBeNull();
+  });
+
+  it('unverified callers, the operator instance and a global session without a conversation are denied', async () => {
+    const spoofed = await resolveMemoryScope(dmWith(OWNER, `+${OWNER}@sms`), withTrusted());
+    expect(spoofed.ownerOnlyAccess).toBe(false);
+    const noActor = await resolveMemoryScope({ ...dmWith(OWNER), actorJid: undefined }, withTrusted());
+    expect(noActor.ownerOnlyAccess).toBe(false);
+    const noDb = await resolveMemoryScope(dmWith(OWNER), { ...withTrusted(), db: null });
+    expect(noDb.ownerOnlyAccess).toBe(false);
+    const operator = await resolveMemoryScope({ ...dmWith(MEMBER), operatorInstance: true }, withTrusted());
+    expect(operator.kind).toBe('unrestricted');
+    expect(operator.ownerOnlyAccess).toBe(false);
+    const global = await resolveMemoryScope({ tier: 'global', operatorInstance: false, actorJid: `${OWNER}@s.whatsapp.net` }, withTrusted());
+    expect(global.ownerOnlyAccess).toBe(false);
+  });
+
+  it('records with no visibility field (written before visibility existed) recall exactly as before', async () => {
+    const f = memoryIdentityFold(db);
+    const contact = await resolveMemoryScope(dmWith(MEMBER), withTrusted());
+    expect(memoryHitTier({ chat_jid: `${MEMBER}@s.whatsapp.net` }, contact, f)).toBe(0);
+    expect(memoryHitTier({ chat_jid: `${MEMBER}@s.whatsapp.net`, visibility: 'chat_scoped' }, contact, f)).toBe(0);
+    expect(memoryHitTier({}, contact, f)).toBe(2);
+  });
+
+  it('the chat runtime predicate: owner or trusted operator in a direct chat only', () => {
+    const input = { adminPhones: identities.adminPhones, trustedOperatorPhones: [TRUSTED], db };
+    expect(ownerOnlyRecallAllowed({ ...input, actorJid: `${OWNER}@s.whatsapp.net`, conversationKey: `${OWNER}@s.whatsapp.net` })).toBe(true);
+    expect(ownerOnlyRecallAllowed({ ...input, actorJid: `${TRUSTED}@s.whatsapp.net`, conversationKey: `${TRUSTED}@s.whatsapp.net` })).toBe(true);
+    expect(ownerOnlyRecallAllowed({ ...input, actorJid: `${OWNER}@s.whatsapp.net`, conversationKey: GROUP_JID })).toBe(false);
+    expect(ownerOnlyRecallAllowed({ ...input, actorJid: `${MEMBER}@s.whatsapp.net`, conversationKey: `${MEMBER}@s.whatsapp.net` })).toBe(false);
+    expect(ownerOnlyRecallAllowed({ ...input, actorJid: `+${OWNER}@sms`, conversationKey: `+${OWNER}@sms` })).toBe(false);
+    expect(ownerOnlyRecallAllowed({ ...input, db: null, actorJid: `${OWNER}@s.whatsapp.net`, conversationKey: OWNER })).toBe(false);
+  });
+
+  it('builds the pre-query filter: exclusion keeps records with no visibility field', () => {
+    const exclusion = { $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] };
+    expect(withVisibilityFilter(undefined, false)).toEqual(exclusion);
+    expect(withVisibilityFilter({}, false)).toEqual(exclusion);
+    expect(withVisibilityFilter({ chat_jid: { $eq: 'c' } }, false)).toEqual({ chat_jid: { $eq: 'c' }, ...exclusion });
+    const disjunction = { $or: [{ a: { $eq: 1 } }, { b: { $eq: 2 } }] };
+    expect(withVisibilityFilter(disjunction, false)).toEqual({ $and: [disjunction, exclusion] });
+    expect(withVisibilityFilter({ chat_jid: { $eq: 'c' } }, true)).toEqual({ chat_jid: { $eq: 'c' } });
+    expect(withVisibilityFilter(undefined, true)).toBeUndefined();
   });
 });
 

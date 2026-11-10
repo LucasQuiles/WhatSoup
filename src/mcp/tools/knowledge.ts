@@ -26,9 +26,12 @@ import {
 } from '../../lib/pinecone-project-guard.ts';
 import type { Database } from '../../core/database.ts';
 import {
+  isOwnerOnlyRecord,
   memoryHitTier,
   memoryIdentityFold,
+  ownerOnlyLegFilter,
   resolveMemoryScope,
+  withVisibilityFilter,
   type GroupMembershipReader,
   type InstanceIdentities,
   type MemoryScope,
@@ -78,6 +81,8 @@ export interface KnowledgeSearchDeps {
   membership?: GroupMembershipReader | null;
   sharedWorkflowGroups?: Iterable<string>;
   contactRecallScopes?: Readonly<Record<string, string>>;
+  /** `memory.pinecone.trustedOperatorPhones`: may read owner_only records. */
+  trustedOperatorPhones?: Iterable<string>;
 }
 
 function pineconeMemoryConfig(): {
@@ -190,11 +195,23 @@ function searchLegs(
 ): SearchLeg[] {
   if (!scope) return namespaces.map((namespace) => ({ namespace }));
   const thisChat = scope.chatSpellings.length > 0 ? { chat_jid: { $in: scope.chatSpellings } } : undefined;
+  // Memory legs exclude owner_only records before the query unless the caller
+  // may read them; memoryHitTier/tierHits gate the returned records again.
+  const leg = (namespace: string, filter?: Record<string, unknown>): SearchLeg => {
+    const scoped = withVisibilityFilter(filter, scope.ownerOnlyAccess);
+    return scoped ? { namespace, filter: scoped } : { namespace };
+  };
+  // With owner_only access (a direct chat only), one more leg per memory
+  // namespace fetches owner_only records of every chat, so a trusted operator
+  // whose chat_scoped boundary is a contact's still reaches them.
+  const ownerOnlyLeg = (namespace: string): SearchLeg[] =>
+    scope.ownerOnlyAccess ? [{ namespace, filter: ownerOnlyLegFilter() }] : [];
   return namespaces.flatMap((namespace): SearchLeg[] => {
     if (!isChatNamespace(namespace)) return [{ namespace }];
     if (scope.kind === 'no_context') return [];
-    if (scope.kind === 'configurable_group') return thisChat ? [{ namespace, filter: thisChat }] : [];
-    return thisChat ? [{ namespace, filter: thisChat }, { namespace }] : [{ namespace }];
+    if (scope.kind === 'configurable_group') return thisChat ? [leg(namespace, thisChat)] : [];
+    const legs = thisChat ? [leg(namespace, thisChat), leg(namespace)] : [leg(namespace)];
+    return [...legs, ...ownerOnlyLeg(namespace)];
   });
 }
 
@@ -220,6 +237,9 @@ function tierHits(
   const fold = memoryIdentityFold(db);
   const byId = new Map<string, TieredHit>();
   for (const hit of hits) {
+    // owner_only records never reach a caller without access, in any namespace
+    // of the memory index (documents included).
+    if (scope !== null && isOwnerOnlyRecord(hit.fields) && !scope.ownerOnlyAccess) continue;
     const isDocument = scope !== null && !isChatNamespace(hit.namespace ?? '');
     const tier = isDocument ? null : scope ? memoryHitTier(hit.fields, scope, fold) : 0;
     if (!isDocument && tier === null) continue;
@@ -478,6 +498,7 @@ export function registerKnowledgeTools(
       membership: deps.membership,
       sharedWorkflowGroups: deps.sharedWorkflowGroups ?? [],
       contactRecallScopes: deps.contactRecallScopes,
+      trustedOperatorPhones: deps.trustedOperatorPhones,
     },
   );
   const apiKey = resolveApiKey({ service: memoryConfig.apiKeyService, envVar: envVarName });

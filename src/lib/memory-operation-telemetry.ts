@@ -301,6 +301,22 @@ function isAbsenceAssertion(value: unknown): boolean {
  * bug, and it is unreachable for the literal inputs this path receives.
  */
 function isQualifierExclusion(value: unknown): boolean {
+  return isAbsentOrNotEqualDisjunction(value, QUALIFIER_FIELD);
+}
+
+const VISIBILITY_FIELD = 'visibility';
+
+/**
+ * The second audited disjunction: the owner_only visibility exclusion the
+ * context legs add beside their own clause (memory-scope.ts
+ * withVisibilityFilter). Same pinned, operand-blind shape as the qualifier
+ * exclusion; it never changes which leg a filter describes.
+ */
+function isVisibilityExclusion(value: unknown): boolean {
+  return isAbsentOrNotEqualDisjunction(value, VISIBILITY_FIELD);
+}
+
+function isAbsentOrNotEqualDisjunction(value: unknown, field: string): boolean {
   if (!Array.isArray(value) || value.length !== 2) {
     return false;
   }
@@ -315,10 +331,10 @@ function isQualifierExclusion(value: unknown): boolean {
         return false;
       }
       const armKeys = Object.keys(arm);
-      if (armKeys.length !== 1 || armKeys[0] !== QUALIFIER_FIELD) {
+      if (armKeys.length !== 1 || armKeys[0] !== field) {
         return false;
       }
-      const condition = readBoundedField(arm, QUALIFIER_FIELD);
+      const condition = readBoundedField(arm, field);
       if (hasExactOperator(condition, '$ne')) {
         sawExclusion = true;
         continue;
@@ -355,6 +371,13 @@ export function classifyMemoryFilter(filters: unknown): {
 
   if (keys.length === 0) {
     return { scopeKind: 'none', filterShape: 'none' };
+  }
+  // A leg clause plus the pinned owner_only exclusion describes the leg.
+  if (keys.length === 2 && keys.includes('$or') && isVisibilityExclusion(readBoundedField(filters, '$or'))) {
+    const legKey = keys[0] === '$or' ? keys[1]! : keys[0]!;
+    if (legKey !== '$or') {
+      return classifyMemoryFilter({ [legKey]: readBoundedField(filters, legKey) });
+    }
   }
   if (keys.length > 1) {
     return { scopeKind: 'global', filterShape: 'mixed' };

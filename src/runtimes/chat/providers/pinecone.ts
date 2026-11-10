@@ -25,6 +25,7 @@ import {
   instanceRecordVisibility,
   memorySourceAccount,
   narrowestVisibility,
+  withVisibilityFilter,
   type MemoryProvenance,
   type MemoryVisibility,
 } from '../../../core/memory-scope.ts';
@@ -573,6 +574,11 @@ export interface PineconeUpsertContext {
   signal?: AbortSignal;
 }
 
+export interface ContextLegOptions {
+  /** Return owner_only records too. Only for a caller ownerOnlyRecallAllowed admits. */
+  includeOwnerOnly?: boolean;
+}
+
 export interface PineconeMemoryOptions {
   /** The connected account JID, read at write time; null while disconnected. */
   accountJid?: () => string | null | undefined;
@@ -1039,22 +1045,28 @@ export class PineconeMemory {
     return (await this.searchDetailed(query, filters, topK, traceId)).results;
   }
 
+  // Context legs exclude owner_only records unless the caller passes
+  // includeOwnerOnly (a verified owner or trusted operator in a direct chat,
+  // decided by memory-scope.ts ownerOnlyRecallAllowed).
   private searchByFieldDetailed(
     query: string,
     field: string,
     value: string,
     topK: number,
     traceId?: string,
+    options: ContextLegOptions = {},
   ): Promise<PineconeSearchDetails> {
-    return this.searchDetailed(query, { [field]: { $eq: value } }, topK, traceId);
+    const filter = withVisibilityFilter({ [field]: { $eq: value } }, options.includeOwnerOnly === true) ?? {};
+    return this.searchDetailed(query, filter, topK, traceId);
   }
 
   async searchForChatDetailed(
     chatJid: string,
     query: string,
     traceId?: string,
+    options?: ContextLegOptions,
   ): Promise<PineconeSearchDetails> {
-    return this.searchByFieldDetailed(query, 'chat_jid', chatJid, config.pineconeContextTopK, traceId);
+    return this.searchByFieldDetailed(query, 'chat_jid', chatJid, config.pineconeContextTopK, traceId, options);
   }
 
   async searchForChat(chatJid: string, query: string, traceId?: string): Promise<SearchResult[]> {
@@ -1065,16 +1077,21 @@ export class PineconeMemory {
     senderJid: string,
     query: string,
     traceId?: string,
+    options?: ContextLegOptions,
   ): Promise<PineconeSearchDetails> {
-    return this.searchByFieldDetailed(query, 'sender_jid', senderJid, config.pineconeSenderTopK, traceId);
+    return this.searchByFieldDetailed(query, 'sender_jid', senderJid, config.pineconeSenderTopK, traceId, options);
   }
 
   async searchForSender(senderJid: string, query: string, traceId?: string): Promise<SearchResult[]> {
     return (await this.searchForSenderDetailed(senderJid, query, traceId)).results;
   }
 
-  async searchSelfFactsDetailed(query: string, traceId?: string): Promise<PineconeSearchDetails> {
-    return this.searchByFieldDetailed(query, 'memory_type', 'self_fact', config.pineconeSelfFactTopK, traceId);
+  async searchSelfFactsDetailed(
+    query: string,
+    traceId?: string,
+    options?: ContextLegOptions,
+  ): Promise<PineconeSearchDetails> {
+    return this.searchByFieldDetailed(query, 'memory_type', 'self_fact', config.pineconeSelfFactTopK, traceId, options);
   }
 
   async searchSelfFacts(query: string, traceId?: string): Promise<SearchResult[]> {
