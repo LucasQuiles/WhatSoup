@@ -123,24 +123,29 @@ function longLivedChildWritingPid(pidFile: string): string[] {
 /**
  * Teardown for a fixture process, leader or member, whose pid the fixture writes. It waits within
  * a bound for the pid file, kills the process unless it is already gone (exited, or a zombie), then
- * waits within waitForPidGone's own bound. A pid file that never appears is never read as gone.
- * `liveGroupTargets` are group ids the kill seam recorded while a member was alive: they are killed
- * first as a backstop, and must be gone too. It never waits on the run.
+ * waits within waitForPidGone's own bound. `liveGroupTargets` are group ids the kill seam recorded
+ * while a member was alive: they are killed first as a backstop, and must be gone too. A pid file
+ * that never appears counts as gone only when at least one such group was recorded and every one
+ * is proven gone: a leader killed before it wrote its pid leads its group and never leaves it.
+ * Otherwise a missing pid file is never read as gone. It never waits on the run.
  */
 async function endFixtureMember(pidFile: string, liveGroupTargets: readonly number[] = []): Promise<boolean> {
   reapFixtureGroups(liveGroupTargets);
   const pid = await waitForFixturePid(pidFile);
-  let gone = false;
+  let pidGone = false;
   if (pid !== undefined) {
     if (!(await waitForPidGone(pid, 0))) {
       try { process.kill(pid, 'SIGKILL'); } catch { /* it exited meanwhile */ }
     }
-    gone = await waitForPidGone(pid);
+    pidGone = await waitForPidGone(pid);
   }
-  for (const target of new Set(liveGroupTargets)) {
-    if (target < -1 && !(await waitForPidGone(target))) gone = false;
+  const groups = [...new Set(liveGroupTargets)].filter((target) => target < -1);
+  let groupsGone = true;
+  for (const target of groups) {
+    if (!(await waitForPidGone(target))) groupsGone = false;
   }
-  return gone;
+  if (pid === undefined) return groups.length > 0 && groupsGone;
+  return pidGone && groupsGone;
 }
 
 /** The teardown fields that do not depend on whether SIGTERM or SIGKILL ended the child. */

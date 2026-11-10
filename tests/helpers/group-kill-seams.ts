@@ -113,9 +113,11 @@ export function readFixturePid(pidFile: string): number | undefined {
 }
 
 /**
- * Structured timing exemption (test-integrity `js-sleep-in-test`): a fixture writes its pid on the
- * kernel's schedule, so a slow start can leave the file missing when teardown begins. This polls
- * within its own bound and returns undefined if the pid never appears.
+ * Bounded polling, not a fixed sleep: a fixture writes its pid on the kernel's schedule, so a slow
+ * start can leave the file missing when teardown begins. This checks every 20 ms, stops as soon as
+ * the pid appears, and returns undefined once its own bound passes. It needs no timing exemption:
+ * the test-integrity `js-sleep-in-test` rule scans only the bodies of `it` and `test` blocks, and
+ * this helper sits outside any test block.
  */
 export async function waitForFixturePid(pidFile: string, boundMs = 1_000): Promise<number | undefined> {
   const deadline = Date.now() + boundMs;
