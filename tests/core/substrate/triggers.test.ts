@@ -9,7 +9,7 @@ import {
   createTrigger, listTriggers, pauseTrigger, extendTrigger, resumeTrigger,
   validateTriggerSpec, dueTriggers, isSafeSqliteSql, prepareTrigger,
   normalizeFireAtSeconds, MAX_REASONABLE_FIRE_AT_SEC,
-  countPastDueTriggers, DEFAULT_TRIGGER_PAST_DUE_GRACE_SEC,
+  countPastDueTriggers, DEFAULT_TRIGGER_PAST_DUE_GRACE_SEC, TRIGGER_BUDGETS,
 } from '../../../src/core/substrate/triggers.ts';
 import { nextCronRun } from '../../../src/core/cron.ts';
 import { fakeClock } from '../../../src/lib/clock.ts';
@@ -27,6 +27,105 @@ describe('triggers core', () => {
     expect(() => validateTriggerSpec('schedule.cron', {})).toThrow();
     expect(() => validateTriggerSpec('poll.email', { source: 'gmail' })).not.toThrow();
     expect(() => validateTriggerSpec('poll.email', {})).toThrow();
+  });
+
+  it('rejects an over-budget SQLite statement before persistence while accepting the exact byte boundary', () => {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'sql budget', ownerJid: 'mw', actor: 'user' });
+    const sqlAtLimit = `SELECT 1 /*${'x'.repeat(4_096 - 'SELECT 1 /**/'.length)}*/`;
+    const sqlOverLimit = `${sqlAtLimit}x`;
+    expect(Buffer.byteLength(sqlAtLimit, 'utf8')).toBe(4_096);
+
+    expect(() => createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: sqlAtLimit, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net', actor: 'user',
+    })).not.toThrow();
+
+    expect(() => createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: sqlOverLimit, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net', actor: 'user',
+    })).toThrow(/resource budget/i);
+    expect(listTriggers(db.raw, { kind: 'poll.sqlite' })).toHaveLength(1);
+  });
+
+  it('rejects regex forms whose execution cost cannot be bounded', () => {
+    expect(() => validateTriggerSpec('poll.email', {
+      source: 'gmail', subject_regex: '(?<=a)b',
+    })).toThrow(/regex/i);
+    expect(() => validateTriggerSpec('poll.email', {
+      source: 'gmail', subject_regex: '^invoice-[0-9]+$',
+    })).not.toThrow();
+  });
+
+  it('rejects a CSS-escaped nested-content selector at admission', () => {
+    expect(() => validateTriggerSpec('poll.url', {
+      url: 'https://example.com/price',
+      hash_mode: 'selector',
+      selector: ':ha\\73(*)',
+    })).toThrow(/selector/i);
+  });
+
+  it('accepts a CSS-escaped structural selector at admission', () => {
+    expect(() => validateTriggerSpec('poll.url', {
+      url: 'https://example.com/price',
+      hash_mode: 'selector',
+      selector: '#pri\\63 e',
+    })).not.toThrow();
+  });
+
+  it('applies the RE2 byte and syntax contract to event.message regexes', () => {
+    const atBoundary = '😀'.repeat(128);
+    const overBoundary = `${atBoundary}😀`;
+    expect(Buffer.byteLength(atBoundary, 'utf8')).toBe(TRIGGER_BUDGETS.maxRegexBytes);
+    expect(Buffer.byteLength(overBoundary, 'utf8')).toBe(TRIGGER_BUDGETS.maxRegexBytes + 4);
+
+    expect(() => validateTriggerSpec('event.message', {
+      match: 'regex', value: atBoundary,
+    })).not.toThrow();
+    expect(() => validateTriggerSpec('event.message', {
+      match: 'regex', value: '(?<=a)b',
+    })).toThrow(/regex/i);
+    expect(() => validateTriggerSpec('event.message', {
+      match: 'regex', value: '(a)\\1',
+    })).toThrow(/regex/i);
+    expect(() => validateTriggerSpec('event.message', {
+      match: 'regex', value: overBoundary,
+    })).toThrow(/budget|regex/i);
+  });
+
+  it('measures report targets in UTF-8 bytes, accepting the exact boundary and rejecting one more code point', () => {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'utf8 report target', ownerJid: 'mw', actor: 'user' });
+    const exact = '😀'.repeat(128);
+    const over = `${exact}😀`;
+    expect(Buffer.byteLength(exact, 'utf8')).toBe(512);
+    expect(Buffer.byteLength(over, 'utf8')).toBe(516);
+
+    expect(() => createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.email', spec: { source: 'gmail' },
+      reportChatJid: exact, actor: 'user',
+    })).not.toThrow();
+    expect(() => createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.email', spec: { source: 'gmail' },
+      reportChatJid: over, actor: 'user',
+    })).toThrow(/resource budget/i);
+  });
+
+  it('refuses to resume a paused legacy trigger whose persisted dedupe key exceeds its budget', () => {
+    const clock = fakeClock(2_000_000_000_000);
+    const now = clock.nowUnixSec();
+    const bead = createBead(db.raw, { kind: 'agent_job', title: 'resume root budget', ownerJid: 'mw', actor: 'user' }, clock);
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.at_time', spec: { fire_at: now + 3600 },
+      reportChatJid: 'admin@s.whatsapp.net', dedupeKey: 'safe', actor: 'user',
+    }, clock);
+    pauseTrigger(db.raw, t.id, { actor: 'user' }, clock);
+    db.raw.prepare('UPDATE bead_triggers SET dedupe_key = ? WHERE id = ?').run(
+      '😀'.repeat((TRIGGER_BUDGETS.maxDedupeKeyBytes / 4) + 1), t.id,
+    );
+
+    expect(() => resumeTrigger(db.raw, t.id, { actor: 'user', maxTtlHours: 72 }, clock))
+      .toThrow(/resource budget/i);
   });
 
   it('createTrigger writes row + trigger_created event', () => {
@@ -98,6 +197,18 @@ describe('triggers core', () => {
     createTrigger(db.raw, { beadId: b.id, kind: 'poll.url', spec: { url: 'https://x.example.com', hash_mode: 'text' }, reportChatJid: 'c', actor: 'u' });
     expect(listTriggers(db.raw, { beadId: a.id })).toHaveLength(1);
     expect(listTriggers(db.raw, { kind: 'poll.url' })).toHaveLength(1);
+  });
+
+  it.each([
+    { boundary: 'row count', rows: 51, spec: '{}' },
+    { boundary: 'response bytes', rows: 3, spec: '\u0001'.repeat(8_192) },
+  ])('listTriggers refuses a partial inventory at the $boundary limit', ({ rows, spec }) => {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'bounded inventory', ownerJid: 'mw', actor: 'user' });
+    const insert = db.raw.prepare(`INSERT INTO bead_triggers
+      (bead_id, kind, spec_json, report_chat_jid, created_at, updated_at)
+      VALUES (?, 'schedule.at', ?, 'report', 1, 1)`);
+    for (let i = 0; i < rows; i += 1) insert.run(bead.id, spec);
+    expect(() => listTriggers(db.raw, { beadId: bead.id })).toThrow(/pagination_required/);
   });
 
   it('listTriggers supports unfiltered and status-only reads', () => {
@@ -480,15 +591,51 @@ describe('poll.sqlite SQL safety guard (#1096)', () => {
   });
 
   it('QR-026: isSafeSqliteSql rejects recursive CTEs (unbounded-CPU vector under query_only)', () => {
-    // A count/aggregate over a recursive CTE returns ONE row → the poller row-cap can't
-    // bound it, and node:sqlite DatabaseSync has no statement-time interrupt → whole-process
-    // freeze. Reject at validation so it never executes.
+    // A recursive aggregate returns one row, so the row cap cannot bound its work.
+    // Explicit recursion is rejected before sending a query to the isolated worker.
     expect(
       isSafeSqliteSql('WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM r WHERE x<1000000000) SELECT count(*) FROM r'),
     ).toBe(false);
     expect(isSafeSqliteSql('with recursive cnt(n) as (select 1 union all select n+1 from cnt) select n from cnt')).toBe(false);
-    // A NON-recursive CTE remains allowed — only the recursive keyword is the CPU vector.
+    // Ordinary CTEs remain allowed; the worker also rejects implicit recursion.
     expect(isSafeSqliteSql('WITH recent AS (SELECT id FROM messages LIMIT 10) SELECT * FROM recent')).toBe(true);
+  });
+
+  it.each([
+    'SELECT (WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 3) SELECT count(*) FROM r)',
+    'SELECT count(*) FROM (WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 3) SELECT x FROM r)',
+    'SELECT 1 WHERE EXISTS (WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 3) SELECT x FROM r)',
+    'WITH outer_cte AS (SELECT (WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 3) SELECT count(*) FROM r)) SELECT * FROM outer_cte',
+    'SELECT (WITH /* separated keywords */ ReCuRsIvE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 3) SELECT count(*) FROM r)',
+  ])('rejects recursive clauses at nested admission boundaries: %s', (sql) => {
+    expect(isSafeSqliteSql(sql)).toBe(false);
+    expect(() => validateTriggerSpec('poll.sqlite', { sql, fire_when: 'rows_returned' })).toThrow();
+  });
+
+  it.each([
+    "SELECT 'WITH RECURSIVE' AS note /* WITH RECURSIVE */",
+    'WITH "recursive" AS (SELECT 1 AS x) SELECT x FROM "recursive"',
+    'SELECT (WITH ordinary AS (SELECT 1 AS x) SELECT x FROM ordinary)',
+    'SELECT with + recursive FROM keyword_columns',
+    'SELECT with recursive FROM keyword_columns',
+    'SELECT abs(with + recursive) FROM keyword_columns',
+  ])('preserves inert recursive text and ordinary nested queries: %s', (sql) => {
+    expect(isSafeSqliteSql(sql)).toBe(true);
+    expect(() => validateTriggerSpec('poll.sqlite', { sql, fire_when: 'rows_returned' })).not.toThrow();
+  });
+
+  it('allows a read-only WITH query but rejects every data-changing outer statement', () => {
+    expect(isSafeSqliteSql('WITH recent AS (SELECT id FROM messages) SELECT id FROM recent')).toBe(true);
+    expect(isSafeSqliteSql("SELECT 'DELETE FROM x' AS note /* INSERT INTO x */")).toBe(true);
+    for (const sql of [
+      'WITH recent AS (SELECT 1) INSERT INTO messages(id) SELECT * FROM recent',
+      'WITH recent AS (SELECT 1) UPDATE messages SET id = 2',
+      'WITH recent AS (SELECT 1) DELETE FROM messages',
+      'WITH recent AS (SELECT 1) REPLACE INTO messages(id) SELECT * FROM recent',
+      'WITH recent AS (SELECT 1) CREATE TABLE copied AS SELECT * FROM recent',
+    ]) {
+      expect(isSafeSqliteSql(sql)).toBe(false);
+    }
   });
 
   it('validateTriggerSpec rejects a poll.sqlite spec with ATTACH', () => {

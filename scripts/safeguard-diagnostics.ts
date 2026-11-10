@@ -1040,6 +1040,11 @@ function qualityCiLanePartitionFailures(text: string): string[] {
   ]);
 
   const macos = asRecord(jobs?.['bot-errors-health-macos']);
+  // GitHub refuses the retired macos-14 image (jobs are cancelled, not failed),
+  // and a floating label such as macos-latest can silently change the proof host.
+  if (macos?.['runs-on'] !== 'macos-15') {
+    failures.push('bot-errors-health-macos runs-on must be exactly macos-15');
+  }
   const macosSteps = Array.isArray(macos?.steps) ? macos.steps.map(asRecord).filter(Boolean) as Record<string, unknown>[] : [];
   const macosPortableRun = 'npm test -- tests/helpers/python-interpreter.test.ts tests/scripts/bot-errors-python-atomic-write-guard.test.ts tests/scripts/bot-errors-release-proof-installer.test.ts tests/scripts/bot-errors-release-proof-run.test.ts --pool=forks --maxWorkers=1';
   if (exactRunCount(macosSteps, macosPortableRun) !== 1) {

@@ -17,7 +17,8 @@ import { constants as sqliteConstants } from 'node:sqlite';
 import { Database } from '../../../src/core/database.ts';
 import { createBead } from '../../../src/core/substrate/beads.ts';
 import { createTrigger } from '../../../src/core/substrate/triggers.ts';
-import { TriggerPoller, toBindArgs } from '../../../src/core/substrate/poller.ts';
+import { TRIGGER_BUDGETS } from '../../../src/core/substrate/trigger-budgets.ts';
+import { TriggerPoller, runIsolatedSqlite, toBindArgs } from '../../../src/core/substrate/poller.ts';
 import { fakeClock } from '../../../src/lib/clock.ts';
 import type { Messenger, SubmissionReceipt } from '../../../src/core/types.ts';
 
@@ -208,8 +209,252 @@ describe('TriggerPoller — poll.sqlite', () => {
     const runs = db.raw.prepare(`SELECT status, output_summary, output_json FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; output_summary: string; output_json: string }>;
     expect(runs).toHaveLength(1);
     expect(runs[0].status).toBe('failed');
-    expect(runs[0].output_summary).toContain('10000-row cap');
-    expect(JSON.parse(runs[0].output_json)).toMatchObject({ rowCap: 10000 });
+    expect(runs[0].output_summary).toContain('resource budget');
+    expect(JSON.parse(runs[0].output_json)).toMatchObject({ reason: 'resource_exhausted', limit: 'rows' });
+  });
+
+  it('fails closed with a redacted resource_exhausted disposition for an oversized legacy SQLite spec', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'legacy resource budget', ownerJid: 'mw', actor: 'u' });
+    const secretMarker = 'legacy-secret-must-not-persist';
+    const oversizedSql = `SELECT 1 /*${secretMarker}${'x'.repeat(4_096)}*/`;
+    const now = 1_000_000_000;
+    const info = db.raw.prepare(
+      `INSERT INTO bead_triggers (
+         bead_id, kind, spec_json, spec_version, status, interval_seconds,
+         next_fire_at, last_fire_at, terminal_at, on_terminal, report_chat_jid,
+         dedupe_key, created_at, updated_at
+       ) VALUES (?, 'poll.sqlite', ?, 1, 'active', 300, ?, NULL, NULL, 'notify', ?, NULL, ?, ?)`,
+    ).run(
+      bead.id,
+      JSON.stringify({ sql: oversizedSql, fire_when: 'rows_returned' }),
+      now,
+      'admin@s.whatsapp.net',
+      now,
+      now,
+    );
+    const triggerId = Number(info.lastInsertRowid);
+
+    await new TriggerPoller(db.raw, messenger, { now: () => now + 1 }).tickOnce();
+
+    expect(calls).toHaveLength(0);
+    const run = db.raw.prepare(
+      `SELECT status, error_kind, error_message, output_json FROM trigger_runs WHERE trigger_id = ?`,
+    ).get(triggerId) as { status: string; error_kind: string; error_message: string; output_json: string };
+    expect(run.status).toBe('failed');
+    expect(run.error_kind).toBe('resource_exhausted');
+    expect(run.error_message).not.toContain(secretMarker);
+    expect(run.output_json).not.toContain(secretMarker);
+    expect(JSON.parse(run.output_json)).toMatchObject({ reason: 'resource_exhausted' });
+  });
+
+  it('terminates and reaps a low-row high-cost SQLite child as one redacted resource result', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'bounded SQL', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec(`CREATE TABLE numbers (n INTEGER PRIMARY KEY)`);
+    const insert = db.raw.prepare(`INSERT INTO numbers (n) VALUES (?)`);
+    for (let n = 0; n < 100; n++) insert.run(n);
+    const t = createTrigger(db.raw, {
+      beadId: bead.id,
+      kind: 'poll.sqlite',
+      // One aggregate row, but a deliberately expensive non-recursive scan.
+      spec: { sql: `SELECT count(*) AS n FROM numbers a, numbers b, numbers c, numbers d`, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net', intervalSeconds: 60, nextFireAt: 1_000_000_000, actor: 'u',
+    });
+    const started = Date.now();
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      // The production executor is used; this test seam shortens only its
+      // child deadline, leaving the poller timeout long enough to persist the
+      // child's resource result rather than race it locally.
+      sqliteExecutor: (request) => runIsolatedSqlite({ ...request, timeoutMs: 75 }),
+    });
+
+    await poller.tickOnce();
+    expect(Date.now() - started).toBeLessThan(1_500);
+    expect(calls).toHaveLength(0);
+    const run = db.raw.prepare(
+      `SELECT status, error_kind, error_message, output_json FROM trigger_runs WHERE trigger_id = ?`,
+    ).get(t.id) as { status: string; error_kind: string; error_message: string; output_json: string };
+    expect(run).toMatchObject({ status: 'failed', error_kind: 'resource_exhausted', error_message: 'isolated SQLite execution exceeded its resource budget' });
+    expect(run.output_json).not.toContain('numbers');
+    expect(JSON.parse(run.output_json)).toMatchObject({ reason: 'resource_exhausted', resource: 'sqlite', limit: 'wall_time' });
+    // runIsolatedSqlite resolves only from child `close`, so this completed
+    // result proves the deadline reaped the child; a late child response has
+    // no route to add a second durable run.
+    expect(db.raw.prepare(`SELECT COUNT(*) AS n FROM trigger_runs WHERE trigger_id = ?`).get(t.id)).toMatchObject({ n: 1 });
+  });
+
+  it('counts a huge projected SQLite value without materializing it in JavaScript', async () => {
+    const result = await runIsolatedSqlite({
+      databasePath: path,
+      sql: `SELECT printf('%.*c', 3000, 120) AS body`,
+      binds: [],
+      maxRows: 1,
+      timeoutMs: 1_000,
+    });
+    expect(result).toEqual({ kind: 'ok', rowCount: 1 });
+  });
+
+  it('preserves a valid trailing SQLite line comment when nesting the admitted query', async () => {
+    await expect(runIsolatedSqlite({
+      databasePath: path,
+      sql: 'SELECT 1 -- a trailing comment remains part of the admitted query',
+      binds: [], maxRows: 1, timeoutMs: 1_000,
+    })).resolves.toEqual({ kind: 'ok', rowCount: 1 });
+  });
+
+  it('returns the exact capped row count and stops at maxRows plus one', async () => {
+    db.raw.exec('CREATE TABLE capped_rows(id INTEGER PRIMARY KEY)');
+    db.raw.prepare('INSERT INTO capped_rows DEFAULT VALUES').run();
+    db.raw.prepare('INSERT INTO capped_rows DEFAULT VALUES').run();
+    await expect(runIsolatedSqlite({
+      databasePath: path, sql: 'SELECT id FROM capped_rows', binds: [], maxRows: 2, timeoutMs: 1_000,
+    })).resolves.toEqual({ kind: 'ok', rowCount: 2 });
+    db.raw.prepare('INSERT INTO capped_rows DEFAULT VALUES').run();
+    await expect(runIsolatedSqlite({
+      databasePath: path, sql: 'SELECT id FROM capped_rows', binds: [], maxRows: 2, timeoutMs: 1_000,
+    })).resolves.toEqual({ kind: 'resource_exhausted', limit: 'rows' });
+  });
+
+  it('rejects direct isolated-worker SQL and bind budget breaches before spawning a child', async () => {
+    await expect(runIsolatedSqlite({
+      databasePath: path,
+      sql: `SELECT 1 /*${'x'.repeat(4_096)}*/`,
+      binds: [],
+      maxRows: 1,
+      timeoutMs: 1_000,
+    })).resolves.toEqual({ kind: 'resource_exhausted', limit: 'sql' });
+    await expect(runIsolatedSqlite({
+      databasePath: path,
+      sql: 'SELECT ?',
+      binds: ['x'.repeat(1_023)],
+      maxRows: 1,
+      timeoutMs: 1_000,
+    })).resolves.toEqual({ kind: 'resource_exhausted', limit: 'binds' });
+  });
+
+  it('makes the child repeat outer-statement validation for direct SQLite calls', async () => {
+    await expect(runIsolatedSqlite({
+      databasePath: path,
+      sql: 'WITH c AS (SELECT 1) DELETE FROM probes',
+      binds: [], maxRows: 1, timeoutMs: 1_000,
+    })).resolves.toEqual({ kind: 'unavailable', reason: 'exit' });
+  });
+
+  it('rejects an explicit recursive clause nested inside a direct worker request', async () => {
+    await expect(runIsolatedSqlite({
+      databasePath: path,
+      sql: 'SELECT count(*) FROM (WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 3) SELECT x FROM r)',
+      binds: [], maxRows: 1, timeoutMs: 1_000,
+    })).resolves.toEqual({ kind: 'unavailable', reason: 'exit' });
+  });
+
+  it.each([
+    'WITH r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 3) SELECT count(*) FROM r',
+    'SELECT count(*) FROM (WITH r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 3) SELECT x FROM r)',
+  ])('denies implicit recursion in the real SQLite worker: %s', async (sql) => {
+    await expect(runIsolatedSqlite({
+      databasePath: path, sql, binds: [], maxRows: 1, timeoutMs: 1_000,
+    })).resolves.toEqual({ kind: 'sql_error' });
+  });
+
+  it('denies recursion hidden in a stored view without exposing SQL details', async () => {
+    db.raw.exec('CREATE VIEW recursive_probe AS WITH r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 3) SELECT x FROM r');
+    await expect(runIsolatedSqlite({
+      databasePath: path, sql: 'SELECT count(*) FROM recursive_probe',
+      binds: [], maxRows: 1, timeoutMs: 1_000,
+    })).resolves.toEqual({ kind: 'sql_error' });
+  });
+
+  it('executes an ordinary nested CTE with a quoted recursive identifier', async () => {
+    await expect(runIsolatedSqlite({
+      databasePath: path,
+      sql: 'SELECT x FROM (WITH "recursive" AS (SELECT 1 AS x UNION ALL SELECT 2) SELECT x FROM "recursive")',
+      binds: [], maxRows: 2, timeoutMs: 1_000,
+    })).resolves.toEqual({ kind: 'ok', rowCount: 2 });
+  });
+
+  it.each([
+    ['SELECT with + recursive FROM keyword_columns', []],
+    ['SELECT with recursive FROM keyword_columns', []],
+    ['SELECT abs(with + recursive) FROM keyword_columns WHERE "with" + "recursive" = ?; -- terminal comment', [3]],
+  ] as const)('executes ordinary keyword identifiers without treating them as a recursive clause: %s', async (sql, binds) => {
+    db.raw.exec('CREATE TABLE keyword_columns ("with" INTEGER, "recursive" INTEGER); INSERT INTO keyword_columns VALUES (1, 2)');
+    await expect(runIsolatedSqlite({
+      databasePath: path, sql, binds: [...binds], maxRows: 1, timeoutMs: 1_000,
+    })).resolves.toEqual({ kind: 'ok', rowCount: 1 });
+  });
+
+  it('fails closed before execution when no durable main database location exists', async () => {
+    const { messenger } = makeMessenger();
+    const memory = new Database(':memory:');
+    memory.open();
+    try {
+      const bead = createBead(memory.raw, { kind: 'watch', title: 'memory location', ownerJid: 'mw', actor: 'u' });
+      const t = createTrigger(memory.raw, {
+        beadId: bead.id, kind: 'poll.sqlite',
+        spec: { sql: `SELECT 1`, fire_when: 'rows_returned' },
+        reportChatJid: 'admin@s.whatsapp.net', nextFireAt: 1_000_000_000, actor: 'u',
+      });
+      const executor = vi.fn(async () => ({ kind: 'ok' as const, rowCount: 1 }));
+      await new TriggerPoller(memory.raw, messenger, { now: () => 1_000_000_001, sqliteExecutor: executor }).tickOnce();
+      expect(executor).not.toHaveBeenCalled();
+      const run = memory.raw.prepare(`SELECT error_kind, output_json FROM trigger_runs WHERE trigger_id = ?`).get(t.id) as { error_kind: string; output_json: string };
+      expect(run).toMatchObject({ error_kind: 'sqlite_worker_unavailable' });
+      expect(JSON.parse(run.output_json)).toEqual({ reason: 'sqlite_worker_unavailable' });
+    } finally {
+      memory.close();
+    }
+  });
+
+  it('rejects empty, in-memory, and relative isolated-worker locations without spawning SQLite', async () => {
+    for (const databasePath of ['', ':memory:', 'relative.db']) {
+      await expect(runIsolatedSqlite({
+        databasePath, sql: 'SELECT 1', binds: [], maxRows: 1, timeoutMs: 1_000,
+      })).resolves.toEqual({ kind: 'unavailable', reason: 'location' });
+    }
+  });
+
+  it('revalidates restored report targets and dedupe keys before execution, retry, or automatic pause', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'legacy root fields', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec('CREATE TABLE legacy_root_rows(id INTEGER PRIMARY KEY)');
+    for (const [column, value] of [
+      ['report_chat_jid', '😀'.repeat((TRIGGER_BUDGETS.maxReportTargetBytes / 4) + 1)],
+      ['dedupe_key', '😀'.repeat((TRIGGER_BUDGETS.maxDedupeKeyBytes / 4) + 1)],
+      ['report_chat_jid', Buffer.from('private-target')],
+      ['dedupe_key', Buffer.from('private-key')],
+    ] as const) {
+      const t = createTrigger(db.raw, {
+        beadId: bead.id, kind: 'poll.sqlite',
+        spec: { sql: 'SELECT id FROM legacy_root_rows', fire_when: 'rows_returned' },
+        reportChatJid: 'admin@s.whatsapp.net',
+        intervalSeconds: 60, nextFireAt: 1_000_000_000, actor: 'u',
+      });
+      db.raw.prepare(`UPDATE bead_triggers SET ${column} = ? WHERE id = ?`).run(value, t.id);
+    }
+    const executor = vi.fn(async () => ({ kind: 'ok' as const, rowCount: 1 }));
+    let now = 1_000_000_001;
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => now, sqliteExecutor: executor });
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await poller.tickOnce();
+      now += 120;
+    }
+    expect(db.raw.prepare('SELECT status, next_fire_at FROM bead_triggers WHERE bead_id = ?').all(bead.id))
+      .toEqual(Array.from({ length: 4 }, () => ({ status: 'paused', next_fire_at: null })));
+    await poller.tickOnce();
+
+    expect(executor).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(0);
+    const runs = db.raw.prepare(
+      `SELECT error_kind, output_json FROM trigger_runs WHERE bead_id = ? ORDER BY id`,
+    ).all(bead.id) as Array<{ error_kind: string; output_json: string }>;
+    expect(runs).toHaveLength(20);
+    for (const run of runs) {
+      expect(run.error_kind).toBe('resource_exhausted');
+      expect(run.output_json).toBe('{"kind":"poll.sqlite","reason":"resource_exhausted"}');
+    }
   });
 
   it('fire_when=rowcount_changed: first run with 0 rows is noop, count increase fires, stable count noops', async () => {
@@ -267,7 +512,7 @@ describe('TriggerPoller — poll.sqlite', () => {
     const runs = db.raw.prepare(`SELECT status, error_kind, error_message FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; error_kind: string; error_message: string }>;
     expect(runs[0].status).toBe('failed');
     expect(runs[0].error_kind).toBe('sql_error');
-    expect(runs[0].error_message).toMatch(/table_that_does_not_exist|no such table/i);
+    expect(runs[0].error_message).toBe('isolated SQLite query failed');
 
     const refreshed = db.raw.prepare(`SELECT next_fire_at FROM bead_triggers WHERE id = ?`).get(t.id) as { next_fire_at: number };
     // FAILED_RETRY_COOLDOWN_SEC = 60. interval_seconds is 300. If the
@@ -348,7 +593,7 @@ describe('TriggerPoller — poll.sqlite', () => {
     expect(JSON.parse(runs[0].output_json)).toMatchObject({ kind: 'poll.sqlite' });
   });
 
-  it('legacy unsafe SQL specs are rejected by the runtime guard before query_only runs', () => {
+  it('legacy unsafe SQL specs are rejected by the runtime guard before isolated execution', async () => {
     const { messenger, calls } = makeMessenger();
     const bead = createBead(db.raw, { kind: 'watch', title: 'unsafe sql', ownerJid: 'mw', actor: 'u' });
     db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY)`);
@@ -361,17 +606,17 @@ describe('TriggerPoller — poll.sqlite', () => {
     });
     const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 });
     const outcome = (poller as unknown as {
-      executeSqlite(trigger: typeof t, spec: { sql: string; fire_when: 'rows_returned' }): {
+      executeSqlite(trigger: typeof t, spec: { sql: string; fire_when: 'rows_returned' }): Promise<{
         status: string;
         fired: boolean;
         outputSummary: string;
         outputJson: Record<string, unknown>;
         errorKind?: string;
-      };
+      }>;
     }).executeSqlite(t, { sql: 'PRAGMA user_version', fire_when: 'rows_returned' });
 
     expect(calls).toHaveLength(0);
-    expect(outcome).toMatchObject({
+    await expect(outcome).resolves.toMatchObject({
       status: 'failed',
       fired: false,
       outputSummary: 'unsafe SQL rejected',
@@ -658,6 +903,68 @@ describe('TriggerPoller — agent_job dispatch', () => {
     expect(refreshed.next_fire_at).toBeGreaterThan(1_000_000_001);
   });
 
+  it('does not persist a dispatcher success detail or create a second occurrence', async () => {
+    const { messenger } = makeMessenger();
+    const secret = `AGENT_JOB_SUCCESS_DETAIL_SECRET_${'s'.repeat(12_000)}`;
+    const bead = createBead(db.raw, {
+      kind: 'agent_job', title: 'job', body: 'do the thing', ownerJid: 'mw', actor: 'u',
+    });
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron', spec: { expr: '* * * * *' },
+      reportChatJid: 'report@g.us', nextFireAt: 1_000_000_000, actor: 'u',
+    });
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      agentJobDispatch: () => ({ dispatched: true, detail: secret }),
+    });
+
+    await poller.tickOnce();
+    await poller.tickOnce();
+
+    const runs = db.raw.prepare(
+      'SELECT output_summary, output_json, error_message FROM trigger_runs WHERE trigger_id = ?',
+    ).all(t.id) as Array<{ output_summary: string; output_json: string; error_message: string | null }>;
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      output_summary: 'agent job dispatched — accepted',
+      output_json: '{"kind":"schedule.cron","agentJob":true,"dispatch":"accepted"}',
+      error_message: null,
+    });
+    expect(JSON.stringify(runs[0])).not.toContain(secret);
+    expect(Buffer.byteLength(JSON.stringify(runs[0]), 'utf8')).toBeLessThan(512);
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM trigger_occurrences WHERE trigger_id = ?').get(t.id))
+      .toMatchObject({ count: 1 });
+  });
+
+  it('fails closed before dispatch when a restored agent-job title or body exceeds its budget', async () => {
+    const { messenger, calls } = makeMessenger();
+    const dispatched = vi.fn(() => ({ dispatched: true }));
+    const bead = createBead(db.raw, {
+      kind: 'agent_job', title: 'safe title', body: 'safe body', ownerJid: 'mw', actor: 'u',
+    });
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron', spec: { expr: '* * * * *' },
+      reportChatJid: 'report@g.us', nextFireAt: 1_000_000_000, actor: 'u',
+    });
+    db.raw.prepare('UPDATE beads SET title = ?, body = ? WHERE id = ?').run(
+      '😀'.repeat((TRIGGER_BUDGETS.maxTitleBytes / 4) + 1),
+      '😀'.repeat((TRIGGER_BUDGETS.maxPromptBytes / 4) + 1),
+      bead.id,
+    );
+    await new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      agentJobDispatch: dispatched,
+    }).tickOnce();
+
+    expect(dispatched).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(0);
+    const run = db.raw.prepare(
+      'SELECT status, error_kind, output_json FROM trigger_runs WHERE trigger_id = ?',
+    ).get(t.id) as { status: string; error_kind: string; output_json: string };
+    expect(run).toMatchObject({ status: 'failed', error_kind: 'resource_exhausted' });
+    expect(run.output_json).toBe('{"kind":"schedule.cron","agentJob":true,"reason":"resource_exhausted"}');
+  });
+
   it('fails CLOSED with an alert when no dispatcher is wired (never a silent cron tick)', async () => {
     const { messenger, calls } = makeMessenger();
     const bead = createBead(db.raw, {
@@ -701,10 +1008,125 @@ describe('TriggerPoller — agent_job dispatch', () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0].text).toContain('FAILED');
-    expect(calls[0].text).toContain('queue full');
-    const runs = db.raw.prepare(`SELECT status, error_kind FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; error_kind: string }>;
+    expect(calls[0].text).not.toContain('queue full');
+    const runs = db.raw.prepare(
+      'SELECT status, error_kind, output_summary, output_json, error_message FROM trigger_runs WHERE trigger_id = ?',
+    ).all(t.id) as Array<{
+      status: string; error_kind: string; output_summary: string; output_json: string; error_message: string | null;
+    }>;
     expect(runs[0].status).toBe('failed');
     expect(runs[0].error_kind).toBe('agent_job_enqueue_rejected');
+    expect(runs[0]).toMatchObject({
+      output_summary: 'agent job dispatch FAILED — enqueue rejected',
+      error_message: 'agent-job dispatcher rejected enqueue',
+    });
+    expect(JSON.parse(runs[0].output_json)).toMatchObject({ agentJob: true, reason: 'agent_job_enqueue_rejected' });
+  });
+
+  it('does not persist a dispatcher rejection detail or retry the claimed occurrence', async () => {
+    const { messenger } = makeMessenger();
+    const secret = `AGENT_JOB_REJECTION_DETAIL_SECRET_${'r'.repeat(12_000)}`;
+    const bead = createBead(db.raw, {
+      kind: 'agent_job', title: 'job', body: 'do the thing', ownerJid: 'mw', actor: 'u',
+    });
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron', spec: { expr: '* * * * *' },
+      reportChatJid: 'report@g.us', nextFireAt: 1_000_000_000, actor: 'u',
+    });
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      agentJobDispatch: () => ({ dispatched: false, detail: secret }),
+    });
+
+    await poller.tickOnce();
+    await poller.tickOnce();
+
+    const runs = db.raw.prepare(
+      'SELECT output_summary, output_json, error_message FROM trigger_runs WHERE trigger_id = ?',
+    ).all(t.id) as Array<{ output_summary: string; output_json: string; error_message: string | null }>;
+    expect(runs).toHaveLength(1);
+    expect(JSON.stringify(runs[0])).not.toContain(secret);
+    expect(Buffer.byteLength(JSON.stringify(runs[0]), 'utf8')).toBeLessThan(512);
+    expect(runs[0]).toMatchObject({
+      output_summary: 'agent job dispatch FAILED — enqueue rejected',
+      error_message: 'agent-job dispatcher rejected enqueue',
+    });
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM trigger_occurrences WHERE trigger_id = ?').get(t.id))
+      .toMatchObject({ count: 1 });
+  });
+
+  it('does not persist a thrown dispatcher error text or retry the claimed occurrence', async () => {
+    const { messenger } = makeMessenger();
+    const secret = `AGENT_JOB_THROW_DETAIL_SECRET_${'t'.repeat(12_000)}`;
+    const bead = createBead(db.raw, {
+      kind: 'agent_job', title: 'job', body: 'do the thing', ownerJid: 'mw', actor: 'u',
+    });
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron', spec: { expr: '* * * * *' },
+      reportChatJid: 'report@g.us', nextFireAt: 1_000_000_000, actor: 'u',
+    });
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      agentJobDispatch: () => { throw new Error(secret); },
+    });
+
+    await poller.tickOnce();
+    await poller.tickOnce();
+
+    const runs = db.raw.prepare(
+      'SELECT output_summary, output_json, error_message FROM trigger_runs WHERE trigger_id = ?',
+    ).all(t.id) as Array<{ output_summary: string; output_json: string; error_message: string | null }>;
+    expect(runs).toHaveLength(1);
+    expect(JSON.stringify(runs[0])).not.toContain(secret);
+    expect(Buffer.byteLength(JSON.stringify(runs[0]), 'utf8')).toBeLessThan(512);
+    expect(runs[0]).toMatchObject({
+      output_summary: 'agent job dispatch FAILED — unavailable',
+      error_message: 'agent-job dispatcher threw',
+    });
+    expect(JSON.parse(runs[0].output_json)).toMatchObject({ agentJob: true, reason: 'agent_job_dispatch_threw' });
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM trigger_occurrences WHERE trigger_id = ?').get(t.id))
+      .toMatchObject({ count: 1 });
+  });
+
+  it('contains a dispatcher result accessor throw before durable finalization', async () => {
+    const { messenger, calls } = makeMessenger();
+    const secret = `AGENT_JOB_PROXY_ACCESSOR_SECRET_${'p'.repeat(12_000)}`;
+    const bead = createBead(db.raw, {
+      kind: 'agent_job', title: 'job', body: 'do the thing', ownerJid: 'mw', actor: 'u',
+    });
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron', spec: { expr: '* * * * *' },
+      reportChatJid: 'report@g.us', nextFireAt: 1_000_000_000, actor: 'u',
+    });
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      agentJobDispatch: () => new Proxy({ dispatched: false }, {
+        get(target, property, receiver) {
+          if (property === 'dispatched') throw new Error(secret);
+          return Reflect.get(target, property, receiver);
+        },
+      }),
+    });
+
+    await poller.tickOnce();
+    await poller.tickOnce();
+
+    const runs = db.raw.prepare(
+      'SELECT output_summary, output_json, error_message, error_kind FROM trigger_runs WHERE trigger_id = ?',
+    ).all(t.id) as Array<{
+      output_summary: string; output_json: string; error_message: string | null; error_kind: string;
+    }>;
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      output_summary: 'agent job dispatch FAILED — unavailable',
+      error_message: 'agent-job dispatcher threw',
+      error_kind: 'agent_job_dispatch_threw',
+    });
+    expect(JSON.stringify(runs[0])).not.toContain(secret);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].text).not.toContain(secret);
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM trigger_occurrences WHERE trigger_id = ?').get(t.id))
+      .toMatchObject({ count: 1 });
   });
 
   it('repeated cron dispatch failures alert every fire and never silently auto-pause', async () => {
@@ -800,6 +1222,75 @@ describe('TriggerPoller — terminal_at expiry', () => {
 
     const eventKinds = (db.raw.prepare(`SELECT event_type FROM bead_events WHERE bead_id = ?`).all(bead.id) as Array<{ event_type: string }>).map(e => e.event_type);
     expect(eventKinds).toContain('trigger_expired');
+  });
+
+  it('batchSize=0 expires terminal rows without dispatching due work', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'expiry-only', ownerJid: 'mw', actor: 'u' });
+    const expired = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.email', spec: { source: 'gmail' },
+      reportChatJid: 'admin@s.whatsapp.net', intervalSeconds: 60,
+      nextFireAt: 1_000_000_000, requestedTerminalAt: 999_999_999,
+      onTerminal: 'silent', actor: 'u',
+    });
+    const due = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.email', spec: { source: 'gmail' },
+      reportChatJid: 'admin@s.whatsapp.net', intervalSeconds: 60,
+      nextFireAt: 1_000_000_000, actor: 'u',
+    });
+
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      batchSize: 0,
+    });
+    expect(await poller.tickOnce()).toBe(1);
+
+    expect(calls).toHaveLength(0);
+    expect(db.raw.prepare(`SELECT status FROM bead_triggers WHERE id = ?`).get(expired.id))
+      .toMatchObject({ status: 'expired' });
+    expect(db.raw.prepare(`SELECT status FROM bead_triggers WHERE id = ?`).get(due.id))
+      .toMatchObject({ status: 'active' });
+    expect(db.raw.prepare(`SELECT status FROM trigger_runs WHERE trigger_id = ?`).all(expired.id))
+      .toMatchObject([{ status: 'terminal_fired' }]);
+    expect(db.raw.prepare(`SELECT id FROM trigger_runs WHERE trigger_id = ?`).all(due.id))
+      .toEqual([]);
+  });
+
+  it('batchSize=0 keeps expiry-only work within the bounded page', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, {
+      kind: 'watch',
+      title: 'bounded-expiry-only',
+      ownerJid: 'mw',
+      actor: 'u',
+    });
+    for (let index = 0; index <= TRIGGER_BUDGETS.maxBatchSize; index++) {
+      createTrigger(db.raw, {
+        beadId: bead.id,
+        kind: 'poll.email',
+        spec: { source: 'gmail' },
+        reportChatJid: 'admin@s.whatsapp.net',
+        intervalSeconds: 60,
+        nextFireAt: 1_000_000_000,
+        requestedTerminalAt: 999_999_999,
+        onTerminal: 'silent',
+        actor: 'u',
+      });
+    }
+
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      batchSize: 0,
+    });
+    expect(await poller.tickOnce()).toBe(TRIGGER_BUDGETS.maxBatchSize);
+    expect(calls).toHaveLength(0);
+
+    const states = db.raw.prepare(
+      'SELECT status FROM bead_triggers WHERE bead_id = ?',
+    ).all(bead.id) as Array<{ status: string }>;
+    expect(states.filter((row) => row.status === 'expired'))
+      .toHaveLength(TRIGGER_BUDGETS.maxBatchSize);
+    expect(states.filter((row) => row.status === 'active')).toHaveLength(1);
   });
 
   it("on_terminal='reopen_bead' reactivates a terminal bead at expiry", async () => {
@@ -971,6 +1462,29 @@ describe('TriggerPoller — not-yet-implemented kinds', () => {
     // and the row stays active (it TTL-expires via the sweep, not here).
     const refreshed = db.raw.prepare(`SELECT status, next_fire_at FROM bead_triggers WHERE id = ?`).get(t.id) as { status: string; next_fire_at: number | null };
     expect(refreshed).toMatchObject({ status: 'active', next_fire_at: null });
+  });
+
+  it('records a redacted resource result for a restored event.message regex over its byte budget', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'msg regex budget', ownerJid: 'mw', actor: 'u' });
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'event.message',
+      spec: { match: 'regex', value: '^urgent$' },
+      reportChatJid: 'admin@s.whatsapp.net', actor: 'u',
+    });
+    db.raw.prepare('UPDATE bead_triggers SET spec_json = ?, next_fire_at = ? WHERE id = ?').run(
+      JSON.stringify({ match: 'regex', value: '😀'.repeat((TRIGGER_BUDGETS.maxRegexBytes / 4) + 1) }),
+      1_000_000_000,
+      t.id,
+    );
+    await new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 }).tickOnce();
+
+    expect(calls).toHaveLength(0);
+    const run = db.raw.prepare(
+      'SELECT error_kind, output_json FROM trigger_runs WHERE trigger_id = ?',
+    ).get(t.id) as { error_kind: string; output_json: string };
+    expect(run).toMatchObject({ error_kind: 'resource_exhausted' });
+    expect(run.output_json).toBe('{"kind":"event.message","reason":"resource_exhausted"}');
   });
 });
 
@@ -1715,6 +2229,7 @@ describe('TriggerPoller — circuit breaker', () => {
     const poller = new TriggerPoller(db.raw, messenger, {
       now: () => now,
       maxConsecutiveFailures: 2,
+      sqliteExecutor: async () => ({ kind: 'sql_error' }),
     });
 
     // Failure 1 — trigger still active, next_fire_at bumped by FAILED_RETRY_COOLDOWN_SEC.
@@ -1774,6 +2289,7 @@ describe('TriggerPoller — circuit breaker', () => {
     const poller = new TriggerPoller(db.raw, messenger, {
       now: () => now,
       maxConsecutiveFailures: 2,
+      sqliteExecutor: async () => ({ kind: 'sql_error' }),
     });
 
     await poller.tickOnce();
@@ -1838,32 +2354,24 @@ describe('TriggerPoller — read-only SQL guard', () => {
   beforeEach(() => { path = tmpFile(); db = new Database(path); db.open(); });
   afterEach(() => { db.close(); if (existsSync(path)) unlinkSync(path); });
 
-  it('rejects DELETE statements in spec.sql — the canary row survives', async () => {
-    const { messenger } = makeMessenger();
+  it('rejects DELETE statements at trigger admission — the canary row survives', () => {
     const bead = createBead(db.raw, { kind: 'watch', title: 'malicious', ownerJid: 'mw', actor: 'u' });
     db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY, label TEXT)`);
     db.raw.prepare(`INSERT INTO probes (label) VALUES ('canary')`).run();
 
     // Operator-controlled spec SQL tries to mutate the live db.
-    const t = createTrigger(db.raw, {
+    expect(() => createTrigger(db.raw, {
       beadId: bead.id, kind: 'poll.sqlite',
       spec: { sql: `DELETE FROM probes`, fire_when: 'rows_returned' },
       reportChatJid: 'admin@s.whatsapp.net',
       intervalSeconds: 300, nextFireAt: 1_000_000_000,
       actor: 'u',
-    });
+    })).toThrow(/single statement/i);
 
-    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 });
-    await poller.tickOnce();
-
-    // Canary must still exist — the DELETE was blocked by PRAGMA query_only.
+    // Canary must still exist — mutation SQL never reaches the worker.
     const remaining = db.raw.prepare(`SELECT COUNT(*) AS n FROM probes`).get() as { n: number };
     expect(remaining.n).toBe(1);
-
-    const runs = db.raw.prepare(`SELECT status, error_kind, error_message FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; error_kind: string; error_message: string }>;
-    expect(runs[0].status).toBe('failed');
-    expect(runs[0].error_kind).toBe('sql_error');
-    expect(runs[0].error_message).toMatch(/readonly|read-only|write/i);
+    expect(db.raw.prepare(`SELECT COUNT(*) AS n FROM trigger_runs`).get() as { n: number }).toMatchObject({ n: 0 });
   });
 
   it('restores write access after the spec SQL — bead_triggers UPDATE and trigger_runs INSERT still succeed', async () => {
@@ -1976,10 +2484,10 @@ describe('TriggerPoller — notification throttle', () => {
     expect(calls).toHaveLength(2);
   });
 
-  it('does NOT throttle when the substring deliveredWaMessageId appears only in row data, not as a delivered receipt', async () => {
+  it('does NOT throttle when a legacy output field contains deliveredWaMessageId but no delivery receipt', async () => {
     // Regression for the brittle `output_json LIKE '%deliveredWaMessageId%'`
-    // throttle: a watch whose query result serialises the text
-    // "deliveredWaMessageId" under $.sampleRow must NOT be mistaken for a run
+    // throttle: an old output record that serialises the text
+    // "deliveredWaMessageId" under an opaque legacy field must NOT be mistaken for a run
     // that actually delivered a WhatsApp notification. With the old LIKE scan
     // the first (never-delivered) run false-matched and suppressed dispatch;
     // json_extract($.deliveredWaMessageId) IS NOT NULL keys on the real value.
@@ -2003,24 +2511,28 @@ describe('TriggerPoller — notification throttle', () => {
       notificationThrottleMinIntervalSec: 100,
     });
 
-    // First tick: the only run so far has output_json containing the substring
-    // (via sampleRow) but it is the run that is dispatching NOW — it must still
-    // dispatch (the throttle looks at PRIOR delivered runs, of which there are none).
+    // First tick dispatches normally; the isolated SQL executor never persists
+    // query rows in trigger_runs.
     await poller.tickOnce();
     expect(calls).toHaveLength(1);
-    // Sanity: that run's output_json does carry the colliding substring.
+    // Replace its receipt with a legacy opaque field holding the colliding
+    // substring. This represents records written before query rows were removed
+    // from trigger output; the throttle still must inspect only the receipt key.
     const firstRun = db.raw.prepare(`SELECT output_json FROM trigger_runs WHERE trigger_id = ? ORDER BY id ASC LIMIT 1`).get(t.id) as { output_json: string };
-    expect(firstRun.output_json).toContain('deliveredWaMessageId');
-
-    // Now strip the real delivered receipt from that first run, leaving ONLY the
-    // colliding substring in sampleRow. Under the old LIKE scan this run would be
+    expect(JSON.parse(firstRun.output_json).deliveredWaMessageId).toBeTruthy();
+    // Strip the real delivered receipt, leaving ONLY the colliding substring in
+    // a legacy field. Under the old LIKE scan this run would be
     // treated as "delivered" and throttle the next tick. It must not.
     db.raw.prepare(
-      `UPDATE trigger_runs SET output_json = json_remove(output_json, '$.deliveredWaMessageId') WHERE trigger_id = ?`,
-    ).run(t.id);
+      `UPDATE trigger_runs
+       SET output_json = json_set(
+         json_remove(output_json, '$.deliveredWaMessageId'),
+         '$.legacySampleRow', json(?)
+       ) WHERE trigger_id = ?`,
+    ).run(JSON.stringify({ body: 'audit: deliveredWaMessageId was set elsewhere' }), t.id);
     const stripped = db.raw.prepare(`SELECT output_json FROM trigger_runs WHERE trigger_id = ? ORDER BY id ASC LIMIT 1`).get(t.id) as { output_json: string };
     expect(JSON.parse(stripped.output_json).deliveredWaMessageId).toBeUndefined();
-    expect(stripped.output_json).toContain('deliveredWaMessageId');  // still present in sampleRow
+    expect(stripped.output_json).toContain('deliveredWaMessageId');  // still present in legacy data
 
     // Second tick 30s later (well within the 100s window). No PRIOR run actually
     // delivered, so dispatch must proceed — the substring collision must not throttle.
@@ -2101,7 +2613,7 @@ describe('poller.ts uncovered-branch coverage', () => {
     // The bind selected exactly the 'match' row, proving binds reached the SQL.
     const runs = db.raw.prepare(`SELECT status, output_json FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; output_json: string }>;
     expect(runs[0].status).toBe('ok');
-    expect(JSON.parse(runs[0].output_json)).toMatchObject({ rowCount: 1, sampleRow: { label: 'match' } });
+    expect(JSON.parse(runs[0].output_json)).toMatchObject({ rowCount: 1 });
   });
 
   it('dispatchPauseNotification swallows a messenger failure and still records the pause', async () => {
@@ -2145,13 +2657,11 @@ describe('poller.ts uncovered-branch coverage', () => {
     expect(calls[0].text).not.toContain('extend_trigger');
   });
 
-  it('expireTrigger swallows an expiry-notification dispatch rejection via .catch (line 548)', async () => {
+  it('keeps expiry committed when notification dispatch rejects', async () => {
     const { messenger, calls } = makeFailingMessenger();
     const bead = createBead(db.raw, { kind: 'watch', title: 'expiry-fail', ownerJid: 'mw', actor: 'u' });
     db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY)`);
     db.raw.prepare(`INSERT INTO probes DEFAULT VALUES`).run();
-    // on_terminal defaults to 'notify', so expiry dispatch is attempted and rejects;
-    // the void ... .catch(...) must absorb it so tickOnce resolves cleanly.
     const t = createTrigger(db.raw, {
       beadId: bead.id, kind: 'poll.sqlite',
       spec: { sql: `SELECT * FROM probes`, fire_when: 'rows_returned' },
@@ -2162,10 +2672,7 @@ describe('poller.ts uncovered-branch coverage', () => {
     });
 
     const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 });
-    // Drain microtasks so the void'd .catch promise settles before the test ends.
     const processed = await poller.tickOnce();
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(processed).toBe(1);
     expect(calls.length).toBeGreaterThanOrEqual(1);
@@ -2237,6 +2744,7 @@ describe('poller.ts uncovered-branch coverage', () => {
       setTimeoutImpl: fakeSetTimeout,
       clearTimeoutImpl: fakeClearTimeout,
       now: () => 1_000_000_001,
+      sqliteExecutor: async () => ({ kind: 'ok', rowCount: 1 }),
     });
 
     poller.start();
@@ -2507,17 +3015,38 @@ describe('TriggerPoller — poll.url (gated, default-OFF)', () => {
     expect(JSON.parse(runs[0].output_json)).toMatchObject({ hashMode: 'selector' });
   });
 
-  it('selector hash_mode falls back to a stable empty marker when selector parsing fails', async () => {
+  it('fails closed for a legacy selector whose cost or syntax is not bounded', async () => {
     const { messenger } = makeMessenger();
     const urlFetch = vi.fn(async () => ({ status: 200, headers: {}, body: '<html><div>A</div></html>' }));
-    const t = makeUrlTrigger({ url: 'https://example.com/bad-selector', hash_mode: 'selector', selector: ':not(' });
+    const t = makeUrlTrigger({ url: 'https://example.com/bad-selector', hash_mode: 'selector', selector: '#stable' });
+    db.raw.prepare(`UPDATE bead_triggers SET spec_json = ? WHERE id = ?`).run(
+      JSON.stringify({ url: 'https://example.com/bad-selector', hash_mode: 'selector', selector: ':not(' }),
+      t.id,
+    );
 
     const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001, enableUrlWatch: true, urlFetch });
     await poller.tickOnce();
 
-    const run = db.raw.prepare(`SELECT status, output_json FROM trigger_runs WHERE trigger_id = ?`).get(t.id) as { status: string; output_json: string };
-    expect(run.status).toBe('ok');
-    expect(JSON.parse(run.output_json)).toMatchObject({ hashChanged: true, hashMode: 'selector' });
+    const run = db.raw.prepare(`SELECT status, error_kind FROM trigger_runs WHERE trigger_id = ?`).get(t.id) as { status: string; error_kind: string };
+    expect(run).toMatchObject({ status: 'failed', error_kind: 'spec_invalid' });
+    expect(urlFetch).not.toHaveBeenCalled();
+  });
+
+  it('fails closed before fetch for a CSS-escaped legacy nested-content selector', async () => {
+    const { messenger } = makeMessenger();
+    const urlFetch = vi.fn(async () => ({ status: 200, headers: {}, body: '<html><div>A</div></html>' }));
+    const t = makeUrlTrigger({ url: 'https://example.com/escaped-selector', hash_mode: 'selector', selector: '#stable' });
+    db.raw.prepare(`UPDATE bead_triggers SET spec_json = ? WHERE id = ?`).run(
+      JSON.stringify({ url: 'https://example.com/escaped-selector', hash_mode: 'selector', selector: ':ha\\73(*)' }),
+      t.id,
+    );
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001, enableUrlWatch: true, urlFetch });
+    await poller.tickOnce();
+
+    expect(urlFetch).not.toHaveBeenCalled();
+    const run = db.raw.prepare(`SELECT status, error_kind FROM trigger_runs WHERE trigger_id = ?`).get(t.id) as { status: string; error_kind: string };
+    expect(run).toMatchObject({ status: 'failed', error_kind: 'spec_invalid' });
   });
 
   it('malformed prior urlHash JSON is ignored and current URL hash is treated as first run', async () => {
