@@ -812,7 +812,7 @@ export class SessionManager {
     | { child: ReturnType<typeof spawn>; signal: NodeJS.Signals; reason: SessionTerminationReason }
     | null = null;
   private pendingToolIds = new Map<string | symbol, number>();
-  /** An ordinary tool started while every tracked slot held a poll wait; cleared with the map. */
+  /** An ordinary tool was refused or displaced at the cap this turn; cleared with the map. */
   private untrackedOrdinaryTool = false;
   /** Codex app-server thread ID for persistent sessions. */
   private codexThreadId: string | null = null;
@@ -2042,20 +2042,21 @@ export class SessionManager {
     this.trackPending(toolId, waitMs > 0 ? performance.now() + waitMs : 0);
   }
 
-  // A noisy provider must not grow this map without limit. At the cap an ordinary tool adds no
-  // wait and hasPendingTools is already true, so it is not recorded; a poll wait displaces one
-  // ordinary entry. With no ordinary entry left the wait is refused and the normal hard watchdog
-  // applies to it.
+  // A noisy provider must not grow this map without limit. At the cap an ordinary tool is not
+  // recorded, and a poll wait displaces one ordinary entry. Either way an ordinary tool loses its
+  // entry and its end can no longer be matched, so the turn keeps the normal hard-watchdog
+  // deadline until the map is cleared (handleWatchdogHard). With no ordinary entry left a poll
+  // wait is refused and the normal hard watchdog applies to it.
   private trackPending(key: string | symbol, deadline: number): boolean {
     if (this.pendingToolIds.size >= MAX_TRACKED_TOOL_IDS) {
-      const ordinary = [...this.pendingToolIds].find(([, d]) => d === 0)?.[0];
       if (deadline === 0) {
-        // Unrecorded, it must still keep the normal hard-watchdog deadline (handleWatchdogHard).
-        if (ordinary === undefined) this.untrackedOrdinaryTool = true;
+        this.untrackedOrdinaryTool = true;
         return false;
       }
+      const ordinary = [...this.pendingToolIds].find(([, d]) => d === 0)?.[0];
       if (ordinary === undefined) return false;
       this.pendingToolIds.delete(ordinary);
+      this.untrackedOrdinaryTool = true;
     }
     this.pendingToolIds.set(key, deadline);
     return true;
