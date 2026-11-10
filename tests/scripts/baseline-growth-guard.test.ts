@@ -25,6 +25,7 @@ import {
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { runInNewContext } from 'node:vm';
 
 import { describe, expect, it } from 'vitest';
 
@@ -79,13 +80,13 @@ function writeBoundary(dir: string, count: number): void {
  * assertion through a catch block and make the inconclusive and block paths look like
  * infrastructure errors rather than results.
  */
-function runGuard(args: string[]): { status: number | null; out: string } {
+function runGuard(args: string[]): { status: number | null; out: string; stdout: string } {
   const r = spawnSync(
     process.execPath,
     ['--experimental-strip-types', resolve(repoRoot, 'scripts/baseline-growth-guard.ts'), ...args],
     { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 },
   );
-  return { status: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+  return { status: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}`, stdout: r.stdout ?? '' };
 }
 
 /** Test fixtures must not let PATH lookup or a stalled helper hang the suite. */
@@ -1475,6 +1476,44 @@ describe('exact-revision pinning — the verdict must name what it measured', ()
 });
 
 describe('CI wiring — the guard must be invoked with pinned revisions', () => {
+  it.each(['tag', 'schedule', 'main'])('checks real baseline growth for a %s event', (event) => {
+    const dir = makeRepo(1);
+    const baseOid = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeBoundary(dir, 2);
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'growth']);
+    const candidate = git(dir, ['rev-parse', 'HEAD']).trim();
+    const workflow = readFileSync(resolve(repoRoot, '.github/workflows/quality.yml'), 'utf8');
+    const expression = workflow.match(/BASELINE_BASE_OID: \$\{\{ (.+) \}\}/)?.[1];
+    expect(expression).toBeDefined();
+    // This workflow expression uses only operators shared by JavaScript and Actions.
+    const base = runInNewContext(expression!, {
+      github: {
+        event_name: event === 'schedule' ? 'schedule' : 'push',
+        ref: event === 'tag' ? 'refs/tags/v-test' : 'refs/heads/main',
+        event: { before: event === 'tag' ? '0'.repeat(40) : baseOid, merge_group: { base_sha: '' } },
+      },
+    }, { timeout: 1000 });
+    expect(base).toBe(event === 'main' ? baseOid : 'HEAD^');
+    const { status, out, stdout } = runGuard(['--repo', dir, '--base', base, '--candidate', candidate, '--json']);
+    expect(status, out).toBe(1);
+    expect(out).toContain(`--base ${baseOid} --candidate ${candidate}`);
+    expect(JSON.parse(stdout)).toMatchObject({
+      base: baseOid,
+      candidate,
+      examined: 1,
+      findings: [{
+        path: '.claude/fitness/boundary-baseline.json',
+        base: 1,
+        head: 2,
+        delta: 1,
+        kind: 'identity-introduction',
+        inconclusive: false,
+      }],
+      waived: [],
+    });
+  });
+
   it('quality.yml passes both --base and --candidate from event OIDs', () => {
     const workflow = readFileSync(resolve(repoRoot, '.github/workflows/quality.yml'), 'utf8');
     const step = workflow.slice(workflow.indexOf('- name: Baseline growth guard'));

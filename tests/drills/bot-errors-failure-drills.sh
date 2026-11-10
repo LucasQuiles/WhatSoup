@@ -53,6 +53,11 @@ declare -a FAILURES=()
 cleanup() { rm -rf "$SANDBOX"; }
 trap cleanup EXIT
 
+# Daily health includes TMPDIR in disk evidence; keep child scratch inside the
+# same sandbox so macOS caller paths cannot trigger the test-leak filter.
+mkdir -p "$SANDBOX/tmp"
+export TMPDIR="$SANDBOX/tmp"
+
 pass() { PASS=$((PASS + 1)); printf '  \033[32mPASS\033[0m %s\n' "$1"; }
 fail() { FAIL=$((FAIL + 1)); FAILURES+=("$1"); printf '  \033[31mFAIL\033[0m %s\n' "$1"; }
 
