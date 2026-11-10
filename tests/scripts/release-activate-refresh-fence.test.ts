@@ -3,6 +3,7 @@
  * Test titles deliberately retain their original release:activate --plan/--apply
  * describe labels so qualification full-name membership is unchanged.
  */
+import { createHash } from 'node:crypto';
 import { readFileSync, readlinkSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -32,28 +33,32 @@ import {
 /** The fence this repository ships; it requires the stalled-operation hold (#3903) of a rollback target. */
 const SHIPPED_REFRESH_FENCE = readFileSync(path.resolve(import.meta.dirname, '../..', REFRESH_ROLLBACK_FENCE_REL), 'utf8');
 
-/** Release a804bb2a's exact fence bytes: refresh owner only, no knowledge of the stalled-operation hold. */
-const A804BB2A_REFRESH_FENCE = `{
-  "schemaVersion": 1,
-  "activationRequirements": {
-    "rollbackTarget": {
-      "claudeRefreshOwnerV3": 3
-    }
-  },
-  "rollbackCapabilities": {
-    "claudeRefreshOwnerV3": 3
-  }
+/**
+ * The real predecessor releases (#3903). a804bb2a is main before the hold; 44d38619a is the release the q line runs
+ * on its Linux host. The a804bb2a fence is the file from that commit's tree, bound by its git blob id; 44d38619a's tree
+ * and its exported release manifest have no fence file.
+ */
+const A804BB2A_COMMIT = 'a804bb2a18f10e6e66248fb2556e0ee993deb47b';
+const A804BB2A_FENCE_BLOB = '4984c1c36366693f1ce2b6e5cf3aa856082f3eff';
+const A804BB2A_REFRESH_FENCE = readFileSync(
+  path.resolve(import.meta.dirname, '../fixtures/release-predecessors/a804bb2a18f1', REFRESH_ROLLBACK_FENCE_REL),
+  'utf8',
+);
+const R44D38619A_COMMIT = '44d38619ae4c38f23a9755c37555268feb0e4715';
+
+function gitBlobId(body: string): string {
+  const bytes = Buffer.from(body);
+  return createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
 }
-`;
 
 let fixture: Fixture;
 
 /** A world whose new release fails verification, so apply attempts an automatic rollback. */
-function failingNewReleaseWorld(): SimulatedLaunchd {
+function failingNewReleaseWorld(oldCommit = OLD_COMMIT): SimulatedLaunchd {
   return new SimulatedLaunchd(fixture, {
     health: (root) => ({
       status: 200,
-      body: diagnosticBody(root === fixture.newRelease ? NEW_COMMIT : OLD_COMMIT, root !== fixture.newRelease),
+      body: diagnosticBody(root === fixture.newRelease ? NEW_COMMIT : oldCommit, root !== fixture.newRelease),
     }),
   });
 }
@@ -366,10 +371,12 @@ describe('release:activate --apply', () => {
   });
 
   it('blocks automatic rollback before stop to a target with the a804bb2a fence that lacks the stalled-operation hold', async () => {
+    expect(gitBlobId(A804BB2A_REFRESH_FENCE)).toBe(A804BB2A_FENCE_BLOB);
     writeRefreshRollbackFenceRaw(fixture.newRelease, SHIPPED_REFRESH_FENCE);
     writeRefreshRollbackFenceRaw(fixture.oldRelease, A804BB2A_REFRESH_FENCE);
+    rewriteReleaseManifestCommit(fixture.oldRelease, A804BB2A_COMMIT);
 
-    const plan = await run(new SimulatedLaunchd(fixture), activationArgs(fixture));
+    const plan = await run(failingNewReleaseWorld(A804BB2A_COMMIT), activationArgs(fixture));
     expect(plan.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
     expect(plan.json.rollbackRefreshFence).toMatchObject({
       candidateRequirement: { claudeRefreshOwnerV3: 3, stalledOperationHoldV1: 1 },
@@ -377,7 +384,29 @@ describe('release:activate --apply', () => {
       targetCompatibleAtPlan: false,
     });
 
-    const world = failingNewReleaseWorld();
+    const world = failingNewReleaseWorld(A804BB2A_COMMIT);
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(5);
+    expect(result.json.outcome).toBe('rollback-blocked-refresh-fence');
+    expect(result.json.rollback).toMatchObject({ refreshFenceBlockedAt: 'before-instance-stop' });
+    expect(readlinkSync(fixture.wrapperLink)).toBe(path.join(fixture.newRelease, 'deploy', 'whatsoup'));
+    expect(world.releasesStarted().filter((root) => root === fixture.oldRelease)).toHaveLength(1);
+  });
+
+  it('blocks automatic rollback before stop to release 44d38619a, which has no fence file', async () => {
+    writeRefreshRollbackFenceRaw(fixture.newRelease, SHIPPED_REFRESH_FENCE);
+    rewriteReleaseManifestCommit(fixture.oldRelease, R44D38619A_COMMIT);
+
+    const plan = await run(failingNewReleaseWorld(R44D38619A_COMMIT), activationArgs(fixture));
+    expect(plan.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    expect(plan.json.rollbackRefreshFence).toMatchObject({
+      candidateRequirement: { claudeRefreshOwnerV3: 3, stalledOperationHoldV1: 1 },
+      targetCapabilityAtPlan: { claudeRefreshOwnerV3: 0, stalledOperationHoldV1: 0 },
+      targetCompatibleAtPlan: false,
+    });
+
+    const world = failingNewReleaseWorld(R44D38619A_COMMIT);
     const result = await run(world, activationArgs(fixture, ['--apply']));
 
     expect(result.code).toBe(5);
