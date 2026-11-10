@@ -185,8 +185,9 @@ qualify CI documentation checks. A `passed` focused lane is still partial eviden
 for a broader gate.
 Reports include each command's outcome and duration. Direct Vitest steps also
 report files, passed/failed/pending tests from the actual runner report. The affected
-runner's scratch cleanup failures remain inconclusive (exit 125) and retain
-completed command results. Permission-denial fixtures must restore their original
+runner's scratch or lock cleanup failures remain inconclusive (exit 125) and retain
+completed command results. Lost lock ownership also returns 125 and preserves the
+replacement lock; inspect its owner before recovery. Permission-denial fixtures must restore their original
 directory modes in teardown so scratch removal can finish. Push and
 release gates report a terminated child's PID and signal, preserve `128 + signal`
 exits, and return 125 when an executable cannot start. Direct Vitest steps

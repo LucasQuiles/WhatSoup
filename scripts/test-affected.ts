@@ -165,20 +165,30 @@ export async function executeTestCommands(
     }
     return complete('passed', 0);
   } finally {
+    const cleanupErrors: string[] = [];
     try {
       if (scratch) {
         if (options.cleanupScratch) options.cleanupScratch(scratch);
         else rmSync(scratch, { recursive: true, force: true });
       }
     } catch (error) {
-      if (!execution) throw error;
-      // Cleanup failure must not erase completed commands or manufacture a passing run.
-      execution.outcome = 'inconclusive';
-      execution.exitCode = 125;
-      execution.error = [execution.error, `scratch cleanup failed: ${String(error)}`].filter(Boolean).join('; ');
-    } finally {
-      releaseProcessLock(lock);
-      if (execution) execution.wallMs = Date.now() - start;
+      cleanupErrors.push(`scratch cleanup failed: ${String(error)}`);
+    }
+    try {
+      if (!releaseProcessLock(lock)) cleanupErrors.push('test lock release failed: ownership changed or lock unavailable');
+    } catch (error) {
+      cleanupErrors.push(`test lock release failed: ${String(error)}`);
+    }
+    if (execution) {
+      execution.wallMs = Date.now() - start;
+      if (cleanupErrors.length) {
+        // Retain child evidence even when cleanup or ownership cannot be established.
+        execution.outcome = 'inconclusive';
+        execution.exitCode = 125;
+        execution.error = [execution.error, ...cleanupErrors].filter(Boolean).join('; ');
+      }
+    } else if (cleanupErrors.length) {
+      throw new Error(cleanupErrors.join('; '));
     }
   }
 }

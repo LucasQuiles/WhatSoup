@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -229,6 +229,38 @@ describe('affected test execution', () => {
       expect(existsSync(join(cwd, '.local/test-run.lock'))).toBe(false);
     } finally {
       if (ownedScratch) rmSync(ownedScratch, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { kind: 'replaced', childExit: 0 },
+    { kind: 'unlink-denied', childExit: 7 },
+  ])('retains completed results and refuses success when lock release is $kind', async ({ kind, childExit }) => {
+    const cwd = tmp.make('lock-release');
+    const parent = join(cwd, '.local');
+    mkdirSync(parent);
+    const originalMode = statSync(parent).mode & 0o777;
+    const lock = join(parent, 'test-run.lock');
+    const child = kind === 'replaced'
+      ? 'const file=process.argv[1]; const lock=JSON.parse(fs.readFileSync(file,"utf8")); fs.writeFileSync(file,JSON.stringify({...lock,token:"replacement-owner"}));'
+      : 'fs.chmodSync(require("node:path").dirname(process.argv[1]),0o500);';
+    try {
+      const result = await executeTestCommands(cwd, [{
+        name: 'finished-child', command: process.execPath,
+        args: ['-e', `const fs=require("node:fs"); ${child} process.exit(${childExit});`, lock],
+      }], { timeoutMs: 10_000, json: false });
+      expect(result).toMatchObject({ outcome: 'inconclusive', exitCode: 125 });
+      expect(result.error).toContain('test lock release failed:');
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0]).toMatchObject({
+        name: 'finished-child', exitCode: childExit, wrappedExit: childExit,
+        outcome: childExit === 0 ? 'passed' : 'failed',
+      });
+      expect(existsSync(lock)).toBe(true);
+      if (kind === 'replaced') expect(JSON.parse(readFileSync(lock, 'utf8')).token).toBe('replacement-owner');
+      else expect(result.error).toMatch(/EACCES|EPERM/);
+    } finally {
+      chmodSync(parent, originalMode);
     }
   });
 });
