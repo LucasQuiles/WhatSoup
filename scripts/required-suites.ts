@@ -27,8 +27,8 @@ import { isSafeChangedPath } from './lib/test-selection-policy.ts';
  * symbol-referencing vitest subset is therefore NOT sufficient. This script is a
  * FAST triage aid for when the full chain is too slow: it prints the minimum set
  * of suites a change must run locally so the two proven gap classes above cannot
- * recur silently. Successful triage is informational (WARN-tier); malformed input
- * is inconclusive and exits non-zero rather than silently omitting a changed file.
+ * recur silently. Successful triage is informational (WARN-tier); malformed or
+ * unreadable input is inconclusive and exits non-zero rather than omitting suites.
  */
 
 const TESTS_DIR = 'tests';
@@ -58,12 +58,7 @@ export function enumerateTestSuites(cwd: string): string[] {
   const root = path.join(cwd, TESTS_DIR);
   const out: string[] = [];
   const walk = (dir: string): void => {
-    let entries: import('node:fs').Dirent[];
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
+    const entries = readdirSync(dir, { withFileTypes: true });
     for (const entry of entries) {
       const abs = path.join(dir, entry.name);
       if (entry.isDirectory()) {
@@ -122,12 +117,7 @@ export function functionalSuites(cwd: string, changedFiles: string[]): string[] 
 
   const tokenList = nonTestSources.flatMap(referenceTokens);
   for (const suite of suites) {
-    let text: string;
-    try {
-      text = readFileSync(path.join(cwd, suite), 'utf8');
-    } catch {
-      continue;
-    }
+    const text = readFileSync(path.join(cwd, suite), 'utf8');
     if (tokenList.some((tok) => text.includes(tok))) {
       result.add(suite);
     }

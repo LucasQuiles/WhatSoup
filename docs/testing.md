@@ -51,7 +51,8 @@ path with the public-surface consistency guard; they do not bypass that contract
 
 The selection policy lives in `scripts/lib/test-selection-policy.ts`. The old
 `triage:required-suites` command remains an informational union of functional and
-fitness suites; malformed input now exits nonzero. It also recognizes TSX tests.
+fitness suites; malformed input or unreadable test directories/files exit with
+code 2 instead of returning a partial list. It also recognizes TSX tests.
 Before selecting affected work, the planner validates the existing BOT ERRORS
 runtime manifest, including required paths, hashes and markers. Deployed library
 inputs select full validation because Python parity tests also consume them.

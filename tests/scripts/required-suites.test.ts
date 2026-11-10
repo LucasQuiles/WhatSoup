@@ -1,7 +1,9 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { cleanGitEnv } from '../../src/lib/git-env.ts';
 
 import {
   isFitnessGuardSuite,
@@ -12,9 +14,15 @@ import {
   resolveChangedFiles,
 } from '../../scripts/required-suites.ts';
 
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return { ...actual, readdirSync: vi.fn(actual.readdirSync), readFileSync: vi.fn(actual.readFileSync) };
+});
+
 const fixtureDirs: string[] = [];
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const dir of fixtureDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -71,6 +79,32 @@ describe('referenceTokens', () => {
 });
 
 describe('fitnessGuardSuites (∪-ALL half — closes the #1514 gap)', () => {
+  it('the CLI rejects a missing test root rather than reporting an empty required set', () => {
+    const dir = makeFixture({});
+    const result = spawnSync(process.execPath, [
+      path.resolve('scripts/required-suites.ts'), '--json', 'src/thing.ts',
+    ], { cwd: dir, env: cleanGitEnv(), encoding: 'utf8', timeout: 5000 });
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(2);
+    expect(result.stdout).not.toContain('"required"');
+    expect(result.stderr).toContain('ENOENT');
+  });
+
+  it('rejects an unreadable subtree instead of reporting a partial suite set', async () => {
+    const dir = makeFixture({
+      'tests/core/plain.test.ts': 'test',
+      'tests/scripts/policy-guard.test.ts': 'test',
+    });
+    const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+    vi.mocked(readdirSync).mockImplementation((...args) => {
+      if (String(args[0]) === path.join(dir, 'tests/scripts')) {
+        throw Object.assign(new Error('test subtree unreadable'), { code: 'EACCES' });
+      }
+      return Reflect.apply(actual.readdirSync, actual, args);
+    });
+    expect(() => computeRequiredSuites(dir, ['src/thing.ts'])).toThrow('test subtree unreadable');
+  });
+
   it('includes ALL fitness/guard suites regardless of what changed', () => {
     const dir = makeFixture({
       'tests/scripts/dedup-reaccumulation-guard.test.ts': 'test',
@@ -87,6 +121,18 @@ describe('fitnessGuardSuites (∪-ALL half — closes the #1514 gap)', () => {
 });
 
 describe('functionalSuites (referencing half — closes the #1507 gap)', () => {
+  it('rejects an unreadable test file rather than silently omitting its references', async () => {
+    const dir = makeFixture({ 'tests/core/thing.test.ts': "import '../../src/thing.ts';" });
+    const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+    vi.mocked(readFileSync).mockImplementation((...args) => {
+      if (String(args[0]) === path.join(dir, 'tests/core/thing.test.ts')) {
+        throw Object.assign(new Error('test file unreadable'), { code: 'EACCES' });
+      }
+      return Reflect.apply(actual.readFileSync, actual, args);
+    });
+    expect(() => computeRequiredSuites(dir, ['src/thing.ts'])).toThrow('test file unreadable');
+  });
+
   it('includes the suite that references the changed source module', () => {
     const dir = makeFixture({
       'tests/runtimes/agent/recovery-probe-validity.test.ts':

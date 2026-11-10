@@ -321,11 +321,10 @@ export const CI_ONLY_GUARDS: ReadonlyArray<{ readonly name: string; readonly rea
 
 /**
  * Explicit allowlisted child env (repo-hygiene: no process.env inheritance).
- * Base is the repo's git-child allowlist (PATH/HOME/TMPDIR/XDG/…); WHATSOUP_*
- * vars pass through EXCEPT the neutralized skip-vars — which implements the
- * legacy `unset WHATSOUP_SKIP_*` preamble structurally rather than by
- * mutation: the skips simply never reach the children. Vitest's worker-count
- * setting may reduce the repository default so resource limits reach both lanes.
+ * Base is the repo's git-child allowlist (PATH/HOME/TMPDIR/XDG/…). Only named
+ * gate controls pass through; runtime credentials and skip flags do not.
+ * Vitest's worker-count setting may reduce the repository default so resource
+ * limits reach both lanes.
  */
 export function pushGateChildEnv(): NodeJS.ProcessEnv {
   const env = cleanGitEnv();
@@ -336,14 +335,18 @@ export function pushGateChildEnv(): NodeJS.ProcessEnv {
     }
     env.VITEST_MAX_WORKERS = workers;
   }
-  for (const [key, value] of Object.entries(process.env)) {
-    if (
-      key.startsWith('WHATSOUP_')
-      && value !== undefined
-      && !(NEUTRALIZED_SKIP_VARS as readonly string[]).includes(key)
-    ) {
-      env[key] = value;
-    }
+  for (const key of [
+    'WHATSOUP_PUSH_BASE_OID',
+    'WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS',
+    'WHATSOUP_BOUNDED_BATTERY_OWNER_PID',
+    'WHATSOUP_TRIPWIRE_MAIN_SHA256',
+    'WHATSOUP_REQUIRE_TEST_INTEGRITY',
+    'WHATSOUP_NODE',
+    'WHATSOUP_NPM',
+    'WHATSOUP_GIT_ESTATE_GIT_TIMEOUT_MS',
+  ]) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
   }
   return env;
 }

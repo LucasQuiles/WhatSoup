@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
+import * as guardCore from '../../scripts/lib/guard-core.ts';
 import {
   findDesignSystemHygieneIssues,
   parseArgs,
@@ -46,6 +47,26 @@ afterEach(() => {
 });
 
 describe('design-system hygiene guard', () => {
+  it('returns inconclusive when a changed package diff cannot be read', () => {
+    const repo = makeRepo();
+    stageFile(repo, 'package.json', '{"scripts":{}}\n');
+    commit(repo, 'base package');
+    const base = gitOutput(repo, ['rev-parse', 'HEAD']);
+    stageFile(repo, 'package.json', '{"scripts":{"verify:console-design":"node verify.js"}}\n');
+    commit(repo, 'add design check');
+    const realGit = guardCore.git;
+    vi.spyOn(guardCore, 'git').mockImplementation((args, cwd) => {
+      if (args.includes('--unified=0')) throw new Error('changed diff unavailable');
+      return realGit(args, cwd);
+    });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(runDesignSystemHygieneGuard(['--changed-since', base, '--json'], repo)).toBe(2);
+    expect(log.mock.calls.join('\n')).not.toContain('"verdict": "PASS"');
+    expect(error.mock.calls.join('\n')).toContain('changed diff unavailable');
+  });
+
   it('passes when no design-system files are staged', () => {
     const repo = makeRepo();
     stageFile(repo, 'src/example.ts', 'export const value = 1;\n');
