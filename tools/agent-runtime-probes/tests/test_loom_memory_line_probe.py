@@ -332,6 +332,8 @@ def make_stale_index_repo(root: Path) -> Path:
     `git status` rewrites the index under index.lock while the file reads clean.
     """
     subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+    # An inherited core.ignoreStat=true would hide the stale stat data.
+    subprocess.run(["git", "-C", str(root), "config", "core.ignoreStat", "false"], check=True)
     subprocess.run(["git", "-C", str(root), "config", "user.email", "t@t"], check=True)
     subprocess.run(["git", "-C", str(root), "config", "user.name", "t"], check=True)
     tracked = root / "tracked.py"

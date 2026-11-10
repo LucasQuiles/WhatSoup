@@ -29,7 +29,8 @@ const gitChildEnvKeys = [
 // index.lock to write refreshed stat data, and a child killed by an
 // uncatchable signal strands that lock for every later commit. Writes (add,
 // commit, checkout) still lock the index.
-// Git documents the variable for status; a worktree `git diff` still rewrites the index.
+// Git documents the variable for status; a worktree `git diff` can still rewrite the
+// index when an entry is stat-dirty.
 export function cleanGitEnv(): NodeJS.ProcessEnv {
   return {
     ...Object.fromEntries(

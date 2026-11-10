@@ -50,6 +50,8 @@ interface StaleIndexRepo {
 // the index under index.lock while the content still reads as clean.
 function makeStaleIndexRepo(): StaleIndexRepo {
   const repo = makeRepo();
+  // An inherited core.ignoreStat=true would hide the stale stat data.
+  git(repo, ['config', 'core.ignoreStat', 'false']);
   const tracked = path.join(repo, 'tracked.txt');
   writeFileSync(tracked, 'tracked\n');
   git(repo, ['add', 'tracked.txt']);
