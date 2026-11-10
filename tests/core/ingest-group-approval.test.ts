@@ -7,6 +7,10 @@
  * mode (groupSenderPolicy 'allowlisted_only') an unknown sender only produces
  * an approval request when they @mentioned the bot; direct chats keep asking;
  * the status broadcast never asks.
+ *
+ * #2949 queued receipt: the same real gate pins why the group receipt says
+ * "Mention me with /stop": a group that is not on the group allowlist
+ * dispatches only a message that mentions the bot.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { tmpdir } from 'node:os';
@@ -39,6 +43,8 @@ import { drainIngest } from './_helpers/ingest-drain.ts';
 import { resolvePhoneFromJid } from '../../src/core/access-list.ts';
 import { isAdminMessage, parseAdminCommand } from '../../src/core/command-router.ts';
 import { sendApprovalRequest } from '../../src/core/admin.ts';
+import { shouldRespond } from '../../src/core/access-policy.ts';
+import { classifyInput } from '../../src/runtimes/agent/commands.ts';
 import { config } from '../../src/config.ts';
 
 const mockSendApprovalRequest = vi.mocked(sendApprovalRequest);
@@ -121,7 +127,7 @@ function makeIngest() {
     getInboundReceivedAtUnixSeconds: vi.fn().mockReturnValue(undefined),
   } as unknown as Parameters<typeof createIngestHandler>[5];
   const handler = createIngestHandler(db, messenger, runtime, () => BOT_JID, () => null, durability);
-  return { db, runtime, handler, journalInbound, markInboundSkipped };
+  return { db, messenger, runtime, handler, journalInbound, markInboundSkipped };
 }
 
 async function runIngest(handler: (msg: IncomingMessage) => void, msg: IncomingMessage): Promise<void> {
@@ -240,5 +246,42 @@ describe('#3566: approval requests from group strangers need an @mention', () =>
 
     expect(runtime.handleMessage).toHaveBeenCalledTimes(2);
     expect(mockSendApprovalRequest).not.toHaveBeenCalled();
+  });
+});
+
+// GROUP_JID has no group access entry, so under the default any_member policy
+// it is a mention-only group: only a message that mentions the bot dispatches.
+describe('#2949: in a mention-only group, only a mentioned /stop reaches the runtime', () => {
+  it('a bare /stop is dropped as not_mentioned: it never reaches the runtime and gets no reply', async () => {
+    setGroupSenderPolicy('any_member');
+    const { db, messenger, runtime, handler, markInboundSkipped } = makeIngest();
+    const msg = makeMsg({ chatJid: GROUP_JID, senderJid: ALLOWED_SENDER, isGroup: true, content: '/stop' });
+
+    await runIngest(handler, msg);
+
+    expect(shouldRespond(msg, BOT_JID, null, db)).toEqual({ respond: false, reason: 'not_mentioned' });
+    expect(runtime.handleMessage).not.toHaveBeenCalled();
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+    expect(markInboundSkipped).toHaveBeenCalledWith(7, 'access_denied');
+  });
+
+  it('a /stop that mentions the bot reaches the runtime as the /stop command', async () => {
+    setGroupSenderPolicy('any_member');
+    const { runtime, handler } = makeIngest();
+    // WhatsApp puts the bot's bare number at the mention point; ingest strips it.
+    const msg = makeMsg({
+      chatJid: GROUP_JID,
+      senderJid: ALLOWED_SENDER,
+      isGroup: true,
+      mentionedJids: [BOT_JID],
+      content: '@15550356609 /stop',
+    });
+
+    await runIngest(handler, msg);
+
+    expect(runtime.handleMessage).toHaveBeenCalledTimes(1);
+    const dispatched = vi.mocked(runtime.handleMessage).mock.calls[0]![0];
+    expect(dispatched.content).toBe('/stop');
+    expect(classifyInput(dispatched.content ?? '')).toMatchObject({ type: 'local', command: 'stop' });
   });
 });

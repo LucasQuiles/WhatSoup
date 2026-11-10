@@ -133,6 +133,7 @@ const { mockConfig } = vi.hoisted(() => ({
     queuedTurnReceipt: true,
     fallbackTunables: { noticeDedupMs: 1_800_000, primaryRecheckMs: 300_000, probeStallThreshold: 12, probeStallCeilingMultiple: 10 },
     adminPhones: new Set<string>(['15550001']),
+    groupSenderPolicy: 'any_member' as 'any_member' | 'allowlisted_only',
     controlPeers: new Map<string, string>(),
     internalPeerJids: new Set<string>(),
     toolUpdateMode: 'full' as const,
@@ -279,7 +280,9 @@ import { Database } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { AgentRuntime, type AgentRuntimeOptions } from '../../../src/runtimes/agent/runtime.ts';
 import {
+  QUEUED_TURN_RECEIPT_GROUP_TEXT,
   QUEUED_TURN_RECEIPT_NO_STOP_TEXT,
+  QUEUED_TURN_RECEIPT_OTHER_GROUP_TEXT,
   QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT,
   QUEUED_TURN_RECEIPT_OTHER_TEXT,
   QUEUED_TURN_RECEIPT_TEXT,
@@ -337,7 +340,9 @@ describe('#2949 queued receipt through the real per_chat admission path', () => 
   function receiptSends(): unknown[][] {
     const receipts: unknown[] = [
       QUEUED_TURN_RECEIPT_TEXT,
+      QUEUED_TURN_RECEIPT_GROUP_TEXT,
       QUEUED_TURN_RECEIPT_OTHER_TEXT,
+      QUEUED_TURN_RECEIPT_OTHER_GROUP_TEXT,
       QUEUED_TURN_RECEIPT_NO_STOP_TEXT,
       QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT,
     ];
@@ -381,6 +386,7 @@ describe('#2949 queued receipt through the real per_chat admission path', () => 
     resetDoubles();
     mockConfig.queuedTurnReceipt = true;
     mockConfig.adminPhones = new Set<string>(['15550001']);
+    mockConfig.groupSenderPolicy = 'any_member';
     db = new Database(':memory:');
     db.open();
     engine = new DurabilityEngine(db);
@@ -475,45 +481,64 @@ describe('#2949 queued receipt through the real per_chat admission path', () => 
     expect(receiptSends()).toEqual([]);
   });
 
-  // Contract with the command gate (review of the /stop offer). For every
-  // per_chat combination of DM or group, admins configured or not, and sender
-  // admin or not, the receipt offers /stop exactly when the REAL command gate
-  // accepts that sender's /stop. The gate is probed with an idle /stop, which
-  // answers at once: "_Not authorized._" when refused, the nothing-to-stop
-  // acknowledgement when accepted. Each row also pins the exact receipt.
+  // Contract with the command gate and the audience (review of the /stop
+  // offer). Every group member reads a receipt, so it offers /stop only where
+  // any reader may reach and run it. Each row probes the REAL command gate for
+  // a reader who is not an admin (in a group, such a member; in a DM, the
+  // sender, the only reader) with an idle /stop, which answers at once:
+  // "_Not authorized._" when refused, the nothing-to-stop acknowledgement when
+  // accepted. Each row then pins the exact receipt, and that building it never
+  // runs the gate's admin check. The queued sender's own admin status changes
+  // nothing. Under the allowlisted_only group sender policy the gate accepts,
+  // but ingest drops a member who is not allowlisted before any gate, so the
+  // receipt offers nothing there.
   type ContractRow = {
     title: string;
     isGroup: boolean;
     admins: 'configured' | 'empty';
+    policy: 'any_member' | 'allowlisted_only';
     sender: string;
     stopDenied: boolean;
     receipt: string;
   };
   const contractRows: ContractRow[] = [
-    { title: 'DM, admins configured, admin sender → offered', isGroup: false, admins: 'configured', sender: senderJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_TEXT },
-    { title: 'DM, admins configured, non-admin sender → offered (a 1:1 chat is ungated)', isGroup: false, admins: 'configured', sender: nonAdminJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_TEXT },
-    { title: 'DM, no admin configured, sender with the former admin number → offered', isGroup: false, admins: 'empty', sender: senderJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_TEXT },
-    { title: 'DM, no admin configured, non-admin sender → offered', isGroup: false, admins: 'empty', sender: nonAdminJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_TEXT },
-    { title: 'group, admins configured, admin sender → offered', isGroup: true, admins: 'configured', sender: senderJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_OTHER_TEXT },
-    { title: 'group, admins configured, non-admin sender → refused and not offered', isGroup: true, admins: 'configured', sender: nonAdminJid, stopDenied: true, receipt: QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT },
-    { title: 'group, no admin configured, sender with the former admin number → offered', isGroup: true, admins: 'empty', sender: senderJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_OTHER_TEXT },
-    { title: 'group, no admin configured, non-admin sender → offered', isGroup: true, admins: 'empty', sender: nonAdminJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_OTHER_TEXT },
+    { title: 'DM, admins configured, admin sender → offered, DM copy', isGroup: false, admins: 'configured', policy: 'any_member', sender: senderJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_TEXT },
+    { title: 'DM, admins configured, non-admin sender → offered, DM copy (a 1:1 chat is ungated)', isGroup: false, admins: 'configured', policy: 'any_member', sender: nonAdminJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_TEXT },
+    { title: 'DM, no admin configured, sender with the former admin number → offered, DM copy', isGroup: false, admins: 'empty', policy: 'any_member', sender: senderJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_TEXT },
+    { title: 'DM, no admin configured, non-admin sender → offered, DM copy', isGroup: false, admins: 'empty', policy: 'any_member', sender: nonAdminJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_TEXT },
+    { title: 'group, admins configured, admin sender → not offered: every member reads it', isGroup: true, admins: 'configured', policy: 'any_member', sender: senderJid, stopDenied: true, receipt: QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT },
+    { title: 'group, admins configured, non-admin sender → refused and not offered', isGroup: true, admins: 'configured', policy: 'any_member', sender: nonAdminJid, stopDenied: true, receipt: QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT },
+    { title: 'group, no admin configured, policy any_member, sender with the former admin number → offered, mention copy', isGroup: true, admins: 'empty', policy: 'any_member', sender: senderJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_OTHER_GROUP_TEXT },
+    { title: 'group, no admin configured, policy any_member, non-admin sender → offered, mention copy', isGroup: true, admins: 'empty', policy: 'any_member', sender: nonAdminJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_OTHER_GROUP_TEXT },
+    { title: 'group, no admin configured, policy allowlisted_only, sender with the former admin number → not offered: not every member reaches /stop', isGroup: true, admins: 'empty', policy: 'allowlisted_only', sender: senderJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT },
+    { title: 'group, no admin configured, policy allowlisted_only, non-admin sender → not offered', isGroup: true, admins: 'empty', policy: 'allowlisted_only', sender: nonAdminJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT },
   ];
 
   it.each(contractRows.map((row) => [row.title, row] as const))(
-    'the receipt offers /stop exactly when the command gate accepts it: %s',
+    'the receipt offers /stop only where any reader may reach and run it, and never runs the admin check: %s',
     async (_title, row) => {
       if (row.admins === 'empty') mockConfig.adminPhones = new Set<string>();
+      mockConfig.groupSenderPolicy = row.policy;
       makeRuntime({ sessionScope: 'per_chat' });
       const chat = row.isGroup ? groupJid : chatJid;
       const venue = { chatJid: chat, isGroup: row.isGroup };
+      // The command gate's own admin check, spied so the receipt path can be
+      // shown never to call it.
+      const isAdmin = vi.spyOn(
+        runtime as unknown as { isAuthenticatedAdminJid: (senderJid: string) => boolean },
+        'isAuthenticatedAdminJid',
+      );
 
-      // The gate's answer for this sender, from an idle /stop.
-      await sendStop('wamid-probe-stop', { ...venue, senderJid: row.sender });
+      // The gate's answer for a reader who is not an admin, from an idle /stop.
+      await sendStop('wamid-probe-stop', { ...venue, senderJid: row.isGroup ? nonAdminJid : row.sender });
       await vi.waitFor(() => expect(
         allSentTexts().filter((text) => text === DENIAL_TEXT || text === STOP_ACK_NOTHING_TO_STOP),
       ).toHaveLength(1));
       const stopDenied = allSentTexts().includes(DENIAL_TEXT);
+      // Positive control: the spy sees the gate's admin check, which the gate
+      // runs only in a group with admins configured.
+      expect(isAdmin).toHaveBeenCalledTimes(row.isGroup && row.admins === 'configured' ? 1 : 0);
+      isAdmin.mockClear();
 
       // In a group the running request is another member's; in a DM it is the sender's own.
       await arrive('wamid-running', 'first question', {
@@ -526,24 +551,27 @@ describe('#2949 queued receipt through the real per_chat admission path', () => 
       const receipt = String(receiptSends()[0]?.[1]);
 
       expect(stopDenied).toBe(row.stopDenied);
-      expect(receipt.includes('/stop')).toBe(!stopDenied);
+      // Never offered where the gate refuses a reader.
+      expect(stopDenied && receipt.includes('/stop')).toBe(false);
       expect(receiptSends()[0]).toEqual([chat, row.receipt]);
+      expect(isAdmin).not.toHaveBeenCalled();
     },
   );
 
-  it('a per_chat group member who is not an admin is not offered /stop, and that member\'s /stop is still refused', async () => {
+  it('in a per_chat group with admins configured, an admin\'s queued message gets a receipt without /stop, because every member reads it; a member who is not an admin is still refused /stop', async () => {
     makeRuntime({ sessionScope: 'per_chat' });
     const venue = { chatJid: groupJid, isGroup: true };
     const running = await arrive('wamid-group-running', 'first question', { ...venue, senderJid: groupMemberJid });
     await vi.waitFor(() => expect(sessionDoubles.some((s) => s.turnInFlight)).toBe(true));
 
-    await arrive('wamid-group-queued', 'second question', { ...venue, senderJid: nonAdminJid });
+    // senderJid is the configured admin.
+    await arrive('wamid-group-queued', 'second question', { ...venue, senderJid });
 
     await vi.waitFor(() => expect(receiptSends()).toHaveLength(1));
     expect(receiptSends()[0]).toEqual([groupJid, QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT]);
     expect(allSentTexts().some((text) => text.includes('/stop'))).toBe(false);
 
-    // The member sends /stop anyway, mid-turn: the gate still refuses it.
+    // A member who is not an admin sends /stop anyway, mid-turn: the gate refuses it.
     await sendStop('wamid-group-stop', { ...venue, senderJid: nonAdminJid });
     await vi.waitFor(() => expect(allSentTexts()).toContain(DENIAL_TEXT));
     // Refused, so nothing was torn down: the running request and the queued message remain.
