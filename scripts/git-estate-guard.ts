@@ -7,6 +7,7 @@ import { randomBytes } from 'node:crypto';
 import {
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   unlinkSync,
@@ -34,6 +35,7 @@ import {
   type BaselineReceipt,
   type EstateBranch,
   type EstateFinding,
+  type EstateScanCapture,
   type EstateSnapshot,
   type EstateSnapshotWithoutHash,
   type EstateStash,
@@ -47,27 +49,21 @@ import {
   type WorktreeStatus,
 } from './lib/git-estate-model.ts';
 
+import {
+  isValidBranchName,
+  parseBranches,
+  parseStashes,
+  parseStatus,
+  parseWorktreePorcelain,
+} from './lib/git-estate-parsers.ts';
+
+export { parseBranches, parseStashes, parseStatus, parseWorktreePorcelain };
+
 // Retain the guard's existing parser API after moving its object-ID predicate.
 export { isFullObjectId };
 
 const SCHEMA_VERSION = 1 as const;
 const BASELINE_NAME = 'git-estate-baseline.v2.json';
-const ORDINARY_XY = new Set([
-  '.M', '.T', '.A', '.D',
-  'M.', 'MM', 'MT', 'MD',
-  'T.', 'TM', 'TT', 'TD',
-  'A.', 'AM', 'AT', 'AD',
-  'D.',
-]);
-const RENAME_XY = new Set([
-  'R.', 'RM', 'RT', 'RD',
-  'C.', 'CM', 'CT', 'CD',
-  '.R', '.C',
-]);
-const UNMERGED_XY_PATTERN = /^(?:DD|AU|UD|UA|DU|AA|UU)$/;
-const SUBMODULE_STATE_PATTERN = /^(?:N\.\.\.|S[.C][.M][.U])$/;
-const FILE_MODE_PATTERN = /^[0-7]{6}$/;
-const RENAME_SCORE_PATTERN = /^([RC])(?:100|[1-9]?\d)$/;
 const DEFAULT_GIT_TIMEOUT_MS = 5_000;
 const MAX_GIT_TIMEOUT_MS = 30_000;
 const STATUS_SCAN_CONCURRENCY = 4;
@@ -76,22 +72,25 @@ const MAX_STASH_CLOSURE_OBJECTS = 100_000;
 /**
  * Reasons that are reported but never block a push.
  *
- * `estate_count_growth` is advisory because the ratchet is repo-global while the
- * repo is worked by several agents at once. Measured 2026-07-26: this guard
- * blocked a push whose entire recorded growth — 5 of 5 new worktrees and 6 of 8
- * new branches — belonged to a *different* agent working the same repo. Growth
- * is an ID SET DIFFERENCE against the baseline, so retiring unrelated work
- * cannot offset it (deleting 27 branches, 77 -> 67, moved countGrowth by zero).
- * The pushing agent's only remedy was a global accept-all (`baseline write`),
- * which simultaneously launders every co-agent's conflicts, stashes, locks,
- * and gone branches into the new floor. A gate whose sole remedy is to disarm
- * the gate is not a gate.
+ * A shared repository can contain worktrees that the pusher cannot retire or
+ * repair. Critical debt blocks only for the invoking worktree, its checked-out
+ * or operation branch,
+ * pushed local branches, and worktrees checking out those branches. Stashes
+ * with unknown branches and debt outside that scope remain visible advisories.
+ * Pre-push scans status only in that scope: other lanes' conflicts, dirty files,
+ * and untracked files are not reported. Topology and refs remain repository-wide
+ * advisories. Every scan error, scoped or unattributed drift, stash or common-dir
+ * drift, and invalid baselines still block. Pre-commit stays warn-only; it and
+ * snapshot retain full repository status scans, as do both baseline commands.
  *
- * Integrity reasons stay blocking: a corrupt baseline, an incomplete or racing
- * scan, new conflicts, and new critical housekeeping debt all describe a repo
- * state the pusher CAN act on.
+ * Estate growth remains advisory because its baseline identity difference is
+ * repository-wide; retiring unrelated work cannot offset another lane's growth.
  */
-const ADVISORY_REASONS = new Set(['estate_count_growth']);
+const ADVISORY_REASONS = new Set([
+  'estate_count_growth',
+  'other_lane_critical_debt',
+  'other_worktree_scan_racing',
+]);
 
 function cleanGitEnvironment(): NodeJS.ProcessEnv {
   return { ...cleanGitEnv(), GIT_OPTIONAL_LOCKS: '0' };
@@ -168,325 +167,6 @@ function requireGit(cwd: string, args: string[], label: string, input?: string):
   return result.stdout;
 }
 
-export function parseWorktreePorcelain(raw: string): WorktreePorcelain[] {
-  const records: WorktreePorcelain[] = [];
-  let current: (Partial<WorktreePorcelain> & { bare?: boolean }) | null = null;
-  let phase: 'identity' | 'checkout' | 'annotations' = 'identity';
-  if (!raw.endsWith('\0\0')) {
-    throw new GitEstateError(
-      'worktree_parse_failed',
-      'worktree porcelain omitted its final record terminator',
-    );
-  }
-  const finish = (): void => {
-    if (current === null) {
-      throw new GitEstateError('worktree_parse_failed', 'unexpected empty worktree record');
-    }
-    if (
-      !current.path
-      || (current.bare !== true && (
-        current.head === undefined
-        || (current.branch === undefined && current.detached !== true)
-      ))
-    ) {
-      throw new GitEstateError('worktree_parse_failed', 'incomplete worktree record');
-    }
-    records.push({
-      path: current.path,
-      head: current.head ?? null,
-      branch: current.branch ?? null,
-      detached: current.detached ?? false,
-      locked: current.locked ?? false,
-      lockReason: current.lockReason ?? null,
-      prunable: current.prunable ?? false,
-      pruneReason: current.pruneReason ?? null,
-    });
-    current = null;
-    phase = 'identity';
-  };
-
-  const tokens = raw.split('\0');
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index]!;
-    if (index === tokens.length - 1) {
-      if (token !== '' || current !== null) {
-        throw new GitEstateError('worktree_parse_failed', 'invalid worktree record framing');
-      }
-      continue;
-    }
-    if (token === '') {
-      finish();
-      continue;
-    }
-    const space = token.indexOf(' ');
-    const key = space < 0 ? token : token.slice(0, space);
-    const value = space < 0 ? '' : token.slice(space + 1);
-    if (current === null) {
-      if (key !== 'worktree' || !value) {
-        throw new GitEstateError(
-          'worktree_parse_failed',
-          'worktree must be the first attribute of every record',
-        );
-      }
-      current = { path: value };
-      phase = 'identity';
-      continue;
-    }
-    switch (key) {
-      case 'HEAD':
-        if (phase !== 'identity' || current.head !== undefined || !isFullObjectId(value)) {
-          throw new GitEstateError('worktree_parse_failed', 'invalid worktree HEAD identity');
-        }
-        current.head = value;
-        phase = 'checkout';
-        break;
-      case 'branch':
-        if (phase !== 'checkout' || !/^refs\/heads\/\S+$/.test(value)) {
-          throw new GitEstateError('worktree_parse_failed', 'invalid worktree branch identity');
-        }
-        current.branch = value.slice('refs/heads/'.length);
-        phase = 'annotations';
-        break;
-      case 'detached':
-        if (phase !== 'checkout' || value) {
-          throw new GitEstateError('worktree_parse_failed', 'invalid detached worktree marker');
-        }
-        current.detached = true;
-        phase = 'annotations';
-        break;
-      case 'locked':
-        if (
-          phase !== 'annotations'
-          || current.bare === true
-          || current.locked === true
-          || current.prunable === true
-        ) {
-          throw new GitEstateError('worktree_parse_failed', 'invalid locked worktree marker');
-        }
-        current.locked = true;
-        current.lockReason = value || null;
-        break;
-      case 'prunable':
-        if (
-          phase !== 'annotations'
-          || current.bare === true
-          || current.locked === true
-          || current.prunable === true
-          || !value
-        ) {
-          throw new GitEstateError('worktree_parse_failed', 'invalid prunable worktree marker');
-        }
-        current.prunable = true;
-        current.pruneReason = value;
-        break;
-      case 'bare':
-        if (phase !== 'identity' || value) {
-          throw new GitEstateError('worktree_parse_failed', 'invalid bare worktree marker');
-        }
-        current.bare = true;
-        phase = 'annotations';
-        break;
-      default:
-        throw new GitEstateError('worktree_parse_failed', `unknown worktree field: ${key}`);
-    }
-  }
-  if (records.length === 0) {
-    throw new GitEstateError('worktree_parse_failed', 'git returned no worktree records');
-  }
-  return records;
-}
-
-export function parseStatus(raw: string): WorktreeStatus {
-  if (!raw.endsWith('\0')) {
-    throw new GitEstateError(
-      'status_parse_failed',
-      'porcelain-v2 status omitted its final NUL terminator',
-    );
-  }
-  const tokens = raw.slice(0, -1).split('\0');
-  if (tokens.some((token) => token.length === 0)) {
-    throw new GitEstateError(
-      'status_parse_failed',
-      'porcelain-v2 status contained an empty record',
-    );
-  }
-  const status: WorktreeStatus = {
-    branchOid: null,
-    branchHead: null,
-    branchUpstream: null,
-    ahead: 0,
-    behind: 0,
-    tracked: [],
-    untracked: [],
-    conflicts: [],
-    conflictOperationMarker: null,
-    conflictOperationReliable: false,
-  };
-  let branchOidSeen = false;
-  let branchHeadSeen = false;
-  for (let index = 0; index < tokens.length; index++) {
-    const token = tokens[index]!;
-    if (token.startsWith('# ')) {
-      const body = token.slice(2);
-      const space = body.indexOf(' ');
-      const key = space < 0 ? body : body.slice(0, space);
-      const value = space < 0 ? '' : body.slice(space + 1);
-      if (key === 'branch.oid') {
-        if (branchOidSeen || (value !== '(initial)' && !isFullObjectId(value))) {
-          throw new GitEstateError('status_parse_failed', 'invalid branch.oid header');
-        }
-        branchOidSeen = true;
-        status.branchOid = value === '(initial)' ? null : value;
-      } else if (key === 'branch.head') {
-        if (branchHeadSeen || !value) {
-          throw new GitEstateError('status_parse_failed', 'invalid branch.head header');
-        }
-        branchHeadSeen = true;
-        status.branchHead = value === '(detached)' ? null : value;
-      }
-      else if (key === 'branch.upstream') status.branchUpstream = value || null;
-      else if (key === 'branch.ab') {
-        const match = /^\+(\d+) -(\d+)$/.exec(value);
-        if (!match) throw new GitEstateError('status_parse_failed', 'invalid branch.ab header');
-        status.ahead = Number(match[1]);
-        status.behind = Number(match[2]);
-      }
-      continue;
-    }
-
-    if (!branchOidSeen || !branchHeadSeen) {
-      throw new GitEstateError(
-        'status_parse_failed',
-        'porcelain-v2 status record preceded mandatory branch identity headers',
-      );
-    }
-    const kind = token[0];
-    if (kind === '?') {
-      const untrackedPath = token.startsWith('? ') ? token.slice(2) : '';
-      if (!untrackedPath) {
-        throw new GitEstateError('status_parse_failed', 'invalid untracked status record');
-      }
-      status.untracked.push(untrackedPath);
-      continue;
-    }
-    if (kind === '!') {
-      if (!token.startsWith('! ') || !token.slice(2)) {
-        throw new GitEstateError('status_parse_failed', 'invalid ignored status record');
-      }
-      continue;
-    }
-    if (kind === '1') {
-      const record = splitFixedStatusFields(token, 8);
-      if (
-        !record
-        || record.fields[0] !== '1'
-        || !isValidTrackedStatusFields(record.fields, ORDINARY_XY)
-      ) {
-        throw new GitEstateError('status_parse_failed', 'invalid ordinary status record');
-      }
-      const xy = record.fields[1]!;
-      status.tracked.push({
-        xy,
-        path: record.remainder,
-        staged: xy[0] !== '.',
-        unstaged: xy[1] !== '.',
-      });
-      continue;
-    }
-    if (kind === '2') {
-      const record = splitFixedStatusFields(token, 9);
-      const originalPath = tokens[index + 1] ?? '';
-      if (
-        !record
-        || record.fields[0] !== '2'
-        || !isValidTrackedStatusFields(record.fields, RENAME_XY)
-        || !isValidRenameScore(record.fields[1]!, record.fields[8]!)
-        || !originalPath
-      ) {
-        throw new GitEstateError('status_parse_failed', 'invalid rename/copy status record');
-      }
-      index += 1;
-      const xy = record.fields[1]!;
-      status.tracked.push({
-        xy,
-        path: record.remainder,
-        originalPath,
-        staged: xy[0] !== '.',
-        unstaged: xy[1] !== '.',
-      });
-      continue;
-    }
-    if (kind === 'u') {
-      const record = splitFixedStatusFields(token, 10);
-      const stageOids = record?.fields.slice(7, 10) ?? [];
-      if (
-        !record
-        || record.fields[0] !== 'u'
-        || !UNMERGED_XY_PATTERN.test(record.fields[1]!)
-        || !SUBMODULE_STATE_PATTERN.test(record.fields[2]!)
-        || !record.fields.slice(3, 7).every((mode) => FILE_MODE_PATTERN.test(mode))
-        || stageOids.length !== 3
-        || !stageOids.every(isFullObjectId)
-      ) {
-        throw new GitEstateError('status_parse_failed', 'invalid unmerged stage identities');
-      }
-      const xy = record.fields[1]!;
-      status.conflicts.push({
-        xy,
-        path: record.remainder,
-        stageOids: stageOids as [string, string, string],
-      });
-      continue;
-    }
-    throw new GitEstateError('status_parse_failed', `unknown porcelain status record: ${kind}`);
-  }
-  if (!branchOidSeen || !branchHeadSeen) {
-    throw new GitEstateError(
-      'status_parse_failed',
-      'porcelain-v2 status omitted mandatory branch.oid or branch.head headers',
-    );
-  }
-  status.tracked.sort((a, b) => compareText(a.path, b.path) || compareText(a.xy, b.xy));
-  status.untracked.sort(compareText);
-  status.conflicts.sort((a, b) => compareText(a.path, b.path) || compareText(a.xy, b.xy));
-  return status;
-}
-
-function isValidTrackedStatusFields(
-  fields: string[],
-  allowedXy: ReadonlySet<string>,
-): boolean {
-  return (
-    allowedXy.has(fields[1]!)
-    && SUBMODULE_STATE_PATTERN.test(fields[2]!)
-    && fields.slice(3, 6).every((mode) => FILE_MODE_PATTERN.test(mode))
-    && fields.slice(6, 8).every(isFullObjectId)
-  );
-}
-
-function isValidRenameScore(xy: string, score: string): boolean {
-  const match = RENAME_SCORE_PATTERN.exec(score);
-  return match !== null && xy.includes(match[1]!);
-}
-
-function splitFixedStatusFields(
-  token: string,
-  fixedFieldCount: number,
-): { fields: string[]; remainder: string } | null {
-  const fields: string[] = [];
-  let cursor = 0;
-  for (let index = 0; index < fixedFieldCount; index += 1) {
-    const separator = token.indexOf(' ', cursor);
-    if (separator < 0) return null;
-    const field = token.slice(cursor, separator);
-    if (!field) return null;
-    fields.push(field);
-    cursor = separator + 1;
-  }
-  const remainder = token.slice(cursor);
-  return remainder ? { fields, remainder } : null;
-}
-
 const OPERATION_ANCHORS = [
   'MERGE_HEAD',
   'CHERRY_PICK_HEAD',
@@ -499,9 +179,7 @@ const OPERATION_ANCHORS = [
   'sequencer/head',
 ] as const;
 
-function readConflictOperationInstance(
-  worktreePath: string,
-): { marker: string | null; reliable: boolean } {
+function resolveWorktreeGitDir(worktreePath: string): string {
   const gitDirRaw = requireGit(
     worktreePath,
     ['rev-parse', '--path-format=absolute', '--git-dir'],
@@ -510,7 +188,79 @@ function readConflictOperationInstance(
   if (!path.isAbsolute(gitDirRaw)) {
     throw new GitEstateError('git_dir_invalid', 'worktree git directory is not absolute');
   }
-  const gitDir = path.normalize(gitDirRaw);
+  return path.normalize(gitDirRaw);
+}
+
+function readOperationBranch(gitDir: string): string | null {
+  for (const file of ['rebase-merge/head-name', 'rebase-apply/head-name', 'BISECT_START']) {
+    try {
+      const value = readFileSync(path.join(gitDir, file), 'utf8').trim();
+      const bisect = file === 'BISECT_START';
+      // Git records a detached operation as an object ID (bisect) or this marker (rebase).
+      if (bisect ? isFullObjectId(value) : value === 'detached HEAD') return null;
+      let branch = value;
+      if (!bisect) branch = value.startsWith('refs/heads/') ? value.slice('refs/heads/'.length) : '';
+      if (isValidBranchName(branch)) return branch;
+      // Anything else leaves scope unproven; the caller reports it without the file's text.
+      throw new GitEstateError('operation_branch_attribution_failed', 'invalid operation metadata');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
+  }
+  return null;
+}
+
+function attributeOperationBranches(
+  commonDir: string,
+  worktrees: WorktreePorcelain[],
+): { worktrees: EstateScanCapture['worktrees']; errors: ScanError[] } {
+  const primaryPath = worktrees[0]!.path;
+  const gitDirs = new Map<string, string>([[primaryPath, commonDir]]);
+  let adminReadFailed = false;
+  if (worktrees.some((worktree) => worktree.detached && worktree.path !== primaryPath)) {
+    const adminRoot = path.join(commonDir, 'worktrees');
+    try {
+      for (const entry of readdirSync(adminRoot, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const adminDir = path.join(adminRoot, entry.name);
+        try {
+          const gitFile = path.resolve(adminDir, readFileSync(path.join(adminDir, 'gitdir'), 'utf8').trim());
+          if (path.basename(gitFile) === '.git') gitDirs.set(path.dirname(gitFile), adminDir);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+      }
+    } catch (error) {
+      adminReadFailed = (error as NodeJS.ErrnoException).code !== 'ENOENT';
+    }
+  }
+  const errors: ScanError[] = [];
+  const attributed = worktrees.map((worktree) => {
+    let operationBranch: string | null = null;
+    if (worktree.detached) {
+      try {
+        const gitDir = gitDirs.get(worktree.path);
+        if (gitDir === undefined || (adminReadFailed && worktree.path !== primaryPath)) {
+          throw new GitEstateError('operation_branch_attribution_failed', 'registered worktree admin directory unavailable');
+        }
+        operationBranch = readOperationBranch(gitDir);
+      } catch {
+        errors.push({
+          kind: 'operation_branch_attribution_failed',
+          message: 'cannot attribute the operation branch of one detached worktree',
+          worktree: worktree.path,
+        });
+      }
+    }
+    return { ...worktree, operationBranch };
+  });
+  return { worktrees: attributed, errors };
+}
+
+function readConflictOperationInstance(
+  gitDir: string,
+): { marker: string | null; reliable: boolean } {
   for (const anchor of OPERATION_ANCHORS) {
     const anchorPath = path.join(gitDir, anchor);
     try {
@@ -550,48 +300,6 @@ function readConflictOperationInstance(
   return { marker: null, reliable: false };
 }
 
-export function parseBranches(raw: string): EstateBranch[] {
-  const branches: EstateBranch[] = [];
-  for (const line of raw.split('\n')) {
-    if (!line) continue;
-    const [name = '', oid = '', upstreamValue = '', trackValue = ''] = line.split('\0');
-    if (!name || !isFullObjectId(oid)) {
-      throw new GitEstateError('branch_parse_failed', 'invalid local branch record');
-    }
-    const track = trackValue.trim();
-    const gone = track === 'gone';
-    const ahead = Number(/\bahead (\d+)\b/.exec(track)?.[1] ?? 0);
-    const behind = Number(/\bbehind (\d+)\b/.exec(track)?.[1] ?? 0);
-    branches.push({
-      name,
-      oid,
-      upstream: upstreamValue || null,
-      ahead,
-      behind,
-      gone,
-    });
-  }
-  return branches.sort((a, b) => compareText(a.name, b.name));
-}
-
-export function parseStashes(raw: string): EstateStash[] {
-  const stashes: EstateStash[] = [];
-  for (const line of raw.split('\n')) {
-    if (!line) continue;
-    const [oid = '', parentsValue = ''] = line.split('\0');
-    if (!isFullObjectId(oid)) {
-      throw new GitEstateError('stash_parse_failed', 'invalid stash object identity');
-    }
-    const parents = parentsValue.split(' ').filter(Boolean).sort(compareText);
-    if (!parents.every(isFullObjectId)) {
-      throw new GitEstateError('stash_parse_failed', 'invalid stash parent identity');
-    }
-    stashes.push({ oid, parents });
-  }
-  stashes.sort((a, b) => compareText(a.oid, b.oid));
-  return stashes;
-}
-
 function readStashes(cwd: string): { raw: string; stashes: EstateStash[] } {
   const exists = runGit(cwd, ['show-ref', '--verify', '--quiet', 'refs/stash']);
   if (exists.status === 1) return { raw: '', stashes: [] };
@@ -600,7 +308,7 @@ function readStashes(cwd: string): { raw: string; stashes: EstateStash[] } {
   }
   const raw = requireGit(
     cwd,
-    ['reflog', 'show', '--format=%H%x00%P%x00', 'refs/stash'],
+    ['reflog', 'show', '--format=%H%x00%P%x00%gs%x00', 'refs/stash'],
     'stash identity scan',
   );
   return { raw, stashes: parseStashes(raw) };
@@ -609,9 +317,12 @@ function readStashes(cwd: string): { raw: string; stashes: EstateStash[] } {
 interface CommonCapture {
   commonDir: string;
   fingerprint: string;
-  worktrees: WorktreePorcelain[];
+  worktrees: EstateScanCapture['worktrees'];
   branches: EstateBranch[];
   stashes: EstateStash[];
+  refHashes: Record<string, string>;
+  stashHash: string;
+  errors: ScanError[];
 }
 
 function resolveCommonDir(cwd: string): string {
@@ -637,7 +348,7 @@ function captureCommonState(cwd: string): CommonCapture {
     cwd,
     [
       'for-each-ref',
-      '--format=%(refname:short)%00%(objectname)%00%(upstream:short)%00%(upstream:track,nobracket)%00',
+      '--format=%(refname:short)%00%(objectname)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(refname:lstrip=2)%00',
       'refs/heads',
     ],
     'local branch scan',
@@ -654,18 +365,32 @@ function captureCommonState(cwd: string): CommonCapture {
     'common ref scan',
   );
   const stash = readStashes(cwd);
+  const branches = parseBranches(branchRaw);
+  const localNames = new Set(branches.map(({ scopeName }) => scopeName));
+  const topology = attributeOperationBranches(commonDir, parseWorktreePorcelain(worktreeRaw));
+  // Display names can change when a tag collides; canonical state must not.
+  const canonicalBranchRaw = branchRaw.split('\n').map((line) => line.split('\0').slice(1).join('\0')).join('\n');
   return {
     commonDir,
     fingerprint: sha256(stableJson({
       commonDir,
       worktreeRaw,
-      branchRaw,
+      operationBranches: topology.worktrees.map(({ path, operationBranch }) => ({ path, operationBranch })),
+      branchRaw: canonicalBranchRaw,
       refRaw,
       stashRaw: stash.raw,
     })),
-    worktrees: parseWorktreePorcelain(worktreeRaw),
-    branches: parseBranches(branchRaw),
-    stashes: stash.stashes,
+    worktrees: topology.worktrees,
+    errors: topology.errors,
+    branches,
+    stashes: stash.stashes.map((entry) => ({
+      ...entry,
+      branch: entry.branch !== null && localNames.has(entry.branch) ? entry.branch : null,
+    })),
+    refHashes: Object.fromEntries(refRaw.split('\n').filter(Boolean).map((line) => [
+      line.split('\0')[0]!, sha256(line),
+    ])),
+    stashHash: sha256(stash.raw),
   };
 }
 
@@ -782,6 +507,7 @@ function buildFindings(
       id: findingId('stash', stash.oid),
       kind: 'stash',
       oid: stash.oid,
+      branch: stash.branch ?? undefined,
     });
   }
   findings.sort((a, b) => compareText(a.id, b.id));
@@ -790,6 +516,7 @@ function buildFindings(
 
 interface WorktreeStatusScan {
   fingerprint: string;
+  statusHashes: Record<string, string>;
   worktrees: EstateWorktree[];
   errors: ScanError[];
 }
@@ -824,13 +551,16 @@ async function mapWithBoundedConcurrency<T, U>(
 }
 
 async function scanWorktreeStatuses(
-  worktrees: WorktreePorcelain[],
+  worktrees: EstateScanCapture['worktrees'],
   primaryPath: string,
+  scopedWorktreePaths?: ReadonlySet<string>,
 ): Promise<WorktreeStatusScan> {
-  const orderedWorktrees = [...worktrees].sort(
+  const orderedWorktrees = worktrees.filter((worktree) =>
+    scopedWorktreePaths === undefined || scopedWorktreePaths.has(worktree.path)
+  ).sort(
     (a, b) => compareText(a.path, b.path),
   );
-  const results = await mapWithBoundedConcurrency<WorktreePorcelain, WorktreeStatusResult>(
+  const results = await mapWithBoundedConcurrency<EstateScanCapture['worktrees'][number], WorktreeStatusResult>(
     orderedWorktrees,
     STATUS_SCAN_CONCURRENCY,
     async (worktree) => {
@@ -852,25 +582,25 @@ async function scanWorktreeStatuses(
         stdout: result.stdout,
         error: result.error ?? null,
       };
-      if (result.status !== 0) {
-        return {
-          capture,
-          worktree: {
-            ...worktree,
-            primary: worktree.path === primaryPath,
-            status: null,
-          } satisfies EstateWorktree,
-          error: {
-            kind: 'worktree_status_failed',
-            message: `status scan failed for one registered worktree (exit ${String(result.status)})`,
-            worktree: worktree.path,
-          } satisfies ScanError,
-        };
-      }
       try {
+        if (result.status !== 0) {
+          return {
+            capture,
+            worktree: {
+              ...worktree,
+              primary: worktree.path === primaryPath,
+              status: null,
+            } satisfies EstateWorktree,
+            error: {
+              kind: 'worktree_status_failed',
+              message: `status scan failed for one registered worktree (exit ${String(result.status)})`,
+              worktree: worktree.path,
+            } satisfies ScanError,
+          };
+        }
         const parsedStatus = parseStatus(result.stdout);
         if (parsedStatus.conflicts.length > 0) {
-          const operation = readConflictOperationInstance(worktree.path);
+          const operation = readConflictOperationInstance(resolveWorktreeGitDir(worktree.path));
           parsedStatus.conflictOperationMarker = operation.marker;
           parsedStatus.conflictOperationReliable = operation.reliable;
         }
@@ -900,33 +630,70 @@ async function scanWorktreeStatuses(
       }
     },
   );
-  const captures: Array<{
-    path: string;
-    status: number | null;
-    stdout: string;
-    error: string | null;
-  }> = results.map(({ capture }) => capture);
-  const estateWorktrees = results.map(({ worktree }) => worktree);
+  const statusHashes = Object.fromEntries(results.map(({ capture, worktree }) => [
+    worktree.path,
+    sha256(stableJson({
+      capture,
+      operationBranch: worktree.operationBranch,
+      marker: worktree.status?.conflictOperationMarker ?? null,
+      reliable: worktree.status?.conflictOperationReliable ?? false,
+    })),
+  ]));
+  const scanned = new Map(results.map(({ worktree }) => [worktree.path, worktree]));
+  const estateWorktrees = worktrees.map((worktree) => scanned.get(worktree.path) ?? {
+    ...worktree, primary: worktree.path === primaryPath, status: null,
+  }).sort((a, b) => compareText(a.path, b.path));
   const errors: ScanError[] = results
     .map(({ error }) => error)
     .filter((error): error is ScanError => error !== null);
   return {
-    fingerprint: sha256(stableJson({
-      captures,
-      operationInstances: estateWorktrees.map(({ path: worktreePath, status }) => ({
-        path: worktreePath,
-        marker: status?.conflictOperationMarker ?? null,
-        reliable: status?.conflictOperationReliable ?? false,
-      })),
-    })),
+    fingerprint: sha256(stableJson(statusHashes)),
+    statusHashes,
     worktrees: estateWorktrees,
     errors,
+  };
+}
+
+function consistencyCapture(common: CommonCapture, status: WorktreeStatusScan): EstateScanCapture {
+  return {
+    commonDir: common.commonDir,
+    worktrees: status.worktrees.map(({ status: _status, primary: _primary, ...topology }) => topology),
+    statusHashes: status.statusHashes,
+    branchHashes: Object.fromEntries(common.branches.map(({ name: _name, ...branch }) => [
+      branch.scopeName, sha256(stableJson(branch)),
+    ])),
+    refHashes: common.refHashes,
+    stashHash: common.stashHash,
+  };
+}
+
+function pusherScope(
+  worktrees: EstateScanCapture['worktrees'],
+  invokingWorktreePath: string,
+  pushLocalRefs: string[],
+): { scopedBranchNames: Set<string>; scopedWorktreePaths: Set<string> } {
+  const scopedBranchNames = new Set(pushLocalRefs.map((ref) => ref.slice('refs/heads/'.length)));
+  for (const worktree of worktrees) {
+    if (worktree.path !== invokingWorktreePath) continue;
+    if (worktree.branch !== null) scopedBranchNames.add(worktree.branch);
+    if (worktree.operationBranch !== null) scopedBranchNames.add(worktree.operationBranch);
+  }
+  return {
+    scopedBranchNames,
+    scopedWorktreePaths: new Set([
+      invokingWorktreePath,
+      ...worktrees.filter(({ branch, operationBranch }) =>
+        (branch !== null && scopedBranchNames.has(branch))
+        || (operationBranch !== null && scopedBranchNames.has(operationBranch))
+      ).map((worktree) => worktree.path),
+    ]),
   };
 }
 
 async function collectSnapshot(
   cwd: string,
   consistency: SnapshotConsistency = 'verified',
+  pushLocalRefs?: string[],
 ): Promise<EstateSnapshot> {
   const start = captureCommonState(cwd);
   const invokingWorktreePathRaw = requireGit(
@@ -948,8 +715,13 @@ async function collectSnapshot(
     );
   }
   const primaryPath = start.worktrees[0]!.path;
-  const initialStatus = await scanWorktreeStatuses(start.worktrees, primaryPath);
-  const errors = [...initialStatus.errors];
+  const statusScope = pushLocalRefs === undefined ? 'repository' : 'pusher';
+  const initialScope = pushLocalRefs === undefined ? undefined
+    : pusherScope(start.worktrees, invokingWorktreePath, pushLocalRefs).scopedWorktreePaths;
+  const initialStatus = await scanWorktreeStatuses(start.worktrees, primaryPath, initialScope);
+  const errors = [...start.errors, ...initialStatus.errors];
+  const consistencyStart = consistencyCapture(start, initialStatus);
+  let consistencyEnd: EstateScanCapture | null = null;
   let endFingerprint = start.fingerprint;
   let endStatusFingerprint = initialStatus.fingerprint;
   let racing = false;
@@ -957,7 +729,13 @@ async function collectSnapshot(
     try {
       const end = captureCommonState(cwd);
       endFingerprint = end.fingerprint;
-      const finalStatus = await scanWorktreeStatuses(end.worktrees, primaryPath);
+      const finalScope = pushLocalRefs === undefined ? undefined
+        : pusherScope([...start.worktrees, ...end.worktrees], invokingWorktreePath, pushLocalRefs).scopedWorktreePaths;
+      const finalStatus = await scanWorktreeStatuses(end.worktrees, primaryPath, finalScope);
+      for (const error of end.errors) {
+        if (!errors.some((existing) => existing.kind === error.kind && existing.worktree === error.worktree)) errors.push(error);
+      }
+      consistencyEnd = consistencyCapture(end, finalStatus);
       endStatusFingerprint = finalStatus.fingerprint;
       const initialFailedPaths = new Set(
         initialStatus.errors.map(({ worktree }) => worktree).filter(Boolean),
@@ -988,10 +766,13 @@ async function collectSnapshot(
     commonDir: start.commonDir,
     baselinePath: path.join(start.commonDir, 'whatsoup', BASELINE_NAME),
     invokingWorktreePath,
+    statusScope,
     topologyFingerprintStart: start.fingerprint,
     topologyFingerprintEnd: endFingerprint,
     statusFingerprintStart: initialStatus.fingerprint,
     statusFingerprintEnd: endStatusFingerprint,
+    consistencyStart,
+    consistencyEnd,
     incomplete: errors.length > 0 || racing,
     racing,
     worktrees: initialStatus.worktrees,
@@ -1016,6 +797,75 @@ function warningCounts(findings: EstateFinding[]): Record<string, number> {
   return Object.fromEntries(
     Object.entries(counts).sort(([a], [b]) => compareText(a, b)),
   );
+}
+
+function changedCaptureKeys(start: Record<string, string>, end: Record<string, string>): string[] {
+  return [...new Set([...Object.keys(start), ...Object.keys(end)])]
+    .filter((key) => start[key] !== end[key]);
+}
+
+export function classifyRacing(
+  snapshot: EstateSnapshot,
+  scopedWorktreePaths: ReadonlySet<string>,
+  scopedBranchNames: ReadonlySet<string>,
+): Pick<GuardDecision, 'scopedRacing' | 'scopedRacingWorktrees' | 'scopedRacingBranches' | 'advisoryRacingWorktrees' | 'advisoryRacingBranches'> {
+  const start = snapshot.consistencyStart;
+  const end = snapshot.consistencyEnd;
+  if (!snapshot.racing || end === null) {
+    return {
+      scopedRacing: snapshot.racing,
+      scopedRacingWorktrees: [],
+      scopedRacingBranches: [],
+      advisoryRacingWorktrees: [],
+      advisoryRacingBranches: [],
+    };
+  }
+  let scopedRacing = start.commonDir !== end.commonDir || start.stashHash !== end.stashHash;
+  const scopedRacingWorktrees = new Set<string>();
+  const scopedRacingBranches = new Set<string>();
+  const advisoryRacingWorktrees = new Set<string>();
+  const advisoryRacingBranches = new Set<string>();
+  const topologyHashes = (capture: EstateScanCapture): Record<string, string> => Object.fromEntries(
+    capture.worktrees.map((worktree) => [worktree.path, sha256(stableJson(worktree))]),
+  );
+  const changedWorktreeTopology = changedCaptureKeys(topologyHashes(start), topologyHashes(end));
+  for (const worktree of new Set([
+    ...changedCaptureKeys(start.statusHashes, end.statusHashes),
+    ...changedWorktreeTopology,
+  ])) {
+    if (scopedWorktreePaths.has(worktree)) {
+      scopedRacing = true;
+      scopedRacingWorktrees.add(worktree);
+    }
+    else advisoryRacingWorktrees.add(worktree);
+  }
+  const changedBranches = new Set(changedCaptureKeys(start.branchHashes, end.branchHashes));
+  const changedRefs = changedCaptureKeys(start.refHashes, end.refHashes);
+  const parsedTopologyChanged = scopedRacing || changedWorktreeTopology.length > 0
+    || changedBranches.size > 0 || changedRefs.length > 0;
+  for (const ref of changedRefs) {
+    if (ref === 'refs/stash') scopedRacing = true;
+    else changedBranches.add(ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : ref);
+  }
+  for (const branch of changedBranches) {
+    if (scopedBranchNames.has(branch)) {
+      scopedRacing = true;
+      scopedRacingBranches.add(branch);
+    }
+    else advisoryRacingBranches.add(branch);
+  }
+  if ((snapshot.topologyFingerprintStart !== snapshot.topologyFingerprintEnd && !parsedTopologyChanged)
+    || (!scopedRacing && advisoryRacingWorktrees.size === 0 && advisoryRacingBranches.size === 0)) {
+    // Unattributed drift cannot be proven out of scope.
+    scopedRacing = true;
+  }
+  return {
+    scopedRacing,
+    scopedRacingWorktrees: [...scopedRacingWorktrees].sort(compareText),
+    scopedRacingBranches: [...scopedRacingBranches].sort(compareText),
+    advisoryRacingWorktrees: [...advisoryRacingWorktrees].sort(compareText),
+    advisoryRacingBranches: [...advisoryRacingBranches].sort(compareText),
+  };
 }
 
 function decideGuard(
@@ -1064,13 +914,44 @@ function decideGuard(
   const invokingWorktreeId = invokingWorktree
     ? worktreeId(invokingWorktree.path)
     : null;
-  const invokingBranchId = invokingWorktree?.branch
-    ? branchId(invokingWorktree.branch)
+  const invokingBranch = snapshot.branches.find(({ scopeName }) => scopeName === invokingWorktree?.branch);
+  const invokingBranchId = invokingBranch
+    ? branchId(invokingBranch.name)
     : null;
   const invokingBranchName = invokingWorktree?.branch ?? null;
   const pushedBranchNames = new Set(
     pushLocalRefs.map((ref) => ref.slice('refs/heads/'.length)),
   );
+  // Both passes matter: leaving or entering a pushed branch must not hide drift.
+  const capturedWorktrees = [
+    ...snapshot.consistencyStart.worktrees,
+    ...(snapshot.consistencyEnd?.worktrees ?? []),
+  ];
+  const { scopedBranchNames, scopedWorktreePaths } = pusherScope(
+    capturedWorktrees, snapshot.invokingWorktreePath, pushLocalRefs,
+  );
+  const racingDecision = classifyRacing(snapshot, scopedWorktreePaths, scopedBranchNames);
+  const findingIsInScope = (finding: EstateFinding): boolean => {
+    // Pre-commit reports all actionable IDs as blockingFindingIds, with an empty
+    // advisoryFindingIds list; the phase still always returns blocked=false.
+    if (phase === 'pre-commit') return true;
+    if (finding.kind === 'branch_gone') {
+      const branch = snapshot.branches.find(({ name }) => name === finding.branch);
+      return branch !== undefined && scopedBranchNames.has(branch.scopeName);
+    }
+    if (finding.kind === 'stash') {
+      return finding.branch !== undefined && scopedBranchNames.has(finding.branch);
+    }
+    return finding.worktree !== undefined && scopedWorktreePaths.has(finding.worktree);
+  };
+  // Unreliable conflicts remain actionable even if their ID was baselined.
+  // Preserve the original ID lists and classify their union for the decision.
+  const actionableIds = new Set([...newConflictIds, ...newCriticalFindingIds]);
+  const actionableFindings = snapshot.findings.filter(({ id }) => actionableIds.has(id));
+  const blockingFindings = actionableFindings.filter(findingIsInScope);
+  const advisoryFindings = actionableFindings.filter((finding) => !findingIsInScope(finding));
+  const blockingFindingIds = blockingFindings.map(({ id }) => id).sort(compareText);
+  const advisoryFindingIds = advisoryFindings.map(({ id }) => id).sort(compareText);
   const exactInvokingBranchIsPushed = invokingBranchName !== null
     && pushedBranchNames.has(invokingBranchName);
   const exemptedWorktreeIds = (
@@ -1099,12 +980,19 @@ function decideGuard(
   };
   const reasons: string[] = [];
   if (baseline.state !== 'valid') reasons.push(`baseline_${baseline.state}`);
-  if (snapshot.incomplete) reasons.push('scan_incomplete');
-  if (snapshot.racing) reasons.push('scan_racing');
-  if (newConflictIds.length > 0) reasons.push('new_conflicts');
-  if (newCriticalFindingIds.some((id) => !newConflictIds.includes(id))) {
+  if (snapshot.incomplete && (
+    racingDecision.scopedRacing || (!snapshot.racing && snapshot.errors.length === 0)
+    || snapshot.errors.length > 0
+  )) reasons.push('scan_incomplete');
+  if (racingDecision.scopedRacing) reasons.push('scan_racing');
+  if (racingDecision.advisoryRacingWorktrees.length > 0 || racingDecision.advisoryRacingBranches.length > 0) {
+    reasons.push('other_worktree_scan_racing');
+  }
+  if (blockingFindings.some(({ kind }) => kind === 'conflict')) reasons.push('new_conflicts');
+  if (blockingFindings.some(({ kind }) => kind !== 'conflict')) {
     reasons.push('new_critical_housekeeping_debt');
   }
+  if (advisoryFindings.some(({ kind }) => kind !== 'conflict')) reasons.push('other_lane_critical_debt');
   if (countGrowth.worktrees > 0 || countGrowth.branches > 0) {
     reasons.push('estate_count_growth');
   }
@@ -1114,6 +1002,9 @@ function decideGuard(
     blocked: phase === 'pre-push' && blockingReasons.length > 0,
     newConflictIds,
     newCriticalFindingIds,
+    blockingFindingIds,
+    advisoryFindingIds,
+    ...racingDecision,
     countGrowth,
     newWorktreeIds,
     newBranchIds,
@@ -1188,6 +1079,45 @@ function printHumanGuard(
         : '') +
       '\n',
   );
+  for (const [findingLabel, ids] of [
+    ['BLOCK', phase === 'pre-push' ? decision.blockingFindingIds : []],
+    ['WARN', decision.advisoryFindingIds],
+  ] as const) {
+    const selected = new Set(ids);
+    const findings = snapshot.findings.filter(({ id }) => selected.has(id));
+    if (findingLabel === 'WARN' && findings.length > 0) {
+      process.stdout.write(`WARN git-estate other lanes: findings=${findings.length}\n`);
+    }
+    for (const finding of findings.slice(0, 10)) {
+      const location = finding.worktree !== undefined
+        ? `worktree=${JSON.stringify(finding.worktree)}`
+        : `branch=${JSON.stringify(finding.branch ?? '(unknown)')}`;
+      process.stdout.write(`${findingLabel} git-estate: ${finding.kind} ${location}\n`);
+    }
+    if (findings.length > 10) {
+      const kind = findingLabel === 'BLOCK' ? 'blocking' : 'advisory';
+      process.stdout.write(`${findingLabel} git-estate: ${findings.length - 10} more ${kind} findings; use --json for all\n`);
+    }
+  }
+  for (const [racingLabel, worktrees, branches, reason] of [
+    ['BLOCK', decision.scopedRacingWorktrees, decision.scopedRacingBranches, 'scan_racing'],
+    ['WARN', decision.advisoryRacingWorktrees, decision.advisoryRacingBranches, 'other_worktree_scan_racing'],
+  ] as const) {
+    const racingLocations = [
+      ...worktrees.map((worktree) => `worktree=${JSON.stringify(worktree)}`),
+      ...branches.map((branch) => `branch=${JSON.stringify(branch)}`),
+    ];
+    if (racingLocations.length === 0) continue;
+    process.stdout.write(
+      `${racingLabel} git-estate ${reason}: worktrees=${worktrees.length} branches=${branches.length}\n`,
+    );
+    for (const location of racingLocations.slice(0, 10)) {
+      process.stdout.write(`${racingLabel} git-estate: racing ${location}\n`);
+    }
+    if (racingLocations.length > 10) {
+      process.stdout.write(`${racingLabel} git-estate: ${racingLocations.length - 10} more racing locations; use --json for all\n`);
+    }
+  }
 }
 
 function diagnostic(message: string): void {
@@ -1347,6 +1277,7 @@ async function runGuardCommand(
     snapshot = await collectSnapshot(
       cwd,
       phase === 'pre-commit' ? 'single-pass' : 'verified',
+      phase === 'pre-push' ? pushLocalRefs : undefined,
     );
     baseline = readBaseline(snapshot);
   } catch (error) {
@@ -1372,6 +1303,13 @@ async function runGuardCommand(
         blocked: phase === 'pre-push',
         newConflictIds: [],
         newCriticalFindingIds: [],
+        blockingFindingIds: [],
+        advisoryFindingIds: [],
+        scopedRacing: false,
+        scopedRacingWorktrees: [],
+        scopedRacingBranches: [],
+        advisoryRacingWorktrees: [],
+        advisoryRacingBranches: [],
         countGrowth: { worktrees: 0, branches: 0 },
         newWorktreeIds: [],
         newBranchIds: [],

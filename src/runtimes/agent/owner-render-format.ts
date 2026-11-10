@@ -143,10 +143,8 @@ export type AvailableModelsListing = ProviderModelsListing;
  * STRUCTURAL vs TRANSIENT catalogue absence — a render-policy classifier. A
  * *structural* absence means no catalogue SOURCE exists for this harness at all,
  * so there is nothing to retry:
- *   - `no-key`     → NO anthropic credential whatsoever (neither the claude-cli's
- *                    OAuth token nor an ANTHROPIC_API_KEY). With OAuth sourcing a
- *                    healthy claude-cli harness is `ok`, so this now means the
- *                    credential is genuinely missing/broken — rare, not routine.
+ *   - `no-key`     → no API key configured for live catalogue discovery.
+ *                    The CLI login is separate and may still be usable.
  *   - `no-adapter` → the harness has no catalogue source wired at all (e.g. codex).
  *
  * SOLICITATION split (Q 2026-07-20): this predicate gates ONLY the UNSOLICITED /
@@ -229,7 +227,7 @@ export interface AvailableModelsInput {
 function unavailableMessage(reason: UnavailableReason): string {
   switch (reason.kind) {
     case 'no-key':
-      return 'no anthropic credential reachable on this host';
+      return 'no Anthropic API key configured for live catalogue discovery';
     case 'key-rejected':
       return 'anthropic credential rejected (401/403)';
     case 'credential-expired':

@@ -288,11 +288,11 @@ export function createIngestHandler(
   durability?: DurabilityEngine,
   instanceType?: string,
   grantManager?: CapabilityGrantManager,
-): (msg: IncomingMessage) => void {
+): (msg: IncomingMessage) => Promise<void> {
   if (config.shadowGate?.mode === 'shadow') warmShadowGate(db);
-  return function ingestMessage(msg: IncomingMessage): void {
-    void (async () => {
+  return async function ingestMessage(msg: IncomingMessage): Promise<void> {
       let slotAcquired = false;
+      let inboundTurnCompletion: Promise<void> | undefined;
       try {
         // QR-056 / QR-074: strip lone surrogates from inbound text at the shared
         // ingestion chokepoint. Lone surrogates (a crafted WhatsApp pushName /
@@ -572,6 +572,7 @@ export function createIngestHandler(
         }
 
         // 6. Dispatch to runtime
+        runtime.beginInboundTurnCompletion?.(msg.messageId);
         try {
           await runtime.handleMessage(msg);
         } catch (err) {
@@ -584,6 +585,12 @@ export function createIngestHandler(
               classifyErrorForInbound(err),
             );
           }
+        } finally {
+          // Release the bounded ingest slot after admission work, then leave
+          // the returned callback promise pending for the protected transport
+          // bridge. Ordinary listeners do not await that promise, so a long
+          // provider turn cannot serialize ingress behind this slot.
+          inboundTurnCompletion = runtime.awaitInboundTurnCompletion?.(msg.messageId);
         }
       } catch (err) {
         log.error({ err, messageId: msg.messageId }, 'unhandled error in ingest handler');
@@ -597,6 +604,6 @@ export function createIngestHandler(
           }
         }
       }
-    })();
+      await inboundTurnCompletion;
   };
 }

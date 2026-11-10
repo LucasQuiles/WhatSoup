@@ -17,7 +17,14 @@ export function observeLifecycleEventOrder(source: string): string {
     source = source.replace(anchor, () => replacement);
   };
   const event = (text: string) => `builtin printf '%s\\n' "${text}" >> "$EVENT_ORDER_LOG"`;
-  insert('          sleep "$chunk" || return 2', `${event('S_OUTER budget=$budget worker=$worker_pid')}\n          sleep "$chunk" || return 2`);
+  insert('          sleep "$chunk" || return 2', [
+    '          case "$EVENT_ORDER_MODE" in event-order-natural-*)',
+    '            IFS= read -r event_release <> "$EVENT_ORDER_AUTHORITY_RELEASE" || return 2',
+    '            [ "$event_release" = release ] || return 2',
+    '            ;; esac',
+    `          ${event('S_OUTER budget=$budget worker=$worker_pid')}`,
+    '          sleep "$chunk" || return 2',
+  ].join('\n'));
   insert('        [ "$start" = run ] || exit 2\n        trap', `        [ "$start" = run ] || exit 2\n        ${event('L_COMMAND')}\n        trap`);
   // D_INNER_COMMIT follows the link: that is when the reader can see the token.
   const inner = [
@@ -32,6 +39,11 @@ export function observeLifecycleEventOrder(source: string): string {
     `        ${event('CONTROL_ERROR guard-park')}`,
   ];
   insert('        sleep "$budget" || exit 2', [
+    // Result-first controls park the inner watchdog until worker cleanup reaps
+    // it. The driver bounds the fixture independently of either watchdog.
+    '        case "$EVENT_ORDER_MODE" in event-order-natural-*)',
+    '          IFS= read -r event_release <> "$EVENT_ORDER_INNER_START" || exit 2',
+    '          ;; esac',
     '        if [ "$EVENT_ORDER_MODE" = event-order-expired-reaped ] || [ "${EVENT_ORDER_MODE#event-order-near-deadline-}" != "$EVENT_ORDER_MODE" ]; then',
     '          IFS= read -r -t 2 event_release <> "$EVENT_ORDER_INNER_START" || exit 2',
     `          ${event('I_START')}`,
@@ -116,7 +128,7 @@ export function observeLifecycleEventOrder(source: string): string {
   insert('        rm -f "$timeout_file"', [
     '        case "$EVENT_ORDER_MODE" in event-order-natural-*|event-order-expired-reaped)',
     `          ${event('C_HOLD cleanup=$cleanup_rc command=$cmd_pid group=$cmd_group')}`,
-    '          if IFS= read -r -t 2 event_release <> "$EVENT_ORDER_CLEANUP_RELEASE" && [ "$event_release" = release ]; then',
+    '          if IFS= read -r event_release <> "$EVENT_ORDER_CLEANUP_RELEASE" && [ "$event_release" = release ]; then',
     `            ${event('C_RELEASE')}`,
     '          else',
     `            ${event('CONTROL_ERROR cleanup-release')}`,
@@ -127,7 +139,13 @@ export function observeLifecycleEventOrder(source: string): string {
   ].join('\n'));
   insert('        [ "$cleanup_rc" -ne 0 ] || rm -f "$cleanup_file"', `        [ "$cleanup_rc" -ne 0 ] || rm -f "$cleanup_file"\n        ${event('C_COMPLETE cleanup=$cleanup_rc')}`);
   insert('      _bounded_claim_outcome deadline-outer\n      outcome_claim_rc=$?', [
-    '      case "$EVENT_ORDER_MODE" in event-order-outcome-candidate-directory|event-order-inner-deadline-command-2)',
+    // Let the real parent end this guard after the worker returns. A second
+    // fixture deadline could otherwise manufacture protocol failure first.
+    '      if [ "$EVENT_ORDER_MODE" = event-order-inner-deadline-command-2 ]; then',
+    `        ${event('D_OUTER_PARKED')}`,
+    '        while :; do sleep 0.01; done',
+    '      fi',
+    '      case "$EVENT_ORDER_MODE" in event-order-outcome-candidate-directory)',
     `        IFS= read -r -t 2 event_release <> "$EVENT_ORDER_AUTHORITY_RELEASE" || { ${event('CONTROL_ERROR authority-hold')}; guard_status=2; _bounded_guard_exit; }`,
     '        ;; esac',
     '      if [ "$EVENT_ORDER_MODE" = event-order-near-deadline-result-first ]; then',

@@ -11,11 +11,14 @@ function harness(over: Partial<ConstructorParameters<typeof HandoffDistillRunner
     now: () => 1000,
     growthThreshold: 500,
     tokenGrowth: () => 600,
-    distillFor: vi.fn(async () => ({ summary: 's', seededArtifacts: null, tokensUsed: 10 })),
     persist: (a) => persisted.push(a),
     onDegraded: vi.fn(),
     sourceFor: () => ({ provider: 'opencode-cli', model: 'deepseek-chat' }),
     ...over,
+    distillFor: async (key, reserve) => {
+      reserve(100);
+      return over.distillFor ? over.distillFor(key, reserve) : { summary: 's', seededArtifacts: null, tokensUsed: 10 };
+    },
   });
   return { runner, persisted };
 }

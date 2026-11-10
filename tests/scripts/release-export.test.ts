@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -58,6 +59,25 @@ interface Fixture {
   commit: string;
 }
 
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function writeSourceRuntimeManifest(sourceRoot: string, mainSource: string): void {
+  const manifestPath = path.join(sourceRoot, 'deploy/source-runtime-manifest.json');
+  mkdirSync(path.dirname(manifestPath), { recursive: true });
+  writeFileSync(manifestPath, JSON.stringify({
+    schemaVersion: 1,
+    scope: 'fixture-source-runtime',
+    entrypoints: [{
+      path: 'src/main.ts',
+      sha256: sha256(mainSource),
+      mustContain: ['export const main'],
+      importGraph: true,
+    }],
+  }, null, 2));
+}
+
 function makeGitFixture(): Fixture {
   tmpRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-release-export-'));
   const sourceRoot = path.join(tmpRoot, 'source');
@@ -65,7 +85,9 @@ function makeGitFixture(): Fixture {
   mkdirSync(path.join(sourceRoot, 'src'), { recursive: true });
   mkdirSync(releaseRoot, { recursive: true });
   writeFileSync(path.join(sourceRoot, 'package.json'), '{"name":"whatsoup-fixture"}\n', 'utf8');
-  writeFileSync(path.join(sourceRoot, 'src/main.ts'), 'export const main = true;\n', 'utf8');
+  const mainSource = 'export const main = true;\n';
+  writeFileSync(path.join(sourceRoot, 'src/main.ts'), mainSource, 'utf8');
+  writeSourceRuntimeManifest(sourceRoot, mainSource);
   // Secret-shaped and state-shaped tracked files: the export must exclude them
   // even when git tracks them, because the release product must never carry
   // credential or mutable-state material.
@@ -239,6 +261,25 @@ describe('exportRelease', () => {
     const drift = createReleaseSnapshotDriftReport(report.releasePath);
     expect(drift.ok).toBe(false);
     expect(drift.issues.some((issue) => issue.kind === 'file-sha256-drift')).toBe(true);
+  });
+
+  it('refuses a stale source-runtime hash before publication', () => {
+    const fixture = makeGitFixture();
+    const manifestPath = path.join(fixture.sourceRoot, 'deploy/source-runtime-manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+      entrypoints: Array<{ sha256: string }>;
+    };
+    manifest.entrypoints[0]!.sha256 = '0'.repeat(64);
+    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+    recommitFixture(fixture, 'stale source runtime fixture hash');
+
+    expect(() => exportRelease({
+      repoRoot: fixture.sourceRoot,
+      commit: fixture.commit,
+      releaseRoot: fixture.releaseRoot,
+      buildTime: '2026-10-22T19:30:00.000Z',
+    })).toThrow(/source.runtime.*self.check|source runtime.*hash/i);
+    expect(existsSync(path.join(fixture.releaseRoot, `WhatSoup-release-${fixture.commit.slice(0, 12)}`))).toBe(false);
   });
 
   it('exports an exact configured qualification closure that the Python verifier accepts', () => {

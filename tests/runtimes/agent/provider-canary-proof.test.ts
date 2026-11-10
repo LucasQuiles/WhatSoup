@@ -13,6 +13,7 @@ import {
   CANARY_CONTRACT_VERSION,
   collectProviderCanaryEvidence,
   providerCanaryReceiptPath,
+  resolveProviderBinaryIdentity,
   validateProviderCanaryAdmission,
   validateProviderCanaryReceipt,
   type ProviderCanaryEvidence,
@@ -59,6 +60,20 @@ function receipt(overrides: Partial<ProviderCanaryReceipt> = {}): ProviderCanary
 }
 
 describe('provider canary receipt', () => {
+  it('resolves and hashes the exact executable selected by the supplied PATH', () => {
+    const root = mkdtempSync(join(tmpdir(), 'provider-identity-'));
+    roots.push(root);
+    const binary = join(root, 'provider');
+    writeFileSync(binary, '#!/bin/sh\nprintf "ok\\n"\n');
+    chmodSync(binary, 0o700);
+    const identity = resolveProviderBinaryIdentity('provider', root);
+    expect(identity.resolvedPath).toBe(binary);
+    expect(identity.sha256).toMatch(/^[a-f0-9]{64}$/);
+    writeFileSync(binary, '#!/bin/sh\nprintf "changed\\n"\n');
+    expect(resolveProviderBinaryIdentity('provider', root).sha256).not.toBe(identity.sha256);
+    expect(() => resolveProviderBinaryIdentity('missing-provider', root)).toThrow(/unavailable/);
+  });
+
   it('accepts a fresh exact artifact-bound proof', () => {
     expect(validateProviderCanaryReceipt(receipt(), evidence(), NOW)).toEqual({
       proven: true,

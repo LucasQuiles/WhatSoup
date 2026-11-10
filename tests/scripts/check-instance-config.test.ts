@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -116,6 +116,17 @@ describe('check-instance-config — committed examples (self-run gate)', () => {
     const result = checkHealthProfiles(HEALTH_PROFILES_ROOT);
     expect(result.findings).toEqual([]);
     expect(result.scanned.length).toBeGreaterThanOrEqual(10);
+  });
+
+  // Remote-desktop settings describe one machine, so they stay in its private profile. Reading the raw text also catches a
+  // key nested inside an instance entry.
+  it('no tracked health profile carries remote-desktop settings', () => {
+    const profiles = readdirSync(HEALTH_PROFILES_ROOT).filter((name) => name.endsWith('.json'));
+    expect(profiles.length).toBeGreaterThanOrEqual(10);
+    const offenders = profiles.filter((name) =>
+      /rustdesk/i.test(readFileSync(path.join(HEALTH_PROFILES_ROOT, name), 'utf8')),
+    );
+    expect(offenders).toEqual([]);
   });
 });
 

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Database } from '../../../src/core/database.ts';
 import { ensureHandoffArtifactSchema, getHandoffArtifact } from '../../../src/runtimes/agent/handoff-artifact.ts';
+import { defaultHandoffDistillConfig } from '../../../src/lib/handoff-distill-config.ts';
 
 const { rows, tokens, distill, alert, clear } = vi.hoisted(() => ({
   rows: vi.fn(),
@@ -15,7 +16,10 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   getSessionTokenSnapshot: tokens,
 }));
 vi.mock('../../../src/runtimes/agent/handoff-summarizer.ts', () => ({
-  buildHandoffDistill: ({ conversationKey }: { conversationKey: string }) => () => distill(conversationKey),
+  buildHandoffDistill: ({ conversationKey }: { conversationKey: string }) => (reserve: (tokens: number) => void) => {
+    reserve(1_000);
+    return distill(conversationKey);
+  },
 }));
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlertChecked: alert,
@@ -76,6 +80,33 @@ describe('handoff distiller recovery through the real runner and artifact store'
     expect(clear).toHaveBeenCalledExactlyOnceWith('test', 'handoff-distill:test');
     await sweep();
     expect(clear).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves a new conversation call budget when an older sweep is still awaiting its provider', async () => {
+    coordinator.shutdown();
+    const config = defaultHandoffDistillConfig();
+    config.budget.maxCallsPerWindow = 1;
+    coordinator = new HandoffDistillCoordinator({
+      db, instanceName: 'test', isEnabled: () => true,
+      getModel: () => 'deepseek-chat', getConfig: () => config,
+    });
+    coordinator.start();
+    const pending = Promise.withResolvers<typeof success>();
+    distill.mockImplementation((key: string) => key === 'c1' ? pending.promise : Promise.resolve(success));
+    const older = sweep();
+    try {
+      expect(distill).toHaveBeenCalledExactlyOnceWith('c1');
+      rows.mockReturnValue([{ conversationKey: 'c1', rowId: 1 }, { conversationKey: 'c2', rowId: 2 }]);
+      await sweep();
+    } finally {
+      pending.resolve(success);
+      await older;
+    }
+    await sweep();
+    await sweep();
+    expect(getHandoffArtifact(db, 'c2')?.summary).toBe(success.summary);
+    expect(distill.mock.calls.filter(([key]) => key === 'c2')).toHaveLength(1);
+    expect(distill.mock.calls.filter(([key]) => key === 'c1')).toHaveLength(1);
   });
 
   it('waits for every degraded conversation to recover', async () => {

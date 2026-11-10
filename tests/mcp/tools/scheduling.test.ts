@@ -264,6 +264,40 @@ describe('scheduling tools', () => {
     expect(large.content[0].text).toMatch(/File too large/);
   });
 
+  it('schedule_message preserves a missing media path with an internal aTlS component', async () => {
+    const scheduledAt = Math.floor(Date.now() / 1000) + 3600;
+    const missingPath = join(scratchDir, 'internal-aTlS-component', 'missing.png');
+    const result = await registry.call(
+      'schedule_message',
+      { chatJid: CHAT_ALPHA_JID, scheduled_at: scheduledAt, filePath: missingPath },
+      globalSession(scratchDir),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toBe(`Tool "schedule_message" failed: File not found: ${missingPath}`);
+  });
+
+  it('schedule_message preserves an outside media path with a certificate directory', async () => {
+    const scheduledAt = Math.floor(Date.now() / 1000) + 3600;
+    const outsideDir = tempDir();
+    try {
+      const certificateDirectory = join(outsideDir, 'certificate-directory');
+      mkdirSync(certificateDirectory);
+      const outsidePath = join(certificateDirectory, 'outside.png');
+      writeFileSync(outsidePath, 'image');
+      const result = await registry.call(
+        'schedule_message',
+        { chatJid: CHAT_ALPHA_JID, scheduled_at: scheduledAt, filePath: outsidePath },
+        { ...globalSession(scratchDir), allowedRoot: scratchDir },
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toBe(`Tool "schedule_message" failed: Path outside workspace: ${outsidePath}`);
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
   it('schedule_message enforces allowedRoot for media paths', async () => {
     const scheduledAt = Math.floor(Date.now() / 1000) + 3600;
     const outsideDir = tempDir();

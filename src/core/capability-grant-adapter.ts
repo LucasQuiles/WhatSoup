@@ -14,14 +14,12 @@
 //  3. assertGroupsRespectDenyFloor — a construction-time guard: no grant group
 //     may unlock a capability that sits in the REQUIRED_DENY floor.
 //
-// SECURITY INVARIANT (privilege-escalation prevention): a grant must NEVER
-// remove a REQUIRED_DENY floor entry from the deny list. This is enforced in
-// TWO independent places:
+// Grants cannot authorize a REQUIRED_DENY capability. Only the runtime's
+// independently verified M365 policy can narrow the effective deny floor:
 //   - Front door: assertGroupsRespectDenyFloor rejects any group whose
 //     capabilities intersect REQUIRED_DENY at manager-construction time.
-//   - Back door: writePermissionsSettings re-unions REQUIRED_DENY into the deny
-//     list on EVERY write (settings-template.applyRequiredDeny), so even if a
-//     delta's removeDeny targeted a floor entry, it is re-added at persist time.
+//   - Back door: writePermissionsSettings re-unions the effective floor on
+//     every write, using the runtime's current policy rather than stored settings.
 
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -29,6 +27,7 @@ import { z } from 'zod';
 
 import { writePermissionsSettings } from './workspace.ts';
 import { REQUIRED_DENY } from './settings-template.ts';
+import type { M365MutationPolicy } from './m365-bridge-policy.ts';
 import { writePrivateJsonMarkerSync } from '../lib/private-fs.ts';
 import type {
   PolicyAdapter,
@@ -60,10 +59,13 @@ function readPermissionSets(settingsPath: string): { allow: string[]; deny: stri
 
 /**
  * PolicyAdapter backed by `<claudeDir>/settings.json`. Every persist routes
- * through writePermissionsSettings, which re-unions the REQUIRED_DENY floor —
- * so this adapter cannot strip a floor entry no matter what delta it is given.
+ * through writePermissionsSettings, which re-unions the effective deny floor.
+ * Re-resolve runtime policy on each write because fallback can revoke approval.
  */
-export function createSettingsPolicyAdapter(claudeDir: string): PolicyAdapter {
+export function createSettingsPolicyAdapter(
+  claudeDir: string,
+  resolveM365Policy?: () => M365MutationPolicy | undefined,
+): PolicyAdapter {
   const settingsPath = join(claudeDir, 'settings.json');
 
   const read = async (): Promise<PolicySnapshot> => {
@@ -85,7 +87,7 @@ export function createSettingsPolicyAdapter(claudeDir: string): PolicyAdapter {
         deny: [...deny],
         defaultMode: 'bypassPermissions',
       },
-    });
+    }, resolveM365Policy?.());
   };
 
   return { read, apply };

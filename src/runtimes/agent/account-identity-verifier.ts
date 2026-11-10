@@ -48,6 +48,7 @@ export interface AccountIdentityVerifierHost {
   readonly agentProvider: string;
   readonly expectedAccountDigest: string | null;
   readonly shutdownRequested: boolean;
+  readonly egressProxyPort?: number;
   accountIdentity: AccountIdentityVerification | null;
 }
 
@@ -70,7 +71,9 @@ export class AccountIdentityVerifier {
 
   constructor(host: AccountIdentityVerifierHost, deps: AccountIdentityVerifierDeps = {}) {
     this.host = host;
-    this.verify = deps.verify ?? ((expected, signal) => verifyClaudeAccountIdentity(expected, {}, signal));
+    this.verify = deps.verify ?? ((expected, signal) => verifyClaudeAccountIdentity(
+      expected, { egressProxyPort: this.host.egressProxyPort }, signal,
+    ));
     this.emitAlert = deps.emitAlertChecked ?? emitAlertChecked;
     this.clearAlert = deps.clearAlertSourceChecked ?? clearAlertSourceChecked;
     this.log = deps.log ?? createChildLogger('account-identity');

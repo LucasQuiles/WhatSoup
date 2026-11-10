@@ -121,6 +121,7 @@ const UPSERT_BODY_SQL = `
     content_type = excluded.content_type,
     sender_name = excluded.sender_name,
     sender_jid = excluded.sender_jid,
+    is_from_me = excluded.is_from_me,
     raw_message = excluded.raw_message,
     quoted_message_id = excluded.quoted_message_id,
     timestamp = excluded.timestamp

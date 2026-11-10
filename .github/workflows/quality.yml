@@ -11,6 +11,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
 
 # Cancel superseded runs for the same ref. A new push/PR-sync supersedes the
 # in-flight run instead of leaving it orphaned at "pending 0s" for hours (the
@@ -20,7 +22,7 @@ on:
 # queue runs must always finish (same reasoning as tag-release-gate.yml).
 concurrency:
   group: quality-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' && !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
   contents: read
@@ -84,6 +86,21 @@ jobs:
         timeout-minutes: 10
         run: docker build --file docker/Dockerfile --tag whatsoup-ci .
 
+      - name: Verify Linux policy ownership and controller readability
+        timeout-minutes: 2
+        run: |
+          policy_scratch="$(mktemp -d "$RUNNER_TEMP/policy-contract.XXXXXX")"
+          trap 'rm -rf -- "$policy_scratch"' EXIT
+          export TMPDIR="$policy_scratch"
+          cc -static -Wall -Wextra -Werror tests/runtimes/agent/provider-policy-reader.integration.c -o "$policy_scratch/policy-reader"
+          docker run --rm --network none --read-only --user 0:0 \
+            --cap-drop ALL --cap-add CHOWN --cap-add FOWNER --cap-add FSETID --cap-add SETUID --cap-add SETGID --cap-add KILL \
+            --tmpfs /opt/policy-probe:rw,nosuid,noexec,size=16m,mode=0755 \
+            --env TMPDIR=/opt/policy-probe \
+            --mount "type=bind,src=$PWD/tests/runtimes/agent/provider-policy-permissions.integration.mjs,dst=/policy-probe.mjs,readonly" \
+            --mount "type=bind,src=$policy_scratch/policy-reader,dst=/policy-reader,readonly" \
+            --entrypoint node whatsoup-ci /policy-probe.mjs /app
+
       - name: Refresh PR base snapshot
         run: |
           if [ -n "${GITHUB_BASE_REF:-}" ]; then
@@ -106,7 +123,12 @@ jobs:
             base="HEAD^"
           fi
           npm run guard:semantic-quality -- --mode shadow --base "$base" --receipt "$SEMANTIC_RECEIPT"
-          node -e 'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(process.env.SEMANTIC_RECEIPT,"utf8")); process.stdout.write(`### Semantic quality (shadow)\n\nDecision: **${r.decision}**\n\nFindings: ${r.findings.length}\n`)' >> "$GITHUB_STEP_SUMMARY"
+          node --input-type=module <<'NODE' >> "$GITHUB_STEP_SUMMARY"
+          import { readFileSync } from 'node:fs';
+
+          const r = JSON.parse(readFileSync(process.env.SEMANTIC_RECEIPT, 'utf8'));
+          process.stdout.write(`### Semantic quality (shadow)\n\nDecision: **${r.decision}**\n\nFindings: ${r.findings.length}\n`);
+          NODE
 
       - name: qSesh lint
         run: npm run lint:qsesh
@@ -513,7 +535,7 @@ jobs:
         run: npm --prefix console run build
 
   bot-errors-health-macos:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 10
     steps:
       - name: Checkout

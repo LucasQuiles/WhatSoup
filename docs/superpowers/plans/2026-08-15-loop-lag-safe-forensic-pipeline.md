@@ -618,7 +618,7 @@ npx vitest run \
   tests/scripts/env-read-allowlist.test.ts \
   tests/scripts/secret-env-read-guard.test.ts \
   tests/scripts/fitness-file-size-warning-budget.test.ts \
-  tests/scripts/fitness-sync-exec-timeout-budget.test.ts \
+  tests/scripts/eslint-fitness-check.test.ts \
   tests/scripts/public-surface-drift-check.test.ts
 ```
 

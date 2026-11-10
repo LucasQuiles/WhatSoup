@@ -9,7 +9,9 @@ import {
   createFileGrantStore,
   assertGroupsRespectDenyFloor,
 } from '../../src/core/capability-grant-adapter.ts';
-import { REQUIRED_DENY } from '../../src/core/settings-template.ts';
+import { M365_MUTATION_DENY, REQUIRED_DENY } from '../../src/core/settings-template.ts';
+import { writePermissionsSettings } from '../../src/core/workspace.ts';
+import type { M365MutationPolicy } from '../../src/core/m365-bridge-policy.ts';
 import type { GrantRecord } from '../../src/lib/capability-grant.ts';
 
 let dir: string;
@@ -26,6 +28,30 @@ function readSettings(): { allow: string[]; deny: string[] } {
 }
 
 describe('createSettingsPolicyAdapter', () => {
+  it('preserves explicit denies through approved grants, fallback and renewed approval', async () => {
+    let policy: M365MutationPolicy = { status: 'approved', childEnv: {} };
+    const explicit = 'mcp__plugin_microsoft_365_microsoft_365__send-mail';
+    writePermissionsSettings(dir, {
+      permissions: { allow: [], deny: [explicit], defaultMode: 'bypassPermissions' },
+    }, policy);
+    const adapter = createSettingsPolicyAdapter(dir, () => policy);
+
+    await adapter.apply({ addAllow: ['camera.snap'], removeAllow: [], addDeny: [], removeDeny: [] });
+    expect(readSettings().allow).toContain('camera.snap');
+    expect(readSettings().deny.filter((entry) => M365_MUTATION_DENY.includes(entry))).toEqual([explicit]);
+    expect(readSettings().deny).toContain(REQUIRED_DENY[0]);
+
+    policy = { status: 'rejected' };
+    await adapter.apply({ addAllow: [], removeAllow: ['camera.snap'], addDeny: [], removeDeny: [] });
+    expect(readSettings().allow).not.toContain('camera.snap');
+    expect(readSettings().deny).toEqual(expect.arrayContaining([...M365_MUTATION_DENY]));
+
+    policy = { status: 'approved', childEnv: {} };
+    await adapter.apply({ addAllow: ['camera.snap'], removeAllow: [], addDeny: [], removeDeny: [] });
+    // Stored entries have no authorship provenance; renewed approval cannot erase them.
+    expect(readSettings().deny).toEqual(expect.arrayContaining([...M365_MUTATION_DENY]));
+  });
+
   it('reads empty sets when settings.json is absent', async () => {
     const adapter = createSettingsPolicyAdapter(dir);
     const snap = await adapter.read();

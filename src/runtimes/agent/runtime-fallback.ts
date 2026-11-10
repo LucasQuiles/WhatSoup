@@ -55,6 +55,7 @@ import {
   buildPrimaryProbeAdapterDeps,
   calculatePeriodicProbeBackoff,
   calculatePeriodicProbeDelay,
+  PERIODIC_PROBE_TIMEOUT_RETRY_MS,
   formatPrimaryModelUsabilityEvidence,
 } from './primary-readiness-probe.ts';
 import {
@@ -75,6 +76,7 @@ import { createPrimaryModelProbeAdapters } from './providers/primary-model-usabi
 import {
   primaryModelUsabilityRequiresAlert,
   probePrimaryModelUsability,
+  type PrimaryProbeServiceContext,
   type PrimaryModelUsabilityResult,
 } from './providers/primary-model-usability.ts';
 import { fallbackRequiresPrimaryProbe, isProviderFallbackReason } from './runtime-presentation.ts';
@@ -95,6 +97,8 @@ import type { FallbackEmptyAdvance } from './fallback-empty-advance.ts';
 import type { TurnCapabilityTracker } from './turn-capability-tracker.ts';
 import type { EgressProxy } from './egress-proxy.ts';
 import type { ProviderExecutionGate } from './provider-execution-gate.ts';
+import type { M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
+import type { TypedHandoffDistillConfig } from '../../lib/handoff-distill-config.ts';
 import type { RuntimePrimaryModelUsability, RuntimeTurnCapability } from './runtime.ts';
 
 const log = createChildLogger('agent-runtime');
@@ -217,10 +221,17 @@ export interface RuntimeFallbackPort {
   readonly agentFallbackDiscovery: AgentFallbackDiscoveryConfig | null;
   readonly modelCatalogueListFn: typeof listModelCatalog | undefined;
   readonly allowM365Mutations: boolean | undefined;
+  readonly m365MutationPolicy: M365MutationPolicy | undefined;
+  readonly expectedAccountDigest: string | null;
   readonly runtimeBootPerfMs: number;
   readonly globalMcpSocketPath: string | null;
   readonly egressProxy: EgressProxy | undefined;
+  /** Explicit instance policy, if configured; absence preserves legacy env health. */
+  readonly handoffDistill: TypedHandoffDistillConfig | undefined;
   readonly providerExecutionGate: ProviderExecutionGate;
+  /** Optional for older hand-built coordinator fixtures; production supplies it. */
+  readonly primaryProbeServiceContext?: PrimaryProbeServiceContext | null;
+  currentPrimaryProbeServiceContext?: () => PrimaryProbeServiceContext | null;
   readonly controlSession: SessionManager | null;
   readonly fallbackWindow: FallbackWindowState;
   readonly fallbackMetrics: FallbackWindowMetrics;
@@ -234,6 +245,7 @@ export interface RuntimeFallbackPort {
   periodicUsabilityProbeTimer: ReturnType<typeof setTimeout> | null;
   periodicUsabilityProbeBackoff: number;
   periodicUsabilityProbeDueAt: number | null;
+  periodicUsabilityProbeTimeoutRetryArmed: boolean;
   readonly shutdownRequested: boolean;
   fallbackProbeAttempts: number;
   fallbackLastProbeAt: number | null;
@@ -868,9 +880,9 @@ export class RuntimeFallbackCoordinator {
       fallbackRestoredFromPersist: this.host.fallbackWindowRestored,
       turnErrorCounts: Object.fromEntries(this.host.turnCapabilityTracker.errorCounts),
       handoffDistiller: {
-        enabled: handoffDistillerEnabled(),
-        contextInjection: handoffContextEnabled(),
-        model: handoffDistillModel(),
+        enabled: this.host.handoffDistill?.enabled ?? handoffDistillerEnabled(),
+        contextInjection: this.host.handoffDistill?.contextInjection ?? handoffContextEnabled(),
+        model: this.host.handoffDistill?.model ?? handoffDistillModel(),
       },
       fallbackDiscovery: this.host.agentFallbackDiscovery
         ? {
@@ -1276,6 +1288,7 @@ export class RuntimeFallbackCoordinator {
             entry.provider,
             {
               allowM365Mutations: this.host.allowM365Mutations,
+              m365MutationPolicy: this.host.m365MutationPolicy === undefined ? undefined : { status: 'rejected' },
               whatsoupInstance: this.host.instanceName,
               whatsoupMcpSocket: this.host.globalMcpSocketPath ?? undefined,
             },
@@ -1724,6 +1737,7 @@ export class RuntimeFallbackCoordinator {
           fallbackEntry.provider,
           {
             allowM365Mutations: this.host.allowM365Mutations,
+            m365MutationPolicy: this.host.m365MutationPolicy === undefined ? undefined : { status: 'rejected' },
             whatsoupInstance: this.host.instanceName,
             whatsoupMcpSocket: this.host.globalMcpSocketPath ?? undefined,
           },
@@ -2196,7 +2210,20 @@ export class RuntimeFallbackCoordinator {
       probeInFlight: true,
     };
 
-    const adapters = createPrimaryModelProbeAdapters(this.host.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.host.agentProvider, this.host.model, this.host.cwd, this.host.egressProxy?.port, this.host.providerExecutionGate));
+    const adapters = createPrimaryModelProbeAdapters(
+      this.host.agentProviderConfig,
+      buildPrimaryProbeAdapterDeps(
+        this.host.agentProvider,
+        this.host.model,
+        this.host.cwd,
+        this.host.egressProxy?.port,
+        this.host.providerExecutionGate,
+        trigger,
+        this.host.primaryProbeServiceContext ?? undefined,
+        this.host.primaryProbeServiceContext !== undefined,
+        () => this.host.currentPrimaryProbeServiceContext?.() ?? null,
+      ),
+    );
     void Promise.resolve()
       .then(() => probePrimaryModelUsability(target, adapters))
       .then((result) => this.recordPrimaryModelUsability(result, trigger))
@@ -2215,13 +2242,13 @@ export class RuntimeFallbackCoordinator {
       .then(() => { this.host.verifyAccountIdentity?.(trigger); });
   }
 
-  scheduleNextPeriodicUsabilityProbe(): void {
+  scheduleNextPeriodicUsabilityProbe(delayOverrideMs?: number): void {
     // Never arm after shutdown began: a probe that resolves post-shutdown must
     // not resurrect the periodic loop (round-3 finding 1).
     if (this.host.shutdownRequested) return;
     if (this.host.periodicUsabilityProbeTimer) clearTimeout(this.host.periodicUsabilityProbeTimer);
     const now = Date.now();
-    const delay = calculatePeriodicProbeDelay(this.host.periodicUsabilityProbeBackoff, this.host.primaryModelUsability?.checkedAt ?? null, now);
+    const delay = delayOverrideMs ?? calculatePeriodicProbeDelay(this.host.periodicUsabilityProbeBackoff, this.host.primaryModelUsability?.checkedAt ?? null, now);
     // The due instant is the source of truth for the evidence freshness window
     // (runtime.modelUsabilityFreshnessMs): set it together with the timer so
     // cadence and window can never diverge.
@@ -2233,6 +2260,7 @@ export class RuntimeFallbackCoordinator {
   recordPrimaryModelUsability(
     result: PrimaryModelUsabilityResult,
     trigger: 'startup' | 'manual' | 'periodic',
+    source: 'probe' | 'turn-success' = 'probe',
   ): void {
     if (this.host.shutdownRequested) {
       // A probe started before shutdown resolved after it. Drop the result
@@ -2246,15 +2274,35 @@ export class RuntimeFallbackCoordinator {
       checkedAt: Date.now(),
       probeInFlight: false,
     };
+    // A first timeout re-probes once within minutes and leaves the backoff
+    // alone; a timeout on that retry backs off like any other failure, so a
+    // provider that keeps timing out gets at most one retry per backoff cycle.
+    // Every probe result moves the retry flag, whatever its trigger (a
+    // recovery probe and a manual probe both record as 'manual'). A turn
+    // success is not a probe and must not clear it, or a busy bot whose
+    // probes keep timing out would retry every 5 minutes forever.
+    const timeoutRetry = result.status === 'timeout'
+      && !this.host.periodicUsabilityProbeTimeoutRetryArmed
+      && (trigger === 'periodic' || this.host.periodicUsabilityProbeTimer !== null);
+    if (source === 'probe') this.host.periodicUsabilityProbeTimeoutRetryArmed = timeoutRetry;
     const previousBackoff = this.host.periodicUsabilityProbeBackoff;
-    this.host.periodicUsabilityProbeBackoff = calculatePeriodicProbeBackoff(previousBackoff, result.status === 'usable');
+    if (!timeoutRetry) {
+      this.host.periodicUsabilityProbeBackoff = calculatePeriodicProbeBackoff(previousBackoff, result.status === 'usable');
+    }
     // A periodic result always re-arms. A manual/startup result re-arms only
     // when it CHANGED the backoff while a periodic timer is armed: the old timer
     // was scheduled for the old cadence, and leaving it would let the health
     // window (derived from the due instant / backoff) diverge from the actual
     // fire time. An unchanged backoff keeps the pending timer and its due instant.
+    // A pending timeout retry is not on the backoff cadence: a turn success
+    // that resets the backoff keeps it, or the flag would stay set with no
+    // retry behind it and the next timeout would get no re-probe.
     const backoffChanged = this.host.periodicUsabilityProbeBackoff !== previousBackoff;
-    if (trigger === 'periodic' || (backoffChanged && this.host.periodicUsabilityProbeTimer !== null)) {
+    const timeoutRetryPending = this.host.periodicUsabilityProbeTimeoutRetryArmed
+      && this.host.periodicUsabilityProbeTimer !== null;
+    if (timeoutRetry) {
+      this.scheduleNextPeriodicUsabilityProbe(PERIODIC_PROBE_TIMEOUT_RETRY_MS);
+    } else if (trigger === 'periodic' || (backoffChanged && this.host.periodicUsabilityProbeTimer !== null && !timeoutRetryPending)) {
       this.scheduleNextPeriodicUsabilityProbe();
     }
 

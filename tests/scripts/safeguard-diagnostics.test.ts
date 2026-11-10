@@ -312,7 +312,7 @@ const requiredQualityWorkflow = [
   '      - name: Console compatibility build',
   '        run: npm --prefix console run build',
   '  bot-errors-health-macos:',
-  '    runs-on: macos-14',
+  '    runs-on: macos-15',
   '    steps:',
   '      - name: Portable Python and release-proof prerequisites (real macOS)',
   '        run: npm test -- tests/helpers/python-interpreter.test.ts tests/scripts/bot-errors-python-atomic-write-guard.test.ts tests/scripts/bot-errors-release-proof-installer.test.ts tests/scripts/bot-errors-release-proof-run.test.ts --pool=forks --maxWorkers=1',
@@ -1085,6 +1085,22 @@ describe('safeguard diagnostics', () => {
         '        run: sudo rm -rf /usr/share/dotnet || true',
       ),
       evidence: 'quality workflow must not retain masked unconditional disk cleanup',
+    },
+    {
+      name: 'reverts the macOS lane to the retired macos-14 image',
+      mutate: (workflow: string) => workflow.replace(
+        '  bot-errors-health-macos:\n    runs-on: macos-15',
+        '  bot-errors-health-macos:\n    runs-on: macos-14',
+      ),
+      evidence: 'bot-errors-health-macos runs-on must be exactly macos-15',
+    },
+    {
+      name: 'floats the macOS lane to macos-latest',
+      mutate: (workflow: string) => workflow.replace(
+        '  bot-errors-health-macos:\n    runs-on: macos-15',
+        '  bot-errors-health-macos:\n    runs-on: macos-latest',
+      ),
+      evidence: 'bot-errors-health-macos runs-on must be exactly macos-15',
     },
   ])('fails when Quality $name', ({ mutate, evidence }) => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];

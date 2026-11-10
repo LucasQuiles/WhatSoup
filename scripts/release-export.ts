@@ -32,6 +32,10 @@ import {
   type ReleaseSnapshotDriftReport,
   type ReleaseSnapshotManifest,
 } from './release-snapshot-plan.ts';
+import {
+  collectSourceRuntimeIssues,
+  loadSourceRuntimeManifest,
+} from './source-runtime-drift-check.ts';
 
 export interface ReleaseExportOptions {
   /** Git repository that contains the commit (bare or work tree). */
@@ -113,6 +117,27 @@ function manifestTreeSha256(manifest: ReleaseSnapshotManifest): string {
   return sha256(manifest.files.map((file) => `${file.path}\n${file.sha256}\n`).join(''));
 }
 
+/**
+ * A WhatSoup source-runtime manifest is an additional release contract: its
+ * pinned entrypoints must agree with the exact staged export before the
+ * ordinary snapshot-byte self-check publishes it. Repositories that do not
+ * declare that contract keep the generic export behavior.
+ */
+function verifyStagedSourceRuntime(stagingRelease: string): void {
+  const manifestPath = path.join(stagingRelease, 'deploy/source-runtime-manifest.json');
+  if (!existsSync(manifestPath)) return;
+  let issues;
+  try {
+    issues = collectSourceRuntimeIssues(stagingRelease, loadSourceRuntimeManifest(stagingRelease));
+  } catch (error) {
+    throw new Error(`release export source-runtime self-check failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (issues.length > 0) {
+    const kinds = [...new Set(issues.map((issue) => issue.kind))].sort().join(', ');
+    throw new Error(`release export source-runtime self-check failed (${kinds}): ${issues[0]?.message ?? ''}`);
+  }
+}
+
 export function exportRelease(options: ReleaseExportOptions): ReleaseExportReport {
   const repoRoot = requireAbsolute('repoRoot', options.repoRoot);
   const releaseRoot = requireAbsolute('releaseRoot', options.releaseRoot);
@@ -178,6 +203,8 @@ export function exportRelease(options: ReleaseExportOptions): ReleaseExportRepor
     }
     const manifestBody = `${JSON.stringify(manifest, null, 2)}\n`;
     writeFileSync(path.join(stagingRelease, RELEASE_MANIFEST_FILE), manifestBody, 'utf8');
+
+    verifyStagedSourceRuntime(stagingRelease);
 
     // Pre-publication self-check against the staged bytes. The manifest clone
     // only repoints release.path at the staging dir; every byte-level check is
