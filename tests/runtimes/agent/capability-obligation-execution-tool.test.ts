@@ -16,7 +16,7 @@
  */
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -30,6 +30,8 @@ import { withTransaction } from '../../../src/core/db-tx.ts';
 import { CapabilityObligationRuntime, type CapabilityObligationLiveFacts } from '../../../src/runtimes/agent/capability-obligation-runtime.ts';
 import type { ObligationDispatchOutcome } from '../../../src/runtimes/agent/capability-obligation-supervisor.ts';
 import type { SessionContext, ToolDeclaration } from '../../../src/mcp/types.ts';
+import { deliverThenThrow, groupKillError, reapFixtureGroups, throwOnly, type GroupSignalSeam } from '../../helpers/group-kill-seams.ts';
+import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 import { trustedNodePath } from '../../helpers/trusted-node.ts';
 
 // ── Spawn seam override ──────────────────────────────────────────────────────
@@ -40,14 +42,32 @@ import { trustedNodePath } from '../../helpers/trusted-node.ts';
 // verifiably exist), so those tests substitute the returned child; every other
 // test runs the real spawn.
 let spawnOverride: (() => unknown) | null = null;
+// Issue 3568 seams. The pid of every real DETACHED spawn (the resolver is its own group leader),
+// so the process.kill spy can intercept that group and nothing else.
+const detachedSpawnPids: number[] = [];
+// When set, answers ONLY the membership probe's `ps -A -o pid=,pgid=,stat=` read.
+let psOverride: (() => { status: number; stdout: string }) | null = null;
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
-  const spawn = ((...args: Parameters<typeof actual.spawn>) =>
-    spawnOverride !== null
-      ? (spawnOverride() as ReturnType<typeof actual.spawn>)
-      : actual.spawn(...args)) as typeof actual.spawn;
-  return { ...actual, spawn };
+  const spawn = ((...args: Parameters<typeof actual.spawn>) => {
+    if (spawnOverride !== null) return spawnOverride() as ReturnType<typeof actual.spawn>;
+    const child = actual.spawn(...args);
+    const options = (args as unknown[])[2] as { detached?: boolean } | undefined;
+    if (options?.detached === true && child.pid !== undefined) detachedSpawnPids.push(child.pid);
+    return child;
+  }) as typeof actual.spawn;
+  const spawnSync = ((...args: unknown[]) => {
+    const [command, commandArgs] = args;
+    // Match the probe's exact call before reading psOverride, so a spawnSync at import time
+    // never touches the module-level binding.
+    if (command === 'ps' && Array.isArray(commandArgs) && commandArgs.join(' ') === '-A -o pid=,pgid=,stat=' && psOverride !== null) {
+      const answer = psOverride();
+      return { pid: 0, output: [null, answer.stdout, ''], stdout: answer.stdout, stderr: '', status: answer.status, signal: null };
+    }
+    return (actual.spawnSync as unknown as (...a: unknown[]) => unknown)(...args);
+  }) as unknown as typeof actual.spawnSync;
+  return { ...actual, spawn, spawnSync };
 });
 
 /** The shape runResolver consumes: pid, stdout/stderr 'data', 'error'/'close'. */
@@ -157,6 +177,8 @@ beforeEach(() => {
 
 afterEach(() => {
   spawnOverride = null;
+  psOverride = null;
+  detachedSpawnPids.length = 0;
   db.close();
   if (dispatchErrors.length > 0) {
     throw new AggregateError(dispatchErrors, 'Dispatch callback failed');
@@ -881,4 +903,187 @@ describe('byte-exact caps and honest signal labeling (audit F8)', () => {
     expect(evidence['signal']).toBe('SIGKILL');
     expect(evidence['timedOut']).toBe(false);
   });
+});
+
+// ── issue 3568: the resolver's group reap must never mask a live member ──
+
+/**
+ * Spies on process.kill and hands ONLY a group kill aimed at the resolver's own group (a real
+ * detached spawn recorded by the child_process mock) to `answer`; every other call goes to the
+ * real kill. While `answer` runs, its own process.kill calls also go to the real kill.
+ */
+function interceptResolverGroupKill(answer: GroupSignalSeam): { targets: number[]; restore: () => void } {
+  const realKill = process.kill.bind(process);
+  const targets: number[] = [];
+  let answering = false;
+  const spy = vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: string | number) => {
+    if (!answering && pid < -1 && detachedSpawnPids.includes(-pid)) {
+      targets.push(pid);
+      answering = true;
+      try {
+        answer(pid, (signal ?? 'SIGTERM') as NodeJS.Signals);
+      } finally {
+        answering = false;
+      }
+      return true;
+    }
+    return realKill(pid, signal);
+  }) as typeof process.kill);
+  return { targets, restore: () => spy.mockRestore() };
+}
+
+/** A `ps` listing in which the resolver's group holds only a zombie. */
+function zombieOnlyListing(): { status: number; stdout: string } {
+  const pgid = detachedSpawnPids[detachedSpawnPids.length - 1] ?? 0;
+  return { status: 0, stdout: ` ${pgid} ${pgid} Z\n` };
+}
+
+const reapResolverDirs = trackTmpDirs('co-exectool-3568-');
+
+/** A resolver in its own dir (removed after each test): the whole-dir manifest binds every sibling. */
+function isolatedResolver(name: string, source: string, timeoutMs = 30_000): CapabilityObligationsOptions['execution'] {
+  const dir = reapResolverDirs.make(name);
+  const script = join(dir, 'resolver.cjs');
+  writeFileSync(script, source);
+  return {
+    command: [NODE, script, '{source}'],
+    interpreter: NODE,
+    args: ['{source}'],
+    timeoutMs,
+    minOutputBytes: 8,
+    resolverArtifactPath: script,
+    interpreted: true,
+  };
+}
+
+async function runToolOnce(
+  execution?: CapabilityObligationsOptions['execution'],
+): Promise<{ id: number; result: Record<string, unknown> }> {
+  const id = seedObligation();
+  freshAttestation(execution ?? OPTIONS.execution);
+  let result: Record<string, unknown> = {};
+  const { runtime } = makeRuntime({
+    ...(execution === undefined ? {} : { execution }),
+    onDispatch: async (tool) => {
+      result = (await tool.handler({ source: SOURCE_URL }, TOOL_SESSION)) as Record<string, unknown>;
+    },
+  });
+  await runtime.tickOnce();
+  return { id, result };
+}
+
+const listResolverStages = (): string[] => readdirSync(tmpdir()).filter((n) => n.startsWith('ws-resolver-stage-'));
+
+describe('resolver process-group reap (issue 3568)', () => {
+  it('an EPERM close-time sweep of a group with no live member records ok, the same as an ESRCH sweep', async () => {
+    let probeCalls = 0;
+    psOverride = () => { probeCalls += 1; return zombieOnlyListing(); };
+    const kill = interceptResolverGroupKill(deliverThenThrow('EPERM', []));
+    try {
+      const { id, result } = await runToolOnce();
+      expect(probeCalls).toBeGreaterThan(0);
+      expect(kill.targets.length).toBeGreaterThan(0);
+      const rows = receiptRows(id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.result_status).toBe('ok');
+      expect(evidenceOf(rows[0]!)['reapError']).toBeUndefined();
+      expect(result['executed']).toBe(true);
+    } finally {
+      kill.restore();
+    }
+  }, 20_000);
+
+  it('an EPERM close-time sweep while a same-group grandchild is live records error with reapError (default ps probe)', async () => {
+    // The resolver leaves a same-group grandchild alive for about 3 s, then ends with output.
+    const execution = isolatedResolver('eperm-live', [
+      'const cp=require("node:child_process");',
+      'cp.spawn(process.execPath,["-e","Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,3000)"],{stdio:"ignore"}).unref();',
+      'console.log("processed "+process.argv[2]+" with a grandchild");',
+    ].join(''));
+    // No signal reaches the group, so the grandchild is still live when the real ps probe reads it.
+    const kill = interceptResolverGroupKill(throwOnly('EPERM', []));
+    try {
+      const { id, result } = await runToolOnce(execution);
+      const rows = receiptRows(id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.result_status).toBe('error');
+      expect(String(evidenceOf(rows[0]!)['reapError'])).toMatch(/EPERM; group membership probe: live/);
+      expect(result['error']).toBe('capability_execution_failed');
+    } finally {
+      kill.restore();
+      reapFixtureGroups(kill.targets); // the grandchild is still alive, so its group id is still allocated
+    }
+  }, 20_000);
+
+  it('an EPERM close-time sweep that the membership probe cannot read records error — fail closed', async () => {
+    let probeCalls = 0;
+    psOverride = () => { probeCalls += 1; return { status: 1, stdout: '' }; };
+    const kill = interceptResolverGroupKill(throwOnly('EPERM', []));
+    try {
+      const { id } = await runToolOnce();
+      const rows = receiptRows(id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.result_status).toBe('error');
+      expect(String(evidenceOf(rows[0]!)['reapError'])).toMatch(/EPERM; group membership probe: unknown/);
+      expect(probeCalls).toBeGreaterThan(0);
+    } finally {
+      kill.restore(); // no fixture reap: the leader exited and was reaped, so its group id may be reused
+    }
+  }, 20_000);
+
+  it('a group-sweep error other than EPERM records error without consulting the membership probe', async () => {
+    let probeCalls = 0;
+    psOverride = () => { probeCalls += 1; return zombieOnlyListing(); };
+    const kill = interceptResolverGroupKill(throwOnly('EINVAL', []));
+    try {
+      const { id } = await runToolOnce();
+      const rows = receiptRows(id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.result_status).toBe('error');
+      expect(String(evidenceOf(rows[0]!)['reapError'])).toMatch(/EINVAL/);
+      expect(probeCalls).toBe(0);
+    } finally {
+      kill.restore();
+    }
+  }, 20_000);
+
+  it('a watchdog EPERM that leaves a live grandchild holding stdout settles an error receipt within the reap grace', async () => {
+    // The grandchild inherits the resolver's stdout and holds it for 12 s, so `close` cannot fire
+    // before the 5 s grace that follows the 2 s watchdog. Its pid goes to a file OUTSIDE the
+    // resolver dir. The pid dir is deliberately NOT removed: it lets a runner check after the
+    // suite that this one grandchild is gone; the runner deletes it after that check.
+    const pidDir = mkdtempSync(join(tmpdir(), 'co-exectool-gcpid-'));
+    const pidFile = join(pidDir, 'grandchild.pid');
+    const execution = isolatedResolver('eperm-no-close', [
+      'const cp=require("node:child_process");const fs=require("node:fs");',
+      'const gc=cp.spawn(process.execPath,["-e","Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,12000)"],{stdio:"inherit"});',
+      `fs.writeFileSync(${JSON.stringify(pidFile)},String(gc.pid));gc.unref();`,
+      'console.log("processed "+process.argv[2]+" then blocked");setInterval(function(){},1000);',
+    ].join(''), 2_000);
+    // The leader dies and a member survives: SIGKILL only the leader, then answer EPERM.
+    const killLeaderThenEperm: GroupSignalSeam = (target, signal) => {
+      try { process.kill(-target, signal); } catch { /* the leader may already be gone */ }
+      throw groupKillError('EPERM');
+    };
+    const kill = interceptResolverGroupKill(killLeaderThenEperm);
+    const before = new Set(listResolverStages());
+    const start = Date.now();
+    try {
+      const { id, result } = await runToolOnce(execution);
+      const elapsed = Date.now() - start;
+      const rows = receiptRows(id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.result_status).toBe('error');
+      const evidence = evidenceOf(rows[0]!);
+      expect(String(evidence['reapError'])).toMatch(/EPERM; group membership probe: live/);
+      expect(evidence['reason']).toBe('resolver_close_not_observed');
+      expect(evidence['timedOut']).toBe(true);
+      expect(result['error']).toBe('capability_execution_failed');
+      expect(elapsed).toBeLessThan(11_000); // the grace settled it, not a close at the grandchild's 12 s release
+      expect(listResolverStages().filter((n) => !before.has(n))).toEqual([]); // the stage dir was removed
+    } finally {
+      kill.restore();
+      reapFixtureGroups(kill.targets); // the grandchild is still alive, so its group id is still allocated
+    }
+  }, 20_000);
 });
