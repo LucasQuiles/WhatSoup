@@ -105,8 +105,11 @@ export interface ActivationContext {
   staged: StagedPlist[];
 }
 
+/** The fields the refresh-fence rechecks read; the launchd and systemd contexts both carry them. */
+export type FenceRecheckContext = Pick<ActivationContext, 'args' | 'refreshRollbackFence' | 'newCommit' | 'oldCommit'>;
+
 export const LABEL_PATTERN = /^com\.whatsoup\.[A-Za-z0-9._-]+$/;
-const FULL_COMMIT = /^[0-9a-f]{40}$/;
+export const FULL_COMMIT = /^[0-9a-f]{40}$/;
 const BOT_ERRORS_HEALTH_LABEL = 'com.bot-errors.health';
 const BOT_ERRORS_RUNTIME_MANIFEST = 'deploy/bot-errors-runtime-manifest.json';
 const BOT_ERRORS_HEALTH_RUNNER = 'deploy/scripts/bot-errors-runner.py';
@@ -173,7 +176,7 @@ export function mentionsReleaseRoot(text: string, root: string): boolean {
   ));
 }
 
-function readManifestCommit(releaseRoot: string): {
+export function readManifestCommit(releaseRoot: string): {
   commit: string | null;
   releasePath: string | null;
   manifest: ReleaseSnapshotManifest | null;
@@ -190,7 +193,7 @@ function readManifestCommit(releaseRoot: string): {
   }
 }
 
-function sha256(bytes: Buffer): string {
+export function sha256(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
@@ -263,7 +266,7 @@ function stableConsumerRegularFile(target: string): StableConsumerFile | null {
  * Read one consumer file from a no-follow descriptor while binding its file and ancestor identities before and after.
  * Returns CONSUMER_FILE_OVER_CAP for a file larger than the cap, so the refusal can name that cause, and null for any other refusal.
  */
-function readBoundedConsumerFile(root: string, relative: string): Buffer | typeof CONSUMER_FILE_OVER_CAP | null {
+export function readBoundedConsumerFile(root: string, relative: string): Buffer | typeof CONSUMER_FILE_OVER_CAP | null {
   if (!path.isAbsolute(root) || path.resolve(root) !== root || relative.split('/').some((part) => part === '' || part === '.' || part === '..')) return null;
   const parts = relative.split('/'), directories = [root];
   let parent = root;
@@ -288,12 +291,12 @@ function readBoundedConsumerFile(root: string, relative: string): Buffer | typeo
   } catch { return null; } finally { if (fd !== null) { try { closeSync(fd); } catch { /* best effort after refusal */ } } }
 }
 
-type RefreshRollbackFenceRead = {
+export type RefreshRollbackFenceRead = {
   required: RefreshRollbackFenceLevels | null; capability: RefreshRollbackFenceLevels | null; digest: string | null; detail: string;
 };
 
 /** A release without a fence file (legacy) requires and provides level 0 for every key. */
-function legacyFenceLevels(): RefreshRollbackFenceLevels {
+export function legacyFenceLevels(): RefreshRollbackFenceLevels {
   return { claudeRefreshOwnerV3: 0, stalledOperationHoldV1: 0 };
 }
 
@@ -318,7 +321,7 @@ function fenceRequiresNothing(required: RefreshRollbackFenceLevels): boolean {
 }
 
 /** Compatible only when the target meets every requirement the candidate names. */
-function fenceCompatible(required: RefreshRollbackFenceLevels, capability: RefreshRollbackFenceLevels | null): boolean {
+export function fenceCompatible(required: RefreshRollbackFenceLevels, capability: RefreshRollbackFenceLevels | null): boolean {
   return REFRESH_ROLLBACK_FENCE_KEYS.every((key) => required[key] === 0 || (capability !== null && capability[key] >= required[key]));
 }
 
@@ -326,7 +329,7 @@ function sameFenceLevels(left: RefreshRollbackFenceLevels, right: RefreshRollbac
   return REFRESH_ROLLBACK_FENCE_KEYS.every((key) => left[key] === right[key]);
 }
 
-function formatFenceLevels(levels: RefreshRollbackFenceLevels): string {
+export function formatFenceLevels(levels: RefreshRollbackFenceLevels): string {
   return REFRESH_ROLLBACK_FENCE_KEYS.map((key) => `${key} ${levels[key]}`).join(', ');
 }
 
@@ -382,7 +385,7 @@ function readSealedRefreshFence(root: string, entry: { path: string; sha256: str
 }
 
 /** Read a release-sealed refresh fence. A missing entry is the legacy capability zero; malformed is unknown. */
-function readRefreshRollbackFence(releaseRoot: string, manifest: ReleaseSnapshotManifest): RefreshRollbackFenceRead {
+export function readRefreshRollbackFence(releaseRoot: string, manifest: ReleaseSnapshotManifest): RefreshRollbackFenceRead {
   const entry = manifest.files.find((file) => file.path === REFRESH_ROLLBACK_FENCE);
   if (entry === undefined) {
     const state = refreshFencePathState(releaseRoot);
@@ -543,7 +546,7 @@ export async function readBotErrorsHealthConsumer(
   }
 }
 
-function isDirectory(target: string): boolean {
+export function isDirectory(target: string): boolean {
   try {
     return statSync(target).isDirectory();
   } catch {
@@ -551,7 +554,7 @@ function isDirectory(target: string): boolean {
   }
 }
 
-function isRegularFile(target: string): boolean {
+export function isRegularFile(target: string): boolean {
   try {
     return lstatSync(target).isFile();
   } catch {
@@ -567,7 +570,7 @@ function readLinkOrNull(target: string): string | null {
   }
 }
 
-function resolveHealthPort(args: ActivationArgs): { port: number | null; detail: string } {
+export function resolveHealthPort(args: ActivationArgs): { port: number | null; detail: string } {
   if (args.healthPort !== null) return { port: args.healthPort, detail: `--health-port ${args.healthPort}` };
   const configPath = path.join(configRoot(), args.instance, 'config.json');
   let parsed: unknown;
@@ -919,7 +922,7 @@ export async function buildActivationContext(host: ActivationHost, args: Activat
 }
 
 /** The candidate requirement is sealed and must not change between planning and the live switch. */
-export function recheckCandidateRefreshRollbackFence(context: ActivationContext): { ok: boolean; detail: string } {
+export function recheckCandidateRefreshRollbackFence(context: FenceRecheckContext): { ok: boolean; detail: string } {
   const expected = context.refreshRollbackFence.required;
   const expectedDigest = context.refreshRollbackFence.candidateDigest;
   if (expected === null || context.newCommit === null) return { ok: false, detail: 'candidate refresh rollback fence was invalid at plan time' };
@@ -933,7 +936,7 @@ export function recheckCandidateRefreshRollbackFence(context: ActivationContext)
 }
 
 /** Recheck the rollback target immediately before stopping the new instance and before restoring/bootstrapping the old release. */
-export function recheckRollbackRefreshFenceTarget(context: ActivationContext): { ok: boolean; detail: string } {
+export function recheckRollbackRefreshFenceTarget(context: FenceRecheckContext): { ok: boolean; detail: string } {
   const required = context.refreshRollbackFence.required;
   const expectedCapability = context.refreshRollbackFence.targetCapability;
   const expectedDigest = context.refreshRollbackFence.targetDigest;

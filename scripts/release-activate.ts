@@ -1,6 +1,10 @@
 /**
  * Coordinated release activation for a macOS launchd instance (npm
- * `release:activate`).
+ * `release:activate`). On Linux the same CLI drives the systemd --user unit
+ * `whatsoup@<instance>.service` through its release drop-in instead
+ * (scripts/lib/release-activation/systemd.ts and systemd-apply.ts): same
+ * arguments except --aux-label/--wrapper-link, same exit codes, and every
+ * refusal before the drop-in write makes no daemon-reload, stop or restart.
  *
  * `--plan` (the default) is read-only: it resolves every path, checks every
  * precondition, renders the staged plists in memory, and prints the exact
@@ -76,6 +80,8 @@ import {
   preconditionsMet,
   wrapperTargetFor,
 } from './lib/release-activation/plan.ts';
+import { buildSystemdActivationContext, systemdPlanDocument } from './lib/release-activation/systemd.ts';
+import { applySystemdActivation, systemdBlockedRollbackMessage } from './lib/release-activation/systemd-apply.ts';
 
 export const RELEASE_ACTIVATE_EXIT = {
   ok: 0,
@@ -95,7 +101,8 @@ const USAGE = [
   '  [--backup-dir DIR] [--wrapper-link PATH] [--exit-timeout S] [--verify-timeout S]',
   '  [--plan | --apply]',
   '',
-  'macOS launchd only. --plan (default) is read-only and prints the actions and',
+  'macOS launchd, or Linux systemd --user (no --aux-label/--wrapper-link there).',
+  '--plan (default) is read-only and prints the actions and',
   'preconditions as JSON. --apply switches, verifies, and rolls back when compatibility gates permit it.',
 ].join('\n');
 
@@ -485,8 +492,9 @@ export async function runReleaseActivateCli(
     io.stderr(`${error instanceof Error ? error.message : String(error)}\n`);
     return RELEASE_ACTIVATE_EXIT.refused;
   }
+  if (host.platform === 'linux') return runSystemdActivation(host, args, io);
   if (host.platform !== 'darwin') {
-    io.stderr('release:activate supports macOS launchd only; see docs/runbooks/release-deployment.md\n');
+    io.stderr('release:activate supports macOS launchd and Linux systemd --user only; see docs/runbooks/release-deployment.md\n');
     io.stdout(`${JSON.stringify({ mode: args.mode, ready: false, refused: 'platform-not-macos-launchd' })}\n`);
     return RELEASE_ACTIVATE_EXIT.refused;
   }
@@ -507,7 +515,7 @@ export async function runReleaseActivateCli(
   // event and stdout, never change the exit code.
   const exitCode = outcomeExit(applied.outcome);
   try {
-    await reportActivation(host, context, args, plan, applied, io);
+    await reportActivation(host, args, plan, applied, io, (result) => resolveOutcomeBindings(host, context, result));
   } catch {
     // One fixed line and nothing read from the error: its message, and even its class name, can carry text.
     try { io.stderr('release:activate: report-failed\n'); } catch { /* the exit code stands */ }
@@ -521,25 +529,58 @@ export async function runReleaseActivateCli(
 }
 
 /**
+ * The Linux systemd --user path: the same plan/apply/report shape and exit
+ * codes. Observations are not bound to a process sample here (that sample is
+ * launchd-specific), so their binding stays `unobserved`.
+ */
+async function runSystemdActivation(
+  host: ActivationHost,
+  args: ActivationArgs,
+  io: { stdout: (text: string) => void; stderr: (text: string) => void },
+): Promise<number> {
+  const context = await buildSystemdActivationContext(host, args);
+  const plan = systemdPlanDocument(context);
+  if (args.mode === 'plan') {
+    io.stdout(`${JSON.stringify(plan, null, 2)}\n`);
+    return plan['ready'] === true ? RELEASE_ACTIVATE_EXIT.ok : RELEASE_ACTIVATE_EXIT.refused;
+  }
+  if (plan['ready'] !== true) {
+    io.stdout(`${JSON.stringify({ ...plan, outcome: 'refused' }, null, 2)}\n`);
+    return RELEASE_ACTIVATE_EXIT.refused;
+  }
+  const applied = await applySystemdActivation(host, context);
+  const exitCode = outcomeExit(applied.outcome);
+  try {
+    await reportActivation(host, args, plan, applied, io, async (result) => result);
+  } catch {
+    try { io.stderr('release:activate: report-failed\n'); } catch { /* the exit code stands */ }
+  }
+  if (applied.outcome === 'rollback-blocked-migrated' || applied.outcome === 'rollback-blocked-refresh-fence') {
+    try { io.stderr(systemdBlockedRollbackMessage(applied)); } catch { /* the exit code stands */ }
+  }
+  return exitCode;
+}
+
+/**
  * #2481, the report phase, run only after the exit code is fixed: bind the
  * observations (one bounded sample), look up the tool commit (bounded), write
  * the receipt, send at most one event, rewrite the receipt, print stdout.
  */
 async function reportActivation(
   host: ActivationHost,
-  context: ActivationContext,
   args: ActivationArgs,
-  plan: ReturnType<typeof planDocument>,
+  plan: Record<string, unknown>,
   applied: ApplyOutcome,
   io: { stdout: (text: string) => void; stderr: (text: string) => void },
+  bindOutcome: (applied: ApplyOutcome) => Promise<ApplyOutcome>,
 ): Promise<void> {
-  const outcome = await resolveOutcomeBindings(host, context, applied);
+  const outcome = await bindOutcome(applied);
   const invariants = classifyForReceipt(await boundedToolCommit(host), outcome);
   const receipt = (): string => `${JSON.stringify({
     mode: 'apply',
     instance: args.instance,
-    release: plan.release,
-    expectCurrent: plan.expectCurrent,
+    release: plan['release'],
+    expectCurrent: plan['expectCurrent'],
     ...outcome,
     invariants,
   }, null, 2)}\n`;

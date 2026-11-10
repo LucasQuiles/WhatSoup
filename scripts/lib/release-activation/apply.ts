@@ -136,12 +136,12 @@ export interface ApplyOutcome {
   } | null;
 }
 
-function utcStamp(epochMs: number): string {
+export function utcStamp(epochMs: number): string {
   return new Date(epochMs).toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
 }
 
 /** Replace `filePath` with `contents` through a same-directory rename. */
-function writeAtomic(filePath: string, contents: string, mode: number): void {
+export function writeAtomic(filePath: string, contents: string, mode: number): void {
   const temporary = path.join(path.dirname(filePath), `.${path.basename(filePath)}.activate-${process.pid}`);
   writeFileSync(temporary, contents, { encoding: 'utf8', mode });
   chmodSync(temporary, mode);
@@ -358,15 +358,41 @@ export async function resolveOutcomeBindings(
   };
 }
 
+/**
+ * How a service manager names the instance's current main pid and that pid's
+ * argv. The verification poll is otherwise manager-neutral.
+ */
+export interface InstanceProbe {
+  pid(): Promise<number | null>;
+  /** The pid's command line, or null when it cannot be read. */
+  argvLine(pid: number): Promise<string | null>;
+}
+
+/** What the verification poll reads besides the probe: the health endpoint and the deadline. */
+export type VerifyTarget = Pick<ActivationContext, 'healthPort' | 'healthToken'> & {
+  args: Pick<ActivationContext['args'], 'verifyTimeoutSeconds'>;
+};
+
+function launchdProbe(host: ActivationHost, context: ActivationContext): InstanceProbe {
+  return {
+    pid: async () => (await launchdState(host, context.domain, context.instanceLabel)).pid,
+    argvLine: async (pid) => {
+      const ps = await host.exec('ps', ['-p', String(pid), '-o', 'command=']);
+      return ps.code === 0 ? ps.stdout.trim() : null;
+    },
+  };
+}
+
 async function observeInstance(
   host: ActivationHost,
-  context: ActivationContext,
+  context: VerifyTarget,
+  probe: InstanceProbe,
   entrypoint: string,
 ): Promise<PolledObservation> {
-  const state = await launchdState(host, context.domain, context.instanceLabel);
-  if (state.pid === null) return { pid: null, argvMatches: false, health: null, requestedAtMs: null };
-  const ps = await host.exec('ps', ['-p', String(state.pid), '-o', 'command=']);
-  const argvMatches = ps.code === 0 && argvNamesEntrypoint(ps.stdout.trim(), entrypoint);
+  const pid = await probe.pid();
+  if (pid === null) return { pid: null, argvMatches: false, health: null, requestedAtMs: null };
+  const argvLine = await probe.argvLine(pid);
+  const argvMatches = argvLine !== null && argvNamesEntrypoint(argvLine, entrypoint);
   let health: HealthObservation | null = null;
   let requestedAtMs: number | null = null;
   if (context.healthPort !== null && context.healthToken !== null) {
@@ -387,7 +413,7 @@ async function observeInstance(
       };
     }
   }
-  return { pid: state.pid, argvMatches, health, requestedAtMs };
+  return { pid, argvMatches, health, requestedAtMs };
 }
 
 /**
@@ -436,16 +462,17 @@ function instancePasses(
 }
 
 /** Poll until the instance passes or the verify timeout elapses, then record the final observation. */
-async function verifyInstance(
+export async function verifyInstance(
   host: ActivationHost,
-  context: ActivationContext,
+  context: VerifyTarget,
+  probe: InstanceProbe,
   expected: { entrypoint: string; commit: string | null; previousPid: number | null },
 ): Promise<{ ok: boolean; observation: InstanceObservation }> {
   const deadline = host.now() + context.args.verifyTimeoutSeconds * 1_000;
   let ok: boolean;
   let polled: PolledObservation;
   for (;;) {
-    polled = await observeInstance(host, context, expected.entrypoint);
+    polled = await observeInstance(host, context, probe, expected.entrypoint);
     if (instancePasses(polled, expected)) { ok = true; break; }
     if (host.now() >= deadline) { ok = false; break; }
     await host.sleep(VERIFY_POLL_INTERVAL_MS);
@@ -470,7 +497,7 @@ async function verifyAuxDefinitions(
   return null;
 }
 
-interface SchemaLevelCheck {
+export interface SchemaLevelCheck {
   after: number | null;
   afterError: string | null;
   /** True when the level differs from `before` OR could not be read: unknown fails closed. */
@@ -501,7 +528,7 @@ function foreignWriterFailure(context: ActivationContext, sides: readonly Activa
   }
 }
 
-function checkSchemaLevel(dbPath: string, before: number): SchemaLevelCheck {
+export function checkSchemaLevel(dbPath: string, before: number): SchemaLevelCheck {
   try {
     const after = readSchemaMigrationLevel(dbPath);
     return { after, afterError: null, changed: after !== before };
@@ -576,7 +603,7 @@ async function rollback(
   for (const entry of context.staged) {
     await attempt(`reload:${entry.label}`, () => reloadLabel(host, context, entry.label, entry.plistPath));
   }
-  const verification = await verifyInstance(host, context, {
+  const verification = await verifyInstance(host, context, launchdProbe(host, context), {
     entrypoint: bootstrapEntrypointFor(context.args.expectCurrent),
     commit: context.oldCommit,
     previousPid: null,
@@ -730,7 +757,7 @@ async function applyHoldingLock(host: ActivationHost, context: ActivationContext
   // ---- verify from the executing process ----
   let verification: InstanceObservation | null = null;
   if (failure === null) {
-    const result = await verifyInstance(host, context, {
+    const result = await verifyInstance(host, context, launchdProbe(host, context), {
       entrypoint: bootstrapEntrypointFor(args.release),
       commit: context.newCommit,
       previousPid: previous.pid,

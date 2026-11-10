@@ -158,7 +158,8 @@ release, and the prepared rollback target.
 ### `npm run release:activate`
 
 `scripts/release-activate.ts` performs the coordinated switch described in the
-rest of this section. It is **macOS launchd only**; on any other platform it
+rest of this section for macOS launchd. On Linux it drives the systemd --user
+unit instead (see "Linux systemd --user" below). On any other platform it
 refuses with exit `2` before doing anything. Every site value is a parameter or
 is derived: paths from `HOME`/`XDG_*`, the health port from the instance
 `config.json` (or `--health-port`), and the expected commit from the new
@@ -265,9 +266,8 @@ reporting `activated` it confirms they still match what it installed; a mismatch
 there fails the activation. A rollback restores nothing over state from another
 writer, which ends as `rollback-unverified` for the operator to resolve.
 
-`release:activate` remains macOS launchd only. On every other platform, its
-existing platform precondition refuses before activation work; this consumer
-check supplies no portable replacement.
+This BOT ERRORS consumer check is launchd-only. The Linux systemd path below
+does not read a health consumer and supplies no portable replacement.
 
 Renderers (`--aux-label <label>=<renderer>`):
 
@@ -518,6 +518,71 @@ Every path the service executes is derived from `REPO_ROOT` — including the
 entrypoint `$REPO_ROOT/src/bootstrap.ts`. The launchd plist `WorkingDirectory`
 sets the process's current directory and nothing else. It does not select the
 release.
+
+#### Linux systemd --user
+
+On Linux, `release:activate` takes the same arguments except `--aux-label` and
+`--wrapper-link` (refused) and keeps the same exit codes. The unit is
+`whatsoup@<instance>.service`. The lexically last `z…-release-<12hex>.conf`
+drop-in in `$XDG_CONFIG_HOME/systemd/user/whatsoup@<instance>.service.d/`
+selects the release. That drop-in resets `ExecStartPre`/`ExecStart` to paths
+under `~/.local/opt/whatsoup/releases/<release>/`. `~/.local/bin/whatsoup`
+selects nothing on Linux.
+
+The plan binds the running generation. Four sources must name
+`--expect-current`, or the plan refuses with exit `2`:
+
+- the effective release drop-in on disk, whose `<12hex>` must start the
+  `--expect-current` manifest commit;
+- the loaded unit (`systemctl --user show`). `NeedDaemonReload` must be `no`.
+  `DropInPaths` must hold that drop-in and the same drop-in set as the
+  directory. No later drop-in may set `ExecStart` or `ExecStartPre`.
+  `ExecStart` must name `<expect-current>/deploy/whatsoup`;
+- the `MainPID` argv (`/proc/<pid>/cmdline`), which must name
+  `<expect-current>/src/bootstrap.ts`;
+- the `--expect-current` release manifest commit.
+
+Forward admission refuses with exit `2` before any change in three cases. The
+candidate fence is invalid. The candidate does not meet the fence the running
+release requires (this covers activating an older release). The database
+schema level is above the candidate's supported level, or either is unknown.
+The supported level is the `CURRENT_SCHEMA_MIGRATION` constant in
+`src/core/database-schema-version.ts`. It counts only when the release manifest
+seals that file and the bytes match; otherwise support is unproven.
+
+A predecessor that could not be started again does not block the forward
+switch. Examples: a legacy predecessor without a fence file (level 0 for every
+key), or one whose schema support is unproven or too low. The plan and the
+receipt then record `automaticRollback.route: manual-recovery-only`.
+
+`--apply` refuses from inside the target unit's cgroup (`/proc/self/cgroup`),
+because the restart would stop the activating process. Run it from a separate
+unit or scope. It then writes the recovery evidence into a new `0700`
+`activation-<commit12>-<utc>` directory under `--backup-dir`:
+
+- `bot.db`, quick_check verified;
+- `dropins/` with a copy of every drop-in, and `staged/` with the new one;
+- `recovery.json` and `recovery.md`. They name the generation (release root,
+  manifest commit, drop-in names and sha256, `MainPID`), the backup path and
+  the backup's schema level. `recovery.md` lists the exact manual steps: stop,
+  restore the drop-in set, restore `bot.db` while stopped, daemon-reload,
+  start, verify.
+
+The tool reads that evidence back and checks it: private modes, quick_check,
+schema level, copy digests, and recovery files bound to this generation. Any
+failure refuses with exit `2` before any daemon-reload, stop or restart. The
+tool never deletes the directory. The switch writes the new drop-in (`0600`,
+atomic), runs `systemctl --user daemon-reload`, confirms that the loaded unit
+selects the candidate, runs `systemctl --user restart` and verifies the new
+`MainPID`, its argv and authenticated health.
+
+Automatic rollback starts the predecessor only when two checks pass. The
+schema level must equal the backup's and lie within the predecessor's proven
+support (else exit `4`). The predecessor must meet the candidate fence (else
+exit `5`). Both checks run before the unit stops and again after it stops. A
+blocked rollback leaves the new drop-in in place and prints the recovery
+steps. Otherwise the rollback removes the new drop-in, reloads, starts and
+verifies. The report-only #2481 bindings stay `unobserved` on Linux.
 
 ### The WorkingDirectory false pass
 
