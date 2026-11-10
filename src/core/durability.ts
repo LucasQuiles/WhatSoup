@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { outboundPayloadHash } from './outbound-payload-hash.ts';
 import { createChildLogger } from '../logger.ts';
 import {
   validDeliveryCorroboratedSelectedOpsSql,
@@ -714,7 +715,7 @@ type DurabilityStatements = {
   selectUnconsumedContinuityCandidates: PreparedStatement;
   countUnconsumedContinuityCandidates: PreparedStatement;
   stampContinuityCandidateConsumed: PreparedStatement;
-  continuityCandidateHasTerminalOrRecovery: PreparedStatement;
+  continuityCandidateIsResolved: PreparedStatement;
   markInboundSkipped: PreparedStatement;
   selectInboundStatus: PreparedStatement;
   selectInboundReceipt: PreparedStatement;
@@ -879,10 +880,23 @@ export class DurabilityEngine {
            AND continuity_candidate_reason IS NOT NULL
            AND continuity_candidate_consumed_at IS NULL`,
       ),
-      continuityCandidateHasTerminalOrRecovery: prepare(
+      // A terminal row settles a mark only with a real disposition: the turn finalized or
+      // transferred to a recovery owner. A failed terminal settles only on the terms of the
+      // observer's failedTerminalDebt (deploy/scripts/reply-guarantee-observer.py): echoed
+      // delivery, a disarmed guarantee or operator cancellation. A crashed turn
+      // (failed_terminal, no delivery, guarantee armed) and unfinalized_retry_owned stay debt.
+      continuityCandidateIsResolved: prepare(
         `SELECT 1 AS found
          WHERE EXISTS (
-             SELECT 1 FROM turn_terminal_records t WHERE t.inbound_seq_key = ?
+             SELECT 1 FROM turn_terminal_records t
+             WHERE t.inbound_seq_key = ?
+               AND (t.inbound_disposition IN (
+                      'finalized_replied', 'finalized_no_reply_policy', 'transferred_to_recovery_owner'
+                    )
+                    OR (t.inbound_disposition = 'failed_terminal'
+                        AND (t.reply_guarantee_disarmed = 1
+                             OR t.delivery_kind = 'echoed'
+                             OR COALESCE(t.attempt_failure_class, '') = 'operator_cancelled')))
            )
             OR EXISTS (
              SELECT 1 FROM turn_recovery_jobs j WHERE j.source_inbound_seq = ?
@@ -1836,28 +1850,27 @@ export class DurabilityEngine {
   }
 
   /**
-   * Idempotency guard for guarded recovery: true when a terminal record or a
-   * turn-recovery job now exists for this seq. The marker refuses to mark once a
-   * terminal record exists, so a live candidate normally returns false; this is
-   * the defensive check that keeps a seq which acquired coverage after marking
-   * out of the recoverable set.
+   * True when this seq reached a real disposition after marking: a terminal record
+   * that finalized, transferred to a recovery owner or delivered its outcome, or a
+   * turn-recovery job. A terminal record alone is not enough: a crashed turn writes
+   * failed_terminal with no delivery and an armed reply guarantee, and that request
+   * is still unanswered.
    */
-  continuityCandidateHasTerminalOrRecovery(seq: number): boolean {
-    return this.statements.continuityCandidateHasTerminalOrRecovery.get(seq, seq) !== undefined;
+  continuityCandidateIsResolved(seq: number): boolean {
+    return this.statements.continuityCandidateIsResolved.get(seq, seq) !== undefined;
   }
 
   /**
    * Reconcile the `continuity_candidate_consumed_at` lifecycle. For each
-   * marked-but-unconsumed row: if the drop was already resolved elsewhere (a
-   * terminal record, terminal outbound, or recovery job now covers its seq),
-   * stamp it consumed so the reader stops re-scanning a settled mark. Rows that
+   * marked-but-unconsumed row: if the drop was already resolved elsewhere
+   * (continuityCandidateIsResolved), stamp it consumed so the reader stops re-scanning a settled mark. Rows that
    * are still unresolved are left untouched and reported by fresh/stale bucket
    * (diagnostic only — the out-of-process observer owns the operator alert).
    *
    * Delivery blast radius is zero: this never re-sends and never mutates an
    * unresolved drop. Re-delivery of unresolved drops is deferred to the recovery
    * follow-up, which must capture a replay envelope at mark time — a continuity
-   * candidate has no `turn_terminal_records` row and inbound_events carries no
+   * candidate has no resolving `turn_terminal_records` row and inbound_events carries no
    * replay envelope, so it cannot ride the terminal-record-linked
    * `turn_recovery_jobs` path without fabricating one.
    *
@@ -1881,7 +1894,7 @@ export class DurabilityEngine {
     let newestUnresolvedMarkedAt: string | null = null;
     const freshWindowStart = nowMs - CONTINUITY_CANDIDATE_FRESH_WINDOW_MS;
     for (const row of rows) {
-      if (this.continuityCandidateHasTerminalOrRecovery(row.seq)) {
+      if (this.continuityCandidateIsResolved(row.seq)) {
         // Drop already handled by another path — settle the mark.
         this.statements.stampContinuityCandidateConsumed.run(row.seq);
         reconciled += 1;
@@ -2288,7 +2301,7 @@ export class DurabilityEngine {
 
   // ── Outbound ops ──
   createOutboundOp(params: OutboundOpParams): number {
-    const hash = createHash('sha256').update(params.payload).digest('hex');
+    const hash = outboundPayloadHash(params.payload);
     // PR-C supersede-on-enqueue: collapse to one outstanding status ping per chat.
     if (params.opType === 'status_ping') {
       const outstanding = this.statements.selectOutstandingStatus.all(params.chatJid) as Array<{

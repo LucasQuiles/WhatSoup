@@ -23,6 +23,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ensureStandbyNoticeSchema } from '../../../src/runtimes/agent/standby-notice.ts';
 import { ensureAgentSchema } from '../../../src/runtimes/agent/session-db.ts';
+import { STALLED_OPERATION_NOTICE } from '../../../src/runtimes/agent/session.ts';
 import { stashHandoffNotice } from '../../../src/runtimes/agent/handoff-notice-prefix.ts';
 import { emitManagedLoopDegradedNotice } from '../../../src/runtimes/agent/managed-loop-disclosure.ts';
 import { runSessionsCommand } from '../../../src/runtimes/agent/runtime-session-lifecycle.ts';
@@ -264,6 +265,18 @@ describe('a notice sent for a turn is not that turn\'s answer', () => {
     await settle(turn);
 
     expect(noticeFacts(turn, 'exited with code 1')).toEqual(notAnswered('status'));
+  });
+
+  // F7: the stalled-tool kill tells the user to resend. That notice reports a failure;
+  // it must never stand in for the task, so the killed turn still ends failed_terminal.
+  it('a stalled-tool termination notice is a status op, and the killed turn ends failed_terminal', async () => {
+    const turn = openTurn({ scope: 'per_chat', echo: true });
+    turn.state.handleCrashNotify(STALLED_OPERATION_NOTICE, turn.jid);
+
+    turn.deliver(failed(UNKNOWN_TERMINAL));
+    await settle(turn);
+
+    expect(noticeFacts(turn, 'stalled and was terminated')).toEqual(notAnswered('status', 'echoed'));
   });
 
   it('a degraded-capabilities disclosure is a status op, and the failed turn ends failed_terminal', async () => {

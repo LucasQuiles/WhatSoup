@@ -243,16 +243,65 @@ describe('DurabilityEngine continuity candidate reconciler', () => {
     return seq;
   }
 
-  /** Insert a minimal terminal record so a mark's seq counts as resolved-elsewhere. */
-  function resolveWithTerminalRecord(seq: number, key: string, jid: string): void {
+  /** Insert a minimal terminal record with real disposition and delivery values. */
+  function insertTerminalRecord(
+    seq: number, key: string, jid: string, disposition: string, deliveryKind: string,
+  ): void {
     db.raw.prepare(`
       INSERT INTO turn_terminal_records
         (scope, conversation_key, delivery_jid, inbound_seq, inbound_seq_key,
          logical_turn_id, manager_id, generation, attempt_kind,
          inbound_disposition, delivery_kind, reply_guarantee_disarmed)
-      VALUES ('per_chat', ?, ?, ?, ?, ?, 'mgr-1', 1, 'initial', 'delivered', 'sent', 0)
-    `).run(key, jid, seq, seq, `lt-${seq}`);
+      VALUES ('per_chat', ?, ?, ?, ?, ?, 'mgr-1', 1, 'initial', ?, ?, 0)
+    `).run(key, jid, seq, seq, `lt-${seq}`, disposition, deliveryKind);
   }
+
+  /** A replied terminal: the mark's drop counts as resolved elsewhere. */
+  function resolveWithTerminalRecord(seq: number, key: string, jid: string): void {
+    insertTerminalRecord(seq, key, jid, 'finalized_replied', 'flushed');
+  }
+
+  function terminalRows(seq: number): unknown[] {
+    return db.raw.prepare('SELECT * FROM turn_terminal_records WHERE inbound_seq = ? ORDER BY id').all(seq);
+  }
+
+  // Shannon 363 (2026-11-10): a crashed turn wrote failed_terminal with no delivery and the reply
+  // guarantee armed, and no recovery job exists. Any terminal row used to settle the mark, so the
+  // unanswered request left the unconsumed-debt scan. These outcomes are not a real disposition;
+  // a failed terminal settles only as the observer's failedTerminalDebt rule does (echoed delivery,
+  // disarmed guarantee or operator cancellation).
+  it.each([
+    ['failed_terminal', 'none'],
+    ['failed_terminal', 'not_sent'],
+    ['failed_terminal', 'flushed'],
+    ['unfinalized_retry_owned', 'none'],
+  ])('keeps a %s / %s terminal as unresolved debt and preserves its records', (disposition, deliveryKind) => {
+    const seq = markRuntimeFault('reconcile-1', 'ck-1', 'jid-1');
+    insertTerminalRecord(seq, 'ck-1', 'jid-1', disposition, deliveryKind);
+    const markerBefore = getInboundContinuityRow(db, seq);
+    const terminalBefore = terminalRows(seq);
+
+    const res = engine.reconcileContinuityCandidates(Date.now());
+
+    expect(res).toMatchObject({ reconciled: 0, unresolvedFresh: 1, unresolvedStale: 0 });
+    expect(engine.getUnconsumedContinuityCandidates().map((r) => r.seq)).toEqual([seq]);
+    expect(getInboundContinuityRow(db, seq)).toEqual(markerBefore);
+    expect(terminalRows(seq)).toEqual(terminalBefore);
+    expect(readAlerts(sink, CONTINUITY_BACKLOG_ALERT_SOURCE).length).toBe(0);
+  });
+
+  it.each([
+    ['failed_terminal', 'echoed'],
+    ['finalized_no_reply_policy', 'none'],
+  ])('settles a %s / %s terminal: the outcome reached a real disposition', (disposition, deliveryKind) => {
+    const seq = markRuntimeFault('reconcile-1', 'ck-1', 'jid-1');
+    insertTerminalRecord(seq, 'ck-1', 'jid-1', disposition, deliveryKind);
+
+    const res = engine.reconcileContinuityCandidates(Date.now());
+
+    expect(res).toMatchObject({ reconciled: 1, unresolvedFresh: 0, unresolvedStale: 0 });
+    expect(engine.countUnconsumedContinuityCandidates()).toBe(0);
+  });
 
   it('reads marked-but-unconsumed rows, ordered and bounded', () => {
     const a = markRuntimeFault('reconcile-1', 'ck-1', 'jid-1');
@@ -287,7 +336,7 @@ describe('DurabilityEngine continuity candidate reconciler', () => {
     const a = markRuntimeFault('reconcile-1', 'ck-1', 'jid-1');
     markRuntimeFault('reconcile-2', 'ck-2', 'jid-2');
     resolveWithTerminalRecord(a, 'ck-1', 'jid-1');
-    expect(engine.continuityCandidateHasTerminalOrRecovery(a)).toBe(true);
+    expect(engine.continuityCandidateIsResolved(a)).toBe(true);
 
     const res = engine.reconcileContinuityCandidates(Date.now());
     expect(res).toMatchObject({ reconciled: 1, unresolvedFresh: 1, unresolvedStale: 0 });
@@ -334,7 +383,7 @@ describe('DurabilityEngine continuity candidate reconciler', () => {
 
   it('a bare candidate has no terminal or recovery record (recovery deferred)', () => {
     const seq = markRuntimeFault('reconcile-1', 'ck-1', 'jid-1');
-    expect(engine.continuityCandidateHasTerminalOrRecovery(seq)).toBe(false);
+    expect(engine.continuityCandidateIsResolved(seq)).toBe(false);
 
     const res = engine.reconcileContinuityCandidates(Date.now());
     expect(res).toMatchObject({ reconciled: 0, unresolvedFresh: 1 });
