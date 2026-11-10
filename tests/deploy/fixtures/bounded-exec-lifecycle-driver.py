@@ -31,6 +31,30 @@ def release_budget():
     # holdBudgetForDriver in credential-probe-stopped-worker.ts holds the budget
     # until this, so a slow host cannot let it overtake the driver's identity read.
     (root / 'budget-hold-release').write_text('release')
+# Modes whose helper stalls in a TERM-ignoring setup child. The driver times
+# their events and the setup processes' exit, so a missed wall-clock bound names
+# the slow phase (issue #3554). It only observes: no event waits for it.
+SETUP_STALL_MODES = ('setup-mktemp-term-ignoring', 'setup-mkfifo-term-ignoring', 'setup-ps-term-ignoring')
+def observe_setup_stall(child, timeout):
+    # Returns the unused part of the timeout, so the probe's total wait is unchanged.
+    deadline = time.monotonic() + timeout
+    log = root / 'event-order.log'
+    observations = record.setdefault('event_observations', [])
+    gone = record.setdefault('setup_gone_ms', {})
+    while True:
+        exited = child.poll() is not None
+        # Take whole lines only: a read can land inside an append.
+        text = log.read_text() if log.exists() else ''
+        for line in text[:text.rfind('\n') + 1].splitlines()[len(observations):]:
+            observations.append({'event': line, 'observed_monotonic_ns': time.monotonic_ns()})
+        for name in ('setup-pid', 'setup-child-pid'):
+            pid_text = (root / name).read_text() if name not in gone and (root / name).exists() else ''
+            if not pid_text.endswith('\n') or not pid_text.strip().isdecimal(): continue
+            # A zombie still answers, so this is when the process was reaped.
+            try: os.kill(int(pid_text), 0)
+            except ProcessLookupError: gone[name] = int((time.monotonic() - started) * 1000)
+        if exited or time.monotonic() >= deadline: return max(0.0, deadline - time.monotonic())
+        time.sleep(0.005)
 def wait_ready():
     deadline = time.monotonic() + 3
     while not ((root / 'command-started').exists() and (root / 'watchdog-sleep-started').exists()) and time.monotonic() < deadline:
@@ -543,8 +567,11 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             timer_group = int((root / 'timer-partial-signal').read_text())
             record['timer_survivors_after_return'] = [item for item in members(session) if item['pgid'] == timer_group]
         record['before_child_wait_ms'] = int((time.monotonic() - started) * 1000)
-        child.wait(timeout=8)
+        child.wait(timeout=observe_setup_stall(child, 8) if mode in SETUP_STALL_MODES else 8)
         record['child_exit_ms'] = int((time.monotonic() - started) * 1000)
+        if mode in SETUP_STALL_MODES:
+            started_ns = int(started * 1_000_000_000)
+            record['setup_phase_ms'] = [[(item['observed_monotonic_ns'] - started_ns) // 1_000_000, item['event']] for item in record['event_observations']]
         record['exit'] = child.returncode
         record['sentinel_alive_before_cleanup'] = sentinel.poll() is None
         record['survivors_before_cleanup'] = members(session)
