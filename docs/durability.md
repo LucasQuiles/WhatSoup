@@ -1832,6 +1832,11 @@ require identical lease, acknowledgement, evidence, privacy, and health contract
 a consumer ships, the honest steady state for an enrichment-enabled instance with queue
 growth is `consumer_missing`, and that is exactly what health now reports.
 
+Whichever model ships, every exporter writes queued facts through the stamping path
+(`PineconeMemory.upsert` with `provenance: 'fact_export'`), never directly to the index,
+so each exported record carries the server-derived `source_instance`, `source_account`,
+`visibility` and `provenance` fields; the queue payload does not carry them.
+
 ## 10. Memory Consolidation Source Lineage (#2569)
 
 ### 10.1 Pipeline shape and the defects it had
