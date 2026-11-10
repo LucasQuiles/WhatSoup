@@ -1,11 +1,21 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
   cleanGitEnv,
+  git as guardGit,
   gitList,
   isTextCandidate,
   normalizeRepoPath,
@@ -27,6 +37,42 @@ function makeRepo(): string {
   git(repo, ['config', 'user.name', 'Guard Core Test']);
   git(repo, ['config', 'user.email', 'guard-core-test@users.noreply.github.com']);
   return repo;
+}
+
+interface StaleIndexRepo {
+  repo: string;
+  indexPath: string;
+  lockPath: string;
+}
+
+// The committed file keeps its bytes but gets an older mtime, so its index
+// entry's cached stat data is stale. A refreshing `git status` then rewrites
+// the index under index.lock while the content still reads as clean.
+function makeStaleIndexRepo(): StaleIndexRepo {
+  const repo = makeRepo();
+  const tracked = path.join(repo, 'tracked.txt');
+  writeFileSync(tracked, 'tracked\n');
+  git(repo, ['add', 'tracked.txt']);
+  git(repo, ['commit', '-m', 'seed']);
+  const past = new Date(Date.now() - 3_600_000);
+  utimesSync(tracked, past, past);
+  return {
+    repo,
+    indexPath: path.join(repo, '.git', 'index'),
+    lockPath: path.join(repo, '.git', 'index.lock'),
+  };
+}
+
+function readIndex(indexPath: string): { mtimeMs: number; bytes: Buffer } {
+  return { mtimeMs: statSync(indexPath).mtimeMs, bytes: readFileSync(indexPath) };
+}
+
+// The same status without GIT_OPTIONAL_LOCKS: git's default takes the optional
+// index lock and writes the refreshed stat data back.
+function refreshingStatus(repo: string): string {
+  const env = cleanGitEnv();
+  delete env.GIT_OPTIONAL_LOCKS;
+  return execFileSync('git', ['status', '--porcelain'], { cwd: repo, encoding: 'utf8', env }).trim();
 }
 
 describe('guard-core helpers', () => {
@@ -89,6 +135,33 @@ describe('guard-core helpers', () => {
       content: undefined,
     });
     expect(readStagedFileContent(repo, 'docs/publication-audit.md')).toBeUndefined();
+  });
+
+  describe('git() optional locks', () => {
+    it('control: status without GIT_OPTIONAL_LOCKS rewrites a stale index', () => {
+      const { repo, indexPath, lockPath } = makeStaleIndexRepo();
+      const before = readIndex(indexPath);
+
+      expect(refreshingStatus(repo)).toBe('');
+
+      expect(readIndex(indexPath).bytes).not.toEqual(before.bytes);
+      expect(existsSync(lockPath)).toBe(false);
+    });
+
+    it('runs a read-only status without refreshing or locking the index', () => {
+      const { repo, indexPath, lockPath } = makeStaleIndexRepo();
+      const before = readIndex(indexPath);
+
+      expect(guardGit(['status', '--porcelain'], repo).trim()).toBe('');
+
+      const after = readIndex(indexPath);
+      expect(after.bytes).toEqual(before.bytes);
+      expect(after.mtimeMs).toBe(before.mtimeMs);
+      expect(existsSync(lockPath)).toBe(false);
+      // The entry is still stale, so the unchanged index above is not vacuous.
+      refreshingStatus(repo);
+      expect(readIndex(indexPath).bytes).not.toEqual(before.bytes);
+    });
   });
 
   describe('readText', () => {
