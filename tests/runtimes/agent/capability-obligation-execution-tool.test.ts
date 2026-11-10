@@ -1052,7 +1052,30 @@ async function runToolOnce(
   return { id, result };
 }
 
-const listResolverStages = (): string[] => readdirSync(tmpdir()).filter((n) => n.startsWith('ws-resolver-stage-'));
+/** Resolver source that changes the snapshot it was handed (argv[2]) before anything else. */
+const SNAPSHOT_MUTATION = "require('fs').writeFileSync(process.argv[2],'MUTATED-DIFFERENT-BYTES');";
+
+/** runToolOnce for a media obligation: the source is the retained media path, which the run snapshots. */
+async function runMediaToolOnce(
+  execution: CapabilityObligationsOptions['execution'],
+  media: { path: string; content: string },
+): Promise<{ id: number; result: Record<string, unknown> }> {
+  writeFileSync(media.path, media.content);
+  const sha256 = createHash('sha256').update(media.content).digest('hex');
+  const id = seedObligation({ retainedMedia: { path: media.path, sha256, bytes: Buffer.byteLength(media.content), policyVersion: 'p/1' } });
+  freshAttestation(execution);
+  let result: Record<string, unknown> = {};
+  const { runtime } = makeRuntime({
+    execution,
+    onDispatch: async (tool) => {
+      result = (await tool.handler({ source: media.path }, TOOL_SESSION)) as Record<string, unknown>;
+    },
+  });
+  await runtime.tickOnce();
+  return { id, result };
+}
+
+const listResolverStages =(): string[] => readdirSync(tmpdir()).filter((n) => n.startsWith('ws-resolver-stage-'));
 
 describe('resolver process-group reap (issue 3568)', () => {
   it('an EPERM close-time sweep of a group with no live member records ok, the same as an ESRCH sweep', async () => {
@@ -1318,4 +1341,69 @@ describe('resolver process-group reap (issue 3568)', () => {
       kill.restore();
     }
   }, 20_000);
+
+  it('a resolver that mutates its snapshot and leaves its group unproven keeps reapError in the receipt and the tool error', async () => {
+    // The resolver changes its snapshot, prints and exits; the close-time sweep then meets EPERM,
+    // and a probe that cannot read `ps` answers `unknown`.
+    let probeCalls = 0;
+    psOverride = () => { probeCalls += 1; return { status: 1, stdout: '' }; };
+    const execution = isolatedResolver('media-reap', `${SNAPSHOT_MUTATION}console.log('processed-and-mutated-ok');`);
+    const mediaPath = join(reapResolverDirs.make('media-reap-work'), 'clip.webm');
+    const kill = interceptResolverGroupKill(throwOnly('EPERM', []));
+    try {
+      const { id, result } = await runMediaToolOnce(execution, { path: mediaPath, content: 'ORIGINAL-MEDIA-BYTES' });
+      expect(probeCalls).toBeGreaterThan(0);
+      const rows = receiptRows(id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.result_status).toBe('error');
+      const evidence = evidenceOf(rows[0]!);
+      expect(evidence['reason']).toBe('media_mutated_during_execution');
+      // The media failure must not hide a group the run could not prove reaped.
+      expect(evidence['reapError']).toBe('group kill failed: EPERM; group membership probe: unknown');
+      expect(result['error']).toBe('capability_execution_failed');
+      expect(result['message']).toBe('Retained media changed during execution, reapError=group kill failed: EPERM; group membership probe: unknown');
+      expectOneReapWarning(id, /EPERM; group membership probe: unknown/);
+    } finally {
+      kill.restore(); // no fixture reap: the leader exited and was reaped, so its group id may be reused
+    }
+  }, 20_000);
+
+  it('a resolver that mutates its snapshot while a setsid descendant holds stdout keeps closeNotObserved in the receipt and the tool error', async () => {
+    // The resolver changes its snapshot first, then leaves a setsid descendant that holds stdout and
+    // stderr until this test's teardown, so the run settles on the reap grace.
+    const pidFile = join(reapResolverDirs.make('media-setsid-pid'), 'grandchild.pid');
+    const execution = isolatedResolver(
+      'media-setsid',
+      SNAPSHOT_MUTATION + grandchildResolverSource(pidFile, { holdStdio: true, setsid: true, block: true }),
+      3_000,
+    );
+    const mediaPath = join(reapResolverDirs.make('media-setsid-work'), 'clip.webm');
+    const run = runMediaToolOnce(execution, { path: mediaPath, content: 'ORIGINAL-MEDIA-BYTES' });
+    try {
+      // 3 s watchdog + 5 s grace: a run that never arms the grace hangs, and this bound fails it.
+      const { id, result } = await settleWithin(run, 18_000, 'the run did not settle within 18 s: no reap grace after a successful watchdog kill');
+      expect(existsSync(pidFile)).toBe(true); // the descendant existed before the watchdog fired
+      const rows = receiptRows(id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.result_status).toBe('error');
+      const evidence = evidenceOf(rows[0]!);
+      expect(evidence['reason']).toBe('media_mutated_during_execution');
+      // The media failure must not hide that a descendant may still be running.
+      expect(evidence['closeNotObserved']).toBe(true);
+      expect(evidence['reapError']).toBeUndefined(); // the group kill itself succeeded
+      expect(result['error']).toBe('capability_execution_failed');
+      expect(result['message']).toBe('Retained media changed during execution, closeNotObserved=true');
+      expectOneCloseNotObservedWarning(id);
+    } finally {
+      const gcPid = readFixturePid(pidFile);
+      // The descendant is alive and leads its own group, so that group id is still allocated.
+      if (gcPid !== undefined) reapFixtureGroups([-gcPid]);
+      const gone = gcPid === undefined ? true : await waitForPidGone(gcPid);
+      // A run still pending here settles once the descendant is gone; let it finish before the DB closes.
+      await settleWithin(run, 2_000, 'the run did not settle after teardown').catch(() => undefined);
+      expect(gone).toBe(true);
+    }
+    // 30 s: a hung run costs the start-up, the 18 s bound, up to 2 s of waitForPidGone and the 2 s
+    // settle, and all of it must finish before the test timeout.
+  }, 30_000);
 });
