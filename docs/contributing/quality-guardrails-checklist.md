@@ -64,6 +64,12 @@ after a remote write is an observability gap, not proof that no check was create
 Fork and merge-queue inputs remain unsupported by this workflow.
 
 Keep the existing Quality scanner step and required checks during qualification.
+Quality runs full validation daily at 06:23 UTC. It compares tags and scheduled
+runs against `HEAD^` for baseline growth;
+a new tag's all-zero `before` value cannot identify a previous revision. PRs,
+merge groups and main pushes retain their event-provided base revisions.
+The guard's JSON receipt and reproduction command name the resolved commit OIDs,
+including when the input base is a relative revision such as `HEAD^`.
 Only after hosted canaries prove current-head publication, stale-head refusal,
 credential confinement, cleanup and failure handling should the private check be
 required. Qualify the tag receipt with the existing `scripts/private-integrity-release.ts`
@@ -78,12 +84,46 @@ a parsed workflow contract do not establish those hosted guarantees.
 Public native capture fixtures run separately from the pure adapter tests:
 `npm test -- --pool=forks tests/scripts/private-test-integrity-native.test.ts`.
 The test invokes `tools/private-test-integrity/run_native_tests.py`, which uses the
-existing process-group supervisor and validates the canary's five-case receipt,
+existing process-group supervisor and validates the canary's six-case receipt,
 source hashes and scratch cleanup. Omission and failing child/group assertions are
 negative controls. The pure `run_tests.py` keeps its no-child/no-network audit guard.
 These synthetic fixtures need POSIX and an outer deadline; they do not qualify the
 private scanner, its Linux/Python ABI, hosted credentials or escaped descendants.
 The caller owns and removes the scratch `TMPDIR` and result file.
+Capture bounds apply to stdout, so parser dependency writes can exceed the 256 KiB
+capture limit. The dependency-write canary verifies a complete 512 KiB file while
+the overflow canary must remain inconclusive. The trusted Linux workflow mounts
+owned scratch with a 512 MiB aggregate allocation limit and 16384-inode limit.
+Before downloading drivers or private code, it verifies the actual filesystem,
+requires an over-budget write to fail with ENOSPC, and verifies a normal write
+after recovery. Mount, quota-probe and unmount failures fail the job. Cleanup
+unmounts this exact scratch before removing the empty mountpoint. Local synthetic
+capture tests do not establish this hosted filesystem limit.
+Runtime qualification requires parse
+errors for every malformed probe; the pinned scanner reports these as advisory
+findings, with Python syntax errors separately blocking. Qualification verifies
+parser detection and does not change scanner policy severity. The trusted workflow
+downloads one bounded Linux grammar archive before acquiring private code. The
+maintained `scanner_grammars.py` pins its size and SHA-256 before extraction, then
+verifies the seven required libraries by path, size and hash. Runtime probes and
+the candidate scan share that job's `XDG_CACHE_HOME`; every native child rechecks
+it before execution. Missing or altered libraries are inconclusive, with no
+download fallback. The workflow entrypoint requires this cache; optional cache
+arguments on lower-level adapters support public synthetic fixtures only.
+This closes the release-asset gap outside the private Git manifest and avoids
+repeated downloads into separate temporary homes. The caller excludes concurrent
+cache writers. Hash verification and a private HOME do not isolate same-user
+processes or block network access.
+
+The shell fault fixtures execute repository-owned workflow source, like other
+repository tests execute source code. Their fake privileged commands prove error
+propagation; they are not a sandbox for hostile pull request code. The privileged
+scanner workflow reads only default-branch drivers and treats candidate files as
+data. Real mount, quota and cleanup behavior still requires hosted qualification.
+
+The alert drill harness gives its children a scratch directory inside its own sandbox.
+This prevents a macOS caller's temporary path from being mistaken for leaked test
+evidence in daily-health alerts; the sandbox and child scratch are removed on exit.
 
 Before the Node 24 toolchain setup, `scripts/ci-disk-reclaim.sh` records free
 space and enforces a 30 GiB budget. Sufficient runners skip mutation with a
