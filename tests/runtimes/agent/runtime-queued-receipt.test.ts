@@ -218,8 +218,9 @@ describe('#2949 queued receipt: the text is truthful and content-free', () => {
     expect(QUEUED_TURN_RECEIPT_OTHER_TEXT).toBe(
       "*Still working on an earlier request.* This message is queued behind it. Send /stop to cancel that request and anything waiting; I'll reply with the outcome.",
     );
-    // Where the receipt offers no /stop (every group receipt): the same status,
-    // and no one named to ask.
+    // Where the receipt offers no /stop: the same status, and no one named to
+    // ask. Every group receipt is the second; the first is only for a 1:1 chat
+    // where the receipt withholds /stop.
     expect(QUEUED_TURN_RECEIPT_NO_STOP_TEXT).toBe(
       '*Still working on your earlier request.* This message is next.',
     );
@@ -271,8 +272,8 @@ describe('#2949 queued receipt: the text is truthful and content-free', () => {
   });
 
   it('picks the text from the running turn\'s sender and purpose, the waiting count, and the /stop offer', () => {
-    const me = { senderJid: '15550001@s.whatsapp.net' };
-    const other = { senderJid: '15550002@s.whatsapp.net' };
+    const me = { senderJid: '15550001@s.whatsapp.net', isGroup: false };
+    const other = { senderJid: '15550002@s.whatsapp.net', isGroup: false };
     expect(queuedTurnReceiptText(me, me, 1, true)).toBe(QUEUED_TURN_RECEIPT_TEXT);
     expect(queuedTurnReceiptText(me, me, 2, true)).toBe(QUEUED_TURN_RECEIPT_OTHER_TEXT);
     expect(queuedTurnReceiptText(other, me, 1, true)).toBe(QUEUED_TURN_RECEIPT_OTHER_TEXT);
@@ -281,6 +282,18 @@ describe('#2949 queued receipt: the text is truthful and content-free', () => {
     expect(queuedTurnReceiptText(me, me, 1, false)).toBe(QUEUED_TURN_RECEIPT_NO_STOP_TEXT);
     expect(queuedTurnReceiptText(me, me, 2, false)).toBe(QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT);
     expect(queuedTurnReceiptText(other, me, 1, false)).toBe(QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT);
+  });
+
+  // Review break (round 5): a group receipt took the own-request text from
+  // sender equality alone, but it is sent to the whole group, so every other
+  // member read a false or ambiguous "your". The other-request text is true
+  // for every reader in either position.
+  it('a group receipt never takes the own-request text: every member reads it, so "your" would be false for the others', () => {
+    const meInGroup = { senderJid: '15550001@s.whatsapp.net', isGroup: true };
+    const otherInGroup = { senderJid: '15550002@s.whatsapp.net', isGroup: true };
+    expect(queuedTurnReceiptText(meInGroup, meInGroup, 1, false)).toBe(QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT);
+    expect(queuedTurnReceiptText(meInGroup, meInGroup, 2, false)).toBe(QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT);
+    expect(queuedTurnReceiptText(otherInGroup, meInGroup, 1, false)).toBe(QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT);
   });
 
   it('a failing send is contained: the decision stays sent and nothing throws', async () => {
@@ -330,14 +343,14 @@ describe('#2949 queued receipt: /stop is offered only where every reader may run
     expect(adminCount).not.toHaveBeenCalled();
   });
 
-  it('a group member behind their own request is told it is next, without /stop', () => {
+  it('a group member behind their own request gets the other-request receipt, without /stop: every member reads it', () => {
     const { queue } = makeBlockingQueue();
     const { notifier, send } = makeNotifier();
     queue.enqueue(groupTurn('my long request'));
 
     expect(admit(notifier, queue, groupTurn('why is it taking so long'))).toBe('sent');
 
-    expect(send.mock.calls).toEqual([[chatJid, QUEUED_TURN_RECEIPT_NO_STOP_TEXT]]);
+    expect(send.mock.calls).toEqual([[chatJid, QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT]]);
   });
 
   it('a DM gets the /stop copy with admins configured, and the admin count is never read', () => {
