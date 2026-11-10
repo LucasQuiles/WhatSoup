@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 import pytest
-from hypothesis import example, given, strategies as st
+from hypothesis import example, given, settings, strategies as st
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "fleet_reliability_observer.py"
@@ -1043,6 +1043,8 @@ def test_uncapped_host_stays_critical_beside_a_capped_host(observer, config):
     ]
 
 
+# These observer cycles persist real checkpoints; this checks severity, not disk latency.
+@settings(deadline=5000)
 @given(value=st.one_of(st.integers(), st.lists(st.text(), max_size=3),
                       st.text().filter(lambda value: value not in {"info", "warning", "error", "critical"})))
 @example(value="urgent")

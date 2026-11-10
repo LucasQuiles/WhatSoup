@@ -2,10 +2,13 @@
 
 import importlib.util
 import json
+from contextlib import contextmanager
+import tempfile
 from pathlib import Path
 import sys
 
 import pytest
+from hypothesis import example, given, settings, strategies as st
 
 
 def load_supervisor():
@@ -24,6 +27,16 @@ def alert(index):
 
 @pytest.fixture
 def service(tmp_path):
+    return service_state(tmp_path)
+
+
+@contextmanager
+def temporary_service():
+    with tempfile.TemporaryDirectory(prefix="fleet-receipt-property-") as directory:
+        yield service_state(Path(directory))
+
+
+def service_state(tmp_path):
     supervisor = load_supervisor()
     directory = tmp_path / "state"
     supervisor.private_directory(directory)
@@ -55,23 +68,27 @@ def cycle(supervisor, config, now):
     ("sent", "channel_delivered"), ("email_delivered", "channel_delivered"),
     ("suppressed", "dispatcher_suppressed"), ("storm_collapsed", "dispatcher_collapsed"),
 ])
-def test_terminal_receipt_is_durable_and_not_requeried_after_restart(service, status, expected):
-    supervisor, config, path, responses, requests = service
-    original = alert(0)
-    state = supervisor.initial_state(100)
-    state["alerts"] = [original]
-    supervisor.write_private(path, state)
-    receipt = {"status": status, "audit_receipt": "exact audit evidence", "extra": "é"}
-    responses.write_text(json.dumps({original["event_id"]: receipt}))
-    result = cycle(supervisor, config, 101)
-    assert result["alerts"][0]["delivery"] == expected
-    assert result["alerts"][0]["event_id"] == original["event_id"]
-    if expected == "channel_delivered":
-        assert result["alerts"][0]["delivery_receipt"] == receipt
-    assert supervisor.read_private(path) == result
-    restarted = cycle(load_supervisor(), config, 102)
-    assert restarted["alerts"][0] == result["alerts"][0]
-    assert [json.loads(line) for line in requests.read_text().splitlines()] == [[original["event_id"]]]
+@settings(max_examples=4, deadline=5000)
+@example(audit_text="exact audit evidence")
+@given(audit_text=st.text(alphabet="abé\\\"", max_size=128))
+def test_terminal_receipt_is_durable_and_not_requeried_after_restart(status, expected, audit_text):
+    with temporary_service() as service:
+        supervisor, config, path, responses, requests = service
+        original = alert(0)
+        state = supervisor.initial_state(100)
+        state["alerts"] = [original]
+        supervisor.write_private(path, state)
+        receipt = {"status": status, "audit_receipt": audit_text, "extra": "é"}
+        responses.write_text(json.dumps({original["event_id"]: receipt}))
+        result = cycle(supervisor, config, 101)
+        assert result["alerts"][0]["delivery"] == expected
+        assert result["alerts"][0]["event_id"] == original["event_id"]
+        if expected == "channel_delivered":
+            assert result["alerts"][0]["delivery_receipt"] == receipt
+        assert supervisor.read_private(path) == result
+        restarted = cycle(load_supervisor(), config, 102)
+        assert restarted["alerts"][0] == result["alerts"][0]
+        assert [json.loads(line) for line in requests.read_text().splitlines()] == [[original["event_id"]]]
 
 
 def test_one_batch_per_cycle_resumes_after_restart_without_starving_later_alerts(service):

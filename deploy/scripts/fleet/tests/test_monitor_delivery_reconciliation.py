@@ -6,8 +6,9 @@ from pathlib import Path
 import sys
 
 import pytest
+from hypothesis import example, given, settings, strategies as st
 
-from test_service_delivery_reconciliation import alert, load_supervisor, service
+from test_service_delivery_reconciliation import alert, load_supervisor, service, temporary_service
 
 
 def load_observer():
@@ -55,21 +56,25 @@ def run_monitor(kind, config, now):
 
 
 @pytest.mark.parametrize("kind", ["observer", "watchdog", "sentinel"])
-def test_monitor_lookup_is_one_batch_and_resumes_after_restart(service, kind):
-    config, path, responses, requests = seed_monitor(service, kind, [alert(i) for i in range(130)])
-    first = run_monitor(kind, config, 101)
-    assert [len(json.loads(line)) for line in requests.read_text().splitlines()] == [128]
-    assert [(a["event_id"], a["delivery"]) for a in first["alerts"]] == [(alert(i)["event_id"], "locally_persisted") for i in range(130)]
-    responses.write_text(json.dumps({alert(i)["event_id"]: {"status": "sent", "audit_receipt": "proof"}
-                                     for i in (128, 129)}))
-    second = run_monitor(kind, config, 102)
-    assert [json.loads(line) for line in requests.read_text().splitlines()] == [
-        [alert(i)["event_id"] for i in range(128)], [alert(i)["event_id"] for i in (128, 129)]
-    ]
-    assert [a["delivery"] for a in second["alerts"][-2:]] == ["channel_delivered"] * 2
-    assert load_supervisor().read_private(path) == second
-    run_monitor(kind, config, 103)
-    assert json.loads(requests.read_text().splitlines()[-1]) == [alert(i)["event_id"] for i in range(128)]
+@settings(max_examples=4, deadline=5000)
+@example(tail_count=2)
+@given(tail_count=st.integers(min_value=1, max_value=8))
+def test_monitor_lookup_is_one_batch_and_resumes_after_restart(kind, tail_count):
+    with temporary_service() as service:
+        config, path, responses, requests = seed_monitor(service, kind, [alert(i) for i in range(128 + tail_count)])
+        first = run_monitor(kind, config, 101)
+        assert [len(json.loads(line)) for line in requests.read_text().splitlines()] == [128]
+        assert [(a["event_id"], a["delivery"]) for a in first["alerts"]] == [(alert(i)["event_id"], "locally_persisted") for i in range(128 + tail_count)]
+        responses.write_text(json.dumps({alert(i)["event_id"]: {"status": "sent", "audit_receipt": "proof"}
+                                         for i in range(128, 128 + tail_count)}))
+        second = run_monitor(kind, config, 102)
+        assert [json.loads(line) for line in requests.read_text().splitlines()] == [
+            [alert(i)["event_id"] for i in range(128)], [alert(i)["event_id"] for i in range(128, 128 + tail_count)]
+        ]
+        assert [a["delivery"] for a in second["alerts"][128:]] == ["channel_delivered"] * tail_count
+        assert load_supervisor().read_private(path) == second
+        run_monitor(kind, config, 103)
+        assert json.loads(requests.read_text().splitlines()[-1]) == [alert(i)["event_id"] for i in range(128)]
 
 
 def test_watchdog_reads_observer_receipts_without_independent_confirmation(service):
@@ -90,22 +95,26 @@ def test_watchdog_reads_observer_receipts_without_independent_confirmation(servi
 
 
 @pytest.mark.parametrize("kind", ["observer", "watchdog", "sentinel"])
-def test_monitor_preserves_unfitting_receipt_and_reports_capacity(service, kind):
-    config, path, responses, requests = seed_monitor(service, kind, [alert(0)])
-    supervisor = load_supervisor()
-    state = supervisor.read_private(path)
-    state["legacy_metadata"] = ""
-    size = len(supervisor._bounded_json_bytes(state, supervisor.PRIVATE_JSON_MAX_BYTES)) + 1
-    state["legacy_metadata"] = "a" * (supervisor.PRIVATE_JSON_MAX_BYTES - 2500 - size)
-    supervisor.write_private(path, state)
-    responses.write_text(json.dumps({alert(0)["event_id"]: {"status": "sent", "audit_receipt": "a" * 3500}}))
-    result = run_monitor(kind, config, 101)
-    assert result["alerts"][0]["delivery"] == "locally_persisted"
-    assert "delivery_receipt" not in result["alerts"][0]
-    assert supervisor.delivery_failures(result) == [{"code": "state_capacity_exhausted", "returncode": None}]
-    assert result["transition_capacity_exhausted"] is True
-    assert result["legacy_metadata"] == state["legacy_metadata"]
-    assert supervisor.read_private(path) == result
+@settings(max_examples=4, deadline=5000)
+@example(receipt_size=3500)
+@given(receipt_size=st.integers(min_value=3000, max_value=4000))
+def test_monitor_preserves_unfitting_receipt_and_reports_capacity(kind, receipt_size):
+    with temporary_service() as service:
+        config, path, responses, requests = seed_monitor(service, kind, [alert(0)])
+        supervisor = load_supervisor()
+        state = supervisor.read_private(path)
+        state["legacy_metadata"] = ""
+        size = len(supervisor._bounded_json_bytes(state, supervisor.PRIVATE_JSON_MAX_BYTES)) + 1
+        state["legacy_metadata"] = "a" * (supervisor.PRIVATE_JSON_MAX_BYTES - 2500 - size)
+        supervisor.write_private(path, state)
+        responses.write_text(json.dumps({alert(0)["event_id"]: {"status": "sent", "audit_receipt": "a" * receipt_size}}))
+        result = run_monitor(kind, config, 101)
+        assert result["alerts"][0]["delivery"] == "locally_persisted"
+        assert "delivery_receipt" not in result["alerts"][0]
+        assert supervisor.delivery_failures(result) == [{"code": "state_capacity_exhausted", "returncode": None}]
+        assert result["transition_capacity_exhausted"] is True
+        assert result["legacy_metadata"] == state["legacy_metadata"]
+        assert supervisor.read_private(path) == result
 
 
 @pytest.mark.parametrize("kind", ["observer", "watchdog"])
