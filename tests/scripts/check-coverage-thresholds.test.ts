@@ -1,4 +1,4 @@
-import { writeFileSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -329,20 +329,47 @@ describe('check-coverage-thresholds.mjs', () => {
   // ---------------------------------------------------------------------------
 
   describe('--strict flag', () => {
-    it('is wired into the root coverage:check gate after BOUNDED coverage generation', () => {
+    it.each([
+      { rootExit: 0, consoleExit: 0, missingBinary: false, expectedExit: 0 },
+      { rootExit: 17, consoleExit: 0, missingBinary: false, expectedExit: 17 },
+      { rootExit: 0, consoleExit: 9, missingBinary: false, expectedExit: 9 },
+      { rootExit: 0, consoleExit: 0, missingBinary: true, expectedExit: 2 },
+    ])('runs bounded coverage with compact reports and preserves gate exits: %j', ({ rootExit, consoleExit, missingBinary, expectedExit }) => {
       const pkg = JSON.parse(readFileSync(ROOT_PACKAGE_JSON, 'utf8')) as {
         scripts: Record<string, string>;
       };
-      const wrapper = readFileSync(ROOT_COVERAGE_WRAPPER, 'utf8');
-
       expect(pkg.scripts['coverage:check']).toBe('bash scripts/run-coverage-check.sh');
-      expect(wrapper).toContain('set -euo pipefail');
-      // Round-19 finding 5: the coverage full suite runs through the EXTERNALLY BOUNDED
-      // battery (a synchronous fixture that wedges a worker converts to a truthful non-zero
-      // exit instead of stalling this gate), forwarding --coverage and any extra args.
-      expect(wrapper).toContain('"$VITEST_BIN"'); // still guards the vitest binary's presence
-      expect(wrapper).toContain('scripts/full-suite-battery.ts --coverage "$@"');
-      expect(wrapper).toContain('npm --prefix console run coverage:check -- --strict');
+      const cwd = tmp.make('wrapper');
+      const bin = join(cwd, 'bin');
+      mkdirSync(bin);
+      mkdirSync(join(cwd, 'scripts'));
+      const rootArgs = join(cwd, 'root-args');
+      const npmArgs = join(cwd, 'npm-args');
+      writeFileSync(join(cwd, 'scripts/run-with-pinned-node.sh'),
+        '#!/bin/bash\nprintf "%s\\n" "$@" > "$ROOT_ARGS"\nexit "$ROOT_EXIT"\n');
+      writeFileSync(join(bin, 'npm'),
+        '#!/bin/bash\nprintf "%s\\n" "$*" >> "$NPM_ARGS"\nif [[ "$1" == "--prefix" ]]; then exit "$CONSOLE_EXIT"; fi\n', { mode: 0o755 });
+      const result = spawnSync('bash', [ROOT_COVERAGE_WRAPPER, '--maxWorkers=2'], {
+        cwd, encoding: 'utf8', timeout: 10_000,
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ROOT_ARGS: rootArgs, NPM_ARGS: npmArgs,
+          ROOT_EXIT: String(rootExit), CONSOLE_EXIT: String(consoleExit),
+          VITEST_BIN: missingBinary ? join(cwd, 'absent-vitest') : process.execPath },
+      });
+      expect(result.status, result.stderr).toBe(expectedExit);
+      if (missingBinary) {
+        expect(result.stderr).toContain('coverage check: missing');
+        expect(existsSync(rootArgs)).toBe(false);
+        expect(existsSync(npmArgs)).toBe(false);
+      } else {
+        expect(readFileSync(rootArgs, 'utf8').trim().split('\n')).toEqual([
+          'scripts/full-suite-battery.ts', '--coverage',
+          '--coverage.reporter=text', '--coverage.reporter=json',
+          '--coverage.reporter=json-summary', '--coverage.reporter=lcovonly', '--maxWorkers=2',
+        ]);
+        expect(readFileSync(npmArgs, 'utf8').trim().split('\n')).toEqual([
+          'run strip-types-compat', ...(rootExit === 0 ? ['--prefix console run coverage:check -- --strict'] : []),
+        ]);
+      }
     });
 
     it('exits 0 under --strict when all areas pass', () => {

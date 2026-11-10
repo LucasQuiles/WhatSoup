@@ -125,9 +125,14 @@ The remaining suite collects deployment qualification automatically. CI runs it
 once there; `test:deployment-qualification` stays in both local gates, which do
 not run the full Python directory. Keep the sentinel coverage gate first: its
 curated files are excluded from the remaining suite and retain their own floors.
-`npm test` and `coverage:check` retain their existing full behavior. Coverage
+`npm test` and `coverage:check` retain their existing full suite scope. Coverage
 requests always use the complete root suite and preserve 95% lines, 90% branches
 and 93% functions. Browser and motion configurations remain separate.
+`coverage:check` writes text, raw JSON, JSON summary and LCOV reports. It omits the
+HTML tree from routine gates; `npm run coverage -- --pool=forks` retains HTML for
+manual inspection. Thresholds and the strict console coverage check are unchanged.
+Without HTML's summary mutation, empty files use Istanbul's default 100% for zero
+counted lines; those unchanged zero counts do not establish exercised code.
 The browser performance measurements remain report-only by default because their
 budgets are provisional. To enforce the existing 50 ms mount and 16 ms update
 budgets, run `PERF_LANE_ENFORCE=1 npm run test:browser -- tests/browser/perf-budget.test.tsx`.
