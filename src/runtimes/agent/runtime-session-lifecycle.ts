@@ -239,7 +239,7 @@ export async function shutdownOwnedSessions<TSession extends RuntimeLifecycleSes
     for (const { chatJid, session, err, durationMs, skipped } of outcomes) {
       if (skipped) {
         failedPerChatSessions.set(chatJid, session);
-        log.warn({ chatJid, durationMs }, 'per_chat session retained after route recycle failure');
+        log.warn({ chatJid, durationMs }, 'per_chat session retained after lifecycle failure');
       } else if (err !== null) {
         failures.push(err);
         failedPerChatSessions.set(chatJid, session);

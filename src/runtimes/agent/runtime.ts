@@ -206,6 +206,7 @@ import {
   isolateScheduledAgentJobPrompt,
   isScheduledAgentJobMapKey,
   resolveAgentTurnMapKey,
+  scheduledAgentJobBaseMapKey,
 } from './scheduled-agent-job-isolation.ts';
 import {
   resolveScheduledFinalAnswer,
@@ -804,7 +805,7 @@ export class AgentRuntime implements Runtime {
    * zombie sweep's non-progressing-resident disposition can never drive the same
    * manager through two concurrent lifecycle transitions.
    */
-  private readonly wedgedResidentResets = new Set<string>();
+  private readonly wedgedResidentResets = new Map<string, Promise<'reset' | 'failed'>>();
 
   /**
    * Post-turn event gate — tracks mapKeys where a 'result' event has been
@@ -1137,9 +1138,9 @@ export class AgentRuntime implements Runtime {
     });
   }
 
-  /** Returns true when a successor (a compact turn or a hard reset) now owns the session. */
-  private maybeStartAutoCompact(session: SessionManager | null, mapKey?: string): boolean {
-    if (this.autoCompactInputTokens === undefined || session === null) return false;
+  /** A hard reset must settle before its predecessor releases the turn queue. */
+  private maybeStartAutoCompact(session: SessionManager | null, mapKey?: string): boolean | Promise<boolean> {
+    if (this.shutdownRequested || this.autoCompactInputTokens === undefined || session === null) return false;
     // QR-105: '/compact' is a claude-cli-only slash command. For any other provider
     // (codex-cli/opencode-cli/gemini-cli, anthropic-api/openai-api) sending it is a
     // plain user message that never emits a compact_boundary — so markSessionCompacted
@@ -1261,7 +1262,7 @@ export class AgentRuntime implements Runtime {
         || consecutiveRapidRearms >= AUTO_COMPACT_CONVERGENCE_LIMIT)
       && isScheduledAgentJobMapKey(scopeKey)
     ) {
-      void this.escalateCompactionLivelock(
+      return this.escalateCompactionLivelock(
         session, scopeKey, rowId, consecutiveRapidRearms, nonConvergentCompactions,
       ).catch((err: unknown) => {
         // Iteration 2 (the adversarial lens A2). The reset inside the escalation
@@ -1270,9 +1271,7 @@ export class AgentRuntime implements Runtime {
         // unhandledRejection, which main.ts treats as fatal and force-exits on — so a
         // livelock guard could take the whole runtime down. Contained and logged.
         log.error({ err, scopeKey, rowId }, 'compaction livelock escalation failed');
-      });
-      // The serialized hard reset owns this session's lifecycle from here.
-      return true;
+      }).then(() => true);
     }
 
     const cooldownUntil = this.autoCompact.cooldownUntil.get(scopeKey);
@@ -1406,7 +1405,7 @@ export class AgentRuntime implements Runtime {
    *
    * Returns 'reset' on a proven fresh session, 'failed' when the reset threw (the
    * caller keeps its evidence and blocks/retries), or 'in_progress' when another
-   * reset already owns this scope.
+   * reset already owned this scope and has now settled.
    */
   private async resetWedgedResidentSession(
     mapKey: string,
@@ -1414,28 +1413,32 @@ export class AgentRuntime implements Runtime {
     trigger: 'compaction-livelock' | 'no-turn-progress',
     logFields: Record<string, unknown>,
   ): Promise<'reset' | 'failed' | 'in_progress'> {
-    if (this.wedgedResidentResets.has(mapKey)) {
-      log.warn({ ...logFields, mapKey, trigger }, 'wedged-resident reset already in progress — skipping');
+    const pending = this.wedgedResidentResets.get(mapKey);
+    if (pending) {
+      log.warn({ ...logFields, mapKey, trigger }, 'wedged-resident reset already in progress — joining');
+      await pending;
       return 'in_progress';
     }
-    this.wedgedResidentResets.add(mapKey);
-    try {
-      const chatJid = this.chatQueues.get(mapKey)?.targetChatJid;
-      if (chatJid === undefined) {
-        // No outbound queue for the scope: the owned per-chat reset cannot be
-        // addressed. Fall back to the manager's own reset, still AWAITED inside
-        // this barrier so the caller observes the outcome and no second reset
-        // can interleave. Weaker than the owned path (no generation advance).
-        log.warn({ ...logFields, mapKey, trigger }, 'wedged-resident reset has no chat queue — using the session-local reset');
-        await session.handleNew();
-      } else {
-        await this.resetOwnedPerChatSession(mapKey, chatJid, session);
+    const reset = (async (): Promise<'reset' | 'failed'> => {
+      try {
+        const chatJid = this.chatQueues.get(mapKey)?.targetChatJid;
+        if (chatJid === undefined) {
+          // Without an outbound queue, only the manager-local reset can be addressed.
+          log.warn({ ...logFields, mapKey, trigger }, 'wedged-resident reset has no chat queue — using the session-local reset');
+          await session.handleNew();
+        } else {
+          await this.resetOwnedPerChatSession(mapKey, chatJid, session);
+        }
+        log.warn({ ...logFields, mapKey, trigger }, 'wedged resident session hard-reset');
+        return 'reset';
+      } catch (err) {
+        log.error({ err, ...logFields, mapKey, trigger }, 'wedged-resident hard reset failed');
+        return 'failed';
       }
-      log.warn({ ...logFields, mapKey, trigger }, 'wedged resident session hard-reset');
-      return 'reset';
-    } catch (err) {
-      log.error({ err, ...logFields, mapKey, trigger }, 'wedged-resident hard reset failed');
-      return 'failed';
+    })();
+    this.wedgedResidentResets.set(mapKey, reset);
+    try {
+      return await reset;
     } finally {
       this.wedgedResidentResets.delete(mapKey);
     }
@@ -3581,7 +3584,17 @@ export class AgentRuntime implements Runtime {
           .find((context) => context.identity.conversationKey === conversationKey)
         ?? [...this.perChatTurnQueues.values()]
           .map((queue) => queue.activeTurn?.runtimeContext)
-          .find((context) => context?.identity.conversationKey === conversationKey);
+          // A processor retains ownership through a published completion or
+          // a blocked finalization whose terminal ownership is unproven.
+          .find((context) => (
+            context?.identity.conversationKey === conversationKey
+            && (
+              [...this.perChatRuntimeTurnCompletions.values()].some(
+                (completion) => completion.context.identity.logicalTurnId === context.identity.logicalTurnId,
+              )
+              || this.runtimeTurnSupervisor.isDegraded(context)
+            )
+          ));
     if (deferIfActive && activeContext) {
       const turnId = activeContext.identity.logicalTurnId;
       const priorAction = this.runtimeTurnAfterTerminal.get(turnId);
@@ -4917,10 +4930,7 @@ export class AgentRuntime implements Runtime {
       })
       .then(() => finishAdmission?.());
     const recycleScopeKey = this.sessionScope === 'per_chat'
-      ? resolveAgentTurnMapKey(
-          this.resolvePerChatMapKey(msg.chatJid),
-          msg.isSyntheticJob === true && !this.sandboxPerChat,
-        )
+      ? this.resolvePerChatMapKey(msg.chatJid, msg.isSyntheticJob === true)
       : GLOBAL_TOOL_SCOPE_KEY;
     this.routeRecycleLifecycle.trackPublication(queuedWork, recycleScopeKey);
     this.turnChain = queuedWork;
@@ -4938,10 +4948,7 @@ export class AgentRuntime implements Runtime {
     const journalConversationKey = msg.journaledConversationKey
       ?? canonicalConversationKey(chatJid, this.db);
     const perChatMapKey = this.sessionScope === 'per_chat'
-      ? resolveAgentTurnMapKey(
-          this.resolvePerChatMapKey(chatJid),
-          msg.isSyntheticJob === true && !this.sandboxPerChat,
-        )
+      ? this.resolvePerChatMapKey(chatJid, msg.isSyntheticJob === true)
       : undefined;
 
     // Substrate slice 1: propagate sender identity to every MCP session so
@@ -5950,6 +5957,15 @@ export class AgentRuntime implements Runtime {
     const onProviderBoundaryReady = (): void => {
       if (dispatchCancelled()) {
         throw new Error('TURN_RECOVERY_DISPATCH_TARGET_SUPERSEDED');
+      }
+      if (effectiveMapKey !== undefined) {
+        // Alias migration can move an active manager during the dispatch waits.
+        // Resolve that manager directly; a stale-key fallback may name its replacement.
+        const currentMapKey = this.findMapKeyForSession(session);
+        if (currentMapKey === null) {
+          throw new Error('TURN_RECOVERY_DISPATCH_TARGET_SUPERSEDED');
+        }
+        effectiveMapKey = currentMapKey;
       }
       if (systemTurnLease) this.requireSystemTurnProviderBoundary(systemTurnLease);
       // #3658: a held notice goes out at the first boundary that admits its
@@ -8096,7 +8112,7 @@ export class AgentRuntime implements Runtime {
   async shutdown(): Promise<void> {
     const shutdownFailures: unknown[] = [];
     const failedPerChatSessions = new Map<string, SessionManager>();
-    const recycleShutdownSkipOwners = new Set<SessionManager>();
+    const sessionShutdownSkipOwners = new Set<SessionManager>();
     let singletonSessionShutdownFailed = false;
     let preserveRuntimeTurnState = false;
     this.shutdownRequested = true;
@@ -8222,14 +8238,14 @@ export class AgentRuntime implements Runtime {
       for (const session of this.routeRecycleLifecycle.retainedOwners((scopeKey) =>
         scopeKey === GLOBAL_TOOL_SCOPE_KEY ? this.session ?? undefined : this.chatSessions.get(scopeKey)
       )) {
-        recycleShutdownSkipOwners.add(session);
+        sessionShutdownSkipOwners.add(session);
       }
     }
     const recycleFailures = this.routeRecycleLifecycle.takeFailures();
     if (recycleFailures.length > 0) {
       preserveRuntimeTurnState = true;
       for (const failure of recycleFailures) {
-        recycleShutdownSkipOwners.add(failure.session);
+        sessionShutdownSkipOwners.add(failure.session);
         shutdownFailures.push(failure.error);
       }
       log.error(
@@ -8239,17 +8255,17 @@ export class AgentRuntime implements Runtime {
     }
 
     // Shutdown per_chat sessions
-    let perChatKeys: Set<string> | null = null;
-    if (this.sessionScope === 'per_chat') {
-      perChatKeys = new Set<string>([
-        ...this.chatSessions.keys(),
-        ...this.chatQueues.keys(),
-        ...this.imageCoalesce.buffers.keys(),
-      ]);
+    const perChatKeys = this.sessionScope === 'per_chat' ? new Set<string>([
+      ...this.chatSessions.keys(), ...this.chatQueues.keys(), ...this.imageCoalesce.buffers.keys(),
+    ]) : null;
+    // A failed finalization join does not transfer an unfinished reset's teardown ownership.
+    for (const [mapKey, session] of this.chatSessions) {
+      const owner = this.sessionOwnership.get(mapKey);
+      if (preserveRuntimeTurnState && owner?.state === 'resetting' && owner.managerId === this.managerIdFor(session)) sessionShutdownSkipOwners.add(session);
     }
     const ownedSessionShutdown = await shutdownOwnedSessions(
       this.sessionLifecycleHost,
-      recycleShutdownSkipOwners,
+      sessionShutdownSkipOwners,
     );
     shutdownFailures.push(...ownedSessionShutdown.failures);
     for (const [mapKey, session] of ownedSessionShutdown.failedPerChatSessions) {
@@ -8494,11 +8510,16 @@ export class AgentRuntime implements Runtime {
     return chatJid === null ? this.getActiveQueue() : this.getQueueForChat(chatJid);
   }
 
-  private resolvePerChatMapKey(chatJid: string): string {
+  private resolvePerChatMapKey(chatJid: string, isSyntheticJob = false): string {
     if (this.sandboxPerChat) {
       return chatJidToWorkspace(this.cwd ?? homedir(), chatJid).workspaceKey;
     }
-    return canonicalizeChatJid(chatJid, this.db);
+    const canonical = canonicalizeChatJid(chatJid, this.db);
+    const requested = resolveAgentTurnMapKey(canonical, isSyntheticJob);
+    if (!isSyntheticJob || this.chatSessions.has(requested)) return requested;
+    // Scheduled work must keep its queue when an alias changes during a turn.
+    return [...this.chatSessions.keys()].find((key) => isScheduledAgentJobMapKey(key)
+      && canonicalizeChatJid(scheduledAgentJobBaseMapKey(key), this.db) === canonical) ?? requested;
   }
 
   private finalizeRuntimeTurnContext(
@@ -9135,6 +9156,7 @@ export class AgentRuntime implements Runtime {
       ) {
         throw new Error(`Per-chat session "${mapKey}" lost ownership during reset shutdown`);
       }
+      if (this.shutdownRequested) throw new Error(`Cannot restart per-chat session "${mapKey}" during shutdown`);
 
       this.cleanupPerChatGenerationState(mapKey);
       this.chatQueues.delete(mapKey);
