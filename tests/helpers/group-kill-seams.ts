@@ -10,7 +10,8 @@ import { readFileSync } from 'node:fs';
 
 import type { GroupMembership } from '../../src/lib/process-group-membership.ts';
 
-export type GroupSignalSeam = (target: number, signal: NodeJS.Signals) => void;
+/** Signal 0 is the liveness check: it asks whether the group exists and delivers nothing. */
+export type GroupSignalSeam = (target: number, signal: NodeJS.Signals | 0) => void;
 /** The membership probe's answer; the one definition lives in src/lib. */
 export type GroupMembershipAnswer = GroupMembership;
 

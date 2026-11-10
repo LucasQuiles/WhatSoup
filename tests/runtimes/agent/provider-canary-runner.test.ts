@@ -1,5 +1,6 @@
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -12,8 +13,10 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import * as canaryRunner from '../../../scripts/lib/provider-canary-runner.ts';
 import {
   buildProviderCanaryInvocation,
+  executeOwnedProvider,
   runProviderCanary,
   type ProviderCanaryObservation,
 } from '../../../scripts/lib/provider-canary-runner.ts';
@@ -22,6 +25,15 @@ import {
   acquireProcessLock,
   releaseProcessLock,
 } from '../../../src/lib/process-lock.ts';
+import {
+  FIXTURE_LEAK_NET_MS,
+  groupKillError,
+  reapFixtureGroups,
+  settleWithin,
+  waitForPidGone,
+  type GroupMembershipAnswer,
+  type GroupSignalSeam,
+} from '../../helpers/group-kill-seams.ts';
 
 const roots: string[] = [];
 
@@ -279,4 +291,220 @@ describe('provider canary runner', () => {
       releaseProcessLock(lock);
     }
   });
+});
+
+type ProcessGroupReap = { reaped: boolean; reapError?: string };
+type ReapApi = {
+  reapProcessGroup?: (
+    pgid: number,
+    deadlineMs: number,
+    deps?: { kill?: GroupSignalSeam; probeGroup?: (pgid: number) => GroupMembershipAnswer },
+  ) => Promise<ProcessGroupReap>;
+};
+// Read through the namespace, so a missing export fails its own assertion instead of the import.
+const reapApi = canaryRunner as unknown as ReapApi;
+
+/** Above every pid limit (Linux 4194304, macOS 99999): a seam slip can signal no real group. */
+const NO_SUCH_GROUP = 4_194_305;
+
+describe('provider canary process-group reap (issue 3568)', () => {
+  it('reads a group whose members are all zombies after SIGTERM as reaped, with no SIGKILL', async () => {
+    expect(typeof reapApi.reapProcessGroup).toBe('function');
+    if (!reapApi.reapProcessGroup) return;
+    const targets: number[] = [];
+    const signals: Array<NodeJS.Signals | 0> = [];
+    let terminated = false;
+    // The macOS shape: kill(-pgid) succeeds while a member lives, then answers EPERM once only
+    // zombies remain, and the probe finds no live member.
+    const kill: GroupSignalSeam = (target, signal) => {
+      targets.push(target);
+      signals.push(signal);
+      if (signal !== 0) { terminated = true; return; }
+      if (terminated) throw groupKillError('EPERM');
+    };
+    const reap = await reapApi.reapProcessGroup(NO_SUCH_GROUP, Date.now() + 2_000, {
+      kill,
+      probeGroup: () => (terminated ? 'no-live-members' : 'live'),
+    });
+    expect(reap).toEqual({ reaped: true });
+    expect(signals.filter((signal) => signal !== 0)).toEqual(['SIGTERM']);
+    expect(new Set(targets)).toEqual(new Set([-NO_SUCH_GROUP]));
+  });
+
+  it('reads a group that holds only zombies from the start as reaped, without signalling it', async () => {
+    expect(typeof reapApi.reapProcessGroup).toBe('function');
+    if (!reapApi.reapProcessGroup) return;
+    const signals: Array<NodeJS.Signals | 0> = [];
+    const reap = await reapApi.reapProcessGroup(NO_SUCH_GROUP, Date.now() + 2_000, {
+      kill: (_target, signal) => { signals.push(signal); throw groupKillError('EPERM'); },
+      probeGroup: () => 'no-live-members',
+    });
+    expect(reap).toEqual({ reaped: true });
+    expect(signals).toEqual([0]);
+  });
+
+  it('keeps a group with a live member it may not signal unreaped, and records the EPERM', async () => {
+    expect(typeof reapApi.reapProcessGroup).toBe('function');
+    if (!reapApi.reapProcessGroup) return;
+    const signals: Array<NodeJS.Signals | 0> = [];
+    const reap = await reapApi.reapProcessGroup(NO_SUCH_GROUP, Date.now() + 300, {
+      kill: (_target, signal) => { signals.push(signal); throw groupKillError('EPERM'); },
+      probeGroup: () => 'live',
+    });
+    expect(reap).toEqual({ reaped: false, reapError: 'group kill failed: EPERM; group membership probe: live' });
+    expect(signals.filter((signal) => signal !== 0)).toEqual(['SIGTERM', 'SIGKILL']);
+  });
+
+  it.each([
+    [
+      'the probe cannot read the group',
+      (): GroupMembershipAnswer => 'unknown',
+      'group kill failed: EPERM; group membership probe: unknown',
+    ],
+    [
+      'the probe throws',
+      (): GroupMembershipAnswer => { throw new Error('ps failed'); },
+      'group kill failed: EPERM; group membership probe: unknown',
+    ],
+  ] as const)('never reads a group as reaped when %s', async (_case, probeGroup, reapError) => {
+    expect(typeof reapApi.reapProcessGroup).toBe('function');
+    if (!reapApi.reapProcessGroup) return;
+    const reap = await reapApi.reapProcessGroup(NO_SUCH_GROUP, Date.now() + 300, {
+      kill: () => { throw groupKillError('EPERM'); },
+      probeGroup,
+    });
+    expect(reap).toEqual({ reaped: false, reapError });
+  });
+
+  it('reads an unexpected signal-0 error as not reaped, records its code, and never asks the probe', async () => {
+    expect(typeof reapApi.reapProcessGroup).toBe('function');
+    if (!reapApi.reapProcessGroup) return;
+    let probeCalls = 0;
+    const reap = await reapApi.reapProcessGroup(NO_SUCH_GROUP, Date.now() + 300, {
+      kill: (_target, signal) => { if (signal === 0) throw groupKillError('EINVAL'); },
+      probeGroup: () => { probeCalls += 1; return 'no-live-members'; },
+    });
+    expect(reap).toEqual({ reaped: false, reapError: 'group liveness check failed: EINVAL' });
+    expect(probeCalls).toBe(0);
+  });
+
+  it('records an unexpected group-kill error even when the group then goes', async () => {
+    expect(typeof reapApi.reapProcessGroup).toBe('function');
+    if (!reapApi.reapProcessGroup) return;
+    let killed = false;
+    // SIGTERM fails with EINVAL and the member lives on; SIGKILL then ends the group.
+    const kill: GroupSignalSeam = (_target, signal) => {
+      if (signal === 'SIGTERM') throw groupKillError('EINVAL');
+      if (signal === 'SIGKILL') { killed = true; return; }
+      if (killed) throw groupKillError('ESRCH');
+    };
+    const reap = await reapApi.reapProcessGroup(NO_SUCH_GROUP, Date.now() + 300, { kill, probeGroup: () => 'live' });
+    expect(reap).toEqual({ reaped: true, reapError: 'group kill failed: EINVAL' });
+  });
+
+  /** An owned run whose provider is a plain long-lived process, with the reap left to its own deadline. */
+  function ownedInput(root: string, timeoutMs: number): Parameters<typeof executeOwnedProvider>[0] {
+    return {
+      invocation: {
+        providerId: 'codex-cli',
+        // The member's own lifetime is the leak net, in case this test's teardown never runs.
+        binary: '/bin/sleep',
+        args: [String(FIXTURE_LEAK_NET_MS / 1_000)],
+        cwd: root,
+        stdinFrames: [],
+      },
+      dynamicSocketPath: join(root, 'd.sock'),
+      staticSocketPath: join(root, 's.sock'),
+      proxyScriptPath: join(root, 'proxy.ts'),
+      isolatedHome: join(root, 'home'),
+      isolatedConfig: join(root, 'config'),
+      isolatedData: join(root, 'data'),
+      isolatedTemp: join(root, 'tmp'),
+      // Below the run's 4 s observation margin, so the run goes straight from spawn to the reap.
+      timeoutMs,
+    };
+  }
+
+  /** Kills the run's group in teardown unless it is already gone, then waits within a bound. */
+  async function endOwnedGroup(groupTargets: readonly number[]): Promise<boolean> {
+    const target = groupTargets[0];
+    if (target === undefined) return true;
+    if (!(await waitForPidGone(-target, 0))) reapFixtureGroups([target]);
+    return waitForPidGone(-target);
+  }
+
+  function captureCanaryStderr(): string[] {
+    const lines: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation(((chunk: unknown) => {
+      lines.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write);
+    return lines;
+  }
+
+  it('stops both sentinels and reports the group unreaped when the signal-0 check fails unexpectedly', async () => {
+    const root = tempRoot();
+    const input = ownedInput(root, 1_500);
+    const realKill = process.kill.bind(process);
+    const groupTargets: number[] = [];
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: string | number) => {
+      if (pid < -1) {
+        groupTargets.push(pid);
+        if (signal === 0) throw groupKillError('EINVAL');
+      }
+      return realKill(pid, signal);
+    }) as typeof process.kill);
+    const stderrLines = captureCanaryStderr();
+    const run = executeOwnedProvider(input);
+    try {
+      await expect(settleWithin(run, 8_000, 'the owned run did not settle within 8 s'))
+        .resolves.toMatchObject({ providerStarted: true, processGroupReaped: false });
+      // The reap no longer throws out of `finally`, so the sentinels are stopped.
+      expect(existsSync(input.dynamicSocketPath)).toBe(false);
+      expect(existsSync(input.staticSocketPath)).toBe(false);
+      const canaryLines = stderrLines.filter((line) => line.startsWith('provider MCP canary:'));
+      expect(canaryLines).toHaveLength(1);
+      expect(canaryLines[0]).toMatch(
+        /^provider MCP canary: process group \d+ not proven reaped \(reapError=group liveness check failed: EINVAL\)\n$/,
+      );
+    } finally {
+      killSpy.mockRestore();
+      const gone = await endOwnedGroup(groupTargets);
+      await settleWithin(run, 2_000, 'the owned run did not settle after teardown').catch(() => undefined);
+      expect(gone).toBe(true);
+    }
+  }, 15_000);
+
+  it('reports the group unreaped when a group kill failed, even though the group then went', async () => {
+    const root = tempRoot();
+    // Long enough that SIGKILL, sent 2 s after SIGTERM, still has time to end the group.
+    const input = ownedInput(root, 3_500);
+    const realKill = process.kill.bind(process);
+    const groupTargets: number[] = [];
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: string | number) => {
+      if (pid < -1) {
+        groupTargets.push(pid);
+        if (signal === 'SIGTERM') throw groupKillError('EINVAL');
+      }
+      return realKill(pid, signal);
+    }) as typeof process.kill);
+    const stderrLines = captureCanaryStderr();
+    const run = executeOwnedProvider(input);
+    try {
+      await expect(settleWithin(run, 10_000, 'the owned run did not settle within 10 s'))
+        .resolves.toMatchObject({ providerStarted: true, processGroupReaped: false });
+      const canaryLines = stderrLines.filter((line) => line.startsWith('provider MCP canary:'));
+      expect(canaryLines).toHaveLength(1);
+      expect(canaryLines[0]).toMatch(
+        /^provider MCP canary: process group \d+ not proven reaped \(reapError=group kill failed: EINVAL\)\n$/,
+      );
+      // The SIGKILL after the failed SIGTERM ended the group within the run.
+      expect(await waitForPidGone(-groupTargets[0]!, 0)).toBe(true);
+    } finally {
+      killSpy.mockRestore();
+      const gone = await endOwnedGroup(groupTargets);
+      await settleWithin(run, 2_000, 'the owned run did not settle after teardown').catch(() => undefined);
+      expect(gone).toBe(true);
+    }
+  }, 15_000);
 });
