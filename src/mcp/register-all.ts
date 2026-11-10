@@ -36,6 +36,7 @@ import * as messagingTools from './tools/messaging.ts';
 import * as mediaTools from './tools/media.ts';
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
+import { resolvePineconeApiKey } from '../runtimes/chat/providers/pinecone.ts';
 import { ToolRegistry } from './registry.ts';
 import {
   noExecutingSession,
@@ -271,13 +272,12 @@ export function registerAllTools(
 
   // Memory write — agent-facing episodic WRITE into the configured per-person
   // Pinecone index (agent instances don't run the chat-runtime enrichment poller).
-  // Vendor-gated (Pinecone): core: false. Registered whenever a Pinecone API key
-  // is available; PineconeMemory.upsert enforces the project guard (the
-  // operator project for `q` when its config sets none).
-  const memWriteApiKeyEnv =
-    (memoryPinecone as { apiKeyEnv?: string } | undefined)?.apiKeyEnv ?? 'PINECONE_API_KEY';
-  // env-allowed: memory-write API key resolver; secret surface stays env-late
-  if (config.pineconeIndex && process.env[memWriteApiKeyEnv]) {
+  // Vendor-gated (Pinecone): core: false. Registered whenever PineconeMemory
+  // itself would resolve a Pinecone API key (keyring first, then the env var
+  // named by memory.pinecone.apiKeyEnv), so the gate and the writer cannot
+  // disagree. PineconeMemory.upsert enforces the project guard (the operator
+  // project for `q` when its config sets none).
+  if (config.pineconeIndex && resolvePineconeApiKey()) {
     runModule('memory-write', false, (register) =>
       memoryWriteTools.registerMemoryWriteTools(register),
     );

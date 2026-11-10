@@ -20,10 +20,13 @@ Complete reference for all 170 MCP tools exposed by WhatSoup. Tools are grouped 
 > - the runtime is not in `sandboxPerChat` mode, and
 > - the runtime is not in `sandbox` mode.
 >
-> **`memory_write`** is registered when `config.pineconeIndex` is non-empty and the
-> environment variable named by `memory.pinecone.apiKeyEnv` (default
-> `PINECONE_API_KEY`) is set. This registration gate is separate from the
-> credential resolver used by `knowledge_search`.
+> **`memory_write`** is registered when `config.pineconeIndex` is non-empty and
+> the Pinecone writer's own key resolution (`resolvePineconeApiKey` in
+> `src/runtimes/chat/providers/pinecone.ts`) yields a key: the keyring first
+> (service `pinecone` for the default `PINECONE_API_KEY` name), then the
+> environment variable named by `memory.pinecone.apiKeyEnv`. A key held only in
+> the keyring therefore registers the tool, and the gate cannot disagree with
+> the writer that performs the upsert.
 >
 > **`restart_self`** is registered when the runtime is neither sandboxed nor in
 > `sandboxPerChat` mode and a `restartSelf` capability is supplied. Control-plane

@@ -460,7 +460,9 @@ function configuredPineconeApiKeyService(): string | undefined {
 
 // Centralized Pinecone API-key resolution through the shared resolver.
 // Precedence: apiKeyService keyring lookup (when configured) → configured env var.
-function resolvePineconeApiKey(): string {
+// Exported so the memory_write registration gate (register-all.ts) asks the
+// same question PineconeMemory does: a keyring-held key registers the tool.
+export function resolvePineconeApiKey(): string {
   return resolveApiKey({
     service: configuredPineconeApiKeyService(),
     envVar: configuredPineconeApiKeyEnv(),
