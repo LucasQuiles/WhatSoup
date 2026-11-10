@@ -424,8 +424,10 @@ function observeLifecycleEventOrder(source: string): string {
   insert('    _bounded_outer_cleanup\n    trap - EXIT', `    ${event('A worker=$worker_pid worker_rc=$worker_rc guard=$guard_pid guard_rc=$guard_rc deadline_rc=$deadline_rc rc=$rc')}\n    _bounded_outer_cleanup\n    trap - EXIT`);
   return source;
 }
+// The driver's whole budget; it reserves its own cleanup time inside it.
+const LIFECYCLE_DRIVER_TIMEOUT_MS = 15_000;
 const LIFECYCLE_DRIVER = fs.readFileSync(path.resolve('tests/deploy/fixtures/bounded-exec-lifecycle-driver.py'), 'utf8');
-function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'dead-leader-finishing-cleanup' | 'command-group-descendant' | 'cleanup-child-group' | 'deadline-timer-descendant' | 'deadline-helper-vanished' | 'deadline-helper-signal-refused' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'control-tokenless-worker-stopped' | 'control-tokenless-cleanup-interrupted' | 'authorization-unreadable-cleanup-interrupted' | 'authorization-valid-cleanup-interrupted' | 'authorization-valid-outer-terminated-after-reap' | 'guard-terminated' | 'outer-terminated' | 'timeout-symlink' | 'timeout-existing' | 'outcome-symlink' | 'outcome-existing' | 'outcome-fifo' | 'outcome-directory' | 'outcome-candidate-symlink' | 'outcome-candidate-existing' | 'outcome-candidate-fifo' | 'outcome-candidate-directory' | 'outcome-candidate-fork-race-symlink' | 'guard-trap-in-record-read' | 'deadline-writer-interrupted' | 'deadline-writer-preexisting' | 'deadline-writer-publish-limited' | 'deadline-writer-pending-planted' | 'job-control-unavailable' | 'zero', terminal = false) {
+function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'dead-leader-finishing-cleanup' | 'command-group-descendant' | 'cleanup-child-group' | 'deadline-timer-descendant' | 'deadline-helper-vanished' | 'deadline-helper-signal-refused' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'control-tokenless-worker-stopped' | 'control-tokenless-cleanup-interrupted' | 'authorization-unreadable-cleanup-interrupted' | 'authorization-valid-cleanup-interrupted' | 'authorization-valid-outer-terminated-after-reap' | 'guard-terminated' | 'outer-terminated' | 'timeout-symlink' | 'timeout-existing' | 'outcome-symlink' | 'outcome-existing' | 'outcome-fifo' | 'outcome-directory' | 'outcome-candidate-symlink' | 'outcome-candidate-existing' | 'outcome-candidate-fifo' | 'outcome-candidate-directory' | 'outcome-candidate-fork-race-symlink' | 'guard-trap-in-record-read' | 'deadline-writer-interrupted' | 'deadline-writer-preexisting' | 'deadline-writer-publish-limited' | 'deadline-writer-pending-planted' | 'job-control-unavailable' | 'zero', terminal = false, fixtureEnv: Record<string, string> = {}) {
   const nearDeadlineTrace = mode === 'near-deadline' && process.env.WHATSOUP_NEAR_DEADLINE_EVENT_TRACE === '1';
   const outcomeTrace = mode === 'outcome-candidate-directory' && process.env.WHATSOUP_OUTCOME_EVENT_TRACE === '1';
   const stoppedWorkerTrace = mode === 'forged-completion-worker-stopped' && process.env.WHATSOUP_STOPPED_WORKER_EVENT_TRACE === '1';
@@ -764,7 +766,8 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     '  kill() {',
     '    local kill_rc=0 polls=0',
     // The worker's loop checks its command only after its USR1 trap returns; hold it there, out of read, for the driver's TERM.
-    '    if [ "$1" = -0 ] && [ -n "${cmd_pid-}" ] && [ "$2" = "$cmd_pid" ] && [ "${entry_timeout-}" = 1 ]; then : > "$TMPDIR/worker-resumed-after-usr1"; while [ "$polls" -lt 400 ]; do /bin/sleep 0.01; polls=$((polls + 1)); done; : > "$BARRIER_EXPIRED-worker-resumed"; fi',
+    // WORKER_RESUME_WITNESS=off withholds the witness, so the driver takes its failure path.
+    '    if [ "$1" = -0 ] && [ -n "${cmd_pid-}" ] && [ "$2" = "$cmd_pid" ] && [ "${entry_timeout-}" = 1 ] && [ "${WORKER_RESUME_WITNESS-}" != off ]; then : > "$TMPDIR/worker-resumed-after-usr1"; while [ "$polls" -lt 400 ]; do /bin/sleep 0.01; polls=$((polls + 1)); done; : > "$BARRIER_EXPIRED-worker-resumed"; fi',
     '    if [ "$cleanup_mode" = authorization-valid-outer-terminated-after-reap ] && [ -z "${outer_held-}" ] && [ "$1" = -CONT ] && [ -n "${guard_pid-}" ] && [ "$2" = "$guard_pid" ]; then',
     '      outer_held=1',
     '      : > "$OUTER_HOLDING"',
@@ -943,8 +946,9 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
   try {
     const result = spawnSync(resolveBinary('python3')!, [
       path.join(root, 'lifecycle.py'), root, path.resolve(BOUNDED_LIB), resolveBinary('bash')!, mode, terminal ? 'pty' : 'pipe',
-    ], { encoding: 'utf8', timeout: 15_000, env: {
-      ...process.env, PATH: shim, TMPDIR: root,
+    ], { encoding: 'utf8', timeout: LIFECYCLE_DRIVER_TIMEOUT_MS, env: {
+      ...process.env, ...fixtureEnv, PATH: shim, TMPDIR: root,
+      LIFECYCLE_DRIVER_TIMEOUT_MS: String(LIFECYCLE_DRIVER_TIMEOUT_MS),
       EVENT_ORDER_MODE: mode,
       EVENT_ORDER_TRACE: eventTrace ? '1' : '0',
       EVENT_ORDER_LOG: path.join(root, 'event-order.log'),
@@ -1430,6 +1434,22 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.sentinel_alive_before_cleanup, evidence).toBe(true);
     expect(result.survivors_after_cleanup, evidence).toEqual([]);
     expect(result.residual_bounded_files, evidence).toEqual([]);
+  });
+  // The USR1 diagnosis runs before cleanup, so a blocked diagnostic must not
+  // spend the cleanup time: the failure stays recorded and every group ends.
+  it('keeps the resume failure and its cleanup when the USR1 diagnosis blocks', () => {
+    const result = runLifecycleProbe('authorization-valid-outer-terminated-after-reap', false, {
+      WORKER_RESUME_WITNESS: 'off',
+      USR1_DIAGNOSIS_SAMPLE: JSON.stringify(['/bin/sh', '-c', 'trap "" TERM; /bin/sleep 60 & /bin/sleep 60']),
+    });
+    const evidence = JSON.stringify(result);
+    expect(result.error, evidence).toBe("RuntimeError('worker did not resume after USR1')");
+    expect(result.usr1_resume_missing?.usr1_marker, evidence).toBe('kill_rc=0');
+    expect(result.usr1_resume_missing?.worker_sample?.timed_out, evidence).toBe('budget');
+    expect(result.usr1_resume_missing?.worker_sample?.survivors, evidence).toEqual([]);
+    expect(result.usr1_resume_missing?.witness_after_cleanup, evidence).toBe(false);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
+    expect(result.duration_ms, evidence).toBeLessThan(LIFECYCLE_DRIVER_TIMEOUT_MS);
   });
   it('ends the worker and the groups it created when the guard receives TERM', () => {
     const result = runLifecycleProbe('guard-terminated');

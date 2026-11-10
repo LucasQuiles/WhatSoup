@@ -1,5 +1,6 @@
 
 import fcntl, hashlib, json, os, pathlib, pty, select, signal, subprocess, sys, termios, time
+DRIVER_STARTED = time.monotonic()
 root, helper, bash, mode, terminal = sys.argv[1:]
 root = pathlib.Path(root)
 # Opening a FIFO O_WRONLY|O_NONBLOCK while no reader holds it fails with ENXIO,
@@ -30,27 +31,63 @@ def usr1_resume_timing(root):
         resumed = (root / 'worker-resumed-after-usr1').stat().st_mtime_ns
     except FileNotFoundError: return None
     return (resumed - sent) // 1_000_000
-def usr1_resume_diagnosis(root, worker, processes):
+# runLifecycleProbe sends TERM LIFECYCLE_DRIVER_TIMEOUT_MS after it spawns this
+# driver. The USR1 diagnosis may use only what is left after the cleanup
+# reserve: the finally block's child wait (3 s) and session drain (2 s), plus
+# 1 s for the record.
+DRIVER_LIMIT_S = int(os.environ.get('LIFECYCLE_DRIVER_TIMEOUT_MS', '15000')) / 1000
+CLEANUP_RESERVE_S = 6
+DIAGNOSIS_DEADLINE = DRIVER_STARTED + DRIVER_LIMIT_S - CLEANUP_RESERVE_S
+def bounded_diagnostic(root, name, argv, cap_s):
+    # Own session and file output: a timeout kills the whole group and no pipe
+    # left open by a descendant can hold the wait.
+    global DIAGNOSIS_DEADLINE
+    remaining = DIAGNOSIS_DEADLINE - time.monotonic()
+    result = {'argv0': argv[0], 'budget_s': round(min(cap_s, remaining), 3)}
+    if remaining < 0.2:
+        result['skipped'] = 'driver budget spent'
+        return result
+    out_path, err_path = root / f'diagnosis-{name}.out', root / f'diagnosis-{name}.err'
+    with open(out_path, 'wb') as out, open(err_path, 'wb') as err:
+        process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=err, start_new_session=True)
+    try:
+        result['returncode'] = process.wait(timeout=min(cap_s, remaining))
+    except subprocess.TimeoutExpired:
+        result['timed_out'] = 'budget'
+    except TimeoutError:
+        # The outer TERM arrived: skip the remaining diagnosis and clean up.
+        DIAGNOSIS_DEADLINE = 0
+        result['timed_out'] = 'outer TERM'
+    finally:
+        try: os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+        process.wait()
+        drain = time.monotonic() + 0.5
+        while members(process.pid) and time.monotonic() < drain: time.sleep(0.01)
+        result['survivors'] = members(process.pid)
+    result['stdout'] = out_path.read_text(errors='replace').splitlines()
+    result['stderr'] = err_path.read_text(errors='replace')[-400:]
+    return result
+def usr1_resume_diagnosis(root, worker, processes, found):
     # Diagnosis only; the driver still raises. It separates a USR1 that was not
     # delivered (kill status), a worker that is late (state, witness after
-    # cleanup) and a worker that is stuck (stack sample).
-    found = {'usr1_marker': (root / 'guard-usr1-sent').read_text().strip()}
+    # cleanup) and a worker that is stuck (stack sample). `found` is already in
+    # the record, so a diagnosis cut short keeps what it has.
+    found['usr1_marker'] = (root / 'guard-usr1-sent').read_text().strip()
     try: found['usr1_sent_age_ms'] = (time.time_ns() - (root / 'guard-usr1-sent').stat().st_mtime_ns) // 1_000_000
     except FileNotFoundError: found['usr1_sent_age_ms'] = None
     group = next((item['pgid'] for item in processes if item['pid'] == worker), None)
     pids = sorted({worker} | {item['pid'] for item in processes if item['pgid'] == group or item['ppid'] == worker})
-    try:
-        state = subprocess.run(['/bin/ps', '-o', 'pid=,ppid=,pgid=,stat=,time=,command=', '-p', ','.join(map(str, pids))], capture_output=True, text=True, timeout=3)
-        found['worker_family'] = state.stdout.splitlines()
-    except Exception as error: found['worker_family'] = repr(error)
-    if sys.platform == 'darwin' and os.path.exists('/usr/bin/sample'):
-        try:
-            sample = subprocess.run(['/usr/bin/sample', str(worker), '1', '-mayDie'], capture_output=True, text=True, timeout=15)
-            lines = sample.stdout.splitlines()
-            start = next((index for index, line in enumerate(lines) if line.startswith('Call graph:')), 0)
-            found['worker_sample'] = {'returncode': sample.returncode, 'call_graph': lines[start:start + 60], 'stderr': sample.stderr[-400:]}
-        except Exception as error: found['worker_sample'] = repr(error)
-    return found
+    found['worker_family'] = bounded_diagnostic(root, 'ps', ['/bin/ps', '-o', 'pid=,ppid=,pgid=,stat=,time=,command=', '-p', ','.join(map(str, pids))], 3)
+    # The test substitutes the sample command to prove a blocked diagnosis.
+    sample = json.loads(os.environ['USR1_DIAGNOSIS_SAMPLE']) if os.environ.get('USR1_DIAGNOSIS_SAMPLE') else None
+    if sample is None and sys.platform == 'darwin' and os.path.exists('/usr/bin/sample'):
+        sample = ['/usr/bin/sample', str(worker), '1', '-mayDie']
+    if sample is not None:
+        found['worker_sample'] = bounded_diagnostic(root, 'sample', sample, 15)
+        lines = found['worker_sample'].get('stdout', [])
+        start = next((index for index, line in enumerate(lines) if line.startswith('Call graph:')), 0)
+        found['worker_sample']['stdout'] = lines[start:start + 60]
 # Modes that count groups outliving the call. Their injections wait for the
 # command to start and the watchdog to enter its budget sleep, not for the
 # record's release line, which the worker writes before releasing either.
@@ -542,7 +579,8 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                 while not (root / 'worker-resumed-after-usr1').exists() and child.poll() is None and time.monotonic() < resumed_deadline:
                     time.sleep(0.01)
                 if not (root / 'worker-resumed-after-usr1').exists():
-                    record['usr1_resume_missing'] = usr1_resume_diagnosis(root, worker, processes)
+                    record['usr1_resume_missing'] = {}
+                    usr1_resume_diagnosis(root, worker, processes, record['usr1_resume_missing'])
                     raise RuntimeError('worker did not resume after USR1')
                 record['usr1_resume_ms'] = usr1_resume_timing(root)
                 os.kill(worker, signal.SIGTERM)
