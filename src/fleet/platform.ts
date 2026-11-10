@@ -127,15 +127,17 @@ function assertValidLaunchdInstanceName(name: string): void {
 /**
  * The program (still XML-escaped) that an instance plist runs as
  * `ProgramArguments[0]`, or null when the Label and instance argument do not
- * match this instance.
+ * match this instance. `exactArguments` also requires the array to end right
+ * after the instance argument.
  */
-function launchdPlistProgram(name: string, contents: string): string | null {
+function launchdPlistProgram(name: string, contents: string, exactArguments = false): string | null {
   const label = escapeRegExp(escapeXml(launchdLabel(name)));
   const instance = escapeRegExp(escapeXml(name));
   const identity = new RegExp(
     `<key>Label</key>\\s*<string>${label}</string>\\s*` +
     `<key>ProgramArguments</key>\\s*<array>\\s*` +
-    `<string>([^<]*)</string>\\s*<string>${instance}</string>`,
+    `<string>([^<]*)</string>\\s*<string>${instance}</string>` +
+    (exactArguments ? '\\s*</array>' : ''),
     'u',
   );
   return identity.exec(contents)?.[1] ?? null;
@@ -156,12 +158,13 @@ const RELEASE_MANIFEST_FILE = '.whatsoup-release-manifest.json';
  * instead of the `~/.local/bin/whatsoup` symlink to that same file. The
  * macOS launchd runbook documents this form and hosts run it, so lifecycle
  * commands must accept it. They accept it only when the program is exactly
- * `deploy/whatsoup` in a `WhatSoup-release-<sha>` directory that is physically
- * inside home and carries a release manifest. Any other program is still a job
- * this manager does not own.
+ * `deploy/whatsoup <instance>` with no further argument, in a
+ * `WhatSoup-release-<sha>` directory that is physically inside home, and the
+ * launcher and the release manifest are both regular files. Any other program
+ * is still a job this manager does not own.
  */
 function isReleasePinnedLaunchdPlist(name: string, contents: string): boolean {
-  const program = launchdPlistProgram(name, contents);
+  const program = launchdPlistProgram(name, contents, true);
   // An XML entity means the path has a character no release path contains.
   if (program === null || program.includes('&') || !isCanonicalAbsolutePath(program)) return false;
   const deployDirectory = path.dirname(program);
@@ -174,7 +177,17 @@ function isReleasePinnedLaunchdPlist(name: string, contents: string): boolean {
     // intentional: a release path that does not resolve is not a release we can confirm.
     return false;
   }
-  return fs.existsSync(path.join(release, RELEASE_MANIFEST_FILE));
+  return isRegularFile(program) && isRegularFile(path.join(release, RELEASE_MANIFEST_FILE));
+}
+
+/** True only for an existing regular file (after symlinks); absent or unreadable is false. */
+function isRegularFile(filePath: string): boolean {
+  try {
+    return fs.statSync(filePath).isFile();
+  } catch {
+    // intentional: absent or unreadable means the release cannot be confirmed.
+    return false;
+  }
 }
 
 /**
