@@ -46,6 +46,7 @@ import type {
   CapabilityObligationDueRow,
   CapabilityObligationStore,
 } from '../../core/capability-obligation-store.ts';
+import { probeGroupMembership } from '../../lib/process-group-membership.ts';
 import { createChildLogger } from '../../logger.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../../mcp/external-effect.ts';
 import { toolError, type ToolDeclaration } from '../../mcp/types.ts';
@@ -54,6 +55,8 @@ const log = createChildLogger('agent:capability-execution-tool');
 
 const STDOUT_CAP_BYTES = 262_144;
 const STDERR_CAP_BYTES = 65_536;
+/** How long a failed watchdog reap waits for `close` before the run settles as not reaped. */
+const RESOLVER_REAP_GRACE_MS = 5_000;
 
 export interface ActiveObligationExecution {
   obligation: CapabilityObligationDueRow;
@@ -92,6 +95,10 @@ interface ResolverRun {
   /** Raw child-output bytes CAPTURED (capped at the advertised limit) — the truthful evidence measure (audit F8). */
   stdoutBytes: number;
   stderrBytes: number;
+  /** Set when the process group could not be proven reaped (issue 3568); the run is then never ok. */
+  reapError?: string;
+  /** True when a failed watchdog reap was followed by no `close` within the reap grace. */
+  closeNotObserved?: boolean;
 }
 
 /**
@@ -155,13 +162,49 @@ function runResolver(argv: readonly string[], timeoutMs: number): Promise<Resolv
     const stderr = cappedCollector(STDERR_CAP_BYTES);
     let timedOut = false;
     let settled = false;
-    const killGroup = (): void => {
-      if (pid === undefined) return;
-      try { process.kill(-pid, 'SIGKILL'); } catch { /* already dead: the process group was reaped by a clean exit or an earlier kill */ }
+    let reapError: string | undefined;
+    let reapGrace: NodeJS.Timeout | undefined;
+    // Reports a reap failure in reapError rather than throwing: every caller is a timer or child
+    // event callback, where a throw would be an uncaught exception and the run would never settle.
+    const killGroup = (): boolean => {
+      if (pid === undefined) return true;
+      try {
+        process.kill(-pid, 'SIGKILL');
+        return true;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === 'ESRCH') return true; // already dead: the process group was reaped by a clean exit or an earlier kill
+        if (code === 'EPERM') {
+          // Issue 3568: macOS can return EPERM for kill(-pgid) when the group holds only zombies.
+          const membership = probeGroupMembership(pid);
+          if (membership === 'no-live-members') return true;
+          reapError ??= `group kill failed: EPERM; group membership probe: ${membership}`;
+          return false;
+        }
+        reapError ??= `group kill failed: ${code ?? (err instanceof Error ? err.message : String(err))}`;
+        return false;
+      }
     };
     const watchdog = setTimeout(() => {
       timedOut = true;
-      killGroup(); // reap the leader AND every descendant
+      if (killGroup()) return; // reaped the leader AND every descendant
+      // A live member can hold the child's stdio open, so `close` may never arrive. Not unref'd:
+      // the run must settle even when nothing else keeps the event loop alive.
+      reapGrace = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        resolve({
+          exitCode: null,
+          signal: null,
+          timedOut: true,
+          stdout: stdout.text(),
+          stderr: stderr.text(),
+          stdoutBytes: stdout.bytes(),
+          stderrBytes: stderr.bytes(),
+          reapError,
+          closeNotObserved: true,
+        });
+      }, RESOLVER_REAP_GRACE_MS);
     }, timeoutMs);
     watchdog.unref?.();
     child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
@@ -170,12 +213,14 @@ function runResolver(argv: readonly string[], timeoutMs: number): Promise<Resolv
       if (settled) return;
       settled = true;
       clearTimeout(watchdog);
+      clearTimeout(reapGrace);
       reject(err);
     });
     child.on('close', (code, signal) => {
       if (settled) return;
       settled = true;
       clearTimeout(watchdog);
+      clearTimeout(reapGrace);
       // r14 F2: the leader has already exited (that is why `close` fired), but a
       // grandchild it forked into the SAME process group can OUTLIVE it and land
       // a side effect AFTER we record the receipt below. On a clean exit the
@@ -183,7 +228,8 @@ function runResolver(argv: readonly string[], timeoutMs: number): Promise<Resolv
       // group HERE before resolving. The leader is gone, so signalling the
       // (now leaderless) negative pid only reaches escaped descendants — a clean
       // run is not "group-killed after success", it just sweeps stragglers. If
-      // no grandchild escaped, killGroup is a no-op (ESRCH → swallowed). This
+      // no grandchild escaped, killGroup is a no-op (ESRCH → reaped). A group it
+      // cannot prove reaped is reported in reapError and the run is never ok. This
       // narrows but does not eliminate the window: a grandchild that itself
       // called setsid() leaves the group and is unreachable by pgid — that needs
       // the stronger resolver contract noted in the module header.
@@ -196,6 +242,7 @@ function runResolver(argv: readonly string[], timeoutMs: number): Promise<Resolv
         stderr: stderr.text(),
         stdoutBytes: stdout.bytes(),
         stderrBytes: stderr.bytes(),
+        ...(reapError === undefined ? {} : { reapError }),
       });
     });
   });
@@ -385,13 +432,16 @@ export function buildCapabilityExecutionTool(deps: CapabilityExecutionToolDeps):
           !run.timedOut
           && run.signal === null
           && run.exitCode === 0
-          && run.stdoutBytes >= deps.options.execution.minOutputBytes;
+          && run.stdoutBytes >= deps.options.execution.minOutputBytes
+          && run.reapError === undefined; // a group not proven reaped may still hold a live descendant
         const receiptPersisted = recordOutcome(deps, active, observedSourceDigest, ok ? 'ok' : 'error', {
           exitCode: run.exitCode,
           signal: run.signal,
           timedOut: run.timedOut,
           stdoutBytes: run.stdoutBytes,
           stderrBytes: run.stderrBytes,
+          ...(run.reapError === undefined ? {} : { reapError: run.reapError }),
+          ...(run.closeNotObserved === true ? { reason: 'resolver_close_not_observed' } : {}),
         }, observedMediaDigest);
 
         if (!ok) {
