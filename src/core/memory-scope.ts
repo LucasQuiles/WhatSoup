@@ -72,6 +72,12 @@ export interface MemoryScope {
    * direct chat (see ownerOnlyRecallAllowed). Independent of `kind`.
    */
   ownerOnlyAccess: boolean;
+  /**
+   * This instance's name when `memory.pinecone.instanceScopedIds` is on. A
+   * record stamped with another source_instance is then another conversation,
+   * whatever its chat_jid; records with no source_instance count as this one's.
+   */
+  sourceInstance?: string;
 }
 
 export interface MemoryIdentityFold {
@@ -285,6 +291,8 @@ export interface MemoryScopeDeps {
   contactRecallScopes?: Readonly<Record<string, string>>;
   /** `memory.pinecone.trustedOperatorPhones`: may read owner_only records. */
   trustedOperatorPhones?: Iterable<string>;
+  /** recordIdScope(instance, instanceScopedIds): set only when the option is on. */
+  instanceScope?: string | null;
 }
 
 /**
@@ -389,7 +397,13 @@ export async function resolveMemoryScope(
     trustedOperatorPhones: deps.trustedOperatorPhones,
     db,
   });
-  const base = { chatKey, chatSpellings, sharedWorkflow: false, ownerOnlyAccess };
+  const base = {
+    chatKey,
+    chatSpellings,
+    sharedWorkflow: false,
+    ownerOnlyAccess,
+    ...(deps.instanceScope ? { sourceInstance: deps.instanceScope } : {}),
+  };
 
   if (request.operatorInstance) return { ...base, kind: 'unrestricted', reason: 'operator_instance' };
   if (!rawKey || !chatKey) {
@@ -461,6 +475,17 @@ export function chatRecallBoundary(input: {
 }
 
 // ── owner_only visibility ──────────────────────────────────────────────────
+
+/**
+ * The record came from `sourceInstance` (or no instance boundary applies). A
+ * record with no source_instance predates provenance and counts as this
+ * instance's, so legacy recall is unchanged.
+ */
+export function isSameSourceInstance(fields: Record<string, unknown>, sourceInstance: string | undefined): boolean {
+  if (!sourceInstance) return true;
+  const recorded = fields['source_instance'];
+  return typeof recorded !== 'string' || recorded === '' || recorded === sourceInstance;
+}
 
 /** A record stamped `owner_only`. A record with no visibility field is not. */
 export function isOwnerOnlyRecord(fields: Record<string, unknown>): boolean {
@@ -536,16 +561,21 @@ export function memoryHitTier(
 ): MemoryTier | null {
   if (scope.kind === 'no_context') return null;
   const rawChat = typeof fields['chat_jid'] === 'string' ? fields['chat_jid'] : '';
+  // Same conversation = same chat AND (with instance-scoped ids on) the same
+  // source instance; a record with no source_instance predates the stamp.
+  const sameConversation = (): boolean => scope.chatKey !== undefined
+    && fold.chat(rawChat) === scope.chatKey
+    && isSameSourceInstance(fields, scope.sourceInstance);
   if (isOwnerOnlyRecord(fields)) {
     // owner_only: refused without access; with access (only ever granted in a
     // direct chat) admitted from any chat, ranked this chat -> other -> untagged.
     // chat_scoped records keep the scope's own boundary below.
     if (!scope.ownerOnlyAccess) return null;
     if (!rawChat.trim()) return 2;
-    return scope.chatKey !== undefined && fold.chat(rawChat) === scope.chatKey ? 0 : 1;
+    return sameConversation() ? 0 : 1;
   }
   if (!rawChat.trim()) return includesUntagged(scope) ? 2 : null;
-  const thisChat = scope.chatKey !== undefined && fold.chat(rawChat) === scope.chatKey;
+  const thisChat = sameConversation();
 
   if (scope.kind === 'dm_chat') return thisChat ? 0 : null;
   if (scope.kind !== 'configurable_group') return thisChat ? 0 : 1;

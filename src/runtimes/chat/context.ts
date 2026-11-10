@@ -16,6 +16,7 @@ import { routeQuery } from './memory/query-router.ts';
 import {
   foldChatAttribution,
   isOwnOrSharedGroupRecord,
+  isSameSourceInstance,
   memoryIdentityFold,
   verifiedSenderIdentity,
   type ChatRecallBoundary,
@@ -138,7 +139,7 @@ export async function loadContextDetailed(
    * ownerOnly: the caller may receive owner_only records (ownerOnlyRecallAllowed).
    * Without it every leg excludes them before the query and again here.
    */
-  access: { ownerOnly?: boolean } = {},
+  access: { ownerOnly?: boolean; sourceInstance?: string } = {},
 ): Promise<ContextLoadResult> {
   if (!messageText.trim()) {
     return { text: '', status: 'not_attempted', scopes: [] };
@@ -211,18 +212,28 @@ export async function loadContextDetailed(
   const thisChat = foldChatAttribution(chatJid);
   const fold = memoryIdentityFold();
   const sender = verifiedSenderIdentity(senderJid);
+  // Instance-scoped ids on: a record of another source instance is another
+  // conversation (legacy records without the stamp count as this instance's).
+  const sameInstance = (result: SearchResult): boolean => isSameSourceInstance(
+    { source_instance: result.record.sourceInstance }, access.sourceInstance,
+  );
+  const crossesBoundary = (result: SearchResult): boolean => ownerOnly && result.record.visibility === 'owner_only';
+  const chatHeld = boundary === 'open'
+    ? chatDetails.results
+    : chatDetails.results.filter((result) => sameInstance(result) || crossesBoundary(result));
   const chatResults = boundary === 'group'
-    ? chatDetails.results.filter((result) => isOwnOrSharedGroupRecord(
+    ? chatHeld.filter((result) => isOwnOrSharedGroupRecord(
       { sender_jid: result.record.senderJid, memory_type: result.record.memoryType }, sender, fold,
     ))
-    : chatDetails.results;
+    : chatHeld;
   // With owner_only access, owner_only records cross the chat boundary; the
   // caller's chat_scoped and legacy records keep it.
   const senderResults = boundary === 'open'
     ? senderDetails.results
-    : senderDetails.results.filter((result) => foldChatAttribution(result.record.chatJid) === thisChat
-      || (ownerOnly && result.record.visibility === 'owner_only'));
-  const selfResults = selfDetails.results;
+    : senderDetails.results.filter((result) =>
+      (foldChatAttribution(result.record.chatJid) === thisChat && sameInstance(result)) || crossesBoundary(result));
+  // Self facts are this bot's own identity: another instance's never apply.
+  const selfResults = selfDetails.results.filter(sameInstance);
   const scopes = [
     scopeOutcome('chat', chatDetails),
     scopeOutcome('sender', senderDetails),

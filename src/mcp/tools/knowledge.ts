@@ -30,6 +30,7 @@ import {
   memoryHitTier,
   memoryIdentityFold,
   ownerOnlyLegFilter,
+  recordIdScope,
   resolveMemoryScope,
   withVisibilityFilter,
   type GroupMembershipReader,
@@ -499,6 +500,10 @@ export function registerKnowledgeTools(
       sharedWorkflowGroups: deps.sharedWorkflowGroups ?? [],
       contactRecallScopes: deps.contactRecallScopes,
       trustedOperatorPhones: deps.trustedOperatorPhones,
+      instanceScope: recordIdScope(
+        (config as { botName?: unknown }).botName,
+        (config as { memory?: { pinecone?: { instanceScopedIds?: unknown } } }).memory?.pinecone?.instanceScopedIds,
+      ),
     },
   );
   const apiKey = resolveApiKey({ service: memoryConfig.apiKeyService, envVar: envVarName });

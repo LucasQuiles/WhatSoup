@@ -2194,6 +2194,29 @@ describe('upsert provenance stamping', () => {
     expect(record['provenance']).toBe('fact_export');
   });
 
+  it('dedup and claim lookups stay inside this instance and account when instance-scoped ids are on', async () => {
+    mockSearchRecords.mockResolvedValue({ result: { hits: [] } });
+    const memory = makeMemory(ACCOUNT_JID);
+    await memory.checkDuplicate('chat-1@g.us', 'sender-1@s.whatsapp.net', 'same text');
+    pineconeConfig.instanceScopedIds = true;
+    try {
+      await memory.checkDuplicate('chat-1@g.us', 'sender-1@s.whatsapp.net', 'same text');
+      await memory.searchClaims('chat-1@g.us', '', 'claim', 3);
+    } finally {
+      delete pineconeConfig.instanceScopedIds;
+    }
+    const filters = mockSearchRecords.mock.calls.map((call) => call[0].query.filter);
+    expect(filters[0]).toEqual({ chat_jid: { $eq: 'chat-1@g.us' }, sender_jid: { $eq: 'sender-1@s.whatsapp.net' } });
+    expect(filters[1]).toEqual({
+      chat_jid: { $eq: 'chat-1@g.us' },
+      sender_jid: { $eq: 'sender-1@s.whatsapp.net' },
+      source_instance: { $eq: 'q' },
+      source_account: { $eq: expect.stringMatching(/^acct:[0-9a-f]{24}$/) },
+    });
+    expect(filters[2]).toMatchObject({ chat_jid: { $eq: 'chat-1@g.us' }, source_instance: { $eq: 'q' } });
+    mockSearchRecords.mockReset();
+  });
+
   it('reads the stamped fields back onto search results, ignoring unknown visibility values', async () => {
     mockSearchRecords.mockResolvedValueOnce({
       result: {

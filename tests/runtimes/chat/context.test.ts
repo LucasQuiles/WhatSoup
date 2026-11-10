@@ -595,6 +595,35 @@ describe('loadContext', () => {
     expect(pinecone.searchSelfFactsDetailed).toHaveBeenLastCalledWith('query', undefined, { includeOwnerOnly: true });
   });
 
+  it('with an instance scope, another instance\'s records are another conversation and its self facts are not ours', async () => {
+    const from = (id: string, text: string, sourceInstance?: string) => {
+      const result = makeResult(id, text);
+      result.record.chatJid = '15550000002@s.whatsapp.net';
+      if (sourceInstance) result.record.sourceInstance = sourceInstance;
+      return result;
+    };
+    const pinecone = makeMockPinecone(
+      [from('a', 'this line chat fact', 'line-a'), from('b', 'other line chat fact', 'line-b'), from('l', 'legacy chat fact')],
+      [from('sb', 'other line sender fact', 'line-b')],
+      [from('self-a', 'this line self fact', 'line-a'), from('self-b', 'other line self fact', 'line-b')],
+    );
+    const held = await loadContextDetailed(
+      pinecone as any, '15550000002@s.whatsapp.net', '15550000002@s.whatsapp.net', 'query', undefined, 'this_chat',
+      { sourceInstance: 'line-a' },
+    );
+    expect(held.text).toContain('this line chat fact');
+    expect(held.text).toContain('legacy chat fact');
+    expect(held.text).not.toContain('other line chat fact');
+    expect(held.text).not.toContain('other line sender fact');
+    expect(held.text).toContain('this line self fact');
+    expect(held.text).not.toContain('other line self fact');
+
+    const off = await loadContextDetailed(
+      pinecone as any, '15550000002@s.whatsapp.net', '15550000002@s.whatsapp.net', 'query', undefined, 'this_chat',
+    );
+    expect(off.text).toContain('other line chat fact');
+  });
+
   it('with access under the this_chat boundary, owner_only records from other chats pass; chat_scoped ones do not', async () => {
     const elsewhere = (id: string, text: string, visibility?: 'owner_only' | 'chat_scoped') => {
       const result = makeResult(id, text);

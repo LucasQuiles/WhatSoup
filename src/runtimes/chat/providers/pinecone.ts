@@ -25,6 +25,7 @@ import {
   instanceRecordVisibility,
   memorySourceAccount,
   narrowestVisibility,
+  recordIdScope,
   withVisibilityFilter,
   type MemoryProvenance,
   type MemoryVisibility,
@@ -727,18 +728,20 @@ function configuredRecordStampSource(): {
   instanceType: unknown;
   accountScopeId: unknown;
   recordVisibility: unknown;
+  instanceScopedIds: unknown;
 } {
   const c = config as {
     botName?: unknown;
     instanceType?: unknown;
     accountScopeId?: unknown;
-    memory?: { pinecone?: { recordVisibility?: unknown } };
+    memory?: { pinecone?: { recordVisibility?: unknown; instanceScopedIds?: unknown } };
   };
   return {
     instanceName: c.botName,
     instanceType: c.instanceType,
     accountScopeId: c.accountScopeId,
     recordVisibility: c.memory?.pinecone?.recordVisibility,
+    instanceScopedIds: c.memory?.pinecone?.instanceScopedIds,
   };
 }
 
@@ -844,6 +847,21 @@ export class PineconeMemory {
       sourceAccount: memorySourceAccount(source.accountScopeId, accountJid),
       visibility: instanceRecordVisibility(source.instanceType, source.recordVisibility),
       ...(provenance ? { provenance } : {}),
+    };
+  }
+
+  /**
+   * Dedup and claim-lookup boundary. With memory.pinecone.instanceScopedIds on,
+   * only records of this instance and account match, so matching text alone
+   * never merges records across instances. Off: no extra clause (unchanged).
+   */
+  private sourceBoundaryFilter(): Record<string, unknown> {
+    const source = configuredRecordStampSource();
+    if (recordIdScope(source.instanceName, source.instanceScopedIds) === null) return {};
+    const stamp = this.recordStamp(undefined);
+    return {
+      source_instance: { $eq: stamp.sourceInstance },
+      source_account: { $eq: stamp.sourceAccount },
     };
   }
 
@@ -1431,6 +1449,7 @@ export class PineconeMemory {
     if (senderJid) {
       filters['sender_jid'] = { $eq: senderJid };
     }
+    Object.assign(filters, this.sourceBoundaryFilter());
 
     const results = await this._searchCore(text, filters, 1);
 
@@ -1453,6 +1472,7 @@ export class PineconeMemory {
     if (senderJid) {
       filters['sender_jid'] = { $eq: senderJid };
     }
+    Object.assign(filters, this.sourceBoundaryFilter());
     return this._searchCore(claimText, filters, topK);
   }
 }

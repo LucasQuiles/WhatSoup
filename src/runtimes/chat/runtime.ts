@@ -37,7 +37,7 @@ import { checkRateLimit } from './rate-limiter.ts';
 import { getConversationWindow } from './window.ts';
 import { summarizeWindowBeforeTrim } from './window-trim.ts';
 import { loadContextDetailed, type ContextLoadResult } from './context.ts';
-import { chatRecallBoundary, ownerOnlyRecallAllowed } from '../../core/memory-scope.ts';
+import { chatRecallBoundary, ownerOnlyRecallAllowed, recordIdScope } from '../../core/memory-scope.ts';
 import { isOperatorInstance } from '../../lib/pinecone-project-guard.ts';
 import { ChatQueue } from './queue.ts';
 import { processMedia } from './media/processor.ts';
@@ -418,6 +418,10 @@ export class ChatRuntime implements Runtime {
       trustedOperatorPhones,
       db: this.db,
     });
+    const instanceScope = recordIdScope(
+      config.botName,
+      (config as { memory?: { pinecone?: { instanceScopedIds?: unknown } } }).memory?.pinecone?.instanceScopedIds,
+    );
     let contextBlock: string | null = null;
     let contextTimeout: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -437,9 +441,14 @@ export class ChatRuntime implements Runtime {
             sharedWorkflowGroups: config.sharedWorkflowGroups,
             contactRecallScopes: config.contactRecallScopes,
           }),
-          // Passed only when granted, so every other caller keeps the
-          // pre-visibility call shape (and the provider default excludes).
-          ...(ownerOnly ? [{ ownerOnly: true }] as const : []),
+          // Passed only when it carries something, so every other caller keeps
+          // the earlier call shape (and the provider default excludes).
+          ...(ownerOnly || instanceScope
+            ? [{
+              ...(ownerOnly ? { ownerOnly: true } : {}),
+              ...(instanceScope ? { sourceInstance: instanceScope } : {}),
+            }] as [{ ownerOnly?: boolean; sourceInstance?: string }]
+            : [] as []),
         ),
         new Promise<ContextLoadResult>((resolve) => {
           contextTimeout = setTimeout(

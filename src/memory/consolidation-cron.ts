@@ -204,6 +204,9 @@ export async function runConsolidation(
           { confidence_qualifier: { $exists: false } },
           { confidence_qualifier: { $ne: CONSOLIDATED_QUALIFIER } },
         ],
+        // Instance-scoped (opt-in): consolidate only this instance's records,
+        // so a promotion keeps its sources' provenance.
+        ...(options.instanceScope ? { source_instance: { $eq: options.instanceScope } } : {}),
       },
       100,
       options.traceId,
@@ -280,7 +283,15 @@ export async function runConsolidation(
   // the records it was derived from (an owner_only source makes the durable
   // record owner_only).
   const sourceVisibility = new Map(recentMemories.map((result) => [result.id, result.record.visibility]));
+  // Instance-scoped (opt-in): the source account joins the group key, so two
+  // accounts' records are never clustered or merged on text alone.
+  const sourceAccount = new Map(recentMemories.map((result) => [result.id, result.record.sourceAccount ?? '']));
+  const groupKeyFor = (record: { id: string; chatJid: string; senderJid: string }): string => {
+    const key = scopeKey(record.chatJid, record.senderJid);
+    return options.instanceScope ? `${sourceAccount.get(record.id) ?? ''}\0${key}` : key;
+  };
   const scopedRecords = new Map<string, {
+    key: string;
     chatJid: string;
     senderJid: string;
     records: typeof records;
@@ -295,8 +306,9 @@ export async function runConsolidation(
       unscopedSkipped += 1;
       continue;
     }
-    const key = scopeKey(record.chatJid, record.senderJid);
+    const key = groupKeyFor(record);
     const group = scopedRecords.get(key) ?? {
+      key,
       chatJid: record.chatJid,
       senderJid: record.senderJid,
       records: [],
@@ -399,7 +411,8 @@ export async function runConsolidation(
         counters.writeAttempted += 1;
         try {
           await pinecone.upsert([{
-            id: durableId(options.instanceScope ?? null, scopeKey(group.chatJid, group.senderJid), durable.claim),
+            // Off: group.key is scopeKey(chat, sender), the legacy formula.
+            id: durableId(options.instanceScope ?? null, group.key, durable.claim),
             text: durable.claim,
             chatJid: group.chatJid,
             senderJid: group.senderJid,

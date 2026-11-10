@@ -81,6 +81,44 @@ describe('runConsolidation — provenance and visibility', () => {
     expect(a).toMatch(/^durable:[0-9a-f]{16}$/);
   });
 
+  it('with an instance scope, selects only this instance and never merges two accounts', async () => {
+    const record = (id: string, sourceAccount: string) => ({
+      id,
+      score: 0.9,
+      record: {
+        id, text: 'Lives in London', claim: 'Lives in London', evidence: 'Said so',
+        createdAt: new Date().toISOString(), confidence: 0.9,
+        chatJid: 'chat-1@g.us', senderJid: 'sender-1@s.whatsapp.net',
+        sourceInstance: 'line-a', sourceAccount,
+      },
+    });
+    const pinecone = {
+      searchDetailed: vi.fn().mockResolvedValue({
+        results: [record('r1', 'acct:one'), record('r2', 'acct:two')], status: 'ok', evidenceCoverage: 'provider_response',
+      }),
+      upsert: vi.fn().mockResolvedValue(undefined),
+    };
+    const provider = {
+      name: 'test-provider',
+      generate: vi.fn().mockImplementation(async (request: unknown) => {
+        const ids = JSON.stringify(request).includes('r1') ? ['r1'] : ['r2'];
+        return {
+          content: JSON.stringify({
+            durableKnowledge: [{ claim: 'User lives in London', promotionReason: 'stated', confidence: 0.9, sourceRecordIds: ids }],
+            discarded: [],
+          }),
+          inputTokens: 1, outputTokens: 1, model: 'test', durationMs: 1,
+        };
+      }),
+    };
+    await runConsolidation(pinecone, provider, { lookbackDays: 7, dryRun: false, instanceScope: 'line-a' });
+    expect(pinecone.searchDetailed.mock.calls[0][1]).toMatchObject({ source_instance: { $eq: 'line-a' } });
+    // Same chat, sender and claim text, different accounts: two groups, two ids.
+    expect(provider.generate).toHaveBeenCalledTimes(2);
+    const ids = pinecone.upsert.mock.calls.map((call) => call[0][0].id);
+    expect(new Set(ids).size).toBe(2);
+  });
+
   it('labels the write as consolidation provenance', async () => {
     const { pinecone, done } = run(undefined);
     await done;

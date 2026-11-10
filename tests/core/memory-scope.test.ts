@@ -406,6 +406,32 @@ describe('owner_only visibility', () => {
   });
 });
 
+describe('instance-scoped recall boundary (memory.pinecone.instanceScopedIds on)', () => {
+  const dm = { tier: 'chat-scoped', conversationKey: MEMBER, deliveryJid: `${MEMBER}@s.whatsapp.net`, operatorInstance: false };
+
+  it('the same chat_jid from another instance is another conversation', async () => {
+    const f = memoryIdentityFold(db);
+    const contact = await resolveMemoryScope({ ...dm, actorJid: `${MEMBER}@s.whatsapp.net` }, deps({ instanceScope: 'line-a' }));
+    expect(memoryHitTier({ chat_jid: `${MEMBER}@s.whatsapp.net`, source_instance: 'line-a' }, contact, f)).toBe(0);
+    expect(memoryHitTier({ chat_jid: `${MEMBER}@s.whatsapp.net`, source_instance: 'line-b' }, contact, f)).toBeNull();
+    // Records written before provenance existed count as this instance's.
+    expect(memoryHitTier({ chat_jid: `${MEMBER}@s.whatsapp.net` }, contact, f)).toBe(0);
+
+    const owner = await resolveMemoryScope(
+      { ...dm, conversationKey: OWNER, deliveryJid: `${OWNER}@s.whatsapp.net`, actorJid: `${OWNER}@s.whatsapp.net` },
+      deps({ instanceScope: 'line-a' }),
+    );
+    expect(memoryHitTier({ chat_jid: `${OWNER}@s.whatsapp.net`, source_instance: 'line-b' }, owner, f)).toBe(1);
+    expect(memoryHitTier({ chat_jid: `${OWNER}@s.whatsapp.net`, source_instance: 'line-b', visibility: 'owner_only' }, owner, f)).toBe(1);
+  });
+
+  it('off (no instance scope) keeps matching on chat alone', async () => {
+    const f = memoryIdentityFold(db);
+    const contact = await resolveMemoryScope({ ...dm, actorJid: `${MEMBER}@s.whatsapp.net` }, deps());
+    expect(memoryHitTier({ chat_jid: `${MEMBER}@s.whatsapp.net`, source_instance: 'line-b' }, contact, f)).toBe(0);
+  });
+});
+
 describe('record provenance helpers', () => {
   it('a passive line is always owner_only; others follow config, defaulting to chat_scoped', () => {
     expect(instanceRecordVisibility('passive', 'chat_scoped')).toBe('owner_only');
