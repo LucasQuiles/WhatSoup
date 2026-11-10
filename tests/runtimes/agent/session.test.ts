@@ -2370,7 +2370,8 @@ describe('SessionManager', () => {
     }
   });
 
-  it.each([16, 262_144])('preserves the longest active wait among %i distinct pending tool IDs', async (count) => {
+  // Only poll waits here: an ordinary pending tool keeps the normal deadline (tests below).
+  it.each([16, MAX_TRACKED_TOOL_IDS - 4])('preserves the longest active wait among %i distinct pending poll waits', async (count) => {
     vi.useFakeTimers();
     const sm = new SessionManager({
       db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
@@ -2384,7 +2385,7 @@ describe('SessionManager', () => {
         if (i === count / 2) {
           sm.trackToolStart('longest-poll', 'send_poll', { awaitResult: true, timeoutMs: WATCHDOG_HARD_MS * 3 });
         }
-        sm.trackToolStart(`pending-${i}`, 'Bash');
+        sm.trackToolStart(`pending-${i}`, 'send_poll', { awaitResult: true, timeoutMs: WATCHDOG_HARD_MS * 2 });
       }
       sm.trackToolStart('last-poll', 'send_poll', { awaitResult: true, timeoutMs: WATCHDOG_HARD_MS * 2 });
       sm.tickWatchdog();
@@ -2427,6 +2428,82 @@ describe('SessionManager', () => {
     sm.trackToolStart('extra-poll', 'send_poll', poll);
     expect(ids.size).toBe(MAX_TRACKED_TOOL_IDS);
     expect(ids.has('extra-poll')).toBe(false);
+  });
+
+  // #3917 review 5844386668: with operation tracking disabled no stall guard exists, so an awaited
+  // poll must not defer the hard watchdog while an unrelated tool is still pending.
+  it.each([
+    ['poll first', ['poll', 'hung']],
+    ['hung tool first', ['hung', 'poll']],
+  ] as const)('a disabled-tracker poll does not mask a hung tool (%s)', async (_label, order) => {
+    vi.useFakeTimers();
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), notifyUser: vi.fn(),
+    });
+    try {
+      await sm.spawnSession();
+      await sm.sendTurn('poll while another tool hangs');
+      for (const step of order) {
+        if (step === 'poll') sm.trackToolStart('poll', 'send_poll', { awaitResult: true, timeoutMs: 86_400_000 });
+        else sm.trackToolStart('hung', 'Bash');
+      }
+      sm.tickWatchdog();
+
+      await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS - 1_000);
+      expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+      await vi.advanceTimersByTimeAsync(1_001);
+      expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    } finally {
+      sm.clearTurnWatchdog();
+      vi.useRealTimers();
+    }
+  });
+
+  it('a poll wait resumes its deferral once the unrelated tool finishes', async () => {
+    vi.useFakeTimers();
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), notifyUser: vi.fn(),
+    });
+    try {
+      await sm.spawnSession();
+      await sm.sendTurn('poll after a short tool');
+      sm.trackToolStart('poll', 'send_poll', { awaitResult: true, timeoutMs: WATCHDOG_HARD_MS * 3 });
+      sm.trackToolStart('short', 'Bash');
+      sm.tickWatchdog();
+      sm.trackToolEnd('short');
+
+      await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS * 3);
+      expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+      await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+      expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    } finally {
+      sm.clearTurnWatchdog();
+      vi.useRealTimers();
+    }
+  });
+
+  it('an ordinary tool refused at the cap still keeps the normal deadline', async () => {
+    vi.useFakeTimers();
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), notifyUser: vi.fn(),
+    });
+    try {
+      await sm.spawnSession();
+      await sm.sendTurn('fill every slot with waits');
+      const poll = { awaitResult: true, timeoutMs: WATCHDOG_HARD_MS * 3 };
+      for (let i = 0; i < MAX_TRACKED_TOOL_IDS; i += 1) sm.trackToolStart(`poll-${i}`, 'send_poll', poll);
+      sm.trackToolStart('hung', 'Bash');
+      sm.tickWatchdog();
+
+      await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+      expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    } finally {
+      sm.clearTurnWatchdog();
+      vi.useRealTimers();
+    }
   });
 
   it('a blocking poll survives both watchdogs until its bounded vote wait ends', async () => {
