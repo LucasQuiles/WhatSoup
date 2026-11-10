@@ -2,7 +2,7 @@ name: Quality
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, edited]
   # `quality (24.x)` / `quality (25.x)` are REQUIRED contexts on main. A merge queue
   # only advances once every required check reports on the merge_group ref, so without
   # this trigger an enabled queue would stall every PR indefinitely waiting for a run
@@ -59,18 +59,24 @@ jobs:
           TEST_BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          plan_path="$RUNNER_TEMP/test-plan.json"
-          if [ "$GITHUB_EVENT_NAME" = 'pull_request' ]; then
-            test -n "$TEST_BASE"
-            node --experimental-strip-types scripts/test-plan.ts --base "$TEST_BASE" --json > "$plan_path"
-          else
-            node --experimental-strip-types scripts/test-plan.ts --full --json > "$plan_path"
-          fi
-          TEST_PLAN_PATH="$plan_path" node --input-type=module <<'NODE'
-          import { appendFileSync, readFileSync } from 'node:fs';
+          node --input-type=module <<'NODE'
+          import { execFileSync } from 'node:child_process';
+          import { appendFileSync } from 'node:fs';
 
-          const plan = JSON.parse(readFileSync(process.env.TEST_PLAN_PATH, 'utf8'));
           const laneNames = ['root', 'console', 'browser', 'python', 'guard', 'docker', 'compatibility'];
+          const git = (...args) => execFileSync('git', args, { encoding: 'utf8', timeout: 10000, maxBuffer: 4 * 1024 * 1024 }).trimEnd();
+          const isPr = process.env.GITHUB_EVENT_NAME === 'pull_request';
+          const base = isPr ? process.env.TEST_BASE : null;
+          if (isPr && !/^[0-9a-f]{40}$/.test(base ?? '')) throw new Error('An immutable PR base is required');
+          const changedFiles = isPr ? git('diff', '--no-renames', '--name-only', '-z', `${base}...HEAD`, '--').split('\0').filter(Boolean) : [];
+          // Candidate selection code cannot approve changes to itself or its transitive inputs.
+          const controlsChanged = changedFiles.some((file) => /^(?:scripts\/|\.github\/|deploy\/|src\/lib\/(?:git-env|type-guards)\.ts$|package(?:-lock)?\.json$|\.nvmrc$|\.npmrc$)/.test(file));
+          const plan = !isPr || controlsChanged ? {
+            profile: 'full', lanes: Object.fromEntries(laneNames.map((lane) => [lane, true])),
+            changedFiles, base, reasons: [controlsChanged ? 'Selection controls changed; full validation required' : 'Non-PR event requires full validation'],
+          } : JSON.parse(execFileSync(process.execPath, ['--experimental-strip-types', 'scripts/test-plan.ts', '--base', base, '--json'], {
+            encoding: 'utf8', timeout: 60000, maxBuffer: 1024 * 1024,
+          }));
           if (
             !['docs', 'affected', 'full'].includes(plan.profile)
             || !Array.isArray(plan.reasons)
@@ -90,6 +96,14 @@ jobs:
           };
           appendFileSync(output, Object.entries(values).map(([key, value]) => `${key}=${value}\n`).join(''));
           NODE
+
+      # Remove this overlap and the edited trigger only after both new required
+      # contexts have passed and live branch-protection drift is clean.
+      - name: PR metadata guard during required-check cutover
+        if: github.event_name == 'pull_request'
+        env:
+          PR_METADATA_EVENT: ${{ github.event_path }}
+        run: node --experimental-strip-types scripts/pr-metadata-guard.ts --github-event "$PR_METADATA_EVENT" --json
 
       - name: Summarize Quality selection
         env:
@@ -244,7 +258,7 @@ jobs:
               exit 0
             fi
             echo "::endgroup::"
-            if [ "$attempt" -lt 3 ]; then sleep $((attempt * 15)); fi
+            sleep $((attempt * 15))
           done
           echo "Playwright chromium download failed after 3 attempts"
           exit 1
@@ -722,7 +736,7 @@ jobs:
             fi
             echo "::endgroup::"
             echo "Playwright chromium download attempt ${attempt} failed or timed out; retrying after backoff"
-            if [ "$attempt" -lt 3 ]; then sleep $((attempt * 15)); fi
+            sleep $((attempt * 15))
           done
           echo "Playwright chromium download failed after 3 attempts"
           exit 1

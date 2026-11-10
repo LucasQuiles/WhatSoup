@@ -93,7 +93,7 @@ function isFixturePath(changedPath: string): boolean {
 }
 
 function isOperationalDocumentation(changedPath: string): boolean {
-  return /(?:^|[\/._-])(?:runbooks?|operations?|operational|policies|policy|schemas?|configuration|config)(?:[\/._-]|$)/i.test(changedPath);
+  return /(?:^|[\/._-])(?:runbooks?|operations?|operational|policies|policy|schemas?|configuration|config|enforcement|guardrails)(?:[\/._-]|$)/i.test(changedPath);
 }
 
 function isDocsOnlyPath(changedPath: string): boolean {

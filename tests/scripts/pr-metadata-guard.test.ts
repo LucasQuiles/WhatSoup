@@ -73,7 +73,13 @@ describe('PR metadata guard', () => {
       expect(activities, `metadata must receive ${activity} PR events`).toContain(activity);
     }
     expect(metadataWorkflow.on).toHaveProperty('merge_group');
-    expect(qualityWorkflow.on.pull_request?.types).not.toContain('edited');
+    expect(qualityWorkflow.on.pull_request?.types).toContain('edited');
+    const inlineGuard = qualityWorkflow.jobs.selection.steps.find((step: { name: string }) => step.name === 'PR metadata guard during required-check cutover');
+    expect(inlineGuard).toMatchObject({
+      if: "github.event_name == 'pull_request'",
+      env: { PR_METADATA_EVENT: '${{ github.event_path }}' },
+    });
+    expect(inlineGuard.run).toContain('scripts/pr-metadata-guard.ts --github-event "$PR_METADATA_EVENT" --json');
     const guard = metadataWorkflow.jobs.metadata.steps.find((step: { name: string }) => step.name === 'PR metadata guard');
     expect(guard).toMatchObject({
       if: "github.event_name == 'pull_request'",

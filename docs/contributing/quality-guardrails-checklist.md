@@ -18,10 +18,12 @@ work. In the full profile Node 24 owns static, Python, coverage, design and brow
 checks; Node 25 runs the full non-coverage compatibility suite and console build.
 Affected compatibility runs use the selected root tests on Node 25.
 
-PR metadata has its own `pr metadata` workflow, including title/body edits, so
-metadata edits do not cancel and restart the application suites. Publishing this
-split requires adding that metadata context to branch protection; local YAML
-validation does not establish that hosted setting. Existing CodeQL requirements
+PR metadata has its own `pr metadata` workflow, including title/body edits.
+Quality retains inline metadata enforcement and its edit trigger during cutover.
+The testing-pipeline owner removes that overlap only after both new required
+contexts pass and live branch-protection drift is clean. This final cutover avoids
+restarting application suites for metadata edits. Local YAML validation does not
+establish that hosted setting. Existing CodeQL requirements
 remain in place. Hosted timing gains require measurements after activation.
 
 | Step | Command | Purpose |

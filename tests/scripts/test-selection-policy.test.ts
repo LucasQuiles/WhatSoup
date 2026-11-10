@@ -38,6 +38,8 @@ describe('classifyTestChanges', () => {
       'docs/runbooks/recovery.md',
       'docs/configuration.md',
       'docs/quality-policy.md',
+      'docs/enforcement/merge-gate.md',
+      'docs/contributing/quality-guardrails-checklist.md',
     ]) {
       const result = classifyTestChanges([changedPath]);
 

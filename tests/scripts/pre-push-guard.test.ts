@@ -11,7 +11,8 @@ import {
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { parse as parseYaml } from 'yaml';
 
 import { describe, expect, it, vi } from 'vitest';
 
@@ -1276,6 +1277,54 @@ describe('verify chain composition (push-gate manifest)', () => {
 });
 
 describe('quality workflow composition', () => {
+  it.each([
+    ['scripts/test-plan.ts', 'pull_request', 'full', false],
+    ['scripts/lib/test-selection-policy.ts', 'pull_request', 'full', false],
+    ['src/lib/type-guards.ts', 'pull_request', 'full', false],
+    ['src/lib/git-env.ts', 'pull_request', 'full', false],
+    ['.github/workflows/quality.yml', 'pull_request', 'full', false],
+    ['README.md', 'pull_request', 'docs', true],
+    ['README.md', 'push', 'full', false],
+  ] as const)('binds selection to changed controls and event: %s %s', (changedPath, event, profile, plannerRuns) => {
+    const root = mkdtempSync(resolve(tmpdir(), 'whatsoup-selection-authority-'));
+    try {
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8', timeout: 10_000 });
+      git('init', '-q');
+      git('config', 'user.name', 'Test');
+      git('config', 'user.email', 'test@example.invalid');
+      mkdirSync(resolve(root, 'scripts'), { recursive: true });
+      const planner = resolve(root, 'scripts/test-plan.ts');
+      writeFileSync(planner, `import { writeFileSync } from 'node:fs';
+writeFileSync('planner-ran', 'yes');
+console.log(JSON.stringify({ profile: 'docs', reasons: [], changedFiles: ['README.md'], lanes: Object.fromEntries(['root', 'console', 'browser', 'python', 'guard', 'docker', 'compatibility'].map(x => [x, false])) }));
+`);
+      git('add', '.');
+      git('-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'fixture');
+      const base = git('rev-parse', 'HEAD').trim();
+      mkdirSync(dirname(resolve(root, changedPath)), { recursive: true });
+      writeFileSync(resolve(root, changedPath), changedPath === 'scripts/test-plan.ts' ? `${readFileSync(planner, 'utf8')}\n` : 'changed\n');
+      git('add', '.');
+      git('-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'candidate');
+      const workflow = parseYaml(qualityWorkflow);
+      const step = workflow.jobs.selection.steps.find((entry: { id?: string }) => entry.id === 'plan');
+      const output = resolve(root, 'output');
+      const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', step.run], {
+        cwd: root, encoding: 'utf8', timeout: 15_000,
+        env: { ...process.env, PATH: `${dirname(process.execPath)}:${process.env.PATH}`, GITHUB_EVENT_NAME: event, TEST_BASE: base, GITHUB_OUTPUT: output, RUNNER_TEMP: root },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const planLine = readFileSync(output, 'utf8').split('\n').find((line) => line.startsWith('plan='));
+      const plan = JSON.parse(planLine!.slice('plan='.length));
+      expect(plan.profile).toBe(profile);
+      expect(plan.lanes).toEqual(profile === 'full'
+        ? { root: true, console: true, browser: true, python: true, guard: true, docker: true, compatibility: true }
+        : { root: false, console: false, browser: false, python: false, guard: false, docker: false, compatibility: false });
+      expect(existsSync(resolve(root, 'planner-ran'))).toBe(plannerRuns);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('keeps disclosure guards ahead of every reduced PR profile without installing dependencies', () => {
     const selection = qualityWorkflow.slice(qualityWorkflow.indexOf('  selection:'), qualityWorkflow.indexOf('  docs:'));
     expect(selection).toContain("if: github.event_name == 'pull_request' && steps.plan.outputs.profile != 'full'");
@@ -1298,7 +1347,7 @@ describe('quality workflow composition', () => {
     expect(prMetadataWorkflow).toMatch(
       /- name: PR metadata guard\n        if: github\.event_name == 'pull_request'\n        env:\n          PR_METADATA_EVENT: \$\{\{ github\.event_path \}\}\n        run: npm run guard:pr-metadata -- --github-event "\$PR_METADATA_EVENT" --json/,
     );
-    expect(qualityWorkflow).toMatch(/pull_request:\n    types: \[opened, synchronize, reopened\]/);
+    expect(qualityWorkflow).toMatch(/pull_request:\n    types: \[opened, synchronize, reopened, edited\]/);
   });
 
   it('runs one read-only Node 24 semantic shadow step before expensive suites', () => {
