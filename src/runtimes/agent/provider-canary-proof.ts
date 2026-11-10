@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import {
   accessSync,
   chmodSync,
   constants,
+  createReadStream,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -217,7 +218,14 @@ export function sha256File(path: string): string {
 const evidenceCache = new Map<string, ProviderCanaryEvidence>();
 const VERSION_TMP_ROOT = process.platform === 'win32' ? tmpdir() : '/tmp';
 
-function readBinaryVersion(entrypoint: string): string {
+async function sha256FileAsync(path: string): Promise<string> {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
+  return hash.digest('hex');
+}
+
+/** Private HOME/XDG/TMP sandbox and allow-listed env for a `--version` child. */
+function createVersionSandbox(): { root: string; env: NodeJS.ProcessEnv } {
   const root = realpathSync(mkdtempSync(join(VERSION_TMP_ROOT, 'wspv-')));
   chmodSync(root, 0o700);
   const config = join(root, 'config');
@@ -248,17 +256,59 @@ function readBinaryVersion(entrypoint: string): string {
       TEMP: temp,
     }).filter(([, value]) => value !== undefined),
   );
+  return { root, env };
+}
+
+const VERSION_TIMEOUT_MS = 5_000;
+const VERSION_MAX_BYTES = 16 * 1024;
+
+function readBinaryVersion(entrypoint: string): string {
+  const { root, env } = createVersionSandbox();
   try {
     return execFileSync(entrypoint, ['--version'], {
       encoding: 'utf8',
-      timeout: 5_000,
-      maxBuffer: 16 * 1024,
+      timeout: VERSION_TIMEOUT_MS,
+      maxBuffer: VERSION_MAX_BYTES,
       stdio: ['ignore', 'pipe', 'ignore'],
       env,
     }).trim();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+/**
+ * Event-loop-safe twin of readBinaryVersion, with the same sandbox, stdio, output
+ * budget and stdout-only result. The deadline kills the child and destroys its stdout,
+ * so a descendant that inherited the pipe cannot keep the promise pending.
+ */
+function readBinaryVersionAsync(entrypoint: string, timeoutMs: number): Promise<string> {
+  const { root, env } = createVersionSandbox();
+  return new Promise<string>((resolve, reject) => {
+    let settled = false;
+    let output = '';
+    let bytes = 0;
+    const child = spawn(entrypoint, ['--version'], { stdio: ['ignore', 'pipe', 'ignore'], env, windowsHide: true });
+    const finish = (error: Error | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      child.stdout?.destroy();
+      rmSync(root, { recursive: true, force: true });
+      if (error) reject(error);
+      else resolve(output.trim());
+    };
+    const deadline = setTimeout(() => finish(new Error('provider binary version timed out')), timeoutMs);
+    child.stdout?.setEncoding('utf8');
+    child.stdout?.on('data', (chunk: string) => {
+      bytes += Buffer.byteLength(chunk);
+      if (bytes > VERSION_MAX_BYTES) finish(new Error('provider binary version output exceeded its budget'));
+      else output += chunk;
+    });
+    child.once('error', (err) => finish(err));
+    child.once('close', (code) => finish(code === 0 ? null : new Error('provider binary version exited non-zero')));
+  });
 }
 
 // env-allowed: ambient OS PATH contract for executable resolution
@@ -289,12 +339,18 @@ export function resolveProviderBinaryIdentity(
   return { resolvedPath, sha256: sha256File(resolvedPath) };
 }
 
-export function collectProviderCanaryEvidence(
+interface EvidenceTarget {
+  entrypoint: string;
+  proxyPath: string;
+  cacheKey: string;
+}
+
+function evidenceTarget(
   providerId: string,
   binary: string,
   proxyScriptPath: string,
   binaryVersionOverride?: string,
-): ProviderCanaryEvidence {
+): EvidenceTarget {
   const entrypoint = resolveExecutable(binary);
   const proxyPath = realpathSync(proxyScriptPath);
   const binaryStat = statSync(entrypoint);
@@ -313,9 +369,16 @@ export function collectProviderCanaryEvidence(
     proxyStat.mtimeMs,
     binaryVersionOverride ?? '',
   ].join(':');
-  const cached = evidenceCache.get(cacheKey);
-  if (cached) return cached;
-  const version = binaryVersionOverride ?? readBinaryVersion(entrypoint);
+  return { entrypoint, proxyPath, cacheKey };
+}
+
+function cacheEvidence(
+  cacheKey: string,
+  providerId: string,
+  version: string,
+  entrypointDigest: string,
+  proxyDigest: string,
+): ProviderCanaryEvidence {
   if (!version || version.length > 128 || /[/\r\n]/.test(version)) {
     throw new Error('provider binary version is unavailable');
   }
@@ -324,12 +387,44 @@ export function collectProviderCanaryEvidence(
     platform: process.platform,
     architecture: process.arch,
     binaryVersion: version,
-    entrypointDigest: sha256File(entrypoint),
-    proxyDigest: sha256File(proxyPath),
+    entrypointDigest,
+    proxyDigest,
   };
   if (evidenceCache.size >= 16) evidenceCache.clear();
   evidenceCache.set(cacheKey, evidence);
   return evidence;
+}
+
+export function collectProviderCanaryEvidence(
+  providerId: string,
+  binary: string,
+  proxyScriptPath: string,
+  binaryVersionOverride?: string,
+): ProviderCanaryEvidence {
+  const { entrypoint, proxyPath, cacheKey } = evidenceTarget(providerId, binary, proxyScriptPath, binaryVersionOverride);
+  const cached = evidenceCache.get(cacheKey);
+  if (cached) return cached;
+  const version = binaryVersionOverride ?? readBinaryVersion(entrypoint);
+  return cacheEvidence(cacheKey, providerId, version, sha256File(entrypoint), sha256File(proxyPath));
+}
+
+/**
+ * collectProviderCanaryEvidence without blocking the event loop: the `--version` child and
+ * both digests run asynchronously, bounded by `versionTimeoutMs`. It fills the cache the
+ * synchronous admission path reads, so admission sees the same evidence.
+ */
+async function collectProviderCanaryEvidenceAsync(
+  providerId: string,
+  binary: string,
+  proxyScriptPath: string,
+  versionTimeoutMs: number,
+): Promise<ProviderCanaryEvidence> {
+  const { entrypoint, proxyPath, cacheKey } = evidenceTarget(providerId, binary, proxyScriptPath);
+  const cached = evidenceCache.get(cacheKey);
+  if (cached) return cached;
+  const version = await readBinaryVersionAsync(entrypoint, versionTimeoutMs);
+  const [entrypointDigest, proxyDigest] = await Promise.all([sha256FileAsync(entrypoint), sha256FileAsync(proxyPath)]);
+  return cacheEvidence(cacheKey, providerId, version, entrypointDigest, proxyDigest);
 }
 
 /** Parsed receipt, or null when absent. Throws on an unsafe read or invalid JSON. */
@@ -403,13 +498,14 @@ export function readProviderCanaryAdmission(input: {
   };
 }
 
-function providerCanaryReadinessReason(
+async function providerCanaryReadinessReason(
   providerId: string,
   binary: string,
   proxyScriptPath: string,
   stateRoot: string,
   nowMs: number | undefined,
-): ProviderCanaryReadinessReason {
+  versionTimeoutMs: number,
+): Promise<ProviderCanaryReadinessReason> {
   let receipt: unknown;
   try {
     receipt = readProviderCanaryReceipt(stateRoot, providerId);
@@ -421,9 +517,9 @@ function providerCanaryReadinessReason(
   if (receipt === null) return 'missing';
   let evidence: ProviderCanaryEvidence;
   try {
-    evidence = collectProviderCanaryEvidence(providerId, binary, proxyScriptPath);
+    evidence = await collectProviderCanaryEvidenceAsync(providerId, binary, proxyScriptPath, versionTimeoutMs);
   } catch {
-    // intentional: admission refuses an unresolvable binary or version; report it as its own class.
+    // intentional: admission refuses an unresolvable, hung or failing binary version; report it as its own class.
     return 'unavailable';
   }
   return validateProviderCanaryReceipt(receipt, evidence, nowMs).reason;
@@ -439,8 +535,12 @@ function providerCanaryReadinessReason(
  * admission requires no proof there. Providers outside the gated mode (API
  * providers, non-`per_chat` scopes, sandbox-per-chat) are skipped. A receipt
  * that cannot be read safely or parsed reports `malformed`.
+ *
+ * Runs on the health tick, so it never blocks the event loop: each `--version`
+ * child is asynchronous and bounded by `versionTimeoutMs` (default 5 s, the
+ * admission bound); a hung or slow binary reports `unavailable`.
  */
-export function inspectProviderCanaryReadiness(input: {
+export async function inspectProviderCanaryReadiness(input: {
   providerIds: readonly string[];
   resolveBinary: (providerId: string) => string | null;
   proxyScriptPath: string;
@@ -448,14 +548,16 @@ export function inspectProviderCanaryReadiness(input: {
   sessionScope: string;
   sandboxPerChat: boolean;
   nowMs?: number;
-}): ProviderCanaryReadinessEntry[] {
+  versionTimeoutMs?: number;
+}): Promise<ProviderCanaryReadinessEntry[]> {
   const required = [...new Set(input.providerIds)].filter((providerId) => providerCanaryRequired(
     providerId,
     input.sessionScope,
     input.sandboxPerChat,
   ));
   if (required.length === 0 || !canaryStoreProvisioned(input.stateRoot)) return [];
-  return required.map((providerId): ProviderCanaryReadinessEntry => {
+  const versionTimeoutMs = input.versionTimeoutMs ?? VERSION_TIMEOUT_MS;
+  return Promise.all(required.map(async (providerId): Promise<ProviderCanaryReadinessEntry> => {
     let binary: string;
     try {
       binary = input.resolveBinary(providerId) ?? '';
@@ -465,13 +567,14 @@ export function inspectProviderCanaryReadiness(input: {
     }
     return {
       providerId,
-      reason: providerCanaryReadinessReason(
+      reason: await providerCanaryReadinessReason(
         providerId,
         binary,
         input.proxyScriptPath,
         input.stateRoot,
         input.nowMs,
+        versionTimeoutMs,
       ),
     };
-  });
+  }));
 }

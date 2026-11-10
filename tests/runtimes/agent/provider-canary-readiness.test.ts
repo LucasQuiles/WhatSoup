@@ -110,7 +110,7 @@ function fixture(): Fixture {
   return { stateRoot, proxy, binaries };
 }
 
-function inspect(f: Fixture, providerIds: readonly string[]) {
+function inspect(f: Fixture, providerIds: readonly string[], versionTimeoutMs?: number) {
   return inspectProviderCanaryReadiness({
     providerIds,
     resolveBinary: (providerId) => f.binaries[providerId] ?? null,
@@ -118,7 +118,24 @@ function inspect(f: Fixture, providerIds: readonly string[]) {
     stateRoot: f.stateRoot,
     sessionScope: 'per_chat',
     sandboxPerChat: false,
+    ...(versionTimeoutMs === undefined ? {} : { versionTimeoutMs }),
   });
+}
+
+/**
+ * A real executable whose `--version` waits `seconds` before printing. The wait runs in a
+ * child `sleep` that inherits stdout, so killing the shell alone leaves the pipe open.
+ */
+function writeSlowProvider(path: string, version: string, seconds: number): void {
+  writeFileSync(path, ['#!/bin/sh', `sleep ${seconds}`, `printf '%s\\n' '${version}'`, ''].join('\n'));
+  chmodSync(path, 0o700);
+}
+
+/** Counts a 10 ms interval's ticks: a blocked event loop leaves the count near zero. */
+function tickCounter(): { ticks: () => number; stop: () => void } {
+  let ticks = 0;
+  const timer = setInterval(() => { ticks += 1; }, 10);
+  return { ticks: () => ticks, stop: () => clearInterval(timer) };
 }
 
 function admit(f: Fixture, providerId: string) {
@@ -140,12 +157,12 @@ function prove(f: Fixture, providerId: string): void {
 }
 
 describe('inspectProviderCanaryReadiness', () => {
-  it('reports a missing primary receipt beside a proven fallback while admission still refuses the primary', () => {
+  it('reports a missing primary receipt beside a proven fallback while admission still refuses the primary', async () => {
     const f = fixture();
     provisionStore(f.stateRoot);
     prove(f, 'claude-cli');
 
-    expect(inspect(f, ['codex-cli', 'claude-cli'])).toEqual([
+    expect(await inspect(f, ['codex-cli', 'claude-cli'])).toEqual([
       { providerId: 'codex-cli', reason: 'missing' },
       { providerId: 'claude-cli', reason: 'proven' },
     ]);
@@ -154,35 +171,35 @@ describe('inspectProviderCanaryReadiness', () => {
     expect(admit(f, 'claude-cli')).toMatchObject({ allowed: true, required: true });
   });
 
-  it('reports stale after the provider binary reports a new version, and admission refuses it', () => {
+  it('reports stale after the provider binary reports a new version, and admission refuses it', async () => {
     const f = fixture();
     provisionStore(f.stateRoot);
     prove(f, 'codex-cli');
-    expect(inspect(f, ['codex-cli'])).toEqual([{ providerId: 'codex-cli', reason: 'proven' }]);
+    expect(await inspect(f, ['codex-cli'])).toEqual([{ providerId: 'codex-cli', reason: 'proven' }]);
     expect(admit(f, 'codex-cli')).toMatchObject({ allowed: true, required: true });
 
     // An upgrade in place. The new version string has a different length, so
     // the binary's size changes and the stat-keyed evidence cache misses.
     writeFakeProvider(f.binaries['codex-cli'], 'codex 1.19.15');
 
-    expect(inspect(f, ['codex-cli'])).toEqual([{ providerId: 'codex-cli', reason: 'stale' }]);
+    expect(await inspect(f, ['codex-cli'])).toEqual([{ providerId: 'codex-cli', reason: 'stale' }]);
     expect(admit(f, 'codex-cli')).toMatchObject({ allowed: false, required: true });
   });
 
-  it('reports nothing when the receipt store is not provisioned, matching not-required admission', () => {
+  it('reports nothing when the receipt store is not provisioned, matching not-required admission', async () => {
     const f = fixture();
 
-    expect(inspect(f, ['codex-cli', 'claude-cli'])).toEqual([]);
+    expect(await inspect(f, ['codex-cli', 'claude-cli'])).toEqual([]);
     expect(admit(f, 'codex-cli')).toMatchObject({ allowed: true, required: false });
   });
 
-  it('reports every gated provider proven when all receipts match, once each, skipping ungated providers', () => {
+  it('reports every gated provider proven when all receipts match, once each, skipping ungated providers', async () => {
     const f = fixture();
     provisionStore(f.stateRoot);
     prove(f, 'codex-cli');
     prove(f, 'claude-cli');
 
-    const entries = inspect(f, ['codex-cli', 'openai-api', 'claude-cli', 'codex-cli']);
+    const entries = await inspect(f, ['codex-cli', 'openai-api', 'claude-cli', 'codex-cli']);
     expect(entries).toEqual([
       { providerId: 'codex-cli', reason: 'proven' },
       { providerId: 'claude-cli', reason: 'proven' },
@@ -190,7 +207,7 @@ describe('inspectProviderCanaryReadiness', () => {
     expect(entries.filter((entry) => entry.reason !== 'proven')).toEqual([]);
   });
 
-  it('classifies an unresolvable binary as unavailable and an unparsable receipt as malformed', () => {
+  it('classifies an unresolvable binary as unavailable and an unparsable receipt as malformed', async () => {
     const f = fixture();
     provisionStore(f.stateRoot);
     prove(f, 'codex-cli');
@@ -199,19 +216,69 @@ describe('inspectProviderCanaryReadiness', () => {
     chmodSync(receiptPath, 0o600);
     rmSync(f.binaries['codex-cli']);
 
-    expect(inspect(f, ['codex-cli', 'claude-cli'])).toEqual([
+    expect(await inspect(f, ['codex-cli', 'claude-cli'])).toEqual([
       { providerId: 'codex-cli', reason: 'unavailable' },
       { providerId: 'claude-cli', reason: 'malformed' },
     ]);
     expect(admit(f, 'codex-cli')).toMatchObject({ allowed: false, required: true });
     expect(admit(f, 'claude-cli')).toMatchObject({ allowed: false, required: true });
   });
+
+  it('keeps timers running while a provider --version hangs, then reports unavailable at the deadline', async () => {
+    const f = fixture();
+    provisionStore(f.stateRoot);
+    // A receipt is present, so the version child must run; nothing has cached this binary.
+    writeReceipt(f.stateRoot, {
+      providerId: 'codex-cli',
+      platform: process.platform,
+      architecture: process.arch,
+      binaryVersion: 'codex 1.19.3',
+      entrypointDigest: 'a'.repeat(64),
+      proxyDigest: 'b'.repeat(64),
+    });
+    writeSlowProvider(f.binaries['codex-cli'], 'codex 1.19.3', 30);
+    const counter = tickCounter();
+    const started = Date.now();
+    try {
+      const entries = await inspect(f, ['codex-cli'], 400);
+      const elapsed = Date.now() - started;
+      expect(entries).toEqual([{ providerId: 'codex-cli', reason: 'unavailable' }]);
+      // Bounded by the deadline even though the sleeping descendant still holds stdout.
+      expect(elapsed).toBeGreaterThanOrEqual(350);
+      expect(elapsed).toBeLessThan(3_000);
+      // About 40 ticks fit in 400 ms; a synchronous wait would allow none.
+      expect(counter.ticks()).toBeGreaterThanOrEqual(15);
+    } finally {
+      counter.stop();
+    }
+    // Detection never relaxes admission.
+    expect(admit(f, 'codex-cli')).toMatchObject({ allowed: false, required: true });
+  });
+
+  it('proves a slow but answering provider within the deadline without blocking timers', async () => {
+    const f = fixture();
+    provisionStore(f.stateRoot);
+    writeSlowProvider(f.binaries['codex-cli'], 'codex 1.19.3', 0.5);
+    // The override fills a different cache key, so readiness must run the slow child itself.
+    writeReceipt(
+      f.stateRoot,
+      collectProviderCanaryEvidence('codex-cli', f.binaries['codex-cli'] ?? '', f.proxy, 'codex 1.19.3'),
+    );
+    const counter = tickCounter();
+    try {
+      expect(await inspect(f, ['codex-cli'], 5_000)).toEqual([{ providerId: 'codex-cli', reason: 'proven' }]);
+      expect(counter.ticks()).toBeGreaterThanOrEqual(20);
+    } finally {
+      counter.stop();
+    }
+    expect(admit(f, 'codex-cli')).toMatchObject({ allowed: true, required: true });
+  });
 });
 
 interface CanaryRuntimeState {
   agentProvider: string;
   agentFallbacks: Array<{ provider: string; model?: string }>;
-  refreshProviderCanaryReadiness(): void;
+  refreshProviderCanaryReadiness(): Promise<void>;
 }
 
 describe('AgentRuntime health — provider canary readiness', () => {
@@ -238,7 +305,7 @@ describe('AgentRuntime health — provider canary readiness', () => {
     rmSync(store, { recursive: true, force: true });
   });
 
-  it('names the unproven fallback by id and class only, and clears once its receipt is proven', () => {
+  it('names the unproven fallback by id and class only, and clears once its receipt is proven', async () => {
     const runtime = new AgentRuntime(db, makeMessenger().messenger, 'canary-readiness', {
       sessionScope: 'per_chat',
     });
@@ -248,7 +315,7 @@ describe('AgentRuntime health — provider canary readiness', () => {
     const proxy = providerMcpProxyScriptPath();
     writeReceipt(config.stateRoot, collectProviderCanaryEvidence('claude-cli', 'claude', proxy));
 
-    state.refreshProviderCanaryReadiness();
+    await state.refreshProviderCanaryReadiness();
     const degraded = runtime.getHealthSnapshot();
     const degradedDetails = degraded.details as Record<string, unknown>;
     expect(degraded.status).toBe('degraded');
@@ -264,9 +331,47 @@ describe('AgentRuntime health — provider canary readiness', () => {
     expect(surfaced).not.toContain('1.19.3');
 
     writeReceipt(config.stateRoot, collectProviderCanaryEvidence('codex-cli', 'codex', proxy));
-    state.refreshProviderCanaryReadiness();
+    await state.refreshProviderCanaryReadiness();
     const repairedDetails = runtime.getHealthSnapshot().details as Record<string, unknown>;
     expect(repairedDetails['degradedReasons']).not.toContain('provider_canary_unproven');
     expect(repairedDetails['providerCanaryUnproven']).toEqual([]);
   });
+
+  it('answers health and runs timers while a slow fallback --version is probed, with one probe in flight', async () => {
+    const runtime = new AgentRuntime(db, makeMessenger().messenger, 'canary-readiness-slow', {
+      sessionScope: 'per_chat',
+    });
+    const state = runtime as unknown as CanaryRuntimeState;
+    state.agentProvider = 'claude-cli';
+    state.agentFallbacks = [{ provider: 'codex-cli', model: 'gpt-5.1-codex' }];
+    const proxy = providerMcpProxyScriptPath();
+    writeReceipt(config.stateRoot, collectProviderCanaryEvidence('claude-cli', 'claude', proxy));
+    writeReceipt(config.stateRoot, collectProviderCanaryEvidence('codex-cli', 'codex', proxy));
+    // Upgrade in place to a binary that takes 1 s to answer with a new version.
+    writeSlowProvider(join(bin, 'codex'), 'codex 1.19.15', 1);
+
+    const counter = tickCounter();
+    const called = Date.now();
+    const first = state.refreshProviderCanaryReadiness();
+    try {
+      // A synchronous version read would hold this call for the full second.
+      expect(Date.now() - called).toBeLessThan(200);
+      // Single flight: another tick while the probe runs joins it instead of spawning again.
+      expect(state.refreshProviderCanaryReadiness()).toBe(first);
+      // Health answers during the probe from the last completed result.
+      const during = runtime.getHealthSnapshot().details as Record<string, unknown>;
+      expect(during['providerCanaryUnproven']).toEqual([]);
+      await first;
+      expect(counter.ticks()).toBeGreaterThanOrEqual(40);
+    } finally {
+      counter.stop();
+    }
+    const details = runtime.getHealthSnapshot().details as Record<string, unknown>;
+    expect(details['degradedReasons']).toContain('provider_canary_unproven');
+    expect(details['providerCanaryUnproven']).toEqual([{ providerId: 'codex-cli', reason: 'stale' }]);
+    // The flight is released: the next tick starts a fresh probe.
+    const next = state.refreshProviderCanaryReadiness();
+    expect(next).not.toBe(first);
+    await next;
+  }, 15_000);
 });

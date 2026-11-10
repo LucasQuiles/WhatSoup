@@ -681,6 +681,8 @@ export class AgentRuntime implements Runtime {
   private healthStatsTimer: ReturnType<typeof setInterval> | null = null;
   // #3832: gated providers admission would refuse; refreshed at start and per health-stats tick.
   private providerCanaryUnproven: readonly ProviderCanaryReadinessEntry[] = [];
+  // Single flight: a slow or hung provider `--version` never stacks probes across ticks.
+  private providerCanaryRefresh: Promise<void> | null = null;
   private proactiveResumeIdentityRejects = 0;
   // C5 restart-loop guard: true when this boot follows an unclean exit
   // (captured at the top of start()); consumed by the startup resume gate.
@@ -1545,7 +1547,7 @@ export class AgentRuntime implements Runtime {
   private startHealthStatsTimer(): void {
     if (this.healthStatsTimer) return;
     this.healthStatsTimer = setInterval(() => {
-      this.refreshProviderCanaryReadiness();
+      void this.refreshProviderCanaryReadiness();
       try {
         this.logHealthStats();
       } catch (err) {
@@ -1555,17 +1557,27 @@ export class AgentRuntime implements Runtime {
     this.healthStatsTimer.unref?.();
   }
 
-  /** #3832 detection only: checks primary and fallback receipts with admission's inputs; writes none. */
-  private refreshProviderCanaryReadiness(): void {
-    try {
-      this.providerCanaryUnproven = inspectProviderCanaryReadiness({
-        providerIds: [this.agentProvider, ...this.agentFallbacks.map((entry) => entry.provider)],
-        resolveBinary: (id) => getProviderBinary(id), proxyScriptPath: providerMcpProxyScriptPath(), stateRoot: config.stateRoot,
-        sessionScope: this.sessionScope, sandboxPerChat: this.sandboxPerChat,
-      }).filter((entry) => entry.reason !== 'proven');
-    } catch (err) {
+  /**
+   * #3832 detection only: checks primary and fallback receipts with admission's inputs; writes none.
+   * Asynchronous and single-flight so the health tick and its timers stay responsive while a
+   * provider's `--version` is slow or hung. Returns the in-flight refresh.
+   */
+  private refreshProviderCanaryReadiness(): Promise<void> {
+    if (this.providerCanaryRefresh) return this.providerCanaryRefresh;
+    // Inputs are built inside the chain so a throw while building them is logged, not raised to the timer.
+    const refresh = Promise.resolve().then(() => inspectProviderCanaryReadiness({
+      providerIds: [this.agentProvider, ...this.agentFallbacks.map((entry) => entry.provider)],
+      resolveBinary: (id) => getProviderBinary(id), proxyScriptPath: providerMcpProxyScriptPath(), stateRoot: config.stateRoot,
+      sessionScope: this.sessionScope, sandboxPerChat: this.sandboxPerChat,
+    })).then((entries) => {
+      this.providerCanaryUnproven = entries.filter((entry) => entry.reason !== 'proven');
+    }, (err: unknown) => {
       log.warn({ err, instanceName: this.instanceName }, 'provider canary readiness inspection failed');
-    }
+    }).finally(() => {
+      if (this.providerCanaryRefresh === refresh) this.providerCanaryRefresh = null;
+    });
+    this.providerCanaryRefresh = refresh;
+    return refresh;
   }
 
   private startQueueSweepTimer(): void {
@@ -4581,7 +4593,7 @@ export class AgentRuntime implements Runtime {
     this.capturePrimaryProbeServiceContext();
     this.fallback.schedulePrimaryModelUsabilityProbe('startup');
     this.fallback.scheduleNextPeriodicUsabilityProbe();
-    this.refreshProviderCanaryReadiness();
+    void this.refreshProviderCanaryReadiness();
     this.startHealthStatsTimer();
     this.workspaceSweeper.start();
     this.startQueueSweepTimer();
