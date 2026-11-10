@@ -626,6 +626,37 @@ export function registerAttemptCases(): void {
     }
   }, 10_000);
 
+  it('names the probe result in the first line of the rethrown error stack, even when the stack was already formatted', async () => {
+    const api = boundaryRun as unknown as WatchdogSeamApi;
+    expect(typeof api.runBoundaryWatchdogForTest).toBe('function');
+    if (!api.runBoundaryWatchdogForTest) return;
+    const targets: number[] = [];
+    const stacksBeforeRethrow: string[] = [];
+    const run = api.runBoundaryWatchdogForTest([...LONG_LIVED_CHILD], {
+      ...SEAM_BOUNDS,
+      kill: (target) => {
+        targets.push(target);
+        const error = groupKillError('EPERM');
+        // Reading the stack formats it now, with the original message, as any earlier reader would.
+        stacksBeforeRethrow.push(String(error.stack));
+        throw error;
+      },
+      probeGroup: () => 'unknown',
+    });
+    try {
+      const error = await run.then(() => undefined, (caught: unknown) => caught);
+      expect(error).toBeInstanceOf(Error);
+      expect(stacksBeforeRethrow).toHaveLength(1);
+      expect(stacksBeforeRethrow[0]!.split('\n')[0]).toBe('Error: kill EPERM');
+      // An uncaught rejection prints the stack, so its first line must carry the probe result too.
+      const stackLines = String((error as Error).stack).split('\n');
+      expect(stackLines[0]).toBe('Error: kill EPERM; group membership probe: unknown');
+      expect(stackLines.slice(1)).toEqual(stacksBeforeRethrow[0]!.split('\n').slice(1)); // the frames are kept
+    } finally {
+      reapFixtureGroups(targets);
+    }
+  }, 10_000);
+
   it('raises a group-kill error other than EPERM without consulting the membership probe', async () => {
     const api = boundaryRun as unknown as WatchdogSeamApi;
     expect(typeof api.runBoundaryWatchdogForTest).toBe('function');

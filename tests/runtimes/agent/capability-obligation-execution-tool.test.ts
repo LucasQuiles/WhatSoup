@@ -120,13 +120,24 @@ vi.mock('../../../src/logger.ts', async (importOriginal) => {
   };
 });
 
-/** The shape runResolver consumes: pid, stdout/stderr 'data', 'error'/'close'. */
+/** A child stream: 'data' events, and the no-op `destroy()` the reap grace calls. */
+class FakeStream extends EventEmitter {
+  destroy(): this {
+    return this;
+  }
+}
+
+/**
+ * The shape runResolver consumes: pid, stdout/stderr 'data', 'error'/'close', and the no-op
+ * `unref()` the reap grace calls, so a close that arrives after the grace cannot throw in its timer.
+ */
 class FakeChild extends EventEmitter {
-  readonly stdout = new EventEmitter();
-  readonly stderr = new EventEmitter();
+  readonly stdout = new FakeStream();
+  readonly stderr = new FakeStream();
   constructor(readonly pid: number | undefined) {
     super();
   }
+  unref(): void { /* no handle holds the event loop */ }
 }
 
 /**
@@ -1139,8 +1150,10 @@ describe('resolver process-group reap (issue 3568)', () => {
     const kill = interceptResolverGroupKill(killLeaderOnceThenEperm([]));
     const before = new Set(listResolverStages());
     const start = Date.now();
+    const run = runToolOnce(execution);
     try {
-      const { id, result } = await runToolOnce(execution);
+      // A run that never settles fails here, below the test timeout, so the teardown below still runs.
+      const { id, result } = await settleWithin(run, 19_000, 'the run did not settle within 19 s: the reap grace never settled it');
       const elapsed = Date.now() - start;
       expect(existsSync(pidFile)).toBe(true); // the grandchild existed before the watchdog fired
       const rows = receiptRows(id);
@@ -1151,20 +1164,26 @@ describe('resolver process-group reap (issue 3568)', () => {
       expect(evidence['reason']).toBe('resolver_close_not_observed');
       expect(evidence['timedOut']).toBe(true);
       expect(result['error']).toBe('capability_execution_failed');
-      expect(elapsed).toBeLessThan(11_000); // the grace settled it; the grandchild never released stdout
+      expect(elapsed).toBeLessThan(18_000); // the grace settled it; the grandchild never released stdout
       expect(listResolverStages().filter((n) => !before.has(n))).toEqual([]); // the stage dir was removed
-      // Grace expiry closes everything it owns: one more group kill, and the child's pipes destroyed.
-      expect(kill.targets).toHaveLength(2);
+      // Grace expiry destroys the child's pipes and does not signal the group again: the failed
+      // first kill is the only one.
+      expect(kill.targets).toHaveLength(1);
       expect(detachedSpawns).toHaveLength(1);
       expect(detachedSpawns[0]!.stdout?.destroyed).toBe(true);
       expect(detachedSpawns[0]!.stderr?.destroyed).toBe(true);
       expect(String(result['message'])).toMatch(/reapError=group kill failed: EPERM; group membership probe: live/);
       expectOneReapWarning(id, /EPERM; group membership probe: live/);
     } finally {
+      // Runs whether or not the run settled. Restore the spy first: while it is active, a kill of
+      // the resolver group goes to the seam, which no longer signals anything.
       kill.restore();
       reapFixtureGroups(kill.targets); // the grandchild is still alive, so its group id is still allocated
       const gcPid = readFixturePid(pidFile);
-      if (gcPid !== undefined) expect(await waitForPidGone(gcPid)).toBe(true);
+      const gone = gcPid === undefined ? true : await waitForPidGone(gcPid);
+      // A run still pending here settles once the grandchild is gone; let it finish before the DB closes.
+      await settleWithin(run, 2_000, 'the run did not settle after teardown').catch(() => undefined);
+      expect(gone).toBe(true);
     }
   }, 25_000);
 
@@ -1177,11 +1196,13 @@ describe('resolver process-group reap (issue 3568)', () => {
       grandchildResolverSource(pidFile, { holdStdio: true, setsid: true, block: true }),
       3_000,
     );
+    // Records each group kill and still delivers it, so the real kill succeeds.
+    const kill = interceptResolverGroupKill((target, signal) => { process.kill(target, signal); });
     const before = new Set(listResolverStages());
     const run = runToolOnce(execution);
     try {
       // 3 s watchdog + 5 s grace: a run that never arms the grace hangs, and this bound fails it.
-      const { id, result } = await settleWithin(run, 12_000, 'the run did not settle within 12 s: no reap grace after a successful watchdog kill');
+      const { id, result } = await settleWithin(run, 18_000, 'the run did not settle within 18 s: no reap grace after a successful watchdog kill');
       expect(existsSync(pidFile)).toBe(true); // the descendant existed before the watchdog fired
       const rows = receiptRows(id);
       expect(rows).toHaveLength(1);
@@ -1192,7 +1213,11 @@ describe('resolver process-group reap (issue 3568)', () => {
       expect(evidence['reapError']).toBeUndefined(); // the group kill itself succeeded
       expect(result['error']).toBe('capability_execution_failed');
       expect(listResolverStages().filter((n) => !before.has(n))).toEqual([]); // the stage dir was removed
+      // Exactly one group kill, the watchdog's: grace expiry never signals the group again.
+      expect(kill.targets).toEqual([-detachedSpawnPids[0]!]);
     } finally {
+      // Runs whether or not the run settled.
+      kill.restore();
       const gcPid = readFixturePid(pidFile);
       // The descendant is alive and leads its own group, so that group id is still allocated.
       if (gcPid !== undefined) reapFixtureGroups([-gcPid]);
@@ -1230,6 +1255,48 @@ describe('resolver process-group reap (issue 3568)', () => {
       expect(rows).toHaveLength(1);
       expect(evidenceOf(rows[0]!)['reason']).toBe('resolver_spawn_failed');
       expect(kill.targets).toEqual([-fakePid]);
+    } finally {
+      kill.restore();
+    }
+  }, 20_000);
+
+  it('a failed error-path sweep keeps its reapError: on the rejected error, in the reap warning and in the receipt', async () => {
+    // A pid far outside any live pgid range: the spy answers the sweep with EINVAL, so nothing real
+    // is signalled and the membership probe is never asked.
+    const fakePid = 2 ** 30;
+    const kill = interceptResolverGroupKill(throwOnly('EINVAL', []));
+    const id = seedObligation();
+    freshAttestation();
+    let result: Record<string, unknown> = {};
+    const { runtime } = makeRuntime({
+      onDispatch: async (tool) => {
+        spawnOverride = () => {
+          const child = new FakeChild(fakePid);
+          detachedSpawnPids.push(fakePid); // the override bypasses the mock's recording
+          setImmediate(() => child.emit('error', Object.assign(new Error('spawn EACCES'), { code: 'EACCES' })));
+          return child;
+        };
+        result = (await tool.handler({ source: SOURCE_URL }, TOOL_SESSION)) as Record<string, unknown>;
+        spawnOverride = null;
+      },
+    });
+    try {
+      await runtime.tickOnce();
+      expect(result['error']).toBe('capability_execution');
+      expect(String(result['message'])).toContain('Capability resolver could not be started');
+      expect(kill.targets).toEqual([-fakePid]);
+      const rows = receiptRows(id);
+      expect(rows).toHaveLength(1);
+      const evidence = evidenceOf(rows[0]!);
+      expect(evidence['reason']).toBe('resolver_spawn_failed');
+      // The rejected error carries the sweep's reapError to the call site.
+      const spawnFailedWarns = executionToolWarns.filter(([, message]) => message === 'capability resolver spawn failed');
+      expect(spawnFailedWarns).toHaveLength(1);
+      const [spawnFailedFields] = spawnFailedWarns[0]!;
+      expect(String((spawnFailedFields as { err?: { reapError?: unknown } }).err?.reapError)).toMatch(/group kill failed: EINVAL/);
+      // The call site names the group in the reap warning, and the receipt records it.
+      expectOneReapWarning(id, /group kill failed: EINVAL/);
+      expect(String(evidence['reapError'])).toMatch(/group kill failed: EINVAL/);
     } finally {
       kill.restore();
     }

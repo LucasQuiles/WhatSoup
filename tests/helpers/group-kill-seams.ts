@@ -5,6 +5,7 @@
  * is not yet reaped. A real EPERM cannot be arranged in-process, so tests inject the group kill.
  * Every helper here signals only a negative group id below -1, never 0 or -1.
  */
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
 import type { GroupMembership } from '../../src/lib/process-group-membership.ts';
@@ -95,7 +96,8 @@ export function grandchildResolverSource(
     `const gc=cp.spawn(process.execPath,["-e",${JSON.stringify(hold)}],${options});`,
     `fs.writeFileSync(${JSON.stringify(pidFile)},String(gc.pid));gc.unref();`,
     'process.stdout.write("processed "+process.argv[2]+" with a grandchild\\n");',
-    shape.block ? 'setInterval(function(){},1000);' : '',
+    // The block ends at the leak net too, so a resolver whose watchdog never fires cannot live forever.
+    shape.block ? `setTimeout(function(){},${FIXTURE_LEAK_NET_MS});` : '',
   ].join('');
 }
 
@@ -110,10 +112,23 @@ export function readFixturePid(pidFile: string): number | undefined {
 }
 
 /**
+ * True when `ps` reports `pid` as a zombie. A killed fixture grandchild is an orphan that only
+ * PID 1 reaps; where PID 1 does not reap orphans (some CI containers), it stays a zombie, and
+ * kill(pid, 0) still succeeds on Linux.
+ */
+function isZombie(pid: number): boolean {
+  // Its own short bound, so one hung `ps` cannot stretch a teardown much past waitForPidGone's bound.
+  const listing = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8', timeout: 1_000 });
+  // macOS appends flag characters to the state letter, so only the first character counts.
+  return listing.status === 0 && typeof listing.stdout === 'string' && listing.stdout.trim().startsWith('Z');
+}
+
+/**
  * Structured timing exemption (test-integrity `js-sleep-in-test`): a fixture process killed in
  * teardown exits on the kernel's schedule, and only polling kill(pid, 0) observes that. The poll
- * has its own bound, so a teardown never waits on the test timeout. Any answer but ESRCH, EPERM
- * included, means the pid is still present.
+ * has its own bound, so a teardown never waits on the test timeout. ESRCH, or a `Z` state from
+ * `ps`, means the pid is gone: a zombie runs nothing. Any other answer, EPERM included, means the
+ * pid is still present.
  */
 export async function waitForPidGone(pid: number, boundMs = 1_000): Promise<boolean> {
   const deadline = Date.now() + boundMs;
@@ -123,6 +138,7 @@ export async function waitForPidGone(pid: number, boundMs = 1_000): Promise<bool
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ESRCH') return true;
     }
+    if (isZombie(pid)) return true;
     if (Date.now() >= deadline) return false;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }

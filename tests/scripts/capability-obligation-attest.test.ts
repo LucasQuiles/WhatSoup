@@ -378,8 +378,8 @@ describe('runResolverCanary (bounded, non-sending resolver probe)', () => {
       expect(detail?.['reason']).toBe('resolver_close_not_observed');
       expect(elapsed).toBeLessThan(10_000); // the grace settled it, not a close at the grandchild's 15 s release
       expect(listResolverStages().filter((n) => !before.has(n))).toEqual([]); // cleanup ran on the grace path
-      // Grace expiry kills the group once more before it settles.
-      expect(targets).toHaveLength(2);
+      // Grace expiry does not signal the group again: the failed first kill is the only one.
+      expect(targets).toHaveLength(1);
     } finally {
       reapFixtureGroups(targets); // the grandchild is still alive, so its group id is still allocated
     }
@@ -392,9 +392,12 @@ describe('runResolverCanary (bounded, non-sending resolver probe)', () => {
     // tracked dir OUTSIDE the resolver dir, whose manifest the digest binds.
     const pidFile = join(tmp.make('canary-setsid-pid'), 'grandchild.pid');
     const before = new Set(listResolverStages());
+    const targets: number[] = [];
     const run = canaryWithSeams({
       ...canaryInput(dir, grandchildResolverSource(pidFile, { holdStdio: true, setsid: true, block: true }), { name: 'parent.cjs', timeoutMs: 3_000, minOutputBytes: 1 }),
       probeSource: 'https://probe.example/clip', nonce: 'setsid-holder',
+      // Records each group kill and still delivers it, so the real kill succeeds.
+      kill: (target, signal) => { targets.push(target); process.kill(target, signal); },
       reapGraceMs: 400,
     });
     try {
@@ -406,6 +409,8 @@ describe('runResolverCanary (bounded, non-sending resolver probe)', () => {
       expect(detail?.['reason']).toBe('resolver_close_not_observed');
       expect(detail?.['reapError']).toBeUndefined(); // the group kill itself succeeded
       expect(listResolverStages().filter((n) => !before.has(n))).toEqual([]); // cleanup ran on the grace path
+      // Exactly one group kill, the watchdog's: grace expiry never signals the group again.
+      expect(targets).toHaveLength(1);
     } finally {
       const gcPid = readFixturePid(pidFile);
       // The descendant is alive and leads its own group, so that group id is still allocated.
