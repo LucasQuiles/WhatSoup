@@ -1,9 +1,12 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   COMMAND_REGISTRY,
+  commandGateDenies,
   getCommandSpec,
+  type CommandGate,
   type CommandSpec,
 } from '../../../src/runtimes/agent/command-registry.ts';
+import type { SessionScope } from '../../../src/runtimes/agent/runtime-options.ts';
 
 describe('COMMAND_REGISTRY', () => {
   it('has a unique name per entry', () => {
@@ -117,5 +120,56 @@ describe('COMMAND_REGISTRY', () => {
 
   it('getCommandSpec throws on an unknown command (fail-closed lookup)', () => {
     expect(() => getCommandSpec('nope' as never)).toThrow();
+  });
+});
+
+// The one authority rule. The runtime command gate enforces it, and the queued
+// receipt asks it before offering /stop, so the two cannot disagree. The
+// runtime-level pins are command-gate-contract.test.ts group 1 (the gate) and
+// queued-turn-receipt-runtime.test.ts (the receipt against the gate). Here:
+// the rule itself, and that the admin lookup (a DB read) runs only when the
+// answer depends on it.
+describe('commandGateDenies: the one authority rule for the command gate and the queued receipt', () => {
+  type Row = {
+    title: string;
+    gate: CommandGate;
+    scope: SessionScope;
+    isGroup: boolean;
+    adminCount: number;
+    isAdmin: boolean;
+    denies: boolean;
+    looksUpAdmin: boolean;
+  };
+
+  const rows: Row[] = [
+    { title: 'none: single DM, admins configured, non-admin → allow, no lookup', gate: 'none', scope: 'single', isGroup: false, adminCount: 1, isAdmin: false, denies: false, looksUpAdmin: false },
+    { title: 'none: per_chat group, admins configured, non-admin → allow, no lookup', gate: 'none', scope: 'per_chat', isGroup: true, adminCount: 1, isAdmin: false, denies: false, looksUpAdmin: false },
+    { title: 'admin: per_chat DM, admins configured, admin → allow', gate: 'admin', scope: 'per_chat', isGroup: false, adminCount: 1, isAdmin: true, denies: false, looksUpAdmin: true },
+    { title: 'admin: per_chat DM, admins configured, non-admin → deny', gate: 'admin', scope: 'per_chat', isGroup: false, adminCount: 1, isAdmin: false, denies: true, looksUpAdmin: true },
+    { title: 'admin: single DM, no admin configured → deny (no empty-set exemption for admin)', gate: 'admin', scope: 'single', isGroup: false, adminCount: 0, isAdmin: false, denies: true, looksUpAdmin: true },
+    { title: 'admin-shared-scope: per_chat DM, admins configured, non-admin → allow, no lookup', gate: 'admin-shared-scope', scope: 'per_chat', isGroup: false, adminCount: 1, isAdmin: false, denies: false, looksUpAdmin: false },
+    { title: 'admin-shared-scope: per_chat DM, no admin configured → allow, no lookup', gate: 'admin-shared-scope', scope: 'per_chat', isGroup: false, adminCount: 0, isAdmin: false, denies: false, looksUpAdmin: false },
+    { title: 'admin-shared-scope: per_chat group, admins configured, non-admin → deny', gate: 'admin-shared-scope', scope: 'per_chat', isGroup: true, adminCount: 1, isAdmin: false, denies: true, looksUpAdmin: true },
+    { title: 'admin-shared-scope: per_chat group, admins configured, admin → allow', gate: 'admin-shared-scope', scope: 'per_chat', isGroup: true, adminCount: 2, isAdmin: true, denies: false, looksUpAdmin: true },
+    { title: 'admin-shared-scope: per_chat group, no admin configured → allow, no lookup', gate: 'admin-shared-scope', scope: 'per_chat', isGroup: true, adminCount: 0, isAdmin: false, denies: false, looksUpAdmin: false },
+    { title: 'admin-shared-scope: single DM, admins configured, non-admin → deny', gate: 'admin-shared-scope', scope: 'single', isGroup: false, adminCount: 1, isAdmin: false, denies: true, looksUpAdmin: true },
+    { title: 'admin-shared-scope: single DM, admins configured, admin → allow', gate: 'admin-shared-scope', scope: 'single', isGroup: false, adminCount: 1, isAdmin: true, denies: false, looksUpAdmin: true },
+    { title: 'admin-shared-scope: shared DM, admins configured, non-admin → deny', gate: 'admin-shared-scope', scope: 'shared', isGroup: false, adminCount: 1, isAdmin: false, denies: true, looksUpAdmin: true },
+    { title: 'admin-shared-scope: shared group, no admin configured → allow, no lookup', gate: 'admin-shared-scope', scope: 'shared', isGroup: true, adminCount: 0, isAdmin: false, denies: false, looksUpAdmin: false },
+    { title: 'admin-shared-scope: single DM, no admin configured → allow, no lookup', gate: 'admin-shared-scope', scope: 'single', isGroup: false, adminCount: 0, isAdmin: false, denies: false, looksUpAdmin: false },
+  ];
+
+  it.each(rows.map((row) => [row.title, row] as const))('%s', (_title, row) => {
+    const isAdmin = vi.fn(() => row.isAdmin);
+
+    const denies = commandGateDenies(row.gate, {
+      sessionScope: row.scope,
+      isGroup: row.isGroup,
+      adminCount: row.adminCount,
+      isAdmin,
+    });
+
+    expect(denies).toBe(row.denies);
+    expect(isAdmin).toHaveBeenCalledTimes(row.looksUpAdmin ? 1 : 0);
   });
 });

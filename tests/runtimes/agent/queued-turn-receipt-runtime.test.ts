@@ -279,14 +279,23 @@ import { Database } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { AgentRuntime, type AgentRuntimeOptions } from '../../../src/runtimes/agent/runtime.ts';
 import {
+  QUEUED_TURN_RECEIPT_NO_STOP_TEXT,
+  QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT,
   QUEUED_TURN_RECEIPT_OTHER_TEXT,
   QUEUED_TURN_RECEIPT_TEXT,
 } from '../../../src/runtimes/agent/runtime-queued-receipt.ts';
+import { STOP_ACK_NOTHING_TO_STOP } from '../../../src/runtimes/agent/runtime-stop-command.ts';
 import { installFakePerChatMcpSocketManager } from './helpers/fake-per-chat-mcp-socket-manager.ts';
 
 const chatJid = 'queued-receipt-chat@s.whatsapp.net';
 const conversationKey = toConversationKey(chatJid);
+/** The configured admin (mockConfig.adminPhones). */
 const senderJid = '15550001@s.whatsapp.net';
+const groupJid = 'queued-receipt-group@g.us';
+const nonAdminJid = '15550002@s.whatsapp.net';
+/** Another group member, whose request is the running one. */
+const groupMemberJid = '15550003@s.whatsapp.net';
+const DENIAL_TEXT = '_Not authorized._';
 
 function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
   return {
@@ -323,19 +332,43 @@ describe('#2949 queued receipt through the real per_chat admission path', () => 
     runtime.setDurability(engine);
   }
 
-  // Either receipt text counts: a cooldown regression on a later message would send the
+  // Every receipt text counts: a cooldown regression on a later message would send the
   // other-request text (more than one waiting), and must still show up here.
   function receiptSends(): unknown[][] {
-    const receipts: unknown[] = [QUEUED_TURN_RECEIPT_TEXT, QUEUED_TURN_RECEIPT_OTHER_TEXT];
+    const receipts: unknown[] = [
+      QUEUED_TURN_RECEIPT_TEXT,
+      QUEUED_TURN_RECEIPT_OTHER_TEXT,
+      QUEUED_TURN_RECEIPT_NO_STOP_TEXT,
+      QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT,
+    ];
     return vi.mocked(messenger.sendMessage).mock.calls
       .filter((call) => receipts.includes(call[1]));
   }
 
-  async function arrive(messageId: string, content: string): Promise<number> {
-    const seq = engine.journalInbound(messageId, conversationKey, chatJid, 'agent');
-    await runtime.handleMessage(makeMsg({ messageId, content, inboundSeq: seq }));
+  /** Every text the runtime sent: out of band, or through a per-chat outbound queue double. */
+  function allSentTexts(): string[] {
+    return [
+      ...vi.mocked(messenger.sendMessage).mock.calls.map((call) => String(call[1])),
+      ...queueDoubles.flatMap((queue) => queue.enqueueText.mock.calls.map((call) => String(call[0]))),
+    ];
+  }
+
+  async function arrive(
+    messageId: string,
+    content: string,
+    overrides: Partial<IncomingMessage> = {},
+  ): Promise<number> {
+    const chat = overrides.chatJid ?? chatJid;
+    const seq = engine.journalInbound(messageId, toConversationKey(chat), chat, 'agent');
+    await runtime.handleMessage(makeMsg({ messageId, content, inboundSeq: seq, ...overrides }));
     await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
     return seq;
+  }
+
+  /** A /stop from `sender` in `chat`; it carries no journal row, like the gate contract's probes. */
+  async function sendStop(messageId: string, overrides: Partial<IncomingMessage>): Promise<void> {
+    await runtime.handleMessage(makeMsg({ messageId, content: '/stop', ...overrides }));
+    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
   }
 
   function liveQueue(): TurnQueue | undefined {
@@ -347,6 +380,7 @@ describe('#2949 queued receipt through the real per_chat admission path', () => 
     vi.clearAllMocks();
     resetDoubles();
     mockConfig.queuedTurnReceipt = true;
+    mockConfig.adminPhones = new Set<string>(['15550001']);
     db = new Database(':memory:');
     db.open();
     engine = new DurabilityEngine(db);
@@ -439,5 +473,81 @@ describe('#2949 queued receipt through the real per_chat admission path', () => 
     await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
 
     expect(receiptSends()).toEqual([]);
+  });
+
+  // Contract with the command gate (review of the /stop offer). For every
+  // per_chat combination of DM or group, admins configured or not, and sender
+  // admin or not, the receipt offers /stop exactly when the REAL command gate
+  // accepts that sender's /stop. The gate is probed with an idle /stop, which
+  // answers at once: "_Not authorized._" when refused, the nothing-to-stop
+  // acknowledgement when accepted. Each row also pins the exact receipt.
+  type ContractRow = {
+    title: string;
+    isGroup: boolean;
+    admins: 'configured' | 'empty';
+    sender: string;
+    stopDenied: boolean;
+    receipt: string;
+  };
+  const contractRows: ContractRow[] = [
+    { title: 'DM, admins configured, admin sender → offered', isGroup: false, admins: 'configured', sender: senderJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_TEXT },
+    { title: 'DM, admins configured, non-admin sender → offered (a 1:1 chat is ungated)', isGroup: false, admins: 'configured', sender: nonAdminJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_TEXT },
+    { title: 'DM, no admin configured, sender with the former admin number → offered', isGroup: false, admins: 'empty', sender: senderJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_TEXT },
+    { title: 'DM, no admin configured, non-admin sender → offered', isGroup: false, admins: 'empty', sender: nonAdminJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_TEXT },
+    { title: 'group, admins configured, admin sender → offered', isGroup: true, admins: 'configured', sender: senderJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_OTHER_TEXT },
+    { title: 'group, admins configured, non-admin sender → refused and not offered', isGroup: true, admins: 'configured', sender: nonAdminJid, stopDenied: true, receipt: QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT },
+    { title: 'group, no admin configured, sender with the former admin number → offered', isGroup: true, admins: 'empty', sender: senderJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_OTHER_TEXT },
+    { title: 'group, no admin configured, non-admin sender → offered', isGroup: true, admins: 'empty', sender: nonAdminJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_OTHER_TEXT },
+  ];
+
+  it.each(contractRows.map((row) => [row.title, row] as const))(
+    'the receipt offers /stop exactly when the command gate accepts it: %s',
+    async (_title, row) => {
+      if (row.admins === 'empty') mockConfig.adminPhones = new Set<string>();
+      makeRuntime({ sessionScope: 'per_chat' });
+      const chat = row.isGroup ? groupJid : chatJid;
+      const venue = { chatJid: chat, isGroup: row.isGroup };
+
+      // The gate's answer for this sender, from an idle /stop.
+      await sendStop('wamid-probe-stop', { ...venue, senderJid: row.sender });
+      await vi.waitFor(() => expect(
+        allSentTexts().filter((text) => text === DENIAL_TEXT || text === STOP_ACK_NOTHING_TO_STOP),
+      ).toHaveLength(1));
+      const stopDenied = allSentTexts().includes(DENIAL_TEXT);
+
+      // In a group the running request is another member's; in a DM it is the sender's own.
+      await arrive('wamid-running', 'first question', {
+        ...venue,
+        senderJid: row.isGroup ? groupMemberJid : row.sender,
+      });
+      await vi.waitFor(() => expect(sessionDoubles.some((s) => s.turnInFlight)).toBe(true));
+      await arrive('wamid-queued', 'second question', { ...venue, senderJid: row.sender });
+      await vi.waitFor(() => expect(receiptSends()).toHaveLength(1));
+      const receipt = String(receiptSends()[0]?.[1]);
+
+      expect(stopDenied).toBe(row.stopDenied);
+      expect(receipt.includes('/stop')).toBe(!stopDenied);
+      expect(receiptSends()[0]).toEqual([chat, row.receipt]);
+    },
+  );
+
+  it('a per_chat group member who is not an admin is not offered /stop, and that member\'s /stop is still refused', async () => {
+    makeRuntime({ sessionScope: 'per_chat' });
+    const venue = { chatJid: groupJid, isGroup: true };
+    const running = await arrive('wamid-group-running', 'first question', { ...venue, senderJid: groupMemberJid });
+    await vi.waitFor(() => expect(sessionDoubles.some((s) => s.turnInFlight)).toBe(true));
+
+    await arrive('wamid-group-queued', 'second question', { ...venue, senderJid: nonAdminJid });
+
+    await vi.waitFor(() => expect(receiptSends()).toHaveLength(1));
+    expect(receiptSends()[0]).toEqual([groupJid, QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT]);
+    expect(allSentTexts().some((text) => text.includes('/stop'))).toBe(false);
+
+    // The member sends /stop anyway, mid-turn: the gate still refuses it.
+    await sendStop('wamid-group-stop', { ...venue, senderJid: nonAdminJid });
+    await vi.waitFor(() => expect(allSentTexts()).toContain(DENIAL_TEXT));
+    // Refused, so nothing was torn down: the running request and the queued message remain.
+    expect(liveQueue()?.activeTurn?.inboundSeq).toBe(running);
+    expect(liveQueue()?.pending).toBe(1);
   });
 });
