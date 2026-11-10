@@ -171,6 +171,16 @@ function makeEmptyRepo(): string {
   return repo;
 }
 
+describe('publication guard help', () => {
+  it('advertises the branch disclosure mode in the usage synopsis', () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    expect(runPublicationGuard(['--help'])).toBe(0);
+    const synopsis = String(log.mock.calls[0]?.[0]).split('\n')[0];
+    expect(synopsis).toBe('Usage: npm run guard:publication -- [--all|--staged|--branch-diff|--release] [--json]');
+  });
+});
+
 describe('publication guard — refuses a whole-tree audit of zero tracked files', () => {
   it('--all is INCONCLUSIVE (exit 2), not a pass, when 0 files are tracked', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});

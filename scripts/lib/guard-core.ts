@@ -998,7 +998,7 @@ function isFormatBlob(format: (typeof VERIFIED_BINARY_FORMATS)[number], blob: Ui
   return blob.subarray(0, GIT_BINARY_PROBE_BYTES).includes(0);
 }
 
-/** The blob `blobSpec` names, or an empty buffer when it cannot be read as a blob in time. */
+/** Unreadable objects are scanned as text; a timed-out probe must stop the enclosing scan. */
 function readBlob(cwd: string, blobSpec: string, timeout: number): Buffer {
   try {
     return execFileSync('git', ['cat-file', 'blob', blobSpec], {
@@ -1008,8 +1008,9 @@ function readBlob(cwd: string, blobSpec: string, timeout: number): Buffer {
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout,
     });
-  } catch {
-    return Buffer.alloc(0); // unreadable, too slow, or not a blob (a submodule commit): scanned
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ETIMEDOUT') throw error;
+    return Buffer.alloc(0); // unreadable or not a blob (a submodule commit): scanned
   }
 }
 

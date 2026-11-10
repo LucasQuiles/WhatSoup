@@ -302,11 +302,22 @@ describe('publication branch scan — line and time limits', () => {
     expect(Date.now() - started).toBeLessThan(4_000);
   });
 
+  it('propagates a timed-out binary probe instead of treating it as non-binary', () => {
+    const { repo } = branchRepo();
+    const image = seededBinary(PNG_SIGNATURE);
+    commitFile(repo, 'assets/dot.png', image, 'image');
+    const blob = gitOutput(repo, ['rev-parse', 'HEAD:assets/dot.png']);
+    expect(createVerifiedBinaryCheck(repo)('assets/dot.png', blob)).toBe(true);
+    fakeGit(repo, '"$1" == "cat-file" && "$2" == "blob"');
+
+    expect(() => createVerifiedBinaryCheck(repo, () => 20)('assets/dot.png', blob)).toThrow(/ETIMEDOUT/);
+  });
+
   it('gives a blob read for the verified-binary check only the time left, and is INCONCLUSIVE when it runs out on the last added line', () => {
     const { repo } = branchRepo();
     // A small verified PNG on the base; the branch changes only its last line, so the
-    // blob read comes on the patch's one added line, after which only the final limit
-    // check can stop the scan.
+    // blob read comes on the patch's one added line. Its timeout must stop the scan
+    // even when there is no next line to check the elapsed budget.
     const image = (tail: string) => Buffer.concat([Buffer.from(PNG_SIGNATURE), Buffer.from([0, 0, 0, 0x0d]), Buffer.from(`IHDR\n${tail}\n`)]);
     git(repo, ['update-ref', 'refs/remotes/origin/main', commitFile(repo, 'assets/dot.png', image('old'), 'image')]);
     commitFile(repo, 'assets/dot.png', image('new'), 'image edit');
@@ -315,7 +326,8 @@ describe('publication branch scan — line and time limits', () => {
 
     const stopped = validateBranchDiff(repo, 'origin/main', { ...BRANCH_SCAN_LIMITS, milliseconds: 1_000 });
 
-    expect('inconclusive' in stopped && stopped.inconclusive).toMatch(/^milliseconds \d+ is over the limit of 1000$/);
+    expect(stopped).toHaveProperty('inconclusive');
+    expect('inconclusive' in stopped && stopped.inconclusive).toMatch(/^a git read failed:.*ETIMEDOUT/);
     expect(Date.now() - started).toBeLessThan(4_000);
   });
 });

@@ -684,7 +684,7 @@ export function writePublicationAudit(cwd: string): { changed: boolean; rows: nu
 }
 
 function printHelp(): void {
-  console.log(`Usage: npm run guard:publication -- [--all|--staged|--release] [--json]
+  console.log(`Usage: npm run guard:publication -- [--all|--staged|--branch-diff|--release] [--json]
        npm run guard:publication:write
 
 Checks:
