@@ -413,18 +413,19 @@ describe('provider canary process-group reap (issue 3568)', () => {
       { reaped: false, reapError: 'group not proven gone; group membership probe: unknown', inconclusive: true },
     ],
     [
-      'a kill is refused with EPERM on a live member, and the group then goes',
-      // SIGTERM is refused while a member lives; SIGKILL then ends the group.
+      'a liveness check answers live, then a later one fails with EINVAL',
+      // The first signal-0 check succeeds and the probe finds a live member; every later check
+      // fails. The earlier `live` must not stand for the last check, which read nothing.
       (): GroupSignalSeam => {
-        let killed = false;
+        let checks = 0;
         return (_target, signal) => {
-          if (signal === 'SIGTERM') throw groupKillError('EPERM');
-          if (signal === 'SIGKILL') { killed = true; return; }
-          if (killed) throw groupKillError('ESRCH');
+          if (signal !== 0) return;
+          checks += 1;
+          if (checks > 1) throw groupKillError('EINVAL');
         };
       },
       'live',
-      { reaped: true, reapError: 'group kill failed: EPERM; group membership probe: live', inconclusive: true },
+      { reaped: false, reapError: 'group liveness check failed: EINVAL', inconclusive: true },
     ],
   ] as const)('calls the reap inconclusive when %s: it does not end with a live member', async (_case, makeKill, membership, expected) => {
     expect(typeof reapApi.reapProcessGroup).toBe('function');
@@ -434,6 +435,21 @@ describe('provider canary process-group reap (issue 3568)', () => {
       probeGroup: () => membership,
     });
     expect(reap).toEqual(expected);
+  });
+
+  it('keeps the reap conclusive when a kill is refused with EPERM on a live member, even though the group then goes', async () => {
+    expect(typeof reapApi.reapProcessGroup).toBe('function');
+    if (!reapApi.reapProcessGroup) return;
+    let killed = false;
+    // SIGTERM is refused while a member lives; SIGKILL then ends the group. The provider ran a
+    // member the canary may not signal, which is evidence about the provider.
+    const kill: GroupSignalSeam = (_target, signal) => {
+      if (signal === 'SIGTERM') throw groupKillError('EPERM');
+      if (signal === 'SIGKILL') { killed = true; return; }
+      if (killed) throw groupKillError('ESRCH');
+    };
+    const reap = await reapApi.reapProcessGroup(NO_SUCH_GROUP, Date.now() + 300, { kill, probeGroup: () => 'live' });
+    expect(reap).toEqual({ reaped: true, reapError: 'group kill failed: EPERM; group membership probe: live' });
   });
 
   it.each([
