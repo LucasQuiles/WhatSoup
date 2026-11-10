@@ -320,24 +320,35 @@ exit ${exitCode}
     }
   });
 
-  it('the child env allowlist excludes the neutralized skip-vars and passes WHATSOUP_* through', async () => {
+  it('gate children receive required controls without credentials or arbitrary WHATSOUP variables', async () => {
     const { pushGateChildEnv } = await import('../../scripts/push-gate.ts');
-    process.env.WHATSOUP_SKIP_DOC_DRIFT = '1';
-    process.env.WHATSOUP_SKIP_ESLINT_FITNESS = '1';
-    process.env.WHATSOUP_TEST_PASSTHROUGH_PROBE = 'probe';
+    const supplied = {
+      WHATSOUP_SKIP_DOC_DRIFT: '1',
+      WHATSOUP_SKIP_ESLINT_FITNESS: '1',
+      WHATSOUP_TEST_PASSTHROUGH_PROBE: 'probe',
+      WHATSOUP_HEALTH_TOKEN: 'synthetic-health-credential',
+      WHATSOUP_REQUIRE_TEST_INTEGRITY: '1',
+    };
+    const prior = Object.fromEntries(Object.keys(supplied).map((key) => [key, process.env[key]]));
+    Object.assign(process.env, supplied);
     try {
       const env = pushGateChildEnv();
       expect(env.WHATSOUP_SKIP_DOC_DRIFT).toBeUndefined();
       expect(env.WHATSOUP_SKIP_ESLINT_FITNESS).toBeUndefined();
-      expect(env.WHATSOUP_TEST_PASSTHROUGH_PROBE).toBe('probe');
+      const child = execFileSync(process.execPath, ['-e', `
+        process.stdout.write(JSON.stringify({
+          health: 'WHATSOUP_HEALTH_TOKEN' in process.env,
+          arbitrary: 'WHATSOUP_TEST_PASSTHROUGH_PROBE' in process.env,
+          integrity: process.env.WHATSOUP_REQUIRE_TEST_INTEGRITY,
+        }));
+      `], { env, encoding: 'utf8', timeout: 5000 });
+      expect(JSON.parse(child)).toEqual({ health: false, arbitrary: false, integrity: '1' });
       expect(typeof env.PATH).toBe('string');
-      delete process.env.WHATSOUP_SKIP_DOC_DRIFT;
-      delete process.env.WHATSOUP_SKIP_ESLINT_FITNESS;
-      delete process.env.WHATSOUP_TEST_PASSTHROUGH_PROBE;
     } finally {
-      delete process.env.WHATSOUP_SKIP_DOC_DRIFT;
-      delete process.env.WHATSOUP_SKIP_ESLINT_FITNESS;
-      delete process.env.WHATSOUP_TEST_PASSTHROUGH_PROBE;
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     }
   });
 
@@ -354,25 +365,31 @@ exit ${exitCode}
     }
   });
 
-  it('every env var a gate step reads survives the child allowlist', async () => {
+  it('passes each required gate control to a real child', async () => {
     const { pushGateChildEnv } = await import('../../scripts/push-gate.ts');
-    const source = readFileSync('scripts/full-suite-battery.ts', 'utf8');
-    const envNames = [...source.matchAll(/process\.env\.([A-Za-z0-9_]+)/g)].map((match) => match[1]);
-
-    expect(envNames.length, 'no process.env reads found — scan is vacuous').toBeGreaterThan(0);
-
-    for (const envName of envNames) {
-      const wasPresent = Object.prototype.hasOwnProperty.call(process.env, envName);
-      const priorValue = process.env[envName];
-      process.env[envName] = 'reachability-probe';
-      try {
-        expect(
-          pushGateChildEnv()[envName],
-          `scripts/full-suite-battery.ts reads ${envName}, but pushGateChildEnv() strips it`,
-        ).toBe('reachability-probe');
-      } finally {
-        if (wasPresent) process.env[envName] = priorValue;
-        else delete process.env[envName];
+    const controls = {
+      WHATSOUP_PUSH_BASE_OID: 'b'.repeat(40),
+      WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS: '600000',
+      WHATSOUP_BOUNDED_BATTERY_OWNER_PID: '1234',
+      WHATSOUP_TRIPWIRE_MAIN_SHA256: 'c'.repeat(64),
+      WHATSOUP_REQUIRE_TEST_INTEGRITY: '1',
+      WHATSOUP_NODE: '/test-toolchain/node',
+      WHATSOUP_NPM: '/test-toolchain/npm',
+      WHATSOUP_GIT_ESTATE_GIT_TIMEOUT_MS: '10000',
+    };
+    const prior = Object.fromEntries(Object.keys(controls).map((key) => [key, process.env[key]]));
+    Object.assign(process.env, controls);
+    try {
+      const child = execFileSync(process.execPath, ['-e', `
+        process.stdout.write(JSON.stringify(Object.fromEntries(
+          Object.entries(process.env).filter(([key]) => key.startsWith('WHATSOUP_'))
+        )));
+      `], { env: pushGateChildEnv(), encoding: 'utf8', timeout: 5000 });
+      expect(JSON.parse(child)).toEqual(controls);
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
       }
     }
   });
