@@ -702,6 +702,23 @@ launchctl bootout   gui/$(id -u)/com.whatsoup.<instance>
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.whatsoup.<instance>.plist
 ```
 
+A **release-pinned** instance plist runs
+`<release>/deploy/whatsoup <instance>` directly instead of the
+`~/.local/bin/whatsoup` symlink. WhatSoup's own service commands (start, stop,
+restart, the in-job `restart_self`, disable) accept that form only when all of
+these hold; otherwise they refuse the job as not theirs (#3829):
+
+- `ProgramArguments` is exactly `<release>/deploy/whatsoup` then `<instance>`,
+  and `Label` is `com.whatsoup.<instance>`.
+- `<release>` is named `WhatSoup-release-<sha>` and carries
+  `.whatsoup-release-manifest.json`.
+- The path is canonical and physically inside the service user's home (no
+  symlink out of home).
+
+`reconcile-launchd-restart-policy` re-renders the symlink form, so it refuses a
+release-pinned plist instead of repointing the job. Switch releases with
+`npm run release:activate`.
+
 `bootout` returning does not guarantee that launchd will immediately accept the
 same label again. During teardown, `bootstrap` can transiently return error 5
 (`Input/output error`) even when the plist is valid. Prefer the repository

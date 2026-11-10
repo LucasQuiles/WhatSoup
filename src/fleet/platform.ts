@@ -20,7 +20,7 @@ import {
   LaunchdRenderConfigError,
   type LaunchdPlistRenderOptions,
 } from '../lib/launchd-service-config.ts';
-import { admitHomeConfinedPath, isCanonicalAbsolutePath } from '../lib/home-confinement.ts';
+import { admitHomeConfinedPath, isCanonicalAbsolutePath, isPhysicallyInsideHome } from '../lib/home-confinement.ts';
 import { resolveLaunchdPlistRenderOptions } from './launchd-render-options.ts';
 import { compareGovernedLaunchdEnv, type GovernedEnvComparison } from './launchd-env-drift.ts';
 import { repoRoot, tmpRoot, xdgDir } from './paths.ts';
@@ -124,23 +124,80 @@ function assertValidLaunchdInstanceName(name: string): void {
   if (!isValidInstanceName(name)) throw new Error('invalid instance name');
 }
 
-/** Recognize the stable structural fields emitted by WhatSoup's plist generator. */
-function isExpectedGeneratedLaunchdPlist(name: string, contents: string): boolean {
+/**
+ * The program (still XML-escaped) that an instance plist runs as
+ * `ProgramArguments[0]`, or null when the Label and instance argument do not
+ * match this instance.
+ */
+function launchdPlistProgram(name: string, contents: string): string | null {
   const label = escapeRegExp(escapeXml(launchdLabel(name)));
-  const wrapper = escapeRegExp(escapeXml(path.join(os.homedir(), '.local', 'bin', 'whatsoup')));
   const instance = escapeRegExp(escapeXml(name));
   const identity = new RegExp(
     `<key>Label</key>\\s*<string>${label}</string>\\s*` +
     `<key>ProgramArguments</key>\\s*<array>\\s*` +
-    `<string>${wrapper}</string>\\s*<string>${instance}</string>`,
+    `<string>([^<]*)</string>\\s*<string>${instance}</string>`,
     'u',
   );
-  return identity.test(contents);
+  return identity.exec(contents)?.[1] ?? null;
 }
 
+/** Recognize the stable structural fields emitted by WhatSoup's plist generator. */
+function isExpectedGeneratedLaunchdPlist(name: string, contents: string): boolean {
+  return launchdPlistProgram(name, contents) === escapeXml(path.join(os.homedir(), '.local', 'bin', 'whatsoup'));
+}
+
+/** Release directory name written by the release exporter; see resolveReleaseIdentity. */
+const RELEASE_DIRECTORY_NAME = /^WhatSoup-release-[0-9a-f]{7,40}$/u;
+/** Same value as RELEASE_MANIFEST_FILE in scripts/release-snapshot-plan.ts, which src does not import. */
+const RELEASE_MANIFEST_FILE = '.whatsoup-release-manifest.json';
+
+/**
+ * #3829: a release-pinned plist runs `<release>/deploy/whatsoup <instance>`
+ * instead of the `~/.local/bin/whatsoup` symlink to that same file. The
+ * macOS launchd runbook documents this form and hosts run it, so lifecycle
+ * commands must accept it. They accept it only when the program is exactly
+ * `deploy/whatsoup` in a `WhatSoup-release-<sha>` directory that is physically
+ * inside home and carries a release manifest. Any other program is still a job
+ * this manager does not own.
+ */
+function isReleasePinnedLaunchdPlist(name: string, contents: string): boolean {
+  const program = launchdPlistProgram(name, contents);
+  // An XML entity means the path has a character no release path contains.
+  if (program === null || program.includes('&') || !isCanonicalAbsolutePath(program)) return false;
+  const deployDirectory = path.dirname(program);
+  const release = path.dirname(deployDirectory);
+  if (path.basename(program) !== 'whatsoup' || path.basename(deployDirectory) !== 'deploy') return false;
+  if (!RELEASE_DIRECTORY_NAME.test(path.basename(release))) return false;
+  try {
+    if (!isPhysicallyInsideHome(program, os.homedir())) return false;
+  } catch {
+    // intentional: a release path that does not resolve is not a release we can confirm.
+    return false;
+  }
+  return fs.existsSync(path.join(release, RELEASE_MANIFEST_FILE));
+}
+
+/**
+ * Writers (reconcile, first install) re-render the generated form. Applied to
+ * a release-pinned plist that would repoint the job to whatever release the
+ * wrapper symlink names, so they refuse it; release:activate switches releases.
+ */
 function assertExpectedGeneratedLaunchdPlist(name: string, contents: string): void {
-  if (!isExpectedGeneratedLaunchdPlist(name, contents)) {
-    throw new Error(`launchd plist for ${launchdLabel(name)} does not match the generated WhatSoup instance identity`);
+  if (isExpectedGeneratedLaunchdPlist(name, contents)) return;
+  if (isReleasePinnedLaunchdPlist(name, contents)) {
+    throw new Error(
+      `launchd plist for ${launchdLabel(name)} is release-pinned; re-rendering it would repoint the job, so switch releases with release:activate`,
+    );
+  }
+  throw new Error(`launchd plist for ${launchdLabel(name)} does not match the generated WhatSoup instance identity`);
+}
+
+/** Lifecycle commands (start, stop, restart, restartSelf, disable) accept either owned form. */
+function assertOwnedLaunchdPlist(name: string, contents: string): void {
+  if (!isExpectedGeneratedLaunchdPlist(name, contents) && !isReleasePinnedLaunchdPlist(name, contents)) {
+    throw new Error(
+      `launchd plist for ${launchdLabel(name)} does not match the generated WhatSoup instance identity or a release-pinned one`,
+    );
   }
 }
 
@@ -309,6 +366,13 @@ function readExistingLaunchdPlist(filePath: string): string | null {
 function readExpectedGeneratedLaunchdPlist(name: string, filePath: string): string | null {
   const contents = readExistingLaunchdPlist(filePath);
   if (contents !== null) assertExpectedGeneratedLaunchdPlist(name, contents);
+  return contents;
+}
+
+/** Read an existing plist only when it bears the generated or a release-pinned identity. */
+function readOwnedLaunchdPlist(name: string, filePath: string): string | null {
+  const contents = readExistingLaunchdPlist(filePath);
+  if (contents !== null) assertOwnedLaunchdPlist(name, contents);
   return contents;
 }
 
@@ -826,7 +890,7 @@ class LaunchdServiceManager extends BaseServiceManager {
   async disable(name: string): Promise<void> {
     assertValidLaunchdInstanceName(name);
     const dest = plistPath(name);
-    if (readExpectedGeneratedLaunchdPlist(name, dest) === null) return;
+    if (readOwnedLaunchdPlist(name, dest) === null) return;
     await this.bootout(name);
     try {
       fs.unlinkSync(dest);
@@ -839,7 +903,7 @@ class LaunchdServiceManager extends BaseServiceManager {
   async start(name: string): Promise<void> {
     assertValidLaunchdInstanceName(name);
     const dest = plistPath(name);
-    if (readExpectedGeneratedLaunchdPlist(name, dest) === null) {
+    if (readOwnedLaunchdPlist(name, dest) === null) {
       throw new Error('launchd plist is installed only after successful authentication; authenticate the instance before starting');
     }
     if (this.bootedOutServices.has(name)) {
@@ -859,7 +923,7 @@ class LaunchdServiceManager extends BaseServiceManager {
     let start: Promise<void>;
     try {
       const dest = plistPath(name);
-      const existing = readExpectedGeneratedLaunchdPlist(name, dest);
+      const existing = readOwnedLaunchdPlist(name, dest);
       start = existing === null
         ? installLaunchdPlist(name)
         : this.bootedOutServices.has(name)
@@ -880,14 +944,14 @@ class LaunchdServiceManager extends BaseServiceManager {
 
   async stop(name: string): Promise<void> {
     assertValidLaunchdInstanceName(name);
-    if (readExpectedGeneratedLaunchdPlist(name, plistPath(name)) === null) return;
+    if (readOwnedLaunchdPlist(name, plistPath(name)) === null) return;
     await this.bootout(name);
     this.bootedOutServices.add(name);
   }
 
   async stopForAuth(name: string): Promise<boolean> {
     assertValidLaunchdInstanceName(name);
-    if (readExpectedGeneratedLaunchdPlist(name, plistPath(name)) === null) return false;
+    if (readOwnedLaunchdPlist(name, plistPath(name)) === null) return false;
     const wasLoaded = await this.bootout(name);
     if (wasLoaded) this.bootedOutServices.add(name);
     return wasLoaded;
@@ -895,7 +959,7 @@ class LaunchdServiceManager extends BaseServiceManager {
 
   async restart(name: string): Promise<void> {
     assertValidLaunchdInstanceName(name);
-    if (readExpectedGeneratedLaunchdPlist(name, plistPath(name)) === null) {
+    if (readOwnedLaunchdPlist(name, plistPath(name)) === null) {
       throw new Error('launchd plist is installed only after successful authentication; authenticate the instance before starting');
     }
     await this.stop(name);
@@ -912,7 +976,7 @@ class LaunchdServiceManager extends BaseServiceManager {
    */
   async restartSelf(name: string): Promise<void> {
     assertValidLaunchdInstanceName(name);
-    if (readExpectedGeneratedLaunchdPlist(name, plistPath(name)) === null) {
+    if (readOwnedLaunchdPlist(name, plistPath(name)) === null) {
       throw new Error('launchd plist is installed only after successful authentication; authenticate the instance before starting');
     }
     await execFileAsync('launchctl', ['kickstart', '-k', launchdServiceTarget(name)]);
