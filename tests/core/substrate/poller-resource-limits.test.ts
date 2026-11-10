@@ -70,7 +70,7 @@ describe('persisted trigger resource limits', () => {
     const trigger = sqliteTrigger(oversizedSpec);
     db.raw.prepare("UPDATE bead_triggers SET status = 'paused' WHERE id = ?").run(trigger.id);
     const parse = vi.spyOn(JSON, 'parse');
-    expect(() => resumeTrigger(db.raw, trigger.id, { actor: 'fixture' })).toThrow(/resource budget/);
+    expect(() => resumeTrigger(db.raw, trigger.id, { actor: 'fixture', maxTtlHours: 72 })).toThrow(/resource budget/);
     expect(parse.mock.calls.filter(([text]) => typeof text === 'string' && Buffer.byteLength(text) > TRIGGER_BUDGETS.maxSpecBytes)).toHaveLength(0);
     expect(db.raw.prepare('SELECT status FROM bead_triggers WHERE id = ?').get(trigger.id)).toEqual({ status: 'paused' });
     expect(db.raw.prepare("SELECT count(*) AS n FROM bead_events WHERE bead_id = ? AND event_type = 'trigger_resumed'").get(trigger.bead_id)).toEqual({ n: 0 });
@@ -82,7 +82,7 @@ describe('persisted trigger resource limits', () => {
     const trigger = sqliteTrigger(raw);
     expect(dueTriggers(db.raw, now, 1)[0].spec_json).toBe(raw);
     db.raw.prepare("UPDATE bead_triggers SET status = 'paused' WHERE id = ?").run(trigger.id);
-    expect(resumeTrigger(db.raw, trigger.id, { actor: 'fixture' })).toMatchObject({ resumed: true });
+    expect(resumeTrigger(db.raw, trigger.id, { actor: 'fixture', maxTtlHours: 72 })).toMatchObject({ resumed: true });
     expect(db.raw.prepare('SELECT spec_json FROM bead_triggers WHERE id = ?').get(trigger.id)).toEqual({ spec_json: raw });
     const execute = vi.fn(async () => ({ kind: 'ok' as const, rowCount: 1 }));
     const poller = new TriggerPoller(db.raw, messenger, { now: () => now, sqliteExecutor: execute });
