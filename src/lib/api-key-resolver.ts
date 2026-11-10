@@ -26,6 +26,7 @@
 // are unaffected until they opt in.
 
 import { lookupCredential } from './keyring.ts';
+import { isNonEmptyString } from './type-guards.ts';
 import { createChildLogger } from '../logger.ts';
 
 const log = createChildLogger('api-key-resolver');
@@ -50,6 +51,25 @@ export interface ResolveApiKeyOptions {
    * (backward-compatible — preserves the prior env-fallback behavior).
    */
   allowEnvFallback?: boolean;
+}
+
+/** The `memory.pinecone` key settings, passed in by the caller from instance config. */
+export interface PineconeKeyConfig {
+  apiKeyEnv?: unknown;
+  apiKeyService?: unknown;
+}
+
+/**
+ * The Pinecone key the memory writer uses: the keyring first (the configured
+ * apiKeyService, or service `pinecone` for the default env name), then the env
+ * var named by apiKeyEnv (default PINECONE_API_KEY). Shared by PineconeMemory
+ * and the memory_write registration gate so the two cannot disagree.
+ */
+export function resolvePineconeApiKey(pinecone: PineconeKeyConfig | undefined): string {
+  return resolveApiKey({
+    service: isNonEmptyString(pinecone?.apiKeyService) ? pinecone.apiKeyService : undefined,
+    envVar: isNonEmptyString(pinecone?.apiKeyEnv) ? pinecone.apiKeyEnv : 'PINECONE_API_KEY',
+  });
 }
 
 /**

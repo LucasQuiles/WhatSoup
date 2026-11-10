@@ -4,7 +4,7 @@ import { config } from '../../../config.ts';
 import { createChildLogger } from '../../../logger.ts';
 import { WhatSoupError as AppError } from '../../../errors.ts';
 import { truncateForRerank } from '../../../lib/text-utils.ts';
-import { resolveApiKey } from '../../../lib/api-key-resolver.ts';
+import { resolvePineconeApiKey } from '../../../lib/api-key-resolver.ts';
 import { isNonEmptyString } from '../../../lib/type-guards.ts';
 import { clearRecoveryMarker, loadRecoveryMarkers, setRecoveryMarker } from '../../../lib/recovery-authority-store.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../../lib/emit-alert.ts';
@@ -334,7 +334,7 @@ export async function getPineconeReadinessObservation(
     return readinessObservation('disabled', targetIndex, 'none', false, 'local_guard');
   }
 
-  const apiKey = resolvePineconeApiKey().trim();
+  const apiKey = resolveConfiguredPineconeApiKey().trim();
   if (!apiKey) {
     logMemoryOperation(operation, {
       stage: 'guard',
@@ -469,14 +469,14 @@ function configuredPineconeApiKeyService(): string | undefined {
   return isNonEmptyString(apiKeyService) ? apiKeyService : undefined;
 }
 
-// Centralized Pinecone API-key resolution through the shared resolver.
-// Precedence: apiKeyService keyring lookup (when configured) → configured env var.
-// Exported so the memory_write registration gate (register-all.ts) asks the
-// same question PineconeMemory does: a keyring-held key registers the tool.
-export function resolvePineconeApiKey(): string {
-  return resolveApiKey({
-    service: configuredPineconeApiKeyService(),
-    envVar: configuredPineconeApiKeyEnv(),
+// Centralized Pinecone API-key resolution through the shared lib resolver
+// (lib/api-key-resolver.ts resolvePineconeApiKey), which the memory_write
+// registration gate (register-all.ts) also calls: a keyring-held key registers
+// the tool exactly when PineconeMemory can use it.
+function resolveConfiguredPineconeApiKey(): string {
+  return resolvePineconeApiKey({
+    apiKeyService: configuredPineconeApiKeyService(),
+    apiKeyEnv: configuredPineconeApiKeyEnv(),
   });
 }
 
@@ -722,6 +722,15 @@ function fromPineconeHit(hit: {
   return { id: hit._id, score: hit._score, record };
 }
 
+/**
+ * recordIdScope from instance configuration (memory.pinecone.instanceScopedIds).
+ * Exported so memory_write reads it here rather than importing config itself.
+ */
+export function configuredRecordIdScope(): string | null {
+  const source = configuredRecordStampSource();
+  return recordIdScope(source.instanceName, source.instanceScopedIds);
+}
+
 /** Instance configuration read for the record stamp. */
 function configuredRecordStampSource(): {
   instanceName: unknown;
@@ -817,7 +826,7 @@ export class PineconeMemory {
   constructor(options: PineconeMemoryOptions = {}) {
     this.accountJid = options.accountJid ?? (() => null);
     this.client = new Pinecone({
-      apiKey: resolvePineconeApiKey(),
+      apiKey: resolveConfiguredPineconeApiKey(),
       fetchApi: (input, init) => {
         const signal = combinedSignal(
           init?.signal,

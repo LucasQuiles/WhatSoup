@@ -22,9 +22,12 @@ import {
   classifyMemoryOperationFailure,
   createMemoryOperationContext,
 } from '../../lib/memory-operation-telemetry.ts';
-import { PineconeMemory, type MemoryRecord } from '../../runtimes/chat/providers/pinecone.ts';
-import { recordIdScope, type MemoryProvenance } from '../../core/memory-scope.ts';
-import { config } from '../../config.ts';
+import {
+  PineconeMemory,
+  configuredRecordIdScope,
+  type MemoryRecord,
+} from '../../runtimes/chat/providers/pinecone.ts';
+import type { MemoryProvenance } from '../../core/memory-scope.ts';
 import {
   conversationBoundKey,
   errorResult,
@@ -72,10 +75,13 @@ function stableId(chatKey: string, memoryType: string, text: string, idScope: st
   return `${memoryType}_${h}`;
 }
 
-/** The configured record id scope (memory.pinecone.instanceScopedIds). */
-function configuredRecordIdScope(): string | null {
-  const c = config as { botName?: unknown; memory?: { pinecone?: { instanceScopedIds?: unknown } } };
-  return recordIdScope(c.botName, c.memory?.pinecone?.instanceScopedIds);
+/**
+ * Live Pinecone writer factory that stamps the connected account. Lives here
+ * (memory_write already depends on the provider) so register-all needs no
+ * runtime import.
+ */
+export function pineconeMemoryWriter(accountJid: () => string | null | undefined): () => MemoryWriter {
+  return () => new PineconeMemory({ accountJid });
 }
 
 /**

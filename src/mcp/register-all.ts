@@ -36,7 +36,7 @@ import * as messagingTools from './tools/messaging.ts';
 import * as mediaTools from './tools/media.ts';
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
-import { PineconeMemory, resolvePineconeApiKey } from '../runtimes/chat/providers/pinecone.ts';
+import { resolvePineconeApiKey } from '../lib/api-key-resolver.ts';
 import { ToolRegistry } from './registry.ts';
 import {
   noExecutingSession,
@@ -279,12 +279,12 @@ export function registerAllTools(
   // named by memory.pinecone.apiKeyEnv), so the gate and the writer cannot
   // disagree. PineconeMemory.upsert enforces the project guard (the operator
   // project for `q` when its config sets none).
-  if (config.pineconeIndex && resolvePineconeApiKey()) {
+  if (config.pineconeIndex && resolvePineconeApiKey(memoryPinecone as { apiKeyEnv?: unknown; apiKeyService?: unknown } | undefined)) {
     runModule('memory-write', false, (register) =>
       memoryWriteTools.registerMemoryWriteTools(
         register,
         // The connected account feeds the opaque source_account stamp.
-        () => new PineconeMemory({ accountJid: () => connection.botJid }),
+        memoryWriteTools.pineconeMemoryWriter(() => connection.botJid),
       ),
     );
   }

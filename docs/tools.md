@@ -22,7 +22,7 @@ Complete reference for all 170 MCP tools exposed by WhatSoup. Tools are grouped 
 >
 > **`memory_write`** is registered when `config.pineconeIndex` is non-empty and
 > the Pinecone writer's own key resolution (`resolvePineconeApiKey` in
-> `src/runtimes/chat/providers/pinecone.ts`) yields a key: the keyring first
+> `src/lib/api-key-resolver.ts`, shared with `PineconeMemory`) yields a key: the keyring first
 > (service `pinecone` for the default `PINECONE_API_KEY` name), then the
 > environment variable named by `memory.pinecone.apiKeyEnv`. A key held only in
 > the keyring therefore registers the tool, and the gate cannot disagree with
