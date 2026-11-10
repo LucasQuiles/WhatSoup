@@ -47,6 +47,12 @@ describe('native fitness scan', () => {
 
   it('rejects valid JSON that omits findings and counts', () => {
     const cwd = fixture('process.stdout.write("{}"); process.exit(0);');
-    expect(() => scanFitnessInNativeProcess(cwd)).toThrow('incomplete report');
+    expect(() => scanFitnessInNativeProcess(cwd)).toThrow('Command failed');
+  });
+
+  it('rejects a config that emits a plausible report and exits before scanning', () => {
+    const report = { fatal: false, warningCount: 0, errorCount: 0, filesLinted: 1, issues: [] };
+    const cwd = fixture(`process.stdout.write(${JSON.stringify(JSON.stringify(report))}); process.exit(0);`);
+    expect(() => scanFitnessInNativeProcess(cwd)).toThrow();
   });
 });

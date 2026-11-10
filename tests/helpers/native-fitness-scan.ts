@@ -9,7 +9,9 @@ export function scanFitnessInNativeProcess(cwd: string): ScanResult {
   // ESLint must scan real source without paying Vitest's instrumentation cost for its parser.
   const output = execFileSync(process.execPath, [
     '--input-type=module', '--eval',
-    'const { runEslintFitness } = await import(process.argv[1]); process.stdout.write(JSON.stringify(await runEslintFitness(process.cwd())));',
+    'let complete = false; process.on("exit", () => { if (!complete && Number(process.exitCode ?? 0) === 0) process.exitCode = 1; }); '
+      + 'const { runEslintFitness } = await import(process.argv[1]); '
+      + 'process.stdout.write(JSON.stringify(await runEslintFitness(process.cwd()))); complete = true;',
     scanner,
   ], {
     cwd, encoding: 'utf8', timeout: 290_000, killSignal: 'SIGKILL',
