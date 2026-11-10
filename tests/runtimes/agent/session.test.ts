@@ -2506,6 +2506,72 @@ describe('SessionManager', () => {
     }
   });
 
+  // #3867 review (lead 11:26 ET): at the cap an ordinary tool can lose its map entry while another
+  // ordinary entry still exists. Its debt must survive that entry's end or eviction.
+  it.each([
+    ['refused beside a tracked tool that then ends', 'refuse-then-end'],
+    ['displaced by a poll admitted at the cap', 'displace'],
+  ] as const)('an ordinary tool %s keeps the normal deadline', async (_label, path) => {
+    vi.useFakeTimers();
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), notifyUser: vi.fn(),
+    });
+    try {
+      await sm.spawnSession();
+      await sm.sendTurn('lose ordinary debt at the cap');
+      const poll = { awaitResult: true, timeoutMs: WATCHDOG_HARD_MS * 3 };
+      for (let i = 0; i < MAX_TRACKED_TOOL_IDS - 1; i += 1) sm.trackToolStart(`poll-${i}`, 'send_poll', poll);
+      sm.trackToolStart('tool-a', 'Bash');
+      if (path === 'refuse-then-end') {
+        sm.trackToolStart('hung-b', 'Bash');
+        sm.trackToolEnd('tool-a');
+      } else {
+        sm.trackToolStart('late-poll', 'send_poll', poll);
+      }
+      sm.tickWatchdog();
+
+      await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS - 1_000);
+      expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+      await vi.advanceTimersByTimeAsync(1_001);
+      expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    } finally {
+      sm.clearTurnWatchdog();
+      vi.useRealTimers();
+    }
+  });
+
+  it('a new turn starts without the debt of a tool lost at the cap', async () => {
+    vi.useFakeTimers();
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), notifyUser: vi.fn(),
+    });
+    try {
+      await sm.spawnSession();
+      await sm.sendTurn('lose ordinary debt at the cap');
+      const poll = { awaitResult: true, timeoutMs: WATCHDOG_HARD_MS * 3 };
+      for (let i = 0; i < MAX_TRACKED_TOOL_IDS - 1; i += 1) sm.trackToolStart(`poll-${i}`, 'send_poll', poll);
+      sm.trackToolStart('tool-a', 'Bash');
+      sm.trackToolStart('late-poll', 'send_poll', poll);
+      sm.completeProviderTurn();
+      await sm.waitForProviderTurnToTerminalize();
+
+      await sm.sendTurn('poll in the next turn');
+      expect(sm.hasPendingTools).toBe(false);
+      sm.trackToolStart('next-poll', 'send_poll', poll);
+      sm.tickWatchdog();
+
+      await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS * 3);
+      expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+      await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+      expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    } finally {
+      sm.clearTurnWatchdog();
+      vi.useRealTimers();
+    }
+  });
+
   it('a blocking poll survives both watchdogs until its bounded vote wait ends', async () => {
     vi.useFakeTimers();
     const sm = new SessionManager({
