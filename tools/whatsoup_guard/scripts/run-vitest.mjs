@@ -18,7 +18,12 @@ function baseTmpDir() {
     return process.env.WHATSOUP_GUARD_TEST_TMPDIR;
   }
   if (process.platform === 'linux' && writableDir('/dev/shm')) return '/dev/shm';
-  return tmpdir();
+  const inherited = tmpdir();
+  // Darwin limits Unix-socket paths to 103 bytes, including tsx's child path.
+  if (process.platform === 'darwin'
+      && Buffer.byteLength(join(inherited, 'wg-XXXXXX', 'tsx-4294967295', '2147483647.pipe')) > 103
+      && writableDir('/private/tmp')) return '/private/tmp';
+  return inherited;
 }
 
 // Leave room for tsx's IPC socket beneath an enclosing test runner's TMPDIR.

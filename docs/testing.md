@@ -126,6 +126,10 @@ repeat an interrupted package-manager transaction. Test verdicts remain uncached
 Changes under `tools/whatsoup_guard/**` also run the standalone `whatsoup-guard`
 Node 25 compatibility lane. Quality owns Node 24 guard typechecking and tests;
 the standalone workflow does not repeat that version.
+The guard runner removes its own temporary directory after either outcome. On macOS,
+an overlong inherited `TMPDIR` uses a short owned directory so `tsx` can open its IPC
+socket. `WHATSOUP_GUARD_TEST_TMPDIR` remains an explicit override; keep it short enough
+for the platform's socket-path limit.
 
 Affected execution defaults to two workers and a two-minute total budget. Full
 validation defaults to thirty minutes. `--max-workers` accepts 1–4; browser
