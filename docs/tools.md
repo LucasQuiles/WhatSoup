@@ -431,12 +431,12 @@ Create an agent job bead and schedule trigger. Admin only.
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| prompt | string | required | Agent job prompt/body. |
-| title | string | optional | Bead title; defaults to the first 80 prompt characters. |
+| prompt | string | required | Agent job prompt/body; at most 4,096 UTF-8 bytes. |
+| title | string | optional | Bead title; at most 256 UTF-8 bytes; defaults to the first 80 prompt characters. |
 | schedule | object | required | Schedule spec with `kind`, plus `expr`/`tz` for cron or `fire_at` (unix epoch seconds) for one-shot time. A ms-range `fire_at` is auto-normalized to seconds; a value implausible in either unit is rejected (#1757). |
-| report_chat | string | required | JID that receives the trigger report. |
+| report_chat | string | required | JID that receives the trigger report; at most 512 UTF-8 bytes. |
 | terminal_at | number | optional | Requested terminal timestamp. |
-| metadata | object | optional | Additional bead metadata. |
+| metadata | object | optional | Additional bead metadata; JSON-serializable, at most 4,096 UTF-8 bytes, eight levels deep, and 64 items per object or array. |
 
 ---
 
@@ -453,14 +453,18 @@ Create a watch bead and poll trigger. Admin only. TTL defaults and caps come fro
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| title | string | optional | Bead title; defaults to `watch:<source>`. |
+| title | string | optional | Bead title; at most 256 UTF-8 bytes; defaults to `watch:<source>`. |
 | source | `"poll.email"` \| `"poll.url"` \| `"poll.file"` \| `"poll.sqlite"` \| `"poll.pinecone"` \| `"event.message"` | required | Trigger source kind. `poll.shell` was REMOVED (no executor). `poll.url` requires `advanced.enableUrlWatch` (off by default). `poll.email` persists but its executor is not wired; `event.message` persists as a reserved scaffold with no next fire time and is never polled. |
-| criteria | object | required | Trigger criteria/spec payload. |
+| criteria | object | required | Trigger criteria/spec payload; JSON-serializable, at most 8,192 UTF-8 bytes, eight levels deep, and 64 items per object or array. Per-kind limits are in the personal-line-watch runbook. |
 | interval_seconds | number | optional | Poll interval. |
 | ttl_hours | number | optional | Requested TTL, clamped by policy. |
-| report_chat | string | required | JID that receives the trigger report. |
+| report_chat | string | required | JID that receives the trigger report; at most 512 UTF-8 bytes. |
 | on_terminal | `"notify"` \| `"silent"` \| `"reopen_bead"` | optional | Terminal behavior. |
-| dedupe_key | string | optional | Trigger dedupe key. |
+| dedupe_key | string | optional | Trigger dedupe key; at most 256 UTF-8 bytes. |
+
+`create_watch` and `create_agent_job` reject a limit breach before creating either a bead or a trigger. Their persisted rows are revalidated at execution, so manually inserted legacy records that no longer meet the contract fail closed. Limits measure UTF-8 bytes, not JavaScript character count.
+
+The shared trigger budget also limits every spec to 8,192 serialized bytes, eight nesting levels, and 64 object or array items. Regexes are at most 512 bytes and must compile with RE2; selectors are at most 512 bytes and use the bounded structural subset. SQLite permits one read statement whose outer form is `SELECT` or `WITH … SELECT`. Admission rejects explicit `WITH RECURSIVE` at every nesting level; the worker also denies implicit recursion and recursive views through SQLite authorization before execution, returning a redacted `sql_error`. Ordinary non-recursive CTEs remain supported. Limits are at most 4,096 bytes, 32 JSON-scalar binds (1,024 bytes each and 4,096 bytes total), 10,000 counted rows, and a 30-second isolated-worker deadline. The child wraps the admitted query with a `maxRows + 1` scalar count, so caller-selected values do not transfer into JavaScript or IPC; its durable result is only `{rowCount}`. SQLite may still use internal memory or work before that outer row limit applies. `poll.pinecone.top_k` is at most 100; scheduled agent jobs can incur provider spend through full agent turns. Their provider budget applies only when configured; these trigger limits do not impose a mandatory token or currency-spend ceiling. A resource breach records the redacted `resource_exhausted` failure. Failed runs cool down and pause after at most five consecutive failures; a stale, completed, or outcome-unknown occurrence is reconciled rather than replayed.
 
 ---
 
@@ -681,7 +685,19 @@ Cancel a proposed bead with an optional rejection reason. Admin only.
 
 ### list_triggers
 
-List triggers with optional filters.
+List triggers with optional filters. Set `limit` or `after_id` to request pagination.
+The result contains `triggers` and `next_after_id`; pass that cursor as `after_id`
+with the same filters until it is `null`. Pages contain at most 50 rows and 65,536
+bytes of compact JSON, so a page can contain fewer rows than requested. A request
+without either pagination parameter returns the complete matching inventory if it
+fits; otherwise it returns `pagination_required`, without a partial success result.
+Concurrent changes are not a snapshot of the inventory. See the
+[migration note](releases/2026-11-10-trigger-inventory-bounds.md).
+Oversized legacy fields and invalid binary values are replaced in the read with a
+bounded over-limit space sentinel; their original database bytes remain unchanged.
+The existing numeric API does not support SQLite integers outside JavaScript's safe
+integer range. Such a legacy row returns an error, not rounded identifiers or an
+empty inventory; it requires database repair before that page can be read.
 
 | | |
 |---|---|
@@ -695,6 +711,8 @@ List triggers with optional filters.
 | bead_id | number | optional | Filter by bead id. |
 | kind | string | optional | Filter by trigger kind. |
 | status | `"active"` \| `"paused"` \| `"expired"` \| `"cancelled"` | optional | Filter by trigger status. |
+| limit | number | optional | Maximum rows, 1–50; default 50. The response byte limit may return fewer. |
+| after_id | number | optional | Return IDs strictly greater than this nonnegative safe integer; use `next_after_id` from the previous page. |
 
 ---
 

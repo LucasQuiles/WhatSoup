@@ -1,5 +1,6 @@
 """Exercise API confinement and failures without network access or credentials."""
 
+import base64
 import io
 import hashlib
 from http.client import IncompleteRead
@@ -9,7 +10,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request
 
 from bounded_github import GitHubClient
-from bounded_github import MAX_BLOB_BATCH_BYTES
+from bounded_github import MAX_BLOB_BATCH_BYTES, _verify_blob_batch_response
 from private_scanner_candidate import BoundaryError
 
 
@@ -32,9 +33,10 @@ class FakeOpener:
 
     def open(self, request, timeout):
         self.calls.append((request, timeout))
-        if isinstance(self.response, Exception):
-            raise self.response
-        return self.response
+        response = self.response.pop(0) if isinstance(self.response, list) else self.response
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 def git_blob_oid(content):
@@ -281,8 +283,8 @@ class GitHubTransportTests(unittest.TestCase):
         cases["binary"] = json.dumps(binary).encode()
 
         truncated = json.loads(graphql_blob_response(((object_id, content),)))
-        truncated["data"]["repository"]["b0"]["isTruncated"] = True
-        cases["truncated"] = json.dumps(truncated).encode()
+        truncated["data"]["repository"]["b0"]["isTruncated"] = "true"
+        cases["malformed-truncation"] = json.dumps(truncated).encode()
 
         wrong_size = json.loads(graphql_blob_response(((object_id, content),)))
         wrong_size["data"]["repository"]["b0"]["byteSize"] += 1
@@ -295,6 +297,71 @@ class GitHubTransportTests(unittest.TestCase):
                     client.fetch_blob_batch(((object_id, len(content)),))
                 self.assertNotIn("private GraphQL detail", str(caught.exception))
                 self.assertEqual(len(opener.calls), 1)
+
+    def truncated_response(self, content):
+        object_id = git_blob_oid(content)
+        payload = json.loads(graphql_blob_response(((object_id, content),)))
+        payload["data"]["repository"]["b0"].update(isTruncated=True, text="partial")
+        return object_id, payload
+
+    def rest_blob(self, object_id, content):
+        return {"sha": object_id, "size": len(content), "encoding": "base64",
+                "content": base64.b64encode(content).decode("ascii")}
+
+    def test_truncated_blob_fetches_complete_immutable_bytes_once(self):
+        content = b"large test source\n" * 40_000
+        object_id, payload = self.truncated_response(content)
+        rest = Response(json.dumps(self.rest_blob(object_id, content)).encode())
+        opener = FakeOpener([Response(json.dumps(payload).encode()), rest])
+        client = GitHubClient("fixture-token", opener=opener)
+
+        self.assertEqual(client.fetch_blob_batch(((object_id, len(content)),)), {object_id: content})
+        self.assertEqual(len(opener.calls), 2)
+        request, timeout = opener.calls[1]
+        self.assertEqual(request.full_url, "https://api.github.com/repos/LucasQuiles/WhatSoup/git/blobs/" + object_id)
+        self.assertEqual(request.get_method(), "GET")
+        self.assertEqual(request.get_header("Authorization"), "Bearer fixture-token")
+        self.assertEqual(timeout, 15)
+        self.assertEqual(rest.read_sizes, [2 * len(content) + 131_072 + 1])
+        self.assertTrue(rest.closed)
+
+    def test_truncated_blob_without_complete_fetch_is_refused(self):
+        content = b"complete source\n"
+        object_id, payload = self.truncated_response(content)
+        with self.assertRaises(BoundaryError):
+            _verify_blob_batch_response(payload, ((object_id, len(content)),))
+
+    def test_truncated_blob_metadata_is_verified_before_rest_fetch(self):
+        content = b"complete source\n"
+        for field, value in [("oid", "a" * 40), ("byteSize", 1), ("isBinary", True),
+                             ("__typename", "Tree"), ("text", None), ("isTruncated", 1)]:
+            with self.subTest(field=field):
+                object_id, payload = self.truncated_response(content)
+                payload["data"]["repository"]["b0"][field] = value
+                client, _, opener = self.client(json.dumps(payload).encode())
+                with self.assertRaises(BoundaryError):
+                    client.fetch_blob_batch(((object_id, len(content)),))
+                self.assertEqual(len(opener.calls), 1)
+
+    def test_truncated_blob_rest_failure_or_corruption_never_returns_partial_text(self):
+        content = b"complete source\n"
+        object_id, payload = self.truncated_response(content)
+        corruptions = [("sha", "a" * 40), ("size", 1), ("encoding", "utf-8"),
+                       ("content", base64.b64encode(b"x" * len(content)).decode("ascii")),
+                       ("content", "!")]
+        for field, value in corruptions:
+            with self.subTest(field=field, value=value):
+                raw = self.rest_blob(object_id, content)
+                raw[field] = value
+                opener = FakeOpener([Response(json.dumps(payload).encode()), Response(json.dumps(raw).encode())])
+                with self.assertRaises(BoundaryError):
+                    GitHubClient("fixture-token", opener=opener).fetch_blob_batch(((object_id, len(content)),))
+                self.assertEqual(len(opener.calls), 2)
+        opener = FakeOpener([Response(json.dumps(payload).encode()), URLError("private-response-lost")])
+        with self.assertRaises(BoundaryError) as caught:
+            GitHubClient("fixture-token", opener=opener).fetch_blob_batch(((object_id, len(content)),))
+        self.assertNotIn("private-response-lost", str(caught.exception))
+        self.assertEqual(len(opener.calls), 2)
 
     def test_batch_refuses_mismatched_content_invalid_text_and_wrong_repository_without_leaking_content(self):
         content = b"verified content\n"
