@@ -1046,7 +1046,13 @@ wall-clock bound and SIGKILLs the whole group on timeout AND on every close (so 
 survive a clean exit — round-18 finding 3). This exists because a synchronous fixture
 `execFileSync('git', …)` (a starved `git hash-object` on `index.lock` under load) once wedged a
 worker for ~72 minutes: vitest's async per-test timeout structurally cannot interrupt a blocking
-synchronous call, so a hung fixture produced no truthful completion signal. Semantics
+synchronous call, so a hung fixture produced no truthful completion signal. A group SIGKILL
+that lands while a Git child holds the index lock can leave a stale `index.lock`, and every later
+commit in that worktree fails. Shared Git helpers therefore run with `cleanGitEnv()`, which sets
+`GIT_OPTIONAL_LOCKS=0`. `git status` then skips writing its refreshed index and does not take the
+lock. A worktree `git diff` can still rewrite the index under the lock when an entry is
+stat-dirty, even with this setting (measured with Git 2.54.0), and a killed write command (`add`,
+`commit`) can still strand one. Semantics
 (round-18..19): a timeout is **inconclusive** (exit 124), never reportable as a pass OR a code failure;
 a group kill that fails for a non-`ESRCH` reason (e.g. `EPERM`) is inconclusive (exit 125), except that an
 `EPERM` on a group with no live member (zombies with no running thread, or empty, per one `ps` read) counts as reaped
