@@ -22,6 +22,7 @@ import {
 import { systemClock } from '../../src/lib/clock.ts';
 import {
   groupGone,
+  probeGroupMembers,
   probeGroupMembership,
   type GroupMembership,
 } from '../../src/lib/process-group-membership.ts';
@@ -293,10 +294,10 @@ async function waitUntil(predicate: () => boolean, deadlineMs: number): Promise<
 
 /**
  * What `reapProcessGroup` found. `reapError` names the first failure by error code and probe
- * answer only, never by message, path or command text; when a later kill is refused while the probe
- * answers `live`, it names that refusal too. `inconclusive` marks a failure with no live member to
- * show for it: no kill was refused while the probe answered `live`, and the reap did not end with a
- * live member. Such a failure is treated as infrastructure state, not as evidence about the provider.
+ * answer only, never by message, path or command text; when a live member later refuses signal 0
+ * after a refused group kill, it names that refusal too. `inconclusive` marks a failure with no live
+ * member to show for it: no live member itself refused signal 0, and the reap did not end with a
+ * live member. Such a failure is infrastructure state, not evidence about the provider.
  */
 export interface ProcessGroupReap {
   reaped: boolean;
@@ -310,6 +311,11 @@ export interface ProcessGroupReapDeps {
   kill?: (pid: number, signal: NodeJS.Signals | 0) => void;
   /** Defaults to `probeGroupMembership`. A probe that throws counts as `unknown`. */
   probeGroup?: (pgid: number) => GroupMembership;
+  /**
+   * Defaults to `probeGroupMembers`: the group's live member pids, or undefined when the listing
+   * cannot be read. A probe that throws counts as unreadable.
+   */
+  probeMembers?: (pgid: number) => number[] | undefined;
 }
 
 /**
@@ -320,12 +326,12 @@ export interface ProcessGroupReapDeps {
  * A group kill follows the #3625 contract: ESRCH, or EPERM on a group with no live member, is
  * fine. Any other kill failure, an unexpected liveness-check error, or a group never proven gone
  * is recorded in `reapError`, and the canary passes only without one. A failure is conclusive
- * when the reap ends with the group still holding a live member. A kill refused with EPERM while
- * the probe answers `live` is also treated as evidence about the provider, even if the group then
- * went, so the reap fails closed. A membership race can rarely produce the same pair: a member
- * forks and exits between the kernel's snapshot of the group and its signal, and the probe then
- * finds the child. The next passing run then restores the receipt. Any other failure is
- * `inconclusive`. It never throws, so the caller's cleanup always runs.
+ * when the reap ends with the group still holding a live member. It is also conclusive, even if the
+ * group then went, when a group kill is refused with EPERM while the probe answers `live` and
+ * signal 0 to a listed live member is itself refused with EPERM. A group-level EPERM whose listed
+ * live members all accept signal 0, or whose member list cannot be read, is a membership race, for
+ * example a member that forked and exited before its signal: it is not a refusal. Any other failure
+ * is `inconclusive`. It never throws, so the caller's cleanup always runs.
  */
 export async function reapProcessGroup(
   pgid: number,
@@ -343,10 +349,28 @@ export async function reapProcessGroup(
   let reapError: string | undefined;
   // What the last liveness check could tell about the members. A check that failed tells nothing.
   let lastMembership: 'live' | 'unknown' = 'unknown';
-  // A kill refused with EPERM while the probe answered `live`. It is treated as evidence about the
-  // provider and fails closed. A member that forks and exits between the kernel's snapshot of the
-  // group and its signal can rarely produce the same pair; the next passing run restores the receipt.
+  // A group kill refused with EPERM while a listed live member itself refused signal 0.
   let liveMemberRefused = false;
+  // Member-level evidence: true only when signal 0 to a listed live member answers EPERM. Any other
+  // answer, or a member list that cannot be read, means the group-level EPERM was a race.
+  const liveMemberRefusesSignal = (): boolean => {
+    let members: number[] | undefined;
+    try {
+      members = (deps.probeMembers ?? probeGroupMembers)(pgid);
+    } catch {
+      return false;
+    }
+    for (const member of members ?? []) {
+      // Pid 0 would address the canary's own group, and pid 1 is never a provider's member.
+      if (member <= 1) continue;
+      try {
+        kill(member, 0);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException | null | undefined)?.code === 'EPERM') return true;
+      }
+    }
+    return false;
+  };
   const gone = (): boolean => {
     const answer = groupGone(pgid, { kill, probeGroup });
     if (answer.gone) return true;
@@ -368,10 +392,10 @@ export async function reapProcessGroup(
         const membership = probeGroup(pgid);
         if (membership === 'no-live-members') return;
         const refusal = `group kill failed: EPERM; group membership probe: ${membership}`;
-        if (membership === 'live' && !liveMemberRefused) {
+        if (membership === 'live' && !liveMemberRefused && liveMemberRefusesSignal()) {
           liveMemberRefused = true;
           // The refusal makes the reap conclusive, so the stderr line names it even after an earlier error.
-          reapError = reapError === undefined ? refusal : `${reapError}; ${refusal}`;
+          reapError = (reapError === undefined || reapError === refusal) ? refusal : `${reapError}; ${refusal}`;
           return;
         }
         reapError ??= refusal;
@@ -382,8 +406,8 @@ export async function reapProcessGroup(
   };
   const result = (reaped: boolean): ProcessGroupReap => {
     if (reapError === undefined) return { reaped };
-    // Treated as evidence about the provider: a kill refused while the probe answered `live`, or a
-    // live member at the end.
+    // Evidence about the provider: a live member that refused signal 0 after a refused group kill,
+    // or a live member at the end.
     const conclusive = liveMemberRefused || (!reaped && lastMembership === 'live');
     return conclusive ? { reaped, reapError } : { reaped, reapError, inconclusive: true };
   };
@@ -489,8 +513,8 @@ export async function executeOwnedProvider(
         // An inconclusive reap is infrastructure state, so an earlier exact receipt stays valid.
         if (reap.inconclusive === true) conclusive = false;
         if (reap.reapError !== undefined) {
-          // Content-free: the group id and the failure classes, never a path or command text. A kill
-          // refused while the probe answered `live` is named even after an earlier error.
+          // Content-free: the group id and the failure classes, never a path or command text. A
+          // member-level refusal is named even after an earlier error.
           process.stderr.write(`provider MCP canary: process group ${pgid} not proven reaped (reapError=${reap.reapError})\n`);
         }
       }

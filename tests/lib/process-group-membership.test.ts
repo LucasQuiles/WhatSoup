@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 
 import * as membershipModule from '../../src/lib/process-group-membership.ts';
@@ -128,7 +128,10 @@ describe('classifyGroupMembership (a multithreaded zombie can still run)', () =>
   });
 });
 
-type LiveMembersApi = { liveGroupMembers?: (psOutput: string, pgid: number) => number[] | undefined };
+type LiveMembersApi = {
+  liveGroupMembers?: (psOutput: string, pgid: number) => number[] | undefined;
+  probeGroupMembers?: (pgid: number) => number[] | undefined;
+};
 // Read through the namespace, so a missing export fails its own assertion instead of the import.
 const membersApi = membershipModule as unknown as LiveMembersApi;
 
@@ -166,5 +169,16 @@ describe('liveGroupMembers (the members a refused group kill is checked against)
     expect(typeof membersApi.liveGroupMembers).toBe('function');
     if (!membersApi.liveGroupMembers) return;
     expect(membersApi.liveGroupMembers(listing, 100)).toBe(undefined);
+  });
+
+  it('with the default ps probe, lists this test process among the live members of its own group', () => {
+    expect(typeof membersApi.probeGroupMembers).toBe('function');
+    if (!membersApi.probeGroupMembers) return;
+    // This process is running while it asks, so its own group always holds it as a live member.
+    const listing = spawnSync('ps', ['-o', 'pgid=', '-p', String(process.pid)], { encoding: 'utf8', timeout: 5_000 });
+    expect(listing.status).toBe(0);
+    const pgid = Number(listing.stdout.trim());
+    expect(Number.isInteger(pgid) && pgid > 0).toBe(true);
+    expect(membersApi.probeGroupMembers(pgid)).toContain(process.pid);
   });
 });
