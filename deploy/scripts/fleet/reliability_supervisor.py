@@ -548,7 +548,7 @@ def _advance(config, state, now, probe, restart, emit, maintenance, path):
                 state["budget_alerted"] = True
     write_private(path, state)
     publish_pending_events(state, now, emit)
-    state["alerts"] = state["alerts"][-128:]
+    state["alerts"], _ = retain_alerts(state["alerts"], now)
     state["completed_at"] = now
     write_private(path, state)
     return state
@@ -744,8 +744,8 @@ def recovery_confirmed(reason, snapshot, *, now):
 # operator already sees: suppression, or a storm digest sent in the event's
 # place. quarantined, dead_lettered and test_leak_dropped are deliberately
 # absent: the dispatcher pages for only one envelope error code (and throttles
-# that), so those alerts may have reached no one. They stay undelivered, page
-# as stale, and are retired by age, counted.
+# that), so those alerts may have reached no one. They stay undelivered and
+# page as stale until a terminal delivery disposition is observed.
 DISPATCHER_DISPOSITIONS = {
     "suppressed": "dispatcher_suppressed",
     "storm_collapsed": "dispatcher_collapsed",
@@ -756,11 +756,6 @@ DELIVERY_BATCH = 128
 TERMINAL_ALERTS_RETAINED = 128
 # Reserve at least half of the readable state budget for non-receipt fields.
 MAX_RETAINED_RECEIPT_BYTES = PRIVATE_JSON_MAX_BYTES // (2 * TERMINAL_ALERTS_RETAINED)
-# Undelivered alerts are retired by age (an alert with no receipt after a day
-# will not get one) and by count (at most four 15 s delivery calls per cycle,
-# and state well under read_private's 1 MiB limit).
-MAX_UNDELIVERED_ALERTS = 512
-MAX_UNDELIVERED_AGE_SECONDS = 86400
 
 
 def _resolve_batch(config, batch):
@@ -825,28 +820,18 @@ def resolve_alert_delivery(config, alerts):
 
 
 def retain_alerts(alerts, now, *, drop_aged=True):
-    """Keep the newest terminal alerts and a bounded set of undelivered ones.
+    """Keep every unresolved obligation and the newest terminal history.
 
-    Returns the kept alerts in their original order and how many undelivered
-    alerts were dropped, so the caller can surface every drop. A caller whose
-    delivery lookup failed this cycle passes drop_aged=False: with no answer,
-    an old alert may still have been delivered, so only the count cap applies.
+    Age and queue length cannot prove delivery. The existing caller options
+    remain accepted, but neither permits dropping an unresolved alert.
     """
     terminal = [a for a in alerts if a.get("delivery") in TERMINAL_DELIVERY]
-    undelivered = [
-        a
-        for a in alerts
-        if a.get("delivery") not in TERMINAL_DELIVERY
-        and (
-            not drop_aged
-            or now - a.get("published_at", now) <= MAX_UNDELIVERED_AGE_SECONDS
-        )
-    ]
     keep = {id(a) for a in terminal[-TERMINAL_ALERTS_RETAINED:]}
-    keep |= {id(a) for a in undelivered[-MAX_UNDELIVERED_ALERTS:]}
-    kept = [a for a in alerts if id(a) in keep]
-    dropped = len(alerts) - len(kept) - max(0, len(terminal) - TERMINAL_ALERTS_RETAINED)
-    return kept, dropped
+    kept = [
+        a for a in alerts
+        if a.get("delivery") not in TERMINAL_DELIVERY or id(a) in keep
+    ]
+    return kept, 0
 
 
 def record_dropped(state, dropped, now):

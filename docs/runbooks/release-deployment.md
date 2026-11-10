@@ -969,6 +969,11 @@ emission can leave the previously saved event pending for retry with the same
 ID. Publication deduplication and post-emission recovery still require
 qualification. No pending-event overflow policy or historical data removal is
 implemented by these limits.
+All four monitoring paths retain undelivered alerts regardless of age or count;
+an unsuccessful lookup or a missing receipt does not end the delivery obligation.
+Only terminal history is reduced to the newest 128 records. Preserving these
+records does not admit new transitions at capacity or enlarge the state limit;
+those admission and progress requirements remain unqualified below.
 Before emission, all four monitoring paths reserve space for the published
 receipt, final cycle metadata and any pending events left behind. Reservation
 accounts for JSON escaping, including the maximum encoded filename. A cycle

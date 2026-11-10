@@ -310,6 +310,29 @@ def test_running_but_hung_service_restarts_after_three_probes(supervisor, config
     assert [e["kind"] for e in events] == ["alert", "clear"]
 
 
+def test_service_retains_undelivered_history_across_cycles(supervisor, config):
+    directory = Path(config["state_dir"])
+    supervisor.private_directory(directory)
+    path = directory / "supervisor.json"
+    waiting = _undelivered(0, 200)
+    terminal = [
+        {**item, "delivery": "channel_delivered"}
+        for item in _undelivered(0, 200)
+    ]
+    state = supervisor.initial_state(0)
+    state["alerts"] = waiting + terminal
+    supervisor.write_private(path, state)
+    restarts, events = [], []
+
+    for now in (2 * 86400, 2 * 86400 + 60):
+        result = harness(supervisor, config, now, True, restarts, events)
+        assert result["alerts"] == waiting + terminal[-128:]
+        assert supervisor.read_private(path)["alerts"] == result["alerts"]
+
+    assert restarts == []
+    assert events == []
+
+
 def test_restart_budget_survives_supervisor_process_recreation(supervisor, config):
     restarts, events = [], []
     for now in [0, 30, 60, 181, 211, 241, 362, 392, 422, 452]:

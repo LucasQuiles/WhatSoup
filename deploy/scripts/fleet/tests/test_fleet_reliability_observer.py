@@ -890,7 +890,7 @@ def test_delivery_resolution_failure_is_recorded_and_pages_the_watchdog(
     ] == ["alert", "clear"]
 
 
-def test_undelivered_alerts_are_bounded_and_every_drop_is_counted(
+def test_undelivered_alerts_keep_their_ids_despite_age_and_count(
     observer, config, tmp_path
 ):
     config["delivery_command"], _ = delivery_stub(tmp_path, status="pending")
@@ -899,12 +899,10 @@ def test_undelivered_alerts_are_bounded_and_every_drop_is_counted(
     seed_observer(observer, config, old + recent)
     state = observe_once(observer, config, 500000)
     kept = {a["event_id"] for a in state["alerts"]}
-    assert not kept & {a["event_id"] for a in old}
-    assert len(kept) == observer.supervisor.MAX_UNDELIVERED_ALERTS
-    assert kept == {a["event_id"] for a in recent[-len(kept) :]}
-    dropped = state["delivery_dropped"]
-    assert dropped["total"] == 605 - len(kept)
-    assert dropped["last_at"] == 500000
+    assert kept == {a["event_id"] for a in old + recent}
+    assert "delivery_dropped" not in state
+    persisted = observer.supervisor.read_private(Path(config["state_dir"]) / "fleet-observer.json")
+    assert {a["event_id"] for a in persisted["alerts"]} == kept
     watchdog = observer.run_watchdog(
         config, now=500001, emit=lambda _: {"published": True}
     )
@@ -933,9 +931,9 @@ def test_failed_lookup_cycle_never_ages_out_undelivered_alerts(
     assert "delivery_dropped" not in state
     config["delivery_command"], _ = delivery_stub(tmp_path, status="unobserved")
     state = observe_once(observer, config, 500001)
-    # A successful lookup that finds no receipt retires them, counted.
-    assert state["alerts"] == []
-    assert state["delivery_dropped"]["total"] == 3
+    # No receipt is not evidence that the delivery obligation has ended.
+    assert {a["event_id"] for a in state["alerts"]} == {a["event_id"] for a in old}
+    assert "delivery_dropped" not in state
 
 
 def test_watchdog_only_lookup_failures_page_after_two_of_its_own_cycles(
