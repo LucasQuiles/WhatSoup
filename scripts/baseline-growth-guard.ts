@@ -747,7 +747,7 @@ function main(): number {
 
   if (options.json) {
     console.log(JSON.stringify({
-      base,
+      base: baseOid,
       // The exact object weighed, so a receipt names what was measured rather than implying
       // it. 'working-tree' is reported literally — it is not reproducible from a SHA.
       candidate: candidateOid ?? 'working-tree',
@@ -774,7 +774,7 @@ function main(): number {
         '  ./scripts/run-with-pinned-node.sh scripts/baseline-growth-guard.ts --json' +
         // Name the exact revisions when they were pinned. A CI failure reproduced against a
         // moving HEAD is a different measurement than the one that failed.
-        (candidateOid !== null ? ` --base ${base} --candidate ${candidateOid}` : ''),
+        (candidateOid !== null ? ` --base ${baseOid} --candidate ${candidateOid}` : ''),
     );
     return EXIT_BLOCK;
   }
