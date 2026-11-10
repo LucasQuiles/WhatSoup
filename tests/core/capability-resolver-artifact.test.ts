@@ -15,7 +15,7 @@ import { chmodSync, chownSync, existsSync, mkdirSync, readFileSync, realpathSync
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, onTestFinished } from 'vitest';
 
 import {
   canonicalExecutionIdentity,
@@ -187,7 +187,10 @@ describe('composite digest (round-19 findings 1+2): content AND shape are bound'
 });
 
 describe('round-20: interpreter identity, direct-mode arg constraint, and envelope binding', () => {
-  it('BLOCKER-2a FALSIFIER: the composite CHANGES when the INTERPRETER content changes (same script) — a same-path interpreter swap is detected', () => {
+  // The fixture mode must not depend on the runner's umask: a umask 0007 slot creates 0660 files.
+  it.each([0o007, 0o022])('BLOCKER-2a FALSIFIER: the composite CHANGES when the INTERPRETER content changes (same script) — a same-path interpreter swap is detected (umask %o)', (umask) => {
+    const previousUmask = process.umask(umask);
+    onTestFinished(() => { process.umask(previousUmask); });
     const dir = tmp.make('interp-swap');
     const { path } = script(dir);
     // The interpreter lives in a SEPARATE dir from the script so the whole-tree manifest (walked
@@ -203,6 +206,20 @@ describe('round-20: interpreter identity, direct-mode arg constraint, and envelo
     writeFileSync(fakeInterp, '#!/bin/sh\nexec node --EVIL-FLAG "$@"\n'); // swap ONLY the interpreter content
     const c2 = verifyResolverArtifact(execution).compositeDigest;
     expect(c2).not.toBe(c1); // pre-round-20 the interpreter was not hashed → these were equal
+  });
+
+  // Negative control for the fixture above: without the explicit mode, the umask decides, and the
+  // guard refuses the group-writable file a umask 0007 creates.
+  it.each([[0o007, true], [0o022, false]])('an interpreter left at its umask-default mode is refused only when group-writable (umask %o)', (umask, refused) => {
+    const previousUmask = process.umask(umask);
+    onTestFinished(() => { process.umask(previousUmask); });
+    const { path } = script(tmp.make('interp-umask'));
+    const fakeInterp = join(tmp.make('interp-umask-bin'), 'fake-interp');
+    writeFileSync(fakeInterp, '#!/bin/sh\nexec node "$@"\n');
+    chownSync(fakeInterp, process.getuid?.() ?? -1, process.getgid?.() ?? -1);
+    const execution = { command: [fakeInterp, path, '{source}'], resolverArtifactPath: path, interpreted: true };
+    if (refused) expect(() => verifyResolverArtifact(execution)).toThrow(/group-writable without the sticky bit/);
+    else expect(() => verifyResolverArtifact(execution)).not.toThrow();
   });
 
   it('BLOCKER-2b FALSIFIER: a direct-mode command with a bare positional arg after the artifact is REFUSED (a renamed interpreter could run it)', () => {
