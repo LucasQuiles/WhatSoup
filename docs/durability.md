@@ -1698,16 +1698,25 @@ with restart-safe recovery markers.
 
 ### 8.4 Durable notification-delivery handoff
 
-Notification dispatch is post-commit by design (a crash mid-send must not roll back the
+Fired-run and terminal-at expiry notification dispatch is post-commit by design (a crash mid-send must not roll back the
 committed run result), which used to make a crash between COMMIT and `sendMessage` a silent
 at-most-once loss. The finalize transaction now stamps `notifyPending` on the run's
-`output_json` whenever dispatch will follow; successful dispatch and both classified failure
+`output_json` whenever dispatch will follow; delivery with a receipt and both classified failure
 paths (`notify_dispatch_failed`, `notify_forbidden_target`) clear it. Startup
 `reconcileDeliveryIntents` marks any surviving intent with the bounded class
 `notify_outcome_unknown` and NEVER re-sends: whether the message left the dead process is
 unknowable, and a duplicate send is a worse failure than a surfaced unknown. Execution state
 (`trigger_occurrences`) and delivery evidence (`deliveredWaMessageId` / notify error kinds)
 are independently queryable.
+
+Expiry validates persisted report targets and dedupe keys before notification or bead reopening.
+Invalid roots retire the trigger as expired but record a redacted failed run with
+`resource_exhausted`, without either effect. Valid expiry commits its terminal transition and
+notification intent together, then records delivery through the same receipt/failure path as a
+normal fire. Silent expiry and one-shot completion create no extra notification intent. A send
+without a receipt remains pending for unknown-outcome reconciliation; it is never replayed.
+Circuit-breaker pause messages remain best-effort and revalidate roots before sending; their
+failure log is not durable delivery evidence.
 
 ### 8.5 Agent-job occurrence linkage
 

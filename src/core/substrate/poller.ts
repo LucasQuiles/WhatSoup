@@ -873,13 +873,13 @@ export class TriggerPoller {
     this.stmtMarkExpiredTrigger = this.db.prepare(
       `UPDATE bead_triggers
        SET status = 'expired', next_fire_at = NULL, updated_at = ?
-       WHERE id = ?`,
+       WHERE id = ? AND status = 'active'`,
     );
     this.stmtInsertExpiryRun = this.db.prepare(
       `INSERT INTO trigger_runs (
          trigger_id, bead_id, status, started_at, finished_at, duration_ms,
-         output_summary, output_json, attempt, metadata_json
-       ) VALUES (?, ?, 'terminal_fired', ?, ?, 0, ?, ?, 1, '{}')`,
+         output_summary, output_json, error_kind, error_message, attempt, metadata_json
+       ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 1, '{}')`,
     );
     this.stmtLookupBeadStatus = this.db.prepare(
       `SELECT status FROM beads WHERE id = ?`,
@@ -1023,7 +1023,7 @@ export class TriggerPoller {
       .all(now, expiryBatchSize) as unknown as TriggerRow[];
     for (const t of overdue) {
       try {
-        this.expireTrigger(t, now);
+        await this.expireTrigger(t, now);
         processed++;
       } catch (err) {
         log.error({ err, triggerId: t.id }, 'trigger expiry failed unexpectedly');
@@ -1319,42 +1319,42 @@ export class TriggerPoller {
     if (shouldDispatchNotification) {
       // Notification dispatch is intentionally post-commit. A crash between
       // COMMIT and sendMessage is at-most-once delivery for this poller tick.
-      const dispatch = await this.dispatchNotification(t, outcome);
-      if (dispatch.waId) {
-        try {
-          this.recordDeliveredWaMessageId(runId, dispatch.waId);
-        } catch (err) {
-          log.error({ err, triggerId: t.id, runId }, 'failed to record trigger notification receipt');
-        }
-      } else if (dispatch.failed && dispatch.terminalReject) {
-        // #1745 — delivery was PERMANENTLY rejected for this target (forbidden/403:
-        // the bot was removed from the report chat). Retrying the same chat is
-        // guaranteed-undeliverable, so once this recurs past the small bound we
-        // RETIRE the producer (pause + clear next_fire_at) and signal it out-of-
-        // band (bead_event + BOT ERRORS alert) — the report chat itself cannot
-        // receive the failure notice, which is exactly why the loop ran for days.
-        try {
-          this.recordNotifyForbiddenTarget(runId);
+      const dispatch = await this.dispatchNotification(t, formatNotification(t, outcome));
+      this.recordNotificationDispatch(t, runId, dispatch, true);
+    }
+  }
+
+  private recordNotificationDispatch(
+    t: TriggerRow,
+    runId: number,
+    dispatch: NotificationDispatch,
+    retireOnForbiddenTarget: boolean,
+  ): void {
+    if (dispatch.waId) {
+      try {
+        this.recordDeliveredWaMessageId(runId, dispatch.waId);
+      } catch (err) {
+        log.error({ err, triggerId: t.id, runId }, 'failed to record trigger notification receipt');
+      }
+    } else if (dispatch.failed && dispatch.terminalReject) {
+      try {
+        this.recordNotifyForbiddenTarget(runId);
+        // Expiry has already retired its producer; only active fires use the breaker.
+        if (retireOnForbiddenTarget) {
           const rejects = this.countConsecutiveForbiddenRejects(t.id);
           if (rejects >= this.maxConsecutiveForbiddenRejects) {
             this.retireTriggerOnForbiddenTarget(t, this.nowFn(), rejects);
           }
-        } catch (err) {
-          log.error({ err, triggerId: t.id, runId }, 'failed to record/retire forbidden-target dispatch');
         }
-      } else if (dispatch.failed) {
-        // The trigger evaluated and fired, but delivery threw a TRANSIENT error.
-        // Mark the already-committed run so a fired-but-undelivered run is
-        // distinguishable in telemetry from a throttled one — status is left
-        // EXACTLY as finishRun wrote it (the evaluation succeeded) and
-        // error_message stays NULL. The trigger keeps rescheduling (fail-loud,
-        // never silently retire) — a daily job must survive a transport blip.
-        // Throttled / not-eligible runs never reach here (shouldDispatchNotification).
-        try {
-          this.recordNotifyDispatchFailed(runId);
-        } catch (err) {
-          log.error({ err, triggerId: t.id, runId }, 'failed to record trigger notification dispatch failure');
-        }
+      } catch (err) {
+        log.error({ err, triggerId: t.id, runId }, 'failed to record/retire forbidden-target dispatch');
+      }
+    } else if (dispatch.failed) {
+      // Preserve the committed evaluation or expiry result independently of delivery.
+      try {
+        this.recordNotifyDispatchFailed(runId);
+      } catch (err) {
+        log.error({ err, triggerId: t.id, runId }, 'failed to record trigger notification dispatch failure');
       }
     }
   }
@@ -2106,8 +2106,7 @@ export class TriggerPoller {
     }
   }
 
-  private async dispatchNotification(t: TriggerRow, outcome: ExecuteOutcome): Promise<NotificationDispatch> {
-    const text = formatNotification(t, outcome);
+  private async dispatchNotification(t: TriggerRow, text: string): Promise<NotificationDispatch> {
     try {
       const receipt = await this.messenger.sendMessage(t.report_chat_jid, text);
       return { waId: receipt.waMessageId ?? null, failed: false, terminalReject: false };
@@ -2328,6 +2327,7 @@ export class TriggerPoller {
 
   private async dispatchPauseNotification(t: TriggerRow, failureCount: number): Promise<void> {
     try {
+      assertTriggerRootBudgets(t.report_chat_jid, t.dedupe_key);
       await this.messenger.sendMessage(
         t.report_chat_jid,
         formatPauseNotification(t, failureCount),
@@ -2337,23 +2337,22 @@ export class TriggerPoller {
     }
   }
 
-  private expireTrigger(t: TriggerRow, now: number): void {
-    let shouldDispatchExpiryNotification = false;
+  private async expireTrigger(t: TriggerRow, now: number): Promise<void> {
+    let notificationRunId: number | null;
     this.db.exec('BEGIN');
     try {
-      shouldDispatchExpiryNotification = this.markExpired(t, now, 'terminal_at_reached');
+      notificationRunId = this.markExpired(t, now, 'terminal_at_reached');
       this.db.exec('COMMIT');
     } catch (err) {
       try { this.db.exec('ROLLBACK'); } catch { /* best effort */ }
       throw err;
     }
-    if (shouldDispatchExpiryNotification) {
-      void this.messenger.sendMessage(
-        t.report_chat_jid,
+    if (notificationRunId !== null) {
+      const dispatch = await this.dispatchNotification(
+        t,
         formatExpiryNotification(t, 'terminal_at_reached'),
-      ).catch((err: unknown) => {
-        log.error({ err, triggerId: t.id }, 'failed to dispatch expiry notification');
-      });
+      );
+      this.recordNotificationDispatch(t, notificationRunId, dispatch, false);
     }
   }
 
@@ -2364,8 +2363,18 @@ export class TriggerPoller {
    */
   private static readonly SILENT_EXPIRY_REASONS = new Set(['one_shot_completed']);
 
-  private markExpired(t: TriggerRow, now: number, reason: string): boolean {
-    this.stmtMarkExpiredTrigger.run(now, t.id);
+  private markExpired(t: TriggerRow, now: number, reason: string): number | null {
+    let invalidRoots = false;
+    try {
+      assertTriggerRootBudgets(t.report_chat_jid, t.dedupe_key);
+    } catch (err) {
+      if (!(err instanceof TriggerBudgetError)) throw err;
+      invalidRoots = true;
+    }
+    // An awaited send lets another tick retire later rows from this batch.
+    if (Number(this.stmtMarkExpiredTrigger.run(now, t.id).changes) === 0) return null;
+    const notify = !invalidRoots && t.on_terminal === 'notify'
+      && !TriggerPoller.SILENT_EXPIRY_REASONS.has(reason);
     writeBeadEvent(this.db, {
       beadId: t.bead_id,
       eventType: 'trigger_expired',
@@ -2373,15 +2382,19 @@ export class TriggerPoller {
       payload: { trigger_id: t.id, reason, on_terminal: t.on_terminal },
       at: now,
     });
-    this.stmtInsertExpiryRun.run(
-      t.id, t.bead_id, now, now,
+    const run = this.stmtInsertExpiryRun.run(
+      t.id, t.bead_id, invalidRoots ? 'failed' : 'terminal_fired', now, now,
       `trigger expired: ${reason}`,
-      JSON.stringify({ reason, on_terminal: t.on_terminal }),
+      JSON.stringify(invalidRoots ? { reason: 'resource_exhausted' } : {
+        reason, on_terminal: t.on_terminal, ...(notify ? { notifyPending: true } : {}),
+      }),
+      invalidRoots ? 'resource_exhausted' : null,
+      invalidRoots ? 'persisted trigger exceeded the current resource budget' : null,
     );
-    if (t.on_terminal === 'reopen_bead') {
+    if (!invalidRoots && t.on_terminal === 'reopen_bead') {
       this.reopenTerminalBead(t, now, reason);
     }
-    return t.on_terminal === 'notify' && !TriggerPoller.SILENT_EXPIRY_REASONS.has(reason);
+    return notify ? Number(run.lastInsertRowid) : null;
   }
 
   private reopenTerminalBead(t: TriggerRow, now: number, reason: string): void {

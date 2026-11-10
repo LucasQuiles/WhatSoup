@@ -416,18 +416,20 @@ describe('TriggerPoller — poll.sqlite', () => {
     }
   });
 
-  it('revalidates restored report targets and dedupe keys before execution or retry', async () => {
+  it('revalidates restored report targets and dedupe keys before execution, retry, or automatic pause', async () => {
     const { messenger, calls } = makeMessenger();
     const bead = createBead(db.raw, { kind: 'watch', title: 'legacy root fields', ownerJid: 'mw', actor: 'u' });
     db.raw.exec('CREATE TABLE legacy_root_rows(id INTEGER PRIMARY KEY)');
     for (const [column, value] of [
       ['report_chat_jid', '😀'.repeat((TRIGGER_BUDGETS.maxReportTargetBytes / 4) + 1)],
       ['dedupe_key', '😀'.repeat((TRIGGER_BUDGETS.maxDedupeKeyBytes / 4) + 1)],
+      ['report_chat_jid', Buffer.from('private-target')],
+      ['dedupe_key', Buffer.from('private-key')],
     ] as const) {
       const t = createTrigger(db.raw, {
         beadId: bead.id, kind: 'poll.sqlite',
         spec: { sql: 'SELECT id FROM legacy_root_rows', fire_when: 'rows_returned' },
-        reportChatJid: 'admin@s.whatsapp.net', dedupeKey: `safe-${column}`,
+        reportChatJid: 'admin@s.whatsapp.net',
         intervalSeconds: 60, nextFireAt: 1_000_000_000, actor: 'u',
       });
       db.raw.prepare(`UPDATE bead_triggers SET ${column} = ? WHERE id = ?`).run(value, t.id);
@@ -435,8 +437,12 @@ describe('TriggerPoller — poll.sqlite', () => {
     const executor = vi.fn(async () => ({ kind: 'ok' as const, rowCount: 1 }));
     let now = 1_000_000_001;
     const poller = new TriggerPoller(db.raw, messenger, { now: () => now, sqliteExecutor: executor });
-    await poller.tickOnce();
-    now += 120;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await poller.tickOnce();
+      now += 120;
+    }
+    expect(db.raw.prepare('SELECT status, next_fire_at FROM bead_triggers WHERE bead_id = ?').all(bead.id))
+      .toEqual(Array.from({ length: 4 }, () => ({ status: 'paused', next_fire_at: null })));
     await poller.tickOnce();
 
     expect(executor).not.toHaveBeenCalled();
@@ -444,7 +450,7 @@ describe('TriggerPoller — poll.sqlite', () => {
     const runs = db.raw.prepare(
       `SELECT error_kind, output_json FROM trigger_runs WHERE bead_id = ? ORDER BY id`,
     ).all(bead.id) as Array<{ error_kind: string; output_json: string }>;
-    expect(runs).toHaveLength(4);
+    expect(runs).toHaveLength(20);
     for (const run of runs) {
       expect(run.error_kind).toBe('resource_exhausted');
       expect(run.output_json).toBe('{"kind":"poll.sqlite","reason":"resource_exhausted"}');
