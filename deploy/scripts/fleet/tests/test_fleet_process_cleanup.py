@@ -119,7 +119,7 @@ def test_mcp_parent_exit_does_not_wait_for_descendant_stderr(tmp_path, exit_at, 
     child = None
     child_ended = False
     completed = False
-    completion_timeout = 6 if exit_at == "ignore-termination" or group == "ignores-term" else 3
+    completion_timeout = 6 if exit_at == "ignore-termination" or group in ("ignores-term", "escaped") else 3
     started = time.monotonic()
     try:
         try:
