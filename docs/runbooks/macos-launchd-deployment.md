@@ -708,10 +708,10 @@ A **release-pinned** instance plist runs
 restart, the in-job `restart_self`, disable) accept that form only when all of
 these hold; otherwise they refuse the job as not theirs (#3829):
 
-- `ProgramArguments` is exactly `<release>/deploy/whatsoup` then `<instance>`,
-  and `Label` is `com.whatsoup.<instance>`.
-- `<release>` is named `WhatSoup-release-<sha>` and carries
-  `.whatsoup-release-manifest.json`.
+- `ProgramArguments` is exactly two entries, `<release>/deploy/whatsoup` then
+  `<instance>`, and `Label` is `com.whatsoup.<instance>`.
+- `<release>` is named `WhatSoup-release-<sha>`; `deploy/whatsoup` and
+  `.whatsoup-release-manifest.json` in it are both regular files.
 - The path is canonical and physically inside the service user's home (no
   symlink out of home).
 
