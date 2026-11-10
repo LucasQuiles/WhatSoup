@@ -19,7 +19,7 @@ const log = createChildLogger('substrate.triggers');
 // Read byte lengths in SQLite before transferring legacy text into JavaScript.
 // A bounded over-limit sentinel preserves resource-error classification without
 // truncating invalid data into valid JSON or changing the stored evidence.
-function boundedTriggerColumn(column: string, maxBytes: number): string {
+export function boundedSubstrateColumn(column: string, maxBytes: number): string {
   return `CASE WHEN typeof(${column}) = 'blob' OR length(CAST(${column} AS BLOB)) > ${maxBytes}
     THEN printf('%*s', ${maxBytes + 1}, '') ELSE ${column} END AS ${column}`;
 }
@@ -29,10 +29,10 @@ export const BOUNDED_TRIGGER_COLUMNS = [
   'id',
   ...['bead_id', 'kind', 'spec_version', 'status', 'interval_seconds', 'next_fire_at',
     'last_fire_at', 'terminal_at', 'on_terminal', 'created_at', 'updated_at']
-    .map((column) => boundedTriggerColumn(column, TRIGGER_BUDGETS.maxRootScalarBytes)),
-  boundedTriggerColumn('spec_json', TRIGGER_BUDGETS.maxSpecBytes),
-  boundedTriggerColumn('report_chat_jid', TRIGGER_BUDGETS.maxReportTargetBytes),
-  boundedTriggerColumn('dedupe_key', TRIGGER_BUDGETS.maxDedupeKeyBytes),
+    .map((column) => boundedSubstrateColumn(column, TRIGGER_BUDGETS.maxRootScalarBytes)),
+  boundedSubstrateColumn('spec_json', TRIGGER_BUDGETS.maxSpecBytes),
+  boundedSubstrateColumn('report_chat_jid', TRIGGER_BUDGETS.maxReportTargetBytes),
+  boundedSubstrateColumn('dedupe_key', TRIGGER_BUDGETS.maxDedupeKeyBytes),
 ].join(', ');
 
 

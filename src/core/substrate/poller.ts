@@ -47,7 +47,7 @@ import { systemClock } from '../../lib/clock.ts';
 import { SIGNAL } from '../../lib/signals.ts';
 import { isNonEmptyString } from '../../lib/type-guards.ts';
 import {
-  BOUNDED_TRIGGER_COLUMNS, dueTriggers, validateTriggerSpec, isSafeSqliteSql, assertTriggerRootBudgets, assertTriggerTextBudget,
+  BOUNDED_TRIGGER_COLUMNS, boundedSubstrateColumn, dueTriggers, validateTriggerSpec, isSafeSqliteSql, assertTriggerRootBudgets, assertTriggerTextBudget,
   TriggerBudgetError, TRIGGER_BUDGETS,
   countPastDueTriggers, DEFAULT_TRIGGER_PAST_DUE_GRACE_SEC,
 } from './triggers.ts';
@@ -93,8 +93,8 @@ const MAX_CONSECUTIVE_FAILURES = TRIGGER_BUDGETS.maxConsecutiveFailures;
 const MAX_CONSECUTIVE_FORBIDDEN_REJECTS = TRIGGER_BUDGETS.maxConsecutiveForbiddenRejects;
 
 /**
- * Poller options may make a safety response stricter for a test or a specific
- * instance, but may never raise or disable the global resource ceiling.
+ * Resource ceilings and notification interval validity have different bounds;
+ * each option supplies its own permitted range.
  */
 function boundedPollerOption(
   value: number | undefined,
@@ -746,7 +746,12 @@ export class TriggerPoller {
       TRIGGER_BUDGETS.maxConsecutiveForbiddenRejects,
       'max_consecutive_forbidden_rejects',
     );
-    this.notificationThrottleMinIntervalSec = opts.notificationThrottleMinIntervalSec ?? NOTIFICATION_THROTTLE_MIN_INTERVAL_SEC;
+    this.notificationThrottleMinIntervalSec = boundedPollerOption(
+      opts.notificationThrottleMinIntervalSec,
+      NOTIFICATION_THROTTLE_MIN_INTERVAL_SEC,
+      Number.MAX_SAFE_INTEGER,
+      'notification_throttle_min_interval_sec',
+    );
     this.pineconeAllowedIndexes = new Set(opts.pineconeAllowedIndexes ?? []);
     this.pineconeSearch = opts.pineconeSearch ?? null;
     // Canonicalise allowed roots once at construction. We realpath() each root
@@ -777,7 +782,10 @@ export class TriggerPoller {
        LIMIT 1`,
     );
     this.stmtLookupBead = this.db.prepare(
-      `SELECT kind, title, body FROM beads WHERE id = ?`,
+      `SELECT kind,
+         ${boundedSubstrateColumn('title', TRIGGER_BUDGETS.maxTitleBytes)},
+         ${boundedSubstrateColumn('body', TRIGGER_BUDGETS.maxPromptBytes)}
+       FROM beads WHERE id = ?`,
     );
     this.stmtLastRowCountRun = this.db.prepare(
       `SELECT output_json FROM trigger_runs

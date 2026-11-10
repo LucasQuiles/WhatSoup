@@ -231,6 +231,10 @@ reconciled as `notify_outcome_unknown` without replay. Silent expiry and one-sho
 not create an extra notification intent. Automatic-pause messages also revalidate roots but
 remain best-effort, without durable delivery evidence.
 
+Scheduled agent-job title and body reads apply their byte limits inside SQLite,
+before transferring text to JavaScript. Oversized or blob values produce bounded
+invalid sentinels; dispatch records `resource_exhausted` and retains the original data.
+
 Scheduled agent jobs can incur provider spend through full agent turns. Their
 provider budget applies only when configured; the trigger resource limits do not
 impose a mandatory token or currency-spend ceiling.
@@ -239,7 +243,9 @@ that policy.
 
 The failure thresholds and notification interval can be tuned per poller through
 `TriggerPollerOptions`: `maxConsecutiveFailures`, `maxConsecutiveForbiddenRejects`
-and `notificationThrottleMinIntervalSec`. The failure thresholds may be lowered but
+and `notificationThrottleMinIntervalSec`. The notification interval must be a
+positive safe integer in seconds; the default remains 300. Invalid settings fail
+construction instead of disabling the throttle. The failure thresholds may be lowered but
 not raised above the five-failure or three-forbidden-reject ceilings; probe
 concurrency may likewise be lowered but not raised above four across ticks. A timed-out
 probe retains its slot until its underlying executor and post-commit notification work

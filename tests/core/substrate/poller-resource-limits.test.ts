@@ -39,6 +39,110 @@ describe('persisted trigger resource limits', () => {
     return trigger;
   }
 
+  it.each([
+    ['title', 'text'], ['title', 'NUL text'], ['title', 'blob'],
+    ['body', 'text'], ['body', 'NUL text'], ['body', 'blob'],
+  ] as const)('bounds legacy agent-job %s %s before transferring it from SQLite', async (field, storage) => {
+    const bead = createBead(db.raw, {
+      kind: 'agent_job', title: 'bounded job', body: 'Run the fixture.',
+      ownerJid: 'fixture', actor: 'fixture',
+    });
+    const trigger = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.at_time', spec: { fire_at: now },
+      reportChatJid: 'fixture@s.whatsapp.net', nextFireAt: now, actor: 'fixture',
+    });
+    const maximum = field === 'title' ? TRIGGER_BUDGETS.maxTitleBytes : TRIGGER_BUDGETS.maxPromptBytes;
+    const raw = (storage === 'NUL text' ? 'é\0' : 'é').repeat(maximum);
+    db.raw.prepare(`UPDATE beads SET ${field} = ? WHERE id = ?`).run(
+      storage === 'blob' ? Buffer.from(raw) : raw, bead.id,
+    );
+    const selected: Array<Record<string, unknown>> = [];
+    const prepare = db.raw.prepare.bind(db.raw);
+    vi.spyOn(db.raw, 'prepare').mockImplementation((sql) => {
+      const statement = prepare(sql);
+      if (/\bFROM beads\b/i.test(sql)) {
+        const get = statement.get.bind(statement);
+        vi.spyOn(statement, 'get').mockImplementation((...args) => {
+          const row = get(...args);
+          if (row) selected.push(row);
+          return row;
+        });
+      }
+      return statement;
+    });
+    const dispatch = vi.fn(() => ({ dispatched: true }));
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => now, agentJobDispatch: dispatch });
+    try {
+      expect(await poller.tickOnce()).toBe(1);
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(db.raw.prepare('SELECT status, error_kind FROM trigger_runs WHERE trigger_id = ?').get(trigger.id))
+        .toEqual({ status: 'failed', error_kind: 'resource_exhausted' });
+      expect(selected.length).toBeGreaterThan(0);
+      for (const row of selected) {
+        const value = row[field];
+        expect(value).toBeDefined();
+        const bytes = typeof value === 'string' ? Buffer.byteLength(value) : (value as Uint8Array).byteLength;
+        expect(bytes).toBeLessThanOrEqual(maximum + 1);
+      }
+      expect(prepare(`SELECT length(CAST(${field} AS BLOB)) AS bytes FROM beads WHERE id = ?`).get(bead.id))
+        .toEqual({ bytes: Buffer.byteLength(raw) });
+    } finally { poller.stop(); }
+  });
+
+  it.each([0, -1, NaN, Infinity, -Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects invalid notification interval %s before polling',
+    (notificationThrottleMinIntervalSec) => {
+      expect(() => new TriggerPoller(db.raw, messenger, { notificationThrottleMinIntervalSec }))
+        .toThrow(/notification_throttle_min_interval_sec/);
+    },
+  );
+
+  it.each([1, Number.MAX_SAFE_INTEGER])('dispatches exact-byte-boundary agent text with valid notification interval %s', async (notificationThrottleMinIntervalSec) => {
+    const title = 'é'.repeat(TRIGGER_BUDGETS.maxTitleBytes / 2);
+    const body = 'é'.repeat(TRIGGER_BUDGETS.maxPromptBytes / 2);
+    const bead = createBead(db.raw, {
+      kind: 'agent_job', title, body, ownerJid: 'fixture', actor: 'fixture',
+    });
+    const trigger = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.at_time', spec: { fire_at: now },
+      reportChatJid: 'fixture@s.whatsapp.net', nextFireAt: now, actor: 'fixture',
+    });
+    const dispatch = vi.fn(() => ({ dispatched: true }));
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => now, notificationThrottleMinIntervalSec, agentJobDispatch: dispatch,
+    });
+    try {
+      expect(await poller.tickOnce()).toBe(1);
+      expect(dispatch).toHaveBeenCalledExactlyOnceWith({
+        beadId: bead.id, triggerId: trigger.id, occurrenceId: expect.any(Number),
+        title, prompt: body, reportChatJid: 'fixture@s.whatsapp.net',
+      });
+      expect(db.raw.prepare('SELECT status, error_kind FROM trigger_runs WHERE trigger_id = ?').get(trigger.id))
+        .toEqual({ status: 'ok', error_kind: null });
+    } finally { poller.stop(); }
+  });
+
+  it('bounds a deduplicated legacy row without rewriting it or creating another trigger', () => {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'dedupe fixture', ownerJid: 'fixture', actor: 'fixture' });
+    const input = {
+      beadId: bead.id, kind: 'poll.sqlite' as const, spec: { sql: 'SELECT 1', fire_when: 'rows_returned' },
+      reportChatJid: 'fixture@s.whatsapp.net', intervalSeconds: 60, dedupeKey: 'bounded-dedupe', actor: 'fixture',
+    };
+    const original = createTrigger(db.raw, input);
+    const spec = 'x'.repeat(TRIGGER_BUDGETS.maxSpecBytes * 2);
+    const target = 'y'.repeat(TRIGGER_BUDGETS.maxReportTargetBytes * 2);
+    db.raw.prepare('UPDATE bead_triggers SET spec_json = ?, report_chat_jid = ? WHERE id = ?')
+      .run(spec, target, original.id);
+    const duplicate = createTrigger(db.raw, input);
+    expect(duplicate.id).toBe(original.id);
+    expect(Buffer.byteLength(duplicate.spec_json)).toBeLessThanOrEqual(TRIGGER_BUDGETS.maxSpecBytes + 1);
+    expect(Buffer.byteLength(duplicate.report_chat_jid)).toBeLessThanOrEqual(TRIGGER_BUDGETS.maxReportTargetBytes + 1);
+    expect(db.raw.prepare('SELECT spec_json, report_chat_jid FROM bead_triggers WHERE id = ?').get(original.id))
+      .toEqual({ spec_json: spec, report_chat_jid: target });
+    expect(db.raw.prepare('SELECT count(*) AS n FROM bead_triggers WHERE bead_id = ?').get(bead.id))
+      .toEqual({ n: 1 });
+  });
+
   const validSpec = JSON.stringify({ sql: 'SELECT 1 /*é*/', fire_when: 'rows_returned' });
   const oversizedSpec = validSpec + ' '.repeat(TRIGGER_BUDGETS.maxSpecBytes + 1 - Buffer.byteLength(validSpec));
 
