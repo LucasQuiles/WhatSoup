@@ -1012,6 +1012,12 @@ function expectOneReapWarning(obligationId: number, reapError: RegExp): void {
   expect(reapWarnings).toEqual([[{ obligationId, reapError: expect.stringMatching(reapError) }, 'capability resolver process group not proven reaped']]);
 }
 
+/** The operator warning the call site must log once when the run settled without a `close`. */
+function expectOneCloseNotObservedWarning(obligationId: number): void {
+  const closeWarnings = executionToolWarns.filter(([fields]) => typeof fields === 'object' && fields !== null && 'closeNotObserved' in fields);
+  expect(closeWarnings).toEqual([[{ obligationId, closeNotObserved: true }, 'capability resolver output still open after the reap grace; a descendant may still be running']]);
+}
+
 const reapResolverDirs = trackTmpDirs('co-exectool-3568-');
 
 /** A resolver in its own dir (removed after each test): the whole-dir manifest binds every sibling. */
@@ -1185,7 +1191,9 @@ describe('resolver process-group reap (issue 3568)', () => {
       await settleWithin(run, 2_000, 'the run did not settle after teardown').catch(() => undefined);
       expect(gone).toBe(true);
     }
-  }, 25_000);
+    // 30 s: a hung run costs the start-up, the 19 s bound, up to 2 s of waitForPidGone and the 2 s
+    // settle, and all of it must finish before the test timeout.
+  }, 30_000);
 
   it('a watchdog group kill that succeeds while a setsid descendant holds stdout settles after the reap grace as close-not-observed', async () => {
     // The descendant leaves the resolver's group, so the watchdog's group kill succeeds yet never
@@ -1215,6 +1223,10 @@ describe('resolver process-group reap (issue 3568)', () => {
       expect(listResolverStages().filter((n) => !before.has(n))).toEqual([]); // the stage dir was removed
       // Exactly one group kill, the watchdog's: grace expiry never signals the group again.
       expect(kill.targets).toEqual([-detachedSpawnPids[0]!]);
+      // The kill succeeded, yet something still held the output open: the agent and the operator
+      // must both hear that a descendant may still be running.
+      expect(String(result['message'])).toMatch(/timedOut=true, closeNotObserved=true\)/);
+      expectOneCloseNotObservedWarning(id);
     } finally {
       // Runs whether or not the run settled.
       kill.restore();
@@ -1226,7 +1238,9 @@ describe('resolver process-group reap (issue 3568)', () => {
       await settleWithin(run, 2_000, 'the run did not settle after teardown').catch(() => undefined);
       expect(gone).toBe(true);
     }
-  }, 25_000);
+    // 30 s: a hung run costs the start-up, the 18 s bound, up to 2 s of waitForPidGone and the 2 s
+    // settle, and all of it must finish before the test timeout.
+  }, 30_000);
 
   it('a child error event sweeps the resolver group before the run rejects', async () => {
     // A pid far outside any live pgid range: the spy answers the sweep, so nothing real is signalled.
@@ -1283,7 +1297,10 @@ describe('resolver process-group reap (issue 3568)', () => {
     try {
       await runtime.tickOnce();
       expect(result['error']).toBe('capability_execution');
-      expect(String(result['message'])).toContain('Capability resolver could not be started');
+      // The group was started and not proven reaped, so the agent's message names reapError and
+      // does not claim the resolver never started.
+      expect(String(result['message'])).toMatch(/reapError=group kill failed: EINVAL/);
+      expect(String(result['message'])).not.toContain('could not be started');
       expect(kill.targets).toEqual([-fakePid]);
       const rows = receiptRows(id);
       expect(rows).toHaveLength(1);

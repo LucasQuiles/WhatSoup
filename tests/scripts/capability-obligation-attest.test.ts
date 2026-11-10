@@ -677,7 +677,8 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
       const result = runCli(dbFile, configFile, dir, ['--run-canary', '--confirm', '--probe-source', 'https://probe.example/clip', '--receipt-out', join(dir, 'probe-receipt.json')], undefined, 20_000);
       expect(existsSync(pidFile)).toBe(true); // the descendant existed before the watchdog fired
       expect(result.status, `signal: ${String(result.signal)}; stderr: ${String(result.stderr)}`).toBe(3);
-      expect(result.stdout).toMatch(/NOT RECORDED attest child_process_tools: canary_failed/);
+      // The operator sees why: the canary's own reason, and that a descendant may still be running.
+      expect(result.stdout).toMatch(/NOT RECORDED attest child_process_tools: canary_failed reason=resolver_close_not_observed \(a resolver descendant may still be running; no attestation, no receipt\)/);
       expect(admissibleOutcome(dbFile, dir, configFile)).toBe('skip');
     } finally {
       const gcPid = readFixturePid(pidFile);
