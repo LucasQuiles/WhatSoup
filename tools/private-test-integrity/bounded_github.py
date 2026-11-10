@@ -11,7 +11,7 @@ import re
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from private_scanner_candidate import BoundaryError
+from private_scanner_candidate import BoundaryError, decode_github_blob
 
 
 MAX_BLOB_BATCH_OBJECTS = 80
@@ -125,7 +125,15 @@ class GitHubClient:
             200,
             response_limit,
         )
-        return _verify_blob_batch_response(response, verified)
+        return _verify_blob_batch_response(response, verified, fetch_blob=self._fetch_complete_blob)
+
+    def _fetch_complete_blob(self, object_id, size):
+        # GraphQL truncates large text blobs; REST preserves their complete bytes.
+        response = self._request_url(
+            "GET", _REST_API_ROOT + "git/blobs/" + object_id, None, 200,
+            min(self._limit, 2 * size + _GRAPHQL_RESPONSE_OVERHEAD),
+        )
+        return decode_github_blob(object_id, size, response, max_blob_bytes=MAX_BLOB_BYTES)
 
     def _request(self, method, suffix, body, expected_status):
         if not isinstance(suffix, str) or not re.fullmatch(r"[A-Za-z0-9_.\-/]+(?:\?[A-Za-z0-9_.=&\-]+)?", suffix):
@@ -211,7 +219,7 @@ def _validate_blob_batch(objects):
     return tuple(verified), total_bytes
 
 
-def _verify_blob_batch_response(response, expected):
+def _verify_blob_batch_response(response, expected, *, fetch_blob=None):
     if type(response) is not dict or set(response) != {"data"}:
         raise BoundaryError("GitHub GraphQL response is malformed")
     data = response["data"]
@@ -237,10 +245,15 @@ def _verify_blob_batch_response(response, expected):
             or type(blob.get("byteSize")) is not int
             or blob["byteSize"] != size
             or blob.get("isBinary") is not False
-            or blob.get("isTruncated") is not False
+            or type(blob.get("isTruncated")) is not bool
             or type(blob.get("text")) is not str
         ):
             raise BoundaryError("GitHub GraphQL blob response is malformed")
+        if blob["isTruncated"]:
+            if fetch_blob is None:
+                raise BoundaryError("GitHub GraphQL blob text is truncated")
+            blobs[object_id] = fetch_blob(object_id, size)
+            continue
         try:
             content = blob["text"].encode("utf-8", "strict")
         except UnicodeError as exc:
