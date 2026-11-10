@@ -20,17 +20,20 @@ const log = createChildLogger('substrate.triggers');
 // A bounded over-limit sentinel preserves resource-error classification without
 // truncating invalid data into valid JSON or changing the stored evidence.
 function boundedTriggerColumn(column: string, maxBytes: number): string {
-  return `CASE WHEN length(CAST(${column} AS BLOB)) > ${maxBytes}
+  return `CASE WHEN typeof(${column}) = 'blob' OR length(CAST(${column} AS BLOB)) > ${maxBytes}
     THEN printf('%*s', ${maxBytes + 1}, '') ELSE ${column} END AS ${column}`;
 }
 
-export const BOUNDED_TRIGGER_COLUMNS = `
-  id, bead_id, kind,
-  ${boundedTriggerColumn('spec_json', TRIGGER_BUDGETS.maxSpecBytes)},
-  spec_version, status, interval_seconds, next_fire_at, last_fire_at, terminal_at, on_terminal,
-  ${boundedTriggerColumn('report_chat_jid', TRIGGER_BUDGETS.maxReportTargetBytes)},
-  ${boundedTriggerColumn('dedupe_key', TRIGGER_BUDGETS.maxDedupeKeyBytes)},
-  created_at, updated_at`;
+// SQLite's non-STRICT numeric columns can also contain legacy text or blobs.
+export const BOUNDED_TRIGGER_COLUMNS = [
+  'id',
+  ...['bead_id', 'kind', 'spec_version', 'status', 'interval_seconds', 'next_fire_at',
+    'last_fire_at', 'terminal_at', 'on_terminal', 'created_at', 'updated_at']
+    .map((column) => boundedTriggerColumn(column, TRIGGER_BUDGETS.maxRootScalarBytes)),
+  boundedTriggerColumn('spec_json', TRIGGER_BUDGETS.maxSpecBytes),
+  boundedTriggerColumn('report_chat_jid', TRIGGER_BUDGETS.maxReportTargetBytes),
+  boundedTriggerColumn('dedupe_key', TRIGGER_BUDGETS.maxDedupeKeyBytes),
+].join(', ');
 
 
 // #1757: a legit epoch-SECONDS fire_at stays under this ceiling — no real
@@ -312,7 +315,7 @@ const SqliteSpec  = z.object({
   // is still accepted for back-compat, but is unsafe for 2+ integer-like keys.
   binds: z.union([
     z.array(z.union([boundedText(z.string(), TRIGGER_BUDGETS.maxSqliteBindBytes, 'sqlite.binds.value'), z.number().finite(), z.null()])).max(TRIGGER_BUDGETS.maxSqliteBinds),
-    z.record(z.union([boundedText(z.string(), TRIGGER_BUDGETS.maxSqliteBindBytes, 'sqlite.binds.value'), z.number().finite(), z.null()])).refine(
+    z.record(z.string(), z.union([boundedText(z.string(), TRIGGER_BUDGETS.maxSqliteBindBytes, 'sqlite.binds.value'), z.number().finite(), z.null()])).refine(
       (binds) => Object.keys(binds).length <= TRIGGER_BUDGETS.maxSqliteBinds,
       { message: 'too many SQLite binds' },
     ),
@@ -457,7 +460,7 @@ export function createTrigger(db: DatabaseSync, args: CreateTriggerArgs, clock: 
     // so a watch can be legitimately re-armed after it has ended.
     if (args.dedupeKey) {
       const existing = db.prepare(
-        `SELECT * FROM bead_triggers
+        `SELECT ${BOUNDED_TRIGGER_COLUMNS} FROM bead_triggers
          WHERE kind = ? AND dedupe_key = ? AND status IN ('active','paused')
          ORDER BY id LIMIT 1`,
       ).get(args.kind, args.dedupeKey) as unknown as TriggerRow | undefined;
@@ -484,7 +487,7 @@ export function createTrigger(db: DatabaseSync, args: CreateTriggerArgs, clock: 
       payload: { trigger_id: triggerId, kind: args.kind, next_fire_at: nextFireAt, terminal_at: terminalAt },
       at: now,
     });
-    const row = db.prepare(`SELECT * FROM bead_triggers WHERE id = ?`).get(triggerId) as unknown as TriggerRow;
+    const row = db.prepare(`SELECT ${BOUNDED_TRIGGER_COLUMNS} FROM bead_triggers WHERE id = ?`).get(triggerId) as unknown as TriggerRow;
     db.exec('COMMIT');
     return row;
   } catch (err) {
@@ -493,16 +496,54 @@ export function createTrigger(db: DatabaseSync, args: CreateTriggerArgs, clock: 
   }
 }
 
-export interface ListTriggersFilter { beadId?: number; kind?: TriggerKind; status?: TriggerRow['status']; }
+export interface ListTriggersFilter {
+  beadId?: number;
+  kind?: TriggerKind;
+  status?: TriggerRow['status'];
+  limit?: number;
+  afterId?: number;
+}
 
 export function listTriggers(db: DatabaseSync, f: ListTriggersFilter = {}): TriggerRow[] {
-  const w: string[] = [];
-  const b: SQLInputValue[] = [];
+  const page = listTriggersPage(db, f);
+  if (page.next_after_id !== null) {
+    throw new Error(`pagination_required: retry list_triggers with limit between 1 and ${TRIGGER_BUDGETS.maxListRows}, then pass next_after_id as after_id until it is null`);
+  }
+  return page.triggers;
+}
+
+export function listTriggersPage(db: DatabaseSync, f: ListTriggersFilter = {}): {
+  triggers: TriggerRow[];
+  next_after_id: number | null;
+} {
+  const limit = f.limit ?? TRIGGER_BUDGETS.maxListRows;
+  const afterId = f.afterId ?? 0;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > TRIGGER_BUDGETS.maxListRows) budgetError('list.limit');
+  if (!Number.isSafeInteger(afterId) || afterId < 0) budgetError('list.after_id');
+  if (f.beadId != null && (!Number.isSafeInteger(f.beadId) || f.beadId < 1)) budgetError('list.bead_id');
+  if (f.kind) assertTriggerTextBudget(f.kind, 'list.kind', TRIGGER_BUDGETS.maxRootScalarBytes);
+  const w: string[] = ['id > ?'];
+  const b: SQLInputValue[] = [afterId];
   if (f.beadId != null) { w.push('bead_id = ?'); b.push(f.beadId); }
   if (f.kind)           { w.push('kind = ?');    b.push(f.kind); }
   if (f.status)         { w.push('status = ?');  b.push(f.status); }
-  const sql = `SELECT * FROM bead_triggers ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY id ASC`;
-  return db.prepare(sql).all(...b) as unknown as TriggerRow[];
+  const sql = `SELECT ${BOUNDED_TRIGGER_COLUMNS} FROM bead_triggers WHERE ${w.join(' AND ')} ORDER BY id ASC LIMIT ?`;
+  const rows = db.prepare(sql).all(...b, limit + 1) as unknown as TriggerRow[];
+  const triggers: TriggerRow[] = [];
+  // Reserve the largest supported cursor before counting escaped JSON row bytes.
+  let bytes = Buffer.byteLength(JSON.stringify({ triggers: [], next_after_id: Number.MAX_SAFE_INTEGER }));
+  let hasMore = false;
+  for (const row of rows) {
+    const rowBytes = Buffer.byteLength(JSON.stringify(row)) + (triggers.length > 0 ? 1 : 0);
+    if (triggers.length === limit || bytes + rowBytes > TRIGGER_BUDGETS.maxListResponseBytes) {
+      hasMore = true;
+      break;
+    }
+    triggers.push(row);
+    bytes += rowBytes;
+  }
+  if (hasMore && triggers.length === 0) budgetError('list.row');
+  return { triggers, next_after_id: hasMore ? triggers[triggers.length - 1].id : null };
 }
 
 export function pauseTrigger(db: DatabaseSync, id: number, args: { actor: string }, clock: Clock = systemClock): void {

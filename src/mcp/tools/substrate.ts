@@ -17,7 +17,7 @@ import {
   assertMutableBeadFields, activityFeed,
 } from '../../core/substrate/beads.ts';
 import {
-  createTrigger, listTriggers, listTriggerRunsRedacted, pauseTrigger, extendTrigger, resumeTrigger, prepareTrigger,
+  createTrigger, listTriggers, listTriggersPage, listTriggerRunsRedacted, pauseTrigger, extendTrigger, resumeTrigger, prepareTrigger,
   assertTriggerTextBudget, assertTriggerValueBudget, TRIGGER_BUDGETS,
 } from '../../core/substrate/triggers.ts';
 import { clearAlertSourceChecked } from '../../lib/emit-alert.ts';
@@ -580,17 +580,22 @@ export function registerSubstrateTools(
 
   registry.register({
     name: 'list_triggers',
-    description: 'List triggers, optionally filtered.',
+    description: 'List triggers with optional filters. Set limit or after_id to paginate; an unpaged request that exceeds one safe response fails with pagination_required. Continue with next_after_id and the same filters until it is null. Oversized legacy fields use bounded sentinels; stored data is unchanged.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'read_only',
     externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
     schema: z.object({
-      bead_id: z.number().int().positive().optional(),
-      kind: z.string().optional(),
+      bead_id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+      kind: z.string().max(TRIGGER_BUDGETS.maxRootScalarBytes).optional(),
       status: z.enum(['active','paused','expired','cancelled']).optional(),
+      limit: z.number().int().positive().max(TRIGGER_BUDGETS.maxListRows).optional(),
+      after_id: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
     }),
     handler: async (raw) => {
-      const p = raw as { bead_id?: number; kind?: string; status?: 'active'|'paused'|'expired'|'cancelled' };
-      return { triggers: listTriggers(deps.db, { beadId: p.bead_id, kind: p.kind as TriggerKind | undefined, status: p.status }) };
+      const p = raw as { bead_id?: number; kind?: string; status?: 'active'|'paused'|'expired'|'cancelled'; limit?: number; after_id?: number };
+      const filter = { beadId: p.bead_id, kind: p.kind as TriggerKind | undefined, status: p.status };
+      return p.limit === undefined && p.after_id === undefined
+        ? { triggers: listTriggers(deps.db, filter), next_after_id: null }
+        : listTriggersPage(deps.db, { ...filter, limit: p.limit, afterId: p.after_id });
     },
   });
 

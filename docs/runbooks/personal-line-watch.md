@@ -215,6 +215,14 @@ of misconfigured or compromised triggers:
 - **Dispatch-failure observability.** When a trigger fires and dispatch is attempted but `messenger.sendMessage` throws a *transient* error (timeout, connection closed, session 401 — anything not classified as a permanent per-target reject), the (already-committed) run is post-commit marked `error_kind='notify_dispatch_failed'` with `status` left unchanged (`ok`) and `error_message` NULL. This makes a fired-but-undelivered run distinguishable in `trigger_runs` telemetry from a throttled one (which was never dispatched and carries no `error_kind`) and from an execute failure (`status='failed'` with its own `error_kind`). The delivery is at-most-once: no automatic retry, and the trigger keeps rescheduling (fail-loud, never silently retire — a daily job must survive a transport blip).
 - **Forbidden-target retirement (#1745).** When the dispatch throws a *permanent per-target authz reject* — `isForbiddenTargetReject` matches a `forbidden`/`403` message or `output.statusCode === 403` (the WhatsApp server refusing because the bot was removed from / is not a member of `report_chat_jid`); `401`/`unauthorized` is deliberately excluded as a transient session condition — the run is marked `error_kind='notify_forbidden_target'` instead. After `MAX_CONSECUTIVE_FORBIDDEN_REJECTS` (default 3) consecutive such rejects the poller RETIRES the producer: `status='paused'`, `next_fire_at=NULL`, a `trigger_paused` bead_event with `{ reason: 'forbidden_target', report_chat_jid, reject_count }` (the producer signal), and a `trigger_forbidden_target` BOT ERRORS alert naming the bead/trigger/chat. The alert is the *out-of-band* channel precisely because the report chat is undeliverable — the gap that let the original incident loop for ~4 days feeding the quarantine. Re-arm only after the bot is re-added, or delete the producing bead. The re-arm path is the MCP tool `resume_trigger` (#3608): it schedules the next regular occurrence and clears the `trigger_forbidden_target` alert. `extend_trigger` only moves the deadline and leaves the trigger paused.
 
+The `list_triggers` reader uses the same bounded SQLite projection, including legacy
+text in numeric columns. It returns at most 50 rows and 65,536 bytes of compact JSON.
+Set `limit` or `after_id` to paginate; an unpaged request that would be incomplete
+returns `pagination_required`. Pass `next_after_id` as `after_id` with the same
+filters until the cursor is `null`. This
+limits transfer and response size, not SQLite's internal query work or a concurrent
+inventory snapshot. Stored values are never truncated or rewritten by a read.
+
 Terminal-at expiry revalidates persisted report targets and dedupe keys before notifying or
 reopening a bead. Invalid roots retire the trigger without either effect and record a redacted
 `failed` / `resource_exhausted` run. Valid expiry commits `notifyPending` with the terminal

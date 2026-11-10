@@ -373,6 +373,166 @@ describe('substrate MCP tools', () => {
     expect(after.triggers[0].status).toBe('paused');
   });
 
+  it.each(['text', 'blob'])('bounds oversized legacy %s trigger fields in SQLite before the MCP response', async (storage) => {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'legacy row', ownerJid: adminActor, actor: 'user' });
+    const oversized = storage === 'text' ? '😀'.repeat(65_536) : Buffer.from('😀'.repeat(65_536));
+    db.raw.prepare(`INSERT INTO bead_triggers
+      (bead_id, kind, spec_json, report_chat_jid, dedupe_key, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 1)`).run(bead.id, oversized, oversized, oversized, oversized, oversized);
+    const prepare = db.raw.prepare.bind(db.raw);
+    const databaseRows: Array<Record<string, unknown>> = [];
+    const reader = vi.spyOn(db.raw, 'prepare').mockImplementation((sql) => {
+      const statement = prepare(sql);
+      if (/SELECT/i.test(sql) && sql.includes('bead_triggers')) {
+        const all = statement.all.bind(statement);
+        vi.spyOn(statement, 'all').mockImplementation((...values) => {
+          const rows = all(...values);
+          databaseRows.push(...rows);
+          return rows;
+        });
+      }
+      return statement;
+    });
+    try {
+      const response = await registry.call('list_triggers', {}, adminSession);
+      const page = parseResult(response);
+      expect(page.triggers).toHaveLength(1);
+      expect(databaseRows).toHaveLength(1);
+      for (const row of databaseRows) {
+        for (const value of Object.values(row)) {
+          if (typeof value === 'string') expect(Buffer.byteLength(value)).toBeLessThanOrEqual(8_193);
+          if (value instanceof Uint8Array) expect(value.byteLength).toBeLessThanOrEqual(8_193);
+        }
+      }
+      expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThanOrEqual(65_536);
+      expect(Buffer.byteLength(JSON.stringify(response))).toBeLessThanOrEqual(196_608);
+      expect(page.triggers[0].spec_json).not.toContain('😀');
+    } finally {
+      reader.mockRestore();
+    }
+    expect(db.raw.prepare('SELECT length(CAST(spec_json AS BLOB)) AS bytes FROM bead_triggers').get()?.bytes).toBe(262_144);
+  });
+
+  it('paginates an unfiltered trigger inventory without gaps or duplicates', async () => {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'large inventory', ownerJid: adminActor, actor: 'user' });
+    const insert = db.raw.prepare(`INSERT INTO bead_triggers
+      (bead_id, kind, spec_json, report_chat_jid, created_at, updated_at)
+      VALUES (?, 'schedule.at', '{}', 'report', 1, 1)`);
+    const ids: number[] = [];
+    for (let i = 0; i < 123; i += 1) ids.push(Number(insert.run(bead.id).lastInsertRowid));
+    const seen: number[] = [];
+    let afterId: number | undefined;
+    for (let pageNumber = 0; pageNumber < 4; pageNumber += 1) {
+      const page = parseResult(await registry.call('list_triggers', { limit: 50, after_id: afterId }, adminSession));
+      expect(page.triggers.length).toBeLessThanOrEqual(50);
+      expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThanOrEqual(65_536);
+      seen.push(...page.triggers.map((row: { id: number }) => row.id));
+      if (page.next_after_id === null) break;
+      expect(page.next_after_id).toBeGreaterThan(afterId ?? 0);
+      afterId = page.next_after_id;
+    }
+    expect(seen).toEqual(ids);
+  });
+
+  it.each([
+    { boundary: 'row count', rows: 51, spec: '{}' },
+    { boundary: 'response bytes', rows: 3, spec: '\u0001'.repeat(8_192) },
+  ])('rejects an incomplete old-style inventory at the $boundary limit', async ({ rows, spec }) => {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'legacy inventory client', ownerJid: adminActor, actor: 'user' });
+    const insert = db.raw.prepare(`INSERT INTO bead_triggers
+      (bead_id, kind, spec_json, report_chat_jid, created_at, updated_at)
+      VALUES (?, 'schedule.at', ?, 'report', 1, 1)`);
+    for (let i = 0; i < rows; i += 1) insert.run(bead.id, spec);
+
+    const response = await registry.call('list_triggers', { bead_id: bead.id }, adminSession);
+    expect(response.isError).toBe(true);
+    expect(response.content[0].text).toContain('pagination_required');
+    expect(response.content[0].text).toContain('limit');
+    expect(Buffer.byteLength(JSON.stringify(response))).toBeLessThan(2_048);
+    expect(db.raw.prepare('SELECT count(*) AS total FROM bead_triggers').get()?.total).toBe(rows);
+
+    const page = parseResult(await registry.call('list_triggers', { bead_id: bead.id, after_id: 0 }, adminSession));
+    expect(page.triggers.length).toBeGreaterThan(0);
+    expect(page.next_after_id).toBe(page.triggers.at(-1).id);
+  });
+
+  it('preserves complete old-style inventories at the row limit', async () => {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'complete legacy inventory', ownerJid: adminActor, actor: 'user' });
+    const insert = db.raw.prepare(`INSERT INTO bead_triggers
+      (bead_id, kind, spec_json, report_chat_jid, created_at, updated_at)
+      VALUES (?, 'schedule.at', '{}', 'report', 1, 1)`);
+    const ids = Array.from({ length: 50 }, () => Number(insert.run(bead.id).lastInsertRowid));
+    const response = await registry.call('list_triggers', {}, adminSession);
+    expect(response.isError).not.toBe(true);
+    const page = parseResult(response);
+    expect({ ids: page.triggers.map((row: { id: number }) => row.id), next_after_id: page.next_after_id })
+      .toEqual({ ids, next_after_id: null });
+  });
+
+  it('caps escaped response bytes while allowing continuation after a full row', async () => {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'escaped legacy spec', ownerJid: adminActor, actor: 'user' });
+    const insert = db.raw.prepare(`INSERT INTO bead_triggers
+      (bead_id, kind, spec_json, report_chat_jid, created_at, updated_at)
+      VALUES (?, 'schedule.at', ?, 'report', 1, 1)`);
+    const spec = '\u0001'.repeat(8_192);
+    const ids = Array.from({ length: 3 }, () => Number(insert.run(bead.id, spec).lastInsertRowid));
+    const response = await registry.call('list_triggers', { limit: 50 }, adminSession);
+    const first = parseResult(response);
+    expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThanOrEqual(65_536);
+    expect(Buffer.byteLength(JSON.stringify(response))).toBeLessThanOrEqual(196_608);
+    expect(first.triggers.map((row: { id: number }) => row.id)).toEqual([ids[0]]);
+    expect(first.triggers[0].spec_json).toBe(spec);
+    expect(first.next_after_id).toBe(ids[0]);
+    const second = parseResult(await registry.call('list_triggers', { after_id: first.next_after_id, limit: 1 }, adminSession));
+    expect(second.triggers.map((row: { id: number }) => row.id)).toEqual([ids[1]]);
+    expect(second.next_after_id).toBe(ids[1]);
+    const final = parseResult(await registry.call('list_triggers', { after_id: second.next_after_id }, adminSession));
+    expect(final.triggers.map((row: { id: number }) => row.id)).toEqual([ids[2]]);
+    expect(final.next_after_id).toBeNull();
+    const empty = parseResult(await registry.call('list_triggers', { after_id: ids[2] + 1 }, adminSession));
+    expect(empty).toEqual({ triggers: [], next_after_id: null });
+  });
+
+  it.each(['\u0001', '"', '\\', '😀'])('bounds the actual tool wire with every variable field at its byte limit (%s)', async (character) => {
+    const field = (bytes: number) => character.repeat(bytes / Buffer.byteLength(character));
+    const bead = createBead(db.raw, { kind: 'watch', title: 'wire boundary', ownerJid: adminActor, actor: 'user' });
+    const insert = db.raw.prepare(`INSERT INTO bead_triggers
+      (bead_id, kind, spec_json, spec_version, interval_seconds, next_fire_at,
+       last_fire_at, terminal_at, report_chat_jid, dedupe_key, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const ids = Array.from({ length: 50 }, () => Number(insert.run(
+      bead.id, field(64), field(8_192), field(64), field(64), field(64),
+      field(64), field(64), field(512), field(256), field(64), field(64),
+    ).lastInsertRowid));
+    const response = await registry.call('list_triggers', { limit: 50 }, adminSession);
+    const page = parseResult(response);
+    expect(page.triggers.length).toBeGreaterThan(0);
+    expect(page.triggers[0].spec_json).toBe(field(8_192));
+    expect(page.next_after_id).toBe(ids[page.triggers.length - 1]);
+    expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThanOrEqual(65_536);
+    expect(Buffer.byteLength(JSON.stringify(response))).toBeLessThanOrEqual(196_608);
+  });
+
+  it('rejects invalid page limits and unsafe cursors without treating them as empty inventories', async () => {
+    for (const input of [{ limit: 0 }, { limit: 51 }, { limit: 1.5 }, { after_id: -1 }, { after_id: Number.MAX_SAFE_INTEGER + 1 }, { bead_id: Number.MAX_SAFE_INTEGER + 1 }]) {
+      const response = await registry.call('list_triggers', input, adminSession);
+      expect(response.isError).toBe(true);
+    }
+  });
+
+  it.each(['id', 'created_at'])('reports an unsupported legacy integer in %s without rounding or claiming an empty inventory', async (column) => {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'unsafe legacy integer', ownerJid: adminActor, actor: 'user' });
+    db.raw.prepare(`INSERT INTO bead_triggers
+      (bead_id, kind, spec_json, report_chat_jid, created_at, updated_at)
+      VALUES (?, 'schedule.at', '{}', 'report', 1, 1)`).run(bead.id);
+    db.raw.exec(`UPDATE bead_triggers SET ${column} = 9007199254740992`);
+    const response = await registry.call('list_triggers', {}, adminSession);
+    expect(response.isError).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(response))).toBeLessThan(2_048);
+    expect(response.content[0].text).toMatch(/too large|safely represented/i);
+    expect(db.raw.prepare(`SELECT CAST(${column} AS TEXT) AS value FROM bead_triggers`).get()?.value).toBe('9007199254740992');
+  });
+
   async function pausedDigestJob() {
     const res = parseResult(await registry.call('create_agent_job', {
       prompt: 'daily digest',

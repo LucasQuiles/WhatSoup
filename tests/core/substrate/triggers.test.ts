@@ -199,6 +199,18 @@ describe('triggers core', () => {
     expect(listTriggers(db.raw, { kind: 'poll.url' })).toHaveLength(1);
   });
 
+  it.each([
+    { boundary: 'row count', rows: 51, spec: '{}' },
+    { boundary: 'response bytes', rows: 3, spec: '\u0001'.repeat(8_192) },
+  ])('listTriggers refuses a partial inventory at the $boundary limit', ({ rows, spec }) => {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'bounded inventory', ownerJid: 'mw', actor: 'user' });
+    const insert = db.raw.prepare(`INSERT INTO bead_triggers
+      (bead_id, kind, spec_json, report_chat_jid, created_at, updated_at)
+      VALUES (?, 'schedule.at', ?, 'report', 1, 1)`);
+    for (let i = 0; i < rows; i += 1) insert.run(bead.id, spec);
+    expect(() => listTriggers(db.raw, { beadId: bead.id })).toThrow(/pagination_required/);
+  });
+
   it('listTriggers supports unfiltered and status-only reads', () => {
     const bead = createBead(db.raw, { kind: 'watch', title: 'status-list', ownerJid: 'mw', actor: 'u' });
     const t = createTrigger(db.raw, {

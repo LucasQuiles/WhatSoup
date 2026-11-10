@@ -685,7 +685,19 @@ Cancel a proposed bead with an optional rejection reason. Admin only.
 
 ### list_triggers
 
-List triggers with optional filters.
+List triggers with optional filters. Set `limit` or `after_id` to request pagination.
+The result contains `triggers` and `next_after_id`; pass that cursor as `after_id`
+with the same filters until it is `null`. Pages contain at most 50 rows and 65,536
+bytes of compact JSON, so a page can contain fewer rows than requested. A request
+without either pagination parameter returns the complete matching inventory if it
+fits; otherwise it returns `pagination_required`, without a partial success result.
+Concurrent changes are not a snapshot of the inventory. See the
+[migration note](releases/2026-11-10-trigger-inventory-bounds.md).
+Oversized legacy fields and invalid binary values are replaced in the read with a
+bounded over-limit space sentinel; their original database bytes remain unchanged.
+The existing numeric API does not support SQLite integers outside JavaScript's safe
+integer range. Such a legacy row returns an error, not rounded identifiers or an
+empty inventory; it requires database repair before that page can be read.
 
 | | |
 |---|---|
@@ -699,6 +711,8 @@ List triggers with optional filters.
 | bead_id | number | optional | Filter by bead id. |
 | kind | string | optional | Filter by trigger kind. |
 | status | `"active"` \| `"paused"` \| `"expired"` \| `"cancelled"` | optional | Filter by trigger status. |
+| limit | number | optional | Maximum rows, 1–50; default 50. The response byte limit may return fewer. |
+| after_id | number | optional | Return IDs strictly greater than this nonnegative safe integer; use `next_after_id` from the previous page. |
 
 ---
 
