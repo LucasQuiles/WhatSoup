@@ -596,9 +596,9 @@ export const fitnessRules = [
         'scripts/lib/verify-lib.sh',
         'scripts/lib/fitness/',
         'scripts/check-launchd-drift.sh',
-        // This exception is limited to the refresh owner's fixed, absolute
+        // This exception is limited to the shared identity helper's fixed, absolute
         // Darwin interpreter candidates; it must not use caller PATH.
-        'src/runtimes/agent/providers/claude-refresh-process-identity.ts',
+        'src/lib/darwin-process-identity.ts',
         // The one sanctioned home for absolute git paths: the static trust
         // allowlist that exists so security-sensitive scripts never
         // PATH-resolve git (#2616). Candidates are individually vetted there.

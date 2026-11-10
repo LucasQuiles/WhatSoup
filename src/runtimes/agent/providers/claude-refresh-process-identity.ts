@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { readDarwinUniqueProcessId } from '../../../lib/darwin-process-identity.ts';
+import { SIGNAL } from '../../../lib/signals.ts';
 
 export type RefreshProcessObservation =
   | { state: 'alive'; birthToken: string }
@@ -31,7 +32,7 @@ export function inspectRefreshProcess(pid: number, deps: ProcessIdentityDeps = {
   if (first !== 'alive') return { state: first };
   const read = deps.read ?? ((path) => readFileSync(path, 'utf8'));
   const command = deps.command ?? ((file, args, env, timeoutMs = 1_000) => execFileSync(file, args, {
-    encoding: 'utf8', env, timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: 4_096, stdio: ['ignore', 'pipe', 'ignore'],
+    encoding: 'utf8', env, timeout: timeoutMs, killSignal: SIGNAL.KILL, maxBuffer: 4_096, stdio: ['ignore', 'pipe', 'ignore'],
   }));
   let birthToken: string;
   try {

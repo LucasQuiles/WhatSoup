@@ -260,15 +260,19 @@ describe('platform-pattern-check', () => {
 
   it('allows the documented Darwin identity source while retaining a sibling finding', () => {
     const root = tmp.make('fixed-candidate-identity');
-    const identity = path.join(root, 'src', 'runtimes', 'agent', 'providers');
+    const identity = path.join(root, 'src', 'lib');
     mkdirSync(identity, { recursive: true });
-    writeFileSync(path.join(identity, 'claude-refresh-process-identity.ts'), "const candidate = '/usr/bin/python3';\n");
+    writeFileSync(path.join(identity, 'darwin-process-identity.ts'), "const candidate = '/usr/bin/python3';\n");
+    const previous = path.join(root, 'src', 'runtimes', 'agent', 'providers');
+    mkdirSync(previous, { recursive: true });
+    writeFileSync(path.join(previous, 'claude-refresh-process-identity.ts'), "const candidate = '/usr/bin/python3';\n");
     writeFileSync(path.join(root, 'src', 'sibling.ts'), "const candidate = '/usr/bin/python3';\n");
 
     const [rule] = loadRuleSpecs(['portability.no-hardcoded-platform-binaries']);
 
-    expect(scanRule(root, rule!).map(({ line, pattern }) => ({ line, pattern }))).toEqual([
-      { line: 1, pattern: "'/usr/bin/python" },
+    expect(scanRule(root, rule!).map(({ file, line, pattern }) => ({ file, line, pattern }))).toEqual([
+      { file: 'src/runtimes/agent/providers/claude-refresh-process-identity.ts', line: 1, pattern: "'/usr/bin/python" },
+      { file: 'src/sibling.ts', line: 1, pattern: "'/usr/bin/python" },
     ]);
   });
 

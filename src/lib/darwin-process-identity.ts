@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { constants } from 'node:os';
+import { SIGNAL } from './signals.ts';
 
 type IdentityCommand = (file: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs: number) => string;
 interface IdentityDependencies {
@@ -109,7 +110,7 @@ function command(args: string[], deps: IdentityDependencies): string {
   const now = deps.now ?? (() => performance.now());
   const deadline = now() + DEADLINE_MS;
   const execute: IdentityCommand = deps.command ?? ((file, argv, env, timeout) => execFileSync(file, argv, {
-    encoding: 'utf8', env, timeout, killSignal: 'SIGKILL', maxBuffer: OUTPUT_BYTES,
+    encoding: 'utf8', env, timeout, killSignal: SIGNAL.KILL, maxBuffer: OUTPUT_BYTES,
     stdio: ['ignore', 'pipe', 'ignore'],
   }));
   for (const python of PYTHONS) {
