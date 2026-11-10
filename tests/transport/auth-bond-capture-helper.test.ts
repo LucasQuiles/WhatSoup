@@ -104,13 +104,23 @@ describe('settleAuthBondCapture under real timers', () => {
     return { armed, cleared, timers };
   };
 
-  it('waits for a capture held 200 ms and clears its deadline timer before it fires', async () => {
+  it('waits for a pending capture until it completes and clears its deadline timer before it fires', async () => {
     expect(vi.isFakeTimers()).toBe(false);
+    let complete!: () => void;
     const holder = {
-      authSnapshotCapture: new Promise<void>((resolve) => { setTimeout(resolve, 200); }) as Promise<void> | null,
+      authSnapshotCapture: new Promise<void>((resolve) => { complete = resolve; }) as Promise<void> | null,
     };
     const { armed, cleared, timers } = recordingTimers();
-    await settleAuthBondCapture(holder, { timers });
+    let settled = false;
+    const settling = settleAuthBondCapture(holder, { timers }).then(() => { settled = true; });
+    // The deadline is armed while the capture is still pending, and the wait does not end on its own.
+    expect(armed).toHaveLength(1);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(cleared).toEqual([]);
+    complete();
+    await settling;
+    expect(settled).toBe(true);
     expect(armed).toHaveLength(1);
     expect(armed[0].ms).toBeGreaterThan(7_900);
     expect(armed[0].ms).toBeLessThanOrEqual(8_000);
