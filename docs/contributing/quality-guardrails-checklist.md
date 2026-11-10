@@ -19,12 +19,13 @@ checks; Node 25 runs the full non-coverage compatibility suite and console build
 Affected compatibility runs use the selected root tests on Node 25.
 
 PR metadata has its own `pr metadata` workflow, including title/body edits.
-Quality retains inline metadata enforcement and its edit trigger during cutover.
-The testing-pipeline owner removes that overlap only after both new required
-contexts pass and live branch-protection drift is clean. This final cutover avoids
-restarting application suites for metadata edits. Local YAML validation does not
-establish that hosted setting. Existing CodeQL requirements
-remain in place. Hosted timing gains require measurements after activation.
+Quality omits duplicate metadata execution and its edit trigger. Both new required
+contexts passed before the authorized 2026-11-10 protection update and clean live
+drift check; [Testing paths](../testing.md) links those checks. This avoids restarting
+application suites for metadata edits. Verify current protection before merging;
+local YAML validation does not establish the hosted setting. Existing CodeQL and
+independent review requirements remain in place. Hosted timing gains require
+measurements after activation.
 
 | Step | Command | Purpose |
 |---|---|---|

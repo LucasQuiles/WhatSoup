@@ -64,16 +64,17 @@ its own assertions and failure result. The temporary report is removed on succes
 or failure; combined mode refuses injected reports and baseline updates. Individual
 inventory commands remain available for focused investigation.
 
-Activate the workflow split only after `pr metadata` and the trusted
-`test-integrity (private)` check have run on a candidate and an authorized
-operator has added them to `main` branch protection.
+`pr metadata` and the trusted `test-integrity (private)` check are separate
+required contexts alongside CodeQL and both Quality contexts. The authorized
+2026-11-10 protection update followed successful candidate checks
+[129691470399](https://github.com/LucasQuiles/WhatSoup/actions/runs/42775047501/job/129691470399)
+and [129710040086](https://github.com/LucasQuiles/WhatSoup/runs/129710040086),
+and live readback matched the committed expectation.
 Run `npm run guard:branch-protection-drift` against the live settings and require
 agreement with `docs/enforcement/branch-protection-expected.json` before merging.
-The committed expectation is not an applied GitHub setting. During cutover, Quality
-retains inline metadata enforcement and the `edited` trigger. The testing-pipeline
-owner removes that overlap only after both new contexts pass and live protection
-matches the expectation. PR metadata is checked
-on PR events, including edits; merge groups rely on those PR checks before admission
+That historical readback does not prove future settings. Quality omits duplicate
+metadata execution and title/body edit triggers; the metadata workflow checks
+PR edits without restarting application suites. Merge groups rely on PR checks before admission
 and receive the required metadata context without pretending to have a PR body.
 To roll back, restore the full Quality workflow's metadata enforcement before
 removing the separate requirement; keep both checks available during that transition.
@@ -112,6 +113,13 @@ computed imports or filesystem dependencies. Fixture and configuration changes
 therefore select full validation; the text-reference search preserves existing
 non-import companions. A no-tests result is a failure. New runtime dependency
 patterns need a policy update or full validation, rather than a skip flag.
+
+The authority-client media tests retain both small and 50 MiB HTTP response cases.
+The capacity case runs the shared scenario in a native Node child with an 8-second
+deadline and bounded output; nonzero exit, signal, timeout or malformed output
+fails the parent test. The small case covers the same production path under V8
+instrumentation. Both assert complete payload preservation and safe Desk referral;
+the large case supplies capacity evidence, not additional coverage counts.
 
 ## Limits and truthful results
 

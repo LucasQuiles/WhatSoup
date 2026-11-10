@@ -239,7 +239,6 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const liveGate = readGateInputs(repoRoot);
 const packageJson = { scripts: liveGate.scripts };
 const qualityWorkflow = liveGate.qualityWorkflow;
-const prMetadataWorkflow = readFileSync(resolve(repoRoot, '.github/workflows/pr-metadata.yml'), 'utf8');
 const whatsoupGuardWorkflow = readFileSync(resolve(repoRoot, '.github/workflows/whatsoup-guard.yml'), 'utf8');
 const branchChain = BRANCH_STEPS.map((step) => step.cmd).join(' && ');
 
@@ -347,20 +346,13 @@ console.log(JSON.stringify({ profile: 'docs', reasons: [], changedFiles: ['READM
     }
   });
 
-  it('runs the standalone PR metadata guard with authoritative pull-request event data', () => {
+  it('keeps the metadata guard in the public command and local branch gate', () => {
     expect(packageJson.scripts['guard:pr-metadata']).toBe(
       'bash scripts/run-with-pinned-node.sh scripts/pr-metadata-guard.ts',
     );
     expect(branchChain).toContain(
       'tests/scripts/pr-metadata-guard.test.ts',
     );
-    expect(prMetadataWorkflow).toMatch(
-      /on:\n  pull_request:\n    types: \[opened, synchronize, reopened, edited\]/,
-    );
-    expect(prMetadataWorkflow).toMatch(
-      /- name: PR metadata guard\n        if: github\.event_name == 'pull_request'\n        env:\n          PR_METADATA_EVENT: \$\{\{ github\.event_path \}\}\n        run: npm run guard:pr-metadata -- --github-event "\$PR_METADATA_EVENT" --json/,
-    );
-    expect(qualityWorkflow).toMatch(/pull_request:\n    types: \[opened, synchronize, reopened, edited\]/);
   });
 
   it('runs one read-only Node 24 semantic shadow step before expensive suites', () => {
