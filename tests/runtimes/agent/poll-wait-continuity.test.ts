@@ -22,7 +22,8 @@ import type { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { WhatSoupSocketServer } from '../../../src/mcp/socket-server.ts';
 import type { ExecutingSessionContext } from '../../../src/mcp/types.ts';
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
-import { SessionManager, WATCHDOG_HARD_MS } from '../../../src/runtimes/agent/session.ts';
+import { SessionManager, STALLED_OP_KILL_GRACE_MS, WATCHDOG_HARD_MS } from '../../../src/runtimes/agent/session.ts';
+import { assessTreeLiveness } from '../../../src/runtimes/agent/tree-liveness.ts';
 import { makeSocketPath } from '../../helpers/socket-rpc.ts';
 import { ownedRuntimeCwd } from '../../helpers/runtime-home-fixture.ts';
 
@@ -132,7 +133,9 @@ function createOpenCodeRuntime(db: Database, messenger: Messenger, cwd: string):
   }
 }
 
-function openAwaitingPoll(socketPath: string, token: string | null): Promise<Socket> {
+function openAwaitingPoll(
+  socketPath: string, token: string | null, timeoutMs = WATCHDOG_HARD_MS * 3,
+): Promise<Socket> {
   return new Promise((resolve, reject) => {
     const client = createConnection(socketPath);
     const rejectOnce = (error: Error) => {
@@ -160,7 +163,7 @@ function openAwaitingPoll(socketPath: string, token: string | null): Promise<Soc
             options: ['Yes', 'No'],
             awaitResult: true,
             // Must remain pending past one ordinary provider hard-watchdog window.
-            timeoutMs: WATCHDOG_HARD_MS + 60_000,
+            timeoutMs,
           },
         },
       }) + '\n');
@@ -178,9 +181,40 @@ describe('OpenCode send_poll await continuity', () => {
   let destination!: SessionManager;
   let server: WhatSoupSocketServer | undefined;
   let clients: Socket[] = [];
+  let socketPath: string;
+  let ownerMessenger: ReturnType<typeof makeMessenger>;
+
+  async function votePoll(client = clients[0]!, pollMessageId = 'poll-await-continuity-1') {
+    const response = new Promise<string>((resolve, reject) => {
+      let buffer = '';
+      const onData = (chunk: Buffer) => {
+        buffer += chunk.toString();
+        const newline = buffer.indexOf('\n');
+        if (newline < 0) return;
+        client.off('data', onData);
+        client.off('error', reject);
+        resolve(buffer.slice(0, newline));
+      };
+      client.on('data', onData);
+      client.once('error', reject);
+    });
+    (ownerRuntime as unknown as RuntimeInternals).handlePollVoteReceived({
+      pollMessageId, chatJid: DESTINATION_JID,
+      voterJid: DESTINATION_JID, selectedOptions: ['Yes'],
+    });
+    const reply = JSON.parse(await response);
+    expect(JSON.parse(reply.result.content[0].text)).toMatchObject({ sent: true, answer: 'Yes' });
+  }
+
+  async function settleOwnerPoll(terminal: 'vote' | 'abort') {
+    if (terminal === 'vote') await votePoll();
+    else clients[0]!.destroy();
+    await vi.waitFor(() => expect(owner.hasPendingTools).toBe(false));
+  }
 
   beforeEach(async () => {
     vi.useFakeTimers();
+    vi.mocked(assessTreeLiveness).mockReset().mockResolvedValue(null);
     spawnedChildren.length = 0;
     vi.mocked(spawn).mockImplementation((...args) => {
       const options = args[2] as { env?: NodeJS.ProcessEnv } | undefined;
@@ -198,7 +232,7 @@ describe('OpenCode send_poll await continuity', () => {
     let resolvePollSends!: () => void;
     const twoPollSends = new Promise<void>((resolve) => { resolvePollSends = resolve; });
     let pollSendCount = 0;
-    const ownerMessenger = makeMessenger(() => {
+    ownerMessenger = makeMessenger(() => {
       pollSendCount += 1;
       if (pollSendCount === 2) resolvePollSends();
     });
@@ -210,7 +244,7 @@ describe('OpenCode send_poll await continuity', () => {
 
     const ownerState = ownerRuntime as unknown as RuntimeInternals;
     const destinationState = destinationRuntime as unknown as RuntimeInternals;
-    const socketPath = makeSocketPath();
+    socketPath = makeSocketPath();
     ownerState.globalMcpSocketPath = socketPath;
 
     ownerState.ensureSessionAndQueueSync(OWNER_JID, undefined, OWNER_JID);
@@ -308,34 +342,13 @@ describe('OpenCode send_poll await continuity', () => {
     await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
     await Promise.resolve();
 
-    // RED on current source: no runtime bridge turns the token-attributed await
-    // into owner.trackToolStart(), so this child is reaped with the unrelated one.
     expect(ownerChild.kill).not.toHaveBeenCalledWith('SIGKILL');
     expect(owner.getStatus()).toMatchObject({ active: true, turnInFlight: true });
 
     // A target JID and an external no-token caller are not owner evidence.
     expect(destinationChild.kill).toHaveBeenCalledWith('SIGKILL');
 
-    const response = new Promise<string>((resolve, reject) => {
-      let buffer = '';
-      const client = clients[0]!;
-      const onData = (chunk: Buffer) => {
-        buffer += chunk.toString();
-        const newline = buffer.indexOf('\n');
-        if (newline < 0) return;
-        client.off('data', onData);
-        client.off('error', reject);
-        resolve(buffer.slice(0, newline));
-      };
-      client.on('data', onData);
-      client.once('error', reject);
-    });
-    (ownerRuntime as unknown as RuntimeInternals).handlePollVoteReceived({
-      pollMessageId: 'poll-await-continuity-1', chatJid: DESTINATION_JID,
-      voterJid: DESTINATION_JID, selectedOptions: ['Yes'],
-    });
-    const reply = JSON.parse(await response);
-    expect(JSON.parse(reply.result.content[0].text)).toMatchObject({ sent: true, answer: 'Yes' });
+    await votePoll();
     expect(owner.hasPendingTools).toBe(false);
     expect(owner.getStatus().turnInFlight).toBe(true);
   });
@@ -350,4 +363,63 @@ describe('OpenCode send_poll await continuity', () => {
     expect(spawnedChildren[0]!.kill).toHaveBeenCalledWith('SIGKILL');
     expect(spawnedChildren[1]!.kill).toHaveBeenCalledWith('SIGKILL');
   });
+
+  it.each(['vote', 'abort'] as const)(
+    'restores the hard watchdog after a rearmed poll settles by %s', async (terminal) => {
+      const child = spawnedChildren[0]!;
+      await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+      expect(child.kill).not.toHaveBeenCalledWith('SIGKILL');
+
+      await settleOwnerPoll(terminal);
+      await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS - 1_000);
+      expect(child.kill).not.toHaveBeenCalledWith('SIGKILL');
+      await vi.advanceTimersByTimeAsync(1_001);
+      expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+    },
+  );
+
+  it('retains another active wait and restores the hard watchdog after the final vote', async () => {
+    const child = spawnedChildren[0]!;
+    const token = child.spawnEnv?.WHATSOUP_MCP_SESSION_TOKEN;
+    expect(token).toBeDefined();
+    const secondClient = await openAwaitingPoll(socketPath, token ?? null, WATCHDOG_HARD_MS * 5);
+    clients.push(secondClient);
+    await vi.waitFor(() => expect(ownerMessenger.sendPollMessage).toHaveBeenCalledTimes(3));
+    await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+
+    await votePoll();
+    expect(owner.hasPendingTools).toBe(true);
+    await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+    expect(child.kill).not.toHaveBeenCalledWith('SIGKILL');
+    expect(owner.getStatus().turnInFlight).toBe(true);
+
+    await votePoll(secondClient, 'poll-await-continuity-3');
+    expect(owner.hasPendingTools).toBe(false);
+    await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+  });
+
+  it.each(['vote', 'abort'] as const)(
+    'preserves an unrelated stalled-operation deadline and liveness evidence after %s', async (terminal) => {
+      const child = spawnedChildren[0]!;
+      await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+      vi.mocked(assessTreeLiveness).mockResolvedValueOnce({
+        alive: true, cpuDeltaMs: 250, pidChurn: 0, pidCount: 1,
+      });
+      owner.recoverStalledOperation('unrelated-stall', 'Bash');
+      await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+      expect(child.kill).not.toHaveBeenCalledWith('SIGKILL');
+      const state = owner as unknown as { livenessProgressEpoch: number; longOpGateStartedAt: number | null };
+      const epoch = state.livenessProgressEpoch;
+      const gateStartedAt = state.longOpGateStartedAt;
+      expect(gateStartedAt).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS / 2);
+
+      await settleOwnerPoll(terminal);
+      expect(state.livenessProgressEpoch).toBe(epoch);
+      expect(state.longOpGateStartedAt).toBe(gateStartedAt);
+      await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS / 2 + 1);
+      expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+    },
+  );
 });

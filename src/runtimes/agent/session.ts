@@ -131,6 +131,9 @@ export const WATCHDOG_HARD_MS  = 1_800_000; // 30 min — SIGKILL
 // WATCHDOG_HARD_MS this is NOT reset by inbound messages (see recoverStalledOperation).
 export const STALLED_OP_KILL_GRACE_MS = 180_000; // 3 min after a tool stalls
 
+// Upper bound on concurrently tracked tool IDs and poll waits per session (#3867 review).
+export const MAX_TRACKED_TOOL_IDS = 1_024;
+
 // ─── Long-operation liveness gate ───────────────────────────────────────────
 // Stream silence is NOT proof of a hang: long browser-automation, bash, and MCP
 // steps legitimately block the provider's event stream for many minutes while
@@ -2034,7 +2037,22 @@ export class SessionManager {
   trackToolStart(toolId: string, toolName = '', toolInput?: Record<string, unknown>): void {
     if (this.pendingToolIds.has(toolId)) return;
     const waitMs = blockingPollWaitMs(toolName, toolInput);
-    this.pendingToolIds.set(toolId, waitMs > 0 ? performance.now() + waitMs : 0);
+    this.trackPending(toolId, waitMs > 0 ? performance.now() + waitMs : 0);
+  }
+
+  // A noisy provider must not grow this map without limit. At the cap an ordinary tool adds no
+  // wait and hasPendingTools is already true, so it is not recorded; a poll wait displaces one
+  // ordinary entry. With no ordinary entry left the wait is refused and the normal hard watchdog
+  // applies to it.
+  private trackPending(key: string | symbol, deadline: number): boolean {
+    if (this.pendingToolIds.size >= MAX_TRACKED_TOOL_IDS) {
+      if (deadline === 0) return false;
+      const ordinary = [...this.pendingToolIds].find(([, d]) => d === 0)?.[0];
+      if (ordinary === undefined) return false;
+      this.pendingToolIds.delete(ordinary);
+    }
+    this.pendingToolIds.set(key, deadline);
+    return true;
   }
 
   trackToolEnd(toolId: string): void {
@@ -2060,11 +2078,17 @@ export class SessionManager {
           || !manager.isEvidenceBindingCurrent(binding)) return undefined;
         const key = Symbol();
         const waitMs = blockingPollWaitMs('send_poll', { awaitResult: true, timeoutMs });
-        manager.pendingToolIds.set(key, performance.now() + waitMs);
+        if (!manager.trackPending(key, performance.now() + waitMs)) return undefined;
         return () => {
           const current = reference.deref();
           if (current?.providerTurnInFlight && current.activeProviderTurnToken === providerTurnToken
-            && current.isEvidenceBindingCurrent(binding)) current.pendingToolIds.delete(key);
+            && current.isEvidenceBindingCurrent(binding) && current.pendingToolIds.delete(key)
+            && current.watchdogHard !== null) {
+            // Reset the hard backstop without invalidating stalled-operation evidence.
+            clearTimeout(current.watchdogHard);
+            current.watchdogHard = null;
+            current.armWatchdog();
+          }
         };
       },
     };
@@ -3778,7 +3802,11 @@ export class SessionManager {
     if (!this.active) return;
 
     // A bounded human vote wait is quiet by design; other stalled tools retain their kill timers.
-    const remainingWaitMs = Math.max(0, ...this.pendingToolIds.values()) - performance.now();
+    let latestWaitDeadline = 0;
+    for (const deadline of this.pendingToolIds.values()) {
+      latestWaitDeadline = Math.max(latestWaitDeadline, deadline);
+    }
+    const remainingWaitMs = latestWaitDeadline - performance.now();
     if (remainingWaitMs > 0) {
       this.armWatchdog(
         managedProviderSession, managedProviderGeneration,
