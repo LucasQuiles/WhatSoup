@@ -166,16 +166,18 @@ describe('release-pinned launchd plists (#3829)', () => {
     expect(launchctlSubcommands()).not.toContain('bootstrap');
   });
 
-  it('restarts a release-pinned job from another process by bootout then bootstrap of the same plist', async () => {
+  it('restarts a release-pinned job from another process by bootout, bootstrap of the same plist, then kickstart -k', async () => {
     fsMocks.readFileSync.mockReturnValue(pinnedPlist(await makeRelease(releases())));
     const { createServiceManager } = await importPlatform();
 
     await expect(createServiceManager().restart('agent')).resolves.toBeUndefined();
 
-    expect(launchctlSubcommands()).toEqual(['bootout', 'bootstrap']);
+    expect(launchctlSubcommands()).toEqual(['bootout', 'bootstrap', 'kickstart']);
     expect(childProcessMocks.execFile.mock.calls[1][1]).toEqual([
       'bootstrap', `gui/${currentUid()}`, `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`,
     ]);
+    // bootstrapLaunchdService always follows bootstrap with kickstart -k (same contract as platform-service-manager.test.ts).
+    expect(childProcessMocks.execFile.mock.calls[2][1]).toEqual(['kickstart', '-k', `gui/${currentUid()}/com.whatsoup.agent`]);
     expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
   });
 
