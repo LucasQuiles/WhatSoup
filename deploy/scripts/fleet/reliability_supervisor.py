@@ -367,7 +367,7 @@ def publish_event(config: dict, event: dict) -> dict:
         return {"published": False}
 
 
-def publication_prefix_capacity(state: dict, now: float) -> int:
+def publication_prefix_capacity(state: dict, now: float, *, reserved_bytes: int = 0) -> int:
     if not state["pending_events"]:
         return 0
     # Account for final-cycle metadata before an emitter can publish. A receipt
@@ -383,7 +383,7 @@ def publication_prefix_capacity(state: dict, now: float) -> int:
         },
     }
     try:
-        size = len(_bounded_json_bytes(projection, PRIVATE_JSON_MAX_BYTES - 1)) + 1
+        size = len(_bounded_json_bytes(projection, PRIVATE_JSON_MAX_BYTES - 1)) + 1 + reserved_bytes
         for index, event in enumerate(state["pending_events"]):
             published = {
                 **event,
@@ -403,6 +403,32 @@ def publication_prefix_capacity(state: dict, now: float) -> int:
         if str(exc) == "state_file_oversized":
             raise PublicationCapacityError("publication_capacity_exhausted") from exc
         raise
+
+
+def admit_state_transition(
+    previous: dict, proposed: dict, now: float, *, reserved_bytes: int = 0
+) -> dict:
+    """Admit an entire transition only when its future receipts also fit."""
+    proposed["transition_capacity_exhausted"] = False
+    try:
+        _bounded_json_bytes(
+            {**proposed, "completed_at": now}, PRIVATE_JSON_MAX_BYTES - 1 - reserved_bytes
+        )
+        if publication_prefix_capacity(proposed, now, reserved_bytes=reserved_bytes) == len(proposed["pending_events"]):
+            return proposed
+    except StateError as exc:
+        if str(exc) not in {"publication_capacity_exhausted", "state_file_oversized"}:
+            raise
+    # Roll back incident IDs and queued events together. Existing delivery work
+    # can still consume an admissible prefix; no new transition takes its space.
+    retained = {**deepcopy(previous), "transition_capacity_exhausted": True}
+    try:
+        _bounded_json_bytes({**retained, "completed_at": now}, PRIVATE_JSON_MAX_BYTES - 1)
+    except StateError as exc:
+        if str(exc) == "state_file_oversized":
+            raise PublicationCapacityError("publication_capacity_exhausted") from exc
+        raise
+    return retained
 
 
 def publish_pending_events(state: dict, now: float, emit) -> None:
@@ -487,7 +513,12 @@ def queue_event(state: dict, kind: str, reason: str, now: float) -> None:
     )
 
 
+# The production restart result contains only the old and new process IDs.
+MAX_RESTART_DETAILS_BYTES = 256
+
+
 def _advance(config, state, now, probe, restart, emit, maintenance, path):
+    previous = deepcopy(state)
     observation = state.setdefault(
         "observation",
         {
@@ -503,7 +534,12 @@ def _advance(config, state, now, probe, restart, emit, maintenance, path):
         )
     observation["probe_count"] += 1
     state["started_at"] = now
+    state = admit_state_transition(previous, state, now)
+    # Legacy state may have no counters when capacity prevents adding them.
+    observation = state.get("observation", observation)
     write_private(path, state)
+    previous = deepcopy(state)
+    restart_requested = False
     state["liveness"] = probe(config["live_url"], 5)
     state["maintenance"] = maintenance()
     # Future timestamps stay in the budget after a backwards clock adjustment.
@@ -537,15 +573,24 @@ def _advance(config, state, now, probe, restart, emit, maintenance, path):
                 state["restart_started_at"] = now
                 state["consecutive_failures"] = 0
                 state["restart_result"] = "reserved"
-                write_private(path, state)
-                try:
-                    state["restart_details"] = restart()
-                    state["restart_result"] = "command_succeeded"
-                except Exception:
-                    state["restart_result"] = "failed"
+                restart_requested = True
             elif not state["budget_alerted"]:
                 queue_event(state, "alert", "restart_budget_exhausted", now)
                 state["budget_alerted"] = True
+    state = admit_state_transition(
+        previous, state, now,
+        # Include the property name, separators and longer success status.
+        reserved_bytes=MAX_RESTART_DETAILS_BYTES + 64 if restart_requested else 0,
+    )
+    if restart_requested and not state["transition_capacity_exhausted"]:
+        write_private(path, state)
+        try:
+            details = restart()
+            _bounded_json_bytes(details, MAX_RESTART_DETAILS_BYTES)
+            state["restart_details"] = details
+            state["restart_result"] = "command_succeeded"
+        except Exception:
+            state["restart_result"] = "failed"
     write_private(path, state)
     publish_pending_events(state, now, emit)
     state["alerts"], _ = retain_alerts(state["alerts"], now)
@@ -608,6 +653,7 @@ def observe(config: dict, *, now=None) -> dict:
             "restart_result": state.get("restart_result"),
             "incident_id": state.get("incident_id"),
             "pending_alerts": len(state["pending_events"]),
+            "transition_capacity_exhausted": state.get("transition_capacity_exhausted", False),
             "alerts": alerts[-10:],
             "restart_details": state.get("restart_details"),
             "observation": state.get("observation"),
@@ -874,6 +920,7 @@ def run_sentinel(config, *, now=None, observe_remote=None, emit=None):
             snapshot = {"status": "unavailable"}
             evaluation = snapshot
             reasons = {"remote_observation_unavailable"}
+        previous = deepcopy(state)
         for reason in set(state["counts"]) | reasons:
             state["counts"][reason] = (
                 state["counts"].get(reason, 0) + 1 if reason in reasons else 0
@@ -894,6 +941,7 @@ def run_sentinel(config, *, now=None, observe_remote=None, emit=None):
                 state["incident_id"] = state["incidents"].pop(reason)
                 queue_event(state, "clear", reason, now)
         state["snapshot"] = snapshot
+        state = admit_state_transition(previous, state, now)
         write_private(path, state)
         publish_pending_events(state, now, emit or (lambda e: publish_event(config, e)))
         state["alerts"], dropped = retain_alerts(
@@ -1122,6 +1170,7 @@ def main() -> int:
                 "completed_at": result["completed_at"],
                 "incidents": sorted(result["incidents"]),
                 "pending_alerts": len(result["pending_events"]),
+                "transition_capacity_exhausted": result.get("transition_capacity_exhausted", False),
             }
         elif args.observe:
             output = observe(config)

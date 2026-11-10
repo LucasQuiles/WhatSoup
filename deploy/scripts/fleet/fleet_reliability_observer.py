@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 import fcntl
 import importlib.util
 import json
@@ -564,6 +565,7 @@ def run_once(config, *, now=None, probe=None, emit=None, resolve_delivery=None):
     try:
         path = directory / "fleet-observer.json"
         state = load_state(path, now)
+        previous = deepcopy(state)
         state["started_at"] = now
         probe_fn = probe or (
             lambda item, limit: run_probe(item["probe_command"], limit)
@@ -589,6 +591,7 @@ def run_once(config, *, now=None, probe=None, emit=None, resolve_delivery=None):
         now = time.time() if live_clock else now
         for host in retired:
             _retire_host(state, host, now)
+        state = supervisor.admit_state_transition(previous, state, now)
         _flush(
             config,
             state,
@@ -679,6 +682,7 @@ def run_watchdog(config, *, now=None, emit=None, resolve_delivery=None):
             failed_cycles >= RESOLUTION_FAILURE_THRESHOLD
         )
         watchdog_instance = config.get("instance") or config["hosts"][0]["instance"]
+        previous = deepcopy(state)
         for reason, failed in conditions.items():
             if failed and reason not in state["incidents"]:
                 incident_id = str(uuid4())
@@ -699,6 +703,7 @@ def run_watchdog(config, *, now=None, emit=None, resolve_delivery=None):
                     "created_at": now,
                 }
             )
+        state = supervisor.admit_state_transition(previous, state, now)
         old_dir = config["state_dir"]
         config = {**config, "state_dir": old_dir}
         _flush(
@@ -796,6 +801,7 @@ def main():
                 {
                     "completed_at": state.get("completed_at"),
                     "pending_events": len(state["pending_events"]),
+                    "transition_capacity_exhausted": state.get("transition_capacity_exhausted", False),
                     "alerts": len(state["alerts"]),
                     "delivery_dropped": state.get("delivery_dropped", {}).get(
                         "total", 0

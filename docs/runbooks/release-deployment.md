@@ -967,13 +967,24 @@ remaining state space. Writer refusal preserves the last readable file but
 does not establish progress or recovery. In particular, a failure after an
 emission can leave the previously saved event pending for retry with the same
 ID. Publication deduplication and post-emission recovery still require
-qualification. No pending-event overflow policy or historical data removal is
-implemented by these limits.
+qualification. These limits do not authorize historical data removal.
 All four monitoring paths retain undelivered alerts regardless of age or count;
 an unsuccessful lookup or a missing receipt does not end the delivery obligation.
 Only terminal history is reduced to the newest 128 records. Preserving these
-records does not admit new transitions at capacity or enlarge the state limit;
-those admission and progress requirements remain unqualified below.
+records does not enlarge the state limit.
+All four paths admit an observation cycle's incident changes only if the resulting
+state and bounded publication receipts fit. Otherwise they preserve the prior
+incident identifiers and pending queue, set `transition_capacity_exhausted`, and
+continue attempting the fitting prefix of existing delivery work. Clear events
+use the same admission rule: an incident remains recorded until its clear can be
+queued safely. A service restart is also withheld until its incident transition
+and restart reservation fit and the reservation has been saved. The reservation
+includes a restart result of at most 256 JSON bytes plus its status fields;
+an oversized result is recorded as a failed restart attempt without saving it.
+The normal result contains only the old and new process IDs. New transitions
+resume on a later cycle when space is available; intermediate changes during the
+pause can be missed. If even the degraded flag cannot fit in a legacy state, the
+command reports `publication_capacity_exhausted` and leaves the saved file intact.
 Before emission, all four monitoring paths reserve space for the published
 receipt, final cycle metadata and any pending events left behind. Reservation
 accounts for JSON escaping, including the maximum encoded filename. A cycle
@@ -982,9 +993,10 @@ untouched suffix remain pending in their original order. Emitters receive a
 copy of each event, so callback mutations cannot change the reserved state.
 If no pending event can fit, no emitter is called. The command reports
 `publication_capacity_exhausted` as degraded and exits unsuccessfully.
-This prevents capacity-caused failure after publication; it does not prove
-crash-safe publication, admit new transitions into a full queue, or guarantee
-progress when legacy state leaves no room for a receipt. Existing receipt
+This reservation prevents capacity-caused failure after publication; it does not
+prove crash-safe publication or guarantee progress when legacy state leaves no
+room for a receipt. Durable delivery reconciliation and a bounded total lookup
+cycle still require qualification. Existing receipt
 evidence is not truncated to create space. Custom emitters still require
 bounded-output and retry-safe-publication qualification before activation.
 The sentinel stores its local alert records once, in the state's `alerts` list.
