@@ -15,10 +15,10 @@
 // `ingest.store_failed` is a failure anywhere on the persistence path, which
 // includes bookkeeping after the message row is written, so the row may still
 // be retained: it claims non-admission with retention unknown, not loss. An
-// accepted emission starts a per-reason window; a failed or thrown emission
-// does not, so the next observation retries (the #2434 pattern in
-// emit-alert.ts). The window is timed on the monotonic clock
-// (performance.now()), so a wall-clock step cannot lengthen the suppression
+// accepted emission starts a 15-minute per-reason window. Failed or thrown
+// emissions retry on the first observation after a one-minute interval, so an
+// outage cannot amplify every message into another delivery attempt. Timing uses
+// the monotonic clock (performance.now()), so a wall-clock step cannot lengthen the suppression
 // of a loss alert. The rest are advisory. Queue displacement keeps
 // its own count and alert in ingest.ts and is not recorded here.
 
@@ -47,6 +47,7 @@ const ALERT_SUMMARIES: Record<AlertingReason, string> = {
 };
 
 export const INBOUND_OBSERVATION_ALERT_WINDOW_MS = 15 * MS_PER_MINUTE;
+const FAILED_ALERT_RETRY_MS = MS_PER_MINUTE;
 
 type AlertOutcome = AlertEmissionStatus | 'rate_limited';
 
@@ -55,7 +56,7 @@ export interface InboundObservationHealth {
   counts: Record<InboundObservationReason, number>;
   /**
    * Alert attempts for the alerting reasons: each emitAlert status as returned,
-   * plus `rate_limited` for observations inside an accepted emission's window.
+   * plus `rate_limited` for observations inside an accepted window or retry interval.
    * A thrown emission is not here; it is a recorder failure.
    */
   alerts: Record<AlertOutcome, number>;
@@ -100,9 +101,11 @@ function emitStoreFailedAlert(instance: string): LocalLossAlertResult {
 }
 
 function emitLocalLossAlert(instance: string, reason: AlertingReason): { emissionAccepted: boolean; status: AlertOutcome } {
-  // Check the window without recording it; only an accepted emission records.
+  const now = performance.now();
   const until = nextAlertAt.get(reason);
-  if (until !== undefined && performance.now() < until) return { emissionAccepted: false, status: 'rate_limited' };
+  if (until !== undefined && now < until) return { emissionAccepted: false, status: 'rate_limited' };
+  // Reserve before calling the emitter: throws and re-entry must not bypass the bound.
+  nextAlertAt.set(reason, now + FAILED_ALERT_RETRY_MS);
   const result = reason === 'transport.no_consumer' ? emitNoConsumerAlert(instance) : emitStoreFailedAlert(instance);
   const emissionAccepted = result.accepted || result.status === 'captured' || result.status === 'legacy_accepted_unconfirmed';
   if (emissionAccepted) nextAlertAt.set(reason, performance.now() + INBOUND_OBSERVATION_ALERT_WINDOW_MS);

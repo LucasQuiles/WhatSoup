@@ -161,9 +161,11 @@ describe('transport inbound exits record observations', () => {
     cm.onMessage = consumer as unknown as (msg: unknown) => void;
     await deliver({ 'messages.upsert': { messages: [{ ...USER_MESSAGE, key: { ...USER_MESSAGE.key, id: 'INBOUND-3' } }], type: 'notify' } });
     expect(consumer).toHaveBeenCalledTimes(1);
+    expect(emitAlert).toHaveBeenCalledTimes(1);
     expect(getInboundObservationHealth()).toMatchObject({
       counts: { 'transport.no_consumer': 2 },
-      recorder_failures: 2,
+      alerts: { rate_limited: 1 },
+      recorder_failures: 1,
     });
   });
 });

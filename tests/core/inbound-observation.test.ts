@@ -115,13 +115,16 @@ describe('inbound observation alerts', () => {
     observeInbound('WhatSoup', 'transport.no_consumer');
     expect(doubles.emitAlert).toHaveBeenCalledTimes(2);
 
-    vi.advanceTimersByTime(INBOUND_OBSERVATION_ALERT_WINDOW_MS);
+    vi.advanceTimersByTime(INBOUND_OBSERVATION_ALERT_WINDOW_MS - 1);
+    observeInbound('WhatSoup', 'ingest.store_failed');
+    expect(doubles.emitAlert).toHaveBeenCalledTimes(2);
+    vi.advanceTimersByTime(1);
     observeInbound('WhatSoup', 'ingest.store_failed');
 
     expect(doubles.emitAlert).toHaveBeenCalledTimes(3);
     expect(getInboundObservationHealth()).toMatchObject({
-      counts: { 'ingest.store_failed': 3, 'transport.no_consumer': 1 },
-      alerts: { durably_queued: 3, rate_limited: 1 },
+      counts: { 'ingest.store_failed': 4, 'transport.no_consumer': 1 },
+      alerts: { durably_queued: 3, rate_limited: 2 },
     });
   });
 
@@ -156,39 +159,84 @@ describe('inbound observation alerts', () => {
   });
 });
 
-describe('alert window counts only accepted emissions', () => {
+describe('accepted alert windows and bounded failed-delivery retries', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-13T16:00:00Z'));
   });
 
-  it('a failed first emission does not consume the window; the next observation retries', () => {
+  it('retries a failed emission after one minute, then starts the accepted window', () => {
     doubles.emitAlert.mockReturnValueOnce({ ok: false, channel: 'none', status: 'failed' });
 
     observeInbound('WhatSoup', 'ingest.store_failed');
     observeInbound('WhatSoup', 'ingest.store_failed');
+    vi.advanceTimersByTime(59_999);
+    observeInbound('WhatSoup', 'ingest.store_failed');
+    expect(doubles.emitAlert).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(1);
+    observeInbound('WhatSoup', 'ingest.store_failed');
     observeInbound('WhatSoup', 'ingest.store_failed');
 
     expect(doubles.emitAlert).toHaveBeenCalledTimes(2);
     expect(getInboundObservationHealth()).toMatchObject({
-      counts: { 'ingest.store_failed': 3 },
-      alerts: { failed: 1, durably_queued: 1, rate_limited: 1 },
+      counts: { 'ingest.store_failed': 5 },
+      alerts: { failed: 1, durably_queued: 1, rate_limited: 3 },
       recorder_failures: 0,
     });
   });
 
-  it('a throwing first emission does not consume the window; the next observation retries', () => {
+  it('retries a throwing emission after one minute without blocking observation counts', () => {
     doubles.emitAlert.mockImplementationOnce(() => { throw new Error('outbox exploded'); });
 
     expect(() => observeInbound('WhatSoup', 'transport.no_consumer')).not.toThrow();
+    observeInbound('WhatSoup', 'transport.no_consumer');
+    vi.advanceTimersByTime(59_999);
+    observeInbound('WhatSoup', 'transport.no_consumer');
+    expect(doubles.emitAlert).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(1);
     observeInbound('WhatSoup', 'transport.no_consumer');
     observeInbound('WhatSoup', 'transport.no_consumer');
 
     expect(doubles.emitAlert).toHaveBeenCalledTimes(2);
     expect(getInboundObservationHealth()).toMatchObject({
-      counts: { 'transport.no_consumer': 3 },
-      alerts: { failed: 0, durably_queued: 1, rate_limited: 1 },
+      counts: { 'transport.no_consumer': 5 },
+      alerts: { failed: 0, durably_queued: 1, rate_limited: 3 },
       recorder_failures: 1,
+    });
+  });
+
+  it('keeps failed retries independent by reason and unaffected by wall-clock changes', () => {
+    doubles.emitAlert.mockReturnValue({ ok: false, channel: 'none', status: 'failed' });
+    for (let i = 0; i < 100; i += 1) {
+      observeInbound('WhatSoup', 'transport.no_consumer');
+      observeInbound('WhatSoup', 'ingest.store_failed');
+    }
+    expect(doubles.emitAlert).toHaveBeenCalledTimes(2);
+    vi.setSystemTime(Date.now() - 60 * 60_000);
+    vi.advanceTimersByTime(59_999);
+    observeInbound('WhatSoup', 'transport.no_consumer');
+    observeInbound('WhatSoup', 'ingest.store_failed');
+    expect(doubles.emitAlert).toHaveBeenCalledTimes(2);
+    vi.advanceTimersByTime(1);
+    observeInbound('WhatSoup', 'transport.no_consumer');
+    observeInbound('WhatSoup', 'ingest.store_failed');
+    expect(doubles.emitAlert).toHaveBeenCalledTimes(4);
+    expect(getInboundObservationHealth()).toMatchObject({
+      counts: { 'transport.no_consumer': 102, 'ingest.store_failed': 102 },
+      alerts: { failed: 4, rate_limited: 200 },
+    });
+  });
+
+  it('reserves the retry interval before an emitter re-enters observation', () => {
+    doubles.emitAlert.mockImplementationOnce(() => {
+      observeInbound('WhatSoup', 'ingest.store_failed');
+      return { ok: false, channel: 'none', status: 'failed' };
+    });
+    observeInbound('WhatSoup', 'ingest.store_failed');
+    expect(doubles.emitAlert).toHaveBeenCalledTimes(1);
+    expect(getInboundObservationHealth()).toMatchObject({
+      counts: { 'ingest.store_failed': 2 },
+      alerts: { failed: 1, rate_limited: 1 },
     });
   });
 
@@ -240,28 +288,28 @@ describe('bounded observation logs', () => {
     try {
       for (let i = 0; i < 100; i += 1) observeInbound('WhatSoup', 'ingest.store_failed');
 
-      expect(doubles.emitAlert).toHaveBeenCalledTimes(100);
+      expect(doubles.emitAlert).toHaveBeenCalledTimes(1);
       expect(mockLog.warn).toHaveBeenCalledTimes(1);
       expect(getInboundObservationHealth()).toMatchObject({
         counts: { 'ingest.store_failed': 100 },
-        recorder_failures: 101,
+        recorder_failures: 2,
       });
     } finally {
       mockLog.warn.mockReset();
     }
   });
 
-  it('bounds failed-alert logs without delaying the next delivery attempt', () => {
+  it('bounds failed delivery and warning attempts during an inbound burst', () => {
     doubles.emitAlert.mockReturnValue({ ok: false, channel: 'none', status: 'failed' });
     for (let i = 0; i < 100; i += 1) observeInbound('WhatSoup', 'transport.no_consumer');
 
-    expect(doubles.emitAlert).toHaveBeenCalledTimes(100);
+    expect(doubles.emitAlert).toHaveBeenCalledTimes(1);
     expect(mockLog.warn).toHaveBeenCalledTimes(1);
     expect(mockLog.warn).toHaveBeenCalledWith(
       expect.objectContaining({ alertAccepted: false, alertStatus: 'failed' }),
       'inbound message not admitted locally',
     );
-    expect(getInboundObservationHealth().alerts.failed).toBe(100);
+    expect(getInboundObservationHealth().alerts).toMatchObject({ failed: 1, rate_limited: 99 });
   });
 
   it('keeps warning windows independent for each reason', () => {
