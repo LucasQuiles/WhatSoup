@@ -63,6 +63,9 @@ const detachedSpawns: ChildProcess[] = [];
 let psOverride: (() => { status: number; stdout: string }) | null = null;
 // The pgid argument of every membership probe, recorded by a pass-through mock (issue 3568).
 const probedPgids: number[] = [];
+// The arguments of every warn call on the execution tool's own logger, recorded by a pass-through
+// mock that still logs (issue 3568).
+const executionToolWarns: unknown[][] = [];
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
@@ -96,6 +99,23 @@ vi.mock('../../../src/lib/process-group-membership.ts', async (importOriginal) =
     probeGroupMembership: (pgid: number) => {
       probedPgids.push(pgid);
       return actual.probeGroupMembership(pgid);
+    },
+  };
+});
+
+vi.mock('../../../src/logger.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/logger.ts')>();
+  return {
+    ...actual,
+    createChildLogger: (name: string) => {
+      const child = actual.createChildLogger(name);
+      if (name !== 'agent:capability-execution-tool') return child;
+      const warn = child.warn.bind(child) as (...args: unknown[]) => void;
+      child.warn = ((...args: unknown[]) => {
+        executionToolWarns.push(args);
+        warn(...args);
+      }) as typeof child.warn;
+      return child;
     },
   };
 });
@@ -211,6 +231,7 @@ afterEach(() => {
   detachedSpawnPids.length = 0;
   detachedSpawns.length = 0;
   probedPgids.length = 0;
+  executionToolWarns.length = 0;
   db.close();
   if (dispatchErrors.length > 0) {
     throw new AggregateError(dispatchErrors, 'Dispatch callback failed');
@@ -974,6 +995,12 @@ function zombieOnlyListing(): { status: number; stdout: string } {
   return { status: 0, stdout: ` ${pgid} ${pgid} Z\n` };
 }
 
+/** The operator warning the call site must log once when the group is not proven reaped. */
+function expectOneReapWarning(obligationId: number, reapError: RegExp): void {
+  const reapWarnings = executionToolWarns.filter(([fields]) => typeof fields === 'object' && fields !== null && 'reapError' in fields);
+  expect(reapWarnings).toEqual([[{ obligationId, reapError: expect.stringMatching(reapError) }, 'capability resolver process group not proven reaped']]);
+}
+
 const reapResolverDirs = trackTmpDirs('co-exectool-3568-');
 
 /** A resolver in its own dir (removed after each test): the whole-dir manifest binds every sibling. */
@@ -1057,6 +1084,7 @@ describe('resolver process-group reap (issue 3568)', () => {
       expect(String(evidenceOf(rows[0]!)['reapError'])).toMatch(/EPERM; group membership probe: live/);
       expect(result['error']).toBe('capability_execution_failed');
       expect(String(result['message'])).toMatch(/reapError=group kill failed: EPERM; group membership probe: live/);
+      expectOneReapWarning(id, /EPERM; group membership probe: live/);
     } finally {
       kill.restore();
       reapFixtureGroups(kill.targets); // the grandchild is still alive, so its group id is still allocated
@@ -1131,6 +1159,7 @@ describe('resolver process-group reap (issue 3568)', () => {
       expect(detachedSpawns[0]!.stdout?.destroyed).toBe(true);
       expect(detachedSpawns[0]!.stderr?.destroyed).toBe(true);
       expect(String(result['message'])).toMatch(/reapError=group kill failed: EPERM; group membership probe: live/);
+      expectOneReapWarning(id, /EPERM; group membership probe: live/);
     } finally {
       kill.restore();
       reapFixtureGroups(kill.targets); // the grandchild is still alive, so its group id is still allocated

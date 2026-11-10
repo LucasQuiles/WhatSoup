@@ -195,8 +195,13 @@ function signalProcessGroup(
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'ESRCH') return;
-    // Issue 3568: macOS can return EPERM for kill(-pgid) when the group holds only zombies.
-    if (code === 'EPERM' && probeGroup(pid) === 'no-live-members') return;
+    if (code === 'EPERM') {
+      // Issue 3568: macOS can return EPERM for kill(-pgid) when the group holds only zombies.
+      const membership = probeGroup(pid);
+      if (membership === 'no-live-members') return;
+      // Name the probe result, so a failed gate log tells a live group from an unreadable one.
+      if (error instanceof Error) error.message += `; group membership probe: ${membership}`;
+    }
     throw error;
   }
 }

@@ -275,7 +275,7 @@ export function assertArgsMatchConfig(args: AttestArgs, options: CapabilityOblig
 }
 
 const CANARY_STREAM_CAP_BYTES = 262_144;
-/** How long a failed watchdog reap waits for `close` before the canary settles fail. */
+/** How long the canary waits for `close` after the watchdog fires before it settles fail. */
 const RESOLVER_REAP_GRACE_MS = 5_000;
 
 /**
@@ -308,7 +308,7 @@ export function runResolverCanary(params: {
   kill?: (pid: number, signal: NodeJS.Signals) => void;
   /** Test-only membership probe, consulted only on an EPERM group kill. */
   probeGroup?: (pgid: number) => GroupMembership;
-  /** Test-only bound on how long a failed watchdog reap waits for `close`. */
+  /** Test-only bound on how long the canary waits for `close` after the watchdog fires. */
   reapGraceMs?: number;
 }): Promise<CapabilityCanaryOutcome> {
   const probeSourceDigest = createHash('sha256').update(params.probeSource).digest('hex');
@@ -394,12 +394,20 @@ export function runResolverCanary(params: {
       (reapError === undefined ? detail : { ...detail, reapError });
     const watchdog = setTimeout(() => {
       timedOut = true;
-      if (killGroup()) return;
-      // A live member can hold the child's stdio open, so `close` may never arrive. Not unref'd:
-      // the canary promise must settle even when nothing else keeps the event loop alive.
+      killGroup();
+      // Armed whatever killGroup() returned: a live member the kill could not reach (one that
+      // called setsid(), or one an EPERM left alive) can hold the child's stdio open, so `close`
+      // may never arrive. Not unref'd: the canary promise must settle even when nothing else
+      // keeps the event loop alive.
       reapGrace = setTimeout(() => {
         if (settled) return;
         settled = true;
+        // Close everything this canary owns before it settles: signal the group once more, then
+        // drop the pipes and the child handle, so a surviving member cannot keep the CLI alive.
+        killGroup();
+        child.stdout.destroy();
+        child.stderr.destroy();
+        child.unref();
         cleanup();
         resolvePromise({ result: 'fail', nonce: params.nonce, detail: withReapError({ reason: 'resolver_close_not_observed', timedOut: true, probeSourceDigest }) });
       }, params.reapGraceMs ?? RESOLVER_REAP_GRACE_MS);

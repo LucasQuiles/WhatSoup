@@ -55,7 +55,7 @@ const log = createChildLogger('agent:capability-execution-tool');
 
 const STDOUT_CAP_BYTES = 262_144;
 const STDERR_CAP_BYTES = 65_536;
-/** How long a failed watchdog reap waits for `close` before the run settles as not reaped. */
+/** How long the run waits for `close` after the watchdog fires before it settles without one. */
 const RESOLVER_REAP_GRACE_MS = 5_000;
 
 export interface ActiveObligationExecution {
@@ -97,7 +97,7 @@ interface ResolverRun {
   stderrBytes: number;
   /** Set when the process group could not be proven reaped (issue 3568); the run is then never ok. */
   reapError?: string;
-  /** True when a failed watchdog reap was followed by no `close` within the reap grace. */
+  /** True when the watchdog fired and no `close` followed within the reap grace. */
   closeNotObserved?: boolean;
 }
 
@@ -187,12 +187,20 @@ function runResolver(argv: readonly string[], timeoutMs: number): Promise<Resolv
     };
     const watchdog = setTimeout(() => {
       timedOut = true;
-      if (killGroup()) return; // reaped the leader AND every descendant
-      // A live member can hold the child's stdio open, so `close` may never arrive. Not unref'd:
-      // the run must settle even when nothing else keeps the event loop alive.
+      killGroup();
+      // Armed whatever killGroup() returned: a live member the kill could not reach (one that
+      // called setsid(), or one an EPERM left alive) can hold the child's stdio open, so `close`
+      // may never arrive. Not unref'd: the run must settle even when nothing else keeps the
+      // event loop alive.
       reapGrace = setTimeout(() => {
         if (settled) return;
         settled = true;
+        // Close everything this run owns before it settles: signal the group once more, then
+        // drop the pipes and the child handle, so a surviving member cannot hold them open.
+        killGroup();
+        child.stdout.destroy();
+        child.stderr.destroy();
+        child.unref();
         resolve({
           exitCode: null,
           signal: null,
@@ -214,6 +222,7 @@ function runResolver(argv: readonly string[], timeoutMs: number): Promise<Resolv
       settled = true;
       clearTimeout(watchdog);
       clearTimeout(reapGrace);
+      killGroup(); // an error after spawn can leave a started group behind; sweep it as attest does
       reject(err);
     });
     child.on('close', (code, signal) => {
@@ -409,6 +418,11 @@ export function buildCapabilityExecutionTool(deps: CapabilityExecutionToolDeps):
           recordOutcome(deps, active, observedSourceDigest, 'error', { reason: 'resolver_spawn_failed' });
           return toolError({ error: 'capability_execution', message: 'Capability resolver could not be started' });
         }
+        if (run.reapError !== undefined) {
+          // A member of the resolver's group may still be running: an operator must check for it
+          // before any requeue of this obligation.
+          log.warn({ obligationId: obligation.id, reapError: run.reapError }, 'capability resolver process group not proven reaped');
+        }
 
         // Media integrity: DETECT a net change to the snapshot the child was
         // handed. A change means the resolver (or a writer of a path only this
@@ -445,10 +459,12 @@ export function buildCapabilityExecutionTool(deps: CapabilityExecutionToolDeps):
         }, observedMediaDigest);
 
         if (!ok) {
+          // A reap failure can follow a clean exit, so name it; exit, signal and timedOut alone would read as success.
+          const reapNote = run.reapError === undefined ? '' : `, reapError=${run.reapError}`;
           return toolError({
             error: 'capability_execution_failed',
             message:
-              `Capability resolver failed (exit=${run.exitCode ?? 'none'}, signal=${run.signal ?? 'none'}, timedOut=${run.timedOut}). `
+              `Capability resolver failed (exit=${run.exitCode ?? 'none'}, signal=${run.signal ?? 'none'}, timedOut=${run.timedOut}${reapNote}). `
               + `stderr tail: ${run.stderr.slice(-1_024)}`,
           });
         }
