@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 
 import * as membershipModule from '../../src/lib/process-group-membership.ts';
-import type { GroupMembership } from '../../src/lib/process-group-membership.ts';
+import { classifyGroupMembership, type GroupMembership } from '../../src/lib/process-group-membership.ts';
 import { FIXTURE_LEAK_NET_MS, groupKillError, waitForPidGone } from '../helpers/group-kill-seams.ts';
 
 type GroupGoneAnswer =
@@ -111,5 +111,19 @@ describe('groupGone (issue 3568: one liveness rule for a whole process group)', 
       const gone = pid === undefined ? true : await waitForPidGone(pid);
       expect(gone).toBe(true);
     }
+  });
+});
+
+describe('classifyGroupMembership (a multithreaded zombie can still run)', () => {
+  // On Linux, a thread-group leader whose main thread exited while its other threads run shows as
+  // `Zl` or `Zsl`. The `l` flag marks a multithreaded process, and those other threads can still run.
+  it.each([
+    ['Zl', 'live'],
+    ['Zsl', 'live'],
+    ['Z', 'no-live-members'],
+    ['Z+', 'no-live-members'],
+    ['Zs', 'no-live-members'],
+  ] as const)('reads a group member in state %s as %s', (stat, expected) => {
+    expect(classifyGroupMembership(` 101   100 ${stat}\n 200   200 S\n`, 100)).toBe(expected);
   });
 });

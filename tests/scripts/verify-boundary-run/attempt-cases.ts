@@ -104,15 +104,25 @@ type WatchdogSeamApi = {
   ) => Promise<WatchdogTeardownOutcome>;
 };
 
-const LONG_LIVED_CHILD = [process.execPath, '-e', 'setInterval(()=>{},1000)'];
+/** A leader that runs until the watchdog ends it. Its own lifetime is the leak net. */
+const LONG_LIVED_CHILD = ['/bin/sleep', String(FIXTURE_LEAK_NET_MS / 1_000)];
 const SEAM_BOUNDS = { deadlineMs: 120, killGraceMs: 60, expectedExit: '0' };
 /** The widest test-only bounds, for real-process fixtures that need start-up time. */
 const REAL_PROCESS_BOUNDS = { deadlineMs: 250, killGraceMs: 100, expectedExit: '0' };
 const FIXTURE_LEAK_NET_S = FIXTURE_LEAK_NET_MS / 1_000;
 
 /**
- * Teardown for a fixture member whose pid the fixture wrote: kills it unless it is already gone
- * (exited, or a zombie), then waits within waitForPidGone's own bound. It never waits on the run.
+ * A long-lived leader that first writes its own pid, which is also its group id, to `pidFile`. So
+ * teardown knows the pid even when the kill seam never runs.
+ */
+function longLivedChildWritingPid(pidFile: string): string[] {
+  return ['/bin/sh', '-c', `echo $$ > "$1"; exec /bin/sleep ${FIXTURE_LEAK_NET_S}`, 'sh', pidFile];
+}
+
+/**
+ * Teardown for a fixture process, leader or member, whose pid the fixture wrote: kills it unless it
+ * is already gone (exited, or a zombie), then waits within waitForPidGone's own bound. It never
+ * waits on the run.
  */
 async function endFixtureMember(pidFile: string): Promise<boolean> {
   const pid = readFixturePid(pidFile);
@@ -701,13 +711,15 @@ export function registerAttemptCases(): void {
     const api = boundaryRun as unknown as WatchdogSeamApi;
     expect(typeof api.runBoundaryWatchdogForTest).toBe('function');
     if (!api.runBoundaryWatchdogForTest) return;
+    const dir = mkdtempSync(path.join(tmpdir(), 'boundary-watchdog-'));
+    const pidFile = path.join(dir, 'leader.pid');
     const targets: number[] = [];
     const probed: number[] = [];
     // Seam-modelled, as macOS answers for a zombie-only group: every kill(-pgid), the signal-0
     // liveness check included, returns EPERM, and the probe finds no live member. No signal is
     // delivered, so the leader pid stays present, as an unreaped zombie leader's would: a check of
     // the leader pid alone cannot tell the two apart.
-    const run = api.runBoundaryWatchdogForTest([...LONG_LIVED_CHILD], {
+    const run = api.runBoundaryWatchdogForTest(longLivedChildWritingPid(pidFile), {
       ...SEAM_BOUNDS,
       kill: throwOnly('EPERM', targets),
       probeGroup: (pgid) => { probed.push(pgid); return 'no-live-members'; },
@@ -718,11 +730,14 @@ export function registerAttemptCases(): void {
       expect(probed.length).toBeGreaterThan(0);
       expect(probed.every((pgid) => pgid > 0 && targets.includes(-pgid))).toBe(true);
     } finally {
-      // Nothing was delivered, so the leader is alive and its group id is still allocated.
-      reapFixtureGroups(targets);
+      // Nothing was delivered, so the leader is still alive. Its pid comes from the fixture, not
+      // from the kill seam, so this ends it even if the watchdog never signalled.
+      const gone = await endFixtureMember(pidFile);
       await settleWithin(run, 2_000, 'the watchdog did not settle after teardown').catch(() => undefined);
+      rmSync(dir, { recursive: true, force: true });
+      expect(gone).toBe(true);
     }
-  }, 10_000);
+  }, 15_000);
 
   it('reports a live member the command left in its group as a survivor, and sweeps it (real ps probe)', async () => {
     const api = boundaryRun as unknown as WatchdogSeamApi;
@@ -750,18 +765,45 @@ export function registerAttemptCases(): void {
       rmSync(dir, { recursive: true, force: true });
       expect(gone).toBe(true);
     }
+  }, 15_000);
+
+  it('does not report a member that exits on its own within the natural-exit settle as a survivor', async () => {
+    const api = boundaryRun as unknown as WatchdogSeamApi;
+    expect(typeof api.runBoundaryWatchdogForTest).toBe('function');
+    if (!api.runBoundaryWatchdogForTest) return;
+    const signals: Array<NodeJS.Signals | 0> = [];
+    let probeCalls = 0;
+    // Seam-modelled: the command exits 0 at once. Its group then answers signal 0, and the probe
+    // finds a live member on the first check only, as when a helper exits a few milliseconds after
+    // the leader. The seam delivers no signal.
+    const run = api.runBoundaryWatchdogForTest(['/bin/sh', '-c', 'exit 0'], {
+      ...REAL_PROCESS_BOUNDS,
+      kill: (_target, signal) => { signals.push(signal); },
+      probeGroup: () => {
+        probeCalls += 1;
+        return probeCalls === 1 ? 'live' : 'no-live-members';
+      },
+    });
+    const outcome = await settleWithin(run, 5_000, 'the watchdog did not settle within 5 s');
+    // The natural-exit path. A timeout here means a loaded host, not this behaviour.
+    expect(outcome.timedOut).toBe(false);
+    expect(teardownShape(outcome)).toEqual({ ok: true, timeout: false, survivor: false, timedOut: false, groupDead: true });
+    expect(signals.filter((signal) => signal !== 0)).toEqual([]);
+    expect(probeCalls).toBeGreaterThanOrEqual(2);
   }, 10_000);
 
   it('does not read a group as gone when the membership probe cannot read it after the watchdog kill', async () => {
     const api = boundaryRun as unknown as WatchdogSeamApi;
     expect(typeof api.runBoundaryWatchdogForTest).toBe('function');
     if (!api.runBoundaryWatchdogForTest) return;
+    const dir = mkdtempSync(path.join(tmpdir(), 'boundary-watchdog-'));
+    const pidFile = path.join(dir, 'leader.pid');
     const signals: Array<NodeJS.Signals | 0> = [];
     const probed: number[] = [];
     let delivered = false;
     // The watchdog's SIGTERM reaches the live group and ends it. From then on every kill(-pgid),
     // the signal-0 liveness check included, answers EPERM, and the probe cannot read the group.
-    const run = api.runBoundaryWatchdogForTest([...LONG_LIVED_CHILD], {
+    const run = api.runBoundaryWatchdogForTest(longLivedChildWritingPid(pidFile), {
       ...SEAM_BOUNDS,
       kill: (target, signal) => {
         signals.push(signal);
@@ -774,12 +816,21 @@ export function registerAttemptCases(): void {
       },
       probeGroup: (pgid) => { probed.push(pgid); return 'unknown'; },
     });
-    // Unproven is not gone: the watchdog escalates to SIGKILL, and raises that kill's EPERM.
-    await expect(settleWithin(run, 5_000, 'the watchdog did not settle within 5 s'))
-      .rejects.toThrow(/^kill EPERM; group membership probe: unknown$/);
-    expect(signals.filter((signal) => signal !== 0)).toEqual(['SIGTERM', 'SIGKILL']);
-    expect(probed.length).toBeGreaterThan(0);
-  }, 10_000);
+    try {
+      // Unproven is not gone: the watchdog escalates to SIGKILL, and raises that kill's EPERM.
+      await expect(settleWithin(run, 5_000, 'the watchdog did not settle within 5 s'))
+        .rejects.toThrow(/^kill EPERM; group membership probe: unknown$/);
+      expect(signals.filter((signal) => signal !== 0)).toEqual(['SIGTERM', 'SIGKILL']);
+      expect(probed.length).toBeGreaterThan(0);
+    } finally {
+      // The pid comes from the fixture, not from the kill seam, so this ends the leader even if the
+      // watchdog stalled before its SIGTERM.
+      const gone = await endFixtureMember(pidFile);
+      await settleWithin(run, 2_000, 'the watchdog did not settle after teardown').catch(() => undefined);
+      rmSync(dir, { recursive: true, force: true });
+      expect(gone).toBe(true);
+    }
+  }, 15_000);
 
   it('sends SIGKILL to a member that ignores SIGTERM on the timeout path, and reports the group dead only once it is (real ps probe)', async () => {
     const api = boundaryRun as unknown as WatchdogSeamApi;
@@ -812,6 +863,6 @@ export function registerAttemptCases(): void {
       rmSync(dir, { recursive: true, force: true });
       expect(gone).toBe(true);
     }
-  }, 10_000);
+  }, 15_000);
 
 }
