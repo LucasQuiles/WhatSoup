@@ -74,6 +74,71 @@ import {
   writeSyntheticRunInitAnchor,
 } from './support.ts';
 
+type GroupSignal = (target: number, signal: NodeJS.Signals) => void;
+type GroupMembershipAnswer = 'live' | 'no-live-members' | 'unknown';
+type WatchdogTeardownOutcome = {
+  result: ReturnType<typeof validateBoundaryRun>;
+  timedOut: boolean;
+  groupDead: boolean;
+};
+type WatchdogSeamApi = {
+  runBoundaryWatchdogForTest?: (
+    argv: string[],
+    options: {
+      deadlineMs: number;
+      killGraceMs: number;
+      expectedExit: string;
+      kill?: GroupSignal;
+      probeGroup?: (pgid: number) => GroupMembershipAnswer;
+    },
+  ) => Promise<WatchdogTeardownOutcome>;
+};
+
+const LONG_LIVED_CHILD = [process.execPath, '-e', 'setInterval(()=>{},1000)'];
+const SEAM_BOUNDS = { deadlineMs: 120, killGraceMs: 60, expectedExit: '0' };
+
+function groupKillError(code: 'EPERM' | 'ESRCH' | 'EINVAL'): NodeJS.ErrnoException {
+  const error = new Error(`kill ${code}`) as NodeJS.ErrnoException;
+  error.code = code;
+  error.syscall = 'kill';
+  return error;
+}
+
+/**
+ * The macOS shape of issue 3568: the signal reaches the group, then kill(-pgid) answers with
+ * an error. Delivering first keeps the fixture group from leaking. Only a negative group id
+ * below -1 is signalled, never 0 or -1.
+ */
+function deliverThenThrow(code: 'EPERM' | 'ESRCH', targets: number[]): GroupSignal {
+  return (target, signal) => {
+    targets.push(target);
+    if (target < -1) {
+      try { process.kill(target, signal); } catch { /* the group may already be gone */ }
+    }
+    throw groupKillError(code);
+  };
+}
+
+/** Kills a fixture group that a test left alive on purpose. */
+function reapFixtureGroups(targets: readonly number[]): void {
+  for (const target of new Set(targets)) {
+    if (target >= -1) continue;
+    try { process.kill(target, 'SIGKILL'); } catch { /* the group is already gone */ }
+  }
+}
+
+/** The teardown fields that do not depend on whether SIGTERM or SIGKILL ended the child. */
+function teardownShape(outcome: WatchdogTeardownOutcome): Record<string, boolean> {
+  const codes = outcome.result.issues.map((entry) => entry.code);
+  return {
+    ok: outcome.result.ok,
+    timeout: codes.includes('watchdog-timeout'),
+    survivor: codes.includes('watchdog-group-survivor'),
+    timedOut: outcome.timedOut,
+    groupDead: outcome.groupDead,
+  };
+}
+
 export function registerAttemptCases(): void {
   it('records one exact direct command with immutable streams and snapshots', async () => {
     const api = boundaryCli as unknown as {
@@ -521,6 +586,85 @@ export function registerAttemptCases(): void {
       rawSignal: null,
       groupDead: true,
     });
+  }, 10_000);
+
+  it('reads an EPERM group kill on a group with no live member as reaped, the same as ESRCH', async () => {
+    const api = boundaryRun as unknown as WatchdogSeamApi;
+    expect(typeof api.runBoundaryWatchdogForTest).toBe('function');
+    if (!api.runBoundaryWatchdogForTest) return;
+    const epermTargets: number[] = [];
+    const probed: number[] = [];
+    const eperm = await api.runBoundaryWatchdogForTest([...LONG_LIVED_CHILD], {
+      ...SEAM_BOUNDS,
+      kill: deliverThenThrow('EPERM', epermTargets),
+      probeGroup: (pgid) => { probed.push(pgid); return 'no-live-members'; },
+    });
+    const esrchProbed: number[] = [];
+    const esrch = await api.runBoundaryWatchdogForTest([...LONG_LIVED_CHILD], {
+      ...SEAM_BOUNDS,
+      kill: deliverThenThrow('ESRCH', []),
+      probeGroup: (pgid) => { esrchProbed.push(pgid); return 'live'; },
+    });
+    expect(probed.length).toBeGreaterThan(0);
+    expect(probed.every((pgid) => pgid > 0 && epermTargets.includes(-pgid))).toBe(true);
+    expect(esrchProbed).toEqual([]);
+    expect(teardownShape(esrch)).toEqual({ ok: false, timeout: true, survivor: false, timedOut: true, groupDead: true });
+    expect(teardownShape(eperm)).toEqual(teardownShape(esrch));
+  }, 10_000);
+
+  it('still raises an EPERM group kill while the group keeps a live member (default ps probe)', async () => {
+    const api = boundaryRun as unknown as WatchdogSeamApi;
+    expect(typeof api.runBoundaryWatchdogForTest).toBe('function');
+    if (!api.runBoundaryWatchdogForTest) return;
+    const targets: number[] = [];
+    // No signal reaches the group, so its member is still live when the real ps probe reads it.
+    const run = api.runBoundaryWatchdogForTest([...LONG_LIVED_CHILD], {
+      ...SEAM_BOUNDS,
+      kill: (target) => { targets.push(target); throw groupKillError('EPERM'); },
+    });
+    try {
+      await expect(run).rejects.toMatchObject({ code: 'EPERM' });
+    } finally {
+      reapFixtureGroups(targets);
+    }
+  }, 10_000);
+
+  it('fails closed when an EPERM group kill meets a group the membership probe cannot read', async () => {
+    const api = boundaryRun as unknown as WatchdogSeamApi;
+    expect(typeof api.runBoundaryWatchdogForTest).toBe('function');
+    if (!api.runBoundaryWatchdogForTest) return;
+    const targets: number[] = [];
+    const probed: number[] = [];
+    const run = api.runBoundaryWatchdogForTest([...LONG_LIVED_CHILD], {
+      ...SEAM_BOUNDS,
+      kill: (target) => { targets.push(target); throw groupKillError('EPERM'); },
+      probeGroup: (pgid) => { probed.push(pgid); return 'unknown'; },
+    });
+    try {
+      await expect(run).rejects.toMatchObject({ code: 'EPERM' });
+      expect(probed).toEqual(targets.map((target) => -target));
+    } finally {
+      reapFixtureGroups(targets);
+    }
+  }, 10_000);
+
+  it('raises a group-kill error other than EPERM without consulting the membership probe', async () => {
+    const api = boundaryRun as unknown as WatchdogSeamApi;
+    expect(typeof api.runBoundaryWatchdogForTest).toBe('function');
+    if (!api.runBoundaryWatchdogForTest) return;
+    const targets: number[] = [];
+    let probeCalls = 0;
+    const run = api.runBoundaryWatchdogForTest([...LONG_LIVED_CHILD], {
+      ...SEAM_BOUNDS,
+      kill: (target) => { targets.push(target); throw groupKillError('EINVAL'); },
+      probeGroup: () => { probeCalls += 1; return 'no-live-members'; },
+    });
+    try {
+      await expect(run).rejects.toMatchObject({ code: 'EINVAL' });
+      expect(probeCalls).toBe(0);
+    } finally {
+      reapFixtureGroups(targets);
+    }
   }, 10_000);
 
 }
