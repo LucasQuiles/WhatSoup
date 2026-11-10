@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { parse as parseYaml } from 'yaml';
 import { cleanGitEnv } from '../../src/lib/git-env.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import {
@@ -192,7 +193,7 @@ describe('push-gate manifest registry (#2224)', () => {
     }
   });
 
-  it('keeps deployment qualification in both local lanes and the Quality workflow', () => {
+  it('keeps focused deployment qualification in both local lanes', () => {
     const expectedCommand = 'npm run test:deployment-qualification';
     for (const steps of [BRANCH_STEPS, RELEASE_STEPS]) {
       expect(steps).toContainEqual(
@@ -200,15 +201,54 @@ describe('push-gate manifest registry (#2224)', () => {
       );
     }
 
-    const qualityWorkflow = readFileSync('.github/workflows/quality.yml', 'utf8');
-    expect(qualityWorkflow).toContain(
-      '      - name: Deployment qualification source suite\n        run: npm run test:deployment-qualification',
-    );
-
     const command = pkg.scripts['test:deployment-qualification'];
     expect(command).toContain('bash -euc');
     expect(command).not.toContain('bash -lc');
     expect(command).toContain('deploy/scripts/lib/pytest-runner.sh');
+  });
+
+  it.each([0, 17])('runs deployment qualification once in CI and preserves pytest exit %i', (exitCode) => {
+    const workflow = parseYaml(readFileSync('.github/workflows/quality.yml', 'utf8'));
+    const steps = workflow.jobs.full.steps.filter((step: { run?: string }) =>
+      /test:deployment-qualification|run-bot-errors-full-suite\.sh/.test(step.run ?? ''),
+    );
+    expect(steps).toHaveLength(1);
+    expect(steps[0].if).toBeUndefined();
+    expect(steps[0]['continue-on-error']).toBeUndefined();
+
+    const scratch = gateTmp.make('python-suite');
+    const python = join(scratch, 'python');
+    writeFileSync(python, `#!/bin/sh
+if [ "$1" = '-c' ] && [ "$2" = 'import pytest' ]; then exit 0; fi
+printf '%s\\n' "$@"
+exit ${exitCode}
+`, { mode: 0o700 });
+    const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', steps[0].run], {
+      cwd: process.cwd(),
+      env: { ...process.env, SENTINEL_PYTEST_PYTHON: python, TMPDIR: scratch },
+      encoding: 'utf8', timeout: 5_000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status, result.stderr).toBe(exitCode);
+    // Only the separately executed sentinel coverage cases may leave directory collection.
+    expect(result.stdout.split('\n').filter((line) => line !== '' && !line.startsWith('==') && !line.startsWith('ALL_'))).toEqual([
+      '-m', 'pytest', 'deploy/scripts/tests/',
+      '--ignore=deploy/scripts/tests/test_sentinel_pin.py',
+      '--ignore=deploy/scripts/tests/test_bot_errors_selfcheck.py',
+      '--ignore=deploy/scripts/tests/test_bot_errors_sentinel.py',
+      '--ignore=deploy/scripts/tests/test_bot_errors_heartbeat_watchdog_auth.py',
+      '--ignore=deploy/scripts/tests/test_bot_errors_redaction_parity.py',
+      '--ignore=deploy/scripts/tests/test_bot_errors_gui_session_monitor.py',
+      '--import-mode=importlib', '-q',
+    ]);
+    expect(result.stdout.includes('ALL_BOT_ERRORS_FULL_SUITE_TESTS_PASS')).toBe(exitCode === 0);
+    const focusedFiles = pkg.scripts['test:deployment-qualification'].match(/deploy\/scripts\/tests\/test_[\w]+\.py/g);
+    expect(focusedFiles).toHaveLength(7);
+    for (const file of focusedFiles!) {
+      expect(existsSync(file), file).toBe(true);
+      expect(result.stdout).not.toContain(`--ignore=${file}`);
+    }
   });
 
   it('every curated test path exists on disk', () => {

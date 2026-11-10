@@ -108,6 +108,11 @@ export async function executeTestCommands(
     return { outcome: 'busy', exitCode: 75, wallMs: Date.now() - start, results, error: `${error.reason} test lock; owner PID ${error.existingPid ?? 'unknown'} at ${lockPath}. Inspect the owner before retrying; this run did not queue or remove the lock.` };
   }
   let scratch: string | undefined;
+  let execution: TestExecution | undefined;
+  const complete = (outcome: TestExecution['outcome'], exitCode: number, error?: string): TestExecution => {
+    execution = { outcome, exitCode, wallMs: Date.now() - start, results, error };
+    return execution;
+  };
   try {
     scratch = mkdtempSync(join(tmpdir(), 'whatsoup-tests-'));
     const env = {
@@ -121,7 +126,7 @@ export async function executeTestCommands(
     };
     for (const step of commands) {
       const remaining = options.timeoutMs - (Date.now() - start);
-      if (remaining <= 0) return { outcome: 'timedOut', exitCode: 124, wallMs: Date.now() - start, results };
+      if (remaining <= 0) return complete('timedOut', 124);
       process.stderr.write(`test:affected: ${step.name} (remaining ${remaining}ms)\n`);
       const reportPath = join(scratch, `vitest-${results.length}.json`);
       const args = step.vitestReport ? [...step.args, '--silent=passed-only', options.json ? '--reporter=dot' : '--reporter=default', '--reporter=json', `--outputFile.json=${reportPath}`] : step.args;
@@ -138,7 +143,7 @@ export async function executeTestCommands(
           inheritOuterGroup: options.inheritOuterGroup,
         });
       } catch (error) {
-        return { outcome: 'inconclusive', exitCode: 125, wallMs: Date.now() - start, results, error: `${step.name}: ${String(error)}` };
+        return complete('inconclusive', 125, `${step.name}: ${String(error)}`);
       }
       results.push({ name: step.name, ...result });
       if (result.wrappedExit !== 0) {
@@ -146,7 +151,7 @@ export async function executeTestCommands(
         if (result.wrappedExit === 75) outcome = 'busy';
         else if (result.wrappedExit === 124) outcome = 'timedOut';
         else if (result.wrappedExit === 125) outcome = 'inconclusive';
-        return { outcome, exitCode: result.wrappedExit, wallMs: Date.now() - start, results };
+        return complete(outcome, result.wrappedExit);
       }
       if (step.vitestReport) {
         try {
@@ -154,19 +159,26 @@ export async function executeTestCommands(
           results[results.length - 1]!.tests = tests;
           if (tests.passed === 0 || tests.failed > 0) throw new Error('No passing tests or failed tests in a successful runner report');
         } catch (error) {
-          return { outcome: 'inconclusive', exitCode: 125, wallMs: Date.now() - start, results, error: String(error) };
+          return complete('inconclusive', 125, String(error));
         }
       }
     }
-    return { outcome: 'passed', exitCode: 0, wallMs: Date.now() - start, results };
+    return complete('passed', 0);
   } finally {
     try {
       if (scratch) {
         if (options.cleanupScratch) options.cleanupScratch(scratch);
         else rmSync(scratch, { recursive: true, force: true });
       }
+    } catch (error) {
+      if (!execution) throw error;
+      // Cleanup failure must not erase completed commands or manufacture a passing run.
+      execution.outcome = 'inconclusive';
+      execution.exitCode = 125;
+      execution.error = [execution.error, `scratch cleanup failed: ${String(error)}`].filter(Boolean).join('; ');
     } finally {
       releaseProcessLock(lock);
+      if (execution) execution.wallMs = Date.now() - start;
     }
   }
 }

@@ -121,6 +121,10 @@ The release manifest already runs the guard package once. CI additionally owns
 the complete Python sentinel/behavioral gates, Docker and Node compatibility;
 the report lists those obligations. `--suite python` runs both the curated
 sentinel gate and the remaining behavioral suite that excludes those files.
+The remaining suite collects deployment qualification automatically. CI runs it
+once there; `test:deployment-qualification` stays in both local gates, which do
+not run the full Python directory. Keep the sentinel coverage gate first: its
+curated files are excluded from the remaining suite and retain their own floors.
 `npm test` and `coverage:check` retain their existing full behavior. Coverage
 requests always use the complete root suite and preserve 95% lines, 90% branches
 and 93% functions. Browser and motion configurations remain separate.
@@ -180,7 +184,10 @@ with `outcome: "not-required"` means no application commands ran; it does not
 qualify CI documentation checks. A `passed` focused lane is still partial evidence
 for a broader gate.
 Reports include each command's outcome and duration. Direct Vitest steps also
-report files, passed/failed/pending tests from the actual runner report. Push and
+report files, passed/failed/pending tests from the actual runner report. The affected
+runner's scratch cleanup failures remain inconclusive (exit 125) and retain
+completed command results. Permission-denial fixtures must restore their original
+directory modes in teardown so scratch removal can finish. Push and
 release gates report a terminated child's PID and signal, preserve `128 + signal`
 exits, and return 125 when an executable cannot start. Direct Vitest steps
 with an all-skipped or missing report cannot become a successful affected run. Counts

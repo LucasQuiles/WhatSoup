@@ -209,16 +209,23 @@ describe('affected test execution', () => {
     expect(JSON.parse(missingBase.stdout)).toMatchObject({ outcome: 'inconclusive', exitCode: 125 });
   });
 
-  it('releases the checkout lock even when scratch removal fails', async () => {
+  it.each([0, 7])('retains child exit %i and releases the lock when scratch removal fails', async (childExit) => {
     const cwd = tmp.make('cleanup-error');
     let ownedScratch: string | undefined;
     try {
-      await expect(executeTestCommands(cwd, [
-        { name: 'clean-child', command: process.execPath, args: ['-e', 'process.exit(0)'] },
+      const result = await executeTestCommands(cwd, [
+        { name: 'finished-child', command: process.execPath, args: ['-e', `process.exit(${childExit})`] },
       ], { timeoutMs: 10_000, json: false, cleanupScratch: (directory: string) => {
         ownedScratch = directory;
         throw new Error('cleanup denied');
-      } })).rejects.toThrow('cleanup denied');
+      } });
+      expect(result).toMatchObject({ outcome: 'inconclusive', exitCode: 125 });
+      expect(result.error).toContain('scratch cleanup failed: Error: cleanup denied');
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0]).toMatchObject({
+        name: 'finished-child', exitCode: childExit, wrappedExit: childExit,
+        outcome: childExit === 0 ? 'passed' : 'failed',
+      });
       expect(existsSync(join(cwd, '.local/test-run.lock'))).toBe(false);
     } finally {
       if (ownedScratch) rmSync(ownedScratch, { recursive: true, force: true });
