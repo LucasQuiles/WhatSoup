@@ -51,10 +51,11 @@ export interface CommandGateContext {
 
 /** The one authority rule for local commands (see CommandGate). runtime.ts
  *  enforces it on every local command, and the queued receipt
- *  (runtime-queued-receipt.ts) asks it whether the waiting sender may run
- *  /stop, so the receipt never offers a command the gate refuses. The
- *  empty-admin exemption (B21-A F2) is 'admin-shared-scope' only: plain
- *  'admin' commands stay denied when no admin is configured. */
+ *  (runtime-queued-receipt.ts) asks it whether a reader who is not an admin
+ *  may run /stop, since every group member reads the receipt, so the receipt
+ *  never offers a command the gate refuses. The empty-admin exemption (B21-A
+ *  F2) is 'admin-shared-scope' only: plain 'admin' commands stay denied when
+ *  no admin is configured. */
 export function commandGateDenies(gate: CommandGate, ctx: CommandGateContext): boolean {
   switch (gate) {
     case 'none':
@@ -211,7 +212,7 @@ export const COMMAND_REGISTRY = [
     syntax: '/new',
     tier: 'transport-local',
     gate: 'admin-shared-scope', // admin only where the reset hits SHARED state (WG-5); own per_chat DM stays ungated
-    venue: 'any', // group-permitting by design (admin may /new in a group); venue is enforced inline via sessionScope/isGroup, not the venue axis
+    venue: 'any', // group-permitting by design (admin may /new in a group); venue is enforced by commandGateDenies via sessionScope/isGroup, not the venue axis
     visibility: 'end-user',
     errorClasses: ['not-authorized', 'internal'],
     // Immediate outcome acknowledgement, including the same-operation
@@ -232,7 +233,7 @@ export const COMMAND_REGISTRY = [
     // turn hits SHARED session state in single/shared scope and in a per_chat
     // group; a per_chat 1:1 DM stops only the sender's own conversation.
     gate: 'admin-shared-scope',
-    venue: 'any', // group-permitting exactly like /new; enforced inline via sessionScope/isGroup
+    venue: 'any', // group-permitting exactly like /new; enforced by commandGateDenies via sessionScope/isGroup, not the venue axis
     visibility: 'end-user',
     errorClasses: ['not-authorized', 'internal'],
     // Immediate outcome acknowledgement — one of stopped / nothing-to-stop /

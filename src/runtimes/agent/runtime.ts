@@ -1995,11 +1995,9 @@ export class AgentRuntime implements Runtime {
     send: (chatJid, text) => sendTracked(
       this.messenger, chatJid, text, this.durability ?? undefined, { replayPolicy: 'unsafe' },
     ),
-    // The command gate's own inputs: the receipt offers /stop only where the gate accepts it.
-    stopAuthority: {
-      adminCount: () => config.adminPhones.size,
-      isAdmin: (senderJid) => this.isAuthenticatedAdminJid(senderJid),
-    },
+    // Config only: the receipt offers /stop where any reader may reach and run it.
+    adminCount: () => config.adminPhones.size,
+    groupSendersAllowlistedOnly: () => config.groupSenderPolicy === 'allowlisted_only',
   });
   /** Deferred and in-progress live-route recycle ownership by scope key. */
   private readonly routeRecycleLifecycle = new RouteRecycleLifecycle<SessionManager>();
@@ -9290,11 +9288,11 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
-   * Authenticated-admin check behind the command gate and the queued receipt's
-   * /stop offer. B4: the grant primitive checks the authenticated transport
-   * FIRST (QR-143: an @sms sender resolves to the same bare phone as the
-   * WhatsApp admin, but its sender id is spoofable), then resolves the phone;
-   * a non-authenticated sender yields null and is denied.
+   * Authenticated-admin check behind the command gate. B4: the grant primitive
+   * checks the authenticated transport FIRST (QR-143: an @sms sender resolves
+   * to the same bare phone as the WhatsApp admin, but its sender id is
+   * spoofable), then resolves the phone; a non-authenticated sender yields
+   * null and is denied.
    */
   private isAuthenticatedAdminJid(senderJid: string): boolean {
     const phone = resolvePhoneFromJidForGrant(senderJid, this.db);
