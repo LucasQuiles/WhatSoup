@@ -431,9 +431,10 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
   const stoppedWorkerTrace = mode === 'forged-completion-worker-stopped' && process.env.WHATSOUP_STOPPED_WORKER_EVENT_TRACE === '1';
   // near-deadline always records its events: its expected result follows the claim order.
   // A stopped worker always records them too: its bound is the guard's timer chain.
-  // A stalled setup child records them with the driver's observation times (issue
-  // #3554), so a missed wall-clock bound names the slow phase of that chain.
-  const setupStallTrace = mode === 'setup-mktemp-term-ignoring' || mode === 'setup-mkfifo-term-ignoring' || mode === 'setup-ps-term-ignoring';
+  // A stalled setup child records its events and the driver's observation times only
+  // on request (issue #3554). Unset, these modes run the untraced path, which is the
+  // same-host control for a traced run.
+  const setupStallTrace = (mode === 'setup-mktemp-term-ignoring' || mode === 'setup-mkfifo-term-ignoring' || mode === 'setup-ps-term-ignoring') && process.env.WHATSOUP_SETUP_STALL_EVENT_TRACE === '1';
   const eventTrace = mode.startsWith('event-order-') || mode === 'near-deadline' || mode === 'worker-stopped-after-authorization' || mode === 'forged-completion-worker-stopped' || outcomeTrace || setupStallTrace;
   const eventOrderSource = eventTrace ? observeLifecycleEventOrder(fs.readFileSync(BOUNDED_LIB, 'utf8')) : undefined;
   let outcomeSource: string | undefined;
@@ -555,7 +556,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     fs.unlinkSync(path.join(shim, stalledSetupBinary));
     fs.writeFileSync(path.join(shim, stalledSetupBinary), [
       '#!/bin/bash',
-      '[ "$EVENT_ORDER_TRACE" != 1 ] || builtin printf "H_SETUP_ENTER pid=%s\\n" "$$" >> "$EVENT_ORDER_LOG"',
+      ...(setupStallTrace ? ['builtin printf "H_SETUP_ENTER pid=%s\\n" "$$" >> "$EVENT_ORDER_LOG"'] : []),
       'printf "%s\\n" "$$" > "$SETUP_PID"',
       'trap "" TERM HUP USR1',
       mode === 'setup-timer-sleep-failure' ? '/bin/sleep 30 &' : 'sleep 30 &',
@@ -1004,6 +1005,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     const record = JSON.parse(result.stdout);
     if (outcomeTrace) process.stderr.write('OUTCOME_EVENT_TRACE ' + JSON.stringify(record) + '\n');
     if (stoppedWorkerTrace) process.stderr.write('STOPPED_WORKER_EVENT_TRACE ' + JSON.stringify(record) + '\n');
+    if (setupStallTrace) process.stderr.write('SETUP_STALL_EVENT_TRACE ' + JSON.stringify(record) + '\n');
     if (nearDeadlineTrace) {
       const events = Array.isArray(record.events)
         ? record.events.filter((event: unknown) => typeof event === 'string' && /^(R_FIFO |O_RESULT_CLAIM |D_OUTER_ENTER|O_OUTER_CLAIM |A )/.test(event))

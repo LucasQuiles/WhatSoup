@@ -31,17 +31,31 @@ def release_budget():
     # holdBudgetForDriver in credential-probe-stopped-worker.ts holds the budget
     # until this, so a slow host cannot let it overtake the driver's identity read.
     (root / 'budget-hold-release').write_text('release')
-# Modes whose helper stalls in a TERM-ignoring setup child. The driver times
-# their events and the setup processes' exit, so a missed wall-clock bound names
-# the slow phase (issue #3554). It only observes: no event waits for it.
+# Modes whose helper stalls in a TERM-ignoring setup child (issue #3554). The
+# test sets EVENT_ORDER_TRACE=1 for them only under
+# WHATSOUP_SETUP_STALL_EVENT_TRACE=1; then the driver records when it observed
+# each event line and each setup process's reap. Otherwise the probe runs the
+# untraced path, the same-host control. It only observes: no event waits for it.
 SETUP_STALL_MODES = ('setup-mktemp-term-ignoring', 'setup-mkfifo-term-ignoring', 'setup-ps-term-ignoring')
+setup_stall_trace = mode in SETUP_STALL_MODES and os.environ.get('EVENT_ORDER_TRACE') == '1'
 def observe_setup_stall(child, timeout):
+    # Every recorded time is an observation time: when this poll loop saw an event
+    # line or found a pid gone, not when the event happened and not how long any
+    # phase took. An event happened at or before its observed time. An interval
+    # between two observed times is accurate only to within
+    # observation_poll_max_gap_ms (plus 1 ms for whole-ms truncation).
     # Returns the unused part of the timeout, so the probe's total wait is unchanged.
     deadline = time.monotonic() + timeout
     log = root / 'event-order.log'
     observations = record.setdefault('event_observations', [])
-    gone = record.setdefault('setup_gone_ms', {})
+    gone = record.setdefault('setup_reap_observed_ms', {})
+    record['observation_poll_max_gap_ms'] = 0.0
+    previous_poll = None
     while True:
+        poll_at = time.monotonic()
+        if previous_poll is not None:
+            record['observation_poll_max_gap_ms'] = max(record['observation_poll_max_gap_ms'], round((poll_at - previous_poll) * 1000, 3))
+        previous_poll = poll_at
         exited = child.poll() is not None
         # Take whole lines only: a read can land inside an append.
         text = log.read_text() if log.exists() else ''
@@ -567,11 +581,11 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             timer_group = int((root / 'timer-partial-signal').read_text())
             record['timer_survivors_after_return'] = [item for item in members(session) if item['pgid'] == timer_group]
         record['before_child_wait_ms'] = int((time.monotonic() - started) * 1000)
-        child.wait(timeout=observe_setup_stall(child, 8) if mode in SETUP_STALL_MODES else 8)
+        child.wait(timeout=observe_setup_stall(child, 8) if setup_stall_trace else 8)
         record['child_exit_ms'] = int((time.monotonic() - started) * 1000)
-        if mode in SETUP_STALL_MODES:
+        if setup_stall_trace:
             started_ns = int(started * 1_000_000_000)
-            record['setup_phase_ms'] = [[(item['observed_monotonic_ns'] - started_ns) // 1_000_000, item['event']] for item in record['event_observations']]
+            record['setup_event_observed_ms'] = [[(item['observed_monotonic_ns'] - started_ns) // 1_000_000, item['event']] for item in record['event_observations']]
         record['exit'] = child.returncode
         record['sentinel_alive_before_cleanup'] = sentinel.poll() is None
         record['survivors_before_cleanup'] = members(session)
