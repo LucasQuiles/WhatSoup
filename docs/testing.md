@@ -36,6 +36,10 @@ be combined with `--base`. Unknown arguments and invalid refs fail visibly.
 | `affected` | Eligible library, memory, console or guard source. Root tests use Vitest's transitive import graph plus the existing text-reference companion search. Console changes also run lint, build, design and both browser configurations. |
 | `full` | Security, identity, authorization, persistence, runtime lifecycle, dependencies, configuration, tests, scripts, deployment, renames/deletions, fixtures, unknown inputs or explicit `--full`/`--coverage`. |
 
+Reduced PR profiles run repository disclosure, commit-author and publication-audit
+guards in the selection job before any application worker starts. These commands
+need Git history and pinned Node, but no application dependency installation.
+
 The selection policy lives in `scripts/lib/test-selection-policy.ts`. The old
 `triage:required-suites` command remains an informational union of functional and
 fitness suites; malformed input now exits nonzero. It also recognizes TSX tests.

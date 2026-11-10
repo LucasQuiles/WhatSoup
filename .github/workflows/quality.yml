@@ -103,6 +103,16 @@ jobs:
           console.log(`reasons=${plan.reasons.join('; ')}`);
           NODE
 
+      - name: Disclosure guards before reduced PR validation
+        if: github.event_name == 'pull_request' && steps.plan.outputs.profile != 'full'
+        env:
+          TEST_BASE: ${{ steps.plan.outputs.test-base }}
+        run: |
+          test -n "$TEST_BASE"
+          node --experimental-strip-types scripts/repo-hygiene-guard.ts --branch-diff --base "$TEST_BASE"
+          node --experimental-strip-types scripts/repo-hygiene-guard.ts --commit-authors
+          node --experimental-strip-types scripts/publication-guard.ts --all
+
   docs:
     name: Quality documentation validation
     needs: selection
@@ -202,13 +212,9 @@ jobs:
         if: fromJSON(needs.selection.outputs.lanes).root
         run: npm run guard:lint:src
 
-      - name: Repository and publication guards when selected
+      - name: Documentation guards when selected
         if: fromJSON(needs.selection.outputs.lanes).root
-        env:
-          TEST_BASE: ${{ needs.selection.outputs.test-base }}
         run: |
-          npm run guard:repo:branch-diff -- --base "$TEST_BASE"
-          npm run guard:publication:all
           npm run guard:doc-drift
           npm run guard:public-surface-drift
 

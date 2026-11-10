@@ -1276,6 +1276,15 @@ describe('verify chain composition (push-gate manifest)', () => {
 });
 
 describe('quality workflow composition', () => {
+  it('keeps disclosure guards ahead of every reduced PR profile without installing dependencies', () => {
+    const selection = qualityWorkflow.slice(qualityWorkflow.indexOf('  selection:'), qualityWorkflow.indexOf('  docs:'));
+    expect(selection).toContain("if: github.event_name == 'pull_request' && steps.plan.outputs.profile != 'full'");
+    expect(selection).toContain('node --experimental-strip-types scripts/repo-hygiene-guard.ts --branch-diff --base "$TEST_BASE"');
+    expect(selection).toContain('node --experimental-strip-types scripts/repo-hygiene-guard.ts --commit-authors');
+    expect(selection).toContain('node --experimental-strip-types scripts/publication-guard.ts --all');
+    expect(selection).not.toContain('npm ci');
+  });
+
   it('runs the standalone PR metadata guard with authoritative pull-request event data', () => {
     expect(packageJson.scripts['guard:pr-metadata']).toBe(
       'bash scripts/run-with-pinned-node.sh scripts/pr-metadata-guard.ts',
