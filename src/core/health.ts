@@ -301,6 +301,11 @@ export const TURN_PROVABLE_STATUS_REASONS: ReadonlySet<string> = new Set([
  *     runtime reason disappears only after the shared alert clear is accepted.
  *     Health itself re-attempts that clear while no abandonment or exhaustion
  *     owns the source, so an accepted retry is immediately re-probed as clean.
+ *   - `runtime.provider_canary_unproven` (#3832) is recomputed by the runtime
+ *     from the provider canary receipts on disk at start and on every
+ *     health-stats tick, so it disappears once every gated provider's receipt
+ *     proves the current binary again. A turn proves nothing about it: the
+ *     primary can serve while a fallback provider stays unproven.
  *   - `recovery_debt_blocking` is the normalized recovery_debt verdict,
  *     recomputed on every evaluation from the continuity ledger, the durable
  *     turn-recovery and completed-delivery-identity gauges, and the delivery
@@ -347,6 +352,7 @@ export const DIRECTLY_REPROBED_STATUS_REASONS: ReadonlySet<string> = new Set([
   'runtime.agent_respawn_failed_clear_pending',
   'runtime.per_chat_session_without_owner',
   'runtime.per_chat_respawn_abandoned',
+  'runtime.provider_canary_unproven',
   'recovery_debt_blocking',
   'runtime.turn_finalization_debt',
   'runtime.completed_delivery_identity_debt',
@@ -677,6 +683,7 @@ export const HEALTH_DEGRADATION_CAUSE_REGISTRY: Readonly<
       'runtime.turn_queue_halted',
       'runtime.poll_persistence_failure',
       'runtime.offline_decision_retry_exhausted',
+      'runtime.provider_canary_unproven',
       'agent_runtime_degraded',
     ],
   },

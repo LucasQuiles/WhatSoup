@@ -1551,6 +1551,18 @@ Same-provider runs are serialized. A missing binary, lock contention, or
 controller/setup failure preserves an exact prior receipt; a conclusive unsafe
 result after the provider starts invalidates that provider's prior receipt.
 
+Once `<state-root>/provider-canaries/` exists, the runtime also inspects the
+receipt of the primary and every fallback CLI provider at start and every
+minute. Each provider whose receipt would not admit it is reported in
+`/health` under `runtime.agent.providerCanaryUnproven` with its provider id and
+one of `missing`, `malformed`, `stale`, `future` or `unavailable` (binary or
+version unresolvable), and the instance reads degraded with the
+`runtime.provider_canary_unproven` reason. A provider upgrade therefore shows
+as `stale` before a turn reaches that provider. The inspection writes no
+receipt and does not change admission; rerun the canary command above for each
+reported provider. The reason clears on the next inspection after the receipts
+prove the current binaries.
+
 #### Primary model usability probe
 
 Refresh ownership initializes an absent final credential-store directory with

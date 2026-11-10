@@ -240,6 +240,7 @@ describe('GET /health — per-chat ownership reasons across a repair', () => {
       'runtime.completed_delivery_identity_debt',
       'runtime.per_chat_respawn_abandoned',
       'runtime.per_chat_session_without_owner',
+      'runtime.provider_canary_unproven',
       'runtime.turn_finalization_debt',
     ]);
     // And the two sets must stay disjoint: a turn-provable reason has a release

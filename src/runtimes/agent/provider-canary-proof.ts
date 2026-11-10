@@ -72,6 +72,15 @@ export interface ProviderCanaryValidation {
   reason: ProviderCanaryValidationReason;
 }
 
+/** Validation classes plus `unavailable`: the binary or its version cannot be resolved. */
+export type ProviderCanaryReadinessReason = ProviderCanaryValidationReason | 'unavailable';
+
+/** One configured provider's canary state as bounded classes: no paths, digests or versions. */
+export interface ProviderCanaryReadinessEntry {
+  readonly providerId: string;
+  readonly reason: ProviderCanaryReadinessReason;
+}
+
 /**
  * Admission record binding the validated provider identity at admission time.
  * Returned by readProviderCanaryAdmission and consumed by SessionManager at
@@ -323,6 +332,15 @@ export function collectProviderCanaryEvidence(
   return evidence;
 }
 
+/** Parsed receipt, or null when absent. Throws on an unsafe read or invalid JSON. */
+function readProviderCanaryReceipt(stateRoot: string, providerId: string): unknown {
+  const raw = readPrivateFileSync(
+    providerCanaryReceiptPath(stateRoot, providerId),
+    { label: 'provider canary receipt', maxBytes: 8 * 1024 },
+  );
+  return raw === null ? null : JSON.parse(raw);
+}
+
 export function readProviderCanaryAdmission(input: {
   providerId: string;
   binary: string;
@@ -352,11 +370,7 @@ export function readProviderCanaryAdmission(input: {
   let receipt: unknown = null;
   let evidence: ProviderCanaryEvidence;
   try {
-    const raw = readPrivateFileSync(
-      providerCanaryReceiptPath(input.stateRoot, input.providerId),
-      { label: 'provider canary receipt', maxBytes: 8 * 1024 },
-    );
-    receipt = raw === null ? null : JSON.parse(raw);
+    receipt = readProviderCanaryReceipt(input.stateRoot, input.providerId);
     evidence = collectProviderCanaryEvidence(
       input.providerId,
       input.binary,
@@ -387,4 +401,77 @@ export function readProviderCanaryAdmission(input: {
     binarySha256: evidence.entrypointDigest,
     proxyScriptSha256: evidence.proxyDigest,
   };
+}
+
+function providerCanaryReadinessReason(
+  providerId: string,
+  binary: string,
+  proxyScriptPath: string,
+  stateRoot: string,
+  nowMs: number | undefined,
+): ProviderCanaryReadinessReason {
+  let receipt: unknown;
+  try {
+    receipt = readProviderCanaryReceipt(stateRoot, providerId);
+  } catch {
+    // intentional: admission refuses an unsafe or unparsable receipt; report it as malformed.
+    return 'malformed';
+  }
+  // A missing receipt needs no version subprocess to classify.
+  if (receipt === null) return 'missing';
+  let evidence: ProviderCanaryEvidence;
+  try {
+    evidence = collectProviderCanaryEvidence(providerId, binary, proxyScriptPath);
+  } catch {
+    // intentional: admission refuses an unresolvable binary or version; report it as its own class.
+    return 'unavailable';
+  }
+  return validateProviderCanaryReceipt(receipt, evidence, nowMs).reason;
+}
+
+/**
+ * Read-only view of the proof readProviderCanaryAdmission enforces, for every
+ * configured provider that admission gates (#3832). Admission refuses an
+ * unproven provider only when a turn reaches it, so without this view a
+ * missing receipt or a provider upgrade stays invisible until turns fail.
+ *
+ * Returns no entries when the receipt store is not provisioned, because
+ * admission requires no proof there. Providers outside the gated mode (API
+ * providers, non-`per_chat` scopes, sandbox-per-chat) are skipped. A receipt
+ * that cannot be read safely or parsed reports `malformed`.
+ */
+export function inspectProviderCanaryReadiness(input: {
+  providerIds: readonly string[];
+  resolveBinary: (providerId: string) => string | null;
+  proxyScriptPath: string;
+  stateRoot: string;
+  sessionScope: string;
+  sandboxPerChat: boolean;
+  nowMs?: number;
+}): ProviderCanaryReadinessEntry[] {
+  const required = [...new Set(input.providerIds)].filter((providerId) => providerCanaryRequired(
+    providerId,
+    input.sessionScope,
+    input.sandboxPerChat,
+  ));
+  if (required.length === 0 || !canaryStoreProvisioned(input.stateRoot)) return [];
+  return required.map((providerId): ProviderCanaryReadinessEntry => {
+    let binary: string;
+    try {
+      binary = input.resolveBinary(providerId) ?? '';
+    } catch {
+      // intentional: admission cannot run a provider whose binary does not resolve.
+      return { providerId, reason: 'unavailable' };
+    }
+    return {
+      providerId,
+      reason: providerCanaryReadinessReason(
+        providerId,
+        binary,
+        input.proxyScriptPath,
+        input.stateRoot,
+        input.nowMs,
+      ),
+    };
+  });
 }

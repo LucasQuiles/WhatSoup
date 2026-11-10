@@ -369,7 +369,7 @@ import {
   suppressStreamedProviderFailure as gateStreamedProviderFailure,
 } from './streamed-provider-failure.ts';
 import { isProcessAlive, sessionUsesInProcessBridge } from './runtime-predicates.ts';
-import { canaryStoreProvisioned, readProviderCanaryAdmission } from './provider-canary-proof.ts';
+import { canaryStoreProvisioned, inspectProviderCanaryReadiness, readProviderCanaryAdmission, type ProviderCanaryReadinessEntry } from './provider-canary-proof.ts';
 import { probeBinaryCommand, type listModelCatalog } from './providers/binary-preflight.ts';
 import { claudeRefreshLockGrace, refreshClaudeLoginAhead } from './providers/claude-refresh-ahead.ts';
 import { probePrimaryModelUsability, type PrimaryProbeServiceContext } from './providers/primary-model-usability.ts';
@@ -679,6 +679,8 @@ export class AgentRuntime implements Runtime {
   private turnHadSuppressedReplySatisfaction = false;
   private turnChain: Promise<void> = Promise.resolve();
   private healthStatsTimer: ReturnType<typeof setInterval> | null = null;
+  // #3832: gated providers admission would refuse; refreshed at start and per health-stats tick.
+  private providerCanaryUnproven: readonly ProviderCanaryReadinessEntry[] = [];
   private proactiveResumeIdentityRejects = 0;
   // C5 restart-loop guard: true when this boot follows an unclean exit
   // (captured at the top of start()); consumed by the startup resume gate.
@@ -1543,6 +1545,7 @@ export class AgentRuntime implements Runtime {
   private startHealthStatsTimer(): void {
     if (this.healthStatsTimer) return;
     this.healthStatsTimer = setInterval(() => {
+      this.refreshProviderCanaryReadiness();
       try {
         this.logHealthStats();
       } catch (err) {
@@ -1550,6 +1553,19 @@ export class AgentRuntime implements Runtime {
       }
     }, HEALTH_STATS_INTERVAL_MS);
     this.healthStatsTimer.unref?.();
+  }
+
+  /** #3832 detection only: checks primary and fallback receipts with admission's inputs; writes none. */
+  private refreshProviderCanaryReadiness(): void {
+    try {
+      this.providerCanaryUnproven = inspectProviderCanaryReadiness({
+        providerIds: [this.agentProvider, ...this.agentFallbacks.map((entry) => entry.provider)],
+        resolveBinary: (id) => getProviderBinary(id), proxyScriptPath: providerMcpProxyScriptPath(), stateRoot: config.stateRoot,
+        sessionScope: this.sessionScope, sandboxPerChat: this.sandboxPerChat,
+      }).filter((entry) => entry.reason !== 'proven');
+    } catch (err) {
+      log.warn({ err, instanceName: this.instanceName }, 'provider canary readiness inspection failed');
+    }
   }
 
   private startQueueSweepTimer(): void {
@@ -4565,6 +4581,7 @@ export class AgentRuntime implements Runtime {
     this.capturePrimaryProbeServiceContext();
     this.fallback.schedulePrimaryModelUsabilityProbe('startup');
     this.fallback.scheduleNextPeriodicUsabilityProbe();
+    this.refreshProviderCanaryReadiness();
     this.startHealthStatsTimer();
     this.workspaceSweeper.start();
     this.startQueueSweepTimer();
@@ -7639,6 +7656,7 @@ export class AgentRuntime implements Runtime {
     // branch's `details` at the same position, preserving key order and output.
     const sharedHealthDetails = {
       accountIdentity,
+      providerCanaryUnproven: this.providerCanaryUnproven,
       pollPersistenceErrors: this.pollPersistence.errors,
       pollPersistenceHealth,
       offlineDecisionRetry,
@@ -7727,6 +7745,7 @@ export class AgentRuntime implements Runtime {
       if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
       if (pollPersistenceHealth.degraded) degradedReasons.push('poll_persistence_failure');
       if (offlineDecisionRetry.exhausted) degradedReasons.push('offline_decision_retry_exhausted');
+      if (this.providerCanaryUnproven.length > 0) degradedReasons.push('provider_canary_unproven'); // only per_chat is gated
       degradedReasons.push(...accountIdentityReasons);
       const healthStatus: RuntimeHealth['status'] = degradedReasons.length > 0 ? 'degraded' : 'healthy';
       return {
