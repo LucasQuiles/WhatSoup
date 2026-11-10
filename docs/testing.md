@@ -65,6 +65,14 @@ its own assertions and failure result. The temporary report is removed on succes
 or failure; combined mode refuses injected reports and baseline updates. Individual
 inventory commands remain available for focused investigation.
 
+The full repository fitness test runs one fresh ESLint scan in a native Node
+child, bounded to 290 seconds inside its existing 300-second setup budget. All
+findings and counts return to the existing warning, error, timeout-rule and
+file-size assertions. A failed child or incomplete report fails the suite. Small
+rule tests still execute their normal assertions; production coverage scope and
+floors remain unchanged. The scan does not inherit Vitest instrumentation or
+Node compile caching.
+
 Both the local release gate and the full Quality job run console lint, build and
 live design checks before root coverage. The full suite and its design tests
 remain required; an earlier build/design failure stops before that expensive run.

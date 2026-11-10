@@ -19,7 +19,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { beforeAll, describe, it, expect } from 'vitest';
-import { runEslintFitness } from '../../scripts/eslint-fitness-check.ts';
+import { scanFitnessInNativeProcess } from '../helpers/native-fitness-scan.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -232,15 +232,13 @@ function formatOverBudgetFailure(overBudget: OverBudgetEntry[]): string {
 }
 
 describe('eslint fitness wrapper — full repository scan', () => {
-  let result: Awaited<ReturnType<typeof runEslintFitness>>;
+  let result: ReturnType<typeof scanFitnessInNativeProcess>;
 
-  beforeAll(async () => {
+  beforeAll(() => {
     // These assertions share one fresh scan; isolated test files would repeat it.
-    result = await runEslintFitness(repoRoot);
+    result = scanFitnessInNativeProcess(repoRoot);
     // Preserve the warning-budget limit from #1782 (run 29316490688).
-    // At base 1dcf6b4e, coverage job 127508252860 completed this suite in 167s
-    // and the former wrapper suite in 172s. The wrapper had a 420s limit from
-    // #3244; the shared scan retains 300s and still needs candidate CI proof.
+    // The native child has a 290-second deadline inside the existing 300-second hook budget.
   }, 300_000);
 
   it('treats warning-only results as non-blocking and reports errors as blocking', () => {
