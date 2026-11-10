@@ -1841,7 +1841,9 @@ Consolidation promotes durable knowledge out of episodic memory:
 durable run receipts, cancellation, and the post-stop write fence;
 `runConsolidation` (`src/memory/consolidation-cron.ts`) selects sources (fixed semantic
 query, top-100, with a provider-side filter excluding the `consolidated`
-confidence qualifier while retaining records without that field), scopes them by chat+sender, clusters them
+confidence qualifier while retaining records without that field; with
+`memory.pinecone.instanceScopedIds` on, only this instance's records), scopes them by
+chat+sender (plus source account when that option is on), clusters them
 (`clusterMemories`, `src/memory/consolidation.ts`), sends each cluster to the model, and
 upserts promoted claims back to the remote store under
 `durable:<shortHash(scope + claim)>` ids with `confidenceQualifier: 'consolidated'`.
@@ -1924,9 +1926,26 @@ designed contract mirrors the fact-export queue machinery (§9):
 - **Why a local ledger.** When the provider circuit breaker is open, remote state can
   be neither inspected nor repaired — a remote-metadata lifecycle strands its own
   leases exactly when reconciliation is needed. The local ledger stays repairable
-  with the provider down. Scope-claim safety across the fleet assumes chat/sender
-  scopes do not collide across instances sharing an index — the same assumption
-  current scoping makes; the owner should confirm it for the fleet topology.
+  with the provider down.
+- **Instances sharing an index.** Chat/sender scopes do collide across instances
+  that share an index: a personal line and a bot line see the same contact's DM
+  under the same `chat_jid`. This is handled by record provenance, not by an
+  assumption. Every record carries server-stamped `source_instance`,
+  `source_account`, `visibility` and `provenance` (`toPineconeRecord`; see
+  [configuration: memory record provenance](configuration.md#memory-record-provenance)).
+  Instances that share an index set `memory.pinecone.instanceScopedIds`, which
+  folds the instance into every id scheme (`memory_write`, the fact-export
+  `factId`, `durable:`) and makes source instance and account boundaries:
+  consolidation selects only its own instance's records, groups by account +
+  chat + sender, and hashes that key into the durable id; dedup and claim
+  lookups match only the same instance and account; recall treats another
+  instance's record as another conversation. Records are never merged on text
+  alone across instances. With the option off (single-instance indexes), ids,
+  filters and scopes are unchanged, and records without `source_instance` count
+  as the reading instance's. A ledger built later keys its scopes the same way.
+  Personal-line records are `owner_only` and reach only the verified owner or a
+  configured trusted operator in a direct chat
+  ([owner_only records](configuration.md#owner_only-records)).
 - **`DurableKnowledge` disposition.** Resolved: the interface had zero consumers
   and was removed from `src/memory/types.ts` (#2569 contract item 13). If the
   ledger lands, its schema is authored fresh rather than reviving the dead type
