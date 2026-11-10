@@ -5,9 +5,10 @@
 // the active turn synchronously when the queue was idle, so these tests prove
 // the idle/queued split against the real queue, not a hand-set flag.
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TurnQueue, type QueuedTurn } from '../../../src/runtimes/agent/turn-queue.ts';
 import { fakeClock, type Clock } from '../../../src/lib/clock.ts';
+import { config } from '../../../src/config.ts';
 import {
   DEFAULT_QUEUED_TURN_RECEIPT_COOLDOWN_MS,
   QUEUED_TURN_RECEIPT_NO_STOP_TEXT,
@@ -346,5 +347,95 @@ describe('#2949 queued receipt: /stop is offered only where every reader may run
 
     expect(send.mock.calls).toEqual([[chatJid, QUEUED_TURN_RECEIPT_TEXT]]);
     expect(adminCount).not.toHaveBeenCalled();
+  });
+});
+
+// Review break (round 4): a DM receipt offered /stop in a 1:1 chat listed in
+// pausedChats. Ingest dispatches a paused chat's message only when it matches
+// a pausedChatBypassPatterns entry, and /stop is not an admin command, so a
+// bypass that admitted the queued message but not a bare /stop got the offer
+// and then dropped the /stop. The offer now asks ingest's own paused-chat rule
+// about the exact text it names. The rule pauses a chat by its conversation
+// key or its chat JID, as ingest does. The ingest-to-runtime contract is in
+// queued-turn-receipt-runtime.test.ts.
+describe('#2949 queued receipt: a paused 1:1 chat is offered /stop only when ingest admits a bare /stop', () => {
+  const otherChat = 'other-chat@s.whatsapp.net';
+  const otherMember = '15550002@s.whatsapp.net';
+  let pausedChats = new Set<string>();
+  let bypassPatterns: string[] = [];
+  // Every read of the two paused-chat settings, so a test can show which
+  // receipts consult them.
+  const pausedChatsRead = vi.fn(() => pausedChats);
+  const bypassPatternsRead = vi.fn(() => bypassPatterns);
+  let savedPausedChats: PropertyDescriptor | undefined;
+  let savedBypassPatterns: PropertyDescriptor | undefined;
+
+  function restoreConfigProp(key: string, descriptor: PropertyDescriptor | undefined): void {
+    if (descriptor) Object.defineProperty(config, key, descriptor);
+    else delete (config as Record<string, unknown>)[key];
+  }
+
+  beforeEach(() => {
+    savedPausedChats = Object.getOwnPropertyDescriptor(config, 'pausedChats');
+    savedBypassPatterns = Object.getOwnPropertyDescriptor(config, 'pausedChatBypassPatterns');
+    pausedChats = new Set<string>();
+    bypassPatterns = [];
+    pausedChatsRead.mockClear();
+    bypassPatternsRead.mockClear();
+    Object.defineProperty(config, 'pausedChats', { configurable: true, enumerable: true, get: pausedChatsRead });
+    Object.defineProperty(config, 'pausedChatBypassPatterns', { configurable: true, enumerable: true, get: bypassPatternsRead });
+  });
+
+  afterEach(() => {
+    restoreConfigProp('pausedChats', savedPausedChats);
+    restoreConfigProp('pausedChatBypassPatterns', savedBypassPatterns);
+  });
+
+  type Row = { title: string; paused: string[]; patterns: string[]; receipt: string };
+  // makeTurn's conversation key is `mapKey` and its chat JID is `chatJid`.
+  const rows: Row[] = [
+    { title: 'paused by conversation key, no bypass pattern → not offered', paused: [mapKey], patterns: [], receipt: QUEUED_TURN_RECEIPT_NO_STOP_TEXT },
+    { title: 'paused, a bypass pattern admits the queued message but not /stop → not offered', paused: [mapKey], patterns: ['^urgent:'], receipt: QUEUED_TURN_RECEIPT_NO_STOP_TEXT },
+    { title: 'paused by chat JID only → not offered', paused: [chatJid], patterns: ['^urgent:'], receipt: QUEUED_TURN_RECEIPT_NO_STOP_TEXT },
+    { title: 'paused, a bypass pattern admits /stop → offered', paused: [mapKey], patterns: ['^urgent:', '^/stop$'], receipt: QUEUED_TURN_RECEIPT_TEXT },
+    { title: 'not paused, another chat is → offered', paused: [otherChat], patterns: [], receipt: QUEUED_TURN_RECEIPT_TEXT },
+  ];
+
+  it.each(rows.map((row) => [row.title, row] as const))('a DM receipt: %s', (_title, row) => {
+    pausedChats = new Set(row.paused);
+    bypassPatterns = row.patterns;
+    const { queue } = makeBlockingQueue();
+    const { notifier, send } = makeNotifier();
+    queue.enqueue(makeTurn('urgent: first question'));
+
+    expect(admit(notifier, queue, makeTurn('urgent: second question'))).toBe('sent');
+
+    expect(send.mock.calls).toEqual([[chatJid, row.receipt]]);
+  });
+
+  it('a group receipt reads no paused-chat setting, even in a paused group whose bypass admits /stop', () => {
+    pausedChats = new Set([mapKey, chatJid]);
+    bypassPatterns = ['^/stop$'];
+    const { queue } = makeBlockingQueue();
+    const { notifier, send } = makeNotifier();
+    queue.enqueue(makeTurn('running', { isGroup: true, senderJid: otherMember }));
+
+    expect(admit(notifier, queue, makeTurn('queued', { isGroup: true }))).toBe('sent');
+
+    expect(send.mock.calls).toEqual([[chatJid, QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT]]);
+    expect(pausedChatsRead).not.toHaveBeenCalled();
+    expect(bypassPatternsRead).not.toHaveBeenCalled();
+  });
+
+  it('positive control for the group pin: a DM receipt reads the paused chats', () => {
+    pausedChats = new Set([otherChat]);
+    const { queue } = makeBlockingQueue();
+    const { notifier, send } = makeNotifier();
+    queue.enqueue(makeTurn('first'));
+
+    expect(admit(notifier, queue, makeTurn('second'))).toBe('sent');
+
+    expect(send.mock.calls).toEqual([[chatJid, QUEUED_TURN_RECEIPT_TEXT]]);
+    expect(pausedChatsRead).toHaveBeenCalled();
   });
 });

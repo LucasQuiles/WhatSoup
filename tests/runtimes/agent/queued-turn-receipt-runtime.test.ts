@@ -3,10 +3,12 @@
 // Harness: REAL AgentRuntime + REAL RuntimeTurnCoordinator + REAL per-chat
 // TurnQueue + REAL SQLite DurabilityEngine. Only the provider session and the
 // per-turn OutboundQueue are doubles (deferred-turn-admission.test.ts pattern).
-// Because the per-turn OutboundQueue is a double, `messenger.sendMessage` is
-// reached only by out-of-band sends, which is what the receipt must be: it must
-// never ride the active turn's outbound queue, where it would count as that
-// turn's visible answer.
+// The ingest-to-runtime cases also put the REAL ingest, admin-command check
+// and access policy in front of the runtime. Because the per-turn
+// OutboundQueue is a double, `messenger.sendMessage` is reached only by
+// out-of-band sends, which is what the receipt must be: it must never ride
+// the active turn's outbound queue, where it would count as that turn's
+// visible answer.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { Messenger, IncomingMessage } from '../../../src/core/types.ts';
@@ -149,6 +151,10 @@ const { mockConfig } = vi.hoisted(() => ({
     elevenlabs: { defaultVoiceId: 'v', defaultModel: 'm', stability: 0.5, similarityBoost: 0.75 },
     memory: { adminJid: 'admin@s.whatsapp.net' },
     ingest: { maxConcurrent: 1, maxQueueDepth: 10 },
+    // Set only by the ingest-to-runtime cases below; unset, as before, elsewhere.
+    accessMode: undefined as 'allowlist' | undefined,
+    pausedChats: undefined as Set<string> | undefined,
+    pausedChatBypassPatterns: undefined as string[] | undefined,
   },
 }));
 
@@ -173,12 +179,9 @@ vi.mock('../../../src/core/messages.ts', async (importOriginal) => ({
   updateTranscription: vi.fn(),
 }));
 
-vi.mock('../../../src/core/command-router.ts', () => ({
-  isAdminMessage: vi.fn(() => false), parseAdminCommand: vi.fn(() => null),
-}));
-vi.mock('../../../src/core/access-policy.ts', () => ({
-  shouldRespond: vi.fn(() => ({ respond: true, reason: 'allowed' })),
-}));
+// The admin-command check (command-router.ts) and the access policy stay REAL:
+// the ingest-to-runtime cases run them in front of the runtime, and no other
+// case reaches them, because those call runtime.handleMessage directly.
 
 vi.mock('../../../src/runtimes/agent/media-prep.ts', () => ({
   prepareContentForAgent: vi.fn(async (msg: IncomingMessage) => msg.content ?? ''),
@@ -285,7 +288,19 @@ import {
   QUEUED_TURN_RECEIPT_OTHER_TEXT,
   QUEUED_TURN_RECEIPT_TEXT,
 } from '../../../src/runtimes/agent/runtime-queued-receipt.ts';
-import { STOP_ACK_NOTHING_TO_STOP } from '../../../src/runtimes/agent/runtime-stop-command.ts';
+import {
+  STOP_ACK_ALREADY_STOPPING,
+  STOP_ACK_NOTHING_TO_STOP,
+  STOP_ACK_STOPPED,
+  STOP_ACK_UNCERTAIN_DELIVERY,
+  STOP_ACK_UNCERTAIN_FAILED,
+  STOP_ACK_UNCERTAIN_NOT_PROVEN,
+  STOP_ACK_UNCERTAIN_STILL_ACTIVE,
+  STOP_ACK_UNCERTAIN_TIMEOUT,
+} from '../../../src/runtimes/agent/runtime-stop-command.ts';
+import { createIngestHandler } from '../../../src/core/ingest.ts';
+import { resolvePhoneFromJid } from '../../../src/core/access-list.ts';
+import { drainIngest } from '../../core/_helpers/ingest-drain.ts';
 import { installFakePerChatMcpSocketManager } from './helpers/fake-per-chat-mcp-socket-manager.ts';
 
 const chatJid = 'queued-receipt-chat@s.whatsapp.net';
@@ -584,5 +599,143 @@ describe('#2949 queued receipt through the real per_chat admission path', () => 
     // Refused, so nothing was torn down: the running request and the queued message remain.
     expect(liveQueue()?.activeTurn?.inboundSeq).toBe(running);
     expect(liveQueue()?.pending).toBe(1);
+  });
+
+  // Review break (round 4): ingest dispatches a message in a chat listed in
+  // pausedChats only when its content matches a pausedChatBypassPatterns entry,
+  // and /stop is not an admin command. A DM receipt that offered /stop there
+  // could promise a command that ingest then drops. These cases put the REAL
+  // ingest, with the REAL admin-command check and access policy, in front of
+  // the runtime above. The receipt offers /stop only when the bypass admits a
+  // bare /stop, and the /stop then does what the receipt said.
+  describe('ingest to runtime: a paused 1:1 chat', () => {
+    /** The sender's own 1:1 chat. The sender is allowlisted and is not an admin. */
+    const dmJid = nonAdminJid;
+    const botJid = '15550000@s.whatsapp.net';
+    let ingest: (msg: IncomingMessage) => Promise<void>;
+
+    /** Every reply a /stop sends: a refusal, nothing to stop, or an outcome. An
+     *  outcome can carry a note on the dropped messages, so these are prefixes. */
+    const STOP_REPLIES = [
+      DENIAL_TEXT,
+      STOP_ACK_NOTHING_TO_STOP,
+      STOP_ACK_ALREADY_STOPPING,
+      STOP_ACK_STOPPED,
+      STOP_ACK_UNCERTAIN_TIMEOUT,
+      STOP_ACK_UNCERTAIN_FAILED,
+      STOP_ACK_UNCERTAIN_STILL_ACTIVE,
+      STOP_ACK_UNCERTAIN_DELIVERY,
+      STOP_ACK_UNCERTAIN_NOT_PROVEN,
+    ];
+    /** The replies of a /stop that tore down a running task: stopped, or uncertain. */
+    const MID_TASK_STOP_OUTCOMES = STOP_REPLIES.filter(
+      (reply) => reply !== DENIAL_TEXT && reply !== STOP_ACK_NOTHING_TO_STOP && reply !== STOP_ACK_ALREADY_STOPPING,
+    );
+
+    function sentMatching(replies: readonly string[]): string[] {
+      return allSentTexts().filter((text) => replies.some((reply) => text.startsWith(reply)));
+    }
+
+    /** The texts ingest handed to the runtime, in order. */
+    function dispatched(): Array<string | null> {
+      return vi.mocked(runtime.handleMessage).mock.calls.map(([msg]) => msg.content);
+    }
+
+    function inboundRow(messageId: string): { routed_to: string; terminal_reason: string | null } | undefined {
+      return db.raw
+        .prepare('SELECT routed_to, terminal_reason FROM inbound_events WHERE message_id = ?')
+        .get(messageId) as { routed_to: string; terminal_reason: string | null } | undefined;
+    }
+
+    function dmMsg(messageId: string, content: string): IncomingMessage {
+      return makeMsg({ messageId, chatJid: dmJid, senderJid: dmJid, content });
+    }
+
+    /** One message through ingest, waited on until ingest and the runtime's turn chain are idle. */
+    async function ingestDm(messageId: string, content: string): Promise<void> {
+      // The returned promise is the transport bridge's and can stay pending; drainIngest is the signal.
+      void ingest(dmMsg(messageId, content));
+      await drainIngest();
+      await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+    }
+
+    /** A running request and a queued one, both admitted by the bypass; returns the receipt. */
+    async function queueBehindRunningRequest(): Promise<unknown[] | undefined> {
+      makeRuntime({ sessionScope: 'per_chat' });
+      vi.spyOn(runtime, 'handleMessage');
+      ingest = createIngestHandler(db, messenger, runtime, () => botJid, () => null, engine);
+
+      await ingestDm('wamid-paused-running', 'urgent: first question');
+      await vi.waitFor(() => expect(sessionDoubles.some((s) => s.turnInFlight)).toBe(true));
+      await ingestDm('wamid-paused-queued', 'urgent: second question');
+
+      expect(dispatched()).toEqual(['urgent: first question', 'urgent: second question']);
+      expect(liveQueue()?.pending).toBe(1);
+      await vi.waitFor(() => expect(receiptSends()).toHaveLength(1));
+      return receiptSends()[0];
+    }
+
+    beforeEach(() => {
+      mockConfig.accessMode = 'allowlist';
+      mockConfig.pausedChats = new Set([dmJid]);
+      db.raw.prepare(
+        `INSERT OR IGNORE INTO access_list (subject_type, subject_id, status, display_name, requested_at)
+         VALUES ('phone', ?, 'allowed', 'Allowed', datetime('now'))`,
+      ).run(resolvePhoneFromJid(dmJid, db));
+    });
+
+    afterEach(() => {
+      mockConfig.accessMode = undefined;
+      mockConfig.pausedChats = undefined;
+      mockConfig.pausedChatBypassPatterns = undefined;
+    });
+
+    it('a bypass that admits the queued message but not /stop: the receipt has no /stop sentence, and a bare /stop is dropped at ingest', async () => {
+      mockConfig.pausedChatBypassPatterns = ['^urgent:'];
+
+      const receipt = await queueBehindRunningRequest();
+
+      expect(receipt).toEqual([dmJid, QUEUED_TURN_RECEIPT_NO_STOP_TEXT]);
+      const running = liveQueue()?.activeTurn?.inboundSeq;
+      expect(running).toBeDefined();
+
+      // The reader sends a bare /stop anyway.
+      await ingestDm('wamid-paused-stop', '/stop');
+
+      // Ingest dropped it as paused: stored and journaled, never dispatched, no reply.
+      expect(inboundRow('wamid-paused-stop')).toEqual({ routed_to: 'none', terminal_reason: 'chat_paused' });
+      expect(dispatched()).not.toContain('/stop');
+      expect(sentMatching(STOP_REPLIES)).toEqual([]);
+      // Nothing was torn down: the running request and the queued message remain.
+      expect(liveQueue()?.activeTurn?.inboundSeq).toBe(running);
+      expect(liveQueue()?.pending).toBe(1);
+    });
+
+    it('a bypass that admits /stop: the receipt offers /stop, and a bare /stop reaches the runtime and tears the task down', async () => {
+      mockConfig.pausedChatBypassPatterns = ['^urgent:', '^/stop$'];
+
+      const receipt = await queueBehindRunningRequest();
+
+      expect(receipt).toEqual([dmJid, QUEUED_TURN_RECEIPT_TEXT]);
+
+      // An accepted mid-task /stop holds its ingest slot until its teardown
+      // settles, so it is not drained here.
+      void ingest(dmMsg('wamid-bypass-stop', '/stop'));
+      await vi.waitFor(() => expect(dispatched()).toContain('/stop'));
+      // The teardown shuts the session down, then waits for its running
+      // provider turn to end. Only a shut-down session's turn is ended, as a
+      // killed provider process's would be, so no turn ends on its own first.
+      await vi.waitFor(() => {
+        for (const session of sessionDoubles) {
+          if (session.turnInFlight && session.shutdown.mock.calls.length > 0) session.completeProviderTurn();
+        }
+        expect(sentMatching(STOP_REPLIES)).toHaveLength(1);
+      }, { timeout: 5_000 });
+      await drainIngest();
+
+      expect(sentMatching(MID_TASK_STOP_OUTCOMES)).toHaveLength(1);
+      expect(inboundRow('wamid-bypass-stop')?.routed_to).not.toBe('none');
+      expect(inboundRow('wamid-bypass-stop')?.terminal_reason).not.toBe('chat_paused');
+    });
   });
 });
