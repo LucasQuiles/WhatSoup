@@ -57,7 +57,7 @@ describe('COMMAND_REGISTRY', () => {
     }
     // /new is group-permitting by design (W1-PACKET.md W1-T3 RULING: an admin
     // may /new in a group). Its gate is scope-based ('admin-shared-scope',
-    // enforced inline via sessionScope/isGroup in runtime.ts — NOT the venue
+    // enforced by commandGateDenies via sessionScope/isGroup — NOT the venue
     // axis), so venue is 'any', not 'dm'.
     expect(getCommandSpec('new').gate).toBe('admin-shared-scope');
     expect(getCommandSpec('new').venue).toBe('any');

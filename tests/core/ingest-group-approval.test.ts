@@ -8,9 +8,9 @@
  * an approval request when they @mentioned the bot; direct chats keep asking;
  * the status broadcast never asks.
  *
- * #2949 queued receipt: the same real gate pins why the group receipt says
- * "Mention me with /stop": a group that is not on the group allowlist
- * dispatches only a message that mentions the bot.
+ * #2949 queued receipt: the same real gate pins one reason a group receipt
+ * offers no /stop: a group that is not on the group allowlist dispatches only
+ * a message that mentions the bot, so a bare /stop there is dropped.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { tmpdir } from 'node:os';
@@ -274,7 +274,7 @@ describe('#2949: in a mention-only group, only a mentioned /stop reaches the run
       senderJid: ALLOWED_SENDER,
       isGroup: true,
       mentionedJids: [BOT_JID],
-      content: '@15550356609 /stop',
+      content: `@${BOT_JID.split('@')[0]} /stop`,
     });
 
     await runIngest(handler, msg);

@@ -10,9 +10,7 @@ import { TurnQueue, type QueuedTurn } from '../../../src/runtimes/agent/turn-que
 import { fakeClock, type Clock } from '../../../src/lib/clock.ts';
 import {
   DEFAULT_QUEUED_TURN_RECEIPT_COOLDOWN_MS,
-  QUEUED_TURN_RECEIPT_GROUP_TEXT,
   QUEUED_TURN_RECEIPT_NO_STOP_TEXT,
-  QUEUED_TURN_RECEIPT_OTHER_GROUP_TEXT,
   QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT,
   QUEUED_TURN_RECEIPT_OTHER_TEXT,
   QUEUED_TURN_RECEIPT_TEXT,
@@ -54,25 +52,20 @@ function makeBlockingQueue(): { queue: TurnQueue; releaseActive: () => void } {
 }
 
 /**
- * `adminCount` is the configured admin count and `allowlistedOnly` the strict
- * group sender policy. Both reach the notifier as vi.fn, so a test can show
- * which one the receipt read. The defaults (no admin, any member may reach
- * the bot) offer /stop everywhere, so the older DM cases keep their /stop text.
+ * `adminCount` is the configured admin count. It reaches the notifier as a
+ * vi.fn, so a test can show whether the receipt read it. The default, no
+ * admin, offers /stop in a DM, so the older DM cases keep their /stop text.
  */
-function makeNotifier(
-  opts: { enabled?: boolean; clock?: Clock; adminCount?: number; allowlistedOnly?: boolean } = {},
-) {
+function makeNotifier(opts: { enabled?: boolean; clock?: Clock; adminCount?: number } = {}) {
   const send = vi.fn(async (_chatJid: string, _text: string) => {});
   const adminCount = vi.fn(() => opts.adminCount ?? 0);
-  const groupSendersAllowlistedOnly = vi.fn(() => opts.allowlistedOnly ?? false);
   const notifier = new QueuedTurnReceiptNotifier({
     enabled: () => opts.enabled ?? true,
     send,
     adminCount,
-    groupSendersAllowlistedOnly,
     ...(opts.clock ? { clock: opts.clock } : {}),
   });
-  return { notifier, send, adminCount, groupSendersAllowlistedOnly };
+  return { notifier, send, adminCount };
 }
 
 function admit(
@@ -212,27 +205,19 @@ describe('#2949 queued receipt: the text is truthful and content-free', () => {
     expect(sentText).not.toContain('99-1234');
   });
 
-  it('says /stop cancels the running task AND what is queued and promises only a reply with the outcome; a group is told to mention the bot; the no-/stop texts drop only that sentence', () => {
+  it('says /stop cancels the running task AND what is queued and promises only a reply with the outcome; the no-/stop texts drop only that sentence', () => {
     // Break caught: "Queued behind the current task" read as "some other task is
     // running"; the user asked again and again to cancel tasks that did not exist.
     // Review break: "Send /stop to cancel" read as a guarantee, but a permitted
     // /stop can end uncertain, and its reply says so.
-    // Review break: a group that is not on the group allowlist dispatches only a
-    // message that mentions the bot, so a bare /stop there never arrives.
     expect(QUEUED_TURN_RECEIPT_TEXT).toBe(
       "*Still working on your earlier request.* This message is next. Send /stop to cancel the earlier request and anything waiting; I'll reply with the outcome.",
-    );
-    expect(QUEUED_TURN_RECEIPT_GROUP_TEXT).toBe(
-      "*Still working on your earlier request.* This message is next. Mention me with /stop to cancel the earlier request and anything waiting; I'll reply with the outcome.",
     );
     expect(QUEUED_TURN_RECEIPT_OTHER_TEXT).toBe(
       "*Still working on an earlier request.* This message is queued behind it. Send /stop to cancel that request and anything waiting; I'll reply with the outcome.",
     );
-    expect(QUEUED_TURN_RECEIPT_OTHER_GROUP_TEXT).toBe(
-      "*Still working on an earlier request.* This message is queued behind it. Mention me with /stop to cancel that request and anything waiting; I'll reply with the outcome.",
-    );
-    // Where the receipt offers no /stop: the same status, and no one named to
-    // ask.
+    // Where the receipt offers no /stop (every group receipt): the same status,
+    // and no one named to ask.
     expect(QUEUED_TURN_RECEIPT_NO_STOP_TEXT).toBe(
       '*Still working on your earlier request.* This message is next.',
     );
@@ -251,14 +236,14 @@ describe('#2949 queued receipt: the text is truthful and content-free', () => {
     expect(send.mock.calls).toEqual([[chatJid, QUEUED_TURN_RECEIPT_TEXT]]);
   });
 
-  it('a group member queued behind someone else\'s request gets the other-request receipt, with the mention copy', () => {
+  it('a group member queued behind someone else\'s request gets the other-request receipt, without /stop', () => {
     const { queue } = makeBlockingQueue();
     const { notifier, send } = makeNotifier();
     queue.enqueue(makeTurn('alice asks', { senderJid: '15550002@s.whatsapp.net', isGroup: true }));
 
     admit(notifier, queue, makeTurn('bob asks', { isGroup: true }));
 
-    expect(send.mock.calls).toEqual([[chatJid, QUEUED_TURN_RECEIPT_OTHER_GROUP_TEXT]]);
+    expect(send.mock.calls).toEqual([[chatJid, QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT]]);
   });
 
   it('a message queued behind a scheduled job gets the other-request receipt', () => {
@@ -283,22 +268,17 @@ describe('#2949 queued receipt: the text is truthful and content-free', () => {
     expect(send.mock.calls).toEqual([[chatJid, QUEUED_TURN_RECEIPT_OTHER_TEXT]]);
   });
 
-  it('picks the text from the running turn\'s sender and purpose, the waiting count, the /stop offer and the venue', () => {
-    const me = { senderJid: '15550001@s.whatsapp.net', isGroup: false };
-    const meInGroup = { ...me, isGroup: true };
+  it('picks the text from the running turn\'s sender and purpose, the waiting count, and the /stop offer', () => {
+    const me = { senderJid: '15550001@s.whatsapp.net' };
     const other = { senderJid: '15550002@s.whatsapp.net' };
     expect(queuedTurnReceiptText(me, me, 1, true)).toBe(QUEUED_TURN_RECEIPT_TEXT);
     expect(queuedTurnReceiptText(me, me, 2, true)).toBe(QUEUED_TURN_RECEIPT_OTHER_TEXT);
     expect(queuedTurnReceiptText(other, me, 1, true)).toBe(QUEUED_TURN_RECEIPT_OTHER_TEXT);
-    expect(queuedTurnReceiptText({ senderJid: me.senderJid, purpose: 'scheduled-agent-job' }, me, 1, true))
+    expect(queuedTurnReceiptText({ ...me, purpose: 'scheduled-agent-job' }, me, 1, true))
       .toBe(QUEUED_TURN_RECEIPT_OTHER_TEXT);
-    expect(queuedTurnReceiptText(me, meInGroup, 1, true)).toBe(QUEUED_TURN_RECEIPT_GROUP_TEXT);
-    expect(queuedTurnReceiptText(me, meInGroup, 2, true)).toBe(QUEUED_TURN_RECEIPT_OTHER_GROUP_TEXT);
-    expect(queuedTurnReceiptText(other, meInGroup, 1, true)).toBe(QUEUED_TURN_RECEIPT_OTHER_GROUP_TEXT);
     expect(queuedTurnReceiptText(me, me, 1, false)).toBe(QUEUED_TURN_RECEIPT_NO_STOP_TEXT);
-    expect(queuedTurnReceiptText(me, meInGroup, 1, false)).toBe(QUEUED_TURN_RECEIPT_NO_STOP_TEXT);
     expect(queuedTurnReceiptText(me, me, 2, false)).toBe(QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT);
-    expect(queuedTurnReceiptText(other, meInGroup, 1, false)).toBe(QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT);
+    expect(queuedTurnReceiptText(other, me, 1, false)).toBe(QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT);
   });
 
   it('a failing send is contained: the decision stays sent and nothing throws', async () => {
@@ -308,7 +288,6 @@ describe('#2949 queued receipt: the text is truthful and content-free', () => {
       enabled: () => true,
       send,
       adminCount: () => 0,
-      groupSendersAllowlistedOnly: () => false,
     });
     queue.enqueue(makeTurn('first'));
 
@@ -321,14 +300,14 @@ describe('#2949 queued receipt: the text is truthful and content-free', () => {
 // - Every group member reads the receipt, but its /stop sentence followed the
 //   queued sender's authority, so in a per_chat group with admins configured
 //   an admin's receipt told members the gate refuses ("_Not authorized._") to
-//   send /stop. The receipt now asks the /stop gate for a reader who is not an
-//   admin, and never asks whether anyone is an admin.
-// - Under the allowlisted_only group sender policy, a member who is not
-//   allowlisted never reaches the gate, so such a group gets no /stop either.
-// - A group that is not on the group allowlist dispatches only a message that
-//   mentions the bot, so the group copy says "Mention me with /stop" (the
-//   ingest pin is in tests/core/ingest-group-approval.test.ts).
-// The contract against the real runtime gate is in
+//   send /stop.
+// - No group receipt can promise every reader a working /stop: ingest drops
+//   blocked and unresolved-LID members, and members who are not allowlisted
+//   under the allowlisted_only sender policy; a mention-only group drops a
+//   bare /stop (tests/core/ingest-group-approval.test.ts); and some transports
+//   carry no mention data.
+// So only a DM receipt offers /stop, and a group receipt reads no
+// configuration. The contract against the real runtime gate is in
 // queued-turn-receipt-runtime.test.ts.
 describe('#2949 queued receipt: /stop is offered only where every reader may run it', () => {
   const otherMember = '15550002@s.whatsapp.net';
@@ -337,20 +316,20 @@ describe('#2949 queued receipt: /stop is offered only where every reader may run
     return makeTurn(text, { isGroup: true, ...overrides });
   }
 
-  it('in a group with admins configured, the receipt has no /stop: every member reads it, and the gate refuses members who are not admins', () => {
+  it.each([0, 1])('a group receipt has no /stop and reads no configuration, with %i admin(s) configured', (configured) => {
     const { queue } = makeBlockingQueue();
-    const { notifier, send, adminCount } = makeNotifier({ adminCount: 1 });
+    const { notifier, send, adminCount } = makeNotifier({ adminCount: configured });
     queue.enqueue(groupTurn('running', { senderJid: otherMember }));
 
     expect(admit(notifier, queue, groupTurn('queued'))).toBe('sent');
 
     expect(send.mock.calls).toEqual([[chatJid, QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT]]);
-    expect(adminCount).toHaveBeenCalledTimes(1);
+    expect(adminCount).not.toHaveBeenCalled();
   });
 
-  it('a group member behind their own request, with admins configured, is told it is next, without /stop', () => {
+  it('a group member behind their own request is told it is next, without /stop', () => {
     const { queue } = makeBlockingQueue();
-    const { notifier, send } = makeNotifier({ adminCount: 1 });
+    const { notifier, send } = makeNotifier();
     queue.enqueue(groupTurn('my long request'));
 
     expect(admit(notifier, queue, groupTurn('why is it taking so long'))).toBe('sent');
@@ -358,48 +337,14 @@ describe('#2949 queued receipt: /stop is offered only where every reader may run
     expect(send.mock.calls).toEqual([[chatJid, QUEUED_TURN_RECEIPT_NO_STOP_TEXT]]);
   });
 
-  it('a DM gets the DM /stop copy whatever the admins and the group sender policy, and reads neither', () => {
+  it('a DM gets the /stop copy with admins configured, and the admin count is never read', () => {
     const { queue } = makeBlockingQueue();
-    const { notifier, send, adminCount, groupSendersAllowlistedOnly } = makeNotifier({
-      adminCount: 1,
-      allowlistedOnly: true,
-    });
+    const { notifier, send, adminCount } = makeNotifier({ adminCount: 1 });
     queue.enqueue(makeTurn('first'));
 
     expect(admit(notifier, queue, makeTurn('second'))).toBe('sent');
 
     expect(send.mock.calls).toEqual([[chatJid, QUEUED_TURN_RECEIPT_TEXT]]);
     expect(adminCount).not.toHaveBeenCalled();
-    expect(groupSendersAllowlistedOnly).not.toHaveBeenCalled();
-  });
-
-  it('with no admin configured, a group gets the mention copy', () => {
-    const { queue } = makeBlockingQueue();
-    const { notifier, send } = makeNotifier();
-    queue.enqueue(groupTurn('running', { senderJid: otherMember }));
-
-    expect(admit(notifier, queue, groupTurn('queued'))).toBe('sent');
-
-    expect(send.mock.calls).toEqual([[chatJid, QUEUED_TURN_RECEIPT_OTHER_GROUP_TEXT]]);
-  });
-
-  it('with no admin configured, a group member behind their own request gets the own-request mention copy', () => {
-    const { queue } = makeBlockingQueue();
-    const { notifier, send } = makeNotifier();
-    queue.enqueue(groupTurn('my long request'));
-
-    expect(admit(notifier, queue, groupTurn('why is it taking so long'))).toBe('sent');
-
-    expect(send.mock.calls).toEqual([[chatJid, QUEUED_TURN_RECEIPT_GROUP_TEXT]]);
-  });
-
-  it('under the allowlisted_only group sender policy, a group gets no /stop even with no admin configured', () => {
-    const { queue } = makeBlockingQueue();
-    const { notifier, send } = makeNotifier({ allowlistedOnly: true });
-    queue.enqueue(groupTurn('running', { senderJid: otherMember }));
-
-    expect(admit(notifier, queue, groupTurn('queued'))).toBe('sent');
-
-    expect(send.mock.calls).toEqual([[chatJid, QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT]]);
   });
 });
