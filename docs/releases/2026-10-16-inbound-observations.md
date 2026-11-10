@@ -7,7 +7,12 @@
   counters reset on restart. Counts distinguish the closed transport and ingest
   reasons documented in the [runbook](../runbook.md#4-health-endpoint).
   The four `transport.*` reasons cover Baileys only; `ingest.*` reasons
-  cover messages reaching the shared ingest path. Twilio, Signal and iMessage
+  cover ordinary inbound message persistence and journal failures before dispatch.
+  Outbound self-echoes and intercepted control-peer messages are excluded,
+  including their storage failures. Those failures remain in the ingest error
+  log; control-message processing continues after a control-message storage
+  failure. Zero ingest counters therefore do not prove those writes succeeded.
+  Twilio, Signal and iMessage
   do not currently count or alert on an absent inbound callback. Zero transport
   counters do not establish complete admission across those adapters.
 - A count records an observed local non-admission attempt, not a unique lost

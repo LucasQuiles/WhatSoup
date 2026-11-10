@@ -48,7 +48,8 @@ vi.mock('../../src/core/access-policy.ts', () => ({
   shouldRespond: vi.fn().mockReturnValue({ respond: true, reason: 'dm_allowed', accessStatus: 'allowed' }),
 }));
 
-vi.mock('../../src/core/access-list.ts', () => ({
+vi.mock('../../src/core/access-list.ts', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/core/access-list.ts')>()),
   extractLocal: vi.fn((jid: string) => jid.split('@')[0]),
   resolvePhoneFromJid: vi.fn((jid: string) => jid.split('@')[0]),
   lookupAccess: vi.fn(),
@@ -201,6 +202,73 @@ describe('ingest exits recorded as inbound observations', () => {
     });
     expect(doubles.emitAlert).toHaveBeenCalledTimes(1);
     expect(doubles.emitAlert.mock.calls[0]![1]).toBe('inbound_store_failed');
+  });
+
+  it('an outbound echo store failure is logged but excluded from inbound non-admission counts', async () => {
+    const db = openDb();
+    const runtime = makeRuntime();
+    const { durability, journalInbound } = makeDurability();
+    db.raw.exec(`
+      CREATE TRIGGER abort_echo_store BEFORE INSERT ON messages
+      WHEN NEW.message_id = 'obs-echo-store-failed'
+      BEGIN SELECT RAISE(ABORT, 'echo store aborted'); END
+    `);
+    const { createChildLogger } = await import('../../src/logger.ts');
+    const logger = createChildLogger('ingest') as unknown as { error: ReturnType<typeof vi.fn> };
+
+    makeHandler(db, runtime, durability)(makeMessage({ messageId: 'obs-echo-store-failed', isFromMe: true }));
+    await waitForIdle();
+
+    expect(storedCount(db, 'obs-echo-store-failed')).toBe(0);
+    const failure = logger.error.mock.calls.find((call) => call[1] === 'failed to store message');
+    expect(String((failure?.[0] as { err?: unknown } | undefined)?.err)).toMatch(/echo store aborted/);
+    expect(durability.matchEcho).toHaveBeenCalledWith('obs-echo-store-failed');
+    expect(journalInbound).not.toHaveBeenCalled();
+    expect(runtime.handleMessage).not.toHaveBeenCalled();
+    expect(Object.values(allZero()).every((n) => n === 0)).toBe(true);
+    expect(doubles.emitAlert).not.toHaveBeenCalled();
+  });
+
+  it('a control-message store failure is logged while control processing continues outside non-admission counts', async () => {
+    const db = openDb();
+    const runtime = makeRuntime();
+    const { durability, journalInbound } = makeDurability();
+    const controlPeers = new Map(config.controlPeers);
+    db.raw.exec(`
+      CREATE TRIGGER abort_control_store BEFORE INSERT ON control_messages
+      WHEN NEW.message_id = 'obs-control-store-failed'
+      BEGIN SELECT RAISE(ABORT, 'control store aborted'); END
+    `);
+    const { createChildLogger } = await import('../../src/logger.ts');
+    const logger = createChildLogger('ingest') as unknown as { error: ReturnType<typeof vi.fn> };
+    config.controlPeers.clear();
+    config.controlPeers.set('peer', '15551230008');
+    try {
+      makeHandler(db, runtime, durability)(makeMessage({
+        messageId: 'obs-control-store-failed',
+        content: '[HEAL_COMPLETE] ' + JSON.stringify({
+          reportId: 'obs-control-report', errorClass: 'test-control-store', result: 'fixed', diagnosis: 'fixture',
+        }),
+      }));
+      await waitForIdle();
+
+      expect(db.raw.prepare('SELECT COUNT(*) AS n FROM control_messages').get()).toEqual({ n: 0 });
+      expect(storedCount(db, 'obs-control-store-failed')).toBe(0);
+      const failure = logger.error.mock.calls.find((call) => call[1] === 'failed to store control message');
+      expect(String((failure?.[0] as { err?: unknown } | undefined)?.err)).toMatch(/control store aborted/);
+      expect(db.raw.prepare('SELECT state FROM heal_reports WHERE report_id = ?').get('obs-control-report'))
+        .toEqual({ state: 'resolved' });
+      expect(journalInbound).toHaveBeenCalledWith(
+        'obs-control-store-failed', '15551230008', '15551230008@s.whatsapp.net', 'control',
+      );
+      expect(durability.markInboundSkipped).toHaveBeenCalledWith(1, 'control_message');
+      expect(runtime.handleMessage).not.toHaveBeenCalled();
+      expect(Object.values(allZero()).every((n) => n === 0)).toBe(true);
+      expect(doubles.emitAlert).not.toHaveBeenCalled();
+    } finally {
+      config.controlPeers.clear();
+      for (const [name, phone] of controlPeers) config.controlPeers.set(name, phone);
+    }
   });
 
   it('a journal failure after a successful store records ingest.stored_not_admitted only; nothing is dispatched', async () => {
