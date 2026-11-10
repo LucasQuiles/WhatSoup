@@ -30,6 +30,7 @@ import {
   memoryHitTier,
   memoryIdentityFold,
   ownerOnlyLegFilter,
+  ownerOnlyRecallAllowed,
   recordIdScope,
   resolveMemoryScope,
   withVisibilityFilter,
@@ -193,22 +194,25 @@ function searchLegs(
   namespaces: string[],
   scope: MemoryScope | null,
   isChatNamespace: (namespace: string) => boolean,
+  ownerOnlyAccess: boolean,
 ): SearchLeg[] {
-  if (!scope) return namespaces.map((namespace) => ({ namespace }));
-  const thisChat = scope.chatSpellings.length > 0 ? { chat_jid: { $in: scope.chatSpellings } } : undefined;
-  // Memory legs exclude owner_only records before the query unless the caller
-  // may read them; memoryHitTier/tierHits gate the returned records again.
+  // Every leg of every allowed index excludes owner_only records before the
+  // query unless the caller may read them; tierHits gates the returned records
+  // again. Visibility is authorized apart from conversation scoping, which
+  // applies to the instance's own memory index only.
   const leg = (namespace: string, filter?: Record<string, unknown>): SearchLeg => {
-    const scoped = withVisibilityFilter(filter, scope.ownerOnlyAccess);
+    const scoped = withVisibilityFilter(filter, ownerOnlyAccess);
     return scoped ? { namespace, filter: scoped } : { namespace };
   };
+  if (!scope) return namespaces.map((namespace) => leg(namespace));
+  const thisChat = scope.chatSpellings.length > 0 ? { chat_jid: { $in: scope.chatSpellings } } : undefined;
   // With owner_only access (a direct chat only), one more leg per memory
   // namespace fetches owner_only records of every chat, so a trusted operator
   // whose chat_scoped boundary is a contact's still reaches them.
   const ownerOnlyLeg = (namespace: string): SearchLeg[] =>
-    scope.ownerOnlyAccess ? [{ namespace, filter: ownerOnlyLegFilter() }] : [];
+    ownerOnlyAccess ? [{ namespace, filter: ownerOnlyLegFilter() }] : [];
   return namespaces.flatMap((namespace): SearchLeg[] => {
-    if (!isChatNamespace(namespace)) return [{ namespace }];
+    if (!isChatNamespace(namespace)) return [leg(namespace)];
     if (scope.kind === 'no_context') return [];
     if (scope.kind === 'configurable_group') return thisChat ? [leg(namespace, thisChat)] : [];
     const legs = thisChat ? [leg(namespace, thisChat), leg(namespace)] : [leg(namespace)];
@@ -234,13 +238,14 @@ function tierHits(
   scope: MemoryScope | null,
   isChatNamespace: (namespace: string) => boolean,
   db: Database | null | undefined,
+  ownerOnlyAccess: boolean,
 ): TieredHit[] {
   const fold = memoryIdentityFold(db);
   const byId = new Map<string, TieredHit>();
   for (const hit of hits) {
-    // owner_only records never reach a caller without access, in any namespace
-    // of the memory index (documents included).
-    if (scope !== null && isOwnerOnlyRecord(hit.fields) && !scope.ownerOnlyAccess) continue;
+    // owner_only records never reach a caller without access, on any allowed
+    // index and in any namespace (documents included).
+    if (!ownerOnlyAccess && isOwnerOnlyRecord(hit.fields)) continue;
     const isDocument = scope !== null && !isChatNamespace(hit.namespace ?? '');
     const tier = isDocument ? null : scope ? memoryHitTier(hit.fields, scope, fold) : 0;
     if (!isDocument && tier === null) continue;
@@ -428,6 +433,9 @@ export function createPineconeWatchSearch(
 
     const index = pc.index(indexName);
     const scores: number[] = [];
+    // A watch has no caller who may read owner_only records: the exclusion
+    // narrows the query and an owner_only hit that still arrives adds no score.
+    const filter = withVisibilityFilter(undefined, false);
 
     if (profile.searchMode === 'vector') {
       const embedUrl = profile.embedUrl;
@@ -447,17 +455,20 @@ export function createPineconeWatchSearch(
       }
       const vec = embedJson.vectors?.[0];
       if (!Array.isArray(vec)) throw new Error('embed service returned no vectors');
-      const resp = await index.namespace(namespace).query({ topK, vector: vec, includeMetadata: false });
+      const resp = await index.namespace(namespace).query({ topK, vector: vec, includeMetadata: true, filter });
       for (const m of resp.matches ?? []) {
+        if (isOwnerOnlyRecord((m.metadata ?? {}) as Record<string, unknown>)) continue;
         if (typeof m.score === 'number') scores.push(m.score);
       }
     } else {
+      // Only the visibility field is fetched; record bodies stay out.
       const resp = await index.searchRecords({
         namespace,
-        query: { topK, inputs: { text: query } },
-        fields: [],
+        query: { topK, inputs: { text: query }, filter },
+        fields: ['visibility'],
       });
       for (const hit of resp.result?.hits ?? []) {
+        if (isOwnerOnlyRecord((hit.fields ?? {}) as Record<string, unknown>)) continue;
         if (typeof hit._score === 'number') scores.push(hit._score);
       }
     }
@@ -506,6 +517,16 @@ export function registerKnowledgeTools(
       ),
     },
   );
+  // Visibility authorization for an allowed index that is not the instance's
+  // memory index: the same grant as the memory scope, without its membership read.
+  const ownerOnlyAccessFor = (session: SessionContext): boolean => ownerOnlyRecallAllowed({
+    actorJid: session.actorJid,
+    conversationKey: conversationBoundKey(session) ?? session.conversationKey,
+    deliveryJid: session.deliveryJid,
+    adminPhones: (deps.identities?.() ?? noIdentities).adminPhones,
+    trustedOperatorPhones: deps.trustedOperatorPhones,
+    db: deps.db,
+  });
   const apiKey = resolveApiKey({ service: memoryConfig.apiKeyService, envVar: envVarName });
   if (!apiKey) {
     log.warn('Pinecone API key env var not set — knowledge tools will not be registered');
@@ -593,7 +614,8 @@ export function registerKnowledgeTools(
         // an explicit namespace argument; other indexes are not memory and are
         // searched as configured.
         const scope = isMemoryIndex(indexName) ? await scopeFor(session) : null;
-        const legs = searchLegs(namespacesToSearch, scope, isChatNamespace);
+        const ownerOnlyAccess = scope ? scope.ownerOnlyAccess : ownerOnlyAccessFor(session);
+        const legs = searchLegs(namespacesToSearch, scope, isChatNamespace, ownerOnlyAccess);
         const projectError = await validatePineconeProject(pc, indexName, {
           projectId: memoryConfig.projectId,
           expectedHostSuffix: memoryConfig.expectedHostSuffix,
@@ -689,7 +711,7 @@ export function registerKnowledgeTools(
         // Gate, dedup by id, then order: memories by tier (this chat -> other
         // chats -> untagged) and score, documents merged in by score. Outside the
         // memory index every hit is tier 0.
-        let ranked = orderHits(tierHits(hits, scope, isChatNamespace, deps.db), false)
+        let ranked = orderHits(tierHits(hits, scope, isChatNamespace, deps.db, ownerOnlyAccess), false)
           .slice(0, RERANK_CANDIDATE_CAP);
         let limit = MAX_RESULTS;
 

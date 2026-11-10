@@ -51,7 +51,10 @@ const { FakePinecone, store, queries, rerankMock, configState } = vi.hoisted(() 
   const FakePinecone = vi.fn(function (this: Record<string, unknown>) {
     this.index = (indexName: string) => makeIndex(indexName, undefined);
     this.listIndexes = async () => ({
-      indexes: [{ name: 'mw-mind', host: 'mw-mind-nf9hzvy.svc.aped-4627-b74a.pinecone.io' }],
+      indexes: [
+        { name: 'mw-mind', host: 'mw-mind-nf9hzvy.svc.aped-4627-b74a.pinecone.io' },
+        { name: 'other-memory', host: 'other-memory-nf9hzvy.svc.aped-4627-b74a.pinecone.io' },
+      ],
     });
     this.inference = { rerank: rerankMock };
   });
@@ -107,7 +110,21 @@ vi.mock('../../../src/config.ts', () => {
           index: 'mw-mind',
           namespaces,
           allowedIndexes: ['mw-mind'],
-          knowledgeProfiles: { 'mw-mind': configState.profile },
+          knowledgeProfiles: {
+            'mw-mind': configState.profile,
+            // Another instance's memory index, allowed for search here.
+            'other-memory': {
+              namespace: 'other-ns',
+              namespaces: [],
+              searchMode: 'vector',
+              rerank: false,
+              rerankModel: '',
+              topK: 20,
+              rerankTopN: 6,
+              embedUrl: 'http://embed.local/embed',
+              description: 'Another memory index',
+            },
+          },
         },
       },
     },
@@ -181,11 +198,11 @@ function membershipOf(members: string[]): GroupMembershipCache {
   return new GroupMembershipCache(async () => members.map((id): GroupParticipantInfo => ({ id })));
 }
 
-function registerTools(deps: KnowledgeSearchDeps = { identities: () => identities }) {
+function registerTools(deps: KnowledgeSearchDeps = { identities: () => identities }, indexes = ['mw-mind']) {
   const tools: ToolDeclaration[] = [];
   const register = (tool: ToolDeclaration) => tools.push(tool);
   registerMemoryWriteTools(register);
-  registerKnowledgeTools(['mw-mind'], register, undefined, deps);
+  registerKnowledgeTools(indexes, register, undefined, deps);
   const memoryWrite = tools.find((tool) => tool.name === 'memory_write');
   const knowledgeSearch = tools.find((tool) => tool.name === 'knowledge_search');
   if (!memoryWrite || !knowledgeSearch) throw new Error('memory tools did not register');
@@ -304,7 +321,7 @@ describe('knowledge_search in direct chats', () => {
       },
       { namespace: '__default__', filter: OWNER_ONLY_EXCLUSION },
     ]);
-    expect(queries.filter((q) => q.namespace === 'onedrive')).toEqual([{ namespace: 'onedrive' }]);
+    expect(queries.filter((q) => q.namespace === 'onedrive')).toEqual([{ namespace: 'onedrive', filter: OWNER_ONLY_EXCLUSION }]);
   });
 
   it('merges documents by relevance: a relevant document outranks weakly relevant memories', async () => {
@@ -449,6 +466,29 @@ describe('knowledge_search and owner_only records', () => {
     seed(PERSONAL);
     expect(await search(knowledgeSearch, dmSession(MEMBER_B))).toEqual(before);
   });
+
+  it('applies on every allowed index, not only this instance\'s memory index', async () => {
+    store.set('other-memory/other-ns', [
+      { id: 'other-personal', score: 0.9, fields: { text: 'another line personal fact', chat_jid: pn(MEMBER_B), sender_jid: pn(MEMBER_B), visibility: 'owner_only' } },
+      { id: 'other-shared', score: 0.8, fields: { text: 'another line shared fact', chat_jid: pn(MEMBER_B), sender_jid: pn(MEMBER_B), visibility: 'chat_scoped' } },
+      { id: 'other-doc', score: 0.7, fields: { text: 'a record with no visibility field' } },
+    ]);
+    const { knowledgeSearch } = registerTools(deps(), ['mw-mind', 'other-memory']);
+    const onOther = { index: 'other-memory' };
+
+    // A contact and a group with the owner in it: refused on the returned hits ...
+    expect(await search(knowledgeSearch, dmSession(MEMBER_A), onOther)).toEqual(['other-shared', 'other-doc']);
+    expect(await search(knowledgeSearch, groupSession(pn(OWNER)), onOther)).toEqual(['other-shared', 'other-doc']);
+    // ... and before the query.
+    const refused = queries.filter((q) => q.namespace === 'other-ns');
+    expect(refused).toHaveLength(2);
+    expect(refused.every((q) => JSON.stringify(q.filter) === JSON.stringify(OWNER_ONLY_EXCLUSION))).toBe(true);
+
+    // The verified owner in a direct chat may read it there too, unfiltered.
+    queries.length = 0;
+    expect(await search(knowledgeSearch, dmSession(OWNER), onOther)).toEqual(['other-personal', 'other-shared', 'other-doc']);
+    expect(queries.filter((q) => q.namespace === 'other-ns').every((q) => q.filter === undefined)).toBe(true);
+  });
 });
 
 describe('knowledge_search in configurable groups', () => {
@@ -462,8 +502,9 @@ describe('knowledge_search in configurable groups', () => {
     expect(await search(knowledgeSearch, groupSession(pn(MEMBER_A)))).toEqual(['g-context', 'g-own-a', 'g-unattributed']);
     const documentNamespaces = new Set(['local-docs', 'onedrive', 'whatsapp-contacts']);
     for (const query of queries) {
+      // Documents get no conversation scoping, only the owner_only exclusion.
       expect(query.filter).toEqual(documentNamespaces.has(query.namespace)
-        ? undefined
+        ? OWNER_ONLY_EXCLUSION
         : { chat_jid: { $in: expect.arrayContaining([GROUP_KEY, GROUP_JID]) }, ...OWNER_ONLY_EXCLUSION });
     }
   });
@@ -520,7 +561,9 @@ describe('knowledge_search in configurable groups', () => {
       'doc-relevant', 'g-context', 'g-own-a', 'g-unattributed', 'doc-weak',
     ]);
     expect(await search(knowledgeSearch, groupSession(pn(MEMBER_A)), { namespace: 'onedrive' })).toEqual(['doc-relevant']);
-    expect(queries.filter((q) => q.namespace === 'onedrive').every((q) => q.filter === undefined)).toBe(true);
+    const onedrive = queries.filter((q) => q.namespace === 'onedrive');
+    expect(onedrive.length).toBeGreaterThan(0);
+    expect(onedrive.every((q) => JSON.stringify(q.filter) === JSON.stringify(OWNER_ONLY_EXCLUSION))).toBe(true);
   });
 });
 

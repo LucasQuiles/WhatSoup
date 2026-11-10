@@ -1286,10 +1286,15 @@ one `visibility = owner_only` leg per memory namespace; the chat runtime lets
 them past its this-chat hold), while its `chat_scoped` and untagged recall keeps
 the boundary in the table above. The admin's own scope is unchanged. For callers
 without access, both readers enforce the exclusion twice: a pre-query
-metadata filter (`visibility` absent or not `owner_only`) narrows every memory
-leg (`knowledge_search` memory namespaces and the chat runtime's chat, sender
-and self-fact legs), and a per-record gate drops any `owner_only` hit that still
-arrives. Records with no `visibility` field are unaffected. Tests prove the
+metadata filter (`visibility` absent or not `owner_only`) narrows every query
+(`knowledge_search` on every allowed index, `memory.pinecone.index` or not, in
+memory and document namespaces alike; the `poll.pinecone` watch search, which
+has no caller with access; and the chat runtime's chat, sender and self-fact
+legs), and a per-record gate drops any `owner_only` hit that still arrives (a
+watch reports no score for it). Visibility is authorized independently of conversation scoping, so an
+allowed index other than the instance's own memory index (another instance's
+memory, for example) never returns an `owner_only` record to a contact or a
+group either. Records with no `visibility` field are unaffected. Tests prove the
 filter shape and the gate; Pinecone's evaluation of `$exists`/`$ne` on live
 metadata is outside unit-test reach.
 
@@ -1317,7 +1322,8 @@ are not instance admins:
   `summaries`, `legacy`). Every other namespace of the index (for example the
   `namespaces.contacts`, `namespaces.localDocs` and `namespaces.oneDrive`
   roles) is a document namespace: it is
-  searched unfiltered in every context, as before scoping, and its hits are
+  searched without conversation scoping in every context, as before scoping
+  (only the `owner_only` exclusion below applies), and its hits are
   merged into the memory order by relevance score (after rerank when the
   profile reranks), so a relevant document can sit above a weakly relevant
   memory.

@@ -259,6 +259,7 @@ describe('createPineconeWatchSearch - records search', () => {
         hits: [
           { _id: 'doc-a', _score: 0.8, fields: { text: 'must not cross boundary' } },
           { _id: 'doc-b', _score: 'not-a-number', fields: { text: 'ignored score' } },
+          { _id: 'doc-private', _score: 0.6, fields: { visibility: 'owner_only' } },
           { _id: 'doc-c', _score: 0.2, fields: { text: 'also hidden' } },
         ],
       },
@@ -273,10 +274,17 @@ describe('createPineconeWatchSearch - records search', () => {
       topK: 3,
     });
 
+    // A watch has no caller with owner_only access: the exclusion narrows the
+    // query and an owner_only hit that still arrives contributes no score.
+    // Only the visibility field is fetched, so record bodies stay out.
     expect(searchRecordsMock).toHaveBeenCalledWith({
       namespace: 'ns_a',
-      query: { topK: 3, inputs: { text: 'watch query' } },
-      fields: [],
+      query: {
+        topK: 3,
+        inputs: { text: 'watch query' },
+        filter: { $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] },
+      },
+      fields: ['visibility'],
     });
     expect(result).toEqual({ matches: [{ score: 0.8 }, { score: 0.2 }] });
   });
@@ -354,6 +362,7 @@ describe('createPineconeWatchSearch - vector search', () => {
       matches: [
         { id: 'vec-a', score: 0.95, metadata: { text: 'must not cross boundary' } },
         { id: 'vec-b', score: undefined, metadata: { text: 'ignored score' } },
+        { id: 'vec-private', score: 0.7, metadata: { visibility: 'owner_only' } },
         { id: 'vec-c', score: 0.4, metadata: { text: 'also hidden' } },
       ],
     });
@@ -376,7 +385,8 @@ describe('createPineconeWatchSearch - vector search', () => {
     expect(namespaceQueryMock).toHaveBeenCalledWith('vec_a', {
       topK: 2,
       vector: [0.4, 0.5],
-      includeMetadata: false,
+      includeMetadata: true,
+      filter: { $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] },
     });
     expect(result).toEqual({ matches: [{ score: 0.95 }, { score: 0.4 }] });
   });
@@ -806,11 +816,13 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
 
     expect(routeQueryMock).not.toHaveBeenCalled();
     expect(searchRecordsMock).toHaveBeenCalledTimes(1);
+    // A caller without owner_only access: every query carries the exclusion.
     expect(searchRecordsMock).toHaveBeenCalledWith({
       namespace: 'ns_chunks',
       query: {
         topK: 6,
         inputs: { text: 'message context' },
+        filter: { $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] },
       },
       fields: ['*'],
     });
@@ -856,6 +868,7 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
       query: {
         topK: 4,
         inputs: { text: 'compact profile' },
+        filter: { $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] },
       },
       fields: ['*'],
     });
@@ -992,15 +1005,18 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
       body: JSON.stringify({ texts: ['vector query'], input_type: 'query' }),
       signal: expect.any(AbortSignal),
     });
+    const ownerOnlyExclusion = { $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] };
     expect(namespaceQueryMock).toHaveBeenNthCalledWith(1, 'vec_a', {
       topK: 2,
       vector: [0.1, 0.2, 0.3],
       includeMetadata: true,
+      filter: ownerOnlyExclusion,
     });
     expect(namespaceQueryMock).toHaveBeenNthCalledWith(2, 'vec_b', {
       topK: 2,
       vector: [0.1, 0.2, 0.3],
       includeMetadata: true,
+      filter: ownerOnlyExclusion,
     });
     expect(parseRegistryText(result)).toEqual({
       index: 'vector-index',
