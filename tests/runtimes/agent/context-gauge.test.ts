@@ -1,10 +1,6 @@
 // #3717c: ContextGaugeStore contract (last DISTINCT request, replace-not-add, unknown, seal, generation).
 import { describe, expect, it } from 'vitest';
-import {
-  ContextGaugeStore,
-  MAX_REQUEST_ID_LENGTH,
-  MAX_REQUEST_IDS_PER_TURN,
-} from '../../../src/runtimes/agent/context-gauge.ts';
+import { ContextGaugeStore } from '../../../src/runtimes/agent/context-gauge.ts';
 
 const S = 'chat@s.whatsapp.net';
 const G = 'row:1';
@@ -173,6 +169,10 @@ describe('ContextGaugeStore', () => {
 });
 
 describe('ContextGaugeStore id bounds (provider-controlled ids)', () => {
+  // The contract limits, stated here rather than imported, so this file runs unchanged against a
+  // gauge without the bound and fails there on the saturation assertions, not on missing exports.
+  const MAX_REQUEST_ID_LENGTH = 256;
+  const MAX_REQUEST_IDS_PER_TURN = 1024;
   /** One turn of `count` distinct ids id-0..id-(count-1); id-i has context i + 1. */
   const fillTurn = (store: ContextGaugeStore, count: number): void => {
     for (let i = 0; i < count; i += 1) store.observeRequest(S, G, `id-${i}`, i + 1);
@@ -224,6 +224,7 @@ describe('ContextGaugeStore id bounds (provider-controlled ids)', () => {
   it('a first init mid-turn keeps the saturation; a new session id resets it', () => {
     const store = new ContextGaugeStore();
     store.observeRequest(S, G, 'x'.repeat(MAX_REQUEST_ID_LENGTH + 1), 1);
+    expect(store.read(S, G)).toBeUndefined();
     store.observeInit(S, G, 'sess-1'); // first bind: same open turn
     store.observeRequest(S, G, 'A', 10_000);
     expect(store.read(S, G)).toBeUndefined();
@@ -236,6 +237,7 @@ describe('ContextGaugeStore id bounds (provider-controlled ids)', () => {
     const store = new ContextGaugeStore();
     const saturate = (generation: string): void => {
       store.observeRequest(S, generation, 'x'.repeat(MAX_REQUEST_ID_LENGTH + 1), 1);
+      expect(store.read(S, generation)).toBeUndefined();
     };
     saturate(G);
     store.observeCompactBoundary(S, G);

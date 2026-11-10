@@ -33,8 +33,8 @@
  *   turn's result, compact_boundary, a new generation or session id, or
  *   delete/clear. The result closes it unknown.
  */
-export const MAX_REQUEST_ID_LENGTH = 256;
-export const MAX_REQUEST_IDS_PER_TURN = 1024;
+const MAX_REQUEST_ID_LENGTH = 256;
+const MAX_REQUEST_IDS_PER_TURN = 1024;
 
 interface ScopeGauge {
   generation: string;
