@@ -288,18 +288,28 @@ function readBinaryVersionAsync(entrypoint: string, timeoutMs: number): Promise<
     let settled = false;
     let output = '';
     let bytes = 0;
-    const child = spawn(entrypoint, ['--version'], { stdio: ['ignore', 'pipe', 'ignore'], env, windowsHide: true });
+    let child: ReturnType<typeof spawn> | undefined;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
     const finish = (error: Error | null): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(deadline);
-      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-      child.stdout?.destroy();
+      if (deadline) clearTimeout(deadline);
+      if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      child?.stdout?.destroy();
       rmSync(root, { recursive: true, force: true });
       if (error) reject(error);
       else resolve(output.trim());
     };
-    const deadline = setTimeout(() => finish(new Error('provider binary version timed out')), timeoutMs);
+    try {
+      child = spawn(entrypoint, ['--version'], { stdio: ['ignore', 'pipe', 'ignore'], env, windowsHide: true });
+    } catch (err) {
+      // A synchronous spawn throw (e.g. an invalid path) still removes the sandbox.
+      finish(err instanceof Error ? err : new Error('provider binary version spawn failed'));
+      return;
+    }
+    // Unref'd: a probe in flight never holds process shutdown.
+    deadline = setTimeout(() => finish(new Error('provider binary version timed out')), timeoutMs);
+    deadline.unref?.();
     child.stdout?.setEncoding('utf8');
     child.stdout?.on('data', (chunk: string) => {
       bytes += Buffer.byteLength(chunk);
@@ -424,6 +434,11 @@ async function collectProviderCanaryEvidenceAsync(
   if (cached) return cached;
   const version = await readBinaryVersionAsync(entrypoint, versionTimeoutMs);
   const [entrypointDigest, proxyDigest] = await Promise.all([sha256FileAsync(entrypoint), sha256FileAsync(proxyPath)]);
+  // The awaits above can span seconds: a binary or proxy replaced meanwhile must not be
+  // cached under the old stat key. Report it unavailable; the next tick re-reads it.
+  if (evidenceTarget(providerId, binary, proxyScriptPath).cacheKey !== cacheKey) {
+    throw new Error('provider binary changed while its evidence was collected');
+  }
   return cacheEvidence(cacheKey, providerId, version, entrypointDigest, proxyDigest);
 }
 
