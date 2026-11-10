@@ -293,11 +293,14 @@ async function waitUntil(predicate: () => boolean, deadlineMs: number): Promise<
 
 /**
  * What `reapProcessGroup` found. `reapError` names the first failure by error code and probe
- * answer only, never by message, path or command text.
+ * answer only, never by message, path or command text. `inconclusive` marks a failure that does
+ * not end with a live member: the group went anyway, or its last check could not read it. Such a
+ * failure is infrastructure state and proves nothing about the provider.
  */
 export interface ProcessGroupReap {
   reaped: boolean;
   reapError?: string;
+  inconclusive?: true;
 }
 
 /** Test seams for `reapProcessGroup`. */
@@ -315,8 +318,9 @@ export interface ProcessGroupReapDeps {
  *
  * A group kill follows the #3625 contract: ESRCH, or EPERM on a group with no live member, is
  * fine. Any other kill failure, an unexpected liveness-check error, or a group never proven gone
- * is recorded in `reapError`, and the canary passes only without one. It never throws, so the
- * caller's cleanup always runs.
+ * is recorded in `reapError`, and the canary passes only without one. A failure is conclusive
+ * only when the reap ends with the group still holding a live member; any other failure is
+ * `inconclusive`. It never throws, so the caller's cleanup always runs.
  */
 export async function reapProcessGroup(
   pgid: number,
@@ -332,12 +336,17 @@ export async function reapProcessGroup(
     }
   };
   let reapError: string | undefined;
+  // What the last liveness check could tell about the members. A check that failed tells nothing.
   let lastMembership: 'live' | 'unknown' = 'unknown';
   const gone = (): boolean => {
     const answer = groupGone(pgid, { kill, probeGroup });
     if (answer.gone) return true;
-    if ('error' in answer) reapError ??= `group liveness check failed: ${answer.error}`;
-    else lastMembership = answer.membership;
+    if ('error' in answer) {
+      reapError ??= `group liveness check failed: ${answer.error}`;
+      lastMembership = 'unknown';
+    } else {
+      lastMembership = answer.membership;
+    }
     return false;
   };
   const signalGroup = (signal: NodeJS.Signals): void => {
@@ -356,7 +365,11 @@ export async function reapProcessGroup(
       reapError ??= `group kill failed: ${typeof code === 'string' ? code : 'no error code'}`;
     }
   };
-  const result = (reaped: boolean): ProcessGroupReap => (reapError === undefined ? { reaped } : { reaped, reapError });
+  const result = (reaped: boolean): ProcessGroupReap => {
+    if (reapError === undefined) return { reaped };
+    // Only a group that still holds a live member at the end is proven not reaped.
+    return !reaped && lastMembership === 'live' ? { reaped, reapError } : { reaped, reapError, inconclusive: true };
+  };
   if (gone()) return result(true);
   signalGroup('SIGTERM');
   if (await waitUntil(gone, Math.min(deadlineMs, Date.now() + 2_000))) return result(true);
@@ -367,8 +380,10 @@ export async function reapProcessGroup(
   return result(false);
 }
 
+/** `reapDeps` are test seams for the final reap, as in `reapProcessGroup`; production passes none. */
 export async function executeOwnedProvider(
   input: OwnedExecutionInput,
+  reapDeps: ProcessGroupReapDeps = {},
 ): Promise<ProviderCanaryObservation> {
   const dynamic = new RpcSentinel(input.dynamicSocketPath);
   const staticSentinel = new RpcSentinel(input.staticSocketPath);
@@ -451,9 +466,11 @@ export async function executeOwnedProvider(
   } finally {
     try {
       if (pgid > 0) {
-        const reap = await reapProcessGroup(pgid, deadline);
+        const reap = await reapProcessGroup(pgid, deadline, reapDeps);
         // A recorded failure keeps the proof unproven, even when the group then went (#3625).
         processGroupReaped = reap.reaped && reap.reapError === undefined;
+        // An inconclusive reap is infrastructure state, so an earlier exact receipt stays valid.
+        if (reap.inconclusive === true) conclusive = false;
         if (reap.reapError !== undefined) {
           // Content-free: the group id and the failure class, never a path or command text.
           process.stderr.write(`provider MCP canary: process group ${pgid} not proven reaped (reapError=${reap.reapError})\n`);

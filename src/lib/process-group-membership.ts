@@ -12,16 +12,16 @@
 import { spawnSync } from 'node:child_process';
 
 /**
- * What a process group holds. `no-live-members` means every member is a zombie, or the group
- * has none: nothing can still run. `unknown` means the probe could not tell, and is treated
- * exactly like `live`.
+ * What a process group holds. `no-live-members` means every member is a zombie with no running
+ * thread, or the group has none: nothing can still run. `unknown` means the probe could not
+ * tell, and is treated exactly like `live`.
  */
 export type GroupMembership = 'live' | 'no-live-members' | 'unknown';
 
 /**
  * Classify `ps -A -o pid=,pgid=,stat=` output for process group `pgid`. An empty or malformed
  * listing is `unknown`, never `no-live-members`: a probe that cannot be read must not clear a
- * group.
+ * group. A zombie that carries the `l` (multithreaded) flag, such as `Zl` or `Zsl`, is live.
  */
 export function classifyGroupMembership(psOutput: string, pgid: number): GroupMembership {
   const lines = psOutput.split('\n').map((line) => line.trim()).filter((line) => line !== '');
@@ -30,7 +30,10 @@ export function classifyGroupMembership(psOutput: string, pgid: number): GroupMe
   for (const line of lines) {
     const [pidField, pgidField, stat] = line.split(/\s+/);
     if (stat === undefined || !/^\d+$/.test(pidField ?? '') || !/^\d+$/.test(pgidField ?? '')) return 'unknown';
-    if (Number(pgidField) === pgid && !stat.startsWith('Z')) live = true;
+    // Linux shows a thread-group leader whose main thread exited while its other threads run as
+    // `Zl`: those threads can still run. Only lowercase `l` counts; uppercase `L` means locked pages.
+    const zombie = stat.startsWith('Z') && !stat.slice(1).includes('l');
+    if (Number(pgidField) === pgid && !zombie) live = true;
   }
   return live ? 'live' : 'no-live-members';
 }
@@ -57,9 +60,9 @@ export type GroupSignalZero = (pid: number, signal: 0) => void;
 /**
  * Whether process group `pgid` is proven gone. It sends signal 0 to the whole group:
  * - ESRCH: no process holds the group id, so the group is gone. The probe is not asked.
- * - Success or EPERM: the membership probe decides. `no-live-members` (zombies only, or empty)
- *   is gone, `live` is present, and `unknown` is not proven gone. A probe that throws counts
- *   as `unknown`.
+ * - Success or EPERM: the membership probe decides. `no-live-members` (zombies with no running
+ *   thread, or empty) is gone, `live` is present, and `unknown` is not proven gone. A probe
+ *   that throws counts as `unknown`.
  * - Any other error: not proven gone.
  * It never throws. `deps` are test seams; the defaults are `process.kill`, looked up at call
  * time, and `probeGroupMembership`.

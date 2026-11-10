@@ -1049,7 +1049,7 @@ worker for ~72 minutes: vitest's async per-test timeout structurally cannot inte
 synchronous call, so a hung fixture produced no truthful completion signal. Semantics
 (round-18..19): a timeout is **inconclusive** (exit 124), never reportable as a pass OR a code failure;
 a group kill that fails for a non-`ESRCH` reason (e.g. `EPERM`) is inconclusive (exit 125), except that an
-`EPERM` on a group with no live member (zombies only, or empty, per one `ps` read) counts as reaped
+`EPERM` on a group with no live member (zombies with no running thread, or empty, per one `ps` read) counts as reaped
 (issue 3568; a live member or an unreadable `ps` keeps 125); a signalled
 child maps to `128 + signal`. On a bound firing AND on a wrapper `SIGTERM`/`SIGINT`, a terminal grace is
 armed **UNCONDITIONALLY** and is deliberately **NOT `.unref()`'d**, so a `close` that never arrives (an

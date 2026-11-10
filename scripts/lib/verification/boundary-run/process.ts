@@ -204,6 +204,9 @@ function signalProcessGroup(
   }
 }
 
+/** A member that exits on its own this soon after the leader, say at its pipe's EOF, is not a leftover. */
+const NATURAL_EXIT_SETTLE_MS = 250;
+
 async function waitForProcessGroupExit(groupAlive: () => boolean, milliseconds: number): Promise<boolean> {
   const deadline = Date.now() + milliseconds;
   while (groupAlive()) {
@@ -288,8 +291,9 @@ async function executeBoundaryWatchdog(
     }
     await waitForPromiseOrTimeout(closed, 100);
   }
-  // A member that outlives a natural exit is a survivor: the run fails, and the group is swept.
-  const survivedNaturalExit = !timedOut && groupAlive();
+  // A member still live after a natural exit and the settle is a survivor: the run fails, and the
+  // group is swept. A clean exit answers ESRCH on the first check, so it never waits.
+  const survivedNaturalExit = !timedOut && !(await waitForProcessGroupExit(groupAlive, NATURAL_EXIT_SETTLE_MS));
   if (survivedNaturalExit) {
     signalGroup('SIGTERM');
     if (!await waitForProcessGroupExit(groupAlive, options.killGraceMs)) {
