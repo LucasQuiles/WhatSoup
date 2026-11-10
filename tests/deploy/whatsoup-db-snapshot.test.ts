@@ -137,7 +137,11 @@ describe('whatsoup-db-snapshot (FLOS Stage 0 S0.4)', () => {
       expect(readdirSync(snaps)).toEqual([snapshot]);
     });
 
-    it('rehearses where the reader cannot create sidecars (read-only snapshot directory)', () => {
+    // Root ignores directory permissions: chmod 0o500 would not make the
+    // directory read-only and the test would pass without exercising the case.
+    // Skip as root (reported as skipped, never as a pass).
+    const runningAsRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+    it.skipIf(runningAsRoot)('rehearses where the reader cannot create sidecars (read-only snapshot directory; skipped as root, which bypasses directory permissions)', () => {
       // A read-only reader of a WAL-format file must find or create -wal and
       // -shm; where it cannot, SQLite refuses with "unable to open database
       // file". A self-contained snapshot needs neither.
