@@ -19,6 +19,7 @@ import {
   instanceRecordVisibility,
   memorySourceAccount,
   narrowestVisibility,
+  recordIdScope,
   type GroupParticipantInfo,
   type InstanceIdentities,
   type MemoryScopeDeps,
@@ -302,6 +303,13 @@ describe('record provenance helpers', () => {
     expect(instanceRecordVisibility('agent', 'owner_only')).toBe('owner_only');
     expect(instanceRecordVisibility('agent', undefined)).toBe('chat_scoped');
     expect(instanceRecordVisibility('chat', 'something-else')).toBe('chat_scoped');
+  });
+
+  it('record id scope is the instance name only when instance-scoped ids are on', () => {
+    expect(recordIdScope('line-a', true)).toBe('line-a');
+    expect(recordIdScope('line-a', false)).toBeNull();
+    expect(recordIdScope('line-a', undefined)).toBeNull();
+    expect(recordIdScope('', true)).toBeNull();
   });
 
   it('narrowest visibility never widens an owner_only input', () => {

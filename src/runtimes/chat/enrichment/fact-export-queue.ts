@@ -4,6 +4,7 @@ import { createChildLogger } from '../../../logger.ts';
 import { config } from '../../../config.ts';
 import type { Database } from '../../../core/database.ts';
 import { deriveFactUid, getFactUidSalt } from '../../../core/fact-uid.ts';
+import { recordIdScope } from '../../../core/memory-scope.ts';
 import type { ValidatedFact } from './validator.ts';
 
 const log = createChildLogger('enrichment');
@@ -46,13 +47,24 @@ export function shortHash(text: string): string {
   return shortHashImpl(text, 12);
 }
 
+function configuredRecordIdScope(): string | null {
+  const c = config as { botName?: unknown; memory?: { pinecone?: { instanceScopedIds?: unknown } } };
+  return recordIdScope(c.botName, c.memory?.pinecone?.instanceScopedIds);
+}
+
 /**
  * Map a validated fact to an ExportableFact row using the canonical factId
  * scheme. See `shortHash` for the cross-service contract rationale.
  */
-export function toExportable(fact: ValidatedFact): ExportableFact {
+export function toExportable(
+  fact: ValidatedFact,
+  // memory.pinecone.instanceScopedIds: the instance folds into the hash (the
+  // `{chat}:{sender}:{hash}` layout is kept). Null keeps the legacy id.
+  idScope: string | null = configuredRecordIdScope(),
+): ExportableFact {
   const senderSegment = fact.senderJid || 'group';
-  const factId = `${fact.chatJid}:${senderSegment}:${shortHash(fact.text)}`;
+  const hashInput = idScope === null ? fact.text : `${idScope}\0${fact.text}`;
+  const factId = `${fact.chatJid}:${senderSegment}:${shortHash(hashInput)}`;
   return {
     factId,
     chatJid: fact.chatJid,

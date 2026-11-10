@@ -13,7 +13,7 @@ import { classifyMemoryFilter } from '../../src/lib/memory-operation-telemetry.t
 import { runConsolidation } from '../../src/memory/consolidation-cron.ts';
 
 describe('runConsolidation — provenance and visibility', () => {
-  function run(visibility: string | undefined) {
+  function run(visibility: string | undefined, instanceScope?: string | null) {
     const pinecone = {
       searchDetailed: vi.fn().mockResolvedValue({
         results: [{
@@ -54,8 +54,32 @@ describe('runConsolidation — provenance and visibility', () => {
         durationMs: 100,
       }),
     };
-    return { pinecone, done: runConsolidation(pinecone, provider, { lookbackDays: 7, dryRun: false }) };
+    return {
+      pinecone,
+      done: runConsolidation(pinecone, provider, {
+        lookbackDays: 7,
+        dryRun: false,
+        ...(instanceScope !== undefined ? { instanceScope } : {}),
+      }),
+    };
   }
+
+  it('durable ids keep the legacy formula when instance scope is off and differ per instance when on', async () => {
+    const legacy = `durable:${createHash('sha256')
+      .update('chat-1@g.us\0sender-1@s.whatsapp.net\0User lives in London').digest('hex').slice(0, 16)}`;
+    const idFor = async (instanceScope: string | null | undefined): Promise<string> => {
+      const { pinecone, done } = run(undefined, instanceScope);
+      await done;
+      return pinecone.upsert.mock.calls[0][0][0].id as string;
+    };
+    expect(await idFor(undefined)).toBe(legacy);
+    expect(await idFor(null)).toBe(legacy);
+    const a = await idFor('line-a');
+    const b = await idFor('line-b');
+    expect(a).not.toBe(b);
+    expect(a).not.toBe(legacy);
+    expect(a).toMatch(/^durable:[0-9a-f]{16}$/);
+  });
 
   it('labels the write as consolidation provenance', async () => {
     const { pinecone, done } = run(undefined);

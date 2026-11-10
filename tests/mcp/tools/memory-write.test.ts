@@ -15,6 +15,7 @@ vi.mock('../../../src/logger.ts', async () => {
 import { registerMemoryWriteTools, type MemoryWriter } from '../../../src/mcp/tools/memory-write.ts';
 import type { ToolDeclaration, SessionContext } from '../../../src/mcp/types.ts';
 import { fakeClock } from '../../../src/lib/clock.ts';
+import { shortHash } from '../../../src/lib/short-hash.ts';
 
 function setup(opts: { upsert?: MemoryWriter['upsert']; clock?: ReturnType<typeof fakeClock> } = {}) {
   const tools: ToolDeclaration[] = [];
@@ -97,6 +98,25 @@ describe('memory_write tool', () => {
     }
     // The pipeline label comes from the tool itself, never from an argument.
     expect(context['provenance']).toBe('memory_write');
+  });
+
+  it('instance-scoped ids: identical content from two instances does not collide; off keeps the legacy id', async () => {
+    const args = { chatJid: '12345@s.whatsapp.net', text: 'same fact', memory_type: 'preference' as const };
+    const idFor = async (idScope?: () => string | null): Promise<string> => {
+      const tools: ToolDeclaration[] = [];
+      const upsert = vi.fn(async () => {});
+      registerMemoryWriteTools((t) => tools.push(t), () => ({ upsert }), undefined, idScope);
+      await tools.find((t) => t.name === 'memory_write')!.handler(args, chatSession());
+      return (upsert.mock.calls[0] as unknown as [MemoryRecord[]])[0][0].id;
+    };
+    const legacy = `preference_${shortHash(JSON.stringify(['12345@s.whatsapp.net', 'preference', 'same fact']), 24)}`;
+    expect(await idFor(() => null)).toBe(legacy);
+    expect(await idFor()).toBe(legacy); // default reads config; instance-scoped ids default off
+    const lineA = await idFor(() => 'line-a');
+    const lineB = await idFor(() => 'line-b');
+    expect(lineA).not.toBe(lineB);
+    expect(lineA).not.toBe(legacy);
+    expect(lineA).toMatch(/^preference_[0-9a-f]{24}$/);
   });
 
   it('stamps record timestamps from the injected clock, not the wall clock (#2200)', async () => {

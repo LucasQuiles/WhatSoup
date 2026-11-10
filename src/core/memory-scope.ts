@@ -498,6 +498,17 @@ export function narrowestVisibility(...values: unknown[]): MemoryVisibility {
   return values.some((value) => value === 'owner_only') ? 'owner_only' : 'chat_scoped';
 }
 
+/**
+ * The instance part of record ids, or null. With `memory.pinecone.
+ * instanceScopedIds` on, every id scheme (memory_write, the fact-export
+ * factId, consolidation's durable id) folds the instance name into its hash,
+ * so identical local content from two instances sharing an index cannot
+ * collide. Off (the default) keeps every existing id and its dedup unchanged.
+ */
+export function recordIdScope(instanceName: unknown, enabled: unknown): string | null {
+  return enabled === true && isNonEmptyString(instanceName) ? instanceName : null;
+}
+
 const SOURCE_ACCOUNT_DIGEST_VERSION = 'whatsoup-memory-source-account/v1';
 
 /**

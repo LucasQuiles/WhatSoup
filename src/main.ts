@@ -28,6 +28,7 @@ import { getLoadedInstanceConfigOrNull } from './lib/instance-context.ts';
 import { ConfigValidationError } from './lib/startup-error.ts';
 import { PassiveRuntime } from './runtimes/passive/runtime.ts';
 import { PineconeMemory, getPineconeReadinessObservation } from './runtimes/chat/providers/pinecone.ts';
+import { recordIdScope } from './core/memory-scope.ts';
 import { createAnthropicProvider } from './runtimes/chat/providers/anthropic.ts';
 import { createOpenAIProvider } from './runtimes/chat/providers/openai.ts';
 import { withDatabaseCompatibility } from './runtimes/chat/providers/database-compatibility.ts';
@@ -637,6 +638,7 @@ if (instanceType === 'agent') {
         intervalMs: config.memory.consolidation.intervalHours * MS_PER_HOUR,
         lookbackDays: config.memory.consolidation.lookbackDays,
         dryRun: config.memory.consolidation.dryRun,
+        instanceScope: recordIdScope(config.botName, config.memory.pinecone.instanceScopedIds),
       },
       memoryConsolidationRunStore,
     );

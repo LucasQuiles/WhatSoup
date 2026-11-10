@@ -43,6 +43,12 @@ export interface ConsolidationOptions {
     evidenceCoverage: MemoryEvidenceCoverage,
   ) => boolean | void;
   now?: () => number;
+  /**
+   * This instance's name when `memory.pinecone.instanceScopedIds` is on, else
+   * null/absent. Folded into durable ids (and, with it on, the source
+   * selection and grouping boundaries).
+   */
+  instanceScope?: string | null;
 }
 
 export interface ConsolidationPinecone {
@@ -72,6 +78,15 @@ const CONSOLIDATED_QUALIFIER = 'consolidated';
 
 function scopeKey(chatJid: string, senderJid: string): string {
   return `${chatJid}\0${senderJid}`;
+}
+
+/**
+ * Durable record id. With an instance scope (opt-in) the instance prefixes the
+ * hash input; without one the id is exactly the pre-scope formula.
+ */
+function durableId(instanceScope: string | null, scope: string, claim: string): string {
+  const input = instanceScope === null ? `${scope}\0${claim}` : `${instanceScope}\0${scope}\0${claim}`;
+  return `durable:${shortHash(input, 16)}`;
 }
 
 function searchEvidence(details: PineconeSearchDetails): MemoryEvidenceCoverage {
@@ -384,7 +399,7 @@ export async function runConsolidation(
         counters.writeAttempted += 1;
         try {
           await pinecone.upsert([{
-            id: `durable:${shortHash(scopeKey(group.chatJid, group.senderJid) + `\0${durable.claim}`, 16)}`,
+            id: durableId(options.instanceScope ?? null, scopeKey(group.chatJid, group.senderJid), durable.claim),
             text: durable.claim,
             chatJid: group.chatJid,
             senderJid: group.senderJid,

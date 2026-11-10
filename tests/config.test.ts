@@ -2263,12 +2263,18 @@ describe('config — memory.pinecone.recordVisibility', () => {
     process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({}));
     const unset = await import('../src/config.ts');
     expect(unset.config.memory.pinecone.recordVisibility).toBe('chat_scoped');
+    expect(unset.config.memory.pinecone.instanceScopedIds).toBe(false);
     vi.resetModules();
     process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
-      memory: { pinecone: { index: 'whatsapp-bot', projectId: 'instance-proj-id', recordVisibility: 'owner_only' } },
+      memory: {
+        pinecone: {
+          index: 'whatsapp-bot', projectId: 'instance-proj-id', recordVisibility: 'owner_only', instanceScopedIds: true,
+        },
+      },
     }));
     const set = await import('../src/config.ts');
     expect(set.config.memory.pinecone.recordVisibility).toBe('owner_only');
+    expect(set.config.memory.pinecone.instanceScopedIds).toBe(true);
   });
 
   it('rejects an unknown value at load rather than widening recall', async () => {

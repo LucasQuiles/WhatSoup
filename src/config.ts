@@ -131,6 +131,12 @@ export interface MemoryConfig {
      * always writes `owner_only` whatever this says (memory-scope.ts).
      */
     recordVisibility: 'owner_only' | 'chat_scoped';
+    /**
+     * Fold the instance name into record ids and use source instance and
+     * account as retrieval, dedup and consolidation boundaries. Default off:
+     * existing records keep their ids and dedup.
+     */
+    instanceScopedIds: boolean;
     index: string;
     namespaces: PineconeNamespaceConfig;
     contextTopK: number;
@@ -1139,6 +1145,7 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
       projectId: stringProp(pinecone, 'projectId') ?? process.env.PINECONE_PROJECT_ID,
       expectedHostSuffix: stringProp(pinecone, 'expectedHostSuffix') ?? process.env.PINECONE_EXPECTED_HOST_SUFFIX,
       recordVisibility: pineconeRecordVisibility(pinecone?.recordVisibility),
+      instanceScopedIds: booleanProp(pinecone, 'instanceScopedIds', false),
       index,
       namespaces,
       contextTopK: numberProp(pinecone, 'contextTopK', 10),

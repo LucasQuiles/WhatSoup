@@ -7,7 +7,7 @@ import type { PineconeMemory } from '../providers/pinecone.ts';
 import type { LLMProvider } from '../providers/types.ts';
 import type { ValidatedFact } from './validator.ts';
 import { detectContradictions } from './contradiction.ts';
-import { shortHash } from './fact-export-queue.ts';
+import { shortHash, toExportable } from './fact-export-queue.ts';
 
 const log = createChildLogger('enrichment');
 
@@ -22,8 +22,8 @@ export async function upsertFacts(
   let contradictions = 0;
 
   for (const fact of facts) {
-    const senderSegment = fact.senderJid || 'group';
-    const id = `${fact.chatJid}:${senderSegment}:${shortHash(fact.text)}`;
+    // The one canonical factId scheme (including opt-in instance scoping).
+    const id = toExportable(fact).factId;
 
     // Dedup check
     let isDup = false;

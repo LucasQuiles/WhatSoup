@@ -23,7 +23,8 @@ import {
   createMemoryOperationContext,
 } from '../../lib/memory-operation-telemetry.ts';
 import { PineconeMemory, type MemoryRecord } from '../../runtimes/chat/providers/pinecone.ts';
-import type { MemoryProvenance } from '../../core/memory-scope.ts';
+import { recordIdScope, type MemoryProvenance } from '../../core/memory-scope.ts';
+import { config } from '../../config.ts';
 import {
   conversationBoundKey,
   errorResult,
@@ -63,9 +64,18 @@ const MemoryWriteSchema = z.object({
   contradicts: z.string().max(2000).optional(),
 });
 
-function stableId(chatKey: string, memoryType: string, text: string): string {
-  const h = shortHash(JSON.stringify([chatKey, memoryType, text]), 24);
+function stableId(chatKey: string, memoryType: string, text: string, idScope: string | null): string {
+  // Instance-scoped ids (opt-in) prepend the instance to the hash input; off,
+  // the input and so every existing id stay exactly as before.
+  const input = idScope === null ? [chatKey, memoryType, text] : [idScope, chatKey, memoryType, text];
+  const h = shortHash(JSON.stringify(input), 24);
   return `${memoryType}_${h}`;
+}
+
+/** The configured record id scope (memory.pinecone.instanceScopedIds). */
+function configuredRecordIdScope(): string | null {
+  const c = config as { botName?: unknown; memory?: { pinecone?: { instanceScopedIds?: unknown } } };
+  return recordIdScope(c.botName, c.memory?.pinecone?.instanceScopedIds);
 }
 
 /**
@@ -80,6 +90,8 @@ export function registerMemoryWriteTools(
   // Injectable so record timestamps can be driven to a known instant (#2200).
   // Optional and defaulted, so this slice changes no existing call site.
   clock: Clock = systemClock,
+  // Injectable for tests; defaults to the instance configuration.
+  idScope: () => string | null = configuredRecordIdScope,
 ): void {
   let writer: MemoryWriter | null = null;
   const getWriter = (): MemoryWriter => (writer ??= makeWriter());
@@ -144,7 +156,7 @@ export function registerMemoryWriteTools(
       });
       const now = clock.nowIso();
       const record: MemoryRecord = {
-        id: stableId(rawChat, memoryType, p.text),
+        id: stableId(rawChat, memoryType, p.text, idScope()),
         text: p.text,
         chatJid: rawChat,
         senderJid,

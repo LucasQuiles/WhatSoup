@@ -36,8 +36,11 @@ import {
   enqueueFacts,
   leasePendingFacts,
   ackFacts,
+  shortHash as shortHash12,
+  toExportable,
   type ExportableFact,
 } from '../../../../src/runtimes/chat/enrichment/fact-export-queue.ts';
+import type { ValidatedFact } from '../../../../src/runtimes/chat/enrichment/validator.ts';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -55,6 +58,34 @@ function makeFact(overrides?: Partial<ExportableFact>): ExportableFact {
     ...overrides,
   };
 }
+
+describe('toExportable factId — instance-scoped ids', () => {
+  const fact = {
+    chatJid: 'test-chat@s.whatsapp.net',
+    senderJid: '15550100001@s.whatsapp.net',
+    text: 'Lives in London',
+    memoryType: 'user_fact',
+    adjustedConfidence: 0.9,
+    senderName: 'TestUser',
+    supersedesText: '',
+    sourceMessagePks: [1],
+  } as unknown as ValidatedFact;
+  const legacy = `test-chat@s.whatsapp.net:15550100001@s.whatsapp.net:${shortHash12('Lives in London')}`;
+
+  it('keeps the legacy id when instance-scoped ids are off (the default)', () => {
+    expect(toExportable(fact).factId).toBe(legacy);
+    expect(toExportable(fact, null).factId).toBe(legacy);
+  });
+
+  it('two instances get different ids for the same fact, in the same {chat}:{sender}:{hash} layout', () => {
+    const a = toExportable(fact, 'line-a').factId;
+    const b = toExportable(fact, 'line-b').factId;
+    expect(a).not.toBe(b);
+    expect(a).not.toBe(legacy);
+    expect(a.startsWith('test-chat@s.whatsapp.net:15550100001@s.whatsapp.net:')).toBe(true);
+    expect(a.split(':').at(-1)).toMatch(/^[0-9a-f]{12}$/);
+  });
+});
 
 describe('fact_export_queue schema', () => {
   let db: Database;

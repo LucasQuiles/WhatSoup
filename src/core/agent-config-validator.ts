@@ -191,6 +191,7 @@ function hasExplicitPineconeConfig(raw: Record<string, unknown>): boolean {
       'knowledgeProfiles',
       'embedUrl',
       'recordVisibility',
+      'instanceScopedIds',
     ])
   );
 }
