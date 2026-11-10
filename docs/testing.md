@@ -64,6 +64,14 @@ its own assertions and failure result. The temporary report is removed on succes
 or failure; combined mode refuses injected reports and baseline updates. Individual
 inventory commands remain available for focused investigation.
 
+The full repository fitness test runs one fresh ESLint scan in a native Node
+child, bounded to 290 seconds inside its existing 300-second setup budget. All
+findings and counts return to the existing warning, error, timeout-rule and
+file-size assertions. A failed child or incomplete report fails the suite. Small
+rule tests still execute their normal assertions; production coverage scope and
+floors remain unchanged. The scan does not inherit Vitest instrumentation or
+Node compile caching.
+
 `pr metadata` and the trusted `test-integrity (private)` check are separate
 required contexts alongside CodeQL and both Quality contexts. The authorized
 2026-11-10 protection update followed successful candidate checks
