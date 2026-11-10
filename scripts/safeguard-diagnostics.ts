@@ -770,6 +770,27 @@ function consoleDesignScriptSteps(consoleScripts: Record<string, string>): strin
     .map((scriptName) => `npm --prefix console run ${scriptName}`);
 }
 
+function consoleDesignChainView(cwd: string, scripts: Record<string, string>, consoleScripts: Record<string, string>): Record<string, string> {
+  const chain = scripts['verify:console-design:live'];
+  const combined = 'npm --prefix console run lint:shadow:baseline -- --with-inventories';
+  if (!chain?.split(/\s+&&\s+/).includes(combined)) return scripts;
+  const source = readText(cwd, 'console/scripts/check-shadow-baseline.mjs') ?? '';
+  const consumers = ['shadow-frozen', 'raw-form-control'];
+  const connected = consoleScripts['lint:shadow:baseline'] === 'node scripts/check-shadow-baseline.mjs'
+    && consumers.every((name) => consoleScripts[`design:${name}-inventory`] === `node scripts/check-${name}-inventory.mjs`
+      && source.includes(`'check-${name}-inventory.mjs'`))
+    && ['if (withInventories)', 'spawnSync(process.execPath', "'--eslint-json', report", 'result.status !== 0'].every((anchor) => source.includes(anchor));
+  if (!connected) return scripts;
+  // Expand the verified shared consumer for the existing order/coverage checks.
+  return {
+    ...scripts,
+    'verify:console-design:live': chain.replace(combined, [
+      'npm --prefix console run lint:shadow:baseline',
+      ...consumers.map((name) => `npm --prefix console run design:${name}-inventory`),
+    ].join(' && ')),
+  };
+}
+
 function checkConsoleDesignScriptCoverage(rootScripts: Record<string, string>, consoleScripts: Record<string, string>): DiagnosticCheck {
   const chain = rootScripts['verify:console-design:live'];
   if (!chain) {
@@ -1767,11 +1788,12 @@ function summarize(checks: DiagnosticCheck[]): Record<DiagnosticStatus, number> 
 export function checkSafeguards(cwd = process.cwd(), strict = false): SafeguardDiagnosticsReport {
   const scripts = loadPackageScripts(cwd);
   const consoleScripts = loadPackageScripts(cwd, 'console/package.json');
+  const chainScripts = consoleDesignChainView(cwd, scripts, consoleScripts);
   const gitContext = collectGitContext(cwd);
   const checks = [
     checkScriptPresence(scripts),
-    checkConsoleDesignScriptCoverage(scripts, consoleScripts),
-    ...CHAIN_REQUIREMENTS.map((requirement) => checkChainRequirement(scripts, requirement)),
+    checkConsoleDesignScriptCoverage(chainScripts, consoleScripts),
+    ...CHAIN_REQUIREMENTS.map((requirement) => checkChainRequirement(chainScripts, requirement)),
     ...ANCHOR_REQUIREMENTS.map((requirement) => checkAnchors(cwd, requirement)),
     ...portableArtifactChecks(gitContext),
     ...repoStateChecks(gitContext),

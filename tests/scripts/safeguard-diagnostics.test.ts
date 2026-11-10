@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -239,6 +239,25 @@ describe('safeguard diagnostics', () => {
     expect(result.checks.find((check) => check.id === 'console-design-live-chain')?.evidence)
       .toContain('missing npm --prefix console run design:raw-form-control-inventory');
   });
+
+  it.each([null, 'check-shadow-frozen-inventory.mjs', 'check-raw-form-control-inventory.mjs', 'spawnSync(process.execPath', "'--eslint-json', report", 'result.status !== 0'])(
+    'requires connected inventory consumers in the shared shadow scan: %s', (removed) => {
+      const source = readFileSync(path.join(repoRoot, 'console/scripts/check-shadow-baseline.mjs'), 'utf8');
+      const fixture = makeRepo({
+        scripts: {
+          'verify:console-design:live': requiredPackageScripts['verify:console-design:live'].replace(
+            'npm --prefix console run lint:shadow:baseline && npm --prefix console run design:shadow-frozen-inventory && npm --prefix console run design:raw-form-control-inventory',
+            'npm --prefix console run lint:shadow:baseline -- --with-inventories',
+          ),
+        },
+        files: { 'console/scripts/check-shadow-baseline.mjs': removed ? source.replace(removed, 'removed') : source },
+      });
+      const result = checkSafeguards(fixture);
+      for (const id of ['console-design-live-chain', 'console-design-script-coverage']) {
+        expect(result.checks.find((check) => check.id === id)?.status).toBe(removed ? 'fail' : 'pass');
+      }
+    },
+  );
 
   it('fails when the shared console design verification chain omits scanner fixture tests', () => {
     const fixture = makeRepo({
