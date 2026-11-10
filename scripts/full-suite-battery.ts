@@ -408,6 +408,9 @@ export function runBoundedBattery(options: BoundedBatteryOptions): Promise<Bound
       }
       if (timedOut) { finish('timedOut', null, signal, 124); return; }
       if (signal) { finish('failed', null, signal, 128 + (osConstants.signals[signal] ?? 0)); return; }
+      // Cancellation can arrive after the child's clean exit but before close; that
+      // completed child is not evidence that the cancelled wrapper finished its work.
+      if (cancelled) { finish('inconclusive', code, null, 125); return; }
       const exitCode = code ?? 1;
       finish(exitCode === 0 ? 'passed' : 'failed', exitCode, null, exitCode);
     });

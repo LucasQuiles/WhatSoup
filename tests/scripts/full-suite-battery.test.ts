@@ -61,6 +61,38 @@ describe('runBoundedBattery (externally bounded full-suite runner)', () => {
     expect(r).toMatchObject({ outcome: 'failed', timedOut: false, exitCode: 7, wrappedExit: 7 });
   }, 30_000);
 
+  it.each(['SIGTERM', 'SIGINT', 'SIGHUP'])('never accepts a clean child exit after wrapper %s cancellation', (signal) => {
+    const dir = tmp.make('cancel-clean-exit');
+    const runner = join(dir, 'runner.ts');
+    const batteryHref = new URL('../../scripts/full-suite-battery.ts', import.meta.url).href;
+    // The exit handler reaps before close. Inject cancellation at that exact boundary,
+    // after the real child has exited 0, without a timing race or signalling Vitest.
+    writeFileSync(runner, [
+      `import { runBoundedBattery } from ${JSON.stringify(batteryHref)};`,
+      'let cancelled = false;',
+      'const result = await runBoundedBattery({',
+      '  command: process.execPath, args: ["-e", "process.exit(0)"], timeoutMs: 10_000, stdio: "ignore",',
+      '  kill(pid, killSignal) {',
+      '    if (!cancelled) { cancelled = true; process.emit(process.argv[2]); }',
+      '    return process.kill(pid, killSignal);',
+      '  },',
+      '});',
+      'process.stdout.write(JSON.stringify({ ...result, cancelled }));',
+      'process.exitCode = result.wrappedExit;',
+    ].join('\n'));
+
+    const child = spawnSync(NODE, ['--disable-warning=ExperimentalWarning', '--experimental-strip-types', runner, signal], {
+      encoding: 'utf8', timeout: 15_000, killSignal: 'SIGKILL', maxBuffer: 4096,
+    });
+
+    expect(child.error).toBeUndefined();
+    expect(child.signal).toBeNull();
+    expect(JSON.parse(child.stdout)).toMatchObject({
+      cancelled: true, outcome: 'inconclusive', timedOut: false, exitCode: 0, wrappedExit: 125,
+    });
+    expect(child.status, child.stderr).toBe(125);
+  }, 30_000);
+
   it('routes child stdout and stderr to the wrapper stderr in diagnostic mode without contaminating JSON stdout', () => {
     const dir = tmp.make('diagnostic-stdio');
     const runner = join(dir, 'runner.ts');
