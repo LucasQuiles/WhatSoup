@@ -772,7 +772,8 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     '      : > "$BARRIER_EXPIRED-outer-hold"',
     '    fi',
     '    builtin kill "$@" || kill_rc=$?',
-    '    if [ "$1" = -USR1 ] && [ -n "${worker_pid-}" ] && [ "$2" = "$worker_pid" ]; then : > "$GUARD_USR1_SENT"; fi',
+    // The marker carries the kill status: it proves the call, not the delivery.
+    '    if [ "$1" = -USR1 ] && [ -n "${worker_pid-}" ] && [ "$2" = "$worker_pid" ]; then builtin printf "kill_rc=%s\\n" "$kill_rc" > "$GUARD_USR1_SENT"; fi',
     '    if [ "$1" = -TERM ] && [ -n "${guard_pid-}" ] && [ "$2" = "$guard_pid" ]; then : > "$OUTER_TERM_SENT"; fi',
     '    return "$kill_rc"',
     '  }',

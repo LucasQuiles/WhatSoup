@@ -23,6 +23,34 @@ def members(session):
             if os.getsid(pid) == session: found.append({'pid': pid, 'ppid': int(fields[1]), 'pgid': int(fields[2]), 'state': fields[3], 'identity': row})
         except ProcessLookupError: pass
     return found
+def usr1_resume_timing(root):
+    # File times: the guard's USR1 call and the worker's first post-trap check.
+    try:
+        sent = (root / 'guard-usr1-sent').stat().st_mtime_ns
+        resumed = (root / 'worker-resumed-after-usr1').stat().st_mtime_ns
+    except FileNotFoundError: return None
+    return (resumed - sent) // 1_000_000
+def usr1_resume_diagnosis(root, worker, processes):
+    # Diagnosis only; the driver still raises. It separates a USR1 that was not
+    # delivered (kill status), a worker that is late (state, witness after
+    # cleanup) and a worker that is stuck (stack sample).
+    found = {'usr1_marker': (root / 'guard-usr1-sent').read_text().strip()}
+    try: found['usr1_sent_age_ms'] = (time.time_ns() - (root / 'guard-usr1-sent').stat().st_mtime_ns) // 1_000_000
+    except FileNotFoundError: found['usr1_sent_age_ms'] = None
+    group = next((item['pgid'] for item in processes if item['pid'] == worker), None)
+    pids = sorted({worker} | {item['pid'] for item in processes if item['pgid'] == group or item['ppid'] == worker})
+    try:
+        state = subprocess.run(['/bin/ps', '-o', 'pid=,ppid=,pgid=,stat=,time=,command=', '-p', ','.join(map(str, pids))], capture_output=True, text=True, timeout=3)
+        found['worker_family'] = state.stdout.splitlines()
+    except Exception as error: found['worker_family'] = repr(error)
+    if sys.platform == 'darwin' and os.path.exists('/usr/bin/sample'):
+        try:
+            sample = subprocess.run(['/usr/bin/sample', str(worker), '1', '-mayDie'], capture_output=True, text=True, timeout=15)
+            lines = sample.stdout.splitlines()
+            start = next((index for index, line in enumerate(lines) if line.startswith('Call graph:')), 0)
+            found['worker_sample'] = {'returncode': sample.returncode, 'call_graph': lines[start:start + 60], 'stderr': sample.stderr[-400:]}
+        except Exception as error: found['worker_sample'] = repr(error)
+    return found
 # Modes that count groups outliving the call. Their injections wait for the
 # command to start and the watchdog to enter its budget sleep, not for the
 # record's release line, which the worker writes before releasing either.
@@ -503,6 +531,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                 while not (root / 'guard-usr1-sent').exists() and child.poll() is None and time.monotonic() < usr1_deadline:
                     time.sleep(0.01)
                 if not (root / 'guard-usr1-sent').exists(): raise RuntimeError('guard USR1 unavailable')
+                record['usr1_observed_ms'] = int((time.monotonic() - started) * 1000)
                 # /bin/bash 3.2 runs a trap inside the signal handler while read
                 # waits, and after an exit from there it keeps doing so. A TERM
                 # landing in the USR1 trap can then leave malloc with its lock
@@ -512,7 +541,10 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                 resumed_deadline = time.monotonic() + 3
                 while not (root / 'worker-resumed-after-usr1').exists() and child.poll() is None and time.monotonic() < resumed_deadline:
                     time.sleep(0.01)
-                if not (root / 'worker-resumed-after-usr1').exists(): raise RuntimeError('worker did not resume after USR1')
+                if not (root / 'worker-resumed-after-usr1').exists():
+                    record['usr1_resume_missing'] = usr1_resume_diagnosis(root, worker, processes)
+                    raise RuntimeError('worker did not resume after USR1')
+                record['usr1_resume_ms'] = usr1_resume_timing(root)
                 os.kill(worker, signal.SIGTERM)
             if mode.endswith('-cleanup-interrupted') or mode.startswith('authorization-valid-'):
                 # The probe holds the worker's cleanup at its first step. A TERM
@@ -616,6 +648,10 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
         if frame_holder is not None: os.close(frame_holder)
         for holder in release_holders: os.close(holder)
 record['duration_ms'] = int((time.monotonic() - started) * 1000)
+if 'usr1_resume_missing' in record:
+    # A witness written after the driver gave up shows a late worker, not a stuck one.
+    record['usr1_resume_missing']['witness_after_cleanup'] = (root / 'worker-resumed-after-usr1').exists()
+    record['usr1_resume_missing']['resume_ms_after_cleanup'] = usr1_resume_timing(root)
 record['stdout'] = (root / 'stdout').read_text()
 record['stderr'] = (root / 'stderr').read_text()
 record['command_started'] = (root / 'command-started').exists()
