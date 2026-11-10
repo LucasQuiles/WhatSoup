@@ -78,7 +78,8 @@ while the existing tag guard workflow remains active. Qualify real tag receipts
 through `scripts/private-integrity-release.ts select` and `verify` before this
 cutover connects the consumer as the tag gate and removes that duplicate work.
 
-Quality compares tags and scheduled runs against `HEAD^` for baseline growth;
+Quality runs full validation daily at 06:23 UTC. It compares tags and scheduled
+runs against `HEAD^` for baseline growth;
 a new tag's all-zero `before` value cannot identify a previous revision. PRs,
 merge groups and main pushes retain their event-provided base revisions.
 The guard's JSON receipt and reproduction command name the resolved commit OIDs,
