@@ -20,13 +20,17 @@
 // WORDING. A per_chat /stop terminalizes the active turn AND every pending turn
 // in that chat's queue (terminalizePerChatTurnQueueForKill finalizes
 // `teardown.pending` as operator-cancelled), so the receipt never promises that
-// /stop cancels less. Two facts pick one of four constants:
-// - Position. "your earlier request ... This message is next" only when the
-//   running turn is the same sender's own request and this message is the only
-//   one waiting, so nothing else can run before it (owner decision,
-//   2026-11-09). Otherwise "an earlier request ... queued behind it": the
-//   running turn may be another group member's or a scheduled job, or other
-//   messages wait ahead of this one.
+// /stop cancels less. Two facts pick one of four constants, and every group
+// receipt is the same one, "an earlier request ... queued behind it" with no
+// /stop sentence:
+// - Position. "your earlier request ... This message is next" only in a 1:1
+//   chat, when the running turn is the sender's own request and this message
+//   is the only one waiting, so nothing else can run before it (owner
+//   decision, 2026-11-09). A group never gets it: every member reads a group
+//   receipt, so "your" would be false for every member but the sender.
+//   Otherwise "an earlier request ... queued behind it", which is true for
+//   every reader: the running turn may be another group member's or a
+//   scheduled job, or other messages wait ahead of this one.
 // - Venue. Only a DM receipt can have the /stop sentence. Its only reader is
 //   the sender, and the command gate's own rule (commandGateDenies with the
 //   /stop spec's gate) never refuses a per_chat DM. It still needs ingest to
@@ -68,12 +72,14 @@ type PausedChatSettings = Parameters<typeof pausedChatAdmission>[0];
 /** The exact text the /stop sentence tells the reader to send. */
 const STOP_COMMAND_TEXT = '/stop';
 
-/** Own request, nothing else waiting, where the receipt offers no /stop
- *  (every group receipt). */
+/** Own request in a 1:1 chat, nothing else waiting, where the receipt offers
+ *  no /stop (a paused 1:1 chat without a /stop bypass). Never a group
+ *  receipt. */
 export const QUEUED_TURN_RECEIPT_NO_STOP_TEXT =
   '*Still working on your earlier request.* This message is next.';
 
-/** Any other position, where the receipt offers no /stop (every group receipt). */
+/** Any other position, where the receipt offers no /stop. Every group receipt
+ *  is this text, in either position. */
 export const QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT =
   '*Still working on an earlier request.* This message is queued behind it.';
 
@@ -92,11 +98,15 @@ export const QUEUED_TURN_RECEIPT_OTHER_TEXT =
 /** Pick the receipt that is true for this admission (see WORDING above). */
 export function queuedTurnReceiptText(
   active: Pick<QueuedTurn, 'senderJid' | 'purpose'>,
-  queued: Pick<QueuedTurn, 'senderJid'>,
+  queued: Pick<QueuedTurn, 'senderJid' | 'isGroup'>,
   pending: number,
   stopOffered: boolean,
 ): string {
-  const ownRequest = active.senderJid === queued.senderJid && active.purpose !== 'scheduled-agent-job';
+  // A group receipt is sent to the whole group, so a group never takes the
+  // own-request text, whoever sent the running turn.
+  const ownRequest = !queued.isGroup
+    && active.senderJid === queued.senderJid
+    && active.purpose !== 'scheduled-agent-job';
   if (ownRequest && pending <= 1) {
     return stopOffered ? QUEUED_TURN_RECEIPT_TEXT : QUEUED_TURN_RECEIPT_NO_STOP_TEXT;
   }
