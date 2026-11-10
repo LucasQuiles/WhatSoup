@@ -474,6 +474,7 @@ export function buildCapabilityExecutionTool(deps: CapabilityExecutionToolDeps):
             // missing close: either may mean a descendant is still running.
             recordOutcome(deps, active, observedSourceDigest, 'error', {
               reason: 'media_mutated_during_execution',
+              timedOut: run.timedOut,
               ...(run.reapError === undefined ? {} : { reapError: run.reapError }),
               ...(run.closeNotObserved === true ? { closeNotObserved: true } : {}),
             }, observedMediaDigest);
@@ -494,7 +495,8 @@ export function buildCapabilityExecutionTool(deps: CapabilityExecutionToolDeps):
           stdoutBytes: run.stdoutBytes,
           stderrBytes: run.stderrBytes,
           ...(run.reapError === undefined ? {} : { reapError: run.reapError }),
-          ...(run.closeNotObserved === true ? { reason: 'resolver_close_not_observed' } : {}),
+          // closeNotObserved is the key the media-mutation receipt also uses; the reason stays for existing readers.
+          ...(run.closeNotObserved === true ? { reason: 'resolver_close_not_observed', closeNotObserved: true } : {}),
         }, observedMediaDigest);
 
         if (!ok) {
