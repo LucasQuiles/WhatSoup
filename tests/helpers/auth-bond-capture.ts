@@ -21,17 +21,28 @@ interface CaptureHolder {
   authSnapshotCapture: Promise<void> | null;
 }
 
+/** The timer pair the real-timer wait arms its deadline with; a test passes recording wrappers. */
+interface DeadlineTimers {
+  setTimeout(callback: () => void, ms: number): unknown;
+  clearTimeout(handle: unknown): void;
+}
+
+const REAL_TIMERS: DeadlineTimers = {
+  setTimeout: (callback, ms) => realSetTimeout(callback, ms),
+  clearTimeout: (handle) => realClearTimeout(handle as ReturnType<typeof setTimeout>),
+};
+
 /** Wait for `pending` until `deadlineNs` on the real clock; the timer is cleared either way. */
-async function awaitByDeadline(pending: Promise<void>, deadlineNs: bigint): Promise<void> {
+async function awaitByDeadline(pending: Promise<void>, deadlineNs: bigint, timers: DeadlineTimers): Promise<void> {
   const remainingMs = Math.max(0, Number((deadlineNs - realNowNs()) / 1_000_000n));
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timer: unknown;
   const expired = new Promise<never>((_, reject) => {
-    timer = realSetTimeout(() => reject(new Error(NOT_SETTLED)), remainingMs);
+    timer = timers.setTimeout(() => reject(new Error(NOT_SETTLED)), remainingMs);
   });
   try {
     await Promise.race([pending, expired]);
   } finally {
-    realClearTimeout(timer);
+    timers.clearTimeout(timer);
   }
 }
 
@@ -46,13 +57,15 @@ async function awaitByDeadline(pending: Promise<void>, deadlineNs: bigint): Prom
  * also yields real turns for the I/O. Pass `advanceClockMs: 0` where a later
  * assertion pins exact fake timestamps; that runs due immediates only, so it
  * cannot drive a capture that waits on a retry timer. Under real timers the
- * capture runs by itself and is awaited against the same real-time bound.
+ * capture runs by itself and is awaited against the same real-time bound, on
+ * a deadline timer armed through `timers` (the real timers by default).
  */
 export async function settleAuthBondCapture(
   manager: object,
-  options: { advanceClockMs?: number } = {},
+  options: { advanceClockMs?: number; timers?: DeadlineTimers } = {},
 ): Promise<void> {
   const advanceClockMs = options.advanceClockMs ?? 1;
+  const timers = options.timers ?? REAL_TIMERS;
   const holder = manager as CaptureHolder;
   for (;;) {
     const pending = holder.authSnapshotCapture;
@@ -66,7 +79,7 @@ export async function settleAuthBondCapture(
         await vi.advanceTimersByTimeAsync(advanceClockMs);
       }
     } else {
-      await awaitByDeadline(pending, deadlineNs);
+      await awaitByDeadline(pending, deadlineNs, timers);
     }
     // A trigger handled while this one settled replaces it; wait for that too.
     if (holder.authSnapshotCapture === pending) return;

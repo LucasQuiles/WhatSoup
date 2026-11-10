@@ -41,28 +41,58 @@ describe('settleAuthBondCapture', () => {
 });
 
 // Real timers: connection-auth-bond-edge.test.ts calls the helper without fake timers.
+// Cleanup is checked on the helper's own deadline timer, recorded through the `timers` option; a
+// process-wide Timeout count also sees worker timers that start and end on their own.
 describe('settleAuthBondCapture under real timers', () => {
-  const activeTimeouts = (): number => process.getActiveResourcesInfo().filter(kind => kind === 'Timeout').length;
+  // Declared here, not imported, so this file runs unchanged against a helper without the option.
+  interface DeadlineTimers {
+    setTimeout(callback: () => void, ms: number): unknown;
+    clearTimeout(handle: unknown): void;
+  }
+  interface ArmedTimer { handle: unknown; ms: number; fired: boolean }
+  const recordingTimers = (): { armed: ArmedTimer[]; cleared: unknown[]; timers: DeadlineTimers } => {
+    const armed: ArmedTimer[] = [];
+    const cleared: unknown[] = [];
+    const timers: DeadlineTimers = {
+      setTimeout(callback, ms) {
+        const record: ArmedTimer = { handle: undefined, ms, fired: false };
+        record.handle = setTimeout(() => { record.fired = true; callback(); }, ms);
+        armed.push(record);
+        return record.handle;
+      },
+      clearTimeout(handle) {
+        cleared.push(handle);
+        clearTimeout(handle as ReturnType<typeof setTimeout>);
+      },
+    };
+    return { armed, cleared, timers };
+  };
 
-  it('waits for a capture held 200 ms and leaves no deadline timer behind', async () => {
+  it('waits for a capture held 200 ms and clears its deadline timer before it fires', async () => {
     expect(vi.isFakeTimers()).toBe(false);
     const holder = {
       authSnapshotCapture: new Promise<void>((resolve) => { setTimeout(resolve, 200); }) as Promise<void> | null,
     };
-    const before = activeTimeouts();
-    await settleAuthBondCapture(holder);
-    expect(activeTimeouts()).toBe(before - 1);
+    const { armed, cleared, timers } = recordingTimers();
+    await settleAuthBondCapture(holder, { timers });
+    expect(armed).toHaveLength(1);
+    expect(armed[0].ms).toBeGreaterThan(7_900);
+    expect(armed[0].ms).toBeLessThanOrEqual(8_000);
+    expect(armed[0].fired).toBe(false);
+    expect(cleared).toEqual([armed[0].handle]);
   });
 
   it('fails with the named error after 8 s when a capture never settles, and clears its timer', async () => {
     expect(vi.isFakeTimers()).toBe(false);
     const holder = { authSnapshotCapture: new Promise<void>(() => {}) as Promise<void> | null };
-    const before = activeTimeouts();
+    const { armed, cleared, timers } = recordingTimers();
     const started = process.hrtime.bigint();
-    await expect(settleAuthBondCapture(holder)).rejects.toThrow(
+    await expect(settleAuthBondCapture(holder, { timers })).rejects.toThrow(
       'auth-bond capture did not settle within 8 s of real time',
     );
     expect(process.hrtime.bigint() - started).toBeGreaterThanOrEqual(7_900_000_000n);
-    expect(activeTimeouts()).toBe(before);
+    expect(armed).toHaveLength(1);
+    expect(armed[0].fired).toBe(true);
+    expect(cleared).toEqual([armed[0].handle]);
   }, 15_000);
 });
