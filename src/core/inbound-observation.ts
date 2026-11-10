@@ -75,6 +75,7 @@ let counts = zeroCounts();
 let alerts = zeroAlerts();
 let recorderFailures = 0;
 const nextAlertAt = new Map<AlertingReason, number>();
+const nextLogAt = new Map<InboundObservationReason, number>();
 
 function isAlerting(reason: InboundObservationReason): reason is AlertingReason {
   return reason === 'transport.no_consumer' || reason === 'ingest.store_failed';
@@ -89,12 +90,12 @@ interface LocalLossAlertResult {
 // fault-taxonomy coverage guard resolves it statically.
 function emitNoConsumerAlert(instance: string): LocalLossAlertResult {
   const result = emitAlert(instance, 'inbound_no_consumer', ALERT_SUMMARIES['transport.no_consumer'], '', 'warning');
-  return { accepted: result.status === 'durably_queued', status: result.status };
+  return { accepted: result.status !== 'failed', status: result.status };
 }
 
 function emitStoreFailedAlert(instance: string): LocalLossAlertResult {
   const result = emitAlert(instance, 'inbound_store_failed', ALERT_SUMMARIES['ingest.store_failed'], '', 'warning');
-  return { accepted: result.status === 'durably_queued', status: result.status };
+  return { accepted: result.status !== 'failed', status: result.status };
 }
 
 function emitLocalLossAlert(instance: string, reason: AlertingReason): { accepted: boolean; status: AlertOutcome } {
@@ -102,7 +103,7 @@ function emitLocalLossAlert(instance: string, reason: AlertingReason): { accepte
   const until = nextAlertAt.get(reason);
   if (until !== undefined && performance.now() < until) return { accepted: false, status: 'rate_limited' };
   const result = reason === 'transport.no_consumer' ? emitNoConsumerAlert(instance) : emitStoreFailedAlert(instance);
-  if (result.status !== 'failed') nextAlertAt.set(reason, performance.now() + INBOUND_OBSERVATION_ALERT_WINDOW_MS);
+  if (result.accepted) nextAlertAt.set(reason, performance.now() + INBOUND_OBSERVATION_ALERT_WINDOW_MS);
   return result;
 }
 
@@ -127,6 +128,12 @@ export function observeInbound(instance: string, reason: InboundObservationReaso
       alertStatus = 'threw';
     }
   }
+  // Bound log attempts independently so failed alert delivery still retries,
+  // without a sustained outage flooding the logger. Health counters stay exact.
+  const now = performance.now();
+  const until = nextLogAt.get(reason);
+  if (until !== undefined && now < until) return;
+  nextLogAt.set(reason, now + INBOUND_OBSERVATION_ALERT_WINDOW_MS);
   try {
     if (alertStatus !== undefined) {
       log.warn({ reason, attempts, alertAccepted, alertStatus }, 'inbound message not admitted locally');
@@ -145,10 +152,11 @@ export function getInboundObservationHealth(): InboundObservationHealth {
   return { counts: { ...counts }, alerts: { ...alerts }, recorder_failures: recorderFailures };
 }
 
-/** Test seam: reset counters and the alert window. */
+/** Test seam: reset counters and the alert and log windows. */
 export function resetInboundObservations(): void {
   counts = zeroCounts();
   alerts = zeroAlerts();
   recorderFailures = 0;
   nextAlertAt.clear();
+  nextLogAt.clear();
 }

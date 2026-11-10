@@ -204,8 +204,77 @@ describe('alert window counts only accepted emissions', () => {
       expect(getInboundObservationHealth().alerts).toEqual({
         durably_queued: 0, captured: 0, legacy_accepted_unconfirmed: 0, failed: 0, rate_limited: 1, [status]: 1,
       });
+      expect(mockLog.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ alertAccepted: true, alertStatus: status }),
+        'inbound message not admitted locally',
+      );
     },
   );
+});
+
+describe('bounded observation logs', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  it.each(INBOUND_OBSERVATION_REASONS)('logs repeated %s once per window while counting every attempt', (reason) => {
+    for (let i = 0; i < 100; i += 1) observeInbound('WhatSoup', reason, 2);
+
+    expect(mockLog.warn.mock.calls.length + mockLog.debug.mock.calls.length).toBe(1);
+    expect(getInboundObservationHealth().counts[reason]).toBe(200);
+
+    vi.setSystemTime(Date.now() - 60 * 60_000);
+    vi.advanceTimersByTime(INBOUND_OBSERVATION_ALERT_WINDOW_MS - 1);
+    observeInbound('WhatSoup', reason);
+    expect(mockLog.warn.mock.calls.length + mockLog.debug.mock.calls.length).toBe(1);
+
+    vi.advanceTimersByTime(1);
+    observeInbound('WhatSoup', reason);
+    expect(mockLog.warn.mock.calls.length + mockLog.debug.mock.calls.length).toBe(2);
+    expect(getInboundObservationHealth().counts[reason]).toBe(202);
+  });
+
+  it('bounds warning attempts even when the alert and logger keep failing', () => {
+    doubles.emitAlert.mockImplementation(() => { throw new Error('outbox unavailable'); });
+    mockLog.warn.mockImplementation(() => { throw new Error('logger unavailable'); });
+    try {
+      for (let i = 0; i < 100; i += 1) observeInbound('WhatSoup', 'ingest.store_failed');
+
+      expect(doubles.emitAlert).toHaveBeenCalledTimes(100);
+      expect(mockLog.warn).toHaveBeenCalledTimes(1);
+      expect(getInboundObservationHealth()).toMatchObject({
+        counts: { 'ingest.store_failed': 100 },
+        recorder_failures: 101,
+      });
+    } finally {
+      mockLog.warn.mockReset();
+    }
+  });
+
+  it('bounds failed-alert logs without delaying the next delivery attempt', () => {
+    doubles.emitAlert.mockReturnValue({ ok: false, channel: 'none', status: 'failed' });
+    for (let i = 0; i < 100; i += 1) observeInbound('WhatSoup', 'transport.no_consumer');
+
+    expect(doubles.emitAlert).toHaveBeenCalledTimes(100);
+    expect(mockLog.warn).toHaveBeenCalledTimes(1);
+    expect(mockLog.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ alertAccepted: false, alertStatus: 'failed' }),
+      'inbound message not admitted locally',
+    );
+    expect(getInboundObservationHealth().alerts.failed).toBe(100);
+  });
+
+  it('keeps warning windows independent for each reason', () => {
+    for (let i = 0; i < 2; i += 1) {
+      observeInbound('WhatSoup', 'transport.no_consumer');
+      observeInbound('WhatSoup', 'ingest.store_failed');
+      observeInbound('WhatSoup', 'ingest.stored_not_admitted');
+    }
+    expect(mockLog.warn).toHaveBeenCalledTimes(3);
+    expect(mockLog.warn.mock.calls.map(([fields]) => fields.reason)).toEqual([
+      'transport.no_consumer', 'ingest.store_failed', 'ingest.stored_not_admitted',
+    ]);
+  });
 });
 
 describe('recorder failures', () => {
