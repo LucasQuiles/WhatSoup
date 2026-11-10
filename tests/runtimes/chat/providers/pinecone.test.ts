@@ -76,6 +76,13 @@ afterEach(() => {
   dateNowSpy.mockRestore();
 });
 
+/**
+ * Server-derived fields every upsert carries. In these tests no instance name,
+ * account scope or connected account is configured, and the instance is not
+ * passive, so the stamp is empty-sourced and chat_scoped.
+ */
+const DEFAULT_STAMP = { source_instance: '', source_account: '', visibility: 'chat_scoped' } as const;
+
 function makeMemoryRecord(overrides: Partial<MemoryRecord> = {}): MemoryRecord {
   return {
     id: 'rec-001',
@@ -682,6 +689,7 @@ describe('PineconeMemory', () => {
               updated_at: '2026-01-01T00:00:00Z',
               superseded: '',
               source_message_pks: '42',
+              ...DEFAULT_STAMP,
             },
           ],
         },
@@ -718,6 +726,7 @@ describe('PineconeMemory', () => {
               updated_at: '2026-01-01T00:00:00Z',
               superseded: '',
               source_message_pks: '42',
+              ...DEFAULT_STAMP,
             },
           ],
         },
@@ -767,6 +776,7 @@ describe('PineconeMemory', () => {
               created_at: '2026-01-01T00:00:00Z',
               updated_at: '2026-01-01T00:00:00Z',
               source_message_pks: '42',
+              ...DEFAULT_STAMP,
             },
           ],
         },
@@ -793,6 +803,7 @@ describe('PineconeMemory', () => {
             updated_at: '2026-01-01T00:00:00Z',
             superseded: '',
             source_message_pks: '42',
+            ...DEFAULT_STAMP,
           },
         ],
       };
@@ -839,6 +850,7 @@ describe('PineconeMemory', () => {
             updated_at: '2026-01-01T00:00:00Z',
             superseded: '',
             source_message_pks: '42',
+            ...DEFAULT_STAMP,
           },
         ],
       };
@@ -883,6 +895,7 @@ describe('PineconeMemory', () => {
               updated_at: '2026-01-01T00:00:00Z',
               superseded: '',
               source_message_pks: '42',
+              ...DEFAULT_STAMP,
             },
             {
               _id: 'r2',
@@ -896,6 +909,7 @@ describe('PineconeMemory', () => {
               updated_at: '2026-01-01T00:00:00Z',
               superseded: '',
               source_message_pks: '42',
+              ...DEFAULT_STAMP,
             },
           ],
         },
@@ -2045,6 +2059,138 @@ describe('alert clearing on recovery', () => {
     const details = await memory.searchDetailed('recover', {}, 1);
     expect(details.status).toBe('ok');
     expect(details.results).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Server-derived provenance: source instance, account, visibility, pipeline
+// ---------------------------------------------------------------------------
+
+describe('upsert provenance stamping', () => {
+  const mutableConfig = configModule.config as unknown as Record<string, unknown>;
+  const pineconeConfig = (configModule.config as unknown as { memory: { pinecone: Record<string, unknown> } }).memory.pinecone;
+  const ACCOUNT_JID = '15550000123:7@s.whatsapp.net';
+
+  function makeMemory(accountJid: string | null = null): PineconeMemory {
+    return new PineconeMemory({ accountJid: () => accountJid });
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mutableConfig.botName = 'q'; // q is checked against the operator project
+    const MockPinecone = vi.mocked(Pinecone);
+    MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
+      this.index = vi.fn().mockReturnValue(mockIndex);
+      this.inference = { rerank: mockRerank };
+      this.listIndexes = vi.fn().mockResolvedValue(OPERATOR_PROJECT_INDEXES);
+    } as unknown as () => InstanceType<typeof Pinecone>);
+    mockUpsertRecords.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    delete mutableConfig.botName;
+    delete mutableConfig.instanceType;
+    delete mutableConfig.accountScopeId;
+    delete pineconeConfig.recordVisibility;
+  });
+
+  function written(): Record<string, unknown> {
+    return mockUpsertRecords.mock.calls[0][0].records[0] as Record<string, unknown>;
+  }
+
+  it('stamps source instance, an opaque account id, chat_scoped visibility and the pipeline label', async () => {
+    await makeMemory(ACCOUNT_JID).upsert([makeMemoryRecord()], { provenance: 'memory_write' });
+    const record = written();
+    expect(record).toMatchObject({
+      source_instance: 'q',
+      visibility: 'chat_scoped',
+      provenance: 'memory_write',
+    });
+    expect(record['source_account']).toMatch(/^acct:[0-9a-f]{24}$/);
+    // Device suffix and domain fold away; the raw account never reaches the record.
+    expect(JSON.stringify(record)).not.toContain('15550000123');
+  });
+
+  it('derives the same account id for the same account across device suffixes', async () => {
+    await makeMemory('15550000123:7@s.whatsapp.net').upsert([makeMemoryRecord()]);
+    await makeMemory('15550000123@s.whatsapp.net').upsert([makeMemoryRecord()]);
+    const [first, second] = mockUpsertRecords.mock.calls.map((call) => call[0].records[0].source_account);
+    expect(first).toBe(second);
+  });
+
+  it('prefers the configured opaque accountScopeId, and writes empty when the account is unknown', async () => {
+    mutableConfig.accountScopeId = 'scope:line-alpha';
+    await makeMemory(ACCOUNT_JID).upsert([makeMemoryRecord()]);
+    expect(written()['source_account']).toBe('scope:line-alpha');
+    delete mutableConfig.accountScopeId;
+    mockUpsertRecords.mockClear();
+    await makeMemory(null).upsert([makeMemoryRecord()]);
+    expect(written()['source_account']).toBe('');
+  });
+
+  it('omits provenance when the caller names no pipeline', async () => {
+    await makeMemory().upsert([makeMemoryRecord()]);
+    expect(written()).not.toHaveProperty('provenance');
+  });
+
+  it('a passive line writes owner_only, and a record value cannot relax it', async () => {
+    mutableConfig.instanceType = 'passive';
+    pineconeConfig.recordVisibility = 'chat_scoped';
+    await makeMemory().upsert([makeMemoryRecord({ visibility: 'chat_scoped' })]);
+    expect(written()['visibility']).toBe('owner_only');
+  });
+
+  it('configuration can make a non-passive instance owner_only', async () => {
+    pineconeConfig.recordVisibility = 'owner_only';
+    await makeMemory().upsert([makeMemoryRecord()]);
+    expect(written()['visibility']).toBe('owner_only');
+  });
+
+  it('a derived record keeps an owner_only source restriction on a chat_scoped instance', async () => {
+    await makeMemory().upsert([makeMemoryRecord({ visibility: 'owner_only' })]);
+    expect(written()['visibility']).toBe('owner_only');
+  });
+
+  it('record fields cannot override the server-derived source fields', async () => {
+    const spoofed = {
+      ...makeMemoryRecord(),
+      sourceInstance: 'other-instance',
+      sourceAccount: 'acct:spoofed',
+      provenance: 'consolidation',
+    } as MemoryRecord;
+    await makeMemory(ACCOUNT_JID).upsert([spoofed], { provenance: 'fact_export' });
+    const record = written();
+    expect(record['source_instance']).toBe('q');
+    expect(record['source_account']).not.toBe('acct:spoofed');
+    expect(record['provenance']).toBe('fact_export');
+  });
+
+  it('reads the stamped fields back onto search results, ignoring unknown visibility values', async () => {
+    mockSearchRecords.mockResolvedValueOnce({
+      result: {
+        hits: [
+          makePineconeHit('stamped', 0.9, {
+            source_instance: 'personal-line',
+            source_account: 'acct:abc',
+            visibility: 'owner_only',
+            provenance: 'fact_export',
+          }),
+          makePineconeHit('odd', 0.8, { visibility: 'everyone' }),
+          makePineconeHit('legacy', 0.7),
+        ],
+      },
+    });
+    const results = await makeMemory().search('q', {}, 3);
+    const byId = Object.fromEntries(results.map((r) => [r.id, r.record]));
+    expect(byId['stamped']).toMatchObject({
+      sourceInstance: 'personal-line',
+      sourceAccount: 'acct:abc',
+      visibility: 'owner_only',
+      provenance: 'fact_export',
+    });
+    expect(byId['odd']).not.toHaveProperty('visibility');
+    expect(byId['legacy']).not.toHaveProperty('visibility');
+    expect(byId['legacy']).not.toHaveProperty('sourceInstance');
   });
 });
 

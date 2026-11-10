@@ -16,6 +16,9 @@ import {
   memoryIdentityFold,
   resolveMemoryScope,
   chatRecallBoundary,
+  instanceRecordVisibility,
+  memorySourceAccount,
+  narrowestVisibility,
   type GroupParticipantInfo,
   type InstanceIdentities,
   type MemoryScopeDeps,
@@ -289,5 +292,31 @@ describe('chatRecallBoundary (chat runtime)', () => {
   it('applies the group rule to any other group sender', () => {
     expect(chatRecallBoundary({ ...base, chatJid: GROUP_JID, senderJid: `${MEMBER}@s.whatsapp.net` })).toBe('group');
     expect(chatRecallBoundary({ ...base, chatJid: GROUP_JID, senderJid: `+${OWNER}@sms` })).toBe('group');
+  });
+});
+
+describe('record provenance helpers', () => {
+  it('a passive line is always owner_only; others follow config, defaulting to chat_scoped', () => {
+    expect(instanceRecordVisibility('passive', 'chat_scoped')).toBe('owner_only');
+    expect(instanceRecordVisibility('passive', undefined)).toBe('owner_only');
+    expect(instanceRecordVisibility('agent', 'owner_only')).toBe('owner_only');
+    expect(instanceRecordVisibility('agent', undefined)).toBe('chat_scoped');
+    expect(instanceRecordVisibility('chat', 'something-else')).toBe('chat_scoped');
+  });
+
+  it('narrowest visibility never widens an owner_only input', () => {
+    expect(narrowestVisibility('chat_scoped', 'owner_only')).toBe('owner_only');
+    expect(narrowestVisibility('owner_only', undefined)).toBe('owner_only');
+    expect(narrowestVisibility('chat_scoped', undefined, 'bogus')).toBe('chat_scoped');
+  });
+
+  it('source account: configured scope id wins; a JID is hashed, never stored raw; unknown is empty', () => {
+    expect(memorySourceAccount('scope:line-alpha', BOT_JID)).toBe('scope:line-alpha');
+    const hashed = memorySourceAccount(undefined, BOT_JID);
+    expect(hashed).toMatch(/^acct:[0-9a-f]{24}$/);
+    expect(hashed).not.toContain('15550000099');
+    expect(memorySourceAccount(undefined, '15550000099:12@s.whatsapp.net')).toBe(hashed);
+    expect(memorySourceAccount(undefined, null)).toBe('');
+    expect(memorySourceAccount('', '')).toBe('');
   });
 });

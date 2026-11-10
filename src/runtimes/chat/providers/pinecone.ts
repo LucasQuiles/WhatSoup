@@ -20,6 +20,15 @@ import {
   type PineconeProjectGuard,
 } from '../../../lib/pinecone-project-guard.ts';
 import {
+  MEMORY_PROVENANCES,
+  MEMORY_VISIBILITIES,
+  instanceRecordVisibility,
+  memorySourceAccount,
+  narrowestVisibility,
+  type MemoryProvenance,
+  type MemoryVisibility,
+} from '../../../core/memory-scope.ts';
+import {
   buildMemoryOperationEvent,
   classifyMemoryFilter,
   classifyMemoryOperationFailure,
@@ -537,6 +546,36 @@ export interface MemoryRecord {
   warrant?: string;
   confidenceQualifier?: string;
   contradicts?: string;
+  // Server-derived provenance, read back from stored metadata. On write the
+  // provider stamps sourceInstance, sourceAccount and provenance itself and
+  // ignores these values; a record's visibility can only narrow the instance
+  // visibility (memory-scope.ts narrowestVisibility), never widen it.
+  sourceInstance?: string;
+  sourceAccount?: string;
+  visibility?: MemoryVisibility;
+  provenance?: MemoryProvenance;
+}
+
+/** The server-derived fields stamped on every record at upsert. */
+interface MemoryRecordStamp {
+  sourceInstance: string;
+  sourceAccount: string;
+  visibility: MemoryVisibility;
+  provenance?: MemoryProvenance;
+}
+
+export interface PineconeUpsertContext {
+  operationId?: string;
+  traceId?: string;
+  operation?: 'upsert' | 'memory_write';
+  /** Which pipeline wrote the records; stamped as `provenance` when given. */
+  provenance?: MemoryProvenance;
+  signal?: AbortSignal;
+}
+
+export interface PineconeMemoryOptions {
+  /** The connected account JID, read at write time; null while disconnected. */
+  accountJid?: () => string | null | undefined;
 }
 
 export interface SearchResult {
@@ -598,7 +637,7 @@ type PineconeRecord = {
   [key: string]: string | number | boolean | string[];
 };
 
-function toPineconeRecord(record: MemoryRecord): PineconeRecord {
+function toPineconeRecord(record: MemoryRecord, stamp: MemoryRecordStamp): PineconeRecord {
   const raw: Record<string, string | number | boolean | string[] | undefined | null> = {
     _id: record.id,
     text: record.text,
@@ -617,6 +656,13 @@ function toPineconeRecord(record: MemoryRecord): PineconeRecord {
     warrant: record.warrant,
     confidence_qualifier: record.confidenceQualifier,
     contradicts: record.contradicts,
+    // Server-derived: from instance config and runtime state only. Record
+    // values for these keys are ignored, except that a record's visibility can
+    // narrow (never widen) the instance visibility.
+    source_instance: stamp.sourceInstance,
+    source_account: stamp.sourceAccount,
+    visibility: narrowestVisibility(stamp.visibility, record.visibility),
+    provenance: stamp.provenance,
   };
 
   // Strip null/undefined values — Pinecone requires primitive fields only
@@ -657,8 +703,37 @@ function fromPineconeHit(hit: {
   if (typeof f['warrant'] === 'string') record.warrant = f['warrant'];
   if (typeof f['confidence_qualifier'] === 'string') record.confidenceQualifier = f['confidence_qualifier'];
   if (typeof f['contradicts'] === 'string') record.contradicts = f['contradicts'];
+  if (typeof f['source_instance'] === 'string') record.sourceInstance = f['source_instance'];
+  if (typeof f['source_account'] === 'string') record.sourceAccount = f['source_account'];
+  if ((MEMORY_VISIBILITIES as readonly unknown[]).includes(f['visibility'])) {
+    record.visibility = f['visibility'] as MemoryVisibility;
+  }
+  if ((MEMORY_PROVENANCES as readonly unknown[]).includes(f['provenance'])) {
+    record.provenance = f['provenance'] as MemoryProvenance;
+  }
 
   return { id: hit._id, score: hit._score, record };
+}
+
+/** Instance configuration read for the record stamp. */
+function configuredRecordStampSource(): {
+  instanceName: unknown;
+  instanceType: unknown;
+  accountScopeId: unknown;
+  recordVisibility: unknown;
+} {
+  const c = config as {
+    botName?: unknown;
+    instanceType?: unknown;
+    accountScopeId?: unknown;
+    memory?: { pinecone?: { recordVisibility?: unknown } };
+  };
+  return {
+    instanceName: c.botName,
+    instanceType: c.instanceType,
+    accountScopeId: c.accountScopeId,
+    recordVisibility: c.memory?.pinecone?.recordVisibility,
+  };
 }
 
 function fromPineconeHitEntity(hit: {
@@ -728,8 +803,10 @@ export class PineconeMemory {
   private client: Pinecone;
   private index: ReturnType<InstanceType<typeof Pinecone>['index']>;
   private projectGuardCheck: Promise<string | null> | null = null;
+  private readonly accountJid: () => string | null | undefined;
 
-  constructor() {
+  constructor(options: PineconeMemoryOptions = {}) {
+    this.accountJid = options.accountJid ?? (() => null);
     this.client = new Pinecone({
       apiKey: resolvePineconeApiKey(),
       fetchApi: (input, init) => {
@@ -744,6 +821,24 @@ export class PineconeMemory {
       },
     });
     this.index = this.client.index(config.pineconeIndex);
+  }
+
+  /** Server-derived provenance for one upsert: instance config plus the live account. */
+  private recordStamp(provenance: MemoryProvenance | undefined): MemoryRecordStamp {
+    const source = configuredRecordStampSource();
+    let accountJid: string | null | undefined;
+    try {
+      accountJid = this.accountJid();
+    } catch {
+      // intentional: an unreadable connection leaves the account unknown ('').
+      accountJid = null;
+    }
+    return {
+      sourceInstance: isNonEmptyString(source.instanceName) ? source.instanceName : '',
+      sourceAccount: memorySourceAccount(source.accountScopeId, accountJid),
+      visibility: instanceRecordVisibility(source.instanceType, source.recordVisibility),
+      ...(provenance ? { provenance } : {}),
+    };
   }
 
   private async getProjectGuardError(): Promise<string | null> {
@@ -1187,12 +1282,7 @@ export class PineconeMemory {
 
   async upsert(
     records: MemoryRecord[],
-    contextInput: {
-      operationId?: string;
-      traceId?: string;
-      operation?: 'upsert' | 'memory_write';
-      signal?: AbortSignal;
-    } = {},
+    contextInput: PineconeUpsertContext = {},
   ): Promise<void> {
     return pineconeOperationSignal.run(
       contextInput.signal,
@@ -1202,12 +1292,7 @@ export class PineconeMemory {
 
   private async upsertWithSignal(
     records: MemoryRecord[],
-    contextInput: {
-      operationId?: string;
-      traceId?: string;
-      operation?: 'upsert' | 'memory_write';
-      signal?: AbortSignal;
-    } = {},
+    contextInput: PineconeUpsertContext = {},
   ): Promise<void> {
     contextInput.signal?.throwIfAborted();
     const operation = createMemoryOperationContext({
@@ -1260,7 +1345,8 @@ export class PineconeMemory {
       );
     }
 
-    const pineconeRecords = records.map(toPineconeRecord);
+    const stamp = this.recordStamp(contextInput.provenance);
+    const pineconeRecords = records.map((record) => toPineconeRecord(record, stamp));
     const startMs = Date.now();
     const doUpsert = () => {
       contextInput.signal?.throwIfAborted();

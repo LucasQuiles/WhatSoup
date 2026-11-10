@@ -12,6 +12,73 @@ vi.mock('../../src/logger.ts', async () => {
 import { classifyMemoryFilter } from '../../src/lib/memory-operation-telemetry.ts';
 import { runConsolidation } from '../../src/memory/consolidation-cron.ts';
 
+describe('runConsolidation — provenance and visibility', () => {
+  function run(visibility: string | undefined) {
+    const pinecone = {
+      searchDetailed: vi.fn().mockResolvedValue({
+        results: [{
+          id: 'rec-1',
+          score: 0.9,
+          record: {
+            id: 'rec-1',
+            text: 'Lives in London',
+            claim: 'Lives in London',
+            evidence: 'Said so',
+            createdAt: new Date().toISOString(),
+            confidence: 0.9,
+            chatJid: 'chat-1@g.us',
+            senderJid: 'sender-1@s.whatsapp.net',
+            ...(visibility ? { visibility } : {}),
+          },
+        }],
+        status: 'ok',
+        evidenceCoverage: 'provider_response',
+      }),
+      upsert: vi.fn().mockResolvedValue(undefined),
+    };
+    const provider = {
+      name: 'test-provider',
+      generate: vi.fn().mockResolvedValue({
+        content: JSON.stringify({
+          durableKnowledge: [{
+            claim: 'User lives in London',
+            promotionReason: 'Consistent across sessions',
+            confidence: 0.92,
+            sourceRecordIds: ['rec-1'],
+          }],
+          discarded: [],
+        }),
+        inputTokens: 100,
+        outputTokens: 50,
+        model: 'test',
+        durationMs: 100,
+      }),
+    };
+    return { pinecone, done: runConsolidation(pinecone, provider, { lookbackDays: 7, dryRun: false }) };
+  }
+
+  it('labels the write as consolidation provenance', async () => {
+    const { pinecone, done } = run(undefined);
+    await done;
+    expect(pinecone.upsert).toHaveBeenCalledTimes(1);
+    expect(pinecone.upsert.mock.calls[0][1]).toMatchObject({ provenance: 'consolidation' });
+  });
+
+  it('an owner_only source makes the durable record owner_only (never widened)', async () => {
+    const { pinecone, done } = run('owner_only');
+    await done;
+    expect(pinecone.upsert.mock.calls[0][0][0].visibility).toBe('owner_only');
+  });
+
+  it('chat_scoped and legacy sources leave visibility to the provider stamp', async () => {
+    for (const visibility of ['chat_scoped', undefined]) {
+      const { pinecone, done } = run(visibility);
+      await done;
+      expect(pinecone.upsert.mock.calls[0][0][0]).not.toHaveProperty('visibility');
+    }
+  });
+});
+
 describe('runConsolidation', () => {
   function makeMockPinecone(searchResults: any[] = []) {
     return {

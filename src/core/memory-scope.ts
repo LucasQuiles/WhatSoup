@@ -39,6 +39,7 @@ import {
 } from './jid-constants.ts';
 import { resolveLid, resolveLidsForPhone } from './lid-resolver.ts';
 import { systemClock } from '../lib/clock.ts';
+import { shortHash } from '../lib/short-hash.ts';
 import { isAdminPhone, normalizePhoneE164 } from '../lib/phone.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
 
@@ -458,4 +459,57 @@ export function isOwnOrSharedGroupRecord(
 /** The folded sender identity when the transport authenticates it, else undefined. */
 export function verifiedSenderIdentity(actorJid: string | undefined, db?: Database | null): string | undefined {
   return actorJid && isAuthenticatedSenderJid(actorJid) ? foldSenderIdentity(actorJid, db) : undefined;
+}
+
+// ── record provenance ──────────────────────────────────────────────────────
+//
+// Every record the instance writes carries four server-derived fields:
+//   source_instance  the writing instance (`config.botName`)
+//   source_account   an opaque id of the writing WhatsApp account
+//   visibility       who may recall it (`owner_only` or `chat_scoped`)
+//   provenance       which pipeline wrote it
+// The provider stamps them in `toPineconeRecord` from instance config and
+// runtime state; no tool argument reaches them. Records written before these
+// fields existed carry none of them and keep their earlier recall behavior.
+
+export const MEMORY_VISIBILITIES = ['owner_only', 'chat_scoped'] as const;
+export type MemoryVisibility = (typeof MEMORY_VISIBILITIES)[number];
+
+export const MEMORY_PROVENANCES = ['memory_write', 'fact_export', 'summary', 'consolidation'] as const;
+export type MemoryProvenance = (typeof MEMORY_PROVENANCES)[number];
+
+/**
+ * The visibility an instance stamps on what it writes. A passive (personal)
+ * line always writes `owner_only`; configuration can make any other instance
+ * `owner_only` but can never relax a passive line to `chat_scoped`.
+ */
+export function instanceRecordVisibility(instanceType: unknown, configured: unknown): MemoryVisibility {
+  if (instanceType === 'passive') return 'owner_only';
+  return configured === 'owner_only' ? 'owner_only' : 'chat_scoped';
+}
+
+/**
+ * The most restrictive visibility among the inputs. A write that derives from
+ * existing records (a consolidation, a correction) never widens them: one
+ * `owner_only` input makes the result `owner_only`. Unknown values count as
+ * `chat_scoped`, the pre-visibility behavior.
+ */
+export function narrowestVisibility(...values: unknown[]): MemoryVisibility {
+  return values.some((value) => value === 'owner_only') ? 'owner_only' : 'chat_scoped';
+}
+
+const SOURCE_ACCOUNT_DIGEST_VERSION = 'whatsoup-memory-source-account/v1';
+
+/**
+ * Opaque id of the writing account. A configured `accountScopeId` (already an
+ * opaque, configured account identity) wins. Otherwise the connected account
+ * JID is reduced to its bare user part and hashed under a versioned prefix, so
+ * the raw JID never reaches the record. Unknown (no scope id, not connected)
+ * is ''.
+ */
+export function memorySourceAccount(accountScopeId: unknown, accountJid: string | null | undefined): string {
+  if (isNonEmptyString(accountScopeId)) return accountScopeId;
+  const user = accountJid ? normalizeLid(bareNumber(accountJid.trim())) : '';
+  if (!user) return '';
+  return `acct:${shortHash(`${SOURCE_ACCOUNT_DIGEST_VERSION}\n${user}`, 24)}`;
 }

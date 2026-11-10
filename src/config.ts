@@ -126,6 +126,11 @@ export interface MemoryConfig {
     apiKeyEnv: string;
     projectId?: string;
     expectedHostSuffix?: string;
+    /**
+     * Visibility stamped on records this instance writes. A passive line
+     * always writes `owner_only` whatever this says (memory-scope.ts).
+     */
+    recordVisibility: 'owner_only' | 'chat_scoped';
     index: string;
     namespaces: PineconeNamespaceConfig;
     contextTopK: number;
@@ -419,6 +424,17 @@ function profileRecordProp(source: Record<string, unknown> | null | undefined, k
 
 function pineconeSearchMode(value: unknown, fallback: PineconeSearchMode): PineconeSearchMode {
   return value === 'memory' || value === 'entity' ? value : fallback;
+}
+
+/**
+ * `memory.pinecone.recordVisibility`. Unset is `chat_scoped` (the behavior
+ * before visibility existed). A present but unknown value throws at config
+ * load: a typo must never silently widen who can recall the records.
+ */
+export function pineconeRecordVisibility(value: unknown): 'owner_only' | 'chat_scoped' {
+  if (value === undefined || value === null) return 'chat_scoped';
+  if (value === 'owner_only' || value === 'chat_scoped') return value;
+  throw new Error('memory.pinecone.recordVisibility must be "owner_only" or "chat_scoped"');
 }
 
 function knowledgeSearchMode(value: unknown, fallback: KnowledgeSearchMode): KnowledgeSearchMode {
@@ -1122,6 +1138,7 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
       apiKeyEnv: stringProp(pinecone, 'apiKeyEnv') ?? DEFAULT_PINECONE_API_KEY_ENV,
       projectId: stringProp(pinecone, 'projectId') ?? process.env.PINECONE_PROJECT_ID,
       expectedHostSuffix: stringProp(pinecone, 'expectedHostSuffix') ?? process.env.PINECONE_EXPECTED_HOST_SUFFIX,
+      recordVisibility: pineconeRecordVisibility(pinecone?.recordVisibility),
       index,
       namespaces,
       contextTopK: numberProp(pinecone, 'contextTopK', 10),

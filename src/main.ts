@@ -607,7 +607,8 @@ if (instanceType === 'agent') {
     ),
     handleDatabaseCompatibilityRejection,
   );
-  const pinecone = new PineconeMemory();
+  // The connected account feeds the opaque source_account stamp on writes.
+  const pinecone = new PineconeMemory({ accountJid: () => connectionManager.botJid });
   // Enrichment is queue-backed: the poller enqueues validated facts into
   // `fact_export_queue`. A deployment may provide an external bridge that
   // leases due rows (leasePendingFacts), writes them to Pinecone, and

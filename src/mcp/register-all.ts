@@ -36,7 +36,7 @@ import * as messagingTools from './tools/messaging.ts';
 import * as mediaTools from './tools/media.ts';
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
-import { resolvePineconeApiKey } from '../runtimes/chat/providers/pinecone.ts';
+import { PineconeMemory, resolvePineconeApiKey } from '../runtimes/chat/providers/pinecone.ts';
 import { ToolRegistry } from './registry.ts';
 import {
   noExecutingSession,
@@ -279,7 +279,11 @@ export function registerAllTools(
   // project for `q` when its config sets none).
   if (config.pineconeIndex && resolvePineconeApiKey()) {
     runModule('memory-write', false, (register) =>
-      memoryWriteTools.registerMemoryWriteTools(register),
+      memoryWriteTools.registerMemoryWriteTools(
+        register,
+        // The connected account feeds the opaque source_account stamp.
+        () => new PineconeMemory({ accountJid: () => connection.botJid }),
+      ),
     );
   }
 

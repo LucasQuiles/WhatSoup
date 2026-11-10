@@ -23,6 +23,7 @@ import {
   createMemoryOperationContext,
 } from '../../lib/memory-operation-telemetry.ts';
 import { PineconeMemory, type MemoryRecord } from '../../runtimes/chat/providers/pinecone.ts';
+import type { MemoryProvenance } from '../../core/memory-scope.ts';
 import {
   conversationBoundKey,
   errorResult,
@@ -36,6 +37,8 @@ export interface MemoryWriteOperationContext {
   operationId?: string;
   traceId?: string;
   operation?: 'upsert' | 'memory_write';
+  /** Which pipeline wrote the record; the provider stamps it as `provenance`. */
+  provenance?: MemoryProvenance;
 }
 
 export interface MemoryWriter {
@@ -159,9 +162,13 @@ export function registerMemoryWriteTools(
       };
 
       try {
+        // Source instance, account, visibility and provenance are stamped by
+        // the provider from instance config and runtime state; the record and
+        // the tool arguments carry none of them.
         await getWriter().upsert([record], {
           operationId: operation.operationId,
           operation: 'memory_write',
+          provenance: 'memory_write',
         });
       } catch (err) {
         const failure = classifyMemoryOperationFailure(err);

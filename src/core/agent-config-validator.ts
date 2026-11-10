@@ -190,6 +190,7 @@ function hasExplicitPineconeConfig(raw: Record<string, unknown>): boolean {
       'knowledgeSearch',
       'knowledgeProfiles',
       'embedUrl',
+      'recordVisibility',
     ])
   );
 }

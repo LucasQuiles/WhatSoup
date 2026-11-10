@@ -49,13 +49,15 @@ export async function upsertFacts(
         if (hits.length > 0 && hits[0].score >= 0.8) {
           const old = hits[0].record;
           const updatedText = `was: ${old.text}, now: ${fact.text}`;
+          // `old.visibility` rides along: the provider can only narrow it,
+          // so a correction never widens an owner_only record.
           await pinecone.upsert([{
             ...old,
             text: updatedText,
             memoryType: 'correction',
             updatedAt: new Date().toISOString(),
             superseded: fact.text,
-          }]);
+          }], { provenance: 'fact_export' });
           superseded = superseded + 1;
         }
       } catch (err) {
@@ -112,7 +114,7 @@ export async function upsertFacts(
         warrant: fact.warrant ?? '',
         confidenceQualifier: fact.confidenceQualifier ?? '',
         contradicts: contradictIds,
-      }]);
+      }], { provenance: 'fact_export' });
       upserted = upserted + 1;
     } catch (err) {
       log.warn({ err, id, operation: 'upsert', elapsed_ms: Date.now() - upsertStart }, 'upserter: upsert failed for fact');

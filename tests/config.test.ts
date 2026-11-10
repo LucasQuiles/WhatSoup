@@ -2258,6 +2258,27 @@ describe('config — processTmpDir from instance.paths.tmpDir', () => {
 // PINECONE_PROJECT_ID / PINECONE_EXPECTED_HOST_SUFFIX env var overrides
 // ---------------------------------------------------------------------------
 
+describe('config — memory.pinecone.recordVisibility', () => {
+  it('defaults to chat_scoped and parses owner_only through the real loader', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({}));
+    const unset = await import('../src/config.ts');
+    expect(unset.config.memory.pinecone.recordVisibility).toBe('chat_scoped');
+    vi.resetModules();
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: { pinecone: { index: 'whatsapp-bot', projectId: 'instance-proj-id', recordVisibility: 'owner_only' } },
+    }));
+    const set = await import('../src/config.ts');
+    expect(set.config.memory.pinecone.recordVisibility).toBe('owner_only');
+  });
+
+  it('rejects an unknown value at load rather than widening recall', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: { pinecone: { index: 'whatsapp-bot', projectId: 'instance-proj-id', recordVisibility: 'everyone' } },
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(/recordVisibility must be "owner_only" or "chat_scoped"/);
+  });
+});
+
 describe('config — pinecone env var overrides', () => {
   it('picks up PINECONE_PROJECT_ID env var when not set in instance', async () => {
     process.env.PINECONE_PROJECT_ID = 'env-proj-id';

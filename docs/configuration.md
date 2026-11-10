@@ -1212,6 +1212,7 @@ The default is a fixed HOME-relative template — it does not consult `LANG`/`LC
 | `memory.pinecone.apiKeyEnv` | string | `PINECONE_API_KEY` | Credential selector and compatibility environment-variable name for this instance's Pinecone key. The runtime resolves the corresponding secure-store service at use time; under the managed launcher the process-level `PINECONE_API_KEY` is launcher-provenanced (resolved from the secure store at launch after inherited values are scrubbed), so the compatibility name never carries an ambient value. |
 | `memory.pinecone.projectId` | string | env/unset | Optional short project slug guard (not the UUID-form project ID). If the listed index host does not include this slug, readiness returns `project_mismatch` and `knowledge_search` refuses to query. |
 | `memory.pinecone.expectedHostSuffix` | string | env/unset | Optional exact host suffix guard. Use this when two projects have the same index name and you need fail-closed routing. |
+| `memory.pinecone.recordVisibility` | `owner_only` \| `chat_scoped` | `chat_scoped` | Visibility stamped on every memory record this instance writes (see [Memory record provenance](#memory-record-provenance)). A `passive` instance always writes `owner_only`, whatever this says. An unknown value fails config load. |
 | `memory.pinecone.index` | string | env/`whatsapp-bot` | Primary chat memory/entity index. |
 | `memory.pinecone.namespaces` | object | WhatsApp defaults | Namespaces used by chat context, fact export, and `mw-mind` intent routing. Every namespace is configurable per instance. |
 | `memory.pinecone.searchMode` | string | auto | `memory` for chat/sender/self-fact filters, `entity` for entity index search. Defaults from the index name. |
@@ -1244,6 +1245,24 @@ level.
 without an explicit `namespace` argument, it always includes `__default__`
 alongside the profile's namespaces, so an instance can find what it wrote. A
 profile that already lists the default namespace is searched as configured.
+
+##### Memory record provenance
+
+Every memory record the instance writes (`memory_write`, fact export,
+consolidation; summaries when they land) carries four metadata fields that the
+provider stamps in `toPineconeRecord` (`src/runtimes/chat/providers/pinecone.ts`)
+from instance configuration and runtime state. No tool argument can set or
+widen them.
+
+| Field | Value |
+|---|---|
+| `source_instance` | The writing instance's name. |
+| `source_account` | Opaque id of the writing account: the configured `accountScopeId` when set; otherwise `acct:` plus a truncated, versioned SHA-256 of the connected account's bare user id (never the raw JID); empty while the account is unknown. A hash of a phone-number id can be reversed by enumeration, so set `accountScopeId` where that matters. |
+| `visibility` | `owner_only` for a `passive` instance or when `memory.pinecone.recordVisibility` is `owner_only`; otherwise `chat_scoped`. A record derived from existing records (a consolidation, a correction) keeps the most restrictive visibility of its sources. |
+| `provenance` | `memory_write`, `fact_export`, `summary` or `consolidation`: the pipeline that wrote the record. |
+
+Records written before these fields existed carry none of them and are
+recalled exactly as before.
 
 ##### Memory recall scope
 

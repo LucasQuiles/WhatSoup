@@ -11,6 +11,11 @@ import type {
   PineconeSearchDetails,
 } from '../runtimes/chat/providers/pinecone.ts';
 import type { LLMProvider } from '../runtimes/chat/providers/types.ts';
+import {
+  narrowestVisibility,
+  type MemoryProvenance,
+  type MemoryVisibility,
+} from '../core/memory-scope.ts';
 import { clusterMemories, consolidateCluster } from './consolidation.ts';
 import type { ClusterExecutionOutcome } from './types.ts';
 import {
@@ -54,6 +59,7 @@ export interface ConsolidationPinecone {
       operationId?: string;
       traceId?: string;
       operation?: 'upsert' | 'memory_write';
+      provenance?: MemoryProvenance;
       signal?: AbortSignal;
     },
   ): Promise<void>;
@@ -255,10 +261,15 @@ export async function runConsolidation(
     senderJid: result.record.senderJid ?? '',
   }));
 
+  // Source visibility by record id: a promotion is never less restricted than
+  // the records it was derived from (an owner_only source makes the durable
+  // record owner_only).
+  const sourceVisibility = new Map(recentMemories.map((result) => [result.id, result.record.visibility]));
   const scopedRecords = new Map<string, {
     chatJid: string;
     senderJid: string;
     records: typeof records;
+    visibility: MemoryVisibility;
   }>();
   // counters.skipped accrues both exclusion reasons (consolidated outputs
   // above, unscoped records here); the log fields keep the reasons distinct.
@@ -274,8 +285,10 @@ export async function runConsolidation(
       chatJid: record.chatJid,
       senderJid: record.senderJid,
       records: [],
+      visibility: 'chat_scoped' as MemoryVisibility,
     };
     group.records.push(record);
+    group.visibility = narrowestVisibility(group.visibility, sourceVisibility.get(record.id));
     scopedRecords.set(key, group);
   }
 
@@ -388,8 +401,12 @@ export async function runConsolidation(
             warrant: durable.promotionReason,
             confidenceQualifier: CONSOLIDATED_QUALIFIER,
             contradicts: '',
+            // The provider narrows this with the instance's own visibility;
+            // it can only make the record more restricted.
+            ...(group.visibility === 'owner_only' ? { visibility: group.visibility } : {}),
           }], {
             operation: 'memory_write',
+            provenance: 'consolidation',
             traceId: options.traceId,
             signal: options.signal,
           });

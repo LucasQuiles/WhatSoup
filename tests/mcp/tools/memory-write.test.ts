@@ -69,7 +69,34 @@ describe('memory_write tool', () => {
     expect(upsert.mock.calls[0]?.[1]).toEqual({
       operationId: (res as { operation_id: string }).operation_id,
       operation: 'memory_write',
+      provenance: 'memory_write',
     });
+  });
+
+  it('tool arguments cannot set source, visibility or provenance fields', async () => {
+    const { tool, upsert } = setup();
+    await tool.handler(
+      {
+        chatJid: '12345@s.whatsapp.net',
+        text: 'Phil prefers email',
+        memory_type: 'preference',
+        visibility: 'chat_scoped',
+        source_instance: 'spoofed-instance',
+        sourceInstance: 'spoofed-instance',
+        source_account: 'acct:spoofed',
+        sourceAccount: 'acct:spoofed',
+        provenance: 'consolidation',
+      } as Record<string, unknown>,
+      chatSession(),
+    );
+    expect(upsert).toHaveBeenCalledTimes(1);
+    const [records, context] = upsert.mock.calls[0] as [MemoryRecord[], Record<string, unknown>];
+    const r = records[0] as unknown as Record<string, unknown>;
+    for (const key of ['visibility', 'source_instance', 'sourceInstance', 'source_account', 'sourceAccount', 'provenance']) {
+      expect(r).not.toHaveProperty(key);
+    }
+    // The pipeline label comes from the tool itself, never from an argument.
+    expect(context['provenance']).toBe('memory_write');
   });
 
   it('stamps record timestamps from the injected clock, not the wall clock (#2200)', async () => {
@@ -237,7 +264,7 @@ describe('memory_write tool', () => {
       expect(upsertSpy).toHaveBeenCalledTimes(1);
       const [records, operation] = upsertSpy.mock.calls[0] as [
         MemoryRecord[],
-        { operationId: string; operation: 'memory_write' },
+        { operationId: string; operation: 'memory_write'; provenance: 'memory_write' },
       ];
       expect(records[0]).toMatchObject({
         chatJid: '12345@s.whatsapp.net',
@@ -248,6 +275,7 @@ describe('memory_write tool', () => {
       expect(operation).toEqual({
         operationId: (res as { operation_id: string }).operation_id,
         operation: 'memory_write',
+        provenance: 'memory_write',
       });
       expect(res).toMatchObject({
         operation_id: expect.stringMatching(/^[a-f0-9]{32}$/),
