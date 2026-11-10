@@ -1081,6 +1081,18 @@ reset after headers arrive, is recorded as `unavailable`.
 Process cleanup across the observer, transport and independently started MCP
 process remains a separate continuity obligation. In particular, a per-request
 MCP timeout does not establish a deadline for the complete multi-request probe.
+The MCP helper sends SIGTERM to its own process group before reaping the session
+leader, including when that leader has already exited. It preserves the
+three-second graceful-stop window. If the leader has not exited, it sends
+SIGKILL before allowing another five seconds to reap it. It never signals the
+group again after reaping its leader. The helper waits for stderr only within
+the remaining graceful-stop window, reads at most 16 KiB without waiting for EOF,
+and closes its three pipes. A group-signaling error,
+cleanup exception or unreadable stderr pipe still held open is retained as
+`cleanup_error`; the fleet result reports `mcp_probe_incomplete` rather than
+healthy Microsoft 365 checks. A descendant that outlives its leader and ignores
+SIGTERM, or creates another process group, can survive this cleanup. Outer-
+observer cancellation and remote process cleanup remain unqualified.
 
 Instance health tokens use the shared reader's precedence: per-instance
 `BOT_ERRORS_HEALTH_TOKEN_<INSTANCE>`, then `WHATSOUP_HEALTH_TOKEN`, then the

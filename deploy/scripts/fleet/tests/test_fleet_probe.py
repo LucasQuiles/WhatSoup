@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import subprocess
 import os
 import pathlib
 import plistlib
@@ -544,6 +545,45 @@ def test_m365_check_reads_no_mailbox_and_reports_graph_reachable(tmp_path):
     assert checks['m365_authenticated'] is True
     assert checks['m365_identity'] is True
     assert result['codes'] == []
+
+
+def test_m365_cleanup_failure_cannot_report_healthy_checks(tmp_path):
+    row = {
+        'tool_count': 5, 'auth': {'authenticated': True},
+        'graph_reachable': True, 'account_username': 'robot@synthetic.example',
+        'cleanup_error': 'PermissionError', 'error': 'mcp_cleanup_unverified',
+    }
+    code = 'print(' + repr(json.dumps({'probes': [row]})) + ')'
+    result, sent, ran = m365_probe(tmp_path, [], {}, mcp_code=code)
+    assert result['checks']['m365_mcp_available'] is False
+    assert result['checks']['m365_authenticated'] is None
+    assert result['checks']['m365_graph_reachable'] is None
+    assert result['checks']['m365_identity'] is None
+    assert 'mcp_probe_incomplete' in result['codes']
+    assert sent == [] and ran == []
+
+
+def test_m365_wait_error_after_successful_calls_reports_incomplete(tmp_path, monkeypatch):
+    wait = subprocess.Popen.wait
+    reaped = []
+
+    def failed_wait(process, *args, **kwargs):
+        wait(process, *args, **kwargs)
+        reaped.append(process)
+        raise OSError('synthetic cleanup failure after reaping')
+
+    monkeypatch.setattr(subprocess.Popen, 'wait', failed_wait)
+    result, sent, ran = m365_probe(tmp_path, TOOLS, {
+        'get-auth-status': SIGNED_IN, 'get-diagnostics': diagnostics({'ok': True})})
+    assert sent == SEQUENCE
+    assert ran == ['/usr/sbin/lsof']
+    assert len(reaped) == 1 and reaped[0].returncode is not None
+    assert reaped[0].stdin.closed and reaped[0].stdout.closed and reaped[0].stderr.closed
+    assert result['checks']['m365_mcp_available'] is False
+    assert result['checks']['m365_authenticated'] is None
+    assert result['checks']['m365_graph_reachable'] is None
+    assert result['checks']['m365_identity'] is None
+    assert 'mcp_probe_incomplete' in result['codes']
 
 
 # Plugin messages for an expired token (src/auth/auth-service.ts:224, surfacing

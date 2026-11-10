@@ -961,7 +961,7 @@
     },
     {
       "path": "deploy/scripts/fleet/fleet_probe_remote.py",
-      "sha256": "3844226c9b4d1005655030d8915cb35651369065424a8c6ed5f202c6034bbc87",
+      "sha256": "44cb4248397fd7b3713e3de7971f03a03ac322235dc6b7236db9726ff54f0def",
       "mustContain": [
         "classify_projection",
         "retired_checks"
@@ -969,7 +969,7 @@
     },
     {
       "path": "deploy/scripts/fleet/mcp_probe_remote.py",
-      "sha256": "7cc2a230a55572e242e02c63cbcaf3ebe795d1bedb45b68880e24ea04368495c",
+      "sha256": "651a1384834819a6cea2a8430d640b33024216472acdcd9b2bbb4a72a48f2bd9",
       "mustContain": [
         "get-auth-status",
         "get-diagnostics"

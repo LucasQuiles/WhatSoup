@@ -1,4 +1,32 @@
 import json,os,pathlib,plistlib,re,selectors,signal,subprocess,time
+
+def finish_process(proc):
+ cleanup_error=None
+ cleanup_deadline=time.monotonic()+3
+ try:
+  # Signal while the unreaped session leader still pins the group identity.
+  try:os.killpg(proc.pid,signal.SIGTERM)
+  except ProcessLookupError:pass
+  except OSError as exc:cleanup_error=type(exc).__name__
+  try:proc.wait(timeout=3)
+  except subprocess.TimeoutExpired:
+   try:os.killpg(proc.pid,signal.SIGKILL)
+   except ProcessLookupError:pass
+   except OSError as exc:cleanup_error=cleanup_error or type(exc).__name__
+   proc.wait(timeout=5)
+  os.set_blocking(proc.stderr.fileno(),False)
+  if cleanup_error is None:
+   with selectors.DefaultSelector() as ready:
+    ready.register(proc.stderr,selectors.EVENT_READ)
+    if not ready.select(max(0,cleanup_deadline-time.monotonic())):cleanup_error='stderr_incomplete'
+  try:err=os.read(proc.stderr.fileno(),16384).decode(errors='replace')
+  except BlockingIOError:err='';cleanup_error=cleanup_error or 'stderr_incomplete'
+ finally:
+  for stream in (proc.stdin,proc.stdout,proc.stderr):
+   try:stream.close()
+   except OSError as exc:cleanup_error=cleanup_error or type(exc).__name__
+ return err,cleanup_error
+
 r=pathlib.Path.home();out={'checked_at':time.time(),'probes':[]}
 for path in (r/'.config/whatsoup/instances').glob('*/config.json'):
  instance=path.parent.name
@@ -88,14 +116,15 @@ for path in (r/'.config/whatsoup/instances').glob('*/config.json'):
      row['observed_executable_paths']=[v[1:] for v in opened.stdout.splitlines() if v.startswith('n') and ('/node' in v or '/python' in v)]
     finally:
      selector.close()
-     if proc.poll() is None:
-      os.killpg(proc.pid,signal.SIGTERM)
-      try:proc.wait(timeout=3)
-      except subprocess.TimeoutExpired:os.killpg(proc.pid,signal.SIGKILL);proc.wait(timeout=5)
-     err=proc.stderr.read(16384).decode(errors='replace')
+     row['cleanup_error']='incomplete'
+     err,cleanup_error=finish_process(proc)
      row['process_exit']=proc.returncode
      row['stderr_bytes']=len(err)
-     if proc.returncode not in (0,-15):
+     if cleanup_error:
+      row['cleanup_error']=cleanup_error
+      raise RuntimeError('mcp_cleanup_unverified')
+     del row['cleanup_error']
+     if proc.returncode not in (0,-15,-9):
       for k,v in env.items():
        if len(v)>8 and any(w in k.upper() for w in ['KEY','TOKEN','SECRET']):err=err.replace(v,'[redacted]')
       row['startup_error_excerpt']=re.sub(r'[A-Za-z0-9_+=/.-]{40,}','[redacted]',err)[:1500]

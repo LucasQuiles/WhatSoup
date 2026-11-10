@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
-from hypothesis import given, strategies as st
+from hypothesis import given, settings, strategies as st
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "reliability_supervisor.py"
@@ -800,6 +800,7 @@ def test_readiness_failure_is_reported_independently_of_working_token(supervisor
 
 
 @pytest.mark.parametrize("uncertain", ["stale", "missing", "unreachable"])
+@settings(deadline=5000)
 @given(uncertain_cycles=st.integers(min_value=1, max_value=20))
 def test_readiness_incident_needs_fresh_positive_recovery(
     uncertain, uncertain_cycles

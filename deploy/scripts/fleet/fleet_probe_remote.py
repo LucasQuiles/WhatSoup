@@ -132,6 +132,7 @@ if request.get('m365'):
     try:
         with contextlib.redirect_stdout(output):exec(compile(request['mcp_code'],'mcp_read_probe','exec'),scope)
         payload=json.loads(output.getvalue());probes=payload.get('probes',[])
+        if any(probe.get('cleanup_error') for probe in probes):raise RuntimeError('mcp_cleanup_unverified')
         expected=request.get('expected_email')
         checks['m365_mcp_available']=len(probes)==1 and probes[0].get('tool_count',0)>0
         checks['m365_authenticated']=len(probes)==1 and probes[0].get('auth',{}).get('authenticated') is True
