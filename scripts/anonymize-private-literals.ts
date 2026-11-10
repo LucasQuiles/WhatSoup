@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, ftruncateSync, lstatSync, openSync, readFileSync, realpathSync, writeSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { escapeRegExp } from '../src/lib/regex-utils.ts';
+import { isPathWithinAllowedRoot } from '../src/lib/path-boundary.ts';
 import { cleanGitEnv, normalizeRepoPath } from './lib/guard-core.ts';
 
 interface ParsedArgs {
@@ -79,8 +80,27 @@ const privatePineconeProjectIds = [
 ].map((parts) => parts.join(''));
 
 function gitList(args: string[], cwd: string): string[] {
-  const output = execFileSync('git', args, { cwd, encoding: 'utf8', env: cleanGitEnv(), timeout: 30_000 }).trim();
-  return output ? output.split(/\r?\n/).map(normalizeRepoPath).filter(Boolean) : [];
+  const output = execFileSync('git', args, { cwd, encoding: 'utf8', env: cleanGitEnv(), timeout: 30_000 });
+  return output.split('\0').map(normalizeRepoPath).filter(Boolean);
+}
+
+function relativeInput(filePath: string): string {
+  const normalized = normalizeRepoPath(filePath);
+  if (path.isAbsolute(filePath) || normalized.split('/').includes('..') || filePath.includes('\0')) {
+    throw new Error('Anonymizer paths must be repository-relative without parent segments');
+  }
+  return normalized;
+}
+
+function inspectCandidate(cwd: string, filePath: string) {
+  const fullPath = path.resolve(cwd, relativeInput(filePath));
+  const canonical = realpathSync(fullPath);
+  if (canonical !== fullPath || !isPathWithinAllowedRoot(canonical, cwd)) {
+    throw new Error('Anonymizer refuses symlink paths');
+  }
+  const stat = lstatSync(fullPath);
+  if (stat.isFile() && stat.nlink !== 1) throw new Error('Anonymizer refuses hardlink files');
+  return { filePath, fullPath, stat };
 }
 
 /** The files this tool may rewrite: a narrow known-text list, not the disclosure scans' file selection. */
@@ -148,7 +168,12 @@ export function anonymizeText(text: string): AnonymizedText {
     values: new Map(),
   };
 
-  let next = text;
+  let next = replacePattern(text, state, 'private-key',
+    /-----BEGIN ((?:[A-Z0-9]+ )*PRIVATE KEY)-----[\s\S]*?-----END \1-----/g,
+    () => '<private-key>');
+  if (/-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/.test(next)) {
+    throw new Error('Unterminated private-key block; refusing partial anonymization');
+  }
 
   next = replacePattern(
     next,
@@ -244,7 +269,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--staged') args.staged = true;
     else if (arg === '--write') args.write = true;
     else if (arg.startsWith('--')) throw new Error(`Unknown argument: ${arg}`);
-    else args.paths.push(normalizeRepoPath(arg));
+    else args.paths.push(relativeInput(arg));
   }
 
   return args;
@@ -253,15 +278,18 @@ function parseArgs(argv: string[]): ParsedArgs {
 function listPathCandidates(cwd: string, args: ParsedArgs): string[] {
   if (args.paths.length === 0) {
     return args.staged
-      ? gitList(['diff', '--cached', '--name-only', '--diff-filter=ACMR'], cwd)
-      : gitList(['ls-files'], cwd);
+      ? gitList(['diff', '--cached', '--name-only', '-z', '--diff-filter=ACMR'], cwd)
+      : gitList(['ls-files', '-z'], cwd);
   }
 
-  const tracked = new Set(gitList(['ls-files', '--', ...args.paths], cwd));
+  for (const filePath of args.paths) {
+    if (existsSync(path.resolve(cwd, filePath))) inspectCandidate(cwd, filePath);
+  }
+  const tracked = new Set(gitList(['ls-files', '-z', '--', ...args.paths], cwd));
   for (const filePath of args.paths) {
     const fullPath = path.join(cwd, filePath);
     if (!existsSync(fullPath)) continue;
-    if (statSync(fullPath).isFile()) tracked.add(normalizeRepoPath(filePath));
+    if (lstatSync(fullPath).isFile()) tracked.add(normalizeRepoPath(filePath));
   }
   return [...tracked];
 }
@@ -277,28 +305,49 @@ function listCandidateFiles(cwd: string, args: ParsedArgs): string[] {
 }
 
 function run(argv = process.argv.slice(2), cwd = process.cwd()): number {
-  let args: ParsedArgs;
-  try {
-    args = parseArgs(argv);
-  } catch (err) {
-    console.error((err as Error).message);
-    return 1;
-  }
+  const args = parseArgs(argv);
 
   if (args.help) {
     printHelp();
     return 0;
   }
 
+  cwd = realpathSync(cwd);
+  // Validate the complete selection before any file can be changed.
+  const candidates = listCandidateFiles(cwd, args).map((filePath) => inspectCandidate(cwd, filePath));
   const changes = [];
-  for (const filePath of listCandidateFiles(cwd, args)) {
-    const fullPath = path.join(cwd, filePath);
-    const original = readFileSync(fullPath, 'utf8');
-    const anonymized = anonymizeText(original);
-    if (anonymized.replacements.length === 0) continue;
+  for (const { filePath, fullPath, stat } of candidates) {
+    const fd = openSync(fullPath, (args.write ? constants.O_RDWR : constants.O_RDONLY) | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const opened = fstatSync(fd);
+      const current = inspectCandidate(cwd, filePath).stat;
+      if (!opened.isFile() || opened.nlink !== 1 || opened.dev !== stat.dev || opened.ino !== stat.ino
+        || opened.dev !== current.dev || opened.ino !== current.ino) {
+        throw new Error('Anonymizer file identity changed before read');
+      }
+      const anonymized = anonymizeText(readFileSync(fd, 'utf8'));
+      if (anonymized.replacements.length === 0) continue;
 
-    changes.push({ filePath, replacements: anonymized.replacements });
-    if (args.write) writeFileSync(fullPath, anonymized.text);
+      if (args.write) {
+        const current = inspectCandidate(cwd, filePath).stat;
+        const beforeWrite = fstatSync(fd);
+        if (current.dev !== opened.dev || current.ino !== opened.ino || beforeWrite.nlink !== 1
+          || beforeWrite.size !== opened.size || beforeWrite.mtimeMs !== opened.mtimeMs || beforeWrite.ctimeMs !== opened.ctimeMs) {
+          throw new Error('Anonymizer file identity changed before write');
+        }
+        const bytes = Buffer.from(anonymized.text);
+        let offset = 0;
+        while (offset < bytes.length) {
+          const written = writeSync(fd, bytes, offset, bytes.length - offset, offset);
+          if (written === 0) throw new Error('Anonymizer write made no progress');
+          offset += written;
+        }
+        ftruncateSync(fd, bytes.length);
+      }
+      changes.push({ filePath, replacements: anonymized.replacements });
+    } finally {
+      closeSync(fd);
+    }
   }
 
   if (args.json) {
@@ -321,11 +370,18 @@ function printHelp(): void {
   console.log(`Usage: npm run leaks:anonymize -- [--write] [--staged] [--include-tests] [--json] [paths...]
 
 Default mode is report-only and exits non-zero when replacements are available.
+Paths must stay inside the checkout; parent segments, symlinks and hardlinks are refused.
+Complete private-key blocks are replaced; unterminated blocks fail without rewriting that file.
 Reports never print original private values; fingerprints are short hashes for correlation.`);
 }
 
 const isDirectRun = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
 
 if (isDirectRun) {
-  process.exitCode = run();
+  try {
+    process.exitCode = run();
+  } catch (error) {
+    console.error((error as Error).message);
+    process.exitCode = 1;
+  }
 }

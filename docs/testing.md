@@ -259,6 +259,13 @@ prompts; semantic similarity and weak-looking assertions alone do not justify
 deletion. A throwing Testing Library query already checks presence. Retain
 distinct edge cases, negative cases, CSS checks and rendered behavior.
 
+For disclosure remediation, `npm run leaks:anonymize -- --json <paths>` is
+report-only; add `--write` explicitly to rewrite supported text files. Inputs must
+be repository-relative and cannot traverse symlinks or hardlinks. Complete private
+key blocks become one placeholder; an unterminated block refuses that file's write.
+The CLI tests verify preserved outside files, interrupted path identity and complete
+body removal. Redaction remains a repair aid; run the normal disclosure guards afterward.
+
 Prove a repaired assertion or gate with a real negative control. Existing result
 artifacts can feed qTest without running another suite:
 
