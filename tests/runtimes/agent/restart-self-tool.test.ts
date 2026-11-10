@@ -318,8 +318,9 @@ describe('restart_self MCP tool', () => {
       vi.useFakeTimers();
       try {
         const order: string[] = [];
+        let settleFlush!: () => void;
         const queue = flushQueue(() => new Promise<void>((resolve) => {
-          setTimeout(() => { order.push('owed'); resolve(); }, OWED_REPLY_FLUSH_GRACE_MS - 1);
+          settleFlush = () => { order.push('owed'); resolve(); };
         }));
         const { deps: d } = deps({
           dataRoot,
@@ -330,7 +331,10 @@ describe('restart_self MCP tool', () => {
         });
 
         const pending = buildRestartSelfTool(d).handler({ reason: 'r' }, SESSION);
+        // Advance the fake clock to 1 ms before the grace timer fires, then settle the flush.
         await vi.advanceTimersByTimeAsync(OWED_REPLY_FLUSH_GRACE_MS - 1);
+        expect(queue.flush).toHaveBeenCalledTimes(1);
+        settleFlush();
         const result = await pending;
 
         expect(result).toMatchObject({ ok: true, restarting: true });
