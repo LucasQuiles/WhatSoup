@@ -64,6 +64,7 @@ function makeNotifier(opts: { enabled?: boolean; clock?: Clock; adminCount?: num
     enabled: () => opts.enabled ?? true,
     send,
     adminCount,
+    pausedChatSettings: config,
     ...(opts.clock ? { clock: opts.clock } : {}),
   });
   return { notifier, send, adminCount };
@@ -289,6 +290,7 @@ describe('#2949 queued receipt: the text is truthful and content-free', () => {
       enabled: () => true,
       send,
       adminCount: () => 0,
+      pausedChatSettings: config,
     });
     queue.enqueue(makeTurn('first'));
 

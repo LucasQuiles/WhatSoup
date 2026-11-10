@@ -378,7 +378,7 @@ export function createIngestHandler(
         // the normal path, so operator-directed traffic survives pausing a busy group.
         // The rule lives in paused-chat.ts, which the queued-turn receipt also asks
         // before it offers /stop. Admin commands are exempt here.
-        const pausedAdmission = pausedChatAdmission({ conversationKey, chatJid: msg.chatJid }, msg.content);
+        const pausedAdmission = pausedChatAdmission(config, { conversationKey, chatJid: msg.chatJid }, msg.content);
         if (pausedAdmission !== 'not_paused' && !getAdminCommand()) {
           if (pausedAdmission === 'bypassed') {
             log.info({ chatJid: msg.chatJid, messageId: msg.messageId }, 'paused chat bypass matched — dispatching');

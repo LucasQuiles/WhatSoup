@@ -62,6 +62,9 @@ import { pausedChatAdmission } from '../../core/paused-chat.ts';
 
 const log = createChildLogger('runtime-queued-receipt');
 
+/** The paused-chat settings the rule reads, as pausedChatAdmission takes them. */
+type PausedChatSettings = Parameters<typeof pausedChatAdmission>[0];
+
 /** The exact text the /stop sentence tells the reader to send. */
 const STOP_COMMAND_TEXT = '/stop';
 
@@ -105,6 +108,7 @@ function receiptOffersStop(
   scope: SessionScope,
   turn: Pick<QueuedTurn, 'isGroup' | 'conversationKey' | 'chatJid'>,
   adminCount: () => number,
+  pausedChatSettings: PausedChatSettings,
 ): boolean {
   // Every group member reads a group receipt, and no group can promise every
   // reader a working /stop, so a group gets no offer before any config read.
@@ -122,7 +126,7 @@ function receiptOffersStop(
   // names. turn.conversationKey is the key ingest journaled this chat's
   // message under, so both see the same chat. /stop is not an admin command,
   // so ingest's admin exemption never applies to it.
-  return pausedChatAdmission(turn, STOP_COMMAND_TEXT) !== 'held';
+  return pausedChatAdmission(pausedChatSettings, turn, STOP_COMMAND_TEXT) !== 'held';
 }
 
 export const DEFAULT_QUEUED_TURN_RECEIPT_COOLDOWN_MS = 60_000;
@@ -156,6 +160,10 @@ export interface QueuedTurnReceiptNotifierOpts {
   /** Configured admin count, the /stop gate's input (see WORDING above). A
    *  group receipt never reads it. */
   readonly adminCount: () => number;
+  /** The live paused-chat settings ingest applies (the config object, not a
+   *  snapshot), read only for a DM receipt (see WORDING above). Required, so a
+   *  wiring that omits it cannot quietly offer /stop in a paused chat. */
+  readonly pausedChatSettings: PausedChatSettings;
   /** Time source for the cooldown; defaults to the system clock. */
   readonly clock?: Clock;
   readonly cooldownMs?: number;
@@ -166,6 +174,7 @@ export class QueuedTurnReceiptNotifier {
   private readonly enabled: () => boolean;
   private readonly send: (chatJid: string, text: string) => Promise<void>;
   private readonly adminCount: () => number;
+  private readonly pausedChatSettings: PausedChatSettings;
   private readonly clock: Clock;
   private readonly cooldownMs: number;
 
@@ -173,6 +182,7 @@ export class QueuedTurnReceiptNotifier {
     this.enabled = opts.enabled;
     this.send = opts.send;
     this.adminCount = opts.adminCount;
+    this.pausedChatSettings = opts.pausedChatSettings;
     this.clock = opts.clock ?? systemClock;
     this.cooldownMs = opts.cooldownMs ?? DEFAULT_QUEUED_TURN_RECEIPT_COOLDOWN_MS;
   }
@@ -186,7 +196,7 @@ export class QueuedTurnReceiptNotifier {
       const decision = this.decide(admission);
       if (decision !== 'sent') return decision;
       const { scope, mapKey, turn, queue } = admission;
-      const stopOffered = receiptOffersStop(scope, turn, this.adminCount);
+      const stopOffered = receiptOffersStop(scope, turn, this.adminCount, this.pausedChatSettings);
       // decide() returned 'sent' only with a non-null active turn other than this one.
       const text = queuedTurnReceiptText(queue!.activeTurn!, turn, queue!.pending, stopOffered);
       this.lastSentAt.set(mapKey, this.clock.now());

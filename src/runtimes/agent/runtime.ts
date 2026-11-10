@@ -1997,6 +1997,7 @@ export class AgentRuntime implements Runtime {
     ),
     // The /stop gate's admin count; only a DM receipt offers /stop.
     adminCount: () => config.adminPhones.size,
+    pausedChatSettings: config, // live object: a DM's /stop offer follows ingest's paused-chat rule
   });
   /** Deferred and in-progress live-route recycle ownership by scope key. */
   private readonly routeRecycleLifecycle = new RouteRecycleLifecycle<SessionManager>();
