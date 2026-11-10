@@ -274,7 +274,7 @@ describe('memory provider telemetry confidentiality', () => {
       query: {
         topK: 10,
         inputs: { text: 'SYNTHETIC_PRIVATE_QUERY_MARKER' },
-        filter: { source: { $ne: 'archive_db' } },
+        filter: { source: { $ne: 'archive_db' }, $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] },
       },
       fields: ['*'],
     });

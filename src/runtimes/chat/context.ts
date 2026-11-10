@@ -15,6 +15,7 @@ import {
 import { routeQuery } from './memory/query-router.ts';
 import {
   foldChatAttribution,
+  isOwnerOnlyRecord,
   isOwnOrSharedGroupRecord,
   isSameSourceInstance,
   memoryIdentityFold,
@@ -149,13 +150,21 @@ export async function loadContextDetailed(
     namespaces: config.memory.pinecone.namespaces,
   });
   const safeTraceId = normalizeMemoryTraceId(traceId);
+  const ownerOnly = access.ownerOnly === true;
+  const legOptions = { includeOwnerOnly: true } as const;
 
   if (config.pineconeSearchMode === 'entity') {
-    const details = await captureContextSearch(() =>
-      traceId
-        ? pinecone.searchEntitiesDetailed(messageText, traceId)
-        : pinecone.searchEntitiesDetailed(messageText),
+    const detailsRaw = await captureContextSearch(() =>
+      ownerOnly
+        ? pinecone.searchEntitiesDetailed(messageText, traceId, legOptions)
+        : traceId
+          ? pinecone.searchEntitiesDetailed(messageText, traceId)
+          : pinecone.searchEntitiesDetailed(messageText),
     );
+    // Post-query gate, as for the memory legs: the provider's exclusion only narrows.
+    const details = ownerOnly
+      ? detailsRaw
+      : { ...detailsRaw, results: detailsRaw.results.filter((result) => !isOwnerOnlyRecord(result.record.metadata)) };
     const scopes = [scopeOutcome('entity', details)];
     log.info(
       {
@@ -177,8 +186,6 @@ export async function loadContextDetailed(
     };
   }
 
-  const ownerOnly = access.ownerOnly === true;
-  const legOptions = { includeOwnerOnly: true } as const;
   const [chatDetailsRaw, senderDetailsRaw, selfDetailsRaw] = await Promise.all([
     captureContextSearch(() =>
       ownerOnly

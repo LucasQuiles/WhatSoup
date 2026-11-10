@@ -1164,7 +1164,7 @@ describe('entity mode', () => {
         query: {
           topK: 20,
           inputs: { text: 'invoice 17088' },
-          filter: { source: { $ne: 'archive_db' } },
+          filter: { source: { $ne: 'archive_db' }, $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] },
         },
         fields: ['*'],
       },
@@ -1181,7 +1181,7 @@ describe('entity mode', () => {
         query: {
           topK: 20,
           inputs: { text: 'find building' },
-          filter: { source: { $ne: 'archive_db' } },
+          filter: { source: { $ne: 'archive_db' }, $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] },
         },
         fields: ['*'],
       },
@@ -1199,11 +1199,41 @@ describe('entity mode', () => {
         query: {
           topK: 15,
           inputs: { text: 'query' },
-          filter: { source: { $ne: 'archive_db' } },
+          filter: { source: { $ne: 'archive_db' }, $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] },
         },
         fields: ['*'],
       },
     ]]);
+  });
+
+  it('searchEntitiesDetailed refuses owner_only records before the query and before rerank unless included', async () => {
+    mutableConfig.pineconeRerank = true;
+    const hits = () => ({ result: { hits: [
+      makeEntityHit('ent-private', 0.9, { visibility: 'owner_only' }),
+      makeEntityHit('ent-shared', 0.8, { visibility: 'chat_scoped' }),
+      makeEntityHit('ent-legacy', 0.7),
+    ] } });
+    const keepOrder = (params: { documents: unknown[] }) => Promise.resolve({
+      data: params.documents.map((_doc, index) => ({ index, score: 1 - index / 10 })),
+    });
+    mockRerank.mockImplementation(keepOrder);
+    try {
+      mockSearchRecords.mockResolvedValueOnce(hits());
+      const refused = await memory.searchEntitiesDetailed('query');
+      expect(refused.results.map((r) => r.id)).toEqual(['ent-shared', 'ent-legacy']);
+      expect(mockSearchRecords.mock.calls[0][0].query.filter).toEqual({
+        source: { $ne: 'archive_db' },
+        $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }],
+      });
+      expect(mockRerank.mock.calls[0][0].documents.map((d: { id: string }) => d.id)).toEqual(['ent-shared', 'ent-legacy']);
+
+      mockSearchRecords.mockResolvedValueOnce(hits());
+      const owner = await memory.searchEntitiesDetailed('query', undefined, { includeOwnerOnly: true });
+      expect(owner.results.map((r) => r.id)).toEqual(['ent-private', 'ent-shared', 'ent-legacy']);
+      expect(mockSearchRecords.mock.calls[1][0].query.filter).toEqual({ source: { $ne: 'archive_db' } });
+    } finally {
+      mockRerank.mockReset();
+    }
   });
 
   it('searchEntities skips client-side rerank when config.pineconeRerank is false', async () => {
@@ -1276,7 +1306,7 @@ describe('entity mode', () => {
       query: {
         topK: 20,
         inputs: { text: 'query' },
-        filter: { source: { $ne: 'archive_db' } },
+        filter: { source: { $ne: 'archive_db' }, $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] },
       },
       fields: ['*'],
     };

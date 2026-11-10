@@ -24,6 +24,7 @@ import {
   MEMORY_VISIBILITIES,
   instanceRecordVisibility,
   memorySourceAccount,
+  isOwnerOnlyRecord,
   narrowestVisibility,
   recordIdScope,
   withVisibilityFilter,
@@ -1129,7 +1130,16 @@ export class PineconeMemory {
     return (await this.searchEntitiesDetailed(query, traceId)).results;
   }
 
-  async searchEntitiesDetailed(query: string, traceId?: string): Promise<PineconeEntitySearchDetails> {
+  // Entity mode excludes owner_only records like the context legs: before the
+  // query, and again on the returned records before rerank and formatting,
+  // unless the caller passes includeOwnerOnly (ownerOnlyRecallAllowed).
+  async searchEntitiesDetailed(
+    query: string,
+    traceId?: string,
+    options: ContextLegOptions = {},
+  ): Promise<PineconeEntitySearchDetails> {
+    const includeOwnerOnly = options.includeOwnerOnly === true;
+    const filter = withVisibilityFilter({ source: { $ne: 'archive_db' } }, includeOwnerOnly) ?? {};
     const operation = createMemoryOperationContext({
       operation: 'entity_search',
       traceId,
@@ -1177,7 +1187,7 @@ export class PineconeMemory {
         query: {
           topK: config.pineconeTopK,
           inputs: { text: query },
-          filter: { source: { $ne: 'archive_db' } },
+          filter,
         },
         fields: ['*'],
       });
@@ -1198,7 +1208,8 @@ export class PineconeMemory {
       }
 
       const hits = response.result.hits ?? [];
-      let mapped = hits.map(fromPineconeHitEntity);
+      let mapped = hits.map(fromPineconeHitEntity)
+        .filter((result) => includeOwnerOnly || !isOwnerOnlyRecord(result.record.metadata));
 
       // Step 2: client-side rerank with truncated text to stay within token limits
       if (config.pineconeRerank && mapped.length > 0) {
