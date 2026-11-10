@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
-from hypothesis import given, settings, strategies as st
+from hypothesis import example, given, settings, strategies as st
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "reliability_supervisor.py"
@@ -416,26 +416,34 @@ def test_status_reports_stale_heartbeat_and_does_not_expose_payloads(
     assert "restart_command" not in json.dumps(status)
 
 
-@pytest.mark.parametrize("name", ["*", "?", "[ab]", "alert[1]", "plain-alert"])
 @pytest.mark.parametrize("matching", [False, True])
-def test_collector_receipt_uses_literal_emitter_filename(supervisor, config, tmp_path, name, matching):
-    relay = tmp_path / "relay"
-    relayed = relay / "relayed"
-    relayed.mkdir(parents=True)
-    unrelated = {"*": "other", "?": "a", "[ab]": "b", "alert[1]": "alert1", "plain-alert": "other"}[name]
-    (relayed / (unrelated + ".host.relayed")).write_text("unrelated")
-    if matching:
-        (relayed / (name + ".host.relayed")).write_text("matching")
-    state = supervisor.initial_state(100)
-    state["completed_at"] = 100
-    state["alerts"] = [{"event_id": "held-event", "file": name, "delivery": "locally_persisted"}]
-    supervisor.private_directory(Path(config["state_dir"]))
-    supervisor.write_private(Path(config["state_dir"]) / "supervisor.json", state)
-    config["bot_errors_state_dir"] = str(relay)
-    observed = supervisor.observe(config, now=101)
-    assert observed["alerts"][0]["delivery"] == (
-        "collector_acknowledged" if matching else "locally_persisted"
-    )
+@given(name=st.text(alphabet="abcdefghijklmnopqrstuvwxyz0123456789*?[]_-", min_size=1, max_size=40))
+@example(name="*")
+@example(name="?")
+@example(name="[ab]")
+@example(name="alert[1]")
+@example(name="plain-alert")
+def test_collector_receipt_uses_literal_emitter_filename(name, matching):
+    supervisor = load_module()
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        relay = root / "relay"
+        relayed = relay / "relayed"
+        relayed.mkdir(parents=True)
+        unrelated = {"*": "other", "?": "a", "[ab]": "b", "alert[1]": "alert1", "plain-alert": "other"}.get(name, "unrelated-" + name)
+        (relayed / (unrelated + ".host.relayed")).write_text("unrelated")
+        if matching:
+            (relayed / (name + ".host.relayed")).write_text("matching")
+        state = supervisor.initial_state(100)
+        state["completed_at"] = 100
+        state["alerts"] = [{"event_id": "held-event", "file": name, "delivery": "locally_persisted"}]
+        state_dir = root / "state"
+        supervisor.private_directory(state_dir)
+        supervisor.write_private(state_dir / "supervisor.json", state)
+        observed = supervisor.observe({"state_dir": str(state_dir), "bot_errors_state_dir": str(relay)}, now=101)
+        assert observed["alerts"][0]["delivery"] == (
+            "collector_acknowledged" if matching else "locally_persisted"
+        )
 
 
 def test_health_body_and_deadline_are_real_http_checks(supervisor):
