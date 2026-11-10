@@ -102,6 +102,17 @@ interface ResolverRun {
 }
 
 /**
+ * The notes every failed-run tool message appends, so no failure return can drop a sign of a live
+ * descendant. A reap failure can follow a clean exit, and a missing close would otherwise read as
+ * an ordinary timeout.
+ */
+function reapNotesOf(run: ResolverRun): string {
+  const reapNote = run.reapError === undefined ? '' : `, reapError=${run.reapError}`;
+  const closeNote = run.closeNotObserved === true ? ', closeNotObserved=true' : '';
+  return `${reapNote}${closeNote}`;
+}
+
+/**
  * Byte-exact capped accumulator (audit F8): the previous char-count compare +
  * whole-chunk append let multi-byte UTF-8 output exceed the advertised BYTE
  * cap. Chunks are collected as Buffers with byte accounting, the final chunk
@@ -459,8 +470,14 @@ export function buildCapabilityExecutionTool(deps: CapabilityExecutionToolDeps):
             postDigest = '';
           }
           if (postDigest !== observedMediaDigest) {
-            recordOutcome(deps, active, observedSourceDigest, 'error', { reason: 'media_mutated_during_execution' }, observedMediaDigest);
-            return toolError({ error: 'capability_execution_failed', message: 'Retained media changed during execution' });
+            // The mutation is the reason, but it must not hide a group not proven reaped or a
+            // missing close: either may mean a descendant is still running.
+            recordOutcome(deps, active, observedSourceDigest, 'error', {
+              reason: 'media_mutated_during_execution',
+              ...(run.reapError === undefined ? {} : { reapError: run.reapError }),
+              ...(run.closeNotObserved === true ? { closeNotObserved: true } : {}),
+            }, observedMediaDigest);
+            return toolError({ error: 'capability_execution_failed', message: `Retained media changed during execution${reapNotesOf(run)}` });
           }
         }
 
@@ -481,14 +498,11 @@ export function buildCapabilityExecutionTool(deps: CapabilityExecutionToolDeps):
         }, observedMediaDigest);
 
         if (!ok) {
-          // A reap failure can follow a clean exit, so name it; exit, signal and timedOut alone would read as success.
-          const reapNote = run.reapError === undefined ? '' : `, reapError=${run.reapError}`;
-          // A missing close would otherwise read as an ordinary timeout.
-          const closeNote = run.closeNotObserved === true ? ', closeNotObserved=true' : '';
+          // Exit, signal and timedOut alone could read as success or as an ordinary timeout.
           return toolError({
             error: 'capability_execution_failed',
             message:
-              `Capability resolver failed (exit=${run.exitCode ?? 'none'}, signal=${run.signal ?? 'none'}, timedOut=${run.timedOut}${reapNote}${closeNote}). `
+              `Capability resolver failed (exit=${run.exitCode ?? 'none'}, signal=${run.signal ?? 'none'}, timedOut=${run.timedOut}${reapNotesOf(run)}). `
               + `stderr tail: ${run.stderr.slice(-1_024)}`,
           });
         }
