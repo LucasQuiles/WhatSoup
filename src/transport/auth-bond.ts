@@ -15,10 +15,12 @@ import {
 import { forceEnsurePrivateDirectorySync } from '../lib/private-fs.ts';
 import { shortHash } from '../lib/short-hash.ts';
 import { errorMessage } from '../lib/error-message.ts';
+import { createChildLogger } from '../logger.ts';
 import { decideRestoreFromCandidate, readTerminalLatchJournal } from './terminal-latch.ts';
 import { readRestoreCandidateEvidence } from './auth-generation-v2.ts';
 import {
   fileSnapshot,
+  isVanishedEntry,
   readCredsThroughNoFollow,
   type AuthBondFileSnapshot,
   type CredsRead,
@@ -39,6 +41,8 @@ import {
   type AuthTreeObservation,
   type AuthTreeSteps,
 } from './auth-bond-steps.ts';
+
+const log = createChildLogger('auth-bond');
 
 export { MAX_CREDS_BYTES } from './auth-bond-files.ts';
 export type { AuthBondFileSnapshot } from './auth-bond-files.ts';
@@ -1858,8 +1862,9 @@ export class AuthBondGuard {
     for (const path of candidates) {
       try {
         if ((yield* perform(request.lstat(path))).isDirectory()) entries.push(path);
-      } catch {
+      } catch (err) {
         // Gone or unreadable: not a backup this prune can count.
+        if (!isVanishedEntry(err)) log.warn({ err, path }, 'auth-bond history entry unreadable during prune');
       }
     }
     entries.sort().reverse();

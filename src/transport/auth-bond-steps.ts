@@ -28,6 +28,7 @@ import type { FileHandle } from 'node:fs/promises';
 import { basename, dirname, join, relative } from 'node:path';
 import { forceEnsurePrivateDirectorySync, fsyncDirectory, privateWriteError } from '../lib/private-fs.ts';
 import { errorMessage } from '../lib/error-message.ts';
+import { createChildLogger } from '../logger.ts';
 import { isVanishedEntry, modeString } from './auth-bond-files.ts';
 
 function sleepSync(ms: number): void {
@@ -164,16 +165,21 @@ function nextTurn(signal: AbortSignal | undefined): Promise<void> {
   });
 }
 
+const log = createChildLogger('auth-bond-steps');
+
 /** Best-effort, as fsyncDirectory: the preceding file fsync is the durability guarantee. */
 async function fsyncDirectoryAsync(fs: AuthBondCaptureFs, path: string): Promise<void> {
   let handle: FileHandle | null = null;
   try {
     handle = await fs.open(path, 'r');
     await handle.sync();
-  } catch {
-    // Directory fsync is best-effort on some filesystems.
+  } catch (err) {
+    // Best-effort on some filesystems, but a refusal stays visible.
+    log.debug({ err, path }, 'auth-bond directory fsync failed (best-effort)');
   } finally {
-    await handle?.close().catch(() => undefined);
+    await handle?.close().catch((err: unknown) => {
+      log.debug({ err, path }, 'auth-bond directory handle close failed');
+    });
   }
 }
 
@@ -539,7 +545,13 @@ export function* writePrivateJsonSteps(path: string, value: unknown): AuthTreeSt
     yield* perform(request.fsyncDirectory(dir));
   } catch (err) {
     if (handle !== null) yield* perform(request.close(handle));
-    try { yield* perform(request.unlink(tmpPath)); } catch { /* best-effort cleanup */ }
+    try {
+      yield* perform(request.unlink(tmpPath));
+    } catch (cleanupErr) {
+      // The write error rethrown below is the one the caller needs; the
+      // leftover temp file is reported, not allowed to replace it.
+      log.warn({ err: cleanupErr, tmpPath }, 'auth-bond temp file cleanup failed');
+    }
     throw err;
   }
 }
