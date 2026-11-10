@@ -92,13 +92,16 @@ describe('memory tool telemetry confidentiality', () => {
       .operation_id;
     const failureOperationId = (failure as { operation_id: string })
       .operation_id;
+    // provenance is a fixed pipeline label, not caller data.
     expect(successUpsert.mock.calls[0]?.[1]).toEqual({
       operationId: successOperationId,
       operation: 'memory_write',
+      provenance: 'memory_write',
     });
     expect(failureUpsert.mock.calls[0]?.[1]).toEqual({
       operationId: failureOperationId,
       operation: 'memory_write',
+      provenance: 'memory_write',
     });
 
     const serializedObservation = JSON.stringify({
