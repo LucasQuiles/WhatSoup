@@ -19,6 +19,7 @@ from github_binding import CHECK_NAME, EXPECTED_REPOSITORY, EXPECTED_WORKFLOW_ID
 from private_check import CHECK_APP_ID, PrivateCheckResult, evaluate_non_pr_run, evaluate_run  # noqa: E402
 from bounded_github import GitHubClient  # noqa: E402
 import private_check  # noqa: E402
+import scanner_grammars  # noqa: E402
 from private_bundle import GitLsTreeBlob, export_verified_bundle  # noqa: E402
 from private_scanner_candidate import VerifiedScannerBundle  # noqa: E402
 from test_candidate_scan import BASELINE, CANDIDATE, CANDIDATE_PATH, fixture_client  # noqa: E402
@@ -654,6 +655,7 @@ class PrivateCheckCompositionTests(unittest.TestCase):
         timeout_seconds: float = 30,
         runtime_check=None,
         scanner_bundle=None,
+        grammar_cache=None,
     ) -> PrivateCheckResult:
         evaluate_private_run = getattr(private_check, "evaluate_private_run", None)
         self.assertTrue(callable(evaluate_private_run), "private composed check is not implemented")
@@ -666,7 +668,37 @@ class PrivateCheckCompositionTests(unittest.TestCase):
             trusted_path="/usr/bin:/bin",
             timeout_seconds=timeout_seconds,
             runtime_check=runtime_check or (lambda _scanner, _binding, **kwargs: None),
+            grammar_cache=grammar_cache,
         )
+
+    def test_runtime_and_candidate_share_verified_grammar_cache(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="private-check-grammar-") as temporary:
+            root = Path(temporary)
+            cache = root / "grammars"
+            libraries = cache / scanner_grammars.LIBRARIES
+            libraries.mkdir(parents=True)
+            content = b"synthetic native fixture"
+            (libraries / "libtree_sitter_python.so").write_bytes(content)
+            scanner, manifest = verified_scanner(root / "scanner", scanner_files())
+            client = CompositePrivateClient(readback=check_readback(conclusion="success"))
+            runtime = mock.Mock(return_value=None)
+            plans = []
+
+            def native(plan, *, timeout_seconds):
+                plans.append(plan)
+                return plan.public_result("pass")
+
+            with (
+                mock.patch.dict(os.environ, {"TMPDIR": str(root)}),
+                mock.patch.object(scanner_grammars, "GRAMMARS", {"python": (len(content), hashlib.sha256(content).hexdigest())}),
+                mock.patch.object(private_check, "run_scanner_privately", side_effect=native),
+            ):
+                result = self._evaluate(client, scanner, manifest, grammar_cache=cache, runtime_check=runtime)
+            self.assertEqual(result, PrivateCheckResult("pass"))
+            self.assertEqual(runtime.call_args.kwargs, {"trusted_path": "/usr/bin:/bin", "grammar_cache": cache})
+            self.assertEqual(len(plans), 1)
+            self.assertEqual(plans[0].environment["XDG_CACHE_HOME"], str(cache))
+            self.assertEqual(client.created[0]["conclusion"], "success")
 
     def test_composes_verified_selector_inputs_native_result_and_public_transport(self) -> None:
         cases = {
@@ -840,7 +872,7 @@ class PrivateCheckCompositionTests(unittest.TestCase):
             runtime_check.assert_called_once()
             self.assertIs(runtime_check.call_args.args[0], scanner)
             self.assertEqual(runtime_check.call_args.args[1].head_sha, HEAD_SHA)
-            self.assertEqual(runtime_check.call_args.kwargs, {"trusted_path": "/usr/bin:/bin"})
+            self.assertEqual(runtime_check.call_args.kwargs, {"trusted_path": "/usr/bin:/bin", "grammar_cache": None})
             native.assert_not_called()
             self.assertFalse((scanner.bundle.root / "scripts/unexpected-selector-execution").exists())
             self.assertEqual(result, PrivateCheckResult("inconclusive"))
