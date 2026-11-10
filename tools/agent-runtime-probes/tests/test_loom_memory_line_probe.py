@@ -7,7 +7,8 @@ import os
 import subprocess
 import sys
 import tempfile
-from contextlib import redirect_stdout
+import time
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -307,6 +308,76 @@ def test_git_metadata_real_repo_emits_counts_not_paths_or_diffs():
         assert str(root) not in rendered, rendered
         assert "untracked-secret.py" not in rendered, rendered
         assert "sk-shouldnotleak0000" not in rendered, rendered
+
+
+# Variables that would point git at another index or repository, or disable the
+# optional index lock for every child. Removing them makes the result depend on
+# the probe's own argv, whatever environment the test runner was started with.
+GIT_INDEX_ENV_KEYS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OPTIONAL_LOCKS")
+
+
+@contextmanager
+def without_git_index_env():
+    saved = {key: os.environ.pop(key) for key in GIT_INDEX_ENV_KEYS if key in os.environ}
+    try:
+        yield
+    finally:
+        os.environ.update(saved)
+
+
+def make_stale_index_repo(root: Path) -> Path:
+    """Commit one file, then backdate it 1 h with the same bytes.
+
+    Its index entry's cached stat data is then stale, so a refreshing
+    `git status` rewrites the index under index.lock while the file reads clean.
+    """
+    subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+    # An inherited core.ignoreStat=true would hide the stale stat data.
+    subprocess.run(["git", "-C", str(root), "config", "core.ignoreStat", "false"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "t"], check=True)
+    tracked = root / "tracked.py"
+    write(tracked, "x = 1\n")
+    subprocess.run(["git", "-C", str(root), "add", "tracked.py"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "init"], check=True)
+    past = time.time() - 3600
+    os.utime(tracked, (past, past))
+    return root / ".git" / "index"
+
+
+def refreshing_status(root: Path) -> None:
+    """Plain `git status`: Git's default takes the optional index lock and writes back."""
+    subprocess.run(["git", "-C", str(root), "status", "--porcelain"], check=True, capture_output=True, timeout=10)
+
+
+def test_git_metadata_control_plain_status_rewrites_stale_index():
+    with without_git_index_env(), tempfile.TemporaryDirectory(prefix="loom-memory-line-") as tmp_dir:
+        root = Path(tmp_dir)
+        index = make_stale_index_repo(root)
+        before = index.read_bytes()
+        refreshing_status(root)
+        assert index.read_bytes() != before
+        # Cleanup check only: Git removes its lock on a normal exit, so the
+        # rewritten index bytes above are the evidence that the lock was taken.
+        assert not (root / ".git" / "index.lock").exists()
+
+
+def test_git_metadata_status_leaves_stale_index_untouched():
+    with without_git_index_env(), tempfile.TemporaryDirectory(prefix="loom-memory-line-") as tmp_dir:
+        root = Path(tmp_dir)
+        index = make_stale_index_repo(root)
+        mtime_before = index.stat().st_mtime_ns
+        bytes_before = index.read_bytes()
+        meta = git_metadata(root)
+        assert meta["dirty_entry_count"] == 0, meta
+        assert index.read_bytes() == bytes_before
+        assert index.stat().st_mtime_ns == mtime_before
+        # Cleanup check only: Git removes its lock on a normal exit, so this
+        # cannot fail here. The unchanged index bytes and mtime are the evidence.
+        assert not (root / ".git" / "index.lock").exists()
+        # The entry is still stale, so the unchanged index above is not vacuous.
+        refreshing_status(root)
+        assert index.read_bytes() != bytes_before
 
 
 def test_line_ref_missing_file_reports_not_found_without_path():

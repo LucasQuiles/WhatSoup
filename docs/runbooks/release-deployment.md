@@ -107,8 +107,9 @@ npm --silent run release:export -- \
 The exporter is an operator tool for a trusted checkout and toolchain. Its `git`
 and `tar` executables are selected through `PATH`; use an operator-controlled
 `PATH` and trusted executables. `cleanGitEnv` removes Git configuration overrides
-but does not authenticate those executables. The exact-commit checks below assume
-that toolchain is trusted.
+and sets `GIT_OPTIONAL_LOCKS=0`, so `git status` does not take the index lock. It
+does not authenticate those executables. The exact-commit checks below assume that
+toolchain is trusted.
 
 The operator also controls `--release-root` and `--rollback-root`, including every
 ancestor directory. Use non-symlinked directories and keep them free of concurrent
