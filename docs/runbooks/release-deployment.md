@@ -1018,16 +1018,52 @@ command reports `publication_capacity_exhausted` and leaves the saved file intac
 Before emission, all four monitoring paths reserve space for the published
 receipt, final cycle metadata and any pending events left behind. Reservation
 accounts for JSON escaping, including the maximum encoded filename. A cycle
-publishes only a fitting prefix of the pending queue; failed attempts and the
-untouched suffix remain pending in their original order. Emitters receive a
-copy of each event, so callback mutations cannot change the reserved state.
-If no pending event can fit, no emitter is called. The command reports
-`publication_capacity_exhausted` as degraded and exits unsuccessfully.
-This reservation prevents capacity-caused failure after publication; it does not
-prove crash-safe publication or guarantee progress when legacy state leaves no
-room for a receipt. Existing receipt evidence is not truncated to create space.
-Custom emitters still require
-bounded-output and retry-safe-publication qualification before activation.
+processes only a fitting prefix of the pending queue; the untouched suffix
+remains pending in its original order. Emitters receive a copy of each event,
+so callback mutations cannot change the reserved state. If no pending event can
+fit, no emitter is called. The command reports `publication_capacity_exhausted`
+as degraded and exits unsuccessfully. Existing receipt evidence is not
+truncated to create space.
+
+New events record `publication: not_attempted`. Before calling an emitter, the
+monitor moves the event into its existing `alerts` list with
+`delivery: publication_unknown` and durably saves that state. A confirmed,
+bounded publication response changes it to `locally_persisted`; this is not
+proof of delivery. A crash, timeout, exception, nonzero exit or invalid response
+leaves the event held. It is never automatically published again. This also
+covers a crash after the hold is saved but before the emitter runs: the alert
+may be delayed even though nothing was published. A legacy pending event without
+attempt provenance is held without invoking an emitter. IDs and incident history
+are preserved; independent pending events and delivery retries continue.
+
+The command summaries and supervisor observation expose `publication_unknown`
+and `monitoring_degraded`. Unknown alerts remain eligible for bounded delivery
+reconciliation and stale-alert detection. Positive spool evidence establishes
+publication; a valid sent receipt or dispatcher disposition establishes its
+existing delivery outcome. `unobserved`, failed or incomplete lookups do not
+prove nonpublication and do not release a hold. Reconciliation never invents a
+publication timestamp. Remote collection can move a record outside the local
+receipt reader's inventory, so such holds may require operator reconciliation.
+
+Before activating custom adapters, qualify bounded output and this recovery
+contract with the actual publication and collection paths. An adapter must not
+silently retry an ambiguous operation internally. The configured emitter command
+receives `--event-id`; its successful bounded path response acknowledges that
+invocation. The shared publisher attaches the invocation's event ID to its
+internal receipt. A held event needs separate positive reconciliation evidence;
+an acknowledgement for a different invocation cannot release it. Preserve
+its state and collect positive evidence by event ID from the publisher, collector
+and delivery audit. Allow the normal receipt path to confirm publication where
+possible. An operator may authorize requeueing only with affirmative proof that
+publication did not occur; an empty directory or nonzero emitter exit is not
+such proof. Any authorized state repair must stop the owning monitor, hold its
+state lock, preserve the original record and ID, use the private atomic state
+writer and validate the size bound before restart. Do not clear holds in bulk.
+Do not roll back to a monitor that retries pending events until the new attempt
+markers and held records have been reconciled under a reviewed migration.
+These rules prevent monitor-initiated duplicate publication after an ambiguous
+call; they do not establish exactly-once external delivery or qualify live
+activation. Legacy state without room for a hold remains degraded and preserved.
 The sentinel stores its local alert records once, in the state's `alerts` list.
 The saved observation snapshot keeps remote alerts. Detection and recovery use
 a temporary combined view of both lists, including local delivery failures and

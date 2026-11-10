@@ -297,6 +297,7 @@ def queue_event(state, host, kind, reason, incident_id, now, severity=None):
     state["pending_events"].append(
         {
             "event_id": str(uuid4()),
+            "publication": "not_attempted",
             "incident_id": incident_id,
             "kind": kind,
             "reason": "fleet_" + reason,
@@ -519,14 +520,14 @@ def _retire_host(state, host, now):
 def _flush(config, state, path, now, emit):
     previous = deepcopy(state)
     for alert in state["alerts"]:
-        alert["delivery_stale"] = (now - alert.get("published_at", now)) > config[
+        alert["delivery_stale"] = (now - alert.get("published_at", alert.get("created_at", now))) > config[
             "freshness_seconds"
         ] and alert.get("delivery") not in supervisor.TERMINAL_DELIVERY
     state = supervisor.admit_state_transition(
         previous, state, now, paused=state.get("transition_capacity_exhausted", False)
     )
     supervisor.write_private(path, state)
-    supervisor.publish_pending_events(state, now, emit)
+    supervisor.publish_pending_events(state, now, emit, path=path)
     state["alerts"], dropped = supervisor.retain_alerts(
         state["alerts"],
         now,
@@ -680,6 +681,7 @@ def run_watchdog(config, *, now=None, emit=None, resolve_delivery=None):
             state["pending_events"].append(
                 {
                     "event_id": str(uuid4()),
+                    "publication": "not_attempted",
                     "incident_id": incident_id,
                     "kind": kind,
                     "reason": "fleet_" + reason,
@@ -784,6 +786,7 @@ def main():
                 {
                     "completed_at": state.get("completed_at"),
                     "pending_events": len(state["pending_events"]),
+                    **supervisor.publication_status(state),
                     "transition_capacity_exhausted": state.get("transition_capacity_exhausted", False),
                     "alerts": len(state["alerts"]),
                     "delivery_dropped": state.get("delivery_dropped", {}).get(

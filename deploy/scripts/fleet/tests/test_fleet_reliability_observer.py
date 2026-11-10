@@ -114,7 +114,7 @@ def test_recovery_never_clears_capability_incident_on_stale_missing_or_unreachab
     ]
 
 
-def test_initial_unreachable_alerts_and_retries_same_persisted_event_id(
+def test_initial_unreachable_alerts_hold_same_persisted_event_id(
     observer, config
 ):
     emitted = []
@@ -126,8 +126,8 @@ def test_initial_unreachable_alerts_and_retries_same_persisted_event_id(
             emit=lambda _: {"published": False},
             resolve_delivery=lambda _: None,
         )
-    assert len(state["pending_events"]) == 1
-    event_id = state["pending_events"][0]["event_id"]
+    assert state["pending_events"] == []
+    event_id = state["alerts"][0]["event_id"]
     state = observer.run_once(
         config,
         now=3,
@@ -135,7 +135,9 @@ def test_initial_unreachable_alerts_and_retries_same_persisted_event_id(
         emit=lambda event: emitted.append(event) or {"published": True},
         resolve_delivery=lambda _: None,
     )
-    assert emitted[0]["event_id"] == event_id
+    assert emitted == []
+    assert state["alerts"][0]["event_id"] == event_id
+    assert state["alerts"][0]["delivery"] == "publication_unknown"
     assert state["pending_events"] == []
 
 
@@ -413,13 +415,15 @@ def test_state_from_previous_schema_loads_and_keeps_open_incidents(
     path.chmod(0o600)
     events = []
     state = run(observer, config, 1, {"alpha": probe(1, {"model": None})}, events)
-    assert [e["event_id"] for e in events] == ["legacy-event"]
+    assert events == []
+    assert state["alerts"][0]["event_id"] == "legacy-event"
+    assert state["alerts"][0]["delivery"] == "publication_unknown"
     assert published_severity(observer, monkeypatch, legacy_pending) == "critical"
     record = state["hosts"]["alpha"]
     assert record["incidents"] == {"model_unverified": "legacy-incident"}
     assert record["checks"]["model"]["none_count"] == 1
     state = run(observer, config, 2, {"alpha": probe(2, {"model": True})}, events)
-    assert [(e["kind"], e["incident_id"]) for e in events[1:]] == [
+    assert [(e["kind"], e["incident_id"]) for e in events] == [
         ("clear", "legacy-incident")
     ]
     assert state["hosts"]["alpha"]["incidents"] == {}

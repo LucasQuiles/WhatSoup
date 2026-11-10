@@ -35,6 +35,7 @@ def test_capacity_is_checked_before_publication(
     }[mode]
     event = {
         "event_id": "00000000-0000-4000-8000-000000000001",
+        "publication": "not_attempted",
         "incident_id": "00000000-0000-4000-8000-000000000002",
         "kind": "alert",
         "reason": "fleet_synthetic",
@@ -143,7 +144,7 @@ def test_capacity_allows_an_ordered_prefix_and_preserves_the_rest(
     state = supervisor.initial_state(100)
     events = [
         {"event_id": str(index), "incident_id": "incident", "kind": "alert",
-         "reason": "capacity", "created_at": 100}
+         "reason": "capacity", "created_at": 100, "publication": "not_attempted"}
         for index in range(3)
     ]
     state["pending_events"] = events.copy()
@@ -156,12 +157,12 @@ def test_capacity_allows_an_ordered_prefix_and_preserves_the_rest(
         emitted.append(event["event_id"])
         return {"published": outcomes[len(emitted) - 1], "file": "event.json"}
 
-    supervisor.publish_pending_events(state, 100, emit)
+    supervisor.publish_pending_events(state, 100, emit, path=tmp_path / "state.json")
     assert emitted == [event["event_id"] for event in events[:len(outcomes)]]
-    succeeded = [event for event, success in zip(events, outcomes) if success]
-    failed = [event for event, success in zip(events, outcomes) if not success]
-    assert [event["event_id"] for event in state["alerts"]] == [event["event_id"] for event in succeeded]
-    assert state["pending_events"] == failed + events[len(outcomes):]
+    assert [(event["event_id"], event["delivery"]) for event in state["alerts"]] == [
+        (event["event_id"], "locally_persisted" if success else "publication_unknown")
+        for event, success in zip(events, outcomes)]
+    assert state["pending_events"] == events[len(outcomes):]
     state["completed_at"] = 100
     supervisor.write_private(tmp_path / "state.json", state)
     saved = supervisor.read_private(tmp_path / "state.json")
@@ -169,9 +170,9 @@ def test_capacity_allows_an_ordered_prefix_and_preserves_the_rest(
     assert len(saved["alerts"]) + len(saved["pending_events"]) == len(events)
 
 
-def test_emitter_cannot_mutate_the_reserved_event(observer):
+def test_emitter_cannot_mutate_the_reserved_event(observer, tmp_path):
     supervisor = observer.supervisor
-    event = {"event_id": "preserved", "details": {"reason": "original"}}
+    event = {"event_id": "preserved", "details": {"reason": "original"}, "publication": "not_attempted"}
     state = {"pending_events": [event], "alerts": []}
 
     def emit(item):
@@ -179,7 +180,7 @@ def test_emitter_cannot_mutate_the_reserved_event(observer):
         item["unbounded"] = "a" * supervisor.PRIVATE_JSON_MAX_BYTES
         return {"published": True, "file": "event.json"}
 
-    supervisor.publish_pending_events(state, 100, emit)
+    supervisor.publish_pending_events(state, 100, emit, path=tmp_path / "state.json")
     assert state["pending_events"] == []
     assert state["alerts"] == [{
         "event_id": "preserved", "details": {"reason": "original"},

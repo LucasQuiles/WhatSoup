@@ -41,6 +41,7 @@ def test_transition_cannot_consume_existing_publication_headroom(
     incident_id = "00000000-0000-4000-8000-000000000004"
     event = {
         "event_id": "00000000-0000-4000-8000-000000000001",
+        "publication": "not_attempted",
         "incident_id": "00000000-0000-4000-8000-000000000002",
         "kind": "alert", "reason": "existing_obligation", "created_at": 100,
         "instance": "operations", "host": "synthetic", "severity": "critical",
@@ -135,22 +136,22 @@ def test_transition_cannot_consume_existing_publication_headroom(
     if near_capacity:
         emitted.clear()
         result, opened = cycle(102)
-        assert result["transition_capacity_exhausted"] is not published
-        if published:
-            assert (opened is None) is recover
-            assert len(emitted) == 1
-            assert emitted[0]["event_id"] != event["event_id"]
-            assert emitted[0]["kind"] == ("clear" if recover else "alert")
-            if recover:
-                assert emitted[0]["incident_id"] == incident_id
-        else:
-            assert opened == (incident_id if recover else None)
-            assert emitted == [event]
-        assert restarts == ([102] if published and restart_eligible else [])
+        # Both a confirmed receipt and a held outcome release only the unused
+        # filename reservation. The original obligation is retained, never retried.
+        assert result["transition_capacity_exhausted"] is False
+        assert (opened is None) is recover
+        assert len(emitted) == 1
+        assert emitted[0]["event_id"] != event["event_id"]
+        assert emitted[0]["kind"] == ("clear" if recover else "alert")
+        if recover:
+            assert emitted[0]["incident_id"] == incident_id
+        original = next(a for a in result["alerts"] if a["event_id"] == event["event_id"])
+        assert original["delivery"] == ("locally_persisted" if published else "publication_unknown")
+        assert restarts == ([102] if restart_eligible else [])
         assert supervisor.read_private(path) == result
 
 
-def test_legacy_service_without_counters_retries_fitting_pending_prefix(tmp_path, observer):
+def test_legacy_service_without_counters_holds_fitting_pending_prefix(tmp_path, observer):
     supervisor = observer.supervisor
     directory = tmp_path / "state"
     supervisor.private_directory(directory)
@@ -178,7 +179,8 @@ def test_legacy_service_without_counters_retries_fitting_pending_prefix(tmp_path
         now=101, probe=lambda *_: {"ok": True}, maintenance=lambda: True,
         restart=lambda: pytest.fail("healthy service restarted"), emit=emit,
     )
-    assert [event["event_id"] for event in events] == ["0"]
+    assert events == []
+    assert [(a["event_id"], a["delivery"]) for a in result["alerts"]] == [("0", "publication_unknown")]
     assert [event["event_id"] for event in result["pending_events"]] == ["1"]
     assert result["transition_capacity_exhausted"] is True
     assert result["legacy_metadata"] == state["legacy_metadata"]

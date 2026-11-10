@@ -431,12 +431,26 @@ def admit_state_transition(
     return retained
 
 
-def publish_pending_events(state: dict, now: float, emit) -> None:
+def publication_status(state: dict) -> dict:
+    unknown = sum(alert.get("delivery") == "publication_unknown" for alert in state["alerts"])
+    return {"publication_unknown": unknown, "monitoring_degraded": bool(unknown)}
+
+
+def publish_pending_events(state: dict, now: float, emit, *, path: Path) -> None:
     admitted = publication_prefix_capacity(state, now)
     if state["pending_events"] and not admitted:
         raise PublicationCapacityError("publication_capacity_exhausted")
-    remaining = []
-    for event in state["pending_events"][:admitted]:
+    for _ in range(admitted):
+        event = state["pending_events"].pop(0)
+        alert = {key: value for key, value in event.items() if key != "publication"}
+        alert["delivery"] = "publication_unknown"
+        state["alerts"].append(alert)
+        # An emitter can publish and then lose its acknowledgement. Persist the
+        # hold first so a crash at any later point cannot trigger re-publication.
+        write_private(path, state)
+        if event.get("publication") != "not_attempted":
+            # Older pending records do not establish whether a call already ran.
+            continue
         try:
             receipt = emit(deepcopy(event))
             filename = receipt.get("file") if isinstance(receipt, dict) else None
@@ -444,21 +458,16 @@ def publish_pending_events(state: dict, now: float, emit) -> None:
                 isinstance(filename, str)
                 and len(filename.encode("utf-8")) <= MAX_EMITTER_FILENAME_BYTES
             )
-            published = isinstance(receipt, dict) and receipt.get("published") is True and valid_filename
+            published = (
+                isinstance(receipt, dict) and receipt.get("published") is True
+                and receipt.get("event_id", event["event_id"]) == event["event_id"]
+                and valid_filename
+            )
         except Exception:
             published = False
         if published:
-            state["alerts"].append(
-                {
-                    **event,
-                    "published_at": now,
-                    "delivery": "locally_persisted",
-                    "file": filename,
-                }
-            )
-        else:
-            remaining.append(event)
-    state["pending_events"] = remaining + state["pending_events"][admitted:]
+            alert.update(published_at=now, delivery="locally_persisted", file=filename)
+            write_private(path, state)
 
 
 def initial_state(now: float) -> dict:
@@ -505,6 +514,7 @@ def queue_event(state: dict, kind: str, reason: str, now: float) -> None:
     state["pending_events"].append(
         {
             "event_id": str(uuid4()),
+            "publication": "not_attempted",
             "incident_id": state["incident_id"],
             "kind": kind,
             "reason": reason,
@@ -605,7 +615,7 @@ def _advance(config, state, now, probe, restart, emit, maintenance, path):
         except Exception:
             state["restart_result"] = "failed"
     write_private(path, state)
-    publish_pending_events(state, now, emit)
+    publish_pending_events(state, now, emit, path=path)
     state["alerts"], _ = retain_alerts(state["alerts"], now)
     state["completed_at"] = now
     write_private(path, state)
@@ -666,6 +676,7 @@ def observe(config: dict, *, now=None) -> dict:
             "restart_result": state.get("restart_result"),
             "incident_id": state.get("incident_id"),
             "pending_alerts": len(state["pending_events"]),
+            **publication_status(state),
             "transition_capacity_exhausted": state.get("transition_capacity_exhausted", False),
             "delivery_resolution": delivery_failures(state),
             "alerts": alerts[-10:],
@@ -730,7 +741,7 @@ def sentinel_conditions(snapshot, *, now=None):
         reasons.append("broker_not_ready")
     dropped_at = snapshot.get("delivery_dropped_at")
     if any(
-        now - a.get("published_at", now) > 900
+        now - a.get("published_at", a.get("created_at", now)) > 900
         and a.get("delivery") not in TERMINAL_DELIVERY
         for a in snapshot.get("alerts", [])
     ) or (type(dropped_at) in (int, float) and 0 <= now - dropped_at <= 900):
@@ -851,6 +862,11 @@ def _resolve_batch(config, batch):
             updates.append((alert, {"delivery": "channel_delivered", "delivery_receipt": receipt}))
         elif receipt.get("status") in DISPATCHER_DISPOSITIONS:
             updates.append((alert, {"delivery": DISPATCHER_DISPOSITIONS[receipt["status"]]}))
+        elif alert.get("delivery") == "publication_unknown" and receipt.get("status") in {
+            "pending", "quarantined", "dead_lettered", "test_leak_dropped"
+        }:
+            # Positive spool evidence establishes publication, not delivery.
+            updates.append((alert, {"delivery": "locally_persisted"}))
     # A later malformed success must not leave an earlier alert marked delivered.
     for alert, update in updates:
         alert.update(update)
@@ -1081,7 +1097,7 @@ def run_sentinel(config, *, now=None, observe_remote=None, emit=None):
         state["snapshot"] = snapshot
         state = admit_state_transition(previous, state, now, paused=capacity_paused)
         write_private(path, state)
-        publish_pending_events(state, now, emit or (lambda e: publish_event(config, e)))
+        publish_pending_events(state, now, emit or (lambda e: publish_event(config, e)), path=path)
         state["alerts"], dropped = retain_alerts(
             state["alerts"],
             now,
@@ -1308,6 +1324,7 @@ def main() -> int:
                 "completed_at": result["completed_at"],
                 "incidents": sorted(result["incidents"]),
                 "pending_alerts": len(result["pending_events"]),
+                **publication_status(result),
                 "transition_capacity_exhausted": result.get("transition_capacity_exhausted", False),
             }
         elif args.observe:

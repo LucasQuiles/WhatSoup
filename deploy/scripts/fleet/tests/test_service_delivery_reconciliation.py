@@ -166,6 +166,7 @@ def test_receipt_growth_cannot_take_space_reserved_for_pending_publication(servi
     supervisor, config, path, responses, requests = service
     state = supervisor.initial_state(100)
     event = {"event_id": "00000000-0000-4000-8000-000000000002",
+             "publication": "not_attempted",
              "incident_id": "existing_incident", "kind": "alert", "reason": "existing", "created_at": 100}
     state.update(completed_at=100, alerts=[alert(0)], pending_events=[event], legacy_metadata="")
     size = len(supervisor._bounded_json_bytes(state, supervisor.PRIVATE_JSON_MAX_BYTES)) + 1

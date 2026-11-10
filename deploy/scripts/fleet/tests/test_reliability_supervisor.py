@@ -377,7 +377,7 @@ def test_restart_reservation_is_durable_before_external_action(supervisor, confi
     assert "sensitive" not in json.dumps(state)
 
 
-def test_unavailable_emitter_keeps_pending_incident_until_persisted(supervisor, config):
+def test_unavailable_emitter_holds_incident_without_republication(supervisor, config):
     for now in [0, 30, 60]:
         state = supervisor.run_once(
             config,
@@ -387,12 +387,13 @@ def test_unavailable_emitter_keeps_pending_incident_until_persisted(supervisor, 
             emit=lambda _: {"published": False},
             maintenance=lambda: True,
         )
-    pending_id = state["pending_events"][0]["event_id"]
+    held_id = state["alerts"][0]["event_id"]
     events = []
     state = harness(supervisor, config, 90, False, [], events, maintenance=True)
-    assert events[0]["event_id"] == pending_id
+    assert events == []
     assert state["pending_events"] == []
-    assert state["alerts"][0]["delivery"] == "locally_persisted"
+    assert state["alerts"][0]["event_id"] == held_id
+    assert state["alerts"][0]["delivery"] == "publication_unknown"
 
 
 def test_corrupt_state_cannot_reset_restart_budget(supervisor, config):
