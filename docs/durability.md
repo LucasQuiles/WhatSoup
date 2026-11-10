@@ -1661,13 +1661,30 @@ policy belongs to a capability-aware later slice. `trigger_runs` is byte-unchang
 ### 8.2 Bounded concurrency and hang isolation
 
 Non-side-effecting probe kinds (`poll.sqlite`, `poll.pinecone`, `poll.file`, `poll.url`) run
-through a bounded pool (`maxConcurrentExecutors`, default 4); every side-effecting kind
+through a bounded pool (`maxConcurrentExecutors`, default and hard ceiling 4); every side-effecting kind
 (`poll.shell`, `schedule.*`, `event.message`) stays strictly serial. Probes carry a
 per-execution timeout (`executionTimeoutSeconds`, default 300s) finalized as the bounded class
 `execution_timeout` — abandoning a read-only probe is always safe, and the finalize state
 guard makes any late write from the abandoned execution a no-op. The run loop awaits each tick
 under `tickBudgetSeconds` (default 600s) and re-arms the timer past stragglers, which keep
 running detached and finalize under their lease.
+
+`poll.sqlite` has a stricter execution boundary. Syntax validation admits one `SELECT` (including a
+read-only `WITH … SELECT`) and rejects explicit `WITH RECURSIVE` clauses at every nesting level.
+The query is sent over bounded JSON stdin to a short-lived read-only child process for the `main`
+database location. Before execution, SQLite's native authorizer denies recursive operations,
+including recursion without the optional keyword and recursion through stored views; those
+denials return the redacted `sql_error` class. Ordinary non-recursive CTEs remain supported.
+The parent owns the hard deadline and resolves only
+after the child closes, so a deadline kills and reaps the process instead of racing a Promise
+around same-thread `DatabaseSync`. The child nests the admitted query under `SELECT 1` with a
+`maxRows + 1` limit, then returns only the fixed `{rowCount}` scalar; SQL text, binds, and caller
+rows do not enter `trigger_runs`. The 10,000-row cap, 2,048-byte fixed-output/IPC caps, and
+30-second deadline return the durable redacted class `resource_exhausted`. SQLite may still use
+internal memory or work before a query's outer row limit takes effect, and the child has no RSS
+guarantee; process isolation lets the parent terminate that work, but is not a memory proof. A
+normal query failure remains the distinct `sql_error` class; an absent durable database location
+is `sqlite_worker_unavailable`.
 
 ### 8.3 Independent liveness observation
 
@@ -1681,16 +1698,25 @@ with restart-safe recovery markers.
 
 ### 8.4 Durable notification-delivery handoff
 
-Notification dispatch is post-commit by design (a crash mid-send must not roll back the
+Fired-run and terminal-at expiry notification dispatch is post-commit by design (a crash mid-send must not roll back the
 committed run result), which used to make a crash between COMMIT and `sendMessage` a silent
 at-most-once loss. The finalize transaction now stamps `notifyPending` on the run's
-`output_json` whenever dispatch will follow; successful dispatch and both classified failure
+`output_json` whenever dispatch will follow; delivery with a receipt and both classified failure
 paths (`notify_dispatch_failed`, `notify_forbidden_target`) clear it. Startup
 `reconcileDeliveryIntents` marks any surviving intent with the bounded class
 `notify_outcome_unknown` and NEVER re-sends: whether the message left the dead process is
 unknowable, and a duplicate send is a worse failure than a surfaced unknown. Execution state
 (`trigger_occurrences`) and delivery evidence (`deliveredWaMessageId` / notify error kinds)
 are independently queryable.
+
+Expiry validates persisted report targets and dedupe keys before notification or bead reopening.
+Invalid roots retire the trigger as expired but record a redacted failed run with
+`resource_exhausted`, without either effect. Valid expiry commits its terminal transition and
+notification intent together, then records delivery through the same receipt/failure path as a
+normal fire. Silent expiry and one-shot completion create no extra notification intent. A send
+without a receipt remains pending for unknown-outcome reconciliation; it is never replayed.
+Circuit-breaker pause messages remain best-effort and revalidate roots before sending; their
+failure log is not durable delivery evidence.
 
 ### 8.5 Agent-job occurrence linkage
 
