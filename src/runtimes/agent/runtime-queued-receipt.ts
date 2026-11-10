@@ -27,10 +27,14 @@
 //   2026-11-09). Otherwise "an earlier request ... queued behind it": the
 //   running turn may be another group member's or a scheduled job, or other
 //   messages wait ahead of this one.
-// - Venue. Only a DM receipt has the /stop sentence. Its only reader is the
-//   sender, who reached the bot with the queued message and so reaches it
-//   with a bare /stop, and the command gate's own rule (commandGateDenies
-//   with the /stop spec's gate) never refuses a per_chat DM. A group receipt
+// - Venue. Only a DM receipt can have the /stop sentence. Its only reader is
+//   the sender, and the command gate's own rule (commandGateDenies with the
+//   /stop spec's gate) never refuses a per_chat DM. It still needs ingest to
+//   pass a bare /stop: in a chat listed in pausedChats, ingest dispatches only
+//   text that matches a pausedChatBypassPatterns entry, and /stop is not an
+//   admin command. So the DM receipt asks ingest's own paused-chat rule
+//   (pausedChatAdmission, src/core/paused-chat.ts) about the text "/stop",
+//   and offers it only when that rule does not hold it. A group receipt
 //   never has it: every member reads it, and no group can promise every
 //   reader a working /stop. The gate refuses members who are not admins once
 //   admins are configured; ingest drops blocked and unresolved-LID members,
@@ -54,8 +58,12 @@ import { systemClock, type Clock } from '../../lib/clock.ts';
 import type { SessionScope } from './runtime.ts';
 import type { QueuedTurn, TurnQueue } from './turn-queue.ts';
 import { commandGateDenies, getCommandSpec } from './command-registry.ts';
+import { pausedChatAdmission } from '../../core/paused-chat.ts';
 
 const log = createChildLogger('runtime-queued-receipt');
+
+/** The exact text the /stop sentence tells the reader to send. */
+const STOP_COMMAND_TEXT = '/stop';
 
 /** Own request, nothing else waiting, where the receipt offers no /stop
  *  (every group receipt). */
@@ -68,7 +76,7 @@ export const QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT =
 
 /** The one /stop sentence, so the two texts that offer /stop cannot drift apart. */
 function stopSentence(request: 'the earlier request' | 'that request'): string {
-  return `Send /stop to cancel ${request} and anything waiting; I'll reply with the outcome.`;
+  return `Send ${STOP_COMMAND_TEXT} to cancel ${request} and anything waiting; I'll reply with the outcome.`;
 }
 
 // The /stop texts extend the no-/stop texts, so both say the same status.
@@ -95,20 +103,26 @@ export function queuedTurnReceiptText(
 /** Whether the receipt offers /stop to its readers (see WORDING above). */
 function receiptOffersStop(
   scope: SessionScope,
-  isGroup: boolean,
+  turn: Pick<QueuedTurn, 'isGroup' | 'conversationKey' | 'chatJid'>,
   adminCount: () => number,
 ): boolean {
   // Every group member reads a group receipt, and no group can promise every
   // reader a working /stop, so a group gets no offer before any config read.
-  if (isGroup) return false;
-  return !commandGateDenies(getCommandSpec('stop').gate, {
+  if (turn.isGroup) return false;
+  const gateDenies = commandGateDenies(getCommandSpec('stop').gate, {
     sessionScope: scope,
-    isGroup,
+    isGroup: turn.isGroup,
     // A getter, so a DM never reads the admin count, as in the command gate.
     get adminCount() { return adminCount(); },
     // A DM's only reader is the sender; in a per_chat DM the gate never asks.
     isAdmin: () => false,
   });
+  if (gateDenies) return false;
+  // Ingest's own paused-chat rule, asked about the exact text the sentence
+  // names. turn.conversationKey is the key ingest journaled this chat's
+  // message under, so both see the same chat. /stop is not an admin command,
+  // so ingest's admin exemption never applies to it.
+  return pausedChatAdmission(turn, STOP_COMMAND_TEXT) !== 'held';
 }
 
 export const DEFAULT_QUEUED_TURN_RECEIPT_COOLDOWN_MS = 60_000;
@@ -172,7 +186,7 @@ export class QueuedTurnReceiptNotifier {
       const decision = this.decide(admission);
       if (decision !== 'sent') return decision;
       const { scope, mapKey, turn, queue } = admission;
-      const stopOffered = receiptOffersStop(scope, turn.isGroup, this.adminCount);
+      const stopOffered = receiptOffersStop(scope, turn, this.adminCount);
       // decide() returned 'sent' only with a non-null active turn other than this one.
       const text = queuedTurnReceiptText(queue!.activeTurn!, turn, queue!.pending, stopOffered);
       this.lastSentAt.set(mapKey, this.clock.now());
