@@ -972,12 +972,19 @@ All four monitoring paths retain undelivered alerts regardless of age or count;
 an unsuccessful lookup or a missing receipt does not end the delivery obligation.
 Only terminal history is reduced to the newest 128 records. Preserving these
 records does not enlarge the state limit.
-The service supervisor reconciles delivery before its liveness probe and saves
-the result under the existing state lock. Each cycle queries at most 128 event
+Each monitoring writer reconciles its own delivery records under its existing
+state lock and saves the result before further observation. The service supervisor
+does this before its liveness probe. Each writer's cycle queries at most 128 event
 IDs through one command with a 15-second timeout and a 65,535-byte output limit.
 The saved cursor and fixed end of the current pass ensure later arrivals cannot
 extend that pass indefinitely. A failed or malformed batch advances the cursor
 without confirming any of its alerts; those alerts are retried on a later pass.
+The 4,096-byte retained-receipt limit applies to each event; the 65,535-byte limit
+applies to the entire command response. An oversized response or nonzero command
+exit halves the attempted batch size, down to one ID, for later cycles. This
+smaller limit persists across restart and does not add commands to the current
+cycle. A command outage can therefore reduce later throughput; no automatic
+increase is attempted that could recreate an oversized-response loop.
 Validated receipts are saved unchanged only when they fit without reducing the
 publication capacity already available to pending events. A receipt that cannot
 fit stays unresolved and records `state_capacity_exhausted`; new transitions stay
@@ -990,6 +997,11 @@ Remote readers use the service's persisted delivery status and perform no separa
 receipt lookup for those alerts. An older service without durable reconciliation
 can continue reporting alerts as unresolved; qualification and rollout must include
 the service writer before relying on terminal delivery observations.
+The watchdog likewise reads the observer's saved delivery status and failure count;
+it cannot confirm an observer alert independently. Observer and watchdog lookup
+failures retain their existing consecutive-cycle counters. Adding per-alert stale
+status also goes through capacity admission, so legacy alerts without that field
+cannot make an otherwise readable state exceed its limit.
 All four paths admit an observation cycle's incident changes only if the resulting
 state and bounded publication receipts fit. Otherwise they preserve the prior
 incident identifiers and pending queue, set `transition_capacity_exhausted`, and
@@ -1013,9 +1025,8 @@ If no pending event can fit, no emitter is called. The command reports
 `publication_capacity_exhausted` as degraded and exits unsuccessfully.
 This reservation prevents capacity-caused failure after publication; it does not
 prove crash-safe publication or guarantee progress when legacy state leaves no
-room for a receipt. Aggregate delivery-lookup bounds for the observer, watchdog
-and sentinel still require qualification. Existing receipt
-evidence is not truncated to create space. Custom emitters still require
+room for a receipt. Existing receipt evidence is not truncated to create space.
+Custom emitters still require
 bounded-output and retry-safe-publication qualification before activation.
 The sentinel stores its local alert records once, in the state's `alerts` list.
 The saved observation snapshot keeps remote alerts. Detection and recovery use

@@ -977,7 +977,7 @@
     },
     {
       "path": "deploy/scripts/fleet/fleet_reliability_observer.py",
-      "sha256": "506f1269aeaf0327d3153928725ed96738fa7438d748b17cc952130a8c3889e8",
+      "sha256": "29d7b5778fffed3e4ddab6d2bf7f0542b752c645eba71aa624ce76aa7916f66f",
       "mustContain": [
         "schema_version",
         "retired_checks",
@@ -986,7 +986,7 @@
     },
     {
       "path": "deploy/scripts/fleet/reliability_supervisor.py",
-      "sha256": "ea7177c2e2e8fa2c1357f4f9a4c059afb30f863f7eb2acd33cddb9eb68b27155",
+      "sha256": "0caefc7cc4bf3c13ff9156277617b7860650cfd0998c31594dedcdbba353bd26",
       "mustContain": [
         "legacy_sent_items_probe",
         "resolve_alert_delivery"

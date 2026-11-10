@@ -525,7 +525,7 @@ def delivery_failures(state):
 
 
 def _advance(config, state, now, probe, restart, emit, maintenance, path):
-    state = reconcile_service_delivery(config, state, now)
+    state = reconcile_alert_delivery(config, state, now)
     capacity_paused = any(
         isinstance(failure, dict) and failure.get("code") == "state_capacity_exhausted"
         for failure in delivery_failures(state)
@@ -878,10 +878,18 @@ def resolve_alert_delivery(config, alerts):
     return failures
 
 
-def reconcile_service_delivery(config, state, now):
+def reconcile_alert_delivery(config, state, now, *, resolve_delivery=None, count_failed_cycles=False):
     """Resolve one rotating batch without losing evidence that cannot fit."""
-    if not config.get("delivery_command"):
+    if not config.get("delivery_command") and resolve_delivery is None:
         return state
+
+    def resolution_record(failures):
+        if not count_failed_cycles:
+            return failures
+        previous = state.get("delivery_resolution") or {}
+        count = previous.get("consecutive_failed_cycles", 0) if isinstance(previous, dict) else 0
+        return {"checked_at": now, "failures": failures[:8],
+                "consecutive_failed_cycles": count + 1 if failures else 0}
 
     def publication_capacity(candidate):
         projection = {**candidate, "started_at": now, "completed_at": now,
@@ -903,11 +911,19 @@ def reconcile_service_delivery(config, state, now):
          and re.fullmatch(r"[0-9a-f-]{36}", a["event_id"])
     ]
     if not eligible:
-        if "delivery_resolution" in proposed:
-            proposed["delivery_resolution"] = []
-        return proposed
+        proposed["delivery_resolution"] = resolution_record([])
+        try:
+            if publication_capacity(proposed) >= prior_capacity:
+                return proposed
+        except StateError as exc:
+            if str(exc) not in {"publication_capacity_exhausted", "state_file_oversized"}:
+                raise
+        return state
     positions = {a.get("event_id"): index for index, a in enumerate(proposed["alerts"])
                  if isinstance(a.get("event_id"), str)}
+    batch_limit = proposed.get("delivery_batch_limit", DELIVERY_BATCH)
+    if type(batch_limit) is not int or not 1 <= batch_limit <= DELIVERY_BATCH:
+        raise StateError("state_invalid")
     cursor = positions.get(proposed.get("delivery_cursor"), -1)
     end = positions.get(proposed.get("delivery_round_end"))
     round_blocked = proposed.get("delivery_round_capacity_exhausted", False) is True
@@ -916,25 +932,38 @@ def reconcile_service_delivery(config, state, now):
         round_blocked = False
     # Freeze the existing queue's end until this pass completes. Later arrivals
     # cannot keep older unresolved alerts waiting behind an expanding tail.
-    batch = [a for a in eligible if cursor < positions[a["event_id"]] <= end][:DELIVERY_BATCH]
+    batch = [a for a in eligible if cursor < positions[a["event_id"]] <= end][:batch_limit]
     if not batch:
-        batch = eligible[:DELIVERY_BATCH]
+        batch = eligible[:batch_limit]
         end = positions[eligible[-1]["event_id"]]
         round_blocked = False
     updates = deepcopy(batch)
-    failure = _resolve_batch(config, updates)
+    if resolve_delivery is None:
+        failure = _resolve_batch(config, updates)
+        failures = [failure] if failure else []
+    else:
+        try:
+            failures = list(resolve_delivery(updates) or [])
+        except Exception:
+            failures = [{"code": "resolver_error", "returncode": None}]
+    if len(batch) > 1 and any(
+        failure.get("code") in {"output_oversized", "nonzero_exit"} for failure in failures
+    ):
+        # A valid per-event receipt can still exceed the whole-response budget
+        # when combined with others. Retry smaller batches on later cycles.
+        proposed["delivery_batch_limit"] = max(1, len(batch) // 2)
     finished = positions[batch[-1]["event_id"]] == end
     proposed["delivery_cursor"] = None if finished else batch[-1]["event_id"]
     proposed["delivery_round_end"] = None if finished else proposed["alerts"][end]["event_id"]
     capacity_failure = {"code": "state_capacity_exhausted", "returncode": None}
     was_blocked = capacity_failure in delivery_failures(state)
     # A clean batch cannot clear a different batch's known storage failure.
-    round_blocked = round_blocked or (bool(failure) and was_blocked)
+    round_blocked = round_blocked or (bool(failures) and was_blocked)
     proposed["delivery_round_capacity_exhausted"] = True
     # Reserve the failure record even while trying successful receipt updates.
-    proposed["delivery_resolution"] = ([failure] if failure else []) + [capacity_failure]
+    proposed["delivery_resolution"] = resolution_record(failures + [capacity_failure])
     blocked = False
-    if not failure:
+    if not failures:
         for original, update in zip(batch, updates):
             if original == update:
                 continue
@@ -955,8 +984,8 @@ def reconcile_service_delivery(config, state, now):
     round_blocked = round_blocked or blocked
     proposed["delivery_round_capacity_exhausted"] = round_blocked
     capacity_blocked = round_blocked or (was_blocked and not finished)
-    proposed["delivery_resolution"] = ([failure] if failure else []) + (
-        [capacity_failure] if capacity_blocked else []
+    proposed["delivery_resolution"] = resolution_record(
+        failures + ([capacity_failure] if capacity_blocked else [])
     )
     try:
         if publication_capacity(proposed) < prior_capacity:
@@ -1006,11 +1035,15 @@ def run_sentinel(config, *, now=None, observe_remote=None, emit=None):
             state = read_private(path)
         except FileNotFoundError:
             state = {"incidents": {}, "counts": {}, "pending_events": [], "alerts": []}
+        state = reconcile_alert_delivery(config, state, now)
+        capacity_paused = any(failure.get("code") == "state_capacity_exhausted"
+                              for failure in delivery_failures(state))
+        write_private(path, state)
         try:
             snapshot = {**(observe_remote or (lambda: remote_observation(config)))()}
             snapshot["delivery_resolution"] = [
-                *snapshot.get("delivery_resolution", []),
-                *resolve_alert_delivery(config, state["alerts"]),
+                *delivery_failures(snapshot),
+                *delivery_failures(state),
             ]
             snapshot["delivery_dropped_at"] = state.get("delivery_dropped", {}).get(
                 "last_at"
@@ -1046,7 +1079,7 @@ def run_sentinel(config, *, now=None, observe_remote=None, emit=None):
                 state["incident_id"] = state["incidents"].pop(reason)
                 queue_event(state, "clear", reason, now)
         state["snapshot"] = snapshot
-        state = admit_state_transition(previous, state, now)
+        state = admit_state_transition(previous, state, now, paused=capacity_paused)
         write_private(path, state)
         publish_pending_events(state, now, emit or (lambda e: publish_event(config, e)))
         state["alerts"], dropped = retain_alerts(

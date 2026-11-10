@@ -516,33 +516,15 @@ def _retire_host(state, host, now):
         )
 
 
-def _resolve(resolve_delivery, alerts):
-    """Run a resolver and return its failures; an injected resolver may return None."""
-    try:
-        return list(resolve_delivery(alerts) or [])
-    except Exception:
-        return [{"code": "resolver_error", "returncode": None}]
-
-
-def _record_resolution(state, failures, now):
-    previous = state.get("delivery_resolution") or {}
-    state["delivery_resolution"] = {
-        "checked_at": now,
-        "failures": failures[:8],
-        "consecutive_failed_cycles": (
-            previous.get("consecutive_failed_cycles", 0) + 1 if failures else 0
-        ),
-    }
-
-
-def _flush(config, state, path, now, emit, resolve_delivery):
-    # The watchdog resolves and records before judging, and passes None here.
-    if resolve_delivery is not None:
-        _record_resolution(state, _resolve(resolve_delivery, state["alerts"]), now)
+def _flush(config, state, path, now, emit):
+    previous = deepcopy(state)
     for alert in state["alerts"]:
         alert["delivery_stale"] = (now - alert.get("published_at", now)) > config[
             "freshness_seconds"
         ] and alert.get("delivery") not in supervisor.TERMINAL_DELIVERY
+    state = supervisor.admit_state_transition(
+        previous, state, now, paused=state.get("transition_capacity_exhausted", False)
+    )
     supervisor.write_private(path, state)
     supervisor.publish_pending_events(state, now, emit)
     state["alerts"], dropped = supervisor.retain_alerts(
@@ -552,6 +534,7 @@ def _flush(config, state, path, now, emit, resolve_delivery):
         drop_aged=not state.get("delivery_resolution", {}).get("failures"),
     )
     supervisor.record_dropped(state, dropped, now)
+    return state
 
 
 def run_once(config, *, now=None, probe=None, emit=None, resolve_delivery=None):
@@ -565,6 +548,12 @@ def run_once(config, *, now=None, probe=None, emit=None, resolve_delivery=None):
     try:
         path = directory / "fleet-observer.json"
         state = load_state(path, now)
+        state = supervisor.reconcile_alert_delivery(
+            config, state, now, resolve_delivery=resolve_delivery, count_failed_cycles=True
+        )
+        capacity_paused = any(failure.get("code") == "state_capacity_exhausted"
+                              for failure in supervisor.delivery_failures(state))
+        supervisor.write_private(path, state)
         previous = deepcopy(state)
         state["started_at"] = now
         probe_fn = probe or (
@@ -591,8 +580,8 @@ def run_once(config, *, now=None, probe=None, emit=None, resolve_delivery=None):
         now = time.time() if live_clock else now
         for host in retired:
             _retire_host(state, host, now)
-        state = supervisor.admit_state_transition(previous, state, now)
-        _flush(
+        state = supervisor.admit_state_transition(previous, state, now, paused=capacity_paused)
+        state = _flush(
             config,
             state,
             path,
@@ -603,8 +592,6 @@ def run_once(config, *, now=None, probe=None, emit=None, resolve_delivery=None):
                     {**config, "instance": event["instance"]}, event
                 )
             ),
-            resolve_delivery
-            or (lambda alerts: supervisor.resolve_alert_delivery(config, alerts)),
         )
         state["completed_at"] = now
         supervisor.write_private(path, state)
@@ -647,16 +634,13 @@ def run_watchdog(config, *, now=None, emit=None, resolve_delivery=None):
         except (FileNotFoundError, supervisor.StateError):
             fresh = False
         conditions = {"observer_stale": not fresh}
-        resolver = resolve_delivery or (
-            lambda alerts: supervisor.resolve_alert_delivery(config, alerts)
+        state = supervisor.reconcile_alert_delivery(
+            config, state, now, resolve_delivery=resolve_delivery, count_failed_cycles=True
         )
-        # Resolve every lookup this cycle makes before judging, so the
-        # watchdog's own failures count this cycle, exactly as the observer's do.
-        failures = _resolve(resolver, state["alerts"])
-        if observer is not None:
-            failures = _resolve(resolver, observer.get("alerts", [])) + failures
-        _record_resolution(state, failures, now)
-        failed_cycles = state["delivery_resolution"]["consecutive_failed_cycles"]
+        capacity_paused = any(failure.get("code") == "state_capacity_exhausted"
+                              for failure in supervisor.delivery_failures(state))
+        supervisor.write_private(path, state)
+        failed_cycles = (state.get("delivery_resolution") or {}).get("consecutive_failed_cycles", 0)
         if observer is not None:
             waiting = [
                 a
@@ -703,10 +687,10 @@ def run_watchdog(config, *, now=None, emit=None, resolve_delivery=None):
                     "created_at": now,
                 }
             )
-        state = supervisor.admit_state_transition(previous, state, now)
+        state = supervisor.admit_state_transition(previous, state, now, paused=capacity_paused)
         old_dir = config["state_dir"]
         config = {**config, "state_dir": old_dir}
-        _flush(
+        state = _flush(
             config,
             state,
             path,
@@ -717,7 +701,6 @@ def run_watchdog(config, *, now=None, emit=None, resolve_delivery=None):
                     {**config, "instance": event["instance"]}, event
                 )
             ),
-            None,
         )
         state["completed_at"] = now
         supervisor.write_private(path, state)

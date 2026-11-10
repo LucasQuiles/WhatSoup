@@ -233,6 +233,16 @@ def test_watchdog_detects_stalled_delivery_even_when_observer_is_fresh(
         emit=lambda e: events.append(e) or {"published": True},
         resolve_delivery=delivered,
     )
+    assert "alert_delivery_stale" in state["incidents"]
+    observer.run_once(
+        config, now=1306, probe=lambda *_: probe(1306, {"token": False}),
+        emit=lambda e: events.append(e) or {"published": True},
+        resolve_delivery=delivered,
+    )
+    state = observer.run_watchdog(
+        config, now=1307, emit=lambda e: events.append(e) or {"published": True},
+        resolve_delivery=delivered,
+    )
     assert "alert_delivery_stale" not in state["incidents"]
     assert [(e["kind"], e["reason"]) for e in events[-2:]] == [
         ("alert", "fleet_alert_delivery_stale"),
@@ -253,7 +263,7 @@ def test_unacknowledged_delivery_records_are_kept_within_the_undelivered_bound(
         ],
         "pending_events": [],
     }
-    observer._flush(config, state, path, 1300, lambda _: {}, lambda _: None)
+    observer._flush(config, state, path, 1300, lambda _: {})
     assert len(state["alerts"]) == 150
 
 
@@ -850,6 +860,9 @@ def test_failing_delivery_batch_does_not_block_the_other_batches(
     )
     seed_observer(observer, config, waiting)
     state = observe_once(observer, config, 5000)
+    assert [len(batch) for batch in batches(log)] == [128]
+    assert all(a["delivery"] == "locally_persisted" for a in state["alerts"])
+    state = observe_once(load_module(), config, 5001)
     assert [len(batch) for batch in batches(log)] == [128, 22]
     delivery = {a["event_id"]: a["delivery"] for a in state["alerts"]}
     assert [delivery[a["event_id"]] for a in waiting[128:]] == [
@@ -937,7 +950,7 @@ def test_failed_lookup_cycle_never_ages_out_undelivered_alerts(
 
 
 def test_watchdog_only_lookup_failures_page_after_two_of_its_own_cycles(
-    observer, config
+    observer, config, tmp_path
 ):
     observer.run_once(
         config,
@@ -946,20 +959,26 @@ def test_watchdog_only_lookup_failures_page_after_two_of_its_own_cycles(
         emit=lambda _: {"published": True},
         resolve_delivery=lambda _: [],
     )
-    failing = lambda _: [{"code": "nonzero_exit", "returncode": 1}]  # noqa: E731
+    waiting = alert(100)
+    observer.supervisor.write_private(
+        Path(config["state_dir"]) / "fleet-watchdog.json",
+        {"schema_version": 1, "incidents": {}, "pending_events": [], "alerts": [waiting]},
+    )
+    config["delivery_command"], log = delivery_stub(tmp_path, fail=[waiting["event_id"]])
     first = observer.run_watchdog(
-        config, now=101, emit=lambda _: {"published": True}, resolve_delivery=failing
+        config, now=101, emit=lambda _: {"published": True}
     )
     assert "alert_delivery_unresolved" not in first["incidents"]
     second = observer.run_watchdog(
-        config, now=102, emit=lambda _: {"published": True}, resolve_delivery=failing
+        config, now=102, emit=lambda _: {"published": True}
     )
     assert "alert_delivery_unresolved" in second["incidents"]
+    assert batches(log) == [[waiting["event_id"]], [waiting["event_id"]]]
+    config["delivery_command"], _ = delivery_stub(tmp_path)
     third = observer.run_watchdog(
         config,
         now=103,
         emit=lambda _: {"published": True},
-        resolve_delivery=lambda _: [],
     )
     assert "alert_delivery_unresolved" not in third["incidents"]
 
