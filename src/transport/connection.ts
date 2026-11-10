@@ -620,6 +620,10 @@ export declare interface ConnectionManager {
 // ConnectionManager
 // ---------------------------------------------------------------------------
 
+function countInboundObservationMessages(messages: readonly WAMessage[] | undefined): number {
+  return messages?.reduce((count, message) => count + (message.key?.fromMe === true ? 0 : 1), 0) ?? 0;
+}
+
 export class ConnectionManager extends EventEmitter implements Messenger {
   private sock: WhatsAppSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2026,8 +2030,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     sock.ev.process(async (events) => {
       // Stale-socket guard: drop events from a socket that is no longer current
       if (this.sock !== sock) {
-        const staleUpsert = events['messages.upsert'] as { messages?: unknown[] } | undefined;
-        observeInbound(config.botName, 'transport.stale_socket', staleUpsert?.messages?.length ?? 0);
+        const staleUpsert = events['messages.upsert'] as { messages?: WAMessage[] } | undefined;
+        observeInbound(config.botName, 'transport.stale_socket', countInboundObservationMessages(staleUpsert?.messages));
         return;
       }
 
@@ -3311,7 +3315,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     const { messages, type } = data;
     // Only process real-time and appended messages, not full history syncs
     if (type !== 'notify' && type !== 'append') {
-      observeInbound(config.botName, 'transport.unsupported_upsert_type', (messages as unknown[] | undefined)?.length ?? 0);
+      observeInbound(config.botName, 'transport.unsupported_upsert_type', countInboundObservationMessages(messages));
       return;
     }
 
@@ -3362,7 +3366,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       }
 
       const parsed = parseIncomingMessage(msg);
-      if (!parsed) observeInbound(config.botName, 'transport.parser_refused');
+      if (!parsed && msg.key.fromMe !== true) observeInbound(config.botName, 'transport.parser_refused');
       if (parsed) {
         // Build contacts directory from every incoming sender for @mention resolution
         this.contactsDir.observe(parsed.senderJid, parsed.senderName);
@@ -3381,7 +3385,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           } catch (err) {
             this.log.warn({ err, messageId: parsed.messageId }, 'onMessage callback threw');
           }
-        } else {
+        } else if (!parsed.isFromMe) {
           observeInbound(config.botName, 'transport.no_consumer');
         }
       }

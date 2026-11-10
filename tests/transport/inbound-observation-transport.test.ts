@@ -154,6 +154,37 @@ describe('transport inbound exits record observations', () => {
     expect(emitAlert).not.toHaveBeenCalled();
   });
 
+  it.each(['stale_socket', 'unsupported_upsert_type', 'parser_refused', 'no_consumer'] as const)(
+    'excludes self echoes from transport.%s while counting inbound messages', async (reason) => {
+      cm.onMessage = null;
+      if (reason === 'stale_socket') {
+        (cm as unknown as { sock: unknown }).sock = { replaced: true };
+      }
+      const message = reason === 'parser_refused'
+        ? { key: USER_MESSAGE.key, messageStubType: 20 }
+        : USER_MESSAGE;
+      const echo = { ...message, key: { ...message.key, id: 'OUTBOUND-ECHO', fromMe: true } };
+      const type = reason === 'unsupported_upsert_type' ? 'prepend' : 'notify';
+
+      await deliver({ 'messages.upsert': { messages: [echo], type } });
+      expect(totalCount()).toBe(0);
+      expect(emitAlert).not.toHaveBeenCalled();
+      await deliver({ 'messages.upsert': { messages: [echo, message], type } });
+      expect(totalCount()).toBe(1);
+      expect(counts()[`transport.${reason}`]).toBe(1);
+      expect(emitAlert).toHaveBeenCalledTimes(reason === 'no_consumer' ? 1 : 0);
+    },
+  );
+
+  it('still passes a self echo to the consumer for storage and correlation', async () => {
+    const echo = { ...USER_MESSAGE, key: { ...USER_MESSAGE.key, id: 'OUTBOUND-ECHO', fromMe: true } };
+    await deliver({ 'messages.upsert': { messages: [echo], type: 'notify' } });
+    expect(consumer).toHaveBeenCalledTimes(1);
+    expect(consumer).toHaveBeenCalledWith(expect.objectContaining({ isFromMe: true }));
+    expect(totalCount()).toBe(0);
+    expect(emitAlert).not.toHaveBeenCalled();
+  });
+
   it('a throwing alert outbox does not stop the rest of the batch', async () => {
     cm.onMessage = null;
     emitAlert.mockImplementation(() => { throw new Error('outbox exploded'); });
