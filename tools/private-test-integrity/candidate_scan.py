@@ -45,6 +45,7 @@ def prepare_scan_inputs(
     selector: Selector,
     scratch: Path,
     trusted_path: str,
+    *, grammar_cache: Path | None = None,
 ) -> RunnerPlan:
     """Build one scanner plan from exact Git objects without executing it."""
     if binding.repository != EXPECTED_REPOSITORY or binding.check_name != CHECK_NAME:
@@ -106,6 +107,7 @@ def prepare_scan_inputs(
             trusted_path=trusted_path,
             candidate_paths=tuple(entry.path for entry in candidate_plan.files),
             check_name=binding.check_name,
+            grammar_cache=grammar_cache,
         )
     except Exception:
         _clear_owned_scratch(home, candidate_root, baseline_path)

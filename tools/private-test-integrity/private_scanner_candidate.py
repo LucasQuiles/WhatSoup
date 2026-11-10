@@ -22,6 +22,8 @@ import subprocess
 import time
 from typing import Callable, Iterable, Mapping
 
+from scanner_grammars import verify_grammar_cache
+
 
 class BoundaryError(ValueError):
     """An untrusted candidate or trusted-input binding is not admissible."""
@@ -477,6 +479,7 @@ def verify_workflow_run_binding(run: WorkflowRunBinding, pull_request: PullReque
 
 def build_scanner_environment(
     scanner: VerifiedScannerBundle, trusted_home: Path, trusted_path: str,
+    *, grammar_cache: Path | None = None,
 ) -> Mapping[str, str]:
     """Use one environment contract for runtime probes and candidate scans."""
     if (
@@ -485,6 +488,10 @@ def build_scanner_environment(
         or any(not component.startswith("/") or "\0" in component for component in trusted_path.split(":"))
     ):
         raise BoundaryError("scanner environment requires absolute trusted paths")
+    cache_environment = {}
+    if grammar_cache is not None:
+        verify_grammar_cache(grammar_cache)
+        cache_environment["XDG_CACHE_HOME"] = str(grammar_cache)
     return MappingProxyType({
         "CLAUDE_PLUGIN_ROOT": str(scanner.bundle.root),
         "HOME": str(trusted_home),
@@ -492,6 +499,7 @@ def build_scanner_environment(
         "WHATSOUP_REQUIRE_TEST_INTEGRITY": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONNOUSERSITE": "1",
+        **cache_environment,
     })
 
 
@@ -505,6 +513,7 @@ def build_runner_plan(
     trusted_path: str,
     candidate_paths: tuple[str, ...],
     check_name: str,
+    grammar_cache: Path | None = None,
 ) -> RunnerPlan:
     """Build, but do not execute, the scanner command and sanitized publication shape."""
     baseline = trusted_baseline.baseline
@@ -541,7 +550,7 @@ def build_runner_plan(
     )
     return RunnerPlan(
         command=command,
-        environment=build_scanner_environment(scanner, trusted_home, trusted_path),
+        environment=build_scanner_environment(scanner, trusted_home, trusted_path, grammar_cache=grammar_cache),
         cwd=scan_root,
         check_name=check_name,
         head_sha=binding.head_sha,
@@ -588,6 +597,8 @@ def run_scanner_privately(
         return True
 
     try:
+        if "XDG_CACHE_HOME" in plan.environment:
+            verify_grammar_cache(Path(plan.environment["XDG_CACHE_HOME"]))
         child = popen(
             plan.command,
             cwd=plan.cwd,

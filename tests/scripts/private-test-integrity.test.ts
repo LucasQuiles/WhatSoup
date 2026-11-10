@@ -196,6 +196,13 @@ it('confines the private scanner credential to the trusted default-branch workfl
   const bootstrap = job.steps.find((step: { id?: string }) => step.id === 'trusted-driver');
   expect(bootstrap.env.TRUSTED_SHA).toBe('${{ github.sha }}');
   expect(bootstrap.run).not.toContain('github.event.workflow_run.head_sha');
+  expect(bootstrap.run).toContain('scanner_grammars.py');
+  const grammars = job.steps.find((step: { id?: string }) => step.id === 'grammars');
+  expect(grammars.env).toEqual({ SCANNER_ROOT: '${{ steps.scratch.outputs.root }}' });
+  expect(job.steps.indexOf(grammars)).toBeGreaterThan(job.steps.indexOf(bootstrap));
+  expect(job.steps.indexOf(grammars)).toBeLessThan(job.steps.indexOf(checkouts[0]));
+  expect(grammars.run).toContain('--max-filesize 19134009');
+  expect(grammars.run).toContain('"$SCANNER_ROOT/driver/scanner_grammars.py" "$archive" "$SCANNER_ROOT/grammar-cache"');
   const scan = job.steps.find((step: { id?: string }) => step.id === 'scan');
   expect(scan.env.QUALITY_RUN_ID).toBe('${{ github.event.workflow_run.id }}');
   expect(scan.env.GITHUB_TOKEN).toBe('${{ github.token }}');
@@ -211,10 +218,45 @@ it('confines the private scanner credential to the trusted default-branch workfl
   expect(job.steps.at(-1).if).toBe('always()');
 });
 
-it('provides an uncancelled Quality producer for tag receipt qualification', () => {
+it('provides tag and daily Quality producers for private receipt qualification', () => {
   const workflow = parse(readFileSync(join(repoRoot, '.github/workflows/quality.yml'), 'utf8'));
   expect(workflow.on.push.tags).toEqual(['v*']);
+  expect(workflow.on.schedule).toEqual([{ cron: '23 6 * * *' }]);
   expect(workflow.concurrency['cancel-in-progress']).toBe("${{ github.event_name != 'merge_group' && !startsWith(github.ref, 'refs/tags/') }}");
+});
+
+it.each(['scratch', 'cleanup'])('refuses a failed filesystem operation during %s', (stepId) => {
+  const workflow = parse(readFileSync(join(repoRoot, '.github/workflows/private-test-integrity.yml'), 'utf8'));
+  const step = workflow.jobs['private-scanner'].steps.find((item: { id?: string }) => item.id === stepId);
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'private-scanner-filesystem-')));
+  const workspace = join(scratch, 'workspace');
+  const scannerRoot = join(workspace, '.private-scanner.fixture');
+  try {
+    mkdirSync(scannerRoot, { recursive: true });
+    writeFileSync(join(scannerRoot, 'preserved'), 'owned scanner data');
+    writeFileSync(join(scratch, 'sudo'), '#!/bin/sh\nprintf "%s\\n" "$*" >> "$OPERATION_LOG"\nexit 23\n');
+    writeFileSync(join(scratch, 'mountpoint'), '#!/bin/sh\nexit 0\n');
+    chmodSync(join(scratch, 'sudo'), 0o700);
+    chmodSync(join(scratch, 'mountpoint'), 0o700);
+    const result = spawnSync('/bin/bash', ['-c', step.run], {
+      env: { PATH: `${scratch}:${process.env.PATH}`, GITHUB_WORKSPACE: workspace,
+        GITHUB_OUTPUT: join(scratch, 'output'), SCANNER_ROOT: scannerRoot,
+        OPERATION_LOG: join(scratch, 'operations'), TMPDIR: scratch },
+      encoding: 'utf8', timeout: 10_000, shell: false,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status, result.stderr).toBe(23);
+    const operation = readFileSync(join(scratch, 'operations'), 'utf8');
+    expect(operation).toContain(stepId === 'scratch' ? 'mount -t tmpfs' : 'umount --');
+    if (stepId === 'scratch') {
+      expect(operation).toContain('size=512m,nr_inodes=16384');
+    } else {
+      expect(readFileSync(join(scannerRoot, 'preserved'), 'utf8')).toBe('owned scanner data');
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 });
 
 it('refuses an old curl before trusted-driver downloads and executes the supported bootstrap path', () => {

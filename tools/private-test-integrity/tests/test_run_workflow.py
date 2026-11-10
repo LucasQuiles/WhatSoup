@@ -20,6 +20,7 @@ from unittest import mock
 from github_binding import CHECK_NAME
 from private_check import evaluate_run
 from test_private_check import CompositePrivateClient, check_readback
+import scanner_grammars
 
 
 RUN_ID = 41752012595
@@ -50,6 +51,14 @@ class RunWorkflowContractTests(unittest.TestCase):
         temporary_parent = Path(os.environ["TMPDIR"])
         with tempfile.TemporaryDirectory(prefix="trusted-cli-", dir=temporary_parent) as temporary:
             root = Path(temporary)
+            grammar_cache = root / "grammar-cache"
+            libraries = grammar_cache / scanner_grammars.LIBRARIES
+            libraries.mkdir(parents=True)
+            grammar_pins = {}
+            for name in ("python", "javascript", "typescript", "tsx", "bash", "go", "rust"):
+                content = (name + " fixture").encode()
+                (libraries / f"libtree_sitter_{name}.so").write_bytes(content)
+                grammar_pins[name] = (len(content), hashlib.sha256(content).hexdigest())
             checkout = root / "private-checkout"
             checkout.mkdir(mode=0o700)
             binary_directory = root / "bin"
@@ -60,17 +69,19 @@ class RunWorkflowContractTests(unittest.TestCase):
                 path.write_bytes(f"#!/bin/sh\n# {name} fixture\nexit 0\n".encode("utf-8"))
                 path.chmod(0o700)
                 binaries[name] = path
-            yield {
-                "root": root,
-                "checkout": checkout,
-                "git": binaries["git"],
-                "python": binaries["python3.12"],
-                "bash": binaries["bash"],
-                "trusted_path": str(binary_directory),
-                "git_sha256": hashlib.sha256(binaries["git"].read_bytes()).hexdigest(),
-                "python_sha256": hashlib.sha256(binaries["python3.12"].read_bytes()).hexdigest(),
-                "bash_sha256": hashlib.sha256(binaries["bash"].read_bytes()).hexdigest(),
-            }
+            with mock.patch.object(scanner_grammars, "GRAMMARS", grammar_pins):
+                yield {
+                    "root": root,
+                    "checkout": checkout,
+                    "git": binaries["git"],
+                    "python": binaries["python3.12"],
+                    "bash": binaries["bash"],
+                    "trusted_path": str(binary_directory),
+                    "git_sha256": hashlib.sha256(binaries["git"].read_bytes()).hexdigest(),
+                    "python_sha256": hashlib.sha256(binaries["python3.12"].read_bytes()).hexdigest(),
+                    "bash_sha256": hashlib.sha256(binaries["bash"].read_bytes()).hexdigest(),
+                    "grammar_cache": grammar_cache,
+                }
 
     def argv(self, fixture: dict[str, object], **overrides) -> list[str]:
         values = {
@@ -159,7 +170,8 @@ class RunWorkflowContractTests(unittest.TestCase):
                     observed["destination"] = destination
                     return scanner
 
-                def evaluate(client, run_id, workflow_ref, scanner_bundle, *, trusted_path, timeout_seconds, runtime_check):
+                def evaluate(client, run_id, workflow_ref, scanner_bundle, *, trusted_path, timeout_seconds, runtime_check, grammar_cache):
+                    self.assertEqual(grammar_cache, fixture["grammar_cache"])
                     self.assertIsNone(observed["destination"])
                     with scanner_bundle() as supplied_scanner:
                         self.assertIs(client, client_instance)
@@ -179,7 +191,7 @@ class RunWorkflowContractTests(unittest.TestCase):
                                 "expected_bash_sha256": fixture["bash_sha256"],
                             },
                         )
-                        runtime_check(supplied_scanner, binding, trusted_path=fixture["trusted_path"])
+                        runtime_check(supplied_scanner, binding, trusted_path=fixture["trusted_path"], grammar_cache=grammar_cache)
                         qualify.assert_called_once_with(
                             supplied_scanner,
                             binding,
@@ -188,6 +200,7 @@ class RunWorkflowContractTests(unittest.TestCase):
                             bash=fixture["bash"],
                             expected_python_sha256=fixture["python_sha256"],
                             expected_bash_sha256=fixture["bash_sha256"],
+                            grammar_cache=fixture["grammar_cache"],
                         )
                         observed["evaluate"] = runtime_check
                     self.assertFalse(observed["destination"].exists())
@@ -221,9 +234,10 @@ class RunWorkflowContractTests(unittest.TestCase):
 
             def evaluate(
                 client, run_id, scanner_bundle, *, trusted_path, timeout_seconds, runtime_check,
-                receipt_path, scanner_run_id, scanner_run_attempt,
+                receipt_path, scanner_run_id, scanner_run_attempt, grammar_cache,
             ):
                 self.assertEqual(run_id, RUN_ID)
+                self.assertEqual(grammar_cache, fixture["grammar_cache"])
                 self.assertEqual(receipt_path, receipt)
                 self.assertEqual(trusted_path, fixture["trusted_path"])
                 self.assertEqual(timeout_seconds, 300)
@@ -451,6 +465,25 @@ class RunWorkflowContractTests(unittest.TestCase):
                 self.assertEqual(rechecks, [True])
                 self.assertEqual([check["conclusion"] for check in client.created], [expected])
                 self.assertNotIn("private cleanup detail", raw_output)
+
+    def test_refuses_missing_native_grammar_before_scanner_acquisition_or_publication(self) -> None:
+        module, main = self.workflow_module()
+        with self.cli_fixture() as fixture:
+            (fixture["grammar_cache"] / scanner_grammars.LIBRARIES / "libtree_sitter_python.so").unlink()
+            with (
+                self.supported_driver(module),
+                self.sanitized_environment(module, fixture),
+                mock.patch.object(module, "GitHubClient") as client,
+                mock.patch.object(module, "acquire_verified_private_bundle") as acquire,
+                mock.patch.object(module, "evaluate_private_run") as evaluate,
+            ):
+                code, records, _output = self.invoke(main, self.argv(fixture))
+            self.assertEqual(code, 2)
+            self.assertEqual(records, [{"check_name": CHECK_NAME, "conclusion": "inconclusive"}])
+            client.assert_not_called()
+            acquire.assert_not_called()
+            evaluate.assert_not_called()
+            self.assertTrue(fixture["checkout"].is_dir())
 
     def test_refuses_to_consume_any_checkout_except_fixed_owned_child(self) -> None:
         module, main = self.workflow_module()
