@@ -394,7 +394,7 @@ export function runResolverCanary(params: {
       (reapError === undefined ? detail : { ...detail, reapError });
     const watchdog = setTimeout(() => {
       timedOut = true;
-      killGroup();
+      const reaped = killGroup();
       // Armed whatever killGroup() returned: a live member the kill could not reach (one that
       // called setsid(), or one an EPERM left alive) can hold the child's stdio open, so `close`
       // may never arrive. Not unref'd: the canary promise must settle even when nothing else
@@ -402,9 +402,13 @@ export function runResolverCanary(params: {
       reapGrace = setTimeout(() => {
         if (settled) return;
         settled = true;
-        // Close everything this canary owns before it settles: signal the group once more, then
-        // drop the pipes and the child handle, so a surviving member cannot keep the CLI alive.
-        killGroup();
+        // Signal the group again only when the first kill failed: a member was still alive then,
+        // so the group id was still held. After a kill that succeeded, the leader may have been
+        // reaped and the group left empty, and a kill now could reach an unrelated group that
+        // reused the id.
+        if (!reaped) killGroup();
+        // Drop the pipes and the child handle on every expiry, so a surviving member cannot keep
+        // the CLI alive.
         child.stdout.destroy();
         child.stderr.destroy();
         child.unref();

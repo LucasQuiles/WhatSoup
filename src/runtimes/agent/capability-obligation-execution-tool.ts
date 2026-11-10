@@ -187,7 +187,7 @@ function runResolver(argv: readonly string[], timeoutMs: number): Promise<Resolv
     };
     const watchdog = setTimeout(() => {
       timedOut = true;
-      killGroup();
+      const reaped = killGroup();
       // Armed whatever killGroup() returned: a live member the kill could not reach (one that
       // called setsid(), or one an EPERM left alive) can hold the child's stdio open, so `close`
       // may never arrive. Not unref'd: the run must settle even when nothing else keeps the
@@ -195,9 +195,13 @@ function runResolver(argv: readonly string[], timeoutMs: number): Promise<Resolv
       reapGrace = setTimeout(() => {
         if (settled) return;
         settled = true;
-        // Close everything this run owns before it settles: signal the group once more, then
-        // drop the pipes and the child handle, so a surviving member cannot hold them open.
-        killGroup();
+        // Signal the group again only when the first kill failed: a member was still alive then,
+        // so the group id was still held. After a kill that succeeded, the leader may have been
+        // reaped and the group left empty, and a kill now could reach an unrelated group that
+        // reused the id.
+        if (!reaped) killGroup();
+        // Drop the pipes and the child handle on every expiry, so a surviving member cannot
+        // hold them open.
         child.stdout.destroy();
         child.stderr.destroy();
         child.unref();
