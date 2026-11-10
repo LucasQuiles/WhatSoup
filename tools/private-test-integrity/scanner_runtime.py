@@ -90,10 +90,13 @@ def validate_probe_outputs(
         raise BoundaryError("private runtime parser is unavailable")
     observed = {
         row["file_path"] for row in invalid
-        if row["rule_id"] == PARSER_ERROR and row["severity"] == "block"
+        if row["rule_id"] == PARSER_ERROR and row["severity"] in {"block", "advisory"}
     }
     if observed != invalid_paths:
         raise BoundaryError("private runtime negative parser coverage is incomplete")
+    if not any(row["rule_id"] == "test-file-syntax-error" and row["severity"] == "block"
+               and row["file_path"] == "runtime-invalid/python_test.py" for row in invalid):
+        raise BoundaryError("private runtime Python syntax error is not blocking")
 
 
 def _verify_executable(path: Path, expected: str, name: str, trusted_path: str) -> None:
@@ -142,6 +145,7 @@ def qualify_runtime(
     expected_bash_sha256: str,
     trusted_path: str,
     probe_timeout_seconds: float = 30,
+    grammar_cache: Path | None = None,
 ) -> None:
     """Qualify fixed parser probes under the same environment as the final scan.
 
@@ -186,7 +190,7 @@ def qualify_runtime(
                 (root / directory).mkdir(mode=0o700)
                 for name, content in zip(PROBE_FILENAMES, contents, strict=True):
                     (root / directory / name).write_bytes(content)
-            environment = build_scanner_environment(scanner, home, trusted_path)
+            environment = build_scanner_environment(scanner, home, trusted_path, grammar_cache=grammar_cache)
 
             def probe(name: str, tail: tuple[str, ...], conclusions: set[str]) -> object:
                 output = root / f"{name}.json"

@@ -10,7 +10,7 @@ import { resolveTestPython } from '../helpers/python-interpreter.ts';
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const adapter = join(repoRoot, 'tools/private-test-integrity');
 const sources = [
-  'private_scanner_candidate.py', 'runtime_capture.py', 'scanner_runtime.py',
+  'private_scanner_candidate.py', 'runtime_capture.py', 'scanner_runtime.py', 'scanner_grammars.py',
   'bounded_github.py', 'github_binding.py', 'tests/native_capture_canary.py',
 ];
 
@@ -52,7 +52,8 @@ it('native qualification runs all synthetic cases and verifies the receipt', () 
     expect(receipt.limits).toEqual(['outer watchdog required', 'escaped descendant containment is not claimed']);
     expect(receipt.cases).toEqual([
       { case: 'small-json', capture_bytes: 16, conclusion: 'pass', status: 'passed', validator: 'accepted' },
-      { case: 'bounded-overflow', capture_bytes: 262144, conclusion: expect.stringMatching(/^(pass|fail|inconclusive)$/), status: 'passed', validator: 'refused' },
+      { case: 'dependency-write', capture_bytes: 16, conclusion: 'pass', status: 'passed', dependency_bytes: 524288 },
+      { case: 'bounded-overflow', capture_bytes: 262144, conclusion: 'inconclusive', status: 'passed', validator: 'refused' },
       { case: 'existing-output', capture_bytes: 17, conclusion: 'inconclusive', status: 'passed' },
       { case: 'symlink-output', capture_bytes: 15, conclusion: 'inconclusive', status: 'passed' },
       { case: 'malformed-command', capture_bytes: 0, conclusion: 'inconclusive', status: 'passed' },
