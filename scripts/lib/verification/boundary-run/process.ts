@@ -16,6 +16,7 @@ import {
 import path from 'node:path';
 
 import { cleanGitEnv } from '../../../../src/lib/git-env.ts';
+import { type GroupMembership, probeGroupMembership } from '../../process-group-membership.ts';
 import {
   ARTIFACT_KEYS,
   ATTEMPT_KEYS,
@@ -180,11 +181,23 @@ function processGroupAlive(pid: number): boolean {
   }
 }
 
-function signalProcessGroup(pid: number, signal: NodeJS.Signals): void {
+type GroupSignal = (pid: number, signal: NodeJS.Signals) => void;
+type GroupProbe = (pgid: number) => GroupMembership;
+
+function signalProcessGroup(
+  pid: number,
+  signal: NodeJS.Signals,
+  kill: GroupSignal = process.kill,
+  probeGroup: GroupProbe = probeGroupMembership,
+): void {
   try {
-    process.kill(-pid, signal);
+    kill(-pid, signal);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') return;
+    // Issue 3568: macOS can return EPERM for kill(-pgid) when the group holds only zombies.
+    if (code === 'EPERM' && probeGroup(pid) === 'no-live-members') return;
+    throw error;
   }
 }
 
@@ -207,6 +220,10 @@ interface BoundaryWatchdogCoreOptions {
   stdinFd?: number | 'ignore';
   stdoutFd?: number | 'ignore';
   stderrFd?: number | 'ignore';
+  /** Test-only group-signal seam; defaults to `process.kill`. */
+  kill?: GroupSignal;
+  /** Test-only membership probe, consulted only on an EPERM group kill. */
+  probeGroup?: GroupProbe;
 }
 
 export interface BoundaryWatchdogOutcome {
@@ -258,19 +275,20 @@ async function executeBoundaryWatchdog(
   });
   const completedBeforeDeadline = await waitForPromiseOrTimeout(closed, options.deadlineMs);
   const timedOut = !completedBeforeDeadline;
+  const signalGroup = (signal: NodeJS.Signals): void => signalProcessGroup(pid, signal, options.kill, options.probeGroup);
   if (timedOut) {
-    signalProcessGroup(pid, 'SIGTERM');
+    signalGroup('SIGTERM');
     if (!await waitForProcessGroupExit(pid, options.killGraceMs)) {
-      signalProcessGroup(pid, 'SIGKILL');
+      signalGroup('SIGKILL');
       await waitForProcessGroupExit(pid, 500);
     }
     await waitForPromiseOrTimeout(closed, 100);
   }
   const survivedNaturalExit = !timedOut && processGroupAlive(pid);
   if (survivedNaturalExit) {
-    signalProcessGroup(pid, 'SIGTERM');
+    signalGroup('SIGTERM');
     if (!await waitForProcessGroupExit(pid, options.killGraceMs)) {
-      signalProcessGroup(pid, 'SIGKILL');
+      signalGroup('SIGKILL');
       await waitForProcessGroupExit(pid, 500);
     }
   }
@@ -297,7 +315,7 @@ async function executeBoundaryWatchdog(
 
 export async function runBoundaryWatchdogForTest(
   argv: string[],
-  options: { deadlineMs: number; killGraceMs: number; expectedExit: string },
+  options: { deadlineMs: number; killGraceMs: number; expectedExit: string; kill?: GroupSignal; probeGroup?: GroupProbe },
 ): Promise<BoundaryWatchdogOutcome> {
   if (
     argv.length === 0
