@@ -141,7 +141,7 @@ For agent runtimes, the normalized `turn_capability` projection also exposes
 the exact still-live session incarnation. A `false` or `null` session-current
 value is intentionally insufficient for provider-progress corroboration.
 
-The diagnostic `inbound_observations` member is emitted at `src/core/health.ts:3142`;
+The diagnostic `inbound_observations` member covers Baileys transport exits and shared ingest exits. Its `transport.*` reasons do not cover Twilio, Signal or iMessage; these adapters do not count or alert on an absent inbound callback. It is emitted at `src/core/health.ts:3142`;
 its process-local counters do not change the health status.
 
 | Identifier | Method + Path | Source | Stability | Status | Notes |

@@ -6,6 +6,10 @@
   `counts`, `alerts`, and `recorder_failures`. These content-free, process-local
   counters reset on restart. Counts distinguish the closed transport and ingest
   reasons documented in the [runbook](../runbook.md#4-health-endpoint).
+  The four `transport.*` reasons cover Baileys only; `ingest.*` reasons
+  cover messages reaching the shared ingest path. Twilio, Signal and iMessage
+  do not currently count or alert on an absent inbound callback. Zero transport
+  counters do not establish complete admission across those adapters.
 - A count records an observed local non-admission attempt, not a unique lost
   message or upstream delivery outcome. Transport redelivery can count again;
   database-recognized duplicates do not. The counters remain advisory and do
