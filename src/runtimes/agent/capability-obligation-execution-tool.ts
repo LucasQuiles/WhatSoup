@@ -187,7 +187,7 @@ function runResolver(argv: readonly string[], timeoutMs: number): Promise<Resolv
     };
     const watchdog = setTimeout(() => {
       timedOut = true;
-      const reaped = killGroup();
+      killGroup();
       // Armed whatever killGroup() returned: a live member the kill could not reach (one that
       // called setsid(), or one an EPERM left alive) can hold the child's stdio open, so `close`
       // may never arrive. Not unref'd: the run must settle even when nothing else keeps the
@@ -195,13 +195,11 @@ function runResolver(argv: readonly string[], timeoutMs: number): Promise<Resolv
       reapGrace = setTimeout(() => {
         if (settled) return;
         settled = true;
-        // Signal the group again only when the first kill failed: a member was still alive then,
-        // so the group id was still held. After a kill that succeeded, the leader may have been
-        // reaped and the group left empty, and a kill now could reach an unrelated group that
-        // reused the id.
-        if (!reaped) killGroup();
-        // Drop the pipes and the child handle on every expiry, so a surviving member cannot
-        // hold them open.
+        // No second group kill. A first kill that failed would fail the same way again. By now
+        // the original group may have exited, and nothing pins its id, so a kill could reach an
+        // unrelated group that reused it. A probe answer of `unknown` never proved a live member.
+        // Instead, drop the pipes and the child handle, so a surviving member cannot hold them
+        // open, and report the unreaped failure in reapError.
         child.stdout.destroy();
         child.stderr.destroy();
         child.unref();
@@ -227,7 +225,8 @@ function runResolver(argv: readonly string[], timeoutMs: number): Promise<Resolv
       clearTimeout(watchdog);
       clearTimeout(reapGrace);
       killGroup(); // an error after spawn can leave a started group behind; sweep it as attest does
-      reject(err);
+      // A sweep that failed travels with the error, so the caller can warn and record it.
+      reject(reapError === undefined ? err : Object.assign(err, { reapError }));
     });
     child.on('close', (code, signal) => {
       if (settled) return;
@@ -419,7 +418,16 @@ export function buildCapabilityExecutionTool(deps: CapabilityExecutionToolDeps):
           run = await runResolver(argv, deps.options.execution.timeoutMs);
         } catch (err) {
           log.warn({ err, obligationId: obligation.id }, 'capability resolver spawn failed');
-          recordOutcome(deps, active, observedSourceDigest, 'error', { reason: 'resolver_spawn_failed' });
+          // The error-path group sweep can fail too; name the group as the close and grace paths do.
+          const spawnReapError = err instanceof Error ? (err as Error & { reapError?: unknown }).reapError : undefined;
+          const reapError = typeof spawnReapError === 'string' ? spawnReapError : undefined;
+          if (reapError !== undefined) {
+            log.warn({ obligationId: obligation.id, reapError }, 'capability resolver process group not proven reaped');
+          }
+          recordOutcome(deps, active, observedSourceDigest, 'error', {
+            reason: 'resolver_spawn_failed',
+            ...(reapError === undefined ? {} : { reapError }),
+          });
           return toolError({ error: 'capability_execution', message: 'Capability resolver could not be started' });
         }
         if (run.reapError !== undefined) {

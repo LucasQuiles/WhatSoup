@@ -184,6 +184,21 @@ function processGroupAlive(pid: number): boolean {
 type GroupSignal = (pid: number, signal: NodeJS.Signals) => void;
 type GroupProbe = (pgid: number) => GroupMembership;
 
+/**
+ * Appends `suffix` to the error's message and to the first line of its stack. An uncaught
+ * rejection prints the stack, whose first line keeps the message it was formatted with.
+ */
+function appendToErrorMessage(error: Error, suffix: string): void {
+  const originalMessage = error.message;
+  // Reading the stack formats it now if nothing has, so its first line holds the original message.
+  const stack = error.stack;
+  error.message = `${originalMessage}${suffix}`;
+  if (typeof stack !== 'string') return;
+  const newline = stack.indexOf('\n');
+  const firstLine = newline === -1 ? stack : stack.slice(0, newline);
+  if (firstLine.endsWith(originalMessage)) error.stack = `${firstLine}${suffix}${stack.slice(firstLine.length)}`;
+}
+
 function signalProcessGroup(
   pid: number,
   signal: NodeJS.Signals,
@@ -200,7 +215,7 @@ function signalProcessGroup(
       const membership = probeGroup(pid);
       if (membership === 'no-live-members') return;
       // Name the probe result, so a failed gate log tells a live group from an unreadable one.
-      if (error instanceof Error) error.message += `; group membership probe: ${membership}`;
+      if (error instanceof Error) appendToErrorMessage(error, `; group membership probe: ${membership}`);
     }
     throw error;
   }

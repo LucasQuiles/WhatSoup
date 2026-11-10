@@ -75,7 +75,7 @@ export function reapFixtureGroups(targets: readonly number[]): void {
  * How long a fixture grandchild lives if its test's teardown never kills it. It only stops a leak:
  * every test kills its grandchild in teardown, long before this.
  */
-const FIXTURE_LEAK_NET_MS = 60_000;
+export const FIXTURE_LEAK_NET_MS = 60_000;
 
 /**
  * Source for a resolver that spawns one grandchild and writes the grandchild's pid to `pidFile`
