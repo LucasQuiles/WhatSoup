@@ -79,6 +79,17 @@ function workflowJob(workflow: string, id: string): string | null {
   return workflow.slice(start, followingJob ? start + followingJob.index : undefined);
 }
 
+/** Structural counterpart of the selection step's executable contract tests. */
+function forcedFullSelection(root: Record<string, unknown> | null): boolean {
+  const selection = asRecord(asRecord(root?.jobs)?.selection);
+  if (asRecord(selection?.outputs)?.profile !== '${{ steps.plan.outputs.profile }}'
+    || !Array.isArray(selection?.steps)) return false;
+  const step = selection.steps.map(asRecord).find((entry) => entry?.id === 'plan');
+  return typeof step?.run === 'string'
+    && /^\s*const isPr = process\.env\.GITHUB_EVENT_NAME === 'pull_request';\s*$/m.test(step.run)
+    && /^\s*const plan = !isPr \|\| controlsChanged \? \{\s*profile: 'full'/m.test(step.run);
+}
+
 /**
  * The tag path reaches this exact full job, not every command that happens to appear in
  * an otherwise unused Quality workflow. All facts below are required for a callable path.
@@ -117,7 +128,7 @@ function callableTagFullJob(inputs: GateInputs): string | null {
     || !releaseGate.steps.some((step) => (
       asRecord(step)?.run === 'node scripts/private-integrity-release.ts verify --receipt \"$RUNNER_TEMP/private-integrity/receipt.json\"'
     ))
-    || !/else\s+node(?: --experimental-strip-types)? scripts\/test-plan\.ts --full --json/s.test(inputs.qualityWorkflow)
+    || !forcedFullSelection(qualityRoot)
   ) return null;
   const full = workflowJob(inputs.qualityWorkflow, 'full');
   if (!full || !/^ {4}if:\s*needs\.selection\.outputs\.profile == 'full'\s*$/m.test(full)) {

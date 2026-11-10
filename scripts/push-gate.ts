@@ -48,6 +48,7 @@ export const NEUTRALIZED_SKIP_VARS = [
  */
 export const CURATED_TEST_PATHS = [
   'tests/redaction-parity.test.ts',
+  'tests/helpers/gate-membership.test.ts',
   'tests/scripts/check-commit-identity.test.ts',
   'tests/scripts/repo-hygiene-guard.test.ts',
   'tests/scripts/png-estate-guard.test.ts',
@@ -130,6 +131,7 @@ export const CURATED_TEST_PATHS = [
   'tests/scripts/check-hardcoded-tmpdir.test.ts',
   'tests/scripts/eslint-fitness-check.test.ts',
   'tests/scripts/fitness-registry.test.ts',
+  'tests/scripts/fitness-registry-backing.test.ts',
   'tests/scripts/fitness-file-size-warning-budget.test.ts',
   'tests/lib/provider-key-service.test.ts',
   'tests/core/agent-config-validator-crossfield.test.ts',

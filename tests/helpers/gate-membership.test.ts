@@ -30,7 +30,7 @@ const inputs = (overrides: Partial<GateInputs> = {}): GateInputs => ({
   // the trusted receipt consumer only releases after that exact completed run.
   qualityWorkflow:
     "on:\n  push:\n    branches: [main]\n    tags: ['v*']\n" +
-    'jobs:\n  selection:\n    steps:\n      - run: |\n          if [ "$GITHUB_EVENT_NAME" = \'pull_request\' ]; then\n            echo pr\n          else\n            node scripts/test-plan.ts --full --json\n          fi\n' +
+    'jobs:\n  selection:\n    outputs:\n      profile: ${{ steps.plan.outputs.profile }}\n    steps:\n      - id: plan\n        run: |\n          const isPr = process.env.GITHUB_EVENT_NAME === \'pull_request\';\n          const plan = !isPr || controlsChanged ? { profile: \'full\' } : candidatePlan;\n' +
     '  full:\n    needs: selection\n    if: needs.selection.outputs.profile == \'full\'\n    steps:\n      - name: Alpha\n        run: npm run guard:alpha\n      - name: Tests\n        run: npm run coverage:check\n',
   // Models the trusted completion consumer; it cannot execute a tag candidate.
   tagReleaseWorkflow:
@@ -193,6 +193,18 @@ describe('per-path reachability', () => {
     });
     expect(runsFullSuite('tag-release', broken)).toBe(false);
     expect(backstopReachability('tests/scripts/anything.test.ts', broken, 'tag-release').reachable).toBe(false);
+  });
+
+  it.each([
+    ["const isPr = process.env.GITHUB_EVENT_NAME === 'pull_request'", 'const isPr = true'],
+    ['!isPr || controlsChanged', 'isPr || controlsChanged'],
+    ["profile: 'full'", "profile: 'docs'"],
+    ['id: plan', 'id: disconnected'],
+    ['${{ steps.plan.outputs.profile }}', '${{ steps.other.outputs.profile }}'],
+  ])('rejects broken non-PR selection wiring: %s', (before, after) => {
+    const broken = inputs({ qualityWorkflow: inputs().qualityWorkflow.replace(before, after) });
+    expect(runsFullSuite('tag-release', broken)).toBe(false);
+    expect(scriptReachability('guard:alpha', broken, 'tag-release').reachable).toBe(false);
   });
 
   it('backstopReachability routes npm scripts to scriptReachability unchanged', () => {
