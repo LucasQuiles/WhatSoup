@@ -543,24 +543,7 @@ def _flush(config, state, path, now, emit, resolve_delivery):
             "freshness_seconds"
         ] and alert.get("delivery") not in supervisor.TERMINAL_DELIVERY
     supervisor.write_private(path, state)
-    remaining = []
-    for event in state["pending_events"]:
-        try:
-            receipt = emit(event)
-        except Exception:
-            receipt = {"published": False}
-        if receipt.get("published") is True:
-            state["alerts"].append(
-                {
-                    **event,
-                    "published_at": now,
-                    "delivery": "locally_persisted",
-                    "file": receipt.get("file"),
-                }
-            )
-        else:
-            remaining.append(event)
-    state["pending_events"] = remaining
+    supervisor.publish_pending_events(state, now, emit)
     state["alerts"], dropped = supervisor.retain_alerts(
         state["alerts"],
         now,
@@ -825,6 +808,9 @@ def main():
             )
         )
         return 0
+    except supervisor.PublicationCapacityError:
+        print(json.dumps({"event": "fleet_observer_degraded", "code": "publication_capacity_exhausted"}))
+        return 1
     except (OSError, ValueError, supervisor.StateError, BlockingIOError):
         return 1
 

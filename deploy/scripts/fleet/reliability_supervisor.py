@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+from copy import deepcopy
 from datetime import datetime
 import fcntl
 import hashlib
@@ -28,6 +29,8 @@ from urllib.parse import urlsplit, quote
 
 
 PRIVATE_JSON_MAX_BYTES = 1024 * 1024
+MAX_EMITTER_PATH_BYTES = 4096
+MAX_EMITTER_FILENAME_BYTES = 255
 
 
 class StateError(RuntimeError):
@@ -35,6 +38,10 @@ class StateError(RuntimeError):
 
 
 class CommandOutputError(StateError):
+    pass
+
+
+class PublicationCapacityError(StateError):
     pass
 
 
@@ -344,17 +351,88 @@ def publish_event(config: dict, event: dict) -> dict:
         "--print-path",
     ]
     try:
-        result = run_command(command, 15)
+        result = run_command(command, 15, max_stdout=MAX_EMITTER_PATH_BYTES)
         if result.returncode:
             return {"published": False}
         output = result.stdout.decode().strip()
+        filename = Path(output).name
+        if not filename or len(filename.encode("utf-8")) > MAX_EMITTER_FILENAME_BYTES:
+            return {"published": False}
         return {
             "published": True,
             "event_id": event["event_id"],
-            "file": Path(output).name,
+            "file": filename,
         }
     except (OSError, subprocess.TimeoutExpired, UnicodeError, CommandOutputError):
         return {"published": False}
+
+
+def publication_prefix_capacity(state: dict, now: float) -> int:
+    if not state["pending_events"]:
+        return 0
+    # Account for final-cycle metadata before an emitter can publish. A receipt
+    # may need six JSON bytes per filename byte; source paths are not retained.
+    dropped = state.get("delivery_dropped", {})
+    projection = {
+        **state,
+        "completed_at": now,
+        "delivery_dropped": {
+            **dropped,
+            "total": dropped.get("total", 0) + len(state["alerts"]) + len(state["pending_events"]),
+            "last_at": now,
+        },
+    }
+    try:
+        size = len(_bounded_json_bytes(projection, PRIVATE_JSON_MAX_BYTES - 1)) + 1
+        for index, event in enumerate(state["pending_events"]):
+            published = {
+                **event,
+                "published_at": now,
+                "delivery": "locally_persisted",
+                "file": "\x00" * MAX_EMITTER_FILENAME_BYTES,
+            }
+            pending_size = len(_bounded_json_bytes(event, PRIVATE_JSON_MAX_BYTES))
+            published_size = len(_bounded_json_bytes(published, PRIVATE_JSON_MAX_BYTES))
+            # Reserve success or failure while retaining the untouched suffix.
+            # An extra separator covers a move between the two arrays.
+            size += max(0, published_size - pending_size) + 2
+            if size > PRIVATE_JSON_MAX_BYTES:
+                return index
+        return len(state["pending_events"])
+    except StateError as exc:
+        if str(exc) == "state_file_oversized":
+            raise PublicationCapacityError("publication_capacity_exhausted") from exc
+        raise
+
+
+def publish_pending_events(state: dict, now: float, emit) -> None:
+    admitted = publication_prefix_capacity(state, now)
+    if state["pending_events"] and not admitted:
+        raise PublicationCapacityError("publication_capacity_exhausted")
+    remaining = []
+    for event in state["pending_events"][:admitted]:
+        try:
+            receipt = emit(deepcopy(event))
+            filename = receipt.get("file") if isinstance(receipt, dict) else None
+            valid_filename = filename is None or (
+                isinstance(filename, str)
+                and len(filename.encode("utf-8")) <= MAX_EMITTER_FILENAME_BYTES
+            )
+            published = isinstance(receipt, dict) and receipt.get("published") is True and valid_filename
+        except Exception:
+            published = False
+        if published:
+            state["alerts"].append(
+                {
+                    **event,
+                    "published_at": now,
+                    "delivery": "locally_persisted",
+                    "file": filename,
+                }
+            )
+        else:
+            remaining.append(event)
+    state["pending_events"] = remaining + state["pending_events"][admitted:]
 
 
 def initial_state(now: float) -> dict:
@@ -469,24 +547,7 @@ def _advance(config, state, now, probe, restart, emit, maintenance, path):
                 queue_event(state, "alert", "restart_budget_exhausted", now)
                 state["budget_alerted"] = True
     write_private(path, state)
-    remaining = []
-    for event in state["pending_events"]:
-        try:
-            receipt = emit(event)
-        except Exception:
-            receipt = {"published": False}
-        if receipt.get("published") is True:
-            state["alerts"].append(
-                {
-                    **event,
-                    "delivery": "locally_persisted",
-                    "published_at": now,
-                    "file": receipt.get("file"),
-                }
-            )
-        else:
-            remaining.append(event)
-    state["pending_events"] = remaining
+    publish_pending_events(state, now, emit)
     state["alerts"] = state["alerts"][-128:]
     state["completed_at"] = now
     write_private(path, state)
@@ -849,21 +910,7 @@ def run_sentinel(config, *, now=None, observe_remote=None, emit=None):
                 queue_event(state, "clear", reason, now)
         state["snapshot"] = snapshot
         write_private(path, state)
-        pending = []
-        for event in state["pending_events"]:
-            receipt = (emit or (lambda e: publish_event(config, e)))(event)
-            if receipt.get("published"):
-                state["alerts"].append(
-                    {
-                        **event,
-                        "published_at": now,
-                        "delivery": "locally_persisted",
-                        "file": receipt.get("file"),
-                    }
-                )
-            else:
-                pending.append(event)
-        state["pending_events"] = pending
+        publish_pending_events(state, now, emit or (lambda e: publish_event(config, e)))
         state["alerts"], dropped = retain_alerts(
             state["alerts"],
             now,
@@ -1098,6 +1145,9 @@ def main() -> int:
             output = observe(config)
         print(json.dumps(output, sort_keys=True))
         return 0
+    except PublicationCapacityError:
+        print(json.dumps({"event": "supervisor_degraded", "code": "publication_capacity_exhausted"}))
+        return 1
     except Exception:
         print(
             json.dumps(

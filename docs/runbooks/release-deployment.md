@@ -929,7 +929,8 @@ is replaced. Existing oversized files are not repaired or truncated.
 The supervisor command helper and local/SSH probe wrapper read stdout and
 stderr concurrently with byte limits. General command stdout permits one MiB;
 delivery lookup requires less than 64 KiB, and fleet probe stdout permits up
-to 64 KiB. Stderr permits up to 64 KiB for all these commands. Oversized output
+to 64 KiB. Emitter stdout permits 4,096 bytes, and its returned filename must
+fit in 255 UTF-8 bytes. Stderr permits up to 64 KiB for all these commands. Oversized output
 fails the operation without exposing captured output. Delivery remains
 unresolved, emission remains unconfirmed and a fleet probe reports transport
 failure. The helper closes its pipes and kills and reaps its direct child on
@@ -968,6 +969,19 @@ emission can leave the previously saved event pending for retry with the same
 ID. Publication deduplication and post-emission recovery still require
 qualification. No pending-event overflow policy or historical data removal is
 implemented by these limits.
+Before emission, all four monitoring paths reserve space for the published
+receipt, final cycle metadata and any pending events left behind. Reservation
+accounts for JSON escaping, including the maximum encoded filename. A cycle
+publishes only a fitting prefix of the pending queue; failed attempts and the
+untouched suffix remain pending in their original order. Emitters receive a
+copy of each event, so callback mutations cannot change the reserved state.
+If no pending event can fit, no emitter is called. The command reports
+`publication_capacity_exhausted` as degraded and exits unsuccessfully.
+This prevents capacity-caused failure after publication; it does not prove
+crash-safe publication, admit new transitions into a full queue, or guarantee
+progress when legacy state leaves no room for a receipt. Existing receipt
+evidence is not truncated to create space. Custom emitters still require
+bounded-output and retry-safe-publication qualification before activation.
 The sentinel stores its local alert records once, in the state's `alerts` list.
 The saved observation snapshot keeps remote alerts. Detection and recovery use
 a temporary combined view of both lists, including local delivery failures and

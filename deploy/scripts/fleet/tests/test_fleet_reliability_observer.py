@@ -303,7 +303,8 @@ def published_severity(observer, monkeypatch, event):
         returncode = 0
         stdout = b"/tmp/event.json\n"
 
-    def fake_run_command(command, timeout):
+    def fake_run_command(command, timeout, *, max_stdout):
+        assert max_stdout == 4096
         captured.append(command)
         return Result()
 
@@ -1283,13 +1284,14 @@ def emitter_flags(observer, monkeypatch, event):
     monkeypatch.setattr(
         observer.supervisor,
         "run_command",
-        lambda command, timeout: captured.append(command) or Result(),
+        lambda command, timeout, *, max_stdout: captured.append((command, max_stdout)) or Result(),
     )
     receipt = observer.supervisor.publish_event(
         {"emitter_command": ["/bin/emit"], "instance": "alpha-i"}, event
     )
     assert receipt["published"] is True
-    argv = captured[0]
+    argv, output_limit = captured[0]
+    assert output_limit == 4096
     return {
         argv[i]: argv[i + 1]
         for i in range(1, len(argv) - 1)
