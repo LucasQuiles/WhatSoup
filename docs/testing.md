@@ -72,6 +72,13 @@ rule tests still execute their normal assertions; production coverage scope and
 floors remain unchanged. The scan does not inherit Vitest instrumentation or
 Node compile caching.
 
+Health endpoint tests use `tests/core/_helpers/health.ts` for their config,
+logger, request and fixture builders. Separate files cover liveness privacy,
+send authorization, command endpoints, listeners, fallbacks, degradation and
+diagnostic projections. Each behavior retains its fresh database and server,
+environment restoration and negative assertions. Every fixture listener starts
+on an ephemeral port so isolated forks can run the files concurrently.
+
 `pr metadata` and the trusted `test-integrity (private)` check are separate
 required contexts alongside CodeQL and both Quality contexts. The authorized
 2026-11-10 protection update followed successful candidate checks
