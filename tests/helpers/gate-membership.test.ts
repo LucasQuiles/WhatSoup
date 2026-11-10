@@ -8,6 +8,13 @@
  */
 import { describe, expect, it } from 'vitest';
 import { fileURLToPath } from 'node:url';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { dirname, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { parse as parseYaml } from 'yaml';
+import ts from 'typescript';
+import { BRANCH_STEPS } from '../../scripts/push-gate.ts';
 
 import {
   CI_EXEMPT_PUSH_GATE_GUARDS,
@@ -227,4 +234,276 @@ describe('CI_EXEMPT_PUSH_GATE_GUARDS', () => {
       }
     }
   });
+});
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const liveGate = readGateInputs(repoRoot);
+const packageJson = { scripts: liveGate.scripts };
+const qualityWorkflow = liveGate.qualityWorkflow;
+const prMetadataWorkflow = readFileSync(resolve(repoRoot, '.github/workflows/pr-metadata.yml'), 'utf8');
+const whatsoupGuardWorkflow = readFileSync(resolve(repoRoot, '.github/workflows/whatsoup-guard.yml'), 'utf8');
+const branchChain = BRANCH_STEPS.map((step) => step.cmd).join(' && ');
+
+describe('quality workflow composition', () => {
+  it('keeps the planner dependency-free with its shared imports covered by the workflow controls', () => {
+    const visited = new Set<string>();
+    const inspect = (file: string) => {
+      if (visited.has(file)) return;
+      visited.add(file);
+      for (const imported of ts.preProcessFile(readFileSync(file, 'utf8')).importedFiles) {
+        if (imported.fileName.startsWith('node:')) continue;
+        expect(imported.fileName, `planner dependency in ${file}`).toMatch(/^\./);
+        inspect(resolve(dirname(file), imported.fileName));
+      }
+    };
+    inspect(resolve(repoRoot, 'scripts/test-plan.ts'));
+    expect([...visited].filter((file) => !file.startsWith(`${repoRoot}/scripts/`)).sort()).toEqual([
+      resolve(repoRoot, 'src/lib/git-env.ts'),
+      resolve(repoRoot, 'src/lib/type-guards.ts'),
+    ]);
+  });
+
+  it.each([
+    ['scripts/test-plan.ts', 'pull_request', 'full', false],
+    ['scripts/lib/test-selection-policy.ts', 'pull_request', 'full', false],
+    ['src/lib/type-guards.ts', 'pull_request', 'full', false],
+    ['src/lib/git-env.ts', 'pull_request', 'full', false],
+    ['.github/workflows/quality.yml', 'pull_request', 'full', false],
+    ['deploy/bot-errors-runtime-manifest.json', 'pull_request', 'full', false],
+    ['package.json', 'pull_request', 'full', false],
+    ['package-lock.json', 'pull_request', 'full', false],
+    ['.nvmrc', 'pull_request', 'full', false],
+    ['.npmrc', 'pull_request', 'full', false],
+    ['README.md', 'pull_request', 'docs', true],
+    ['README.md', 'push', 'full', false],
+  ] as const)('binds selection to changed controls and event: %s %s', (changedPath, event, profile, plannerRuns) => {
+    const root = mkdtempSync(resolve(tmpdir(), 'whatsoup-selection-authority-'));
+    try {
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8', timeout: 10_000 });
+      git('init', '-q');
+      git('config', 'user.name', 'Test');
+      git('config', 'user.email', 'test@example.invalid');
+      mkdirSync(resolve(root, 'scripts'), { recursive: true });
+      const planner = resolve(root, 'scripts/test-plan.ts');
+      writeFileSync(planner, `import { writeFileSync } from 'node:fs';
+writeFileSync('planner-ran', 'yes');
+console.log(JSON.stringify({ profile: 'docs', reasons: [], changedFiles: ['README.md'], lanes: Object.fromEntries(['root', 'console', 'browser', 'python', 'guard', 'docker', 'compatibility'].map(x => [x, false])) }));
+`);
+      git('add', '.');
+      git('-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'fixture');
+      const base = git('rev-parse', 'HEAD').trim();
+      mkdirSync(dirname(resolve(root, changedPath)), { recursive: true });
+      writeFileSync(resolve(root, changedPath), changedPath === 'scripts/test-plan.ts' ? `${readFileSync(planner, 'utf8')}\n` : 'changed\n');
+      git('add', '.');
+      git('-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'candidate');
+      const workflow = parseYaml(qualityWorkflow);
+      const step = workflow.jobs.selection.steps.find((entry: { id?: string }) => entry.id === 'plan');
+      const output = resolve(root, 'output');
+      const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', step.run], {
+        cwd: root, encoding: 'utf8', timeout: 15_000,
+        env: { ...process.env, PATH: `${dirname(process.execPath)}:${process.env.PATH}`, GITHUB_EVENT_NAME: event, TEST_BASE: base, GITHUB_OUTPUT: output, RUNNER_TEMP: root },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const planLine = readFileSync(output, 'utf8').split('\n').find((line) => line.startsWith('plan='));
+      const plan = JSON.parse(planLine!.slice('plan='.length));
+      expect(plan.profile).toBe(profile);
+      expect(plan.lanes).toEqual(profile === 'full'
+        ? { root: true, console: true, browser: true, python: true, guard: true, docker: true, compatibility: true }
+        : { root: false, console: false, browser: false, python: false, guard: false, docker: false, compatibility: false });
+      expect(existsSync(resolve(root, 'planner-ran'))).toBe(plannerRuns);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps disclosure guards ahead of every reduced PR profile without installing dependencies', () => {
+    const selection = qualityWorkflow.slice(qualityWorkflow.indexOf('  selection:'), qualityWorkflow.indexOf('  docs:'));
+    expect(selection).toContain("if: github.event_name == 'pull_request' && steps.plan.outputs.profile != 'full'");
+    expect(selection).toContain('node --experimental-strip-types scripts/repo-hygiene-guard.ts --branch-diff --base "$TEST_BASE"');
+    expect(selection).toContain('node --experimental-strip-types scripts/repo-hygiene-guard.ts --commit-authors');
+    expect(selection).toContain('node --experimental-strip-types scripts/publication-guard.ts --all');
+    expect(selection).toContain('node --experimental-strip-types scripts/publication-guard.ts --branch-diff');
+    expect(selection).not.toContain('npm ci');
+  });
+
+  it('runs the standalone PR metadata guard with authoritative pull-request event data', () => {
+    expect(packageJson.scripts['guard:pr-metadata']).toBe(
+      'bash scripts/run-with-pinned-node.sh scripts/pr-metadata-guard.ts',
+    );
+    expect(branchChain).toContain(
+      'tests/scripts/pr-metadata-guard.test.ts',
+    );
+    expect(prMetadataWorkflow).toMatch(
+      /on:\n  pull_request:\n    types: \[opened, synchronize, reopened, edited\]/,
+    );
+    expect(prMetadataWorkflow).toMatch(
+      /- name: PR metadata guard\n        if: github\.event_name == 'pull_request'\n        env:\n          PR_METADATA_EVENT: \$\{\{ github\.event_path \}\}\n        run: npm run guard:pr-metadata -- --github-event "\$PR_METADATA_EVENT" --json/,
+    );
+    expect(qualityWorkflow).toMatch(/pull_request:\n    types: \[opened, synchronize, reopened, edited\]/);
+  });
+
+  it('runs one read-only Node 24 semantic shadow step before expensive suites', () => {
+    const semanticMatches = qualityWorkflow.match(/name: Semantic quality \(shadow\)/g) ?? [];
+    const semanticIndex = qualityWorkflow.indexOf('name: Semantic quality (shadow)');
+    const suiteIndex = qualityWorkflow.indexOf('name: Test suite + coverage thresholds');
+
+    expect(semanticMatches).toHaveLength(1);
+    expect(semanticIndex).toBeGreaterThanOrEqual(0);
+    expect(semanticIndex).toBeLessThan(suiteIndex);
+    expect(qualityWorkflow).toContain('name: quality (24.x)');
+    expect(qualityWorkflow).not.toContain("if: matrix.node == '24.x'");
+    expect(qualityWorkflow).toContain('SEMANTIC_RECEIPT: ${{ runner.temp }}/semantic-quality.json');
+    expect(qualityWorkflow).toContain('base="origin/$GITHUB_BASE_REF"');
+    expect(qualityWorkflow).toContain('base="HEAD^"');
+    expect(qualityWorkflow).toContain('--mode shadow --base "$base" --receipt "$SEMANTIC_RECEIPT"');
+    expect(qualityWorkflow).toContain('>> "$GITHUB_STEP_SUMMARY"');
+    expect(qualityWorkflow).toMatch(/permissions:\n  contents: read/);
+    expect(qualityWorkflow).not.toContain('pull_request_target');
+    expect(qualityWorkflow).not.toContain('path: semantic-quality.json');
+  });
+
+  it('uses the shared quality installer before Python-backed gates run', () => {
+    const setupPythonIndex = qualityWorkflow.indexOf('name: Setup Python 3.12');
+    const pythonDepsIndex = qualityWorkflow.indexOf('name: Host dependency profile (strict)');
+    const tokenomicsIndex = qualityWorkflow.indexOf('name: Tokenomics Python tests');
+
+    expect(setupPythonIndex).toBeGreaterThanOrEqual(0);
+    expect(pythonDepsIndex).toBeGreaterThan(setupPythonIndex);
+    expect(tokenomicsIndex).toBeGreaterThan(pythonDepsIndex);
+    expect(qualityWorkflow).toMatch(/uses: actions\/setup-python@[0-9a-f]{40}/);
+    expect(qualityWorkflow).toContain("python-version: '3.12'");
+    expect(qualityWorkflow).toContain('install-host-dependencies.sh --profile quality --apply --yes --json');
+    expect(qualityWorkflow).not.toContain('Install Python and Linux quality prerequisites');
+    expect(qualityWorkflow).not.toContain('sudo apt-get install -y shellcheck ripgrep');
+  });
+
+  it('preserves exact required contexts while isolating Node 25 compatibility work', () => {
+    const compatibilityStart = qualityWorkflow.indexOf('  compatibility-full:');
+    const nextJob = qualityWorkflow.indexOf('  bot-errors-health-macos:', compatibilityStart);
+    const compatibility = qualityWorkflow.slice(compatibilityStart, nextJob);
+
+    expect(qualityWorkflow).toContain('name: quality (24.x)');
+    expect(qualityWorkflow).toContain("node-version-file: '.nvmrc'");
+    expect(compatibility).toContain('name: Quality full (25.x)');
+    expect(qualityWorkflow).not.toContain('matrix:');
+    expect(compatibility).toContain("node-version: '25.x'");
+    expect(compatibility).toContain('run: node --experimental-strip-types scripts/full-suite-battery.ts --pool=forks');
+    expect(compatibility).toContain('run: npm --prefix console run build');
+    expect(compatibility).not.toContain('coverage:check');
+    expect(compatibility).not.toContain('guard:');
+    expect(compatibility).not.toContain('Playwright');
+    expect(compatibility).not.toContain('Setup Python');
+    expect(compatibility).not.toContain('test-integrity');
+    expect(compatibility).not.toContain('ci-disk-reclaim');
+  });
+
+  it('requires strict and compatibility doctor receipts in the protected contexts', () => {
+    expect(qualityWorkflow.match(/name: Host dependency profile \(strict\)/g)).toHaveLength(1);
+    expect(qualityWorkflow.match(/name: Validate strict doctor receipt/g)).toHaveLength(1);
+    expect(qualityWorkflow).toContain('set -o pipefail');
+    expect(qualityWorkflow).toContain('whatsoup-doctor-quality.json');
+    expect(qualityWorkflow.match(/name: Host dependency profile \(compatibility-only\)/g)).toHaveLength(1);
+    expect(qualityWorkflow).toContain('--node-policy compatibility --json');
+    expect(qualityWorkflow).toContain('whatsoup-doctor-compatibility.json');
+  });
+
+  it('runs measured disk enforcement only in the Node 24 authority job', () => {
+    expect(qualityWorkflow.match(/bash scripts\/ci-disk-reclaim\.sh/g)).toHaveLength(1);
+    expect(qualityWorkflow).not.toContain('sudo rm -rf /usr/share/dotnet');
+    expect(qualityWorkflow).not.toContain('docker image prune --all --force || true');
+  });
+
+  it('runs branch-diff repo hygiene in CI before commit-author scanning', () => {
+    const branchDiffIndex = qualityWorkflow.indexOf('npm run guard:repo:branch-diff');
+    const commitAuthorIndex = qualityWorkflow.indexOf('npm run guard:repo:commit-authors');
+
+    expect(branchDiffIndex).toBeGreaterThanOrEqual(0);
+    expect(commitAuthorIndex).toBeGreaterThan(branchDiffIndex);
+    expect(qualityWorkflow).toContain('--base "origin/$GITHUB_BASE_REF"');
+  });
+
+  it('fetches one fail-closed PR base snapshot before every authority consumer', () => {
+    const fullStart = qualityWorkflow.indexOf('  full:');
+    const compatibilityIndex = qualityWorkflow.indexOf('  compatibility-full:', fullStart);
+    const authority = qualityWorkflow.slice(fullStart, compatibilityIndex);
+    const fetchCommand =
+      'git fetch origin "$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"';
+    const fetchLines = authority
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(
+        (line) =>
+          line.includes('git fetch')
+          && line.includes('refs/remotes/origin/$GITHUB_BASE_REF'),
+      );
+    const fetchIndex = authority.indexOf(fetchCommand);
+    const snapshotStepIndex = authority.indexOf('- name: Refresh PR base snapshot');
+    const semanticStepIndex = authority.indexOf('- name: Semantic quality (shadow)');
+    const snapshotStep = authority.slice(snapshotStepIndex, semanticStepIndex);
+    const consumerCommands = [
+      'npm run guard:semantic-quality -- --mode shadow --base "$base"',
+      'npm run guard:repo:branch-diff',
+      'npm run guard:repo:commit-authors',
+      'npm run guard:baseline-growth',
+      'npm run guard:design-system-hygiene -- --changed-since "origin/${GITHUB_BASE_REF}"',
+    ];
+
+    expect(compatibilityIndex).toBeGreaterThanOrEqual(0);
+    expect(fetchLines).toEqual([fetchCommand]);
+    expect(fetchIndex).toBeGreaterThanOrEqual(0);
+    expect(snapshotStepIndex).toBeGreaterThanOrEqual(0);
+    expect(semanticStepIndex).toBeGreaterThan(snapshotStepIndex);
+    expect(snapshotStep).toContain(fetchCommand);
+    expect(snapshotStep).not.toMatch(/continue-on-error|set \+e|\|\| true/);
+    for (const command of consumerCommands) {
+      expect(authority.indexOf(command)).toBeGreaterThan(fetchIndex);
+    }
+  });
+
+  it('relies on authoritative coverage instead of rerunning repo-hygiene tests', () => {
+    const fullStart = qualityWorkflow.indexOf('  full:');
+    const compatibilityIndex = qualityWorkflow.indexOf('  compatibility-full:', fullStart);
+    const authority = qualityWorkflow.slice(fullStart, compatibilityIndex);
+    const stagedIndex = authority.indexOf('npm run guard:repo:staged');
+    const branchDiffIndex = authority.indexOf('npm run guard:repo:branch-diff');
+    const commitAuthorIndex = authority.indexOf('npm run guard:repo:commit-authors');
+    const coverageIndex = authority.indexOf('npm run coverage:check -- --pool=forks');
+
+    expect(compatibilityIndex).toBeGreaterThanOrEqual(0);
+    expect(stagedIndex).toBeGreaterThanOrEqual(0);
+    expect(branchDiffIndex).toBeGreaterThan(stagedIndex);
+    expect(commitAuthorIndex).toBeGreaterThan(branchDiffIndex);
+    expect(coverageIndex).toBeGreaterThan(commitAuthorIndex);
+    expect(authority).not.toContain(
+      'run: npm test -- tests/scripts/repo-hygiene-guard.test.ts --pool=forks',
+    );
+  });
+
+  it('runs BOT ERRORS runtime manifest verification before the simulation matrix in CI', () => {
+    const runtimeManifestIndex = qualityWorkflow.indexOf('npm run guard:bot-errors-runtime-manifest');
+    const simulationIndex = qualityWorkflow.indexOf('npm run guard:bot-errors-simulation-matrix');
+
+    expect(runtimeManifestIndex).toBeGreaterThanOrEqual(0);
+    expect(simulationIndex).toBeGreaterThan(runtimeManifestIndex);
+  });
+
+  it('runs the sentinel coverage and deployer mutation gate in CI after the simulation matrix', () => {
+    const simulationIndex = qualityWorkflow.indexOf('npm run guard:bot-errors-simulation-matrix');
+    const sentinelGateIndex = qualityWorkflow.indexOf('bash deploy/scripts/run-sentinel-tests.sh');
+    const testSuiteIndex = qualityWorkflow.indexOf('name: Test suite');
+
+    expect(simulationIndex).toBeGreaterThanOrEqual(0);
+    expect(sentinelGateIndex).toBeGreaterThan(simulationIndex);
+    expect(testSuiteIndex).toBeGreaterThan(sentinelGateIndex);
+    expect(qualityWorkflow).toContain('name: BOT ERRORS sentinel coverage and deployer mutation gate');
+  });
+
+  it('keeps the standalone Node 25 guard package compatibility workflow', () => {
+    expect(whatsoupGuardWorkflow).toContain("node: ['25.x']");
+    expect(whatsoupGuardWorkflow).not.toContain("'24.x'");
+    expect(whatsoupGuardWorkflow).toContain('node-version: ${{ matrix.node }}');
+    expect(whatsoupGuardWorkflow).toContain('run: npm run typecheck');
+    expect(whatsoupGuardWorkflow).toContain('run: npm test');
+    expect(whatsoupGuardWorkflow).not.toContain('npm run coverage:proof');
+  });
+
 });
