@@ -116,6 +116,12 @@ export interface BotErrorsOutboxInput {
    * Omitted for every other source, which keeps their emitted shape unchanged.
    */
   outageStartedAt?: string;
+  /**
+   * Identity of the outage an alert or its clear reports: a lower-case UUID.
+   * Validated in the builder and merged into `diagnostics`; anything else is
+   * dropped. The dispatcher collapses repeats of one ID, so a resend is safe.
+   */
+  outageId?: string;
 }
 
 export interface BotErrorsOutboxWrite {
@@ -448,6 +454,12 @@ function boundedOutageStartedAt(value: unknown): { outageStartedAt?: string } {
   return { outageStartedAt: value };
 }
 
+const OUTAGE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function boundedOutageId(value: unknown): { outageId?: string } {
+  return typeof value === 'string' && OUTAGE_ID_RE.test(value) ? { outageId: value } : {};
+}
+
 export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = randomUUID(), createdAt = nowIso()) {
   const instance = input.instance.trim() || 'unknown';
   const source = input.source.trim() || 'unknown';
@@ -506,6 +518,7 @@ export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = rando
       ...boundedDegradationDiagnostics(input.degradationDiagnostics),
       // Additive, absent-by-default: only an outage alert carries it.
       ...boundedOutageStartedAt(input.outageStartedAt),
+      ...boundedOutageId(input.outageId),
     },
     delivery: {
       attempts: 0,

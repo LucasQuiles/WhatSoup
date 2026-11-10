@@ -10,7 +10,7 @@
  * stubbed; the outbox write, the emit-alert ladder and the marker are real.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -28,6 +28,19 @@ vi.mock('node:fs', async (importOriginal) => {
     ...actual,
     existsSync: (path: Parameters<typeof actual.existsSync>[0]) =>
       String(path).endsWith('whatsapp-alert.sh') ? helperPresent.value : actual.existsSync(path),
+  };
+});
+
+// The real private-fs, except that a test can make marker writes fail.
+const markerWrites = vi.hoisted(() => ({ fail: false }));
+vi.mock('../../src/lib/private-fs.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/lib/private-fs.ts')>();
+  return {
+    ...actual,
+    writePrivateJsonMarkerSync: (...args: Parameters<typeof actual.writePrivateJsonMarkerSync>) => {
+      if (markerWrites.fail) throw new Error('EACCES: marker write refused');
+      return actual.writePrivateJsonMarkerSync(...args);
+    },
   };
 });
 
@@ -74,6 +87,7 @@ beforeEach(() => {
   vi.setSystemTime(new Date(OUTAGE_START));
   spawnMock.mockClear();
   helperPresent.value = true;
+  markerWrites.fail = false;
   resetEmitAlertThrottle();
   root = mkdtempSync(join(tmpdir(), 'dead-link-delivery-'));
   outboxDir = join(root, 'outbox');
@@ -147,12 +161,117 @@ describe('dead-link alarm delivery', () => {
     process.env['BOT_ERRORS_OUTBOX_DIR'] = UNWRITABLE_OUTBOX;
     alarm.onConnectionOpen();
     expect(spawnMock).not.toHaveBeenCalled();
-    expect(marker()).toMatchObject({ linkOpenedAt: '2026-11-09T05:10:00.000Z' });
+    expect(marker()).toMatchObject({ state: 'clearing' });
 
     process.env['BOT_ERRORS_OUTBOX_DIR'] = outboxDir;
     await vi.advanceTimersByTimeAsync(DEAD_LINK_RETRY_MS);
     expect(queued('clear')).toHaveLength(1);
-    expect(existsSync(join(dataRoot, 'dead-link-outage.json'))).toBe(false);
+    expect(marker()).toMatchObject({ state: 'cleared' });
+    alarm.dispose();
+  });
+});
+
+describe('dead-link alarm: at least once per outage, with an outage ID', () => {
+  const MARKER_FILE = () => join(dataRoot, 'dead-link-outage.json');
+  const lockDataRoot = () => { markerWrites.fail = true; };
+  const unlockDataRoot = () => { markerWrites.fail = false; };
+
+  it('keeps the marker after a clear, recorded as cleared, and never deletes it', async () => {
+    const alarm = newAlarm();
+    alarm.onLoggedOut(LOGGED_OUT);
+    await vi.advanceTimersByTimeAsync(DEAD_LINK_GRACE_MS);
+    const id = queued('alert')[0]!.diagnostics.outageId as string;
+    expect(id).toMatch(/^[0-9a-f-]{36}$/);
+
+    alarm.onConnectionOpen();
+    expect(marker()).toMatchObject({ outageId: id, state: 'cleared', clearQueuedAt: expect.any(String) });
+    expect(queued('clear')[0]!.diagnostics.outageId).toBe(id);
+    alarm.dispose();
+  });
+
+  it('a marker that cannot be updated at the link open never suppresses the next outage', async () => {
+    const alarm = newAlarm();
+    alarm.onLoggedOut(LOGGED_OUT);
+    await vi.advanceTimersByTimeAsync(DEAD_LINK_GRACE_MS);
+    expect(queued('alert')).toHaveLength(1);
+    const first = marker();
+    expect(first.state).toBe('alerted');
+
+    lockDataRoot();
+    alarm.onConnectionOpen();
+    // The file still says "alerted" for the outage that has ended.
+    expect(marker()).toMatchObject({ outageId: first.outageId, state: 'alerted' });
+
+    alarm.onLoggedOut(LOGGED_OUT);
+    await vi.advanceTimersByTimeAsync(DEAD_LINK_GRACE_MS);
+    const cards = queued('alert');
+    expect(cards).toHaveLength(2);
+    expect(cards[1]!.diagnostics.outageId).not.toBe(cards[0]!.diagnostics.outageId);
+    alarm.dispose();
+  });
+
+  it('a failed marker write is retried on the retry timer and lands once the directory is writable', async () => {
+    mkdirSync(dataRoot, { recursive: true });
+    lockDataRoot();
+    const alarm = newAlarm();
+    alarm.onLoggedOut(LOGGED_OUT);
+    expect(existsSync(MARKER_FILE())).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(DEAD_LINK_GRACE_MS);
+    // Memory was authoritative: the card went out although nothing was persisted.
+    expect(queued('alert')).toHaveLength(1);
+
+    unlockDataRoot();
+    await vi.advanceTimersByTimeAsync(DEAD_LINK_RETRY_MS);
+    expect(marker()).toMatchObject({ state: 'alerted', outageId: queued('alert')[0]!.diagnostics.outageId });
+    alarm.dispose();
+  });
+
+  it('a restart after a failed persist raises the card when the marker is missing', async () => {
+    mkdirSync(dataRoot, { recursive: true });
+    lockDataRoot();
+    const before = newAlarm();
+    before.onLoggedOut(LOGGED_OUT);
+    before.dispose();
+    expect(existsSync(MARKER_FILE())).toBe(false);
+    unlockDataRoot();
+
+    const after = newAlarm();
+    after.resume();
+    after.onLoggedOut(LOGGED_OUT);
+    await vi.advanceTimersByTimeAsync(DEAD_LINK_GRACE_MS);
+    expect(queued('alert')).toHaveLength(1);
+    after.dispose();
+  });
+
+  it.each([
+    ['unparsable text', '{not json'],
+    ['an unknown state', JSON.stringify({ version: 2, outageId: 'a'.repeat(8) + '-aaaa-aaaa-aaaa-' + 'a'.repeat(12), outageStartedAt: OUTAGE_START, deadline: OUTAGE_START, state: 'weird', alertedAt: null, clearQueuedAt: null, statusCode: 401 })],
+    ['a marker from the earlier format', JSON.stringify({ version: 1, outageStartedAt: OUTAGE_START, statusCode: 401, alertedAt: null, linkOpenedAt: null, heldOutage: null })],
+  ])('a restart over %s treats the card as unconfirmed and raises it', async (_label, text) => {
+    mkdirSync(dataRoot, { recursive: true });
+    writeFileSync(MARKER_FILE(), text);
+
+    const alarm = newAlarm();
+    alarm.resume();
+    await vi.advanceTimersByTimeAsync(DEAD_LINK_GRACE_MS);
+    expect(queued('alert')).toHaveLength(1);
+    expect(marker()).toMatchObject({ state: 'alerted' });
+    alarm.dispose();
+  });
+
+  it('a marker that vanishes mid-outage sends the card again with the same outage ID', async () => {
+    const alarm = newAlarm();
+    alarm.onLoggedOut(LOGGED_OUT);
+    await vi.advanceTimersByTimeAsync(DEAD_LINK_GRACE_MS);
+    expect(queued('alert')).toHaveLength(1);
+
+    rmSync(MARKER_FILE());
+    alarm.onLoggedOut(LOGGED_OUT);
+    await vi.advanceTimersByTimeAsync(1);
+    const cards = queued('alert');
+    expect(cards).toHaveLength(2);
+    expect(cards[1]!.diagnostics.outageId).toBe(cards[0]!.diagnostics.outageId);
     alarm.dispose();
   });
 });

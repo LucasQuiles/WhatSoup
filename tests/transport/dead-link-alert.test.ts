@@ -309,7 +309,7 @@ describe('dead-link alert', () => {
     expect(deadLinkAlerts()).toHaveLength(0);
     // Nothing was raised, so nothing is cleared.
     expect(deadLinkClears()).toHaveLength(0);
-    expect(existsSync(join(testDataRoot, 'dead-link-outage.json'))).toBe(false);
+    expect(readMarker()).toMatchObject({ state: 'cleared', alertedAt: null });
     await manager.shutdown();
   });
 
@@ -328,7 +328,7 @@ describe('dead-link alert', () => {
     sockets.at(-1)!.emit(openEvent());
     expect(deadLinkClears()).toHaveLength(1);
     expect(deadLinkClears()[0]![0]).toBe('dead-link-bot');
-    expect(existsSync(join(testDataRoot, 'dead-link-outage.json'))).toBe(false);
+    expect(readMarker()).toMatchObject({ state: 'cleared' });
 
     // A second outage, 15 minutes after the relink, is its own card.
     await vi.advanceTimersByTimeAsync(15 * 60_000);
@@ -352,12 +352,12 @@ describe('dead-link alert', () => {
     clearAlertSourceMock.mockReturnValueOnce(FAILED);
     sockets.at(-1)!.emit(openEvent());
     expect(deadLinkClears()).toHaveLength(1);
-    expect(existsSync(join(testDataRoot, 'dead-link-outage.json'))).toBe(true);
+    expect(readMarker()).toMatchObject({ state: 'clearing' });
 
     await vi.advanceTimersByTimeAsync(15 * 60_000);
     // The pending clear was retried while the link stayed open.
     expect(deadLinkClears()).toHaveLength(2);
-    expect(existsSync(join(testDataRoot, 'dead-link-outage.json'))).toBe(false);
+    expect(readMarker()).toMatchObject({ state: 'cleared' });
     sockets.at(-1)!.emit(closeEvent(401));
     await vi.advanceTimersByTimeAsync(TEN_MINUTES);
     expect(deadLinkAlerts()).toHaveLength(2);
@@ -377,62 +377,43 @@ describe('dead-link alert', () => {
 
     alarm.onConnectionOpen();
     expect(deadLinkClears()).toHaveLength(1);
-    expect(deadLinkClears()[0]![4]).toEqual({ requireDurableOutbox: true });
+    expect(deadLinkClears()[0]![4]).toEqual({ requireDurableOutbox: true, outageId: expect.any(String) });
     // The dispatcher has not seen a clear: the recovered marker stays.
-    expect(readMarker()).toMatchObject({ outageStartedAt: OUTAGE_START, linkOpenedAt: '2026-11-09T05:10:00.000Z' });
+    expect(readMarker()).toMatchObject({ outageStartedAt: OUTAGE_START, state: 'clearing' });
 
-    // The next outage is held, not folded into the still-open incident.
+    // The next outage is its own outage with its own ID, not held behind the
+    // still-pending clear: it raises its card at its own deadline.
+    const firstId = readMarker().outageId;
     await vi.advanceTimersByTimeAsync(5 * 60_000);
     alarm.onLoggedOut(LOGGED_OUT);
+    expect(readMarker().outageId).not.toBe(firstId);
     await vi.advanceTimersByTimeAsync(TEN_MINUTES);
-    expect(deadLinkAlerts()).toHaveLength(1);
-    expect(readMarker()).toMatchObject({ outageStartedAt: OUTAGE_START });
-
-    // The outbox recovers: the clear is queued, then the held outage raises its card.
-    clearAlertSourceMock.mockImplementation(() => QUEUED);
-    // +1: the overdue card is a 0 ms timer armed inside the retry, which fake
-    // timers run 1 ms later.
-    await vi.advanceTimersByTimeAsync(DEAD_LINK_RETRY_MS + 1);
     expect(deadLinkAlerts()).toHaveLength(2);
     expect(deadLinkAlerts()[1]![2]).toContain('2026-11-09T05:15:00.000Z');
+    expect((deadLinkAlerts()[1]![6] as { outageId: string }).outageId).not.toBe(firstId);
     alarm.dispose();
   });
 
-  it('a repeated clear failure keeps the recovered marker and holds the next outage, across a restart', async () => {
+  it('a repeated clear failure keeps retrying across a restart, and a restart keeps the same outage', async () => {
     const first = new DeadLinkAlarm({ instance: 'dead-link-bot', dataRoot: testDataRoot, log: silentLog() as never });
     first.onLoggedOut(LOGGED_OUT);
     await vi.advanceTimersByTimeAsync(TEN_MINUTES);
     expect(deadLinkAlerts()).toHaveLength(1);
+    const outageId = readMarker().outageId;
 
     clearAlertSourceMock.mockImplementation(() => FAILED);
     first.onConnectionOpen();
-    await vi.advanceTimersByTimeAsync(5 * 60_000);
-    // A new 401 retries the clear; it fails again.
-    first.onLoggedOut(LOGGED_OUT);
-    const recovered = readMarker();
-    expect(recovered).toMatchObject({
-      outageStartedAt: OUTAGE_START,
-      linkOpenedAt: '2026-11-09T05:10:00.000Z',
-    });
-    expect(recovered.alertedAt).not.toBeNull();
-
-    await vi.advanceTimersByTimeAsync(3 * TEN_MINUTES);
-    expect(deadLinkAlerts()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(3 * DEAD_LINK_RETRY_MS);
+    expect(readMarker()).toMatchObject({ outageId, state: 'clearing' });
     expect(deadLinkClears().length).toBeGreaterThan(3);
-    expect(readMarker()).toMatchObject({ outageStartedAt: OUTAGE_START });
     first.dispose();
 
-    // A restart keeps holding; once the clear is queued the held outage alerts
-    // at once (its deadline has passed) and names its own start.
     const second = new DeadLinkAlarm({ instance: 'dead-link-bot', dataRoot: testDataRoot, log: silentLog() as never });
     second.resume();
-    await vi.advanceTimersByTimeAsync(DEAD_LINK_RETRY_MS);
-    expect(deadLinkAlerts()).toHaveLength(1);
     clearAlertSourceMock.mockImplementation(() => QUEUED);
     await vi.advanceTimersByTimeAsync(DEAD_LINK_RETRY_MS + 1);
-    expect(deadLinkAlerts()).toHaveLength(2);
-    expect(deadLinkAlerts()[1]![2]).toContain('2026-11-09T05:15:00.000Z');
-    expect(readMarker()).toMatchObject({ outageStartedAt: '2026-11-09T05:15:00.000Z', linkOpenedAt: null });
+    expect(readMarker()).toMatchObject({ outageId, state: 'cleared' });
+    expect(deadLinkAlerts()).toHaveLength(1);
     second.dispose();
   });
 
@@ -442,7 +423,11 @@ describe('dead-link alert', () => {
     await vi.advanceTimersByTimeAsync(TEN_MINUTES);
 
     expect(deadLinkAlerts()).toHaveLength(1);
-    expect(deadLinkAlerts()[0]![6]).toEqual({ requireDurableOutbox: true, outageStartedAt: OUTAGE_START });
+    expect(deadLinkAlerts()[0]![6]).toEqual({
+      requireDurableOutbox: true,
+      outageStartedAt: OUTAGE_START,
+      outageId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    });
     alarm.dispose();
   });
 

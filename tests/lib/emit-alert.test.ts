@@ -783,6 +783,24 @@ describe('emitAlert', () => {
     expect(readOnlyEvent().diagnostics).toMatchObject({ outageStartedAt: '2026-11-09T05:00:00.000Z' });
   });
 
+  it('carries the outage ID on the card and on its strict clear', () => {
+    const id = '0b6f6a52-3f43-4a58-9d8c-7a1f2f5b9c11';
+    emitAlert('whatsoup-prod', 'whatsapp_link_dead', 'link down', 'no reconnect', 'critical', undefined, {
+      requireDurableOutbox: true,
+      outageId: id,
+    });
+    clearAlertSource('whatsoup-prod', 'whatsapp_link_dead', 'relinked', undefined, {
+      requireDurableOutbox: true,
+      outageId: id,
+    });
+
+    const events = readdirSync(outboxDir)
+      .filter((file) => file.endsWith('.json'))
+      .map((file) => JSON.parse(readFileSync(join(outboxDir, file), 'utf8')) as { eventType: string; diagnostics: { outageId?: string } });
+    expect(events.map((event) => event.eventType).sort()).toEqual(['alert', 'clear']);
+    expect(events.map((event) => event.diagnostics.outageId)).toEqual([id, id]);
+  });
+
   it('logs legacy helper spawn errors after a fallback send is attempted', () => {
     process.env['BOT_ERRORS_OUTBOX_DIR'] = '/dev/null/outbox';
 

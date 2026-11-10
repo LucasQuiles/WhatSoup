@@ -614,3 +614,29 @@ describe('outage start on a dead-link alert', () => {
     expect(Object.keys(deadLinkEvent().diagnostics)).toEqual(['queue']);
   });
 });
+
+describe('outage ID on a dead-link alert and its clear', () => {
+  const ID = '0b6f6a52-3f43-4a58-9d8c-7a1f2f5b9c11';
+  const build = (eventType: 'alert' | 'clear', outageId?: unknown) =>
+    buildBotErrorsEvent({
+      eventType,
+      instance: 'agent-alpha',
+      source: 'whatsapp_link_dead',
+      summary: 'WhatsApp link down',
+      outageId: outageId as string | undefined,
+    });
+
+  it.each(['alert', 'clear'] as const)('carries a UUID into the %s diagnostics', (eventType) => {
+    expect(build(eventType, ID).diagnostics).toEqual({ queue: botErrorsOutboxDir(), outageId: ID });
+  });
+
+  it.each([
+    ['free text', 'yesterday morning'],
+    ['a path', '/home/testuser/.config/whatsoup/tokens.env'],
+    ['upper case', ID.toUpperCase()],
+    ['a trailing line', `${ID}\nextra`],
+    ['a non-string', 42],
+  ])('drops %s', (_label, outageId) => {
+    expect(build('alert', outageId).diagnostics).toEqual({ queue: botErrorsOutboxDir() });
+  });
+});

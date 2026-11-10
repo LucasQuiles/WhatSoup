@@ -45,7 +45,7 @@ def _event(event_id: str, event_type: str = "alert") -> dict:
         "schemaVersion": 2,
         "id": event_id,
         "eventType": event_type,
-        "eventKind": "incident_alert" if event_type == "alert" else "incident_clear",
+        "eventKind": "incident_alert" if event_type == "alert" else "incident_recovery",
         "severity": "critical" if event_type == "alert" else "info",
         "instance": _INSTANCE,
         "source": "whatsapp_link_dead",
@@ -161,3 +161,98 @@ def test_a_card_without_the_field_renders_as_before(tmp_path):
     mod = _load(tmp_path)
 
     assert "outage_started" not in mod.format_event(_card_event(None))
+
+
+# --- Outage identity: at least once per outage, collapsed by outage ID -------
+
+_ID_A = "0b6f6a52-3f43-4a58-9d8c-7a1f2f5b9c11"
+_ID_B = "7c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f"
+
+
+def _with_id(event: dict, outage_id) -> dict:
+    return dict(event, diagnostics={"queue": "/tmp/outbox", "outageId": outage_id})
+
+
+def _deliver(mod, event: dict, state: dict):
+    """The dispatcher's decision, then its delivery bookkeeping when it sends."""
+    reason = mod.should_suppress_send(event, state)
+    if reason is None:
+        mod.mark_incident_sent(event, state)
+    return reason
+
+
+def test_a_resend_of_one_outage_is_collapsed_even_after_its_incident_closed(tmp_path):
+    mod = _load(tmp_path)
+    state = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
+
+    assert _deliver(mod, _with_id(_event("card-1"), _ID_A), state) is None
+    assert _deliver(mod, _with_id(_event("clear-1", "clear"), _ID_A), state) is None
+    # A duplicate that arrives after the clear must not open an incident nobody clears.
+    reason = _deliver(mod, _with_id(_event("card-1-resend"), _ID_A), state)
+
+    assert reason is not None and "outage" in reason and _ID_A in reason
+    assert not state["openIncidents"]
+
+
+def test_a_resend_while_the_incident_is_open_is_collapsed(tmp_path):
+    mod = _load(tmp_path)
+    state = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
+    assert _deliver(mod, _with_id(_event("card-1"), _ID_A), state) is None
+
+    reason = _deliver(mod, _with_id(_event("card-1-resend"), _ID_A), state)
+
+    assert reason is not None and _ID_A in reason
+
+
+def test_a_new_outage_id_is_delivered_while_the_old_incident_is_open_or_cooling_down(tmp_path):
+    mod = _load(tmp_path)
+    state = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
+    assert _deliver(mod, _with_id(_event("card-1"), _ID_A), state) is None
+
+    # Old incident still open (its clear was lost): the new outage still pages.
+    assert _deliver(mod, _with_id(_event("card-2"), _ID_B), state) is None
+    # Closed moments ago (cooldown): a third distinct outage still pages.
+    assert _deliver(mod, _with_id(_event("clear-2", "clear"), _ID_B), state) is None
+    third = "1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9"
+    assert _deliver(mod, _with_id(_event("card-3"), third), state) is None
+
+
+def test_a_clear_for_an_older_outage_does_not_close_the_newer_incident(tmp_path):
+    mod = _load(tmp_path)
+    state = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
+    assert _deliver(mod, _with_id(_event("card-1"), _ID_A), state) is None
+    assert _deliver(mod, _with_id(_event("card-2"), _ID_B), state) is None
+
+    reason = _deliver(mod, _with_id(_event("clear-1-late", "clear"), _ID_A), state)
+
+    assert reason is not None and "stale" in reason
+    assert len(state["openIncidents"]) == 1
+
+
+def test_a_repeated_clear_is_a_no_op(tmp_path):
+    mod = _load(tmp_path)
+    state = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
+    assert _deliver(mod, _with_id(_event("card-1"), _ID_A), state) is None
+    assert _deliver(mod, _with_id(_event("clear-1", "clear"), _ID_A), state) is None
+
+    reason = _deliver(mod, _with_id(_event("clear-1-resend", "clear"), _ID_A), state)
+
+    assert reason is not None and "no open incident" in reason
+
+
+def test_an_older_producer_without_the_field_is_handled_as_before(tmp_path):
+    mod = _load(tmp_path)
+    state = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
+    assert _deliver(mod, _event("card-1"), state) is None
+
+    reason = _deliver(mod, _event("card-1-repeat"), state)
+
+    assert reason is not None and "duplicate suppressed" in reason
+    assert "outage_started" not in mod.format_event(_card_event(None))
+
+
+def test_a_malformed_outage_id_is_ignored_not_trusted(tmp_path):
+    mod = _load(tmp_path)
+    for value in ("not-a-uuid", _ID_A.upper(), _ID_A + "\n", 7, None):
+        assert mod.event_outage_id(_with_id(_event("x"), value)) is None, value
+    assert mod.event_outage_id(_with_id(_event("x"), _ID_A)) == _ID_A

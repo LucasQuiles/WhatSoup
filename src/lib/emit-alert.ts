@@ -94,6 +94,8 @@ export interface AlertEmissionOptions {
   degradationDiagnostics?: BotErrorsDegradationDiagnostics;
   /** When the reported outage began; validated by the event builder. */
   outageStartedAt?: string;
+  /** Identity of the reported outage (a UUID); the hub collapses repeats of one ID. */
+  outageId?: string;
   /**
    * Write the durable outbox or fail: no dry-run sink capture and no legacy
    * helper, whose acceptance does not prove the dispatcher has the event.
@@ -111,6 +113,8 @@ export interface AlertEmissionContext {
 export interface ClearAlertSourceOptions {
   /** Reject sink and legacy paths when a clear must preserve outbox causality. */
   requireDurableOutbox?: boolean;
+  /** Identity of the outage this clear ends; the hub ignores a clear for another outage. */
+  outageId?: string;
 }
 
 // BOT_ERRORS_{JID,EXPECTED_JID,REQUIRE_EXPECTED} are config-published (#2192
@@ -300,7 +304,7 @@ export function emitAlert(
   const degradationDiagnostics = opts?.degradationDiagnostics;
   const outageStartedAt = opts?.outageStartedAt;
   const input: BotErrorsOutboxInput = {
-    eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset, renotify, conversationKey, degradationDiagnostics, outageStartedAt,
+    eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset, renotify, conversationKey, degradationDiagnostics, outageStartedAt, outageId: opts?.outageId,
   };
   if (opts?.requireDurableOutbox) return writeDurableOutboxOnly(input, 'bot-errors strict alert outbox write failed');
   const sink = alertSinkPath();
@@ -408,7 +412,7 @@ export function clearAlertSource(
 ): AlertEmissionResult {
   if (options.requireDurableOutbox) {
     return writeDurableOutboxOnly(
-      { eventType: 'clear', instance, source, summary: `alert source cleared: ${source}`, evidence, severity: 'info', criticalAsset },
+      { eventType: 'clear', instance, source, summary: `alert source cleared: ${source}`, evidence, severity: 'info', criticalAsset, outageId: options.outageId },
       'bot-errors strict clear outbox write failed',
     );
   }
