@@ -106,6 +106,7 @@ import {
   persistAuthGenerationReceiptV2,
 } from '../../src/transport/auth-generation-v2.ts';
 import { parseAccountScopeId } from '../../src/transport/auth-custody-contracts.ts';
+import { settleAuthBondCapture } from '../helpers/auth-bond-capture.ts';
 
 const SCOPE = parseAccountScopeId('scope:line-a-wa')!;
 const EVIDENCE_DIGEST = 'f'.repeat(64);
@@ -206,6 +207,9 @@ async function establishRevokedGenerationWithBackup(): Promise<string> {
   const manager = new ConnectionManager();
   await manager.connect();
   await emit(openEvent());
+  // The open-time capture runs off the event loop (#3677); latest.json exists
+  // only once it settles.
+  await settleAuthBondCapture(manager);
   const digest = computeCredentialTreeDigest(testAuthDir);
   if (!digest.ok) throw new Error('fixture digest unexpectedly failed');
   const latest = JSON.parse(
