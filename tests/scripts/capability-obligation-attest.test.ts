@@ -20,6 +20,14 @@ import { Database } from '../../src/core/database.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import { trustedNodePath } from '../helpers/trusted-node.ts';
 import {
+  deliverThenThrow,
+  groupKillError,
+  reapFixtureGroups,
+  throwOnly,
+  type GroupMembershipAnswer,
+  type GroupSignalSeam,
+} from '../helpers/group-kill-seams.ts';
+import {
   assertArgsMatchConfig,
   assertMediaRootReadable,
   attest,
@@ -50,6 +58,16 @@ const NODE = trustedNodePath();
 function TIMING(waitMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, waitMs));
 }
+
+/** runResolverCanary with its test-only group-kill, membership-probe and reap-grace seams (issue 3568). */
+type CanaryWithSeams = (params: Parameters<typeof runResolverCanary>[0] & {
+  kill?: GroupSignalSeam;
+  probeGroup?: (pgid: number) => GroupMembershipAnswer;
+  reapGraceMs?: number;
+}) => ReturnType<typeof runResolverCanary>;
+const canaryWithSeams = runResolverCanary as unknown as CanaryWithSeams;
+const CLEAN_RESOLVER = 'process.stdout.write("processed:" + process.argv[2])\n';
+const listResolverStages = (): string[] => readdirSync(tmpdir()).filter((n) => n.startsWith('ws-resolver-stage-'));
 
 /**
  * A parsed `capabilityObligations` block whose mediaRoot / contract version /
@@ -256,6 +274,118 @@ describe('runResolverCanary (bounded, non-sending resolver probe)', () => {
     // With the close-handler group reap, the grandchild was SIGKILLed → the marker never lands.
     expect(existsSync(marker)).toBe(false);
   }, 30_000);
+
+  it('issue 3568: an EPERM close-time group reap on a group with no live member passes, the same as ESRCH', async () => {
+    const dir = tmp.make('canary-eperm-reaped');
+    const input = canaryInput(dir, CLEAN_RESOLVER);
+    const targets: number[] = [];
+    const probed: number[] = [];
+    const eperm = await canaryWithSeams({
+      ...input, probeSource: 'https://probe.example/clip', nonce: 'eperm-reaped',
+      kill: deliverThenThrow('EPERM', targets),
+      probeGroup: (pgid) => { probed.push(pgid); return 'no-live-members'; },
+    });
+    const esrchProbed: number[] = [];
+    const esrch = await canaryWithSeams({
+      ...input, probeSource: 'https://probe.example/clip', nonce: 'esrch-reaped',
+      kill: deliverThenThrow('ESRCH', []),
+      probeGroup: (pgid) => { esrchProbed.push(pgid); return 'live'; },
+    });
+    expect(probed.length).toBeGreaterThan(0);
+    expect(probed.every((pgid) => pgid > 0 && targets.includes(-pgid))).toBe(true);
+    expect(esrchProbed).toEqual([]);
+    expect(esrch.result, JSON.stringify(esrch.detail)).toBe('pass');
+    expect(eperm.result, JSON.stringify(eperm.detail)).toBe('pass');
+    expect((eperm.detail as Record<string, unknown>)?.['reapError']).toBeUndefined();
+  }, 30_000);
+
+  it('issue 3568: an EPERM close-time group reap fails the canary while a same-group grandchild is live (default ps probe)', async () => {
+    const dir = tmp.make('canary-eperm-live');
+    // The resolver leaves a same-group grandchild alive for about 3 s, then exits 0 with output.
+    const parentSrc = [
+      'const cp=require("node:child_process");',
+      'cp.spawn(process.execPath,["-e","Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,3000)"],{stdio:"ignore"}).unref();',
+      'process.stdout.write("processed-with-grandchild");process.exit(0);',
+    ].join('');
+    const targets: number[] = [];
+    try {
+      const outcome = await canaryWithSeams({
+        ...canaryInput(dir, parentSrc, { name: 'parent.cjs' }), probeSource: 'https://probe.example/clip', nonce: 'eperm-live',
+        kill: throwOnly('EPERM', targets),
+      });
+      expect(outcome.result).toBe('fail');
+      expect(String((outcome.detail as Record<string, unknown>)?.['reapError'])).toMatch(/EPERM; group membership probe: live/);
+    } finally {
+      reapFixtureGroups(targets); // the grandchild is still alive here, so its group id is still allocated
+    }
+  }, 30_000);
+
+  it('issue 3568: an EPERM close-time group reap that the membership probe cannot read fails closed', async () => {
+    const dir = tmp.make('canary-eperm-unknown');
+    const probed: number[] = [];
+    const outcome = await canaryWithSeams({
+      ...canaryInput(dir, CLEAN_RESOLVER), probeSource: 'https://probe.example/clip', nonce: 'eperm-unknown',
+      kill: throwOnly('EPERM', []),
+      probeGroup: (pgid) => { probed.push(pgid); return 'unknown'; },
+    });
+    expect(outcome.result).toBe('fail');
+    expect(String((outcome.detail as Record<string, unknown>)?.['reapError'])).toMatch(/EPERM; group membership probe: unknown/);
+    expect(probed.length).toBeGreaterThan(0);
+    // No fixture reap: the leader exited and was reaped, so its group id may already be reused.
+  }, 30_000);
+
+  it('issue 3568: a group-reap error other than EPERM fails the canary without consulting the membership probe', async () => {
+    const dir = tmp.make('canary-einval');
+    let probeCalls = 0;
+    const outcome = await canaryWithSeams({
+      ...canaryInput(dir, CLEAN_RESOLVER), probeSource: 'https://probe.example/clip', nonce: 'einval',
+      kill: throwOnly('EINVAL', []),
+      probeGroup: () => { probeCalls += 1; return 'no-live-members'; },
+    });
+    expect(outcome.result).toBe('fail');
+    expect(String((outcome.detail as Record<string, unknown>)?.['reapError'])).toMatch(/EINVAL/);
+    expect(probeCalls).toBe(0);
+  }, 30_000);
+
+  it('issue 3568: a watchdog EPERM that leaves a live grandchild holding stdout settles fail within the reap grace and removes the staging dir', async () => {
+    const dir = tmp.make('canary-eperm-no-close');
+    // The grandchild inherits the canary's stdout pipe and holds it for 15 s, so `close` cannot
+    // fire before the grace. The resolver then blocks, so the 3 s watchdog fires; 3 s leaves room
+    // for two node start-ups under load.
+    const parentSrc = [
+      'const cp=require("node:child_process");',
+      'cp.spawn(process.execPath,["-e","Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,15000)"],{stdio:"inherit"}).unref();',
+      'process.stdout.write("started");setInterval(function(){},1000);',
+    ].join('');
+    const targets: number[] = [];
+    // The leader dies and a member survives: SIGKILL only the leader, then answer EPERM.
+    const killLeaderThenEperm: GroupSignalSeam = (target, signal) => {
+      targets.push(target);
+      if (target < -1) {
+        try { process.kill(-target, signal); } catch { /* the leader may already be gone */ }
+      }
+      throw groupKillError('EPERM');
+    };
+    const before = new Set(listResolverStages());
+    const start = Date.now();
+    try {
+      const outcome = await canaryWithSeams({
+        ...canaryInput(dir, parentSrc, { name: 'parent.cjs', timeoutMs: 3_000, minOutputBytes: 1 }),
+        probeSource: 'https://probe.example/clip', nonce: 'eperm-no-close',
+        kill: killLeaderThenEperm,
+        reapGraceMs: 400,
+      });
+      const elapsed = Date.now() - start;
+      const detail = outcome.detail as Record<string, unknown>;
+      expect(outcome.result).toBe('fail');
+      expect(String(detail?.['reapError'])).toMatch(/EPERM; group membership probe: live/);
+      expect(detail?.['reason']).toBe('resolver_close_not_observed');
+      expect(elapsed).toBeLessThan(10_000); // the grace settled it, not a close at the grandchild's 15 s release
+      expect(listResolverStages().filter((n) => !before.has(n))).toEqual([]); // cleanup ran on the grace path
+    } finally {
+      reapFixtureGroups(targets); // the grandchild is still alive, so its group id is still allocated
+    }
+  }, 20_000);
 });
 
 describe('capability-obligation-attest CLI (the operator front-door records end-to-end)', () => {

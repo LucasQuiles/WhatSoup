@@ -73,9 +73,14 @@ import {
   writeFileSync,
   writeSyntheticRunInitAnchor,
 } from './support.ts';
+import {
+  deliverThenThrow,
+  groupKillError,
+  reapFixtureGroups,
+  type GroupMembershipAnswer,
+  type GroupSignalSeam,
+} from '../../helpers/group-kill-seams.ts';
 
-type GroupSignal = (target: number, signal: NodeJS.Signals) => void;
-type GroupMembershipAnswer = 'live' | 'no-live-members' | 'unknown';
 type WatchdogTeardownOutcome = {
   result: ReturnType<typeof validateBoundaryRun>;
   timedOut: boolean;
@@ -88,7 +93,7 @@ type WatchdogSeamApi = {
       deadlineMs: number;
       killGraceMs: number;
       expectedExit: string;
-      kill?: GroupSignal;
+      kill?: GroupSignalSeam;
       probeGroup?: (pgid: number) => GroupMembershipAnswer;
     },
   ) => Promise<WatchdogTeardownOutcome>;
@@ -96,36 +101,6 @@ type WatchdogSeamApi = {
 
 const LONG_LIVED_CHILD = [process.execPath, '-e', 'setInterval(()=>{},1000)'];
 const SEAM_BOUNDS = { deadlineMs: 120, killGraceMs: 60, expectedExit: '0' };
-
-function groupKillError(code: 'EPERM' | 'ESRCH' | 'EINVAL'): NodeJS.ErrnoException {
-  const error = new Error(`kill ${code}`) as NodeJS.ErrnoException;
-  error.code = code;
-  error.syscall = 'kill';
-  return error;
-}
-
-/**
- * The macOS shape of issue 3568: the signal reaches the group, then kill(-pgid) answers with
- * an error. Delivering first keeps the fixture group from leaking. Only a negative group id
- * below -1 is signalled, never 0 or -1.
- */
-function deliverThenThrow(code: 'EPERM' | 'ESRCH', targets: number[]): GroupSignal {
-  return (target, signal) => {
-    targets.push(target);
-    if (target < -1) {
-      try { process.kill(target, signal); } catch { /* the group may already be gone */ }
-    }
-    throw groupKillError(code);
-  };
-}
-
-/** Kills a fixture group that a test left alive on purpose. */
-function reapFixtureGroups(targets: readonly number[]): void {
-  for (const target of new Set(targets)) {
-    if (target >= -1) continue;
-    try { process.kill(target, 'SIGKILL'); } catch { /* the group is already gone */ }
-  }
-}
 
 /** The teardown fields that do not depend on whether SIGTERM or SIGKILL ended the child. */
 function teardownShape(outcome: WatchdogTeardownOutcome): Record<string, boolean> {
