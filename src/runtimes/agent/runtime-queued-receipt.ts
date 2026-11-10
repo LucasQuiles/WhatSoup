@@ -20,28 +20,28 @@
 // WORDING. A per_chat /stop terminalizes the active turn AND every pending turn
 // in that chat's queue (terminalizePerChatTurnQueueForKill finalizes
 // `teardown.pending` as operator-cancelled), so the receipt never promises that
-// /stop cancels less. Three facts pick one of six constants:
+// /stop cancels less. Two facts pick one of four constants:
 // - Position. "your earlier request ... This message is next" only when the
 //   running turn is the same sender's own request and this message is the only
 //   one waiting, so nothing else can run before it (owner decision,
 //   2026-11-09). Otherwise "an earlier request ... queued behind it": the
 //   running turn may be another group member's or a scheduled job, or other
 //   messages wait ahead of this one.
-// - Audience. Every group member reads the receipt, so the /stop sentence
-//   appears only where any reader may reach and run /stop. A per_chat DM
-//   always gets it. A group gets it only when its sender policy is not
-//   allowlisted_only (there a member who is not allowlisted is dropped at
-//   ingest before any gate) and the command gate's own rule
-//   (commandGateDenies with the /stop spec's gate) accepts a reader who is not
-//   an admin, which holds exactly when no admin is configured. The receipt
-//   never runs the admin check, and without the sentence it names no one to
-//   ask.
-// - Venue. A DM says "Send /stop". A group says "Mention me with /stop": a
-//   group that is not on the group allowlist dispatches only a message that
-//   mentions the bot, and ingest drops a bare /stop there with no reply.
+// - Venue. Only a DM receipt has the /stop sentence. Its only reader is the
+//   sender, who reached the bot with the queued message and so reaches it
+//   with a bare /stop, and the command gate's own rule (commandGateDenies
+//   with the /stop spec's gate) never refuses a per_chat DM. A group receipt
+//   never has it: every member reads it, and no group can promise every
+//   reader a working /stop. The gate refuses members who are not admins once
+//   admins are configured; ingest drops blocked and unresolved-LID members,
+//   and members who are not allowlisted under allowlisted_only; a
+//   mention-only group drops a bare /stop; and some transports carry no
+//   mention data, so no one wording fits every group. Without the sentence
+//   the receipt names no one to ask, and a group receipt reads no
+//   configuration.
 // The /stop sentence does not promise the outcome: a permitted /stop can end
-// uncertain, and its reply says so. No text echoes the queued message's
-// content.
+// uncertain or find a stop already in progress, and its reply says so. No
+// text echoes the queued message's content.
 //
 // RATE LIMIT. At most one receipt per chat per cooldown window, so a busy group
 // is not spammed while one long task runs. The cooldown is consumed when the
@@ -57,73 +57,56 @@ import { commandGateDenies, getCommandSpec } from './command-registry.ts';
 
 const log = createChildLogger('runtime-queued-receipt');
 
-/** Own request, nothing else waiting, where the receipt offers no /stop. */
+/** Own request, nothing else waiting, where the receipt offers no /stop
+ *  (every group receipt). */
 export const QUEUED_TURN_RECEIPT_NO_STOP_TEXT =
   '*Still working on your earlier request.* This message is next.';
 
-/** Any other position, where the receipt offers no /stop. */
+/** Any other position, where the receipt offers no /stop (every group receipt). */
 export const QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT =
   '*Still working on an earlier request.* This message is queued behind it.';
 
-/** One /stop sentence: how the venue sends /stop, then the tail every venue
- *  shares, so the DM and group texts cannot drift apart. */
-function stopSentence(
-  send: 'Send' | 'Mention me with',
-  request: 'the earlier request' | 'that request',
-): string {
-  return `${send} /stop to cancel ${request} and anything waiting; I'll reply with the outcome.`;
+/** The one /stop sentence, so the two texts that offer /stop cannot drift apart. */
+function stopSentence(request: 'the earlier request' | 'that request'): string {
+  return `Send /stop to cancel ${request} and anything waiting; I'll reply with the outcome.`;
 }
 
-// The /stop texts extend the no-/stop texts, so all of them say the same status.
+// The /stop texts extend the no-/stop texts, so both say the same status.
 export const QUEUED_TURN_RECEIPT_TEXT =
-  `${QUEUED_TURN_RECEIPT_NO_STOP_TEXT} ${stopSentence('Send', 'the earlier request')}`;
-
-export const QUEUED_TURN_RECEIPT_GROUP_TEXT =
-  `${QUEUED_TURN_RECEIPT_NO_STOP_TEXT} ${stopSentence('Mention me with', 'the earlier request')}`;
+  `${QUEUED_TURN_RECEIPT_NO_STOP_TEXT} ${stopSentence('the earlier request')}`;
 
 export const QUEUED_TURN_RECEIPT_OTHER_TEXT =
-  `${QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT} ${stopSentence('Send', 'that request')}`;
-
-export const QUEUED_TURN_RECEIPT_OTHER_GROUP_TEXT =
-  `${QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT} ${stopSentence('Mention me with', 'that request')}`;
+  `${QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT} ${stopSentence('that request')}`;
 
 /** Pick the receipt that is true for this admission (see WORDING above). */
 export function queuedTurnReceiptText(
   active: Pick<QueuedTurn, 'senderJid' | 'purpose'>,
-  queued: Pick<QueuedTurn, 'senderJid' | 'isGroup'>,
+  queued: Pick<QueuedTurn, 'senderJid'>,
   pending: number,
   stopOffered: boolean,
 ): string {
   const ownRequest = active.senderJid === queued.senderJid && active.purpose !== 'scheduled-agent-job';
   if (ownRequest && pending <= 1) {
-    if (!stopOffered) return QUEUED_TURN_RECEIPT_NO_STOP_TEXT;
-    return queued.isGroup ? QUEUED_TURN_RECEIPT_GROUP_TEXT : QUEUED_TURN_RECEIPT_TEXT;
+    return stopOffered ? QUEUED_TURN_RECEIPT_TEXT : QUEUED_TURN_RECEIPT_NO_STOP_TEXT;
   }
-  if (!stopOffered) return QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT;
-  return queued.isGroup ? QUEUED_TURN_RECEIPT_OTHER_GROUP_TEXT : QUEUED_TURN_RECEIPT_OTHER_TEXT;
-}
-
-/** The configuration the /stop offer reads; each is read only when needed. */
-interface QueuedTurnReceiptAudience {
-  readonly adminCount: () => number;
-  readonly groupSendersAllowlistedOnly: () => boolean;
+  return stopOffered ? QUEUED_TURN_RECEIPT_OTHER_TEXT : QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT;
 }
 
 /** Whether the receipt offers /stop to its readers (see WORDING above). */
 function receiptOffersStop(
   scope: SessionScope,
   isGroup: boolean,
-  audience: QueuedTurnReceiptAudience,
+  adminCount: () => number,
 ): boolean {
-  // A member who is not allowlisted never reaches the gate (access-policy.ts).
-  if (isGroup && audience.groupSendersAllowlistedOnly()) return false;
+  // Every group member reads a group receipt, and no group can promise every
+  // reader a working /stop, so a group gets no offer before any config read.
+  if (isGroup) return false;
   return !commandGateDenies(getCommandSpec('stop').gate, {
     sessionScope: scope,
     isGroup,
     // A getter, so a DM never reads the admin count, as in the command gate.
-    get adminCount() { return audience.adminCount(); },
-    // Every group member reads the receipt, so it offers /stop only where any
-    // member may run it; in a per_chat DM the gate never asks.
+    get adminCount() { return adminCount(); },
+    // A DM's only reader is the sender; in a per_chat DM the gate never asks.
     isAdmin: () => false,
   });
 }
@@ -156,10 +139,9 @@ export interface QueuedTurnReceiptNotifierOpts {
   readonly enabled: () => boolean;
   /** Out-of-band send. Must not route through the active turn's outbound queue. */
   readonly send: (chatJid: string, text: string) => Promise<void>;
-  /** Configured admin count, the /stop gate's input (see WORDING above). */
+  /** Configured admin count, the /stop gate's input (see WORDING above). A
+   *  group receipt never reads it. */
   readonly adminCount: () => number;
-  /** Whether the group sender policy is allowlisted_only (see WORDING above). */
-  readonly groupSendersAllowlistedOnly: () => boolean;
   /** Time source for the cooldown; defaults to the system clock. */
   readonly clock?: Clock;
   readonly cooldownMs?: number;
@@ -169,17 +151,14 @@ export class QueuedTurnReceiptNotifier {
   private readonly lastSentAt = new Map<string, number>();
   private readonly enabled: () => boolean;
   private readonly send: (chatJid: string, text: string) => Promise<void>;
-  private readonly audience: QueuedTurnReceiptAudience;
+  private readonly adminCount: () => number;
   private readonly clock: Clock;
   private readonly cooldownMs: number;
 
   constructor(opts: QueuedTurnReceiptNotifierOpts) {
     this.enabled = opts.enabled;
     this.send = opts.send;
-    this.audience = {
-      adminCount: opts.adminCount,
-      groupSendersAllowlistedOnly: opts.groupSendersAllowlistedOnly,
-    };
+    this.adminCount = opts.adminCount;
     this.clock = opts.clock ?? systemClock;
     this.cooldownMs = opts.cooldownMs ?? DEFAULT_QUEUED_TURN_RECEIPT_COOLDOWN_MS;
   }
@@ -193,7 +172,7 @@ export class QueuedTurnReceiptNotifier {
       const decision = this.decide(admission);
       if (decision !== 'sent') return decision;
       const { scope, mapKey, turn, queue } = admission;
-      const stopOffered = receiptOffersStop(scope, turn.isGroup, this.audience);
+      const stopOffered = receiptOffersStop(scope, turn.isGroup, this.adminCount);
       // decide() returned 'sent' only with a non-null active turn other than this one.
       const text = queuedTurnReceiptText(queue!.activeTurn!, turn, queue!.pending, stopOffered);
       this.lastSentAt.set(mapKey, this.clock.now());

@@ -1995,9 +1995,8 @@ export class AgentRuntime implements Runtime {
     send: (chatJid, text) => sendTracked(
       this.messenger, chatJid, text, this.durability ?? undefined, { replayPolicy: 'unsafe' },
     ),
-    // Config only: the receipt offers /stop where any reader may reach and run it.
+    // The /stop gate's admin count; only a DM receipt offers /stop.
     adminCount: () => config.adminPhones.size,
-    groupSendersAllowlistedOnly: () => config.groupSenderPolicy === 'allowlisted_only',
   });
   /** Deferred and in-progress live-route recycle ownership by scope key. */
   private readonly routeRecycleLifecycle = new RouteRecycleLifecycle<SessionManager>();

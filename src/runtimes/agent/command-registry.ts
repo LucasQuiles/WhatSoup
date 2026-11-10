@@ -51,11 +51,11 @@ export interface CommandGateContext {
 
 /** The one authority rule for local commands (see CommandGate). runtime.ts
  *  enforces it on every local command, and the queued receipt
- *  (runtime-queued-receipt.ts) asks it whether a reader who is not an admin
- *  may run /stop, since every group member reads the receipt, so the receipt
- *  never offers a command the gate refuses. The empty-admin exemption (B21-A
- *  F2) is 'admin-shared-scope' only: plain 'admin' commands stay denied when
- *  no admin is configured. */
+ *  (runtime-queued-receipt.ts) asks it before a DM receipt offers /stop, so
+ *  the receipt never offers a command the gate refuses. A group receipt never
+ *  offers /stop, because not every member can reach the bot. The empty-admin
+ *  exemption (B21-A F2) is 'admin-shared-scope' only: plain 'admin' commands
+ *  stay denied when no admin is configured. */
 export function commandGateDenies(gate: CommandGate, ctx: CommandGateContext): boolean {
   switch (gate) {
     case 'none':
