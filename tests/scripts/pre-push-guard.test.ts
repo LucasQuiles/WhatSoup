@@ -13,6 +13,7 @@ import { dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { parse as parseYaml } from 'yaml';
+import ts from 'typescript';
 
 import { describe, expect, it, vi } from 'vitest';
 
@@ -1277,12 +1278,35 @@ describe('verify chain composition (push-gate manifest)', () => {
 });
 
 describe('quality workflow composition', () => {
+  it('keeps the planner dependency-free with its shared imports covered by the workflow controls', () => {
+    const visited = new Set<string>();
+    const inspect = (file: string) => {
+      if (visited.has(file)) return;
+      visited.add(file);
+      for (const imported of ts.preProcessFile(readFileSync(file, 'utf8')).importedFiles) {
+        if (imported.fileName.startsWith('node:')) continue;
+        expect(imported.fileName, `planner dependency in ${file}`).toMatch(/^\./);
+        inspect(resolve(dirname(file), imported.fileName));
+      }
+    };
+    inspect(resolve(repoRoot, 'scripts/test-plan.ts'));
+    expect([...visited].filter((file) => !file.startsWith(`${repoRoot}/scripts/`)).sort()).toEqual([
+      resolve(repoRoot, 'src/lib/git-env.ts'),
+      resolve(repoRoot, 'src/lib/type-guards.ts'),
+    ]);
+  });
+
   it.each([
     ['scripts/test-plan.ts', 'pull_request', 'full', false],
     ['scripts/lib/test-selection-policy.ts', 'pull_request', 'full', false],
     ['src/lib/type-guards.ts', 'pull_request', 'full', false],
     ['src/lib/git-env.ts', 'pull_request', 'full', false],
     ['.github/workflows/quality.yml', 'pull_request', 'full', false],
+    ['deploy/bot-errors-runtime-manifest.json', 'pull_request', 'full', false],
+    ['package.json', 'pull_request', 'full', false],
+    ['package-lock.json', 'pull_request', 'full', false],
+    ['.nvmrc', 'pull_request', 'full', false],
+    ['.npmrc', 'pull_request', 'full', false],
     ['README.md', 'pull_request', 'docs', true],
     ['README.md', 'push', 'full', false],
   ] as const)('binds selection to changed controls and event: %s %s', (changedPath, event, profile, plannerRuns) => {
