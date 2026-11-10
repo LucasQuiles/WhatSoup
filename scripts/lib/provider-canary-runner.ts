@@ -293,9 +293,9 @@ async function waitUntil(predicate: () => boolean, deadlineMs: number): Promise<
 
 /**
  * What `reapProcessGroup` found. `reapError` names the first failure by error code and probe
- * answer only, never by message, path or command text. `inconclusive` marks a failure that does
- * not end with a live member: the group went anyway, or its last check could not read it. Such a
- * failure is infrastructure state and proves nothing about the provider.
+ * answer only, never by message, path or command text. `inconclusive` marks a failure with no live
+ * member to show for it: no kill was refused on a live member, and the reap did not end with one.
+ * Such a failure is infrastructure state and proves nothing about the provider.
  */
 export interface ProcessGroupReap {
   reaped: boolean;
@@ -313,14 +313,15 @@ export interface ProcessGroupReapDeps {
 
 /**
  * Ends the provider's process group: SIGTERM, then SIGKILL, each followed by a bounded wait
- * until `groupGone` proves the group gone (issue 3568). A group that holds only zombies is gone;
- * a live member, or a group the probe cannot read, is not.
+ * until `groupGone` proves the group gone (issue 3568). A group whose members are all zombies with
+ * no running thread is gone; a live member, or a group the probe cannot read, is not.
  *
  * A group kill follows the #3625 contract: ESRCH, or EPERM on a group with no live member, is
  * fine. Any other kill failure, an unexpected liveness-check error, or a group never proven gone
  * is recorded in `reapError`, and the canary passes only without one. A failure is conclusive
- * only when the reap ends with the group still holding a live member; any other failure is
- * `inconclusive`. It never throws, so the caller's cleanup always runs.
+ * when a kill was refused with EPERM on a live member, even if the group then went, or when the
+ * reap ends with the group still holding a live member; any other failure is `inconclusive`. It
+ * never throws, so the caller's cleanup always runs.
  */
 export async function reapProcessGroup(
   pgid: number,
@@ -338,6 +339,8 @@ export async function reapProcessGroup(
   let reapError: string | undefined;
   // What the last liveness check could tell about the members. A check that failed tells nothing.
   let lastMembership: 'live' | 'unknown' = 'unknown';
+  // A kill refused with EPERM while a member ran: the provider ran a member the canary may not signal.
+  let liveMemberRefused = false;
   const gone = (): boolean => {
     const answer = groupGone(pgid, { kill, probeGroup });
     if (answer.gone) return true;
@@ -357,6 +360,7 @@ export async function reapProcessGroup(
       if (code === 'ESRCH') return;
       if (code === 'EPERM') {
         const membership = probeGroup(pgid);
+        if (membership === 'live') liveMemberRefused = true;
         if (membership !== 'no-live-members') {
           reapError ??= `group kill failed: EPERM; group membership probe: ${membership}`;
         }
@@ -367,8 +371,9 @@ export async function reapProcessGroup(
   };
   const result = (reaped: boolean): ProcessGroupReap => {
     if (reapError === undefined) return { reaped };
-    // Only a group that still holds a live member at the end is proven not reaped.
-    return !reaped && lastMembership === 'live' ? { reaped, reapError } : { reaped, reapError, inconclusive: true };
+    // Evidence about the provider: a kill refused on a live member, or a live member at the end.
+    const conclusive = liveMemberRefused || (!reaped && lastMembership === 'live');
+    return conclusive ? { reaped, reapError } : { reaped, reapError, inconclusive: true };
   };
   if (gone()) return result(true);
   signalGroup('SIGTERM');

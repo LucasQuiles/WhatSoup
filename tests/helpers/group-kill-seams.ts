@@ -113,6 +113,20 @@ export function readFixturePid(pidFile: string): number | undefined {
 }
 
 /**
+ * Structured timing exemption (test-integrity `js-sleep-in-test`): a fixture writes its pid on the
+ * kernel's schedule, so a slow start can leave the file missing when teardown begins. This polls
+ * within its own bound and returns undefined if the pid never appears.
+ */
+export async function waitForFixturePid(pidFile: string, boundMs = 1_000): Promise<number | undefined> {
+  const deadline = Date.now() + boundMs;
+  for (;;) {
+    const pid = readFixturePid(pidFile);
+    if (pid !== undefined || Date.now() >= deadline) return pid;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+/**
  * True when `ps` reports `pid` as a zombie. A killed fixture grandchild is an orphan that only
  * PID 1 reaps; where PID 1 does not reap orphans (some CI containers), it stays a zombie, and
  * kill(pid, 0) still succeeds on Linux.

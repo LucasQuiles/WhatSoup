@@ -81,6 +81,7 @@ import {
   reapFixtureGroups,
   settleWithin,
   throwOnly,
+  waitForFixturePid,
   waitForPidGone,
   type GroupMembershipAnswer,
   type GroupSignalSeam,
@@ -120,17 +121,26 @@ function longLivedChildWritingPid(pidFile: string): string[] {
 }
 
 /**
- * Teardown for a fixture process, leader or member, whose pid the fixture wrote: kills it unless it
- * is already gone (exited, or a zombie), then waits within waitForPidGone's own bound. It never
- * waits on the run.
+ * Teardown for a fixture process, leader or member, whose pid the fixture writes. It waits within
+ * a bound for the pid file, kills the process unless it is already gone (exited, or a zombie), then
+ * waits within waitForPidGone's own bound. A pid file that never appears is never read as gone.
+ * `liveGroupTargets` are group ids the kill seam recorded while a member was alive: they are killed
+ * first as a backstop, and must be gone too. It never waits on the run.
  */
-async function endFixtureMember(pidFile: string): Promise<boolean> {
-  const pid = readFixturePid(pidFile);
-  if (pid === undefined) return true;
-  if (!(await waitForPidGone(pid, 0))) {
-    try { process.kill(pid, 'SIGKILL'); } catch { /* it exited meanwhile */ }
+async function endFixtureMember(pidFile: string, liveGroupTargets: readonly number[] = []): Promise<boolean> {
+  reapFixtureGroups(liveGroupTargets);
+  const pid = await waitForFixturePid(pidFile);
+  let gone = false;
+  if (pid !== undefined) {
+    if (!(await waitForPidGone(pid, 0))) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* it exited meanwhile */ }
+    }
+    gone = await waitForPidGone(pid);
   }
-  return waitForPidGone(pid);
+  for (const target of new Set(liveGroupTargets)) {
+    if (target < -1 && !(await waitForPidGone(target))) gone = false;
+  }
+  return gone;
 }
 
 /** The teardown fields that do not depend on whether SIGTERM or SIGKILL ended the child. */
@@ -731,8 +741,9 @@ export function registerAttemptCases(): void {
       expect(probed.every((pgid) => pgid > 0 && targets.includes(-pgid))).toBe(true);
     } finally {
       // Nothing was delivered, so the leader is still alive. Its pid comes from the fixture, not
-      // from the kill seam, so this ends it even if the watchdog never signalled.
-      const gone = await endFixtureMember(pidFile);
+      // from the kill seam, so this ends it even if the watchdog never signalled. The group ids the
+      // seam recorded are a backstop, and the group must be gone too.
+      const gone = await endFixtureMember(pidFile, targets);
       await settleWithin(run, 2_000, 'the watchdog did not settle after teardown').catch(() => undefined);
       rmSync(dir, { recursive: true, force: true });
       expect(gone).toBe(true);
