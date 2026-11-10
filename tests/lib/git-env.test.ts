@@ -49,6 +49,24 @@ describe('git env helpers', () => {
     }
   });
 
+  // A read-only git child killed while holding the optional index lock leaves a
+  // stale index.lock that blocks every later commit in that worktree.
+  it.each([
+    ['unset', undefined],
+    ['enabled', '1'],
+    ['true', 'true'],
+    ['disabled', '0'],
+  ])('always disables optional git locks when the parent value is %s', async (_label, parentValue) => {
+    const prevOptionalLocks = process.env.GIT_OPTIONAL_LOCKS;
+    try {
+      restoreEnv('GIT_OPTIONAL_LOCKS', parentValue);
+      const gitEnv = await import('../../src/lib/git-env.ts');
+      expect(gitEnv.cleanGitEnv().GIT_OPTIONAL_LOCKS).toBe('0');
+    } finally {
+      restoreEnv('GIT_OPTIONAL_LOCKS', prevOptionalLocks);
+    }
+  });
+
   it('keeps connection lifecycle audit on the shared SHA helper', () => {
     const source = readFileSync('src/transport/connection.ts', 'utf8');
     expect(source).toContain("readWhatsoupGitSha } from '../lib/git-env.ts'");
