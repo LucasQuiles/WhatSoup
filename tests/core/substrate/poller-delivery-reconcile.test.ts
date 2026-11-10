@@ -175,9 +175,9 @@ describe('TriggerPoller — expiry delivery boundaries', () => {
 
   it.each([
     { label: 'receipt', receipt: { waMessageId: 'expiry-1' }, error: null, classification: null },
-    { label: 'missing receipt', receipt: {}, error: null, classification: 'notify_outcome_unknown' },
-    { label: 'transient rejection', receipt: {}, error: new Error('connection closed'), classification: 'notify_dispatch_failed' },
-    { label: 'forbidden rejection', receipt: {}, error: new Error('forbidden (403)'), classification: 'notify_forbidden_target' },
+    { label: 'missing receipt', receipt: { waMessageId: null }, error: null, classification: 'notify_outcome_unknown' },
+    { label: 'transient rejection', receipt: { waMessageId: null }, error: new Error('connection closed'), classification: 'notify_dispatch_failed' },
+    { label: 'forbidden rejection', receipt: { waMessageId: null }, error: new Error('forbidden (403)'), classification: 'notify_forbidden_target' },
   ])('records committed expiry intent and its $label disposition', async ({ receipt, error, classification }) => {
     const t = makeExpiringTrigger(db);
     const reader = new DatabaseSync(path, { readOnly: true });
@@ -236,7 +236,7 @@ describe('TriggerPoller — expiry delivery boundaries', () => {
       expect(runRows(db, t.id)).toMatchObject([{ error_kind: 'notify_outcome_unknown', delivered_wa_id: null }]);
       expect(replayed).toBe(0);
     } finally {
-      finish({});
+      finish({ waMessageId: null });
       await tick;
     }
   });

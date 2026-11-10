@@ -2657,13 +2657,11 @@ describe('poller.ts uncovered-branch coverage', () => {
     expect(calls[0].text).not.toContain('extend_trigger');
   });
 
-  it('expireTrigger swallows an expiry-notification dispatch rejection via .catch (line 548)', async () => {
+  it('keeps expiry committed when notification dispatch rejects', async () => {
     const { messenger, calls } = makeFailingMessenger();
     const bead = createBead(db.raw, { kind: 'watch', title: 'expiry-fail', ownerJid: 'mw', actor: 'u' });
     db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY)`);
     db.raw.prepare(`INSERT INTO probes DEFAULT VALUES`).run();
-    // on_terminal defaults to 'notify', so expiry dispatch is attempted and rejects;
-    // the void ... .catch(...) must absorb it so tickOnce resolves cleanly.
     const t = createTrigger(db.raw, {
       beadId: bead.id, kind: 'poll.sqlite',
       spec: { sql: `SELECT * FROM probes`, fire_when: 'rows_returned' },
@@ -2674,10 +2672,7 @@ describe('poller.ts uncovered-branch coverage', () => {
     });
 
     const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 });
-    // Drain microtasks so the void'd .catch promise settles before the test ends.
     const processed = await poller.tickOnce();
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(processed).toBe(1);
     expect(calls.length).toBeGreaterThanOrEqual(1);
