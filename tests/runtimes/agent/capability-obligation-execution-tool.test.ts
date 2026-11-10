@@ -526,6 +526,7 @@ describe('media obligations', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.result_status).toBe('error');
     expect(evidenceOf(rows[0]!)['reason']).toBe('media_mutated_during_execution');
+    expect(evidenceOf(rows[0]!)['timedOut']).toBe(false); // the resolver exited on its own; the watchdog never fired
     expect(readFileSync(mediaPath, 'utf8')).toBe(ORIGINAL); // only the snapshot was mutated
   });
 });
@@ -1075,7 +1076,7 @@ async function runMediaToolOnce(
   return { id, result };
 }
 
-const listResolverStages =(): string[] => readdirSync(tmpdir()).filter((n) => n.startsWith('ws-resolver-stage-'));
+const listResolverStages = (): string[] => readdirSync(tmpdir()).filter((n) => n.startsWith('ws-resolver-stage-'));
 
 describe('resolver process-group reap (issue 3568)', () => {
   it('an EPERM close-time sweep of a group with no live member records ok, the same as an ESRCH sweep', async () => {
@@ -1191,6 +1192,7 @@ describe('resolver process-group reap (issue 3568)', () => {
       const evidence = evidenceOf(rows[0]!);
       expect(String(evidence['reapError'])).toMatch(/EPERM; group membership probe: live/);
       expect(evidence['reason']).toBe('resolver_close_not_observed');
+      expect(evidence['closeNotObserved']).toBe(true); // the same key the media-mutation receipt uses
       expect(evidence['timedOut']).toBe(true);
       expect(result['error']).toBe('capability_execution_failed');
       expect(elapsed).toBeLessThan(18_000); // the grace settled it; the grandchild never released stdout
@@ -1240,6 +1242,7 @@ describe('resolver process-group reap (issue 3568)', () => {
       expect(rows[0]!.result_status).toBe('error');
       const evidence = evidenceOf(rows[0]!);
       expect(evidence['reason']).toBe('resolver_close_not_observed');
+      expect(evidence['closeNotObserved']).toBe(true); // the same key the media-mutation receipt uses
       expect(evidence['timedOut']).toBe(true);
       expect(evidence['reapError']).toBeUndefined(); // the group kill itself succeeded
       expect(result['error']).toBe('capability_execution_failed');
@@ -1390,6 +1393,7 @@ describe('resolver process-group reap (issue 3568)', () => {
       expect(evidence['reason']).toBe('media_mutated_during_execution');
       // The media failure must not hide that a descendant may still be running.
       expect(evidence['closeNotObserved']).toBe(true);
+      expect(evidence['timedOut']).toBe(true); // the watchdog fired before the grace
       expect(evidence['reapError']).toBeUndefined(); // the group kill itself succeeded
       expect(result['error']).toBe('capability_execution_failed');
       expect(result['message']).toBe('Retained media changed during execution, closeNotObserved=true');
