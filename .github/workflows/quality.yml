@@ -13,6 +13,8 @@ on:
       - main
     tags:
       - 'v*'
+  schedule:
+    - cron: '23 6 * * *'
 
 # Cancel superseded runs for the same ref. A new push/PR-sync supersedes the
 # in-flight run instead of leaving it orphaned at "pending 0s" for hours (the

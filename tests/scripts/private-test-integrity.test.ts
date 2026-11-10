@@ -218,9 +218,10 @@ it('confines the private scanner credential to the trusted default-branch workfl
   expect(job.steps.at(-1).if).toBe('always()');
 });
 
-it('provides an uncancelled Quality producer for tag receipt qualification', () => {
+it('provides tag and daily Quality producers for private receipt qualification', () => {
   const workflow = parse(readFileSync(join(repoRoot, '.github/workflows/quality.yml'), 'utf8'));
   expect(workflow.on.push.tags).toEqual(['v*']);
+  expect(workflow.on.schedule).toEqual([{ cron: '23 6 * * *' }]);
   expect(workflow.concurrency['cancel-in-progress']).toBe("${{ github.event_name != 'merge_group' && !startsWith(github.ref, 'refs/tags/') }}");
 });
 
