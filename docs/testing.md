@@ -73,6 +73,13 @@ rule tests still execute their normal assertions; production coverage scope and
 floors remain unchanged. The scan does not inherit Vitest instrumentation or
 Node compile caching.
 
+Health endpoint tests use `tests/core/_helpers/health.ts` for their config,
+logger, request and fixture builders. Separate files cover liveness privacy,
+send authorization, command endpoints, listeners, fallbacks, degradation and
+diagnostic projections. Each behavior retains its fresh database and server,
+environment restoration and negative assertions. Every fixture listener starts
+on an ephemeral port so isolated forks can run the files concurrently.
+
 Both the local release gate and the full Quality job run console lint, build and
 live design checks before root coverage. The full suite and its design tests
 remain required; an earlier build/design failure stops before that expensive run.
