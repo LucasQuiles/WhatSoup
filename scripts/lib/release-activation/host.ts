@@ -73,12 +73,13 @@ export interface ActivationHost {
    */
   toolCommit(): Promise<string | null>;
   /**
-   * Linux systemd path only: the text of `/proc/self/cgroup`, or null when it
-   * cannot be read. Absent on hosts that never take that path; absent or null
-   * is "unknown", which the systemd --apply treats as inside the target unit.
+   * Linux systemd path only: the text of this process's procfs cgroup file, or
+   * null when it cannot be read or the host is not Linux. Absent on hosts that
+   * never take that path; absent or null is "unknown", which the systemd
+   * --apply treats as inside the target unit.
    */
   readSelfCgroup?(): string | null;
-  /** Linux systemd path only: the argv of `pid` from `/proc/<pid>/cmdline`, or null. */
+  /** Linux systemd path only: the argv of `pid` from its procfs cmdline file, or null (also off Linux). */
   readProcessCmdline?(pid: number): string[] | null;
 }
 
@@ -195,17 +196,23 @@ export function createDefaultActivationHost(): ActivationHost {
     },
     toolCommit: () => resolveToolCommit({ root: TOOL_REPO_ROOT, exec: toolCommitExec }),
     readSelfCgroup: () => {
-      try { return readFileSync('/proc/self/cgroup', 'utf8'); } catch { return null; }
+      if (process.platform === 'linux') {
+        try { return readFileSync('/proc/self/cgroup', 'utf8'); } catch { return null; }
+      }
+      return null;
     },
     readProcessCmdline: (pid) => {
       if (!Number.isSafeInteger(pid) || pid <= 0) return null;
-      try {
-        const argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0');
-        if (argv.at(-1) === '') argv.pop();
-        return argv.length > 0 ? argv : null;
-      } catch {
-        return null;
+      if (process.platform === 'linux') {
+        try {
+          const argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0');
+          if (argv.at(-1) === '') argv.pop();
+          return argv.length > 0 ? argv : null;
+        } catch {
+          return null;
+        }
       }
+      return null;
     },
   };
 }
