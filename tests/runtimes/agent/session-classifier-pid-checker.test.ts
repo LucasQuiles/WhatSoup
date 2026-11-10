@@ -136,10 +136,11 @@ describe('defaultPidOwnershipChecker', () => {
     mocks.execFileSync.mockReturnValue(Buffer.from(`${process.pid} claude\n`));
 
     expect(defaultPidOwnershipChecker(5678)).toEqual({ alive: true, owned: true });
-    expect(mocks.execFileSync).toHaveBeenCalledWith('ps', ['-o', 'ppid=,command=', '-p', '5678'], {
+    expect(mocks.execFileSync).toHaveBeenCalledWith('/bin/ps', ['-o', 'ppid=,command=', '-p', '5678'], {
       maxBuffer: 64 * 1024,
       timeout: 2_000,
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'C', LC_ALL: 'C', TZ: 'UTC' },
     });
   });
 

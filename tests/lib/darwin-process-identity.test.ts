@@ -101,7 +101,7 @@ describe.skipIf(process.platform !== 'darwin')('Darwin native identity signaling
           expect(b.exitCode).toBeNull();
           // Only the census is simulated: a same-second replacement must not inherit authority.
           childProcess.execFileSync = ((file: string, args: string[], options: unknown) => {
-            if (file !== 'ps') return Reflect.apply(actualExec, childProcess, [file, args, options]);
+            if (file !== '/bin/ps') return Reflect.apply(actualExec, childProcess, [file, args, options]);
             if (args[0] === '-p' && args[3] === 'pid=,lstart=') {
               return args[1]!.split(',').filter((pid) => Number(pid) === b.pid)
                 .map((pid) => `${pid} ${start}`).join('\n');

@@ -552,9 +552,12 @@ function normalizeCensusFailure(
 function readProcessCensus(unavailableCode: CensusUnavailableCode): ProcessCensusRow[] {
   try {
     const output = execFileSync(
-      'ps',
+      '/bin/ps',
       ['-eo', 'pid,ppid,pgid,lstart,command'],
-      { encoding: 'utf8', timeout: 2_000, maxBuffer: 16 * 1024 * 1024 },
+      {
+        encoding: 'utf8', timeout: 2_000, maxBuffer: 16 * 1024 * 1024,
+        env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'C', LC_ALL: 'C', TZ: 'UTC' },
+      },
     );
     return parseProcessCensus(output);
   } catch (error) {

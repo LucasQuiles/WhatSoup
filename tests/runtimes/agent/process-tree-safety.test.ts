@@ -358,6 +358,13 @@ describe('process-tree fail-closed safety', () => {
       generationMarker: 'lease-b',
     })).rejects.toThrow('Refusing process-tree lease change');
     expect(await first).toMatchObject({ code: 'PROCESS_TREE_SURVIVORS_REMAIN' });
+    expect(execFileSyncMock).toHaveBeenCalledWith(
+      '/bin/ps', ['-eo', 'pid,ppid,pgid,lstart,command'],
+      {
+        encoding: 'utf8', timeout: 2_000, maxBuffer: 16 * 1024 * 1024,
+        env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'C', LC_ALL: 'C', TZ: 'UTC' },
+      },
+    );
   });
 
   it('uses identity-checked per-PID signals when the self PGID row is missing', async () => {

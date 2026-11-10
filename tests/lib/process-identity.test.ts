@@ -44,9 +44,12 @@ describe('bounded process birth identity observation', () => {
     ]));
     expect(execFileSyncMock).toHaveBeenCalledTimes(1);
     expect(execFileSyncMock).toHaveBeenCalledWith(
-      'ps',
+      '/bin/ps',
       ['-p', '101,102', '-o', 'pid=,lstart='],
-      { encoding: 'utf-8', timeout: 250, maxBuffer: 1024 * 1024 },
+      {
+        encoding: 'utf-8', timeout: 250, maxBuffer: 1024 * 1024,
+        env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'C', LC_ALL: 'C', TZ: 'UTC' },
+      },
     );
   });
 

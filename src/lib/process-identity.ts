@@ -43,12 +43,13 @@ function darwinBirthTokens(pids: readonly number[]): ReadonlyMap<number, string>
   try {
     const requested = new Set(pids);
     const output = execFileSync(
-      'ps',
+      '/bin/ps',
       ['-p', pids.join(','), '-o', 'pid=,lstart='],
       {
         encoding: 'utf-8',
         timeout: PROCESS_IDENTITY_DARWIN_TIMEOUT_MS,
         maxBuffer: PROCESS_IDENTITY_DARWIN_MAX_BUFFER_BYTES,
+        env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'C', LC_ALL: 'C', TZ: 'UTC' },
       },
     );
     const observed = new Map<number, string>();

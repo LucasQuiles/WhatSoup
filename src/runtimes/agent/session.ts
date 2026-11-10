@@ -3634,7 +3634,7 @@ export class SessionManager {
           { sessionId: this.sessionId, pid: child.pid, toolId, toolName, reason: 'stalled_operation' },
           'stalled-operation kill fired — SIGKILL hung provider',
         );
-        this.emitUserNotice('_A tool call stalled and was terminated. Send your message again to retry._');
+        this.emitUserNotice('_A tool call stalled. Cleanup requested; waiting for termination before another session can start._');
         this.markIntentionalKill(child, 'SIGKILL', 'stalled_operation');
         void this.killChildTree(child, 'SIGKILL').catch((err) => {
           log.error({
@@ -3829,9 +3829,9 @@ export class SessionManager {
       ),
       kill: () => {
         log.warn({ sessionId: this.sessionId, pid: child.pid, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled Claude process');
-        // This notice is the ONLY user-facing message for a reap: the intent marker below
-        // suppresses the generic crash notice (and the operator page) in the exit handler.
-        this.emitUserNotice(terminationNotice);
+        // This pending-cleanup notice replaces the generic crash notice; the intent
+        // marker suppresses that duplicate notice and the operator page on exit.
+        this.emitUserNotice(`_Session cleanup requested after ${inactivityMinutes} minutes of inactivity; waiting for termination before another session can start._`);
         this.markIntentionalKill(child, 'SIGKILL', 'idle_watchdog');
         void this.killChildTree(child, 'SIGKILL').catch((err) => {
           log.error({

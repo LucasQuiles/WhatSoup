@@ -174,10 +174,11 @@ export function defaultPidOwnershipChecker(
     // stderr 'pipe' (not the execFileSync default of inheriting the service's
     // stderr): any ps complaint must land on the thrown error, never as raw
     // non-JSON lines in the service log stream.
-    const psOut = execFileSync('ps', ['-o', 'ppid=,command=', '-p', String(pid)], {
+    const psOut = execFileSync('/bin/ps', ['-o', 'ppid=,command=', '-p', String(pid)], {
       maxBuffer: 64 * 1024,
       timeout: 2_000,
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'C', LC_ALL: 'C', TZ: 'UTC' },
     });
     const line = (typeof psOut === 'string' ? psOut : psOut.toString('utf-8')).trim();
     const [ppidStr, ...commandParts] = line.split(/\s+/);
