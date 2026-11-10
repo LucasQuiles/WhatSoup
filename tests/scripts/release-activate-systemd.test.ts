@@ -76,9 +76,14 @@ import {
   UNIT,
   writeSchemaSupport,
 } from '../helpers/release-activate-systemd-world.ts';
+import { nextReleaseDropInName } from '../../scripts/lib/release-activation/systemd.ts';
 
 let fixture: SystemdFixture;
-const NEW_DROPIN = `zzzzzzzzz-release-${SYS_NEW_COMMIT.slice(0, 12)}.conf`;
+/**
+ * The same `z` count as the effective `zzzzzzzz-release-c0ffee044d00.conf`: the
+ * new commit `c0ffee0f7a00` already sorts after it, so no extra `z` is needed.
+ */
+const NEW_DROPIN = `zzzzzzzz-release-${SYS_NEW_COMMIT.slice(0, 12)}.conf`;
 
 beforeEach(() => {
   fixture = installSystemdFixture();
@@ -114,6 +119,7 @@ async function expectRefusedWithoutLiveChange(
   expectedFailures: string[] | null,
 ): Promise<Awaited<ReturnType<typeof runSystemd>>> {
   const before = snapshotTree(fixture.dropInDir);
+  const startsBefore = [...world.instanceStarts];
   const result = await runSystemd(world, argv);
   expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
   if (expectedFailures !== null) {
@@ -121,7 +127,7 @@ async function expectRefusedWithoutLiveChange(
   }
   expect(world.mutatingCalls()).toEqual([]);
   expect(snapshotTree(fixture.dropInDir)).toEqual(before);
-  expect(world.instanceStarts).toEqual([world.instanceStarts[0]]);
+  expect(world.instanceStarts).toEqual(startsBefore);
   return result;
 }
 
@@ -237,7 +243,8 @@ describe('release:activate systemd generation binding refusals', () => {
 
   it('refuses a later loaded drop-in that overrides ExecStart', async () => {
     writeFileSync(path.join(fixture.dropInDir, 'zzzzzzzzzz-local-override.conf'), '[Service]\nExecStart=\nExecStart=/bin/true\n');
-    const world = new SimulatedSystemd(fixture);
+    // The process still runs the old release; only the loaded unit now selects the override.
+    const world = new SimulatedSystemd(fixture, { initialMainPidRoot: fixture.oldRelease });
     await expectRefusedWithoutLiveChange(world, systemdActivationArgs(fixture, ['--apply']), ['systemd-loaded-unit-on-expected-release']);
   });
 });
@@ -405,5 +412,28 @@ describe('release:activate systemd --apply', () => {
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.rollbackBlockedMigrated);
     expect(world.mutatingVerbs()).toEqual(['daemon-reload', 'restart']);
     expect(existsSync(path.join(fixture.dropInDir, NEW_DROPIN))).toBe(true);
+  });
+});
+
+describe('nextReleaseDropInName', () => {
+  it('keeps the current z count when the new commit already sorts after the effective drop-in', () => {
+    expect(nextReleaseDropInName('c1e24d33a691', ['max-sessions.conf', 'zzzzzzzz-release-44d38619ae4c.conf']))
+      .toBe('zzzzzzzz-release-c1e24d33a691.conf');
+  });
+
+  it('adds a z when the new commit would sort before the effective drop-in', () => {
+    expect(nextReleaseDropInName('44d38619ae4c', ['zzzzzzzz-release-c1e24d33a691.conf']))
+      .toBe('zzzzzzzzz-release-44d38619ae4c.conf');
+  });
+
+  it('sorts after a later non-release drop-in too', () => {
+    expect(nextReleaseDropInName('c1e24d33a691', ['zzzzzzzz-release-44d38619ae4c.conf', 'zzzzzzzzzz-local-override.conf']))
+      .toBe('zzzzzzzzzz-release-c1e24d33a691.conf');
+    expect(nextReleaseDropInName('c1e24d33a691', ['zzzzzzzzzz-zz-override.conf']))
+      .toBe('zzzzzzzzzzz-release-c1e24d33a691.conf');
+  });
+
+  it('returns null when 64 z characters cannot sort last', () => {
+    expect(nextReleaseDropInName('c1e24d33a691', [`${'z'.repeat(65)}.conf`])).toBeNull();
   });
 });
