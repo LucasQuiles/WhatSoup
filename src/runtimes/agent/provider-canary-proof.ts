@@ -18,6 +18,7 @@ import { delimiter, join } from 'node:path';
 
 import { systemClock } from '../../lib/clock.ts';
 import { readPrivateFileSync } from '../../lib/private-fs.ts';
+import { SIGNAL } from '../../lib/signals.ts';
 import { isRecord } from '../../lib/type-guards.ts';
 import { isProviderId, mcpModeForProvider } from './providers/index.ts';
 
@@ -294,7 +295,7 @@ function readBinaryVersionAsync(entrypoint: string, timeoutMs: number): Promise<
       if (settled) return;
       settled = true;
       if (deadline) clearTimeout(deadline);
-      if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      if (child && child.exitCode === null && child.signalCode === null) child.kill(SIGNAL.KILL);
       child?.stdout?.destroy();
       rmSync(root, { recursive: true, force: true });
       if (error) reject(error);
