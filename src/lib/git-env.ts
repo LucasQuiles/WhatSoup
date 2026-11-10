@@ -25,10 +25,11 @@ const gitChildEnvKeys = [
   'PATHEXT',
 ] as const;
 
-// GIT_OPTIONAL_LOCKS is set, never inherited: read-only commands such as
-// `git status` otherwise take index.lock to write refreshed stat data, and a
-// child killed by an uncatchable signal strands that lock for every later
-// commit. Writes (add, commit, checkout) still lock the index.
+// GIT_OPTIONAL_LOCKS is set, never inherited: `git status` otherwise takes
+// index.lock to write refreshed stat data, and a child killed by an
+// uncatchable signal strands that lock for every later commit. Writes (add,
+// commit, checkout) still lock the index.
+// Git documents the variable for status; a worktree `git diff` still rewrites the index.
 export function cleanGitEnv(): NodeJS.ProcessEnv {
   return {
     ...Object.fromEntries(

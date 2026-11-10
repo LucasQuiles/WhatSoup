@@ -145,6 +145,8 @@ describe('guard-core helpers', () => {
       expect(refreshingStatus(repo)).toBe('');
 
       expect(readIndex(indexPath).bytes).not.toEqual(before.bytes);
+      // Cleanup check only: Git removes its lock on a normal exit, so the
+      // rewritten index bytes above are the evidence that the lock was taken.
       expect(existsSync(lockPath)).toBe(false);
     });
 
@@ -157,6 +159,8 @@ describe('guard-core helpers', () => {
       const after = readIndex(indexPath);
       expect(after.bytes).toEqual(before.bytes);
       expect(after.mtimeMs).toBe(before.mtimeMs);
+      // Cleanup check only: Git removes its lock on a normal exit, so this
+      // cannot fail here. The unchanged index bytes and mtime are the evidence.
       expect(existsSync(lockPath)).toBe(false);
       // The entry is still stale, so the unchanged index above is not vacuous.
       refreshingStatus(repo);
