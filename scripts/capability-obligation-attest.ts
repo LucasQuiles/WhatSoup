@@ -459,6 +459,21 @@ export function runResolverCanary(params: {
 }
 
 /**
+ * The CLI's note after `canary_failed`: the canary's own reason and reapError when it set them,
+ * so an operator sees more than `canary_failed`. A missing close means a resolver descendant may
+ * still be running, even after a group kill that succeeded.
+ */
+function canaryFailureNote(detail: unknown): string {
+  const fields = (typeof detail === 'object' && detail !== null ? detail : {}) as Record<string, unknown>;
+  const reason = fields['reason'];
+  const reapError = fields['reapError'];
+  const reasonNote = typeof reason === 'string' ? ` reason=${reason}` : '';
+  const reapNote = typeof reapError === 'string' ? ` reapError=${reapError}` : '';
+  const descendantNote = reason === 'resolver_close_not_observed' ? 'a resolver descendant may still be running; ' : '';
+  return `${reasonNote}${reapNote} (${descendantNote}no attestation, no receipt)`;
+}
+
+/**
  * Round-18 finding 1: VERIFY the EXPLICITLY-DECLARED resolver artifact and refuse on
  * any mismatch. Round 17 INFERRED the artifact from argv (skip a leading interpreter,
  * hash the first path token); a reviewer proved that unsound (`perl -eCODE <decoy>`
@@ -667,7 +682,7 @@ if (import.meta.url === invokedPath) {
           if (canary.result !== 'pass') {
             // Failed/insufficient canary: record NOTHING and do NOT write the admission
             // receipt (a receipt at --receipt-out means an admission was attempted).
-            process.stdout.write((args.json ? JSON.stringify({ mode: 'record', recorded: false, reason: 'canary_failed' }) : `NOT RECORDED attest ${args.capability}: canary_failed (no attestation, no receipt)`) + '\n');
+            process.stdout.write((args.json ? JSON.stringify({ mode: 'record', recorded: false, reason: 'canary_failed' }) : `NOT RECORDED attest ${args.capability}: canary_failed${canaryFailureNote(canary.detail)}`) + '\n');
             process.exitCode = 3;
             return;
           }

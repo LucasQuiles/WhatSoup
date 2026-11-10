@@ -428,12 +428,22 @@ export function buildCapabilityExecutionTool(deps: CapabilityExecutionToolDeps):
             reason: 'resolver_spawn_failed',
             ...(reapError === undefined ? {} : { reapError }),
           });
-          return toolError({ error: 'capability_execution', message: 'Capability resolver could not be started' });
+          // A failed sweep means the child had a pid, so its group started: never tell the agent it
+          // could not be started.
+          const message = reapError === undefined
+            ? 'Capability resolver could not be started'
+            : `Capability resolver failed after it started, and its process group was not proven reaped (reapError=${reapError})`;
+          return toolError({ error: 'capability_execution', message });
         }
         if (run.reapError !== undefined) {
           // A member of the resolver's group may still be running: an operator must check for it
           // before any requeue of this obligation.
           log.warn({ obligationId: obligation.id, reapError: run.reapError }, 'capability resolver process group not proven reaped');
+        }
+        if (run.closeNotObserved === true) {
+          // The group kill may have succeeded, yet something still held the output open after the
+          // grace, such as a descendant that called setsid(): the same operator check applies.
+          log.warn({ obligationId: obligation.id, closeNotObserved: true }, 'capability resolver output still open after the reap grace; a descendant may still be running');
         }
 
         // Media integrity: DETECT a net change to the snapshot the child was
@@ -473,10 +483,12 @@ export function buildCapabilityExecutionTool(deps: CapabilityExecutionToolDeps):
         if (!ok) {
           // A reap failure can follow a clean exit, so name it; exit, signal and timedOut alone would read as success.
           const reapNote = run.reapError === undefined ? '' : `, reapError=${run.reapError}`;
+          // A missing close would otherwise read as an ordinary timeout.
+          const closeNote = run.closeNotObserved === true ? ', closeNotObserved=true' : '';
           return toolError({
             error: 'capability_execution_failed',
             message:
-              `Capability resolver failed (exit=${run.exitCode ?? 'none'}, signal=${run.signal ?? 'none'}, timedOut=${run.timedOut}${reapNote}). `
+              `Capability resolver failed (exit=${run.exitCode ?? 'none'}, signal=${run.signal ?? 'none'}, timedOut=${run.timedOut}${reapNote}${closeNote}). `
               + `stderr tail: ${run.stderr.slice(-1_024)}`,
           });
         }
