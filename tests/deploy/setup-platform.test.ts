@@ -120,26 +120,20 @@ function runLinuxSetupReplay(
   });
 }
 
-/**
- * Hide only ffmpeg names, retaining the other utilities in those PATH directories.
- * Linux commonly installs ffmpeg and required setup commands together in /usr/bin.
- */
-function realPathWithoutFfmpeg(): string {
+// Hide ffmpeg without removing co-located setup tools or changing PATH precedence.
+function realPathWithoutFfmpeg(searchPath: string = process.env.PATH ?? ''): string {
   const excluded = new Set(['ffmpeg', 'ffmpeg-arm64', 'ffmpeg-x64']);
-  const mirrors = new Map<string, string>();
-  return (process.env.PATH ?? '').split(path.delimiter)
+  return searchPath.split(path.delimiter)
     .filter(Boolean)
     .map((dir) => {
       if (![...excluded].some((name) => fs.existsSync(path.join(dir, name)))) return dir;
-      const original = fs.realpathSync(dir);
-      const previous = mirrors.get(original);
-      if (previous) return previous;
-      const mirror = makeTempRoot('whatsoup-setup-path-');
-      for (const name of fs.readdirSync(original)) {
-        if (!excluded.has(name)) fs.symlinkSync(path.join(original, name), path.join(mirror, name));
+      const filtered = makeTempRoot('whatsoup-setup-filtered-path-');
+      for (const name of fs.readdirSync(dir)) {
+        if (!excluded.has(name)) {
+          fs.symlinkSync(path.resolve(dir, name), path.join(filtered, name));
+        }
       }
-      mirrors.set(original, mirror);
-      return mirror;
+      return filtered;
     })
     .join(path.delimiter);
 }
@@ -674,6 +668,46 @@ describe('deploy/setup.sh — arch_bin_suffix (#2820)', () => {
     const { status, stdout, stderr } = runArchBinSuffix(hostMachine);
     expect(status, stderr).toBe(0);
     expect(stdout).toBe(getArchBinSuffix());
+  });
+});
+
+describe('deploy/setup.sh — ffmpeg-free PATH fixture', () => {
+  it('keeps core utilities co-located with excluded ffmpeg binaries', () => {
+    const bin = makeTempRoot('whatsoup-setup-path-');
+    const dirname = execFileSync('/bin/bash', ['-c', 'command -v dirname'], {
+      encoding: 'utf8',
+    }).trim();
+    fs.symlinkSync(dirname, path.join(bin, 'dirname'));
+    for (const name of ['ffmpeg', 'ffmpeg-arm64', 'ffmpeg-x64']) {
+      writeExecutable(bin, name, '#!/bin/sh\nexit 0\n');
+    }
+
+    const env = { ...process.env, PATH: realPathWithoutFfmpeg(bin) };
+    const result = spawnSync('/bin/bash', ['-c', 'dirname /alpha/beta'], {
+      env,
+      encoding: 'utf8',
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe('/alpha\n');
+    for (const name of ['ffmpeg', 'ffmpeg-arm64', 'ffmpeg-x64']) {
+      expect(spawnSync('/bin/bash', ['-c', 'command -v "$1"', 'probe', name], { env }).status)
+        .toBe(1);
+    }
+  });
+
+  it('keeps PATH precedence when a directory also contains ffmpeg', () => {
+    const first = makeTempRoot('whatsoup-setup-path-first-');
+    const second = makeTempRoot('whatsoup-setup-path-second-');
+    writeExecutable(first, 'ffmpeg', '#!/bin/sh\nexit 0\n');
+    writeExecutable(first, 'setup-fixture-tool', '#!/bin/sh\nprintf "first\\n"\n');
+    writeExecutable(second, 'setup-fixture-tool', '#!/bin/sh\nprintf "second\\n"\n');
+
+    const result = spawnSync('/bin/bash', ['-c', 'setup-fixture-tool'], {
+      env: { ...process.env, PATH: realPathWithoutFfmpeg([first, second].join(path.delimiter)) },
+      encoding: 'utf8',
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe('first\n');
   });
 });
 
