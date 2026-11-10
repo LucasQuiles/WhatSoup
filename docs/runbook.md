@@ -1063,10 +1063,15 @@ path when no stronger credential, health-evidence, or restart outcome applies.
 - `CREDENTIAL-DEAD` → re-authenticate the provider on that host. Do not
   restart the bot to "fix" it; the watchdog deliberately never restarts on
   credential death.
-- After reauth, the marker clears only on affirmative fresh proof. The
-  usability probe runs once at startup with a 30-minute freshness TTL, so in
-  practice the marker clears on the first watchdog cycle after the post-reauth
-  bot restart; `CREDENTIAL-UNKNOWN` in between is expected.
+- After reauth, the marker clears only on affirmative fresh primary evidence
+  with no active fallback window. The runtime probes at startup and periodically
+  on a 30-minute base interval with jitter and failure backoff. The first
+  timeout retries after five minutes while periodic probing is active; a
+  timeout on that retry resumes normal backoff. A successful user turn preserves
+  a pending retry. Probe freshness follows the scheduled deadline plus bounded
+  execution grace. The watchdog reads this health evidence; it does not run
+  provider probes. Until fresh recovery evidence arrives, an existing marker
+  remains and `CREDENTIAL-UNKNOWN` is expected.
 - A marker create/clear failure logs
   `ERROR: failed to create|clear credential marker …` and exits that watchdog
   invocation nonzero without restarting anything; the next cycle retries.
@@ -1090,10 +1095,10 @@ path when no stronger credential, health-evidence, or restart outcome applies.
 **Known detection limitations** (accepted by design): the fallback arm reason
 is frozen at its original value across window extensions, so an auth-required
 death during an open usage-limit window reports `usage-limit`; a successful
-fallback turn clears `last_turn_error_class`; and a stale `usable` probe
-verdict is never re-probed. The combined worst case still surfaces as
-`CREDENTIAL-UNKNOWN` (active fallback window) rather than a false `ok` — that
-visibility is the designed detection floor.
+fallback turn clears `last_turn_error_class`; and the watchdog cannot refresh
+stale usability evidence itself. Runtime periodic probes can refresh that
+evidence. Until they do, an active fallback window remains
+`CREDENTIAL-UNKNOWN`, even when an older probe reported `usable`.
 
 A cold SSH `claude auth status`, credential-item presence, or a passing public
 health envelope is not provider-recovery proof. Diagnose in the service owner's
@@ -1109,10 +1114,10 @@ primary-usability probe and reports the verdict as
 `runtime.agent.accountIdentity` (status classes and digest prefixes only).
 `credential_identity_mismatch` (critical) and `credential_identity_unverifiable`
 (warning) are alert sources and degradation causes with the reason twins
-`runtime.credential_identity_*`; neither is turn-provable, so a latched
-identity degradation releases only on a restart after the owner corrects the
-login. The runtime never heals, mirrors, or seeds a credential from this
-check — see
+`runtime.credential_identity_*`. A successful turn does not prove identity.
+Follow [Account identity recovery](runbooks/account-identity-recovery.md) for
+fresh verification and alert-clear requirements after correcting the login.
+The runtime never heals, mirrors, or seeds a credential from this check — see
 [Ratified account identity](configuration.md#ratified-account-identity-serviceexpectedaccountdigest).
 
 ### Database Compatibility Startup Classification
