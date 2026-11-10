@@ -369,7 +369,7 @@ import {
   suppressStreamedProviderFailure as gateStreamedProviderFailure,
 } from './streamed-provider-failure.ts';
 import { isProcessAlive, sessionUsesInProcessBridge } from './runtime-predicates.ts';
-import { canaryStoreProvisioned, inspectProviderCanaryReadiness, readProviderCanaryAdmission, type ProviderCanaryReadinessEntry } from './provider-canary-proof.ts';
+import { canaryStoreProvisioned, ProviderCanaryReadinessMonitor, readProviderCanaryAdmission } from './provider-canary-proof.ts';
 import { probeBinaryCommand, type listModelCatalog } from './providers/binary-preflight.ts';
 import { claudeRefreshLockGrace, refreshClaudeLoginAhead } from './providers/claude-refresh-ahead.ts';
 import { probePrimaryModelUsability, type PrimaryProbeServiceContext } from './providers/primary-model-usability.ts';
@@ -680,9 +680,11 @@ export class AgentRuntime implements Runtime {
   private turnChain: Promise<void> = Promise.resolve();
   private healthStatsTimer: ReturnType<typeof setInterval> | null = null;
   // #3832: gated providers admission would refuse; refreshed at start and per health-stats tick.
-  private providerCanaryUnproven: readonly ProviderCanaryReadinessEntry[] = [];
-  // Single flight: a slow or hung provider `--version` never stacks probes across ticks.
-  private providerCanaryRefresh: Promise<void> | null = null;
+  private readonly providerCanaryReadiness = new ProviderCanaryReadinessMonitor(() => ({
+    providerIds: [this.agentProvider, ...this.agentFallbacks.map((entry) => entry.provider)],
+    resolveBinary: (id) => getProviderBinary(id), proxyScriptPath: providerMcpProxyScriptPath(), stateRoot: config.stateRoot,
+    sessionScope: this.sessionScope, sandboxPerChat: this.sandboxPerChat,
+  }), (err) => log.warn({ err, instanceName: this.instanceName }, 'provider canary readiness inspection failed'));
   private proactiveResumeIdentityRejects = 0;
   // C5 restart-loop guard: true when this boot follows an unclean exit
   // (captured at the top of start()); consumed by the startup resume gate.
@@ -1557,28 +1559,8 @@ export class AgentRuntime implements Runtime {
     this.healthStatsTimer.unref?.();
   }
 
-  /**
-   * #3832 detection only: checks primary and fallback receipts with admission's inputs; writes none.
-   * Asynchronous and single-flight so the health tick and its timers stay responsive while a
-   * provider's `--version` is slow or hung. Returns the in-flight refresh.
-   */
-  private refreshProviderCanaryReadiness(): Promise<void> {
-    if (this.providerCanaryRefresh) return this.providerCanaryRefresh;
-    // Inputs are built inside the chain so a throw while building them is logged, not raised to the timer.
-    const refresh = Promise.resolve().then(() => inspectProviderCanaryReadiness({
-      providerIds: [this.agentProvider, ...this.agentFallbacks.map((entry) => entry.provider)],
-      resolveBinary: (id) => getProviderBinary(id), proxyScriptPath: providerMcpProxyScriptPath(), stateRoot: config.stateRoot,
-      sessionScope: this.sessionScope, sandboxPerChat: this.sandboxPerChat,
-    })).then((entries) => {
-      this.providerCanaryUnproven = entries.filter((entry) => entry.reason !== 'proven');
-    }, (err: unknown) => {
-      log.warn({ err, instanceName: this.instanceName }, 'provider canary readiness inspection failed');
-    }).finally(() => {
-      if (this.providerCanaryRefresh === refresh) this.providerCanaryRefresh = null;
-    });
-    this.providerCanaryRefresh = refresh;
-    return refresh;
-  }
+  /** #3832 detection only (writes nothing); returns the in-flight single-flight refresh. */
+  private refreshProviderCanaryReadiness(): Promise<void> { return this.providerCanaryReadiness.refresh(); }
 
   private startQueueSweepTimer(): void {
     if (!this.shared || this.queueSweepTimer) return;
@@ -7668,7 +7650,7 @@ export class AgentRuntime implements Runtime {
     // branch's `details` at the same position, preserving key order and output.
     const sharedHealthDetails = {
       accountIdentity,
-      providerCanaryUnproven: this.providerCanaryUnproven,
+      providerCanaryUnproven: this.providerCanaryReadiness.unproven,
       pollPersistenceErrors: this.pollPersistence.errors,
       pollPersistenceHealth,
       offlineDecisionRetry,
@@ -7757,7 +7739,7 @@ export class AgentRuntime implements Runtime {
       if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
       if (pollPersistenceHealth.degraded) degradedReasons.push('poll_persistence_failure');
       if (offlineDecisionRetry.exhausted) degradedReasons.push('offline_decision_retry_exhausted');
-      if (this.providerCanaryUnproven.length > 0) degradedReasons.push('provider_canary_unproven'); // only per_chat is gated
+      if (this.providerCanaryReadiness.unproven.length > 0) degradedReasons.push('provider_canary_unproven'); // only per_chat is gated
       degradedReasons.push(...accountIdentityReasons);
       const healthStatus: RuntimeHealth['status'] = degradedReasons.length > 0 ? 'degraded' : 'healthy';
       return {

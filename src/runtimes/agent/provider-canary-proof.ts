@@ -593,3 +593,39 @@ export async function inspectProviderCanaryReadiness(input: {
     };
   }));
 }
+
+/**
+ * #3832 detection only: the gated providers admission would refuse, checked with admission's
+ * inputs. Refreshes are asynchronous and single-flight, so a slow or hung provider `--version`
+ * never stacks probes across health ticks or blocks the timers.
+ */
+export class ProviderCanaryReadinessMonitor {
+  private current: readonly ProviderCanaryReadinessEntry[] = [];
+  private inFlight: Promise<void> | null = null;
+  private readonly inputs: () => Parameters<typeof inspectProviderCanaryReadiness>[0];
+  private readonly onError: (err: unknown) => void;
+
+  constructor(inputs: () => Parameters<typeof inspectProviderCanaryReadiness>[0], onError: (err: unknown) => void) {
+    this.inputs = inputs;
+    this.onError = onError;
+  }
+
+  /** Providers whose receipt was not proven at the last completed refresh. */
+  get unproven(): readonly ProviderCanaryReadinessEntry[] {
+    return this.current;
+  }
+
+  /** Returns the in-flight refresh. Inputs are built inside the chain, so a throw there is reported, not raised. */
+  refresh(): Promise<void> {
+    if (this.inFlight) return this.inFlight;
+    const run = Promise.resolve().then(() => inspectProviderCanaryReadiness(this.inputs())).then((entries) => {
+      this.current = entries.filter((entry) => entry.reason !== 'proven');
+    }, (err: unknown) => {
+      this.onError(err);
+    }).finally(() => {
+      if (this.inFlight === run) this.inFlight = null;
+    });
+    this.inFlight = run;
+    return run;
+  }
+}
