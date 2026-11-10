@@ -5,9 +5,13 @@
  * is not yet reaped. A real EPERM cannot be arranged in-process, so tests inject the group kill.
  * Every helper here signals only a negative group id below -1, never 0 or -1.
  */
+import { readFileSync } from 'node:fs';
+
+import type { GroupMembership } from '../../src/lib/process-group-membership.ts';
 
 export type GroupSignalSeam = (target: number, signal: NodeJS.Signals) => void;
-export type GroupMembershipAnswer = 'live' | 'no-live-members' | 'unknown';
+/** The membership probe's answer; the one definition lives in src/lib. */
+export type GroupMembershipAnswer = GroupMembership;
 
 export function groupKillError(code: 'EPERM' | 'ESRCH' | 'EINVAL'): NodeJS.ErrnoException {
   const error = new Error(`kill ${code}`) as NodeJS.ErrnoException;
@@ -39,6 +43,23 @@ export function throwOnly(code: 'EPERM' | 'EINVAL', targets: number[]): GroupSig
 }
 
 /**
+ * The leader dies and a member survives: the first call SIGKILLs only the group leader (the
+ * positive pid), then every call answers EPERM. A later call signals nothing, because by then the
+ * leader may have been reaped and its pid reused.
+ */
+export function killLeaderOnceThenEperm(targets: number[]): GroupSignalSeam {
+  let leaderSignalled = false;
+  return (target, signal) => {
+    targets.push(target);
+    if (!leaderSignalled && target < -1) {
+      leaderSignalled = true;
+      try { process.kill(-target, signal); } catch { /* the leader may already be gone */ }
+    }
+    throw groupKillError('EPERM');
+  };
+}
+
+/**
  * Kills a fixture group that a test left alive on purpose. Call it only while a member is known
  * to be alive: a live member keeps the group id allocated, so it cannot have been reused.
  */
@@ -47,4 +68,77 @@ export function reapFixtureGroups(targets: readonly number[]): void {
     if (target >= -1) continue;
     try { process.kill(target, 'SIGKILL'); } catch { /* the group is already gone */ }
   }
+}
+
+/**
+ * How long a fixture grandchild lives if its test's teardown never kills it. It only stops a leak:
+ * every test kills its grandchild in teardown, long before this.
+ */
+const FIXTURE_LEAK_NET_MS = 60_000;
+
+/**
+ * Source for a resolver that spawns one grandchild and writes the grandchild's pid to `pidFile`
+ * before it prints anything. So the pid is known before any group kill or membership probe runs.
+ * - `holdStdio`: the grandchild inherits the resolver's stdout and stderr, so `close` cannot fire
+ *   while it lives.
+ * - `setsid`: the grandchild is spawned `detached: true`, so it leaves the resolver's process group.
+ * - `block`: the resolver keeps running after its output, so only the watchdog ends it.
+ */
+export function grandchildResolverSource(
+  pidFile: string,
+  shape: { holdStdio: boolean; setsid: boolean; block: boolean },
+): string {
+  const hold = `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,${FIXTURE_LEAK_NET_MS})`;
+  const options = `{stdio:${shape.holdStdio ? '["ignore","inherit","inherit"]' : '"ignore"'},detached:${shape.setsid}}`;
+  return [
+    'const cp=require("node:child_process");const fs=require("node:fs");',
+    `const gc=cp.spawn(process.execPath,["-e",${JSON.stringify(hold)}],${options});`,
+    `fs.writeFileSync(${JSON.stringify(pidFile)},String(gc.pid));gc.unref();`,
+    'process.stdout.write("processed "+process.argv[2]+" with a grandchild\\n");',
+    shape.block ? 'setInterval(function(){},1000);' : '',
+  ].join('');
+}
+
+/** The pid a fixture resolver wrote, or undefined when the file is missing or unreadable. */
+export function readFixturePid(pidFile: string): number | undefined {
+  try {
+    const pid = Number(readFileSync(pidFile, 'utf8').trim());
+    return Number.isInteger(pid) && pid > 1 ? pid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Structured timing exemption (test-integrity `js-sleep-in-test`): a fixture process killed in
+ * teardown exits on the kernel's schedule, and only polling kill(pid, 0) observes that. The poll
+ * has its own bound, so a teardown never waits on the test timeout. Any answer but ESRCH, EPERM
+ * included, means the pid is still present.
+ */
+export async function waitForPidGone(pid: number, boundMs = 1_000): Promise<boolean> {
+  const deadline = Date.now() + boundMs;
+  for (;;) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return true;
+    }
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+/**
+ * Structured timing exemption (test-integrity `js-sleep-in-test`): bounds a run that must settle
+ * by itself. A hang then fails the test with `message` before the test timeout, and the test's
+ * own teardown still runs.
+ */
+export function settleWithin<T>(promise: Promise<T>, boundMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), boundMs);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error: unknown) => { clearTimeout(timer); reject(error); },
+    );
+  });
 }

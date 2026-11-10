@@ -599,6 +599,8 @@ export function registerAttemptCases(): void {
     });
     try {
       await expect(run).rejects.toMatchObject({ code: 'EPERM' });
+      // The rethrown error names the probe result, so a failed gate log tells live from unknown.
+      await expect(run).rejects.toThrow(/; group membership probe: live$/);
     } finally {
       reapFixtureGroups(targets);
     }
@@ -618,6 +620,7 @@ export function registerAttemptCases(): void {
     try {
       await expect(run).rejects.toMatchObject({ code: 'EPERM' });
       expect(probed).toEqual(targets.map((target) => -target));
+      await expect(run).rejects.toThrow(/; group membership probe: unknown$/);
     } finally {
       reapFixtureGroups(targets);
     }
