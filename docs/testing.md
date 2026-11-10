@@ -64,11 +64,25 @@ waits for a small receipt from the authenticated private workflow and verifies
 both run attempts and the source SHA. Missing, failed or stale evidence cannot
 complete a release. This ordering avoids waiting for a scanner that itself
 waits for Quality to finish. See the [cutover checklist](contributing/quality-guardrails-checklist.md).
-After correcting a scanner infrastructure failure, rerun its workflow and then the
+After resolving a transient scanner infrastructure failure, rerun its workflow and then the
 tag receipt consumer. The scanner replaces its own prior receipt, and the consumer
 requires the new artifact identity and current scanner attempt. This recovery does
 not require rerunning unchanged Quality tests. A changed Quality attempt or source
 commit still requires fresh matching validation. Receipts expire after thirty days.
+Workflow, driver or receipt-consumer fixes need a new Quality completion after the fix lands on
+`main`. Re-running an old scanner run keeps its original trusted revision; it
+does not load the fix. See [GitHub's rerun contract](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs).
+
+After activation, a broken default-branch driver can block its own repair PR.
+Keep the failed result visible. The repository owner must approve any temporary
+exception to the private-check requirement for a specific repair or rollback PR.
+Record the exact head, owner, reason, expiry and current protection in that PR;
+pause unrelated merges while the exception is active. Preserve Quality, CodeQL,
+metadata and independent review requirements. After the repair lands, obtain a
+new Quality completion, qualify the private scanner, restore its required context
+and run `guard:branch-protection-drift` before resuming unrelated merges. An
+expired exception leaves promotion blocked. This is an operator recovery procedure;
+the runner does not grant exceptions or enforce the pause on other maintainers.
 
 Vitest can follow static and literal dynamic imports. It cannot prove arbitrary
 computed imports or filesystem dependencies. Fixture and configuration changes
@@ -91,6 +105,10 @@ The browser performance measurements remain report-only by default because their
 budgets are provisional. To enforce the existing 50 ms mount and 16 ms update
 budgets, run `PERF_LANE_ENFORCE=1 npm run test:browser -- tests/browser/perf-budget.test.tsx`.
 A normal browser pass does not establish compliance with those budgets.
+Affected, full and performance jobs share the existing Playwright binary cache;
+the installer still checks the version required by the lockfile on every run.
+System package installation is separate and bounded so a download retry cannot
+repeat an interrupted package-manager transaction. Test verdicts remain uncached.
 Changes under `tools/whatsoup_guard/**` also run the standalone `whatsoup-guard`
 Node 25 compatibility lane. Quality owns Node 24 guard typechecking and tests;
 the standalone workflow does not repeat that version.

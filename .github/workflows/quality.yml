@@ -212,7 +212,17 @@ jobs:
           npm run guard:doc-drift
           npm run guard:public-surface-drift
 
-      - name: Install Playwright chromium when selected
+      - name: Cache Playwright browsers when selected
+        if: fromJSON(needs.selection.outputs.lanes).browser
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-node24-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-node24-
+            playwright-${{ runner.os }}-
+
+      - name: Install Playwright system deps when selected
         if: fromJSON(needs.selection.outputs.lanes).browser
         timeout-minutes: 5
         run: npx playwright install-deps chromium
@@ -228,7 +238,7 @@ jobs:
               exit 0
             fi
             echo "::endgroup::"
-            sleep $((attempt * 15))
+            if [ "$attempt" -lt 3 ]; then sleep $((attempt * 15)); fi
           done
           echo "Playwright chromium download failed after 3 attempts"
           exit 1
@@ -706,7 +716,7 @@ jobs:
             fi
             echo "::endgroup::"
             echo "Playwright chromium download attempt ${attempt} failed or timed out; retrying after backoff"
-            sleep $((attempt * 15))
+            if [ "$attempt" -lt 3 ]; then sleep $((attempt * 15)); fi
           done
           echo "Playwright chromium download failed after 3 attempts"
           exit 1
@@ -825,6 +835,9 @@ jobs:
         with:
           node-version: '24.x'
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            console/package-lock.json
 
       - name: Install dependencies
         run: npm ci && npm --prefix console ci
@@ -832,8 +845,22 @@ jobs:
       - name: Build console
         run: npm --prefix console run build
 
+      - name: Cache Playwright browsers
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-node24-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-node24-
+            playwright-${{ runner.os }}-
+
+      - name: Install Playwright system deps
+        timeout-minutes: 5
+        run: npx playwright install-deps chromium
+
       - name: Install Playwright chromium
-        run: npx playwright install chromium --with-deps
+        timeout-minutes: 5
+        run: npx playwright install chromium
 
       - name: Perf lane (report-only)
         run: npm --prefix console run perf:lane -- --json
