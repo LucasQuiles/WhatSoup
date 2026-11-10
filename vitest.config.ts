@@ -61,6 +61,8 @@ export default defineConfig({
     },
     env: {
       INSTANCE_CONFIG: '',
+      // A push sets the live push base for its gate steps; fixture repos never hold it.
+      WHATSOUP_PUSH_BASE_OID: '',
     },
     // vitest 4 removed test.poolOptions; the per-pool maxForks/maxThreads cap is
     // now the unified top-level maxWorkers option (applies to whichever pool runs).

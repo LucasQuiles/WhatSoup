@@ -4,6 +4,10 @@ Use the Node version in `.nvmrc` and install the root dependencies with `npm ci`
 Install `console` dependencies before root suites that exercise console lint or build
 fixtures. The guard package has its own install under `tools/whatsoup_guard`.
 
+Branch pushes run `verify:push:fast`, which checks disclosure before publication.
+Run `verify:push:branch` for the complete local gate; `main` and tag pushes require
+`verify:release`. Required hosted checks and independent review still govern merging.
+
 ## Choose work before starting workers
 
 ```sh

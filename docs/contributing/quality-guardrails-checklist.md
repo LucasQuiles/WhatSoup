@@ -4,7 +4,7 @@
 
 ## Layer 1 — CI gates (must pass for merge)
 
-> **This table is a curated subset.** `.github/workflows/quality.yml` owns the current step inventory: the `guard:*` family, coverage (`coverage:check`), browser/Playwright suites, console design checks, mutation via `deploy/scripts/run-sentinel-tests.sh` (pytest `--cov-fail-under=98` + deployer mutation drill — note `stryker.conf.json` is dormant/unwired), and tokenomics/drills. `scripts/lib/fitness/registry.ts` owns the architectural-fitness rule inventory. Its blocking authority lives in the **guard ring** (`verify:push:branch`); the ESLint fitness mirror is warn-only. Semantic-quality (`semantic-quality-check.ts`) runs in **shadow mode** (exit 0) everywhere it is wired; its enforce path is unwired/on-demand.
+> **This table is a curated subset.** `.github/workflows/quality.yml` owns the current step inventory: the `guard:*` family, coverage (`coverage:check`), browser/Playwright suites, console design checks, mutation via `deploy/scripts/run-sentinel-tests.sh` (pytest `--cov-fail-under=98` + deployer mutation drill — note `stryker.conf.json` is dormant/unwired), and tokenomics/drills. `scripts/lib/fitness/registry.ts` owns the architectural-fitness rule inventory. Its blocking authority lives in the **guard ring** (`verify:push:branch`, run by hand, and the same guards in the required hosted checks); the ESLint fitness mirror is warn-only. Semantic-quality (`semantic-quality-check.ts`) runs in **shadow mode** (exit 0) everywhere it is wired; its enforce path is unwired/on-demand.
 
 The `Quality` workflow (`.github/workflows/quality.yml`) classifies PR changes
 before installing dependencies. Documentation gets static validation; eligible
@@ -220,8 +220,8 @@ signal when a commit stages `*.ts`, `package.json`, `.nvmrc`, or `deploy/` files
 it runs `guard:boundaries` and `guard:lint:src` and prints a warning for either
 that fails, **without aborting the commit**. Node-pin consistency already ran
 once as an unconditional blocking pre-commit check, so the warning phase does
-not repeat it. These same guards are hard-enforced at push by
-`verify:push:branch` (Layer 2); the
+not repeat it. These same guards block merge through the required hosted checks,
+and `verify:push:branch` (Layer 2) runs them by hand; the branch-push hook does not. The
 architectural-drift signal only surfaces drift earlier. Skip only that signal
 with `WHATSOUP_SKIP_DRIFT_WARN=1`.
 
@@ -396,11 +396,13 @@ the primary worktree's potentially stale or in-flight hook bytes.
 
 | Push target | Composite script | Required checks |
 |---|---|---|
-| Branch push | `npm run verify:push:branch` | repo hygiene staged smoke, repo hygiene branch/base diff, publication staged guard, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, semantic guard-test coverage enforcement, test-integrity baseline, ring/boundary/service/config guards, `npm run typecheck:all`, the targeted guard test list below, design-system hygiene guard, harness-maintenance manifest guard, tokenomics Python tests, and console lint + build (#1105: these last four mirror blocking CI quality-job steps so console strict-tsconfig/design-system/tokenomics violations fail fast locally; the slow coverage/drills/browser tail stays in `verify:release` and CI) |
+| Branch push (hook) | `npm run verify:push:fast` | repo hygiene branch/base diff, commit authors, the publication audit table, and a private-literal scan of every commit the branch adds. Each of these guards is also a quality-workflow step. Tests, typecheck and the console build run in `quality (24.x)` and `quality (25.x)`, which branch protection on `main` requires before merge |
+| Pushed refs unreadable (hook), or by hand before merge | `npm run verify:push:branch` | repo hygiene staged smoke, repo hygiene branch/base diff, publication staged guard, publication branch-diff scan, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, semantic guard-test coverage enforcement, test-integrity baseline, ring/boundary/service/config guards, `npm run typecheck:all`, the targeted guard test list below, design-system hygiene guard, harness-maintenance manifest guard, tokenomics Python tests, and console lint + build (#1105: these last four mirror blocking CI quality-job steps so console strict-tsconfig/design-system/tokenomics violations fail fast locally; the slow coverage/drills/browser tail stays in `verify:release` and CI) |
 | `main` or release tag push | `npm run verify:release` | release repo hygiene, full publication audit, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, semantic guard-test coverage enforcement, test-integrity baseline, ring/boundary/service/config guards, tokenomics/drills, `tools/whatsoup_guard` install/typecheck/test, console dependency install/lint/build, `npm run typecheck:all`, full Vitest suite with `--pool=forks` (four workers by default in the root `vitest.config.ts`, matching CI; `VITEST_MAX_WORKERS=1`, `2`, or `3` lowers that concurrency), and coverage thresholds |
 | Delete-only push | metadata-only dispatcher path | `design:metrics` and `design:burndown`, each once through the pinned npm wrapper; content verification and console dependency prerequisites are skipped |
 
-Before branch or release verification starts, the dispatcher checks that the
+Before release verification starts, or `verify:push:branch` when the pushed refs are
+unreadable, the dispatcher checks that the
 installed console package exposes executable `eslint`, `tsc`, and `vite`
 entrypoints, then uses the pinned npm wrapper to validate the complete installed
 package graph in offline, lifecycle-script-disabled mode. A missing or invalid
@@ -408,9 +410,11 @@ package, plugin, or transitive dependency fails before the expensive composite
 with the remediation `npm ci --prefix console`. Child output is suppressed so
 the diagnostic stays bounded and cannot echo package-manager configuration.
 Delete-only pushes bypass this prerequisite so the file-based metadata checks
-remain runnable without console dependencies. Branch and release composites
-already include those metadata checks through `verify:console-design`; the hook
-does not repeat them.
+remain runnable without console dependencies. A branch push through
+`verify:push:fast` also skips this prerequisite because it builds nothing. The
+`verify:push:branch` and release composites already include those metadata checks
+through `verify:console-design`; the hook does not repeat them. `verify:push:fast`
+does not run them; the required hosted checks do.
 
 The "ring/boundary/service/config guards" phrasing above folds in several named
 guards that `verify:push:branch` runs. Spelled out:

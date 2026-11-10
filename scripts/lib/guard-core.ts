@@ -943,23 +943,171 @@ export function gitList(args: string[], cwd: string): string[] {
     .map(normalizeRepoPath);
 }
 
+/**
+ * Staged paths, raw. With `-z` Git prints each name as it is, NUL-terminated;
+ * without it Git C-quotes a name holding a control character, a double quote, a
+ * backslash or a non-ASCII byte, and the quoted form names no file, so a staged
+ * read of it finds nothing.
+ */
 export function listStagedFiles(cwd: string, diffFilter: string): string[] {
-  return gitList(['diff', '--cached', '--name-only', `--diff-filter=${diffFilter}`], cwd);
+  return git(['diff', '--cached', '--name-only', '-z', `--diff-filter=${diffFilter}`], cwd)
+    .split('\0')
+    .filter(Boolean)
+    .map(normalizeRepoPath);
 }
 
-export function readStagedAddedLines(cwd: string, filePath: string): string {
+/**
+ * Flags for every patch a disclosure scan reads. Git prints only "Binary files ...
+ * differ" for a file it takes as binary, so without `--text` a branch-controlled
+ * `.gitattributes` rule (`-diff`, `binary`) or a NUL byte in a file's first 8000
+ * bytes hides every line that file adds. The other flags pin the output against
+ * user config: an external diff or a textconv driver rewrites the text, and
+ * `color.ui=always` hides the `+` markers. `--full-index` prints each file's full
+ * new blob id, which the verified-binary check below reads.
+ */
+export const DISCLOSURE_PATCH_FLAGS = ['--text', '--no-ext-diff', '--no-textconv', '--no-color', '--full-index'] as const;
+
+/**
+ * Binary formats the disclosure scans skip. Every other path is scanned, whatever
+ * its name. With --text a real image's bytes reach the scans and match loose rules
+ * (an internal-label or email shape): main's screenshots did, 58 times over 60 days
+ * of history. A file is skipped only when its new blob is the format its name says:
+ * the extension (any case) is listed, the blob starts with that format's signature,
+ * and it holds a NUL in its first 8000 bytes, Git's own content test for binary.
+ * Attributes are never read, so a `-diff` or `binary` rule, a NUL in a source file,
+ * and a text file under an image name are all still scanned. A skipped file is what
+ * main did not scan either: a real image's bytes, including any text in its metadata
+ * (PNG text chunks, for example), and a file built to pass all three checks. The
+ * table holds the binary types main tracks; a new type is scanned until it is listed.
+ */
+const VERIFIED_BINARY_FORMATS: ReadonlyArray<{ extension: string; signature: readonly number[] }> = [
+  { extension: '.png', signature: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] },
+  { extension: '.woff2', signature: [0x77, 0x4f, 0x46, 0x32] }, // "wOF2"
+  { extension: '.ogg', signature: [0x4f, 0x67, 0x67, 0x53] }, // "OggS"
+];
+
+const GIT_BINARY_PROBE_BYTES = 8000;
+
+function verifiedBinaryFormat(filePath: string): (typeof VERIFIED_BINARY_FORMATS)[number] | undefined {
+  const extension = path.extname(filePath).toLowerCase();
+  return VERIFIED_BINARY_FORMATS.find((entry) => entry.extension === extension);
+}
+
+function isFormatBlob(format: (typeof VERIFIED_BINARY_FORMATS)[number], blob: Uint8Array): boolean {
+  if (!format.signature.every((byte, index) => blob[index] === byte)) return false;
+  return blob.subarray(0, GIT_BINARY_PROBE_BYTES).includes(0);
+}
+
+/** Unreadable objects are scanned as text; a timed-out probe must stop the enclosing scan. */
+function readBlob(cwd: string, blobSpec: string, timeout: number): Buffer {
   try {
-    return execFileSync('git', ['diff', '--cached', '--unified=0', '--', filePath], {
+    return execFileSync('git', ['cat-file', 'blob', blobSpec], {
+      cwd,
+      env: cleanGitEnv(),
+      maxBuffer: 64 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout,
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ETIMEDOUT') throw error;
+    return Buffer.alloc(0); // unreadable or not a blob (a submodule commit): scanned
+  }
+}
+
+/**
+ * The one test every disclosure scan uses to skip a file's added lines. `blobSpec`
+ * names the file's new content: the blob id from the patch's `index` line, or
+ * `:<path>` for the staged copy. Without one, the file is scanned. Verdicts are
+ * cached per blob for the life of the returned function. `timeout` gives each blob
+ * read its time in milliseconds; a scan with a time limit passes the time it has left.
+ */
+export function createVerifiedBinaryCheck(
+  cwd: string,
+  timeout: () => number = () => 30_000,
+): (filePath: string, blobSpec: string | undefined) => boolean {
+  const verdicts = new Map<string, boolean>();
+  return (filePath, blobSpec) => {
+    if (!blobSpec) return false;
+    const format = verifiedBinaryFormat(filePath);
+    if (!format) return false;
+    const key = `${format.extension}\0${blobSpec}`;
+    let verdict = verdicts.get(key);
+    if (verdict === undefined) {
+      verdict = isFormatBlob(format, readBlob(cwd, blobSpec, timeout()));
+      verdicts.set(key, verdict);
+    }
+    return verdict;
+  };
+}
+
+/**
+ * The live main the push hook proved. pre-push-guard reads it from the pushed
+ * remote's configured URL and passes it to the gate steps, so a branch scan
+ * compares with what is public rather than with a local tracking ref.
+ */
+export const PUSH_BASE_OID_ENV = 'WHATSOUP_PUSH_BASE_OID';
+
+export type StagedDiffReadResult = { ok: true; diff: string } | { ok: false; error: string };
+
+/** The largest staged patch of one path the staged scans read. */
+export const STAGED_DIFF_MAX_BYTES = 20 * 1024 * 1024;
+
+/**
+ * The staged patch of one path, read with the disclosure flags. A git error, a
+ * timeout or a patch over `maxBytes` is a failed read with its cause, never an
+ * empty patch: a disclosure scan must not pass a file it could not read.
+ */
+export function readStagedAddedLinesResult(
+  cwd: string,
+  filePath: string,
+  maxBytes: number = STAGED_DIFF_MAX_BYTES,
+): StagedDiffReadResult {
+  try {
+    const diff = execFileSync('git', ['diff', '--cached', '--unified=0', ...DISCLOSURE_PATCH_FLAGS, '--', filePath], {
       cwd,
       encoding: 'utf8',
       env: cleanGitEnv(),
-      maxBuffer: 20 * 1024 * 1024,
+      maxBuffer: maxBytes,
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 30_000,
     });
-  } catch {
-    return '';
+    return { ok: true, diff };
+  } catch (error) {
+    const { code, status } = error as { code?: unknown; status?: unknown };
+    if (code === 'ENOBUFS') return { ok: false, error: `the staged diff is over ${maxBytes} bytes` };
+    if (code === 'ETIMEDOUT') return { ok: false, error: 'the staged diff read timed out' };
+    if (typeof code === 'string') return { ok: false, error: `git could not run (${code})` };
+    return { ok: false, error: `git exited ${String(status ?? 'without a status')}` };
   }
+}
+
+/**
+ * Compatibility wrapper for callers that treat a failed read as no added lines
+ * (the design-system hygiene guard, unchanged). Disclosure scans use
+ * readStagedAddedLinesResult.
+ */
+export function readStagedAddedLines(cwd: string, filePath: string): string {
+  const result = readStagedAddedLinesResult(cwd, filePath);
+  return result.ok ? result.diff : '';
+}
+
+// C0 and C1 controls, DEL, the bidirectional marks, overrides and isolates, and the
+// line and paragraph separators.
+const UNPRINTABLE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+const NAMED_ESCAPES: Readonly<Record<string, string>> = { '\n': '\\n', '\r': '\\r', '\t': '\\t' };
+
+/**
+ * `text` with every control character escaped, for a guard's printed lines: a file
+ * name, commit subject or audit row cannot then move the cursor, clear a line or
+ * start a new one. Printing only; issue objects keep the real text.
+ */
+export function printableText(text: string): string {
+  return text.replace(UNPRINTABLE, (char) => {
+    const named = NAMED_ESCAPES[char];
+    if (named) return named;
+    const code = char.charCodeAt(0);
+    return code <= 0xff ? `\\x${code.toString(16).padStart(2, '0')}` : `\\u${code.toString(16).padStart(4, '0')}`;
+  });
 }
 
 function errorText(error: unknown): string {
