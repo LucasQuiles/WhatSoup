@@ -215,6 +215,11 @@ affected runner and branch/release gates also compare repository inputs before
 and after execution. These snapshots include tracked and nonignored untracked
 files, with pre-existing dirty files and deletions preserved as the starting state.
 Persistent changes reject the result; unavailable snapshot evidence is inconclusive.
+Snapshot hashing uses a shared 64 KiB buffer and rejects inputs above 64 MiB per
+file, 512 MiB in total, or 50,000 paths. A changed file identity or size during
+reading also prevents verification. Limit failures return inconclusive evidence;
+they do not silently exclude inputs. Keep generated output in the existing ignored
+output directories, or review a justified limit change before rerunning.
 Ignored generated output is excluded. The outer snapshot does not detect a
 temporary change restored before comparison. Standalone browser scripts do not
 take this snapshot; the affected runner and release gate cover browser execution.

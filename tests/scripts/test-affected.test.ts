@@ -157,6 +157,20 @@ describe('affected test execution', () => {
     expect(report.error).toContain('FINAL-SOURCE cannot enumerate repository inputs');
   });
 
+  it('retains a completed child result when an oversized input prevents final verification', async () => {
+    const cwd = tmp.make('source-oversized');
+    makeGitRepository(cwd);
+    const report = await executeTestCommandsWithRepositoryInputCheck(cwd, [{
+      name: 'oversized-input', command: process.execPath,
+      args: ['-e', 'const fs=require("node:fs");fs.writeFileSync("large.bin", "");fs.truncateSync("large.bin", 67108865)'],
+    }], { timeoutMs: 10_000, json: false });
+    expect(report).toMatchObject({ outcome: 'inconclusive', exitCode: 125 });
+    expect(report.results).toHaveLength(1);
+    expect(report.results[0]).toMatchObject({ name: 'oversized-input', exitCode: 0 });
+    expect(report.error).toContain('large.bin exceeds 67108864-byte file limit');
+    expect(existsSync(join(cwd, '.local/test-run.lock'))).toBe(false);
+  });
+
   it('refuses duplicate work immediately and retains the existing owner lock', async () => {
     const cwd = tmp.make('locked');
     const lock = acquireProcessLock(join(cwd, 'test.lock'));

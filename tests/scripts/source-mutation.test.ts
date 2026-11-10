@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, symlinkSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
@@ -32,6 +33,48 @@ function makeRepository(): string {
 }
 
 describe('repository input snapshot', () => {
+  it('hashes all bytes across read chunks, including the final partial chunk', () => {
+    const cwd = makeRepository();
+    const contents = Buffer.alloc(131_079, 7);
+    contents[65_536] = 19;
+    contents[contents.length - 1] = 31;
+    writeFileSync(join(cwd, 'chunked.bin'), contents);
+    const snapshot = captureRepositoryInputSnapshot({ cwd });
+    expect(snapshot.entries.get('chunked.bin')).toBe(`file:${createHash('sha256').update(contents).digest('hex')}`);
+    contents[contents.length - 1] = 32;
+    writeFileSync(join(cwd, 'chunked.bin'), contents);
+    expect(() => assertRepositoryInputUnchanged({ cwd, snapshot, stage: 'chunk-tail', report: () => {} }))
+      .toThrow('changed=chunked.bin');
+  });
+
+  it('refuses an oversized sparse input with a controlled diagnostic', () => {
+    const cwd = makeRepository();
+    const input = join(cwd, 'oversized.bin');
+    writeFileSync(input, '');
+    truncateSync(input, 64 * 1024 * 1024 + 1);
+    expect(() => captureRepositoryInputSnapshot({ cwd }))
+      .toThrow('FINAL-SOURCE cannot snapshot repository input: oversized.bin exceeds 67108864-byte file limit');
+  });
+
+  it('refuses an aggregate input size above the snapshot budget', () => {
+    const cwd = makeRepository();
+    for (let index = 0; index < 9; index += 1) {
+      const input = join(cwd, `part-${index}.bin`);
+      writeFileSync(input, '');
+      truncateSync(input, 64 * 1024 * 1024);
+    }
+    expect(() => captureRepositoryInputSnapshot({ cwd }))
+      .toThrow('repository inputs exceed 536870912-byte snapshot limit');
+  });
+
+  it('refuses excess input count before inspecting any path', () => {
+    const cwd = makeRepository();
+    expect(() => captureRepositoryInputSnapshot({
+      cwd,
+      dependencies: { listFiles: () => Array.from({ length: 50_001 }, (_, index) => `missing-${index}`) },
+    })).toThrow('repository inputs exceed 50000-path snapshot limit');
+  });
+
   it('accepts unchanged dirty inputs and ignores generated paths', () => {
     const cwd = makeRepository();
     writeFileSync(join(cwd, 'src', 'lib', 'helper.ts'), 'export const helper = "dirty before snapshot";\n');

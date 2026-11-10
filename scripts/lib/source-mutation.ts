@@ -1,12 +1,15 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync, readlinkSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, type Stats } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { cleanGitEnv } from '../../src/lib/git-env.ts';
 
 const SOURCE_RELATIVE_PATH = 'src/main.ts';
 const SHA256 = /^[a-f0-9]{64}$/;
+const MAX_INPUT_BYTES = 64 * 1024 * 1024;
+const MAX_SNAPSHOT_BYTES = 512 * 1024 * 1024;
+const MAX_SNAPSHOT_PATHS = 50_000;
 
 export interface SourceMutationAnchorOptions {
   cwd: string;
@@ -80,7 +83,16 @@ function absoluteRepositoryPath(cwd: string, inputPath: string): string {
   return absolute;
 }
 
-function repositoryInputState(cwd: string, inputPath: string): RepositoryInputState {
+function sameInputFile(before: Stats, after: Stats): boolean {
+  return after.isFile() && before.dev === after.dev && before.ino === after.ino
+    && before.size === after.size && before.mtimeMs === after.mtimeMs && before.ctimeMs === after.ctimeMs;
+}
+
+function repositoryInputState(
+  cwd: string,
+  inputPath: string,
+  budget: { bytes: number; chunk: Buffer },
+): RepositoryInputState {
   const absolute = absoluteRepositoryPath(cwd, inputPath);
   let stat: ReturnType<typeof lstatSync>;
   try {
@@ -99,8 +111,29 @@ function repositoryInputState(cwd: string, inputPath: string): RepositoryInputSt
     }
   }
   if (!stat.isFile()) throw new Error(`Git input ${inputPath} is not a regular file or symbolic link`);
+  if (stat.size > MAX_INPUT_BYTES) throw new Error(`${inputPath} exceeds ${MAX_INPUT_BYTES}-byte file limit`);
+  budget.bytes += stat.size;
+  if (budget.bytes > MAX_SNAPSHOT_BYTES) throw new Error(`repository inputs exceed ${MAX_SNAPSHOT_BYTES}-byte snapshot limit`);
   try {
-    return `file:${sha256(readFileSync(absolute))}`;
+    const hash = createHash('sha256');
+    const descriptor = openSync(absolute, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      if (!sameInputFile(stat, fstatSync(descriptor))) throw new Error('input changed before read');
+      let total = 0;
+      for (;;) {
+        const count = readSync(descriptor, budget.chunk, 0, Math.min(budget.chunk.length, stat.size - total + 1), null);
+        if (count === 0) break;
+        total += count;
+        if (total > stat.size) throw new Error('input grew during read');
+        hash.update(budget.chunk.subarray(0, count));
+      }
+      if (total !== stat.size || !sameInputFile(stat, fstatSync(descriptor)) || !sameInputFile(stat, lstatSync(absolute))) {
+        throw new Error('input changed during read');
+      }
+    } finally {
+      closeSync(descriptor);
+    }
+    return `file:${hash.digest('hex')}`;
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`cannot read ${inputPath}: ${detail}`, { cause: error });
@@ -131,7 +164,9 @@ export function captureRepositoryInputSnapshot(options: RepositoryInputSnapshotO
   }
   const entries = new Map<string, RepositoryInputState>();
   try {
-    for (const inputPath of paths) entries.set(inputPath, repositoryInputState(options.cwd, inputPath));
+    if (paths.length > MAX_SNAPSHOT_PATHS) throw new Error(`repository inputs exceed ${MAX_SNAPSHOT_PATHS}-path snapshot limit`);
+    const budget = { bytes: 0, chunk: Buffer.allocUnsafe(64 * 1024) };
+    for (const inputPath of paths) entries.set(inputPath, repositoryInputState(options.cwd, inputPath, budget));
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`FINAL-SOURCE cannot snapshot repository input: ${detail}`, { cause: error });
