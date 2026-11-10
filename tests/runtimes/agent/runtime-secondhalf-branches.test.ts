@@ -1783,12 +1783,16 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
           await runtime.shutdown();
         });
 
-        it('a restart after the respawn resumes once and sends nothing; a second restart does the same', async () => {
+        it('with the park unavailable, no respawn runs; each restart resumes once and sends nothing', async () => {
           const saved = savedSession();
           const first = stallRuntimeWith(saved.durability);
           stallKill(first.runtime, first.state, dmJid);
+          // This port cannot orphan the checkpoint, so only the hold protects
+          // it; a respawn would reactivate it for a build that ignores the hold.
+          expect(first.state.pendingRespawnTimers.size, 'no respawn timer').toBe(0);
           await runRespawn();
-          expect(suppressionLogs()).toHaveLength(1);
+          expect(mockSession.spawnSession, 'no automatic resume').not.toHaveBeenCalled();
+          expect(suppressionLogs()).toHaveLength(0);
 
           const second = await restart(saved.durability);
           expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);

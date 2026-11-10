@@ -2,8 +2,8 @@
 //
 // F7: extracted from AgentRuntime to keep runtime.ts under the per-file
 // ceiling (12500 lines). Owns the restart protection after a stalled-operation
-// kill: the resume hold on the killed session's checkpoint, the fail-closed
-// withdrawal from proactive resume, the withheld respawn and its deferred
+// kill: the park of the killed session's checkpoint (the resume hold plus the
+// withdrawal from proactive resume), the withheld respawn and its deferred
 // in-place resume. The hold's JSON encoding is in
 // stalled-operation-resume-hold.ts.
 //
@@ -51,73 +51,96 @@ export class StalledOperationHolds {
   }
 
   /**
-   * Save the stalled-operation kill on the checkpoint of the killed provider
-   * session, so a service restart does not continue the work either, and read
-   * it back. A chat with no checkpoint has nothing a restart could resume.
-   * When the hold cannot be saved or read back, the held session's checkpoint
-   * is taken out of proactive resume instead; when the checkpoint names
-   * another session there is nothing of the held session to withdraw. Either
-   * way the chat stays unverified so the respawn and the service shutdown,
-   * which both make the checkpoint resumable again, repeat this step.
+   * Park the killed provider session durably: save the stalled-operation kill
+   * on its checkpoint (the hold, read back) and keep that checkpoint out of
+   * proactive resume (orphaned, read back from the resumable set). The
+   * orphaned state is what protects a restart into a build that ignores the
+   * hold: every build excludes orphaned checkpoints from proactive resume
+   * (getResumableCheckpoints reads active and suspended only), and lazy
+   * adoption still resumes the session on the chat's next message. The hold
+   * covers the next resume in place, which reactivates the checkpoint before
+   * the user's turn is accepted. A chat with no checkpoint has nothing a
+   * restart could resume. Unless both writes are verified the chat stays
+   * unverified, so the service shutdown repeats this step.
    *
-   * Returns what protects a restart: `held` (the hold was read back, or there
-   * is no checkpoint), `withdrawn` (no resumable checkpoint names the held
-   * session) or `unprotected` (both protective writes failed). Only
-   * `held` survives a resume: reactivation keeps watchdog_state but makes the
-   * checkpoint resumable again, so the respawn gate admits `held` alone.
+   * Returns what protects a restart: `parked` (no resumable checkpoint names
+   * the held session), `held` (only the hold, which this build reads),
+   * `unprotected` (neither) or `not_needed` (no checkpoint). Only
+   * `not_needed` admits the automatic respawn: its resume would reactivate a
+   * parked checkpoint.
    */
   record(mapKey: string, sessionId: string): StalledOperationRestartProtection {
     const durability = this.deps.durability();
-    if (!durability || typeof durability.getSessionCheckpoint !== 'function') return 'held';
+    if (!durability || typeof durability.getSessionCheckpoint !== 'function') return 'not_needed';
     const conversationKey = checkpointConversationKey(mapKey);
+    let held = false;
     try {
       const checkpoint = durability.getSessionCheckpoint(conversationKey);
       if (!checkpoint) {
         this.unverified.delete(conversationKey);
-        return 'held';
+        return 'not_needed';
       }
-      if (checkpoint.session_id === sessionId) {
-        if (!stalledOperationResumeHoldApplies(checkpoint.watchdog_state, sessionId)) {
-          durability.upsertSessionCheckpoint(conversationKey, {
-            watchdogState: withStalledOperationResumeHold(checkpoint.watchdog_state, sessionId),
-          });
-        }
-        if (stalledOperationResumeHoldApplies(durability.getSessionCheckpoint(conversationKey)?.watchdog_state, sessionId)) {
-          this.unverified.delete(conversationKey);
-          return 'held';
-        }
-        log.warn({ mapKey, sessionId }, 'stalled-operation resume hold not found after the write');
-      } else {
-        log.warn({ mapKey, sessionId }, 'stalled-operation resume hold not saved — the checkpoint names another session');
-      }
+      held = this.saveHold(conversationKey, mapKey, sessionId);
     } catch (err) {
       log.warn({ err, mapKey, sessionId }, 'failed to save the stalled-operation resume hold');
     }
-    this.unverified.set(conversationKey, { mapKey, sessionId });
-    return this.withdrawFromProactiveResume(conversationKey, mapKey, sessionId) ? 'withdrawn' : 'unprotected';
+    const parked = this.withdrawFromProactiveResume(conversationKey, mapKey, sessionId);
+    if (held && parked) this.unverified.delete(conversationKey);
+    else this.unverified.set(conversationKey, { mapKey, sessionId });
+    if (parked) return 'parked';
+    if (held) {
+      log.warn(
+        { mapKey, sessionId },
+        'stalled-operation session not parked — only the resume hold keeps a restart from continuing the stopped work',
+      );
+      return 'held';
+    }
+    log.error(
+      { mapKey, sessionId },
+      'stalled-operation kill not saved and the checkpoint is still resumable — a service restart may continue the stopped work',
+    );
+    return 'unprotected';
+  }
+
+  /** Write the hold when it is missing and read it back. A checkpoint that names another session gets none. */
+  private saveHold(conversationKey: string, mapKey: string, sessionId: string): boolean {
+    const durability = this.deps.durability()!;
+    const checkpoint = durability.getSessionCheckpoint(conversationKey);
+    if (checkpoint?.session_id !== sessionId) {
+      log.warn({ mapKey, sessionId }, 'stalled-operation resume hold not saved — the checkpoint names another session');
+      return false;
+    }
+    if (!stalledOperationResumeHoldApplies(checkpoint.watchdog_state, sessionId)) {
+      durability.upsertSessionCheckpoint(conversationKey, {
+        watchdogState: withStalledOperationResumeHold(checkpoint.watchdog_state, sessionId),
+      });
+    }
+    if (stalledOperationResumeHoldApplies(durability.getSessionCheckpoint(conversationKey)?.watchdog_state, sessionId)) {
+      return true;
+    }
+    log.warn({ mapKey, sessionId }, 'stalled-operation resume hold not found after the write');
+    return false;
   }
 
   /**
-   * At the provider exit, before any respawn is scheduled: save the hold when
-   * the exit was a stalled-operation kill. Any other exit needs no
-   * protection and reports `held`.
+   * At the provider exit, before any respawn is scheduled: park the session
+   * when the exit was a stalled-operation kill. Any other exit needs no
+   * protection.
    */
   recordExit(mapKey: string, info: SessionCrashInfo | undefined): StalledOperationRestartProtection {
     const stalledSessionId = info?.terminationReason === 'stalled_operation' ? info.sessionId : undefined;
     return typeof stalledSessionId === 'string'
       ? this.record(mapKey, stalledSessionId)
-      : 'held';
+      : 'not_needed';
   }
 
   /**
-   * Fail-closed path: an orphaned checkpoint is not proactively resumed on
-   * startup (getResumableCheckpoints reads active and suspended only); the
-   * chat's next message rebuilds it. Only the held session's checkpoint is
-   * withdrawn. A checkpoint that names another session, such as the fresh
-   * session a /new reset started, cannot resume the stopped work and keeps
-   * its own resume; the unverified chat repeats this step at shutdown, so a
-   * conversation-wide write would orphan that session. Verified by reading
-   * the resumable set for the held session.
+   * The park: only the held session's checkpoint is orphaned. A checkpoint
+   * that names another session, such as the fresh session a /new reset
+   * started, cannot resume the stopped work and keeps its own resume; the
+   * unverified chat repeats this step at shutdown, so a conversation-wide
+   * write would orphan that session. Verified by reading the resumable set
+   * for the held session.
    */
   private withdrawFromProactiveResume(conversationKey: string, mapKey: string, sessionId: string): boolean {
     const durability = this.deps.durability();
@@ -134,31 +157,25 @@ export class StalledOperationHolds {
             sessionStatus: 'orphaned',
           });
         }
-        if (!durability.getResumableCheckpoints().some(
+        return !durability.getResumableCheckpoints().some(
           (cp) => cp.conversation_key === conversationKey && cp.session_id === sessionId,
-        )) {
-          log.warn({ mapKey, sessionId }, 'stalled-operation resume hold unavailable — no resumable checkpoint names the stopped session');
-          return true;
-        }
+        );
       }
     } catch (err) {
-      log.error({ err, mapKey, sessionId }, 'failed to withdraw the checkpoint from proactive resume');
+      log.error({ err, mapKey, sessionId }, 'failed to park the stalled-operation session out of proactive resume');
     }
-    log.error(
-      { mapKey, sessionId },
-      'stalled-operation kill not saved and the checkpoint is still resumable — a service restart may continue the stopped work',
-    );
     return false;
   }
 
   /**
-   * Respawn gate: without a verified hold the automatic respawn is withheld,
-   * because its resume makes the checkpoint resumable again and a restart
-   * would then continue the stopped work. The chat stays recoverable_dead and
-   * keeps its provider session for the next request: in this process the
-   * next turn resumes it in place (takeDeferredResume); after a restart the
-   * crashed row, marked orphaned here, is what lazy adoption resumes on the
-   * chat's next message (never proactive resume, which reads checkpoints).
+   * Respawn gate: after a stalled-operation kill with a checkpoint the
+   * automatic respawn is withheld, because its resume reactivates the parked
+   * checkpoint and a restart into a build that ignores the hold would then
+   * continue the stopped work. The chat stays recoverable_dead and keeps its
+   * provider session for the next request: in this process the next turn
+   * resumes it in place (adoptDeferredResume); after a restart the crashed
+   * row, marked orphaned here, is what lazy adoption resumes on the chat's
+   * next message (never proactive resume, which skips orphaned checkpoints).
    */
   withholdRespawn(
     mapKey: string,
@@ -175,9 +192,9 @@ export class StalledOperationHolds {
         log.warn({ err, mapKey, sessionId }, 'stalled-operation session row not kept for lazy resume — a restart starts fresh with a notice');
       }
     }
-    log[protection === 'unprotected' ? 'error' : 'warn'](
+    log[protection === 'parked' ? 'info' : protection === 'unprotected' ? 'error' : 'warn'](
       { mapKey, sessionId, protection, deferredResume: typeof dbRowId === 'number' },
-      'auto-respawn withheld after a stalled-operation kill — no verified hold; the next request resumes the session',
+      'stalled-operation kill parked — no automatic respawn; the next request resumes the session',
     );
   }
 
@@ -188,16 +205,16 @@ export class StalledOperationHolds {
    */
   admitRespawn(mapKey: string, session: SessionManager, sessionId: string, dbRowId: number | null): boolean {
     const protection = this.record(mapKey, sessionId);
-    if (protection === 'held') return true;
+    if (protection === 'not_needed') return true;
     this.withholdRespawn(mapKey, session, sessionId, dbRowId, protection);
     return false;
   }
 
   /**
-   * The automatic respawn resumed the killed session. The caller sends no
-   * context or continuation turn: either would re-run the stopped work
-   * unbidden. The resume reactivated the checkpoint, so the hold is recorded
-   * again.
+   * The automatic respawn resumed the killed session, which had no checkpoint
+   * when it was admitted. The caller sends no context or continuation turn:
+   * either would re-run the stopped work unbidden. The session is live, so a
+   * checkpoint written by its resume gets the hold, never the park.
    */
   recordAfterRespawnResume(mapKey: string, session: SessionManager, sessionId: string): void {
     log.info(
@@ -205,7 +222,14 @@ export class StalledOperationHolds {
       'auto-respawn resumed after a stalled-operation kill — no context or continuation turn sent',
     );
     const resumedSessionId = session.getStatus().sessionId ?? sessionId;
-    if (resumedSessionId) this.record(mapKey, resumedSessionId);
+    const durability = this.deps.durability();
+    if (!resumedSessionId || !durability || typeof durability.getSessionCheckpoint !== 'function') return;
+    const conversationKey = checkpointConversationKey(mapKey);
+    try {
+      if (durability.getSessionCheckpoint(conversationKey)) this.saveHold(conversationKey, mapKey, resumedSessionId);
+    } catch (err) {
+      log.warn({ err, mapKey, sessionId: resumedSessionId }, 'failed to save the stalled-operation resume hold');
+    }
   }
 
   /**
@@ -244,7 +268,7 @@ export class StalledOperationHolds {
     this.deferredResumes.delete(session);
   }
 
-  /** Repeat the hold for chats whose kill is not yet saved, after shutdown suspended their checkpoints. */
+  /** Repeat the park for chats whose kill is not yet saved, after shutdown suspended their checkpoints. */
   settleUnverified(): void {
     for (const { mapKey, sessionId } of Array.from(this.unverified.values())) {
       this.record(mapKey, sessionId);

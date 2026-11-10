@@ -11275,13 +11275,13 @@ export class AgentRuntime implements Runtime {
       );
     }
 
-    // F7: the stalled-operation hold is saved before any respawn is scheduled.
+    // F7: a stalled-operation kill is parked before any respawn is scheduled.
     const stalledOperationProtection = this.stalledOperationHolds.recordExit(currentMapKey, info);
 
     // Auto-respawn: if we haven't hit the crash limit, try to resume the session
     // after a short delay. This lets the agent continue mid-conversation without
     // requiring the user to send a new message.
-    if (crashCount <= AUTO_RESPAWN_MAX_CRASHES && info?.sessionId && stalledOperationProtection !== 'held') {
+    if (crashCount <= AUTO_RESPAWN_MAX_CRASHES && info?.sessionId && stalledOperationProtection !== 'not_needed') {
       this.stalledOperationHolds.withholdRespawn(currentMapKey, session, info.sessionId, info.dbRowId, stalledOperationProtection);
     } else if (crashCount <= AUTO_RESPAWN_MAX_CRASHES && info?.sessionId) {
       const sessionId = info.sessionId;

@@ -3,9 +3,10 @@
  * finalizes the killed request as failed. The agent must not resume that
  * work on its own. The in-process respawn knows the kill reason; a service
  * restart does not, so the reason is saved on the session checkpoint's
- * `watchdog_state` JSON. Proactive resume after a restart reads it and
- * resumes the provider session without a context or continuation turn.
- * The next request the user sends clears it.
+ * `watchdog_state` JSON next to the park (stalled-operation-holds.ts).
+ * Proactive resume after a restart reads it and resumes the provider session
+ * without a context or continuation turn. The next request the user sends
+ * clears it.
  *
  * The hold names the provider session it was recorded for. A checkpoint that
  * moved to another session does not inherit it.
@@ -13,11 +14,12 @@
 const HOLD_KEY = 'stalledOperationResumeHold';
 
 /**
- * What keeps a service restart from continuing the stopped work: the hold
- * read back (or no checkpoint), no resumable checkpoint naming the stopped
- * session, or neither. Only the hold survives a resume of the session.
+ * What keeps a service restart from continuing the stopped work: `parked`
+ * (no resumable checkpoint names the stopped session, which every build
+ * honours), `held` (only the hold, which a build without it ignores),
+ * `unprotected` (neither) or `not_needed` (no checkpoint to resume).
  */
-export type StalledOperationRestartProtection = 'held' | 'withdrawn' | 'unprotected';
+export type StalledOperationRestartProtection = 'not_needed' | 'parked' | 'held' | 'unprotected';
 
 function parseWatchdogState(raw: string | null | undefined): Record<string, unknown> {
   if (!raw) return {};
