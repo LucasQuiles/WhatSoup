@@ -1,6 +1,6 @@
 /**
  * Host adapter for `release:activate`: every effect that reaches outside the
- * filesystem (launchctl, ps, plutil, renderer scripts, process liveness,
+ * filesystem (launchctl, systemctl, ps, /proc reads, plutil, renderer scripts, process liveness,
  * clocks, the loopback health probe, and the BOT ERRORS alert helper) goes
  * through this seam so tests can
  * drive the whole activation against a real temporary HOME with fakes here.
@@ -72,6 +72,15 @@ export interface ActivationHost {
    * `TOOL_COMMIT_TIMEOUT_MS` (see tool-commit.ts).
    */
   toolCommit(): Promise<string | null>;
+  /**
+   * Linux systemd path only: the text of this process's procfs cgroup file, or
+   * null when it cannot be read or the host is not Linux. Absent on hosts that
+   * never take that path; absent or null is "unknown", which the systemd
+   * --apply treats as inside the target unit.
+   */
+  readSelfCgroup?(): string | null;
+  /** Linux systemd path only: the argv of `pid` from its procfs cmdline file, or null (also off Linux). */
+  readProcessCmdline?(pid: number): string[] | null;
 }
 
 export interface ReleaseAlertRequest {
@@ -186,6 +195,25 @@ export function createDefaultActivationHost(): ActivationHost {
       return { status: result.status };
     },
     toolCommit: () => resolveToolCommit({ root: TOOL_REPO_ROOT, exec: toolCommitExec }),
+    readSelfCgroup: () => {
+      if (process.platform === 'linux') {
+        try { return readFileSync('/proc/self/cgroup', 'utf8'); } catch { return null; }
+      }
+      return null;
+    },
+    readProcessCmdline: (pid) => {
+      if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+      if (process.platform === 'linux') {
+        try {
+          const argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0');
+          if (argv.at(-1) === '') argv.pop();
+          return argv.length > 0 ? argv : null;
+        } catch {
+          return null;
+        }
+      }
+      return null;
+    },
   };
 }
 

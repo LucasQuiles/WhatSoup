@@ -625,6 +625,10 @@ export const fitnessRules = [
       allowlistPaths: [
         'deploy/scripts/tests/',
         'plugins/tokenomics/tests/',
+        // Linux-only branch of release:activate's platform dispatch
+        // (scripts/release-activate.ts: linux -> systemd --user, darwin -> launchd).
+        'scripts/lib/release-activation/systemd.ts',
+        'scripts/lib/release-activation/systemd-apply.ts',
       ],
     },
     source: ['issue:2623'],
@@ -653,6 +657,11 @@ export const fitnessRules = [
         // dispatch (default_probes) with launchctl equivalents on darwin —
         // exactly the fallback this rule demands, invisible to its lexical scan.
         'deploy/scripts/lib/target_provenance.py',
+        // release:activate dispatches by platform (scripts/release-activate.ts:
+        // linux -> these systemd --user modules, darwin -> the launchd path);
+        // the modules are the linux branch, the launchctl fallback the rule demands.
+        'scripts/lib/release-activation/systemd.ts',
+        'scripts/lib/release-activation/systemd-apply.ts',
         'deploy/scripts/tests/',
       ],
     },

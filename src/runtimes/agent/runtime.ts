@@ -119,6 +119,7 @@ import {
   type CheckpointAdoption,
 } from './checkpoint-adoption.ts';
 import { checkpointCompletedIdentityIsAdmissionRejected } from './admission-rejected-checkpoint.ts';
+import { StalledOperationHolds, checkpointConversationKey } from './stalled-operation-holds.ts';
 import { reconcileResidentSessionStatuses } from './resident-session-reconciler.ts';
 import {
   ensureFallbackStateSchema,
@@ -251,6 +252,7 @@ import {
 } from './pending-system-result-tracker.ts';
 import {
   decideProviderEventAdmission,
+  resolveProviderEventOwner,
   systemPurposeAllowsOutput,
   type ProviderEventOwner,
 } from './runtime-event-admission.ts';
@@ -713,6 +715,7 @@ export class AgentRuntime implements Runtime {
   private readonly handoffDistill: HandoffDistillCoordinator;
   private readonly typedHandoffDistill: TypedHandoffDistillConfig | undefined;
   private pendingRespawnTimers = new Set<ReturnType<typeof setTimeout>>();
+  private readonly stalledOperationHolds = new StalledOperationHolds({ durability: () => this.durability, db: () => this.db });
   // Provider-fallback window lifecycle scalars (active-until / activated-at /
   // arm-reason / reset-at / recovery-probe-required / active-entry). Owned by the
   // collaborator; the arm / activate / deactivate / revert / probe orchestration
@@ -1427,6 +1430,7 @@ export class AgentRuntime implements Runtime {
         // this barrier so the caller observes the outcome and no second reset
         // can interleave. Weaker than the owned path (no generation advance).
         log.warn({ ...logFields, mapKey, trigger }, 'wedged-resident reset has no chat queue — using the session-local reset');
+        this.stalledOperationHolds.forgetDeferredResume(session);
         await session.handleNew();
       } else {
         await this.resetOwnedPerChatSession(mapKey, chatJid, session);
@@ -2175,7 +2179,7 @@ export class AgentRuntime implements Runtime {
     // (workspaceKey = toConversationKey), while in canonical-JID mode it is a
     // JID that must be reduced. Reconcile so teardown reaches these maps and
     // they cannot grow unbounded (LEAK-15).
-    const conversationKey = mapKey.includes('@') ? toConversationKey(mapKey) : mapKey;
+    const conversationKey = checkpointConversationKey(mapKey);
     this.lastSpawnRouteProvider.delete(conversationKey);
     this.lastPinBlockNotice.delete(conversationKey);
   }
@@ -4294,6 +4298,8 @@ export class AgentRuntime implements Runtime {
           // Small delay to let the init event propagate (confirms resume succeeded)
           await sleep(MS_PER_SECOND);
           if (!session.getStatus().active) return; // resume failed, onResumeFailed handles it
+          // F7: after a stalled-operation kill the session waits for the user's resend.
+          if (this.stalledOperationHolds.holdsProactiveResume(chatJid, full.watchdog_state, full.session_id)) return;
           try {
             // Inject messages that arrived while the service was down.
             // Without this, the agent resumes with stale context — it has no
@@ -5115,6 +5121,7 @@ export class AgentRuntime implements Runtime {
               resetSingleSession: async (session) => {
                 this.heldCloseFailedNotices.delete(session);
                 await this.waitForRejectedTerminalTeardown(session);
+                this.stalledOperationHolds.forgetDeferredResume(session);
                 await session.handleNew();
                 this.rejectedTerminalTeardowns.delete(session);
               },
@@ -5810,6 +5817,8 @@ export class AgentRuntime implements Runtime {
         ? await lazyCheckpointAdoption(this.db, this.durability, session, toConversationKey(chatJid))
         : NO_CHECKPOINT_ADOPTION;
       if (dispatchCancelled()) return;
+      // F7: a withheld stalled-operation respawn resumes here (StalledOperationHolds.withholdRespawn).
+      adoption = this.stalledOperationHolds.adoptDeferredResume(session, adoption);
       announceAdoption(adoption, (notice) => this.sendDirect(chatJid, notice, 'status'));
       const spawnOwnership = effectiveMapKey !== undefined
         ? this.captureOwnedPerChatGeneration(effectiveMapKey, session)
@@ -6025,7 +6034,9 @@ export class AgentRuntime implements Runtime {
       const turnInput = contextPreamble === null
         ? userTurnText
         : withProviderApplicationContext(userTurnText, contextPreamble);
-      await dispatchProviderTurn(session, turnInput, onProviderBoundaryReady);
+      let providerAccepted = false; // F7: only a live user turn the provider accepted releases the stalled-operation hold.
+      await dispatchProviderTurn(session, turnInput, () => { onProviderBoundaryReady(); providerAccepted = true; });
+      if (providerAccepted && systemTurnLease === undefined && deliveryKind !== 'recovery_replay' && !isScheduledDispatch() && effectiveMapKey !== undefined) this.stalledOperationHolds.clear(effectiveMapKey);
     } catch (err) {
       if (actorPushed && pushedExecScopeKey !== undefined) {
         this.removeFailedExecutingActor(
@@ -6606,39 +6617,6 @@ export class AgentRuntime implements Runtime {
     this.bindActiveGlobalMcpConversation(chatJid);
   }
 
-  /**
-   * Handle events from a per_chat session — routes to that chat's outbound queue.
-   * Resolves queue and session locally from the mapKey to avoid mutating shared
-   * instance fields that another concurrent chat could overwrite.
-   */
-  private resolveProviderEventOwner(
-    event: AgentEvent,
-    logicalOwnerMatches: boolean,
-    systemTurn: PendingSystemTurnSnapshot | null,
-  ): { owner: ProviderEventOwner; systemTurn: PendingSystemTurnSnapshot | null } {
-    if (systemTurn) {
-      const systemOwner: ProviderEventOwner = {
-        kind: 'system_request',
-        purpose: systemTurn.purpose,
-      };
-      const systemDecision = decideProviderEventAdmission(event, systemOwner);
-      if (
-        event.type === 'result'
-        || !logicalOwnerMatches
-        || (event.type === 'compact_boundary' && systemDecision.admit)
-      ) {
-        return { owner: systemOwner, systemTurn };
-      }
-    }
-    if (logicalOwnerMatches) {
-      return { owner: { kind: 'logical_turn' }, systemTurn: null };
-    }
-    if (event.type === 'init') {
-      return { owner: { kind: 'session_accounting' }, systemTurn: null };
-    }
-    return { owner: { kind: 'none' }, systemTurn: null };
-  }
-
   private rejectProviderEvent(
     eventType: AgentEvent['type'],
     runtimeScope: 'per_chat' | 'singleton_shared',
@@ -7081,7 +7059,7 @@ export class AgentRuntime implements Runtime {
       && systemTurn.owner.managerId === managerId
       && systemTurn.owner.generation === generationOwner.generation
       && systemTurn.owner.toolScopeKey === toolScopeKey;
-    const resolved = this.resolveProviderEventOwner(
+    const resolved = resolveProviderEventOwner(
       event,
       logicalOwnerMatches,
       systemOwnerMatches ? systemTurn : null,
@@ -8256,6 +8234,8 @@ export class AgentRuntime implements Runtime {
       failedPerChatSessions.set(mapKey, session);
     }
     singletonSessionShutdownFailed = ownedSessionShutdown.singletonSessionShutdownFailed;
+    // F7: suspending a session makes its checkpoint resumable again.
+    this.stalledOperationHolds.settleUnverified();
 
     // Session shutdown can synchronously surface a final result or failure.
     // Drain those records while their queues, FIFO maps, and reply guarantee
@@ -9040,6 +9020,7 @@ export class AgentRuntime implements Runtime {
     session: SessionManager,
     expected: { managerId: string; generation: number },
   ): Promise<string> {
+    this.stalledOperationHolds.forgetDeferredResume(session); // F7: a spawn supersedes a withheld resume
     const spawnedPid = session.getStatus().pid;
     try {
       return this.markOwnedPerChatSessionActive(mapKey, session, expected);
@@ -11080,8 +11061,8 @@ export class AgentRuntime implements Runtime {
     // healthy entries wait behind it. recordFallbackTurnProcessFailure
     // attributes the crash (null for primary/other sessions — those take the
     // ordinary machinery below), marks the entry failed, and advances the
-    // window to the next eligible entry.
-    if (info) {
+    // window to the next eligible entry. F7: a stalled-operation kill is not chain evidence and is never replayed.
+    if (info && info.terminationReason !== 'stalled_operation') {
       const processFailure = this.fallback.recordFallbackTurnProcessFailure(
         session,
         `process_exit code=${info.exitCode ?? 'null'} signal=${info.signal ?? 'none'}`
@@ -11294,12 +11275,18 @@ export class AgentRuntime implements Runtime {
       );
     }
 
+    // F7: a stalled-operation kill is parked before any respawn is scheduled.
+    const stalledOperationProtection = this.stalledOperationHolds.recordExit(currentMapKey, info);
+
     // Auto-respawn: if we haven't hit the crash limit, try to resume the session
     // after a short delay. This lets the agent continue mid-conversation without
     // requiring the user to send a new message.
-    if (crashCount <= AUTO_RESPAWN_MAX_CRASHES && info?.sessionId) {
+    if (crashCount <= AUTO_RESPAWN_MAX_CRASHES && info?.sessionId && stalledOperationProtection !== 'not_needed') {
+      this.stalledOperationHolds.withholdRespawn(currentMapKey, session, info.sessionId, info.dbRowId, stalledOperationProtection);
+    } else if (crashCount <= AUTO_RESPAWN_MAX_CRASHES && info?.sessionId) {
       const sessionId = info.sessionId;
       const dbRowId = info.dbRowId;
+      const terminationReason = info.terminationReason;
       const crashedAtSec = Math.floor(Date.now() / 1000);
       // crashCount can be 0 here (#3395: an uncharged intentional exit) —
       // clamp so the backoff exponent never goes negative.
@@ -11316,6 +11303,7 @@ export class AgentRuntime implements Runtime {
           dbRowId,
           crashedAtSec,
           timer,
+          ...(terminationReason !== undefined ? { terminationReason } : {}),
         });
       }, delayMs);
       if (this.sessionOwnership.setRespawnTimer(currentMapKey, managerId, recoveryGeneration, timer)) {
@@ -11521,6 +11509,13 @@ export class AgentRuntime implements Runtime {
       }, 'auto-respawn skipped — manager route is stale; recycle pended');
       return;
     }
+    // F7: re-verify restart protection at the resume itself (StalledOperationHolds.admitRespawn).
+    if (
+      args.terminationReason === 'stalled_operation'
+      && !this.stalledOperationHolds.admitRespawn(mapKey, args.session, args.sessionId, args.dbRowId)
+    ) {
+      return;
+    }
 
     this.sessionOwnership.transition(mapKey, args.managerId, 'respawning');
     const respawnGeneration = this.sessionOwnership.advanceGeneration(mapKey, args.managerId);
@@ -11580,6 +11575,13 @@ export class AgentRuntime implements Runtime {
           );
         }
       };
+      // F7: the context and continuation turns below would re-run the stopped
+      // work unbidden, so neither is sent (stalled-operation-holds.ts).
+      if (args.terminationReason === 'stalled_operation') {
+        this.stalledOperationHolds.recordAfterRespawnResume(activeMapKey, args.session, args.sessionId);
+        publishRespawnRecovery();
+        return;
+      }
       let contextLease: SystemTurnLeaseToken | null = null;
       let continuationLease: SystemTurnLeaseToken | null = null;
       try {
@@ -12142,7 +12144,7 @@ export class AgentRuntime implements Runtime {
       && systemTurn.owner.managerId === managerId
       && systemTurn.owner.generation === 1
       && systemTurn.owner.toolScopeKey === GLOBAL_TOOL_SCOPE_KEY;
-    const resolved = this.resolveProviderEventOwner(
+    const resolved = resolveProviderEventOwner(
       event,
       logicalOwnerMatches,
       systemOwnerMatches ? systemTurn : null,

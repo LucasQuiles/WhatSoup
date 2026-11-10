@@ -287,10 +287,11 @@ describe('release:activate --plan', () => {
   });
 
   it('refuses clearly on a platform other than macOS launchd', async () => {
-    const world = new SimulatedLaunchd(fixture, { platform: 'linux' });
+    // Linux now takes the systemd --user path (release-activate-systemd.test.ts); any other platform still refuses.
+    const world = new SimulatedLaunchd(fixture, { platform: 'freebsd' });
     const result = await run(world, activationArgs(fixture));
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
-    expect(result.stderr).toMatch(/macOS launchd only/);
+    expect(result.stderr).toMatch(/macOS launchd and Linux systemd --user only/);
     expect(result.json).toEqual({ mode: 'plan', ready: false, refused: 'platform-not-macos-launchd' });
     expect(world.calls).toEqual([]);
   });

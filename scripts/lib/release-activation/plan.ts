@@ -90,11 +90,11 @@ export interface ActivationContext {
   oldCommit: string | null;
   /** Loaded BOT ERRORS health consumer bound from launchd and sealed at plan time, when the next release requires it. */
   botErrorsHealthConsumer: PlannedBotErrorsHealthConsumer | null;
-  /** Candidate requirement and observed rollback-target capability; compatibility is advisory until rollback. */
+  /** Candidate requirements and observed rollback-target capabilities, per fence key; compatibility is advisory until rollback. */
   refreshRollbackFence: {
-    required: number | null;
+    required: RefreshRollbackFenceLevels | null;
     candidateDigest: string | null;
-    targetCapability: number | null;
+    targetCapability: RefreshRollbackFenceLevels | null;
     targetDigest: string | null;
     targetCompatibleAtPlan: boolean;
     candidateDetail: string;
@@ -105,8 +105,11 @@ export interface ActivationContext {
   staged: StagedPlist[];
 }
 
+/** The fields the refresh-fence rechecks read; the launchd and systemd contexts both carry them. */
+export type FenceRecheckContext = Pick<ActivationContext, 'args' | 'refreshRollbackFence' | 'newCommit' | 'oldCommit'>;
+
 export const LABEL_PATTERN = /^com\.whatsoup\.[A-Za-z0-9._-]+$/;
-const FULL_COMMIT = /^[0-9a-f]{40}$/;
+export const FULL_COMMIT = /^[0-9a-f]{40}$/;
 const BOT_ERRORS_HEALTH_LABEL = 'com.bot-errors.health';
 const BOT_ERRORS_RUNTIME_MANIFEST = 'deploy/bot-errors-runtime-manifest.json';
 const BOT_ERRORS_HEALTH_RUNNER = 'deploy/scripts/bot-errors-runner.py';
@@ -123,7 +126,13 @@ interface BotErrorsHealthConsumer {
 }
 type PlannedBotErrorsHealthConsumer = BotErrorsHealthConsumer & { required: number };
 const REFRESH_ROLLBACK_FENCE = 'deploy/claude-refresh-rollback-fence.json';
-const REFRESH_ROLLBACK_FENCE_KEY = 'claudeRefreshOwnerV3';
+/**
+ * Every fence key this tool understands. A fence naming any other key is invalid (fail closed);
+ * a known key a fence omits is level 0. stalledOperationHoldV1 is the #3903 stalled-operation hold.
+ */
+const REFRESH_ROLLBACK_FENCE_KEYS = ['claudeRefreshOwnerV3', 'stalledOperationHoldV1'] as const;
+type RefreshRollbackFenceKey = typeof REFRESH_ROLLBACK_FENCE_KEYS[number];
+export type RefreshRollbackFenceLevels = Record<RefreshRollbackFenceKey, number>;
 const REFRESH_ROLLBACK_FENCE_MAX_BYTES = 16 * 1024;
 const REFRESH_ROLLBACK_FENCE_OPEN_FLAGS = constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW;
 
@@ -167,7 +176,7 @@ export function mentionsReleaseRoot(text: string, root: string): boolean {
   ));
 }
 
-function readManifestCommit(releaseRoot: string): {
+export function readManifestCommit(releaseRoot: string): {
   commit: string | null;
   releasePath: string | null;
   manifest: ReleaseSnapshotManifest | null;
@@ -184,7 +193,7 @@ function readManifestCommit(releaseRoot: string): {
   }
 }
 
-function sha256(bytes: Buffer): string {
+export function sha256(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
@@ -257,7 +266,7 @@ function stableConsumerRegularFile(target: string): StableConsumerFile | null {
  * Read one consumer file from a no-follow descriptor while binding its file and ancestor identities before and after.
  * Returns CONSUMER_FILE_OVER_CAP for a file larger than the cap, so the refusal can name that cause, and null for any other refusal.
  */
-function readBoundedConsumerFile(root: string, relative: string): Buffer | typeof CONSUMER_FILE_OVER_CAP | null {
+export function readBoundedConsumerFile(root: string, relative: string): Buffer | typeof CONSUMER_FILE_OVER_CAP | null {
   if (!path.isAbsolute(root) || path.resolve(root) !== root || relative.split('/').some((part) => part === '' || part === '.' || part === '..')) return null;
   const parts = relative.split('/'), directories = [root];
   let parent = root;
@@ -282,7 +291,47 @@ function readBoundedConsumerFile(root: string, relative: string): Buffer | typeo
   } catch { return null; } finally { if (fd !== null) { try { closeSync(fd); } catch { /* best effort after refusal */ } } }
 }
 
-type RefreshRollbackFenceRead = { required: number | null; capability: number | null; digest: string | null; detail: string };
+export type RefreshRollbackFenceRead = {
+  required: RefreshRollbackFenceLevels | null; capability: RefreshRollbackFenceLevels | null; digest: string | null; detail: string;
+};
+
+/** A release without a fence file (legacy) requires and provides level 0 for every key. */
+export function legacyFenceLevels(): RefreshRollbackFenceLevels {
+  return { claudeRefreshOwnerV3: 0, stalledOperationHoldV1: 0 };
+}
+
+/** Parse one non-empty fence level map: known keys only, each present value a positive integer. */
+function parseFenceLevels(value: unknown): RefreshRollbackFenceLevels | null {
+  const record = object(value);
+  if (record === null) return null;
+  const keys = Object.keys(record);
+  if (keys.length === 0 || keys.some((key) => !(REFRESH_ROLLBACK_FENCE_KEYS as readonly string[]).includes(key))) return null;
+  const levels = legacyFenceLevels();
+  for (const key of REFRESH_ROLLBACK_FENCE_KEYS) {
+    if (!Object.hasOwn(record, key)) continue;
+    const level = positiveInteger(record[key]);
+    if (level === null) return null;
+    levels[key] = level;
+  }
+  return levels;
+}
+
+function fenceRequiresNothing(required: RefreshRollbackFenceLevels): boolean {
+  return REFRESH_ROLLBACK_FENCE_KEYS.every((key) => required[key] === 0);
+}
+
+/** Compatible only when the target meets every requirement the candidate names. */
+export function fenceCompatible(required: RefreshRollbackFenceLevels, capability: RefreshRollbackFenceLevels | null): boolean {
+  return REFRESH_ROLLBACK_FENCE_KEYS.every((key) => required[key] === 0 || (capability !== null && capability[key] >= required[key]));
+}
+
+function sameFenceLevels(left: RefreshRollbackFenceLevels, right: RefreshRollbackFenceLevels): boolean {
+  return REFRESH_ROLLBACK_FENCE_KEYS.every((key) => left[key] === right[key]);
+}
+
+export function formatFenceLevels(levels: RefreshRollbackFenceLevels): string {
+  return REFRESH_ROLLBACK_FENCE_KEYS.map((key) => `${key} ${levels[key]}`).join(', ');
+}
 
 /** Only a fully absent path is legacy. An unsealed regular file, symlink or bad ancestor is unknown. */
 function refreshFencePathState(root: string): 'absent' | 'present' | 'invalid' {
@@ -336,12 +385,12 @@ function readSealedRefreshFence(root: string, entry: { path: string; sha256: str
 }
 
 /** Read a release-sealed refresh fence. A missing entry is the legacy capability zero; malformed is unknown. */
-function readRefreshRollbackFence(releaseRoot: string, manifest: ReleaseSnapshotManifest): RefreshRollbackFenceRead {
+export function readRefreshRollbackFence(releaseRoot: string, manifest: ReleaseSnapshotManifest): RefreshRollbackFenceRead {
   const entry = manifest.files.find((file) => file.path === REFRESH_ROLLBACK_FENCE);
   if (entry === undefined) {
     const state = refreshFencePathState(releaseRoot);
     return state === 'absent'
-      ? { required: 0, capability: 0, digest: null, detail: 'no refresh rollback fence (legacy release)' }
+      ? { required: legacyFenceLevels(), capability: legacyFenceLevels(), digest: null, detail: 'no refresh rollback fence (legacy release)' }
       : { required: null, capability: null, digest: null, detail: state === 'present' ? 'refresh rollback fence exists but is unsealed' : 'refresh rollback fence path is invalid' };
   }
   const bytes = readSealedRefreshFence(releaseRoot, entry);
@@ -351,16 +400,14 @@ function readRefreshRollbackFence(releaseRoot: string, manifest: ReleaseSnapshot
     const parsed = object(JSON.parse(bytes.toString('utf8')));
     if (parsed === null || !exactKeys(parsed, ['schemaVersion', 'activationRequirements', 'rollbackCapabilities']) || parsed['schemaVersion'] !== 1) throw new Error();
     const requirementsObject = object(parsed['activationRequirements']);
-    const targetObject = requirementsObject === null ? null : object(requirementsObject['rollbackTarget']);
-    const capabilitiesObject = object(parsed['rollbackCapabilities']);
-    if (requirementsObject === null || targetObject === null || capabilitiesObject === null
-      || !exactKeys(requirementsObject, ['rollbackTarget'])
-      || !exactKeys(targetObject, [REFRESH_ROLLBACK_FENCE_KEY])
-      || !exactKeys(capabilitiesObject, [REFRESH_ROLLBACK_FENCE_KEY])) throw new Error();
-    const required = positiveInteger(targetObject[REFRESH_ROLLBACK_FENCE_KEY]);
-    const capability = positiveInteger(capabilitiesObject[REFRESH_ROLLBACK_FENCE_KEY]);
+    if (requirementsObject === null || !exactKeys(requirementsObject, ['rollbackTarget'])) throw new Error();
+    const required = parseFenceLevels(requirementsObject['rollbackTarget']);
+    const capability = parseFenceLevels(parsed['rollbackCapabilities']);
     if (required === null || capability === null) throw new Error();
-    return { required, capability, digest, detail: `refresh rollback fence requires ${required}, provides ${capability}` };
+    return {
+      required, capability, digest,
+      detail: `refresh rollback fence requires ${formatFenceLevels(required)}; provides ${formatFenceLevels(capability)}`,
+    };
   } catch {
     return { required: null, capability: null, digest: null, detail: 'refresh rollback fence is invalid' };
   }
@@ -499,7 +546,7 @@ export async function readBotErrorsHealthConsumer(
   }
 }
 
-function isDirectory(target: string): boolean {
+export function isDirectory(target: string): boolean {
   try {
     return statSync(target).isDirectory();
   } catch {
@@ -507,7 +554,7 @@ function isDirectory(target: string): boolean {
   }
 }
 
-function isRegularFile(target: string): boolean {
+export function isRegularFile(target: string): boolean {
   try {
     return lstatSync(target).isFile();
   } catch {
@@ -523,7 +570,7 @@ function readLinkOrNull(target: string): string | null {
   }
 }
 
-function resolveHealthPort(args: ActivationArgs): { port: number | null; detail: string } {
+export function resolveHealthPort(args: ActivationArgs): { port: number | null; detail: string } {
   if (args.healthPort !== null) return { port: args.healthPort, detail: `--health-port ${args.healthPort}` };
   const configPath = path.join(configRoot(), args.instance, 'config.json');
   let parsed: unknown;
@@ -776,15 +823,14 @@ export async function buildActivationContext(host: ActivationHost, args: Activat
   const targetFence = previous.error === null && previous.manifest !== null
     ? readRefreshRollbackFence(args.expectCurrent, previous.manifest)
     : previous.error === 'missing'
-      ? { required: 0, capability: 0, digest: null, detail: 'rollback target has no release manifest or refresh rollback fence' }
+      ? { required: legacyFenceLevels(), capability: legacyFenceLevels(), digest: null, detail: 'rollback target has no release manifest or refresh rollback fence' }
       : { required: null, capability: null, digest: null, detail: `rollback target release manifest ${previous.error ?? 'unavailable'}` };
   context.refreshRollbackFence = {
     required: candidateFence.required,
     candidateDigest: candidateFence.digest,
     targetCapability: targetFence.capability,
     targetDigest: targetFence.digest,
-    targetCompatibleAtPlan: candidateFence.required !== null
-      && (candidateFence.required === 0 || (targetFence.capability !== null && targetFence.capability >= candidateFence.required)),
+    targetCompatibleAtPlan: candidateFence.required !== null && fenceCompatible(candidateFence.required, targetFence.capability),
     candidateDetail: candidateFence.detail,
     targetDetail: targetFence.detail,
   };
@@ -876,7 +922,7 @@ export async function buildActivationContext(host: ActivationHost, args: Activat
 }
 
 /** The candidate requirement is sealed and must not change between planning and the live switch. */
-export function recheckCandidateRefreshRollbackFence(context: ActivationContext): { ok: boolean; detail: string } {
+export function recheckCandidateRefreshRollbackFence(context: FenceRecheckContext): { ok: boolean; detail: string } {
   const expected = context.refreshRollbackFence.required;
   const expectedDigest = context.refreshRollbackFence.candidateDigest;
   if (expected === null || context.newCommit === null) return { ok: false, detail: 'candidate refresh rollback fence was invalid at plan time' };
@@ -885,30 +931,30 @@ export function recheckCandidateRefreshRollbackFence(context: ActivationContext)
     return { ok: false, detail: `candidate release manifest ${candidate.error ?? 'unavailable'} before switch` };
   }
   const fence = readRefreshRollbackFence(context.args.release, candidate.manifest);
-  const ok = fence.required !== null && fence.required === expected && fence.digest === expectedDigest;
+  const ok = fence.required !== null && sameFenceLevels(fence.required, expected) && fence.digest === expectedDigest;
   return { ok, detail: ok ? fence.detail : 'candidate refresh rollback fence changed or became invalid before switch' };
 }
 
 /** Recheck the rollback target immediately before stopping the new instance and before restoring/bootstrapping the old release. */
-export function recheckRollbackRefreshFenceTarget(context: ActivationContext): { ok: boolean; detail: string } {
+export function recheckRollbackRefreshFenceTarget(context: FenceRecheckContext): { ok: boolean; detail: string } {
   const required = context.refreshRollbackFence.required;
   const expectedCapability = context.refreshRollbackFence.targetCapability;
   const expectedDigest = context.refreshRollbackFence.targetDigest;
   if (required === null) return { ok: false, detail: 'candidate refresh rollback fence requirement is unknown' };
-  if (required === 0) return { ok: true, detail: 'candidate has no refresh rollback fence requirement' };
+  if (fenceRequiresNothing(required)) return { ok: true, detail: 'candidate has no refresh rollback fence requirement' };
   if (expectedCapability === null || expectedDigest === null || context.oldCommit === null) return { ok: false, detail: 'rollback target refresh fence was incompatible or unknown at plan time' };
   const target = readManifestCommit(context.args.expectCurrent);
   const fence = target.error === null && target.manifest !== null
     ? readRefreshRollbackFence(context.args.expectCurrent, target.manifest)
     : target.error === 'missing'
-      ? { required: 0, capability: 0, digest: null, detail: 'rollback target has no release manifest or refresh rollback fence' }
+      ? { required: legacyFenceLevels(), capability: legacyFenceLevels(), digest: null, detail: 'rollback target has no release manifest or refresh rollback fence' }
       : { required: null, capability: null, digest: null, detail: `rollback target release manifest ${target.error ?? 'unavailable'}` };
   const ok = target.commit === context.oldCommit
     && fence.capability !== null
-    && fence.capability === expectedCapability
+    && sameFenceLevels(fence.capability, expectedCapability)
     && fence.digest === expectedDigest
-    && fence.capability >= required;
-  return { ok, detail: ok ? fence.detail : `${fence.detail}; requires refresh rollback fence ${required}` };
+    && fenceCompatible(required, fence.capability);
+  return { ok, detail: ok ? fence.detail : `${fence.detail}; requires refresh rollback fence ${formatFenceLevels(required)}` };
 }
 
 export function preconditionsMet(context: ActivationContext): boolean {

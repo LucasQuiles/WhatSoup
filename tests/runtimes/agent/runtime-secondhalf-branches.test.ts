@@ -262,6 +262,7 @@ import {
   type PollVote,
 } from '../../../src/runtimes/agent/runtime.ts';
 import {
+  completedCheckpoint as savedSessionCheckpoint,
   markOwnedSystemTurn,
   makeRuntimeTurnContext,
   pendingSystemResults,
@@ -480,9 +481,28 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
     mockConfig.toolUpdateMode = 'full';
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.runOnlyPendingTimers();
     vi.useRealTimers();
+    // A case's work must end with the case. Teardown fires its pending fake
+    // timers; whatever they start and then park on a real timer (the respawn's
+    // settle sleep) wakes during a LATER case and drives that case's shared
+    // mocks — on CI it consumed another case's provider-boundary gate and
+    // cleared its alert early. Fail the case that leaked, not its victim.
+    const realSetTimeout = globalThis.setTimeout;
+    const escaped: ReturnType<typeof setTimeout>[] = [];
+    globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+      const handle = realSetTimeout(...args);
+      escaped.push(handle);
+      return handle;
+    }) as unknown as typeof setTimeout;
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
+    for (const handle of escaped) clearTimeout(handle);
+    expect(escaped, 'work started by this case outlived it and armed a real timer').toHaveLength(0);
   });
 
   describe('minimal-mode delivery boundaries', () => {
@@ -1014,6 +1034,8 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       rowId: 9,
       conversationKey: 'unscoped',
     }, 'cannot retire stale shared/single resume without exact workspace identity');
+    // start() armed the runtime's probe and sweep timers: stop it so they end with the case.
+    await runtime.shutdown();
   });
 
   it('capDedupeMap evicts oldest-first over an object-valued map (BEAD-050)', () => {
@@ -1402,6 +1424,438 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       admitPendingSystemResult(state, mapKey, 'respawn_continuation');
       // success path clears the prior respawn-failed alert
       expect(mockClearAlertSource).toHaveBeenCalledWith('test', 'agent_respawn_failed');
+    });
+
+    describe('F7: a stalled-operation kill resumes the session without a context or continuation turn', () => {
+      const deadStatus = { active: false, pid: null, providerTerminated: true, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null };
+      const liveStatus = { active: true, pid: 321, providerTerminated: false, sessionId: 'sess-1', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null };
+
+      function stallKill(runtime: AgentRuntime, state: PollRuntimeState, mapKey: string): void {
+        state.handlePerChatCrash(mapKey, dmJid, {
+          ...currentCrashIdentity(runtime, mapKey),
+          exitCode: null,
+          signal: 'SIGKILL',
+          sessionId: 'sess-1',
+          dbRowId: 7,
+          provider: 'p',
+          terminationReason: 'stalled_operation',
+        });
+      }
+
+      function continuationSends(): unknown[][] {
+        return mockSession.sendTurn.mock.calls.filter(
+          (c: unknown[]) => typeof c[0] === 'string' && c[0].includes('session resumed after crash'),
+        );
+      }
+
+      function suppressionLogs(): unknown[][] {
+        return (mockRuntimeLogger.info?.mock.calls ?? []).filter(
+          (c: unknown[]) => typeof c[1] === 'string'
+            && c[1].startsWith('auto-respawn resumed after a stalled-operation kill'),
+        );
+      }
+
+      async function runRespawn(): Promise<void> {
+        await vi.advanceTimersByTimeAsync(60_000);
+        await vi.advanceTimersByTimeAsync(2_000);
+      }
+
+      function makeStallRuntime() {
+        const db = makeDb();
+        const { messenger } = makeMessenger();
+        const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+        const state = runtime as unknown as PollRuntimeState;
+        seedPerChatSession(state, dmJid);
+        const mark = vi.spyOn(state.pendingSystemResults, 'mark');
+        mockSession.getStatus.mockReturnValueOnce(deadStatus).mockReturnValue(liveStatus);
+        return { runtime, state, mark };
+      }
+
+      it('resumes the session but sends no continuation turn', async () => {
+        const { runtime, state, mark } = makeStallRuntime();
+
+        stallKill(runtime, state, dmJid);
+        await runRespawn();
+
+        expect(mockSession.spawnSession).toHaveBeenCalledWith('sess-1', 7);
+        expect(continuationSends()).toHaveLength(0);
+        expect(mark).not.toHaveBeenCalledWith(expect.objectContaining({ purpose: 'respawn_continuation' }));
+        expect(state.pendingSystemResults.peek(dmJid)).toBeNull();
+        expect(suppressionLogs()).toHaveLength(1);
+        // The resume itself recovered the conversation, so the respawn-failed source still clears.
+        expect(mockClearAlertSource).toHaveBeenCalledWith('test', 'agent_respawn_failed');
+      });
+
+      it('a duplicate stall-kill callback schedules no second respawn and no continuation', async () => {
+        const { runtime, state } = makeStallRuntime();
+
+        stallKill(runtime, state, dmJid);
+        stallKill(runtime, state, dmJid);
+        await runRespawn();
+
+        expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);
+        expect(continuationSends()).toHaveLength(0);
+        expect(suppressionLogs()).toHaveLength(1);
+      });
+
+      it('control: an unmarked SIGKILL of the same shape still gets its continuation turn', async () => {
+        const { runtime, state, mark } = makeStallRuntime();
+
+        state.handlePerChatCrash(dmJid, dmJid, {
+          ...currentCrashIdentity(runtime, dmJid),
+          exitCode: null,
+          signal: 'SIGKILL',
+          sessionId: 'sess-1',
+          dbRowId: 7,
+          provider: 'p',
+        });
+        await runRespawn();
+
+        await vi.waitFor(() => { expect(continuationSends()).toHaveLength(1); });
+        expect(mark).toHaveBeenCalledWith(expect.objectContaining({ purpose: 'respawn_continuation' }));
+        admitPendingSystemResult(state, dmJid, 'respawn_continuation');
+        expect(suppressionLogs()).toHaveLength(0);
+      });
+
+      it('the suppression is per crash: a later ordinary crash on the resumed session continues normally', async () => {
+        const { runtime, state } = makeStallRuntime();
+
+        stallKill(runtime, state, dmJid);
+        await runRespawn();
+        expect(continuationSends()).toHaveLength(0);
+
+        mockSession.getStatus.mockReturnValueOnce(deadStatus).mockReturnValue(liveStatus);
+        state.handlePerChatCrash(dmJid, dmJid, {
+          ...currentCrashIdentity(runtime, dmJid),
+          exitCode: 1,
+          signal: null,
+          sessionId: 'sess-1',
+          dbRowId: 7,
+          provider: 'p',
+        });
+        await runRespawn();
+
+        expect(mockSession.spawnSession).toHaveBeenCalledTimes(2);
+        await vi.waitFor(() => { expect(continuationSends()).toHaveLength(1); });
+        admitPendingSystemResult(state, dmJid, 'respawn_continuation');
+        expect(suppressionLogs()).toHaveLength(1);
+      });
+
+      function contextSends(): unknown[][] {
+        return mockSession.sendTurn.mock.calls.filter(
+          (c: unknown[]) => typeof c[0] === 'string' && c[0].includes('Recent chat context'),
+        );
+      }
+
+      function crashWindowMessage(content: string): void {
+        mockGetMessagesSince.mockReturnValue([
+          { timestamp: Math.floor(Date.now() / 1000), senderName: 'Tester', senderJid: dmJid, content },
+        ]);
+      }
+
+      it('missed messages in the crash window start no context turn', async () => {
+        const { runtime, state, mark } = makeStallRuntime();
+        crashWindowMessage('please run the export again');
+
+        stallKill(runtime, state, dmJid);
+        await runRespawn();
+
+        expect(mockSession.spawnSession).toHaveBeenCalledWith('sess-1', 7);
+        expect(contextSends()).toHaveLength(0);
+        expect(continuationSends()).toHaveLength(0);
+        expect(mark).not.toHaveBeenCalledWith(expect.objectContaining({ purpose: 'respawn_context' }));
+        expect(mockGetMessagesSince).not.toHaveBeenCalled();
+        expect(state.pendingSystemResults.peek(dmJid)).toBeNull();
+        expect(suppressionLogs()).toHaveLength(1);
+      });
+
+      it('control: an ordinary crash with missed messages still gets its context turn', async () => {
+        const { runtime, state, mark } = makeStallRuntime();
+        crashWindowMessage('are you back?');
+
+        state.handlePerChatCrash(dmJid, dmJid, {
+          ...currentCrashIdentity(runtime, dmJid),
+          exitCode: 1, signal: null, sessionId: 'sess-1', dbRowId: 7, provider: 'p',
+        });
+        await runRespawn();
+
+        await vi.waitFor(() => { expect(contextSends()).toHaveLength(1); });
+        expect(mark).toHaveBeenCalledWith(expect.objectContaining({ purpose: 'respawn_context' }));
+        admitPendingSystemResult(state, dmJid, 'respawn_context');
+        await vi.waitFor(() => { expect(continuationSends()).toHaveLength(1); });
+        admitPendingSystemResult(state, dmJid, 'respawn_continuation');
+        expect(suppressionLogs()).toHaveLength(0);
+      });
+
+      it('a respawn deferred for unproven termination keeps the stall reason and sends neither turn', async () => {
+        const { runtime, state, mark } = makeStallRuntime();
+        crashWindowMessage('please run the export again');
+        const unproven = { ...deadStatus, providerTerminated: false };
+        mockSession.getStatus.mockReset().mockReturnValue(unproven);
+
+        stallKill(runtime, state, dmJid);
+        // The first attempt finds termination unproven and re-arms (see the
+        // deferral cases below); the timer is not consumed. An uncharged
+        // intentional exit backs off within [1.5s, 2.5s], so 2.6s fires
+        // exactly the first timer and no deferral.
+        await vi.advanceTimersByTimeAsync(2_600);
+        expect(mockSession.spawnSession).not.toHaveBeenCalled();
+        expect(state.pendingRespawnTimers.size).toBe(1);
+
+        mockSession.getStatus.mockReturnValueOnce(deadStatus).mockReturnValue(liveStatus);
+        await runRespawn();
+
+        expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);
+        expect(mockSession.spawnSession).toHaveBeenCalledWith('sess-1', 7);
+        expect(contextSends()).toHaveLength(0);
+        expect(continuationSends()).toHaveLength(0);
+        expect(mark).not.toHaveBeenCalled();
+        expect(suppressionLogs()).toHaveLength(1);
+      });
+
+      it('the next real request after the resume is dispatched and its reply is delivered', async () => {
+        const { runtime, state } = makeStallRuntime();
+        stallKill(runtime, state, dmJid);
+        await runRespawn();
+        expect(suppressionLogs()).toHaveLength(1);
+        mockSession.sendTurn.mockClear();
+
+        await sendAndDrain(runtime, makeMsg({ messageId: 'msg-after-stall', content: 'try the export again' }));
+        await vi.advanceTimersByTimeAsync(0);
+        await ownedView(state).perChatTurnQueues.get(dmJid)?.idle();
+
+        expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+        expect(JSON.stringify(mockSession.sendTurn.mock.calls[0])).toContain('try the export again');
+        expect(contextSends()).toHaveLength(0);
+        expect(continuationSends()).toHaveLength(0);
+
+        const toolScopeKey = state.sessionEventToolScopes.get(mockSession);
+        if (!toolScopeKey) throw new Error(`missing tool scope for ${dmJid}`);
+        state.handleEventPerChat(mockSession, { type: 'assistant_text', text: 'Export finished.' }, toolScopeKey);
+        expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Export finished.', 'answer');
+      });
+
+      it('a request sent during the backoff gets its own turn, and the respawn then sends nothing', async () => {
+        const { runtime, state } = makeStallRuntime();
+        crashWindowMessage('try the export again');
+        let respawned = false;
+        mockSession.spawnSession.mockImplementation(async () => { respawned = true; });
+        mockSession.getStatus.mockReset().mockImplementation(() => (respawned ? liveStatus : deadStatus));
+
+        stallKill(runtime, state, dmJid);
+        await sendAndDrain(runtime, makeMsg({ messageId: 'msg-during-backoff', content: 'try the export again' }));
+        await vi.advanceTimersByTimeAsync(0);
+        await ownedView(state).perChatTurnQueues.get(dmJid)?.idle();
+
+        expect(mockSession.spawnSession, 'the inbound turn spawned in place').toHaveBeenCalledTimes(1);
+        expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+        expect(JSON.stringify(mockSession.sendTurn.mock.calls[0])).toContain('try the export again');
+
+        await runRespawn();
+
+        expect(mockSession.spawnSession, 'the scheduled respawn did not run a second resume').toHaveBeenCalledTimes(1);
+        expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+        expect(contextSends()).toHaveLength(0);
+        expect(continuationSends()).toHaveLength(0);
+      });
+
+      describe('a service restart after the kill', () => {
+        const HOLD_LOG = 'proactive resume after a stalled-operation kill — no context or continuation turn sent';
+        // The restart-loop guard counts boots in a state file shared by the
+        // whole file; several boots inside one case are not a loop under test.
+        let restartLoopGuard: typeof mockConfig.restartLoopGuard;
+        beforeEach(() => {
+          restartLoopGuard = mockConfig.restartLoopGuard;
+          mockConfig.restartLoopGuard = { ...restartLoopGuard, enabled: false };
+        });
+        afterEach(() => { mockConfig.restartLoopGuard = restartLoopGuard; });
+
+        /** One saved session (session_checkpoints row) shared across runtime instances, like the database across a restart. */
+        function savedSession() {
+          let row = {
+            ...savedSessionCheckpoint({
+              conversationKey: '15550001',
+              deliveryJid: dmJid,
+              deliveryNamespace: 's.whatsapp.net',
+              scope: 'per_chat',
+              sessionId: 'sess-1',
+              updatedAt: new Date(Date.now() - 60_000).toISOString().slice(0, 19),
+            }),
+            watchdog_state: JSON.stringify({ providerRoutePolicy: { provider: 'p' } }),
+          };
+          const durability = {
+            getResumableCheckpoints: vi.fn(() => [{ conversation_key: row.conversation_key }]),
+            getSessionCheckpoint: vi.fn(() => row),
+            upsertSessionCheckpoint: vi.fn((_key: string, fields: { watchdogState?: string }) => {
+              if (fields.watchdogState !== undefined) row = { ...row, watchdog_state: fields.watchdogState };
+            }),
+            completeTurn: vi.fn(),
+          };
+          const watchdogState = () => JSON.parse(row.watchdog_state ?? '{}') as Record<string, unknown>;
+          const holdWrites = () => durability.upsertSessionCheckpoint.mock.calls.filter(
+            (c) => typeof c[1].watchdogState === 'string' && c[1].watchdogState.includes('stalledOperationResumeHold'),
+          );
+          return { durability, watchdogState, holdWrites };
+        }
+
+        function stallRuntimeWith(durability: unknown) {
+          const made = makeStallRuntime();
+          (made.runtime as unknown as { durability: unknown }).durability = durability;
+          return made;
+        }
+
+        /** The old process stops before its respawn timer fires; only the saved session survives. */
+        function stopService(state: PollRuntimeState): void {
+          for (const timer of state.pendingRespawnTimers) clearTimeout(timer);
+          state.pendingRespawnTimers.clear();
+        }
+
+        /** A fresh runtime over the same saved session: the proactive resume on startup. */
+        async function restart(durability: unknown) {
+          mockSession.spawnSession.mockClear();
+          mockSession.sendTurn.mockClear();
+          mockSession.getStatus.mockReset().mockReturnValue(liveStatus);
+          const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { sessionScope: 'per_chat' });
+          (runtime as unknown as { durability: unknown }).durability = durability;
+          const injectMissedMessages = vi.fn(async () => false);
+          (runtime as unknown as { injectMissedMessages: unknown }).injectMissedMessages = injectMissedMessages;
+          await runtime.start();
+          await vi.advanceTimersByTimeAsync(1_000);
+          return { runtime, state: runtime as unknown as PollRuntimeState, injectMissedMessages };
+        }
+
+        function restartSends(): unknown[][] {
+          return mockSession.sendTurn.mock.calls.filter(
+            (c: unknown[]) => typeof c[0] === 'string' && c[0].includes('resumed after service restart'),
+          );
+        }
+
+        function restartHoldLogs(): unknown[][] {
+          return (mockRuntimeLogger.info?.mock.calls ?? []).filter((c: unknown[]) => c[1] === HOLD_LOG);
+        }
+
+        it('the kill is saved on the session, once, and other saved state is kept', () => {
+          const saved = savedSession();
+          const { runtime, state } = stallRuntimeWith(saved.durability);
+
+          stallKill(runtime, state, dmJid);
+          stallKill(runtime, state, dmJid);
+
+          expect(saved.watchdogState()).toEqual({
+            providerRoutePolicy: { provider: 'p' },
+            stalledOperationResumeHold: { sessionId: 'sess-1' },
+          });
+          expect(saved.holdWrites(), 'the duplicate callback writes nothing').toHaveLength(1);
+          // The case ends before its respawn: stop the old process as the restart cases do.
+          stopService(state);
+        });
+
+        it('control: an ordinary crash saves no hold', () => {
+          const saved = savedSession();
+          const { runtime, state } = stallRuntimeWith(saved.durability);
+
+          state.handlePerChatCrash(dmJid, dmJid, {
+            ...currentCrashIdentity(runtime, dmJid),
+            exitCode: 1, signal: null, sessionId: 'sess-1', dbRowId: 7, provider: 'p',
+          });
+
+          expect(saved.holdWrites()).toHaveLength(0);
+          expect(saved.watchdogState()).toEqual({ providerRoutePolicy: { provider: 'p' } });
+          // The case ends before its respawn: stop the old process as the restart cases do.
+          stopService(state);
+        });
+
+        it('a restart before the respawn resumes the session and sends no context or continuation turn', async () => {
+          const saved = savedSession();
+          const first = stallRuntimeWith(saved.durability);
+          stallKill(first.runtime, first.state, dmJid);
+          stopService(first.state);
+
+          const { runtime, injectMissedMessages } = await restart(saved.durability);
+
+          expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);
+          expect(mockSession.spawnSession).toHaveBeenCalledWith('sess-1');
+          expect(injectMissedMessages).not.toHaveBeenCalled();
+          expect(mockSession.sendTurn).not.toHaveBeenCalled();
+          expect(restartHoldLogs()).toHaveLength(1);
+          // start() armed the restarted runtime's timers: stop every runtime this case created.
+          await first.runtime.shutdown();
+          await runtime.shutdown();
+        });
+
+        it('with the park unavailable, no respawn runs; each restart resumes once and sends nothing', async () => {
+          const saved = savedSession();
+          const first = stallRuntimeWith(saved.durability);
+          stallKill(first.runtime, first.state, dmJid);
+          // This port cannot orphan the checkpoint, so only the hold protects
+          // it; a respawn would reactivate it for a build that ignores the hold.
+          expect(first.state.pendingRespawnTimers.size, 'no respawn timer').toBe(0);
+          await runRespawn();
+          expect(mockSession.spawnSession, 'no automatic resume').not.toHaveBeenCalled();
+          expect(suppressionLogs()).toHaveLength(0);
+
+          const second = await restart(saved.durability);
+          expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);
+          expect(second.injectMissedMessages).not.toHaveBeenCalled();
+          expect(mockSession.sendTurn).not.toHaveBeenCalled();
+          expect(second.state.pendingSystemResults.peek(dmJid)).toBeNull();
+
+          const third = await restart(saved.durability);
+          expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);
+          expect(third.injectMissedMessages).not.toHaveBeenCalled();
+          expect(mockSession.sendTurn).not.toHaveBeenCalled();
+          expect(restartHoldLogs()).toHaveLength(2);
+          expect(saved.holdWrites(), 'restarts do not rewrite the hold').toHaveLength(1);
+          // start() armed each restarted runtime's timers: stop every runtime this case created.
+          await first.runtime.shutdown();
+          await second.runtime.shutdown();
+          await third.runtime.shutdown();
+        });
+
+        it('the next real request after a restart is dispatched, its reply is delivered, and it releases the hold', async () => {
+          const saved = savedSession();
+          const first = stallRuntimeWith(saved.durability);
+          stallKill(first.runtime, first.state, dmJid);
+          stopService(first.state);
+          const { runtime, state } = await restart(saved.durability);
+          expect(mockSession.sendTurn).not.toHaveBeenCalled();
+
+          await sendAndDrain(runtime, makeMsg({ messageId: 'msg-after-restart', content: 'try the export again' }));
+          await vi.advanceTimersByTimeAsync(0);
+          await ownedView(state).perChatTurnQueues.get(dmJid)?.idle();
+
+          expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+          expect(JSON.stringify(mockSession.sendTurn.mock.calls[0])).toContain('try the export again');
+          const toolScopeKey = state.sessionEventToolScopes.get(mockSession);
+          if (!toolScopeKey) throw new Error(`missing tool scope for ${dmJid}`);
+          state.handleEventPerChat(mockSession, { type: 'assistant_text', text: 'Export finished.' }, toolScopeKey);
+          expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Export finished.', 'answer');
+          expect(saved.watchdogState()).toEqual({ providerRoutePolicy: { provider: 'p' } });
+
+          // Released: a later restart resumes the ordinary way again.
+          const third = await restart(saved.durability);
+          await vi.waitFor(() => { expect(restartSends()).toHaveLength(1); });
+          expect(restartHoldLogs()).toHaveLength(1);
+          // start() armed each restarted runtime's timers and the last one's continuation
+          // turn waits on its result deadline: stop every runtime this case created.
+          await first.runtime.shutdown();
+          await runtime.shutdown();
+          await third.runtime.shutdown();
+        });
+
+        it('control: a restart with no saved hold still sends its continuation turn', async () => {
+          const saved = savedSession();
+
+          const { runtime, injectMissedMessages } = await restart(saved.durability);
+
+          expect(injectMissedMessages).toHaveBeenCalledOnce();
+          await vi.waitFor(() => { expect(restartSends()).toHaveLength(1); });
+          expect(restartHoldLogs()).toHaveLength(0);
+          // start() armed the runtime's timers and its continuation turn waits on its
+          // result deadline: stop the runtime.
+          await runtime.shutdown();
+        });
+      });
     });
 
     it('re-arms a respawn refused only because termination is unproven, and recovers once it proves', async () => {
@@ -2111,6 +2565,8 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       expect(liveAbandonedCount(observed.runtime), 'chat A is still abandoned').toBe(1);
       expect(mockClearAlertSource, 'a recovery elsewhere must not retract a page that is still true')
         .not.toHaveBeenCalledWith('test', 'agent_respawn_failed');
+      // Chat B's continuation turn still waits on its result deadline: stop the runtime.
+      await observed.runtime.shutdown();
     });
 
     it('an abandonment that ages out clears the alert exactly once', async () => {
@@ -2223,6 +2679,8 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);
       expect(mockSession.spawnSession).toHaveBeenCalledWith('sess-control', 13);
       expect(state.pendingRespawnTimers.size).toBe(0);
+      // The continuation turn still waits on its result deadline: stop the runtime.
+      await runtime.shutdown();
     });
 
     /** Every decline reason this suite pins, asserted as an exact list so a
@@ -2471,6 +2929,8 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       await vi.waitFor(() => {
         expect(mockClearAlertSource).toHaveBeenCalledWith('test', 'agent_respawn_failed');
       });
+      // The continuation turn still waits on its result deadline: stop the runtime.
+      await runtime.shutdown();
     });
 
     it('successful respawn that retires an exhausted owner retains a refused clear for health retry without double reconciliation', async () => {

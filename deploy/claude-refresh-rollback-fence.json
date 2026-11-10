@@ -2,10 +2,12 @@
   "schemaVersion": 1,
   "activationRequirements": {
     "rollbackTarget": {
-      "claudeRefreshOwnerV3": 3
+      "claudeRefreshOwnerV3": 3,
+      "stalledOperationHoldV1": 1
     }
   },
   "rollbackCapabilities": {
-    "claudeRefreshOwnerV3": 3
+    "claudeRefreshOwnerV3": 3,
+    "stalledOperationHoldV1": 1
   }
 }
