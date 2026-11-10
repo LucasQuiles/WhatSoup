@@ -16,6 +16,23 @@ export { TRIGGER_BUDGETS, isSafeSqliteSql } from './trigger-budgets.ts';
 
 const log = createChildLogger('substrate.triggers');
 
+// Read byte lengths in SQLite before transferring legacy text into JavaScript.
+// A bounded over-limit sentinel preserves resource-error classification without
+// truncating invalid data into valid JSON or changing the stored evidence.
+function boundedTriggerColumn(column: string, maxBytes: number): string {
+  return `CASE WHEN length(CAST(${column} AS BLOB)) > ${maxBytes}
+    THEN printf('%*s', ${maxBytes + 1}, '') ELSE ${column} END AS ${column}`;
+}
+
+export const BOUNDED_TRIGGER_COLUMNS = `
+  id, bead_id, kind,
+  ${boundedTriggerColumn('spec_json', TRIGGER_BUDGETS.maxSpecBytes)},
+  spec_version, status, interval_seconds, next_fire_at, last_fire_at, terminal_at, on_terminal,
+  ${boundedTriggerColumn('report_chat_jid', TRIGGER_BUDGETS.maxReportTargetBytes)},
+  ${boundedTriggerColumn('dedupe_key', TRIGGER_BUDGETS.maxDedupeKeyBytes)},
+  created_at, updated_at`;
+
+
 // #1757: a legit epoch-SECONDS fire_at stays under this ceiling — no real
 // schedule needs to reach 75 years out. An epoch-MILLISECONDS value for any
 // present-day date clears it by 3 orders of magnitude, so the two units never
@@ -568,7 +585,7 @@ function latestPauseReason(db: DatabaseSync, beadId: number, triggerId: number):
  */
 export function resumeTrigger(db: DatabaseSync, id: number, args: ResumeTriggerArgs, clock: Clock = systemClock): ResumeTriggerResult {
   const now = clock.nowUnixSec();
-  const t = queryOne<TriggerRow>(db, `SELECT * FROM bead_triggers WHERE id = ?`, id);
+  const t = queryOne<TriggerRow>(db, `SELECT ${BOUNDED_TRIGGER_COLUMNS} FROM bead_triggers WHERE id = ?`, id);
   if (!t) throw new Error(`trigger ${id} not found`);
   if (t.status === 'active') {
     return { resumed: false, status: 'active', next_fire_at: t.next_fire_at, terminal_at: t.terminal_at, paused_reason: null };
@@ -585,6 +602,7 @@ export function resumeTrigger(db: DatabaseSync, id: number, args: ResumeTriggerA
     throw new Error('resumeTrigger: url watch is disabled. Set advanced.enableUrlWatch: true in instance config to resume poll.url watches.');
   }
   assertTriggerRootBudgets(t.report_chat_jid, t.dedupe_key);
+  assertTriggerTextBudget(t.spec_json, 'spec.bytes', TRIGGER_BUDGETS.maxSpecBytes);
   const validated = validateTriggerSpec(t.kind, JSON.parse(t.spec_json));
   let terminalAt = t.terminal_at;
   if (args.until !== undefined) {
@@ -623,7 +641,7 @@ export function resumeTrigger(db: DatabaseSync, id: number, args: ResumeTriggerA
 /** Runtime helper for slice-3 poller. */
 export function dueTriggers(db: DatabaseSync, now: number, batchSize: number): TriggerRow[] {
   return db.prepare(
-    `SELECT * FROM bead_triggers
+    `SELECT ${BOUNDED_TRIGGER_COLUMNS} FROM bead_triggers
      WHERE status = 'active'
        AND next_fire_at IS NOT NULL
        AND next_fire_at <= ?

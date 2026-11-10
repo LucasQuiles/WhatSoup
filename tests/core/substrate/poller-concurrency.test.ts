@@ -138,8 +138,9 @@ describe('TriggerPoller — hang isolation and bounded concurrency (#2566 slice 
       tickBudgetSeconds: 1,
     });
 
-    const held = new Promise<never>(() => {});
-    vi.spyOn(poller as unknown as ExecSpy, 'executeTrigger').mockImplementation(() => held as Promise<unknown>);
+    let release!: () => void;
+    const held = new Promise<never>((_resolve, reject) => { release = () => reject(new Error('released')); });
+    const execute = vi.spyOn(poller as unknown as ExecSpy, 'executeTrigger').mockImplementation(() => held as Promise<unknown>);
     const tickSpy = vi.spyOn(
       poller as unknown as { tickOnce(): Promise<number> },
       'tickOnce',
@@ -158,14 +159,15 @@ describe('TriggerPoller — hang isolation and bounded concurrency (#2566 slice 
     }, { timeout: 3000 });
 
     poller.stop();
-    // The fake scheduler fires EVERY armed timer, including the probe
-    // execution timeout — so earlier hung occurrences finalize 'failed'
-    // (execution_timeout) and the latest claim is the surviving 'running'
-    // evidence. Every state must be one of exactly those two.
-    const states = occurrenceStates(db, a.id);
-    expect(states.length).toBeGreaterThanOrEqual(1);
-    expect(states[states.length - 1]).toBe('running');
-    for (const s of states.slice(0, -1)) expect(s).toBe('failed');
+    try {
+      // The fake scheduler also fires the execution timeout. Later ticks must
+      // keep running without replacing the still-unsettled executor.
+      await vi.waitFor(() => expect(occurrenceStates(db, a.id)).toEqual(['failed']));
+      expect(execute).toHaveBeenCalledTimes(1);
+    } finally {
+      release();
+      await held.catch(() => {});
+    }
   });
 
   it('F5: probe concurrency peaks at exactly the pool bound', async () => {

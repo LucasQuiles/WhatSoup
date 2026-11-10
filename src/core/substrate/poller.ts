@@ -47,7 +47,7 @@ import { systemClock } from '../../lib/clock.ts';
 import { SIGNAL } from '../../lib/signals.ts';
 import { isNonEmptyString } from '../../lib/type-guards.ts';
 import {
-  dueTriggers, validateTriggerSpec, isSafeSqliteSql, assertTriggerRootBudgets, assertTriggerTextBudget,
+  BOUNDED_TRIGGER_COLUMNS, dueTriggers, validateTriggerSpec, isSafeSqliteSql, assertTriggerRootBudgets, assertTriggerTextBudget,
   TriggerBudgetError, TRIGGER_BUDGETS,
   countPastDueTriggers, DEFAULT_TRIGGER_PAST_DUE_GRACE_SEC,
 } from './triggers.ts';
@@ -277,7 +277,8 @@ export interface TriggerPollerOptions {
   batchSize?: number;
   /**
    * #2566 slice 2 — max concurrently executing non-side-effecting probe
-   * triggers (poll.sqlite/pinecone/file/url) per tick. Side-effecting kinds
+   * triggers (poll.sqlite/pinecone/file/url) across ticks. Timed-out executors
+   * and pending notifications retain their slots until settled. Side-effecting kinds
    * (poll.shell, schedule.*, event.message) always run strictly serially.
    * Default 4.
    */
@@ -712,6 +713,8 @@ export class TriggerPoller {
   private readonly occurrenceLeaseTtlSeconds: number;
   private readonly occurrenceLeaseOwner: string;
   private readonly maxConcurrentExecutors: number;
+  private readonly activeProbes = new Map<number, { processing: boolean; executing: boolean }>();
+  private serialBusy = false;
   private readonly tickBudgetSeconds: number;
   private readonly executionTimeoutSeconds: number;
   private readonly sqliteExecutor: IsolatedSqliteExecutor;
@@ -761,7 +764,7 @@ export class TriggerPoller {
     // #2292 L15 — prepare constant SQL once here rather than per-call/per-tick.
     // SQL text below is byte-identical to what each call site used to inline.
     this.stmtOverdueTerminalTriggers = this.db.prepare(
-      `SELECT * FROM bead_triggers
+      `SELECT ${BOUNDED_TRIGGER_COLUMNS} FROM bead_triggers
        WHERE status = 'active' AND terminal_at IS NOT NULL AND terminal_at <= ?
        LIMIT ?`,
     );
@@ -1022,11 +1025,17 @@ export class TriggerPoller {
     const overdue = this.stmtOverdueTerminalTriggers
       .all(now, expiryBatchSize) as unknown as TriggerRow[];
     for (const t of overdue) {
+      if (this.serialBusy) break;
+      // Preserve the in-flight run and its notification before terminal expiry.
+      if (this.activeProbes.get(t.id)?.processing) continue;
+      this.serialBusy = true;
       try {
         await this.expireTrigger(t, now);
         processed++;
       } catch (err) {
         log.error({ err, triggerId: t.id }, 'trigger expiry failed unexpectedly');
+      } finally {
+        this.serialBusy = false;
       }
     }
     // 2. Due triggers — normal poll/schedule execution path.
@@ -1041,6 +1050,10 @@ export class TriggerPoller {
     const probeWorker = async (): Promise<void> => {
       while (nextProbe < probes.length) {
         const t = probes[nextProbe++];
+        if (this.activeProbes.has(t.id)) continue;
+        if (this.activeProbes.size >= this.maxConcurrentExecutors) break;
+        const active = { processing: true, executing: false };
+        this.activeProbes.set(t.id, active);
         try {
           await this.processTrigger(t, now);
           processed++;
@@ -1049,6 +1062,9 @@ export class TriggerPoller {
             { err, triggerId: t.id, kind: t.kind },
             'trigger run failed unexpectedly',
           );
+        } finally {
+          active.processing = false;
+          if (!active.executing) this.activeProbes.delete(t.id);
         }
       }
     };
@@ -1057,6 +1073,8 @@ export class TriggerPoller {
       () => probeWorker(),
     );
     for (const t of serial) {
+      if (this.serialBusy) break;
+      this.serialBusy = true;
       try {
         await this.processTrigger(t, now);
         processed++;
@@ -1065,6 +1083,8 @@ export class TriggerPoller {
           { err, triggerId: t.id, kind: t.kind },
           'trigger run failed unexpectedly',
         );
+      } finally {
+        this.serialBusy = false;
       }
     }
     await Promise.all(workers);
@@ -1383,15 +1403,22 @@ export class TriggerPoller {
   /**
    * #2566 slice 2 — probe kinds race their executor against
    * executionTimeoutSeconds. On timeout the occurrence is finalized 'failed'
-   * with the bounded class 'execution_timeout' and the pool slot frees; the
-   * abandoned promise is detached with its rejection swallowed, and the
-   * finalize state guard (state IN claimed/running) makes any late write a
-   * no-op. Side-effecting kinds pass through un-raced: whether their side
+   * with the bounded class 'execution_timeout'. Its slot remains occupied
+   * until both the executor and post-commit processing settle, so later ticks
+   * cannot accumulate abandoned work. Side-effecting kinds pass through
+   * un-raced: whether their side
    * effect happened is unknowable, so they are never abandoned.
    */
   private async executeWithTimeout(t: TriggerRow, occurrenceId: number): Promise<ExecuteOutcome> {
     if (!PROBE_KINDS.has(t.kind)) return this.executeTrigger(t, occurrenceId);
+    const active = this.activeProbes.get(t.id)!;
+    active.executing = true;
     const exec = this.executeTrigger(t, occurrenceId);
+    const settled = (): void => {
+      active.executing = false;
+      if (!active.processing) this.activeProbes.delete(t.id);
+    };
+    void exec.then(settled, settled);
     let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
     const timeout = new Promise<'timeout'>((resolve) => {
       timeoutTimer = this.setTimeoutImpl(() => resolve('timeout'), this.executionTimeoutSeconds * 1000);
@@ -1418,26 +1445,17 @@ export class TriggerPoller {
   private async executeTrigger(t: TriggerRow, occurrenceId: number): Promise<ExecuteOutcome> {
     const kind = t.kind as TriggerKind;
     let spec: unknown;
-    try {
-      spec = JSON.parse(t.spec_json);
-    } catch (err) {
-      return {
-        status: 'failed',
-        fired: false,
-        outputSummary: 'spec_json is not valid JSON',
-        outputJson: {},
-        errorKind: 'spec_parse',
-        errorMessage: errorMessage(err),
-      };
-    }
+    let parsed = false;
     try {
       assertTriggerRootBudgets(t.report_chat_jid, t.dedupe_key);
+      assertTriggerTextBudget(t.spec_json, 'spec.bytes', TRIGGER_BUDGETS.maxSpecBytes);
+      spec = JSON.parse(t.spec_json);
+      parsed = true;
       spec = validateTriggerSpec(kind, spec);
     } catch (err) {
       if (err instanceof TriggerBudgetError) {
         return {
-          status: 'failed',
-          fired: false,
+          status: 'failed', fired: false,
           outputSummary: 'trigger resource budget exceeded',
           outputJson: { kind, reason: 'resource_exhausted' satisfies TriggerReason },
           errorKind: 'resource_exhausted',
@@ -1445,11 +1463,10 @@ export class TriggerPoller {
         };
       }
       return {
-        status: 'failed',
-        fired: false,
-        outputSummary: 'spec_json failed SPEC_REGISTRY validation',
-        outputJson: { kind },
-        errorKind: 'spec_invalid',
+        status: 'failed', fired: false,
+        outputSummary: parsed ? 'spec_json failed SPEC_REGISTRY validation' : 'spec_json is not valid JSON',
+        outputJson: parsed ? { kind } : {},
+        errorKind: parsed ? 'spec_invalid' : 'spec_parse',
         errorMessage: errorMessage(err),
       };
     }
