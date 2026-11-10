@@ -26,7 +26,8 @@ def http(port,path,token=None):
         except urllib.error.HTTPError as e:response=e
         with response:
             if 300<=response.status<400:return None,{}
-            payload=response.read(1000000)
+            payload=response.read(1000001)
+            if len(payload)>1000000:return None,{}
             return response.status,json.loads(payload)
     except Exception:return None,{}
 

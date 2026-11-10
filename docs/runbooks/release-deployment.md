@@ -889,6 +889,11 @@ descriptors it validates, so replacing a pathname cannot redirect the read.
 Each receipt is limited to one MiB, including growth after the initial size
 check. Unreadable or malformed entries do not establish delivery. The queue
 root's ancestor directories remain part of the trusted host configuration.
+Supervisor collector observations match emitter filenames literally, including
+wildcard characters; an unrelated relay receipt cannot acknowledge an alert.
+Direct fleet HTTP probes accept at most 1,000,000 response bytes. They inspect
+one additional byte to detect overflow and reject the whole response, even when
+the bounded prefix is valid JSON. The same limit applies to error responses.
 
 Release exports include `deploy/scripts/fleet/` through the BOT ERRORS runtime
 manifest and `whatsoup-bot-errors-deploy.sh`. The module has no tracked host

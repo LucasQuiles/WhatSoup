@@ -416,6 +416,28 @@ def test_status_reports_stale_heartbeat_and_does_not_expose_payloads(
     assert "restart_command" not in json.dumps(status)
 
 
+@pytest.mark.parametrize("name", ["*", "?", "[ab]", "alert[1]", "plain-alert"])
+@pytest.mark.parametrize("matching", [False, True])
+def test_collector_receipt_uses_literal_emitter_filename(supervisor, config, tmp_path, name, matching):
+    relay = tmp_path / "relay"
+    relayed = relay / "relayed"
+    relayed.mkdir(parents=True)
+    unrelated = {"*": "other", "?": "a", "[ab]": "b", "alert[1]": "alert1", "plain-alert": "other"}[name]
+    (relayed / (unrelated + ".host.relayed")).write_text("unrelated")
+    if matching:
+        (relayed / (name + ".host.relayed")).write_text("matching")
+    state = supervisor.initial_state(100)
+    state["completed_at"] = 100
+    state["alerts"] = [{"event_id": "held-event", "file": name, "delivery": "locally_persisted"}]
+    supervisor.private_directory(Path(config["state_dir"]))
+    supervisor.write_private(Path(config["state_dir"]) / "supervisor.json", state)
+    config["bot_errors_state_dir"] = str(relay)
+    observed = supervisor.observe(config, now=101)
+    assert observed["alerts"][0]["delivery"] == (
+        "collector_acknowledged" if matching else "locally_persisted"
+    )
+
+
 def test_health_body_and_deadline_are_real_http_checks(supervisor):
     import http.server
     import threading

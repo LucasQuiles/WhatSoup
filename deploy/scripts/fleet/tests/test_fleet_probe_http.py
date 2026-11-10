@@ -40,7 +40,7 @@ def endpoint(status=200, payload=None, location=None, connected=None):
 
         def do_GET(self):
             requests.append((self.path, self.headers.get("Authorization")))
-            body = json.dumps(payload if payload is not None else {"status": "ok"}).encode()
+            body = payload if isinstance(payload, bytes) else json.dumps(payload if payload is not None else {"status": "ok"}).encode()
             self.send_response(status)
             if location is not None:
                 self.send_header("Location", location)
@@ -150,6 +150,19 @@ def test_existing_fleet_response_limit_accepts_more_than_shared_reader_limit():
         result = http(port, "/health")
     assert requests == [("/health", None)]
     assert result == (200, payload)
+
+
+@pytest.mark.parametrize("status", [200, 503])
+@pytest.mark.parametrize("trailing", [b"", b" ", b"garbage"])
+def test_fleet_response_limit_rejects_trailing_bytes_after_valid_json(status, trailing):
+    http = http_adapter()
+    payload = {"details": "x" * (1000000 - len(json.dumps({"details": ""}).encode()))}
+    body = json.dumps(payload).encode()
+    assert len(body) == 1000000
+    with endpoint(status=status, payload=body + trailing) as (port, requests):
+        result = http(port, "/health")
+    assert requests == [("/health", None)]
+    assert result == ((None, {}) if trailing else (status, payload))
 
 
 def supervisor_adapter():

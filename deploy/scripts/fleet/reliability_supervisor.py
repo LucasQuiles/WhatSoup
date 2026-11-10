@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime
 import fcntl
+import glob
 import hashlib
 import http.client
 import json
@@ -662,7 +663,7 @@ def observe(config: dict, *, now=None) -> dict:
         for alert in alerts:
             name = alert.get("file")
             if relay and name and Path(name).name == name and alert.get("delivery") not in TERMINAL_DELIVERY:
-                matches = list((Path(relay) / "relayed").glob(name + ".*.relayed"))
+                matches = list((Path(relay) / "relayed").glob(glob.escape(name) + ".*.relayed"))
                 if matches:
                     alert["delivery"] = "collector_acknowledged"
         return {
