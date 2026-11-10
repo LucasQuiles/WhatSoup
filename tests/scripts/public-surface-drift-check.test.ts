@@ -1,8 +1,8 @@
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 import {
   extractNpmScriptName,
@@ -11,9 +11,10 @@ import {
 } from '../../scripts/public-surface-drift-check.ts';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
+const tmp = trackTmpDirs('whatsoup-public-surface-');
 
 function makeFakeRepo(): { root: string; registryPath: string } {
-  const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-public-surface-'));
+  const root = tmp.make('fixture');
   mkdirSync(path.join(root, 'docs'), { recursive: true });
   mkdirSync(path.join(root, 'src/fleet'), { recursive: true });
   mkdirSync(path.join(root, 'src/mcp/tools'), { recursive: true });

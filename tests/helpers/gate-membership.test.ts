@@ -315,14 +315,36 @@ console.log(JSON.stringify({ profile: 'docs', reasons: [], changedFiles: ['READM
     }
   });
 
-  it('keeps disclosure guards ahead of every reduced PR profile without installing dependencies', () => {
+  it('keeps disclosure and public-surface guards ahead of every reduced PR profile without installing dependencies', () => {
     const selection = qualityWorkflow.slice(qualityWorkflow.indexOf('  selection:'), qualityWorkflow.indexOf('  docs:'));
     expect(selection).toContain("if: github.event_name == 'pull_request' && steps.plan.outputs.profile != 'full'");
     expect(selection).toContain('node --experimental-strip-types scripts/repo-hygiene-guard.ts --branch-diff --base "$TEST_BASE"');
     expect(selection).toContain('node --experimental-strip-types scripts/repo-hygiene-guard.ts --commit-authors');
     expect(selection).toContain('node --experimental-strip-types scripts/publication-guard.ts --all');
     expect(selection).toContain('node --experimental-strip-types scripts/publication-guard.ts --branch-diff');
+    expect(selection).toContain('node --experimental-strip-types scripts/public-surface-drift-check.ts');
     expect(selection).not.toContain('npm ci');
+  });
+
+  it('propagates a public-surface guard failure through the normal reduced-profile step', () => {
+    const workflow = parseYaml(qualityWorkflow);
+    const step = workflow.jobs.selection.steps.find((entry: { name?: string }) => entry.name?.startsWith('Disclosure guards'));
+    const root = mkdtempSync(resolve(tmpdir(), 'whatsoup-docs-guard-'));
+    try {
+      mkdirSync(resolve(root, 'scripts'));
+      writeFileSync(resolve(root, 'scripts/repo-hygiene-guard.ts'), 'process.exit(0);\n');
+      writeFileSync(resolve(root, 'scripts/publication-guard.ts'), 'process.exit(0);\n');
+      writeFileSync(resolve(root, 'scripts/public-surface-drift-check.ts'), 'process.exit(23);\n');
+      const execute = () => spawnSync('bash', ['-e', '-o', 'pipefail', '-c', step.run], {
+        cwd: root, encoding: 'utf8', timeout: 10_000,
+        env: { ...process.env, PATH: `${dirname(process.execPath)}:${process.env.PATH}`, TEST_BASE: 'fixture-base' },
+      });
+      expect(execute().status).toBe(23);
+      writeFileSync(resolve(root, 'scripts/public-surface-drift-check.ts'), 'process.exit(0);\n');
+      expect(execute().status).toBe(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('runs the standalone PR metadata guard with authoritative pull-request event data', () => {

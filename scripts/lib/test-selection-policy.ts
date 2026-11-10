@@ -93,6 +93,7 @@ function isFixturePath(changedPath: string): boolean {
 }
 
 function isOperationalDocumentation(changedPath: string): boolean {
+  if (changedPath === 'docs/public-surface.md') return true;
   return /(?:^|[\/._-])(?:runbooks?|operations?|operational|policies|policy|schemas?|configuration|config|enforcement|guardrails)(?:[\/._-]|$)/i.test(changedPath);
 }
 

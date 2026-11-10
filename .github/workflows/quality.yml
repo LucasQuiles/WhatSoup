@@ -127,6 +127,7 @@ jobs:
           node --experimental-strip-types scripts/repo-hygiene-guard.ts --commit-authors
           node --experimental-strip-types scripts/publication-guard.ts --all
           node --experimental-strip-types scripts/publication-guard.ts --branch-diff
+          node --experimental-strip-types scripts/public-surface-drift-check.ts
 
   docs:
     name: Quality documentation validation

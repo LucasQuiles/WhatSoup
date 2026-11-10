@@ -40,12 +40,14 @@ be combined with `--base`. Unknown arguments and invalid refs fail visibly.
 | `affected` | Eligible library, memory, console or guard source. Root tests use Vitest's transitive import graph plus the existing text-reference companion search. Console changes also run lint, build, design and both browser configurations. |
 | `full` | Security, identity, authorization, persistence, runtime lifecycle, dependencies, configuration, tests, scripts, deployment, renames/deletions, fixtures, unknown inputs or explicit `--full`/`--coverage`. |
 
-Reduced PR profiles run repository disclosure, commit-author and publication-audit
-guards in the selection job before any application worker starts. These commands
+Reduced PR profiles run repository disclosure, commit-author, publication-audit
+and public-surface drift guards before any application worker starts. These commands
 need Git history and pinned Node, but no application dependency installation.
 Changes to selection scripts, workflow controls, deployment inputs or the
 planner's shared imports force the full profile before executing candidate code.
-Enforcement documents and guardrail checklists also require full validation.
+Enforcement documents, guardrail checklists and the public-surface registry also
+require full validation. README and other allowed prose changes retain the fast
+path with the public-surface consistency guard; they do not bypass that contract.
 
 The selection policy lives in `scripts/lib/test-selection-policy.ts`. The old
 `triage:required-suites` command remains an informational union of functional and
@@ -54,6 +56,13 @@ Before selecting affected work, the planner validates the existing BOT ERRORS
 runtime manifest, including required paths, hashes and markers. Deployed library
 inputs select full validation because Python parity tests also consume them.
 Missing or invalid manifest evidence selects full validation.
+
+`verify:console-design:live` runs shadow ESLint once. The existing
+`lint:shadow:baseline -- --with-inventories` command checks its ratchet and shares
+that fresh report with the frozen and raw-form inventories. Each inventory keeps
+its own assertions and failure result. The temporary report is removed on success
+or failure; combined mode refuses injected reports and baseline updates. Individual
+inventory commands remain available for focused investigation.
 
 Activate the workflow split only after `pr metadata` and the trusted
 `test-integrity (private)` check have run on a candidate and an authorized
