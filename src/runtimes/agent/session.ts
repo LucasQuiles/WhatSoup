@@ -812,6 +812,8 @@ export class SessionManager {
     | { child: ReturnType<typeof spawn>; signal: NodeJS.Signals; reason: SessionTerminationReason }
     | null = null;
   private pendingToolIds = new Map<string | symbol, number>();
+  /** An ordinary tool started while every tracked slot held a poll wait; cleared with the map. */
+  private untrackedOrdinaryTool = false;
   /** Codex app-server thread ID for persistent sessions. */
   private codexThreadId: string | null = null;
   /** Monotonic counter for Codex JSON-RPC request IDs. */
@@ -2046,8 +2048,12 @@ export class SessionManager {
   // applies to it.
   private trackPending(key: string | symbol, deadline: number): boolean {
     if (this.pendingToolIds.size >= MAX_TRACKED_TOOL_IDS) {
-      if (deadline === 0) return false;
       const ordinary = [...this.pendingToolIds].find(([, d]) => d === 0)?.[0];
+      if (deadline === 0) {
+        // Unrecorded, it must still keep the normal hard-watchdog deadline (handleWatchdogHard).
+        if (ordinary === undefined) this.untrackedOrdinaryTool = true;
+        return false;
+      }
       if (ordinary === undefined) return false;
       this.pendingToolIds.delete(ordinary);
     }
@@ -2522,6 +2528,7 @@ export class SessionManager {
     this.lastMessageAt = null;
     this.activeEvidenceGeneration = null;
     this.pendingToolIds.clear();
+    this.untrackedOrdinaryTool = false;
     this.codexThreadId = null;
     this.codexRequestSeq = 0;
     this.geminiSessionId = null;
@@ -3487,6 +3494,7 @@ export class SessionManager {
   clearTurnWatchdog(): void {
     this.clearWatchdogTimers();
     this.pendingToolIds.clear();
+    this.untrackedOrdinaryTool = false;
   }
 
   private clearWatchdogTimers(): void {
@@ -3801,10 +3809,17 @@ export class SessionManager {
     this.watchdogHard = null;
     if (!this.active) return;
 
-    // A bounded human vote wait is quiet by design; other stalled tools retain their kill timers.
+    // A bounded human vote wait is quiet by design. Any other pending tool keeps the normal
+    // deadline: with operation tracking disabled nothing else would recover it (#3917 review).
     let latestWaitDeadline = 0;
-    for (const deadline of this.pendingToolIds.values()) {
-      latestWaitDeadline = Math.max(latestWaitDeadline, deadline);
+    if (!this.untrackedOrdinaryTool) {
+      for (const deadline of this.pendingToolIds.values()) {
+        if (deadline === 0) {
+          latestWaitDeadline = 0;
+          break;
+        }
+        latestWaitDeadline = Math.max(latestWaitDeadline, deadline);
+      }
     }
     const remainingWaitMs = latestWaitDeadline - performance.now();
     if (remainingWaitMs > 0) {
