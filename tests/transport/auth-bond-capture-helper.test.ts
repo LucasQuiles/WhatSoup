@@ -39,3 +39,30 @@ describe('settleAuthBondCapture', () => {
     );
   }, 15_000);
 });
+
+// Real timers: connection-auth-bond-edge.test.ts calls the helper without fake timers.
+describe('settleAuthBondCapture under real timers', () => {
+  const activeTimeouts = (): number => process.getActiveResourcesInfo().filter(kind => kind === 'Timeout').length;
+
+  it('waits for a capture held 200 ms and leaves no deadline timer behind', async () => {
+    expect(vi.isFakeTimers()).toBe(false);
+    const holder = {
+      authSnapshotCapture: new Promise<void>((resolve) => { setTimeout(resolve, 200); }) as Promise<void> | null,
+    };
+    const before = activeTimeouts();
+    await settleAuthBondCapture(holder);
+    expect(activeTimeouts()).toBe(before - 1);
+  });
+
+  it('fails with the named error after 8 s when a capture never settles, and clears its timer', async () => {
+    expect(vi.isFakeTimers()).toBe(false);
+    const holder = { authSnapshotCapture: new Promise<void>(() => {}) as Promise<void> | null };
+    const before = activeTimeouts();
+    const started = process.hrtime.bigint();
+    await expect(settleAuthBondCapture(holder)).rejects.toThrow(
+      'auth-bond capture did not settle within 8 s of real time',
+    );
+    expect(process.hrtime.bigint() - started).toBeGreaterThanOrEqual(7_900_000_000n);
+    expect(activeTimeouts()).toBe(before);
+  }, 15_000);
+});
