@@ -124,3 +124,37 @@ export function probeTraceHead(trace: boolean): string[] {
 export function writeEventTraces(record: unknown, traces: Record<string, boolean>): void {
   for (const [label, on] of Object.entries(traces)) if (on) process.stderr.write(`${label}_EVENT_TRACE ${JSON.stringify(record)}\n`);
 }
+
+// Record the guard's USR1 to the worker. Valid-record cases require it;
+// the unreadable-record diagnostic requires its absence. Record the outer's
+// TERM to the guard as well. After the reap, the outer-terminated mode holds
+// the outer at its first resume of the guard until the driver sends TERM.
+// Every status passes through.
+export const AUTHORIZATION_KILL_SHIM: readonly string[] = [
+  'case "$4" in authorization-valid-*|authorization-unreadable-cleanup-interrupted)',
+  '  kill() {',
+  '    local kill_rc=0 polls=0',
+  // The worker's loop checks its command only after its USR1 trap returns; hold it there, out of read, for the driver's TERM.
+  // WORKER_RESUME_WITNESS=off withholds the witness, so the driver takes its failure path.
+  '    if [ "$1" = -0 ] && [ -n "${cmd_pid-}" ] && [ "$2" = "$cmd_pid" ] && [ "${entry_timeout-}" = 1 ] && [ "${WORKER_RESUME_WITNESS-}" != off ]; then : > "$TMPDIR/worker-resumed-after-usr1"; while [ "$polls" -lt 400 ]; do /bin/sleep 0.01; polls=$((polls + 1)); done; : > "$BARRIER_EXPIRED-worker-resumed"; fi',
+  '    if [ "$cleanup_mode" = authorization-valid-outer-terminated-after-reap ] && [ -z "${outer_held-}" ] && [ "$1" = -CONT ] && [ -n "${guard_pid-}" ] && [ "$2" = "$guard_pid" ]; then',
+  '      outer_held=1',
+  '      : > "$OUTER_HOLDING"',
+  '      while [ "$polls" -lt 400 ]; do /bin/sleep 0.01; polls=$((polls + 1)); done',
+  '      : > "$BARRIER_EXPIRED-outer-hold"',
+  '    fi',
+  '    builtin kill "$@" || kill_rc=$?',
+  // The marker carries the kill status: it proves the call, not the delivery.
+  '    if [ "$1" = -USR1 ] && [ -n "${worker_pid-}" ] && [ "$2" = "$worker_pid" ]; then builtin printf "kill_rc=%s\\n" "$kill_rc" > "$GUARD_USR1_SENT"; fi',
+  '    if [ "$1" = -TERM ] && [ -n "${guard_pid-}" ] && [ "$2" = "$guard_pid" ]; then : > "$OUTER_TERM_SENT"; fi',
+  '    return "$kill_rc"',
+  '  }',
+  '  ;; esac',
+];
+
+// Withholds the resume witness and runs a stack sample that ignores TERM and
+// leaves a child, so the driver's budget, not the sample, ends the diagnosis.
+export const BLOCKED_USR1_DIAGNOSIS_ENV: Readonly<Record<string, string>> = {
+  WORKER_RESUME_WITNESS: 'off',
+  USR1_DIAGNOSIS_SAMPLE: JSON.stringify(['/bin/sh', '-c', 'trap "" TERM; /bin/sleep 60 & /bin/sleep 60']),
+};

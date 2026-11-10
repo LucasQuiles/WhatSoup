@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { BUDGET_HOLD_MODES, TICKER_HOLD, expectGuardChainEndsStoppedWorker, holdBudgetForDriver, installSleepLedgerShim, probeTraceHead, setupShimHead, setupStallTraceOn, writeEventTraces } from './fixtures/credential-probe-stopped-worker.ts';
+import { AUTHORIZATION_KILL_SHIM, BLOCKED_USR1_DIAGNOSIS_ENV, BUDGET_HOLD_MODES, TICKER_HOLD, expectGuardChainEndsStoppedWorker, holdBudgetForDriver, installSleepLedgerShim, probeTraceHead, setupShimHead, setupStallTraceOn, writeEventTraces } from './fixtures/credential-probe-stopped-worker.ts';
 
 // Incident 2026-07-24 (mini11 / ph-bot, ~45h outage): an unbounded
 // `security find-generic-password` blocked the launcher forever because macOS
@@ -757,30 +757,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     '    command sleep "$@"',
     '  }',
     '  ;; esac',
-    // Record the guard's USR1 to the worker. Valid-record cases require it;
-    // the unreadable-record diagnostic requires its absence. Record the outer's
-    // TERM to the guard as well. After the reap, the outer-terminated mode holds
-    // the outer at its first resume of the guard until the driver sends TERM.
-    // Every status passes through.
-    'case "$4" in authorization-valid-*|authorization-unreadable-cleanup-interrupted)',
-    '  kill() {',
-    '    local kill_rc=0 polls=0',
-    // The worker's loop checks its command only after its USR1 trap returns; hold it there, out of read, for the driver's TERM.
-    // WORKER_RESUME_WITNESS=off withholds the witness, so the driver takes its failure path.
-    '    if [ "$1" = -0 ] && [ -n "${cmd_pid-}" ] && [ "$2" = "$cmd_pid" ] && [ "${entry_timeout-}" = 1 ] && [ "${WORKER_RESUME_WITNESS-}" != off ]; then : > "$TMPDIR/worker-resumed-after-usr1"; while [ "$polls" -lt 400 ]; do /bin/sleep 0.01; polls=$((polls + 1)); done; : > "$BARRIER_EXPIRED-worker-resumed"; fi',
-    '    if [ "$cleanup_mode" = authorization-valid-outer-terminated-after-reap ] && [ -z "${outer_held-}" ] && [ "$1" = -CONT ] && [ -n "${guard_pid-}" ] && [ "$2" = "$guard_pid" ]; then',
-    '      outer_held=1',
-    '      : > "$OUTER_HOLDING"',
-    '      while [ "$polls" -lt 400 ]; do /bin/sleep 0.01; polls=$((polls + 1)); done',
-    '      : > "$BARRIER_EXPIRED-outer-hold"',
-    '    fi',
-    '    builtin kill "$@" || kill_rc=$?',
-    // The marker carries the kill status: it proves the call, not the delivery.
-    '    if [ "$1" = -USR1 ] && [ -n "${worker_pid-}" ] && [ "$2" = "$worker_pid" ]; then builtin printf "kill_rc=%s\\n" "$kill_rc" > "$GUARD_USR1_SENT"; fi',
-    '    if [ "$1" = -TERM ] && [ -n "${guard_pid-}" ] && [ "$2" = "$guard_pid" ]; then : > "$OUTER_TERM_SENT"; fi',
-    '    return "$kill_rc"',
-    '  }',
-    '  ;; esac',
+    ...AUTHORIZATION_KILL_SHIM,
     // Hold the worker's cleanup at its first step, the ticker wait, or the
     // cleanup marker's umask where there is no ticker, until the driver has
     // sent the worker a trapped signal.
@@ -1438,10 +1415,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
   // The USR1 diagnosis runs before cleanup, so a blocked diagnostic must not
   // spend the cleanup time: the failure stays recorded and every group ends.
   it('keeps the resume failure and its cleanup when the USR1 diagnosis blocks', () => {
-    const result = runLifecycleProbe('authorization-valid-outer-terminated-after-reap', false, {
-      WORKER_RESUME_WITNESS: 'off',
-      USR1_DIAGNOSIS_SAMPLE: JSON.stringify(['/bin/sh', '-c', 'trap "" TERM; /bin/sleep 60 & /bin/sleep 60']),
-    });
+    const result = runLifecycleProbe('authorization-valid-outer-terminated-after-reap', false, BLOCKED_USR1_DIAGNOSIS_ENV);
     const evidence = JSON.stringify(result);
     expect(result.error, evidence).toBe("RuntimeError('worker did not resume after USR1')");
     expect(result.usr1_resume_missing?.usr1_marker, evidence).toBe('kill_rc=0');
