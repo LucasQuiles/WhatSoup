@@ -9,10 +9,14 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import { Database } from '../../src/core/database.ts';
-import { closeOperatorCatchupRecoveryRaw } from '../../src/core/recovery-catchup-closure.ts';
+import { DurabilityEngine } from '../../src/core/durability.ts';
+import {
+  closeFailedSourceOperatorCatchupRecoveryRaw,
+  closeOperatorCatchupRecoveryRaw,
+} from '../../src/core/recovery-catchup-closure.ts';
 import {
   classifyError,
   loadOrCreateRedactionSalt,
@@ -830,5 +834,1152 @@ describe('classifyError (bounded error-code taxonomy)', () => {
     expect(classifyError('a bare string throw')).toBe('unknown');
     expect(classifyError({ unrelated: true })).toBe('unknown');
     expect(classifyError(undefined)).toBe('unknown');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// #3903 failed-source mode: an inbound that ended processing_status='failed'
+// with a failed_terminal record and no delivery never receives a
+// recovery_pending_operator_catchup link (startup recovery writes those for
+// open rows only), so the plain closure cannot close it. --failed-source
+// creates the operator plan and pending link and performs the existing
+// closure in one writer transaction, without touching the source rows.
+// ─────────────────────────────────────────────────────────────────────────
+const FAILED_SOURCE_SEQ = 910_001;
+const FAILED_CATCHUP_SEQ = 910_050;
+const FAILED_CHAT = 'failed-source@g.us';
+const FAILED_CONVERSATION = 'conversation-failed-source';
+const FAILED_PLAN = 'plan-failed-source';
+const FAILED_ACTOR = 'operator:failed-source';
+const FAILED_EVIDENCE = 'evidence://failed-source/catchup';
+
+type SourceTerminalShape =
+  | 'failed_none'
+  | 'none'
+  | 'failed_with_delivery'
+  | 'disarmed'
+  | 'operator_cancelled'
+  | 'second_record';
+
+interface FailedSourceRowsOptions {
+  status?: 'failed' | 'complete' | 'processing';
+  conversationKey?: string;
+  chatJid?: string;
+  terminal?: SourceTerminalShape;
+  /** attempt_failure_class of a non-cancelled failure; defaults to 'session_crash'. */
+  attemptFailureClass?: string;
+}
+
+/** One source inbound and its terminal record(s), shaped like a crashed turn by default. */
+function insertFailedSourceRows(
+  raw: DatabaseSync,
+  seq: number,
+  options: FailedSourceRowsOptions = {},
+): void {
+  const {
+    status = 'failed',
+    conversationKey = FAILED_CONVERSATION,
+    chatJid = FAILED_CHAT,
+    terminal = 'failed_none',
+    attemptFailureClass = 'session_crash',
+  } = options;
+  raw.prepare(`
+    INSERT INTO inbound_events (
+      seq, message_id, conversation_key, chat_jid, processing_status, completed_at,
+      terminal_reason, failure_class
+    ) VALUES (?, ?, ?, ?, ?,
+              CASE WHEN ? = 'processing' THEN NULL ELSE datetime('now') END,
+              CASE WHEN ? = 'failed' THEN 'error' WHEN ? = 'complete' THEN 'response_sent' ELSE NULL END,
+              CASE WHEN ? = 'failed' THEN 'session_crash' ELSE NULL END)
+  `).run(seq, `failed-source-${seq}`, conversationKey, chatJid, status, status, status, status, status);
+  if (terminal === 'none') return;
+
+  // The schema's turn_terminal_disarm_evidence CHECK allows a disarmed
+  // failed_terminal only with echoed delivery, so 'disarmed' carries one.
+  const deliveredStatus = terminal === 'failed_with_delivery'
+    ? 'submitted'
+    : terminal === 'disarmed' ? 'echoed' : null;
+  let deliveryOpId: number | null = null;
+  if (deliveredStatus !== null) {
+    deliveryOpId = Number(raw.prepare(`
+      INSERT INTO outbound_ops (
+        conversation_key, chat_jid, op_type, payload, status,
+        source_inbound_seq, is_terminal, replay_policy
+      ) VALUES (?, ?, 'text', '{"text":"partial"}', ?, ?, 1, 'unsafe')
+    `).run(conversationKey, chatJid, deliveredStatus, seq).lastInsertRowid);
+  }
+  raw.prepare(`
+    INSERT INTO turn_terminal_records (
+      scope, conversation_key, delivery_jid, inbound_seq, inbound_seq_key,
+      logical_turn_id, manager_id, generation, attempt_kind, attempt_failure_class,
+      inbound_disposition, delivery_kind, delivery_op_id, reply_guarantee_disarmed
+    ) VALUES ('per_chat', ?, ?, ?, ?, ?, 'failed-manager', 1,
+              'failed', ?, 'failed_terminal', ?, ?, ?)
+  `).run(
+    conversationKey,
+    chatJid,
+    seq,
+    seq,
+    `failed-turn-${seq}`,
+    terminal === 'operator_cancelled' ? 'operator_cancelled' : attemptFailureClass,
+    terminal === 'failed_with_delivery' ? 'flushed' : terminal === 'disarmed' ? 'echoed' : 'none',
+    deliveryOpId,
+    terminal === 'disarmed' ? 1 : 0,
+  );
+  if (terminal === 'second_record') {
+    raw.prepare(`
+      INSERT INTO turn_terminal_records (
+        scope, conversation_key, delivery_jid, inbound_seq, inbound_seq_key,
+        logical_turn_id, manager_id, generation, attempt_kind,
+        inbound_disposition, delivery_kind, reply_guarantee_disarmed
+      ) VALUES ('per_chat', ?, ?, ?, ?, ?, 'second-manager', 1,
+                'initial', 'finalized_no_reply_policy', 'none', 0)
+    `).run(conversationKey, chatJid, seq, seq, `second-turn-${seq}`);
+  }
+}
+
+interface FailedSourceFixtureOptions {
+  sourceStatus?: 'failed' | 'complete' | 'processing';
+  sourceConversationKey?: string;
+  sourceChatJid?: string;
+  sourceTerminal?: SourceTerminalShape;
+  sourceAttemptFailureClass?: string;
+  /** Further sources in the closure set, each with its own shape. */
+  extraSources?: Array<{ seq: number } & FailedSourceRowsOptions>;
+  catchupStatus?: 'complete' | 'processing';
+  catchupConversationKey?: string;
+  echoed?: boolean;
+}
+
+interface FailedSourceFixture {
+  dbPath: string;
+  planId: string;
+  conversationKey: string;
+  sourceSeq: number;
+  sourceSeqs: number[];
+  catchupSeq: number;
+}
+
+function installFailedSourceFixture(options: FailedSourceFixtureOptions = {}): FailedSourceFixture {
+  const {
+    sourceStatus = 'failed',
+    sourceConversationKey = FAILED_CONVERSATION,
+    sourceChatJid = FAILED_CHAT,
+    sourceTerminal = 'failed_none',
+    sourceAttemptFailureClass = 'session_crash',
+    extraSources = [],
+    catchupStatus = 'complete',
+    catchupConversationKey = FAILED_CONVERSATION,
+    echoed = true,
+  } = options;
+  const dbPath = path.join(makeTempRoot(), 'bot.db');
+  const db = new Database(dbPath);
+  db.open();
+  insertFailedSourceRows(db.raw, FAILED_SOURCE_SEQ, {
+    status: sourceStatus,
+    conversationKey: sourceConversationKey,
+    chatJid: sourceChatJid,
+    terminal: sourceTerminal,
+    attemptFailureClass: sourceAttemptFailureClass,
+  });
+  for (const { seq, ...sourceOptions } of extraSources) {
+    insertFailedSourceRows(db.raw, seq, sourceOptions);
+  }
+
+  db.raw.prepare(`
+    INSERT INTO inbound_events (
+      seq, message_id, conversation_key, chat_jid, processing_status,
+      completed_at, terminal_reason
+    ) VALUES (?, 'failed-source-catchup', ?, ?, ?,
+              CASE WHEN ? = 'complete' THEN datetime('now') ELSE NULL END,
+              CASE WHEN ? = 'complete' THEN 'response_sent' ELSE NULL END)
+  `).run(FAILED_CATCHUP_SEQ, catchupConversationKey, FAILED_CHAT, catchupStatus, catchupStatus, catchupStatus);
+  const opId = Number(db.raw.prepare(`
+    INSERT INTO outbound_ops (
+      conversation_key, chat_jid, op_type, payload, status,
+      source_inbound_seq, is_terminal, replay_policy, echoed_at
+    ) VALUES (?, ?, 'text', '{"text":"continued"}', ?,
+              ?, 1, 'unsafe', CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END)
+  `).run(
+    catchupConversationKey,
+    FAILED_CHAT,
+    echoed ? 'echoed' : 'submitted',
+    FAILED_CATCHUP_SEQ,
+    echoed ? 1 : 0,
+  ).lastInsertRowid);
+  db.raw.prepare(`
+    INSERT INTO turn_terminal_records (
+      scope, conversation_key, delivery_jid, inbound_seq, inbound_seq_key,
+      logical_turn_id, manager_id, generation, attempt_kind,
+      inbound_disposition, delivery_kind, delivery_op_id,
+      reply_guarantee_disarmed
+    ) VALUES ('per_chat', ?, ?, ?, ?, 'catchup-turn', 'catchup-manager', 1,
+              'replied', 'finalized_replied', ?, ?, ?)
+  `).run(
+    catchupConversationKey,
+    FAILED_CHAT,
+    FAILED_CATCHUP_SEQ,
+    FAILED_CATCHUP_SEQ,
+    echoed ? 'echoed' : 'enqueued',
+    opId,
+    echoed ? 1 : 0,
+  );
+  db.close();
+  return {
+    dbPath,
+    planId: FAILED_PLAN,
+    conversationKey: FAILED_CONVERSATION,
+    sourceSeq: FAILED_SOURCE_SEQ,
+    sourceSeqs: [FAILED_SOURCE_SEQ, ...extraSources.map(({ seq }) => seq)],
+    catchupSeq: FAILED_CATCHUP_SEQ,
+  };
+}
+
+function failedSourceArgs(
+  fixture: FailedSourceFixture,
+  extra: readonly string[] = [],
+  overrides: { planId?: string; catchupSeq?: number; evidenceRef?: string } = {},
+): string[] {
+  return [
+    '--db', fixture.dbPath,
+    '--plan-id', overrides.planId ?? fixture.planId,
+    '--conversation-key', fixture.conversationKey,
+    '--source-seqs', fixture.sourceSeqs.join(','),
+    '--catchup-seq', String(overrides.catchupSeq ?? fixture.catchupSeq),
+    '--actor', FAILED_ACTOR,
+    '--evidence-ref', overrides.evidenceRef ?? FAILED_EVIDENCE,
+    '--failed-source',
+    ...extra,
+  ];
+}
+
+function failedSourceParams(
+  fixture: FailedSourceFixture,
+  overrides: { planId?: string } = {},
+): Parameters<typeof closeFailedSourceOperatorCatchupRecoveryRaw>[1] {
+  return {
+    planId: overrides.planId ?? fixture.planId,
+    conversationKey: fixture.conversationKey,
+    expectedSourceSeqs: fixture.sourceSeqs,
+    catchupSeq: fixture.catchupSeq,
+    actor: FAILED_ACTOR,
+    evidenceRef: FAILED_EVIDENCE,
+  };
+}
+
+interface RecoveryStateSnapshot {
+  plans: number;
+  pending: number;
+  closures: number;
+  witnesses: number;
+  recoveryJobs: number;
+  outboundOps: number;
+  sourceRows: unknown[];
+  sourceTerminals: unknown[];
+  sourceRecoveryJobs: unknown[];
+  sourceOutboundOps: unknown[];
+}
+
+/** Row counts plus every row that belongs to the fixture's source set. */
+function recoveryState(fixture: FailedSourceFixture): RecoveryStateSnapshot {
+  const raw = new DatabaseSync(fixture.dbPath, { readOnly: true });
+  try {
+    const count = (sql: string): number => Number((raw.prepare(sql).get() as { count: number }).count);
+    const seqs = fixture.sourceSeqs;
+    const placeholders = seqs.map(() => '?').join(', ');
+    const rows = (sql: string): unknown[] => raw.prepare(sql).all(...seqs);
+    return {
+      plans: count('SELECT COUNT(*) AS count FROM recovery_plans'),
+      pending: count(`SELECT COUNT(*) AS count FROM inbound_disposition_links
+                      WHERE disposition = 'recovery_pending_operator_catchup'`),
+      closures: count(`SELECT COUNT(*) AS count FROM inbound_disposition_links
+                       WHERE disposition = 'superseded_by_operator_catchup'`),
+      witnesses: count('SELECT COUNT(*) AS count FROM operator_catchup_closure_witnesses'),
+      recoveryJobs: count('SELECT COUNT(*) AS count FROM turn_recovery_jobs'),
+      outboundOps: count('SELECT COUNT(*) AS count FROM outbound_ops'),
+      sourceRows: rows(`SELECT * FROM inbound_events WHERE seq IN (${placeholders}) ORDER BY seq`),
+      sourceTerminals: rows(`
+        SELECT * FROM turn_terminal_records WHERE inbound_seq_key IN (${placeholders}) ORDER BY id
+      `),
+      sourceRecoveryJobs: rows(`
+        SELECT * FROM turn_recovery_jobs WHERE source_inbound_seq IN (${placeholders}) ORDER BY id
+      `),
+      sourceOutboundOps: rows(`
+        SELECT * FROM outbound_ops WHERE source_inbound_seq IN (${placeholders}) ORDER BY id
+      `),
+    };
+  } finally {
+    raw.close();
+  }
+}
+
+function withWritableFixture(fixture: FailedSourceFixture, write: (raw: DatabaseSync) => void): void {
+  const raw = new DatabaseSync(fixture.dbPath);
+  try {
+    raw.exec('PRAGMA foreign_keys = ON');
+    write(raw);
+  } finally {
+    raw.close();
+  }
+}
+
+/** A pending recovery job owning the source's reply, keyed to its terminal record. */
+function insertPendingRecoveryJob(raw: DatabaseSync, seq: number): void {
+  const changes = Number(raw.prepare(`
+    INSERT INTO turn_recovery_jobs (
+      terminal_record_id, scope, conversation_key, delivery_jid,
+      source_inbound_seq, source_inbound_seq_key,
+      source_logical_turn_id, source_manager_id, source_generation, source_message_id,
+      owner_logical_turn_id, owner_manager_id, owner_generation,
+      assigned_owner_logical_turn_id, assigned_owner_manager_id, assigned_owner_generation,
+      replay_safe, sender_jid, replay_text, is_group, state
+    )
+    SELECT t.id, t.scope, t.conversation_key, t.delivery_jid,
+           t.inbound_seq, t.inbound_seq,
+           t.logical_turn_id, t.manager_id, t.generation, i.message_id,
+           'owner-turn', 'owner-manager', 1,
+           'owner-turn', 'owner-manager', 1,
+           1, 'sender@s.whatsapp.net', 'replay text', 1, 'pending'
+    FROM turn_terminal_records t
+    JOIN inbound_events i ON i.seq = t.inbound_seq
+    WHERE t.inbound_seq_key = ?
+  `).run(seq).changes);
+  expect(changes).toBe(1);
+}
+
+/**
+ * Make the failed source the catch-up target of an earlier recovery. The
+ * closure trigger admits only a complete, delivered target, so the trigger is
+ * set aside and restored from its exact stored DDL. The link then has no
+ * closure witness (a witness needs a delivery proof, which a failed target
+ * cannot have), so the canonical schema-43 attestation rejects the database
+ * before the failed-source guard is reached.
+ */
+function insertLinkSupersededBySource(raw: DatabaseSync, seq: number): void {
+  const earlierSeq = seq - 1;
+  insertFailedSourceRows(raw, earlierSeq);
+  raw.prepare(`
+    INSERT INTO recovery_plans (plan_id, origin, actor, summary, evidence_ref)
+    VALUES ('plan-earlier', 'operator', 'operator:earlier', 'earlier recovery', 'test://earlier')
+  `).run();
+  raw.prepare(`
+    INSERT INTO inbound_disposition_links (
+      inbound_seq, recovery_plan_id, disposition, superseded_by_seq, reason, evidence_ref, actor
+    ) VALUES (?, 'plan-earlier', 'recovery_pending_operator_catchup', NULL,
+              'earlier pending', 'test://earlier', 'operator:earlier')
+  `).run(earlierSeq);
+  const trigger = raw.prepare(`
+    SELECT sql FROM sqlite_master
+    WHERE type = 'trigger' AND name = 'inbound_disposition_closure_validate_insert'
+  `).get() as { sql: string };
+  raw.exec('DROP TRIGGER inbound_disposition_closure_validate_insert');
+  try {
+    raw.prepare(`
+      INSERT INTO inbound_disposition_links (
+        inbound_seq, recovery_plan_id, disposition, superseded_by_seq, reason, evidence_ref, actor
+      ) VALUES (?, 'plan-earlier', 'superseded_by_operator_catchup', ?,
+                'legacy closure', 'test://earlier', 'operator:earlier')
+    `).run(earlierSeq, seq);
+  } finally {
+    raw.exec(trigger.sql);
+  }
+}
+
+function insertForeignPendingLink(dbPath: string, sourceSeq: number, planId: string): void {
+  const raw = new DatabaseSync(dbPath);
+  try {
+    raw.exec('PRAGMA foreign_keys = ON');
+    raw.prepare(`
+      INSERT INTO recovery_plans (plan_id, origin, actor, summary, evidence_ref)
+      VALUES (?, 'post_connect_recovery', 'durability_recovery', 'startup', 'recovery_run:1')
+    `).run(planId);
+    raw.prepare(`
+      INSERT INTO inbound_disposition_links (
+        inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
+        reason, evidence_ref, actor
+      ) VALUES (?, ?, 'recovery_pending_operator_catchup', NULL,
+                'startup pending', 'recovery_run:1', 'durability_recovery')
+    `).run(sourceSeq, planId);
+  } finally {
+    raw.close();
+  }
+}
+
+describe('close-recovery-catchup --failed-source (#3903)', () => {
+  it('parses --failed-source once as a boolean mode flag', () => {
+    const fixture = installFailedSourceFixture();
+    expect(parseCloseRecoveryArgs(failedSourceArgs(fixture))).toMatchObject({
+      failedSource: true,
+      confirm: false,
+    });
+    const plainArgs = failedSourceArgs(fixture).filter((arg) => arg !== '--failed-source');
+    expect(parseCloseRecoveryArgs(plainArgs)).toMatchObject({ failedSource: false });
+    expect(() => parseCloseRecoveryArgs([...failedSourceArgs(fixture), '--failed-source']))
+      .toThrow('Duplicate argument: --failed-source');
+  });
+
+  it('without --failed-source a failed source that has no pending link stays refused', () => {
+    const fixture = installFailedSourceFixture();
+    const before = recoveryState(fixture);
+    const argv = failedSourceArgs(fixture, ['--confirm']).filter((arg) => arg !== '--failed-source');
+
+    expect(() => runCloseRecoveryCatchupCli(argv)).toThrow('Recovery plan does not exist');
+    expect(recoveryState(fixture)).toEqual(before);
+  });
+
+  it('dry run validates the failed source and the catch-up proof and writes nothing', () => {
+    const fixture = installFailedSourceFixture();
+    const before = recoveryState(fixture);
+
+    const result = captureRun(failedSourceArgs(fixture));
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toMatchObject({
+      ok: true,
+      dryRun: true,
+      ready: true,
+      nSourceSeqs: 1,
+      evidenceBasis: 'selected_echoed',
+      wouldInsert: 1,
+      idempotent: false,
+      openAfter: 0,
+    });
+    expect(result.text).not.toContain(FAILED_EVIDENCE);
+    expect(result.text).not.toContain(String(fixture.sourceSeq));
+    expect(recoveryState(fixture)).toEqual(before);
+  });
+
+  it('confirm creates exactly one plan, one pending link and one closure and preserves the source rows', () => {
+    const fixture = installFailedSourceFixture();
+    const before = recoveryState(fixture);
+    expect(before).toMatchObject({ plans: 0, pending: 0, closures: 0, witnesses: 0 });
+
+    const result = captureRun(failedSourceArgs(fixture, ['--confirm']));
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toMatchObject({
+      ok: true,
+      dryRun: false,
+      receipt: { nSourceSeqs: 1, inserted: 1, idempotent: false, openAfter: 0 },
+    });
+    const after = recoveryState(fixture);
+    expect(after).toMatchObject({
+      plans: 1,
+      pending: 1,
+      closures: 1,
+      witnesses: 1,
+      outboundOps: before.outboundOps,
+    });
+    // The original failure, its failure class and its attempt record are untouched.
+    expect(after.sourceRows).toHaveLength(1);
+    expect(after.sourceRows).toEqual(before.sourceRows);
+    expect(after.sourceTerminals).toEqual(before.sourceTerminals);
+    expect(after.sourceTerminals).toHaveLength(1);
+    expect(after.sourceRecoveryJobs).toEqual(before.sourceRecoveryJobs);
+    expect(after.sourceOutboundOps).toEqual(before.sourceOutboundOps);
+
+    const raw = new DatabaseSync(fixture.dbPath, { readOnly: true });
+    try {
+      expect(raw.prepare(`
+        SELECT plan_id, origin, actor, evidence_ref FROM recovery_plans
+      `).get()).toEqual({
+        plan_id: FAILED_PLAN,
+        origin: 'operator',
+        actor: FAILED_ACTOR,
+        evidence_ref: FAILED_EVIDENCE,
+      });
+      expect(raw.prepare(`
+        SELECT inbound_seq, recovery_plan_id, disposition, superseded_by_seq, actor, evidence_ref
+        FROM inbound_disposition_links ORDER BY id
+      `).all()).toEqual([
+        {
+          inbound_seq: fixture.sourceSeq,
+          recovery_plan_id: FAILED_PLAN,
+          disposition: 'recovery_pending_operator_catchup',
+          superseded_by_seq: null,
+          actor: FAILED_ACTOR,
+          evidence_ref: FAILED_EVIDENCE,
+        },
+        {
+          inbound_seq: fixture.sourceSeq,
+          recovery_plan_id: FAILED_PLAN,
+          disposition: 'superseded_by_operator_catchup',
+          superseded_by_seq: fixture.catchupSeq,
+          actor: FAILED_ACTOR,
+          evidence_ref: FAILED_EVIDENCE,
+        },
+      ]);
+    } finally {
+      raw.close();
+    }
+  });
+
+  it('duplicate: the same confirmed request twice is an idempotent no-op', () => {
+    const fixture = installFailedSourceFixture();
+    captureRun(failedSourceArgs(fixture, ['--confirm']));
+    const afterFirst = recoveryState(fixture);
+
+    const dryReplay = captureRun(failedSourceArgs(fixture));
+    expect(dryReplay.output).toMatchObject({ ready: true, wouldInsert: 0, idempotent: true });
+    const replay = captureRun(failedSourceArgs(fixture, ['--confirm']));
+
+    expect(replay.output).toMatchObject({
+      ok: true,
+      dryRun: false,
+      receipt: { inserted: 0, idempotent: true, openAfter: 0 },
+    });
+    expect(recoveryState(fixture)).toEqual(afterFirst);
+  });
+
+  it.each([
+    ['a different evidence ref', { evidenceRef: 'evidence://failed-source/other' }],
+    ['a different catch-up seq', { catchupSeq: FAILED_CATCHUP_SEQ + 1 }],
+  ] as const)('changed evidence: a rerun with %s after closure is refused', (_label, overrides) => {
+    const fixture = installFailedSourceFixture();
+    captureRun(failedSourceArgs(fixture, ['--confirm']));
+    const afterFirst = recoveryState(fixture);
+
+    for (const extra of [[], ['--confirm']]) {
+      expect(() => runCloseRecoveryCatchupCli(failedSourceArgs(fixture, extra, overrides)))
+        .toThrow('Recovery was already closed against a different catch-up or evidence');
+    }
+    expect(recoveryState(fixture)).toEqual(afterFirst);
+  });
+
+  it('changed plan: a second plan for an already-closed failed source is refused', () => {
+    const fixture = installFailedSourceFixture();
+    captureRun(failedSourceArgs(fixture, ['--confirm']));
+    const afterFirst = recoveryState(fixture);
+
+    expect(() => runCloseRecoveryCatchupCli(
+      failedSourceArgs(fixture, ['--confirm'], { planId: 'plan-failed-source-second' }),
+    )).toThrow('Failed source inbound already has a disposition link');
+    expect(recoveryState(fixture)).toEqual(afterFirst);
+  });
+
+  it('changed plan: a plan ID that already names another recovery is refused', () => {
+    const fixture = installFailedSourceFixture();
+    const raw = new DatabaseSync(fixture.dbPath);
+    raw.prepare(`
+      INSERT INTO recovery_plans (plan_id, origin, actor, summary, evidence_ref)
+      VALUES (?, 'operator', 'operator:other', 'unrelated plan', 'test://other')
+    `).run(fixture.planId);
+    raw.close();
+    const before = recoveryState(fixture);
+
+    for (const extra of [[], ['--confirm']]) {
+      expect(() => runCloseRecoveryCatchupCli(failedSourceArgs(fixture, extra)))
+        .toThrow('Failed-source recovery plan already exists');
+    }
+    expect(recoveryState(fixture)).toEqual(before);
+  });
+
+  it.each([
+    [
+      'the source in another conversation',
+      { sourceConversationKey: 'conversation-other' },
+      'Failed source inbound does not exist in the recovery conversation',
+    ],
+    [
+      'the catch-up in another conversation',
+      { catchupConversationKey: 'conversation-other' },
+      'Catch-up inbound does not exist in the recovery conversation',
+    ],
+    [
+      'the source in another chat of the same conversation',
+      { sourceChatJid: 'other-chat@g.us' },
+      'Failed source inbound must share the catch-up chat',
+    ],
+  ] as const)('wrong chat: refuses %s', (_label, options, message) => {
+    const fixture = installFailedSourceFixture(options);
+    const before = recoveryState(fixture);
+
+    for (const extra of [[], ['--confirm']]) {
+      expect(() => runCloseRecoveryCatchupCli(failedSourceArgs(fixture, extra))).toThrow(message);
+    }
+    expect(recoveryState(fixture)).toEqual(before);
+  });
+
+  it.each([
+    ['a complete source', { sourceStatus: 'complete' }, 'Failed source inbound must be failed'],
+    ['a processing source', { sourceStatus: 'processing' }, 'Failed source inbound must be failed'],
+    [
+      'a failed source with no terminal record',
+      { sourceTerminal: 'none' },
+      'Failed source inbound must have exactly one armed, undelivered failed terminal record',
+    ],
+    [
+      'a failed source whose terminal record carries a delivery',
+      { sourceTerminal: 'failed_with_delivery' },
+      'Failed source inbound must have exactly one armed, undelivered failed terminal record',
+    ],
+    ['a catch-up that is not complete', { catchupStatus: 'processing' }, 'Catch-up inbound must be complete'],
+  ] as const)('wrong target: refuses %s', (_label, options, message) => {
+    const fixture = installFailedSourceFixture(options);
+    const before = recoveryState(fixture);
+
+    for (const extra of [[], ['--confirm']]) {
+      expect(() => runCloseRecoveryCatchupCli(failedSourceArgs(fixture, extra))).toThrow(message);
+    }
+    expect(recoveryState(fixture)).toEqual(before);
+  });
+
+  it('missing echo: refuses a catch-up whose reply was not echoed', () => {
+    const fixture = installFailedSourceFixture({ echoed: false });
+    const before = recoveryState(fixture);
+
+    for (const extra of [[], ['--confirm']]) {
+      expect(() => runCloseRecoveryCatchupCli(failedSourceArgs(fixture, extra)))
+        .toThrow('Catch-up reply must have echoed delivery proof');
+    }
+    expect(recoveryState(fixture)).toEqual(before);
+  });
+
+  const NOT_A_NOTICE_MESSAGE =
+    'Failed source inbound has an outbound op that is not an echoed registered failure notice';
+  const ACK_MISMATCH_MESSAGE =
+    'Delivered-op acknowledgements must match the delivered failure-notice ops exactly';
+  const TERMINAL_DEBT_MESSAGE =
+    'Failed source inbound must have exactly one armed, undelivered failed terminal record';
+
+  it.each([
+    [
+      'a source with a pending turn recovery job',
+      {},
+      (raw: DatabaseSync) => insertPendingRecoveryJob(raw, FAILED_SOURCE_SEQ),
+      'Failed source inbound has a turn recovery job',
+    ],
+    ['a source with a second terminal record', { sourceTerminal: 'second_record' }, null, TERMINAL_DEBT_MESSAGE],
+    ['a source whose failed terminal is disarmed', { sourceTerminal: 'disarmed' }, null, TERMINAL_DEBT_MESSAGE],
+    ['an operator-cancelled failure', { sourceTerminal: 'operator_cancelled' }, null, TERMINAL_DEBT_MESSAGE],
+    [
+      // Unreachable on a canonical schema-43 database: the attestation refuses
+      // an unwitnessed closure first. The guard's superseded_by_seq clause is
+      // kept for parity with TerminalRecordInboundCloser.selectLinked.
+      'a source that is already another recovery\'s catch-up target',
+      {},
+      (raw: DatabaseSync) => insertLinkSupersededBySource(raw, FAILED_SOURCE_SEQ),
+      'has an unwitnessed closure',
+    ],
+  ] as const)('source guard: refuses %s', (_label, options, mutate, message) => {
+    const fixture = installFailedSourceFixture(options);
+    if (mutate) withWritableFixture(fixture, mutate);
+    const before = recoveryState(fixture);
+
+    for (const extra of [[], ['--confirm']]) {
+      expect(() => runCloseRecoveryCatchupCli(failedSourceArgs(fixture, extra))).toThrow(message);
+    }
+    expect(recoveryState(fixture)).toEqual(before);
+  });
+
+  // ── Delivered source ops (#3903 lead corrections) ────────────────────────
+  // Any source op not proven unsent (status other than failed_permanent) is
+  // delivered-or-in-flight evidence. It closes only as an echoed, non-terminal
+  // text op whose payload hash is a registered failure notice, acknowledged by
+  // the keyed fingerprint the dry run lists. is_terminal = 1 marks a delivered
+  // answer (markTerminal, chat runtime), never a notice. Ops are written
+  // through the real DurabilityEngine API; raw op ids and payload hashes never
+  // reach stdout (#2457).
+
+  // Loaded at run time so a missing registry fails only the tests that use it.
+  type FailureNotices = typeof import('../../src/core/agent-failure-notices.ts');
+  let failureNotices: FailureNotices | undefined;
+  beforeAll(async () => {
+    try {
+      failureNotices = await import('../../src/core/agent-failure-notices.ts');
+    } catch {
+      failureNotices = undefined;
+    }
+  });
+  function notices(): FailureNotices {
+    if (failureNotices === undefined) throw new Error('failure-notice registry is not available');
+    return failureNotices;
+  }
+
+  /**
+   * Seed outbound_ops so API-created ops get distinctive ids (>= 970001); a
+   * small id would collide with counts and hex digits in a stdout canary.
+   */
+  const OP_ID_FLOOR = 970_000;
+  function withDurability(fixture: FailedSourceFixture, use: (durability: DurabilityEngine) => void): void {
+    const db = new Database(fixture.dbPath);
+    db.open();
+    try {
+      db.raw.prepare(`
+        INSERT OR IGNORE INTO outbound_ops (
+          id, conversation_key, chat_jid, op_type, payload, status, is_terminal, replay_policy
+        ) VALUES (?, 'unrelated', 'unrelated@g.us', 'text', '{"text":"seed"}', 'failed_permanent', 0, 'unsafe')
+      `).run(OP_ID_FLOOR);
+      use(new DurabilityEngine(db));
+    } finally {
+      db.close();
+    }
+  }
+
+  type NoticeState = 'pending' | 'sending' | 'submitted' | 'maybe_sent' | 'quarantined' | 'echoed';
+
+  /** Create a text op for the source and drive it to `state` through the API. */
+  function sendSourceText(
+    durability: DurabilityEngine,
+    text: string,
+    options: { isTerminal?: boolean; state?: NoticeState } = {},
+  ): number {
+    const state = options.state ?? 'echoed';
+    const id = durability.createOutboundOp({
+      conversationKey: FAILED_CONVERSATION,
+      chatJid: FAILED_CHAT,
+      opType: 'text',
+      payload: JSON.stringify({ text }),
+      replayPolicy: 'unsafe',
+      sourceInboundSeq: FAILED_SOURCE_SEQ,
+      isTerminal: options.isTerminal,
+    });
+    if (state === 'pending') return id;
+    durability.markSending(id);
+    if (state === 'sending') return id;
+    durability.markSubmitted(id, `wa-${id}`);
+    if (state === 'maybe_sent') expect(durability.markMaybeSent(id, 'send outcome unknown')).toBe(true);
+    if (state === 'quarantined') expect(durability.markQuarantined(id)).toBe(true);
+    if (state === 'echoed') durability.markEchoed(id);
+    return id;
+  }
+
+  function opRow(fixture: FailedSourceFixture, opId: number): { payload_hash: string; status: string } {
+    const raw = new DatabaseSync(fixture.dbPath, { readOnly: true });
+    try {
+      return raw.prepare('SELECT payload_hash, status FROM outbound_ops WHERE id = ?').get(opId) as {
+        payload_hash: string;
+        status: string;
+      };
+    } finally {
+      raw.close();
+    }
+  }
+
+  /** The fingerprint the CLI shows for an op in its current state. */
+  function opFingerprint(fixture: FailedSourceFixture, opId: number): string {
+    const { payload_hash: payloadHash, status } = opRow(fixture, opId);
+    return redactFingerprint(
+      loadOrCreateRedactionSalt(fixture.dbPath),
+      'delivered-op',
+      `${opId}:${payloadHash}:${status}`,
+    );
+  }
+
+  function ackArgs(fingerprints: string[]): string[] {
+    return fingerprints.flatMap((fingerprint) => ['--ack-delivered-op', fingerprint]);
+  }
+
+  /** Dry run that is expected not to be ready: exit 1, valid JSON on stdout. */
+  function notReadyDryRun(argv: string[]): Record<string, unknown> {
+    const result = captureRun(argv);
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toMatchObject({ ok: true, dryRun: true, ready: false });
+    return result.output;
+  }
+
+  it('parses repeatable --ack-delivered-op fingerprints only with --failed-source', () => {
+    const fixture = installFailedSourceFixture();
+    const [first, second] = ['0123456789ab', 'ba9876543210'];
+    expect(parseCloseRecoveryArgs(failedSourceArgs(fixture, ackArgs([first, second]))))
+      .toMatchObject({ ackedDeliveredOpFingerprints: [first, second] });
+    expect(parseCloseRecoveryArgs(failedSourceArgs(fixture)))
+      .toMatchObject({ ackedDeliveredOpFingerprints: [] });
+    for (const invalid of ['7', `970001:${'a'.repeat(64)}`, '0123456789AB', '0123456789a', 'g123456789ab']) {
+      expect(() => parseCloseRecoveryArgs(failedSourceArgs(fixture, ['--ack-delivered-op', invalid])))
+        .toThrow('Delivered-op acknowledgement must be a delivered-op fingerprint');
+    }
+    expect(() => parseCloseRecoveryArgs(failedSourceArgs(fixture, ackArgs([first, first]))))
+      .toThrow('Delivered-op acknowledgements contain duplicates');
+    const plain = failedSourceArgs(fixture, ackArgs([first])).filter((arg) => arg !== '--failed-source');
+    expect(() => parseCloseRecoveryArgs(plain)).toThrow('--ack-delivered-op requires --failed-source');
+  });
+
+  it('registers the stalled-operation notice by the payload hash durability stores', () => {
+    const expected = createHash('sha256')
+      .update(JSON.stringify({ text: notices().STALLED_OPERATION_NOTICE }))
+      .digest('hex');
+    // The live 363 notice op carried this payload_hash.
+    expect(expected.startsWith('c513ce1d0a88')).toBe(true);
+    expect([...notices().AGENT_FAILURE_NOTICE_PAYLOAD_HASHES]).toEqual([expected]);
+  });
+
+  it('dry run stdout lists a delivered op by fingerprint only, never its raw id or payload hash', () => {
+    const fixture = installFailedSourceFixture();
+    let opId = 0;
+    withDurability(fixture, (durability) => {
+      opId = sendSourceText(durability, notices().STALLED_OPERATION_NOTICE);
+    });
+    expect(opId).toBeGreaterThan(OP_ID_FLOOR);
+    const { payload_hash: payloadHash } = opRow(fixture, opId);
+
+    const result = captureRun(failedSourceArgs(fixture));
+
+    expect(result.output['deliveredOps']).toEqual([{
+      opFingerprint: opFingerprint(fixture, opId),
+      isTerminal: false,
+      status: 'echoed',
+      opType: 'text',
+      registeredNotice: true,
+    }]);
+    expect(result.text).not.toContain(String(opId));
+    expect(result.text).not.toContain(payloadHash);
+    expect(result.text).not.toContain(payloadHash.slice(0, 16));
+    expect(result.text).not.toContain('"id"');
+    expect(result.text).not.toContain('"payloadHash"');
+  });
+
+  it('363 shape: an echoed non-terminal stalled notice closes only with its exact fingerprint ack', () => {
+    const fixture = installFailedSourceFixture({ sourceAttemptFailureClass: 'crash' });
+    let noticeId = 0;
+    withDurability(fixture, (durability) => {
+      noticeId = sendSourceText(durability, notices().STALLED_OPERATION_NOTICE);
+    });
+    const noticeHash = opRow(fixture, noticeId).payload_hash;
+    expect(notices().AGENT_FAILURE_NOTICE_PAYLOAD_HASHES.has(noticeHash)).toBe(true);
+    const before = recoveryState(fixture);
+    expect(before.sourceTerminals).toMatchObject([{
+      inbound_disposition: 'failed_terminal',
+      attempt_failure_class: 'crash',
+      reply_guarantee_disarmed: 0,
+      delivery_kind: 'none',
+      delivery_op_id: null,
+    }]);
+    expect(before.sourceRecoveryJobs).toEqual([]);
+    expect(before).toMatchObject({ plans: 0, pending: 0, closures: 0 });
+    expect(before.sourceOutboundOps).toMatchObject([
+      { id: noticeId, is_terminal: 0, status: 'echoed', op_type: 'text', payload_hash: noticeHash },
+    ]);
+
+    // Dry run without an ack lists the op and is not ready; confirm refuses.
+    const dry = notReadyDryRun(failedSourceArgs(fixture));
+    expect(dry).toMatchObject({ acksMatch: false });
+    const listed = dry['deliveredOps'] as Array<{ opFingerprint: string }>;
+    expect(listed).toHaveLength(1);
+    const fingerprint = listed[0].opFingerprint;
+    expect(fingerprint).toBe(opFingerprint(fixture, noticeId));
+    expect(() => runCloseRecoveryCatchupCli(failedSourceArgs(fixture, ['--confirm'])))
+      .toThrow(ACK_MISMATCH_MESSAGE);
+    expect(recoveryState(fixture)).toEqual(before);
+
+    const ack = ackArgs([fingerprint]);
+    const readyDry = captureRun(failedSourceArgs(fixture, ack));
+    expect(readyDry.exitCode).toBe(0);
+    expect(readyDry.output).toMatchObject({ ready: true, acksMatch: true });
+    const closed = captureRun(failedSourceArgs(fixture, [...ack, '--confirm']));
+    expect(closed.output).toMatchObject({ ok: true, receipt: { inserted: 1, idempotent: false } });
+    const after = recoveryState(fixture);
+    expect(after).toMatchObject({ plans: 1, pending: 1, closures: 1, witnesses: 1 });
+    expect(after.sourceRows).toEqual(before.sourceRows);
+    expect(after.sourceTerminals).toEqual(before.sourceTerminals);
+    expect(after.sourceOutboundOps).toEqual(before.sourceOutboundOps);
+
+    // The bound op is part of the recorded evidence on plan, links and witness.
+    const boundRef = `${FAILED_EVIDENCE} acked-delivered-ops=${noticeId}:${noticeHash}`;
+    const raw = new DatabaseSync(fixture.dbPath, { readOnly: true });
+    try {
+      expect(raw.prepare('SELECT evidence_ref FROM recovery_plans').all())
+        .toEqual([{ evidence_ref: boundRef }]);
+      expect(raw.prepare('SELECT DISTINCT evidence_ref FROM inbound_disposition_links').all())
+        .toEqual([{ evidence_ref: boundRef }]);
+      expect(raw.prepare('SELECT evidence_ref FROM operator_catchup_closure_witnesses').all())
+        .toEqual([{ evidence_ref: boundRef }]);
+    } finally {
+      raw.close();
+    }
+
+    // Exact replay is a no-op; a replay without the ack is changed evidence.
+    expect(captureRun(failedSourceArgs(fixture, [...ack, '--confirm'])).output)
+      .toMatchObject({ receipt: { inserted: 0, idempotent: true } });
+    expect(() => runCloseRecoveryCatchupCli(failedSourceArgs(fixture, ['--confirm'])))
+      .toThrow('Recovery was already closed against a different catch-up or evidence');
+    expect(recoveryState(fixture)).toEqual(after);
+  });
+
+  it.each([
+    ['an unknown fingerprint', 'unknown'],
+    ['an extra fingerprint', 'extra'],
+    ['a missing fingerprint', 'missing'],
+  ] as const)('ack binding: refuses %s', (_label, shape) => {
+    const fixture = installFailedSourceFixture();
+    const ids: number[] = [];
+    withDurability(fixture, (durability) => {
+      ids.push(sendSourceText(durability, notices().STALLED_OPERATION_NOTICE));
+      if (shape === 'missing') ids.push(sendSourceText(durability, notices().STALLED_OPERATION_NOTICE));
+    });
+    const own = opFingerprint(fixture, ids[0]);
+    const acks = shape === 'unknown'
+      ? ['ffffffffffff']
+      : shape === 'extra'
+        ? [own, 'eeeeeeeeeeee']
+        : [own];
+    const before = recoveryState(fixture);
+
+    expect(notReadyDryRun(failedSourceArgs(fixture, ackArgs(acks)))).toMatchObject({ acksMatch: false });
+    expect(() => runCloseRecoveryCatchupCli(failedSourceArgs(fixture, [...ackArgs(acks), '--confirm'])))
+      .toThrow(ACK_MISMATCH_MESSAGE);
+    expect(recoveryState(fixture)).toEqual(before);
+  });
+
+  type DeliveredOpCase = [
+    label: string,
+    send: (durability: DurabilityEngine) => number,
+    listed: { isTerminal: boolean; status: string; registeredNotice: boolean },
+  ];
+  it.each<DeliveredOpCase>([
+    [
+      'an ordinary answer sent as a non-terminal echoed op',
+      (durability: DurabilityEngine) => sendSourceText(durability, 'Here is the report you asked for.'),
+      { isTerminal: false, status: 'echoed', registeredNotice: false },
+    ],
+    [
+      'a terminal answer (createOutboundOp isTerminal) that was echoed',
+      (durability: DurabilityEngine) => sendSourceText(
+        durability,
+        'Here is the report you asked for.',
+        { isTerminal: true },
+      ),
+      { isTerminal: true, status: 'echoed', registeredNotice: false },
+    ],
+    [
+      'a registered notice that markTerminal finalized as the delivered answer',
+      (durability: DurabilityEngine) => {
+        const id = sendSourceText(durability, notices().STALLED_OPERATION_NOTICE);
+        durability.markTerminal(id);
+        return id;
+      },
+      { isTerminal: true, status: 'echoed', registeredNotice: false },
+    ],
+    ...(['pending', 'sending', 'submitted', 'maybe_sent', 'quarantined'] as const).map((state): DeliveredOpCase => [
+      `a registered notice still ${state}`,
+      (durability: DurabilityEngine) => sendSourceText(durability, notices().STALLED_OPERATION_NOTICE, { state }),
+      { isTerminal: false, status: state, registeredNotice: true },
+    ]),
+  ])('delivered op: refuses %s even with its exact fingerprint ack', (_label, send, listed) => {
+    const fixture = installFailedSourceFixture();
+    let opId = 0;
+    withDurability(fixture, (durability) => {
+      opId = send(durability);
+    });
+    const fingerprint = opFingerprint(fixture, opId);
+    const before = recoveryState(fixture);
+    expect(before.sourceOutboundOps).toMatchObject([{ id: opId, status: listed.status }]);
+    expect(before.sourceRows).toMatchObject([{ processing_status: 'failed' }]);
+
+    const dry = notReadyDryRun(failedSourceArgs(fixture, ackArgs([fingerprint])));
+    expect(dry).toMatchObject({
+      acksMatch: true,
+      deliveredOps: [{ opFingerprint: fingerprint, opType: 'text', ...listed }],
+    });
+    expect(() => runCloseRecoveryCatchupCli(
+      failedSourceArgs(fixture, [...ackArgs([fingerprint]), '--confirm']),
+    )).toThrow(NOT_A_NOTICE_MESSAGE);
+    expect(recoveryState(fixture)).toEqual(before);
+  });
+
+  it('transition: a notice op that changes after a ready dry run makes confirm refuse with nothing written', () => {
+    // A second notice arrives (pending) after the operator's ready dry run.
+    const arriving = installFailedSourceFixture();
+    let echoedId = 0;
+    withDurability(arriving, (durability) => {
+      echoedId = sendSourceText(durability, notices().STALLED_OPERATION_NOTICE);
+    });
+    const echoedAck = ackArgs([opFingerprint(arriving, echoedId)]);
+    expect(captureRun(failedSourceArgs(arriving, echoedAck)).output).toMatchObject({ ready: true });
+    withDurability(arriving, (durability) => {
+      sendSourceText(durability, notices().STALLED_OPERATION_NOTICE, { state: 'pending' });
+    });
+    const beforeArrivingConfirm = recoveryState(arriving);
+    expect(() => runCloseRecoveryCatchupCli(failedSourceArgs(arriving, [...echoedAck, '--confirm'])))
+      .toThrow(NOT_A_NOTICE_MESSAGE);
+    expect(recoveryState(arriving)).toEqual(beforeArrivingConfirm);
+    expect(beforeArrivingConfirm).toMatchObject({ plans: 0, pending: 0, closures: 0 });
+
+    // The fingerprint binds status: an ack taken while the op was submitted no
+    // longer matches once it is echoed, so the confirm refuses.
+    const moving = installFailedSourceFixture();
+    let movingId = 0;
+    withDurability(moving, (durability) => {
+      movingId = sendSourceText(durability, notices().STALLED_OPERATION_NOTICE, { state: 'submitted' });
+    });
+    const submittedAck = ackArgs([opFingerprint(moving, movingId)]);
+    expect(notReadyDryRun(failedSourceArgs(moving, submittedAck))).toMatchObject({ acksMatch: true });
+    withDurability(moving, (durability) => durability.markEchoed(movingId));
+    const beforeMovingConfirm = recoveryState(moving);
+    expect(() => runCloseRecoveryCatchupCli(failedSourceArgs(moving, [...submittedAck, '--confirm'])))
+      .toThrow(ACK_MISMATCH_MESSAGE);
+    expect(recoveryState(moving)).toEqual(beforeMovingConfirm);
+
+    // A fresh dry run shows the echoed fingerprint, and that ack closes.
+    const echoedNow = ackArgs([opFingerprint(moving, movingId)]);
+    expect(echoedNow).not.toEqual(submittedAck);
+    expect(captureRun(failedSourceArgs(moving, [...echoedNow, '--confirm'])).output)
+      .toMatchObject({ ok: true, receipt: { inserted: 1 } });
+  });
+
+  it('delivered op: a failed_permanent op is proven unsent and closes without an ack', () => {
+    const fixture = installFailedSourceFixture();
+    withDurability(fixture, (durability) => {
+      const id = durability.createOutboundOp({
+        conversationKey: FAILED_CONVERSATION,
+        chatJid: FAILED_CHAT,
+        opType: 'text',
+        payload: JSON.stringify({ text: 'Here is the report you asked for.' }),
+        replayPolicy: 'unsafe',
+        sourceInboundSeq: FAILED_SOURCE_SEQ,
+      });
+      durability.markSending(id);
+      expect(durability.markFailedPermanent(id, 'provider rejected the payload')).toBe(true);
+    });
+    const before = recoveryState(fixture);
+    expect(before.sourceOutboundOps).toMatchObject([{ status: 'failed_permanent' }]);
+
+    const dry = captureRun(failedSourceArgs(fixture));
+    expect(dry.output).toMatchObject({ ready: true, deliveredOps: [], acksMatch: true });
+    const result = captureRun(failedSourceArgs(fixture, ['--confirm']));
+
+    expect(result.output).toMatchObject({ ok: true, receipt: { inserted: 1, idempotent: false } });
+    const after = recoveryState(fixture);
+    expect(after).toMatchObject({ plans: 1, pending: 1, closures: 1, witnesses: 1 });
+    expect(after.sourceRows).toEqual(before.sourceRows);
+    expect(after.sourceTerminals).toEqual(before.sourceTerminals);
+    expect(after.sourceOutboundOps).toEqual(before.sourceOutboundOps);
+  });
+
+  it('multi-source: closes two failed sources in the same chat under one plan', () => {
+    const fixture = installFailedSourceFixture({ extraSources: [{ seq: FAILED_SOURCE_SEQ + 1 }] });
+    const before = recoveryState(fixture);
+    expect(before.sourceRows).toHaveLength(2);
+
+    const result = captureRun(failedSourceArgs(fixture, ['--confirm']));
+
+    expect(result.output).toMatchObject({
+      ok: true,
+      receipt: { nSourceSeqs: 2, inserted: 2, idempotent: false, openAfter: 0 },
+    });
+    const after = recoveryState(fixture);
+    expect(after).toMatchObject({ plans: 1, pending: 2, closures: 2, witnesses: 1 });
+    expect(after.sourceRows).toEqual(before.sourceRows);
+    expect(after.sourceTerminals).toEqual(before.sourceTerminals);
+    expect(after.sourceRecoveryJobs).toEqual(before.sourceRecoveryJobs);
+    expect(after.sourceOutboundOps).toEqual(before.sourceOutboundOps);
+  });
+
+  it('multi-source: an invalid second source refuses the whole set with nothing written', () => {
+    const fixture = installFailedSourceFixture({
+      extraSources: [{ seq: FAILED_SOURCE_SEQ + 1, terminal: 'operator_cancelled' }],
+    });
+    const before = recoveryState(fixture);
+
+    for (const extra of [[], ['--confirm']]) {
+      expect(() => runCloseRecoveryCatchupCli(failedSourceArgs(fixture, extra)))
+        .toThrow(TERMINAL_DEBT_MESSAGE);
+    }
+    expect(recoveryState(fixture)).toEqual(before);
+    expect(before).toMatchObject({ plans: 0, pending: 0, closures: 0, witnesses: 0 });
+  });
+
+  it('race: a pending link written after a ready dry run makes confirm refuse without writes', () => {
+    const fixture = installFailedSourceFixture();
+    expect(captureRun(failedSourceArgs(fixture)).output).toMatchObject({ ready: true });
+
+    insertForeignPendingLink(fixture.dbPath, fixture.sourceSeq, 'plan-startup-race');
+    const beforeConfirm = recoveryState(fixture);
+
+    expect(() => runCloseRecoveryCatchupCli(failedSourceArgs(fixture, ['--confirm'])))
+      .toThrow('Failed source inbound already has a disposition link');
+    expect(recoveryState(fixture)).toEqual(beforeConfirm);
+    expect(beforeConfirm).toMatchObject({ plans: 1, pending: 1, closures: 0 });
+  });
+
+  it('race: the write transaction re-checks the source after taking the writer reservation', () => {
+    const fixture = installFailedSourceFixture();
+    const before = recoveryState(fixture);
+    const raw = new DatabaseSync(fixture.dbPath);
+    try {
+      raw.exec('PRAGMA foreign_keys = ON');
+      expect(() => closeFailedSourceOperatorCatchupRecoveryRaw(
+        raw,
+        failedSourceParams(fixture),
+        (transactionRaw) => {
+          // A conflicting link lands after any earlier inspection but before
+          // the in-transaction inspection.
+          transactionRaw.prepare(`
+            INSERT INTO recovery_plans (plan_id, origin, actor, summary, evidence_ref)
+            VALUES ('plan-in-flight', 'operator', 'operator:other', 'in flight', 'test://race')
+          `).run();
+          transactionRaw.prepare(`
+            INSERT INTO inbound_disposition_links (
+              inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
+              reason, evidence_ref, actor
+            ) VALUES (?, 'plan-in-flight', 'recovery_pending_operator_catchup', NULL,
+                      'in flight', 'test://race', 'operator:other')
+          `).run(fixture.sourceSeq);
+        },
+      )).toThrow('Failed source inbound already has a disposition link');
+    } finally {
+      raw.close();
+    }
+    // All or nothing: the refused transaction leaves no plan or link behind.
+    expect(recoveryState(fixture)).toEqual(before);
+  });
+
+  it('race: of two concurrent closures for one failed source exactly one plan wins', () => {
+    const fixture = installFailedSourceFixture();
+    const first = new DatabaseSync(fixture.dbPath);
+    const second = new DatabaseSync(fixture.dbPath);
+    try {
+      for (const connection of [first, second]) {
+        connection.exec('PRAGMA foreign_keys = ON');
+        connection.exec('PRAGMA busy_timeout = 1000');
+      }
+      const winner = closeFailedSourceOperatorCatchupRecoveryRaw(first, failedSourceParams(fixture));
+      expect(winner).toMatchObject({ inserted: 1, idempotent: false });
+      const afterWinner = recoveryState(fixture);
+
+      expect(() => closeFailedSourceOperatorCatchupRecoveryRaw(
+        second,
+        failedSourceParams(fixture, { planId: 'plan-failed-source-loser' }),
+      )).toThrow('Failed source inbound already has a disposition link');
+      expect(closeFailedSourceOperatorCatchupRecoveryRaw(second, failedSourceParams(fixture)))
+        .toMatchObject({ inserted: 0, idempotent: true });
+      expect(recoveryState(fixture)).toEqual(afterWinner);
+      expect(afterWinner).toMatchObject({ plans: 1, pending: 1, closures: 1, witnesses: 1 });
+    } finally {
+      first.close();
+      second.close();
+    }
+  });
+
+  it('refuses the failed-source mutation unless foreign-key enforcement is active', () => {
+    const fixture = installFailedSourceFixture();
+    const before = recoveryState(fixture);
+    const raw = new DatabaseSync(fixture.dbPath);
+    try {
+      raw.exec('PRAGMA foreign_keys = OFF');
+      expect(() => closeFailedSourceOperatorCatchupRecoveryRaw(raw, failedSourceParams(fixture)))
+        .toThrow('foreign-key enforcement');
+    } finally {
+      raw.close();
+    }
+    expect(recoveryState(fixture)).toEqual(before);
+  });
+
+  it.each([
+    ['Failed source inbound does not exist in the recovery conversation', 'invalid_proof'],
+    ['Failed source inbound must be failed', 'invalid_proof'],
+    ['Failed source inbound must share the catch-up chat', 'invalid_proof'],
+    ['Failed source inbound must have exactly one armed, undelivered failed terminal record', 'invalid_proof'],
+    ['Failed source inbound has a turn recovery job', 'invalid_proof'],
+    ['Failed source inbound has an outbound op that is not an echoed registered failure notice', 'invalid_proof'],
+    ['Delivered-op acknowledgements must match the delivered failure-notice ops exactly', 'invalid_proof'],
+    ['Delivered-op acknowledgement must be a delivered-op fingerprint', 'invalid_args'],
+    ['Delivered-op acknowledgements require a fingerprint function', 'invalid_args'],
+    ['Delivered-op acknowledgements contain duplicates', 'invalid_args'],
+    ['--ack-delivered-op requires --failed-source', 'invalid_args'],
+    ['Failed source inbound already has a disposition link', 'invalid_proof'],
+    ['Failed-source recovery plan already exists', 'invalid_proof'],
+  ] as const)('classifies %j as %s', (message, expected) => {
+    expect(classifyError(new Error(message))).toBe(expected);
   });
 });
