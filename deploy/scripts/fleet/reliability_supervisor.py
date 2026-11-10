@@ -406,7 +406,7 @@ def publication_prefix_capacity(state: dict, now: float, *, reserved_bytes: int 
 
 
 def admit_state_transition(
-    previous: dict, proposed: dict, now: float, *, reserved_bytes: int = 0
+    previous: dict, proposed: dict, now: float, *, reserved_bytes: int = 0, paused: bool = False
 ) -> dict:
     """Admit an entire transition only when its future receipts also fit."""
     proposed["transition_capacity_exhausted"] = False
@@ -414,7 +414,7 @@ def admit_state_transition(
         _bounded_json_bytes(
             {**proposed, "completed_at": now}, PRIVATE_JSON_MAX_BYTES - 1 - reserved_bytes
         )
-        if publication_prefix_capacity(proposed, now, reserved_bytes=reserved_bytes) == len(proposed["pending_events"]):
+        if not paused and publication_prefix_capacity(proposed, now, reserved_bytes=reserved_bytes) == len(proposed["pending_events"]):
             return proposed
     except StateError as exc:
         if str(exc) not in {"publication_capacity_exhausted", "state_file_oversized"}:
@@ -517,7 +517,19 @@ def queue_event(state: dict, kind: str, reason: str, now: float) -> None:
 MAX_RESTART_DETAILS_BYTES = 256
 
 
+def delivery_failures(state):
+    resolution = state.get("delivery_resolution", [])
+    if isinstance(resolution, dict):
+        resolution = resolution.get("failures", [])
+    return resolution if isinstance(resolution, list) else []
+
+
 def _advance(config, state, now, probe, restart, emit, maintenance, path):
+    state = reconcile_service_delivery(config, state, now)
+    capacity_paused = any(
+        isinstance(failure, dict) and failure.get("code") == "state_capacity_exhausted"
+        for failure in delivery_failures(state)
+    )
     previous = deepcopy(state)
     observation = state.setdefault(
         "observation",
@@ -534,7 +546,7 @@ def _advance(config, state, now, probe, restart, emit, maintenance, path):
         )
     observation["probe_count"] += 1
     state["started_at"] = now
-    state = admit_state_transition(previous, state, now)
+    state = admit_state_transition(previous, state, now, paused=capacity_paused)
     # Legacy state may have no counters when capacity prevents adding them.
     observation = state.get("observation", observation)
     write_private(path, state)
@@ -581,6 +593,7 @@ def _advance(config, state, now, probe, restart, emit, maintenance, path):
         previous, state, now,
         # Include the property name, separators and longer success status.
         reserved_bytes=MAX_RESTART_DETAILS_BYTES + 64 if restart_requested else 0,
+        paused=capacity_paused,
     )
     if restart_requested and not state["transition_capacity_exhausted"]:
         write_private(path, state)
@@ -638,7 +651,7 @@ def observe(config: dict, *, now=None) -> dict:
         relay = config.get("bot_errors_state_dir")
         for alert in alerts:
             name = alert.get("file")
-            if relay and name and Path(name).name == name:
+            if relay and name and Path(name).name == name and alert.get("delivery") not in TERMINAL_DELIVERY:
                 matches = list((Path(relay) / "relayed").glob(name + ".*.relayed"))
                 if matches:
                     alert["delivery"] = "collector_acknowledged"
@@ -654,6 +667,7 @@ def observe(config: dict, *, now=None) -> dict:
             "incident_id": state.get("incident_id"),
             "pending_alerts": len(state["pending_events"]),
             "transition_capacity_exhausted": state.get("transition_capacity_exhausted", False),
+            "delivery_resolution": delivery_failures(state),
             "alerts": alerts[-10:],
             "restart_details": state.get("restart_details"),
             "observation": state.get("observation"),
@@ -735,9 +749,8 @@ def remote_observation(config):
     if result.returncode or len(result.stdout) > 1024 * 1024:
         raise StateError("remote_observation_failed")
     snapshot = json.loads(result.stdout)
-    snapshot["delivery_resolution"] = resolve_alert_delivery(
-        config, snapshot.get("alerts", [])
-    )
+    # Only the service writer can confirm and persist its delivery obligations.
+    snapshot["delivery_resolution"] = delivery_failures(snapshot)
     return snapshot
 
 
@@ -863,6 +876,98 @@ def resolve_alert_delivery(config, alerts):
         if failure:
             failures.append(failure)
     return failures
+
+
+def reconcile_service_delivery(config, state, now):
+    """Resolve one rotating batch without losing evidence that cannot fit."""
+    if not config.get("delivery_command"):
+        return state
+
+    def publication_capacity(candidate):
+        projection = {**candidate, "started_at": now, "completed_at": now,
+                      "transition_capacity_exhausted": False}
+        _bounded_json_bytes(projection, PRIVATE_JSON_MAX_BYTES - 1)
+        return publication_prefix_capacity(projection, now)
+
+    try:
+        prior_capacity = publication_capacity(state)
+    except StateError as exc:
+        if str(exc) not in {"publication_capacity_exhausted", "state_file_oversized"}:
+            raise
+        prior_capacity = 0
+    proposed = deepcopy(state)
+    eligible = [
+        a for a in proposed["alerts"]
+         if a.get("delivery") not in TERMINAL_DELIVERY
+         and isinstance(a.get("event_id"), str)
+         and re.fullmatch(r"[0-9a-f-]{36}", a["event_id"])
+    ]
+    if not eligible:
+        if "delivery_resolution" in proposed:
+            proposed["delivery_resolution"] = []
+        return proposed
+    positions = {a.get("event_id"): index for index, a in enumerate(proposed["alerts"])
+                 if isinstance(a.get("event_id"), str)}
+    cursor = positions.get(proposed.get("delivery_cursor"), -1)
+    end = positions.get(proposed.get("delivery_round_end"))
+    round_blocked = proposed.get("delivery_round_capacity_exhausted", False) is True
+    if end is None or cursor >= end:
+        cursor, end = -1, positions[eligible[-1]["event_id"]]
+        round_blocked = False
+    # Freeze the existing queue's end until this pass completes. Later arrivals
+    # cannot keep older unresolved alerts waiting behind an expanding tail.
+    batch = [a for a in eligible if cursor < positions[a["event_id"]] <= end][:DELIVERY_BATCH]
+    if not batch:
+        batch = eligible[:DELIVERY_BATCH]
+        end = positions[eligible[-1]["event_id"]]
+        round_blocked = False
+    updates = deepcopy(batch)
+    failure = _resolve_batch(config, updates)
+    finished = positions[batch[-1]["event_id"]] == end
+    proposed["delivery_cursor"] = None if finished else batch[-1]["event_id"]
+    proposed["delivery_round_end"] = None if finished else proposed["alerts"][end]["event_id"]
+    capacity_failure = {"code": "state_capacity_exhausted", "returncode": None}
+    was_blocked = capacity_failure in delivery_failures(state)
+    # A clean batch cannot clear a different batch's known storage failure.
+    round_blocked = round_blocked or (bool(failure) and was_blocked)
+    proposed["delivery_round_capacity_exhausted"] = True
+    # Reserve the failure record even while trying successful receipt updates.
+    proposed["delivery_resolution"] = ([failure] if failure else []) + [capacity_failure]
+    blocked = False
+    if not failure:
+        for original, update in zip(batch, updates):
+            if original == update:
+                continue
+            previous = dict(original)
+            original.update(update)
+            retained, _ = retain_alerts(proposed["alerts"], now)
+            try:
+                if publication_capacity({**proposed, "alerts": retained}) < prior_capacity:
+                    raise PublicationCapacityError("publication_capacity_exhausted")
+            except StateError as exc:
+                if str(exc) not in {"publication_capacity_exhausted", "state_file_oversized"}:
+                    raise
+                original.clear()
+                original.update(previous)
+                blocked = True
+            else:
+                proposed["alerts"] = retained
+    round_blocked = round_blocked or blocked
+    proposed["delivery_round_capacity_exhausted"] = round_blocked
+    capacity_blocked = round_blocked or (was_blocked and not finished)
+    proposed["delivery_resolution"] = ([failure] if failure else []) + (
+        [capacity_failure] if capacity_blocked else []
+    )
+    try:
+        if publication_capacity(proposed) < prior_capacity:
+            raise PublicationCapacityError("publication_capacity_exhausted")
+    except StateError as exc:
+        if str(exc) not in {"publication_capacity_exhausted", "state_file_oversized"}:
+            raise
+        # Even cursor/error metadata must not block existing publication work.
+        print(json.dumps({"event": "supervisor_degraded", "code": "delivery_capacity_exhausted"}), file=sys.stderr)
+        return state
+    return proposed
 
 
 def retain_alerts(alerts, now, *, drop_aged=True):

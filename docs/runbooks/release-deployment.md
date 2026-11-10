@@ -972,6 +972,24 @@ All four monitoring paths retain undelivered alerts regardless of age or count;
 an unsuccessful lookup or a missing receipt does not end the delivery obligation.
 Only terminal history is reduced to the newest 128 records. Preserving these
 records does not enlarge the state limit.
+The service supervisor reconciles delivery before its liveness probe and saves
+the result under the existing state lock. Each cycle queries at most 128 event
+IDs through one command with a 15-second timeout and a 65,535-byte output limit.
+The saved cursor and fixed end of the current pass ensure later arrivals cannot
+extend that pass indefinitely. A failed or malformed batch advances the cursor
+without confirming any of its alerts; those alerts are retried on a later pass.
+Validated receipts are saved unchanged only when they fit without reducing the
+publication capacity already available to pending events. A receipt that cannot
+fit stays unresolved and records `state_capacity_exhausted`; new transitions stay
+paused until a complete clean pass. Other batches cannot clear that condition.
+If even cursor and failure metadata would consume reserved publication space,
+the command reports `delivery_capacity_exhausted` on stderr and retains the prior
+reconciliation state, allowing existing publication work to continue. Confirmed
+delivery is never downgraded to collector acknowledgement by observation readers.
+Remote readers use the service's persisted delivery status and perform no separate
+receipt lookup for those alerts. An older service without durable reconciliation
+can continue reporting alerts as unresolved; qualification and rollout must include
+the service writer before relying on terminal delivery observations.
 All four paths admit an observation cycle's incident changes only if the resulting
 state and bounded publication receipts fit. Otherwise they preserve the prior
 incident identifiers and pending queue, set `transition_capacity_exhausted`, and
@@ -995,8 +1013,8 @@ If no pending event can fit, no emitter is called. The command reports
 `publication_capacity_exhausted` as degraded and exits unsuccessfully.
 This reservation prevents capacity-caused failure after publication; it does not
 prove crash-safe publication or guarantee progress when legacy state leaves no
-room for a receipt. Durable delivery reconciliation and a bounded total lookup
-cycle still require qualification. Existing receipt
+room for a receipt. Aggregate delivery-lookup bounds for the observer, watchdog
+and sentinel still require qualification. Existing receipt
 evidence is not truncated to create space. Custom emitters still require
 bounded-output and retry-safe-publication qualification before activation.
 The sentinel stores its local alert records once, in the state's `alerts` list.
