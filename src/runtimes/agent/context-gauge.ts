@@ -25,13 +25,25 @@
  * - The gauge belongs to one session generation: a different generation or a
  *   new provider session id starts unknown; cleanup/reset drop the scope; a
  *   JID-alias rekey moves it.
+ * - Message ids come from the provider, so retention is bounded: an id longer
+ *   than MAX_REQUEST_ID_LENGTH, or a distinct id past MAX_REQUEST_IDS_PER_TURN
+ *   in one turn, SATURATES the turn. A saturated turn drops its ids, reads
+ *   unknown, and ignores every request_usage (late repeats included, which it
+ *   can no longer tell from new requests) until its lifecycle boundary: the
+ *   turn's result, compact_boundary, a new generation or session id, or
+ *   delete/clear. The result closes it unknown.
  */
+export const MAX_REQUEST_ID_LENGTH = 256;
+export const MAX_REQUEST_IDS_PER_TURN = 1024;
+
 interface ScopeGauge {
   generation: string;
   sessionId: string | undefined;
   sealed: boolean;
   /** True once the current turn has seen a request_usage; false after its result. */
   turnOpen: boolean;
+  /** The current turn exceeded an id bound; unknown until the turn's boundary. */
+  saturated: boolean;
   /** Context per distinct message id within the current turn. */
   readonly seen: Map<string, number | undefined>;
   /** Id of the last distinct request, or undefined for an id-less request. */
@@ -50,6 +62,7 @@ export class ContextGaugeStore {
       sessionId: undefined,
       sealed: false,
       turnOpen: false,
+      saturated: false,
       seen: new Map(),
       currentId: undefined,
       current: undefined,
@@ -85,12 +98,23 @@ export class ContextGaugeStore {
     contextTokens: number | undefined,
   ): void {
     const gauge = this.scope(scopeKey, generation);
-    if (gauge.sealed) return;
+    if (gauge.sealed || gauge.saturated) return;
     if (!gauge.turnOpen) {
       gauge.turnOpen = true;
       gauge.seen.clear();
       gauge.currentId = undefined;
       gauge.current = undefined;
+    }
+    if (
+      messageId !== undefined
+      && (messageId.length > MAX_REQUEST_ID_LENGTH
+        || (!gauge.seen.has(messageId) && gauge.seen.size >= MAX_REQUEST_IDS_PER_TURN))
+    ) {
+      gauge.saturated = true;
+      gauge.seen.clear();
+      gauge.currentId = undefined;
+      gauge.current = undefined;
+      return;
     }
     if (messageId !== undefined && gauge.seen.has(messageId)) {
       gauge.seen.set(messageId, contextTokens);
@@ -104,11 +128,12 @@ export class ContextGaugeStore {
 
   observeResult(scopeKey: string, generation: string): void {
     const gauge = this.scope(scopeKey, generation);
-    if (gauge.sealed || !gauge.turnOpen) {
+    if (gauge.sealed || gauge.saturated || !gauge.turnOpen) {
       gauge.current = undefined;
       gauge.currentId = undefined;
     }
     gauge.sealed = false;
+    gauge.saturated = false;
     gauge.turnOpen = false;
     gauge.seen.clear();
   }
@@ -116,6 +141,7 @@ export class ContextGaugeStore {
   observeCompactBoundary(scopeKey: string, generation: string): void {
     const gauge = this.scope(scopeKey, generation);
     gauge.sealed = true;
+    gauge.saturated = false;
     gauge.turnOpen = false;
     gauge.seen.clear();
     gauge.currentId = undefined;

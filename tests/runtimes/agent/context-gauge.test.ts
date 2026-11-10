@@ -1,6 +1,10 @@
 // #3717c: ContextGaugeStore contract (last DISTINCT request, replace-not-add, unknown, seal, generation).
 import { describe, expect, it } from 'vitest';
-import { ContextGaugeStore } from '../../../src/runtimes/agent/context-gauge.ts';
+import {
+  ContextGaugeStore,
+  MAX_REQUEST_ID_LENGTH,
+  MAX_REQUEST_IDS_PER_TURN,
+} from '../../../src/runtimes/agent/context-gauge.ts';
 
 const S = 'chat@s.whatsapp.net';
 const G = 'row:1';
@@ -165,5 +169,88 @@ describe('ContextGaugeStore', () => {
     store.observeRequest('other', G, 'A', 7);
     expect(store.read(S, G)).toBe(100_000);
     expect(store.read('other', G)).toBe(7);
+  });
+});
+
+describe('ContextGaugeStore id bounds (provider-controlled ids)', () => {
+  /** One turn of `count` distinct ids id-0..id-(count-1); id-i has context i + 1. */
+  const fillTurn = (store: ContextGaugeStore, count: number): void => {
+    for (let i = 0; i < count; i += 1) store.observeRequest(S, G, `id-${i}`, i + 1);
+  };
+
+  it('accepts an id of exactly the length bound', () => {
+    const store = new ContextGaugeStore();
+    store.observeRequest(S, G, 'x'.repeat(MAX_REQUEST_ID_LENGTH), 70_000);
+    expect(store.read(S, G)).toBe(70_000);
+  });
+
+  it('an oversized id saturates the turn: unknown, later requests ignored, the result closes it unknown', () => {
+    const store = new ContextGaugeStore();
+    store.observeRequest(S, G, 'A', 100_000);
+    store.observeRequest(S, G, 'x'.repeat(MAX_REQUEST_ID_LENGTH + 1), 120_000);
+    expect(store.read(S, G)).toBeUndefined();
+    store.observeRequest(S, G, 'B', 130_000);
+    store.observeRequest(S, G, undefined, 140_000);
+    expect(store.read(S, G)).toBeUndefined();
+    store.observeResult(S, G);
+    expect(store.read(S, G)).toBeUndefined();
+    store.observeRequest(S, G, 'C', 50_000); // next turn starts known
+    expect(store.read(S, G)).toBe(50_000);
+  });
+
+  it('holds the per-turn id bound; a late repeat at the bound replaces without saturating', () => {
+    const store = new ContextGaugeStore();
+    fillTurn(store, MAX_REQUEST_IDS_PER_TURN);
+    expect(store.read(S, G)).toBe(MAX_REQUEST_IDS_PER_TURN);
+    store.observeRequest(S, G, 'id-0', 999); // late repeat of an earlier id: not current, not new
+    expect(store.read(S, G)).toBe(MAX_REQUEST_IDS_PER_TURN);
+    store.observeRequest(S, G, `id-${MAX_REQUEST_IDS_PER_TURN - 1}`, 777); // repeat of the current id
+    expect(store.read(S, G)).toBe(777);
+  });
+
+  it('one distinct id past the bound saturates; late duplicates stay unknown until the result', () => {
+    const store = new ContextGaugeStore();
+    fillTurn(store, MAX_REQUEST_IDS_PER_TURN + 1);
+    expect(store.read(S, G)).toBeUndefined();
+    store.observeRequest(S, G, 'id-0', 1); // late duplicate of a dropped id
+    store.observeRequest(S, G, `id-${MAX_REQUEST_IDS_PER_TURN}`, 2); // duplicate of the saturating id
+    expect(store.read(S, G)).toBeUndefined();
+    store.observeResult(S, G);
+    expect(store.read(S, G)).toBeUndefined();
+    store.observeRequest(S, G, 'id-0', 60_000); // a new turn may reuse an id
+    expect(store.read(S, G)).toBe(60_000);
+  });
+
+  it('a first init mid-turn keeps the saturation; a new session id resets it', () => {
+    const store = new ContextGaugeStore();
+    store.observeRequest(S, G, 'x'.repeat(MAX_REQUEST_ID_LENGTH + 1), 1);
+    store.observeInit(S, G, 'sess-1'); // first bind: same open turn
+    store.observeRequest(S, G, 'A', 10_000);
+    expect(store.read(S, G)).toBeUndefined();
+    store.observeInit(S, G, 'sess-2'); // new provider session: fresh gauge
+    store.observeRequest(S, G, 'A', 20_000);
+    expect(store.read(S, G)).toBe(20_000);
+  });
+
+  it('compact_boundary, a new generation and delete each end a saturation', () => {
+    const store = new ContextGaugeStore();
+    const saturate = (generation: string): void => {
+      store.observeRequest(S, generation, 'x'.repeat(MAX_REQUEST_ID_LENGTH + 1), 1);
+    };
+    saturate(G);
+    store.observeCompactBoundary(S, G);
+    store.observeRequest(S, G, 'summary', 30_000); // sealed: ignored
+    store.observeResult(S, G);
+    store.observeRequest(S, G, 'next', 31_000);
+    expect(store.read(S, G)).toBe(31_000);
+
+    saturate(G);
+    store.observeRequest(S, 'row:2', 'B', 5_000);
+    expect(store.read(S, 'row:2')).toBe(5_000);
+
+    saturate('row:2');
+    store.delete(S);
+    store.observeRequest(S, 'row:2', 'C', 6_000);
+    expect(store.read(S, 'row:2')).toBe(6_000);
   });
 });
