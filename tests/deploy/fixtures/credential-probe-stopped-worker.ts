@@ -100,3 +100,27 @@ export function expectGuardChainEndsStoppedWorker(result: StoppedWorkerProbeReco
   const guard = returned?.[1];
   expect(result.sleep_ledger.filter((entry: string) => entry.startsWith(`${guard} `)), evidence).toEqual([`${guard} 2`, `${guard} 2`]);
 }
+
+// A stalled setup child records its events and the driver's observation times only
+// on request (issue #3554). Unset, these modes run the untraced path, which is the
+// same-host control for a traced run.
+const SETUP_STALL_TRACE_MODES: ReadonlySet<string> = new Set(['setup-mktemp-term-ignoring', 'setup-mkfifo-term-ignoring', 'setup-ps-term-ignoring']);
+
+export function setupStallTraceOn(mode: string): boolean {
+  return SETUP_STALL_TRACE_MODES.has(mode) && process.env.WHATSOUP_SETUP_STALL_EVENT_TRACE === '1';
+}
+
+// First lines of the stalled setup shim; a traced run logs the child's entry.
+export function setupShimHead(trace: boolean): string[] {
+  return ['#!/bin/bash', ...(trace ? ['builtin printf "H_SETUP_ENTER pid=%s\\n" "$$" >> "$EVENT_ORDER_LOG"'] : [])];
+}
+
+// A traced run logs the probe's entry before its first command.
+export function probeTraceHead(trace: boolean): string[] {
+  return trace ? ['builtin printf "H_PROBE_ENTER\\n" >> "$EVENT_ORDER_LOG"'] : [];
+}
+
+// One stderr line per requested trace: "<LABEL>_EVENT_TRACE <driver record JSON>".
+export function writeEventTraces(record: unknown, traces: Record<string, boolean>): void {
+  for (const [label, on] of Object.entries(traces)) if (on) process.stderr.write(`${label}_EVENT_TRACE ${JSON.stringify(record)}\n`);
+}

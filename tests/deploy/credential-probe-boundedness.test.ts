@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { BUDGET_HOLD_MODES, TICKER_HOLD, expectGuardChainEndsStoppedWorker, holdBudgetForDriver, installSleepLedgerShim } from './fixtures/credential-probe-stopped-worker.ts';
+import { BUDGET_HOLD_MODES, TICKER_HOLD, expectGuardChainEndsStoppedWorker, holdBudgetForDriver, installSleepLedgerShim, probeTraceHead, setupShimHead, setupStallTraceOn, writeEventTraces } from './fixtures/credential-probe-stopped-worker.ts';
 
 // Incident 2026-07-24 (mini11 / ph-bot, ~45h outage): an unbounded
 // `security find-generic-password` blocked the launcher forever because macOS
@@ -431,10 +431,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
   const stoppedWorkerTrace = mode === 'forged-completion-worker-stopped' && process.env.WHATSOUP_STOPPED_WORKER_EVENT_TRACE === '1';
   // near-deadline always records its events: its expected result follows the claim order.
   // A stopped worker always records them too: its bound is the guard's timer chain.
-  // A stalled setup child records its events and the driver's observation times only
-  // on request (issue #3554). Unset, these modes run the untraced path, which is the
-  // same-host control for a traced run.
-  const setupStallTrace = (mode === 'setup-mktemp-term-ignoring' || mode === 'setup-mkfifo-term-ignoring' || mode === 'setup-ps-term-ignoring') && process.env.WHATSOUP_SETUP_STALL_EVENT_TRACE === '1';
+  const setupStallTrace = setupStallTraceOn(mode);
   const eventTrace = mode.startsWith('event-order-') || mode === 'near-deadline' || mode === 'worker-stopped-after-authorization' || mode === 'forged-completion-worker-stopped' || outcomeTrace || setupStallTrace;
   const eventOrderSource = eventTrace ? observeLifecycleEventOrder(fs.readFileSync(BOUNDED_LIB, 'utf8')) : undefined;
   let outcomeSource: string | undefined;
@@ -555,8 +552,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
   if (stalledSetupBinary) {
     fs.unlinkSync(path.join(shim, stalledSetupBinary));
     fs.writeFileSync(path.join(shim, stalledSetupBinary), [
-      '#!/bin/bash',
-      ...(setupStallTrace ? ['builtin printf "H_SETUP_ENTER pid=%s\\n" "$$" >> "$EVENT_ORDER_LOG"'] : []),
+      ...setupShimHead(setupStallTrace),
       'printf "%s\\n" "$$" > "$SETUP_PID"',
       'trap "" TERM HUP USR1',
       mode === 'setup-timer-sleep-failure' ? '/bin/sleep 30 &' : 'sleep 30 &',
@@ -589,8 +585,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
   fs.writeFileSync(path.join(root, 'lifecycle.py'), LIFECYCLE_DRIVER);
   fs.writeFileSync(path.join(root, 'probe.sh'), [
     'IFS= read -r go',
-    ...(setupStallTrace ? ['builtin printf "H_PROBE_ENTER\\n" >> "$EVENT_ORDER_LOG"'] : []),
-    ...(BUDGET_HOLD_MODES.has(mode) ? [TICKER_HOLD] : []),
+    ...probeTraceHead(setupStallTrace), ...(BUDGET_HOLD_MODES.has(mode) ? [TICKER_HOLD] : []),
     'cleanup_mode="$4"',
     'case "$4" in control-*|cleanup-residual)',
     '  kill() {',
@@ -1003,9 +998,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     if (result.error) throw new Error(`${result.error.message}\n${result.stdout}\n${result.stderr}`);
     expect(result.status, result.stderr).toBe(0);
     const record = JSON.parse(result.stdout);
-    if (outcomeTrace) process.stderr.write('OUTCOME_EVENT_TRACE ' + JSON.stringify(record) + '\n');
-    if (stoppedWorkerTrace) process.stderr.write('STOPPED_WORKER_EVENT_TRACE ' + JSON.stringify(record) + '\n');
-    if (setupStallTrace) process.stderr.write('SETUP_STALL_EVENT_TRACE ' + JSON.stringify(record) + '\n');
+    writeEventTraces(record, { OUTCOME: outcomeTrace, STOPPED_WORKER: stoppedWorkerTrace, SETUP_STALL: setupStallTrace });
     if (nearDeadlineTrace) {
       const events = Array.isArray(record.events)
         ? record.events.filter((event: unknown) => typeof event === 'string' && /^(R_FIFO |O_RESULT_CLAIM |D_OUTER_ENTER|O_OUTER_CLAIM |A )/.test(event))
