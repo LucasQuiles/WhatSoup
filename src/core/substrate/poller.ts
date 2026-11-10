@@ -38,12 +38,17 @@
 // rather than crashing.
 
 import type { DatabaseSync, SQLInputValue, StatementSync } from 'node:sqlite';
-import { basename, resolve, sep } from 'node:path';
+import { basename, isAbsolute, resolve, sep } from 'node:path';
 import { realpathSync, statSync, createReadStream } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { systemClock } from '../../lib/clock.ts';
+import { SIGNAL } from '../../lib/signals.ts';
+import { isNonEmptyString } from '../../lib/type-guards.ts';
 import {
-  dueTriggers, validateTriggerSpec, isSafeSqliteSql,
+  BOUNDED_TRIGGER_COLUMNS, boundedSubstrateColumn, dueTriggers, validateTriggerSpec, isSafeSqliteSql, assertTriggerRootBudgets, assertTriggerTextBudget,
+  TriggerBudgetError, TRIGGER_BUDGETS,
   countPastDueTriggers, DEFAULT_TRIGGER_PAST_DUE_GRACE_SEC,
 } from './triggers.ts';
 import { TERMINAL, countOverdueProposals } from './beads.ts';
@@ -67,21 +72,17 @@ const log = createChildLogger('substrate.trigger-poller');
 const DEFAULT_INTERVAL_MS = 30_000;
 const DEFAULT_BATCH_SIZE = 50;
 /**
- * Hard cap on rows a single poll.sqlite execution may materialize (QR-026).
- * `query_only` bounds writes but not CPU/heap; a read-only recursive CTE passes
- * `isSafeSqliteSql` and would otherwise let `.all()` materialize unboundedly,
- * OOM-crashing / freezing the synchronous DatabaseSync (whole-process DoS). We
- * iterate and fail past this cap. NOTE: node:sqlite exposes no interrupt/step
- * limit and DatabaseSync blocks the event loop, so a CPU-spin yielding FEW rows
- * is NOT bounded by this — full containment needs out-of-process execution.
+ * Hard cap on rows a single poll.sqlite execution may count (QR-026). The
+ * isolated child limits the admitted query to this many rows plus one, then
+ * returns one bounded scalar response without materializing caller row values.
  */
-export const MAX_SQLITE_ROWS = 10_000;
+export const MAX_SQLITE_ROWS = TRIGGER_BUDGETS.maxSqliteRows;
 /** Cooldown applied when a kind is not yet implemented — avoids tight loops. */
 const NOT_IMPLEMENTED_COOLDOWN_SEC = 3_600;
 /** Cooldown applied after a transient failure so the poller does not spin. */
 const FAILED_RETRY_COOLDOWN_SEC = 60;
 /** Auto-pause a trigger after this many consecutive failed runs. */
-const MAX_CONSECUTIVE_FAILURES = 5;
+const MAX_CONSECUTIVE_FAILURES = TRIGGER_BUDGETS.maxConsecutiveFailures;
 /**
  * #1745 — auto-RETIRE a trigger after this many consecutive notification sends
  * rejected with a PERMANENT per-target authz error. Deliberately smaller than
@@ -89,7 +90,25 @@ const MAX_CONSECUTIVE_FAILURES = 5;
  * group) never self-heals by retrying the SAME chat, so every further fire is
  * guaranteed-undeliverable and pure waste — the days-long incident loop.
  */
-const MAX_CONSECUTIVE_FORBIDDEN_REJECTS = 3;
+const MAX_CONSECUTIVE_FORBIDDEN_REJECTS = TRIGGER_BUDGETS.maxConsecutiveForbiddenRejects;
+
+/**
+ * Resource ceilings and notification interval validity have different bounds;
+ * each option supplies its own permitted range.
+ */
+function boundedPollerOption(
+  value: number | undefined,
+  fallback: number,
+  ceiling: number,
+  name: string,
+  minimum = 1,
+): number {
+  const resolved = value ?? fallback;
+  if (!Number.isInteger(resolved) || resolved < minimum || resolved > ceiling) {
+    throw new TriggerBudgetError(`poller.${name}`);
+  }
+  return resolved;
+}
 
 /**
  * #1745 — classify a notification-send rejection as a PERMANENT per-target
@@ -223,7 +242,10 @@ export interface AgentJobContext {
 /** Result of an agent-job dispatch attempt. `dispatched:false` fails CLOSED. */
 export interface AgentJobDispatchResult {
   dispatched: boolean;
-  /** Optional detail (queue depth, rejection reason) recorded on the run. */
+  /**
+   * Opaque dispatcher-local detail. The poller never logs, notifies, or
+   * persists it because a dispatcher controls the string's size and content.
+   */
   detail?: string;
 }
 
@@ -251,11 +273,12 @@ export interface TriggerPollerOptions {
    * process-scoped random token; tests inject a fixed value.
    */
   occurrenceLeaseOwner?: string;
-  /** Max triggers fetched per tick. Default 50. */
+  /** Max triggers fetched per tick. 0 intentionally drains only expiry work; default 50. */
   batchSize?: number;
   /**
    * #2566 slice 2 — max concurrently executing non-side-effecting probe
-   * triggers (poll.sqlite/pinecone/file/url) per tick. Side-effecting kinds
+   * triggers (poll.sqlite/pinecone/file/url) across ticks. Timed-out executors
+   * and pending notifications retain their slots until settled. Side-effecting kinds
    * (poll.shell, schedule.*, event.message) always run strictly serially.
    * Default 4.
    */
@@ -360,6 +383,12 @@ export interface TriggerPollerOptions {
    * stale next_fire_at is reported as recurring-overdue. Default 900s.
    */
   recurringOverdueGraceSeconds?: number;
+  /**
+   * Test seam for the isolated SQLite executor. Production always uses the
+   * default child-process implementation below; this is never a same-thread
+   * fallback.
+   */
+  sqliteExecutor?: IsolatedSqliteExecutor;
 }
 
 interface SqliteSpec {
@@ -407,6 +436,9 @@ const TRIGGER_REASONS = [
   'event_message_not_polled',
   'not_implemented',
   'unsafe_sql',
+  'resource_exhausted',
+  'sqlite_worker_unavailable',
+  'sql_error',
   'index_not_allowed',
   'pinecone_unavailable',
   'path_not_allowed',
@@ -423,6 +455,164 @@ interface ExecuteOutcome {
   outputJson: Record<string, unknown>;
   errorKind?: string;
   errorMessage?: string;
+}
+
+export interface IsolatedSqliteRequest {
+  databasePath: string;
+  sql: string;
+  binds: Array<null | number | string>;
+  maxRows: number;
+  timeoutMs: number;
+}
+
+export type IsolatedSqliteResult =
+  | { kind: 'ok'; rowCount: number }
+  | { kind: 'sql_error' }
+  | { kind: 'resource_exhausted'; limit: 'sql' | 'binds' | 'rows' | 'output' | 'wall_time' | 'stdin' | 'stdout' | 'stderr' }
+  | { kind: 'unavailable'; reason: 'location' | 'spawn' | 'protocol' | 'exit' };
+
+export type IsolatedSqliteExecutor = (request: IsolatedSqliteRequest) => Promise<IsolatedSqliteResult>;
+
+const SQLITE_WORKER_PATH = fileURLToPath(new URL('./sqlite-trigger-worker.ts', import.meta.url));
+
+function sqliteRequestResourceLimit(request: IsolatedSqliteRequest): 'sql' | 'binds' | 'rows' | 'wall_time' | null {
+  if (Buffer.byteLength(request.sql, 'utf8') > TRIGGER_BUDGETS.maxSqlBytes) return 'sql';
+  if (!Number.isInteger(request.maxRows) || request.maxRows <= 0 || request.maxRows > TRIGGER_BUDGETS.maxSqliteRows) return 'rows';
+  if (!Number.isInteger(request.timeoutMs) || request.timeoutMs <= 0 || request.timeoutMs > TRIGGER_BUDGETS.maxSqliteWallTimeMs) return 'wall_time';
+  if (request.binds.length > TRIGGER_BUDGETS.maxSqliteBinds) return 'binds';
+  let bindBytes = 0;
+  for (const bind of request.binds) {
+    const bytes = Buffer.byteLength(JSON.stringify(bind), 'utf8');
+    if (bytes > TRIGGER_BUDGETS.maxSqliteBindBytes) return 'binds';
+    bindBytes += bytes;
+    if (bindBytes > TRIGGER_BUDGETS.maxSqliteBindPayloadBytes) return 'binds';
+  }
+  return null;
+}
+
+/**
+ * Executes a validated read-only query in a child process and resolves only
+ * after that child exits. No SQL, bind, or response bytes are returned on any
+ * failure path. This gives the timeout a real process boundary to terminate;
+ * a Promise race around DatabaseSync on this process would not.
+ */
+export function runIsolatedSqlite(request: IsolatedSqliteRequest): Promise<IsolatedSqliteResult> {
+  if (!isAbsolute(request.databasePath)) {
+    return Promise.resolve({ kind: 'unavailable', reason: 'location' });
+  }
+  if (request.binds.some((bind) => bind !== null && typeof bind !== 'string' && (typeof bind !== 'number' || !Number.isFinite(bind)))) {
+    return Promise.resolve({ kind: 'unavailable', reason: 'protocol' });
+  }
+  const resourceLimit = sqliteRequestResourceLimit(request);
+  if (resourceLimit) return Promise.resolve({ kind: 'resource_exhausted', limit: resourceLimit });
+  let payload: string;
+  try {
+    payload = JSON.stringify({
+      databasePath: request.databasePath,
+      sql: request.sql,
+      binds: request.binds,
+      maxRows: request.maxRows,
+      maxOutputBytes: TRIGGER_BUDGETS.maxSqliteOutputBytes,
+    });
+  } catch {
+    return Promise.resolve({ kind: 'unavailable', reason: 'protocol' });
+  }
+  if (Buffer.byteLength(payload, 'utf8') > TRIGGER_BUDGETS.maxWorkerStdinBytes) {
+    return Promise.resolve({ kind: 'resource_exhausted', limit: 'stdin' });
+  }
+
+  return new Promise((resolveResult) => {
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn(process.execPath, [
+        '--disable-warning=ExperimentalWarning',
+        '--experimental-strip-types',
+        SQLITE_WORKER_PATH,
+      ], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        // The worker receives no application credentials or provider settings.
+        env: {},
+      });
+    } catch {
+      resolveResult({ kind: 'unavailable', reason: 'spawn' });
+      return;
+    }
+
+    let settled = false;
+    const stdoutChunks: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let terminal: IsolatedSqliteResult | null = null;
+    let deadline: ReturnType<typeof setTimeout> | null = null;
+    const finish = (result: IsolatedSqliteResult): void => {
+      if (settled) return;
+      settled = true;
+      if (deadline !== null) clearTimeout(deadline);
+      resolveResult(result);
+    };
+    const terminate = (result: IsolatedSqliteResult): void => {
+      if (terminal) return;
+      terminal = result;
+      try { child.kill(SIGNAL.KILL); } catch { /* intentional: close or error below settles the fixed terminal result */ }
+    };
+    deadline = setTimeout(() => {
+      terminate({ kind: 'resource_exhausted', limit: 'wall_time' });
+    }, request.timeoutMs);
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > TRIGGER_BUDGETS.maxWorkerStdoutBytes) {
+        terminate({ kind: 'resource_exhausted', limit: 'stdout' });
+        return;
+      }
+      stdoutChunks.push(chunk);
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderrBytes += chunk.length;
+      if (stderrBytes > TRIGGER_BUDGETS.maxWorkerStderrBytes) {
+        terminate({ kind: 'resource_exhausted', limit: 'stderr' });
+      }
+    });
+    child.on('error', () => {
+      // A child error does not prove the process is gone. Keep the terminal
+      // disposition pending until close so late output cannot resolve the
+      // durable occurrence after an error path.
+      terminate(terminal ?? { kind: 'unavailable', reason: 'spawn' });
+    });
+    child.on('close', (code) => {
+      if (terminal) {
+        finish(terminal);
+        return;
+      }
+      if (code !== 0) {
+        finish({ kind: 'unavailable', reason: 'exit' });
+        return;
+      }
+      try {
+        const parsed = JSON.parse(Buffer.concat(stdoutChunks).toString('utf8')) as { status?: unknown; rowCount?: unknown; limit?: unknown };
+        const rowCount = parsed.rowCount;
+        if (parsed.status === 'ok' && typeof rowCount === 'number' && Number.isInteger(rowCount) && rowCount >= 0) {
+          finish({ kind: 'ok', rowCount });
+          return;
+        }
+        if (parsed.status === 'resource_exhausted' && (parsed.limit === 'rows' || parsed.limit === 'output')) {
+          finish({ kind: 'resource_exhausted', limit: parsed.limit });
+          return;
+        }
+        if (parsed.status === 'sql_error') {
+          finish({ kind: 'sql_error' });
+          return;
+        }
+        if (parsed.status === 'unavailable') {
+          finish({ kind: 'unavailable', reason: 'location' });
+          return;
+        }
+      } catch { /* intentional: malformed worker output maps to the content-free protocol result below */ }
+      finish({ kind: 'unavailable', reason: 'protocol' });
+    });
+    child.stdin.on('error', () => terminate({ kind: 'unavailable', reason: 'spawn' }));
+    child.stdin.end(payload);
+  });
 }
 
 interface PostCommitActions {
@@ -523,21 +713,45 @@ export class TriggerPoller {
   private readonly occurrenceLeaseTtlSeconds: number;
   private readonly occurrenceLeaseOwner: string;
   private readonly maxConcurrentExecutors: number;
+  private readonly activeProbes = new Map<number, { processing: boolean; executing: boolean }>();
+  private serialBusy = false;
   private readonly tickBudgetSeconds: number;
   private readonly executionTimeoutSeconds: number;
+  private readonly sqliteExecutor: IsolatedSqliteExecutor;
   private readonly livenessObserver: TriggerLivenessObserver;
 
   constructor(db: DatabaseSync, messenger: Messenger, opts: TriggerPollerOptions = {}) {
     this.db = db;
     this.messenger = messenger;
     this.intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
-    this.batchSize = opts.batchSize ?? DEFAULT_BATCH_SIZE;
+    this.batchSize = boundedPollerOption(
+      opts.batchSize,
+      DEFAULT_BATCH_SIZE,
+      TRIGGER_BUDGETS.maxBatchSize,
+      'batch_size',
+      0,
+    );
     this.nowFn = opts.now ?? systemClock.nowUnixSec;
     this.setTimeoutImpl = opts.setTimeoutImpl ?? setTimeout;
     this.clearTimeoutImpl = opts.clearTimeoutImpl ?? clearTimeout;
-    this.maxConsecutiveFailures = opts.maxConsecutiveFailures ?? MAX_CONSECUTIVE_FAILURES;
-    this.maxConsecutiveForbiddenRejects = opts.maxConsecutiveForbiddenRejects ?? MAX_CONSECUTIVE_FORBIDDEN_REJECTS;
-    this.notificationThrottleMinIntervalSec = opts.notificationThrottleMinIntervalSec ?? NOTIFICATION_THROTTLE_MIN_INTERVAL_SEC;
+    this.maxConsecutiveFailures = boundedPollerOption(
+      opts.maxConsecutiveFailures,
+      MAX_CONSECUTIVE_FAILURES,
+      TRIGGER_BUDGETS.maxConsecutiveFailures,
+      'max_consecutive_failures',
+    );
+    this.maxConsecutiveForbiddenRejects = boundedPollerOption(
+      opts.maxConsecutiveForbiddenRejects,
+      MAX_CONSECUTIVE_FORBIDDEN_REJECTS,
+      TRIGGER_BUDGETS.maxConsecutiveForbiddenRejects,
+      'max_consecutive_forbidden_rejects',
+    );
+    this.notificationThrottleMinIntervalSec = boundedPollerOption(
+      opts.notificationThrottleMinIntervalSec,
+      NOTIFICATION_THROTTLE_MIN_INTERVAL_SEC,
+      Number.MAX_SAFE_INTEGER,
+      'notification_throttle_min_interval_sec',
+    );
     this.pineconeAllowedIndexes = new Set(opts.pineconeAllowedIndexes ?? []);
     this.pineconeSearch = opts.pineconeSearch ?? null;
     // Canonicalise allowed roots once at construction. We realpath() each root
@@ -555,7 +769,7 @@ export class TriggerPoller {
     // #2292 L15 — prepare constant SQL once here rather than per-call/per-tick.
     // SQL text below is byte-identical to what each call site used to inline.
     this.stmtOverdueTerminalTriggers = this.db.prepare(
-      `SELECT * FROM bead_triggers
+      `SELECT ${BOUNDED_TRIGGER_COLUMNS} FROM bead_triggers
        WHERE status = 'active' AND terminal_at IS NOT NULL AND terminal_at <= ?
        LIMIT ?`,
     );
@@ -568,7 +782,10 @@ export class TriggerPoller {
        LIMIT 1`,
     );
     this.stmtLookupBead = this.db.prepare(
-      `SELECT kind, title, body FROM beads WHERE id = ?`,
+      `SELECT kind,
+         ${boundedSubstrateColumn('title', TRIGGER_BUDGETS.maxTitleBytes)},
+         ${boundedSubstrateColumn('body', TRIGGER_BUDGETS.maxPromptBytes)}
+       FROM beads WHERE id = ?`,
     );
     this.stmtLastRowCountRun = this.db.prepare(
       `SELECT output_json FROM trigger_runs
@@ -667,13 +884,13 @@ export class TriggerPoller {
     this.stmtMarkExpiredTrigger = this.db.prepare(
       `UPDATE bead_triggers
        SET status = 'expired', next_fire_at = NULL, updated_at = ?
-       WHERE id = ?`,
+       WHERE id = ? AND status = 'active'`,
     );
     this.stmtInsertExpiryRun = this.db.prepare(
       `INSERT INTO trigger_runs (
          trigger_id, bead_id, status, started_at, finished_at, duration_ms,
-         output_summary, output_json, attempt, metadata_json
-       ) VALUES (?, ?, 'terminal_fired', ?, ?, 0, ?, ?, 1, '{}')`,
+         output_summary, output_json, error_kind, error_message, attempt, metadata_json
+       ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 1, '{}')`,
     );
     this.stmtLookupBeadStatus = this.db.prepare(
       `SELECT status FROM beads WHERE id = ?`,
@@ -690,9 +907,25 @@ export class TriggerPoller {
     this.occurrenceLeaseTtlSeconds = opts.occurrenceLeaseTtlSeconds ?? 900;
     this.occurrenceLeaseOwner = opts.occurrenceLeaseOwner
       ?? `pid:${process.pid}:${randomBytes(4).toString('hex')}`;
-    this.maxConcurrentExecutors = opts.maxConcurrentExecutors ?? 4;
-    this.tickBudgetSeconds = opts.tickBudgetSeconds ?? 600;
-    this.executionTimeoutSeconds = opts.executionTimeoutSeconds ?? 300;
+    this.maxConcurrentExecutors = boundedPollerOption(
+      opts.maxConcurrentExecutors,
+      TRIGGER_BUDGETS.maxConcurrentPerTick,
+      TRIGGER_BUDGETS.maxConcurrentPerTick,
+      'max_concurrent_executors',
+    );
+    this.tickBudgetSeconds = boundedPollerOption(
+      opts.tickBudgetSeconds,
+      TRIGGER_BUDGETS.maxTickBudgetSeconds,
+      TRIGGER_BUDGETS.maxTickBudgetSeconds,
+      'tick_budget_seconds',
+    );
+    this.executionTimeoutSeconds = boundedPollerOption(
+      opts.executionTimeoutSeconds,
+      TRIGGER_BUDGETS.maxExecutionTimeoutSeconds,
+      TRIGGER_BUDGETS.maxExecutionTimeoutSeconds,
+      'execution_timeout_seconds',
+    );
+    this.sqliteExecutor = opts.sqliteExecutor ?? runIsolatedSqlite;
     this.livenessObserver = new TriggerLivenessObserver(this.db, {
       instance: opts.instance,
       intervalMs: opts.observerIntervalMs,
@@ -796,14 +1029,21 @@ export class TriggerPoller {
     let processed = 0;
     // 1. Expiry sweep — dueTriggers filters out triggers past terminal_at,
     //    so without this sweep they would stay status='active' forever.
+    const expiryBatchSize = this.batchSize === 0 ? DEFAULT_BATCH_SIZE : this.batchSize;
     const overdue = this.stmtOverdueTerminalTriggers
-      .all(now, this.batchSize) as unknown as TriggerRow[];
+      .all(now, expiryBatchSize) as unknown as TriggerRow[];
     for (const t of overdue) {
+      if (this.serialBusy) break;
+      // Preserve the in-flight run and its notification before terminal expiry.
+      if (this.activeProbes.get(t.id)?.processing) continue;
+      this.serialBusy = true;
       try {
-        this.expireTrigger(t, now);
+        await this.expireTrigger(t, now);
         processed++;
       } catch (err) {
         log.error({ err, triggerId: t.id }, 'trigger expiry failed unexpectedly');
+      } finally {
+        this.serialBusy = false;
       }
     }
     // 2. Due triggers — normal poll/schedule execution path.
@@ -818,6 +1058,10 @@ export class TriggerPoller {
     const probeWorker = async (): Promise<void> => {
       while (nextProbe < probes.length) {
         const t = probes[nextProbe++];
+        if (this.activeProbes.has(t.id)) continue;
+        if (this.activeProbes.size >= this.maxConcurrentExecutors) break;
+        const active = { processing: true, executing: false };
+        this.activeProbes.set(t.id, active);
         try {
           await this.processTrigger(t, now);
           processed++;
@@ -826,6 +1070,9 @@ export class TriggerPoller {
             { err, triggerId: t.id, kind: t.kind },
             'trigger run failed unexpectedly',
           );
+        } finally {
+          active.processing = false;
+          if (!active.executing) this.activeProbes.delete(t.id);
         }
       }
     };
@@ -834,6 +1081,8 @@ export class TriggerPoller {
       () => probeWorker(),
     );
     for (const t of serial) {
+      if (this.serialBusy) break;
+      this.serialBusy = true;
       try {
         await this.processTrigger(t, now);
         processed++;
@@ -842,6 +1091,8 @@ export class TriggerPoller {
           { err, triggerId: t.id, kind: t.kind },
           'trigger run failed unexpectedly',
         );
+      } finally {
+        this.serialBusy = false;
       }
     }
     await Promise.all(workers);
@@ -1096,42 +1347,42 @@ export class TriggerPoller {
     if (shouldDispatchNotification) {
       // Notification dispatch is intentionally post-commit. A crash between
       // COMMIT and sendMessage is at-most-once delivery for this poller tick.
-      const dispatch = await this.dispatchNotification(t, outcome);
-      if (dispatch.waId) {
-        try {
-          this.recordDeliveredWaMessageId(runId, dispatch.waId);
-        } catch (err) {
-          log.error({ err, triggerId: t.id, runId }, 'failed to record trigger notification receipt');
-        }
-      } else if (dispatch.failed && dispatch.terminalReject) {
-        // #1745 — delivery was PERMANENTLY rejected for this target (forbidden/403:
-        // the bot was removed from the report chat). Retrying the same chat is
-        // guaranteed-undeliverable, so once this recurs past the small bound we
-        // RETIRE the producer (pause + clear next_fire_at) and signal it out-of-
-        // band (bead_event + BOT ERRORS alert) — the report chat itself cannot
-        // receive the failure notice, which is exactly why the loop ran for days.
-        try {
-          this.recordNotifyForbiddenTarget(runId);
+      const dispatch = await this.dispatchNotification(t, formatNotification(t, outcome));
+      this.recordNotificationDispatch(t, runId, dispatch, true);
+    }
+  }
+
+  private recordNotificationDispatch(
+    t: TriggerRow,
+    runId: number,
+    dispatch: NotificationDispatch,
+    retireOnForbiddenTarget: boolean,
+  ): void {
+    if (dispatch.waId) {
+      try {
+        this.recordDeliveredWaMessageId(runId, dispatch.waId);
+      } catch (err) {
+        log.error({ err, triggerId: t.id, runId }, 'failed to record trigger notification receipt');
+      }
+    } else if (dispatch.failed && dispatch.terminalReject) {
+      try {
+        this.recordNotifyForbiddenTarget(runId);
+        // Expiry has already retired its producer; only active fires use the breaker.
+        if (retireOnForbiddenTarget) {
           const rejects = this.countConsecutiveForbiddenRejects(t.id);
           if (rejects >= this.maxConsecutiveForbiddenRejects) {
             this.retireTriggerOnForbiddenTarget(t, this.nowFn(), rejects);
           }
-        } catch (err) {
-          log.error({ err, triggerId: t.id, runId }, 'failed to record/retire forbidden-target dispatch');
         }
-      } else if (dispatch.failed) {
-        // The trigger evaluated and fired, but delivery threw a TRANSIENT error.
-        // Mark the already-committed run so a fired-but-undelivered run is
-        // distinguishable in telemetry from a throttled one — status is left
-        // EXACTLY as finishRun wrote it (the evaluation succeeded) and
-        // error_message stays NULL. The trigger keeps rescheduling (fail-loud,
-        // never silently retire) — a daily job must survive a transport blip.
-        // Throttled / not-eligible runs never reach here (shouldDispatchNotification).
-        try {
-          this.recordNotifyDispatchFailed(runId);
-        } catch (err) {
-          log.error({ err, triggerId: t.id, runId }, 'failed to record trigger notification dispatch failure');
-        }
+      } catch (err) {
+        log.error({ err, triggerId: t.id, runId }, 'failed to record/retire forbidden-target dispatch');
+      }
+    } else if (dispatch.failed) {
+      // Preserve the committed evaluation or expiry result independently of delivery.
+      try {
+        this.recordNotifyDispatchFailed(runId);
+      } catch (err) {
+        log.error({ err, triggerId: t.id, runId }, 'failed to record trigger notification dispatch failure');
       }
     }
   }
@@ -1146,8 +1397,7 @@ export class TriggerPoller {
     // json_extract on the JSON path is required here, NOT a `LIKE
     // '%deliveredWaMessageId%'` substring scan: the substring form matches the
     // KEY name anywhere in the column text — so it false-positives on arbitrary
-    // operator-query row data serialised under $.sampleRow (e.g. a watch over a
-    // table whose rows contain that text) and on a literal-null value — wrongly
+    // legacy output data (or a literal-null value) and wrongly
     // treating a never-delivered run as delivered and silently throttling future
     // notifications. json_extract(...) IS NOT NULL keys on the real value.
     const row = this.stmtLastDeliveredRun
@@ -1161,15 +1411,22 @@ export class TriggerPoller {
   /**
    * #2566 slice 2 — probe kinds race their executor against
    * executionTimeoutSeconds. On timeout the occurrence is finalized 'failed'
-   * with the bounded class 'execution_timeout' and the pool slot frees; the
-   * abandoned promise is detached with its rejection swallowed, and the
-   * finalize state guard (state IN claimed/running) makes any late write a
-   * no-op. Side-effecting kinds pass through un-raced: whether their side
+   * with the bounded class 'execution_timeout'. Its slot remains occupied
+   * until both the executor and post-commit processing settle, so later ticks
+   * cannot accumulate abandoned work. Side-effecting kinds pass through
+   * un-raced: whether their side
    * effect happened is unknowable, so they are never abandoned.
    */
   private async executeWithTimeout(t: TriggerRow, occurrenceId: number): Promise<ExecuteOutcome> {
     if (!PROBE_KINDS.has(t.kind)) return this.executeTrigger(t, occurrenceId);
+    const active = this.activeProbes.get(t.id)!;
+    active.executing = true;
     const exec = this.executeTrigger(t, occurrenceId);
+    const settled = (): void => {
+      active.executing = false;
+      if (!active.processing) this.activeProbes.delete(t.id);
+    };
+    void exec.then(settled, settled);
     let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
     const timeout = new Promise<'timeout'>((resolve) => {
       timeoutTimer = this.setTimeoutImpl(() => resolve('timeout'), this.executionTimeoutSeconds * 1000);
@@ -1196,27 +1453,28 @@ export class TriggerPoller {
   private async executeTrigger(t: TriggerRow, occurrenceId: number): Promise<ExecuteOutcome> {
     const kind = t.kind as TriggerKind;
     let spec: unknown;
+    let parsed = false;
     try {
+      assertTriggerRootBudgets(t.report_chat_jid, t.dedupe_key);
+      assertTriggerTextBudget(t.spec_json, 'spec.bytes', TRIGGER_BUDGETS.maxSpecBytes);
       spec = JSON.parse(t.spec_json);
-    } catch (err) {
-      return {
-        status: 'failed',
-        fired: false,
-        outputSummary: 'spec_json is not valid JSON',
-        outputJson: {},
-        errorKind: 'spec_parse',
-        errorMessage: errorMessage(err),
-      };
-    }
-    try {
+      parsed = true;
       spec = validateTriggerSpec(kind, spec);
     } catch (err) {
+      if (err instanceof TriggerBudgetError) {
+        return {
+          status: 'failed', fired: false,
+          outputSummary: 'trigger resource budget exceeded',
+          outputJson: { kind, reason: 'resource_exhausted' satisfies TriggerReason },
+          errorKind: 'resource_exhausted',
+          errorMessage: 'persisted trigger exceeded the current resource budget',
+        };
+      }
       return {
-        status: 'failed',
-        fired: false,
-        outputSummary: 'spec_json failed SPEC_REGISTRY validation',
-        outputJson: { kind },
-        errorKind: 'spec_invalid',
+        status: 'failed', fired: false,
+        outputSummary: parsed ? 'spec_json failed SPEC_REGISTRY validation' : 'spec_json is not valid JSON',
+        outputJson: parsed ? { kind } : {},
+        errorKind: parsed ? 'spec_invalid' : 'spec_parse',
         errorMessage: errorMessage(err),
       };
     }
@@ -1300,6 +1558,26 @@ export class TriggerPoller {
     bead: { title: string; body: string | null },
     occurrenceId: number,
   ): ExecuteOutcome {
+    try {
+      if (typeof bead.title !== 'string' || (bead.body !== null && typeof bead.body !== 'string')) {
+        throw new TriggerBudgetError('agent_job.persisted_type');
+      }
+      assertTriggerTextBudget(bead.title, 'agent_job.title.bytes', TRIGGER_BUDGETS.maxTitleBytes);
+      if (bead.body !== null) {
+        assertTriggerTextBudget(bead.body, 'agent_job.body.bytes', TRIGGER_BUDGETS.maxPromptBytes);
+      }
+    } catch (err) {
+      if (err instanceof TriggerBudgetError) {
+        return {
+          status: 'failed', fired: false,
+          outputSummary: 'agent job resource budget exceeded',
+          outputJson: { kind: t.kind, agentJob: true, reason: 'resource_exhausted' satisfies TriggerReason },
+          errorKind: 'resource_exhausted',
+          errorMessage: 'persisted agent job exceeded the current resource budget',
+        };
+      }
+      throw err;
+    }
     const prompt = bead.body?.trim();
     if (!prompt) {
       return {
@@ -1319,39 +1597,54 @@ export class TriggerPoller {
         errorMessage: 'no agentJobDispatch injected; this poller instance cannot run agent turns',
       };
     }
-    let result: AgentJobDispatchResult;
+    let dispatched: boolean;
     try {
-      result = this.agentJobDispatch({
+      const result = this.agentJobDispatch({
         beadId: t.bead_id, triggerId: t.id, occurrenceId,
         prompt, title: bead.title, reportChatJid: t.report_chat_jid,
       });
-    } catch (err) {
+      if (result === null || typeof result !== 'object' || Array.isArray(result)) {
+        throw new TypeError('invalid agent job dispatcher result');
+      }
+      const resultDispatched = result.dispatched;
+      if (typeof resultDispatched !== 'boolean') {
+        throw new TypeError('invalid agent job dispatcher result');
+      }
+      dispatched = resultDispatched;
+    } catch {
+      log.warn(
+        { triggerId: t.id, occurrenceId, classification: 'agent_job_dispatch_threw' },
+        'agent job dispatcher threw',
+      );
       return {
         status: 'failed', fired: true,
-        outputSummary: `agent job dispatch FAILED — ${errorMessage(err)}`,
+        outputSummary: 'agent job dispatch FAILED — unavailable',
         outputJson: { kind: t.kind, agentJob: true, reason: 'agent_job_dispatch_threw' },
         errorKind: 'agent_job_dispatch_threw',
-        errorMessage: errorMessage(err),
+        errorMessage: 'agent-job dispatcher threw',
       };
     }
-    if (!result.dispatched) {
-      const detail = result.detail ?? 'turn queue rejected the job (queue full?)';
+    if (!dispatched) {
+      log.warn(
+        { triggerId: t.id, occurrenceId, classification: 'agent_job_enqueue_rejected' },
+        'agent job dispatcher rejected enqueue',
+      );
       return {
         status: 'failed', fired: true,
-        outputSummary: `agent job dispatch FAILED — ${detail}`,
+        outputSummary: 'agent job dispatch FAILED — enqueue rejected',
         outputJson: { kind: t.kind, agentJob: true, reason: 'agent_job_enqueue_rejected' },
         errorKind: 'agent_job_enqueue_rejected',
-        errorMessage: detail,
+        errorMessage: 'agent-job dispatcher rejected enqueue',
       };
     }
     return {
       status: 'ok', fired: false,
-      outputSummary: 'agent job dispatched — turn enqueued',
-      outputJson: { kind: t.kind, agentJob: true, detail: result.detail ?? null },
+      outputSummary: 'agent job dispatched — accepted',
+      outputJson: { kind: t.kind, agentJob: true, dispatch: 'accepted' },
     };
   }
 
-  private executeSqlite(t: TriggerRow, spec: SqliteSpec): ExecuteOutcome {
+  private async executeSqlite(t: TriggerRow, spec: SqliteSpec): Promise<ExecuteOutcome> {
     // Runtime guard for specs persisted before validation existed (#1096):
     // query_only does not block ATTACH/cross-DB reads, so reject them here too.
     if (!isSafeSqliteSql(spec.sql)) {
@@ -1364,55 +1657,66 @@ export class TriggerPoller {
         errorMessage: 'poll.sqlite rejects ATTACH/DETACH/PRAGMA and multi-statement SQL',
       };
     }
-    let rows: Record<string, unknown>[];
-    let capExceeded = false;
+    let databasePath: string | null = null;
     try {
-      // Operator-stored SQL runs against the live bot.db. Bound the blast
-      // radius of a compromised or confused-deputy spec by flipping the
-      // connection to read-only for the duration of this query. The OFF
-      // restoration MUST be in finally so the poller's own follow-up writes
-      // (UPDATE bead_triggers, INSERT trigger_runs) still succeed.
-      this.db.exec('PRAGMA query_only = ON');
-      try {
-        const stmt = this.db.prepare(spec.sql);
-        const bindArgs = spec.binds ? toBindArgs(spec.binds) : [];
-        // QR-026: iterate with a hard row cap instead of `.all()`. A runaway
-        // recursive CTE is bounded at MAX_SQLITE_ROWS pulls (breaking the
-        // iterator stops the query) rather than materializing unboundedly and
-        // OOM-crashing the process.
-        rows = [];
-        for (const row of stmt.iterate(...bindArgs)) {
-          if (rows.length >= MAX_SQLITE_ROWS) { capExceeded = true; break; }
-          rows.push(row as Record<string, unknown>);
-        }
-      } finally {
-        this.db.exec('PRAGMA query_only = OFF');
+      const location = this.db.location('main');
+      if (isNonEmptyString(location) && location !== ':memory:' && isAbsolute(location)) {
+        databasePath = location;
       }
-    } catch (err) {
+    } catch {
+      // Intentional: location lookup failure maps to the unavailable disposition
+      // below without revealing a database path.
+    }
+    if (!databasePath) {
+      return {
+        status: 'failed',
+        fired: false,
+        outputSummary: 'isolated SQLite worker unavailable',
+        outputJson: { reason: 'sqlite_worker_unavailable' satisfies TriggerReason },
+        errorKind: 'sqlite_worker_unavailable',
+        errorMessage: 'main database location is unavailable for isolated execution',
+      };
+    }
+    const bindArgs = (spec.binds ? toBindArgs(spec.binds) : []) as Array<null | number | string>;
+    const result = await this.sqliteExecutor({
+      databasePath,
+      sql: spec.sql,
+      binds: bindArgs,
+      maxRows: TRIGGER_BUDGETS.maxSqliteRows,
+      timeoutMs: Math.min(this.executionTimeoutSeconds * 1_000, TRIGGER_BUDGETS.maxSqliteWallTimeMs),
+    });
+    if (result.kind === 'resource_exhausted') {
+      return {
+        status: 'failed',
+        fired: false,
+        outputSummary: 'SQLite execution exhausted a resource budget',
+        outputJson: { reason: 'resource_exhausted' satisfies TriggerReason, resource: 'sqlite', limit: result.limit },
+        errorKind: 'resource_exhausted',
+        errorMessage: 'isolated SQLite execution exceeded its resource budget',
+      };
+    }
+    if (result.kind === 'unavailable') {
+      return {
+        status: 'failed',
+        fired: false,
+        outputSummary: 'isolated SQLite worker unavailable',
+        outputJson: { reason: 'sqlite_worker_unavailable' satisfies TriggerReason },
+        errorKind: 'sqlite_worker_unavailable',
+        errorMessage: `isolated SQLite worker unavailable (${result.reason})`,
+      };
+    }
+    if (result.kind === 'sql_error') {
       return {
         status: 'failed',
         fired: false,
         outputSummary: 'SQL execution failed',
-        outputJson: { sql: spec.sql },
+        outputJson: { reason: 'sql_error' satisfies TriggerReason },
         errorKind: 'sql_error',
-        errorMessage: errorMessage(err),
-      };
-    }
-    if (capExceeded) {
-      // The query produced more than MAX_SQLITE_ROWS rows — almost certainly an
-      // unbounded/recursive or misconfigured spec. Fail (the circuit breaker will
-      // pause it after repeated failures) rather than acting on a truncated set.
-      return {
-        status: 'failed',
-        fired: false,
-        outputSummary: `SQL exceeded the ${MAX_SQLITE_ROWS}-row cap — rejected`,
-        outputJson: { rowCap: MAX_SQLITE_ROWS, sql: spec.sql },
-        errorKind: 'row_cap_exceeded',
-        errorMessage: `poll.sqlite result exceeded ${MAX_SQLITE_ROWS} rows — query rejected to bound DoS risk (unbounded/recursive query?)`,
+        errorMessage: 'isolated SQLite query failed',
       };
     }
 
-    const rowCount = rows.length;
+    const rowCount = result.rowCount;
 
     if (spec.fire_when === 'rows_returned') {
       return {
@@ -1421,7 +1725,7 @@ export class TriggerPoller {
         outputSummary: rowCount > 0
           ? `SQL returned ${rowCount} row${rowCount === 1 ? '' : 's'}`
           : 'SQL returned 0 rows',
-        outputJson: { rowCount, sampleRow: rows[0] ?? null },
+        outputJson: { rowCount },
       };
     }
 
@@ -1459,8 +1763,8 @@ export class TriggerPoller {
    * (fail-closed). The Pinecone client is injected; when absent we fail with
    * `pinecone_unavailable` rather than silently noop. `outputJson` is reduced
    * to scalars (`matchCount`, `topScore`) — record bodies never enter the
-   * poller (the search fn returns only scores), parity with the SQL
-   * `sampleRow` redaction posture.
+   * poller (the search fn returns only scores), matching the SQL
+   * rowCount-only result protocol.
    */
   private async executePinecone(spec: PineconeTriggerSpec): Promise<ExecuteOutcome> {
     if (!this.pineconeAllowedIndexes.has(spec.index)) {
@@ -1723,7 +2027,7 @@ export class TriggerPoller {
    *
    * `outputJson` is reduced to scalars/booleans (`hashChanged` + the opaque
    * digest used for the next comparison) — the fetched body NEVER enters
-   * output_json (parity with the SQL `sampleRow` / pinecone redaction posture).
+   * output_json, matching the SQL rowCount-only and Pinecone scalar protocols.
    */
   private async executeUrl(t: TriggerRow, spec: UrlTriggerSpec): Promise<ExecuteOutcome> {
     if (!this.enableUrlWatch) {
@@ -1827,8 +2131,7 @@ export class TriggerPoller {
     }
   }
 
-  private async dispatchNotification(t: TriggerRow, outcome: ExecuteOutcome): Promise<NotificationDispatch> {
-    const text = formatNotification(t, outcome);
+  private async dispatchNotification(t: TriggerRow, text: string): Promise<NotificationDispatch> {
     try {
       const receipt = await this.messenger.sendMessage(t.report_chat_jid, text);
       return { waId: receipt.waMessageId ?? null, failed: false, terminalReject: false };
@@ -2049,6 +2352,7 @@ export class TriggerPoller {
 
   private async dispatchPauseNotification(t: TriggerRow, failureCount: number): Promise<void> {
     try {
+      assertTriggerRootBudgets(t.report_chat_jid, t.dedupe_key);
       await this.messenger.sendMessage(
         t.report_chat_jid,
         formatPauseNotification(t, failureCount),
@@ -2058,23 +2362,22 @@ export class TriggerPoller {
     }
   }
 
-  private expireTrigger(t: TriggerRow, now: number): void {
-    let shouldDispatchExpiryNotification = false;
+  private async expireTrigger(t: TriggerRow, now: number): Promise<void> {
+    let notificationRunId: number | null;
     this.db.exec('BEGIN');
     try {
-      shouldDispatchExpiryNotification = this.markExpired(t, now, 'terminal_at_reached');
+      notificationRunId = this.markExpired(t, now, 'terminal_at_reached');
       this.db.exec('COMMIT');
     } catch (err) {
       try { this.db.exec('ROLLBACK'); } catch { /* best effort */ }
       throw err;
     }
-    if (shouldDispatchExpiryNotification) {
-      void this.messenger.sendMessage(
-        t.report_chat_jid,
+    if (notificationRunId !== null) {
+      const dispatch = await this.dispatchNotification(
+        t,
         formatExpiryNotification(t, 'terminal_at_reached'),
-      ).catch((err: unknown) => {
-        log.error({ err, triggerId: t.id }, 'failed to dispatch expiry notification');
-      });
+      );
+      this.recordNotificationDispatch(t, notificationRunId, dispatch, false);
     }
   }
 
@@ -2085,8 +2388,18 @@ export class TriggerPoller {
    */
   private static readonly SILENT_EXPIRY_REASONS = new Set(['one_shot_completed']);
 
-  private markExpired(t: TriggerRow, now: number, reason: string): boolean {
-    this.stmtMarkExpiredTrigger.run(now, t.id);
+  private markExpired(t: TriggerRow, now: number, reason: string): number | null {
+    let invalidRoots = false;
+    try {
+      assertTriggerRootBudgets(t.report_chat_jid, t.dedupe_key);
+    } catch (err) {
+      if (!(err instanceof TriggerBudgetError)) throw err;
+      invalidRoots = true;
+    }
+    // An awaited send lets another tick retire later rows from this batch.
+    if (Number(this.stmtMarkExpiredTrigger.run(now, t.id).changes) === 0) return null;
+    const notify = !invalidRoots && t.on_terminal === 'notify'
+      && !TriggerPoller.SILENT_EXPIRY_REASONS.has(reason);
     writeBeadEvent(this.db, {
       beadId: t.bead_id,
       eventType: 'trigger_expired',
@@ -2094,15 +2407,19 @@ export class TriggerPoller {
       payload: { trigger_id: t.id, reason, on_terminal: t.on_terminal },
       at: now,
     });
-    this.stmtInsertExpiryRun.run(
-      t.id, t.bead_id, now, now,
+    const run = this.stmtInsertExpiryRun.run(
+      t.id, t.bead_id, invalidRoots ? 'failed' : 'terminal_fired', now, now,
       `trigger expired: ${reason}`,
-      JSON.stringify({ reason, on_terminal: t.on_terminal }),
+      JSON.stringify(invalidRoots ? { reason: 'resource_exhausted' } : {
+        reason, on_terminal: t.on_terminal, ...(notify ? { notifyPending: true } : {}),
+      }),
+      invalidRoots ? 'resource_exhausted' : null,
+      invalidRoots ? 'persisted trigger exceeded the current resource budget' : null,
     );
-    if (t.on_terminal === 'reopen_bead') {
+    if (!invalidRoots && t.on_terminal === 'reopen_bead') {
       this.reopenTerminalBead(t, now, reason);
     }
-    return t.on_terminal === 'notify' && !TriggerPoller.SILENT_EXPIRY_REASONS.has(reason);
+    return notify ? Number(run.lastInsertRowid) : null;
   }
 
   private reopenTerminalBead(t: TriggerRow, now: number, reason: string): void {
