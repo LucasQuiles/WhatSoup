@@ -557,6 +557,12 @@ jobs:
       - name: Portable Python and release-proof prerequisites (real macOS)
         run: npm test -- tests/helpers/python-interpreter.test.ts tests/scripts/bot-errors-python-atomic-write-guard.test.ts tests/scripts/bot-errors-release-proof-installer.test.ts tests/scripts/bot-errors-release-proof-run.test.ts --pool=forks --maxWorkers=1
 
+      - name: Darwin process identity and root signaling
+        run: |
+          test_scratch=$(mktemp -d)
+          trap 'rm -rf "$test_scratch"' EXIT
+          TMPDIR="$test_scratch" npm test -- tests/lib/darwin-process-identity.test.ts tests/runtimes/agent/process-tree-safety.test.ts tests/runtimes/agent/providers/claude-refresh-process-identity.test.ts --pool=forks --maxWorkers=1
+
       # The credential-probe boundedness suite runs on BOTH legs on purpose. The
       # Linux leg exercises it with timeout(1) present and with PATH stripped to
       # simulate Darwin; this leg runs the same assertions against a real macOS

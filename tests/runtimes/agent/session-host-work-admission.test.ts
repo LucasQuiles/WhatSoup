@@ -29,7 +29,8 @@ vi.mock('node:child_process', () => ({ spawn: vi.fn(), execFileSync: processObse
 vi.mock('../../../src/lib/process-identity.ts', () => ({
   probeProcessBirthToken: (pid: number) => `birth:${pid}`,
   probeProcessBirthTokens: (pids: readonly number[]) => new Map(pids.map((pid) => [pid, `birth:${pid}`])),
-  processBirthTokenSupportsNumericSignal: () => false,
+  // Synthetic exact identities; real Darwin generations are tested in darwin-process-identity.test.ts.
+  processBirthTokenSupportsNumericSignal: () => true,
 }));
 vi.mock('../../../src/runtimes/agent/process-tree.ts', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../../src/runtimes/agent/process-tree.ts')>(),

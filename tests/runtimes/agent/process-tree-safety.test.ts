@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hoistedLoggerMock, type SingletonLoggerMock } from '../../helpers/logger-mock.ts';
 
-const { birthTokenMock, birthTokenBatchMock, execFileSyncMock, processTreeLog } = vi.hoisted(() => {
+const { birthTokenMock, birthTokenBatchMock, execFileSyncMock, darwinIdentityMock, darwinSignalMock, processTreeLog } = vi.hoisted(() => {
   const token = vi.fn((pid: number) => `birth:${pid}`);
   return {
     birthTokenMock: token,
@@ -14,6 +14,8 @@ const { birthTokenMock, birthTokenBatchMock, execFileSyncMock, processTreeLog } 
       return observed;
     }),
     execFileSyncMock: vi.fn(),
+    darwinIdentityMock: vi.fn<() => string | null>(),
+    darwinSignalMock: vi.fn<() => boolean>(),
     processTreeLog: {} as SingletonLoggerMock,
   };
 });
@@ -28,6 +30,11 @@ vi.mock('../../../src/lib/process-identity.ts', () => ({
     !token.startsWith('darwin-lstart:'),
   probeProcessBirthToken: birthTokenMock,
   probeProcessBirthTokens: birthTokenBatchMock,
+}));
+
+vi.mock('../../../src/lib/darwin-process-identity.ts', () => ({
+  readDarwinUniqueProcessId: darwinIdentityMock,
+  signalDarwinProcess: darwinSignalMock,
 }));
 
 vi.mock('../../../src/logger.ts', () => ({
@@ -122,6 +129,8 @@ beforeEach(() => {
   birthTokenMock.mockReset().mockImplementation((pid: number) => `birth:${pid}`);
   birthTokenBatchMock.mockClear();
   execFileSyncMock.mockReset();
+  darwinIdentityMock.mockReset().mockReturnValue('123456');
+  darwinSignalMock.mockReset().mockReturnValue(true);
   for (const sink of Object.values(processTreeLog)) sink.mockClear();
   killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
 });
@@ -603,8 +612,41 @@ describe('process-tree fail-closed safety', () => {
       signaledProcessCount: 1,
     });
 
-    expect(target.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(target.kill).not.toHaveBeenCalled();
+    expect(darwinSignalMock).toHaveBeenCalledWith(ROOT_PID, '123456', 'SIGKILL');
     expect(killSpy).not.toHaveBeenCalledWith(CHILD_PID, 'SIGKILL');
+  });
+
+  it('refuses Darwin capture when a stable identity is unavailable', () => {
+    birthTokenMock.mockReturnValue(`darwin-lstart:same-second:${ROOT_PID}`);
+    darwinIdentityMock.mockReturnValue(null);
+    const target = { pid: ROOT_PID, exitCode: null, signalCode: null, kill: vi.fn(() => true) };
+    expect(captureProcessTreeRootAuthority(target)).toBeNull();
+    expect(target.kill).not.toHaveBeenCalled();
+    expect(darwinSignalMock).not.toHaveBeenCalled();
+    expect(killSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['identity changed', (): boolean => false, 'PROCESS_TREE_SIGNAL_FAILED'],
+    ['permission denied', (): boolean => { throw Object.assign(new Error('denied'), { code: 'EPERM' }); }, 'PROCESS_TREE_SIGNAL_PERMISSION_DENIED'],
+    ['helper unavailable', (): boolean => { throw new Error('unavailable'); }, 'PROCESS_TREE_SIGNAL_FAILED'],
+  ] as const)('does not fall back to a numeric Darwin signal after %s', async (_name, result, code) => {
+    birthTokenMock.mockReturnValue(`darwin-lstart:same-second:${ROOT_PID}`);
+    execFileSyncMock.mockReturnValue(census([
+      { pid: process.pid, ppid: 1, pgid: process.pid, command: 'vitest-parent' },
+      { pid: ROOT_PID, ppid: process.pid, pgid: ROOT_PID, command: 'provider-root' },
+    ]));
+    const target = { pid: ROOT_PID, exitCode: null, signalCode: null, kill: vi.fn(() => true) };
+    const authority = captureProcessTreeRootAuthority(target);
+    expect(authority).not.toBeNull();
+    darwinSignalMock.mockImplementation(result);
+    await expectTerminationCode(killSessionTreeRaw(target, 'SIGKILL', {
+      rootAuthority: authority!, generationMarker: 'darwin-no-numeric-fallback', killGraceMs: 0,
+    }), code);
+    expect(darwinSignalMock).toHaveBeenCalledWith(ROOT_PID, '123456', 'SIGKILL');
+    expect(target.kill).not.toHaveBeenCalled();
+    expect(killSpy).not.toHaveBeenCalled();
   });
 
   it('never broadens spawn authority through a process-group broadcast', async () => {

@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { readDarwinUniqueProcessId } from '../../../lib/darwin-process-identity.ts';
 
 export type RefreshProcessObservation =
   | { state: 'alive'; birthToken: string }
@@ -9,34 +10,10 @@ interface ProcessIdentityDeps {
   platform?: NodeJS.Platform;
   signal?: (pid: number, signal: 0) => unknown;
   read?: (path: string) => string;
-  command?: (file: string, args: string[], env: NodeJS.ProcessEnv) => string;
+  command?: (file: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs?: number) => string;
 }
 
 const IDENTITY_ENV = { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'C', LC_ALL: 'C', TZ: 'UTC' };
-const DARWIN_IDENTITY_PYTHONS = [
-  '/opt/homebrew/bin/python3',
-  '/usr/local/bin/python3',
-  '/usr/bin/python3',
-] as const;
-
-// PROC_PIDUNIQIDENTIFIERINFO distinguishes PID reuse even within one clock tick.
-const DARWIN_UNIQUE_ID = `
-import ctypes
-import sys
-class Identity(ctypes.Structure):
-    _fields_ = [('uuid', ctypes.c_ubyte * 16), ('unique', ctypes.c_uint64),
-                ('parent', ctypes.c_uint64), ('version', ctypes.c_int32),
-                ('parent_version', ctypes.c_int32), ('reserved2', ctypes.c_uint64),
-                ('reserved3', ctypes.c_uint64)]
-call = ctypes.CDLL('/usr/lib/libproc.dylib').proc_pidinfo
-call.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
-call.restype = ctypes.c_int
-identity = Identity()
-size = ctypes.sizeof(identity)
-if size != 56 or call(int(sys.argv[1]), 17, 0, ctypes.byref(identity), size) != size or identity.unique == 0:
-    raise SystemExit(1)
-print(identity.unique)
-`;
 
 /** A boot-bound identity independent of the observing parent's locale and timezone. */
 export function inspectRefreshProcess(pid: number, deps: ProcessIdentityDeps = {}): RefreshProcessObservation {
@@ -53,8 +30,8 @@ export function inspectRefreshProcess(pid: number, deps: ProcessIdentityDeps = {
   const first = liveness();
   if (first !== 'alive') return { state: first };
   const read = deps.read ?? ((path) => readFileSync(path, 'utf8'));
-  const command = deps.command ?? ((file, args, env) => execFileSync(file, args, {
-    encoding: 'utf8', env, timeout: 1_000, maxBuffer: 4_096, stdio: ['ignore', 'pipe', 'ignore'],
+  const command = deps.command ?? ((file, args, env, timeoutMs = 1_000) => execFileSync(file, args, {
+    encoding: 'utf8', env, timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: 4_096, stdio: ['ignore', 'pipe', 'ignore'],
   }));
   let birthToken: string;
   try {
@@ -63,20 +40,10 @@ export function inspectRefreshProcess(pid: number, deps: ProcessIdentityDeps = {
       const boot = /^\{\s*sec\s*=\s*(\d+),\s*usec\s*=\s*(\d+)\s*\}/.exec(
         command('/usr/sbin/sysctl', ['-n', 'kern.boottime'], IDENTITY_ENV).trim(),
       );
-      let birth = '';
-      for (const python of DARWIN_IDENTITY_PYTHONS) {
-        try {
-          birth = command(python, ['-I', '-S', '-c', DARWIN_UNIQUE_ID, String(pid)], IDENTITY_ENV).trim();
-          break;
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-        }
-      }
-      if (birth === '') return { state: 'unknown' };
-      const unique = birth.length <= 20 ? BigInt(birth) : 0n;
+      const birth = readDarwinUniqueProcessId(pid, { command });
+      if (birth === null) return { state: liveness() === 'absent' ? 'absent' : 'unknown' };
       if (!boot || !Number.isSafeInteger(Number(boot[1])) || Number(boot[1]) <= 0
-        || !Number.isSafeInteger(Number(boot[2])) || Number(boot[2]) > 999_999
-        || unique <= 0n || unique > 18_446_744_073_709_551_615n || unique.toString() !== birth) {
+        || !Number.isSafeInteger(Number(boot[2])) || Number(boot[2]) > 999_999) {
         return { state: 'unknown' };
       }
       birthToken = `refresh-owner-v2:darwin:${Number(boot[1])}.${boot[2]!.padStart(6, '0')}:${birth}`;

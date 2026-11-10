@@ -38,7 +38,8 @@ vi.mock('../../../../src/lib/process-identity.ts', () => ({
   probeProcessBirthTokens: vi.fn((pids: readonly number[]) => new Map(
     pids.map((pid) => [pid, `test-birth:${pid}`]),
   )),
-  processBirthTokenSupportsNumericSignal: vi.fn(() => false),
+  // Synthetic exact identities; real Darwin generations are tested in darwin-process-identity.test.ts.
+  processBirthTokenSupportsNumericSignal: vi.fn(() => true),
 }));
 
 vi.mock('../../../../src/runtimes/agent/session-db.ts', () => {

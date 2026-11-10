@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { systemClock } from '../../lib/clock.ts';
 import { SIGNAL } from '../../lib/signals.ts';
+import { readDarwinUniqueProcessId, signalDarwinProcess } from '../../lib/darwin-process-identity.ts';
 import {
   processBirthTokenSupportsNumericSignal,
   probeProcessBirthToken,
@@ -115,6 +116,14 @@ export function captureProcessTreeRootAuthority(
     if (target.signalCode !== undefined && target.signalCode !== null) return null;
     const birthToken = probeProcessBirthToken(pid as number);
     if (birthToken === null) return null;
+    let signalRoot = (signal: NodeJS.Signals): boolean => REFLECT_APPLY(kill, target, [signal]);
+    if (!processBirthTokenSupportsNumericSignal(birthToken)) {
+      if (!birthToken.startsWith('darwin-lstart:')) return null;
+      const uniqueId = readDarwinUniqueProcessId(pid as number);
+      if (uniqueId === null) return null;
+      // A retained Node handle can outlive reaping; only the kernel token grants signaling.
+      signalRoot = (signal) => signalDarwinProcess(pid as number, uniqueId, signal);
+    }
     const authority = OBJECT_FREEZE({
       pid: pid as number,
       parentPid: process.pid,
@@ -125,7 +134,7 @@ export function captureProcessTreeRootAuthority(
       pid: pid as number,
       parentPid: process.pid,
       birthToken,
-      signalRoot: (signal: NodeJS.Signals) => REFLECT_APPLY(kill, target, [signal]),
+      signalRoot,
     });
     REFLECT_APPLY(
       WEAK_MAP_SET,

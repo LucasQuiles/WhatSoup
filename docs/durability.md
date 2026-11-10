@@ -1481,10 +1481,17 @@ child handle, then bound to the durable row and provider. Persisted PID, parent 
 or start-time fields cannot recreate that capability after restart. Descendants are retained
 as bounded birth-identity records and a still-verified retained child remains a discovery
 anchor after the root exits. Darwin birth checks use one 250 ms batch observation for at most
-4,096 PIDs. The root is signaled through its captured child handle. Numeric descendant signaling
+4,096 PIDs. On Darwin, capture also retains the kernel's unique process identifier before
+yielding from the spawn handoff. Root signaling checks that identifier around acquisition of
+an opaque task audit token, then uses the kernel's generation-bound signal operation. A process
+that changes executable image retains its unique identifier; a rejected stale token permits
+one complete token reacquisition. Missing identity, permissions or helper support fail cleanup
+without a numeric-PID fallback. The shared identity helper uses the existing fixed Python
+candidates, a one-second total deadline and a 4 KiB output limit. Refresh-owner tokens retain
+their existing format. Linux roots use the captured child handle. Numeric descendant signaling
 requires a high-resolution birth-token source and is currently enabled only for Linux procfs
 start ticks. Darwin's second-resolution `lstart` remains observation evidence, but it cannot
-authorize numeric descendant signaling; a descendant that remains after the root-handle signal
+authorize numeric descendant signaling; a descendant that remains after the root signal
 therefore yields a survivor or inconclusive outcome. Linux still has a documented final
 revalidation-to-signal interval because Node does not expose a pidfd-style atomic signal handle.
 Cgroup membership remains bounded
