@@ -193,17 +193,32 @@ export function writeBotErrorsRuntime(
   writeFileSync(outerPath, JSON.stringify(outer));
 }
 
-/** Add a release-manifest-sealed refresh rollback fence to a fabricated release. */
+/**
+ * Add a release-manifest-sealed refresh rollback fence to a fabricated release.
+ * The stalledOperationHoldV1 key is written only when its hold option is given,
+ * so the default bytes stay the single-key fence.
+ */
 export function writeRefreshRollbackFence(
   root: string,
-  options: { requirement?: number; capability?: number; seal?: boolean; pretty?: boolean } = {},
+  options: {
+    requirement?: number; capability?: number; holdRequirement?: number; holdCapability?: number;
+    seal?: boolean; pretty?: boolean;
+  } = {},
 ): void {
   const requirement = options.requirement ?? 3;
   const capability = options.capability ?? 3;
   const body = JSON.stringify({
     schemaVersion: 1,
-    activationRequirements: { rollbackTarget: { claudeRefreshOwnerV3: requirement } },
-    rollbackCapabilities: { claudeRefreshOwnerV3: capability },
+    activationRequirements: {
+      rollbackTarget: {
+        claudeRefreshOwnerV3: requirement,
+        ...(options.holdRequirement === undefined ? {} : { stalledOperationHoldV1: options.holdRequirement }),
+      },
+    },
+    rollbackCapabilities: {
+      claudeRefreshOwnerV3: capability,
+      ...(options.holdCapability === undefined ? {} : { stalledOperationHoldV1: options.holdCapability }),
+    },
   }, null, options.pretty ? 2 : undefined);
   writeFileSync(path.join(root, REFRESH_ROLLBACK_FENCE_REL), body);
   if (options.seal === false) return;

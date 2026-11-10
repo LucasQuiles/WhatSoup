@@ -695,9 +695,13 @@ restored `bot.db`.
 #### Rollback blocked by refresh-fence compatibility (exit `5`)
 
 `deploy/claude-refresh-rollback-fence.json` is a regular, manifest-sealed
-release file. A release that requires `claudeRefreshOwnerV3` records that
-requirement and the capability it provides. This is a compatibility fence for
-automatic rollback, not evidence that a refresh child is live or dead.
+release file. It records, per key, what the release requires of a rollback
+target and what it provides. The known keys are `claudeRefreshOwnerV3` and
+`stalledOperationHoldV1` (the stalled-operation hold); any other key makes the
+fence invalid. A known key a fence omits is level 0, and a release without the
+file is level 0 for every key. A target is compatible only when it meets every
+requirement. This is a compatibility fence for automatic rollback, not
+evidence that a refresh child is live or dead.
 
 An upgrade from a legacy release is allowed: the plan reports that automatic
 rollback is unavailable if verification later fails. Before the live switch,

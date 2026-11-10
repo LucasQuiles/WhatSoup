@@ -151,7 +151,7 @@ import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { killSessionTree } from '../../../src/runtimes/agent/process-tree.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
-import { formatAge, WATCHDOG_SOFT_MS, WATCHDOG_WARN_MS, WATCHDOG_HARD_MS, STALLED_OP_KILL_GRACE_MS, LONG_OP_CEILING_MS, PROVIDER_DISPLAY_NAMES } from '../../../src/runtimes/agent/session.ts';
+import { formatAge, WATCHDOG_SOFT_MS, WATCHDOG_WARN_MS, WATCHDOG_HARD_MS, STALLED_OP_KILL_GRACE_MS, STALLED_OPERATION_NOTICE, LONG_OP_CEILING_MS, PROVIDER_DISPLAY_NAMES } from '../../../src/runtimes/agent/session.ts';
 import { OpenAIApiProvider } from '../../../src/runtimes/agent/providers/openai-api.ts';
 import { AnthropicApiProvider } from '../../../src/runtimes/agent/providers/anthropic-api.ts';
 
@@ -2333,6 +2333,81 @@ describe('SessionManager', () => {
     expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
 
     vi.useRealTimers();
+  });
+
+  // F7 (2026-11-09 incident): the stall kill fired with no "kill deferred"
+  // line, and an assessment failure logged at debug only, so the kill line could not
+  // say whether the tool's tree was idle or the check never produced a verdict.
+  describe('F7: the stall kill names why the liveness gate did not defer', () => {
+    type Verdict = { alive: boolean; cpuDeltaMs: number; pidChurn: number; pidCount: number };
+    const KILL_LINE = 'stalled-operation kill fired — SIGKILL hung provider';
+
+    async function stallAndKill(assessor: () => Promise<Verdict | null>): Promise<ReturnType<typeof vi.fn>> {
+      const notifyUser = vi.fn();
+      const sm = new SessionManager({
+        db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+        instanceName: 'personal', notifyUser, treeLivenessAssessor: vi.fn(assessor),
+      });
+      await sm.spawnSession();
+      await sm.sendTurn('convert the document');
+      mockLogger.warn.mockClear();
+      sm.recoverStalledOperation('toolu_f7', 'Bash');
+      await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+      expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+      return notifyUser;
+    }
+
+    function killLine(): Record<string, unknown> | undefined {
+      const call = mockLogger.warn.mock.calls.find((c) => c[1] === KILL_LINE);
+      return call?.[0] as Record<string, unknown> | undefined;
+    }
+
+    beforeEach(() => { vi.useFakeTimers(); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    it('an idle tree: the kill line says idle, with the sampled CPU delta and pid count', async () => {
+      await stallAndKill(async () => ({ alive: false, cpuDeltaMs: 0, pidChurn: 0, pidCount: 3 }));
+      expect(killLine()).toMatchObject({
+        reason: 'stalled_operation', toolName: 'Bash', liveness: 'idle', cpuDeltaMs: 0, pidCount: 3,
+      });
+    });
+
+    it('no verdict (ps unusable or the tree gone): the kill line says unavailable', async () => {
+      await stallAndKill(async () => null);
+      expect(killLine()).toMatchObject({ reason: 'stalled_operation', liveness: 'unavailable' });
+      expect(killLine()).not.toHaveProperty('cpuDeltaMs');
+    });
+
+    it('a failed assessment is a warning, and the kill line says assessment_failed', async () => {
+      await stallAndKill(async () => { throw new Error('ps exited 1'); });
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: 'stalled_operation', err: expect.any(Error) }),
+        'tree liveness assessment failed — proceeding with kill',
+      );
+      expect(killLine()).toMatchObject({ reason: 'stalled_operation', liveness: 'assessment_failed' });
+    });
+
+    it('the kill still sends one resend notice and never claims the task was done', async () => {
+      const notifyUser = await stallAndKill(async () => ({ alive: false, cpuDeltaMs: 0, pidChurn: 0, pidCount: 1 }));
+      expect(notifyUser).toHaveBeenCalledOnce();
+      expect(notifyUser).toHaveBeenCalledWith(STALLED_OPERATION_NOTICE);
+      expect(STALLED_OPERATION_NOTICE).toMatch(/terminated/);
+      expect(STALLED_OPERATION_NOTICE).not.toMatch(/\b(done|completed|finished|resolved)\b/i);
+    });
+
+    it('control: a tree with CPU progress still defers the kill', async () => {
+      const sm = new SessionManager({
+        db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+        treeLivenessAssessor: vi.fn(async () => ({ alive: true, cpuDeltaMs: 900, pidChurn: 0, pidCount: 3 })),
+      });
+      await sm.spawnSession();
+      await sm.sendTurn('long build');
+      mockLogger.warn.mockClear();
+      sm.recoverStalledOperation('toolu_f7_busy', 'Bash');
+      await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+      expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+      expect(killLine()).toBeUndefined();
+    });
   });
 
   it('CAS token prevents rearmed timer from acting on stale liveness verdict', async () => {

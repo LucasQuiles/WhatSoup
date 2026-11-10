@@ -3,7 +3,8 @@
  * Test titles deliberately retain their original release:activate --plan/--apply
  * describe labels so qualification full-name membership is unchanged.
  */
-import { readlinkSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { readFileSync, readlinkSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -29,7 +30,38 @@ import {
   REFRESH_ROLLBACK_FENCE_REL,
 } from '../helpers/release-activate-world.ts';
 
+/** The fence this repository ships; it requires the stalled-operation hold (#3903) of a rollback target. */
+const SHIPPED_REFRESH_FENCE = readFileSync(path.resolve(import.meta.dirname, '../..', REFRESH_ROLLBACK_FENCE_REL), 'utf8');
+
+/**
+ * The real predecessor releases (#3903). a804bb2a is main before the hold; 44d38619a is the release the q line runs
+ * on its Linux host. The a804bb2a fence is the file from that commit's tree, bound by its git blob id; 44d38619a's tree
+ * and its exported release manifest have no fence file.
+ */
+const A804BB2A_COMMIT = 'a804bb2a18f10e6e66248fb2556e0ee993deb47b';
+const A804BB2A_FENCE_BLOB = '4984c1c36366693f1ce2b6e5cf3aa856082f3eff';
+const A804BB2A_REFRESH_FENCE = readFileSync(
+  path.resolve(import.meta.dirname, '../fixtures/release-predecessors/a804bb2a18f1', REFRESH_ROLLBACK_FENCE_REL),
+  'utf8',
+);
+const R44D38619A_COMMIT = '44d38619ae4c38f23a9755c37555268feb0e4715';
+
+function gitBlobId(body: string): string {
+  const bytes = Buffer.from(body);
+  return createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+}
+
 let fixture: Fixture;
+
+/** A world whose new release fails verification, so apply attempts an automatic rollback. */
+function failingNewReleaseWorld(oldCommit = OLD_COMMIT): SimulatedLaunchd {
+  return new SimulatedLaunchd(fixture, {
+    health: (root) => ({
+      status: 200,
+      body: diagnosticBody(root === fixture.newRelease ? NEW_COMMIT : oldCommit, root !== fixture.newRelease),
+    }),
+  });
+}
 
 function useFixture(next: Fixture): void {
   fixture = next;
@@ -101,6 +133,21 @@ describe('release:activate --plan', () => {
     });
   });
 
+  it.each(['rollbackTarget', 'rollbackCapabilities'] as const)(
+    'refuses a candidate whose refresh fence %s names an unknown key',
+    async (section) => {
+      const known = { claudeRefreshOwnerV3: 3, stalledOperationHoldV1: 1 };
+      const withUnknown = { ...known, unknownFenceV1: 1 };
+      await expectRefreshFencePlanRefusal(() => {
+        writeRefreshRollbackFenceRaw(fixture.newRelease, JSON.stringify({
+          schemaVersion: 1,
+          activationRequirements: { rollbackTarget: section === 'rollbackTarget' ? withUnknown : known },
+          rollbackCapabilities: section === 'rollbackCapabilities' ? withUnknown : known,
+        }));
+      });
+    },
+  );
+
 });
 
 describe('release:activate --apply', () => {
@@ -111,8 +158,8 @@ describe('release:activate --apply', () => {
     const plan = await run(world, activationArgs(fixture));
     expect(plan.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
     expect(plan.json.rollbackRefreshFence).toMatchObject({
-      candidateRequirement: 3,
-      targetCapabilityAtPlan: 0,
+      candidateRequirement: { claudeRefreshOwnerV3: 3, stalledOperationHoldV1: 0 },
+      targetCapabilityAtPlan: { claudeRefreshOwnerV3: 0, stalledOperationHoldV1: 0 },
       targetCompatibleAtPlan: false,
     });
 
@@ -321,6 +368,98 @@ describe('release:activate --apply', () => {
     expect(result.json.outcome).toBe('rolled-back');
     expect(readlinkSync(fixture.wrapperLink)).toBe(path.join(fixture.oldRelease, 'deploy', 'whatsoup'));
     expect(world.releasesStarted().filter((root) => root === fixture.oldRelease)).toHaveLength(2);
+  });
+
+  it('blocks automatic rollback before stop to a target with the a804bb2a fence that lacks the stalled-operation hold', async () => {
+    expect(gitBlobId(A804BB2A_REFRESH_FENCE)).toBe(A804BB2A_FENCE_BLOB);
+    writeRefreshRollbackFenceRaw(fixture.newRelease, SHIPPED_REFRESH_FENCE);
+    writeRefreshRollbackFenceRaw(fixture.oldRelease, A804BB2A_REFRESH_FENCE);
+    rewriteReleaseManifestCommit(fixture.oldRelease, A804BB2A_COMMIT);
+
+    const plan = await run(failingNewReleaseWorld(A804BB2A_COMMIT), activationArgs(fixture));
+    expect(plan.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    expect(plan.json.rollbackRefreshFence).toMatchObject({
+      candidateRequirement: { claudeRefreshOwnerV3: 3, stalledOperationHoldV1: 1 },
+      targetCapabilityAtPlan: { claudeRefreshOwnerV3: 3, stalledOperationHoldV1: 0 },
+      targetCompatibleAtPlan: false,
+    });
+
+    const world = failingNewReleaseWorld(A804BB2A_COMMIT);
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(5);
+    expect(result.json.outcome).toBe('rollback-blocked-refresh-fence');
+    expect(result.json.rollback).toMatchObject({ refreshFenceBlockedAt: 'before-instance-stop' });
+    expect(readlinkSync(fixture.wrapperLink)).toBe(path.join(fixture.newRelease, 'deploy', 'whatsoup'));
+    expect(world.releasesStarted().filter((root) => root === fixture.oldRelease)).toHaveLength(1);
+  });
+
+  it('blocks automatic rollback before stop to release 44d38619a, which has no fence file', async () => {
+    writeRefreshRollbackFenceRaw(fixture.newRelease, SHIPPED_REFRESH_FENCE);
+    rewriteReleaseManifestCommit(fixture.oldRelease, R44D38619A_COMMIT);
+
+    const plan = await run(failingNewReleaseWorld(R44D38619A_COMMIT), activationArgs(fixture));
+    expect(plan.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    expect(plan.json.rollbackRefreshFence).toMatchObject({
+      candidateRequirement: { claudeRefreshOwnerV3: 3, stalledOperationHoldV1: 1 },
+      targetCapabilityAtPlan: { claudeRefreshOwnerV3: 0, stalledOperationHoldV1: 0 },
+      targetCompatibleAtPlan: false,
+    });
+
+    const world = failingNewReleaseWorld(R44D38619A_COMMIT);
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(5);
+    expect(result.json.outcome).toBe('rollback-blocked-refresh-fence');
+    expect(result.json.rollback).toMatchObject({ refreshFenceBlockedAt: 'before-instance-stop' });
+    expect(readlinkSync(fixture.wrapperLink)).toBe(path.join(fixture.newRelease, 'deploy', 'whatsoup'));
+    expect(world.releasesStarted().filter((root) => root === fixture.oldRelease)).toHaveLength(1);
+  });
+
+  it('blocks automatic rollback before stop when the target refresh fence names an unknown key', async () => {
+    writeRefreshRollbackFenceRaw(fixture.newRelease, SHIPPED_REFRESH_FENCE);
+    const levels = { claudeRefreshOwnerV3: 3, stalledOperationHoldV1: 1, unknownFenceV1: 1 };
+    writeRefreshRollbackFenceRaw(fixture.oldRelease, JSON.stringify({
+      schemaVersion: 1,
+      activationRequirements: { rollbackTarget: levels },
+      rollbackCapabilities: levels,
+    }));
+    const world = failingNewReleaseWorld();
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(5);
+    expect(result.json.outcome).toBe('rollback-blocked-refresh-fence');
+    expect(result.json.rollback).toMatchObject({ refreshFenceBlockedAt: 'before-instance-stop' });
+    expect(world.releasesStarted().filter((root) => root === fixture.oldRelease)).toHaveLength(1);
+  });
+
+  it('rolls back to a target whose sealed fence provides both the refresh owner and the stalled-operation hold', async () => {
+    writeRefreshRollbackFenceRaw(fixture.newRelease, SHIPPED_REFRESH_FENCE);
+    writeRefreshRollbackFence(fixture.oldRelease, { holdRequirement: 1, holdCapability: 1 });
+    const world = failingNewReleaseWorld();
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.rolledBack);
+    expect(result.json.outcome).toBe('rolled-back');
+    expect(readlinkSync(fixture.wrapperLink)).toBe(path.join(fixture.oldRelease, 'deploy', 'whatsoup'));
+    expect(world.releasesStarted().filter((root) => root === fixture.oldRelease)).toHaveLength(2);
+  });
+
+  it('refuses before live switch when the candidate stalled-operation hold requirement changes after planning', async () => {
+    writeRefreshRollbackFence(fixture.newRelease, { holdRequirement: 1, holdCapability: 1 });
+    const world = new SimulatedLaunchd(fixture);
+    const context = await buildActivationContext(world.host(), parseActivationArgs(activationArgs(fixture, ['--apply'])));
+    writeRefreshRollbackFence(fixture.newRelease, { holdRequirement: 2, holdCapability: 1 });
+
+    const outcome = await applyActivation(world.host(), context);
+
+    expect(outcome.outcome).toBe('refused');
+    expect(outcome.steps).toContainEqual(expect.objectContaining({
+      step: 'recheck-refresh-rollback-fence-requirement-before-switch', ok: false,
+    }));
+    expect(world.mutatingCalls()).toEqual([]);
   });
 
 });
