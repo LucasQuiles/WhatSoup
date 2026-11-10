@@ -16,8 +16,10 @@
 - `transport.no_consumer` and `ingest.store_failed` emit warning alerts under
   the fixed sources `inbound_no_consumer` and `inbound_store_failed`.
   An accepted emission suppresses repeated alerts for that reason for
-  15 minutes on the monotonic clock. Failed or thrown emissions leave the next
-  observation eligible to retry.
+  15 minutes on the monotonic clock. Failed or thrown emissions suppress retries
+  for one minute; a later observation can retry after that interval. There is no
+  background retry timer. Log attempts are separately limited to once per reason
+  every 15 minutes, while the observation counters continue to increment.
 - A persistence failure can occur after the message row was written. Its
   observation therefore leaves retention unknown and does not journal or
   replay the message. Recording does not change admission or recovery.
