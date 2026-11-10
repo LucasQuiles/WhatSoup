@@ -536,6 +536,7 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 import * as registerAllModule from '../../../src/mcp/register-all.ts';
 import { AgentRuntime, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
 import { parseGeminiAcpEvent } from '../../../src/runtimes/agent/providers/gemini-acp-parser.ts';
+import { parseCodexEvent } from '../../../src/runtimes/agent/providers/codex-parser.ts';
 import { __resetModelCatalogueCacheForTest } from '../../../src/runtimes/agent/model-catalogue-resolver.ts';
 import { providerServerErrorNoFallbackNotice, providerUnknownTerminalNotice, renderUserMessage } from '../../../src/runtimes/agent/response-templates.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
@@ -2028,7 +2029,7 @@ describe('AgentRuntime', () => {
     }
   });
 
-  it('uses token_usage events for next-turn measurement when result has no token counts', async () => {
+  it('treats a Codex token_usage-only post-compact turn as unknown context', async () => {
     vi.useFakeTimers();
     try {
       const db = makeDb();
@@ -2049,13 +2050,20 @@ describe('AgentRuntime', () => {
         messageId: 'msg-large-codex-follow-up',
         content: 'large codex follow-up',
       }));
-      // #3717c: token_usage is the measurement point; the value is the known context.
-      await emitRequestUsage(250);
-      await emitTokenUsage(250);
+      // #3896 review 5842877599: Codex reports only thread-level token usage, never a per-request
+      // context, so this turn's context is unknown and the convergence guards record nothing.
+      const codexUsage = parseCodexEvent(JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'thread/tokenUsage/updated',
+        params: { tokenUsage: { input_tokens: 250, output_tokens: 0 } },
+      }));
+      expect(codexUsage).toEqual({ type: 'token_usage', inputTokens: 250, outputTokens: 0 });
+      capturedOnEventRef.current?.(codexUsage!);
+      await Promise.resolve();
       await emitAgentResultWithoutTokens('ok');
 
-      expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(1);
-      expect(runtime.getHealthSnapshot().details.autoCompactIneffective).toBe(1);
+      expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(0);
+      expect(runtime.getHealthSnapshot().details.autoCompactIneffective).toBe(0);
     } finally {
       vi.useRealTimers();
     }
