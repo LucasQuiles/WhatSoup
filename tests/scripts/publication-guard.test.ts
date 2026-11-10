@@ -531,6 +531,8 @@ describe('publication guard branch-diff limits', () => {
       commits: MAX_EXACT_COMMIT_COUNT,
       patchBytes: 64 * 1024 * 1024,
       addedLines: 2_000_000,
+      findings: 1_000,
+      retainedBytes: 1024 * 1024,
       baseBlobs: MAX_EXACT_BLOB_COUNT,
       baseBytes: MAX_EXACT_AGGREGATE_BLOB_BYTES,
       milliseconds: 60_000,

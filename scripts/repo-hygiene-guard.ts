@@ -555,27 +555,23 @@ export function baseRefFileLines(
   baseRef: string,
   filePath: string,
   cache: Map<string, Set<string>>,
-  timeout?: number,
+  timeout?: number | (() => number),
+  beforeBlobRead?: (bytes: number) => void,
 ): Set<string> {
   const cached = cache.get(filePath);
   if (cached) return cached;
   let lines = new Set<string>();
-  // ls-tree is quiet for paths absent at the base (empty output, no stderr), so a
-  // branch-new file never emits a `fatal: path ... not in <base>` line. Only read the
-  // blob when the path exists at the base. A failed or timed-out read leaves the set
-  // empty, so every line of the file is scanned: a failure can only add findings.
-  let existsAtBase = false;
-  try {
-    existsAtBase = git(['ls-tree', baseRef, '--', filePath], cwd, timeout).trim() !== '';
-  } catch {
-    existsAtBase = false;
-  }
-  if (existsAtBase) {
-    try {
-      lines = new Set(git(['show', `${baseRef}:${filePath}`], cwd, timeout).split(/\r?\n/));
-    } catch {
-      lines = new Set();
+  const remaining = () => typeof timeout === 'function' ? timeout() : timeout;
+  // One metadata read proves absence or supplies the exact blob and its size.
+  // Read failures propagate: an unavailable base cannot establish a new violation.
+  const entry = git(['ls-tree', '-z', '-l', baseRef, '--', `:(literal)${filePath}`], cwd, remaining());
+  if (entry !== '') {
+    const match = /^\d{6} blob ([a-f0-9]{40,64})\s+(\d+)\t([^\0]*)\0$/.exec(entry);
+    if (!match || match[3] !== filePath || !Number.isSafeInteger(Number(match[2]))) {
+      throw new Error('invalid base blob metadata');
     }
+    beforeBlobRead?.(Number(match[2]));
+    lines = new Set(git(['show', match[1]], cwd, remaining()).split(/\r?\n/));
   }
   cache.set(filePath, lines);
   return lines;

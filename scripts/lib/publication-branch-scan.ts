@@ -1,4 +1,4 @@
-import { createVerifiedBinaryCheck, DISCLOSURE_PATCH_FLAGS, git, isTextCandidate, normalizeRepoPath } from './guard-core.ts';
+import { createVerifiedBinaryCheck, DISCLOSURE_PATCH_FLAGS, git, isTextCandidate, normalizeRepoPath, printableText } from './guard-core.ts';
 import { MAX_EXACT_AGGREGATE_BLOB_BYTES, MAX_EXACT_BLOB_COUNT, MAX_EXACT_COMMIT_COUNT } from './ci-control/git-input.ts';
 import { isFixtureFile } from './repo-hygiene-policy.ts';
 import { baseRefFileLines, iterateUnifiedDiffAddedLines } from '../repo-hygiene-guard.ts';
@@ -17,6 +17,8 @@ export interface BranchScanLimits {
   commits: number;
   patchBytes: number;
   addedLines: number;
+  findings: number;
+  retainedBytes: number;
   baseBlobs: number;
   baseBytes: number;
   milliseconds: number;
@@ -31,11 +33,15 @@ export interface BranchScanLimits {
  * patch limit is the git() output ceiling, so a larger patch fails its read first;
  * the added-line limit leaves about five times that PR's count. The time limit
  * covers the whole scan, git reads included, at about sixty times that PR's time.
+ * Finding and retained-byte limits bound the match map and printed diagnostics,
+ * including escaped characters, independently of the much larger input budget.
  */
 export const BRANCH_SCAN_LIMITS: Readonly<BranchScanLimits> = Object.freeze({
   commits: MAX_EXACT_COMMIT_COUNT,
   patchBytes: 64 * 1024 * 1024,
   addedLines: 2_000_000,
+  findings: 1_000,
+  retainedBytes: 1024 * 1024,
   baseBlobs: MAX_EXACT_BLOB_COUNT,
   baseBytes: MAX_EXACT_AGGREGATE_BLOB_BYTES,
   milliseconds: 60_000,
@@ -56,14 +62,6 @@ export function branchScanOverLimit(
 export type BranchDiffResult<Issue> =
   | { issues: Issue[]; used: BranchScanLimits }
   | { inconclusive: string; used: BranchScanLimits };
-
-function baseBlobByteCount(cwd: string, baseRef: string, filePath: string, timeout: number): number {
-  try {
-    return Number(git(['cat-file', '-s', `${baseRef}:${filePath}`], cwd, timeout).trim());
-  } catch {
-    return 0; // absent at the base: nothing to read
-  }
-}
 
 /**
  * The private-literal scan over what a branch adds relative to its base, for the
@@ -96,7 +94,7 @@ export function scanBranchRange<Issue extends { line?: number }>(
   now: () => number = Date.now,
 ): BranchDiffResult<Issue> {
   const started = now();
-  const used: BranchScanLimits = { commits: 0, patchBytes: 0, addedLines: 0, baseBlobs: 0, baseBytes: 0, milliseconds: 0 };
+  const used: BranchScanLimits = { commits: 0, patchBytes: 0, addedLines: 0, findings: 0, retainedBytes: 0, baseBlobs: 0, baseBytes: 0, milliseconds: 0 };
   const overLimit = (): BranchDiffResult<Issue> | null => {
     used.milliseconds = now() - started;
     const key = branchScanOverLimit(used, limits);
@@ -106,6 +104,7 @@ export function scanBranchRange<Issue extends { line?: number }>(
   };
   // A read that outlives the time left fails, and a failed read is INCONCLUSIVE.
   const timeLeft = () => Math.max(1, limits.milliseconds - (now() - started));
+  let readStop: BranchDiffResult<Issue> | null = null;
   try {
     const mergeBase = git(['merge-base', baseRef, head], cwd, timeLeft()).trim();
     const range = `${mergeBase}..${head}`;
@@ -121,7 +120,7 @@ export function scanBranchRange<Issue extends { line?: number }>(
     if (patchStop) return patchStop;
 
     const isVerifiedBinary = createVerifiedBinaryCheck(cwd, timeLeft);
-    const matches = new Map<string, { filePath: string; line: number; text: string; found: Issue[] }>();
+    const matches = new Map<string, { filePath: string; text: string; found: Issue[] }>();
     for (const added of iterateUnifiedDiffAddedLines(patches)) {
       used.addedLines += 1;
       const lineStop = overLimit();
@@ -131,7 +130,18 @@ export function scanBranchRange<Issue extends { line?: number }>(
       const key = `${filePath}\0${added.text}`;
       if (matches.has(key)) continue;
       const found = scanLine(filePath, added.text);
-      if (found.length > 0) matches.set(key, { filePath, line: added.line, text: added.text, found });
+      if (found.length > 0) {
+        used.findings += found.length;
+        const countStop = overLimit();
+        if (countStop) return countStop;
+        const located = found.map((issue) => ({ ...issue, line: added.line }));
+        // Bound retained source and escaped diagnostics before adding to the map.
+        used.retainedBytes += Buffer.byteLength(key + added.text, 'utf8')
+          + Buffer.byteLength(printableText(JSON.stringify(located, null, 2)), 'utf8');
+        const sizeStop = overLimit();
+        if (sizeStop) return sizeStop;
+        matches.set(key, { filePath, text: added.text, found: located });
+      }
     }
     // A blob read on the last line can use the time left, so check once more.
     const loopStop = overLimit();
@@ -142,15 +152,22 @@ export function scanBranchRange<Issue extends { line?: number }>(
     for (const match of matches.values()) {
       if (!baseLines.has(match.filePath)) {
         used.baseBlobs += 1;
-        used.baseBytes += baseBlobByteCount(cwd, baseRef, match.filePath, timeLeft());
         const baseStop = overLimit();
         if (baseStop) return baseStop;
       }
-      if (baseRefFileLines(cwd, baseRef, match.filePath, baseLines, timeLeft()).has(match.text)) continue;
-      issues.push(...match.found.map((issue) => ({ ...issue, line: match.line })));
+      const lines = baseRefFileLines(cwd, baseRef, match.filePath, baseLines, timeLeft, (bytes) => {
+        used.baseBytes += bytes;
+        readStop = overLimit();
+        if (readStop) throw new Error('base read budget exhausted');
+      });
+      const baseStop = overLimit();
+      if (baseStop) return baseStop;
+      if (lines.has(match.text)) continue;
+      issues.push(...match.found);
     }
     return { issues, used };
   } catch (error) {
+    if (readStop) return readStop;
     used.milliseconds = now() - started;
     return { inconclusive: `a git read failed: ${String((error as Error).message).split('\n')[0]}`, used: { ...used } };
   }

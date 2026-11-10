@@ -332,7 +332,91 @@ describe('publication branch scan — line and time limits', () => {
   });
 });
 
-describe('publication branch scan — the base', () => {
+describe('publication branch scan — bounded findings and base reads', () => {
+  it.each(['ls-tree', 'show'])('reports a failed base %s read as inconclusive through the normal command', (command) => {
+    const { repo } = branchRepo();
+    commitFile(repo, 'note.txt', `// ${privatePath}\n`, 'new literal');
+    fakeGit(repo, `"$1" == "${command}"`, 'exit 1');
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(runPublicationGuard(['--branch-diff'], repo)).toBe(2);
+    expect(error.mock.calls.join('\n')).toContain('INCONCLUSIVE');
+    expect(error.mock.calls.join('\n')).not.toContain('error local-home-path:');
+  });
+
+  it('stops before retaining too many findings or reading their bases', () => {
+    const { repo } = branchRepo();
+    commitFile(repo, 'src/many.ts', twentyLines, 'twenty lines');
+    const scanned: string[] = [];
+    const result = scanBranchRange(repo, 'origin/main', (_path, text) => {
+      scanned.push(text);
+      return [{ message: text, line: 0 }];
+    }, { ...BRANCH_SCAN_LIMITS, findings: 2 });
+
+    expect(result).toMatchObject({ inconclusive: 'findings 3 is over the limit of 2', used: { findings: 3, baseBlobs: 0 } });
+    expect(result).not.toHaveProperty('issues');
+    expect(scanned).toHaveLength(3);
+  });
+
+  it('reads the base size without a separate size query', () => {
+    const { repo } = branchRepo();
+    commitFile(repo, 'note.txt', `// ${privatePath}\n// ${privatePath} again\n`, 'two literals');
+    fakeGit(repo, '"$1" == "cat-file" && "$2" == "-s"', 'exit 1');
+    const result = validateBranchDiff(repo, 'origin/main');
+
+    expect(result).toMatchObject({ used: { baseBlobs: 1, baseBytes: Buffer.byteLength('public-safe\n') } });
+    expect('issues' in result && result.issues.map((issue) => issue.line)).toEqual([1, 2]);
+  });
+
+  it('keeps a branch-new file distinct from an unreadable base', () => {
+    const { repo } = branchRepo();
+    commitFile(repo, 'new.txt', `// ${privatePath}\n`, 'new file');
+    fakeGit(repo, '"$1" == "show"', 'exit 1');
+
+    expect(guardRun(repo, '--branch-diff')).toEqual({ code: 1, paths: ['new.txt'], codes: ['local-home-path'] });
+  });
+
+  it('deduplicates repeated source lines at the finding limit', () => {
+    const { repo } = branchRepo();
+    commitFile(repo, 'note.txt', `// ${privatePath}\n// ${privatePath}\n`, 'repeated literal');
+    const result = validateBranchDiff(repo, 'origin/main', { ...BRANCH_SCAN_LIMITS, findings: 1 });
+
+    expect(result).toMatchObject({ used: { findings: 1, baseBlobs: 1 } });
+    expect('issues' in result && result.issues.map((issue) => issue.code)).toEqual(['local-home-path']);
+  });
+
+  it('returns one inconclusive diagnostic through the CLI when the finding budget is exhausted', () => {
+    const { repo } = branchRepo();
+    commitFile(repo, 'note.txt', Array.from({ length: 1_001 }, (_, i) => `// ${privatePath}/${i}\n`).join(''), 'many literals');
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(runPublicationGuard(['--branch-diff'], repo)).toBe(2);
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error.mock.calls[0][0]).toContain('findings 1001 is over the limit of 1000');
+  });
+
+  it('counts several findings on one line before retaining any of them', () => {
+    const { repo } = branchRepo();
+    commitFile(repo, 'src/note.ts', '// one line\n', 'one line');
+    const result = scanBranchRange(repo, 'origin/main', () => [{ code: 'one', line: 0 }, { code: 'two', line: 0 }], { ...BRANCH_SCAN_LIMITS, findings: 1 });
+
+    expect(result).toMatchObject({ inconclusive: 'findings 2 is over the limit of 1', used: { baseBlobs: 0 } });
+    expect(result).not.toHaveProperty('issues');
+  });
+
+  it.each([
+    ['source text', 'x'.repeat(2_000), 'small'],
+    ['diagnostics', 'small', '\u202e'.repeat(400)],
+  ])('bounds retained %s before reading bases', (_label, source, message) => {
+    const { repo } = branchRepo();
+    commitFile(repo, 'src/note.ts', `${source}\n`, 'one line');
+    const result = scanBranchRange(repo, 'origin/main', () => [{ message, line: 0 }], { ...BRANCH_SCAN_LIMITS, retainedBytes: 1_000 });
+
+    expect('inconclusive' in result && result.inconclusive).toMatch(/^retainedBytes /);
+    expect(result.used.baseBlobs).toBe(0);
+    expect(result).not.toHaveProperty('issues');
+  });
+
   // origin/main stands for any local base that already holds the branch's line: a
   // fork's main, a tracking ref set by hand, or the main of another remote.
   const repoWithBaseHoldingTheLine = () => {
