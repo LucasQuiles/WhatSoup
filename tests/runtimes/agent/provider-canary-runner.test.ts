@@ -294,7 +294,12 @@ describe('provider canary runner', () => {
 });
 
 type ProcessGroupReap = { reaped: boolean; reapError?: string; inconclusive?: true };
-type ReapDeps = { kill?: GroupSignalSeam; probeGroup?: (pgid: number) => GroupMembershipAnswer };
+type ReapDeps = {
+  kill?: GroupSignalSeam;
+  probeGroup?: (pgid: number) => GroupMembershipAnswer;
+  /** The live member pids of the group, or undefined when the listing cannot be read. */
+  probeMembers?: (pgid: number) => number[] | undefined;
+};
 type ReapApi = {
   reapProcessGroup?: (pgid: number, deadlineMs: number, deps?: ReapDeps) => Promise<ProcessGroupReap>;
   /** The optional second argument carries the final reap's seams. */
@@ -308,6 +313,74 @@ const reapApi = canaryRunner as unknown as ReapApi;
 
 /** Above every pid limit (Linux 4194304, macOS 99999): a seam slip can signal no real group. */
 const NO_SUCH_GROUP = 4_194_305;
+/** Member pids above every pid limit too, for seams that answer signal 0 to one listed member. */
+const NO_SUCH_MEMBER = NO_SUCH_GROUP + 1;
+const NO_SUCH_MEMBER_2 = NO_SUCH_GROUP + 2;
+
+/**
+ * A group kill seam for the refused-kill cases. SIGTERM to the group is refused with EPERM, and
+ * SIGKILL then ends the group. Signal 0 to a member pid (a positive target) is recorded in
+ * `memberChecks`, and answers with `memberErrors[pid]` when one is set.
+ */
+function refusedThenGoneSeam(
+  memberChecks: Array<[number, NodeJS.Signals | 0]>,
+  memberErrors: Partial<Record<number, 'EPERM' | 'ESRCH' | 'EINVAL'>>,
+): GroupSignalSeam {
+  let killed = false;
+  return (target, signal) => {
+    if (target > 0) {
+      memberChecks.push([target, signal]);
+      const code = memberErrors[target];
+      if (code !== undefined) throw groupKillError(code);
+      return;
+    }
+    if (signal === 'SIGTERM') throw groupKillError('EPERM');
+    if (signal === 'SIGKILL') { killed = true; return; }
+    if (killed) throw groupKillError('ESRCH');
+  };
+}
+
+type MemberAnswerRow = [
+  string,
+  () => number[] | undefined,
+  Partial<Record<number, 'EPERM' | 'ESRCH' | 'EINVAL'>>,
+  number[],
+];
+
+/**
+ * A group kill refused with EPERM while the probe answers live, where no listed live member itself
+ * refuses signal 0: the group-level EPERM was a membership race. Each row gives the member list,
+ * the per-member signal-0 answers, and the member pids that must each get one signal-0 check.
+ */
+const MEMBER_RACE_ROWS: MemberAnswerRow[] = [
+  [
+    'every listed member accepts signal 0, as when a member forks and exits before its signal',
+    () => [NO_SUCH_MEMBER, NO_SUCH_MEMBER_2],
+    {},
+    [NO_SUCH_MEMBER, NO_SUCH_MEMBER_2],
+  ],
+  [
+    'the listed member joined the group after the kill and accepts signal 0',
+    () => [NO_SUCH_MEMBER],
+    {},
+    [NO_SUCH_MEMBER],
+  ],
+  [
+    'one listed member is already gone and the other accepts signal 0',
+    () => [NO_SUCH_MEMBER, NO_SUCH_MEMBER_2],
+    { [NO_SUCH_MEMBER]: 'ESRCH' },
+    [NO_SUCH_MEMBER, NO_SUCH_MEMBER_2],
+  ],
+  [
+    'signal 0 to the listed member fails with an unexpected code',
+    () => [NO_SUCH_MEMBER],
+    { [NO_SUCH_MEMBER]: 'EINVAL' },
+    [NO_SUCH_MEMBER],
+  ],
+  ['the member list holds no live member', () => [], {}, []],
+  ['the member list cannot be read', () => undefined, {}, []],
+  ['the member listing throws', () => { throw new Error('ps failed'); }, {}, []],
+];
 
 describe('provider canary process-group reap (issue 3568)', () => {
   it('reads a group whose members are all zombies after SIGTERM as reaped, with no SIGKILL', async () => {
@@ -440,17 +513,37 @@ describe('provider canary process-group reap (issue 3568)', () => {
   it('keeps the reap conclusive when a kill is refused with EPERM on a live member, even though the group then goes', async () => {
     expect(typeof reapApi.reapProcessGroup).toBe('function');
     if (!reapApi.reapProcessGroup) return;
-    let killed = false;
-    // SIGTERM is refused while a member lives; SIGKILL then ends the group. The provider ran a
-    // member the canary may not signal, which is evidence about the provider.
-    const kill: GroupSignalSeam = (_target, signal) => {
-      if (signal === 'SIGTERM') throw groupKillError('EPERM');
-      if (signal === 'SIGKILL') { killed = true; return; }
-      if (killed) throw groupKillError('ESRCH');
-    };
-    const reap = await reapApi.reapProcessGroup(NO_SUCH_GROUP, Date.now() + 300, { kill, probeGroup: () => 'live' });
+    // SIGTERM to the group is refused while the probe answers live, and signal 0 to the listed live
+    // member is itself refused: member-level evidence about the provider. SIGKILL then ends the group.
+    const memberChecks: Array<[number, NodeJS.Signals | 0]> = [];
+    const reap = await reapApi.reapProcessGroup(NO_SUCH_GROUP, Date.now() + 300, {
+      kill: refusedThenGoneSeam(memberChecks, { [NO_SUCH_MEMBER]: 'EPERM' }),
+      probeGroup: () => 'live',
+      probeMembers: () => [NO_SUCH_MEMBER],
+    });
     expect(reap).toEqual({ reaped: true, reapError: 'group kill failed: EPERM; group membership probe: live' });
+    expect(memberChecks).toEqual([[NO_SUCH_MEMBER, 0]]);
   });
+
+  it.each(MEMBER_RACE_ROWS)(
+    'calls the reap inconclusive when a kill is refused with EPERM while the probe answers live, but %s, and the group then goes',
+    async (_case, probeMembers, memberErrors, checkedMembers) => {
+      expect(typeof reapApi.reapProcessGroup).toBe('function');
+      if (!reapApi.reapProcessGroup) return;
+      const memberChecks: Array<[number, NodeJS.Signals | 0]> = [];
+      const reap = await reapApi.reapProcessGroup(NO_SUCH_GROUP, Date.now() + 300, {
+        kill: refusedThenGoneSeam(memberChecks, memberErrors),
+        probeGroup: () => 'live',
+        probeMembers,
+      });
+      expect(reap).toEqual({
+        reaped: true,
+        reapError: 'group kill failed: EPERM; group membership probe: live',
+        inconclusive: true,
+      });
+      expect(memberChecks).toEqual(checkedMembers.map((pid) => [pid, 0]));
+    },
+  );
 
   it.each([
     [

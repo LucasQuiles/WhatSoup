@@ -127,3 +127,44 @@ describe('classifyGroupMembership (a multithreaded zombie can still run)', () =>
     expect(classifyGroupMembership(` 101   100 ${stat}\n 200   200 S\n`, 100)).toBe(expected);
   });
 });
+
+type LiveMembersApi = { liveGroupMembers?: (psOutput: string, pgid: number) => number[] | undefined };
+// Read through the namespace, so a missing export fails its own assertion instead of the import.
+const membersApi = membershipModule as unknown as LiveMembersApi;
+
+describe('liveGroupMembers (the members a refused group kill is checked against)', () => {
+  it('lists the live member pids of the group: running rows and Zl count; Z rows and other groups do not', () => {
+    expect(typeof membersApi.liveGroupMembers).toBe('function');
+    if (!membersApi.liveGroupMembers) return;
+    const listing = [
+      ' 101   100 S',
+      ' 102   100 Z',
+      ' 103   100 Zl',
+      ' 104   100 R+',
+      ' 105   100 Zs',
+      ' 200   200 S',
+      ' 201   200 Zl',
+      '',
+    ].join('\n');
+    expect(membersApi.liveGroupMembers(listing, 100)).toEqual([101, 103, 104]);
+  });
+
+  it('lists no pid for a group that holds only zombies, or that has no row in the listing', () => {
+    expect(typeof membersApi.liveGroupMembers).toBe('function');
+    if (!membersApi.liveGroupMembers) return;
+    const listing = ' 101   100 Z\n 200   200 S\n';
+    expect(membersApi.liveGroupMembers(listing, 100)).toEqual([]);
+    expect(membersApi.liveGroupMembers(listing, 300)).toEqual([]);
+  });
+
+  it.each([
+    ['an empty listing', ''],
+    ['a blank listing', '\n   \n'],
+    ['a listing with a non-numeric pid', ' 101   100 S\nabc   100 S\n'],
+    ['a listing with a row that has no state', ' 101   100 S\n 102   100\n'],
+  ] as const)('reads %s as unreadable, never as a group with no live member', (_case, listing) => {
+    expect(typeof membersApi.liveGroupMembers).toBe('function');
+    if (!membersApi.liveGroupMembers) return;
+    expect(membersApi.liveGroupMembers(listing, 100)).toBe(undefined);
+  });
+});
