@@ -103,7 +103,8 @@ function validPid(pid: number): boolean {
 }
 
 function validUniqueId(value: string): boolean {
-  return /^[1-9]\d{0,19}$/u.test(value) && BigInt(value) <= 18_446_744_073_709_551_615n;
+  if (value.length === 0 || value.length > 20 || value[0] === '0' || /[^0-9]/u.test(value)) return false;
+  return BigInt(value) <= 18_446_744_073_709_551_615n;
 }
 
 function command(args: string[], deps: IdentityDependencies): string {

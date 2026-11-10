@@ -11,10 +11,11 @@ import {
 const mocks = vi.hoisted(() => ({
   readFileSync: vi.fn(),
   execFileSync: vi.fn(),
-  birthToken: vi.fn((pid: number): string | null => `birth:${pid}`),
+  birthToken: vi.fn((pid: number): string | null => `linux-start:${pid}`),
 }));
 
-vi.mock('../../../src/lib/process-identity.ts', () => ({
+vi.mock('../../../src/lib/process-identity.ts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../src/lib/process-identity.ts')>(),
   probeProcessBirthToken: mocks.birthToken,
 }));
 
@@ -42,7 +43,7 @@ describe('defaultPidOwnershipChecker', () => {
   beforeEach(() => {
     mocks.readFileSync.mockReset();
     mocks.execFileSync.mockReset();
-    mocks.birthToken.mockReset().mockImplementation((pid: number) => `birth:${pid}`);
+    mocks.birthToken.mockReset().mockImplementation((pid: number) => `linux-start:${pid}`);
     killSpy = vi.spyOn(process, 'kill').mockImplementation((() => true) as typeof process.kill);
   });
 

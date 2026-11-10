@@ -8,7 +8,7 @@ vi.mock('node:child_process', () => ({
 
 vi.mock('../../../src/lib/process-identity.ts', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../../src/lib/process-identity.ts')>(),
-  probeProcessBirthToken: (pid: number) => pid === 51_001 ? 'birth:fixture-child' : null,
+  probeProcessBirthToken: (pid: number) => pid === 51_001 ? 'linux-start:51001' : null,
 }));
 
 import { spawn } from 'node:child_process';

@@ -169,6 +169,27 @@ export interface ProcessTreeRootAuthority {
   readonly birthToken: string;
 }
 
+export interface ProcessTreeTarget {
+  readonly pid?: number;
+  readonly exitCode?: number | null;
+  readonly signalCode?: NodeJS.Signals | null;
+  kill(signal: NodeJS.Signals): boolean;
+}
+
+export interface RegisteredProcessTreeTerminationLease {
+  readonly target: ProcessTreeTarget;
+  readonly rootAuthority: ProcessTreeRootAuthority;
+}
+
+/**
+ * #1869: coarse, assumption-free divergence gauge emitted at each teardown.
+ * `offTreeCount` is the count of cgroup members not in this session's PPID-owned
+ * set (excluding the provider root itself) — a superset of the leaked reparented
+ * daemons (it also includes the main process and other sessions), so it is a
+ * trend gauge, NOT a per-session leak attribution. Classifying which off-tree
+ * members are session-owned-and-leaked requires a leak-signature decision that is
+ * out of scope here (tracked on #1869's reclaim design).
+ */
 export interface CgroupDivergenceInfo {
   readonly cgroupMemberCount: number;
   readonly ownedCount: number;

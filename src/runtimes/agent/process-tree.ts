@@ -22,8 +22,10 @@ import {
   type ProcessTreeDiagnosticFailureCode,
   type ProcessTreeDiagnosticSource,
   type ProcessTreeRootAuthority,
+  type ProcessTreeTarget,
   type ProcessTreeTerminationErrorCode,
   type ProcessTreeTerminationRetryClass,
+  type RegisteredProcessTreeTerminationLease,
 } from './process-tree-contract.ts';
 
 export {
@@ -40,18 +42,13 @@ export type {
   ProcessTreeDiagnosticFailureCode,
   ProcessTreeDiagnosticSource,
   ProcessTreeRootAuthority,
+  ProcessTreeTarget,
   ProcessTreeTerminationErrorCode,
   ProcessTreeTerminationRetryClass,
+  RegisteredProcessTreeTerminationLease,
 } from './process-tree-contract.ts';
 
 const log = createChildLogger('process-tree');
-
-export interface ProcessTreeTarget {
-  readonly pid?: number;
-  readonly exitCode?: number | null;
-  readonly signalCode?: NodeJS.Signals | null;
-  kill(signal: NodeJS.Signals): boolean;
-}
 
 interface ProcessTreeRootAuthorityBinding {
   readonly target: ProcessTreeTarget;
@@ -145,11 +142,6 @@ export function captureProcessTreeRootAuthority(
   } catch {
     return null;
   }
-}
-
-export interface RegisteredProcessTreeTerminationLease {
-  readonly target: ProcessTreeTarget;
-  readonly rootAuthority: ProcessTreeRootAuthority;
 }
 
 type ProcessTreeTargetState = 'live' | 'terminal' | 'unverifiable';
@@ -377,15 +369,6 @@ interface NormalizedProcessTreeTarget {
   signalRoot(signal: NodeJS.Signals): boolean;
 }
 
-/**
- * #1869: coarse, assumption-free divergence gauge emitted at each teardown.
- * `offTreeCount` is the count of cgroup members not in this session's PPID-owned
- * set (excluding the provider root itself) — a superset of the leaked reparented
- * daemons (it also includes the main process and other sessions), so it is a
- * trend gauge, NOT a per-session leak attribution. Classifying which off-tree
- * members are session-owned-and-leaked requires a leak-signature decision that is
- * out of scope here (tracked on #1869's reclaim design).
- */
 interface ProcessCensusRow {
   readonly pid: number;
   readonly ppid: number;
