@@ -364,6 +364,7 @@ export function queueStub(chatJid: string): IOutboundQueue {
     setDurability: vi.fn(),
     endTurn: vi.fn(),
     beginTurnEvidence: vi.fn(),
+    detachTurnEvidence: vi.fn(),
     flushTurnEvidence: vi.fn(async (turnId: string) => ({
       turnId,
       answerOpIds: [],

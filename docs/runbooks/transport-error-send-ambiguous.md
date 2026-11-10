@@ -88,6 +88,22 @@ The runtime contains the risk on every axis:
 
 ## Operator diagnosis steps
 
+For a per-chat provider crash, distinguish the crashed logical turn from its
+respawn continuation. Once a current-generation `respawn_continuation` event is
+admitted against an older runtime owner, new queue output is detached from the
+old turn's evidence. Already queued chunks retain their original attribution;
+the continuation retains its conversation, delivery route and inbound sequence.
+This prevents a continuation's ambiguous answer from creating a recovery job
+for the crashed turn. It does not change same-operation retry policy, prove
+delivery, or eliminate recovery jobs supported by the crashed turn's own output.
+
+A continuation with `is_terminal=0` can leave a continuity candidate at crash
+finalization even when its source sequence is retained. The existing continuity
+reconciler consumes candidates covered by a terminal record; this is bookkeeping,
+not proof of delivery. Inspect outbound status separately. See
+[crash continuation attribution](../durability.md#crash-continuation-attribution)
+and [#3841](https://github.com/LucasQuiles/WhatSoup/issues/3841).
+
 1. Read `payload.phase` first — it determines how much risk exists:
    `provider_call_started` / `ack_received` mean the message may have landed;
    `not_started` means it provably did not.

@@ -60,6 +60,66 @@ describe('OutboundQueue turn delivery evidence', () => {
     expect(leakedTimers, 'turn-evidence test leaked a timer').toBe(0);
   });
 
+  it('keeps buffered old chunks in evidence while separating subsequent continuation text', async () => {
+    const messenger = makeMessenger();
+    const durability = makeDurability();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(durability);
+    queue.setToolUpdateMode('minimal');
+    queue.setInboundSeq(42);
+    queue.beginTurnEvidence('crashed');
+    queue.enqueueStreamingText('old answer', 'answer');
+    queue.detachTurnEvidence('crashed');
+    queue.enqueueStreamingText('new answer', 'answer');
+
+    const evidence = await settle(queue.flushTurnEvidence('crashed'));
+    expect(evidence.answerOpIds).toEqual([1]);
+    expect(vi.mocked(messenger.sendMessage).mock.calls.map((call) => call[1]))
+      .toEqual(['old answer', 'new answer']);
+    expect(vi.mocked(durability.createOutboundOp).mock.calls.map((call) => call[0].sourceInboundSeq))
+      .toEqual([42, 42]);
+  });
+
+  it('detaches all subsequent enqueue kinds without changing route or inbound correlation', async () => {
+    const durability = makeDurability();
+    const queue = new OutboundQueue(makeMessenger(), CHAT_JID);
+    queue.setDurability(durability);
+    queue.setInboundSeq(42);
+    queue.beginTurnEvidence('crashed', { conversationKey: 'source-key', chatJid: 'source@s.whatsapp.net' });
+    queue.enqueueText('old status', 'status');
+    queue.detachTurnEvidence('crashed');
+    queue.enqueueResultText('new result', 'answer');
+    queue.enqueueText('new lifecycle', 'lifecycle');
+    queue.enqueueToolUpdate({ category: 'running', detail: 'New tool' });
+    queue.enqueueProgressUpdate({ type: 'thinking_long', gapMs: 10_000 }, 'Soup');
+
+    const evidence = await settle(queue.flushTurnEvidence('crashed'));
+    expect(evidence).toEqual({
+      turnId: 'crashed', answerOpIds: [], lifecycleOpIds: [], statusOpIds: [1], withheldAnswerCount: 0,
+    });
+    const calls = vi.mocked(durability.createOutboundOp).mock.calls;
+    expect(calls).toHaveLength(5);
+    for (const [op] of calls) {
+      expect(op).toMatchObject({ conversationKey: 'source-key', chatJid: 'source@s.whatsapp.net', sourceInboundSeq: 42 });
+    }
+  });
+
+  it('ignores a stale detach request and attributes a later logical turn normally', async () => {
+    const queue = new OutboundQueue(makeMessenger(), CHAT_JID);
+    queue.setDurability(makeDurability());
+    queue.beginTurnEvidence('first');
+    queue.detachTurnEvidence('another-turn');
+    queue.enqueueText('first answer', 'answer');
+    expect((await settle(queue.flushTurnEvidence('first'))).answerOpIds).toEqual([1]);
+    queue.beginTurnEvidence('second');
+    queue.detachTurnEvidence('second');
+    queue.enqueueText('continuation', 'answer');
+    expect((await settle(queue.flushTurnEvidence('second'))).answerOpIds).toEqual([]);
+    queue.beginTurnEvidence('third');
+    queue.enqueueText('third answer', 'answer');
+    expect((await settle(queue.flushTurnEvidence('third'))).answerOpIds).toEqual([3]);
+  });
+
   it('waits for async outbound-op creation before returning evidence', async () => {
     const durability = makeDurability();
     const queue = new OutboundQueue(makeMessenger(), CHAT_JID);

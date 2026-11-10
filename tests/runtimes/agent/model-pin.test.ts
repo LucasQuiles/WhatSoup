@@ -111,6 +111,7 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
     markLastTerminal: vi.fn(),
     clearLastOpId: vi.fn(),
     beginTurnEvidence: vi.fn(),
+    detachTurnEvidence: vi.fn(),
     flushTurnEvidence: vi.fn(async (turnId: string) => ({
       turnId,
       answerOpIds: [] as number[],

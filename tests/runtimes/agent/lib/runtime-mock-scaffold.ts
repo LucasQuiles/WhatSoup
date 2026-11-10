@@ -21,6 +21,16 @@ import type {
 
 // ─── View types ────────────────────────────────────────────────────────────────
 
+export type CapturedCrashInfo = {
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  sessionId: string | null;
+  dbRowId: number | null;
+  provider?: string;
+  crashClass?: string;
+  stderrPreview?: string;
+};
+
 export type AutoCompactView = {
   cooldownUntil: Map<string, number>;
   lastSuccessAt: Map<string, number>;
@@ -277,6 +287,7 @@ export function makeQueueMock(targetChatJid: string): IOutboundQueue {
     markLastTerminal: vi.fn(),
     clearLastOpId: vi.fn(),
     beginTurnEvidence: vi.fn(),
+    detachTurnEvidence: vi.fn(),
     flushTurnEvidence: vi.fn(async (turnId: string) => ({
       turnId,
       answerOpIds: [] as number[],

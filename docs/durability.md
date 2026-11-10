@@ -1986,3 +1986,40 @@ Health exposes aggregates only: `outboundQueuePoisoned` and
 Per-chat poison is degraded because healthy scopes remain available; shared or single
 poison is unhealthy because the active lane is unavailable. Durable recovery debt is an
 independent signal: it neither creates nor clears outbound queue poison.
+
+## Crash continuation attribution
+
+A crash finalizer can be waiting for an in-flight status send while a replacement
+session generation starts its continuation. Queue quiescence alone does not
+establish which generation owns newly enqueued output. The per-chat event owner
+check therefore detaches future evidence attribution only when an admitted
+`respawn_continuation` has a different runtime owner and the queue still owns
+that old logical turn. Poll and proactive continuation paths are unchanged.
+
+Detachment is one-way for that evidence epoch. It drops the turn ID and epoch
+from future chunks while retaining conversation, delivery route and inbound
+sequence. Already buffered or in-flight chunks remain in the old evidence;
+stream aggregation separates differently attributed parts. Starting the next
+logical turn restores normal attribution. Stale detach requests do nothing.
+No wait, schema, replay-policy change or additional ownership ledger is added.
+
+The regression uses real runtime crash/respawn admission, queue, file-backed
+SQLite, finalizer and recovery supervisor with controlled session and transport
+fixtures. It covers held status sends, streamed/result-only continuations,
+stale generations, prior echoed output and late echoes. It does not attest a
+live provider, process termination, host deployment or fleet-wide behavior.
+The minimal-mode held status is injected; a natural caller remains unqualified.
+
+A failed crashed turn can retain a continuity candidate after an unattributed
+continuation, because source sequence alone does not make an outbound terminal.
+The existing reconciler consumes the candidate when its terminal record exists,
+without replay. Consumption is not delivery proof. Observer debt classification,
+provider-specific echo identity and restart competition remain separate questions.
+
+This adapts existing event ownership and per-chunk evidence instead of serializing
+respawn behind an unbounded finalization wait. Its maintenance cost is one queue
+state flag, a typed method and the runtime admission condition. It preserves
+[#3398](https://github.com/LucasQuiles/WhatSoup/issues/3398) continuation behavior
+and the existing recovery/late-echo controls tracked in
+[#3841](https://github.com/LucasQuiles/WhatSoup/issues/3841). Reverting this change
+requires no database migration, but restores the demonstrated attribution race.
