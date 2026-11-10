@@ -157,13 +157,13 @@ describe('transport inbound exits record observations', () => {
   it('a throwing alert outbox does not stop the rest of the batch', async () => {
     cm.onMessage = null;
     emitAlert.mockImplementation(() => { throw new Error('outbox exploded'); });
-    await deliver({ 'messages.upsert': { messages: [USER_MESSAGE], type: 'notify' } });
+    await deliver({ 'messages.upsert': { messages: [USER_MESSAGE, { ...USER_MESSAGE, key: { ...USER_MESSAGE.key, id: 'INBOUND-2' } }], type: 'notify' } });
     cm.onMessage = consumer as unknown as (msg: unknown) => void;
     await deliver({ 'messages.upsert': { messages: [{ ...USER_MESSAGE, key: { ...USER_MESSAGE.key, id: 'INBOUND-3' } }], type: 'notify' } });
     expect(consumer).toHaveBeenCalledTimes(1);
     expect(getInboundObservationHealth()).toMatchObject({
-      counts: { 'transport.no_consumer': 1 },
-      recorder_failures: 1,
+      counts: { 'transport.no_consumer': 2 },
+      recorder_failures: 2,
     });
   });
 });
