@@ -15,8 +15,9 @@ import type { Database } from '../../core/database.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
+import type { CheckpointAdoption } from './checkpoint-adoption.ts';
 import { markOrphaned } from './session-db.ts';
-import type { SessionManager } from './session.ts';
+import type { SessionCrashInfo, SessionManager } from './session.ts';
 import {
   stalledOperationResumeHoldApplies,
   withStalledOperationResumeHold,
@@ -97,6 +98,18 @@ export class StalledOperationHolds {
   }
 
   /**
+   * At the provider exit, before any respawn is scheduled: save the hold when
+   * the exit was a stalled-operation kill. Any other exit needs no
+   * protection and reports `held`.
+   */
+  recordExit(mapKey: string, info: SessionCrashInfo | undefined): StalledOperationRestartProtection {
+    const stalledSessionId = info?.terminationReason === 'stalled_operation' ? info.sessionId : undefined;
+    return typeof stalledSessionId === 'string'
+      ? this.record(mapKey, stalledSessionId)
+      : 'held';
+  }
+
+  /**
    * Fail-closed path: an orphaned checkpoint is not proactively resumed on
    * startup (getResumableCheckpoints reads active and suspended only); the
    * chat's next message rebuilds it. Only the held session's checkpoint is
@@ -168,11 +181,62 @@ export class StalledOperationHolds {
     );
   }
 
-  /** The withheld resume for this session, removed; the caller's next turn resumes it in place. */
-  takeDeferredResume(session: SessionManager): { sessionId: string; rowId: number } | undefined {
+  /**
+   * Re-verify restart protection at the automatic resume itself: time has
+   * passed since the kill, and the resume reactivates the checkpoint. Returns
+   * false when the respawn was withheld instead.
+   */
+  admitRespawn(mapKey: string, session: SessionManager, sessionId: string, dbRowId: number | null): boolean {
+    const protection = this.record(mapKey, sessionId);
+    if (protection === 'held') return true;
+    this.withholdRespawn(mapKey, session, sessionId, dbRowId, protection);
+    return false;
+  }
+
+  /**
+   * The automatic respawn resumed the killed session. The caller sends no
+   * context or continuation turn: either would re-run the stopped work
+   * unbidden. The resume reactivated the checkpoint, so the hold is recorded
+   * again.
+   */
+  recordAfterRespawnResume(mapKey: string, session: SessionManager, sessionId: string): void {
+    log.info(
+      { mapKey, sessionId },
+      'auto-respawn resumed after a stalled-operation kill — no context or continuation turn sent',
+    );
+    const resumedSessionId = session.getStatus().sessionId ?? sessionId;
+    if (resumedSessionId) this.record(mapKey, resumedSessionId);
+  }
+
+  /**
+   * Proactive resume after a service restart: true when the checkpoint holds
+   * this provider session after a stalled-operation kill. The caller then
+   * sends no context or continuation turn; the session waits for the user's
+   * resend.
+   */
+  holdsProactiveResume(
+    chatJid: string,
+    watchdogState: string | null | undefined,
+    sessionId: string | null | undefined,
+  ): boolean {
+    if (!stalledOperationResumeHoldApplies(watchdogState, sessionId)) return false;
+    log.info(
+      { chatJid, sessionId },
+      'proactive resume after a stalled-operation kill — no context or continuation turn sent',
+    );
+    return true;
+  }
+
+  /**
+   * The checkpoint adoption for this session's next turn. A withheld resume
+   * (withholdRespawn) is removed in every case and resumes the provider
+   * session in place when nothing else was adopted.
+   */
+  adoptDeferredResume(session: SessionManager, adoption: CheckpointAdoption): CheckpointAdoption {
     const deferred = this.deferredResumes.get(session);
     this.deferredResumes.delete(session);
-    return deferred;
+    if (deferred === undefined || adoption.kind !== 'none') return adoption;
+    return { kind: 'resume', rowId: deferred.rowId, sessionId: deferred.sessionId, recoveredOwn: false };
   }
 
   /** Any spawn or reset supersedes a withheld resume. */

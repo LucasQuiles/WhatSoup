@@ -119,7 +119,6 @@ import {
   type CheckpointAdoption,
 } from './checkpoint-adoption.ts';
 import { checkpointCompletedIdentityIsAdmissionRejected } from './admission-rejected-checkpoint.ts';
-import { stalledOperationResumeHoldApplies } from './stalled-operation-resume-hold.ts';
 import { StalledOperationHolds, checkpointConversationKey } from './stalled-operation-holds.ts';
 import { reconcileResidentSessionStatuses } from './resident-session-reconciler.ts';
 import {
@@ -4300,13 +4299,7 @@ export class AgentRuntime implements Runtime {
           await sleep(MS_PER_SECOND);
           if (!session.getStatus().active) return; // resume failed, onResumeFailed handles it
           // F7: after a stalled-operation kill the session waits for the user's resend.
-          if (stalledOperationResumeHoldApplies(full.watchdog_state, full.session_id)) {
-            log.info(
-              { chatJid, sessionId: full.session_id },
-              'proactive resume after a stalled-operation kill — no context or continuation turn sent',
-            );
-            return;
-          }
+          if (this.stalledOperationHolds.holdsProactiveResume(chatJid, full.watchdog_state, full.session_id)) return;
           try {
             // Inject messages that arrived while the service was down.
             // Without this, the agent resumes with stale context — it has no
@@ -5825,10 +5818,7 @@ export class AgentRuntime implements Runtime {
         : NO_CHECKPOINT_ADOPTION;
       if (dispatchCancelled()) return;
       // F7: a withheld stalled-operation respawn resumes here (StalledOperationHolds.withholdRespawn).
-      const deferredResume = this.stalledOperationHolds.takeDeferredResume(session);
-      if (deferredResume !== undefined && adoption.kind === 'none') {
-        adoption = { kind: 'resume', rowId: deferredResume.rowId, sessionId: deferredResume.sessionId, recoveredOwn: false };
-      }
+      adoption = this.stalledOperationHolds.adoptDeferredResume(session, adoption);
       announceAdoption(adoption, (notice) => this.sendDirect(chatJid, notice, 'status'));
       const spawnOwnership = effectiveMapKey !== undefined
         ? this.captureOwnedPerChatGeneration(effectiveMapKey, session)
@@ -11286,10 +11276,7 @@ export class AgentRuntime implements Runtime {
     }
 
     // F7: the stalled-operation hold is saved before any respawn is scheduled.
-    const stalledSessionId = info?.terminationReason === 'stalled_operation' ? info.sessionId : undefined;
-    const stalledOperationProtection = typeof stalledSessionId === 'string'
-      ? this.stalledOperationHolds.record(currentMapKey, stalledSessionId)
-      : 'held';
+    const stalledOperationProtection = this.stalledOperationHolds.recordExit(currentMapKey, info);
 
     // Auto-respawn: if we haven't hit the crash limit, try to resume the session
     // after a short delay. This lets the agent continue mid-conversation without
@@ -11522,14 +11509,12 @@ export class AgentRuntime implements Runtime {
       }, 'auto-respawn skipped — manager route is stale; recycle pended');
       return;
     }
-    // F7: re-verify restart protection at the resume itself; time has passed
-    // since the kill, and the resume reactivates the checkpoint.
-    if (args.terminationReason === 'stalled_operation') {
-      const protection = this.stalledOperationHolds.record(mapKey, args.sessionId);
-      if (protection !== 'held') {
-        this.stalledOperationHolds.withholdRespawn(mapKey, args.session, args.sessionId, args.dbRowId, protection);
-        return;
-      }
+    // F7: re-verify restart protection at the resume itself (StalledOperationHolds.admitRespawn).
+    if (
+      args.terminationReason === 'stalled_operation'
+      && !this.stalledOperationHolds.admitRespawn(mapKey, args.session, args.sessionId, args.dbRowId)
+    ) {
+      return;
     }
 
     this.sessionOwnership.transition(mapKey, args.managerId, 'respawning');
@@ -11593,13 +11578,7 @@ export class AgentRuntime implements Runtime {
       // F7: the context and continuation turns below would re-run the stopped
       // work unbidden, so neither is sent (stalled-operation-holds.ts).
       if (args.terminationReason === 'stalled_operation') {
-        log.info(
-          { mapKey: activeMapKey, sessionId: args.sessionId },
-          'auto-respawn resumed after a stalled-operation kill — no context or continuation turn sent',
-        );
-        // The resume reactivated the checkpoint: record the hold again.
-        const resumedSessionId = args.session.getStatus().sessionId ?? args.sessionId;
-        if (resumedSessionId) this.stalledOperationHolds.record(activeMapKey, resumedSessionId);
+        this.stalledOperationHolds.recordAfterRespawnResume(activeMapKey, args.session, args.sessionId);
         publishRespawnRecovery();
         return;
       }
