@@ -1063,10 +1063,15 @@ path when no stronger credential, health-evidence, or restart outcome applies.
 - `CREDENTIAL-DEAD` → re-authenticate the provider on that host. Do not
   restart the bot to "fix" it; the watchdog deliberately never restarts on
   credential death.
-- After reauth, the marker clears only on affirmative fresh proof. The
-  usability probe runs once at startup with a 30-minute freshness TTL, so in
-  practice the marker clears on the first watchdog cycle after the post-reauth
-  bot restart; `CREDENTIAL-UNKNOWN` in between is expected.
+- After reauth, the marker clears only on affirmative fresh primary evidence
+  with no active fallback window. The runtime probes at startup and periodically
+  on a 30-minute base interval with jitter and failure backoff. The first
+  timeout retries after five minutes while periodic probing is active; a
+  timeout on that retry resumes normal backoff. A successful user turn preserves
+  a pending retry. Probe freshness follows the scheduled deadline plus bounded
+  execution grace. The watchdog reads this health evidence; it does not run
+  provider probes. Until fresh recovery evidence arrives, an existing marker
+  remains and `CREDENTIAL-UNKNOWN` is expected.
 - A marker create/clear failure logs
   `ERROR: failed to create|clear credential marker …` and exits that watchdog
   invocation nonzero without restarting anything; the next cycle retries.
@@ -1090,10 +1095,10 @@ path when no stronger credential, health-evidence, or restart outcome applies.
 **Known detection limitations** (accepted by design): the fallback arm reason
 is frozen at its original value across window extensions, so an auth-required
 death during an open usage-limit window reports `usage-limit`; a successful
-fallback turn clears `last_turn_error_class`; and a stale `usable` probe
-verdict is never re-probed. The combined worst case still surfaces as
-`CREDENTIAL-UNKNOWN` (active fallback window) rather than a false `ok` — that
-visibility is the designed detection floor.
+fallback turn clears `last_turn_error_class`; and the watchdog cannot refresh
+stale usability evidence itself. Runtime periodic probes can refresh that
+evidence. Until they do, an active fallback window remains
+`CREDENTIAL-UNKNOWN`, even when an older probe reported `usable`.
 
 A cold SSH `claude auth status`, credential-item presence, or a passing public
 health envelope is not provider-recovery proof. Diagnose in the service owner's
@@ -1109,10 +1114,10 @@ primary-usability probe and reports the verdict as
 `runtime.agent.accountIdentity` (status classes and digest prefixes only).
 `credential_identity_mismatch` (critical) and `credential_identity_unverifiable`
 (warning) are alert sources and degradation causes with the reason twins
-`runtime.credential_identity_*`; neither is turn-provable, so a latched
-identity degradation releases only on a restart after the owner corrects the
-login. The runtime never heals, mirrors, or seeds a credential from this
-check — see
+`runtime.credential_identity_*`. A successful turn does not prove identity.
+Follow [Account identity recovery](runbooks/account-identity-recovery.md) for
+fresh verification and alert-clear requirements after correcting the login.
+The runtime never heals, mirrors, or seeds a credential from this check — see
 [Ratified account identity](configuration.md#ratified-account-identity-serviceexpectedaccountdigest).
 
 ### Database Compatibility Startup Classification
@@ -1588,8 +1593,8 @@ curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9091/
 - `pending` with a future `retry_not_before` — producer-requested defer; the
   pending drainer owns the retry and will not send before the deadline
 - `sending` — send in progress
-- `submitted` — sent to WhatsApp, waiting for echo confirmation
-- `echoed` — confirmed delivered (normal terminal state)
+- `submitted` — the transport returned a submission receipt; waiting for echo correlation
+- `echoed` — an own-message echo was correlated (normal terminal state); this alone does not prove recipient delivery. See [stored recovery evidence](durability.md#42-post-connect-recovery-postconnectrecovery) for identity limits.
 - `maybe_sent` — send attempted but uncertain (network issue or crash mid-send)
 - `failed_permanent` — permanent failure (e.g. invalid JID)
 - `quarantined` — terminal containment; consult `quarantine_disposition` before inferring whether a provider send was possible
@@ -1718,8 +1723,10 @@ sqlite3 $DB ".backup '${DB}.pre-recovery'"
 #
 # Then postConnectRecovery() runs after reconnect:
 #    - Reconciles 'maybe_sent' ops against the messages table
-#    - Resets safe/read_only ops to 'pending' for replay
-#    - Quarantines unsafe ops
+#    - Settles matching self-authored rows as 'echoed'
+#    - Quarantines conflicting stored rows regardless of replay policy
+#    - With missing evidence only: resets safe/read_only ops to 'pending';
+#      quarantines unsafe ops (see docs/durability.md §4.2)
 #
 # Immediately after, and on the live 10s echo-timeout interval,
 # drainPendingOutbound() actually re-sends the 'pending' (reset) ops:
@@ -1732,8 +1739,10 @@ sqlite3 $DB ".backup '${DB}.pre-recovery'"
 # While the process remains live, the 10-second echo-maintenance loop also
 # reconciles up to 200 oldest live `maybe_sent` rows after each current
 # ambiguity_at episode has aged 30 seconds (not from queue creation).
-# Safe/read-only sends return to the pending drainer; unsafe sends quarantine and the existing
-# stuck-inbound sweep can then release a terminally non-echoed recovery owner.
+# Matching self-authored rows settle; conflicting stored rows quarantine under
+# every policy. Only missing evidence returns safe/read_only sends to the pending
+# drainer; unsafe sends quarantine. The existing stuck-inbound sweep can then
+# release a terminally non-echoed recovery owner.
 
 # 5. Start the service
 systemctl --user start whatsoup@$INSTANCE
@@ -2059,6 +2068,8 @@ sqlite3 "$SNAPSHOT_DB" \
 
 A returned row with a real `content_type` means the body is stored. `content_type = 'history'` is
 an envelope-only placeholder; the body never arrived. A missing row means the message is absent.
+When a full history body upgrades a placeholder, its `fromMe` value also replaces
+the stored `is_from_me` flag. Later history does not overwrite a non-placeholder row.
 Treat a repeated batch as successful only when the expected row already exists. Stored history is
 not an inbound admission: backfilled messages are never answered automatically, so use the
 continuity manifest audit below to decide on any catch-up.
@@ -2327,6 +2338,10 @@ evidence manifest: a manifest that calls an audio receipt `text` is rejected.
   An audio receipt also requires `original_media` and `transcript` files whose digests equal the
   `audio` hashes, with `enrichmentComplete: true`. A later reply, elapsed time, a generic recovery note,
   or replaying the historical text is not proof.
+  Here, `addressed` records closure through the live reissue and its linked terminal reply.
+  The echoed/corroborated proof does not establish recipient delivery or reading; those outcomes
+  remain unproven by this closure. A stored own-message row alone cannot replace the live inbound,
+  terminal record, or context witness.
 - **`declined`** (`proofKind: sender_declined` or `owner_declined`) requires `--policy` and a `decision`
   referencing a real decision inbound plus a `continuity-closure-decision.v1` record that binds the plan,
   receipt, inbound message hash and the SHA-256 of the inbound's exact text. `original_sender_inbound`

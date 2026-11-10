@@ -28,6 +28,7 @@
  */
 import { OutboundRateLimiter } from './outbound-rate-limiter.ts';
 import { WhatSoupError } from '../errors.ts';
+import { assertTransportSendActive, observeTransportSubmission, runWithTransportSendDeadline } from './send-deadline.ts';
 import {
   OUTBOUND_GOVERNOR_SHED_LOG,
 } from '../core/outbound-governor-shed.ts';
@@ -40,6 +41,10 @@ import {
   OUTBOUND_CONTENT_EGRESS_REDACTED_LOG,
   type OutboundBannerClassifier,
 } from './outbound-content-egress.ts';
+import {
+  TransportAuthorityUnavailableError,
+  type OutboundAuthorityGate,
+} from './operations-authority-gate.ts';
 
 /** Single fixed key for the aggregate per-bot bucket (breadth floods, F2). */
 const GLOBAL_BUCKET_KEY = '__bot_global__';
@@ -70,6 +75,19 @@ const CONTROL_KEYS = [
 ] as const;
 
 export type OutboundClass = 'text' | 'media' | 'control';
+
+/**
+ * A final authority admission has reached an unknown terminal state, so
+ * callers must not replay the logical send locally.
+ */
+export class TransportAuthorityProviderOutcomeUnknownError extends Error {
+  readonly code = 'TRANSPORT_AUTHORITY_PROVIDER_OUTCOME_UNKNOWN';
+
+  constructor(cause: unknown) {
+    super('provider outcome is unknown after transport authority admission', { cause });
+    this.name = 'TransportAuthorityProviderOutcomeUnknownError';
+  }
+}
 
 function hasKey(content: Record<string, unknown>, keys: readonly string[]): boolean {
   for (const k of keys) {
@@ -152,9 +170,11 @@ export class OutboundGovernor {
     // 1. Per-destination pacing (depth floods) — short window, self-heals fast.
     const perDest = await this.perDest.acquireBounded(dest, this.maxWaitMs);
     if (perDest.capped) return 'pace-per-dest';
+    assertTransportSendActive();
     // 2. Aggregate per-bot pacing (breadth floods, F2) — short window.
     const glob = await this.global.acquireBounded(GLOBAL_BUCKET_KEY, this.maxWaitMs);
     if (glob.capped) return 'pace-global';
+    assertTransportSendActive();
     // 3. Catastrophe ceiling LAST — reserves only for a send that cleared pacing,
     //    so the long window never counts a shed bystander's attempts.
     if (!this.ceiling.tryAcquireSync(dest)) return 'ceiling';
@@ -167,8 +187,8 @@ interface GovernorLog {
 }
 
 export interface WrapOutboundGovernorOptions {
-  /** The single, reused governor (SS2). */
-  governor: OutboundGovernor;
+  /** The single, reused governor (SS2). Optional when only authority is active. */
+  governor?: OutboundGovernor;
   /** Map a raw send JID to the lid-resolved canonical destination key (H3/F3). */
   resolveDest: (jid: string) => string;
   /** Optional structured logger; the shed log line feeds PR-G. */
@@ -180,11 +200,18 @@ export interface WrapOutboundGovernorOptions {
    * unit tests that do not exercise content-egress.
    */
   classifyProviderBanner?: OutboundBannerClassifier;
+  /**
+   * Independently enforced send authority. This is deliberately separate from
+   * the pacing governor: every content shape must be admitted at the final
+   * wire seam, including media and controls that pacing leaves alone.
+   */
+  authorityGate?: OutboundAuthorityGate;
 }
 
 /** Minimal shape the governor needs — a socket with a `sendMessage` method. */
 interface Sendable {
   sendMessage: (...args: unknown[]) => unknown;
+  relayMessage?: (...args: unknown[]) => unknown;
   [k: string]: unknown;
 }
 
@@ -207,13 +234,13 @@ export function wrapWithOutboundGovernor<S extends object>(
   const original = s.sendMessage;
   const realSend = original.bind(s);
 
-  const governed = async function governedSendMessage(
+  const send = async function sendMessageWithinDeadline(
     jid: string,
     content: unknown,
     ...rest: unknown[]
   ): Promise<unknown> {
     let outbound = content;
-    if (classifyOutbound(content) === 'text') {
+    if (classifyOutbound(content) === 'text' && opts.governor) {
       const dest = opts.resolveDest(jid);
       const shed = await opts.governor.gate(dest);
       if (shed) {
@@ -224,16 +251,67 @@ export function wrapWithOutboundGovernor<S extends object>(
       // this ONE convergence point before it reaches the wire. Positive-match
       // only; ambient prose about an error and normal text pass unchanged. Runs
       // only when the classifier is wired (composition root); no-ops otherwise.
-      if (opts.classifyProviderBanner) {
-        const egress = adjudicateOutboundContent(content, opts.classifyProviderBanner);
-        if (egress.redacted) {
-          opts.log?.warn({ dest, kind: egress.kind }, OUTBOUND_CONTENT_EGRESS_REDACTED_LOG);
-          outbound = egress.content;
-        }
+    }
+    // Redaction is content normalization, not authority. It must happen before
+    // immutable admission so the approved bytes are exactly those sent.
+    if (classifyOutbound(content) === 'text' && opts.classifyProviderBanner) {
+      const egress = adjudicateOutboundContent(content, opts.classifyProviderBanner);
+      if (egress.redacted) {
+        opts.log?.warn({ jid, kind: egress.kind }, OUTBOUND_CONTENT_EGRESS_REDACTED_LOG);
+        outbound = egress.content;
       }
     }
-    return realSend(jid, outbound, ...rest);
+    if (!opts.authorityGate) return realSend(jid, outbound, ...rest);
+    assertTransportSendActive();
+    if (rest.length > 1) {
+      throw new TransportAuthorityUnavailableError(
+        'outbound send has unsupported provider arguments while transport authority is enabled',
+      );
+    }
+
+    // Provider options can change the audience. The final gate freezes known
+    // semantics and holds unsupported options before authority admission.
+    const options = rest[0];
+    const dispatch = await opts.authorityGate.admit({
+      recipient: jid,
+      content: outbound,
+      ...(options === undefined ? {} : { options }),
+    });
+    try {
+      // Admission has durably allocated a dispatching attempt. If the deadline
+      // expired while waiting for it, close that attempt as unknown without
+      // starting a provider call rather than leaving it dispatching forever.
+      assertTransportSendActive();
+      const result = await observeTransportSubmission(Promise.resolve(dispatch.options === undefined
+        ? realSend(jid, dispatch.content)
+        : realSend(jid, dispatch.content, dispatch.options)));
+      await opts.authorityGate.recordReceipt({
+        attemptId: dispatch.attemptId,
+        state: 'provider_accepted',
+        providerId: providerIdFrom(result),
+      });
+      return result;
+    } catch (err) {
+      // A throw from the provider or from the accepted receipt leaves its effect
+      // ambiguous. The authority owns reconciliation; this seam never retries.
+      try {
+        await opts.authorityGate.recordReceipt({ attemptId: dispatch.attemptId, state: 'unknown' });
+      } catch (receiptError) {
+        throw new TransportAuthorityProviderOutcomeUnknownError(
+          new AggregateError(
+            [err, receiptError],
+            'provider outcome is ambiguous and the authority unknown receipt failed',
+          ),
+        );
+      }
+      throw new TransportAuthorityProviderOutcomeUnknownError(err);
+    }
   };
+
+  const governed = (jid: string, content: unknown, ...rest: unknown[]): Promise<unknown> =>
+    opts.authorityGate
+      ? runWithTransportSendDeadline(() => send(jid, content, ...rest))
+      : send(jid, content, ...rest);
 
   // Transparent wrapper: copy the underlying fn's own-property descriptors onto
   // the override. In production the real Baileys `sendMessage` carries nothing
@@ -247,5 +325,25 @@ export function wrapWithOutboundGovernor<S extends object>(
   }
 
   s.sendMessage = governed as unknown as Sendable['sendMessage'];
+
+  // Raw protobuf relay has no semantic preview adapter. Do not let an enabled
+  // authority pilot turn an opaque raw relay into an unreviewed delivery path.
+  // The original method remains available when authority is disabled.
+  if (opts.authorityGate && typeof s.relayMessage === 'function') {
+    const blockedRelay = async function blockedRelayMessage(): Promise<never> {
+      throw new TransportAuthorityUnavailableError(
+        'raw relayMessage is unavailable while transport authority is enabled',
+      );
+    };
+    s.relayMessage = blockedRelay;
+  }
   return sock;
+}
+
+function providerIdFrom(result: unknown): string | undefined {
+  if (result === null || typeof result !== 'object') return undefined;
+  const key = (result as { key?: unknown }).key;
+  if (key === null || typeof key !== 'object') return undefined;
+  const id = (key as { id?: unknown }).id;
+  return typeof id === 'string' && id.length > 0 ? id : undefined;
 }
