@@ -336,7 +336,7 @@ describe('DurabilityEngine continuity candidate reconciler', () => {
     const a = markRuntimeFault('reconcile-1', 'ck-1', 'jid-1');
     markRuntimeFault('reconcile-2', 'ck-2', 'jid-2');
     resolveWithTerminalRecord(a, 'ck-1', 'jid-1');
-    expect(engine.continuityCandidateHasTerminalOrRecovery(a)).toBe(true);
+    expect(engine.continuityCandidateIsResolved(a)).toBe(true);
 
     const res = engine.reconcileContinuityCandidates(Date.now());
     expect(res).toMatchObject({ reconciled: 1, unresolvedFresh: 1, unresolvedStale: 0 });
@@ -383,7 +383,7 @@ describe('DurabilityEngine continuity candidate reconciler', () => {
 
   it('a bare candidate has no terminal or recovery record (recovery deferred)', () => {
     const seq = markRuntimeFault('reconcile-1', 'ck-1', 'jid-1');
-    expect(engine.continuityCandidateHasTerminalOrRecovery(seq)).toBe(false);
+    expect(engine.continuityCandidateIsResolved(seq)).toBe(false);
 
     const res = engine.reconcileContinuityCandidates(Date.now());
     expect(res).toMatchObject({ reconciled: 0, unresolvedFresh: 1 });
