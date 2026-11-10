@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { outboundPayloadHash } from './outbound-payload-hash.ts';
 import { createChildLogger } from '../logger.ts';
 import {
   validDeliveryCorroboratedSelectedOpsSql,
@@ -2300,7 +2301,7 @@ export class DurabilityEngine {
 
   // ── Outbound ops ──
   createOutboundOp(params: OutboundOpParams): number {
-    const hash = createHash('sha256').update(params.payload).digest('hex');
+    const hash = outboundPayloadHash(params.payload);
     // PR-C supersede-on-enqueue: collapse to one outstanding status ping per chat.
     if (params.opType === 'status_ping') {
       const outstanding = this.statements.selectOutstandingStatus.all(params.chatJid) as Array<{

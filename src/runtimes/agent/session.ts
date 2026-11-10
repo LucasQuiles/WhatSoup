@@ -10,6 +10,7 @@ import { admitHomeConfinedPath } from '../../lib/home-confinement.ts';
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { STALLED_OPERATION_NOTICE } from '../../core/agent-failure-notices.ts';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -128,8 +129,9 @@ export const WATCHDOG_HARD_MS  = 1_800_000; // 30 min — SIGKILL
 // Grace after a tool stalls before we SIGKILL the hung stream-json provider. Unlike
 // WATCHDOG_HARD_MS this is NOT reset by inbound messages (see recoverStalledOperation).
 export const STALLED_OP_KILL_GRACE_MS = 180_000; // 3 min after a tool stalls
-/** The user-facing notice for a stalled-tool kill: a failure notice, never task fulfilment. */
-export const STALLED_OPERATION_NOTICE = '_A tool call stalled and was terminated. Send your message again to retry._';
+// The stalled-tool notice lives in the failure-notice registry, which operator
+// tooling uses to prove a delivered op was only a failure notice.
+export { STALLED_OPERATION_NOTICE };
 
 // ─── Long-operation liveness gate ───────────────────────────────────────────
 // Stream silence is NOT proof of a hang: long browser-automation, bash, and MCP

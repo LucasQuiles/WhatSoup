@@ -3,6 +3,7 @@ import type { Database } from './database.ts';
 import { assertCanonicalSchema43 } from './database-migration-43.ts';
 import { withTransaction } from './db-tx.ts';
 import { allFromStatement } from '../lib/db-query.ts';
+import { AGENT_FAILURE_NOTICE_PAYLOAD_HASHES } from './agent-failure-notices.ts';
 
 export interface CloseOperatorCatchupRecoveryParams {
   planId: string;
@@ -101,6 +102,45 @@ function sameNumbers(left: number[], right: number[]): boolean {
 }
 
 /**
+ * The catch-up half of the closure proof: a completed inbound in the recovery
+ * conversation whose reply has a unique echoed delivery proof on its own chat.
+ */
+function inspectCatchupTarget(
+  raw: DatabaseSync,
+  conversationKey: string,
+  catchupSeq: number,
+): { chatJid: string; deliveredReply: DeliveredReplyRow } {
+  const target = raw.prepare(`
+    SELECT seq, chat_jid, processing_status
+    FROM inbound_events
+    WHERE seq = ? AND conversation_key = ?
+  `).get(catchupSeq, conversationKey) as {
+    seq: number;
+    chat_jid: string;
+    processing_status: string;
+  } | undefined;
+  if (!target) throw new Error('Catch-up inbound does not exist in the recovery conversation');
+  if (target.processing_status !== 'complete') throw new Error('Catch-up inbound must be complete');
+
+  const deliveredReply = raw.prepare(`
+    SELECT
+      proof.terminal_record_id,
+      proof.selected_op_id,
+      proof.recovery_job_id,
+      proof.completion_proof_id,
+      proof.evidence_basis
+    FROM operator_catchup_delivery_proofs proof
+    WHERE proof.target_seq = ?
+      AND proof.conversation_key = ?
+      AND proof.chat_jid = ?
+    ORDER BY proof.terminal_record_id, proof.selected_op_id
+    LIMIT 1
+  `).get(catchupSeq, conversationKey, target.chat_jid) as DeliveredReplyRow | undefined;
+  if (!deliveredReply) throw new Error('Catch-up reply must have echoed delivery proof');
+  return { chatJid: target.chat_jid, deliveredReply };
+}
+
+/**
  * Validate canonical schema-43 state and an operator catch-up closure without
  * mutating the database. This is the proof inspection used by both CLI dry
  * runs and the write path.
@@ -194,33 +234,7 @@ export function inspectOperatorCatchupRecovery(
     };
   }
 
-  const target = raw.prepare(`
-    SELECT seq, chat_jid, processing_status
-    FROM inbound_events
-    WHERE seq = ? AND conversation_key = ?
-  `).get(catchupSeq, conversationKey) as {
-    seq: number;
-    chat_jid: string;
-    processing_status: string;
-  } | undefined;
-  if (!target) throw new Error('Catch-up inbound does not exist in the recovery conversation');
-  if (target.processing_status !== 'complete') throw new Error('Catch-up inbound must be complete');
-
-  const deliveredReply = raw.prepare(`
-    SELECT
-      proof.terminal_record_id,
-      proof.selected_op_id,
-      proof.recovery_job_id,
-      proof.completion_proof_id,
-      proof.evidence_basis
-    FROM operator_catchup_delivery_proofs proof
-    WHERE proof.target_seq = ?
-      AND proof.conversation_key = ?
-      AND proof.chat_jid = ?
-    ORDER BY proof.terminal_record_id, proof.selected_op_id
-    LIMIT 1
-  `).get(catchupSeq, conversationKey, target.chat_jid) as DeliveredReplyRow | undefined;
-  if (!deliveredReply) throw new Error('Catch-up reply must have echoed delivery proof');
+  const { deliveredReply } = inspectCatchupTarget(raw, conversationKey, catchupSeq);
 
   return {
     planId,
@@ -311,12 +325,11 @@ function closeInspectedOperatorCatchupRecovery(
   return { ...receipt, inserted, openAfter };
 }
 
-/** Close using a raw, already-open SQLite handle without running app migrations. */
-export function closeOperatorCatchupRecoveryRaw(
+function withWriterReservation<T>(
   raw: DatabaseSync,
-  params: CloseOperatorCatchupRecoveryParams,
-  transactionalAttestation?: (transactionRaw: DatabaseSync) => void,
-): CloseOperatorCatchupRecoveryReceipt {
+  transactionalAttestation: ((transactionRaw: DatabaseSync) => void) | undefined,
+  work: () => T,
+): T {
   const foreignKeys = raw.prepare('PRAGMA foreign_keys').get() as {
     foreign_keys: number;
   } | undefined;
@@ -333,16 +346,29 @@ export function closeOperatorCatchupRecoveryRaw(
   let opened = true;
   try {
     transactionalAttestation?.(raw);
-    const receipt = closeInspectedOperatorCatchupRecovery(raw, params);
+    const result = work();
     commit.run();
     opened = false;
-    return receipt;
+    return result;
   } catch (error) {
     if (opened) {
       try { rollback.run(); } catch { /* best-effort rollback */ }
     }
     throw error;
   }
+}
+
+/** Close using a raw, already-open SQLite handle without running app migrations. */
+export function closeOperatorCatchupRecoveryRaw(
+  raw: DatabaseSync,
+  params: CloseOperatorCatchupRecoveryParams,
+  transactionalAttestation?: (transactionRaw: DatabaseSync) => void,
+): CloseOperatorCatchupRecoveryReceipt {
+  return withWriterReservation(
+    raw,
+    transactionalAttestation,
+    () => closeInspectedOperatorCatchupRecovery(raw, params),
+  );
 }
 
 /**
@@ -356,6 +382,332 @@ export function closeOperatorCatchupRecovery(
   params: CloseOperatorCatchupRecoveryParams,
 ): CloseOperatorCatchupRecoveryReceipt {
   return withTransaction(db, () => closeInspectedOperatorCatchupRecovery(db.raw, params));
+}
+
+// ---------------------------------------------------------------------------
+// Failed-source closure (#3903)
+//
+// Startup recovery writes recovery_pending_operator_catchup links for open rows
+// only, so an inbound that ended processing_status='failed' with a
+// failed_terminal record and no delivery never enters a recovery plan and the
+// closure above cannot close it. This route creates the operator plan and the
+// pending links for exactly those failed sources and then runs the unchanged
+// closure, all in one writer transaction. The source inbound and terminal rows
+// are never written: the original failure, failure class and attempts stay as
+// recorded, and the closure exists only as plan + links.
+// ---------------------------------------------------------------------------
+
+const FAILED_SOURCE_PLAN_SUMMARY = 'operator catch-up closure of a failed source inbound';
+const FAILED_SOURCE_PENDING_REASON = 'failed source inbound enrolled for operator catch-up closure';
+const DELIVERED_OP_FINGERPRINT_PATTERN = /^[0-9a-f]{12}$/;
+
+/** What a delivered-op fingerprint binds: the op, its exact payload and its status. */
+export interface DeliveredOpIdentity {
+  opId: number;
+  payloadHash: string | null;
+  status: string;
+}
+
+export interface CloseFailedSourceOperatorCatchupParams extends CloseOperatorCatchupRecoveryParams {
+  /** Operator acks; must equal the fingerprints of every delivered source op. */
+  ackedDeliveredOpFingerprints?: string[];
+  /**
+   * Fingerprint of a delivered op. Supplied by the caller so the core never
+   * emits raw op ids or payload hashes; required when acks are given.
+   */
+  deliveredOpFingerprint?: (op: DeliveredOpIdentity) => string;
+}
+
+/** A source op not proven unsent: delivered, possibly delivered, or still in flight. */
+export interface DeliveredSourceOp extends DeliveredOpIdentity {
+  sourceSeq: number;
+  isTerminal: boolean;
+  opType: string;
+  /** A non-terminal text op whose payload hash is a registered failure notice. */
+  registeredNotice: boolean;
+  /** A registered notice that is proven delivered (echoed), so nothing can follow. */
+  closable: boolean;
+}
+
+export interface FailedSourceOperatorCatchupInspection extends OperatorCatchupRecoveryInspection {
+  deliveredOps: DeliveredSourceOp[];
+  /** Every delivered op is closable; the write refuses otherwise. */
+  allClosable: boolean;
+  /** The acks equal the delivered-op fingerprints exactly; the write refuses otherwise. */
+  acksMatch: boolean;
+}
+
+function normalizedAckFingerprints(acks: string[] | undefined): string[] {
+  const normalized = (acks ?? []).map((ack) => {
+    if (!DELIVERED_OP_FINGERPRINT_PATTERN.test(ack)) {
+      throw new Error('Delivered-op acknowledgement must be a delivered-op fingerprint');
+    }
+    return ack;
+  }).sort();
+  if (new Set(normalized).size !== normalized.length) {
+    throw new Error('Delivered-op acknowledgements contain duplicates');
+  }
+  return normalized;
+}
+
+/**
+ * Every source op not proven unsent, in id order. failed_permanent is the only
+ * proven-unsent status: markFailedPermanent accepts only deterministic
+ * non-delivery evidence and the finalizer reads it as not_sent. Of the rest
+ * (OUTBOUND_STATUSES in durability.ts) only echoed is proven delivered:
+ * pending and sending can still be sent, and submitted, maybe_sent and
+ * quarantined may arrive later. An op closes only as an echoed, non-terminal
+ * text op whose payload hash is a registered failure notice. is_terminal = 1
+ * marks a delivered answer (markTerminal, the chat runtime), so the turn was
+ * answered. Payload text is never matched, only the exact hash.
+ */
+function selectDeliveredSourceOps(raw: DatabaseSync, sourceSeqs: number[]): DeliveredSourceOp[] {
+  const select = raw.prepare(`
+    SELECT id, source_inbound_seq, is_terminal, status, op_type, payload_hash
+    FROM outbound_ops
+    WHERE source_inbound_seq = ? AND status <> 'failed_permanent'
+    ORDER BY id
+  `);
+  const ops: DeliveredSourceOp[] = [];
+  for (const seq of sourceSeqs) {
+    for (const op of allFromStatement<{
+      id: number;
+      source_inbound_seq: number;
+      is_terminal: number;
+      status: string;
+      op_type: string;
+      payload_hash: string | null;
+    }>(select, seq)) {
+      const registeredNotice = op.op_type === 'text'
+        && op.is_terminal === 0
+        && op.payload_hash !== null
+        && AGENT_FAILURE_NOTICE_PAYLOAD_HASHES.has(op.payload_hash);
+      ops.push({
+        opId: op.id,
+        sourceSeq: op.source_inbound_seq,
+        isTerminal: op.is_terminal !== 0,
+        status: op.status,
+        opType: op.op_type,
+        payloadHash: op.payload_hash,
+        registeredNotice,
+        closable: registeredNotice && op.status === 'echoed',
+      });
+    }
+  }
+  return ops.sort((left, right) => left.opId - right.opId);
+}
+
+/**
+ * The evidence reference recorded on the plan, links and witness. The bound
+ * ops are part of it, so a replay against a different op set is refused by
+ * the existing changed-evidence check.
+ */
+function boundEvidenceRef(evidenceRef: string, ops: DeliveredSourceOp[]): string {
+  const bound = ops.length === 0
+    ? evidenceRef
+    : `${evidenceRef} acked-delivered-ops=${ops.map(({ opId, payloadHash }) => `${opId}:${payloadHash}`).join(',')}`;
+  return requiredText(bound, 'Recovery evidence reference', 8192);
+}
+
+/**
+ * Validate a failed-source closure without mutating the database. A plan that
+ * already carries its closure witness is delegated to the plain inspection, so
+ * an exact replay is idempotent and a changed catch-up, evidence or op set is
+ * refused.
+ */
+export function inspectFailedSourceOperatorCatchupRecovery(
+  raw: DatabaseSync,
+  params: CloseFailedSourceOperatorCatchupParams,
+): FailedSourceOperatorCatchupInspection {
+  assertCanonicalSchema43(raw);
+  const planId = requiredText(params.planId, 'Recovery plan ID');
+  const conversationKey = requiredText(params.conversationKey, 'Conversation key');
+  const actor = requiredText(params.actor, 'Recovery actor');
+  const operatorEvidenceRef = requiredText(params.evidenceRef, 'Recovery evidence reference', 8192);
+  const catchupSeq = positiveSeq(params.catchupSeq, 'Catch-up sequence');
+  const sourceSeqs = normalizedSourceSeqs(params.expectedSourceSeqs);
+  const acks = normalizedAckFingerprints(params.ackedDeliveredOpFingerprints);
+  const fingerprint = params.deliveredOpFingerprint;
+  if (acks.length > 0 && fingerprint === undefined) {
+    throw new Error('Delivered-op acknowledgements require a fingerprint function');
+  }
+
+  const deliveredOps = selectDeliveredSourceOps(raw, sourceSeqs);
+  const opFingerprints = fingerprint === undefined
+    ? []
+    : deliveredOps.map((op) => fingerprint(op)).sort();
+  const acksMatch = deliveredOps.length === acks.length
+    && opFingerprints.length === acks.length
+    && opFingerprints.every((value, index) => value === acks[index]);
+  const allClosable = deliveredOps.every((op) => op.closable);
+  const evidenceRef = boundEvidenceRef(operatorEvidenceRef, deliveredOps);
+
+  const plan = raw.prepare('SELECT plan_id FROM recovery_plans WHERE plan_id = ?').get(planId);
+  if (plan) {
+    const witness = raw.prepare(`
+      SELECT 1 AS present
+      FROM operator_catchup_closure_witnesses
+      WHERE recovery_plan_id = ? AND conversation_key = ?
+    `).get(planId, conversationKey);
+    if (!witness) throw new Error('Failed-source recovery plan already exists');
+    if (!acksMatch || !allClosable) {
+      throw new Error('Recovery was already closed against a different catch-up or evidence');
+    }
+    const existing = inspectOperatorCatchupRecovery(raw, { ...params, evidenceRef });
+    return { ...existing, deliveredOps, allClosable, acksMatch };
+  }
+
+  if (sourceSeqs.some((seq) => catchupSeq <= seq)) {
+    throw new Error('Catch-up sequence must be later than every source sequence');
+  }
+  const selectSource = raw.prepare(`
+    SELECT chat_jid, processing_status
+    FROM inbound_events
+    WHERE seq = ? AND conversation_key = ?
+  `);
+  // The source must be reply debt in the observer's failedTerminalDebt sense
+  // (deploy/scripts/reply-guarantee-observer.py): its only terminal record is
+  // an armed failed_terminal with no delivery that the operator did not
+  // cancel. A second record of any kind means another disposition exists.
+  const selectTerminalRecords = raw.prepare(`
+    SELECT
+      COUNT(*) AS total,
+      COALESCE(SUM(
+        terminal.inbound_disposition = 'failed_terminal'
+        AND terminal.delivery_kind = 'none'
+        AND terminal.delivery_op_id IS NULL
+        AND terminal.reply_guarantee_disarmed = 0
+        AND COALESCE(terminal.attempt_failure_class, '') <> 'operator_cancelled'
+      ), 0) AS debt
+    FROM turn_terminal_records terminal
+    WHERE terminal.inbound_seq_key = ?
+  `);
+  // A recovery job owns the source's reply; closing it here would compete with
+  // that owner (precedent: TerminalRecordInboundCloser.selectRecoveryJob).
+  const selectRecoveryJob = raw.prepare(`
+    SELECT 1 AS present FROM turn_recovery_jobs WHERE source_inbound_seq = ? LIMIT 1
+  `);
+  // Both columns, as TerminalRecordInboundCloser.selectLinked: a source that is
+  // already another recovery's catch-up target has a disposition too.
+  const selectLinked = raw.prepare(`
+    SELECT 1 AS present FROM inbound_disposition_links
+    WHERE inbound_seq = ? OR superseded_by_seq = ? LIMIT 1
+  `);
+  const sourceChats = new Set<string>();
+  for (const seq of sourceSeqs) {
+    const source = selectSource.get(seq, conversationKey) as {
+      chat_jid: string;
+      processing_status: string;
+    } | undefined;
+    if (!source) throw new Error('Failed source inbound does not exist in the recovery conversation');
+    if (source.processing_status !== 'failed') throw new Error('Failed source inbound must be failed');
+    const terminals = selectTerminalRecords.get(seq) as { total: number; debt: number };
+    if (Number(terminals.total) !== 1 || Number(terminals.debt) !== 1) {
+      throw new Error('Failed source inbound must have exactly one armed, undelivered failed terminal record');
+    }
+    if (selectRecoveryJob.get(seq)) throw new Error('Failed source inbound has a turn recovery job');
+    if (selectLinked.get(seq, seq)) {
+      throw new Error('Failed source inbound already has a disposition link');
+    }
+    sourceChats.add(source.chat_jid);
+  }
+
+  const { chatJid, deliveredReply } = inspectCatchupTarget(raw, conversationKey, catchupSeq);
+  // The closure trigger requires target.chat_jid = source.chat_jid per link;
+  // checking it here keeps a dry run from reporting ready for a closure the
+  // write would reject.
+  if (sourceChats.size !== 1 || !sourceChats.has(chatJid)) {
+    throw new Error('Failed source inbound must share the catch-up chat');
+  }
+
+  return {
+    planId,
+    conversationKey,
+    sourceSeqs,
+    catchupSeq,
+    actor,
+    evidenceRef,
+    evidenceBasis: deliveredReply.evidence_basis,
+    terminalRecordId: deliveredReply.terminal_record_id,
+    selectedOpId: deliveredReply.selected_op_id,
+    recoveryJobId: deliveredReply.recovery_job_id,
+    completionProofId: deliveredReply.completion_proof_id,
+    wouldInsert: sourceSeqs.length,
+    idempotent: false,
+    openBefore: 0,
+    openAfter: 0,
+    deliveredOps,
+    allClosable,
+    acksMatch,
+  };
+}
+
+/**
+ * Enroll failed sources in a new operator recovery plan and close them against
+ * a proven catch-up, atomically. Re-inspects inside the writer reservation, so
+ * a link, op or op status that changed after a dry run makes the closure refuse.
+ */
+export function closeFailedSourceOperatorCatchupRecoveryRaw(
+  raw: DatabaseSync,
+  params: CloseFailedSourceOperatorCatchupParams,
+  transactionalAttestation?: (transactionRaw: DatabaseSync) => void,
+): CloseOperatorCatchupRecoveryReceipt {
+  return withWriterReservation(raw, transactionalAttestation, () => {
+    const {
+      wouldInsert: _wouldInsert,
+      deliveredOps: _deliveredOps,
+      allClosable,
+      acksMatch,
+      ...inspection
+    } = inspectFailedSourceOperatorCatchupRecovery(raw, params);
+    if (inspection.idempotent) return { ...inspection, inserted: 0 };
+    if (!allClosable) {
+      throw new Error('Failed source inbound has an outbound op that is not an echoed registered failure notice');
+    }
+    if (!acksMatch) {
+      throw new Error('Delivered-op acknowledgements must match the delivered failure-notice ops exactly');
+    }
+
+    const planInserted = Number(raw.prepare(`
+      INSERT INTO recovery_plans (plan_id, origin, actor, summary, evidence_ref)
+      VALUES (?, 'operator', ?, ?, ?)
+    `).run(
+      inspection.planId,
+      inspection.actor,
+      FAILED_SOURCE_PLAN_SUMMARY,
+      inspection.evidenceRef,
+    ).changes);
+    if (planInserted !== 1) throw new Error('Failed-source recovery plan was not recorded exactly once');
+    const insertPending = raw.prepare(`
+      INSERT INTO inbound_disposition_links (
+        inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
+        reason, evidence_ref, actor
+      ) VALUES (?, ?, 'recovery_pending_operator_catchup', NULL, ?, ?, ?)
+    `);
+    for (const seq of inspection.sourceSeqs) {
+      const changes = Number(insertPending.run(
+        seq,
+        inspection.planId,
+        FAILED_SOURCE_PENDING_REASON,
+        inspection.evidenceRef,
+        inspection.actor,
+      ).changes);
+      if (changes !== 1) {
+        throw new Error('Pending operator catch-up disposition was not recorded exactly once');
+      }
+    }
+
+    const receipt = closeInspectedOperatorCatchupRecovery(raw, {
+      ...params,
+      evidenceRef: inspection.evidenceRef,
+    });
+    if (receipt.idempotent || receipt.inserted !== inspection.sourceSeqs.length) {
+      throw new Error('Catch-up closure did not resolve the exact recovery set');
+    }
+    // Nothing was open before this transaction; the pending links it wrote are
+    // closed by the same transaction.
+    return { ...receipt, openBefore: 0 };
+  });
 }
 
 // ---------------------------------------------------------------------------

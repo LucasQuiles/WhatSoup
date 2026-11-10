@@ -4,10 +4,14 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHmac, randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import {
+  closeFailedSourceOperatorCatchupRecoveryRaw,
   closeOperatorCatchupRecoveryRaw,
+  inspectFailedSourceOperatorCatchupRecovery,
   inspectOperatorCatchupRecovery,
-  type CloseOperatorCatchupRecoveryParams,
+  type CloseFailedSourceOperatorCatchupParams,
   type CloseOperatorCatchupRecoveryReceipt,
+  type DeliveredOpIdentity,
+  type FailedSourceOperatorCatchupInspection,
   type OperatorCatchupRecoveryInspection,
 } from '../src/core/recovery-catchup-closure.ts';
 import { SQLITE_BUSY_TIMEOUT_PRAGMA } from '../src/lib/sqlite-constants.ts';
@@ -21,6 +25,8 @@ interface CliArgs {
   actor: string;
   evidenceRef: string;
   confirm: boolean;
+  failedSource: boolean;
+  ackedDeliveredOpFingerprints: string[];
 }
 
 export interface FileIdentity {
@@ -31,11 +37,19 @@ export interface FileIdentity {
 function usage(): string {
   return [
     'Usage: close-recovery-catchup --db PATH --plan-id ID --conversation-key KEY',
-    '  --source-seqs 1,2,3 --catchup-seq N --actor ID --evidence-ref REF [--confirm]',
+    '  --source-seqs 1,2,3 --catchup-seq N --actor ID --evidence-ref REF',
+    '  [--failed-source [--ack-delivered-op FINGERPRINT ...]] [--confirm]',
     '',
     'Without --confirm this command is a non-mutating dry run.',
+    'With --failed-source the source sequences must be failed inbounds (failed_terminal,',
+    'no delivery, no disposition link); the plan ID names a new operator recovery plan',
+    'that enrolls and closes them in one transaction. A source op not proven unsent',
+    'must be an echoed registered failure notice and must be acknowledged by the',
+    'opFingerprint the dry run lists for it (repeat the flag per op).',
   ].join('\n');
 }
+
+const BOOLEAN_FLAGS = new Set(['--confirm', '--failed-source']);
 
 const VALUE_FLAGS = new Set([
   '--db',
@@ -46,6 +60,26 @@ const VALUE_FLAGS = new Set([
   '--actor',
   '--evidence-ref',
 ]);
+
+/** Value flags that may repeat; each occurrence adds one entry. */
+const REPEATABLE_FLAGS = new Set(['--ack-delivered-op']);
+
+function deliveredOpAck(value: string): string {
+  if (!/^[0-9a-f]{12}$/.test(value)) {
+    throw new Error('Delivered-op acknowledgement must be a delivered-op fingerprint');
+  }
+  return value;
+}
+
+/**
+ * The opFingerprint the dry run shows and --ack-delivered-op takes. It binds
+ * the op id, exact payload hash and status, so a status change between dry run
+ * and confirm changes the set and the confirm refuses. Keyed like every other
+ * fingerprint here: raw op ids and payload hashes never reach stdout (#2457).
+ */
+export function deliveredOpFingerprint(salt: Buffer, op: DeliveredOpIdentity): string {
+  return redactFingerprint(salt, 'delivered-op', `${op.opId}:${op.payloadHash ?? ''}:${op.status}`);
+}
 
 function positiveSequence(value: string, label: string): number {
   if (!/^[1-9]\d*$/.test(value)) {
@@ -74,24 +108,28 @@ export function parseCloseRecoveryArgs(argv: string[]): CliArgs {
   if (argv.includes('--help')) throw new Error(usage());
   const values = new Map<string, string>();
   const seen = new Set<string>();
-  let confirm = false;
+  const acks: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
-    if (flag !== '--confirm' && !VALUE_FLAGS.has(flag)) {
+    if (!BOOLEAN_FLAGS.has(flag) && !VALUE_FLAGS.has(flag) && !REPEATABLE_FLAGS.has(flag)) {
       throw new Error(`Unknown argument: ${flag}`);
     }
-    if (seen.has(flag)) throw new Error(`Duplicate argument: ${flag}`);
+    if (seen.has(flag) && !REPEATABLE_FLAGS.has(flag)) throw new Error(`Duplicate argument: ${flag}`);
     seen.add(flag);
-    if (flag === '--confirm') {
-      confirm = true;
-      continue;
-    }
+    if (BOOLEAN_FLAGS.has(flag)) continue;
     const value = argv[index + 1];
     if (value === undefined || value.startsWith('--')) {
       throw new Error(`${flag} is required`);
     }
-    values.set(flag, value);
+    if (REPEATABLE_FLAGS.has(flag)) acks.push(deliveredOpAck(value));
+    else values.set(flag, value);
     index += 1;
+  }
+  if (acks.length > 0 && !seen.has('--failed-source')) {
+    throw new Error('--ack-delivered-op requires --failed-source');
+  }
+  if (new Set(acks).size !== acks.length) {
+    throw new Error('Delivered-op acknowledgements contain duplicates');
   }
   const required = (flag: string): string => {
     const value = values.get(flag);
@@ -109,7 +147,9 @@ export function parseCloseRecoveryArgs(argv: string[]): CliArgs {
     catchupSeq: positiveSequence(required('--catchup-seq'), 'Catch-up sequence'),
     actor: required('--actor'),
     evidenceRef: required('--evidence-ref'),
-    confirm,
+    confirm: seen.has('--confirm'),
+    failedSource: seen.has('--failed-source'),
+    ackedDeliveredOpFingerprints: acks,
   };
 }
 
@@ -175,7 +215,7 @@ export function assertSchema43Foundation(raw: DatabaseSync): void {
   }
 }
 
-function closureParams(args: CliArgs): CloseOperatorCatchupRecoveryParams {
+function closureParams(args: CliArgs, salt: Buffer): CloseFailedSourceOperatorCatchupParams {
   return {
     planId: args.planId,
     conversationKey: args.conversationKey,
@@ -183,22 +223,33 @@ function closureParams(args: CliArgs): CloseOperatorCatchupRecoveryParams {
     catchupSeq: args.catchupSeq,
     actor: args.actor,
     evidenceRef: args.evidenceRef,
+    ackedDeliveredOpFingerprints: args.ackedDeliveredOpFingerprints,
+    deliveredOpFingerprint: (op) => deliveredOpFingerprint(salt, op),
   };
 }
 
 function inspectReadOnly(
   dbPath: string,
-  params: CloseOperatorCatchupRecoveryParams,
-): { inspection: OperatorCatchupRecoveryInspection; identity: FileIdentity; salt: Buffer } {
+  args: CliArgs,
+): {
+  inspection: OperatorCatchupRecoveryInspection | FailedSourceOperatorCatchupInspection;
+  params: CloseFailedSourceOperatorCatchupParams;
+  identity: FileIdentity;
+  salt: Buffer;
+} {
   const identity = assertExistingRegularDatabase(dbPath);
   const salt = loadOrCreateRedactionSalt(dbPath);
+  const params = closureParams(args, salt);
+  const failedSource = args.failedSource;
   const raw = new DatabaseSync(dbPath, { readOnly: true });
   try {
     raw.exec('PRAGMA foreign_keys = ON');
     assertSchema43Foundation(raw);
-    const inspection = inspectOperatorCatchupRecovery(raw, params);
+    const inspection = failedSource
+      ? inspectFailedSourceOperatorCatchupRecovery(raw, params)
+      : inspectOperatorCatchupRecovery(raw, params);
     assertSameDatabaseFile(identity, assertExistingRegularDatabase(dbPath));
-    return { inspection, identity, salt };
+    return { inspection, params, identity, salt };
   } finally {
     raw.close();
   }
@@ -333,16 +384,33 @@ function publicReceipt(salt: Buffer, receipt: CloseOperatorCatchupRecoveryReceip
 }
 
 function runCloseRecoveryCatchupWithArgs(args: CliArgs): number {
-  const params = closureParams(args);
-  const { inspection, identity, salt } = inspectReadOnly(args.dbPath, params);
+  const { inspection, params, identity, salt } = inspectReadOnly(args.dbPath, args);
   if (!args.confirm) {
+    // Failed-source mode lists every source op not proven unsent by its keyed
+    // fingerprint, so the operator can ack each closable one. The dry run is
+    // ready only when every op is closable and the acks match them exactly.
+    const failedSourceView = 'deliveredOps' in inspection
+      ? {
+        deliveredOps: inspection.deliveredOps.map((op) => ({
+          opFingerprint: deliveredOpFingerprint(salt, op),
+          isTerminal: op.isTerminal,
+          status: op.status,
+          opType: op.opType,
+          registeredNotice: op.registeredNotice,
+        })),
+        acksMatch: inspection.acksMatch,
+      }
+      : {};
+    const ready = !('deliveredOps' in inspection)
+      || (inspection.allClosable && inspection.acksMatch);
     process.stdout.write(`${JSON.stringify({
       ok: true,
       dryRun: true,
-      ready: true,
+      ready,
       ...publicInspection(salt, inspection),
+      ...failedSourceView,
     })}\n`);
-    return 0;
+    return ready ? 0 : 1;
   }
 
   // Recheck the path after the read-only preflight, then revalidate schema and
@@ -352,7 +420,10 @@ function runCloseRecoveryCatchupWithArgs(args: CliArgs): number {
   try {
     raw.exec(SQLITE_BUSY_TIMEOUT_PRAGMA);
     raw.exec('PRAGMA foreign_keys = ON');
-    const receipt = closeOperatorCatchupRecoveryRaw(raw, params, (transactionRaw) => {
+    const close = args.failedSource
+      ? closeFailedSourceOperatorCatchupRecoveryRaw
+      : closeOperatorCatchupRecoveryRaw;
+    const receipt = close(raw, params, (transactionRaw) => {
       assertSameDatabaseFile(identity, assertExistingRegularDatabase(args.dbPath));
       assertSchema43Foundation(transactionRaw);
     });
@@ -455,7 +526,22 @@ const ERROR_CLASSIFIERS: ReadonlyArray<{
       || m === 'Catch-up inbound must be complete'
       || m === 'Catch-up reply must have echoed delivery proof'
       || m === 'Catch-up closure did not resolve the exact recovery set'
-      || m === 'Catch-up closure did not persist its exact proof witness',
+      || m === 'Catch-up closure did not persist its exact proof witness'
+      || m === 'Failed source inbound does not exist in the recovery conversation'
+      || m === 'Failed source inbound must be failed'
+      || m === 'Failed source inbound must share the catch-up chat'
+      // A failed-source precondition that does not hold, like the plain mode's
+      // 'Recovery plan does not exist'. changed_evidence stays reserved for a
+      // closure already recorded against a different catch-up or evidence.
+      || m === 'Failed-source recovery plan already exists'
+      || m === 'Failed source inbound already has a disposition link'
+      || m === 'Failed source inbound does not exist in the recovery conversation'
+      || m === 'Failed source inbound must be failed'
+      || m === 'Failed source inbound must share the catch-up chat'
+      || m === 'Failed source inbound must have exactly one armed, undelivered failed terminal record'
+      || m === 'Failed source inbound has a turn recovery job'
+      || m === 'Failed source inbound has an outbound op that is not an echoed registered failure notice'
+      || m === 'Delivered-op acknowledgements must match the delivered failure-notice ops exactly',
   },
   {
     code: 'invalid_args',
@@ -467,6 +553,10 @@ const ERROR_CLASSIFIERS: ReadonlyArray<{
       || m === 'Source sequence set contains duplicates'
       || m === 'Expected source sequence set is required'
       || m === 'Expected source sequence set contains duplicates'
+      || m === 'Delivered-op acknowledgement must be a delivered-op fingerprint'
+      || m === 'Delivered-op acknowledgements require a fingerprint function'
+      || m === 'Delivered-op acknowledgements contain duplicates'
+      || m === '--ack-delivered-op requires --failed-source'
       || m.startsWith('Usage: close-recovery-catchup'), // --help
   },
 ];
