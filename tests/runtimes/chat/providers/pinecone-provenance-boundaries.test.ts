@@ -13,7 +13,10 @@ const { state, records, queries, rerank, settings } = vi.hoisted(() => ({
     pineconeSenderTopK: 20, pineconeSelfFactTopK: 20, pineconeRerank: false,
     recencyHalfLifeDays: 36500, maxAgeDays: 36500,
     models: { validation: 'test-model' },
-    memory: { pinecone: { apiKeyEnv: 'TEST_BOUNDARY_KEY', instanceScopedIds: true, recordVisibility: 'chat_scoped' } },
+    // A non-operator instance needs a passing project guard, or every read and write is refused.
+    memory: { pinecone: {
+      apiKeyEnv: 'TEST_BOUNDARY_KEY', projectId: 'testproj', instanceScopedIds: true, recordVisibility: 'chat_scoped',
+    } },
   },
 }));
 
@@ -26,6 +29,9 @@ vi.mock('../../../../src/lib/keyring.ts', () => ({ lookupCredential: () => null 
 vi.mock('@pinecone-database/pinecone', () => ({
   Pinecone: class {
     inference = { rerank };
+    async listIndexes() {
+      return { indexes: [{ name: 'test-index', host: 'test-index-testproj.svc.example.pinecone.io' }] };
+    }
     index() {
       return {
         upsertRecords: async ({ records: incoming }: { records: Array<Record<string, unknown>> }) => {
