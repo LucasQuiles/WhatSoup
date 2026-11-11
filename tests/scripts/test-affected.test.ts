@@ -205,6 +205,51 @@ describe('affected test execution', () => {
     }
   });
 
+  it('runs work under a supplied checkout lock without releasing its owner', async () => {
+    const cwd = tmp.make('shared-lock');
+    mkdirSync(join(cwd, '.local'));
+    const lock = acquireProcessLock(join(cwd, '.local', 'test-run.lock'));
+    try {
+      const report = await executeTestCommands(cwd, [
+        { name: 'shared-owner', command: process.execPath, args: ['-e', 'process.exit(0)'] },
+      ], { timeoutMs: 10_000, json: false, heldLock: lock });
+      expect(report).toMatchObject({ outcome: 'passed', exitCode: 0 });
+      expect(JSON.parse(readFileSync(lock.path, 'utf8')).token).toBe(lock.token);
+    } finally {
+      releaseProcessLock(lock);
+    }
+  });
+
+  it.each(['released', 'replaced'] as const)('refuses a %s supplied checkout lock before spawning children', async (state) => {
+    const cwd = tmp.make(`shared-lock-${state}`);
+    mkdirSync(join(cwd, '.local'));
+    const lock = acquireProcessLock(join(cwd, '.local', 'test-run.lock'));
+    const marker = join(cwd, 'must-not-run');
+    if (state === 'released') {
+      expect(releaseProcessLock(lock)).toBe(true);
+    } else {
+      const payload = JSON.parse(readFileSync(lock.path, 'utf8'));
+      writeFileSync(lock.path, JSON.stringify({ ...payload, token: 'replacement-owner' }));
+    }
+    await expect(executeTestCommands(cwd, [
+      { name: 'stale-owner', command: process.execPath, args: ['-e', 'require("node:fs").writeFileSync(process.argv[1],"bad")', marker] },
+    ], { timeoutMs: 10_000, json: false, heldLock: lock })).rejects.toThrow(/held lock.*owned/i);
+    expect(existsSync(marker)).toBe(false);
+    if (state === 'replaced') expect(JSON.parse(readFileSync(lock.path, 'utf8')).token).toBe('replacement-owner');
+  });
+
+  it('rejects a supplied lock that does not own this checkout', async () => {
+    const cwd = tmp.make('foreign-shared-lock');
+    const lock = acquireProcessLock(join(cwd, 'foreign.lock'));
+    try {
+      await expect(executeTestCommands(cwd, [
+        { name: 'foreign-owner', command: process.execPath, args: ['-e', 'process.exit(0)'] },
+      ], { timeoutMs: 10_000, json: false, heldLock: lock })).rejects.toThrow(/different checkout lock/i);
+    } finally {
+      releaseProcessLock(lock);
+    }
+  });
+
   it('bounds a hung child and reports timeout instead of a pass', async () => {
     const report = await executeTestCommands(tmp.make('timeout'), [
       { name: 'hung', command: process.execPath, args: ['-e', 'require("node:net").createServer(()=>{}).listen(0,"127.0.0.1")'] },

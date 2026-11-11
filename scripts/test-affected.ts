@@ -3,7 +3,7 @@ import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
-import { acquireProcessLock, isProcessLockError, releaseProcessLock } from '../src/lib/process-lock.ts';
+import { acquireProcessLock, isProcessLockError, readProcessLockPayload, releaseProcessLock, type ProcessLockHandle } from '../src/lib/process-lock.ts';
 import { isRecord } from '../src/lib/type-guards.ts';
 import { runBoundedBattery, type BoundedBatteryResult } from './full-suite-battery.ts';
 import { functionalSuites } from './required-suites.ts';
@@ -98,7 +98,7 @@ export function parseTestCounts(report: unknown): TestCounts {
 export async function executeTestCommands(
   cwd: string,
   commands: readonly TestCommand[],
-  options: { timeoutMs: number; json: boolean; lockPath?: string; loadgate?: string; env?: NodeJS.ProcessEnv; cleanupScratch?: (directory: string) => void; inheritOuterGroup?: boolean },
+  options: { timeoutMs: number; json: boolean; lockPath?: string; heldLock?: ProcessLockHandle; loadgate?: string; env?: NodeJS.ProcessEnv; cleanupScratch?: (directory: string) => void; inheritOuterGroup?: boolean },
 ): Promise<TestExecution> {
   const clock = () => performance.now();
   const start = clock();
@@ -106,11 +106,21 @@ export async function executeTestCommands(
   if (!commands.length) return { outcome: 'not-required', exitCode: 0, wallMs: 0, results };
   const lockPath = options.lockPath ?? join(cwd, '.local/test-run.lock');
   mkdirSync(dirname(lockPath), { recursive: true });
-  let lock;
-  try { lock = acquireProcessLock(lockPath); }
-  catch (error) {
-    if (!isProcessLockError(error)) throw error;
-    return { outcome: 'busy', exitCode: 75, wallMs: clock() - start, results, error: `${error.reason} test lock; owner PID ${error.existingPid ?? 'unknown'} at ${lockPath}. Inspect the owner before retrying; this run did not queue or remove the lock.` };
+  const ownsLock = options.heldLock === undefined;
+  let lock: ProcessLockHandle;
+  if (options.heldLock) {
+    if (options.heldLock.path !== lockPath) throw new Error(`Held lock belongs to a different checkout lock: ${options.heldLock.path}`);
+    const current = readProcessLockPayload(lockPath);
+    if (options.heldLock.pid !== process.pid || current?.pid !== options.heldLock.pid || current.token !== options.heldLock.token) {
+      throw new Error(`Held lock is no longer owned by this process: ${lockPath}`);
+    }
+    lock = options.heldLock;
+  } else {
+    try { lock = acquireProcessLock(lockPath); }
+    catch (error) {
+      if (!isProcessLockError(error)) throw error;
+      return { outcome: 'busy', exitCode: 75, wallMs: clock() - start, results, error: `${error.reason} test lock; owner PID ${error.existingPid ?? 'unknown'} at ${lockPath}. Inspect the owner before retrying; this run did not queue or remove the lock.` };
+    }
   }
   let scratch: string | undefined;
   let execution: TestExecution | undefined;
@@ -180,10 +190,12 @@ export async function executeTestCommands(
     } catch (error) {
       cleanupErrors.push(`scratch cleanup failed: ${String(error)}`);
     }
-    try {
-      if (!releaseProcessLock(lock)) cleanupErrors.push('test lock release failed: ownership changed or lock unavailable');
-    } catch (error) {
-      cleanupErrors.push(`test lock release failed: ${String(error)}`);
+    if (ownsLock) {
+      try {
+        if (!releaseProcessLock(lock)) cleanupErrors.push('test lock release failed: ownership changed or lock unavailable');
+      } catch (error) {
+        cleanupErrors.push(`test lock release failed: ${String(error)}`);
+      }
     }
     if (execution) {
       execution.wallMs = clock() - start;

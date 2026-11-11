@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { cleanGitEnv } from '../src/lib/git-env.ts';
+import { acquireProcessLock, isProcessLockError, releaseProcessLock, type ProcessLockHandle } from '../src/lib/process-lock.ts';
 import { isRecord } from '../src/lib/type-guards.ts';
 import { runBoundedBattery } from './full-suite-battery.ts';
 import { parseClosedOptions } from './lib/cli-args.ts';
@@ -19,10 +20,12 @@ const vitest = join(toolRoot, 'node_modules/vitest/vitest.mjs');
 const HELP = `Usage: npm run coverage:shards -- plan --out PLAN [--timings JSON] [--max-workers 2] [--timeout-ms 30000]
        npm run coverage:shards -- shard --plan PLAN --index 1|2 --out NEW_DIRECTORY [--timeout-ms 2700000]
        npm run coverage:shards -- merge --plan PLAN --receipts DIRECTORY [--timeout-ms 300000]
+       npm run coverage:shards -- run [--out DIRECTORY] [--max-workers 2] [--timeout-ms 2700000]
 Store shard outputs as DIRECTORY/shard-1 and DIRECTORY/shard-2. Artifacts must be
 outside the checkout. The caller owns their retention and removal. Matching source,
 runtime, platform and absolute checkout root are required. Only the complete native
-merge enforces coverage thresholds. Console strict checks remain a separate obligation.
+merge enforces coverage thresholds. The coordinated run holds one checkout lock, runs
+both isolated shards concurrently, then performs console strict coverage and headroom.
 Compile caching is disabled. Forks and isolation remain enabled. JSON results go to stdout.
 Exit: 0 passed, native nonzero failure, 2 invalid input, 75 busy, 124 timeout, 125 inconclusive.
 `;
@@ -31,11 +34,11 @@ const sha = (value: string | Buffer): string => createHash('sha256').update(valu
 const readJson = (path: string, maximumBytes = 256 * 1024 * 1024): unknown => JSON.parse(readCoverageArtifact(resolve(path), undefined, maximumBytes).toString('utf8'));
 export interface CoverageCommandResult { exitCode: number; outcome?: string; operation?: string; error?: string; [key: string]: unknown }
 
-function identity(cwd: string, executionId: string, workers: number): CoverageRunIdentity {
+function identity(cwd: string, executionId: string, workers: number, inputDigest: string): CoverageRunIdentity {
   return {
     executionId,
     sourceCommit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd, env: cleanGitEnv(), encoding: 'utf8', timeout: 10_000 }).trim(),
-    inputDigest: captureRepositoryInputSnapshot({ cwd }).digest,
+    inputDigest,
     dependencyDigest: sha(['package-lock.json', 'console/package-lock.json'].map((file) => `${file}:${sha(readCoverageArtifact(join(cwd, file), undefined, 8 * 1024 * 1024))}`).join('\n')),
     configDigest: sha(readCoverageArtifact(join(cwd, 'vitest.config.ts'), undefined, 1024 * 1024)),
     root: cwd, node: process.version,
@@ -76,82 +79,82 @@ function parseOptions(argv: readonly string[]) {
   const operation = argv[0];
   const fields = operation === 'plan' ? ['--out', '--timings', '--max-workers', '--timeout-ms']
     : operation === 'shard' ? ['--plan', '--index', '--out', '--timeout-ms']
-      : operation === 'merge' ? ['--plan', '--receipts', '--timeout-ms'] : [];
+      : operation === 'merge' ? ['--plan', '--receipts', '--timeout-ms']
+        : operation === 'run' ? ['--out', '--max-workers', '--timeout-ms'] : [];
   const options = parseClosedOptions(argv.slice(1), { booleanOptions: [], valueOptions: fields });
   if (!fields.length || options.error) throw new Error(`Invalid coverage command: ${options.error ?? operation}`);
-  const required = operation === 'plan' ? ['--out'] : operation === 'shard' ? ['--plan', '--index', '--out'] : ['--plan', '--receipts'];
+  const required = operation === 'plan' ? ['--out'] : operation === 'shard' ? ['--plan', '--index', '--out'] : operation === 'merge' ? ['--plan', '--receipts'] : [];
   if (required.some((field) => !options.values.has(field))) throw new Error(`Missing options: ${required.join(', ')}`);
-  const workers = Number(options.values.get('--max-workers') ?? 2);
-  const timeoutMs = Number(options.values.get('--timeout-ms') ?? (operation === 'plan' ? 30_000 : operation === 'shard' ? 2_700_000 : 300_000));
-  if (!Number.isInteger(workers) || workers < 1 || workers > 4 || !Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 2_700_000) {
+  const totalWorkers = Number(options.values.get('--max-workers') ?? 2);
+  const workers = operation === 'run' ? totalWorkers / 2 : totalWorkers;
+  const timeoutMs = Number(options.values.get('--timeout-ms') ?? (operation === 'plan' ? 30_000 : operation === 'shard' || operation === 'run' ? 2_700_000 : 300_000));
+  if (!Number.isInteger(workers) || workers < 1 || workers > 4 || operation === 'run' && totalWorkers > 4
+    || !Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 2_700_000) {
     throw new Error('Invalid worker count or timeout budget');
   }
   const index = Number(options.values.get('--index'));
   if (operation === 'shard' && index !== 1 && index !== 2) throw new Error('Shard index must be 1 or 2');
-  return { operation, options, workers, timeoutMs, index };
+  return { operation, options, workers, totalWorkers: operation === 'run' ? totalWorkers : undefined, timeoutMs, index };
 }
 
 export async function runCoverageCommand(argv: readonly string[], cwd = realpathSync(process.cwd()), budgetMs?: number): Promise<CoverageCommandResult> {
   if (argv[0] === '--help') return { help: HELP, exitCode: 0 };
-  const { operation, options, workers, index, timeoutMs: requestedMs } = parseOptions(argv);
+  const { operation, options, workers, totalWorkers, index, timeoutMs: requestedMs } = parseOptions(argv);
   const timeoutMs = budgetMs ?? requestedMs;
   const started = performance.now();
   const snapshot = captureRepositoryInputSnapshot({ cwd });
   const scratch = mkdtempSync(join(tmpdir(), 'whatsoup-coverage-'));
   const loadgatePath = join(homedir(), '.local/bin/loadgate');
   const admission = existsSync(loadgatePath) ? 'shared-host' : 'local-limits-only';
-  const run = async (args: string[], env: NodeJS.ProcessEnv = {}) => executeTestCommands(cwd, [{ name: `coverage-${operation}`, command: process.execPath, args: [vitest, ...args] }], {
+  const run = async (phase: 'plan' | 'shard' | 'merge', args: string[], env: NodeJS.ProcessEnv = {}, heldLock?: ProcessLockHandle) => executeTestCommands(cwd, [{ name: `coverage-${phase}`, command: process.execPath, args: [vitest, ...args] }], {
     // Reserve report validation and cleanup time inside the caller's outer budget.
     timeoutMs: Math.max(1, timeoutMs - (performance.now() - started) - Math.min(10_000, timeoutMs / 4)),
     json: true, loadgate: admission === 'shared-host' ? loadgatePath : undefined,
-    env: { NODE_DISABLE_COMPILE_CACHE: '1', ...env },
+    env: { NODE_DISABLE_COMPILE_CACHE: '1', ...env }, heldLock,
     inheritOuterGroup: process.env.WHATSOUP_BOUNDED_BATTERY_OWNER_PID !== undefined,
   });
-  const perform = async (): Promise<CoverageCommandResult> => {
-    if (operation === 'plan') {
-      const out = externalOutput(cwd, options.values.get('--out')!);
-      const inventory = join(scratch, 'inventory.json');
-      const result = await run(['list', '--root', cwd, '--config', join(cwd, 'vitest.config.ts'), '--filesOnly', '--json', inventory]);
-      if (result.exitCode !== 0) return { schemaVersion: 1, operation, admission, ...result };
-      const files = readJson(inventory, 8 * 1024 * 1024);
-      if (!Array.isArray(files) || files.some((row) => !isRecord(row) || typeof row.file !== 'string' || row.projectName !== undefined)) {
-        throw new Error('Native test inventory is invalid or uses unsupported projects');
-      }
-      const plan = parseCoveragePlan({ schemaVersion: 1, identity: identity(cwd, randomUUID(), workers),
-        shards: balanceCoverageFiles(files.map((row) => relative(cwd, row.file)), timingDurations(options.values.get('--timings'), cwd)) });
-      writeFileSync(out, `${JSON.stringify(plan)}\n`, { flag: 'wx', mode: 0o600 });
-      return { schemaVersion: 1, operation, admission, outcome: 'passed', exitCode: 0, plan: out, planDigest: coveragePlanDigest(plan), files: files.length,
-        durationBasis: options.values.has('--timings') ? 'measured' : 'equal-estimates' };
+  const planCoverage = async (out: string, planWorkers: number, timings?: string, heldLock?: ProcessLockHandle): Promise<{ result: CoverageCommandResult; plan?: CoverageShardPlan }> => {
+    const inventory = join(scratch, 'inventory.json');
+    const result = await run('plan', ['list', '--root', cwd, '--config', join(cwd, 'vitest.config.ts'), '--filesOnly', '--json', inventory], {}, heldLock);
+    if (result.exitCode !== 0) return { result: { schemaVersion: 1, operation: 'plan', admission, ...result } };
+    const files = readJson(inventory, 8 * 1024 * 1024);
+    if (!Array.isArray(files) || files.some((row) => !isRecord(row) || typeof row.file !== 'string' || row.projectName !== undefined)) {
+      throw new Error('Native test inventory is invalid or uses unsupported projects');
     }
-    const planPath = resolve(options.values.get('--plan')!);
-    const plan: CoverageShardPlan = parseCoveragePlan(readJson(planPath, 8 * 1024 * 1024));
-    const observed = identity(cwd, plan.identity.executionId, plan.identity.workers);
+    const plan = parseCoveragePlan({ schemaVersion: 1, identity: identity(cwd, randomUUID(), planWorkers, snapshot.digest),
+      shards: balanceCoverageFiles(files.map((row) => relative(cwd, row.file)), timingDurations(timings, cwd)) });
+    writeFileSync(out, `${JSON.stringify(plan)}\n`, { flag: 'wx', mode: 0o600 });
+    return { plan, result: { schemaVersion: 1, operation: 'plan', admission, outcome: 'passed', exitCode: 0, plan: out, planDigest: coveragePlanDigest(plan), files: files.length,
+      durationBasis: timings === undefined ? 'equal-estimates' : 'measured' } };
+  };
+  const shardCoverage = async (planPath: string, plan: CoverageShardPlan, shardIndex: number, out: string, heldLock?: ProcessLockHandle): Promise<CoverageCommandResult> => {
+    const observed = identity(cwd, plan.identity.executionId, plan.identity.workers, snapshot.digest);
     if (JSON.stringify(observed) !== JSON.stringify(plan.identity)) throw new Error('Coverage execution identity differs from the plan; reconcile before retrying');
-    if (operation === 'shard') {
-      const out = externalOutput(cwd, options.values.get('--out')!);
-      mkdirSync(out, { mode: 0o700 });
-      const blobPath = join(out, 'blob.json');
-      const reportPath = join(out, 'report.json');
-      const shardConfig = join(scratch, 'shard.config.mts');
-      writeFileSync(shardConfig, `import base from ${JSON.stringify(join(cwd, 'vitest.config.ts'))};\n`
-        + `import { mergeConfig } from ${JSON.stringify(join(toolRoot, 'node_modules/vitest/dist/config.js'))};\n`
-        + `import Sequencer from ${JSON.stringify(join(toolRoot, 'scripts/lib/coverage-shard-sequencer.ts'))};\n`
-        + 'export default async (env) => mergeConfig(await (typeof base === "function" ? base(env) : base), { test: { sequence: { sequencer: Sequencer } } });\n');
-      const result = await run(['run', '--root', cwd, '--config', shardConfig, '--pool=forks', '--isolate',
-        `--maxWorkers=${plan.identity.workers}`, '--coverage', `--shard=${index}/2`,
-        '--reporter=default', '--reporter=blob', '--reporter=json', `--outputFile.blob=${blobPath}`, `--outputFile.json=${reportPath}`,
-        '--coverage.thresholds.lines=0', '--coverage.thresholds.branches=0', '--coverage.thresholds.functions=0', '--coverage.thresholds.statements=0',
-        '--coverage.reporter=json', `--coverage.reportsDirectory=${join(scratch, 'coverage')}`], {
-        WHATSOUP_COVERAGE_PLAN: planPath, WHATSOUP_COVERAGE_PLAN_DIGEST: coveragePlanDigest(plan),
-      });
-      if (result.exitCode !== 0) return { schemaVersion: 1, operation, admission, ...result };
-      assertRepositoryInputUnchanged({ cwd, snapshot, stage: 'coverage-shard', report: (message) => process.stderr.write(`${message}\n`) });
-      const receipt: CoverageShardReceipt = { schemaVersion: 1, planDigest: coveragePlanDigest(plan), identity: observed, index,
-        outcome: 'passed', exitCode: 0, blobPath, reportPath, blobSha256: sha(readCoverageArtifact(blobPath)), reportSha256: sha(readCoverageArtifact(reportPath)) };
-      writeFileSync(join(out, 'receipt.json'), `${JSON.stringify(receipt)}\n`, { flag: 'wx', mode: 0o600 });
-      return { schemaVersion: 1, operation, admission, ...result, receipt: join(out, 'receipt.json') };
-    }
-    const directory = realpathSync(options.values.get('--receipts')!);
+    mkdirSync(out, { mode: 0o700 });
+    const blobPath = join(out, 'blob.json');
+    const reportPath = join(out, 'report.json');
+    const shardConfig = join(scratch, `shard-${shardIndex}.config.mts`);
+    writeFileSync(shardConfig, `import base from ${JSON.stringify(join(cwd, 'vitest.config.ts'))};\n`
+      + `import { mergeConfig } from ${JSON.stringify(join(toolRoot, 'node_modules/vitest/dist/config.js'))};\n`
+      + `import Sequencer from ${JSON.stringify(join(toolRoot, 'scripts/lib/coverage-shard-sequencer.ts'))};\n`
+      + 'export default async (env) => mergeConfig(await (typeof base === "function" ? base(env) : base), { test: { sequence: { sequencer: Sequencer } } });\n');
+    const result = await run('shard', ['run', '--root', cwd, '--config', shardConfig, '--pool=forks', '--isolate',
+      `--maxWorkers=${plan.identity.workers}`, '--coverage', `--shard=${shardIndex}/2`,
+      '--reporter=default', '--reporter=blob', '--reporter=json', `--outputFile.blob=${blobPath}`, `--outputFile.json=${reportPath}`,
+      '--coverage.thresholds.lines=0', '--coverage.thresholds.branches=0', '--coverage.thresholds.functions=0', '--coverage.thresholds.statements=0',
+      '--coverage.reporter=json', `--coverage.reportsDirectory=${join(scratch, `coverage-${shardIndex}`)}`], {
+      WHATSOUP_COVERAGE_PLAN: planPath, WHATSOUP_COVERAGE_PLAN_DIGEST: coveragePlanDigest(plan),
+    }, heldLock);
+    if (result.exitCode !== 0) return { schemaVersion: 1, operation: 'shard', admission, ...result };
+    assertRepositoryInputUnchanged({ cwd, snapshot, stage: 'coverage-shard', report: (message) => process.stderr.write(`${message}\n`) });
+    const receipt: CoverageShardReceipt = { schemaVersion: 1, planDigest: coveragePlanDigest(plan), identity: observed, index: shardIndex,
+      outcome: 'passed', exitCode: 0, blobPath, reportPath, blobSha256: sha(readCoverageArtifact(blobPath)), reportSha256: sha(readCoverageArtifact(reportPath)) };
+    writeFileSync(join(out, 'receipt.json'), `${JSON.stringify(receipt)}\n`, { flag: 'wx', mode: 0o600 });
+    return { schemaVersion: 1, operation: 'shard', admission, ...result, receipt: join(out, 'receipt.json') };
+  };
+  const mergeCoverage = async (plan: CoverageShardPlan, directory: string, heldLock?: ProcessLockHandle): Promise<CoverageCommandResult> => {
+    const observed = identity(cwd, plan.identity.executionId, plan.identity.workers, snapshot.digest);
+    if (JSON.stringify(observed) !== JSON.stringify(plan.identity)) throw new Error('Coverage execution identity differs from the plan; reconcile before retrying');
     const receipts = readdirSync(directory).filter((name) => name.startsWith('shard-')).map((name) => {
       const shardDirectory = join(directory, name);
       if (!['shard-1', 'shard-2'].includes(name) || realpathSync(shardDirectory) !== shardDirectory) {
@@ -172,13 +175,89 @@ export async function runCoverageCommand(argv: readonly string[], cwd = realpath
       const bytes = readCoverageArtifact(path, receipt.blobSha256);
       writeFileSync(join(blobs, `blob-${offset + 1}.json`), bytes, { flag: 'wx' });
     }
-    const result = await run(['run', '--root', cwd, '--config', join(cwd, 'vitest.config.ts'), `--merge-reports=${blobs}`, '--coverage',
-      '--coverage.reporter=text', '--coverage.reporter=json', '--coverage.reporter=json-summary', '--coverage.reporter=lcovonly']);
+    const result = await run('merge', ['run', '--root', cwd, '--config', join(cwd, 'vitest.config.ts'), `--merge-reports=${blobs}`, '--coverage',
+      '--coverage.reporter=text', '--coverage.reporter=json', '--coverage.reporter=json-summary', '--coverage.reporter=lcovonly'], {}, heldLock);
     if (result.exitCode === 0) {
       const merged = readJson(join(cwd, 'coverage/coverage-final.json'));
       if (!isRecord(merged) || JSON.stringify(Object.keys(merged).sort()) !== JSON.stringify(validated.coverageFiles)) throw new Error('Merged coverage scope differs from admitted shards');
     }
-    return { schemaVersion: 1, operation, admission, ...result, tests: validated.tests };
+    return { schemaVersion: 1, operation: 'merge', admission, ...result, tests: validated.tests };
+  };
+  const coordinatedRun = async (): Promise<CoverageCommandResult> => {
+    const requestedOutput = options.values.get('--out');
+    const artifacts = requestedOutput === undefined ? join(scratch, 'run-artifacts') : externalOutput(cwd, requestedOutput);
+    const artifactReport = requestedOutput === undefined
+      ? { ownership: 'worker-scratch', cleanup: 'included in worker cleanup' }
+      : { ownership: 'caller', path: artifacts, cleanup: 'retained for debugging' };
+    const lockPath = join(cwd, '.local/test-run.lock');
+    mkdirSync(dirname(lockPath), { recursive: true });
+    let lock: ProcessLockHandle;
+    try { lock = acquireProcessLock(lockPath); }
+    catch (error) {
+      if (!isProcessLockError(error)) throw error;
+      return { schemaVersion: 1, operation: 'run', admission, outcome: 'busy', exitCode: 75, artifacts: artifactReport,
+        error: `${error.reason} test lock; owner PID ${error.existingPid ?? 'unknown'} at ${lockPath}. Inspect the owner before retrying; this run did not queue or remove the lock.` };
+    }
+    let coordinated: CoverageCommandResult | undefined;
+    try {
+      mkdirSync(artifacts, { mode: 0o700 });
+      const planPath = join(artifacts, 'plan.json');
+      const planned = await planCoverage(planPath, workers, undefined, lock);
+      if (planned.result.exitCode !== 0 || planned.plan === undefined) {
+        coordinated = { ...planned.result, operation: 'run', phase: 'plan', artifacts: artifactReport, workers: { total: totalWorkers, perShard: workers } };
+      } else {
+        const shardResults = await Promise.allSettled([1, 2].map((shardIndex) => shardCoverage(planPath, planned.plan!, shardIndex, join(artifacts, `shard-${shardIndex}`), lock)));
+        const shards = shardResults.map((result) => result.status === 'fulfilled' ? result.value : {
+          schemaVersion: 1, operation: 'shard', admission, outcome: 'inconclusive', exitCode: 125, error: String(result.reason),
+        });
+        const failedShard = shards.find((result) => result.exitCode === 125) ?? shards.find((result) => result.exitCode !== 0);
+        if (failedShard) {
+          coordinated = { ...failedShard, operation: 'run', phase: 'shard', artifacts: artifactReport, workers: { total: totalWorkers, perShard: workers }, plan: planPath, shards };
+        } else {
+          const merged = await mergeCoverage(planned.plan, artifacts, lock);
+          if (merged.exitCode !== 0) {
+            coordinated = { ...merged, operation: 'run', phase: 'merge', artifacts: artifactReport, workers: { total: totalWorkers, perShard: workers }, plan: planPath, shards };
+          } else {
+            const postMerge = await executeTestCommands(cwd, [
+              { name: 'console-strict-coverage', command: 'npm', args: ['--prefix', 'console', 'run', 'coverage:check', '--', '--strict'] },
+              { name: 'coverage-headroom', command: 'npm', args: ['run', 'guard:coverage-headroom'] },
+            ], {
+              timeoutMs: Math.max(1, timeoutMs - (performance.now() - started) - Math.min(10_000, timeoutMs / 4)), json: true,
+              loadgate: admission === 'shared-host' ? loadgatePath : undefined, heldLock: lock,
+              env: { NODE_DISABLE_COMPILE_CACHE: '1' }, inheritOuterGroup: process.env.WHATSOUP_BOUNDED_BATTERY_OWNER_PID !== undefined,
+            });
+            coordinated = postMerge.exitCode === 0
+              ? { schemaVersion: 1, operation: 'run', admission, outcome: 'passed', exitCode: 0, artifacts: artifactReport,
+                workers: { total: totalWorkers, perShard: workers }, plan: planPath, planDigest: coveragePlanDigest(planned.plan), shards, merge: merged, postMerge, consoleCoverage: 'strict-passed' }
+              : { ...postMerge, operation: 'run', phase: 'post-merge', artifacts: artifactReport, workers: { total: totalWorkers, perShard: workers }, plan: planPath, shards, merge: merged };
+          }
+        }
+      }
+    } finally {
+      try {
+        if (!releaseProcessLock(lock!)) {
+          coordinated = { ...coordinated!, nativeResultExit: coordinated?.exitCode, outcome: 'inconclusive', exitCode: 125,
+            error: [coordinated?.error, 'test lock release failed: ownership changed or lock unavailable'].filter(Boolean).join('; ') };
+        }
+      } catch (error) {
+        coordinated = { ...coordinated!, nativeResultExit: coordinated?.exitCode, outcome: 'inconclusive', exitCode: 125,
+          error: [coordinated?.error, `test lock release failed: ${String(error)}`].filter(Boolean).join('; ') };
+      }
+    }
+    return coordinated!;
+  };
+  const perform = async (): Promise<CoverageCommandResult> => {
+    if (operation === 'plan') return (await planCoverage(externalOutput(cwd, options.values.get('--out')!), workers, options.values.get('--timings'))).result;
+    if (operation === 'shard') {
+      const planPath = resolve(options.values.get('--plan')!);
+      const plan = parseCoveragePlan(readJson(planPath, 8 * 1024 * 1024));
+      return shardCoverage(planPath, plan, index, externalOutput(cwd, options.values.get('--out')!));
+    }
+    if (operation === 'merge') {
+      const plan = parseCoveragePlan(readJson(resolve(options.values.get('--plan')!), 8 * 1024 * 1024));
+      return mergeCoverage(plan, realpathSync(options.values.get('--receipts')!));
+    }
+    return coordinatedRun();
   };
   let result: CoverageCommandResult;
   try { result = await perform(); }
@@ -269,8 +348,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   try {
     const result = await runBoundedCoverageCommand(process.argv.slice(2));
     process.stdout.write(typeof result.help === 'string' ? result.help : `${JSON.stringify({ ...result,
-      scope: 'root-coverage', completeCoverage: result.operation === 'merge' && result.outcome === 'passed',
-      consoleCoverage: 'not-run', omittedObligations: ['console-strict-report', 'static', 'behavioral', 'docker', 'python', 'other-platforms'],
+      scope: 'root-coverage', completeCoverage: ['merge', 'run'].includes(String(result.operation)) && result.outcome === 'passed',
+      consoleCoverage: result.operation === 'run' ? result.consoleCoverage : 'not-run',
+      omittedObligations: result.operation === 'run'
+        ? ['static', 'behavioral', 'docker', 'python', 'other-platforms']
+        : ['console-strict-report', 'static', 'behavioral', 'docker', 'python', 'other-platforms'],
     })}\n`);
     process.exitCode = result.exitCode;
   } catch (error) {

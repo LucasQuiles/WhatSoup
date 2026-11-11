@@ -160,12 +160,27 @@ counted lines; those unchanged zero counts do not establish exercised code.
 
 ### Local coverage shard pilot
 
-`npm run coverage:shards -- --help` exposes the opt-in plan, shard and merge commands.
+`npm run coverage:shards -- --help` exposes the opt-in run, plan, shard and merge commands.
 The existing `coverage:check` remains the full default, including the strict console
-report consumer. The pilot verifies root coverage only; it does not replace console,
-static, behavioral, Docker, Python or platform checks.
+report consumer. For one coordinated coverage run:
 
-Create an owned artifact directory outside the checkout, then run:
+```bash
+npm run coverage:shards -- run --max-workers 2 --timeout-ms 2700000
+```
+
+The coordinator holds the existing checkout lock across planning, both overlapping
+shards, native merge, strict console coverage consumption and the headroom check.
+Two total test workers means one isolated fork worker per shard; `--max-workers 4`
+means two per shard. It creates and removes its own intermediate artifacts by
+default. Use `--out` with a new directory outside the checkout only when retaining
+artifacts for investigation; that directory then belongs to the caller. Output
+paths inside removed scratch are diagnostic provenance, not retained evidence.
+Missing cleanup proof returns 125, contention returns 75 and a timeout returns 124.
+The command is opt-in pending matched performance and native cleanup qualification;
+it does not replace static, browser, behavioral, Docker, Python or platform checks.
+
+The individual commands remain available. Create an owned artifact directory
+outside the checkout, then run:
 
 ```bash
 npm run coverage:shards -- plan --out "$COVERAGE_ARTIFACTS/plan.json" --max-workers 2

@@ -1,5 +1,5 @@
-import { execFileSync, spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, symlinkSync, unlinkSync, watch, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
@@ -7,15 +7,33 @@ import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 const tmp = trackTmpDirs('coverage-shard-cli-');
 const command = resolve('scripts/coverage-shards.ts');
 
+function waitForFile(path: string, signal: AbortSignal): Promise<void> {
+  return new Promise((resolveWait) => {
+    const watcher = watch(resolve(path, '..'), { signal }, () => {
+      if (existsSync(path)) {
+        watcher.close();
+        resolveWait();
+      }
+    });
+    if (existsSync(path)) {
+      watcher.close();
+      resolveWait();
+    }
+  });
+}
+
 function fixture(runTimeoutMs = 30_000) {
   const cwd = tmp.make('repo');
   const output = tmp.make('artifacts');
   mkdirSync(join(cwd, 'src'));
   mkdirSync(join(cwd, 'tests'));
   mkdirSync(join(cwd, 'console'));
-  writeFileSync(join(cwd, 'package.json'), '{"type":"module"}');
+  writeFileSync(join(cwd, 'package.json'), '{"type":"module","scripts":{"guard:coverage-headroom":"node headroom.mjs"}}');
   writeFileSync(join(cwd, 'package-lock.json'), '{}');
   writeFileSync(join(cwd, 'console/package-lock.json'), '{}');
+  writeFileSync(join(cwd, 'console/package.json'), '{"type":"module","scripts":{"coverage:check":"node check-coverage.mjs"}}');
+  writeFileSync(join(cwd, 'console/check-coverage.mjs'), "import { accessSync } from 'node:fs';\nif (!process.argv.includes('--strict')) process.exit(42);\naccessSync('../coverage/coverage-summary.json');\n");
+  writeFileSync(join(cwd, 'headroom.mjs'), "import { accessSync } from 'node:fs';\naccessSync('coverage/coverage-summary.json');\n");
   writeFileSync(join(cwd, '.gitignore'), 'coverage/\nnode_modules/\n.local/\n');
   writeFileSync(join(cwd, 'src/main.ts'), 'export const choose = (value: boolean) => value ? 1 : 2;\n');
   writeFileSync(join(cwd, 'tests/a.test.ts'), "import { choose } from '../src/main.ts'; test('true', () => { expect(process.env.NODE_DISABLE_COMPILE_CACHE).toBe('1'); expect(choose(true)).toBe(1); });\n");
@@ -39,6 +57,176 @@ function fixture(runTimeoutMs = 30_000) {
 }
 
 describe('native coverage shard commands', () => {
+  it('creates a requested coordinated output directory and refuses an existing one without overwriting it', () => {
+    const { cwd, output, run } = fixture(30_000);
+    const created = join(output, 'created-run-output');
+    const completed = run('run', '--out', created, '--timeout-ms', '20000');
+    expect(completed.status, completed.stderr).toBe(0);
+    expect(JSON.parse(completed.stdout)).toMatchObject({ outcome: 'passed', exitCode: 0, operation: 'run' });
+    expect(existsSync(join(created, 'plan.json'))).toBe(true);
+    const existing = join(output, 'existing-run-output');
+    mkdirSync(existing);
+    const sentinel = join(existing, 'keep');
+    writeFileSync(sentinel, 'unchanged');
+    const refused = run('run', '--out', existing, '--timeout-ms', '20000');
+    expect(refused.status, refused.stderr).toBe(125);
+    expect(JSON.parse(refused.stdout)).toMatchObject({ outcome: 'inconclusive', exitCode: 125, operation: 'run' });
+    expect(readFileSync(sentinel, 'utf8')).toBe('unchanged');
+    expect(existsSync(join(existing, 'plan.json'))).toBe(false);
+  }, 30_000);
+
+  it('runs two shards concurrently under one checkout lock before strict post-merge checks', async () => {
+    const { cwd, output, run } = fixture(30_000);
+    const artifacts = join(output, 'coordinated-output');
+    const startedA = join(output, 'started-1');
+    const startedB = join(output, 'started-2');
+    const bothStarted = join(output, 'both-started');
+    const release = join(output, 'release');
+    writeFileSync(join(cwd, 'tests/a.test.ts'), `import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { choose } from '../src/main.ts';
+const startedA = ${JSON.stringify(startedA)};
+const startedB = ${JSON.stringify(startedB)};
+const bothStarted = ${JSON.stringify(bothStarted)};
+const release = ${JSON.stringify(release)};
+test('shard one waits for shard two before release', () => {
+  writeFileSync(startedA, 'started');
+  const deadline = Date.now() + 10_000;
+  while (!existsSync(startedB) && Date.now() < deadline) {}
+  if (!existsSync(startedB)) throw new Error('shard two never started');
+  writeFileSync(bothStarted, readFileSync(startedB, 'utf8'));
+  while (!existsSync(release) && Date.now() < deadline) {}
+  if (!existsSync(release)) throw new Error('shard one was not released');
+  expect(choose(true)).toBe(1);
+});\n`);
+    writeFileSync(join(cwd, 'tests/b.test.ts'), `import { existsSync, writeFileSync } from 'node:fs';
+import { choose } from '../src/main.ts';
+const startedA = ${JSON.stringify(startedA)};
+const startedB = ${JSON.stringify(startedB)};
+const release = ${JSON.stringify(release)};
+test('shard two starts while shard one owns its test', () => {
+  const deadline = Date.now() + 10_000;
+  while (!existsSync(startedA) && Date.now() < deadline) {}
+  if (!existsSync(startedA)) throw new Error('shard one never started');
+  writeFileSync(startedB, 'started');
+  while (!existsSync(release) && Date.now() < deadline) {}
+  if (!existsSync(release)) throw new Error('shard two was not released');
+  expect(choose(false)).toBe(2);
+});\n`);
+    const observation = new AbortController();
+    const bothShardsStarted = waitForFile(bothStarted, observation.signal);
+    const coordinated = spawn(process.execPath, [command, 'run', '--out', artifacts, '--timeout-ms', '20000'], {
+      cwd, env: { ...process.env, NODE_DISABLE_COMPILE_CACHE: '1' }, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    coordinated.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
+    coordinated.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+    const terminal = new Promise<number | null>((resolveTerminal, reject) => {
+      coordinated.once('error', reject);
+      coordinated.once('close', resolveTerminal);
+    });
+    let terminalStatus: number | null;
+    try {
+      await Promise.race([
+        bothShardsStarted,
+        terminal.then((status) => Promise.reject(new Error(`coordinated run ended before both shards started: ${status}; ${Buffer.concat(stdout).toString('utf8')}`))),
+      ]);
+      expect(existsSync(bothStarted)).toBe(true);
+      expect(readFileSync(bothStarted, 'utf8')).toBe('started');
+      const blocked = run('plan', '--out', join(output, 'unrelated-plan.json'));
+      expect(blocked.status, blocked.stderr).toBe(75);
+      expect(JSON.parse(blocked.stdout)).toMatchObject({ outcome: 'busy', exitCode: 75 });
+    } finally {
+      observation.abort();
+      writeFileSync(release, 'release');
+      terminalStatus = await terminal;
+    }
+    expect(terminalStatus, `${Buffer.concat(stderr).toString('utf8')}\n${Buffer.concat(stdout).toString('utf8')}`).toBe(0);
+    const result = JSON.parse(Buffer.concat(stdout).toString('utf8'));
+    expect(result).toMatchObject({ outcome: 'passed', exitCode: 0, operation: 'run', completeCoverage: true, consoleCoverage: 'strict-passed' });
+    expect(result.cleanup).toMatchObject({ outcome: 'passed', wrappedExit: 0 });
+    expect(JSON.parse(readFileSync(join(artifacts, 'plan.json'), 'utf8')).identity.workers).toBe(1);
+  }, 35_000);
+
+  it('holds the checkout lock through a shard receipt exception and gives inconclusive precedence after its sibling fails', async () => {
+    const { cwd, output, plan, run } = fixture(30_000);
+    const artifacts = join(output, 'coordinated-output');
+    expect(run('plan', '--out', plan).status).toBe(0);
+    const initialPlan = JSON.parse(readFileSync(plan, 'utf8'));
+    unlinkSync(plan);
+    const shardOneTest = initialPlan.shards[0].includes('tests/a.test.ts') ? 'a' : 'b';
+    const siblingLive = join(output, 'sibling-live');
+    const releaseSibling = join(output, 'release-sibling');
+    const receiptFailure = join(output, 'receipt-failure');
+    const waitForSibling = `import { existsSync, writeFileSync } from 'node:fs';
+import { choose } from '../src/main.ts';
+const siblingLive = ${JSON.stringify(siblingLive)};
+test('waits for the sibling to remain live before completing', () => {
+  const deadline = Date.now() + 10_000;
+  while (!existsSync(siblingLive) && Date.now() < deadline) {}
+  if (!existsSync(siblingLive)) throw new Error('sibling never became live');
+  expect(choose(true)).toBe(1);
+});\n`;
+    const liveThenFail = `import { existsSync, writeFileSync } from 'node:fs';
+import { choose } from '../src/main.ts';
+const siblingLive = ${JSON.stringify(siblingLive)};
+const releaseSibling = ${JSON.stringify(releaseSibling)};
+test('remains live until released, then reports a native failure', () => {
+  writeFileSync(siblingLive, 'live');
+  const deadline = Date.now() + 10_000;
+  while (!existsSync(releaseSibling) && Date.now() < deadline) {}
+  if (!existsSync(releaseSibling)) throw new Error('sibling was not released');
+  expect(choose(false)).toBe(3);
+});\n`;
+    writeFileSync(join(cwd, 'tests/a.test.ts'), shardOneTest === 'a' ? waitForSibling : liveThenFail);
+    writeFileSync(join(cwd, 'tests/b.test.ts'), shardOneTest === 'b' ? waitForSibling : liveThenFail);
+    const preload = join(output, 'receipt-failure.cjs');
+    writeFileSync(preload, `if ((process.argv[1] || '').endsWith('/coverage-shard-worker.ts')) {
+  const fs = require('node:fs');
+  const original = fs.writeFileSync;
+  const receipt = ${JSON.stringify(join(realpathSync(output), 'coordinated-output', 'shard-1', 'receipt.json'))};
+  const failure = ${JSON.stringify(receiptFailure)};
+  fs.writeFileSync = function(path, ...args) {
+    if (String(path) === receipt) {
+      original.call(this, failure, 'receipt write failed');
+      throw new Error('injected shard receipt failure');
+    }
+    return original.call(this, path, ...args);
+  };
+  require('node:module').syncBuiltinESMExports();
+}\n`);
+    const coordinated = spawn(process.execPath, [command, 'run', '--out', artifacts, '--timeout-ms', '20000'], {
+      cwd, env: { ...process.env, NODE_DISABLE_COMPILE_CACHE: '1', NODE_OPTIONS: `--require=${preload}` }, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    coordinated.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
+    coordinated.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+    const terminal = new Promise<number | null>((resolveTerminal, reject) => {
+      coordinated.once('error', reject);
+      coordinated.once('close', resolveTerminal);
+    });
+    const observation = new AbortController();
+    let terminalStatus: number | null;
+    try {
+      await Promise.race([
+        waitForFile(receiptFailure, observation.signal),
+        terminal.then((status) => Promise.reject(new Error(`coordinated run ended before the receipt failure: ${status}; ${Buffer.concat(stdout).toString('utf8')}`))),
+      ]);
+      expect(existsSync(siblingLive)).toBe(true);
+      const blocked = run('plan', '--out', join(output, 'unrelated-plan.json'));
+      expect(blocked.status, blocked.stderr).toBe(75);
+      expect(JSON.parse(blocked.stdout)).toMatchObject({ outcome: 'busy', exitCode: 75 });
+    } finally {
+      observation.abort();
+      if (!existsSync(releaseSibling)) writeFileSync(releaseSibling, 'release');
+      terminalStatus = await terminal;
+    }
+    const diagnostics = `${Buffer.concat(stderr).toString('utf8')}\n${Buffer.concat(stdout).toString('utf8')}`;
+    expect(terminalStatus, diagnostics).toBe(125);
+    expect(JSON.parse(Buffer.concat(stdout).toString('utf8'))).toMatchObject({ outcome: 'inconclusive', exitCode: 125, operation: 'run', phase: 'shard' });
+  }, 35_000);
+
   it.each([['failed', 0], ['busy', 0], ['timedOut', 0], ['inconclusive', 0], ['passed', 1], ['busy', 1]])('rejects a forged %s terminal record with native exit %s', (outcome, exitCode) => {
     const { plan, output, runWithEnv } = fixture();
     const preload = join(output, 'forged-terminal.cjs');
@@ -197,6 +385,27 @@ ${existing}`);
     expect(JSON.parse(merged.stdout)).toMatchObject({ outcome: 'failed', operation: 'merge', tests: { passed: 2, total: 2 } });
     const summary = JSON.parse(readFileSync(join(cwd, 'coverage/coverage-summary.json'), 'utf8'));
     expect(summary.total.functions.pct).toBe(50);
+  }, 30_000);
+
+  it('refuses merge after source, dependency or configuration changes without writing coverage', () => {
+    const { cwd, plan, output, run } = fixture();
+    expect(run('plan', '--out', plan, '--max-workers', '1').status).toBe(0);
+    for (const index of ['1', '2']) {
+      const shard = run('shard', '--plan', plan, '--index', index, '--out', join(output, `shard-${index}`), '--timeout-ms', '20000');
+      expect(shard.status, shard.stderr).toBe(0);
+    }
+    for (const file of ['src/main.ts', 'package-lock.json', 'vitest.config.ts']) {
+      const path = join(cwd, file);
+      const original = readFileSync(path, 'utf8');
+      writeFileSync(path, `${original}\n`);
+      const merged = run('merge', '--plan', plan, '--receipts', output, '--timeout-ms', '20000');
+      expect(merged.status, `${file}: ${merged.stderr}`).toBe(125);
+      expect(JSON.parse(merged.stdout)).toMatchObject({
+        outcome: 'inconclusive', operation: 'merge', error: expect.stringContaining('identity differs'),
+      });
+      expect(existsSync(join(cwd, 'coverage/coverage-final.json'))).toBe(false);
+      writeFileSync(path, original);
+    }
   }, 30_000);
 
   it.each(['foreign-artifacts', 'symlinked-shard'])('rejects %s despite valid identities and artifact hashes', (mode) => {
