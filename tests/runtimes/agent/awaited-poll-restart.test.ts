@@ -78,7 +78,7 @@ describe('awaited send_poll admission across restarts', () => {
           { chatJid, question: 'Proceed?', options: ['Yes', 'No'], awaitResult: true, timeoutMs: 3_600_000 },
           resolveSessionContext(
             { tier: 'chat-scoped', conversationKey: chatJid, deliveryJid: chatJid, abortSignal: abort.signal },
-            { actorJid: chatJid, conversationKey: chatJid, purpose: undefined, resolved: true },
+            { actorJid: chatJid, conversationKey: chatJid, purpose: undefined },
           ),
         );
 
