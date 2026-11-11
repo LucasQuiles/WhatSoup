@@ -2331,6 +2331,7 @@ describe('config — memory.pinecone.apiKeyService', () => {
 
   it.each([
     ['an empty string', ''],
+    ['null', null],
     ['a number', 7],
     ['an object', { service: 'pinecone-line-b' }],
   ])('rejects %s at load rather than falling back to the default key', async (_case, value) => {

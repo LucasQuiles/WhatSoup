@@ -540,7 +540,7 @@ describe('PineconeMemory', () => {
     it('the owner_only leg sends exactly one query, for owner_only records only', async () => {
       mockSearchRecords.mockResolvedValue({ result: { hits: [] } });
       try {
-        await memory.searchOwnerOnlyDetailed('q4');
+        await memory.searchOwnerOnlyDetailed('q4', undefined, { includeOwnerOnly: true });
         // Exact request: no chat, sender or source clause rides along, and the
         // filter is never the exclusion (that would return no owner_only record).
         expect(mockOwnerSearchRecords.mock.calls).toEqual([

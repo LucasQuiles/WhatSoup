@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, openSync, readSync, closeSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, openSync, readSync, closeSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -121,6 +121,29 @@ describe('whatsoup-db-snapshot (FLOS Stage 0 S0.4)', () => {
     const remaining = readdirSync(snaps);
     expect(remaining).toHaveLength(4);
     expect(remaining).toEqual(expect.arrayContaining([...otherSnapshots, receipt.snapshot]));
+
+    // The own series is still pruned, matched literally.
+    const second = JSON.parse(runTool(['snapshot', '--db', ownDb, '--out-root', snaps, '--retain', '1'], {
+      BOT_ERRORS_DRY_NOW: '1787900400',
+    })) as { snapshot: string; pruned: string[] };
+    expect(second.pruned).toEqual([receipt.snapshot]);
+    expect(readdirSync(snaps).sort()).toEqual([...otherSnapshots, second.snapshot].sort());
+  });
+
+  it('counts only ASCII-digit stamps in the own series', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'whatsoup-db-snapshot-'));
+    const snaps = join(tmpRoot, 'snaps');
+    const db = join(tmpRoot, 'bot.db');
+    makeFixtureDb(db);
+    mkdirSync(snaps);
+    // Arabic-Indic digits in the stamp position: not one of this tool's names.
+    const decoy = 'bot-٢٠٢٦١١١١T٠٠٠٠٠٠Z.snapshot.sqlite3';
+    writeFileSync(join(snaps, decoy), '');
+    const receipt = JSON.parse(runTool(['snapshot', '--db', db, '--out-root', snaps, '--retain', '1'], {
+      BOT_ERRORS_DRY_NOW: '1787900000',
+    })) as { snapshot: string; pruned: string[] };
+    expect(receipt.pruned).toEqual([]);
+    expect(readdirSync(snaps).sort()).toEqual([receipt.snapshot, decoy].sort());
   });
 
   describe('live WAL source (writer connection held open)', () => {

@@ -269,6 +269,36 @@ describe('Pinecone project guard validation', () => {
     );
   });
 
+  // Admission rejects what config load rejects, so a fleet patch cannot store
+  // a config the instance then refuses to start with.
+  it.each([
+    ['an empty apiKeyService', { apiKeyService: '' }, 'memory.pinecone.apiKeyService'],
+    ['a null apiKeyService', { apiKeyService: null }, 'memory.pinecone.apiKeyService'],
+    ['a non-string apiKeyService', { apiKeyService: 7 }, 'memory.pinecone.apiKeyService'],
+    ['the reserved owner_only namespace', { namespaces: { facts: 'whatsoup-owner-only-v1' } }, 'memory.pinecone.namespaces.facts'],
+    [
+      'a knowledge profile on the reserved owner_only namespace',
+      { knowledgeProfiles: { 'docs-index': { namespaces: ['docs', 'whatsoup-owner-only-v1'] } } },
+      'memory.pinecone.knowledgeProfiles.docs-index',
+    ],
+  ])('rejects %s at admission, as config load does', (_case, pinecone, field) => {
+    const raw = baseChat({ memory: { pinecone: { projectId: 'instance-proj-id', index: 'whatsapp-bot', ...pinecone } } });
+    expect(validateInstanceConfig(raw, ctx('create'))?.field).toBe(field);
+    expect(validateInstanceConfig(raw, ctx('patch', { originalType: 'chat' }))?.field).toBe(field);
+  });
+
+  it('rejects the reserved owner_only namespace through a legacy namespace alias', () => {
+    const raw = baseChat({ pineconeFactsNamespace: 'whatsoup-owner-only-v1', memory: { pinecone: { projectId: 'instance-proj-id' } } });
+    expect(validateInstanceConfig(raw, ctx('create'))?.field).toBe('memory.pinecone.namespaces.facts');
+  });
+
+  it('accepts a valid apiKeyService and ordinary namespaces', () => {
+    const raw = baseChat({
+      memory: { pinecone: { projectId: 'instance-proj-id', apiKeyService: 'pinecone-line-b', namespaces: { facts: 'facts' } } },
+    });
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+
   it('treats a keyring service selector alone as Pinecone config that needs a project guard', () => {
     const keyServiceOnly = baseChat({
       memory: { pinecone: { apiKeyService: 'pinecone-line-b' } },

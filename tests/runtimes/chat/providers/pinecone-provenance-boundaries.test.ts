@@ -3,7 +3,7 @@ import { matchesMetadata } from '../../../helpers/pinecone-metadata.ts';
 import type { LLMProvider } from '../../../../src/runtimes/chat/providers/types.ts';
 
 const { state, records, privateRecords, namespaceQueries, namespaceWrites, scores, queries, rerank, settings } = vi.hoisted(() => ({
-  state: { ignoreFilters: false, failNamespace: null as string | null },
+  state: { ignoreFilters: false, failNamespace: null as string | null, failOnce: false },
   records: new Map<string, Record<string, unknown>>(),
   privateRecords: new Map<string, Record<string, unknown>>(),
   namespaceQueries: [] as string[],
@@ -37,25 +37,31 @@ vi.mock('@pinecone-database/pinecone', () => ({
       return { indexes: [{ name: 'test-index', host: 'test-index-testproj.svc.example.pinecone.io' }] };
     }
     index() {
+      const failIfInjected = (target: string): void => {
+        if (state.failNamespace !== target) return;
+        if (state.failOnce) state.failNamespace = null;
+        throw new Error('namespace unavailable');
+      };
       const namespace = (name: string) => {
         const store = name === '' ? records : privateRecords;
         return {
           upsertRecords: async ({ records: incoming }: { records: Array<Record<string, unknown>> }) => {
             namespaceWrites.push(name);
-            if (state.failNamespace === name) throw new Error('namespace unavailable');
+            failIfInjected(name);
             for (const { _id, ...fields } of incoming) store.set(String(_id), fields);
           },
           deleteMany: async ({ ids }: { ids?: string[] }) => {
             namespaceWrites.push(`delete:${name}`);
-            if (state.failNamespace === `delete:${name}`) throw new Error('namespace unavailable');
+            failIfInjected(`delete:${name}`);
             for (const id of ids ?? []) store.delete(id);
           },
           searchRecords: async ({ query }: { query: { filter?: Record<string, unknown>; topK: number } }) => {
             namespaceQueries.push(name);
             queries.push(query.filter ?? {});
+            // A score may be set per namespace (`<namespace>:<id>`) or per id.
             return { result: { hits: [...store].filter(([, fields]) =>
               state.ignoreFilters || matchesMetadata(fields, query.filter),
-            ).map(([id, fields]) => ({ _id: id, _score: scores.get(id) ?? 0.95, fields }))
+            ).map(([id, fields]) => ({ _id: id, _score: scores.get(`${name}:${id}`) ?? scores.get(id) ?? 0.95, fields }))
               .sort((a, b) => b._score - a._score).slice(0, query.topK) } };
           },
         };
@@ -91,6 +97,7 @@ beforeEach(() => {
   queries.length = 0;
   state.ignoreFilters = false;
   state.failNamespace = null;
+  state.failOnce = false;
   settings.accountScopeId = 'scope:account-b';
   settings.memory.pinecone.instanceScopedIds = true;
   settings.memory.pinecone.recordVisibility = 'chat_scoped';
@@ -201,7 +208,7 @@ describe('owner-only namespace compatibility fence', () => {
     expect(await memory.checkDuplicate('test-chat', 'test-contact', 'query', 0.8)).toEqual({ isDuplicate: false });
     expect(await memory.searchClaims('test-chat', 'test-contact', 'query')).toEqual([]);
     expect(await memory.findSupersedeCandidate('test-chat', 'query')).toBeNull();
-    expect((await memory.searchEntitiesDetailed('query', undefined, ownerOptions)).results).toEqual([]);
+    expect((await memory.searchEntitiesDetailed('query')).results).toEqual([]);
     expect(namespaceQueries).toEqual(['', '', '', '']);
 
     namespaceQueries.length = 0;
@@ -265,7 +272,103 @@ describe('owner-only namespace compatibility fence', () => {
     await new PineconeMemory().upsert([record('shared')]);
     expect(namespaceWrites).toEqual(['']);
   });
+
+  it('a move whose delete fails once succeeds on the retry and leaves only the reserved copy', async () => {
+    seed('shared fact', own);
+    settings.memory.pinecone.recordVisibility = 'owner_only';
+    state.failNamespace = 'delete:';
+    state.failOnce = true;
+    const memory = new PineconeMemory();
+    const candidate = (await memory.findSupersedeCandidate('test-chat', 'query'))!;
+    await memory.upsert([{ ...candidate.record, memoryType: 'correction', superseded: 'private update' }], {
+      provenance: 'fact_export',
+    });
+    expect(records.has('shared fact')).toBe(false);
+    expect(privateRecords.get('shared fact')).toMatchObject({ visibility: 'owner_only', superseded: 'private update' });
+    expect(namespaceWrites).toEqual([reservedNamespace, 'delete:', reservedNamespace, 'delete:']);
+  });
+
+  // A move interrupted after the reserved write leaves one id in both
+  // namespaces until a later write deletes the shared copy. Merged reads must
+  // keep only the reserved copy: it is the narrowed, newer version, and a
+  // later duplicate must never relabel it chat_scoped.
+  function seedPartialMove() {
+    seed('moved', { ...own, text: 'shared original' });
+    seed('moved', { ...own, visibility: 'owner_only', text: 'private correction' }, reservedNamespace);
+    scores.set(`${reservedNamespace}:moved`, 0.99);
+    scores.set(':moved', 0.5);
+  }
+
+  it('admitted recall keeps only the reserved copy of an id found in both namespaces', async () => {
+    seedPartialMove();
+    const result = await new PineconeMemory().searchForChatDetailed('test-chat', 'query', undefined, ownerOptions);
+    expect(result.results.map((hit) => [hit.id, hit.record.text, hit.record.visibility])).toEqual([
+      ['moved', 'private correction', 'owner_only'],
+    ]);
+  });
+
+  it('consolidation promotes the reserved copy of an id found in both namespaces, as owner_only', async () => {
+    seedPartialMove();
+    const result = await runConsolidation(new PineconeMemory(), consolidationProvider(), {
+      instanceScope: 'test-line', lookbackDays: 7, dryRun: false,
+    });
+    expect(result.status).toBe('completed');
+    const durable = (store: Map<string, Record<string, unknown>>) =>
+      [...store].filter(([id]) => id.startsWith('durable:')).map(([, fields]) => [fields.text, fields.visibility]);
+    expect(durable(records)).toEqual([]);
+    expect(durable(privateRecords)).toEqual([['private correction', 'owner_only']]);
+  });
+
+  it('entity recall for an admitted owner merges reserved records by score', async () => {
+    seed('shared entity', own);
+    scores.set('shared entity', 0.9);
+    seedPrivate('private entity', 0.95);
+    const owner = await new PineconeMemory().searchEntitiesDetailed('query', undefined, ownerOptions);
+    expect(owner.results.map((hit) => hit.id)).toEqual(['private entity', 'shared entity']);
+    expect(namespaceQueries).toEqual(['', reservedNamespace]);
+  });
+
+  it('the owner-only leg queries nothing without an explicit grant', async () => {
+    seedPrivate('private');
+    const result = await new PineconeMemory().searchOwnerOnlyDetailed('query');
+    expect(result.results).toEqual([]);
+    expect(namespaceQueries).toEqual([]);
+  });
+
+  // Without instanceScopedIds, consolidation cannot tell whose an owner_only
+  // record is, and a promotion carries this writer's identity: it must never
+  // read the reserved namespace, or another line's private text would become
+  // recallable as this instance's own.
+  it('unscoped consolidation never reads the reserved namespace', async () => {
+    settings.memory.pinecone.instanceScopedIds = false;
+    seed('shared content', own);
+    seed('foreign private', {
+      source_instance: 'other-line', source_account: 'scope:account-a', visibility: 'owner_only',
+    }, reservedNamespace);
+    const result = await runConsolidation(new PineconeMemory(), consolidationProvider(), {
+      instanceScope: null, lookbackDays: 7, dryRun: false,
+    });
+    expect(result.status).toBe('completed');
+    expect(namespaceQueries).not.toContain(reservedNamespace);
+    const promoted = [...records, ...privateRecords].filter(([id]) => id.startsWith('durable:')).map(([, fields]) => fields.text);
+    expect(promoted).toEqual(['shared content']);
+  });
 });
+
+function consolidationProvider(): LLMProvider {
+  return {
+    name: 'fixture',
+    generate: vi.fn(async (request) => {
+      const input = JSON.parse(String(request.messages[0]!.content)) as { records: Array<{ id: string; text: string }> };
+      return {
+        content: JSON.stringify({ durableKnowledge: input.records.map((record) => ({
+          claim: record.text, sourceRecordIds: [record.id], confidence: 0.9, promotionReason: 'stable preference',
+        })), discarded: [] }),
+        inputTokens: 1, outputTokens: 1, model: 'fixture', durationMs: 1,
+      };
+    }),
+  };
+}
 
 describe('consolidation provenance boundary', () => {
   function provider(): LLMProvider {
@@ -304,6 +407,11 @@ describe('consolidation provenance boundary', () => {
       expect(fields).toMatchObject({ ...own, provenance: 'consolidation' });
       expect(fields.visibility).toBe(fields.text === 'private current content' ? 'owner_only' : 'chat_scoped');
     }
+    // Each promotion lands in its own namespace.
+    const promotedIn = (store: Map<string, Record<string, unknown>>) =>
+      [...store].filter(([id]) => id.startsWith('durable:')).map(([, fields]) => fields.text);
+    expect(promotedIn(records)).toEqual(['current account content']);
+    expect(promotedIn(privateRecords)).toEqual(['private current content']);
     expect(queries[0]).toMatchObject({ source_instance: { $eq: 'test-line' }, source_account: { $eq: 'scope:account-b' } });
   });
 
