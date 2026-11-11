@@ -535,6 +535,7 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 // ─── Import after mocks ───────────────────────────────────────────────────────
 
 import * as registerAllModule from '../../../src/mcp/register-all.ts';
+import { MAX_PENDING_POLL_AWAITS } from '../../../src/mcp/tools/messaging.ts';
 import { AgentRuntime, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
 import { parseGeminiAcpEvent } from '../../../src/runtimes/agent/providers/gemini-acp-parser.ts';
 import { parseCodexEvent } from '../../../src/runtimes/agent/providers/codex-parser.ts';
@@ -14153,6 +14154,53 @@ describe('AgentRuntime', () => {
       const remaining = db.raw.prepare('SELECT COUNT(*) AS cnt FROM pending_polls').get() as { cnt: number };
       expect(remaining.cnt).toBe(1);
 
+      db.close();
+    });
+
+    it('restart drops orphaned send_poll awaits so repeated restarts never carry more than the cap, and keeps AskUser polls', async () => {
+      type RestartState = {
+        pendingPolls: { questions: Map<string, unknown> };
+        registerSendPollAwaiter: AgentRuntime['registerSendPollAwaiter'];
+        deletePendingPollQuestions: (mapKey: string) => void;
+        rehydratePendingPolls(): Promise<void>;
+      };
+      const db = makeRealDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const future = Date.now() + 3_600_000;
+      insertRow(db, 'askuser-live', 'ask-chat@g.us', future, buildPayload({ chatJid: 'ask-chat@g.us' }));
+      const sendPollRows = () => (db.raw.prepare(
+        "SELECT COUNT(*) AS cnt FROM pending_polls WHERE map_key LIKE 'send_poll:%'",
+      ).get() as { cnt: number }).cnt;
+
+      const generations: RestartState[] = [];
+      const awaits: Promise<unknown>[] = [];
+      for (let generation = 0; generation < 3; generation += 1) {
+        const state = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' }) as unknown as RestartState;
+        generations.push(state);
+        sentMessages.length = 0;
+        await state.rehydratePendingPolls();
+
+        // Rows from the previous process have no awaiter here and must not survive.
+        expect(sendPollRows()).toBe(0);
+        expect([...state.pendingPolls.questions.keys()]).toEqual(['askuser-live']);
+        expect(sentMessages).toEqual(generation === 0 ? [] : [{
+          jid: 'poll-chat@g.us',
+          text: `I restarted while waiting on ${MAX_PENDING_POLL_AWAITS} polls, so I can no longer act on their votes — ask me again if you still need those decisions.`,
+        }]);
+
+        // This process admits a full cap of awaited polls (the admission counters start at zero).
+        for (let i = 0; i < MAX_PENDING_POLL_AWAITS; i += 1) {
+          awaits.push(state
+            .registerSendPollAwaiter(`G${generation}_${i}`, 'poll-chat@g.us', ['Yes', 'No'], 'first-vote-wins', 3_600_000)
+            .catch(() => undefined));
+        }
+        expect(sendPollRows()).toBe(MAX_PENDING_POLL_AWAITS);
+      }
+
+      for (const [generation, state] of generations.entries()) {
+        for (let i = 0; i < MAX_PENDING_POLL_AWAITS; i += 1) state.deletePendingPollQuestions(`send_poll:G${generation}_${i}`);
+      }
+      await Promise.all(awaits);
       db.close();
     });
 

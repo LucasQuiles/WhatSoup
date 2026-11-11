@@ -19,6 +19,7 @@ There are two poll paths with different semantics:
    - By default, `send_poll` returns after sending. With `awaitResult: true`, it stays open until a vote, expiry, or cancellation and returns the result.
    - A blocking wait uses the tool timeout (default one hour, clamped to one second through 24 hours). The operation tracker and session hard watchdog allow that bounded wait. Unrelated stalled tools retain their normal deadlines.
    - At most 8 awaited polls can be pending per conversation and 32 per runtime. A call over either limit returns an error and sends no poll. A slot frees when a pending poll is answered, expires or is cancelled, or when its send fails.
+   - A restart ends every awaiting `send_poll` call. On start, WhatSoup deletes the stored awaited polls and tells each affected chat that their votes can no longer be acted on, so the limits start from zero with no carried-over polls. Pending `AskUserQuestion` polls are restored.
    - When the provider reports a tool start and operation tracking is enabled, periodic progress during that bounded wait refreshes the typing indicator without sending “still working” text for the waiting operation. Unrelated operations keep their normal progress behavior.
    - After the wait expires, a missing tool result still reaches ordinary stall recovery for child-process providers. Managed API providers use their hard-watchdog fallback. The session hard watchdog also bounds recovery when operation tracking is disabled.
 
