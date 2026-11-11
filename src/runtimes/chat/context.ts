@@ -25,7 +25,7 @@ import {
 
 const log = createChildLogger('conversation');
 
-export type ContextScope = 'chat' | 'sender' | 'self' | 'entity' | 'context';
+export type ContextScope = 'chat' | 'sender' | 'self' | 'owner_only' | 'entity' | 'context';
 export type ContextLoadStatus = 'not_attempted' | 'complete' | 'partial' | 'unavailable';
 
 export interface ContextScopeOutcome {
@@ -186,6 +186,13 @@ export async function loadContextDetailed(
     };
   }
 
+  // With owner_only access, a fourth leg fetches the owner_only records of every
+  // chat: an owner_only fact about another sender in another chat matches neither
+  // the chat leg nor the sender leg. Without access it is never queried. It runs
+  // alongside the other three.
+  const ownerOnlyLeg = ownerOnly
+    ? captureContextSearch(() => pinecone.searchOwnerOnlyDetailed(messageText, traceId))
+    : Promise.resolve(null);
   const [chatDetailsRaw, senderDetailsRaw, selfDetailsRaw] = await Promise.all([
     captureContextSearch(() =>
       ownerOnly
@@ -209,6 +216,7 @@ export async function loadContextDetailed(
           : pinecone.searchSelfFactsDetailed(messageText),
     ),
   ]);
+  const ownerOnlyDetailsRaw = await ownerOnlyLeg;
   // Post-query gate: the pre-query exclusion only narrows the fetch.
   const visible = <T extends { results: SearchResult[] }>(details: T): T => (ownerOnly
     ? details
@@ -241,17 +249,21 @@ export async function loadContextDetailed(
       (foldChatAttribution(result.record.chatJid) === thisChat && sameInstance(result)) || crossesBoundary(result));
   // Self facts are this bot's own identity: another instance's never apply.
   const selfResults = selfDetails.results.filter(sameInstance);
+  // The owner_only leg asks for owner_only records only; the gate checks again.
+  const ownerOnlyResults = ownerOnlyDetailsRaw ? ownerOnlyDetailsRaw.results.filter(crossesBoundary) : [];
   const scopes = [
     scopeOutcome('chat', chatDetails),
     scopeOutcome('sender', senderDetails),
     scopeOutcome('self', selfDetails),
+    ...(ownerOnlyDetailsRaw ? [scopeOutcome('owner_only', ownerOnlyDetailsRaw)] : []),
   ];
 
-  // Merge, deduplicate by id, preserve insertion order (chat results first)
+  // Merge, deduplicate by id, preserve insertion order (chat results first,
+  // then sender, then the owner_only leg)
   const seen = new Set<string>();
   const merged: SearchResult[] = [];
 
-  for (const result of [...chatResults, ...senderResults]) {
+  for (const result of [...chatResults, ...senderResults, ...ownerOnlyResults]) {
     if (!seen.has(result.id)) {
       seen.add(result.id);
       merged.push(result);
@@ -273,7 +285,7 @@ export async function loadContextDetailed(
       ...(safeTraceId ? { trace_id: safeTraceId } : {}),
       query_intent: routed.intent,
       routed_namespace_count: routed.namespaces.length,
-      scope_coverage: ['chat', 'sender', 'self'],
+      scope_coverage: scopes.map((outcome) => outcome.scope),
       result_count: topResults.length,
       score_buckets: bucketMemoryScores(
         topResults.map((result) => result.score),

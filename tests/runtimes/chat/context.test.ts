@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { loadContext, loadContextDetailed } from '../../../src/runtimes/chat/context.ts';
 import type { SearchResult, MemoryRecord, EntitySearchResult } from '../../../src/runtimes/chat/providers/pinecone.ts';
+import { ownerOnlyLegFilter, withVisibilityFilter } from '../../../src/core/memory-scope.ts';
 
 vi.mock('../../../src/config.ts', () => ({
   config: {
@@ -70,9 +71,66 @@ function makeMockPinecone(
     searchForChatDetailed: vi.fn().mockResolvedValue({ results: chatResults, status: 'ok' }),
     searchForSenderDetailed: vi.fn().mockResolvedValue({ results: senderResults, status: 'ok' }),
     searchSelfFactsDetailed: vi.fn().mockResolvedValue({ results: selfResults, status: 'ok' }),
+    searchOwnerOnlyDetailed: vi.fn().mockResolvedValue({ results: [], status: 'ok' }),
     search: vi.fn().mockResolvedValue([]),
     upsert: vi.fn().mockResolvedValue(undefined),
     checkDuplicate: vi.fn().mockResolvedValue({ isDuplicate: false }),
+  };
+}
+
+// ---- Predicate-evaluating fake ----
+//
+// makeMockPinecone returns fixed lists whatever a leg asks for, which proves the
+// post-query gates. This fake answers each leg with only the stored records its
+// metadata filter matches (the same filter the provider sends), so a record no
+// leg asks for is never returned.
+
+type Filter = Record<string, unknown>;
+
+/** Pinecone metadata filter semantics for the operators the context legs use. */
+function matchesFilter(fields: Record<string, unknown>, filter: Filter): boolean {
+  return Object.entries(filter).every(([key, condition]) => {
+    if (key === '$or') return (condition as Filter[]).some((f) => matchesFilter(fields, f));
+    if (key === '$and') return (condition as Filter[]).every((f) => matchesFilter(fields, f));
+    const value = fields[key];
+    return Object.entries(condition as Filter).every(([op, operand]) => {
+      switch (op) {
+        case '$eq': return value === operand;
+        // A bare $ne matches only records that carry a differing value.
+        case '$ne': return value !== undefined && value !== operand;
+        case '$in': return (operand as unknown[]).includes(value);
+        case '$exists': return (value !== undefined) === operand;
+        default: throw new Error(`fake index: unsupported operator ${op}`);
+      }
+    });
+  });
+}
+
+function storedFields(record: MemoryRecord): Record<string, unknown> {
+  const fields: Record<string, unknown> = {
+    chat_jid: record.chatJid, sender_jid: record.senderJid, memory_type: record.memoryType,
+  };
+  if (record.visibility !== undefined) fields['visibility'] = record.visibility;
+  if (record.sourceInstance !== undefined) fields['source_instance'] = record.sourceInstance;
+  if (record.sourceAccount !== undefined) fields['source_account'] = record.sourceAccount;
+  return fields;
+}
+
+function makeFilteringPinecone(stored: SearchResult[]) {
+  const answer = (filter: Filter) => ({
+    results: stored.filter((result) => matchesFilter(storedFields(result.record), filter)),
+    status: 'ok' as const,
+  });
+  const leg = (base: Filter, options?: { includeOwnerOnly?: boolean }) =>
+    answer(withVisibilityFilter(base, options?.includeOwnerOnly === true) ?? {});
+  return {
+    searchForChatDetailed: vi.fn(async (chatJid: string, _q: string, _t?: string, o?: { includeOwnerOnly?: boolean }) =>
+      leg({ chat_jid: { $eq: chatJid } }, o)),
+    searchForSenderDetailed: vi.fn(async (senderJid: string, _q: string, _t?: string, o?: { includeOwnerOnly?: boolean }) =>
+      leg({ sender_jid: { $eq: senderJid } }, o)),
+    searchSelfFactsDetailed: vi.fn(async (_q: string, _t?: string, o?: { includeOwnerOnly?: boolean }) =>
+      leg({ memory_type: { $eq: 'self_fact' } }, o)),
+    searchOwnerOnlyDetailed: vi.fn(async () => answer(ownerOnlyLegFilter())),
   };
 }
 
@@ -625,24 +683,34 @@ describe('loadContext', () => {
   });
 
   it('with access under the this_chat boundary, owner_only records from other chats pass; chat_scoped ones do not', async () => {
-    const elsewhere = (id: string, text: string, visibility?: 'owner_only' | 'chat_scoped') => {
+    const CALLER = '15550000055@s.whatsapp.net';
+    const stored = (id: string, text: string, sender: string, visibility?: 'owner_only' | 'chat_scoped') => {
       const result = makeResult(id, text);
       result.record.chatJid = '15550000003@s.whatsapp.net';
+      result.record.senderJid = sender;
       if (visibility) result.record.visibility = visibility;
       return result;
     };
-    const pinecone = makeMockPinecone([], [
-      elsewhere('p', 'personal line fact from another chat', 'owner_only'),
-      elsewhere('c', 'another contact chat_scoped fact', 'chat_scoped'),
-      elsewhere('l', 'another contact legacy fact'),
+    // The owner_only fact is about another sender in another chat: neither the
+    // chat leg nor the sender leg asks for it. The caller's own records from
+    // another chat do reach the sender leg, and the boundary must drop them.
+    const pinecone = makeFilteringPinecone([
+      stored('p', 'personal line fact from another chat', '15550000003@s.whatsapp.net', 'owner_only'),
+      stored('c', 'another contact chat_scoped fact', CALLER, 'chat_scoped'),
+      stored('l', 'another contact legacy fact', CALLER),
     ]);
     const trusted = await loadContextDetailed(
-      pinecone as any, '15550000055@s.whatsapp.net', '15550000055@s.whatsapp.net', 'query', undefined, 'this_chat',
-      { ownerOnly: true },
+      pinecone as any, CALLER, CALLER, 'query', undefined, 'this_chat', { ownerOnly: true },
     );
     expect(trusted.text).toContain('personal line fact from another chat');
     expect(trusted.text).not.toContain('another contact chat_scoped fact');
     expect(trusted.text).not.toContain('another contact legacy fact');
+    expect(trusted.status).toBe('complete');
+
+    // Without access the owner_only leg is never queried and the fact never arrives.
+    const contact = await loadContextDetailed(pinecone as any, CALLER, CALLER, 'query', undefined, 'this_chat');
+    expect(contact.text).not.toContain('personal line fact from another chat');
+    expect(pinecone.searchOwnerOnlyDetailed).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -714,6 +782,24 @@ describe('loadContext — entity mode', () => {
     await loadContext(pinecone as any, 'chat@g.us', 'alice@s.whatsapp.net', 'find invoice 17088');
 
     expect(pinecone.searchEntitiesDetailed).toHaveBeenCalledWith('find invoice 17088');
+  });
+
+  it('drops owner_only entity records unless the caller may read them, and includes them only then', async () => {
+    const privateNote = makeEntityResult('p1', 'note', 'a private entity note');
+    privateNote.record.metadata = { visibility: 'owner_only' };
+    const pinecone = makeMockPineconeWithEntity([privateNote, makeEntityResult('b1', 'building', 'BUILDING: 100 Main St')]);
+
+    const contact = await loadContextDetailed(pinecone as any, 'chat@g.us', 'alice@s.whatsapp.net', 'query');
+    expect(contact.text).not.toContain('a private entity note');
+    expect(contact.text).toContain('BUILDING: 100 Main St');
+    // An unprivileged caller keeps the exact earlier call shape (the provider excludes by default).
+    expect(pinecone.searchEntitiesDetailed).toHaveBeenLastCalledWith('query');
+
+    const owner = await loadContextDetailed(
+      pinecone as any, 'alice@s.whatsapp.net', 'alice@s.whatsapp.net', 'query', undefined, 'open', { ownerOnly: true },
+    );
+    expect(owner.text).toContain('a private entity note');
+    expect(pinecone.searchEntitiesDetailed).toHaveBeenLastCalledWith('query', undefined, { includeOwnerOnly: true });
   });
 
   it('returns empty string when searchEntities returns no results', async () => {

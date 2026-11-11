@@ -26,6 +26,7 @@ import {
   memorySourceAccount,
   isOwnerOnlyRecord,
   narrowestVisibility,
+  ownerOnlyLegFilter,
   recordIdScope,
   withVisibilityFilter,
   type MemoryProvenance,
@@ -1124,6 +1125,15 @@ export class PineconeMemory {
 
   async searchSelfFacts(query: string, traceId?: string): Promise<SearchResult[]> {
     return (await this.searchSelfFactsDetailed(query, traceId)).results;
+  }
+
+  /**
+   * owner_only records of every chat, for a caller that ownerOnlyRecallAllowed
+   * admits (memory-scope.ts). The chat and sender legs reach only this chat's
+   * records and those about this sender; this leg reaches the other owner_only ones.
+   */
+  async searchOwnerOnlyDetailed(query: string, traceId?: string): Promise<PineconeSearchDetails> {
+    return this.searchDetailed(query, ownerOnlyLegFilter(), config.pineconeContextTopK, traceId);
   }
 
   async searchEntities(query: string, traceId?: string): Promise<EntitySearchResult[]> {

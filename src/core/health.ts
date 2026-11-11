@@ -117,7 +117,7 @@ export interface MemoryReadinessHealth {
 export interface MemoryContextHealth {
   status: 'complete' | 'partial' | 'unavailable';
   scopes: Array<{
-    scope: 'chat' | 'sender' | 'self' | 'entity' | 'context';
+    scope: 'chat' | 'sender' | 'self' | 'owner_only' | 'entity' | 'context';
     status: 'ok' | 'breaker_open' | 'project_guard_failed' | 'failed';
     failureCode: MemoryOperationFailureCode | null;
     retryable: boolean;
