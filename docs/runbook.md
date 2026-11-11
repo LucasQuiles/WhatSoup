@@ -3383,6 +3383,17 @@ Groups used for multi-agent orchestration (where a conductor agent like Q coordi
 
 WhatSoup can run in a Docker container as an alternative to the systemd/launchd host deployment. The container runs fleet + instances in a single supervisor process.
 
+The supervisor shares pending starts and stops for each instance. Start confirms
+that the child spawned, not that the instance is healthy. Stop listens for exit
+before sending SIGTERM, allows 15 seconds for graceful shutdown, then sends
+SIGKILL and waits up to five more seconds for exit confirmation. Sending a signal
+alone is not a successful stop. A failed or unconfirmed stop retains the child
+record and rejects restart and deletion; inspect the child and correlated fleet
+error, then retry the managed stop to reconcile its exit. An error before spawn
+removes the failed attempt so a later start can retry. These controls are local to
+the supervisor process; they do not serialize filesystem mutations across fleet
+processes.
+
 ### Build
 
 ```bash
