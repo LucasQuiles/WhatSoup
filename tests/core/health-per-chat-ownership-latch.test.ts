@@ -323,6 +323,63 @@ describe('GET /health — per-chat ownership reasons across a repair', () => {
     expect(repaired.status_reasons).not.toContain('runtime.agent_respawn_failed_clear_pending');
   });
 
+  it('re-probes auto-compact backoff across expiry, then reports a renewed active window', async () => {
+    // The runtime recomputes this window from its current clock on every
+    // snapshot. One long-lived handler must therefore follow backoff → expiry
+    // healthy → a newly armed backoff without retaining stale degradation.
+    const instance = await openInstance(
+      'latch-auto-compact-backoff',
+      ownershipSnapshot(['auto_compact_backoff'], { backoffScopes: 1 }),
+    );
+    const active = await instance.poll();
+    expect(active.status).toBe('degraded');
+    expect(active.status_reasons).toContain('runtime.auto_compact_backoff');
+    expect(active.degradation_causes).toContain('agent_auto_compact_backoff');
+
+    instance.setSnapshot(ownershipSnapshot([]));
+    const expired = await instance.poll();
+    expect(expired.status, 'an expired runtime backoff must not remain latched').toBe('healthy');
+    expect(expired.status_reasons).toEqual([]);
+    expect(expired.degradation_causes).not.toContain('degradation_silence_unproven');
+
+    instance.setSnapshot(ownershipSnapshot(['auto_compact_backoff'], { backoffScopes: 1 }));
+    const renewed = await instance.poll();
+    expect(renewed.status).toBe('degraded');
+    expect(renewed.status_reasons).toContain('runtime.auto_compact_backoff');
+    expect(renewed.degradation_causes).toContain('agent_auto_compact_backoff');
+  });
+
+  it('keeps a mixed unrelated latch after auto-compact backoff expires', async () => {
+    // Exempting the directly re-probed backoff must not release a simultaneous
+    // silence-prone runtime fault. This proves the exemption is surgical.
+    const instance = await openInstance(
+      'latch-auto-compact-mixed',
+      ownershipSnapshot(['auto_compact_backoff', 'turn_queue_halted'], { backoffScopes: 1 }),
+    );
+    expect((await instance.poll()).status).toBe('degraded');
+
+    instance.setSnapshot(ownershipSnapshot([]));
+    const expired = await instance.poll();
+    expect(expired.status).toBe('degraded');
+    expect(expired.status_reasons).toContain('degradation_silence_unproven');
+  });
+
+  it('fails closed when the agent runtime snapshot is missing', async () => {
+    // The auto-compact exception applies only after a fresh runtime snapshot
+    // reports that its active window expired. Missing runtime evidence remains
+    // a recovery-debt failure and cannot make the health handler read healthy.
+    const deps = makeDeps(db, 'latch-auto-compact-runtime-missing', () => ownershipSnapshot([]));
+    const built = await buildTestServer({ ...deps, runtime: undefined });
+    server = built.server;
+
+    const { status, body } = await healthReq(built.port);
+    expect(status).toBe(200);
+    const missing = JSON.parse(body);
+    expect(missing.status).toBe('degraded');
+    expect(missing.status_reasons).toContain('recovery_debt_blocking');
+    expect(missing.recovery_debt.reasons).toContain('recovery_evidence_unreadable');
+  });
+
   it('a silence-prone reason alongside a re-probed one still arms, so the fix removes no protection', async () => {
     // Only turn_queue_halted is silence-prone; the ownership reason is re-probed
     // every evaluation. Filtering the re-probed reason out of the latched set
