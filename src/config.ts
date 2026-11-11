@@ -124,6 +124,12 @@ export interface MemoryConfig {
   };
   pinecone: {
     apiKeyEnv: string;
+    /**
+     * Keyring service holding this instance's Pinecone key. When set, only
+     * this service is consulted (never the default `pinecone` entry), then
+     * the `apiKeyEnv` variable (lib/api-key-resolver.ts resolvePineconeApiKey).
+     */
+    apiKeyService?: string;
     projectId?: string;
     expectedHostSuffix?: string;
     /**
@@ -451,6 +457,18 @@ export function pineconeRecordVisibility(value: unknown): 'owner_only' | 'chat_s
   if (value === undefined || value === null) return 'chat_scoped';
   if (value === 'owner_only' || value === 'chat_scoped') return value;
   throw new Error('memory.pinecone.recordVisibility must be "owner_only" or "chat_scoped"');
+}
+
+/**
+ * `memory.pinecone.apiKeyService`. Unset keeps the default key route. A
+ * present value that is not a non-empty string throws at config load:
+ * ignoring it would fall back to the default `pinecone` keyring entry, which
+ * can belong to another account.
+ */
+export function pineconeApiKeyService(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (isNonEmptyString(value)) return value;
+  throw new Error('memory.pinecone.apiKeyService must be a non-empty string');
 }
 
 function knowledgeSearchMode(value: unknown, fallback: KnowledgeSearchMode): KnowledgeSearchMode {
@@ -1152,6 +1170,7 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
     },
     pinecone: {
       apiKeyEnv: stringProp(pinecone, 'apiKeyEnv') ?? DEFAULT_PINECONE_API_KEY_ENV,
+      apiKeyService: pineconeApiKeyService(pinecone?.apiKeyService),
       projectId: stringProp(pinecone, 'projectId') ?? process.env.PINECONE_PROJECT_ID,
       expectedHostSuffix: stringProp(pinecone, 'expectedHostSuffix') ?? process.env.PINECONE_EXPECTED_HOST_SUFFIX,
       recordVisibility: pineconeRecordVisibility(pinecone?.recordVisibility),

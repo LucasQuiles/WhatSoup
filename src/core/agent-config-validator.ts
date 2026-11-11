@@ -174,6 +174,7 @@ function hasExplicitPineconeConfig(raw: Record<string, unknown>): boolean {
     ]) ||
     hasAnyOwn(pinecone, [
       'apiKeyEnv',
+      'apiKeyService',
       'index',
       'allowedIndexes',
       'namespaces',

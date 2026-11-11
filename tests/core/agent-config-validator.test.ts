@@ -268,6 +268,16 @@ describe('Pinecone project guard validation', () => {
       'memory.pinecone.projectId',
     );
   });
+
+  it('treats a keyring service selector alone as Pinecone config that needs a project guard', () => {
+    const keyServiceOnly = baseChat({
+      memory: { pinecone: { apiKeyService: 'pinecone-line-b' } },
+    });
+
+    expect(validateInstanceConfig(keyServiceOnly, ctx('create'))?.field).toBe(
+      'memory.pinecone.projectId',
+    );
+  });
 });
 
 describe('healthPort validation', () => {
