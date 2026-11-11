@@ -58,6 +58,46 @@ describe('PendingPollPersistence unresolved records', () => {
     return persistence;
   }
 
+  it.each(['source', 'destination'] as const)('rekey preserves a newer %s generation', async (location) => {
+    const db = openDatabase();
+    const persistence = new PendingPollPersistence(db);
+    const pending = pendingPoll();
+    persistence.save('old', pending);
+    const key = location === 'source' ? 'old' : 'new';
+    persistence.save(key, { ...pending, createdAt: pending.createdAt + 1, toolId: 'newer' });
+    const before = db.raw.prepare('SELECT * FROM pending_polls ORDER BY map_key').all();
+    const resume = vi.fn();
+    expect(persistence.rekey('old', 'new', pending, () => true, resume).durable).toBe(false);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(db.raw.prepare('SELECT * FROM pending_polls ORDER BY map_key').all()).toEqual(before);
+    expect(resume).not.toHaveBeenCalled();
+    expect(persistence.healthDetails().degraded).toBe(true);
+    persistence.stop();
+  });
+
+  it('failed rekey retains its source across a real database reopen', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'poll-rekey-'));
+    directories.push(directory);
+    const file = join(directory, 'bot.db');
+    const db = openDatabase(file);
+    const persistence = new PendingPollPersistence(db);
+    const pending = pendingPoll();
+    persistence.save('old', pending);
+    const before = db.raw.prepare('SELECT * FROM pending_polls').all();
+    db.raw.exec("CREATE TRIGGER reject_move BEFORE DELETE ON pending_polls BEGIN SELECT RAISE(FAIL, 'blocked'); END");
+    expect(persistence.rekey('old', 'new', pending, () => true, vi.fn()).durable).toBe(false);
+    persistence.stop();
+    databases.splice(databases.indexOf(db), 1);
+    db.close();
+    const reopened = openDatabase(file);
+    expect(reopened.raw.prepare('SELECT * FROM pending_polls').all()).toEqual(before);
+    reopened.raw.exec('DROP TRIGGER reject_move');
+    const recovery = new PendingPollPersistence(reopened);
+    expect(recovery.rekey('old', 'new', { ...pending, chatJid: 'new' }, () => true, vi.fn()).durable).toBe(true);
+    expect(recovery.readRows()).toMatchObject({ status: 'available', rows: [{ map_key: 'new', chat_jid: 'new' }] });
+    recovery.stop();
+  });
+
   it.each(['recover', 'exhaust', 'stop', 'replace', 'newer-row'] as const)(
     'awaited poll save: %s settles without releasing an undurable answer', async (outcome) => {
       const db = openDatabase();

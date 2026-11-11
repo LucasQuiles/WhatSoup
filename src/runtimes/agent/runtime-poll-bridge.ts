@@ -132,6 +132,23 @@ export class RuntimePollBridgeCoordinator {
     this.host = host;
   }
 
+  currentPendingPollKey(mapKey: string, pending: PendingPollQuestion): string | undefined {
+    if (this.host.pendingPolls.questions.get(mapKey) === pending) return mapKey;
+    return Array.from(this.host.pendingPolls.questions).find(([, value]) => value === pending)?.[0];
+  }
+
+  preparePendingPollRekey(from: string, to: string, newJid: string, retry: () => void): boolean {
+    const pending = this.host.pendingPolls.questions.get(from);
+    if (!pending) return true;
+    const session = this.host.chatSessions.get(from);
+    const isCurrent = (): boolean => !this.host.shutdownRequested
+      && this.host.pendingPolls.questions.get(from) === pending
+      && this.host.chatSessions.get(from) === session && !this.host.chatSessions.has(to);
+    return this.host.pollPersistence.rekey(from, to, {
+      ...pending, chatJid: to, chatJidAliases: new Set([...pending.chatJidAliases, from, to, newJid]),
+    }, isCurrent, () => { if (isCurrent()) retry(); }).durable;
+  }
+
   /** Remove an AskUser continuation from interception while retaining its durable row. */
   detachPendingPollContinuation(
     mapKey: string,
@@ -175,7 +192,9 @@ export class RuntimePollBridgeCoordinator {
     if (this.host.pendingPolls.questions.get(mapKey) !== pending) return false;
     const resolvedAt = pending.resolvedAt ?? systemClock.now();
     if (!this.host.pollPersistence.save(mapKey, { ...pending, resolvedAt }, () => {
-      if (pending.resolvedAt === undefined && this.stageResolvedAskUserPoll(mapKey, pending, onDurable)) onDurable?.();
+      const currentKey = this.currentPendingPollKey(mapKey, pending);
+      if (currentKey !== undefined && pending.resolvedAt === undefined
+          && this.stageResolvedAskUserPoll(currentKey, pending, onDurable)) onDurable?.();
     }).durable) return false;
     return this.finishResolvedAskUserPoll(mapKey, pending, resolvedAt);
   }
@@ -184,7 +203,8 @@ export class RuntimePollBridgeCoordinator {
     if (this.host.pendingPolls.questions.get(mapKey) !== pending) return false;
     const resolvedAt = pending.resolvedAt ?? systemClock.now();
     const result = await this.host.pollPersistence.saveAndWait(mapKey, { ...pending, resolvedAt });
-    return result.durable && this.finishResolvedAskUserPoll(mapKey, pending, resolvedAt);
+    const currentKey = this.currentPendingPollKey(mapKey, pending);
+    return result.durable && currentKey !== undefined && this.finishResolvedAskUserPoll(currentKey, pending, resolvedAt);
   }
 
   private finishResolvedAskUserPoll(mapKey: string, pending: PendingPollQuestion, resolvedAt: number): boolean {
@@ -1063,6 +1083,7 @@ export class RuntimePollBridgeCoordinator {
     pending: PendingPollQuestion,
     answererActorJid?: string,
   ): Promise<void> {
+    mapKey = this.currentPendingPollKey(mapKey, pending) ?? mapKey;
     // Format the answer as structured context for Claude.
     const lines = ['[User answered poll]'];
     pending.questions.forEach((q, index) => {
@@ -1091,6 +1112,7 @@ export class RuntimePollBridgeCoordinator {
         if (sourceSession) await sourceSession.waitForProviderTurnToTerminalize();
       }
 
+      mapKey = this.currentPendingPollKey(mapKey, pending) ?? mapKey;
       // An explicit reset/replacement cancels the staged continuation.
       if (this.host.pendingPolls.questions.get(mapKey) !== pending) return;
 

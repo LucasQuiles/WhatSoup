@@ -17,6 +17,155 @@ export function registerRuntimePollPersistenceTests(
   mockRuntimeLogger: SingletonLoggerMock,
 ): void {
   describe('poll persistence hardening', () => {
+    it.each([{ questionCount: 1, deferred: false }, { questionCount: 2, deferred: false }, { questionCount: 1, deferred: true }])('LID remap preserves an in-flight typed answer: $questionCount questions, deferred=$deferred', async ({ questionCount, deferred }) => {
+      vi.useFakeTimers();
+      const db = makeRealDb();
+      const { messenger } = makeMessenger();
+      const lidKey = '15550005555@lid';
+      const canonical = '15550005555@s.whatsapp.net';
+      insertRow(db, lidKey, lidKey, Date.now() + 600_000, buildPayload({
+        chatJid: lidKey, chatJidAliases: new Set([lidKey]), mode: 'textFallback', createdAt: Date.now(),
+        questions: Array.from({ length: questionCount }, (_, index) => ({
+          question: `Question ${index + 1}`, header: 'Choice',
+          options: [{ label: 'A', description: '' }], multiSelect: false,
+        })),
+      }));
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const durability = { completeInbound: vi.fn(), ...makeTerminalDurabilityMock() };
+      const state = runtime as unknown as {
+        durability: typeof durability;
+        pollPersistence: { stop(): void };
+      };
+      try {
+        await runtime.start();
+        setOwnedTestSession(runtime, lidKey, mockSession);
+        state.durability = durability;
+        db.raw.exec(`CREATE TRIGGER block_old_save BEFORE INSERT ON pending_polls
+          WHEN NEW.map_key = '${lidKey}' BEGIN SELECT RAISE(FAIL, 'blocked'); END`);
+        await sendAndDrain(runtime, makeMsg({ chatJid: lidKey, senderJid: lidKey, content: 'A', inboundSeq: 1704 }));
+        await vi.advanceTimersByTimeAsync(1);
+        expect(durability.finalizeTurnTerminal).not.toHaveBeenCalled();
+        expect(mockSession.sendTurn).not.toHaveBeenCalled();
+        runtime.handleJidAliasChanged('15550005555', canonical, deferred);
+        if (deferred) {
+          expect(db.raw.prepare('SELECT map_key FROM pending_polls WHERE map_key = ?').get(canonical)).toBeUndefined();
+          expect(durability.finalizeTurnTerminal).not.toHaveBeenCalled();
+          db.raw.exec('DROP TRIGGER block_old_save');
+          await vi.advanceTimersByTimeAsync(5_000);
+        }
+        await vi.advanceTimersByTimeAsync(1);
+        expect(durability.finalizeTurnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+          terminal: expect.objectContaining({ inboundSeq: 1704, attemptKind: 'suppressed_by_policy' }),
+        }));
+        if (questionCount === 1) {
+          expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+          expect(String(mockSession.sendTurn.mock.calls[0]?.[0])).toContain('A: A');
+          expect(db.raw.prepare('SELECT map_key FROM pending_polls').all()).toEqual([]);
+        } else {
+          expect(mockSession.sendTurn).not.toHaveBeenCalled();
+          const row = db.raw.prepare('SELECT payload FROM pending_polls WHERE map_key = ?').get(canonical)!;
+          expect(JSON.parse(row.payload as string).answersCollected).toEqual({ 0: 'A' });
+        }
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(mockSession.sendTurn).toHaveBeenCalledTimes(questionCount === 1 ? 1 : 0);
+      } finally {
+        state.pollPersistence.stop();
+        vi.clearAllTimers();
+        db.close();
+        vi.useRealTimers();
+      }
+    });
+
+    it('LID remap retains the console answer continuation after a failed save', async () => {
+      vi.useFakeTimers();
+      const db = makeRealDb();
+      const { messenger } = makeMessenger();
+      const lidKey = '15550006666@lid';
+      const canonical = '15550006666@s.whatsapp.net';
+      insertRow(db, lidKey, lidKey, Date.now() + 600_000, buildPayload({
+        chatJid: lidKey, chatJidAliases: new Set([lidKey]), mode: 'textFallback', createdAt: Date.now(),
+      }));
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as { pollPersistence: { stop(): void } };
+      try {
+        await runtime.start();
+        setOwnedTestSession(runtime, lidKey, mockSession);
+        db.raw.exec(`CREATE TRIGGER block_old_save BEFORE INSERT ON pending_polls
+          WHEN NEW.map_key = '${lidKey}' BEGIN SELECT RAISE(FAIL, 'blocked'); END`);
+        expect(await runtime.resolvePollDecisionFromConsole({
+          mapKey: lidKey, questionIndex: 0, selectedOptions: ['A'],
+        })).toMatchObject({ ok: false, code: 'invalid' });
+        runtime.handleJidAliasChanged('15550006666', canonical);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+        expect(String(mockSession.sendTurn.mock.calls[0]?.[0])).toContain('A: A');
+        expect(db.raw.prepare('SELECT map_key FROM pending_polls').all()).toEqual([]);
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+      } finally {
+        state.pollPersistence.stop();
+        vi.clearAllTimers();
+        db.close();
+        vi.useRealTimers();
+      }
+    });
+
+    it.each(['destination-write', 'source-delete', 'shutdown'] as const)(
+      'LID remap retains its durable source through %s failure', async (failure) => {
+        vi.useFakeTimers();
+        const db = makeRealDb();
+        const { messenger } = makeMessenger();
+        const lidKey = '15550004444@lid';
+        const canonical = '15550004444@s.whatsapp.net';
+        insertRow(db, lidKey, lidKey, Date.now() + 600_000, buildPayload({
+          chatJid: lidKey, chatJidAliases: new Set([lidKey]), createdAt: Date.now(),
+        }));
+        const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+        const state = runtime as unknown as {
+          chatSessions: Map<string, unknown>;
+          pendingPolls: { questions: Map<string, PendingPollQuestion> };
+          pollPersistence: { stop(): void; healthDetails(): { degraded: boolean } };
+        };
+        try {
+          await runtime.start();
+          setOwnedTestSession(runtime, lidKey, mockSession);
+          const before = db.raw.prepare('SELECT payload FROM pending_polls WHERE map_key = ?').get(lidKey)!;
+          db.raw.exec(failure === 'source-delete'
+            ? `CREATE TRIGGER block_rekey BEFORE DELETE ON pending_polls
+                WHEN OLD.map_key = '${lidKey}' BEGIN SELECT RAISE(FAIL, 'blocked'); END`
+            : `CREATE TRIGGER block_rekey BEFORE INSERT ON pending_polls
+                WHEN NEW.map_key = '${canonical}' BEGIN SELECT RAISE(FAIL, 'blocked'); END`);
+          runtime.handleJidAliasChanged('15550004444', canonical);
+          expect(db.raw.prepare('SELECT payload FROM pending_polls WHERE map_key = ?').get(lidKey)?.payload).toBe(before.payload);
+          expect(db.raw.prepare('SELECT map_key FROM pending_polls WHERE map_key = ?').get(canonical)).toBeUndefined();
+          expect(state.pendingPolls.questions.has(lidKey)).toBe(true);
+          expect(state.chatSessions.has(lidKey)).toBe(true);
+          expect(state.pollPersistence.healthDetails().degraded).toBe(true);
+          if (failure === 'shutdown') state.pollPersistence.stop();
+          db.raw.exec('DROP TRIGGER block_rekey');
+          await vi.advanceTimersByTimeAsync(5_000);
+          if (failure === 'shutdown') {
+            expect(db.raw.prepare('SELECT payload FROM pending_polls WHERE map_key = ?').get(lidKey)?.payload).toBe(before.payload);
+            expect(state.pendingPolls.questions.has(canonical)).toBe(false);
+            expect(state.pollPersistence.healthDetails().degraded).toBe(true);
+          } else {
+            expect(db.raw.prepare('SELECT map_key FROM pending_polls WHERE map_key = ?').get(lidKey)).toBeUndefined();
+            const row = db.raw.prepare('SELECT payload FROM pending_polls WHERE map_key = ?').get(canonical)!;
+            expect(JSON.parse(row.payload as string).chatJid).toBe(canonical);
+            expect(state.pendingPolls.questions.has(lidKey)).toBe(false);
+            expect(state.pendingPolls.questions.has(canonical)).toBe(true);
+            expect(state.chatSessions.has(canonical)).toBe(true);
+            expect(state.pollPersistence.healthDetails().degraded).toBe(false);
+          }
+        } finally {
+          state.pollPersistence.stop();
+          vi.clearAllTimers();
+          db.close();
+          vi.useRealTimers();
+        }
+      },
+    );
+
     it.each([
       { questionCount: 1, stop: false }, { questionCount: 2, stop: false },
       { questionCount: 1, stop: true }, { questionCount: 2, stop: true },

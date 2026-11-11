@@ -657,6 +657,7 @@ function installPollPersistenceStub(runtime: AgentRuntime) {
   const persistence = {
     save: vi.fn(() => ({ status: 'confirmed', durable: true })),
     saveAndWait: vi.fn(async () => ({ status: 'confirmed', durable: true })),
+    rekey: vi.fn(() => ({ status: 'confirmed', durable: true })),
     remove: vi.fn(() => ({ status: 'confirmed', durable: true })),
     loadRows: vi.fn(() => []),
     readRows: vi.fn(() => ({ status: 'available', rows: [] })),

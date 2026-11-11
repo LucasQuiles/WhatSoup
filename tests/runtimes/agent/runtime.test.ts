@@ -3609,11 +3609,8 @@ describe('AgentRuntime', () => {
     vi.useFakeTimers();
     try {
       const canonicalJid = '15550004444@s.whatsapp.net';
-      const db = makeDb();
-      (db.raw.prepare as ReturnType<typeof vi.fn>).mockReturnValue({
-        run: vi.fn(),
-        get: vi.fn(() => ({ phone_jid: canonicalJid })),
-      });
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const { messenger } = makeMessenger();
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
       const state = runtime as unknown as PerChatCleanupRuntimeState & {
@@ -3882,7 +3879,8 @@ describe('AgentRuntime', () => {
   it('normalizes legacy pending poll timeout during LID remap before re-arming timers', async () => {
     const canonicalJid = '15550004444@s.whatsapp.net';
     const lidKey = '15550004444@lid';
-    const db = makeDb();
+    const db = makeRealDb();
+    onTestFinished(() => db.close());
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
     const state = runtime as unknown as PerChatCleanupRuntimeState & {

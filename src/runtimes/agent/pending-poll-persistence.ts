@@ -90,12 +90,14 @@ export class PendingPollPersistence {
   private readonly pendingWrites = new Map<string, {
     generation: Pick<PendingPollQuestion, 'createdAt' | 'toolId'>;
     run: () => PollPersistenceWriteResult;
+    save?: { snapshot: PendingPollQuestion; onDurable?: () => void };
   }>();
   private readonly saveWaiters = new Map<string, {
     onDurable: () => void;
     finish: (result: PollPersistenceWriteResult) => void;
     createdAt: number;
     toolId: string;
+    pending: PendingPollQuestion;
   }>();
   private stopped = false;
 
@@ -115,9 +117,9 @@ export class PendingPollPersistence {
       || (active.createdAt === generation.createdAt && active.toolId !== generation.toolId));
   }
 
-  private retryWrite(mapKey: string, generation: Pick<PendingPollQuestion, 'createdAt' | 'toolId'>, operation: () => PollPersistenceWriteResult): void {
+  private retryWrite(mapKey: string, generation: Pick<PendingPollQuestion, 'createdAt' | 'toolId'>, operation: () => PollPersistenceWriteResult, save?: { snapshot: PendingPollQuestion; onDurable?: () => void }): void {
     if (this.isSupersededWrite(mapKey, generation)) return;
-    this.pendingWrites.set(mapKey, { generation: { createdAt: generation.createdAt, toolId: generation.toolId }, run: operation });
+    this.pendingWrites.set(mapKey, { generation: { createdAt: generation.createdAt, toolId: generation.toolId }, run: operation, save });
     if (this.stopped) {
       this.saveWaiters.get(mapKey)?.finish({ status: 'pending', durable: false });
       return;
@@ -144,7 +146,7 @@ export class PendingPollPersistence {
         resolve(result);
       };
       const onDurable = (): void => finish({ status: 'confirmed', durable: true });
-      this.saveWaiters.set(mapKey, { onDurable, finish, createdAt: pending.createdAt, toolId: pending.toolId });
+      this.saveWaiters.set(mapKey, { onDurable, finish, pending, createdAt: pending.createdAt, toolId: pending.toolId });
       const result = this.save(mapKey, pending, onDurable);
       if (result.status !== 'pending' || result.durable) finish(result);
     });
@@ -220,45 +222,11 @@ export class PendingPollPersistence {
       const timeoutMs = normalizePendingPollTimeoutMs(pending.timeoutMs);
       pending.timeoutMs = timeoutMs;
       payload = JSON.stringify(serializePendingPoll(pending));
-      const closesAt = pending.createdAt + timeoutMs;
-      const hardClosesAt = pending.createdAt + timeoutMs * 2;
-      this.db.raw
-        .prepare(
-          `INSERT INTO pending_polls (map_key, chat_jid, tool_id, source, resolution, payload, created_at, closes_at, hard_closes_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(map_key) DO UPDATE SET
-             chat_jid = excluded.chat_jid,
-             tool_id = excluded.tool_id,
-             source = excluded.source,
-             resolution = excluded.resolution,
-             payload = excluded.payload,
-             created_at = excluded.created_at,
-             closes_at = excluded.closes_at,
-             hard_closes_at = excluded.hard_closes_at
-           WHERE pending_polls.created_at < excluded.created_at
-              OR (pending_polls.created_at = excluded.created_at AND pending_polls.tool_id = excluded.tool_id)`,
-        )
-        .run(
-          mapKey,
-          pending.chatJid,
-          pending.toolId,
-          pending.source,
-          pending.resolution,
-          payload,
-          pending.createdAt,
-          closesAt,
-          hardClosesAt,
-        );
-      const stored = this.db.raw.prepare('SELECT payload, created_at, tool_id, hard_closes_at FROM pending_polls WHERE map_key = ?').get(mapKey);
-      if (stored && (Number(stored.created_at) > pending.createdAt
-          || (stored.created_at === pending.createdAt && stored.tool_id !== pending.toolId))) {
+      const result = this.writeSnapshot(mapKey, pending, payload);
+      if (!result.durable) {
         this.recordSuccess(mapKey);
-        this.saveWaiters.get(mapKey)?.finish({ status: 'superseded', durable: false });
-        return { status: 'superseded', durable: false };
-      }
-      if (stored?.payload !== payload || stored.created_at !== pending.createdAt
-          || stored.tool_id !== pending.toolId || stored.hard_closes_at !== hardClosesAt) {
-        throw new Error('pending poll write was not verified');
+        this.saveWaiters.get(mapKey)?.finish(result);
+        return result;
       }
       this.recordSuccess(mapKey);
       return { status: 'confirmed', durable: true };
@@ -268,13 +236,114 @@ export class PendingPollPersistence {
         const snapshot = payload;
         this.retryWrite(mapKey, pending, () => this.resumeAfterWrite(
           this.save(mapKey, deserializePendingPoll(JSON.parse(snapshot)), onDurable), onDurable,
-        ));
+        ), { snapshot: deserializePendingPoll(JSON.parse(snapshot)), onDurable });
       } else {
         this.pendingWrites.delete(mapKey);
         if (this.pendingWrites.size === 0) this.retry.clear();
         this.saveWaiters.get(mapKey)?.finish({ status: 'pending', durable: false });
       }
       log.error({ cause: this.lastFailureErr }, 'persistPendingPoll failed; durability unavailable');
+      return { status: 'pending', durable: false };
+    }
+  }
+
+  private writeSnapshot(mapKey: string, pending: PendingPollQuestion, payload: string): PollPersistenceWriteResult {
+    const timeoutMs = normalizePendingPollTimeoutMs(pending.timeoutMs);
+    const closesAt = pending.createdAt + timeoutMs;
+    const hardClosesAt = pending.createdAt + timeoutMs * 2;
+    this.db.raw
+      .prepare(
+        `INSERT INTO pending_polls (map_key, chat_jid, tool_id, source, resolution, payload, created_at, closes_at, hard_closes_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(map_key) DO UPDATE SET
+           chat_jid = excluded.chat_jid,
+           tool_id = excluded.tool_id,
+           source = excluded.source,
+           resolution = excluded.resolution,
+           payload = excluded.payload,
+           created_at = excluded.created_at,
+           closes_at = excluded.closes_at,
+           hard_closes_at = excluded.hard_closes_at
+         WHERE pending_polls.created_at < excluded.created_at
+            OR (pending_polls.created_at = excluded.created_at AND pending_polls.tool_id = excluded.tool_id)`,
+      )
+      .run(
+        mapKey,
+        pending.chatJid,
+        pending.toolId,
+        pending.source,
+        pending.resolution,
+        payload,
+        pending.createdAt,
+        closesAt,
+        hardClosesAt,
+      );
+    const stored = this.db.raw.prepare('SELECT payload, created_at, tool_id, hard_closes_at FROM pending_polls WHERE map_key = ?').get(mapKey);
+    if (stored && (Number(stored.created_at) > pending.createdAt
+        || (stored.created_at === pending.createdAt && stored.tool_id !== pending.toolId))) {
+      return { status: 'superseded', durable: false };
+    }
+    if (stored?.payload !== payload || stored.created_at !== pending.createdAt
+        || stored.tool_id !== pending.toolId || stored.hard_closes_at !== hardClosesAt) {
+      throw new Error('pending poll write was not verified');
+    }
+    return { status: 'confirmed', durable: true };
+  }
+
+  /** Keep both identities unchanged unless the complete move commits. */
+  rekey(
+    from: string,
+    to: string,
+    pending: PendingPollQuestion,
+    isCurrent: () => boolean,
+    onDurable: () => void,
+  ): PollPersistenceWriteResult {
+    if (this.stopped || !isCurrent() || this.isSupersededWrite(from, pending)
+        || this.isSupersededWrite(to, pending)) return { status: 'superseded', durable: false };
+    const saved = this.pendingWrites.get(from)?.save;
+    let transactionOpen = false;
+    try {
+      const waiter = this.saveWaiters.get(from);
+      const original = waiter && waiter.createdAt === pending.createdAt && waiter.toolId === pending.toolId
+        ? waiter.pending : saved?.snapshot ?? pending;
+      const snapshot = { ...original, chatJid: pending.chatJid, chatJidAliases: pending.chatJidAliases };
+      snapshot.timeoutMs = normalizePendingPollTimeoutMs(snapshot.timeoutMs);
+      const payload = JSON.stringify(serializePendingPoll(snapshot));
+      this.db.raw.exec('BEGIN IMMEDIATE');
+      transactionOpen = true;
+      const source = this.db.raw.prepare('SELECT created_at, tool_id FROM pending_polls WHERE map_key = ?').get(from);
+      if (source && (source.created_at !== pending.createdAt || source.tool_id !== pending.toolId)) {
+        throw new Error('poll rekey source generation changed');
+      }
+      const result = this.writeSnapshot(to, snapshot, payload);
+      if (!result.durable) throw new Error('poll rekey destination generation changed');
+      this.db.raw.prepare('DELETE FROM pending_polls WHERE map_key = ? AND created_at = ? AND tool_id = ?')
+        .run(from, pending.createdAt, pending.toolId);
+      if (this.db.raw.prepare('SELECT map_key FROM pending_polls WHERE map_key = ?').get(from)) {
+        throw new Error('poll rekey source deletion was not verified');
+      }
+      this.db.raw.exec('COMMIT');
+      transactionOpen = false;
+      this.recordSuccess(from);
+      this.recordSuccess(to);
+      waiter?.finish(result);
+      if (!waiter && saved?.onDurable) queueMicrotask(() => { if (!this.stopped) saved.onDurable?.(); });
+      return result;
+    } catch (err) {
+      this.recordFailure(err, from);
+      if (transactionOpen) {
+        try {
+          this.db.raw.exec('ROLLBACK');
+        } catch (rollbackError) {
+          this.recordFailure(rollbackError, from);
+          log.error({ cause: this.lastFailureErr }, 'poll rekey rollback unavailable');
+          return { status: 'pending', durable: false };
+        }
+      }
+      this.retryWrite(from, pending, () => this.resumeAfterWrite(
+        this.rekey(from, to, pending, isCurrent, onDurable), onDurable,
+      ), saved);
+      log.error({ cause: this.lastFailureErr }, 'poll rekey durability unavailable');
       return { status: 'pending', durable: false };
     }
   }

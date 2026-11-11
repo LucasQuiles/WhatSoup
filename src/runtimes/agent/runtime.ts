@@ -3703,6 +3703,8 @@ export class AgentRuntime implements Runtime {
       this.runtimeTurnCoordinator.rekeyPerChatOutboundQueuePoisonScope(lidKey, canonical);
       if (this.chatSessions.has(lidKey)) {
         if (canonical !== lidKey && !this.chatSessions.has(canonical)) {
+          if (!this.pollBridge.preparePendingPollRekey(lidKey, canonical, newJid,
+            () => this.handleJidAliasChanged(conversationKey, newJid))) return;
           const legacyProviderTurn = this.legacyProviderTurnOwners.get(lidKey);
           if (legacyProviderTurn && this.legacyProviderTurnOwners.has(canonical)) {
             throw new Error(`Cannot rekey provider turn ownership onto occupied scope "${canonical}"`);
@@ -3835,14 +3837,12 @@ export class AgentRuntime implements Runtime {
           const pendingPoll = this.pendingPolls.questions.get(lidKey);
           if (pendingPoll) {
             this.pendingPolls.questions.delete(lidKey);
-            this.pollPersistence.remove(lidKey);
             clearPendingPollTimers(pendingPoll);
             pendingPoll.chatJidAliases.add(lidKey);
             pendingPoll.chatJidAliases.add(newJid);
             pendingPoll.chatJidAliases.add(canonical);
             pendingPoll.chatJid = canonical;
             this.pendingPolls.questions.set(canonical, pendingPoll);
-            this.pollPersistence.save(canonical, pendingPoll);
             this.startPendingPollExpiry(canonical, pendingPoll);
           }
           const imageBuffer = this.imageCoalesce.buffers.get(lidKey);
@@ -6271,6 +6271,7 @@ export class AgentRuntime implements Runtime {
           const durable = allAnswered
             ? await this.pollBridge.stageResolvedAskUserPollAndWait(mapKey, pendingPoll)
             : (await this.pollPersistence.saveAndWait(mapKey, pendingPoll)).durable;
+          mapKey = this.pollBridge.currentPendingPollKey(mapKey, pendingPoll) ?? mapKey;
           if (!durable || this.pendingPolls.questions.get(mapKey) !== pendingPoll) {
             throw new Error('Poll answer durability is unavailable');
           }
