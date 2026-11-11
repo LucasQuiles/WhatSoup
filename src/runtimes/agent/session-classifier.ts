@@ -6,7 +6,8 @@
  *
  * Safety rules (from investigation 2026-04-01):
  * - Never kill based on agent_sessions.status alone
- * - Only reap PIDs that belong to this service process (verified via PPID)
+ * - Classify live stale children only with parent/provider evidence or exact registered spawn authority
+ * - Classification never grants signal authority; cleanup validates the retained capability again
  * - Only reap PIDs for the same conversation that do NOT match the current checkpoint
  * - If checkpoint is missing or ambiguous, do not auto-kill — log and escalate
  * - If checkpoint status is not 'active', do not label its match as authoritative_live
@@ -14,20 +15,25 @@
 
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { basename } from 'node:path';
 import type { Database } from '../../core/database.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
+import { probeProcessBirthToken } from '../../lib/process-identity.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
+  DEFAULT_PROVIDER_ID,
   executionModeForProvider,
   isProviderId,
 } from './providers/index.ts';
+import { getProviderBinary } from './providers/provider-binary.ts';
+import { getRegisteredProcessTreeTerminationLease } from './process-tree.ts';
 
 const log = createChildLogger('session-classifier');
 
 export type SessionClassification =
   | 'authoritative_live'  // matches current checkpoint AND checkpoint is active — the real session
-  | 'stale_live'          // PID alive, owned by this service, doesn't match checkpoint — safe to kill
+  | 'stale_live'          // Owned stale child or retained row-bound handle; signaling still requires spawn capability
   | 'stale_dead'          // PID dead, DB row still 'active' — should be marked orphaned
   | 'ambiguous';          // no checkpoint, ownership unverified, or multiple conflicts — do not touch
 
@@ -38,6 +44,7 @@ export interface ClassifiedSession {
   chatJid: string | null;
   conversationKey: string | null;
   status: string;
+  provider: string | null;
   classification: SessionClassification;
   reason: string;
   /** ISO timestamp the row was created, or null if unavailable (e.g. mocked callers). */
@@ -74,7 +81,7 @@ interface CheckpointInfo {
  * Verify a PID belongs to this WhatSoup service by checking:
  * 1. PID is alive (kill -0)
  * 2. Parent PID matches the current process (same service)
- * 3. Command contains 'claude' (not a reused PID)
+ * 3. Command contains the durable row's canonical provider binary (not a reused PID)
  *
  * Returns { alive, owned } — alive without owned means the PID exists
  * but might belong to a different process (PID reuse).
@@ -84,13 +91,33 @@ export interface PidCheckResult {
   owned: boolean;
 }
 
-export type PidOwnershipChecker = (pid: number) => PidCheckResult;
+export type PidOwnershipChecker = (pid: number, provider: string | null) => PidCheckResult;
+
+function expectedProviderBinary(provider: string | null): string | null {
+  const providerId = provider ?? DEFAULT_PROVIDER_ID;
+  return isProviderId(providerId) ? getProviderBinary(providerId) : null;
+}
+
+function commandContainsBinary(command: string, binary: string): boolean {
+  const parts = command
+    .split(/[\0\s]+/u)
+    .filter((part) => part.length > 0);
+  if (parts.length === 0) return false;
+  if (basename(parts[0]!) === binary) return true;
+  const executable = basename(parts[0]!);
+  return ['node', 'nodejs', 'bun', 'deno'].includes(executable)
+    && parts.length > 1
+    && basename(parts[1]!) === binary;
+}
 
 /**
  * Default PID ownership checker using /proc on Linux.
  * Falls back to alive-only on non-Linux or read errors.
  */
-export function defaultPidOwnershipChecker(pid: number): PidCheckResult {
+export function defaultPidOwnershipChecker(
+  pid: number,
+  provider: string | null = DEFAULT_PROVIDER_ID,
+): PidCheckResult {
   // Step 0: Reject invalid PIDs before ANY probe. agent_sessions.claude_pid can
   // be null/0 for a row whose subprocess was already torn down; pid<=0 is not a
   // single process to kill(2) (0 = own process group, negative = process group),
@@ -106,12 +133,18 @@ export function defaultPidOwnershipChecker(pid: number): PidCheckResult {
   // Step 1: Is the PID alive?
   try {
     process.kill(pid, 0);
-  } catch {
-    return { alive: false, owned: false };
+  } catch (error) {
+    return (error as NodeJS.ErrnoException | null)?.code === 'ESRCH'
+      ? { alive: false, owned: false }
+      : { alive: true, owned: false };
   }
 
   // Step 2: Verify ownership via /proc (Linux) or ps fallback (macOS/other)
   const myPid = process.pid;
+  const providerBinary = expectedProviderBinary(provider);
+  if (providerBinary === null) return { alive: true, owned: false };
+  const birthTokenBefore = probeProcessBirthToken(pid);
+  if (birthTokenBefore === null) return { alive: true, owned: false };
   try {
     const statusContent = readFileSync(`/proc/${pid}/status`, 'utf8');
     const ppidMatch = statusContent.match(/^PPid:\s+(\d+)/m);
@@ -122,15 +155,18 @@ export function defaultPidOwnershipChecker(pid: number): PidCheckResult {
       return { alive: true, owned: false };
     }
 
-    // Verify it's actually a claude process (guards against PID reuse)
+    // Verify the command belongs to the row's canonical CLI provider.
     const cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8');
-    if (!cmdline.includes('claude')) {
+    if (!commandContainsBinary(cmdline, providerBinary)) {
       return { alive: true, owned: false };
     }
 
-    return { alive: true, owned: true };
+    const birthTokenAfter = probeProcessBirthToken(pid);
+    return birthTokenAfter === birthTokenBefore
+      ? { alive: true, owned: true }
+      : { alive: true, owned: false };
   } catch {
-    // /proc not available (macOS, FreeBSD) or permission denied — try ps
+    // Intentional: procfs is absent on supported non-Linux hosts, so ps performs the conservative ownership fallback.
   }
 
   // Fallback: use ps for platforms without /proc (macOS, FreeBSD)
@@ -138,16 +174,21 @@ export function defaultPidOwnershipChecker(pid: number): PidCheckResult {
     // stderr 'pipe' (not the execFileSync default of inheriting the service's
     // stderr): any ps complaint must land on the thrown error, never as raw
     // non-JSON lines in the service log stream.
-    const psOut = execFileSync('ps', ['-o', 'ppid=,comm=', '-p', String(pid)], {
+    const psOut = execFileSync('/bin/ps', ['-o', 'ppid=,command=', '-p', String(pid)], {
+      maxBuffer: 64 * 1024,
       timeout: 2_000,
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'C', LC_ALL: 'C', TZ: 'UTC' },
     });
     const line = (typeof psOut === 'string' ? psOut : psOut.toString('utf-8')).trim();
-    const [ppidStr, ...commParts] = line.split(/\s+/);
+    const [ppidStr, ...commandParts] = line.split(/\s+/);
     const ppid = parseInt(ppidStr, 10);
-    const comm = commParts.join(' ');
-    if (ppid === myPid && comm.includes('claude')) {
-      return { alive: true, owned: true };
+    const command = commandParts.join(' ');
+    if (ppid === myPid && commandContainsBinary(command, providerBinary)) {
+      const birthTokenAfter = probeProcessBirthToken(pid);
+      return birthTokenAfter === birthTokenBefore
+        ? { alive: true, owned: true }
+        : { alive: true, owned: false };
     }
     return { alive: true, owned: false };
   } catch {
@@ -177,6 +218,14 @@ export function classifyActiveSessions(
   if (activeSessions.length === 0) return [];
 
   const results: ClassifiedSession[] = [];
+  const pidCounts = new Map<number, number>();
+  for (const session of activeSessions) {
+    if (!Number.isSafeInteger(session.claude_pid) || session.claude_pid <= 1) continue;
+    pidCounts.set(session.claude_pid, (pidCounts.get(session.claude_pid) ?? 0) + 1);
+  }
+  const duplicatePids = new Set(
+    [...pidCounts].filter(([, count]) => count > 1).map(([pid]) => pid),
+  );
 
   // Group sessions by conversation key for batch classification
   const byConversation = new Map<string, ActiveSessionRow[]>();
@@ -244,7 +293,7 @@ export function classifyActiveSessions(
         // classified stale_dead and orphaned on the next sweep. An unknown
         // provider (mode === null) also fails safe to ambiguous.
         const mode = executionMode(session.provider);
-        const pidCheck = pidChecker(session.claude_pid);
+        const pidCheck = pidChecker(session.claude_pid, session.provider);
         if (mode === 'persistent_session' && !pidCheck.alive) {
           results.push({
             ...sessionFields(session, convKey),
@@ -283,7 +332,18 @@ export function classifyActiveSessions(
       : null; // non-active checkpoint → no authoritative match
 
     for (const session of sessions) {
-      const pidCheck = pidChecker(session.claude_pid);
+      const pidCheck = pidChecker(session.claude_pid, session.provider);
+
+      // Duplicate rows cannot establish ownership of a live process, but must
+      // not prevent checkpoint-backed recovery once that process is gone.
+      if (duplicatePids.has(session.claude_pid) && pidCheck.alive) {
+        results.push({
+          ...sessionFields(session, convKey),
+          classification: 'ambiguous',
+          reason: `duplicate live PID ${session.claude_pid} appears in multiple active rows`,
+        });
+        continue;
+      }
 
       if (session === matchingSession) {
         const mode = executionMode(session.provider);
@@ -302,8 +362,7 @@ export function classifyActiveSessions(
         // dead. Gate on LIVENESS ONLY (not ownership): pidChecker returns alive:false
         // ONLY for a genuinely-gone PID (process.kill(pid,0) → ESRCH); every transient
         // ps/proc failure returns alive:true, so this never demotes a live session on a
-        // flaky check, and it stays provider-agnostic (a live codex/opencode session is
-        // alive:true even though the claude-only ownership check reports owned:false).
+        // flaky check, and it stays provider-agnostic.
         if (!pidCheck.alive) {
           classifyNonAuthoritative(results, session, convKey, pidCheck, checkpoint);
         } else {
@@ -370,7 +429,8 @@ function executionMode(provider: string | null) {
 
 /**
  * Classify a session that is NOT the authoritative match.
- * Uses PID ownership to distinguish stale_live (safe to kill) from ambiguous (unsafe).
+ * Uses PID ownership or retained spawn authority to identify stale-live candidates.
+ * Classification alone never grants signal authority.
  */
 function classifyNonAuthoritative(
   results: ClassifiedSession[],
@@ -390,15 +450,17 @@ function classifyNonAuthoritative(
       classification: 'stale_dead',
       reason: `${base}PID ${session.claude_pid} dead, checkpoint points to PID ${checkpoint.claudePid}`,
     });
-  } else if (pidCheck.owned) {
-    // PID is alive AND verified as our child claude process → safe to kill
+  } else if (
+    pidCheck.owned
+    || getRegisteredProcessTreeTerminationLease(session.id, session.claude_pid, session.provider) !== null
+  ) {
     results.push({
       ...sessionFields(session, convKey),
       classification: 'stale_live',
-      reason: `${base}PID ${session.claude_pid} alive+owned, checkpoint points to PID ${checkpoint.claudePid}`,
+      reason: `${base}PID ${session.claude_pid} alive with verified ownership or retained spawn authority, checkpoint points to PID ${checkpoint.claudePid}`,
     });
   } else {
-    // PID is alive but ownership unverified (different parent, not claude, or /proc unavailable)
+    // PID is alive but ownership unverified (parent/provider mismatch or probe unavailable)
     results.push({
       ...sessionFields(session, convKey),
       classification: 'ambiguous',
@@ -415,6 +477,7 @@ function sessionFields(session: ActiveSessionRow, convKey: string | null) {
     chatJid: session.chat_jid,
     conversationKey: convKey,
     status: session.status,
+    provider: session.provider,
     startedAt: session.started_at ?? null,
     messageCount: session.message_count ?? null,
   };
@@ -425,6 +488,7 @@ export type AmbiguousAgeFallbackVerdict = 'orphan' | 'leave';
 export interface AmbiguousAgeFallbackInput {
   id: number;
   claudePid: number;
+  provider?: string | null;
   startedAt: string | null;
   messageCount: number | null;
 }
@@ -461,9 +525,8 @@ export function resolveAmbiguousAgeFallback(
   const startedAtMs = Date.parse(session.startedAt);
   if (!Number.isFinite(startedAtMs)) return 'leave';
   if (now - startedAtMs < maxAgeMs) return 'leave';
-  const pidCheck = pidChecker(session.claudePid);
-  if (pidCheck.alive && pidCheck.owned) return 'leave';
-  return 'orphan';
+  const pidCheck = pidChecker(session.claudePid, session.provider ?? null);
+  return pidCheck.alive ? 'leave' : 'orphan';
 }
 
 function getCheckpointForConversation(

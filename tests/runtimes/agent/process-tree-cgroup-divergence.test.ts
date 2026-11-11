@@ -13,21 +13,63 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  captureProcessTreeRootAuthority,
   computeCgroupDivergence,
   emitCgroupDivergence,
-  killSessionTree,
+  killSessionTree as killSessionTreeRaw,
+  resetProcessTreeTerminationLeasesForTesting,
   type CgroupDivergenceInfo,
+  type KillSessionTreeOptions,
+  type ProcessTreeRootAuthority,
+  type ProcessTreeTarget,
 } from '../../../src/runtimes/agent/process-tree.ts';
 
 // #1869: mock node:child_process for killSessionTree integration tests so the
 // ps census is fully controlled. Pure-function tests that don't call execFileSync
 // are unaffected.
-const { execFileSyncMock } = vi.hoisted(() => ({
+const { birthTokenMock, execFileSyncMock } = vi.hoisted(() => ({
+  birthTokenMock: vi.fn((pid: number) => `birth:${pid}`),
   execFileSyncMock: vi.fn(),
 }));
 vi.mock('node:child_process', () => ({
   execFileSync: execFileSyncMock,
 }));
+vi.mock('../../../src/lib/process-identity.ts', () => ({
+  processBirthTokenSupportsNumericSignal: () => true,
+  probeProcessBirthToken: birthTokenMock,
+  probeProcessBirthTokens: (pids: readonly number[]) => {
+    const observed = new Map<number, string>();
+    for (const pid of pids) {
+      const token = birthTokenMock(pid);
+      if (typeof token === 'string') observed.set(pid, token);
+    }
+    return observed;
+  },
+}));
+
+type TestKillOptions = Omit<KillSessionTreeOptions, 'rootAuthority'> & {
+  readonly rootAuthority?: ProcessTreeRootAuthority;
+};
+
+function killSessionTree(
+  target: number | ProcessTreeTarget,
+  signal: NodeJS.Signals,
+  options: TestKillOptions,
+) {
+  const capturedTarget: ProcessTreeTarget = typeof target === 'number'
+    ? {
+        pid: target,
+        exitCode: null,
+        signalCode: null,
+        kill: (requestedSignal) => process.kill(target, requestedSignal),
+      }
+    : target;
+  return killSessionTreeRaw(capturedTarget, signal, {
+    ...options,
+    rootAuthority: options.rootAuthority
+      ?? captureProcessTreeRootAuthority(capturedTarget)!,
+  });
+}
 
 describe('computeCgroupDivergence (pure)', () => {
   it('counts cgroup members not in the PPID-owned set, excluding the provider root', () => {
@@ -60,9 +102,9 @@ describe('computeCgroupDivergence (pure)', () => {
 });
 
 describe('emitCgroupDivergence (best-effort isolation)', () => {
-  it('emits the divergence gauge when the injected reader returns members', () => {
+  it('emits the divergence gauge when the injected reader returns members', async () => {
     const sink = vi.fn();
-    emitCgroupDivergence([{ pid: 101 }], 100, {
+    await emitCgroupDivergence([{ pid: 101 }], 100, {
       generationMarker: 'g',
       onCgroupDivergence: sink,
       readCgroupMemberPids: () => [100, 101, 200],
@@ -75,9 +117,9 @@ describe('emitCgroupDivergence (best-effort isolation)', () => {
     });
   });
 
-  it('does NOT emit when the reader returns null (cgroup membership undeterminable)', () => {
+  it('does NOT emit when the reader returns null (cgroup membership undeterminable)', async () => {
     const sink = vi.fn();
-    emitCgroupDivergence([{ pid: 101 }], 100, {
+    await emitCgroupDivergence([{ pid: 101 }], 100, {
       generationMarker: 'g',
       onCgroupDivergence: sink,
       readCgroupMemberPids: () => null,
@@ -85,9 +127,9 @@ describe('emitCgroupDivergence (best-effort isolation)', () => {
     expect(sink).not.toHaveBeenCalled();
   });
 
-  it('never throws and does not emit when the reader throws', () => {
+  it('never throws and does not emit when the reader throws', async () => {
     const sink = vi.fn();
-    expect(() =>
+    await expect(
       emitCgroupDivergence([{ pid: 101 }], 100, {
         generationMarker: 'g',
         onCgroupDivergence: sink,
@@ -95,12 +137,12 @@ describe('emitCgroupDivergence (best-effort isolation)', () => {
           throw new Error('cgroup read blew up');
         },
       }),
-    ).not.toThrow();
+    ).resolves.toBeDefined();
     expect(sink).not.toHaveBeenCalled();
   });
 
-  it('never throws when the sink itself throws', () => {
-    expect(() =>
+  it('never throws when the sink itself throws', async () => {
+    await expect(
       emitCgroupDivergence([{ pid: 101 }], 100, {
         generationMarker: 'g',
         onCgroupDivergence: () => {
@@ -108,16 +150,53 @@ describe('emitCgroupDivergence (best-effort isolation)', () => {
         },
         readCgroupMemberPids: () => [100, 200],
       }),
-    ).not.toThrow();
+    ).resolves.toBeDefined();
   });
 
-  it('is a no-op (no throw) when no sink is provided', () => {
-    expect(() =>
+  it('is a no-op (no throw) when no sink is provided', async () => {
+    await expect(
       emitCgroupDivergence([{ pid: 101 }], 100, {
         generationMarker: 'g',
         readCgroupMemberPids: () => [100, 200],
       }),
-    ).not.toThrow();
+    ).resolves.toBeDefined();
+  });
+
+  it('accepts the exact member ceiling and fails telemetry closed one item over', async () => {
+    const exactSink = vi.fn();
+    const exact = await emitCgroupDivergence([], 50_000, {
+      generationMarker: 'exact-entry-limit',
+      onCgroupDivergence: exactSink,
+      readCgroupMemberPids: () => Array.from({ length: 4_096 }, (_, index) => index + 1),
+    });
+    expect(exact).toMatchObject({ state: 'complete' });
+    expect(exactSink).toHaveBeenCalledTimes(1);
+
+    const overSink = vi.fn();
+    const over = await emitCgroupDivergence([], 50_000, {
+      generationMarker: 'over-entry-limit',
+      onCgroupDivergence: overSink,
+      readCgroupMemberPids: () => Array.from({ length: 4_097 }, (_, index) => index + 1),
+    });
+    expect(over).toEqual({
+      state: 'inconclusive',
+      diagnosticCode: 'PROCESS_TREE_CGROUP_LIMIT_ENTRIES',
+    });
+    expect(overSink).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed injected membership without emitting a partial gauge', async () => {
+    const sink = vi.fn();
+    const observation = await emitCgroupDivergence([], 100, {
+      generationMarker: 'invalid-membership',
+      onCgroupDivergence: sink,
+      readCgroupMemberPids: () => [100, Number.NaN],
+    });
+    expect(observation).toEqual({
+      state: 'inconclusive',
+      diagnosticCode: 'PROCESS_TREE_CGROUP_INPUT_INVALID',
+    });
+    expect(sink).not.toHaveBeenCalled();
   });
 });
 
@@ -139,11 +218,14 @@ describe('#1869 killSessionTree cgroup isolation (mock ps)', () => {
   }
 
   beforeEach(() => {
+    resetProcessTreeTerminationLeasesForTesting();
+    birthTokenMock.mockReset().mockImplementation((pid: number) => `birth:${pid}`);
     execFileSyncMock.mockReset();
     killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
   });
 
   afterEach(() => {
+    resetProcessTreeTerminationLeasesForTesting();
     killSpy.mockRestore();
   });
 
@@ -187,7 +269,7 @@ describe('#1869 killSessionTree cgroup isolation (mock ps)', () => {
         CHILD_PID,
         SIBLING_SESSION_PID,
       ],
-    })).resolves.toBeUndefined();
+    })).resolves.toMatchObject({ outcome: 'terminated' });
 
     // The divergence sink reports the off-tree PID that the PPID walk missed
     expect(divergenceSink).toHaveBeenCalledTimes(1);
@@ -200,8 +282,10 @@ describe('#1869 killSessionTree cgroup isolation (mock ps)', () => {
     // Cgroup membership alone proves co-location, not ownership. Signaling the
     // sibling reproduces the observed cross-session crash during idle TTL.
     expect(killSpy).not.toHaveBeenCalledWith(SIBLING_SESSION_PID, 'SIGKILL');
-    expect(killSpy).toHaveBeenCalledTimes(1);
-    expect(killSpy).toHaveBeenCalledWith(-ROOT_PID, 'SIGKILL');
+    expect(killSpy.mock.calls).toEqual([
+      [CHILD_PID, 'SIGKILL'],
+      [ROOT_PID, 'SIGKILL'],
+    ]);
   });
 
   it('falls back to owned PIDs when an off-tree process shares the root process group', async () => {
@@ -240,7 +324,7 @@ describe('#1869 killSessionTree cgroup isolation (mock ps)', () => {
         CHILD_PID,
         SIBLING_SESSION_PID,
       ],
-    })).resolves.toBeUndefined();
+    })).resolves.toMatchObject({ outcome: 'terminated' });
 
     expect(killSpy).not.toHaveBeenCalledWith(-ROOT_PID, 'SIGKILL');
     expect(killSpy).not.toHaveBeenCalledWith(SIBLING_SESSION_PID, 'SIGKILL');
@@ -273,7 +357,7 @@ describe('#1869 killSessionTree cgroup isolation (mock ps)', () => {
       generationMarker: 'test-missing-root',
       killGraceMs: 0,
       readCgroupMemberPids: () => [process.pid, SIBLING_SESSION_PID],
-    })).rejects.toThrow('pre-signal root row missing or ambiguous');
+    })).rejects.toMatchObject({ code: 'PROCESS_TREE_ROOT_MISSING' });
 
     expect(killSpy).not.toHaveBeenCalledWith(SIBLING_SESSION_PID, 'SIGKILL');
   });
@@ -300,10 +384,16 @@ describe('#1869 killSessionTree cgroup isolation (mock ps)', () => {
       readCgroupMemberPids: () => {
         throw new Error('reader blew up');
       },
-    })).resolves.toBeUndefined();
+    })).resolves.toMatchObject({
+      outcome: 'terminated',
+      diagnosticState: 'inconclusive',
+      diagnosticCodes: ['PROCESS_TREE_CGROUP_OBSERVATION_UNAVAILABLE'],
+    });
 
-    expect(killSpy).toHaveBeenCalledTimes(1);
-    expect(killSpy).toHaveBeenCalledWith(-ROOT_PID, 'SIGKILL');
+    expect(killSpy.mock.calls).toEqual([
+      [CHILD_PID, 'SIGKILL'],
+      [ROOT_PID, 'SIGKILL'],
+    ]);
   });
 
   it('emits a zero divergence gauge when every cgroup member is already in the PPID tree', async () => {
@@ -328,7 +418,7 @@ describe('#1869 killSessionTree cgroup isolation (mock ps)', () => {
       killGraceMs: 0,
       onCgroupDivergence: divergenceSink,
       readCgroupMemberPids: () => [ROOT_PID, CHILD_PID],
-    })).resolves.toBeUndefined();
+    })).resolves.toMatchObject({ outcome: 'terminated' });
 
     expect(divergenceSink).toHaveBeenCalledTimes(1);
     expect(divergenceSink).toHaveBeenCalledWith<[CgroupDivergenceInfo]>({

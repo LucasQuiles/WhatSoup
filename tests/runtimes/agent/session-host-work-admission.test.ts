@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 
 const admission = vi.hoisted(() => ({
@@ -20,14 +20,42 @@ const processIsolation = vi.hoisted(() => ({
   launch: vi.fn(),
 }));
 
+const processObservation = vi.hoisted(() => ({ census: vi.fn() }));
+
 vi.mock('../../../src/logger.ts', async () => (await import('../../helpers/logger-mock.ts')).loggerMock());
 vi.mock('node:os', () => ({ homedir: vi.fn(() => '/mock/home'), userInfo: vi.fn(() => ({ username: 'test' })) }));
 vi.mock('node:fs', () => ({ readFileSync: vi.fn() }));
-vi.mock('node:child_process', () => ({ spawn: vi.fn() }));
-vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
+vi.mock('node:child_process', () => ({ spawn: vi.fn(), execFileSync: processObservation.census }));
+vi.mock('../../../src/lib/process-identity.ts', () => ({
+  probeProcessBirthToken: (pid: number) => `birth:${pid}`,
+  probeProcessBirthTokens: (pids: readonly number[]) => new Map(pids.map((pid) => [pid, `birth:${pid}`])),
+  // Synthetic exact identities; real Darwin generations are tested in darwin-process-identity.test.ts.
+  processBirthTokenSupportsNumericSignal: () => true,
+}));
+vi.mock('../../../src/runtimes/agent/process-tree.ts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../src/runtimes/agent/process-tree.ts')>(),
+  bindProcessTreeRootAuthority: vi.fn(() => true),
   killSessionTree: vi.fn(async (child: { kill(signal: NodeJS.Signals): boolean }, signal: NodeJS.Signals) => {
     child.kill(signal);
+    return {
+      outcome: 'terminated' as const,
+      durationMs: 0,
+      ownedProcessCount: 1,
+      signaledProcessCount: 1,
+      ambiguousProcessCount: 0,
+      diagnosticState: 'complete' as const,
+      diagnosticCodes: [],
+    };
   }),
+  retryKillSessionTree: vi.fn(async () => ({
+    outcome: 'terminated' as const,
+    durationMs: 0,
+    ownedProcessCount: 1,
+    signaledProcessCount: 1,
+    ambiguousProcessCount: 0,
+    diagnosticState: 'complete' as const,
+    diagnosticCodes: [],
+  })),
 }));
 vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   createSession: vi.fn(() => 9), incrementMessageCount: vi.fn(), updateSessionId: vi.fn(),
@@ -51,7 +79,7 @@ vi.mock('../../../src/lib/keyring.ts', async (importOriginal) => {
   return { ...actual, lookupCredential: vi.fn(() => null) };
 });
 
-import { killSessionTree } from '../../../src/runtimes/agent/process-tree.ts';
+import { killSessionTree, resetProcessTreeTerminationLeasesForTesting } from '../../../src/runtimes/agent/process-tree.ts';
 import { resolveResumableAgentSession, updateResumedSessionStatus } from '../../../src/runtimes/agent/session-db.ts';
 import { SessionManager, type SessionManagerOptions } from '../../../src/runtimes/agent/session.ts';
 import { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
@@ -121,12 +149,123 @@ function admitPersistentChild(child: ReturnType<typeof makeChild>): void {
   });
 }
 
+function terminatedOutcome() {
+  return {
+    outcome: 'terminated' as const,
+    durationMs: 0,
+    ownedProcessCount: 1,
+    signaledProcessCount: 1,
+    ambiguousProcessCount: 0,
+    diagnosticState: 'complete' as const,
+    diagnosticCodes: [],
+  };
+}
+
 describe('SessionManager host work admission', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     admission.spawn.mockReset();
     admission.enabled.mockReturnValue(true);
     processIsolation.launch.mockReset();
+    processObservation.census.mockReset();
+  });
+
+  afterEach(() => {
+    resetProcessTreeTerminationLeasesForTesting();
+  });
+
+  it.each(['abort', 'invalidation'] as const)('reaps a pending admitted child through real authority checks after %s', async (mode) => {
+    const reaper = await vi.importActual<typeof import('../../../src/runtimes/agent/process-tree.ts')>(
+      '../../../src/runtimes/agent/process-tree.ts',
+    );
+    vi.mocked(killSessionTree).mockImplementationOnce(reaper.killSessionTree);
+    const child = makeChild();
+    let alive = true;
+    child.kill.mockImplementation(() => { alive = false; return true; });
+    processObservation.census.mockImplementation(() => [
+      'PID PPID PGID STARTED COMMAND',
+      `${process.pid} 1 ${process.pid} Fri Jul 10 08:00:00 2026 vitest-parent`,
+      ...(alive ? [`${child.pid} ${process.pid} ${child.pid} Fri Jul 10 08:00:00 2026 provider-root`] : []),
+    ].join('\n'));
+    let finishAdmission!: () => void;
+    admission.spawn.mockImplementationOnce((options: {
+      signal: AbortSignal;
+      onSpawned: (value: typeof child) => void;
+      onAbort: (value: typeof child) => Promise<void>;
+    }) => {
+      options.onSpawned(child);
+      return new Promise((resolve, reject) => {
+        finishAdmission = () => resolve(child);
+        if (mode === 'abort') {
+          options.signal.addEventListener('abort', () => {
+            void options.onAbort(child).then(() => reject(new admission.error()), reject);
+          }, { once: true });
+        }
+      });
+    });
+    const session = makeSession('claude-cli');
+    await session.spawnSession();
+    const turn = session.sendTurn('old turn');
+    void turn.catch(() => {});
+    await vi.waitFor(() => expect(admission.spawn).toHaveBeenCalledOnce());
+    const reset = session.handleNew();
+    if (mode === 'invalidation') finishAdmission();
+    const [resetResult, turnResult] = await Promise.allSettled([reset, turn]);
+
+    expect(alive).toBe(false);
+    expect(resetResult.status).toBe('fulfilled');
+    expect(turnResult.status).toBe('rejected');
+    expect(session.getStatus()).toMatchObject({ active: false, providerTerminated: true });
+  });
+
+  it.each(['boundary failure', 'start invalidation'] as const)('reaps an isolated child through real authority checks after %s', async (mode) => {
+    const reaper = await vi.importActual<typeof import('../../../src/runtimes/agent/process-tree.ts')>(
+      '../../../src/runtimes/agent/process-tree.ts',
+    );
+    vi.mocked(killSessionTree).mockImplementationOnce(reaper.killSessionTree);
+    const child = makeChild();
+    let alive = true;
+    child.kill.mockImplementation(() => { alive = false; return true; });
+    processObservation.census.mockImplementation(() => [
+      'PID PPID PGID STARTED COMMAND',
+      `${process.pid} 1 ${process.pid} Fri Jul 10 08:00:00 2026 vitest-parent`,
+      ...(alive ? [`${child.pid} ${process.pid} ${child.pid} Fri Jul 10 08:00:00 2026 provider-root`] : []),
+    ].join('\n'));
+    let finishIsolation!: () => void;
+    processIsolation.launch.mockImplementationOnce(() => new Promise((resolve) => {
+      finishIsolation = () => resolve(child);
+    }));
+    const session = makeSession(mode === 'boundary failure' ? 'opencode-cli' : 'claude-cli', {
+      providerProcessIsolation: {
+        controllerUid: 501,
+        controllerGid: 20,
+        workerUid: 502,
+        workerGid: 502,
+        launcherPath: '/usr/local/libexec/whatsoup-agent-isolation-launcher',
+        launcherSha256: 'a'.repeat(64),
+        policyPath: '/etc/whatsoup/agent-isolation.policy',
+        policySha256: 'b'.repeat(64),
+        homeDir: '/var/lib/whatsoup-agent',
+        configHome: '/var/lib/whatsoup-agent/.config',
+        dataHome: '/var/lib/whatsoup-agent/.local/share',
+        protectedPaths: ['/var/db/whatsoup/transport-authority.bearer'],
+      },
+      providerCanaryAdmission: verifiedCanaryAdmission(),
+    });
+    await session.spawnSession();
+    const turn = mode === 'boundary failure'
+      ? session.sendTurnAtProviderBoundary('obsolete turn', () => { throw new Error('boundary invalidated'); })
+      : session.sendTurn('obsolete turn');
+    void turn.catch(() => {});
+    await vi.waitFor(() => expect(processIsolation.launch).toHaveBeenCalledOnce());
+    const reset = mode === 'start invalidation' ? session.handleNew() : Promise.resolve();
+    finishIsolation();
+    const [resetResult, turnResult] = await Promise.allSettled([reset, turn]);
+
+    expect(alive).toBe(false);
+    expect(resetResult.status).toBe('fulfilled');
+    expect(turnResult.status).toBe('rejected');
+    expect(admission.spawn).not.toHaveBeenCalled();
   });
 
   it('routes spawn-per-turn providers through the checked UID/GID launcher instead of the host-admission or direct-spawn path', async () => {
@@ -325,11 +464,11 @@ describe('SessionManager host work admission', () => {
     const gate = new ProviderExecutionGate();
     const session = makeSession('opencode-cli', { providerExecutionGate: gate });
     await session.spawnSession();
-    const turn = session.sendTurn('queued turn');
+    const turn = session.sendTurn('queued turn').catch((error: unknown) => error);
     await vi.waitFor(() => expect(admission.spawn).toHaveBeenCalledOnce());
 
     await expect(session.shutdown()).rejects.toBeInstanceOf(admission.cleanupError);
-    await expect(turn).rejects.toBeInstanceOf(admission.cleanupError);
+    expect(await turn).toBeInstanceOf(admission.cleanupError);
     expect(gate.snapshot()).toMatchObject({ active: true, pending: 0 });
 
     await session.shutdown();
@@ -450,8 +589,10 @@ describe('SessionManager host work admission', () => {
 
     await expect(reset).rejects.toThrow('obsolete admitted child cleanup failed');
     await expect(oldTurn).rejects.toThrow('obsolete admitted child cleanup failed');
-    await session.spawnSession();
-    await expect(session.sendTurn('replacement turn')).rejects.toThrow('Previous host work provider cleanup remains unproven');
+    await expect(session.spawnSession()).rejects.toThrow(
+      'Session admission blocked until prior shutdown and process-tree cleanup are complete',
+    );
+    expect(admission.spawn).toHaveBeenCalledOnce();
   });
 
   it('releases a persistent Claude admission when its first provider turn becomes terminal', async () => {
@@ -502,7 +643,10 @@ describe('SessionManager host work admission', () => {
     const admittedArgs: string[][] = [];
     let releaseCleanup!: () => void;
     const cleanup = new Promise<void>((resolve) => { releaseCleanup = resolve; });
-    vi.mocked(killSessionTree).mockImplementationOnce(() => cleanup);
+    vi.mocked(killSessionTree).mockImplementationOnce(async () => {
+      await cleanup;
+      return terminatedOutcome();
+    });
     admission.spawn.mockImplementation((options: { args: string[]; onSpawned?: (value: typeof first) => void }) => {
       admittedArgs.push(options.args);
       const child = admittedArgs.length === 1 ? first : second;
@@ -532,7 +676,10 @@ describe('SessionManager host work admission', () => {
     const child = makeChild();
     let releaseCleanup!: () => void;
     const cleanup = new Promise<void>((resolve) => { releaseCleanup = resolve; });
-    vi.mocked(killSessionTree).mockImplementationOnce(() => cleanup);
+    vi.mocked(killSessionTree).mockImplementationOnce(async () => {
+      await cleanup;
+      return terminatedOutcome();
+    });
     admitPersistentChild(child);
     const session = makeSession('claude-cli');
     await session.spawnSession();
@@ -573,7 +720,10 @@ describe('SessionManager host work admission', () => {
     const child = makeChild();
     let releaseCleanup!: () => void;
     const cleanup = new Promise<void>((resolve) => { releaseCleanup = resolve; });
-    vi.mocked(killSessionTree).mockImplementationOnce(() => cleanup);
+    vi.mocked(killSessionTree).mockImplementationOnce(async () => {
+      await cleanup;
+      return terminatedOutcome();
+    });
     admitPersistentChild(child);
     const session = makeSession('claude-cli');
     await session.spawnSession();
@@ -581,12 +731,12 @@ describe('SessionManager host work admission', () => {
     session.completeProviderTurn();
 
     const suspension = session.suspendHostWorkAdmissionAfterTerminal();
-    const replacement = session.sendTurn('replacement');
+    const replacement = session.sendTurn('replacement').catch((error: unknown) => error);
     await vi.waitFor(() => expect(killSessionTree).toHaveBeenCalledTimes(1));
     releaseCleanup();
 
     await expect(suspension).rejects.toThrow('HOST_WORK_ADMISSION_RESUME_IDENTITY_UNAVAILABLE');
-    await expect(replacement).rejects.toThrow('HOST_WORK_ADMISSION_RESUME_IDENTITY_UNAVAILABLE');
+    expect(await replacement).toMatchObject({ code: 'PROCESS_TREE_LEASE_CONFLICT' });
     expect(admission.spawn).toHaveBeenCalledTimes(1);
   });
 
@@ -659,8 +809,9 @@ describe('SessionManager host work admission', () => {
     vi.mocked(killSessionTree).mockRejectedValueOnce(new Error('tree cleanup unproven'));
 
     await expect(session.shutdown(true)).rejects.toThrow('tree cleanup unproven');
-    await session.spawnSession();
-    await expect(session.sendTurn('replacement turn')).rejects.toThrow('Previous host work provider cleanup remains unproven');
+    await expect(session.spawnSession()).rejects.toThrow(
+      'Session admission blocked until prior shutdown and process-tree cleanup are complete',
+    );
 
     // Existing fail-closed control: a second child cannot overlap an unproven
     // tree while the runtime-level suspension barrier is being added.

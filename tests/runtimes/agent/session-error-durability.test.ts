@@ -15,7 +15,39 @@ vi.mock('node:fs', async (importOriginal) => ({
 }));
 vi.mock('node:child_process', () => ({ spawn: vi.fn() }));
 vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
-  killSessionTree: vi.fn(async () => undefined),
+  captureProcessTreeRootAuthority: vi.fn((target: { pid?: number }) => ({
+    pid: target.pid ?? 0,
+    parentPid: process.pid,
+    birthToken: `birth:${target.pid ?? 0}`,
+  })),
+  bindProcessTreeRootAuthority: vi.fn(() => true),
+  killSessionTree: vi.fn(async () => ({
+    outcome: 'terminated' as const,
+    durationMs: 0,
+    ownedProcessCount: 1,
+    signaledProcessCount: 1,
+    ambiguousProcessCount: 0,
+    diagnosticState: 'complete' as const,
+    diagnosticCodes: [],
+  })),
+  retryKillSessionTree: vi.fn(async () => ({
+    outcome: 'terminated' as const,
+    durationMs: 0,
+    ownedProcessCount: 1,
+    signaledProcessCount: 1,
+    ambiguousProcessCount: 0,
+    diagnosticState: 'complete' as const,
+    diagnosticCodes: [],
+  })),
+  ProcessTreeTerminationError: class ProcessTreeTerminationError extends Error {
+    readonly code: string;
+    readonly retryClass: string;
+    constructor(code: string, message: string) {
+      super(message);
+      this.code = code;
+      this.retryClass = code.includes('PERMISSION') ? 'permission_denied' : 'census_retryable';
+    }
+  },
 }));
 
 import { spawn } from 'node:child_process';
@@ -24,7 +56,11 @@ import { DurabilityEngine } from '../../../src/core/durability.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import { SessionManager } from '../../../src/runtimes/agent/session.ts';
 import { OpenAIApiProvider } from '../../../src/runtimes/agent/providers/openai-api.ts';
-import { killSessionTree } from '../../../src/runtimes/agent/process-tree.ts';
+import {
+  killSessionTree,
+  retryKillSessionTree,
+  type KillSessionOutcome,
+} from '../../../src/runtimes/agent/process-tree.ts';
 
 const CHAT_JID = '15550171@s.whatsapp.net';
 const CONVERSATION_KEY = '15550171';
@@ -33,6 +69,18 @@ function makeMessenger(): Messenger {
   return {
     sendMessage: vi.fn(async () => ({ waMessageId: null })),
     sendMedia: vi.fn(async () => ({ waMessageId: null })),
+  };
+}
+
+function terminatedOutcome(): KillSessionOutcome {
+  return {
+    outcome: 'terminated',
+    durationMs: 0,
+    ownedProcessCount: 1,
+    signaledProcessCount: 1,
+    ambiguousProcessCount: 0,
+    diagnosticState: 'complete',
+    diagnosticCodes: [],
   };
 }
 
@@ -306,6 +354,7 @@ describe('SessionManager durable error lifecycle', () => {
     vi.mocked(killSessionTree).mockImplementationOnce(async () => {
       child.exitCode = 1;
       child.emit('exit', 1, 'SIGKILL');
+      return terminatedOutcome();
     });
     db.raw.exec(`
       CREATE TRIGGER deny_session_begin
@@ -425,8 +474,8 @@ describe('SessionManager durable error lifecycle', () => {
   it('does not persist graceful state until child termination succeeds', async () => {
     const child = makeChild(17109);
     vi.mocked(spawn).mockReturnValue(child as never);
-    let finishTermination: (() => void) | null = null;
-    vi.mocked(killSessionTree).mockImplementationOnce(() => new Promise<void>((resolve) => {
+    let finishTermination: ((outcome: KillSessionOutcome) => void) | null = null;
+    vi.mocked(killSessionTree).mockImplementationOnce(() => new Promise<KillSessionOutcome>((resolve) => {
       finishTermination = resolve;
     }));
     const sm = new SessionManager({
@@ -446,13 +495,242 @@ describe('SessionManager durable error lifecycle', () => {
     expect(rowStatus(db, rowId)).toBe('active');
     expect(durability.getSessionCheckpoint(CONVERSATION_KEY)?.session_status).toBe('active');
 
-    const release = finishTermination as (() => void) | null;
+    const release = finishTermination as ((outcome: KillSessionOutcome) => void) | null;
     if (release === null) throw new Error('termination was not started');
-    release();
+    release(terminatedOutcome());
     await shuttingDown;
 
     expect(rowStatus(db, rowId)).toBe('suspended');
     expect(durability.getSessionCheckpoint(CONVERSATION_KEY)?.session_status).toBe('suspended');
+  });
+
+  it('retains the child and active lifecycle after bounded ambiguous cleanup retries', async () => {
+    const child = makeChild(17111);
+    vi.mocked(spawn).mockReturnValue(child as never);
+    const unresolved: KillSessionOutcome = {
+      outcome: 'unresolved_ambiguous',
+      durationMs: 1,
+      ownedProcessCount: 2,
+      signaledProcessCount: 1,
+      ambiguousProcessCount: 1,
+      diagnosticState: 'complete',
+      diagnosticCodes: [],
+    };
+    vi.mocked(killSessionTree).mockResolvedValueOnce(unresolved);
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      vi.mocked(retryKillSessionTree).mockResolvedValueOnce(unresolved);
+    }
+    const sm = new SessionManager({
+      db,
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+    });
+    sm.setDurability(durability);
+    await sm.spawnSession();
+    const rowId = sm.getDbRowId();
+    if (rowId === null) throw new Error('persistent session row was not created');
+
+    await expect(sm.shutdown(true)).rejects.toMatchObject({
+      code: 'PROCESS_TREE_AMBIGUOUS_IDENTITY_UNRESOLVED',
+    });
+
+    expect(killSessionTree).toHaveBeenCalledTimes(1);
+    expect(retryKillSessionTree).toHaveBeenCalledTimes(4);
+    expect(rowStatus(db, rowId)).toBe('active');
+    expect(durability.getSessionCheckpoint(CONVERSATION_KEY)?.session_status).toBe('active');
+    expect(sm.getStatus()).toMatchObject({
+      active: false,
+      pid: 17111,
+      durableFailureInconclusive: true,
+      providerTerminated: false,
+    });
+  });
+
+  it('keeps repeated shutdown inconclusive after the root exits before descendant proof', async () => {
+    const child = makeChild(17112);
+    vi.mocked(spawn).mockReturnValue(child as never);
+    const unresolved: KillSessionOutcome = {
+      ...terminatedOutcome(),
+      outcome: 'unresolved_ambiguous',
+      ownedProcessCount: 2,
+      ambiguousProcessCount: 1,
+    };
+    vi.mocked(killSessionTree).mockImplementationOnce(async () => {
+      child.signalCode = 'SIGTERM';
+      child.emit('exit', null, 'SIGTERM');
+      return unresolved;
+    });
+    for (let attempt = 0; attempt < 9; attempt += 1) {
+      vi.mocked(retryKillSessionTree).mockResolvedValueOnce(unresolved);
+    }
+    const sm = new SessionManager({
+      db,
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+    });
+    sm.setDurability(durability);
+    await sm.spawnSession();
+    const rowId = sm.getDbRowId();
+    if (rowId === null) throw new Error('persistent session row was not created');
+
+    try {
+      await expect(sm.shutdown(true)).rejects.toMatchObject({
+        code: 'PROCESS_TREE_AMBIGUOUS_IDENTITY_UNRESOLVED',
+      });
+      await expect(sm.shutdown(true)).rejects.toMatchObject({
+        code: 'PROCESS_TREE_AMBIGUOUS_IDENTITY_UNRESOLVED',
+      });
+      expect(rowStatus(db, rowId)).toBe('active');
+      expect(durability.getSessionCheckpoint(CONVERSATION_KEY)?.session_status).toBe('active');
+      expect(sm.getStatus().providerTerminated).toBe(false);
+      expect(killSessionTree).toHaveBeenCalledTimes(1);
+      expect(retryKillSessionTree).toHaveBeenCalledTimes(9);
+    } finally {
+      vi.mocked(retryKillSessionTree).mockReset().mockResolvedValue(terminatedOutcome());
+    }
+  });
+
+  it('holds concurrent shutdown and termination status until root-exit tree proof completes', async () => {
+    const child = makeChild(17113);
+    vi.mocked(spawn).mockReturnValue(child as never);
+    let finishTermination: ((outcome: KillSessionOutcome) => void) | null = null;
+    vi.mocked(killSessionTree).mockImplementationOnce(() => new Promise<KillSessionOutcome>((resolve) => {
+      finishTermination = resolve;
+    }));
+    const sm = new SessionManager({
+      db,
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+    });
+    sm.setDurability(durability);
+    await sm.spawnSession();
+    const rowId = sm.getDbRowId();
+    if (rowId === null) throw new Error('persistent session row was not created');
+
+    const firstShutdown = sm.shutdown(true);
+    child.signalCode = 'SIGTERM';
+    child.emit('exit', null, 'SIGTERM');
+    const secondShutdown = sm.shutdown(true);
+    let secondSettled = false;
+    void secondShutdown.then(() => { secondSettled = true; }, () => { secondSettled = true; });
+    const release = finishTermination as ((outcome: KillSessionOutcome) => void) | null;
+    if (release === null) throw new Error('termination was not started');
+
+    try {
+      await Promise.resolve();
+      expect(secondSettled).toBe(false);
+      expect(rowStatus(db, rowId)).toBe('active');
+      expect(durability.getSessionCheckpoint(CONVERSATION_KEY)?.session_status).toBe('active');
+      expect(sm.getStatus().providerTerminated).toBe(false);
+    } finally {
+      release(terminatedOutcome());
+      await Promise.all([firstShutdown, secondShutdown]);
+    }
+
+    expect(rowStatus(db, rowId)).toBe('suspended');
+    expect(durability.getSessionCheckpoint(CONVERSATION_KEY)?.session_status).toBe('suspended');
+    expect(sm.getStatus().providerTerminated).toBe(true);
+    await expect(sm.shutdown(true)).resolves.toBeUndefined();
+    expect(killSessionTree).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['claude-cli', 'codex-cli', 'opencode-cli'] as const)(
+    'blocks %s readmission after root exit until tree cleanup settles', async (provider) => {
+      const child = makeChild(17114);
+      const replacement = makeChild(17115);
+      vi.mocked(spawn).mockReturnValueOnce(child as never).mockReturnValue(replacement as never);
+      let finishTermination: ((outcome: KillSessionOutcome) => void) | null = null;
+      vi.mocked(killSessionTree).mockImplementationOnce(() => new Promise<KillSessionOutcome>((resolve) => {
+        finishTermination = resolve;
+      }));
+      const sm = new SessionManager({
+        db,
+        messenger: makeMessenger(),
+        chatJid: CHAT_JID,
+        provider,
+        model: provider === 'opencode-cli' ? 'glm/test-model' : undefined,
+        onEvent: vi.fn(),
+      });
+      sm.setDurability(durability);
+      await sm.spawnSession();
+      if (provider === 'opencode-cli') await sm.sendTurn('initial turn');
+      const rowId = sm.getDbRowId();
+      if (rowId === null) throw new Error('session row was not created');
+      expect(spawn).toHaveBeenCalledTimes(1);
+
+      const shuttingDown = sm.shutdown(true);
+      child.signalCode = 'SIGTERM';
+      child.emit(provider === 'opencode-cli' ? 'close' : 'exit', null, 'SIGTERM');
+      const release = finishTermination as ((outcome: KillSessionOutcome) => void) | null;
+      if (release === null) throw new Error('termination was not started');
+
+      try {
+        await expect(sm.spawnSession()).rejects.toMatchObject({ code: 'PROCESS_TREE_LEASE_CONFLICT' });
+        expect(spawn).toHaveBeenCalledTimes(1);
+        expect(sm.getDbRowId()).toBe(rowId);
+        expect(rowStatus(db, rowId)).toBe('active');
+        expect(sm.getStatus().providerTerminated).toBe(false);
+      } finally {
+        release(terminatedOutcome());
+        await shuttingDown;
+      }
+
+      await sm.spawnSession();
+      if (provider === 'opencode-cli') await sm.sendTurn('after proved cleanup');
+      expect(spawn).toHaveBeenCalledTimes(2);
+      expect(sm.getDbRowId()).not.toBe(rowId);
+      expect(sm.getStatus().pid).toBe(17115);
+      expect(killSessionTree).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('blocks readmission after tree proof until the entire shutdown has settled', async () => {
+    const child = makeChild(17116);
+    const replacement = makeChild(17117);
+    vi.mocked(spawn).mockReturnValueOnce(child as never).mockReturnValue(replacement as never);
+    let finishTermination: ((outcome: KillSessionOutcome) => void) | null = null;
+    vi.mocked(killSessionTree).mockImplementationOnce(() => new Promise<KillSessionOutcome>((resolve) => {
+      finishTermination = resolve;
+    }));
+    const sm = new SessionManager({
+      db,
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+    });
+    sm.setDurability(durability);
+    await sm.spawnSession();
+    const rowId = sm.getDbRowId();
+    if (rowId === null) throw new Error('persistent session row was not created');
+
+    let shutdownSettled = false;
+    const shuttingDown = sm.shutdown(true).then(() => { shutdownSettled = true; });
+    child.signalCode = 'SIGTERM';
+    child.emit('exit', null, 'SIGTERM');
+    const release = finishTermination as ((outcome: KillSessionOutcome) => void) | null;
+    if (release === null) throw new Error('termination was not started');
+    release(terminatedOutcome());
+
+    try {
+      for (let step = 0; step < 32 && !sm.getStatus().providerTerminated; step += 1) {
+        await Promise.resolve();
+      }
+      expect(sm.getStatus().providerTerminated).toBe(true);
+      expect(shutdownSettled).toBe(false);
+      expect(rowStatus(db, rowId)).toBe('active');
+      await expect(sm.spawnSession()).rejects.toMatchObject({ code: 'PROCESS_TREE_LEASE_CONFLICT' });
+      expect(spawn).toHaveBeenCalledTimes(1);
+    } finally {
+      await shuttingDown;
+    }
+
+    expect(rowStatus(db, rowId)).toBe('suspended');
+    await sm.spawnSession();
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(sm.getDbRowId()).not.toBe(rowId);
   });
 
   it('rolls back graceful state atomically after termination when checkpoint closure fails', async () => {
@@ -684,6 +962,7 @@ describe('SessionManager durable error lifecycle', () => {
     vi.mocked(killSessionTree).mockImplementationOnce(async () => {
       child.exitCode = 1;
       child.emit('exit', 1, 'SIGKILL');
+      return terminatedOutcome();
     });
     const sm = new SessionManager({
       db,

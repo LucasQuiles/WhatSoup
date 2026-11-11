@@ -59,6 +59,9 @@ jobs:
       - name: Typecheck (all)
         run: npm run typecheck:all
 
+      - name: Process-tree diagnostic adoption
+        run: npm run guard:process-tree-diagnostics
+
       - name: Import boundary guard
         run: npm run guard:boundaries
 

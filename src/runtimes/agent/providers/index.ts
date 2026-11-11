@@ -11,8 +11,8 @@
 //      transport-suffixed) AND to the ProviderIdTuple type below — the
 //      registry test pins the two in lockstep.
 //   2. Add display name in src/runtimes/agent/session.ts PROVIDER_DISPLAY_NAMES.
-//   3. Add a case in the three switches in session.ts (getProviderBinary,
-//      getProviderArgs, getParser) — TypeScript will surface any miss via
+//   3. Add the binary in provider-binary.ts and cases in the session.ts
+//      argument/parser switches — TypeScript will surface any miss via
 //      the assertNever pattern at the throw site.
 //   4. Add display metadata in console/src/lib/providers.ts (PROVIDER_META) —
 //      the ID list itself is shared via src/lib/provider-ids.json, so the console

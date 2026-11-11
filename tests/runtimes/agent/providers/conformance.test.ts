@@ -33,13 +33,28 @@ vi.mock('node:child_process', () => ({
   spawn: vi.fn(),
 }));
 
-vi.mock('../../../../src/runtimes/agent/session-db.ts', () => ({
-  createSession: vi.fn(() => 42),
-  incrementMessageCount: vi.fn(),
-  updateSessionId: vi.fn(),
-  updateSessionStatus: vi.fn(),
-  updateTranscriptPath: vi.fn(),
+vi.mock('../../../../src/lib/process-identity.ts', () => ({
+  probeProcessBirthToken: vi.fn((pid: number) => `test-birth:${pid}`),
+  probeProcessBirthTokens: vi.fn((pids: readonly number[]) => new Map(
+    pids.map((pid) => [pid, `test-birth:${pid}`]),
+  )),
+  // Synthetic exact identities; real Darwin generations are tested in darwin-process-identity.test.ts.
+  processBirthTokenSupportsNumericSignal: vi.fn(() => true),
 }));
+
+vi.mock('../../../../src/runtimes/agent/session-db.ts', () => {
+  let nextSessionRowId = 41;
+  return {
+    createSession: vi.fn(() => {
+      nextSessionRowId += 1;
+      return nextSessionRowId;
+    }),
+    incrementMessageCount: vi.fn(),
+    updateSessionId: vi.fn(),
+    updateSessionStatus: vi.fn(),
+    updateTranscriptPath: vi.fn(),
+  };
+});
 
 import { readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';

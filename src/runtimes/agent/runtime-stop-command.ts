@@ -55,7 +55,11 @@
 // provider-independent predicate `isSessionProvablyTerminated`
 // (runtime.ts:8121 at b65984f0).
 //
-// RESIDUAL, DISCLOSED (three, none closed by this leaf):
+// Unresolved process-tree cleanup throws before SessionManager.shutdown clears
+// its child handle. Awaiting shutdown therefore prevents a stopped acknowledgement
+// for that failure; its inconclusive latch also fails the termination predicate.
+//
+// RESIDUAL, DISCLOSED (two, neither closed by this leaf):
 // (1) Empty torn-down set. When the scope holds no session object to prove
 //     (single/shared with a null session ref, per_chat with no mapped session)
 //     the set is empty and the predicate is vacuously satisfied, so 'stopped'
@@ -63,14 +67,7 @@
 //     where the runtime has nothing left to interrogate; it is not evidence of
 //     termination. Pinned by the RESIDUAL tests in runtime-stop-command.test.ts
 //     so a later change to it is deliberate.
-// (2) Ambiguous kill census. `SessionManager.shutdown` nulls `child` after
-//     `killChildTree` returns normally even when PIDs stayed ambiguous and
-//     were never signalled (session.ts:4165-4188 and process-tree.ts:428-442 at
-//     b65984f0; the outcome sink at session.ts:1134-1138 only logs). The status
-//     this command reads then reports `providerTerminated` true, so 'stopped'
-//     stays reachable with a surviving provider descendant. The route is
-//     outside this leaf's paths; owner is the follow-up draft on #2949.
-// (3) Containment, not detection. The seam clears the scope refs before the
+// (2) Containment, not detection. The seam clears the scope refs before the
 //     proof runs (the ordering /new established), so after an 'uncertain'
 //     outcome the next inbound can still spawn a replacement session while the
 //     first teardown is unproven. N1 adds detection and an honest

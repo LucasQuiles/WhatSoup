@@ -82,7 +82,6 @@ import {
   SESSION_IDLE_MS,
   SESSION_SWEEP_INTERVAL_MS,
   ZOMBIE_SESSION_SWEEP_INTERVAL_MS,
-  AMBIGUOUS_SESSION_MAX_AGE_MS,
   MAX_RESIDENT_SESSIONS,
   SESSION_MIN_RESIDENCY_MS,
   RESIDENT_TURN_PROGRESS_DEADLINE_MS,
@@ -100,7 +99,6 @@ import {
   ensureAgentSchema,
   getActiveSession,
   backfillWorkspaceKeys,
-  markOrphaned,
   getResumableSessionForChat,
   accumulateSessionTokens,
   insertTokenEvent,
@@ -119,7 +117,6 @@ import {
   type CheckpointAdoption,
 } from './checkpoint-adoption.ts';
 import { checkpointCompletedIdentityIsAdmissionRejected } from './admission-rejected-checkpoint.ts';
-import { reconcileResidentSessionStatuses } from './resident-session-reconciler.ts';
 import {
   ensureFallbackStateSchema,
   getFallbackState,
@@ -128,12 +125,12 @@ import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts, ensurePe
 import { resolveM365MutationPolicy, type M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
 import { inspectUserClaudeSettings } from '../../core/user-claude-settings.ts';
 import { isSamePhysicalDirectory } from '../../lib/home-path.ts';
-import { classifyActiveSessions, resolveAmbiguousAgeFallback } from './session-classifier.ts';
 import {
   SessionManager,
   formatAge,
   getProviderBinary,
   type SessionCrashInfo,
+  type SessionProcessTreeTerminationLease,
 } from './session.ts';
 import { createProviderExecutionGate, ProviderExecutionGate } from './provider-execution-gate.ts';
 import { dispatchProviderTurn, withProviderApplicationContext } from './provider-boundary-dispatch.ts';
@@ -186,6 +183,7 @@ import {
   shutdownOwnedSessions,
   type RuntimeSessionLifecycleHost,
 } from './runtime-session-lifecycle.ts';
+import { sweepStaleAgentSessions as sweepStaleAgentSessionsForHost } from './stale-session-sweep.ts';
 import {
   resolveExecutingActor as resolveExecutingActorForPort,
   wirePerChatActorSocket as wirePerChatActorSocketForPort,
@@ -285,7 +283,11 @@ import {
 } from './runtime-turn-coordinator.ts';
 import { TurnCapabilityTracker, type TurnCapabilityErrorClass } from './turn-capability-tracker.ts';
 import { SessionOwnershipRegistry } from './session-ownership.ts';
-import { killSessionTree } from './process-tree.ts';
+import {
+  killSessionTree,
+  ProcessTreeTerminationError,
+  processTreeFailureDiagnostic,
+} from './process-tree.ts';
 import { FallbackWindowMetrics } from './fallback-window-metrics.ts';
 import { FallbackWindowState } from './fallback-window-state.ts';
 import { FallbackChain } from './fallback-chain-state.ts';
@@ -409,6 +411,7 @@ import {
   type FallbackRecoveryReceipt,
 } from './fallback-recovery-transaction.ts';
 import { jitteredDelay, sleep } from '../../core/retry.ts';
+import { probeProcessBirthToken } from '../../lib/process-identity.ts';
 import { synthesizeSpeech } from '../chat/providers/elevenlabs.ts';
 import { writeTempFile } from '../../core/media-download.ts';
 import { OperationTracker } from './operation-tracker.ts';
@@ -439,6 +442,8 @@ const CONTROL_SESSION_TIMEOUT_MS = 15 * MS_PER_MINUTE;
 const HEALTH_STATS_INTERVAL_MS = MS_PER_MINUTE;
 const SHARED_QUEUE_IDLE_MS = MS_PER_HOUR;
 const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * MS_PER_MINUTE;
+const STALE_PROCESS_TREE_RETRY_DELAY_MS = MS_PER_SECOND;
+
 // Single-sourced from conversation-key.ts so the tool/crash scope keys and the
 // tool_calls telemetry sentinel can never drift apart.
 const GLOBAL_TOOL_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
@@ -560,15 +565,12 @@ import { errorMessage } from '../../lib/error-message.ts';
 // `isPromptTooLongMessage` lives in `./failure-taxonomy.ts` (imported + re-exported above).
 
 /**
- * What a wedged-lane release did to the provider (#3374 C7). `reaped_child` is
- * the real-process wedge, where an intentional SIGKILL routes the exit through
- * the session's own crash machinery. `reap_skipped_no_child` is the
- * managed-provider wedge: the session holds no child, so nothing is killed and
- * the remote request is left outstanding — the release still frees the lane,
- * but it must not be recorded as a reap that happened.
+ * `reap_requested` records admission of asynchronous provider cleanup, not
+ * confirmed termination. `reap_not_requested` makes no claim about child
+ * presence: an inactive session can still retain a child after failed cleanup.
  * `reap_unavailable` is a session surface that does not implement the reap.
  */
-type WedgedLaneReapOutcome = 'reaped_child' | 'reap_skipped_no_child' | 'reap_unavailable';
+type WedgedLaneReapOutcome = 'reap_requested' | 'reap_not_requested' | 'reap_unavailable';
 
 export class AgentRuntime implements Runtime {
 
@@ -717,6 +719,18 @@ export class AgentRuntime implements Runtime {
   private queueSweepTimer: ReturnType<typeof setInterval> | null = null;
   private sessionSweepTimer: ReturnType<typeof setInterval> | null = null;
   private zombieSessionSweepTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly staleProcessTreeRetries = new Map<
+    number,
+    { pid: number; generationMarker: string; birthToken: string; provider: string | null }
+  >();
+  private readonly staleProcessTreePermissionBlocks = new Map<
+    number,
+    { pid: number; generationMarker: string; birthToken: string; provider: string | null }
+  >();
+  private readonly staleProcessTreeRetryTimers = new Map<
+    number,
+    ReturnType<typeof setTimeout>
+  >();
   // Background handoff distiller (flag-gated). The coordinator owns the timer +
   // runner lifecycle; it stays inert when the flag is off OR the model/key fails
   // to resolve. Initialized in the constructor (needs db + instanceName + the
@@ -1636,10 +1650,41 @@ export class AgentRuntime implements Runtime {
     if (!(this.sessionScope === 'per_chat' || this.sandboxPerChat) || this.zombieSessionSweepTimer) return;
     this.zombieSessionSweepTimer = setInterval(() => {
       this.sweepStaleAgentSessions().catch((err) => {
-        log.warn({ err, instanceName: this.instanceName }, 'interval zombie-session sweep failed');
+        log.warn({
+          ...processTreeFailureDiagnostic(err),
+          instanceName: this.instanceName,
+        }, 'interval zombie-session sweep failed');
       });
     }, ZOMBIE_SESSION_SWEEP_INTERVAL_MS);
     this.zombieSessionSweepTimer.unref?.();
+  }
+
+  private clearStaleProcessTreeRetryTimer(rowId: number): void {
+    const timer = this.staleProcessTreeRetryTimers.get(rowId);
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    this.staleProcessTreeRetryTimers.delete(rowId);
+  }
+
+  private scheduleStaleProcessTreeRetry(rowId: number): void {
+    if (
+      this.shutdownRequested
+      || this.staleProcessTreeRetryTimers.has(rowId)
+      || this.staleProcessTreeRetryTimers.size >= 64
+    ) return;
+    const timer = setTimeout(() => {
+      if (this.staleProcessTreeRetryTimers.get(rowId) !== timer) return;
+      this.staleProcessTreeRetryTimers.delete(rowId);
+      if (this.shutdownRequested) return;
+      void this.sweepStaleAgentSessions().catch(() => {
+        log.warn(
+          { instanceName: this.instanceName, rowId },
+          'scheduled stale-session process-tree retry failed',
+        );
+      });
+    }, STALE_PROCESS_TREE_RETRY_DELAY_MS);
+    timer.unref?.();
+    this.staleProcessTreeRetryTimers.set(rowId, timer);
   }
 
   /**
@@ -1695,157 +1740,23 @@ export class AgentRuntime implements Runtime {
   }
 
   private async sweepStaleAgentSessions(): Promise<Set<string>> {
-    const proactiveResumeBlockedConversationKeys = new Set<string>();
-    if (!(this.sessionScope === 'per_chat' || this.sandboxPerChat)) {
-      return proactiveResumeBlockedConversationKeys;
-    }
-    if (!this.durability) {
-      log.warn('durability engine not set — skipping active session classification');
-      return proactiveResumeBlockedConversationKeys;
-    }
-
-    const residentRowIds = reconcileResidentSessionStatuses(this.db, this.chatSessions.values());
-    const classified = classifyActiveSessions(this.db, this.durability);
-    const now = systemClock.now();
-    for (const session of classified) {
-      if (residentRowIds.has(session.id)) {
-        // #3523 layer 2: the resident exemption is liveness-gated. A current-process
-        // resident manager is only spared zombie disposition while it is making turn
-        // progress. A resident wedged between turns (e.g. a compaction livelock, or a
-        // manager whose child crashed but whose row is still mapped) would otherwise
-        // be protected forever and never self-clear. When it is NOT progressing, fall
-        // through to the classification's normal stale_live/stale_dead disposition
-        // instead of skipping.
-        if (this.isResidentManagerMakingProgress(session.id, now)) {
-          log.warn(
-            { id: session.id, conversationKey: session.conversationKey, classification: session.classification,
-              reason: session.reason, providerSessionId: session.sessionId },
-            'skipping zombie-session disposition for current-process resident manager');
-          if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
-          continue;
-        }
-        log.warn(
-          { id: session.id, conversationKey: session.conversationKey, classification: session.classification,
-            reason: session.reason, providerSessionId: session.sessionId },
-          'resident manager making no turn progress — allowing zombie-session disposition');
-        // #3523 layer 2 (iteration 1, review H1/S2): 'authoritative_live' is the
-        // classification the incident's own journal records for the livelocked
-        // row — its child process IS alive and DOES match the active checkpoint,
-        // so every disposition arm below is a no-op for it (the switch only
-        // re-adds the conversation key to the proactive-resume block set, exactly
-        // what the old unconditional exemption did). A non-progressing
-        // authoritative resident must therefore be dispositioned HERE, by the
-        // same serialized owned reset the compaction-livelock escalation uses, so
-        // the incident's state (authoritative_live + no turn progress past the
-        // deadline) ends in a fresh, usable session instead of a log line.
-        // Every other classification keeps its existing disposition below.
-        //
-        // Iteration 2 (the adversarial lens A0/A1 = the spec lens N1): the hard
-        // reset is gated on the SCHEDULED scope, the same predicate layer 1's
-        // escalation already carries, because #3523 AC1 restricts it to
-        // '::scheduled-agent-job' scopes. Ungated, this arm aborted the in-flight
-        // turn and dropped the resumable checkpoint of ANY per-chat scope whose
-        // convergence streak had latched — the convergence gates in
-        // isResidentManagerMakingProgress deliberately outrank turnInFlight (the
-        // incident's compact turn is perpetually in flight), so an ordinary
-        // interactive chat could be reset mid-turn. A non-scheduled resident that
-        // stops progressing loses its exemption and keeps the pre-existing
-        // disposition for this classification: proactive resume stays blocked for
-        // the key, and the lapse is logged rather than acted on.
-        if (session.classification === 'authoritative_live') {
-          const entry = this.findResidentManagerForRow(session.id);
-          if (entry === undefined || !isScheduledAgentJobMapKey(entry.mapKey)) {
-            log.warn(
-              {
-                id: session.id, conversationKey: session.conversationKey,
-                mapKey: entry?.mapKey ?? null, trigger: 'no-turn-progress',
-              },
-              'non-progressing resident is not a scheduled-agent-job scope — exemption lapsed without a hard reset',
-            );
-            if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
-            continue;
-          }
-          const outcome = await this.resetWedgedResidentSession(
-            entry.mapKey, entry.session, 'no-turn-progress',
-            { id: session.id, conversationKey: session.conversationKey, providerSessionId: session.sessionId },
-          );
-          if (outcome !== 'reset' && session.conversationKey) {
-            // The reset did not settle cleanly — the old session may still hold
-            // the conversation, so keep proactive resume blocked for this key.
-            proactiveResumeBlockedConversationKeys.add(session.conversationKey);
-          }
-          continue;
-        }
-      }
-      switch (session.classification) {
-        case 'stale_dead':
-          markOrphaned(this.db, session.id);
-          break;
-        case 'stale_live':
-          log.warn({
-            id: session.id,
-            pid: session.claudePid,
-            conversationKey: session.conversationKey,
-            reason: session.reason,
-          }, 'reaping stale session');
-          try {
-            await killSessionTree(session.claudePid, 'SIGTERM', {
-              generationMarker:
-                `stale:${session.id}:${session.sessionId ?? 'unknown'}:${session.claudePid}`,
-            });
-          } catch (err) {
-            log.error({
-              err,
-              id: session.id,
-              pid: session.claudePid,
-              conversationKey: session.conversationKey,
-            }, 'stale session tree cleanup inconclusive — blocking proactive resume');
-            if (session.conversationKey) {
-              proactiveResumeBlockedConversationKeys.add(session.conversationKey);
-              break;
-            }
-            throw err;
-          }
-          markOrphaned(this.db, session.id);
-          break;
-        case 'ambiguous': {
-          const fallback = resolveAmbiguousAgeFallback(
-            {
-              id: session.id,
-              claudePid: session.claudePid,
-              startedAt: session.startedAt,
-              messageCount: session.messageCount,
-            },
-            Date.now(),
-            AMBIGUOUS_SESSION_MAX_AGE_MS,
-          );
-          if (fallback === 'orphan') {
-            markOrphaned(this.db, session.id);
-            log.warn({
-              id: session.id,
-              pid: session.claudePid,
-              conversationKey: session.conversationKey,
-              reason: session.reason,
-            }, 'ambiguous session past age threshold with no activity — marked orphaned (#1756)');
-            break;
-          }
-          log.warn({
-            id: session.id,
-            pid: session.claudePid,
-            conversationKey: session.conversationKey,
-            reason: session.reason,
-          }, 'ambiguous session — not touching');
-          // Left running — block a duplicate proactive resume for this key.
-          if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
-          break;
-        }
-        case 'authoritative_live':
-          // Verified-live child left in place — block a duplicate proactive resume.
-          if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
-          break;
-      }
-    }
-    return proactiveResumeBlockedConversationKeys;
+    return sweepStaleAgentSessionsForHost({
+      db: this.db,
+      sessionScope: this.sessionScope,
+      sandboxPerChat: this.sandboxPerChat,
+      getDurability: () => this.durability,
+      getResidentSessions: () => this.chatSessions.values(),
+      staleProcessTreeRetries: this.staleProcessTreeRetries,
+      staleProcessTreePermissionBlocks: this.staleProcessTreePermissionBlocks,
+      staleProcessTreeRetryTimerRowIds: () => this.staleProcessTreeRetryTimers.keys(),
+      clearStaleProcessTreeRetryTimer: (rowId) => this.clearStaleProcessTreeRetryTimer(rowId),
+      scheduleStaleProcessTreeRetry: (rowId) => this.scheduleStaleProcessTreeRetry(rowId),
+      isResidentManagerMakingProgress: (rowId, now) => this.isResidentManagerMakingProgress(rowId, now),
+      findResidentManagerForRow: (rowId) => this.findResidentManagerForRow(rowId),
+      resetWedgedResidentSession: (mapKey, session, trigger, logFields) => (
+        this.resetWedgedResidentSession(mapKey, session, trigger, logFields)
+      ),
+    });
   }
 
   /**
@@ -3448,14 +3359,24 @@ export class AgentRuntime implements Runtime {
         );
         continue;
       }
-      // Reap BEFORE announcing so the operator record carries what the reap
-      // actually did rather than what the release intended (#3374 C7). Both
-      // statements are synchronous and adjacent, so no lane state can change
-      // between them.
+      // Rejecting the matching completion is the authority check for every
+      // release side effect, including the cleanup request itself.
+      const rejected = this.runtimeTurnCoordinator.rejectRuntimeTurnCompletion(
+        new WedgedTurnReclaimedError(),
+        mapKey,
+        publishedContexts[0],
+      );
+      if (!rejected) {
+        log.warn(
+          { inboundSeq: row.seq, mapKey },
+          'wedged-lane release: no published completion for the reclaimed turn — leaving the provider turn alone',
+        );
+        continue;
+      }
+      // Request before announcing; cleanup remains asynchronous and may fail.
       const reapOutcome = this.reapWedgedLaneProvider(session);
       this.announceWedgedLaneRelease(row.seq, turnQueue.pending, reapOutcome);
-      // Reject the held turn's runtime completion (the turn-recovery
-      // replay-abort pattern), then settle the session's provider-turn
+      // With the matching completion rejected, settle the session's provider-turn
       // promise: the pinned processor is parked inside `sendTurn`, which by
       // contract resolves only at provider TERMINALIZATION — an event the
       // wedge, by definition, will never produce. A killed real child
@@ -3468,26 +3389,21 @@ export class AgentRuntime implements Runtime {
       // standard post-effects, so followers drain to a fresh session.
       // Deliberately NOT pre-finalized here: a second finalization owner
       // would race the canonical one.
-      this.runtimeTurnCoordinator.rejectRuntimeTurnCompletion(
-        new WedgedTurnReclaimedError(),
-        mapKey,
-        publishedContexts[0],
-      );
       session.completeProviderTurn();
     }
   }
 
   /**
-   * Kill the wedged lane's provider child, if it has one, and report what
-   * happened. `reapWedgedProviderChild` returns false when the session holds no
-   * child — every managed-loop provider — so a bare call cannot distinguish a
-   * reap from a no-op (#3374 C7). The absent-method case is a session surface
+   * Request cleanup of the wedged lane's provider child, if it has one.
+   * A true return does not prove termination; asynchronous failure is reported
+   * by the session's typed diagnostics. No request is made when it holds no
+   * child, including managed-loop providers. The absent-method case is a session surface
    * older than the reap and is named separately: it is not evidence that the
    * session had no child.
    */
   private reapWedgedLaneProvider(session: SessionManager): WedgedLaneReapOutcome {
     if (typeof session.reapWedgedProviderChild !== 'function') return 'reap_unavailable';
-    return session.reapWedgedProviderChild() ? 'reaped_child' : 'reap_skipped_no_child';
+    return session.reapWedgedProviderChild() ? 'reap_requested' : 'reap_not_requested';
   }
 
   /**
@@ -3502,9 +3418,9 @@ export class AgentRuntime implements Runtime {
   ): void {
     log.warn(
       { inboundSeq, queuedBehind, scope: this.sessionScope, reapOutcome },
-      reapOutcome === 'reaped_child'
-        ? 'durably reclaimed turn still pins a live lane — releasing via crash finalization'
-        : 'durably reclaimed turn still pins a live lane — releasing with no provider child reaped',
+      reapOutcome === 'reap_requested'
+        ? 'durably reclaimed turn still pins a live lane — cleanup requested, releasing via crash finalization'
+        : 'durably reclaimed turn still pins a live lane — releasing without a provider cleanup request',
     );
     emitAlertChecked(
       this.instanceName,
@@ -3570,18 +3486,12 @@ export class AgentRuntime implements Runtime {
       );
       return;
     }
-    // shared queues followers behind the wedge; single chains them on turnChain
-    // with nothing to count.
-    // Same ordering as the per-chat path: the reap's answer is what the
-    // announcement reports (#3374 C7).
-    const reapOutcome = this.reapWedgedLaneProvider(session);
-    this.announceWedgedLaneRelease(row.seq, this.shared ? this.turnQueue.pending : 0, reapOutcome);
     // The reject is the live-turn interlock, not just a signal: it refuses
     // unless the published completion IS this context's logical turn
-    // (rejectRuntimeTurnCompletionValue). Only then is the provider-turn
-    // promise force-settled — so a lane holding some other turn keeps its
-    // provider boundary untouched. The global lane holds at most one context by
-    // construction, which is why this replaces the per-chat path's
+    // (rejectRuntimeTurnCompletionValue). Only then may cleanup be requested,
+    // announced or the provider-turn promise force-settled. A lane holding some
+    // other turn keeps its provider boundary untouched. The global lane holds
+    // at most one context by construction, which replaces the per-chat path's
     // "exactly one published context" check.
     const rejected = this.runtimeTurnCoordinator.rejectRuntimeTurnCompletion(
       new WedgedTurnReclaimedError(),
@@ -3595,6 +3505,11 @@ export class AgentRuntime implements Runtime {
       );
       return;
     }
+    // shared queues followers behind the wedge; single chains them on turnChain
+    // with nothing to count. Keep the request adjacent to the interlock: no
+    // asynchronous continuation may start a new turn between them.
+    const reapOutcome = this.reapWedgedLaneProvider(session);
+    this.announceWedgedLaneRelease(row.seq, this.shared ? this.turnQueue.pending : 0, reapOutcome);
     // shared settles through the queue's ordinary processor-error path;
     // single settles through handleMessage's turn-chain catch. Both recognize
     // the sweep-owned durable terminal (reclaimed_by_sweep) rather than writing
@@ -8140,6 +8055,9 @@ export class AgentRuntime implements Runtime {
       clearInterval(this.zombieSessionSweepTimer);
       this.zombieSessionSweepTimer = null;
     }
+    for (const rowId of this.staleProcessTreeRetryTimers.keys()) {
+      this.clearStaleProcessTreeRetryTimer(rowId);
+    }
     this.handoffDistill.shutdown();
     if (this.revertTimer) {
       clearTimeout(this.revertTimer);
@@ -8804,10 +8722,8 @@ export class AgentRuntime implements Runtime {
    * so treat it as work that may still be outstanding rather than as a
    * terminated generation.
    *
-   * The guarantee is bounded by what the status reports: a kill-tree census
-   * that left descendant PIDs unsignalled still returns normally and clears the
-   * handle, and this predicate cannot see that, so it proves the manager's own
-   * generation is finished rather than that no provider descendant survives.
+   * Unresolved process-tree cleanup throws before shutdown clears the child
+   * handle and sets the inconclusive latch, so it cannot satisfy this predicate.
    */
   private isSessionProvablyTerminated(session: SessionManager): boolean {
     const status = session.getStatus();
@@ -9038,23 +8954,18 @@ export class AgentRuntime implements Runtime {
     session: SessionManager,
     expected: { managerId: string; generation: number },
   ): Promise<string> {
-    const spawnedPid = session.getStatus().pid;
     try {
       return this.markOwnedPerChatSessionActive(mapKey, session, expected);
     } catch (err) {
       const cleanupFailures: unknown[] = [];
-      let shutdownProvedTreeEmpty = false;
       try {
         await session.shutdown(false);
-        shutdownProvedTreeEmpty = true;
       } catch (cleanupErr) {
         cleanupFailures.push(cleanupErr);
-      }
-      if (!shutdownProvedTreeEmpty) {
         try {
-          await this.terminateKnownProcesses([spawnedPid, session.getStatus().pid]);
-        } catch (cleanupErr) {
-          cleanupFailures.push(cleanupErr);
+          await this.terminateOwnedSessionProcessTree(session);
+        } catch (retryErr) {
+          cleanupFailures.push(retryErr);
         }
       }
       if (cleanupFailures.length > 0) {
@@ -9067,10 +8978,28 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  private async awaitProcessExit(pid: number | null, timeoutMs = 6_000): Promise<void> {
-    if (pid === null) return;
+  private capturedProcessHasExited(
+    pid: number | null,
+    lease: SessionProcessTreeTerminationLease | null,
+  ): boolean {
+    if (pid === null) return true;
+    const matchingLease = lease !== null && lease.rootAuthority.pid === pid && lease.target.pid === pid
+      ? lease
+      : null;
+    if (matchingLease !== null && (matchingLease.target.exitCode != null || matchingLease.target.signalCode != null)) return true;
+    if (!isProcessAlive(pid)) return true;
+    if (matchingLease === null) return false;
+    const currentBirth = probeProcessBirthToken(pid);
+    return currentBirth !== null && currentBirth !== matchingLease.rootAuthority.birthToken;
+  }
+
+  private async awaitProcessExit(
+    pid: number | null,
+    lease: SessionProcessTreeTerminationLease | null,
+    timeoutMs = 6_000,
+  ): Promise<void> {
     const deadline = Date.now() + timeoutMs;
-    while (isProcessAlive(pid)) {
+    while (!this.capturedProcessHasExited(pid, lease)) {
       if (Date.now() >= deadline) {
         throw new Error(`Timed out waiting for prior session process ${pid} to exit`);
       }
@@ -9078,25 +9007,40 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  private async terminateKnownProcess(pid: number): Promise<void> {
-    await killSessionTree(pid, 'SIGTERM', {
-      generationMarker: `ownership-loss:${pid}:${randomUUID()}`,
-    });
-  }
-
-  private async terminateKnownProcesses(pids: Array<number | null>): Promise<void> {
-    const failures: unknown[] = [];
-    for (const pid of new Set(pids.filter((value): value is number => value !== null))) {
-      try {
-        if (!isProcessAlive(pid)) continue;
-        await this.terminateKnownProcess(pid);
-      } catch (err) {
-        failures.push(err);
-      }
+  private async terminateOwnedSessionProcessTree(session: SessionManager): Promise<void> {
+    const lease = session.getProcessTreeTerminationLease();
+    if (lease === null) {
+      const status = session.getStatus();
+      if (status.pid === null && status.providerTerminated === true) return;
+      throw new ProcessTreeTerminationError(
+        'PROCESS_TREE_ROOT_IDENTITY_UNVERIFIED',
+        'Ownership-loss cleanup has no captured process-tree authority',
+      );
     }
-    if (failures.length === 1) throw failures[0];
-    if (failures.length > 1) {
-      throw new AggregateError(failures, 'Unable to prove all session processes terminated');
+    const outcome = await killSessionTree(lease.target, 'SIGTERM', {
+      generationMarker: lease.generationMarker,
+      rootAuthority: lease.rootAuthority,
+      diagnosticSource: 'ownership_loss_cleanup',
+      onOutcome: (observed) => {
+        log.debug(
+          {
+            outcome: observed.outcome,
+            ambiguousProcessCount: observed.ambiguousProcessCount,
+            diagnosticState: observed.diagnosticState,
+            diagnosticCodes: observed.diagnosticCodes,
+          },
+          'ownership-loss process-tree outcome',
+        );
+      },
+      onCgroupDivergence: (info) => {
+        log.debug({ pid: lease.rootAuthority.pid, ...info }, 'ownership-loss cleanup cgroup divergence');
+      },
+    });
+    if (outcome.outcome === 'unresolved_ambiguous') {
+      throw new ProcessTreeTerminationError(
+        'PROCESS_TREE_AMBIGUOUS_IDENTITY_UNRESOLVED',
+        `Ownership-loss cleanup retained ${outcome.ambiguousProcessCount} ambiguous process identities`,
+      );
     }
   }
 
@@ -9115,17 +9059,19 @@ export class AgentRuntime implements Runtime {
     this.sessionOwnership.transition(mapKey, managerId, 'resetting');
     this.getQueueForChat(chatJid, mapKey)?.abortTurn();
     const oldPid = session.getStatus().pid;
+    const oldLease = session.getProcessTreeTerminationLease();
     const generation = this.sessionOwnership.advanceGeneration(mapKey, managerId);
     this.heldCloseFailedNotices.delete(session);
     let replacementPid: number | null = null;
-    let oldTreeProvedEmpty = false;
+    let replacementLease: SessionProcessTreeTerminationLease | null = null;
+    let cleanupReentryAllowed = false;
 
     try {
       await this.waitForRejectedTerminalTeardown(session);
+      cleanupReentryAllowed = true;
       await session.shutdown(false);
       this.rejectedTerminalTeardowns.delete(session);
-      oldTreeProvedEmpty = true;
-      await this.awaitProcessExit(oldPid);
+      await this.awaitProcessExit(oldPid, oldLease);
 
       if (
         this.chatSessions.get(mapKey) !== session ||
@@ -9142,6 +9088,7 @@ export class AgentRuntime implements Runtime {
 
       await session.spawnSession();
       replacementPid = session.getStatus().pid;
+      replacementLease = session.getProcessTreeTerminationLease();
       if (
         this.chatSessions.get(mapKey) !== session ||
         !this.sessionOwnership.isCurrent(mapKey, managerId, generation)
@@ -9150,22 +9097,31 @@ export class AgentRuntime implements Runtime {
       }
       this.sessionOwnership.transition(mapKey, managerId, 'active');
     } catch (err) {
-      const knownPids = [
-        ...(oldTreeProvedEmpty ? [] : [oldPid]),
-        replacementPid,
-        session.getStatus().pid,
+      const knownProcesses = [
+        { pid: oldPid, lease: oldLease },
+        { pid: replacementPid, lease: replacementLease },
+        { pid: session.getStatus().pid, lease: session.getProcessTreeTerminationLease() },
       ];
       let cleanupError: unknown = null;
-      try {
-        await this.terminateKnownProcesses(knownPids);
-      } catch (cleanupErr) {
-        cleanupError = cleanupErr;
+      if (cleanupReentryAllowed) {
+        try {
+          await session.shutdown(false);
+        } catch (cleanupErr) {
+          try {
+            await this.terminateOwnedSessionProcessTree(session);
+          } catch (retryErr) {
+            cleanupError = new AggregateError(
+              [cleanupErr, retryErr],
+              'Session shutdown and ownership-loss process-tree cleanup both failed',
+            );
+          }
+        }
       }
 
       let allKnownProcessesDead = cleanupError === null;
       if (allKnownProcessesDead) {
         try {
-          allKnownProcessesDead = knownPids.every((pid) => pid === null || !isProcessAlive(pid));
+          allKnownProcessesDead = knownProcesses.every(({ pid, lease }) => this.capturedProcessHasExited(pid, lease));
         } catch (probeErr) {
           cleanupError = probeErr;
           allKnownProcessesDead = false;

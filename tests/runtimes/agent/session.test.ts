@@ -7,9 +7,11 @@ import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { ProviderMcpBridge } from '../../../src/runtimes/agent/providers/types.ts';
+import { ProcessTreeTerminationError, type KillSessionOutcome } from '../../../src/runtimes/agent/process-tree-contract.ts';
 import { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
 import { shortHash } from '../../../src/lib/short-hash.ts';
 import { outsideRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
+import { deferred } from '../../helpers/deferred.ts';
 import {
   CONFIG_ROOT_ISOLATION_FLAG,
   FAILCLOSED_FLAG,
@@ -117,10 +119,40 @@ vi.mock('node:child_process', () => ({
   spawn: vi.fn(),
 }));
 
-vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
-  killSessionTree: vi.fn(async (target: { kill(signal: NodeJS.Signals): boolean }, signal: NodeJS.Signals) => {
+vi.mock('../../../src/runtimes/agent/process-tree.ts', async () => ({
+  captureProcessTreeRootAuthority: vi.fn((target: { pid?: number }) => ({
+    pid: target.pid ?? 0,
+    parentPid: process.pid,
+    birthToken: `birth:${target.pid ?? 0}`,
+  })),
+  bindProcessTreeRootAuthority: vi.fn(() => true),
+  killSessionTree: vi.fn(async (
+    target: { kill(signal: NodeJS.Signals): boolean }, signal: NodeJS.Signals,
+    options: { beforeSignal?: (signal: NodeJS.Signals) => void | Promise<void> },
+  ) => {
+    const protection = options.beforeSignal?.(signal);
+    if (protection) await protection;
     target.kill(signal);
+    return {
+      outcome: 'terminated' as const,
+      durationMs: 0,
+      ownedProcessCount: 1,
+      signaledProcessCount: 1,
+      ambiguousProcessCount: 0,
+      diagnosticState: 'complete' as const,
+      diagnosticCodes: [],
+    };
   }),
+  retryKillSessionTree: vi.fn(async () => ({
+    outcome: 'terminated' as const,
+    durationMs: 0,
+    ownedProcessCount: 1,
+    signaledProcessCount: 1,
+    ambiguousProcessCount: 0,
+    diagnosticState: 'complete' as const,
+    diagnosticCodes: [],
+  })),
+  ProcessTreeTerminationError: (await import('../../../src/runtimes/agent/process-tree-contract.ts')).ProcessTreeTerminationError,
 }));
 
 vi.mock('node:fs', async (importOriginal) => ({
@@ -2151,6 +2183,79 @@ describe('SessionManager', () => {
     vi.useRealTimers();
   });
 
+  it.each([
+    ['watchdog', 'terminated'], ['watchdog', 'failed'],
+    ['stalled', 'terminated'], ['stalled', 'failed'],
+  ] as const)('%s reports pending cleanup and keeps admission closed until termination (%s)', async (trigger, result) => {
+    const notifyUser = vi.fn();
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), notifyUser, treeLivenessAssessor: vi.fn(async () => null),
+    });
+    await sm.spawnSession();
+    const completion = deferred<KillSessionOutcome>();
+    const complete: KillSessionOutcome = {
+      outcome: 'terminated', durationMs: 0, ownedProcessCount: 1,
+      signaledProcessCount: 1, ambiguousProcessCount: 0,
+      diagnosticState: 'complete', diagnosticCodes: [],
+    };
+    vi.mocked(killSessionTree).mockImplementationOnce(() => completion.promise);
+    const internal = sm as unknown as {
+      handleWatchdogHard: () => void;
+      handleStalledOpKill: (id: string, name: string, token: number) => void;
+    };
+    try {
+      if (trigger === 'watchdog') internal.handleWatchdogHard();
+      else internal.handleStalledOpKill('test-tool', 'Bash', 0);
+      await vi.waitFor(() => expect(killSessionTree).toHaveBeenCalledTimes(1));
+      expect(notifyUser).toHaveBeenCalledTimes(1);
+      expect(notifyUser.mock.calls[0]?.[0]).toMatch(/cleanup requested/i);
+      expect(notifyUser.mock.calls[0]?.[0]).not.toMatch(/terminated|restarting/i);
+      expect((await sm.spawnSession().catch((error: unknown) => error))).toMatchObject({
+        code: 'PROCESS_TREE_LEASE_CONFLICT',
+      });
+      if (result === 'failed') {
+        completion.reject(new ProcessTreeTerminationError(
+          'PROCESS_TREE_SIGNAL_PERMISSION_DENIED', 'PRIVATE cleanup failure',
+        ));
+        await vi.waitFor(() => expect(mockLogger.error).toHaveBeenCalledWith(
+          expect.objectContaining({ errorCode: 'PROCESS_TREE_SIGNAL_PERMISSION_DENIED' }),
+          expect.stringMatching(/failed to reap .* provider process tree/),
+        ));
+        expect((await sm.spawnSession().catch((error: unknown) => error))).toMatchObject({
+          code: 'PROCESS_TREE_LEASE_CONFLICT',
+        });
+      } else {
+        completion.resolve(complete);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      expect(notifyUser).toHaveBeenCalledTimes(1);
+      expect(notifyUser.mock.calls[0]?.[0]).not.toMatch(/terminated|restarting|PRIVATE/);
+    } finally {
+      completion.resolve(complete);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      mockChild._exitCb?.(null, 'SIGKILL');
+      mockChild._closeCb?.(null, 'SIGKILL');
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(notifyUser).toHaveBeenCalledTimes(1);
+    if (result === 'failed') {
+      expect((await sm.spawnSession().catch((error: unknown) => error))).toMatchObject({
+        code: 'PROCESS_TREE_LEASE_CONFLICT',
+      });
+    } else {
+      const replacementChild = makeMockChild(31002);
+      (spawn as ReturnType<typeof vi.fn>).mockReturnValueOnce(replacementChild);
+      try {
+        await sm.spawnSession();
+        expect(sm.getStatus()).toMatchObject({ active: true, pid: replacementChild.pid });
+      } finally {
+        replacementChild._exitCb?.(0, null);
+        replacementChild._closeCb?.(0, null);
+      }
+    }
+  });
+
   it('a SIGKILL the manager did not issue is still an untagged crash', async () => {
     const db = makeDb();
     const { messenger, sentMessages } = makeMessenger();
@@ -2503,7 +2608,8 @@ describe('SessionManager', () => {
     // Second expiry: tree hung → the original termination behavior runs.
     await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
     expect(treeLivenessAssessor).toHaveBeenCalledTimes(2);
-    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('terminated'));
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('cleanup requested'));
+    expect(notifyUser).not.toHaveBeenCalledWith(expect.stringMatching(/terminated|restarting/));
     expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
 
     vi.useRealTimers();
@@ -2668,24 +2774,22 @@ describe('SessionManager', () => {
     vi.useRealTimers();
   });
 
-  it('shutdown escalates from SIGTERM to SIGKILL after the grace period when the child ignores exit', async () => {
+  it('delegates bounded SIGTERM escalation to the process-tree reaper', async () => {
     vi.useFakeTimers();
 
     const db = makeDb();
     const { messenger } = makeMessenger();
-    const graceMs = (SessionManager as unknown as { SHUTDOWN_GRACE_MS: number }).SHUTDOWN_GRACE_MS;
-
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
     await sm.spawnSession();
     await sm.shutdown();
 
     expect(mockChild.kill).toHaveBeenCalledWith('SIGTERM');
-
-    await vi.advanceTimersByTimeAsync(graceMs + 1);
-
-    expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
-    expect(mockChild.kill).toHaveBeenNthCalledWith(1, 'SIGTERM');
-    expect(mockChild.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+    expect(killSessionTree).toHaveBeenCalledWith(
+      mockChild,
+      'SIGTERM',
+      expect.objectContaining({ termGraceMs: 5_000 }),
+    );
+    expect(mockChild.kill).toHaveBeenCalledTimes(1);
 
     vi.useRealTimers();
   });
@@ -2701,11 +2805,22 @@ describe('SessionManager', () => {
     const termGrace = new Promise<ClaudeRefreshGraceResult>((resolve) => { releaseTerm = () => resolve(released); });
     const killGrace = new Promise<ClaudeRefreshGraceResult>((resolve) => { releaseKill = () => resolve(released); });
     mockClaudeRefreshLockGrace.mockReturnValueOnce(termGrace).mockReturnValueOnce(killGrace);
+    vi.mocked(killSessionTree).mockImplementationOnce(async (target, signal, options) => {
+      if (typeof target === 'number') throw new Error('Session cleanup must retain its child handle');
+      await options.beforeSignal?.(signal);
+      target.kill(signal);
+      await options.beforeSignal?.('SIGKILL');
+      target.kill('SIGKILL');
+      return {
+        outcome: 'escalated', durationMs: 0, ownedProcessCount: 1,
+        signaledProcessCount: 1, ambiguousProcessCount: 0,
+        diagnosticState: 'complete', diagnosticCodes: [],
+      };
+    });
 
     try {
       const db = makeDb();
       const { messenger } = makeMessenger();
-      const graceMs = (SessionManager as unknown as { SHUTDOWN_GRACE_MS: number }).SHUTDOWN_GRACE_MS;
       const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), provider: 'claude-cli' });
       await sm.spawnSession();
       const childEnv = vi.mocked(spawn).mock.calls[0]?.[2]?.env;
@@ -2721,10 +2836,9 @@ describe('SessionManager', () => {
       expect(mockChild.kill).not.toHaveBeenCalled();
 
       releaseTerm();
-      await stopping;
+      await vi.advanceTimersByTimeAsync(0);
       expect(mockChild.kill).toHaveBeenNthCalledWith(1, 'SIGTERM');
 
-      await vi.advanceTimersByTimeAsync(graceMs + 1);
       expect(mockClaudeRefreshLockGrace).toHaveBeenCalledTimes(2);
       expect(mockClaudeRefreshLockGrace).toHaveBeenNthCalledWith(
         2,
@@ -2734,7 +2848,7 @@ describe('SessionManager', () => {
       expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
 
       releaseKill();
-      await vi.advanceTimersByTimeAsync(0);
+      await stopping;
       expect(mockChild.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
     } finally {
       if (previousSecure === undefined) delete process.env['CLAUDE_SECURESTORAGE_CONFIG_DIR'];
@@ -2743,13 +2857,11 @@ describe('SessionManager', () => {
     }
   });
 
-  it('repeated resets keep a shutdown escalation timer for every superseded child', async () => {
+  it('repeated resets delegate each superseded child to one tree cleanup', async () => {
     vi.useFakeTimers();
 
     const db = makeDb();
     const { messenger } = makeMessenger();
-    const graceMs = (SessionManager as unknown as { SHUTDOWN_GRACE_MS: number }).SHUTDOWN_GRACE_MS;
-
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
     await sm.spawnSession();
     await sm.shutdown();
@@ -2763,19 +2875,16 @@ describe('SessionManager', () => {
     (spawn as ReturnType<typeof vi.fn>).mockReturnValueOnce(mockChild3);
     await sm.spawnSession();
 
-    await vi.advanceTimersByTimeAsync(graceMs + 1);
-
-    expect(mockChild.kill).toHaveBeenNthCalledWith(1, 'SIGTERM');
-    expect(mockChild.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
-    expect(mockChild2.kill).toHaveBeenNthCalledWith(1, 'SIGTERM');
-    expect(mockChild2.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+    expect(mockChild.kill).toHaveBeenCalledExactlyOnceWith('SIGTERM');
+    expect(mockChild2.kill).toHaveBeenCalledExactlyOnceWith('SIGTERM');
     expect(mockChild3.kill).not.toHaveBeenCalled();
+    expect(killSessionTree).toHaveBeenCalledTimes(2);
     expect(sm.getStatus().pid).toBe(34567);
 
     vi.useRealTimers();
   });
 
-  it('spawn-per-turn child exit after shutdown clears the pending shutdown kill timer', async () => {
+  it('spawn-per-turn child exit after shutdown does not trigger a second signal', async () => {
     vi.useFakeTimers();
 
     const db = makeDb();
@@ -2803,10 +2912,6 @@ describe('SessionManager', () => {
 
     expect(mockChild.kill).toHaveBeenCalledTimes(1);
     expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
-    expect(
-      (sm as unknown as { shutdownKillTimers: Map<unknown, unknown> }).shutdownKillTimers.size,
-    ).toBe(0);
-
     vi.useRealTimers();
   });
 
@@ -3854,6 +3959,27 @@ describe('Event-driven provider ready signal', () => {
     });
     sm.bindGenerationOwnership(() => generation);
 
+    const terminatedOutcome: KillSessionOutcome = {
+      outcome: 'terminated',
+      durationMs: 0,
+      ownedProcessCount: 1,
+      signaledProcessCount: 1,
+      ambiguousProcessCount: 0,
+      diagnosticState: 'complete',
+      diagnosticCodes: [],
+    };
+    let finishQuarantineCleanup: (outcome: KillSessionOutcome) => void = () => {};
+    let quarantineCleanup!: Promise<KillSessionOutcome>;
+    (killSessionTree as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      (target: { kill(signal: NodeJS.Signals): boolean }, signal: NodeJS.Signals) => {
+        target.kill(signal);
+        quarantineCleanup = new Promise<KillSessionOutcome>((resolve) => {
+          finishQuarantineCleanup = resolve;
+        });
+        return quarantineCleanup;
+      },
+    );
+
     await sm.spawnSession();
     childA.stdout.emit('data', Buffer.from(JSON.stringify({
       jsonrpc: '2.0',
@@ -3876,6 +4002,18 @@ describe('Event-driven provider ready signal', () => {
       active: false,
       pid: null,
       turnInFlight: false,
+    });
+
+    await vi.waitFor(() => {
+      expect(killSessionTree).toHaveBeenCalledWith(childA, 'SIGKILL', expect.anything());
+    });
+    expect(childA.kill).toHaveBeenCalledWith('SIGKILL');
+    await expect(sm.spawnSession()).rejects.toThrow(
+      'Session admission blocked until prior shutdown and process-tree cleanup are complete',
+    );
+    finishQuarantineCleanup(terminatedOutcome);
+    await vi.waitFor(() => {
+      expect(sm.getStatus()).toMatchObject({ providerTerminated: true });
     });
 
     generation = { managerId: 'codex-child-replacement', generation: 2 };
@@ -6842,11 +6980,10 @@ describe('session.ts uncovered-branch coverage', () => {
     expect(sm.getStatus().providerTerminated).toBe(true);
   });
 
-  // --- shutdown SIGKILL escalation when SIGTERM doesn't kill the child
-  //     (lines 1963-1965). Use fake timers and a child whose kill is a no-op
-  //     so the grace timer fires the SIGKILL path.
+  // --- Session delegates TERM-to-KILL escalation to the process-tree reaper.
+  //     The reaper's own tests exercise the actual SIGKILL transition.
 
-  it('shutdown escalates to SIGKILL after the grace period when SIGTERM does not kill', async () => {
+  it('shutdown delegates the full escalation window to the process-tree reaper', async () => {
     vi.useFakeTimers();
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -6862,10 +6999,14 @@ describe('session.ts uncovered-branch coverage', () => {
     });
 
     const shutdownP = sm.shutdown(true);
-    await vi.advanceTimersByTimeAsync(10_000); // past SHUTDOWN_GRACE_MS (5s)
     await shutdownP;
 
-    expect(kills).toEqual(['SIGTERM', 'SIGKILL']);
+    expect(kills).toEqual(['SIGTERM']);
+    expect(killSessionTree).toHaveBeenCalledWith(
+      child,
+      'SIGTERM',
+      expect.objectContaining({ termGraceMs: 5_000 }),
+    );
     vi.useRealTimers();
   });
 
@@ -7781,9 +7922,22 @@ describe('session.ts uncovered-branch coverage', () => {
     const firstChild = makeMockChild(12021);
     const secondChild = makeMockChild(12022);
     vi.mocked(spawn).mockReturnValueOnce(firstChild as never).mockReturnValueOnce(secondChild as never);
-    let finishKill: () => void = () => {};
+    const terminatedOutcome: KillSessionOutcome = {
+      outcome: 'terminated',
+      durationMs: 0,
+      ownedProcessCount: 1,
+      signaledProcessCount: 1,
+      ambiguousProcessCount: 0,
+      diagnosticState: 'complete',
+      diagnosticCodes: [],
+    };
+    let finishKill: (outcome: KillSessionOutcome) => void = () => {};
     (killSessionTree as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(
-      () => new Promise<void>((resolve) => { finishKill = resolve; }),
+      (target: { kill(signal: NodeJS.Signals): boolean }, signal: NodeJS.Signals) =>
+        new Promise<KillSessionOutcome>((resolve) => {
+          target.kill(signal);
+          finishKill = resolve;
+        }),
     );
     try {
       const gate = new ProviderExecutionGate({ now: () => now });
@@ -7829,7 +7983,7 @@ describe('session.ts uncovered-branch coverage', () => {
         progressAgeMs: 0,
       });
 
-      finishKill();
+      finishKill(terminatedOutcome);
       await secondTurn;
       expect(gate.snapshot()).toMatchObject({ active: true, activePhase: 'executing', progressAgeMs: 0 });
 
@@ -7886,16 +8040,17 @@ describe('session.ts uncovered-branch coverage', () => {
     expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
   });
 
-  it('#1869: wires onCgroupDivergence into killSessionTree and logs when the sink fires', async () => {
+  it('#1755/#1869: wires bounded outcome and cgroup observers for session shutdown', async () => {
     const firstChild = makeMockChild(12007);
     const secondChild = makeMockChild(12008);
     vi.mocked(spawn)
       .mockReturnValueOnce(firstChild as never)
       .mockReturnValueOnce(secondChild as never);
     const gate = new ProviderExecutionGate();
+    const { messenger } = makeMessenger();
     const session = new SessionManager({
       db: makeDb(),
-      messenger: makeMessenger().messenger,
+      messenger,
       chatJid: 'cgroup-divergence@s.whatsapp.net',
       onEvent: vi.fn(),
       provider: 'opencode-cli',
@@ -7912,30 +8067,60 @@ describe('session.ts uncovered-branch coverage', () => {
       expect(killSessionTree).toHaveBeenCalledWith(
         firstChild,
         'SIGTERM',
-        expect.objectContaining({ onCgroupDivergence: expect.any(Function) }),
+        expect.objectContaining({
+          diagnosticSource: 'session_shutdown',
+          onOutcome: expect.any(Function),
+          onCgroupDivergence: expect.any(Function),
+        }),
       );
     });
     await secondTurn;
 
-    // The dormant #1869 telemetry (PR #1960) is wired at the killChildTree call
-    // site: killSessionTree must receive a sink, and firing it must log — proving
-    // the sink is not merely present but observable.
     const [, , options] = vi.mocked(killSessionTree).mock.calls[0];
-    const onCgroupDivergence = (options as { onCgroupDivergence?: (info: unknown) => void }).onCgroupDivergence;
-    expect(onCgroupDivergence).toBeInstanceOf(Function);
-
+    const observers = options as {
+      onOutcome?: (outcome: {
+        outcome: 'unresolved_ambiguous';
+        durationMs: number;
+        ownedProcessCount: number;
+        signaledProcessCount: number;
+        ambiguousProcessCount: number;
+        diagnosticState: 'complete';
+        diagnosticCodes: readonly [];
+      }) => void;
+      onCgroupDivergence?: (info: {
+        cgroupMemberCount: number;
+        ownedCount: number;
+        offTreeCount: number;
+      }) => void;
+    };
+    mockLogger.warn.mockClear();
     mockLogger.debug.mockClear();
-    onCgroupDivergence?.({ cgroupMemberCount: 5, ownedCount: 2, offTreeCount: 3 });
+    observers.onOutcome?.({
+      outcome: 'unresolved_ambiguous',
+      durationMs: 7,
+      ownedProcessCount: 2,
+      signaledProcessCount: 1,
+      ambiguousProcessCount: 1,
+      diagnosticState: 'complete',
+      diagnosticCodes: [],
+    });
+    observers.onCgroupDivergence?.({ cgroupMemberCount: 5, ownedCount: 2, offTreeCount: 3 });
 
-    expect(mockLogger.debug).toHaveBeenCalledWith(
+    expect(mockLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({
-        cgroupMemberCount: 5,
-        ownedCount: 2,
-        offTreeCount: 3,
-        chatJid: 'cgroup-divergence@s.whatsapp.net',
+        outcome: 'unresolved_ambiguous',
+        ambiguousCount: 1,
+        durationMs: 7,
       }),
-      expect.stringContaining('cgroup divergence'),
+      'kill-tree outcome: unresolved ambiguous identity',
     );
+    expect(mockLogger.warn.mock.calls[0]?.[0]).not.toHaveProperty('ambiguousPids');
+    expect(mockLogger.warn.mock.calls[0]?.[0]).not.toHaveProperty('generationMarker');
+    expect(mockLogger.debug).toHaveBeenCalledWith(
+      expect.objectContaining({ cgroupMemberCount: 5, ownedCount: 2, offTreeCount: 3 }),
+      'cgroup divergence',
+    );
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
 
     secondChild._closeCb?.(0, null);
     expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
@@ -8188,6 +8373,15 @@ describe('session.ts uncovered-branch coverage', () => {
       async (target: { kill: (signal: NodeJS.Signals) => boolean }, signal: NodeJS.Signals) => {
         target.kill(signal);
         await shutdownProof;
+        return {
+          outcome: 'terminated' as const,
+          durationMs: 0,
+          ownedProcessCount: 1,
+          signaledProcessCount: 1,
+          ambiguousProcessCount: 0,
+          diagnosticState: 'complete' as const,
+          diagnosticCodes: [],
+        };
       },
     );
     (child.stdin.write as ReturnType<typeof vi.fn>).mockImplementation(
@@ -8580,5 +8774,160 @@ describe('suspend SIGTERM graceful self-exit (#3391)', () => {
     await vi.waitFor(() => {
       expect(sentMessages.filter((m) => m.text.includes('exited with code 143'))).toHaveLength(1);
     });
+  });
+});
+
+describe('process-tree cleanup diagnostic projection', () => {
+  let mockChild: MockChild;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChild = makeMockChild(31392);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each(['terminated', 'permission denied'] as const)('admits a wedged cleanup request before its later %s outcome', async (outcome) => {
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      treeLivenessAssessor: vi.fn(async () => null),
+    });
+    await sm.spawnSession();
+    let resolveCleanup!: (result: KillSessionOutcome) => void;
+    let rejectCleanup!: (error: unknown) => void;
+    const cleanup = new Promise<KillSessionOutcome>((resolve, reject) => {
+      resolveCleanup = resolve;
+      rejectCleanup = reject;
+    });
+    const internal = sm as unknown as {
+      killChildTree: (child: MockChild, signal: NodeJS.Signals) => Promise<KillSessionOutcome>;
+    };
+    const cleanupSpy = vi.spyOn(internal, 'killChildTree').mockReturnValue(cleanup);
+    mockLogger.error.mockClear();
+
+    expect(sm.reapWedgedProviderChild()).toBe(true);
+    expect(cleanupSpy).toHaveBeenCalledWith(mockChild, 'SIGKILL');
+    expect(mockChild.kill).not.toHaveBeenCalled();
+    expect(sm.getStatus().pid).toBe(mockChild.pid);
+    expect(mockLogger.error).not.toHaveBeenCalled();
+
+    if (outcome === 'permission denied') {
+      rejectCleanup(new ProcessTreeTerminationError(
+        'PROCESS_TREE_SIGNAL_PERMISSION_DENIED',
+        'Private cleanup detail must not reach the diagnostic',
+      ));
+      await vi.waitFor(() => expect(mockLogger.error).toHaveBeenCalledWith(
+        expect.objectContaining({
+          errorCode: 'PROCESS_TREE_SIGNAL_PERMISSION_DENIED',
+          retryClass: 'permission_denied',
+        }),
+        'failed to reap wedged provider process tree',
+      ));
+    } else {
+      resolveCleanup({
+        outcome: 'terminated',
+        durationMs: 0,
+        ownedProcessCount: 1,
+        signaledProcessCount: 1,
+        ambiguousProcessCount: 0,
+        diagnosticState: 'complete',
+        diagnosticCodes: [],
+      });
+      await cleanup;
+      expect(mockLogger.error).not.toHaveBeenCalled();
+    }
+  });
+
+  it('declines a cleanup request with a child retained after typed shutdown failure', async () => {
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      treeLivenessAssessor: vi.fn(async () => null),
+    });
+    await sm.spawnSession();
+    const failure = new ProcessTreeTerminationError(
+      'PROCESS_TREE_SIGNAL_PERMISSION_DENIED',
+      'Private cleanup detail must not reach the diagnostic',
+    );
+    const internal = sm as unknown as {
+      killChildTree: (child: MockChild, signal: NodeJS.Signals) => Promise<KillSessionOutcome>;
+    };
+    const cleanupSpy = vi.spyOn(internal, 'killChildTree').mockRejectedValue(failure);
+
+    await expect(sm.shutdown(false)).rejects.toBe(failure);
+    expect(sm.getStatus()).toMatchObject({
+      active: false,
+      pid: mockChild.pid,
+      providerTerminated: false,
+      durableFailureInconclusive: true,
+    });
+    cleanupSpy.mockClear();
+
+    expect(sm.reapWedgedProviderChild()).toBe(false);
+    expect(cleanupSpy).not.toHaveBeenCalled();
+    expect(mockChild.kill).not.toHaveBeenCalled();
+    expect(sm.getStatus().pid).toBe(mockChild.pid);
+  });
+
+  it.each([
+    [
+      'native-turn quarantine',
+      'quarantine',
+      'failed to quarantine provider after native turn identity violation',
+    ],
+    [
+      'wedged-turn reclamation',
+      'wedged',
+      'failed to reap wedged provider process tree',
+    ],
+    [
+      'stalled-operation cleanup',
+      'stalled',
+      'failed to reap stalled provider process tree',
+    ],
+  ] as const)('projects a stable diagnostic for %s', async (_name, trigger, message) => {
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      treeLivenessAssessor: vi.fn(async () => null),
+    });
+    await sm.spawnSession();
+    const privateText = 'PRIVATE:/operator/path?token=do-not-log';
+    const internal = sm as unknown as {
+      killChildTree: () => Promise<never>;
+      quarantineNativeTurnSource: (message: string, evidence: Record<string, unknown>) => void;
+      handleStalledOpKill: (toolId: string, toolName: string, token: number) => void;
+    };
+    internal.killChildTree = vi.fn().mockRejectedValue(new Error(privateText));
+    mockLogger.error.mockClear();
+
+    if (trigger === 'quarantine') {
+      internal.quarantineNativeTurnSource('native turn identity violation', {});
+    } else if (trigger === 'wedged') {
+      expect(sm.reapWedgedProviderChild()).toBe(true);
+    } else {
+      internal.handleStalledOpKill('tool-private', 'Bash', 0);
+    }
+
+    await vi.waitFor(() => {
+      expect(mockLogger.error.mock.calls.some((call) => call[1] === message)).toBe(true);
+    });
+    const logCall = mockLogger.error.mock.calls.find((call) => call[1] === message);
+    expect(logCall?.[0]).toMatchObject({
+      errorCode: 'PROCESS_TREE_UNEXPECTED_FAILURE',
+      retryClass: 'unknown',
+    });
+    expect(logCall?.[0]).not.toHaveProperty('err');
+    expect(JSON.stringify(logCall)).not.toContain(privateText);
   });
 });

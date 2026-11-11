@@ -6,6 +6,11 @@ vi.mock('node:child_process', () => ({
   spawn: vi.fn(),
 }));
 
+vi.mock('../../../src/lib/process-identity.ts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../src/lib/process-identity.ts')>(),
+  probeProcessBirthToken: (pid: number) => pid === 51_001 ? 'linux-start:51001' : null,
+}));
+
 import { spawn } from 'node:child_process';
 import { Database } from '../../../src/core/database.ts';
 import {
@@ -14,6 +19,7 @@ import {
 } from '../../../src/core/transport-inbound-context.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import { SessionManager } from '../../../src/runtimes/agent/session.ts';
+import { resetProcessTreeTerminationLeasesForTesting } from '../../../src/runtimes/agent/process-tree.ts';
 import { ensureAgentSchema } from '../../../src/runtimes/agent/session-db.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import { OpenAIApiProvider } from '../../../src/runtimes/agent/providers/openai-api.ts';
@@ -37,7 +43,7 @@ function makeMessenger(): Messenger {
   };
 }
 
-function makeSpawnPerTurnChild(bindRegisteredListeners = false) {
+function makeSpawnPerTurnChild(bindRegisteredListeners = false, pid?: number) {
   const stdin = Object.assign(new EventEmitter(), {
     end: vi.fn(),
     write: vi.fn((...args: unknown[]) => {
@@ -50,8 +56,8 @@ function makeSpawnPerTurnChild(bindRegisteredListeners = false) {
     setEncoding: vi.fn(),
   });
   const child = {
-    // Do not use a host PID: cleanup must stay fake even after a failed assertion.
-    pid: undefined,
+    // Any supplied PID belongs to the mocked identity probe, never a host child.
+    pid,
     stdin,
     stdout,
     stderr: new EventEmitter(),
@@ -74,6 +80,7 @@ function makeSpawnPerTurnChild(bindRegisteredListeners = false) {
 
 describe('SessionManager persistent provider authority context', () => {
   afterEach(() => {
+    resetProcessTreeTerminationLeasesForTesting();
     vi.restoreAllMocks();
     for (const db of openDatabases.splice(0)) db.close();
   });
@@ -180,7 +187,7 @@ describe('SessionManager persistent provider authority context', () => {
 
   it('clears a retained persistent child error notice after B has started', async () => {
     const db = makeDb();
-    const child = makeSpawnPerTurnChild(true);
+    const child = makeSpawnPerTurnChild(true, 51_001);
     vi.mocked(spawn).mockReturnValue(child as never);
     const noticeContexts: Array<string | undefined> = [];
     const session = new SessionManager({
