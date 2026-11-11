@@ -1941,14 +1941,17 @@ designed contract mirrors the fact-export queue machinery (§9):
   Instances that share an index set `memory.pinecone.instanceScopedIds`, which
   folds the instance into every id scheme (`memory_write`, the fact-export
   `factId`, `durable:`) and makes source instance and account boundaries:
-  consolidation selects only its own instance's records, groups by account +
-  chat + sender, and hashes that key into the durable id; dedup and claim
-  lookups match only the same instance and account; recall treats another
-  instance's or account's record as another conversation, and a record missing
-  `source_instance` or `source_account` counts as the reading instance's only for
-  a caller with `owner_only` access. Records are never merged on text alone
-  across instances. With the option off (single-instance indexes), ids, filters
-  and scopes are unchanged and there is no instance or account boundary. A
+  consolidation selects and verifies its known instance and account, groups by
+  account + visibility + chat + sender, and hashes that key into the durable id.
+  An unknown writer account produces no work. Promotions preserve both source
+  fields and visibility; an account change before writing refuses promotion.
+  Dedup and claim lookups match only the same instance and account. Recall checks
+  source eligibility before conversation scope and ranking: non-owners receive
+  no foreign-account or unstamped chat memories, even with broad recall. Only
+  admitted owners may read `owner_only` records from listed sources across that
+  boundary. With the option off, ids, dedup and recall remain unchanged.
+  Supersede always constrains each source field to the known writer's value or
+  an absent legacy field, regardless of the flag. A
   `passive` or `owner_only` instance still recalls restrictively: callers
   without `owner_only` access receive only `chat_scoped` records
   ([memory record provenance](configuration.md#memory-record-provenance)). A
@@ -1956,6 +1959,11 @@ designed contract mirrors the fact-export queue machinery (§9):
   Personal-line records are `owner_only` and reach only the verified owner or a
   configured trusted operator in a direct chat
   ([owner_only records](configuration.md#owner_only-records)).
+  Agent-instance `knowledge_search` currently grants this access to no caller,
+  pending a transport-derived direct-chat flag and isolated agent session.
+  Business entities retain the compatible `owner_only` exclusion, including
+  entity profiles on `__default__`; restrictive chat-memory queries require
+  `chat_scoped` instead.
 - **`DurableKnowledge` disposition.** Resolved: the interface had zero consumers
   and was removed from `src/memory/types.ts` (#2569 contract item 13). If the
   ledger lands, its schema is authored fresh rather than reviving the dead type

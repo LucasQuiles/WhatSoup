@@ -26,7 +26,9 @@ import {
 } from '../../lib/pinecone-project-guard.ts';
 import type { Database } from '../../core/database.ts';
 import {
+  includesUntagged,
   isOwnerOnlyRecord,
+  isChatMemoryRecord,
   memoryHitTier,
   memoryIdentityFold,
   agentSessionIsolatedPerChat,
@@ -37,13 +39,16 @@ import {
   recordIdScope,
   memoryRecallRestrictive,
   memorySourceAccount,
+  memorySourceEligible,
   resolveMemoryScope,
   withVisibilityFilter,
+  withSourceFilter,
   type GroupMembershipReader,
   type InstanceIdentities,
   type MemoryScope,
   type MemoryTier,
   type OwnerOnlyRecallInput,
+  type SourceBoundary,
 } from '../../core/memory-scope.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 import { resolvePineconeApiKey } from '../../lib/api-key-resolver.ts';
@@ -207,13 +212,14 @@ function searchLegs(
   scope: MemoryScope | null,
   isChatNamespace: (namespace: string) => boolean,
   ownerOnlyAccess: boolean,
+  sourceBoundary: SourceBoundary,
 ): SearchLeg[] {
   // Every leg of every allowed index excludes owner_only records before the
   // query unless the caller may read them; tierHits gates the returned records
   // again. Visibility is authorized apart from conversation scoping, which
   // applies to the instance's own memory index only.
-  const leg = (namespace: string, filter?: Record<string, unknown>, chatScopedOnly = false): SearchLeg => {
-    const scoped = withVisibilityFilter(filter, ownerOnlyAccess, chatScopedOnly);
+  const leg = (namespace: string, filter?: Record<string, unknown>, chatScopedOnly = false, memory = false): SearchLeg => {
+    const scoped = withSourceFilter(withVisibilityFilter(filter, ownerOnlyAccess, chatScopedOnly), sourceBoundary, !memory);
     return scoped ? { namespace, filter: scoped } : { namespace };
   };
   if (!scope) return namespaces.map((namespace) => leg(namespace));
@@ -221,19 +227,23 @@ function searchLegs(
   // to chat_scoped records; documents keep the compatible exclusion.
   const restrictive = scope.restrictive === true;
   const memoryLeg = (namespace: string, filter?: Record<string, unknown>): SearchLeg =>
-    leg(namespace, filter, restrictive);
+    leg(namespace, filter, restrictive, true);
   const thisChat = scope.chatSpellings.length > 0 ? { chat_jid: { $in: scope.chatSpellings } } : undefined;
   // With owner_only access (a direct chat only), one more leg per memory
   // namespace fetches owner_only records of every chat, so a trusted operator
   // whose chat_scoped boundary is a contact's still reaches them.
   const ownerOnlyLeg = (namespace: string): SearchLeg[] =>
-    ownerOnlyAccess ? [{ namespace, filter: ownerOnlyLegFilter() }] : [];
+    ownerOnlyAccess ? [leg(namespace, ownerOnlyLegFilter(), false, true)] : [];
   return namespaces.flatMap((namespace): SearchLeg[] => {
     if (!isChatNamespace(namespace)) return [leg(namespace)];
+    // Entity records carry no chat_jid. They reach exactly the scopes that see
+    // untagged records, which the restrictive and source filters would otherwise drop.
+    const entities = includesUntagged(scope) && (restrictive || scope.sourceInstance)
+      ? [leg(namespace, { entity_type: { $exists: true } })] : [];
     if (scope.kind === 'no_context') return [];
     if (scope.kind === 'configurable_group') return thisChat ? [memoryLeg(namespace, thisChat)] : [];
     const legs = thisChat ? [memoryLeg(namespace, thisChat), memoryLeg(namespace)] : [memoryLeg(namespace)];
-    return [...legs, ...ownerOnlyLeg(namespace)];
+    return [...legs, ...ownerOnlyLeg(namespace), ...entities];
   });
 }
 
@@ -257,6 +267,8 @@ function tierHits(
   db: Database | null | undefined,
   ownerOnlyAccess: boolean,
   ownerOnlySources: ReadonlySet<string>,
+  sourceBoundary: SourceBoundary,
+  entityProfile: boolean,
 ): TieredHit[] {
   const fold = memoryIdentityFold(db);
   const byId = new Map<string, TieredHit>();
@@ -265,7 +277,13 @@ function tierHits(
     // listed source instance, on any allowed index and in any namespace
     // (documents included).
     if (isOwnerOnlyRecord(hit.fields) && !ownerOnlyRecordServable(hit.fields, ownerOnlyAccess, ownerOnlySources)) continue;
-    const isDocument = scope !== null && !isChatNamespace(hit.namespace ?? '');
+    // An entity record in a chat namespace is untagged, so a scope that never
+    // sees untagged records (a configurable group, no context) gates it as memory.
+    const chatHit = isChatNamespace(hit.namespace ?? '');
+    const isDocument = scope === null
+      || (isNonEmptyString(hit.fields['entity_type']) && (!chatHit || includesUntagged(scope)))
+      || (!chatHit && (!entityProfile || !isChatMemoryRecord(hit.fields)));
+    if (!memorySourceEligible(hit.fields, sourceBoundary, isDocument)) continue;
     const tier = isDocument ? null : scope ? memoryHitTier(hit.fields, scope, fold) : 0;
     if (!isDocument && tier === null) continue;
     const candidate: TieredHit = { ...hit, tier };
@@ -409,6 +427,7 @@ function formatTextResults(hits: ParsedHit[]): string {
  */
 export function createPineconeWatchSearch(
   allowedIndexes: string[],
+  accountJid: () => string | null | undefined = () => null,
 ): {
   allowedIndexes: string[];
   search: (args: { index: string; namespace: string; query: string; topK: number }) => Promise<{ matches: Array<{ score: number }> }>;
@@ -454,7 +473,20 @@ export function createPineconeWatchSearch(
     const scores: number[] = [];
     // A watch has no caller who may read owner_only records: the exclusion
     // narrows the query and an owner_only hit that still arrives adds no score.
-    const filter = withVisibilityFilter(undefined, false);
+    const boundary: SourceBoundary = {
+      sourceInstance: recordIdScope(config.botName, config.memory?.pinecone?.instanceScopedIds) ?? undefined,
+      sourceAccount: memorySourceAccount(config.accountScopeId, accountJid()),
+      ownerOnlyAccess: false,
+    };
+    const memoryNamespace = isMemoryIndex(indexName) && profile.searchMode !== 'entity'
+      && chatAttributedNamespaces(memoryConfig.namespaces).has(namespace);
+    const restrictive = memoryNamespace && memoryRecallRestrictive(
+      config.instanceType, config.memory?.pinecone?.recordVisibility, config.memory?.pinecone?.instanceScopedIds,
+    );
+    const filter = withSourceFilter(withVisibilityFilter(undefined, false, restrictive), boundary, !memoryNamespace);
+    const eligible = (fields: Record<string, unknown>): boolean => !isOwnerOnlyRecord(fields)
+      && memorySourceEligible(fields, boundary, !memoryNamespace)
+      && (!restrictive || fields['visibility'] === 'chat_scoped');
 
     if (profile.searchMode === 'vector') {
       const embedUrl = profile.embedUrl;
@@ -476,18 +508,20 @@ export function createPineconeWatchSearch(
       if (!Array.isArray(vec)) throw new Error('embed service returned no vectors');
       const resp = await index.namespace(namespace).query({ topK, vector: vec, includeMetadata: true, filter });
       for (const m of resp.matches ?? []) {
-        if (isOwnerOnlyRecord((m.metadata ?? {}) as Record<string, unknown>)) continue;
+        if (!eligible((m.metadata ?? {}) as Record<string, unknown>)) continue;
         if (typeof m.score === 'number') scores.push(m.score);
       }
     } else {
-      // Only the visibility field is fetched; record bodies stay out.
+      // Fetch only gate metadata; record bodies stay out.
       const resp = await index.searchRecords({
         namespace,
         query: { topK, inputs: { text: query }, filter },
-        fields: ['visibility'],
+        fields: boundary.sourceInstance || restrictive
+          ? ['visibility', 'source_instance', 'source_account', 'entity_type', 'chat_jid', 'memory_type', 'provenance']
+          : ['visibility'],
       });
       for (const hit of resp.result?.hits ?? []) {
-        if (isOwnerOnlyRecord((hit.fields ?? {}) as Record<string, unknown>)) continue;
+        if (!eligible((hit.fields ?? {}) as Record<string, unknown>)) continue;
         if (typeof hit._score === 'number') scores.push(hit._score);
       }
     }
@@ -664,7 +698,18 @@ export function registerKnowledgeTools(
         // searched as configured.
         const scope = isMemoryIndex(indexName) ? await scopeFor(session) : null;
         const ownerOnlyAccess = scope ? scope.ownerOnlyAccess : ownerOnlyAccessFor(session);
-        const legs = searchLegs(namespacesToSearch, scope, isChatNamespace, ownerOnlyAccess);
+        const sourceBoundary: SourceBoundary = scope ?? {
+          sourceInstance: recordIdScope(config.botName, config.memory?.pinecone?.instanceScopedIds) ?? undefined,
+          sourceAccount: memorySourceAccount(config.accountScopeId, deps.identities?.().botJid),
+          ownerOnlyAccess, ownerOnlySources,
+        };
+        const entityProfile = profile.searchMode === 'entity';
+        // An entity profile's namespaces hold business records: searched like
+        // documents wherever untagged records are visible. Groups and callers
+        // without context keep chat scoping (includesUntagged).
+        const chatNamespace = (namespace: string): boolean => isChatNamespace(namespace)
+          && !(entityProfile && (scope === null || includesUntagged(scope)));
+        const legs = searchLegs(namespacesToSearch, scope, chatNamespace, ownerOnlyAccess, sourceBoundary);
         const projectError = await validatePineconeProject(pc, indexName, {
           projectId: memoryConfig.projectId,
           expectedHostSuffix: memoryConfig.expectedHostSuffix,
@@ -760,7 +805,7 @@ export function registerKnowledgeTools(
         // Gate, dedup by id, then order: memories by tier (this chat -> other
         // chats -> untagged) and score, documents merged in by score. Outside the
         // memory index every hit is tier 0.
-        let ranked = orderHits(tierHits(hits, scope, isChatNamespace, deps.db, ownerOnlyAccess, ownerOnlySources), false)
+        let ranked = orderHits(tierHits(hits, scope, chatNamespace, deps.db, ownerOnlyAccess, ownerOnlySources, sourceBoundary, entityProfile), false)
           .slice(0, RERANK_CANDIDATE_CAP);
         let limit = MAX_RESULTS;
 

@@ -24,14 +24,18 @@ import {
   MEMORY_VISIBILITIES,
   instanceRecordVisibility,
   memorySourceAccount,
+  memorySourceEligible,
+  memoryRecallRestrictive,
   isOwnerOnlyRecord,
   narrowestVisibility,
   ownerOnlyLegFilter,
   ownerOnlyRecordServable,
   recordIdScope,
   withVisibilityFilter,
+  withSourceFilter,
   type MemoryProvenance,
   type MemoryVisibility,
+  type SourceBoundary,
 } from '../../../core/memory-scope.ts';
 import {
   buildMemoryOperationEvent,
@@ -553,8 +557,8 @@ export interface MemoryRecord {
   contradicts?: string;
   // Server-derived provenance, read back from stored metadata. On write the
   // provider stamps sourceInstance, sourceAccount and provenance itself and
-  // ignores these values; a record's visibility can only narrow the instance
-  // visibility (memory-scope.ts narrowestVisibility), never widen it.
+  // ignores these values for new writes. Scoped consolidation verifies them
+  // against the writer and preserves the source visibility.
   sourceInstance?: string;
   sourceAccount?: string;
   visibility?: MemoryVisibility;
@@ -579,6 +583,8 @@ export interface PineconeUpsertContext {
 }
 
 export interface ContextLegOptions {
+  sourceInstance?: string;
+  sourceAccount?: string;
   /** Return owner_only records too. Only for a caller ownerOnlyRecallAllowed admits. */
   includeOwnerOnly?: boolean;
   /**
@@ -678,7 +684,8 @@ function toPineconeRecord(record: MemoryRecord, stamp: MemoryRecordStamp): Pinec
     contradicts: record.contradicts,
     // Server-derived: from instance config and runtime state only. Record
     // values for these keys are ignored, except that a record's visibility can
-    // narrow (never widen) the instance visibility.
+    // narrow the instance visibility. Scoped consolidation passes its verified
+    // source visibility in the stamp (upsertRecords preserveConsolidation).
     source_instance: stamp.sourceInstance,
     source_account: stamp.sourceAccount,
     visibility: narrowestVisibility(stamp.visibility, record.visibility),
@@ -879,6 +886,16 @@ export class PineconeMemory {
    */
   sourceAccount(): string {
     return this.recordStamp(undefined).sourceAccount;
+  }
+
+  private recallSourceBoundary(options: ContextLegOptions): SourceBoundary {
+    const source = configuredRecordStampSource();
+    return {
+      sourceInstance: options.sourceInstance ?? recordIdScope(source.instanceName, source.instanceScopedIds) ?? undefined,
+      sourceAccount: options.sourceAccount ?? this.sourceAccount(),
+      ownerOnlyAccess: options.includeOwnerOnly === true,
+      ownerOnlySources: options.ownerOnlySources,
+    };
   }
 
   /**
@@ -1097,7 +1114,7 @@ export class PineconeMemory {
   // Context legs exclude owner_only records unless the caller passes
   // includeOwnerOnly (a verified owner or trusted operator in a direct chat,
   // decided by memory-scope.ts ownerOnlyRecallAllowed).
-  private searchByFieldDetailed(
+  private async searchByFieldDetailed(
     query: string,
     field: string,
     value: string,
@@ -1105,10 +1122,18 @@ export class PineconeMemory {
     traceId?: string,
     options: ContextLegOptions = {},
   ): Promise<PineconeSearchDetails> {
-    const filter = withVisibilityFilter(
-      { [field]: { $eq: value } }, options.includeOwnerOnly === true, options.chatScopedOnly === true,
-    ) ?? {};
-    return this.searchDetailed(query, filter, topK, traceId);
+    const boundary = this.recallSourceBoundary(options);
+    const source = configuredRecordStampSource();
+    const chatScopedOnly = options.includeOwnerOnly !== true && (options.chatScopedOnly === true
+      || memoryRecallRestrictive(source.instanceType, source.recordVisibility, source.instanceScopedIds));
+    const filter = withSourceFilter(withVisibilityFilter(
+      { [field]: { $eq: value } }, options.includeOwnerOnly === true, chatScopedOnly,
+    ), boundary) ?? {};
+    const details = await this._searchCoreDetailed(query, filter, topK, traceId);
+    const eligible = details.results.filter(({ record }) => memorySourceEligible({
+      source_instance: record.sourceInstance, source_account: record.sourceAccount, visibility: record.visibility,
+    }, boundary) && (!chatScopedOnly || record.visibility === 'chat_scoped'));
+    return { ...details, results: applyDecay(eligible, config.recencyHalfLifeDays, config.maxAgeDays) };
   }
 
   async searchForChatDetailed(
@@ -1154,8 +1179,14 @@ export class PineconeMemory {
    * admits (memory-scope.ts). The chat and sender legs reach only this chat's
    * records and those about this sender; this leg reaches the other owner_only ones.
    */
-  async searchOwnerOnlyDetailed(query: string, traceId?: string): Promise<PineconeSearchDetails> {
-    return this.searchDetailed(query, ownerOnlyLegFilter(), config.pineconeContextTopK, traceId);
+  async searchOwnerOnlyDetailed(query: string, traceId?: string, options: ContextLegOptions = {}): Promise<PineconeSearchDetails> {
+    const boundary = this.recallSourceBoundary(options);
+    const filter = withSourceFilter(ownerOnlyLegFilter(), boundary) ?? {};
+    const details = await this._searchCoreDetailed(query, filter, config.pineconeContextTopK, traceId);
+    const eligible = details.results.filter(({ record }) => memorySourceEligible({
+      visibility: record.visibility, source_instance: record.sourceInstance, source_account: record.sourceAccount,
+    }, boundary));
+    return { ...details, results: applyDecay(eligible, config.recencyHalfLifeDays, config.maxAgeDays) };
   }
 
   async searchEntities(query: string, traceId?: string): Promise<EntitySearchResult[]> {
@@ -1172,7 +1203,8 @@ export class PineconeMemory {
     options: ContextLegOptions = {},
   ): Promise<PineconeEntitySearchDetails> {
     const includeOwnerOnly = options.includeOwnerOnly === true;
-    const filter = withVisibilityFilter({ source: { $ne: 'archive_db' } }, includeOwnerOnly) ?? {};
+    const boundary = this.recallSourceBoundary(options);
+    const filter = withSourceFilter(withVisibilityFilter({ source: { $ne: 'archive_db' } }, includeOwnerOnly), boundary, true) ?? {};
     const operation = createMemoryOperationContext({
       operation: 'entity_search',
       traceId,
@@ -1241,9 +1273,11 @@ export class PineconeMemory {
       }
 
       const hits = response.result.hits ?? [];
-      let mapped = hits.map(fromPineconeHitEntity)
-        .filter((result) => !isOwnerOnlyRecord(result.record.metadata)
-          || ownerOnlyRecordServable(result.record.metadata, includeOwnerOnly, options.ownerOnlySources));
+      let mapped = hits.filter((hit) => {
+        const fields = hit.fields as Record<string, unknown>;
+        return memorySourceEligible(fields, boundary, true) && (!isOwnerOnlyRecord(fields)
+          || ownerOnlyRecordServable(fields, includeOwnerOnly, options.ownerOnlySources));
+      }).map(fromPineconeHitEntity);
 
       // Step 2: client-side rerank with truncated text to stay within token limits
       if (config.pineconeRerank && mapped.length > 0) {
@@ -1434,6 +1468,13 @@ export class PineconeMemory {
         'PINECONE_UNAVAILABLE',
       );
     }
+    const preserveConsolidation = contextInput.provenance === 'consolidation' && configuredRecordIdScope() !== null;
+    if (preserveConsolidation && records.some((record) =>
+      record.sourceInstance !== stamp.sourceInstance || record.sourceAccount !== stamp.sourceAccount
+      || (record.visibility !== 'owner_only' && record.visibility !== 'chat_scoped')
+    )) {
+      throw new AppError('Consolidation source provenance does not match the writer', 'PINECONE_UNAVAILABLE');
+    }
     const projectGuardError = await this.getProjectGuardError();
     if (projectGuardError) {
       logMemoryOperation(operation, {
@@ -1452,7 +1493,8 @@ export class PineconeMemory {
       );
     }
 
-    const pineconeRecords = records.map((record) => toPineconeRecord(record, stamp));
+    const pineconeRecords = records.map((record) => toPineconeRecord(record,
+      preserveConsolidation ? { ...stamp, visibility: record.visibility! } : stamp));
     const startMs = Date.now();
     const doUpsert = () => {
       contextInput.signal?.throwIfAborted();
@@ -1548,20 +1590,33 @@ export class PineconeMemory {
   }
 
   /**
-   * Corrections share the opt-in instance/account boundary with dedup lookups.
+   * Corrections stay within the known writer's provenance, with legacy records
+   * still correctable regardless of instance-scoped IDs.
    * Only an owner_only writer may supersede an owner_only record.
    */
   async findSupersedeCandidate(chatJid: string, text: string): Promise<SearchResult | null> {
     const source = configuredRecordStampSource();
     const writesOwnerOnly =
       instanceRecordVisibility(source.instanceType, source.recordVisibility) === 'owner_only';
+    const stamp = this.recordStamp(undefined);
+    const knownWriter = Boolean(stamp.sourceInstance && stamp.sourceAccount);
+    const sameOrAbsent = (field: string, value: string) => ({
+      $or: [{ [field]: { $eq: value } }, { [field]: { $exists: false } }],
+    });
     const filter = withVisibilityFilter(
-      { chat_jid: { $eq: chatJid }, ...this.sourceBoundaryFilter() },
+      { chat_jid: { $eq: chatJid }, ...(knownWriter ? { $and: [
+        sameOrAbsent('source_instance', stamp.sourceInstance),
+        sameOrAbsent('source_account', stamp.sourceAccount),
+      ] } : this.sourceBoundaryFilter()) },
       writesOwnerOnly,
     ) ?? {};
     const results = await this._searchCore(text, filter, 1);
     // Preserve the decay applied by the supersede lookup's former search() call.
-    const [best] = applyDecay(results, config.recencyHalfLifeDays, config.maxAgeDays);
+    const eligible = results.filter(({ record }) => !knownWriter || (
+      (record.sourceInstance === undefined || record.sourceInstance === stamp.sourceInstance)
+      && (record.sourceAccount === undefined || record.sourceAccount === stamp.sourceAccount)
+    ));
+    const [best] = applyDecay(eligible, config.recencyHalfLifeDays, config.maxAgeDays);
     return best ?? null;
   }
 }

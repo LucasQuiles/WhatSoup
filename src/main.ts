@@ -1255,7 +1255,7 @@ messageScheduler.start();
 // poll.pinecone reuses the knowledge_search Pinecone client + index/namespace
 // allowlist (no second client). poll.file's allowed-root set is the explicit
 // fail-closed allowlist config.memory.fileWatch.allowedRoots (empty = deny-all).
-const pineconeWatch = createPineconeWatchSearch(config.memory.pinecone.allowedIndexes);
+const pineconeWatch = createPineconeWatchSearch(config.memory.pinecone.allowedIndexes, () => connectionManager.botJid);
 const triggerPoller = new TriggerPoller(db.raw, connectionManager, {
   pineconeAllowedIndexes: pineconeWatch?.allowedIndexes ?? [],
   pineconeSearch: pineconeWatch?.search,

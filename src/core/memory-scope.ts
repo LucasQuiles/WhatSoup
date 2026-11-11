@@ -80,8 +80,7 @@ export interface MemoryScope {
   ownerOnlySources?: ReadonlySet<string>;
   /**
    * This instance's name when `memory.pinecone.instanceScopedIds` is on. A
-   * record of another source instance or account is then another
-   * conversation, whatever its chat_jid (isSameSourceInstance).
+   * record must then pass source eligibility before conversation ranking.
    */
   sourceInstance?: string;
   /** The reader's own account (memorySourceAccount); '' or unset matches no stamped record. */
@@ -544,6 +543,7 @@ export interface SourceBoundary {
   /** The reader's own account; '' or unset matches no stamped record. */
   sourceAccount?: string;
   ownerOnlyAccess: boolean;
+  ownerOnlySources?: ReadonlySet<string>;
 }
 
 /**
@@ -558,9 +558,68 @@ export function isSameSourceInstance(fields: Record<string, unknown>, boundary: 
   if (!boundary.sourceInstance) return true;
   const instance = fields['source_instance'];
   const account = fields['source_account'];
+  if (isNonEmptyString(account) && (!isNonEmptyString(boundary.sourceAccount) || account !== boundary.sourceAccount)) return false;
   if (isNonEmptyString(instance) && instance !== boundary.sourceInstance) return false;
   if (!isNonEmptyString(instance) || !isNonEmptyString(account)) return boundary.ownerOnlyAccess;
   return isNonEmptyString(boundary.sourceAccount) && account === boundary.sourceAccount;
+}
+
+/** Source eligibility is independent of conversation scope and ranking. */
+export function memorySourceEligible(
+  fields: Record<string, unknown>,
+  boundary: SourceBoundary,
+  allowUnstamped = false,
+): boolean {
+  if (!boundary.sourceInstance) return true;
+  if (isOwnerOnlyRecord(fields)) return ownerOnlyRecordServable(fields, boundary.ownerOnlyAccess, boundary.ownerOnlySources);
+  // Business entities and documents predate chat-memory provenance.
+  if (allowUnstamped && !isChatMemoryRecord(fields)
+    && fields['source_instance'] === undefined && fields['source_account'] === undefined) return true;
+  return isSameSourceInstance(fields, boundary);
+}
+
+/** Explicit entity metadata distinguishes business records in shared namespaces. */
+export function isChatMemoryRecord(fields: Record<string, unknown>): boolean {
+  return !isNonEmptyString(fields['entity_type'])
+    && (fields['chat_jid'] !== undefined || fields['memory_type'] !== undefined
+      || fields['visibility'] !== undefined || fields['provenance'] !== undefined);
+}
+
+/** Narrow retrieval before top-K; memorySourceEligible checks returned metadata. */
+export function withSourceFilter(
+  filter: Record<string, unknown> | undefined,
+  boundary: SourceBoundary,
+  allowUnstamped = false,
+): Record<string, unknown> | undefined {
+  if (!boundary.sourceInstance) return filter;
+  const sameOrAbsent = (field: string, value: string): Record<string, unknown> => ({
+    $or: [{ [field]: { $eq: value } }, { [field]: { $exists: false } }],
+  });
+  const own = boundary.ownerOnlyAccess
+    ? { $and: [
+      sameOrAbsent('source_instance', boundary.sourceInstance),
+      isNonEmptyString(boundary.sourceAccount)
+        ? sameOrAbsent('source_account', boundary.sourceAccount)
+        : { source_account: { $exists: false } },
+    ] }
+    : isNonEmptyString(boundary.sourceAccount)
+      ? { source_instance: { $eq: boundary.sourceInstance }, source_account: { $eq: boundary.sourceAccount } }
+      : { $and: [{ source_account: { $exists: true } }, { source_account: { $exists: false } }] };
+  const ordinary = (source: Record<string, unknown>): Record<string, unknown> =>
+    boundary.ownerOnlyAccess ? { $and: [ownerOnlyExclusion(), source] } : source;
+  const choices: Record<string, unknown>[] = [ordinary(own)];
+  if (allowUnstamped) choices.push(ordinary({
+    source_instance: { $exists: false }, source_account: { $exists: false },
+    $or: [{ entity_type: { $exists: true } }, {
+      chat_jid: { $exists: false }, memory_type: { $exists: false },
+      visibility: { $exists: false }, provenance: { $exists: false },
+    }],
+  }));
+  if (boundary.ownerOnlyAccess && boundary.ownerOnlySources?.size) choices.push({
+    visibility: { $eq: 'owner_only' }, source_instance: { $in: [...boundary.ownerOnlySources] },
+  });
+  const source = choices.length === 1 ? choices[0]! : { $or: choices };
+  return filter && Object.keys(filter).length ? { $and: [filter, source] } : source;
 }
 
 /**
@@ -683,6 +742,7 @@ export function memoryHitTier(
   fold: MemoryIdentityFold,
 ): MemoryTier | null {
   if (scope.kind === 'no_context') return null;
+  if (!memorySourceEligible(fields, scope)) return null;
   const rawChat = typeof fields['chat_jid'] === 'string' ? fields['chat_jid'] : '';
   // Same conversation = same chat AND (with instance-scoped ids on) the same
   // source instance and account (isSameSourceInstance).
@@ -735,7 +795,7 @@ export function verifiedSenderIdentity(actorJid: string | undefined, db?: Databa
 //   provenance       which pipeline wrote it
 // The provider stamps them in `toPineconeRecord` from instance config and
 // runtime state; no tool argument reaches them. Records written before these
-// fields existed carry none of them and keep their earlier recall behavior.
+// fields existed carry none of them; restrictive chat recall excludes them.
 
 export const MEMORY_VISIBILITIES = ['owner_only', 'chat_scoped'] as const;
 export type MemoryVisibility = (typeof MEMORY_VISIBILITIES)[number];

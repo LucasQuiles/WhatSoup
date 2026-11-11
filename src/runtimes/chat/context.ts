@@ -20,6 +20,7 @@ import {
   isOwnOrSharedGroupRecord,
   isSameSourceInstance,
   memoryIdentityFold,
+  memorySourceEligible,
   ownerOnlyRecordServable,
   verifiedSenderIdentity,
   type ChatRecallBoundary,
@@ -164,28 +165,45 @@ export async function loadContextDetailed(
   const safeTraceId = normalizeMemoryTraceId(traceId);
   const ownerOnly = access.ownerOnly === true;
   const legOptions = { includeOwnerOnly: true } as const;
+  const sourceBoundary = {
+    sourceInstance: access.sourceInstance, sourceAccount: access.sourceAccount,
+    ownerOnlyAccess: ownerOnly, ownerOnlySources: access.ownerOnlySources,
+  };
+  const sourceOptions = access.sourceInstance ? {
+    sourceInstance: access.sourceInstance, sourceAccount: access.sourceAccount,
+    ownerOnlySources: access.ownerOnlySources,
+  } : undefined;
   // Restrictive recall without access: every memory leg asks for chat_scoped
   // records only, and the post-query gate keeps only those. Entity records keep
   // the compatible exclusion.
   const chatScopedOnly = !ownerOnly && access.restrictive === true;
-  const memoryLegOptions: ContextLegOptions | undefined = ownerOnly
+  const visibilityOptions: ContextLegOptions | undefined = ownerOnly
     ? legOptions
     : chatScopedOnly ? { chatScopedOnly: true } : undefined;
+  const memoryLegOptions = sourceOptions ? { ...visibilityOptions, ...sourceOptions } : visibilityOptions;
   // An owner_only record is served only with access and from a listed source
   // instance (memory-scope.ts ownerOnlyRecordServable).
   const servable = (fields: Record<string, unknown>): boolean =>
     !isOwnerOnlyRecord(fields) || ownerOnlyRecordServable(fields, ownerOnly, access.ownerOnlySources);
 
   if (config.pineconeSearchMode === 'entity') {
+    const entityOptions = ownerOnly || sourceOptions
+      ? { ...(ownerOnly ? legOptions : {}), ...sourceOptions, ownerOnlySources: access.ownerOnlySources }
+      : undefined;
     const detailsRaw = await captureContextSearch(() =>
-      ownerOnly
-        ? pinecone.searchEntitiesDetailed(messageText, traceId, { ...legOptions, ownerOnlySources: access.ownerOnlySources })
+      entityOptions
+        ? pinecone.searchEntitiesDetailed(messageText, traceId, entityOptions)
         : traceId
           ? pinecone.searchEntitiesDetailed(messageText, traceId)
           : pinecone.searchEntitiesDetailed(messageText),
     );
     // Post-query gate, as for the memory legs: the provider's exclusion only narrows.
-    const details = { ...detailsRaw, results: detailsRaw.results.filter((result) => servable(result.record.metadata)) };
+    const details = { ...detailsRaw, results: detailsRaw.results.filter((result) =>
+      memorySourceEligible({
+        ...result.record.metadata,
+        ...(result.record.entityType !== 'unknown' ? { entity_type: result.record.entityType } : {}),
+      }, sourceBoundary, true)
+      && servable(result.record.metadata)) };
     const scopes = [scopeOutcome('entity', details)];
     log.info(
       {
@@ -212,7 +230,9 @@ export async function loadContextDetailed(
   // the chat leg nor the sender leg. Without access it is never queried. It runs
   // alongside the other three.
   const ownerOnlyLeg = ownerOnly
-    ? captureContextSearch(() => pinecone.searchOwnerOnlyDetailed(messageText, traceId))
+    ? captureContextSearch(() => sourceOptions
+      ? pinecone.searchOwnerOnlyDetailed(messageText, traceId, { ...legOptions, ...sourceOptions })
+      : pinecone.searchOwnerOnlyDetailed(messageText, traceId))
     : Promise.resolve(null);
   const [chatDetailsRaw, senderDetailsRaw, selfDetailsRaw] = await Promise.all([
     captureContextSearch(() =>
@@ -240,7 +260,10 @@ export async function loadContextDetailed(
   const ownerOnlyDetailsRaw = await ownerOnlyLeg;
   // Post-query gate: the pre-query exclusion only narrows the fetch.
   const recordServable = (result: SearchResult): boolean =>
-    servable({ visibility: result.record.visibility, source_instance: result.record.sourceInstance })
+    memorySourceEligible({
+      visibility: result.record.visibility, source_instance: result.record.sourceInstance, source_account: result.record.sourceAccount,
+    }, sourceBoundary)
+    && servable({ visibility: result.record.visibility, source_instance: result.record.sourceInstance })
     && (!chatScopedOnly || result.record.visibility === 'chat_scoped');
   const visible = <T extends { results: SearchResult[] }>(details: T): T =>
     ({ ...details, results: details.results.filter(recordServable) });
