@@ -23,7 +23,12 @@ import {
   type ClaudeFileStoreHealResult,
 } from './claude-filestore-heal.ts';
 import { claudeRefreshLockGrace, refreshAheadDefersProbe, refreshClaudeLoginAhead } from './claude-refresh-ahead.ts';
-import { DEFERRED_REFRESH_IN_FLIGHT, REFRESH_AHEAD_FAILED, REFRESH_OWNER_UNAVAILABLE } from './primary-model-usability.ts';
+import {
+  CLAUDE_CLI_LACKS_STRICT_MCP_CONFIG,
+  DEFERRED_REFRESH_IN_FLIGHT,
+  REFRESH_AHEAD_FAILED,
+  REFRESH_OWNER_UNAVAILABLE,
+} from './primary-model-usability.ts';
 import { probeLifecycleObservers, type ProbeLifecycleLog } from './probe-lifecycle-log.ts';
 import { createChildLogger } from '../../../logger.ts';
 import type {
@@ -71,6 +76,17 @@ export interface PrimaryModelProbeAdapterDeps {
     env: NodeJS.ProcessEnv,
     options?: BinaryCommandProbeOptions,
   ) => Promise<BinaryAuthStatusResult>;
+  /**
+   * Reads the selected Claude CLI's parser help before its model probe. This
+   * remains distinct from the model-probe seam: model output must never decide
+   * whether a non-strict retry is allowed.
+   */
+  probeClaudeCliHelp?: (
+    binary: string,
+    args: string[],
+    env: NodeJS.ProcessEnv,
+    options?: BinaryCommandProbeOptions,
+  ) => Promise<BinaryAuthStatusResult>;
   resolveApiKey?: (opts: ResolveApiKeyOptions) => string;
   fetch?: typeof fetch;
   /**
@@ -109,9 +125,20 @@ const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com/v1';
 const API_PROBE_TIMEOUT_MS = 5_000;
 const API_ERROR_RESPONSE_LIMIT_BYTES = 64 * 1024;
 const CLI_MODEL_PROBE_TIMEOUT_MS = 15_000;
+const CLAUDE_HELP_TIMEOUT_MS = 5_000;
 const CLAUDE_MODEL_PROBE_PROMPT = 'Reply with OK only.';
 const OPENCODE_MODEL_PROBE_PROMPT = 'Reply with OK only.';
 const API_MODEL_PROBE_PROMPT = 'Reply with OK only.';
+const CLAUDE_STRICT_MCP_CONFIG_FLAG = '--strict-mcp-config';
+const STRICT_MCP_CONFIG_HELP_OPTION = /^[ \t]{0,8}(?:-[A-Za-z], )?--strict-mcp-config(?![\w-])/m;
+
+type StrictMcpConfigSupport = 'supported' | 'unsupported' | 'unverified';
+
+/**
+ * Cache a completed help verdict by the configured token and the exact
+ * canonical identity that was asked. A replacement invalidates the entry.
+ */
+const strictMcpConfigSupportByBinary = new Map<string, { identity: string; supported: boolean }>();
 
 interface PrimaryProbeInvocation {
   readonly binaryToken: string | null;
@@ -424,7 +451,7 @@ async function probeCliModel(
     // post-acquire setup step in this cleanup scope: environment construction,
     // lifecycle observer construction, and context mapping can all throw before
     // probeBinaryCommand gets a chance to invoke onProcessClosed.
-    const invocation = buildPrimaryProbeInvocation({ provider, model }, providerConfig, deps);
+    let invocation = buildPrimaryProbeInvocation({ provider, model }, providerConfig, deps);
     if (invocation.blockedReason !== null) {
       releaseExecutionLease();
       return { status: 'unknown', reason: invocation.blockedReason };
@@ -432,6 +459,37 @@ async function probeCliModel(
     if (!invocation.binaryToken || !invocation.executablePath || !invocation.binarySha256) {
       releaseExecutionLease();
       return { status: 'provider_unavailable' };
+    }
+    let executablePath = invocation.executablePath;
+    if (provider === 'claude-cli') {
+      const support = await claudeStrictMcpConfigSupport(invocation, deps, signal, onStage);
+      if (signal?.aborted) {
+        releaseExecutionLease();
+        return { status: 'timeout' };
+      }
+
+      // Help is an await boundary. Re-resolve the canonical identity and
+      // compare its complete serving context before a model child can start.
+      const afterHelp = buildPrimaryProbeInvocation({ provider, model }, providerConfig, deps);
+      if (afterHelp.blockedReason !== null) {
+        releaseExecutionLease();
+        return { status: 'unknown', reason: afterHelp.blockedReason };
+      }
+      if (!afterHelp.binaryToken || !afterHelp.executablePath || !afterHelp.binarySha256) {
+        releaseExecutionLease();
+        return { status: 'provider_unavailable' };
+      }
+      const identityDrift = primaryProbeIdentityDriftReason(invocation, afterHelp);
+      if (identityDrift !== null) {
+        releaseExecutionLease();
+        return { status: 'unknown', reason: identityDrift };
+      }
+      if (support === 'unsupported') {
+        releaseExecutionLease();
+        return { status: 'unknown', reason: CLAUDE_CLI_LACKS_STRICT_MCP_CONFIG };
+      }
+      invocation = afterHelp;
+      executablePath = afterHelp.executablePath;
     }
     const env = invocation.env;
     const lifecycle = probeChildLifecycleLog(provider, env, deps, signal);
@@ -441,7 +499,7 @@ async function probeCliModel(
       executionLease?.markProgress();
     }
     const result = await probe(
-      invocation.executablePath,
+      executablePath,
       args,
       env,
       {
@@ -525,7 +583,81 @@ function modelProbeCommand(
   // claude-cli only: no configured model => probe the CLI's own default (omit
   // --model) instead of never probing at all — a model-less instance must be able
   // to recover (subscription auth needs no per-model credential).
-  return ['-p', CLAUDE_MODEL_PROBE_PROMPT, ...(model === null ? [] : ['--model', model])];
+  return [
+    '-p',
+    CLAUDE_MODEL_PROBE_PROMPT,
+    CLAUDE_STRICT_MCP_CONFIG_FLAG,
+    ...(model === null ? [] : ['--model', model]),
+  ];
+}
+
+function strictMcpConfigIdentity(invocation: PrimaryProbeInvocation): string | null {
+  if (!invocation.executablePath || !invocation.binarySha256) return null;
+  return `${invocation.executablePath}\0${invocation.binarySha256}`;
+}
+
+function primaryProbeIdentityDriftReason(
+  before: PrimaryProbeInvocation,
+  after: PrimaryProbeInvocation,
+): string | null {
+  if (before.executablePath !== after.executablePath) return 'context-mismatch-binary-path';
+  if (before.binarySha256 !== after.binarySha256) return 'context-mismatch-binary-sha';
+  return null;
+}
+
+/**
+ * Resolve strict-MCP support solely from the selected CLI's successful help
+ * listing. Failed help is deliberately inconclusive: the only fallback remains
+ * the regular strict model probe. A custom model-probe seam never doubles as a
+ * help reader, because its output is not parser evidence.
+ */
+async function claudeStrictMcpConfigSupport(
+  invocation: PrimaryProbeInvocation,
+  deps: PrimaryModelProbeAdapterDeps,
+  signal?: AbortSignal,
+  onStage?: PrimaryModelProbeStageReporter,
+): Promise<StrictMcpConfigSupport> {
+  if (!invocation.binaryToken || !invocation.executablePath) return 'unverified';
+  const identity = strictMcpConfigIdentity(invocation);
+  const cached = strictMcpConfigSupportByBinary.get(invocation.binaryToken);
+  if (identity !== null && cached?.identity === identity) {
+    return cached.supported ? 'supported' : 'unsupported';
+  }
+
+  // Model-probe overrides are test/embedding seams, not authoritative parser
+  // readers. Production supplies neither override and uses the bounded helper.
+  const readHelp = deps.probeClaudeCliHelp
+    ?? (deps.probeBinaryCommand || deps.probeBinaryAuthStatus ? undefined : probeBinaryCommand);
+  if (!readHelp) return 'unverified';
+
+  const lifecycle = probeChildLifecycleLog('claude-cli', invocation.env, deps, signal);
+  let resolveHelpClosed: (() => void) | undefined;
+  const helpClosed = new Promise<void>((resolve) => { resolveHelpClosed = resolve; });
+  let help: BinaryAuthStatusResult;
+  try {
+    help = await readHelp(invocation.executablePath, ['--help'], invocation.env, {
+      timeoutMs: CLAUDE_HELP_TIMEOUT_MS,
+      ...(signal ? { signal } : {}),
+      ...lifecycle,
+      onSpawned: (pid) => {
+        onStage?.('child-run');
+        lifecycle.onSpawned(pid);
+      },
+      onProcessClosed: () => resolveHelpClosed?.(),
+    });
+    // The bounded helper may return a timeout before its child closes. Keep
+    // cleanup ahead of cache updates and model admission. Injected readers
+    // instead define their complete lifetime through their returned promise.
+    if (!deps.probeClaudeCliHelp) await helpClosed;
+  } catch {
+    return 'unverified';
+  }
+  if (help.status !== 'ok' || signal?.aborted) return 'unverified';
+  const supported = STRICT_MCP_CONFIG_HELP_OPTION.test(help.output);
+  if (identity !== null) {
+    strictMcpConfigSupportByBinary.set(invocation.binaryToken, { identity, supported });
+  }
+  return supported ? 'supported' : 'unsupported';
 }
 
 export function buildPrimaryProbeEnv(

@@ -51,6 +51,12 @@ export interface PrimaryModelUsabilityResult {
   suggestion?: string | null;
 }
 
+/**
+ * The selected Claude CLI cleanly reported no strict-MCP parser option, so no
+ * model child ran. This is inconclusive rather than an actionable model fault.
+ */
+export const CLAUDE_CLI_LACKS_STRICT_MCP_CONFIG = 'claude-cli-lacks-strict-mcp-config';
+
 export type BinaryModelProbeResult =
   | { status: 'ok' }
   | { status: 'model_unavailable' }
@@ -367,9 +373,9 @@ async function withCancellationDeadline<T>(
 /**
  * Whether a primary-model usability probe result should raise an operator alert.
  * Pure predicate over PrimaryModelUsabilityResult, relocated from AgentRuntime
- * (god-class decomposition slice BEAD-PURE-3). A transient 'unknown' caused by
- * missing config / unsupported provider is not actionable; any other non-'usable'
- * status is.
+ * (god-class decomposition slice BEAD-PURE-3). An 'unknown' caused by missing
+ * config, an unsupported provider, a deferred refresh, or a skipped strict-MCP
+ * Claude probe is not actionable; any other non-'usable' status is.
  */
 export function primaryModelUsabilityRequiresAlert(result: PrimaryModelUsabilityResult): boolean {
   // model === null no longer implies not-probed: claude-cli default-model probes
@@ -379,7 +385,8 @@ export function primaryModelUsabilityRequiresAlert(result: PrimaryModelUsability
     // either way; the refresh-ahead module logs the child (error at its cap).
     return result.reason !== 'model-not-configured'
       && result.reason !== 'unsupported-provider'
-      && result.reason !== DEFERRED_REFRESH_IN_FLIGHT;
+      && result.reason !== DEFERRED_REFRESH_IN_FLIGHT
+      && result.reason !== CLAUDE_CLI_LACKS_STRICT_MCP_CONFIG;
   }
   return result.status !== 'usable';
 }
