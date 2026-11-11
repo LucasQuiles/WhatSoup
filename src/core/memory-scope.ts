@@ -279,6 +279,8 @@ export interface MemoryScopeRequest {
   conversationKey?: string;
   deliveryJid?: string;
   actorJid?: string;
+  /** The transport's direct-chat classification (OwnerOnlyRecallInput.directChat). */
+  directChat: boolean | undefined;
 }
 
 export interface MemoryScopeDeps {
@@ -293,6 +295,11 @@ export interface MemoryScopeDeps {
   trustedOperatorPhones?: Iterable<string>;
   /** recordIdScope(instance, instanceScopedIds): set only when the option is on. */
   instanceScope?: string | null;
+  /**
+   * The owner_only grant; ownerOnlyRecallAllowed when unset. knowledge_search
+   * passes knowledgeSearchOwnerOnlyAllowed with its session isolation.
+   */
+  ownerOnlyGrant?: (input: OwnerOnlyRecallInput) => boolean;
 }
 
 /**
@@ -349,27 +356,59 @@ export function isTrustedOperatorSender(
   return phone !== null && isAdminPhone(phone, phones);
 }
 
-/**
- * Whether the caller may receive `owner_only` records. Only a verified admin of
- * the instance or a configured trusted operator, over an authenticated
- * transport, in a direct chat. The operator instance, contacts (whatever their
- * recall scope), every group (even one the admin is in, since other members read
- * the reply), unverified transports and callers with no pinned direct
- * conversation are all refused.
- */
-export function ownerOnlyRecallAllowed(input: {
+export interface OwnerOnlyRecallInput {
   actorJid?: string;
   conversationKey?: string;
   deliveryJid?: string;
+  /**
+   * The transport classified this conversation as a direct chat (the inbound
+   * message's `isGroup === false`). Required so every caller states it:
+   * undefined (unknown) is refused. An iMessage group id carries no group
+   * marker, so the absence of one never proves a direct chat.
+   */
+  directChat: boolean | undefined;
   adminPhones: Set<string>;
   trustedOperatorPhones?: Iterable<string>;
   db?: Database | null;
-}): boolean {
+}
+
+/**
+ * Whether the caller may receive `owner_only` records. Only a verified admin of
+ * the instance or a configured trusted operator, over an authenticated
+ * transport, in a conversation the transport classified as a direct chat. The
+ * operator instance, contacts (whatever their recall scope), every group (even
+ * one the admin is in, since other members read the reply; a recognized group
+ * key or JID is refused whatever directChat says), unverified transports,
+ * unknown conversation kinds and callers with no pinned conversation are all
+ * refused.
+ */
+export function ownerOnlyRecallAllowed(input: OwnerOnlyRecallInput): boolean {
   const { actorJid, conversationKey, db } = input;
+  if (input.directChat !== true) return false;
   if (!actorJid || !db || !conversationKey) return false;
   if (isGroupContext(conversationKey, input.deliveryJid) || isGroupJid(conversationKey)) return false;
   return isVerifiedAdminSender(actorJid, input.adminPhones, db)
     || isTrustedOperatorSender(actorJid, input.trustedOperatorPhones, db);
+}
+
+/**
+ * The agent session serving this call is isolated per chat: `sessionScope`
+ * `per_chat`, or `sandboxPerChat`. A shared, single or global session (or an
+ * unset or unknown scope) carries what one chat recalled into replies to
+ * other chats.
+ */
+export function agentSessionIsolatedPerChat(sessionScope: unknown, sandboxPerChat: unknown): boolean {
+  return sessionScope === 'per_chat' || sandboxPerChat === true;
+}
+
+/**
+ * knowledge_search's owner_only grant: ownerOnlyRecallAllowed, and the agent
+ * session must be isolated per chat (agentSessionIsolatedPerChat).
+ */
+export function knowledgeSearchOwnerOnlyAllowed(
+  input: OwnerOnlyRecallInput & { sessionIsolatedPerChat: boolean },
+): boolean {
+  return input.sessionIsolatedPerChat === true && ownerOnlyRecallAllowed(input);
 }
 
 function isGroupContext(key: string, deliveryJid: string | undefined): boolean {
@@ -389,10 +428,11 @@ export async function resolveMemoryScope(
   const rawKey = request.conversationKey;
   const chatKey = rawKey ? foldChatAttribution(rawKey, db) : undefined;
   const chatSpellings = rawKey ? chatAttributionSpellings(rawKey, request.deliveryJid, db) : [];
-  const ownerOnlyAccess = ownerOnlyRecallAllowed({
+  const ownerOnlyAccess = (deps.ownerOnlyGrant ?? ownerOnlyRecallAllowed)({
     actorJid: request.actorJid,
     conversationKey: rawKey,
     deliveryJid: request.deliveryJid,
+    directChat: request.directChat,
     adminPhones: deps.identities.adminPhones,
     trustedOperatorPhones: deps.trustedOperatorPhones,
     db,

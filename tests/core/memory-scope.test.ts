@@ -9,6 +9,7 @@ import { Database } from '../../src/core/database.ts';
 import { upsertLidMapping } from '../../src/core/lid-resolver.ts';
 import {
   GroupMembershipCache,
+  agentSessionIsolatedPerChat,
   foldChatAttribution,
   isDmLaneMembership,
   isGroupSharedRecord,
@@ -303,6 +304,7 @@ describe('owner_only visibility', () => {
   const OWNER_ONLY = { chat_jid: `${MEMBER}@s.whatsapp.net`, visibility: 'owner_only' };
   const dmWith = (phone: string, actorJid = `${phone}@s.whatsapp.net`) => ({
     tier: 'chat-scoped', conversationKey: phone, deliveryJid: `${phone}@s.whatsapp.net`, operatorInstance: false, actorJid,
+    directChat: true as boolean | undefined,
   });
   const withTrusted = (overrides: Partial<MemoryScopeDeps> = {}) => deps({ trustedOperatorPhones: [TRUSTED], ...overrides });
 
@@ -385,13 +387,53 @@ describe('owner_only visibility', () => {
   });
 
   it('the chat runtime predicate: owner or trusted operator in a direct chat only', () => {
-    const input = { adminPhones: identities.adminPhones, trustedOperatorPhones: [TRUSTED], db };
+    const input = { adminPhones: identities.adminPhones, trustedOperatorPhones: [TRUSTED], db, directChat: true };
     expect(ownerOnlyRecallAllowed({ ...input, actorJid: `${OWNER}@s.whatsapp.net`, conversationKey: `${OWNER}@s.whatsapp.net` })).toBe(true);
     expect(ownerOnlyRecallAllowed({ ...input, actorJid: `${TRUSTED}@s.whatsapp.net`, conversationKey: `${TRUSTED}@s.whatsapp.net` })).toBe(true);
     expect(ownerOnlyRecallAllowed({ ...input, actorJid: `${OWNER}@s.whatsapp.net`, conversationKey: GROUP_JID })).toBe(false);
     expect(ownerOnlyRecallAllowed({ ...input, actorJid: `${MEMBER}@s.whatsapp.net`, conversationKey: `${MEMBER}@s.whatsapp.net` })).toBe(false);
     expect(ownerOnlyRecallAllowed({ ...input, actorJid: `+${OWNER}@sms`, conversationKey: `+${OWNER}@sms` })).toBe(false);
     expect(ownerOnlyRecallAllowed({ ...input, db: null, actorJid: `${OWNER}@s.whatsapp.net`, conversationKey: OWNER })).toBe(false);
+  });
+
+  it('grants only on an affirmative transport direct-chat classification, never by the absence of a group marker', () => {
+    // The `_at_imessage` entries are the grant resolver's identities for
+    // `<phone>@imessage`, so both senders below are verified: the refusals come
+    // from the conversation kind alone.
+    const input = {
+      adminPhones: new Set([...identities.adminPhones, `${OWNER}_at_imessage`]),
+      trustedOperatorPhones: [TRUSTED, `${TRUSTED}_at_imessage`],
+      db,
+    };
+    // An iMessage group's chat id carries no group marker: only the transport knows.
+    const imessageGroup = 'chat000111222333@imessage';
+    for (const actorJid of [`${OWNER}@imessage`, `${TRUSTED}@imessage`]) {
+      const inGroup = { ...input, actorJid, conversationKey: imessageGroup, deliveryJid: imessageGroup };
+      expect(ownerOnlyRecallAllowed({ ...inGroup, directChat: false })).toBe(false);
+      expect(ownerOnlyRecallAllowed({ ...inGroup, directChat: undefined })).toBe(false);
+      expect(ownerOnlyRecallAllowed({ ...inGroup, directChat: true })).toBe(true);
+    }
+    // An unknown conversation kind is refused even for a WhatsApp direct chat.
+    const ownerDm = { ...input, actorJid: `${OWNER}@s.whatsapp.net`, conversationKey: OWNER, deliveryJid: `${OWNER}@s.whatsapp.net` };
+    expect(ownerOnlyRecallAllowed({ ...ownerDm, directChat: undefined })).toBe(false);
+    // A flag that says direct never overrides a recognized group.
+    expect(ownerOnlyRecallAllowed({ ...ownerDm, conversationKey: GROUP_KEY, deliveryJid: GROUP_JID, directChat: true })).toBe(false);
+  });
+
+  it('resolveMemoryScope grants owner_only access only when the request classifies a direct chat', async () => {
+    expect((await resolveMemoryScope({ ...dmWith(OWNER), directChat: undefined }, withTrusted())).ownerOnlyAccess).toBe(false);
+    expect((await resolveMemoryScope({ ...dmWith(OWNER), directChat: false }, withTrusted())).ownerOnlyAccess).toBe(false);
+    expect((await resolveMemoryScope(dmWith(OWNER), withTrusted())).ownerOnlyAccess).toBe(true);
+  });
+
+  it('an agent session is isolated per chat only with sessionScope per_chat or sandboxPerChat', () => {
+    expect(agentSessionIsolatedPerChat('per_chat', false)).toBe(true);
+    expect(agentSessionIsolatedPerChat('per_chat', undefined)).toBe(true);
+    expect(agentSessionIsolatedPerChat(undefined, true)).toBe(true);
+    for (const scope of ['shared', 'single', 'global', undefined, 'per-chat', '']) {
+      expect(agentSessionIsolatedPerChat(scope, false)).toBe(false);
+      expect(agentSessionIsolatedPerChat(scope, undefined)).toBe(false);
+    }
   });
 
   it('builds the pre-query filter: exclusion keeps records with no visibility field', () => {
@@ -407,7 +449,9 @@ describe('owner_only visibility', () => {
 });
 
 describe('instance-scoped recall boundary (memory.pinecone.instanceScopedIds on)', () => {
-  const dm = { tier: 'chat-scoped', conversationKey: MEMBER, deliveryJid: `${MEMBER}@s.whatsapp.net`, operatorInstance: false };
+  const dm = {
+    tier: 'chat-scoped', conversationKey: MEMBER, deliveryJid: `${MEMBER}@s.whatsapp.net`, operatorInstance: false, directChat: true,
+  };
 
   it('the same chat_jid from another instance is another conversation', async () => {
     const f = memoryIdentityFold(db);

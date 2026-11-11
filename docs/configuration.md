@@ -1276,13 +1276,25 @@ A record stamped `owner_only` (a personal line's records, or an instance
 configured that way) is returned only to a caller that
 `ownerOnlyRecallAllowed` (`src/core/memory-scope.ts`) admits: a verified
 `adminPhones` identity or a `memory.pinecone.trustedOperatorPhones` entry,
-proven over an authenticated transport, in a direct chat. Nothing else gets one:
+proven over an authenticated transport, in a conversation the transport
+classified as a direct chat (the inbound message's `isGroup` flag is `false`).
+The absence of a group marker proves nothing: an iMessage group id has none, and
+an unknown conversation kind is refused. Nothing else gets one:
 not ordinary contacts (whatever their `contactRecallScopes`), not any group (even
 one the admin is in, because other members read the reply), not the operator
 instance by itself, not a global session without a conversation, and not an
-unverified transport such as SMS. Access widens recall for `owner_only` records
-only: a caller with access receives them from any chat (`knowledge_search` adds
-one `visibility = owner_only` leg per memory namespace; the chat runtime lets
+unverified transport such as SMS.
+
+`knowledge_search` currently grants no `owner_only` access to anyone. It
+receives no transport classification of the conversation, and its grant also
+requires an agent session isolated per chat (`agentOptions.sessionScope`
+`per_chat` or `sandboxPerChat`), because a shared session carries recalled
+records into replies to other chats. Only the chat runtime's recall returns
+`owner_only` records today.
+
+Access widens recall for `owner_only` records
+only: a caller with access receives them from any chat (`knowledge_search` would
+add one `visibility = owner_only` leg per memory namespace; the chat runtime lets
 them past its this-chat hold), while its `chat_scoped` and untagged recall keeps
 the boundary in the table above. The admin's own scope is unchanged. For callers
 without access, both readers enforce the exclusion twice: a pre-query

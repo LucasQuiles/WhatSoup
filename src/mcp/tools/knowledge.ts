@@ -29,8 +29,9 @@ import {
   isOwnerOnlyRecord,
   memoryHitTier,
   memoryIdentityFold,
+  agentSessionIsolatedPerChat,
+  knowledgeSearchOwnerOnlyAllowed,
   ownerOnlyLegFilter,
-  ownerOnlyRecallAllowed,
   recordIdScope,
   resolveMemoryScope,
   withVisibilityFilter,
@@ -38,6 +39,7 @@ import {
   type InstanceIdentities,
   type MemoryScope,
   type MemoryTier,
+  type OwnerOnlyRecallInput,
 } from '../../core/memory-scope.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 import { resolveApiKey } from '../../lib/api-key-resolver.ts';
@@ -85,6 +87,12 @@ export interface KnowledgeSearchDeps {
   contactRecallScopes?: Readonly<Record<string, string>>;
   /** `memory.pinecone.trustedOperatorPhones`: may read owner_only records. */
   trustedOperatorPhones?: Iterable<string>;
+  /**
+   * The agent session's isolation (`agentOptions.sessionScope` and
+   * `sandboxPerChat`), a required input of the owner_only grant here. Not wired
+   * yet: unset means not isolated.
+   */
+  agentSession?: { sessionScope?: unknown; sandboxPerChat?: unknown };
 }
 
 function pineconeMemoryConfig(): {
@@ -496,6 +504,15 @@ export function registerKnowledgeTools(
   const noIdentities: InstanceIdentities = {
     adminPhones: new Set(), siblingPhones: new Set(), botJid: null, botLid: null,
   };
+  // The owner_only grant for this tool needs an agent session isolated per chat
+  // as well as a transport direct-chat classification. No classification
+  // reaches the tool (directChat stays undefined), so it grants none for now.
+  const sessionIsolatedPerChat = agentSessionIsolatedPerChat(
+    deps.agentSession?.sessionScope,
+    deps.agentSession?.sandboxPerChat,
+  );
+  const ownerOnlyGrant = (input: OwnerOnlyRecallInput): boolean =>
+    knowledgeSearchOwnerOnlyAllowed({ ...input, sessionIsolatedPerChat });
   const scopeFor = (session: SessionContext): Promise<MemoryScope> => resolveMemoryScope(
     {
       operatorInstance: isOperatorInstance((config as { botName?: unknown }).botName),
@@ -503,6 +520,7 @@ export function registerKnowledgeTools(
       conversationKey: conversationBoundKey(session) ?? session.conversationKey,
       deliveryJid: session.deliveryJid,
       actorJid: session.actorJid,
+      directChat: undefined,
     },
     {
       db: deps.db,
@@ -515,14 +533,16 @@ export function registerKnowledgeTools(
         (config as { botName?: unknown }).botName,
         (config as { memory?: { pinecone?: { instanceScopedIds?: unknown } } }).memory?.pinecone?.instanceScopedIds,
       ),
+      ownerOnlyGrant,
     },
   );
   // Visibility authorization for an allowed index that is not the instance's
   // memory index: the same grant as the memory scope, without its membership read.
-  const ownerOnlyAccessFor = (session: SessionContext): boolean => ownerOnlyRecallAllowed({
+  const ownerOnlyAccessFor = (session: SessionContext): boolean => ownerOnlyGrant({
     actorJid: session.actorJid,
     conversationKey: conversationBoundKey(session) ?? session.conversationKey,
     deliveryJid: session.deliveryJid,
+    directChat: undefined,
     adminPhones: (deps.identities?.() ?? noIdentities).adminPhones,
     trustedOperatorPhones: deps.trustedOperatorPhones,
     db: deps.db,

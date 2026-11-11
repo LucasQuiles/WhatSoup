@@ -414,6 +414,8 @@ export class ChatRuntime implements Runtime {
       actorJid: msg.senderJid,
       conversationKey: msg.chatJid,
       deliveryJid: msg.chatJid,
+      // The transport's classification: an iMessage group id has no group marker.
+      directChat: msg.isGroup === false,
       adminPhones: config.adminPhones,
       trustedOperatorPhones,
       db: this.db,

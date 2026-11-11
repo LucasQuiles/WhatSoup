@@ -921,7 +921,9 @@ describe('Media processing', () => {
   it('grants owner_only recall only to a verified admin in a direct chat, never in a group', async () => {
     const mutable = configModule.config as unknown as { adminPhones: Set<string> };
     const previousAdmins = mutable.adminPhones;
-    mutable.adminPhones = new Set(['15550001111']);
+    // The second entry is the grant resolver's identity for 15550001111@imessage,
+    // so the iMessage case below is a verified admin, not an unknown sender.
+    mutable.adminPhones = new Set(['15550001111', '15550001111_at_imessage']);
     try {
       const { handler, pinecone } = makeHandler();
       await handleAndDrain(handler, makeIncomingMessage({
@@ -950,6 +952,24 @@ describe('Media processing', () => {
         group.pinecone,
         '111111100000001@g.us',
         '15550001111@s.whatsapp.net',
+        expect.any(String),
+        expect.any(String),
+        'open',
+      );
+
+      // An iMessage group id carries no group marker; the transport's isGroup
+      // flag alone classifies it, and a group never gets owner_only access.
+      // The verified admin keeps open recall; only the access argument is absent.
+      const imessageGroup = makeHandler();
+      await handleAndDrain(imessageGroup.handler, makeIncomingMessage({
+        chatJid: 'chat000111222333@imessage',
+        isGroup: true,
+        senderJid: '15550001111@imessage',
+      }));
+      expect(mockLoadContext).toHaveBeenLastCalledWith(
+        imessageGroup.pinecone,
+        'chat000111222333@imessage',
+        '15550001111@imessage',
         expect.any(String),
         expect.any(String),
         'open',

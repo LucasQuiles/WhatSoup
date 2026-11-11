@@ -395,7 +395,8 @@ describe('knowledge_search ranking outside configurable groups', () => {
 
     expect(await search(knowledgeSearch, { tier: 'chat-scoped' })).toEqual(['doc']);
     expect(queries.map((q) => q.namespace).sort()).toEqual(['local-docs', 'onedrive', 'whatsapp-contacts']);
-    expect(queries.every((q) => q.filter === undefined)).toBe(true);
+    // Document legs get no conversation scoping, only the owner_only exclusion.
+    expect(queries.every((q) => JSON.stringify(q.filter) === JSON.stringify(OWNER_ONLY_EXCLUSION))).toBe(true);
   });
 
   it('keeps tier order after rerank and minScore', async () => {
@@ -431,19 +432,22 @@ describe('knowledge_search and owner_only records', () => {
     tier: 'chat-scoped', conversationKey: phone, deliveryJid: `+${phone}@sms`, actorJid: `+${phone}@sms`,
   });
 
-  it('the verified owner and a trusted operator receive owner_only records in a direct chat', async () => {
+  it('grants no owner_only access, even to the verified owner or a trusted operator in a direct chat', async () => {
+    // No transport direct-chat classification reaches knowledge_search, so its
+    // grant never sees an affirmative direct chat. An agent session isolated
+    // per chat is required as well, and does not grant by itself.
     seed(PERSONAL);
-    const { knowledgeSearch } = registerTools(deps());
-    expect(await search(knowledgeSearch, dmSession(OWNER))).toContain('personal');
-    // (1) the trusted operator gets the owner_only record from another chat ...
-    const trusted = await search(knowledgeSearch, dmSession(TRUSTED));
-    expect(trusted).toContain('personal');
-    // (2) ... but no other contact's chat_scoped records: its boundary is a contact's.
-    expect(trusted).toEqual(['personal', 'untagged']);
-    // Access lifts the exclusion and adds one owner_only leg per memory namespace.
-    expect(queries.some((q) => JSON.stringify(q.filter ?? {}).includes('"$ne":"owner_only"'))).toBe(false);
-    expect(queries.filter((q) => q.namespace === '__default__' && JSON.stringify(q.filter ?? {}) === '{"visibility":{"$eq":"owner_only"}}'))
-      .toHaveLength(2);
+    for (const isolation of [{}, { agentSession: { sessionScope: 'per_chat', sandboxPerChat: false } }]) {
+      const { knowledgeSearch } = registerTools({ ...deps(), ...isolation });
+      expect(await search(knowledgeSearch, dmSession(OWNER))).not.toContain('personal');
+      // The trusted operator keeps a contact's boundary for everything else.
+      expect(await search(knowledgeSearch, dmSession(TRUSTED))).toEqual(['untagged']);
+    }
+    // Every memory-namespace query carried the exclusion; no owner_only leg was sent.
+    const memoryQueries = queries.filter((q) => !['local-docs', 'onedrive', 'whatsapp-contacts'].includes(q.namespace));
+    expect(memoryQueries.length).toBeGreaterThan(0);
+    expect(memoryQueries.every((q) => JSON.stringify(q.filter).includes('"$ne":"owner_only"'))).toBe(true);
+    expect(queries.some((q) => JSON.stringify(q.filter ?? {}) === '{"visibility":{"$eq":"owner_only"}}')).toBe(false);
   });
 
   it('a contact, a group with the owner in it, and an unverified caller never receive one', async () => {
@@ -484,10 +488,13 @@ describe('knowledge_search and owner_only records', () => {
     expect(refused).toHaveLength(2);
     expect(refused.every((q) => JSON.stringify(q.filter) === JSON.stringify(OWNER_ONLY_EXCLUSION))).toBe(true);
 
-    // The verified owner in a direct chat may read it there too, unfiltered.
+    // The verified owner in a direct chat is refused as well: knowledge_search
+    // grants no owner_only access on any index.
     queries.length = 0;
-    expect(await search(knowledgeSearch, dmSession(OWNER), onOther)).toEqual(['other-personal', 'other-shared', 'other-doc']);
-    expect(queries.filter((q) => q.namespace === 'other-ns').every((q) => q.filter === undefined)).toBe(true);
+    expect(await search(knowledgeSearch, dmSession(OWNER), onOther)).toEqual(['other-shared', 'other-doc']);
+    const ownerQueries = queries.filter((q) => q.namespace === 'other-ns');
+    expect(ownerQueries.length).toBeGreaterThan(0);
+    expect(ownerQueries.every((q) => JSON.stringify(q.filter) === JSON.stringify(OWNER_ONLY_EXCLUSION))).toBe(true);
   });
 });
 
