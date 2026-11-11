@@ -756,6 +756,11 @@ jobs:
             tests/browser-motion/__screenshots__
           if-no-files-found: ignore
 
+  guard-compatibility:
+    needs: selection
+    if: fromJSON(needs.selection.outputs.lanes).guard
+    uses: ./.github/workflows/whatsoup-guard.yml
+
   compatibility-full:
     name: Quality full (25.x)
     needs: selection
@@ -910,7 +915,7 @@ jobs:
 
   compatibility:
     name: quality (25.x)
-    needs: [selection, docs, compatibility-affected, compatibility-full]
+    needs: [selection, docs, compatibility-affected, compatibility-full, guard-compatibility]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

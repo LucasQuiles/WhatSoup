@@ -1556,7 +1556,62 @@ describe('safeguard diagnostics', () => {
 
   it.each([
     {
-      name: 'drops the standalone Node 25 guard compatibility lane',
+      name: 'omits guard validation from the required Node 25 dependency',
+      mutate: (workflow: string) => workflow.replace('compatibility-full, guard-compatibility]', 'compatibility-full]'),
+      evidence: 'quality (node25) aggregator must depend exactly on every selected validation job',
+    },
+    {
+      name: 'selects guard validation through the unrelated root compatibility flag',
+      mutate: (workflow: string) => workflow.replace('if: fromJSON(needs.selection.outputs.lanes).guard', 'if: fromJSON(needs.selection.outputs.lanes).compatibility'),
+      evidence: 'guard compatibility must call the local guard workflow after guard selection without overrides',
+    },
+    {
+      name: 'replaces the guard callee',
+      mutate: (workflow: string) => workflow.replace('uses: ./.github/workflows/whatsoup-guard.yml', 'uses: ./.github/workflows/other.yml'),
+      evidence: 'guard compatibility must call the local guard workflow after guard selection without overrides',
+    },
+    {
+      name: 'makes guard validation advisory',
+      mutate: (workflow: string) => workflow.replace('  guard-compatibility:', '  guard-compatibility:\n    continue-on-error: true'),
+      evidence: 'guard compatibility must call the local guard workflow after guard selection without overrides',
+    },
+  ])('rejects Quality when it $name', ({ mutate, evidence }) => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = mutate(workflow);
+    expect(mutated).not.toBe(workflow);
+    const result = checkSafeguards(makeRepo({ files: { '.github/workflows/quality.yml': mutated } }));
+    expect(result.checks.find((check) => check.id === 'quality-ci-lane-partition'))
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining([evidence]) });
+  });
+
+  it.each([
+    {
+      name: 'removes the callable entrypoint',
+      mutate: (workflow: string) => workflow.replace('  workflow_call:', '  pull_request:'),
+      evidence: 'whatsoup guard workflow must be callable only through Quality without separate concurrency',
+    },
+    {
+      name: 'retains a duplicate standalone trigger',
+      mutate: (workflow: string) => workflow.replace('  workflow_call:', '  workflow_call:\n  pull_request:'),
+      evidence: 'whatsoup guard workflow must be callable only through Quality without separate concurrency',
+    },
+    {
+      name: 'retains separate concurrency',
+      mutate: (workflow: string) => workflow.replace('jobs:', 'concurrency:\n  group: guard\n  cancel-in-progress: true\njobs:'),
+      evidence: 'whatsoup guard workflow must be callable only through Quality without separate concurrency',
+    },
+    {
+      name: 'skips guard tests',
+      mutate: (workflow: string) => workflow.replace('      - run: npm test', '      - run: npm test\n        if: false'),
+      evidence: 'whatsoup guard validation must run npm ci, typecheck and tests unconditionally and block on failure',
+    },
+    {
+      name: 'ignores a failed typecheck',
+      mutate: (workflow: string) => workflow.replace('      - run: npm run typecheck', '      - run: npm run typecheck\n        continue-on-error: true'),
+      evidence: 'whatsoup guard validation must run npm ci, typecheck and tests unconditionally and block on failure',
+    },
+    {
+      name: 'drops the Node 25 guard compatibility lane',
       mutate: (workflow: string) => workflow.replace("node: ['25.x']", 'node: []'),
       evidence: 'whatsoup guard workflow must retain exactly the Node 25 compatibility lane',
     },

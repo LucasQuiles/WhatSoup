@@ -165,9 +165,12 @@ Affected, full and performance jobs share the existing Playwright binary cache;
 the installer still checks the version required by the lockfile on every run.
 System package installation is separate and bounded so a download retry cannot
 repeat an interrupted package-manager transaction. Test verdicts remain uncached.
-Changes under `tools/whatsoup_guard/**` also run the standalone `whatsoup-guard`
-Node 25 compatibility lane. Quality owns Node 24 guard typechecking and tests;
-the standalone workflow does not repeat that version.
+Quality calls the reusable `whatsoup-guard` workflow for Node 25 when guard
+validation is selected, including every full profile and merge-queue run.
+The required `quality (25.x)` check rejects failed, cancelled, skipped or missing
+selected guard results. Documentation-only changes need no guard result.
+Quality also owns Node 24 guard typechecking and tests. The reusable workflow
+tests only Node 25 and has no separate trigger or concurrency group.
 The guard runner removes its own temporary directory after either outcome. On macOS,
 an overlong inherited `TMPDIR` uses a short owned directory so `tsx` can open its IPC
 socket. `WHATSOUP_GUARD_TEST_TMPDIR` remains an explicit override; keep it short enough
