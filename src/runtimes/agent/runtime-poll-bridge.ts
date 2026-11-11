@@ -227,7 +227,11 @@ export class RuntimePollBridgeCoordinator {
    * with re-armed timers using the remaining time. Expired polls
    * (hard_closes_at <= now) have a brief "decision expired during downtime"
    * message sent to the originating chat (best-effort via outbound queue) and
-   * are deleted from the table.
+   * are deleted from the table. Live send_poll rows are deleted with an
+   * "interrupted" notice: their awaiting tool call ended with the old process,
+   * and every send_poll row then belongs to a call this process admitted
+   * under its awaited-poll cap. A send_poll row whose delete fails stays
+   * stored and unnotified until the next start retries it.
    *
    * An unreadable snapshot returns false; the runtime retains queued decisions
    * and uses its bounded startup retry before consuming them.
@@ -283,6 +287,8 @@ export class RuntimePollBridgeCoordinator {
     // than one message per stranded poll.
     const expiredByChat = new Map<string, number>();
     const interruptedContinuationsByChat = new Map<string, number>();
+    const orphanedAwaitsByChat = new Map<string, number>();
+    let orphanedAwaitPersistenceFailures = 0;
     for (const row of rows) {
       try {
         if (row.hard_closes_at !== null && row.hard_closes_at <= now) {
@@ -293,6 +299,27 @@ export class RuntimePollBridgeCoordinator {
         }
         const serialized = JSON.parse(row.payload) as SerializedPendingPoll;
         const pending = deserializePendingPoll(serialized);
+        if (pending.source === 'send_poll') {
+          // The send_poll tool call that awaited this row ended with the
+          // previous process, so no vote can reach a caller. Restoring it would
+          // also hold a row the new process's awaited-poll cap never counted.
+          // A verified terminal marker prevents restoration even if deletion
+          // fails. A failed marker write must defer the notice until recovery.
+          let notified = false;
+          const notifyRecovered = (): void => {
+            if (notified) return;
+            notified = true;
+            this.notifyAwaitedPollInterrupted(row.chat_jid);
+          };
+          const result = this.host.pollPersistence.remove(row.map_key, pending, notifyRecovered);
+          if (result.durable) {
+            notified = true;
+            orphanedAwaitsByChat.set(row.chat_jid, (orphanedAwaitsByChat.get(row.chat_jid) ?? 0) + 1);
+          } else {
+            orphanedAwaitPersistenceFailures += 1;
+          }
+          continue;
+        }
         if (pending.source === 'askuser' && pending.resolvedAt !== undefined) {
           this.host.pollPersistence.remove(row.map_key, pending);
           interruptedContinuationsByChat.set(
@@ -315,12 +342,18 @@ export class RuntimePollBridgeCoordinator {
     for (const [chatJid, count] of interruptedContinuationsByChat) {
       this.notifyPollContinuationInterrupted(chatJid, count);
     }
-    if (restored > 0 || expired > 0 || interruptedContinuationsByChat.size > 0) {
+    for (const [chatJid, count] of orphanedAwaitsByChat) {
+      this.notifyAwaitedPollInterrupted(chatJid, count);
+    }
+    if (restored > 0 || expired > 0 || interruptedContinuationsByChat.size > 0 || orphanedAwaitsByChat.size > 0
+      || orphanedAwaitPersistenceFailures > 0) {
       log.info({
         restored,
         expired,
         chatsNotified: expiredByChat.size,
         interruptedContinuationChats: interruptedContinuationsByChat.size,
+        orphanedAwaitChats: orphanedAwaitsByChat.size,
+        orphanedAwaitPersistenceFailures,
       }, 'rehydratePendingPolls: completed');
     }
     return true;
@@ -333,28 +366,31 @@ export class RuntimePollBridgeCoordinator {
    * JID unresolvable) is logged.
    */
   private notifyPollExpiredDuringDowntime(chatJid: string, count = 1): void {
-    const message = count > 1
+    this.sendRehydrateNotice('notifyPollExpiredDuringDowntime', chatJid, count > 1
       ? `${count} polls I was waiting on expired before I picked them back up — ask me again if you still need those decisions.`
-      : 'A poll I was waiting on expired before I picked it back up — ask me again if you still need that decision.';
-    try {
-      void this.host.messenger.sendMessage(chatJid, message).catch((err) =>
-        log.warn({ err, chatJid }, 'notifyPollExpiredDuringDowntime: send failed (non-fatal)'),
-      );
-    } catch (err) {
-      log.warn({ err, chatJid }, 'notifyPollExpiredDuringDowntime: dispatch failed (non-fatal)');
-    }
+      : 'A poll I was waiting on expired before I picked it back up — ask me again if you still need that decision.');
   }
 
   private notifyPollContinuationInterrupted(chatJid: string, count = 1): void {
-    const message = count > 1
+    this.sendRehydrateNotice('notifyPollContinuationInterrupted', chatJid, count > 1
       ? `I received ${count} poll answers before restarting, but could not continue them safely. Please send the answers again.`
-      : 'I received your poll answer before restarting, but could not continue it safely. Please send the answer again.';
+      : 'I received your poll answer before restarting, but could not continue it safely. Please send the answer again.');
+  }
+
+  private notifyAwaitedPollInterrupted(chatJid: string, count = 1): void {
+    this.sendRehydrateNotice('notifyAwaitedPollInterrupted', chatJid, count > 1
+      ? `I restarted while waiting on ${count} polls, so I can no longer act on their votes — ask me again if you still need those decisions.`
+      : 'I restarted while waiting on a poll, so I can no longer act on its votes — ask me again if you still need that decision.');
+  }
+
+  /** Best-effort send; a rejected or throwing dispatch is logged, never raised. */
+  private sendRehydrateNotice(label: string, chatJid: string, message: string): void {
     try {
       void this.host.messenger.sendMessage(chatJid, message).catch((err) =>
-        log.warn({ err, chatJid }, 'notifyPollContinuationInterrupted: send failed (non-fatal)'),
+        log.warn({ err, chatJid }, `${label}: send failed (non-fatal)`),
       );
     } catch (err) {
-      log.warn({ err, chatJid }, 'notifyPollContinuationInterrupted: dispatch failed (non-fatal)');
+      log.warn({ err, chatJid }, `${label}: dispatch failed (non-fatal)`);
     }
   }
 

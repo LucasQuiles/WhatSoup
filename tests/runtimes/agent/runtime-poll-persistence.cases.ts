@@ -394,10 +394,10 @@ export function registerRuntimePollPersistenceTests(
       vi.useFakeTimers();
       const db = makeRealDb();
       const { messenger } = makeMessenger();
-      const mapKey = 'terminal-durability';
+      const mapKey = operation === 'stage' ? 'terminal-durability' : 'send_poll:TERMINAL_POLL';
       const chatJid = 'terminal@g.us';
       const source = operation === 'stage' ? 'askuser' : 'send_poll';
-      insertRow(db, mapKey, chatJid, Date.now() + 600_000, buildPayload({
+      if (operation === 'stage') insertRow(db, mapKey, chatJid, Date.now() + 600_000, buildPayload({
         chatJid, source, createdAt: Date.now(), resolution: 'first-vote-wins',
         pollMessageIdToQuestionIndex: new Map([['TERMINAL_POLL', 0]]),
         sentPollMessageIds: ['TERMINAL_POLL'],
@@ -405,22 +405,25 @@ export function registerRuntimePollPersistenceTests(
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
       const state = runtime as unknown as {
         rehydratePendingPolls(): Promise<void>;
+        registerSendPollAwaiter(pollId: string, chatJid: string, options: string[], resolution: 'first-vote-wins', timeoutMs: number): Promise<string>;
+        pollPersistence: { stop(): void };
         pendingPolls: { questions: Map<string, PendingPollQuestion> };
         deletePendingPollQuestions(key: string): void;
         stageResolvedAskUserPoll(key: string, pending: PendingPollQuestion): boolean;
         handlePollVoteReceived(data: { pollMessageId: string; chatJid: string; voterJid: string; selectedOptions: string[] }): void;
       };
       let pending: PendingPollQuestion | undefined;
+      const resolve = vi.fn();
+      const reject = vi.fn();
+      let awaited: Promise<unknown> | undefined;
       try {
-        await state.rehydratePendingPolls();
+        if (operation === 'stage') await state.rehydratePendingPolls();
+        else awaited = state.registerSendPollAwaiter('TERMINAL_POLL', chatJid, ['A', 'B'], 'first-vote-wins', 600_000)
+          .then(resolve, reject);
         pending = state.pendingPolls.questions.get(mapKey)!;
         expect(pending).toBeDefined();
         db.raw.prepare('UPDATE pending_polls SET created_at = ?, tool_id = ? WHERE map_key = ?')
           .run(pending.createdAt, pending.toolId, mapKey);
-        const resolve = vi.fn();
-        const reject = vi.fn();
-        pending.awaitResolve = resolve;
-        pending.awaitReject = reject;
         db.raw.exec(`
           CREATE TRIGGER reject_poll_update BEFORE UPDATE ON pending_polls BEGIN SELECT RAISE(FAIL, 'write blocked'); END;
           CREATE TRIGGER reject_poll_insert BEFORE INSERT ON pending_polls BEGIN SELECT RAISE(FAIL, 'write blocked'); END;
@@ -446,6 +449,9 @@ export function registerRuntimePollPersistenceTests(
           expect(state.pendingPolls.questions.has(mapKey)).toBe(false);
         }
       } finally {
+        state.pollPersistence.stop();
+        pending?.awaitReject?.(new Error('test cleanup'));
+        await awaited;
         if (pending?.softExpiryTimer) clearTimeout(pending.softExpiryTimer);
         if (pending?.hardExpiryTimer) clearTimeout(pending.hardExpiryTimer);
         db.close();

@@ -16,8 +16,10 @@ vi.mock('../../src/logger.ts', async () => {
 
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
+import { SessionTokenRegistry } from '../../src/mcp/caller-attribution.ts';
 import { ToolRegistry } from '../../src/mcp/registry.ts';
 import { WhatSoupSocketServer } from '../../src/mcp/socket-server.ts';
+import { beginPollWait, type PollWaitOwner } from '../../src/mcp/poll-wait-owner.ts';
 import {
   resolveSessionContext,
   type ExecutingSessionContext,
@@ -267,5 +269,144 @@ describe('tool-call caller attribution (#3421 step 1)', () => {
       caller_actor_source: null,
       tool_sensitive: null,
     }]);
+  });
+
+  it('attaches a matched token owner only to its fresh request, then clears it on mismatch', async () => {
+    let begins = 0;
+    let disposals = 0;
+    const observedOwnership: boolean[] = [];
+    const serializedContexts: string[] = [];
+    const owner: PollWaitOwner = {
+      begin: (timeoutMs) => {
+        expect(timeoutMs).toBe(60_000);
+        begins += 1;
+        return () => {
+          disposals += 1;
+        };
+      },
+    };
+    const sessionTokens = new SessionTokenRegistry();
+    const token = sessionTokens.mint(owner);
+
+    registry.register({
+      name: 'poll_wait_owner_probe',
+      description: 'Observes an in-process poll-wait capability',
+      scope: 'global',
+      targetMode: 'caller-supplied',
+      schema: z.object({}),
+      handler: async (_params, session) => {
+        const dispose = beginPollWait(session, 60_000);
+        observedOwnership.push(dispose !== undefined);
+        serializedContexts.push(JSON.stringify(session));
+        dispose?.();
+        return { ownerAttached: dispose !== undefined };
+      },
+    });
+
+    server = new WhatSoupSocketServer(
+      socketPath,
+      registry,
+      { tier: 'global' },
+      () => executing,
+      undefined,
+      { sessionTokens },
+    );
+    server.start();
+    await waitForSocket(socketPath);
+
+    const matchedThenMismatched = await exchange(socketPath, [
+      {
+        jsonrpc: '2.0',
+        method: 'notifications/whatsoup/session',
+        params: { token },
+      },
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'poll_wait_owner_probe', arguments: {} },
+      },
+      {
+        jsonrpc: '2.0',
+        method: 'notifications/whatsoup/session',
+        params: { token: 'f'.repeat(64) },
+      },
+      {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'poll_wait_owner_probe', arguments: {} },
+      },
+    ]);
+    const tokenless = await exchange(socketPath, [{
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'poll_wait_owner_probe', arguments: {} },
+    }]);
+
+    expect(matchedThenMismatched.has(1)).toBe(true);
+    expect(matchedThenMismatched.has(2)).toBe(true);
+    expect(tokenless.has(1)).toBe(true);
+    expect(observedOwnership).toEqual([true, false, false]);
+    expect(begins).toBe(1);
+    expect(disposals).toBe(1);
+    expect(callerRows(db).map((row) => row.caller_token_result)).toEqual([
+      'match',
+      'mismatch',
+      'absent',
+    ]);
+    expect(serializedContexts).toHaveLength(3);
+    for (const serialized of serializedContexts) {
+      expect(serialized).not.toContain(token);
+    }
+    const persistedCalls = db.raw.prepare('SELECT * FROM tool_calls ORDER BY id').all();
+    expect(JSON.stringify(persistedCalls)).not.toContain(token);
+  });
+});
+
+describe('session token poll-wait ownership', () => {
+  function owner(): PollWaitOwner {
+    return { begin: vi.fn(() => undefined) };
+  }
+
+  it('resolves each current token only to the owner supplied at mint time', () => {
+    const registry = new SessionTokenRegistry();
+    const first = owner();
+    const second = owner();
+    const firstToken = registry.mint(first);
+    const secondToken = registry.mint(second);
+
+    expect(registry.resolvePollWaitOwner(firstToken)).toBe(first);
+    expect(registry.resolvePollWaitOwner(secondToken)).toBe(second);
+    expect(registry.verify(firstToken)).toBe(true);
+    expect(registry.verify(secondToken)).toBe(true);
+  });
+
+  it('does not turn missing, invalid, or ownerless tokens into poll-wait capability', () => {
+    const registry = new SessionTokenRegistry();
+    const ownerlessToken = registry.mint();
+    const staticToken = '0'.repeat(64);
+
+    expect(registry.resolvePollWaitOwner(undefined)).toBeUndefined();
+    expect(registry.resolvePollWaitOwner(staticToken)).toBeUndefined();
+    expect(registry.resolvePollWaitOwner(ownerlessToken)).toBeUndefined();
+    expect(registry.verify(staticToken)).toBe(false);
+    expect(registry.verify(ownerlessToken)).toBe(true);
+  });
+
+  it('forgets both the evidence match and poll-wait owner together on FIFO eviction', () => {
+    const registry = new SessionTokenRegistry(2);
+    const first = owner();
+    const second = owner();
+    const third = owner();
+    const firstToken = registry.mint(first);
+    const secondToken = registry.mint(second);
+    const thirdToken = registry.mint(third);
+
+    expect(registry.verify(firstToken)).toBe(false);
+    expect(registry.resolvePollWaitOwner(firstToken)).toBeUndefined();
+    expect(registry.resolvePollWaitOwner(secondToken)).toBe(second);
+    expect(registry.resolvePollWaitOwner(thirdToken)).toBe(third);
   });
 });

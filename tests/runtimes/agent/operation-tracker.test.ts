@@ -698,4 +698,102 @@ describe('OperationTracker', () => {
       tracker.shutdown();
     });
   });
+
+  // ─── Blocking send_poll waiting for a vote ──────────────────────────────
+
+  describe('blocking send_poll waiting for a vote', () => {
+    const SEND_POLL = 'mcp__whatsoup__send_poll';
+    const POLL_TIMEOUT_MS = 600_000;
+    // mcp threshold: slow at 30 s, stall at 75 s.
+    const MCP_STALL_MS = 75_000;
+
+    it('does not stall while the vote wait is inside the poll timeout', () => {
+      const { callbacks, stalledCalls, progressEvents } = makeCallbacks();
+      const tracker = makeTracker(callbacks);
+
+      tracker.onToolStart('poll-1', SEND_POLL, 'other', {
+        question: 'Pick one', options: ['A', 'B'], awaitResult: true, timeoutMs: POLL_TIMEOUT_MS,
+      });
+
+      vi.advanceTimersByTime(MCP_STALL_MS + 1_000);
+      expect(stalledCalls).toEqual([]);
+      vi.advanceTimersByTime(180_000);
+      expect(stalledCalls).toEqual([]);
+      vi.advanceTimersByTime(POLL_TIMEOUT_MS - MCP_STALL_MS - 181_000);
+      expect(stalledCalls).toEqual([]);
+      expect(progressEvents.some((e) => e.type === 'operation_stalled')).toBe(false);
+      expect(tracker.getActive()[0]?.state).not.toBe('stalled');
+
+      tracker.shutdown();
+    });
+
+    it('stalls once the poll timeout plus the mcp stall window has passed', () => {
+      const { callbacks, stalledCalls } = makeCallbacks();
+      const tracker = makeTracker(callbacks);
+
+      tracker.onToolStart('poll-2', SEND_POLL, 'other', {
+        question: 'Pick one', options: ['A', 'B'], awaitResult: true, timeoutMs: POLL_TIMEOUT_MS,
+      });
+
+      vi.advanceTimersByTime(POLL_TIMEOUT_MS + MCP_STALL_MS - 1);
+      expect(stalledCalls).toEqual([]);
+      vi.advanceTimersByTime(1);
+      expect(stalledCalls).toEqual([{ toolId: 'poll-2', toolName: SEND_POLL }]);
+      expect(tracker.getActive()[0]?.state).toBe('stalled');
+
+      tracker.shutdown();
+    });
+
+    it('bounds a blocking send_poll without timeoutMs by the default poll timeout', () => {
+      const { callbacks, stalledCalls } = makeCallbacks();
+      const tracker = makeTracker(callbacks);
+
+      tracker.onToolStart('poll-3', SEND_POLL, 'other', { question: 'Pick one', options: ['A', 'B'], awaitResult: true });
+
+      vi.advanceTimersByTime(3_600_000 + MCP_STALL_MS - 1);
+      expect(stalledCalls).toEqual([]);
+      vi.advanceTimersByTime(1);
+      expect(stalledCalls).toEqual([{ toolId: 'poll-3', toolName: SEND_POLL }]);
+
+      tracker.shutdown();
+    });
+
+    it('still stalls another MCP tool at the mcp threshold', () => {
+      const { callbacks, stalledCalls } = makeCallbacks();
+      const tracker = makeTracker(callbacks);
+
+      tracker.onToolStart('other-1', 'mcp__whatsoup__send_message', 'other', {
+        text: 'hi', awaitResult: true, timeoutMs: POLL_TIMEOUT_MS,
+      });
+
+      vi.advanceTimersByTime(MCP_STALL_MS - 1);
+      expect(stalledCalls).toEqual([]);
+      vi.advanceTimersByTime(1);
+      expect(stalledCalls).toEqual([{ toolId: 'other-1', toolName: 'mcp__whatsoup__send_message' }]);
+
+      tracker.shutdown();
+    });
+
+    it('keeps the mcp threshold for a non-blocking send_poll', () => {
+      const { callbacks, stalledCalls } = makeCallbacks();
+      const tracker = makeTracker(callbacks);
+
+      tracker.onToolStart('poll-4', SEND_POLL, 'other', {
+        question: 'Pick one', options: ['A', 'B'], awaitResult: false, timeoutMs: POLL_TIMEOUT_MS,
+      });
+      tracker.onToolStart('poll-5', SEND_POLL, 'other', {
+        question: 'Pick one', options: ['A', 'B'], timeoutMs: POLL_TIMEOUT_MS,
+      });
+
+      vi.advanceTimersByTime(MCP_STALL_MS - 1);
+      expect(stalledCalls).toEqual([]);
+      vi.advanceTimersByTime(1);
+      expect(stalledCalls).toEqual([
+        { toolId: 'poll-4', toolName: SEND_POLL },
+        { toolId: 'poll-5', toolName: SEND_POLL },
+      ]);
+
+      tracker.shutdown();
+    });
+  });
 });
