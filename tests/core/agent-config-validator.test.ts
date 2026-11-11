@@ -276,6 +276,7 @@ describe('Pinecone project guard validation', () => {
     ['a null apiKeyService', { apiKeyService: null }, 'memory.pinecone.apiKeyService'],
     ['a non-string apiKeyService', { apiKeyService: 7 }, 'memory.pinecone.apiKeyService'],
     ['an unknown recordVisibility', { recordVisibility: 'everyone' }, 'memory.pinecone.recordVisibility'],
+    ['a non-boolean instanceScopedIds', { instanceScopedIds: 'true' }, 'memory.pinecone.instanceScopedIds'],
     ['the reserved owner_only namespace', { namespaces: { facts: 'whatsoup-owner-only-v1' } }, 'memory.pinecone.namespaces.facts'],
     [
       'a knowledge profile on the reserved owner_only namespace',
@@ -317,6 +318,11 @@ describe('Pinecone project guard validation', () => {
   // Config load treats an absent or null recordVisibility as chat_scoped.
   it.each(['owner_only', 'chat_scoped', null])('accepts recordVisibility %j', (recordVisibility) => {
     const raw = baseChat({ memory: { pinecone: { projectId: 'instance-proj-id', recordVisibility } } });
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+
+  it.each([true, false, null])('accepts instanceScopedIds %j', (instanceScopedIds) => {
+    const raw = baseChat({ memory: { pinecone: { projectId: 'instance-proj-id', instanceScopedIds } } });
     expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
   });
 

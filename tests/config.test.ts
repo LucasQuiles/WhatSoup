@@ -2321,6 +2321,15 @@ describe('config — memory.pinecone.recordVisibility', () => {
     }));
     await expect(import('../src/config.ts')).rejects.toThrow(/recordVisibility must be "owner_only" or "chat_scoped"/);
   });
+
+  // Read as false, a string "true" would silently drop the instance and
+  // account boundaries the operator asked for on a shared index.
+  it('rejects a non-boolean instanceScopedIds at load rather than turning it off', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: { pinecone: { index: 'whatsapp-bot', projectId: 'instance-proj-id', instanceScopedIds: 'true' } },
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(/instanceScopedIds must be true or false/);
+  });
 });
 
 describe('config — memory.pinecone.apiKeyService', () => {
