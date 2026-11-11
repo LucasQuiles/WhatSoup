@@ -1,6 +1,7 @@
 // src/runtimes/agent/command-registry.ts
-// Single source of truth for WhatsApp slash-command metadata. Pure data — no
-// runtime imports (would create a cycle with runtime.ts). The classifier
+// Single source of truth for WhatsApp slash-command metadata and the gate
+// rule. Pure data and pure functions; type-only imports only (a value import
+// would create a cycle with runtime.ts). The classifier
 // (commands.ts), the /help renderer, and the derived command doc all read from
 // here so command metadata is defined once (DRY/SSOT — kills the hand-sync
 // drift class, CH5). The CommandSpec TYPE is built ONCE, schema-forward for the
@@ -9,11 +10,13 @@
 // and renderContract (N16) axes those commands need. Only Phase-1 ENTRIES are
 // seeded here (KISS/YAGNI); W2/W3/Phase-2 append entries, never re-shape the type.
 
+import type { SessionScope } from './runtime-options.ts';
+
 /** Who may EXECUTE a command (identity axis). Composes with `venue` (N17):
  *  identity is WHO, venue is WHERE — god-priv needs both.
  *  - 'admin'              : authenticated admin (isWhatsAppAuthenticatedJid
  *                           FIRST — QR-143 @sms-closing — then admin-phone),
- *                           enforced inline in runtime.ts. Group-permitting
+ *                           enforced by commandGateDenies below. Group-permitting
  *                           since B21-A F3 (base parity: the pre-registry
  *                           phone-only gates let admins run these from groups;
  *                           isAdminMessage's DM-only clause is deliberately NOT
@@ -27,9 +30,42 @@
  *                           group-permitting (an admin may act in a group) and
  *                           @sms-closing (requires isWhatsAppAuthenticatedJid).
  *                           With EMPTY adminPhones the gate stays open (B21-A
- *                           F2: a no-admin instance has no other reset path).
- *                           Used by /new — enforced in runtime.ts. */
+ *                           F2: a no-admin instance has no other reset path,
+ *                           so deny-everyone would lock /new out entirely).
+ *                           Used by /new and /stop.
+ *  The rule is commandGateDenies below: runtime.ts enforces it, and the queued
+ *  receipt asks it before offering /stop. */
 export type CommandGate = 'none' | 'admin' | 'admin-shared-scope';
+
+/** What a gate decision reads about one invocation. */
+export interface CommandGateContext {
+  readonly sessionScope: SessionScope;
+  readonly isGroup: boolean;
+  /** Configured admin count (`config.adminPhones.size`). */
+  readonly adminCount: number;
+  /** Authenticated-admin check for the sender (QR-143: authenticated transport
+   *  first, then admin phone). Lazy: it resolves the sender's phone, a DB
+   *  read, so it runs only when the decision needs it. */
+  readonly isAdmin: () => boolean;
+}
+
+/** The one authority rule for local commands (see CommandGate). runtime.ts
+ *  enforces it on every local command, and the queued receipt
+ *  (runtime-queued-receipt.ts) asks it before a DM receipt offers /stop, so
+ *  the receipt never offers a command the gate refuses. A group receipt never
+ *  offers /stop, because not every member can reach the bot. The empty-admin
+ *  exemption (B21-A F2) is 'admin-shared-scope' only: plain 'admin' commands
+ *  stay denied when no admin is configured. */
+export function commandGateDenies(gate: CommandGate, ctx: CommandGateContext): boolean {
+  switch (gate) {
+    case 'none':
+      return false;
+    case 'admin':
+      return !ctx.isAdmin();
+    case 'admin-shared-scope':
+      return (ctx.sessionScope !== 'per_chat' || ctx.isGroup) && ctx.adminCount > 0 && !ctx.isAdmin();
+  }
+}
 
 /** /help presentation strings per gate value — the renderer's single lookup
  *  for the LIST tag and the DETAIL gate note (SSOT; replaces the two
@@ -176,7 +212,7 @@ export const COMMAND_REGISTRY = [
     syntax: '/new',
     tier: 'transport-local',
     gate: 'admin-shared-scope', // admin only where the reset hits SHARED state (WG-5); own per_chat DM stays ungated
-    venue: 'any', // group-permitting by design (admin may /new in a group); venue is enforced inline via sessionScope/isGroup, not the venue axis
+    venue: 'any', // group-permitting by design (admin may /new in a group); venue is enforced by commandGateDenies via sessionScope/isGroup, not the venue axis
     visibility: 'end-user',
     errorClasses: ['not-authorized', 'internal'],
     // Immediate outcome acknowledgement, including the same-operation
@@ -197,7 +233,7 @@ export const COMMAND_REGISTRY = [
     // turn hits SHARED session state in single/shared scope and in a per_chat
     // group; a per_chat 1:1 DM stops only the sender's own conversation.
     gate: 'admin-shared-scope',
-    venue: 'any', // group-permitting exactly like /new; enforced inline via sessionScope/isGroup
+    venue: 'any', // group-permitting exactly like /new; enforced by commandGateDenies via sessionScope/isGroup, not the venue axis
     visibility: 'end-user',
     errorClasses: ['not-authorized', 'internal'],
     // Immediate outcome acknowledgement — one of stopped / nothing-to-stop /

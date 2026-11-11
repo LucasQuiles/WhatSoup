@@ -135,8 +135,8 @@ RGP is decomposed into independently reviewable layers, all now shipped:
    - **What they do not say.** The fields make no claim about queue
      position. In `single` and `shared` session scope one queue serves every
      chat, so several stale chats can sit behind one stuck turn. Sends with no
-     source inbound never count: the "Queued behind the current task"
-     receipt, startup, admin and health notices. `outbound_ops` records no
+     source inbound never count: the queued-message receipt ("Still working
+     on ... request"), startup, admin and health notices. `outbound_ops` records no
      message role, so a command reply sent through the chat queue while a row
      is the active turn is tied to that row and counts as a recent send; that
      is one reason these fields never page.

@@ -1,8 +1,8 @@
 // src/runtimes/agent/runtime-queued-receipt.ts
 //
-// #2949 first slice (owner decision 63, 2026-09-25): a truthful "queued behind
-// the current task" receipt. It is the queue-honesty half only; it steers
-// nothing and changes no turn ordering.
+// #2949 first slice (owner decision 63, 2026-09-25): a truthful receipt for a
+// message that queued behind a running task. It is the queue-honesty half only;
+// it steers nothing and changes no turn ordering.
 //
 // WHERE IT FIRES. Only after a per_chat inbound was ADMITTED to its chat's
 // runtime TurnQueue and did NOT become that queue's active turn. TurnQueue.drain
@@ -19,8 +19,38 @@
 //
 // WORDING. A per_chat /stop terminalizes the active turn AND every pending turn
 // in that chat's queue (terminalizePerChatTurnQueueForKill finalizes
-// `teardown.pending` as operator-cancelled), so the receipt says exactly that.
-// The text is a constant: it never echoes the queued message's content.
+// `teardown.pending` as operator-cancelled), so the receipt never promises that
+// /stop cancels less. Two facts pick one of four constants, and every group
+// receipt is the same one, "an earlier request ... queued behind it" with no
+// /stop sentence:
+// - Position. "your earlier request ... This message is next" only in a 1:1
+//   chat, when the running turn is the sender's own request and this message
+//   is the only one waiting, so nothing else can run before it (owner
+//   decision, 2026-11-09). A group never gets it: every member reads a group
+//   receipt, so "your" would be false for every member but the sender.
+//   Otherwise "an earlier request ... queued behind it", which is true for
+//   every reader: the running turn may be another group member's or a
+//   scheduled job, or other messages wait ahead of this one.
+// - Venue. Only a DM receipt can have the /stop sentence. Its only reader is
+//   the sender, and the command gate's own rule (commandGateDenies with the
+//   /stop spec's gate) never refuses a per_chat DM. It still needs ingest to
+//   pass a bare /stop: in a chat listed in pausedChats, ingest dispatches only
+//   text that matches a pausedChatBypassPatterns entry, and /stop is not an
+//   admin command. So the DM receipt asks ingest's own paused-chat rule
+//   (pausedChatAdmission, src/core/paused-chat.ts) about the text "/stop",
+//   and offers it only when that rule does not hold it. A group receipt
+//   never has it: every member reads it, and no group can promise every
+//   reader a working /stop. The gate refuses members who are not admins once
+//   admins are configured; ingest drops blocked and unresolved-LID members,
+//   and members who are not allowlisted under allowlisted_only; a
+//   mention-only group drops a bare /stop; and some transports carry no
+//   mention data, so no one wording fits every group. Without the sentence
+//   the receipt names no one to ask, and a group receipt reads no
+//   configuration.
+// The /stop sentence promises no reply: the /stop reply is sent without a check
+// that it arrived, and one sent through a poisoned outbound queue is refused.
+// Nor does it promise the cancel: a permitted /stop can end uncertain. No text
+// echoes the queued message's content.
 //
 // RATE LIMIT. At most one receipt per chat per cooldown window, so a busy group
 // is not spammed while one long task runs. The cooldown is consumed when the
@@ -32,11 +62,83 @@ import { systemClock, type Clock } from '../../lib/clock.ts';
 // the composition-ring twin in instance-loader.ts is off-limits here.
 import type { SessionScope } from './runtime.ts';
 import type { QueuedTurn, TurnQueue } from './turn-queue.ts';
+import { commandGateDenies, getCommandSpec } from './command-registry.ts';
+import { pausedChatAdmission } from '../../core/paused-chat.ts';
 
 const log = createChildLogger('runtime-queued-receipt');
 
+/** The paused-chat settings the rule reads, as pausedChatAdmission takes them. */
+type PausedChatSettings = Parameters<typeof pausedChatAdmission>[0];
+
+/** The exact text the /stop sentence tells the reader to send. */
+const STOP_COMMAND_TEXT = '/stop';
+
+/** Own request in a 1:1 chat, nothing else waiting, where the receipt offers
+ *  no /stop (a paused 1:1 chat without a /stop bypass). Never a group
+ *  receipt. */
+export const QUEUED_TURN_RECEIPT_NO_STOP_TEXT =
+  '*Still working on your earlier request.* This message is next.';
+
+/** Any other position, where the receipt offers no /stop. Every group receipt
+ *  is this text, in either position. */
+export const QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT =
+  '*Still working on an earlier request.* This message is queued behind it.';
+
+/** The one /stop sentence, so the two texts that offer /stop cannot drift apart. */
+function stopSentence(request: 'the earlier request' | 'that request'): string {
+  return `Send ${STOP_COMMAND_TEXT} to cancel ${request} and anything waiting.`;
+}
+
+// The /stop texts extend the no-/stop texts, so both say the same status.
 export const QUEUED_TURN_RECEIPT_TEXT =
-  '*Queued behind the current task.* Send /stop to cancel the running task and everything queued behind it.';
+  `${QUEUED_TURN_RECEIPT_NO_STOP_TEXT} ${stopSentence('the earlier request')}`;
+
+export const QUEUED_TURN_RECEIPT_OTHER_TEXT =
+  `${QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT} ${stopSentence('that request')}`;
+
+/** Pick the receipt that is true for this admission (see WORDING above). */
+export function queuedTurnReceiptText(
+  active: Pick<QueuedTurn, 'senderJid' | 'purpose'>,
+  queued: Pick<QueuedTurn, 'senderJid' | 'isGroup'>,
+  pending: number,
+  stopOffered: boolean,
+): string {
+  // A group receipt is sent to the whole group, so a group never takes the
+  // own-request text, whoever sent the running turn.
+  const ownRequest = !queued.isGroup
+    && active.senderJid === queued.senderJid
+    && active.purpose !== 'scheduled-agent-job';
+  if (ownRequest && pending <= 1) {
+    return stopOffered ? QUEUED_TURN_RECEIPT_TEXT : QUEUED_TURN_RECEIPT_NO_STOP_TEXT;
+  }
+  return stopOffered ? QUEUED_TURN_RECEIPT_OTHER_TEXT : QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT;
+}
+
+/** Whether the receipt offers /stop to its readers (see WORDING above). */
+function receiptOffersStop(
+  scope: SessionScope,
+  turn: Pick<QueuedTurn, 'isGroup' | 'conversationKey' | 'chatJid'>,
+  adminCount: () => number,
+  pausedChatSettings: PausedChatSettings,
+): boolean {
+  // Every group member reads a group receipt, and no group can promise every
+  // reader a working /stop, so a group gets no offer before any config read.
+  if (turn.isGroup) return false;
+  const gateDenies = commandGateDenies(getCommandSpec('stop').gate, {
+    sessionScope: scope,
+    isGroup: turn.isGroup,
+    // A getter, so a DM never reads the admin count, as in the command gate.
+    get adminCount() { return adminCount(); },
+    // A DM's only reader is the sender; in a per_chat DM the gate never asks.
+    isAdmin: () => false,
+  });
+  if (gateDenies) return false;
+  // Ingest's own paused-chat rule, asked about the exact text the sentence
+  // names. turn.conversationKey is the key ingest journaled this chat's
+  // message under, so both see the same chat. /stop is not an admin command,
+  // so ingest's admin exemption never applies to it.
+  return pausedChatAdmission(pausedChatSettings, turn, STOP_COMMAND_TEXT) !== 'held';
+}
 
 export const DEFAULT_QUEUED_TURN_RECEIPT_COOLDOWN_MS = 60_000;
 
@@ -56,7 +158,7 @@ export interface QueuedTurnAdmission {
   readonly scope: SessionScope;
   readonly mapKey: string;
   /** The chat's runtime TurnQueue as it stands right after the enqueue call. */
-  readonly queue: Pick<TurnQueue, 'activeTurn'> | undefined;
+  readonly queue: Pick<TurnQueue, 'activeTurn' | 'pending'> | undefined;
   readonly turn: QueuedTurn;
   /** The boolean the enqueue returned. */
   readonly admitted: boolean;
@@ -66,6 +168,13 @@ export interface QueuedTurnReceiptNotifierOpts {
   readonly enabled: () => boolean;
   /** Out-of-band send. Must not route through the active turn's outbound queue. */
   readonly send: (chatJid: string, text: string) => Promise<void>;
+  /** Configured admin count, the /stop gate's input (see WORDING above). A
+   *  group receipt never reads it. */
+  readonly adminCount: () => number;
+  /** The live paused-chat settings ingest applies (the config object, not a
+   *  snapshot), read only for a DM receipt (see WORDING above). Required, so a
+   *  wiring that omits it cannot quietly offer /stop in a paused chat. */
+  readonly pausedChatSettings: PausedChatSettings;
   /** Time source for the cooldown; defaults to the system clock. */
   readonly clock?: Clock;
   readonly cooldownMs?: number;
@@ -75,12 +184,16 @@ export class QueuedTurnReceiptNotifier {
   private readonly lastSentAt = new Map<string, number>();
   private readonly enabled: () => boolean;
   private readonly send: (chatJid: string, text: string) => Promise<void>;
+  private readonly adminCount: () => number;
+  private readonly pausedChatSettings: PausedChatSettings;
   private readonly clock: Clock;
   private readonly cooldownMs: number;
 
   constructor(opts: QueuedTurnReceiptNotifierOpts) {
     this.enabled = opts.enabled;
     this.send = opts.send;
+    this.adminCount = opts.adminCount;
+    this.pausedChatSettings = opts.pausedChatSettings;
     this.clock = opts.clock ?? systemClock;
     this.cooldownMs = opts.cooldownMs ?? DEFAULT_QUEUED_TURN_RECEIPT_COOLDOWN_MS;
   }
@@ -93,13 +206,16 @@ export class QueuedTurnReceiptNotifier {
     try {
       const decision = this.decide(admission);
       if (decision !== 'sent') return decision;
-      const { mapKey, turn } = admission;
+      const { scope, mapKey, turn, queue } = admission;
+      const stopOffered = receiptOffersStop(scope, turn, this.adminCount, this.pausedChatSettings);
+      // decide() returned 'sent' only with a non-null active turn other than this one.
+      const text = queuedTurnReceiptText(queue!.activeTurn!, turn, queue!.pending, stopOffered);
       this.lastSentAt.set(mapKey, this.clock.now());
       this.pruneExpired();
-      void this.send(turn.chatJid, QUEUED_TURN_RECEIPT_TEXT).catch((err: unknown) => {
+      void this.send(turn.chatJid, text).catch((err: unknown) => {
         log.warn({ err, mapKey, inboundSeq: turn.inboundSeq }, 'queued-turn receipt send failed');
       });
-      log.info({ mapKey, inboundSeq: turn.inboundSeq }, 'queued-turn receipt sent');
+      log.info({ mapKey, inboundSeq: turn.inboundSeq, stopOffered }, 'queued-turn receipt sent');
       return 'sent';
     } catch (err) {
       log.warn({ err, mapKey: admission.mapKey }, 'queued-turn receipt decision failed');
