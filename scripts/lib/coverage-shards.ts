@@ -99,8 +99,9 @@ function coverageFiles(report: unknown, root: string): string[] {
     throw new Error('Coverage report has missing or empty coverage');
   }
   for (const [path, entry] of Object.entries(report.coverageMap)) {
-    if (!repositoryPath(root, path).startsWith('src/') || !isRecord(entry) || entry.path !== path) {
-      throw new Error('Coverage report has foreign or invalid coverage');
+    const name = repositoryPath(root, path);
+    if (!(name.startsWith('src/') || name.startsWith('console/src/')) || !isRecord(entry) || entry.path !== path) {
+      throw new Error(`Coverage report has foreign or invalid coverage: ${path}`);
     }
     for (const [countsKey, mapKey] of [['s', 'statementMap'], ['f', 'fnMap'], ['b', 'branchMap']] as const) {
       const counts = entry[countsKey];
@@ -128,7 +129,8 @@ export function validateCoverageShards(rawPlan: unknown, rawReceipts: readonly u
   const seen = new Set<number>();
   const artifacts = new Set<string>();
   const blobs: string[] = [];
-  let scope: string[] | undefined;
+  const scope = new Set<string>();
+  let rootScope: string[] | undefined;
   const tests = { total: 0, passed: 0, failed: 0, pending: 0, todo: 0 };
   for (const raw of rawReceipts) {
     const parsed = receiptSchema.safeParse(raw);
@@ -159,10 +161,16 @@ export function validateCoverageShards(rawPlan: unknown, rawReceipts: readonly u
       throw new Error(`Coverage shard ${receipt.index} test inventory mismatch`);
     }
     const currentScope = coverageFiles(report, plan.identity.root);
-    if (scope && JSON.stringify(scope) !== JSON.stringify(currentScope)) throw new Error('Coverage shard scope mismatch');
-    scope = currentScope;
+    // Native include adds every root source, while console coverage follows executed imports.
+    // Keep root parity and compare the complete union with the native merged report.
+    const currentRootScope = currentScope.filter((path) => repositoryPath(plan.identity.root, path).startsWith('src/'));
+    if (currentRootScope.length === 0 || rootScope && JSON.stringify(rootScope) !== JSON.stringify(currentRootScope)) {
+      throw new Error('Coverage shard scope mismatch');
+    }
+    rootScope = currentRootScope;
+    for (const path of currentScope) scope.add(path);
     for (const key of Object.keys(tests) as (keyof typeof tests)[]) tests[key] += counts[key];
     blobs[receipt.index - 1] = receipt.blobPath;
   }
-  return { blobPaths: blobs, coverageFiles: scope!, tests };
+  return { blobPaths: blobs, coverageFiles: [...scope].sort(), tests };
 }

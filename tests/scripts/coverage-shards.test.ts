@@ -147,4 +147,33 @@ describe('coverage shard admission', () => {
     receipt.reportSha256 = hash(readFileSync(receipt.reportPath));
     expect(() => validateCoverageShards(plan, receipts)).toThrow(/coverage.*scope/i);
   });
+
+  it('unions console sources covered by different shards without dropping root coverage', () => {
+    const { plan, receipts } = fixture();
+    for (const receipt of receipts) {
+      const report = JSON.parse(readFileSync(receipt.reportPath, 'utf8'));
+      const path = `/fixture/repository/console/src/side-${receipt.index}.ts`;
+      report.coverageMap[path] = { ...report.coverageMap['/fixture/repository/src/main.ts'], path };
+      writeFileSync(receipt.reportPath, JSON.stringify(report));
+      receipt.reportSha256 = hash(readFileSync(receipt.reportPath));
+    }
+    expect(validateCoverageShards(plan, receipts).coverageFiles).toEqual([
+      '/fixture/repository/console/src/side-1.ts',
+      '/fixture/repository/console/src/side-2.ts',
+      '/fixture/repository/src/main.ts',
+    ]);
+  });
+
+  it.each(['scripts/tool.ts', 'tests/fixture.ts', 'console/other.ts'])(
+    'rejects unrelated repository coverage at %s', (name) => {
+      const { plan, receipts } = fixture();
+      const receipt = receipts[0]!;
+      const report = JSON.parse(readFileSync(receipt.reportPath, 'utf8'));
+      const path = `/fixture/repository/${name}`;
+      report.coverageMap[path] = { ...report.coverageMap['/fixture/repository/src/main.ts'], path };
+      writeFileSync(receipt.reportPath, JSON.stringify(report));
+      receipt.reportSha256 = hash(readFileSync(receipt.reportPath));
+      expect(() => validateCoverageShards(plan, receipts)).toThrow(/foreign.*coverage/i);
+    },
+  );
 });

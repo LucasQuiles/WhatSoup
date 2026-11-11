@@ -158,6 +158,13 @@ ${existing}`);
 
   it('runs two isolated native blobs and enforces thresholds only on their complete merge', () => {
     const { cwd, plan, output, run } = fixture();
+    mkdirSync(join(cwd, 'console/src'));
+    for (const [name, value] of [['a', 'true'], ['b', 'false']]) {
+      writeFileSync(join(cwd, `console/src/${name}.ts`), `export const side = () => ${value};\n`);
+      const test = join(cwd, `tests/${name}.test.ts`);
+      writeFileSync(test, `import { side } from '../console/src/${name}.ts';\n`
+        + readFileSync(test, 'utf8').replace(`choose(${value})`, 'choose(side())'));
+    }
     const planned = run('plan', '--out', plan, '--max-workers', '1');
     expect(planned.status, planned.stderr).toBe(0);
     for (const index of ['1', '2']) {
@@ -171,6 +178,9 @@ ${existing}`);
     const summary = JSON.parse(readFileSync(join(cwd, 'coverage/coverage-summary.json'), 'utf8'));
     expect(summary.total.branches.pct).toBe(100);
     expect(summary.total.functions.pct).toBe(100);
+    expect(Object.keys(summary).filter((path) => path !== 'total').sort()).toEqual([
+      join(cwd, 'console/src/a.ts'), join(cwd, 'console/src/b.ts'), join(cwd, 'src/main.ts'),
+    ]);
   }, 30_000);
 
   it('fails the normal merge command when complete coverage misses the unchanged floors', () => {

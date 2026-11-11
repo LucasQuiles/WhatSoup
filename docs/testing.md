@@ -188,7 +188,11 @@ dependency/configuration hashes, execution ID, Node/Vitest versions, platform,
 architecture, worker count and absolute checkout root. Changed inputs require a
 new plan. Exactly one successful receipt per shard is required. Native nonzero
 exits, missing/duplicate files, mismatched identities, corrupt artifacts and
-inconsistent coverage scopes prevent merge. Documented test skips stay visible.
+inconsistent root-source coverage scopes prevent merge. Native Vitest also reports
+executed `console/src` imports; those may differ between shards. The validator
+unions those entries and requires the native merged report to match that complete
+union, while every shard must retain the same nonempty root-source scope.
+Documented test skips stay visible.
 Per-shard coverage is partial; only the native blob merge applies the existing
 95/90/93 floors. Console consumption and headroom checks follow that complete report.
 
