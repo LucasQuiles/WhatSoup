@@ -267,7 +267,9 @@ export interface DegradationLatchEntry {
  * evaluation never enter a latch at all (DIRECTLY_REPROBED_STATUS_REASONS
  * below). The task-21 identity reasons
  * (`runtime.credential_identity_mismatch` / `_unverifiable`) are deliberately
- * absent: a turn proves the credential works, not whose it is. Named and
+ * absent: a turn proves the credential works, not whose it is. A latched
+ * `_unverifiable` leaves only through an identity check (the direct re-probe,
+ * LatchReprobeEvidence.accountIdentityMatchedAfterLatch). Named and
  * exported so review can adjust membership without touching the release
  * mechanics. */
 export const TURN_PROVABLE_STATUS_REASONS: ReadonlySet<string> = new Set([
@@ -475,6 +477,29 @@ export interface LatchReprobeEvidence {
   databaseRetentionClear: boolean;
   schemaReady: boolean;
   pendingPollsReadable: boolean;
+  /** #3562: the runtime's identity verdict reads a fresh `match` whose check
+   * ran strictly after the latch point (and not in the future). An expired
+   * match (stale-receipt), a missing verdict, a mismatch, or a match checked
+   * at or before the latch point is not proof. */
+  accountIdentityMatchedAfterLatch: boolean;
+}
+
+/** #3562: the identity proof for a latched `runtime.credential_identity_unverifiable`.
+ * The verdict is the agent runtime's own freshness-honest projection
+ * (deriveAccountIdentityHealth), so `match` with `stale` false already means
+ * the check is inside its window; the check time must also postdate the
+ * latch point, because a check the latch already saw cannot prove a recovery
+ * after it. Wall time on both sides: latchedAtMs is wall time. */
+function accountIdentityMatchedAfter(details: Record<string, unknown> | null | undefined, latchedAtMs: number, nowMs: number): boolean {
+  const identity = details?.['accountIdentity'];
+  if (identity === null || typeof identity !== 'object') return false;
+  const { status, stale, checkedAt } = identity as Record<string, unknown>;
+  return status === 'match'
+    && stale === false
+    && typeof checkedAt === 'number'
+    && Number.isFinite(checkedAt)
+    && checkedAt > latchedAtMs
+    && checkedAt <= nowMs;
 }
 
 function latchedReasonReprobedClear(reason: string, evidence: LatchReprobeEvidence): boolean {
@@ -490,9 +515,12 @@ function latchedReasonReprobedClear(reason: string, evidence: LatchReprobeEviden
   if (reason === 'database_retention_failed') return evidence.databaseRetentionClear;
   if (reason === 'schema_not_ready') return evidence.schemaReady;
   if (reason === 'pending_polls_unreadable') return evidence.pendingPollsReadable;
+  // A mismatch is never re-probed clear: the owner corrects the login and the
+  // process restarts. A successful turn proves neither identity reason.
+  if (reason === 'runtime.credential_identity_unverifiable') return evidence.accountIdentityMatchedAfterLatch;
   // No direct probe: the turn pipeline (turn-receipt proof only), child-reported
   // runtime and enrichment-runtime state (a passive or Chat runtime_degraded /
-  // runtime_unhealthy among them), identity, schema_future and
+  // runtime_unhealthy among them), identity mismatch, schema_future and
   // fact_export_consumer_missing, whose failed read falls back to a clean-looking
   // idle state. Such a reason holds the latch until the process restarts.
   return false;
@@ -2719,6 +2747,12 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
                 databaseRetentionClear: databaseRetention !== null && !databaseRetentionFailed,
                 schemaReady,
                 pendingPollsReadable,
+                accountIdentityMatchedAfterLatch: deps.instanceType === 'agent'
+                  && accountIdentityMatchedAfter(
+                    runtimeSnapshot?.details as Record<string, unknown> | undefined,
+                    latchBeforeEvaluation.latchedAtMs,
+                    systemClock.now(),
+                  ),
               }
             : null;
           if (releaseDegradationLatchOnReprobe(recentlyDegraded, deps.instanceName, reprobeEvidence, performance.now())) {

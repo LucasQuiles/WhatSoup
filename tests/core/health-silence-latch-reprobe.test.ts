@@ -795,6 +795,7 @@ describe('releaseDegradationLatchOnReprobe — the re-probe release contract', (
     databaseRetentionClear: true,
     schemaReady: true,
     pendingPollsReadable: true,
+    accountIdentityMatchedAfterLatch: true,
   };
   const latch = (reasons: string[]): Map<string, DegradationLatchEntry> =>
     new Map([[NAME, { latchedAtMs: T0, reasons: new Set(reasons) }]]);
@@ -841,6 +842,22 @@ describe('releaseDegradationLatchOnReprobe — the re-probe release contract', (
       expect(health.releaseDegradationLatchOnReprobe(map, NAME, CLEAN, T0 + 1 + WINDOW_MS), reason).toBe(false);
       expect(map.has(NAME)).toBe(true);
     }
+  });
+
+  it('a latched identity unverifiable needs a fresh match checked after the latch point', () => {
+    const noMatch = { ...CLEAN, accountIdentityMatchedAfterLatch: false };
+    const unproven = latch(['runtime.credential_identity_unverifiable']);
+    expect(health.releaseDegradationLatchOnReprobe(unproven, NAME, noMatch, T0 + 1)).toBe(false);
+    expect(health.releaseDegradationLatchOnReprobe(unproven, NAME, noMatch, T0 + 1 + WINDOW_MS)).toBe(false);
+    expect(unproven.has(NAME)).toBe(true);
+    const matched = latch(['runtime.credential_identity_unverifiable']);
+    expect(health.releaseDegradationLatchOnReprobe(matched, NAME, CLEAN, T0 + 1)).toBe(false);
+    expect(health.releaseDegradationLatchOnReprobe(matched, NAME, CLEAN, T0 + 1 + WINDOW_MS)).toBe(true);
+    // The same proof never clears a mismatch latched beside it.
+    const both = latch(['runtime.credential_identity_unverifiable', 'runtime.credential_identity_mismatch']);
+    expect(health.releaseDegradationLatchOnReprobe(both, NAME, CLEAN, T0 + 1)).toBe(false);
+    expect(health.releaseDegradationLatchOnReprobe(both, NAME, CLEAN, T0 + 1 + WINDOW_MS)).toBe(false);
+    expect([...both.get(NAME)!.reasons]).toEqual(['runtime.credential_identity_mismatch']);
   });
 
   it.each([

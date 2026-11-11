@@ -830,9 +830,13 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
   without a direct probe keep the proof they needed before. These are the
   turn-pipeline reasons, child-reported runtime (a passive or Chat
   `runtime_degraded` or `runtime_unhealthy` among them) and
-  `enrichment_runtime_degraded`, the identity reasons, `schema_future`, and
-  `fact_export_consumer_missing`, whose failed read falls back to an idle
-  state that looks clean.
+  `enrichment_runtime_degraded`, `runtime.credential_identity_mismatch`,
+  `schema_future`, and `fact_export_consumer_missing`, whose failed read falls
+  back to an idle state that looks clean. A latched
+  `runtime.credential_identity_unverifiable` is re-probed by the identity
+  check itself: it counts as clear only while the agent runtime reports a
+  fresh `match` whose check ran after the latch point. An expired match, a
+  missing verdict, a mismatch, and a successful turn are not that proof.
 - **Restart amnesia (known hazard, not a channel).** The latch is
   process-lifetime, in-memory state: a process restart clears it without any
   recovery proof. Nothing treats a restart as proof; the loss is a documented
@@ -842,8 +846,9 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
   underlying condition is fixed and the process restarts, even after a later
   evaluation stops reporting it. Examples are `runtime.recent_crashes`,
   `runtime.turn_queue_halted`, `enrichment_runtime_degraded`, a passive or
-  Chat instance's `runtime_degraded` or `runtime_unhealthy`, the identity
-  reasons, `schema_future`, and `fact_export_consumer_missing`. The late
+  Chat instance's `runtime_degraded` or `runtime_unhealthy`,
+  `runtime.credential_identity_mismatch`, `schema_future`, and
+  `fact_export_consumer_missing`. The late
   reasons among them never arm a latch, but they join one that is already
   armed. On an agent instance, `turn_capability_degraded` and
   `agent_runtime_*` leave only through a turn receipt, and only when every
@@ -1176,9 +1181,11 @@ primary-usability probe and reports the verdict as
 `runtime.agent.accountIdentity` (status classes and digest prefixes only).
 `credential_identity_mismatch` (critical) and `credential_identity_unverifiable`
 (warning) are alert sources and degradation causes with the reason twins
-`runtime.credential_identity_*`; neither is turn-provable, so a latched
-identity degradation releases only on a restart after the owner corrects the
-login. The runtime never heals, mirrors, or seeds a credential from this
+`runtime.credential_identity_*`; neither is turn-provable. A latched mismatch
+releases only on a restart after the owner corrects the login. A latched
+unverifiable (for example a match receipt that expired before the next check
+landed) releases when a later check matches and that fresh match holds across
+the one-minute re-probe window. The runtime never heals, mirrors, or seeds a credential from this
 check — see
 [Ratified account identity](configuration.md#ratified-account-identity-serviceexpectedaccountdigest).
 
