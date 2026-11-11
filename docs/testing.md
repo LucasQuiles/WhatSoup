@@ -157,6 +157,67 @@ HTML tree from routine gates; `npm run coverage -- --pool=forks` retains HTML fo
 manual inspection. Thresholds and the strict console coverage check are unchanged.
 Without HTML's summary mutation, empty files use Istanbul's default 100% for zero
 counted lines; those unchanged zero counts do not establish exercised code.
+
+### Local coverage shard pilot
+
+`npm run coverage:shards -- --help` exposes the opt-in plan, shard and merge commands.
+The existing `coverage:check` remains the full default, including the strict console
+report consumer. The pilot verifies root coverage only; it does not replace console,
+static, behavioral, Docker, Python or platform checks.
+
+Create an owned artifact directory outside the checkout, then run:
+
+```bash
+npm run coverage:shards -- plan --out "$COVERAGE_ARTIFACTS/plan.json" --max-workers 2
+npm run coverage:shards -- shard --plan "$COVERAGE_ARTIFACTS/plan.json" --index 1 --out "$COVERAGE_ARTIFACTS/shard-1"
+npm run coverage:shards -- shard --plan "$COVERAGE_ARTIFACTS/plan.json" --index 2 --out "$COVERAGE_ARTIFACTS/shard-2"
+npm run coverage:shards -- merge --plan "$COVERAGE_ARTIFACTS/plan.json" --receipts "$COVERAGE_ARTIFACTS"
+npm --prefix console run coverage:check -- --strict
+npm run guard:coverage-headroom
+```
+
+`COVERAGE_ARTIFACTS` must name a caller-owned temporary directory with cleanup at the
+end of the run. Retain only required evidence under the normal artifact policy.
+Pass `--timings` a prior successful Vitest JSON report from the same checkout to
+balance durations. New files use an estimated duration; without a report the plan
+explicitly reports equal estimates. Ordinary per-shard ordering remains Vitest's
+duration-aware ordering, with isolated forks and compile caching disabled.
+
+The plan binds the complete native file inventory, source and input digest,
+dependency/configuration hashes, execution ID, Node/Vitest versions, platform,
+architecture, worker count and absolute checkout root. Changed inputs require a
+new plan. Exactly one successful receipt per shard is required. Native nonzero
+exits, missing/duplicate files, mismatched identities, corrupt artifacts and
+inconsistent coverage scopes prevent merge. Documented test skips stay visible.
+Per-shard coverage is partial; only the native blob merge applies the existing
+95/90/93 floors. Console consumption and headroom checks follow that complete report.
+
+The commands reuse the existing checkout lock, admission and bounded process
+execution. The default shard budget is 45 minutes and merge budget is 5 minutes;
+`--timeout-ms` includes setup and admission, with report/cleanup headroom reserved
+inside it. The existing process watchdog bounds the full operation, including
+synchronous source snapshots and artifact reads; a separate bounded cleanup uses
+the reserved time. Its parent receives at most 64 KiB of terminal JSON through a
+pipe and performs no synchronous artifact reads or directory allocation. All elapsed
+budgets use a monotonic clock. Plans, inventories and dependency locks are bounded
+to 8 MiB, configuration and tool metadata to 1 MiB, receipts to 64 KiB, and coverage
+artifacts to 256 MiB. Input leaves must be regular files, not symlinks or FIFOs;
+the native sequencer also verifies the admitted plan digest. Duplicate timing names
+are rejected. The native default reporter keeps failure diagnostics on stderr
+alongside the machine-readable blob and JSON reports. Native failures retain
+their result if the final source check also fails. This does not extend CI's outer timeout. A failed or interrupted output
+without a successful receipt is incomplete; inspect its result before retrying
+into a fresh output directory. Existing output directories are never overwritten.
+An unverified child reap or failed cleanup returns inconclusive and names retained
+scratch. Reconcile that owned execution and any checkout lock before removal or retry.
+
+Current qualification is local. The plan and receipts require the same absolute
+checkout and artifact paths; copying outputs to a different root is unsupported.
+Cross-host path portability, full-suite parity, three matched performance comparisons
+and CI activation must qualify before replacing hosted coverage execution.
+
+### Other validation obligations
+
 The browser performance measurements remain report-only by default because their
 budgets are provisional. To enforce the existing 50 ms mount and 16 ms update
 budgets, run `PERF_LANE_ENFORCE=1 npm run test:browser -- tests/browser/perf-budget.test.tsx`.

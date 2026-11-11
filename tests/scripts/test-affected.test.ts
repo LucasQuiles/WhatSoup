@@ -29,6 +29,23 @@ const completedReport = {
 };
 
 describe('affected test execution', () => {
+  it('keeps remaining budgets and elapsed duration independent of wall-clock jumps', async () => {
+    const cwd = tmp.make('clock-jump');
+    const marker = join(cwd, 'executed');
+    let time = 0;
+    const wall = vi.spyOn(Date, 'now').mockImplementation(() => { time += 60_000; return time; });
+    try {
+      const result = await executeTestCommands(cwd, [{ name: 'clock-jump', command: process.execPath,
+        args: ['-e', 'require("node:fs").writeFileSync(process.argv[1], "executed")', marker] }],
+      { timeoutMs: 5000, json: true });
+      expect(result).toMatchObject({ outcome: 'passed', exitCode: 0 });
+      expect(readFileSync(marker, 'utf8')).toBe('executed');
+      expect(result.wallMs).toBeGreaterThanOrEqual(0);
+      expect(result.wallMs).toBeLessThan(5000);
+      expect(result.results[0]!.wallMs).toBeLessThan(5000);
+    } finally { wall.mockRestore(); }
+  });
+
   it('passes CI context without copying unrelated parent credentials to workers', async () => {
     const cwd = tmp.make('environment');
     const observation = join(cwd, 'environment.json');

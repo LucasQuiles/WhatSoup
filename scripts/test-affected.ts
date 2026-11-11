@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 import { acquireProcessLock, isProcessLockError, releaseProcessLock } from '../src/lib/process-lock.ts';
 import { isRecord } from '../src/lib/type-guards.ts';
@@ -70,7 +71,10 @@ export function buildTestCommands(cwd: string, plan: TestPlan): TestCommand[] {
 }
 
 export function readTestCounts(reportPath: string): TestCounts {
-  const report: unknown = JSON.parse(readFileSync(reportPath, 'utf8'));
+  return parseTestCounts(JSON.parse(readFileSync(reportPath, 'utf8')));
+}
+
+export function parseTestCounts(report: unknown): TestCounts {
   const fields = ['numTotalTests', 'numPassedTests', 'numFailedTests', 'numPendingTests', 'numTodoTests'] as const;
   if (!isRecord(report) || report.success !== true || report.numFailedTestSuites !== 0 || report.numPendingTestSuites !== 0
     || !Array.isArray(report.testResults) || report.testResults.length === 0
@@ -96,7 +100,8 @@ export async function executeTestCommands(
   commands: readonly TestCommand[],
   options: { timeoutMs: number; json: boolean; lockPath?: string; loadgate?: string; env?: NodeJS.ProcessEnv; cleanupScratch?: (directory: string) => void; inheritOuterGroup?: boolean },
 ): Promise<TestExecution> {
-  const start = Date.now();
+  const clock = () => performance.now();
+  const start = clock();
   const results: TestExecution['results'] = [];
   if (!commands.length) return { outcome: 'not-required', exitCode: 0, wallMs: 0, results };
   const lockPath = options.lockPath ?? join(cwd, '.local/test-run.lock');
@@ -105,12 +110,12 @@ export async function executeTestCommands(
   try { lock = acquireProcessLock(lockPath); }
   catch (error) {
     if (!isProcessLockError(error)) throw error;
-    return { outcome: 'busy', exitCode: 75, wallMs: Date.now() - start, results, error: `${error.reason} test lock; owner PID ${error.existingPid ?? 'unknown'} at ${lockPath}. Inspect the owner before retrying; this run did not queue or remove the lock.` };
+    return { outcome: 'busy', exitCode: 75, wallMs: clock() - start, results, error: `${error.reason} test lock; owner PID ${error.existingPid ?? 'unknown'} at ${lockPath}. Inspect the owner before retrying; this run did not queue or remove the lock.` };
   }
   let scratch: string | undefined;
   let execution: TestExecution | undefined;
   const complete = (outcome: TestExecution['outcome'], exitCode: number, error?: string): TestExecution => {
-    execution = { outcome, exitCode, wallMs: Date.now() - start, results, error };
+    execution = { outcome, exitCode, wallMs: clock() - start, results, error };
     return execution;
   };
   try {
@@ -125,7 +130,7 @@ export async function executeTestCommands(
       PATH: `${dirname(process.execPath)}:${process.env.PATH ?? ''}`,
     };
     for (const step of commands) {
-      const remaining = options.timeoutMs - (Date.now() - start);
+      const remaining = options.timeoutMs - (clock() - start);
       if (remaining <= 0) return complete('timedOut', 124);
       process.stderr.write(`test:affected: ${step.name} (remaining ${remaining}ms)\n`);
       const reportPath = join(scratch, `vitest-${results.length}.json`);
@@ -139,6 +144,7 @@ export async function executeTestCommands(
           command: options.loadgate ?? step.command,
           args: admission ?? args,
           cwd: step.cwd ?? cwd, env, timeoutMs: remaining,
+          now: clock,
           stdio: options.json ? 'diagnostic' : 'inherit',
           inheritOuterGroup: options.inheritOuterGroup,
         });
@@ -180,7 +186,7 @@ export async function executeTestCommands(
       cleanupErrors.push(`test lock release failed: ${String(error)}`);
     }
     if (execution) {
-      execution.wallMs = Date.now() - start;
+      execution.wallMs = clock() - start;
       if (cleanupErrors.length) {
         // Retain child evidence even when cleanup or ownership cannot be established.
         execution.outcome = 'inconclusive';

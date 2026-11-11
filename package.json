@@ -161,6 +161,7 @@
     "test:drills": "bash tests/drills/bot-errors-failure-drills.sh",
     "coverage": "vitest run --coverage",
     "coverage:check": "bash scripts/run-coverage-check.sh",
+    "coverage:shards": "bash scripts/run-with-pinned-node.sh scripts/coverage-shards.ts",
     "test:watch": "vitest",
     "test:browser": "vitest run --config vitest.browser.config.ts",
     "test:browser:motion": "vitest run --config vitest.browser.motion.config.ts",

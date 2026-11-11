@@ -51,6 +51,20 @@ function eperm(): never {
 }
 
 describe('runBoundedBattery (externally bounded full-suite runner)', () => {
+  it('captures a bounded terminal response while preserving a native failure', async () => {
+    const result = await runBoundedBattery({ command: NODE,
+      args: ['-e', 'process.stdout.write(JSON.stringify({ outcome: "failed" })); process.exitCode = 7;'],
+      timeoutMs: 5000, stdoutLimitBytes: 128 });
+    expect(result).toMatchObject({ outcome: 'failed', wrappedExit: 7, stdout: '{"outcome":"failed"}' });
+  });
+
+  it('kills an overflowing result producer and refuses its successful exit', async () => {
+    const result = await runBoundedBattery({ command: NODE,
+      args: ['-e', 'process.stdout.write("x".repeat(65536)); setInterval(() => {}, 1000);'],
+      timeoutMs: 5000, graceMs: 1000, stdoutLimitBytes: 128 });
+    expect(result).toMatchObject({ outcome: 'inconclusive', wrappedExit: 125, timedOut: false, outputLimitExceeded: true, stdout: '' });
+  });
+
   it('a fast clean child reports outcome:passed and wrappedExit 0', async () => {
     const r = await runBoundedBattery({ command: NODE, args: ['-e', 'process.exit(0)'], timeoutMs: 10_000, stdio: 'ignore' });
     expect(r).toMatchObject({ outcome: 'passed', timedOut: false, exitCode: 0, wrappedExit: 0 });

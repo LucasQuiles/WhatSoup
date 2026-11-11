@@ -55,6 +55,9 @@ export interface BoundedBatteryResult {
   wrappedExit: number;
   /** Non-fatal group-reap diagnostics (e.g. an EPERM that made the result inconclusive). */
   reapError?: string;
+  /** Present only when bounded stdout capture was requested. */
+  stdout?: string;
+  outputLimitExceeded?: boolean;
 }
 
 export interface BoundedBatteryOptions {
@@ -71,6 +74,8 @@ export interface BoundedBatteryOptions {
   inheritOuterGroup?: boolean;
   /** Child stdio; diagnostic preserves child output on stderr for callers whose stdout is JSON. */
   stdio?: 'inherit' | 'ignore' | 'pipe' | 'diagnostic';
+  /** Capture stdout for a terminal protocol response; stderr stays diagnostic. */
+  stdoutLimitBytes?: number;
   /** Injected clock for testability (defaults to Date.now). */
   now?: () => number;
   /** Terminal-grace bound (ms) after a kill before declaring INCONCLUSIVE; overridable for tests. */
@@ -247,6 +252,10 @@ const REAP_GRACE_MS = 5_000;
  * whole-group reap, so it reports INCONCLUSIVE (125) after force-stopping its direct child.
  */
 export function runBoundedBattery(options: BoundedBatteryOptions): Promise<BoundedBatteryResult> {
+  if (options.stdoutLimitBytes !== undefined && (!Number.isSafeInteger(options.stdoutLimitBytes)
+    || options.stdoutLimitBytes < 1 || options.stdoutLimitBytes > 16 * 1024 * 1024)) {
+    throw new Error('Invalid bounded stdout limit');
+  }
   const clock = options.now ?? Date.now;
   const graceMs = options.graceMs ?? REAP_GRACE_MS;
   const started = clock();
@@ -272,7 +281,8 @@ export function runBoundedBattery(options: BoundedBatteryOptions): Promise<Bound
       ...suppliedEnv,
       [BATTERY_OWNER_PID_ENV]: String(outerBattery?.ownerPid ?? process.pid),
     };
-    const stdio: StdioOptions = options.stdio === 'diagnostic' ? ['inherit', 2, 2] : options.stdio ?? 'inherit';
+    const stdio: StdioOptions = options.stdoutLimitBytes !== undefined ? ['inherit', 'pipe', 2]
+      : options.stdio === 'diagnostic' ? ['inherit', 2, 2] : options.stdio ?? 'inherit';
     const child = spawn(options.command, [...options.args], {
       cwd: options.cwd,
       env: childEnv,
@@ -284,6 +294,9 @@ export function runBoundedBattery(options: BoundedBatteryOptions): Promise<Bound
     let timedOut = false;
     let settled = false;
     let reapError: string | undefined;
+    const output: Buffer[] = [];
+    let outputBytes = 0;
+    let outputLimitExceeded = false;
     let graceTimer: ReturnType<typeof setTimeout> | undefined;
     const pid = child.pid;
 
@@ -330,7 +343,12 @@ export function runBoundedBattery(options: BoundedBatteryOptions): Promise<Bound
       process.off(SIGNAL.TERM, onSignal);
       process.off(SIGNAL.INT, onSignal);
       process.off(SIGNAL.HUP, onSignal);
-      resolvePromise({ outcome, timedOut, exitCode: code, signal, wallMs: clock() - started, wrappedExit, reapError });
+      if (options.stdoutLimitBytes !== undefined) child.stdout?.destroy();
+      resolvePromise({ outcome, timedOut, exitCode: code, signal, wallMs: clock() - started, wrappedExit, reapError,
+        ...(options.stdoutLimitBytes === undefined ? {} : {
+          stdout: outputLimitExceeded ? '' : Buffer.concat(output).toString('utf8'), outputLimitExceeded,
+        }),
+      });
     };
 
     // Arm a TERMINAL grace that force-resolves INCONCLUSIVE (exit 125) if `close` never
@@ -372,6 +390,17 @@ export function runBoundedBattery(options: BoundedBatteryOptions): Promise<Bound
     // survives, reparented to PID 1 — an orphaned test run the battery exists to prevent.
     process.on(SIGNAL.HUP, onSignal);
 
+    if (options.stdoutLimitBytes !== undefined) child.stdout?.on('data', (chunk: Buffer) => {
+      if (settled || outputLimitExceeded) return;
+      outputBytes += chunk.length;
+      if (outputBytes > options.stdoutLimitBytes!) {
+        outputLimitExceeded = true;
+        output.length = 0;
+        killTarget();
+        armTerminalGrace('terminal output exceeded its byte limit — awaiting reap / close');
+      } else output.push(chunk);
+    });
+
     // Reap an owned group as soon as its leader exits, rather than waiting for a descendant that
     // still holds stdio open to delay `close`. `close` remains the verdict boundary below.
     child.once('exit', () => {
@@ -398,6 +427,7 @@ export function runBoundedBattery(options: BoundedBatteryOptions): Promise<Bound
       // returned 124 on a timed-out-AND-EPERM close, hiding a surviving process behind an
       // ordinary-timeout verdict (reviewer's reproduced EPERM case). Check `!reaped` FIRST.
       if (!reaped) { finish('inconclusive', code, signal, 125); return; }
+      if (outputLimitExceeded) { finish('inconclusive', code, signal, 125); return; }
       // A nested runner cannot prove that sibling workers in its shared outer group are gone.
       // Its outer owner will reap that group; until then an internal timeout/cancellation is
       // explicitly INCONCLUSIVE (never a false ordinary timeout or pass).
