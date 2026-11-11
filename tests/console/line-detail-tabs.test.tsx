@@ -585,8 +585,9 @@ describe('LineDetail header workflows', () => {
     await waitFor(() => expect(screen.queryByText('Delete test-line?')).toBeNull());
   });
 
-  it('keeps the user on the page when header delete fails', async () => {
-    vi.mocked(api.deleteLine).mockRejectedValueOnce(new Error('permission denied'));
+  it('keeps the user on the page without a success notification when cleanup is incomplete', async () => {
+    const message = 'Instance cleanup is incomplete. Inspect remaining state before retrying. (instance_cleanup_failed)';
+    vi.mocked(api.deleteLine).mockRejectedValueOnce(new Error(message));
 
     await act(async () => {
       renderLineDetail({ line: makeLine({ name: 'test-line', status: 'online' }) });
@@ -595,7 +596,8 @@ describe('LineDetail header workflows', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
     fireEvent.click(screen.getByRole('button', { name: 'Delete permanently' }));
 
-    await waitFor(() => expect(toastValue.error).toHaveBeenCalledWith('Delete failed: permission denied'));
+    await waitFor(() => expect(toastValue.error).toHaveBeenCalledWith(`Delete failed: ${message}`));
+    expect(toastValue.success).not.toHaveBeenCalled();
     expect(navigateMock).not.toHaveBeenCalledWith('/operator');
     await waitFor(() => expect(screen.queryByText('Delete test-line?')).toBeNull());
   });

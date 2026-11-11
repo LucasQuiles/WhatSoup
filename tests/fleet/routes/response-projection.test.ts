@@ -175,6 +175,18 @@ describe('response-error-projection — schema completeness', () => {
     expect(projected.code).toBe('restart_failed');
   });
 
+  it('keeps incomplete cleanup non-retryable and excludes private diagnostics', () => {
+    const projected = mutationError(Object.assign(new Error(MARKER), { code: 'EBUSY' }), {
+      operation: 'instance_delete', stage: 'commit', mutationState: 'unknown', rollbackState: 'not_applicable',
+    }, 'instance_cleanup_failed');
+    expect(projected).toMatchObject({
+      code: 'instance_cleanup_failed',
+      message: 'Instance cleanup is incomplete. Inspect remaining state before retrying.',
+      retryable: false, mutation_state: 'unknown', rollback_state: 'not_applicable',
+    });
+    assertNoMarker(projected);
+  });
+
   it('projects a silence-registry precondition failure through the closed v1 schema', () => {
     const projected = silenceRegistryUnavailableError(true);
     expect(projected).toMatchObject({
@@ -194,7 +206,7 @@ describe('response-error-projection — schema completeness', () => {
       'source_unavailable', 'permission_denied', 'storage_full',
       'service_action_failed', 'service_start_failed', 'service_stop_failed',
       'restart_failed', 'rollback_failed', 'config_read_failed',
-      'config_write_failed', 'instance_creation_failed', 'auth_failed',
+      'config_write_failed', 'instance_creation_failed', 'instance_cleanup_failed', 'auth_failed',
       'auth_timeout', 'validation_failed', 'internal_error',
       'embed_service_unavailable', 'log_scan_failed', 'silence_registry_unavailable',
     ];

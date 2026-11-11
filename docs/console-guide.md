@@ -66,6 +66,22 @@ Fleet health monitoring with instance management actions.
 
 The left panel shows every instance with its status, phone number, message count, and session info. Unhealthy instances display restart and delete buttons inline.
 
+Deletion succeeds only after the service is stopped and disabled and its config,
+data and state directories are removed. If cleanup is incomplete, the API returns
+`instance_cleanup_failed` with `mutation_state: unknown` and `retryable: false`.
+The line detail page shows the recovery message and stays open. Inspect the
+remaining directories and the correlated server log, correct the cleanup failure,
+then explicitly retry deletion. A failure can leave only part of the instance;
+it does not mean that deletion had no effect.
+
+Failed creation reports `rolled_back` with `rollback_state: succeeded` only after
+service compensation and filesystem restoration succeed. A rejected enable call
+can have changed service state before losing its response, so creation attempts
+disable before removing its files. Failed compensation retains the files and
+reports `rollback_failed` with `rollback_state: failed`. Inspect service state and
+the correlated server log before repair or another creation attempt; the API does
+not automatically retry an uncertain service operation.
+
 ![Unhealthy Instance Management](screenshots/ops-unhealthy.png)
 
 The console tab shows a structured log viewer with level filtering (all, error,

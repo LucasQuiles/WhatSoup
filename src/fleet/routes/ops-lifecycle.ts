@@ -163,7 +163,15 @@ export async function handleDeleteLine(
   }
 
   // 3. Remove config, data, and state directories
-  cleanupPartial(params.name);
+  const cleanupErrors = cleanupPartial(params.name);
+  if (cleanupErrors.length > 0) {
+    const response = mutationError(cleanupErrors[0], {
+      operation: 'instance_delete', stage: 'commit', mutationState: 'unknown', rollbackState: 'not_applicable',
+    }, 'instance_cleanup_failed');
+    log.error({ err: new AggregateError(cleanupErrors), instance: params.name, correlationId: response.correlation_id }, 'delete line: cleanup incomplete');
+    jsonResponse(res, 500, response);
+    return;
+  }
 
   // 4. Re-scan discovery so the instance disappears from the UI
   deps.discovery.scan();
@@ -209,14 +217,15 @@ function snapshotExtra(filePath: string): ExtraRecord {
 }
 
 /** Remove directories/files created during a partial instance creation. */
-function cleanupPartial(name: string, extras?: ExtraRecord[]): void {
+function cleanupPartial(name: string, extras?: ExtraRecord[]): unknown[] {
+  const errors: unknown[] = [];
   const dirs = [
     path.join(configRoot(), name),
     path.join(dataRoot(name)),
     path.join(stateRoot(name)),
   ];
   for (const d of dirs) {
-    try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* intentional: best-effort removal of a partial instance; cleanup must never throw */ }
+    try { fs.rmSync(d, { recursive: true, force: true }); } catch (error) { errors.push(error); }
   }
   if (extras) {
     for (const e of extras) {
@@ -228,9 +237,10 @@ function cleanupPartial(name: string, extras?: ExtraRecord[]): void {
           // Never recursive: extras are files, not directories.
           fs.rmSync(e.path, { force: true });
         }
-      } catch { /* intentional: swallow — cleanup must never throw */ }
+      } catch (error) { errors.push(error); }
     }
   }
+  return errors;
 }
 
 // ---------------------------------------------------------------------------
@@ -426,7 +436,7 @@ export async function handleCreateLine(
 
   // --- Create directories ---
   const createdExtras: ExtraRecord[] = [];
-  let serviceEnabled = false;
+  let serviceEnableAttempted = false;
   try {
     fs.mkdirSync(configRoot(), { recursive: true, mode: 0o700 });
     fs.mkdirSync(configDir, { mode: 0o700 });
@@ -495,8 +505,8 @@ export async function handleCreateLine(
     }
 
     // --- Enable service ---
+    serviceEnableAttempted = true;
     await deps.serviceManager.enable(name);
-    serviceEnabled = true;
 
     // --- Re-scan discovery ---
     deps.discovery.scan();
@@ -505,7 +515,8 @@ export async function handleCreateLine(
     publishFeedEvent(deps.realtime, name);
     jsonResponse(res, 201, { name, healthPort });
   } catch (err) {
-    if (serviceEnabled) {
+    // A rejected enable call can have changed service state before losing its response.
+    if (serviceEnableAttempted) {
       try {
         await deps.serviceManager.disable(name);
       } catch (rollbackErr) {
@@ -513,11 +524,19 @@ export async function handleCreateLine(
           { err: rollbackErr, originalErr: err, instance: name },
           'failed to disable service after instance creation failure',
         );
-        jsonResponse(res, 500, mutationError(err, { operation: 'instance_create', stage: 'rollback', mutationState: 'rollback_failed', rollbackState: 'failed' }));
+        jsonResponse(res, 500, mutationError(rollbackErr, { operation: 'instance_create', stage: 'rollback', mutationState: 'rollback_failed', rollbackState: 'failed' }, 'rollback_failed'));
         return;
       }
     }
-    cleanupPartial(name, createdExtras);
-    jsonResponse(res, 500, mutationError(err, { operation: 'instance_create', stage: 'commit', mutationState: 'not_started' }));
+    const cleanupErrors = cleanupPartial(name, createdExtras);
+    if (cleanupErrors.length > 0) {
+      const response = mutationError(cleanupErrors[0], {
+        operation: 'instance_create', stage: 'rollback', mutationState: 'rollback_failed', rollbackState: 'failed',
+      }, 'rollback_failed');
+      log.error({ err: new AggregateError(cleanupErrors), originalErr: err, instance: name, correlationId: response.correlation_id }, 'instance creation rollback cleanup incomplete');
+      jsonResponse(res, 500, response);
+      return;
+    }
+    jsonResponse(res, 500, mutationError(err, { operation: 'instance_create', stage: 'rollback', mutationState: 'rolled_back', rollbackState: 'succeeded' }));
   }
 }
