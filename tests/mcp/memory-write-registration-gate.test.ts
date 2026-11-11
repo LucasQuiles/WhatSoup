@@ -26,7 +26,7 @@ import { PresenceCache } from '../../src/transport/presence-cache.ts';
 import { registerAllTools } from '../../src/mcp/register-all.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
 import type { ToolDeclaration } from '../../src/mcp/types.ts';
-import { config } from '../../src/config.ts';
+import { config, resolveMemoryConfig } from '../../src/config.ts';
 
 function makeConnection(): ConnectionManager {
   return {
@@ -139,6 +139,32 @@ describe('memory_write registration gate (#1976)', () => {
     expect(registered).toBe(true);
     expect(declaration?.scope).toBe('chat');
     expect(vi.mocked(lookupCredential)).toHaveBeenCalledWith('pinecone', { skipEnv: true });
+  });
+
+  // From raw instance JSON through the real memory-config resolution to the
+  // gate: a key held under a configured, non-default keyring service must
+  // survive config resolution and open the gate (and only that service).
+  it('registers memory_write from a configured apiKeyService resolved by the config loader', () => {
+    vi.mocked(lookupCredential).mockImplementation((service: string) =>
+      service === 'pinecone-line-b' ? 'probe-keyring-dummy-not-a-secret' : null);
+    (config as { memory?: unknown }).memory = resolveMemoryConfig({
+      memory: { pinecone: { index: 'probe-index', apiKeyService: 'pinecone-line-b' } },
+    });
+    setGate('probe-index', DEFAULT_KEY_ENV, undefined);
+    const { registered } = registerAndInspect();
+    expect(registered).toBe(true);
+    expect(vi.mocked(lookupCredential)).toHaveBeenCalledWith('pinecone-line-b', { skipEnv: true });
+  });
+
+  it('a configured apiKeyService never borrows the default pinecone keyring entry', () => {
+    vi.mocked(lookupCredential).mockImplementation((service: string) =>
+      service === 'pinecone' ? 'probe-keyring-dummy-not-a-secret' : null);
+    (config as { memory?: unknown }).memory = resolveMemoryConfig({
+      memory: { pinecone: { index: 'probe-index', apiKeyService: 'pinecone-line-b' } },
+    });
+    setGate('probe-index', DEFAULT_KEY_ENV, undefined);
+    const { registered } = registerAndInspect();
+    expect(registered).toBe(false);
   });
 
   it('a keyring-held key still needs pineconeIndex', () => {

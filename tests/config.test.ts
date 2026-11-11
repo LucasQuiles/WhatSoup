@@ -2299,6 +2299,31 @@ describe('config — memory.pinecone.recordVisibility', () => {
   });
 });
 
+describe('config — memory.pinecone.apiKeyService', () => {
+  it('is unset by default and survives the real loader when configured', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({}));
+    const unset = await import('../src/config.ts');
+    expect(unset.config.memory.pinecone.apiKeyService).toBeUndefined();
+    vi.resetModules();
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: { pinecone: { index: 'whatsapp-bot', projectId: 'instance-proj-id', apiKeyService: 'pinecone-line-b' } },
+    }));
+    const set = await import('../src/config.ts');
+    expect(set.config.memory.pinecone.apiKeyService).toBe('pinecone-line-b');
+  });
+
+  it.each([
+    ['an empty string', ''],
+    ['a number', 7],
+    ['an object', { service: 'pinecone-line-b' }],
+  ])('rejects %s at load rather than falling back to the default key', async (_case, value) => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: { pinecone: { index: 'whatsapp-bot', projectId: 'instance-proj-id', apiKeyService: value } },
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(/memory\.pinecone\.apiKeyService must be a non-empty string/);
+  });
+});
+
 describe('config — pinecone env var overrides', () => {
   it('picks up PINECONE_PROJECT_ID env var when not set in instance', async () => {
     process.env.PINECONE_PROJECT_ID = 'env-proj-id';
