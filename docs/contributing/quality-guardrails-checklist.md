@@ -373,9 +373,13 @@ full object ID and a non-sensitive reason:
 npm run guard:git-estate -- baseline accept-stash --oid <full-object-id> --reason 'preserved work awaiting integration' --json
 ```
 
-This requires a valid existing baseline, two complete matching estate snapshots,
-and matching stash parents with all reachable objects present and of supported
-types. It adds only the selected stash finding; other finding IDs, counts and
+This requires a valid existing baseline, two complete matching snapshots of the
+common Git state and relevant worktrees, and matching stash parents with all
+reachable objects present and of supported types. The existing pusher scope
+includes the invoking worktree and the stash's attributable branch. An unreadable
+unrelated worktree does not prevent this narrow acknowledgment; unreadable relevant
+worktrees and unknown or changing stash attribution still refuse it.
+It adds only the selected stash finding; other finding IDs, counts and
 container identities retain their prior values. A different stash, conflict or
 worktree lock in the pusher's scope still blocks. The JSON receipt includes the reason; the baseline
 does not. This acknowledgment does not prove restored content, integration or

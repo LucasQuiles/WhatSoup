@@ -65,6 +65,10 @@ its own assertions and failure result. The temporary report is removed on succes
 or failure; combined mode refuses injected reports and baseline updates. Individual
 inventory commands remain available for focused investigation.
 
+Both the local release gate and the full Quality job run console lint, build and
+live design checks before root coverage. The full suite and its design tests
+remain required; an earlier build/design failure stops before that expensive run.
+
 The 2026-11-11 live protection readback requires both Quality contexts, CodeQL
 and `test-integrity (private)`, with one approving review and an up-to-date branch.
 The separate `pr metadata` requirement has not been activated. The committed
@@ -90,6 +94,14 @@ metadata execution and title/body edit triggers; the metadata workflow checks
 PR edits without restarting application suites. The metadata workflow also
 triggers for merge groups, but its PR metadata guard is skipped for those events;
 that path does not validate merge-group metadata.
+The PR job checks out the event's immutable base SHA, fetches and verifies the
+candidate head as Git data, and invokes the base metadata validator directly with
+Node. Candidate package scripts and validator imports are never executed.
+This does not make the `pull_request` workflow definition itself trusted: changes
+to that definition still require independent review and hosted qualification before
+the separate requirement is activated. Switching to `pull_request_target` needs
+its own authorized cutover; GitHub has announced a [public-repository default event
+policy block from December 2, 2026](https://github.blog/changelog/2026-11-02-pull_request_target-blocked-by-default-december-2/).
 Repository-wide merge-queue support remains unqualified: the required private
 scanner does not admit `merge_group` events, and CodeQL's behavior on queue refs
 has not been qualified. No merge queue is active in the observed ruleset. Keep it
@@ -173,6 +185,14 @@ Affected, full and performance jobs share the existing Playwright binary cache;
 the installer still checks the version required by the lockfile on every run.
 System package installation is separate and bounded so a download retry cannot
 repeat an interrupted package-manager transaction. Test verdicts remain uncached.
+The full Quality job also caches pip downloads/wheels through `setup-python`, keyed
+by Python/platform and the host installer input. It still creates and validates the
+quality environment on every run. Docker uses Buildx with the GitHub cache backend,
+loads the `whatsoup-ci` image locally and retains its integration checks. Only main
+pushes export the shared layer cache; transfers have a one-minute bound and export
+errors are non-fatal. No registry push, virtual environment or test result is cached.
+Hosted cold/warm and cache-failure qualification remains required before claiming
+these caches save time or provide a verified transport fallback.
 Quality calls the reusable `whatsoup-guard` workflow for Node 25 when guard
 validation is selected, including every full profile and merge-queue run.
 The required `quality (25.x)` check rejects failed, cancelled, skipped or missing

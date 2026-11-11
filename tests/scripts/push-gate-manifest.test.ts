@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { parse as parseYaml } from 'yaml';
@@ -106,6 +106,52 @@ describe('push-gate child outcomes', () => {
       expect(result.stderr).toMatch(/push-gate: guard:repo:release-hygiene terminated by SIGTERM \(pid \d+\); exit 143/);
     }
     expect(result.stdout).not.toContain('steps passed');
+  });
+
+  it.each([
+    ['local', 'console-build', '--prefix console run build'],
+    ['local', 'verify:console-design:live', 'run verify:console-design:live'],
+    ['hosted', 'Console build', '--prefix console run build'],
+    ['hosted', 'Console design verification', 'run verify:console-design:live'],
+  ])('%s fails %s before starting coverage', (lane, name, command) => {
+    const cwd = gateTmp.make('early-failure');
+    execFileSync('git', ['init', '--quiet', cwd], { env: cleanGitEnv(), timeout: 5_000 });
+    mkdirSync(join(cwd, 'scripts'));
+    writeFileSync(join(cwd, 'scripts/run-with-pinned-npm.sh'), '#!/bin/sh\nexec npm "$@"\n');
+    writeFileSync(join(cwd, 'npm'), `#!/bin/sh
+printf '%s\\n' "$*" >> "$(dirname "$0")/.git/events"
+if [ "$*" = '${command}' ]; then exit 17; fi
+`, { mode: 0o700 });
+    let executable = process.execPath;
+    let args = [resolve('scripts/push-gate.ts'), 'release'];
+    if (lane === 'hosted') {
+      const workflow = parseYaml(readFileSync('.github/workflows/quality.yml', 'utf8'));
+      const names = ['Install console dependencies', 'Console lint', 'Console build', 'Console design verification', 'Test suite + coverage thresholds'];
+      const steps = workflow.jobs.full.steps.filter((step: { name: string }) => names.includes(step.name));
+      expect(steps).toHaveLength(names.length);
+      for (const step of steps) {
+        expect(step.if).toBeUndefined();
+        expect(step['continue-on-error']).toBeUndefined();
+      }
+      executable = 'bash';
+      args = ['-e', '-o', 'pipefail', '-c', steps.map((step: { run: string }) => step.run).join('\n')];
+    }
+    const result = spawnSync(executable, args, {
+      cwd,
+      env: { ...cleanGitEnv(), PATH: `${cwd}:${process.env.PATH}` },
+      encoding: 'utf8', timeout: 10_000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status, result.stderr).toBe(17);
+    if (lane === 'local') {
+      expect(result.stderr).toContain(`[${name}]`);
+      expect(result.stderr).toContain('(exit 17)');
+    }
+    expect(result.stderr).not.toContain('FINAL-SOURCE drift');
+    const events = readFileSync(join(cwd, '.git/events'), 'utf8').trim().split('\n');
+    expect(events.at(-1)).toBe(command);
+    expect(events.some((event) => event.includes('coverage:check'))).toBe(false);
   });
 });
 

@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
@@ -63,6 +63,101 @@ function makeUnrelatedRootOid(repo: string): string {
   return git(repo, ['rev-parse', 'HEAD']);
 }
 
+function makeTamperedMetadataWorkflowRepo(): {
+  repo: string;
+  baseOid: string;
+  headOid: string;
+  eventPath: string;
+} {
+  const repo = tmp.make('pr-metadata-workflow-trust');
+  const scriptsDir = path.join(repo, 'scripts');
+  mkdirSync(scriptsDir, { recursive: true });
+  git(repo, ['init']);
+
+  writeFileSync(
+    path.join(scriptsDir, 'pr-metadata-guard.ts'),
+    [
+      "import { readFileSync } from 'node:fs';",
+      '',
+      "const eventIndex = process.argv.indexOf('--github-event');",
+      'const eventPath = eventIndex >= 0 ? process.argv[eventIndex + 1] : undefined;',
+      'if (eventPath === undefined) {',
+      '  process.exitCode = 2;',
+      '} else {',
+      "  const event = JSON.parse(readFileSync(eventPath, 'utf8')) as { pull_request: { body: string } };",
+      "  process.exitCode = event.pull_request.body.includes('Closes #991') ? 1 : 0;",
+      '}',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  writeFileSync(
+    path.join(repo, 'package.json'),
+    JSON.stringify({ scripts: { 'guard:pr-metadata': 'node --experimental-strip-types scripts/pr-metadata-guard.ts' } }),
+    'utf8',
+  );
+  git(repo, ['add', 'package.json', 'scripts/pr-metadata-guard.ts']);
+  git(repo, ['commit', '-m', 'trusted base guard']);
+  const baseOid = git(repo, ['rev-parse', 'HEAD']);
+
+  writeFileSync(
+    path.join(scriptsDir, 'pr-metadata-guard.ts'),
+    "process.stdout.write('CANDIDATE_GUARD_RAN\\n');\nprocess.exitCode = 0;\n",
+    'utf8',
+  );
+  writeFileSync(
+    path.join(repo, 'package.json'),
+    JSON.stringify({ scripts: { 'guard:pr-metadata': "node -e \"process.stdout.write('CANDIDATE_PACKAGE_RAN\\\\n')\" --" } }),
+    'utf8',
+  );
+  git(repo, ['add', 'package.json', 'scripts/pr-metadata-guard.ts']);
+  git(repo, ['commit', '-m', 'candidate disables metadata guard']);
+  const headOid = git(repo, ['rev-parse', 'HEAD']);
+
+  const eventPath = path.join(repo, 'event.json');
+  writeFileSync(
+    eventPath,
+    JSON.stringify({
+      number: 991,
+      repository: { default_branch: 'main' },
+      pull_request: {
+        body: 'Closes #991',
+        base: { ref: 'main', sha: baseOid },
+        head: { sha: headOid },
+      },
+    }),
+    'utf8',
+  );
+  return { repo, baseOid, headOid, eventPath };
+}
+
+function runMetadataWorkflowGuard(
+  repo: string,
+  baseOid: string,
+  headOid: string,
+  eventPath: string,
+): ReturnType<typeof spawnSync> {
+  const workflow = parse(readFileSync(path.join(REPO_ROOT, '.github/workflows/pr-metadata.yml'), 'utf8'));
+  const steps = workflow.jobs.metadata.steps as Array<Record<string, unknown>>;
+  const checkout = steps.find((step) => step.uses === 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262');
+  const guard = steps.find((step) => step.name === 'PR metadata guard');
+  if (checkout === undefined || guard === undefined || typeof guard.run !== 'string') {
+    throw new Error('PR metadata workflow must define checkout and guard steps');
+  }
+
+  const checkoutWith = checkout.with as Record<string, unknown> | undefined;
+  const checkoutRef = checkoutWith?.ref;
+  const trustedBaseSelected = checkoutRef === '${{ github.event_name == \'pull_request\' && github.event.pull_request.base.sha || github.sha }}';
+  git(repo, ['checkout', '--detach', trustedBaseSelected ? baseOid : headOid]);
+
+  return spawnSync('bash', ['-c', guard.run], {
+    cwd: repo,
+    encoding: 'utf8',
+    env: { ...cleanGitEnv(), PR_METADATA_EVENT: eventPath },
+    timeout: 30_000,
+  });
+}
+
 describe('PR metadata guard', () => {
   it('receives fresh PR metadata after edits without stalling merge-group required checks', () => {
     const metadataWorkflow = parse(readFileSync(path.join(REPO_ROOT, '.github/workflows/pr-metadata.yml'), 'utf8'));
@@ -72,6 +167,7 @@ describe('PR metadata guard', () => {
     for (const activity of ['opened', 'synchronize', 'reopened', 'edited']) {
       expect(activities, `metadata must receive ${activity} PR events`).toContain(activity);
     }
+    expect(metadataWorkflow.on).toHaveProperty('pull_request');
     expect(metadataWorkflow.on).toHaveProperty('merge_group');
     expect(qualityWorkflow.on.pull_request?.types).toEqual(['opened', 'synchronize', 'reopened']);
     expect(JSON.stringify(qualityWorkflow.jobs)).not.toContain('pr-metadata');
@@ -80,7 +176,47 @@ describe('PR metadata guard', () => {
       if: "github.event_name == 'pull_request'",
       env: { PR_METADATA_EVENT: '${{ github.event_path }}' },
     });
-    expect(guard.run).toBe('npm run guard:pr-metadata -- --github-event "$PR_METADATA_EVENT" --json');
+  });
+
+  it('uses trusted base code when candidate guard and package scripts attempt to approve invalid metadata', () => {
+    const { repo, baseOid, headOid, eventPath } = makeTamperedMetadataWorkflowRepo();
+
+    const violating = runMetadataWorkflowGuard(repo, baseOid, headOid, eventPath);
+
+    expect(violating.status, `${violating.stderr}\n${violating.stdout}`).toBe(1);
+    expect(violating.stdout).not.toContain('CANDIDATE_GUARD_RAN');
+    expect(violating.stdout).not.toContain('CANDIDATE_PACKAGE_RAN');
+
+    writeFileSync(
+      eventPath,
+      JSON.stringify({
+        number: 991,
+        repository: { default_branch: 'main' },
+        pull_request: {
+          body: 'Refs #991',
+          base: { ref: 'main', sha: baseOid },
+          head: { sha: headOid },
+        },
+      }),
+      'utf8',
+    );
+    const valid = runMetadataWorkflowGuard(repo, baseOid, headOid, eventPath);
+
+    expect(valid.status).toBe(0);
+    expect(valid.stdout).not.toContain('CANDIDATE_GUARD_RAN');
+    expect(valid.stdout).not.toContain('CANDIDATE_PACKAGE_RAN');
+  });
+
+  it('refuses to substitute the candidate when the trusted validator is missing', () => {
+    const { repo, baseOid, headOid, eventPath } = makeTamperedMetadataWorkflowRepo();
+    git(repo, ['checkout', '--detach', baseOid]);
+    git(repo, ['rm', 'scripts/pr-metadata-guard.ts']);
+    git(repo, ['commit', '-m', 'base without metadata validator']);
+    const missingBase = git(repo, ['rev-parse', 'HEAD']);
+    const result = runMetadataWorkflowGuard(repo, missingBase, headOid, eventPath);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('MODULE_NOT_FOUND');
+    expect(result.stdout).not.toContain('CANDIDATE_');
   });
 
   it('rejects the #2391 historical negated closing phrase outside the declared directive section', () => {

@@ -116,9 +116,9 @@ export const requiredPackageScripts = {
     'bash scripts/run-with-pinned-npm.sh --prefix console ci',
     'bash scripts/run-with-pinned-npm.sh --prefix console run lint',
     'npm run typecheck:all',
-    'npm run coverage:check -- --pool=forks',
     'bash scripts/run-with-pinned-npm.sh --prefix console run build',
     'npm run verify:console-design:live',
+    'npm run coverage:check -- --pool=forks',
     'npm run verify:console-browser',
   ].join(' && '),
   'verify:publish': [
