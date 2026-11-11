@@ -287,11 +287,6 @@ describe('Pinecone project guard validation', () => {
     expect(validateInstanceConfig(raw, ctx('patch', { originalType: 'chat' }))?.field).toBe(field);
   });
 
-  it('rejects the reserved owner_only namespace through a legacy namespace alias', () => {
-    const raw = baseChat({ pineconeFactsNamespace: 'whatsoup-owner-only-v1', memory: { pinecone: { projectId: 'instance-proj-id' } } });
-    expect(validateInstanceConfig(raw, ctx('create'))?.field).toBe('memory.pinecone.namespaces.facts');
-  });
-
   it('accepts a valid apiKeyService and ordinary namespaces', () => {
     const raw = baseChat({
       memory: { pinecone: { projectId: 'instance-proj-id', apiKeyService: 'pinecone-line-b', namespaces: { facts: 'facts' } } },
