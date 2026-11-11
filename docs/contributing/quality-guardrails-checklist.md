@@ -634,8 +634,8 @@ To cut a release:
 
 1. **Verify locally** — run `npm run verify:release` on the commit you intend to tag. All steps must pass.
 2. **Tag** — `git tag v<version>` on the verified commit.
-3. **Push tag** — `git push origin v<version>`. The `tag-release-gate` CI workflow (`.github/workflows/tag-release-gate.yml`) will run the guard subset automatically.
-4. **Wait for CI** — confirm `tag-release-gate` passes in the GitHub Actions tab before publishing any release artifacts.
+3. **Push tag** — `git push origin v<version>`. Quality runs full validation for the tag, including guards, coverage, design checks and browser tests.
+4. **Wait for CI** — confirm Quality and `tag-release-gate` pass for the exact tag commit and Quality attempt before publishing any release artifacts. After the receipt cutover, the tag gate selects and verifies the trusted private-scanner receipt; a missing or invalid receipt cannot qualify the release.
 5. **Publish** — run `npm run verify:publish` as a final local gate, then proceed with any deployment.
 
 Quality runs full validation for tags and scheduled runs; PR validation follows the
