@@ -14,6 +14,7 @@ import {
   isDmLaneMembership,
   isGroupSharedRecord,
   memoryHitTier,
+  memoryRecallRestrictive,
   memoryIdentityFold,
   resolveMemoryScope,
   chatRecallBoundary,
@@ -447,6 +448,11 @@ describe('owner_only visibility', () => {
     expect(withVisibilityFilter(disjunction, false)).toEqual({ $and: [disjunction, exclusion] });
     expect(withVisibilityFilter({ chat_jid: { $eq: 'c' } }, true)).toEqual({ chat_jid: { $eq: 'c' } });
     expect(withVisibilityFilter(undefined, true)).toBeUndefined();
+    // Restrictive recall, caller without access: chat_scoped records only.
+    expect(withVisibilityFilter({ chat_jid: { $eq: 'c' } }, false, true))
+      .toEqual({ chat_jid: { $eq: 'c' }, visibility: { $eq: 'chat_scoped' } });
+    expect(withVisibilityFilter(undefined, false, true)).toEqual({ visibility: { $eq: 'chat_scoped' } });
+    expect(withVisibilityFilter({ chat_jid: { $eq: 'c' } }, true, true)).toEqual({ chat_jid: { $eq: 'c' } });
   });
 });
 
@@ -455,27 +461,69 @@ describe('instance-scoped recall boundary (memory.pinecone.instanceScopedIds on)
     tier: 'chat-scoped', conversationKey: MEMBER, deliveryJid: `${MEMBER}@s.whatsapp.net`, operatorInstance: false, directChat: true,
   };
 
-  it('the same chat_jid from another instance is another conversation', async () => {
-    const f = memoryIdentityFold(db);
-    const contact = await resolveMemoryScope({ ...dm, actorJid: `${MEMBER}@s.whatsapp.net` }, deps({ instanceScope: 'line-a' }));
-    expect(memoryHitTier({ chat_jid: `${MEMBER}@s.whatsapp.net`, source_instance: 'line-a' }, contact, f)).toBe(0);
-    expect(memoryHitTier({ chat_jid: `${MEMBER}@s.whatsapp.net`, source_instance: 'line-b' }, contact, f)).toBeNull();
-    // Records written before provenance existed count as this instance's.
-    expect(memoryHitTier({ chat_jid: `${MEMBER}@s.whatsapp.net` }, contact, f)).toBe(0);
+  // What runtime and knowledge_search pass with the option on: this instance,
+  // the reader's own account, and restrictive recall.
+  const lineA = { source_instance: 'line-a', source_account: 'acct-a', visibility: 'chat_scoped' };
+  const scoped = (overrides: Partial<MemoryScopeDeps> = {}): MemoryScopeDeps =>
+    deps({ instanceScope: 'line-a', sourceAccount: 'acct-a', restrictive: true, ...overrides } as Partial<MemoryScopeDeps>);
 
-    const owner = await resolveMemoryScope(
-      { ...dm, conversationKey: OWNER, deliveryJid: `${OWNER}@s.whatsapp.net`, actorJid: `${OWNER}@s.whatsapp.net` },
-      deps({ instanceScope: 'line-a' }),
-    );
-    expect(memoryHitTier({ chat_jid: `${OWNER}@s.whatsapp.net`, source_instance: 'line-b' }, owner, f)).toBe(1);
+  it('the same chat_jid from another instance or another account is another conversation', async () => {
+    const f = memoryIdentityFold(db);
+    const chat = `${MEMBER}@s.whatsapp.net`;
+    const contact = await resolveMemoryScope({ ...dm, actorJid: chat }, scoped());
+    expect(memoryHitTier({ chat_jid: chat, ...lineA }, contact, f)).toBe(0);
+    expect(memoryHitTier({ chat_jid: chat, ...lineA, source_instance: 'line-b' }, contact, f)).toBeNull();
+    // Same instance name under another account (the instance reconnected as
+    // another account): another conversation.
+    expect(memoryHitTier({ chat_jid: chat, ...lineA, source_account: 'acct-b' }, contact, f)).toBeNull();
+    // A missing instance or account ties the record to no instance, so a caller
+    // without owner_only access does not get it.
+    expect(memoryHitTier({ chat_jid: chat, visibility: 'chat_scoped' }, contact, f)).toBeNull();
+    expect(memoryHitTier({ chat_jid: chat, visibility: 'chat_scoped', source_instance: 'line-a' }, contact, f)).toBeNull();
+    // A record written before provenance existed no longer reaches a contact.
+    expect(memoryHitTier({ chat_jid: chat }, contact, f)).toBeNull();
+
+    const ownerChat = `${OWNER}@s.whatsapp.net`;
+    const ownerDm = { ...dm, conversationKey: OWNER, deliveryJid: ownerChat, actorJid: ownerChat };
+    const owner = await resolveMemoryScope(ownerDm, scoped());
+    expect(memoryHitTier({ chat_jid: ownerChat, source_instance: 'line-b' }, owner, f)).toBe(1);
+    // With owner_only access an unstamped record of this chat still counts as this instance's.
+    expect(memoryHitTier({ chat_jid: ownerChat }, owner, f)).toBe(0);
     // A line-b owner_only record reaches the line-a owner only when line-a lists line-b.
-    const lineBOwnerOnly = { chat_jid: `${OWNER}@s.whatsapp.net`, source_instance: 'line-b', visibility: 'owner_only' };
+    const lineBOwnerOnly = { chat_jid: ownerChat, source_instance: 'line-b', visibility: 'owner_only' };
     expect(memoryHitTier(lineBOwnerOnly, owner, f)).toBeNull();
-    const listing = await resolveMemoryScope(
-      { ...dm, conversationKey: OWNER, deliveryJid: `${OWNER}@s.whatsapp.net`, actorJid: `${OWNER}@s.whatsapp.net` },
-      deps({ instanceScope: 'line-a', ownerOnlySources: new Set(['line-a', 'line-b']) }),
-    );
+    const listing = await resolveMemoryScope(ownerDm, scoped({ ownerOnlySources: new Set(['line-a', 'line-b']) }));
     expect(memoryHitTier(lineBOwnerOnly, listing, f)).toBe(1);
+  });
+
+  it('a reader whose own account is unknown matches no stamped record', async () => {
+    const f = memoryIdentityFold(db);
+    const chat = `${MEMBER}@s.whatsapp.net`;
+    const contact = await resolveMemoryScope({ ...dm, actorJid: chat }, scoped({ sourceAccount: '' } as Partial<MemoryScopeDeps>));
+    expect(memoryHitTier({ chat_jid: chat, ...lineA }, contact, f)).toBeNull();
+    expect(memoryHitTier({ chat_jid: chat, ...lineA, source_account: '' }, contact, f)).toBeNull();
+  });
+
+  it('restrictive recall with the option off: chat_scoped records only, no instance or account boundary', async () => {
+    const f = memoryIdentityFold(db);
+    const chat = `${MEMBER}@s.whatsapp.net`;
+    const restrictive = deps({ restrictive: true } as Partial<MemoryScopeDeps>);
+    const contact = await resolveMemoryScope({ ...dm, actorJid: chat }, restrictive);
+    expect(memoryHitTier({ chat_jid: chat, visibility: 'chat_scoped', source_instance: 'line-b' }, contact, f)).toBe(0);
+    expect(memoryHitTier({ chat_jid: chat }, contact, f)).toBeNull();
+    const ownerChat = `${OWNER}@s.whatsapp.net`;
+    const owner = await resolveMemoryScope(
+      { ...dm, conversationKey: OWNER, deliveryJid: ownerChat, actorJid: ownerChat }, restrictive,
+    );
+    expect(memoryHitTier({ chat_jid: ownerChat }, owner, f)).toBe(0);
+  });
+
+  it('recall is restrictive with instanceScopedIds, an owner_only recordVisibility, or a passive line', () => {
+    expect(memoryRecallRestrictive(undefined, undefined, undefined)).toBe(false);
+    expect(memoryRecallRestrictive('chat', 'chat_scoped', false)).toBe(false);
+    expect(memoryRecallRestrictive('chat', undefined, true)).toBe(true);
+    expect(memoryRecallRestrictive('chat', 'owner_only', false)).toBe(true);
+    expect(memoryRecallRestrictive('passive', undefined, false)).toBe(true);
   });
 
   it('off (no instance scope) keeps matching on chat alone', async () => {

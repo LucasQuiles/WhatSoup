@@ -530,6 +530,34 @@ describe('PineconeMemory', () => {
       }
     });
 
+    it('context legs ask for chat_scoped records only under restrictive recall, unless the caller has access', async () => {
+      mockSearchRecords.mockResolvedValue({ result: { hits: [] } });
+      try {
+        await memory.searchForChatDetailed('chat-42@g.us', 'q1', undefined, { chatScopedOnly: true });
+        await memory.searchForSenderDetailed('sender-17@s.whatsapp.net', 'q2', undefined, { chatScopedOnly: true });
+        await memory.searchSelfFactsDetailed('q3', undefined, { chatScopedOnly: true });
+        // Access wins: an admitted caller is never narrowed to chat_scoped.
+        await memory.searchForChatDetailed('chat-42@g.us', 'q1', undefined, { includeOwnerOnly: true, chatScopedOnly: true });
+        expect(mockSearchRecords.mock.calls.map((call) => call[0].query.filter)).toEqual([
+          { chat_jid: { $eq: 'chat-42@g.us' }, visibility: { $eq: 'chat_scoped' } },
+          { sender_jid: { $eq: 'sender-17@s.whatsapp.net' }, visibility: { $eq: 'chat_scoped' } },
+          { memory_type: { $eq: 'self_fact' }, visibility: { $eq: 'chat_scoped' } },
+          { chat_jid: { $eq: 'chat-42@g.us' } },
+        ]);
+      } finally {
+        mockSearchRecords.mockReset();
+      }
+    });
+
+    it('sourceAccount() is the account this provider stamps, read from its own getter when called', () => {
+      let accountJid: string | null = null;
+      const reader = new PineconeMemory({ accountJid: () => accountJid });
+      expect(reader.sourceAccount()).toBe('');
+      accountJid = '15550000001@s.whatsapp.net';
+      expect(reader.sourceAccount()).toMatch(/^acct:\S+$/);
+      expect(reader.sourceAccount()).not.toContain('15550000001');
+    });
+
     it('preserves a successful empty chat lookup through the detailed scoped helper', async () => {
       mockSearchRecords.mockResolvedValueOnce({ result: { hits: [] } });
 

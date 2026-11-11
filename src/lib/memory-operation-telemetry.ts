@@ -312,6 +312,10 @@ const VISIBILITY_FIELD = 'visibility';
  * withVisibilityFilter). Same pinned, operand-blind shape as the qualifier
  * exclusion; it never changes which leg a filter describes.
  */
+function isChatScopedOnly(value: unknown): boolean {
+  return hasExactOperator(value, '$eq') && readBoundedField(value as object, '$eq') === 'chat_scoped';
+}
+
 function isVisibilityExclusion(value: unknown): boolean {
   return isAbsentOrNotEqualDisjunction(value, VISIBILITY_FIELD);
 }
@@ -378,6 +382,12 @@ export function classifyMemoryFilter(filters: unknown): {
     if (legKey !== '$or') {
       return classifyMemoryFilter({ [legKey]: readBoundedField(filters, legKey) });
     }
+  }
+  // A leg clause plus restrictive recall's exact chat_scoped-only clause
+  // (withVisibilityFilter) describes the leg too.
+  if (keys.length === 2 && keys.includes('visibility') && isChatScopedOnly(readBoundedField(filters, 'visibility'))) {
+    const legKey = keys[0] === 'visibility' ? keys[1]! : keys[0]!;
+    return classifyMemoryFilter({ [legKey]: readBoundedField(filters, legKey) });
   }
   if (keys.length > 1) {
     return { scopeKind: 'global', filterShape: 'mixed' };

@@ -18,7 +18,11 @@ const { FakePinecone, store, queries, rerankMock, configState } = vi.hoisted(() 
   const store = new Map<string, StoredRecord[]>();
   const queries: Array<{ namespace: string; filter?: unknown }> = [];
   const rerankMock = vi.fn();
-  const configState = { botName: 'vector-memory-bot', profile: {} as Record<string, unknown> };
+  const configState = {
+    botName: 'vector-memory-bot',
+    profile: {} as Record<string, unknown>,
+    recordVisibility: undefined as string | undefined,
+  };
 
   // SDK behaviours this agreement depends on (@pinecone-database/pinecone dist):
   //   data/index.js:173                  Index target namespace = options.namespace || '__default__'
@@ -110,6 +114,7 @@ vi.mock('../../../src/config.ts', () => {
           index: 'mw-mind',
           namespaces,
           allowedIndexes: ['mw-mind'],
+          get recordVisibility() { return configState.recordVisibility; },
           knowledgeProfiles: {
             'mw-mind': configState.profile,
             // Another instance's memory index, allowed for search here.
@@ -225,6 +230,7 @@ beforeEach(() => {
   queries.length = 0;
   rerankMock.mockReset();
   configState.botName = 'vector-memory-bot';
+  configState.recordVisibility = undefined;
   configState.profile.rerank = false;
   configState.profile.rerankTopN = 6;
   delete configState.profile.minScore;
@@ -465,6 +471,23 @@ describe('knowledge_search and owner_only records', () => {
     const memoryQueries = queries.filter((q) => !['local-docs', 'onedrive', 'whatsapp-contacts'].includes(q.namespace));
     expect(memoryQueries.length).toBeGreaterThan(0);
     for (const q of memoryQueries) expect(withoutChatClause(q.filter)).toEqual(OWNER_ONLY_EXCLUSION);
+  });
+
+  it('under restrictive recall a caller without access gets only chat_scoped memory records; documents keep the exclusion', async () => {
+    configState.recordVisibility = 'owner_only';
+    seed([
+      { id: 'stamped', score: 0.9, fields: { text: 'stamped fact', chat_jid: pn(MEMBER_B), sender_jid: pn(MEMBER_B), visibility: 'chat_scoped' } },
+      { id: 'legacy', score: 0.8, fields: { text: 'legacy fact', chat_jid: pn(MEMBER_B), sender_jid: pn(MEMBER_B) } },
+    ]);
+    const { knowledgeSearch } = registerTools(deps());
+    // The fake index ignores filters: dropping 'legacy' proves the post-query gate.
+    expect(await search(knowledgeSearch, dmSession(MEMBER_B))).toEqual(['stamped']);
+    const memoryQueries = queries.filter((q) => !['local-docs', 'onedrive', 'whatsapp-contacts'].includes(q.namespace));
+    expect(memoryQueries.length).toBeGreaterThan(0);
+    for (const q of memoryQueries) expect(withoutChatClause(q.filter)).toEqual({ visibility: { $eq: 'chat_scoped' } });
+    const documents = queries.filter((q) => q.namespace === 'onedrive');
+    expect(documents.length).toBeGreaterThan(0);
+    for (const q of documents) expect(q.filter).toEqual(OWNER_ONLY_EXCLUSION);
   });
 
   it('records with no visibility field are returned exactly as before', async () => {

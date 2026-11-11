@@ -121,6 +121,21 @@ describe('memory operation telemetry', () => {
       .toEqual({ scopeKind: 'global', filterShape: 'mixed' });
   });
 
+  it('a leg filter plus the restrictive chat_scoped-only clause keeps the leg shape', () => {
+    const chatScopedOnly = { visibility: { $eq: 'chat_scoped' } };
+    expect(classifyMemoryFilter({ chat_jid: { $eq: 'c' }, ...chatScopedOnly }))
+      .toEqual({ scopeKind: 'chat', filterShape: 'chat_eq' });
+    expect(classifyMemoryFilter({ sender_jid: { $eq: 's' }, ...chatScopedOnly }))
+      .toEqual({ scopeKind: 'sender', filterShape: 'sender_eq' });
+    expect(classifyMemoryFilter({ memory_type: { $eq: 'self_fact' }, ...chatScopedOnly }))
+      .toEqual({ scopeKind: 'self', filterShape: 'memory_type_eq' });
+    // Only the exact chat_scoped value is transparent.
+    expect(classifyMemoryFilter({ chat_jid: { $eq: 'c' }, visibility: { $eq: 'owner_only' } }))
+      .toEqual({ scopeKind: 'global', filterShape: 'mixed' });
+    expect(classifyMemoryFilter({ chat_jid: { $eq: 'c' }, visibility: { $ne: 'chat_scoped' } }))
+      .toEqual({ scopeKind: 'global', filterShape: 'mixed' });
+  });
+
   it('names the consolidation eligibility filter instead of bucketing it as unknown', () => {
     // The exact shape consolidation source selection sends provider-side
     // (#2569): exclude prior promotion outputs, keep qualifier-less records.

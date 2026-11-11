@@ -80,10 +80,17 @@ export interface MemoryScope {
   ownerOnlySources?: ReadonlySet<string>;
   /**
    * This instance's name when `memory.pinecone.instanceScopedIds` is on. A
-   * record stamped with another source_instance is then another conversation,
-   * whatever its chat_jid; records with no source_instance count as this one's.
+   * record of another source instance or account is then another
+   * conversation, whatever its chat_jid (isSameSourceInstance).
    */
   sourceInstance?: string;
+  /** The reader's own account (memorySourceAccount); '' or unset matches no stamped record. */
+  sourceAccount?: string;
+  /**
+   * Restrictive recall (memoryRecallRestrictive): without owner_only access the
+   * caller receives only records stamped chat_scoped.
+   */
+  restrictive?: boolean;
 }
 
 export interface MemoryIdentityFold {
@@ -301,6 +308,10 @@ export interface MemoryScopeDeps {
   trustedOperatorPhones?: Iterable<string>;
   /** recordIdScope(instance, instanceScopedIds): set only when the option is on. */
   instanceScope?: string | null;
+  /** The reader's account, derived as the writer derives it (memorySourceAccount). */
+  sourceAccount?: string;
+  /** memoryRecallRestrictive(instanceType, recordVisibility, instanceScopedIds). */
+  restrictive?: boolean;
   /** ownerOnlySourceSet(botName, memory.pinecone.ownerOnlySources). */
   ownerOnlySources?: ReadonlySet<string>;
   /**
@@ -452,6 +463,8 @@ export async function resolveMemoryScope(
     ownerOnlyAccess,
     ...(deps.ownerOnlySources ? { ownerOnlySources: deps.ownerOnlySources } : {}),
     ...(deps.instanceScope ? { sourceInstance: deps.instanceScope } : {}),
+    ...(deps.sourceAccount !== undefined ? { sourceAccount: deps.sourceAccount } : {}),
+    ...(deps.restrictive === true ? { restrictive: true } : {}),
   };
 
   if (request.operatorInstance) return { ...base, kind: 'unrestricted', reason: 'operator_instance' };
@@ -525,15 +538,45 @@ export function chatRecallBoundary(input: {
 
 // ── owner_only visibility ──────────────────────────────────────────────────
 
+export interface SourceBoundary {
+  /** Set only with instanceScopedIds on; unset means no instance or account boundary. */
+  sourceInstance?: string;
+  /** The reader's own account; '' or unset matches no stamped record. */
+  sourceAccount?: string;
+  ownerOnlyAccess: boolean;
+}
+
 /**
- * The record came from `sourceInstance` (or no instance boundary applies). A
- * record with no source_instance predates provenance and counts as this
- * instance's, so legacy recall is unchanged.
+ * The record belongs to the reader's instance and account, or no boundary
+ * applies (instanceScopedIds off). With the option on, a record of another
+ * instance or account is another conversation. A record missing
+ * source_instance or source_account is tied to nothing, so it counts as this
+ * instance's only for a caller with owner_only access: ownership is never
+ * inferred from absent metadata.
  */
-export function isSameSourceInstance(fields: Record<string, unknown>, sourceInstance: string | undefined): boolean {
-  if (!sourceInstance) return true;
-  const recorded = fields['source_instance'];
-  return typeof recorded !== 'string' || recorded === '' || recorded === sourceInstance;
+export function isSameSourceInstance(fields: Record<string, unknown>, boundary: SourceBoundary): boolean {
+  if (!boundary.sourceInstance) return true;
+  const instance = fields['source_instance'];
+  const account = fields['source_account'];
+  if (isNonEmptyString(instance) && instance !== boundary.sourceInstance) return false;
+  if (!isNonEmptyString(instance) || !isNonEmptyString(account)) return boundary.ownerOnlyAccess;
+  return isNonEmptyString(boundary.sourceAccount) && account === boundary.sourceAccount;
+}
+
+/**
+ * Recall is restrictive on an instance that writes owner_only records (a
+ * passive line, or recordVisibility owner_only) or shares its index
+ * (instanceScopedIds): a caller without owner_only access then receives only
+ * records stamped chat_scoped from the chat-memory namespaces. An unstamped
+ * record may predate an owner_only stamp, so it reaches only a caller with
+ * access. Default instances keep legacy recall unchanged.
+ */
+export function memoryRecallRestrictive(
+  instanceType: unknown,
+  recordVisibility: unknown,
+  instanceScopedIds: unknown,
+): boolean {
+  return instanceRecordVisibility(instanceType, recordVisibility) === 'owner_only' || instanceScopedIds === true;
 }
 
 /** A record stamped `owner_only`. A record with no visibility field is not. */
@@ -580,14 +623,19 @@ function ownerOnlyExclusion(): { $or: Array<Record<string, unknown>> } {
 
 /**
  * Add the owner_only exclusion to a search filter unless the caller may read
- * owner_only records. The pre-query filter only narrows the fetch; the
- * per-record gate (memoryHitTier, the chat runtime's post-filter) decides.
+ * owner_only records. With `chatScopedOnly` (restrictive recall on a
+ * chat-memory leg) a caller without access asks for chat_scoped records only,
+ * which also leaves out unstamped ones. The pre-query filter only narrows the
+ * fetch; the per-record gate (memoryHitTier, the chat runtime's post-filter)
+ * decides. classifyMemoryFilter recognizes both shapes.
  */
 export function withVisibilityFilter(
   filter: Record<string, unknown> | undefined,
   ownerOnlyAccess: boolean,
+  chatScopedOnly = false,
 ): Record<string, unknown> | undefined {
   if (ownerOnlyAccess) return filter;
+  if (chatScopedOnly) return { ...(filter ?? {}), visibility: { $eq: 'chat_scoped' } };
   const exclusion = ownerOnlyExclusion();
   if (!filter || Object.keys(filter).length === 0) return exclusion;
   // A filter that already has a top-level $or cannot take a second one.
@@ -637,10 +685,10 @@ export function memoryHitTier(
   if (scope.kind === 'no_context') return null;
   const rawChat = typeof fields['chat_jid'] === 'string' ? fields['chat_jid'] : '';
   // Same conversation = same chat AND (with instance-scoped ids on) the same
-  // source instance; a record with no source_instance predates the stamp.
+  // source instance and account (isSameSourceInstance).
   const sameConversation = (): boolean => scope.chatKey !== undefined
     && fold.chat(rawChat) === scope.chatKey
-    && isSameSourceInstance(fields, scope.sourceInstance);
+    && isSameSourceInstance(fields, scope);
   if (isOwnerOnlyRecord(fields)) {
     // owner_only: refused without access or from an unlisted source; with access
     // (only ever granted in a direct chat) admitted from any chat, ranked this
@@ -650,6 +698,8 @@ export function memoryHitTier(
     if (!rawChat.trim()) return 2;
     return sameConversation() ? 0 : 1;
   }
+  // Restrictive recall: without access, only records stamped chat_scoped.
+  if (scope.restrictive === true && !scope.ownerOnlyAccess && fields['visibility'] !== 'chat_scoped') return null;
   if (!rawChat.trim()) return includesUntagged(scope) ? 2 : null;
   const thisChat = sameConversation();
 

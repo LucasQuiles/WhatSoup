@@ -121,8 +121,8 @@ function makeFilteringPinecone(stored: SearchResult[]) {
     results: stored.filter((result) => matchesFilter(storedFields(result.record), filter)),
     status: 'ok' as const,
   });
-  const leg = (base: Filter, options?: { includeOwnerOnly?: boolean }) =>
-    answer(withVisibilityFilter(base, options?.includeOwnerOnly === true) ?? {});
+  const leg = (base: Filter, options?: { includeOwnerOnly?: boolean; chatScopedOnly?: boolean }) =>
+    answer(withVisibilityFilter(base, options?.includeOwnerOnly === true, options?.chatScopedOnly === true) ?? {});
   return {
     searchForChatDetailed: vi.fn(async (chatJid: string, _q: string, _t?: string, o?: { includeOwnerOnly?: boolean }) =>
       leg({ chat_jid: { $eq: chatJid } }, o)),
@@ -654,25 +654,42 @@ describe('loadContext', () => {
     expect(pinecone.searchSelfFactsDetailed).toHaveBeenLastCalledWith('query', undefined, { includeOwnerOnly: true });
   });
 
-  it('with an instance scope, another instance\'s records are another conversation and its self facts are not ours', async () => {
-    const from = (id: string, text: string, sourceInstance?: string) => {
+  it('with an instance scope, another instance\'s or account\'s records are another conversation and its self facts are not ours', async () => {
+    const from = (id: string, text: string, instance?: string, account?: string) => {
       const result = makeResult(id, text);
       result.record.chatJid = '15550000002@s.whatsapp.net';
-      if (sourceInstance) result.record.sourceInstance = sourceInstance;
+      if (instance) {
+        result.record.sourceInstance = instance;
+        result.record.visibility = 'chat_scoped';
+      }
+      if (account) result.record.sourceAccount = account;
       return result;
     };
     const pinecone = makeMockPinecone(
-      [from('a', 'this line chat fact', 'line-a'), from('b', 'other line chat fact', 'line-b'), from('l', 'legacy chat fact')],
-      [from('sb', 'other line sender fact', 'line-b')],
-      [from('self-a', 'this line self fact', 'line-a'), from('self-b', 'other line self fact', 'line-b')],
+      [
+        from('a', 'this line chat fact', 'line-a', 'acct-a'),
+        from('b', 'other line chat fact', 'line-b', 'acct-a'),
+        from('x', 'other account chat fact', 'line-a', 'acct-b'),
+        from('l', 'legacy chat fact'),
+      ],
+      [from('sb', 'other line sender fact', 'line-b', 'acct-a')],
+      [
+        from('self-a', 'this line self fact', 'line-a', 'acct-a'),
+        from('self-b', 'other line self fact', 'line-b', 'acct-a'),
+        from('self-l', 'legacy self fact'),
+      ],
     );
+    // What the runtime passes with instanceScopedIds on.
     const held = await loadContextDetailed(
       pinecone as any, '15550000002@s.whatsapp.net', '15550000002@s.whatsapp.net', 'query', undefined, 'this_chat',
-      { sourceInstance: 'line-a' },
+      { sourceInstance: 'line-a', sourceAccount: 'acct-a', restrictive: true },
     );
     expect(held.text).toContain('this line chat fact');
-    expect(held.text).toContain('legacy chat fact');
     expect(held.text).not.toContain('other line chat fact');
+    expect(held.text).not.toContain('other account chat fact');
+    // Unstamped records reach only a caller with owner_only access.
+    expect(held.text).not.toContain('legacy chat fact');
+    expect(held.text).not.toContain('legacy self fact');
     expect(held.text).not.toContain('other line sender fact');
     expect(held.text).toContain('this line self fact');
     expect(held.text).not.toContain('other line self fact');
@@ -681,6 +698,25 @@ describe('loadContext', () => {
       pinecone as any, '15550000002@s.whatsapp.net', '15550000002@s.whatsapp.net', 'query', undefined, 'this_chat',
     );
     expect(off.text).toContain('other line chat fact');
+    expect(off.text).toContain('legacy chat fact');
+  });
+
+  it('restrictive recall without access asks every leg for chat_scoped records and drops the rest', async () => {
+    const stamped = makeResult('s', 'stamped chat fact');
+    stamped.record.visibility = 'chat_scoped';
+    // The mock ignores filters, so this proves the post-query gate.
+    const pinecone = makeMockPinecone([stamped, makeResult('l', 'legacy chat fact')], [], [makeResult('sl', 'legacy self fact')]);
+    const result = await loadContextDetailed(
+      pinecone as any, '15550000002@s.whatsapp.net', '15550000002@s.whatsapp.net', 'query', undefined, 'open',
+      { restrictive: true },
+    );
+    expect(result.text).toContain('stamped chat fact');
+    expect(result.text).not.toContain('legacy chat fact');
+    expect(result.text).not.toContain('legacy self fact');
+    expect(pinecone.searchForChatDetailed).toHaveBeenLastCalledWith(
+      '15550000002@s.whatsapp.net', 'query', undefined, { chatScopedOnly: true },
+    );
+    expect(pinecone.searchSelfFactsDetailed).toHaveBeenLastCalledWith('query', undefined, { chatScopedOnly: true });
   });
 
   it('with access under the this_chat boundary, owner_only records from other chats pass; chat_scoped ones do not', async () => {

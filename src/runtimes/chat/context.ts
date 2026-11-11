@@ -1,4 +1,5 @@
 import type {
+  ContextLegOptions,
   EntitySearchResult,
   PineconeMemory,
   PineconeSearchStatus,
@@ -143,7 +144,15 @@ export async function loadContextDetailed(
    * ownerOnlySources: the source instances whose owner_only records it may
    * receive (ownerOnlySourceSet); unset serves none, even with ownerOnly.
    */
-  access: { ownerOnly?: boolean; ownerOnlySources?: ReadonlySet<string>; sourceInstance?: string } = {},
+  access: {
+    ownerOnly?: boolean;
+    ownerOnlySources?: ReadonlySet<string>;
+    /** instanceScopedIds on: this instance; with sourceAccount, the recall boundary. */
+    sourceInstance?: string;
+    sourceAccount?: string;
+    /** Restrictive recall (memoryRecallRestrictive). */
+    restrictive?: boolean;
+  } = {},
 ): Promise<ContextLoadResult> {
   if (!messageText.trim()) {
     return { text: '', status: 'not_attempted', scopes: [] };
@@ -155,6 +164,13 @@ export async function loadContextDetailed(
   const safeTraceId = normalizeMemoryTraceId(traceId);
   const ownerOnly = access.ownerOnly === true;
   const legOptions = { includeOwnerOnly: true } as const;
+  // Restrictive recall without access: every memory leg asks for chat_scoped
+  // records only, and the post-query gate keeps only those. Entity records keep
+  // the compatible exclusion.
+  const chatScopedOnly = !ownerOnly && access.restrictive === true;
+  const memoryLegOptions: ContextLegOptions | undefined = ownerOnly
+    ? legOptions
+    : chatScopedOnly ? { chatScopedOnly: true } : undefined;
   // An owner_only record is served only with access and from a listed source
   // instance (memory-scope.ts ownerOnlyRecordServable).
   const servable = (fields: Record<string, unknown>): boolean =>
@@ -200,22 +216,22 @@ export async function loadContextDetailed(
     : Promise.resolve(null);
   const [chatDetailsRaw, senderDetailsRaw, selfDetailsRaw] = await Promise.all([
     captureContextSearch(() =>
-      ownerOnly
-        ? pinecone.searchForChatDetailed(chatJid, messageText, traceId, legOptions)
+      memoryLegOptions
+        ? pinecone.searchForChatDetailed(chatJid, messageText, traceId, memoryLegOptions)
         : traceId
           ? pinecone.searchForChatDetailed(chatJid, messageText, traceId)
           : pinecone.searchForChatDetailed(chatJid, messageText),
     ),
     captureContextSearch(() =>
-      ownerOnly
-        ? pinecone.searchForSenderDetailed(senderJid, messageText, traceId, legOptions)
+      memoryLegOptions
+        ? pinecone.searchForSenderDetailed(senderJid, messageText, traceId, memoryLegOptions)
         : traceId
           ? pinecone.searchForSenderDetailed(senderJid, messageText, traceId)
           : pinecone.searchForSenderDetailed(senderJid, messageText),
     ),
     captureContextSearch(() =>
-      ownerOnly
-        ? pinecone.searchSelfFactsDetailed(messageText, traceId, legOptions)
+      memoryLegOptions
+        ? pinecone.searchSelfFactsDetailed(messageText, traceId, memoryLegOptions)
         : traceId
           ? pinecone.searchSelfFactsDetailed(messageText, traceId)
           : pinecone.searchSelfFactsDetailed(messageText),
@@ -224,7 +240,8 @@ export async function loadContextDetailed(
   const ownerOnlyDetailsRaw = await ownerOnlyLeg;
   // Post-query gate: the pre-query exclusion only narrows the fetch.
   const recordServable = (result: SearchResult): boolean =>
-    servable({ visibility: result.record.visibility, source_instance: result.record.sourceInstance });
+    servable({ visibility: result.record.visibility, source_instance: result.record.sourceInstance })
+    && (!chatScopedOnly || result.record.visibility === 'chat_scoped');
   const visible = <T extends { results: SearchResult[] }>(details: T): T =>
     ({ ...details, results: details.results.filter(recordServable) });
   const chatDetails = visible(chatDetailsRaw);
@@ -233,10 +250,11 @@ export async function loadContextDetailed(
   const thisChat = foldChatAttribution(chatJid);
   const fold = memoryIdentityFold();
   const sender = verifiedSenderIdentity(senderJid);
-  // Instance-scoped ids on: a record of another source instance is another
-  // conversation (legacy records without the stamp count as this instance's).
+  // Instance-scoped ids on: a record of another source instance or account is
+  // another conversation; an unstamped one is ours only with owner_only access.
   const sameInstance = (result: SearchResult): boolean => isSameSourceInstance(
-    { source_instance: result.record.sourceInstance }, access.sourceInstance,
+    { source_instance: result.record.sourceInstance, source_account: result.record.sourceAccount },
+    { sourceInstance: access.sourceInstance, sourceAccount: access.sourceAccount, ownerOnlyAccess: ownerOnly },
   );
   const crossesBoundary = (result: SearchResult): boolean =>
     result.record.visibility === 'owner_only' && recordServable(result);

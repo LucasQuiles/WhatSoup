@@ -208,6 +208,8 @@ function makePinecone() {
     searchForChat: vi.fn().mockResolvedValue([]),
     searchForSender: vi.fn().mockResolvedValue([]),
     searchSelfFacts: vi.fn().mockResolvedValue([]),
+    // The reader account (PineconeMemory.sourceAccount), read with instanceScopedIds on.
+    sourceAccount: vi.fn().mockReturnValue('acct-test'),
   } as unknown as PineconeMemory;
 }
 

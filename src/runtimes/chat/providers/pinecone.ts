@@ -582,6 +582,11 @@ export interface ContextLegOptions {
   /** Return owner_only records too. Only for a caller ownerOnlyRecallAllowed admits. */
   includeOwnerOnly?: boolean;
   /**
+   * Restrictive recall (memoryRecallRestrictive) for a caller without access:
+   * ask for chat_scoped records only. includeOwnerOnly wins.
+   */
+  chatScopedOnly?: boolean;
+  /**
    * Entity search: the source instances whose owner_only records may be
    * returned (ownerOnlySourceSet). Checked before rerank; unset returns none.
    */
@@ -868,6 +873,15 @@ export class PineconeMemory {
   }
 
   /**
+   * The reader's account for the recall boundary: the same derivation, from
+   * the same getter, as the source_account this provider stamps, so reader and
+   * writer cannot diverge. '' while the account is unknown.
+   */
+  sourceAccount(): string {
+    return this.recordStamp(undefined).sourceAccount;
+  }
+
+  /**
    * Dedup and claim-lookup boundary. With memory.pinecone.instanceScopedIds on,
    * only records of this instance and account match, so matching text alone
    * never merges records across instances. Off: no extra clause (unchanged).
@@ -1091,7 +1105,9 @@ export class PineconeMemory {
     traceId?: string,
     options: ContextLegOptions = {},
   ): Promise<PineconeSearchDetails> {
-    const filter = withVisibilityFilter({ [field]: { $eq: value } }, options.includeOwnerOnly === true) ?? {};
+    const filter = withVisibilityFilter(
+      { [field]: { $eq: value } }, options.includeOwnerOnly === true, options.chatScopedOnly === true,
+    ) ?? {};
     return this.searchDetailed(query, filter, topK, traceId);
   }
 

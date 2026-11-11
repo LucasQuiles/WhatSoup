@@ -37,7 +37,13 @@ import { checkRateLimit } from './rate-limiter.ts';
 import { getConversationWindow } from './window.ts';
 import { summarizeWindowBeforeTrim } from './window-trim.ts';
 import { loadContextDetailed, type ContextLoadResult } from './context.ts';
-import { chatRecallBoundary, ownerOnlyRecallAllowed, ownerOnlySourceSet, recordIdScope } from '../../core/memory-scope.ts';
+import {
+  chatRecallBoundary,
+  memoryRecallRestrictive,
+  ownerOnlyRecallAllowed,
+  ownerOnlySourceSet,
+  recordIdScope,
+} from '../../core/memory-scope.ts';
 import { isOperatorInstance } from '../../lib/pinecone-project-guard.ts';
 import { ChatQueue } from './queue.ts';
 import { processMedia } from './media/processor.ts';
@@ -420,9 +426,13 @@ export class ChatRuntime implements Runtime {
       trustedOperatorPhones,
       db: this.db,
     });
-    const instanceScope = recordIdScope(
-      config.botName,
-      (config as { memory?: { pinecone?: { instanceScopedIds?: unknown } } }).memory?.pinecone?.instanceScopedIds,
+    const pineconeSettings = (config as { memory?: { pinecone?: { instanceScopedIds?: unknown; recordVisibility?: unknown } } })
+      .memory?.pinecone;
+    const instanceScope = recordIdScope(config.botName, pineconeSettings?.instanceScopedIds);
+    const restrictive = memoryRecallRestrictive(
+      (config as { instanceType?: unknown }).instanceType,
+      pineconeSettings?.recordVisibility,
+      pineconeSettings?.instanceScopedIds,
     );
     // The owner_only records an admitted caller may receive: this instance's and
     // those of memory.pinecone.ownerOnlySources (R3).
@@ -451,11 +461,20 @@ export class ChatRuntime implements Runtime {
           }),
           // Passed only when it carries something, so every other caller keeps
           // the earlier call shape (and the provider default excludes).
-          ...(ownerOnly || instanceScope
+          ...(ownerOnly || instanceScope || restrictive
             ? [{
               ...(ownerOnly ? { ownerOnly: true, ownerOnlySources } : {}),
-              ...(instanceScope ? { sourceInstance: instanceScope } : {}),
-            }] as [{ ownerOnly?: boolean; ownerOnlySources?: ReadonlySet<string>; sourceInstance?: string }]
+              // The reader account comes from the provider that stamps this
+              // instance's writes (one derivation, one getter).
+              ...(instanceScope ? { sourceInstance: instanceScope, sourceAccount: this.pinecone.sourceAccount() } : {}),
+              ...(restrictive ? { restrictive: true } : {}),
+            }] as [{
+              ownerOnly?: boolean;
+              ownerOnlySources?: ReadonlySet<string>;
+              sourceInstance?: string;
+              sourceAccount?: string;
+              restrictive?: boolean;
+            }]
             : [] as []),
         ),
         new Promise<ContextLoadResult>((resolve) => {

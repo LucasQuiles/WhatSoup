@@ -35,6 +35,8 @@ import {
   ownerOnlyRecordServable,
   ownerOnlySourceSet,
   recordIdScope,
+  memoryRecallRestrictive,
+  memorySourceAccount,
   resolveMemoryScope,
   withVisibilityFilter,
   type GroupMembershipReader,
@@ -210,11 +212,16 @@ function searchLegs(
   // query unless the caller may read them; tierHits gates the returned records
   // again. Visibility is authorized apart from conversation scoping, which
   // applies to the instance's own memory index only.
-  const leg = (namespace: string, filter?: Record<string, unknown>): SearchLeg => {
-    const scoped = withVisibilityFilter(filter, ownerOnlyAccess);
+  const leg = (namespace: string, filter?: Record<string, unknown>, chatScopedOnly = false): SearchLeg => {
+    const scoped = withVisibilityFilter(filter, ownerOnlyAccess, chatScopedOnly);
     return scoped ? { namespace, filter: scoped } : { namespace };
   };
   if (!scope) return namespaces.map((namespace) => leg(namespace));
+  // Restrictive recall narrows the chat-memory legs of a caller without access
+  // to chat_scoped records; documents keep the compatible exclusion.
+  const restrictive = scope.restrictive === true;
+  const memoryLeg = (namespace: string, filter?: Record<string, unknown>): SearchLeg =>
+    leg(namespace, filter, restrictive);
   const thisChat = scope.chatSpellings.length > 0 ? { chat_jid: { $in: scope.chatSpellings } } : undefined;
   // With owner_only access (a direct chat only), one more leg per memory
   // namespace fetches owner_only records of every chat, so a trusted operator
@@ -224,8 +231,8 @@ function searchLegs(
   return namespaces.flatMap((namespace): SearchLeg[] => {
     if (!isChatNamespace(namespace)) return [leg(namespace)];
     if (scope.kind === 'no_context') return [];
-    if (scope.kind === 'configurable_group') return thisChat ? [leg(namespace, thisChat)] : [];
-    const legs = thisChat ? [leg(namespace, thisChat), leg(namespace)] : [leg(namespace)];
+    if (scope.kind === 'configurable_group') return thisChat ? [memoryLeg(namespace, thisChat)] : [];
+    const legs = thisChat ? [memoryLeg(namespace, thisChat), memoryLeg(namespace)] : [memoryLeg(namespace)];
     return [...legs, ...ownerOnlyLeg(namespace)];
   });
 }
@@ -520,30 +527,44 @@ export function registerKnowledgeTools(
     (config as { botName?: unknown }).botName,
     (config as { memory?: { pinecone?: { ownerOnlySources?: unknown } } }).memory?.pinecone?.ownerOnlySources,
   );
-  const scopeFor = (session: SessionContext): Promise<MemoryScope> => resolveMemoryScope(
-    {
-      operatorInstance: isOperatorInstance((config as { botName?: unknown }).botName),
-      tier: session.tier,
-      conversationKey: conversationBoundKey(session) ?? session.conversationKey,
-      deliveryJid: session.deliveryJid,
-      actorJid: session.actorJid,
-      directChat: undefined,
-    },
-    {
-      db: deps.db,
-      identities: deps.identities?.() ?? noIdentities,
-      membership: deps.membership,
-      sharedWorkflowGroups: deps.sharedWorkflowGroups ?? [],
-      contactRecallScopes: deps.contactRecallScopes,
-      trustedOperatorPhones: deps.trustedOperatorPhones,
-      instanceScope: recordIdScope(
-        (config as { botName?: unknown }).botName,
-        (config as { memory?: { pinecone?: { instanceScopedIds?: unknown } } }).memory?.pinecone?.instanceScopedIds,
-      ),
-      ownerOnlySources,
-      ownerOnlyGrant,
-    },
-  );
+  const scopeFor = (session: SessionContext): Promise<MemoryScope> => {
+    const settings = config as {
+      botName?: unknown;
+      instanceType?: unknown;
+      accountScopeId?: unknown;
+      memory?: { pinecone?: { instanceScopedIds?: unknown; recordVisibility?: unknown } };
+    };
+    const identities = deps.identities?.() ?? noIdentities;
+    return resolveMemoryScope(
+      {
+        operatorInstance: isOperatorInstance(settings.botName),
+        tier: session.tier,
+        conversationKey: conversationBoundKey(session) ?? session.conversationKey,
+        deliveryJid: session.deliveryJid,
+        actorJid: session.actorJid,
+        directChat: undefined,
+      },
+      {
+        db: deps.db,
+        identities,
+        membership: deps.membership,
+        sharedWorkflowGroups: deps.sharedWorkflowGroups ?? [],
+        contactRecallScopes: deps.contactRecallScopes,
+        trustedOperatorPhones: deps.trustedOperatorPhones,
+        instanceScope: recordIdScope(settings.botName, settings.memory?.pinecone?.instanceScopedIds),
+        // The reader's account, derived exactly as memory_write's writer stamps
+        // it: memorySourceAccount over the connection's botJid, read per call.
+        sourceAccount: memorySourceAccount(settings.accountScopeId, identities.botJid),
+        restrictive: memoryRecallRestrictive(
+          settings.instanceType,
+          settings.memory?.pinecone?.recordVisibility,
+          settings.memory?.pinecone?.instanceScopedIds,
+        ),
+        ownerOnlySources,
+        ownerOnlyGrant,
+      },
+    );
+  };
   // Visibility authorization for an allowed index that is not the instance's
   // memory index: the same grant as the memory scope, without its membership read.
   const ownerOnlyAccessFor = (session: SessionContext): boolean => ownerOnlyGrant({
