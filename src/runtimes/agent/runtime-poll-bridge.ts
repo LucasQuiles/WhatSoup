@@ -188,7 +188,8 @@ export class RuntimePollBridgeCoordinator {
    * are deleted from the table. Live send_poll rows are deleted with an
    * "interrupted" notice: their awaiting tool call ended with the old process,
    * and every send_poll row then belongs to a call this process admitted
-   * under its awaited-poll cap.
+   * under its awaited-poll cap. A send_poll row whose delete fails stays
+   * stored and unnotified until the next start retries it.
    *
    * Persistence errors are logged and swallowed; rehydration always succeeds
    * structurally even if some rows are unreadable.
@@ -225,6 +226,7 @@ export class RuntimePollBridgeCoordinator {
     const expiredByChat = new Map<string, number>();
     const interruptedContinuationsByChat = new Map<string, number>();
     const orphanedAwaitsByChat = new Map<string, number>();
+    let orphanedAwaitDeleteFailures = 0;
     for (const row of rows) {
       try {
         if (row.hard_closes_at !== null && row.hard_closes_at <= now) {
@@ -239,8 +241,13 @@ export class RuntimePollBridgeCoordinator {
           // The send_poll tool call that awaited this row ended with the
           // previous process, so no vote can reach a caller. Restoring it would
           // also hold a row the new process's awaited-poll cap never counted.
-          this.host.pollPersistence.remove(row.map_key);
-          orphanedAwaitsByChat.set(row.chat_jid, (orphanedAwaitsByChat.get(row.chat_jid) ?? 0) + 1);
+          // A failed delete keeps the row, so the next start retries it and
+          // tells the chat then; telling it now would repeat the notice.
+          if (this.host.pollPersistence.remove(row.map_key)) {
+            orphanedAwaitsByChat.set(row.chat_jid, (orphanedAwaitsByChat.get(row.chat_jid) ?? 0) + 1);
+          } else {
+            orphanedAwaitDeleteFailures += 1;
+          }
           continue;
         }
         if (pending.source === 'askuser' && pending.resolvedAt !== undefined) {
@@ -268,13 +275,15 @@ export class RuntimePollBridgeCoordinator {
     for (const [chatJid, count] of orphanedAwaitsByChat) {
       this.notifyAwaitedPollInterrupted(chatJid, count);
     }
-    if (restored > 0 || expired > 0 || interruptedContinuationsByChat.size > 0 || orphanedAwaitsByChat.size > 0) {
+    if (restored > 0 || expired > 0 || interruptedContinuationsByChat.size > 0 || orphanedAwaitsByChat.size > 0
+      || orphanedAwaitDeleteFailures > 0) {
       log.info({
         restored,
         expired,
         chatsNotified: expiredByChat.size,
         interruptedContinuationChats: interruptedContinuationsByChat.size,
         orphanedAwaitChats: orphanedAwaitsByChat.size,
+        orphanedAwaitDeleteFailures,
       }, 'rehydratePendingPolls: completed');
     }
   }

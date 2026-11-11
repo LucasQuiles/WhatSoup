@@ -170,14 +170,19 @@ export class PendingPollPersistence {
     }
   }
 
-  /** Delete a pending poll row. Called when the in-memory entry is removed. */
-  remove(mapKey: string): void {
+  /**
+   * Delete a pending poll row. Called when the in-memory entry is removed.
+   * Returns false when the delete failed and the row is still stored.
+   */
+  remove(mapKey: string): boolean {
     try {
       this.db.raw.prepare('DELETE FROM pending_polls WHERE map_key = ?').run(mapKey);
       this.recordSuccess();
+      return true;
     } catch (err) {
       this.recordFailure(err);
       log.error({ err, mapKey }, 'removePendingPoll failed');
+      return false;
     }
   }
 
