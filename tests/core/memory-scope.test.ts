@@ -395,6 +395,14 @@ describe('owner_only visibility', () => {
     expect(global.ownerOnlyAccess).toBe(false);
   });
 
+  it('the operator instance carries no owner_only grant, even for the verified owner in a direct chat', async () => {
+    // Control: the same caller on an ordinary instance is admitted.
+    expect((await resolveMemoryScope(dmWith(OWNER), withTrusted())).ownerOnlyAccess).toBe(true);
+    const operator = await resolveMemoryScope({ ...dmWith(OWNER), operatorInstance: true }, withTrusted());
+    expect(operator).toMatchObject({ kind: 'unrestricted', reason: 'operator_instance', ownerOnlyAccess: false });
+    expect(memoryHitTier(OWNER_ONLY, operator, memoryIdentityFold(db))).toBeNull();
+  });
+
   it('records with no visibility field (written before visibility existed) recall exactly as before', async () => {
     const f = memoryIdentityFold(db);
     const contact = await resolveMemoryScope(dmWith(MEMBER), withTrusted());
