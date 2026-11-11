@@ -1093,17 +1093,24 @@ Process cleanup across the observer, transport and independently started MCP
 process remains a separate continuity obligation. In particular, a per-request
 MCP timeout does not establish a deadline for the complete multi-request probe.
 The MCP helper sends SIGTERM to its own process group before reaping the session
-leader, including when that leader has already exited. It preserves the
-three-second graceful-stop window. If the leader has not exited, it sends
-SIGKILL before allowing another five seconds to reap it. It never signals the
-group again after reaping its leader. The helper waits for stderr only within
-the remaining graceful-stop window, reads at most 16 KiB without waiting for EOF,
-and closes its three pipes. A group-signaling error,
+leader, including when that leader has already exited. It allows up to three
+seconds for graceful stop, ending that wait early if diagnostics exceed the
+capture limit. It retains the unreaped leader while waiting
+for inherited stderr to close. If that pipe remains open at the deadline, or
+exceeds its capture limit, the helper sends SIGKILL before reaping the leader.
+This also stops same-group descendants that retain stderr and ignore SIGTERM
+after the leader exits. If the leader itself has not exited, SIGKILL also
+precedes the final five-second reap wait. No group signal follows reaping.
+The helper captures at most 16 KiB, with one extra byte to detect overflow,
+and allows one bounded second after forced cleanup to observe stderr closure.
+It closes all three pipes. Oversized diagnostics remain incomplete rather than
+silently certifying cleanup from a truncated capture. A group-signaling error,
 cleanup exception or unreadable stderr pipe still held open is retained as
 `cleanup_error`; the fleet result reports `mcp_probe_incomplete` rather than
-healthy Microsoft 365 checks. A descendant that outlives its leader and ignores
-SIGTERM, or creates another process group, can survive this cleanup. Outer-
-observer cancellation and remote process cleanup remain unqualified.
+healthy Microsoft 365 checks. Stderr closure is not proof that every descendant
+has exited: a descendant that closes the inherited pipe or creates another
+process group can survive. Outer-observer cancellation and remote process
+cleanup remain unqualified.
 
 Instance health tokens use the shared reader's precedence: per-instance
 `BOT_ERRORS_HEALTH_TOKEN_<INSTANCE>`, then `WHATSOUP_HEALTH_TOKEN`, then the

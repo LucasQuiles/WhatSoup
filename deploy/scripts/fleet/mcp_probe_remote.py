@@ -1,5 +1,18 @@
 import json,os,pathlib,plistlib,re,selectors,signal,subprocess,time
 
+def read_stderr(stream,deadline,limit):
+ data=bytearray()
+ os.set_blocking(stream.fileno(),False)
+ with selectors.DefaultSelector() as ready:
+  ready.register(stream,selectors.EVENT_READ)
+  while len(data)<=limit and time.monotonic()<deadline:
+   if not ready.select(max(0,deadline-time.monotonic())):return bytes(data),False
+   try:chunk=os.read(stream.fileno(),min(4096,limit+1-len(data)))
+   except BlockingIOError:continue
+   if not chunk:return bytes(data),True
+   data.extend(chunk)
+ return bytes(data[:limit]),False
+
 def finish_process(proc):
  cleanup_error=None
  cleanup_deadline=time.monotonic()+3
@@ -8,19 +21,25 @@ def finish_process(proc):
   try:os.killpg(proc.pid,signal.SIGTERM)
   except ProcessLookupError:pass
   except OSError as exc:cleanup_error=type(exc).__name__
-  try:proc.wait(timeout=3)
+  # Keep the leader unreaped while inherited stderr may belong to a straggler.
+  raw,complete=read_stderr(proc.stderr,cleanup_deadline,16384)
+  if not complete and len(raw)==16384:cleanup_error=cleanup_error or 'stderr_incomplete'
+  if not complete:
+   try:os.killpg(proc.pid,signal.SIGKILL)
+   except ProcessLookupError:pass
+   except OSError as exc:cleanup_error=cleanup_error or type(exc).__name__
+  try:proc.wait(timeout=5 if not complete else max(0,cleanup_deadline-time.monotonic()))
   except subprocess.TimeoutExpired:
+   if not complete:raise
    try:os.killpg(proc.pid,signal.SIGKILL)
    except ProcessLookupError:pass
    except OSError as exc:cleanup_error=cleanup_error or type(exc).__name__
    proc.wait(timeout=5)
-  os.set_blocking(proc.stderr.fileno(),False)
-  if cleanup_error is None:
-   with selectors.DefaultSelector() as ready:
-    ready.register(proc.stderr,selectors.EVENT_READ)
-    if not ready.select(max(0,cleanup_deadline-time.monotonic())):cleanup_error='stderr_incomplete'
-  try:err=os.read(proc.stderr.fileno(),16384).decode(errors='replace')
-  except BlockingIOError:err='';cleanup_error=cleanup_error or 'stderr_incomplete'
+  if not complete and len(raw)<16384:
+   tail,complete=read_stderr(proc.stderr,time.monotonic()+1,16384-len(raw))
+   raw+=tail
+  if not complete:cleanup_error=cleanup_error or 'stderr_incomplete'
+  err=raw.decode(errors='replace')
  finally:
   for stream in (proc.stdin,proc.stdout,proc.stderr):
    try:stream.close()

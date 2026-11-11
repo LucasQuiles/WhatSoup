@@ -9,8 +9,11 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import pytest
+from hypothesis import example, given, strategies as st
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "mcp_probe_remote.py"
@@ -58,6 +61,29 @@ from unittest.mock import patch
 with patch.object(pathlib.Path, 'home', return_value=pathlib.Path(sys.argv[1])):
     runpy.run_path(sys.argv[2])
 """
+
+
+@given(data=st.binary(max_size=1024), limit=st.integers(min_value=0, max_value=1025))
+@example(data=b"diagnostic", limit=10)
+@example(data=b"diagnostic!", limit=10)
+def test_stderr_capture_preserves_exact_limit_and_detects_overflow(data, limit):
+    with TemporaryDirectory() as directory, patch.object(Path, "home", return_value=Path(directory)):
+        with contextlib.redirect_stdout(io.StringIO()):
+            reader = runpy.run_path(str(SCRIPT))["read_stderr"]
+        read_fd, write_fd = os.pipe()
+        try:
+            if data:
+                assert os.write(write_fd, data) == len(data)
+            os.close(write_fd)
+            write_fd = None
+            with os.fdopen(read_fd, "rb") as stream:
+                read_fd = None
+                assert reader(stream, time.monotonic() + 1, limit) == (data[:limit], len(data) <= limit)
+        finally:
+            if read_fd is not None:
+                os.close(read_fd)
+            if write_fd is not None:
+                os.close(write_fd)
 
 
 def test_mcp_cleanup_closes_remaining_pipes_after_close_error(tmp_path, monkeypatch):
@@ -137,10 +163,7 @@ def test_mcp_parent_exit_does_not_wait_for_descendant_stderr(tmp_path, exit_at, 
         row = json.loads(stdout)["probes"][0]
         assert row.get("process_exit") == (-9 if exit_at == "ignore-termination" else 0), row
         assert time.monotonic() - started < completion_timeout
-        if group == "ignores-term":
-            assert row["error"] == "mcp_cleanup_unverified"
-            assert row["cleanup_error"] == "stderr_incomplete"
-        elif group == "escaped" and sys.platform == "darwin" and exit_at != "on-termination":
+        if group == "escaped" and sys.platform == "darwin" and exit_at != "on-termination":
             assert row["error"] == "mcp_cleanup_unverified"
             assert row["cleanup_error"] == "PermissionError"
         elif exit_at == "before-reply":
@@ -149,7 +172,8 @@ def test_mcp_parent_exit_does_not_wait_for_descendant_stderr(tmp_path, exit_at, 
             assert row["tool_count"] == 0
         if exit_at == "on-termination":
             assert (tmp_path / "graceful-stop").read_text() == 'completed'
-        if group == "inherited" or exit_at == "on-termination":
+        if group in ("inherited", "ignores-term") or exit_at == "on-termination":
+            assert "cleanup_error" not in row, row
             assert select.select([receipt], [], [], 1)[0], "owned process-group member survived cleanup"
             assert os.read(receipt, 1) == b''
             child_ended = True
