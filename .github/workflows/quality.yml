@@ -3,10 +3,9 @@ name: Quality
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-  # `quality (24.x)` / `quality (25.x)` are REQUIRED contexts on main. A merge queue
-  # only advances once every required check reports on the merge_group ref, so without
-  # this trigger an enabled queue would stall every PR indefinitely waiting for a run
-  # that never starts. Wire the trigger BEFORE enabling the queue, never after.
+  # Retain Quality's queue-ref trigger as a prerequisite for a future queue.
+  # Repository-wide queue support is unqualified: the required private-integrity
+  # producer does not yet admit merge_group. See docs/testing.md before activation.
   merge_group:
   push:
     branches:

@@ -65,16 +65,17 @@ its own assertions and failure result. The temporary report is removed on succes
 or failure; combined mode refuses injected reports and baseline updates. Individual
 inventory commands remain available for focused investigation.
 
-The target protection requires `pr metadata` and the trusted
-`test-integrity (private)` check alongside CodeQL and both Quality contexts. The authorized
-2026-11-10 protection update followed successful candidate checks
-[129691470399](https://github.com/LucasQuiles/WhatSoup/actions/runs/42775047501/job/129691470399)
-and [129710040086](https://github.com/LucasQuiles/WhatSoup/runs/129710040086),
-and live readback matched the committed expectation.
+The 2026-11-11 live protection readback requires both Quality contexts, CodeQL
+and `test-integrity (private)`, with one approving review and an up-to-date branch.
+The separate `pr metadata` requirement has not been activated. The committed
+`docs/enforcement/branch-protection-expected.json` defines the five-context target
+after the authorized cutover below; the current four-context state does not yet
+match that target. The [branch-protection checklist](contributing/quality-guardrails-checklist.md#branch-protection)
+records the overlapping ruleset and classic-protection settings.
 Run `npm run guard:branch-protection-drift` against the live settings and require
 agreement with `docs/enforcement/branch-protection-expected.json` before merging.
-That historical readback proves neither current settings nor migration of older PR
-branches. Before requiring `pr metadata`, inventory open branches that lack
+Repeat the live readback at cutover; the dated observation does not prove later
+settings or migration of older PR branches. Before requiring `pr metadata`, inventory open branches that lack
 `.github/workflows/pr-metadata.yml`. A cutover that introduces the producer and
 requirement together needs an explicitly authorized migration window: qualify the
 cutover PR, enable and read back the requirement immediately before its merge, and
@@ -86,8 +87,14 @@ sequence is executed and verified, the migration remains incomplete.
 
 Quality omits duplicate
 metadata execution and title/body edit triggers; the metadata workflow checks
-PR edits without restarting application suites. Merge groups rely on PR checks before admission
-and receive the required metadata context without pretending to have a PR body.
+PR edits without restarting application suites. The metadata producer has a
+merge-group path that validates the event without pretending it has a PR body.
+Repository-wide merge-queue support remains unqualified: the required private
+scanner does not admit `merge_group` events, and CodeQL's behavior on queue refs
+has not been qualified. No merge queue is active in the observed ruleset. Keep it
+disabled until every required producer can report against the exact queue commit,
+including a separately reviewed private-scanner trust boundary and a successful
+queue canary. Quality's retained trigger alone does not establish queue readiness.
 To roll back, restore both the metadata guard and the `pull_request: edited`
 trigger in the full Quality workflow. Verify that a title/body edit starts that
 replacement check and rejects invalid metadata before removing the separate
