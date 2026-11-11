@@ -45,9 +45,9 @@ export async function upsertFacts(
     if (fact.supersedesText) {
       const supersedeStart = Date.now();
       try {
-        const hits = await pinecone.search(fact.supersedesText, { chat_jid: { $eq: fact.chatJid } }, 1);
-        if (hits.length > 0 && hits[0].score >= 0.8) {
-          const old = hits[0].record;
+        const hit = await pinecone.findSupersedeCandidate(fact.chatJid, fact.supersedesText);
+        if (hit && hit.score >= 0.8) {
+          const old = hit.record;
           const updatedText = `was: ${old.text}, now: ${fact.text}`;
           // `old.visibility` rides along: the provider can only narrow it,
           // so a correction never widens an owner_only record.

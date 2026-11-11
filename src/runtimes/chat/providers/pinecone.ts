@@ -1416,6 +1416,24 @@ export class PineconeMemory {
       });
       throw new AppError('Pinecone circuit breaker open', 'PINECONE_UNAVAILABLE');
     }
+    // Refuse incomplete provenance before the project guard can make a request.
+    // Local refusals must not increment provider failure counters.
+    const stamp = this.recordStamp(contextInput.provenance);
+    if (stamp.sourceInstance === '' || stamp.sourceAccount === '') {
+      logMemoryOperation(operation, {
+        stage: 'guard',
+        status: 'failed',
+        failureCode: 'provider_unavailable',
+        retryable: true,
+        attempt: 0,
+        resultCount: 0,
+        evidenceCoverage: 'local_guard',
+      });
+      throw new AppError(
+        'Pinecone upsert refused: the source instance or account is unknown',
+        'PINECONE_UNAVAILABLE',
+      );
+    }
     const projectGuardError = await this.getProjectGuardError();
     if (projectGuardError) {
       logMemoryOperation(operation, {
@@ -1434,7 +1452,6 @@ export class PineconeMemory {
       );
     }
 
-    const stamp = this.recordStamp(contextInput.provenance);
     const pineconeRecords = records.map((record) => toPineconeRecord(record, stamp));
     const startMs = Date.now();
     const doUpsert = () => {
@@ -1528,5 +1545,23 @@ export class PineconeMemory {
     }
     Object.assign(filters, this.sourceBoundaryFilter());
     return this._searchCore(claimText, filters, topK);
+  }
+
+  /**
+   * Corrections share the opt-in instance/account boundary with dedup lookups.
+   * Only an owner_only writer may supersede an owner_only record.
+   */
+  async findSupersedeCandidate(chatJid: string, text: string): Promise<SearchResult | null> {
+    const source = configuredRecordStampSource();
+    const writesOwnerOnly =
+      instanceRecordVisibility(source.instanceType, source.recordVisibility) === 'owner_only';
+    const filter = withVisibilityFilter(
+      { chat_jid: { $eq: chatJid }, ...this.sourceBoundaryFilter() },
+      writesOwnerOnly,
+    ) ?? {};
+    const results = await this._searchCore(text, filter, 1);
+    // Preserve the decay applied by the supersede lookup's former search() call.
+    const [best] = applyDecay(results, config.recencyHalfLifeDays, config.maxAgeDays);
+    return best ?? null;
   }
 }
