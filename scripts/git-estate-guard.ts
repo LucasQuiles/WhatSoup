@@ -1512,6 +1512,20 @@ function printBaselineAcceptRefusal(
 
 type BaselineCommandResult = number | { publishSuccess: () => void };
 
+function acceptedStashBranch(cwd: string, oid: string): string {
+  const stash = captureCommonState(cwd).stashes.find((candidate) => candidate.oid === oid);
+  if (!stash) {
+    throw new GitEstateError('stash_not_retained', 'requested stash is not currently retained');
+  }
+  if (stash.branch === null) {
+    throw new GitEstateError(
+      'stash_scope_unknown',
+      'requested stash has no attributable local branch scope',
+    );
+  }
+  return stash.branch;
+}
+
 async function runBaselineAcceptStashCommand(
   cwd: string,
   json: boolean,
@@ -1520,13 +1534,15 @@ async function runBaselineAcceptStashCommand(
   _reason: string,
 ): Promise<BaselineCommandResult> {
   let first: EstateSnapshot;
+  let stashBranch: string;
   try {
-    first = await collectSnapshot(cwd);
+    stashBranch = acceptedStashBranch(cwd, oid);
+    first = await collectSnapshot(cwd, 'verified', [`refs/heads/${stashBranch}`]);
   } catch (error) {
     printBaselineAcceptRefusal(
       json,
       null,
-      'scan_failed',
+      error instanceof GitEstateError ? error.kind : 'scan_failed',
       error instanceof Error ? error.message : 'initial estate scan failed',
     );
     return 2;
@@ -1554,6 +1570,12 @@ async function runBaselineAcceptStashCommand(
   let initialStash: VerifiedStashAcceptance;
   try {
     initialStash = verifyObservedStashClosure(cwd, first, oid);
+    if (initialStash.finding.branch !== stashBranch) {
+      throw new GitEstateError(
+        'stash_scope_changed',
+        'requested stash branch attribution changed during acceptance',
+      );
+    }
   } catch (error) {
     printBaselineAcceptRefusal(
       json,
@@ -1575,7 +1597,7 @@ async function runBaselineAcceptStashCommand(
 
   let finalSnapshot: EstateSnapshot;
   try {
-    finalSnapshot = await collectSnapshot(cwd);
+    finalSnapshot = await collectSnapshot(cwd, 'verified', [`refs/heads/${stashBranch}`]);
   } catch (error) {
     printBaselineAcceptRefusal(
       json,
@@ -1616,6 +1638,12 @@ async function runBaselineAcceptStashCommand(
   let finalStash: VerifiedStashAcceptance;
   try {
     finalStash = verifyObservedStashClosure(cwd, finalSnapshot, oid);
+    if (finalStash.finding.branch !== stashBranch) {
+      throw new GitEstateError(
+        'stash_scope_changed',
+        'requested stash branch attribution changed during acceptance',
+      );
+    }
   } catch (error) {
     printBaselineAcceptRefusal(
       json,

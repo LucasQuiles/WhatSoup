@@ -567,9 +567,11 @@ The hook and CI wiring are protected by `scripts/safeguard-diagnostics.ts`: the 
 must fail if `.husky/pre-commit` drops repo hygiene, publication, design-system documentation
 hygiene, node-pin, settings, or console lint coverage; if quality.yml drops the changed-range
 design-system hygiene step, shared console design verification, Playwright install, either browser
-proof suite, or the browser failure-artifact path list; or if tag-release CI drops shared console
-design verification, Playwright install, either browser proof suite, or the browser failure-artifact
-path list. Playwright browser caching is a runtime-cost optimization, not a correctness guard.
+proof suite, or the browser failure-artifact path list. The tag-gate safeguard requires receipt
+delegation for every direct-tag Quality completion, including failed Quality runs so the consumer
+can report failure. Quality performs the design and browser checks; `tag-release-gate` selects and
+verifies the authenticated private-scanner receipt for that exact Quality attempt. Playwright
+browser caching is a runtime-cost optimization, not a correctness guard.
 Failure screenshots are best-effort diagnostics: the workflows keep their artifact paths wired, but
 `if-no-files-found: ignore` means absence of screenshots does not itself fail a run that already
 failed for a primary browser assertion.
@@ -582,28 +584,28 @@ The root verification scripts call one shared design-system audit tail:
 npm run verify:console-design
 ```
 
-This chain is the DRY owner for non-browser console design checks in `verify:push:branch`,
-`verify:release`, quality.yml CI, and tag-release CI. It currently runs, in order:
+This chain combines `verify:console-design:live` with the design-guard fixture tests for
+`verify:push:branch`. Local `verify:release` and Quality's full profile run the live portion after
+full-suite coverage has already exercised those fixtures. Quality uses that full profile for tags;
+the separate tag gate verifies the resulting private-scanner receipt. The complete chain runs:
 
 1. `npm --prefix console run design:theme-parity`
 2. `npm --prefix console run design:token-drift`
 3. `npm --prefix console run design:contrast`
-4. `npm --prefix console run lint:shadow:baseline`
-5. `npm --prefix console run design:shadow-frozen-inventory`
-6. `npm --prefix console run design:raw-form-control-inventory`
-7. `npm --prefix console run design:regression`
-8. `npm --prefix console run design:metrics`
-9. `npm --prefix console run design:burndown`
-10. `npm --prefix console run design:color-semantics`
-11. `npm --prefix console run design:resilience`
-12. `npm --prefix console run design:font-assets`
-13. `npm --prefix console run design:brand-assets`
-14. `npm --prefix console run design:lint-fixtures`
-15. `npm run test:design-guards`
+4. `npm --prefix console run lint:shadow:baseline -- --with-inventories` (also checks frozen shadow and raw-form inventories)
+5. `npm --prefix console run design:regression`
+6. `npm --prefix console run design:metrics`
+7. `npm --prefix console run design:burndown`
+8. `npm --prefix console run design:color-semantics`
+9. `npm --prefix console run design:resilience`
+10. `npm --prefix console run design:font-assets`
+11. `npm --prefix console run design:brand-assets`
+12. `npm --prefix console run design:lint-fixtures`
+13. `npm run test:design-guards`
 
-`scripts/safeguard-diagnostics.ts` enforces the shared chain and the fact that push/release
-verification plus CI workflows call it. Removing, reordering, or bypassing this chain is a
-guard-chain failure.
+`scripts/safeguard-diagnostics.ts` enforces the shared chain, its local and Quality callers, and
+the tag gate's authenticated receipt delegation. Removing or bypassing a required caller is a
+guard-chain failure; the tag consumer does not repeat the design checks.
 
 Release verification has an additional browser proof tail:
 
@@ -611,10 +613,12 @@ Release verification has an additional browser proof tail:
 npm run verify:console-browser
 ```
 
-That shared script runs `test:browser` and `test:browser:motion`. It is wired into
-`verify:release` and tag-release CI so trusted-keyboard, viewport, target-size, reduced-motion, and
-no-reduce exit-motion proofs cannot be skipped on release/tag paths. Branch-push verification still
-uses the faster non-browser design chain; quality.yml remains the PR/main browser gate.
+That shared script runs `test:browser` and `test:browser:motion` in local `verify:release`.
+Quality's full profile invokes both commands directly for tags and other full-validation inputs,
+covering trusted-keyboard, viewport, target-size, reduced-motion and no-reduce exit-motion behavior.
+The tag gate requires the matching successful Quality run and private-scanner receipt. Branch-push
+verification uses the non-browser design chain; reduced PR profiles follow the selection policy
+in [Testing paths](../../testing.md).
 
 Report-only audits inside this chain remain report-only. Their presence in the shared chain proves
 that a structured inventory was generated during the verification run; it does not prove the inventory is

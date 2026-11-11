@@ -55,10 +55,14 @@ function selectedJobs(matrix: TestMatrix, plan: TestPlan): string[] {
   if (plan.profile === 'full') {
     return matrix === 'node24'
       ? ['selection', 'full', 'bot-errors-health-macos']
-      : ['selection', 'compatibility-full'];
+      : ['selection', 'compatibility-full', 'guard-compatibility'];
   }
   if (matrix === 'node24') return ['selection', 'affected'];
-  return plan.lanes.compatibility ? ['selection', 'compatibility-affected'] : ['selection'];
+  return [
+    'selection',
+    ...(plan.lanes.compatibility ? ['compatibility-affected'] : []),
+    ...(plan.lanes.guard ? ['guard-compatibility'] : []),
+  ];
 }
 
 export function checkTestJobs(

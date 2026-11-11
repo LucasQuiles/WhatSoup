@@ -78,6 +78,8 @@ describe('SessionManager provider switches — fail-fast (#447)', () => {
           message: { content: [{ type: 'text', text: 'hello' }] },
         }),
         expectedType: 'assistant_text',
+        // #3717c: a Claude assistant line also reports its request usage, after its content.
+        trailingType: 'request_usage',
       },
       {
         provider: 'codex-cli',
@@ -104,9 +106,12 @@ describe('SessionManager provider switches — fail-fast (#447)', () => {
       },
     ] as const;
 
-    for (const { provider, line, expectedType } of cases) {
+    for (const testCase of cases) {
+      const { provider, line, expectedType } = testCase;
+      const trailing = 'trailingType' in testCase ? [expect.objectContaining({ type: testCase.trailingType })] : [];
       expect(__provider_switch_for_test.getParser(provider)(line)).toEqual([
         expect.objectContaining({ type: expectedType }),
+        ...trailing,
       ]);
       expect(__provider_switch_for_test.getParser(provider)('')).toEqual([]);
     }

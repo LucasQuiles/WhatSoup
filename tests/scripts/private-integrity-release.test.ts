@@ -161,20 +161,24 @@ describe('trusted private scanner release consumption', () => {
     expect(() => releaseSource({ QUALITY_HEAD_SHA: source.head })).toThrow('Exact Quality run');
   });
 
-  it('runs the normal CLI and propagates a failed receipt to the release caller', () => {
+  it('uses canonical API paths through the CLI and propagates a failed receipt', () => {
     const scratch = tmp.make('cli');
     const responses = join(scratch, 'responses.json');
     const output = join(scratch, 'outputs.txt');
     const receiptPath = join(scratch, 'receipt.json');
-    writeFileSync(responses, JSON.stringify(fixtures()));
+    writeFileSync(responses, JSON.stringify(Object.fromEntries(
+      Object.entries(fixtures()).map(([suffix, value]) => [
+        `repos/LucasQuiles/WhatSoup${suffix ? `/${suffix}` : ''}`, value,
+      ]),
+    )));
     const gh = join(scratch, 'gh');
     writeFileSync(gh, `#!${process.execPath}\n` + `
 const fs = require('node:fs');
-const suffix = process.argv.at(-1).replace('repos/LucasQuiles/WhatSoup/', '');
+const endpoint = process.argv.at(-1);
 const data = JSON.parse(fs.readFileSync(${JSON.stringify(responses)}, 'utf8'));
 if (process.env.UNRELATED_TEST_SECRET !== undefined || process.env.GH_TOKEN !== 'synthetic-token') process.exit(4);
-if (!Object.hasOwn(data, suffix)) process.exit(3);
-process.stdout.write(JSON.stringify(data[suffix]));
+if (!Object.hasOwn(data, endpoint)) process.exit(3);
+process.stdout.write(JSON.stringify(data[endpoint]));
 `);
     chmodSync(gh, 0o700);
     const env = {

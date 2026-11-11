@@ -219,9 +219,9 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'bash scripts/run-with-pinned-npm.sh --prefix console ci',
       'bash scripts/run-with-pinned-npm.sh --prefix console run lint',
       'npm run typecheck:all',
-      'npm run coverage:check -- --pool=forks',
       'bash scripts/run-with-pinned-npm.sh --prefix console run build',
       'npm run verify:console-design:live',
+      'npm run coverage:check -- --pool=forks',
       'npm run verify:console-browser',
     ],
     exactSequence: true,
@@ -1168,6 +1168,10 @@ function whatsoupGuardNode25CompatibilityFailures(text: string): string[] {
   const { root, failures: parseFailures } = parseWorkflow(text, 'whatsoup guard workflow');
   if (!root) return parseFailures;
   const failures: string[] = [];
+  const triggers = asRecord(root.on);
+  if (!triggers || Object.keys(triggers).length !== 1 || !hasOwn(triggers, 'workflow_call') || hasOwn(root, 'concurrency')) {
+    failures.push('whatsoup guard workflow must be callable only through Quality without separate concurrency');
+  }
   const test = asRecord(asRecord(root.jobs)?.test);
   const matrix = asRecord(asRecord(test?.strategy)?.matrix);
   const nodes = matrix?.node;
@@ -1180,6 +1184,18 @@ function whatsoupGuardNode25CompatibilityFailures(text: string): string[] {
   const setup = steps.filter((step) => step.uses === 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020');
   if (setup.length !== 1 || asRecord(setup[0]?.with)?.['node-version'] !== '${{ matrix.node }}') {
     failures.push('whatsoup guard workflow must select its setup Node from the retained matrix lane');
+  }
+  const commands = ['npm ci', 'npm run typecheck', 'npm test'];
+  const runSteps = steps.filter((step) => hasOwn(step, 'run'));
+  if (
+    !test || hasOwn(test, 'if') || hasOwn(test, 'continue-on-error')
+    || asRecord(asRecord(test.defaults)?.run)?.['working-directory'] !== 'tools/whatsoup_guard'
+    || runSteps.length !== commands.length
+    || commands.some((command, index) => runSteps[index]?.run !== command)
+    || steps.some((step) => hasOwn(step, 'if') || hasOwn(step, 'continue-on-error'))
+    || runSteps.some((step) => runControlFailures(step, 'guard validation').length > 0)
+  ) {
+    failures.push('whatsoup guard validation must run npm ci, typecheck and tests unconditionally and block on failure');
   }
   return failures;
 }
@@ -1200,6 +1216,7 @@ function qualityCiLanePartitionFailures(text: string): string[] {
   const compatibilityAffected = asRecord(jobs?.['compatibility-affected']);
   const full = asRecord(jobs?.full);
   const compatibilityFull = asRecord(jobs?.['compatibility-full']);
+  const guardCompatibility = asRecord(jobs?.['guard-compatibility']);
   if (!quality || !compatibility || !docs || !affected || !compatibilityAffected || !full || !compatibilityFull) {
     return ['quality workflow must declare stable aggregators and every selected-profile validation job'];
   }
@@ -1282,7 +1299,15 @@ function qualityCiLanePartitionFailures(text: string): string[] {
     }
   };
   aggregate(quality, 'node24', ['selection', 'docs', 'affected', 'full', 'bot-errors-health-macos']);
-  aggregate(compatibility, 'node25', ['selection', 'docs', 'compatibility-affected', 'compatibility-full']);
+  aggregate(compatibility, 'node25', ['selection', 'docs', 'compatibility-affected', 'compatibility-full', 'guard-compatibility']);
+  if (
+    !guardCompatibility || !needsSelection(guardCompatibility)
+    || guardCompatibility.if !== 'fromJSON(needs.selection.outputs.lanes).guard'
+    || guardCompatibility.uses !== './.github/workflows/whatsoup-guard.yml'
+    || Object.keys(guardCompatibility).some((key) => !['needs', 'if', 'uses', 'name'].includes(key))
+  ) {
+    failures.push('guard compatibility must call the local guard workflow after guard selection without overrides');
+  }
   if (hasOwn(quality, 'strategy') || hasOwn(compatibility, 'strategy')) {
     failures.push('required-context aggregators must not use a matrix strategy');
   }

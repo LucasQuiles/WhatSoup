@@ -80,20 +80,55 @@ diagnostic projections. Each behavior retains its fresh database and server,
 environment restoration and negative assertions. Every fixture listener starts
 on an ephemeral port so isolated forks can run the files concurrently.
 
-`pr metadata` and the trusted `test-integrity (private)` check are separate
-required contexts alongside CodeQL and both Quality contexts. The authorized
-2026-11-10 protection update followed successful candidate checks
-[129691470399](https://github.com/LucasQuiles/WhatSoup/actions/runs/42775047501/job/129691470399)
-and [129710040086](https://github.com/LucasQuiles/WhatSoup/runs/129710040086),
-and live readback matched the committed expectation.
+Both the local release gate and the full Quality job run console lint, build and
+live design checks before root coverage. The full suite and its design tests
+remain required; an earlier build/design failure stops before that expensive run.
+
+The 2026-11-11 live protection readback requires both Quality contexts, CodeQL
+and `test-integrity (private)`, with one approving review and an up-to-date branch.
+The separate `pr metadata` requirement has not been activated. The committed
+`docs/enforcement/branch-protection-expected.json` defines the five-context target
+after the authorized cutover below; the current four-context state does not yet
+match that target. The [branch-protection checklist](contributing/quality-guardrails-checklist.md#branch-protection)
+records the overlapping ruleset and classic-protection settings.
 Run `npm run guard:branch-protection-drift` against the live settings and require
 agreement with `docs/enforcement/branch-protection-expected.json` before merging.
-That historical readback does not prove future settings. Quality omits duplicate
+Repeat the live readback at cutover; the dated observation does not prove later
+settings or migration of older PR branches. Before requiring `pr metadata`, inventory open branches that lack
+`.github/workflows/pr-metadata.yml`. A cutover that introduces the producer and
+requirement together needs an explicitly authorized migration window: qualify the
+cutover PR, enable and read back the requirement immediately before its merge, and
+hold other merges until the producer is on `main`. Update each affected PR branch
+from that `main` before resuming its qualification; require its own successful
+metadata check, including validation after a title/body edit. Missing contexts keep
+those PRs blocked; do not remove the requirement to advance them. Until this
+sequence is executed and verified, the migration remains incomplete.
+
+Quality omits duplicate
 metadata execution and title/body edit triggers; the metadata workflow checks
-PR edits without restarting application suites. Merge groups rely on PR checks before admission
-and receive the required metadata context without pretending to have a PR body.
-To roll back, restore the full Quality workflow's metadata enforcement before
-removing the separate requirement; keep both checks available during that transition.
+PR edits without restarting application suites. The metadata workflow also
+triggers for merge groups, but its PR metadata guard is skipped for those events;
+that path does not validate merge-group metadata.
+The PR job checks out the event's immutable base SHA, fetches and verifies the
+candidate head as Git data, and invokes the base metadata validator directly with
+Node. Candidate package scripts and validator imports are never executed.
+This does not make the `pull_request` workflow definition itself trusted: changes
+to that definition still require independent review and hosted qualification before
+the separate requirement is activated. Switching to `pull_request_target` needs
+its own authorized cutover; GitHub has announced a [public-repository default event
+policy block from December 2, 2026](https://github.blog/changelog/2026-11-02-pull_request_target-blocked-by-default-december-2/).
+Repository-wide merge-queue support remains unqualified: the required private
+scanner does not admit `merge_group` events, and CodeQL's behavior on queue refs
+has not been qualified. No merge queue is active in the observed ruleset. Keep it
+disabled until every required producer can report against the exact queue commit,
+including a separately reviewed private-scanner trust boundary and a successful
+queue canary. Quality's retained trigger alone does not establish queue readiness.
+To roll back, restore both the metadata guard and the `pull_request: edited`
+trigger in the full Quality workflow. Verify that a title/body edit starts that
+replacement check and rejects invalid metadata before removing the separate
+requirement. Keep the separate workflow and requirement active until the replacement
+is proven on each branch still eligible to merge; merely restoring full-suite
+selection does not restore edit validation.
 
 Private scanning runs from the default branch after Quality completes. Quality
 never receives its deploy key. Main and scheduled scans bind exact commits;
@@ -254,9 +289,20 @@ Affected, full and performance jobs share the existing Playwright binary cache;
 the installer still checks the version required by the lockfile on every run.
 System package installation is separate and bounded so a download retry cannot
 repeat an interrupted package-manager transaction. Test verdicts remain uncached.
-Changes under `tools/whatsoup_guard/**` also run the standalone `whatsoup-guard`
-Node 25 compatibility lane. Quality owns Node 24 guard typechecking and tests;
-the standalone workflow does not repeat that version.
+The full Quality job also caches pip downloads/wheels through `setup-python`, keyed
+by Python/platform and the host installer input. It still creates and validates the
+quality environment on every run. Docker uses Buildx with the GitHub cache backend,
+loads the `whatsoup-ci` image locally and retains its integration checks. Only main
+pushes export the shared layer cache; transfers have a one-minute bound and export
+errors are non-fatal. No registry push, virtual environment or test result is cached.
+Hosted cold/warm and cache-failure qualification remains required before claiming
+these caches save time or provide a verified transport fallback.
+Quality calls the reusable `whatsoup-guard` workflow for Node 25 when guard
+validation is selected, including every full profile and merge-queue run.
+The required `quality (25.x)` check rejects failed, cancelled, skipped or missing
+selected guard results. Documentation-only changes need no guard result.
+Quality also owns Node 24 guard typechecking and tests. The reusable workflow
+tests only Node 25 and has no separate trigger or concurrency group.
 The guard runner removes its own temporary directory after either outcome. On macOS,
 an overlong inherited `TMPDIR` uses a short owned directory so `tsx` can open its IPC
 socket. `WHATSOUP_GUARD_TEST_TMPDIR` remains an explicit override; keep it short enough
@@ -267,6 +313,12 @@ validation defaults to thirty minutes. `--max-workers` accepts 1–4; browser
 execution stays at one. `--timeout-ms` is a total budget, including admission.
 The existing battery kills the child's process group at the bound and records
 cleanup uncertainty. This is separate from Vitest's per-test timeout.
+The boundary verification watchdog reuses the battery's full process-group probe.
+A departed leader or unreadable inventory cannot establish cleanup. On macOS,
+`EPERM` is tolerated only when a fresh inventory proves no live group members;
+the original timeout, signal or unexpected-survivor result still fails.
+Other signal errors remain in an inconclusive terminal result after bounded
+teardown, so missing cleanup proof cannot become a pass.
 The planner and affected runner use `--max-workers`; the direct Vitest arguments
 forwarded by `npm test` use `--maxWorkers`.
 

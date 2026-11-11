@@ -1,20 +1,10 @@
 name: whatsoup-guard
 
 on:
-  pull_request:
-    paths: ['tools/whatsoup_guard/**', '.github/workflows/whatsoup-guard.yml']
-  push:
-    branches: [main]
-    paths: ['tools/whatsoup_guard/**', '.github/workflows/whatsoup-guard.yml']
+  workflow_call:
 
 permissions:
   contents: read
-
-# Superseded runs on the same ref are safe to drop (PR/push guard, like quality.yml
-# — the opposite of tag-release-gate.yml, which never interrupts a release).
-concurrency:
-  group: whatsoup-guard-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   test:

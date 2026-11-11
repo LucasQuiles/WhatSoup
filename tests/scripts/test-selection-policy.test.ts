@@ -94,7 +94,7 @@ describe('classifyTestChanges', () => {
     });
   });
 
-  it('uses the standalone guard lane for the Whatsoup guard tool matrix', () => {
+  it('selects guard validation without unrelated root compatibility work', () => {
     const result = classifyTestChanges(['tools/whatsoup_guard/check_policy.ts']);
 
     expect(result.profile).toBe('affected');

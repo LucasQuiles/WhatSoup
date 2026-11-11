@@ -21,9 +21,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Checkout
+      # The guard and its transitive imports use the immutable base revision;
+      # candidate content remains Git data only. The pull_request workflow
+      # definition itself requires separate hosted qualification.
+      - name: Checkout trusted metadata base
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
           fetch-depth: 0
 
       - name: Setup Node 24
@@ -31,8 +35,18 @@ jobs:
         with:
           node-version-file: '.nvmrc'
 
+      - name: Fetch PR head history
+        if: github.event_name == 'pull_request'
+        env:
+          PR_METADATA_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_METADATA_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "refs/pull/${PR_METADATA_NUMBER}/head"
+          test "$(git rev-parse --verify FETCH_HEAD^{commit})" = "$PR_METADATA_HEAD"
+
       - name: PR metadata guard
         if: github.event_name == 'pull_request'
         env:
           PR_METADATA_EVENT: ${{ github.event_path }}
-        run: npm run guard:pr-metadata -- --github-event "$PR_METADATA_EVENT" --json
+        run: node --disable-warning=ExperimentalWarning --experimental-strip-types scripts/pr-metadata-guard.ts --github-event "$PR_METADATA_EVENT" --json

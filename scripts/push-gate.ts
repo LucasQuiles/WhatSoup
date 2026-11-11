@@ -8,9 +8,9 @@
  * an ordered array, the curated test list is one path per line, and the
  * runner reports per-step timing with fail-fast attribution.
  *
- * Behavior parity with the legacy strings is the contract:
- *  - same steps, same order (including verify:semantic:shadow's position
- *    mid-guard-block and the trailing scope print);
+ * Required behavior from the legacy strings is the contract:
+ *  - same steps and prerequisite order, including verify:semantic:shadow's
+ *    position mid-guard-block and the trailing scope print;
  *  - same fail-fast semantics (first non-zero exit aborts the pipeline);
  *  - the legacy `unset WHATSOUP_SKIP_*` preamble is preserved by deleting
  *    those variables from the environment before any step spawns.
@@ -235,7 +235,7 @@ export const BRANCH_STEPS: readonly GateStep[] = [
   step('push-gate-scope', 'bash scripts/print-push-gate-scope.sh'),
 ];
 
-/** verify:release — exact legacy order. */
+/** verify:release — build and design failures precede the expensive coverage suite. */
 export const RELEASE_STEPS: readonly GateStep[] = [
   guard('guard:repo:release-hygiene'),
   guard('guard:repo:commit-authors'),
@@ -282,9 +282,9 @@ export const RELEASE_STEPS: readonly GateStep[] = [
   step('console-ci', 'bash scripts/run-with-pinned-npm.sh --prefix console ci'),
   step('console-lint', 'bash scripts/run-with-pinned-npm.sh --prefix console run lint'),
   step('typecheck:all', 'npm run typecheck:all'),
-  step('coverage:check', 'npm run coverage:check -- --pool=forks'),
   step('console-build', 'bash scripts/run-with-pinned-npm.sh --prefix console run build'),
   step('verify:console-design:live', 'npm run verify:console-design:live'),
+  step('coverage:check', 'npm run coverage:check -- --pool=forks'),
   step('verify:console-browser', 'npm run verify:console-browser'),
 ];
 

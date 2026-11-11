@@ -19,11 +19,13 @@ checks; Node 25 runs the full non-coverage compatibility suite and console build
 Affected compatibility runs use the selected root tests on Node 25.
 
 PR metadata has its own `pr metadata` workflow, including title/body edits.
-Quality omits duplicate metadata execution and its edit trigger. Both new required
-contexts passed before the authorized 2026-11-10 protection update and clean live
-drift check; [Testing paths](../testing.md) links those checks. This avoids restarting
-application suites for metadata edits. Verify current protection before merging;
-local YAML validation does not establish the hosted setting. Existing CodeQL and
+Quality omits duplicate metadata execution and its edit trigger. The metadata
+check has passed, but its required-context activation remains pending. The
+[protection migration](../testing.md) records
+the live setting, target and authorized sequence: qualify the candidate, enable
+the requirement, verify the live readback, then merge. This avoids restarting
+application suites for metadata edits. Local YAML validation does not establish
+the hosted setting. Existing CodeQL and
 independent review requirements remain in place. Hosted timing gains require
 measurements after activation.
 
@@ -371,9 +373,13 @@ full object ID and a non-sensitive reason:
 npm run guard:git-estate -- baseline accept-stash --oid <full-object-id> --reason 'preserved work awaiting integration' --json
 ```
 
-This requires a valid existing baseline, two complete matching estate snapshots,
-and matching stash parents with all reachable objects present and of supported
-types. It adds only the selected stash finding; other finding IDs, counts and
+This requires a valid existing baseline, two complete matching snapshots of the
+common Git state and relevant worktrees, and matching stash parents with all
+reachable objects present and of supported types. The existing pusher scope
+includes the invoking worktree and the stash's attributable branch. An unreadable
+unrelated worktree does not prevent this narrow acknowledgment; unreadable relevant
+worktrees and unknown or changing stash attribution still refuse it.
+It adds only the selected stash finding; other finding IDs, counts and
 container identities retain their prior values. A different stash, conflict or
 worktree lock in the pusher's scope still blocks. The JSON receipt includes the reason; the baseline
 does not. This acknowledgment does not prove restored content, integration or
@@ -594,34 +600,35 @@ Main thread should `grep` to spot-check whenever a reviewer claims a previously-
 
 ## Branch Protection
 
-> Verified live 2026-07-22 via `gh api .../branches/main/protection` and `.../rulesets` (originally audited 2026-07-21, `WHATSOUP-CICD-AUDIT-2026-07-21`; refreshed after the R-02 approval requirement and the `merge_group` wiring). The default branch is gated by **two overlapping surfaces** — a modern ruleset *and* classic branch protection.
+> Verified live 2026-11-11 via `gh api repos/LucasQuiles/WhatSoup/branches/main/protection`, `.../rulesets`, and `.../rulesets/16319133`. The default branch is gated by two overlapping surfaces: a ruleset and classic branch protection. This is the observed state before the authorized metadata cutover; [Testing paths](../testing.md) defines the cutover and rollback procedure.
 
 **Ruleset "Lock"** (id `16319133`, enforcement `active`, `bypass_actors=[]` so it binds admins), scoped to `~DEFAULT_BRANCH`, four rules:
 - `deletion` — branch deletion blocked
 - `non_fast_forward` — force-pushes blocked
 - `required_status_checks` — `quality (24.x)` and `quality (25.x)` must pass (strict=false; branch need not be up to date)
-- `pull_request` — a PR is required, **with 0 required approvals**
+- `pull_request` — a PR is required, with `required_approving_review_count=0` and `require_extra_approval_for_unattributed_changes=true`; the latter can impose an additional approval for unattributed changes.
 
-**Classic branch protection** (same branch) additionally requires the **`CodeQL`** check, with `strict=true` (branch must be up to date), and — since the R-02 remediation — **`required_pull_request_reviews.required_approving_review_count = 1`** with `dismiss_stale_reviews=true` (an approval does not survive later commits). Its `enforce_admins=false`, so an admin can bypass the classic surface (including CodeQL *and* the approval requirement); the ruleset still binds admins to the quality checks, the PR requirement, and the non-fast-forward/deletion blocks.
+**Classic branch protection** requires `quality (24.x)`, `quality (25.x)`, `CodeQL`, and `test-integrity (private)`, with `strict=true` (the branch must be up to date). It also requires one approving review and dismisses stale approvals after later commits. Its `enforce_admins=false`, so the classic surface permits administrator bypass; the ruleset still binds administrators to the Quality checks, the PR requirement, and the non-fast-forward/deletion blocks. This release procedure does not use administrator bypass.
 
-**Net effect** — a non-admin contributor must pass `quality (24.x)` + `quality (25.x)` + `CodeQL`, have an up-to-date branch, **and obtain one approving review**; `CodeQL` and the approval are admin-bypassable. **`CodeQL` has no in-repo workflow** — it is GitHub *default code-scanning setup* (state=configured; languages actions/javascript/javascript-typescript/python/typescript; weekly + PR), so it is invisible to an in-repo-only search.
+**Effective checks before cutover:** both Quality contexts, CodeQL, and private test integrity, plus an up-to-date branch and one approving review for a non-administrator merge. The committed expectation adds `pr metadata` as the fifth context after the authorized cutover. Verify live agreement with that target immediately before the cutover PR merges. CodeQL uses GitHub-managed default code-scanning setup rather than an in-repository workflow.
 
 ⚠️ **Admin self-merge remains possible — deliberately.** R-02 closed the self-merge gap for *non-admins* by setting 1 required approval on the classic surface. It does **not** bind admins: classic `enforce_admins=false`, and the ruleset's `pull_request` rule (which does bind admins) still requires **0** approvals. So a repo admin can still merge their own PR. This is an accepted residual — raising the ruleset's approval count would block every solo merge on a single-maintainer repo. To close it fully, set the approval count on ruleset `16319133` instead.
 
-**Merge queue — UNAVAILABLE on this repository (platform constraint).** Do not spend time trying to turn it on. GitHub's merge queue requires an **organization-owned** repository; `LucasQuiles/WhatSoup` is public but `owner.type=User`, so the `merge_queue` ruleset rule is rejected outright:
+**Merge queue — disabled and unqualified.** The historical 2026-07-22 activation attempt on this user-owned repository was rejected by GitHub:
 
 ```
 PUT /repos/LucasQuiles/WhatSoup/rulesets/16319133
 -> HTTP 422 {"errors":["Invalid rule 'merge_queue': "]}
 ```
 
-Verified 2026-07-22: rejected **both** with explicit parameters and with none, so it is not a parameter-tuning problem. It would only become available by transferring the repo to an organization.
+That dated attempt failed both with explicit parameters and with none. It does not establish current platform eligibility; recheck eligibility and obtain owner authorization before proposing a future activation or repository transfer.
 
-`quality.yml` nevertheless **does** trigger on `merge_group` and exempts queue runs from `cancel-in-progress` (cancelling a queue run reports a cancelled required check and ejects the PR). That wiring is deliberately retained: it is inert while no queue exists, and it is the correct prerequisite if the repo ever moves to an org — the trigger must be on `main` *before* a queue is enabled, or every PR stalls waiting for a check that never runs.
+`quality.yml` retains its `merge_group` trigger and exempts queue runs from `cancel-in-progress`. This is one prerequisite for a future queue, not evidence of repository-wide queue support. The 2026-11-11 ruleset readback contains no merge queue; the existing private scanner intentionally excludes `merge_group` from its admitted events.
 
-Two constraints to respect if a queue ever becomes possible:
-- `whatsoup-guard.yml` is path-filtered and must **never** be made a required context while a queue is live — a PR not touching those paths would never report it, stalling the queue.
-- `CodeQL` is GitHub-managed default setup (it runs as event `dynamic`, with no in-repo workflow), so its behaviour on a `merge_group` ref cannot be configured or verified in advance. Treat enabling a queue as a canary exercise on a single low-risk PR, not a fleet-wide switch.
+Before any future queue activation:
+- Implement and review a private-scanner producer that safely binds its privileged publication to the exact queue commit. The current producer cannot supply the required `test-integrity (private)` context for that event.
+- Verify every required producer on a queue canary, including GitHub-managed CodeQL and metadata validation. Retained triggers and static expectations do not prove successful publication.
+- Verify the required Node 25 aggregate waits for the callable guard workflow whenever the guard lane is selected. `whatsoup-guard.yml` now runs through Quality; it has no independent path-filtered trigger.
 
 **Action pinning.** External action `uses:` refs are pinned to 40-hex commit SHAs (R-03, PR #2024); action updates are reviewed source changes, never floating tags.
 
@@ -634,8 +641,8 @@ To cut a release:
 
 1. **Verify locally** — run `npm run verify:release` on the commit you intend to tag. All steps must pass.
 2. **Tag** — `git tag v<version>` on the verified commit.
-3. **Push tag** — `git push origin v<version>`. The `tag-release-gate` CI workflow (`.github/workflows/tag-release-gate.yml`) will run the guard subset automatically.
-4. **Wait for CI** — confirm `tag-release-gate` passes in the GitHub Actions tab before publishing any release artifacts.
+3. **Push tag** — `git push origin v<version>`. Quality runs full validation for the tag, including guards, coverage, design checks and browser tests.
+4. **Wait for CI** — confirm Quality and `tag-release-gate` pass for the exact tag commit and Quality attempt before publishing any release artifacts. After the receipt cutover, the tag gate selects and verifies the trusted private-scanner receipt; a missing or invalid receipt cannot qualify the release.
 5. **Publish** — run `npm run verify:publish` as a final local gate, then proceed with any deployment.
 
 Quality runs full validation for tags and scheduled runs; PR validation follows the

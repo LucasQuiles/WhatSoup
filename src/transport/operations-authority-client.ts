@@ -229,31 +229,47 @@ function awaitWithAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   });
 }
 
+/**
+ * Returns the index after the quote that closes the string opened at `open`,
+ * or `body.length` when the string is unterminated. A quote closes the string
+ * only when an even run of backslashes precedes it. Each backslash run is
+ * walked once, so the scan stays linear. Jumping between quotes with native
+ * indexOf avoids a per-byte JavaScript loop over large media strings, which
+ * took about 4 s for 67 MB under v8 coverage (#3896 Node 24 job).
+ */
+function authorityStringEnd(body: Buffer, open: number): number {
+  let from = open + 1;
+  for (;;) {
+    const quote = body.indexOf(0x22, from);
+    if (quote === -1) return body.length;
+    let backslashes = 0;
+    for (let cursor = quote - 1; cursor > open && body[cursor] === 0x5c; cursor -= 1) backslashes += 1;
+    if (backslashes % 2 === 0) return quote + 1;
+    from = quote + 1;
+  }
+}
+
 function assertAuthorityJsonStructure(body: Buffer): void {
   let depth = 0;
   let containers = 0;
   let jsonTokens = 0;
-  let inString = false;
   let inScalar = false;
-  let escaped = false;
   const countToken = () => {
     jsonTokens += 1;
     if (jsonTokens > AUTHORITY_RESPONSE_MAX_JSON_TOKENS) {
       throw new RangeError('transport authority response JSON token count exceeds limit');
     }
   };
-  for (const byte of body) {
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (byte === 0x5c) escaped = true;
-      else if (byte === 0x22) inString = false;
-      continue;
-    }
+  const length = body.length;
+  let index = 0;
+  while (index < length) {
+    const byte = body[index];
     if (byte === 0x22) {
       countToken();
-      inString = true;
+      index = authorityStringEnd(body, index);
       continue;
     }
+    index += 1;
     if (byte === 0x09 || byte === 0x0a || byte === 0x0d || byte === 0x20) {
       inScalar = false;
       continue;
