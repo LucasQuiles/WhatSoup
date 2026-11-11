@@ -287,6 +287,24 @@ describe('Pinecone project guard validation', () => {
     expect(validateInstanceConfig(raw, ctx('patch', { originalType: 'chat' }))?.field).toBe(field);
   });
 
+  // Config load migrates legacy aliases before it refuses the reserved
+  // namespace, so every validator caller (admission, load, discovery, the
+  // deploy preflight) must refuse it through an alias too.
+  it.each([
+    ['pineconeFactsNamespace', { pineconeFactsNamespace: 'whatsoup-owner-only-v1' }, 'memory.pinecone.namespaces.facts'],
+    ['pineconeNamespaces', { pineconeNamespaces: { chunks: 'whatsoup-owner-only-v1' } }, 'memory.pinecone.namespaces.chunks'],
+    [
+      'pineconeKnowledgeProfiles',
+      { pineconeKnowledgeProfiles: { 'docs-index': { namespaces: ['docs', 'whatsoup-owner-only-v1'] } } },
+      'memory.pinecone.knowledgeProfiles.docs-index',
+    ],
+  ])('rejects the reserved owner_only namespace through the legacy alias %s in every mode', (_alias, legacy, field) => {
+    const raw = baseChat({ ...legacy, memory: { pinecone: { projectId: 'instance-proj-id', index: 'whatsapp-bot' } } });
+    for (const mode of ['create', 'patch', 'load', 'discovery'] as const) {
+      expect(validateInstanceConfig(raw, ctx(mode, { originalType: 'chat' }))?.field, mode).toBe(field);
+    }
+  });
+
   it('accepts a valid apiKeyService and ordinary namespaces', () => {
     const raw = baseChat({
       memory: { pinecone: { projectId: 'instance-proj-id', apiKeyService: 'pinecone-line-b', namespaces: { facts: 'facts' } } },

@@ -91,6 +91,16 @@ describe('deploy/preflight-instance-check.ts (#1862)', () => {
     expect(stderr).toContain('not valid JSON');
   });
 
+  // Config load refuses the reserved owner_only namespace after migrating
+  // legacy aliases, so the preflight must refuse it through an alias too.
+  it('exits 3 when a legacy namespace alias names the reserved owner_only namespace', () => {
+    const configHome = makeConfigHome();
+    writeInstance(configHome, 'q-bot', validAgentConfig({ pineconeFactsNamespace: 'whatsoup-owner-only-v1' }));
+    const { status, stderr } = runInstanceCheck('q-bot', { XDG_CONFIG_HOME: configHome });
+    expect(status, stderr).toBe(3);
+    expect(stderr).toContain('reserved owner_only namespace whatsoup-owner-only-v1');
+  });
+
   it('exits 0 for a valid instance configuration', () => {
     const configHome = makeConfigHome();
     writeInstance(configHome, 'q-bot', validAgentConfig());

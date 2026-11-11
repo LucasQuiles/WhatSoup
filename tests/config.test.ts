@@ -2266,6 +2266,13 @@ describe('config — memory.pinecone.recordVisibility', () => {
     await expect(import('../src/config.ts')).rejects.toThrow(/reserved.*whatsoup-owner-only-v1/i);
   });
 
+  it('rejects the reserved owner-only namespace through a legacy namespace alias at load', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      pineconeFactsNamespace: 'whatsoup-owner-only-v1',
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(/reserved.*whatsoup-owner-only-v1/i);
+  });
+
   it.each([
     { namespace: 'whatsoup-owner-only-v1' },
     { namespaces: ['public-docs', 'whatsoup-owner-only-v1'] },
