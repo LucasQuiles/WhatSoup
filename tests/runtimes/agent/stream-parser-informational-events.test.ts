@@ -301,6 +301,8 @@ describe('Claude CLI informational stream events', () => {
         blockType: 'future_side_effect',
         raw: unknownBlock,
       },
+      // #3717c: the line's request_usage; no usage on the message -> unknown context.
+      { type: 'request_usage', messageId: undefined, contextTokens: undefined },
     ]);
   });
 });

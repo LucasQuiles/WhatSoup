@@ -561,6 +561,28 @@ function makeQueue(chatJid = 'chat-edge@s.whatsapp.net'): QueueMock {
   } as unknown as QueueMock;
 }
 
+// #3717c: deliver one API request's context through the runtime's event handler (not by
+// writing the store). The convergence guards count only a KNOWN context; a token
+// snapshot alone is unknown context and records no verdict or re-arm.
+let knownContextSeq = 0;
+function feedKnownContext(
+  state: RuntimeView,
+  session: Parameters<RuntimeView['handleEventWithContext']>[2],
+  scopeKey: string,
+  contextTokens: number,
+): void {
+  knownContextSeq += 1;
+  state.handleEventWithContext(
+    { type: 'request_usage', messageId: `known-${knownContextSeq}`, contextTokens },
+    makeQueue() as unknown as IOutboundQueue,
+    session,
+    undefined,
+    undefined,
+    scopeKey,
+    scopeKey,
+  );
+}
+
 function makeDb(): Database {
   return {
     assertWritableCompatibility: vi.fn(),
@@ -2171,6 +2193,7 @@ describe('AgentRuntime edge coverage', () => {
       lastCompactCacheReadTokens: 0,
     });
     state.autoCompact.lastSuccessAt.set('compact-scope', Date.now() - 1_000);
+    feedKnownContext(state, session, 'compact-scope', 70); // known context over the 50 threshold
 
     state.maybeStartAutoCompact(session, 'compact-scope');
     await Promise.resolve();
@@ -2338,6 +2361,7 @@ describe('AgentRuntime edge coverage', () => {
         totalInputTokens: 200, totalOutputTokens: 0, totalCacheReadTokens: 0,
         lastCompactInputTokens: 70, lastCompactOutputTokens: 0, lastCompactCacheReadTokens: 0,
       });
+      feedKnownContext(state, session, scopeKey, 130); // known context still over (did not shrink)
       state.maybeStartAutoCompact(session, scopeKey);
       for (let tick = 0; tick < 10; tick += 1) await Promise.resolve();
     }
@@ -2379,6 +2403,7 @@ describe('AgentRuntime edge coverage', () => {
       totalInputTokens: 200, totalOutputTokens: 0, totalCacheReadTokens: 0,
       lastCompactInputTokens: 70, lastCompactOutputTokens: 0, lastCompactCacheReadTokens: 0,
     });
+    feedKnownContext(state, session, scopeKey, 130); // known context over
     state.maybeStartAutoCompact(session, scopeKey);
     expect(state.autoCompact.consecutiveNonConvergentCompactions.get(scopeKey)).toBe(1);
 
@@ -2389,6 +2414,7 @@ describe('AgentRuntime edge coverage', () => {
       totalInputTokens: 90, totalOutputTokens: 0, totalCacheReadTokens: 0,
       lastCompactInputTokens: 70, lastCompactOutputTokens: 0, lastCompactCacheReadTokens: 0,
     });
+    feedKnownContext(state, session, scopeKey, 20); // known context under: converged
     state.maybeStartAutoCompact(session, scopeKey);
     expect(state.autoCompact.consecutiveNonConvergentCompactions.has(scopeKey)).toBe(false);
 
@@ -2400,6 +2426,7 @@ describe('AgentRuntime edge coverage', () => {
       totalInputTokens: 200, totalOutputTokens: 0, totalCacheReadTokens: 0,
       lastCompactInputTokens: 70, lastCompactOutputTokens: 0, lastCompactCacheReadTokens: 0,
     });
+    feedKnownContext(state, session, scopeKey, 130); // known context over
     state.maybeStartAutoCompact(session, scopeKey);
     for (let tick = 0; tick < 10; tick += 1) await Promise.resolve();
 

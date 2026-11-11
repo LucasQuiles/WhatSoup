@@ -63,7 +63,11 @@ describe('X1 stream envelope replay contract', () => {
 
   it.each(FIXTURE_FILES)('replays every sanitized block in order from %s', (filename) => {
     const fixture = readFixture(filename);
-    const events = parseEvents(buildAssistantLine(fixture));
+    const allEvents = parseEvents(buildAssistantLine(fixture));
+    // #3717c: the line ends with its request_usage (sanitized fixtures carry no usage -> unknown);
+    // the block events before it must still replay every block in order.
+    expect(allEvents.at(-1)).toEqual({ type: 'request_usage', messageId: undefined, contextTokens: undefined });
+    const events = allEvents.slice(0, -1);
 
     expect(events.map((event) => event.type)).toEqual([
       'ignored',
@@ -117,6 +121,7 @@ describe('X1 stream envelope replay contract', () => {
         blockType: 'redacted_thinking',
         reason: 'model-internal redacted reasoning, no side effects',
       },
+      { type: 'request_usage', messageId: undefined, contextTokens: undefined },
     ]);
 
     expect(parseEvents(JSON.stringify({
@@ -155,6 +160,7 @@ describe('X1 stream envelope replay contract', () => {
       message: { content: [block] },
     }))).toEqual([
       { type: 'unknown_block', blockType: 'future_side_effect', raw: block },
+      { type: 'request_usage', messageId: undefined, contextTokens: undefined },
     ]);
   });
 
@@ -171,6 +177,7 @@ describe('X1 stream envelope replay contract', () => {
       { type: 'unknown_block', blockType: '<non-object>', raw: 'not-an-object' },
       { type: 'unknown_block', blockType: '<missing>', raw: {} },
       { type: 'unknown_block', blockType: '<invalid>', raw: { type: 42 } },
+      { type: 'request_usage', messageId: undefined, contextTokens: undefined },
     ]);
   });
 
@@ -194,11 +201,10 @@ describe('X1 stream envelope replay contract', () => {
         if (event.type === 'tool_use') tracker.onToolStart(event.toolId, event.toolName, 'running');
       }
 
-      expect(events).toEqual(malformedStarts.map((raw) => ({
-        type: 'unknown_block',
-        blockType: 'tool_use',
-        raw,
-      })));
+      expect(events).toEqual([
+        ...malformedStarts.map((raw) => ({ type: 'unknown_block', blockType: 'tool_use', raw })),
+        { type: 'request_usage', messageId: undefined, contextTokens: undefined },
+      ]);
       expect(events.some((event) => event.type === 'tool_use' && event.toolId === '')).toBe(false);
       expect(tracker.getActive()).toEqual([]);
     } finally {
