@@ -1,9 +1,13 @@
 import importlib.util
 import json
 import os
+import runpy
+import select
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -23,6 +27,8 @@ def load_module():
 
 
 @pytest.mark.parametrize("status", ["sent", "email_delivered"])
+# Each generated case launches real processes, as do the other five-second integration tests.
+@settings(deadline=5000)
 @given(audit=st.one_of(st.none(), st.booleans(), st.integers(), st.lists(st.text()),
                       st.text(alphabet=" \t\r\n\v\f\u0085\u00a0\u2003\u2028\u2029", max_size=80)))
 @example(audit="")
@@ -45,6 +51,7 @@ def test_unaudited_success_does_not_partially_update_a_delivery_batch(audit, sta
 
 
 @pytest.mark.parametrize("status", ["sent", "email_delivered"])
+@settings(deadline=5000)
 @given(audit=st.text(min_size=1, max_size=80).filter(lambda value: bool(value.strip())))
 @example(audit=" \topaque-receipt \n")
 def test_nonblank_audit_receipt_is_retained_without_normalization(audit, status):
@@ -134,6 +141,7 @@ def test_repeated_delivery_receipts_leave_readable_state(tmp_path, monkeypatch, 
     assert path.stat().st_size < 600000
 
 
+@settings(deadline=5000)
 @given(status=st.one_of(st.lists(st.integers()), st.dictionaries(st.text(), st.integers())))
 def test_non_string_receipt_status_stays_unresolved(status):
     supervisor = load_module()
@@ -202,6 +210,135 @@ def test_command_timeout_reaps_direct_child_and_closes_pipes(monkeypatch, close_
         supervisor.run_command([sys.executable, "-c", code], 0.3)
     assert len(started) == 1 and started[0].returncode is not None
     assert started[0].stdout.closed and started[0].stderr.closed
+
+
+@pytest.mark.parametrize("mode,pipes", [
+    (mode, pipes)
+    for mode in ("timeout", "outer-cancellation")
+    for pipes in ("open", "closed")
+] + [(mode, "closed") for mode in ("normal", "stdout", "stderr", "setup-error")]
+  + [("normal", "open")])
+def test_command_scope_stops_descendants(tmp_path, monkeypatch, mode, pipes):
+    supervisor = load_module()
+    child = """import os, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+if sys.argv[2] == 'closed':
+    os.close(1)
+    os.close(2)
+life = os.open(root / 'lifetime', os.O_WRONLY)
+stop = os.open(root / 'keep-running', os.O_RDONLY)
+(root / 'child-ready').write_text('ready')
+os.write(life, b'R')
+ready = os.open(root / 'command-ready', os.O_WRONLY)
+os.write(ready, b'R')
+os.close(ready)
+os.read(stop, 1)
+"""
+    parent = """import os, pathlib, subprocess, sys
+root = pathlib.Path(sys.argv[1])
+child = subprocess.Popen([sys.executable, '-c', CHILD, str(root), sys.argv[3]])
+ready = os.open(root / 'command-ready', os.O_RDONLY)
+assert os.read(ready, 1) == b'R'
+os.close(ready)
+mode = sys.argv[2]
+if mode == 'normal':
+    print('complete')
+    raise SystemExit(7)
+if mode in ('stdout', 'stderr'):
+    while True:
+        os.write(1 if mode == 'stdout' else 2, b'x' * 65536)
+child.wait()
+""".replace("CHILD", repr(child))
+    os.mkfifo(tmp_path / "lifetime")
+    os.mkfifo(tmp_path / "keep-running")
+    os.mkfifo(tmp_path / "command-ready")
+    stop = os.open(tmp_path / "keep-running", os.O_RDWR | os.O_NONBLOCK)
+    ready = os.open(tmp_path / "command-ready", os.O_RDWR | os.O_NONBLOCK)
+    life = os.open(tmp_path / "lifetime", os.O_RDONLY | os.O_NONBLOCK)
+    ended = False
+    try:
+        command = [sys.executable, "-c", parent, str(tmp_path), mode, pipes]
+        if mode == "outer-cancellation":
+            driver = ("import runpy,sys; runner=runpy.run_path(sys.argv[1]); "
+                      f"runner['run_command']([sys.executable,'-c',{parent!r},*sys.argv[2:]],30)")
+            observer = runpy.run_path(str(SCRIPT.with_name("fleet_reliability_observer.py")))
+            assert observer["run_probe"](
+                [sys.executable, "-c", driver, str(SCRIPT), str(tmp_path), mode, pipes], 2,
+            ) is None
+        elif mode == "timeout":
+            with pytest.raises(subprocess.TimeoutExpired):
+                supervisor.run_command(command, 2)
+        elif mode == "normal":
+            result = supervisor.run_command(command, 5)
+            assert result.returncode == 7
+            assert result.stdout == b"complete\n"
+            assert result.stderr == b""
+        elif mode == "setup-error":
+            def fail(*_):
+                assert select.select([life], [], [], 3)[0], "descendant did not become ready"
+                assert (tmp_path / "child-ready").exists()
+                raise OSError("synthetic selector setup error")
+
+            with monkeypatch.context() as fault:
+                fault.setattr(os, "set_blocking", fail)
+                with pytest.raises(OSError, match="selector setup"):
+                    supervisor.run_command(command, 5)
+        else:
+            with pytest.raises(supervisor.CommandOutputError):
+                supervisor.run_command(command, 5)
+        assert (tmp_path / "child-ready").exists(), "descendant did not reach its ready checkpoint"
+        assert os.read(life, 1) == b"R"
+        assert select.select([life], [], [], 1)[0], "command descendant survived scope completion"
+        assert os.read(life, 1) == b""
+        ended = True
+    finally:
+        # Release the fixture without signaling a PID that may already have been reaped.
+        os.close(stop)
+        os.close(ready)
+        try:
+            if not ended and (tmp_path / "child-ready").exists():
+                deadline = time.monotonic() + 3
+                while True:
+                    assert select.select([life], [], [], max(0, deadline - time.monotonic()))[0]
+                    if os.read(life, 2) == b"":
+                        break
+        finally:
+            os.close(life)
+
+
+def test_command_missing_executable_preserves_filename(tmp_path):
+    supervisor = load_module()
+    missing = str(tmp_path / "missing")
+    with pytest.raises(FileNotFoundError) as error:
+        supervisor.run_command([missing], 5)
+    assert error.value.filename == missing
+
+
+def test_command_signal_exit_preserves_returncode():
+    supervisor = load_module()
+    result = supervisor.run_command([
+        sys.executable, "-c", "import os,signal; os.kill(os.getpid(),signal.SIGTERM)",
+    ], 5)
+    assert result.returncode == -signal.SIGTERM
+
+
+@pytest.mark.parametrize("guard", [
+    "raise SystemExit(0)",
+    "import os,sys; os.write(int(sys.argv[2]), b'bad')",
+])
+def test_command_missing_helper_status_remains_failure(tmp_path, monkeypatch, guard):
+    supervisor = load_module()
+    marker = tmp_path / "unexpected-command"
+    monkeypatch.setattr(supervisor, "_COMMAND_GUARD", guard)
+    command = [sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).touch()"]
+    with pytest.raises((supervisor.StateError, OSError)) as error:
+        supervisor.run_command(command, 5)
+    # Some kernels refuse signaling a group containing only its exited leader.
+    cause = error.value
+    while cause is not None and "command_status_incomplete" not in str(cause):
+        cause = cause.__context__
+    assert cause is not None, "missing status failure was lost during cleanup"
+    assert not marker.exists()
 
 
 def test_publishing_oversized_output_retains_failure_without_raw_bytes(tmp_path):
@@ -680,6 +817,7 @@ def test_sentinel_stores_local_receipts_once_and_preserves_remote_input(supervis
 
 @pytest.mark.parametrize(("stale_source", "remote_has_alerts"), [("local", True), ("local", False), ("remote", True)])
 @pytest.mark.parametrize("observation_failure", ["unavailable", "exception"])
+@settings(deadline=5000)
 @given(uncertain_cycles=st.integers(min_value=1, max_value=8))
 def test_sentinel_combined_delivery_view_preserves_detection_and_recovery(
     stale_source, remote_has_alerts, observation_failure, uncertain_cycles

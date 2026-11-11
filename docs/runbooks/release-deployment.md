@@ -939,10 +939,22 @@ to 64 KiB. Emitter stdout permits 4,096 bytes, and its returned filename must
 fit in 255 UTF-8 bytes. Stderr permits up to 64 KiB for all these commands. Oversized output
 fails the operation without exposing captured output. Delivery remains
 unresolved, emission remains unconfirmed and a fleet probe reports transport
-failure. The helper closes its pipes and kills and reaps its direct child on
-timeout or output overflow, allowing up to five seconds for cleanup. It keeps
-the inherited process group. This does not guarantee termination of descendants
-or remote commands, or establish a deadline for the complete cycle.
+failure. Each command runs under a short-lived helper in a separate process
+group. The helper retains the group identity after the command exits. The
+caller sends SIGKILL to that group before reaping the helper, including on
+normal completion, timeout, output overflow or capture failure. It waits up to
+five seconds to reap the helper and closes its pipes on exit. Same-group children
+must finish within this command scope; background work must not depend on
+surviving a successful command return.
+
+A private pipe tells the helper when its caller has exited, including outer
+observer cancellation. The helper then stops its own group. An independent
+deadline, five seconds after the command deadline, also limits the helper's
+lifetime if another process retains the pipe. The command receives neither
+control descriptor. Its exit code and captured bytes remain the command result;
+missing helper status or a cleanup error cannot report success. These controls
+do not terminate children that create another process group or remote SSH
+commands, and do not establish a deadline for the complete monitoring cycle.
 Receipt lookup scans each stage once for the whole batch of at most 128 event
 IDs. Across the batch it permits 4,096 directory entries, eight MiB read and a
 five-second cooperative deadline. One additional entry or byte may be inspected

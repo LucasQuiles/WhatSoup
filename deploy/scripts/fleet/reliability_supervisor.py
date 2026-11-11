@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from copy import deepcopy
 from datetime import datetime
 import fcntl
@@ -18,8 +18,10 @@ from pathlib import Path
 import re
 import selectors
 import shutil
+import signal
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import time
@@ -229,6 +231,51 @@ def maintenance_active(path: Path) -> bool:
         os.close(fd)
 
 
+# The helper remains the group leader until cleanup, even after the command exits.
+# Its private owner pipe lets it stop the group if an outer observer kills us.
+_COMMAND_GUARD = r"""
+import errno
+import os
+import select
+import signal
+import struct
+import subprocess
+import sys
+import time
+
+owner, result = int(sys.argv[1]), int(sys.argv[2])
+deadline = float(sys.argv[3])
+os.set_inheritable(owner, False)
+os.set_inheritable(result, False)
+try:
+    if select.select([owner], [], [], 0)[0]:
+        raise SystemExit(1)
+    try:
+        process = subprocess.Popen(sys.argv[4:], close_fds=True)
+    except OSError as exc:
+        record = (1, exc.errno or errno.EIO)
+    else:
+        record = None
+    sent = False
+    while time.monotonic() < deadline:
+        if not sent:
+            if record is None and process.poll() is not None:
+                record = (0, process.returncode)
+            if record is not None:
+                payload = struct.pack('!bi', *record)
+                if os.write(result, payload) != len(payload):
+                    raise RuntimeError('incomplete_status')
+                os.close(result)
+                os.close(1)
+                os.close(2)
+                sent = True
+        if select.select([owner], [], [], min(.02, max(0, deadline - time.monotonic())))[0]:
+            break
+finally:
+    os.killpg(os.getpgrp(), signal.SIGKILL)
+"""
+
+
 def run_command(
     command: list[str], timeout: float, *, max_stdout: int = 1024 * 1024
 ) -> subprocess.CompletedProcess:
@@ -239,40 +286,78 @@ def run_command(
     if type(max_stdout) is not int or not 0 < max_stdout <= 1024 * 1024:
         raise StateError("command_output_limit_invalid")
     deadline = time.monotonic() + timeout
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    output = {"stdout": bytearray(), "stderr": bytearray()}
-    limits = {"stdout": max_stdout, "stderr": 64 * 1024}
-    try:
-        with selectors.DefaultSelector() as ready:
-            for name in output:
-                stream = getattr(process, name)
-                os.set_blocking(stream.fileno(), False)
-                ready.register(stream, selectors.EVENT_READ, name)
-            while ready.get_map():
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise subprocess.TimeoutExpired(command, timeout)
-                for key, _ in ready.select(remaining):
-                    name = key.data
-                    try:
-                        chunk = os.read(key.fd, min(4096, limits[name] + 1 - len(output[name])))
-                    except BlockingIOError:
-                        continue
-                    if not chunk:
-                        ready.unregister(key.fileobj)
-                        continue
-                    output[name].extend(chunk)
-                    if len(output[name]) > limits[name]:
-                        raise CommandOutputError("command_output_oversized")
-            returncode = process.wait(timeout=max(0, deadline - time.monotonic()))
-        return subprocess.CompletedProcess(command, returncode, bytes(output["stdout"]), bytes(output["stderr"]))
-    finally:
-        # Keep the inherited process group so the outer observer can still cancel it.
-        process.stdout.close()
-        process.stderr.close()
-        if process.returncode is None:
-            process.kill()
-            process.wait(timeout=5)
+    with ExitStack() as pipes:
+        reader, writer = os.pipe()
+        owner_read = pipes.enter_context(os.fdopen(reader, "rb", buffering=0))
+        pipes.enter_context(os.fdopen(writer, "wb", buffering=0))
+        reader, writer = os.pipe()
+        status_read = pipes.enter_context(os.fdopen(reader, "rb", buffering=0))
+        status_write = pipes.enter_context(os.fdopen(writer, "wb", buffering=0))
+        process = subprocess.Popen(
+            [sys.executable, "-c", _COMMAND_GUARD, str(owner_read.fileno()),
+             str(status_write.fileno()), str(deadline + 5), *command],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            pass_fds=(owner_read.fileno(), status_write.fileno()),
+            start_new_session=True,
+        )
+        cleanup_attempted = False
+
+        def stop_group():
+            nonlocal cleanup_attempted
+            if cleanup_attempted:
+                return
+            cleanup_attempted = True
+            # Keep the leader unreaped until the last group signal to prevent PID reuse.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+        try:
+            pipes.enter_context(process.stdout)
+            pipes.enter_context(process.stderr)
+            owner_read.close()
+            status_write.close()
+            output = {name: bytearray() for name in ("stdout", "stderr", "status")}
+            limits = {"stdout": max_stdout, "stderr": 64 * 1024, "status": 5}
+            with selectors.DefaultSelector() as ready:
+                for name, stream in (
+                    ("stdout", process.stdout), ("stderr", process.stderr), ("status", status_read),
+                ):
+                    os.set_blocking(stream.fileno(), False)
+                    ready.register(stream, selectors.EVENT_READ, name)
+                while ready.get_map():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    for key, _ in ready.select(remaining):
+                        name = key.data
+                        try:
+                            chunk = os.read(key.fd, min(4096, limits[name] + 1 - len(output[name])))
+                        except BlockingIOError:
+                            continue
+                        if not chunk:
+                            ready.unregister(key.fileobj)
+                            continue
+                        output[name].extend(chunk)
+                        if len(output[name]) > limits[name]:
+                            raise CommandOutputError("command_output_oversized")
+                        if name == "status" and len(output[name]) == 5:
+                            # A child may retain the output pipes after the command exits.
+                            stop_group()
+            if len(output["status"]) != 5:
+                raise StateError("command_status_incomplete")
+            kind, value = struct.unpack("!bi", output["status"])
+            if kind == 1:
+                raise OSError(value, os.strerror(value), command[0])
+            if kind != 0:
+                raise StateError("command_status_invalid")
+            return subprocess.CompletedProcess(command, value, bytes(output["stdout"]), bytes(output["stderr"]))
+        finally:
+            try:
+                stop_group()
+            finally:
+                process.wait(timeout=5)
 
 
 def restart_service(config: dict) -> dict:

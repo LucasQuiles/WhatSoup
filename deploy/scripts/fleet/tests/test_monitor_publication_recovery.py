@@ -156,17 +156,25 @@ def test_ambiguous_adapter_outcome_is_not_retried(receipt):
 
 @pytest.mark.parametrize("status,expected", [("pending", "locally_persisted"),
     ("quarantined", "locally_persisted"), ("dead_lettered", "locally_persisted"),
-    ("unobserved", "publication_unknown"), ("sent", "channel_delivered")])
+    ("unobserved", "publication_unknown"), ("sent", "channel_delivered"),
+    ("email_delivered", "channel_delivered")])
 @settings(max_examples=4, deadline=5000)
 @example(audit_text="proof")
-@given(audit_text=st.text(alphabet="abé\\\"", max_size=64))
+@example(audit_text="")
+@example(audit_text=" \t")
+@given(audit_text=st.text(alphabet="abé\\\" \t", max_size=64))
 def test_only_positive_receipt_evidence_resolves_the_hold(status, expected, audit_text):
     supervisor = load("publication_recovery_receipts", "fleet/reliability_supervisor.py")
     item = {**event(), "delivery": "publication_unknown"}
     payload = json.dumps({item["event_id"]: {"status": status, "audit_receipt": audit_text}})
     config = {"delivery_command": [sys.executable, "-c", "print(" + repr(payload) + ")"]}
-    assert supervisor.resolve_alert_delivery(config, [item]) == []
-    assert item["delivery"] == expected
+    failures = supervisor.resolve_alert_delivery(config, [item])
+    if expected == "channel_delivered" and not audit_text.strip():
+        assert failures == [{"code": "invalid_output", "returncode": None}]
+        assert item == {**event(), "delivery": "publication_unknown"}
+    else:
+        assert failures == []
+        assert item["delivery"] == expected
 
 
 @pytest.mark.parametrize("mode", FILENAMES)
