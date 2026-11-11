@@ -105,8 +105,9 @@ describe('useConsoleSession onLock', () => {
     const { result } = renderHook(() => useConsoleSession())
     act(() => result.current.onUnlocked())
     await act(async () => { reject(new ConsoleLockedError()) })
-    expect(result.current.state).toBe('unlocked')
-    expect(result.current.notice).toBeNull()
+    expect(mockGetApiTicket).toHaveBeenCalledTimes(1)
+    expect(mockLockConsole).not.toHaveBeenCalled()
+    expect({ state: result.current.state, notice: result.current.notice }).toEqual({ state: 'unlocked', notice: null })
   })
 
   it('cannot unlock or start a probe while revocation is still pending', async () => {
