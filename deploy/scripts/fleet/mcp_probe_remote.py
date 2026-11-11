@@ -1,4 +1,86 @@
-import json,os,pathlib,plistlib,re,selectors,signal,subprocess,time
+import json,os,pathlib,plistlib,re,selectors,signal,struct,subprocess,sys,time
+
+# Keep the group leader alive until cleanup, without hiding the server's PID or status.
+# Unlike the batch command guard, MCP must retain the server for executable inspection.
+_MCP_GUARD = r"""
+import errno,os,select,signal,struct,subprocess,sys,time
+owner,result=int(sys.argv[1]),int(sys.argv[2])
+os.set_inheritable(owner,False)
+os.set_inheritable(result,False)
+signal.signal(signal.SIGTERM,lambda *_:None)
+try:
+ if select.select([owner],[],[],0)[0]:raise SystemExit(1)
+ try:process=subprocess.Popen(sys.argv[3:],close_fds=True)
+ except OSError as exc:
+  os.write(result,struct.pack('!bi',1,exc.errno or errno.EIO))
+  for fd in (0,1,2):os.close(fd)
+  os.read(owner,1)
+  raise SystemExit(1)
+ os.write(result,struct.pack('!bi',2,process.pid))
+ for fd in (0,1,2):os.close(fd)
+ deadline=None
+ while True:
+  if select.select([owner],[],[],.02 if deadline is not None else None)[0]:
+   if os.read(owner,1)!=b'F' or deadline is not None:break
+   deadline=time.monotonic()+3
+  if deadline is not None:
+   code=process.poll()
+   if code is None and time.monotonic()>=deadline:
+    process.kill()
+    code=process.wait(timeout=1)
+   if code is not None:
+    os.write(result,struct.pack('!bi',0,code))
+    os.close(result)
+    deadline=None
+finally:
+ os.killpg(os.getpgrp(),signal.SIGKILL)
+"""
+
+def read_status(fd,deadline):
+ data=bytearray()
+ os.set_blocking(fd,False)
+ with selectors.DefaultSelector() as ready:
+  ready.register(fd,selectors.EVENT_READ)
+  while len(data)<5:
+   if not ready.select(max(0,deadline-time.monotonic())):raise RuntimeError('process_status_deadline')
+   try:chunk=os.read(fd,5-len(data))
+   except BlockingIOError:continue
+   if not chunk:raise RuntimeError('process_status_incomplete')
+   data.extend(chunk)
+ return struct.unpack('!bi',data)
+
+def start_process(command,env,cwd):
+ owner,owner_write=os.pipe()
+ result_read=result=None
+ proc=None
+ try:
+  result_read,result=os.pipe()
+  proc=subprocess.Popen([sys.executable,'-c',_MCP_GUARD,str(owner),str(result)]+command,
+   env=env,cwd=cwd,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+   start_new_session=True,pass_fds=(owner,result))
+  os.close(owner);owner=None
+  os.close(result);result=None
+  kind,value=read_status(result_read,time.monotonic()+5)
+  if kind==1:raise OSError(value,os.strerror(value))
+  if kind!=2 or value<=0:raise RuntimeError('process_start_unverified')
+  return proc,owner_write,result_read,value
+ except BaseException:
+  try:
+   if proc is not None:
+    try:
+     try:os.killpg(proc.pid,signal.SIGKILL)
+     except ProcessLookupError:pass
+    finally:
+     try:proc.wait(timeout=5)
+     finally:
+      for stream in (proc.stdin,proc.stdout,proc.stderr):stream.close()
+  finally:
+   os.close(owner_write)
+   if result_read is not None:os.close(result_read)
+  raise
+ finally:
+  for fd in (owner,result):
+   if fd is not None:os.close(fd)
 
 def read_stderr(stream,deadline,limit):
  data=bytearray()
@@ -13,30 +95,35 @@ def read_stderr(stream,deadline,limit):
    data.extend(chunk)
  return bytes(data[:limit]),False
 
-def finish_process(proc):
+def finish_process(proc,owner,result):
  cleanup_error=None
  cleanup_deadline=time.monotonic()+3
+ code=None
+ raw,complete=b'',False
  try:
-  # Signal while the unreaped session leader still pins the group identity.
-  try:os.killpg(proc.pid,signal.SIGTERM)
-  except ProcessLookupError:pass
-  except OSError as exc:cleanup_error=type(exc).__name__
-  # Keep the leader unreaped while inherited stderr may belong to a straggler.
-  raw,complete=b'',False
-  try:raw,complete=read_stderr(proc.stderr,cleanup_deadline,16384)
-  except (OSError,ValueError) as exc:cleanup_error=cleanup_error or type(exc).__name__
-  if not complete and len(raw)==16384:cleanup_error=cleanup_error or 'stderr_incomplete'
-  if not complete:
+  try:
+   try:os.write(owner,b'F')
+   except OSError as exc:cleanup_error=type(exc).__name__
+   # Signal while the unreaped session leader still pins the group identity.
+   try:os.killpg(proc.pid,signal.SIGTERM)
+   except ProcessLookupError:pass
+   except OSError as exc:cleanup_error=cleanup_error or type(exc).__name__
+   try:raw,complete=read_stderr(proc.stderr,cleanup_deadline,16384)
+   except (OSError,ValueError) as exc:cleanup_error=cleanup_error or type(exc).__name__
+   if not complete and len(raw)==16384:cleanup_error=cleanup_error or 'stderr_incomplete'
+   try:
+    kind,code=read_status(result,cleanup_deadline+1)
+    if kind!=0:
+     code=None
+     cleanup_error=cleanup_error or 'process_status_invalid'
+   except (OSError,ValueError,RuntimeError) as exc:cleanup_error=cleanup_error or type(exc).__name__
+  finally:
+   # Always stop the group: a descendant may have closed all inherited pipes.
    try:os.killpg(proc.pid,signal.SIGKILL)
    except ProcessLookupError:pass
    except OSError as exc:cleanup_error=cleanup_error or type(exc).__name__
-  try:proc.wait(timeout=5 if not complete else max(0,cleanup_deadline-time.monotonic()))
-  except subprocess.TimeoutExpired:
-   if not complete:raise
-   try:os.killpg(proc.pid,signal.SIGKILL)
-   except ProcessLookupError:pass
-   except OSError as exc:cleanup_error=cleanup_error or type(exc).__name__
-   proc.wait(timeout=5)
+   try:proc.wait(timeout=5)
+   except (OSError,subprocess.TimeoutExpired) as exc:cleanup_error=cleanup_error or type(exc).__name__
   if not complete and len(raw)<16384:
    try:
     tail,complete=read_stderr(proc.stderr,time.monotonic()+1,16384-len(raw))
@@ -45,10 +132,13 @@ def finish_process(proc):
   if not complete:cleanup_error=cleanup_error or 'stderr_incomplete'
   err=raw.decode(errors='replace')
  finally:
+  for fd in (owner,result):
+   try:os.close(fd)
+   except OSError as exc:cleanup_error=cleanup_error or type(exc).__name__
   for stream in (proc.stdin,proc.stdout,proc.stderr):
    try:stream.close()
    except OSError as exc:cleanup_error=cleanup_error or type(exc).__name__
- return err,cleanup_error
+ return err,cleanup_error,code
 
 r=pathlib.Path.home();out={'checked_at':time.time(),'probes':[]}
 for path in (r/'.config/whatsoup/instances').glob('*/config.json'):
@@ -85,8 +175,8 @@ for path in (r/'.config/whatsoup/instances').glob('*/config.json'):
     command=next((p for p in candidates if p and pathlib.Path(p).is_file()),command)
    row['configured_command']=command;row['artifact_exists']=all(pathlib.Path(a).exists() for a in args if a.startswith('/') and not a.startswith('//'))
    try:
-    proc=subprocess.Popen([command]+args,env=env,cwd=options.get('cwd') or str(r),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
-    selector=selectors.DefaultSelector();selector.register(proc.stdout,selectors.EVENT_READ);pending=bytearray()
+    proc,owner,result_fd,server_pid=start_process([command]+args,env,options.get('cwd') or str(r))
+    selector=None;pending=bytearray()
     def request(n,method,params=None):
      msg={'jsonrpc':'2.0','method':method}
      if n is not None:msg['id']=n
@@ -107,6 +197,8 @@ for path in (r/'.config/whatsoup/instances').glob('*/config.json'):
        if len(pending)>1000000:raise RuntimeError('mcp_output_limit')
      raise RuntimeError('mcp_deadline')
     try:
+     selector=selectors.DefaultSelector()
+     selector.register(proc.stdout,selectors.EVENT_READ)
      init=request(1,'initialize',{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'fleet-read-verifier','version':'1'}})
      request(None,'notifications/initialized')
      listing=request(2,'tools/list');names={t['name'] for t in listing.get('result',{}).get('tools',[])}
@@ -135,19 +227,20 @@ for path in (r/'.config/whatsoup/instances').glob('*/config.json'):
        row['graph_error_codes']+=['AUTH_EXPIRED'] if '[AUTH_EXPIRED]' in body else []
        # get-diagnostics reports the plugin's expired-token message bare, without the [AUTH_EXPIRED] that errorResult adds.
        if conn.get('error') in ('Token refresh failed. Please re-authenticate using the login tool.','Authentication expired. Please re-authenticate using the login tool.') and 'AUTH_EXPIRED' not in row['graph_error_codes']:row['graph_error_codes'].append('AUTH_EXPIRED')
-     opened=subprocess.run(['/usr/sbin/lsof','-a','-p',str(proc.pid),'-d','txt','-Fn'],capture_output=True,text=True,timeout=5)
+     opened=subprocess.run(['/usr/sbin/lsof','-a','-p',str(server_pid),'-d','txt','-Fn'],capture_output=True,text=True,timeout=5)
      row['observed_executable_paths']=[v[1:] for v in opened.stdout.splitlines() if v.startswith('n') and ('/node' in v or '/python' in v)]
     finally:
-     selector.close()
      row['cleanup_error']='incomplete'
-     err,cleanup_error=finish_process(proc)
-     row['process_exit']=proc.returncode
+     try:err,cleanup_error,process_exit=finish_process(proc,owner,result_fd)
+     finally:
+      if selector is not None:selector.close()
+     row['process_exit']=process_exit
      row['stderr_bytes']=len(err)
      if cleanup_error:
       row['cleanup_error']=cleanup_error
       raise RuntimeError('mcp_cleanup_unverified')
      del row['cleanup_error']
-     if proc.returncode not in (0,-15,-9):
+     if process_exit not in (0,-15,-9):
       for k,v in env.items():
        if len(v)>8 and any(w in k.upper() for w in ['KEY','TOKEN','SECRET']):err=err.replace(v,'[redacted]')
       row['startup_error_excerpt']=re.sub(r'[A-Za-z0-9_+=/.-]{40,}','[redacted]',err)[:1500]

@@ -969,7 +969,7 @@
     },
     {
       "path": "deploy/scripts/fleet/mcp_probe_remote.py",
-      "sha256": "7a67bede83c0214c23ae15380b8dff1588035410187f0c5315af87d73726e3c0",
+      "sha256": "2d2f7e09bc3393c80edd4b98e8c33385c1200f86bdce04d18810574a153d5e36",
       "mustContain": [
         "get-auth-status",
         "get-diagnostics"

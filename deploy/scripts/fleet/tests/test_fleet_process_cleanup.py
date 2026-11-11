@@ -5,6 +5,7 @@ import os
 import runpy
 import select
 import signal
+import struct
 import subprocess
 import sys
 import time
@@ -24,9 +25,11 @@ root = pathlib.Path(sys.argv[1])
 child = subprocess.Popen([sys.executable, '-c', '''
 import os, pathlib, signal, sys
 root = pathlib.Path(sys.argv[1])
-if sys.argv[2] == 'ignores-term':
+if sys.argv[2] in ('ignores-term', 'closed-stderr-ignores-term'):
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
 os.close(1)
+if sys.argv[2].startswith('closed-stderr'):
+    os.close(2)
 receipt = os.open(root / 'lifetime', os.O_WRONLY)
 stop = os.open(root / 'keep-running', os.O_RDONLY)
 os.write(receipt, b'R')
@@ -47,6 +50,12 @@ if sys.argv[2] == 'ignore-termination':
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
 if sys.argv[2] == 'before-reply':
     os._exit(0)
+if sys.argv[2] == 'block-initialize':
+    receipt = os.open(root / 'server-lifetime', os.O_WRONLY)
+    stop = os.open(root / 'server-stop', os.O_RDONLY)
+    os.write(receipt, b'R')
+    os.read(stop, 1)
+    raise SystemExit(0)
 for line in sys.stdin:
     request = json.loads(line)
     if 'id' not in request:
@@ -62,6 +71,70 @@ from unittest.mock import patch
 with patch.object(pathlib.Path, 'home', return_value=pathlib.Path(sys.argv[1])):
     runpy.run_path(sys.argv[2])
 """
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGKILL])
+@pytest.mark.parametrize("child_mode", ["inherited", "closed-stderr"])
+def test_observer_cancellation_stops_server_and_descendant(tmp_path, signum, child_mode):
+    server = tmp_path / "server.py"
+    server.write_text(SERVER)
+    for name in ("keep-running", "lifetime", "server-stop", "server-lifetime"):
+        os.mkfifo(tmp_path / name)
+    stops = [os.open(tmp_path / name, os.O_RDWR | os.O_NONBLOCK)
+             for name in ("keep-running", "server-stop")]
+    receipts = [os.open(tmp_path / name, os.O_RDONLY | os.O_NONBLOCK)
+                for name in ("lifetime", "server-lifetime")]
+    instance = tmp_path / ".config/whatsoup/instances/synthetic"
+    instance.mkdir(parents=True)
+    (instance / "config.json").write_text(json.dumps({"agentOptions": {}}))
+    (instance / "agent365.mcp.json").write_text(json.dumps({"mcpServers": {
+        "microsoft_365": {"command": sys.executable,
+                          "args": [str(server), str(tmp_path), "block-initialize", child_mode]}
+    }}))
+    sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                start_new_session=True)
+    process = subprocess.Popen(
+        [sys.executable, "-c", DRIVER, str(tmp_path), str(SCRIPT)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+    )
+    ready = []
+    closed = set()
+    try:
+        for receipt in receipts:
+            if select.select([receipt], [], [], 5)[0] and os.read(receipt, 1) == b"R":
+                ready.append(receipt)
+            assert receipt in ready, "native fixture did not become ready"
+        process.send_signal(signum)
+        assert process.wait(timeout=3) == -signum
+        deadline = time.monotonic() + 4
+        ended = []
+        for receipt in receipts:
+            readable = select.select([receipt], [], [], max(0, deadline - time.monotonic()))[0]
+            eof = bool(readable) and os.read(receipt, 1) == b""
+            ended.append(eof)
+            if eof:
+                closed.add(receipt)
+        assert sentinel.poll() is None, "observer cancellation signaled an unrelated group"
+        assert all(ended), "server or descendant survived observer cancellation"
+    finally:
+        for stop in stops:
+            os.close(stop)
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=3)
+        for stream in (process.stdout, process.stderr):
+            stream.close()
+        sentinel.terminate()
+        sentinel.wait(timeout=3)
+        try:
+            for receipt in ready:
+                if receipt in closed:
+                    continue
+                assert select.select([receipt], [], [], 3)[0], "fixture did not stop after release"
+                assert os.read(receipt, 1) == b"", "fixture lifetime was not closed"
+        finally:
+            for receipt in receipts:
+                os.close(receipt)
 
 
 @given(data=st.binary(max_size=1024), limit=st.integers(min_value=0, max_value=1025))
@@ -87,6 +160,46 @@ def test_stderr_capture_preserves_exact_limit_and_detects_overflow(data, limit):
                 os.close(write_fd)
 
 
+def test_guard_preserves_server_identity_and_graceful_exit_status(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    with contextlib.redirect_stdout(io.StringIO()):
+        helpers = runpy.run_path(str(SCRIPT))
+    code = "import os,signal,time; signal.signal(signal.SIGTERM,lambda *_:exit(37)); print(os.getpid(),flush=True); time.sleep(60)"
+    process, owner, result, server_pid = helpers["start_process"](
+        [sys.executable, "-c", code], os.environ.copy(), str(tmp_path),
+    )
+    try:
+        assert select.select([process.stdout], [], [], 3)[0]
+        assert int(process.stdout.readline()) == server_pid
+        assert server_pid != process.pid
+        assert os.getpgid(server_pid) == process.pid
+    finally:
+        diagnostics, error, status = helpers["finish_process"](process, owner, result)
+    assert (diagnostics, error, status) == ("", None, 37)
+    assert process.returncode == -signal.SIGKILL
+
+
+def test_guard_reports_missing_server_and_closes_launch_resources(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    with contextlib.redirect_stdout(io.StringIO()):
+        helpers = runpy.run_path(str(SCRIPT))
+    launched = []
+    popen = subprocess.Popen
+
+    def record_launch(*args, **kwargs):
+        process = popen(*args, **kwargs)
+        launched.append(process)
+        return process
+
+    with patch.object(subprocess, "Popen", side_effect=record_launch):
+        with pytest.raises(FileNotFoundError):
+            helpers["start_process"]([str(tmp_path / "missing")], os.environ.copy(), str(tmp_path))
+    assert len(launched) == 1
+    process = launched[0]
+    assert process.returncode == -signal.SIGKILL
+    assert all(stream.closed for stream in (process.stdin, process.stdout, process.stderr))
+
+
 def test_mcp_cleanup_closes_remaining_pipes_after_close_error(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     with contextlib.redirect_stdout(io.StringIO()):
@@ -95,6 +208,10 @@ def test_mcp_cleanup_closes_remaining_pipes_after_close_error(tmp_path, monkeypa
     reader, writer = os.pipe()
     os.write(writer, b"diagnostic")
     os.close(writer)
+    owner_read, owner = os.pipe()
+    result, result_write = os.pipe()
+    os.write(result_write, struct.pack('!bi', 0, 0))
+    os.close(result_write)
 
     class Stream:
         def __init__(self, name):
@@ -112,31 +229,38 @@ def test_mcp_cleanup_closes_remaining_pipes_after_close_error(tmp_path, monkeypa
                               **{name: Stream(name) for name in ("stdin", "stdout", "stderr")})
     monkeypatch.setattr(os, "killpg", lambda *_: None)
     try:
-        assert helper(process) == ("diagnostic", "BrokenPipeError")
+        assert helper(process, owner, result) == ("diagnostic", "BrokenPipeError", 0)
         assert closed == ["stdin", "stdout", "stderr"]
     finally:
         os.close(reader)
+        os.close(owner_read)
 
 
 @pytest.mark.parametrize("fault", ["setup", "read"])
 def test_mcp_cleanup_stops_descendant_when_stderr_read_fails(tmp_path, monkeypatch, fault):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     with contextlib.redirect_stdout(io.StringIO()):
-        helper = runpy.run_path(str(SCRIPT))["finish_process"]
+        helpers = runpy.run_path(str(SCRIPT))
+        helper = helpers["finish_process"]
     server = tmp_path / "server.py"
     server.write_text(SERVER.replace("os.close(1)", "os.close(1)\nos.write(2, b'diagnostic')"))
     os.mkfifo(tmp_path / "keep-running")
     os.mkfifo(tmp_path / "lifetime")
     stop = os.open(tmp_path / "keep-running", os.O_RDWR | os.O_NONBLOCK)
     receipt = os.open(tmp_path / "lifetime", os.O_RDONLY | os.O_NONBLOCK)
-    process = subprocess.Popen(
+    process, owner, result, server_pid = helpers["start_process"](
         [sys.executable, str(server), str(tmp_path), "before-reply", "ignores-term"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        start_new_session=True,
+        os.environ.copy(), str(tmp_path),
     )
     ended = False
     signals = []
     killpg = os.killpg
+    target = os.set_blocking if fault == "setup" else os.read
+
+    def fail_stderr(fd, *args):
+        if fd == process.stderr.fileno():
+            raise OSError("synthetic stderr failure")
+        return target(fd, *args)
 
     def signal_group(pid, signum):
         assert process.returncode is None, "group signal followed leader reaping"
@@ -150,11 +274,12 @@ def test_mcp_cleanup_stops_descendant_when_stderr_read_fails(tmp_path, monkeypat
         assert os.read(receipt, 1) == b"R"
         with patch.object(os, "killpg", side_effect=signal_group), patch.object(
             os, "set_blocking" if fault == "setup" else "read",
-            side_effect=OSError("synthetic stderr failure"),
+            side_effect=fail_stderr,
         ):
-            assert helper(process) == ("", "OSError")
+            assert helper(process, owner, result) == ("", "OSError", 0)
         assert signals == [signal.SIGTERM, signal.SIGKILL]
-        assert process.returncode == 0
+        assert server_pid != process.pid
+        assert process.returncode == -signal.SIGKILL
         assert select.select([receipt], [], [], 1)[0], "descendant survived read failure"
         assert os.read(receipt, 1) == b""
         ended = True
@@ -184,6 +309,7 @@ def test_mcp_cleanup_stops_descendant_when_stderr_read_fails(tmp_path, monkeypat
     for exit_at in ("before-reply", "after-reply", "on-termination")
     for group in ("inherited", "escaped")
 ] + [("before-reply", "ignores-term"), ("after-reply", "ignores-term"),
+     ("before-reply", "closed-stderr-ignores-term"), ("after-reply", "closed-stderr-ignores-term"),
      ("ignore-termination", "inherited")])
 def test_mcp_parent_exit_does_not_wait_for_descendant_stderr(tmp_path, exit_at, group):
     server = tmp_path / "server.py"
@@ -228,15 +354,14 @@ def test_mcp_parent_exit_does_not_wait_for_descendant_stderr(tmp_path, exit_at, 
         if group == "escaped" and exit_at != "on-termination":
             # The escaped child still owns stderr, so cleanup is unverified on either host.
             assert row["error"] == "mcp_cleanup_unverified"
-            expected_cleanup_error = "PermissionError" if sys.platform == "darwin" else "stderr_incomplete"
-            assert row["cleanup_error"] == expected_cleanup_error
+            assert row["cleanup_error"] == "stderr_incomplete"
         elif exit_at == "before-reply":
             assert row["error"] == "mcp_closed"
         else:
             assert row["tool_count"] == 0
         if exit_at == "on-termination":
             assert (tmp_path / "graceful-stop").read_text() == 'completed'
-        if group in ("inherited", "ignores-term") or exit_at == "on-termination":
+        if group in ("inherited", "ignores-term", "closed-stderr-ignores-term") or exit_at == "on-termination":
             assert "cleanup_error" not in row, row
             assert select.select([receipt], [], [], 1)[0], "owned process-group member survived cleanup"
             assert os.read(receipt, 1) == b''

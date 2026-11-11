@@ -1104,27 +1104,31 @@ reset after headers arrive, is recorded as `unavailable`.
 Process cleanup across the observer, transport and independently started MCP
 process remains a separate continuity obligation. In particular, a per-request
 MCP timeout does not establish a deadline for the complete multi-request probe.
-The MCP helper sends SIGTERM to its own process group before reaping the session
-leader, including when that leader has already exited. It allows up to three
-seconds for graceful stop, ending that wait early if diagnostics exceed the
-capture limit. It retains the unreaped leader while waiting
-for inherited stderr to close. If that pipe remains open at the deadline, or
-exceeds its capture limit, the helper sends SIGKILL before reaping the leader.
-This also stops same-group descendants that retain stderr and ignore SIGTERM
-after the leader exits. If the leader itself has not exited, SIGKILL also
-precedes the final five-second reap wait. No group signal follows reaping.
+The MCP probe starts a private helper as its process-group leader. A private pipe
+ties that helper to the observer: observer exit, including SIGTERM or SIGKILL,
+closes the pipe and makes the helper kill its current group. The server cannot
+inherit this pipe. This stops same-group server descendants even if they close
+stderr. It does not establish continuity across a broken remote SSH connection.
+The helper reports the actual server PID and keeps it unreaped until the observer
+finishes executable inspection. On normal completion, the observer requests the
+server's exit status and sends group SIGTERM. The helper allows three seconds
+for graceful stop, then kills a resistant server and waits up to one second for
+its exit status. The observer allows four seconds for that status response.
+It always sends group SIGKILL before the helper's final five-second reap wait,
+including when stderr has already closed. No group signal follows helper reaping.
+The reported exit status belongs to the server, not the helper.
 The helper captures at most 16 KiB, with one extra byte to detect overflow,
 and, when captured data remains below that limit, allows one bounded second
 after forced cleanup to observe stderr closure. A failed stderr read does not
 skip forced cleanup; the original read error remains in the result.
-It closes all three pipes. Oversized diagnostics remain incomplete rather than
+It closes all three standard pipes and both private pipes. Oversized diagnostics remain incomplete rather than
 silently certifying cleanup from a truncated capture. A group-signaling error,
 cleanup exception or unreadable stderr pipe still held open is retained as
 `cleanup_error`; the fleet result reports `mcp_probe_incomplete` rather than
-healthy Microsoft 365 checks. Stderr closure is not proof that every descendant
-has exited: a descendant that closes the inherited pipe or creates another
-process group can survive. Outer-observer cancellation and remote process
-cleanup remain unqualified.
+healthy Microsoft 365 checks. Descendants that create another process group
+remain outside this cleanup authority. Retained stderr from an escaped child
+reports `stderr_incomplete`; closing that pipe cannot establish escaped-child
+cleanup. Whole-cycle deadlines and remote transport cleanup remain unqualified.
 
 Instance health tokens use the shared reader's precedence: per-instance
 `BOT_ERRORS_HEALTH_TOKEN_<INSTANCE>`, then `WHATSOUP_HEALTH_TOKEN`, then the
