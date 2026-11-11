@@ -1317,6 +1317,9 @@ later reply does not clear that obligation. Operator cancellation, deliberate no
 synthetic scheduled turns are excluded. Enrollment in an operator catch-up moves the obligation
 to `open_catchups`. The retention sweep uses the same failed-source selector to preserve unanswered
 terminal records and their source inbounds beyond the normal age window; age alone cannot clear debt.
+The selector uses the checked recovery-source key and pending-link shape for indexed exclusion
+lookups. It still scans terminal history; a dedicated failed-terminal index remains an open
+qualification item pending schema-lineage allocation. Counts are not truncated to hide that cost.
 Only the existing proof-based closure removes a catch-up from that gauge. These reads
 neither reset attempts nor replay work. The reply-guarantee observer's `failedTerminalDebt` is a
 raw terminal-row diagnostic; its count may overlap jobs or catch-ups and is not added to this health gauge.

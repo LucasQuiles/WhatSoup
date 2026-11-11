@@ -51,12 +51,13 @@ export const UNOWNED_FAILED_TERMINAL_SOURCES_SQL = `
             AND NOT ${syntheticSourceMessageIdSql('source.message_id')}
             AND NOT EXISTS (
               SELECT 1 FROM turn_recovery_jobs job
-              WHERE job.source_inbound_seq = source.seq
+              WHERE job.source_inbound_seq_key = source.seq
             )
             AND NOT EXISTS (
               SELECT 1 FROM inbound_disposition_links pending
               WHERE pending.inbound_seq = source.seq
                 AND pending.disposition = 'recovery_pending_operator_catchup'
+                AND pending.superseded_by_seq IS NULL
             )
         `;
 

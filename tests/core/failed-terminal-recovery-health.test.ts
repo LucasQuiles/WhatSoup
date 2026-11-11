@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
 import { runDatabaseRetention } from '../../src/core/database-retention.ts';
+import { UNOWNED_FAILED_TERMINAL_SOURCES_SQL } from '../../src/core/open-recoveries-sql.ts';
 import { normalizeRecoveryDebt } from '../../src/core/recovery-debt.ts';
 import { closeOperatorCatchupRecovery } from '../../src/core/recovery-catchup-closure.ts';
 import { getTurnRecoveryHealthDetails } from '../../src/runtimes/agent/turn-recovery-dispatch.ts';
@@ -176,5 +177,20 @@ describe('failed terminal reply obligations in recovery health', () => {
   it('propagates unreadable evidence instead of returning a false zero', () => {
     db.close();
     expect(() => getTurnRecoveryHealthDetails(durability)).toThrow();
+  });
+
+  it('uses keyed exclusions instead of rescanning recovery history for each failed source', () => {
+    for (let i = 0; i < 1000; i++) terminal(`settled-history-${i}`, 'policy');
+    for (let i = 0; i < 20; i++) terminal(`unanswered-history-${i}`);
+
+    expect(health().turn_recovery.retained_terminal).toBe(20);
+    const plan = db.raw.prepare(`EXPLAIN QUERY PLAN ${UNOWNED_FAILED_TERMINAL_SOURCES_SQL}`)
+      .all() as Array<{ detail: string }>;
+    const details = plan.map((step) => step.detail);
+    expect(details.filter((detail) => /^SCAN (job|pending)\b/.test(detail))).toEqual([]);
+    expect(details.some((detail) => /^SEARCH job USING .*\(source_inbound_seq_key=\?\)/.test(detail)))
+      .toBe(true);
+    expect(details.some((detail) => /^SEARCH pending USING .*\(inbound_seq=\?\)/.test(detail)))
+      .toBe(true);
   });
 });
