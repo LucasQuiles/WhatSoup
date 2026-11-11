@@ -403,10 +403,15 @@ export type RenewLeaseResult =
   | { ok: true; lease: CoordinationLeaseV1 }
   | { ok: false; refusal: 'lease_missing' | 'lease_corrupt' | 'fencing_token_mismatch' | 'io_error' | 'lease_race_lost' };
 
-function withLeaseGuard<T>(stateRoot: string, scopeId: AccountScopeIdV1, probes: LeaseProbes, action: () => T): T | { ok: false; refusal: 'lease_race_lost' } {
+function withLeaseGuard<T>(stateRoot: string, scopeId: AccountScopeIdV1, probes: LeaseProbes, action: () => T): T | { ok: false; refusal: 'lease_race_lost' | 'io_error' } {
   const guard = reclaimGuardPath(stateRoot, scopeId);
-  if (!acquireReclaimGuard(guard, probes)) return { ok: false, refusal: 'lease_race_lost' };
-  try { return action(); } finally { unlinkSync(guard); }
+  try {
+    if (!acquireReclaimGuard(guard, probes)) return { ok: false, refusal: 'lease_race_lost' };
+  } catch { return { ok: false, refusal: 'io_error' }; }
+  let result: T | { ok: false; refusal: 'io_error' };
+  try { result = action(); } catch { result = { ok: false, refusal: 'io_error' }; }
+  try { unlinkSync(guard); } catch { return { ok: false, refusal: 'io_error' }; }
+  return result;
 }
 
 /** Register before touching credentials: a surviving helper keeps custody after coordinator death. */
@@ -488,7 +493,7 @@ function renewHeldCoordinationLease(args: {
 
 export type ReleaseLeaseResult =
   | { ok: true }
-  | { ok: false; refusal: 'lease_missing' | 'lease_corrupt' | 'fencing_token_mismatch' | 'lease_race_lost' | 'helper_unconfirmed' };
+  | { ok: false; refusal: 'lease_missing' | 'lease_corrupt' | 'fencing_token_mismatch' | 'lease_race_lost' | 'helper_unconfirmed' | 'io_error' };
 
 export function releaseCoordinationLease(args: {
   stateRoot: string;

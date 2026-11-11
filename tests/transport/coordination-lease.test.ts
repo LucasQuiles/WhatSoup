@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import * as fs from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -16,6 +17,11 @@ import {
   type LeaseProbes,
 } from '../../src/transport/coordination-lease.ts';
 import { parseCoordinationLease, parseAccountScopeId } from '../../src/transport/auth-custody-contracts.ts';
+
+vi.mock('node:fs', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return { ...actual, unlinkSync: vi.fn(actual.unlinkSync), closeSync: vi.fn(actual.closeSync) };
+});
 
 const SCOPE = parseAccountScopeId('scope:line-a-wa')!;
 const T0 = Date.parse('2026-08-18T18:00:00.000Z');
@@ -202,6 +208,45 @@ describe('acquireCoordinationLease', () => {
 });
 
 describe('renew and release', () => {
+  it('returns an I/O refusal when closing the acquired guard fails', () => {
+    const acquired = acquireCoordinationLease(baseArgs());
+    if (!acquired.ok) throw new Error('fixture acquire failed');
+    const original = vi.mocked(fs.closeSync).getMockImplementation()!;
+    const close = vi.mocked(fs.closeSync).mockImplementation(fd => {
+      original(fd);
+      throw new Error('fixture close refused');
+    });
+    try {
+      expect(releaseCoordinationLease({ stateRoot: root, scopeId: SCOPE, lease: acquired.lease })).toEqual({ ok: false, refusal: 'io_error' });
+      expect(readCoordinationLease(root, SCOPE)).toEqual(acquired.lease);
+    } finally { close.mockRestore(); }
+  });
+
+  it('returns an I/O refusal and preserves custody when its tombstone cannot be written', () => {
+    const acquired = acquireCoordinationLease(baseArgs());
+    if (!acquired.ok) throw new Error('fixture acquire failed');
+    mkdirSync(coordinationLeasePath(root, SCOPE).replace(/\.json$/, '.last-token.json'));
+    expect(releaseCoordinationLease({ stateRoot: root, scopeId: SCOPE, lease: acquired.lease })).toEqual({ ok: false, refusal: 'io_error' });
+    expect(readCoordinationLease(root, SCOPE)).toEqual(acquired.lease);
+    expect(acquireCoordinationLease(baseArgs({ operationId: 'next' }))).toEqual({ ok: false, refusal: 'held_by_live_owner' });
+  });
+
+  it.each(['lease', 'guard'] as const)('returns an I/O refusal when %s unlink fails', (target) => {
+    const acquired = acquireCoordinationLease(baseArgs());
+    if (!acquired.ok) throw new Error('fixture acquire failed');
+    const leasePath = coordinationLeasePath(root, SCOPE);
+    const original = vi.mocked(fs.unlinkSync).getMockImplementation()!;
+    const unlink = vi.mocked(fs.unlinkSync).mockImplementation(path => {
+      if (String(path) === (target === 'lease' ? leasePath : `${leasePath}.reclaim`)) throw new Error('fixture unlink refused');
+      original(path);
+    });
+    try {
+      expect(releaseCoordinationLease({ stateRoot: root, scopeId: SCOPE, lease: acquired.lease })).toEqual({ ok: false, refusal: 'io_error' });
+      if (target === 'lease') expect(readCoordinationLease(root, SCOPE)).toEqual(acquired.lease);
+      else expect(existsSync(`${leasePath}.reclaim`)).toBe(true);
+    } finally { unlink.mockRestore(); }
+  });
+
   it('registers the direct helper and refuses release until that exact process is gone', () => {
     const parent = acquireCoordinationLease(baseArgs({ probes: probes({ pid: 101 }) }));
     if (!parent.ok) throw new Error('fixture acquire failed');
