@@ -9,7 +9,7 @@
 // AgentRuntime (test seams bind them on the runtime instance), and
 // deletePendingPollQuestions / fetchGroupAdminJids stay whole on the runtime
 // (structural-source and spy seams) with this module reaching them via the
-// host. Zero state lives here.
+// host. Startup reconciliation state lives with its retry orchestration here.
 
 import type { Messenger } from '../../core/types.ts';
 import type { Database } from '../../core/database.ts';
@@ -24,7 +24,8 @@ import type { ConnectionManager } from '../../transport/connection.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { createChildLogger } from '../../logger.ts';
 import type { IOutboundQueue, OutboundMessageRole } from './outbound-queue.ts';
-import type { QueuedDecisionConsumer } from './pending-poll-health.ts';
+import type { QueuedDecisionConsumer, OfflineDecisionRetryScheduler } from './pending-poll-health.ts';
+import { systemClock } from '../../lib/clock.ts';
 import type { PendingPollStore } from './pending-poll-store.ts';
 import type { PendingPollPersistence } from './pending-poll-persistence.ts';
 import type { SystemTurnLeaseToken, SystemTurnPurpose } from './pending-system-result-tracker.ts';
@@ -76,6 +77,8 @@ export interface RuntimePollBridgePort {
   readonly chatSessions: Map<string, SessionManager>;
   readonly pendingPolls: PendingPollStore;
   readonly pollPersistence: PendingPollPersistence;
+  readonly shutdownRequested: boolean;
+  readonly offlineDecisionRetry: OfflineDecisionRetryScheduler;
   readonly suppressedAskUserToolIds: Set<string>;
   readonly pendingPollSourceTurnBarriers: WeakMap<PendingPollQuestion, Promise<void>>;
   readonly queuedDecisionConsumer: QueuedDecisionConsumer;
@@ -123,6 +126,7 @@ export interface RuntimePollBridgePort {
 
 export class RuntimePollBridgeCoordinator {
   private readonly host: RuntimePollBridgePort;
+  private rehydrationComplete = false;
 
   constructor(host: RuntimePollBridgePort) {
     this.host = host;
@@ -169,7 +173,7 @@ export class RuntimePollBridgeCoordinator {
     onDurable?: () => void,
   ): boolean {
     if (this.host.pendingPolls.questions.get(mapKey) !== pending) return false;
-    const resolvedAt = pending.resolvedAt ?? Date.now();
+    const resolvedAt = pending.resolvedAt ?? systemClock.now();
     if (!this.host.pollPersistence.save(mapKey, { ...pending, resolvedAt }, () => {
       if (pending.resolvedAt === undefined && this.stageResolvedAskUserPoll(mapKey, pending, onDurable)) onDurable?.();
     }).durable) return false;
@@ -178,7 +182,7 @@ export class RuntimePollBridgeCoordinator {
 
   async stageResolvedAskUserPollAndWait(mapKey: string, pending: PendingPollQuestion): Promise<boolean> {
     if (this.host.pendingPolls.questions.get(mapKey) !== pending) return false;
-    const resolvedAt = pending.resolvedAt ?? Date.now();
+    const resolvedAt = pending.resolvedAt ?? systemClock.now();
     const result = await this.host.pollPersistence.saveAndWait(mapKey, { ...pending, resolvedAt });
     return result.durable && this.finishResolvedAskUserPoll(mapKey, pending, resolvedAt);
   }
@@ -220,14 +224,32 @@ export class RuntimePollBridgeCoordinator {
    * read/parse/delete failure stranded rows for "next boot" only. Runs once at
    * boot, after rehydratePendingPolls.
    */
+  scheduleRecoveryRetry(): void {
+    if (this.host.shutdownRequested) return;
+    this.host.offlineDecisionRetry.scheduleRetry(async () => {
+      if (this.host.shutdownRequested) return;
+      if (!this.rehydrationComplete) await this.rehydratePendingPolls();
+      if (!this.host.shutdownRequested) await this.consumeQueuedPollDecisions();
+    });
+  }
+
   async consumeQueuedPollDecisions(): Promise<void> {
+    // An unreadable poll table is not evidence that queued answers are obsolete.
+    if (!this.rehydrationComplete) {
+      this.scheduleRecoveryRetry();
+      return;
+    }
     await this.host.queuedDecisionConsumer.consume({
       hasPending: (mapKey) => this.host.pendingPolls.questions.has(mapKey),
       resolve: (decision) => this.resolvePollDecisionFromConsole(decision),
     });
   }
 
-  async rehydratePendingPolls(): Promise<boolean> {
+  async rehydratePendingPolls(): Promise<void> {
+    this.rehydrationComplete = await this.rehydrateSnapshot();
+  }
+
+  private async rehydrateSnapshot(): Promise<boolean> {
     const persisted = this.host.pollPersistence.readRows();
     if (persisted.status === 'unavailable') return false;
     const rows = persisted.rows;

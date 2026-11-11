@@ -892,7 +892,6 @@ export class AgentRuntime implements Runtime {
   // Poll durability owns verified writes and unresolved debt. Startup must obtain
   // a readable snapshot before queued decisions can be consumed.
   private readonly pollPersistence: PendingPollPersistence;
-  private pendingPollRehydrationComplete = false;
   // CAR-20 (#2539): offline poll-decision retry owner + durable consumption receipts.
   private readonly offlineDecisionRetry = new OfflineDecisionRetryScheduler();
   private readonly consumptionReceipts!: ConsumptionReceiptRecorder;
@@ -2617,7 +2616,7 @@ export class AgentRuntime implements Runtime {
     this.queuedDecisionConsumer = new QueuedDecisionConsumer(
       db,
       this.consumptionReceipts,
-      () => this.schedulePollRecoveryRetry(),
+      () => this.pollBridge.scheduleRecoveryRetry(),
     );
     this.messenger = messenger;
     this.instanceName = instanceName ?? 'personal';
@@ -3096,6 +3095,8 @@ export class AgentRuntime implements Runtime {
       get chatSessions() { return runtime.chatSessions; },
       get pendingPolls() { return runtime.pendingPolls; },
       get pollPersistence() { return runtime.pollPersistence; },
+      get shutdownRequested() { return runtime.shutdownRequested; },
+      get offlineDecisionRetry() { return runtime.offlineDecisionRetry; },
       get suppressedAskUserToolIds() { return runtime.suppressedAskUserToolIds; },
       get pendingPollSourceTurnBarriers() { return runtime.pendingPollSourceTurnBarriers; },
       get queuedDecisionConsumer() { return runtime.queuedDecisionConsumer; },
@@ -6266,11 +6267,15 @@ export class AgentRuntime implements Runtime {
           pendingPoll.currentQuestionIndex++;
           advancePendingPollIndex(pendingPoll);
 
-          if (Object.keys(pendingPoll.answersCollected).length >= pendingPoll.questions.length) {
-            if (!await this.pollBridge.stageResolvedAskUserPollAndWait(mapKey, pendingPoll)) {
-              throw new Error('Poll answer durability is unavailable');
-            }
-            if (runtimeContext && this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(runtimeContext)) return;
+          const allAnswered = Object.keys(pendingPoll.answersCollected).length >= pendingPoll.questions.length;
+          const durable = allAnswered
+            ? await this.pollBridge.stageResolvedAskUserPollAndWait(mapKey, pendingPoll)
+            : (await this.pollPersistence.saveAndWait(mapKey, pendingPoll)).durable;
+          if (!durable || this.pendingPolls.questions.get(mapKey) !== pendingPoll) {
+            throw new Error('Poll answer durability is unavailable');
+          }
+          if (runtimeContext && this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(runtimeContext)) return;
+          if (allAnswered) {
             await this.completeConsumedPerChatInbound(
               mapKey,
               'poll_answer_collected',
@@ -6279,11 +6284,6 @@ export class AgentRuntime implements Runtime {
             );
             await this.injectPollAnswers(mapKey, pendingPoll, actorJid);
           } else {
-            if (!(await this.pollPersistence.saveAndWait(mapKey, pendingPoll)).durable
-              || this.pendingPolls.questions.get(mapKey) !== pendingPoll) {
-              throw new Error('Poll answer durability is unavailable');
-            }
-            if (runtimeContext && this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(runtimeContext)) return;
             log.info({
               mapKey,
               answered: Object.keys(pendingPoll.answersCollected).length,
@@ -7187,12 +7187,8 @@ export class AgentRuntime implements Runtime {
     this.pendingPolls.questions.delete(mapKey);
   }
 
-  // ---------------------------------------------------------------------------
-  // AskUserQuestion→poll bridge (#1977 D3) — extracted to runtime-poll-bridge.ts.
-  // Spread delegators keep every externally-reached name (ctor subscriptions,
-  // start() calls, the public console API, and the characterization suites
-  // that invoke these on the runtime) working unchanged.
-  // ---------------------------------------------------------------------------
+  // The poll coordinator owns lifecycle and startup recovery. Delegates preserve
+  // runtime entry points used by subscriptions, startup, the console and tests.
 
   private detachPendingPollContinuation(...args: Parameters<RuntimePollBridgeCoordinator['detachPendingPollContinuation']>): ReturnType<RuntimePollBridgeCoordinator['detachPendingPollContinuation']> {
     return this.pollBridge.detachPendingPollContinuation(...args);
@@ -7202,26 +7198,12 @@ export class AgentRuntime implements Runtime {
     return this.pollBridge.stageResolvedAskUserPoll(...args);
   }
 
-  private schedulePollRecoveryRetry(): void {
-    if (this.shutdownRequested) return;
-    this.offlineDecisionRetry.scheduleRetry(async () => {
-      if (this.shutdownRequested) return;
-      if (!this.pendingPollRehydrationComplete) await this.rehydratePendingPolls();
-      if (!this.shutdownRequested) await this.consumeQueuedPollDecisions();
-    });
+  private consumeQueuedPollDecisions(...args: Parameters<RuntimePollBridgeCoordinator['consumeQueuedPollDecisions']>): ReturnType<RuntimePollBridgeCoordinator['consumeQueuedPollDecisions']> {
+    return this.pollBridge.consumeQueuedPollDecisions(...args);
   }
 
-  private async consumeQueuedPollDecisions(): Promise<void> {
-    // An unreadable poll table is not evidence that queued answers are obsolete.
-    if (!this.pendingPollRehydrationComplete) {
-      this.schedulePollRecoveryRetry();
-      return;
-    }
-    await this.pollBridge.consumeQueuedPollDecisions();
-  }
-
-  private async rehydratePendingPolls(): Promise<void> {
-    this.pendingPollRehydrationComplete = await this.pollBridge.rehydratePendingPolls();
+  private rehydratePendingPolls(...args: Parameters<RuntimePollBridgeCoordinator['rehydratePendingPolls']>): ReturnType<RuntimePollBridgeCoordinator['rehydratePendingPolls']> {
+    return this.pollBridge.rehydratePendingPolls(...args);
   }
 
   private startPendingPollExpiry(...args: Parameters<RuntimePollBridgeCoordinator['startPendingPollExpiry']>): ReturnType<RuntimePollBridgeCoordinator['startPendingPollExpiry']> {

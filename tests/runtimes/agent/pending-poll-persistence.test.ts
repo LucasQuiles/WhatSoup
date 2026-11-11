@@ -7,8 +7,13 @@ import { Database } from '../../../src/core/database.ts';
 import { PendingPollPersistence } from '../../../src/runtimes/agent/pending-poll-persistence.ts';
 import { deserializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/poll-resolution.ts';
 
-const logger = vi.hoisted(() => ({ error: vi.fn(), info: vi.fn(), warn: vi.fn(), debug: vi.fn() }));
-vi.mock('../../../src/logger.ts', () => ({ createChildLogger: () => logger }));
+import type { SingletonLoggerMock } from '../../helpers/logger-mock.ts';
+
+const logger = vi.hoisted(() => ({} as SingletonLoggerMock));
+vi.mock('../../../src/logger.ts', async () => {
+  const { hoistedLoggerMock } = await import('../../helpers/logger-mock.ts');
+  return hoistedLoggerMock(logger);
+});
 
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
