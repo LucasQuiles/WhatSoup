@@ -2337,8 +2337,10 @@ describe('upsert provenance stamping', () => {
       // No visibility clause: this line writes owner_only, so it must reach its own.
       expect(query.filter).toEqual({
         chat_jid: { $eq: 'chat-1@g.us' },
-        source_instance: { $eq: 'q' },
-        source_account: { $eq: ownAccount },
+        $and: [
+          { $or: [{ source_instance: { $eq: mutableConfig.botName } }, { source_instance: { $exists: false } }] },
+          { $or: [{ source_account: { $eq: ownAccount } }, { source_account: { $exists: false } }] },
+        ],
       });
     } finally {
       delete pineconeConfig.instanceScopedIds;
@@ -2362,14 +2364,15 @@ describe('upsert provenance stamping', () => {
       filters = mockSearchRecords.mock.calls.map((call) => call[0].query.filter);
       mockSearchRecords.mockReset();
     }
-    // instanceScopedIds off: no instance or account boundary (unchanged), owner_only excluded.
-    expect(filters[0]).toEqual({ chat_jid: { $eq: 'chat-1@g.us' }, ...OWNER_ONLY_EXCLUSION });
-    expect(filters[1]).toEqual({
+    const expected = {
       chat_jid: { $eq: 'chat-1@g.us' },
-      source_instance: { $eq: 'q' },
-      source_account: { $eq: expect.stringMatching(/^acct:[0-9a-f]{24}$/) },
+      $and: [
+        { $or: [{ source_instance: { $eq: mutableConfig.botName } }, { source_instance: { $exists: false } }] },
+        { $or: [{ source_account: { $eq: memory.sourceAccount() } }, { source_account: { $exists: false } }] },
+      ],
       ...OWNER_ONLY_EXCLUSION,
-    });
+    };
+    expect(filters).toEqual([expected, expected]);
   });
 
   it('omits provenance when the caller names no pipeline', async () => {

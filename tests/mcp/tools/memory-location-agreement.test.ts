@@ -12,6 +12,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SessionContext, ToolDeclaration } from '../../../src/mcp/types.ts';
 import type { GroupParticipantInfo, InstanceIdentities } from '../../../src/core/memory-scope.ts';
+import { matchesMetadata } from '../../helpers/pinecone-metadata.ts';
 
 const { FakePinecone, store, queries, rerankMock, configState } = vi.hoisted(() => {
   type StoredRecord = { id: string; score: number; fields: Record<string, unknown> };
@@ -22,6 +23,8 @@ const { FakePinecone, store, queries, rerankMock, configState } = vi.hoisted(() 
     botName: 'vector-memory-bot',
     profile: {} as Record<string, unknown>,
     recordVisibility: undefined as string | undefined,
+    instanceScopedIds: false,
+    accountScopeId: 'scope:reader',
   };
 
   // SDK behaviours this agreement depends on (@pinecone-database/pinecone dist):
@@ -47,6 +50,11 @@ const { FakePinecone, store, queries, rerankMock, configState } = vi.hoisted(() 
           .slice(0, params.topK)
           .map((r) => ({ id: r.id, score: r.score, metadata: r.fields }));
         return { matches };
+      },
+      searchRecords: async (params: { namespace: string; query: { topK: number; filter?: Record<string, unknown> } }) => {
+        queries.push({ namespace: params.namespace, filter: params.query.filter });
+        return { result: { hits: (store.get(key(params.namespace)) ?? []).slice(0, params.query.topK)
+          .map((record) => ({ _id: record.id, _score: record.score, fields: record.fields })) } };
       },
       namespace: (ns: string) => makeIndex(indexName, ns),
     };
@@ -101,6 +109,7 @@ vi.mock('../../../src/config.ts', () => {
   return {
     config: {
       get botName() { return configState.botName; },
+      get accountScopeId() { return configState.accountScopeId; },
       pineconeIndex: 'mw-mind',
       pineconeContextTopK: 10,
       pineconeSenderTopK: 5,
@@ -115,6 +124,7 @@ vi.mock('../../../src/config.ts', () => {
           namespaces,
           allowedIndexes: ['mw-mind'],
           get recordVisibility() { return configState.recordVisibility; },
+          get instanceScopedIds() { return configState.instanceScopedIds; },
           knowledgeProfiles: {
             'mw-mind': configState.profile,
             // Another instance's memory index, allowed for search here.
@@ -232,6 +242,9 @@ beforeEach(() => {
   rerankMock.mockReset();
   configState.botName = 'vector-memory-bot';
   configState.recordVisibility = undefined;
+  configState.instanceScopedIds = false;
+  configState.accountScopeId = 'scope:reader';
+  configState.profile.searchMode = 'vector';
   configState.profile.rerank = false;
   configState.profile.rerankTopN = 6;
   delete configState.profile.minScore;
@@ -443,6 +456,78 @@ describe('knowledge_search and owner_only records', () => {
   const withoutChatClause = (filter: unknown): Record<string, unknown> =>
     Object.fromEntries(Object.entries((filter ?? {}) as Record<string, unknown>).filter(([key]) => key !== 'chat_jid'));
 
+  it.each(['scope:reader', ''])('instance contact recall excludes other accounts before rerank with reader account "%s"', async (account) => {
+    configState.instanceScopedIds = true;
+    configState.accountScopeId = account;
+    configState.profile.rerank = true;
+    const own = { visibility: 'chat_scoped', source_instance: configState.botName, source_account: 'scope:reader' };
+    seed([
+      { id: 'own', score: 0.9, fields: { ...own, text: 'own content', chat_jid: pn(MEMBER_A) } },
+      { id: 'foreign', score: 0.99, fields: { ...own, text: 'foreign content', source_account: 'scope:previous', chat_jid: pn(MEMBER_B) } },
+      { id: 'untagged-foreign', score: 0.98, fields: { ...own, text: 'untagged foreign', source_account: 'scope:previous' } },
+      { id: 'unstamped', score: 0.97, fields: { text: 'unstamped content', visibility: 'chat_scoped' } },
+    ]);
+    rerankMock.mockImplementation(async ({ documents }: { documents: Array<{ id: string }> }) => ({
+      data: documents.map((document, index) => ({ index, document, score: 0.9 })),
+    }));
+    const { knowledgeSearch } = registerTools({ ...AS_INSTANCE, identities: () => ({ ...identities, botJid: null }) });
+    expect(await search(knowledgeSearch, dmSession(MEMBER_A))).toEqual(account ? ['own'] : []);
+    const candidates = JSON.stringify(rerankMock.mock.calls);
+    expect(candidates).not.toContain('foreign');
+    expect(candidates).not.toContain('unstamped');
+    const defaultQueries = queries.filter((query) => query.namespace === '__default__');
+    expect(defaultQueries.length).toBeGreaterThan(0);
+    const queriedIds = new Set<string>();
+    for (const query of defaultQueries) {
+      const admitted = store.get('mw-mind/__default__')!.filter((record) => matchesMetadata(record.fields, query.filter as Record<string, unknown>));
+      expect(admitted.every((record) => account && record.id === 'own')).toBe(true);
+      for (const record of admitted) queriedIds.add(record.id);
+    }
+    expect([...queriedIds]).toEqual(account ? ['own'] : []);
+  });
+
+  it.each([false, true])('an entity profile on __default__ retains unstamped business entities (instanceScopedIds: %s)', async (enabled) => {
+    configState.recordVisibility = 'owner_only';
+    configState.instanceScopedIds = enabled;
+    configState.profile.searchMode = 'entity';
+    seed([
+      { id: 'business', score: 0.9, fields: { text: 'Business entity', entity_type: 'company' } },
+      { id: 'private-business', score: 0.95, fields: { text: 'Private entity', entity_type: 'company', visibility: 'owner_only' } },
+      { id: 'foreign-business', score: 0.94, fields: { text: 'Foreign entity', entity_type: 'company', source_instance: configState.botName, source_account: 'scope:previous' } },
+      { id: 'legacy-chat', score: 0.93, fields: { text: 'Legacy chat', chat_jid: pn(MEMBER_A), memory_type: 'user_fact' } },
+    ]);
+    const { knowledgeSearch } = registerTools();
+    expect(await search(knowledgeSearch, dmSession(MEMBER_A))).toEqual(enabled ? ['business'] : ['foreign-business', 'business']);
+    const defaultQueries = queries.filter((query) => query.namespace === '__default__');
+    expect(defaultQueries.length).toBeGreaterThan(0);
+    for (const query of defaultQueries) {
+      expect(matchesMetadata(store.get('mw-mind/__default__')![0]!.fields, query.filter as Record<string, unknown>)).toBe(true);
+      expect(matchesMetadata(store.get('mw-mind/__default__')![1]!.fields, query.filter as Record<string, unknown>)).toBe(false);
+    }
+  });
+
+  it.each([
+    ['vector', false], ['vector', true], ['entity', false], ['entity', true],
+  ] as const)('a group never receives untagged business entities (%s profile, instanceScopedIds: %s)', async (mode, enabled) => {
+    // Restrictive recall, so the entity path is the one under test; groups never
+    // see untagged records (includesUntagged), entity records included.
+    configState.recordVisibility = 'owner_only';
+    configState.instanceScopedIds = enabled;
+    configState.profile.searchMode = mode;
+    const stamp = { source_instance: configState.botName, source_account: 'scope:reader' };
+    seed([
+      { id: 'business', score: 0.99, fields: { text: 'Business entity', entity_type: 'company' } },
+      { id: 'g-shared', score: 0.6, fields: { ...stamp, text: 'group context', chat_jid: GROUP_KEY, sender_jid: pn(MEMBER_B), memory_type: 'group_context', visibility: 'chat_scoped' } },
+    ]);
+    const { knowledgeSearch } = registerTools();
+    expect(await search(knowledgeSearch, groupSession(pn(MEMBER_A)))).toEqual(['g-shared']);
+    const memoryQueries = queries.filter((query) => query.namespace === '__default__');
+    expect(memoryQueries.length).toBeGreaterThan(0);
+    expect(memoryQueries.some((query) => JSON.stringify(query.filter ?? {}).includes('entity_type'))).toBe(false);
+    // Control: a direct chat, which sees untagged records, still gets the entity.
+    expect(await search(knowledgeSearch, dmSession(MEMBER_A))).toContain('business');
+  });
+
   it('grants no owner_only access, even to the verified owner or a trusted operator in a direct chat', async () => {
     // No transport direct-chat classification reaches knowledge_search, so its
     // grant never sees an affirmative direct chat. An agent session isolated
@@ -485,7 +570,12 @@ describe('knowledge_search and owner_only records', () => {
     expect(await search(knowledgeSearch, dmSession(MEMBER_B))).toEqual(['stamped']);
     const memoryQueries = queries.filter((q) => !['local-docs', 'onedrive', 'whatsapp-contacts'].includes(q.namespace));
     expect(memoryQueries.length).toBeGreaterThan(0);
-    for (const q of memoryQueries) expect(withoutChatClause(q.filter)).toEqual({ visibility: { $eq: 'chat_scoped' } });
+    for (const q of memoryQueries) {
+      const filter = withoutChatClause(q.filter);
+      expect(filter).toEqual('entity_type' in filter
+        ? { entity_type: { $exists: true }, ...OWNER_ONLY_EXCLUSION }
+        : { visibility: { $eq: 'chat_scoped' } });
+    }
     const documents = queries.filter((q) => q.namespace === 'onedrive');
     expect(documents.length).toBeGreaterThan(0);
     for (const q of documents) expect(q.filter).toEqual(OWNER_ONLY_EXCLUSION);

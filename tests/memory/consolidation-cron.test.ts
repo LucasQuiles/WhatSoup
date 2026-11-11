@@ -15,6 +15,7 @@ import { runConsolidation } from '../../src/memory/consolidation-cron.ts';
 describe('runConsolidation — provenance and visibility', () => {
   function run(visibility: string | undefined, instanceScope?: string | null) {
     const pinecone = {
+      sourceAccount: () => 'acct:one',
       searchDetailed: vi.fn().mockResolvedValue({
         results: [{
           id: 'rec-1',
@@ -28,6 +29,7 @@ describe('runConsolidation — provenance and visibility', () => {
             confidence: 0.9,
             chatJid: 'chat-1@g.us',
             senderJid: 'sender-1@s.whatsapp.net',
+            ...(instanceScope ? { sourceInstance: instanceScope, sourceAccount: 'acct:one', visibility: 'chat_scoped' } : {}),
             ...(visibility ? { visibility } : {}),
           },
         }],
@@ -81,7 +83,7 @@ describe('runConsolidation — provenance and visibility', () => {
     expect(a).toMatch(/^durable:[0-9a-f]{16}$/);
   });
 
-  it('with an instance scope, selects only this instance and never merges two accounts', async () => {
+  it('with an instance scope, skips returned records from another account', async () => {
     const record = (id: string, sourceAccount: string) => ({
       id,
       score: 0.9,
@@ -90,9 +92,11 @@ describe('runConsolidation — provenance and visibility', () => {
         createdAt: new Date().toISOString(), confidence: 0.9,
         chatJid: 'chat-1@g.us', senderJid: 'sender-1@s.whatsapp.net',
         sourceInstance: 'line-a', sourceAccount,
+        visibility: 'chat_scoped',
       },
     });
     const pinecone = {
+      sourceAccount: () => 'acct:one',
       searchDetailed: vi.fn().mockResolvedValue({
         results: [record('r1', 'acct:one'), record('r2', 'acct:two')], status: 'ok', evidenceCoverage: 'provider_response',
       }),
@@ -113,10 +117,10 @@ describe('runConsolidation — provenance and visibility', () => {
     };
     await runConsolidation(pinecone, provider, { lookbackDays: 7, dryRun: false, instanceScope: 'line-a' });
     expect(pinecone.searchDetailed.mock.calls[0][1]).toMatchObject({ source_instance: { $eq: 'line-a' } });
-    // Same chat, sender and claim text, different accounts: two groups, two ids.
-    expect(provider.generate).toHaveBeenCalledTimes(2);
-    const ids = pinecone.upsert.mock.calls.map((call) => call[0][0].id);
-    expect(new Set(ids).size).toBe(2);
+    expect(pinecone.searchDetailed.mock.calls[0][1]).toMatchObject({ source_account: { $eq: 'acct:one' } });
+    expect(provider.generate).toHaveBeenCalledTimes(1);
+    expect(pinecone.upsert).toHaveBeenCalledTimes(1);
+    expect(pinecone.upsert.mock.calls[0][0][0]).toMatchObject({ sourceInstance: 'line-a', sourceAccount: 'acct:one' });
   });
 
   it('labels the write as consolidation provenance', async () => {

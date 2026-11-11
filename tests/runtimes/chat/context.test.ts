@@ -701,6 +701,22 @@ describe('loadContext', () => {
     expect(off.text).toContain('legacy chat fact');
   });
 
+  it.each(['acct-a', ''])('open recall excludes foreign and unstamped records with reader account "%s"', async (account) => {
+    const record = (id: string, sourceAccount?: string) => ({
+      ...makeResult(id, id),
+      record: makeRecord({ id, text: id, visibility: 'chat_scoped', sourceInstance: 'line-a', sourceAccount }),
+    });
+    const candidates = [record('own content', 'acct-a'), record('foreign content', 'acct-b'), record('unstamped content')];
+    const pinecone = makeMockPinecone(candidates, candidates, candidates);
+    const result = await loadContextDetailed(pinecone as any, 'test-chat', 'test-contact', 'query', undefined, 'open', {
+      sourceInstance: 'line-a', sourceAccount: account, restrictive: true,
+    });
+    expect(result.text).not.toContain('foreign content');
+    expect(result.text).not.toContain('unstamped content');
+    if (account) expect(result.text).toContain('own content');
+    else expect(result.text).toBe('');
+  });
+
   it('restrictive recall without access asks every leg for chat_scoped records and drops the rest', async () => {
     const stamped = makeResult('s', 'stamped chat fact');
     stamped.record.visibility = 'chat_scoped';

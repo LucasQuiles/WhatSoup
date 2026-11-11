@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import type { ToolDeclaration } from '../../../src/mcp/types.ts';
 import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
+import { matchesMetadata } from '../../helpers/pinecone-metadata.ts';
 
 const {
   PineconeMock,
@@ -211,6 +212,34 @@ function parseRegistryText(result: Awaited<ReturnType<ToolRegistry['call']>>): u
 }
 
 describe('createPineconeWatchSearch - registration gating', () => {
+  it.each(['scope:reader', ''])('watch search excludes other-account and unstamped memories with reader account "%s"', async (account) => {
+    const settings = configStub as unknown as Record<string, unknown>;
+    const pinecone = configStub.memory.pinecone as unknown as Record<string, unknown>;
+    settings.botName = 'test-reader';
+    settings.pineconeIndex = 'index-a';
+    settings.accountScopeId = account;
+    pinecone.instanceScopedIds = true;
+    const fields = [
+      { visibility: 'chat_scoped', source_instance: 'test-reader', source_account: 'scope:reader' },
+      { visibility: 'chat_scoped', source_instance: 'test-reader', source_account: 'scope:previous' },
+      { visibility: 'chat_scoped' },
+    ];
+    searchRecordsMock.mockResolvedValue({ result: { hits: fields.map((metadata, index) => ({ _id: String(index), _score: 0.9, fields: metadata })) } });
+    try {
+      const watch = createPineconeWatchSearch(['index-a']);
+      expect(watch).not.toBeNull();
+      expect(await watch!.search({ index: 'index-a', namespace: '__default__', query: 'query', topK: 8 }))
+        .toEqual({ matches: account ? [{ score: 0.9 }] : [] });
+      const filter = searchRecordsMock.mock.calls[0]![0].query.filter;
+      expect(fields.filter((metadata) => matchesMetadata(metadata, filter))).toEqual(account ? [fields[0]] : []);
+    } finally {
+      delete settings.botName;
+      delete settings.pineconeIndex;
+      delete settings.accountScopeId;
+      delete pinecone.instanceScopedIds;
+    }
+  });
+
   it('returns null when the allowed-index list is empty', () => {
     const watchSearch = createPineconeWatchSearch([]);
 
