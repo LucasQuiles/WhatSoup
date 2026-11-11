@@ -47,9 +47,9 @@
 //   mention data, so no one wording fits every group. Without the sentence
 //   the receipt names no one to ask, and a group receipt reads no
 //   configuration.
-// The /stop sentence does not promise the outcome: a permitted /stop can end
-// uncertain or find a stop already in progress, and its reply says so. No
-// text echoes the queued message's content.
+// The /stop sentence promises no reply: the /stop acknowledgement goes through
+// the chat's outbound queue, which refuses sends while that queue is poisoned.
+// No text echoes the queued message's content.
 //
 // RATE LIMIT. At most one receipt per chat per cooldown window, so a busy group
 // is not spammed while one long task runs. The cooldown is consumed when the
@@ -85,7 +85,7 @@ export const QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT =
 
 /** The one /stop sentence, so the two texts that offer /stop cannot drift apart. */
 function stopSentence(request: 'the earlier request' | 'that request'): string {
-  return `Send ${STOP_COMMAND_TEXT} to cancel ${request} and anything waiting; I'll reply with the outcome.`;
+  return `Send ${STOP_COMMAND_TEXT} to cancel ${request} and anything waiting.`;
 }
 
 // The /stop texts extend the no-/stop texts, so both say the same status.
