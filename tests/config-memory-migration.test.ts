@@ -304,12 +304,16 @@ describe('migrateLegacyMemoryConfig with hostile legacy namespace keys', () => {
     delete prototype['systemPrompt'];
   });
 
-  it('never writes through a dotted __proto__ key into Object.prototype', () => {
-    const input = JSON.parse(`{"pineconeNamespaces": {"__proto__.${probe}": "x"}}`) as Record<string, unknown>;
-    migrateLegacyMemoryConfig(input, { removeLegacy: false });
-    expect(Object.hasOwn(Object.prototype, probe)).toBe(false);
-    expect(({} as Record<string, unknown>)[probe]).toBeUndefined();
-  });
+  it.each(['__proto__.', 'constructor.prototype.', 'prototype.'])(
+    'never writes through a dotted key starting %s into a shared prototype',
+    (prefix) => {
+      const input = JSON.parse(`{"pineconeNamespaces": {"${prefix}${probe}": "x"}}`) as Record<string, unknown>;
+      migrateLegacyMemoryConfig(input, { removeLegacy: false });
+      expect(Object.hasOwn(Object.prototype, probe)).toBe(false);
+      expect(Object.hasOwn(Function.prototype, probe)).toBe(false);
+      expect(({} as Record<string, unknown>)[probe]).toBeUndefined();
+    },
+  );
 
   it('never reparents the namespaces object through a bare __proto__ key', () => {
     const input = JSON.parse(

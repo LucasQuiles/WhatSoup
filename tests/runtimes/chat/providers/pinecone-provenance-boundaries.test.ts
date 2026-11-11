@@ -82,7 +82,7 @@ vi.mock('@pinecone-database/pinecone', () => ({
 }));
 
 import { Pinecone } from '@pinecone-database/pinecone';
-import { PineconeMemory, type MemoryRecord } from '../../../../src/runtimes/chat/providers/pinecone.ts';
+import { PineconeMemory, _testing, type MemoryRecord } from '../../../../src/runtimes/chat/providers/pinecone.ts';
 import { runConsolidation } from '../../../../src/memory/consolidation-cron.ts';
 
 function seed(id: string, provenance: Record<string, unknown> = {}, namespace = '') {
@@ -99,6 +99,8 @@ const own = { source_instance: 'test-line', source_account: 'scope:account-b' };
 const reservedNamespace = 'whatsoup-owner-only-v1';
 
 beforeEach(() => {
+  // Breakers are module state: a failure case must not short-circuit later searches.
+  _testing.reset();
   records.clear();
   privateRecords.clear();
   namespaceQueries.length = 0;
@@ -350,8 +352,26 @@ describe('owner-only namespace compatibility fence', () => {
 
   it('admitted recall fetches nothing when the reserved hits already match every default hit', async () => {
     seedPartialMove();
-    await new PineconeMemory().searchForChatDetailed('test-chat', 'query', undefined, ownerOptions);
+    const result = await new PineconeMemory().searchForChatDetailed('test-chat', 'query', undefined, ownerOptions);
+    expect(result.status).toBe('ok');
+    expect(result.retried).toBeUndefined();
+    expect(result.results.map((hit) => [hit.id, hit.record.text])).toEqual([['moved', 'private correction']]);
+    expect(namespaceQueries).toEqual(['', reservedNamespace]);
     expect(namespaceFetches).toEqual([]);
+  });
+
+  it('a failing reserved fetch fails the merged read closed, never returning the default copy', async () => {
+    seed('moved', { ...own, text: 'shared original' });
+    seed('moved', { ...own, visibility: 'owner_only', text: 'private correction' }, reservedNamespace);
+    scores.set(':moved', 0.99);
+    state.failNamespace = `fetch:${reservedNamespace}`;
+    settings.pineconeContextTopK = 1;
+    seedPrivate('private high', 0.98);
+    const result = await new PineconeMemory().searchForChatDetailed('test-chat', 'query', undefined, ownerOptions);
+    expect(result).toMatchObject({ status: 'failed', results: [], retried: true });
+    expect(namespaceFetches).toEqual([
+      { name: reservedNamespace, ids: ['moved'] }, { name: reservedNamespace, ids: ['moved'] },
+    ]);
   });
 
   it('consolidation promotes the reserved copy of an id found in both namespaces, as owner_only', async () => {

@@ -1946,9 +1946,10 @@ designed contract mirrors the fact-export queue machinery (§9):
   records anywhere (the visibility field ships with the fence). Rolling a
   writer back stops `owner_only` writes; rolling forward again needs no
   migration. A correction that narrows a shared record moves it (reserved
-  write, then default delete); merged reads keep the reserved copy of an id
-  found in both namespaces, including one whose reserved copy ranks below the
-  reserved `topK` cutoff (one fetch of the unmatched default ids).
+  write, then default delete); merged reads suppress the default copy of an id
+  the reserved namespace holds, also when the reserved copy ranks below the
+  reserved `topK` cutoff and is not returned (one fetch of the unmatched
+  default ids).
   Instances that share an index set `memory.pinecone.instanceScopedIds`, which
   folds the instance into every id scheme (`memory_write`, the fact-export
   `factId`, `durable:`) and makes source instance and account boundaries:
