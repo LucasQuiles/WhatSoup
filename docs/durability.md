@@ -126,6 +126,13 @@ The policy is set at creation time by the caller. Autonomous bot responses (via 
 
 Note: `completeInbound()` is a guarded helper — if the row is still `processing` when called, it applies `markTurnDone()` first before `markInboundComplete()`. This handles cases where the agent completes a turn without an explicit `markTurnDone()` call.
 
+Chat records its terminal outbound op, then marks the inbound `turn_done` before
+the network send. A successful submission, including a receipt without a message
+ID, does not complete that inbound. The legacy terminal echo/reconciliation path
+owns completion. A submission-settlement write failure leaves the send uncertain
+and does not trigger another send. `markTurnDone()` only changes `processing`, so
+a late call cannot reopen an inbound already completed or failed.
+
 ### 3.2 Outbound Op Lifecycle
 
 ```
@@ -215,6 +222,17 @@ Queries `inbound_events` with `processing_status = 'processing'`. For each:
 - Checks if a non-quarantined, non-permanently-failed **terminal** outbound op exists with `source_inbound_seq` matching this event.
 - If no such op exists: mark the inbound event `failed`. The message was being processed when the crash occurred and never produced a reply.
 - If a terminal op exists (e.g., in `maybe_sent`): leave in `processing` — post-connect recovery will resolve the outbound op and may complete the inbound event normally.
+
+For a stranded `turn_done`, recovery distinguishes an unattempted reply from an
+unconfirmed one. With no terminal outbound op, the existing no-reply path completes
+it as `recovered_turn_done`. An echoed terminal op completes it as `response_sent`;
+an active terminal op retains delivery ownership. If all terminal attempts are
+quarantined or permanently failed, recovery marks the inbound failed with
+`transport_send_failed` and records `recovery_pending_operator_catchup`. The
+outbound evidence remains intact for inspection; this does not authorize replay
+or assert that an ambiguous send never reached the recipient. When several
+terminal attempts exist, echoed evidence takes precedence over an active attempt,
+and an active attempt over terminal failure.
 
 Before any recovery phase mutates state, pre-connect recovery appends a `recovery_plans` row and an
 open `recovery_runs` row with trigger `pre_connect`. Summary statistics and the current open-recovery
@@ -413,8 +431,8 @@ reports:
 | Bucket | Selection | Disposition |
 |---|---|---|
 | 1. Echoed but not finalized | open (`pending`/`processing`/`turn_done`) with an `is_terminal`, `echoed` outbound op, `received_at` older than **5 minutes** | `completeInbound(seq, 'recovered_response_sent')` |
-| 2. Stranded `turn_done` | `turn_done` older than **24 hours** with no echoed terminal op (and no `turn_terminal_records` row) | `markInboundComplete(seq, 'recovered_turn_done')` |
-| 3. Stale open, no success | `pending`/`processing` older than **24 hours** with no echoed terminal op (and no `turn_terminal_records` row) | `markInboundFailed(seq)` (terminal_reason `error`, failure_class `stale_reclaim`) |
+| 2. Stranded no-reply `turn_done` | `turn_done` older than **24 hours** with no terminal outbound op (and no `turn_terminal_records` row) | `markInboundComplete(seq, 'recovered_turn_done')` |
+| 3. Stale open, no success | `pending`/`processing`, or `turn_done` with a terminal outbound op, older than **24 hours** with no echoed terminal op (and no `turn_terminal_records` row) | `markInboundFailed(seq)` (terminal_reason `error`, failure_class `stale_reclaim`); preserve outbound evidence and record operator catch-up |
 | 4. Recovery-owner reclaim (#1749) | open with a `transferred_to_recovery_owner` terminal record whose selected op is `failed_permanent`/`quarantined` **or** whose recovery job is `exhausted`, no echoed terminal op, and `received_at` older than **5 minutes** | `markInboundFailed(seq)` (failure_class `recovery_owner_reclaimed`); drive any `pending`/`claimed` owning job to `exhausted` |
 | 5. Open behind a final terminal record (**report-only**) | open with **exactly one** terminal record, whose disposition is `finalized_replied`, `finalized_no_reply_policy` or `failed_terminal`, whose identity matches the inbound and whose delivery proof still holds; no `inbound_disposition_links` row (as `inbound_seq` or `superseded_by_seq`), no `turn_recovery_jobs` row; `received_at` older than **5 minutes** | **nothing is written** (no inbound change, no recovery evidence): the count is returned as `terminalRecordCloseCandidates` and the first 200 seqs are logged (`inboundSeqsTruncated` is true when there are more). Each close is an operator decision taken with `turn-recovery-operator close-inbound` (`docs/runbook.md`), which applies the status the record implies. Read in its own snapshot before the four-bucket transaction, and bounded per sweep (see below) |
 

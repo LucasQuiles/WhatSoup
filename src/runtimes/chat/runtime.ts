@@ -761,6 +761,9 @@ export class ChatRuntime implements Runtime {
         isTerminal: true,
       });
       this.durability.markSending(mainOpId);
+      // A submitted reply is still awaiting delivery evidence. Publish LLM
+      // completion before sending so a fast echo cannot be reopened afterward.
+      if (msg.inboundSeq !== undefined) this.durability.markTurnDone(msg.inboundSeq);
     }
     let sendSucceeded = false;
     let outboundReceipt: SubmissionReceipt | null = null;
@@ -854,11 +857,6 @@ export class ChatRuntime implements Runtime {
       }
     }
     const sendDurationMs = Date.now() - sendStart;
-
-    // Advance inbound event state machine on successful send
-    if (sendSucceeded && this.durability && msg.inboundSeq !== undefined) {
-      this.durability.completeInbound(msg.inboundSeq, 'response_sent');
-    }
 
     // 10. Bot reply storage: handled by the Baileys messages.upsert echo
     //     (via ingest → storeMessageIfNew). The echo carries the real WhatsApp
