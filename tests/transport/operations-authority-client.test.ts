@@ -401,6 +401,41 @@ describe('OperationsAuthorityClient HTTP boundaries', () => {
       .resolves.toEqual({ attemptId: 'attempt-http-boundary', payloadDigest: 'sha256:http-boundary' });
   });
 
+  it.each([
+    ['an escaped quote', '\\"', 'resolves'],
+    ['three backslashes before a quote', '\\\\\\"', 'resolves'],
+    ['an even backslash run that closes the string', '\\\\"', 'rejects'],
+  ] as const)('scans structure after %s inside a response string', async (_kind, escape, outcome) => {
+    // Break caught: the string skip must end a string only at a quote preceded
+    // by an even backslash run. Ending too early counts quoted brackets as
+    // containers; ending too late hides real nesting from the depth limit.
+    const brackets = `${'['.repeat(129)}${']'.repeat(129)}`;
+    const payload = outcome === 'resolves'
+      ? `{"attempt_id":"attempt-http-boundary","payload_digest":"sha256:http-boundary","state":"dispatching","note":"a${escape}${brackets}"}`
+      : `{"attempt_id":"attempt-http-boundary","payload_digest":"sha256:http-boundary","state":"dispatching","note":"a${escape},"snapshot":${brackets}}`;
+    const fetch = vi.fn(async () => new Response(payload));
+    const client = new OperationsAuthorityClient({
+      baseUrl: 'https://authority.example/',
+      accountId: 'pilot-account',
+      bearerToken: 'test-only-transport-token',
+      fetch,
+    });
+
+    const parse = vi.spyOn(JSON, 'parse');
+    try {
+      const admission = client.admit({ recipient: '15551230000@s.whatsapp.net', content: { text: 'fake-only' } });
+      if (outcome === 'resolves') {
+        await expect(admission).resolves.toEqual({ attemptId: 'attempt-http-boundary', payloadDigest: 'sha256:http-boundary' });
+      } else {
+        await expect(admission).rejects.toThrow('transport authority response is not JSON');
+        // The structure scan, not a later gate, must reject the nesting.
+        expect(parse.mock.calls.filter(([text]) => text === payload)).toEqual([]);
+      }
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
   it('returns at its own deadline when the authority response body stops streaming', async () => {
     // Break caught: a response starts successfully but then occupies the
     // transport gate forever while the body reader waits for another chunk.

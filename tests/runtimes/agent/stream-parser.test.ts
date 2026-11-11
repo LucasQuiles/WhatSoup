@@ -12,6 +12,10 @@ function line(obj: unknown): string {
   return JSON.stringify(obj);
 }
 
+// #3717c: every assistant line ends with its request_usage event; a message without
+// usage carries unknown context (contextTokens undefined, never 0).
+const UNKNOWN_REQUEST = { type: 'request_usage', messageId: undefined, contextTokens: undefined };
+
 describe('parseEvent', () => {
   describe('empty / whitespace lines', () => {
     it('returns null for an empty string', () => {
@@ -140,6 +144,7 @@ describe('parseEvent', () => {
         { type: 'unknown_block', blockType: '<non-object>', raw: null },
         { type: 'unknown_block', blockType: '<non-object>', raw: 'ignored' },
         { type: 'unknown_block', blockType: 'text', raw: malformedText },
+        UNKNOWN_REQUEST,
       ]);
     });
   });
@@ -202,6 +207,7 @@ describe('parseEvent', () => {
         { type: 'unknown_block', blockType: 'tool_use', raw: missingIdentity },
         { type: 'unknown_block', blockType: 'tool_use', raw: blankIdentity },
         { type: 'unknown_block', blockType: 'tool_use', raw: invalidIdentity },
+        UNKNOWN_REQUEST,
       ]);
     });
 
@@ -219,6 +225,7 @@ describe('parseEvent', () => {
       expect(result).toEqual({ type: 'unknown_block', blockType: 'tool_use', raw: missingInput });
       expect(parseEvents(line({ type: 'assistant', message: { content: [arrayInput] } }))).toEqual([
         { type: 'unknown_block', blockType: 'tool_use', raw: arrayInput },
+        UNKNOWN_REQUEST,
       ]);
     });
 
@@ -235,6 +242,7 @@ describe('parseEvent', () => {
           blockType: 'image',
           raw: { type: 'image', source: 'redacted' },
         },
+        UNKNOWN_REQUEST,
       ]);
     });
   });
@@ -554,6 +562,78 @@ describe('parseEvent', () => {
       const result = parseDeprecatedHead('null');
       // null parses as non-object, handled as unknown
       expect((result as AgentEvent).type).toBe('unknown');
+    });
+  });
+
+  describe('#3717c request_usage', () => {
+    const assistant = (message: Record<string, unknown>) =>
+      parseEvents(line({ type: 'assistant', message })).at(-1);
+    const text = [{ type: 'text', text: 'hi' }];
+
+    it('reports input + cache_creation + cache_read of the one request, after its content', () => {
+      const events = parseEvents(line({
+        type: 'assistant',
+        message: {
+          id: 'msg_1',
+          content: text,
+          usage: { input_tokens: 3, cache_creation_input_tokens: 1_000, cache_read_input_tokens: 75_000, output_tokens: 9 },
+        },
+      }));
+      expect(events).toEqual([
+        { type: 'assistant_text', text: 'hi' },
+        { type: 'request_usage', messageId: 'msg_1', contextTokens: 76_003 },
+      ]);
+    });
+
+    it('counts ABSENT optional cache fields as zero', () => {
+      expect(assistant({ id: 'm', content: text, usage: { input_tokens: 500 } }))
+        .toEqual({ type: 'request_usage', messageId: 'm', contextTokens: 500 });
+    });
+
+    it.each([
+      ['null cache_read', { input_tokens: 5, cache_read_input_tokens: null }],
+      ['null cache_creation', { input_tokens: 5, cache_creation_input_tokens: null }],
+      ['string cache field', { input_tokens: 5, cache_read_input_tokens: '7' }],
+      ['negative cache field', { input_tokens: 5, cache_creation_input_tokens: -1 }],
+      ['missing input_tokens', { cache_read_input_tokens: 7 }],
+      ['null input_tokens', { input_tokens: null }],
+      ['NaN input_tokens', { input_tokens: Number.NaN }],
+      ['sum overflows to Infinity', { input_tokens: Number.MAX_VALUE, cache_read_input_tokens: Number.MAX_VALUE }],
+    ])('makes the context unknown on invalid usage: %s', (_name, usage) => {
+      const event = assistant({ id: 'm', content: text, usage });
+      expect(event).toMatchObject({ type: 'request_usage', messageId: 'm' });
+      expect(event).toHaveProperty('contextTokens', undefined);
+    });
+
+    it('makes the context unknown when usage is missing or not an object', () => {
+      expect(assistant({ id: 'm', content: text })).toHaveProperty('contextTokens', undefined);
+      expect(assistant({ id: 'm', content: text, usage: [1] })).toHaveProperty('contextTokens', undefined);
+    });
+
+    it('still emits request_usage for an assistant message with empty or missing content', () => {
+      const usage = { input_tokens: 10, cache_read_input_tokens: 90 };
+      for (const content of [[], null, undefined]) {
+        const raw = { type: 'assistant', message: { id: 'm_empty', content, usage } };
+        const events = parseEvents(line(raw));
+        expect(events).toHaveLength(2);
+        expect(events[0]).toMatchObject({ type: 'unknown' });
+        expect(events[1]).toEqual({ type: 'request_usage', messageId: 'm_empty', contextTokens: 100 });
+        // The deprecated head stays the unknown event.
+        expect(parseDeprecatedHead(line(raw))).toMatchObject({ type: 'unknown' });
+      }
+    });
+
+    it('emits no request_usage when the assistant message itself is absent', () => {
+      expect(parseEvents('{"type":"assistant","message":null}')).toEqual([
+        { type: 'unknown', raw: { type: 'assistant', message: null } },
+      ]);
+    });
+
+    it('drops an empty or non-string message id', () => {
+      expect(assistant({ id: '', content: text, usage: { input_tokens: 1 } }))
+        .toEqual({ type: 'request_usage', messageId: undefined, contextTokens: 1 });
+      expect(assistant({ id: 7, content: text, usage: { input_tokens: 1 } }))
+        .toHaveProperty('messageId', undefined);
     });
   });
 
