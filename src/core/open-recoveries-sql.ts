@@ -32,3 +32,30 @@ export const OPEN_RECOVERIES_CTE_SQL = `open_recoveries AS (
                 AND closure.disposition = 'superseded_by_operator_catchup'
             )
         )`;
+
+/**
+ * Failed user turns can owe a reply without ever acquiring a recovery job.
+ * A notice echo or newer conversation activity does not fulfill that debt.
+ * Jobs and operator catch-ups already have their own health accounting;
+ * immutable pending links also keep proven closed catch-ups out of this count.
+ */
+export const UNOWNED_FAILED_TERMINALS_CTE_SQL = `unowned_failed_terminals AS (
+          SELECT COUNT(DISTINCT source.seq) AS count
+          FROM inbound_events source
+          JOIN turn_terminal_records terminal ON terminal.inbound_seq = source.seq
+          WHERE source.processing_status = 'failed'
+            AND terminal.inbound_disposition = 'failed_terminal'
+            AND terminal.reply_guarantee_disarmed = 0
+            AND terminal.delivery_kind <> 'echoed'
+            AND COALESCE(terminal.attempt_failure_class, '') <> 'operator_cancelled'
+            AND NOT ${syntheticSourceMessageIdSql('source.message_id')}
+            AND NOT EXISTS (
+              SELECT 1 FROM turn_recovery_jobs job
+              WHERE job.source_inbound_seq = source.seq
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM inbound_disposition_links pending
+              WHERE pending.inbound_seq = source.seq
+                AND pending.disposition = 'recovery_pending_operator_catchup'
+            )
+        )`;
