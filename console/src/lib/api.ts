@@ -563,7 +563,7 @@ export const api = {
     apiFetch<{ exists: boolean; writable: boolean }>(`/api/directories/check?path=${encodeURIComponent(dirPath)}`),
 
   getVersion: () =>
-    apiFetch<{ sha: string; remoteSha: string; updateAvailable: boolean; checkedAt: string }>('/api/version'),
+    apiFetch<{ sha: string; remoteSha: string; updateAvailable: boolean; checkedAt: string; updateMode?: string }>('/api/version'),
 
   // Fleet-process liveness (src/fleet/livez.ts) — unauthenticated loopback
   // route; the Deployments surface reads fleet uptime from it.

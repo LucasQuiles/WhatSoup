@@ -106,7 +106,7 @@ server binds to `127.0.0.1:9099` by default and is gated by the root fleet token
 | `http:fleet.typing` | `GET /api/typing` | `src/fleet/index.ts:370` | stable | active | Currently-typing indicators |
 | `http:fleet.directories.check` | `GET /api/directories/check?path=...` | `src/fleet/index.ts:372` | stable | active | Path writable probe |
 | `http:fleet.metrics` | `GET /api/metrics` | `src/fleet/index.ts:394` | stable | active | Fleet-wide metrics |
-| `http:fleet.version` | `GET /api/version` | `src/fleet/index.ts:431` | stable | active | Build version |
+| `http:fleet.version` | `GET /api/version` | `src/fleet/index.ts:431` | stable | active | Build version and update availability; `updateMode: release_deploy` directs the console to release deployment rather than the retired in-place mutation. Older clients may ignore this additive field and still receive the typed refusal from `POST /api/update`. |
 | `http:fleet.update` | `POST /api/update` | `src/fleet/index.ts:432` | stable | active | Retired in-place update: performs no mutation in any mode; returns a typed `update-by-release-deploy-required` refusal over the SSE error channel. Update by deploying a new release; read availability via `GET /api/version`. |
 | `http:fleet.lid-mappings.list` | `GET /api/lid-mappings` | `src/fleet/index.ts:433`, `src/fleet/routes/lid-sync.ts` | stable | active | List cross-instance LID mappings |
 | `http:fleet.lid-mappings.sync` | `POST /api/lid-mappings/sync` | `src/fleet/index.ts:434`, `src/fleet/routes/lid-sync.ts` | stable | active | Sync mappings between instances |

@@ -11,6 +11,7 @@ export interface UpdateState {
   remoteSha: string;
   updateAvailable: boolean;
   checkedAt: string;
+  updateMode?: string;
 }
 
 export function useUpdateCheck() {

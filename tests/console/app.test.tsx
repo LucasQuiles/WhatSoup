@@ -94,9 +94,9 @@ vi.mock('../../console/src/pages/Settings', () => ({
   default: () => createElement('div', { 'data-testid': 'page-settings' }, 'Settings'),
 }));
 vi.mock('../../console/src/components/UpdateModal', () => ({
-  default: ({ open, currentSha, lines }: { open: boolean; onClose: () => void; currentSha: string; lines: unknown[] }) =>
+  default: ({ open, currentSha, lines, updateMode }: { open: boolean; onClose: () => void; currentSha: string; lines: unknown[]; updateMode?: string }) =>
     open
-      ? createElement('div', { 'data-testid': 'update-modal' }, `UpdateModal ${currentSha} lines:${lines.length}`)
+      ? createElement('div', { 'data-testid': 'update-modal', 'data-update-mode': updateMode }, `UpdateModal ${currentSha} lines:${lines.length}`)
       : null,
 }));
 
@@ -455,7 +455,7 @@ describe('App — chrome counts and update check integration', () => {
 
   it('renders UpdateModal with the current sha and line list when open', async () => {
     mockShowUpdateModal = true;
-    mockUpdateData = { sha: 'live-sha', remoteSha: 'new-sha', updateAvailable: true };
+    mockUpdateData = { sha: 'live-sha', remoteSha: 'new-sha', updateAvailable: true, updateMode: 'release_deploy' };
     mockLines = [
       { name: 'primary', status: 'online', unread: 1 },
       { name: 'sandbox', status: 'degraded' },
@@ -465,6 +465,7 @@ describe('App — chrome counts and update check integration', () => {
 
     await waitFor(() => {
       expect(screen.getByTestId('update-modal').textContent).toBe('UpdateModal live-sha lines:2');
+      expect(screen.getByTestId('update-modal').getAttribute('data-update-mode')).toBe('release_deploy');
     });
   });
 });

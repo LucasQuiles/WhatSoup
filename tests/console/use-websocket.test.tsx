@@ -8,9 +8,9 @@
  *  - On mount: checks production mode via isProductionConsole(); if dev, bails
  *  - Mints a WS ticket via api.getWsTicket() → getFleetWebSocketUrl()
  *  - Opens `new WebSocket(url)`
- *  - onopen  → setConnected(true), resets backoff to RECONNECT_BASE_MS (1000)
+ *  - onopen leaves polling active until the server hello is processed
  *  - onmessage → parseWsEvent():
- *      'connected'      → no-op
+ *      'connected'      → reconcile stream position, mark ready, reset backoff
  *      'typing_update'  → queryClient.setQueryData(['typing'], applyTypingUpdate)
  *      invalidation evt → queryClient.invalidateQueries(key) per getInvalidationKeys()
  *  - onclose → setConnected(false), invalidate lines/feed/typing,
@@ -28,7 +28,7 @@
  *     directly — must be mocked via vi.mock on that module.
  *  2. Ticket null-path: when getFleetWebSocketUrl returns null (ticket mint fails),
  *     the hook retries on the SAME exponential backoff curve used for close events.
- *  3. Backoff resets on onopen, not on a successful ticket mint.
+ *  3. Backoff resets on the server hello, not on a successful ticket mint.
  *  4. onclose is nulled before cleanup close() to prevent a reconnect loop on unmount.
  *  5. The 'cancelled' flag guards against async connect() resolving after unmount.
  */
@@ -53,6 +53,7 @@ import * as apiModule from '../../console/src/lib/api';
 vi.mock('../../console/src/lib/api', () => ({
   api: {
     getWsTicket: vi.fn(),
+    getLines: vi.fn(),
   },
   isProductionConsole: vi.fn(),
 }));
@@ -100,6 +101,10 @@ class FakeWebSocket {
 
   simulateMessage(data: string): void {
     this.onmessage?.(new MessageEvent('message', { data }));
+  }
+
+  simulateHello(): void {
+    this.simulateMessage(JSON.stringify({ type: 'connected', timestamp: Date.now() }));
   }
 
   /** Calls hook's onclose without touching readyState guard — mirrors a server-side close. */
@@ -180,6 +185,7 @@ beforeEach(() => {
   addProductionAuthMode();
   mockedIsProduction.mockReturnValue(true);
   mockedGetWsTicket.mockResolvedValue({ ticket: 'ws-ticket-1', expiresIn: 60 });
+  vi.mocked(apiModule.api.getLines).mockReset().mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -212,13 +218,98 @@ describe('RealtimeProvider — mount and connect', () => {
     expect(getConnected()).toBe(false);
   });
 
-  it('reports connected after onopen fires', async () => {
+  it('keeps polling enabled after open until a valid server hello arrives', async () => {
     const { getConnected } = await renderProvider(buildQueryClient());
     await flush();
 
     act(() => { wsRegistry[0].simulateOpen(); });
 
+    expect(getConnected()).toBe(false);
+    act(() => { wsRegistry[0].simulateMessage('{"type":"connected"}'); });
+    expect(getConnected()).toBe(false);
+    act(() => { wsRegistry[0].simulateHello(); });
+
     expect(getConnected()).toBe(true);
+  });
+
+  it.each(['connecting', 'open'])('reconnects a %s socket that never sends hello without disabling polling', async (state) => {
+    const { getConnected } = await renderProvider(buildQueryClient());
+    await flush();
+    if (state === 'open') act(() => { wsRegistry[0].simulateOpen(); });
+    vi.spyOn(wsRegistry[0], 'close').mockImplementation(() => { wsRegistry[0].readyState = FakeWebSocket.CLOSED; });
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(wsRegistry[0].readyState).toBe(FakeWebSocket.CLOSED);
+    expect(getConnected()).toBe(false);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(wsRegistry).toHaveLength(2);
+    act(() => { wsRegistry[1].simulateOpen(); wsRegistry[1].simulateHello(); });
+    expect(getConnected()).toBe(true);
+  });
+
+  it('ignores a retired socket hello and close after a replacement becomes ready', async () => {
+    const qc = buildQueryClient();
+    const invalidate = vi.spyOn(qc, 'invalidateQueries');
+    const { getConnected } = await renderProvider(qc);
+    await flush();
+    const staleMessage = wsRegistry[0].onmessage!;
+    const staleClose = wsRegistry[0].onclose!;
+    act(() => { wsRegistry[0].simulateClose(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    act(() => {
+      wsRegistry[1].simulateOpen();
+      wsRegistry[1].simulateMessage(JSON.stringify({ type: 'connected', timestamp: 1, stream_generation: 'new', sequence: 2 }));
+    });
+    invalidate.mockClear();
+    act(() => {
+      staleMessage(new MessageEvent('message', { data: JSON.stringify({ type: 'connected', timestamp: 1, stream_generation: 'old', sequence: 100 }) }));
+      staleClose(new CloseEvent('close'));
+    });
+    expect(getConnected()).toBe(true);
+    expect(invalidate).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(wsRegistry).toHaveLength(2);
+  });
+
+  it('bounds hello waiting separately from the existing maximum reconnect backoff', async () => {
+    const { getConnected } = await renderProvider(buildQueryClient());
+    await flush();
+    for (const delay of [1000, 2000, 4000, 8000, 16_000]) {
+      act(() => { wsRegistry.at(-1)!.simulateClose(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(delay); });
+    }
+    const waiting = wsRegistry.at(-1)!;
+    const count = wsRegistry.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(9999); });
+    expect(waiting.readyState).toBe(FakeWebSocket.CONNECTING);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(waiting.readyState).toBe(FakeWebSocket.CLOSED);
+    expect(getConnected()).toBe(false);
+    await act(async () => { await vi.advanceTimersByTimeAsync(29_999); });
+    expect(wsRegistry).toHaveLength(count);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(wsRegistry).toHaveLength(count + 1);
+  });
+
+  it('keeps the ordinary fleet query polling until hello and then uses its slower backstop', async () => {
+    const { RealtimeProvider } = await import('../../console/src/hooks/use-websocket');
+    const { useLines } = await import('../../console/src/hooks/use-fleet');
+    function LinesConsumer() {
+      useLines();
+      return null;
+    }
+    render(createElement(QueryClientProvider, { client: buildQueryClient() },
+      createElement(RealtimeProvider, null, createElement(LinesConsumer))));
+    await flush();
+    act(() => { wsRegistry[0].simulateOpen(); });
+    expect(apiModule.api.getLines).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(apiModule.api.getLines).toHaveBeenCalledTimes(2);
+
+    act(() => { wsRegistry[0].simulateHello(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(apiModule.api.getLines).toHaveBeenCalledTimes(2);
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(apiModule.api.getLines).toHaveBeenCalledTimes(3);
   });
 
   it('embeds the ticket value in the WebSocket URL', async () => {
@@ -344,9 +435,9 @@ describe('RealtimeProvider — ticket mint failure and backoff', () => {
     expect(wsRegistry[0].url).toContain('ticket=ws-ticket-cap');
   });
 
-  it('resets backoff to 1000ms after successful open following an elevated retry delay', async () => {
+  it('resets backoff to 1000ms after successful hello following an elevated retry delay', async () => {
     // Step 1: fail the ticket once → delay escalates to 2000ms
-    // Step 2: succeed ticket → open socket → onopen resets backoff to 1000ms
+    // Step 2: succeed ticket → receive hello → reset backoff to 1000ms
     // Step 3: close socket → next reconnect must fire at ~1100ms, not ~2100ms
     mockedGetWsTicket
       .mockRejectedValueOnce(new Error('fail-1'))              // drives delay to 2000ms
@@ -363,8 +454,7 @@ describe('RealtimeProvider — ticket mint failure and backoff', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(1100); });
     expect(wsRegistry).toHaveLength(1);
 
-    // Open the socket — this triggers onopen which resets reconnectDelay to 1000ms.
-    act(() => { wsRegistry[0].simulateOpen(); });
+    act(() => { wsRegistry[0].simulateOpen(); wsRegistry[0].simulateHello(); });
 
     // Close the socket — onclose schedules reconnect at the (now-reset) 1000ms delay.
     act(() => { wsRegistry[0].simulateClose(); });
@@ -385,7 +475,7 @@ describe('RealtimeProvider — ticket mint failure and backoff', () => {
 // ---------------------------------------------------------------------------
 
 describe('RealtimeProvider — message handling', () => {
-  it('ignores "connected" frames with no side effects', async () => {
+  it('accepts the initial legacy hello without unnecessary cache invalidation', async () => {
     const qc = buildQueryClient();
     vi.spyOn(qc, 'invalidateQueries');
     vi.spyOn(qc, 'setQueryData');
@@ -506,7 +596,7 @@ describe('RealtimeProvider — disconnect and reconnect', () => {
     const { getConnected } = await renderProvider(buildQueryClient());
     await flush();
 
-    act(() => { wsRegistry[0].simulateOpen(); });
+    act(() => { wsRegistry[0].simulateOpen(); wsRegistry[0].simulateHello(); });
     expect(getConnected()).toBe(true);
 
     act(() => { wsRegistry[0].simulateClose(); });
@@ -550,7 +640,7 @@ describe('RealtimeProvider — disconnect and reconnect', () => {
     expect(wsRegistry[1].url).toContain('ticket=tkt-2');
   });
 
-  it('resets backoff to 1000 ms after a successful open, so next close retries quickly', async () => {
+  it('resets backoff to 1000 ms after a successful hello, so next close retries quickly', async () => {
     mockedGetWsTicket
       .mockResolvedValueOnce({ ticket: 'tkt-1', expiresIn: 60 })
       .mockResolvedValueOnce({ ticket: 'tkt-2', expiresIn: 60 })
@@ -559,15 +649,15 @@ describe('RealtimeProvider — disconnect and reconnect', () => {
     await renderProvider(buildQueryClient());
     await flush();
 
-    // First connect + disconnect
-    act(() => { wsRegistry[0].simulateOpen(); });
+    // First ready connection + disconnect
+    act(() => { wsRegistry[0].simulateOpen(); wsRegistry[0].simulateHello(); });
     act(() => { wsRegistry[0].simulateClose(); });
 
     await act(async () => { await vi.advanceTimersByTimeAsync(1100); });
     expect(wsRegistry).toHaveLength(2);
 
-    // Second open resets backoff; second disconnect should retry in another 1000 ms
-    act(() => { wsRegistry[1].simulateOpen(); });
+    // Second hello resets backoff; second disconnect should retry in another 1000 ms
+    act(() => { wsRegistry[1].simulateOpen(); wsRegistry[1].simulateHello(); });
     act(() => { wsRegistry[1].simulateClose(); });
 
     await act(async () => { await vi.advanceTimersByTimeAsync(1100); });
@@ -584,10 +674,10 @@ describe('RealtimeProvider — error handling', () => {
     const { getConnected } = await renderProvider(buildQueryClient());
     await flush();
 
-    act(() => { wsRegistry[0].simulateOpen(); });
+    act(() => { wsRegistry[0].simulateOpen(); wsRegistry[0].simulateHello(); });
     expect(getConnected()).toBe(true);
 
-    // onerror → ws.close() → onclose fires → setConnected(false)
+    // Errors retire the connection even if a close event never arrives.
     act(() => { wsRegistry[0].simulateError(); });
 
     expect(getConnected()).toBe(false);
@@ -645,7 +735,7 @@ describe('RealtimeProvider — cleanup on unmount', () => {
 
     expect(wsRegistry[0].readyState).toBe(FakeWebSocket.CLOSED);
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
     expect(wsRegistry).toHaveLength(1);
   });
 });
@@ -661,11 +751,11 @@ describe('useRealtime hook', () => {
     expect(result.current.connected).toBe(false);
   });
 
-  it('returns connected: true while the provider socket is open', async () => {
+  it('returns connected: true after the provider receives hello', async () => {
     const { getConnected } = await renderProvider(buildQueryClient());
     await flush();
 
-    act(() => { wsRegistry[0].simulateOpen(); });
+    act(() => { wsRegistry[0].simulateOpen(); wsRegistry[0].simulateHello(); });
 
     expect(getConnected()).toBe(true);
   });

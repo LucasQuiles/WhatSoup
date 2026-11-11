@@ -170,7 +170,7 @@ describe('ModeSwitchDialog — confirm flow (mode change)', () => {
     expect(updateConfig.mock.invocationCallOrder[0]).toBeLessThan(restart.mock.invocationCallOrder[0])
   })
 
-  it('emits a success toast and invalidates the ["lines", lineName] query on success', async () => {
+  it('reports saved configuration and requested restart, then refreshes line projections', async () => {
     updateConfig.mockResolvedValue(undefined)
     restart.mockResolvedValue(undefined)
     const h = makeHarness()
@@ -181,9 +181,9 @@ describe('ModeSwitchDialog — confirm flow (mode change)', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Switch to chat' }))
     })
 
-    expect(h.toast.success).toHaveBeenCalledWith(expect.stringContaining('chat'))
+    expect(h.toast.success).toHaveBeenCalledWith('Mode configuration saved as chat; restart requested. Check instance health to confirm it is running.')
     expect(h.invalidateSpy).toHaveBeenCalledTimes(1)
-    expect(h.invalidateSpy).toHaveBeenCalledWith({ queryKey: ['lines', 'demo-line'] })
+    expect(h.invalidateSpy).toHaveBeenCalledWith({ queryKey: ['lines'] })
     expect(h.onClose).toHaveBeenCalledTimes(1)
   })
 
@@ -248,7 +248,8 @@ describe('ModeSwitchDialog — error path', () => {
     expect(updateConfig).toHaveBeenCalledTimes(1)
     expect(restart).toHaveBeenCalledTimes(1)
     expect(h.toast.error).toHaveBeenCalledWith(expect.stringContaining('boom-restart'))
-    expect(h.invalidateSpy).not.toHaveBeenCalled()
+    expect(h.toast.error).toHaveBeenCalledWith(expect.stringContaining('Mode configuration saved as chat; restart could not be confirmed.'))
+    expect(h.invalidateSpy).toHaveBeenCalledWith({ queryKey: ['lines'] })
     expect(h.onClose).not.toHaveBeenCalled()
   })
 })

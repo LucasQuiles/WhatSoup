@@ -164,6 +164,7 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
             onClose={update.closeUpdateModal}
             currentSha={version}
             lines={lines ?? []}
+            updateMode={update.data?.updateMode}
           />
         </Suspense>
         <KeyboardShortcutsHelp open={showShortcuts} onClose={() => setShowShortcuts(false)} />
