@@ -188,6 +188,16 @@ export interface MessagingDeps {
 const POLL_QUESTION_MAX_CHARS = 900;
 const POLL_OPTION_MAX_CHARS = 95;
 
+/**
+ * #3867 review: upper bound on concurrently awaited send_poll calls per tool registry.
+ * Each await holds a durable pending-poll row plus soft/hard expiry timers for up to
+ * 24 h, and the socket cap limits connections, not requests. Admission is checked
+ * before the external send, so a refused call sends nothing.
+ */
+export const MAX_PENDING_POLL_AWAITS = 32;
+/** Per requesting conversation, so one chat cannot take every slot of a shared runtime. */
+export const MAX_PENDING_POLL_AWAITS_PER_CONVERSATION = 8;
+
 type OwnershipRow = Pick<MessageRow, 'conversation_key' | 'is_from_me' | 'chat_jid' | 'message_id' | 'sender_jid' | 'content'>;
 
 interface OwnershipResult {
@@ -240,6 +250,10 @@ export function registerMessagingTools(
   deps: MessagingDeps,
 ): void {
   const { connection, db } = deps;
+  // Awaited polls admitted and not yet settled (send in flight or waiting for a vote),
+  // in total and per requesting conversation.
+  let pendingPollAwaits = 0;
+  const pendingPollAwaitsByConversation = new Map<string, number>();
 
   // Issue 3150 registry layer: the registry's cross-conversation guard must
   // fold `@lid` -> phone (canonicalConversationKey, matching ingest QR-050).
@@ -866,6 +880,22 @@ export function registerMessagingTools(
         86_400_000,
       );
       const awaitResult = (params['awaitResult'] as boolean | undefined) ?? false;
+      const reservesAwait = awaitResult && deps.pollRegistrar !== undefined;
+      const requesterKey = _session.conversationKey ?? '';
+      if (reservesAwait) {
+        const forRequester = pendingPollAwaitsByConversation.get(requesterKey) ?? 0;
+        const limit = forRequester >= MAX_PENDING_POLL_AWAITS_PER_CONVERSATION
+          ? `${MAX_PENDING_POLL_AWAITS_PER_CONVERSATION} per conversation`
+          : pendingPollAwaits >= MAX_PENDING_POLL_AWAITS ? `${MAX_PENDING_POLL_AWAITS} in total` : null;
+        if (limit !== null) {
+          return errorResult(
+            `Too many awaited polls are pending (limit ${limit}); poll not sent. `
+            + 'Wait for a pending poll to resolve, or send without awaitResult.',
+          );
+        }
+        pendingPollAwaits += 1;
+        pendingPollAwaitsByConversation.set(requesterKey, forRequester + 1);
+      }
 
       try {
         const result = await connection.sendPollMessage(chatJid, safeQuestion, safeOptions, resolvedSelectableCount);
@@ -899,6 +929,13 @@ export function registerMessagingTools(
         return { sent: true, pollId: result.waMessageId, question: safeQuestion, options: safeOptions, selectableCount: resolvedSelectableCount };
       } catch (err) {
         return errorResult(sanitizeError(err));
+      } finally {
+        if (reservesAwait) {
+          pendingPollAwaits -= 1;
+          const left = (pendingPollAwaitsByConversation.get(requesterKey) ?? 1) - 1;
+          if (left > 0) pendingPollAwaitsByConversation.set(requesterKey, left);
+          else pendingPollAwaitsByConversation.delete(requesterKey);
+        }
       }
     },
   });

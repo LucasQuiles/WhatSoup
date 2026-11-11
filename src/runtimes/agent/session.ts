@@ -3801,6 +3801,21 @@ export class SessionManager {
     this.watchdogHard = watchdog;
   }
 
+  /**
+   * Milliseconds until the latest pending poll-wait deadline, or 0 when no deferral applies.
+   * A bounded human vote wait is quiet by design. Any other pending tool keeps the normal
+   * deadline: with operation tracking disabled nothing else would recover it (#3917 review).
+   */
+  private pollWaitDeferralMs(): number {
+    if (this.untrackedOrdinaryTool) return 0;
+    let latestWaitDeadline = 0;
+    for (const deadline of this.pendingToolIds.values()) {
+      if (deadline === 0) return 0;
+      latestWaitDeadline = Math.max(latestWaitDeadline, deadline);
+    }
+    return Math.max(0, latestWaitDeadline - performance.now());
+  }
+
   private handleWatchdogHard(
     managedProviderSession = this.managedProviderSession,
     managedProviderGeneration = this.managedProviderGeneration,
@@ -3810,19 +3825,7 @@ export class SessionManager {
     this.watchdogHard = null;
     if (!this.active) return;
 
-    // A bounded human vote wait is quiet by design. Any other pending tool keeps the normal
-    // deadline: with operation tracking disabled nothing else would recover it (#3917 review).
-    let latestWaitDeadline = 0;
-    if (!this.untrackedOrdinaryTool) {
-      for (const deadline of this.pendingToolIds.values()) {
-        if (deadline === 0) {
-          latestWaitDeadline = 0;
-          break;
-        }
-        latestWaitDeadline = Math.max(latestWaitDeadline, deadline);
-      }
-    }
-    const remainingWaitMs = latestWaitDeadline - performance.now();
+    const remainingWaitMs = this.pollWaitDeferralMs();
     if (remainingWaitMs > 0) {
       this.armWatchdog(
         managedProviderSession, managedProviderGeneration,
@@ -3863,6 +3866,17 @@ export class SessionManager {
         'only-if-null',
       ),
       kill: () => {
+        // A poll wait may have begun while the liveness assessment awaited (#3867 review):
+        // its deadline, not this earlier check, governs.
+        const lateWaitMs = this.pollWaitDeferralMs();
+        if (lateWaitMs > 0) {
+          this.armWatchdog(
+            managedProviderSession, managedProviderGeneration,
+            lateWaitMs + watchdogHardMsForProvider(this.provider),
+            'only-if-null',
+          );
+          return;
+        }
         log.warn({ sessionId: this.sessionId, pid: child.pid, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled Claude process');
         // This notice is the ONLY user-facing message for a reap: the intent marker below
         // suppresses the generic crash notice (and the operator page) in the exit handler.

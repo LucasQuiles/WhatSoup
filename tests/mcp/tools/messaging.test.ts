@@ -4,7 +4,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import { Database } from '../../../src/core/database.ts';
 import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
-import { registerMessagingTools, type MessagingDeps } from '../../../src/mcp/tools/messaging.ts';
+import { MAX_PENDING_POLL_AWAITS, MAX_PENDING_POLL_AWAITS_PER_CONVERSATION, registerMessagingTools, type MessagingDeps } from '../../../src/mcp/tools/messaging.ts';
 import { depsWithRegistrar, makeFakePollRegistrar } from '../../helpers/poll-registrar.ts';
 import { createProfileRegistry } from '../../../src/core/profiles.ts';
 import { createOutboundSendsWriter } from '../../../src/core/outbound-sends.ts';
@@ -1783,6 +1783,82 @@ describe('registerMessagingTools', () => {
       expect(fakeRegistrar.calls[2].timeoutMs).toBe(3_600_000);
       fakeRegistrar.resolveLast('A');
       await defaultPromise;
+    });
+
+    it('C6d — bounds concurrently awaited polls before the external send and frees a slot on settle or send failure', async () => {
+      const localRegistry = new ToolRegistry();
+      const settle: Array<(answer: string) => void> = [];
+      const registrar = {
+        register: vi.fn(() => new Promise<string>((resolve) => { settle.push(resolve); })),
+      };
+      registerMessagingTools(localRegistry, Object.assign({}, deps, { pollRegistrar: registrar }));
+      const sendPoll = vi.spyOn(connection as unknown as { sendPollMessage: (...args: unknown[]) => unknown }, 'sendPollMessage');
+      const sendCountBefore = sendPoll.mock.calls.length;
+      const ask = (i: number) => localRegistry.call(
+        'send_poll',
+        { question: 'Pick', options: ['A', 'B'], awaitResult: true },
+        chatSession(`poll-cap-${i}`, `poll-cap-${i}@s.whatsapp.net`),
+      );
+
+      const pending = Array.from({ length: MAX_PENDING_POLL_AWAITS }, (_, i) => ask(i));
+      await vi.waitFor(() => { expect(registrar.register).toHaveBeenCalledTimes(MAX_PENDING_POLL_AWAITS); });
+
+      const refused = await ask(MAX_PENDING_POLL_AWAITS);
+      expect(refused.isError).toBe(true);
+      expect(JSON.parse(refused.content[0].text).error).toMatch(/Too many awaited polls are pending \(limit 32 in total\); poll not sent/);
+      expect(sendPoll.mock.calls.length - sendCountBefore).toBe(MAX_PENDING_POLL_AWAITS);
+
+      // A poll without awaitResult creates no wait and is not limited.
+      const plain = await localRegistry.call('send_poll', { question: 'Pick', options: ['A', 'B'] }, chatSession('poll-plain', 'poll-plain@s.whatsapp.net'));
+      expect(JSON.parse(plain.content[0].text).sent).toBe(true);
+
+      settle[0]!('A');
+      await pending[0];
+      const readmitted = ask(MAX_PENDING_POLL_AWAITS + 1);
+      await vi.waitFor(() => { expect(registrar.register).toHaveBeenCalledTimes(MAX_PENDING_POLL_AWAITS + 1); });
+
+      // A failed send releases its reservation too.
+      const failing = vi.spyOn(connection as unknown as { sendPollMessage: (...args: unknown[]) => unknown }, 'sendPollMessage');
+      settle[1]!('A');
+      await pending[1];
+      failing.mockRejectedValueOnce(new Error('send failed'));
+      const failed = await ask(MAX_PENDING_POLL_AWAITS + 2);
+      expect(failed.isError).toBe(true);
+      const afterFailure = ask(MAX_PENDING_POLL_AWAITS + 3);
+      await vi.waitFor(() => { expect(registrar.register).toHaveBeenCalledTimes(MAX_PENDING_POLL_AWAITS + 2); });
+
+      for (const resolve of settle.slice(2)) resolve('A');
+      await Promise.all([...pending.slice(2), readmitted, afterFailure]);
+      sendPoll.mockRestore();
+    });
+
+    it('C6e — one conversation cannot take every awaited-poll slot', async () => {
+      const localRegistry = new ToolRegistry();
+      const settle: Array<(answer: string) => void> = [];
+      const registrar = {
+        register: vi.fn(() => new Promise<string>((resolve) => { settle.push(resolve); })),
+      };
+      registerMessagingTools(localRegistry, Object.assign({}, deps, { pollRegistrar: registrar }));
+      const ask = (key: string) => localRegistry.call(
+        'send_poll',
+        { question: 'Pick', options: ['A', 'B'], awaitResult: true },
+        chatSession(key, `${key}@s.whatsapp.net`),
+      );
+
+      const busy = Array.from({ length: MAX_PENDING_POLL_AWAITS_PER_CONVERSATION }, () => ask('poll-busy'));
+      await vi.waitFor(() => { expect(registrar.register).toHaveBeenCalledTimes(MAX_PENDING_POLL_AWAITS_PER_CONVERSATION); });
+      const refused = await ask('poll-busy');
+      expect(JSON.parse(refused.content[0].text).error).toMatch(/limit 8 per conversation\); poll not sent/);
+
+      const other = ask('poll-other');
+      await vi.waitFor(() => { expect(registrar.register).toHaveBeenCalledTimes(MAX_PENDING_POLL_AWAITS_PER_CONVERSATION + 1); });
+
+      settle[0]!('A');
+      await busy[0];
+      const again = ask('poll-busy');
+      await vi.waitFor(() => { expect(registrar.register).toHaveBeenCalledTimes(MAX_PENDING_POLL_AWAITS_PER_CONVERSATION + 2); });
+      for (const resolve of settle.slice(1)) resolve('A');
+      await Promise.all([...busy.slice(1), other, again]);
     });
 
     it('C7a — AbortController firing during an in-flight registrar call resolves to awaitFailed with the cancelled error', async () => {
