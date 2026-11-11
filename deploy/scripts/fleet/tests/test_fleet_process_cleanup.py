@@ -225,9 +225,11 @@ def test_mcp_parent_exit_does_not_wait_for_descendant_stderr(tmp_path, exit_at, 
         row = json.loads(stdout)["probes"][0]
         assert row.get("process_exit") == (-9 if exit_at == "ignore-termination" else 0), row
         assert time.monotonic() - started < completion_timeout
-        if group == "escaped" and sys.platform == "darwin" and exit_at != "on-termination":
+        if group == "escaped" and exit_at != "on-termination":
+            # The escaped child still owns stderr, so cleanup is unverified on either host.
             assert row["error"] == "mcp_cleanup_unverified"
-            assert row["cleanup_error"] == "PermissionError"
+            expected_cleanup_error = "PermissionError" if sys.platform == "darwin" else "stderr_incomplete"
+            assert row["cleanup_error"] == expected_cleanup_error
         elif exit_at == "before-reply":
             assert row["error"] == "mcp_closed"
         else:
