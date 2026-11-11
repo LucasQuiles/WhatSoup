@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
@@ -39,6 +39,19 @@ function fixture(runTimeoutMs = 30_000) {
 }
 
 describe('native coverage shard commands', () => {
+  it.each([['failed', 0], ['busy', 0], ['timedOut', 0], ['inconclusive', 0], ['passed', 1], ['busy', 1]])('rejects a forged %s terminal record with native exit %s', (outcome, exitCode) => {
+    const { plan, output, runWithEnv } = fixture();
+    const preload = join(output, 'forged-terminal.cjs');
+    writeFileSync(preload, `if ((process.argv[1] || '').endsWith('/coverage-shard-worker.ts')) {
+  process.stdout.write(${JSON.stringify(JSON.stringify({ operation: 'plan', outcome, exitCode }))});
+  process.exit(${exitCode});
+}\n`);
+    const result = runWithEnv({ NODE_OPTIONS: `--require=${preload}` }, 'plan', '--out', plan);
+    expect(result.status).toBe(125);
+    expect(JSON.parse(result.stdout)).toMatchObject({ outcome: 'inconclusive', exitCode: 125 });
+    expect(existsSync(plan)).toBe(false);
+  });
+
   it('does not copy unrelated caller credentials into the coverage worker', () => {
     const { plan, output, runWithEnv } = fixture();
     const observation = join(output, 'worker-environment.json');
@@ -174,6 +187,34 @@ ${existing}`);
     expect(JSON.parse(merged.stdout)).toMatchObject({ outcome: 'failed', operation: 'merge', tests: { passed: 2, total: 2 } });
     const summary = JSON.parse(readFileSync(join(cwd, 'coverage/coverage-summary.json'), 'utf8'));
     expect(summary.total.functions.pct).toBe(50);
+  }, 30_000);
+
+  it.each(['foreign-artifacts', 'symlinked-shard'])('rejects %s despite valid identities and artifact hashes', (mode) => {
+    const { cwd, plan, output, run } = fixture();
+    expect(run('plan', '--out', plan, '--max-workers', '1').status).toBe(0);
+    for (const index of ['1', '2']) {
+      const shard = run('shard', '--plan', plan, '--index', index, '--out', join(output, `shard-${index}`), '--timeout-ms', '20000');
+      expect(shard.status, shard.stderr).toBe(0);
+    }
+    const shardPath = join(output, 'shard-1');
+    const foreign = join(output, 'foreign');
+    if (mode === 'symlinked-shard') {
+      renameSync(shardPath, foreign);
+      symlinkSync(foreign, shardPath);
+    } else {
+      mkdirSync(foreign);
+      const receiptPath = join(shardPath, 'receipt.json');
+      const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
+      copyFileSync(receipt.blobPath, join(foreign, 'blob.json'));
+      copyFileSync(receipt.reportPath, join(foreign, 'report.json'));
+      receipt.blobPath = join(foreign, 'blob.json');
+      receipt.reportPath = join(foreign, 'report.json');
+      writeFileSync(receiptPath, JSON.stringify(receipt));
+    }
+    const merged = run('merge', '--plan', plan, '--receipts', output, '--timeout-ms', '20000');
+    expect(merged.status).toBe(125);
+    expect(JSON.parse(merged.stdout)).toMatchObject({ outcome: 'inconclusive', operation: 'merge' });
+    expect(existsSync(join(cwd, 'coverage/coverage-final.json'))).toBe(false);
   }, 30_000);
 
   it('rejects a missing shard through the normal merge entry point before writing coverage', () => {

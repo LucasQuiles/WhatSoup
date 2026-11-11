@@ -152,7 +152,18 @@ export async function runCoverageCommand(argv: readonly string[], cwd = realpath
       return { schemaVersion: 1, operation, admission, ...result, receipt: join(out, 'receipt.json') };
     }
     const directory = realpathSync(options.values.get('--receipts')!);
-    const receipts = readdirSync(directory).filter((name) => name.startsWith('shard-')).map((name) => readJson(join(directory, name, 'receipt.json'), 64 * 1024));
+    const receipts = readdirSync(directory).filter((name) => name.startsWith('shard-')).map((name) => {
+      const shardDirectory = join(directory, name);
+      if (!['shard-1', 'shard-2'].includes(name) || realpathSync(shardDirectory) !== shardDirectory) {
+        throw new Error('Coverage shard directory differs from the selected artifact root');
+      }
+      const receipt = readJson(join(shardDirectory, 'receipt.json'), 64 * 1024);
+      if (!isRecord(receipt) || receipt.index !== Number(name.slice('shard-'.length))
+        || receipt.blobPath !== join(shardDirectory, 'blob.json') || receipt.reportPath !== join(shardDirectory, 'report.json')) {
+        throw new Error('Coverage receipt artifact paths differ from the selected shard directory');
+      }
+      return receipt;
+    });
     const validated = validateCoverageShards(plan, receipts);
     const blobs = join(scratch, 'blobs');
     mkdirSync(blobs);
@@ -215,7 +226,11 @@ async function runBoundedCoverageCommand(argv: readonly string[]): Promise<Cover
     } else {
       const record: unknown = JSON.parse(supervision.stdout ?? 'null');
       if (!isRecord(record) || record.operation !== operation || record.exitCode !== supervision.wrappedExit
-        || !['passed', 'failed', 'busy', 'timedOut', 'inconclusive'].includes(String(record.outcome))) {
+        || !(record.outcome === 'passed' && record.exitCode === 0
+          || record.outcome === 'failed' && Number.isInteger(record.exitCode) && Number(record.exitCode) > 0 && Number(record.exitCode) <= 255
+          || record.outcome === 'busy' && record.exitCode === 75
+          || record.outcome === 'timedOut' && record.exitCode === 124
+          || record.outcome === 'inconclusive' && record.exitCode === 125)) {
         throw new Error('Coverage worker did not produce a matching terminal result');
       }
       result = { ...record, exitCode: supervision.wrappedExit, supervision };

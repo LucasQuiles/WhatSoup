@@ -213,6 +213,9 @@ scratch. Reconcile that owned execution and any checkout lock before removal or 
 
 Current qualification is local. The plan and receipts require the same absolute
 checkout and artifact paths; copying outputs to a different root is unsupported.
+Merge requires each receipt and its blob/report in the selected `shard-1` or
+`shard-2` directory and rejects redirected shard directories. A worker's terminal
+outcome must agree with its native exit status; a failed result cannot exit zero.
 Cross-host path portability, full-suite parity, three matched performance comparisons
 and CI activation must qualify before replacing hosted coverage execution.
 
