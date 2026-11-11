@@ -833,9 +833,18 @@ with the account the owner ratified?**
   Without the field, `runtime.agent.accountIdentity.status` is `disabled`.
 - **Latch interaction.** The identity reasons are deliberately not
   turn-provable (a successful turn proves the credential works, not whose it
-  is), so if the #2280 silence latch captured one, the instance stays
-  `degraded` until it restarts after the identity is corrected. A passing turn
-  never releases it. Note what the restart actually is: the latch is
+  is), so a passing turn never releases a #2280 silence latch that captured
+  one. The two reasons leave the latch differently:
+  - `runtime.credential_identity_unverifiable` is re-probed directly. It
+    leaves the latch once a later identity check reports a non-stale `match`
+    whose `checkedAt` is newer than the latch point, and that result holds for
+    the one-minute re-probe observation window. The instance leaves `degraded`
+    only when every latched reason has cleared.
+  - `runtime.credential_identity_mismatch` is never re-probed clear: the
+    instance stays `degraded` until it restarts after the identity is
+    corrected.
+
+  Note what the restart actually is: the latch is
   process-local state, so a restart clears it by amnesia, not by proof — it
   loses the latch rather than satisfying it. Correct the identity first; a
   restart used as a way to clear the degradation only hides an

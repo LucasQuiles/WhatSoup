@@ -1539,12 +1539,15 @@ function sendRequestErrorMessage(err: unknown): string {
 export function startHealthServer(deps: HealthDeps): ReturnType<typeof createServer> {
   // #2280: tracks instances that have recently been in STATUS_DEGRADED — the
   // epoch-ms of the latest evaluation that observed a real degradation reason
-  // (the latch point) plus THAT evaluation's reason set (replace semantics,
-  // maintained by the latch-maintenance block just before emit) — so status
-  // updates that see empty statusReasons (silence) keep the instance degraded
-  // until explicit recovery proof arrives: a successful primary-turn receipt
-  // strictly newer than the latch point, when every latched reason is
-  // turn-provable (releaseDegradationLatchOnRecoveryProof). Scoped to the
+  // (the latch point) plus the union of every reason latched since the latch
+  // was set (the latch-maintenance block just before emit adds newly observed
+  // reasons and never drops one) — so status updates that see empty
+  // statusReasons (silence) keep the instance degraded until explicit recovery
+  // proof arrives: a successful primary-turn receipt strictly newer than the
+  // latch point, when every latched reason is turn-provable
+  // (releaseDegradationLatchOnRecoveryProof), or direct re-probes that keep
+  // each latched reason clear for LATCH_REPROBE_OBSERVATION_MS until none
+  // remains (releaseDegradationLatchOnReprobe). Scoped to the
   // server instance: module scope would leak degradation across server
   // lifetimes that share an instance name (observed as cross-test pollution).
   const recentlyDegraded = new Map<string, DegradationLatchEntry>();
