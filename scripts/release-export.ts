@@ -72,8 +72,48 @@ export interface ReleaseExportReport {
   /** Digest over the sorted (path, sha256) manifest rows — the release identity. */
   treeSha256: string;
   selfCheck: ReleaseSnapshotDriftReport;
+  /** The main commit the source was proven to be (an ancestor of) at export time. */
+  sourceOnMain: { ref: string; mainCommit: string };
   qualificationBundle?: DeploymentQualificationBundleReport;
   approvalPending: string;
+}
+
+/**
+ * Every host runs `main` or an ancestor of it; a commit that has not landed on
+ * main is backlog, not a deployable build. The check reads the local
+ * remote-tracking ref, not the network: `main` is protected against force-push,
+ * so a stale ref can only refuse a landed commit (fetch, then retry), never
+ * admit an unlanded one. Local `refs/heads/main` is not used because a clone
+ * can carry unpushed commits there.
+ */
+export const RELEASE_MAIN_REF = 'refs/remotes/origin/main';
+
+function requireCommitOnMain(repoRoot: string, commit: string): ReleaseExportReport['sourceOnMain'] {
+  const resolved = spawnSync('git', ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', `${RELEASE_MAIN_REF}^{commit}`], {
+    encoding: 'utf8',
+    env: cleanGitEnv(),
+    timeout: 30_000,
+  });
+  const mainCommit = resolved.stdout?.trim() ?? '';
+  if (resolved.status !== 0 || !/^[0-9a-f]{40}$/.test(mainCommit)) {
+    throw new Error(
+      `release source must be on main: ${RELEASE_MAIN_REF} is missing in ${repoRoot}; export from a clone of the repository after \`git fetch origin main\``,
+    );
+  }
+  const ancestry = spawnSync('git', ['-C', repoRoot, 'merge-base', '--is-ancestor', commit, mainCommit], {
+    encoding: 'utf8',
+    env: cleanGitEnv(),
+    timeout: 30_000,
+  });
+  if (ancestry.status === 0) return { ref: RELEASE_MAIN_REF, mainCommit };
+  if (ancestry.status === 1) {
+    throw new Error(
+      `release source must be on main: commit ${commit} is not ${RELEASE_MAIN_REF} (${mainCommit}) or an ancestor of it; land it on main first (if it already landed, run \`git fetch origin main\` and retry)`,
+    );
+  }
+  throw new Error(
+    `release source must be on main: ancestry check failed: ${(ancestry.stderr || ancestry.error?.message || 'git merge-base failed').trim()}`,
+  );
 }
 
 function git(repoRoot: string, args: string[], input?: string): Buffer {
@@ -152,6 +192,7 @@ export function exportRelease(options: ReleaseExportOptions): ReleaseExportRepor
   if (exists.status !== 0) {
     throw new Error(`commit not found in repository ${repoRoot}: ${commit}`);
   }
+  const sourceOnMain = requireCommitOnMain(repoRoot, commit);
 
   mkdirSync(releaseRoot, { recursive: true });
   const stagingRoot = mkdtempSync(path.join(releaseRoot, '.export-staging-'));
@@ -260,6 +301,7 @@ export function exportRelease(options: ReleaseExportOptions): ReleaseExportRepor
       fileCount: manifest.files.length,
       treeSha256: manifestTreeSha256(manifest),
       selfCheck,
+      sourceOnMain,
       qualificationBundle: stagedQualificationBundle
         ? {
           ...stagedQualificationBundle.report,
@@ -400,6 +442,7 @@ export function run(argv: string[] = process.argv.slice(2), cwd = process.cwd())
   else {
     console.log(`exported ${report.commit} -> ${report.releasePath}`);
     console.log(`files=${report.fileCount} tree=${report.treeSha256}`);
+    console.log(`source on main: ${report.sourceOnMain.ref} ${report.sourceOnMain.mainCommit}`);
     console.log(`self-check ok=${report.selfCheck.ok}`);
     if (report.qualificationBundle) {
       console.log(`qualification bundle=${report.qualificationBundle.manifestPath} sha256=${report.qualificationBundle.manifestSha256}`);

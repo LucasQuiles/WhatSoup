@@ -78,6 +78,11 @@ function writeSourceRuntimeManifest(sourceRoot: string, mainSource: string): voi
   }, null, 2));
 }
 
+/** Stand-in for `git fetch origin main` after the commit landed on main. */
+function landOnMain(fixture: Fixture): void {
+  execGit(fixture.sourceRoot, ['update-ref', 'refs/remotes/origin/main', fixture.commit]);
+}
+
 function makeGitFixture(): Fixture {
   tmpRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-release-export-'));
   const sourceRoot = path.join(tmpRoot, 'source');
@@ -96,8 +101,9 @@ function makeGitFixture(): Fixture {
   execGit(sourceRoot, ['init']);
   execGit(sourceRoot, ['add', '-A']);
   execGit(sourceRoot, ['commit', '-m', 'fixture v1']);
-  const commit = execGit(sourceRoot, ['rev-parse', 'HEAD']);
-  return { sourceRoot, releaseRoot, commit };
+  const fixture = { sourceRoot, releaseRoot, commit: execGit(sourceRoot, ['rev-parse', 'HEAD']) };
+  landOnMain(fixture);
+  return fixture;
 }
 
 function makeQualificationGitFixture(): Fixture {
@@ -110,6 +116,7 @@ function makeQualificationGitFixture(): Fixture {
   execGit(fixture.sourceRoot, ['add', '-A']);
   execGit(fixture.sourceRoot, ['commit', '-m', 'qualification closure']);
   fixture.commit = execGit(fixture.sourceRoot, ['rev-parse', 'HEAD']);
+  landOnMain(fixture);
   return fixture;
 }
 
@@ -134,10 +141,11 @@ function qualificationBinding(fixture: Fixture) {
   };
 }
 
-function recommitFixture(fixture: Fixture, message: string): void {
+function recommitFixture(fixture: Fixture, message: string, land = true): void {
   execGit(fixture.sourceRoot, ['add', '-A']);
-  execGit(fixture.sourceRoot, ['commit', '-m', message]);
+  execGit(fixture.sourceRoot, ['commit', '--allow-empty', '-m', message]);
   fixture.commit = execGit(fixture.sourceRoot, ['rev-parse', 'HEAD']);
+  if (land) landOnMain(fixture);
 }
 
 function exportOk(fixture: Fixture, extra: Partial<Parameters<typeof exportRelease>[0]> = {}): ReleaseExportReport {
@@ -217,6 +225,38 @@ describe('exportRelease', () => {
     expect(rolledBack).toBe('export const main = "OLD";\n');
     // The fresh export is back to exact-commit bytes.
     expect(readFileSync(path.join(second.releasePath, 'src/main.ts'), 'utf8')).toBe('export const main = true;\n');
+  });
+
+  it('refuses a commit that has not landed on origin/main, before writing anything', () => {
+    const fixture = makeGitFixture();
+    recommitFixture(fixture, 'local-only work', false);
+    rmSync(fixture.releaseRoot, { recursive: true, force: true });
+
+    expect(() => exportOk(fixture)).toThrow(
+      /release source must be on main: commit [0-9a-f]{40} is not refs\/remotes\/origin\/main \([0-9a-f]{40}\) or an ancestor of it/,
+    );
+    expect(existsSync(fixture.releaseRoot)).toBe(false);
+  });
+
+  it('refuses when refs/remotes/origin/main is absent, naming the fetch', () => {
+    const fixture = makeGitFixture();
+    execGit(fixture.sourceRoot, ['update-ref', '-d', 'refs/remotes/origin/main']);
+
+    expect(() => exportOk(fixture)).toThrow(
+      /release source must be on main: refs\/remotes\/origin\/main is missing .*git fetch origin main/,
+    );
+    expect(existsSync(path.join(fixture.releaseRoot, `WhatSoup-release-${fixture.commit.slice(0, 12)}`))).toBe(false);
+  });
+
+  it('admits an older ancestor of origin/main and reports the main commit it was checked against', () => {
+    const fixture = makeGitFixture();
+    const older = fixture.commit;
+    recommitFixture(fixture, 'newer main');
+    const main = fixture.commit;
+
+    const report = exportOk({ ...fixture, commit: older });
+    expect(report.commit).toBe(older);
+    expect(report.sourceOnMain).toEqual({ ref: 'refs/remotes/origin/main', mainCommit: main });
   });
 
   it('rejects an unknown or abbreviated commit', () => {
@@ -364,6 +404,7 @@ describe('exportRelease', () => {
     execGit(fixture.sourceRoot, ['rm', 'deploy/scripts/lib/durable_json.py']);
     execGit(fixture.sourceRoot, ['commit', '-m', 'remove declared helper']);
     fixture.commit = execGit(fixture.sourceRoot, ['rev-parse', 'HEAD']);
+    landOnMain(fixture);
 
     expect(() => exportRelease({
       repoRoot: fixture.sourceRoot,
