@@ -192,6 +192,10 @@ inconsistent root-source coverage scopes prevent merge. Native Vitest also repor
 executed `console/src` imports; those may differ between shards. The validator
 unions those entries and requires the native merged report to match that complete
 union, while every shard must retain the same nonempty root-source scope.
+Native V8 mapping can produce negative branch counts by subtraction. The validator
+preserves those integers for Istanbul, which counts only positive branch hits as
+covered; it rejects fractional counters, negative statement/function counts and
+non-array branch counts. It does not clamp or rewrite the coverage data.
 Documented test skips stay visible.
 Per-shard coverage is partial; only the native blob merge applies the existing
 95/90/93 floors. Console consumption and headroom checks follow that complete report.

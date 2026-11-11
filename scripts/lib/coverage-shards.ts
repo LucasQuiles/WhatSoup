@@ -109,10 +109,14 @@ function coverageFiles(report: unknown, root: string): string[] {
       if (!isRecord(counts) || !isRecord(map) || JSON.stringify(Object.keys(counts).sort()) !== JSON.stringify(Object.keys(map).sort())) {
         throw new Error('Coverage report has partial coverage counters');
       }
-      for (const value of Object.values(counts)) {
-        const hits = countsKey === 'b' && Array.isArray(value) ? value : [value];
-        if (hits.some((hit) => typeof hit !== 'number' || !Number.isFinite(hit) || hit < 0)) {
-          throw new Error('Coverage report has invalid coverage counters');
+      for (const [key, value] of Object.entries(counts)) {
+        if (countsKey === 'b' && !Array.isArray(value)) {
+          throw new Error(`Coverage report has invalid coverage counters: ${path} ${countsKey}.${key}`);
+        }
+        const hits = countsKey === 'b' ? value as unknown[] : [value];
+        // The native mapper subtracts branch counts; Istanbul treats negative branches as uncovered.
+        if (hits.some((hit) => typeof hit !== 'number' || !Number.isSafeInteger(hit) || (countsKey !== 'b' && hit < 0))) {
+          throw new Error(`Coverage report has invalid coverage counters: ${path} ${countsKey}.${key}`);
         }
       }
     }

@@ -66,6 +66,37 @@ describe('coverage shard admission', () => {
     });
   });
 
+  it('preserves native negative branch counts for the native coverage merger', () => {
+    const { plan, receipts } = fixture();
+    const receipt = receipts[0]!;
+    const report = JSON.parse(readFileSync(receipt.reportPath, 'utf8'));
+    const coverage = report.coverageMap['/fixture/repository/src/main.ts'];
+    coverage.branchMap = { 0: { type: 'if', locations: [{ start: {}, end: {} }, { start: {}, end: {} }] } };
+    coverage.b = { 0: [18, -18] };
+    writeFileSync(receipt.reportPath, JSON.stringify(report));
+    receipt.reportSha256 = hash(readFileSync(receipt.reportPath));
+
+    expect(validateCoverageShards(plan, receipts).coverageFiles).toEqual(['/fixture/repository/src/main.ts']);
+    expect(JSON.parse(readFileSync(receipt.reportPath, 'utf8')).coverageMap['/fixture/repository/src/main.ts'].b)
+      .toEqual({ 0: [18, -18] });
+  });
+
+  it.each([
+    ['s', -1], ['f', -1], ['s', 0.5], ['f', null], ['b', 1], ['b', [0, 0.5]], ['b', [0, null]],
+  ])('rejects malformed %s counters: %j', (kind, value) => {
+    const { plan, receipts } = fixture();
+    const receipt = receipts[0]!;
+    const report = JSON.parse(readFileSync(receipt.reportPath, 'utf8'));
+    const coverage = report.coverageMap['/fixture/repository/src/main.ts'];
+    const mapKey = kind === 's' ? 'statementMap' : kind === 'f' ? 'fnMap' : 'branchMap';
+    coverage[mapKey] = { 0: {} };
+    coverage[kind as string] = { 0: value };
+    writeFileSync(receipt.reportPath, JSON.stringify(report));
+    receipt.reportSha256 = hash(readFileSync(receipt.reportPath));
+
+    expect(() => validateCoverageShards(plan, receipts)).toThrow(/invalid coverage counters/);
+  });
+
   it('rejects a missing shard instead of producing a partial merge', () => {
     const { plan, receipts } = fixture();
     expect(() => validateCoverageShards(plan, receipts.slice(0, 1))).toThrow(/expected.*2.*shards/i);
