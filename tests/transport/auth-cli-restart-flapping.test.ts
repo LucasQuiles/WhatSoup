@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { acquireCoordinationLease, defaultLeaseProbes, INSTANCE_MUTATION_SCOPE, instanceMutationRoot, readCoordinationLease } from '../../src/transport/coordination-lease.ts';
+
+const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+let fixtureRoot: string;
+let exitListeners: Set<Function>;
 
 type ConnectionUpdateHandler = (update: {
   connection?: string;
@@ -57,10 +63,7 @@ vi.mock('qrcode-terminal', () => ({
 }));
 
 vi.mock('../../src/config.ts', () => ({
-  config: {
-    authDir: '/tmp/wa-test-auth-auth-cli-restart-flapping',
-    lockPath: '/tmp/wa-test-auth-auth-cli-restart-flapping.lock',
-  },
+  config: { get authDir() { return join(fixtureRoot, 'auth'); }, get lockPath() { return join(fixtureRoot, 'auth.lock'); }, get stateRoot() { return join(fixtureRoot, 'state'); } },
 }));
 
 vi.mock('../../src/transport/third-party-console-redaction.ts', () => ({
@@ -85,13 +88,16 @@ async function flushPromises() {
 
 describe('auth CLI restartRequired handling', () => {
   beforeEach(() => {
+    fixtureRoot = mkdtempSync(join(tmpdir(), 'auth-cli-'));
+    mkdirSync(join(fixtureRoot, 'state'));
+    exitListeners = new Set(process.listeners('exit'));
     vi.useFakeTimers();
     vi.resetModules();
     mocks.connectionHandlers.length = 0;
     mocks.sockets.length = 0;
     mocks.nextUserId = undefined;
     mocks.existsSync.mockReset();
-    mocks.existsSync.mockReturnValue(false);
+    mocks.existsSync.mockImplementation(actualFs.existsSync);
     mocks.saveCreds.mockReset();
     mocks.saveCreds.mockResolvedValue(undefined);
     mocks.qrcodeGenerate.mockReset();
@@ -121,6 +127,11 @@ describe('auth CLI restartRequired handling', () => {
   });
 
   afterEach(() => {
+    for (const listener of process.listeners('exit')) {
+      if (!exitListeners.has(listener)) { listener(0); process.off('exit', listener); }
+    }
+    rmSync(fixtureRoot, { recursive: true, force: true });
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
     vi.useRealTimers();
   });
@@ -154,6 +165,31 @@ describe('auth CLI restartRequired handling', () => {
     await vi.advanceTimersByTimeAsync(1);
     await flushPromises();
     expect(mocks.makeWASocket).toHaveBeenCalledTimes(callsBeforeFlap + 1);
+  });
+
+  it('registers its native process identity before using a delegated mutation lease', async () => {
+    const stateRoot = instanceMutationRoot(join(fixtureRoot, 'state'));
+    const parent = acquireCoordinationLease({ stateRoot, scopeId: INSTANCE_MUTATION_SCOPE, operationId: 'parent-operation', mode: 'route_orchestration', ttlMs: 60_000, probes: { ...defaultLeaseProbes(), pid: process.ppid } });
+    if (!parent.ok) throw new Error(`fixture lease refused: ${parent.refusal}`);
+    vi.stubEnv('WHATSOUP_MUTATION_LEASE_OP', parent.lease.operationId);
+    vi.stubEnv('WHATSOUP_MUTATION_LEASE_FENCING', String(parent.lease.fencingToken));
+    await import('../../src/transport/auth.ts');
+    await flushPromises();
+    expect(readCoordinationLease(stateRoot, INSTANCE_MUTATION_SCOPE)).toMatchObject({ pid: process.ppid, helper: { pid: process.pid, processBirthToken: defaultLeaseProbes().birthToken(process.pid) } });
+    expect(mocks.useMultiFileAuthState).toHaveBeenCalledExactlyOnceWith(join(fixtureRoot, 'auth'));
+  });
+
+  it('refuses stale delegated custody before opening credentials or a socket', async () => {
+    const stateRoot = instanceMutationRoot(join(fixtureRoot, 'state'));
+    const parent = acquireCoordinationLease({ stateRoot, scopeId: INSTANCE_MUTATION_SCOPE, operationId: 'parent-operation', mode: 'route_orchestration', ttlMs: 60_000, probes: { ...defaultLeaseProbes(), pid: process.ppid } });
+    if (!parent.ok) throw new Error(`fixture lease refused: ${parent.refusal}`);
+    vi.stubEnv('WHATSOUP_MUTATION_LEASE_OP', parent.lease.operationId);
+    vi.stubEnv('WHATSOUP_MUTATION_LEASE_FENCING', String(parent.lease.fencingToken + 1));
+    vi.mocked(process.exit).mockImplementationOnce(((code: number) => { throw new Error(`exit:${code}`); }) as never);
+    await expect(import('../../src/transport/auth.ts')).rejects.toThrow('exit:1');
+    expect(mocks.useMultiFileAuthState).not.toHaveBeenCalled();
+    expect(mocks.makeWASocket).not.toHaveBeenCalled();
+    expect(readCoordinationLease(stateRoot, INSTANCE_MUTATION_SCOPE)).toEqual(parent.lease);
   });
 
   it('refuses to start when the bot lock file exists', async () => {

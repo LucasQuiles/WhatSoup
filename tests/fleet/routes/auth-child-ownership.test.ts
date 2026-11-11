@@ -1,6 +1,6 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { mockChildProcess } from '../../helpers/child-process.ts';
 import { makeDeps, mockReq, mockRes, mockSseRes } from '../../helpers/http-mocks.ts';
 import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
@@ -12,11 +12,13 @@ vi.mock('node:child_process', async (original) => ({
 }));
 const tmp = trackTmpDirs('auth-child-ownership-');
 const children: ReturnType<typeof mockChildProcess>[] = [];
+const routeDeps: OpsDeps[] = [];
 
 beforeEach(() => {
   vi.resetModules();
   vi.useFakeTimers();
   children.length = 0;
+  routeDeps.length = 0;
   spawnMock.mockReset().mockImplementation(() => {
     const child = mockChildProcess();
     children.push(child);
@@ -24,6 +26,7 @@ beforeEach(() => {
   });
 });
 afterEach(() => {
+  for (const deps of routeDeps) vi.mocked(deps.serviceManager.startFire).mockImplementation((_name, callback) => callback?.(new Error('fixture shutdown')));
   for (const child of children) child.emit('close', 1);
   vi.clearAllTimers();
   vi.useRealTimers();
@@ -34,6 +37,7 @@ async function setup() {
   const configPath = join(tmp.make('instance'), 'config.json');
   writeFileSync(configPath, '{}');
   const deps = makeDeps({ discovery: { getInstance: () => ({ name: 'line-a', configPath }) } }) as unknown as OpsDeps;
+  routeDeps.push(deps);
   const invoke = async () => {
     const req = mockReq({ method: 'GET' });
     const res = mockSseRes();
@@ -49,6 +53,74 @@ async function setup() {
 }
 
 describe('authentication helper ownership', () => {
+  it('releases in-memory admission after the durable claim cannot be created', async () => {
+    const { deps, invoke } = await setup();
+    const { instancePaths } = await import('../../../src/fleet/paths.ts');
+    const blockedRoot = `${instancePaths('line-a').stateRoot}.mutation`;
+    mkdirSync(dirname(blockedRoot), { recursive: true });
+    writeFileSync(blockedRoot, 'blocked');
+    try {
+      const response = await invoke();
+      expect(response.res._status).toBe(500);
+      expect(spawnMock).not.toHaveBeenCalled();
+      expect(deps.serviceManager.stop).not.toHaveBeenCalled();
+    } finally { unlinkSync(blockedRoot); }
+    await invoke();
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['config', 'delete', 'restart', 'checkpoint'] as const)('refuses %s while a pairing helper owns the instance', async (operation) => {
+    const { deps, invoke, configPath } = await setup();
+    await invoke();
+    vi.mocked(deps.serviceManager.stop).mockClear();
+    const res = mockRes();
+    const req = mockReq({ method: 'POST', body: '{}' });
+    if (operation === 'config') {
+      const { handleConfigUpdate } = await import('../../../src/fleet/routes/ops-config.ts');
+      await handleConfigUpdate(req, res, deps, { name: 'line-a' });
+    } else if (operation === 'checkpoint') {
+      const { handleRestoreCheckpoint } = await import('../../../src/fleet/routes/checkpoints.ts');
+      await handleRestoreCheckpoint(req, res, deps as never, { name: 'line-a' });
+    } else {
+      const { handleDeleteLine, handleRestart } = await import('../../../src/fleet/routes/ops-lifecycle.ts');
+      await (operation === 'delete' ? handleDeleteLine : handleRestart)(req, res, deps, { name: 'line-a' });
+    }
+    expect(res._status).toBe(409);
+    expect(res._body).toContain('instance_mutation_in_progress');
+    expect(readFileSync(configPath, 'utf8')).toBe('{}');
+    expect(deps.serviceManager.stop).not.toHaveBeenCalled();
+    expect(deps.serviceManager.restart).not.toHaveBeenCalled();
+    expect(deps.serviceManager.disable).not.toHaveBeenCalled();
+  });
+
+  it('refuses auth while deletion waits for service stop and releases after deletion settles', async () => {
+    const { deps, invoke } = await setup();
+    const { handleDeleteLine } = await import('../../../src/fleet/routes/ops-lifecycle.ts');
+    let finish!: () => void;
+    vi.mocked(deps.serviceManager.stop).mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; }));
+    const deleting = handleDeleteLine(mockReq(), mockRes(), deps, { name: 'line-a' });
+    const blocked = await invoke();
+    expect(blocked.res._status).toBe(409);
+    expect(spawnMock).not.toHaveBeenCalled();
+    finish();
+    await deleting;
+    await invoke();
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses to launch a credential writer when the fallback service stop fails', async () => {
+    const { deps, invoke, configPath } = await setup();
+    vi.mocked(deps.serviceManager.stop).mockRejectedValueOnce(new Error('stop outcome unknown'));
+    const { res } = await invoke();
+    expect(res._ended).toBe(true);
+    expect(res._chunks.join('')).toContain('Unable to stop');
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(deps.serviceManager.startFire).not.toHaveBeenCalled();
+    expect(readFileSync(configPath, 'utf8')).toBe('{}');
+    await invoke();
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+  });
+
   it('ignores a late connected event after cancellation without resetting persisted configuration', async () => {
     const { deps, invoke, configPath } = await setup();
     const first = await invoke();

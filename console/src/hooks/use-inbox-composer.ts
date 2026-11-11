@@ -1,14 +1,14 @@
-import { useEffect, useRef, useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { conversationId, type Conversation } from '../lib/inbox-unified'
 import { useToast } from './toast-context'
 
-type Draft = { text: string; status: 'editing' | 'pending' | 'unconfirmed' }
+type Draft = { text: string; status: 'editing' | 'pending' | 'unconfirmed' | 'rejected' }
 const EMPTY_DRAFT: Draft = { text: '', status: 'editing' }
 
-/** Drafts and send ownership survive thread navigation for this Inbox mount. */
-export function useInboxComposer(conversation: Conversation | null) {
+/** Drafts and send ownership survive thread navigation within the owning view. */
+export function useInboxComposer(conversation: Pick<Conversation, 'line' | 'conversationKey'> | null) {
   const queryClient = useQueryClient()
   const toast = useToast()
   const [drafts, setDrafts] = useState<ReadonlyMap<string, Draft>>(new Map())
@@ -16,10 +16,10 @@ export function useInboxComposer(conversation: Conversation | null) {
   const mounted = useRef(false)
   const id = conversation ? conversationId(conversation.line, conversation.conversationKey) : null
   const selected = useRef(id)
-  useEffect(() => {
+  useLayoutEffect(() => {
     selected.current = id
   }, [id])
-  useEffect(() => {
+  useLayoutEffect(() => {
     mounted.current = true
     return () => { mounted.current = false }
   }, [])
@@ -43,12 +43,22 @@ export function useInboxComposer(conversation: Conversation | null) {
     const queryKey = ['messages', conversation.line, conversation.conversationKey]
     attempts.current.set(id, attempt)
     update(id, { text: submitted, status: 'pending' })
-    try {
-      await api.sendMessage(conversation.line, conversation.conversationKey, submitted.trim())
-    } catch {
+    const retain = (rejected = false) => {
       if (!mounted.current || attempts.current.get(id) !== attempt) return
-      update(id, { text: submitted, status: 'unconfirmed' })
-      if (selected.current === id) toast.error('Send not confirmed. Check this conversation before sending again.')
+      if (rejected) attempts.current.delete(id)
+      update(id, { text: submitted, status: rejected ? 'rejected' : 'unconfirmed' })
+      if (selected.current === id) toast.error(rejected
+        ? 'Message was not sent. Review it before trying again.'
+        : 'Send not confirmed. Check this conversation before sending again.')
+    }
+    try {
+      const result = await api.sendMessage(conversation.line, conversation.conversationKey, submitted.trim())
+      if (result?.sent !== true) {
+        retain(result?.sent === false)
+        return
+      }
+    } catch {
+      retain()
       return
     }
     if (!mounted.current || attempts.current.get(id) !== attempt) return

@@ -14,6 +14,7 @@
  *
  *   npx vitest run --pool=forks tests/fleet/routes/ops-branches2.test.ts
  */
+import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -22,7 +23,8 @@ vi.mock('../../../src/fleet/mcp-client.ts', () => ({ mcpCall: vi.fn() }));
 vi.mock('../../../src/fleet/http-proxy.ts', () => ({ proxyToInstance: vi.fn() }));
 vi.mock('node:child_process', async () => {
   const { childProcessMock } = await import('../../helpers/child-process.ts');
-  return childProcessMock();
+  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+  return { ...actual, ...childProcessMock(), execFileSync: actual.execFileSync };
 });
 
 // Controllable mkdir-failure injection. When `mkdirFailFor` is set, the first
@@ -61,6 +63,14 @@ import { makeDeps, mockReq, mockRes, mockSseRes } from '../../helpers/http-mocks
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+const authConfigs = trackTmpDirs('auth-route-');
+
+function fakeAuthInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
+  const configPath = path.join(authConfigs.make('instance'), 'config.json');
+  fs.writeFileSync(configPath, '{}');
+  return fakeInstance({ configPath, ...overrides });
+}
 
 function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
   return {
@@ -200,7 +210,7 @@ describe('handleAuth: branch arms', () => {
   });
 
   it('skips blank stdout lines and ignores empty stderr chunks (lines 1334, 1367)', async () => {
-    const deps = depsFor(fakeInstance());
+    const deps = depsFor(fakeAuthInstance());
     const req = mockReq({ method: 'POST' });
     const res = mockSseRes();
     const pending = handleAuth(req, res, deps, { name: 'test-line' });
@@ -424,7 +434,7 @@ describe('handleAuth: connected → start-after-auth SSE arms', () => {
   it('qr + pairing_code + connected then close(0) starts the service and emits connected', async () => {
     const startAfterAuthFire = vi.fn((_n: string, cb?: (e: Error | null) => void) => cb?.(null));
     const deps = makeDeps<any>({
-      discovery: { getInstance: vi.fn(() => fakeInstance({ name: 'auth-arm-1' })), scan: vi.fn() },
+      discovery: { getInstance: vi.fn(() => fakeAuthInstance({ name: 'auth-arm-1' })), scan: vi.fn() },
       serviceManager: { startAfterAuthFire },
     });
     const req = mockReq({ method: 'POST' });
@@ -453,7 +463,7 @@ describe('handleAuth: connected → start-after-auth SSE arms', () => {
   });
 
   it('close with a nonzero code emits an auth-failed error', async () => {
-    const deps = depsFor(fakeInstance({ name: 'auth-arm-2' }));
+    const deps = depsFor(fakeAuthInstance({ name: 'auth-arm-2' }));
     const req = mockReq({ method: 'POST' });
     const res = mockSseRes();
     const pending = handleAuth(req, res, deps, { name: 'auth-arm-2' });
@@ -467,7 +477,7 @@ describe('handleAuth: connected → start-after-auth SSE arms', () => {
   it('a service-start failure after connected surfaces the could-not-start error', async () => {
     const startAfterAuthFire = vi.fn((_n: string, cb?: (e: Error | null) => void) => cb?.(new Error('start failed')));
     const deps = makeDeps<any>({
-      discovery: { getInstance: vi.fn(() => fakeInstance({ name: 'auth-arm-3' })), scan: vi.fn() },
+      discovery: { getInstance: vi.fn(() => fakeAuthInstance({ name: 'auth-arm-3' })), scan: vi.fn() },
       serviceManager: { startAfterAuthFire },
     });
     const req = mockReq({ method: 'POST' });
@@ -494,7 +504,7 @@ describe('handleAuth: disconnect and timeout restore arms', () => {
   });
 
   it('restores the stopped instance when the client disconnects before connected', async () => {
-    const deps = depsFor(fakeInstance({ name: 'auth-arm-4' }));
+    const deps = depsFor(fakeAuthInstance({ name: 'auth-arm-4' }));
     const req = mockReq({ method: 'POST' });
     const res = mockSseRes();
     const pending = handleAuth(req, res, deps, { name: 'auth-arm-4' });
@@ -510,7 +520,7 @@ describe('handleAuth: disconnect and timeout restore arms', () => {
   it('kills the helper and emits a timeout error when the wall-clock timeout fires', async () => {
     vi.useFakeTimers();
     try {
-      const deps = depsFor(fakeInstance({ name: 'auth-arm-5' }));
+      const deps = depsFor(fakeAuthInstance({ name: 'auth-arm-5' }));
       const req = mockReq({ method: 'POST' });
       const res = mockSseRes();
       const pending = handleAuth(req, res, deps, { name: 'auth-arm-5' });

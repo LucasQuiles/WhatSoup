@@ -1,3 +1,4 @@
+import { claimInstanceMutation } from './instance-mutation.ts';
 /**
  * Service-lifecycle handlers for the fleet ops API.
  *
@@ -57,19 +58,23 @@ async function handleServiceAction(
   if (!validateInstanceName(params.name, res)) return;
   const instance = requireInstance(deps.discovery, params.name, res);
   if (!instance) return;
-
+  const mutation = claimInstanceMutation(params.name, res);
+  if (!mutation) return;
   try {
-    if (verb === 'restart') {
-      await deps.serviceManager.restart(params.name);
-    } else {
-      await deps.serviceManager.stop(params.name);
+    try {
+      if (verb === 'restart') {
+        await deps.serviceManager.restart(params.name);
+      } else {
+        await deps.serviceManager.stop(params.name);
+      }
+      publishInstanceStatus(deps.realtime, params.name);
+      publishFeedEvent(deps.realtime, params.name);
+      jsonResponse(res, 202, { status: `${verb}_requested`, instance: params.name });
+    } catch (err) {
+      jsonResponse(res, 500, projectError(err, { operation: 'service_action', stage: 'execute' }));
     }
-    publishInstanceStatus(deps.realtime, params.name);
-    publishFeedEvent(deps.realtime, params.name);
-    jsonResponse(res, 202, { status: `${verb}_requested`, instance: params.name });
-  } catch (err) {
-    jsonResponse(res, 500, projectError(err, { operation: 'service_action', stage: 'execute' }));
-  }
+
+  } finally { mutation.release(); }
 }
 
 function serviceErrorMessage(err: unknown): string {
@@ -131,50 +136,56 @@ export async function handleDeleteLine(
 ): Promise<void> {
   if (!validateInstanceName(params.name, res)) return;
 
-  // 1. Stop the service. Only service-absence errors are idempotent; other
-  // failures may leave the instance running, so state must not be deleted.
+
+  const mutation = claimInstanceMutation(params.name, res);
+  if (!mutation) return;
   try {
-    await deps.serviceManager.stop(params.name);
-  } catch (err) {
-    if (!isBenignServiceTeardownError(err, params.name)) {
-      const response = serviceActionError(err, 'instance_delete', 'service_stop_failed');
-      log.error({ err, instance: params.name, correlationId: response.correlation_id }, 'delete line: service stop failed');
-      jsonResponse(res, 500, { ...response, instance: params.name });
+    // 1. Stop the service. Only service-absence errors are idempotent; other
+    // failures may leave the instance running, so state must not be deleted.
+    try {
+      await deps.serviceManager.stop(params.name);
+    } catch (err) {
+      if (!isBenignServiceTeardownError(err, params.name)) {
+        const response = serviceActionError(err, 'instance_delete', 'service_stop_failed');
+        log.error({ err, instance: params.name, correlationId: response.correlation_id }, 'delete line: service stop failed');
+        jsonResponse(res, 500, { ...response, instance: params.name });
+        return;
+      }
+      log.warn({ err, instance: params.name }, 'delete line: service already stopped or absent');
+    }
+
+    // 2. Disable the service. As above, unknown disable failures block deletion.
+    try {
+      await deps.serviceManager.disable(params.name);
+    } catch (err) {
+      if (!isBenignServiceTeardownError(err, params.name)) {
+        const response = serviceActionError(err, 'instance_delete', 'service_action_failed');
+        log.error({ err, instance: params.name, correlationId: response.correlation_id }, 'delete line: service disable failed');
+        jsonResponse(res, 500, { ...response, instance: params.name });
+        return;
+      }
+      log.warn({ err, instance: params.name }, 'delete line: service already disabled or absent');
+    }
+
+    // 3. Remove config, data, and state directories
+    const cleanupErrors = cleanupPartial(params.name);
+    if (cleanupErrors.length > 0) {
+      const response = mutationError(cleanupErrors[0], {
+        operation: 'instance_delete', stage: 'commit', mutationState: 'unknown', rollbackState: 'not_applicable',
+      }, 'instance_cleanup_failed');
+      log.error({ err: new AggregateError(cleanupErrors), instance: params.name, correlationId: response.correlation_id }, 'delete line: cleanup incomplete');
+      jsonResponse(res, 500, response);
       return;
     }
-    log.warn({ err, instance: params.name }, 'delete line: service already stopped or absent');
-  }
 
-  // 2. Disable the service. As above, unknown disable failures block deletion.
-  try {
-    await deps.serviceManager.disable(params.name);
-  } catch (err) {
-    if (!isBenignServiceTeardownError(err, params.name)) {
-      const response = serviceActionError(err, 'instance_delete', 'service_action_failed');
-      log.error({ err, instance: params.name, correlationId: response.correlation_id }, 'delete line: service disable failed');
-      jsonResponse(res, 500, { ...response, instance: params.name });
-      return;
-    }
-    log.warn({ err, instance: params.name }, 'delete line: service already disabled or absent');
-  }
+    // 4. Re-scan discovery so the instance disappears from the UI
+    deps.discovery.scan();
 
-  // 3. Remove config, data, and state directories
-  const cleanupErrors = cleanupPartial(params.name);
-  if (cleanupErrors.length > 0) {
-    const response = mutationError(cleanupErrors[0], {
-      operation: 'instance_delete', stage: 'commit', mutationState: 'unknown', rollbackState: 'not_applicable',
-    }, 'instance_cleanup_failed');
-    log.error({ err: new AggregateError(cleanupErrors), instance: params.name, correlationId: response.correlation_id }, 'delete line: cleanup incomplete');
-    jsonResponse(res, 500, response);
-    return;
-  }
+    publishInstanceStatus(deps.realtime, params.name);
+    publishFeedEvent(deps.realtime, params.name);
+    jsonResponse(res, 200, { deleted: params.name });
 
-  // 4. Re-scan discovery so the instance disappears from the UI
-  deps.discovery.scan();
-
-  publishInstanceStatus(deps.realtime, params.name);
-  publishFeedEvent(deps.realtime, params.name);
-  jsonResponse(res, 200, { deleted: params.name });
+  } finally { mutation.release(); }
 }
 
 /**
@@ -273,266 +284,272 @@ export async function handleCreateLine(
     return;
   }
 
-  // --- Uniqueness check ---
-  const configDir = path.join(configRoot(), name);
-  if (deps.discovery.getInstance(name) != null || fs.existsSync(configDir)) {
-    jsonResponse(res, 409, { error: `instance '${name}' already exists` });
-    return;
-  }
 
-  // --- Validate type ---
-  const type = body.type as string;
-  if (!VALID_TYPES.has(type)) {
-    jsonResponse(res, 400, { error: `type must be one of: passive, chat, agent` });
-    return;
-  }
-
-  // --- Validate & deduplicate adminPhones ---
-  let adminPhones = body.adminPhones;
-  if (!Array.isArray(adminPhones) || adminPhones.length === 0 ||
-      adminPhones.some((p: unknown) => typeof p !== 'string' || p === '')) {
-    jsonResponse(res, 400, { error: 'adminPhones must be a non-empty array of non-empty strings' });
-    return;
-  }
-  adminPhones = normalizeAdminPhones(adminPhones as string[]);
-
-  // --- Type-specific validation ---
-  // systemPrompt and agentOptions are deferred — validated at instance start by instance-loader.
-  // At create time they may not be set yet (wizard sends them via PATCH after QR link).
-  // Only block passive instances from having a systemPrompt (hard constraint).
-  if (type === 'passive' && body.systemPrompt) {
-    jsonResponse(res, 400, { error: 'passive instances must not have a systemPrompt' });
-    return;
-  }
-
-  // --- Auto-assign healthPort ---
-  let healthPort = typeof body.healthPort === 'number' ? body.healthPort as number : null;
-  if (healthPort != null && (healthPort < 1024 || healthPort > 65535)) {
-    jsonResponse(res, 400, { error: 'healthPort must be between 1024 and 65535' });
-    return;
-  }
-  const portInventory = scanHealthPortInventory();
-  if (!portInventory.ok) {
-    emitInventoryFailure(res, portInventory);
-    return;
-  }
-  if (healthPort == null) {
-    const used = [...portInventory.ports.values()];
-    healthPort = used.length > 0 ? Math.max(...used) + 1 : 9095;
-  } else {
-    // Validate user-supplied port isn't already in use
-    const used = [...portInventory.ports.values()];
-    if (used.includes(healthPort)) {
-      jsonResponse(res, 409, { error: `healthPort ${healthPort} is already in use` });
-      return;
-    }
-  }
-
-  // --- Validate accessMode ---
-  const accessMode = type === 'passive' ? 'self_only' : (body.accessMode ?? 'self_only') as string;
-  if (!VALID_ACCESS_MODES.has(accessMode)) {
-    jsonResponse(res, 400, { error: 'accessMode must be one of: self_only, allowlist, open_dm, groups_only' });
-    return;
-  }
-
-  // --- Validate agent-specific options (only if provided — may come via PATCH later) ---
-  if (type === 'agent') {
-    if (body.agentOptions == null) {
-      body.agentOptions = defaultAgentOptions(name);
-    }
-    const ao = body.agentOptions as Record<string, unknown>;
-    if (typeof ao !== 'object' || Array.isArray(ao)) {
-      jsonResponse(res, 400, { error: 'agentOptions must be an object' });
-      return;
-    }
-    if (ao.sessionScope && !VALID_SESSION_SCOPES.has(ao.sessionScope as string)) {
-      jsonResponse(res, 400, { error: 'agentOptions.sessionScope must be single, shared, or per_chat' });
-      return;
-    }
-    if (resolveAndValidateAgentCwd(name, ao, res) === null) return;
-    // Confine pluginDirs to user home directory
-    if (Array.isArray(ao.pluginDirs)) {
-      if (!validatePluginDirs(ao.pluginDirs as unknown[], res)) return;
-    }
-  }
-
-  // --- Build config — start with validated required fields, then merge optional fields ---
-  let config: Record<string, unknown> = {
-    name,
-    type,
-    adminPhones,
-    healthPort,
-    accessMode,
-    introSent: false, // triggers introduction message on first boot
-  };
-
-  // Numeric bounds (rateLimitPerHour/maxTokens/tokenBudget) are enforced by the
-  // shared validateInstanceConfig call below, which runs on both CREATE and PATCH.
-
-  // Pass through all optional config fields (exclude internal/UI-only fields)
-  const PASSTHROUGH_FIELDS = [
-    'description', 'systemPrompt', 'maxTokens', 'tokenBudget', 'rateLimitPerHour',
-    'models', 'model', 'pineconeIndex', 'pineconeSearchMode', 'pineconeRerank', 'pineconeTopK',
-    'pineconeAllowedIndexes', 'memory', 'agentOptions', 'toolUpdateMode', 'controlPeers',
-    'transcriptionOptions',
-    // Pilot final-send authority. The shared load/startup config resolver
-    // validates its strict enabled shape and refuses non-Baileys transport.
-    'transportAuthority',
-    // service: governed launchd render options (claudeConfigDir, pathPrepend) and
-    // the ratified account digest. Passed through so the shared validator below
-    // (validateLaunchdServiceConfig / validateServiceIdentityConfig) admits or
-    // rejects the block on CREATE as it already does on PATCH/load (#3401 item 2).
-    'service',
-    'pineconeApiKeyEnv', 'pineconeProjectId', 'pineconeExpectedHostSuffix',
-    'pineconeNamespaces', 'pineconeFactsNamespace', 'pineconeChunksNamespace',
-    'pineconeSummariesNamespace', 'pineconeKnowledgeSearch', 'pineconeKnowledgeProfiles',
-  ];
-  for (const field of PASSTHROUGH_FIELDS) {
-    if (body[field] != null) config[field] = body[field];
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'clientOutputPolicies')) {
-    config['clientOutputPolicies'] = body['clientOutputPolicies'];
-  }
-  // chatOptions (openaiProviderConfig — QR-218 PR-2) is chat-only: gated to
-  // type 'chat' so an agent/passive config can never carry an unvalidated
-  // chat-shaped block (validateChatOptions below only checks type === 'chat').
-  if (type === 'chat' && body.chatOptions != null) {
-    config['chatOptions'] = body.chatOptions;
-  }
-  // Regression guard, not an active hole: PASSTHROUGH_FIELDS excludes the
-  // wizard-era plaintext key fields today; this keeps future allowlist
-  // growth from reopening the PATCH-path leak fixed alongside it.
-  config = stripPlaintextProviderKeys(
-    migrateLegacyMemoryConfig(config, { removeLegacy: true }).config,
-  ).clean;
-
-  // --- Shared validator: defense-in-depth before writing to disk ---
-  // CREATE has already done inline shape checks above; this catches any field
-  // that slips through (e.g. invalid instructionsPath in agentOptions, oversize
-  // claudeMd, malformed providerConfig) and keeps CREATE/PATCH/loader aligned.
-  {
-    const validationError = validateInstanceConfig(
-      { ...config, claudeMd: body.claudeMd },
-      { name, mode: 'create', existingHealthPorts: portInventory.ports },
-    );
-    if (validationError) {
-      jsonResponse(res, validationError.status ?? 400, { error: validationError.message });
-      return;
-    }
-  }
-
-  // service-block home-confinement (fs-aware, so not in the shared validator).
-  // Placed outside the `type === 'agent'` block above that holds the pluginDirs
-  // sibling: `service` is type-agnostic, so an out-of-home prepend on a chat or
-  // passive instance must be refused too. Reads the assembled `config` rather
-  // than `body` so it sees the post-passthrough, post-strip view that is about
-  // to be written. Runs before the first mkdir, so a refusal leaves no
-  // partially-created instance.
-  if (!validateServiceHomeConfinement(config['service'], res)) return;
-
-  // --- Create directories ---
-  const createdExtras: ExtraRecord[] = [];
-  let serviceEnableAttempted = false;
+  const mutation = claimInstanceMutation(name, res);
+  if (!mutation) return;
   try {
-    fs.mkdirSync(configRoot(), { recursive: true, mode: 0o700 });
-    fs.mkdirSync(configDir, { mode: 0o700 });
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+    // --- Uniqueness check ---
+    const configDir = path.join(configRoot(), name);
+    if (deps.discovery.getInstance(name) != null || fs.existsSync(configDir)) {
       jsonResponse(res, 409, { error: `instance '${name}' already exists` });
       return;
     }
-    jsonResponse(res, 500, mutationError(err, { operation: 'instance_create', stage: 'commit', mutationState: 'not_started' }));
-    return;
-  }
 
-  try {
-    fs.mkdirSync(path.join(dataRoot(name), 'logs'), { recursive: true, mode: 0o700 });
-    fs.mkdirSync(path.join(dataRoot(name), 'media', 'tmp'), { recursive: true, mode: 0o700 });
-    fs.mkdirSync(stateRoot(name), { recursive: true, mode: 0o700 });
-    writeInitialDatabaseCreateMarker(dataRoot(name), name);
-
-    // --- Write config.json ---
-    writePrivateFileSync(path.join(configDir, 'config.json'), JSON.stringify(config, null, 2) + '\n', { exclusive: true });
-
-    // Decision: instance creation ignores any per-instance provider key material for now.
-    // The deploy wrapper still reads a shared provider key from the keyring, and we will only
-    // persist instance-scoped keys after a dedicated secret-storage model is designed end-to-end.
-
-    // --- Copy health token (per-instance canonical service only) ---
-    try {
-      const token = lookupCredential('whatsoup-health-token', { user: name, skipEnv: true, skipMigrationFallbacks: true });
-      if (token) {
-        writePrivateFileSync(path.join(configDir, 'tokens.env'), `WHATSOUP_HEALTH_TOKEN=${token}\n`, { exclusive: true });
-      }
-    } catch {
-      log.warn({ instance: name }, 'keyring read failed — spawned instance will start without a health token');
+    // --- Validate type ---
+    const type = body.type as string;
+    if (!VALID_TYPES.has(type)) {
+      jsonResponse(res, 400, { error: `type must be one of: passive, chat, agent` });
+      return;
     }
 
-    // --- Write CLAUDE.md for agent instances ---
-    if (body.claudeMd && type === 'agent' && body.agentOptions &&
-        typeof (body.agentOptions as Record<string, unknown>).cwd === 'string') {
-      const cwd = (body.agentOptions as Record<string, unknown>).cwd as string;
-      let claudeDir = path.join(cwd, '.claude');
-      claudeDir = ensureHomeConfinedDirectory(claudeDir);
-      const claudeMdPath = path.join(claudeDir, 'CLAUDE.md');
-      const claudeMdSnapshot = snapshotExtra(claudeMdPath);
-      createdExtras.push(claudeMdSnapshot);
-      writePrivateFileSync(claudeMdPath, body.claudeMd as string);
+    // --- Validate & deduplicate adminPhones ---
+    let adminPhones = body.adminPhones;
+    if (!Array.isArray(adminPhones) || adminPhones.length === 0 ||
+        adminPhones.some((p: unknown) => typeof p !== 'string' || p === '')) {
+      jsonResponse(res, 400, { error: 'adminPhones must be a non-empty array of non-empty strings' });
+      return;
+    }
+    adminPhones = normalizeAdminPhones(adminPhones as string[]);
+
+    // --- Type-specific validation ---
+    // systemPrompt and agentOptions are deferred — validated at instance start by instance-loader.
+    // At create time they may not be set yet (wizard sends them via PATCH after QR link).
+    // Only block passive instances from having a systemPrompt (hard constraint).
+    if (type === 'passive' && body.systemPrompt) {
+      jsonResponse(res, 400, { error: 'passive instances must not have a systemPrompt' });
+      return;
     }
 
-    // --- Write settings.json for agent instances ---
-    if (type === 'agent' && body.agentOptions &&
-        typeof (body.agentOptions as Record<string, unknown>).cwd === 'string') {
-      const cwd = (body.agentOptions as Record<string, unknown>).cwd as string;
-      let claudeDir = path.join(cwd, '.claude');
-      const settings = mergeSettingsJson('agent', body.settingsJson as PermissionsSettings | undefined);
-      if (settings) {
-        claudeDir = ensureHomeConfinedDirectory(claudeDir);
-        // Include enabledPlugins from agentOptions if provided
-        const ao = body.agentOptions as Record<string, unknown>;
-        if (ao.enabledPlugins && typeof ao.enabledPlugins === 'object') {
-          settings.enabledPlugins = ao.enabledPlugins as Record<string, boolean>;
-        }
-        const settingsPath = path.join(claudeDir, 'settings.json');
-        const settingsSnapshot = snapshotExtra(settingsPath);
-        createdExtras.push(settingsSnapshot);
-        writePermissionsSettings(claudeDir, settings);
-      }
+    // --- Auto-assign healthPort ---
+    let healthPort = typeof body.healthPort === 'number' ? body.healthPort as number : null;
+    if (healthPort != null && (healthPort < 1024 || healthPort > 65535)) {
+      jsonResponse(res, 400, { error: 'healthPort must be between 1024 and 65535' });
+      return;
     }
-
-    // --- Enable service ---
-    serviceEnableAttempted = true;
-    await deps.serviceManager.enable(name);
-
-    // --- Re-scan discovery ---
-    deps.discovery.scan();
-
-    publishInstanceStatus(deps.realtime, name);
-    publishFeedEvent(deps.realtime, name);
-    jsonResponse(res, 201, { name, healthPort });
-  } catch (err) {
-    // A rejected enable call can have changed service state before losing its response.
-    if (serviceEnableAttempted) {
-      try {
-        await deps.serviceManager.disable(name);
-      } catch (rollbackErr) {
-        log.error(
-          { err: rollbackErr, originalErr: err, instance: name },
-          'failed to disable service after instance creation failure',
-        );
-        jsonResponse(res, 500, mutationError(rollbackErr, { operation: 'instance_create', stage: 'rollback', mutationState: 'rollback_failed', rollbackState: 'failed' }, 'rollback_failed'));
+    const portInventory = scanHealthPortInventory();
+    if (!portInventory.ok) {
+      emitInventoryFailure(res, portInventory);
+      return;
+    }
+    if (healthPort == null) {
+      const used = [...portInventory.ports.values()];
+      healthPort = used.length > 0 ? Math.max(...used) + 1 : 9095;
+    } else {
+      // Validate user-supplied port isn't already in use
+      const used = [...portInventory.ports.values()];
+      if (used.includes(healthPort)) {
+        jsonResponse(res, 409, { error: `healthPort ${healthPort} is already in use` });
         return;
       }
     }
-    const cleanupErrors = cleanupPartial(name, createdExtras);
-    if (cleanupErrors.length > 0) {
-      const response = mutationError(cleanupErrors[0], {
-        operation: 'instance_create', stage: 'rollback', mutationState: 'rollback_failed', rollbackState: 'failed',
-      }, 'rollback_failed');
-      log.error({ err: new AggregateError(cleanupErrors), originalErr: err, instance: name, correlationId: response.correlation_id }, 'instance creation rollback cleanup incomplete');
-      jsonResponse(res, 500, response);
+
+    // --- Validate accessMode ---
+    const accessMode = type === 'passive' ? 'self_only' : (body.accessMode ?? 'self_only') as string;
+    if (!VALID_ACCESS_MODES.has(accessMode)) {
+      jsonResponse(res, 400, { error: 'accessMode must be one of: self_only, allowlist, open_dm, groups_only' });
       return;
     }
-    jsonResponse(res, 500, mutationError(err, { operation: 'instance_create', stage: 'rollback', mutationState: 'rolled_back', rollbackState: 'succeeded' }));
-  }
+
+    // --- Validate agent-specific options (only if provided — may come via PATCH later) ---
+    if (type === 'agent') {
+      if (body.agentOptions == null) {
+        body.agentOptions = defaultAgentOptions(name);
+      }
+      const ao = body.agentOptions as Record<string, unknown>;
+      if (typeof ao !== 'object' || Array.isArray(ao)) {
+        jsonResponse(res, 400, { error: 'agentOptions must be an object' });
+        return;
+      }
+      if (ao.sessionScope && !VALID_SESSION_SCOPES.has(ao.sessionScope as string)) {
+        jsonResponse(res, 400, { error: 'agentOptions.sessionScope must be single, shared, or per_chat' });
+        return;
+      }
+      if (resolveAndValidateAgentCwd(name, ao, res) === null) return;
+      // Confine pluginDirs to user home directory
+      if (Array.isArray(ao.pluginDirs)) {
+        if (!validatePluginDirs(ao.pluginDirs as unknown[], res)) return;
+      }
+    }
+
+    // --- Build config — start with validated required fields, then merge optional fields ---
+    let config: Record<string, unknown> = {
+      name,
+      type,
+      adminPhones,
+      healthPort,
+      accessMode,
+      introSent: false, // triggers introduction message on first boot
+    };
+
+    // Numeric bounds (rateLimitPerHour/maxTokens/tokenBudget) are enforced by the
+    // shared validateInstanceConfig call below, which runs on both CREATE and PATCH.
+
+    // Pass through all optional config fields (exclude internal/UI-only fields)
+    const PASSTHROUGH_FIELDS = [
+      'description', 'systemPrompt', 'maxTokens', 'tokenBudget', 'rateLimitPerHour',
+      'models', 'model', 'pineconeIndex', 'pineconeSearchMode', 'pineconeRerank', 'pineconeTopK',
+      'pineconeAllowedIndexes', 'memory', 'agentOptions', 'toolUpdateMode', 'controlPeers',
+      'transcriptionOptions',
+      // Pilot final-send authority. The shared load/startup config resolver
+      // validates its strict enabled shape and refuses non-Baileys transport.
+      'transportAuthority',
+      // service: governed launchd render options (claudeConfigDir, pathPrepend) and
+      // the ratified account digest. Passed through so the shared validator below
+      // (validateLaunchdServiceConfig / validateServiceIdentityConfig) admits or
+      // rejects the block on CREATE as it already does on PATCH/load (#3401 item 2).
+      'service',
+      'pineconeApiKeyEnv', 'pineconeProjectId', 'pineconeExpectedHostSuffix',
+      'pineconeNamespaces', 'pineconeFactsNamespace', 'pineconeChunksNamespace',
+      'pineconeSummariesNamespace', 'pineconeKnowledgeSearch', 'pineconeKnowledgeProfiles',
+    ];
+    for (const field of PASSTHROUGH_FIELDS) {
+      if (body[field] != null) config[field] = body[field];
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'clientOutputPolicies')) {
+      config['clientOutputPolicies'] = body['clientOutputPolicies'];
+    }
+    // chatOptions (openaiProviderConfig — QR-218 PR-2) is chat-only: gated to
+    // type 'chat' so an agent/passive config can never carry an unvalidated
+    // chat-shaped block (validateChatOptions below only checks type === 'chat').
+    if (type === 'chat' && body.chatOptions != null) {
+      config['chatOptions'] = body.chatOptions;
+    }
+    // Regression guard, not an active hole: PASSTHROUGH_FIELDS excludes the
+    // wizard-era plaintext key fields today; this keeps future allowlist
+    // growth from reopening the PATCH-path leak fixed alongside it.
+    config = stripPlaintextProviderKeys(
+      migrateLegacyMemoryConfig(config, { removeLegacy: true }).config,
+    ).clean;
+
+    // --- Shared validator: defense-in-depth before writing to disk ---
+    // CREATE has already done inline shape checks above; this catches any field
+    // that slips through (e.g. invalid instructionsPath in agentOptions, oversize
+    // claudeMd, malformed providerConfig) and keeps CREATE/PATCH/loader aligned.
+    {
+      const validationError = validateInstanceConfig(
+        { ...config, claudeMd: body.claudeMd },
+        { name, mode: 'create', existingHealthPorts: portInventory.ports },
+      );
+      if (validationError) {
+        jsonResponse(res, validationError.status ?? 400, { error: validationError.message });
+        return;
+      }
+    }
+
+    // service-block home-confinement (fs-aware, so not in the shared validator).
+    // Placed outside the `type === 'agent'` block above that holds the pluginDirs
+    // sibling: `service` is type-agnostic, so an out-of-home prepend on a chat or
+    // passive instance must be refused too. Reads the assembled `config` rather
+    // than `body` so it sees the post-passthrough, post-strip view that is about
+    // to be written. Runs before the first mkdir, so a refusal leaves no
+    // partially-created instance.
+    if (!validateServiceHomeConfinement(config['service'], res)) return;
+
+    // --- Create directories ---
+    const createdExtras: ExtraRecord[] = [];
+    let serviceEnableAttempted = false;
+    try {
+      fs.mkdirSync(configRoot(), { recursive: true, mode: 0o700 });
+      fs.mkdirSync(configDir, { mode: 0o700 });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        jsonResponse(res, 409, { error: `instance '${name}' already exists` });
+        return;
+      }
+      jsonResponse(res, 500, mutationError(err, { operation: 'instance_create', stage: 'commit', mutationState: 'not_started' }));
+      return;
+    }
+
+    try {
+      fs.mkdirSync(path.join(dataRoot(name), 'logs'), { recursive: true, mode: 0o700 });
+      fs.mkdirSync(path.join(dataRoot(name), 'media', 'tmp'), { recursive: true, mode: 0o700 });
+      fs.mkdirSync(stateRoot(name), { recursive: true, mode: 0o700 });
+      writeInitialDatabaseCreateMarker(dataRoot(name), name);
+
+      // --- Write config.json ---
+      writePrivateFileSync(path.join(configDir, 'config.json'), JSON.stringify(config, null, 2) + '\n', { exclusive: true });
+
+      // Decision: instance creation ignores any per-instance provider key material for now.
+      // The deploy wrapper still reads a shared provider key from the keyring, and we will only
+      // persist instance-scoped keys after a dedicated secret-storage model is designed end-to-end.
+
+      // --- Copy health token (per-instance canonical service only) ---
+      try {
+        const token = lookupCredential('whatsoup-health-token', { user: name, skipEnv: true, skipMigrationFallbacks: true });
+        if (token) {
+          writePrivateFileSync(path.join(configDir, 'tokens.env'), `WHATSOUP_HEALTH_TOKEN=${token}\n`, { exclusive: true });
+        }
+      } catch {
+        log.warn({ instance: name }, 'keyring read failed — spawned instance will start without a health token');
+      }
+
+      // --- Write CLAUDE.md for agent instances ---
+      if (body.claudeMd && type === 'agent' && body.agentOptions &&
+          typeof (body.agentOptions as Record<string, unknown>).cwd === 'string') {
+        const cwd = (body.agentOptions as Record<string, unknown>).cwd as string;
+        let claudeDir = path.join(cwd, '.claude');
+        claudeDir = ensureHomeConfinedDirectory(claudeDir);
+        const claudeMdPath = path.join(claudeDir, 'CLAUDE.md');
+        const claudeMdSnapshot = snapshotExtra(claudeMdPath);
+        createdExtras.push(claudeMdSnapshot);
+        writePrivateFileSync(claudeMdPath, body.claudeMd as string);
+      }
+
+      // --- Write settings.json for agent instances ---
+      if (type === 'agent' && body.agentOptions &&
+          typeof (body.agentOptions as Record<string, unknown>).cwd === 'string') {
+        const cwd = (body.agentOptions as Record<string, unknown>).cwd as string;
+        let claudeDir = path.join(cwd, '.claude');
+        const settings = mergeSettingsJson('agent', body.settingsJson as PermissionsSettings | undefined);
+        if (settings) {
+          claudeDir = ensureHomeConfinedDirectory(claudeDir);
+          // Include enabledPlugins from agentOptions if provided
+          const ao = body.agentOptions as Record<string, unknown>;
+          if (ao.enabledPlugins && typeof ao.enabledPlugins === 'object') {
+            settings.enabledPlugins = ao.enabledPlugins as Record<string, boolean>;
+          }
+          const settingsPath = path.join(claudeDir, 'settings.json');
+          const settingsSnapshot = snapshotExtra(settingsPath);
+          createdExtras.push(settingsSnapshot);
+          writePermissionsSettings(claudeDir, settings);
+        }
+      }
+
+      // --- Enable service ---
+      serviceEnableAttempted = true;
+      await deps.serviceManager.enable(name);
+
+      // --- Re-scan discovery ---
+      deps.discovery.scan();
+
+      publishInstanceStatus(deps.realtime, name);
+      publishFeedEvent(deps.realtime, name);
+      jsonResponse(res, 201, { name, healthPort });
+    } catch (err) {
+      // A rejected enable call can have changed service state before losing its response.
+      if (serviceEnableAttempted) {
+        try {
+          await deps.serviceManager.disable(name);
+        } catch (rollbackErr) {
+          log.error(
+            { err: rollbackErr, originalErr: err, instance: name },
+            'failed to disable service after instance creation failure',
+          );
+          jsonResponse(res, 500, mutationError(rollbackErr, { operation: 'instance_create', stage: 'rollback', mutationState: 'rollback_failed', rollbackState: 'failed' }, 'rollback_failed'));
+          return;
+        }
+      }
+      const cleanupErrors = cleanupPartial(name, createdExtras);
+      if (cleanupErrors.length > 0) {
+        const response = mutationError(cleanupErrors[0], {
+          operation: 'instance_create', stage: 'rollback', mutationState: 'rollback_failed', rollbackState: 'failed',
+        }, 'rollback_failed');
+        log.error({ err: new AggregateError(cleanupErrors), originalErr: err, instance: name, correlationId: response.correlation_id }, 'instance creation rollback cleanup incomplete');
+        jsonResponse(res, 500, response);
+        return;
+      }
+      jsonResponse(res, 500, mutationError(err, { operation: 'instance_create', stage: 'rollback', mutationState: 'rolled_back', rollbackState: 'succeeded' }));
+    }
+
+  } finally { mutation.release(); }
 }

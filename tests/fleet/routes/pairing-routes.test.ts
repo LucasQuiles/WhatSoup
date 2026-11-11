@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -86,6 +86,52 @@ describe('pairing route authenticity requirements', () => {
 });
 
 describe('pairing route scope gating', () => {
+  for (const [route, handler] of [
+    ['auth', handleAuth],
+    ['preflight', handlePairingPreflight],
+    ['apply', handlePairingApply],
+    ['status', handlePairingStatus],
+  ] as const) {
+    it.each(['missing', 'directory', '{', 'null', '[]', '1', '"not a configuration"'])(
+      `${route} refuses unknown scope from %s configuration before any service or tree mutation`,
+      async (fixture) => {
+        const configPath = join(configDir, 'config.json');
+        if (fixture === 'directory') mkdirSync(configPath);
+        else if (fixture !== 'missing') writeFileSync(configPath, fixture);
+        const deps = depsFor(configPath);
+        // Contain the old fail-open path before it can launch a real helper.
+        deps.serviceManager.stopForAuth = vi.fn().mockRejectedValue(new Error('unexpected service stop'));
+        const res = mockRes();
+        await handler(mockReq({ headers: authedHeaders() }), res, deps, { name: 'test-line' });
+        expect(res._status).toBe(500);
+        expect(JSON.parse(res._body)).toMatchObject({
+          schema: 'fleet-error-v1', code: 'config_read_failed', operation: 'auth',
+          stage: 'precondition', mutation_state: 'not_started', retryable: false,
+        });
+        expect(res._body).not.toContain(configPath);
+        expect(deps.serviceManager.stop).not.toHaveBeenCalled();
+        expect(deps.serviceManager.stopForAuth).not.toHaveBeenCalled();
+        expect(deps.serviceManager.startFire).not.toHaveBeenCalled();
+        expect(readdirSync(stateRoot)).toEqual([]);
+      },
+    );
+  }
+
+  it('observes a repaired scoped configuration on the next request', async () => {
+    const configPath = join(configDir, 'config.json');
+    writeFileSync(configPath, '{');
+    const deps = depsFor(configPath);
+    const first = mockRes();
+    await handlePairingPreflight(mockReq({ headers: authedHeaders() }), first, deps, { name: 'test-line' });
+    expect(first._status).toBe(500);
+    writeInstanceConfig({ accountScopeId: SCOPE });
+    const repaired = mockRes();
+    await handlePairingPreflight(mockReq({ headers: authedHeaders() }), repaired, deps, { name: 'test-line' });
+    expect(repaired._status).toBe(200);
+    expect(JSON.parse(repaired._body).scopeId).toBe(SCOPE);
+    expect(deps.serviceManager.stop).not.toHaveBeenCalled();
+  });
+
   it('409s for instances without a configured accountScopeId', async () => {
     const configPath = writeInstanceConfig({});
     const res = mockRes();

@@ -79,7 +79,7 @@ vi.mock('../../console/src/lib/api', () => ({
   api: {
     getChats: vi.fn().mockResolvedValue([]),
     getMessages: vi.fn().mockResolvedValue([]),
-    sendMessage: vi.fn().mockResolvedValue(undefined),
+    sendMessage: vi.fn().mockResolvedValue({ sent: true }),
     markRead: vi.fn().mockResolvedValue(undefined),
     getCheckpoints: vi.fn().mockResolvedValue({ observedAt: '', checkpoints: [] }),
   },
@@ -200,7 +200,7 @@ beforeEach(() => {
   mockMessages = []
   getChatsMock.mockReset().mockResolvedValue([makeChat('conv-a')])
   getMessagesMock.mockReset().mockResolvedValue([])
-  sendMessageMock.mockReset().mockResolvedValue(undefined)
+  sendMessageMock.mockReset().mockResolvedValue({ sent: true })
   // Default to the common healthy path (#2550); state-specific tests below
   // override with mockResolvedValueOnce for the other three remote outcomes.
   markReadMock.mockReset().mockResolvedValue(markReadResult('acked'))
@@ -529,6 +529,33 @@ describe('v3.5 inbox — takeover (local-only honesty)', () => {
 // ---------------------------------------------------------------------------
 
 describe('v3.5 inbox — composer', () => {
+  it.each([{ sent: false }, undefined, null, {}, { sent: 'true' }])('retains the draft when the response does not confirm a send: %j', async (outcome) => {
+    sendMessageMock.mockResolvedValueOnce(outcome).mockResolvedValue({ sent: true })
+    const { container, qc, getByRole } = renderInbox()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    const invalidate = vi.spyOn(qc, 'invalidateQueries')
+    const input = getByRole('textbox', { name: 'Type a message' }) as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'retain this draft' } })
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }) })
+    expect(input.value).toBe('retain this draft')
+    expect(invalidate).not.toHaveBeenCalled()
+    expect(toastMock.success).not.toHaveBeenCalled()
+    const rejected = outcome?.sent === false
+    expect(getByRole('status').textContent).toContain(rejected ? 'not sent' : 'not confirmed')
+    expect(input.disabled).toBe(!rejected)
+    if (rejected) {
+      fireEvent.change(input, { target: { value: 'revised message' } })
+      await act(async () => { fireEvent.click(getByRole('button', { name: 'Send' })) })
+      expect(sendMessageMock).toHaveBeenCalledTimes(2)
+      expect(sendMessageMock).toHaveBeenLastCalledWith('personal', 'conv-a', 'revised message')
+      expect(input.value).toBe('')
+    } else {
+      fireEvent.keyDown(input, { key: 'Enter' })
+      expect(sendMessageMock).toHaveBeenCalledTimes(1)
+    }
+  })
+
   it('keeps an uncertain draft visible without a success-shaped cached message or automatic retry', async () => {
     const pending = Promise.withResolvers<unknown>()
     sendMessageMock.mockReturnValue(pending.promise)

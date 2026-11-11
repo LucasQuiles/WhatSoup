@@ -40,9 +40,10 @@ import { createChildLogger } from '../../logger.ts';
 import { repoRoot } from '../paths.ts';
 import { createSSEWriter } from '../sse-helpers.ts';
 import { trackAuthHelper, type AuthHelper } from '../auth-helper.ts';
-import { projectError, serviceActionError } from '../response-error-projection.ts';
+import { projectError, serviceActionError, mutationError } from '../response-error-projection.ts';
 import { NAME_MAX_LENGTH, NAME_RE, validateInstanceName } from './instance-name.ts';
 import type { OpsDeps } from './ops.ts';
+import { claimInstanceMutation, type InstanceMutationClaim } from './instance-mutation.ts';
 
 const log = createChildLogger('fleet:ops-auth');
 
@@ -50,6 +51,16 @@ const log = createChildLogger('fleet:ops-auth');
 const activeAuthProcesses = new Map<string, AuthHelper>();
 // In-flight auth operations — prevents concurrent auth requests from racing
 const authInFlight = new Set<string>();
+const pendingAuthActivations = new Map<string, symbol>();
+const pairingMutations = new Map<string, { claim: InstanceMutationClaim; settled: boolean }>();
+
+function releaseSettledPairingMutation(name: string) {
+  const mutation = pairingMutations.get(name);
+  if (mutation?.settled && !activeAuthProcesses.has(name) && !pendingAuthActivations.has(name)) {
+    mutation.claim.release();
+    pairingMutations.delete(name);
+  }
+}
 
 // Auth session wall-clock timeout (5 minutes — QR codes expire in ~60s, allows 5 scan attempts)
 const AUTH_TIMEOUT_MS = 5 * MS_PER_MINUTE;
@@ -102,7 +113,8 @@ export async function handleAuth(
   // idempotent POST saga (q-canary lane, T5): this legacy SSE route stops the
   // service and pairs into the existing auth directory with no quarantine,
   // exactly the replay surface the saga exists to close.
-  const legacyGateScope = readInstanceAccountScope(instance.configPath);
+  const legacyGateScope = readInstanceAccountScope(instance.configPath, res);
+  if (legacyGateScope === undefined) return;
   if (legacyGateScope !== null) {
     jsonResponse(res, 409, {
       error: legacyGateScope === 'malformed'
@@ -113,11 +125,22 @@ export async function handleAuth(
   }
 
   // Prevent concurrent auth requests for the same instance from racing
-  if (authInFlight.has(params.name) || activeAuthProcesses.has(params.name)) {
+  if (authInFlight.has(params.name) || activeAuthProcesses.has(params.name) || pendingAuthActivations.has(params.name)) {
     jsonResponse(res, 409, { error: 'auth already in progress for this instance' });
     return;
   }
   authInFlight.add(params.name);
+
+  const mutation = claimInstanceMutation(params.name, res);
+  if (!mutation) { authInFlight.delete(params.name); return; }
+  const admittedScope = readInstanceAccountScope(instance.configPath, res);
+  if (admittedScope !== null) {
+    authInFlight.delete(params.name);
+    mutation.release();
+    if (admittedScope !== undefined) jsonResponse(res, 409, { error: 'instance pairing configuration changed; retry preflight' });
+    return;
+  }
+  let mutationReleased = false;
 
   // SSE headers — write BEFORE stopping the instance to avoid browser timeout
   // during a slow systemd stop (up to TimeoutStopSec=15s)
@@ -139,7 +162,10 @@ export async function handleAuth(
   let servicePending = false;
   const releaseIfSettled = () => {
     if (helper?.confirmedClosed && activeAuthProcesses.get(params.name) === helper) activeAuthProcesses.delete(params.name);
-    if (streamEnded && !servicePending && (!helper || helper.confirmedClosed)) authInFlight.delete(params.name);
+    if (streamEnded && !servicePending && (!helper || helper.confirmedClosed)) {
+      authInFlight.delete(params.name);
+      if (!mutationReleased) { mutationReleased = true; mutation.release(); }
+    }
   };
   const { writeSSE, endOnce } = createSSEWriter(res, () => {
     streamEnded = true;
@@ -187,23 +213,21 @@ export async function handleAuth(
   req.once('close', onPreflightClose);
 
   // Stop the running instance so the lock file is released for auth.
-  if (deps.serviceManager.stopForAuth) {
-    try {
+  try {
+    if (deps.serviceManager.stopForAuth) {
       stoppedForAuth = (await deps.serviceManager.stopForAuth(params.name)) !== false;
-    } catch (err) {
-      req.removeListener('close', onPreflightClose);
-      log.error({ err, instance: params.name }, 'auth preflight failed to stop existing service');
-      if (!preflightClosed) {
-        writeSSE('error', { message: 'Unable to stop the existing instance before authentication. Resolve its service state and retry.' });
-      }
-      endOnce();
-      return;
-    }
-  } else {
-    try {
+    } else {
       await deps.serviceManager.stop(params.name);
       stoppedForAuth = true;
-    } catch { /* intentional: the service may not be running */ }
+    }
+  } catch (err) {
+    req.removeListener('close', onPreflightClose);
+    log.error({ err, instance: params.name }, 'auth preflight failed to stop existing service');
+    if (!preflightClosed) {
+      writeSSE('error', { message: 'Unable to stop the existing instance before authentication. Resolve its service state and retry.' });
+    }
+    endOnce();
+    return;
   }
 
   req.removeListener('close', onPreflightClose);
@@ -225,7 +249,7 @@ export async function handleAuth(
     params.name,
   ], {
     cwd: repoRoot,
-    env: buildAuthHelperEnv(),
+    env: { ...buildAuthHelperEnv(), WHATSOUP_MUTATION_LEASE_OP: mutation.lease.operationId, WHATSOUP_MUTATION_LEASE_FENCING: String(mutation.lease.fencingToken) },
     stdio: ['ignore', 'pipe', 'pipe'],
   }); } catch (error) {
     writeSSE('error', projectError(error, { operation: 'auth', stage: 'execute' }));
@@ -390,20 +414,21 @@ export async function handleAuth(
 /** Last pairing helper event per instance, served via the status route. */
 const lastPairingEvents = new Map<string, { event: string; data: string | null; at: string }>();
 
-function readInstanceAccountScope(configPath: string): AccountScopeIdV1 | null | 'malformed' {
-  // Absent or unparseable config reads as NO scope: legacy instances predate
-  // the field and discovery already owns config-error reporting. Only a
-  // present-but-invalid value is 'malformed' (fail closed on the value, not
-  // on unrelated read failures).
-  let parsed: Record<string, unknown>;
+function readInstanceAccountScope(configPath: string, res: ServerResponse): AccountScopeIdV1 | null | 'malformed' | undefined {
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+    parsed = JSON.parse(readFileSync(configPath, 'utf-8'));
   } catch {
-    // intentional: absent or unparseable config reads as no scope - legacy
-    // instances predate the field and discovery owns config-error reporting.
-    return null;
+    // An unavailable observation cannot authorize the legacy pairing path.
+    parsed = undefined;
   }
-  const raw = parsed.accountScopeId;
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    jsonResponse(res, 500, mutationError(undefined, {
+      operation: 'auth', stage: 'precondition', mutationState: 'not_started',
+    }, 'config_read_failed'));
+    return undefined;
+  }
+  const raw = (parsed as Record<string, unknown>).accountScopeId;
   if (raw === undefined || raw === null) return null;
   const scope = parseAccountScopeId(raw);
   return scope === null ? 'malformed' : scope;
@@ -446,7 +471,8 @@ export async function handlePairingPreflight(
   const instance = requireInstance(deps.discovery, params.name, res);
   if (!instance) return;
   if (!rejectNonHeaderAuthOrCrossSite(req, res)) return;
-  const scope = readInstanceAccountScope(instance.configPath);
+  const scope = readInstanceAccountScope(instance.configPath, res);
+  if (scope === undefined) return;
   if (scope === 'malformed') {
     jsonResponse(res, 500, { error: 'instance accountScopeId is malformed; fix config before pairing' });
     return;
@@ -472,7 +498,8 @@ export async function handlePairingStatus(
   const instance = requireInstance(deps.discovery, params.name, res);
   if (!instance) return;
   if (!rejectNonHeaderAuthOrCrossSite(req, res)) return;
-  const scope = readInstanceAccountScope(instance.configPath);
+  const scope = readInstanceAccountScope(instance.configPath, res);
+  if (scope === undefined) return;
   if (scope === null || scope === 'malformed') {
     jsonResponse(res, 409, { error: 'pairing status exists only for accountScopeId-configured instances' });
     return;
@@ -505,7 +532,8 @@ export async function handlePairingApply(
   const instance = requireInstance(deps.discovery, params.name, res);
   if (!instance) return;
   if (!rejectNonHeaderAuthOrCrossSite(req, res)) return;
-  const scope = readInstanceAccountScope(instance.configPath);
+  const scope = readInstanceAccountScope(instance.configPath, res);
+  if (scope === undefined) return;
   if (scope === 'malformed') {
     jsonResponse(res, 500, { error: 'instance accountScopeId is malformed; fix config before pairing' });
     return;
@@ -517,11 +545,21 @@ export async function handlePairingApply(
   // Reserve the in-flight slot in the same synchronous section as the check:
   // an `await` between has() and add() would let two concurrent applies both
   // pass the guard and run sagas concurrently.
-  if (authInFlight.has(params.name) || activeAuthProcesses.has(params.name)) {
+  if (authInFlight.has(params.name) || activeAuthProcesses.has(params.name) || pendingAuthActivations.has(params.name)) {
     jsonResponse(res, 409, { error: 'auth already in progress for this instance' });
     return;
   }
   authInFlight.add(params.name);
+  const mutation = claimInstanceMutation(params.name, res);
+  if (!mutation) { authInFlight.delete(params.name); return; }
+  const admittedScope = readInstanceAccountScope(instance.configPath, res);
+  if (admittedScope !== scope) {
+    authInFlight.delete(params.name);
+    mutation.release();
+    if (admittedScope !== undefined) jsonResponse(res, 409, { error: 'instance pairing configuration changed; retry preflight' });
+    return;
+  }
+  pairingMutations.set(params.name, { claim: mutation, settled: false });
   try {
     let body: Record<string, unknown>;
     try {
@@ -569,6 +607,8 @@ export async function handlePairingApply(
     jsonResponse(res, 500, projectError(err, { operation: 'auth', stage: 'execute' }));
   } finally {
     authInFlight.delete(params.name);
+    pairingMutations.get(params.name)!.settled = true;
+    releaseSettledPairingMutation(params.name);
   }
 }
 
@@ -585,7 +625,8 @@ export function buildSagaEffects(
     stopService: async () => {
       try {
         if (deps.serviceManager.stopForAuth) {
-          return (await deps.serviceManager.stopForAuth(name)) !== false;
+          await deps.serviceManager.stopForAuth(name);
+          return true;
         }
         await deps.serviceManager.stop(name);
         return true;
@@ -597,11 +638,22 @@ export function buildSagaEffects(
     },
     startService: () =>
       new Promise<boolean>(resolve => {
-        const onError = (err: Error | null) => resolve(err === null);
-        if (deps.serviceManager.startAfterAuthFire) {
-          deps.serviceManager.startAfterAuthFire(name, onError);
-        } else {
-          deps.serviceManager.startFire(name, onError);
+        const attempt = Symbol('activation');
+        pendingAuthActivations.set(name, attempt);
+        const settle = (started: boolean) => {
+          if (pendingAuthActivations.get(name) === attempt) pendingAuthActivations.delete(name);
+          releaseSettledPairingMutation(name);
+          resolve(started);
+        };
+        const onError = (err: Error | null) => settle(err === null);
+        try {
+          if (deps.serviceManager.startAfterAuthFire) {
+            deps.serviceManager.startAfterAuthFire(name, onError);
+          } else {
+            deps.serviceManager.startFire(name, onError);
+          }
+        } catch {
+          settle(false);
         }
       }),
     acquireLease: operationId =>
@@ -623,6 +675,11 @@ export function buildSagaEffects(
         // helper adopts exactly this lease instead of acquiring its own.
         env.WHATSOUP_PAIRING_LEASE_OP = input.lease.operationId;
         env.WHATSOUP_PAIRING_LEASE_FENCING = String(input.lease.fencingToken);
+        const mutation = pairingMutations.get(name);
+        if (mutation) {
+          env.WHATSOUP_MUTATION_LEASE_OP = mutation.claim.lease.operationId;
+          env.WHATSOUP_MUTATION_LEASE_FENCING = String(mutation.claim.lease.fencingToken);
+        }
         // A stale 'connected' from a PREVIOUS helper run must never validate
         // this one's exit; success evidence starts empty for every run.
         lastPairingEvents.delete(name);
@@ -640,6 +697,7 @@ export function buildSagaEffects(
         let releaseOnClose = false;
         void helper.closed.then(() => {
           if (activeAuthProcesses.get(name) === helper) activeAuthProcesses.delete(name);
+          releaseSettledPairingMutation(name);
           if (releaseOnClose) {
             let released = false;
             try {

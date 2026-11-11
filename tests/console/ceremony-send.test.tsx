@@ -22,6 +22,27 @@ beforeEach(() => { vi.resetAllMocks() })
 afterEach(() => { cleanup(); vi.useRealTimers() })
 
 describe('first-message delivery ownership', () => {
+  it.each([{ sent: false }, undefined, null, {}, { sent: 'true' }])('does not announce or navigate on a non-confirming response: %j', async (outcome) => {
+    vi.mocked(api.sendMessage).mockResolvedValueOnce(outcome as { sent: boolean }).mockResolvedValue({ sent: true })
+    const view = setup()
+    await act(async () => { fireEvent.click(view.getByRole('button', { name: 'Send & go live' })) })
+    expect(navigate).not.toHaveBeenCalled()
+    expect(success).not.toHaveBeenCalled()
+    expect(view.input.value).toBe('Hello')
+    const rejected = outcome?.sent === false
+    expect(view.getByRole('status').textContent).toMatch(rejected ? /not sent/i : /not confirmed/i)
+    if (rejected) {
+      fireEvent.change(view.input, { target: { value: 'Revised hello' } })
+      await act(async () => { fireEvent.click(view.getByRole('button', { name: 'Send & go live' })) })
+      expect(api.sendMessage).toHaveBeenCalledTimes(2)
+      expect(api.sendMessage).toHaveBeenLastCalledWith('quinn', '+15550100001', 'Revised hello')
+      expect(success).toHaveBeenCalledTimes(1)
+    } else {
+      fireEvent.keyDown(view.input, { key: 'Enter' })
+      expect(api.sendMessage).toHaveBeenCalledTimes(1)
+    }
+  })
+
   it.each(['Enter', 'click'])('leaves an empty optional message unsent on %s', async (action) => {
     const view = setup()
     fireEvent.change(view.input, { target: { value: '   ' } })

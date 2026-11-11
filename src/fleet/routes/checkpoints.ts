@@ -1,3 +1,4 @@
+import { claimInstanceMutation } from './instance-mutation.ts';
 /**
  * GET /api/lines/:name/checkpoints — read-only feed for the console
  * checkpoint browser tab (design/implementation lineage: PR #1930).
@@ -81,104 +82,108 @@ export async function handleRestoreCheckpoint(
   if (!validateInstanceName(params.name, res)) return;
   const instance = requireInstance(deps.discovery, params.name, res);
   if (!instance) return;
-
-  let conversationKey: string;
+  const mutation = claimInstanceMutation(params.name, res);
+  if (!mutation) return;
   try {
-    const parsed: unknown = JSON.parse(await readBody(req));
-    const key = (parsed as { conversationKey?: unknown }).conversationKey;
-    if (typeof key !== 'string' || key.length === 0) throw new Error('missing conversationKey');
-    conversationKey = key;
-  } catch {
-    jsonResponse(res, 400, { error: 'invalid JSON body — expected {conversationKey}' });
-    return;
-  }
-
-  const read = deps.dbReader.getCheckpoints(instance.name, instance.dbPath);
-  if (!read.ok) {
-    jsonResponse(res, 500, { error: `checkpoint read failed: ${read.error}`, instance: instance.name });
-    return;
-  }
-  const row = read.data.find((r) => r.conversationKey === conversationKey);
-  if (!row) {
-    jsonResponse(res, 404, { error: 'checkpoint not found', instance: instance.name, conversationKey });
-    return;
-  }
-  if (row.resumable) {
-    jsonResponse(res, 200, { status: 'already_resumable', instance: instance.name, conversationKey });
-    return;
-  }
-  if (row.sessionId === null) {
-    jsonResponse(res, 409, {
-      error: 'checkpoint has no session id — cannot be made resumable',
-      instance: instance.name,
-      conversationKey,
-    });
-    return;
-  }
-
-  // Write-while-down. Stop must succeed BEFORE any mutation; the guarded
-  // UPDATE re-asserts the preconditions decisively in SQL (the read above
-  // is advisory); start is attempted even when the write fails.
-  try {
-    await deps.serviceManager.stop(instance.name);
-  } catch (err) {
-    jsonResponse(res, 500, projectError(err, { operation: 'checkpoint_restore', stage: 'execute', mutationState: 'applied' }));
-    return;
-  }
-
-  // The UPDATE's own verdict, not the advisory read's. Zero matched rows means
-  // the SQL preconditions were NOT met at write time — the checkpoint changed
-  // under us during the stop window — and nothing was restored (#2292 L10).
-  let changedRows = 0;
-  try {
-    const db = new DatabaseSync(instance.dbPath);
+    let conversationKey: string;
     try {
-      const result = db.prepare(`
-        UPDATE session_checkpoints
-        SET session_status = 'suspended', updated_at = datetime('now')
-        WHERE conversation_key = ?
-          AND session_id IS NOT NULL
-          AND session_status NOT IN ('active', 'suspended')
-      `).run(conversationKey);
-      changedRows = Number(result.changes);
-    } finally {
-      db.close();
+      const parsed: unknown = JSON.parse(await readBody(req));
+      const key = (parsed as { conversationKey?: unknown }).conversationKey;
+      if (typeof key !== 'string' || key.length === 0) throw new Error('missing conversationKey');
+      conversationKey = key;
+    } catch {
+      jsonResponse(res, 400, { error: 'invalid JSON body — expected {conversationKey}' });
+      return;
     }
-  } catch (err) {
+
+    const read = deps.dbReader.getCheckpoints(instance.name, instance.dbPath);
+    if (!read.ok) {
+      jsonResponse(res, 500, { error: `checkpoint read failed: ${read.error}`, instance: instance.name });
+      return;
+    }
+    const row = read.data.find((r) => r.conversationKey === conversationKey);
+    if (!row) {
+      jsonResponse(res, 404, { error: 'checkpoint not found', instance: instance.name, conversationKey });
+      return;
+    }
+    if (row.resumable) {
+      jsonResponse(res, 200, { status: 'already_resumable', instance: instance.name, conversationKey });
+      return;
+    }
+    if (row.sessionId === null) {
+      jsonResponse(res, 409, {
+        error: 'checkpoint has no session id — cannot be made resumable',
+        instance: instance.name,
+        conversationKey,
+      });
+      return;
+    }
+
+    // Write-while-down. Stop must succeed BEFORE any mutation; the guarded
+    // UPDATE re-asserts the preconditions decisively in SQL (the read above
+    // is advisory); start is attempted even when the write fails.
+    try {
+      await deps.serviceManager.stop(instance.name);
+    } catch (err) {
+      jsonResponse(res, 500, projectError(err, { operation: 'checkpoint_restore', stage: 'execute', mutationState: 'applied' }));
+      return;
+    }
+
+    // The UPDATE's own verdict, not the advisory read's. Zero matched rows means
+    // the SQL preconditions were NOT met at write time — the checkpoint changed
+    // under us during the stop window — and nothing was restored (#2292 L10).
+    let changedRows = 0;
+    try {
+      const db = new DatabaseSync(instance.dbPath);
+      try {
+        const result = db.prepare(`
+          UPDATE session_checkpoints
+          SET session_status = 'suspended', updated_at = datetime('now')
+          WHERE conversation_key = ?
+            AND session_id IS NOT NULL
+            AND session_status NOT IN ('active', 'suspended')
+        `).run(conversationKey);
+        changedRows = Number(result.changes);
+      } finally {
+        db.close();
+      }
+    } catch (err) {
+      try {
+        await deps.serviceManager.start(instance.name);
+      } catch (restartErr) {
+        // Log the restart failure internally (correlated via the projected response below);
+        // raw exception prose never enters the client response (#2517).
+        log.warn({ err: errorMessage(restartErr) }, 'checkpoint restore: restart after DB write failure');
+      }
+      jsonResponse(res, 500, projectError(err, { operation: 'checkpoint_restore', stage: 'commit', mutationState: 'applied' }));
+      return;
+    }
+
     try {
       await deps.serviceManager.start(instance.name);
-    } catch (restartErr) {
-      // Log the restart failure internally (correlated via the projected response below);
-      // raw exception prose never enters the client response (#2517).
-      log.warn({ err: errorMessage(restartErr) }, 'checkpoint restore: restart after DB write failure');
+    } catch (err) {
+      jsonResponse(res, 500, projectError(err, { operation: 'checkpoint_restore', stage: 'verify', mutationState: 'applied' }));
+      return;
     }
-    jsonResponse(res, 500, projectError(err, { operation: 'checkpoint_restore', stage: 'commit', mutationState: 'applied' }));
-    return;
-  }
 
-  try {
-    await deps.serviceManager.start(instance.name);
-  } catch (err) {
-    jsonResponse(res, 500, projectError(err, { operation: 'checkpoint_restore', stage: 'verify', mutationState: 'applied' }));
-    return;
-  }
+    // Reported only AFTER the restart above, so a no-op never leaves the instance
+    // down. The stop/start still happened — that is real disruption the operator
+    // needs to know about — but no checkpoint was made resumable, so this is not
+    // a 202. Previously this path returned 'restore_requested' and the operator
+    // had no way to tell a restore from a stop/start that changed nothing.
+    if (changedRows === 0) {
+      jsonResponse(res, 409, {
+        error: 'restore matched no checkpoint — it changed state during the restart window',
+        instance: instance.name,
+        conversationKey,
+        instanceRestarted: true,
+      });
+      return;
+    }
 
-  // Reported only AFTER the restart above, so a no-op never leaves the instance
-  // down. The stop/start still happened — that is real disruption the operator
-  // needs to know about — but no checkpoint was made resumable, so this is not
-  // a 202. Previously this path returned 'restore_requested' and the operator
-  // had no way to tell a restore from a stop/start that changed nothing.
-  if (changedRows === 0) {
-    jsonResponse(res, 409, {
-      error: 'restore matched no checkpoint — it changed state during the restart window',
-      instance: instance.name,
-      conversationKey,
-      instanceRestarted: true,
-    });
-    return;
-  }
+    publishInstanceStatus(deps.realtime, instance.name);
+    publishFeedEvent(deps.realtime, instance.name);
+    jsonResponse(res, 202, { status: 'restore_requested', instance: instance.name, conversationKey });
 
-  publishInstanceStatus(deps.realtime, instance.name);
-  publishFeedEvent(deps.realtime, instance.name);
-  jsonResponse(res, 202, { status: 'restore_requested', instance: instance.name, conversationKey });
+  } finally { mutation.release(); }
 }

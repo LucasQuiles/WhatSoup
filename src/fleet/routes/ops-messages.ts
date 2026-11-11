@@ -12,9 +12,9 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
 import { readBody, jsonResponse, requireInstance } from '../../lib/http.ts';
-import { isNonEmptyString } from '../../lib/type-guards.ts';
+import { isNonEmptyString, isRecord } from '../../lib/type-guards.ts';
 import { mcpCall } from '../mcp-client.ts';
-import { respondMcp } from './mcp-proxy.ts';
+import { respondMcp, unwrapMcpResult } from './mcp-proxy.ts';
 import { proxyToInstance } from '../http-proxy.ts';
 import { isGroupConversationKey, conversationKeyToJid } from '../../core/conversation-key.ts';
 import { toPersonalJid } from '../../core/jid-constants.ts';
@@ -120,13 +120,17 @@ export async function handleSend(
         respondUnconfirmedSend(res, new Error(result.error ?? 'MCP send response unavailable'), 502);
         return;
       }
-      // Publish realtime events only on a fully clean tool envelope —
-      // transport failure (`success: false`) and tool-level error
-      // (`toolError: true`) must NOT fan out a "message received" signal.
-      if (result.success && !result.toolError && !dryRun) {
-        publishMessageReceived(deps.realtime, params.name);
-        publishChatUpdated(deps.realtime, params.name);
-        publishFeedEvent(deps.realtime, params.name);
+      if (!result.toolError && !dryRun) {
+        const payload = unwrapMcpResult(result.result);
+        if (!isRecord(payload) || typeof payload.sent !== 'boolean') {
+          respondUnconfirmedSend(res, new Error('MCP send acknowledgement invalid'), 502);
+          return;
+        }
+        if (payload.sent) {
+          publishMessageReceived(deps.realtime, params.name);
+          publishChatUpdated(deps.realtime, params.name);
+          publishFeedEvent(deps.realtime, params.name);
+        }
       }
       // Route through `respondMcp` so `isError: true` envelopes map to
       // 4xx/5xx like the dedicated MCP proxy routes (issue #257 parity).
@@ -149,9 +153,26 @@ export async function handleSend(
       return;
     }
     if (result.status >= 200 && result.status < 300 && !dryRun) {
-      publishMessageReceived(deps.realtime, params.name);
-      publishChatUpdated(deps.realtime, params.name);
-      publishFeedEvent(deps.realtime, params.name);
+      let payload: unknown;
+      try {
+        payload = JSON.parse(result.body);
+      } catch {
+        respondUnconfirmedSend(res, new Error('HTTP send acknowledgement invalid'), 502);
+        return;
+      }
+      const sent = isRecord(payload) ? ('sent' in payload ? payload.sent : payload.ok) : undefined;
+      if (!isRecord(payload) || typeof sent !== 'boolean'
+        || ('ok' in payload && payload.ok !== sent)) {
+        respondUnconfirmedSend(res, new Error('HTTP send acknowledgement invalid'), 502);
+        return;
+      }
+      if (sent) {
+        publishMessageReceived(deps.realtime, params.name);
+        publishChatUpdated(deps.realtime, params.name);
+        publishFeedEvent(deps.realtime, params.name);
+      }
+      jsonResponse(res, result.status, { ...payload, sent });
+      return;
     }
     res.writeHead(result.status, { 'Content-Type': 'application/json' });
     res.end(result.body);

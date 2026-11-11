@@ -38,7 +38,7 @@ export function Ceremony({
   const navigate = useNavigate()
   const toast = useToast()
   const [msg, setMsg] = useState('')
-  const [sendState, setSendState] = useState<'idle' | 'pending' | 'unconfirmed'>('idle')
+  const [sendState, setSendState] = useState<'idle' | 'pending' | 'unconfirmed' | 'rejected'>('idle')
   const attempted = useRef(false)
   const mounted = useRef(false)
   useEffect(() => {
@@ -58,8 +58,17 @@ export function Ceremony({
     attempted.current = true
     setSendState('pending')
     try {
-      await api.sendMessage(lineName, adminPhone, text)
+      const result = await api.sendMessage(lineName, adminPhone, text)
       if (!mounted.current) return
+      if (result?.sent !== true) {
+        if (result?.sent === false) {
+          attempted.current = false
+          setSendState('rejected')
+          toast.error('First message was not sent. Review it before trying again.')
+          return
+        }
+        throw new Error('Send response did not confirm the outcome')
+      }
       toast.success(`${name} is live — first message sent to your admin`)
       navigate('/')
     } catch {
@@ -103,10 +112,10 @@ export function Ceremony({
       <div className="journey-firstmsg">
         <TextInput
           value={msg}
-          onChange={(e) => setMsg(e.target.value)}
+          onChange={(e) => { setMsg(e.target.value); if (sendState === 'rejected') setSendState('idle') }}
           placeholder="Say hello to your new agent…"
           aria-label="First message (optional)"
-          disabled={sending}
+          disabled={sending || unconfirmed}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
               e.preventDefault()
@@ -122,6 +131,7 @@ export function Ceremony({
         <p role="status">Delivery was not confirmed. Your message may have been sent. Check Inbox before sending it again.</p>
         <Button variant="neutral" onClick={() => navigate('/inbox')}>Check Inbox</Button>
       </div>}
+      {sendState === 'rejected' && <p role="status">First message was not sent. Review it before trying again.</p>}
       <div className="journey-actions">
         <Button variant="ghost" disabled={sending} onClick={() => navigate('/')}>
           Skip ceremony

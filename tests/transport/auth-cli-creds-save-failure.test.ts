@@ -18,6 +18,13 @@
  * which is the state the pre-fix code could not report.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+
+const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+let fixtureRoot: string;
+let exitListeners: Set<Function>;
 
 type Handler = (update?: unknown) => unknown | Promise<unknown>;
 
@@ -47,7 +54,7 @@ vi.mock('@whiskeysockets/baileys', () => ({
 vi.mock('qrcode-terminal', () => ({ default: { generate: mocks.qrcodeGenerate } }));
 
 vi.mock('../../src/config.ts', () => ({
-  config: { authDir: '/tmp/wa-test-auth-auth-cli-creds-save-failure', lockPath: '/tmp/wa-test-auth-auth-cli-creds-save-failure.lock' },
+  config: { get authDir() { return join(fixtureRoot, 'auth'); }, get lockPath() { return join(fixtureRoot, 'auth.lock'); }, get stateRoot() { return join(fixtureRoot, 'state'); } },
 }));
 
 vi.mock('../../src/transport/third-party-console-redaction.ts', () => ({
@@ -74,12 +81,15 @@ describe('#2165 auth CLI credential-save failure', () => {
   let onUnhandled: (reason: unknown) => void;
 
   beforeEach(() => {
+    fixtureRoot = mkdtempSync(join(tmpdir(), 'auth-cli-'));
+    mkdirSync(join(fixtureRoot, 'state'));
+    exitListeners = new Set(process.listeners('exit'));
     vi.useFakeTimers();
     vi.resetModules();
     mocks.connectionHandlers.length = 0;
     mocks.credsHandlers.length = 0;
     mocks.existsSync.mockReset();
-    mocks.existsSync.mockReturnValue(false);
+    mocks.existsSync.mockImplementation(actualFs.existsSync);
     mocks.saveCreds.mockReset();
     mocks.saveCreds.mockResolvedValue(undefined);
     mocks.qrcodeGenerate.mockReset();
@@ -110,6 +120,10 @@ describe('#2165 auth CLI credential-save failure', () => {
   });
 
   afterEach(() => {
+    for (const listener of process.listeners('exit')) {
+      if (!exitListeners.has(listener)) { listener(0); process.off('exit', listener); }
+    }
+    rmSync(fixtureRoot, { recursive: true, force: true });
     // `off` with the captured reference, NOT removeAllListeners: the latter
     // would also strip vitest's own unhandled-rejection handler, and a
     // suppressed rejection reads as a green run.

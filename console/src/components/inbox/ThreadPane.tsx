@@ -77,11 +77,12 @@ export function ThreadPane({
   const navigate = useNavigate()
   const isSending = composer.status === 'pending'
   const unconfirmed = composer.status === 'unconfirmed'
+  const rejected = composer.status === 'rejected'
   const inputRef = useRef<HTMLInputElement>(null)
 
   const selectionKey = `${conversation.line}\n${conversation.conversationKey}`
   useEffect(() => {
-    if (composer.status === 'editing') inputRef.current?.focus()
+    if (composer.status === 'editing' || composer.status === 'rejected') inputRef.current?.focus()
   }, [selectionKey, composer.status])
 
   const renderedMessages = toChronologicalMessages(messages)
@@ -168,9 +169,11 @@ export function ThreadPane({
             <EmptyState title="No messages loaded" description="Messages will appear here." />
           </div>
         )}
-        {isSending || unconfirmed ? (
+        {isSending || unconfirmed || rejected ? (
           <div className="inbox-sys" role="status">
-            {isSending ? 'Sending message…' : 'Send not confirmed. Check this conversation before sending again.'}
+            {isSending ? 'Sending message…' : rejected
+              ? 'Message was not sent. Review it before trying again.'
+              : 'Send not confirmed. Check this conversation before sending again.'}
             {unconfirmed ? <>
               <Button variant="ghost" onClick={composer.refresh}>Refresh messages</Button>
               <Button variant="ghost" onClick={composer.discard}>Discard draft</Button>

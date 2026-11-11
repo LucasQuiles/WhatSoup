@@ -1,6 +1,6 @@
 /**
  * HistoryTab — chat-list rendering, empty/no-selection state, message panel,
- * send happy path + error rollback, optimistic update, load-older pagination,
+ * confirmed sends, uncertain outcomes, retained drafts, load-older pagination,
  * Enter-key send, and typing-indicator pass-through.
  *
  * @vitest-environment jsdom
@@ -337,8 +337,82 @@ describe('HistoryTab — outgoing background by mode', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 5. Send message — happy path with optimistic update
+// 5. Send message — ownership and confirmed outcomes
 // ---------------------------------------------------------------------------
+
+describe('HistoryTab — send ownership', () => {
+  it('retains the pending draft, prevents repeated Enter, and keeps unconfirmed messages out of history', async () => {
+    let finish!: (value: { sent: boolean }) => void
+    sendMessageMock.mockReturnValue(new Promise(resolve => { finish = resolve }))
+    const client = makeClient()
+    const key = ['messages', 'demo-line', CHAT_A.conversationKey]
+    client.setQueryData(key, [MSG_1])
+    render(withProviders(<HistoryTab {...defaultProps()} />, client))
+    const textarea = screen.getByRole('textbox', { name: 'Type a reply' }) as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'Keep this draft' } })
+    act(() => {
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+    })
+    expect(sendMessageMock).toHaveBeenCalledTimes(1)
+    expect(textarea.value).toBe('Keep this draft')
+    expect(textarea.disabled).toBe(true)
+    expect(client.getQueryData(key)).toEqual([MSG_1])
+    await act(async () => finish({ sent: true }))
+    expect(textarea.value).toBe('')
+  })
+
+  it('keeps a rejected draft editable without claiming success', async () => {
+    sendMessageMock.mockResolvedValue({ sent: false })
+    const client = makeClient()
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    render(withProviders(<HistoryTab {...defaultProps()} />, client))
+    const textarea = screen.getByRole('textbox', { name: 'Type a reply' }) as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'Rejected draft' } })
+    await act(async () => fireEvent.keyDown(textarea, { key: 'Enter' }))
+    expect(textarea.value).toBe('Rejected draft')
+    expect(textarea.disabled).toBe(false)
+    expect(screen.getByRole('status').textContent).toContain('Message was not sent')
+    expect(invalidate).not.toHaveBeenCalled()
+  })
+
+  it('retains an uncertain draft and refreshes history without resending', async () => {
+    sendMessageMock.mockRejectedValue(new Error('response lost'))
+    const client = makeClient()
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    render(withProviders(<HistoryTab {...defaultProps()} />, client))
+    const textarea = screen.getByRole('textbox', { name: 'Type a reply' }) as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'Uncertain draft' } })
+    await act(async () => fireEvent.keyDown(textarea, { key: 'Enter' }))
+    expect(textarea.value).toBe('Uncertain draft')
+    expect(textarea.disabled).toBe(true)
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh messages' }))
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['messages', 'demo-line', CHAT_A.conversationKey] })
+    expect(sendMessageMock).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Discard draft' }))
+    expect(textarea.value).toBe('')
+    expect(textarea.disabled).toBe(false)
+  })
+
+  it('keeps drafts scoped to their line through deselection and late completion', async () => {
+    let reject!: (reason: Error) => void
+    sendMessageMock.mockReturnValue(new Promise((_resolve, fail) => { reject = fail }))
+    const client = makeClient()
+    const { rerender } = render(withProviders(<HistoryTab {...defaultProps()} />, client))
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'First line draft' } })
+    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' })
+    rerender(withProviders(<HistoryTab {...defaultProps({ selectedChat: null })} />, client))
+    rerender(withProviders(<HistoryTab {...defaultProps({ lineName: 'second-line' })} />, client))
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Second line draft' } })
+    await act(async () => reject(new Error('first reply lost')))
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('Second line draft')
+    expect(toastValue.error).not.toHaveBeenCalled()
+    rerender(withProviders(<HistoryTab {...defaultProps()} />, client))
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('First line draft')
+    expect(screen.getByRole('status').textContent).toContain('Send not confirmed')
+  })
+})
 
 describe('HistoryTab — send message happy path', () => {
   it('clears the input and calls api.sendMessage after clicking Send', async () => {
@@ -361,35 +435,31 @@ describe('HistoryTab — send message happy path', () => {
     expect(textarea.value).toBe('')
   })
 
-  it('injects an optimistic message into the query cache before the API call resolves', async () => {
+  it('keeps recorded history unchanged until the confirmed send is refetched', async () => {
     let resolveApi!: () => void
     sendMessageMock.mockReturnValue(new Promise<{ sent: boolean }>(resolve => {
       resolveApi = () => resolve({ sent: true })
     }))
 
     const client = makeClient()
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
     // Pre-seed the query cache with existing messages
     client.setQueryData(['messages', 'demo-line', CHAT_A.conversationKey], [MSG_1])
 
     render(withProviders(<HistoryTab {...defaultProps()} />, client))
 
     const textarea = screen.getByPlaceholderText('Type a reply...')
-    fireEvent.change(textarea, { target: { value: 'Optimistic!' } })
+    fireEvent.change(textarea, { target: { value: 'Await confirmation' } })
 
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /Send/i }))
     })
 
-    // Check that the optimistic message was injected (negative pk)
     const cached = client.getQueryData<Message[]>(['messages', 'demo-line', CHAT_A.conversationKey])
-    expect(cached).toBeDefined()
-    const optimistic = cached!.find(m => m.content === 'Optimistic!')
-    expect(optimistic).toBeDefined()
-    expect(optimistic!.pk).toBeLessThan(0) // negative pk = optimistic
-    expect(optimistic!.fromMe).toBe(true)
-    expect(optimistic!.senderName).toBe('You')
-
-    resolveApi()
+    expect(cached).toEqual([MSG_1])
+    expect(invalidate).not.toHaveBeenCalled()
+    await act(async () => resolveApi())
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['messages', 'demo-line', CHAT_A.conversationKey] })
   })
 
   it('invalidates the query after api.sendMessage resolves', async () => {
@@ -469,11 +539,11 @@ describe('HistoryTab — send message happy path', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 6. Send message — error rollback
+// 6. Send message — uncertain outcomes
 // ---------------------------------------------------------------------------
 
-describe('HistoryTab — send message error rollback', () => {
-  it('removes the optimistic message from cache and calls toast.error on API failure', async () => {
+describe('HistoryTab — send message uncertainty', () => {
+  it('preserves recorded history and the draft when the API response fails', async () => {
     sendMessageMock.mockRejectedValue(new Error('network down'))
 
     const client = makeClient()
@@ -489,16 +559,16 @@ describe('HistoryTab — send message error rollback', () => {
     })
 
     await waitFor(() => {
-      expect(toastValue.error).toHaveBeenCalledWith('Send failed: network down')
+      expect(toastValue.error).toHaveBeenCalledWith('Send not confirmed. Check this conversation before sending again.')
     })
 
-    // Optimistic message must be rolled back
     const cached = client.getQueryData<Message[]>(['messages', 'demo-line', CHAT_A.conversationKey])
-    expect(cached?.every(m => m.pk >= 0)).toBe(true)
-    expect(cached?.find(m => m.content === 'Fail me')).toBeUndefined()
+    expect(cached).toEqual([MSG_1])
+    expect((textarea as HTMLTextAreaElement).value).toBe('Fail me')
+    expect((textarea as HTMLTextAreaElement).disabled).toBe(true)
   })
 
-  it('stringifies non-Error rejection into the toast message', async () => {
+  it('reports non-Error rejection as uncertain without exposing arbitrary response text', async () => {
     sendMessageMock.mockRejectedValue('plain string error')
 
     render(withProviders(<HistoryTab {...defaultProps()} />))
@@ -511,7 +581,7 @@ describe('HistoryTab — send message error rollback', () => {
     })
 
     await waitFor(() => {
-      expect(toastValue.error).toHaveBeenCalledWith('Send failed: plain string error')
+      expect(toastValue.error).toHaveBeenCalledWith('Send not confirmed. Check this conversation before sending again.')
     })
   })
 })

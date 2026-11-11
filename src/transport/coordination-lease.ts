@@ -57,6 +57,12 @@ import {
 } from './auth-custody-contracts.ts';
 
 const TAKEOVER_LOG_FILENAME = 'coordination-lease-takeovers.ndjson';
+export const INSTANCE_MUTATION_SCOPE = parseAccountScopeId('scope:instance-mutation')!;
+
+export function instanceMutationRoot(stateRoot: string): string {
+  // A delete must not remove its own exclusion record before it settles.
+  return `${stateRoot}.mutation`;
+}
 
 /**
  * Resolve the configured account scope. Absent stays absent (the lease
@@ -271,6 +277,11 @@ function assessHolder(leasePath: string, probes: LeaseProbes): HolderVerdict {
   if (parsed === null) return { verdict: 'corrupt' };
   if (parsed.hostId !== probes.hostId) return { verdict: 'unknown' };
   if (parsed.bootId !== probes.bootId) return { verdict: 'reclaimable', reason: 'boot_changed', holder: parsed };
+  if (parsed.helper && probes.pidAlive(parsed.helper.pid)) {
+    const helperBirth = probes.birthToken(parsed.helper.pid);
+    if (helperBirth === null) return { verdict: 'unknown' };
+    if (helperBirth === parsed.helper.processBirthToken) return { verdict: 'live_owner' };
+  }
   if (!probes.pidAlive(parsed.pid)) return { verdict: 'reclaimable', reason: 'holder_dead', holder: parsed };
   const holderBirth = probes.birthToken(parsed.pid);
   if (holderBirth === null) return { verdict: 'unknown' };
@@ -390,7 +401,44 @@ export function acquireCoordinationLease(args: AcquireLeaseArgs): AcquireLeaseRe
 
 export type RenewLeaseResult =
   | { ok: true; lease: CoordinationLeaseV1 }
-  | { ok: false; refusal: 'lease_missing' | 'lease_corrupt' | 'fencing_token_mismatch' | 'io_error' };
+  | { ok: false; refusal: 'lease_missing' | 'lease_corrupt' | 'fencing_token_mismatch' | 'io_error' | 'lease_race_lost' };
+
+function withLeaseGuard<T>(stateRoot: string, scopeId: AccountScopeIdV1, probes: LeaseProbes, action: () => T): T | { ok: false; refusal: 'lease_race_lost' } {
+  const guard = reclaimGuardPath(stateRoot, scopeId);
+  if (!acquireReclaimGuard(guard, probes)) return { ok: false, refusal: 'lease_race_lost' };
+  try { return action(); } finally { unlinkSync(guard); }
+}
+
+/** Register before touching credentials: a surviving helper keeps custody after coordinator death. */
+export function registerCoordinationLeaseHelper(args: {
+  stateRoot: string;
+  scopeId: AccountScopeIdV1;
+  operationId: string;
+  fencingToken: number;
+  parentPid: number;
+  probes: LeaseProbes;
+}): RenewLeaseResult {
+  return withLeaseGuard(args.stateRoot, args.scopeId, args.probes, (): RenewLeaseResult => {
+    const lease = readCoordinationLease(args.stateRoot, args.scopeId);
+    if (!lease) return { ok: false, refusal: 'lease_missing' };
+    if (lease.operationId !== args.operationId || lease.fencingToken !== args.fencingToken ||
+      (lease.mode !== 'pairing' && lease.mode !== 'route_orchestration') ||
+      lease.pid !== args.parentPid || lease.hostId !== args.probes.hostId || lease.bootId !== args.probes.bootId ||
+      !args.probes.pidAlive(lease.pid) || args.probes.birthToken(lease.pid) !== lease.processBirthToken) {
+      return { ok: false, refusal: 'fencing_token_mismatch' };
+    }
+    const processBirthToken = args.probes.birthToken(args.probes.pid);
+    if (processBirthToken === null || (lease.helper &&
+      (lease.helper.pid !== args.probes.pid || lease.helper.processBirthToken !== processBirthToken))) {
+      return { ok: false, refusal: 'fencing_token_mismatch' };
+    }
+    const registered = { ...lease, helper: { pid: args.probes.pid, processBirthToken } };
+    try {
+      writeAtomicPrivateFileIsolatedSync(coordinationLeasePath(args.stateRoot, args.scopeId), JSON.stringify(registered), 'coordination lease helper');
+    } catch { return { ok: false, refusal: 'io_error' }; }
+    return { ok: true, lease: registered };
+  });
+}
 
 export function renewCoordinationLease(args: {
   stateRoot: string;
@@ -398,6 +446,13 @@ export function renewCoordinationLease(args: {
   lease: CoordinationLeaseV1;
   ttlMs: number;
   probes: LeaseProbes;
+}): RenewLeaseResult {
+  if (!existsSync(coordinationLeasePath(args.stateRoot, args.scopeId))) return { ok: false, refusal: 'lease_missing' };
+  return withLeaseGuard(args.stateRoot, args.scopeId, args.probes, () => renewHeldCoordinationLease(args));
+}
+
+function renewHeldCoordinationLease(args: {
+  stateRoot: string; scopeId: AccountScopeIdV1; lease: CoordinationLeaseV1; ttlMs: number; probes: LeaseProbes;
 }): RenewLeaseResult {
   const leasePath = coordinationLeasePath(args.stateRoot, args.scopeId);
   if (!existsSync(leasePath)) return { ok: false, refusal: 'lease_missing' };
@@ -433,12 +488,21 @@ export function renewCoordinationLease(args: {
 
 export type ReleaseLeaseResult =
   | { ok: true }
-  | { ok: false; refusal: 'lease_missing' | 'lease_corrupt' | 'fencing_token_mismatch' };
+  | { ok: false; refusal: 'lease_missing' | 'lease_corrupt' | 'fencing_token_mismatch' | 'lease_race_lost' | 'helper_unconfirmed' };
 
 export function releaseCoordinationLease(args: {
   stateRoot: string;
   scopeId: AccountScopeIdV1;
   lease: CoordinationLeaseV1;
+  probes?: LeaseProbes;
+}): ReleaseLeaseResult {
+  if (!existsSync(coordinationLeasePath(args.stateRoot, args.scopeId))) return { ok: false, refusal: 'lease_missing' };
+  const probes = args.probes ?? defaultLeaseProbes();
+  return withLeaseGuard(args.stateRoot, args.scopeId, probes, () => releaseHeldCoordinationLease({ ...args, probes }));
+}
+
+function releaseHeldCoordinationLease(args: {
+  stateRoot: string; scopeId: AccountScopeIdV1; lease: CoordinationLeaseV1; probes: LeaseProbes;
 }): ReleaseLeaseResult {
   const leasePath = coordinationLeasePath(args.stateRoot, args.scopeId);
   if (!existsSync(leasePath)) return { ok: false, refusal: 'lease_missing' };
@@ -451,6 +515,13 @@ export function releaseCoordinationLease(args: {
   if (onDisk === null) return { ok: false, refusal: 'lease_corrupt' };
   if (onDisk.fencingToken !== args.lease.fencingToken) {
     return { ok: false, refusal: 'fencing_token_mismatch' };
+  }
+  if (onDisk.helper) {
+    if (onDisk.hostId !== args.probes.hostId || onDisk.bootId !== args.probes.bootId) return { ok: false, refusal: 'helper_unconfirmed' };
+    if (args.probes.pidAlive(onDisk.helper.pid)) {
+      const birth = args.probes.birthToken(onDisk.helper.pid);
+      if (birth === null || birth === onDisk.helper.processBirthToken) return { ok: false, refusal: 'helper_unconfirmed' };
+    }
   }
   // Tombstone BEFORE unlink so a crash between the two cannot lose
   // monotonicity: the next acquire folds in max(tombstone, lease).

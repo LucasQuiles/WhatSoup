@@ -57,6 +57,7 @@ export interface CoordinationLeaseV1 {
   expiresAt: string;
   fencingToken: number;
   mode: CoordinationLeaseMode;
+  helper?: { pid: number; processBirthToken: string };
 }
 
 export interface AuthGenerationReceiptV2 {
@@ -200,8 +201,16 @@ const LEASE_KEYS = [
 ] as const;
 
 export function parseCoordinationLease(value: unknown): CoordinationLeaseV1 | null {
-  if (!isRecord(value) || !hasExactKeys(value, LEASE_KEYS)) return null;
+  if (!isRecord(value) || !hasExactKeys(value, 'helper' in value ? [...LEASE_KEYS, 'helper'] : LEASE_KEYS)) return null;
   if (value.v !== 1) return null;
+  let helper: CoordinationLeaseV1['helper'];
+  if ('helper' in value) {
+    if (!isRecord(value.helper) || !hasExactKeys(value.helper, ['pid', 'processBirthToken'])) return null;
+    const helperPid = positiveInt(value.helper.pid);
+    const helperBirth = boundedToken(value.helper.processBirthToken);
+    if (helperPid === null || helperBirth === null) return null;
+    helper = { pid: helperPid, processBirthToken: helperBirth };
+  }
   const scopeId = parseAccountScopeId(value.scopeId);
   const operationId = boundedToken(value.operationId);
   const hostId = boundedToken(value.hostId);
@@ -235,6 +244,7 @@ export function parseCoordinationLease(value: unknown): CoordinationLeaseV1 | nu
     expiresAt: value.expiresAt as string,
     fencingToken,
     mode,
+    ...(helper ? { helper } : {}),
   };
 }
 

@@ -21,6 +21,8 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readdirSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { appendPrivateJsonLineSync, fsyncDirectory, readPrivateFileSync } from '../lib/private-fs.ts';
+import { MS_PER_SECOND } from '../lib/time-units.ts';
+import { createChildLogger } from '../logger.ts';
 import {
   parseAccountScopeId,
   parseCoordinationLease,
@@ -48,6 +50,8 @@ import type { AcquireLeaseResult } from './coordination-lease.ts';
 
 const OPERATIONS_JOURNAL_FILENAME = 'pairing-operations.ndjson';
 const MAX_OPERATIONS_JOURNAL_BYTES = 512 * 1024;
+const ACTIVATION_TIMEOUT_MS = 30 * MS_PER_SECOND;
+const log = createChildLogger('transport:pairing-saga');
 
 export interface PairingSagaRequest {
   idempotencyKey: string;
@@ -172,8 +176,6 @@ export function readPairingOperationRecord(
 }
 
 const TERMINAL_STATES: readonly PairingOperationState[] = ['activated', 'failed', 'aborted'];
-/** receipt_persisted is the resting SUCCESS for install-without-activate. */
-const COMPLETED_STATES: readonly PairingOperationState[] = ['activated', 'receipt_persisted'];
 
 export async function executePairingSaga(
   request: PairingSagaRequest,
@@ -198,7 +200,10 @@ export async function executePairingSaga(
     if (existing.paramsDigest !== paramsDigest) {
       return { ok: false, errorClass: 'verification_failed', refusal: 'parameter_drift' };
     }
-    if (COMPLETED_STATES.includes(existing.operation.state) && existing.generationId !== null) {
+    // A persisted receipt only completes an operation that did not request activation.
+    const completed = existing.operation.state === 'activated'
+      || existing.operation.state === 'receipt_persisted' && !request.startService;
+    if (completed && existing.generationId !== null) {
       return { ok: true, generationId: existing.generationId, replayed: true };
     }
     if (existing.operation.state === 'failed') {
@@ -276,6 +281,7 @@ export async function executePairingSaga(
   const lease = leaseResult.lease;
   journal('lease_acquired', { fencingToken: lease.fencingToken });
   let helperCleanupUnconfirmed = false;
+  let activationCleanupUnconfirmed = false;
 
   try {
     // Quarantine the existing active tree (if any) under a unique
@@ -364,7 +370,23 @@ export async function executePairingSaga(
     journal('receipt_persisted', { fencingToken: lease.fencingToken });
 
     if (request.startService) {
-      const started = await effects.startService();
+      const activation = Promise.resolve().then(() => effects.startService()).catch(() => false);
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      const started = await Promise.race([
+        activation,
+        new Promise<'unconfirmed'>((resolve) => {
+          deadline = setTimeout(() => resolve('unconfirmed'), ACTIVATION_TIMEOUT_MS);
+        }),
+      ]).finally(() => { clearTimeout(deadline); });
+      if (started === 'unconfirmed') {
+        // The response deadline does not prove that service control has stopped.
+        activationCleanupUnconfirmed = true;
+        void activation.then(() => effects.releaseLease(lease)).catch((err) => {
+          log.error({ err, operationId: request.idempotencyKey }, 'Late activation lease release failed');
+        });
+        journal('failed', { errorClass: 'verification_failed', fencingToken: lease.fencingToken });
+        return { ok: false, errorClass: 'verification_failed', refusal: 'service_start_unconfirmed' };
+      }
       if (!started) {
         journal('failed', { errorClass: 'verification_failed', fencingToken: lease.fencingToken });
         return { ok: false, errorClass: 'verification_failed', refusal: 'service_start_unverified' };
@@ -374,7 +396,7 @@ export async function executePairingSaga(
 
     return { ok: true, generationId };
   } finally {
-    if (!helperCleanupUnconfirmed) effects.releaseLease(lease);
+    if (!helperCleanupUnconfirmed && !activationCleanupUnconfirmed) effects.releaseLease(lease);
   }
 }
 

@@ -158,6 +158,16 @@ within the current Inbox visit. Leaving Inbox or reloading ends this local
 protection, so inspect history before re-entering an uncertain message. A late
 response from an abandoned Inbox cannot change its cache or announce an outcome.
 
+Inbox, the line-detail History tab, and the first-message ceremony clear a draft
+only after an explicit `sent: true` acknowledgement. A `sent: false` result keeps
+the draft editable and reports that the message was not sent. Missing or malformed
+acknowledgements remain unconfirmed. The fleet normalizes the health server's
+existing `ok` acknowledgement into `sent`, preserving its other response fields;
+neither a rejection nor an invalid acknowledgement publishes message activity.
+History uses the same composer state as Inbox, with drafts retained across chat
+and line selection for the current History mount. Leaving that view ends its
+local duplicate-submission protection.
+
 **Contact details** panel (right side) shows the contact, line, conversation type,
 and recorded agent session. Contact access controls live on the line detail page.
 

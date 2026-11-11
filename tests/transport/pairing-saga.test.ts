@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -21,7 +21,7 @@ import {
   observeActiveTree,
   resolveAuthGenerationEvidenceV2,
 } from '../../src/transport/auth-generation-v2.ts';
-import { acquireCoordinationLease, releaseCoordinationLease, type LeaseProbes } from '../../src/transport/coordination-lease.ts';
+import { acquireCoordinationLease, readCoordinationLease, releaseCoordinationLease, type LeaseProbes } from '../../src/transport/coordination-lease.ts';
 import { parseAccountScopeId, type CoordinationLeaseV1 } from '../../src/transport/auth-custody-contracts.ts';
 
 const SCOPE = parseAccountScopeId('scope:line-a-wa')!;
@@ -173,6 +173,7 @@ it('preserves the writable auth tree and lease when helper cleanup is unconfirme
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   for (const entry of existsSync(root) ? readdirSync(root) : []) {
     try {
       chmodSync(join(root, entry), 0o700);
@@ -627,6 +628,69 @@ describe('executePairingSaga — refusal and custody edge branches', () => {
     expect(outcome).toEqual({ ok: false, errorClass: 'verification_failed', refusal: 'service_start_unverified' });
     expect(resolveAuthGenerationEvidenceV2(stateRoot).status).toBe('recorded_v2');
     expect(readTerminalLatchJournal(stateRoot).status).toBe('superseded');
+  });
+
+  it('journals a rejected activation and refuses replay without repeating effects', async () => {
+    const request = baseRequest({ startService: true });
+    const { effects, log } = makeEffects({ startService: async () => { throw new Error('activation rejected'); } });
+    await expect(executePairingSaga(request, { stateRoot, authDir }, effects)).resolves.toEqual({
+      ok: false, errorClass: 'verification_failed', refusal: 'service_start_unverified',
+    });
+    expect(mustRecord(request.idempotencyKey).operation.state).toBe('failed');
+    expect(resolveAuthGenerationEvidenceV2(stateRoot).status).toBe('recorded_v2');
+    const previousCalls = [...log.calls];
+    const replay = await executePairingSaga(request, { stateRoot, authDir }, effects);
+    expect(replay).toEqual({ ok: false, errorClass: 'verification_failed', refusal: 'operation_already_failed' });
+    expect(log.calls).toEqual(previousCalls);
+  });
+
+  it.each([true, false])('bounds an unresolved activation and retains custody until late completion %s', async (lateResult) => {
+    vi.useFakeTimers();
+    let finishActivation!: (started: boolean) => void;
+    const activation = new Promise<boolean>((resolve) => { finishActivation = resolve; });
+    const request = baseRequest({ startService: true });
+    const { effects, log } = makeEffects({ startService: () => activation });
+    let outcome: Awaited<ReturnType<typeof executePairingSaga>> | undefined;
+    const pending = executePairingSaga(request, { stateRoot, authDir }, effects).then((result) => { outcome = result; });
+
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(outcome).toBeUndefined();
+    expect(mustRecord(request.idempotencyKey).operation.state).toBe('receipt_persisted');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(outcome).toEqual({ ok: false, errorClass: 'verification_failed', refusal: 'service_start_unconfirmed' });
+    await pending;
+    expect(mustRecord(request.idempotencyKey).operation.state).toBe('failed');
+    expect(readCoordinationLease(stateRoot, SCOPE)?.operationId).toBe(request.idempotencyKey);
+    expect(log.calls).not.toContain('releaseLease');
+    expect(resolveAuthGenerationEvidenceV2(stateRoot).status).toBe('recorded_v2');
+    const previousCalls = [...log.calls];
+    expect(await executePairingSaga(request, { stateRoot, authDir }, effects)).toMatchObject({ ok: false, refusal: 'operation_already_failed' });
+    expect(log.calls).toEqual(previousCalls);
+
+    finishActivation(lateResult);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(readCoordinationLease(stateRoot, SCOPE)).toBeNull();
+    expect(log.calls.filter((call) => call === 'releaseLease')).toHaveLength(1);
+    expect(mustRecord(request.idempotencyKey).operation.state).toBe('failed');
+    expect(outcome).toMatchObject({ ok: false, refusal: 'service_start_unconfirmed' });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('refuses replay when the journal ends before requested activation is confirmed', async () => {
+    const request = baseRequest({ startService: true });
+    const { effects, log } = makeEffects();
+    expect((await executePairingSaga(request, { stateRoot, authDir }, effects)).ok).toBe(true);
+    const journalPath = join(stateRoot, 'pairing-operations.ndjson');
+    const rows = readFileSync(journalPath, 'utf8').trim().split('\n');
+    expect(JSON.parse(rows.pop()!).operation.state).toBe('activated');
+    writeFileSync(journalPath, rows.join('\n') + '\n');
+    expect(mustRecord(request.idempotencyKey).operation.state).toBe('receipt_persisted');
+    const previousCalls = [...log.calls];
+
+    expect(await executePairingSaga(request, { stateRoot, authDir }, effects)).toEqual({
+      ok: false, errorClass: 'crash_recovered', refusal: 'operation_interrupted',
+    });
+    expect(log.calls).toEqual(previousCalls);
   });
 
   it('an incomplete pairing that wrote nothing leaves no failed-quarantine sibling', async () => {

@@ -84,12 +84,12 @@ afterEach(() => {
 });
 
 describe('buildSagaEffects.stopService', () => {
-  it('uses stopForAuth when present and maps its boolean', async () => {
+  it('accepts a verified stop or a platform report that no job exists', async () => {
     const sm = makeServiceManager({ stopForAuth: vi.fn().mockResolvedValue(true) });
     expect(await effectsFor(sm).stopService()).toBe(true);
 
     const smFalse = makeServiceManager({ stopForAuth: vi.fn().mockResolvedValue(false) });
-    expect(await effectsFor(smFalse).stopService()).toBe(false);
+    expect(await effectsFor(smFalse).stopService()).toBe(true);
   });
 
   it('falls back to stop() when stopForAuth is absent, and reports false on throw', async () => {
@@ -103,6 +103,36 @@ describe('buildSagaEffects.stopService', () => {
 });
 
 describe('buildSagaEffects.startService', () => {
+  it('keeps pairing admission closed until an unresolved activation callback settles', async () => {
+    vi.useFakeTimers();
+    let finish!: (error: Error | null) => void;
+    const sm = makeServiceManager({ startAfterAuthFire: vi.fn((_name: string, callback: typeof finish) => { finish = callback; }) });
+    const activation = effectsFor(sm).startService();
+    const configPath = join(root, 'config.json');
+    writeFileSync(configPath, JSON.stringify({ accountScopeId: SCOPE }));
+    const deps = { discovery: { getInstance: () => ({ name: 'line-a', configPath, stateRoot }) } } as unknown as OpsDeps;
+    const request = () => mockReq({ method: 'POST', body: '{}', headers: { authorization: 'Bearer fixture' } });
+    try {
+      await vi.advanceTimersByTimeAsync(30_001);
+      const busy = mockRes();
+      await handlePairingApply(request(), busy, deps, { name: 'line-a' });
+      expect(busy._status).toBe(409);
+      expect(JSON.parse(busy._body).error).toContain('already in progress');
+    } finally {
+      finish(null);
+      await activation;
+    }
+    const admitted = mockRes();
+    await handlePairingApply(request(), admitted, deps, { name: 'line-a' });
+    expect(admitted._status).toBe(400);
+    expect(JSON.parse(admitted._body).error).toContain('apply requires idempotencyKey');
+  });
+
+  it.each(['startAfterAuthFire', 'startFire'])('reports a synchronous %s throw as unverified activation', async (method) => {
+    const sm = makeServiceManager({ [method]: vi.fn(() => { throw new Error('start refused'); }) });
+    await expect(effectsFor(sm).startService()).resolves.toBe(false);
+  });
+
   it('resolves true on a null error via startAfterAuthFire and false on an error', async () => {
     const ok = makeServiceManager({ startAfterAuthFire: vi.fn((_n: string, cb?: (e: Error | null) => void) => cb?.(null)) });
     expect(await effectsFor(ok).startService()).toBe(true);

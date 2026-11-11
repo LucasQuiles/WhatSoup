@@ -33,6 +33,7 @@
  * CLUSTER S (lines 1251, 1253, 1257-1258, 1265-1266): handleAuth name guard, not found,
  *   in-flight dedupe, kill existing
  */
+import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -62,7 +63,8 @@ vi.mock('../../../src/fleet/mcp-client.ts', () => ({ mcpCall: vi.fn() }));
 vi.mock('../../../src/fleet/http-proxy.ts', () => ({ proxyToInstance: vi.fn() }));
 vi.mock('node:child_process', async () => {
   const { childProcessMock } = await import('../../helpers/child-process.ts');
-  return childProcessMock();
+  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+  return { ...actual, ...childProcessMock(), execFileSync: actual.execFileSync };
 });
 vi.mock('node:fs', async (importOriginal) => {
   const actual = (await importOriginal()) as typeof import('node:fs');
@@ -79,6 +81,14 @@ import { spawn } from 'node:child_process';
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+const authConfigs = trackTmpDirs('auth-route-');
+
+function fakeAuthInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
+  const configPath = path.join(authConfigs.make('instance'), 'config.json');
+  fs.writeFileSync(configPath, '{}');
+  return fakeInstance({ configPath, ...overrides });
+}
 
 function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
   return {
@@ -588,7 +598,7 @@ describe('handleAuth — concurrency guards', () => {
   });
 
   it('returns 409 when auth is already in-flight for the same instance', async () => {
-    const inst = fakeInstance({ name: 'alpha' });
+    const inst = fakeAuthInstance({ name: 'alpha' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
 

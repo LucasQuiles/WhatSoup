@@ -34,7 +34,8 @@ import {
 import { writeAuthGenerationReceipt } from './auth-generation.ts';
 import { errorMessage } from '../lib/error-message.ts';
 import { classifyPairNumber, maskPairingCode, pairingEmissionLine, pairingGate } from './pairing.ts';
-import { acquireCoordinationLease, defaultLeaseProbes, readCoordinationLease, releaseCoordinationLease } from './coordination-lease.ts';
+import { acquireCoordinationLease, defaultLeaseProbes, INSTANCE_MUTATION_SCOPE, instanceMutationRoot, registerCoordinationLeaseHelper, releaseCoordinationLease } from './coordination-lease.ts';
+import { acquireProcessLock, releaseProcessLock } from '../lib/process-lock.ts';
 
 const log = createChildLogger('auth-cli');
 
@@ -58,6 +59,25 @@ if (existsSync(lockPath)) {
   );
   process.exit(1);
 }
+const mutationRoot = instanceMutationRoot(config.stateRoot);
+const mutationProbes = defaultLeaseProbes();
+// env-allowed: exact delegated instance mutation lease identity
+const mutationOp = process.env.WHATSOUP_MUTATION_LEASE_OP;
+// env-allowed: exact delegated instance mutation lease identity
+const mutationFencing = process.env.WHATSOUP_MUTATION_LEASE_FENCING;
+const mutation = mutationOp !== undefined || mutationFencing !== undefined
+  ? registerCoordinationLeaseHelper({ stateRoot: mutationRoot, scopeId: INSTANCE_MUTATION_SCOPE, operationId: mutationOp ?? '', fencingToken: Number(mutationFencing), parentPid: process.ppid, probes: mutationProbes })
+  : acquireCoordinationLease({ stateRoot: mutationRoot, scopeId: INSTANCE_MUTATION_SCOPE, operationId: `auth-cli-${process.pid}-${Date.now()}`, mode: 'pairing', ttlMs: 600_000, probes: mutationProbes });
+if (!mutation.ok) {
+  log.fatal({ refusal: mutation.refusal }, 'instance mutation lease unavailable; refusing pairing');
+  process.exit(1);
+}
+if (mutationOp === undefined && mutationFencing === undefined) {
+  process.once('exit', () => { releaseCoordinationLease({ stateRoot: mutationRoot, scopeId: INSTANCE_MUTATION_SCOPE, lease: mutation.lease }); });
+}
+
+const authProcessLock = acquireProcessLock(lockPath);
+process.once('exit', () => { releaseProcessLock(authProcessLock); });
 
 // ---------------------------------------------------------------------------
 // Account-scope coordination lease (q-canary lane, T4)
@@ -81,13 +101,9 @@ if (config.accountScopeId !== undefined) {
   // env-allowed: delegated pairing-lease handoff from the fleet coordinator
   const delegatedFencing = process.env.WHATSOUP_PAIRING_LEASE_FENCING;
   if (delegatedOp !== undefined || delegatedFencing !== undefined) {
-    const onDisk = readCoordinationLease(config.stateRoot, scopeId);
-    if (
-      onDisk === null ||
-      onDisk.mode !== 'pairing' ||
-      onDisk.operationId !== delegatedOp ||
-      String(onDisk.fencingToken) !== delegatedFencing
-    ) {
+    const registered = registerCoordinationLeaseHelper({ stateRoot: config.stateRoot, scopeId,
+      operationId: delegatedOp ?? '', fencingToken: Number(delegatedFencing), parentPid: process.ppid, probes: mutationProbes });
+    if (!registered.ok || registered.lease.mode !== 'pairing') {
       log.fatal(
         { delegatedOp, delegatedFencing },
         'delegated pairing lease does not match the on-disk lease; refusing pairing',

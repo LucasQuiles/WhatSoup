@@ -95,6 +95,16 @@ restoration after explicit discard and a subsequent successful send. The ordinar
 `test:browser` command includes this check. It does not establish delivery over a
 real transport or persistence after leaving Inbox or reloading.
 
+The component journeys in `tests/console/history-tab.test.tsx`,
+`inbox-page.test.tsx`, and `ceremony-send.test.tsx` distinguish confirmed,
+rejected, and unconfirmed acknowledgements. History shares Inbox's synchronous
+send ownership and retained drafts; its tests cover repeated Enter, line changes,
+deselection, late completion, refresh without resend, and explicit discard.
+Only `sent: true` clears a draft. These isolated fixtures establish local UI
+behavior; they do not establish transport delivery or cross-client deduplication.
+The History browser journey also exercises repeated Enter, conversation changes,
+refresh without resend, and keyboard focus after discard at a 390px viewport.
+
 ## 5. Visual Drift Sentinel
 
 Before a screen is accepted, compare it against locked SOUP v2 Blend. Flag any of:

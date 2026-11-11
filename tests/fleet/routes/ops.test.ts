@@ -1,6 +1,7 @@
 /**
  * Tests for src/fleet/routes/ops.ts
  */
+import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -32,7 +33,8 @@ vi.mock('../../../src/fleet/http-proxy.ts', () => ({
 }));
 vi.mock('node:child_process', async () => {
   const { childProcessMock } = await import('../../helpers/child-process.ts');
-  return childProcessMock();
+  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+  return { ...actual, ...childProcessMock(), execFileSync: actual.execFileSync };
 });
 vi.mock('node:fs', async (importOriginal) => {
   const actual = (await importOriginal()) as typeof import('node:fs');
@@ -80,6 +82,14 @@ function writePermissiveFile(filePath: string, contents: string): void {
   fs.writeFileSync(filePath, contents);
   fs.chmodSync(filePath, 0o644);
   expect(fileMode(filePath)).toBe(0o644);
+}
+
+const authConfigs = trackTmpDirs('auth-route-');
+
+function fakeAuthInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
+  const configPath = path.join(authConfigs.make('instance'), 'config.json');
+  fs.writeFileSync(configPath, '{}');
+  return fakeInstance({ configPath, ...overrides });
 }
 
 function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
@@ -150,7 +160,7 @@ describe('handleAuth', () => {
   });
 
   it('spawns bootstrap-auth with process.execPath, an absolute script path, and repoRoot cwd', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
 
@@ -162,7 +172,7 @@ describe('handleAuth', () => {
 
     await handleAuth(req, res, deps, { name: 'test-line' });
 
-    expect(res._status).toBe(200);
+    expect(res._status, res._chunks.join('')).toBe(200);
     expect(deps.serviceManager.stop).toHaveBeenCalledWith('test-line');
     expect(spawn).toHaveBeenCalledTimes(1);
     expect(spawn).toHaveBeenCalledWith(
@@ -183,7 +193,7 @@ describe('handleAuth', () => {
   });
 
   it('restarts a stopped instance when auth exits nonzero before connecting', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
 
@@ -207,7 +217,7 @@ describe('handleAuth', () => {
   });
 
   it('restarts a stopped instance when auth spawn reports an error before connecting', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
 
@@ -234,7 +244,7 @@ describe('handleAuth', () => {
   it('restarts a stopped instance when auth times out before connecting', async () => {
     vi.useFakeTimers();
     try {
-      const inst = fakeInstance({ name: 'test-line' });
+      const inst = fakeAuthInstance({ name: 'test-line' });
       const child = fakeChildProcess();
       vi.mocked(spawn).mockReturnValue(child as any);
 
@@ -379,7 +389,7 @@ describe('handleSend', () => {
     expect(mcpCall).not.toHaveBeenCalled();
     expect(proxyToInstance).toHaveBeenCalledTimes(1);
     expect(res._status).toBe(status);
-    expect(res._body).toBe(body);
+    expect(JSON.parse(res._body)).toEqual(status === 200 ? { ok: true, sent: true } : { error: 'invalid recipient' });
     expect(deps.realtime.publish).toHaveBeenCalledTimes(status === 200 ? 3 : 0);
   });
 
@@ -3082,12 +3092,13 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
 
   it('forwards XDG_STATE_HOME to the pairing helper', async () => {
     const previousStateHome = process.env.XDG_STATE_HOME;
-    process.env.XDG_STATE_HOME = '/custom/xdg-state';
+    const customStateHome = authConfigs.make('custom-state');
+    process.env.XDG_STATE_HOME = customStateHome;
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const deps = depsFor({
       discovery: {
-        getInstance: vi.fn(() => fakeInstance({ name: 'test-line' })),
+        getInstance: vi.fn(() => fakeAuthInstance({ name: 'test-line' })),
         scan: vi.fn(),
       } as any,
     });
@@ -3103,7 +3114,7 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
       const spawnOptions = vi.mocked(spawn).mock.calls.at(-1)?.[2] as
         | { env?: NodeJS.ProcessEnv }
         | undefined;
-      expect(spawnOptions?.env?.XDG_STATE_HOME).toBe('/custom/xdg-state');
+      expect(spawnOptions?.env?.XDG_STATE_HOME).toBe(customStateHome);
     } finally {
       child.emit('exit', 1);
       if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME;
@@ -3112,7 +3123,7 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
   });
 
   it('skips non-JSON stdout lines without emitting an SSE event (line 1360)', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const deps = depsFor({
@@ -3132,7 +3143,7 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
   });
 
   it('drops stdout events whose event name is not in the allow-list (line 1337)', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const deps = depsFor({
@@ -3151,7 +3162,7 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
   });
 
   it('forwards an allowed "qr" stdout event through SSE (lines 1338-1339)', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const deps = depsFor({
@@ -3173,7 +3184,7 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
   });
 
   it('forwards an "error" stdout event that omits data, using the empty default (line 1338)', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const deps = depsFor({
@@ -3195,7 +3206,7 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
   });
 
   it('handles a partial stdout line followed by completion on the next chunk (line 1332)', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const deps = depsFor({
@@ -3702,7 +3713,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
 
   // --- handleAuth: stderr logging branch (ops.ts:1365-1367) ---
   it('handleAuth logs trimmed stderr output from the auth process (lines 1365-1367)', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const deps = depsFor({
@@ -3734,7 +3745,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       fs.writeFileSync(cfgPath, JSON.stringify({ name: 'test-line', introSent: true }));
       fs.chmodSync(cfgPath, 0o600);
 
-      const inst = fakeInstance({ name: 'test-line', configPath: cfgPath });
+      const inst = fakeAuthInstance({ name: 'test-line', configPath: cfgPath });
       const child = fakeChildProcess();
       vi.mocked(spawn).mockReturnValue(child as any);
       const svc = mockServiceManager();
@@ -3766,7 +3777,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
   });
 
   it('waits for the pairing helper to exit successfully before using the authenticated-start hook', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const svc = mockServiceManager();
@@ -3801,7 +3812,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
   });
 
   it('waits for stdout to close before deciding whether a successful helper persisted credentials', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess({ emitCloseOnExit: false });
     vi.mocked(spawn).mockReturnValue(child as any);
     const svc = mockServiceManager();
@@ -3832,7 +3843,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
   });
 
   it('keeps a persisted pairing alive through an SSE client close and activates it on exit 0', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const svc = mockServiceManager();
@@ -3857,7 +3868,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
   it('restores the stopped instance when a persisted pairing helper does not exit promptly', async () => {
     vi.useFakeTimers();
     try {
-      const inst = fakeInstance({ name: 'test-line' });
+      const inst = fakeAuthInstance({ name: 'test-line' });
       const child = fakeChildProcess();
       vi.mocked(spawn).mockReturnValue(child as any);
       const svc = mockServiceManager();
@@ -3887,7 +3898,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
   });
 
   it('reports a sanitized activation failure after persisted pairing exits successfully', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const svc = mockServiceManager();
@@ -3914,7 +3925,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
   });
 
   it('does not activate an uninstalled macOS instance when auth teardown finds no existing job', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const svc = mockServiceManager();
@@ -3944,7 +3955,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
   });
 
   it('fails authentication before spawning when macOS teardown cannot stop an existing job', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const svc = mockServiceManager();
@@ -3967,7 +3978,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
   });
 
   it('suppresses a preflight-stop failure after the auth SSE client closes', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     let rejectStop: ((reason?: unknown) => void) | undefined;
@@ -3998,7 +4009,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
   });
 
   it('restores a stopped service when the auth SSE client closes during preflight', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     let resolveStop: (() => void) | undefined;
@@ -4028,8 +4039,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
 
   // --- handleAuth: connected event when introSent reset throws (warn branch, ops.ts:1349-1352) ---
   it('handleAuth continues the connected flow when introSent reset fails (lines 1349-1352)', async () => {
-    // Make the config path unreadable so writePrivateFileSync throws.
-    const inst = fakeInstance({ name: 'test-line', configPath: '/definitely/missing/path/config.json' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const svc = mockServiceManager();
@@ -4041,6 +4051,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     const res = mockSseRes();
     await handleAuth(req, res, deps, { name: 'test-line' });
 
+    fs.rmSync(inst.configPath);
     // The connected branch records the event even though introSent reset throws.
     child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'connected', data: {} }) + '\n'));
 
@@ -4056,7 +4067,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
   // authInFlight is a module-level singleton. We trigger an in-flight auth session
   // by awaiting one whose child never exits, then immediately call again.
   it('handleAuth returns 409 when an auth session is already in flight (lines 1256-1258)', async () => {
-    const inst = fakeInstance({ name: 'inflight-line' });
+    const inst = fakeAuthInstance({ name: 'inflight-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const deps = depsFor({
@@ -4082,7 +4093,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
 
   // --- handleAuth: kills any pre-existing auth child for the same instance (ops.ts:1264-1266) ---
   it('handleAuth kills a previously-spawned auth child for the same instance (lines 1264-1266)', async () => {
-    const inst = fakeInstance({ name: 'reuse-line' });
+    const inst = fakeAuthInstance({ name: 'reuse-line' });
     const firstChild = fakeChildProcess();
     const secondChild = fakeChildProcess();
     vi.mocked(spawn)
@@ -4130,7 +4141,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       fs.writeFileSync(cfgPath, JSON.stringify({ name: 'norestart-line', introSent: true }));
       fs.chmodSync(cfgPath, 0o600);
 
-      const inst = fakeInstance({ name: 'norestart-line', configPath: cfgPath });
+      const inst = fakeAuthInstance({ name: 'norestart-line', configPath: cfgPath });
       const child = fakeChildProcess();
       vi.mocked(spawn).mockReturnValue(child as any);
       const svc = mockServiceManager();
@@ -4219,7 +4230,7 @@ describe('ops.ts uncovered-branch coverage', () => {
   it('handleAuth logs post-auth start failure when startFire invokes its error callback (line 1315)', async () => {
     vi.useFakeTimers();
     try {
-      const inst = fakeInstance({ name: 'test-line' });
+      const inst = fakeAuthInstance({ name: 'test-line' });
       const child = fakeChildProcess();
       vi.mocked(spawn).mockReturnValue(child as any);
       const svc = mockServiceManager();
@@ -4249,7 +4260,7 @@ describe('ops.ts uncovered-branch coverage', () => {
   });
 
   it('handleAuth logs connected-branch start failure when startFire invokes its error callback (line 1355)', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const svc = mockServiceManager();
@@ -4846,7 +4857,7 @@ describe('ops.ts uncovered-branch coverage', () => {
   it('handleAuth completes the timeout path without logging when startFire reports no error (line 1315 false)', async () => {
     vi.useFakeTimers();
     try {
-      const inst = fakeInstance({ name: 'test-line' });
+      const inst = fakeAuthInstance({ name: 'test-line' });
       const child = fakeChildProcess();
       vi.mocked(spawn).mockReturnValue(child as any);
       const svc = mockServiceManager();
@@ -5163,7 +5174,7 @@ describe('ops.ts uncovered-branch coverage', () => {
 
   // ---- Line 1355 (false branch): handleAuth connected-branch startFire with null err ----
   it('handleAuth completes the connected path without logging when startFire reports no error (line 1355 false)', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const svc = mockServiceManager();

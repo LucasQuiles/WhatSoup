@@ -198,7 +198,7 @@ vi.mock('../../console/src/lib/api', () => ({
     deleteLine: vi.fn(() => Promise.resolve()),
     searchMessages: vi.fn(() => Promise.resolve({ results: [], total: 0 })),
     getMessages: vi.fn(() => Promise.resolve([])),
-    sendMessage: vi.fn(() => Promise.resolve()),
+    sendMessage: vi.fn(() => Promise.resolve({ sent: true })),
     // v3.5 Inbox: mark-read on open + context-pane checkpoint query.
     markRead: vi.fn(() => Promise.resolve()),
     getCheckpoints: vi.fn(() => Promise.resolve({ observedAt: '', checkpoints: [] })),
@@ -1272,8 +1272,8 @@ const foldLine: LineInstance = {
 };
 
 const foldChats: ChatItem[] = [
-  { conversationKey: '15550000001@s.whatsapp.net', displayName: 'One', lastMessageAt: null, lastMessagePreview: null, unreadCount: 0, isGroup: false } as unknown as ChatItem,
-  { conversationKey: '15550000002@s.whatsapp.net', displayName: 'Two', lastMessageAt: null, lastMessagePreview: null, unreadCount: 0, isGroup: false } as unknown as ChatItem,
+  { conversationKey: '15550000001@s.whatsapp.net', name: 'One', lastMessageAt: null, lastMessagePreview: null, unreadCount: 0, isGroup: false } as unknown as ChatItem,
+  { conversationKey: '15550000002@s.whatsapp.net', name: 'Two', lastMessageAt: null, lastMessagePreview: null, unreadCount: 0, isGroup: false } as unknown as ChatItem,
 ];
 
 function wrapSummaryTab(containerWidthPx: number) {
@@ -1309,6 +1309,43 @@ function wrapHistoryTab(containerWidthPx: number) {
 }
 
 describe('Viewport matrix — side-panel fold (DD-18r leg 2)', () => {
+  it('History retains an unconfirmed keyboard send across conversation changes and restores focus after discard', async () => {
+    function HistoryJourney() {
+      const [selectedChat, selectChat] = React.useState<string | null>(foldChats[0]!.conversationKey);
+      return <HistoryTab chats={foldChats} messages={[]} selectedChat={selectedChat}
+        onSelectChat={selectChat} mode="chat" lineName="fold-line" typingJids={new Set()} />;
+    }
+    vi.mocked(api.sendMessage).mockRejectedValueOnce(new Error('response lost'));
+    await page.viewport(390, 844);
+    await render(<QueryClientProvider client={makeQC()}>
+      <ToastContext.Provider value={toastValue}>
+        <div style={{ width: '390px', height: '600px' }}><HistoryJourney /></div>
+      </ToastContext.Provider>
+    </QueryClientProvider>);
+    const input = page.getByRole('textbox', { name: 'Type a reply' });
+    await expect.element(input).toHaveFocus();
+    await input.fill('Keep the history draft');
+    await userEvent.keyboard('{Enter}{Enter}');
+    await expect.element(page.getByRole('status')).toHaveTextContent('Send not confirmed.');
+    expect(api.sendMessage).toHaveBeenCalledExactlyOnceWith('fold-line', foldChats[0]!.conversationKey, 'Keep the history draft');
+    await expect.element(input).toBeDisabled();
+    await page.getByRole('option', { name: 'Open conversation with Two' }).click();
+    await expect.element(input).toBeEnabled();
+    await expect.element(input).toHaveValue('');
+    await page.getByRole('option', { name: 'Open conversation with One' }).click();
+    await expect.element(input).toHaveValue('Keep the history draft');
+    await expect.element(input).toBeDisabled();
+    await page.getByRole('button', { name: 'Refresh messages' }).click();
+    expect(api.sendMessage).toHaveBeenCalledTimes(1);
+    await page.getByRole('button', { name: 'Discard draft' }).click();
+    await expect.element(input).toBeEnabled();
+    await expect.element(input).toHaveFocus();
+    await userEvent.keyboard('A new history message{Enter}');
+    await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(2));
+    expect(api.sendMessage).toHaveBeenLastCalledWith('fold-line', foldChats[0]!.conversationKey, 'A new history message');
+    await expect.element(input).toHaveValue('');
+  });
+
   it('SummaryTab Row 3 stacks (flex-direction: column) with a full-width actions panel at 599px container', async () => {
     await page.viewport(1440, 900);
     const { container } = await render(wrapSummaryTab(599));
