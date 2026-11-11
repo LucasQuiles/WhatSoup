@@ -16,6 +16,7 @@ const CONFIG_DIR = '/tmp/probe-log-bot/.claude';
 // Independent oracle: `printf %s /tmp/probe-log-bot/.claude | shasum -a 256 | cut -c1-8`.
 const OWN_SERVICE = `${SVC}-a4a3c522`;
 const OUTPUT_SENTINEL = 'probe-output-sentinel-7f3a';
+const STRICT_HELP = '  --strict-mcp-config  Only use configured MCP servers\n';
 const START = new Date('2026-10-18T12:00:00.000Z');
 
 type FakeChild = EventEmitter & {
@@ -48,6 +49,7 @@ function adaptersFor(child: FakeChild, log: ReturnType<typeof capture>['log'], t
     getProviderBinary: () => 'claude',
     resolveProviderBinaryIdentity: (binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) }),
     ensureClaudeFileStoreCredential: () => ({ outcome: 'skipped-cli-reads-own-item' }),
+    probeClaudeCliHelp: async () => ({ status: 'ok' as const, output: STRICT_HELP }),
     probeBinaryCommand: (binary, args, env, options) => runBinaryCommandProbe(binary, args, env, options, spawnImpl),
     probeTrigger: trigger as 'periodic',
     log,
@@ -82,6 +84,8 @@ describe('primary model probe lifecycle log', () => {
     const child = fakeChild(4242);
     const { lines, log } = capture();
     const probe = adaptersFor(child, log).probeBinaryModel!({ provider: 'claude-cli', model: 'claude-opus-4-8' });
+
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(lines).toEqual([{
       obj: {
@@ -126,6 +130,8 @@ describe('primary model probe lifecycle log', () => {
     const child = fakeChild(5151);
     const { lines, log } = capture();
     const probe = adaptersFor(child, log).probeBinaryModel!({ provider: 'claude-cli', model: null });
+
+    await vi.advanceTimersByTimeAsync(0);
 
     vi.advanceTimersByTime(15_000);
     expect(child.kill).toHaveBeenCalledOnce();
@@ -205,6 +211,7 @@ describe('primary model probe lifecycle log', () => {
       getProviderBinary: () => 'claude',
       resolveProviderBinaryIdentity: (binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) }),
       ensureClaudeFileStoreCredential: () => ({ outcome: 'skipped-cli-reads-own-item' }),
+      probeClaudeCliHelp: async () => ({ status: 'ok' as const, output: STRICT_HELP }),
       probeBinaryCommand: (binary, args, env, options) => runBinaryCommandProbe(binary, args, env, options, spawnImpl),
       probeTrigger: 'periodic',
       log,
@@ -221,6 +228,7 @@ describe('primary model probe lifecycle log', () => {
     const child = fakeChild(8484);
     const { lines, log } = capture();
     const probe = adaptersFor(child, log).probeBinaryModel!({ provider: 'claude-cli', model: null });
+    await vi.advanceTimersByTimeAsync(0);
     child.emit('close', 1, null);
     await probe;
 
@@ -236,6 +244,7 @@ describe('primary model probe lifecycle log with a real child process', () => {
     const adapters = createPrimaryModelProbeAdapters(undefined, {
       getProviderBinary: () => process.execPath,
       ensureClaudeFileStoreCredential: () => ({ outcome: 'skipped-cli-reads-own-item' }),
+      probeClaudeCliHelp: async () => ({ status: 'ok' as const, output: STRICT_HELP }),
       // A real spawn of node itself, which exits 0 at once; the probe's own argv is replaced.
       probeBinaryCommand: (binary, _args, env, options) => runBinaryCommandProbe(binary, ['-e', ''], env, options),
       probeTrigger: 'periodic',
