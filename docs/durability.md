@@ -1944,10 +1944,15 @@ designed contract mirrors the fact-export queue machinery (§9):
   consolidation selects only its own instance's records, groups by account +
   chat + sender, and hashes that key into the durable id; dedup and claim
   lookups match only the same instance and account; recall treats another
-  instance's record as another conversation. Records are never merged on text
-  alone across instances. With the option off (single-instance indexes), ids,
-  filters and scopes are unchanged, and records without `source_instance` count
-  as the reading instance's. A ledger built later keys its scopes the same way.
+  instance's or account's record as another conversation, and a record missing
+  `source_instance` or `source_account` counts as the reading instance's only for
+  a caller with `owner_only` access. Records are never merged on text alone
+  across instances. With the option off (single-instance indexes), ids, filters
+  and scopes are unchanged and there is no instance or account boundary. A
+  `passive` or `owner_only` instance still recalls restrictively: callers
+  without `owner_only` access receive only `chat_scoped` records
+  ([memory record provenance](configuration.md#memory-record-provenance)). A
+  ledger built later keys its scopes the same way.
   Personal-line records are `owner_only` and reach only the verified owner or a
   configured trusted operator in a direct chat
   ([owner_only records](configuration.md#owner_only-records)).
