@@ -1,7 +1,7 @@
 /**
  * Every `severity: 'block'` fitness rule must name a real backstop, and that backstop must
- * actually run on a gate nobody can bypass — stated PER GATE PATH, because there are two
- * and they are not equivalent.
+ * actually run on the full profile of a gate nobody can bypass — stated PER GATE PATH,
+ * because there are two and they are not equivalent.
  *
  * A registry rule marked `block` is a promise that a merge carrying a violation cannot land.
  * Before `implementedBy`, nothing checked that promise: the rule→enforcement link lived in
@@ -33,14 +33,13 @@
  *     separately below.
  *
  *  2. It said "gate-reachable" while consulting `quality.yml` alone. There are two
- *     independent server-side paths, and `tag-release-gate.yml` runs fifteen discrete guard
- *     steps and NO unit suite — so every exemption-backed guard and every test-file backstop
- *     is unreachable there. That is 12 of the 17 block rules. The old wording implied a
- *     coverage claim the check never made.
+ *     server-side paths. The tag caller delegates to Quality's selected non-PR full job, so
+ *     the shared helper follows that exact callable job and rejects missing or redirected
+ *     delegation rather than treating arbitrary Quality commands as tag coverage.
  *
  * WHAT THIS PROVES: every block rule declares a backstop that exists on disk, runs somewhere,
- * and cannot be bypassed on the pull-request path; and the set of rules unenforced on the tag
- * path is exactly the recorded set, so that gap cannot widen unnoticed.
+ * and cannot be bypassed on either server-side full profile; and the set of rules unenforced on the
+ * tag path is exactly the recorded set, so a delegation or guard regression cannot hide.
  * WHAT IT DOES NOT PROVE: that a named backstop detects what its rule describes. That
  * semantic link stays hand-asserted in each guard's own tests — claiming otherwise would be
  * the same false-green this file exists to prevent.
@@ -74,40 +73,12 @@ const collectedByVitest = (path: string): boolean =>
 /**
  * Block rules with NO backstop on the tag/release gate — an exact ratchet, not a tolerance.
  *
- * `tag-release-gate.yml` runs no unit suite, so anything carried by `coverage:check` (every
- * test-file backstop, and every guard exempted on the strength of a live-tree test) does not
- * execute there, as well as any guard simply absent from that workflow.
- *
- * Second-order rather than a live breach: a tag is cut from `main`, and the pull-request path
- * covers all 17, so a clean `main` yields a clean tag. It matters because `enforce_admins`
- * is false on this repo — an admin push to `main` can skip `quality.yml` entirely, and the
- * tag gate is the only thing downstream of that.
- *
- * Recorded rather than fixed, deliberately: making the tag gate mirror the PR gate is a
- * release-engineering decision about what a tag push should cost, and belongs to whoever owns
- * that workflow. What is NOT optional is that the list stop growing silently. Adding a block
- * rule with no tag-path backstop fails here; wiring one up also fails here, until its id is
- * removed from this list — which is the good kind of failure.
+ * The tag caller invokes Quality's non-PR full profile, so every current block rule has a
+ * tag-path backstop. The empty list is still an exact ratchet rather than a tolerance: a
+ * missing guard, an unselected full job, or a redirected reusable call produces a non-empty
+ * actual set and fails this assertion.
  */
-const TAG_PATH_UNCOVERED_BLOCK_RULES: readonly string[] = [
-  'arch.env-read-justification',
-  'arch.file-size',
-  'arch.ring-boundaries',
-  'arch.ssot-jid-construction',
-  'arch.ssot-lid-reads',
-  'arch.ssot-name-ladder',
-  'arch.ssot-phone-shape',
-  'arch.ssot-presentation-literals',
-  'hygiene.no-health-whatsapp-key-read',
-  'hygiene.no-wa-jid-literal-in-generic-ui',
-  'hygiene.no-whatsapp-copy-in-generic-ui',
-  'portability.gnu-bsd-shell-flags',
-  'portability.no-hardcoded-platform-binaries',
-  'portability.platform-paths-guarded',
-  'portability.systemctl-guarded',
-  'process.no-destructive-git',
-  'test.insecure-tempfile',
-].sort();
+const TAG_PATH_UNCOVERED_BLOCK_RULES: readonly string[] = [];
 
 describe('fitness registry — every block rule declares a gate-reachable backstop', () => {
   it('the registry actually contains block rules (this suite is not vacuous)', () => {
@@ -167,7 +138,7 @@ describe('fitness registry — every block rule declares a gate-reachable backst
     expect(runsFullSuite('pull-request', gate)).toBe(true);
   });
 
-  it('every block rule has at least one backstop that runs on the pull-request path', () => {
+  it('every block rule has at least one backstop that runs on the full pull-request profile', () => {
     // The core assertion. A guard that runs ONLY from .husky/pre-push is advisory:
     // `gh pr merge`, the GitHub merge button, `--no-verify`, and any clone without husky
     // installed all bypass it. `guard:transport-patterns` was in exactly that state while
@@ -192,7 +163,7 @@ describe('fitness registry — every block rule declares a gate-reachable backst
       unreachable,
       unreachable.length === 0
         ? ''
-        : `These block rules rest entirely on checks a server-side merge bypasses:\n` +
+        : `These block rules rest entirely on checks the full server-side Quality profile bypasses:\n` +
           unreachable.join('\n') +
           `\nAdd a named step to .github/workflows/quality.yml, or add the guard to ` +
           `CI_EXEMPT_PUSH_GATE_GUARDS in tests/helpers/gate-membership.ts naming the ` +
@@ -236,11 +207,11 @@ describe('fitness registry — every block rule declares a gate-reachable backst
     ).toEqual(TAG_PATH_UNCOVERED_BLOCK_RULES);
   });
 
-  it('the tag/release path really does skip the full suite (the reason the list above exists)', () => {
-    // Pins the single fact the whole tag-path analysis rests on. If tag-release-gate.yml
-    // ever gains coverage:check, this fails and the recorded list must shrink accordingly —
-    // so the explanation cannot outlive the condition that justified it.
-    expect(runsFullSuite('tag-release', gate)).toBe(false);
+  it('the tag/release path reaches the canonical full Quality job', () => {
+    // Pins the dispatch fact behind the empty ratchet. If the caller is redirected, loses
+    // its deploy-key contract, or Quality stops selecting full for the non-PR caller, this
+    // becomes false before unrelated Quality commands can be mistaken for tag coverage.
+    expect(runsFullSuite('tag-release', gate)).toBe(true);
   });
 
   it('implementedBy entries are distinguishable — no path-shaped npm script or vice versa', () => {

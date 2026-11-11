@@ -7,6 +7,7 @@ import { registerJoinCases } from './verify-boundary-run/join-cases.ts';
 import { registerSchemaCases } from './verify-boundary-run/schema-cases.ts';
 import { fixtureRoots } from './verify-boundary-run/support.ts';
 import { registerTransitionCases } from './verify-boundary-run/transition-cases.ts';
+import { registerWatchdogCases } from './verify-boundary-run/watchdog-cases.ts';
 
 afterEach(() => {
   for (const root of fixtureRoots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -18,4 +19,5 @@ describe('boundary run validator', () => {
   registerJoinCases();
   registerTransitionCases();
   registerCloseoutCases();
+  registerWatchdogCases();
 });

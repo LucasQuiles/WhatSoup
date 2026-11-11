@@ -179,16 +179,25 @@ describe('fleet bot hardening parity guard', () => {
     ]));
   });
 
-  it('accepts a parity manifest whose updated timestamp is within the freshness budget', () => {
+  it('accepts a fresh legacy manifest without optional inventory, release or receipt bindings', () => {
     const root = makeRoot();
     writeFixtureStandard(root);
     writeFixtureManifest(root, { updated: '2026-06-15' });
+
+    const manifest = JSON.parse(readFileSync(path.join(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH), 'utf8'));
+    expect(manifest).not.toHaveProperty('inventoryBinding');
+    expect(manifest.rows).toHaveLength(2);
+    for (const row of manifest.rows) {
+      expect(row).not.toHaveProperty('releaseIdentity');
+      expect(row).not.toHaveProperty('receipt');
+    }
 
     const freshNow = new Date('2026-06-20T00:00:00Z');
     const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, freshNow);
 
     expect(result.ok).toBe(true);
     expect(result.findings).toEqual([]);
+    expect(result.runtimeParity.findings).toEqual([]);
   });
 
   describe('a date-driven failure is announced before it happens', () => {
@@ -771,19 +780,6 @@ const chain = scriptName === 'verify:push:branch'
   });
 
   describe('inventory-epoch binding (#1867 criterion 3)', () => {
-    it('emits no finding when inventoryBinding is absent (validate-when-present; protects the tracked manifest)', () => {
-      const root = makeRoot();
-      writeFixtureStandard(root);
-      writeFixtureManifest(root);
-
-      const now = new Date('2026-06-20T00:00:00Z');
-      const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
-
-      expect(result.ok).toBe(true);
-      expect(result.findings).toEqual([]);
-      expect(result.runtimeParity.findings).toEqual([]);
-    });
-
     it('accepts inventoryBinding whose declared digest/count/epoch match the independently recomputed roster', () => {
       const root = makeRoot();
       writeFixtureStandard(root);
@@ -904,19 +900,6 @@ const chain = scriptName === 'verify:push:branch'
   // is explicitly deferred to a later increment that needs the runtime
   // receipt; not implemented here.
   describe('release/config identity binding (#1867 criterion 2, partial)', () => {
-    it('emits no finding when releaseIdentity is absent (validate-when-present; protects the tracked manifest)', () => {
-      const root = makeRoot();
-      writeFixtureStandard(root);
-      writeFixtureManifest(root);
-
-      const now = new Date('2026-06-20T00:00:00Z');
-      const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
-
-      expect(result.ok).toBe(true);
-      expect(result.findings).toEqual([]);
-      expect(result.runtimeParity.findings).toEqual([]);
-    });
-
     it('accepts a row whose releaseIdentity is well-formed (40-hex commit, numeric schemaMigration, non-empty provider)', () => {
       const root = makeRoot();
       writeFixtureStandard(root);
@@ -1147,19 +1130,6 @@ const chain = scriptName === 'verify:push:branch'
   // / `verified-before-service-restart`, design §7.3, also deferred -- those
   // need both fields present on real rows, not just validated in isolation).
   describe('runtime receipt validation (#1867 criterion 1, guard-side)', () => {
-    it('emits no finding when receipt is absent (validate-when-present; protects the tracked manifest)', () => {
-      const root = makeRoot();
-      writeFixtureStandard(root);
-      writeFixtureManifest(root);
-
-      const now = new Date('2026-06-20T00:00:00Z');
-      const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
-
-      expect(result.ok).toBe(true);
-      expect(result.findings).toEqual([]);
-      expect(result.runtimeParity.findings).toEqual([]);
-    });
-
     it('accepts a row with a present, valid receipt whose recomputed digest matches the referenced file', () => {
       const root = makeRoot();
       writeFixtureStandard(root);

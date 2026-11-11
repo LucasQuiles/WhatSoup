@@ -116,6 +116,7 @@ export default defineConfig({
     // No INSTANCE_CONFIG env needed for browser tests; inherit root defaults.
     env: {
       INSTANCE_CONFIG: '',
+      PERF_LANE_ENFORCE: process.env.PERF_LANE_ENFORCE ?? '',
     },
   },
 });

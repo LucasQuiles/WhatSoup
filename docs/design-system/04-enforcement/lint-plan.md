@@ -941,11 +941,13 @@ landed `ba4ed643`):
   block-4a/4b spreads were removed (lint output unchanged — the empty spread was a no-op).
 - **Group P** (soup/no-legacy-tokens, soup/no-utility-smell): scoped-error inside
   `components/primitives/**` (born-clean tier); both remain shadow outside primitives.
-- **Shared design verification chain**: CI-blocking — `npm run verify:console-design` runs in
-  `verify:push:branch`, `verify:release`, quality.yml CI, and tag-release CI. It owns theme parity,
-  token drift, contrast, shadow baseline, frozen shadow inventory, raw-form inventory, design
-  regression/metrics/burndown, color semantics, resilience, font assets, brand assets, and
-  design-lint fixture coverage.
+- **Shared design verification chain**: CI-blocking — `npm run verify:console-design` combines
+  live checks and design-guard fixtures for `verify:push:branch`. Local `verify:release` and
+  Quality's full profile use `verify:console-design:live` after full-suite coverage runs the
+  fixtures. The shared checks cover theme parity, token drift, contrast, shadow baseline and
+  inventories, design regression/metrics/burndown, color semantics, resilience, font assets,
+  brand assets and design-lint fixtures. Quality validates tags with its full profile;
+  `tag-release-gate` verifies the authenticated receipt instead of repeating the design chain.
 - **Design-regression suite promotion state**: the section-5 suite has grown 15→16→20 checks
   (checks 1+8 made meaningful `db165001`; CSS tier-boundary checks 17–20 added `64332ce8`).
   Blocking set live in `design-regression.sh`: `EXIT_ON_FAIL=(1 2 6 8 10 11 12 13 14 15 16 17 19)` —

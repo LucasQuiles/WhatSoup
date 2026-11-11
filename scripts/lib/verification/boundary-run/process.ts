@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import {
   accessSync,
   closeSync,
@@ -16,6 +16,7 @@ import {
 import path from 'node:path';
 
 import { cleanGitEnv } from '../../../../src/lib/git-env.ts';
+import { probeGroupMembership } from '../../../full-suite-battery.ts';
 import {
   ARTIFACT_KEYS,
   ATTEMPT_KEYS,
@@ -151,46 +152,28 @@ async function waitForPromiseOrTimeout(promise: Promise<void>, milliseconds: num
   });
 }
 
-function processGroupAlive(pid: number): boolean {
-  try {
-    // #2979: targeted process-group check without scanning ALL processes.
-    // 1. Get the PGID of the target PID (portable: ps -p on macOS/Linux).
-    const pgidOut = execFileSync('ps', ['-p', String(pid), '-o', 'pgid='], {
-      encoding: 'utf8',
-      env: cleanGitEnv(),
-      timeout: 30_000,
-    }).toString().trim();
-    // ps output: one header line + one data line. Take the last line.
-    const lines = pgidOut.split('\n');
-    const pgid = parseInt(lines[lines.length - 1]?.trim() ?? '', 10);
-    if (isNaN(pgid) || pgid <= 0) return false;
-    // 2. Check if the process group leader (PID == PGID) is alive.
-    //    The leader being alive implies the group is alive. If the leader
-    //    died, children are re-parented to init but the PGID persists;
-    //    however boundary-run kills the group from the leader, so checking
-    //    the leader covers the common case.
-    execFileSync('ps', ['-p', String(pgid), '-o', 'pid='], {
-      encoding: 'utf8',
-      env: cleanGitEnv(),
-      timeout: 30_000,
-    });
-    return true;
-  } catch {
-    return false;
-  }
+function processGroupExited(pid: number): boolean {
+  // A departed leader does not prove its descendants exited; unreadable inventory
+  // likewise cannot establish cleanup. Reuse the battery's full-group proof.
+  return probeGroupMembership(pid) === 'no-live-members';
 }
 
-function signalProcessGroup(pid: number, signal: NodeJS.Signals): void {
+function signalProcessGroup(pid: number, signal: NodeJS.Signals): BoundaryValidationIssue | null {
   try {
     process.kill(-pid, signal);
+    return null;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') return null;
+    // macOS can report EPERM for a group whose remaining members are zombies.
+    if (code === 'EPERM' && processGroupExited(pid)) return null;
+    return issue('watchdog-signal-failed', `${signal} failed for the owned process group: ${code ?? 'unknown error'}`);
   }
 }
 
 async function waitForProcessGroupExit(pid: number, milliseconds: number): Promise<boolean> {
   const deadline = Date.now() + milliseconds;
-  while (processGroupAlive(pid)) {
+  while (!processGroupExited(pid)) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) return false;
     await delay(Math.min(remaining, 10));
@@ -258,24 +241,19 @@ async function executeBoundaryWatchdog(
   });
   const completedBeforeDeadline = await waitForPromiseOrTimeout(closed, options.deadlineMs);
   const timedOut = !completedBeforeDeadline;
-  if (timedOut) {
-    signalProcessGroup(pid, 'SIGTERM');
+  const survivedNaturalExit = !timedOut && !processGroupExited(pid);
+  const issues: BoundaryValidationIssue[] = [];
+  if (timedOut || survivedNaturalExit) {
+    const termFailure = signalProcessGroup(pid, 'SIGTERM');
+    if (termFailure) issues.push(termFailure);
     if (!await waitForProcessGroupExit(pid, options.killGraceMs)) {
-      signalProcessGroup(pid, 'SIGKILL');
+      const killFailure = signalProcessGroup(pid, 'SIGKILL');
+      if (killFailure) issues.push(killFailure);
       await waitForProcessGroupExit(pid, 500);
     }
     await waitForPromiseOrTimeout(closed, 100);
   }
-  const survivedNaturalExit = !timedOut && processGroupAlive(pid);
-  if (survivedNaturalExit) {
-    signalProcessGroup(pid, 'SIGTERM');
-    if (!await waitForProcessGroupExit(pid, options.killGraceMs)) {
-      signalProcessGroup(pid, 'SIGKILL');
-      await waitForProcessGroupExit(pid, 500);
-    }
-  }
-  const groupDead = !processGroupAlive(pid);
-  const issues: BoundaryValidationIssue[] = [];
+  const groupDead = processGroupExited(pid);
   if (spawnError !== null) issues.push(issue('watchdog-spawn-failed', spawnError));
   if (timedOut) issues.push(issue('watchdog-timeout', 'child exceeded the helper-owned monotonic deadline'));
   if (rawSignal !== null) issues.push(issue('watchdog-signal', `child terminated by ${rawSignal}`));
@@ -287,7 +265,7 @@ async function executeBoundaryWatchdog(
     issues.push(issue('watchdog-exit-mismatch', 'direct child exit did not satisfy the expected status'));
   }
   if (survivedNaturalExit || !groupDead) {
-    issues.push(issue('watchdog-group-survivor', 'child process group survived leader completion or teardown'));
+    issues.push(issue('watchdog-group-survivor', 'child process group survived leader completion or its cleanup could not be verified'));
   }
   return {
     result: snapshotResult(issues), rawExit, rawSignal, timedOut, groupDead,

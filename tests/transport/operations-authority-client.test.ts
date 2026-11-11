@@ -1,7 +1,10 @@
+import { spawnSync } from 'node:child_process';
 import { chmodSync, closeSync, openSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
+import { legacyMediaReview, mediaInbound, mediaOperation, mediaReview } from '../helpers/operations-authority-media.ts';
 import {
   OperationsAuthorityClient,
   TransportApprovalRequiredError,
@@ -398,6 +401,41 @@ describe('OperationsAuthorityClient HTTP boundaries', () => {
       .resolves.toEqual({ attemptId: 'attempt-http-boundary', payloadDigest: 'sha256:http-boundary' });
   });
 
+  it.each([
+    ['an escaped quote', '\\"', 'resolves'],
+    ['three backslashes before a quote', '\\\\\\"', 'resolves'],
+    ['an even backslash run that closes the string', '\\\\"', 'rejects'],
+  ] as const)('scans structure after %s inside a response string', async (_kind, escape, outcome) => {
+    // Break caught: the string skip must end a string only at a quote preceded
+    // by an even backslash run. Ending too early counts quoted brackets as
+    // containers; ending too late hides real nesting from the depth limit.
+    const brackets = `${'['.repeat(129)}${']'.repeat(129)}`;
+    const payload = outcome === 'resolves'
+      ? `{"attempt_id":"attempt-http-boundary","payload_digest":"sha256:http-boundary","state":"dispatching","note":"a${escape}${brackets}"}`
+      : `{"attempt_id":"attempt-http-boundary","payload_digest":"sha256:http-boundary","state":"dispatching","note":"a${escape},"snapshot":${brackets}}`;
+    const fetch = vi.fn(async () => new Response(payload));
+    const client = new OperationsAuthorityClient({
+      baseUrl: 'https://authority.example/',
+      accountId: 'pilot-account',
+      bearerToken: 'test-only-transport-token',
+      fetch,
+    });
+
+    const parse = vi.spyOn(JSON, 'parse');
+    try {
+      const admission = client.admit({ recipient: '15551230000@s.whatsapp.net', content: { text: 'fake-only' } });
+      if (outcome === 'resolves') {
+        await expect(admission).resolves.toEqual({ attemptId: 'attempt-http-boundary', payloadDigest: 'sha256:http-boundary' });
+      } else {
+        await expect(admission).rejects.toThrow('transport authority response is not JSON');
+        // The structure scan, not a later gate, must reject the nesting.
+        expect(parse.mock.calls.filter(([text]) => text === payload)).toEqual([]);
+      }
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
   it('returns at its own deadline when the authority response body stops streaming', async () => {
     // Break caught: a response starts successfully but then occupies the
     // transport gate forever while the body reader waits for another chunk.
@@ -629,41 +667,28 @@ describe('OperationsAuthorityClient ingress and receipt contract', () => {
     await expect(client.readyOperation(reference)).rejects.toBeInstanceOf(TransportAuthorityUnavailableError);
   });
 
-  const mediaInbound = {
-    eventId: 'media-review', sender: '15551230000@s.whatsapp.net',
-    conversation: '15551230000@s.whatsapp.net', receivedAt: '2026-11-02T14:30:00.000Z',
-    text: '/review media-operation',
-  };
-  const mediaOperation = {
-    id: 'media-operation', account_id: 'pilot-account', action: 'whatsapp.send',
-    digest: 'a'.repeat(64), state: 'pending',
-  };
-  const mediaReview = (operation: Record<string, unknown>) => ({
-    kind: 'review', review: {
-      challenge: 'media-challenge', items: [{ id: 'media-operation', digest: 'a'.repeat(64) }],
-      previews: [operation], expires_at: '2026-11-02T15:00:00.000Z',
-      desk_url: 'https://untrusted.example/agent-controlled',
-    },
-  });
-
   it.each([3, 50 * 1024 * 1024])('routes legacy %i-byte media to the trusted Desk before serializing a card', async (size) => {
-    const binary = Buffer.alloc(size, 109).toString('base64');
-    const { client } = clientWith([response(200, mediaReview({
-      ...mediaOperation, payload: { recipient: '15551230000@s.whatsapp.net', content: { document: { $binary: binary } } },
-    }))]);
-    const result = await client.registerInbound(mediaInbound);
+    let result: Awaited<ReturnType<typeof legacyMediaReview>>;
+    if (size === 3) {
+      result = await legacyMediaReview(size);
+    } else {
+      const child = spawnSync(process.execPath, [
+        '--experimental-strip-types', fileURLToPath(new URL('../helpers/operations-authority-media.ts', import.meta.url)),
+      ], { encoding: 'utf8', timeout: 8000, killSignal: 'SIGKILL', maxBuffer: 4096 });
+      expect(child.error, child.stderr).toBeUndefined();
+      expect(child.signal, child.stderr).toBeNull();
+      expect(child.status, child.stderr).toBe(0);
+      result = JSON.parse(child.stdout);
+    }
     expect(result.kind).toBe('review');
-    if (result.kind !== 'review') throw new Error('expected a review');
-    Object.defineProperty(result.review.previews[0]!.payload, 'toJSON', {
-      value: () => { throw new Error('raw media must never be serialized into a human review card'); },
-    });
-    const card = renderTransportReviewCard(result.review);
+    expect(result.mediaBytes).toBe(size);
+    const { card, binaryPrefix } = result;
     expect(card).toContain('https://authority.example/operation-review');
     expect(card).not.toContain('untrusted.example');
     expect(card).not.toContain('/approve');
     expect(card).not.toContain('/reject');
     expect(card).not.toContain('$binary');
-    expect(card).not.toContain(binary.slice(0, 20));
+    expect(card).not.toContain(binaryPrefix);
     expect(card.length).toBeLessThan(1000);
   });
 

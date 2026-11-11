@@ -20,7 +20,7 @@ import {
  */
 function observed(overrides: Record<string, unknown> = {}): ObservedProtection {
   return {
-    required_status_checks: { strict: true, contexts: ['CodeQL', 'quality (24.x)', 'quality (25.x)'] },
+    required_status_checks: { strict: true, contexts: ['CodeQL', 'pr metadata', 'quality (24.x)', 'quality (25.x)', 'test-integrity (private)'] },
     required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true },
     enforce_admins: false,
     allow_force_pushes: false,
@@ -37,15 +37,15 @@ describe('branch-protection-drift-check — diffProtection', () => {
     expect(diffProtection(expected, observed())).toEqual([]);
   });
 
-  it('detects a dropped required status check (the R-02 regression that matters most)', () => {
+  it('detects a missing PR metadata context before branch protection can be activated', () => {
     const expected = loadExpectedProtection();
     const findings = diffProtection(
       expected,
-      observed({ required_status_checks: { strict: true, contexts: ['CodeQL', 'quality (24.x)'] } }),
+      observed({ required_status_checks: { strict: true, contexts: ['CodeQL', 'quality (24.x)', 'quality (25.x)'] } }),
     );
     expect(findings).toHaveLength(1);
     expect(findings[0].field).toBe('required_status_checks.contexts');
-    expect(findings[0].detail).toContain('quality (25.x)');
+    expect(findings[0].detail).toContain('pr metadata');
   });
 
   it('detects required approvals being lowered to zero', () => {
@@ -57,6 +57,14 @@ describe('branch-protection-drift-check — diffProtection', () => {
     expect(findings.map((f) => f.field)).toContain(
       'required_pull_request_reviews.required_approving_review_count',
     );
+  });
+
+  it('detects a missing private scanner requirement after cutover', () => {
+    const findings = diffProtection(loadExpectedProtection(), observed({
+      required_status_checks: { strict: true, contexts: ['CodeQL', 'pr metadata', 'quality (24.x)', 'quality (25.x)'] },
+    }));
+    expect(findings).toHaveLength(1);
+    expect(findings[0].detail).toContain('test-integrity (private)');
   });
 
   it('detects force-push or deletion being re-enabled', () => {
@@ -75,7 +83,7 @@ describe('branch-protection-drift-check — diffProtection', () => {
     const expected = loadExpectedProtection();
     const findings = diffProtection(
       expected,
-      observed({ required_status_checks: { strict: true, contexts: ['CodeQL', 'quality (24.x)', 'quality (25.x)', 'new-gate'] } }),
+      observed({ required_status_checks: { strict: true, contexts: ['CodeQL', 'pr metadata', 'quality (24.x)', 'quality (25.x)', 'test-integrity (private)', 'new-gate'] } }),
     );
     expect(findings).toHaveLength(1);
     expect(findings[0].detail).toContain('new-gate');
@@ -85,7 +93,7 @@ describe('branch-protection-drift-check — diffProtection', () => {
     const expected = loadExpectedProtection();
     const findings = diffProtection(
       expected,
-      observed({ required_status_checks: { strict: true, contexts: ['quality (25.x)', 'CodeQL', 'quality (24.x)'] } }),
+      observed({ required_status_checks: { strict: true, contexts: ['quality (25.x)', 'CodeQL', 'pr metadata', 'test-integrity (private)', 'quality (24.x)'] } }),
     );
     expect(findings).toEqual([]);
   });

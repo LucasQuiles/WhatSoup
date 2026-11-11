@@ -4,27 +4,30 @@
 
 ## Layer 1 — CI gates (must pass for merge)
 
-> **This table is a curated subset.** `.github/workflows/quality.yml` owns the current step inventory: the `guard:*` family, coverage (`coverage:check`), browser/Playwright suites, console design checks, mutation via `deploy/scripts/run-sentinel-tests.sh` (pytest `--cov-fail-under=98` + deployer mutation drill — note `stryker.conf.json` is dormant/unwired), and tokenomics/drills. `scripts/lib/fitness/registry.ts` owns the architectural-fitness rule inventory. Its blocking authority lives in the **guard ring** (`verify:push:branch`); the ESLint fitness mirror is warn-only. Semantic-quality (`semantic-quality-check.ts`) runs in **shadow mode** (exit 0) everywhere it is wired; its enforce path is unwired/on-demand.
+> **This table is a curated subset.** `.github/workflows/quality.yml` owns the current step inventory: the `guard:*` family, coverage (`coverage:check`), browser/Playwright suites, console design checks, mutation via `deploy/scripts/run-sentinel-tests.sh` (pytest `--cov-fail-under=98` + deployer mutation drill — note `stryker.conf.json` is dormant/unwired), and tokenomics/drills. `scripts/lib/fitness/registry.ts` owns the architectural-fitness rule inventory. Its blocking authority lives in the **guard ring** (`verify:push:branch`, run by hand, and the same guards in the required hosted checks); the ESLint fitness mirror is warn-only. Semantic-quality (`semantic-quality-check.ts`) runs in **shadow mode** (exit 0) everywhere it is wired; its enforce path is unwired/on-demand.
 
-The `Quality` workflow (`.github/workflows/quality.yml`) runs on every PR,
-push to `main`, and `v*` tag, with two explicit required-context jobs:
+The `Quality` workflow (`.github/workflows/quality.yml`) classifies PR changes
+before installing dependencies. Documentation gets static validation; eligible
+source changes get affected suites; high-risk and unknown changes get the full
+matrix. Main pushes, merge groups, scheduled runs and release tags select full.
+See [testing paths](../testing.md) for the policy, limitations and local commands.
 
-- `quality (24.x)` is the full enforcement authority. It owns all static,
-  Python, guard, coverage, console-design, and browser checks listed below.
-- `quality (25.x)` is the compatibility lane. It performs clean root and
-  console installs, the complete non-coverage Vitest suite, and the console
-  production build. It intentionally does not duplicate version-invariant
-  guards, coverage, Python, lint/design, or browser work.
+`quality (24.x)` and `quality (25.x)` remain stable required contexts. They
+aggregate the selected jobs and reject missing, skipped, cancelled or failed
+work. In the full profile Node 24 owns static, Python, coverage, design and browser
+checks; Node 25 runs the full non-coverage compatibility suite and console build.
+Affected compatibility runs use the selected root tests on Node 25.
 
-PR title and body edits also trigger Quality so metadata remains checked.
-An edit can cancel the active run for that PR and start the full workflow again.
-Finalize PR metadata before publishing a candidate, and defer cosmetic edits
-while its required checks are running.
-
-This split preserves both required context names while removing roughly
-6.7 duplicated runner-minutes per workflow run across five recent successful
-main runs. It primarily frees runner capacity; Node 24 remains the critical
-path, and exact savings vary with runner scheduling and step duration.
+PR metadata has its own `pr metadata` workflow, including title/body edits.
+Quality omits duplicate metadata execution and its edit trigger. The metadata
+check has passed, but its required-context activation remains pending. The
+[protection migration](../testing.md) records
+the live setting, target and authorized sequence: qualify the candidate, enable
+the requirement, verify the live readback, then merge. This avoids restarting
+application suites for metadata edits. Local YAML validation does not establish
+the hosted setting. Existing CodeQL and
+independent review requirements remain in place. Hosted timing gains require
+measurements after activation.
 
 | Step | Command | Purpose |
 |---|---|---|
@@ -39,31 +42,45 @@ path, and exact savings vary with runner scheduling and step duration.
 | Work index coverage | `npm run guard:work-index` | docs/work-index.json completeness |
 | AskUser poll protocol guard | `npm run guard:agent-decision-polls` | Verifies the WhatsApp poll decision protocol remains wired across prompt guidance, MCP schema descriptions, sandbox diagnostics, docs, and release gates. |
 | Safeguard diagnostics | `npm run guard:safeguard-diagnostics` | Deterministic readout of guard-chain wiring, sensitive-publication anchors, runtime-boundary anchors, public-exposure guards, and portability blockers. |
-| **Test integrity baseline check** | `npm run guard:test-integrity` | Runs the baseline check for tautologies, weak assertions, raw sleeps, and assertion-free tests when the plugin is installed; skips missing-plugin cases only outside CI and when `WHATSOUP_REQUIRE_TEST_INTEGRITY` is not set. The Node 24 job installs the private `LucasQuiles/test-integrity` plugin over SSH using the read-only `TEST_INTEGRITY_DEPLOY_KEY`, fetches the exact `TEST_INTEGRITY_COMMIT`, detaches at that object, and verifies `HEAD` byte-for-byte. Pin updates are reviewed repository changes; CI never pushes or publishes plugin state. |
+| **Test integrity baseline check** | `npm run guard:test-integrity` | Local required gates fail if the scanner is unavailable. Hosted scanning belongs to the trusted `Private test integrity` workflow, using an exact private scanner commit and a main-only environment key. Candidate Quality jobs receive no private key or scanner source. Baselines permit known findings; passing means no new violations detected, not that every assertion is strong. |
 | Repo-hygiene tests | `npm test -- tests/scripts/repo-hygiene-guard.test.ts` | tests that the hygiene-guard itself works |
 | Full test suite + coverage | `npm run coverage:check -- --pool=forks` | Node 24 runs the entire Vitest suite under V8 coverage and enforces thresholds. Node 25 separately runs `npm test -- --pool=forks` without duplicating coverage. |
 | Console build | `npm --prefix console run build` | Vite production build smoke |
 
-The private scanner migration adds `.github/workflows/private-test-integrity.yml`.
+The private scanner lives in `.github/workflows/private-test-integrity.yml`.
 It requires the `private-scanner-trusted` environment to admit only `main`, with a
 read-only scanner deploy key stored in that environment. Completed same-repository
-pull request, main and tag runs of Quality trigger trusted default-branch code. Candidate test
+PR, main, schedule and version-tag runs of Quality trigger trusted default-branch code. Candidate test
 files are retrieved as immutable Git data; candidate code, hooks, configuration and
 package scripts are not executed. The scanner and its diagnostics remain private.
 The driver validates the current pull request head and base, qualifies the pinned
 Linux/Python 3.12 scanner runtime, removes its owned private checkout and temporary
 bundle, and rechecks the pull request before publishing `test-integrity (private)`.
-Main and tag scans publish a bounded receipt instead. The receipt binds the source
-run and attempt, commit, scanner run and attempt, and conclusion. Tag scans also
-verify the tag target and main ancestry before and after scanning. Receipt upload
-follows private scratch cleanup; rerunning the scanner replaces its own receipt
-with a new artifact identity and current attempt. Receipts expire after thirty days.
+For non-PR runs, it binds the exact run attempt, derives the baseline from the
+immutable commit's first parent, and checks main ancestry. Tag identity is checked
+again after scanning. The driver writes a small receipt only after its private
+bundle is removed. The workflow moves only that receipt out of scratch, removes
+scratch, uploads the receipt, and preserves the scanner's terminal exit status.
+The tag release consumer checks the artifact producer's workflow identity, both
+run attempts, source SHA, receipt conclusion and overall workflow success.
 Operational or cleanup failures cannot produce a successful local conclusion.
 The 20-minute watchdog can leave an inconclusive or missing check; a failed readback
 after a remote write is an observability gap, not proof that no check was created.
 Fork and merge-queue inputs remain unsupported by this workflow.
 
+Classic required status checks authenticate a check name and app, not a particular
+workflow. They do not prevent a privileged PR workflow from forging an Actions-app
+check. Keep independent review of workflow changes; do not call that setting
+workflow-identity enforcement. The release consumer verifies the trusted artifact
+producer instead of relying on a matching custom check name.
+
 Keep the existing Quality scanner step and required checks during qualification.
+The scanner bootstrap must land first with its main/tag receipt producer and public
+receipt consumer. Its temporary direct tag trigger provides full Quality evidence
+while the existing tag guard workflow remains active. Qualify real tag receipts
+through `scripts/private-integrity-release.ts select` and `verify` before this
+cutover connects the consumer as the tag gate and removes that duplicate work.
+
 Quality runs full validation daily at 06:23 UTC. It compares tags and scheduled
 runs against `HEAD^` for baseline growth;
 a new tag's all-zero `before` value cannot identify a previous revision. PRs,
@@ -71,14 +88,10 @@ merge groups and main pushes retain their event-provided base revisions.
 The guard's JSON receipt and reproduction command name the resolved commit OIDs,
 including when the input base is a relative revision such as `HEAD^`.
 Only after hosted canaries prove current-head publication, stale-head refusal,
-credential confinement, cleanup and failure handling should the private check be
-required. Qualify the tag receipt with the existing `scripts/private-integrity-release.ts`
-`select` and `verify` commands before the testing pipeline connects that consumer
-as its release gate. Quality tags run the full existing suite during this staged
-qualification; the existing tag guard workflow remains active. This is temporary
-overlap owned by the testing pipeline cutover and ends when its receipt-based tag
-gate is verified. Remove the repository-scoped scanner secret only after the trusted check
-is operational and Quality no longer consumes that secret. Local adapter tests or
+credential confinement, cleanup, failure handling and tag receipt consumption
+should the private check be required and this Quality cutover merged. Remove the
+repository-scoped scanner secret and its old deploy key only after the trusted
+path is operational and Quality no longer consumes that secret. Local adapter tests or
 a parsed workflow contract do not establish those hosted guarantees.
 
 Public native capture fixtures run separately from the pure adapter tests:
@@ -211,12 +224,29 @@ signal when a commit stages `*.ts`, `package.json`, `.nvmrc`, or `deploy/` files
 it runs `guard:boundaries` and `guard:lint:src` and prints a warning for either
 that fails, **without aborting the commit**. Node-pin consistency already ran
 once as an unconditional blocking pre-commit check, so the warning phase does
-not repeat it. These same guards are hard-enforced at push by
-`verify:push:branch` (Layer 2); the
+not repeat it. These same guards block merge through the required hosted checks,
+and `verify:push:branch` (Layer 2) runs them by hand; the branch-push hook does not. The
 architectural-drift signal only surfaces drift earlier. Skip only that signal
 with `WHATSOUP_SKIP_DRIFT_WARN=1`.
 
 ## Layer 2 — Local pre-push guards
+
+The three backend type-check commands retain TypeScript incremental compiler
+state in `.local/typescript/`. Each project has a separate `.tsbuildinfo` file;
+the directory belongs to the invoking worktree, even when `node_modules` is a
+shared symlink. TypeScript checks current source and compiler options against
+that state. Test results are never cached. A fresh checkout still performs a
+cold check. For a cold comparison, use a unique `--tsBuildInfoFile` in owned
+scratch and compare repeat runs of the same input. Tests and benchmarks set
+`TMPDIR` to owned scratch and remove it at exit; tracked temporary-directory
+helpers and registered cleanup keep fixture lifetimes explicit.
+
+The real-repository ESLint assertions share one fresh scan in
+`tests/scripts/fitness-file-size-warning-budget.test.ts`: warning/error counts,
+nonempty scope, synchronous-command timeout findings, and the file-size warning
+identity set. The scan retains the 300-second warning-budget bound. Synthetic
+rule and failure-path tests remain in `tests/scripts/eslint-fitness-check.test.ts`.
+Both files remain in the branch test list and full suite.
 
 The shared push and release runner accepts `VITEST_MAX_WORKERS` as an integer
 from 1 through 4 and forwards it to gate children. Other values fail before
@@ -225,8 +255,8 @@ the root Node suite in `vitest.config.ts` defaults to four workers. On a busy
 host, `VITEST_MAX_WORKERS=2` reduces that suite's concurrency to two workers.
 The auxiliary guard and browser suites use separate configurations; their
 concurrency controls still apply. The override does not skip tests, raise
-timeouts, or remove gate stages. The runner still excludes the four skip
-variables listed in `NEUTRALIZED_SKIP_VARS`.
+timeouts, or remove gate stages. The runner still excludes the skip
+variables listed in `NEUTRALIZED_SKIP_VARS`, including the ESLint fitness bypass.
 
 Pre-push routes through `scripts/pre-push-guard.ts`. Before classifying any ref
 update—including delete-only pushes—it evaluates the Git-estate scan and
@@ -343,9 +373,13 @@ full object ID and a non-sensitive reason:
 npm run guard:git-estate -- baseline accept-stash --oid <full-object-id> --reason 'preserved work awaiting integration' --json
 ```
 
-This requires a valid existing baseline, two complete matching estate snapshots,
-and matching stash parents with all reachable objects present and of supported
-types. It adds only the selected stash finding; other finding IDs, counts and
+This requires a valid existing baseline, two complete matching snapshots of the
+common Git state and relevant worktrees, and matching stash parents with all
+reachable objects present and of supported types. The existing pusher scope
+includes the invoking worktree and the stash's attributable branch. An unreadable
+unrelated worktree does not prevent this narrow acknowledgment; unreadable relevant
+worktrees and unknown or changing stash attribution still refuse it.
+It adds only the selected stash finding; other finding IDs, counts and
 container identities retain their prior values. A different stash, conflict or
 worktree lock in the pusher's scope still blocks. The JSON receipt includes the reason; the baseline
 does not. This acknowledgment does not prove restored content, integration or
@@ -370,11 +404,13 @@ the primary worktree's potentially stale or in-flight hook bytes.
 
 | Push target | Composite script | Required checks |
 |---|---|---|
-| Branch push | `npm run verify:push:branch` | repo hygiene staged smoke, repo hygiene branch/base diff, publication staged guard, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, semantic guard-test coverage enforcement, test-integrity baseline, ring/boundary/service/config guards, `npm run typecheck:all`, the targeted guard test list below, design-system hygiene guard, harness-maintenance manifest guard, tokenomics Python tests, and console lint + build (#1105: these last four mirror blocking CI quality-job steps so console strict-tsconfig/design-system/tokenomics violations fail fast locally; the slow coverage/drills/browser tail stays in `verify:release` and CI) |
+| Branch push (hook) | `npm run verify:push:fast` | repo hygiene branch/base diff, commit authors, the publication audit table, and a private-literal scan of every commit the branch adds. Each of these guards is also a quality-workflow step. Tests, typecheck and the console build run in `quality (24.x)` and `quality (25.x)`, which branch protection on `main` requires before merge |
+| Pushed refs unreadable (hook), or by hand before merge | `npm run verify:push:branch` | repo hygiene staged smoke, repo hygiene branch/base diff, publication staged guard, publication branch-diff scan, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, semantic guard-test coverage enforcement, test-integrity baseline, ring/boundary/service/config guards, `npm run typecheck:all`, the targeted guard test list below, design-system hygiene guard, harness-maintenance manifest guard, tokenomics Python tests, and console lint + build (#1105: these last four mirror blocking CI quality-job steps so console strict-tsconfig/design-system/tokenomics violations fail fast locally; the slow coverage/drills/browser tail stays in `verify:release` and CI) |
 | `main` or release tag push | `npm run verify:release` | release repo hygiene, full publication audit, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, semantic guard-test coverage enforcement, test-integrity baseline, ring/boundary/service/config guards, tokenomics/drills, `tools/whatsoup_guard` install/typecheck/test, console dependency install/lint/build, `npm run typecheck:all`, full Vitest suite with `--pool=forks` (four workers by default in the root `vitest.config.ts`, matching CI; `VITEST_MAX_WORKERS=1`, `2`, or `3` lowers that concurrency), and coverage thresholds |
 | Delete-only push | metadata-only dispatcher path | `design:metrics` and `design:burndown`, each once through the pinned npm wrapper; content verification and console dependency prerequisites are skipped |
 
-Before branch or release verification starts, the dispatcher checks that the
+Before release verification starts, or `verify:push:branch` when the pushed refs are
+unreadable, the dispatcher checks that the
 installed console package exposes executable `eslint`, `tsc`, and `vite`
 entrypoints, then uses the pinned npm wrapper to validate the complete installed
 package graph in offline, lifecycle-script-disabled mode. A missing or invalid
@@ -382,9 +418,11 @@ package, plugin, or transitive dependency fails before the expensive composite
 with the remediation `npm ci --prefix console`. Child output is suppressed so
 the diagnostic stays bounded and cannot echo package-manager configuration.
 Delete-only pushes bypass this prerequisite so the file-based metadata checks
-remain runnable without console dependencies. Branch and release composites
-already include those metadata checks through `verify:console-design`; the hook
-does not repeat them.
+remain runnable without console dependencies. A branch push through
+`verify:push:fast` also skips this prerequisite because it builds nothing. The
+`verify:push:branch` and release composites already include those metadata checks
+through `verify:console-design`; the hook does not repeat them. `verify:push:fast`
+does not run them; the required hosted checks do.
 
 The "ring/boundary/service/config guards" phrasing above folds in several named
 guards that `verify:push:branch` runs. Spelled out:
@@ -562,34 +600,35 @@ Main thread should `grep` to spot-check whenever a reviewer claims a previously-
 
 ## Branch Protection
 
-> Verified live 2026-07-22 via `gh api .../branches/main/protection` and `.../rulesets` (originally audited 2026-07-21, `WHATSOUP-CICD-AUDIT-2026-07-21`; refreshed after the R-02 approval requirement and the `merge_group` wiring). The default branch is gated by **two overlapping surfaces** — a modern ruleset *and* classic branch protection.
+> Verified live 2026-11-11 via `gh api repos/LucasQuiles/WhatSoup/branches/main/protection`, `.../rulesets`, and `.../rulesets/16319133`. The default branch is gated by two overlapping surfaces: a ruleset and classic branch protection. This is the observed state before the authorized metadata cutover; [Testing paths](../testing.md) defines the cutover and rollback procedure.
 
 **Ruleset "Lock"** (id `16319133`, enforcement `active`, `bypass_actors=[]` so it binds admins), scoped to `~DEFAULT_BRANCH`, four rules:
 - `deletion` — branch deletion blocked
 - `non_fast_forward` — force-pushes blocked
 - `required_status_checks` — `quality (24.x)` and `quality (25.x)` must pass (strict=false; branch need not be up to date)
-- `pull_request` — a PR is required, **with 0 required approvals**
+- `pull_request` — a PR is required, with `required_approving_review_count=0` and `require_extra_approval_for_unattributed_changes=true`; the latter can impose an additional approval for unattributed changes.
 
-**Classic branch protection** (same branch) additionally requires the **`CodeQL`** check, with `strict=true` (branch must be up to date), and — since the R-02 remediation — **`required_pull_request_reviews.required_approving_review_count = 1`** with `dismiss_stale_reviews=true` (an approval does not survive later commits). Its `enforce_admins=false`, so an admin can bypass the classic surface (including CodeQL *and* the approval requirement); the ruleset still binds admins to the quality checks, the PR requirement, and the non-fast-forward/deletion blocks.
+**Classic branch protection** requires `quality (24.x)`, `quality (25.x)`, `CodeQL`, and `test-integrity (private)`, with `strict=true` (the branch must be up to date). It also requires one approving review and dismisses stale approvals after later commits. Its `enforce_admins=false`, so the classic surface permits administrator bypass; the ruleset still binds administrators to the Quality checks, the PR requirement, and the non-fast-forward/deletion blocks. This release procedure does not use administrator bypass.
 
-**Net effect** — a non-admin contributor must pass `quality (24.x)` + `quality (25.x)` + `CodeQL`, have an up-to-date branch, **and obtain one approving review**; `CodeQL` and the approval are admin-bypassable. **`CodeQL` has no in-repo workflow** — it is GitHub *default code-scanning setup* (state=configured; languages actions/javascript/javascript-typescript/python/typescript; weekly + PR), so it is invisible to an in-repo-only search.
+**Effective checks before cutover:** both Quality contexts, CodeQL, and private test integrity, plus an up-to-date branch and one approving review for a non-administrator merge. The committed expectation adds `pr metadata` as the fifth context after the authorized cutover. Verify live agreement with that target immediately before the cutover PR merges. CodeQL uses GitHub-managed default code-scanning setup rather than an in-repository workflow.
 
 ⚠️ **Admin self-merge remains possible — deliberately.** R-02 closed the self-merge gap for *non-admins* by setting 1 required approval on the classic surface. It does **not** bind admins: classic `enforce_admins=false`, and the ruleset's `pull_request` rule (which does bind admins) still requires **0** approvals. So a repo admin can still merge their own PR. This is an accepted residual — raising the ruleset's approval count would block every solo merge on a single-maintainer repo. To close it fully, set the approval count on ruleset `16319133` instead.
 
-**Merge queue — UNAVAILABLE on this repository (platform constraint).** Do not spend time trying to turn it on. GitHub's merge queue requires an **organization-owned** repository; `LucasQuiles/WhatSoup` is public but `owner.type=User`, so the `merge_queue` ruleset rule is rejected outright:
+**Merge queue — disabled and unqualified.** The historical 2026-07-22 activation attempt on this user-owned repository was rejected by GitHub:
 
 ```
 PUT /repos/LucasQuiles/WhatSoup/rulesets/16319133
 -> HTTP 422 {"errors":["Invalid rule 'merge_queue': "]}
 ```
 
-Verified 2026-07-22: rejected **both** with explicit parameters and with none, so it is not a parameter-tuning problem. It would only become available by transferring the repo to an organization.
+That dated attempt failed both with explicit parameters and with none. It does not establish current platform eligibility; recheck eligibility and obtain owner authorization before proposing a future activation or repository transfer.
 
-`quality.yml` nevertheless **does** trigger on `merge_group` and exempts queue runs from `cancel-in-progress` (cancelling a queue run reports a cancelled required check and ejects the PR). That wiring is deliberately retained: it is inert while no queue exists, and it is the correct prerequisite if the repo ever moves to an org — the trigger must be on `main` *before* a queue is enabled, or every PR stalls waiting for a check that never runs.
+`quality.yml` retains its `merge_group` trigger and exempts queue runs from `cancel-in-progress`. This is one prerequisite for a future queue, not evidence of repository-wide queue support. The 2026-11-11 ruleset readback contains no merge queue; the existing private scanner intentionally excludes `merge_group` from its admitted events.
 
-Two constraints to respect if a queue ever becomes possible:
-- `whatsoup-guard.yml` is path-filtered and must **never** be made a required context while a queue is live — a PR not touching those paths would never report it, stalling the queue.
-- `CodeQL` is GitHub-managed default setup (it runs as event `dynamic`, with no in-repo workflow), so its behaviour on a `merge_group` ref cannot be configured or verified in advance. Treat enabling a queue as a canary exercise on a single low-risk PR, not a fleet-wide switch.
+Before any future queue activation:
+- Implement and review a private-scanner producer that safely binds its privileged publication to the exact queue commit. The current producer cannot supply the required `test-integrity (private)` context for that event.
+- Verify every required producer on a queue canary, including GitHub-managed CodeQL and metadata validation. Retained triggers and static expectations do not prove successful publication.
+- Verify the required Node 25 aggregate waits for the callable guard workflow whenever the guard lane is selected. `whatsoup-guard.yml` now runs through Quality; it has no independent path-filtered trigger.
 
 **Action pinning.** External action `uses:` refs are pinned to 40-hex commit SHAs (R-03, PR #2024); action updates are reviewed source changes, never floating tags.
 
@@ -602,11 +641,14 @@ To cut a release:
 
 1. **Verify locally** — run `npm run verify:release` on the commit you intend to tag. All steps must pass.
 2. **Tag** — `git tag v<version>` on the verified commit.
-3. **Push tag** — `git push origin v<version>`. The `tag-release-gate` CI workflow (`.github/workflows/tag-release-gate.yml`) will run the guard subset automatically.
-4. **Wait for CI** — confirm `tag-release-gate` passes in the GitHub Actions tab before publishing any release artifacts.
+3. **Push tag** — `git push origin v<version>`. Quality runs full validation for the tag, including guards, coverage, design checks and browser tests.
+4. **Wait for CI** — confirm Quality and `tag-release-gate` pass for the exact tag commit and Quality attempt before publishing any release artifacts. After the receipt cutover, the tag gate selects and verifies the trusted private-scanner receipt; a missing or invalid receipt cannot qualify the release.
 5. **Publish** — run `npm run verify:publish` as a final local gate, then proceed with any deployment.
 
-Note: the `tag-release-gate` workflow does NOT run the full test suite (those run on every PR via `quality.yml`). It runs the guard-only subset: typechecks, boundary/hygiene/drift/publication guards, ESLint fitness ring, and console lint + build.
+Quality runs full validation for tags and scheduled runs; PR validation follows the
+change-aware policy in [Testing paths](../testing.md). After cutover,
+`tag-release-gate` verifies the authenticated private-scanner receipt for the exact
+completed Quality attempt. It does not repeat Quality's guards or test suites.
 
 ## Maintenance
 

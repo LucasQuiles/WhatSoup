@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, expect } from 'vitest';
-import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  assertSourceMutationUnchanged,
+  establishSourceMutationAnchor,
+} from '../../scripts/lib/source-mutation.ts';
 
 // Source-mutation tripwire. The suite has twice shipped a mutator that
 // rewrites src/main.ts in the repo tree mid-run (caught by the source-runtime
@@ -12,30 +13,42 @@ import { join } from 'node:path';
 // WHATSOUP_TRIPWIRE_MAIN_SHA256 (set by the CI workflow before vitest starts)
 // additionally catches cross-file gaps on entry. globalSetup cannot carry the
 // baseline — its process.env never reaches forked workers.
-const target = join(process.cwd(), 'src/main.ts');
+const cwd = process.cwd();
+const entryDigest = establishSourceMutationAnchor({ cwd });
 
-function currentDigest(): string {
-  return createHash('sha256').update(readFileSync(target)).digest('hex');
-}
-
-const entryDigest = currentDigest();
-
-function fire(stage: string, baseline: string, current: string): void {
-  const spec = expect.getState().testPath ?? 'unknown-spec';
+function report(message: string): void {
   // Raw stderr, not console.error: vitest's console interception swallows
   // hook-context console output, and the whole point is surviving into the
   // raw CI log.
-  process.stderr.write(
-    `TRIPWIRE src/main.ts mutated: stage=${stage} spec=${spec} baseline=${baseline.slice(0, 16)} current=${current.slice(0, 16)}\n`,
-  );
+  process.stderr.write(`${message}\n`);
+}
+
+function check(stage: string, expectedDigest: string): void {
+  const spec = expect.getState().testPath ?? 'unknown-spec';
+  assertSourceMutationUnchanged({ cwd, expectedDigest, stage, spec, report });
+}
+
+function trace(event: 'start' | 'end'): void {
+  if (process.env.WHATSOUP_TEST_TRACE !== '1') return;
+  report(`test-module: ${JSON.stringify({
+    event,
+    spec: expect.getState().testPath ?? 'unknown-spec',
+    pid: process.pid,
+    ppid: process.ppid,
+    at: Date.now(),
+  })}`);
 }
 
 beforeAll(() => {
+  trace('start');
   const anchor = process.env.WHATSOUP_TRIPWIRE_MAIN_SHA256;
-  if (anchor && anchor !== entryDigest) fire('enter-vs-suite-anchor', anchor, entryDigest);
+  if (anchor) check('enter-vs-suite-anchor', anchor);
 });
 
 afterAll(() => {
-  const exitDigest = currentDigest();
-  if (exitDigest !== entryDigest) fire('exit-vs-own-entry', entryDigest, exitDigest);
+  try {
+    check('exit-vs-own-entry', entryDigest);
+  } finally {
+    trace('end');
+  }
 });
