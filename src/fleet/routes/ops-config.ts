@@ -181,9 +181,7 @@ export async function handleConfigUpdate(
           emitInventoryFailure(res, portInventory);
           haltConfigUpdateAfterResponse();
         }
-        // Validate the legacy-migrated view, as the loader reads it, so a
-        // legacy alias cannot pass admission and then fail config load.
-        const validationError = validateInstanceConfig(migrateLegacyMemoryConfig(merged, { removeLegacy: false }).config, {
+        const validationError = validateInstanceConfig(merged, {
           name: params.name,
           mode: 'patch',
           ...(portInventory ? { existingHealthPorts: portInventory.ports } : {}),
