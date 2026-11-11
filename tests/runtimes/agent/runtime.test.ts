@@ -535,13 +535,13 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 // ─── Import after mocks ───────────────────────────────────────────────────────
 
 import * as registerAllModule from '../../../src/mcp/register-all.ts';
-import { AgentRuntime, serializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
+import { AgentRuntime, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
 import { parseGeminiAcpEvent } from '../../../src/runtimes/agent/providers/gemini-acp-parser.ts';
+import { parseCodexEvent } from '../../../src/runtimes/agent/providers/codex-parser.ts';
 import { __resetModelCatalogueCacheForTest } from '../../../src/runtimes/agent/model-catalogue-resolver.ts';
 import { providerServerErrorNoFallbackNotice, providerUnknownTerminalNotice, renderUserMessage } from '../../../src/runtimes/agent/response-templates.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { TurnQueue } from '../../../src/runtimes/agent/turn-queue.ts';
-import type { SessionContext } from '../../../src/mcp/types.ts';
 import { Database as RealDatabase } from '../../../src/core/database.ts';
 import { DurabilityEngine, type SessionCheckpointRow } from '../../../src/core/durability.ts';
 import { getRecentMessages } from '../../../src/core/messages.ts';
@@ -556,7 +556,8 @@ import {
   getPerChatCleanupState, setOwnedTestSession, type PendingSystemResultTrackerView,
   pendingSystemResults, markOwnedSystemTurn, publishSingletonTestOwner,
   handlePerChatProviderEvent, currentCrashIdentity, awaitDispatchedTurn, retireDispatchedTurn,
-  type AutoCompactView, type ImageCoalescerView,
+  type AutoCompactView, type ImageCoalescerView, makePollMessenger, makeRealDb, buildPayload,
+  insertRow, makeDbWithTokenRow, makeBindingRuntime,
 } from './lib/runtime-mock-scaffold.ts';
 
 // ─── Coupled helpers (hoisting-pinned, cannot leave this file) ────────────────
@@ -648,6 +649,16 @@ async function emitAgentResultWithoutTokens(text: string | null = null): Promise
 
 async function emitTokenUsage(inputTokens: number): Promise<void> {
   capturedOnEventRef.current?.({ type: 'token_usage', inputTokens, outputTokens: 0 });
+  await Promise.resolve();
+}
+
+// #3717c: one API request's context. The convergence guards (verdict, rapid re-arm,
+// next-turn count) measure only a KNOWN context, so a fixture that means "this turn's
+// context was N" emits it here; a result or token_usage figure alone is unknown context.
+let requestUsageSeq = 0;
+async function emitRequestUsage(contextTokens: number): Promise<void> {
+  requestUsageSeq += 1;
+  capturedOnEventRef.current?.({ type: 'request_usage', messageId: `req-${requestUsageSeq}`, contextTokens });
   await Promise.resolve();
 }
 
@@ -1772,6 +1783,7 @@ describe('AgentRuntime', () => {
           messageId: `msg-escalation-${userTurn}`,
           content: `escalation turn ${userTurn}`,
         }));
+        await emitRequestUsage(inputTokens); // #3717c: the turn's known context
         await emitAgentResult(inputTokens);
       };
 
@@ -1845,6 +1857,7 @@ describe('AgentRuntime', () => {
           messageId: `msg-recovery-${userTurn}`,
           content: `recovery turn ${userTurn}`,
         }));
+        await emitRequestUsage(inputTokens); // #3717c: the turn's known context
         await emitAgentResult(inputTokens);
       };
 
@@ -1888,6 +1901,97 @@ describe('AgentRuntime', () => {
     }
   });
 
+  // #3717 shape from production (threshold 150,000): a request context of 352,562 was
+  // compacted; the first requests after the compact had contexts of 84,216 and 93,900.
+  // That turn's summed usage (1,070,745) and the cumulative input since the compact were
+  // both over the threshold, so the cumulative measure judged the successful compact
+  // non-convergent, counted a rapid re-arm and backed the scope off.
+  describe('#3717 convergence is judged on the current request context', () => {
+    const threshold = 150_000;
+    const globalKey = '__global__';
+    const baseline = 2_000_000;
+    const preCompactCumulative = 38_160_286;
+    const compactBaseline = baseline + preCompactCumulative;
+    const overContext = 352_562;
+    const postCompactContexts = [84_216, 93_900] as const;
+    const postCompactSummedInput = 1_070_745;
+
+    type ConvergenceView = AutoCompactView & { consecutiveNonConvergentCompactions: Map<string, number> };
+
+    /** A real over-threshold context compacts, then the first post-compact turn is under it. */
+    async function compactThenUnderThresholdTurn(runtime: AgentRuntime, label: string): Promise<number> {
+      mockActiveAgentSession();
+      await runtime.start();
+
+      mockTokenSnapshot(compactBaseline, baseline);
+      await sendAndAwaitProviderDispatch(runtime, makeMsg({ messageId: `msg-${label}-over`, content: 'over' }));
+      await emitRequestUsage(overContext);
+      await emitAgentResult(overContext);
+      expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+      await emitSuccessfulCompactResult();
+
+      // Inside the 5-minute rapid-rearm window, with cumulative input past the threshold.
+      mockSession.sendTurn.mockClear();
+      mockTokenSnapshot(compactBaseline + postCompactSummedInput, compactBaseline);
+      await sendAndAwaitProviderDispatch(runtime, makeMsg({ messageId: `msg-${label}-after`, content: 'after compact' }));
+      for (const context of postCompactContexts) await emitRequestUsage(context);
+      await emitAgentResult(postCompactSummedInput);
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
+      return compactBaseline + postCompactSummedInput;
+    }
+
+    it('judges a compact converged and sets no backoff when the first post-compact context is under the threshold', async () => {
+      vi.useFakeTimers();
+      try {
+        const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { autoCompactInputTokens: threshold });
+        const { autoCompact } = runtime as unknown as { autoCompact: ConvergenceView };
+
+        await compactThenUnderThresholdTurn(runtime, '3717-b1');
+
+        // The verdict: this compact converged.
+        expect(autoCompact.consecutiveNonConvergentCompactions.get(globalKey) ?? 0).toBe(0);
+        // No rapid re-arm, and no cooldown beyond the 5-minute one the successful compact set.
+        expect(autoCompact.consecutiveRapidRearms.get(globalKey) ?? 0).toBe(0);
+        const compactedAt = autoCompact.lastSuccessAt.get(globalKey);
+        expect(compactedAt).toBeDefined();
+        expect(autoCompact.cooldownUntil.get(globalKey)).toBe(compactedAt! + 5 * 60 * 1000);
+        const health = runtime.getHealthSnapshot().details as {
+          degradedReasons: string[];
+          autoCompactIneffective: number;
+          autoCompactNextTurnOverThreshold: number;
+          autoCompactState: string;
+        };
+        expect(health.autoCompactIneffective).toBe(0);
+        expect(health.autoCompactNextTurnOverThreshold).toBe(0);
+        expect(health.autoCompactState).toBe('idle');
+        expect(health.degradedReasons).not.toContain('auto_compact_backoff');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('compacts a real over-threshold context inside the backoff an earlier false verdict would have set', async () => {
+      vi.useFakeTimers();
+      try {
+        const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { autoCompactInputTokens: threshold });
+        const totalAfterFirstTurn = await compactThenUnderThresholdTurn(runtime, '3717-b2');
+
+        // Past the 5-minute success cooldown, inside the 15-minute tier-1 backoff a false
+        // verdict on the previous turn would have set. The context is now really over.
+        await vi.advanceTimersByTimeAsync(9 * 60 * 1000);
+        mockSession.sendTurn.mockClear();
+        mockTokenSnapshot(totalAfterFirstTurn + 2_500_000, compactBaseline);
+        await sendAndAwaitProviderDispatch(runtime, makeMsg({ messageId: 'msg-3717-b2-real-over', content: 'real over' }));
+        await emitRequestUsage(151_798);
+        await emitAgentResult(151_798);
+
+        expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   it('counts only the first real high-input turn after a successful compact', async () => {
     vi.useFakeTimers();
     try {
@@ -1909,6 +2013,7 @@ describe('AgentRuntime', () => {
         messageId: 'msg-large-follow-up',
         content: 'large follow-up',
       }));
+      await emitRequestUsage(250); // #3717c: known context over threshold
       await emitAgentResult(250, 'ok');
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(1);
       expect(runtime.getHealthSnapshot().details.autoCompactIneffective).toBe(1);
@@ -1917,6 +2022,7 @@ describe('AgentRuntime', () => {
         messageId: 'msg-second-follow-up',
         content: 'second follow-up',
       }));
+      await emitRequestUsage(250); // still over: only the FIRST post-compact turn counts
       await emitAgentResult(250, 'still ok');
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(1);
     } finally {
@@ -1924,7 +2030,7 @@ describe('AgentRuntime', () => {
     }
   });
 
-  it('uses token_usage events for next-turn measurement when result has no token counts', async () => {
+  it('treats a Codex token_usage-only post-compact turn as unknown context', async () => {
     vi.useFakeTimers();
     try {
       const db = makeDb();
@@ -1945,11 +2051,20 @@ describe('AgentRuntime', () => {
         messageId: 'msg-large-codex-follow-up',
         content: 'large codex follow-up',
       }));
-      await emitTokenUsage(250);
+      // #3896 review 5842877599: Codex reports only thread-level token usage, never a per-request
+      // context, so this turn's context is unknown and the convergence guards record nothing.
+      const codexUsage = parseCodexEvent(JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'thread/tokenUsage/updated',
+        params: { tokenUsage: { input_tokens: 250, output_tokens: 0 } },
+      }));
+      expect(codexUsage).toEqual({ type: 'token_usage', inputTokens: 250, outputTokens: 0 });
+      capturedOnEventRef.current?.(codexUsage!);
+      await Promise.resolve();
       await emitAgentResultWithoutTokens('ok');
 
-      expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(1);
-      expect(runtime.getHealthSnapshot().details.autoCompactIneffective).toBe(1);
+      expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(0);
+      expect(runtime.getHealthSnapshot().details.autoCompactIneffective).toBe(0);
     } finally {
       vi.useRealTimers();
     }
@@ -1980,6 +2095,7 @@ describe('AgentRuntime', () => {
         'manual_compact_silent',
         'test@s.whatsapp.net',
       );
+      await emitRequestUsage(250); // #3717c: a KNOWN over context, so the system-turn guard is what keeps this 0
       await emitTokenUsage(250);
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(0);
       expect(state.autoCompact.measureNextTurn.has(globalKey)).toBe(true);
@@ -1989,6 +2105,7 @@ describe('AgentRuntime', () => {
         messageId: 'msg-single-token-measurement',
         content: 'real user turn after compact',
       }));
+      await emitRequestUsage(250); // #3717c: the real user turn's known context
       await emitTokenUsage(250);
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(1);
       await emitAgentResultWithoutTokens('done');
@@ -2029,6 +2146,7 @@ describe('AgentRuntime', () => {
         'manual_compact_silent',
         chatJid,
       );
+      await emitRequestUsage(250); // #3717c: a KNOWN over context, so the system-turn guard is what keeps this 0
       await emitTokenUsage(250);
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(0);
       expect(state.autoCompact.measureNextTurn.has(chatJid)).toBe(true);
@@ -2044,6 +2162,7 @@ describe('AgentRuntime', () => {
         }),
         chatJid,
       );
+      await emitRequestUsage(250); // #3717c: the real user turn's known context
       await emitTokenUsage(250);
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(1);
       await emitAgentResultWithoutTokens('done');
@@ -11930,38 +12049,6 @@ describe('AgentRuntime', () => {
   // ═══════════════════════════════════════════════════════════════════════════
 
   describe('AskUserQuestion poll bridge queue behavior', () => {
-    // Build a messenger with sendPollMessage and event subscription support
-    function makePollMessenger(
-      sendResult: { waMessageId: string | null; hasSecret: boolean }
-        | Array<{ waMessageId: string | null; hasSecret: boolean }>,
-    ) {
-      const sentMessages: Array<{ jid: string; text: string }> = [];
-      const pollSends: Array<{ chatJid: string; name: string; values: string[]; selectableCount: number }> = [];
-      const eventHandlers = new Map<string, Function>();
-      let sendIndex = 0;
-
-      const messenger = {
-        sendMessage: vi.fn(async (jid: string, text: string) => {
-          sentMessages.push({ jid, text });
-          return { waMessageId: null };
-        }),
-        sendMedia: vi.fn(async () => ({ waMessageId: null })),
-        // ConnectionManager-shaped additions for poll bridge
-        sendPollMessage: vi.fn(async (chatJid: string, name: string, values: string[], selectableCount: number) => {
-          pollSends.push({ chatJid, name, values, selectableCount });
-          if (Array.isArray(sendResult)) {
-            return sendResult[Math.min(sendIndex++, sendResult.length - 1)];
-          }
-          return sendResult;
-        }),
-        on: vi.fn((event: string, handler: Function) => {
-          eventHandlers.set(event, handler);
-          return messenger;
-        }),
-      };
-      return { messenger: messenger as unknown as Messenger, sentMessages, pollSends, eventHandlers };
-    }
-
     function sendTurnTexts(): string[] {
       return mockSession.sendTurn.mock.calls.map((call) => String((call as unknown as [unknown])[0]));
     }
@@ -14030,52 +14117,6 @@ describe('AgentRuntime', () => {
   // ── P2 hardening: rehydrate consolidation + persistence error counter ─────
 
   describe('poll persistence hardening', () => {
-    function makeRealDb(): RealDatabase {
-      const db = new RealDatabase(':memory:');
-      db.open();
-      return db;
-    }
-
-    function buildPayload(overrides: Partial<PendingPollQuestion>): string {
-      const pending: PendingPollQuestion = {
-        questions: [{
-          question: 'Pick',
-          header: 'H',
-          options: [{ label: 'A', description: '' }, { label: 'B', description: '' }],
-          multiSelect: false,
-        }],
-        toolId: 'tool-x',
-        chatJid: 'chat@g.us',
-        chatJidAliases: new Set(['chat@g.us']),
-        mode: 'poll',
-        pollMessageIdToQuestionIndex: new Map([['POLL_X', 0]]),
-        currentQuestionIndex: 0,
-        answersCollected: {},
-        createdAt: 1_700_000_000_000,
-        resolution: 'first-vote-wins',
-        timeoutMs: 3_600_000,
-        votesByQuestion: new Map(),
-        adminJids: null,
-        source: 'askuser',
-        sentPollMessageIds: ['POLL_X'],
-        ...overrides,
-      };
-      return JSON.stringify(serializePendingPoll(pending));
-    }
-
-    function insertRow(
-      db: RealDatabase,
-      mapKey: string,
-      chatJid: string,
-      hardClosesAt: number | null,
-      payload: string,
-    ): void {
-      db.raw.prepare(
-        `INSERT INTO pending_polls (map_key, chat_jid, tool_id, source, resolution, payload, created_at, closes_at, hard_closes_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(mapKey, chatJid, mapKey, 'askuser', 'first-vote-wins', payload, 1_700_000_000_000, hardClosesAt, hardClosesAt);
-    }
-
     it('rehydrate consolidates expired-during-downtime notices to one message per chat', async () => {
       const db = makeRealDb();
       const { messenger, sentMessages } = makeMessenger();
@@ -14390,23 +14431,6 @@ describe('AgentRuntime', () => {
   describe('admin session commands', () => {
     const adminSender = '15550100001@s.whatsapp.net';
     const nonAdminSender = '15559998888@s.whatsapp.net';
-
-    /**
-     * Mock Database whose prepared SELECT against agent_sessions returns a
-     * controlled token row. Used to exercise the token-formatting branches in
-     * the /sessions handler (>1000 → "k" suffix vs raw count).
-     */
-    function makeDbWithTokenRow(
-      tokenRow: { total_input_tokens: number | null; total_output_tokens: number | null } | undefined,
-    ): Database {
-      return {
-        assertWritableCompatibility: vi.fn(),
-        raw: {
-          prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn(() => tokenRow) })),
-          exec: vi.fn(),
-        },
-      } as unknown as Database;
-    }
 
     function makePerChatSession(active: boolean, dbRowId: number | null, startedAt: string | null) {
       return {
@@ -15294,26 +15318,6 @@ describe('AgentRuntime', () => {
   describe('cross-conversation binding invariant (#1095)', () => {
     const ALICE_JID = '15550100001@s.whatsapp.net';
     const BOB_JID = '15550100002@s.whatsapp.net';
-
-    type BindView = {
-      singletonProviderToolSession: SessionContext | null;
-      globalSocketServer: { updateConversationKey: (k: string | undefined) => void } | null;
-      enforceGlobalConversationBinding: (chatJid: string) => void;
-    };
-
-    function makeBindingRuntime(sessionScope: 'single' | 'shared' | 'per_chat'): {
-      view: BindView;
-      socketUpdates: Array<string | undefined>;
-    } {
-      const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { sessionScope });
-      const view = runtime as unknown as BindView;
-      const socketUpdates: Array<string | undefined> = [];
-      // singletonProviderToolSession is only ever tracked for single/shared spawns
-      // (trackSingletonMcpSession: true) — per_chat never sets it in production.
-      view.singletonProviderToolSession = sessionScope === 'per_chat' ? null : { tier: 'global' };
-      view.globalSocketServer = { updateConversationKey: (k) => { socketUpdates.push(k); } };
-      return { view, socketUpdates };
-    }
 
     it('pins an unbound shared/global session to the originating chat at turn dispatch (no drift error)', () => {
       const { view, socketUpdates } = makeBindingRuntime('shared');
@@ -16489,11 +16493,6 @@ describe('B3 inline imperative extractor — QR-143 transport gate', () => {
   const ADMIN_SMS = '+15550100001@sms'; // spoofable: same bare digits as admin
   const IMPERATIVE = 'remind me to call Alex Friday';
 
-  function makeRealDb(): RealDatabase {
-    const db = new RealDatabase(':memory:');
-    db.open();
-    return db;
-  }
   function proposedCount(db: RealDatabase): number {
     return (db.raw.prepare("SELECT COUNT(*) AS c FROM beads WHERE status = 'proposed'").get() as { c: number }).c;
   }

@@ -134,6 +134,15 @@ export type AgentEvent =
       providerTurnProtocolError?: 'missing_identity' | 'missing_request_identity';
     }
   | { type: 'token_usage'; inputTokens?: number; outputTokens?: number; cacheReadTokens?: number }
+  /**
+   * #3717c: the context size of ONE API request (input + cache_creation + cache_read of that
+   * assistant message's usage). Emitted once per assistant line, after its content events.
+   * The CLI repeats a message per content block with the same id and usage, so consumers key by
+   * messageId and REPLACE, never add. contextTokens is undefined when the usage is missing or
+   * invalid (the context is unknown; no fallback to an earlier request or the summed result).
+   * Not a billing figure: billing stays on the result usage.
+   */
+  | { type: 'request_usage'; messageId?: string; contextTokens?: number }
   | { type: 'ignored' }
   | { type: 'ignored'; blockType: string; reason: IgnoredBlockReason }
   | { type: 'unknown_block'; blockType: string; raw: unknown }
@@ -160,6 +169,32 @@ export function splitInputTokenUsage(event: {
 }
 
 type JsonRecord = Record<string, unknown>;
+
+const isTokenCount = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0;
+
+/** #3717c G1-G3: one request's context, or unknown when its usage is missing or invalid. */
+function requestUsageEvent(message: JsonRecord | null): AgentEvent {
+  const rawId = message?.['id'];
+  const messageId = typeof rawId === 'string' && rawId.length > 0 ? rawId : undefined;
+  const usage = asRecord(message?.['usage']);
+  // input_tokens is required. The cache fields are optional: ABSENT counts as 0, but a
+  // present non-count value (null, string, negative, NaN) makes the context unknown.
+  const optionalCount = (key: string): number | undefined => {
+    if (usage === null || !(key in usage)) return 0;
+    const value = usage[key];
+    return isTokenCount(value) ? value : undefined;
+  };
+  const input = usage?.['input_tokens'];
+  const creation = optionalCount('cache_creation_input_tokens');
+  const read = optionalCount('cache_read_input_tokens');
+  let contextTokens: number | undefined;
+  if (usage !== null && isTokenCount(input) && creation !== undefined && read !== undefined) {
+    const sum = input + creation + read;
+    contextTokens = Number.isFinite(sum) ? sum : undefined; // finite parts can overflow to Infinity
+  }
+  return { type: 'request_usage', messageId, contextTokens };
+}
 
 function asRecord(value: unknown): JsonRecord | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -481,9 +516,12 @@ export function parseEvents(line: string): AgentEvent[] {
     const message = asRecord(event['message']);
     const content = message?.['content'];
     if (!Array.isArray(content) || content.length === 0) {
-      return [unknownEvent(parsed)];
+      // #3717c: an assistant message with no renderable content is still one API
+      // request; its usage (or its absence -> unknown) must reach the gauge so an
+      // earlier request's context is never left standing as the current one.
+      return message === null ? [unknownEvent(parsed)] : [unknownEvent(parsed), requestUsageEvent(message)];
     }
-    return content.flatMap(parseAssistantBlock);
+    return [...content.flatMap(parseAssistantBlock), requestUsageEvent(message)];
   }
 
   if (topType === 'user') {
