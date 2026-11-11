@@ -22,20 +22,39 @@ def load_module():
     return module
 
 
-@given(audit=st.one_of(st.none(), st.booleans(), st.integers(), st.lists(st.text())))
-def test_unaudited_success_does_not_partially_update_a_delivery_batch(audit):
+@pytest.mark.parametrize("status", ["sent", "email_delivered"])
+@given(audit=st.one_of(st.none(), st.booleans(), st.integers(), st.lists(st.text()),
+                      st.text(alphabet=" \t\r\n\v\f\u0085\u00a0\u2003\u2028\u2029", max_size=80)))
+@example(audit="")
+@example(audit=" \t\r\n\u2003")
+def test_unaudited_success_does_not_partially_update_a_delivery_batch(audit, status):
     supervisor = load_module()
     identifiers = [f"00000000-0000-4000-8000-{index:012d}" for index in range(2)]
     receipts = {
         identifiers[0]: {"status": "sent", "audit_receipt": "valid-receipt"},
-        identifiers[1]: {"status": "email_delivered", "audit_receipt": audit},
+        identifiers[1]: {"status": status, "audit_receipt": audit},
     }
     code = "import sys; sys.stdout.write(" + repr(json.dumps(receipts)) + ")"
-    alerts = [{"event_id": identifier, "delivery": "published"} for identifier in identifiers]
+    alerts = [{"event_id": identifiers[0], "delivery": "published"},
+              {"event_id": identifiers[1], "delivery": "publication_unknown"}]
+    original = [dict(alert) for alert in alerts]
     assert supervisor.resolve_alert_delivery({"delivery_command": [sys.executable, "-c", code]}, alerts) == [
         {"code": "invalid_output", "returncode": None}
     ]
-    assert alerts == [{"event_id": identifier, "delivery": "published"} for identifier in identifiers]
+    assert alerts == original
+
+
+@pytest.mark.parametrize("status", ["sent", "email_delivered"])
+@given(audit=st.text(min_size=1, max_size=80).filter(lambda value: bool(value.strip())))
+@example(audit=" \topaque-receipt \n")
+def test_nonblank_audit_receipt_is_retained_without_normalization(audit, status):
+    supervisor = load_module()
+    identifier = "00000000-0000-4000-8000-000000000035"
+    receipt = {"status": status, "audit_receipt": audit, "extension": [True, 3]}
+    code = "import sys; sys.stdout.write(" + repr(json.dumps({identifier: receipt})) + ")"
+    alert = {"event_id": identifier, "delivery": "publication_unknown"}
+    assert supervisor.resolve_alert_delivery({"delivery_command": [sys.executable, "-c", code]}, [alert]) == []
+    assert alert == {"event_id": identifier, "delivery": "channel_delivered", "delivery_receipt": receipt}
 
 
 def test_missing_audit_receipt_cannot_claim_delivery():

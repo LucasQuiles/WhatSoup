@@ -854,7 +854,8 @@ def _resolve_batch(config, batch):
         if not isinstance(receipt, dict) or not isinstance(receipt.get("status"), str):
             continue
         if receipt.get("status") in {"sent", "email_delivered"}:
-            if not isinstance(receipt.get("audit_receipt"), str):
+            audit_receipt = receipt.get("audit_receipt")
+            if not isinstance(audit_receipt, str) or not audit_receipt.strip():
                 return {"code": "invalid_output", "returncode": None}
             try:
                 _bounded_json_bytes(receipt, MAX_RETAINED_RECEIPT_BYTES)

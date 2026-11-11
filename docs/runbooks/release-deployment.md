@@ -956,9 +956,14 @@ Scan errors or exhausted budgets fail the whole batch through the existing
 generic command error; they cannot return an earlier partial delivery result.
 The supervisor leaves that batch unresolved with unchanged event IDs. Its
 existing published-alert retention rules are unchanged.
-A command response that claims delivery without an audit-receipt string fails
-the batch before any alert is changed. Other malformed receipt rows remain
-unresolved; they cannot establish delivery.
+A command response that claims delivery without a nonblank audit-receipt string
+fails the batch before any alert is changed. Empty or whitespace-only strings
+do not establish delivery. The receipt reader reports a sent spool record with
+such a value as pending. This matches the dispatcher's acceptance contract;
+valid opaque receipt strings, including surrounding whitespace, are retained
+unchanged. Other malformed receipt rows remain unresolved.
+This validation applies when resolving delivery. Previously saved terminal
+records are not revalidated or migrated by this change.
 Each newly accepted successful receipt must also serialize within 4,096 bytes,
 with no non-finite numbers. The entire receipt object is retained unchanged;
 the audit string is neither truncated nor restricted to a hexadecimal format.

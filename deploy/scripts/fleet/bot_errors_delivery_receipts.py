@@ -170,17 +170,19 @@ def delivery_receipts(root, identifiers):
                     if not isinstance(delivery, dict):
                         continue
                     status = delivery.get("status")
+                    audit_receipt = delivery.get("auditReceipt")
                     if (
                         stage == "sent"
                         and status in ("sent", "email_delivered")
-                        and isinstance(delivery.get("auditReceipt"), str)
+                        and isinstance(audit_receipt, str)
+                        and audit_receipt.strip()
                     ):
                         if output[identifier]["status"] in ("sent", "email_delivered"):
                             continue
                         output[identifier] = {
                             "status": status,
                             "sent_at": delivery.get("sentAt"),
-                            "audit_receipt": delivery["auditReceipt"],
+                            "audit_receipt": audit_receipt,
                         }
                         _check_response(output, budget)
                         continue

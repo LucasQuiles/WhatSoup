@@ -10,7 +10,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 import pytest
-from hypothesis import given, strategies as st
+from hypothesis import example, given, strategies as st
 
 
 spec = importlib.util.spec_from_file_location(
@@ -55,6 +55,37 @@ def test_final_dispatcher_receipt_is_redacted_and_not_confused_with_queue(tmp_pa
 def test_delivery_query_rejects_arbitrary_path_and_glob_input(tmp_path):
     with pytest.raises(ValueError):
         module.delivery_receipts(tmp_path, ["../../*"])
+
+
+@pytest.mark.parametrize("status", ["sent", "email_delivered"])
+@given(audit=st.one_of(
+    st.none(), st.booleans(), st.integers(), st.lists(st.text(max_size=20), max_size=4),
+    st.dictionaries(st.text(max_size=20), st.integers(), max_size=4),
+    st.text(alphabet=" \t\r\n\v\f\u0085\u00a0\u2003\u2028\u2029", max_size=80),
+))
+@example(audit="")
+@example(audit=" \t\r\n\u2003")
+def test_invalid_sent_audit_receipt_remains_pending(audit, status):
+    identifier = "00000000-0000-4000-8000-000000000035"
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "sent").mkdir()
+        _sent_receipt(root / "sent" / f"{identifier}.json", identifier, audit=audit, status=status)
+        assert module.delivery_receipts(root, [identifier]) == {identifier: {"status": "pending"}}
+
+
+@pytest.mark.parametrize("status", ["sent", "email_delivered"])
+@given(audit=st.text(min_size=1, max_size=80).filter(lambda value: bool(value.strip())))
+@example(audit=" \topaque-receipt \n")
+def test_nonblank_sent_audit_receipt_is_preserved_exactly(audit, status):
+    identifier = "00000000-0000-4000-8000-000000000036"
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "sent").mkdir()
+        _sent_receipt(root / "sent" / f"{identifier}.json", identifier, audit=audit, status=status)
+        assert module.delivery_receipts(root, [identifier]) == {
+            identifier: {"status": status, "audit_receipt": audit, "sent_at": None}
+        }
 
 
 def _place(root, stage, identifier, name_suffix, status="queued"):
@@ -117,10 +148,10 @@ def test_dead_letter_is_reported_as_dead_lettered_not_pending(tmp_path):
     )
 
 
-def _sent_receipt(path, identifier):
+def _sent_receipt(path, identifier, *, audit="outside-receipt", status="sent"):
     path.write_text(json.dumps({
         "id": identifier,
-        "delivery": {"status": "sent", "auditReceipt": "outside-receipt"},
+        "delivery": {"status": status, "auditReceipt": audit},
     }))
 
 
