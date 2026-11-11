@@ -4,7 +4,7 @@
  * DISPOSITION RECORD (this file previously pinned the v3 page — 27 tests):
  *   SURVIVED (re-pinned against the v3.5 anatomy):
  *   - load-older pagination (success / end-of-history / failure-toast)
- *   - composer send (trim, optimistic, invalidate) + send failure toast
+ *   - composer send (trim, pending draft, invalidate) + uncertain outcome
  *   - mark-read (now fires on OPEN per the unified-inbox model, same real route)
  *   - deep-link selection (?line=&chat=)
  *   REMOVED per the mockup SSOT (not test-signal weakening — the features left
@@ -529,6 +529,124 @@ describe('v3.5 inbox — takeover (local-only honesty)', () => {
 // ---------------------------------------------------------------------------
 
 describe('v3.5 inbox — composer', () => {
+  it('keeps an uncertain draft visible without a success-shaped cached message or automatic retry', async () => {
+    const pending = Promise.withResolvers<unknown>()
+    sendMessageMock.mockReturnValue(pending.promise)
+    const { container, qc, getByRole } = renderInbox()
+    const saved = [makeMessage(1, 'existing')]
+    qc.setQueryData(['messages', 'personal', 'conv-a'], saved)
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    const input = getByRole('textbox', { name: 'Type a message' }) as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'retain this draft' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(input.value).toBe('retain this draft')
+    expect(input.disabled).toBe(true)
+    expect(qc.getQueryData(['messages', 'personal', 'conv-a'])).toEqual(saved)
+    await act(async () => pending.reject(new Error('response lost')))
+    expect(input.value).toBe('retain this draft')
+    expect(getByRole('status').textContent).toContain('not confirmed')
+    expect((getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(sendMessageMock).toHaveBeenCalledTimes(1)
+    const invalidate = vi.spyOn(qc, 'invalidateQueries')
+    fireEvent.click(getByRole('button', { name: 'Refresh messages' }))
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['messages', 'personal', 'conv-a'] })
+    expect(sendMessageMock).toHaveBeenCalledTimes(1)
+    fireEvent.click(getByRole('button', { name: 'Discard draft' }))
+    expect(input.value).toBe('')
+    expect(input.disabled).toBe(false)
+    expect(sendMessageMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('admits one send before React commits repeated Enter events', async () => {
+    const pending = Promise.withResolvers<unknown>()
+    sendMessageMock.mockReturnValue(pending.promise)
+    const { container, getByRole } = renderInbox()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    const input = getByRole('textbox', { name: 'Type a message' })
+    fireEvent.change(input, { target: { value: 'once' } })
+    act(() => {
+      fireEvent.keyDown(input, { key: 'Enter' })
+      fireEvent.keyDown(input, { key: 'Enter' })
+    })
+    expect(sendMessageMock).toHaveBeenCalledTimes(1)
+    await act(async () => pending.resolve({ sent: true }))
+    expect((input as HTMLInputElement).value).toBe('')
+  })
+
+  it('keeps sends on the same conversation key on different lines independently owned', async () => {
+    mockLines = [makeLine('alpha'), makeLine('beta')]
+    getChatsMock.mockImplementation(async (line: string) => [makeChat('shared', { name: `Chat ${line}` })])
+    const first = Promise.withResolvers<unknown>()
+    const second = Promise.withResolvers<unknown>()
+    sendMessageMock.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+    const { container, getByRole } = renderInbox()
+    await waitFor(() => expect(container.querySelectorAll('.inbox-citem')).toHaveLength(2))
+    const select = (line: string) => fireEvent.click([...container.querySelectorAll('.inbox-citem')].find((item) => item.textContent?.includes(`Chat ${line}`))!)
+    const input = () => getByRole('textbox', { name: 'Type a message' }) as HTMLInputElement
+    select('alpha')
+    fireEvent.change(input(), { target: { value: 'alpha draft' } })
+    fireEvent.keyDown(input(), { key: 'Enter' })
+    select('beta')
+    expect(input().disabled).toBe(false)
+    fireEvent.change(input(), { target: { value: 'beta draft' } })
+    fireEvent.keyDown(input(), { key: 'Enter' })
+    expect(sendMessageMock.mock.calls).toEqual([['alpha', 'shared', 'alpha draft'], ['beta', 'shared', 'beta draft']])
+    await act(async () => first.reject(new Error('alpha response lost')))
+    expect(input().value).toBe('beta draft')
+    expect((getByRole('button', { name: 'Sending' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(toastMock.error).not.toHaveBeenCalled()
+    await act(async () => second.resolve({ sent: true }))
+    expect(input().value).toBe('')
+    select('alpha')
+    expect(input().value).toBe('alpha draft')
+    expect(getByRole('status').textContent).toContain('not confirmed')
+  })
+
+  it.each(['resolve', 'reject'])('does not change Inbox after leaving it before a send %s', async (outcome) => {
+    const pending = Promise.withResolvers<unknown>()
+    sendMessageMock.mockReturnValue(pending.promise)
+    const { container, getByRole, unmount, qc } = renderInbox()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    const input = getByRole('textbox', { name: 'Type a message' })
+    fireEvent.change(input, { target: { value: 'submitted once' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    const invalidate = vi.spyOn(qc, 'invalidateQueries')
+    unmount()
+    await act(async () => {
+      if (outcome === 'resolve') pending.resolve({ sent: true })
+      else pending.reject(new Error('late response lost'))
+    })
+    expect(sendMessageMock).toHaveBeenCalledTimes(1)
+    expect(toastMock.error).not.toHaveBeenCalled()
+    expect(invalidate).not.toHaveBeenCalled()
+  })
+
+  it('preserves an uncertain draft through back navigation and allows a separate new message after discarding it', async () => {
+    sendMessageMock.mockRejectedValueOnce(new Error('response lost')).mockResolvedValueOnce({ sent: true })
+    const { container, getByRole } = renderInbox()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    const select = () => fireEvent.click(container.querySelector('.inbox-citem')!)
+    select()
+    fireEvent.change(getByRole('textbox', { name: 'Type a message' }), { target: { value: 'uncertain old draft' } })
+    fireEvent.click(getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(getByRole('status').textContent).toContain('not confirmed'))
+    fireEvent.click(getByRole('button', { name: 'Back to conversations' }))
+    select()
+    const input = getByRole('textbox', { name: 'Type a message' }) as HTMLInputElement
+    expect(input.value).toBe('uncertain old draft')
+    expect(input.disabled).toBe(true)
+    fireEvent.click(getByRole('button', { name: 'Discard draft' }))
+    expect(input.value).toBe('')
+    expect(input).toBe(document.activeElement)
+    fireEvent.change(input, { target: { value: 'a different message' } })
+    fireEvent.click(getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(input.value).toBe(''))
+    expect(sendMessageMock.mock.calls).toEqual([['personal', 'conv-a', 'uncertain old draft'], ['personal', 'conv-a', 'a different message']])
+  })
   it('media/voice/poll caps are disabled with no-fleet-route notes; schedule cap navigates', async () => {
     const { container } = renderInbox()
     await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
@@ -568,7 +686,7 @@ describe('v3.5 inbox — composer', () => {
     )
   })
 
-  it('reports a failed send via toast and drops the optimistic bubble', async () => {
+  it('reports uncertainty with safe feedback and retains the draft after a lost response', async () => {
     sendMessageMock.mockRejectedValue(new Error('boom'))
     const { container } = renderInbox()
     await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
@@ -577,7 +695,8 @@ describe('v3.5 inbox — composer', () => {
     fireEvent.change(input, { target: { value: 'will fail' } })
     fireEvent.keyDown(input, { key: 'Enter' })
     await waitFor(() => expect(toastMock.error).toHaveBeenCalled())
-    expect(toastMock.error.mock.calls[0]![0]).toContain('boom')
+    expect(toastMock.error).toHaveBeenCalledExactlyOnceWith('Send not confirmed. Check this conversation before sending again.')
+    expect(input.value).toBe('will fail')
   })
 })
 

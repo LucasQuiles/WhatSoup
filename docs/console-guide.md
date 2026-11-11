@@ -148,6 +148,16 @@ allows the new thread to load independently. Overlapping history pages retain
 the current cached message once. Returning to a thread preserves its pagination
 state until the Inbox is remounted.
 
+Drafts and pending sends belong to the same line and conversation. The draft
+stays visible while sending; message history contains only recorded messages.
+An unconfirmed result keeps the draft and blocks another submission. **Refresh
+messages** requests current history without resending. After checking the
+conversation, **Discard draft** clears that local draft and permits a new message;
+it does not cancel or undo the earlier attempt. Back navigation preserves drafts
+within the current Inbox visit. Leaving Inbox or reloading ends this local
+protection, so inspect history before re-entering an uncertain message. A late
+response from an abandoned Inbox cannot change its cache or announce an outcome.
+
 **Contact details** panel (right side) shows the contact, line, conversation type,
 and recorded agent session. Contact access controls live on the line detail page.
 

@@ -77,13 +77,14 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, cleanup } from 'vitest-browser-react';
-import { page } from 'vitest/browser';
+import { page, userEvent } from 'vitest/browser';
 import React from 'react';
 import { MemoryRouter, Routes, Route } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ToastContext } from '../../console/src/hooks/toast-context';
 import type { ToastContextValue } from '../../console/src/hooks/toast-context';
 import type { LineInstance, ChatItem, Message } from '../../console/src/types';
+import { api } from '../../console/src/lib/api';
 import NavRail from '../../console/src/components/chrome/NavRail';
 import Agents from '../../console/src/pages/Agents';
 import { SummaryTab } from '../../console/src/components/line-detail/SummaryTab';
@@ -695,6 +696,43 @@ describe('Viewport matrix — v3.5 Inbox (T5 b-07)', () => {
       expect(input.getBoundingClientRect().height).toBe(36);
       expect(send.getBoundingClientRect().height).toBe(36);
     });
+  });
+
+  it('retains an uncertain send through mobile back navigation and restores keyboard editing after discard', async () => {
+    let rejectSend!: (error: Error) => void;
+    vi.mocked(api.sendMessage).mockImplementationOnce(() => new Promise((_, reject) => {
+      rejectSend = reject;
+    }));
+    await page.viewport(390, 844);
+    const { container } = await render(wrapInboxV35());
+    await page.getByText('Fixture Chat', { exact: true }).click();
+    const input = page.getByRole('textbox', { name: 'Type a message' });
+    await expect.element(input).toHaveFocus();
+    await input.fill('Keep this draft');
+    await userEvent.keyboard('{Enter}{Enter}');
+    expect(api.sendMessage).toHaveBeenCalledExactlyOnceWith('personal', 'conv-a', 'Keep this draft');
+    await expect.element(input).toBeDisabled();
+    await expect.element(page.getByRole('status')).toHaveTextContent('Sending message…');
+    expect(container.querySelectorAll('.inbox-mrow--me')).toHaveLength(0);
+
+    rejectSend(new Error('response lost'));
+    await expect.element(page.getByRole('status')).toHaveTextContent('Send not confirmed.');
+    await expect.element(input).toHaveValue('Keep this draft');
+    await page.getByRole('button', { name: 'Back to conversations' }).click();
+    await page.getByText('Fixture Chat', { exact: true }).click();
+    await expect.element(input).toHaveValue('Keep this draft');
+    await expect.element(input).toBeDisabled();
+    await page.getByRole('button', { name: 'Refresh messages' }).click();
+    expect(api.sendMessage).toHaveBeenCalledTimes(1);
+    await page.getByRole('button', { name: 'Discard draft' }).click();
+    await expect.element(input).toBeEnabled();
+    await expect.element(input).toHaveValue('');
+    await expect.element(input).toHaveFocus();
+    await userEvent.keyboard('A different message{Enter}');
+    await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(2));
+    expect(api.sendMessage).toHaveBeenLastCalledWith('personal', 'conv-a', 'A different message');
+    await expect.element(input).toHaveValue('');
+    await expect.element(input).toHaveFocus();
   });
 
   describe('no horizontal overflow at every breakpoint', () => {

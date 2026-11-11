@@ -11,7 +11,7 @@
  *   no read state) — it is local UI state and says so wherever it renders.
  * - Composer media/voice/poll caps have no fleet route → disabled with notes;
  *   scheduling lives on the line detail surface and the cap navigates there.
- * - Messages send for real (POST /api/lines/:name/send, optimistic insert);
+ * - Sends retain a pending draft until POST /api/lines/:name/send settles;
  *   opening a conversation with unread marks it read (real mark-read route).
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -32,6 +32,7 @@ import {
 } from '../lib/inbox-unified'
 import { ConversationList } from '../components/inbox/ConversationList'
 import { ThreadPane } from '../components/inbox/ThreadPane'
+import { useInboxComposer } from '../hooks/use-inbox-composer'
 import { ContextPane } from '../components/inbox/ContextPane'
 import { ChannelGlyph } from '../components/inbox/channel-glyphs'
 import { CHANNEL_LABEL } from '../lib/transport-identity'
@@ -138,6 +139,7 @@ export default function Inbox() {
     () => (selected ? conversations.find((c) => conversationId(c.line, c.conversationKey) === selectedId) ?? null : null),
     [conversations, selected, selectedId],
   )
+  const composer = useInboxComposer(selectedConversation)
 
   const { data: messages, error: messagesError } = useMessages(selected?.line ?? '', selected?.key ?? '')
   const hasMore = selectedId ? (pagination[selectedId]?.hasMore ?? true) : true
@@ -252,6 +254,7 @@ export default function Inbox() {
         {selectedConversation && !messagesError ? (
           <ThreadPane
             conversation={selectedConversation}
+            composer={composer}
             messages={messages ?? []}
             hasMore={hasMore}
             loadingOlder={loadingOlder}

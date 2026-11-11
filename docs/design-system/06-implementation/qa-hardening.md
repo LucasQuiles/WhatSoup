@@ -87,6 +87,14 @@ Every migrated surface must classify these cases:
 Allowed statuses: **PASS, FAIL, BLOCKED, DEFERRED, NOT APPLICABLE, INCONCLUSIVE**. No row may be blank
 in the final slice evidence. If a case cannot be simulated, document why and classify it.
 
+The Inbox journey in `tests/browser/viewport-matrix.test.tsx` uses the existing
+mocked API fixture and bundled Chromium at 390×844. It verifies keyboard double
+submission, visible pending status without a sent-message bubble, draft retention
+after an uncertain response and back navigation, refresh without resend, and focus
+restoration after explicit discard and a subsequent successful send. The ordinary
+`test:browser` command includes this check. It does not establish delivery over a
+real transport or persistence after leaving Inbox or reloading.
+
 ## 5. Visual Drift Sentinel
 
 Before a screen is accepted, compare it against locked SOUP v2 Blend. Flag any of:
