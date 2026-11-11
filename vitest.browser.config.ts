@@ -22,7 +22,6 @@ import tailwindcss from '@tailwindcss/vite';
 import path from 'path';
 
 export default defineConfig({
-  cacheDir: '.local/vite/browser',
   // esbuild JSX: same transform the root config uses for console component tests.
   // @vitejs/plugin-react is NOT imported — it requires vite ^8 (console-only).
   esbuild: {
