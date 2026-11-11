@@ -1658,6 +1658,33 @@ Use when credentials are expired (logged out) or the auth directory is corrupted
 
 **Prerequisites:** The bot instance must be stopped before running auth.
 
+The fleet authentication routes retain the helper's ownership until its process
+and output streams close. Closing the browser or reaching the five-minute limit
+requests termination; it does not establish that the helper stopped. The fleet
+requests SIGKILL after five seconds and reports unconfirmed cleanup after another
+five seconds. While closure is unconfirmed, another authentication request gets
+409 and the legacy flow does not restart the instance over the credential writer.
+A service activation callback has a 30-second response deadline. If it does not
+settle, the response ends with an error and admission stays held until it settles.
+A late callback cannot turn that ended response into success.
+
+For account-scoped pairing, `pairing_helper_cleanup_unconfirmed` leaves the
+operation journal at `pairing`, preserves the active credential tree, and retains
+the coordination lease. Inspect `GET /api/lines/:name/pairing/status` with the
+original idempotency key and header-borne credentials. Its `lastEvent` distinguishes
+`cleanup_unconfirmed`, `cleanup_confirmed`, and `cleanup_release_unconfirmed`.
+Confirmed late closure releases only the original fenced lease. It does not
+complete the interrupted pairing or authorize an automatic retry. Resolve the
+recorded operation and verify that no helper owns the tree before starting a new
+pairing; do not delete the lease or credentials to bypass admission.
+
+These helper records belong to the running fleet process. Recovery after a fleet
+crash, and shared exclusion with config, delete and checkpoint writers, still
+require qualification. Restarting the fleet is not proof that an orphaned helper
+has stopped. The maintained controls are `src/fleet/auth-helper.ts`, the auth
+routes, and `src/transport/pairing-saga.ts`; their ownership and recovery tests
+run through the ordinary root test suite.
+
 ```bash
 # 1. Stop the instance
 systemctl --user stop whatsoup@sandbox-agent

@@ -7,9 +7,14 @@ import { tmpdir } from 'node:os';
 // The saga effects spawn a real helper child; mock node:child_process so the
 // spawn/stdout/stderr/exit branches are driven deterministically.
 const spawnMock = vi.fn();
-vi.mock('node:child_process', () => ({ spawn: (...args: unknown[]) => spawnMock(...args) }));
+vi.mock('node:child_process', async (original) => ({
+  ...await original<typeof import('node:child_process')>(),
+  spawn: (...args: unknown[]) => spawnMock(...args),
+}));
 
-import { buildSagaEffects } from '../../../src/fleet/routes/ops-auth.ts';
+import { buildSagaEffects, handlePairingApply, handlePairingStatus } from '../../../src/fleet/routes/ops-auth.ts';
+import { acquireCoordinationLease, coordinationLeasePath, readCoordinationLease } from '../../../src/transport/coordination-lease.ts';
+import { mockReq, mockRes } from '../../helpers/http-mocks.ts';
 import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
 import { parseAccountScopeId, type CoordinationLeaseV1 } from '../../../src/transport/auth-custody-contracts.ts';
 
@@ -20,6 +25,10 @@ let stateRoot: string;
 let authDir: string;
 
 class FakeChild extends EventEmitter {
+  constructor(closeOnExit = true) {
+    super();
+    if (closeOnExit) this.on('exit', (code) => this.emit('close', code));
+  }
   stdout = new EventEmitter();
   stderr = new EventEmitter();
   kill = vi.fn();
@@ -123,6 +132,74 @@ describe('buildSagaEffects.acquireLease / releaseLease', () => {
 });
 
 describe('buildSagaEffects.runPairingHelper', () => {
+  it('waits for stdout closure before accepting the final persisted-credential event', async () => {
+    const child = new FakeChild(false);
+    spawnMock.mockReturnValue(child);
+    let settled = false;
+    const promise = effectsFor(makeServiceManager()).runPairingHelper({ authDir, lease });
+    void promise.then(() => { settled = true; });
+    child.emit('exit', 0);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    child.stdout.emit('data', Buffer.from('{"event":"connected"}\n'));
+    child.emit('close', 0);
+    expect(await promise).toEqual({ ok: true });
+  });
+
+  it('reports unconfirmed cleanup when a timed-out helper never closes', async () => {
+    vi.useFakeTimers();
+    const child = new FakeChild(false);
+    spawnMock.mockReturnValue(child);
+    const promise = effectsFor(makeServiceManager()).runPairingHelper({ authDir, lease });
+    await vi.advanceTimersByTimeAsync(5 * 60_000 + 10_001);
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(await promise).toEqual({ ok: false, errorClass: 'pairing_timeout', cleanupUnconfirmed: true });
+    child.emit('close', 1);
+  });
+
+  it.each([false, true])('retains the real lease until late closure and preserves a replacement: %s', async (replaced) => {
+    vi.useFakeTimers();
+    const child = new FakeChild(false);
+    spawnMock.mockReturnValue(child);
+    const effects = effectsFor(makeServiceManager());
+    const acquired = acquireCoordinationLease({ stateRoot, scopeId: SCOPE, operationId: 'late-close-lease', mode: 'pairing', ttlMs: 600_000,
+      probes: { hostId: 'fixture-host', bootId: 'fixture-boot', pid: process.pid, birthToken: () => 'fixture-birth', pidAlive: () => true, nowMs: () => Date.now() } });
+    if (!acquired.ok) throw new Error(`fixture lease unavailable: ${acquired.refusal}`);
+    expect(acquired.lease.operationId).toBe('late-close-lease');
+    const promise = effects.runPairingHelper({ authDir, lease: acquired.lease });
+    await vi.advanceTimersByTimeAsync(5 * 60_000 + 10_001);
+    expect(await promise).toMatchObject({ ok: false, cleanupUnconfirmed: true });
+    expect(readCoordinationLease(stateRoot, SCOPE)).toEqual(acquired.lease);
+    const configPath = join(root, 'config.json');
+    writeFileSync(configPath, JSON.stringify({ accountScopeId: SCOPE }));
+    const deps = { discovery: { getInstance: () => ({ name: 'line-a', configPath, stateRoot }) } } as unknown as OpsDeps;
+    const request = () => mockReq({ method: 'POST', body: '{}', headers: { authorization: 'Bearer fixture' } });
+    const busy = mockRes();
+    await handlePairingApply(request(), busy, deps, { name: 'line-a' });
+    expect(busy._status).toBe(409);
+    expect(JSON.parse(busy._body).error).toContain('already in progress');
+    const status = mockRes();
+    await handlePairingStatus(request(), status, deps, { name: 'line-a' });
+    expect(JSON.parse(status._body).lastEvent.event).toBe('cleanup_unconfirmed');
+    child.stdout.emit('data', Buffer.from('{"event":"connected"}\n'));
+    const lateStatus = mockRes();
+    await handlePairingStatus(request(), lateStatus, deps, { name: 'line-a' });
+    expect(JSON.parse(lateStatus._body).lastEvent.event).toBe('cleanup_unconfirmed');
+    const replacement = { ...acquired.lease, fencingToken: acquired.lease.fencingToken + 1, operationId: 'replacement-owner' };
+    if (replaced) writeFileSync(coordinationLeasePath(stateRoot, SCOPE), JSON.stringify(replacement));
+    child.emit('close', 1);
+    await Promise.resolve();
+    expect(readCoordinationLease(stateRoot, SCOPE)).toEqual(replaced ? replacement : null);
+    const closedStatus = mockRes();
+    await handlePairingStatus(request(), closedStatus, deps, { name: 'line-a' });
+    expect(JSON.parse(closedStatus._body).lastEvent.event).toBe(replaced ? 'cleanup_release_unconfirmed' : 'cleanup_confirmed');
+    const admitted = mockRes();
+    await handlePairingApply(request(), admitted, deps, { name: 'line-a' });
+    expect(admitted._status).toBe(400);
+    expect(JSON.parse(admitted._body).error).toContain('apply requires idempotencyKey');
+  });
+
   it('resolves ok when the helper streams pairing_code then connected and exits 0', async () => {
     const child = new FakeChild();
     spawnMock.mockReturnValue(child);
@@ -165,9 +242,10 @@ describe('buildSagaEffects.runPairingHelper', () => {
     expect(await p2).toEqual({ ok: false, errorClass: 'unknown' });
   });
 
-  it('kills the child and reports pairing_timeout when it never settles', async () => {
+  it('reports pairing_timeout after the signalled child confirms closure', async () => {
     vi.useFakeTimers();
     const child = new FakeChild();
+    child.kill.mockImplementation(() => { child.emit('close', 1); });
     spawnMock.mockReturnValue(child);
     const promise = effectsFor(makeServiceManager()).runPairingHelper({ authDir, lease });
     await vi.advanceTimersByTimeAsync(5 * 60_000 + 10);

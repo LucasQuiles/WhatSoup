@@ -157,6 +157,21 @@ beforeEach(() => {
   mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
 });
 
+it('preserves the writable auth tree and lease when helper cleanup is unconfirmed', async () => {
+  const { effects, log } = makeEffects({ runPairingHelper: async () => {
+    writeFileSync(join(authDir, 'still-owned'), 'helper can still write');
+    return { ok: false, errorClass: 'pairing_timeout', cleanupUnconfirmed: true };
+  } });
+  const result = await executePairingSaga(baseRequest(), { stateRoot, authDir }, effects);
+  expect(result).toEqual({ ok: false, errorClass: 'pairing_timeout', refusal: 'pairing_helper_cleanup_unconfirmed' });
+  expect(readFileSync(join(authDir, 'still-owned'), 'utf8')).toBe('helper can still write');
+  expect(log.calls).not.toContain('releaseLease');
+  expect(log.calls).not.toContain('startService');
+  expect(mustRecord('pairing-op-0001').operation.state).toBe('pairing');
+  const replay = await executePairingSaga(baseRequest(), { stateRoot, authDir }, effects);
+  expect(replay).toMatchObject({ ok: false, refusal: 'operation_interrupted' });
+});
+
 afterEach(() => {
   for (const entry of existsSync(root) ? readdirSync(root) : []) {
     try {

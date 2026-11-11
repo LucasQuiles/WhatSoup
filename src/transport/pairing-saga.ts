@@ -78,7 +78,7 @@ export interface PairingSagaEffects {
   runPairingHelper(input: {
     authDir: string;
     lease: CoordinationLeaseV1;
-  }): Promise<{ ok: true } | { ok: false; errorClass: PairingErrorClass }>;
+  }): Promise<{ ok: true } | { ok: false; errorClass: PairingErrorClass; cleanupUnconfirmed?: true }>;
 }
 
 export type PairingSagaOutcome =
@@ -275,6 +275,7 @@ export async function executePairingSaga(
   }
   const lease = leaseResult.lease;
   journal('lease_acquired', { fencingToken: lease.fencingToken });
+  let helperCleanupUnconfirmed = false;
 
   try {
     // Quarantine the existing active tree (if any) under a unique
@@ -309,6 +310,12 @@ export async function executePairingSaga(
     journal('pairing', { fencingToken: lease.fencingToken });
     const helper = await effects.runPairingHelper({ authDir: paths.authDir, lease });
     if (!helper.ok) {
+      if (helper.cleanupUnconfirmed) {
+        // The writer still owns this tree. Keep its lease and interrupted
+        // journal until confirmed closure; moving the tree would race writes.
+        helperCleanupUnconfirmed = true;
+        return { ok: false, errorClass: helper.errorClass, refusal: 'pairing_helper_cleanup_unconfirmed' };
+      }
       quarantineIncomplete(paths, effects.nowMs());
       journal('failed', { errorClass: helper.errorClass, fencingToken: lease.fencingToken });
       return { ok: false, errorClass: helper.errorClass, refusal: 'pairing_helper_failed' };
@@ -367,7 +374,7 @@ export async function executePairingSaga(
 
     return { ok: true, generationId };
   } finally {
-    effects.releaseLease(lease);
+    if (!helperCleanupUnconfirmed) effects.releaseLease(lease);
   }
 }
 

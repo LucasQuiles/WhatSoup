@@ -109,6 +109,12 @@ function mockServiceManager() {
   };
 }
 
+const authChildren: EventEmitter[] = [];
+afterEach(async () => {
+  for (const child of authChildren.splice(0)) child.emit('close', 1);
+  await Promise.resolve();
+});
+
 function fakeChildProcess({ emitCloseOnExit = true }: { emitCloseOnExit?: boolean } = {}) {
   const child = new EventEmitter() as EventEmitter & {
     stdout: PassThrough;
@@ -118,6 +124,7 @@ function fakeChildProcess({ emitCloseOnExit = true }: { emitCloseOnExit?: boolea
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
   child.kill = vi.fn();
+  authChildren.push(child);
   if (emitCloseOnExit) {
     child.once('exit', (code, signal) => child.emit('close', code, signal));
   }
@@ -244,6 +251,8 @@ describe('handleAuth', () => {
 
       expect(child.kill).toHaveBeenCalledWith('SIGTERM');
       expect(svc.stop).toHaveBeenCalledWith('test-line');
+      expect(svc.startFire).not.toHaveBeenCalled();
+      child.emit('close', 1);
       expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
       expect(res._chunks.join('')).toContain('Authentication timed out');
       expect(res._ended).toBe(true);
@@ -3866,6 +3875,8 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       vi.advanceTimersByTime(15_000);
 
       expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(startAfterAuthFire).not.toHaveBeenCalled();
+      child.emit('close', 1);
       expect(startAfterAuthFire).toHaveBeenCalledWith('test-line', expect.any(Function));
       expect(svc.startFire).not.toHaveBeenCalled();
       expect(res._chunks.join('')).toContain('Authentication completed but did not finish');
@@ -4226,8 +4237,10 @@ describe('ops.ts uncovered-branch coverage', () => {
 
       await handleAuth(req, res, deps, { name: 'test-line' });
 
-      // Advance fake clock past the AUTH_TIMEOUT_MS to trigger restoreStoppedInstance.
+      // Timeout requests termination; confirmed closure permits restoration.
       vi.advanceTimersByTime(5 * 60 * 1000);
+      expect(svc.startFire).not.toHaveBeenCalled();
+      child.emit('close', 1);
       expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
       expect(res._ended).toBe(true);
     } finally {
@@ -4851,6 +4864,8 @@ describe('ops.ts uncovered-branch coverage', () => {
       await handleAuth(req, res, deps, { name: 'test-line' });
       vi.advanceTimersByTime(5 * 60 * 1000);
 
+      expect(svc.startFire).not.toHaveBeenCalled();
+      child.emit('close', 1);
       expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
       expect(res._ended).toBe(true);
     } finally {
