@@ -48,6 +48,24 @@ Preserve relevant negative cases; report skipped, masked and environment-blocked
 checks as inconclusive. Follow [objective tracking](docs/runbooks/objective-tracking.md)
 and [the quality checklist](docs/contributing/quality-guardrails-checklist.md).
 
+## Release convergence
+
+`main` is the only release line. Every host runs a release exported from `main`
+or an ancestor of it; `scripts/release-export.ts` refuses any other commit (see
+[release deployment](docs/runbooks/release-deployment.md)). A deployed commit
+that is not on `main` is backlog to land, not a second version to maintain.
+
+- Work is done when it has landed on `main` and is deployed, or when the owner
+  has discarded it. A branch, stash, worktree, mirror ref or ledger entry is not done.
+- While unlanded work exists, fix forward on an existing pull request or the
+  current `integration/convergence-*` branch. Do not create other branches or
+  pull requests; a repository ruleset refuses other branch names on GitHub.
+- One landing owner builds integration batches and merges them. Other sessions
+  hand finished work to the landing owner through the hand-off record the owner
+  names, instead of opening pull requests.
+- When a pull request merges, delete its branch, worktree and stashes in the
+  same session.
+
 ## Documentation ownership
 
 - [Current program](docs/current-program.md): active-work navigation, not a copied backlog.
