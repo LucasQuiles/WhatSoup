@@ -771,11 +771,16 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
       { tier: 'global' },
     );
 
+    // index-a is not the instance's memory index, so no conversation scope
+    // applies; visibility is still authorized on it: a caller without
+    // owner_only access gets the exact exclusion on every leg.
+    const ownerOnlyExclusion = { $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] };
     expect(searchRecordsMock).toHaveBeenNthCalledWith(1, {
       namespace: 'ns_a',
       query: {
         topK: 3,
         inputs: { text: 'project notes' },
+        filter: ownerOnlyExclusion,
       },
       fields: ['*'],
     });
@@ -784,6 +789,7 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
       query: {
         topK: 3,
         inputs: { text: 'project notes' },
+        filter: ownerOnlyExclusion,
       },
       fields: ['*'],
     });
@@ -848,9 +854,20 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
     expect(routeQueryMock).toHaveBeenCalledWith('recent summary', {
       namespaces: configStub.memory.pinecone.namespaces,
     });
-    expect(searchRecordsMock).toHaveBeenNthCalledWith(1, expect.objectContaining({ namespace: 'ns_summaries' }));
-    expect(searchRecordsMock).toHaveBeenNthCalledWith(2, expect.objectContaining({ namespace: 'ns_facts' }));
-    expect(searchRecordsMock).toHaveBeenNthCalledWith(3, expect.objectContaining({ namespace: 'ns_chunks' }));
+    // Every routed leg carries the exact owner_only exclusion for this caller.
+    const routedLeg = (namespace: string) => ({
+      namespace,
+      query: {
+        topK: 6,
+        inputs: { text: 'recent summary' },
+        filter: { $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] },
+      },
+      fields: ['*'],
+    });
+    expect(searchRecordsMock).toHaveBeenCalledTimes(3);
+    expect(searchRecordsMock).toHaveBeenNthCalledWith(1, routedLeg('ns_summaries'));
+    expect(searchRecordsMock).toHaveBeenNthCalledWith(2, routedLeg('ns_facts'));
+    expect(searchRecordsMock).toHaveBeenNthCalledWith(3, routedLeg('ns_chunks'));
   });
 
   it('falls back to the primary namespace when a profile has no namespace fan-out', async () => {

@@ -431,6 +431,10 @@ describe('knowledge_search and owner_only records', () => {
   const smsSession = (phone: string): SessionContext => ({
     tier: 'chat-scoped', conversationKey: phone, deliveryJid: `+${phone}@sms`, actorJid: `+${phone}@sms`,
   });
+  // Exact pin: a memory query's filter is the owner_only exclusion, alone or
+  // beside this chat's chat_jid clause; nothing else may ride along.
+  const withoutChatClause = (filter: unknown): Record<string, unknown> =>
+    Object.fromEntries(Object.entries((filter ?? {}) as Record<string, unknown>).filter(([key]) => key !== 'chat_jid'));
 
   it('grants no owner_only access, even to the verified owner or a trusted operator in a direct chat', async () => {
     // No transport direct-chat classification reaches knowledge_search, so its
@@ -446,7 +450,7 @@ describe('knowledge_search and owner_only records', () => {
     // Every memory-namespace query carried the exclusion; no owner_only leg was sent.
     const memoryQueries = queries.filter((q) => !['local-docs', 'onedrive', 'whatsapp-contacts'].includes(q.namespace));
     expect(memoryQueries.length).toBeGreaterThan(0);
-    expect(memoryQueries.every((q) => JSON.stringify(q.filter).includes('"$ne":"owner_only"'))).toBe(true);
+    for (const q of memoryQueries) expect(withoutChatClause(q.filter)).toEqual(OWNER_ONLY_EXCLUSION);
     expect(queries.some((q) => JSON.stringify(q.filter ?? {}) === '{"visibility":{"$eq":"owner_only"}}')).toBe(false);
   });
 
@@ -460,7 +464,7 @@ describe('knowledge_search and owner_only records', () => {
     // Every memory-namespace query of these callers carried the exclusion.
     const memoryQueries = queries.filter((q) => !['local-docs', 'onedrive', 'whatsapp-contacts'].includes(q.namespace));
     expect(memoryQueries.length).toBeGreaterThan(0);
-    expect(memoryQueries.every((q) => JSON.stringify(q.filter).includes('"$ne":"owner_only"'))).toBe(true);
+    for (const q of memoryQueries) expect(withoutChatClause(q.filter)).toEqual(OWNER_ONLY_EXCLUSION);
   });
 
   it('records with no visibility field are returned exactly as before', async () => {

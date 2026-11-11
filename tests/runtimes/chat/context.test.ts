@@ -713,6 +713,7 @@ describe('loadContext', () => {
     const contact = await loadContextDetailed(pinecone as any, CALLER, CALLER, 'query', undefined, 'this_chat');
     expect(contact.text).not.toContain('personal line fact from another chat');
     expect(pinecone.searchOwnerOnlyDetailed).toHaveBeenCalledTimes(1);
+    expect(pinecone.searchOwnerOnlyDetailed).toHaveBeenCalledWith('query', undefined);
   });
 
   it('serves owner_only records only from a listed source instance, on every leg', async () => {
