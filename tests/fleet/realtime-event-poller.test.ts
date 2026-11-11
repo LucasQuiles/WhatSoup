@@ -29,6 +29,7 @@ function makeDiscovery(instances: Record<string, any> = {}) {
 
 function makeDbReader(markers: { latestMessagePk: number | null; latestMessageMarker?: string | null; latestAccessMarker: string | null } = { latestMessagePk: null, latestMessageMarker: null, latestAccessMarker: null }) {
   return {
+    retainMarkerHandles: vi.fn(),
     getLatestMarkers: vi.fn(() => ({ ok: true, data: { ...markers } })),
   } as any;
 }
@@ -228,6 +229,7 @@ describe('FleetRealtimeEventPoller', () => {
     }));
     const discovery = { getInstances: () => instances } as any;
     const dbReader = {
+      retainMarkerHandles: vi.fn(),
       getLatestMarkers: vi.fn((name: string) => ({
         ok: true,
         data: {

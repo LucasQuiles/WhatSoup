@@ -236,6 +236,7 @@ export class FleetRealtimeEventPoller {
     let observedSources = 0;
     try {
       const instances = this.deps.discovery.getInstances();
+      this.deps.dbReader.retainMarkerHandles(Array.from(instances.values(), (instance) => instance.dbPath));
 
       for (const [name, inst] of instances) {
         expectedSources += 1;
