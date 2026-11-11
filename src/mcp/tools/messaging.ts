@@ -188,6 +188,14 @@ export interface MessagingDeps {
 const POLL_QUESTION_MAX_CHARS = 900;
 const POLL_OPTION_MAX_CHARS = 95;
 
+/**
+ * #3867 review: upper bound on concurrently awaited send_poll calls per tool registry.
+ * Each await holds a durable pending-poll row plus soft/hard expiry timers for up to
+ * 24 h, and the socket cap limits connections, not requests. Admission is checked
+ * before the external send, so a refused call sends nothing.
+ */
+export const MAX_PENDING_POLL_AWAITS = 32;
+
 type OwnershipRow = Pick<MessageRow, 'conversation_key' | 'is_from_me' | 'chat_jid' | 'message_id' | 'sender_jid' | 'content'>;
 
 interface OwnershipResult {
@@ -240,6 +248,8 @@ export function registerMessagingTools(
   deps: MessagingDeps,
 ): void {
   const { connection, db } = deps;
+  // Awaited polls admitted and not yet settled (send in flight or waiting for a vote).
+  let pendingPollAwaits = 0;
 
   // Issue 3150 registry layer: the registry's cross-conversation guard must
   // fold `@lid` -> phone (canonicalConversationKey, matching ingest QR-050).
@@ -866,6 +876,14 @@ export function registerMessagingTools(
         86_400_000,
       );
       const awaitResult = (params['awaitResult'] as boolean | undefined) ?? false;
+      const reservesAwait = awaitResult && deps.pollRegistrar !== undefined;
+      if (reservesAwait && pendingPollAwaits >= MAX_PENDING_POLL_AWAITS) {
+        return errorResult(
+          `Too many awaited polls are pending (limit ${MAX_PENDING_POLL_AWAITS}); poll not sent. `
+          + 'Wait for a pending poll to resolve, or send without awaitResult.',
+        );
+      }
+      if (reservesAwait) pendingPollAwaits += 1;
 
       try {
         const result = await connection.sendPollMessage(chatJid, safeQuestion, safeOptions, resolvedSelectableCount);
@@ -899,6 +917,8 @@ export function registerMessagingTools(
         return { sent: true, pollId: result.waMessageId, question: safeQuestion, options: safeOptions, selectableCount: resolvedSelectableCount };
       } catch (err) {
         return errorResult(sanitizeError(err));
+      } finally {
+        if (reservesAwait) pendingPollAwaits -= 1;
       }
     },
   });

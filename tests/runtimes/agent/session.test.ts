@@ -2484,6 +2484,54 @@ describe('SessionManager', () => {
     }
   });
 
+  // #3867 review (93c27c85): an attributed poll wait can begin after the hard watchdog's
+  // pending-wait check, while its liveness assessment is still awaiting. The old callback
+  // must not SIGKILL through the new wait; the wait's deadline governs instead.
+  it('a poll wait that begins during the hard-watchdog liveness assessment prevents the kill', async () => {
+    vi.useFakeTimers();
+    let resolveAssessment!: (verdict: null) => void;
+    const treeLivenessAssessor = vi.fn(() => new Promise<null>((resolve) => {
+      resolveAssessment = resolve;
+    }));
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), notifyUser: vi.fn(), treeLivenessAssessor,
+    });
+    try {
+      await sm.spawnSession();
+      await sm.sendTurn('poll starts while the watchdog assesses liveness');
+      sm.tickWatchdog();
+
+      await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+      expect(treeLivenessAssessor).toHaveBeenCalledOnce();
+
+      const internals = sm as unknown as {
+        activeProviderTurnToken: number;
+        capturePollWaitOwner(token: number): PollWaitOwner | undefined;
+      };
+      const owner = internals.capturePollWaitOwner(internals.activeProviderTurnToken);
+      expect(owner).toBeDefined();
+      const end = owner!.begin(WATCHDOG_HARD_MS * 2);
+      expect(end).toBeDefined();
+      expect(sm.hasPendingTools).toBe(true);
+
+      resolveAssessment(null);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+
+      // The wait's own deadline plus the normal hard window still bounds it.
+      await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS * 2);
+      expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+      await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+      expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+      end?.();
+    } finally {
+      sm.clearTurnWatchdog();
+      vi.useRealTimers();
+    }
+  });
+
   it('an ordinary tool refused at the cap still keeps the normal deadline', async () => {
     vi.useFakeTimers();
     const sm = new SessionManager({
