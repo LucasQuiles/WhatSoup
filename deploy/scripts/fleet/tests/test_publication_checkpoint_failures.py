@@ -5,7 +5,7 @@ import tempfile
 
 import pytest
 
-from test_monitor_publication_recovery import event, load
+from deploy.scripts.fleet.tests.test_monitor_publication_recovery import event, load
 
 
 @pytest.mark.parametrize("failing_write", [1, 2])

@@ -8,7 +8,9 @@ import sys
 import pytest
 from hypothesis import example, given, settings, strategies as st
 
-from test_service_delivery_reconciliation import alert, load_supervisor, service, temporary_service
+from deploy.scripts.fleet.tests.test_service_delivery_reconciliation import (
+    alert, load_supervisor, service, temporary_service,
+)
 
 
 def load_observer():

@@ -6,8 +6,10 @@ import sys
 import pytest
 from hypothesis import example, given, settings, strategies as st
 
-from test_monitor_delivery_reconciliation import run_monitor, seed_monitor
-from test_service_delivery_reconciliation import alert, cycle, load_supervisor, service, temporary_service
+from deploy.scripts.fleet.tests.test_monitor_delivery_reconciliation import run_monitor, seed_monitor
+from deploy.scripts.fleet.tests.test_service_delivery_reconciliation import (
+    alert, cycle, load_supervisor, service, temporary_service,
+)
 
 
 @pytest.mark.parametrize("kind", ["service", "observer", "watchdog", "sentinel"])
