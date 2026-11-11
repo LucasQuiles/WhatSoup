@@ -134,7 +134,8 @@ describe('GroupMembershipCache', () => {
 });
 
 describe('resolveMemoryScope', () => {
-  const group = { tier: 'chat-scoped', conversationKey: GROUP_KEY, deliveryJid: GROUP_JID };
+  // directChat undefined: no transport classification, so no owner_only grant.
+  const group = { tier: 'chat-scoped', conversationKey: GROUP_KEY, deliveryJid: GROUP_JID, directChat: undefined };
 
   it('treats the operator instance as unrestricted', async () => {
     const scope = await resolveMemoryScope(
@@ -154,7 +155,10 @@ describe('resolveMemoryScope', () => {
 
   it('classifies a direct chat by the contact scope, with every spelling of the chat', async () => {
     const scope = await resolveMemoryScope(
-      { tier: 'chat-scoped', conversationKey: MEMBER, deliveryJid: `${MEMBER}@s.whatsapp.net`, operatorInstance: false, actorJid: `${MEMBER}@s.whatsapp.net` },
+      {
+        tier: 'chat-scoped', conversationKey: MEMBER, deliveryJid: `${MEMBER}@s.whatsapp.net`, operatorInstance: false,
+        actorJid: `${MEMBER}@s.whatsapp.net`, directChat: undefined,
+      },
       deps(),
     );
     expect(scope.kind).toBe('dm_chat');
@@ -188,9 +192,9 @@ describe('resolveMemoryScope', () => {
   });
 
   it('fails closed for a chat session with no conversation, and gives a global session the instance', async () => {
-    const chat = await resolveMemoryScope({ tier: 'chat-scoped', operatorInstance: false }, deps());
+    const chat = await resolveMemoryScope({ tier: 'chat-scoped', operatorInstance: false, directChat: undefined }, deps());
     expect(chat.kind).toBe('no_context');
-    const global = await resolveMemoryScope({ tier: 'global', operatorInstance: false }, deps());
+    const global = await resolveMemoryScope({ tier: 'global', operatorInstance: false, directChat: undefined }, deps());
     expect(global).toMatchObject({ kind: 'dm', chatKey: undefined });
   });
 });
@@ -200,7 +204,7 @@ describe('memoryHitTier', () => {
 
   it('ranks this chat, other chats, then untagged for a whole-instance dm', async () => {
     const scope = await resolveMemoryScope(
-      { tier: 'chat-scoped', conversationKey: MEMBER, operatorInstance: false, actorJid: `${MEMBER}@s.whatsapp.net` },
+      { tier: 'chat-scoped', conversationKey: MEMBER, operatorInstance: false, actorJid: `${MEMBER}@s.whatsapp.net`, directChat: undefined },
       deps({ contactRecallScopes: { [MEMBER]: 'instance' } }),
     );
     expect(memoryHitTier({ chat_jid: `${MEMBER_LID}@lid` }, scope, fold())).toBe(0);
@@ -211,7 +215,10 @@ describe('memoryHitTier', () => {
 
   it('gives a configurable group its shared records and the sender\'s own records only', async () => {
     const scope = await resolveMemoryScope(
-      { tier: 'chat-scoped', conversationKey: GROUP_KEY, deliveryJid: GROUP_JID, operatorInstance: false, actorJid: `${MEMBER_LID}@lid` },
+      {
+        tier: 'chat-scoped', conversationKey: GROUP_KEY, deliveryJid: GROUP_JID, operatorInstance: false,
+        actorJid: `${MEMBER_LID}@lid`, directChat: undefined,
+      },
       deps(),
     );
     const f = fold();
@@ -234,6 +241,7 @@ describe('memoryHitTier', () => {
 describe('direct-chat contact scope', () => {
   const dm = (actorJid: string) => ({
     tier: 'chat-scoped', conversationKey: MEMBER, deliveryJid: `${MEMBER}@s.whatsapp.net`, operatorInstance: false, actorJid,
+    directChat: undefined,
   });
 
   it('holds a non-admin direct chat to this chat by default', async () => {
@@ -358,7 +366,10 @@ describe('owner_only visibility', () => {
   it('a group where the admin participates gets no owner_only records', async () => {
     const f = memoryIdentityFold(db);
     const group = await resolveMemoryScope(
-      { tier: 'chat-scoped', conversationKey: GROUP_KEY, deliveryJid: GROUP_JID, operatorInstance: false, actorJid: `${OWNER}@s.whatsapp.net` },
+      {
+        tier: 'chat-scoped', conversationKey: GROUP_KEY, deliveryJid: GROUP_JID, operatorInstance: false,
+        actorJid: `${OWNER}@s.whatsapp.net`, directChat: undefined,
+      },
       withTrusted({ membership: reader([{ id: `${OWNER}@s.whatsapp.net` }, { id: `${MEMBER}@s.whatsapp.net` }]) }),
     );
     expect(group.kind).toBe('unrestricted');
@@ -377,7 +388,10 @@ describe('owner_only visibility', () => {
     const operator = await resolveMemoryScope({ ...dmWith(MEMBER), operatorInstance: true }, withTrusted());
     expect(operator.kind).toBe('unrestricted');
     expect(operator.ownerOnlyAccess).toBe(false);
-    const global = await resolveMemoryScope({ tier: 'global', operatorInstance: false, actorJid: `${OWNER}@s.whatsapp.net` }, withTrusted());
+    const global = await resolveMemoryScope(
+      { tier: 'global', operatorInstance: false, actorJid: `${OWNER}@s.whatsapp.net`, directChat: undefined },
+      withTrusted(),
+    );
     expect(global.ownerOnlyAccess).toBe(false);
   });
 
