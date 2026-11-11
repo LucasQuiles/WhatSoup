@@ -209,6 +209,12 @@ validation defaults to thirty minutes. `--max-workers` accepts 1–4; browser
 execution stays at one. `--timeout-ms` is a total budget, including admission.
 The existing battery kills the child's process group at the bound and records
 cleanup uncertainty. This is separate from Vitest's per-test timeout.
+The boundary verification watchdog reuses the battery's full process-group probe.
+A departed leader or unreadable inventory cannot establish cleanup. On macOS,
+`EPERM` is tolerated only when a fresh inventory proves no live group members;
+the original timeout, signal or unexpected-survivor result still fails.
+Other signal errors remain in an inconclusive terminal result after bounded
+teardown, so missing cleanup proof cannot become a pass.
 The planner and affected runner use `--max-workers`; the direct Vitest arguments
 forwarded by `npm test` use `--maxWorkers`.
 
