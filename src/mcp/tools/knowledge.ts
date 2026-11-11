@@ -42,7 +42,7 @@ import {
   type OwnerOnlyRecallInput,
 } from '../../core/memory-scope.ts';
 import { errorMessage } from '../../lib/error-message.ts';
-import { resolveApiKey } from '../../lib/api-key-resolver.ts';
+import { resolvePineconeApiKey } from '../../lib/api-key-resolver.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 const log = createChildLogger('knowledge-tools');
@@ -405,7 +405,7 @@ export function createPineconeWatchSearch(
   if (allowedIndexes.length === 0) return null;
 
   const memoryConfig = pineconeMemoryConfig();
-  const apiKey = resolveApiKey({ service: memoryConfig.apiKeyService, envVar: memoryConfig.apiKeyEnv });
+  const apiKey = resolvePineconeApiKey({ apiKeyService: memoryConfig.apiKeyService, apiKeyEnv: memoryConfig.apiKeyEnv });
   if (!apiKey) {
     log.warn('Pinecone API key env var not set — poll.pinecone watches disabled');
     return null;
@@ -498,7 +498,6 @@ export function registerKnowledgeTools(
   if (allowedIndexes.length === 0) return;
 
   const memoryConfig = pineconeMemoryConfig();
-  const envVarName = memoryConfig.apiKeyEnv;
   const chatNamespaces = chatAttributedNamespaces(memoryConfig.namespaces);
   const isChatNamespace = (namespace: string): boolean => chatNamespaces.has(namespace);
   const noIdentities: InstanceIdentities = {
@@ -547,7 +546,7 @@ export function registerKnowledgeTools(
     trustedOperatorPhones: deps.trustedOperatorPhones,
     db: deps.db,
   });
-  const apiKey = resolveApiKey({ service: memoryConfig.apiKeyService, envVar: envVarName });
+  const apiKey = resolvePineconeApiKey({ apiKeyService: memoryConfig.apiKeyService, apiKeyEnv: memoryConfig.apiKeyEnv });
   if (!apiKey) {
     log.warn('Pinecone API key env var not set — knowledge tools will not be registered');
     return;
