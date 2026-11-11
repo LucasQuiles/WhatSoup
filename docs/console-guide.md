@@ -13,10 +13,24 @@ credentials — enter the fleet token on the lock screen to start a session:
 - Authenticated HTTP and SSE requests use short-lived audience tickets minted
   against that session; WebSocket connections use a separate `/api/ws-ticket`.
   A fleet-server restart relocks the console.
-- To log out, click **Lock** in the navigation rail's utility area — it revokes the
-  session server-side (`DELETE /api/console-session`), clears the cookie, and
-  returns to the lock screen. (`DELETE /api/console-session` can also be called
-  directly.)
+- **Lock** closes local access immediately, then requests server revocation with
+  `DELETE /api/console-session`. Only a successful response confirms revocation
+  and cookie clearing. Failure leaves the screen locked with **Retry lock** and
+  an explicit unconfirmed outcome; pending duplicate requests are coalesced.
+  The lock screen serializes token unlock and retry handlers so an older unlock
+  response cannot overtake a newer revocation request.
+  A non-secret session-storage marker preserves an unfinished lock across reload
+  in the same tab. It is cleared by confirmed revocation or explicit token unlock.
+  If storage cannot be read, the console stays closed. If it cannot save the marker,
+  the screen explains, including while revocation is pending, that reload may
+  reopen the session until revocation succeeds.
+  If the marker cannot be cleared after a confirmed session change, local access
+  stays closed with **Retry browser storage**. Recovery clears the marker, then
+  checks the current server session without repeating the mutation.
+  This local marker does not revoke credentials or replace server authorization.
+- An unavailable session check stays closed with **Retry session check**; it is
+  distinguished from the server confirming that the session is absent or expired.
+  Retired probes and revocation responses cannot overwrite a newer local action.
 - The fleet token lives in `~/.config/whatsoup/fleet-tokens.json` on the
   fleet host.
 - Dev mode (Vite proxy) bypasses the lock screen — the proxy injects auth

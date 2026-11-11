@@ -110,11 +110,12 @@ export async function unlockConsole(rootToken: string): Promise<{ expiresIn: num
 
 /** Lock the console: revoke the session and clear the cookie. */
 export async function lockConsole(): Promise<void> {
-  await fetch(`${API_BASE}/api/console-session`, {
+  const res = await fetch(`${API_BASE}/api/console-session`, {
     method: 'DELETE',
     credentials: 'same-origin',
     signal: AbortSignal.timeout(5000),
   });
+  if (!res.ok) throw new Error(`Session revocation could not be confirmed (${res.status}).`);
 }
 
 // ---------------------------------------------------------------------------
