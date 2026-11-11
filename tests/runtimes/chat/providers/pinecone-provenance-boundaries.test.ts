@@ -2,12 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { matchesMetadata } from '../../../helpers/pinecone-metadata.ts';
 import type { LLMProvider } from '../../../../src/runtimes/chat/providers/types.ts';
 
-const { state, records, privateRecords, namespaceQueries, namespaceWrites, scores, queries, rerank, settings } = vi.hoisted(() => ({
+const {
+  state, records, privateRecords, namespaceQueries, namespaceWrites, namespaceFetches, scores, queries, rerank, settings,
+} = vi.hoisted(() => ({
   state: { ignoreFilters: false, failNamespace: null as string | null, failOnce: false },
   records: new Map<string, Record<string, unknown>>(),
   privateRecords: new Map<string, Record<string, unknown>>(),
   namespaceQueries: [] as string[],
   namespaceWrites: [] as string[],
+  namespaceFetches: [] as Array<{ name: string; ids: string[] }>,
   scores: new Map<string, number>(),
   queries: [] as Array<Record<string, unknown>>,
   rerank: vi.fn(),
@@ -55,6 +58,13 @@ vi.mock('@pinecone-database/pinecone', () => ({
             failIfInjected(`delete:${name}`);
             for (const id of ids ?? []) store.delete(id);
           },
+          // A namespace that does not exist answers fetch with no records
+          // (live-checked 2026-11-11), as an empty store does here.
+          fetch: async ({ ids }: { ids: string[] }) => {
+            namespaceFetches.push({ name, ids: [...ids] });
+            failIfInjected(`fetch:${name}`);
+            return { namespace: name, records: Object.fromEntries(ids.filter((id) => store.has(id)).map((id) => [id, { id }])) };
+          },
           searchRecords: async ({ query }: { query: { filter?: Record<string, unknown>; topK: number } }) => {
             namespaceQueries.push(name);
             queries.push(query.filter ?? {});
@@ -93,6 +103,7 @@ beforeEach(() => {
   privateRecords.clear();
   namespaceQueries.length = 0;
   namespaceWrites.length = 0;
+  namespaceFetches.length = 0;
   scores.clear();
   queries.length = 0;
   state.ignoreFilters = false;
@@ -102,6 +113,7 @@ beforeEach(() => {
   settings.memory.pinecone.instanceScopedIds = true;
   settings.memory.pinecone.recordVisibility = 'chat_scoped';
   settings.pineconeRerank = false;
+  settings.pineconeTopK = 20;
   settings.pineconeContextTopK = 20;
   settings.pineconeSenderTopK = 20;
   settings.pineconeSelfFactTopK = 20;
@@ -305,6 +317,41 @@ describe('owner-only namespace compatibility fence', () => {
     expect(result.results.map((hit) => [hit.id, hit.record.text, hit.record.visibility])).toEqual([
       ['moved', 'private correction', 'owner_only'],
     ]);
+  });
+
+  // Each namespace answers within topK, so the reserved copy of a returned
+  // default id can rank below the reserved cutoff. Merged reads must ask the
+  // reserved namespace about every unmatched default id, or the stale shared
+  // copy comes back. 'shared other' is the negative control: the reserved
+  // namespace does not hold it, so it stays.
+  it.each(['chat', 'entity'] as const)(
+    'admitted %s recall drops a default copy whose reserved copy ranks below the reserved cutoff',
+    async (leg) => {
+      seed('moved', { ...own, text: 'shared original' });
+      seed('moved', { ...own, visibility: 'owner_only', text: 'private correction' }, reservedNamespace);
+      seed('shared other', own);
+      seedPrivate('private high', 0.98);
+      seedPrivate('private next', 0.96);
+      scores.set(':moved', 0.99);
+      scores.set(':shared other', 0.97);
+      scores.set(`${reservedNamespace}:moved`, 0.5);
+      settings.pineconeContextTopK = 2;
+      settings.pineconeTopK = 2;
+      const memory = new PineconeMemory();
+      const result = leg === 'chat'
+        ? await memory.searchForChatDetailed('test-chat', 'query', undefined, ownerOptions)
+        : await memory.searchEntitiesDetailed('query', undefined, ownerOptions);
+      expect(result.status).toBe('ok');
+      expect(result.retried).toBeUndefined();
+      expect(result.results.map((hit) => hit.id)).toEqual(['private high', 'shared other']);
+      expect(namespaceFetches).toEqual([{ name: reservedNamespace, ids: ['moved', 'shared other'] }]);
+    },
+  );
+
+  it('admitted recall fetches nothing when the reserved hits already match every default hit', async () => {
+    seedPartialMove();
+    await new PineconeMemory().searchForChatDetailed('test-chat', 'query', undefined, ownerOptions);
+    expect(namespaceFetches).toEqual([]);
   });
 
   it('consolidation promotes the reserved copy of an id found in both namespaces, as owner_only', async () => {
