@@ -2259,6 +2259,23 @@ describe('config — processTmpDir from instance.paths.tmpDir', () => {
 // ---------------------------------------------------------------------------
 
 describe('config — memory.pinecone.recordVisibility', () => {
+  it.each(['facts', 'custom'])('rejects the reserved owner-only namespace in namespaces.%s at load', async (key) => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: { pinecone: { namespaces: { [key]: 'whatsoup-owner-only-v1' } } },
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(/reserved.*whatsoup-owner-only-v1/i);
+  });
+
+  it.each([
+    { namespace: 'whatsoup-owner-only-v1' },
+    { namespaces: ['public-docs', 'whatsoup-owner-only-v1'] },
+  ])('rejects a reserved owner-only knowledge profile namespace at load: %j', async (profile) => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: { pinecone: { knowledgeProfiles: { 'test-knowledge': profile } } },
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(/reserved.*whatsoup-owner-only-v1/i);
+  });
+
   it('defaults to chat_scoped and parses owner_only through the real loader', async () => {
     process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({}));
     const unset = await import('../src/config.ts');

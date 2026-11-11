@@ -4,11 +4,16 @@ import { WhatSoupError as AppError } from '../../../../src/errors.ts';
 // Mock index methods — set up before mock factory so factory can reference them
 const mockSearchRecords = vi.fn();
 const mockUpsertRecords = vi.fn();
+const mockOwnerSearchRecords = vi.fn();
+// Default-namespace delete of an id moved into the owner_only namespace.
+const mockDeleteMany = vi.fn();
 const mockRerank = vi.fn();
 const { mockPineconeLogger } = vi.hoisted(() => ({ mockPineconeLogger: {} as Record<string, ReturnType<typeof vi.fn>> }));
 const mockIndex = {
   searchRecords: mockSearchRecords,
   upsertRecords: mockUpsertRecords,
+  deleteMany: mockDeleteMany,
+  namespace: () => ({ searchRecords: mockOwnerSearchRecords, upsertRecords: mockUpsertRecords }),
 };
 const FIXED_NOW_ISO = '2026-01-15T00:00:00.000Z';
 const FIXED_NOW_MS = new Date(FIXED_NOW_ISO).getTime();
@@ -70,6 +75,7 @@ let dateNowSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(FIXED_NOW_MS);
+  mockOwnerSearchRecords.mockReset().mockResolvedValue({ result: { hits: [] } });
 });
 
 afterEach(() => {
@@ -537,7 +543,7 @@ describe('PineconeMemory', () => {
         await memory.searchOwnerOnlyDetailed('q4');
         // Exact request: no chat, sender or source clause rides along, and the
         // filter is never the exclusion (that would return no owner_only record).
-        expect(mockSearchRecords.mock.calls).toEqual([
+        expect(mockOwnerSearchRecords.mock.calls).toEqual([
           [{
             query: {
               topK: 10,
@@ -547,6 +553,7 @@ describe('PineconeMemory', () => {
             fields: ['*'],
           }],
         ]);
+        expect(mockSearchRecords).not.toHaveBeenCalled();
       } finally {
         mockSearchRecords.mockReset();
       }
@@ -2233,8 +2240,8 @@ describe('upsert provenance stamping', () => {
   }
 
   /** A searchRecords fake that returns the best `topK` of `hits` its filter admits. */
-  function serveFiltered(hits: ReturnType<typeof makePineconeHit>[]): void {
-    mockSearchRecords.mockImplementation(async ({ query }: { query: { topK: number; filter?: Record<string, unknown> } }) => ({
+  function serveFiltered(hits: ReturnType<typeof makePineconeHit>[], search = mockSearchRecords): void {
+    search.mockImplementation(async ({ query }: { query: { topK: number; filter?: Record<string, unknown> } }) => ({
       result: {
         hits: hits
           .filter((hit) => matchesFilter(hit.fields, query.filter ?? {}))
@@ -2324,15 +2331,16 @@ describe('upsert provenance stamping', () => {
     pineconeConfig.instanceScopedIds = true;
     const memory = makeMemory(ACCOUNT_JID);
     const ownAccount = memory.sourceAccount();
+    mockSearchRecords.mockResolvedValue({ result: { hits: [] } });
     serveFiltered([
       makePineconeHit('other-instance', 0.99, { source_instance: 'other-line', source_account: ownAccount, visibility: 'owner_only' }),
       makePineconeHit('other-account', 0.98, { source_instance: 'q', source_account: 'acct:other', visibility: 'owner_only' }),
       makePineconeHit('own', 0.9, { source_instance: 'q', source_account: ownAccount, visibility: 'owner_only' }),
-    ]);
+    ], mockOwnerSearchRecords);
     try {
       const candidate = await memory.findSupersedeCandidate('chat-1@g.us', 'old text');
       expect(candidate?.id).toBe('own');
-      const { query } = mockSearchRecords.mock.calls[0][0];
+      const { query } = mockOwnerSearchRecords.mock.calls[0][0];
       expect(query.topK).toBe(1);
       // No visibility clause: this line writes owner_only, so it must reach its own.
       expect(query.filter).toEqual({
