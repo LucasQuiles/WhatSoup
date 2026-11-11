@@ -1315,7 +1315,9 @@ and historical catch-ups remain visible as retained recovery debt without making
 guarantee and no terminal echo, recovery job, or operator catch-up link. A retry notice or unrelated
 later reply does not clear that obligation. Operator cancellation, deliberate no-reply policy and
 synthetic scheduled turns are excluded. Enrollment in an operator catch-up moves the obligation
-to `open_catchups`; only the existing proof-based closure removes it from that gauge. These reads
+to `open_catchups`. The retention sweep uses the same failed-source selector to preserve unanswered
+terminal records and their source inbounds beyond the normal age window; age alone cannot clear debt.
+Only the existing proof-based closure removes a catch-up from that gauge. These reads
 neither reset attempts nor replay work. The reply-guarantee observer's `failedTerminalDebt` is a
 raw terminal-row diagnostic; its count may overlap jobs or catch-ups and is not added to this health gauge.
 Only user-facing catch-ups count as historical catch-ups: a link whose source is a synthetic

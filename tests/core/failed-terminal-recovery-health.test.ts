@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
+import { runDatabaseRetention } from '../../src/core/database-retention.ts';
 import { normalizeRecoveryDebt } from '../../src/core/recovery-debt.ts';
 import { closeOperatorCatchupRecovery } from '../../src/core/recovery-catchup-closure.ts';
 import { getTurnRecoveryHealthDetails } from '../../src/runtimes/agent/turn-recovery-dispatch.ts';
@@ -72,6 +73,15 @@ describe('failed terminal reply obligations in recovery health', () => {
     });
   }
 
+  function ageDurabilityRows() {
+    db.raw.exec(`
+      UPDATE inbound_events SET received_at = datetime('now', '-45 days'),
+        completed_at = datetime('now', '-45 days');
+      UPDATE turn_terminal_records SET created_at = datetime('now', '-45 days');
+      UPDATE outbound_ops SET created_at = datetime('now', '-45 days');
+    `);
+  }
+
   it('retains a failed user reply with no recovery job without blocking service', () => {
     const seq = terminal('failed-user-request');
     expect(db.raw.prepare('SELECT COUNT(*) AS n FROM turn_recovery_jobs').get()).toEqual({ n: 0 });
@@ -89,6 +99,25 @@ describe('failed terminal reply obligations in recovery health', () => {
       .toEqual({ is_terminal: 0 });
     terminal('later-unrelated-request', 'replied');
     expect(health()).toMatchObject({ open: true, turn_recovery: { retained_terminal: 1 } });
+  });
+
+  it('preserves unanswered debt beyond retention while pruning settled and intentional turns', () => {
+    const seq = terminal('expired-unanswered');
+    echo(seq, 'old-retry-notice');
+    terminal('expired-cancelled', 'operator_cancelled');
+    terminal('expired-policy', 'policy');
+    terminal('expired-replied', 'replied');
+    terminal('agentjob-expired');
+    ageDurabilityRows();
+
+    expect(runDatabaseRetention(db)).toMatchObject({ turnTerminalRecords: 4, inboundEvents: 4 });
+    expect(db.raw.prepare('SELECT inbound_seq FROM turn_terminal_records').all())
+      .toEqual([{ inbound_seq: seq }]);
+    expect(db.raw.prepare('SELECT seq FROM inbound_events').all()).toEqual([{ seq }]);
+    expect(health()).toMatchObject({ open: true, service_blocking: false,
+      turn_recovery: { retained_terminal: 1 } });
+    expect(runDatabaseRetention(db)).toMatchObject({ turnTerminalRecords: 0, inboundEvents: 0 });
+    expect(health().turn_recovery.retained_terminal).toBe(1);
   });
 
   it.each(['operator_cancelled', 'replied', 'policy'] as const)('keeps %s out of failed reply debt', (outcome) => {
@@ -121,6 +150,9 @@ describe('failed terminal reply obligations in recovery health', () => {
 
   it('hands accounting to an operator catch-up and closes only through its durable proof', () => {
     const seq = terminal('catchup-source');
+    ageDurabilityRows();
+    runDatabaseRetention(db);
+    expect(health().turn_recovery.retained_terminal).toBe(1);
     db.raw.exec(`INSERT INTO recovery_plans (plan_id, origin, actor, summary, evidence_ref)
       VALUES ('failed-reply-plan', 'pre_connect_recovery', 'system:test', 'fixture', 'test://fixture')`);
     db.raw.prepare(`INSERT INTO inbound_disposition_links
@@ -134,6 +166,11 @@ describe('failed terminal reply obligations in recovery health', () => {
     expect(health()).toMatchObject({ open: false, turn_recovery: { retained_terminal: 0, open_catchups: 0 } });
     expect(db.raw.prepare('SELECT processing_status FROM inbound_events WHERE seq = ?').get(seq))
       .toEqual({ processing_status: 'failed' });
+    runDatabaseRetention(db);
+    expect(db.raw.prepare('SELECT id FROM turn_terminal_records WHERE inbound_seq = ?').get(seq))
+      .toBeUndefined();
+    expect(health()).toMatchObject({ open: false,
+      turn_recovery: { retained_terminal: 0, open_catchups: 0 } });
   });
 
   it('propagates unreadable evidence instead of returning a false zero', () => {

@@ -39,8 +39,8 @@ export const OPEN_RECOVERIES_CTE_SQL = `open_recoveries AS (
  * Jobs and operator catch-ups already have their own health accounting;
  * immutable pending links also keep proven closed catch-ups out of this count.
  */
-export const UNOWNED_FAILED_TERMINALS_CTE_SQL = `unowned_failed_terminals AS (
-          SELECT COUNT(DISTINCT source.seq) AS count
+export const UNOWNED_FAILED_TERMINAL_SOURCES_SQL = `
+          SELECT DISTINCT source.seq AS inbound_seq
           FROM inbound_events source
           JOIN turn_terminal_records terminal ON terminal.inbound_seq = source.seq
           WHERE source.processing_status = 'failed'
@@ -58,4 +58,8 @@ export const UNOWNED_FAILED_TERMINALS_CTE_SQL = `unowned_failed_terminals AS (
               WHERE pending.inbound_seq = source.seq
                 AND pending.disposition = 'recovery_pending_operator_catchup'
             )
+        `;
+
+export const UNOWNED_FAILED_TERMINALS_CTE_SQL = `unowned_failed_terminals AS (
+          SELECT COUNT(*) AS count FROM (${UNOWNED_FAILED_TERMINAL_SOURCES_SQL})
         )`;
