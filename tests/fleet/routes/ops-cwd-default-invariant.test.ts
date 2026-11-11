@@ -43,7 +43,10 @@ import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
 vi.mock('../../../src/fleet/mcp-client.ts', () => ({ mcpCall: vi.fn() }));
 vi.mock('../../../src/fleet/http-proxy.ts', () => ({ proxyToInstance: vi.fn() }));
-vi.mock('node:child_process', () => ({ execFile: vi.fn(), spawn: vi.fn() }));
+vi.mock('node:child_process', async () => {
+  const { childProcessMockWithNativeOwnership } = await import('../../helpers/child-process.ts');
+  return childProcessMockWithNativeOwnership();
+});
 
 /** Mirrors ops.ts's private defaultAgentCwd(name) — not exported. */
 function expectedDefaultCwd(name: string): string {

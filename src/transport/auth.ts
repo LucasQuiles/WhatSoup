@@ -67,7 +67,7 @@ const mutationOp = process.env.WHATSOUP_MUTATION_LEASE_OP;
 const mutationFencing = process.env.WHATSOUP_MUTATION_LEASE_FENCING;
 const mutation = mutationOp !== undefined || mutationFencing !== undefined
   ? registerCoordinationLeaseHelper({ stateRoot: mutationRoot, scopeId: INSTANCE_MUTATION_SCOPE, operationId: mutationOp ?? '', fencingToken: Number(mutationFencing), parentPid: process.ppid, probes: mutationProbes })
-  : acquireCoordinationLease({ stateRoot: mutationRoot, scopeId: INSTANCE_MUTATION_SCOPE, operationId: `auth-cli-${process.pid}-${Date.now()}`, mode: 'pairing', ttlMs: 600_000, probes: mutationProbes });
+  : acquireCoordinationLease({ stateRoot: mutationRoot, scopeId: INSTANCE_MUTATION_SCOPE, operationId: `auth-cli-${mutationProbes.pid}-${mutationProbes.nowMs()}`, mode: 'pairing', ttlMs: 600_000, probes: mutationProbes });
 if (!mutation.ok) {
   log.fatal({ refusal: mutation.refusal }, 'instance mutation lease unavailable; refusing pairing');
   process.exit(1);

@@ -33,7 +33,10 @@ import * as os from 'node:os';
 
 vi.mock('../../../src/fleet/mcp-client.ts', () => ({ mcpCall: vi.fn() }));
 vi.mock('../../../src/fleet/http-proxy.ts', () => ({ proxyToInstance: vi.fn() }));
-vi.mock('node:child_process', () => ({ execFile: vi.fn(), spawn: vi.fn() }));
+vi.mock('node:child_process', async () => {
+  const { childProcessMockWithNativeOwnership } = await import('../../helpers/child-process.ts');
+  return childProcessMockWithNativeOwnership();
+});
 
 import { handleCreateLine } from '../../../src/fleet/routes/ops.ts';
 import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';

@@ -24,13 +24,14 @@ describe('SIGNAL constants', () => {
     const ops = readFileSync('src/fleet/routes/ops.ts', 'utf8');
     expect(bareLiteral.test(ops)).toBe(false);
 
-    // handleAuth + its SIGNAL.* usage extracted to ops-auth.ts (#2239).
+    // Auth termination is owned by the helper lifecycle; routes never kill directly.
     const opsAuth = readFileSync('src/fleet/routes/ops-auth.ts', 'utf8');
-    expect(opsAuth).toContain("import { SIGNAL } from '../../lib/signals.ts';");
-    expect(opsAuth).toContain("existing.kill(SIGNAL.TERM);");
-    expect(opsAuth).toContain('child.kill(SIGNAL.TERM);');
-    expect(opsAuth).toContain('child.kill(SIGNAL.KILL);');
     expect(bareLiteral.test(opsAuth)).toBe(false);
+    const authHelper = readFileSync('src/fleet/auth-helper.ts', 'utf8');
+    expect(authHelper).toContain("import { SIGNAL } from '../lib/signals.ts';");
+    expect(authHelper).toContain('child.kill(SIGNAL.TERM);');
+    expect(authHelper).toContain('child.kill(SIGNAL.KILL);');
+    expect(bareLiteral.test(authHelper)).toBe(false);
 
     const binaryPreflight = readFileSync('src/runtimes/agent/providers/binary-preflight.ts', 'utf8');
     expect(binaryPreflight).toContain("import { SIGNAL } from '../../../lib/signals.ts';");

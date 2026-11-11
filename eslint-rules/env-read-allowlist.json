@@ -238,8 +238,8 @@
     },
     {
       "file": "src/transport/auth.ts",
-      "allowedUnmarkedSites": 6,
-      "reason": "WHATSOUP_PAIR_NUMBER \u2014 env-late by design (#2192 s4 verdict: per-CLI-run mode selector (QR vs pairing-code) + operator PII; a typed field would persist E.164 at rest and make an ephemeral per-run choice permanent). + WHATSOUP_PAIRING_LEASE_{OP,FENCING} \u2014 env-late by design (q-canary lane: per-spawn delegated coordination-lease handoff from the fleet pairing coordinator to the helper child; a typed config field would persist an ephemeral single-operation capability at rest)."
+      "allowedUnmarkedSites": 8,
+      "reason": "WHATSOUP_PAIR_NUMBER \u2014 env-late by design (#2192 s4 verdict: per-CLI-run mode selector (QR vs pairing-code) + operator PII; a typed field would persist E.164 at rest and make an ephemeral per-run choice permanent). + WHATSOUP_PAIRING_LEASE_{OP,FENCING} \u2014 env-late by design (q-canary lane: per-spawn delegated coordination-lease handoff from the fleet pairing coordinator to the helper child; a typed config field would persist an ephemeral single-operation capability at rest). + WHATSOUP_MUTATION_LEASE_{OP,FENCING} \u2014 per-spawn fenced instance mutation identity; persisting this ephemeral capability in instance config would permit stale ownership reuse."
     },
     {
       "file": "src/transport/imessage/imsg-rpc-relay.ts",

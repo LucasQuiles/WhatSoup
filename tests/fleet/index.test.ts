@@ -24,18 +24,17 @@ import { WebSocket } from 'ws';
 // Mocks — must be set up before importing fleet modules
 // ---------------------------------------------------------------------------
 
-// spawnSync stays the real builtin: the silence routes reach silence-manager,
-// whose store writes go through writeAtomicPrivateFileIsolatedSync (a
-// spawnSync-supervised child). Everything else stays mocked.
+// Keep native ownership probes and isolated writers; external commands stay mocked.
 vi.mock('node:child_process', async () => {
-  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+  const { childProcessMockWithNativeOwnership } = await import('../helpers/child-process.ts');
+  const native = await childProcessMockWithNativeOwnership(Buffer.from('abc1234'));
   return {
     execFile: vi.fn((_cmd: string, _args: string[], cb: (err: Error | null, stdout?: string) => void) => {
       cb(null, '');
     }),
-    execFileSync: vi.fn(() => Buffer.from('abc1234')),
+    execFileSync: native.execFileSync,
     spawn: vi.fn(),
-    spawnSync: actual.spawnSync,
+    spawnSync: native.spawnSync,
   };
 });
 

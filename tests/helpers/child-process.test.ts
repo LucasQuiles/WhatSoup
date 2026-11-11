@@ -1,8 +1,23 @@
 import { describe, expect, it, vi } from 'vitest';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 
-import { childProcessMock } from './child-process.ts';
+import { childProcessMock, childProcessMockWithNativeOwnership } from './child-process.ts';
+import { trackTmpDirs } from './tmp-dir.ts';
+
+const tmp = trackTmpDirs('child-process-mock-');
 
 describe('childProcessMock', () => {
+  it('allows native process identity while keeping other sync commands mocked', async () => {
+    const mock = await childProcessMockWithNativeOwnership();
+    const birth = mock.execFileSync('ps', ['-p', String(process.pid), '-o', 'lstart='], { encoding: 'utf8', timeout: 2000 });
+    expect(birth.toString().trim()).not.toBe('');
+    const marker = join(tmp.make('sync'), 'unexpected-command');
+    expect(mock.execFileSync(process.execPath, ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'executed')`]))
+      .toEqual(Buffer.from(''));
+    expect(existsSync(marker)).toBe(false);
+  });
+
   it('provides spawn and execFile spies matching existing test mocks', () => {
     const mock = childProcessMock();
     const child = mock.spawn('node', ['script.js']);

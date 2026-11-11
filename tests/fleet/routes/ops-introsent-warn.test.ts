@@ -25,9 +25,8 @@ vi.mock('../../../src/fleet/http-proxy.ts', () => ({
   proxyToInstance: vi.fn(),
 }));
 vi.mock('node:child_process', async () => {
-  const { childProcessMock } = await import('../../helpers/child-process.ts');
-  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
-  return { ...actual, ...childProcessMock(), execFileSync: actual.execFileSync };
+  const { childProcessMockWithNativeOwnership } = await import('../../helpers/child-process.ts');
+  return childProcessMockWithNativeOwnership();
 });
 
 import { handleAuth } from '../../../src/fleet/routes/ops.ts';
