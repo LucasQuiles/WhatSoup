@@ -50,8 +50,9 @@ and [the quality checklist](docs/contributing/quality-guardrails-checklist.md).
 
 ## Release convergence
 
-`main` is the only release line. Every host runs a release exported from `main`
-or an ancestor of it; `scripts/release-export.ts` refuses any other commit (see
+`main` is the only release line. Every host must run a release exported from
+`main` or an ancestor of it. `scripts/release-export.ts` refuses any other
+commit; restarts from a plain git checkout are not checked yet (see
 [release deployment](docs/runbooks/release-deployment.md)). A deployed commit
 that is not on `main` is backlog to land, not a second version to maintain.
 
