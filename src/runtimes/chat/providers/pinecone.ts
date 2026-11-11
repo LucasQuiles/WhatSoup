@@ -704,6 +704,24 @@ function toPineconeRecord(record: MemoryRecord, stamp: MemoryRecordStamp): Pinec
   return cleaned as PineconeRecord;
 }
 
+/**
+ * Hits from the default and the reserved owner_only namespace, merged by score
+ * within topK (one index and embedding model, so scores compare). An id in
+ * both is a move whose default-copy delete has not landed: keep only the
+ * reserved copy, the narrowed and newer version, so a duplicate can never
+ * relabel private text chat_scoped downstream.
+ */
+function mergeNamespaceHits<T extends { _id: string; _score: number }>(
+  defaultHits: T[],
+  reservedHits: T[],
+  topK: number,
+): T[] {
+  const reservedIds = new Set(reservedHits.map((hit) => hit._id));
+  return [...defaultHits.filter((hit) => !reservedIds.has(hit._id)), ...reservedHits]
+    .sort((a, b) => b._score - a._score)
+    .slice(0, topK);
+}
+
 function fromPineconeHit(hit: {
   _id: string;
   _score: number;
@@ -1007,15 +1025,17 @@ export class PineconeMemory {
         },
         fields: ['*'],
       };
-      const indexes = namespaces === 'owner_only' ? [] : [this.index];
-      if (namespaces !== 'default') indexes.push(this.index.namespace(OWNER_ONLY_NAMESPACE));
-      const results: SearchResult[] = [];
-      for (const index of indexes) {
+      const hitsOf = async (index: typeof this.index) => {
         signal?.throwIfAborted();
-        const response = await index.searchRecords(request);
-        results.push(...(response.result.hits ?? []).map(fromPineconeHit));
-      }
-      return namespaces === 'both' ? results.sort((a, b) => b.score - a.score).slice(0, topK) : results;
+        return (await index.searchRecords(request)).result.hits ?? [];
+      };
+      const reserved = () => this.index.namespace(OWNER_ONLY_NAMESPACE);
+      const hits = namespaces === 'default'
+        ? await hitsOf(this.index)
+        : namespaces === 'owner_only'
+          ? await hitsOf(reserved())
+          : mergeNamespaceHits(await hitsOf(this.index), await hitsOf(reserved()), topK);
+      return hits.map(fromPineconeHit);
     };
 
     const startMs = Date.now();
@@ -1199,6 +1219,9 @@ export class PineconeMemory {
    * records and those about this sender; this leg reaches the other owner_only ones.
    */
   async searchOwnerOnlyDetailed(query: string, traceId?: string, options: ContextLegOptions = {}): Promise<PineconeSearchDetails> {
+    // The grant is explicit at this boundary too: without it the leg queries
+    // nothing, whatever the caller checked before.
+    if (options.includeOwnerOnly !== true) return { results: [], status: 'ok' };
     const boundary = this.recallSourceBoundary(options);
     const filter = withSourceFilter(ownerOnlyLegFilter(), boundary) ?? {};
     const details = await this._searchCoreDetailed(query, filter, config.pineconeContextTopK, traceId, undefined, 'owner_only');
@@ -1266,15 +1289,22 @@ export class PineconeMemory {
       };
     }
 
-    const doSearch = () =>
-      this.index.searchRecords({
+    // An admitted owner's entity recall also reaches the reserved owner_only
+    // namespace; everyone else's reads only the default namespace.
+    const doSearch = async () => {
+      const request = {
         query: {
           topK: config.pineconeTopK,
           inputs: { text: query },
           filter,
         },
         fields: ['*'],
-      });
+      };
+      const defaultHits = (await this.index.searchRecords(request)).result.hits ?? [];
+      if (!includeOwnerOnly) return defaultHits;
+      const reservedHits = (await this.index.namespace(OWNER_ONLY_NAMESPACE).searchRecords(request)).result.hits ?? [];
+      return mergeNamespaceHits(defaultHits, reservedHits, config.pineconeTopK);
+    };
 
     const startMs = Date.now();
     let retried = false;
@@ -1291,7 +1321,7 @@ export class PineconeMemory {
         response = await doSearch();
       }
 
-      const hits = response.result.hits ?? [];
+      const hits = response;
       let mapped = hits.filter((hit) => {
         const fields = hit.fields as Record<string, unknown>;
         return memorySourceEligible(fields, boundary, true) && (!isOwnerOnlyRecord(fields)

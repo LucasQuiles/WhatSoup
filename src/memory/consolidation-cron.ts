@@ -59,6 +59,7 @@ export interface ConsolidationPinecone {
     topK: number,
     traceId?: string,
     signal?: AbortSignal,
+    namespaces?: 'default' | 'both',
   ): Promise<PineconeSearchDetails>;
   upsert(
     records: MemoryRecord[],
@@ -223,7 +224,10 @@ export async function runConsolidation(
       options.signal,
       // owner_only sources live in the reserved namespace; promotions keep
       // their sources' visibility, so owner_only promotions go back there.
-      'both',
+      // Unscoped, consolidation cannot tell whose an owner_only record is and
+      // a promotion carries this instance's identity: it reads the default
+      // namespace only, so another line's private text never becomes its own.
+      options.instanceScope ? 'both' : 'default',
     );
   } catch (error) {
     const failure = classifyMemoryOperationFailure(error);

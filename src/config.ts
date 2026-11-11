@@ -37,7 +37,7 @@ import { getLoadedInstanceConfigOrNull } from './lib/instance-context.ts';
 import { parseClientOutputPoliciesForInstance } from './core/client-output-policy-config.ts';
 import type { ProviderProcessIsolationConfig } from './runtimes/agent/provider-process-isolation.ts';
 import { resolveTypedHandoffDistillConfig, type TypedHandoffDistillInput } from './lib/handoff-distill-config.ts';
-import { OWNER_ONLY_NAMESPACE } from './core/memory-scope.ts';
+import { pineconeMemoryValueError } from './core/memory-scope.ts';
 
 const APP_NAME = 'whatsoup';
 
@@ -125,11 +125,7 @@ export interface MemoryConfig {
   };
   pinecone: {
     apiKeyEnv: string;
-    /**
-     * Keyring service holding this instance's Pinecone key. When set, only
-     * this service is consulted (never the default `pinecone` entry), then
-     * the `apiKeyEnv` variable (lib/api-key-resolver.ts resolvePineconeApiKey).
-     */
+    /** Keyring service of this instance's Pinecone key (lib/api-key-resolver.ts). */
     apiKeyService?: string;
     projectId?: string;
     expectedHostSuffix?: string;
@@ -460,18 +456,6 @@ export function pineconeRecordVisibility(value: unknown): 'owner_only' | 'chat_s
   throw new Error('memory.pinecone.recordVisibility must be "owner_only" or "chat_scoped"');
 }
 
-/**
- * `memory.pinecone.apiKeyService`. Unset keeps the default key route. A
- * present value that is not a non-empty string throws at config load:
- * ignoring it would fall back to the default `pinecone` keyring entry, which
- * can belong to another account.
- */
-export function pineconeApiKeyService(value: unknown): string | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (isNonEmptyString(value)) return value;
-  throw new Error('memory.pinecone.apiKeyService must be a non-empty string');
-}
-
 function knowledgeSearchMode(value: unknown, fallback: KnowledgeSearchMode): KnowledgeSearchMode {
   return value === 'entity' || value === 'text' || value === 'vector' ? value : fallback;
 }
@@ -768,9 +752,6 @@ function warnConfigDeprecation(payload: Record<string, unknown>, message: string
 function resolvePineconeNamespaces(source: Record<string, unknown> | undefined): PineconeNamespaceConfig {
   const namespaces: PineconeNamespaceConfig = { ...DEFAULT_PINECONE_NAMESPACES };
   for (const [key, value] of Object.entries(source ?? {})) {
-    if (value === OWNER_ONLY_NAMESPACE) {
-      throw new Error(`memory.pinecone.namespaces.${key} uses reserved namespace ${OWNER_ONLY_NAMESPACE}`);
-    }
     if (isNonEmptyString(value)) {
       namespaces[key] = value;
     }
@@ -869,11 +850,7 @@ function mergeKnowledgeProfiles(
       rerankTopN: 6,
       description: indexName,
     };
-    const profile = mergeKnowledgeProfile(base, override);
-    if (profile.namespace === OWNER_ONLY_NAMESPACE || profile.namespaces.includes(OWNER_ONLY_NAMESPACE)) {
-      throw new Error(`memory.pinecone.knowledgeProfiles.${indexName} uses reserved namespace ${OWNER_ONLY_NAMESPACE}`);
-    }
-    profiles[indexName] = profile;
+    profiles[indexName] = mergeKnowledgeProfile(base, override);
   }
   return profiles;
 }
@@ -1091,6 +1068,8 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
     hasInvalidBoundedIntProp(consolidation, 'lookbackDays', 1, 90);
   const enrichment = asRecord(memoryRoot?.enrichment);
   const pinecone = asRecord(memoryRoot?.pinecone);
+  const pineconeValueError = pineconeMemoryValueError(pinecone);
+  if (pineconeValueError) throw new Error(pineconeValueError.message);
   const index = stringProp(pinecone, 'index') ?? process.env.PINECONE_INDEX ?? DEFAULT_PINECONE_INDEX;
   const namespaces = resolvePineconeNamespaces(asRecord(pinecone?.namespaces));
   const pineconeEmbedUrl = stringProp(pinecone, 'embedUrl');
@@ -1178,7 +1157,7 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
     },
     pinecone: {
       apiKeyEnv: stringProp(pinecone, 'apiKeyEnv') ?? DEFAULT_PINECONE_API_KEY_ENV,
-      apiKeyService: pineconeApiKeyService(pinecone?.apiKeyService),
+      apiKeyService: stringProp(pinecone, 'apiKeyService'),
       projectId: stringProp(pinecone, 'projectId') ?? process.env.PINECONE_PROJECT_ID,
       expectedHostSuffix: stringProp(pinecone, 'expectedHostSuffix') ?? process.env.PINECONE_EXPECTED_HOST_SUFFIX,
       recordVisibility: pineconeRecordVisibility(pinecone?.recordVisibility),

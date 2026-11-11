@@ -90,8 +90,9 @@ def prune_snapshots(out_root: Path, stem: str, retain: int) -> list[str]:
     # from the stem would read "*" or "[...]" in a database name as a pattern,
     # and a bare prefix would also catch another database whose name starts
     # with this stem ("bot" and "bot-archive"). The fixed-width UTC stamp keeps
-    # name order chronological.
-    own_series = re.compile(re.escape(stem) + r"-\d{8}T\d{6}Z\.snapshot\.sqlite3")
+    # name order chronological; [0-9], not \d, which also matches non-ASCII
+    # digits this tool never writes.
+    own_series = re.compile(re.escape(stem) + r"-[0-9]{8}T[0-9]{6}Z\.snapshot\.sqlite3")
     snapshots = sorted(
         path for path in out_root.iterdir() if own_series.fullmatch(path.name) and path.is_file()
     )

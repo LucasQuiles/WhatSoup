@@ -41,7 +41,7 @@ import { resolveLid, resolveLidsForPhone } from './lid-resolver.ts';
 import { systemClock } from '../lib/clock.ts';
 import { shortHash } from '../lib/short-hash.ts';
 import { isAdminPhone, normalizePhoneE164 } from '../lib/phone.ts';
-import { isNonEmptyString } from '../lib/type-guards.ts';
+import { isNonEmptyString, isRecord } from '../lib/type-guards.ts';
 
 export type MemoryScopeKind = 'dm_chat' | 'dm' | 'dm_lane' | 'unrestricted' | 'configurable_group' | 'no_context';
 
@@ -807,6 +807,46 @@ export type MemoryVisibility = (typeof MEMORY_VISIBILITIES)[number];
 // Releases before this fence never query this namespace, so deploy or rollback
 // order cannot let them return owner_only records.
 export const OWNER_ONLY_NAMESPACE = 'whatsoup-owner-only-v1';
+
+/**
+ * The memory.pinecone values that config load (config.ts resolveMemoryConfig)
+ * and admission (agent-config-validator.ts) both refuse, from this one place so
+ * a fleet patch cannot store a config the instance then refuses to start with.
+ * Takes the `memory.pinecone` block after legacy-alias migration.
+ * - a present apiKeyService that is not a non-empty string: ignoring it would
+ *   fall back to the default `pinecone` keyring entry, which can belong to
+ *   another account;
+ * - the reserved owner_only namespace in `namespaces` or a knowledge profile,
+ *   so knowledge_search can never query it.
+ */
+export function pineconeMemoryValueError(
+  pinecone: Record<string, unknown> | undefined,
+): { field: string; message: string } | null {
+  if (!pinecone) return null;
+  if (Object.hasOwn(pinecone, 'apiKeyService') && !isNonEmptyString(pinecone['apiKeyService'])) {
+    return { field: 'memory.pinecone.apiKeyService', message: 'memory.pinecone.apiKeyService must be a non-empty string' };
+  }
+  const reserved = (field: string) => ({
+    field, message: `${field} uses the reserved owner_only namespace ${OWNER_ONLY_NAMESPACE}`,
+  });
+  const namespaces = pinecone['namespaces'];
+  if (isRecord(namespaces)) {
+    for (const [key, value] of Object.entries(namespaces)) {
+      if (value === OWNER_ONLY_NAMESPACE) return reserved(`memory.pinecone.namespaces.${key}`);
+    }
+  }
+  const profiles = pinecone['knowledgeProfiles'];
+  if (isRecord(profiles)) {
+    for (const [name, profile] of Object.entries(profiles)) {
+      if (!isRecord(profile)) continue;
+      const listed = Array.isArray(profile['namespaces']) ? profile['namespaces'] : [];
+      if (profile['namespace'] === OWNER_ONLY_NAMESPACE || listed.includes(OWNER_ONLY_NAMESPACE)) {
+        return reserved(`memory.pinecone.knowledgeProfiles.${name}`);
+      }
+    }
+  }
+  return null;
+}
 
 export const MEMORY_PROVENANCES = ['memory_write', 'fact_export', 'summary', 'consolidation'] as const;
 export type MemoryProvenance = (typeof MEMORY_PROVENANCES)[number];

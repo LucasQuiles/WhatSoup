@@ -118,6 +118,8 @@ describe('runConsolidation — provenance and visibility', () => {
     await runConsolidation(pinecone, provider, { lookbackDays: 7, dryRun: false, instanceScope: 'line-a' });
     expect(pinecone.searchDetailed.mock.calls[0][1]).toMatchObject({ source_instance: { $eq: 'line-a' } });
     expect(pinecone.searchDetailed.mock.calls[0][1]).toMatchObject({ source_account: { $eq: 'acct:one' } });
+    // Instance-scoped consolidation also reads the reserved owner_only namespace.
+    expect(pinecone.searchDetailed.mock.calls[0][5]).toBe('both');
     expect(provider.generate).toHaveBeenCalledTimes(1);
     expect(pinecone.upsert).toHaveBeenCalledTimes(1);
     expect(pinecone.upsert.mock.calls[0][0][0]).toMatchObject({ sourceInstance: 'line-a', sourceAccount: 'acct:one' });
@@ -231,8 +233,8 @@ describe('runConsolidation', () => {
       100,
       undefined,
       undefined,
-      // owner_only sources live in the reserved namespace.
-      'both',
+      // Unscoped consolidation reads the default namespace only.
+      'default',
     );
   });
 

@@ -1244,11 +1244,15 @@ resolves its memory index in any other project, readiness reports
 provider logs `Pinecone project guard refused the configured key` at error
 level.
 
-`memory_write` writes to the SDK default namespace (`__default__`) of
-`memory.pinecone.index`. When `knowledge_search` searches that same index
-without an explicit `namespace` argument, it always includes `__default__`
-alongside the profile's namespaces, so an instance can find what it wrote. A
-profile that already lists the default namespace is searched as configured.
+`memory_write` writes `chat_scoped` records to the SDK default namespace
+(`__default__`) of `memory.pinecone.index`, and `owner_only` records to the
+reserved `whatsoup-owner-only-v1` namespace (see
+[Memory record provenance](#memory-record-provenance)). When `knowledge_search`
+searches that same index without an explicit `namespace` argument, it always
+includes `__default__` alongside the profile's namespaces, so an instance can
+find the `chat_scoped` records it wrote; it never queries the reserved
+namespace. A profile that already lists the default namespace is searched as
+configured.
 
 ##### Memory record provenance
 
@@ -1271,17 +1275,27 @@ land. A `passive` line has no writer yet.
 `owner_only` records live only in the reserved `whatsoup-owner-only-v1`
 namespace; other records use the default namespace. Configuration rejects the
 reserved name in `memory.pinecone.namespaces.*` and knowledge profiles, so
-`knowledge_search` cannot query it. Admitted memory recall searches both namespaces;
-the owner-only leg searches only the reserved namespace, retaining visibility and
-source filters. Consolidation reads both namespaces. A correction that narrows a
-shared record to `owner_only` moves it: the reserved copy is written first, then
-the default copy is deleted, and a failure at either step fails the write.
+`knowledge_search` cannot query it. Admitted memory recall, entity mode included,
+searches both namespaces and merges by score; the owner-only leg searches only
+the reserved namespace and only for a caller with the explicit grant. Every
+visibility and source filter still applies. Instance-scoped consolidation reads
+both namespaces; without `instanceScopedIds` it reads only the default
+namespace, because it cannot attribute an `owner_only` record to its writer and
+a promotion carries this instance's identity. A correction that narrows a
+shared record to `owner_only` moves it: the reserved copy is written first,
+then the default copy is deleted, and a failure at either step fails the write.
+Until the delete lands, an id can exist in both namespaces; merged reads keep
+only the reserved copy. Pinecone has no conditional writes, so a `chat_scoped`
+write of the same id racing a move can leave the shared pre-correction text in
+the default namespace. That copy never carries `owner_only` text.
 
 Readers and writers can upgrade in either order: old readers never query the
 reserved namespace, and new readers retain the legacy-record rules below.
 For rollback, restore the earlier reader release; it cannot expose `owner_only`
-records because it never queries that namespace. Rolling a writer back stops
-`owner_only` writes. Rolling forward again needs no migration.
+records because it never queries that namespace. No earlier release writes
+`owner_only` records, because the visibility field ships with this fence.
+Rolling a writer back stops `owner_only` writes. Rolling forward again needs no
+migration.
 
 Records written before these fields existed carry none of them. Nothing ties
 such a record to an owner, so recall does not infer ownership from the missing

@@ -230,9 +230,8 @@ export async function loadContextDetailed(
   // the chat leg nor the sender leg. Without access it is never queried. It runs
   // alongside the other three.
   const ownerOnlyLeg = ownerOnly
-    ? captureContextSearch(() => sourceOptions
-      ? pinecone.searchOwnerOnlyDetailed(messageText, traceId, { ...legOptions, ...sourceOptions })
-      : pinecone.searchOwnerOnlyDetailed(messageText, traceId))
+    ? captureContextSearch(() =>
+      pinecone.searchOwnerOnlyDetailed(messageText, traceId, sourceOptions ? { ...legOptions, ...sourceOptions } : legOptions))
     : Promise.resolve(null);
   const [chatDetailsRaw, senderDetailsRaw, selfDetailsRaw] = await Promise.all([
     captureContextSearch(() =>
