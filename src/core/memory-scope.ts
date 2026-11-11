@@ -816,6 +816,8 @@ export const OWNER_ONLY_NAMESPACE = 'whatsoup-owner-only-v1';
  * - a present apiKeyService that is not a non-empty string: ignoring it would
  *   fall back to the default `pinecone` keyring entry, which can belong to
  *   another account;
+ * - a recordVisibility other than a known visibility (absent or null means
+ *   chat_scoped): a typo must never silently widen who can recall records;
  * - the reserved owner_only namespace in `namespaces` or a knowledge profile,
  *   so knowledge_search can never query it.
  */
@@ -825,6 +827,13 @@ export function pineconeMemoryValueError(
   if (!pinecone) return null;
   if (Object.hasOwn(pinecone, 'apiKeyService') && !isNonEmptyString(pinecone['apiKeyService'])) {
     return { field: 'memory.pinecone.apiKeyService', message: 'memory.pinecone.apiKeyService must be a non-empty string' };
+  }
+  const visibility = pinecone['recordVisibility'];
+  if (visibility !== undefined && visibility !== null && !(MEMORY_VISIBILITIES as readonly unknown[]).includes(visibility)) {
+    return {
+      field: 'memory.pinecone.recordVisibility',
+      message: 'memory.pinecone.recordVisibility must be "owner_only" or "chat_scoped"',
+    };
   }
   const reserved = (field: string) => ({
     field, message: `${field} uses the reserved owner_only namespace ${OWNER_ONLY_NAMESPACE}`,

@@ -709,14 +709,26 @@ function toPineconeRecord(record: MemoryRecord, stamp: MemoryRecordStamp): Pinec
  * within topK (one index and embedding model, so scores compare). An id in
  * both is a move whose default-copy delete has not landed: keep only the
  * reserved copy, the narrowed and newer version, so a duplicate can never
- * relabel private text chat_scoped downstream.
+ * relabel private text chat_scoped downstream. Each namespace answers within
+ * topK, so the reserved copy can rank below the reserved cutoff: one fetch
+ * asks the reserved namespace about every default id its hits do not cover.
+ * While a move is incomplete, a dropped duplicate does not pull in the default
+ * namespace's next candidate, so ranking at the topK edge can differ from a
+ * complete read; no stale or wrongly labelled record is returned.
  */
-function mergeNamespaceHits<T extends { _id: string; _score: number }>(
+async function mergeNamespaceHits<T extends { _id: string; _score: number }>(
   defaultHits: T[],
   reservedHits: T[],
   topK: number,
-): T[] {
+  reserved: { fetch(options: { ids: string[] }): Promise<{ records?: Record<string, unknown> }> },
+  signal?: AbortSignal,
+): Promise<T[]> {
   const reservedIds = new Set(reservedHits.map((hit) => hit._id));
+  const unmatched = defaultHits.map((hit) => hit._id).filter((id) => !reservedIds.has(id));
+  if (unmatched.length > 0) {
+    signal?.throwIfAborted();
+    for (const id of Object.keys((await reserved.fetch({ ids: unmatched })).records ?? {})) reservedIds.add(id);
+  }
   return [...defaultHits.filter((hit) => !reservedIds.has(hit._id)), ...reservedHits]
     .sort((a, b) => b._score - a._score)
     .slice(0, topK);
@@ -1029,12 +1041,11 @@ export class PineconeMemory {
         signal?.throwIfAborted();
         return (await index.searchRecords(request)).result.hits ?? [];
       };
-      const reserved = () => this.index.namespace(OWNER_ONLY_NAMESPACE);
-      const hits = namespaces === 'default'
-        ? await hitsOf(this.index)
-        : namespaces === 'owner_only'
-          ? await hitsOf(reserved())
-          : mergeNamespaceHits(await hitsOf(this.index), await hitsOf(reserved()), topK);
+      if (namespaces === 'default') return (await hitsOf(this.index)).map(fromPineconeHit);
+      const reserved = this.index.namespace(OWNER_ONLY_NAMESPACE);
+      const hits = namespaces === 'owner_only'
+        ? await hitsOf(reserved)
+        : await mergeNamespaceHits(await hitsOf(this.index), await hitsOf(reserved), topK, reserved, signal);
       return hits.map(fromPineconeHit);
     };
 
@@ -1302,8 +1313,9 @@ export class PineconeMemory {
       };
       const defaultHits = (await this.index.searchRecords(request)).result.hits ?? [];
       if (!includeOwnerOnly) return defaultHits;
-      const reservedHits = (await this.index.namespace(OWNER_ONLY_NAMESPACE).searchRecords(request)).result.hits ?? [];
-      return mergeNamespaceHits(defaultHits, reservedHits, config.pineconeTopK);
+      const reserved = this.index.namespace(OWNER_ONLY_NAMESPACE);
+      const reservedHits = (await reserved.searchRecords(request)).result.hits ?? [];
+      return mergeNamespaceHits(defaultHits, reservedHits, config.pineconeTopK, reserved);
     };
 
     const startMs = Date.now();

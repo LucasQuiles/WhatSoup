@@ -7,13 +7,15 @@ const mockUpsertRecords = vi.fn();
 const mockOwnerSearchRecords = vi.fn();
 // Default-namespace delete of an id moved into the owner_only namespace.
 const mockDeleteMany = vi.fn();
+// Reserved-namespace fetch of default ids a merged read must check for a reserved copy.
+const mockOwnerFetch = vi.fn();
 const mockRerank = vi.fn();
 const { mockPineconeLogger } = vi.hoisted(() => ({ mockPineconeLogger: {} as Record<string, ReturnType<typeof vi.fn>> }));
 const mockIndex = {
   searchRecords: mockSearchRecords,
   upsertRecords: mockUpsertRecords,
   deleteMany: mockDeleteMany,
-  namespace: () => ({ searchRecords: mockOwnerSearchRecords, upsertRecords: mockUpsertRecords }),
+  namespace: () => ({ searchRecords: mockOwnerSearchRecords, upsertRecords: mockUpsertRecords, fetch: mockOwnerFetch }),
 };
 const FIXED_NOW_ISO = '2026-01-15T00:00:00.000Z';
 const FIXED_NOW_MS = new Date(FIXED_NOW_ISO).getTime();
@@ -76,6 +78,7 @@ let dateNowSpy: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(FIXED_NOW_MS);
   mockOwnerSearchRecords.mockReset().mockResolvedValue({ result: { hits: [] } });
+  mockOwnerFetch.mockReset().mockResolvedValue({ records: {} });
 });
 
 afterEach(() => {

@@ -1285,7 +1285,12 @@ a promotion carries this instance's identity. A correction that narrows a
 shared record to `owner_only` moves it: the reserved copy is written first,
 then the default copy is deleted, and a failure at either step fails the write.
 Until the delete lands, an id can exist in both namespaces; merged reads keep
-only the reserved copy. Pinecone has no conditional writes, so a `chat_scoped`
+only the reserved copy. Each namespace answers within `topK`, so a merged read
+also fetches, in one call, every returned default id the reserved hits do not
+cover, and drops those the reserved namespace holds. While a move is
+incomplete, a dropped duplicate is not replaced by the default namespace's next
+candidate, so ranking at the `topK` edge can differ; no stale copy is returned.
+Pinecone has no conditional writes, so a `chat_scoped`
 write of the same id racing a move can leave the shared pre-correction text in
 the default namespace. That copy never carries `owner_only` text.
 
@@ -1410,7 +1415,8 @@ before every ranking rule in this table:
 | Chat session, no conversation | tier `chat-scoped` with no pinned conversation | nothing |
 
 - **Chat memories and documents.** The scope applies only to the memory
-  namespaces: the default namespace `memory_write` writes to, and the WhatsApp
+  namespaces: the default namespace `memory_write` writes `chat_scoped` records
+  to (`owner_only` records go to the reserved namespace above), and the WhatsApp
   conversation roles in `memory.pinecone.namespaces` (`facts`, `chunks`,
   `summaries`, `legacy`). Every other namespace of the index (for example the
   `namespaces.contacts`, `namespaces.localDocs` and `namespaces.oneDrive`

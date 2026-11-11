@@ -59,11 +59,20 @@ function cloneJson<T>(value: T): T {
   return structuredClone(value);
 }
 
+// The input is operator-supplied JSON (instance files, fleet API bodies).
+// Paths follow own properties only, and these keys are never written, so no
+// input can reach Object.prototype or reparent an object.
+const UNSAFE_KEYS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype']);
+
+function ownChild(current: unknown, part: string): unknown {
+  return isRecord(current) && Object.hasOwn(current, part) ? current[part] : undefined;
+}
+
 function getPath(root: Record<string, unknown>, path: string): unknown {
   let current: unknown = root;
   for (const part of path.split('.')) {
-    if (!isRecord(current) || !(part in current)) return undefined;
-    current = current[part];
+    current = ownChild(current, part);
+    if (current === undefined) return undefined;
   }
   return current;
 }
@@ -71,18 +80,18 @@ function getPath(root: Record<string, unknown>, path: string): unknown {
 function hasPath(root: Record<string, unknown>, path: string): boolean {
   let current: unknown = root;
   for (const part of path.split('.')) {
-    if (!isRecord(current) || !(part in current)) return false;
+    if (!isRecord(current) || !Object.hasOwn(current, part)) return false;
     current = current[part];
   }
   return true;
 }
 
-function ensureRecordPath(root: Record<string, unknown>, path: string[]): Record<string, unknown> {
+function ensureRecordPath(root: Record<string, unknown>, path: string[]): Record<string, unknown> | null {
   let current = root;
   for (const part of path) {
-    if (!isRecord(current[part])) {
-      current[part] = {};
-    }
+    if (UNSAFE_KEYS.has(part)) return null;
+    const child = ownChild(current, part);
+    if (!isRecord(child)) current[part] = {};
     current = current[part] as Record<string, unknown>;
   }
   return current;
@@ -91,9 +100,9 @@ function ensureRecordPath(root: Record<string, unknown>, path: string[]): Record
 function setPath(root: Record<string, unknown>, path: string, value: unknown): void {
   const parts = path.split('.');
   const key = parts.pop();
-  if (!key) return;
+  if (!key || UNSAFE_KEYS.has(key)) return;
   const parent = ensureRecordPath(root, parts);
-  parent[key] = cloneJson(value);
+  if (parent) parent[key] = cloneJson(value);
 }
 
 function deletePath(root: Record<string, unknown>, path: string): boolean {
@@ -102,14 +111,16 @@ function deletePath(root: Record<string, unknown>, path: string): boolean {
   if (!key) return false;
   let parent: unknown = root;
   for (const part of parts) {
-    if (!isRecord(parent) || !isRecord(parent[part])) return false;
-    parent = parent[part];
+    parent = ownChild(parent, part);
+    if (!isRecord(parent)) return false;
   }
-  if (!isRecord(parent) || !(key in parent)) return false;
+  if (!isRecord(parent) || !Object.hasOwn(parent, key)) return false;
   delete parent[key];
   return true;
 }
 
+// Each legacy pineconeNamespaces key names a namespace role and maps to the
+// canonical key of the same name, literally: a dot in it is not a path.
 function migrateNamespaceObject(
   source: Record<string, unknown>,
   target: Record<string, unknown>,
@@ -118,11 +129,14 @@ function migrateNamespaceObject(
   const legacyNamespaces = getPath(source, 'pineconeNamespaces');
   if (!isRecord(legacyNamespaces)) return;
 
+  const canonical = getPath(source, 'memory.pinecone.namespaces');
   let didMove = false;
   for (const [namespaceKey, namespaceValue] of Object.entries(legacyNamespaces)) {
-    const targetPath = `memory.pinecone.namespaces.${namespaceKey}`;
-    if (hasPath(source, targetPath)) continue;
-    setPath(target, targetPath, namespaceValue);
+    if (UNSAFE_KEYS.has(namespaceKey)) continue;
+    if (isRecord(canonical) && Object.hasOwn(canonical, namespaceKey)) continue;
+    const namespaces = ensureRecordPath(target, ['memory', 'pinecone', 'namespaces']);
+    if (!namespaces) continue;
+    namespaces[namespaceKey] = cloneJson(namespaceValue);
     didMove = true;
   }
   if (didMove) {
