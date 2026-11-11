@@ -466,7 +466,11 @@ export async function resolveMemoryScope(
     ...(deps.restrictive === true ? { restrictive: true } : {}),
   };
 
-  if (request.operatorInstance) return { ...base, kind: 'unrestricted', reason: 'operator_instance' };
+  // The operator instance's scope is the whole instance in every chat, so it
+  // never carries an owner_only grant (configuration.md, owner_only records).
+  if (request.operatorInstance) {
+    return { ...base, ownerOnlyAccess: false, kind: 'unrestricted', reason: 'operator_instance' };
+  }
   if (!rawKey || !chatKey) {
     return request.tier === 'global'
       ? { ...base, kind: 'dm', reason: 'global_session_without_conversation' }

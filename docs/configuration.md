@@ -1319,7 +1319,9 @@ an unknown conversation kind is refused. Nothing else gets one:
 not ordinary contacts (whatever their `contactRecallScopes`), not any group (even
 one the admin is in, because other members read the reply), not the operator
 instance by itself, not a global session without a conversation, and not an
-unverified transport such as SMS.
+unverified transport such as SMS. The operator instance's recall scope spans
+every chat, so that scope (`resolveMemoryScope`) never carries the grant, even
+for the verified owner in a direct chat.
 
 An admitted caller receives an `owner_only` record only from a source it is bound
 to: the record's `source_instance` must be this instance's name or an entry of
