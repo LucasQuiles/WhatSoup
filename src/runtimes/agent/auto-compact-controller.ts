@@ -26,6 +26,7 @@
  */
 import { createChildLogger } from '../../logger.ts';
 import { MS_PER_MINUTE, MS_PER_HOUR } from '../../lib/time-units.ts';
+import { ContextGaugeStore } from './context-gauge.ts';
 
 // Same component name as AgentRuntime: the rapid-rearm / next-turn warnings keep
 // their existing `component: 'agent-runtime'` log binding (no observable change).
@@ -79,6 +80,14 @@ export class AutoCompactController {
   readonly rapidRearmRecordedForSuccessAt = new Map<string, number>();
   /** Scope → count of consecutive rapid re-arms (drives the backoff tier). */
   readonly consecutiveRapidRearms = new Map<string, number>();
+  /**
+   * #3717: scope → the rapid-rearm backoff currently in force (deadline + tier).
+   * Kept apart from consecutiveRapidRearms, which is a retained streak that
+   * survives a later successful compact so the next rapid re-arm escalates a
+   * tier. A success replaces the backoff with the ordinary success cooldown and
+   * removes this entry; health reports backoff only while an entry is unexpired.
+   */
+  readonly rapidRearmBackoff = new Map<string, { until: number; tier: number }>();
   /** Scopes to measure on their next turn for post-compact effectiveness. */
   readonly measureNextTurn = new Set<string>();
   /**
@@ -102,6 +111,8 @@ export class AutoCompactController {
   readonly compactionOutcomeRecordedForCompactAt = new Map<string, number>();
   /** Scope → in-flight auto-compact waiter (promise + resolve + timeout timer). */
   readonly waiters = new Map<string, AutoCompactWaiter>();
+  /** #3717c: per-scope, per-generation context of the last distinct request. */
+  readonly contextGauge = new ContextGaugeStore();
 
   /** Cumulative count of rapid re-arms observed (health metric). */
   ineffective = 0;
@@ -123,25 +134,10 @@ export class AutoCompactController {
   healthSnapshot(now = Date.now()): AutoCompactHealthSnapshot {
     let activeBackoffScopes = 0;
     let worstCurrentBackoffTier = 0;
-    for (const [scopeKey, consecutiveRapidRearms] of this.consecutiveRapidRearms) {
-      const cooldownUntil = this.cooldownUntil.get(scopeKey);
-      if (
-        !Number.isFinite(consecutiveRapidRearms)
-        || consecutiveRapidRearms <= 0
-        || cooldownUntil === undefined
-        || !Number.isFinite(cooldownUntil)
-        || cooldownUntil <= now
-      ) {
-        continue;
-      }
+    for (const { until, tier } of this.rapidRearmBackoff.values()) {
+      if (!Number.isFinite(until) || until <= now) continue;
       activeBackoffScopes += 1;
-      worstCurrentBackoffTier = Math.max(
-        worstCurrentBackoffTier,
-        Math.min(
-          Math.floor(consecutiveRapidRearms),
-          AUTO_COMPACT_BACKOFF_TIERS_MS.length - 1,
-        ),
-      );
+      worstCurrentBackoffTier = Math.max(worstCurrentBackoffTier, tier);
     }
     return {
       state: activeBackoffScopes > 0 ? 'backoff' : 'idle',
@@ -190,6 +186,10 @@ export class AutoCompactController {
     this.rapidRearmRecordedForSuccessAt.delete(scopeKey);
     this.measureNextTurn.add(scopeKey);
     this.cooldownUntil.set(scopeKey, now + AUTO_COMPACT_SUCCESS_COOLDOWN_MS);
+    // #3717: the success cooldown supersedes any rapid-rearm backoff. The streak
+    // in consecutiveRapidRearms is kept so a rapid re-arm of THIS compact still
+    // escalates to the next tier.
+    this.rapidRearmBackoff.delete(scopeKey);
   }
 
   recordAutoCompactRapidRearm(scopeKey: string, lastSuccessAt: number, now: number): void {
@@ -203,6 +203,7 @@ export class AutoCompactController {
     }
     const tier = Math.min(next, AUTO_COMPACT_BACKOFF_TIERS_MS.length - 1);
     this.cooldownUntil.set(scopeKey, now + AUTO_COMPACT_BACKOFF_TIERS_MS[tier]);
+    this.rapidRearmBackoff.set(scopeKey, { until: now + AUTO_COMPACT_BACKOFF_TIERS_MS[tier], tier });
     log.warn(
       {
         scopeKey,
@@ -257,14 +258,19 @@ export class AutoCompactController {
       >= AUTO_COMPACT_CONVERGENCE_LIMIT;
   }
 
+  /**
+   * #3717c P4: `contextTokens` is the context gauge (undefined = unknown, which
+   * records nothing). `summedInputTokens` is the turn's summed usage, logged only.
+   */
   recordAutoCompactNextTurnIfNeeded(
     scopeKey: string,
-    inputTokens: number | undefined,
+    contextTokens: number | undefined,
     consumeWhenNotOverThreshold = true,
+    summedInputTokens?: number,
   ): void {
     if (this.inputTokens === undefined) return;
     if (!this.measureNextTurn.has(scopeKey)) return;
-    if (inputTokens === undefined || inputTokens <= this.inputTokens) {
+    if (contextTokens === undefined || contextTokens <= this.inputTokens) {
       if (consumeWhenNotOverThreshold) this.measureNextTurn.delete(scopeKey);
       return;
     }
@@ -277,8 +283,14 @@ export class AutoCompactController {
       this.recordAutoCompactRapidRearm(scopeKey, lastSuccessAt, now);
     }
     log.warn(
-      { scopeKey, inputTokens: inputTokens ?? 0, threshold: this.inputTokens },
-      'auto compact next turn input exceeded threshold',
+      {
+        scopeKey,
+        contextTokens,
+        summedInputTokens: summedInputTokens ?? null,
+        threshold: this.inputTokens,
+        crossed: 'context',
+      },
+      'auto compact next turn context exceeded threshold',
     );
   }
 
@@ -295,9 +307,11 @@ export class AutoCompactController {
     this.lastSuccessAt.delete(scopeKey);
     this.rapidRearmRecordedForSuccessAt.delete(scopeKey);
     this.consecutiveRapidRearms.delete(scopeKey);
+    this.rapidRearmBackoff.delete(scopeKey);
     this.consecutiveNonConvergentCompactions.delete(scopeKey);
     this.compactionOutcomeRecordedForCompactAt.delete(scopeKey);
     this.measureNextTurn.delete(scopeKey);
+    this.contextGauge.delete(scopeKey);
     this.finishAutoCompact(scopeKey);
     this.clearSilentCompact(scopeKey);
   }
@@ -305,8 +319,8 @@ export class AutoCompactController {
   /**
    * Migrate auto-compact bookkeeping from oldKey to newKey on a JID-alias change.
    * Mirrors the prior inline per-map get/delete/set sequence exactly: only the
-   * cooldown, last-success, rapid-rearm-recorded, consecutive-rapid-rearm, and
-   * measure-next-turn entries move (silent-compact timers, the boundary set, and
+   * cooldown, last-success, rapid-rearm-recorded, consecutive-rapid-rearm,
+   * rapid-rearm-backoff, and measure-next-turn entries move (silent-compact timers, the boundary set, and
    * in-flight waiters are intentionally left untouched, as before).
    */
   rekey(oldKey: string, newKey: string): void {
@@ -330,6 +344,11 @@ export class AutoCompactController {
       this.consecutiveRapidRearms.delete(oldKey);
       this.consecutiveRapidRearms.set(newKey, consecutiveRapidRearms);
     }
+    const backoff = this.rapidRearmBackoff.get(oldKey);
+    if (backoff !== undefined) {
+      this.rapidRearmBackoff.delete(oldKey);
+      this.rapidRearmBackoff.set(newKey, backoff);
+    }
     // #3523 layer 1: the non-convergence streak and its per-compaction dedupe
     // travel with the scope for the same reason the rapid-rearm counter does —
     // a JID-alias rekey is the same conversation, not a fresh context.
@@ -347,6 +366,8 @@ export class AutoCompactController {
       this.measureNextTurn.delete(oldKey);
       this.measureNextTurn.add(newKey);
     }
+    // #3717c: the context gauge is the same conversation's context; it moves too.
+    this.contextGauge.rekey(oldKey, newKey);
   }
 
   /**
@@ -369,8 +390,10 @@ export class AutoCompactController {
     this.lastSuccessAt.clear();
     this.rapidRearmRecordedForSuccessAt.clear();
     this.consecutiveRapidRearms.clear();
+    this.rapidRearmBackoff.clear();
     this.consecutiveNonConvergentCompactions.clear();
     this.compactionOutcomeRecordedForCompactAt.clear();
     this.measureNextTurn.clear();
+    this.contextGauge.clear();
   }
 }
