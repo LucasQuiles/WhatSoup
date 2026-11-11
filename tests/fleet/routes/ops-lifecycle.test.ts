@@ -105,9 +105,35 @@ describe('ops-lifecycle handlers', () => {
     await handleDeleteLine(mockReq({ method: 'DELETE' }), res, deps, { name });
 
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body)).toEqual({ error: 'stop failed: permission denied', instance: name });
+    expect(JSON.parse(res._body)).toMatchObject({ schema: 'fleet-error-v1', code: 'service_stop_failed',
+      instance: name, operation: 'instance_delete', stage: 'execute', mutation_state: 'unknown', retryable: false });
     expect(deps.serviceManager.disable).not.toHaveBeenCalled();
     expect(fs.existsSync(dirs.configDir)).toBe(true);
+  });
+
+  it.each(['stop', 'disable'] as const)('bounds %s failures and preserves files without publishing success', async (action) => {
+    const name = 'delete-private-failure';
+    const dirs = seedInstanceDirs(name);
+    const deps = makeDeps<any>({}) as OpsDeps;
+    vi.mocked(deps.serviceManager[action]).mockRejectedValueOnce(new Error('private path /secret/service.log token=canary'));
+    const res = mockRes();
+
+    await handleDeleteLine(mockReq({ method: 'DELETE' }), res, deps, { name });
+
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body)).toMatchObject({ schema: 'fleet-error-v1',
+      instance: name,
+      code: action === 'stop' ? 'service_stop_failed' : 'service_action_failed',
+      operation: 'instance_delete', stage: 'execute', mutation_state: 'unknown', rollback_state: 'not_applicable', retryable: false,
+      correlation_id: expect.any(String),
+    });
+    expect(res._body).not.toContain('/secret/service.log');
+    expect(res._body).not.toContain('canary');
+    expect(deps.discovery.scan).not.toHaveBeenCalled();
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
+    expect(fs.existsSync(dirs.configDir)).toBe(true);
+    expect(fs.existsSync(dirs.dataDir)).toBe(true);
+    expect(fs.existsSync(dirs.stateDir)).toBe(true);
   });
 
   it('reports incomplete deletion and succeeds only after the remaining files can be removed', async () => {

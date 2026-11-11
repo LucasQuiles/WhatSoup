@@ -29,7 +29,7 @@ import { migrateLegacyMemoryConfig } from '../../config-memory-migration.ts';
 import { stripPlaintextProviderKeys } from '../../lib/config-plaintext-keys.ts';
 import { privateWriteError, writePrivateFileSync } from '../../lib/private-fs.ts';
 import { errorMessage } from '../../lib/error-message.ts';
-import { projectError, validationError, mutationError } from '../response-error-projection.ts';
+import { projectError, validationError, mutationError, serviceActionError } from '../response-error-projection.ts';
 import { NAME_MAX_LENGTH, NAME_RE, validateInstanceName } from './instance-name.ts';
 import { writeInitialDatabaseCreateMarker } from '../../core/initial-database-marker.ts';
 import {
@@ -137,11 +137,9 @@ export async function handleDeleteLine(
     await deps.serviceManager.stop(params.name);
   } catch (err) {
     if (!isBenignServiceTeardownError(err, params.name)) {
-      log.error({ err, instance: params.name }, 'delete line: service stop failed');
-      jsonResponse(res, 500, {
-        error: `stop failed: ${serviceErrorMessage(err)}`,
-        instance: params.name,
-      });
+      const response = serviceActionError(err, 'instance_delete', 'service_stop_failed');
+      log.error({ err, instance: params.name, correlationId: response.correlation_id }, 'delete line: service stop failed');
+      jsonResponse(res, 500, { ...response, instance: params.name });
       return;
     }
     log.warn({ err, instance: params.name }, 'delete line: service already stopped or absent');
@@ -152,11 +150,9 @@ export async function handleDeleteLine(
     await deps.serviceManager.disable(params.name);
   } catch (err) {
     if (!isBenignServiceTeardownError(err, params.name)) {
-      log.error({ err, instance: params.name }, 'delete line: service disable failed');
-      jsonResponse(res, 500, {
-        error: `disable failed: ${serviceErrorMessage(err)}`,
-        instance: params.name,
-      });
+      const response = serviceActionError(err, 'instance_delete', 'service_action_failed');
+      log.error({ err, instance: params.name, correlationId: response.correlation_id }, 'delete line: service disable failed');
+      jsonResponse(res, 500, { ...response, instance: params.name });
       return;
     }
     log.warn({ err, instance: params.name }, 'delete line: service already disabled or absent');
