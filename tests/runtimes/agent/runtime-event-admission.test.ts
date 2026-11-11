@@ -13,6 +13,8 @@ const effectEvents: AgentEvent[] = [
   { type: 'compact_boundary' },
   { type: 'result', text: 'private terminal text' },
   { type: 'token_usage', inputTokens: 42 },
+  // #3717c: per-request context usage follows the same ownership as token_usage.
+  { type: 'request_usage', messageId: 'msg-1', contextTokens: 42 },
 ];
 
 const owner = (kind: ProviderEventOwner['kind']): ProviderEventOwner => {
@@ -72,16 +74,16 @@ describe('decideProviderEventAdmission', () => {
     purpose: SystemTurnPurpose;
     allowed: AgentEvent['type'][];
   }>([
-    { purpose: 'fresh_session_context', allowed: ['init', 'token_usage', 'result', 'ignored'] },
-    { purpose: 'auto_compact_silent', allowed: ['init', 'token_usage', 'compact_boundary', 'result', 'ignored'] },
-    { purpose: 'manual_compact_notice', allowed: ['init', 'token_usage', 'compact_boundary', 'result', 'ignored'] },
+    { purpose: 'fresh_session_context', allowed: ['init', 'token_usage', 'request_usage', 'result', 'ignored'] },
+    { purpose: 'auto_compact_silent', allowed: ['init', 'token_usage', 'request_usage', 'compact_boundary', 'result', 'ignored'] },
+    { purpose: 'manual_compact_notice', allowed: ['init', 'token_usage', 'request_usage', 'compact_boundary', 'result', 'ignored'] },
     {
       purpose: 'poll_answer_continuation',
-      allowed: ['init', 'assistant_text', 'tool_use', 'tool_result', 'compact_boundary', 'result', 'token_usage', 'ignored'],
+      allowed: ['init', 'assistant_text', 'tool_use', 'tool_result', 'compact_boundary', 'result', 'token_usage', 'request_usage', 'ignored'],
     },
     {
       purpose: 'respawn_continuation',
-      allowed: ['init', 'assistant_text', 'tool_use', 'tool_result', 'compact_boundary', 'result', 'token_usage', 'ignored'],
+      allowed: ['init', 'assistant_text', 'tool_use', 'tool_result', 'compact_boundary', 'result', 'token_usage', 'request_usage', 'ignored'],
     },
   ])('applies the $purpose system-purpose event policy', ({ purpose, allowed }) => {
     const currentOwner: ProviderEventOwner = { kind: 'system_request', purpose };

@@ -1785,6 +1785,15 @@ describe('registerMessagingTools', () => {
       await defaultPromise;
     });
 
+    // An over-limit call must return at once. Without the limit it would wait for a vote, so
+    // fail by assertion instead of by the test timeout.
+    const returnsWithoutVote = async <T,>(call: Promise<T>): Promise<T> => {
+      let settled: { value: T } | undefined;
+      void call.then((value) => { settled = { value }; });
+      await vi.waitFor(() => { expect(settled, 'call returned without waiting for a vote').toBeDefined(); });
+      return settled!.value;
+    };
+
     it('C6d — bounds concurrently awaited polls before the external send and frees a slot on settle or send failure', async () => {
       const localRegistry = new ToolRegistry();
       const settle: Array<(answer: string) => void> = [];
@@ -1803,7 +1812,7 @@ describe('registerMessagingTools', () => {
       const pending = Array.from({ length: MAX_PENDING_POLL_AWAITS }, (_, i) => ask(i));
       await vi.waitFor(() => { expect(registrar.register).toHaveBeenCalledTimes(MAX_PENDING_POLL_AWAITS); });
 
-      const refused = await ask(MAX_PENDING_POLL_AWAITS);
+      const refused = await returnsWithoutVote(ask(MAX_PENDING_POLL_AWAITS));
       expect(refused.isError).toBe(true);
       expect(JSON.parse(refused.content[0].text).error).toMatch(/Too many awaited polls are pending \(limit 32 in total\); poll not sent/);
       expect(sendPoll.mock.calls.length - sendCountBefore).toBe(MAX_PENDING_POLL_AWAITS);
@@ -1847,7 +1856,7 @@ describe('registerMessagingTools', () => {
 
       const busy = Array.from({ length: MAX_PENDING_POLL_AWAITS_PER_CONVERSATION }, () => ask('poll-busy'));
       await vi.waitFor(() => { expect(registrar.register).toHaveBeenCalledTimes(MAX_PENDING_POLL_AWAITS_PER_CONVERSATION); });
-      const refused = await ask('poll-busy');
+      const refused = await returnsWithoutVote(ask('poll-busy'));
       expect(JSON.parse(refused.content[0].text).error).toMatch(/limit 8 per conversation\); poll not sent/);
 
       const other = ask('poll-other');

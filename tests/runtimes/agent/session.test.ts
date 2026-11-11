@@ -2490,9 +2490,11 @@ describe('SessionManager', () => {
   it('a poll wait that begins during the hard-watchdog liveness assessment prevents the kill', async () => {
     vi.useFakeTimers();
     let resolveAssessment!: (verdict: null) => void;
-    const treeLivenessAssessor = vi.fn(() => new Promise<null>((resolve) => {
-      resolveAssessment = resolve;
-    }));
+    // Only the first assessment is held open; the later backstop assessment reports no progress.
+    const treeLivenessAssessor = vi.fn(async (): Promise<null> => null)
+      .mockImplementationOnce(() => new Promise<null>((resolve) => {
+        resolveAssessment = resolve;
+      }));
     const sm = new SessionManager({
       db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
       onEvent: vi.fn(), notifyUser: vi.fn(), treeLivenessAssessor,
@@ -2524,6 +2526,7 @@ describe('SessionManager', () => {
       await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS * 2);
       expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
       await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+      expect(treeLivenessAssessor).toHaveBeenCalledTimes(2);
       expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
       end?.();
     } finally {
