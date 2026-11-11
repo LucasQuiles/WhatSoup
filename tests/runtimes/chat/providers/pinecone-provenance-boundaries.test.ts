@@ -58,8 +58,9 @@ vi.mock('@pinecone-database/pinecone', () => ({
             failIfInjected(`delete:${name}`);
             for (const id of ids ?? []) store.delete(id);
           },
-          // A namespace that does not exist answers fetch with no records
-          // (live-checked 2026-11-11), as an empty store does here.
+          // A namespace that does not exist answers fetch and searchRecords
+          // with empty results, not an error (live-checked 2026-11-11), as an
+          // empty store does here.
           fetch: async ({ ids }: { ids: string[] }) => {
             namespaceFetches.push({ name, ids: [...ids] });
             failIfInjected(`fetch:${name}`);

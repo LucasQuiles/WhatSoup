@@ -1943,9 +1943,10 @@ designed contract mirrors the fact-export queue machinery (§9):
   query it, and new readers retain restrictive recall for legacy records.
   Rollback to an earlier reader cannot expose these records because it never
   queries the reserved namespace, and no earlier release wrote `owner_only`
-  records anywhere (the visibility field ships with the fence). Rolling a
-  writer back stops `owner_only` writes; rolling forward again needs no
-  migration. A correction that narrows a shared record moves it (reserved
+  records anywhere (the visibility field ships with the fence). An earlier
+  writer ignores visibility and would store an `owner_only` instance's new
+  memories unstamped in the default namespace, so roll such a writer back only
+  with its memory writes stopped; rolling forward again needs no migration. A correction that narrows a shared record moves it (reserved
   write, then default delete); merged reads suppress the default copy of an id
   the reserved namespace holds, also when the reserved copy ranks below the
   reserved `topK` cutoff and is not returned (one fetch of the unmatched

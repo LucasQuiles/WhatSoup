@@ -818,6 +818,8 @@ export const OWNER_ONLY_NAMESPACE = 'whatsoup-owner-only-v1';
  *   another account;
  * - a recordVisibility other than a known visibility (absent or null means
  *   chat_scoped): a typo must never silently widen who can recall records;
+ * - an instanceScopedIds that is not a boolean (absent or null means off):
+ *   read as off, it would silently drop the boundaries the operator asked for;
  * - the reserved owner_only namespace in `namespaces` or a knowledge profile,
  *   so knowledge_search can never query it.
  */
@@ -834,6 +836,10 @@ export function pineconeMemoryValueError(
       field: 'memory.pinecone.recordVisibility',
       message: 'memory.pinecone.recordVisibility must be "owner_only" or "chat_scoped"',
     };
+  }
+  const scopedIds = pinecone['instanceScopedIds'];
+  if (scopedIds !== undefined && scopedIds !== null && typeof scopedIds !== 'boolean') {
+    return { field: 'memory.pinecone.instanceScopedIds', message: 'memory.pinecone.instanceScopedIds must be true or false' };
   }
   const reserved = (field: string) => ({
     field, message: `${field} uses the reserved owner_only namespace ${OWNER_ONLY_NAMESPACE}`,
