@@ -37,6 +37,7 @@ import { getLoadedInstanceConfigOrNull } from './lib/instance-context.ts';
 import { parseClientOutputPoliciesForInstance } from './core/client-output-policy-config.ts';
 import type { ProviderProcessIsolationConfig } from './runtimes/agent/provider-process-isolation.ts';
 import { resolveTypedHandoffDistillConfig, type TypedHandoffDistillInput } from './lib/handoff-distill-config.ts';
+import { OWNER_ONLY_NAMESPACE } from './core/memory-scope.ts';
 
 const APP_NAME = 'whatsoup';
 
@@ -767,6 +768,9 @@ function warnConfigDeprecation(payload: Record<string, unknown>, message: string
 function resolvePineconeNamespaces(source: Record<string, unknown> | undefined): PineconeNamespaceConfig {
   const namespaces: PineconeNamespaceConfig = { ...DEFAULT_PINECONE_NAMESPACES };
   for (const [key, value] of Object.entries(source ?? {})) {
+    if (value === OWNER_ONLY_NAMESPACE) {
+      throw new Error(`memory.pinecone.namespaces.${key} uses reserved namespace ${OWNER_ONLY_NAMESPACE}`);
+    }
     if (isNonEmptyString(value)) {
       namespaces[key] = value;
     }
@@ -865,7 +869,11 @@ function mergeKnowledgeProfiles(
       rerankTopN: 6,
       description: indexName,
     };
-    profiles[indexName] = mergeKnowledgeProfile(base, override);
+    const profile = mergeKnowledgeProfile(base, override);
+    if (profile.namespace === OWNER_ONLY_NAMESPACE || profile.namespaces.includes(OWNER_ONLY_NAMESPACE)) {
+      throw new Error(`memory.pinecone.knowledgeProfiles.${indexName} uses reserved namespace ${OWNER_ONLY_NAMESPACE}`);
+    }
+    profiles[indexName] = profile;
   }
   return profiles;
 }

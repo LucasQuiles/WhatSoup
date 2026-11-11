@@ -804,6 +804,10 @@ export function verifiedSenderIdentity(actorJid: string | undefined, db?: Databa
 export const MEMORY_VISIBILITIES = ['owner_only', 'chat_scoped'] as const;
 export type MemoryVisibility = (typeof MEMORY_VISIBILITIES)[number];
 
+// Releases before this fence never query this namespace, so deploy or rollback
+// order cannot let them return owner_only records.
+export const OWNER_ONLY_NAMESPACE = 'whatsoup-owner-only-v1';
+
 export const MEMORY_PROVENANCES = ['memory_write', 'fact_export', 'summary', 'consolidation'] as const;
 export type MemoryProvenance = (typeof MEMORY_PROVENANCES)[number];
 

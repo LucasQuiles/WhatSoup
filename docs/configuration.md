@@ -1268,6 +1268,21 @@ land. A `passive` line has no writer yet.
 | `visibility` | New writes use `owner_only` for a `passive` instance or when `memory.pinecone.recordVisibility` is `owner_only`; otherwise `chat_scoped`. Corrections and legacy consolidation keep the most restrictive visibility of their sources and writer. Instance-scoped consolidation preserves its inputs' visibility exactly. |
 | `provenance` | `memory_write`, `fact_export`, `summary` or `consolidation`: the pipeline that wrote the record. |
 
+`owner_only` records live only in the reserved `whatsoup-owner-only-v1`
+namespace; other records use the default namespace. Configuration rejects the
+reserved name in `memory.pinecone.namespaces.*` and knowledge profiles, so
+`knowledge_search` cannot query it. Admitted memory recall searches both namespaces;
+the owner-only leg searches only the reserved namespace, retaining visibility and
+source filters. Consolidation reads both namespaces. A correction that narrows a
+shared record to `owner_only` moves it: the reserved copy is written first, then
+the default copy is deleted, and a failure at either step fails the write.
+
+Readers and writers can upgrade in either order: old readers never query the
+reserved namespace, and new readers retain the legacy-record rules below.
+For rollback, restore the earlier reader release; it cannot expose `owner_only`
+records because it never queries that namespace. Rolling a writer back stops
+`owner_only` writes. Rolling forward again needs no migration.
+
 Records written before these fields existed carry none of them. Nothing ties
 such a record to an owner, so recall does not infer ownership from the missing
 fields:

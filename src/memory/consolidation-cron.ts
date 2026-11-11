@@ -221,6 +221,9 @@ export async function runConsolidation(
       100,
       options.traceId,
       options.signal,
+      // owner_only sources live in the reserved namespace; promotions keep
+      // their sources' visibility, so owner_only promotions go back there.
+      'both',
     );
   } catch (error) {
     const failure = classifyMemoryOperationFailure(error);

@@ -231,6 +231,8 @@ describe('runConsolidation', () => {
       100,
       undefined,
       undefined,
+      // owner_only sources live in the reserved namespace.
+      'both',
     );
   });
 

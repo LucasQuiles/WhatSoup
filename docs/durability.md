@@ -1938,6 +1938,12 @@ designed contract mirrors the fact-export queue machinery (§9):
   assumption. Every record carries server-stamped `source_instance`,
   `source_account`, `visibility` and `provenance` (`toPineconeRecord`; see
   [configuration: memory record provenance](configuration.md#memory-record-provenance)).
+  `owner_only` records live only in the reserved `whatsoup-owner-only-v1`
+  namespace. Readers and writers can upgrade in either order: old readers never
+  query it, and new readers retain restrictive recall for legacy records.
+  Rollback to an earlier reader cannot expose these records because it never
+  queries the reserved namespace. Rolling a writer back stops `owner_only`
+  writes; rolling forward again needs no migration.
   Instances that share an index set `memory.pinecone.instanceScopedIds`, which
   folds the instance into every id scheme (`memory_write`, the fact-export
   `factId`, `durable:`) and makes source instance and account boundaries:

@@ -22,6 +22,7 @@ import {
 import {
   MEMORY_PROVENANCES,
   MEMORY_VISIBILITIES,
+  OWNER_ONLY_NAMESPACE,
   instanceRecordVisibility,
   memorySourceAccount,
   memorySourceEligible,
@@ -951,6 +952,7 @@ export class PineconeMemory {
     topK: number,
     traceId?: string,
     signal?: AbortSignal,
+    namespaces: 'default' | 'both' | 'owner_only' = 'default',
   ): Promise<PineconeSearchDetails> {
     signal?.throwIfAborted();
     const filter = classifyMemoryFilter(filters);
@@ -996,22 +998,29 @@ export class PineconeMemory {
       };
     }
 
-    const doSearch = () => {
-      signal?.throwIfAborted();
-      return this.index.searchRecords({
+    const doSearch = async () => {
+      const request = {
         query: {
           topK,
           inputs: { text: query },
           filter: filters,
         },
         fields: ['*'],
-      });
+      };
+      const indexes = namespaces === 'owner_only' ? [] : [this.index];
+      if (namespaces !== 'default') indexes.push(this.index.namespace(OWNER_ONLY_NAMESPACE));
+      const results: SearchResult[] = [];
+      for (const index of indexes) {
+        signal?.throwIfAborted();
+        const response = await index.searchRecords(request);
+        results.push(...(response.result.hits ?? []).map(fromPineconeHit));
+      }
+      return namespaces === 'both' ? results.sort((a, b) => b.score - a.score).slice(0, topK) : results;
     };
 
     const startMs = Date.now();
     try {
-      const response = await doSearch();
-      const results = (response.result.hits ?? []).map(fromPineconeHit);
+      const results = await doSearch();
       const durationMs = Date.now() - startMs;
       logMemoryOperation(operation, {
         stage: 'request',
@@ -1030,8 +1039,7 @@ export class PineconeMemory {
       // One retry after a short delay to catch transient blips
       await sleepWithAbort(RETRY_DELAY_MS, signal);
       try {
-        const response = await doSearch();
-        const results = (response.result.hits ?? []).map(fromPineconeHit);
+        const results = await doSearch();
         const durationMs = Date.now() - startMs;
         logMemoryOperation(operation, {
           stage: 'request',
@@ -1076,16 +1084,25 @@ export class PineconeMemory {
     query: string,
     filters: Record<string, unknown>,
     topK: number,
+    includeOwnerOnly = false,
   ): Promise<SearchResult[]> {
-    return (await this._searchCoreDetailed(query, filters, topK)).results;
+    return (await this._searchCoreDetailed(query, filters, topK, undefined, undefined,
+      includeOwnerOnly ? 'both' : 'default')).results;
   }
 
+  /**
+   * `namespaces: 'both'` also reads the reserved owner_only namespace; the
+   * caller's filters then own eligibility. Only consolidation passes it: an
+   * instance's owner_only records (written by an owner_only writer, or derived
+   * from owner_only inputs by any writer) must still be consolidated.
+   */
   async searchDetailed(
     query: string,
     filters: Record<string, unknown>,
     topK: number,
     traceId?: string,
     signal?: AbortSignal,
+    namespaces: 'default' | 'both' = 'default',
   ): Promise<PineconeSearchDetails> {
     return pineconeOperationSignal.run(signal, async () => {
       const details = await this._searchCoreDetailed(
@@ -1094,6 +1111,7 @@ export class PineconeMemory {
         topK,
         traceId,
         signal,
+        namespaces,
       );
       return {
         ...details,
@@ -1129,7 +1147,8 @@ export class PineconeMemory {
     const filter = withSourceFilter(withVisibilityFilter(
       { [field]: { $eq: value } }, options.includeOwnerOnly === true, chatScopedOnly,
     ), boundary) ?? {};
-    const details = await this._searchCoreDetailed(query, filter, topK, traceId);
+    const details = await this._searchCoreDetailed(query, filter, topK, traceId, undefined,
+      options.includeOwnerOnly === true ? 'both' : 'default');
     const eligible = details.results.filter(({ record }) => memorySourceEligible({
       source_instance: record.sourceInstance, source_account: record.sourceAccount, visibility: record.visibility,
     }, boundary) && (!chatScopedOnly || record.visibility === 'chat_scoped'));
@@ -1182,7 +1201,7 @@ export class PineconeMemory {
   async searchOwnerOnlyDetailed(query: string, traceId?: string, options: ContextLegOptions = {}): Promise<PineconeSearchDetails> {
     const boundary = this.recallSourceBoundary(options);
     const filter = withSourceFilter(ownerOnlyLegFilter(), boundary) ?? {};
-    const details = await this._searchCoreDetailed(query, filter, config.pineconeContextTopK, traceId);
+    const details = await this._searchCoreDetailed(query, filter, config.pineconeContextTopK, traceId, undefined, 'owner_only');
     const eligible = details.results.filter(({ record }) => memorySourceEligible({
       visibility: record.visibility, source_instance: record.sourceInstance, source_account: record.sourceAccount,
     }, boundary));
@@ -1495,10 +1514,23 @@ export class PineconeMemory {
 
     const pineconeRecords = records.map((record) => toPineconeRecord(record,
       preserveConsolidation ? { ...stamp, visibility: record.visibility! } : stamp));
+    const ownerOnlyRecords = pineconeRecords.filter((record) => record.visibility === 'owner_only');
+    const defaultRecords = pineconeRecords.filter((record) => record.visibility !== 'owner_only');
     const startMs = Date.now();
-    const doUpsert = () => {
+    const doUpsert = async () => {
       contextInput.signal?.throwIfAborted();
-      return this.index.upsertRecords({ records: pineconeRecords });
+      if (defaultRecords.length > 0) await this.index.upsertRecords({ records: defaultRecords });
+      if (ownerOnlyRecords.length > 0) {
+        contextInput.signal?.throwIfAborted();
+        await this.index.namespace(OWNER_ONLY_NAMESPACE).upsertRecords({ records: ownerOnlyRecords });
+        // A correction rewrites an existing record under its own id, and an
+        // owner_only writer narrows it, so the id may still hold the shared
+        // copy in the default namespace. Delete it, only after the reserved
+        // copy is written: the stale shared text must not outlive the move,
+        // and no step may leave the record in neither namespace.
+        contextInput.signal?.throwIfAborted();
+        await this.index.deleteMany({ ids: ownerOnlyRecords.map((record) => record._id) });
+      }
     };
 
     try {
@@ -1564,7 +1596,7 @@ export class PineconeMemory {
     }
     Object.assign(filters, this.sourceBoundaryFilter());
 
-    const results = await this._searchCore(text, filters, 1);
+    const results = await this._searchCore(text, filters, 1, this.recordStamp(undefined).visibility === 'owner_only');
 
     if (results.length > 0 && results[0].score >= threshold) {
       return { isDuplicate: true, existingId: results[0].id, score: results[0].score };
@@ -1586,7 +1618,7 @@ export class PineconeMemory {
       filters['sender_jid'] = { $eq: senderJid };
     }
     Object.assign(filters, this.sourceBoundaryFilter());
-    return this._searchCore(claimText, filters, topK);
+    return this._searchCore(claimText, filters, topK, this.recordStamp(undefined).visibility === 'owner_only');
   }
 
   /**
@@ -1610,7 +1642,7 @@ export class PineconeMemory {
       ] } : this.sourceBoundaryFilter()) },
       writesOwnerOnly,
     ) ?? {};
-    const results = await this._searchCore(text, filter, 1);
+    const results = await this._searchCore(text, filter, 1, writesOwnerOnly);
     // Preserve the decay applied by the supersede lookup's former search() call.
     const eligible = results.filter(({ record }) => !knownWriter || (
       (record.sourceInstance === undefined || record.sourceInstance === stamp.sourceInstance)
