@@ -375,28 +375,28 @@ describe('synthetic scheduled-job catch-up enrollment (#3754)', () => {
     const writtenRow = (seq: number) => db.raw.prepare(`
       SELECT processing_status, failure_class, terminal_reason FROM inbound_events WHERE seq = ?
     `).get(seq);
-    // Each seq-keyed writer as a late runtime path calls it, and the row main
-    // leaves when that writer rewrites a stale_reclaim failure.
+    // A late turn completion cannot reopen a terminal row. The explicit
+    // disposition writers retain their existing real-user recovery behavior.
     const writers = [
       {
         writer: 'markTurnDone',
         write: (seq: number) => engine.markTurnDone(seq),
-        mainRow: { processing_status: 'turn_done', failure_class: 'stale_reclaim', terminal_reason: 'error' },
+        expectedRow: { processing_status: 'failed', failure_class: 'stale_reclaim', terminal_reason: 'error' },
       },
       {
         writer: 'markInboundComplete',
         write: (seq: number) => engine.markInboundComplete(seq, 'response_sent'),
-        mainRow: { processing_status: 'complete', failure_class: 'stale_reclaim', terminal_reason: 'response_sent' },
+        expectedRow: { processing_status: 'complete', failure_class: 'stale_reclaim', terminal_reason: 'response_sent' },
       },
       {
         writer: 'markInboundFailed',
         write: (seq: number) => engine.markInboundFailed(seq, 'session_spawn_failed'),
-        mainRow: { processing_status: 'failed', failure_class: 'session_spawn_failed', terminal_reason: 'error' },
+        expectedRow: { processing_status: 'failed', failure_class: 'session_spawn_failed', terminal_reason: 'error' },
       },
       {
         writer: 'markInboundSkipped',
         write: (seq: number) => engine.markInboundSkipped(seq, 'empty_content'),
-        mainRow: { processing_status: 'complete', failure_class: 'stale_reclaim', terminal_reason: 'empty_content' },
+        expectedRow: { processing_status: 'complete', failure_class: 'stale_reclaim', terminal_reason: 'empty_content' },
       },
     ];
 
@@ -412,7 +412,7 @@ describe('synthetic scheduled-job catch-up enrollment (#3754)', () => {
       expect(engine.isInboundSweepReclaimed(seq)).toBe(true);
     });
 
-    it.each(writers)('still lets $writer rewrite a real-user row in the same state', ({ write, mainRow }) => {
+    it.each(writers)('preserves the $writer transition contract for a real-user failure', ({ write, expectedRow }) => {
       // Unlinked on purpose: a swept real-user row carries a disposition link,
       // and migration 41's trigger already freezes a linked row on main.
       const seq = journal('wamid-late-writer-user');
@@ -420,7 +420,19 @@ describe('synthetic scheduled-job catch-up enrollment (#3754)', () => {
 
       write(seq);
 
-      expect(writtenRow(seq)).toEqual(mainRow);
+      expect(writtenRow(seq)).toEqual(expectedRow);
+    });
+
+    it('advances a fresh real-user turn without reopening an earlier failed turn', () => {
+      const failedSeq = journal('wamid-failed-turn');
+      engine.markInboundFailed(failedSeq, 'stale_reclaim');
+      const currentSeq = journal('wamid-current-turn');
+
+      engine.markTurnDone(failedSeq);
+      engine.markTurnDone(currentSeq);
+
+      expect(writtenRow(failedSeq)).toEqual({ processing_status: 'failed', failure_class: 'stale_reclaim', terminal_reason: 'error' });
+      expect(writtenRow(currentSeq)).toEqual({ processing_status: 'turn_done', failure_class: null, terminal_reason: null });
     });
 
     it('leaves a synthetic failure with no failure class writable', () => {

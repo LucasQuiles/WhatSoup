@@ -142,6 +142,9 @@ cannot express the check).
 - **FP strategy:** comments and import paths excluded by node-type selection; identifier allowlist
   (`WhatSoupError`, `mcp__whatsoup__`, `whatsoup:` prefix, path segments `/run/whatsoup/`,
   `~/.local/share/whatsoup/`, `whatsoup@` unit names) shared with soup/protected-identifiers.
+  Literal `href` targets under `https://github.com/LucasQuiles/WhatSoup` also preserve
+  the canonical repository identifier. This exception does not cover visible link
+  text, titles, accessible labels, lookalike hosts or different repository names.
 - **Autofix:** none (copy changes need human/spec review).
 - **Phase:** P4. **Entry state:** shadow (baseline = the dispositions above).
 
