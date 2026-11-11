@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, onTestFinished, vi } from 'vitest';
 import { prepareRuntimeHome, ownedRuntimeCwd } from '../../helpers/runtime-home-fixture.ts';
 import { registerRuntimeHomeConfinementTests } from './runtime-home-confinement.cases.ts';
 import { registerRuntimeSettingsPolicyTests } from './runtime-settings-policy.cases.ts';
@@ -3816,7 +3816,8 @@ describe('AgentRuntime', () => {
   it('pending AskUser poll votes remain correlated after LID remap', async () => {
     const canonicalJid = '15550004444@s.whatsapp.net';
     const lidKey = '15550004444@lid';
-    const db = makeDb();
+    const db = makeRealDb();
+    onTestFinished(() => db.close());
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
     const state = runtime as unknown as PerChatCleanupRuntimeState & {
@@ -12578,7 +12579,8 @@ describe('AgentRuntime', () => {
 
     it('injects a pollVoteReceived answer back into the active per-chat session', async () => {
       const { messenger, pollSends, eventHandlers } = makePollMessenger({ waMessageId: 'POLL_ANSWER', hasSecret: true });
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
@@ -12633,7 +12635,8 @@ describe('AgentRuntime', () => {
         waMessageId: 'POLL_FAST_ANSWER',
         hasSecret: true,
       });
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
@@ -12698,7 +12701,8 @@ describe('AgentRuntime', () => {
         waMessageId: 'POLL_JOURNALED_FAST_ANSWER',
         hasSecret: true,
       });
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
@@ -12886,7 +12890,8 @@ describe('AgentRuntime', () => {
         { waMessageId: 'POLL_Q1', hasSecret: true },
         { waMessageId: 'POLL_Q2', hasSecret: true },
       ]);
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
@@ -12957,7 +12962,8 @@ describe('AgentRuntime', () => {
         { waMessageId: 'POLL_DUP_Q1', hasSecret: true },
         { waMessageId: 'POLL_DUP_Q2', hasSecret: true },
       ]);
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
@@ -13054,7 +13060,8 @@ describe('AgentRuntime', () => {
 
     it('treats text while a poll is pending as a free-text Other answer', async () => {
       const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_OTHER', hasSecret: true });
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
@@ -13100,7 +13107,8 @@ describe('AgentRuntime', () => {
 
     it('does not resolve a pending poll from a generic vote-status text reply', async () => {
       const { messenger, sentMessages, pollSends, eventHandlers } = makePollMessenger({ waMessageId: 'POLL_STATUS_TEXT', hasSecret: true });
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
@@ -13156,7 +13164,8 @@ describe('AgentRuntime', () => {
 
     it('terminalizes a fully collected typed poll answer before reinjecting the structured answer', async () => {
       const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_FULL_DURABILITY', hasSecret: true });
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
       const durability = { completeInbound: vi.fn(), ...makeTerminalDurabilityMock() };
       const replyGuarantee = { arm: vi.fn(), disarm: vi.fn(), shutdown: vi.fn(), isArmed: vi.fn(() => false) };
@@ -13214,7 +13223,8 @@ describe('AgentRuntime', () => {
 
     it('accepts a typed option label even when the label looks like generic vote status', async () => {
       const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_SUBMITTED_OPTION', hasSecret: true });
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
@@ -13259,7 +13269,8 @@ describe('AgentRuntime', () => {
 
     it('injects an Other poll vote as a structured interview directive', async () => {
       const { messenger, pollSends, eventHandlers } = makePollMessenger({ waMessageId: 'POLL_OTHER_DIRECTIVE', hasSecret: true });
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
@@ -13646,7 +13657,8 @@ describe('AgentRuntime', () => {
 
     it('pollVoteFailed switches to idempotent text fallback and accepts typed option', async () => {
       const { messenger, pollSends, eventHandlers, sentMessages } = makePollMessenger({ waMessageId: 'POLL_DECRYPT_FAIL', hasSecret: true });
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
@@ -13703,7 +13715,8 @@ describe('AgentRuntime', () => {
         { waMessageId: 'POLL_PARTIAL_1', hasSecret: true },
         { waMessageId: 'POLL_PARTIAL_2', hasSecret: false },
       ]);
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
@@ -13917,7 +13930,8 @@ describe('AgentRuntime', () => {
     }
 
     it('E2Ea — askuser source: non-admin votes are recorded but do not resolve; admin vote settles via sendTurn with the admin selection', async () => {
-      const db = makeDb();
+      const db = makeRealDb();
+      try {
       const { messenger } = makeMessenger();
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
       const state = runtime as unknown as AdminRuntimeState;
@@ -13959,6 +13973,9 @@ describe('AgentRuntime', () => {
       });
       expect(mockSession.sendTurn).not.toHaveBeenCalledWith(expect.stringContaining('No'));
       expect(state.pendingPolls.questions.has(groupJid)).toBe(false);
+      } finally {
+        db.close();
+      }
     });
 
     it('E2Eb — send_poll source: admin vote resolves the awaitResolve promise with the admin selection', async () => {
@@ -14166,6 +14183,294 @@ describe('AgentRuntime', () => {
   // ── P2 hardening: rehydrate consolidation + persistence error counter ─────
 
   describe('poll persistence hardening', () => {
+    it.each([
+      { questionCount: 1, stop: false }, { questionCount: 2, stop: false },
+      { questionCount: 1, stop: true }, { questionCount: 2, stop: true },
+    ])('typed poll answer durability: $questionCount questions, shutdown=$stop preserves inbound ownership', async ({ questionCount, stop }) => {
+      vi.useFakeTimers();
+      const db = makeRealDb();
+      const { messenger } = makeMessenger();
+      const chatJid = 'typed-durable@s.whatsapp.net';
+      insertRow(db, chatJid, chatJid, Date.now() + 600_000, buildPayload({
+        chatJid, source: 'askuser', mode: 'textFallback', createdAt: Date.now(),
+        questions: Array.from({ length: questionCount }, (_, index) => ({
+          question: `Question ${index + 1}`, header: 'Choice',
+          options: [{ label: 'A', description: '' }], multiSelect: false,
+        })),
+      }));
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const durability = { completeInbound: vi.fn(), ...makeTerminalDurabilityMock() };
+      const state = runtime as unknown as {
+        durability: typeof durability;
+        pollPersistence: { stop(): void; healthDetails(): { degraded: boolean } };
+        perChatTurnQueues: Map<string, TurnQueue>;
+      };
+      try {
+        await runtime.start();
+        state.durability = durability;
+        setOwnedTestSession(runtime, chatJid, mockSession);
+        db.raw.exec(`
+          CREATE TRIGGER reject_typed_update BEFORE UPDATE ON pending_polls BEGIN SELECT RAISE(FAIL, 'write blocked'); END;
+          CREATE TRIGGER reject_typed_insert BEFORE INSERT ON pending_polls BEGIN SELECT RAISE(FAIL, 'write blocked'); END;
+        `);
+        await sendAndDrain(runtime, makeMsg({ chatJid, senderJid: chatJid, content: 'A', inboundSeq: 1703 }));
+        await vi.advanceTimersByTimeAsync(1);
+        expect.soft(durability.finalizeTurnTerminal).not.toHaveBeenCalled();
+        expect.soft(state.perChatTurnQueues.get(chatJid)?.activeTurn?.inboundSeq).toBe(1703);
+        expect(mockSession.sendTurn).not.toHaveBeenCalled();
+        const before = db.raw.prepare('SELECT payload FROM pending_polls WHERE map_key = ?').get(chatJid)!;
+        expect(JSON.parse(before.payload as string).answersCollected).toEqual({});
+        if (stop) await runtime.shutdown();
+        db.raw.exec('DROP TRIGGER reject_typed_update; DROP TRIGGER reject_typed_insert');
+        await vi.advanceTimersByTimeAsync(5_000);
+        if (stop) {
+          expect(mockSession.sendTurn).not.toHaveBeenCalled();
+          expect(durability.finalizeTurnTerminal).not.toHaveBeenCalledWith(expect.objectContaining({
+            terminal: expect.objectContaining({ attemptKind: 'suppressed_by_policy' }),
+          }));
+          expect(state.perChatTurnQueues.get(chatJid)?.activeTurn).toBeUndefined();
+          expect(state.pollPersistence.healthDetails().degraded).toBe(true);
+          expect(db.raw.prepare('SELECT payload FROM pending_polls WHERE map_key = ?').get(chatJid)?.payload).toBe(before.payload);
+          return;
+        }
+        expect(durability.finalizeTurnTerminal).toHaveBeenCalledTimes(1);
+        expect(durability.finalizeTurnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+          terminal: expect.objectContaining({ inboundSeq: 1703, attemptKind: 'suppressed_by_policy' }),
+        }));
+        expect(state.pollPersistence.healthDetails().degraded).toBe(false);
+        if (questionCount === 1) {
+          expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+          expect(String((mockSession.sendTurn.mock.calls[0] as unknown as [unknown])[0])).toContain('A: A');
+        } else {
+          expect(mockSession.sendTurn).not.toHaveBeenCalled();
+          const stored = db.raw.prepare('SELECT payload FROM pending_polls WHERE map_key = ?').get(chatJid)!;
+          expect(JSON.parse(stored.payload as string).answersCollected).toEqual({ 0: 'A' });
+        }
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(durability.finalizeTurnTerminal).toHaveBeenCalledTimes(1);
+      } finally {
+        state.pollPersistence.stop();
+        vi.clearAllTimers();
+        db.close();
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([
+      { questionCount: 1, outcome: 'recover' }, { questionCount: 2, outcome: 'recover' },
+      { questionCount: 1, outcome: 'dispatch-failure' }, { questionCount: 1, outcome: 'replace' },
+      { questionCount: 1, outcome: 'newer-row' }, { questionCount: 1, outcome: 'newer-row-failure' },
+    ])('console text fallback durability: $questionCount questions, $outcome without false delivery', async ({ questionCount, outcome }) => {
+      vi.useFakeTimers();
+      const db = makeRealDb();
+      const { messenger } = makeMessenger();
+      const chatJid = 'console-durable@s.whatsapp.net';
+      insertRow(db, chatJid, chatJid, Date.now() + 600_000, buildPayload({
+        chatJid, source: 'askuser', mode: 'textFallback', createdAt: Date.now(),
+        questions: Array.from({ length: questionCount }, (_, index) => ({
+          question: `Question ${index + 1}`, header: 'Choice',
+          options: [{ label: 'A', description: '' }], multiSelect: false,
+        })),
+      }));
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as {
+        rehydratePendingPolls(): Promise<void>;
+        pollPersistence: { healthDetails(): { degraded: boolean }; stop(): void };
+        pendingPolls: { questions: Map<string, PendingPollQuestion> };
+      };
+      try {
+        await state.rehydratePendingPolls();
+        setOwnedTestSession(runtime, chatJid, mockSession);
+        db.raw.exec(`
+          CREATE TRIGGER reject_poll_update BEFORE UPDATE ON pending_polls BEGIN SELECT RAISE(FAIL, 'write blocked'); END;
+          CREATE TRIGGER reject_poll_insert BEFORE INSERT ON pending_polls BEGIN SELECT RAISE(FAIL, 'write blocked'); END;
+        `);
+        const decision = { mapKey: chatJid, questionIndex: 0, selectedOptions: ['A'] };
+        expect.soft(await runtime.resolvePollDecisionFromConsole(decision)).toMatchObject({ ok: false, code: 'invalid' });
+        expect(mockSession.sendTurn).not.toHaveBeenCalled();
+        expect(state.pollPersistence.healthDetails().degraded).toBe(true);
+        const before = db.raw.prepare('SELECT payload FROM pending_polls WHERE map_key = ?').get(chatJid)!;
+        expect(JSON.parse(before.payload as string).answersCollected).toEqual({});
+        if (outcome === 'dispatch-failure') mockSession.sendTurn.mockRejectedValueOnce(new Error('provider dispatch unavailable'));
+        const original = state.pendingPolls.questions.get(chatJid)!;
+        const replacement = { ...original, createdAt: original.createdAt + 1, toolId: 'replacement' };
+        if (outcome === 'replace') state.pendingPolls.questions.set(chatJid, replacement);
+        if (outcome.startsWith('newer-row')) mockSession.sendTurn.mockImplementationOnce(async () => {
+          db.raw.prepare('UPDATE pending_polls SET created_at = ?, tool_id = ? WHERE map_key = ?')
+            .run(replacement.createdAt, replacement.toolId, chatJid);
+          if (outcome === 'newer-row-failure') throw new Error('provider dispatch unavailable');
+        });
+        db.raw.exec('DROP TRIGGER reject_poll_update; DROP TRIGGER reject_poll_insert');
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(state.pollPersistence.healthDetails().degraded).toBe(false);
+        if (outcome.startsWith('newer-row')) {
+          expect(mockSession.sendTurn).toHaveBeenCalledOnce();
+          expect(db.raw.prepare('SELECT created_at, tool_id FROM pending_polls WHERE map_key = ?').get(chatJid))
+            .toEqual({ created_at: replacement.createdAt, tool_id: replacement.toolId });
+          return;
+        }
+        if (outcome === 'replace') {
+          expect(mockSession.sendTurn).not.toHaveBeenCalled();
+          expect(state.pendingPolls.questions.get(chatJid)).toBe(replacement);
+          return;
+        }
+        if (outcome === 'dispatch-failure') {
+          expect(mockSession.sendTurn).toHaveBeenCalledOnce();
+          expect(mockRuntimeLogger.error.mock.calls.some((call) => String(call[1]).includes('continuation abandoned'))).toBe(true);
+          expect(state.pendingPolls.questions.has(chatJid)).toBe(false);
+          expect(db.raw.prepare('SELECT map_key FROM pending_polls WHERE map_key = ?').get(chatJid)).toBeUndefined();
+          await vi.advanceTimersByTimeAsync(10_000);
+          expect(mockSession.sendTurn).toHaveBeenCalledOnce();
+          return;
+        }
+        if (questionCount === 1) {
+          expect(mockRuntimeLogger.error.mock.calls.filter((call) => String(call[1]).includes('continue') || String(call[1]).includes('dispatch'))).toEqual([]);
+          expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+          expect(String((mockSession.sendTurn.mock.calls[0] as unknown as [unknown])[0])).toContain('A: A');
+          expect(db.raw.prepare('SELECT map_key FROM pending_polls WHERE map_key = ?').get(chatJid)).toBeUndefined();
+        } else {
+          expect(mockSession.sendTurn).not.toHaveBeenCalled();
+          const after = db.raw.prepare('SELECT payload FROM pending_polls WHERE map_key = ?').get(chatJid)!;
+          expect(JSON.parse(after.payload as string).answersCollected).toEqual({ 0: 'A' });
+        }
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(mockSession.sendTurn).toHaveBeenCalledTimes(questionCount === 1 ? 1 : 0);
+      } finally {
+        state.pollPersistence.stop();
+        vi.clearAllTimers();
+        db.close();
+        vi.useRealTimers();
+      }
+    });
+
+    it.each(['recover', 'valid', 'corrupt', 'exhaust', 'shutdown'] as const)('poll startup read recovery: %s preserves queued decisions', async (outcome) => {
+      vi.useFakeTimers();
+      const db = makeRealDb();
+      const { messenger } = makeMessenger();
+      const mapKey = 'startup-askuser';
+      insertRow(db, mapKey, 'startup@g.us', Date.now() + 600_000, buildPayload({
+        chatJid: 'startup@g.us', source: 'askuser', mode: 'textFallback', createdAt: Date.now(),
+        questions: ['First', 'Second'].map((question) => ({
+          question, header: 'Choice', options: [{ label: 'A', description: '' }], multiSelect: false,
+        })),
+      }));
+      db.raw.exec(`CREATE TABLE pending_poll_decisions (
+        map_key TEXT NOT NULL, question_index INTEGER NOT NULL, selected_options TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')), via TEXT NOT NULL,
+        PRIMARY KEY (map_key, question_index)
+      )`);
+      // Recovery must distinguish a consumed answer from input retained for correction.
+      db.raw.prepare('INSERT INTO pending_poll_decisions (map_key, question_index, selected_options, via) VALUES (?, 0, ?, ?)')
+        .run(mapKey, outcome === 'valid' ? '["A"]' : '[]', 'console');
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as {
+        rehydratePendingPolls(): Promise<void>;
+        consumeQueuedPollDecisions(): Promise<void>;
+        pendingPolls: { questions: Map<string, PendingPollQuestion> };
+        offlineDecisionRetry: { healthDetails(): { attempts: number; pending: boolean; exhausted: boolean } };
+        pollPersistence: { healthDetails(): { degraded: boolean } };
+      };
+      try {
+        const storedPayload = db.raw.prepare('SELECT payload FROM pending_polls WHERE map_key = ?').get(mapKey)!.payload;
+        if (outcome === 'corrupt') db.raw.prepare('UPDATE pending_polls SET payload = ? WHERE map_key = ?').run('{invalid private answer', mapKey);
+        else db.raw.exec('ALTER TABLE pending_polls RENAME TO temporarily_unreadable_polls');
+        await state.rehydratePendingPolls();
+        await state.consumeQueuedPollDecisions();
+        expect(db.raw.prepare('SELECT count(*) AS n FROM pending_poll_decisions').get()?.n).toBe(1);
+        expect(state.pendingPolls.questions.size).toBe(0);
+        expect(state.pollPersistence.healthDetails().degraded).toBe(true);
+        expect(state.offlineDecisionRetry.healthDetails()).toMatchObject({ pending: true, attempts: 0 });
+        if (outcome === 'shutdown') await runtime.shutdown();
+        if (outcome === 'corrupt') db.raw.prepare('UPDATE pending_polls SET payload = ? WHERE map_key = ?').run(storedPayload, mapKey);
+        else if (outcome !== 'exhaust') db.raw.exec('ALTER TABLE temporarily_unreadable_polls RENAME TO pending_polls');
+        await vi.advanceTimersByTimeAsync(outcome === 'exhaust' ? 180_000 : 5_000);
+        expect(db.raw.prepare('SELECT count(*) AS n FROM pending_poll_decisions').get()?.n).toBe(outcome === 'valid' ? 0 : 1);
+        if (outcome === 'recover' || outcome === 'valid' || outcome === 'corrupt') {
+          expect(state.pendingPolls.questions.get(mapKey)?.source).toBe('askuser');
+          expect(state.pollPersistence.healthDetails().degraded).toBe(false);
+          if (outcome === 'valid') {
+            expect(state.pendingPolls.questions.get(mapKey)?.answersCollected).toEqual({ 0: 'A' });
+            const stored = db.raw.prepare('SELECT payload FROM pending_polls WHERE map_key = ?').get(mapKey)!;
+            expect(JSON.parse(stored.payload as string).answersCollected).toEqual({ 0: 'A' });
+          }
+        } else {
+          expect(state.pendingPolls.questions.size).toBe(0);
+          expect(state.pollPersistence.healthDetails().degraded).toBe(true);
+          expect(state.offlineDecisionRetry.healthDetails()).toMatchObject(outcome === 'exhaust'
+            ? { pending: false, attempts: 5, exhausted: true }
+            : { pending: false, attempts: 0, exhausted: false });
+        }
+      } finally {
+        vi.clearAllTimers();
+        db.close();
+        vi.useRealTimers();
+      }
+    });
+
+    it.each(['delete', 'stage', 'vote', 'console'] as const)('poll terminal durability: %s waits for a durable state', async (operation) => {
+      vi.useFakeTimers();
+      const db = makeRealDb();
+      const { messenger } = makeMessenger();
+      const mapKey = 'terminal-durability';
+      const chatJid = 'terminal@g.us';
+      const source = operation === 'stage' ? 'askuser' : 'send_poll';
+      insertRow(db, mapKey, chatJid, Date.now() + 600_000, buildPayload({
+        chatJid, source, createdAt: Date.now(), resolution: 'first-vote-wins',
+        pollMessageIdToQuestionIndex: new Map([['TERMINAL_POLL', 0]]),
+        sentPollMessageIds: ['TERMINAL_POLL'],
+      }));
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as {
+        rehydratePendingPolls(): Promise<void>;
+        pendingPolls: { questions: Map<string, PendingPollQuestion> };
+        deletePendingPollQuestions(key: string): void;
+        stageResolvedAskUserPoll(key: string, pending: PendingPollQuestion): boolean;
+        handlePollVoteReceived(data: { pollMessageId: string; chatJid: string; voterJid: string; selectedOptions: string[] }): void;
+      };
+      let pending: PendingPollQuestion | undefined;
+      try {
+        await state.rehydratePendingPolls();
+        pending = state.pendingPolls.questions.get(mapKey)!;
+        expect(pending).toBeDefined();
+        db.raw.prepare('UPDATE pending_polls SET created_at = ?, tool_id = ? WHERE map_key = ?')
+          .run(pending.createdAt, pending.toolId, mapKey);
+        const resolve = vi.fn();
+        const reject = vi.fn();
+        pending.awaitResolve = resolve;
+        pending.awaitReject = reject;
+        db.raw.exec(`
+          CREATE TRIGGER reject_poll_update BEFORE UPDATE ON pending_polls BEGIN SELECT RAISE(FAIL, 'write blocked'); END;
+          CREATE TRIGGER reject_poll_insert BEFORE INSERT ON pending_polls BEGIN SELECT RAISE(FAIL, 'write blocked'); END;
+          CREATE TRIGGER reject_poll_delete BEFORE DELETE ON pending_polls BEGIN SELECT RAISE(FAIL, 'write blocked'); END;
+        `);
+        if (operation === 'delete') state.deletePendingPollQuestions(mapKey);
+        else if (operation === 'stage') expect(state.stageResolvedAskUserPoll(mapKey, pending)).toBe(false);
+        else if (operation === 'console') expect(await runtime.resolvePollDecisionFromConsole({
+          mapKey, questionIndex: 0, selectedOptions: ['A'],
+        })).toMatchObject({ ok: false, code: 'invalid' });
+        else state.handlePollVoteReceived({ pollMessageId: 'TERMINAL_POLL', chatJid, voterJid: chatJid, selectedOptions: ['A'] });
+        expect(resolve).not.toHaveBeenCalled();
+        expect(reject).not.toHaveBeenCalled();
+        expect(state.pendingPolls.questions.get(mapKey)).toBe(pending);
+        expect(pending.resolvedAt).toBeUndefined();
+        const stored = db.raw.prepare('SELECT payload FROM pending_polls WHERE map_key = ?').get(mapKey)!;
+        expect(JSON.parse(stored.payload as string).resolvedAt).toBeUndefined();
+        db.raw.exec('DROP TRIGGER reject_poll_update; DROP TRIGGER reject_poll_insert; DROP TRIGGER reject_poll_delete');
+        await vi.advanceTimersByTimeAsync(5_000);
+        if (operation === 'stage') expect(pending.resolvedAt).toBeTypeOf('number');
+        else {
+          expect(operation === 'delete' ? reject : resolve).toHaveBeenCalledTimes(1);
+          expect(state.pendingPolls.questions.has(mapKey)).toBe(false);
+        }
+      } finally {
+        if (pending?.softExpiryTimer) clearTimeout(pending.softExpiryTimer);
+        if (pending?.hardExpiryTimer) clearTimeout(pending.hardExpiryTimer);
+        db.close();
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    });
+
     it('rehydrate consolidates expired-during-downtime notices to one message per chat', async () => {
       const db = makeRealDb();
       const { messenger, sentMessages } = makeMessenger();

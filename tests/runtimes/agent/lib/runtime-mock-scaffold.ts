@@ -591,10 +591,11 @@ export function insertRow(
   hardClosesAt: number | null,
   payload: string,
 ): void {
+  const pending = JSON.parse(payload) as PendingPollQuestion;
   db.raw.prepare(
     `INSERT INTO pending_polls (map_key, chat_jid, tool_id, source, resolution, payload, created_at, closes_at, hard_closes_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(mapKey, chatJid, mapKey, 'askuser', 'first-vote-wins', payload, 1_700_000_000_000, hardClosesAt, hardClosesAt);
+  ).run(mapKey, chatJid, pending.toolId, pending.source, pending.resolution, payload, pending.createdAt, hardClosesAt, hardClosesAt);
 }
 
 /**

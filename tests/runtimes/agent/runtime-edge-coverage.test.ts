@@ -655,9 +655,13 @@ function makeRuntime(
 
 function installPollPersistenceStub(runtime: AgentRuntime) {
   const persistence = {
-    save: vi.fn(),
-    remove: vi.fn(),
+    save: vi.fn(() => ({ status: 'confirmed', durable: true })),
+    saveAndWait: vi.fn(async () => ({ status: 'confirmed', durable: true })),
+    remove: vi.fn(() => ({ status: 'confirmed', durable: true })),
     loadRows: vi.fn(() => []),
+    readRows: vi.fn(() => ({ status: 'available', rows: [] })),
+    isPending: vi.fn(() => false),
+    stop: vi.fn(),
   };
   view(runtime).pollPersistence = persistence;
   return persistence;
@@ -1113,7 +1117,7 @@ describe('AgentRuntime edge coverage', () => {
     await expect(promise).rejects.toThrow('Poll abort: MCP client disconnected');
     expect(messenger.clearPollTracking).toHaveBeenCalledWith('poll-dm-edge');
     expect(view(runtime).pendingPolls.questions.has(mapKey)).toBe(false);
-    expect(persistence.remove).toHaveBeenCalledWith(mapKey);
+    expect(persistence.remove).toHaveBeenCalledWith(mapKey, pending, expect.any(Function));
   });
 
   it('keeps the admin gate fail-closed for a group send_poll awaiter when admin metadata cannot be fetched (QR-036)', async () => {

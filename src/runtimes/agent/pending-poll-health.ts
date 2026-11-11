@@ -25,9 +25,8 @@
  *     drops, 'invalid' rows retained for operator retry) is preserved verbatim;
  *     this layers durable receipts and a scheduled retry on top.
  *
- * All DB writes are best-effort (swallow + log, never throw), mirroring
- * PendingPollPersistence's discipline — a receipt-table failure must never break
- * the consumption path or strand a queued decision.
+ * Receipt failures retain the existing consumption contract. Pending poll writes
+ * are verified separately by PendingPollPersistence before terminal effects.
  */
 import type { Database } from '../../core/database.ts';
 import { systemClock } from '../../lib/clock.ts';

@@ -889,11 +889,10 @@ export class AgentRuntime implements Runtime {
    *  as a boolean since that path uses a single global scope key. */
   private singleTurnHadToolActivity = false;
 
-  // Best-effort SQLite durability for pending polls (save/remove/loadRows + the
-  // swallowed-error counter surfaced in health). Initialized in the constructor —
-  // it needs the db. rehydratePendingPolls orchestrates loadRows() into the store +
-  // timers + downtime notify; settle/delete/expiry call save/remove.
+  // Poll durability owns verified writes and unresolved debt. Startup must obtain
+  // a readable snapshot before queued decisions can be consumed.
   private readonly pollPersistence: PendingPollPersistence;
+  private pendingPollRehydrationComplete = false;
   // CAR-20 (#2539): offline poll-decision retry owner + durable consumption receipts.
   private readonly offlineDecisionRetry = new OfflineDecisionRetryScheduler();
   private readonly consumptionReceipts!: ConsumptionReceiptRecorder;
@@ -2618,9 +2617,7 @@ export class AgentRuntime implements Runtime {
     this.queuedDecisionConsumer = new QueuedDecisionConsumer(
       db,
       this.consumptionReceipts,
-      () => this.offlineDecisionRetry.scheduleRetry(() => {
-        void this.consumeQueuedPollDecisions();
-      }),
+      () => this.schedulePollRecoveryRetry(),
     );
     this.messenger = messenger;
     this.instanceName = instanceName ?? 'personal';
@@ -6270,7 +6267,10 @@ export class AgentRuntime implements Runtime {
           advancePendingPollIndex(pendingPoll);
 
           if (Object.keys(pendingPoll.answersCollected).length >= pendingPoll.questions.length) {
-            this.stageResolvedAskUserPoll(mapKey, pendingPoll);
+            if (!await this.pollBridge.stageResolvedAskUserPollAndWait(mapKey, pendingPoll)) {
+              throw new Error('Poll answer durability is unavailable');
+            }
+            if (runtimeContext && this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(runtimeContext)) return;
             await this.completeConsumedPerChatInbound(
               mapKey,
               'poll_answer_collected',
@@ -6279,6 +6279,11 @@ export class AgentRuntime implements Runtime {
             );
             await this.injectPollAnswers(mapKey, pendingPoll, actorJid);
           } else {
+            if (!(await this.pollPersistence.saveAndWait(mapKey, pendingPoll)).durable
+              || this.pendingPolls.questions.get(mapKey) !== pendingPoll) {
+              throw new Error('Poll answer durability is unavailable');
+            }
+            if (runtimeContext && this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(runtimeContext)) return;
             log.info({
               mapKey,
               answered: Object.keys(pendingPoll.answersCollected).length,
@@ -7164,6 +7169,9 @@ export class AgentRuntime implements Runtime {
   private deletePendingPollQuestions(mapKey: string): void {
     const pending = this.pendingPolls.questions.get(mapKey);
     if (!pending) return;
+    if (!this.pollPersistence.remove(mapKey, pending, () => {
+      if (this.pendingPolls.questions.get(mapKey) === pending) this.deletePendingPollQuestions(mapKey);
+    }).durable) return;
     clearPendingPollTimers(pending);
     // Clean up suppression for askuser source
     if (pending.source === 'askuser' || pending.source === undefined) {
@@ -7177,7 +7185,6 @@ export class AgentRuntime implements Runtime {
       pending.awaitReject = undefined;
     }
     this.pendingPolls.questions.delete(mapKey);
-    this.pollPersistence.remove(mapKey);
   }
 
   // ---------------------------------------------------------------------------
@@ -7195,12 +7202,26 @@ export class AgentRuntime implements Runtime {
     return this.pollBridge.stageResolvedAskUserPoll(...args);
   }
 
-  private consumeQueuedPollDecisions(...args: Parameters<RuntimePollBridgeCoordinator['consumeQueuedPollDecisions']>): ReturnType<RuntimePollBridgeCoordinator['consumeQueuedPollDecisions']> {
-    return this.pollBridge.consumeQueuedPollDecisions(...args);
+  private schedulePollRecoveryRetry(): void {
+    if (this.shutdownRequested) return;
+    this.offlineDecisionRetry.scheduleRetry(async () => {
+      if (this.shutdownRequested) return;
+      if (!this.pendingPollRehydrationComplete) await this.rehydratePendingPolls();
+      if (!this.shutdownRequested) await this.consumeQueuedPollDecisions();
+    });
   }
 
-  private rehydratePendingPolls(...args: Parameters<RuntimePollBridgeCoordinator['rehydratePendingPolls']>): ReturnType<RuntimePollBridgeCoordinator['rehydratePendingPolls']> {
-    return this.pollBridge.rehydratePendingPolls(...args);
+  private async consumeQueuedPollDecisions(): Promise<void> {
+    // An unreadable poll table is not evidence that queued answers are obsolete.
+    if (!this.pendingPollRehydrationComplete) {
+      this.schedulePollRecoveryRetry();
+      return;
+    }
+    await this.pollBridge.consumeQueuedPollDecisions();
+  }
+
+  private async rehydratePendingPolls(): Promise<void> {
+    this.pendingPollRehydrationComplete = await this.pollBridge.rehydratePendingPolls();
   }
 
   private startPendingPollExpiry(...args: Parameters<RuntimePollBridgeCoordinator['startPendingPollExpiry']>): ReturnType<RuntimePollBridgeCoordinator['startPendingPollExpiry']> {
@@ -8098,6 +8119,8 @@ export class AgentRuntime implements Runtime {
     let singletonSessionShutdownFailed = false;
     let preserveRuntimeTurnState = false;
     this.shutdownRequested = true;
+    this.pollPersistence.stop();
+    this.offlineDecisionRetry.clear();
     log.info({
       instanceName: this.instanceName,
       sessionScope: this.sessionScope,

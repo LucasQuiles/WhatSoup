@@ -149,7 +149,7 @@ export class RuntimePollBridgeCoordinator {
     if (current === pending) {
       this.host.deletePendingPollQuestions(mapKey);
     } else if (current === undefined) {
-      this.host.pollPersistence.remove(mapKey);
+      this.host.pollPersistence.remove(mapKey, pending);
     }
     this.host.getQueueForChat(pending.chatJid, mapKey)?.setPollPending(false);
     this.host.sendDirect(
@@ -166,8 +166,26 @@ export class RuntimePollBridgeCoordinator {
   stageResolvedAskUserPoll(
     mapKey: string,
     pending: PendingPollQuestion,
-  ): void {
-    pending.resolvedAt ??= Date.now();
+    onDurable?: () => void,
+  ): boolean {
+    if (this.host.pendingPolls.questions.get(mapKey) !== pending) return false;
+    const resolvedAt = pending.resolvedAt ?? Date.now();
+    if (!this.host.pollPersistence.save(mapKey, { ...pending, resolvedAt }, () => {
+      if (pending.resolvedAt === undefined && this.stageResolvedAskUserPoll(mapKey, pending, onDurable)) onDurable?.();
+    }).durable) return false;
+    return this.finishResolvedAskUserPoll(mapKey, pending, resolvedAt);
+  }
+
+  async stageResolvedAskUserPollAndWait(mapKey: string, pending: PendingPollQuestion): Promise<boolean> {
+    if (this.host.pendingPolls.questions.get(mapKey) !== pending) return false;
+    const resolvedAt = pending.resolvedAt ?? Date.now();
+    const result = await this.host.pollPersistence.saveAndWait(mapKey, { ...pending, resolvedAt });
+    return result.durable && this.finishResolvedAskUserPoll(mapKey, pending, resolvedAt);
+  }
+
+  private finishResolvedAskUserPoll(mapKey: string, pending: PendingPollQuestion, resolvedAt: number): boolean {
+    if (this.host.pendingPolls.questions.get(mapKey) !== pending) return false;
+    pending.resolvedAt = resolvedAt;
     clearPendingPollTimers(pending);
     const connection = this.host.messenger as ConnectionManager;
     if (typeof connection.clearPollTracking === 'function') {
@@ -175,8 +193,8 @@ export class RuntimePollBridgeCoordinator {
         connection.clearPollTracking(pollMessageId);
       }
     }
-    this.host.pollPersistence.save(mapKey, pending);
     this.host.getQueueForChat(pending.chatJid, mapKey)?.setPollPending(false);
+    return true;
   }
 
   /**
@@ -187,8 +205,8 @@ export class RuntimePollBridgeCoordinator {
    * message sent to the originating chat (best-effort via outbound queue) and
    * are deleted from the table.
    *
-   * Persistence errors are logged and swallowed; rehydration always succeeds
-   * structurally even if some rows are unreadable.
+   * An unreadable snapshot returns false; the runtime retains queued decisions
+   * and uses its bounded startup retry before consuming them.
    */
   /**
    * D-4 v1.1: consume console decisions that were queued durably while the
@@ -209,9 +227,11 @@ export class RuntimePollBridgeCoordinator {
     });
   }
 
-  async rehydratePendingPolls(): Promise<void> {
-    const rows = this.host.pollPersistence.loadRows();
-    if (rows.length === 0) return;
+  async rehydratePendingPolls(): Promise<boolean> {
+    const persisted = this.host.pollPersistence.readRows();
+    if (persisted.status === 'unavailable') return false;
+    const rows = persisted.rows;
+    if (rows.length === 0) return true;
 
     const now = Date.now();
     let restored = 0;
@@ -224,7 +244,7 @@ export class RuntimePollBridgeCoordinator {
     for (const row of rows) {
       try {
         if (row.hard_closes_at !== null && row.hard_closes_at <= now) {
-          this.host.pollPersistence.remove(row.map_key);
+          this.host.pollPersistence.remove(row.map_key, { createdAt: row.created_at, toolId: row.tool_id });
           expiredByChat.set(row.chat_jid, (expiredByChat.get(row.chat_jid) ?? 0) + 1);
           expired += 1;
           continue;
@@ -232,7 +252,7 @@ export class RuntimePollBridgeCoordinator {
         const serialized = JSON.parse(row.payload) as SerializedPendingPoll;
         const pending = deserializePendingPoll(serialized);
         if (pending.source === 'askuser' && pending.resolvedAt !== undefined) {
-          this.host.pollPersistence.remove(row.map_key);
+          this.host.pollPersistence.remove(row.map_key, pending);
           interruptedContinuationsByChat.set(
             row.chat_jid,
             (interruptedContinuationsByChat.get(row.chat_jid) ?? 0) + 1,
@@ -242,9 +262,9 @@ export class RuntimePollBridgeCoordinator {
         this.host.pendingPolls.questions.set(row.map_key, pending);
         this.startPendingPollExpiry(row.map_key, pending);
         restored += 1;
-      } catch (err) {
+      } catch {
         this.host.pollPersistence.errors += 1;
-        log.error({ err, mapKey: row.map_key }, 'rehydratePendingPolls: row deserialize failed; skipping');
+        log.error({ cause: 'poll restore failed' }, 'rehydratePendingPolls: row restore failed; skipping');
       }
     }
     for (const [chatJid, count] of expiredByChat) {
@@ -261,6 +281,7 @@ export class RuntimePollBridgeCoordinator {
         interruptedContinuationChats: interruptedContinuationsByChat.size,
       }, 'rehydratePendingPolls: completed');
     }
+    return true;
   }
 
   /**
@@ -367,7 +388,14 @@ export class RuntimePollBridgeCoordinator {
       log.debug({ mapKey, reason }, 'settlePoll called but poll already settled or removed');
       return;
     }
-    pending.resolvedAt = Date.now();
+    const askUserContinuation = pending.source === 'askuser' || pending.source === undefined;
+    const resolvedAt = Date.now();
+    const resume = () => this.settlePoll(mapKey, pending, reason, answer);
+    const persistence = askUserContinuation
+      ? this.host.pollPersistence.save(mapKey, { ...pending, resolvedAt }, resume)
+      : this.host.pollPersistence.remove(mapKey, pending, resume);
+    if (!persistence.durable) return;
+    pending.resolvedAt = resolvedAt;
 
     // Clear timers
     if (pending.softExpiryTimer) { clearTimeout(pending.softExpiryTimer); pending.softExpiryTimer = undefined; }
@@ -394,16 +422,7 @@ export class RuntimePollBridgeCoordinator {
       pending.awaitReject = undefined;
     }
 
-    const askUserContinuation = pending.source === 'askuser' || pending.source === undefined;
-    if (askUserContinuation) {
-      // Retain the resolved answer in memory + SQLite until the continuation
-      // has crossed the provider boundary. A crash or failed source
-      // finalization must not turn a successfully collected vote into silence.
-      this.host.pollPersistence.save(mapKey, pending);
-    } else {
-      // send_poll awaiters were settled above and have no provider continuation.
-      this.host.deletePendingPollQuestions(mapKey);
-    }
+    if (!askUserContinuation) this.host.deletePendingPollQuestions(mapKey);
 
     // AskUser: inject answer into session (treat undefined source as 'askuser' for legacy compat)
     if (askUserContinuation) {
@@ -925,6 +944,10 @@ export class RuntimePollBridgeCoordinator {
     if (!pending) {
       return { ok: false, error: 'pending poll not found (already resolved or expired)', code: 'not_found' };
     }
+    if (pending.answersCollected[decision.questionIndex] !== undefined
+        && this.host.pollPersistence.isPending(decision.mapKey)) {
+      return { ok: false, error: 'poll answer durability is unavailable', code: 'invalid' };
+    }
     if (pending.mode === 'textFallback') {
       // v1.1: console decisions for text-fallback pendings mirror the typed-
       // answer path verbatim (answer collect → index advance → persistence →
@@ -946,16 +969,23 @@ export class RuntimePollBridgeCoordinator {
       removePollIdsForQuestion(pending, decision.questionIndex);
       pending.currentQuestionIndex = Math.max(pending.currentQuestionIndex, decision.questionIndex + 1);
       advancePendingPollIndex(pending);
-      this.host.pollPersistence.save(decision.mapKey, pending);
+      if (Object.keys(pending.answersCollected).length >= pending.questions.length) {
+        const actorJid = pending.adminJids?.values().next().value ?? pending.chatJid;
+        if (!this.stageResolvedAskUserPoll(decision.mapKey, pending, () => {
+          void this.injectPollAnswers(decision.mapKey, pending, actorJid).catch((err) => {
+            log.error({ err }, 'failed to continue the durable console poll answer');
+          });
+        })) {
+          return { ok: false, error: 'poll answer durability is unavailable', code: 'invalid' };
+        }
+        await this.injectPollAnswers(decision.mapKey, pending, actorJid);
+      } else if (!this.host.pollPersistence.save(decision.mapKey, pending).durable) {
+        return { ok: false, error: 'poll answer durability is unavailable', code: 'invalid' };
+      }
       log.info(
         { mapKey: decision.mapKey, questionIndex: decision.questionIndex, via: 'console' },
-        'text-fallback decision delivered from the console approval queue',
+        'text-fallback decision persisted from the console approval queue',
       );
-      if (Object.keys(pending.answersCollected).length >= pending.questions.length) {
-        this.stageResolvedAskUserPoll(decision.mapKey, pending);
-        const actorJid = pending.adminJids?.values().next().value ?? pending.chatJid;
-        await this.injectPollAnswers(decision.mapKey, pending, actorJid);
-      }
       return { ok: true };
     }
     if (pending.mode !== 'poll') {
@@ -993,6 +1023,9 @@ export class RuntimePollBridgeCoordinator {
     // answer actually landed before reporting delivery.
     if (pending.answersCollected[decision.questionIndex] === undefined) {
       return { ok: false, error: 'decision was not accepted (duplicate or raced resolution)', code: 'stale' };
+    }
+    if (this.host.pollPersistence.isPending(decision.mapKey)) {
+      return { ok: false, error: 'poll answer durability is unavailable', code: 'invalid' };
     }
     return { ok: true };
   }
@@ -1070,7 +1103,7 @@ export class RuntimePollBridgeCoordinator {
       }
 
       // A newer poll may already own the same mapKey/row. Never delete it.
-      if (!this.host.pendingPolls.questions.has(mapKey)) this.host.pollPersistence.remove(mapKey);
+      if (!this.host.pendingPolls.questions.has(mapKey)) this.host.pollPersistence.remove(mapKey, pending);
       log.info({ mapKey, chatJid: pending.chatJid, questionCount: pending.questions.length }, 'poll answers injected');
     } catch (err) {
       this.abandonPendingPollContinuation(mapKey, pending, err);
