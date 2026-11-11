@@ -15,8 +15,10 @@ Usage:
     whatsoup-db-snapshot.py rehearse --snapshot <file>
 
 `snapshot` writes `<stem>-<UTC>.snapshot.sqlite3` (mode 0600, fsynced), runs
-PRAGMA integrity_check on the copy, records per-table row counts, prunes to
-the newest N snapshots (default 7), and prints one JSON receipt on stdout.
+PRAGMA integrity_check on the copy, records per-table row counts, prunes that
+database's own series to the newest N snapshots (default 7), and prints one
+JSON receipt on stdout. Other databases' snapshots in the same out-root are
+never counted or pruned.
 
 The copy is switched to a rollback journal (`journal_mode=DELETE`) before it
 is published. The backup API copies the source header, so a live WAL source
@@ -39,6 +41,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -83,7 +86,15 @@ def emit(receipt: dict) -> None:
 def prune_snapshots(out_root: Path, stem: str, retain: int) -> list[str]:
     if retain <= 0:
         return []
-    snapshots = sorted(out_root.glob(f"{stem}-*.snapshot.sqlite3"))
+    # Count only this database's own series, matched literally. A glob built
+    # from the stem would read "*" or "[...]" in a database name as a pattern,
+    # and a bare prefix would also catch another database whose name starts
+    # with this stem ("bot" and "bot-archive"). The fixed-width UTC stamp keeps
+    # name order chronological.
+    own_series = re.compile(re.escape(stem) + r"-\d{8}T\d{6}Z\.snapshot\.sqlite3")
+    snapshots = sorted(
+        path for path in out_root.iterdir() if own_series.fullmatch(path.name) and path.is_file()
+    )
     doomed = snapshots[:-retain] if len(snapshots) > retain else []
     for path in doomed:
         path.unlink()
