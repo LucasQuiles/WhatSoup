@@ -19,11 +19,13 @@ checks; Node 25 runs the full non-coverage compatibility suite and console build
 Affected compatibility runs use the selected root tests on Node 25.
 
 PR metadata has its own `pr metadata` workflow, including title/body edits.
-Quality omits duplicate metadata execution and its edit trigger. Both new required
-contexts passed before the authorized 2026-11-10 protection update and clean live
-drift check; [Testing paths](../testing.md) links those checks. This avoids restarting
-application suites for metadata edits. Verify current protection before merging;
-local YAML validation does not establish the hosted setting. Existing CodeQL and
+Quality omits duplicate metadata execution and its edit trigger. The metadata
+check has passed, but its required-context activation remains pending. The
+[protection migration](../testing.md) records
+the live setting, target and authorized sequence: qualify the candidate, enable
+the requirement, verify the live readback, then merge. This avoids restarting
+application suites for metadata edits. Local YAML validation does not establish
+the hosted setting. Existing CodeQL and
 independent review requirements remain in place. Hosted timing gains require
 measurements after activation.
 

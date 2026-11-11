@@ -87,8 +87,9 @@ sequence is executed and verified, the migration remains incomplete.
 
 Quality omits duplicate
 metadata execution and title/body edit triggers; the metadata workflow checks
-PR edits without restarting application suites. The metadata producer has a
-merge-group path that validates the event without pretending it has a PR body.
+PR edits without restarting application suites. The metadata workflow also
+triggers for merge groups, but its PR metadata guard is skipped for those events;
+that path does not validate merge-group metadata.
 Repository-wide merge-queue support remains unqualified: the required private
 scanner does not admit `merge_group` events, and CodeQL's behavior on queue refs
 has not been qualified. No merge queue is active in the observed ruleset. Keep it
