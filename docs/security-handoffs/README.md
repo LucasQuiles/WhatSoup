@@ -11,3 +11,4 @@ Handoff index (each linked record owns its status and remaining acceptance work)
 - [2026-07-23-fleet-audit-status.md](2026-07-23-fleet-audit-status.md) - Exact source objects, evidence anchors, defect disposition, publication constraints, and residual cross-repository gates for Tasks 2, 3, 4, and 6.
 - [2026-07-19-egress-allowlist-defense-in-depth.md](2026-07-19-egress-allowlist-defense-in-depth.md) - Egress threat model, proxy limitations and remaining isolation work.
 - [Insecure-tempfile branch triage](insecure-tempfile/branch-triage-notes.md) - Supporting branch/evidence notes; verify their recorded scope before acting on a disposition.
+- [send-approval-activation.md](send-approval-activation.md) - Send-authority activation remains blocked pending protected authority and host-specific isolation evidence; the Linux launcher prototype does not qualify a macOS pilot.

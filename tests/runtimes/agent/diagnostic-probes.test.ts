@@ -228,8 +228,9 @@ describe('buildDiagnosticProbes', () => {
     }));
     const controller = new AbortController();
     const diagnostic = map['primary-model-usability']!(controller.signal);
-    await Promise.resolve();
-    expect(gate.snapshot()).toMatchObject({ active: true, pending: 1 });
+    await vi.waitFor(() => {
+      expect(gate.snapshot()).toMatchObject({ active: true, pending: 1 });
+    });
 
     controller.abort();
     await expect(diagnostic).resolves.toMatchObject({

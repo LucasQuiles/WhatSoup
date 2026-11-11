@@ -7,12 +7,14 @@ import {
   symlinkSync,
   unlinkSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   applyRequiredDeny,
   defaultSettingsJson,
+  isValidPermissionsShape,
   type PermissionsSettings,
 } from './settings-template.ts';
+import type { M365MutationPolicy } from './m365-bridge-policy.ts';
 import { toConversationKey } from './conversation-key.ts';
 import { JID_PERSONAL, JID_LID, JID_GROUP } from './jid-constants.ts';
 import {
@@ -21,9 +23,11 @@ import {
   type OpencodeProviderConfig,
 } from './provider-mcp-config.ts';
 import { createChildLogger } from '../logger.ts';
+import { isRecord } from '../lib/type-guards.ts';
 import {
   assertPrivateDirectorySync,
   ensurePrivateDirectorySync,
+  readPrivateFileSync,
   writePrivateFileSync,
   writePrivateJsonMarkerSync,
 } from '../lib/private-fs.ts';
@@ -124,7 +128,7 @@ function writeWorkspaceMcpConfig(
 
 /**
  * Write sandbox-policy.json and settings.json into an existing .claude/ directory.
- * Both files are always overwritten (deterministic).
+ * Refreshes managed hooks while preserving existing permissions and other settings.
  *
  * @param claudeDir  Absolute path to the .claude/ directory (must already exist).
  * @param policy     The sandbox policy object to serialise as sandbox-policy.json.
@@ -145,7 +149,16 @@ export function writeSandboxArtifacts(
   postToolUseLogHookPath?: string,
 ): void {
   try {
-    const policyPath = join(claudeDir, 'sandbox-policy.json');
+    const root = resolve(claudeDir);
+    const settingsPath = join(root, 'settings.json');
+    const observed = readPrivateFileSync(settingsPath, {
+      label: 'settings.json', maxBytes: 1024 * 1024, observation: { root },
+    });
+    const existing = observed === null ? {} : JSON.parse(observed.bytes.toString('utf8'));
+    if (!isRecord(existing)) {
+      throw new Error('settings.json must be an object to preserve existing restrictions');
+    }
+    const policyPath = join(root, 'sandbox-policy.json');
     writePrivateFileSync(policyPath, JSON.stringify(policy, null, 2));
 
     const hooks: Record<string, unknown> = {
@@ -166,12 +179,18 @@ export function writeSandboxArtifacts(
       hooks.PostToolUseFailure = [{ matcher: '', hooks: [{ type: 'command', command: postToolUseLogHookPath }] }];
     }
     if (postToolUseHooks.length > 0) hooks.PostToolUse = [{ matcher: '', hooks: postToolUseHooks }];
-    const settings = { hooks };
-    writePrivateFileSync(join(claudeDir, 'settings.json'), JSON.stringify(settings, null, 2));
+    writePrivateJsonMarkerSync(settingsPath, { ...existing, hooks }, { label: 'settings.json' });
   } catch (err) {
     log.error({ err, claudeDir }, 'failed to write sandbox artifacts');
     throw err;
   }
+}
+
+function readablePermissionDenies(settings: Record<string, unknown>): string[] {
+  const permissions = settings.permissions;
+  return isRecord(permissions) && Array.isArray(permissions.deny)
+    ? permissions.deny.filter((entry): entry is string => typeof entry === 'string')
+    : [];
 }
 
 /**
@@ -184,16 +203,22 @@ export function writeSandboxArtifacts(
 export function writePermissionsSettings(
   claudeDir: string,
   settings: PermissionsSettings,
+  m365MutationPolicy?: M365MutationPolicy,
 ): void {
   try {
     ensurePrivateDirectorySync(claudeDir);
     const settingsPath = join(claudeDir, 'settings.json');
 
     let existing: Record<string, unknown> = {};
+    let repairExisting = false;
     if (existsSync(settingsPath)) {
       try {
-        existing = JSON.parse(readFileSync(settingsPath, 'utf8'));
+        const parsed: unknown = JSON.parse(readFileSync(settingsPath, 'utf8'));
+        if (!isRecord(parsed)) throw new Error('settings.json must be an object');
+        existing = parsed;
+        repairExisting = Object.hasOwn(existing, 'permissions') && !isValidPermissionsShape(existing);
       } catch (err) {
+        repairExisting = true;
         // Corrupt file — overwrite entirely (destructive: customizations are lost)
         log.warn({ err, settingsPath }, 'settings.json unreadable; overwriting with generated settings');
       }
@@ -201,7 +226,9 @@ export function writePermissionsSettings(
 
     const mergedPermissions = {
       ...settings.permissions,
-      deny: applyRequiredDeny(settings.permissions.deny),
+      deny: repairExisting
+        ? applyRequiredDeny([...settings.permissions.deny, ...readablePermissionDenies(existing)])
+        : applyRequiredDeny(settings.permissions.deny, m365MutationPolicy),
     };
     const merged: Record<string, unknown> = { ...existing, permissions: mergedPermissions };
     if (settings.enabledPlugins !== undefined) {
@@ -260,12 +287,12 @@ export function ensurePermissionsSettings(
   claudeDir: string,
   type: string,
   enabledPlugins?: Record<string, boolean>,
-  opts?: { hasSandbox?: boolean },
+  opts?: { hasSandbox?: boolean; m365MutationPolicy?: M365MutationPolicy },
 ): void {
   try {
     if (type !== 'agent') return;
 
-    const defaults = defaultSettingsJson(type);
+    const defaults = defaultSettingsJson(type, opts?.m365MutationPolicy);
     if (!defaults) return;
 
     ensurePrivateDirectorySync(claudeDir);
@@ -274,6 +301,7 @@ export function ensurePermissionsSettings(
     if (existsSync(settingsPath)) {
       try {
         const existing = JSON.parse(readFileSync(settingsPath, 'utf8'));
+        if (!isRecord(existing)) throw new Error('settings.json must be an object');
         // Reconcile an orphaned fail-closed agent-sandbox PreToolUse hook: when the
         // instance has no sandbox config, writeSandboxArtifacts never runs, so a hook
         // left over from a prior sandboxed config is unmanaged and bricks every tool
@@ -288,17 +316,12 @@ export function ensurePermissionsSettings(
           settingsChanged = true;
         }
 
-        if (existing.permissions && typeof existing.permissions === 'object') {
-          const permissions = existing.permissions as Record<string, unknown>;
-          const validPermissions = Array.isArray(permissions.allow)
-            && permissions.allow.every((entry) => typeof entry === 'string')
-            && Array.isArray(permissions.deny)
-            && permissions.deny.every((entry) => typeof entry === 'string')
-            && permissions.defaultMode === 'bypassPermissions';
-          if (validPermissions) {
-            const currentDeny = permissions.deny as string[];
-            const repairedDeny = applyRequiredDeny(currentDeny);
-            if (repairedDeny.length !== currentDeny.length) {
+        if (Object.hasOwn(existing, 'permissions')) {
+          if (isValidPermissionsShape(existing)) {
+            const permissions = existing.permissions;
+            const currentDeny = permissions.deny;
+            const repairedDeny = applyRequiredDeny(currentDeny, opts?.m365MutationPolicy);
+            if (repairedDeny.length !== currentDeny.length || repairedDeny.some((entry, index) => entry !== currentDeny[index])) {
               existing.permissions = {
                 ...permissions,
                 deny: repairedDeny,
@@ -308,6 +331,7 @@ export function ensurePermissionsSettings(
           } else {
             existing.permissions = {
               ...defaults.permissions,
+              deny: applyRequiredDeny(readablePermissionDenies(existing)),
             };
             settingsChanged = true;
           }
@@ -323,7 +347,10 @@ export function ensurePermissionsSettings(
       } catch (err) {
         // Corrupt file — overwrite with defaults (destructive: customizations are lost)
         log.warn({ err, settingsPath }, 'settings.json unreadable; overwriting with default permissions');
-        const out: Record<string, unknown> = { ...defaults };
+        const out: Record<string, unknown> = {
+          ...defaults,
+          permissions: { ...defaults.permissions, deny: applyRequiredDeny([]) },
+        };
         if (enabledPlugins) out.enabledPlugins = enabledPlugins;
         writePrivateFileSync(settingsPath, JSON.stringify(out, null, 2));
       }
@@ -342,7 +369,7 @@ export function ensurePermissionsSettings(
 
 /**
  * Provision (or re-provision) a workspace directory. Returns the WhatSoup socket path.
- * Deterministic — always overwrites existing files.
+ * Refreshes managed artifacts while preserving existing permission restrictions.
  */
 export function provisionWorkspace(opts: ProvisionOptions): string {
   const { workspacePath, instanceCwd, provider = 'claude-cli', providerConfig, sandbox, hookPath, pollLintHookPath, postToolUseLogHookPath, mcpServerPath, sendMediaServerPath } = opts;

@@ -38,6 +38,11 @@ function hangingFetch() {
     }));
 }
 
+const fakeProviderBinaryIdentity = (binary: string) => ({
+  resolvedPath: binary,
+  sha256: 'a'.repeat(64),
+});
+
 describe('primary usability timeout cause (#3557)', () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -48,7 +53,8 @@ describe('primary usability timeout cause (#3557)', () => {
       const stages: PrimaryModelProbeStage[] = [];
       const adapters = createPrimaryModelProbeAdapters(undefined, {
         getProviderBinary: vi.fn(() => 'claude'),
-        ensureClaudeFileStoreCredential: vi.fn(() => ({ outcome: 'healed' as const })),
+        resolveProviderBinaryIdentity: fakeProviderBinaryIdentity,
+        ensureClaudeFileStoreCredential: vi.fn(() => ({ outcome: 'skipped-cli-reads-own-item' as const })),
         probeBinaryCommand: vi.fn(async () => ({ status: 'ok' as const, output: 'OK' })),
       });
 
@@ -66,6 +72,7 @@ describe('primary usability timeout cause (#3557)', () => {
       const stages: PrimaryModelProbeStage[] = [];
       const adapters = createPrimaryModelProbeAdapters(undefined, {
         getProviderBinary: vi.fn(() => 'opencode'),
+        resolveProviderBinaryIdentity: fakeProviderBinaryIdentity,
         probeBinaryCommand: vi.fn(async () => ({ status: 'ok' as const, output: 'OK' })),
         providerExecutionGate: new ProviderExecutionGate(),
       });
@@ -103,7 +110,8 @@ describe('primary usability timeout cause (#3557)', () => {
       vi.useFakeTimers();
       const adapters = createPrimaryModelProbeAdapters(undefined, {
         getProviderBinary: vi.fn(() => 'claude'),
-        ensureClaudeFileStoreCredential: vi.fn(() => ({ outcome: 'healed' as const })),
+        resolveProviderBinaryIdentity: fakeProviderBinaryIdentity,
+        ensureClaudeFileStoreCredential: vi.fn(() => ({ outcome: 'skipped-cli-reads-own-item' as const })),
         probeBinaryCommand: hangingBinaryCommand(),
       });
 
@@ -136,9 +144,10 @@ describe('primary usability timeout cause (#3557)', () => {
         const probeBinaryCommand = hangingBinaryCommand();
         const adapters = createPrimaryModelProbeAdapters(undefined, {
           getProviderBinary: vi.fn(() => 'claude'),
+          resolveProviderBinaryIdentity: fakeProviderBinaryIdentity,
           ensureClaudeFileStoreCredential: vi.fn(() => {
             monotonicMs += 250;
-            return { outcome: 'healed' as const };
+            return { outcome: 'skipped-cli-reads-own-item' as const };
           }),
           probeBinaryCommand,
         });
@@ -167,6 +176,7 @@ describe('primary usability timeout cause (#3557)', () => {
       const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
       const adapters = createPrimaryModelProbeAdapters(undefined, {
         getProviderBinary: vi.fn(() => 'opencode'),
+        resolveProviderBinaryIdentity: fakeProviderBinaryIdentity,
         probeBinaryCommand,
         providerExecutionGate: gate,
       });
@@ -231,7 +241,8 @@ describe('primary usability timeout cause (#3557)', () => {
       const probeBinaryCommand = hangingBinaryCommand();
       const adapters = createPrimaryModelProbeAdapters(undefined, {
         getProviderBinary: vi.fn(() => 'claude'),
-        ensureClaudeFileStoreCredential: vi.fn(() => ({ outcome: 'healed' as const })),
+        resolveProviderBinaryIdentity: fakeProviderBinaryIdentity,
+        ensureClaudeFileStoreCredential: vi.fn(() => ({ outcome: 'skipped-cli-reads-own-item' as const })),
         probeBinaryCommand,
       });
 
@@ -328,7 +339,8 @@ describe('primary usability timeout cause (#3557)', () => {
       vi.useFakeTimers();
       const adapters = createPrimaryModelProbeAdapters(undefined, {
         getProviderBinary: vi.fn(() => 'claude'),
-        ensureClaudeFileStoreCredential: vi.fn(() => ({ outcome: 'healed' as const })),
+        resolveProviderBinaryIdentity: fakeProviderBinaryIdentity,
+        ensureClaudeFileStoreCredential: vi.fn(() => ({ outcome: 'skipped-cli-reads-own-item' as const })),
         probeBinaryCommand: vi.fn(async () => ({ status: 'ok' as const, output: 'OK' })),
       });
 

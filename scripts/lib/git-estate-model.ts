@@ -57,12 +57,15 @@ export interface WorktreeStatus {
 }
 
 export interface EstateWorktree extends WorktreePorcelain {
+  operationBranch: string | null;
   primary: boolean;
   status: WorktreeStatus | null;
 }
 
 export interface EstateBranch {
   name: string;
+  /** Unambiguous local name; `name` retains its existing baseline identity. */
+  scopeName: string;
   oid: string;
   upstream: string | null;
   ahead: number;
@@ -73,6 +76,7 @@ export interface EstateBranch {
 export interface EstateStash {
   oid: string;
   parents: string[];
+  branch: string | null;
 }
 
 export interface EstateFinding {
@@ -101,9 +105,19 @@ export interface ScanError {
   kind:
     | 'worktree_status_failed'
     | 'worktree_status_rescan_failed'
+    | 'operation_branch_attribution_failed'
     | 'topology_rescan_failed';
   message: string;
   worktree?: string;
+}
+
+export interface EstateScanCapture {
+  commonDir: string;
+  worktrees: Array<WorktreePorcelain & { operationBranch: string | null }>;
+  statusHashes: Record<string, string>;
+  branchHashes: Record<string, string>;
+  refHashes: Record<string, string>;
+  stashHash: string;
 }
 
 export interface EstateSnapshotWithoutHash {
@@ -111,10 +125,13 @@ export interface EstateSnapshotWithoutHash {
   commonDir: string;
   baselinePath: string;
   invokingWorktreePath: string;
+  statusScope: 'pusher' | 'repository';
   topologyFingerprintStart: string;
   topologyFingerprintEnd: string;
   statusFingerprintStart: string;
   statusFingerprintEnd: string;
+  consistencyStart: EstateScanCapture;
+  consistencyEnd: EstateScanCapture | null;
   incomplete: boolean;
   racing: boolean;
   worktrees: EstateWorktree[];
@@ -160,6 +177,15 @@ export interface GuardDecision {
   blocked: boolean;
   newConflictIds: string[];
   newCriticalFindingIds: string[];
+  /** Pre-commit lists all actionable findings here but always has blocked=false. */
+  blockingFindingIds: string[];
+  /** Empty in pre-commit, which retains repository-wide finding warnings. */
+  advisoryFindingIds: string[];
+  scopedRacing: boolean;
+  scopedRacingWorktrees: string[];
+  scopedRacingBranches: string[];
+  advisoryRacingWorktrees: string[];
+  advisoryRacingBranches: string[];
   countGrowth: {
     worktrees: number;
     branches: number;

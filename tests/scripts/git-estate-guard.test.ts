@@ -8,7 +8,6 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import {
   isFullObjectId,
@@ -18,239 +17,207 @@ import {
   parseStatus,
   parseWorktreePorcelain,
 } from '../../scripts/git-estate-guard.ts';
-import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import {
-  baselineChangeEnvironment,
-  finalClosureBaselineChangeEnvironment,
-  gitCallLogEnvironment,
-  gitInspectionFailureEnvironment,
-  readGitCalls,
-  shellQuote,
-  stashChangeEnvironment,
+  repoRoot, tmp, STATUS_TIMEOUT_GIT_BUDGET_MS, STATUS_PROBE_HANG_SECONDS, ALL_TRACKED_XY,
+  EXPECTED_ORDINARY_XY, EXPECTED_RENAME_XY, EXPECTED_UNMERGED_XY, INVALID_RENAME_XY,
+  type SnapshotDocument, type GuardDocument, type BaselineWriteDocument,
+  type BaselineAcceptStashDocument, run, git, initRepo, snapshot,
+  expectOnlyNarrowBaselineFieldsChanged, shellQuote, statusRaceEnvironment,
+  statusOutputEnvironment, statusProbeHangEnvironment, worktreeOutputEnvironment,
+  gitCallLogEnvironment, gitInspectionFailureEnvironment, stashChangeEnvironment,
+  baselineChangeEnvironment, finalClosureBaselineChangeEnvironment, readGitCalls,
   statusConcurrencyEnvironment,
-  statusOutputEnvironment,
-  statusProbeHangEnvironment,
-  statusRaceEnvironment,
-  worktreeOutputEnvironment,
 } from '../helpers/git-estate-guard-fixtures.ts';
 import * as processLocks from '../../src/lib/process-lock.ts';
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const script = resolve(repoRoot, 'scripts/git-estate-guard.ts');
-const tmp = trackTmpDirs('');
-// #3488: the guard's default git budget (5 s) is tighter than vitest's 10 s
-// test timeout, so a git starved under host load failed as an exit-2
-// assertion. Give every guard subprocess a budget above the test timeout so
-// starvation surfaces as a runner timeout. Cases that need a tighter budget
-// still override it through `extraEnv`.
-const SUITE_GIT_TIMEOUT_MS = '20000';
-// #3561: the status-timeout cases shrink the ONE budget every guard git call
-// shares (gitTimeoutMs, scripts/git-estate-guard.ts:100-113, used by runGit and
-// runGitAsync), so it must still cover each real setup call under gate load.
-// 300 ms did not: a setup call died first and the snapshot became scan_failed.
-const STATUS_TIMEOUT_GIT_BUDGET_MS = 3_000;
-const STATUS_PROBE_HANG_SECONDS = 30;
-const STATUS_XY_CHARACTERS = ['.', 'M', 'T', 'A', 'D', 'R', 'C'] as const;
-const ALL_TRACKED_XY = STATUS_XY_CHARACTERS.flatMap((indexStatus) =>
-  STATUS_XY_CHARACTERS.map((worktreeStatus) => `${indexStatus}${worktreeStatus}`)
-);
-const EXPECTED_ORDINARY_XY = new Set([
-  '.M', '.T', '.A', '.D',
-  'M.', 'MM', 'MT', 'MD',
-  'T.', 'TM', 'TT', 'TD',
-  'A.', 'AM', 'AT', 'AD',
-  'D.',
-]);
-const EXPECTED_RENAME_XY = new Set([
-  'R.', 'RM', 'RT', 'RD',
-  'C.', 'CM', 'CT', 'CD',
-  '.R', '.C',
-]);
-const EXPECTED_UNMERGED_XY = new Set(['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU']);
-const INVALID_RENAME_XY = [
-  'RR', 'RC', 'CR', 'CC',
-  'MR', 'MC', 'TR', 'TC', 'AR', 'AC',
-] as const;
-
-interface CliResult {
-  status: number | null;
-  stdout: string;
-  stderr: string;
-}
-
-interface SnapshotDocument {
-  schemaVersion: 1;
-  command: 'snapshot';
-  exitCode: number;
-  snapshot: {
-    commonDir: string;
-    baselinePath: string;
-    snapshotHash: string;
-    incomplete: boolean;
-    racing: boolean;
-    worktrees: Array<{
-      path: string;
-      head: string | null;
-      primary: boolean;
-      detached: boolean;
-      locked: boolean;
-      prunable: boolean;
-      status: {
-        branchOid: string | null;
-        tracked: Array<{ path: string; xy: string }>;
-        untracked: string[];
-        conflicts: Array<{
-          path: string;
-          xy: string;
-          stageOids: [string, string, string];
-        }>;
-      } | null;
-    }>;
-    branches: Array<{
-      name: string;
-      oid: string;
-      upstream: string | null;
-      ahead: number;
-      behind: number;
-      gone: boolean;
-    }>;
-    stashes: Array<{ oid: string; parents: string[] }>;
-    findings: Array<{ id: string; kind: string }>;
-    errors: Array<{ kind: string; message: string }>;
-  };
-}
-
-interface GuardDocument {
-  schemaVersion: 1;
-  command: 'guard';
-  phase: 'pre-commit' | 'pre-push';
-  exitCode: number;
-  baseline: { state: 'valid' | 'missing' | 'malformed'; path: string };
-  decision: {
-    blocked: boolean;
-    newConflictIds: string[];
-    newCriticalFindingIds: string[];
-    countGrowth: { worktrees: number; branches: number };
-    newWorktreeIds: string[];
-    newBranchIds: string[];
-    exemptedWorktreeIds: string[];
-    exemptedBranchIds: string[];
-    warningCounts: Record<string, number>;
-  };
-  snapshot: SnapshotDocument['snapshot'] | null;
-}
-
-interface BaselineWriteDocument {
-  schemaVersion: 1;
-  command: 'baseline';
-  action: 'write';
-  exitCode: number;
-  baseline: {
-    path: string;
-    snapshotHash: string;
-    findingCount: number;
-    worktreeCount: number;
-    branchCount: number;
-  } | null;
-}
-
-interface BaselineAcceptStashDocument {
-  schemaVersion: 1;
-  command: 'baseline';
-  action: 'accept-stash';
-  exitCode: number;
-  baseline: BaselineWriteDocument['baseline'];
-  acceptedStash?: {
-    oid: string;
-    findingId: string;
-    parentCount: number;
-  };
-  admission?: {
-    reason: string;
-    reasonSha256: string;
-  };
-}
-
-function run(
-  cwd: string,
-  args: string[],
-  extraEnv: NodeJS.ProcessEnv = {},
-): CliResult {
-  const proc = spawnSync(
-    process.execPath,
-    ['--disable-warning=ExperimentalWarning', '--experimental-strip-types', script, ...args],
-    {
-      cwd,
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        NO_COLOR: '1',
-        WHATSOUP_GIT_ESTATE_GIT_TIMEOUT_MS: SUITE_GIT_TIMEOUT_MS,
-        ...extraEnv,
-      },
-      maxBuffer: 16 * 1024 * 1024,
-    },
-  );
-  return {
-    status: proc.status,
-    stdout: proc.stdout ?? '',
-    stderr: proc.stderr ?? '',
-  };
-}
-
-function git(cwd: string, args: string[], expectedStatus = 0): string {
-  const proc = spawnSync('git', ['-C', cwd, ...args], {
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      GIT_AUTHOR_NAME: 'Estate Test',
-      GIT_AUTHOR_EMAIL: 'estate@example.test',
-      GIT_COMMITTER_NAME: 'Estate Test',
-      GIT_COMMITTER_EMAIL: 'estate@example.test',
-    },
-  });
-  expect(proc.status, proc.stderr).toBe(expectedStatus);
-  return proc.stdout.trim();
-}
-
-function initRepo(objectFormat: 'sha1' | 'sha256' = 'sha1'): { root: string; repo: string } {
-  const root = tmp.make('whatsoup-git-estate');
-  const repo = join(root, 'repo');
-  mkdirSync(repo);
-  git(repo, ['init', `--object-format=${objectFormat}`, '--initial-branch=main']);
-  writeFileSync(join(repo, 'tracked.txt'), 'base\n');
-  git(repo, ['add', 'tracked.txt']);
-  git(repo, ['commit', '-m', 'base']);
-  return { root, repo };
-}
-
-function snapshot(repo: string): SnapshotDocument {
-  const result = run(repo, ['snapshot', '--json']);
-  expect(result.status, result.stderr).toBe(0);
-  return JSON.parse(result.stdout) as SnapshotDocument;
-}
-
-function expectOnlyNarrowBaselineFieldsChanged(
-  beforeRaw: string,
-  afterRaw: string,
-  addedFindingId: string,
-): void {
-  const before = JSON.parse(beforeRaw) as Record<string, unknown>;
-  const after = JSON.parse(afterRaw) as Record<string, unknown>;
-  const expected = {
-    ...before,
-    findingIds: [...(before['findingIds'] as string[]), addedFindingId].sort(),
-    snapshotHash: after['snapshotHash'],
-    payloadHash: after['payloadHash'],
-  };
-  expect(after).toEqual(expected);
-  // The normal writer is canonical, so this also checks literal preservation
-  // of every unselected baseline field rather than only semantic equality.
-  expect(afterRaw).toBe(`${JSON.stringify(expected)}\n`);
-}
-
-
 describe('git-estate guard', () => {
+  it('reports topology without scanning a missing detached out-of-scope worktree', () => {
+    const { root, repo } = initRepo();
+    const other = join(root, 'other-worktree');
+    const otherHead = git(repo, ['commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-m', 'other commit']);
+    git(repo, ['worktree', 'add', '--detach', other, otherHead]);
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    rmSync(other, { recursive: true, force: true });
+
+    const result = run(repo, [
+      'guard', '--phase', 'pre-push', '--push-local-ref', 'refs/heads/main', '--json',
+    ]);
+    const doc = JSON.parse(result.stdout) as GuardDocument;
+    expect(result.status, result.stderr).toBe(0);
+    expect(doc.snapshot).toMatchObject({ incomplete: false, racing: false });
+    expect(doc.snapshot!.worktrees.find(({ path }) => path === other)).toMatchObject({
+      head: otherHead,
+      detached: true,
+      operationBranch: null,
+      status: null,
+    });
+    expect(doc.decision.blockingReasons).toEqual([]);
+    expect(doc.decision.advisoryReasons).toEqual(['other_lane_critical_debt']);
+    expect(doc.snapshot!.errors).toEqual([]);
+  });
+
+  it.each([
+    ['other branch', 'main', 0],
+    ['pushed branch', 'other', 2],
+  ] as const)('scopes a prunable worktree and its scan error on the %s', (_label, pushed, exitCode) => {
+    const { root, repo } = initRepo();
+    const other = join(root, 'other-worktree');
+    git(repo, ['worktree', 'add', '-b', 'other', other]);
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    rmSync(other, { recursive: true, force: true });
+
+    const args = ['guard', '--phase', 'pre-push', '--push-local-ref', `refs/heads/${pushed}`];
+    const result = run(repo, [...args, '--json']);
+    const doc = JSON.parse(result.stdout) as GuardDocument;
+    expect(result.status, result.stderr).toBe(exitCode);
+    expect(doc.snapshot).toMatchObject({ incomplete: exitCode === 2, racing: false });
+    expect(doc.snapshot!.errors).toEqual(exitCode === 2 ? [
+      expect.objectContaining({ kind: 'worktree_status_failed', worktree: other }),
+    ] : []);
+    const finding = doc.snapshot!.findings.find(({ kind }) => kind === 'prunable')!;
+    expect(finding).toMatchObject({ worktree: other });
+    expect(doc.decision.newCriticalFindingIds).toEqual([finding.id]);
+    if (exitCode === 0) {
+      expect(doc.decision.blockingReasons).toEqual([]);
+      expect(doc.decision.blockingFindingIds).toEqual([]);
+      expect(doc.decision.advisoryFindingIds).toEqual([finding.id]);
+      expect(doc.decision.advisoryReasons).toEqual([
+        'other_lane_critical_debt',
+      ]);
+      const human = run(repo, args);
+      expect(human.status, human.stderr).toBe(0);
+      expect(human.stdout).toContain('WARN');
+      expect(human.stdout).toContain('complete=true');
+      expect(human.stdout).toContain(`prunable worktree=${JSON.stringify(other)}`);
+    } else {
+      expect(doc.decision.blockingReasons).toEqual(['scan_incomplete', 'new_critical_housekeeping_debt']);
+      expect(doc.decision.blockingFindingIds).toEqual([finding.id]);
+      expect(doc.decision.advisoryFindingIds).toEqual([]);
+    }
+  });
+
+  it.each([
+    ['other branch', 'other', 'main', 0],
+    ['unknown detached branch', null, 'main', 0],
+    ['pushed branch', 'other', 'other', 2],
+    ['invoking branch', 'main', 'other', 2],
+  ] as const)('scopes a new WIP stash from the %s', (_label, branch, pushed, exitCode) => {
+    const { repo } = initRepo();
+    git(repo, ['branch', 'other']);
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    git(repo, branch === null ? ['switch', '--detach'] : ['switch', branch]);
+    writeFileSync(join(repo, 'tracked.txt'), 'stash change\n');
+    git(repo, ['stash', 'push']);
+    git(repo, ['switch', 'main']);
+
+    const result = run(repo, ['guard', '--phase', 'pre-push', '--push-local-ref', `refs/heads/${pushed}`, '--json']);
+    expect(result.status, result.stderr).toBe(exitCode);
+    const doc = JSON.parse(result.stdout) as GuardDocument;
+    expect(doc.snapshot!.stashes).toEqual([expect.objectContaining({ branch })]);
+    const stash = doc.snapshot!.findings.find(({ kind }) => kind === 'stash')!;
+    expect(doc.decision.newCriticalFindingIds).toEqual([stash.id]);
+    expect(doc.decision.blockingFindingIds).toEqual(exitCode === 2 ? [stash.id] : []);
+    expect(doc.decision.advisoryFindingIds).toEqual(exitCode === 0 ? [stash.id] : []);
+    expect(doc.decision.reasons).toEqual([
+      exitCode === 2 ? 'new_critical_housekeeping_debt' : 'other_lane_critical_debt',
+    ]);
+  });
+
+  it.each([
+    ['WIP on feature/topic: original commit', 'feature/topic'],
+    ['On feature/topic: custom subject', 'feature/topic'],
+    ['WIP on (no branch): detached commit', null],
+    ['On (no branch): custom detached subject', null],
+    ['unparseable subject', null],
+    ['WIP on other:missing separator', null],
+  ] as const)('attributes stash reflog subject %s without retaining its content', (subject, branch) => {
+    expect(parseStashes(`${'a'.repeat(40)}\0${'b'.repeat(40)}\0${subject}\0\n`)).toEqual([
+      { oid: 'a'.repeat(40), parents: ['b'.repeat(40)], branch },
+    ]);
+  });
+
+  it.each([
+    ['other worktree', false, 'main', 0],
+    ['pushed worktree', false, 'other', 2],
+    ['invoking worktree', true, 'main', 2],
+  ] as const)('scopes new conflicts in the %s', (_label, invokeOther, pushed, exitCode) => {
+    const { root, repo } = initRepo();
+    const other = join(root, 'conflicted-worktree');
+    git(repo, ['worktree', 'add', '-b', 'other', other]);
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    for (const [cwd, content] of [[repo, 'main'], [other, 'other']]) {
+      writeFileSync(join(cwd!, 'tracked.txt'), `${content}\n`);
+      git(cwd!, ['commit', '-am', 'conflict fixture']);
+    }
+    git(other, ['merge', 'main'], 1);
+    const result = run(invokeOther ? other : repo, [
+      'guard', '--phase', 'pre-push', '--push-local-ref', `refs/heads/${pushed}`, '--json',
+    ]);
+    expect(result.status, result.stderr).toBe(exitCode);
+    const doc = JSON.parse(result.stdout) as GuardDocument;
+    const conflict = doc.snapshot!.findings.find(({ kind }) => kind === 'conflict');
+    if (exitCode === 0) {
+      expect(conflict).toBeUndefined();
+      expect(doc.snapshot!.worktrees.find(({ path }) => path === other)!.status).toBeNull();
+      expect(doc.decision.newConflictIds).toEqual([]);
+      expect(doc.decision.newCriticalFindingIds).toEqual([]);
+      expect(doc.decision.blockingFindingIds).toEqual([]);
+    } else {
+      expect(conflict).toMatchObject({ worktree: other });
+      expect(doc.decision.newConflictIds).toEqual([conflict!.id]);
+      expect(doc.decision.newCriticalFindingIds).toEqual([conflict!.id]);
+      expect(doc.decision.blockingFindingIds).toEqual([conflict!.id]);
+    }
+    expect(doc.decision.advisoryFindingIds).toEqual([]);
+    expect(doc.decision.reasons).toEqual(exitCode === 2 ? ['new_conflicts'] : []);
+  });
+
+  it.each([
+    ['locked', false, 'main', 0],
+    ['locked', false, 'other', 2],
+    ['locked', true, 'main', 2],
+    ['detached', false, 'main', 0],
+    ['detached', true, 'main', 2],
+  ] as const)('scopes %s worktree debt (invokeOther=%s, pushed=%s)', (kind, invokeOther, pushed, exitCode) => {
+    const { root, repo } = initRepo();
+    const other = join(root, 'other-worktree');
+    git(repo, ['worktree', 'add', '-b', 'other', other]);
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    if (kind === 'locked') git(repo, ['worktree', 'lock', other]);
+    else git(other, ['switch', '--detach']);
+    const result = run(invokeOther ? other : repo, [
+      'guard', '--phase', 'pre-push', '--push-local-ref', `refs/heads/${pushed}`, '--json',
+    ]);
+    expect(result.status, result.stderr).toBe(exitCode);
+    const doc = JSON.parse(result.stdout) as GuardDocument;
+    const finding = doc.snapshot!.findings.find((item) => item.kind === kind)!;
+    expect(doc.decision.newCriticalFindingIds).toEqual([finding.id]);
+    expect(doc.decision.blockingFindingIds).toEqual(exitCode === 2 ? [finding.id] : []);
+    expect(doc.decision.advisoryFindingIds).toEqual(exitCode === 0 ? [finding.id] : []);
+  });
+
+  it.each([
+    ['other', 'main', 0],
+    ['other', 'other', 2],
+    ['main', 'other', 2],
+  ] as const)('scopes gone branch %s while pushing %s', (branch, pushed, exitCode) => {
+    const { repo } = initRepo();
+    git(repo, ['branch', 'other']);
+    git(repo, ['config', `branch.${branch}.remote`, '.']);
+    git(repo, ['config', `branch.${branch}.merge`, 'refs/heads/upstream']);
+    git(repo, ['branch', 'upstream']);
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    git(repo, ['branch', '-d', 'upstream']);
+    const result = run(repo, ['guard', '--phase', 'pre-push', '--push-local-ref', `refs/heads/${pushed}`, '--json']);
+    expect(result.status, result.stderr).toBe(exitCode);
+    const doc = JSON.parse(result.stdout) as GuardDocument;
+    const finding = doc.snapshot!.findings.find(({ kind }) => kind === 'branch_gone')!;
+    expect(finding).toMatchObject({ branch });
+    expect(doc.decision.newCriticalFindingIds).toEqual([finding.id]);
+    expect(doc.decision.blockingFindingIds).toEqual(exitCode === 2 ? [finding.id] : []);
+    expect(doc.decision.advisoryFindingIds).toEqual(exitCode === 0 ? [finding.id] : []);
+  });
+
   it('exposes the exact guard entrypoint for in-process harnesses', async () => {
     const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
@@ -398,6 +365,7 @@ describe('git-estate guard', () => {
       {
         oid: expect.stringMatching(/^[0-9a-f]{64}$/),
         parents: expect.arrayContaining([expect.stringMatching(/^[0-9a-f]{64}$/)]),
+        branch: null,
       },
     ]);
   });
@@ -790,6 +758,7 @@ describe('git-estate guard', () => {
         {
           oid: 'a'.repeat(width),
           parents: ['b'.repeat(width)],
+          branch: null,
         },
       ]);
     },
@@ -861,6 +830,7 @@ describe('git-estate guard', () => {
         parents: expect.arrayContaining([
           expect.stringMatching(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
         ]),
+        branch: 'main',
       },
     ]);
   });
@@ -1199,7 +1169,13 @@ describe('git-estate guard', () => {
     const lane = join(root, 'newly-locked');
     git(repo, ['worktree', 'add', '-b', 'newly-locked', lane]);
     git(repo, ['worktree', 'lock', '--reason', 'fixture lock', lane]);
-    const locked = run(repo, ['guard', '--phase', 'pre-push', '--json']);
+    const unrelated = run(repo, ['guard', '--phase', 'pre-push', '--json']);
+    expect(unrelated.status, unrelated.stderr).toBe(0);
+    expect((JSON.parse(unrelated.stdout) as GuardDocument).decision.advisoryFindingIds)
+      .toEqual([expect.stringMatching(/^locked:/)]);
+    const locked = run(repo, [
+      'guard', '--phase', 'pre-push', '--push-local-ref', 'refs/heads/newly-locked', '--json',
+    ]);
     expect(locked.status).toBe(2);
     expect((JSON.parse(locked.stdout) as GuardDocument).decision.newCriticalFindingIds)
       .toEqual(expect.arrayContaining([expect.stringMatching(/^locked:/)]));
@@ -1863,7 +1839,14 @@ syncBuiltinESMExports();
     expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
 
     git(repo, ['worktree', 'lock', '--reason', 'fixture debt', lane]);
-    const blocked = run(repo, ['guard', '--phase', 'pre-push', '--json']);
+    const unrelated = run(repo, ['guard', '--phase', 'pre-push', '--json']);
+    expect(unrelated.status, unrelated.stderr).toBe(0);
+    expect((JSON.parse(unrelated.stdout) as GuardDocument).decision.advisoryFindingIds)
+      .toEqual([expect.stringMatching(/^locked:/)]);
+    const pushArgs = [
+      'guard', '--phase', 'pre-push', '--push-local-ref', 'refs/heads/lane/accepted', '--json',
+    ];
+    const blocked = run(repo, pushArgs);
     expect(blocked.status).toBe(2);
     const blockedDoc = JSON.parse(blocked.stdout) as GuardDocument;
     expect(blockedDoc.decision.countGrowth).toEqual({ worktrees: 0, branches: 0 });
@@ -1880,13 +1863,13 @@ syncBuiltinESMExports();
     });
 
     expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
-    const inherited = run(repo, ['guard', '--phase', 'pre-push', '--json']);
+    const inherited = run(repo, pushArgs);
     expect(inherited.status, inherited.stderr).toBe(0);
     expect((JSON.parse(inherited.stdout) as GuardDocument).decision.newCriticalFindingIds)
       .toEqual([]);
 
     git(repo, ['worktree', 'unlock', lane]);
-    const resolved = run(repo, ['guard', '--phase', 'pre-push', '--json']);
+    const resolved = run(repo, pushArgs);
     expect(resolved.status, resolved.stderr).toBe(0);
     expect((JSON.parse(resolved.stdout) as GuardDocument).decision.newCriticalFindingIds)
       .toEqual([]);

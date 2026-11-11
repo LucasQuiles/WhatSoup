@@ -5,7 +5,7 @@
   "entrypoints": [
     {
       "path": "src/main.ts",
-      "sha256": "ab7715492633084b97ac2ce212c981207c315c3233ad59d3b86380f7e0d9c679",
+      "sha256": "1809c0a75c44b3ba3b3ae591c9fbd7610055a3a39c43031a835e47da04b8698d",
       "mustContain": [
         "startHealthServer",
         "createConnection"
@@ -26,6 +26,16 @@
       "mustContain": [
         "databaseCompatibilityBootstrap",
         "checkLoadedInstanceDatabase"
+      ],
+      "importGraph": true
+    },
+    {
+      "path": "src/core/substrate/sqlite-trigger-worker.ts",
+      "sha256": "0863629a3b62fec922c99c04c1f41e81ad0e1d35a59c09189191d5f1050284a9",
+      "mustContain": [
+        "DatabaseSync",
+        "resource_exhausted",
+        "rowCount"
       ],
       "importGraph": true
     },
@@ -53,7 +63,7 @@
     },
     {
       "path": "src/transport/connection.ts",
-      "sha256": "e929e88ca91c2fb2cd20aa419f7e6cbbcb162db4c113c46b70fb30ca6491e75b",
+      "sha256": "9210d4dd841f5344e4bbf4c92eec5bcfc93cf95ada0980ff773c181d84f128d1",
       "mustContain": [
         "decideDisconnectAction",
         "QR code received",
@@ -84,7 +94,7 @@
     },
     {
       "path": "src/runtimes/agent/session.ts",
-      "sha256": "ca0203a034f857475b6601186e3a472ef146df5e8b7785f2769d83f550a00736",
+      "sha256": "0d61c6f71c3f45e107b82edc058dfc428efd19c37317eaf0d4011fe2526a12e9",
       "mustContain": [
         "composeWithExactLineDedup",
         "managedTerminationUnknown",

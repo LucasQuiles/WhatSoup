@@ -7,8 +7,8 @@
  * actions as JSON. `--apply` re-derives the same plan, backs up the database
  * (quick_check verified), the wrapper symlink and every plist, switches the
  * wrapper symlink and the staged plists as one step, reloads each label, and
- * verifies from the executing process. Any failure after the switch rolls
- * everything back and verifies the rollback the same way.
+ * verifies from the executing process. A failure after the switch rolls back
+ * only when the schema and refresh-fence compatibility gates permit it.
  *
  * Nothing site-specific is compiled in: the instance, releases, auxiliary
  * labels and backup location are arguments; paths come from HOME/XDG_*; the
@@ -23,7 +23,9 @@
  * the automatic rollback was NOT attempted because the new release changed
  * the database schema migration level (or it could not be read) — the old
  * binary would refuse that database, so the new release is left in place and
- * stderr carries the manual database-restore steps.
+ * stderr carries the manual database-restore steps. Exit 5 means the old
+ * target cannot revalidate the candidate's sealed refresh rollback fence, so
+ * it was not started.
  *
  * #2481, report-only: under --apply, the receipt also records the health
  * invariant verdict of the activated (and any rollback) process against this
@@ -81,6 +83,7 @@ export const RELEASE_ACTIVATE_EXIT = {
   refused: 2,
   rollbackUnverified: 3,
   rollbackBlockedMigrated: 4,
+  rollbackBlockedRefreshFence: 5,
 } as const;
 
 const DEFAULT_EXIT_TIMEOUT_SECONDS = 60;
@@ -93,7 +96,7 @@ const USAGE = [
   '  [--plan | --apply]',
   '',
   'macOS launchd only. --plan (default) is read-only and prints the actions and',
-  'preconditions as JSON. --apply switches, verifies, and rolls back on failure.',
+  'preconditions as JSON. --apply switches, verifies, and rolls back when compatibility gates permit it.',
 ].join('\n');
 
 const VALUE_FLAGS = new Set([
@@ -196,6 +199,14 @@ export function planDocument(context: ActivationContext): Record<string, unknown
       domain: context.domain,
     },
     health: { port: context.healthPort, tokenResolved: context.healthToken !== null },
+    rollbackRefreshFence: {
+      candidateRequirement: context.refreshRollbackFence.required,
+      targetCapabilityAtPlan: context.refreshRollbackFence.targetCapability,
+      targetCompatibleAtPlan: context.refreshRollbackFence.targetCompatibleAtPlan,
+      candidateDetail: context.refreshRollbackFence.candidateDetail,
+      targetDetail: context.refreshRollbackFence.targetDetail,
+      limitation: 'compatibility only; not evidence of a live or absent refresh child',
+    },
     preconditions: context.preconditions,
     plists: context.staged.map((entry) => ({
       label: entry.label,
@@ -368,7 +379,22 @@ function outcomeExit(outcome: ApplyOutcome['outcome']): number {
     case 'refused': return RELEASE_ACTIVATE_EXIT.refused;
     case 'rollback-unverified': return RELEASE_ACTIVATE_EXIT.rollbackUnverified;
     case 'rollback-blocked-migrated': return RELEASE_ACTIVATE_EXIT.rollbackBlockedMigrated;
+    case 'rollback-blocked-refresh-fence': return RELEASE_ACTIVATE_EXIT.rollbackBlockedRefreshFence;
   }
+}
+
+/** Operator guidance for a rollback target that cannot prove refresh-owner compatibility. */
+export function blockedRefreshFenceRollbackMessage(outcome: ApplyOutcome): string {
+  const blockedAt = outcome.rollback?.refreshFenceBlockedAt ?? 'unknown';
+  return [
+    '',
+    'release:activate: ROLLBACK BLOCKED — refresh rollback-fence compatibility is unavailable.',
+    `  blocked at ${blockedAt}`,
+    'The rollback target was not restored or bootstrapped. The new release remains selected.',
+    'This compatibility check is not a liveness proof and does not kill or inspect a refresh child.',
+    'Use a rollback target with a sealed compatible refresh rollback fence, or perform approved manual recovery.',
+    '',
+  ].join('\n');
 }
 
 /**
@@ -488,6 +514,8 @@ export async function runReleaseActivateCli(
   }
   if (applied.outcome === 'rollback-blocked-migrated') {
     try { io.stderr(blockedRollbackMessage(context, applied)); } catch { /* the exit code stands */ }
+  } else if (applied.outcome === 'rollback-blocked-refresh-fence') {
+    try { io.stderr(blockedRefreshFenceRollbackMessage(applied)); } catch { /* the exit code stands */ }
   }
   return exitCode;
 }

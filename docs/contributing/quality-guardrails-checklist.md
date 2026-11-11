@@ -6,8 +6,8 @@
 
 > **This table is a curated subset.** `.github/workflows/quality.yml` owns the current step inventory: the `guard:*` family, coverage (`coverage:check`), browser/Playwright suites, console design checks, mutation via `deploy/scripts/run-sentinel-tests.sh` (pytest `--cov-fail-under=98` + deployer mutation drill — note `stryker.conf.json` is dormant/unwired), and tokenomics/drills. `scripts/lib/fitness/registry.ts` owns the architectural-fitness rule inventory. Its blocking authority lives in the **guard ring** (`verify:push:branch`); the ESLint fitness mirror is warn-only. Semantic-quality (`semantic-quality-check.ts`) runs in **shadow mode** (exit 0) everywhere it is wired; its enforce path is unwired/on-demand.
 
-The `Quality` workflow (`.github/workflows/quality.yml`) runs on every PR and
-every push to `main`, with two explicit required-context jobs:
+The `Quality` workflow (`.github/workflows/quality.yml`) runs on every PR,
+push to `main`, and `v*` tag, with two explicit required-context jobs:
 
 - `quality (24.x)` is the full enforcement authority. It owns all static,
   Python, guard, coverage, console-design, and browser checks listed below.
@@ -15,6 +15,11 @@ every push to `main`, with two explicit required-context jobs:
   console installs, the complete non-coverage Vitest suite, and the console
   production build. It intentionally does not duplicate version-invariant
   guards, coverage, Python, lint/design, or browser work.
+
+PR title and body edits also trigger Quality so metadata remains checked.
+An edit can cancel the active run for that PR and start the full workflow again.
+Finalize PR metadata before publishing a candidate, and defer cosmetic edits
+while its required checks are running.
 
 This split preserves both required context names while removing roughly
 6.7 duplicated runner-minutes per workflow run across five recent successful
@@ -38,6 +43,87 @@ path, and exact savings vary with runner scheduling and step duration.
 | Repo-hygiene tests | `npm test -- tests/scripts/repo-hygiene-guard.test.ts` | tests that the hygiene-guard itself works |
 | Full test suite + coverage | `npm run coverage:check -- --pool=forks` | Node 24 runs the entire Vitest suite under V8 coverage and enforces thresholds. Node 25 separately runs `npm test -- --pool=forks` without duplicating coverage. |
 | Console build | `npm --prefix console run build` | Vite production build smoke |
+
+The private scanner migration adds `.github/workflows/private-test-integrity.yml`.
+It requires the `private-scanner-trusted` environment to admit only `main`, with a
+read-only scanner deploy key stored in that environment. Completed same-repository
+pull request, main and tag runs of Quality trigger trusted default-branch code. Candidate test
+files are retrieved as immutable Git data; candidate code, hooks, configuration and
+package scripts are not executed. The scanner and its diagnostics remain private.
+The driver validates the current pull request head and base, qualifies the pinned
+Linux/Python 3.12 scanner runtime, removes its owned private checkout and temporary
+bundle, and rechecks the pull request before publishing `test-integrity (private)`.
+Main and tag scans publish a bounded receipt instead. The receipt binds the source
+run and attempt, commit, scanner run and attempt, and conclusion. Tag scans also
+verify the tag target and main ancestry before and after scanning. Receipt upload
+follows private scratch cleanup; rerunning the scanner replaces its own receipt
+with a new artifact identity and current attempt. Receipts expire after thirty days.
+Operational or cleanup failures cannot produce a successful local conclusion.
+The 20-minute watchdog can leave an inconclusive or missing check; a failed readback
+after a remote write is an observability gap, not proof that no check was created.
+Fork and merge-queue inputs remain unsupported by this workflow.
+
+Keep the existing Quality scanner step and required checks during qualification.
+Quality runs full validation daily at 06:23 UTC. It compares tags and scheduled
+runs against `HEAD^` for baseline growth;
+a new tag's all-zero `before` value cannot identify a previous revision. PRs,
+merge groups and main pushes retain their event-provided base revisions.
+The guard's JSON receipt and reproduction command name the resolved commit OIDs,
+including when the input base is a relative revision such as `HEAD^`.
+Only after hosted canaries prove current-head publication, stale-head refusal,
+credential confinement, cleanup and failure handling should the private check be
+required. Qualify the tag receipt with the existing `scripts/private-integrity-release.ts`
+`select` and `verify` commands before the testing pipeline connects that consumer
+as its release gate. Quality tags run the full existing suite during this staged
+qualification; the existing tag guard workflow remains active. This is temporary
+overlap owned by the testing pipeline cutover and ends when its receipt-based tag
+gate is verified. Remove the repository-scoped scanner secret only after the trusted check
+is operational and Quality no longer consumes that secret. Local adapter tests or
+a parsed workflow contract do not establish those hosted guarantees.
+
+Public native capture fixtures run separately from the pure adapter tests:
+`npm test -- --pool=forks tests/scripts/private-test-integrity-native.test.ts`.
+The test invokes `tools/private-test-integrity/run_native_tests.py`, which uses the
+existing process-group supervisor and validates the canary's six-case receipt,
+source hashes and scratch cleanup. Omission and failing child/group assertions are
+negative controls. The pure `run_tests.py` keeps its no-child/no-network audit guard.
+These synthetic fixtures need POSIX and an outer deadline; they do not qualify the
+private scanner, its Linux/Python ABI, hosted credentials or escaped descendants.
+The caller owns and removes the scratch `TMPDIR` and result file.
+Capture bounds apply to stdout, so parser dependency writes can exceed the 256 KiB
+capture limit. The dependency-write canary verifies a complete 512 KiB file while
+the overflow canary must remain inconclusive. The trusted Linux workflow mounts
+owned scratch with a 512 MiB aggregate allocation limit and 16384-inode limit.
+Before downloading drivers or private code, it verifies the actual filesystem,
+requires an over-budget write to fail with ENOSPC, and verifies a normal write
+after recovery. Mount, quota-probe and unmount failures fail the job. Cleanup
+unmounts this exact scratch before removing the empty mountpoint. Local synthetic
+capture tests do not establish this hosted filesystem limit.
+Runtime qualification requires parse
+errors for every malformed probe; the pinned scanner reports these as advisory
+findings, with Python syntax errors separately blocking. Qualification verifies
+parser detection and does not change scanner policy severity. The trusted workflow
+downloads one bounded Linux grammar archive before acquiring private code. The
+maintained `scanner_grammars.py` pins its size and SHA-256 before extraction, then
+verifies the seven required libraries by path, size and hash. Runtime probes and
+the candidate scan share that job's `XDG_CACHE_HOME`; every native child rechecks
+it before execution. Missing or altered libraries are inconclusive, with no
+download fallback. The workflow entrypoint requires this cache; optional cache
+arguments on lower-level adapters support public synthetic fixtures only.
+This closes the release-asset gap outside the private Git manifest and avoids
+repeated downloads into separate temporary homes. The caller excludes concurrent
+cache writers. Hash verification and a private HOME do not isolate same-user
+processes or block network access.
+
+The shell fault fixtures execute repository-owned workflow source, like other
+repository tests execute source code. Their fake privileged commands prove error
+propagation; they are not a sandbox for hostile pull request code. The privileged
+scanner workflow reads only default-branch drivers and treats candidate files as
+data. Real mount, quota and cleanup behavior still requires hosted qualification.
+
+The alert drill harness gives its children a scratch directory inside its own sandbox.
+This prevents a macOS caller's temporary path from being mistaken for leaked test
+evidence in daily-health alerts; the sandbox and child scratch are removed on exit.
 
 Before the Node 24 toolchain setup, `scripts/ci-disk-reclaim.sh` records free
 space and enforces a 30 GiB budget. Sufficient runners skip mutation with a
@@ -91,6 +177,18 @@ resolver fallback and child-process reads, and verifies write and delete
 rejection; a sibling test pins the `PATH` order and the cleared
 `REQUIRE_OS_KEYRING` under the real configuration.
 
+The separate `portability.platform-paths-guarded` rule recognizes a narrow
+TypeScript guard: string or template occurrences inside the consequent of
+`if (process.platform === 'linux')`. It also recognizes a preceding `const`
+alias in the same block, initialized from `process.platform` or the injected
+fallback `deps.platform ?? process.platform`. Nested `else if` works the same
+way. Each occurrence must be guarded; an unguarded occurrence on the same
+line still matches. This recognition does not cross function or class bodies.
+Parse errors, any local `process` binding, unsupported conditions and unknown
+or mutable aliases retain the original substring findings. Python, shell,
+comments and the other portability rules keep their existing matching rules.
+The ratchet baseline is unchanged.
+
 ## Layer 1.5 — Local pre-commit early-drift signal (warn-only)
 
 The `.husky/pre-commit` hook first runs the deterministic
@@ -100,7 +198,7 @@ identity without printing filenames or stash subjects. The commit-time scan is
 one estate-wide capture and is warn-only so an unrelated lane cannot block a
 local checkpoint; incomplete scans and estate growth remain visible warnings.
 Pre-push retains two independent captures for race detection and applies the
-same estate evaluation fail-closed.
+pusher scope described below when deciding which findings block.
 
 The hook also reads the invoking worktree's atomic writer lease. Free or valid
 held state is reported without prompting the agent. A stale, malformed, or
@@ -131,11 +229,30 @@ timeouts, or remove gate stages. The runner still excludes the four skip
 variables listed in `NEUTRALIZED_SKIP_VARS`.
 
 Pre-push routes through `scripts/pre-push-guard.ts`. Before classifying any ref
-update—including delete-only pushes—it requires a complete Git-estate scan and
+update—including delete-only pushes—it evaluates the Git-estate scan and
 compares it with the machine-local baseline under the repository's common Git
-directory. It blocks newly introduced conflict instances, prunable/detached/
-locked worktrees, stashes, gone-upstream branches, and new critical housekeeping
-debt. New registered worktree or local-branch identities are reported as
+directory. Its blocking scope contains the invoking worktree, its checked-out
+or operation branch, every pushed local branch, and every registered worktree checking out
+one of those branches, including detached worktrees whose rebase or bisect
+metadata identifies one of those branches. New conflict instances and
+prunable/detached/locked worktrees block only in that scope. New gone-upstream branches and stashes block
+only when their branch is in scope. Stash branches come from `WIP on` or `On`
+reflog subjects, accepting only valid names that match a current local branch.
+Detached, unparseable, and unmatched subjects have unknown branches and remain advisory. A subject written by hand
+with `git stash store -m` is taken at its word: this is a housekeeping check for cooperating agents, not a security
+boundary, and it cannot tell such a subject from a real one. The guard retains the branch
+without exposing the subject. Scope comparisons use unambiguous local branch
+names while baseline and finding identities retain the existing short names.
+Pre-push runs status only on scoped worktrees. Other lanes' conflicts, dirty files,
+and untracked files are not reported; pre-commit and `snapshot` still report them.
+Topology and refs remain repository-wide: new prunable, locked, detached, gone-upstream,
+and stash findings outside scope appear as `other_lane_critical_debt` advisories. Findings already in the
+baseline are accepted debt and produce no reason, in or out of scope; `snapshot` still lists them.
+Human output prints up to ten `BLOCK git-estate: <kind> <location>` lines for scoped
+findings and ten `WARN` lines for advisory findings, with remainder counts.
+JSON preserves all new critical IDs and separates `blockingFindingIds` and
+`advisoryFindingIds`.
+New registered worktree or local-branch identities are reported as
 **advisory only** and never block, in either phase — the current invoking
 worktree identity and its checked-out branch identity are still evaluated
 independently and exempted only when that exact branch appears in a non-delete
@@ -174,13 +291,36 @@ remote, `HEAD`, worktree cleanliness, and live `main`. A mid-run main advance is
 a retryable **INCONCLUSIVE** result: fetch and rebase or merge the latest main,
 rerun the gate, then push. The hook never rebases, stashes, or rewrites work.
 
-Missing or malformed baselines, malformed ref input or porcelain, Git command timeouts,
-and racing or incomplete scans are **INCONCLUSIVE** and fail closed. Worktree
-status scans use a four-worker bounded pool and every Git subprocess has a
-bounded timeout. Inherited critical debt, dirty worktrees, untracked files,
-missing upstreams, and ahead/behind/diverged branches remain explicit warnings
-so an unrelated in-flight lane is visible but does not become a working
-bottleneck. After reviewing the complete human snapshot, initialize or
+Missing or malformed baselines, malformed ref input, every scan error,
+and racing within the pusher's scope are
+**INCONCLUSIVE** and fail closed. Each verified snapshot records both passes in
+`consistencyStart` and `consistencyEnd`: worktree topology and operation branches,
+per-worktree status hashes, branch and ref hashes, the common directory, and a
+stash capture hash. `snapshot.statusScope` is `pusher` at pre-push and `repository`
+for pre-commit, `snapshot`, and both baseline commands. Out-of-scope worktrees have
+`status: null` without a scan error. `snapshot.racing` means drift in captured data;
+`decision.scopedRacing` determines whether that drift blocks a push. Status or
+topology drift blocks for worktrees in scope in either pass. Changes to scoped
+branch refs, the stash ref or reflog capture, the common directory, or a failed final
+topology rescan also block. Raw topology drift with no parsed explanation blocks,
+even when unrelated advisory drift is present. Canonical branch state excludes
+display-only name changes caused by colliding tags. Other worktree topology or branch drift reports
+`other_worktree_scan_racing`, with `advisoryRacingWorktrees` and
+`advisoryRacingBranches` in JSON and bounded locations in human warnings.
+Remote branch refs in the latter list retain their full ref names. Scoped drift
+uses `scopedRacingWorktrees` and `scopedRacingBranches`, with bounded `BLOCK` locations.
+The first status pass uses the first topology's scope; the second uses the union
+of both topologies. Operation branches are read from the common Git directory
+before status scanning, even for missing worktree folders. Failed attribution, including
+unreadable metadata or metadata git would not have written, blocks because scope cannot be
+proven; absent metadata means no operation, and a recorded detached operation has no branch.
+Pre-commit keeps its existing repository-wide warnings and never blocks. In that
+phase, `blockingFindingIds` lists all actionable findings, `advisoryFindingIds`
+is empty, and `blocked` is always false. Worktree status scans use a four-worker
+bounded pool and every Git subprocess has a
+bounded timeout. Inherited critical debt, missing upstreams, and
+ahead/behind/diverged branches remain visible. Dirty and untracked counts at
+pre-push cover only scoped worktrees. After reviewing the complete human snapshot, initialize or
 deliberately refresh the local ratchet with:
 
 ```bash
@@ -207,7 +347,7 @@ This requires a valid existing baseline, two complete matching estate snapshots,
 and matching stash parents with all reachable objects present and of supported
 types. It adds only the selected stash finding; other finding IDs, counts and
 container identities retain their prior values. A different stash, conflict or
-worktree lock still blocks. The JSON receipt includes the reason; the baseline
+worktree lock in the pusher's scope still blocks. The JSON receipt includes the reason; the baseline
 does not. This acknowledgment does not prove restored content, integration or
 retirement eligibility, and does not apply or drop the stash.
 
@@ -251,7 +391,7 @@ guards that `verify:push:branch` runs. Spelled out:
 
 | Guard | Command | Purpose | Also in CI (`quality.yml`)? |
 |---|---|---|---|
-| Git estate awareness | `npm run guard:git-estate -- guard --phase pre-push` | Snapshot all linked worktrees twice plus branch/upstream state, stash object identity, and conflict-instance identity; fail closed on malformed porcelain, timeouts, incomplete/racing scans, invalid v2 local baselines, new conflicts, and new critical housekeeping debt; new worktree/branch identities are reported advisory-only and never block — the ratchet is repo-global while several agents work the repo concurrently, so growth is routinely caused by an agent other than the pusher, who cannot clear it (growth is an ID set difference; retiring unrelated work does not offset it). | no (local estate only) |
+| Git estate awareness | `npm run guard:git-estate -- guard --phase pre-push` | Capture topology and refs repository-wide twice; scan status only in the pusher's scope. Block invalid baselines, scan errors, scoped or unattributed drift, stash/common-directory drift, and new scoped critical debt. Report other-lane topology debt, unknown-branch stashes, unrelated topology/ref drift, and estate growth as advisories. Other lanes' conflicts and dirty/untracked files remain visible through pre-commit and `snapshot`. | no (local estate only) |
 | Service unit validity | `npm run guard:service-units` | Validate launchd plists / systemd units (label == filename stem, no bare/`env` node, no unexpanded `${VAR}`, node-pin match, absolute well-formed paths, valid plist structure). | yes |
 | Instance config integrity | `npm run guard:instance-config` | Verify instance `config.json` files for memory-config integrity (non-empty `memory.pinecone.expectedHostSuffix`, no UUID-shaped `projectId` host trap) and per-host health-port map integrity. | yes |
 | Fail-closed gate | `npm run guard:fail-closed-gate` | Reject fail-open shell gate shapes: a probe that substitutes a sentinel on failure (`\|\| echo "000"`, `\|\| true`) then gates only on success, and the `grep -c ... \|\| echo 0` double-zero shape. | yes |
@@ -290,6 +430,7 @@ headroom above every enforced V8 threshold.
 - `pre-push-alignment.test.ts`
 - `pre-push-guard.test.ts`
 - `git-estate-guard.test.ts`
+- `git-estate-guard-scope.test.ts`
 - `doc-drift-check.test.ts`
 - `public-surface-drift-check.test.ts`
 - `drift-skip-ci-gating.test.ts`
@@ -450,7 +591,7 @@ Two constraints to respect if a queue ever becomes possible:
 - `whatsoup-guard.yml` is path-filtered and must **never** be made a required context while a queue is live — a PR not touching those paths would never report it, stalling the queue.
 - `CodeQL` is GitHub-managed default setup (it runs as event `dynamic`, with no in-repo workflow), so its behaviour on a `merge_group` ref cannot be configured or verified in advance. Treat enabling a queue as a canary exercise on a single low-risk PR, not a fleet-wide switch.
 
-**Action pinning.** All external action `uses:` refs are pinned to 40-hex commit SHAs (R-03, PR #2024) — verified 14/14 pinned, 0 mutable `@vN` tags.
+**Action pinning.** External action `uses:` refs are pinned to 40-hex commit SHAs (R-03, PR #2024); action updates are reviewed source changes, never floating tags.
 
 To inspect: `gh api repos/LucasQuiles/WhatSoup/rulesets/16319133 | jq '.rules[].type'` and `gh api repos/LucasQuiles/WhatSoup/branches/main/protection`.
 To modify the ruleset: `gh api --method PUT repos/LucasQuiles/WhatSoup/rulesets/16319133 --input <json>` (PUT replaces the whole ruleset — include all existing rules or they are dropped).

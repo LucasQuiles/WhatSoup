@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
-set -u
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WHATSOUP_CAPABILITY_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# Sourcing establishes WHATSOUP_CAPABILITY_ROOT for the capability library and
+# defines the doctor functions. Main invocation state remains in its subshell.
+WHATSOUP_CAPABILITY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export WHATSOUP_CAPABILITY_ROOT
 
 # shellcheck source=deploy/lib/host-capabilities.sh
-. "$WHATSOUP_CAPABILITY_ROOT/deploy/lib/host-capabilities.sh"
+if ! type whatsoup_capability_records >/dev/null 2>&1; then
+  . "$WHATSOUP_CAPABILITY_ROOT/deploy/lib/host-capabilities.sh"
+fi
 
-usage() {
+whatsoup_host_doctor_usage() {
   cat >&2 <<'USAGE'
 Usage: deploy/scripts/whatsoup-host-doctor.sh --profile <runtime|quality|release> [--node-policy <exact|compatibility>] [--json]
 USAGE
 }
+
+whatsoup_host_doctor_main() (
+set -u
 
 profile=""
 node_policy=exact
@@ -23,52 +28,52 @@ seen_node_policy=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --profile)
-      [ "$seen_profile" -eq 0 ] && [ "$#" -ge 2 ] || { usage; exit 2; }
+      [ "$seen_profile" -eq 0 ] && [ "$#" -ge 2 ] || { whatsoup_host_doctor_usage; return 2; }
       profile="$2"
       seen_profile=1
       shift 2
       ;;
     --node-policy)
-      [ "$seen_node_policy" -eq 0 ] && [ "$#" -ge 2 ] || { usage; exit 2; }
+      [ "$seen_node_policy" -eq 0 ] && [ "$#" -ge 2 ] || { whatsoup_host_doctor_usage; return 2; }
       node_policy="$2"
       seen_node_policy=1
       shift 2
       ;;
     --json)
-      [ "$json" -eq 0 ] || { usage; exit 2; }
+      [ "$json" -eq 0 ] || { whatsoup_host_doctor_usage; return 2; }
       json=1
       shift
       ;;
     -h|--help)
-      usage
-      exit 0
+      whatsoup_host_doctor_usage
+      return 0
       ;;
     *)
-      usage
-      exit 2
+      whatsoup_host_doctor_usage
+      return 2
       ;;
   esac
 done
 
 case "$profile" in
   runtime|quality|release) ;;
-  *) usage; exit 2 ;;
+  *) whatsoup_host_doctor_usage; return 2 ;;
 esac
 case "$node_policy" in
   exact|compatibility) ;;
-  *) usage; exit 2 ;;
+  *) whatsoup_host_doctor_usage; return 2 ;;
 esac
 
 if ! WHATSOUP_CAPABILITY_PLATFORM="$(whatsoup_first_line uname -s)" ||
    ! WHATSOUP_CAPABILITY_PLATFORM="$(whatsoup_normalize_platform "$WHATSOUP_CAPABILITY_PLATFORM")"; then
   echo "host doctor: unsupported or unreadable platform" >&2
-  exit 2
+  return 2
 fi
 export WHATSOUP_CAPABILITY_PLATFORM
 
 records="$(whatsoup_capability_records "$profile" "$WHATSOUP_CAPABILITY_PLATFORM" "$node_policy" 2>/dev/null)" || {
   echo "host doctor: capability contract is malformed" >&2
-  exit 2
+  return 2
 }
 
 json_records=""
@@ -128,4 +133,9 @@ else
   done
 fi
 
-exit "$exit_code"
+return "$exit_code"
+)
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  whatsoup_host_doctor_main "$@"
+fi

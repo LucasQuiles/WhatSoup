@@ -21,6 +21,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
+import ts from 'typescript';
 import { fitnessRules } from './lib/fitness/registry.ts';
 
 // ---------------------------------------------------------------------------
@@ -112,6 +113,81 @@ function isAllowlisted(relFile: string, allowlistPaths: string[]): boolean {
 // Scanning
 // ---------------------------------------------------------------------------
 
+function isProcessPlatform(node: ts.Node): boolean {
+  return ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression)
+    && node.expression.text === 'process' && node.name.text === 'platform';
+}
+
+function isPlatformValue(node: ts.Expression): boolean {
+  if (isProcessPlatform(node)) return true;
+  return ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken
+    && ts.isPropertyAccessExpression(node.left) && ts.isIdentifier(node.left.expression)
+    && node.left.expression.text === 'deps' && node.left.name.text === 'platform'
+    && isProcessPlatform(node.right);
+}
+
+function isLinuxGuard(statement: ts.IfStatement): boolean {
+  const condition = statement.expression;
+  if (!ts.isBinaryExpression(condition)
+    || condition.operatorToken.kind !== ts.SyntaxKind.EqualsEqualsEqualsToken
+    || !ts.isStringLiteral(condition.right) || condition.right.text !== 'linux') return false;
+  if (isProcessPlatform(condition.left)) return true;
+  if (!ts.isIdentifier(condition.left)) return false;
+
+  let container: ts.Node = statement.parent;
+  while (ts.isIfStatement(container)) container = container.parent;
+  if (!ts.isBlock(container) && !ts.isSourceFile(container)) return false;
+  for (const sibling of container.statements) {
+    if (sibling.pos >= statement.pos) break;
+    if (!ts.isVariableStatement(sibling)
+      || !(sibling.declarationList.flags & ts.NodeFlags.Const)) continue;
+    for (const declaration of sibling.declarationList.declarations) {
+      if (ts.isIdentifier(declaration.name) && declaration.name.text === condition.left.text
+        && declaration.initializer && isPlatformValue(declaration.initializer)) return true;
+    }
+  }
+  return false;
+}
+
+function guardedPathRanges(file: string, text: string): Array<readonly [number, number]> {
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const diagnostics = (source as ts.SourceFile & { parseDiagnostics?: readonly ts.Diagnostic[] }).parseDiagnostics;
+  if (diagnostics?.length) return [];
+
+  // A local process binding makes this syntactic proof ambiguous; keep every match.
+  let localProcess = false;
+  function findProcessBinding(node: ts.Node): void {
+    if ((ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isBindingElement(node)
+      || ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isClassDeclaration(node)
+      || ts.isClassExpression(node) || ts.isImportClause(node) || ts.isImportSpecifier(node)
+      || ts.isNamespaceImport(node) || ts.isImportEqualsDeclaration(node) || ts.isEnumDeclaration(node)
+      || ts.isModuleDeclaration(node)) && node.name && ts.isIdentifier(node.name)
+      && node.name.text === 'process') localProcess = true;
+    ts.forEachChild(node, findProcessBinding);
+  }
+  findProcessBinding(source);
+  if (localProcess) return [];
+
+  const ranges: Array<readonly [number, number]> = [];
+  function visit(node: ts.Node): void {
+    if (ts.isStringLiteralLike(node) || ts.isTemplateHead(node)
+      || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) {
+      for (let child = node as ts.Node; child.parent; child = child.parent) {
+        const parent = child.parent;
+        // Deferred bodies can run after the branch has returned.
+        if (ts.isFunctionLike(parent) || ts.isClassLike(parent)) break;
+        if (ts.isIfStatement(parent) && parent.thenStatement === child && isLinuxGuard(parent)) {
+          ranges.push([node.getStart(source), node.end]);
+          break;
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  return ranges;
+}
+
 export function scanRule(repoRoot: string, spec: RuleSpec): PlatformViolation[] {
   const violations: PlatformViolation[] = [];
   for (const globRoot of spec.params.globs) {
@@ -121,11 +197,20 @@ export function scanRule(repoRoot: string, spec: RuleSpec): PlatformViolation[] 
       const relFile = path.relative(repoRoot, absFile).split(path.sep).join('/');
       if (isAllowlisted(relFile, spec.params.allowlistPaths)) continue;
       const source = readFileSync(absFile, 'utf8');
+      const guarded = spec.id === 'portability.platform-paths-guarded' && relFile.endsWith('.ts')
+        && spec.params.patterns.some((pattern) => source.includes(pattern))
+        ? guardedPathRanges(relFile, source) : [];
       const lines = source.split('\n');
+      let lineStart = 0;
       for (let i = 0; i < lines.length; i += 1) {
         const lineText = lines[i]!;
         for (const pattern of spec.params.patterns) {
-          if (lineText.includes(pattern)) {
+          let match = lineText.indexOf(pattern);
+          while (match !== -1 && guarded.some(([start, end]) =>
+            lineStart + match >= start && lineStart + match + pattern.length <= end)) {
+            match = lineText.indexOf(pattern, match + pattern.length);
+          }
+          if (match !== -1) {
             violations.push({
               ruleId: spec.id,
               file: relFile,
@@ -135,6 +220,7 @@ export function scanRule(repoRoot: string, spec: RuleSpec): PlatformViolation[] 
             });
           }
         }
+        lineStart += lineText.length + 1;
       }
     }
   }

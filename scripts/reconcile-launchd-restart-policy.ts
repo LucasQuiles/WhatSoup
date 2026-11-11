@@ -1,4 +1,8 @@
+import { homedir } from 'node:os';
+
 import { isHelpFlag, takeValue } from './lib/cli-args.ts';
+import { acquireActivationLock } from './lib/release-activation/lock.ts';
+import { type ProcessLockHandle, releaseProcessLock } from '../src/lib/process-lock.ts';
 import {
   LaunchdReconcileRefusedError,
   reconcileLaunchdPlist,
@@ -125,10 +129,36 @@ function governedEnvLines(comparison: LaunchdReconcileResult['governedEnvDrift']
   return lines;
 }
 
+/**
+ * An applying reconcile rewrites and reloads an installed plist, so it holds the
+ * activation lock; a dry run writes nothing and takes no lock. The refusal text
+ * is fixed, because the lock error names a filesystem path.
+ */
+export async function reconcileUnderActivationLock(
+  name: string,
+  options: LaunchdReconcileOptions,
+  reconcile: ReconcileLaunchdRestartPolicyDependencies['reconcile'] = reconcileLaunchdPlist,
+  home: string = homedir(),
+): Promise<LaunchdReconcileResult> {
+  if (options.dryRun) return reconcile(name, options);
+  let lock: ProcessLockHandle;
+  try {
+    lock = acquireActivationLock(home);
+  } catch {
+    throw new LaunchdReconcileRefusedError('another activation or reconcile holds the release activation lock, or it could not be taken');
+  }
+  try {
+    return await reconcile(name, options);
+  } finally {
+    // A lock that cannot be removed names this pid, so the next run reclaims it once this process exits.
+    try { releaseProcessLock(lock); } catch { /* the reconcile outcome stands */ }
+  }
+}
+
 function defaultDependencies(): ReconcileLaunchdRestartPolicyDependencies {
   return {
     platform: process.platform,
-    reconcile: reconcileLaunchdPlist,
+    reconcile: (name, options) => reconcileUnderActivationLock(name, options),
     stdout: (line) => console.log(line),
     stderr: (line) => console.error(line),
   };

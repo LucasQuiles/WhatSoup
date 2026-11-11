@@ -11,10 +11,15 @@ import {
 } from '../../src/core/workspace.ts';
 import { toConversationKey } from '../../src/core/conversation-key.ts';
 import type { ProvisionOptions } from '../../src/core/workspace.ts';
+import type { M365MutationPolicy } from '../../src/core/m365-bridge-policy.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const CWD = '/instances/test-bot';
 const tmp = trackTmpDirs('');
+const approvedM365Policy: M365MutationPolicy = {
+  status: 'approved',
+  childEnv: { ALLOW_M365_MUTATIONS: '1' },
+};
 
 describe('chatJidToWorkspace', () => {
   it('DM @s.whatsapp.net: kind=dm, key=phone, path ends with users/<phone>', () => {
@@ -304,6 +309,16 @@ describe('provisionWorkspace', () => {
     const opts = makeOpts(workspacePath, instanceCwd);
     provisionWorkspace(opts);
 
+    // Re-provisioning must preserve operator restrictions while refreshing hooks.
+    const settingsPath = join(workspacePath, '.claude', 'settings.json');
+    const existing = JSON.parse(readFileSync(settingsPath, 'utf8'));
+    const permissions = {
+      allow: ['Read'],
+      deny: ['mcp__plugin_microsoft_365_microsoft_365__send-mail'],
+      defaultMode: 'bypassPermissions',
+    };
+    writeFileSync(settingsPath, JSON.stringify({ ...existing, permissions }));
+
     // Modify hook paths and re-provision.
     const opts2 = {
       ...opts,
@@ -314,6 +329,7 @@ describe('provisionWorkspace', () => {
     provisionWorkspace(opts2);
 
     const settings = JSON.parse(readFileSync(join(workspacePath, '.claude', 'settings.json'), 'utf8'));
+    expect(settings.permissions).toEqual(permissions);
     expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe(
       `'/new/path/to/hook.sh' '${join(workspacePath, '.claude', 'sandbox-policy.json')}'`,
     );
@@ -452,6 +468,20 @@ describe('workspace.ts uncovered-branch coverage', () => {
   });
 
   // --- writeSandboxArtifacts branches (lines 133-161) ---
+
+  it.each(['{broken', 'null', '[]', '"unexpected"'])(
+    'refuses to overwrite unreadable settings during sandbox refresh: %s', (contents) => {
+      const claudeDir = makeTmp();
+      const settingsPath = join(claudeDir, 'settings.json');
+      const policyPath = join(claudeDir, 'sandbox-policy.json');
+      const originalPolicy = JSON.stringify({ allowedTools: ['Read'] });
+      writeFileSync(settingsPath, contents, { mode: 0o600 });
+      writeFileSync(policyPath, originalPolicy);
+      expect(() => writeSandboxArtifacts(claudeDir, {}, '/hooks/agent-sandbox.sh')).toThrow();
+      expect(readFileSync(settingsPath, 'utf8')).toBe(contents);
+      expect(readFileSync(policyPath, 'utf8')).toBe(originalPolicy);
+    },
+  );
 
   it('writeSandboxArtifacts writes only PreToolUse when no optional hooks are given', () => {
     const claudeDir = makeTmp();
@@ -676,6 +706,75 @@ describe('workspace.ts uncovered-branch coverage', () => {
     const out = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
     expect(out.enabledPlugins).toEqual({ newPlugin: true });
     expect(out.permissions.defaultMode).toBe('bypassPermissions');
+  });
+
+  it.each(['write', 'reconcile'])('preserves explicit M365 denies on approved %s without provenance', (surface) => {
+    const claudeDir = makeTmp();
+    const explicit = 'mcp__plugin_microsoft_365_microsoft_365__send-mail';
+    const settings = {
+      permissions: { allow: ['Read'], deny: [explicit], defaultMode: 'bypassPermissions' as const },
+    };
+    writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify(settings));
+    if (surface === 'write') writePermissionsSettings(claudeDir, settings, approvedM365Policy);
+    else ensurePermissionsSettings(claudeDir, 'agent', undefined, { m365MutationPolicy: approvedM365Policy });
+    const out = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(out.permissions.deny).toContain(explicit);
+    expect(out.permissions.deny).not.toContain('mcp__plugin_microsoft_365_microsoft_365__create-event');
+  });
+
+  it.each(['write', 'reconcile'])('restores the full floor when approved %s repairs invalid settings', (surface) => {
+    const explicit = 'mcp__plugin_microsoft_365_microsoft_365__send-mail';
+    const custom = 'mcp__operator_owned__keep';
+    const cases = [
+      '{broken', 'null', '[]',
+      JSON.stringify({ permissions: 'invalid' }),
+      JSON.stringify({ permissions: { allow: 'invalid', deny: [explicit, custom], defaultMode: 'bypassPermissions' } }),
+    ];
+    for (const contents of cases) {
+      const claudeDir = makeTmp();
+      writeFileSync(join(claudeDir, 'settings.json'), contents);
+      if (surface === 'write') writePermissionsSettings(claudeDir, {
+        permissions: { allow: ['Read'], deny: [], defaultMode: 'bypassPermissions' },
+      }, approvedM365Policy);
+      else ensurePermissionsSettings(claudeDir, 'agent', undefined, { m365MutationPolicy: approvedM365Policy });
+      const out = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+      expect(out.permissions.deny).toContain(explicit);
+      expect(out.permissions.deny).toContain('mcp__plugin_microsoft_365_microsoft_365__create-event');
+      if (contents.includes(custom)) expect(out.permissions.deny).toContain(custom);
+    }
+  });
+
+  it('preserves explicit restrictions through sandbox startup and approved reconciliation', () => {
+    const claudeDir = makeTmp();
+    const explicit = 'mcp__plugin_microsoft_365_microsoft_365__send-mail';
+    writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify({
+      permissions: { allow: ['Read'], deny: [explicit], defaultMode: 'bypassPermissions' },
+      enabledPlugins: { custom: true },
+    }), { mode: 0o600 });
+    writeSandboxArtifacts(claudeDir, {}, '/managed/agent-sandbox.sh');
+    ensurePermissionsSettings(claudeDir, 'agent', undefined, {
+      hasSandbox: true, m365MutationPolicy: approvedM365Policy,
+    });
+    const out = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(out.permissions.deny).toContain(explicit);
+    expect(out.permissions.deny).not.toContain('mcp__plugin_microsoft_365_microsoft_365__create-event');
+    expect(out.enabledPlugins).toEqual({ custom: true });
+    expect(out.hooks.PreToolUse).toHaveLength(1);
+  });
+
+  it('ensurePermissionsSettings applies the approved bridge exception while retaining other denies', () => {
+    const claudeDir = makeTmp();
+
+    ensurePermissionsSettings(
+      claudeDir,
+      'agent',
+      { 'microsoft_365@microsoft-365-dev': true },
+      { m365MutationPolicy: approvedM365Policy },
+    );
+
+    const out = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(out.permissions.deny).not.toContain('mcp__plugin_microsoft_365_microsoft_365__send-mail');
+    expect(out.permissions.deny).toContain('mcp__claude_ai_Gmail__create_draft');
   });
 
   it('ensurePermissionsSettings overwrites a corrupt existing settings.json with defaults', () => {

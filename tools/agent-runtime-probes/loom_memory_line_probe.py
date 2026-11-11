@@ -155,8 +155,10 @@ def git_metadata(root: Path) -> dict[str, Any]:
         check=False,
         timeout=10,
     )
+    # Read-only probe: never take the optional index lock, which a timeout kill
+    # would otherwise strand as index.lock and block later commits.
     status = subprocess.run(
-        ["git", "-C", str(root), "status", "--short", "--untracked-files=all"],
+        ["git", "--no-optional-locks", "-C", str(root), "status", "--short", "--untracked-files=all"],
         text=True,
         capture_output=True,
         check=False,

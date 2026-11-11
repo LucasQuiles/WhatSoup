@@ -168,6 +168,7 @@
     "@pinecone-database/pinecone": "8.1.0",
     "@whiskeysockets/baileys": "7.0.0-rc13",
     "cheerio": "1.2.0",
+    "css-what": "6.2.2",
     "linkedom": "0.18.12",
     "openai": "5.23.2",
     "pdf-parse": "2.4.5",
@@ -222,6 +223,7 @@
     "yaml": "2.9.0"
   },
   "overrides": {
+    "music-metadata": "11.16.1",
     "protobufjs": "^7.6.5",
     "vite": {
       "esbuild": "^0.28.1"

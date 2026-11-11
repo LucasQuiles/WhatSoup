@@ -125,6 +125,7 @@ import {
   getFallbackState,
 } from './fallback-state-db.ts';
 import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
+import { resolveM365MutationPolicy, type M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
 import { inspectUserClaudeSettings } from '../../core/user-claude-settings.ts';
 import { isSamePhysicalDirectory } from '../../lib/home-path.ts';
 import { classifyActiveSessions, resolveAmbiguousAgeFallback } from './session-classifier.ts';
@@ -166,6 +167,7 @@ import type { ModelRouteEvent } from './route-events.ts';
 import { RuntimeRoutingCoordinator, type RuntimeRoutingPort } from './runtime-routing.ts';
 import { RuntimeFallbackCoordinator, type RuntimeFallbackPort } from './runtime-fallback.ts';
 import { emitManagedLoopDegradedNotice, isManagedLoopFallbackDegraded, managedLoopDegradedSystemBlock } from './managed-loop-disclosure.ts';
+import { memoryGuidanceSystemBlock, type MemoryReadinessSnapshot } from './memory-guidance.ts';
 import { RuntimePollBridgeCoordinator, type RuntimePollBridgePort } from './runtime-poll-bridge.ts';
 import { buildRoutingPromptContract } from './route-intent.ts';
 import { createCatalogueSnapshotCache, type CatalogueSnapshotCache } from './model-snapshot-cache.ts';
@@ -293,6 +295,7 @@ import {
 import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
 import { CapabilityObligationRuntime, maybeActivateCapabilityObligationRuntime, shutdownCapabilityObligationRuntimeSafely, turnCorrelationFromContexts } from './capability-obligation-runtime.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
+import type { TypedHandoffDistillConfig } from '../../lib/handoff-distill-config.ts';
 import { config } from '../../config.ts';
 import type { StartupChatNotice, StartupNotificationEvent } from '../../core/startup-notification-controller.ts';
 import {
@@ -350,36 +353,40 @@ import {
 } from './auto-respawn-policy.ts';
 import type { AgentRuntimeOptions, SandboxPolicy, SessionScope } from './runtime-options.ts';
 export type { AgentRuntimeOptions, SandboxPolicy, SessionScope } from './runtime-options.ts';
+import type { ProviderProcessIsolationConfig } from './provider-process-isolation.ts';
+import { InboundTurnCompletionTracker } from './inbound-turn-completion.ts';
+import { extractUsageLimitResetTime } from './usage-limit-reset-time.ts';
 import {
   deriveModelUsable,
-  MODEL_USABILITY_FRESHNESS_MS,
   type RuntimePrimaryModelUsability,
   type RuntimeTurnCapability,
 } from './model-usability.ts';
 export { deriveModelUsable } from './model-usability.ts';
 export type { RuntimePrimaryModelUsability, RuntimeTurnCapability } from './model-usability.ts';
+export { extractUsageLimitResetTime } from './usage-limit-reset-time.ts';
 import {
   logAmbientProviderFailureOutcome,
   suppressStreamedProviderFailure as gateStreamedProviderFailure,
 } from './streamed-provider-failure.ts';
 import { isProcessAlive, sessionUsesInProcessBridge } from './runtime-predicates.ts';
 import { canaryStoreProvisioned, readProviderCanaryAdmission } from './provider-canary-proof.ts';
-import { probeBinaryAuthStatus, type listModelCatalog } from './providers/binary-preflight.ts';
+import { probeBinaryCommand, type listModelCatalog } from './providers/binary-preflight.ts';
+import { claudeRefreshLockGrace, refreshClaudeLoginAhead } from './providers/claude-refresh-ahead.ts';
+import { probePrimaryModelUsability, type PrimaryProbeServiceContext } from './providers/primary-model-usability.ts';
 import {
-  probePrimaryModelUsability,
-} from './providers/primary-model-usability.ts';
-import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
-import {
-  buildPrimaryProbeAdapterDeps,
-  expectedProbeDeadlineFromDueMs,
-  expectedProbeDeadlineMs,
+  buildRuntimePrimaryProbeServiceContext,
+  createRuntimePrimaryProbeAdapters,
+  resolveModelUsabilityFreshnessMs,
   periodicProbeBackoffMultiple,
+  probeRuntimePrimaryProviderRecovered,
 } from './primary-readiness-probe.ts';
+export { resolveModelUsabilityFreshnessMs } from './primary-readiness-probe.ts';
 import {
   MessageHandlerDrainTimeoutError,
   drainMessageHandlersForShutdown,
 } from './shutdown-message-handler-drain.ts';
 import { ensureClaudeFileStoreCredential } from './providers/claude-filestore-heal.ts';
+import { scrubbedAuthStatusEnv } from './providers/account-auth-status.ts';
 import {
   AccountIdentityVerifier,
   type AccountIdentityProbeTrigger,
@@ -454,31 +461,6 @@ class AgentCommandRuntimeError extends Error {
   }
 }
 
-/**
- * Freshness window for `deriveModelUsable`. While the periodic primary-readiness
- * probe is armed the evidence can legitimately be as old as the scheduler's
- * next fire (interval × backoff, plus the full jitter band and a grace), so the
- * window follows the scheduler via `expectedProbeDeadlineMs`; a flat 30min
- * window declared it stale for up to 3 minutes every cycle and for the back
- * half of every backoff>=2 cycle (the canary `turn_capability_evidence_stale`
- * flap). With no periodic probe armed the flat window is preserved unchanged.
- * Pure + exported for direct unit testing.
- */
-export function resolveModelUsabilityFreshnessMs(
-  periodicProbeExpected: boolean,
-  backoffMultiple: number,
-  schedule: { nextProbeDueAt: number | null; checkedAt: number | null } | null = null,
-): number {
-  if (!periodicProbeExpected) return MODEL_USABILITY_FRESHNESS_MS;
-  // The armed timer's due instant is the source of truth when known: cadence
-  // and window can then never diverge (a manual probe that resets the backoff
-  // re-arms the timer and moves this instant with it). The scheduler formula
-  // is the fallback only while no due instant has been recorded.
-  if (schedule !== null && schedule.nextProbeDueAt !== null && schedule.checkedAt !== null) {
-    return expectedProbeDeadlineFromDueMs(schedule.nextProbeDueAt, schedule.checkedAt);
-  }
-  return expectedProbeDeadlineMs(backoffMultiple);
-}
 // ---------------------------------------------------------------------------
 // AskUserQuestion → Poll formatting / resolution helpers
 //
@@ -564,80 +546,6 @@ import { errorMessage } from '../../lib/error-message.ts';
 
 
 
-/**
- * Extract the usage-limit reset time from a provider usage-limit message.
- *
- * Claude usage-limit notices often name when the cap resets — e.g.
- *   "resets at 3pm", "resets at 15:00", "try again at 9:30am",
- *   "will be available at 11pm", or a raw Unix-epoch seconds value.
- * The fallback state machine uses this to schedule auto-revert to the primary
- * provider. Parsing is conservative: anything it cannot confidently interpret
- * yields `null`, and the caller then applies a default rolling-window estimate.
- *
- * Returned times are always in the future relative to `now` — a clock time like
- * "3pm" that has already passed today is rolled forward to tomorrow.
- *
- * @param text the usage-limit message text
- * @param now  injectable clock for deterministic tests (defaults to Date.now)
- * @returns the reset Date, or null when unparseable
- */
-export function extractUsageLimitResetTime(text: string, now: Date = new Date()): Date | null {
-  if (typeof text !== 'string' || text.length === 0) return null;
-  const lower = text.toLowerCase();
-
-  // 1) Clock time after a reset cue: "resets at 3pm", "available at 15:00",
-  //    "come back at 9:30am", "try again at 11 pm".
-  //    Parsed FIRST so an explicit clock cue always wins over an incidental
-  //    long number elsewhere in the message (e.g. an order/quota figure).
-  //    The trailing (?!\d) prevents the clock hour from matching the leading
-  //    digits of a longer number (e.g. "5551234567").
-  const cue = /(?:reset[s]?|available|come\s+back|try\s+again|back)\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?(?!\d)\s*(am|pm)?/i;
-  const m = lower.match(cue);
-  if (m) {
-    let hour = Number.parseInt(m[1]!, 10);
-    const minute = m[2] ? Number.parseInt(m[2], 10) : 0;
-    const meridiem = m[3];
-    if (
-      Number.isFinite(hour) &&
-      Number.isFinite(minute) &&
-      hour >= 0 &&
-      minute >= 0 &&
-      minute < 60 &&
-      (meridiem ? hour >= 1 && hour <= 12 : hour <= 23)
-    ) {
-      if (meridiem === 'pm' && hour < 12) hour += 12;
-      if (meridiem === 'am' && hour === 12) hour = 0;
-      const candidate = new Date(now);
-      candidate.setHours(hour, minute, 0, 0);
-      // A clock time already past today rolls forward to tomorrow.
-      if (candidate.getTime() <= now.getTime()) {
-        candidate.setDate(candidate.getDate() + 1);
-      }
-      return candidate;
-    }
-  }
-
-  // 2) Raw Unix epoch (seconds, 10 digits) — e.g. "resets at 1771000000".
-  //    Milliseconds (13 digits) are also accepted. Cue-anchored: the epoch must
-  //    directly follow a reset cue, so an incidental long number (order/quota
-  //    figure) is never mistaken for a reset time.
-  const epochMatch = lower.match(
-    /(?:reset[s]?|available|try\s+again|come\s+back|back)\D{0,12}(1[5-9]\d{8}|[2-9]\d{9})(\d{3})?\b/,
-  );
-  if (epochMatch) {
-    const seconds = epochMatch[1]!;
-    const millis = epochMatch[2];
-    const epochMs = millis
-      ? Number.parseInt(seconds + millis, 10)
-      : Number.parseInt(seconds, 10) * 1000;
-    if (Number.isFinite(epochMs) && epochMs > now.getTime()) {
-      return new Date(epochMs);
-    }
-  }
-
-  return null;
-}
-
 // `isPromptTooLongMessage` lives in `./failure-taxonomy.ts` (imported + re-exported above).
 
 /**
@@ -705,7 +613,11 @@ export class AgentRuntime implements Runtime {
   private pluginDirs: string[];
   private readonly enabledPlugins: Record<string, boolean> | undefined;
   private readonly allowM365Mutations: boolean | undefined;
+  private readonly providerProcessIsolation: ProviderProcessIsolationConfig | undefined;
+  private readonly m365MutationPolicy: M365MutationPolicy | undefined;
+  private m365SettingsPolicyReady = false;
   private readonly autoCompactInputTokens: number | undefined;
+  private readonly memoryReadiness: MemoryReadinessSnapshot | undefined;
   private readonly agentProvider: string;
   private readonly agentProviderConfig: Record<string, unknown> | undefined;
   private readonly agentDataPolicy: ProviderDataPolicy | null;
@@ -725,6 +637,10 @@ export class AgentRuntime implements Runtime {
    *  the /model list render + apply path added in this task. */
   private readonly catalogueSnapshot: CatalogueSnapshotCache;
   private readonly providerExecutionGate: ProviderExecutionGate;
+  /** Runtime/configuration generation for the global primary readiness proof. */
+  private readonly primaryProbeServiceGeneration = randomUUID();
+  /** Captured once after startup configuration settles; never sourced from a child. */
+  private primaryProbeServiceContext: PrimaryProbeServiceContext | null = null;
 
   // single mode: one session, one queue
   private session: SessionManager | null = null;
@@ -795,6 +711,7 @@ export class AgentRuntime implements Runtime {
   // to resolve. Initialized in the constructor (needs db + instanceName + the
   // config readers, which stay on AgentRuntime for the health/context callers).
   private readonly handoffDistill: HandoffDistillCoordinator;
+  private readonly typedHandoffDistill: TypedHandoffDistillConfig | undefined;
   private pendingRespawnTimers = new Set<ReturnType<typeof setTimeout>>();
   // Provider-fallback window lifecycle scalars (active-until / activated-at /
   // arm-reason / reset-at / recovery-probe-required / active-entry). Owned by the
@@ -826,6 +743,7 @@ export class AgentRuntime implements Runtime {
   private periodicUsabilityProbeTimer: ReturnType<typeof setTimeout> | null = null; private periodicUsabilityProbeBackoff = 0;
   /** Epoch ms the armed periodic probe timer is due (same clock as checkedAt); null while no timer is armed. */
   private periodicUsabilityProbeDueAt: number | null = null;
+  private periodicUsabilityProbeTimeoutRetryArmed = false;
   // Consecutive failed recovery probes on the revert-timer EXTENSION path
   // (process-local, reset on deactivation — which a successful probe triggers).
   // Early-window standing probes do not count: nothing is extending yet.
@@ -2125,6 +2043,8 @@ export class AgentRuntime implements Runtime {
   /** Exact-source teardowns for terminal results that could not be safely attributed. */
   private readonly rejectedTerminalTeardowns = new WeakMap<SessionManager, Promise<boolean>>();
   private readonly activeMessageHandlers = new Set<Promise<void>>();
+  /** Ingest-owned leases settle only when the exact admitted turn is terminal. */
+  private readonly inboundTurnCompletions = new InboundTurnCompletionTracker();
   private readonly routeRecycleCommandWork = this.routeRecycleLifecycle.commandWork;
   private readonly routeRecyclePublicationWork = this.routeRecycleLifecycle.publicationWork;
   private shutdownRequested = false;
@@ -2700,11 +2620,14 @@ export class AgentRuntime implements Runtime {
       emitAlert: emitAlertChecked,
       clearAlert: clearAlertSourceChecked,
     });
+    const typedHandoffDistill = options?.handoffDistill;
+    this.typedHandoffDistill = typedHandoffDistill;
     this.handoffDistill = new HandoffDistillCoordinator({
       db,
       instanceName: this.instanceName,
-      isEnabled: () => handoffDistillerEnabled(),
-      getModel: () => handoffDistillModel(),
+      isEnabled: () => typedHandoffDistill?.enabled ?? handoffDistillerEnabled(),
+      getModel: () => typedHandoffDistill?.model ?? handoffDistillModel(),
+      getConfig: typedHandoffDistill ? () => typedHandoffDistill.config : undefined,
     });
     this.sessionScope = options?.sessionScope ?? (options?.shared ? 'shared' : 'single');
     this.shared = this.sessionScope === 'shared';
@@ -2732,6 +2655,7 @@ export class AgentRuntime implements Runtime {
     this.pluginDirs = options?.pluginDirs ?? [];
     this.enabledPlugins = options?.enabledPlugins;
     this.allowM365Mutations = options?.allowM365Mutations;
+    this.providerProcessIsolation = options?.providerProcessIsolation;
     this.autoCompactInputTokens =
       typeof options?.autoCompactInputTokens === 'number' &&
       Number.isFinite(options.autoCompactInputTokens) &&
@@ -2740,8 +2664,16 @@ export class AgentRuntime implements Runtime {
         : DEFAULT_AUTO_COMPACT_INPUT_TOKENS;
     this.autoCompact = new AutoCompactController(this.autoCompactInputTokens);
     this.replyGuaranteeTimeoutMs = options?.replyGuaranteeTimeoutMs ?? DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS;
+    this.memoryReadiness = options?.memoryReadiness;
     this.agentProvider = config.agentProvider;
     this.agentProviderConfig = config.agentProviderConfig;
+    this.m365MutationPolicy = resolveM365MutationPolicy({
+      instanceName: this.instanceName,
+      provider: this.agentProvider,
+      allowM365Mutations: this.allowM365Mutations,
+      enabledPlugins: this.enabledPlugins,
+      binding: options?.m365Bridge,
+    });
     this.agentDataPolicy = config.agentProviderDataPolicy ?? null;
     this.providerBoundaryMode = config.agentProviderBoundaryMode ?? 'shadow';
     const configuredFallbacks = Array.isArray(config.agentFallbacks)
@@ -2795,9 +2727,9 @@ export class AgentRuntime implements Runtime {
     const turnQueue = new TurnQueue({
       maxDepth: config.agentMaxQueueDepth,
       onReject: (turn, reason) => {
-        this.finalizeRejectedRuntimeTurn(turn, reason);
         log.warn({ chatJid: turn.chatJid, senderJid: turn.senderJid, reason },
           'turn rejected — agent queue full');
+        return this.finalizeRejectedRuntimeTurn(turn, reason);
       },
       onProcessorError: (turn, error) => this.finalizeSharedProcessorError(turn, error),
     });
@@ -2988,13 +2920,26 @@ export class AgentRuntime implements Runtime {
     };
   }
 
-  /**
-   * Host for the extracted fallback coordinator (runtime-fallback.ts, #1977
-   * D2) — live-getter shape. ALL fallback state stays owned here: the
-   * characterization suites bind these fields on the runtime instance, and
-   * probePrimaryProviderRecovered / deactivateProviderFallback are stub/spy
-   * seams that must observe in-cluster calls.
-   */
+  private buildPrimaryProbeServiceContext(): PrimaryProbeServiceContext {
+    return buildRuntimePrimaryProbeServiceContext(
+      this.agentProvider,
+      this.model ?? null,
+      this.primaryProbeServiceGeneration,
+      this.cwd,
+      this.agentProviderConfig,
+      this.egressProxy?.port,
+    );
+  }
+
+  private capturePrimaryProbeServiceContext(): void {
+    this.primaryProbeServiceContext = this.buildPrimaryProbeServiceContext();
+  }
+
+  private currentPrimaryProbeServiceContext(): PrimaryProbeServiceContext | null {
+    if (!this.primaryProbeServiceContext) return null;
+    return this.buildPrimaryProbeServiceContext();
+  }
+
   private createRuntimeFallbackHost(): RuntimeFallbackPort {
     const runtime = this;
     return {
@@ -3009,10 +2954,15 @@ export class AgentRuntime implements Runtime {
       get agentFallbackDiscovery() { return runtime.agentFallbackDiscovery; },
       get modelCatalogueListFn() { return runtime.modelCatalogueListFn; },
       get allowM365Mutations() { return runtime.allowM365Mutations; },
+      get m365MutationPolicy() { return runtime.m365MutationPolicy; },
+      get expectedAccountDigest() { return runtime.expectedAccountDigest; },
       get runtimeBootPerfMs() { return runtime.runtimeBootPerfMs; },
       get globalMcpSocketPath() { return runtime.globalMcpSocketPath; },
       get egressProxy() { return runtime.egressProxy; },
+      get handoffDistill() { return runtime.typedHandoffDistill; },
       get providerExecutionGate() { return runtime.providerExecutionGate; },
+      get primaryProbeServiceContext() { return runtime.primaryProbeServiceContext; },
+      currentPrimaryProbeServiceContext: () => runtime.currentPrimaryProbeServiceContext(),
       get controlSession() { return runtime.controlSession; },
       get fallbackWindow() { return runtime.fallbackWindow; },
       get fallbackMetrics() { return runtime.fallbackMetrics; },
@@ -3031,6 +2981,8 @@ export class AgentRuntime implements Runtime {
       set periodicUsabilityProbeBackoff(value) { runtime.periodicUsabilityProbeBackoff = value; },
       get periodicUsabilityProbeDueAt() { return runtime.periodicUsabilityProbeDueAt; },
       set periodicUsabilityProbeDueAt(value) { runtime.periodicUsabilityProbeDueAt = value; },
+      get periodicUsabilityProbeTimeoutRetryArmed() { return runtime.periodicUsabilityProbeTimeoutRetryArmed; },
+      set periodicUsabilityProbeTimeoutRetryArmed(value) { runtime.periodicUsabilityProbeTimeoutRetryArmed = value; },
       get shutdownRequested() { return runtime.shutdownRequested; },
       get fallbackProbeAttempts() { return runtime.fallbackProbeAttempts; },
       set fallbackProbeAttempts(value) { runtime.fallbackProbeAttempts = value; },
@@ -3080,6 +3032,7 @@ export class AgentRuntime implements Runtime {
       get agentProvider() { return runtime.agentProvider; },
       get expectedAccountDigest() { return runtime.expectedAccountDigest; },
       get shutdownRequested() { return runtime.shutdownRequested; },
+      get egressProxyPort() { return runtime.egressProxy?.port; },
       get accountIdentity() { return runtime.accountIdentity; },
       set accountIdentity(value) { runtime.accountIdentity = value; },
     };
@@ -3960,6 +3913,13 @@ export class AgentRuntime implements Runtime {
     }
   }
 
+  getM365SettingsPolicy(): M365MutationPolicy | undefined {
+    if (this.m365MutationPolicy === undefined) return undefined;
+    // Grant reconciliation runs before startup restores a persisted fallback.
+    return this.m365SettingsPolicyReady && !this.isFallbackWindowActive
+      ? this.m365MutationPolicy : { status: 'rejected' };
+  }
+
   async start(): Promise<void> {
     // Refuse configured paths before startup writes or provider setup.
     const home = homedir();
@@ -3985,6 +3945,7 @@ export class AgentRuntime implements Runtime {
     // table unconditionally is inert when the flag is off.
     ensureHandoffArtifactSchema(this.db);
     this.fallback.restorePersistedFallbackWindow();
+    this.m365SettingsPolicyReady = true;
     // Periodic real-completion canary over the chain (no-op unless
     // WHATSOUP_FALLBACK_CANARY_MS > 0) — see fallback-canary-config.ts.
     this.fallback.startChainCanary();
@@ -4072,7 +4033,10 @@ export class AgentRuntime implements Runtime {
       const cwd = this.cwd ?? homedir();
       try {
         const claudeDir = ensureHomeConfinedDirectory(join(cwd, '.claude'), home);
-        ensurePermissionsSettings(claudeDir, 'agent', this.enabledPlugins, { hasSandbox: !!this.sandbox });
+        ensurePermissionsSettings(claudeDir, 'agent', this.enabledPlugins, {
+          hasSandbox: !!this.sandbox,
+          m365MutationPolicy: this.getM365SettingsPolicy(),
+        });
         // User-level settings are not owned by this instance. Startup only
         // inspects for its exact hook and warns; it never repairs or normalizes
         // global hooks, permissions, or plugins.
@@ -4586,14 +4550,19 @@ export class AgentRuntime implements Runtime {
       } : null,
     });
 
-    // Heal the claude file-store credential from the keychain BEFORE the first
-    // turn can run, so a keychain-only refresh (native login) can't false-arm
-    // the provider fallback on turn 1 (the recovery probe path heals for the
-    // mid-run case). No-op off-darwin / when CLAUDE_CONFIG_DIR is unset / when
-    // the file store is already current. Fail-open by contract.
+    // Detect duplicate credential stores before serving; copying refresh tokens
+    // would leave a stale second copy available to the CLI.
     if (this.agentProvider === 'claude-cli') {
-      ensureClaudeFileStoreCredential();
+      try {
+        ensureClaudeFileStoreCredential();
+      } catch (error) {
+        log.warn({ error }, 'could not check Claude credential stores at runtime startup');
+      }
     }
+    // Capture the global primary service context once per runtime generation.
+    // It is intentionally independent of any resumed or active SessionManager;
+    // recovery must remain possible after a child fails or is retired.
+    this.capturePrimaryProbeServiceContext();
     this.fallback.schedulePrimaryModelUsabilityProbe('startup');
     this.fallback.scheduleNextPeriodicUsabilityProbe();
     this.startHealthStatsTimer();
@@ -4721,13 +4690,23 @@ export class AgentRuntime implements Runtime {
     }
   }
 
+  beginInboundTurnCompletion(messageId: string): void {
+    this.inboundTurnCompletions.begin(messageId);
+  }
+
+  async awaitInboundTurnCompletion(messageId: string): Promise<void> {
+    return this.inboundTurnCompletions.await(messageId);
+  }
+
   handleMessage(msg: IncomingMessage): Promise<void> {
     try {
       this.db.assertWritableCompatibility();
     } catch (err) {
+      this.inboundTurnCompletions.settle(msg.messageId);
       return Promise.reject(err);
     }
     if (this.shutdownRequested) {
+      this.inboundTurnCompletions.settle(msg.messageId);
       return Promise.reject(new Error('Agent runtime is shutting down; new turns are not accepted'));
     }
     const initialClassification = msg.content === null
@@ -4750,6 +4729,7 @@ export class AgentRuntime implements Runtime {
     }
     void processing.finally(() => {
       this.activeMessageHandlers.delete(processing);
+      this.inboundTurnCompletions.settleUnadopted(msg.messageId);
       if (tracksRouteRecycle) {
         this.routeRecycleLifecycle.untrackRouteCommand(processing);
       }
@@ -4881,9 +4861,17 @@ export class AgentRuntime implements Runtime {
       log.warn({ err, messageId: msg.messageId }, 'inline extractor hook failed (continuing)');
     }
 
+    // Keep pre-admission work inside the ingest limit. Single scope has no
+    // TurnQueue, so its provider boundary releases admission separately from
+    // the exact queued work that still owns terminal completion.
+    const finishAdmission = this.inboundTurnCompletions.holdForAdmission(msg.messageId);
+    let onAdmitted: (() => void) | undefined;
+    const admitted = finishAdmission && this.sessionScope === 'single'
+      ? new Promise<void>((resolve) => { onAdmitted = resolve; })
+      : undefined;
     const queuedWork = this.turnChain
-      .then(() => this._handleMessageInner(msg))
-      .catch((err) => {
+      .then(() => this._handleMessageInner(msg, onAdmitted))
+      .catch(async (err) => {
         // #3374 ask 2 (single scope): a wedged-lane release is a DESIGNED
         // settlement of a turn the W2 sweep already terminalized, not a
         // processing failure. It reaches this catch because single mode has no
@@ -4907,8 +4895,15 @@ export class AgentRuntime implements Runtime {
         }
         // Admitted turns have one terminal owner; pre-admission failures retain
         // the legacy inbound owner so they cannot stay stuck in processing.
+        const failedTurnCompletion = this.currentRuntimeTurnCompletion;
         if (this.runtimeTurnCoordinator.finalizeMessageProcessingFailure(msg.inboundSeq)) {
-          // Coordinator owns terminal persistence and reply-guarantee disarm.
+          // A following single turn must not replace the context while the
+          // coordinator still owns terminal persistence and post-effects.
+          if (
+            this.sessionScope === 'single'
+            && failedTurnCompletion
+            && failedTurnCompletion.context.identity.inboundSeq === msg.inboundSeq
+          ) await failedTurnCompletion.promise;
         } else if (!wedgedReclaim && this.durability && msg.inboundSeq !== undefined) {
           this.markRuntimeFaultContinuityCandidate(msg.inboundSeq);
           this.replyGuarantee?.disarm(msg.inboundSeq);
@@ -4919,7 +4914,8 @@ export class AgentRuntime implements Runtime {
         if (!wedgedReclaim && msg.isSyntheticJob !== true) {
           this.sendDirect(msg.chatJid, 'Something went wrong processing that message. Try again?', 'status');
         }
-      });
+      })
+      .then(() => finishAdmission?.());
     const recycleScopeKey = this.sessionScope === 'per_chat'
       ? resolveAgentTurnMapKey(
           this.resolvePerChatMapKey(msg.chatJid),
@@ -4928,10 +4924,12 @@ export class AgentRuntime implements Runtime {
       : GLOBAL_TOOL_SCOPE_KEY;
     this.routeRecycleLifecycle.trackPublication(queuedWork, recycleScopeKey);
     this.turnChain = queuedWork;
-    if (awaitQueuedRouteCommand) await queuedWork;
+    if (awaitQueuedRouteCommand || finishAdmission) {
+      await (admitted && !awaitQueuedRouteCommand ? Promise.race([queuedWork, admitted]) : queuedWork);
+    }
   }
 
-  private async _handleMessageInner(msg: IncomingMessage): Promise<void> {
+  private async _handleMessageInner(msg: IncomingMessage, onAdmitted?: () => void): Promise<void> {
     let content = msg.content;
     const chatJid = msg.chatJid;
     // The key the inbound row was journaled under. A caller that journaled the
@@ -5465,6 +5463,7 @@ export class AgentRuntime implements Runtime {
         session: this.session!,
         toolScopeKey: GLOBAL_TOOL_SCOPE_KEY,
       });
+      const onSettled = this.inboundTurnCompletions.bind(msg.messageId);
       this.runtimeTurnCoordinator.enqueueSharedRuntimeTurn({
         sourceMessageId: msg.messageId,
         receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
@@ -5479,6 +5478,7 @@ export class AgentRuntime implements Runtime {
         purpose: msg.isSyntheticJob === true ? 'scheduled-agent-job' : undefined,
         ...(runtimeContext ? { runtimeContext } : {}),
         inboundSeq: msg.inboundSeq,
+        ...(onSettled === undefined ? {} : { onSettled }),
       });
     } else if (this.sessionScope === 'per_chat') {
       const mapKey = perChatMapKey!;
@@ -5486,7 +5486,11 @@ export class AgentRuntime implements Runtime {
       // Image coalescing: batch rapid image sends into a single turn.
       // For coalesced images, defer seq/state setup until flush time — only
       // the representative turn gets a seq entry, preventing desync.
-      if (msg.contentType === 'image') {
+      // A coalesced batch has several authenticated inbound contexts but only
+      // one later provider turn. Under transport authority, keep each media
+      // event as an exact queued turn so its reply grant and lease cannot be
+      // inherited from whichever image happened to arm the coalesce timer.
+      if (msg.contentType === 'image' && !config.transportAuthority?.enabled) {
         await this.coalesceImageTurn(mapKey, chatJid, text, msg);
       } else {
         // Flush any pending image buffer first (text message after images = done uploading).
@@ -5515,6 +5519,7 @@ export class AgentRuntime implements Runtime {
           mapKey,
         });
 
+        const onSettled = this.inboundTurnCompletions.bind(msg.messageId);
         this.enqueuePerChatRuntimeTurn(mapKey, {
           sourceMessageId: msg.messageId,
           receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
@@ -5529,6 +5534,7 @@ export class AgentRuntime implements Runtime {
           purpose: msg.isSyntheticJob === true ? 'scheduled-agent-job' : undefined,
           ...(runtimeContext ? { runtimeContext } : {}),
           inboundSeq: msg.inboundSeq,
+          ...(onSettled === undefined ? {} : { onSettled }),
         });
       }
     } else {
@@ -5553,7 +5559,7 @@ export class AgentRuntime implements Runtime {
         contentType: msg.contentType,
         isGroup: msg.isGroup,
         ...(msg.isGroup ? { groupName: chatJid } : {}),
-      }, msg.inboundSeq, msg.isSyntheticJob === true ? 'scheduled-agent-job' : undefined);
+      }, msg.inboundSeq, msg.isSyntheticJob === true ? 'scheduled-agent-job' : undefined, onAdmitted);
     }
   }
 
@@ -5571,8 +5577,8 @@ export class AgentRuntime implements Runtime {
     return admitted;
   }
 
-  private finalizeRejectedRuntimeTurn(turn: QueuedTurn, reason?: TurnRejectReason): void {
-    this.runtimeTurnCoordinator.finalizeRejectedRuntimeTurn(turn, reason);
+  private finalizeRejectedRuntimeTurn(turn: QueuedTurn, reason?: TurnRejectReason): Promise<void> {
+    return this.runtimeTurnCoordinator.finalizeRejectedRuntimeTurn(turn, reason);
   }
 
   private finalizePerChatProcessorError(
@@ -6054,6 +6060,7 @@ export class AgentRuntime implements Runtime {
     source?: RuntimeTurnSourceSnapshot,
     inboundSeq?: number,
     purpose?: SessionContext['purpose'],
+    onAdmitted?: () => void,
   ): Promise<void> {
     // Clear post-turn gate for shared session scope
     this.postTurnGate.delete(GLOBAL_TOOL_SCOPE_KEY);
@@ -6100,6 +6107,18 @@ export class AgentRuntime implements Runtime {
       this.pendingSingletonRuntimeTurnContext = context;
     }
     let legacyOwner: LegacyProviderTurnOwner | null = null;
+    let retainUndispatchedContext = false;
+    const finalizeUndispatched = async (pending: RuntimeTurnContext): Promise<void> => {
+      const settleInbound = source && this.inboundTurnCompletions.bind(source.sourceMessageId);
+      retainUndispatchedContext = true;
+      if (!this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(pending)) {
+        this.runtimeTurnCoordinator.terminalizeUndispatchedRuntimeCrash(pending);
+      }
+      await this.runtimeTurnCoordinator.waitForUndispatchedRuntimeCrash(pending);
+      this.runtimeTurnCoordinator.clearUndispatchedRuntimeTurnCancellation(pending);
+      retainUndispatchedContext = false;
+      settleInbound?.();
+    };
     try {
       await this.sendTurnToSession(this.session!, chatJid, text, undefined, actorJid, () => {
         if (!context) {
@@ -6108,31 +6127,50 @@ export class AgentRuntime implements Runtime {
             GLOBAL_TOOL_SCOPE_KEY,
             chatJid,
           );
+          onAdmitted?.();
           return;
         }
         this.runtimeTurnCoordinator.beginRuntimeTurnEvidence(this.queue!, context);
         this.currentRuntimeTurnContext = context;
         this.pendingSingletonRuntimeTurnContext = null;
-        completion.value = this.runtimeTurnCoordinator.createRuntimeTurnCompletion(context);
+        const turnCompletion = this.runtimeTurnCoordinator.createRuntimeTurnCompletion(context);
+        const settleInbound = source && this.inboundTurnCompletions.bind(source.sourceMessageId);
+        completion.value = {
+          ...turnCompletion,
+          resolve: () => {
+            turnCompletion.resolve();
+            // The coordinator calls resolve only after terminal post-effects.
+            settleInbound?.();
+          },
+        };
         this.currentRuntimeTurnCompletion = completion.value;
+        onAdmitted?.();
       }, undefined, () => (
         !this.shutdownRequested
         && (context === null || !this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context))
       ), context ?? undefined, 'live', purpose);
       if (context && completion.value === null) {
-        if (!this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context)) {
-          this.runtimeTurnCoordinator.terminalizeUndispatchedRuntimeCrash(context);
-        }
+        await finalizeUndispatched(context);
         return;
       }
       if (completion.value !== null) await completion.value.promise;
     } catch (err) {
+      if (context && completion.value === null && !retainUndispatchedContext) {
+        log.error({ err, chatJid, inboundSeq }, 'single turn failed before provider admission');
+        await finalizeUndispatched(context);
+        // This context now has a proven terminal owner; do not fall through to
+        // the outer handler's legacy failed-row write.
+        if (purpose !== 'scheduled-agent-job') {
+          this.sendDirect(chatJid, 'Something went wrong processing that message. Try again?', 'status');
+        }
+        return;
+      }
       if (legacyOwner) {
         this.clearLegacyProviderTurn(GLOBAL_TOOL_SCOPE_KEY, legacyOwner);
       }
       throw err;
     } finally {
-      if (this.pendingSingletonRuntimeTurnContext === context) {
+      if (!retainUndispatchedContext && this.pendingSingletonRuntimeTurnContext === context) {
         this.pendingSingletonRuntimeTurnContext = null;
       }
     }
@@ -6320,12 +6358,8 @@ export class AgentRuntime implements Runtime {
           this.replyGuarantee?.disarm(failedSeq);
           this.durability.markInboundFailed(failedSeq, 'session_spawn_failed');
         }
-        // Eligible-side disclosure (Slice 1): the common config is a primary
-        // routed on a `present-expired-refreshable` credential (routable because
-        // a refresh was expected) that then fails. F07 does not gate the primary,
-        // so this is where that turn gets its explanation. The note HEDGES — the
-        // failure here is not distinguishable as a refresh failure, so it names
-        // the observed classification and the likely cause without asserting it.
+        // Preserve classified failure disclosures without inferring native CLI
+        // login state from a separate plaintext credential file.
         const credNote = spawnFailureCredentialNote(
           resolveProviderCredentialState({
             provider: this.agentProvider,
@@ -9396,9 +9430,8 @@ export class AgentRuntime implements Runtime {
     // override", not provider equality alone. F07: cross-provider entries (which
     // DO carry a distinct credential) read the unified accessor
     // (eligibility projection) — replacing the old presence-only `service ?
-    // lookup : true` that treated null-service providers as always credentialed;
-    // now a cross-provider claude-cli fallback's expired-no-refresh OAuth is
-    // de-routed, while codex/gemini stay `native` → routable.
+    // lookup : true`. Native CLIs remain routable and validate their own login
+    // at spawn; unrelated credential files cannot exclude their fallback tier.
     if (entry.provider === this.agentProvider) return true;
     return isProviderRoutable(
       resolveProviderCredentialState({
@@ -9608,34 +9641,42 @@ export class AgentRuntime implements Runtime {
     return current.isEvidenceBindingCurrent(binding);
   }
 
+  private isPeriodicUsabilityProbeExpected(): boolean {
+    return this.periodicUsabilityProbeTimer !== null
+      || (this.periodicUsabilityProbeDueAt !== null && this.primaryModelUsability?.probeInFlight === true);
+  }
+
   /** The freshness window the live verdict is judged against: scheduler-derived
-   *  while the periodic probe is armed, the flat 30min otherwise. */
-  private modelUsabilityFreshnessMs(): number {
+   *  while the periodic probe is armed or in flight, the flat 30min otherwise. `checkedAt`
+   *  is the evidence's own receipt time (model usability by default). */
+  private modelUsabilityFreshnessMs(checkedAt: number | null = this.primaryModelUsability?.checkedAt ?? null): number {
     return resolveModelUsabilityFreshnessMs(
-      this.periodicUsabilityProbeTimer !== null,
+      this.isPeriodicUsabilityProbeExpected(),
       periodicProbeBackoffMultiple(this.periodicUsabilityProbeBackoff),
-      {
-        nextProbeDueAt: this.periodicUsabilityProbeDueAt,
-        checkedAt: this.primaryModelUsability?.checkedAt ?? null,
-      },
+      { nextProbeDueAt: this.periodicUsabilityProbeDueAt, checkedAt },
     );
   }
 
-  /** Freshness-honest identity verdict for /health, judged against the same
-   *  window as model usability (the identity check rides the same probe). */
+  /** Freshness-honest identity verdict for /health. The deadline is the same
+   *  next probe as model usability (the identity check rides it), but the
+   *  window starts at the identity receipt: a turn success refreshes the
+   *  usability checkedAt only, and must not age the identity receipt early. */
   private accountIdentityHealth(): AccountIdentityHealth {
+    const receipt = this.accountIdentity;
     return deriveAccountIdentityHealth({
       expectedConfigured: this.expectedAccountDigest !== null,
-      verification: this.accountIdentity,
+      verification: receipt,
       armedAtMs: this.accountIdentityArmedAt,
       nowMs: systemClock.now(),
-      freshnessMs: this.modelUsabilityFreshnessMs(),
+      freshnessMs: receipt !== null && receipt.status !== 'disabled'
+        ? this.modelUsabilityFreshnessMs(receipt.checkedAt)
+        : this.modelUsabilityFreshnessMs(),
     });
   }
 
   private getTurnCapability(): RuntimeTurnCapability {
     const usability = this.primaryModelUsability;
-    const periodicProbeExpected = this.periodicUsabilityProbeTimer !== null;
+    const periodicProbeExpected = this.isPeriodicUsabilityProbeExpected();
     const backoffMultiple = periodicProbeBackoffMultiple(this.periodicUsabilityProbeBackoff);
     const modelUsableFreshnessMs = this.modelUsabilityFreshnessMs();
     const { modelUsable, modelUsableStale, modelUsableCheckedAt } =
@@ -9689,7 +9730,7 @@ export class AgentRuntime implements Runtime {
       this.pendingPostRevertConfirmation = false;
     }
     const wasStale = deriveModelUsable(this.primaryModelUsability, Date.now(), this.modelUsabilityFreshnessMs()).modelUsableStale;
-    this.fallback.recordPrimaryModelUsability({ status: 'usable', provider: this.agentProvider, model: this.model ?? null, reason: 'turn-success' }, 'manual');
+    this.fallback.recordPrimaryModelUsability({ status: 'usable', provider: this.agentProvider, model: this.model ?? null, reason: 'turn-success' }, 'manual', 'turn-success');
     if (wasStale) log.info({ provider: this.agentProvider, model: this.model ?? null }, 'primary model usability refreshed by turn success after going stale');
   }
 
@@ -9734,27 +9775,20 @@ export class AgentRuntime implements Runtime {
       : this.model;
   }
 
-
-  /**
-   * Probe whether the primary provider can serve again. Recovery requires a
-   * real model-usability success, not credential presence: a revoked API key or
-   * expired OAuth token can still be present in the key store while live turns
-   * continue returning auth failures. The probe is deadline-cancelled and never
-   * rejects; a timeout result waits for cancellation acknowledgement.
-   * `onEvidence` (DUR-02) gets the full result pre-resolve — see
-   * resolveFallbackRecoveryDecision for why a callback, not a field.
-   */
-  private async probePrimaryProviderRecovered(
+  private probePrimaryProviderRecovered(
     onEvidence?: (evidence: FallbackRecoveryEvidence) => void,
     signal?: AbortSignal,
   ): Promise<boolean> {
-    const target = { provider: this.agentProvider, model: this.model ?? null };
-    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate));
-    const result = signal
-      ? await probePrimaryModelUsability(target, adapters, { signal })
-      : await probePrimaryModelUsability(target, adapters);
-    onEvidence?.({ ...result, checkedAt: Date.now() });
-    return result.status === 'usable';
+    return probeRuntimePrimaryProviderRecovered({
+      agentProvider: this.agentProvider,
+      model: this.model,
+      agentProviderConfig: this.agentProviderConfig,
+      cwd: this.cwd,
+      egressProxy: this.egressProxy,
+      providerExecutionGate: this.providerExecutionGate,
+      primaryProbeServiceContext: this.primaryProbeServiceContext,
+      currentPrimaryProbeServiceContext: () => this.currentPrimaryProbeServiceContext(),
+    }, onEvidence, signal);
   }
 
   private handleProviderFailureResult(wf: ResponseWorkflow, ctx: ProviderFailureResultContext): void {
@@ -9797,30 +9831,26 @@ export class AgentRuntime implements Runtime {
         },
         runPrimaryModelUsability: (signal) => probePrimaryModelUsability(
           { provider: this.agentProvider, model: this.model ?? null },
-          createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate)),
+          createRuntimePrimaryProbeAdapters(
+            this.agentProviderConfig, this.agentProvider, this.model, this.cwd,
+            this.egressProxy?.port, this.providerExecutionGate, 'diagnostic',
+            this.primaryProbeServiceContext ?? undefined,
+            () => this.currentPrimaryProbeServiceContext(),
+          ),
           { signal },
         ),
         runPrimaryRecoveryProbe: (signal) => this.probePrimaryProviderRecovered(undefined, signal),
         accountAuthDeps: {
+          egressProxyPort: this.egressProxy?.port,
           resolveKeyService: resolveProviderKeyService,
           lookupCredential,
           getProviderBinary,
-          probeBinaryAuthStatus,
+          probeBinaryAuthStatus: (binary, args, env, options) => probeBinaryCommand(binary, args, env, options),
+          refreshAhead: (binary, env) => refreshClaudeLoginAhead(binary, env),
+          terminationGrace: (env) => claudeRefreshLockGrace(env, 'diagnostic-auth-status'),
           isAuthRequiredMessage: isProviderAuthRequiredMessage,
-          // Explicit allowlist — never hand the CLI probe the full process env.
-          // CLAUDE_CONFIG_DIR is forwarded if set so the auth-status probe reads
-          // creds from the same place as the model probe + turns (launchd keychain
-          // unreadable; see RCA 2026-06-24). Omitted when unset → no change.
-          env: {
-            // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
-            HOME: process.env['HOME'],
-            // env-allowed: ambient OS PATH contract for executable resolution
-            PATH: process.env['PATH'],
-            // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
-            USER: process.env['USER'],
-            // env-allowed: external-tool interop; must track the env the spawned claude CLI sees
-            ...(process.env['CLAUDE_CONFIG_DIR'] ? { CLAUDE_CONFIG_DIR: process.env['CLAUDE_CONFIG_DIR'] } : {}),
-          },
+          // env-allowed: shared explicit allow-list preserves the serving credential selectors
+          env: scrubbedAuthStatusEnv(process.env),
         },
       });
       void runDiagnosticBundle({ workflow: wf, probes, now })
@@ -10417,7 +10447,7 @@ export class AgentRuntime implements Runtime {
     conversationKey: string,
     provider: string,
   ): (() => string | null) | undefined {
-    if (!handoffContextEnabled()) return undefined;
+    if (!(this.typedHandoffDistill?.contextInjection ?? handoffContextEnabled())) return undefined;
     if (seamForProvider(provider as AgentProvider) !== 'system') return undefined;
     return () => {
       // Seed the distilled handoff context only into a STAND-IN session spawned
@@ -10545,6 +10575,23 @@ export class AgentRuntime implements Runtime {
       this.singletonProviderToolSession = providerToolSession;
     }
 
+    // Provider identity alone cannot distinguish a same-provider fallback.
+    const primaryBridgeRoute = !this.isFallbackWindowActive && route.source !== 'fallback'
+      && route.provider === this.agentProvider && route.model === this.model
+      && opts.providerConfigOverride === undefined;
+    const sessionM365Policy: M365MutationPolicy | undefined = this.m365MutationPolicy === undefined
+      ? undefined
+      : primaryBridgeRoute ? this.m365MutationPolicy : { status: 'rejected' };
+
+    // Each sandbox cwd owns its settings; route changes must restore the deny
+    // floor before a fallback can reuse a workspace approved for the primary.
+    if (this.sandboxPerChat && opts.cwd) {
+      ensurePermissionsSettings(join(opts.cwd, '.claude'), 'agent', this.enabledPlugins, {
+        hasSandbox: true,
+        m365MutationPolicy: sessionM365Policy,
+      });
+    }
+
     const session = new SessionManager({
       db: this.db,
       messenger: this.messenger,
@@ -10561,7 +10608,8 @@ export class AgentRuntime implements Runtime {
       instructionsPath: this.instructionsPath,
       model: route.model,
       pluginDirs: this.pluginDirs,
-      allowM365Mutations: this.allowM365Mutations,
+      allowM365Mutations: sessionM365Policy?.status === 'rejected' ? false : this.allowM365Mutations,
+      m365MutationPolicy: sessionM365Policy,
       provider: route ? route.provider : this.effectiveProvider,
       providerConfig: opts.providerConfigOverride
         ? { ...(route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()), ...opts.providerConfigOverride }
@@ -10585,9 +10633,14 @@ export class AgentRuntime implements Runtime {
         ? managedLoopDegradedSystemBlock
         : undefined,
       routingSystemBlock: config.nlRouting ? () => this.buildRoutingContractBlock(route ? route.provider : this.effectiveProvider) : undefined,
+      memoryGuidanceBlock: memoryGuidanceSystemBlock({
+        readiness: this.memoryReadiness, registry: this.registry, session: providerToolSession,
+        instanceName: this.instanceName, memoryIndex: config.pineconeIndex, allowedMcpTools: this.sandbox?.allowedMcpTools,
+      }),
       routePolicy: route ?? undefined,
       egressProxyPort: this.egressProxy?.port,
       providerExecutionGate: this.providerExecutionGate,
+      providerProcessIsolation: this.providerProcessIsolation,
       providerMcpConfigArgs: this.globalMcpSocketPath
         ? buildProviderMcpConfigArgs(
             sessionProvider,

@@ -1207,7 +1207,7 @@ def test_opencode_functional_probe_child_excludes_the_claude_config_root():
     assert child["WHATSOUP_INSTANCE"] == "agent-alpha"
 
 
-def test_the_two_probe_allowlists_differ_only_by_the_claude_config_root():
+def test_the_two_probe_allowlists_differ_by_the_claude_config_selectors():
     """Pins the split itself, so a later key lands on a deliberate side.
 
     Stated precisely rather than as "never wider": the opencode probe child does
@@ -1217,7 +1217,10 @@ def test_the_two_probe_allowlists_differ_only_by_the_claude_config_root():
     """
     common = set(_mod.COMMON_FUNCTIONAL_ENV_KEYS)
     assert set(_mod.OPENCODE_FUNCTIONAL_ENV_KEYS) == common
-    assert set(_mod.CLAUDE_FUNCTIONAL_ENV_KEYS) - common == {"CLAUDE_CONFIG_DIR"}
+    assert set(_mod.CLAUDE_FUNCTIONAL_ENV_KEYS) - common == {
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+    }
     assert "CLAUDE_CONFIG_DIR" not in common
     assert "WHATSOUP_PATH_PREPEND" in common
 
@@ -1252,10 +1255,15 @@ def test_opencode_probe_allowlist_admits_no_claude_or_anthropic_class_key():
     assert [k for k in _mod.COMMON_FUNCTIONAL_ENV_KEYS
             if k.startswith(CLAUDE_CLASS_ENV_PREFIXES)] == []
     # Non-vacuity: the predicate matches a real key, and it DISCRIMINATES --
-    # the claude allowlist carries exactly one key of this class.
+    # the claude allowlist carries exactly the two configuration selectors of
+    # this class, while the OpenCode allowlist carries neither.
     assert "CLAUDE_CONFIG_DIR".startswith(CLAUDE_CLASS_ENV_PREFIXES)
+    assert "CLAUDE_SECURESTORAGE_CONFIG_DIR".startswith(CLAUDE_CLASS_ENV_PREFIXES)
     assert [k for k in _mod.CLAUDE_FUNCTIONAL_ENV_KEYS
-            if k.startswith(CLAUDE_CLASS_ENV_PREFIXES)] == ["CLAUDE_CONFIG_DIR"]
+            if k.startswith(CLAUDE_CLASS_ENV_PREFIXES)] == [
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+    ]
 
 
 def test_opencode_probe_child_environment_admits_no_claude_or_anthropic_class_key():

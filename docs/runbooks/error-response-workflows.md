@@ -183,10 +183,59 @@ known-bad primary. The counter resets on any non-empty fallback turn. A
 successful advance emits `fallback_provider_failed` (for the dead entry) plus a
 structured `advanced fallback chain past structurally-empty entry` log.
 
-## Warm handoff distiller (flag-gated)
+## Warm handoff distiller
 
-The cross-harness context handoff is now fully wired behind three opt-in flags
-(default-off — byte-identical when unset):
+After the [rollout gate](#handoff-distiller-rollout-gate) below is satisfied,
+an explicit per-instance `agentOptions.handoffDistill` object takes precedence
+over the legacy environment controls below. `{ "enabled": false }` disables
+distillation and ignores legacy `WHATSOUP_HANDOFF_*` settings in the new process.
+An enabled object requires `provider: "deepseek"` and `model: "deepseek-flash"`;
+it can set context injection, cadence, budgets, and concurrency within the bounds
+in the [configuration reference](../configuration.md#agentoptions).
+The launcher admits the private config and matching instance identity before
+projecting only the existing `deepseek` credential for this exact enabled route.
+It refuses unsafe or mismatched config inputs before credential lookup. Each config
+read rejects symlinked ancestors, hard links, and file identity changes during the
+read. The separate type and projection reads are not one atomic snapshot.
+Credentials and instance policy remain local; the shared defaults do not enable
+the feature.
+
+### Handoff distiller rollout gate
+
+Install code before changing the typed policy. An older launcher or runtime can
+ignore `agentOptions.handoffDistill` and keep legacy environment opt-ins active;
+writing `{ "enabled": false }` and restarting that older installation is not a
+kill switch. Config changes also do not disable a process that is already running.
+
+For each instance, require these checks in order before relying on the typed
+disable setting:
+
+1. Install and verify one matching release of `deploy/whatsoup`,
+   `deploy/lib/read-agent-handoff-distill-config.mjs`, and the agent runtime that
+   implements `agentOptions.handoffDistill`. Compare the installed launcher,
+   helper, and runtime artifacts with that release's hashes, and verify the
+   service's actual launch path uses them. A repository checkout or a new runtime
+   behind an old installed launcher does not satisfy this check.
+2. Write the intended per-instance policy, initially `{ "enabled": false }`,
+   using the existing private-config and instance-identity checks. Until this
+   step, an absent object preserves the legacy behavior; installing code alone
+   does not disable an existing opt-in.
+3. Perform the separately authorized instance restart. Verify that the previous
+   process ended and the replacement started after the installation through the
+   verified launcher, using the verified runtime release. Check that its
+   `instance.handoffDistiller.enabled` health value is `false`. A missing health
+   field or an unverified process/release identity is inconclusive, not a
+   successful disable.
+
+Only then may an operator rely on the typed setting or separately enable the
+feature. These instructions do not authorize a deployment or restart. If rolling
+back to a release without this contract, first disable both legacy opt-ins
+(`WHATSOUP_HANDOFF_DISTILLER` and `WHATSOUP_HANDOFF_CONTEXT`) in the actual service
+environment and verify the restarted process's effective behavior. Do not retain
+the typed object as the rollback's sole disable mechanism.
+
+When the typed object is absent, the legacy opt-in controls remain in effect
+(default-off when unset):
 
 - **`WHATSOUP_HANDOFF_DISTILLER`** (`1` to enable) — arms the background
   production sweep that periodically asks the `HandoffDistillRunner` to distill
@@ -194,21 +243,49 @@ The cross-harness context handoff is now fully wired behind three opt-in flags
   budget and the global concurrency + circuit-breaker gate; the timer only sets
   the sweep cadence. Inert (sweep not armed, one warn log) when set but no model
   key resolves.
-- **`WHATSOUP_HANDOFF_CONTEXT`** (`1` to enable) — when a fresh or stand-in
-  session is spawned, injects the most recent distilled summary into the session
-  system prompt (`system` seam for all providers per the 2026-06-16 experiment).
+- **`WHATSOUP_HANDOFF_CONTEXT`** (`1` to enable) — when a fresh fallback session
+  is spawned, injects the most recent distilled summary for the same conversation
+  into the session system prompt.
   The callback yields `null` (SessionManager omits it) when no fresh artifact
   exists, so there is no behaviour change when the distiller has not yet run.
 - **`WHATSOUP_HANDOFF_DISTILL_MODEL`** — the cheap summarizer model id used for
-  distillation. Accepted values: `deepseek-chat`, `MiniMax-M2.7`, `glm-5.2`.
+  distillation. DeepSeek-prefixed ids (including `deepseek-flash`),
+  `MiniMax-M2.7`, and `glm-5.2` resolve through their provider adapters.
   When unset (or set to an unrecognised id with no matching API key) the
   distiller is inert and the sweep is not armed.
 
+The summarizer refuses more than 64 KiB of loaded message/name input or encoded
+request data, and stops reading a successful response above 64 KiB. Error bodies
+are cancelled without reading or logging their contents. Redirects are refused.
+Only assistant `content` can become an artifact; reasoning-only responses fail.
+A summary must fit both 4,096 UTF-8 bytes and 120 whitespace-separated words.
+Missing or invalid token usage fails before persistence, while valid zero usage
+is accepted. These refusals use the existing failure counter and circuit breaker;
+they do not replace the previous artifact. A storage-write failure retains
+validated provider spend and counts one failed call. The production database read
+projects only content, sender name and direction from the configured recent window
+(at most 200 messages). One SQLite statement checks the combined UTF-8 text size
+before returning any text to JavaScript; oversized windows fail without returning
+their text. Raw message payloads are excluded. This bounds the application result,
+not SQLite's internal storage reads or working memory.
+
+Before provider egress, the runner reserves the serialized request's UTF-8 byte
+count plus 256 tokens for framing and the 512-token completion cap. A request that
+does not fit the remaining window is denied without a provider call or failure
+charge. This is conservative admission accounting, not a provider-guaranteed
+billing ceiling. Validated usage replaces the reservation, including when the
+summary or storage write is rejected. Unknown usage after egress retains the
+reservation; reported usage above it exhausts the window and raises degradation.
+Artifact invalidation suppresses stale persistence but preserves spend. Budgets
+are in-memory for active conversations and reset on runner restart or pruning.
+
 The implementation is best-effort and fail-safe: every error at tick or sweep
 level is caught and logged at warn, never propagated to the turn path or the
-process. A structured info-level log (`handoff distill sweep complete` with
+process. Only one sweep runs at a time; timer ticks during an active sweep are
+ignored so an older conversation set cannot prune newer call or token budgets.
+A structured info-level log (`handoff distill sweep complete` with
 `ticked` count) is emitted on each successful sweep. The `handoffDistiller`
-block in `GET /health` (`instance.handoffDistiller`) reports the live flag+config
+block in `GET /health` (`instance.handoffDistiller`) reports the resolved
 state as read-only telemetry:
 
 ```json
@@ -217,6 +294,14 @@ state as read-only telemetry:
 
 The verbatim half (last N messages as `[Recent chat context]` on every fresh
 session) ships unconditionally and is unaffected by these flags.
+
+Distilled context injection is off by default. When enabled, it places untrusted
+summary text in the stand-in's system prompt during an active fallback window.
+Random delimiters, marker neutralization and instructions to ignore embedded
+commands are prompt hardening; they do not enforce isolation or prevent the model
+from following malicious text. Injection does not reduce the provider's tool
+permissions or sandbox scope. Keep it disabled where that residual risk is
+unacceptable; sentinel-recall tests do not establish prompt-injection resistance.
 
 ## Deterministic message templates (wired)
 

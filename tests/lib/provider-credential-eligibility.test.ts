@@ -1,15 +1,32 @@
-import { describe, it, expect } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   resolveProviderCredentialState,
   isProviderRoutable,
   providerCredentialDisplayReason,
   spawnFailureCredentialNote,
 } from '../../src/lib/provider-credential-eligibility.ts';
-import type { ClaudeOAuthCredResult } from '../../src/lib/model-advisor.ts';
 
-const deps = (over: Partial<{ lookup: () => string | null; oauth: () => ClaudeOAuthCredResult }> = {}) => ({
+let claudeConfigDir: string;
+let claudeSecureStorageDir: string;
+
+beforeEach(() => {
+  claudeConfigDir = mkdtempSync(join(tmpdir(), 'whatsoup-test-claude-config-'));
+  claudeSecureStorageDir = mkdtempSync(join(tmpdir(), 'whatsoup-test-claude-secure-'));
+  vi.stubEnv('CLAUDE_CONFIG_DIR', claudeConfigDir);
+  vi.stubEnv('CLAUDE_SECURESTORAGE_CONFIG_DIR', claudeSecureStorageDir);
+});
+
+afterEach(() => {
+  rmSync(claudeConfigDir, { recursive: true, force: true });
+  rmSync(claudeSecureStorageDir, { recursive: true, force: true });
+  vi.unstubAllEnvs();
+});
+
+const deps = (over: Partial<{ lookup: () => string | null }> = {}) => ({
   lookup: () => null as string | null,
-  oauth: () => ({ status: 'absent' as const }),
   ...over,
 });
 
@@ -22,20 +39,15 @@ describe('resolveProviderCredentialState', () => {
     expect(resolveProviderCredentialState({ provider: 'openai-api' }, deps({ lookup: () => '   ' }))).toBe('absent');
   });
 
-  it('claude-cli: OAuth valid → present-valid', () => {
-    expect(resolveProviderCredentialState({ provider: 'claude-cli' }, deps({ oauth: () => ({ status: 'present', token: 't' }) }))).toBe('present-valid');
-  });
+  it('claude-cli remains native and routable despite a stale non-selected plaintext file', () => {
+    writeFileSync(
+      join(claudeConfigDir, '.credentials.json'),
+      JSON.stringify({ claudeAiOauth: { accessToken: 'fixture-stale-token', expiresAt: 1 } }),
+    );
 
-  it('claude-cli: expired WITH refresh → present-expired-refreshable (invariant 3: routable)', () => {
-    expect(resolveProviderCredentialState({ provider: 'claude-cli' }, deps({ oauth: () => ({ status: 'expired', hasRefreshToken: true }) }))).toBe('present-expired-refreshable');
-  });
-
-  it('claude-cli: expired NO refresh → expired-no-refresh (not routable)', () => {
-    expect(resolveProviderCredentialState({ provider: 'claude-cli' }, deps({ oauth: () => ({ status: 'expired', hasRefreshToken: false }) }))).toBe('expired-no-refresh');
-  });
-
-  it('claude-cli: absent OAuth → absent', () => {
-    expect(resolveProviderCredentialState({ provider: 'claude-cli' }, deps())).toBe('absent');
+    const state = resolveProviderCredentialState({ provider: 'claude-cli' });
+    expect(state).toBe('native');
+    expect(isProviderRoutable(state)).toBe(true);
   });
 
   it('codex-cli / gemini-cli: native subscription auth → native (fail-open, routable in slice 1)', () => {
@@ -99,11 +111,11 @@ describe('spawnFailureCredentialNote (eligible-side disclosure — HEDGE, Q roun
 
 describe('blast radius (Slice 1 obligation): F07 does not OVER-exclude', () => {
   it('with credentials present, no provider flips from the old presence-only verdict', () => {
-    // Old isEntryCredentialed: null-service → true (always). New: claude-cli uses OAuth,
-    // codex/gemini stay native→true. So with creds present, nothing goes ineligible.
+    // Null-service CLI providers, including claude-cli, are native and routable;
+    // keyed providers still use their resolved key service.
     const providers = ['openai-api', 'anthropic-api', 'opencode-cli', 'claude-cli', 'codex-cli', 'gemini-cli'];
     const flips = providers.filter(
-      (p) => !isProviderRoutable(resolveProviderCredentialState({ provider: p, model: 'x/y' }, { lookup: () => 'k', oauth: () => ({ status: 'present', token: 't' }) })),
+      (p) => !isProviderRoutable(resolveProviderCredentialState({ provider: p, model: 'x/y' }, { lookup: () => 'k' })),
     );
     expect(flips).toEqual([]);
   });
