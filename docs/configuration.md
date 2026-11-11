@@ -1294,8 +1294,10 @@ records into replies to other chats. Only the chat runtime's recall returns
 
 Access widens recall for `owner_only` records
 only: a caller with access receives them from any chat (`knowledge_search` would
-add one `visibility = owner_only` leg per memory namespace; the chat runtime lets
-them past its this-chat hold), while its `chat_scoped` and untagged recall keeps
+add one `visibility = owner_only` leg per memory namespace; the chat runtime adds
+a fourth `visibility = owner_only` leg beside its chat, sender and self-fact
+legs, merged after the chat and sender results, and lets `owner_only` records
+past its this-chat hold), while its `chat_scoped` and untagged recall keeps
 the boundary in the table above. The admin's own scope is unchanged. For callers
 without access, both readers enforce the exclusion twice: a pre-query
 metadata filter (`visibility` absent or not `owner_only`) narrows every query
