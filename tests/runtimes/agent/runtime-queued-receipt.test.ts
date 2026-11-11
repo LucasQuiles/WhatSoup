@@ -207,16 +207,18 @@ describe('#2949 queued receipt: the text is truthful and content-free', () => {
     expect(sentText).not.toContain('99-1234');
   });
 
-  it('says /stop cancels the running task AND what is queued and promises only a reply with the outcome; the no-/stop texts drop only that sentence', () => {
+  it('says /stop cancels the running task AND what is queued and promises no reply; the no-/stop texts drop only that sentence', () => {
     // Break caught: "Queued behind the current task" read as "some other task is
     // running"; the user asked again and again to cancel tasks that did not exist.
     // Review break: "Send /stop to cancel" read as a guarantee, but a permitted
-    // /stop can end uncertain, and its reply says so.
+    // /stop can end uncertain. Review break (round 7): the fix that followed
+    // promised a reply with the outcome, and a poisoned outbound queue drops
+    // that reply, so the sentence now promises no reply (next test).
     expect(QUEUED_TURN_RECEIPT_TEXT).toBe(
-      "*Still working on your earlier request.* This message is next. Send /stop to cancel the earlier request and anything waiting; I'll reply with the outcome.",
+      '*Still working on your earlier request.* This message is next. Send /stop to cancel the earlier request and anything waiting.',
     );
     expect(QUEUED_TURN_RECEIPT_OTHER_TEXT).toBe(
-      "*Still working on an earlier request.* This message is queued behind it. Send /stop to cancel that request and anything waiting; I'll reply with the outcome.",
+      '*Still working on an earlier request.* This message is queued behind it. Send /stop to cancel that request and anything waiting.',
     );
     // Where the receipt offers no /stop: the same status, and no one named to
     // ask. Every group receipt is the second; the first is only for a 1:1 chat
@@ -227,6 +229,27 @@ describe('#2949 queued receipt: the text is truthful and content-free', () => {
     expect(QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT).toBe(
       '*Still working on an earlier request.* This message is queued behind it.',
     );
+  });
+
+  // Review break (round 7): the /stop acknowledgement goes through the chat's
+  // outbound queue, which rejects it while the queue is poisoned (the
+  // known-poisoned-queue tests B7 and T5 in chat-transport-send-direct.test.ts).
+  // A receipt cannot know whether that queue will still accept the reply when
+  // the /stop arrives, so no receipt promises a reply.
+  it('no receipt promises a reply: none of the four texts says "reply" or "outcome"', () => {
+    const texts = {
+      QUEUED_TURN_RECEIPT_TEXT,
+      QUEUED_TURN_RECEIPT_OTHER_TEXT,
+      QUEUED_TURN_RECEIPT_NO_STOP_TEXT,
+      QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT,
+    };
+    // Four non-empty strings, so the check below cannot pass on a missing text.
+    expect(Object.values(texts).filter((text) => typeof text === 'string' && text.length > 0)).toHaveLength(4);
+
+    const promisingAReply = Object.entries(texts)
+      .filter(([, text]) => /reply|outcome/i.test(text))
+      .map(([name]) => name);
+    expect(promisingAReply).toEqual([]);
   });
 
   it('says "your earlier request ... next" only for the sender\'s own request with nothing else waiting', () => {
