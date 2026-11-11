@@ -937,7 +937,9 @@ describe('Media processing', () => {
         expect.any(String),
         expect.any(String),
         'open',
-        { ownerOnly: true },
+        // R3: the owner_only records it may receive are this instance's own
+        // (memory.pinecone.ownerOnlySources lists none here).
+        { ownerOnly: true, ownerOnlySources: new Set([configModule.config.botName]) },
       );
 
       // Same admin in a group: recall stays open, but no owner_only access

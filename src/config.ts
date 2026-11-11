@@ -142,6 +142,11 @@ export interface MemoryConfig {
      * direct chat over an authenticated transport (memory-scope.ts).
      */
     trustedOperatorPhones: string[];
+    /**
+     * Other instances whose `owner_only` records this instance's owner may
+     * recall, beside its own (memory-scope.ts ownerOnlySourceSet).
+     */
+    ownerOnlySources: string[];
     index: string;
     namespaces: PineconeNamespaceConfig;
     contextTopK: number;
@@ -1152,6 +1157,7 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
       recordVisibility: pineconeRecordVisibility(pinecone?.recordVisibility),
       instanceScopedIds: booleanProp(pinecone, 'instanceScopedIds', false),
       trustedOperatorPhones: stringArrayProp(pinecone, 'trustedOperatorPhones'),
+      ownerOnlySources: stringArrayProp(pinecone, 'ownerOnlySources'),
       index,
       namespaces,
       contextTopK: numberProp(pinecone, 'contextTopK', 10),

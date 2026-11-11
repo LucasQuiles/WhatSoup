@@ -1214,6 +1214,7 @@ The default is a fixed HOME-relative template — it does not consult `LANG`/`LC
 | `memory.pinecone.expectedHostSuffix` | string | env/unset | Optional exact host suffix guard. Use this when two projects have the same index name and you need fail-closed routing. |
 | `memory.pinecone.recordVisibility` | `owner_only` \| `chat_scoped` | `chat_scoped` | Visibility stamped on every memory record this instance writes (see [Memory record provenance](#memory-record-provenance)). A `passive` instance always writes `owner_only`, whatever this says. An unknown value fails config load. |
 | `memory.pinecone.trustedOperatorPhones` | string[] | `[]` | Phones, besides `adminPhones`, allowed to recall `owner_only` records from any chat: in a direct chat, over an authenticated transport, verified like an admin. Their `chat_scoped` recall keeps an ordinary contact's boundary (their own chat). See [owner_only records](#owner_only-records). |
+| `memory.pinecone.ownerOnlySources` | string[] | `[]` | Names of other instances whose `owner_only` records this instance's owner may recall. This instance's own name is always included. An `owner_only` record whose `source_instance` is not in that set, or is missing or empty, is never served. Works whether `instanceScopedIds` is on or off. See [owner_only records](#owner_only-records). |
 | `memory.pinecone.instanceScopedIds` | boolean | `false` | Set on every instance that shares a memory index with another instance. Folds the instance name into all three record id schemes (`memory_write` ids, the fact-export `factId` hash, consolidation `durable:` ids), so identical content from two instances cannot overwrite each other. With it on, source instance and account also become boundaries: recall treats a record of another instance as another conversation even when its `chat_jid` matches (records without `source_instance` count as this instance's), the chat runtime ignores another instance's self facts, dedup and claim lookups match only this instance and account, and consolidation reads only this instance's records and never groups two accounts together. Records are never merged on matching text alone across instances. Off keeps every existing id, dedup and recall unchanged; turning it on mints new ids for later writes and does not rewrite stored records. |
 | `memory.pinecone.index` | string | env/`whatsapp-bot` | Primary chat memory/entity index. |
 | `memory.pinecone.namespaces` | object | WhatsApp defaults | Namespaces used by chat context, fact export, and `mw-mind` intent routing. Every namespace is configurable per instance. |
@@ -1284,6 +1285,12 @@ not ordinary contacts (whatever their `contactRecallScopes`), not any group (eve
 one the admin is in, because other members read the reply), not the operator
 instance by itself, not a global session without a conversation, and not an
 unverified transport such as SMS.
+
+An admitted caller receives an `owner_only` record only from a source it is bound
+to: the record's `source_instance` must be this instance's name or an entry of
+`memory.pinecone.ownerOnlySources`. A record from any other instance, or one with
+a missing or empty `source_instance`, is never served, entity records included.
+The check is separate from `instanceScopedIds`, so it holds with that option off.
 
 `knowledge_search` currently grants no `owner_only` access to anyone. It
 receives no transport classification of the conversation, and its grant also

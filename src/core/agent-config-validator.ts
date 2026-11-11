@@ -193,6 +193,7 @@ function hasExplicitPineconeConfig(raw: Record<string, unknown>): boolean {
       'recordVisibility',
       'instanceScopedIds',
       'trustedOperatorPhones',
+      'ownerOnlySources',
     ])
   );
 }

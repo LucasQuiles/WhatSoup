@@ -73,6 +73,12 @@ export interface MemoryScope {
    */
   ownerOnlyAccess: boolean;
   /**
+   * The source instances whose `owner_only` records the caller may receive
+   * (ownerOnlySourceSet: this instance plus `memory.pinecone.ownerOnlySources`).
+   * Independent of instanceScopedIds. Unset serves no owner_only record.
+   */
+  ownerOnlySources?: ReadonlySet<string>;
+  /**
    * This instance's name when `memory.pinecone.instanceScopedIds` is on. A
    * record stamped with another source_instance is then another conversation,
    * whatever its chat_jid; records with no source_instance count as this one's.
@@ -295,6 +301,8 @@ export interface MemoryScopeDeps {
   trustedOperatorPhones?: Iterable<string>;
   /** recordIdScope(instance, instanceScopedIds): set only when the option is on. */
   instanceScope?: string | null;
+  /** ownerOnlySourceSet(botName, memory.pinecone.ownerOnlySources). */
+  ownerOnlySources?: ReadonlySet<string>;
   /**
    * The owner_only grant; ownerOnlyRecallAllowed when unset. knowledge_search
    * passes knowledgeSearchOwnerOnlyAllowed with its session isolation.
@@ -442,6 +450,7 @@ export async function resolveMemoryScope(
     chatSpellings,
     sharedWorkflow: false,
     ownerOnlyAccess,
+    ...(deps.ownerOnlySources ? { ownerOnlySources: deps.ownerOnlySources } : {}),
     ...(deps.instanceScope ? { sourceInstance: deps.instanceScope } : {}),
   };
 
@@ -533,6 +542,32 @@ export function isOwnerOnlyRecord(fields: Record<string, unknown>): boolean {
 }
 
 /**
+ * The source instances whose `owner_only` records this instance's owner may
+ * read: this instance (`botName`) plus `memory.pinecone.ownerOnlySources`.
+ * Built apart from instanceScopedIds, so the binding holds with that option off.
+ */
+export function ownerOnlySourceSet(instanceName: unknown, configured: unknown): ReadonlySet<string> {
+  const listed = Array.isArray(configured) ? configured : [];
+  return new Set([instanceName, ...listed].filter(isNonEmptyString));
+}
+
+/**
+ * Whether one `owner_only` record may be served: the caller has owner_only
+ * access AND the record's source_instance is in `sources`. A record whose
+ * source_instance is missing, empty or not a string is never served, because
+ * nothing ties it to an owner.
+ */
+export function ownerOnlyRecordServable(
+  fields: Record<string, unknown>,
+  ownerOnlyAccess: boolean,
+  sources: ReadonlySet<string> | undefined,
+): boolean {
+  if (!ownerOnlyAccess || !sources) return false;
+  const source = fields['source_instance'];
+  return isNonEmptyString(source) && sources.has(source);
+}
+
+/**
  * Pre-query clause keeping every record except `owner_only` ones. The
  * `$exists: false` arm is load-bearing: records written before visibility
  * existed have no such field, and a bare `$ne` is documented to match only
@@ -607,10 +642,11 @@ export function memoryHitTier(
     && fold.chat(rawChat) === scope.chatKey
     && isSameSourceInstance(fields, scope.sourceInstance);
   if (isOwnerOnlyRecord(fields)) {
-    // owner_only: refused without access; with access (only ever granted in a
-    // direct chat) admitted from any chat, ranked this chat -> other -> untagged.
-    // chat_scoped records keep the scope's own boundary below.
-    if (!scope.ownerOnlyAccess) return null;
+    // owner_only: refused without access or from an unlisted source; with access
+    // (only ever granted in a direct chat) admitted from any chat, ranked this
+    // chat -> other -> untagged. chat_scoped records keep the scope's own
+    // boundary below.
+    if (!ownerOnlyRecordServable(fields, scope.ownerOnlyAccess, scope.ownerOnlySources)) return null;
     if (!rawChat.trim()) return 2;
     return sameConversation() ? 0 : 1;
   }

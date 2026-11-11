@@ -622,6 +622,7 @@ describe('loadContext', () => {
       const result = makeResult(id, text);
       result.record.chatJid = '15550000002@s.whatsapp.net';
       result.record.visibility = 'owner_only';
+      result.record.sourceInstance = 'line-a';
       return result;
     };
     const legacy = makeResult('legacy', 'a legacy fact with no visibility field');
@@ -642,7 +643,7 @@ describe('loadContext', () => {
 
     const owner = await loadContextDetailed(
       pinecone as any, '15550000002@s.whatsapp.net', '15550000002@s.whatsapp.net', 'query', undefined, 'open',
-      { ownerOnly: true },
+      { ownerOnly: true, ownerOnlySources: new Set(['line-a']) },
     );
     expect(owner.text).toContain('private chat fact');
     expect(owner.text).toContain('private sender fact');
@@ -689,6 +690,7 @@ describe('loadContext', () => {
       result.record.chatJid = '15550000003@s.whatsapp.net';
       result.record.senderJid = sender;
       if (visibility) result.record.visibility = visibility;
+      if (visibility === 'owner_only') result.record.sourceInstance = 'line-a';
       return result;
     };
     // The owner_only fact is about another sender in another chat: neither the
@@ -700,7 +702,7 @@ describe('loadContext', () => {
       stored('l', 'another contact legacy fact', CALLER),
     ]);
     const trusted = await loadContextDetailed(
-      pinecone as any, CALLER, CALLER, 'query', undefined, 'this_chat', { ownerOnly: true },
+      pinecone as any, CALLER, CALLER, 'query', undefined, 'this_chat', { ownerOnly: true, ownerOnlySources: new Set(['line-a']) },
     );
     expect(trusted.text).toContain('personal line fact from another chat');
     expect(trusted.text).not.toContain('another contact chat_scoped fact');
@@ -711,6 +713,45 @@ describe('loadContext', () => {
     const contact = await loadContextDetailed(pinecone as any, CALLER, CALLER, 'query', undefined, 'this_chat');
     expect(contact.text).not.toContain('personal line fact from another chat');
     expect(pinecone.searchOwnerOnlyDetailed).toHaveBeenCalledTimes(1);
+  });
+
+  it('serves owner_only records only from a listed source instance, on every leg', async () => {
+    const OWNER = '15550000001@s.whatsapp.net';
+    const stored = (id: string, text: string, chatJid: string, sourceInstance?: string) => {
+      const result = makeResult(id, text);
+      result.record.chatJid = chatJid;
+      result.record.senderJid = chatJid;
+      result.record.visibility = 'owner_only';
+      if (sourceInstance !== undefined) result.record.sourceInstance = sourceInstance;
+      return result;
+    };
+    const OTHER = '15550000003@s.whatsapp.net';
+    const pinecone = makeFilteringPinecone([
+      stored('a', 'this line fact from another chat', OTHER, 'line-a'),
+      stored('b', 'listed line fact from another chat', OTHER, 'line-b'),
+      stored('c', 'unlisted line fact from another chat', OTHER, 'line-c'),
+      stored('n', 'unstamped fact from another chat', OTHER),
+      stored('e', 'empty-source fact from another chat', OTHER, ''),
+      // This chat's chat and sender legs return these; the gate still applies.
+      stored('ca', 'this line fact in this chat', OWNER, 'line-a'),
+      stored('cc', 'unlisted line fact in this chat', OWNER, 'line-c'),
+      stored('cn', 'unstamped fact in this chat', OWNER),
+    ]);
+    // instanceScopedIds off: no sourceInstance in access, the binding still holds.
+    const owner = await loadContextDetailed(
+      pinecone as any, OWNER, OWNER, 'query', undefined, 'open',
+      { ownerOnly: true, ownerOnlySources: new Set(['line-a', 'line-b']) },
+    );
+    expect(owner.text).toContain('this line fact from another chat');
+    expect(owner.text).toContain('listed line fact from another chat');
+    expect(owner.text).toContain('this line fact in this chat');
+    expect(owner.text).not.toContain('unlisted line fact');
+    expect(owner.text).not.toContain('unstamped fact');
+    expect(owner.text).not.toContain('empty-source fact');
+
+    // Access without an allowed set serves no owner_only record at all.
+    const noSet = await loadContextDetailed(pinecone as any, OWNER, OWNER, 'query', undefined, 'open', { ownerOnly: true });
+    expect(noSet.text).toBe('');
   });
 });
 
@@ -786,8 +827,14 @@ describe('loadContext — entity mode', () => {
 
   it('drops owner_only entity records unless the caller may read them, and includes them only then', async () => {
     const privateNote = makeEntityResult('p1', 'note', 'a private entity note');
-    privateNote.record.metadata = { visibility: 'owner_only' };
-    const pinecone = makeMockPineconeWithEntity([privateNote, makeEntityResult('b1', 'building', 'BUILDING: 100 Main St')]);
+    privateNote.record.metadata = { visibility: 'owner_only', source_instance: 'line-a' };
+    const otherSource = makeEntityResult('p2', 'note', 'an unlisted source entity note');
+    otherSource.record.metadata = { visibility: 'owner_only', source_instance: 'line-c' };
+    const unstamped = makeEntityResult('p3', 'note', 'an unstamped private entity note');
+    unstamped.record.metadata = { visibility: 'owner_only' };
+    const pinecone = makeMockPineconeWithEntity([
+      privateNote, otherSource, unstamped, makeEntityResult('b1', 'building', 'BUILDING: 100 Main St'),
+    ]);
 
     const contact = await loadContextDetailed(pinecone as any, 'chat@g.us', 'alice@s.whatsapp.net', 'query');
     expect(contact.text).not.toContain('a private entity note');
@@ -795,11 +842,18 @@ describe('loadContext — entity mode', () => {
     // An unprivileged caller keeps the exact earlier call shape (the provider excludes by default).
     expect(pinecone.searchEntitiesDetailed).toHaveBeenLastCalledWith('query');
 
+    const sources = new Set(['line-a']);
     const owner = await loadContextDetailed(
-      pinecone as any, 'alice@s.whatsapp.net', 'alice@s.whatsapp.net', 'query', undefined, 'open', { ownerOnly: true },
+      pinecone as any, 'alice@s.whatsapp.net', 'alice@s.whatsapp.net', 'query', undefined, 'open',
+      { ownerOnly: true, ownerOnlySources: sources },
     );
     expect(owner.text).toContain('a private entity note');
-    expect(pinecone.searchEntitiesDetailed).toHaveBeenLastCalledWith('query', undefined, { includeOwnerOnly: true });
+    // Entity records need a listed source_instance too.
+    expect(owner.text).not.toContain('an unlisted source entity note');
+    expect(owner.text).not.toContain('an unstamped private entity note');
+    expect(pinecone.searchEntitiesDetailed).toHaveBeenLastCalledWith(
+      'query', undefined, { includeOwnerOnly: true, ownerOnlySources: sources },
+    );
   });
 
   it('returns empty string when searchEntities returns no results', async () => {

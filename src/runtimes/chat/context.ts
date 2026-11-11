@@ -19,6 +19,7 @@ import {
   isOwnOrSharedGroupRecord,
   isSameSourceInstance,
   memoryIdentityFold,
+  ownerOnlyRecordServable,
   verifiedSenderIdentity,
   type ChatRecallBoundary,
 } from '../../core/memory-scope.ts';
@@ -139,8 +140,10 @@ export async function loadContextDetailed(
   /**
    * ownerOnly: the caller may receive owner_only records (ownerOnlyRecallAllowed).
    * Without it every leg excludes them before the query and again here.
+   * ownerOnlySources: the source instances whose owner_only records it may
+   * receive (ownerOnlySourceSet); unset serves none, even with ownerOnly.
    */
-  access: { ownerOnly?: boolean; sourceInstance?: string } = {},
+  access: { ownerOnly?: boolean; ownerOnlySources?: ReadonlySet<string>; sourceInstance?: string } = {},
 ): Promise<ContextLoadResult> {
   if (!messageText.trim()) {
     return { text: '', status: 'not_attempted', scopes: [] };
@@ -152,19 +155,21 @@ export async function loadContextDetailed(
   const safeTraceId = normalizeMemoryTraceId(traceId);
   const ownerOnly = access.ownerOnly === true;
   const legOptions = { includeOwnerOnly: true } as const;
+  // An owner_only record is served only with access and from a listed source
+  // instance (memory-scope.ts ownerOnlyRecordServable).
+  const servable = (fields: Record<string, unknown>): boolean =>
+    !isOwnerOnlyRecord(fields) || ownerOnlyRecordServable(fields, ownerOnly, access.ownerOnlySources);
 
   if (config.pineconeSearchMode === 'entity') {
     const detailsRaw = await captureContextSearch(() =>
       ownerOnly
-        ? pinecone.searchEntitiesDetailed(messageText, traceId, legOptions)
+        ? pinecone.searchEntitiesDetailed(messageText, traceId, { ...legOptions, ownerOnlySources: access.ownerOnlySources })
         : traceId
           ? pinecone.searchEntitiesDetailed(messageText, traceId)
           : pinecone.searchEntitiesDetailed(messageText),
     );
     // Post-query gate, as for the memory legs: the provider's exclusion only narrows.
-    const details = ownerOnly
-      ? detailsRaw
-      : { ...detailsRaw, results: detailsRaw.results.filter((result) => !isOwnerOnlyRecord(result.record.metadata)) };
+    const details = { ...detailsRaw, results: detailsRaw.results.filter((result) => servable(result.record.metadata)) };
     const scopes = [scopeOutcome('entity', details)];
     log.info(
       {
@@ -218,9 +223,10 @@ export async function loadContextDetailed(
   ]);
   const ownerOnlyDetailsRaw = await ownerOnlyLeg;
   // Post-query gate: the pre-query exclusion only narrows the fetch.
-  const visible = <T extends { results: SearchResult[] }>(details: T): T => (ownerOnly
-    ? details
-    : { ...details, results: details.results.filter((result) => result.record.visibility !== 'owner_only') });
+  const recordServable = (result: SearchResult): boolean =>
+    servable({ visibility: result.record.visibility, source_instance: result.record.sourceInstance });
+  const visible = <T extends { results: SearchResult[] }>(details: T): T =>
+    ({ ...details, results: details.results.filter(recordServable) });
   const chatDetails = visible(chatDetailsRaw);
   const senderDetails = visible(senderDetailsRaw);
   const selfDetails = visible(selfDetailsRaw);
@@ -232,7 +238,8 @@ export async function loadContextDetailed(
   const sameInstance = (result: SearchResult): boolean => isSameSourceInstance(
     { source_instance: result.record.sourceInstance }, access.sourceInstance,
   );
-  const crossesBoundary = (result: SearchResult): boolean => ownerOnly && result.record.visibility === 'owner_only';
+  const crossesBoundary = (result: SearchResult): boolean =>
+    result.record.visibility === 'owner_only' && recordServable(result);
   const chatHeld = boundary === 'open'
     ? chatDetails.results
     : chatDetails.results.filter((result) => sameInstance(result) || crossesBoundary(result));

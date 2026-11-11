@@ -37,7 +37,7 @@ import { checkRateLimit } from './rate-limiter.ts';
 import { getConversationWindow } from './window.ts';
 import { summarizeWindowBeforeTrim } from './window-trim.ts';
 import { loadContextDetailed, type ContextLoadResult } from './context.ts';
-import { chatRecallBoundary, ownerOnlyRecallAllowed, recordIdScope } from '../../core/memory-scope.ts';
+import { chatRecallBoundary, ownerOnlyRecallAllowed, ownerOnlySourceSet, recordIdScope } from '../../core/memory-scope.ts';
 import { isOperatorInstance } from '../../lib/pinecone-project-guard.ts';
 import { ChatQueue } from './queue.ts';
 import { processMedia } from './media/processor.ts';
@@ -424,6 +424,12 @@ export class ChatRuntime implements Runtime {
       config.botName,
       (config as { memory?: { pinecone?: { instanceScopedIds?: unknown } } }).memory?.pinecone?.instanceScopedIds,
     );
+    // The owner_only records an admitted caller may receive: this instance's and
+    // those of memory.pinecone.ownerOnlySources (R3).
+    const ownerOnlySources = ownerOnlySourceSet(
+      config.botName,
+      (config as { memory?: { pinecone?: { ownerOnlySources?: unknown } } }).memory?.pinecone?.ownerOnlySources,
+    );
     let contextBlock: string | null = null;
     let contextTimeout: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -447,9 +453,9 @@ export class ChatRuntime implements Runtime {
           // the earlier call shape (and the provider default excludes).
           ...(ownerOnly || instanceScope
             ? [{
-              ...(ownerOnly ? { ownerOnly: true } : {}),
+              ...(ownerOnly ? { ownerOnly: true, ownerOnlySources } : {}),
               ...(instanceScope ? { sourceInstance: instanceScope } : {}),
-            }] as [{ ownerOnly?: boolean; sourceInstance?: string }]
+            }] as [{ ownerOnly?: boolean; ownerOnlySources?: ReadonlySet<string>; sourceInstance?: string }]
             : [] as []),
         ),
         new Promise<ContextLoadResult>((resolve) => {

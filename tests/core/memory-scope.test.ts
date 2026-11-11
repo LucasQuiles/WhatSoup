@@ -301,12 +301,14 @@ describe('chatRecallBoundary (chat runtime)', () => {
 
 describe('owner_only visibility', () => {
   const TRUSTED = '15550000055';
-  const OWNER_ONLY = { chat_jid: `${MEMBER}@s.whatsapp.net`, visibility: 'owner_only' };
+  const OWNER_ONLY = { chat_jid: `${MEMBER}@s.whatsapp.net`, visibility: 'owner_only', source_instance: 'line-a' };
   const dmWith = (phone: string, actorJid = `${phone}@s.whatsapp.net`) => ({
     tier: 'chat-scoped', conversationKey: phone, deliveryJid: `${phone}@s.whatsapp.net`, operatorInstance: false, actorJid,
     directChat: true as boolean | undefined,
   });
-  const withTrusted = (overrides: Partial<MemoryScopeDeps> = {}) => deps({ trustedOperatorPhones: [TRUSTED], ...overrides });
+  const withTrusted = (overrides: Partial<MemoryScopeDeps> = {}) => deps({
+    trustedOperatorPhones: [TRUSTED], ownerOnlySources: new Set(['line-a']), ...overrides,
+  });
 
   it('the verified owner and a configured trusted operator read owner_only records in a direct chat', async () => {
     const f = memoryIdentityFold(db);
@@ -466,7 +468,14 @@ describe('instance-scoped recall boundary (memory.pinecone.instanceScopedIds on)
       deps({ instanceScope: 'line-a' }),
     );
     expect(memoryHitTier({ chat_jid: `${OWNER}@s.whatsapp.net`, source_instance: 'line-b' }, owner, f)).toBe(1);
-    expect(memoryHitTier({ chat_jid: `${OWNER}@s.whatsapp.net`, source_instance: 'line-b', visibility: 'owner_only' }, owner, f)).toBe(1);
+    // A line-b owner_only record reaches the line-a owner only when line-a lists line-b.
+    const lineBOwnerOnly = { chat_jid: `${OWNER}@s.whatsapp.net`, source_instance: 'line-b', visibility: 'owner_only' };
+    expect(memoryHitTier(lineBOwnerOnly, owner, f)).toBeNull();
+    const listing = await resolveMemoryScope(
+      { ...dm, conversationKey: OWNER, deliveryJid: `${OWNER}@s.whatsapp.net`, actorJid: `${OWNER}@s.whatsapp.net` },
+      deps({ instanceScope: 'line-a', ownerOnlySources: new Set(['line-a', 'line-b']) }),
+    );
+    expect(memoryHitTier(lineBOwnerOnly, listing, f)).toBe(1);
   });
 
   it('off (no instance scope) keeps matching on chat alone', async () => {

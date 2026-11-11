@@ -32,6 +32,8 @@ import {
   agentSessionIsolatedPerChat,
   knowledgeSearchOwnerOnlyAllowed,
   ownerOnlyLegFilter,
+  ownerOnlyRecordServable,
+  ownerOnlySourceSet,
   recordIdScope,
   resolveMemoryScope,
   withVisibilityFilter,
@@ -247,13 +249,15 @@ function tierHits(
   isChatNamespace: (namespace: string) => boolean,
   db: Database | null | undefined,
   ownerOnlyAccess: boolean,
+  ownerOnlySources: ReadonlySet<string>,
 ): TieredHit[] {
   const fold = memoryIdentityFold(db);
   const byId = new Map<string, TieredHit>();
   for (const hit of hits) {
-    // owner_only records never reach a caller without access, on any allowed
-    // index and in any namespace (documents included).
-    if (!ownerOnlyAccess && isOwnerOnlyRecord(hit.fields)) continue;
+    // owner_only records reach only a caller with access, and only from a
+    // listed source instance, on any allowed index and in any namespace
+    // (documents included).
+    if (isOwnerOnlyRecord(hit.fields) && !ownerOnlyRecordServable(hit.fields, ownerOnlyAccess, ownerOnlySources)) continue;
     const isDocument = scope !== null && !isChatNamespace(hit.namespace ?? '');
     const tier = isDocument ? null : scope ? memoryHitTier(hit.fields, scope, fold) : 0;
     if (!isDocument && tier === null) continue;
@@ -512,6 +516,10 @@ export function registerKnowledgeTools(
   );
   const ownerOnlyGrant = (input: OwnerOnlyRecallInput): boolean =>
     knowledgeSearchOwnerOnlyAllowed({ ...input, sessionIsolatedPerChat });
+  const ownerOnlySources = ownerOnlySourceSet(
+    (config as { botName?: unknown }).botName,
+    (config as { memory?: { pinecone?: { ownerOnlySources?: unknown } } }).memory?.pinecone?.ownerOnlySources,
+  );
   const scopeFor = (session: SessionContext): Promise<MemoryScope> => resolveMemoryScope(
     {
       operatorInstance: isOperatorInstance((config as { botName?: unknown }).botName),
@@ -532,6 +540,7 @@ export function registerKnowledgeTools(
         (config as { botName?: unknown }).botName,
         (config as { memory?: { pinecone?: { instanceScopedIds?: unknown } } }).memory?.pinecone?.instanceScopedIds,
       ),
+      ownerOnlySources,
       ownerOnlyGrant,
     },
   );
@@ -730,7 +739,7 @@ export function registerKnowledgeTools(
         // Gate, dedup by id, then order: memories by tier (this chat -> other
         // chats -> untagged) and score, documents merged in by score. Outside the
         // memory index every hit is tier 0.
-        let ranked = orderHits(tierHits(hits, scope, isChatNamespace, deps.db, ownerOnlyAccess), false)
+        let ranked = orderHits(tierHits(hits, scope, isChatNamespace, deps.db, ownerOnlyAccess, ownerOnlySources), false)
           .slice(0, RERANK_CANDIDATE_CAP);
         let limit = MAX_RESULTS;
 

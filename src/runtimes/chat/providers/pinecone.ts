@@ -27,6 +27,7 @@ import {
   isOwnerOnlyRecord,
   narrowestVisibility,
   ownerOnlyLegFilter,
+  ownerOnlyRecordServable,
   recordIdScope,
   withVisibilityFilter,
   type MemoryProvenance,
@@ -580,6 +581,11 @@ export interface PineconeUpsertContext {
 export interface ContextLegOptions {
   /** Return owner_only records too. Only for a caller ownerOnlyRecallAllowed admits. */
   includeOwnerOnly?: boolean;
+  /**
+   * Entity search: the source instances whose owner_only records may be
+   * returned (ownerOnlySourceSet). Checked before rerank; unset returns none.
+   */
+  ownerOnlySources?: ReadonlySet<string>;
 }
 
 export interface PineconeMemoryOptions {
@@ -1142,7 +1148,8 @@ export class PineconeMemory {
 
   // Entity mode excludes owner_only records like the context legs: before the
   // query, and again on the returned records before rerank and formatting,
-  // unless the caller passes includeOwnerOnly (ownerOnlyRecallAllowed).
+  // unless the caller passes includeOwnerOnly (ownerOnlyRecallAllowed); even
+  // then only records whose source_instance is in ownerOnlySources pass.
   async searchEntitiesDetailed(
     query: string,
     traceId?: string,
@@ -1219,7 +1226,8 @@ export class PineconeMemory {
 
       const hits = response.result.hits ?? [];
       let mapped = hits.map(fromPineconeHitEntity)
-        .filter((result) => includeOwnerOnly || !isOwnerOnlyRecord(result.record.metadata));
+        .filter((result) => !isOwnerOnlyRecord(result.record.metadata)
+          || ownerOnlyRecordServable(result.record.metadata, includeOwnerOnly, options.ownerOnlySources));
 
       // Step 2: client-side rerank with truncated text to stay within token limits
       if (config.pineconeRerank && mapped.length > 0) {

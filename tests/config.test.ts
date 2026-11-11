@@ -2277,6 +2277,20 @@ describe('config — memory.pinecone.recordVisibility', () => {
     expect(set.config.memory.pinecone.instanceScopedIds).toBe(true);
   });
 
+  it('ownerOnlySources defaults to none and keeps only non-empty instance names', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({}));
+    const unset = await import('../src/config.ts');
+    expect(unset.config.memory.pinecone.ownerOnlySources).toEqual([]);
+    vi.resetModules();
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: {
+        pinecone: { index: 'whatsapp-bot', projectId: 'instance-proj-id', ownerOnlySources: ['line-b', '', 7, 'line-c'] },
+      },
+    }));
+    const set = await import('../src/config.ts');
+    expect(set.config.memory.pinecone.ownerOnlySources).toEqual(['line-b', 'line-c']);
+  });
+
   it('rejects an unknown value at load rather than widening recall', async () => {
     process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
       memory: { pinecone: { index: 'whatsapp-bot', projectId: 'instance-proj-id', recordVisibility: 'everyone' } },
