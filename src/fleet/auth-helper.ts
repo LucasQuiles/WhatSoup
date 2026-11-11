@@ -42,11 +42,11 @@ export function trackAuthHelper(child: ChildProcess) {
           resolve(outcome);
         };
         const escalation = setTimeout(() => {
-          try { child.kill(SIGNAL.KILL); } catch { /* Exit remains unconfirmed until close. */ }
+          try { child.kill(SIGNAL.KILL); } catch { /* intentional: Exit remains unconfirmed until close. */ }
           deadline = setTimeout(() => complete(confirmedClosed ? 'closed' : 'unconfirmed'), 5000);
         }, 5000);
         void closed.then(() => complete('closed'));
-        try { child.kill(SIGNAL.TERM); } catch { /* Retain ownership and the bounded confirmation wait. */ }
+        try { child.kill(SIGNAL.TERM); } catch { /* intentional: Retain ownership and the bounded confirmation wait. */ }
       });
       return stopping;
     },
