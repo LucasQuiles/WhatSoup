@@ -39,6 +39,7 @@ function makeDbReader(
   },
 ) {
   return {
+    retainMarkerHandles: vi.fn(),
     getLatestMarkers: vi.fn(() => ({ ok: true, data: { ...markers } })),
   } as any;
 }

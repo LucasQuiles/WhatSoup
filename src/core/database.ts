@@ -68,6 +68,9 @@ export {
 
 const log = createChildLogger('database');
 
+/** Per-connection page cache for instance databases (negative = KiB): 32 MiB. */
+const SQLITE_CACHE_SIZE_KIB = -32768;
+
 // ─── Migration 1: Full schema DDL ───────────────────────────────────────────
 
 const MIGRATION_1 = `
@@ -1659,6 +1662,10 @@ export class Database {
     try {
       this.db.exec(SQLITE_BUSY_TIMEOUT_PRAGMA);
       this.db.exec('PRAGMA foreign_keys = ON');
+      // Instance DBs are 240-740 MB; the 2 MiB default cache re-read hot pages
+      // through pread thousands of times a second. 32 MiB (negative = KiB) is
+      // an upper bound per connection, allocated only as pages are touched.
+      this.db.exec(`PRAGMA cache_size = ${SQLITE_CACHE_SIZE_KIB}`);
     } catch (err) {
       const rejection = databaseWriteCompatibilityError(this.dbPath, err);
       if (rejection) {

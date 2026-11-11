@@ -24,6 +24,7 @@ function makeDiscovery(instances: Record<string, unknown> = {}) {
 
 function makeDbReader(ok = true) {
   return {
+    retainMarkerHandles: vi.fn(),
     getLatestMarkers: vi.fn(() =>
       ok
         ? { ok: true, data: { latestMessagePk: 1, latestMessageMarker: null, latestAccessMarker: null } }
@@ -303,6 +304,7 @@ describe('realtime poller health snapshot (#2522)', () => {
       },
     } as never;
     const dbReader = {
+      retainMarkerHandles: vi.fn(),
       getLatestMarkers: vi.fn(() =>
         mode === 'partial'
           ? { ok: false, error: 'synthetic-unavailable' }

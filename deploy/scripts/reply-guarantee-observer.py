@@ -92,6 +92,8 @@ SOURCE_SEVERITIES = {
 }
 
 
+# A status notice is not settlement. Retain legacy terminal-only echo coverage
+# without requiring a terminal record that older delivery paths never wrote.
 _UNRESOLVED_CONTINUITY_CANDIDATES_SQL = """
                 SELECT COUNT(*)
                 FROM inbound_events i
@@ -101,6 +103,7 @@ _UNRESOLVED_CONTINUITY_CANDIDATES_SQL = """
                   )
                   AND NOT EXISTS (
                     SELECT 1 FROM outbound_ops o WHERE o.source_inbound_seq = i.seq
+                      AND o.is_terminal = 1 AND o.status = 'echoed'
                   )
                   AND NOT EXISTS (
                     SELECT 1 FROM turn_recovery_jobs j WHERE j.source_inbound_seq = i.seq

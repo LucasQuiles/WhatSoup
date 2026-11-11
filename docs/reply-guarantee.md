@@ -79,6 +79,14 @@ RGP is decomposed into independently reviewable layers, all now shipped:
    `inconclusive` without replaying or modifying durable rows. Historical failed
    terminals and continuity candidates are recovery debt with no runtime-health
    impact; only stale open inbound or recovery work is an operational breach.
+   A continuity mark is covered by a terminal record, a recovery job, or an
+   echoed terminal outbound operation linked to that same inbound sequence.
+   Status notices, non-terminal echoes and uncertain terminal sends do not
+   resolve it. Terminal-only echo coverage preserves legacy delivery paths
+   that complete an inbound without creating a terminal record. The observer
+   evaluates this evidence independently of `continuity_candidate_consumed_at`;
+   a consumed stamp alone is not proof of settlement. Failed terminal records
+   remain subject to the separate failed-terminal debt check.
    A turn an operator cancelled with `/stop` (`operator_cancelled`) is a
    requested outcome, not debt, so its failed terminal is not counted.
    A continuity candidate whose inbound is a synthetic scheduled-job turn
@@ -127,8 +135,8 @@ RGP is decomposed into independently reviewable layers, all now shipped:
    - **What they do not say.** The fields make no claim about queue
      position. In `single` and `shared` session scope one queue serves every
      chat, so several stale chats can sit behind one stuck turn. Sends with no
-     source inbound never count: the "Queued behind the current task"
-     receipt, startup, admin and health notices. `outbound_ops` records no
+     source inbound never count: the queued-message receipt ("Still working
+     on ... request"), startup, admin and health notices. `outbound_ops` records no
      message role, so a command reply sent through the chat queue while a row
      is the active turn is tied to that row and counts as a recent send; that
      is one reason these fields never page.

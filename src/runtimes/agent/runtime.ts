@@ -311,7 +311,7 @@ import {
 } from './restart-loop-guard.ts';
 import { canonicalConversationKey, resolvePhoneFromJid, resolvePhoneFromJidForGrant } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
-import { getCommandSpec } from './command-registry.ts';
+import { commandGateDenies, getCommandSpec } from './command-registry.ts';
 import { matchImperative, extractImperativeTarget } from '../../core/substrate/inline-extractor.ts';
 import { createBead } from '../../core/substrate/beads.ts';
 import { mkdirSync, copyFileSync, readdirSync, readFileSync } from 'node:fs';
@@ -2033,6 +2033,9 @@ export class AgentRuntime implements Runtime {
     send: (chatJid, text) => sendTracked(
       this.messenger, chatJid, text, this.durability ?? undefined, { replayPolicy: 'unsafe' },
     ),
+    // The /stop gate's admin count; only a DM receipt offers /stop.
+    adminCount: () => config.adminPhones.size,
+    pausedChatSettings: config, // live object: a DM's /stop offer follows ingest's paused-chat rule
   });
   /** Deferred and in-progress live-route recycle ownership by scope key. */
   private readonly routeRecycleLifecycle = new RouteRecycleLifecycle<SessionManager>();
@@ -5003,46 +5006,19 @@ export class AgentRuntime implements Runtime {
 
     if (classified.type === 'local') {
       const spec = getCommandSpec(classified.command);
-      // Gate enforcement by gate class. Both gated classes share the same
-      // authenticated-admin core: isWhatsAppAuthenticatedJid FIRST (QR-143 —
-      // a non-authenticated transport like @sms resolves to the SAME bare
-      // phone as the WhatsApp admin but its sender-ID is spoofable, so the
-      // transport check must precede the phone match), THEN admin-phone.
-      //  - 'admin'              → authenticated admin, any venue (B21-A F3, base
-      //                           parity: the deleted pre-registry gates were
-      //                           phone-only, so admins could run these from
-      //                           groups; isAdminMessage's DM-only clause is
-      //                           deliberately NOT used here): /sessions,
-      //                           /kill-session.
-      //  - 'admin-shared-scope' → /new: admin required ONLY where the reset hits SHARED
-      //                           session state (single/shared mode, or a per_chat GROUP —
-      //                           WG-5; this.session is one session across ALL chats there,
-      //                           :760); a per_chat 1:1 DM reset touches only the sender's
-      //                           own conversation → ungated. Group-permitting (an admin may
-      //                           /new in a group) AND @sms-closing (authenticated-JID check).
-      //                           With EMPTY adminPhones /new stays ungated too (B21-A F2,
-      //                           base parity): a no-admin instance has no other reset path,
-      //                           so deny-everyone would be a total /new lockout, not a
-      //                           security posture. The empty-set exemption is THIS gate
-      //                           only — plain 'admin' commands were admin-gated on base
-      //                           and stay denied when no admin is configured.
-      // Lazy so gate:'none' commands never pay the resolvePhoneFromJid DB read.
-      // B4: the grant primitive gates authenticated-transport-FIRST then resolves;
-      // a non-authenticated (@sms) sender yields null and is denied. Behaviour is
-      // identical to the prior isWhatsAppAuthenticatedJid && isAdminPhone(...) form
-      // (isAdminPhone(null) === false).
-      const isAuthenticatedAdmin = (): boolean => {
-        const phone = resolvePhoneFromJidForGrant(msg.senderJid, this.db);
-        return phone !== null && isAdminPhone(phone, config.adminPhones);
-      };
-      const denied =
-        spec.gate === 'admin'
-          ? !isAuthenticatedAdmin()
-          : spec.gate === 'admin-shared-scope'
-            ? (this.sessionScope !== 'per_chat' || msg.isGroup) &&
-              config.adminPhones.size > 0 &&
-              !isAuthenticatedAdmin()
-            : false;
+      // Gate enforcement by gate class: the one authority rule is
+      // commandGateDenies (command-registry.ts, where the gate classes are
+      // described), which the queued receipt also asks before offering /stop.
+      // 'admin-shared-scope' gates single/shared mode because this.session is
+      // one session across ALL chats there (WG-5). isAdmin is lazy, so
+      // gate:'none' commands never pay the phone-resolution DB read; the
+      // adminCount getter keeps adminPhones read only where the rule reads it.
+      const denied = commandGateDenies(spec.gate, {
+        sessionScope: this.sessionScope,
+        isGroup: msg.isGroup,
+        get adminCount() { return config.adminPhones.size; },
+        isAdmin: () => this.isAuthenticatedAdminJid(msg.senderJid),
+      });
       if (denied) {
         // NFR-3: unsampled — never silent (V19). ids only, no content (U6).
         // @check CHK-067 // @traces REQ-012.AC-06
@@ -9307,6 +9283,18 @@ export class AgentRuntime implements Runtime {
 
   private getTracker(mapKey?: string): OperationTracker | null {
     return getTrackerForPort(this.chatTransportHost, mapKey);
+  }
+
+  /**
+   * Authenticated-admin check behind the command gate. B4: the grant primitive
+   * checks the authenticated transport FIRST (QR-143: an @sms sender resolves
+   * to the same bare phone as the WhatsApp admin, but its sender id is
+   * spoofable), then resolves the phone; a non-authenticated sender yields
+   * null and is denied.
+   */
+  private isAuthenticatedAdminJid(senderJid: string): boolean {
+    const phone = resolvePhoneFromJidForGrant(senderJid, this.db);
+    return phone !== null && isAdminPhone(phone, config.adminPhones);
   }
 
   // #2981 car-A SHIM — fire-and-forget wrapper. The free function now returns

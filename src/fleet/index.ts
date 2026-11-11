@@ -884,6 +884,7 @@ export function createFleetServer(deps: FleetDeps) {
     stop(): void {
       closeIncidentStores();
       realtimePoller.stop();
+      dbReader.close();
       healthPoller.stop();
       discovery.stop();
       updateChecker.stop();

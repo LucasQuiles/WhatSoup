@@ -3,10 +3,12 @@
 // Harness: REAL AgentRuntime + REAL RuntimeTurnCoordinator + REAL per-chat
 // TurnQueue + REAL SQLite DurabilityEngine. Only the provider session and the
 // per-turn OutboundQueue are doubles (deferred-turn-admission.test.ts pattern).
-// Because the per-turn OutboundQueue is a double, `messenger.sendMessage` is
-// reached only by out-of-band sends, which is what the receipt must be: it must
-// never ride the active turn's outbound queue, where it would count as that
-// turn's visible answer.
+// The ingest-to-runtime cases also put the REAL ingest, admin-command check
+// and access policy in front of the runtime. Because the per-turn
+// OutboundQueue is a double, `messenger.sendMessage` is reached only by
+// out-of-band sends, which is what the receipt must be: it must never ride
+// the active turn's outbound queue, where it would count as that turn's
+// visible answer.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { Messenger, IncomingMessage } from '../../../src/core/types.ts';
@@ -133,6 +135,7 @@ const { mockConfig } = vi.hoisted(() => ({
     queuedTurnReceipt: true,
     fallbackTunables: { noticeDedupMs: 1_800_000, primaryRecheckMs: 300_000, probeStallThreshold: 12, probeStallCeilingMultiple: 10 },
     adminPhones: new Set<string>(['15550001']),
+    groupSenderPolicy: 'any_member' as 'any_member' | 'allowlisted_only',
     controlPeers: new Map<string, string>(),
     internalPeerJids: new Set<string>(),
     toolUpdateMode: 'full' as const,
@@ -148,6 +151,10 @@ const { mockConfig } = vi.hoisted(() => ({
     elevenlabs: { defaultVoiceId: 'v', defaultModel: 'm', stability: 0.5, similarityBoost: 0.75 },
     memory: { adminJid: 'admin@s.whatsapp.net' },
     ingest: { maxConcurrent: 1, maxQueueDepth: 10 },
+    // Set only by the ingest-to-runtime cases below; unset, as before, elsewhere.
+    accessMode: undefined as 'allowlist' | undefined,
+    pausedChats: undefined as Set<string> | undefined,
+    pausedChatBypassPatterns: undefined as string[] | undefined,
   },
 }));
 
@@ -172,12 +179,9 @@ vi.mock('../../../src/core/messages.ts', async (importOriginal) => ({
   updateTranscription: vi.fn(),
 }));
 
-vi.mock('../../../src/core/command-router.ts', () => ({
-  isAdminMessage: vi.fn(() => false), parseAdminCommand: vi.fn(() => null),
-}));
-vi.mock('../../../src/core/access-policy.ts', () => ({
-  shouldRespond: vi.fn(() => ({ respond: true, reason: 'allowed' })),
-}));
+// The admin-command check (command-router.ts) and the access policy stay REAL:
+// the ingest-to-runtime cases run them in front of the runtime, and no other
+// case reaches them, because those call runtime.handleMessage directly.
 
 vi.mock('../../../src/runtimes/agent/media-prep.ts', () => ({
   prepareContentForAgent: vi.fn(async (msg: IncomingMessage) => msg.content ?? ''),
@@ -278,12 +282,36 @@ vi.mock('node:fs', async (importOriginal) => {
 import { Database } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { AgentRuntime, type AgentRuntimeOptions } from '../../../src/runtimes/agent/runtime.ts';
-import { QUEUED_TURN_RECEIPT_TEXT } from '../../../src/runtimes/agent/runtime-queued-receipt.ts';
+import {
+  QUEUED_TURN_RECEIPT_NO_STOP_TEXT,
+  QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT,
+  QUEUED_TURN_RECEIPT_OTHER_TEXT,
+  QUEUED_TURN_RECEIPT_TEXT,
+} from '../../../src/runtimes/agent/runtime-queued-receipt.ts';
+import {
+  STOP_ACK_ALREADY_STOPPING,
+  STOP_ACK_NOTHING_TO_STOP,
+  STOP_ACK_STOPPED,
+  STOP_ACK_UNCERTAIN_DELIVERY,
+  STOP_ACK_UNCERTAIN_FAILED,
+  STOP_ACK_UNCERTAIN_NOT_PROVEN,
+  STOP_ACK_UNCERTAIN_STILL_ACTIVE,
+  STOP_ACK_UNCERTAIN_TIMEOUT,
+} from '../../../src/runtimes/agent/runtime-stop-command.ts';
+import { createIngestHandler } from '../../../src/core/ingest.ts';
+import { resolvePhoneFromJid } from '../../../src/core/access-list.ts';
+import { drainIngest } from '../../core/_helpers/ingest-drain.ts';
 import { installFakePerChatMcpSocketManager } from './helpers/fake-per-chat-mcp-socket-manager.ts';
 
 const chatJid = 'queued-receipt-chat@s.whatsapp.net';
 const conversationKey = toConversationKey(chatJid);
+/** The configured admin (mockConfig.adminPhones). */
 const senderJid = '15550001@s.whatsapp.net';
+const groupJid = 'queued-receipt-group@g.us';
+const nonAdminJid = '15550002@s.whatsapp.net';
+/** Another group member, whose request is the running one. */
+const groupMemberJid = '15550003@s.whatsapp.net';
+const DENIAL_TEXT = '_Not authorized._';
 
 function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
   return {
@@ -320,16 +348,43 @@ describe('#2949 queued receipt through the real per_chat admission path', () => 
     runtime.setDurability(engine);
   }
 
+  // Every receipt text counts: a cooldown regression on a later message would send the
+  // other-request text (more than one waiting), and must still show up here.
   function receiptSends(): unknown[][] {
+    const receipts: unknown[] = [
+      QUEUED_TURN_RECEIPT_TEXT,
+      QUEUED_TURN_RECEIPT_OTHER_TEXT,
+      QUEUED_TURN_RECEIPT_NO_STOP_TEXT,
+      QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT,
+    ];
     return vi.mocked(messenger.sendMessage).mock.calls
-      .filter((call) => call[1] === QUEUED_TURN_RECEIPT_TEXT);
+      .filter((call) => receipts.includes(call[1]));
   }
 
-  async function arrive(messageId: string, content: string): Promise<number> {
-    const seq = engine.journalInbound(messageId, conversationKey, chatJid, 'agent');
-    await runtime.handleMessage(makeMsg({ messageId, content, inboundSeq: seq }));
+  /** Every text the runtime sent: out of band, or through a per-chat outbound queue double. */
+  function allSentTexts(): string[] {
+    return [
+      ...vi.mocked(messenger.sendMessage).mock.calls.map((call) => String(call[1])),
+      ...queueDoubles.flatMap((queue) => queue.enqueueText.mock.calls.map((call) => String(call[0]))),
+    ];
+  }
+
+  async function arrive(
+    messageId: string,
+    content: string,
+    overrides: Partial<IncomingMessage> = {},
+  ): Promise<number> {
+    const chat = overrides.chatJid ?? chatJid;
+    const seq = engine.journalInbound(messageId, toConversationKey(chat), chat, 'agent');
+    await runtime.handleMessage(makeMsg({ messageId, content, inboundSeq: seq, ...overrides }));
     await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
     return seq;
+  }
+
+  /** A /stop from `sender` in `chat`; it carries no journal row, like the gate contract's probes. */
+  async function sendStop(messageId: string, overrides: Partial<IncomingMessage>): Promise<void> {
+    await runtime.handleMessage(makeMsg({ messageId, content: '/stop', ...overrides }));
+    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
   }
 
   function liveQueue(): TurnQueue | undefined {
@@ -337,10 +392,21 @@ describe('#2949 queued receipt through the real per_chat admission path', () => 
       .perChatTurnQueues.values()][0];
   }
 
+  // Every read of config.groupSenderPolicy, so the contract can show that
+  // building a receipt never reads it.
+  let policyRead = vi.fn((): 'any_member' | 'allowlisted_only' => 'any_member');
+
   beforeEach(() => {
     vi.clearAllMocks();
     resetDoubles();
     mockConfig.queuedTurnReceipt = true;
+    mockConfig.adminPhones = new Set<string>(['15550001']);
+    policyRead = vi.fn((): 'any_member' | 'allowlisted_only' => 'any_member');
+    Object.defineProperty(mockConfig, 'groupSenderPolicy', {
+      get: () => policyRead(),
+      configurable: true,
+      enumerable: true,
+    });
     db = new Database(':memory:');
     db.open();
     engine = new DurabilityEngine(db);
@@ -380,6 +446,7 @@ describe('#2949 queued receipt through the real per_chat admission path', () => 
     // Every enqueueText call's text, whatever role argument rode with it.
     const queuedTexts = queueDoubles.flatMap((queue) => queue.enqueueText.mock.calls.map((call) => call[0]));
     expect(queuedTexts).not.toContain(QUEUED_TURN_RECEIPT_TEXT);
+    expect(queuedTexts).not.toContain(QUEUED_TURN_RECEIPT_OTHER_TEXT);
   });
 
   it('the per-chat cooldown suppresses a second receipt behind the same task', async () => {
@@ -392,6 +459,8 @@ describe('#2949 queued receipt through the real per_chat admission path', () => 
 
     expect(liveQueue()?.pending).toBe(2);
     await vi.waitFor(() => expect(receiptSends()).toHaveLength(1));
+    // The one receipt is the second message's; the third (two waiting) got none.
+    expect(receiptSends()).toEqual([[chatJid, QUEUED_TURN_RECEIPT_TEXT]]);
   });
 
   it('the flag off sends no receipt for a queued message', async () => {
@@ -430,5 +499,243 @@ describe('#2949 queued receipt through the real per_chat admission path', () => 
     await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
 
     expect(receiptSends()).toEqual([]);
+  });
+
+  // Contract with the command gate and the audience (review of the /stop
+  // offer). Only a DM receipt offers /stop: every group member reads a group
+  // receipt, and no group can promise every reader a working /stop (ingest
+  // drops blocked, unresolved-LID and, under allowlisted_only, non-allowlisted
+  // members). Each row probes the REAL command gate for a reader who is not an
+  // admin (in a group, such a member; in a DM, the sender, the only reader)
+  // with an idle /stop, which answers at once: "_Not authorized._" when
+  // refused, the nothing-to-stop acknowledgement when accepted. Each row then
+  // pins the exact receipt, and that building it neither runs the gate's
+  // admin check nor reads the group sender policy. The queued sender's own
+  // admin status changes nothing.
+  type ContractRow = {
+    title: string;
+    isGroup: boolean;
+    admins: 'configured' | 'empty';
+    policy: 'any_member' | 'allowlisted_only';
+    sender: string;
+    stopDenied: boolean;
+    receipt: string;
+  };
+  const contractRows: ContractRow[] = [
+    { title: 'DM, admins configured, admin sender → offered, DM copy', isGroup: false, admins: 'configured', policy: 'any_member', sender: senderJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_TEXT },
+    { title: 'DM, admins configured, non-admin sender → offered, DM copy (a 1:1 chat is ungated)', isGroup: false, admins: 'configured', policy: 'any_member', sender: nonAdminJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_TEXT },
+    { title: 'DM, no admin configured, sender with the former admin number → offered, DM copy', isGroup: false, admins: 'empty', policy: 'any_member', sender: senderJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_TEXT },
+    { title: 'DM, no admin configured, non-admin sender → offered, DM copy', isGroup: false, admins: 'empty', policy: 'any_member', sender: nonAdminJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_TEXT },
+    { title: 'group, admins configured, admin sender → not offered: every member reads it', isGroup: true, admins: 'configured', policy: 'any_member', sender: senderJid, stopDenied: true, receipt: QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT },
+    { title: 'group, admins configured, non-admin sender → refused and not offered', isGroup: true, admins: 'configured', policy: 'any_member', sender: nonAdminJid, stopDenied: true, receipt: QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT },
+    { title: 'group, no admin configured, policy any_member, sender with the former admin number → not offered: a group never gets /stop', isGroup: true, admins: 'empty', policy: 'any_member', sender: senderJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT },
+    { title: 'group, no admin configured, policy any_member, non-admin sender → not offered', isGroup: true, admins: 'empty', policy: 'any_member', sender: nonAdminJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT },
+    { title: 'group, no admin configured, policy allowlisted_only, sender with the former admin number → not offered: not every member reaches /stop', isGroup: true, admins: 'empty', policy: 'allowlisted_only', sender: senderJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT },
+    { title: 'group, no admin configured, policy allowlisted_only, non-admin sender → not offered', isGroup: true, admins: 'empty', policy: 'allowlisted_only', sender: nonAdminJid, stopDenied: false, receipt: QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT },
+  ];
+
+  it.each(contractRows.map((row) => [row.title, row] as const))(
+    'the receipt offers /stop only in a DM, and never runs the admin check or reads the group sender policy: %s',
+    async (_title, row) => {
+      if (row.admins === 'empty') mockConfig.adminPhones = new Set<string>();
+      policyRead.mockReturnValue(row.policy);
+      makeRuntime({ sessionScope: 'per_chat' });
+      const chat = row.isGroup ? groupJid : chatJid;
+      const venue = { chatJid: chat, isGroup: row.isGroup };
+      // The command gate's own admin check, spied so the receipt path can be
+      // shown never to call it.
+      const isAdmin = vi.spyOn(
+        runtime as unknown as { isAuthenticatedAdminJid: (senderJid: string) => boolean },
+        'isAuthenticatedAdminJid',
+      );
+
+      // The gate's answer for a reader who is not an admin, from an idle /stop.
+      await sendStop('wamid-probe-stop', { ...venue, senderJid: row.isGroup ? nonAdminJid : row.sender });
+      await vi.waitFor(() => expect(
+        allSentTexts().filter((text) => text === DENIAL_TEXT || text === STOP_ACK_NOTHING_TO_STOP),
+      ).toHaveLength(1));
+      const stopDenied = allSentTexts().includes(DENIAL_TEXT);
+      // Positive control: the spy sees the gate's admin check, which the gate
+      // runs only in a group with admins configured.
+      expect(isAdmin).toHaveBeenCalledTimes(row.isGroup && row.admins === 'configured' ? 1 : 0);
+      isAdmin.mockClear();
+      policyRead.mockClear();
+
+      // In a group the running request is another member's; in a DM it is the sender's own.
+      await arrive('wamid-running', 'first question', {
+        ...venue,
+        senderJid: row.isGroup ? groupMemberJid : row.sender,
+      });
+      await vi.waitFor(() => expect(sessionDoubles.some((s) => s.turnInFlight)).toBe(true));
+      await arrive('wamid-queued', 'second question', { ...venue, senderJid: row.sender });
+      await vi.waitFor(() => expect(receiptSends()).toHaveLength(1));
+      const receipt = String(receiptSends()[0]?.[1]);
+
+      expect(stopDenied).toBe(row.stopDenied);
+      // Never offered where the gate refuses a reader.
+      expect(stopDenied && receipt.includes('/stop')).toBe(false);
+      expect(receiptSends()[0]).toEqual([chat, row.receipt]);
+      expect(isAdmin).not.toHaveBeenCalled();
+      expect(policyRead).not.toHaveBeenCalled();
+    },
+  );
+
+  it('in a per_chat group with admins configured, an admin\'s queued message gets a receipt without /stop, because every member reads it; a member who is not an admin is still refused /stop', async () => {
+    makeRuntime({ sessionScope: 'per_chat' });
+    const venue = { chatJid: groupJid, isGroup: true };
+    const running = await arrive('wamid-group-running', 'first question', { ...venue, senderJid: groupMemberJid });
+    await vi.waitFor(() => expect(sessionDoubles.some((s) => s.turnInFlight)).toBe(true));
+
+    // senderJid is the configured admin.
+    await arrive('wamid-group-queued', 'second question', { ...venue, senderJid });
+
+    await vi.waitFor(() => expect(receiptSends()).toHaveLength(1));
+    expect(receiptSends()[0]).toEqual([groupJid, QUEUED_TURN_RECEIPT_OTHER_NO_STOP_TEXT]);
+    expect(allSentTexts().some((text) => text.includes('/stop'))).toBe(false);
+
+    // A member who is not an admin sends /stop anyway, mid-turn: the gate refuses it.
+    await sendStop('wamid-group-stop', { ...venue, senderJid: nonAdminJid });
+    await vi.waitFor(() => expect(allSentTexts()).toContain(DENIAL_TEXT));
+    // Refused, so nothing was torn down: the running request and the queued message remain.
+    expect(liveQueue()?.activeTurn?.inboundSeq).toBe(running);
+    expect(liveQueue()?.pending).toBe(1);
+  });
+
+  // Review break (round 4): ingest dispatches a message in a chat listed in
+  // pausedChats only when its content matches a pausedChatBypassPatterns entry,
+  // and /stop is not an admin command. A DM receipt that offered /stop there
+  // could promise a command that ingest then drops. These cases put the REAL
+  // ingest, with the REAL admin-command check and access policy, in front of
+  // the runtime above. The receipt offers /stop only when the bypass admits a
+  // bare /stop, and the /stop then does what the receipt said.
+  describe('ingest to runtime: a paused 1:1 chat', () => {
+    /** The sender's own 1:1 chat. The sender is allowlisted and is not an admin. */
+    const dmJid = nonAdminJid;
+    const botJid = '15550000@s.whatsapp.net';
+    let ingest: (msg: IncomingMessage) => Promise<void>;
+
+    /** Every reply a /stop sends: a refusal, nothing to stop, or an outcome. An
+     *  outcome can carry a note on the dropped messages, so these are prefixes. */
+    const STOP_REPLIES = [
+      DENIAL_TEXT,
+      STOP_ACK_NOTHING_TO_STOP,
+      STOP_ACK_ALREADY_STOPPING,
+      STOP_ACK_STOPPED,
+      STOP_ACK_UNCERTAIN_TIMEOUT,
+      STOP_ACK_UNCERTAIN_FAILED,
+      STOP_ACK_UNCERTAIN_STILL_ACTIVE,
+      STOP_ACK_UNCERTAIN_DELIVERY,
+      STOP_ACK_UNCERTAIN_NOT_PROVEN,
+    ];
+    /** The replies of a /stop that tore down a running task: stopped, or uncertain. */
+    const MID_TASK_STOP_OUTCOMES = STOP_REPLIES.filter(
+      (reply) => reply !== DENIAL_TEXT && reply !== STOP_ACK_NOTHING_TO_STOP && reply !== STOP_ACK_ALREADY_STOPPING,
+    );
+
+    function sentMatching(replies: readonly string[]): string[] {
+      return allSentTexts().filter((text) => replies.some((reply) => text.startsWith(reply)));
+    }
+
+    /** The texts ingest handed to the runtime, in order. */
+    function dispatched(): Array<string | null> {
+      return vi.mocked(runtime.handleMessage).mock.calls.map(([msg]) => msg.content);
+    }
+
+    function inboundRow(messageId: string): { routed_to: string; terminal_reason: string | null } | undefined {
+      return db.raw
+        .prepare('SELECT routed_to, terminal_reason FROM inbound_events WHERE message_id = ?')
+        .get(messageId) as { routed_to: string; terminal_reason: string | null } | undefined;
+    }
+
+    function dmMsg(messageId: string, content: string): IncomingMessage {
+      return makeMsg({ messageId, chatJid: dmJid, senderJid: dmJid, content });
+    }
+
+    /** One message through ingest, waited on until ingest and the runtime's turn chain are idle. */
+    async function ingestDm(messageId: string, content: string): Promise<void> {
+      // The returned promise is the transport bridge's and can stay pending; drainIngest is the signal.
+      void ingest(dmMsg(messageId, content));
+      await drainIngest();
+      await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+    }
+
+    /** A running request and a queued one, both admitted by the bypass; returns the receipt. */
+    async function queueBehindRunningRequest(): Promise<unknown[] | undefined> {
+      makeRuntime({ sessionScope: 'per_chat' });
+      vi.spyOn(runtime, 'handleMessage');
+      ingest = createIngestHandler(db, messenger, runtime, () => botJid, () => null, engine);
+
+      await ingestDm('wamid-paused-running', 'urgent: first question');
+      await vi.waitFor(() => expect(sessionDoubles.some((s) => s.turnInFlight)).toBe(true));
+      await ingestDm('wamid-paused-queued', 'urgent: second question');
+
+      expect(dispatched()).toEqual(['urgent: first question', 'urgent: second question']);
+      expect(liveQueue()?.pending).toBe(1);
+      await vi.waitFor(() => expect(receiptSends()).toHaveLength(1));
+      return receiptSends()[0];
+    }
+
+    beforeEach(() => {
+      mockConfig.accessMode = 'allowlist';
+      mockConfig.pausedChats = new Set([dmJid]);
+      db.raw.prepare(
+        `INSERT OR IGNORE INTO access_list (subject_type, subject_id, status, display_name, requested_at)
+         VALUES ('phone', ?, 'allowed', 'Allowed', datetime('now'))`,
+      ).run(resolvePhoneFromJid(dmJid, db));
+    });
+
+    afterEach(() => {
+      mockConfig.accessMode = undefined;
+      mockConfig.pausedChats = undefined;
+      mockConfig.pausedChatBypassPatterns = undefined;
+    });
+
+    it('a bypass that admits the queued message but not /stop: the receipt has no /stop sentence, and a bare /stop is dropped at ingest', async () => {
+      mockConfig.pausedChatBypassPatterns = ['^urgent:'];
+
+      const receipt = await queueBehindRunningRequest();
+
+      expect(receipt).toEqual([dmJid, QUEUED_TURN_RECEIPT_NO_STOP_TEXT]);
+      const running = liveQueue()?.activeTurn?.inboundSeq;
+      expect(running).toBeDefined();
+
+      // The reader sends a bare /stop anyway.
+      await ingestDm('wamid-paused-stop', '/stop');
+
+      // Ingest dropped it as paused: stored and journaled, never dispatched, no reply.
+      expect(inboundRow('wamid-paused-stop')).toEqual({ routed_to: 'none', terminal_reason: 'chat_paused' });
+      expect(dispatched()).not.toContain('/stop');
+      expect(sentMatching(STOP_REPLIES)).toEqual([]);
+      // Nothing was torn down: the running request and the queued message remain.
+      expect(liveQueue()?.activeTurn?.inboundSeq).toBe(running);
+      expect(liveQueue()?.pending).toBe(1);
+    });
+
+    it('a bypass that admits /stop: the receipt offers /stop, and a bare /stop reaches the runtime and tears the task down', async () => {
+      mockConfig.pausedChatBypassPatterns = ['^urgent:', '^/stop$'];
+
+      const receipt = await queueBehindRunningRequest();
+
+      expect(receipt).toEqual([dmJid, QUEUED_TURN_RECEIPT_TEXT]);
+
+      // An accepted mid-task /stop holds its ingest slot until its teardown
+      // settles, so it is not drained here.
+      void ingest(dmMsg('wamid-bypass-stop', '/stop'));
+      await vi.waitFor(() => expect(dispatched()).toContain('/stop'));
+      // The teardown shuts the session down, then waits for its running
+      // provider turn to end. Only a shut-down session's turn is ended, as a
+      // killed provider process's would be, so no turn ends on its own first.
+      await vi.waitFor(() => {
+        for (const session of sessionDoubles) {
+          if (session.turnInFlight && session.shutdown.mock.calls.length > 0) session.completeProviderTurn();
+        }
+        expect(sentMatching(STOP_REPLIES)).toHaveLength(1);
+      }, { timeout: 5_000 });
+      await drainIngest();
+
+      expect(sentMatching(MID_TASK_STOP_OUTCOMES)).toHaveLength(1);
+      expect(inboundRow('wamid-bypass-stop')?.routed_to).not.toBe('none');
+      expect(inboundRow('wamid-bypass-stop')?.terminal_reason).not.toBe('chat_paused');
+    });
   });
 });

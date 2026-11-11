@@ -324,6 +324,121 @@ def test_continuity_mark_split_matches_the_case_sensitive_synthetic_prefix(db_pa
     assert result["counts"]["syntheticContinuityCandidates"] == 1
 
 
+@properties
+@given(
+    seq=st.integers(min_value=1, max_value=1_000_000),
+    terminal=st.booleans(),
+    status=st.sampled_from(("pending", "sending", "submitted", "maybe_sent", "quarantined", "failed_permanent", "echoed")),
+)
+@example(seq=1, terminal=False, status="pending")
+@example(seq=1, terminal=False, status="sending")
+@example(seq=1, terminal=False, status="submitted")
+@example(seq=1, terminal=False, status="maybe_sent")
+@example(seq=1, terminal=False, status="quarantined")
+@example(seq=1, terminal=False, status="failed_permanent")
+@example(seq=1, terminal=False, status="echoed")
+@example(seq=1, terminal=True, status="pending")
+@example(seq=1, terminal=True, status="sending")
+@example(seq=1, terminal=True, status="submitted")
+@example(seq=1, terminal=True, status="maybe_sent")
+@example(seq=1, terminal=True, status="quarantined")
+@example(seq=1, terminal=True, status="failed_permanent")
+@example(seq=1, terminal=True, status="echoed")
+def test_marked_inbound_requires_echoed_terminal_coverage(
+    seq: int, terminal: bool, status: str
+) -> None:
+    mod = _load_module()
+    settled = terminal and status == "echoed"
+    with private_case() as (root, _patch):
+        db_path = root / "bot.db"
+        with sqlite3.connect(db_path) as db:
+            _create_schema(db)
+            _insert_inbound(
+                db, seq=seq, received_at="2026-08-15 21:00:00",
+                status="complete" if settled else "failed",
+                continuity="runtime_fault_no_terminal_outbound",
+            )
+            db.execute(
+                "INSERT INTO outbound_ops(id,source_inbound_seq,status,is_terminal,replay_policy) VALUES(1,?,?,?, 'unsafe')",
+                (seq, status, terminal),
+            )
+        result = mod.observe_database(
+            db_path, instance="agent-a", now=datetime(2026, 8, 15, 22, tzinfo=UTC), stale_seconds=900,
+        )
+    assert result["state"] == ("clear" if settled else "recovery-debt")
+    assert result["counts"]["unresolvedContinuityCandidates"] == (0 if settled else 1)
+    assert result["healthImpact"] == "none"
+
+
+def test_terminal_echo_for_another_inbound_does_not_cover_status_only_drop(db_path: Path) -> None:
+    mod = _load_module()
+    with sqlite3.connect(db_path) as db:
+        _insert_inbound(
+            db, seq=1, received_at="2026-08-15 21:00:00", status="failed",
+            continuity="runtime_fault_no_terminal_outbound",
+        )
+        _insert_inbound(db, seq=2, received_at="2026-08-15 21:00:00", status="complete")
+        db.executemany(
+            "INSERT INTO outbound_ops(id,source_inbound_seq,status,is_terminal,replay_policy) VALUES(?,?,'echoed',?,'unsafe')",
+            [(1, 1, 0), (2, 2, 1)],
+        )
+    result = mod.observe_database(
+        db_path, instance="agent-a", now=datetime(2026, 8, 15, 22, tzinfo=UTC), stale_seconds=900,
+    )
+    assert result["state"] == "recovery-debt"
+    assert result["counts"]["unresolvedContinuityCandidates"] == 1
+
+
+def test_consumed_stamp_alone_does_not_resolve_reply_debt(db_path: Path) -> None:
+    mod = _load_module()
+    with sqlite3.connect(db_path) as db:
+        db.execute("ALTER TABLE inbound_events ADD COLUMN continuity_candidate_consumed_at TEXT")
+        _insert_inbound(
+            db, seq=1, received_at="2026-08-15 21:00:00", status="failed",
+            continuity="runtime_fault_no_terminal_outbound",
+        )
+        db.execute("UPDATE inbound_events SET continuity_candidate_consumed_at='2026-08-15 21:30:00'")
+        db.execute(
+            "INSERT INTO outbound_ops(id,source_inbound_seq,status,is_terminal,replay_policy) VALUES(1,1,'echoed',0,'unsafe')"
+        )
+    result = mod.observe_database(
+        db_path, instance="agent-a", now=datetime(2026, 8, 15, 22, tzinfo=UTC), stale_seconds=900,
+    )
+    assert result["state"] == "recovery-debt"
+    assert result["counts"]["unresolvedContinuityCandidates"] == 1
+
+
+@pytest.mark.parametrize("owner", ["terminal", "recovery"])
+def test_mark_with_existing_owner_is_not_counted_again(db_path: Path, owner: str) -> None:
+    mod = _load_module()
+    with sqlite3.connect(db_path) as db:
+        _insert_inbound(
+            db, seq=1, received_at="2026-08-15 21:00:00", status="failed",
+            continuity="runtime_fault_no_terminal_outbound",
+        )
+        db.execute(
+            "INSERT INTO outbound_ops(id,source_inbound_seq,status,is_terminal,replay_policy) VALUES(1,1,'echoed',0,'unsafe')"
+        )
+        if owner == "terminal":
+            db.execute(
+                "INSERT INTO turn_terminal_records(id,inbound_seq,inbound_seq_key,inbound_disposition,delivery_kind,reply_guarantee_disarmed) VALUES(1,1,1,'failed_terminal','none',0)"
+            )
+        else:
+            db.execute(
+                "INSERT INTO turn_terminal_records(id,inbound_seq,inbound_seq_key,inbound_disposition,delivery_kind,reply_guarantee_disarmed) VALUES(1,1,1,'transferred_to_recovery_owner','delivery_unknown',0)"
+            )
+            db.execute(
+                "INSERT INTO turn_recovery_jobs(id,terminal_record_id,source_inbound_seq,state,next_attempt_at) VALUES(1,1,1,'pending','2026-08-15 22:01:00')"
+            )
+    result = mod.observe_database(
+        db_path, instance="agent-a", now=datetime(2026, 8, 15, 22, tzinfo=UTC), stale_seconds=900,
+    )
+    assert result["state"] != "inconclusive", result["reason"]
+    assert result["counts"]["unresolvedContinuityCandidates"] == 0
+    assert result["counts"]["failedTerminalDebt"] == (1 if owner == "terminal" else 0)
+    assert result["state"] == ("recovery-debt" if owner == "terminal" else "clear")
+
+
 def test_clean_database_reports_clear(db_path: Path) -> None:
     mod = _load_module()
     with sqlite3.connect(db_path) as db:
