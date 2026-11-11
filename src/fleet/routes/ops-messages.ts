@@ -20,7 +20,17 @@ import { isGroupConversationKey, conversationKeyToJid } from '../../core/convers
 import { toPersonalJid } from '../../core/jid-constants.ts';
 import { publishMessageReceived, publishChatUpdated, publishAccessChanged, publishFeedEvent } from '../realtime-publisher.ts';
 import { validateInstanceName } from './instance-name.ts';
+import { mutationError } from '../response-error-projection.ts';
+import { createChildLogger } from '../../logger.ts';
 import type { OpsDeps } from './ops.ts';
+
+const log = createChildLogger('fleet:ops-messages');
+
+function respondUnconfirmedSend(res: ServerResponse, err: unknown, status: number): void {
+  const response = mutationError(err, { operation: 'message_send', stage: 'execute', mutationState: 'unknown' }, 'message_send_unconfirmed');
+  log.error({ err, correlation_id: response.correlation_id }, 'Message send outcome unconfirmed');
+  jsonResponse(res, status, response);
+}
 
 /** POST /api/lines/:name/send — route a message to the instance. */
 export async function handleSend(
@@ -48,6 +58,7 @@ export async function handleSend(
   // HTTP callers; MCP xor protects direct-MCP callers. Instance returns its own
   // error (propagated as 502) when an alias is unknown.
   let fixedBody = body;
+  let dryRun = false;
   try {
     const parsed = JSON.parse(body);
 
@@ -63,6 +74,7 @@ export async function handleSend(
       });
       return;
     }
+    dryRun = parsed.dryRun === true;
 
     // Trim before length check: whitespace-only values count as not-provided
     // (matches resolver semantics in src/core/chats-resolver.ts and prevents
@@ -100,26 +112,30 @@ export async function handleSend(
   }
 
   // Route 1: Try MCP socket (passive instances with verified socket)
-  if (instance.type === 'passive' && instance.socketPath) {
+  if (instance.type === 'passive' && instance.socketPath && fs.existsSync(instance.socketPath)) {
     try {
-      const socketStat = fs.existsSync(instance.socketPath!);
-      if (socketStat) {
-        const parsed = JSON.parse(fixedBody);
-        const result = await mcpCall(instance.socketPath, 'send_message', parsed);
-        // Publish realtime events only on a fully clean tool envelope —
-        // transport failure (`success: false`) and tool-level error
-        // (`toolError: true`) must NOT fan out a "message received" signal.
-        if (result.success && !result.toolError) {
-          publishMessageReceived(deps.realtime, params.name);
-          publishChatUpdated(deps.realtime, params.name);
-          publishFeedEvent(deps.realtime, params.name);
-        }
-        // Route through `respondMcp` so `isError: true` envelopes map to
-        // 4xx/5xx like the dedicated MCP proxy routes (issue #257 parity).
-        respondMcp(res, result, 200);
+      const parsed = JSON.parse(fixedBody);
+      const result = await mcpCall(instance.socketPath, 'send_message', parsed);
+      if (!result.success) {
+        respondUnconfirmedSend(res, new Error(result.error ?? 'MCP send response unavailable'), 502);
         return;
       }
-    } catch { /* intentional: fall through to HTTP — a failed MCP socket send retries via the health-port route below */ }
+      // Publish realtime events only on a fully clean tool envelope —
+      // transport failure (`success: false`) and tool-level error
+      // (`toolError: true`) must NOT fan out a "message received" signal.
+      if (result.success && !result.toolError && !dryRun) {
+        publishMessageReceived(deps.realtime, params.name);
+        publishChatUpdated(deps.realtime, params.name);
+        publishFeedEvent(deps.realtime, params.name);
+      }
+      // Route through `respondMcp` so `isError: true` envelopes map to
+      // 4xx/5xx like the dedicated MCP proxy routes (issue #257 parity).
+      respondMcp(res, result, 200);
+      return;
+    } catch (err) {
+      respondUnconfirmedSend(res, err, 500);
+      return;
+    }
   }
 
   // Route 2: HTTP health server /send (works for ALL instance types)
@@ -128,7 +144,11 @@ export async function handleSend(
     const result = await proxyToInstance(
       instance.healthPort, '/send', 'POST', fixedBody, instance.healthToken,
     );
-    if (result.status >= 200 && result.status < 300) {
+    if (result.status >= 500) {
+      respondUnconfirmedSend(res, new Error(`HTTP send returned ${result.status}`), result.status);
+      return;
+    }
+    if (result.status >= 200 && result.status < 300 && !dryRun) {
       publishMessageReceived(deps.realtime, params.name);
       publishChatUpdated(deps.realtime, params.name);
       publishFeedEvent(deps.realtime, params.name);

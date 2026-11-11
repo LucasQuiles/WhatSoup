@@ -45,6 +45,7 @@ export type FleetErrorCode =
   | 'config_write_failed'
   | 'instance_creation_failed'
   | 'instance_cleanup_failed'
+  | 'message_send_unconfirmed'
   | 'auth_failed'
   | 'auth_timeout'
   | 'validation_failed'
@@ -60,6 +61,7 @@ export type FleetOperation =
   | 'config_write'
   | 'instance_create'
   | 'instance_delete'
+  | 'message_send'
   | 'auth'
   | 'checkpoint_restore'
   | 'log_scan'
@@ -136,6 +138,7 @@ const SAFE_MESSAGES: Record<FleetErrorCode, string> = {
   config_write_failed: 'Configuration could not be written.',
   instance_creation_failed: 'Instance creation failed.',
   instance_cleanup_failed: 'Instance cleanup is incomplete. Inspect remaining state before retrying.',
+  message_send_unconfirmed: 'Message delivery was not confirmed. Check message history before sending again.',
   auth_failed: 'Authentication failed.',
   auth_timeout: 'Authentication timed out. Please retry.',
   validation_failed: 'The request failed validation.',

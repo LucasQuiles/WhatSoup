@@ -231,6 +231,19 @@ For a previously linked line, a successful persona save returns to the ceremony.
 A rejected save keeps the editor and its input open. Pending creates and persona
 saves admit one request and disable navigation that would discard their outcome.
 
+The optional first message admits one attempt while the ceremony is open. A lost
+response leaves the draft visible with an unconfirmed status and **Check Inbox**;
+it does not automatically resend or announce success. Inspect that line's message
+history before another send. Leaving the page does not cancel an accepted send,
+and a late response cannot navigate or announce success on the abandoned page.
+This is a per-page duplicate guard, not delivery deduplication across reloads or
+other clients. At the fleet API, a failed socket response or HTTP server error returns
+`message_send_unconfirmed` with `mutation_state: unknown` and `retryable: false`;
+the existing HTTP status is retained. A thrown socket send has the same outcome
+with status 500 and cannot fall through into a second HTTP send. HTTP routing remains available
+when the socket is absent before any send attempt. A successful `dryRun` retains
+its result without publishing message, chat or feed activity.
+
 5-step provisioning flow for creating new instances. Accessed via the "Add Line" button on the fleet overview.
 
 ![Add Line Wizard](screenshots/add-line-wizard.png)

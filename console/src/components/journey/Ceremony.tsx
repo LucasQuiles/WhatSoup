@@ -11,7 +11,7 @@
  * at the Agent step only — the mockup's ceremony dice would be fiction here
  * (documented deviation).
  */
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { useToast } from '../../hooks/toast-context'
 import { api } from '../../lib/api'
@@ -38,31 +38,35 @@ export function Ceremony({
   const navigate = useNavigate()
   const toast = useToast()
   const [msg, setMsg] = useState('')
-  const [sending, setSending] = useState(false)
+  const [sendState, setSendState] = useState<'idle' | 'pending' | 'unconfirmed'>('idle')
+  const attempted = useRef(false)
+  const mounted = useRef(false)
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
+  const sending = sendState === 'pending'
+  const unconfirmed = sendState === 'unconfirmed'
 
   const goLive = async () => {
+    if (attempted.current) return
     const text = msg.trim()
     if (!text) {
       navigate('/')
       return
     }
-    setSending(true)
+    attempted.current = true
+    setSendState('pending')
     try {
-      // The line boots on link; a just-linked transport can still be settling,
-      // so one retry after a beat is honest engineering, not a swallowed error.
-      try {
-        await api.sendMessage(lineName, adminPhone, text)
-      } catch {
-        await new Promise((r) => setTimeout(r, 3000))
-        await api.sendMessage(lineName, adminPhone, text)
-      }
+      await api.sendMessage(lineName, adminPhone, text)
+      if (!mounted.current) return
       toast.success(`${name} is live — first message sent to your admin`)
       navigate('/')
-    } catch (e) {
-      toast.error(`First message failed: ${e instanceof Error ? e.message : e}. The line still sends its own intro on boot.`)
-      navigate('/')
-    } finally {
-      setSending(false)
+    } catch {
+      if (!mounted.current) return
+      // A lost response cannot establish whether the transport already sent the message.
+      setSendState('unconfirmed')
+      toast.error('First message was not confirmed. Check Inbox before sending again.')
     }
   }
 
@@ -102,6 +106,7 @@ export function Ceremony({
           onChange={(e) => setMsg(e.target.value)}
           placeholder="Say hello to your new agent…"
           aria-label="First message (optional)"
+          disabled={sending}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
               e.preventDefault()
@@ -109,15 +114,19 @@ export function Ceremony({
             }
           }}
         />
-        <Button variant="primary" disabled={sending} onClick={() => void goLive()}>
+        <Button variant="primary" disabled={sending || unconfirmed} onClick={() => void goLive()}>
           {sending ? 'Sending…' : 'Send & go live'}
         </Button>
       </div>
+      {unconfirmed && <div>
+        <p role="status">Delivery was not confirmed. Your message may have been sent. Check Inbox before sending it again.</p>
+        <Button variant="neutral" onClick={() => navigate('/inbox')}>Check Inbox</Button>
+      </div>}
       <div className="journey-actions">
-        <Button variant="ghost" onClick={() => navigate('/')}>
+        <Button variant="ghost" disabled={sending} onClick={() => navigate('/')}>
           Skip ceremony
         </Button>
-        <Button variant="neutral" onClick={onAdjust}>
+        <Button variant="neutral" disabled={sending || unconfirmed} onClick={onAdjust}>
           Adjust persona
         </Button>
       </div>

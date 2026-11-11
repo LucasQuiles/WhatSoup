@@ -267,6 +267,27 @@ describe('handleSend', () => {
     vi.mocked(fs.existsSync).mockImplementation(actualExistsSync);
   });
 
+  it.each(['mcp', 'http'])('does not publish message activity for a %s dry run', async (route) => {
+    const inst = fakeInstance({ type: route === 'mcp' ? 'passive' : 'agent', socketPath: '/state/test-line/whatsoup.sock' });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    const outcome = { sent: false, dryRun: true, resolved_chatJid: '123@s.whatsapp.net' };
+    vi.mocked(mcpCall).mockResolvedValue({ success: true, result: outcome });
+    vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: JSON.stringify(outcome) });
+    const res = mockRes();
+    await handleSend(mockReq({ method: 'POST', body: JSON.stringify({ chatJid: '123', text: 'hi', dryRun: true }) }), res, deps, { name: 'test-line' });
+    expect(res._status).toBe(200);
+    expect(JSON.parse(res._body)).toEqual(outcome);
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
+    if (route === 'mcp') {
+      expect(mcpCall).toHaveBeenCalledExactlyOnceWith(inst.socketPath, 'send_message', { chatJid: '123@s.whatsapp.net', text: 'hi', dryRun: true });
+      expect(proxyToInstance).not.toHaveBeenCalled();
+    } else {
+      expect(proxyToInstance).toHaveBeenCalledExactlyOnceWith(3010, '/send', 'POST', JSON.stringify({ chatJid: '123@s.whatsapp.net', text: 'hi', dryRun: true }), 'tok123');
+      expect(mcpCall).not.toHaveBeenCalled();
+    }
+  });
+
   it('returns 404 for unknown instance', async () => {
     const deps = depsFor();
     const res = mockRes();
@@ -319,6 +340,38 @@ describe('handleSend', () => {
       mockReq({ method: 'POST', body: JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' }) }),
       res, deps, { name: 'test-line' });
     expect(res._status).toBe(502);
+    expect(JSON.parse(res._body)).toMatchObject({ code: 'message_send_unconfirmed', mutation_state: 'unknown', retryable: false });
+    expect(proxyToInstance).not.toHaveBeenCalled();
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
+  });
+
+  it.each([500, 502, 504])('reports HTTP send uncertainty at status %s without a success event or retry', async (status) => {
+    const inst = fakeInstance({ type: 'chat' });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    vi.mocked(proxyToInstance).mockResolvedValue({ status, body: '{"error":"private-upstream-canary"}' });
+    const res = mockRes();
+    await handleSend(mockReq({ method: 'POST', body: JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' }) }), res, deps, { name: 'test-line' });
+    expect(proxyToInstance).toHaveBeenCalledTimes(1);
+    expect(mcpCall).not.toHaveBeenCalled();
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
+    expect(res._status).toBe(status);
+    expect(JSON.parse(res._body)).toMatchObject({ code: 'message_send_unconfirmed', mutation_state: 'unknown', retryable: false });
+    expect(res._body).not.toContain('private-upstream-canary');
+  });
+
+  it.each([200, 400])('preserves HTTP outcome %s when no socket send was attempted', async (status) => {
+    const inst = fakeInstance({ type: 'passive', socketPath: '/missing/sock' });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+    const body = JSON.stringify(status === 200 ? { ok: true } : { error: 'invalid recipient' });
+    vi.mocked(proxyToInstance).mockResolvedValue({ status, body });
+    const res = mockRes();
+    await handleSend(mockReq({ method: 'POST', body: JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' }) }), res, deps, { name: 'test-line' });
+    expect(mcpCall).not.toHaveBeenCalled();
+    expect(proxyToInstance).toHaveBeenCalledTimes(1);
+    expect(res._status).toBe(status);
+    expect(res._body).toBe(body);
+    expect(deps.realtime.publish).toHaveBeenCalledTimes(status === 200 ? 3 : 0);
   });
 
   it('returns 400 for invalid JSON body without forwarding downstream', async () => {
@@ -457,12 +510,12 @@ describe('handleSend', () => {
     expect(JSON.parse(res._body).error).toMatch(/chatJid.*to|to.*chatJid/);
   });
 
-  it('propagates 502 when instance reports unknown alias not found', async () => {
+  it('does not infer a confirmed tool rejection from transport error prose', async () => {
     const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
     const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     vi.mocked(fs.existsSync).mockReturnValue(true);
-    // Simulate the per-instance MCP returning an alias-not-found error.
+    // Only a tool-error envelope establishes a validation rejection.
     vi.mocked(mcpCall).mockResolvedValue({
       success: false, error: 'alias not found: unknown',
     });
@@ -473,7 +526,23 @@ describe('handleSend', () => {
       res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(502);
-    expect(JSON.parse(res._body).error).toMatch(/alias not found/);
+    expect(JSON.parse(res._body)).toMatchObject({ code: 'message_send_unconfirmed', mutation_state: 'unknown', retryable: false });
+    expect(proxyToInstance).not.toHaveBeenCalled();
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
+  });
+
+  it('preserves the documented alias rejection from a confirmed MCP tool-error envelope', async () => {
+    const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(mcpCall).mockResolvedValue({ success: true, toolError: true,
+      result: { isError: true, content: [{ type: 'text', text: 'alias not found: unknown' }] } });
+    const res = mockRes();
+    await handleSend(mockReq({ method: 'POST', body: JSON.stringify({ to: 'unknown', text: 'hi' }) }), res, deps, { name: 'test-line' });
+    expect(res._status).toBe(422);
+    expect(JSON.parse(res._body)).toMatchObject({ error: 'alias not found: unknown', isError: true });
+    expect(proxyToInstance).not.toHaveBeenCalled();
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
   });
 
   // ── P1-D code-review I-1 / I-2 regression guards ──────────────────────────
@@ -3177,8 +3246,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     expect(forwarded.chatJid).toBe('1111111000000000@g.us');
   });
 
-  // --- handleSend: passive instance whose socket exists but mcpCall throws -> fall to HTTP (ops.ts:222) ---
-  it('handleSend falls back to healthPort when mcpCall throws on the passive socket route', async () => {
+  it('handleSend preserves uncertainty after a socket send throws without duplicating it over HTTP', async () => {
     const inst = fakeInstance({
       type: 'passive',
       socketPath: '/state/test-line/whatsoup.sock',
@@ -3188,16 +3256,19 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       discovery: { getInstance: vi.fn(() => inst) } as any,
     });
     vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(mcpCall).mockRejectedValue(new Error('socket gone'));
+    vi.mocked(mcpCall).mockRejectedValue(new Error('response lost: secret-path-canary'));
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
     const res = mockRes();
     await handleSend(
       mockReq({ method: 'POST', body: JSON.stringify({ chatJid: '15550000001@s.whatsapp.net', text: 'hi' }) }),
       res, deps, { name: 'test-line' });
-    // Fell through to HTTP route.
-    expect(proxyToInstance).toHaveBeenCalledWith(
-      4602, '/send', 'POST', expect.any(String), 'tok123');
-    expect(res._status).toBe(200);
+    expect(mcpCall).toHaveBeenCalledTimes(1);
+    expect(proxyToInstance).not.toHaveBeenCalled();
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body)).toMatchObject({ schema: 'fleet-error-v1', code: 'message_send_unconfirmed',
+      operation: 'message_send', mutation_state: 'unknown', retryable: false });
+    expect(res._body).not.toContain('secret-path-canary');
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
   });
 
   // --- handleConfigUpdate: invalid instance name (ops.ts:442 true branch) ---
