@@ -23,6 +23,7 @@ import tailwindcss from '@tailwindcss/vite';
 import path from 'path';
 
 export default defineConfig({
+  cacheDir: '.local/vite/motion',
   esbuild: {
     jsx: 'automatic',
     jsxImportSource: 'react',

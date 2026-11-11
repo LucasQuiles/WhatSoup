@@ -620,6 +620,12 @@ The tag gate requires the matching successful Quality run and private-scanner re
 verification uses the non-browser design chain; reduced PR profiles follow the selection policy
 in [Testing paths](../../testing.md).
 
+The browser and motion configurations use separate Vite dependency caches under
+`.local/vite/browser` and `.local/vite/motion`. Their different dependency and
+motion settings therefore do not share the same optimization directory. Both
+suites still execute every assertion; these directories contain no test verdicts.
+Matched cold/warm measurements are required before claiming a performance gain.
+
 Report-only audits inside this chain remain report-only. Their presence in the shared chain proves
 that a structured inventory was generated during the verification run; it does not prove the inventory is
 empty. Any final acceptance claim must cite the finding counts and promotion mode, not merely the
