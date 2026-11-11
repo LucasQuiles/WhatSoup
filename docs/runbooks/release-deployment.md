@@ -1102,7 +1102,9 @@ This also stops same-group descendants that retain stderr and ignore SIGTERM
 after the leader exits. If the leader itself has not exited, SIGKILL also
 precedes the final five-second reap wait. No group signal follows reaping.
 The helper captures at most 16 KiB, with one extra byte to detect overflow,
-and allows one bounded second after forced cleanup to observe stderr closure.
+and, when captured data remains below that limit, allows one bounded second
+after forced cleanup to observe stderr closure. A failed stderr read does not
+skip forced cleanup; the original read error remains in the result.
 It closes all three pipes. Oversized diagnostics remain incomplete rather than
 silently certifying cleanup from a truncated capture. A group-signaling error,
 cleanup exception or unreadable stderr pipe still held open is retained as

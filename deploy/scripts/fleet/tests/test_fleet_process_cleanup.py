@@ -4,6 +4,7 @@ import io
 import os
 import runpy
 import select
+import signal
 import subprocess
 import sys
 import time
@@ -115,6 +116,67 @@ def test_mcp_cleanup_closes_remaining_pipes_after_close_error(tmp_path, monkeypa
         assert closed == ["stdin", "stdout", "stderr"]
     finally:
         os.close(reader)
+
+
+@pytest.mark.parametrize("fault", ["setup", "read"])
+def test_mcp_cleanup_stops_descendant_when_stderr_read_fails(tmp_path, monkeypatch, fault):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    with contextlib.redirect_stdout(io.StringIO()):
+        helper = runpy.run_path(str(SCRIPT))["finish_process"]
+    server = tmp_path / "server.py"
+    server.write_text(SERVER.replace("os.close(1)", "os.close(1)\nos.write(2, b'diagnostic')"))
+    os.mkfifo(tmp_path / "keep-running")
+    os.mkfifo(tmp_path / "lifetime")
+    stop = os.open(tmp_path / "keep-running", os.O_RDWR | os.O_NONBLOCK)
+    receipt = os.open(tmp_path / "lifetime", os.O_RDONLY | os.O_NONBLOCK)
+    process = subprocess.Popen(
+        [sys.executable, str(server), str(tmp_path), "before-reply", "ignores-term"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    ended = False
+    signals = []
+    killpg = os.killpg
+
+    def signal_group(pid, signum):
+        assert process.returncode is None, "group signal followed leader reaping"
+        signals.append(signum)
+        return killpg(pid, signum)
+
+    try:
+        assert select.select([process.stdout], [], [], 3)[0], "server did not exit"
+        assert os.read(process.stdout.fileno(), 1) == b""
+        assert (tmp_path / "child-ready").exists()
+        assert os.read(receipt, 1) == b"R"
+        with patch.object(os, "killpg", side_effect=signal_group), patch.object(
+            os, "set_blocking" if fault == "setup" else "read",
+            side_effect=OSError("synthetic stderr failure"),
+        ):
+            assert helper(process) == ("", "OSError")
+        assert signals == [signal.SIGTERM, signal.SIGKILL]
+        assert process.returncode == 0
+        assert select.select([receipt], [], [], 1)[0], "descendant survived read failure"
+        assert os.read(receipt, 1) == b""
+        ended = True
+    finally:
+        os.close(stop)
+        if process.returncode is None:
+            try:
+                killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=3)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            stream.close()
+        try:
+            if not ended and (tmp_path / "child-ready").exists():
+                deadline = time.monotonic() + 3
+                while True:
+                    assert select.select([receipt], [], [], max(0, deadline - time.monotonic()))[0]
+                    if os.read(receipt, 2) == b"":
+                        break
+        finally:
+            os.close(receipt)
 
 
 @pytest.mark.parametrize("exit_at,group", [

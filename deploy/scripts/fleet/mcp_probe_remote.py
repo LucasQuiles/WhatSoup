@@ -22,7 +22,9 @@ def finish_process(proc):
   except ProcessLookupError:pass
   except OSError as exc:cleanup_error=type(exc).__name__
   # Keep the leader unreaped while inherited stderr may belong to a straggler.
-  raw,complete=read_stderr(proc.stderr,cleanup_deadline,16384)
+  raw,complete=b'',False
+  try:raw,complete=read_stderr(proc.stderr,cleanup_deadline,16384)
+  except (OSError,ValueError) as exc:cleanup_error=cleanup_error or type(exc).__name__
   if not complete and len(raw)==16384:cleanup_error=cleanup_error or 'stderr_incomplete'
   if not complete:
    try:os.killpg(proc.pid,signal.SIGKILL)
@@ -36,8 +38,10 @@ def finish_process(proc):
    except OSError as exc:cleanup_error=cleanup_error or type(exc).__name__
    proc.wait(timeout=5)
   if not complete and len(raw)<16384:
-   tail,complete=read_stderr(proc.stderr,time.monotonic()+1,16384-len(raw))
-   raw+=tail
+   try:
+    tail,complete=read_stderr(proc.stderr,time.monotonic()+1,16384-len(raw))
+    raw+=tail
+   except (OSError,ValueError) as exc:cleanup_error=cleanup_error or type(exc).__name__
   if not complete:cleanup_error=cleanup_error or 'stderr_incomplete'
   err=raw.decode(errors='replace')
  finally:
