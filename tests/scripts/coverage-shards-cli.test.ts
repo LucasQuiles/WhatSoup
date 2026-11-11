@@ -57,6 +57,38 @@ function fixture(runTimeoutMs = 30_000) {
 }
 
 describe('native coverage shard commands', () => {
+  it.each([
+    { exits: [75, 124], exitCode: 124, outcome: 'timedOut' },
+    { exits: [124, 75], exitCode: 124, outcome: 'timedOut' },
+    { exits: [75, 1], exitCode: 1, outcome: 'failed' },
+    { exits: [1, 75], exitCode: 1, outcome: 'failed' },
+    { exits: [1, 124], exitCode: 124, outcome: 'timedOut' },
+    { exits: [124, 1], exitCode: 124, outcome: 'timedOut' },
+    { exits: [124, 125], exitCode: 125, outcome: 'inconclusive' },
+    { exits: [125, 124], exitCode: 125, outcome: 'inconclusive' },
+  ])('prioritizes mixed shard outcomes $exits', ({ exits, exitCode, outcome }) => {
+    const { cwd, output, runWithEnv } = fixture();
+    const home = join(output, 'home');
+    const bin = join(home, '.local/bin');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, 'loadgate'), `#!${process.execPath}
+const { spawnSync } = require('node:child_process');
+const args = process.argv.slice(2);
+if (args.includes('--shard=1/2')) process.exit(${exits[0]});
+if (args.includes('--shard=2/2')) process.exit(${exits[1]});
+const start = args.indexOf('--') + 1;
+const child = spawnSync(args[start], args.slice(start + 1), { stdio: 'inherit' });
+process.exit(child.status ?? 125);
+`, { mode: 0o700 });
+    const completed = runWithEnv({ HOME: home }, 'run', '--timeout-ms', '20000');
+    expect(completed.status, completed.stderr).toBe(exitCode);
+    const result = JSON.parse(completed.stdout);
+    expect(result).toMatchObject({ operation: 'run', phase: 'shard', outcome, exitCode });
+    expect(result.shards.map((shard: { exitCode: number }) => shard.exitCode)).toEqual(exits);
+    expect(existsSync(join(cwd, '.local/test-run.lock'))).toBe(false);
+    expect(existsSync(join(cwd, 'coverage/coverage-final.json'))).toBe(false);
+  });
+
   it('creates a requested coordinated output directory and refuses an existing one without overwriting it', () => {
     const { cwd, output, run } = fixture(30_000);
     const created = join(output, 'created-run-output');

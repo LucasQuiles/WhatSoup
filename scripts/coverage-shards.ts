@@ -210,7 +210,10 @@ export async function runCoverageCommand(argv: readonly string[], cwd = realpath
         const shards = shardResults.map((result) => result.status === 'fulfilled' ? result.value : {
           schemaVersion: 1, operation: 'shard', admission, outcome: 'inconclusive', exitCode: 125, error: String(result.reason),
         });
-        const failedShard = shards.find((result) => result.exitCode === 125) ?? shards.find((result) => result.exitCode !== 0);
+        const failedShard = shards.find((result) => result.exitCode === 125)
+          ?? shards.find((result) => result.exitCode === 124)
+          ?? shards.find((result) => result.exitCode !== 0 && result.exitCode !== 75)
+          ?? shards.find((result) => result.exitCode !== 0);
         if (failedShard) {
           coordinated = { ...failedShard, operation: 'run', phase: 'shard', artifacts: artifactReport, workers: { total: totalWorkers, perShard: workers }, plan: planPath, shards };
         } else {

@@ -176,6 +176,8 @@ default. Use `--out` with a new directory outside the checkout only when retaini
 artifacts for investigation; that directory then belongs to the caller. Output
 paths inside removed scratch are diagnostic provenance, not retained evidence.
 Missing cleanup proof returns 125, contention returns 75 and a timeout returns 124.
+When shards disagree, the result prioritizes an inconclusive result, timeout, test
+failure, then contention. The JSON output preserves every shard result.
 The command is opt-in pending matched performance and native cleanup qualification;
 it does not replace static, browser, behavioral, Docker, Python or platform checks.
 
