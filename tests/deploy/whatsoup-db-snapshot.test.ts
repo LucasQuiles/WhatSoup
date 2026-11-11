@@ -93,6 +93,36 @@ describe('whatsoup-db-snapshot (FLOS Stage 0 S0.4)', () => {
     expect(remaining).not.toContain(lastReceipt!.pruned[0]);
   });
 
+  // Retention counts only the snapshotted database's own series. Another
+  // database in the same out-root keeps its snapshots when its name starts with
+  // this stem, or when this name holds glob metacharacters that match it.
+  it.each([
+    ['a longer name with the same prefix', 'bot.db', 'bot-archive.db'],
+    ['a "*" in the name', '*.db', 'bot.db'],
+    ['a "[...]" class in the name', 'b[o]t.db', 'bot.db'],
+  ])('never prunes another database\'s snapshots (%s)', (_case, ownName, otherName) => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'whatsoup-db-snapshot-'));
+    const snaps = join(tmpRoot, 'snaps');
+    const otherDb = join(tmpRoot, otherName);
+    const ownDb = join(tmpRoot, ownName);
+    makeFixtureDb(otherDb);
+    makeFixtureDb(ownDb);
+    for (const epoch of ['1787900000', '1787900100', '1787900200']) {
+      runTool(['snapshot', '--db', otherDb, '--out-root', snaps, '--retain', '7'], { BOT_ERRORS_DRY_NOW: epoch });
+    }
+    const otherSnapshots = readdirSync(snaps).sort();
+    expect(otherSnapshots).toHaveLength(3);
+
+    const receipt = JSON.parse(runTool(['snapshot', '--db', ownDb, '--out-root', snaps, '--retain', '1'], {
+      BOT_ERRORS_DRY_NOW: '1787900300',
+    })) as { snapshot: string; pruned: string[] };
+
+    expect(receipt.pruned).toEqual([]);
+    const remaining = readdirSync(snaps);
+    expect(remaining).toHaveLength(4);
+    expect(remaining).toEqual(expect.arrayContaining([...otherSnapshots, receipt.snapshot]));
+  });
+
   describe('live WAL source (writer connection held open)', () => {
     // A production instance database runs in WAL mode with the runtime's
     // connection open, so committed rows sit in the -wal file and the source
