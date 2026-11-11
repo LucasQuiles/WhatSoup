@@ -99,6 +99,55 @@ describe('useConsoleSession onLock', () => {
     expect(result.current.state).toBe('locked')
   })
 
+  it('ignores stale rejected probes after a newer unlock succeeds', async () => {
+    let reject!: (error: Error) => void
+    mockGetApiTicket.mockReturnValue(new Promise<string>((_done, fail) => { reject = fail }))
+    const { result } = renderHook(() => useConsoleSession())
+    act(() => result.current.onUnlocked())
+    await act(async () => { reject(new ConsoleLockedError()) })
+    expect(result.current.state).toBe('unlocked')
+    expect(result.current.notice).toBeNull()
+  })
+
+  it('cannot unlock or start a probe while revocation is still pending', async () => {
+    let resolve!: () => void
+    mockLockConsole.mockReturnValue(new Promise<void>(done => { resolve = done }))
+    const { result } = renderHook(() => useConsoleSession())
+    await waitFor(() => expect(result.current.state).toBe('unlocked'))
+    let pending!: Promise<void>
+    let retry!: Promise<void>
+    act(() => {
+      pending = result.current.onLock()
+      result.current.onUnlocked()
+      retry = result.current.onRetry()
+    })
+    expect(retry).toBe(pending)
+    expect(result.current.state).toBe('locked')
+    expect(result.current.notice).toBe('revocation_pending')
+    expect(mockGetApiTicket).toHaveBeenCalledOnce()
+    await act(async () => { resolve(); await pending })
+    expect(result.current.state).toBe('locked')
+  })
+
+  it.each(['confirmed', 'failed'] as const)('retains reload lock intent when %s revocation settles after unmount', async (outcome) => {
+    let settle!: () => void
+    mockLockConsole.mockReturnValue(new Promise<void>((resolve, reject) => {
+      settle = () => outcome === 'confirmed' ? resolve() : reject(new Error('response lost'))
+    }))
+    const first = renderHook(() => useConsoleSession())
+    await waitFor(() => expect(first.result.current.state).toBe('unlocked'))
+    let pending!: Promise<void>
+    act(() => { pending = first.result.current.onLock() })
+    first.unmount()
+    await act(async () => { settle(); await pending })
+    expect(sessionStorage.getItem('whatsoup.console.lock-requested')).toBe('1')
+    mockGetApiTicket.mockClear()
+    const second = renderHook(() => useConsoleSession())
+    expect(second.result.current.state).toBe('locked')
+    expect(second.result.current.notice).toBe('revocation_unconfirmed')
+    expect(mockGetApiTicket).not.toHaveBeenCalled()
+  })
+
   it('reports when failed revocation cannot preserve its lock request across reload', async () => {
     const { result } = renderHook(() => useConsoleSession())
     await waitFor(() => expect(result.current.state).toBe('unlocked'))
