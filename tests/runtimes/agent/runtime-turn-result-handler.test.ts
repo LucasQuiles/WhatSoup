@@ -976,4 +976,44 @@ describe('minimal-mode result text after narration held at a tool boundary (#342
 
     expect(sent).toEqual([TOOL_LOOP_LIMIT_TEXT]);
   });
+
+  it.each([
+    { path: 'scoped', suppressed: true, expected: [] },
+    { path: 'global', suppressed: true, expected: [] },
+    { path: 'scoped', suppressed: false, expected: ['The queue command completed.'] },
+    { path: 'global', suppressed: false, expected: ['The queue command completed.'] },
+  ] as const)('$path deferred reply honors policy suppression=$suppressed', async ({ path, suppressed, expected }) => {
+    vi.useFakeTimers();
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+    const coordinator = harness.host.runtimeTurnCoordinator as unknown as {
+      attemptOutcomeForResult: ReturnType<typeof vi.fn>;
+    };
+    coordinator.attemptOutcomeForResult.mockReturnValue({ kind: 'completed' });
+    if (suppressed) {
+      harness.host.perChatTurnSuppressedReplySatisfaction.add('15550190050');
+      harness.host.turnHadSuppressedReplySatisfaction = true;
+    }
+    const sent: string[] = [];
+    const messenger: Messenger = {
+      sendMessage: vi.fn(async (_jid: string, text: string) => {
+        sent.push(text);
+        return { waMessageId: null };
+      }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+      setTyping: vi.fn(async () => {}),
+    };
+    const queue = new OutboundQueue(messenger, '15550190050@s.whatsapp.net');
+    queue.setToolUpdateMode('minimal');
+    queue.enqueueStreamingText('The queue command completed.', 'answer', () => {
+      harness.host.turnHadVisibleOutput = true;
+      harness.host.perChatTurnText.set('15550190050', 'The queue command completed.');
+    });
+    queue.discardPreToolAssistantText();
+
+    driveResult(path, harness, '', { queue, isError: false });
+    await vi.runAllTimersAsync();
+
+    expect(sent).toEqual(expected);
+    expect(queue.hasPendingWork()).toBe(false);
+  });
 });

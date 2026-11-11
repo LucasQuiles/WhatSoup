@@ -380,6 +380,7 @@ tracker?.onTurnComplete();
 // persistent session. Idempotent with the normal-path queue.flush().
 queue.endTurn({
   resultTextPending: resultTextWillBeEnqueued(event, wasSilentCompact || (mapKey !== undefined && host.pendingPolls.questions.has(mapKey))),
+  recoverDeferredText: attemptOutcome.kind !== 'suppressed_by_policy',
 });
 // Provider-reported turn cost: log it beside the token counts and
 // accumulate it while a fallback window is active.
@@ -1039,7 +1040,10 @@ tracker?.onTurnComplete();
 // Turn-end choke point: clear the typing indicator unconditionally so no
 // early-break branch below can leave 'composing' asserted into the idle
 // persistent session. Idempotent with the normal-path queue.flush().
-queue.endTurn({ resultTextPending: resultTextWillBeEnqueued(event, wasSilentCompact) });
+queue.endTurn({
+  resultTextPending: resultTextWillBeEnqueued(event, wasSilentCompact),
+  recoverDeferredText: attemptOutcome.kind !== 'suppressed_by_policy',
+});
 // Provider-reported turn cost: log it beside the token counts and
 // accumulate it while a fallback window is active.
 host.recordTurnCostUsd(event);
