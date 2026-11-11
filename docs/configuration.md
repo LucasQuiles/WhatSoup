@@ -270,6 +270,11 @@ These have no effect when `INSTANCE_CONFIG` is set (multi-instance mode).
 | `WHATSOUP_ACCOUNT_SCOPE_ID` | string (`scope:` + `[a-z0-9-]`, 4-59 chars, at least one letter) | unset | Opaque account-scope identity for the fenced coordination lease (`src/transport/coordination-lease.ts`). Unset disables account-scope coordination; per-instance mutation ownership still applies. When set, runtime startup and the pairing CLI each acquire the per-scope lease (exactly one owner, monotonic fencing token) and the watchdog declines restarts while a pairing lease is held. A malformed value throws at config load. Fronted by the typed `accountScopeId` instance-config field; never derive it from a path, JID, or phone number. |
 | `WHATSOUP_PAIR_NUMBER` | string (E.164 phone number) | (unset → QR pairing) | Switches `deploy`/`npm run auth` from QR-code pairing to phone-number pairing-code mode (`src/transport/auth.ts:104,210`). Unset or invalid values leave QR-code pairing unaffected. |
 
+Instance creation accepts the optional `accountScopeId` configuration field.
+Creation, updates, loading and discovery validate non-null values with the same
+scope parser used by pairing. Malformed values are rejected before configuration
+writes or service activation. The API does not assign or infer an account scope.
+
 ### Credential Storage
 
 | Variable | Type | Default | Description |

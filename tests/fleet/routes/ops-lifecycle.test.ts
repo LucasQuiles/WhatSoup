@@ -18,6 +18,7 @@ import {
   handleStop,
 } from '../../../src/fleet/routes/ops-lifecycle.ts';
 import * as opsShim from '../../../src/fleet/routes/ops.ts';
+import { handlePairingPreflight } from '../../../src/fleet/routes/ops-auth.ts';
 import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
 import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
@@ -232,6 +233,46 @@ describe('ops-lifecycle handlers', () => {
     expect(fs.existsSync(path.join(tmpDir, 'config'))).toBe(false);
     expect(deps.serviceManager.enable).not.toHaveBeenCalled();
   });
+
+  it('preserves the configured account scope from creation through pairing preflight', async () => {
+    const name = 'scoped-line';
+    const accountScopeId = 'scope:create-roundtrip';
+    const deps = makeDeps<any>({}) as OpsDeps;
+    const res = mockRes();
+    await handleCreateLine(mockReq({ method: 'POST', body: JSON.stringify({
+      name, type: 'chat', adminPhones: ['15551230006'], accountScopeId,
+    }) }), res, deps);
+
+    expect(res._status).toBe(201);
+    const configPath = path.join(tmpDir, 'config', 'whatsoup', 'instances', name, 'config.json');
+    expect(JSON.parse(fs.readFileSync(configPath, 'utf8')).accountScopeId).toBe(accountScopeId);
+    vi.mocked(deps.discovery.getInstance).mockReturnValue({
+      name, configPath, stateRoot: path.join(tmpDir, 'state', 'whatsoup', 'instances', name),
+    } as never);
+    const preflight = mockRes();
+    await handlePairingPreflight(mockReq({
+      method: 'POST', headers: { authorization: 'Bearer test-token' },
+    }), preflight, deps, { name });
+    expect(preflight._status).toBe(200);
+    expect(JSON.parse(preflight._body).scopeId).toBe(accountScopeId);
+  });
+
+  it.each(['not-a-scope', '/tmp/account', 'scope:15551230006', 42, {}, []].map((accountScopeId) => ({ accountScopeId })))(
+    'rejects malformed account scope %j before creating instance state', async ({ accountScopeId }) => {
+      const name = 'invalid-scope';
+      const deps = makeDeps<any>({}) as OpsDeps;
+      const res = mockRes();
+      await handleCreateLine(mockReq({ method: 'POST', body: JSON.stringify({
+        name, type: 'chat', adminPhones: ['15551230006'], accountScopeId,
+      }) }), res, deps);
+
+      expect(res._status).toBe(400);
+      expect(JSON.parse(res._body).error).toContain('accountScopeId');
+      expect(fs.existsSync(path.join(tmpDir, 'config', 'whatsoup', 'instances', name))).toBe(false);
+      expect(fs.existsSync(path.join(tmpDir, 'data', 'whatsoup', 'instances', name))).toBe(false);
+      expect(deps.serviceManager.enable).not.toHaveBeenCalled();
+    },
+  );
 
   it('creates a configured M365 agent with the full deny floor before launch', async () => {
     const { REQUIRED_DENY } = await import('../../../src/core/settings-template.ts');

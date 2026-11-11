@@ -13,28 +13,16 @@
 // discouraged.
 
 import { isRecord } from '../lib/type-guards.ts';
+import { parseAccountScopeId, type AccountScopeIdV1 } from '../lib/account-scope.ts';
 
-const SCOPE_PREFIX = 'scope:';
-const SCOPE_TAIL_RE = /^[a-z0-9-]{4,59}$/;
+export { parseAccountScopeId, type AccountScopeIdV1 } from '../lib/account-scope.ts';
+
 const HEX64_RE = /^[0-9a-f]{64}$/;
 const ADVISORY_HASH_RE = /^[0-9a-f]{8,64}$/;
 const MAX_TOKEN_LENGTH = 128;
 const MAX_CLIENT_SUBTREE_BYTES = 8 * 1024;
 const MAX_CLIENT_SUBTREE_DEPTH = 3;
 const MAX_CLIENT_LEAF_STRING = 512;
-
-export type AccountScopeIdV1 = string & { readonly __accountScopeIdV1: unique symbol };
-
-export function parseAccountScopeId(value: unknown): AccountScopeIdV1 | null {
-  if (typeof value !== 'string') return null;
-  if (!value.startsWith(SCOPE_PREFIX)) return null;
-  const tail = value.slice(SCOPE_PREFIX.length);
-  if (!SCOPE_TAIL_RE.test(tail)) return null;
-  // A digits-and-dashes-only tail can smuggle a phone number through the
-  // charset; require at least one letter so the identifier stays opaque.
-  if (!/[a-z]/.test(tail)) return null;
-  return value as AccountScopeIdV1;
-}
 
 export const COORDINATION_LEASE_MODES = [
   'pairing',

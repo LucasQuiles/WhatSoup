@@ -50,6 +50,20 @@ const ctx = (mode: ValidatorContext['mode'], over: Partial<ValidatorContext> = {
   ...over,
 });
 
+describe.each(['create', 'patch', 'load', 'discovery'] as const)('accountScopeId in %s mode', (mode) => {
+  it.each([undefined, null, 'scope:configured-account'])(
+    'accepts an absent or valid configured scope %j', (accountScopeId) => {
+      expect(validateInstanceConfig(baseChat({ accountScopeId }), ctx(mode))).toBeNull();
+    },
+  );
+
+  it.each(['', 'not-a-scope', '/tmp/account', 'scope:15551234567', 42, {}, []].map((accountScopeId) => ({ accountScopeId })))(
+    'rejects malformed scope %j', ({ accountScopeId }) => {
+      expect(validateInstanceConfig(baseChat({ accountScopeId }), ctx(mode))?.field).toBe('accountScopeId');
+    },
+  );
+});
+
 // #1862: the home-root working-directory invariant — AgentRuntime.start() rejects
 // an explicitly-configured cwd that resolves to the user home directory
 // (runtime.ts). The validator must enforce the SAME invariant so config load,

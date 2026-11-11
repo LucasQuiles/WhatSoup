@@ -389,7 +389,7 @@ export async function handleCreateLine(
       'description', 'systemPrompt', 'maxTokens', 'tokenBudget', 'rateLimitPerHour',
       'models', 'model', 'pineconeIndex', 'pineconeSearchMode', 'pineconeRerank', 'pineconeTopK',
       'pineconeAllowedIndexes', 'memory', 'agentOptions', 'toolUpdateMode', 'controlPeers',
-      'transcriptionOptions',
+      'transcriptionOptions', 'accountScopeId',
       // Pilot final-send authority. The shared load/startup config resolver
       // validates its strict enabled shape and refuses non-Baileys transport.
       'transportAuthority',

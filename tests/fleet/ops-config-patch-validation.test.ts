@@ -439,6 +439,32 @@ describe('handleConfigUpdate PATCH round-trip invariant (#244 #249)', () => {
     expect(persisted).toEqual(original);
   });
 
+  it('rejects an invalid account scope without changing the config bytes', async () => {
+    const dir = path.join(tmpDir, 'whatsoup', 'instances', 'roundtrip-scope');
+    fs.mkdirSync(dir, { recursive: true });
+    const cfg = path.join(dir, 'config.json');
+    const before = JSON.stringify({
+      name: 'roundtrip-scope',
+      type: 'chat',
+      accessMode: 'self_only',
+      adminPhones: ['15551230006'],
+      healthPort: 9095,
+      accountScopeId: 'scope:roundtrip-test',
+    }, null, 2) + '\n';
+    fs.writeFileSync(cfg, before);
+    const inst = fakeInstance(cfg, { name: 'roundtrip-scope' });
+    const res = mockRes();
+
+    await handleConfigUpdate(
+      mockReq({ method: 'PATCH', body: JSON.stringify({ accountScopeId: '/tmp/account' }) }),
+      res, depsFor(inst), { name: 'roundtrip-scope' },
+    );
+
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).message).toContain('accountScopeId');
+    expect(fs.readFileSync(cfg, 'utf-8')).toBe(before);
+  });
+
   it('persists a valid BYOK providerConfig + fallbacks patch (positive round-trip)', async () => {
     const agentCwd = makeAgentCwd('rt-byok');
     const dir = path.join(tmpDir, 'whatsoup', 'instances', 'roundtrip-byok');
