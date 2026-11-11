@@ -3291,6 +3291,13 @@ After a successful auto-compact, the runtime applies a 5-minute success cooldown
 
 The trigger compares `autoCompactInputTokens` with the session's known context: the size of the last distinct API request, not the sum of a turn's requests. When the context is unknown (see `autoCompactInputTokens` in docs/configuration.md), it falls back to the cumulative input since the last compact; the `auto compact triggered` log shows which in `crossed` (`context` or `cumulative_fallback`).
 
+When a scheduled-agent-job scope reaches the compaction convergence limit, its
+hard reset remains part of the completed turn's finalization barrier. Later
+scheduled occurrences wait until the reset settles; an overlapping reset request
+joins the same operation. Shutdown joins that terminal owner and rejects queued
+occurrences without dispatching them. A failed reset retains its convergence
+evidence and recovery state. It does not establish that the scope recovered.
+
 The next real user turn after a successful compact is measured separately. If that turn's known context exceeds `autoCompactInputTokens`, `runtime.agent.autoCompactNextTurnOverThreshold` increments. An unknown context records nothing. If it happens inside the rapid re-arm window, it also counts as the rapid re-arm for that compact cycle. If it happens later, it remains telemetry only; delayed eligibility is not the spiral condition.
 
 The three counters `autoCompactIneffective`,
