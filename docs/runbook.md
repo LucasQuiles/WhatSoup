@@ -618,7 +618,8 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
   and a recurring fault can leave a window between detections. Each therefore
   stays reported, with the same reason and cause, until a hold has passed
   since the condition was last detected. It then clears with no turn
-  (`src/core/health-reason-hold.ts`). The producer records when the condition
+  (`src/core/health-reason-hold.ts`), so chat and passive instances, which
+  have no provider receipts, recover the same way. The producer records when the condition
   last held as it computes it, so detection does not depend on when or how
   often `/health` is read. Health also counts the evaluations at which it sees
   the condition, or an unreadable input, itself. Each hold, and when the

@@ -7304,6 +7304,36 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       expect(json.event_loop.lag_p95_ms === null || typeof json.event_loop.lag_p95_ms === 'number').toBe(true);
     });
 
+    it.each(['chat', 'passive'] as const)('re-probes event-loop recovery without a provider receipt (%s)', async (instanceType) => {
+      let monotonicMs = 1000;
+      vi.spyOn(performance, 'now').mockImplementation(() => monotonicMs);
+      const sampler = fakeLoopLagSampler({
+        sampleCount: 20, p95LagMs: 412, locallyStarved: true, discontinuityCount: 0,
+      });
+      const snapshot = sampler.snapshot();
+      ({ server, port } = await buildTestServer(makeDeps(db, {
+        instanceType, loopLagSampler: sampler as any,
+      })));
+      const starved = JSON.parse((await healthReq(port)).body);
+      expect(starved.status).toBe('degraded');
+      expect(starved.status_reasons).toContain('event_loop_starvation');
+
+      sampler.snapshot.mockReturnValue({ ...snapshot, p95LagMs: 5, locallyStarved: false });
+      const held = JSON.parse((await healthReq(port)).body);
+      expect(held.status_reasons).toContain('event_loop_starvation');
+      monotonicMs += 5 * 60_000;
+      const recovered = JSON.parse((await healthReq(port)).body);
+      expect(recovered.status).toBe('healthy');
+      expect(recovered.status_reasons).not.toContain('degradation_silence_unproven');
+      expect(recovered.degradation_causes).not.toContain('event_loop_starved');
+
+      sampler.snapshot.mockReturnValue(snapshot);
+      const recurred = JSON.parse((await healthReq(port)).body);
+      expect(recurred.status).toBe('degraded');
+      expect(recurred.status_reasons).toContain('event_loop_starvation');
+      expect(recurred.degradation_causes).toContain('event_loop_starved');
+    });
+
     it('folds a starved sampler snapshot into the event_loop body and degrades status', async () => {
       const sampler = fakeLoopLagSampler({
         sampleCount: 20,
