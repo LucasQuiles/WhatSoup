@@ -22,7 +22,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type ReactNode } from 'react'
-import { cleanup, fireEvent, render, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, useLocation } from 'react-router'
 import type { LineInstance } from '../../console/src/types'
@@ -586,6 +586,88 @@ describe('v3.5 inbox — composer', () => {
 // ---------------------------------------------------------------------------
 
 describe('v3.5 inbox — load older', () => {
+  it('keeps the same conversation key on different lines independently owned', async () => {
+    mockLines = [makeLine('alpha'), makeLine('beta')]
+    mockMessages = [makeMessage(5, 'newest', { conversationKey: 'shared-key' })]
+    getChatsMock.mockImplementation(async (line: string) => [makeChat('shared-key', { name: `Chat ${line}` })])
+    const first = Promise.withResolvers<ReturnType<typeof makeMessage>[]>()
+    const second = Promise.withResolvers<ReturnType<typeof makeMessage>[]>()
+    getMessagesMock.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+    const { container, qc } = renderInbox()
+    qc.setQueryData(['messages', 'alpha', 'shared-key'], mockMessages)
+    qc.setQueryData(['messages', 'beta', 'shared-key'], mockMessages)
+    await waitFor(() => expect(container.querySelectorAll('.inbox-citem')).toHaveLength(2))
+    const select = (line: string) => fireEvent.click([...container.querySelectorAll('.inbox-citem')].find((item) => item.textContent?.includes(`Chat ${line}`))!)
+    select('alpha')
+    fireEvent.click(container.querySelector('.inbox-older')!)
+    select('beta')
+    expect((container.querySelector('.inbox-older') as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(container.querySelector('.inbox-older')!)
+    expect(getMessagesMock.mock.calls.map((args) => args.slice(0, 2))).toEqual([['alpha', 'shared-key'], ['beta', 'shared-key']])
+    await act(async () => first.resolve([]))
+    expect((container.querySelector('.inbox-older') as HTMLButtonElement).disabled).toBe(true)
+    const older = makeMessage(3, 'beta history', { conversationKey: 'shared-key' })
+    await act(async () => second.resolve([older]))
+    expect(qc.getQueryData(['messages', 'alpha', 'shared-key'])).toEqual(mockMessages)
+    expect(qc.getQueryData(['messages', 'beta', 'shared-key'])).toEqual([...mockMessages, older])
+    select('alpha')
+    expect(container.querySelector('.inbox-older')).toBeNull()
+    select('beta')
+    expect((container.querySelector('.inbox-older') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('keeps pagination ownership when another conversation finishes loading', async () => {
+    mockMessages = [makeMessage(5, 'newest')]
+    getChatsMock.mockResolvedValue([makeChat('conv-a'), makeChat('conv-b')])
+    const first = Promise.withResolvers<ReturnType<typeof makeMessage>[]>()
+    const second = Promise.withResolvers<ReturnType<typeof makeMessage>[]>()
+    getMessagesMock.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+    const { container } = renderInbox()
+    await waitFor(() => expect(container.querySelectorAll('.inbox-citem')).toHaveLength(2))
+    const select = (name: string) => fireEvent.click([...container.querySelectorAll('.inbox-citem')].find((item) => item.textContent?.includes(name))!)
+    select('conv-a')
+    fireEvent.click(container.querySelector('.inbox-older')!)
+    select('conv-b')
+    expect((container.querySelector('.inbox-older') as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(container.querySelector('.inbox-older')!)
+    expect(getMessagesMock.mock.calls.map((args) => args.slice(0, 2))).toEqual([['personal', 'conv-a'], ['personal', 'conv-b']])
+    await act(async () => first.resolve([]))
+    expect((container.querySelector('.inbox-older') as HTMLButtonElement).disabled).toBe(true)
+    await act(async () => second.resolve([makeMessage(3, 'older', { conversationKey: 'conv-b' })]))
+    expect((container.querySelector('.inbox-older') as HTMLButtonElement).disabled).toBe(false)
+    select('conv-a')
+    expect(container.querySelector('.inbox-older')).toBeNull()
+  })
+
+  it('admits one pagination request per conversation before React commits', async () => {
+    mockMessages = [makeMessage(5, 'newest')]
+    const page = Promise.withResolvers<ReturnType<typeof makeMessage>[]>()
+    getMessagesMock.mockReturnValue(page.promise)
+    const { container } = renderInbox()
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    const button = container.querySelector('.inbox-older')!
+    act(() => {
+      fireEvent.click(button)
+      fireEvent.click(button)
+    })
+    expect(getMessagesMock).toHaveBeenCalledTimes(1)
+    await act(async () => page.resolve([]))
+  })
+
+  it('merges overlapping history without replacing newer cached message data', async () => {
+    mockMessages = [makeMessage(5, 'newest'), makeMessage(3, 'current content')]
+    getMessagesMock.mockResolvedValue([makeMessage(3, 'old content'), makeMessage(2, 'older'), makeMessage(2, 'duplicate')])
+    const { container, qc } = renderInbox()
+    qc.setQueryData(['messages', 'personal', 'conv-a'], mockMessages)
+    await waitFor(() => expect(container.querySelector('.inbox-citem')).not.toBeNull())
+    fireEvent.click(container.querySelector('.inbox-citem')!)
+    fireEvent.click(container.querySelector('.inbox-older')!)
+    await waitFor(() => expect(qc.getQueryData(['messages', 'personal', 'conv-a'])).toEqual([
+      ...mockMessages, makeMessage(2, 'older'),
+    ]))
+  })
+
   it('keeps the load-older control and appends history when an older page is returned', async () => {
     mockMessages = [makeMessage(5, 'newest'), makeMessage(3, 'oldest')]
     const olderPage = [makeMessage(2, 'older two'), makeMessage(1, 'older one')]

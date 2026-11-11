@@ -78,8 +78,13 @@ export default function Inbox() {
   const [seg, setSeg] = useState<InboxSeg>('direct')
   const [selected, setSelected] = useState<{ line: string; key: string } | null>(null)
   const [takeoverIds, setTakeoverIds] = useState<ReadonlySet<string>>(new Set())
-  const [hasMore, setHasMore] = useState(true)
-  const [loadingOlder, setLoadingOlder] = useState(false)
+  const [pagination, setPagination] = useState<Record<string, { hasMore: boolean; loading: boolean }>>({})
+  const pendingOlder = useRef(new Set<string>())
+  const mounted = useRef(false)
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
 
   // Deep links (?line=&chat=) — consumed once, then cleared so back-navigation
   // doesn't re-trigger (same contract the v3 page honored).
@@ -135,9 +140,8 @@ export default function Inbox() {
   )
 
   const { data: messages, error: messagesError } = useMessages(selected?.line ?? '', selected?.key ?? '')
-  useEffect(() => {
-    setHasMore(true)
-  }, [selectedId])
+  const hasMore = selectedId ? (pagination[selectedId]?.hasMore ?? true) : true
+  const loadingOlder = selectedId ? (pagination[selectedId]?.loading ?? false) : false
 
   // Mark-read on open — the real route; optimistic zero, invalidate to settle.
   const markedRef = useRef<string | null>(null)
@@ -159,23 +163,30 @@ export default function Inbox() {
   }, [selected, selectedConversation, selectedId, queryClient, toast])
 
   const handleLoadOlder = async () => {
-    if (!selected || loadingOlder) return
+    if (!selected || !selectedId || pendingOlder.current.has(selectedId) || !hasMore) return
+    const id = selectedId
     const oldestPk = messages?.[messages.length - 1]?.pk
-    setLoadingOlder(true)
+    pendingOlder.current.add(id)
+    setPagination((prev) => ({ ...prev, [id]: { hasMore: true, loading: true } }))
     try {
       const older = await api.getMessages(selected.line, selected.key, oldestPk)
       if (!older || older.length === 0) {
-        setHasMore(false)
+        if (mounted.current) setPagination((prev) => ({ ...prev, [id]: { hasMore: false, loading: true } }))
       } else {
-        queryClient.setQueryData<Message[]>(['messages', selected.line, selected.key], (prev) => [
-          ...(prev ?? []),
-          ...older,
-        ])
+        queryClient.setQueryData<Message[]>(['messages', selected.line, selected.key], (prev) => {
+          const seen = new Set((prev ?? []).map((message) => message.pk))
+          return [...(prev ?? []), ...older.filter((message) => {
+            if (seen.has(message.pk)) return false
+            seen.add(message.pk)
+            return true
+          })]
+        })
       }
     } catch (e) {
-      toast.error(`Failed to load older messages: ${e instanceof Error ? e.message : e}`)
+      if (mounted.current) toast.error(`Failed to load older messages for ${selected.line}: ${e instanceof Error ? e.message : e}`)
     } finally {
-      setLoadingOlder(false)
+      pendingOlder.current.delete(id)
+      if (mounted.current) setPagination((prev) => ({ ...prev, [id]: { hasMore: prev[id]?.hasMore ?? true, loading: false } }))
     }
   }
 

@@ -131,19 +131,25 @@ available at `/metrics`.
 
 ### Inbox
 
-Unified message inbox across all instances. Read conversations, send replies, and manage contact access — all from one view.
+Unified message inbox across all instances. Read conversations and send replies
+from one view. Channel filters and the Direct/Rooms selector narrow the shared
+conversation list; selecting a conversation binds its thread to that line.
 
 ![Inbox — Personal Messages](screenshots/inbox.png)
 
-**Line picker** (top-left dropdown) switches between instances. Shows each line's status, name, mode, and phone number.
-
-![Line Picker](screenshots/inbox-line-picker.png)
-
-**Chat list** shows conversations for the selected instance with contact avatars, last message preview, timestamps, and unread badges.
+**Chat list** shows matching conversations across lines with contact avatars,
+last message previews, timestamps, and unread badges.
 
 **Message view** renders the conversation with bubble-style messages. Outgoing messages appear on the right in the accent color; incoming messages on the left in a neutral tone.
 
-**Contact details** panel (right side) shows the contact name, which line they're on, conversation type (direct/group), mode, and action buttons (Allow Contact / Block Contact).
+History loading and end-of-history state belong to each conversation. Switching
+threads leaves an existing request attached to its original conversation and
+allows the new thread to load independently. Overlapping history pages retain
+the current cached message once. Returning to a thread preserves its pagination
+state until the Inbox is remounted.
+
+**Contact details** panel (right side) shows the contact, line, conversation type,
+and recorded agent session. Contact access controls live on the line detail page.
 
 #### Inbox by Mode
 
@@ -211,6 +217,19 @@ Data is fetched from `GET /api/lines/:name/metrics?range=24h|7d|30d` (per-line) 
 **Groups** — Groups this instance participates in. The header bar shows the total count and a "Create Group" button that opens the create modal. Each group card opens a detail modal with the participant list, promote / demote, add and remove participants, editable subject and description, invite link (get and revoke), ephemeral message duration, member-add mode (admins only vs all members), join-approval mode, pending join requests (approve / reject), and a Leave Group action. Successful detail mutations refresh both the detail and the group list immediately; the dialog heading uses the current detail. The list also polls every 30 s. This tab is only shown for instances with a global MCP socket (not sandbox-per-chat). Backed by 15 routes under `/api/lines/:name/groups/...` (list, create, get detail, leave, subject, description, participants, settings, invite get and revoke, ephemeral, member-add-mode, join-approval, requests get and update) — see the [Fleet API table](../README.md#fleet-api).
 
 ### Add Line Wizard
+
+The `/hatch` onboarding journey creates a line before opening its link stream.
+Leaving the page preserves that line and closes the owned stream; late responses
+cannot open a new stream or advance the abandoned journey. A creation error is
+unconfirmed until inspected in Lines, so Hatch offers that route and does not
+automatically repeat creation. The link wait ends after six minutes with a visible
+unconfirmed result. Check the line status before requesting a fresh code.
+
+Only the current stream's confirmed connection advances to the ceremony. Going
+back closes that stream; saving an unlinked line's persona returns to linking.
+For a previously linked line, a successful persona save returns to the ceremony.
+A rejected save keeps the editor and its input open. Pending creates and persona
+saves admit one request and disable navigation that would discard their outcome.
 
 5-step provisioning flow for creating new instances. Accessed via the "Add Line" button on the fleet overview.
 
