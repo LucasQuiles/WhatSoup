@@ -21,6 +21,7 @@ import { configRoot, instancePaths } from '../../../src/fleet/paths.ts';
 import { escapeXml } from '../../../src/fleet/platform.ts';
 import { parsePlist } from '../../check-service-units.ts';
 import {
+  missingRequiredOutputs,
   parseReleaseSnapshotManifest,
   RELEASE_MANIFEST_FILE,
   type ReleaseSnapshotManifest,
@@ -733,6 +734,12 @@ export async function buildActivationContext(host: ActivationHost, args: Activat
     const full = next.commit !== null && FULL_COMMIT.test(next.commit);
     check('release-manifest-commit', full, full ? `commit ${next.commit}` : 'manifest source.commit is not a full 40-hex commit');
     if (full) context.newCommit = next.commit;
+    if (next.manifest !== null) {
+      const missingOutputs = missingRequiredOutputs(args.release, next.manifest);
+      check('release-required-outputs-present', missingOutputs.length === 0, missingOutputs.length === 0
+        ? 'every manifest requiredOutputs path exists in the new release'
+        : `host-built outputs missing from the new release: ${missingOutputs.join(', ')} (build them in the release first)`);
+    }
     const requirement = next.manifest === null
       ? { required: null, detail: 'candidate release manifest is unavailable after validation' }
       : releaseBotErrorsRequirement(args.release, next.manifest);
