@@ -47,9 +47,10 @@
 //   mention data, so no one wording fits every group. Without the sentence
 //   the receipt names no one to ask, and a group receipt reads no
 //   configuration.
-// The /stop sentence promises no reply: the /stop acknowledgement goes through
-// the chat's outbound queue, which refuses sends while that queue is poisoned.
-// No text echoes the queued message's content.
+// The /stop sentence promises no reply: the /stop reply is sent without a check
+// that it arrived, and one sent through a poisoned outbound queue is refused.
+// Nor does it promise the cancel: a permitted /stop can end uncertain. No text
+// echoes the queued message's content.
 //
 // RATE LIMIT. At most one receipt per chat per cooldown window, so a busy group
 // is not spammed while one long task runs. The cooldown is consumed when the

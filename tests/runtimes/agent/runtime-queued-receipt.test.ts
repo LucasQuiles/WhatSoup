@@ -211,9 +211,9 @@ describe('#2949 queued receipt: the text is truthful and content-free', () => {
     // Break caught: "Queued behind the current task" read as "some other task is
     // running"; the user asked again and again to cancel tasks that did not exist.
     // Review break: "Send /stop to cancel" read as a guarantee, but a permitted
-    // /stop can end uncertain. Review break (round 7): the fix that followed
-    // promised a reply with the outcome, and a poisoned outbound queue drops
-    // that reply, so the sentence now promises no reply (next test).
+    // /stop can end uncertain. Review break (round 6): the fix that followed
+    // promised a reply with the outcome, but that reply is sent without a check
+    // that it arrived, so the sentence now promises no reply (next test).
     expect(QUEUED_TURN_RECEIPT_TEXT).toBe(
       '*Still working on your earlier request.* This message is next. Send /stop to cancel the earlier request and anything waiting.',
     );
@@ -231,11 +231,11 @@ describe('#2949 queued receipt: the text is truthful and content-free', () => {
     );
   });
 
-  // Review break (round 7): the /stop acknowledgement goes through the chat's
-  // outbound queue, which rejects it while the queue is poisoned (the
+  // Review break (round 6): the /stop reply is sent without a check that it
+  // arrived, and one sent through a poisoned outbound queue is refused (the
   // known-poisoned-queue tests B7 and T5 in chat-transport-send-direct.test.ts).
-  // A receipt cannot know whether that queue will still accept the reply when
-  // the /stop arrives, so no receipt promises a reply.
+  // A receipt cannot know whether that reply will arrive, so no receipt
+  // promises a reply.
   it('no receipt promises a reply: none of the four texts says "reply" or "outcome"', () => {
     const texts = {
       QUEUED_TURN_RECEIPT_TEXT,
