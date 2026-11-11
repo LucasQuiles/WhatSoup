@@ -3289,7 +3289,7 @@ The default `autoCompactInputTokens` threshold is 150,000 tokens. This triggers 
 
 After a successful auto-compact, the runtime applies a 5-minute success cooldown. If the same scope becomes eligible again inside that rapid re-arm window, the runtime treats the compact as operationally ineffective and escalates the cooldown: 15 minutes, then 30 minutes, then 60 minutes capped. This bounds the slow-response spiral where a high-volume chat repeatedly spends turns compacting instead of replying.
 
-The trigger compares `autoCompactInputTokens` with the session's known context: the size of the last distinct API request, not the sum of a turn's requests. When the context is unknown (see `autoCompactInputTokens` in docs/configuration.md), it falls back to the cumulative input since the last compact; the `auto compact triggered` log shows which in `crossed` (`context` or `cumulative_fallback`).
+The trigger compares `autoCompactInputTokens` with the session's known context: the size of the last distinct main-loop API request, not the sum of a turn's requests. A subagent's requests measure the subagent's own context and never replace the session's value. `/status` shows the known context, or `unknown` with the cumulative fallback figure. When the context is unknown (see `autoCompactInputTokens` in docs/configuration.md), it falls back to the cumulative input since the last compact; the `auto compact triggered` log shows which in `crossed` (`context` or `cumulative_fallback`).
 
 When a scheduled-agent-job scope reaches the compaction convergence limit, its
 hard reset remains part of the completed turn's finalization barrier. Later

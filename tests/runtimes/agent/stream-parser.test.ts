@@ -17,6 +17,37 @@ function line(obj: unknown): string {
 const UNKNOWN_REQUEST = { type: 'request_usage', messageId: undefined, contextTokens: undefined };
 
 describe('parseEvent', () => {
+  describe('main-loop request context', () => {
+    it('reports a main-loop request with cached input as one request_usage', () => {
+      expect(parseEvents(line({
+        type: 'assistant', parent_tool_use_id: null,
+        message: { content: [{ type: 'text', text: 'done' }], usage: {
+          input_tokens: 10, cache_creation_input_tokens: 20, cache_read_input_tokens: 70,
+        } },
+      }))).toEqual([
+        { type: 'assistant_text', text: 'done' },
+        { type: 'request_usage', messageId: undefined, contextTokens: 100 },
+      ]);
+    });
+
+    it('does not replace parent context with subagent usage', () => {
+      expect(parseEvents(line({
+        type: 'assistant', parent_tool_use_id: 'task-1',
+        message: { id: 'msg-sub', content: [{ type: 'text', text: 'nested' }], usage: { input_tokens: 999 } },
+      }))).toEqual([{ type: 'assistant_text', text: 'nested' }]);
+    });
+
+    it('emits no request_usage for a subagent line without renderable content', () => {
+      const raw = {
+        type: 'assistant', parent_tool_use_id: 'task-1',
+        message: { id: 'msg-sub', content: [], usage: { input_tokens: 999 } },
+      };
+      const events = parseEvents(line(raw));
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ type: 'unknown' });
+    });
+  });
+
   describe('empty / whitespace lines', () => {
     it('returns null for an empty string', () => {
       expect(parseDeprecatedHead('')).toBeNull();

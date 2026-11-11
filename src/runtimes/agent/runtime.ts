@@ -5208,15 +5208,13 @@ export class AgentRuntime implements Runtime {
                 `Last activity: ${lastActivity}`;
               // B26: session token counts from the agent_sessions denorm
               // columns (same source as /sessions); omitted honestly when no
-              // row exists yet. The context line pairs the since-last-compact
-              // quantity maybeStartAutoCompact actually compares (input +
-              // cache_read minus the last-compact baseline, :1273-76) with
-              // the threshold the runtime actually applies (configured value,
-              // else DEFAULT_AUTO_COMPACT_INPUT_TOKENS) — and renders ONLY
-              // where auto-compact can genuinely run (claude-cli session,
-              // non-shared scope): a budget meter for a limit that never
-              // fires would be a lie. NO provider quota meters here — that is
-              // the /account lane.
+              // row exists yet. The context line shows what maybeStartAutoCompact
+              // compares with the threshold the runtime applies, and renders
+              // ONLY where auto-compact can genuinely run (claude-cli session,
+              // non-shared scope). Billing totals are not context size: a known
+              // context gauge is shown as context, and the cumulative quantity
+              // appears only labelled as the fallback used while the gauge is
+              // unknown. NO provider quota meters here — that is the /account lane.
               const statusRowId = sessionForStatus?.getDbRowId() ?? null;
               const statusSnap = statusRowId !== null ? getSessionTokenSnapshot(this.db, statusRowId) : null;
               if (statusSnap) {
@@ -5227,13 +5225,20 @@ export class AgentRuntime implements Runtime {
                   this.sessionScope !== 'shared' &&
                   this.autoCompactInputTokens !== undefined
                 ) {
-                  const contextUsed = Math.max(
+                  const contextUsed = this.autoCompact.contextGauge.read(
+                    this.sessionScope === 'per_chat' ? perChatMapKey! : GLOBAL_TOOL_SCOPE_KEY,
+                    contextGeneration(sessionForStatus),
+                  );
+                  const cumulativeSinceCompact = Math.max(
                     0,
                     statusSnap.totalInputTokens + statusSnap.totalCacheReadTokens -
                       (statusSnap.lastCompactInputTokens + statusSnap.lastCompactCacheReadTokens),
                   );
+                  const contextText = contextUsed === undefined
+                    ? `unknown (cumulative fallback ${formatTokenCount(cumulativeSinceCompact)})`
+                    : formatTokenCount(contextUsed);
                   text +=
-                    `\nContext: ${formatTokenCount(contextUsed)} / ${formatTokenCount(this.autoCompactInputTokens)} before auto-compact`;
+                    `\nContext: ${contextText} / ${formatTokenCount(this.autoCompactInputTokens)} before auto-compact`;
                 }
               }
             } else {

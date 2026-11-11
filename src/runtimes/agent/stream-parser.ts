@@ -135,8 +135,10 @@ export type AgentEvent =
     }
   | { type: 'token_usage'; inputTokens?: number; outputTokens?: number; cacheReadTokens?: number }
   /**
-   * #3717c: the context size of ONE API request (input + cache_creation + cache_read of that
-   * assistant message's usage). Emitted once per assistant line, after its content events.
+   * #3717c: the context size of ONE main-loop API request (input + cache_creation + cache_read
+   * of that assistant message's usage). Emitted once per main-loop assistant line, after its
+   * content events; a subagent's assistant line (parent_tool_use_id set) emits none, because its
+   * request measures the subagent's context, not the parent session's.
    * The CLI repeats a message per content block with the same id and usage, so consumers key by
    * messageId and REPLACE, never add. contextTokens is undefined when the usage is missing or
    * invalid (the context is unknown; no fallback to an earlier request or the summed result).
@@ -515,13 +517,19 @@ export function parseEvents(line: string): AgentEvent[] {
   if (topType === 'assistant') {
     const message = asRecord(event['message']);
     const content = message?.['content'];
+    // A subagent's request measures the subagent's own context. It must not
+    // replace the parent session's sample, which the compaction trigger reads.
+    const mainLoop = event['parent_tool_use_id'] == null;
     if (!Array.isArray(content) || content.length === 0) {
       // #3717c: an assistant message with no renderable content is still one API
       // request; its usage (or its absence -> unknown) must reach the gauge so an
       // earlier request's context is never left standing as the current one.
-      return message === null ? [unknownEvent(parsed)] : [unknownEvent(parsed), requestUsageEvent(message)];
+      return message === null || !mainLoop
+        ? [unknownEvent(parsed)]
+        : [unknownEvent(parsed), requestUsageEvent(message)];
     }
-    return [...content.flatMap(parseAssistantBlock), requestUsageEvent(message)];
+    const events = content.flatMap(parseAssistantBlock);
+    return mainLoop ? [...events, requestUsageEvent(message)] : events;
   }
 
   if (topType === 'user') {
