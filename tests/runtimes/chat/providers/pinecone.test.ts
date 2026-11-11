@@ -77,11 +77,31 @@ afterEach(() => {
 });
 
 /**
- * Server-derived fields every upsert carries. In these tests no instance name,
- * account scope or connected account is configured, and the instance is not
- * passive, so the stamp is empty-sourced and chat_scoped.
+ * PineconeMemory refuses an upsert whose source instance or account is
+ * unknown. Blocks that write therefore run as the operator instance `q`
+ * (checked against the operator project, so their Pinecone mock lists
+ * indexes) with this configured opaque account scope.
  */
-const DEFAULT_STAMP = { source_instance: '', source_account: '', visibility: 'chat_scoped' } as const;
+const WRITER_ACCOUNT_SCOPE = 'scope:test-line';
+
+/** Registers the instance name and account scope a writing block needs. */
+function useWritableInstance(): void {
+  const mutableConfig = configModule.config as unknown as Record<string, unknown>;
+  beforeEach(() => {
+    mutableConfig.botName = 'q';
+    mutableConfig.accountScopeId = WRITER_ACCOUNT_SCOPE;
+  });
+  afterEach(() => {
+    delete mutableConfig.botName;
+    delete mutableConfig.accountScopeId;
+  });
+}
+
+/**
+ * Server-derived fields every upsert in those blocks carries. The instance is
+ * not passive, so the stamp is chat_scoped.
+ */
+const DEFAULT_STAMP = { source_instance: 'q', source_account: WRITER_ACCOUNT_SCOPE, visibility: 'chat_scoped' } as const;
 
 /** Pre-query clause the context legs add unless the caller may read owner_only records. */
 const OWNER_ONLY_EXCLUSION = {
@@ -134,6 +154,8 @@ describe('PineconeMemory', () => {
     MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
       this.index = vi.fn().mockReturnValue(mockIndex);
       this.inference = { rerank: mockRerank };
+      // Read only by the operator instance's project check (the upsert block).
+      this.listIndexes = vi.fn().mockResolvedValue(OPERATOR_PROJECT_INDEXES);
     } as unknown as () => InstanceType<typeof Pinecone>);
     memory = new PineconeMemory();
   });
@@ -749,6 +771,8 @@ describe('PineconeMemory', () => {
   // ── upsert ────────────────────────────────────────────────────────────────
 
   describe('upsert', () => {
+    useWritableInstance();
+
     it('calls upsertRecords with snake_case fields', async () => {
       mockUpsertRecords.mockResolvedValueOnce(undefined);
       await memory.upsert([makeMemoryRecord()]);
@@ -1819,6 +1843,7 @@ describe('applyDecay', () => {
 
 describe('upsert retry success', () => {
   let memory: PineconeMemory;
+  useWritableInstance();
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1826,6 +1851,7 @@ describe('upsert retry success', () => {
     MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
       this.index = vi.fn().mockReturnValue(mockIndex);
       this.inference = { rerank: mockRerank };
+      this.listIndexes = vi.fn().mockResolvedValue(OPERATOR_PROJECT_INDEXES);
     } as unknown as () => InstanceType<typeof Pinecone>);
     memory = new PineconeMemory();
   });
@@ -2185,19 +2211,48 @@ describe('upsert provenance stamping', () => {
   const mutableConfig = configModule.config as unknown as Record<string, unknown>;
   const pineconeConfig = (configModule.config as unknown as { memory: { pinecone: Record<string, unknown> } }).memory.pinecone;
   const ACCOUNT_JID = '15550000123:7@s.whatsapp.net';
+  // The operator project check's only network call; named so a test can show it never ran.
+  const mockOperatorListIndexes = vi.fn();
 
-  function makeMemory(accountJid: string | null = null): PineconeMemory {
+  function makeMemory(accountJid: string | null = ACCOUNT_JID): PineconeMemory {
     return new PineconeMemory({ accountJid: () => accountJid });
+  }
+
+  /** Pinecone metadata-filter semantics for the operators these queries use. */
+  function matchesFilter(fields: Record<string, unknown>, filter: Record<string, unknown>): boolean {
+    return Object.entries(filter).every(([key, condition]) => {
+      if (key === '$or') return (condition as Record<string, unknown>[]).some((branch) => matchesFilter(fields, branch));
+      if (key === '$and') return (condition as Record<string, unknown>[]).every((branch) => matchesFilter(fields, branch));
+      const value = fields[key];
+      const ops = condition as { $eq?: unknown; $ne?: unknown; $exists?: boolean };
+      if ('$exists' in ops && (value !== undefined) !== ops.$exists) return false;
+      if ('$eq' in ops && value !== ops.$eq) return false;
+      if ('$ne' in ops && (value === undefined || value === ops.$ne)) return false;
+      return true;
+    });
+  }
+
+  /** A searchRecords fake that returns the best `topK` of `hits` its filter admits. */
+  function serveFiltered(hits: ReturnType<typeof makePineconeHit>[]): void {
+    mockSearchRecords.mockImplementation(async ({ query }: { query: { topK: number; filter?: Record<string, unknown> } }) => ({
+      result: {
+        hits: hits
+          .filter((hit) => matchesFilter(hit.fields, query.filter ?? {}))
+          .sort((a, b) => b._score - a._score)
+          .slice(0, query.topK),
+      },
+    }));
   }
 
   beforeEach(() => {
     vi.clearAllMocks();
     mutableConfig.botName = 'q'; // q is checked against the operator project
+    mockOperatorListIndexes.mockResolvedValue(OPERATOR_PROJECT_INDEXES);
     const MockPinecone = vi.mocked(Pinecone);
     MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
       this.index = vi.fn().mockReturnValue(mockIndex);
       this.inference = { rerank: mockRerank };
-      this.listIndexes = vi.fn().mockResolvedValue(OPERATOR_PROJECT_INDEXES);
+      this.listIndexes = mockOperatorListIndexes;
     } as unknown as () => InstanceType<typeof Pinecone>);
     mockUpsertRecords.mockResolvedValue(undefined);
   });
@@ -2233,14 +2288,88 @@ describe('upsert provenance stamping', () => {
     expect(first).toBe(second);
   });
 
-  it('prefers the configured opaque accountScopeId, and writes empty when the account is unknown', async () => {
+  it('prefers the configured opaque accountScopeId over the connected account', async () => {
     mutableConfig.accountScopeId = 'scope:line-alpha';
     await makeMemory(ACCOUNT_JID).upsert([makeMemoryRecord()]);
     expect(written()['source_account']).toBe('scope:line-alpha');
-    delete mutableConfig.accountScopeId;
-    mockUpsertRecords.mockClear();
-    await makeMemory(null).upsert([makeMemoryRecord()]);
-    expect(written()['source_account']).toBe('');
+  });
+
+  it('refuses a write with an unknown source account or instance before any network call, the project check included', async () => {
+    const refusal = {
+      code: 'PINECONE_UNAVAILABLE',
+      message: 'Pinecone upsert refused: the source instance or account is unknown',
+    };
+    // No accountScopeId and no connected account yet. A fresh instance, so the
+    // project check has not run and been cached.
+    await expect(makeMemory(null).upsert([makeMemoryRecord()])).rejects.toMatchObject(refusal);
+    // No instance name.
+    mutableConfig.botName = '';
+    await expect(makeMemory(ACCOUNT_JID).upsert([makeMemoryRecord()])).rejects.toMatchObject(refusal);
+    expect(mockUpsertRecords).not.toHaveBeenCalled();
+    expect(mockOperatorListIndexes).not.toHaveBeenCalled();
+  });
+
+  it('a refused write is not a provider failure, so the upsert breaker stays closed', async () => {
+    const unknownAccount = makeMemory(null);
+    // Three provider failures open the breaker (threshold 3); three refusals must not.
+    for (let i = 0; i < 3; i++) {
+      await expect(unknownAccount.upsert([makeMemoryRecord()])).rejects.toMatchObject({ code: 'PINECONE_UNAVAILABLE' });
+    }
+    await expect(makeMemory(ACCOUNT_JID).upsert([makeMemoryRecord()])).resolves.toBeUndefined();
+    expect(mockUpsertRecords).toHaveBeenCalledTimes(1);
+  });
+
+  it('a passive line supersedes its own owner_only record and never reaches another instance or account', async () => {
+    mutableConfig.instanceType = 'passive';
+    pineconeConfig.instanceScopedIds = true;
+    const memory = makeMemory(ACCOUNT_JID);
+    const ownAccount = memory.sourceAccount();
+    serveFiltered([
+      makePineconeHit('other-instance', 0.99, { source_instance: 'other-line', source_account: ownAccount, visibility: 'owner_only' }),
+      makePineconeHit('other-account', 0.98, { source_instance: 'q', source_account: 'acct:other', visibility: 'owner_only' }),
+      makePineconeHit('own', 0.9, { source_instance: 'q', source_account: ownAccount, visibility: 'owner_only' }),
+    ]);
+    try {
+      const candidate = await memory.findSupersedeCandidate('chat-1@g.us', 'old text');
+      expect(candidate?.id).toBe('own');
+      const { query } = mockSearchRecords.mock.calls[0][0];
+      expect(query.topK).toBe(1);
+      // No visibility clause: this line writes owner_only, so it must reach its own.
+      expect(query.filter).toEqual({
+        chat_jid: { $eq: 'chat-1@g.us' },
+        source_instance: { $eq: 'q' },
+        source_account: { $eq: ownAccount },
+      });
+    } finally {
+      delete pineconeConfig.instanceScopedIds;
+      mockSearchRecords.mockReset();
+    }
+  });
+
+  it('a chat_scoped line never supersedes an owner_only record', async () => {
+    const memory = makeMemory(ACCOUNT_JID);
+    serveFiltered([
+      makePineconeHit('private', 0.97, { source_instance: 'q', visibility: 'owner_only' }),
+      makePineconeHit('shared', 0.9, { source_instance: 'q', visibility: 'chat_scoped' }),
+    ]);
+    let filters: unknown[] = [];
+    try {
+      expect((await memory.findSupersedeCandidate('chat-1@g.us', 'old text'))?.id).toBe('shared');
+      pineconeConfig.instanceScopedIds = true;
+      await memory.findSupersedeCandidate('chat-1@g.us', 'old text');
+    } finally {
+      delete pineconeConfig.instanceScopedIds;
+      filters = mockSearchRecords.mock.calls.map((call) => call[0].query.filter);
+      mockSearchRecords.mockReset();
+    }
+    // instanceScopedIds off: no instance or account boundary (unchanged), owner_only excluded.
+    expect(filters[0]).toEqual({ chat_jid: { $eq: 'chat-1@g.us' }, ...OWNER_ONLY_EXCLUSION });
+    expect(filters[1]).toEqual({
+      chat_jid: { $eq: 'chat-1@g.us' },
+      source_instance: { $eq: 'q' },
+      source_account: { $eq: expect.stringMatching(/^acct:[0-9a-f]{24}$/) },
+      ...OWNER_ONLY_EXCLUSION,
+    });
   });
 
   it('omits provenance when the caller names no pipeline', async () => {
@@ -2406,6 +2535,8 @@ describe('searchEntities rerank error fallback', () => {
 
 describe('circuit breaker open — must run last', () => {
   let memory: PineconeMemory;
+  // The upsert case must reach the provider to trip its breaker.
+  useWritableInstance();
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -2413,6 +2544,7 @@ describe('circuit breaker open — must run last', () => {
     MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
       this.index = vi.fn().mockReturnValue(mockIndex);
       this.inference = { rerank: mockRerank };
+      this.listIndexes = vi.fn().mockResolvedValue(OPERATOR_PROJECT_INDEXES);
     } as unknown as () => InstanceType<typeof Pinecone>);
     memory = new PineconeMemory();
   });
@@ -2535,6 +2667,7 @@ describe('pinecone.ts uncovered-branch coverage', () => {
     mutableConfig.pineconeRerank = false;
     mutableConfig.pineconeRerankTopN = 6;
     mutableConfig.botName = 'q'; // q is checked against the operator project
+    mutableConfig.accountScopeId = WRITER_ACCOUNT_SCOPE;
     const MockPinecone = vi.mocked(Pinecone);
     MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
       this.index = vi.fn().mockReturnValue(mockIndex);
@@ -2549,6 +2682,7 @@ describe('pinecone.ts uncovered-branch coverage', () => {
     delete mutableConfig.pineconeRerank;
     delete mutableConfig.pineconeRerankTopN;
     delete mutableConfig.botName;
+    delete mutableConfig.accountScopeId;
     delete mutableConfig.memory;
     delete process.env['PINECONE_API_KEY'];
   });

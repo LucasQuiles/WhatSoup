@@ -32,18 +32,18 @@ function shortHash(text: string): string {
 
 function makePinecone(overrides?: Partial<{
   checkDuplicateResult: { isDuplicate: boolean; existingId?: string; score?: number };
-  searchResults: SearchResult[];
+  supersedeCandidate: SearchResult | null;
   upsertError: Error | null;
   checkDuplicateError: Error | null;
 }>): PineconeMemory {
   const checkResult = overrides?.checkDuplicateResult ?? { isDuplicate: false };
-  const searchResults = overrides?.searchResults ?? [];
+  const supersedeCandidate = overrides?.supersedeCandidate ?? null;
 
   return {
     checkDuplicate: overrides?.checkDuplicateError
       ? vi.fn().mockRejectedValue(overrides.checkDuplicateError)
       : vi.fn().mockResolvedValue(checkResult),
-    search: vi.fn().mockResolvedValue(searchResults),
+    findSupersedeCandidate: vi.fn().mockResolvedValue(supersedeCandidate),
     searchClaims: vi.fn().mockResolvedValue([]),
     upsert: overrides?.upsertError
       ? vi.fn().mockRejectedValue(overrides.upsertError)
@@ -155,12 +155,14 @@ describe('upsertFacts', () => {
     const oldText = 'Lives in Paris';
     const pinecone = makePinecone({
       checkDuplicateResult: { isDuplicate: false },
-      searchResults: [makeSearchResult(oldText, 0.92)],
+      supersedeCandidate: makeSearchResult(oldText, 0.92),
     });
     const fact = makeValidatedFact({ text: 'Lives in London', supersedesText: 'Lives in Paris' });
 
     const result = await upsertFacts(pinecone, [fact]);
 
+    // The lookup goes through the provider's bounded supersede search.
+    expect(pinecone.findSupersedeCandidate).toHaveBeenCalledWith(fact.chatJid, 'Lives in Paris');
     expect(result.superseded).toBe(1);
     // upsert is called twice: once for the updated old record, once for the new fact
     expect(pinecone.upsert).toHaveBeenCalledTimes(2);
@@ -175,7 +177,7 @@ describe('upsertFacts', () => {
   it('supersede does NOT delete the old record — only updates it', async () => {
     const pinecone = makePinecone({
       checkDuplicateResult: { isDuplicate: false },
-      searchResults: [makeSearchResult('Old fact', 0.95)],
+      supersedeCandidate: makeSearchResult('Old fact', 0.95),
     });
     const fact = makeValidatedFact({ supersedesText: 'Old fact' });
 
@@ -192,7 +194,7 @@ describe('upsertFacts', () => {
         .mockResolvedValueOnce({ isDuplicate: true, score: 0.98 })
         .mockResolvedValueOnce({ isDuplicate: false })
         .mockResolvedValueOnce({ isDuplicate: false }),
-      search: vi.fn().mockResolvedValue([makeSearchResult('Old preference', 0.9)]),
+      findSupersedeCandidate: vi.fn().mockResolvedValue(makeSearchResult('Old preference', 0.9)),
       searchClaims: vi.fn().mockResolvedValue([]),
       upsert: vi.fn().mockResolvedValue(undefined),
       searchForChat: vi.fn().mockResolvedValue([]),
@@ -269,19 +271,17 @@ describe('upsertFacts', () => {
 
     await upsertFacts(pinecone, [factWithWhitespace]);
 
-    // search should NOT be called for whitespace supersedesText
-    // The implementation checks `if (fact.supersedesText)` which is truthy for '   '
-    // so search may be called. Let's verify actual behavior:
-    // supersedesText = '   ' is truthy, so search IS called, but if no hits
-    // above 0.8 threshold then superseded stays 0.
+    // The implementation checks `if (fact.supersedesText)`, which is truthy for
+    // '   ', so the supersede lookup IS called; with no candidate, superseded
+    // stays 0.
     expect(pinecone.upsert).toHaveBeenCalledTimes(1);
-    expect(pinecone.search).toHaveBeenCalledWith('   ', { chat_jid: { $eq: factWithWhitespace.chatJid } }, 1);
+    expect(pinecone.findSupersedeCandidate).toHaveBeenCalledWith(factWithWhitespace.chatJid, '   ');
   });
 
   it('does NOT increment superseded when supersede search returns low-score results', async () => {
     const pinecone = makePinecone({
       checkDuplicateResult: { isDuplicate: false },
-      searchResults: [makeSearchResult('Old fact', 0.75)], // below 0.8 threshold
+      supersedeCandidate: makeSearchResult('Old fact', 0.75), // below 0.8 threshold
     });
     const fact = makeValidatedFact({ supersedesText: 'Old fact' });
 
@@ -295,7 +295,7 @@ describe('upsertFacts', () => {
   it('continues processing remaining facts when supersede lookup throws', async () => {
     const pinecone = {
       checkDuplicate: vi.fn().mockResolvedValue({ isDuplicate: false }),
-      search: vi.fn().mockRejectedValue(new Error('Search failed')),
+      findSupersedeCandidate: vi.fn().mockRejectedValue(new Error('Search failed')),
       searchClaims: vi.fn().mockResolvedValue([]),
       upsert: vi.fn().mockResolvedValue(undefined),
       searchForChat: vi.fn().mockResolvedValue([]),
@@ -855,11 +855,11 @@ describe('upserter.ts uncovered-branch coverage', () => {
     expect(upsertCall.updatedAt).toBe(upsertCall.createdAt);
   });
 
-  // Line 49: hits.length === 0 → does NOT update old record but still upserts new
-  it('does not invoke supersede update when search returns zero hits, but still upserts new fact', async () => {
+  // No supersede candidate → does NOT update an old record but still upserts new
+  it('does not invoke supersede update when the lookup finds no candidate, but still upserts new fact', async () => {
     const pinecone = makePinecone({
       checkDuplicateResult: { isDuplicate: false },
-      searchResults: [], // empty — no old record found
+      supersedeCandidate: null, // no old record found
     });
     const fact = makeValidatedFact({ supersedesText: 'No such old text' });
 

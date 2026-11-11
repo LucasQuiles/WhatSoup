@@ -983,6 +983,44 @@ describe('Media processing', () => {
     }
   });
 
+  it('passes the instance and account boundary and restrictive recall only with instance-scoped ids on', async () => {
+    const mutable = configModule.config as unknown as { memory?: { pinecone?: Record<string, unknown> } };
+    const previousMemory = mutable.memory;
+    try {
+      // Off (this config's default): a contact's direct chat passes no access argument.
+      const off = makeHandler();
+      await handleAndDrain(off.handler, makeIncomingMessage());
+      expect(mockLoadContext).toHaveBeenLastCalledWith(
+        off.pinecone,
+        '15551230008@s.whatsapp.net',
+        '15551230008@s.whatsapp.net',
+        expect.any(String),
+        expect.any(String),
+        'this_chat',
+      );
+      expect(off.pinecone.sourceAccount).not.toHaveBeenCalled();
+
+      mutable.memory = {
+        ...previousMemory,
+        pinecone: { ...previousMemory?.pinecone, instanceScopedIds: true },
+      };
+      const on = makeHandler();
+      await handleAndDrain(on.handler, makeIncomingMessage());
+      // The reader account comes from the provider that stamps this instance's writes.
+      expect(mockLoadContext).toHaveBeenLastCalledWith(
+        on.pinecone,
+        '15551230008@s.whatsapp.net',
+        '15551230008@s.whatsapp.net',
+        expect.any(String),
+        expect.any(String),
+        'this_chat',
+        { sourceInstance: configModule.config.botName, sourceAccount: 'acct-test', restrictive: true },
+      );
+    } finally {
+      mutable.memory = previousMemory;
+    }
+  });
+
   it('DB content updated when processMedia returns different content than original', async () => {
     const { handler, db } = makeHandler();
     const msg = makeIncomingMessage({ content: 'original', contentType: 'audio' });

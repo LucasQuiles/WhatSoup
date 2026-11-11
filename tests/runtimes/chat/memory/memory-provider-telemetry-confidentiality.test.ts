@@ -17,6 +17,8 @@ vi.mock('@pinecone-database/pinecone', () => ({
 vi.mock('../../../../src/config.ts', () => ({
   config: {
     botName: 'q',
+    // A write needs a known source account.
+    accountScopeId: 'scope:synthetic-line',
     pineconeIndex: 'SYNTHETIC_PRIVATE_INDEX_MARKER',
     pineconeContextTopK: 10,
     pineconeSenderTopK: 5,

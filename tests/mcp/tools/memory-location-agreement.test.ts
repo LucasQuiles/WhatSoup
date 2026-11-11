@@ -145,7 +145,7 @@ vi.mock('../../../src/lib/keyring.ts', () => ({
   lookupCredential: vi.fn(() => null),
 }));
 
-import { registerMemoryWriteTools } from '../../../src/mcp/tools/memory-write.ts';
+import { pineconeMemoryWriter, registerMemoryWriteTools } from '../../../src/mcp/tools/memory-write.ts';
 import { registerKnowledgeTools, type KnowledgeSearchDeps } from '../../../src/mcp/tools/knowledge.ts';
 import { GroupMembershipCache } from '../../../src/core/memory-scope.ts';
 import { Database } from '../../../src/core/database.ts';
@@ -206,7 +206,8 @@ function membershipOf(members: string[]): GroupMembershipCache {
 function registerTools(deps: KnowledgeSearchDeps = { identities: () => identities }, indexes = ['mw-mind']) {
   const tools: ToolDeclaration[] = [];
   const register = (tool: ToolDeclaration) => tools.push(tool);
-  registerMemoryWriteTools(register);
+  // As register-all wires it: the connected account feeds the source_account stamp.
+  registerMemoryWriteTools(register, pineconeMemoryWriter(() => identities.botJid));
   registerKnowledgeTools(indexes, register, undefined, deps);
   const memoryWrite = tools.find((tool) => tool.name === 'memory_write');
   const knowledgeSearch = tools.find((tool) => tool.name === 'knowledge_search');
