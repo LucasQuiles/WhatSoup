@@ -286,6 +286,61 @@ describe('outbound_sends metadata-only audit writer', () => {
     ]);
   });
 
+  it('keeps an audit row while a retained protected-delivery journal references it', () => {
+    const writer = createOutboundSendsWriter({ db: db.raw });
+    const protectedAudit = writer.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });
+    const ordinaryAudit = writer.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });
+    writer.markSuccess(protectedAudit.id);
+    writer.markSuccess(ordinaryAudit.id);
+    db.raw.prepare(`
+      UPDATE outbound_sends
+      SET created_at=datetime('now', '-31 days'), completed_at=datetime('now', '-31 days')
+      WHERE id IN (?, ?)
+    `).run(protectedAudit.id, ordinaryAudit.id);
+    db.raw.prepare(`
+      INSERT INTO protected_deliveries (
+        stage_operation_id, resolve_operation_id, delivery_ref, delivery_id,
+        principal, recipient_jid, kind, device_id, purpose, whatsapp_message_id,
+        outbound_send_id, state, issued_at
+      ) VALUES (
+        'protected-audit-stage', 'protected-audit-resolve', 'protected-audit-delivery', 'protected-audit-id',
+        '15551234567', '15551234567@s.whatsapp.net', 'rustdesk', 'fixture-device', 'login', 'protected-audit-message',
+        ?, 'submitted', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-89 days')
+      )
+    `).run(protectedAudit.id);
+
+    expect(writer.maintain({ mode: 'apply', terminalDays: 30, terminalMaxRows: 10_000 })).toEqual({
+      mode: 'apply', eligibleRows: 1, deletedRows: 1,
+    });
+    expect(db.raw.prepare('SELECT id FROM outbound_sends ORDER BY id').all()).toEqual([{ id: protectedAudit.id }]);
+  });
+
+  it('does not let an unlinked protected-delivery journal retain every audit row', () => {
+    const writer = createOutboundSendsWriter({ db: db.raw });
+    const audit = writer.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });
+    writer.markSuccess(audit.id);
+    db.raw.prepare(`
+      UPDATE outbound_sends
+      SET created_at=datetime('now', '-31 days'), completed_at=datetime('now', '-31 days')
+      WHERE id=?
+    `).run(audit.id);
+    db.raw.prepare(`
+      INSERT INTO protected_deliveries (
+        stage_operation_id, resolve_operation_id, delivery_ref, delivery_id,
+        principal, recipient_jid, kind, device_id, purpose, whatsapp_message_id,
+        state, issued_at
+      ) VALUES (
+        'unlinked-stage', 'unlinked-resolve', 'unlinked-ref', 'unlinked-id',
+        '15551234567', '15551234567@s.whatsapp.net', 'rustdesk', 'fixture-device', 'login', 'unlinked-message',
+        'submitted', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-89 days')
+      )
+    `).run();
+
+    expect(writer.maintain({ mode: 'apply', terminalDays: 30, terminalMaxRows: 10_000 })).toEqual({
+      mode: 'apply', eligibleRows: 1, deletedRows: 1,
+    });
+  });
+
   it('caps terminal rows while preserving every unresolved intent', () => {
     const writer = createOutboundSendsWriter({ db: db.raw });
     const unresolved = writer.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });
@@ -312,5 +367,35 @@ describe('outbound_sends metadata-only audit writer', () => {
     ]);
     expect(db.raw.prepare('SELECT outcome_code FROM outbound_sends WHERE id = ?').get(unresolved.id))
       .toEqual({ outcome_code: 'intent' });
+  });
+
+  it('excludes protected-delivery audits from the terminal-row cap', () => {
+    const writer = createOutboundSendsWriter({ db: db.raw });
+    const protectedAudit = writer.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });
+    writer.markSuccess(protectedAudit.id);
+    db.raw.prepare(`
+      INSERT INTO protected_deliveries (
+        stage_operation_id, resolve_operation_id, delivery_ref, delivery_id,
+        principal, recipient_jid, kind, device_id, purpose, whatsapp_message_id,
+        outbound_send_id, state, issued_at
+      ) VALUES (
+        'protected-cap-stage', 'protected-cap-resolve', 'protected-cap-delivery', 'protected-cap-id',
+        '15551234567', '15551234567@s.whatsapp.net', 'rustdesk', 'fixture-device', 'login', 'protected-cap-message',
+        ?, 'submitted', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-89 days')
+      )
+    `).run(protectedAudit.id);
+    for (let index = 0; index < 105; index += 1) {
+      const ordinary = writer.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });
+      writer.markSuccess(ordinary.id);
+    }
+
+    expect(writer.maintain({ mode: 'apply', terminalDays: 365, terminalMaxRows: 100 })).toEqual({
+      mode: 'apply', eligibleRows: 5, deletedRows: 5,
+    });
+    expect(db.raw.prepare('SELECT id FROM outbound_sends WHERE id=?').get(protectedAudit.id))
+      .toEqual({ id: protectedAudit.id });
+    expect(db.raw.prepare(`
+      SELECT COUNT(*) AS count FROM outbound_sends WHERE outcome_code='submitted'
+    `).get()).toEqual({ count: 101 });
   });
 });

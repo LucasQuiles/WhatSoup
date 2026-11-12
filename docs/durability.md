@@ -749,8 +749,10 @@ message delivery. Their managed one-use URL is resolved only inside
 with a stable WhatsApp message ID. The URL, RustDesk code, device seed, and
 managed credential never enter a model result, generic outbox, message history,
 or durable generic-send record. The service writes only delivery metadata and a
-metadata-only outbound audit intent. An ambiguous transport outcome stays
-ambiguous; it must not be retried through generic send tooling.
+metadata-only outbound audit intent. Submission requires the expected stable
+WhatsApp message ID; a missing or mismatched ID is ambiguous. An ambiguous outcome
+must not be retried through generic send tooling. A concurrent delivery/read receipt
+remains stronger evidence and is not overwritten by a later ambiguous acknowledgement.
 
 Receipt status is joined by that stable message ID and queued as a bounded
 metadata event for managed-side reporting. After the transport is fully
@@ -762,8 +764,12 @@ window. A second loop does not start until the prior loop completes; each event
 flush is bounded to 100 rows. Automatic
 recovery does not replay `resolving` or `ambiguous` rows, mint, adopt, or replace
 a managed delivery. The same-reference retry limit remains three attempts within
-60 seconds. The ordinary 90-day database-retention transaction removes the
-delivery metadata and its associated events together.
+60 seconds. Expired unresolved deliveries become terminal after any active send
+lease has passed its 60-second window. An active lease blocks replacement issuance;
+late receipts remain admissible without restarting delivery. Database retention
+removes delivery metadata and its associated events after 90 days from issuance.
+Referenced outbound audit rows remain until that journal expires; ordinary audit
+age and row limits continue to apply to unreferenced records.
 
 ### 5.7 `sendTracked` — Shared Send Helper
 

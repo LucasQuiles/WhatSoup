@@ -99,6 +99,41 @@ describe('database retention', () => {
       .toEqual({ count: 0 });
   });
 
+  it('keeps a referenced outbound audit until the protected-delivery journal expires', () => {
+    const writer = createOutboundSendsWriter({ db: db.raw });
+    const audit = writer.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });
+    writer.markSuccess(audit.id);
+    db.raw.prepare(`
+      UPDATE outbound_sends
+      SET created_at=datetime('now', '-31 days'), completed_at=datetime('now', '-31 days')
+      WHERE id=?
+    `).run(audit.id);
+    db.raw.prepare(`
+      INSERT INTO protected_deliveries (
+        stage_operation_id, resolve_operation_id, delivery_ref, delivery_id,
+        principal, recipient_jid, kind, device_id, purpose, whatsapp_message_id,
+        outbound_send_id, state, issued_at
+      ) VALUES (
+        'retained-audit-stage', 'retained-audit-resolve', 'retained-audit-ref', 'retained-audit-id',
+        '15551230000', '15551230000@s.whatsapp.net', 'rustdesk', 'fixture-desktop', 'login', 'retained-audit-message',
+        ?, 'submitted', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-89 days')
+      )
+    `).run(audit.id);
+
+    const retained = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+    expect(retained).toMatchObject({ protectedDeliveries: 0, outboundSends: 0 });
+    expect(db.raw.prepare('SELECT id FROM outbound_sends').all()).toEqual([{ id: audit.id }]);
+
+    db.raw.prepare(`
+      UPDATE protected_deliveries
+      SET issued_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-91 days')
+      WHERE delivery_ref='retained-audit-ref'
+    `).run();
+    const expired = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+    expect(expired).toMatchObject({ protectedDeliveries: 1, outboundSends: 1 });
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM outbound_sends').get()).toEqual({ count: 0 });
+  });
+
   it('rolls back every bounded handoff batch after a later SQLite failure and drains it once on retry', () => {
     const now = 2_000_000_000_000;
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);

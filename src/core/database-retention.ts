@@ -375,6 +375,10 @@ export function runDatabaseRetention(
          AND COALESCE(completed_at, created_at) < datetime('now', ?)
     `).run(terminalCutoff));
 
+    // Remove expired protected-delivery journals before their generic audit
+    // rows, so each linked audit is retained for the journal's full lifecycle.
+    const protectedDeliveries = deleteExpiredProtectedDeliveries(db.raw);
+
     const outboundSends = maintainOutboundSends(db.raw, {
       mode: 'apply',
       terminalDays: retention.outboundSendDays,
@@ -456,10 +460,6 @@ export function runDatabaseRetention(
     // unchanged — same cutoff math, same orphan-receipts cleanup — only the
     // location moved.
     const messages = deleteOldMessages(db, retention.messageRetentionDays);
-
-    // Delivery rows are metadata only; their linked event records are deleted
-    // in the same transaction so no principal or delivery correlation remains.
-    const protectedDeliveries = deleteExpiredProtectedDeliveries(db.raw);
 
     // #2566 slice 4 — trigger history. Terminal rows only: a running run or a
     // running/claimed occurrence is crash evidence, not history, and is never

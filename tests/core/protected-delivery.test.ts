@@ -140,6 +140,34 @@ describe('protected delivery', () => {
     expect(durable).not.toContain('c'.repeat(43));
   });
 
+  it('treats a missing transport acknowledgement as ambiguous instead of submitted', async () => {
+    const client: ManagedDeliveryClient = {
+      async stageRustdesk() { return { deliveryRef: DELIVERY_REF, id: DELIVERY_ID, expiresAt: EXPIRES_AT, state: 'unclaimed' }; },
+      async resolve() { return { id: DELIVERY_ID, link: DELIVERY_LINK, expiresAt: EXPIRES_AT, state: 'unclaimed' }; },
+      async getStatus() { return managedStatus(); },
+      async reportEvent() {},
+    };
+    const service = new ProtectedDeliveryService({
+      db: db.raw, client,
+      messenger: { async sendRaw() { return { waMessageId: null }; } },
+      now: () => new Date('2026-10-29T12:00:00.000Z'), randomId: () => 'stable-id',
+    });
+    await service.requestRustdesk({
+      deviceId: 'device-null-ack', purpose: 'login', principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net',
+    });
+
+    await expect(service.deliver({
+      deliveryRef: DELIVERY_REF, principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net',
+    })).rejects.toThrow('transport outcome is ambiguous');
+    expect(db.raw.prepare(`
+      SELECT state, whatsapp_message_id, send_claim_token, send_claimed_at
+      FROM protected_deliveries WHERE delivery_ref=?
+    `).get(DELIVERY_REF)).toEqual({
+      state: 'ambiguous', whatsapp_message_id: 'stable-id', send_claim_token: null, send_claimed_at: null,
+    });
+    expect(db.raw.prepare('SELECT outcome_code FROM outbound_sends').get()).toEqual({ outcome_code: 'ambiguous' });
+  });
+
   it('deduplicates WhatsApp receipt events before relaying metadata', async () => {
     const reported: Array<{ eventId: string; status: string }> = [];
     const client: ManagedDeliveryClient = {
@@ -380,6 +408,184 @@ describe('protected delivery', () => {
 
     expect(resolves).toBe(0);
     expect(sends).toBe(0);
+  });
+
+  it('terminalizes expired uncertain rows without replaying and preserves a receipt on an active lease', async () => {
+    let resolves = 0;
+    let sends = 0;
+    const now = new Date('2026-10-29T12:00:00.000Z');
+    const client: ManagedDeliveryClient = {
+      async stageRustdesk() { throw new Error('not used'); },
+      async resolve() { resolves += 1; throw new Error('not used'); },
+      async getStatus() { return managedStatus(); },
+      async reportEvent() {},
+    };
+    const service = new ProtectedDeliveryService({
+      db: db.raw, client,
+      messenger: { async sendRaw() { sends += 1; return { waMessageId: 'unused' }; } },
+      now: () => now, randomId: () => 'stable-id',
+    });
+    const insert = db.raw.prepare(`
+      INSERT INTO protected_deliveries (
+        stage_operation_id, resolve_operation_id, delivery_ref, delivery_id,
+        principal, recipient_jid, kind, device_id, purpose, whatsapp_message_id,
+        state, expires_at, issued_at, attempt_count, send_claim_token, send_claimed_at
+      ) VALUES (?, ?, ?, ?, '15551234567', '15551234567@s.whatsapp.net', 'rustdesk', 'fixture-device', 'login', ?, ?, ?, ?, 1, ?, ?)
+    `);
+    for (const state of ['staging', 'staged', 'resolving', 'failed', 'ambiguous']) {
+      insert.run(
+        `stage-${state}`, `resolve-${state}`, `delivery-${state}`, `id-${state}`, `message-${state}`, state,
+        '2026-10-29T11:59:00.000Z', '2026-10-29T11:50:00.000Z', `lease-${state}`, '2026-10-29T11:58:00.000Z',
+      );
+    }
+    insert.run(
+      'stage-active', 'resolve-active', 'delivery-active', 'id-active', 'message-active', 'resolving',
+      '2026-10-29T11:59:00.000Z', '2026-10-29T11:50:00.000Z', 'active-lease', '2026-10-29T11:59:30.000Z',
+    );
+    for (const state of ['delivered', 'read']) {
+      insert.run(
+        `stage-${state}`, `resolve-${state}`, `delivery-${state}`, `id-${state}`, `message-${state}`, state,
+        '2026-10-29T11:59:00.000Z', '2026-10-29T11:50:00.000Z', null, null,
+      );
+    }
+
+    await expect(service.recoverPendingDeliveries()).resolves.toEqual({ resumed: 0, skipped: 0 });
+    expect(db.raw.prepare(`
+      SELECT state, send_claim_token, send_claimed_at, terminal_at
+      FROM protected_deliveries WHERE delivery_ref='delivery-active'
+    `).get()).toEqual({ state: 'resolving', send_claim_token: 'active-lease', send_claimed_at: '2026-10-29T11:59:30.000Z', terminal_at: null });
+    await expect(service.recordReceipt({
+      whatsappMessageId: 'message-active', recipientJid: '15551234567@s.whatsapp.net', type: 'read',
+    })).resolves.toBe(true);
+    expect(db.raw.prepare(`
+      SELECT state, send_claim_token, send_claimed_at
+      FROM protected_deliveries WHERE delivery_ref='delivery-active'
+    `).get()).toEqual({ state: 'read', send_claim_token: null, send_claimed_at: null });
+    expect(db.raw.prepare(`
+      SELECT state, send_claim_token, send_claimed_at, terminal_at
+      FROM protected_deliveries
+      WHERE delivery_ref LIKE 'delivery-%'
+        AND delivery_ref NOT IN ('delivery-active', 'delivery-delivered', 'delivery-read')
+      ORDER BY delivery_ref
+    `).all()).toEqual([
+      'ambiguous', 'failed', 'resolving', 'staged', 'staging',
+    ].map(() => expect.objectContaining({ state: 'expired', send_claim_token: null, send_claimed_at: null, terminal_at: expect.any(String) })));
+    await expect(service.recordReceipt({
+      whatsappMessageId: 'message-resolving', recipientJid: '15551234567@s.whatsapp.net', type: 'delivery',
+    })).resolves.toBe(true);
+    expect(db.raw.prepare(`
+      SELECT state, send_claim_token, send_claimed_at
+      FROM protected_deliveries WHERE delivery_ref='delivery-resolving'
+    `).get()).toEqual({ state: 'delivered', send_claim_token: null, send_claimed_at: null });
+    expect(db.raw.prepare(`
+      SELECT delivery_ref, state FROM protected_deliveries
+      WHERE delivery_ref IN ('delivery-delivered', 'delivery-read') ORDER BY delivery_ref
+    `).all()).toEqual([
+      { delivery_ref: 'delivery-delivered', state: 'delivered' },
+      { delivery_ref: 'delivery-read', state: 'read' },
+    ]);
+    expect(resolves).toBe(0);
+    expect(sends).toBe(0);
+  });
+
+  it('does not expire an actively resolving send before its stable acknowledgement arrives', async () => {
+    let now = new Date('2026-10-29T11:59:00.000Z');
+    let releaseResolve: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => { releaseResolve = resolve; });
+    let sends = 0;
+    const client: ManagedDeliveryClient = {
+      async stageRustdesk() { return { deliveryRef: DELIVERY_REF, id: DELIVERY_ID, expiresAt: EXPIRES_AT, state: 'unclaimed' }; },
+      async resolve() { await blocked; return { id: DELIVERY_ID, link: DELIVERY_LINK, expiresAt: EXPIRES_AT, state: 'unclaimed' }; },
+      async getStatus() { return managedStatus(); },
+      async reportEvent() {},
+    };
+    const service = new ProtectedDeliveryService({
+      db: db.raw, client,
+      messenger: { async sendRaw(_jid, _content, options) { sends += 1; return { waMessageId: options?.messageId ?? null }; } },
+      now: () => now, randomId: () => 'stable-id',
+    });
+    await service.requestRustdesk({ deviceId: 'device-in-flight', purpose: 'login', principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net' });
+    const delivery = service.deliver({ deliveryRef: DELIVERY_REF, principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net' });
+    await Promise.resolve();
+    now = new Date('2026-10-29T11:59:30.000Z');
+    db.raw.prepare('UPDATE protected_deliveries SET expires_at=? WHERE delivery_ref=?')
+      .run('2026-10-29T11:59:15.000Z', DELIVERY_REF);
+
+    await expect(service.recoverPendingDeliveries()).resolves.toEqual({ resumed: 0, skipped: 0 });
+    expect(db.raw.prepare('SELECT state, send_claim_token FROM protected_deliveries WHERE delivery_ref=?').get(DELIVERY_REF))
+      .toEqual({ state: 'resolving', send_claim_token: 'stable-id' });
+    releaseResolve?.();
+    await expect(delivery).resolves.toEqual({ deliveryRef: DELIVERY_REF, id: DELIVERY_ID, state: 'submitted' });
+    expect(sends).toBe(1);
+    expect(db.raw.prepare('SELECT state FROM protected_deliveries WHERE delivery_ref=?').get(DELIVERY_REF)).toEqual({ state: 'submitted' });
+  });
+
+  it('does not reissue a RustDesk delivery while its expired send lease is still active', async () => {
+    let stageCalls = 0;
+    const now = new Date('2026-10-29T12:00:00.000Z');
+    const client: ManagedDeliveryClient = {
+      async stageRustdesk() { stageCalls += 1; return { deliveryRef: DELIVERY_REF, id: DELIVERY_ID, expiresAt: EXPIRES_AT, state: 'unclaimed' }; },
+      async resolve() { throw new Error('not used'); },
+      async getStatus() { return managedStatus(); },
+      async reportEvent() {},
+    };
+    const service = new ProtectedDeliveryService({
+      db: db.raw, client,
+      messenger: { async sendRaw() { throw new Error('not used'); } },
+      now: () => now, randomId: () => 'stable-id',
+    });
+    db.raw.prepare(`
+      INSERT INTO protected_deliveries (
+        stage_operation_id, resolve_operation_id, delivery_ref, delivery_id,
+        principal, recipient_jid, kind, device_id, purpose, whatsapp_message_id,
+        state, expires_at, issued_at, attempt_count, send_claim_token, send_claimed_at
+      ) VALUES (
+        'active-request-stage', 'active-request-resolve', 'active-request-ref', 'active-request-id',
+        '15551234567', '15551234567@s.whatsapp.net', 'rustdesk', 'device-active-request', 'login', 'active-request-message',
+        'resolving', '2026-10-29T11:59:00.000Z', '2026-10-29T11:50:00.000Z', 1, 'active-request-lease', '2026-10-29T11:59:30.000Z'
+      )
+    `).run();
+
+    await expect(service.requestRustdesk({
+      deviceId: 'device-active-request', purpose: 'login', principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net',
+    })).rejects.toThrow('outcome is still unresolved');
+    expect(stageCalls).toBe(0);
+    expect(db.raw.prepare('SELECT state, send_claim_token FROM protected_deliveries').all())
+      .toEqual([{ state: 'resolving', send_claim_token: 'active-request-lease' }]);
+  });
+
+  it('preserves a receipt that arrives while a transport acknowledgement is ambiguous', async () => {
+    let releaseSend: (() => void) | undefined;
+    const sending = new Promise<void>((resolve) => { releaseSend = resolve; });
+    let sendStarted = false;
+    const client: ManagedDeliveryClient = {
+      async stageRustdesk() { return { deliveryRef: DELIVERY_REF, id: DELIVERY_ID, expiresAt: EXPIRES_AT, state: 'unclaimed' }; },
+      async resolve() { return { id: DELIVERY_ID, link: DELIVERY_LINK, expiresAt: EXPIRES_AT, state: 'unclaimed' }; },
+      async getStatus() { return managedStatus(); },
+      async reportEvent() {},
+    };
+    const service = new ProtectedDeliveryService({
+      db: db.raw, client,
+      messenger: {
+        async sendRaw() {
+          sendStarted = true;
+          await sending;
+          return { waMessageId: null };
+        },
+      },
+      now: () => new Date('2026-10-29T12:00:00.000Z'), randomId: () => 'stable-id',
+    });
+    await service.requestRustdesk({ deviceId: 'device-receipt-race', purpose: 'login', principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net' });
+    const delivery = service.deliver({ deliveryRef: DELIVERY_REF, principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net' });
+    while (!sendStarted) await Promise.resolve();
+
+    await expect(service.recordReceipt({
+      whatsappMessageId: 'stable-id', recipientJid: '15551234567@s.whatsapp.net', type: 'read',
+    })).resolves.toBe(true);
+    releaseSend?.();
+    await expect(delivery).rejects.toThrow('transport outcome is ambiguous');
+    expect(db.raw.prepare('SELECT state FROM protected_deliveries WHERE delivery_ref=?').get(DELIVERY_REF))
+      .toEqual({ state: 'read' });
   });
 
   it('reuses the resolve operation and WhatsApp message IDs for an explicit bounded retry', async () => {

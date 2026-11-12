@@ -50,11 +50,16 @@ export class ProtectedDeliveryService {
   async requestRustdesk(input: { deviceId: string; purpose: ProtectedDeliveryPurpose; principal: string; recipientJid: string }): Promise<{ deliveryRef: string; id: string; expiresAt: string; state: string }> {
     const now = this.now();
     const nowIso = now.toISOString();
-    this.deps.db.prepare(`UPDATE protected_deliveries SET state='expired',send_claim_token=NULL,send_claimed_at=NULL,terminal_at=COALESCE(terminal_at,?),updated_at=?
+    this.expireOverdueUncertainDeliveries(now);
+    const activeLeaseCutoff = new Date(now.getTime() - RETRY_WINDOW_MS).toISOString();
+    const active = this.deps.db.prepare(`SELECT 1 FROM protected_deliveries
       WHERE kind='rustdesk' AND device_id=? AND purpose=? AND principal=? AND recipient_jid=?
         AND state IN ('staging','staged','resolving','failed','ambiguous')
-        AND expires_at IS NOT NULL AND julianday(expires_at) <= julianday(?)`)
-      .run(nowIso, nowIso, input.deviceId, input.purpose, input.principal, input.recipientJid, nowIso);
+        AND expires_at IS NOT NULL AND julianday(expires_at) <= julianday(?)
+        AND send_claim_token IS NOT NULL AND send_claimed_at IS NOT NULL
+        AND julianday(send_claimed_at) > julianday(?)
+      LIMIT 1`).get(input.deviceId, input.purpose, input.principal, input.recipientJid, nowIso, activeLeaseCutoff);
+    if (active) throw new Error('protected delivery outcome is still unresolved');
     const old = this.deps.db.prepare(`SELECT * FROM protected_deliveries
       WHERE kind='rustdesk' AND device_id=? AND purpose=? AND principal=? AND recipient_jid=?
         AND state IN ('staging','staged','resolving','failed','ambiguous')
@@ -99,19 +104,21 @@ export class ProtectedDeliveryService {
       resolved = await this.deps.client.resolve({ deliveryRef: claimed.delivery_ref!, principal: claimed.principal, operationId: claimed.resolve_operation_id });
       if (!opaqueId(resolved.id) || !isCanonicalManagedLink(resolved.link, this.deps.pins ?? PROTECTED_DELIVERY_PINS) || !instant(resolved.expiresAt) || resolved.id !== claimed.delivery_id) throw new Error('invalid');
     } catch {
-      this.fail(claimed); this.event(claimed, 'failed'); throw new Error('protected delivery resolution failed');
+      if (this.fail(claimed)) this.event(claimed, 'failed');
+      throw new Error('protected delivery resolution failed');
     }
     if (new Date(resolved.expiresAt).getTime() <= this.now().getTime()) { this.expire(claimed); throw new Error('protected delivery is expired'); }
     const outbound = this.audit.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });
     this.deps.db.prepare(`UPDATE protected_deliveries SET outbound_send_id=?,expires_at=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND send_claim_token=?`).run(outbound.id, resolved.expiresAt, claimed.id, claimed.send_claim_token);
     try {
       const result = await this.deps.messenger.sendRaw(claimed.recipient_jid, { text: resolved.link, linkPreview: null }, { messageId: claimed.whatsapp_message_id });
-      if (result.waMessageId !== null && result.waMessageId !== claimed.whatsapp_message_id) throw new Error('stable id rejected');
+      if (result.waMessageId !== claimed.whatsapp_message_id) throw new Error('stable id rejected');
     } catch {
       // Never persist or reflect a send exception; providers may include the full URL in it.
       const safe = new Error('protected delivery transport outcome is ambiguous');
       this.audit.markFailure(outbound.id, safe);
-      this.ambiguous(claimed); this.event(claimed, 'ambiguous'); throw safe;
+      if (this.ambiguous(claimed)) this.event(claimed, 'ambiguous');
+      throw safe;
     }
     this.audit.markSuccess(outbound.id);
     this.deps.db.prepare(`UPDATE protected_deliveries SET state='submitted',send_claim_token=NULL,send_claimed_at=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND send_claim_token=?`).run(claimed.id, claimed.send_claim_token);
@@ -171,6 +178,7 @@ export class ProtectedDeliveryService {
    */
   async recoverPendingDeliveries(): Promise<{ resumed: number; skipped: number }> {
     const now = this.now();
+    this.expireOverdueUncertainDeliveries(now);
     const cutoff = new Date(now.getTime() - RETRY_WINDOW_MS).toISOString();
     const rows = this.deps.db.prepare(`SELECT delivery_ref,principal,recipient_jid FROM protected_deliveries
       WHERE state='staged' AND delivery_ref IS NOT NULL AND delivery_id IS NOT NULL
@@ -267,9 +275,28 @@ export class ProtectedDeliveryService {
     if (!claim) throw new Error('protected delivery could not be claimed');
     return claim;
   }
-  private expire(row: Row): void { this.deps.db.prepare(`UPDATE protected_deliveries SET state='expired',send_claim_token=NULL,send_claimed_at=NULL,terminal_at=COALESCE(terminal_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?`).run(row.id); }
-  private fail(row: Row): void { this.deps.db.prepare(`UPDATE protected_deliveries SET state='failed',send_claim_token=NULL,send_claimed_at=NULL,terminal_at=CASE WHEN attempt_count>=? THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE terminal_at END,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?`).run(MAX_ATTEMPTS,row.id); }
-  private ambiguous(row: Row): void { this.deps.db.prepare(`UPDATE protected_deliveries SET state='ambiguous',send_claim_token=NULL,send_claimed_at=NULL,terminal_at=CASE WHEN attempt_count>=? THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE terminal_at END,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?`).run(MAX_ATTEMPTS,row.id); }
+  private expire(row: Row): void {
+    this.deps.db.prepare(`UPDATE protected_deliveries SET state='expired',send_claim_token=NULL,send_claimed_at=NULL,terminal_at=COALESCE(terminal_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND state IN ('staging','staged','resolving','failed','ambiguous')`).run(row.id);
+  }
+  private expireOverdueUncertainDeliveries(now: Date): void {
+    const nowIso = now.toISOString();
+    const staleLeaseCutoff = new Date(now.getTime() - RETRY_WINDOW_MS).toISOString();
+    // A current lease can still receive its stable acknowledgement or a receipt;
+    // only terminalize it after the same bounded lease window used by claim().
+    this.deps.db.prepare(`UPDATE protected_deliveries
+      SET state='expired',send_claim_token=NULL,send_claimed_at=NULL,
+          terminal_at=COALESCE(terminal_at,?),updated_at=?
+      WHERE state IN ('staging','staged','resolving','failed','ambiguous')
+        AND expires_at IS NOT NULL AND julianday(expires_at) <= julianday(?)
+        AND (send_claim_token IS NULL OR send_claimed_at IS NULL OR julianday(send_claimed_at) <= julianday(?))`)
+      .run(nowIso, nowIso, nowIso, staleLeaseCutoff);
+  }
+  private fail(row: Row): boolean {
+    return this.deps.db.prepare(`UPDATE protected_deliveries SET state='failed',send_claim_token=NULL,send_claimed_at=NULL,terminal_at=CASE WHEN attempt_count>=? THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE terminal_at END,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND state IN ('staging','staged','resolving','failed','ambiguous')`).run(MAX_ATTEMPTS,row.id).changes > 0;
+  }
+  private ambiguous(row: Row): boolean {
+    return this.deps.db.prepare(`UPDATE protected_deliveries SET state='ambiguous',send_claim_token=NULL,send_claimed_at=NULL,terminal_at=CASE WHEN attempt_count>=? THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE terminal_at END,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND state IN ('staging','staged','resolving','failed','ambiguous')`).run(MAX_ATTEMPTS,row.id).changes > 0;
+  }
   private event(row: Row, status: DeliveryEventStatus, eventId = row.delivery_ref + ':' + status): void {
     if (!row.delivery_ref) return;
     this.deps.db.prepare('INSERT OR IGNORE INTO protected_delivery_events (event_id,delivery_ref,status,observed_at) VALUES (?,?,?,?)').run(eventId,row.delivery_ref,status,this.nowIso());

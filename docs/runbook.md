@@ -3076,8 +3076,12 @@ overlaps an in-flight loop; each flush is bounded to 100 pending events. Recover
 uses the same persisted reference and remains bounded to three attempts within
 60 seconds. It does not replay `resolving` or `ambiguous` rows, mint, adopt, or
 replace a delivery; inspect delivery status and receipt evidence for those rows.
+Expired unresolved rows become terminal once any send lease is at least 60 seconds
+old. A fresh lease blocks reissue. Missing or mismatched WhatsApp message IDs report
+an ambiguous submission; later receipt evidence is preserved.
 The daily unified database-retention transaction deletes protected-delivery
-metadata and associated event rows older than 90 days. Check
+metadata and associated event rows older than 90 days from issuance. It preserves
+their referenced outbound audit rows until that deletion. Check
 `health.retention.database.lastResult.protectedDeliveries` after a successful
 sweep. A missing runtime credential is a startup configuration error, so correct
 the service environment before restarting the agent.
