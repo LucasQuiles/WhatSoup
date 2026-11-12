@@ -199,10 +199,14 @@ npm --silent run release:activate -- \
      user-database home of `SUDO_UID`, with no symlinked path component. It
      refuses `/Library/LaunchAgents` and any other home, so an activation run
      with a `HOME` that differs from that user-database home cannot replace
-     a root-owned plist. It checks the expected bytes, preserves owner, group,
-     mode and `uchg`, and refuses symlinks, extended attributes and other
-     protection flags. A failed replacement restores its original bytes and
-     protection;
+     a root-owned plist. The home, `Library` and `LaunchAgents` must be
+     folders that user owns. After these checks the helper works only
+     through descriptors of the opened folder and plist, so a folder or plist
+     swapped for a symlink mid-run cannot redirect a root write or flag change;
+     the run fails instead. It checks the expected bytes, preserves owner,
+     group, mode and `uchg`, and refuses symlinks, hard-linked plists,
+     extended attributes and other protection flags. A failed replacement
+     restores its original bytes and protection;
   3. reloads each label with the reload sequence below;
   4. verifies from the executing process (a new pid whose argv names
      `<release>/src/bootstrap.ts`, authenticated health with the manifest
