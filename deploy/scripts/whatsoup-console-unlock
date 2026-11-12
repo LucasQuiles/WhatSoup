@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Console auto-unlock wrapper: reads the root token from the login keychain and
-# runs the CDP helper. Token travels via env only (never argv/disk/clipboard).
+# Console auto-unlock wrapper: reads the root token from the login keychain or
+# the existing private canonical fleet-token file and runs the CDP helper.
+# Token travels to the helper via env only (never argv/URL/clipboard).
 # Exit: 0 only when the helper reports already-valid/unlocked; 1 otherwise.
 set -uo pipefail
 CDP_PORT="${CDP_PORT:-9333}"; FLEET="${FLEET:-http://localhost:9227}"
@@ -12,5 +13,18 @@ fi
 [ -n "$NODE" ] && [ -x "$NODE" ] || { echo "no-node"; exit 1; }
 for i in $(seq 1 24); do curl -s --fail "http://localhost:$CDP_PORT/json/version" >/dev/null 2>&1 && break; sleep 0.5; done
 curl -s --fail "http://localhost:$CDP_PORT/json/version" >/dev/null 2>&1 || { echo "cdp-unreachable"; exit 1; }
-TOKEN=$(security find-generic-password -s whatsoup-console-token -w 2>/dev/null) || { echo "no-keychain-token"; exit 1; }
+TOKEN=$(security find-generic-password -s whatsoup-console-token -w 2>/dev/null) || TOKEN=""
+if [ -z "$TOKEN" ]; then
+  TOKEN_FILE="${WHATSOUP_FLEET_TOKEN_FILE:-$HOME/.config/whatsoup/fleet-tokens.json}"
+  TOKEN=$("$NODE" -e '
+    const fs = require("node:fs");
+    const file = process.argv[1];
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) process.exit(1);
+    const token = JSON.parse(fs.readFileSync(file, "utf8")).active;
+    if (typeof token !== "string" || !/^[0-9a-f]{64}$/.test(token)) process.exit(1);
+    process.stdout.write(token);
+  ' "$TOKEN_FILE" 2>/dev/null) || TOKEN=""
+fi
+[ -n "$TOKEN" ] || { echo "no-console-token"; exit 1; }
 CDP_PORT="$CDP_PORT" FLEET="$FLEET" WHATSOUP_CONSOLE_TOKEN="$TOKEN" exec "$NODE" "$HOME/.local/bin/whatsoup-console-unlock.mjs"
