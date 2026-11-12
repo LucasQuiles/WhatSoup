@@ -200,7 +200,7 @@ function requireDelivery(
 
 function requireSecretInput(value: unknown): ManagedSecretInputMetadata {
   const record = asRecord(value);
-  const state = record['state'];
+  const state = record['state'] === 'awaiting_submission' ? 'awaiting_input' : record['state'];
   const kind = record['kind'];
   const saveAllowed = record['saveAllowed'];
   if (!isSecretInputState(state) || !isSecretInputKind(kind) || typeof saveAllowed !== 'boolean') {

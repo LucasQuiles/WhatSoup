@@ -336,6 +336,17 @@ describe('managed delivery HTTP client', () => {
     expect(calls.every((call) => call.init.redirect === 'error')).toBe(true);
   });
 
+  it('projects a claimed browser form onto the local awaiting-input state and rejects unknown states', async () => {
+    const managed = client(async () => json(intakeReply({ state: 'awaiting_submission' })));
+
+    await expect(managed.getSecretInput({ id: INTAKE_ID, principal: '15551234567' }))
+      .resolves.toEqual(intakeReply());
+
+    const unknown = client(async () => json(intakeReply({ state: 'unexpected_state' })));
+    await expect(unknown.getSecretInput({ id: INTAKE_ID, principal: '15551234567' }))
+      .rejects.toThrow('managed delivery response has an invalid secret input metadata');
+  });
+
   it('uses the unchanged intake body for an MFA request and rejects storable MFA metadata', async () => {
     const calls: FetchCall[] = [];
     const managed = client(async (url, init) => {

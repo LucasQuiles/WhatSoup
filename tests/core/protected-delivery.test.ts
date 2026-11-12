@@ -228,7 +228,7 @@ describe('protected delivery', () => {
         calls.push({ url: String(url), init: init! });
         const body = calls.length === 1 ? metadata('awaiting_input')
           : calls.length === 2 ? { ...metadata('awaiting_input'), link: INTAKE_LINK }
-            : metadata(calls.length === 4 ? 'cancelled' : 'awaiting_input');
+            : metadata(calls.length === 4 ? 'cancelled' : 'awaiting_submission');
         return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
       },
     });
@@ -244,6 +244,8 @@ describe('protected delivery', () => {
       resourceId: 'dummy-account', kind: 'password', purpose: 'dummy login', principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net',
     })).resolves.toMatchObject({ id: INTAKE_ID, deliveryStatus: 'submitted' });
     await expect(service.secretInputStatus({ id: INTAKE_ID, principal: '15551234567' })).resolves.toMatchObject({ inputState: 'awaiting_input' });
+    expect(db.raw.prepare('SELECT input_state FROM protected_secret_inputs WHERE intake_id=?').get(INTAKE_ID))
+      .toEqual({ input_state: 'awaiting_input' });
     await expect(service.cancelSecretInput({ id: INTAKE_ID, principal: '15551234567' })).resolves.toMatchObject({ inputState: 'cancelled' });
 
     expect(calls.map(({ url }) => url)).toEqual([
