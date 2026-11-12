@@ -41,6 +41,9 @@ describe('protected delivery configuration', () => {
       `https://evil${TEST_DELIVERY_HOST}/s/api/v1`,
       `https://${TEST_DELIVERY_HOST}.evil.invalid/s/api/v1`,
       `https://${TEST_DELIVERY_HOST}:8443/s/api/v1`,
+      `https://${TEST_DELIVERY_HOST}./s/api/v1`,
+      `https://www.${TEST_DELIVERY_HOST}/s/api/v1`,
+      `https://links.example.test/s/api/v1`,
       `https://${TEST_DELIVERY_HOST}/s/api/v2`,
       `https://${TEST_DELIVERY_HOST}/`,
     ]) {

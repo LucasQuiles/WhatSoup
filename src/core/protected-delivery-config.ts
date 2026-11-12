@@ -1,6 +1,6 @@
 import { isRecord } from '../lib/type-guards.ts';
 import { normalizeFallbackEntriesFromAgentOptions } from './fallback-chain.ts';
-import { pinDigest, PROTECTED_DELIVERY_PINS, type ProtectedDeliveryPins } from './protected-delivery-pins.ts';
+import { isExactPinnedHost, PROTECTED_DELIVERY_PINS, type ProtectedDeliveryPins } from './protected-delivery-pins.ts';
 
 export interface ProtectedDeliveryConfig {
   baseUrl: string;
@@ -8,18 +8,19 @@ export interface ProtectedDeliveryConfig {
   token: string;
 }
 
-/** The managed API path is fixed; only its origin comes from instance configuration. */
+/** The managed API path is fixed; only its host comes from instance configuration. */
 const APPROVED_MANAGED_DELIVERY_API_PATH = '/s/api/v1';
 const MANAGED_DELIVERY_CREDENTIAL_ENV = /^LINKS_MANAGED_[A-Z][A-Z0-9_]*$/;
 
 /**
- * The configured base URL must be a pinned HTTPS origin plus the fixed API
- * path. The origin is compared after URL normalization (lowercase host,
- * default port removed), as the endpoint string itself always was.
+ * The configured base URL must use a hash-pinned approved host (owner ruling)
+ * on the default HTTPS port with the fixed API path. The URL parser has
+ * already lowercased the host and dropped a default port, as the deployed
+ * string comparison relied on; `www.` and trailing-dot spellings stay refused.
  */
 function isApprovedManagedDeliveryEndpoint(endpoint: URL, pins: ProtectedDeliveryPins): boolean {
-  const origin = `${endpoint.protocol}//${endpoint.host}`;
-  return pins.deliveryOriginSha256.has(pinDigest(origin))
+  return endpoint.port === ''
+    && isExactPinnedHost(endpoint.hostname, pins.deliveryHostSha256)
     && endpoint.pathname.replace(/\/$/, '') === APPROVED_MANAGED_DELIVERY_API_PATH;
 }
 

@@ -17,9 +17,9 @@ export const TEST_DELIVERY_BASE_URL = `${TEST_DELIVERY_ORIGIN}/s/api/v1`;
 const digest = (value: string): string => createHash('sha256').update(value, 'utf8').digest('hex');
 
 export const TEST_PROTECTED_DELIVERY_PINS: ProtectedDeliveryPins = Object.freeze({
-  deliveryOriginSha256: new Set([digest(TEST_DELIVERY_ORIGIN)]),
+  deliveryHostSha256: new Set([digest(TEST_DELIVERY_HOST)]),
   linkHostSha256: new Set([digest(TEST_LINK_HOST), digest(TEST_DELIVERY_HOST)]),
-  canonicalLinkHostSha256: digest(TEST_LINK_HOST),
+  canonicalLinkHostSha256: new Set([digest(TEST_LINK_HOST)]),
 });
 
 type PinsModule = typeof import('../../src/core/protected-delivery-pins.ts');

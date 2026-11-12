@@ -114,6 +114,19 @@ describe('parseIncomingMessage — protected managed links', () => {
       .toBe(PROTECTED_MESSAGE_MARKER);
     expect(msg.message.extendedTextMessage.text).toBe(link);
   });
+
+  it('redacts a hash-pinned host on an instance with no protectedDelivery configuration', async () => {
+    // Redaction must not depend on delivery configuration: a line that only
+    // receives a protected link (for example a passive personal line) has none.
+    const { config } = await import('../../src/config.ts');
+    expect(config).not.toHaveProperty('protectedDelivery');
+    const link = 'https://www.delivery.example.test./setup/#n=host&k=NOCONFIG&x=expiry';
+
+    const result = parseIncomingMessage(msgWith({ conversation: `open ${link}` }));
+
+    expect(result!.content).toBe(`open ${PROTECTED_MESSAGE_MARKER}`);
+    expect((result!.rawMessage as any).message.conversation).toBe(`open ${PROTECTED_MESSAGE_MARKER}`);
+  });
 });
 
 describe('parseIncomingMessage — positive cases', () => {
