@@ -37,6 +37,20 @@ describe('protected delivery configuration', () => {
     }
   });
 
+  it('refuses empty query and fragment delimiters that would move the API path out of the request path', () => {
+    // URL getters report '' for a bare `?` or `#`, but the client appends its
+    // route to the configured string, which would land in the query or fragment.
+    for (const baseUrl of [
+      `${TEST_DELIVERY_BASE_URL}?`,
+      `${TEST_DELIVERY_BASE_URL}#`,
+      `${TEST_DELIVERY_BASE_URL}?#`,
+      `${TEST_DELIVERY_BASE_URL}/?`,
+    ]) {
+      expect(() => parseProtectedDeliveryConfig(withBaseUrl(baseUrl), credential, pins))
+        .toThrow(/query, or fragment/);
+    }
+  });
+
   it('refuses lookalike origins, other ports and other API paths', () => {
     for (const baseUrl of [
       `https://evil${TEST_DELIVERY_HOST}/s/api/v1`,

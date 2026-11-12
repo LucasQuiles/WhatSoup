@@ -69,7 +69,9 @@ export function parseProtectedDeliveryConfig(
   } catch {
     throw new Error('protectedDelivery.baseUrl must be a valid HTTPS URL');
   }
-  if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
+  // `search` and `hash` read '' for a bare `?` or `#`; the serialized form still
+  // carries the delimiter, which would move an appended route out of the path.
+  if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || /[?#]/.test(endpoint.href)) {
     throw new Error('protectedDelivery.baseUrl must be an HTTPS endpoint without credentials, query, or fragment');
   }
   if (!isApprovedManagedDeliveryEndpoint(endpoint, pins)) {
@@ -85,7 +87,8 @@ export function parseProtectedDeliveryConfig(
     throw new Error('protectedDelivery credential is unavailable');
   }
   return {
-    baseUrl: endpoint.toString().replace(/\/$/, ''),
+    // Rebuilt from the validated parts so no unvalidated spelling reaches the client.
+    baseUrl: `https://${endpoint.hostname}${APPROVED_MANAGED_DELIVERY_API_PATH}`,
     token,
     ...(linkHosts === undefined ? {} : { linkHosts }),
   };
