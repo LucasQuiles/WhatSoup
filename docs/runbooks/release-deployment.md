@@ -212,6 +212,13 @@ Preconditions include: the wrapper symlink points at
 currently runs from `--expect-current`; a health token and port resolve; the
 database exists; and no staged plist still references `--expect-current`.
 
+The script does not check Microsoft 365 plugin copies. Before activating a release for
+an instance with an `m365Bridge` binding, check by hand that the guarded plugin is
+installed through `agentOptions.pluginDirs`. If `enabledPlugins` also names a
+marketplace copy, compare the SHA-256 of `mcp-server/dist/index.cjs` in both copies and
+stop when they differ. See the "One guarded plugin build" note in
+[the configuration reference](../configuration.md#connector-mutation-policy-411).
+
 #### BOT ERRORS health-consumer prerequisite
 
 A candidate release can declare the minimum BOT ERRORS health-consumer

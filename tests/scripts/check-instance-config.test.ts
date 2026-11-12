@@ -8,6 +8,7 @@ import {
   checkHealthPortParity,
   checkHealthProfiles,
   checkInstanceConfigs,
+  checkM365UpgradeWarnings,
   checkMemoryIntegrity,
   checkPortMap,
   run,
@@ -422,5 +423,20 @@ describe('Class B — health-port authority parity (#2342)', () => {
       checkHealthProfiles(profilesDir),
     );
     expect(findings).toEqual([]);
+  });
+});
+
+describe('checkM365UpgradeWarnings', () => {
+  const bridge = { tenantId: '11111111-2222-3333-4444-555555555555', origin: 'https://127.0.0.1:10000', profile: 'user-full-v1' };
+  const warn = (m365Bridge: unknown) => checkM365UpgradeWarnings({ agentOptions: { m365Bridge } }, 'bridge-bot', 'config.json');
+
+  it('notes, without a finding, a bridge binding whose Microsoft 365 writes this release denies', () => {
+    expect(warn({ ...bridge, accountId: 'employee-account' })).toEqual([expect.objectContaining({
+      instance: 'bridge-bot', field: 'agentOptions.m365Bridge.workflowAuthority', message: expect.stringContaining('add workflowAuthority'),
+    })]);
+    expect(warn({ ...bridge, accountEmail: 'user@example.test' })[0]?.message).toContain('accountEmail binding cannot carry workflowAuthority');
+    expect(warn({ ...bridge, accountId: 'employee-account',
+      workflowAuthority: { accountId: 'employee-account', employeeActorJid: '15551230001@s.whatsapp.net' } })).toEqual([]);
+    expect(checkM365UpgradeWarnings({ agentOptions: {} }, 'plain-bot', 'config.json')).toEqual([]);
   });
 });

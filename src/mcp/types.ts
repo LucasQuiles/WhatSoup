@@ -9,6 +9,8 @@ import {
   type ToolFailureStage,
 } from '../core/durability-evidence-contract.ts';
 import type { ClientOutputGateResult } from '../core/client-output-policy-gate.ts';
+import type { M365WorkflowAuthority, M365WorkflowAuthorityScope } from '../core/m365-bridge-policy.ts';
+import type { SessionTokenBinding } from './caller-attribution.ts';
 export { isPathWithinAllowedRoot } from '../lib/path-boundary.ts';
 
 export type ToolScope = 'chat' | 'global';
@@ -82,6 +84,17 @@ export interface SessionContext {
    * Replaced, never mutated, when the connection learns more about its client.
    */
   callerAttribution?: Readonly<CallerAttribution>;
+  /** Exact per-instance assignment for the private Microsoft workflow broker. */
+  workflowAuthority?: M365WorkflowAuthority;
+  /** Immutable inbound message identity for the currently executing human request. */
+  requestRef?: string;
+  /** Session scope of the runtime whose turn published `workflowAuthority`. */
+  workflowAuthorityScope?: M365WorkflowAuthorityScope;
+  /**
+   * Request-local, socket callers only: the live binding of the token this
+   * connection presented, re-verified on each read. The token never travels here.
+   */
+  tokenBinding?: () => Readonly<SessionTokenBinding> | undefined;
 }
 
 /** The connection-level half of {@link ToolCallCallerEvidence}. */
@@ -95,6 +108,9 @@ export interface ExecutingSessionContext {
   actorJid: SessionContext['actorJid'];
   purpose: SessionContext['purpose'];
   conversationKey: SessionContext['conversationKey'];
+  workflowAuthority?: SessionContext['workflowAuthority'];
+  requestRef?: SessionContext['requestRef'];
+  workflowAuthorityScope?: SessionContext['workflowAuthorityScope'];
   /**
    * Explicit assertion that a REAL executing-turn resolution produced this
    * context (#3435, L1). Optional: a real resolution is normally recognized
@@ -235,6 +251,10 @@ export interface ToolDeclaration {
    * docs/tools.md for the authoritative model.)
    */
   sensitive?: boolean;
+  /** Excluded from MCP discovery; authenticated callers may still invoke it directly. */
+  private?: boolean;
+  /** Listed only to chat-scoped sessions bound to a delivery chat; other sessions can never resolve its authority. */
+  chatSessionsOnly?: boolean;
   /**
    * S1 (bond-revocation programme, 2026-08-17). Marks a tool that intentionally
    * asks WhatsApp to remove this companion device. The registry writes an actor

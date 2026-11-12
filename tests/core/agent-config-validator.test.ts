@@ -891,7 +891,7 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     });
   });
 
-  it.each(['create', 'patch', 'load', 'discovery'] as const)('rejects an M365 bridge without an explicit provider in %s mode', (mode) => {
+  it.each(['create', 'patch', 'load', 'discovery'] as const)('rejects an M365 bridge without an approved provider in %s mode', (mode) => {
     const raw = baseAgent({
       agentOptions: {
         sessionScope: 'single',
@@ -908,8 +908,27 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     expect(validateInstanceConfig(raw, ctx(mode))).toMatchObject({
       field: 'agentOptions.m365Bridge',
       status: 400,
-      message: 'agentOptions.m365Bridge requires agentOptions.provider to be claude-cli',
+      message: 'agentOptions.m365Bridge requires agentOptions.provider to be claude-cli, openai-api, or anthropic-api',
     });
+  });
+
+  it.each(['openai-api', 'anthropic-api'])('accepts an M365 bridge for the guarded API provider %s', (provider) => {
+    const raw = baseAgent({
+      agentOptions: {
+        sessionScope: 'per_chat',
+        provider,
+        allowM365Mutations: true,
+        enabledPlugins: { 'microsoft_365@microsoft-365-dev': true },
+        m365Bridge: {
+          tenantId: '11111111-2222-3333-4444-555555555555',
+          accountId: 'employee-account',
+          origin: 'https://127.0.0.1:10000',
+          profile: 'user-full-v1',
+          workflowAuthority: { accountId: 'employee-account', employeeActorJid: '15551230001@s.whatsapp.net' },
+        },
+      },
+    });
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
   });
 
   it('accepts a structurally complete M365 bridge binding with a dynamic account domain', () => {
@@ -929,6 +948,33 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     });
 
     expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+
+  it('requires a workflow authority to use the exact account-id bridge selector', () => {
+    const raw = baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        provider: 'claude-cli',
+        allowM365Mutations: true,
+        enabledPlugins: { 'microsoft_365@microsoft-365-dev': true },
+        m365Bridge: {
+          tenantId: '11111111-2222-3333-4444-555555555555',
+          accountEmail: 'user@custom-domain.example',
+          origin: 'https://127.0.0.1:10000',
+          profile: 'user-full-v1',
+          workflowAuthority: {
+            accountId: 'account-1',
+            employeeActorJid: '15551230001@s.whatsapp.net',
+            conversationKey: '15551230001',
+          },
+        },
+      },
+    });
+
+    expect(validateInstanceConfig(raw, ctx('create'))).toMatchObject({
+      field: 'agentOptions.m365Bridge.workflowAuthority',
+      status: 400,
+    });
   });
 
   it.each(['COMMON', 'CONSUMERS', 'organizations'])('rejects an M365 directory-wide tenant alias: %s', (tenantId) => {

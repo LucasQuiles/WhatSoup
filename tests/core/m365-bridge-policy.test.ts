@@ -5,8 +5,12 @@ import {
   resolveM365MutationPolicy,
   m365BridgeCredentialProjectionAllowed,
   m365BridgeCredentialAdmission,
+  m365MutationAdmissionGap,
+  m365MutationExceptionAllowed,
+  m365TurnAuthority,
   type M365BridgeBinding,
 } from '../../src/core/m365-bridge-policy.ts';
+import { applyRequiredDeny, M365_MUTATION_DENY } from '../../src/core/settings-template.ts';
 
 const binding: M365BridgeBinding = {
   tenantId: '11111111-2222-3333-4444-555555555555',
@@ -33,6 +37,7 @@ function serviceEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
     MS365_TENANT_ID: binding.tenantId,
     MS365_PROFILE: binding.profile,
     MS365_HUB_URL: binding.origin,
+    MS365_DURABLE_MAIL_STATE_DIR: '/tmp/whatsoup-m365-durable-mail',
   };
   return {
     ...env,
@@ -48,6 +53,69 @@ function policy(overrides: Parameters<typeof resolveM365MutationPolicy>[0] = {})
     ...overrides,
   });
 }
+
+describe('m365MutationAdmissionGap', () => {
+  it('names the first setting that keeps a configured bridge from admission, never a value', () => {
+    expect(m365MutationAdmissionGap({ ...configured, env: serviceEnv() })).toBeNull();
+    expect(m365MutationAdmissionGap({ ...configured, binding: undefined, env: serviceEnv() })).toBeNull();
+    expect(m365MutationAdmissionGap({ ...configured, env: serviceEnv({ MS365_DURABLE_MAIL_STATE_DIR: undefined }) }))
+      .toBe('MS365_DURABLE_MAIL_STATE_DIR');
+    expect(m365MutationAdmissionGap({ ...configured, env: serviceEnv({ MS365_DURABLE_MAIL_STATE_DIR: 'relative/dir' }) }))
+      .toBe('MS365_DURABLE_MAIL_STATE_DIR');
+    expect(m365MutationAdmissionGap({ ...configured, provider: 'opencode-cli', env: serviceEnv() })).toBe('agentOptions.provider');
+    expect(m365MutationAdmissionGap({ ...configured, env: serviceEnv({ MS365_HUB_URL: 'https://127.0.0.1:10001' }) }))
+      .toBe('MS365_HUB_URL');
+    expect(m365MutationAdmissionGap({ ...configured, env: serviceEnv({ WHATSOUP_M365_LAUNCH_ADMISSION: undefined }) }))
+      .toBe('launch-admission');
+    expect(m365MutationAdmissionGap({ ...configured, binding: { ...binding, origin: 'http://127.0.0.1:10000' }, env: serviceEnv() }))
+      .toBe('agentOptions.m365Bridge');
+  });
+
+  it('agrees with policy resolution on every named gap', () => {
+    for (const env of [serviceEnv({ ALLOW_M365_MUTATIONS: '0' }), serviceEnv({ MS365_PROFILE: 'other' }), serviceEnv()]) {
+      const options = { ...configured, env };
+      const gap = m365MutationAdmissionGap(options);
+      expect(resolveM365MutationPolicy(options)?.status).toBe(gap === null ? 'approved' : 'rejected');
+    }
+  });
+});
+
+describe('m365TurnAuthority', () => {
+  it('publishes the request reference and assignment only for a human request on an approved policy', () => {
+    const workflowAuthority = { accountId: 'employee-account', employeeActorJid: '15551230001@s.whatsapp.net' };
+    const approved = { status: 'approved' as const, childEnv: {}, workflowAuthority };
+    expect(m365TurnAuthority(approved, true, 'request-1')).toEqual({ requestRef: 'request-1', workflowAuthority });
+    expect(m365TurnAuthority(approved, false, 'request-1')).toEqual({ requestRef: undefined, workflowAuthority: undefined });
+    expect(m365TurnAuthority({ status: 'rejected' }, true, 'request-1')).toEqual({ requestRef: 'request-1', workflowAuthority: undefined });
+    expect(m365TurnAuthority(undefined, true, undefined)).toEqual({ requestRef: undefined, workflowAuthority: undefined });
+  });
+
+  it('publishes the session scope with a human request, so the broker can refuse a scope other than per-chat', () => {
+    const workflowAuthority = { accountId: 'employee-account', employeeActorJid: '15551230001@s.whatsapp.net' };
+    const approved = { status: 'approved' as const, childEnv: {}, workflowAuthority };
+    expect(m365TurnAuthority(approved, true, 'request-1', 'per_chat'))
+      .toEqual({ requestRef: 'request-1', workflowAuthority, workflowAuthorityScope: 'per_chat' });
+    expect(m365TurnAuthority(approved, true, 'request-1', 'shared'))
+      .toEqual({ requestRef: 'request-1', workflowAuthority, workflowAuthorityScope: 'shared' });
+    expect(m365TurnAuthority(approved, false, 'request-1', 'per_chat'))
+      .toEqual({ requestRef: undefined, workflowAuthority: undefined, workflowAuthorityScope: undefined });
+  });
+});
+
+describe('validateM365BridgeBinding', () => {
+  const withEmployee = (employeeActorJid: string) => ({
+    ...binding, accountEmail: undefined, accountId: 'account-1',
+    workflowAuthority: { accountId: 'account-1', employeeActorJid },
+  });
+
+  it('admits only the canonical phone JID that the broker compares with the executing actor (M365 r5 W7)', async () => {
+    const { validateM365BridgeBinding } = await import('../../src/core/m365-bridge-policy.ts');
+    expect(validateM365BridgeBinding(withEmployee('15551230001@s.whatsapp.net'))).toBeNull();
+    expect(validateM365BridgeBinding(withEmployee('15551230001:7@s.whatsapp.net'))).toEqual({ kind: 'workflow-authority' });
+    expect(validateM365BridgeBinding(withEmployee('15551230001@lid'))).toEqual({ kind: 'workflow-authority' });
+    expect(validateM365BridgeBinding(withEmployee(' 15551230001@s.whatsapp.net'))).toEqual({ kind: 'workflow-authority' });
+  });
+});
 
 describe('resolveM365MutationPolicy', () => {
   it.each(['http://127.0.0.1:10000', 'http://[::1]:10000'])(
@@ -158,13 +226,24 @@ describe('resolveM365MutationPolicy', () => {
     const accountId = 'account-1';
     const options = {
       ...configured,
-      binding: { ...binding, accountEmail: undefined, accountId },
+      binding: {
+        ...binding,
+        accountEmail: undefined,
+        accountId,
+        workflowAuthority: {
+          accountId,
+          employeeActorJid: '15551230001@s.whatsapp.net',
+          conversationKey: '15551230001',
+        },
+      },
       env: serviceEnv({ MS365_AGENT365_ACCOUNT_EMAIL: undefined, MS365_AGENT365_ACCOUNT_ID: accountId }),
     };
     options.env.WHATSOUP_M365_LAUNCH_ADMISSION = m365BridgeCredentialAdmission(options, process.pid) ?? undefined;
-    expect(resolveM365MutationPolicy(options)).toMatchObject({
+    const result = resolveM365MutationPolicy(options);
+    expect(result).toMatchObject({
       status: 'approved', childEnv: { MS365_AGENT365_ACCOUNT_ID: accountId },
     });
+    expect(m365MutationExceptionAllowed(result)).toBe(true);
   });
 
   it('does not issue an admission without an exact instance, process and resolved credential', () => {
@@ -190,7 +269,50 @@ describe('resolveM365MutationPolicy', () => {
       MS365_TENANT_ID: binding.tenantId,
       MS365_PROFILE: M365_USER_FULL_PROFILE,
       MS365_HUB_URL: binding.origin,
+      MS365_DURABLE_MAIL_STATE_DIR: '/tmp/whatsoup-m365-durable-mail',
     });
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['blank', ''],
+    ['relative', 'whatsoup-m365-durable-mail'],
+  ])('rejects a %s durable mail state directory before credential admission', (_case, durableMailStateDir) => {
+    const options = { ...configured, env: serviceEnv({ MS365_DURABLE_MAIL_STATE_DIR: durableMailStateDir }) };
+    const result = resolveM365MutationPolicy(options);
+
+    expect(m365BridgeCredentialProjectionAllowed(options)).toBe(false);
+    expect(m365BridgeCredentialAdmission(options, process.pid)).toBeNull();
+    expect(result).toEqual({ status: 'rejected' });
+    expect(m365MutationExceptionAllowed(result)).toBe(false);
+    expect(applyRequiredDeny([], result)).toEqual(expect.arrayContaining([...M365_MUTATION_DENY]));
+  });
+
+  it('binds a present durable mail state directory to the admission and child projection', () => {
+    const options = { ...configured, env: serviceEnv() };
+    const admission = m365BridgeCredentialAdmission(options, process.pid);
+
+    expect(m365BridgeCredentialProjectionAllowed(options)).toBe(true);
+    expect(admission).toMatch(/^[0-9a-f]{64}$/);
+    expect(resolveM365MutationPolicy(options)).toMatchObject({
+      status: 'approved', childEnv: { MS365_DURABLE_MAIL_STATE_DIR: '/tmp/whatsoup-m365-durable-mail' },
+    });
+  });
+
+  it('invalidates an admission when the durable mail state directory changes', () => {
+    const options = { ...configured, env: serviceEnv({ MS365_DURABLE_MAIL_STATE_DIR: '/tmp/other-mail-state' }) };
+
+    expect(resolveM365MutationPolicy(options)).toEqual({ status: 'rejected' });
+    options.env.WHATSOUP_M365_LAUNCH_ADMISSION = m365BridgeCredentialAdmission(options, process.pid) ?? undefined;
+    expect(resolveM365MutationPolicy(options)).toMatchObject({
+      status: 'approved', childEnv: { MS365_DURABLE_MAIL_STATE_DIR: '/tmp/other-mail-state' },
+    });
+  });
+
+  it.each(['openai-api', 'anthropic-api'])('admits the same exact bridge for %s', (provider) => {
+    const options = { ...configured, provider, env: serviceEnv() };
+    options.env.WHATSOUP_M365_LAUNCH_ADMISSION = m365BridgeCredentialAdmission(options, process.pid) ?? undefined;
+    expect(resolveM365MutationPolicy(options)).toMatchObject({ status: 'approved' });
   });
 
   it.each([
@@ -215,6 +337,7 @@ describe('resolveM365MutationPolicy', () => {
     expect(policy({ binding: { ...binding, accountId: 'account-1' } })).toMatchObject({ status: 'rejected' });
     expect(policy({ binding: { ...binding, accountEmail: undefined } })).toMatchObject({ status: 'rejected' });
     expect(policy()).toMatchObject({ status: 'approved' });
+    expect(m365MutationExceptionAllowed(policy())).toBe(false);
   });
 });
 

@@ -329,21 +329,31 @@ describe('fallback chain selection', () => {
     );
   });
 
-  it.each([false, true])('withholds bridge credentials and restores mutation denies on same-provider fallback (sandbox=%s)', (sandboxPerChat) => {
+  it.each([
+    { sandboxPerChat: false, guarded: false }, { sandboxPerChat: true, guarded: false },
+    { sandboxPerChat: false, guarded: true }, { sandboxPerChat: true, guarded: true },
+  ])('preserves request-bound authority across a CLI model fallback (sandbox=$sandboxPerChat, guarded=$guarded)', ({ sandboxPerChat, guarded }) => {
     const tenantId = '11111111-2222-3333-4444-555555555555';
     const origin = 'https://127.0.0.1:10000';
     const accountEmail = 'user@example.test';
+    const accountId = 'employee-account';
+    const binding = {
+      tenantId, origin, profile: 'user-full-v1' as const,
+      ...(guarded ? { accountId, workflowAuthority: { accountId, employeeActorJid: '15551230001@s.whatsapp.net' } } : { accountEmail }),
+    };
     for (const [key, value] of Object.entries({
       ALLOW_M365_MUTATIONS: '1', MS365_AGENT365_BRIDGE: 'true',
       MS365_AGENT365_BASE_URL: origin, MS365_HUB_URL: origin,
       MS365_TENANT_ID: tenantId, MS365_PROFILE: 'user-full-v1',
-      MS365_AGENT365_ACCOUNT_EMAIL: accountEmail, MS365_AGENT365_API_KEY: 'synthetic-key',
+      MS365_AGENT365_API_KEY: 'synthetic-key',
+      MS365_DURABLE_MAIL_STATE_DIR: '/tmp/whatsoup-m365-durable-mail',
     })) vi.stubEnv(key, value);
-    vi.stubEnv('MS365_AGENT365_ACCOUNT_ID', undefined);
+    vi.stubEnv('MS365_AGENT365_ACCOUNT_ID', guarded ? accountId : undefined);
+    vi.stubEnv('MS365_AGENT365_ACCOUNT_EMAIL', guarded ? undefined : accountEmail);
     vi.stubEnv('WHATSOUP_M365_LAUNCH_ADMISSION', m365BridgeCredentialAdmission({
       instanceName: 'test', provider: 'claude-cli', allowM365Mutations: true,
       enabledPlugins: { 'microsoft_365@microsoft-365-dev': true },
-      binding: { tenantId, accountEmail, origin, profile: 'user-full-v1' },
+      binding,
       env: process.env,
     }, process.pid) ?? undefined);
     try {
@@ -360,7 +370,7 @@ describe('fallback chain selection', () => {
         sandboxPerChat,
         allowM365Mutations: true,
         enabledPlugins: { 'microsoft_365@microsoft-365-dev': true },
-        m365Bridge: { tenantId, accountEmail, origin, profile: 'user-full-v1' },
+        m365Bridge: binding,
       });
       const session = () => view(runtime).createSessionManager({
         chatJid: 'bridge-test@s.whatsapp.net', cwd: workspacePath,
@@ -369,10 +379,10 @@ describe('fallback chain selection', () => {
       const primary = session();
       expect(primary.m365MutationPolicy.status).toBe('approved');
       expect(buildChildEnv('claude-cli', primary).MS365_AGENT365_API_KEY).toBe('synthetic-key');
-      expect(applyRequiredDeny([], primary.m365MutationPolicy)).not.toContain(M365_MUTATION_DENY[0]);
+      expect(applyRequiredDeny([], primary.m365MutationPolicy).includes(M365_MUTATION_DENY[0]!)).toBe(!guarded);
       if (workspacePath) {
         const settings = JSON.parse(readFileSync(join(workspacePath, '.claude/settings.json'), 'utf8'));
-        expect(settings.permissions.deny).toEqual(REQUIRED_DENY.filter((entry) => !M365_MUTATION_DENY.includes(entry)));
+        expect(settings.permissions.deny).toEqual(guarded ? REQUIRED_DENY.filter((entry) => !M365_MUTATION_DENY.includes(entry)) : REQUIRED_DENY);
         expect(settings.enabledPlugins).toEqual({ 'microsoft_365@microsoft-365-dev': true });
         expect(settings.hooks.PreToolUse).toHaveLength(1);
       }
@@ -381,18 +391,19 @@ describe('fallback chain selection', () => {
       expect(view(runtime).effectiveProvider).toBe('claude-cli');
       expect(view(runtime).effectiveModel).toBe('fallback-model');
       const fallback = session();
-      expect(fallback.m365MutationPolicy).toEqual({ status: 'rejected' });
+      expect(fallback.m365MutationPolicy.status).toBe(guarded ? 'approved' : 'rejected');
       if (workspacePath) {
         const settings = JSON.parse(readFileSync(join(workspacePath, '.claude/settings.json'), 'utf8'));
-        expect(new Set(settings.permissions.deny)).toEqual(new Set(REQUIRED_DENY));
+        expect(new Set(settings.permissions.deny)).toEqual(new Set(guarded ? REQUIRED_DENY.filter((entry) => !M365_MUTATION_DENY.includes(entry)) : REQUIRED_DENY));
         expect(settings.hooks.PreToolUse).toHaveLength(1);
       }
       const env = buildChildEnv('claude-cli', fallback);
-      expect(Object.keys(env).filter((key) => key.startsWith('MS365_') || key === 'ALLOW_M365_MUTATIONS')).toEqual([]);
-      expect(applyRequiredDeny([], fallback.m365MutationPolicy)).toEqual(expect.arrayContaining([...M365_MUTATION_DENY]));
+      if (guarded) expect(env.MS365_AGENT365_ACCOUNT_ID).toBe(accountId);
+      else expect(Object.keys(env).filter((key) => key.startsWith('MS365_') || key === 'ALLOW_M365_MUTATIONS')).toEqual([]);
+      expect(applyRequiredDeny([], fallback.m365MutationPolicy).includes(M365_MUTATION_DENY[0]!)).toBe(!guarded);
       const args = fallback.getProviderArgs('test', process.cwd());
-      expect(args).toContain('--disallowedTools');
-      expect(args).toEqual(expect.arrayContaining([...M365_MUTATION_DENY]));
+      expect(args.includes(M365_MUTATION_DENY[0]!)).toBe(!guarded);
+      // A legacy primary still relies on the generated settings floor above.
       expect(primary.getProviderArgs('test', process.cwd())).not.toContain('--disallowedTools');
       expect(vi.mocked(probeFallbackBinary)).toHaveBeenCalledOnce();
       const probeEnv = vi.mocked(probeFallbackBinary).mock.calls[0]![1]!;

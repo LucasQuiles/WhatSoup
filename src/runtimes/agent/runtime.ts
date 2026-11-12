@@ -85,6 +85,7 @@ import {
   AMBIGUOUS_SESSION_MAX_AGE_MS,
   MAX_RESIDENT_SESSIONS,
   SESSION_MIN_RESIDENCY_MS,
+  sessionIdleMs,
   RESIDENT_TURN_PROGRESS_DEADLINE_MS,
   MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS,
   diagnosticBundleEnabled,
@@ -125,7 +126,8 @@ import {
   getFallbackState,
 } from './fallback-state-db.ts';
 import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
-import { resolveM365MutationPolicy, type M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
+import { workspaceSocketPath } from '../../core/workspace-paths.ts';
+import { m365MutationExceptionAllowed, m365TurnAuthority, supportsM365BridgeProvider, type M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
 import { inspectUserClaudeSettings } from '../../core/user-claude-settings.ts';
 import { isSamePhysicalDirectory } from '../../lib/home-path.ts';
 import { classifyActiveSessions, resolveAmbiguousAgeFallback } from './session-classifier.ts';
@@ -321,6 +323,7 @@ import { randomUUID } from 'node:crypto';
 import { EgressProxy } from './egress-proxy.ts';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { PerChatMcpSocketManager } from './per-chat-mcp-socket-manager.ts';
+import { admitMicrosoft365Workflow, resolveExplainedM365MutationPolicy } from './microsoft365-adapter.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
 import { SessionTokenRegistry } from '../../mcp/caller-attribution.ts';
 import type { ExecutingSessionContext, SessionContext } from '../../mcp/types.ts';
@@ -625,7 +628,7 @@ export class AgentRuntime implements Runtime {
   private readonly enabledPlugins: Record<string, boolean> | undefined;
   private readonly allowM365Mutations: boolean | undefined;
   private readonly providerProcessIsolation: ProviderProcessIsolationConfig | undefined;
-  private readonly m365MutationPolicy: M365MutationPolicy | undefined;
+  private m365MutationPolicy: M365MutationPolicy | undefined;
   private m365SettingsPolicyReady = false;
   private readonly autoCompactInputTokens: number | undefined;
   private readonly memoryReadiness: MemoryReadinessSnapshot | undefined;
@@ -654,7 +657,10 @@ export class AgentRuntime implements Runtime {
   private primaryProbeServiceContext: PrimaryProbeServiceContext | null = null;
 
   // single mode: one session, one queue
-  private session: SessionManager | null = null;
+  private sessionSlot: SessionManager | null = null;
+  private get session(): SessionManager | null { return this.sessionSlot; }
+  /** Retiring or replacing the singleton manager revokes its session token; keeping it does not. */
+  private set session(next: SessionManager | null) { if (this.sessionSlot !== next) this.sessionSlot?.mcpSessionLease?.revoke(); this.sessionSlot = next; }
   private queue: IOutboundQueue | null = null;
   private activeChatJid: string | null = null;
 
@@ -1927,16 +1933,9 @@ export class AgentRuntime implements Runtime {
     return true;
   }
 
-  private sessionIdleMs(session: SessionManager, now: number): number {
-    const st = session.getStatus();
-    const startedMs = st.startedAt ? Date.parse(st.startedAt) : now;
-    const lastMs = st.lastMessageAt ? Date.parse(st.lastMessageAt) : startedMs;
-    return Number.isFinite(lastMs) ? now - lastMs : 0;
-  }
-
   /** TTL-pass eligibility: safe to evict AND idle beyond the TTL. */
   private isSessionEvictable(mapKey: string, session: SessionManager, now: number): boolean {
-    return this.isSessionSafeToEvict(mapKey, session, now) && this.sessionIdleMs(session, now) > SESSION_IDLE_MS;
+    return this.isSessionSafeToEvict(mapKey, session, now) && sessionIdleMs(session.getStatus(), now) > SESSION_IDLE_MS;
   }
 
   /**
@@ -1967,7 +1966,7 @@ export class AgentRuntime implements Runtime {
       const overBy = this.chatSessions.size - MAX_RESIDENT_SESSIONS;
       const candidates = [...this.chatSessions.entries()]
         .filter(([mapKey, session]) => this.isSessionSafeToEvict(mapKey, session, now))
-        .map(([mapKey, session]) => ({ mapKey, session, idleMs: this.sessionIdleMs(session, now) }))
+        .map(([mapKey, session]) => ({ mapKey, session, idleMs: sessionIdleMs(session.getStatus(), now) }))
         .sort((a, b) => b.idleMs - a.idleMs); // longest-idle first
       for (const { mapKey, session } of candidates.slice(0, overBy)) {
         this.evictIdleSession(mapKey, session, 'lru-ceiling');
@@ -2710,7 +2709,7 @@ export class AgentRuntime implements Runtime {
     this.memoryReadiness = options?.memoryReadiness;
     this.agentProvider = config.agentProvider;
     this.agentProviderConfig = config.agentProviderConfig;
-    this.m365MutationPolicy = resolveM365MutationPolicy({
+    this.m365MutationPolicy = resolveExplainedM365MutationPolicy({
       instanceName: this.instanceName,
       provider: this.agentProvider,
       allowM365Mutations: this.allowM365Mutations,
@@ -3930,7 +3929,8 @@ export class AgentRuntime implements Runtime {
   getM365SettingsPolicy(): M365MutationPolicy | undefined {
     if (this.m365MutationPolicy === undefined) return undefined;
     // Grant reconciliation runs before startup restores a persisted fallback.
-    return this.m365SettingsPolicyReady && !this.isFallbackWindowActive
+    const guardedProvider = supportsM365BridgeProvider(this.effectiveProvider) && m365MutationExceptionAllowed(this.m365MutationPolicy);
+    return this.m365SettingsPolicyReady && (!this.isFallbackWindowActive || guardedProvider)
       ? this.m365MutationPolicy : { status: 'rejected' };
   }
 
@@ -3940,6 +3940,15 @@ export class AgentRuntime implements Runtime {
     if (this.cwd && isSamePhysicalDirectory(this.cwd, homedir())) throw new Error('configured agent cwd must not resolve to the user home directory');
     if (this.cwd) this.cwd = admitHomeConfinedPath(this.cwd, home);
     this.pluginDirs = this.pluginDirs?.map(dir => admitHomeConfinedPath(dir, home));
+    this.m365MutationPolicy = admitMicrosoft365Workflow({
+      registry: this.registry,
+      policy: this.m365MutationPolicy,
+      pluginDirs: this.pluginDirs,
+      perChatMcpSocketManager: this.perChatMcpSocketManager,
+      resolvePerChatMapKey: (deliveryJid) => this.resolvePerChatMapKey(deliveryJid),
+      sessionTokens: this.sessionTokens,
+      sandboxPerChat: this.sandboxPerChat, instanceName: this.instanceName,
+    });
 
     // C5 restart-loop guard: mark this boot BEFORE any fallible work so a
     // later crash leaves the marker standing. Consumed at the resume gate
@@ -5700,6 +5709,7 @@ export class AgentRuntime implements Runtime {
         actorJid: senderJid,
         purpose,
         conversationKey: canonicalConversationKey(chatJid, this.db),
+        ...m365TurnAuthority(this.m365MutationPolicy, !recoveryDispatch && purpose === undefined, context?.replay.sourceMessageId, this.sessionScope),
       });
       this.perChatExecActorQueue.set(GLOBAL_TOOL_SCOPE_KEY, sharedExecQ);
       const scheduled = purpose === 'scheduled-agent-job';
@@ -5975,6 +5985,7 @@ export class AgentRuntime implements Runtime {
           actorJid,
           purpose,
           conversationKey: canonicalConversationKey(chatJid, this.db),
+          ...m365TurnAuthority(this.m365MutationPolicy, deliveryKind === 'live' && purpose === undefined, runtimeContext?.replay.sourceMessageId, this.sessionScope),
         });
         this.perChatExecActorQueue.set(execScopeKey, execQ);
         actorPushed = true;
@@ -8609,6 +8620,7 @@ export class AgentRuntime implements Runtime {
       }
       this.sessionOwnership.transition(mapKey, current.managerId, 'closing');
       this.sessionOwnership.release(mapKey, current.managerId);
+      previous?.mcpSessionLease?.revoke();
       this.ownedSessionManagers.delete(current.managerId);
     }
     if (!this.sessionOwnership.get(mapKey)) {
@@ -8667,6 +8679,7 @@ export class AgentRuntime implements Runtime {
         this.sessionOwnership.discardIfOwned(mapKey, current.managerId);
       }
       this.chatSessions.delete(mapKey);
+      mapped?.mcpSessionLease?.revoke();
       if (mapped !== undefined) this.lazyRestoreScopes.noteRetired(mapKey);
       // Forget the chat's throttle history here, alongside the map entry the
       // sweep iterates. Deliberately OUTSIDE the `if (current)` above: the
@@ -10572,9 +10585,12 @@ export class AgentRuntime implements Runtime {
     const primaryBridgeRoute = !this.isFallbackWindowActive && route.source !== 'fallback'
       && route.provider === this.agentProvider && route.model === this.model
       && opts.providerConfigOverride === undefined;
+    // The guarded plugin binds writes to the employee and Microsoft account,
+    // so changing the language model need not revoke that employee's request.
+    const guardedM365BridgeRoute = supportsM365BridgeProvider(sessionProvider) && m365MutationExceptionAllowed(this.m365MutationPolicy);
     const sessionM365Policy: M365MutationPolicy | undefined = this.m365MutationPolicy === undefined
       ? undefined
-      : primaryBridgeRoute ? this.m365MutationPolicy : { status: 'rejected' };
+      : primaryBridgeRoute || guardedM365BridgeRoute ? this.m365MutationPolicy : { status: 'rejected' };
 
     // Each sandbox cwd owns its settings; route changes must restore the deny
     // floor before a fallback can reuse a workspace approved for the primary.
@@ -10619,7 +10635,7 @@ export class AgentRuntime implements Runtime {
       mcpSessionContext: providerToolSession,
       whatsoupInstance: this.instanceName,
       whatsoupMcpSocket: mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
-      whatsoupMcpSessionToken: this.sessionTokens.mint(),
+      whatsoupMcpSessionLease: this.sessionTokens.mintLease({ kind: 'session', socketPath: mcpSocketPath ?? this.globalMcpSocketPath ?? (this.sandboxPerChat && opts.cwd ? workspaceSocketPath(opts.cwd) : '') }),
       providerTransitionReady,
       handoffSystemBlock: this.buildHandoffSystemBlock(sessionConversationKey, route ? route.provider : this.effectiveProvider),
       degradedCapabilitiesBlock: managedLoopDegraded

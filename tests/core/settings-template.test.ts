@@ -25,6 +25,10 @@ const approvedM365Policy: M365MutationPolicy = {
     ALLOW_M365_MUTATIONS: '1',
     MS365_AGENT365_BRIDGE: 'true',
   },
+  workflowAuthority: {
+    accountId: 'bridge-account',
+    employeeActorJid: '15551230001@s.whatsapp.net',
+  },
 };
 
 describe('defaultSettingsJson', () => {
@@ -227,6 +231,8 @@ const MUTATION_EXACT = new Set([
   'upsert-dataverse-record',
   'associate-dataverse-records',
   'execute-dataverse-action',
+  // The plugin classes this a write: a GET to a tenant Custom API function can run its code.
+  'execute-dataverse-function',
   'execute-tool',
   'batch-dataverse',
   'graph-batch',
@@ -235,6 +241,11 @@ const MUTATION_EXACT = new Set([
   'hub-recover-delta',
   'hub-refresh-account',
   'hub-trigger-enrich',
+  'hub-operation-cancel',
+  'hub-operation-request-review',
+  // These change which account or environment later calls reach.
+  'select-account',
+  'select-dataverse-environment',
 ]);
 
 function m365ToolName(permission: string): string | null {
@@ -246,11 +257,13 @@ function m365ToolName(permission: string): string | null {
 // REQUIRED_DENY is populated from the approved connector mutation inventory.
 
 describe('REQUIRED_DENY (deny-floor scaffold, #411)', () => {
-  it('denies the live Agent365 enrichment writer but not the read-only Dataverse function', () => {
+  // PR #1737 dropped the Dataverse function as a read-only GET. The plugin now classes it a write,
+  // because a tenant Custom API function runs its code on GET, so the floor denies it again.
+  it('denies the live Agent365 enrichment writer and the Dataverse function the plugin classes as a write', () => {
     expect(REQUIRED_DENY).toContain(
       'mcp__plugin_microsoft_365_microsoft_365__hub-trigger-enrich',
     );
-    expect(REQUIRED_DENY).not.toContain(
+    expect(REQUIRED_DENY).toContain(
       'mcp__plugin_microsoft_365_microsoft_365__execute-dataverse-function',
     );
   });
@@ -268,7 +281,7 @@ describe('REQUIRED_DENY (deny-floor scaffold, #411)', () => {
   });
 
   it('contains full permission strings without duplicates', () => {
-    expect(REQUIRED_DENY.length).toBe(124);
+    expect(REQUIRED_DENY.length).toBe(130);
     expect(new Set(REQUIRED_DENY).size).toBe(REQUIRED_DENY.length);
     for (const permission of REQUIRED_DENY) {
       expect(permission).toMatch(/^mcp__[^_]+.*__/);

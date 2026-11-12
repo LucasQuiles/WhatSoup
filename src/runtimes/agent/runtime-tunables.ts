@@ -27,6 +27,16 @@ export const ZOMBIE_SESSION_SWEEP_INTERVAL_MS = envPositiveInt('WHATSOUP_ZOMBIE_
 export const AMBIGUOUS_SESSION_MAX_AGE_MS = envPositiveInt('WHATSOUP_AMBIGUOUS_SESSION_MAX_AGE_MS', MS_PER_DAY); // 24h
 export const MAX_RESIDENT_SESSIONS = envPositiveInt('WHATSOUP_MAX_SESSIONS', 12);
 export const SESSION_MIN_RESIDENCY_MS = envPositiveInt('WHATSOUP_SESSION_MIN_RESIDENCY_MS', 5 * MS_PER_MINUTE); // 5m
+
+/**
+ * Idle time the TTL pass compares with SESSION_IDLE_MS: since the last message,
+ * else since start. An unparseable timestamp counts as not idle.
+ */
+export function sessionIdleMs(status: { startedAt: string | null; lastMessageAt: string | null }, now: number): number {
+  const startedMs = status.startedAt ? Date.parse(status.startedAt) : now;
+  const lastMs = status.lastMessageAt ? Date.parse(status.lastMessageAt) : startedMs;
+  return Number.isFinite(lastMs) ? now - lastMs : 0;
+}
 // #3523: the zombie sweep exempts a current-process resident manager from
 // disposition, but that exemption used to be unconditional — a resident wedged
 // between turns (e.g. a compaction livelock) was protected forever and never

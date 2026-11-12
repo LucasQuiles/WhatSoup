@@ -181,6 +181,11 @@ export function buildBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.Proce
       WHATSOUP_INSTANCE: opts?.whatsoupInstance,
       WHATSOUP_MCP_SOCKET: opts?.whatsoupMcpSocket,
       WHATSOUP_MCP_SESSION_TOKEN: opts?.whatsoupMcpSessionToken,
+      // The Microsoft plugin may use this only through the same scoped MCP
+      // socket and session token as its hosting provider turn.
+      MS365_WORKFLOW_AUTHORITY_REQUIRED: m365Policy?.status === 'approved' && m365Policy.workflowAuthority !== undefined ? '1' : undefined,
+      MS365_WORKFLOW_AUTHORITY_SOCKET: m365Policy?.status === 'approved' && m365Policy.workflowAuthority !== undefined
+        && opts?.whatsoupMcpSessionToken !== undefined ? opts?.whatsoupMcpSocket : undefined,
       // Egress proxy (#1607): only present when a caller supplies a positive
       // egressProxyPort — instances that haven't opted into the allowlist
       // see zero change. Both UPPER and lower case variants are set (F4):

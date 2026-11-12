@@ -721,7 +721,7 @@ describe('SessionManager', () => {
       messenger: makeMessenger().messenger,
       chatJid: CHAT_JID,
       onEvent: vi.fn(),
-      whatsoupMcpSessionToken: 'session-token-persistent',
+      whatsoupMcpSessionLease: { token: 'session-token-persistent', revoke: vi.fn() },
     });
     await persistent.spawnSession();
     const persistentEnv = vi.mocked(spawn).mock.calls[0]?.[2]?.env;
@@ -734,7 +734,7 @@ describe('SessionManager', () => {
       onEvent: vi.fn(),
       provider: 'opencode-cli',
       model: 'glm/test-model',
-      whatsoupMcpSessionToken: 'session-token-per-turn',
+      whatsoupMcpSessionLease: { token: 'session-token-per-turn', revoke: vi.fn() },
     });
     await perTurn.spawnSession();
     void perTurn.sendTurn('hello').catch(() => {});
@@ -743,6 +743,30 @@ describe('SessionManager', () => {
 
     expect([persistentEnv?.WHATSOUP_MCP_SESSION_TOKEN, perTurnEnv?.WHATSOUP_MCP_SESSION_TOKEN])
       .toEqual(['session-token-persistent', 'session-token-per-turn']);
+  });
+
+  // M365 r4 W4/T6: the session token lives as long as its manager. A child
+  // respawned inside the manager keeps it, and the manager never revokes it itself.
+  it('keeps its session token lease across a child respawn and a kept shutdown', async () => {
+    const lease = { token: 'session-token-lease', revoke: vi.fn() };
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      whatsoupMcpSessionLease: lease,
+    } as ConstructorParameters<typeof SessionManager>[0]);
+    await sm.spawnSession();
+    const firstEnv = vi.mocked(spawn).mock.calls.at(-1)?.[2]?.env;
+    vi.mocked(spawn).mockReturnValue(makeMockChild(88889));
+    await sm.handleNew();
+    const respawnedEnv = vi.mocked(spawn).mock.calls.at(-1)?.[2]?.env;
+    await sm.shutdown(true);
+
+    expect([firstEnv?.WHATSOUP_MCP_SESSION_TOKEN, respawnedEnv?.WHATSOUP_MCP_SESSION_TOKEN])
+      .toEqual(['session-token-lease', 'session-token-lease']);
+    expect((sm as unknown as { mcpSessionLease?: unknown }).mcpSessionLease).toBe(lease);
+    expect(lease.revoke).not.toHaveBeenCalled();
   });
 
   it('spawnSession propagates ALLOW_M365_MUTATIONS when fail-closed mode is unset', async () => {

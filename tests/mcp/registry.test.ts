@@ -53,6 +53,21 @@ describe('ToolRegistry', () => {
     expect(tools[0].description).toBe('A test tool');
   });
 
+  it('keeps a private broker out of discovery while retaining its direct call route', async () => {
+    registry.register(makeTool({
+      name: 'authorize_m365_action',
+      scope: 'global',
+      private: true,
+      schema: z.object({ requestId: z.string() }),
+      handler: async (params) => ({ allowed: true, operationId: params['requestId'] }),
+    }));
+
+    expect(registry.listTools(makeSession()).map((tool) => tool.name)).not.toContain('authorize_m365_action');
+    const call = await registry.call('authorize_m365_action', { requestId: 'plugin-call-1' }, makeSession());
+    expect(call.isError).toBeUndefined();
+    expect(JSON.parse(call.content[0].text)).toEqual({ allowed: true, operationId: 'plugin-call-1' });
+  });
+
   it('throws on duplicate registration', () => {
     registry.register(makeTool());
     expect(() => registry.register(makeTool())).toThrow('Tool already registered: test_tool');

@@ -23,6 +23,7 @@ import {
 } from '../../core/provider-data-policy.ts';
 import type { M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
 import type { SessionContext } from '../../mcp/types.ts';
+import type { SessionTokenLease } from '../../mcp/caller-attribution.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
 import { MS_PER_HOUR } from '../../lib/time-units.ts';
@@ -312,8 +313,11 @@ export interface SessionManagerOptions {
   mcpSessionContext?: SessionContext;
   whatsoupInstance?: string;
   whatsoupMcpSocket?: string;
-  /** #3421 step 1: this session's MCP token, passed to its child env only. */
-  whatsoupMcpSessionToken?: string;
+  /**
+   * #3421: this session's MCP token lease. The token reaches its child env only;
+   * it lives as long as this manager, and the runtime revokes it on retirement.
+   */
+  whatsoupMcpSessionLease?: SessionTokenLease;
   providerTransitionReady?: Promise<void>;
   handoffSystemBlock?: () => string | null;
   /**
@@ -737,6 +741,8 @@ export class SessionManager {
   private readonly whatsoupInstance: string | undefined;
   private readonly whatsoupMcpSocket: string | undefined;
   private readonly whatsoupMcpSessionToken: string | undefined;
+  /** Read by the runtime when it retires this manager; never revoked here, so respawns keep it. */
+  readonly mcpSessionLease: SessionTokenLease | undefined;
   private readonly providerTransitionReady: Promise<void> | undefined;
   private readonly handoffSystemBlock: (() => string | null) | undefined;
   private readonly degradedCapabilitiesBlock: (() => string | null) | undefined;
@@ -962,7 +968,8 @@ export class SessionManager {
     this.mcpSessionContext = opts.mcpSessionContext;
     this.whatsoupInstance = opts.whatsoupInstance;
     this.whatsoupMcpSocket = opts.whatsoupMcpSocket;
-    this.whatsoupMcpSessionToken = opts.whatsoupMcpSessionToken;
+    this.mcpSessionLease = opts.whatsoupMcpSessionLease;
+    this.whatsoupMcpSessionToken = opts.whatsoupMcpSessionLease?.token;
     this.providerTransitionReady = opts.providerTransitionReady;
     this.handoffSystemBlock = opts.handoffSystemBlock;
     this.degradedCapabilitiesBlock = opts.degradedCapabilitiesBlock;
