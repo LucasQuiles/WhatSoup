@@ -64,6 +64,7 @@ import {
   type ProviderTurnControlCapabilities,
 } from './providers/turn-control-capabilities.ts';
 import { composeWithExactLineDedup } from './prompt-compose.ts';
+import { TRUSTED_ACTOR_SYSTEM_CONTRACT } from './trusted-actor-envelope.ts';
 import {
   appendProviderCrashPreview,
   buildProviderCrashMetadata,
@@ -1279,6 +1280,8 @@ export class SessionManager {
         sources.push(instructionsContent);
       }
     }
+
+    sources.push(TRUSTED_ACTOR_SYSTEM_CONTRACT);
 
     const systemPrompt = composeWithExactLineDedup(sources);
     if (systemPrompt.trim().length === 0) {

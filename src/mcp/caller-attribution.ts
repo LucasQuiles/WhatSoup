@@ -22,6 +22,8 @@ export const SESSION_TOKEN_NOTIFICATION = 'notifications/whatsoup/session';
 /** Anything that can say whether a presented token belongs to a live session. */
 export interface SessionTokenVerifier {
   verify(presented: unknown): boolean;
+  /** Returns an opaque runtime session identity only for a matched token. */
+  turnReplySessionId?(presented: unknown): string | undefined;
 }
 
 /** How many live session tokens are kept before the oldest is forgotten. */
@@ -40,32 +42,53 @@ export const SESSION_TOKEN_CAPACITY = 4096;
  * attribution evidence, not authentication.
  */
 export class SessionTokenRegistry implements SessionTokenVerifier {
-  private readonly live = new Set<string>();
+  private readonly live = new Map<string, string | undefined>();
   private readonly capacity: number;
 
   constructor(capacity: number = SESSION_TOKEN_CAPACITY) {
     this.capacity = capacity;
   }
 
-  mint(): string {
+  mint(turnReplySessionId?: string): string {
     const token = randomBytes(32).toString('hex');
-    this.live.add(token);
+    this.live.set(token, turnReplySessionId);
     while (this.live.size > this.capacity) {
-      const oldest = this.live.values().next().value;
-      if (oldest === undefined) break;
-      this.live.delete(oldest);
+      const oldestToken = this.live.keys().next().value;
+      if (oldestToken === undefined) break;
+      this.live.delete(oldestToken);
     }
     return token;
   }
 
   verify(presented: unknown): boolean {
-    if (!isNonEmptyString(presented)) return false;
-    let matched = false;
-    for (const token of this.live) {
-      if (safeStringEqual(token, presented)) matched = true;
-    }
-    return matched;
+    return this.findTurnReplySessionId(presented).matched;
   }
+
+  turnReplySessionId(presented: unknown): string | undefined {
+    return this.findTurnReplySessionId(presented).sessionId;
+  }
+
+  private findTurnReplySessionId(presented: unknown): { matched: boolean; sessionId: string | undefined } {
+    if (!isNonEmptyString(presented)) return { matched: false, sessionId: undefined };
+    let matched = false;
+    let sessionId: string | undefined;
+    for (const [token, owner] of this.live) {
+      if (safeStringEqual(token, presented)) {
+        matched = true;
+        sessionId = owner;
+      }
+    }
+    return { matched, sessionId };
+  }
+}
+
+/** A matched socket token identifies its runtime session, never a bare token value. */
+export function turnReplySessionIdFromPresentedToken(
+  notificationParams: unknown,
+  verifier: SessionTokenVerifier | undefined,
+): string | undefined {
+  const presented = isRecord(notificationParams) ? notificationParams['token'] : undefined;
+  return verifier?.turnReplySessionId?.(presented);
 }
 
 /** Fold a presented session token into a connection's attribution. */

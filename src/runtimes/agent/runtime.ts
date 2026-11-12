@@ -136,7 +136,12 @@ import {
   type SessionCrashInfo,
 } from './session.ts';
 import { createProviderExecutionGate, ProviderExecutionGate } from './provider-execution-gate.ts';
-import { dispatchProviderTurn, withProviderApplicationContext } from './provider-boundary-dispatch.ts';
+import {
+  dispatchProviderTurn,
+  isStructuredProviderTurn,
+  withProviderApplicationContext,
+  type ProviderTurnInput,
+} from './provider-boundary-dispatch.ts';
 import { TurnChronologyTracker, type TurnDeliveryKind } from './turn-chronology.ts';
 import {
   receivedAtUnixSeconds,
@@ -310,6 +315,7 @@ import {
   restartLoopGuardPath,
 } from './restart-loop-guard.ts';
 import { canonicalConversationKey, resolvePhoneFromJid, resolvePhoneFromJidForGrant } from '../../core/access-list.ts';
+import { classifyTrustedActorAccess } from '../../core/access-policy.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
 import { commandGateDenies, getCommandSpec } from './command-registry.ts';
 import { matchImperative, extractImperativeTarget } from '../../core/substrate/inline-extractor.ts';
@@ -323,6 +329,9 @@ import { ToolRegistry } from '../../mcp/registry.ts';
 import { PerChatMcpSocketManager } from './per-chat-mcp-socket-manager.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
 import { SessionTokenRegistry } from '../../mcp/caller-attribution.ts';
+import { trustedActorApplicationContext } from './trusted-actor-envelope.ts';
+import { createActiveTurnReplySink, type ActiveTurnReplyBinding } from './turn-reply-sink.ts';
+import type { TurnReplyRequest } from '../../core/turn-reply.ts';
 import type { ExecutingSessionContext, SessionContext } from '../../mcp/types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
@@ -2740,6 +2749,7 @@ export class AgentRuntime implements Runtime {
       get allowedRoot() { return getAllowedRoot(); },
       conversationBound: this.perChatConversationBound,
       resolveExecutingSession: (mapKey) => this.resolveExecutingSessionByMapKey(mapKey),
+      resolveTurnReplySink: (mapKey) => this.createPerChatTurnReplySink(mapKey),
       sessionTokens: this.sessionTokens,
     });
     this.catalogueSnapshot = createCatalogueSnapshotCache();
@@ -4086,7 +4096,11 @@ export class AgentRuntime implements Runtime {
             'agent cwd unset; global MCP file boundary falls back to home directory',
           );
         }
-        const globalSession: SessionContext = { tier: 'global', allowedRoot: agentCwd };
+        const globalSession: SessionContext = {
+          tier: 'global',
+          allowedRoot: agentCwd,
+          turnReplySink: this.createGlobalTurnReplySink(),
+        };
         // #2976 (ii): identity is resolved per request from the executing-turn
         // register — never stored on the session (no broadcast to go stale).
         this.globalSocketServer = new WhatSoupSocketServer(
@@ -5705,11 +5719,14 @@ export class AgentRuntime implements Runtime {
       const scheduled = purpose === 'scheduled-agent-job';
       this.noteScheduledDispatch(this.session!, undefined, scheduled);
       try {
-        await this.session!.sendTurn(withProviderApplicationContext(
-          renderUserTurnForProvider(this.turnChronology, scheduled
-            ? scheduledAgentJobTurnForProvider(exactText, sessionProviderId(this.session))
-            : exactText, context, 'live'),
-          participantContext,
+        await this.session!.sendTurn(this.withTrustedActorTurn(
+          withProviderApplicationContext(
+            renderUserTurnForProvider(this.turnChronology, scheduled
+              ? scheduledAgentJobTurnForProvider(exactText, sessionProviderId(this.session))
+              : exactText, context, 'live'),
+            participantContext,
+          ),
+          senderJid,
         ));
       } catch (sendErr) {
         this.removeFailedExecutingActor(GLOBAL_TOOL_SCOPE_KEY, senderJid);
@@ -6017,7 +6034,11 @@ export class AgentRuntime implements Runtime {
       const turnInput = contextPreamble === null
         ? userTurnText
         : withProviderApplicationContext(userTurnText, contextPreamble);
-      await dispatchProviderTurn(session, turnInput, onProviderBoundaryReady);
+      await dispatchProviderTurn(
+        session,
+        this.withTrustedActorTurn(turnInput, actorJid),
+        onProviderBoundaryReady,
+      );
     } catch (err) {
       if (actorPushed && pushedExecScopeKey !== undefined) {
         this.removeFailedExecutingActor(
@@ -6561,6 +6582,18 @@ export class AgentRuntime implements Runtime {
     if (!actorJid) return;
     const maybeSession = session as SessionManager & { updateMcpActorJid?: (actorJid: string) => void };
     maybeSession.updateMcpActorJid?.(actorJid);
+  }
+
+  private withTrustedActorTurn(
+    input: ProviderTurnInput,
+    actorJid: string | undefined,
+  ): ProviderTurnInput {
+    const actorAccess = classifyTrustedActorAccess(actorJid, this.db, config.adminPhones);
+    const actorContext = trustedActorApplicationContext(actorAccess);
+    if (isStructuredProviderTurn(input)) {
+      return { ...input, applicationContext: [...input.applicationContext, actorContext] };
+    }
+    return { applicationContext: [actorContext], userText: input };
   }
 
   private bindActiveGlobalMcpConversation(chatJid: string): void {
@@ -7389,7 +7422,7 @@ export class AgentRuntime implements Runtime {
             });
           } else {
             queue.enqueueStreamingText(normalizedText, 'answer');
-            if (markReplayUnsafe) {
+            if (markReplayUnsafe && queue.hasCommittedAnswer?.()) {
               this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe(mapKey);
             }
             // Reply-guarantee: visible output reached the user, so reset the
@@ -9277,6 +9310,47 @@ export class AgentRuntime implements Runtime {
     return findMapKeyForSessionForPort(this.chatTransportHost, session, fallbackMapKey);
   }
 
+  /**
+   * A socket or bridge can claim a reply only while the matching per-chat
+   * runtime turn still owns the exact conversation. The queue enforces the
+   * one-answer arbitration; this resolver prevents stale aliases or sessions
+   * from reaching it.
+   */
+  private activeTurnReplyBinding(
+    request: TurnReplyRequest,
+    active: RuntimeTurnContext | null | undefined,
+    queue: IOutboundQueue | null | undefined,
+  ): ActiveTurnReplyBinding | undefined {
+    if (
+      !active
+      || active.identity.conversationKey !== request.conversationKey
+      || active.identity.managerId !== request.runtimeSessionId
+      || !queue
+    ) return undefined;
+    return { queue, logicalTurnId: active.identity.logicalTurnId };
+  }
+
+  private createPerChatTurnReplySink(mapKey: string) {
+    return createActiveTurnReplySink((request) => {
+      const active = this.perChatRuntimeTurnContexts.get(mapKey)?.[0];
+      return this.activeTurnReplyBinding(request, active, this.chatQueues.get(mapKey));
+    });
+  }
+
+  /** The single/shared socket must also prove its current runtime turn. */
+  private createGlobalTurnReplySink() {
+    return createActiveTurnReplySink((request) => {
+      const active = this.currentRuntimeTurnContext;
+      const queue = active === null
+        ? undefined
+        : this.shared
+        ? this.outboundQueues.get(active.identity.deliveryJid)
+          ?? this.outboundQueues.get(canonicalizeChatJid(active.identity.deliveryJid, this.db))
+        : this.queue;
+      return this.activeTurnReplyBinding(request, active, queue);
+    });
+  }
+
   private getQueueForChat(chatJid: string, mapKey?: string): IOutboundQueue | null {
     return getQueueForChatForPort(this.chatTransportHost, chatJid, mapKey);
   }
@@ -10125,9 +10199,18 @@ export class AgentRuntime implements Runtime {
     // perChatTurnText[mapKey], singleton/shared reads turnHadVisibleOutput. Uses
     // the streamed reply text, NOT the terminal result text (which is the failure
     // string that was just classified) — so a genuinely silent turn still replays.
-    const hadVisibleOutput = args.mapKey !== undefined
+    const activeQueue = args.mapKey !== undefined
+      ? this.chatQueues.get(args.mapKey)
+      : this.getActiveQueue();
+    const legacyVisibleOutput = args.mapKey !== undefined
       ? ((this.perChatTurnText.get(args.mapKey)?.trim() ?? '') !== '')
       : this.turnHadVisibleOutput;
+    const heldRuntimeContext = args.mapKey !== undefined
+      ? this.perChatRuntimeTurnContexts.get(args.mapKey)?.[0]
+      : this.currentRuntimeTurnContext;
+    const hadVisibleOutput = heldRuntimeContext && activeQueue
+      ? activeQueue.hasCommittedAnswer?.() ?? legacyVisibleOutput
+      : legacyVisibleOutput;
     if (
       args.activation.keyPresent === false
       || args.hadToolActivity
@@ -10166,9 +10249,7 @@ export class AgentRuntime implements Runtime {
 
     const runtimeContext = args.forceFresh
       ? undefined
-      : args.mapKey !== undefined
-        ? this.perChatRuntimeTurnContexts.get(args.mapKey)?.[0]
-        : this.currentRuntimeTurnContext;
+      : heldRuntimeContext;
     if (runtimeContext) {
       if (
         runtimeContext.replay.text !== replayText
@@ -10181,7 +10262,21 @@ export class AgentRuntime implements Runtime {
         }, 'refusing fallback replay with mismatched captured turn context');
         return false;
       }
-      if (!this.runtimeTurnCoordinator.beginRuntimeTurnContinuation(runtimeContext)) return false;
+      if (
+        !activeQueue
+        || !activeQueue.resumeTurnAnswerArbitration
+        || !this.runtimeTurnCoordinator.beginRuntimeTurnContinuation(runtimeContext)
+      ) return false;
+      try {
+        activeQueue.resumeTurnAnswerArbitration(runtimeContext.identity.logicalTurnId);
+      } catch (err) {
+        this.runtimeTurnCoordinator.cancelRuntimeTurnContinuation(runtimeContext);
+        log.error({ err, logicalTurnId: runtimeContext.identity.logicalTurnId },
+          'failed to reopen fallback answer arbitration');
+        return false;
+      }
+      if (args.mapKey === undefined) this.currentTurnAssistantText = '';
+      else this.perChatTurnText.set(args.mapKey, '');
       let scopeRef: PerChatRuntimeScopeRef | undefined;
       if (args.mapKey !== undefined) {
         scopeRef = this.perChatRuntimeTurnScopeRefs.get(runtimeContext.identity.logicalTurnId);
@@ -10547,6 +10642,7 @@ export class AgentRuntime implements Runtime {
     if (actorSocketRequired && !mcpSocketPath?.trim()) {
       throw new Error(`per_chat ${sessionProvider} session for ${sessionConversationKey} would spawn without an actor-bound socket`);
     }
+    const sessionManagerId = randomUUID();
     const providerToolSession: SessionContext =
       this.sandboxPerChat || this.sessionScope === 'per_chat'
         ? {
@@ -10563,7 +10659,9 @@ export class AgentRuntime implements Runtime {
             tier: 'global',
             ...(opts.actorJid ? { actorJid: opts.actorJid } : {}),
             ...(!this.shared ? { conversationKey: deliveryConversationKey } : {}),
-        };
+          };
+    providerToolSession.turnReplySessionId = sessionManagerId;
+    const mcpSessionToken = this.sessionTokens.mint(sessionManagerId);
     if (opts.trackSingletonMcpSession) {
       this.singletonProviderToolSession = providerToolSession;
     }
@@ -10619,7 +10717,7 @@ export class AgentRuntime implements Runtime {
       mcpSessionContext: providerToolSession,
       whatsoupInstance: this.instanceName,
       whatsoupMcpSocket: mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
-      whatsoupMcpSessionToken: this.sessionTokens.mint(),
+      whatsoupMcpSessionToken: mcpSessionToken,
       providerTransitionReady,
       handoffSystemBlock: this.buildHandoffSystemBlock(sessionConversationKey, route ? route.provider : this.effectiveProvider),
       degradedCapabilitiesBlock: managedLoopDegraded
@@ -10659,7 +10757,22 @@ export class AgentRuntime implements Runtime {
           }
         : undefined,
     });
-    this.sessionManagerIds.set(session, randomUUID());
+    providerToolSession.turnReplySink = createActiveTurnReplySink((request) => {
+      const mapKey = this.findMapKeyForSession(session, opts.sessionMapKey);
+      if (mapKey !== null) {
+        const active = this.perChatRuntimeTurnContexts.get(mapKey)?.[0];
+        return this.activeTurnReplyBinding(request, active, this.chatQueues.get(mapKey));
+      }
+      const active = this.currentRuntimeTurnContext;
+      const queue = active === null
+        ? undefined
+        : this.shared
+        ? this.outboundQueues.get(active.identity.deliveryJid)
+          ?? this.outboundQueues.get(canonicalizeChatJid(active.identity.deliveryJid, this.db))
+        : this.queue;
+      return this.activeTurnReplyBinding(request, active, queue);
+    });
+    this.sessionManagerIds.set(session, sessionManagerId);
     this.sessionEventToolScopes.set(
       session,
       opts.eventToolScopeKey ?? GLOBAL_TOOL_SCOPE_KEY,
@@ -10765,6 +10878,7 @@ export class AgentRuntime implements Runtime {
               deliveryJid: chatJid,
               ...(actorJid ? { actorJid } : {}),
               allowedRoot: workspacePath,
+              turnReplySink: this.createPerChatTurnReplySink(workspaceKey),
             };
             socketServer = new WhatSoupSocketServer(
               socketPath,
@@ -12323,8 +12437,8 @@ export class AgentRuntime implements Runtime {
             });
           } else {
             queue.enqueueStreamingText(normalizedText, 'answer');
-            this.turnHadVisibleOutput = true;
-            if (markReplayUnsafe) {
+            this.turnHadVisibleOutput ||= queue.hasCommittedAnswer?.() ?? true;
+            if (markReplayUnsafe && queue.hasCommittedAnswer?.()) {
               this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe();
             }
             // Reply-guarantee: visible output reached the user — reset the silence

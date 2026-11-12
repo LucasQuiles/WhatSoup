@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import { Database } from '../../src/core/database.ts';
+import * as accessPolicy from '../../src/core/access-policy.ts';
 import { shouldRespond } from '../../src/core/access-policy.ts';
 import { resolveLid, hydrateLidMappings, upsertLidMapping } from '../../src/core/lid-resolver.ts';
 import { extractLocal } from '../../src/core/access-list.ts';
@@ -833,5 +834,41 @@ describe('LID resolver', () => {
     hydrateLidMappings(lidDb, tmpAuthDir);
     // The upserted value (19998887777) should persist — hydrate doesn't overwrite
     expect(resolveLid(lidDb, ADMIN_LID_NUM)).toBe('19998887777');
+  });
+});
+
+describe('trusted actor access classification', () => {
+  const ADMIN_LID_NUM = '99900000000001';
+  const classify = (): ((
+    senderJid: string | null | undefined,
+    database: Database,
+    adminPhones: Set<string>,
+  ) => string) => {
+    const candidate = (accessPolicy as unknown as {
+      classifyTrustedActorAccess?: unknown;
+    }).classifyTrustedActorAccess;
+    expect(candidate).toBeTypeOf('function');
+    return candidate as (senderJid: string | null | undefined, database: Database, adminPhones: Set<string>) => string;
+  };
+
+  it('derives administrator and allowlisted roles only from authenticated transport identity', () => {
+    const classifier = classify();
+    upsertLidMapping(db, ADMIN_LID_NUM, `${ALLOWED_ADMIN}@s.whatsapp.net`);
+
+    expect(classifier(`${ALLOWED_ADMIN}@s.whatsapp.net`, db, new Set([ALLOWED_ADMIN])))
+      .toBe('administrator');
+    expect(classifier(`${ADMIN_LID_NUM}@lid`, db, new Set([ALLOWED_ADMIN])))
+      .toBe('administrator');
+    expect(classifier(`${ALLOWED_USER}@s.whatsapp.net`, db, new Set([ALLOWED_ADMIN])))
+      .toBe('authorized_user');
+  });
+
+  it.each([
+    [`${ALLOWED_ADMIN}@sms`, 'spoofable SMS identity'],
+    ['unmapped-actor@lid', 'unmapped LID'],
+    [`${UNKNOWN_USER}@s.whatsapp.net`, 'unknown authenticated sender'],
+    [undefined, 'missing identity'],
+  ])('fails closed for %s (%s)', (senderJid, _description) => {
+    expect(classify()(senderJid, db, new Set([ALLOWED_ADMIN]))).toBe('untrusted_or_unknown');
   });
 });
