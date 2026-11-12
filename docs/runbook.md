@@ -3057,9 +3057,15 @@ implemented lifecycle; it does not attest any deployed system or external copy.
 
 Protected delivery is disabled until an agent instance explicitly sets
 `agentOptions.protectedDelivery.enabled: true` with the fixed managed-links API
-endpoint and a runtime-only credential environment-variable name. Inject that
-credential through the service environment; do not place its value in
-`config.json`, a prompt, or a tool call.
+endpoint and a runtime-only credential environment-variable name. The name must
+match `^LINKS_MANAGED_[A-Z][A-Z0-9_]*$`, such as
+`LINKS_MANAGED_TRANSPORT_TOKEN`; the parser rejects `LANG`, `PATH`, provider
+authentication, and WhatSoup session names before it reads the environment.
+Inject that credential through the service environment; do not place its value
+in `config.json`, a prompt, or a tool call. The child-environment builders do
+not forward the reserved namespace, but that does not limit a different local
+process running as the same OS user from potentially inspecting the service
+environment. Treat same-user shell access as trusted operator access.
 
 The three protected-delivery tools exist only in agent runtimes and require a
 resolved, bound direct WhatsApp conversation. The protected transport sends the

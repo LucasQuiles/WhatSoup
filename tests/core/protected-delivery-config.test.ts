@@ -51,4 +51,14 @@ describe('protected delivery configuration', () => {
   it('refuses the test origin under the production pins', () => {
     expect(() => parseProtectedDeliveryConfig(withBaseUrl(TEST_DELIVERY_BASE_URL), credential)).toThrow(/approved/i);
   });
+
+  it('rejects ambient and child-environment names for the managed credential', () => {
+    for (const credentialEnv of ['LANG', 'PATH', 'OPENAI_API_KEY', 'WHATSOUP_MCP_SESSION_TOKEN']) {
+      expect(() => parseProtectedDeliveryConfig({
+        enabled: true,
+        baseUrl: TEST_DELIVERY_BASE_URL,
+        credentialEnv,
+      }, { [credentialEnv]: 'synthetic-managed-token' }, pins)).toThrow(/reserved managed credential namespace/i);
+    }
+  });
 });

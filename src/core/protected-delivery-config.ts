@@ -9,6 +9,7 @@ export interface ProtectedDeliveryConfig {
 
 /** The managed API path is fixed; only its origin comes from instance configuration. */
 const APPROVED_MANAGED_DELIVERY_API_PATH = '/s/api/v1';
+const MANAGED_DELIVERY_CREDENTIAL_ENV = /^LINKS_MANAGED_[A-Z][A-Z0-9_]*$/;
 
 /**
  * The configured base URL must be a pinned HTTPS origin plus the fixed API
@@ -48,8 +49,8 @@ export function parseProtectedDeliveryConfig(
     throw new Error('protectedDelivery.baseUrl must be the approved managed-delivery API endpoint');
   }
   const credentialEnv = requiredString(raw['credentialEnv'], 'protectedDelivery.credentialEnv');
-  if (!/^[A-Z][A-Z0-9_]*$/.test(credentialEnv)) {
-    throw new Error('protectedDelivery.credentialEnv must be an uppercase environment variable name');
+  if (!MANAGED_DELIVERY_CREDENTIAL_ENV.test(credentialEnv)) {
+    throw new Error('protectedDelivery.credentialEnv must use the reserved managed credential namespace');
   }
   const token = environment[credentialEnv];
   if (typeof token !== 'string' || token.length === 0) {
