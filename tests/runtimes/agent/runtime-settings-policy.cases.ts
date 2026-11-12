@@ -76,6 +76,8 @@ export function registerRuntimeSettingsPolicyTests(
     // rows run the real admission, which finds no plugin and withdraws authority.
     const admitSpy = vi.spyOn(adapter, 'admitMicrosoft365Workflow');
     if (admitted) admitSpy.mockImplementation(options => options.policy);
+    // The real re-check passes a policy it did not admit through; one row below makes it withdraw.
+    const recheckSpy = vi.spyOn(adapter, 'recheckMicrosoft365Workflow');
     try {
       const cwd = await ownedRuntimeCwd('m365-startup-policy');
       const runtime = createRuntime({
@@ -100,7 +102,17 @@ export function registerRuntimeSettingsPolicyTests(
         expect(route.activateProviderFallback(null, 'usage-limit')).not.toBeNull();
         expect(runtime.getM365SettingsPolicy()?.status).toBe(exception ? 'approved' : 'rejected');
       }
+      if (exception) {
+        // A marketplace update replaces the native copy mid-run: the next settings write
+        // re-checks it, and the withdrawal holds for every later write.
+        const admittedPolicy = runtime.getM365SettingsPolicy();
+        recheckSpy.mockImplementationOnce((p) => p?.status === 'approved' ? { status: 'approved', childEnv: p.childEnv } : p);
+        expect(m365MutationExceptionAllowed(runtime.getM365SettingsPolicy())).toBe(false);
+        expect(m365MutationExceptionAllowed(runtime.getM365SettingsPolicy())).toBe(false);
+        expect(recheckSpy).toHaveBeenCalledWith(admittedPolicy, 'test');
+      }
     } finally {
+      recheckSpy.mockRestore();
       admitSpy.mockRestore();
       stateSpy.mockRestore();
       if (originalFallbacks === undefined) delete cfg.agentFallbacks;

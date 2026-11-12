@@ -19,6 +19,7 @@ import {
   admitMicrosoft365Workflow,
   loadMicrosoft365PluginLaunch,
   microsoft365AuthorityKey,
+  recheckMicrosoft365Workflow,
   registerMicrosoft365Adapter,
 } from '../../../src/runtimes/agent/microsoft365-adapter.ts';
 import { createProviderMcpBridge } from '../../../src/runtimes/agent/providers/mcp-bridge.ts';
@@ -34,6 +35,13 @@ const { AGENT365_HOME, FOREIGN_OWNED } = vi.hoisted(() => {
     // Paths that lstat reports as owned by another user: a test cannot chown without root.
     FOREIGN_OWNED: new Set<string>(),
   };
+});
+
+// The adapter's own logger, captured so a withdrawal's reason can be asserted; other components log normally.
+const { adapterLog } = vi.hoisted(() => ({ adapterLog: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
+vi.mock('../../../src/logger.ts', async (importOriginal: () => Promise<typeof import('../../../src/logger.ts')>) => {
+  const actual = await importOriginal();
+  return { ...actual, createChildLogger: (name: string) => name === 'microsoft365-adapter' ? adapterLog : actual.createChildLogger(name) };
 });
 
 vi.mock('node:os', async (importOriginal: () => Promise<OsModule>) => {
@@ -739,6 +747,49 @@ describe.skipIf(SYSTEM_PYTHON === '')('Microsoft 365 provider adapter', () => {
     nativeInstall(GUARDED_FIXTURE);
     vi.stubEnv('CLAUDE_CONFIG_DIR', temporaryDirectory('whatsoup-m365-empty-config-'));
     expect(admit()).toEqual(withdrawn);
+  });
+
+  it('re-checks the native copy before each settings write and withdraws authority once it no longer matches', () => {
+    vi.stubEnv('CLAUDE_CONFIG_DIR', undefined);
+    const trace = join(temporaryDirectory('whatsoup-m365-recheck-'), 'm365-fixture-trace.jsonl');
+    const approved = policy(trace);
+    const plugin = pluginDirectory(trace);
+    const admittedServer = (JSON.parse(readFileSync(join(plugin.root, '.claude-plugin', 'plugin.json'), 'utf8')) as {
+      mcpServers: { microsoft_365: Record<string, unknown> };
+    }).mcpServers.microsoft_365;
+    const nativeRoot = nativeInstall(GUARDED_FIXTURE, admittedServer);
+    const admitted = admitMicrosoft365Workflow({
+      registry: new ToolRegistry(), policy: approved, pluginDirs: [plugin.root], perChatMcpSocketManager: {} as never,
+      resolvePerChatMapKey: (jid: string) => jid, sessionTokens: new SessionTokenRegistry(), instanceName: 'test',
+    });
+    expect(admitted).toBe(approved);
+    adapterLog.warn.mockClear();
+
+    // Positive control: the guarded native copy is unchanged, so the write keeps the assignment.
+    expect(recheckMicrosoft365Workflow(admitted, 'test')).toBe(approved);
+    expect(adapterLog.warn).not.toHaveBeenCalled();
+
+    // A marketplace update replaces the native entry with different bytes mid-run.
+    const nativeEntry = join(nativeRoot, 'mcp-server', 'dist', 'index.cjs');
+    copyFileSync(LAUNCHER_FIXTURE, nativeEntry);
+    const withdrawn = recheckMicrosoft365Workflow(admitted, 'test');
+    expect(withdrawn).toEqual({ status: 'approved', childEnv: approved.status === 'approved' ? approved.childEnv : {} });
+    expect(m365MutationExceptionAllowed(withdrawn)).toBe(false);
+    expect(adapterLog.warn).toHaveBeenCalledTimes(1);
+    expect(adapterLog.warn.mock.calls[0]![0]).toEqual({ instance: 'test', reason: 'entry-differs' });
+    // The log names a reason, never a path.
+    expect(JSON.stringify(adapterLog.warn.mock.calls[0])).not.toContain(AGENT365_HOME);
+    expect(JSON.stringify(adapterLog.warn.mock.calls[0])).not.toContain(plugin.root);
+
+    // The withdrawal holds for the rest of the run, even after the guarded bytes return, and logs once.
+    copyFileSync(GUARDED_FIXTURE, nativeEntry);
+    expect(recheckMicrosoft365Workflow(withdrawn, 'test')).toBe(withdrawn);
+    expect(adapterLog.warn).toHaveBeenCalledTimes(1);
+
+    // A policy this adapter never admitted, or one without an assignment, passes through unchecked.
+    expect(recheckMicrosoft365Workflow(policy(trace), 'test')).toEqual(policy(trace));
+    expect(recheckMicrosoft365Workflow({ status: 'rejected' }, 'test')).toEqual({ status: 'rejected' });
+    expect(recheckMicrosoft365Workflow(undefined, 'test')).toBeUndefined();
   });
 
   it('refuses reads and writes on a turn whose route is not an admitted Microsoft 365 provider', async () => {

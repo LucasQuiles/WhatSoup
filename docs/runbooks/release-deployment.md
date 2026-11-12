@@ -213,9 +213,10 @@ currently runs from `--expect-current`; a health token and port resolve; the
 database exists; and no staged plist still references `--expect-current`.
 
 The script does not check Microsoft 365 plugin copies; the runtime checks them at
-startup. Before activating a release for an instance with an `m365Bridge` binding, check
-that the guarded plugin is installed through `agentOptions.pluginDirs`. When the copy
-that `enabledPlugins` names is missing or differs from the guarded copy, startup
+startup and before each later native-settings write. Before activating a release for an
+instance with an `m365Bridge` binding, check that the guarded plugin is installed through
+`agentOptions.pluginDirs`. When the copy that `enabledPlugins` names is missing or differs
+from the guarded copy, including after a marketplace update during the run, the runtime
 withdraws `workflowAuthority` and logs `Microsoft 365 workflow authority withdrawn` with
 a reason. Microsoft 365 writes then stay denied until both copies match and the instance
 restarts. See the "One guarded plugin build" note in

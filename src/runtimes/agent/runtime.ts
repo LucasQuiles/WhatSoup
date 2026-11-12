@@ -323,7 +323,7 @@ import { randomUUID } from 'node:crypto';
 import { EgressProxy } from './egress-proxy.ts';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { PerChatMcpSocketManager } from './per-chat-mcp-socket-manager.ts';
-import { admitMicrosoft365Workflow, resolveExplainedM365MutationPolicy } from './microsoft365-adapter.ts';
+import { admitMicrosoft365Workflow, recheckMicrosoft365Workflow, resolveExplainedM365MutationPolicy } from './microsoft365-adapter.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
 import { SessionTokenRegistry } from '../../mcp/caller-attribution.ts';
 import type { ExecutingSessionContext, SessionContext } from '../../mcp/types.ts';
@@ -3923,11 +3923,11 @@ export class AgentRuntime implements Runtime {
   }
 
   getM365SettingsPolicy(): M365MutationPolicy | undefined {
-    if (this.m365MutationPolicy === undefined) return undefined;
-    // Grant reconciliation runs before startup restores a persisted fallback.
+    // Grant reconciliation runs before startup restores a persisted fallback; afterwards every settings write re-checks the native plugin copy.
+    if (this.m365MutationPolicy === undefined || !this.m365SettingsPolicyReady) return this.m365MutationPolicy && { status: 'rejected' as const };
+    this.m365MutationPolicy = recheckMicrosoft365Workflow(this.m365MutationPolicy, this.instanceName);
     const guardedProvider = supportsM365BridgeProvider(this.effectiveProvider) && m365MutationExceptionAllowed(this.m365MutationPolicy);
-    return this.m365SettingsPolicyReady && (!this.isFallbackWindowActive || guardedProvider)
-      ? this.m365MutationPolicy : { status: 'rejected' };
+    return !this.isFallbackWindowActive || guardedProvider ? this.m365MutationPolicy : { status: 'rejected' };
   }
 
   async start(): Promise<void> {
@@ -10581,12 +10581,12 @@ export class AgentRuntime implements Runtime {
     const primaryBridgeRoute = !this.isFallbackWindowActive && route.source !== 'fallback'
       && route.provider === this.agentProvider && route.model === this.model
       && opts.providerConfigOverride === undefined;
-    // The guarded plugin binds writes to the employee and Microsoft account,
-    // so changing the language model need not revoke that employee's request.
-    const guardedM365BridgeRoute = supportsM365BridgeProvider(sessionProvider) && m365MutationExceptionAllowed(this.m365MutationPolicy);
-    const sessionM365Policy: M365MutationPolicy | undefined = this.m365MutationPolicy === undefined
-      ? undefined
-      : primaryBridgeRoute || guardedM365BridgeRoute ? this.m365MutationPolicy : { status: 'rejected' };
+    // The guarded plugin binds writes to the employee and Microsoft account, so changing the language model need not
+    // revoke that employee's request. The native plugin copy is re-checked first: this session may write sandbox settings.
+    const m365Policy = this.m365MutationPolicy = recheckMicrosoft365Workflow(this.m365MutationPolicy, this.instanceName);
+    const guardedM365BridgeRoute = supportsM365BridgeProvider(sessionProvider) && m365MutationExceptionAllowed(m365Policy);
+    const sessionM365Policy: M365MutationPolicy | undefined = m365Policy === undefined ? undefined
+      : primaryBridgeRoute || guardedM365BridgeRoute ? m365Policy : { status: 'rejected' };
 
     // Each sandbox cwd owns its settings; route changes must restore the deny
     // floor before a fallback can reuse a workspace approved for the primary.

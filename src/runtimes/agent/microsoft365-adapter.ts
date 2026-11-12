@@ -402,13 +402,21 @@ function sha256File(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
+function fileDigest(path: string): string | undefined {
+  try {
+    return sha256File(path);
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * The `claude-cli` provider also loads the copy that `enabledPlugins` names, from the
  * install record in its config directory. Every install must launch the guarded entry
- * byte for byte, without turning the guard off; otherwise it could receive the bridge
- * credentials without enforcing employee authorization.
+ * byte for byte (the SHA-256 recorded at admission), without turning the guard off;
+ * otherwise it could receive the bridge credentials without enforcing employee authorization.
  */
-function nativePluginMismatch(admittedEntry: string): NativePluginMismatch | undefined {
+function nativePluginMismatch(admittedDigest: string): NativePluginMismatch | undefined {
   let installs: unknown;
   try {
     // env-allowed: external-tool interop; must track the config dir the spawned claude CLI reads
@@ -434,7 +442,7 @@ function nativePluginMismatch(admittedEntry: string): NativePluginMismatch | und
       ) return 'manifest-differs';
       const entry = realpathSync(join(root, PLUGIN_ENTRY));
       if (!containedPath(root, entry) || !statSync(entry).isFile()) return 'entry-unreadable';
-      if (sha256File(entry) !== sha256File(admittedEntry)) return 'entry-differs';
+      if (sha256File(entry) !== admittedDigest) return 'entry-differs';
     } catch {
       return 'entry-unreadable';
     }
@@ -443,6 +451,19 @@ function nativePluginMismatch(admittedEntry: string): NativePluginMismatch | und
 }
 
 const log = createChildLogger('microsoft365-adapter');
+
+/** The admitted guarded entry's SHA-256, per policy that kept its workflow assignment at admission. */
+const admittedEntryDigests = new WeakMap<M365MutationPolicy, string>();
+
+function withdrawnForNativeCopy(
+  policy: Extract<M365MutationPolicy, { status: 'approved' }>,
+  reason: NativePluginMismatch,
+  instanceName: string | undefined,
+): M365MutationPolicy {
+  log.warn({ instance: instanceName, reason },
+    'Microsoft 365 workflow authority withdrawn: the plugin copy that enabledPlugins names does not run the admitted guarded entry, so Microsoft 365 writes stay denied');
+  return { status: 'approved', childEnv: policy.childEnv };
+}
 
 /**
  * Resolves the runtime's M365 policy. When a configured bridge keeps Microsoft 365
@@ -476,9 +497,25 @@ export function admitMicrosoft365Workflow(options: RegisterMicrosoft365AdapterOp
       'Microsoft 365 workflow authority withdrawn: no guarded plugin was admitted, so Microsoft 365 writes stay denied');
     return { status: 'approved', childEnv: policy.childEnv };
   }
-  const mismatch = nativePluginMismatch(launch.args[4]!);
-  if (mismatch === undefined) return policy;
-  log.warn({ instance: options.instanceName, reason: mismatch },
-    'Microsoft 365 workflow authority withdrawn: the plugin copy that enabledPlugins names does not run the admitted guarded entry, so Microsoft 365 writes stay denied');
-  return { status: 'approved', childEnv: policy.childEnv };
+  const digest = fileDigest(launch.args[4]!);
+  if (digest === undefined) return withdrawnForNativeCopy(policy, 'entry-unreadable', options.instanceName);
+  const mismatch = nativePluginMismatch(digest);
+  if (mismatch !== undefined) return withdrawnForNativeCopy(policy, mismatch, options.instanceName);
+  admittedEntryDigests.set(policy, digest);
+  return policy;
+}
+
+/**
+ * Runs before each native-settings write. A marketplace update can replace the copy that
+ * `enabledPlugins` names mid-run, so it must still run the entry this policy was admitted
+ * with; otherwise the assignment is withdrawn. The withdrawn policy carries no assignment,
+ * so the withdrawal holds for the rest of the run and is logged once. A policy that
+ * `admitMicrosoft365Workflow` did not keep is returned unchanged: after `start()` the
+ * runtime holds no other policy with an assignment.
+ */
+export function recheckMicrosoft365Workflow(policy: M365MutationPolicy | undefined, instanceName?: string): M365MutationPolicy | undefined {
+  const digest = policy === undefined ? undefined : admittedEntryDigests.get(policy);
+  if (digest === undefined || policy?.status !== 'approved') return policy;
+  const mismatch = nativePluginMismatch(digest);
+  return mismatch === undefined ? policy : withdrawnForNativeCopy(policy, mismatch, instanceName);
 }

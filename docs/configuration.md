@@ -2554,8 +2554,13 @@ requires every install of `microsoft_365@microsoft-365-dev` to:
 - have that entry inside its install directory, with the same SHA-256 as the admitted entry.
 
 A missing or unreadable record, a missing install or any difference withdraws the
-assignment. The startup log names the reason, never a path. The check runs at startup
-only: restart the instance after you update either copy.
+assignment. The log names the reason, never a path. Admission records the SHA-256 of
+the admitted entry. The check runs at startup and again before each later write of
+native settings (a capability-grant write, or the settings of a new sandbox per-chat
+session), because a marketplace update can replace the native copy mid-run. A
+withdrawal holds until the instance restarts, even if the copies match again: restart
+it after you update either copy. Sessions that started before the withdrawal keep
+their snapshot of the assignment until they respawn.
 
 Settings do not record deny authorship. Approval therefore never removes existing
 entries, even if they match a previously generated floor. Legacy settings and a

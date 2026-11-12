@@ -81,7 +81,8 @@ import type { Messenger } from '../../../src/core/types.ts';
 import { emitAlert } from '../../../src/lib/emit-alert.ts';
 import { ProviderDataPolicyError } from '../../../src/core/provider-data-policy.ts';
 import type { AgentRuntimeOptions } from '../../../src/runtimes/agent/runtime-options.ts';
-import { m365BridgeCredentialAdmission, type M365MutationPolicy } from '../../../src/core/m365-bridge-policy.ts';
+import { m365BridgeCredentialAdmission, m365MutationExceptionAllowed, type M365MutationPolicy } from '../../../src/core/m365-bridge-policy.ts';
+import * as microsoft365Adapter from '../../../src/runtimes/agent/microsoft365-adapter.ts';
 import { probeFallbackBinary } from '../../../src/runtimes/agent/providers/binary-preflight.ts';
 import { buildChildEnv } from '../../../src/runtimes/agent/session.ts';
 import { applyRequiredDeny, M365_MUTATION_DENY, REQUIRED_DENY } from '../../../src/core/settings-template.ts';
@@ -415,6 +416,19 @@ describe('fallback chain selection', () => {
       expect(vi.mocked(probeFallbackBinary)).toHaveBeenCalledOnce();
       const probeEnv = vi.mocked(probeFallbackBinary).mock.calls[0]![1]!;
       expect(Object.keys(probeEnv).filter((key) => key.startsWith('MS365_') || key === 'ALLOW_M365_MUTATIONS')).toEqual([]);
+      if (guarded) {
+        // A new session re-checks the native plugin copy before it writes sandbox settings. Once
+        // the copy no longer matches, the session loses the exception and the sandbox floor returns.
+        const recheck = vi.spyOn(microsoft365Adapter, 'recheckMicrosoft365Workflow')
+          .mockImplementationOnce((p) => p?.status === 'approved' ? { status: 'approved', childEnv: p.childEnv } : p);
+        const rechecked = session();
+        recheck.mockRestore();
+        expect(m365MutationExceptionAllowed(rechecked.m365MutationPolicy)).toBe(false);
+        if (workspacePath) {
+          const settings = JSON.parse(readFileSync(join(workspacePath, '.claude/settings.json'), 'utf8'));
+          expect(settings.permissions.deny).toEqual(expect.arrayContaining([...M365_MUTATION_DENY]));
+        }
+      }
     } finally {
       vi.unstubAllEnvs();
     }
