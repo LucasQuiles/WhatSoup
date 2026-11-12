@@ -4497,9 +4497,8 @@ describe('AgentRuntime', () => {
   // limits'. Model follows the same honesty rule as /model status
   // ('(configured)' label; the served weight is unobservable). Token counts
   // come from the agent_sessions denorm columns; the context budget pairs the
-  // known context gauge that maybeStartAutoCompact actually compares, or the
-  // labelled cumulative fallback while the gauge is unknown, with the threshold
-  // the runtime actually applies (configured, else the 150k default).
+  // known context gauge (or the labelled cumulative fallback while it is unknown)
+  // with the threshold the runtime applies (configured, else the 150k default).
 
   it('B26: /status renders the configured model, token counts, and the auto-compact context budget', async () => {
     const cfg = mockConfig as unknown as Record<string, unknown>;
@@ -4524,8 +4523,6 @@ describe('AgentRuntime', () => {
       expect(text).toContain('Model: claude-opus-4-8 (configured)');
       expect(text).toContain('Tokens: 96.2k in / 4.1k out');
       // Unconfigured threshold → the default the runtime actually applies (150k).
-      // No request observed yet: the gauge is unknown, so the line names the
-      // cumulative fallback the trigger would compare instead of calling it context.
       expect(text).toContain('Context: unknown (cumulative fallback 96.2k) / 150k before auto-compact');
     } finally {
       delete cfg.agentProvider;
