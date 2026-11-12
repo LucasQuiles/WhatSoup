@@ -371,6 +371,23 @@ async function withCancellationDeadline<T>(
 }
 
 /**
+ * Whether a probe result raises, clears or keeps the alert for a claude CLI that
+ * lacks --strict-mcp-config. Such a CLI is never model-probed, so it makes no
+ * usability claim, but the missing capability is actionable. Only a usable probe
+ * clears: its model child ran with --strict-mcp-config, so the CLI accepted the
+ * option, while any other result proves nothing about it. A usable result clears
+ * even when no alert is known, so a restarted process also retires an alert raised
+ * before it started. Callers pass probe results only, never a turn success.
+ */
+export function probeIncompatibilityAlertAction(
+  result: PrimaryModelUsabilityResult,
+  alertActive: boolean,
+): 'raise' | 'clear' | 'none' {
+  if (result.status === 'unknown' && result.reason === CLAUDE_CLI_LACKS_STRICT_MCP_CONFIG) return alertActive ? 'none' : 'raise';
+  return result.status === 'usable' ? 'clear' : 'none';
+}
+
+/**
  * Whether a primary-model usability probe result should raise an operator alert.
  * Pure predicate over PrimaryModelUsabilityResult, relocated from AgentRuntime
  * (god-class decomposition slice BEAD-PURE-3). An 'unknown' caused by missing
