@@ -8,17 +8,21 @@ folder (openat, renameat, unlinkat), and owner, mode and flag changes go to
 descriptors this helper opened. If the caller swaps a folder or the plist after
 the checks, a root write, flag change or ownership change cannot land on
 another file, and the run fails.
+
+The helper also runs no other program: sudo can keep the caller's PATH, so a
+program named without a path would be one the caller chose, run as root.
 """
 import ctypes
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
+import plistlib
 import pwd
 import re
 import secrets
 import stat
-import subprocess
 import sys
 
 LAUNCH_AGENT_NAME = re.compile(r'com\.whatsoup\.[A-Za-z0-9][A-Za-z0-9._-]*\.plist')
@@ -299,6 +303,37 @@ def open_caller_folder(home, uid):
     return fd
 
 
+def check_contents(replacement, label):
+    """Refuse contents that are not an XML plist dictionary of JSON-representable values naming `label`.
+
+    These are the checks the earlier `plutil -convert json` round trip gave, kept
+    without running a program. Only validation uses the parsed value; the caller
+    writes and digests the request bytes unchanged.
+    """
+    try:
+        parsed = plistlib.loads(replacement, fmt=plistlib.FMT_XML)
+    except Exception as exc:  # any parse failure is a refusal; the reason stays out of the output
+        raise RuntimeError('plist contents must be an XML property list') from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError('plist contents must be a dictionary')
+    pending = [parsed]
+    while pending:  # a loop, not recursion: nesting depth is the caller's choice
+        value = pending.pop()
+        if isinstance(value, dict):
+            if not all(isinstance(key, str) for key in value):
+                raise RuntimeError('plist dictionary keys must be strings')
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+        elif isinstance(value, float):
+            if not math.isfinite(value):
+                raise RuntimeError('plist reals must be finite')
+        elif not isinstance(value, (str, int)):  # bool is an int; data and date have no JSON form
+            raise RuntimeError('plist value has no JSON form')
+    if parsed.get('Label') != label:
+        raise RuntimeError('plist label does not match target')
+
+
 def main():
     request = json.load(sys.stdin)
     if os.getuid() != 0:
@@ -312,10 +347,7 @@ def main():
     try:
         os.close(open_plist(folder_fd, path.name))
         replacement = request['contents'].encode()
-        parsed = json.loads(subprocess.run(['plutil', '-convert', 'json', '-o', '-', '-'], input=replacement,
-                                          check=True, capture_output=True, timeout=10).stdout)
-        if parsed.get('Label') != path.name[:-6]:
-            raise RuntimeError('plist label does not match target')
+        check_contents(replacement, path.name[:-6])
         result = replace_at(folder_fd, path.name, request['expectedSha256'], replacement, request['metadata'],
                             lambda: open_caller_folder(home, uid))
     finally:

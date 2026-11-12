@@ -205,8 +205,11 @@ npm --silent run release:activate -- \
      swapped for a symlink mid-run cannot redirect a root write or flag change;
      the run fails instead. It checks the expected bytes, preserves owner,
      group, mode and `uchg`, and refuses symlinks, hard-linked plists,
-     extended attributes and other protection flags. A failed replacement
-     restores its original bytes and protection;
+     extended attributes and other protection flags. It parses the new
+     contents itself and runs no other program, so nothing is looked up on
+     `PATH` as root; the contents must be an XML plist dictionary of
+     JSON-representable values whose `Label` names the target. A failed
+     replacement restores its original bytes and protection;
   3. reloads each label with the reload sequence below;
   4. verifies from the executing process (a new pid whose argv names
      `<release>/src/bootstrap.ts`, authenticated health with the manifest

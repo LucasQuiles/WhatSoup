@@ -1,8 +1,10 @@
+import datetime
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import plistlib
 import pwd
 import stat
 import types
@@ -58,9 +60,9 @@ def test_failures_restore_bytes_and_protection(tmp_path,monkeypatch,failure):
 
 
 # Root replacement is confined to the sudo caller's own ~/Library/LaunchAgents.
-# These cases drive main() as root with the write (replace) and plutil stubbed,
-# so a target that passes the confinement reaches the stub and a refused one
-# never does.
+# These cases drive main() as root with the write (replace) stubbed, so a target
+# that passes the confinement reaches the stub and a refused one never does. The
+# helper parses the new contents itself, so nothing else is stubbed.
 
 # The sudo caller is the test's own user, so the folders the test creates are the caller's.
 OWN_UID = str(os.getuid())
@@ -74,7 +76,7 @@ def _own_launch_agents(root):
     return home, folder
 
 
-def _drive_main_as_root(monkeypatch, target, home, sudo_uid, *, stub_write=True, original=None):
+def _drive_main_as_root(monkeypatch, target, home, sudo_uid, *, stub_write=True, original=None, contents=None):
     replaced = []
     looked_up = []
     monkeypatch.setattr(p.os, 'getuid', lambda: 0)
@@ -88,20 +90,14 @@ def _drive_main_as_root(monkeypatch, target, home, sudo_uid, *, stub_write=True,
         return types.SimpleNamespace(pw_dir=str(home))
 
     monkeypatch.setattr(pwd, 'getpwuid', getpwuid)
-    label = Path(target).name[:-6]
-
-    def run(args, **kwargs):
-        if args[0] == 'plutil':
-            return types.SimpleNamespace(stdout=json.dumps({'Label': label}).encode())
-        return types.SimpleNamespace(stdout=b'')  # any other probe reports nothing
-
-    monkeypatch.setattr(p.subprocess, 'run', run)
+    if contents is None:
+        contents = plistlib.dumps({'Label': Path(target).name[:-6]}).decode()
     if stub_write:
         # Record the plist name the write would replace, whichever entry point is used.
         monkeypatch.setattr(p, 'replace', lambda *args: replaced.append(Path(args[0]).name) or {}, raising=False)
         monkeypatch.setattr(p, 'replace_at', lambda *args: replaced.append(args[1]) or {}, raising=False)
     expected = p.digest(original) if original is not None else '0' * 64
-    request = {'path': str(target), 'contents': '<plist/>', 'expectedSha256': expected, 'metadata': {}}
+    request = {'path': str(target), 'contents': contents, 'expectedSha256': expected, 'metadata': {}}
     monkeypatch.setattr(p.sys, 'stdin', io.StringIO(json.dumps(request)))
     return replaced, looked_up
 
@@ -113,6 +109,91 @@ def test_root_replacement_accepts_an_existing_plist_in_the_callers_launch_agents
     p.main()
     assert replaced == [target.name]
     assert looked_up == [int(OWN_UID)]
+
+
+def test_root_replacement_never_runs_a_program_found_on_path(tmp_path, monkeypatch):
+    # sudo can keep the caller's PATH, so a program the helper names without a path
+    # would be one the caller chose, run as root. A fake plutil first on PATH records
+    # whether it ran; the helper must still reach the write without it.
+    root = tmp_path.resolve()
+    home, folder = _own_launch_agents(root)
+    target = folder / 'com.whatsoup.alpha.plist'
+    marker = root / 'fake-plutil-ran'
+    fake_bin = root / 'bin'
+    fake_bin.mkdir()
+    fake = fake_bin / 'plutil'
+    fake.write_text('#!/bin/sh\n'
+                    f"/usr/bin/touch '{marker}'\n"
+                    '/bin/cat >/dev/null\n'
+                    """/bin/echo '{"Label": "com.whatsoup.alpha"}'\n""")
+    fake.chmod(0o755)
+    monkeypatch.setenv('PATH', f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    replaced, _ = _drive_main_as_root(monkeypatch, target, home, OWN_UID)
+    p.main()
+    assert not marker.exists(), 'the root helper ran a program found by name on PATH'
+    assert replaced == [target.name]
+
+
+def test_root_replacement_accepts_json_shaped_plist_values(tmp_path, monkeypatch):
+    home, folder = _own_launch_agents(tmp_path.resolve())
+    target = folder / 'com.whatsoup.alpha.plist'
+    contents = plistlib.dumps({
+        'Label': 'com.whatsoup.alpha',
+        'ProgramArguments': ['/usr/bin/true', 'run'],
+        'EnvironmentVariables': {'MODE': 'release'},
+        'RunAtLoad': True,
+        'ThrottleInterval': 10,
+        'Nice': 0.5,
+    }).decode()
+    replaced, _ = _drive_main_as_root(monkeypatch, target, home, OWN_UID, contents=contents)
+    p.main()
+    assert replaced == [target.name]
+
+
+def _plist(value):
+    return plistlib.dumps(value).decode()
+
+
+_WHEN = datetime.datetime(2026, 1, 1)
+
+
+# The helper once validated the contents by converting them to JSON with plutil.
+# It keeps that contract: an XML property list whose top level is a dictionary of
+# JSON-representable values (dictionary, array, string, integer, finite real,
+# boolean) whose Label names the target.
+@pytest.mark.parametrize('contents', [
+    '<plist><dict><key>Label</key>',
+    '',
+    json.dumps({'Label': 'com.whatsoup.alpha'}),
+    _plist(['com.whatsoup.alpha']),
+    _plist({}),
+    _plist({'Label': 'com.whatsoup.beta'}),
+    _plist({'Label': 'com.whatsoup.alpha', 'Blob': b'x'}),
+    _plist({'Label': 'com.whatsoup.alpha', 'When': _WHEN}),
+    _plist({'Label': 'com.whatsoup.alpha', 'Nested': [{'When': _WHEN}]}),
+    _plist({'Label': 'com.whatsoup.alpha', 'Nice': float('nan')}),
+    '<?xml version="1.0"?><!DOCTYPE plist [<!ENTITY a "com.whatsoup.alpha">]>'
+    '<plist version="1.0"><dict><key>Label</key><string>&a;</string></dict></plist>',
+], ids=[
+    'malformed-xml',
+    'empty',
+    'json-text',
+    'top-level-array',
+    'no-label',
+    'label-of-another-plist',
+    'data-value',
+    'date-value',
+    'nested-date-value',
+    'non-finite-real',
+    'entity-declaration',
+])
+def test_root_replacement_refuses_contents_without_a_json_form(tmp_path, monkeypatch, contents):
+    home, folder = _own_launch_agents(tmp_path.resolve())
+    target = folder / 'com.whatsoup.alpha.plist'
+    replaced, _ = _drive_main_as_root(monkeypatch, target, home, OWN_UID, contents=contents)
+    with pytest.raises(RuntimeError):
+        p.main()
+    assert replaced == []
 
 
 def _system_folder(root):
