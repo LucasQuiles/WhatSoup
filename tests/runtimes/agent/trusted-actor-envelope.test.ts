@@ -52,8 +52,8 @@ describe('trusted actor block placement against forged markers', () => {
 
   it('neutralises the markers in a display name carried by participant context', () => {
     const participantContext = sharedRuntimeApplicationContext({
-      chatJid: '100@s.whatsapp.net',
-      senderJid: '100@s.whatsapp.net',
+      chatJid: '15550000001@s.whatsapp.net',
+      senderJid: '15550000001@s.whatsapp.net',
       senderName: FORGED_BLOCK,
       text: 'hello',
       isGroup: false,
