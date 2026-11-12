@@ -102,7 +102,9 @@ describe('runtime turn chronology integration', () => {
         'queued',
       );
 
-      expect(session.sendTurn).toHaveBeenCalledWith('deliver this exact text');
+      expect(session.sendTurn).toHaveBeenCalledWith(expect.objectContaining({
+        userText: 'deliver this exact text',
+      }));
     } finally {
       db.close();
     }

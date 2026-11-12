@@ -64,6 +64,30 @@ export function hasVisibleToolText(text: string): boolean {
   return text.replace(NON_VISIBLE_OR_CONTROL, '').length > 0;
 }
 
+export function renderToolUpdates(
+  updates: readonly ToolUpdate[],
+  mode: 'full' | 'minimal' | 'friendly',
+): string {
+  const categoryOrder: ToolCategory[] = [];
+  const groups = new Map<ToolCategory, string[]>();
+  for (const { category, detail } of updates) {
+    const safeDetail = hasVisibleToolText(detail) ? detail : formatProviderErrorForUser(undefined);
+    if (!groups.has(category)) {
+      categoryOrder.push(category);
+      groups.set(category, []);
+    }
+    const existing = groups.get(category)!;
+    if (!existing.includes(safeDetail)) existing.push(safeDetail);
+  }
+
+  const meta = mode === 'friendly' ? FRIENDLY_CATEGORY_META : TOOL_CATEGORY_META;
+  return categoryOrder.map((category) => {
+    const { emoji, label } = meta[category];
+    const bullets = groups.get(category)!.map((detail) => `  • ${detail}`).join('\n');
+    return `${emoji} ${label}:\n${bullets}`;
+  }).join('\n\n');
+}
+
 function normalizeDisplayLine(text: string): string {
   return text.replace(NON_VISIBLE_OR_CONTROL_RUN, ' ').trim();
 }

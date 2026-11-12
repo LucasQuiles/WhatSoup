@@ -1,12 +1,8 @@
 // src/runtimes/agent/outbound-queue.ts
 // Serialized outbound queue for WhatsApp messages with batching and pacing.
 
-import { createHash } from 'node:crypto';
 import type { Messenger } from '../../core/types.ts';
-import {
-  persistOutboundFailureDisposition,
-  type DurabilityEngine,
-} from '../../core/durability.ts';
+import type { DurabilityEngine } from '../../core/durability.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import {
   getTransportInboundContext,
@@ -14,24 +10,16 @@ import {
   type TransportInboundContext,
 } from '../../core/transport-inbound-context.ts';
 import { createChildLogger } from '../../logger.ts';
-import { jitteredDelay, MAX_TIMER_DELAY_MS } from '../../core/retry.ts';
 import { canSendToGroup, recordGroupOutbound } from '../../core/echo-guard.ts';
-import {
-  classifyOutboundFailure,
-  createInternalOutboundFailureEvidence,
-  outboundFailureWarrantsUserNotice,
-  type OutboundFailureEvidenceV1,
-} from '../../core/outbound-failure-disposition.ts';
 import { redactInternalArtifacts, resolveOutboundAudience } from '../../core/outbound-message-safety.ts';
 import type { ClientOutputPolicyRegistry } from '../../core/client-output-policy-config.ts';
 import { enforceClientOutputPolicy } from '../../core/client-output-policy-gate.ts';
 import { isNonEmptyString } from '../../lib/type-guards.ts';
-import { formatProviderErrorForUser } from '../../lib/provider-errors.ts';
 import { MS_PER_SECOND, MS_PER_MINUTE } from '../../lib/time-units.ts';
 import { isGroupJid } from '../../core/jid-constants.ts';
 import { config } from '../../config.ts';
 import type { TurnReplyDeliveryObserver, TurnReplySinkResult } from '../../core/turn-reply.ts';
-import { FRIENDLY_CATEGORY_META, hasVisibleToolText, TOOL_CATEGORY_META } from './tool-update.ts';
+import { renderToolUpdates } from './tool-update.ts';
 import { preprocessText, repairChunkFormatting, splitMessage } from './whatsapp-format.ts';
 import type { ToolCategory } from './providers/tool-mapping.ts';
 export type { ToolCategory } from './providers/tool-mapping.ts';
@@ -43,6 +31,16 @@ import {
   type TurnEvidenceFlush,
   type TurnOutboundAttribution,
 } from './outbound-turn-evidence.ts';
+import {
+  OUTBOUND_SHUTDOWN_DEADLINE,
+  sendOutboundWithRetry,
+  SEND_TIMEOUT_MS,
+  type QueueDeliveryOutcome,
+  waitForOutboundDelayOrShutdown,
+} from './outbound-delivery.ts';
+import { TerminalTextDedupe } from './terminal-text-dedupe.ts';
+
+export { SEND_TIMEOUT_MS } from './outbound-delivery.ts';
 
 const log = createChildLogger('outbound-queue');
 
@@ -128,11 +126,6 @@ interface BufferedToolUpdate extends OutboundAttribution {
   readonly update: ToolUpdate;
 }
 
-type QueueDeliveryOutcome =
-  | { readonly outcome: 'submitted' }
-  | { readonly outcome: 'failed'; readonly error: unknown }
-  | { readonly outcome: 'not_sent' };
-
 // QR-126 chunk cap (MAX_CHUNKS) and message shaping live in whatsapp-format.ts.
 // Exported so tests can import the exact values rather than hardcoding them.
 // Changing a constant here will automatically break tests that rely on it.
@@ -156,8 +149,6 @@ export const TYPING_REFRESH_MS = 8 * MS_PER_SECOND;
  * re-arms typing and resets this clock.
  */
 export const TYPING_MAX_MS = 5 * MS_PER_MINUTE; // 5 min
-export const SEND_TIMEOUT_MS = 15 * MS_PER_SECOND;
-const OUTBOUND_SHUTDOWN_DEADLINE = Symbol('outbound_shutdown_deadline');
 /** Delay before flushing aggregated text — batches streaming provider fragments. */
 export const TEXT_AGGREGATE_DELAY_MS = 2 * MS_PER_SECOND;
 /** Suppress repeated terminal/error text from respawn loops without affecting normal repeated assistant output. */
@@ -228,14 +219,6 @@ export const SALVAGED_REPLY_NOTICE =
  * fragment could evade the redaction patterns applied at delivery time.
  */
 export const MAX_SALVAGE_RETENTION_CHARS = 4000;
-/** Hard cap on the terminal-text dedup map so it can't grow unbounded between window prunes. */
-const MAX_TERMINAL_TEXT_DEDUPE_KEYS = 1_000;
-
-interface TerminalTextDedupeEntry {
-  lastSeenAt: number;
-  suppressedCount: number;
-}
-
 interface StatusMessageWindowState {
   emittedAt: number[];
   noticeSentAt: number | undefined;
@@ -383,9 +366,6 @@ export interface IOutboundQueue {
 }
 
 export class OutboundQueue implements IOutboundQueue {
-  private static readonly MAX_SEND_ATTEMPTS = 3;
-  private static readonly SEND_RETRY_BASE_MS = MS_PER_SECOND;
-  private static readonly SEND_RETRY_MAX_MS = 8 * MS_PER_SECOND;
 
   private readonly messenger: Messenger;
   private deliveryJid: string;
@@ -405,7 +385,7 @@ export class OutboundQueue implements IOutboundQueue {
   /** Dedupe key for the most recently submitted text op, promoted only if markLastTerminal follows. */
   private lastSubmittedTextDedupeKey: string | undefined;
   /** Recent terminal text sends. Only terminalized text can suppress a later duplicate. */
-  private readonly recentTerminalTextKeys = new Map<string, TerminalTextDedupeEntry>();
+  private readonly terminalTextDedupe = new TerminalTextDedupe();
   /** Rendered progress-placeholder text → timestamp of last enqueue, for short-window coalescing. */
   private readonly recentProgressTextAt = new Map<string, number>();
   /**
@@ -673,17 +653,11 @@ export class OutboundQueue implements IOutboundQueue {
       this.durability.markTerminal(this.lastOpId);
     }
     if (options.dedupeText === true && this.lastSubmittedTextDedupeKey !== undefined) {
-      const now = Date.now();
-      this.pruneTerminalTextDedupe(now);
-      this.recentTerminalTextKeys.set(this.lastSubmittedTextDedupeKey, {
-        lastSeenAt: now,
-        suppressedCount: 0,
-      });
-      while (this.recentTerminalTextKeys.size > MAX_TERMINAL_TEXT_DEDUPE_KEYS) {
-        const oldest = this.recentTerminalTextKeys.keys().next().value;
-        if (oldest === undefined) break;
-        this.recentTerminalTextKeys.delete(oldest);
-      }
+      this.terminalTextDedupe.markTerminal(
+        this.lastSubmittedTextDedupeKey,
+        Date.now(),
+        TERMINAL_TEXT_DEDUPE_WINDOW_MS,
+      );
     }
     this.lastSubmittedTextDedupeKey = undefined;
     this.clearLastOpId();
@@ -1717,10 +1691,10 @@ export class OutboundQueue implements IOutboundQueue {
     log.info({
       sourcePaths: ['assistant_text', 'result'],
       payloadHash,
-      conversationKeyHash: this.terminalTextPayloadHash(this.conversationKey),
+      conversationKeyHash: this.terminalTextDedupe.payloadHash(this.conversationKey),
       ...(this.completedStreamedTurnId === undefined
         ? {}
-        : { turnIdHash: this.terminalTextPayloadHash(this.completedStreamedTurnId) }),
+        : { turnIdHash: this.terminalTextDedupe.payloadHash(this.completedStreamedTurnId) }),
     }, 'suppressed duplicate same-turn final payload');
     return true;
   }
@@ -1781,7 +1755,7 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   private sameTurnFinalPayloadHash(text: string): string {
-    return this.terminalTextPayloadHash(text.replace(/\r\n?/g, '\n').trim());
+    return this.terminalTextDedupe.payloadHash(text.replace(/\r\n?/g, '\n').trim());
   }
 
   /**
@@ -1867,7 +1841,7 @@ export class OutboundQueue implements IOutboundQueue {
       if (this.toolUpdateRedirectJid !== null) {
         const redirectJid = this.toolUpdateRedirectJid;
         const safeStatusText = redactInternalArtifacts(
-          this.renderToolUpdates(batch.updates),
+          renderToolUpdates(batch.updates, this.toolUpdateMode),
           resolveOutboundAudience(redirectJid),
         ).text;
         this.chain = this.chain.then(() => withTransportInboundContext(batch.attribution.authorityContext, async () => {
@@ -1882,38 +1856,8 @@ export class OutboundQueue implements IOutboundQueue {
       if (this.statusBudgetExhausted(batch.attribution)) continue;
       this.flushStreamBuffer();
       this.markVisibleTextDelivered();
-      this.enqueuePreparedText(this.renderToolUpdates(batch.updates), batch.attribution);
+      this.enqueuePreparedText(renderToolUpdates(batch.updates, this.toolUpdateMode), batch.attribution);
     }
-  }
-
-  private renderToolUpdates(updates: readonly ToolUpdate[]): string {
-    // Group updates by category, preserving first-appearance order of categories.
-    // Deduplicate detail strings within each category to avoid "Checking my notes on X" x2.
-    const categoryOrder: ToolCategory[] = [];
-    const groups = new Map<ToolCategory, string[]>();
-    for (const { category, detail } of updates) {
-      const safeDetail = hasVisibleToolText(detail) ? detail : formatProviderErrorForUser(undefined);
-      if (!groups.has(category)) {
-        categoryOrder.push(category);
-        groups.set(category, []);
-      }
-      const existing = groups.get(category)!;
-      if (!existing.includes(safeDetail)) {
-        existing.push(safeDetail);
-      }
-    }
-
-    // Render each group as "{emoji} {Label}:\n  • detail\n  • detail"
-    const meta = this.toolUpdateMode === 'friendly' ? FRIENDLY_CATEGORY_META : TOOL_CATEGORY_META;
-    const sections: string[] = [];
-    for (const category of categoryOrder) {
-      const { emoji, label } = meta[category];
-      const details = groups.get(category)!;
-      const bullets = details.map((d) => `  • ${d}`).join('\n');
-      sections.push(`${emoji} ${label}:\n${bullets}`);
-    }
-
-    return sections.join('\n\n');
   }
 
   private enqueue(
@@ -1921,7 +1865,7 @@ export class OutboundQueue implements IOutboundQueue {
     attribution: OutboundAttribution,
     deliveryObserver?: TurnReplyDeliveryObserver,
   ): void {
-    if (this.suppressDuplicateTerminalText(chunk, attribution.chatJid)) {
+    if (this.terminalTextDedupe.suppress(chunk, attribution.chatJid, Date.now(), TERMINAL_TEXT_DEDUPE_WINDOW_MS, log)) {
       this.notifyDelivery(deliveryObserver, { outcome: 'not_sent' });
       return;
     }
@@ -2018,187 +1962,18 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   private async sendWithRetry(chunk: QueuedOutboundChunk): Promise<QueueDeliveryOutcome> {
-    const { text } = chunk;
-    const textDedupeKey = this.terminalTextDedupeKey('text', chunk.chatJid, text);
-    // Create an outbound op before first attempt (if durability is wired)
-    let opId: number | undefined;
-    if (this.durability) {
-      opId = this.durability.createOutboundOp({
-        conversationKey: chunk.conversationKey,
-        chatJid: chunk.chatJid,
-        opType: 'text',
-        payload: JSON.stringify({ text }),
-        replayPolicy: 'unsafe',
-        sourceInboundSeq: chunk.sourceInboundSeq,
-      });
-      this.lastOpId = opId;
-      this.recordTurnOp(chunk, opId);
-      this.durability.markSending(opId);
-    }
-
-    // QR-028: one stable WhatsApp-shaped message id for this logical send,
-    // REUSED across every retry attempt. A send that times out (SEND_TIMEOUT_MS)
-    // may already be on the wire; retrying with the SAME id lets the server
-    // dedupe it instead of delivering the reply twice. 32 uppercase-hex chars
-    // (a dashless UUID) is a valid, unique key.id.
-    const stableMessageId = crypto.randomUUID().replace(/-/g, '').toUpperCase();
-
-    let lastEvidence: OutboundFailureEvidenceV1 | undefined;
-    let lastError: unknown;
-    let shutdownDeadlineExpired = false;
-    for (let attempt = 0; attempt < OutboundQueue.MAX_SEND_ATTEMPTS; attempt++) {
-      if (this.shutdownDeadlineReached) {
-        shutdownDeadlineExpired = true;
-        break;
-      }
-      try {
-        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-        let receiptOrDeadline;
-        try {
-          receiptOrDeadline = await Promise.race([
-            this.messenger.sendMessage(chunk.chatJid, text, { messageId: stableMessageId }),
-            this.shutdownDeadlineSignal,
-            new Promise<never>((_, reject) => {
-              timeoutHandle = setTimeout(
-                () => reject(new Error('SEND_TIMEOUT')),
-                SEND_TIMEOUT_MS,
-              );
-            }),
-          ]);
-        } finally {
-          clearTimeout(timeoutHandle);
-        }
-        if (receiptOrDeadline === OUTBOUND_SHUTDOWN_DEADLINE) {
-          shutdownDeadlineExpired = true;
-          lastEvidence = createInternalOutboundFailureEvidence({
-            failureCode: 'outbound.shutdown_deadline',
-            stage: 'provider_request',
-            mutationState: 'ambiguous',
-            logicalAttemptCount: (lastEvidence?.logical_attempt_count ?? 0) + 1,
-            providerSubmissionCount: (lastEvidence?.provider_submission_count ?? 0) + 1,
-            previousEvidence: lastEvidence,
-            evidenceCoverage: 'partial',
-          });
-          break;
-        }
-        if (opId !== undefined && this.durability) {
-          this.durability.markSubmitted(
-            opId,
-            receiptOrDeadline.waMessageId,
-            (lastEvidence?.logical_attempt_count ?? 0) + 1,
-          );
-        }
-        this.lastSubmittedTextDedupeKey = textDedupeKey;
-        return { outcome: 'submitted' };
-      } catch (err) {
-        lastError = err;
-        lastEvidence = classifyOutboundFailure(err, {
-          retryOwner: 'agent_queue',
-          attemptsRemaining: OutboundQueue.MAX_SEND_ATTEMPTS - attempt - 1,
-          previousEvidence: lastEvidence,
-        });
-        if (
-          lastEvidence.retry_decision === 'retry_now'
-          || (
-            lastEvidence.retry_decision === 'retry_not_before'
-            && !this.durability
-            && lastEvidence.retry_not_before !== null
-            && attempt < OutboundQueue.MAX_SEND_ATTEMPTS - 1
-          )
-        ) {
-          const retryNotBefore = lastEvidence.retry_not_before;
-          const delayMs = lastEvidence.retry_decision === 'retry_not_before'
-            ? Math.max(1, Date.parse(retryNotBefore!) - Date.now())
-            : jitteredDelay(
-              OutboundQueue.SEND_RETRY_BASE_MS,
-              attempt,
-              OutboundQueue.SEND_RETRY_MAX_MS,
-            );
-          log.warn({
-            opId,
-            attempt: attempt + 1,
-            maxAttempts: OutboundQueue.MAX_SEND_ATTEMPTS,
-            failureCode: lastEvidence.failure_code,
-            stage: lastEvidence.stage,
-            mutationState: lastEvidence.mutation_state,
-            delayMs,
-          }, 'outbound send failed — retrying');
-          if (await this.waitForDelayOrShutdown(delayMs)) {
-            shutdownDeadlineExpired = true;
-            break;
-          }
-        } else {
-          break;
-        }
-      }
-    }
-    if (shutdownDeadlineExpired) {
-      lastEvidence = lastEvidence === undefined
-        ? createInternalOutboundFailureEvidence({
-          failureCode: 'outbound.shutdown_before_send',
-          stage: 'admission',
-          mutationState: 'not_started',
-          logicalAttemptCount: 0,
-          providerSubmissionCount: 0,
-        })
-        : createInternalOutboundFailureEvidence({
-          failureCode: 'outbound.shutdown_deadline',
-          stage: 'runtime',
-          mutationState: lastEvidence.mutation_state,
-          logicalAttemptCount: lastEvidence.logical_attempt_count,
-          providerSubmissionCount: lastEvidence.provider_submission_count,
-          previousEvidence: lastEvidence,
-          evidenceCoverage: lastEvidence.evidence_coverage,
-        });
-      log.warn({
-        opId,
-        failureCode: lastEvidence.failure_code,
-        stage: lastEvidence.stage,
-        mutationState: lastEvidence.mutation_state,
-      }, 'outbound send stopped at runtime shutdown deadline');
-      if (opId !== undefined && this.durability) {
-        persistOutboundFailureDisposition(
-          this.durability,
-          opId,
-          lastEvidence,
-          lastEvidence.mutation_state === 'ambiguous' ? stableMessageId : undefined,
-        );
-      }
-      return {
-        outcome: 'failed',
-        error: lastError ?? new Error('outbound send stopped at runtime shutdown deadline'),
-      };
-    }
-    if (!lastEvidence) {
-      return { outcome: 'failed', error: new Error('outbound send stopped without a delivery outcome') };
-    }
-    log.error({
-      opId,
-      attempts: lastEvidence.logical_attempt_count,
-      providerSubmissions: lastEvidence.provider_submission_count,
-      failureCode: lastEvidence.failure_code,
-      stage: lastEvidence.stage,
-      mutationState: lastEvidence.mutation_state,
-      retryDecision: lastEvidence.retry_decision,
-    }, 'outbound send stopped with bounded failure disposition');
-
-    if (opId !== undefined && this.durability) {
-      persistOutboundFailureDisposition(this.durability, opId, lastEvidence);
-    }
-
-    if (outboundFailureWarrantsUserNotice(lastEvidence)) {
-      // Best-effort: notify the user that part of the response was lost.
-      // Send directly (not through queue) to avoid re-entry loops. Not
-      // conditional on durability — the user still needs to know.
-      Promise.race([
-        this.messenger.sendMessage(chunk.chatJid, '⚠️ A response could not be delivered after 3 attempts.'),
-        new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), SEND_TIMEOUT_MS)),
-      ]).catch((err) => { log.warn({ err }, 'outbound-queue: delivery failure notification send failed'); });
-    }
-    return {
-      outcome: 'failed',
-      error: lastError ?? new Error(`outbound send failed: ${lastEvidence.failure_code}`),
-    };
+    return sendOutboundWithRetry({
+      messenger: this.messenger,
+      durability: this.durability,
+      shutdownDeadlineReached: () => this.shutdownDeadlineReached,
+      shutdownDeadlineSignal: this.shutdownDeadlineSignal,
+      waitForDelayOrShutdown: (delayMs) => this.waitForDelayOrShutdown(delayMs),
+      terminalTextDedupeKey: (chatJid, text) => this.terminalTextDedupe.key(chatJid, text),
+      recordTurnOp: (queuedChunk, opId) => this.recordTurnOp(queuedChunk, opId),
+      setLastOpId: (opId) => { this.lastOpId = opId; },
+      setLastSubmittedTextDedupeKey: (key) => { this.lastSubmittedTextDedupeKey = key; },
+      log,
+    }, chunk);
   }
 
   private notifyDelivery(
@@ -2215,64 +1990,12 @@ export class OutboundQueue implements IOutboundQueue {
     }
   }
 
-  private async waitForDelayOrShutdown(delayMs: number): Promise<boolean> {
-    if (this.shutdownDeadlineReached) return true;
-    if (!Number.isFinite(delayMs)) {
-      throw new RangeError('Outbound retry delay must be finite');
-    }
-    let remainingMs = Math.max(0, delayMs);
-    while (remainingMs > 0) {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const chunkMs = Math.min(remainingMs, MAX_TIMER_DELAY_MS);
-      try {
-        const shutdown = await Promise.race([
-          new Promise<false>((resolve) => {
-            timer = setTimeout(() => resolve(false), chunkMs);
-          }),
-          this.shutdownDeadlineSignal.then(() => true as const),
-        ]);
-        if (shutdown) return true;
-      } finally {
-        clearTimeout(timer);
-      }
-      remainingMs -= chunkMs;
-    }
-    return false;
+  private waitForDelayOrShutdown(delayMs: number): Promise<boolean> {
+    return waitForOutboundDelayOrShutdown(
+      delayMs,
+      () => this.shutdownDeadlineReached,
+      this.shutdownDeadlineSignal,
+    );
   }
 
-  private suppressDuplicateTerminalText(text: string, chatJid: string): boolean {
-    const now = Date.now();
-    this.pruneTerminalTextDedupe(now);
-    const key = this.terminalTextDedupeKey('text', chatJid, text);
-    const entry = this.recentTerminalTextKeys.get(key);
-    if (!entry) return false;
-
-    entry.lastSeenAt = now;
-    entry.suppressedCount += 1;
-    log.info({
-      chatJid,
-      opType: 'text',
-      terminal: true,
-      payloadHash: this.terminalTextPayloadHash(text),
-      suppressedCount: entry.suppressedCount,
-      windowMs: TERMINAL_TEXT_DEDUPE_WINDOW_MS,
-    }, 'suppressed duplicate outbound terminal text');
-    return true;
-  }
-
-  private pruneTerminalTextDedupe(now: number): void {
-    for (const [key, entry] of this.recentTerminalTextKeys) {
-      if (now - entry.lastSeenAt > TERMINAL_TEXT_DEDUPE_WINDOW_MS) {
-        this.recentTerminalTextKeys.delete(key);
-      }
-    }
-  }
-
-  private terminalTextDedupeKey(opType: 'text', chatJid: string, text: string): string {
-    return `${opType}:${chatJid}:${this.terminalTextPayloadHash(text)}`;
-  }
-
-  private terminalTextPayloadHash(text: string): string {
-    return createHash('sha256').update(text).digest('hex');
-  }
 }

@@ -6,6 +6,25 @@ export interface ActiveTurnReplyBinding {
   readonly logicalTurnId: string;
 }
 
+export interface ActiveTurnReplyContext {
+  readonly identity: {
+    readonly conversationKey: string;
+    readonly managerId: string;
+    readonly logicalTurnId: string;
+  };
+}
+
+export interface RuntimeTurnReplySinkCandidate {
+  readonly active: ActiveTurnReplyContext | null | undefined;
+  readonly queue: IOutboundQueue | null | undefined;
+}
+
+export interface RuntimeTurnReplySinksOptions<Session> {
+  readonly mapKeyFor: (session: Session, fallbackMapKey?: string) => string | null;
+  readonly perChat: (mapKey: string) => RuntimeTurnReplySinkCandidate;
+  readonly global: () => RuntimeTurnReplySinkCandidate;
+}
+
 interface RawReplyReservation extends ActiveTurnReplyBinding {
   readonly reservationId: string;
 }
@@ -65,4 +84,41 @@ export function createActiveTurnReplySink(
       }
     }
   };
+}
+
+/** Binds socket and bridge reply calls to the currently owned runtime turn. */
+export class RuntimeTurnReplySinks<Session> {
+  private readonly options: RuntimeTurnReplySinksOptions<Session>;
+
+  constructor(options: RuntimeTurnReplySinksOptions<Session>) {
+    this.options = options;
+  }
+
+  forPerChat(mapKey: string): TurnReplySink {
+    return this.create(() => this.options.perChat(mapKey));
+  }
+
+  forGlobal(): TurnReplySink {
+    return this.create(() => this.options.global());
+  }
+
+  forSession(session: Session, fallbackMapKey?: string): TurnReplySink {
+    return this.create(() => {
+      const mapKey = this.options.mapKeyFor(session, fallbackMapKey);
+      return mapKey === null ? this.options.global() : this.options.perChat(mapKey);
+    });
+  }
+
+  private create(resolveCandidate: () => RuntimeTurnReplySinkCandidate): TurnReplySink {
+    return createActiveTurnReplySink((request) => {
+      const { active, queue } = resolveCandidate();
+      if (
+        !active
+        || active.identity.conversationKey !== request.conversationKey
+        || active.identity.managerId !== request.runtimeSessionId
+        || !queue
+      ) return undefined;
+      return { queue, logicalTurnId: active.identity.logicalTurnId };
+    });
+  }
 }

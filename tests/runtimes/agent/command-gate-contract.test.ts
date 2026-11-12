@@ -673,7 +673,10 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
       // Hold the provider turn open so the /stop below genuinely arrives mid-turn.
       void runtime.handleMessage(makeMsg({ content: 'long running work', senderJid: ADMIN_WA }));
       await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledTimes(1));
-      expect(mockSession.sendTurn).toHaveBeenCalledWith('long running work');
+      expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.objectContaining({
+        userText: 'long running work',
+        applicationContext: [expect.stringContaining('actor_access=administrator')],
+      }));
 
       await runtime.handleMessage(makeMsg({
         messageId: 'msg-stop', content: '/stop', senderJid: ADMIN_WA,
@@ -749,7 +752,9 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
       }));
       await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledTimes(1));
       if (scope === 'per_chat') {
-        expect(mockSession.sendTurn).toHaveBeenCalledWith('active work');
+        expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.objectContaining({
+          userText: 'active work',
+        }));
       } else {
         // Shared runtime wraps user text with participant metadata before it
         // crosses the provider boundary; prove the active work is still this
@@ -1010,11 +1015,15 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
       await runtime.handleMessage(makeMsg({
         messageId: 'msg-settle-probe', content: 'settle probe', senderJid: ADMIN_WA,
       }));
-      await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('settle probe'));
+      await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.objectContaining({
+        userText: 'settle probe',
+      })));
 
       // The body never became a turn, asserted AFTER the refusal was delivered
       // and after a later turn overtook it.
-      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('run this other thing instead');
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith(expect.objectContaining({
+        userText: 'run this other thing instead',
+      }));
       expect(mockSession.sendTurn).toHaveBeenCalledTimes(2);
       expect(directTexts()).not.toContain('run this other thing instead');
 
@@ -1095,7 +1104,9 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
     }));
 
     // #2357 B1 intact: the command ran and its body became a turn.
-    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('do this instead'));
+    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.objectContaining({
+      userText: 'do this instead',
+    })));
     expect(mockSession.handleNew).toHaveBeenCalledOnce();
     expect(directTexts().some((text) => text.includes('/new is refused until it settles'))).toBe(false);
     expect(directTexts().some((text) => text.includes('Your follow-up message was not sent'))).toBe(false);
@@ -1117,7 +1128,9 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
       senderJid: ADMIN_WA,
     }));
 
-    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('do this instead'));
+    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.objectContaining({
+      userText: 'do this instead',
+    })));
     expect(enqueuedTexts().some((t) => t.includes('does not take a follow-up message'))).toBe(false);
   });
 
@@ -1317,7 +1330,9 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
       const runtime = new AgentRuntime(db, messenger);
       await runtime.start();
       await sendAndDrain(runtime, makeMsg({ content: '/stats', senderJid: ADMIN_WA }));
-      await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('/stats'));
+      await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.objectContaining({
+        userText: '/stats',
+      })));
       expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
         expect.objectContaining({ command: 'stats' }),
         expect.stringContaining('no handler'),

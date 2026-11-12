@@ -1165,7 +1165,9 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       expect(pending.answersCollected[0]).toBe('No');
       // askuser path injects the answer into the session (settlePoll → injectPollAnswers)
       await vi.waitFor(() => {
-        expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.stringContaining('No'));
+        expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.objectContaining({
+          userText: expect.stringContaining('No'),
+        }));
       });
       expect(mark).toHaveBeenCalledWith(expect.objectContaining({
         scopeKey: groupJid,
@@ -3169,7 +3171,7 @@ describe('fresh-spawn context preamble (P4 — effect-free by construction)', ()
     await state.sendTurnToSession(mockSession, chatJid, 'Continue');
 
     expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
-    expect(mockSession.sendTurn).toHaveBeenCalledWith('Continue');
+    expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.objectContaining({ userText: 'Continue' }));
   });
 
   it('proceeds with the plain user text when context assembly throws', async () => {
@@ -3187,7 +3189,7 @@ describe('fresh-spawn context preamble (P4 — effect-free by construction)', ()
     await state.sendTurnToSession(mockSession, chatJid, 'Continue');
 
     expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
-    expect(mockSession.sendTurn).toHaveBeenCalledWith('Continue');
+    expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.objectContaining({ userText: 'Continue' }));
   });
 
   it('redacts fresh context for a live cross-provider session after the fallback window expires', async () => {

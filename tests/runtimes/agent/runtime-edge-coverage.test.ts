@@ -544,6 +544,8 @@ function makeQueue(chatJid = 'chat-edge@s.whatsapp.net'): QueueMock {
     indicateTyping: vi.fn(),
     enqueuePoll: vi.fn(async (fn: () => Promise<void>) => { await fn(); }),
     hasPendingPoll: vi.fn(() => false),
+    hasCommittedAnswer: vi.fn(() => false),
+    resumeTurnAnswerArbitration: vi.fn(),
     setPollPending: vi.fn(),
     flush: vi.fn(async () => {}),
     shutdown: vi.fn(async () => {}),
@@ -1900,7 +1902,9 @@ describe('AgentRuntime edge coverage', () => {
     expect(scheduled).toBe(true);
     expect(oldSession.shutdown).toHaveBeenCalledWith(false);
     await vi.waitFor(() => {
-      expect(createdSessions.at(-1)!.session.sendTurn).toHaveBeenCalledWith('retry this interrupted turn');
+      expect(createdSessions.at(-1)!.session.sendTurn).toHaveBeenCalledWith(expect.objectContaining({
+        userText: 'retry this interrupted turn',
+      }));
       expect(mockEmitAlert).toHaveBeenCalledWith(
         'test',
         'provider_fallback_replayed',
@@ -2755,7 +2759,9 @@ describe('AgentRuntime edge coverage', () => {
     await state.perChatTurnQueues.get(mapKey)!.idle();
 
     expect(state.imageCoalesce.buffers.has(mapKey)).toBe(false);
-    expect(session.sendTurn).toHaveBeenCalledWith(expect.stringContaining('[20 images received]'));
+    expect(session.sendTurn).toHaveBeenCalledWith(expect.objectContaining({
+      userText: expect.stringContaining('[20 images received]'),
+    }));
     expect(durability.finalizeTurnTerminal).toHaveBeenCalledOnce();
     expect(durability.finalizeTurnTerminal).toHaveBeenCalledWith(expect.objectContaining({
       terminal: expect.objectContaining({ inboundSeq: 20, attemptKind: 'failed', attemptFailureClass: 'processor_throw' }),
@@ -2809,7 +2815,9 @@ describe('AgentRuntime edge coverage', () => {
     await vi.advanceTimersByTimeAsync(1);
     await queueIdle;
 
-    expect(session.sendTurn).toHaveBeenCalledWith('[image:/tmp/unsequenced.png]');
+    expect(session.sendTurn).toHaveBeenCalledWith(expect.objectContaining({
+      userText: '[image:/tmp/unsequenced.png]',
+    }));
     expect(queue.setInboundSeq).toHaveBeenCalledWith(undefined);
     expect(state.perChatInboundSeqQueue.get(mapKey)).toEqual([]);
     expect(state.imageCoalesce.buffers.has(mapKey)).toBe(false);

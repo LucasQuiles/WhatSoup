@@ -558,45 +558,13 @@ import {
   type AutoCompactView, type ImageCoalescerView, makePollMessenger, makeRealDb, buildPayload,
   insertRow, makeDbWithTokenRow, makeBindingRuntime,
 } from './lib/runtime-mock-scaffold.ts';
+import {
+  providerUserText,
+  setMockMemoryConfig,
+  trustedProviderTurn,
+} from './lib/provider-turn-test-helpers.ts';
 
 // ─── Coupled helpers (hoisting-pinned, cannot leave this file) ────────────────
-
-function trustedProviderTurn(userText: string): object {
-  return expect.objectContaining({
-    userText,
-    applicationContext: expect.arrayContaining([
-      expect.stringContaining('[WhatSoup trusted transport metadata'),
-    ]),
-  });
-}
-
-function providerUserText(input: unknown): string {
-  return typeof input === 'string'
-    ? input
-    : (input as { userText: string }).userText;
-}
-
-function setMockMemoryConfig(): () => void {
-  const configWithMemory = mockConfig as typeof mockConfig & {
-    memory?: {
-      adminJid: string | null;
-      sweep: { reviewByDays: number };
-    };
-  };
-  const previous = configWithMemory.memory;
-  configWithMemory.memory = {
-    adminJid: null,
-    sweep: { reviewByDays: 7 },
-  };
-
-  return () => {
-    if (previous === undefined) {
-      delete configWithMemory.memory;
-    } else {
-      configWithMemory.memory = previous;
-    }
-  };
-}
 
 async function waitForProviderDispatch(
   runtime: AgentRuntime,
@@ -2332,7 +2300,7 @@ describe('AgentRuntime', () => {
   });
 
   it('continues the agent turn when inline extraction hits a recoverable persistence error', async () => {
-    const restoreMemory = setMockMemoryConfig();
+    const restoreMemory = setMockMemoryConfig(mockConfig);
     try {
       const db = makeDb();
       const raw = db.raw as unknown as { exec: ReturnType<typeof vi.fn> };
@@ -2365,7 +2333,7 @@ describe('AgentRuntime', () => {
   });
 
   it('alerts and marks inbound failed when inline extraction hits an unrecoverable DB error', async () => {
-    const restoreMemory = setMockMemoryConfig();
+    const restoreMemory = setMockMemoryConfig(mockConfig);
     try {
       const db = makeDb();
       const raw = db.raw as unknown as { exec: ReturnType<typeof vi.fn> };
@@ -16566,7 +16534,7 @@ describe('B3 inline imperative extractor — QR-143 transport gate', () => {
   }
 
   it('ALLOWS an authenticated WhatsApp admin: imperative → proposed bead created (preserved)', async () => {
-    const restoreMemory = setMockMemoryConfig();
+    const restoreMemory = setMockMemoryConfig(mockConfig);
     const db = makeRealDb();
     try {
       const { messenger } = makeMessenger();
@@ -16581,7 +16549,7 @@ describe('B3 inline imperative extractor — QR-143 transport gate', () => {
   });
 
   it('DENIES a spoofed <admin-digits>@sms: imperative → NO proposed bead (new)', async () => {
-    const restoreMemory = setMockMemoryConfig();
+    const restoreMemory = setMockMemoryConfig(mockConfig);
     const db = makeRealDb();
     try {
       const { messenger } = makeMessenger();

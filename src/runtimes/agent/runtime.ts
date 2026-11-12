@@ -138,7 +138,6 @@ import {
 import { createProviderExecutionGate, ProviderExecutionGate } from './provider-execution-gate.ts';
 import {
   dispatchProviderTurn,
-  isStructuredProviderTurn,
   withProviderApplicationContext,
   type ProviderTurnInput,
 } from './provider-boundary-dispatch.ts';
@@ -315,7 +314,6 @@ import {
   restartLoopGuardPath,
 } from './restart-loop-guard.ts';
 import { canonicalConversationKey, resolvePhoneFromJid, resolvePhoneFromJidForGrant } from '../../core/access-list.ts';
-import { classifyTrustedActorAccess } from '../../core/access-policy.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
 import { commandGateDenies, getCommandSpec } from './command-registry.ts';
 import { matchImperative, extractImperativeTarget } from '../../core/substrate/inline-extractor.ts';
@@ -329,9 +327,8 @@ import { ToolRegistry } from '../../mcp/registry.ts';
 import { PerChatMcpSocketManager } from './per-chat-mcp-socket-manager.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
 import { SessionTokenRegistry } from '../../mcp/caller-attribution.ts';
-import { trustedActorApplicationContext } from './trusted-actor-envelope.ts';
-import { createActiveTurnReplySink, type ActiveTurnReplyBinding } from './turn-reply-sink.ts';
-import type { TurnReplyRequest } from '../../core/turn-reply.ts';
+import { withTrustedActorTurn } from './trusted-actor-envelope.ts';
+import { RuntimeTurnReplySinks } from './turn-reply-sink.ts';
 import type { ExecutingSessionContext, SessionContext } from '../../mcp/types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
@@ -674,6 +671,7 @@ export class AgentRuntime implements Runtime {
   // When sandboxPerChat=true, maps are keyed by workspaceKey; when false, keyed by raw chatJid.
   private chatSessions: Map<string, SessionManager> = new Map();
   private chatQueues: Map<string, IOutboundQueue> = new Map();
+  private readonly turnReplySinks: RuntimeTurnReplySinks<SessionManager>;
   private readonly sessionOwnership = new SessionOwnershipRegistry();
   private readonly sessionManagerIds = new WeakMap<SessionManager, string>();
   private readonly sessionEventToolScopes = new WeakMap<SessionManager, string>();
@@ -2683,6 +2681,17 @@ export class AgentRuntime implements Runtime {
     });
     this.sessionScope = options?.sessionScope ?? (options?.shared ? 'shared' : 'single');
     this.shared = this.sessionScope === 'shared';
+    this.turnReplySinks = new RuntimeTurnReplySinks({
+      mapKeyFor: (session, fallback) => this.findMapKeyForSession(session, fallback),
+      perChat: (mapKey) => ({ active: this.perChatRuntimeTurnContexts.get(mapKey)?.[0], queue: this.chatQueues.get(mapKey) }),
+      global: () => {
+        const active = this.currentRuntimeTurnContext;
+        const queue = active === null ? undefined : this.shared
+          ? this.outboundQueues.get(active.identity.deliveryJid) ?? this.outboundQueues.get(canonicalizeChatJid(active.identity.deliveryJid, this.db))
+          : this.queue;
+        return { active, queue };
+      },
+    });
     this.cwd = options?.cwd;
     this.configSystemPrompt = options?.configSystemPrompt;
     this.instructionsPath = options?.instructionsPath;
@@ -2749,7 +2758,7 @@ export class AgentRuntime implements Runtime {
       get allowedRoot() { return getAllowedRoot(); },
       conversationBound: this.perChatConversationBound,
       resolveExecutingSession: (mapKey) => this.resolveExecutingSessionByMapKey(mapKey),
-      resolveTurnReplySink: (mapKey) => this.createPerChatTurnReplySink(mapKey),
+      resolveTurnReplySink: (mapKey) => this.turnReplySinks.forPerChat(mapKey),
       sessionTokens: this.sessionTokens,
     });
     this.catalogueSnapshot = createCatalogueSnapshotCache();
@@ -4099,7 +4108,7 @@ export class AgentRuntime implements Runtime {
         const globalSession: SessionContext = {
           tier: 'global',
           allowedRoot: agentCwd,
-          turnReplySink: this.createGlobalTurnReplySink(),
+          turnReplySink: this.turnReplySinks.forGlobal(),
         };
         // #2976 (ii): identity is resolved per request from the executing-turn
         // register — never stored on the session (no broadcast to go stale).
@@ -5719,14 +5728,13 @@ export class AgentRuntime implements Runtime {
       const scheduled = purpose === 'scheduled-agent-job';
       this.noteScheduledDispatch(this.session!, undefined, scheduled);
       try {
-        await this.session!.sendTurn(this.withTrustedActorTurn(
+        await this.session!.sendTurn(withTrustedActorTurn(
           withProviderApplicationContext(
             renderUserTurnForProvider(this.turnChronology, scheduled
               ? scheduledAgentJobTurnForProvider(exactText, sessionProviderId(this.session))
               : exactText, context, 'live'),
             participantContext,
-          ),
-          senderJid,
+          ), senderJid, this.db, config.adminPhones,
         ));
       } catch (sendErr) {
         this.removeFailedExecutingActor(GLOBAL_TOOL_SCOPE_KEY, senderJid);
@@ -6036,7 +6044,7 @@ export class AgentRuntime implements Runtime {
         : withProviderApplicationContext(userTurnText, contextPreamble);
       await dispatchProviderTurn(
         session,
-        this.withTrustedActorTurn(turnInput, actorJid),
+        withTrustedActorTurn(turnInput, actorJid, this.db, config.adminPhones),
         onProviderBoundaryReady,
       );
     } catch (err) {
@@ -6055,6 +6063,10 @@ export class AgentRuntime implements Runtime {
           sessionId: status.sessionId,
           pid: status.pid,
         }, 'stdin write timed out — notifying user');
+        // A provider can emit an answer before its stdin write rejects. Commit
+        // that answer before the status notice so the queue preserves ordering
+        // and fallback arbitration observes the delivered answer.
+        (mapKey === undefined ? this.getQueueForChat(chatJid) : this.chatQueues.get(mapKey))?.endTurn();
         this.sendDirect(chatJid, 'Agent is not responding — try /new to start a fresh session.', 'status');
         throw err;
       } else {
@@ -6582,18 +6594,6 @@ export class AgentRuntime implements Runtime {
     if (!actorJid) return;
     const maybeSession = session as SessionManager & { updateMcpActorJid?: (actorJid: string) => void };
     maybeSession.updateMcpActorJid?.(actorJid);
-  }
-
-  private withTrustedActorTurn(
-    input: ProviderTurnInput,
-    actorJid: string | undefined,
-  ): ProviderTurnInput {
-    const actorAccess = classifyTrustedActorAccess(actorJid, this.db, config.adminPhones);
-    const actorContext = trustedActorApplicationContext(actorAccess);
-    if (isStructuredProviderTurn(input)) {
-      return { ...input, applicationContext: [...input.applicationContext, actorContext] };
-    }
-    return { applicationContext: [actorContext], userText: input };
   }
 
   private bindActiveGlobalMcpConversation(chatJid: string): void {
@@ -9310,47 +9310,6 @@ export class AgentRuntime implements Runtime {
     return findMapKeyForSessionForPort(this.chatTransportHost, session, fallbackMapKey);
   }
 
-  /**
-   * A socket or bridge can claim a reply only while the matching per-chat
-   * runtime turn still owns the exact conversation. The queue enforces the
-   * one-answer arbitration; this resolver prevents stale aliases or sessions
-   * from reaching it.
-   */
-  private activeTurnReplyBinding(
-    request: TurnReplyRequest,
-    active: RuntimeTurnContext | null | undefined,
-    queue: IOutboundQueue | null | undefined,
-  ): ActiveTurnReplyBinding | undefined {
-    if (
-      !active
-      || active.identity.conversationKey !== request.conversationKey
-      || active.identity.managerId !== request.runtimeSessionId
-      || !queue
-    ) return undefined;
-    return { queue, logicalTurnId: active.identity.logicalTurnId };
-  }
-
-  private createPerChatTurnReplySink(mapKey: string) {
-    return createActiveTurnReplySink((request) => {
-      const active = this.perChatRuntimeTurnContexts.get(mapKey)?.[0];
-      return this.activeTurnReplyBinding(request, active, this.chatQueues.get(mapKey));
-    });
-  }
-
-  /** The single/shared socket must also prove its current runtime turn. */
-  private createGlobalTurnReplySink() {
-    return createActiveTurnReplySink((request) => {
-      const active = this.currentRuntimeTurnContext;
-      const queue = active === null
-        ? undefined
-        : this.shared
-        ? this.outboundQueues.get(active.identity.deliveryJid)
-          ?? this.outboundQueues.get(canonicalizeChatJid(active.identity.deliveryJid, this.db))
-        : this.queue;
-      return this.activeTurnReplyBinding(request, active, queue);
-    });
-  }
-
   private getQueueForChat(chatJid: string, mapKey?: string): IOutboundQueue | null {
     return getQueueForChatForPort(this.chatTransportHost, chatJid, mapKey);
   }
@@ -10757,21 +10716,7 @@ export class AgentRuntime implements Runtime {
           }
         : undefined,
     });
-    providerToolSession.turnReplySink = createActiveTurnReplySink((request) => {
-      const mapKey = this.findMapKeyForSession(session, opts.sessionMapKey);
-      if (mapKey !== null) {
-        const active = this.perChatRuntimeTurnContexts.get(mapKey)?.[0];
-        return this.activeTurnReplyBinding(request, active, this.chatQueues.get(mapKey));
-      }
-      const active = this.currentRuntimeTurnContext;
-      const queue = active === null
-        ? undefined
-        : this.shared
-        ? this.outboundQueues.get(active.identity.deliveryJid)
-          ?? this.outboundQueues.get(canonicalizeChatJid(active.identity.deliveryJid, this.db))
-        : this.queue;
-      return this.activeTurnReplyBinding(request, active, queue);
-    });
+    providerToolSession.turnReplySink = this.turnReplySinks.forSession(session, opts.sessionMapKey);
     this.sessionManagerIds.set(session, sessionManagerId);
     this.sessionEventToolScopes.set(
       session,
@@ -10878,7 +10823,7 @@ export class AgentRuntime implements Runtime {
               deliveryJid: chatJid,
               ...(actorJid ? { actorJid } : {}),
               allowedRoot: workspacePath,
-              turnReplySink: this.createPerChatTurnReplySink(workspaceKey),
+              turnReplySink: this.turnReplySinks.forPerChat(workspaceKey),
             };
             socketServer = new WhatSoupSocketServer(
               socketPath,
