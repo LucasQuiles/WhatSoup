@@ -16,12 +16,20 @@ export class HttpManagedDeliveryClient implements ManagedDeliveryClient {
   private readonly token: string;
   private readonly fetchFn: FetchLike;
   private readonly pins: ProtectedDeliveryPins;
+  private readonly linkHosts: readonly string[] | undefined;
 
-  constructor(options: { baseUrl: string; token: string; fetch?: FetchLike; pins?: ProtectedDeliveryPins }) {
+  constructor(options: {
+    baseUrl: string;
+    token: string;
+    fetch?: FetchLike;
+    pins?: ProtectedDeliveryPins;
+    linkHosts?: readonly string[];
+  }) {
     this.baseUrl = options.baseUrl.replace(/\/$/, '');
     this.token = options.token;
     this.fetchFn = options.fetch ?? fetch;
     this.pins = options.pins ?? PROTECTED_DELIVERY_PINS;
+    this.linkHosts = options.linkHosts;
   }
 
   async stageRustdesk(request: {
@@ -36,7 +44,7 @@ export class HttpManagedDeliveryClient implements ManagedDeliveryClient {
       principal: request.principal,
       purpose: request.purpose,
     });
-    const delivery = requireDelivery(body, false, true, this.pins);
+    const delivery = requireDelivery(body, false, true, this.pins, this.linkHosts);
     return {
       deliveryRef: delivery.deliveryRef!,
       id: delivery.id,
@@ -54,7 +62,7 @@ export class HttpManagedDeliveryClient implements ManagedDeliveryClient {
       principal: request.principal,
       operationId: request.operationId,
     });
-    const delivery = requireDelivery(body, true, false, this.pins);
+    const delivery = requireDelivery(body, true, false, this.pins, this.linkHosts);
     return { id: delivery.id, link: delivery.link!, expiresAt: delivery.expiresAt, state: delivery.state };
   }
 
@@ -120,7 +128,13 @@ export class HttpManagedDeliveryClient implements ManagedDeliveryClient {
   }
 }
 
-function requireDelivery(value: unknown, requireLink: boolean, requireRef: boolean, pins: ProtectedDeliveryPins): {
+function requireDelivery(
+  value: unknown,
+  requireLink: boolean,
+  requireRef: boolean,
+  pins: ProtectedDeliveryPins,
+  linkHosts: readonly string[] | undefined,
+): {
   deliveryRef?: string; id: string; expiresAt: string; state: string; link?: string;
 } {
   const record = asRecord(value);
@@ -129,7 +143,7 @@ function requireDelivery(value: unknown, requireLink: boolean, requireRef: boole
     expiresAt: requiredInstant(record['expiresAt'], 'expiresAt'),
     state: requiredGrantState(record['state']),
     ...(requireRef ? { deliveryRef: requiredOpaqueId(record['deliveryRef'], 'deliveryRef') } : {}),
-    ...(typeof record['link'] === 'string' && isCanonicalManagedLink(record['link'], pins) ? { link: record['link'] } : {}),
+    ...(typeof record['link'] === 'string' && isCanonicalManagedLink(record['link'], pins, linkHosts) ? { link: record['link'] } : {}),
   };
   if (requireLink && result.link === undefined) throw new Error('managed delivery response is missing protected URL');
   return result;

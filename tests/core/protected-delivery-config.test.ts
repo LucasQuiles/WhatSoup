@@ -3,6 +3,7 @@ import { parseProtectedDeliveryConfig } from '../../src/core/protected-delivery-
 import {
   TEST_DELIVERY_BASE_URL,
   TEST_DELIVERY_HOST,
+  TEST_LINK_HOST,
   TEST_PROTECTED_DELIVERY_PINS as pins,
 } from '../helpers/protected-delivery-pins.ts';
 
@@ -49,6 +50,34 @@ describe('protected delivery configuration', () => {
     ]) {
       expect(() => parseProtectedDeliveryConfig(withBaseUrl(baseUrl), credential, pins)).toThrow(/approved/i);
     }
+  });
+
+  it('admits linkHosts that are hash-pinned approved hosts in exact form', () => {
+    expect(parseProtectedDeliveryConfig(
+      { ...withBaseUrl(TEST_DELIVERY_BASE_URL), linkHosts: [TEST_LINK_HOST, TEST_DELIVERY_HOST] },
+      credential,
+      pins,
+    )).toMatchObject({ linkHosts: [TEST_LINK_HOST, TEST_DELIVERY_HOST] });
+  });
+
+  it('refuses linkHosts that are not pinned, not exact, or malformed', () => {
+    for (const linkHosts of [
+      ['evil.invalid'],
+      [`evil${TEST_LINK_HOST}`],
+      [`www.${TEST_LINK_HOST}`],
+      [`${TEST_LINK_HOST}.`],
+      [TEST_LINK_HOST.toUpperCase()],
+      [],
+      TEST_LINK_HOST,
+      [TEST_LINK_HOST, 7],
+    ]) {
+      expect(() => parseProtectedDeliveryConfig({ ...withBaseUrl(TEST_DELIVERY_BASE_URL), linkHosts }, credential, pins))
+        .toThrow(/linkHosts/);
+    }
+    expect(() => parseProtectedDeliveryConfig(
+      { ...withBaseUrl(TEST_DELIVERY_BASE_URL), linkHosts: [TEST_LINK_HOST] },
+      credential,
+    )).toThrow(/approved/i);
   });
 
   it('refuses the test origin under the production pins', () => {

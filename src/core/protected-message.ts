@@ -151,7 +151,11 @@ function nextProtectedLink(text: string, from: number, pins: ProtectedDeliveryPi
  * True only for the exact canonical managed link the delivery service may send:
  * `https://<pinned host>/s/#v3.<22>.<43>` with no port, credentials or query.
  */
-export function isCanonicalManagedLink(value: unknown, pins: ProtectedDeliveryPins = PROTECTED_DELIVERY_PINS): boolean {
+export function isCanonicalManagedLink(
+  value: unknown,
+  pins: ProtectedDeliveryPins = PROTECTED_DELIVERY_PINS,
+  linkHosts?: readonly string[],
+): boolean {
   if (typeof value !== 'string') return false;
   let url: URL;
   try {
@@ -166,6 +170,8 @@ export function isCanonicalManagedLink(value: unknown, pins: ProtectedDeliveryPi
   // spellings that the parser normalizes are still refused; the exact pin
   // check also refuses `www.` and trailing-dot spellings.
   if (!MANAGED_LINK_FRAGMENT.test(url.hash) || value !== `https://${url.hostname}/s/${url.hash}`) return false;
+  // Configured link hosts can only narrow the pinned set, never widen it.
+  if (linkHosts !== undefined && !linkHosts.includes(url.hostname)) return false;
   return isExactPinnedHost(url.hostname, pins.canonicalLinkHostSha256);
 }
 

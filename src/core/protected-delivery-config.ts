@@ -6,6 +6,12 @@ export interface ProtectedDeliveryConfig {
   baseUrl: string;
   /** Resolved at process configuration load; never included in a tool declaration or response. */
   token: string;
+  /**
+   * Optional link hosts from the private instance configuration. Every entry is
+   * a hash-pinned approved host; when present, a managed link is sent only on
+   * one of them. Redaction never narrows: it always uses every pinned host.
+   */
+  linkHosts?: readonly string[];
 }
 
 /** The managed API path is fixed; only its host comes from instance configuration. */
@@ -52,7 +58,7 @@ export function parseProtectedDeliveryConfig(
   if (!isRecord(raw)) throw new Error('protectedDelivery must be an object');
   if (raw['enabled'] === false) return null;
   if (raw['enabled'] !== true) throw new Error('protectedDelivery.enabled must be true to enable protected delivery');
-  const permitted = new Set(['enabled', 'baseUrl', 'credentialEnv']);
+  const permitted = new Set(['enabled', 'baseUrl', 'credentialEnv', 'linkHosts']);
   for (const key of Object.keys(raw)) {
     if (!permitted.has(key)) throw new Error(`protectedDelivery.${key} is not allowed`);
   }
@@ -69,6 +75,7 @@ export function parseProtectedDeliveryConfig(
   if (!isApprovedManagedDeliveryEndpoint(endpoint, pins)) {
     throw new Error('protectedDelivery.baseUrl must be the approved managed-delivery API endpoint');
   }
+  const linkHosts = optionalLinkHosts(raw['linkHosts'], pins);
   const credentialEnv = requiredString(raw['credentialEnv'], 'protectedDelivery.credentialEnv');
   if (!MANAGED_DELIVERY_CREDENTIAL_ENV.test(credentialEnv)) {
     throw new Error('protectedDelivery.credentialEnv must use the reserved managed credential namespace');
@@ -77,7 +84,24 @@ export function parseProtectedDeliveryConfig(
   if (typeof token !== 'string' || token.length === 0) {
     throw new Error('protectedDelivery credential is unavailable');
   }
-  return { baseUrl: endpoint.toString().replace(/\/$/, ''), token };
+  return {
+    baseUrl: endpoint.toString().replace(/\/$/, ''),
+    token,
+    ...(linkHosts === undefined ? {} : { linkHosts }),
+  };
+}
+
+function optionalLinkHosts(value: unknown, pins: ProtectedDeliveryPins): readonly string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error('protectedDelivery.linkHosts must be a non-empty array of hash-pinned approved hosts');
+  }
+  for (const host of value) {
+    if (typeof host !== 'string' || !isExactPinnedHost(host, pins.linkHostSha256)) {
+      throw new Error('protectedDelivery.linkHosts must list only hash-pinned approved hosts in lowercase form');
+    }
+  }
+  return Object.freeze([...value] as string[]);
 }
 
 function requiredString(value: unknown, name: string): string {

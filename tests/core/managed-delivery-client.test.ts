@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HttpManagedDeliveryClient } from '../../src/core/managed-delivery-client.ts';
 import {
   TEST_DELIVERY_BASE_URL,
+  TEST_DELIVERY_HOST,
   TEST_LINK_HOST,
   TEST_PROTECTED_DELIVERY_PINS,
 } from '../helpers/protected-delivery-pins.ts';
@@ -239,6 +240,21 @@ describe('managed delivery HTTP client', () => {
       principal: '15551234567',
       operationId: 'production-pins',
     })).rejects.toThrow('managed delivery response is missing protected URL');
+  });
+
+  it('admits a link on a pinned host taken from configured linkHosts and refuses a link outside them', async () => {
+    const configured = (linkHosts: readonly string[]) => new HttpManagedDeliveryClient({
+      baseUrl: TEST_DELIVERY_BASE_URL,
+      token: 'DUMMY-transport-token',
+      fetch: async () => json(resolveReply({ link: MANAGED_LINK })),
+      pins: TEST_PROTECTED_DELIVERY_PINS,
+      linkHosts,
+    });
+    const request = { deliveryRef: DELIVERY_REF, principal: '15551234567', operationId: 'configured-link-hosts' };
+
+    await expect(configured([TEST_LINK_HOST]).resolve(request)).resolves.toMatchObject({ link: MANAGED_LINK });
+    await expect(configured([TEST_DELIVERY_HOST]).resolve(request))
+      .rejects.toThrow('managed delivery response is missing protected URL');
   });
 
   it('does not expose failed response bodies', async () => {

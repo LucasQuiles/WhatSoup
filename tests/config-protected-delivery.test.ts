@@ -134,4 +134,24 @@ describe('raw INSTANCE_CONFIG protected-delivery admission', () => {
     }, undefined);
     expect(config).toHaveProperty('protectedDelivery', null);
   });
+
+  it('admits linkHosts taken from config when every host is hash-pinned', async () => {
+    const { config } = await importConfig({
+      sessionScope: 'per_chat',
+      provider: 'openai-api',
+      protectedDelivery: { ...protectedDelivery(), linkHosts: ['links.example.test'] },
+    }, 'DUMMY managed token');
+    expect(config.protectedDelivery).toMatchObject({ baseUrl: MANAGED_URL, linkHosts: ['links.example.test'] });
+  });
+
+  it('fails startup when linkHosts names a host that is not pinned', async () => {
+    const { ConfigValidationError } = await import('../src/lib/startup-error.ts');
+    const agentOptions = {
+      sessionScope: 'per_chat',
+      provider: 'openai-api',
+      protectedDelivery: { ...protectedDelivery(), linkHosts: ['links.example.test', 'evil.invalid'] },
+    };
+    await expect(importConfig(agentOptions, 'DUMMY managed token')).rejects.toBeInstanceOf(ConfigValidationError);
+    await expect(importConfig(agentOptions, 'DUMMY managed token')).rejects.toThrow(/linkHosts/);
+  });
 });
