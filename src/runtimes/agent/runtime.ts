@@ -86,7 +86,6 @@ import {
   MAX_RESIDENT_SESSIONS,
   SESSION_MIN_RESIDENCY_MS,
   RESIDENT_TURN_PROGRESS_DEADLINE_MS,
-  MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS,
   diagnosticBundleEnabled,
   DIAGNOSTIC_BUNDLE_THROTTLE_MS,
   HANDOFF_STALE_MS,
@@ -136,11 +135,7 @@ import {
   type SessionCrashInfo,
 } from './session.ts';
 import { createProviderExecutionGate, ProviderExecutionGate } from './provider-execution-gate.ts';
-import {
-  dispatchProviderTurn,
-  withProviderApplicationContext,
-  type ProviderTurnInput,
-} from './provider-boundary-dispatch.ts';
+import { dispatchProviderTurn, withProviderApplicationContext } from './provider-boundary-dispatch.ts';
 import { TurnChronologyTracker, type TurnDeliveryKind } from './turn-chronology.ts';
 import {
   receivedAtUnixSeconds,
@@ -418,6 +413,7 @@ import { jitteredDelay, sleep } from '../../core/retry.ts';
 import { synthesizeSpeech } from '../chat/providers/elevenlabs.ts';
 import { writeTempFile } from '../../core/media-download.ts';
 import { OperationTracker } from './operation-tracker.ts';
+import { AgentCommandRuntimeError } from './agent-command-runtime-error.ts';
 // Media prep (message → agent content + workspace relocation) extracted to media-prep.ts.
 // Imported for the inbound pipeline; the public surface (prepareContentForAgent + the
 // __*ForTests helpers) is re-exported below so namespace-importing tests are unchanged.
@@ -465,18 +461,6 @@ const GLOBAL_CRASH_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
 // while leaving headroom for tool results and system prompts. Override per-instance via
 // agentOptions.autoCompactInputTokens in config.json.
 const DEFAULT_AUTO_COMPACT_INPUT_TOKENS = 150_000;
-
-class AgentCommandRuntimeError extends Error {
-  readonly code: string;
-  readonly statusCode: number;
-
-  constructor(code: string, message: string, statusCode: number) {
-    super(message);
-    this.name = 'AgentCommandRuntimeError';
-    this.code = code;
-    this.statusCode = statusCode;
-  }
-}
 
 // ---------------------------------------------------------------------------
 // AskUserQuestion → Poll formatting / resolution helpers
@@ -564,17 +548,8 @@ import { errorMessage } from '../../lib/error-message.ts';
 
 
 // `isPromptTooLongMessage` lives in `./failure-taxonomy.ts` (imported + re-exported above).
-
-/**
- * What a wedged-lane release did to the provider (#3374 C7). `reaped_child` is
- * the real-process wedge, where an intentional SIGKILL routes the exit through
- * the session's own crash machinery. `reap_skipped_no_child` is the
- * managed-provider wedge: the session holds no child, so nothing is killed and
- * the remote request is left outstanding — the release still frees the lane,
- * but it must not be recorded as a reap that happened.
- * `reap_unavailable` is a session surface that does not implement the reap.
- */
-type WedgedLaneReapOutcome = 'reaped_child' | 'reap_skipped_no_child' | 'reap_unavailable';
+import { reapWedgedLaneProvider, type WedgedLaneReapOutcome } from './wedged-lane-reap.ts';
+import { capDedupeMap } from './dedupe-map-cap.ts';
 
 export class AgentRuntime implements Runtime {
 
@@ -971,19 +946,6 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
-   * Bound an evict-oldest dedup map. Mirrors the recentToolFailureAlerts cap so
-   * window-pruned maps can't grow without limit between prunes (e.g. one entry per
-   * distinct chat that never recurs within the window).
-   */
-  private capDedupeMap(map: Map<string, unknown>, max = MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS): void {
-    while (map.size > max) {
-      const oldest = map.keys().next().value;
-      if (oldest === undefined) break;
-      map.delete(oldest);
-    }
-  }
-
-  /**
    * Clear all tool-scope state belonging to one mapKey. Tool scope keys are
    * `${mapKey}#${ordinal}` (see createToolScopeKey), so on a per_chat crash we must
    * drop only the crashing chat's scopes — a blanket `.clear()` would stomp other
@@ -1017,7 +979,7 @@ export class AgentRuntime implements Runtime {
       toolFailureAlertsEnabled: config.toolFailureAlertsEnabled,
       resolveProvider: () => this.effectiveProvider || this.agentProvider || 'unknown-provider',
       recentToolFailureAlerts: this.recentToolFailureAlerts,
-      capDedupeMap: (map) => this.capDedupeMap(map),
+      capDedupeMap: (map) => capDedupeMap(map),
     };
   }
 
@@ -3069,7 +3031,7 @@ export class AgentRuntime implements Runtime {
       get isFallbackWindowActive() { return runtime.isFallbackWindowActive; },
       isEntryCredentialed: (entry) => runtime.isEntryCredentialed(entry),
       emitRouteEventChecked: (ev) => runtime.emitRouteEventChecked(ev),
-      capDedupeMap: (map, max) => runtime.capDedupeMap(map, max),
+      capDedupeMap: (map, max) => capDedupeMap(map, max),
       getTurnCapability: () => runtime.getTurnCapability(),
       verifyAccountIdentity: (trigger) => runtime.verifyAccountIdentity(trigger),
       scheduleFallbackReplay: (args) => runtime.scheduleFallbackReplay(args),
@@ -3476,7 +3438,7 @@ export class AgentRuntime implements Runtime {
       // actually did rather than what the release intended (#3374 C7). Both
       // statements are synchronous and adjacent, so no lane state can change
       // between them.
-      const reapOutcome = this.reapWedgedLaneProvider(session);
+      const reapOutcome = reapWedgedLaneProvider(session);
       this.announceWedgedLaneRelease(row.seq, turnQueue.pending, reapOutcome);
       // Reject the held turn's runtime completion (the turn-recovery
       // replay-abort pattern), then settle the session's provider-turn
@@ -3499,19 +3461,6 @@ export class AgentRuntime implements Runtime {
       );
       session.completeProviderTurn();
     }
-  }
-
-  /**
-   * Kill the wedged lane's provider child, if it has one, and report what
-   * happened. `reapWedgedProviderChild` returns false when the session holds no
-   * child — every managed-loop provider — so a bare call cannot distinguish a
-   * reap from a no-op (#3374 C7). The absent-method case is a session surface
-   * older than the reap and is named separately: it is not evidence that the
-   * session had no child.
-   */
-  private reapWedgedLaneProvider(session: SessionManager): WedgedLaneReapOutcome {
-    if (typeof session.reapWedgedProviderChild !== 'function') return 'reap_unavailable';
-    return session.reapWedgedProviderChild() ? 'reaped_child' : 'reap_skipped_no_child';
   }
 
   /**
@@ -3598,7 +3547,7 @@ export class AgentRuntime implements Runtime {
     // with nothing to count.
     // Same ordering as the per-chat path: the reap's answer is what the
     // announcement reports (#3374 C7).
-    const reapOutcome = this.reapWedgedLaneProvider(session);
+    const reapOutcome = reapWedgedLaneProvider(session);
     this.announceWedgedLaneRelease(row.seq, this.shared ? this.turnQueue.pending : 0, reapOutcome);
     // The reject is the live-turn interlock, not just a signal: it refuses
     // unless the published completion IS this context's logical turn
@@ -7313,7 +7262,7 @@ export class AgentRuntime implements Runtime {
         }
       }
       this.groupMetadataCache.set(chatJid, { adminJids, fetchedAt: Date.now() });
-      this.capDedupeMap(this.groupMetadataCache, AgentRuntime.GROUP_METADATA_CACHE_MAX);
+      capDedupeMap(this.groupMetadataCache, AgentRuntime.GROUP_METADATA_CACHE_MAX);
       return adminJids;
     } catch (err) {
       // QR-036: returns null → callers KEEP the admin gate (fail-closed), they no
@@ -9919,7 +9868,7 @@ export class AgentRuntime implements Runtime {
     ].join(':');
     if (this.recentProviderFallbackNotices.has(noticeKey)) return;
     this.recentProviderFallbackNotices.set(noticeKey, now);
-    this.capDedupeMap(this.recentProviderFallbackNotices);
+    capDedupeMap(this.recentProviderFallbackNotices);
 
     const card = modelCardLabel(activation.fallbackProvider, activation.fallbackModel);
     const credentialsMissing = activation.keyPresent === false;
@@ -10731,7 +10680,7 @@ export class AgentRuntime implements Runtime {
           queue: degradedQueue,
           recentNotices: this.recentManagedLoopDegradedNotices,
           noticeDedupMs: config.fallbackTunables.noticeDedupMs,
-          capDedupeMap: (map) => this.capDedupeMap(map),
+          capDedupeMap: (map) => capDedupeMap(map),
         });
       }
     }

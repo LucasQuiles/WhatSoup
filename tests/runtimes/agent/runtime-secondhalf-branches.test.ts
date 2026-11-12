@@ -261,6 +261,7 @@ import {
   type PendingPollQuestion,
   type PollVote,
 } from '../../../src/runtimes/agent/runtime.ts';
+import { capDedupeMap } from '../../../src/runtimes/agent/dedupe-map-cap.ts';
 import {
   markOwnedSystemTurn,
   makeRuntimeTurnContext,
@@ -1017,10 +1018,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
   });
 
   it('capDedupeMap evicts oldest-first over an object-valued map (BEAD-050)', () => {
-    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger);
-    const cap = (runtime as unknown as {
-      capDedupeMap(map: Map<string, unknown>, max?: number): void;
-    }).capDedupeMap.bind(runtime);
+    const cap = capDedupeMap;
     const map = new Map<string, { adminJids: Set<string>; fetchedAt: number }>();
     for (let i = 0; i < 10; i++) {
       map.set(`group-${i}@g.us`, { adminJids: new Set([`admin-${i}`]), fetchedAt: i });
