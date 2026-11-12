@@ -415,6 +415,7 @@ import { jitteredDelay, sleep } from '../../core/retry.ts';
 import { synthesizeSpeech } from '../chat/providers/elevenlabs.ts';
 import { writeTempFile } from '../../core/media-download.ts';
 import { OperationTracker } from './operation-tracker.ts';
+import { AgentCommandRuntimeError } from './agent-command-runtime-error.ts';
 // Media prep (message → agent content + workspace relocation) extracted to media-prep.ts.
 // Imported for the inbound pipeline; the public surface (prepareContentForAgent + the
 // __*ForTests helpers) is re-exported below so namespace-importing tests are unchanged.
@@ -462,18 +463,6 @@ const GLOBAL_CRASH_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
 // while leaving headroom for tool results and system prompts. Override per-instance via
 // agentOptions.autoCompactInputTokens in config.json.
 const DEFAULT_AUTO_COMPACT_INPUT_TOKENS = 150_000;
-
-class AgentCommandRuntimeError extends Error {
-  readonly code: string;
-  readonly statusCode: number;
-
-  constructor(code: string, message: string, statusCode: number) {
-    super(message);
-    this.name = 'AgentCommandRuntimeError';
-    this.code = code;
-    this.statusCode = statusCode;
-  }
-}
 
 // ---------------------------------------------------------------------------
 // AskUserQuestion → Poll formatting / resolution helpers
