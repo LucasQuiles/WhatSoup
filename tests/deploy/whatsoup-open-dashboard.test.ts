@@ -33,7 +33,7 @@ describe('whatsoup-console-unlock', () => {
     writeFileSync(join(localBin, 'whatsoup-console-unlock.mjs'), '');
     executable('security', 'exit 1');
     executable('curl', 'exit 0');
-    const node = executable(
+    executable(
       'node',
       `if [ "$1" = "-e" ]; then /usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["active"])' "$3"; exit; fi\n[ "$WHATSOUP_CONSOLE_TOKEN" = ${JSON.stringify(token)} ] || exit 9\nprintf 'fallback-token-used\\n' > ${JSON.stringify(log)}`,
     );
@@ -51,7 +51,6 @@ describe('whatsoup-console-unlock', () => {
 
     expect(result.status).toBe(0);
     expect(readFileSync(log, 'utf8')).toBe('fallback-token-used\n');
-    expect(node).toBeTruthy();
   });
 });
 
