@@ -193,23 +193,11 @@ npm --silent run release:activate -- \
      owner-only (`0600`) instance plist, for example one carrying credentials
      in `EnvironmentVariables`, stays `0600` through the switch and through
      the automatic rollback;
-     Root-owned WhatSoup LaunchAgents use a bounded `sudo -n` replacement
-     helper. It replaces only an existing `com.whatsoup.<name>.plist`
-     directly in the invoking user's own `~/Library/LaunchAgents`: the
-     user-database home of `SUDO_UID`, with no symlinked path component. It
-     refuses `/Library/LaunchAgents` and any other home, so an activation run
-     with a `HOME` that differs from that user-database home cannot replace
-     a root-owned plist. The home, `Library` and `LaunchAgents` must be
-     folders that user owns. After these checks the helper works only
-     through descriptors of the opened folder and plist, so a folder or plist
-     swapped for a symlink mid-run cannot redirect a root write or flag change;
-     the run fails instead. It checks the expected bytes, preserves owner,
-     group, mode and `uchg`, and refuses symlinks, hard-linked plists,
-     extended attributes and other protection flags. It parses the new
-     contents itself and runs no other program, so nothing is looked up on
-     `PATH` as root; the contents must be an XML plist dictionary of
-     JSON-representable values whose `Label` names the target. A failed
-     replacement restores its original bytes and protection;
+     Root-owned WhatSoup LaunchAgents are replaced through the root plist
+     helper installed on the host (see "Root-owned LaunchAgents: the root
+     plist helper" below). A missing or outdated helper refuses the
+     activation before the switch; a helper that reports incomplete recovery
+     fails the activation;
   3. reloads each label with the reload sequence below;
   4. verifies from the executing process (a new pid whose argv names
      `<release>/src/bootstrap.ts`, authenticated health with the manifest
@@ -228,6 +216,83 @@ Preconditions include: the wrapper symlink points at
 `deploy/whatsoup`, `src/bootstrap.ts` and `node_modules`; each auxiliary job
 currently runs from `--expect-current`; a health token and port resolve; the
 database exists; and no staged plist still references `--expect-current`.
+
+#### Root-owned LaunchAgents: the root plist helper
+
+A root-owned, `uchg`-protected `com.whatsoup.<name>.plist` in the bot user's
+`~/Library/LaunchAgents` cannot be replaced by the bot user. Activation
+replaces it through `protected_plist.py`, run as root by exactly one sudoers
+rule, from a fixed root-owned install:
+`/Library/PrivilegedHelperTools/com.whatsoup.protected-plist.py` (root:wheel
+`0444`). `scripts/lib/release-activation/root-helper.json` is the one record of
+that path and of the helper's sha256. Change the helper and that pin in the
+same commit; a test fails when they differ. Before any live change, activation
+compares the installed helper with the pin. This is a version check, not a
+security control. A mismatch refuses with "root plist helper missing or
+outdated; run the install step".
+
+What the helper guarantees:
+- Root changes no inode except the intended plist and the files that run
+  itself creates. It never writes, chmods, chowns or changes the flags of
+  anything else, whatever the bot user does to its folders during the run.
+- The plist must be root-owned, single-link, at most `0644`, readable by the
+  bot user, and either unflagged or flagged `uchg` only. Root changes only the
+  `uchg` flag, and only while that flag freezes the plist's single name.
+- The new contents must be a strict XML plist (Apple's document type, known
+  elements only, one top-level dictionary) whose `Label` names the target.
+- A failed replacement restores the original bytes and protection. When it
+  cannot do that and confirm it, the helper exits 3 and the activation fails
+  with "root plist helper recovery is incomplete": inspect that plist and its
+  `uchg` flag before any retry.
+
+What it does not guarantee: the bot user owns `~/Library`, so it can always
+rename its own `LaunchAgents` folder and create another one. Between the rename
+into place and setting `uchg`, it can also swap the new plist; the helper
+detects that and reports incomplete recovery (exit 3), but cannot prevent it.
+In a user-owned home, `uchg` gives tamper resistance, not a security boundary.
+
+A host that lets the bot user run anything as root gets no protection from the
+helper. That includes a host whose sudoers grants the bot user
+`NOPASSWD: ALL`; check with `sudo -l -U <bot-user>`. It also includes a bot
+user in the `admin` group while an Xcode under `/Applications` is the selected
+developer folder: `/Applications` is admin-writable, and `/usr/bin/python3`
+resolves through that folder.
+sudo keeps `HOME`, so the rule runs Python isolated (`-I`); keep
+`DEVELOPER_DIR` and `TMPDIR` out of `env_keep`.
+
+Owner steps, once per host and again after any helper change:
+
+1. Check out the reviewed `origin/main` commit in a clone the bot user cannot
+   write (owned by an administrator, not inside the bot user's home). Running
+   the install step from the bot user's release tree would let that user change
+   what root installs.
+2. Install the helper. The step refuses on a pin mismatch, on an install folder
+   or ancestor that is not root-owned or is group- or other-writable, and on an
+   interpreter path the bot user can write. When the install is already
+   current, it changes nothing:
+
+   ```bash
+   sudo /usr/bin/python3 -I -B <clone>/scripts/lib/release-activation/install_root_helper.py --user <bot-user>
+   ```
+
+3. Install the one sudoers rule it prints. Use no wildcards: sudo then matches
+   these exact arguments.
+
+   ```bash
+   sudo visudo -f /etc/sudoers.d/whatsoup-protected-plist
+   # <bot-user> ALL = (root) NOPASSWD: /usr/bin/python3 -I -B /Library/PrivilegedHelperTools/com.whatsoup.protected-plist.py
+   ```
+
+4. Verify the install and the rule:
+
+   ```bash
+   shasum -a 256 /Library/PrivilegedHelperTools/com.whatsoup.protected-plist.py   # equals the sha256 in root-helper.json
+   ls -le /Library/PrivilegedHelperTools/com.whatsoup.protected-plist.py          # root wheel, -r--r--r--, no ACL
+   sudo -l -U <bot-user>   # lists the one rule and no broader NOPASSWD grant
+   ```
+
+The install step checks owners and mode bits, not ACLs; step 4's `ls -le`
+shows any ACL.
 
 #### BOT ERRORS health-consumer prerequisite
 
