@@ -590,7 +590,9 @@ export function registerAttemptCases(): void {
     expect(outcome.groupDead).toBe(false);
   }, 10_000);
 
-  it('[BCF00-U18] reports a survivor that teardown finds after an unknown first probe', async () => {
+  // Supplementary regression, deliberately unmarked: BCF00 markers must match the
+  // closed contract roster in contracts.ts exactly.
+  it('reports a survivor that teardown finds after an unknown first probe', async () => {
     const api = boundaryRun as unknown as {
       runBoundaryWatchdogForTest?: (
         argv: string[],
