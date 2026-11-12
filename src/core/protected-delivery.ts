@@ -33,6 +33,17 @@ interface Row {
 }
 const MAX_ATTEMPTS = 3;
 const RETRY_WINDOW_MS = 60_000;
+/**
+ * A stage or send lease younger than the retry window may still receive its
+ * stable acknowledgement or a receipt, so only its holder may clear it. Expiry
+ * and retry-limit transitions by any other caller apply only to rows without a
+ * fresh lease. Bind: the stale-lease cutoff from leaseCutoff().
+ */
+const WITHOUT_FRESH_LEASE = '(send_claim_token IS NULL OR send_claimed_at IS NULL OR julianday(send_claimed_at) <= julianday(?))';
+function leaseCutoff(now: Date): string { return new Date(now.getTime() - RETRY_WINDOW_MS).toISOString(); }
+function hasFreshLease(row: Pick<Row, 'send_claim_token' | 'send_claimed_at'>, now: Date): boolean {
+  return !!row.send_claim_token && !!row.send_claimed_at && new Date(row.send_claimed_at).getTime() + RETRY_WINDOW_MS > now.getTime();
+}
 export const PROTECTED_DELIVERY_RETENTION_DAYS = 90;
 
 export class ProtectedDeliveryService {
@@ -54,7 +65,7 @@ export class ProtectedDeliveryService {
     const now = this.now();
     const nowIso = now.toISOString();
     this.expireOverdueUncertainDeliveries(now);
-    const activeLeaseCutoff = new Date(now.getTime() - RETRY_WINDOW_MS).toISOString();
+    const activeLeaseCutoff = leaseCutoff(now);
     const active = this.deps.db.prepare(`SELECT 1 FROM protected_deliveries
       WHERE kind='rustdesk' AND device_id=? AND purpose=? AND principal=?
         AND state IN ('staging','staged','resolving','failed','ambiguous')
@@ -143,7 +154,8 @@ export class ProtectedDeliveryService {
     // A claimed RustDesk grant has a session that can outlive its original
     // unclaimed-link deadline. The backend's grant state is authoritative.
     const expired = remote.state === 'expired';
-    if (expired) this.expire(row);
+    // A send in flight settles its own row; polling must not clear its lease.
+    if (expired) this.expireWithoutFreshLease(row, this.now());
     this.deps.db.prepare(`UPDATE protected_deliveries SET expires_at=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?`).run(remote.expiresAt, row.id);
     return {
       id: row.delivery_id,
@@ -229,9 +241,9 @@ export class ProtectedDeliveryService {
     try {
       const current = this.deps.db.prepare('SELECT * FROM protected_deliveries WHERE id=?').get(row.id) as Row | undefined;
       if (!current || current.state !== 'staging') rejected = new Error('protected delivery is no longer staging');
+      else if (hasFreshLease(current, now)) rejected = new Error('protected delivery is already being staged');
       else if (!current.expires_at || new Date(current.expires_at).getTime() <= now.getTime()) { this.expire(current); rejected = new Error('protected delivery is expired'); }
       else if (current.attempt_count >= MAX_ATTEMPTS || (current.first_attempt_at && new Date(current.first_attempt_at).getTime() + RETRY_WINDOW_MS <= now.getTime())) { this.fail(current); rejected = new Error('protected delivery staging retry limit reached'); }
-      else if (current.send_claim_token && current.send_claimed_at && new Date(current.send_claimed_at).getTime() + RETRY_WINDOW_MS > now.getTime()) rejected = new Error('protected delivery is already being staged');
       else {
         const token = this.id();
         this.deps.db.prepare(`UPDATE protected_deliveries SET attempt_count=attempt_count+1,first_attempt_at=COALESCE(first_attempt_at,?),last_attempt_at=?,send_claim_token=?,send_claimed_at=?,updated_at=? WHERE id=?`).run(at,at,token,at,at,current.id);
@@ -301,11 +313,12 @@ export class ProtectedDeliveryService {
       const current = this.deps.db.prepare('SELECT * FROM protected_deliveries WHERE id=?').get(row.id) as Row | undefined;
       if (!current?.delivery_ref || !current.delivery_id) rejected = new Error('protected delivery not found');
       else if (sent(current.state)) claim = current;
+      // Checked before expiry and retry limits: those transitions would clear a lease that may still settle.
+      else if (hasFreshLease(current, now)) rejected = new Error('protected delivery is already being sent');
       else if (!current.expires_at || new Date(current.expires_at).getTime() <= now.getTime()) { this.expire(current); rejected = new Error('protected delivery is expired'); }
       else if (current.attempt_count >= MAX_ATTEMPTS) { this.fail(current); rejected = new Error('protected delivery retry limit reached'); }
       else if (current.first_attempt_at && new Date(current.first_attempt_at).getTime() + RETRY_WINDOW_MS <= now.getTime()) { this.fail(current); rejected = new Error('protected delivery retry window elapsed'); }
       else if (current.state === 'staging') rejected = new Error('protected delivery is still staging');
-      else if (current.state === 'resolving' && current.send_claimed_at && new Date(current.send_claimed_at).getTime() + RETRY_WINDOW_MS > now.getTime()) rejected = new Error('protected delivery is already being sent');
       else {
         const token = this.id();
         this.deps.db.prepare(`UPDATE protected_deliveries SET state='resolving',attempt_count=attempt_count+1,first_attempt_at=COALESCE(first_attempt_at,?),last_attempt_at=?,send_claim_token=?,send_claimed_at=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?`).run(at,at,token,at,current.id);
@@ -320,18 +333,18 @@ export class ProtectedDeliveryService {
   private expire(row: Row): void {
     this.deps.db.prepare(`UPDATE protected_deliveries SET state='expired',send_claim_token=NULL,send_claimed_at=NULL,terminal_at=COALESCE(terminal_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND state IN ('staging','staged','resolving','failed','ambiguous')`).run(row.id);
   }
+  private expireWithoutFreshLease(row: Row, now: Date): void {
+    this.deps.db.prepare(`UPDATE protected_deliveries SET state='expired',send_claim_token=NULL,send_claimed_at=NULL,terminal_at=COALESCE(terminal_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND state IN ('staging','staged','resolving','failed','ambiguous') AND ${WITHOUT_FRESH_LEASE}`).run(row.id, leaseCutoff(now));
+  }
   private expireOverdueUncertainDeliveries(now: Date): void {
     const nowIso = now.toISOString();
-    const staleLeaseCutoff = new Date(now.getTime() - RETRY_WINDOW_MS).toISOString();
-    // A current lease can still receive its stable acknowledgement or a receipt;
-    // only terminalize it after the same bounded lease window used by claim().
     this.deps.db.prepare(`UPDATE protected_deliveries
       SET state='expired',send_claim_token=NULL,send_claimed_at=NULL,
           terminal_at=COALESCE(terminal_at,?),updated_at=?
       WHERE state IN ('staging','staged','resolving','failed','ambiguous')
         AND expires_at IS NOT NULL AND julianday(expires_at) <= julianday(?)
-        AND (send_claim_token IS NULL OR send_claimed_at IS NULL OR julianday(send_claimed_at) <= julianday(?))`)
-      .run(nowIso, nowIso, nowIso, staleLeaseCutoff);
+        AND ${WITHOUT_FRESH_LEASE}`)
+      .run(nowIso, nowIso, nowIso, leaseCutoff(now));
   }
   private fail(row: Row): boolean {
     return this.deps.db.prepare(`UPDATE protected_deliveries SET state='failed',send_claim_token=NULL,send_claimed_at=NULL,terminal_at=CASE WHEN attempt_count>=? THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE terminal_at END,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND state IN ('staging','staged','resolving','failed','ambiguous')`).run(MAX_ATTEMPTS,row.id).changes > 0;

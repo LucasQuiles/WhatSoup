@@ -520,6 +520,187 @@ describe('protected delivery', () => {
     expect(db.raw.prepare('SELECT state FROM protected_deliveries WHERE delivery_ref=?').get(DELIVERY_REF)).toEqual({ state: 'submitted' });
   });
 
+  describe('a link that expires while its send is still pending', () => {
+    const principal = '15551234567';
+    const recipientJid = '15551234567@s.whatsapp.net';
+    const request = { deviceId: 'device-pending-send', purpose: 'login' as const, principal, recipientJid };
+
+    function pendingSendHarness(start: string) {
+      let now = new Date(start);
+      let n = 0;
+      const counts = { stages: 0, resolves: 0, sends: 0 };
+      let releaseSend: (() => void) | undefined;
+      const sendGate = new Promise<void>((resolve) => { releaseSend = resolve; });
+      let markSendStarted: (() => void) | undefined;
+      const sendStarted = new Promise<void>((resolve) => { markSendStarted = resolve; });
+      const client: ManagedDeliveryClient = {
+        async stageRustdesk() {
+          counts.stages += 1;
+          return { deliveryRef: DELIVERY_REF, id: DELIVERY_ID, expiresAt: EXPIRES_AT, state: 'unclaimed' };
+        },
+        async resolve() {
+          counts.resolves += 1;
+          return { id: DELIVERY_ID, link: DELIVERY_LINK, expiresAt: EXPIRES_AT, state: 'unclaimed' };
+        },
+        async getStatus() {
+          return managedStatus(now.getTime() >= Date.parse(EXPIRES_AT) ? { state: 'expired' } : {});
+        },
+        async reportEvent() {},
+      };
+      const service = new ProtectedDeliveryService({
+        db: db.raw, client,
+        messenger: {
+          async sendRaw(_jid, _content, options) {
+            counts.sends += 1;
+            markSendStarted?.();
+            await sendGate;
+            return { waMessageId: options?.messageId ?? null };
+          },
+        },
+        now: () => now,
+        // Distinct ids so a replacement row could be inserted if the lease were lost.
+        randomId: () => `opaque-${++n}`,
+      });
+      return {
+        service, counts, sendStarted,
+        release: () => releaseSend?.(),
+        advance: (iso: string) => { now = new Date(iso); },
+      };
+    }
+
+    async function expectOneIssuanceSettledAsSubmitted(
+      harness: ReturnType<typeof pendingSendHarness>,
+      first: Promise<{ deliveryRef: string; id: string; state: string }>,
+    ): Promise<void> {
+      await expect(harness.service.requestRustdeskAccess(request)).rejects.toThrow('outcome is still unresolved');
+      harness.release();
+      const settled = await first;
+      expect(settled).toEqual({ deliveryRef: DELIVERY_REF, id: DELIVERY_ID, state: 'submitted' });
+      expect(db.raw.prepare('SELECT state, send_claim_token FROM protected_deliveries').all())
+        .toEqual([{ state: settled.state, send_claim_token: null }]);
+      expect(harness.counts).toEqual({ stages: 1, resolves: 1, sends: 1 });
+    }
+
+    it('keeps the send lease when status polling reports the grant expired', async () => {
+      const harness = pendingSendHarness('2026-10-29T12:04:30.000Z');
+      const first = harness.service.requestRustdeskAccess(request);
+      await harness.sendStarted;
+      // Past the link deadline, but the 12:04:30 send lease is still inside its retry window.
+      harness.advance('2026-10-29T12:05:10.000Z');
+
+      await expect(harness.service.status({ deliveryId: DELIVERY_ID, principal })).resolves
+        .toMatchObject({ id: DELIVERY_ID, state: 'expired' });
+      expect(db.raw.prepare('SELECT state, send_claim_token FROM protected_deliveries').get())
+        .toEqual({ state: 'resolving', send_claim_token: expect.any(String) });
+
+      await expectOneIssuanceSettledAsSubmitted(harness, first);
+    });
+
+    it('keeps the send lease when a second deliver call arrives after the link deadline', async () => {
+      const harness = pendingSendHarness('2026-10-29T12:04:30.000Z');
+      const first = harness.service.requestRustdeskAccess(request);
+      await harness.sendStarted;
+      harness.advance('2026-10-29T12:05:10.000Z');
+
+      await expect(harness.service.deliver({ deliveryRef: DELIVERY_REF, principal, recipientJid }))
+        .rejects.toThrow('already being sent');
+
+      await expectOneIssuanceSettledAsSubmitted(harness, first);
+    });
+
+    it('keeps a retry send lease when the retry window elapses before it settles', async () => {
+      let now = new Date('2026-10-29T12:00:00.000Z');
+      let sends = 0;
+      let releaseSend: (() => void) | undefined;
+      const sendGate = new Promise<void>((resolve) => { releaseSend = resolve; });
+      let markSendStarted: (() => void) | undefined;
+      const sendStarted = new Promise<void>((resolve) => { markSendStarted = resolve; });
+      let n = 0;
+      const service = new ProtectedDeliveryService({
+        db: db.raw,
+        client: {
+          async stageRustdesk() { return { deliveryRef: DELIVERY_REF, id: DELIVERY_ID, expiresAt: EXPIRES_AT, state: 'unclaimed' }; },
+          async resolve() { return { id: DELIVERY_ID, link: DELIVERY_LINK, expiresAt: EXPIRES_AT, state: 'unclaimed' }; },
+          async getStatus() { return managedStatus(); },
+          async reportEvent() {},
+        },
+        messenger: {
+          async sendRaw(_jid, _content, options) {
+            sends += 1;
+            if (sends === 1) throw new Error('transport unavailable');
+            markSendStarted?.();
+            await sendGate;
+            return { waMessageId: options?.messageId ?? null };
+          },
+        },
+        now: () => now,
+        randomId: () => `opaque-${++n}`,
+      });
+      await service.requestRustdesk(request);
+      await expect(service.deliver({ deliveryRef: DELIVERY_REF, principal, recipientJid }))
+        .rejects.toThrow('transport outcome is ambiguous');
+
+      now = new Date('2026-10-29T12:00:50.000Z');
+      const retry = service.deliver({ deliveryRef: DELIVERY_REF, principal, recipientJid });
+      await sendStarted;
+      // The first attempt's retry window closed at 12:01:00; the 12:00:50 lease is 20 s old.
+      now = new Date('2026-10-29T12:01:10.000Z');
+
+      await expect(service.deliver({ deliveryRef: DELIVERY_REF, principal, recipientJid }))
+        .rejects.toThrow('already being sent');
+      releaseSend?.();
+      const settled = await retry;
+      expect(settled).toEqual({ deliveryRef: DELIVERY_REF, id: DELIVERY_ID, state: 'submitted' });
+      expect(db.raw.prepare('SELECT state, send_claim_token FROM protected_deliveries').get())
+        .toEqual({ state: settled.state, send_claim_token: null });
+      expect(sends).toBe(2);
+    });
+
+    it('keeps a fresh send or staging lease at the retry limit instead of failing it', async () => {
+      const now = new Date('2026-10-29T12:00:30.000Z');
+      let stages = 0;
+      const service = new ProtectedDeliveryService({
+        db: db.raw,
+        client: {
+          async stageRustdesk() { stages += 1; throw new Error('not used'); },
+          async resolve() { throw new Error('not used'); },
+          async getStatus() { return managedStatus(); },
+          async reportEvent() {},
+        },
+        messenger: { async sendRaw() { throw new Error('not used'); } },
+        now: () => now,
+        randomId: () => 'unused-id',
+      });
+      const insert = db.raw.prepare(`
+        INSERT INTO protected_deliveries (
+          stage_operation_id, resolve_operation_id, delivery_ref, delivery_id,
+          principal, recipient_jid, kind, device_id, purpose, whatsapp_message_id,
+          state, expires_at, issued_at, first_attempt_at, attempt_count, send_claim_token, send_claimed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'rustdesk', ?, 'login', ?, ?, ?, ?, ?, 3, ?, ?)
+      `);
+      insert.run(
+        'stage-sending', 'resolve-sending', DELIVERY_REF, DELIVERY_ID, principal, recipientJid, 'device-sending', 'message-sending',
+        'resolving', EXPIRES_AT, '2026-10-29T12:00:00.000Z', '2026-10-29T12:00:00.000Z', 'send-lease', '2026-10-29T12:00:20.000Z',
+      );
+      insert.run(
+        'stage-staging', 'resolve-staging', null, null, principal, recipientJid, 'device-staging', 'message-staging',
+        'staging', EXPIRES_AT, '2026-10-29T12:00:00.000Z', '2026-10-29T12:00:00.000Z', 'stage-lease', '2026-10-29T12:00:20.000Z',
+      );
+
+      await expect(service.deliver({ deliveryRef: DELIVERY_REF, principal, recipientJid }))
+        .rejects.toThrow('already being sent');
+      await expect(service.requestRustdesk({ deviceId: 'device-staging', purpose: 'login', principal, recipientJid }))
+        .rejects.toThrow('already being staged');
+
+      expect(stages).toBe(0);
+      expect(db.raw.prepare('SELECT state, send_claim_token, terminal_at FROM protected_deliveries ORDER BY id').all())
+        .toEqual([
+          { state: 'resolving', send_claim_token: 'send-lease', terminal_at: null },
+          { state: 'staging', send_claim_token: 'stage-lease', terminal_at: null },
+        ]);
+    });
+  });
+
   it('does not reuse a newer row while an expired staging lease is active under another alias', async () => {
     let stageCalls = 0;
     const now = new Date('2026-10-29T12:00:00.000Z');
