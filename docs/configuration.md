@@ -2838,4 +2838,4 @@ Agent and passive instances only need `openai` for the cloud transcription layer
 is absent, voice note transcription silently degrades — the agent receives the file path
 instead of transcribed text.
 
-For mwlab host-specific Pinecone/transcription setup, see `docs/runbooks/mwlab-transcription-pinecone.md`.
+For host-specific Pinecone/transcription setup, use the deployment's operator runbook.
