@@ -8,7 +8,16 @@ import { TEST_LINK_HOST, TEST_PROTECTED_DELIVERY_PINS } from '../../helpers/prot
 
 const DELIVERY_REF = 'aaaaaaaaaaaaaaaaaaaaaa';
 const DELIVERY_ID = 'bbbbbbbbbbbbbbbbbbbbbb';
-const DELIVERY_LINK = `https://${TEST_LINK_HOST}/s/#v3.${DELIVERY_ID}.${'c'.repeat(43)}`;
+// The fragment key is the secret part of the link; the delivery id beside it is public.
+const DELIVERY_LINK_KEY = 'c'.repeat(43);
+const DELIVERY_LINK = `https://${TEST_LINK_HOST}/s/#v3.${DELIVERY_ID}.${DELIVERY_LINK_KEY}`;
+
+function expectOpaqueSubmittedResponse(text: string): void {
+  expect(text).not.toContain(DELIVERY_LINK);
+  expect(text).not.toContain(DELIVERY_LINK_KEY);
+  expect(text).not.toContain(TEST_LINK_HOST);
+  expect(JSON.parse(text)).toEqual({ deliveryRef: DELIVERY_REF, id: DELIVERY_ID, state: 'submitted' });
+}
 
 const directSession: SessionContext = {
   tier: 'chat-scoped',
@@ -70,10 +79,13 @@ describe('protected delivery MCP tools', () => {
     expect(body).toContain(DELIVERY_REF);
     expect(body).not.toContain(TEST_LINK_HOST);
     expect(body).not.toContain('fragment');
+    // request_rustdesk_access stages and sends, so it already reports the submitted delivery.
+    expectOpaqueSubmittedResponse(body);
 
     const delivered = await registry.call('deliver_secret', { delivery_ref: DELIVERY_REF }, directSession);
     expect(delivered.content[0].text).toContain('submitted');
     expect(delivered.content[0].text).not.toContain('managed.example');
+    expectOpaqueSubmittedResponse(delivered.content[0].text);
   });
 
   it('refuses a group or a direct identity that differs from the recipient', async () => {

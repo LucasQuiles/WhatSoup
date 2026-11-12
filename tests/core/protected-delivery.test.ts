@@ -13,7 +13,9 @@ vi.mock('../../src/core/protected-delivery-pins.ts', async (importOriginal) =>
 
 const DELIVERY_REF = 'aaaaaaaaaaaaaaaaaaaaaa';
 const DELIVERY_ID = 'bbbbbbbbbbbbbbbbbbbbbb';
-const DELIVERY_LINK = `https://${TEST_LINK_HOST}/s/#v3.${DELIVERY_ID}.${'c'.repeat(43)}`;
+// The fragment key is the secret part of the link; the delivery id beside it is public.
+const DELIVERY_LINK_KEY = 'c'.repeat(43);
+const DELIVERY_LINK = `https://${TEST_LINK_HOST}/s/#v3.${DELIVERY_ID}.${DELIVERY_LINK_KEY}`;
 const EXPIRES_AT = '2026-10-29T12:05:00.000Z';
 
 function managedStatus(overrides: Partial<Awaited<ReturnType<ManagedDeliveryClient['getStatus']>>> = {}) {
@@ -84,8 +86,11 @@ describe('protected delivery', () => {
     expect(staged).toEqual({
       deliveryRef: DELIVERY_REF, id: DELIVERY_ID, expiresAt: EXPIRES_AT, state: 'staged',
     });
-    expect(JSON.stringify(db.raw.prepare('SELECT * FROM protected_deliveries').all()))
-      .not.toContain('managed.example');
+    const durable = JSON.stringify(db.raw.prepare('SELECT * FROM protected_deliveries').all());
+    expect(durable).not.toContain('managed.example');
+    expect(durable).not.toContain(DELIVERY_LINK);
+    expect(durable).not.toContain(DELIVERY_LINK_KEY);
+    expect(durable).not.toContain(TEST_LINK_HOST);
   });
 
   it('sends a resolved link with its persisted WhatsApp id and retains no link body', async () => {
@@ -137,7 +142,7 @@ describe('protected delivery', () => {
       sends: db.raw.prepare('SELECT * FROM outbound_sends').all(),
     });
     expect(durable).not.toContain(TEST_LINK_HOST);
-    expect(durable).not.toContain('c'.repeat(43));
+    expect(durable).not.toContain(DELIVERY_LINK_KEY);
   });
 
   it('treats a missing transport acknowledgement as ambiguous instead of submitted', async () => {
