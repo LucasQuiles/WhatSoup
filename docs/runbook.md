@@ -3123,6 +3123,75 @@ their referenced outbound audit rows until that deletion. Check
 sweep. A missing runtime credential is a startup configuration error, so correct
 the service environment before restarting the agent.
 
+### Secure-handoff consumer worker (pilot)
+
+The consumer worker is a separate process for a small, administrator-registered
+fixed adapter set. It is started with:
+
+```sh
+npm run secure-handoff:consumer -- --config /absolute/private/consumer.json
+```
+
+Use the schema-68 database for the same instance and a private, owner-controlled
+configuration file. The worker rejects a relative, unreadable, over-16-KiB,
+symlinked, non-regular, non-private, or malformed configuration file. It also
+rejects a database that lacks migration 68 or exceeds the running binary's
+schema ceiling. Complete the instance's schema migration and verify the
+compatible binary before starting the worker.
+
+Before starting, provision `LINKS_MANAGED_TRANSPORT_TOKEN` and
+`LINKS_MANAGED_CONSUMER_TOKEN` through the approved service credential mechanism.
+Provision a distinct store bearer under the environment name selected by
+`saveStore.authorizationEnv` only when saving is configured. Keep transport
+and consumer bearers separate and their values out of configuration files.
+The worker's config
+must contain only fixed HTTPS endpoints and fixed resource, principal, action,
+and username fields. Secret values are accepted only from a public intake and
+are never valid worker configuration, model input, prompt text, or tool
+arguments.
+
+For each matching, unexpired local metadata row, the worker reads remote status
+using the transport bearer, rechecks the exact resource, principal, kind, and
+action, and calls the consumer only for `submitted` rows. The fixed adapters
+perform these exact operations:
+
+- Password: `POST` the configured username and the one-time password value to
+  the configured login target.
+- Token: `GET` the configured validation target with the one-time token as its
+  bearer credential.
+- MFA: `POST` the configured username, one-time code, and fixed operation ID
+  to the configured challenge target. The request must match the live,
+  consumer-registered challenge; this worker neither creates nor extends one.
+
+The consumer verifies the returned intake ID, resource, principal, kind,
+action, and MFA operation ID before an adapter receives a value. It reports
+success or failure with the returned receipt. A transport or consumer failure,
+unexpected binding, unexpected response, or fixed-target uncertainty is
+ambiguous. In particular, after a restart a row already in `consuming` is only
+marked ambiguous; no target action is replayed. An ambiguous row remains for
+adapter-specific reconciliation and must not be automatically retried.
+
+The process keeps at most 1,000 consumer operations and 1,000 terminal intake
+IDs in memory. The terminal cache skips repeat polling of an observed terminal
+row while that entry remains cached. Concurrent duplicates share the same
+pending operation. If all 1,000 consumer entries are active, the worker refuses
+a new admission before it calls Links. Restart or settled-entry eviction removes
+only this local reuse cache; Links' atomic consume fence still prevents a value
+from being handed to an adapter again. After restart, a terminal remote row can
+be checked again but does not invoke its fixed adapter.
+
+Credential saving requires two explicit bindings: the submitting person chooses
+save, and the matching password or token adapter names one approved
+service-owned store. The store is fixed by name, resource, principal, action,
+HTTPS endpoint, and its environment-named bearer. MFA has no store binding and
+cannot be saved. Do not add a generic credential-store endpoint or pass a save
+destination through an intake.
+
+This is a pilot same-UID process arrangement, not operating-system isolation or
+terminal qualification. Operators with the same OS account remain trusted.
+Do not describe an automated authenticator, dummy target, or this consumer
+worker as a physical phone or a RustDesk login.
+
 ---
 
 ## 8. Monitoring

@@ -6,6 +6,11 @@ import {
   FixedIntakeConsumer,
   type FixedConsumerAdapter,
 } from '../../src/secure-handoff/consumer.ts';
+import {
+  createFixedHttpCredentialStore,
+  createServiceOwnedCredentialStore,
+  type ServiceOwnedCredentialStore,
+} from '../../src/secure-handoff/credential-store.ts';
 
 const INTAKE_ID = 'I'.repeat(22);
 const RECEIPT = 'R'.repeat(43);
@@ -65,7 +70,37 @@ async function loginFixture(): Promise<{ endpoint: string; accepted: Array<Recor
   return { endpoint: `http://127.0.0.1:${address.port}/login`, accepted };
 }
 
-async function restartLinksFixture(): Promise<{ fetch: typeof globalThis.fetch; consumeRequests: () => number }> {
+async function credentialStoreFixture(): Promise<{ endpoint: string; values: string[]; authorization: string | undefined }> {
+  const values: string[] = [];
+  let authorization: string | undefined;
+  const server = createServer((request, response) => {
+    let body = '';
+    request.setEncoding('utf8');
+    request.on('data', (chunk) => { body += chunk; });
+    request.on('end', () => {
+      const payload = JSON.parse(body) as Record<string, unknown>;
+      authorization = request.headers.authorization;
+      if (request.method !== 'POST' || request.url !== '/credential' || typeof payload.value !== 'string') {
+        response.writeHead(400).end(JSON.stringify({ stored: false }));
+        return;
+      }
+      values.push(payload.value);
+      response.writeHead(204).end();
+    });
+  });
+  servers.push(server);
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('fixture did not bind TCP');
+  return {
+    endpoint: `http://127.0.0.1:${address.port}/credential`,
+    values,
+    get authorization() { return authorization; },
+  };
+}
+
+async function restartLinksFixture(save = false): Promise<{ fetch: typeof globalThis.fetch; consumeRequests: () => number }> {
   let state: 'awaiting_input' | 'consuming' | 'ambiguous' = 'awaiting_input';
   let consumes = 0;
   let ambiguousAttempts = 0;
@@ -85,7 +120,7 @@ async function restartLinksFixture(): Promise<{ fetch: typeof globalThis.fetch; 
           return;
         }
         state = 'consuming';
-        response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(consumed()));
+        response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(consumed({ save })));
         return;
       }
       if (request.url === `/s/api/v1/intakes/${INTAKE_ID}/ambiguous`) {
@@ -117,7 +152,11 @@ async function restartLinksFixture(): Promise<{ fetch: typeof globalThis.fetch; 
   };
 }
 
-function fixedAdapter(endpoint: string, fetch: typeof globalThis.fetch): FixedConsumerAdapter {
+function fixedAdapter(
+  endpoint: string,
+  fetch: typeof globalThis.fetch,
+  store?: ServiceOwnedCredentialStore,
+): FixedConsumerAdapter {
   return createFixedHttpLoginAdapter({
     resourceId: 'dummy-login',
     principal: 'alice',
@@ -125,10 +164,164 @@ function fixedAdapter(endpoint: string, fetch: typeof globalThis.fetch): FixedCo
     endpoint: 'https://fixed-dummy.invalid/login',
     username: 'dummy-user',
     fetch: async (_url, init) => fetch(endpoint, init),
+    ...(store === undefined ? {} : { store }),
+  });
+}
+
+function registeredPasswordStore(persist: (value: string) => Promise<void> | void): ServiceOwnedCredentialStore {
+  return createServiceOwnedCredentialStore({
+    name: 'dummy-password-store',
+    resourceId: 'dummy-login',
+    principal: 'alice',
+    action: 'sign_in',
+    persist,
   });
 }
 
 describe('fixed intake consumer', () => {
+  it('bounds settled operations while the remote consume fence prevents replay after eviction', async () => {
+    const consumedIds = new Set<string>();
+    let consumeRequests = 0;
+    let actions = 0;
+    const consumer = new FixedIntakeConsumer({
+      baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token',
+      adapters: [{ resourceId: 'dummy-login', principal: 'alice', action: 'sign_in', kinds: ['password'],
+        approvedSaveStore: null, async execute() { actions++; return 'succeeded'; } }],
+      fetch: async (url) => {
+        const parts = new URL(String(url)).pathname.split('/');
+        const id = parts.at(-2)!;
+        if (parts.at(-1) === 'consume') {
+          consumeRequests++;
+          if (consumedIds.has(id)) return json({ error: 'already_consumed' }, 409);
+          consumedIds.add(id);
+          return json(consumed({ id }));
+        }
+        return json({ id, state: parts.at(-1) === 'complete' ? 'succeeded' : 'ambiguous' });
+      },
+    });
+    for (let index = 0; index < 1_001; index++) {
+      const id = String(index).padStart(22, 'I');
+      await expect(consumer.execute({ intakeId: id, resourceId: 'dummy-login' }))
+        .resolves.toEqual({ id, state: 'succeeded' });
+    }
+    const firstId = '0'.padStart(22, 'I');
+    await expect(consumer.execute({ intakeId: firstId, resourceId: 'dummy-login' }))
+      .resolves.toEqual({ id: firstId, state: 'ambiguous' });
+    expect(consumeRequests).toBe(1_002);
+    expect(actions).toBe(1_001);
+  });
+
+  it('rejects excess concurrent operations without evicting an active operation', async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    let consumeRequests = 0;
+    const consumer = new FixedIntakeConsumer({
+      baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token',
+      adapters: [{ resourceId: 'dummy-login', principal: 'alice', action: 'sign_in', kinds: ['password'],
+        approvedSaveStore: null, async execute() { return 'succeeded'; } }],
+      fetch: async (url) => {
+        const parts = new URL(String(url)).pathname.split('/');
+        const id = parts.at(-2)!;
+        if (parts.at(-1) === 'consume') {
+          consumeRequests++;
+          await pending;
+          return json(consumed({ id }));
+        }
+        return json({ id, state: 'succeeded' });
+      },
+    });
+    const operations = Array.from({ length: 1_000 }, (_, index) =>
+      consumer.execute({ intakeId: String(index).padStart(22, 'I'), resourceId: 'dummy-login' }));
+    try {
+      const excess = consumer.execute({ intakeId: 'X'.repeat(22), resourceId: 'dummy-login' });
+      let admissionError: unknown;
+      void excess.catch((error: unknown) => { admissionError = error; });
+      await Promise.resolve();
+      expect(admissionError).toEqual(new Error('consumer capacity is unavailable'));
+      expect(consumer.execute({ intakeId: '0'.padStart(22, 'I'), resourceId: 'dummy-login' })).toBe(operations[0]);
+      expect(consumeRequests).toBe(1_000);
+    } finally {
+      release();
+      await Promise.all(operations);
+    }
+  });
+
+  it('retains the registered adapter binding and operation after caller mutation', async () => {
+    let originalCalls = 0;
+    let replacementCalls = 0;
+    const kinds: Array<'password' | 'mfa'> = ['password'];
+    const adapter: FixedConsumerAdapter = {
+      resourceId: 'dummy-login', principal: 'alice', action: 'sign_in', kinds, approvedSaveStore: null,
+      async execute() {
+        expect(this.principal).toBe('alice');
+        originalCalls++;
+        return 'succeeded';
+      },
+    };
+    const consumer = new FixedIntakeConsumer({
+      baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token', adapters: [adapter],
+      fetch: async (url) => String(url).endsWith('/consume')
+        ? json(consumed()) : json({ id: INTAKE_ID, state: 'succeeded' }),
+    });
+    adapter.execute = async () => { replacementCalls++; return 'succeeded'; };
+    Object.assign(adapter, { principal: 'mallory', resourceId: 'redirected', action: 'other' });
+    kinds.splice(0, 1, 'mfa');
+
+    await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-login' }))
+      .resolves.toEqual({ id: INTAKE_ID, state: 'succeeded' });
+    expect(originalCalls).toBe(1);
+    expect(replacementCalls).toBe(0);
+  });
+
+  it('reconciles a consuming intake without retrieving or replaying its value', async () => {
+    const calls: string[] = [];
+    const fixture = await loginFixture();
+    const consumer = new FixedIntakeConsumer({
+      baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token',
+      adapters: [fixedAdapter(fixture.endpoint, globalThis.fetch)],
+      fetch: async (url) => {
+        calls.push(String(url));
+        return json({ id: INTAKE_ID, state: 'ambiguous', value: SECRET });
+      },
+    });
+    const request = { intakeId: INTAKE_ID, resourceId: 'dummy-login' };
+
+    await expect(consumer.reconcileAmbiguous(request)).resolves.toEqual({ id: INTAKE_ID, state: 'ambiguous' });
+    await expect(consumer.execute(request)).resolves.toEqual({ id: INTAKE_ID, state: 'ambiguous' });
+    await expect(consumer.reconcileAmbiguous({ ...request, resourceId: 'other-resource' })).rejects.toThrow('consumer request is invalid');
+
+    expect(calls).toEqual([`https://links.example.test/s/api/v1/intakes/${INTAKE_ID}/ambiguous`]);
+    expect(fixture.accepted).toEqual([]);
+  });
+
+  it('does not interrupt an active fixed action when reconciliation is requested', async () => {
+    let finish: (() => void) | undefined;
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    const calls: string[] = [];
+    const adapter: FixedConsumerAdapter = {
+      resourceId: 'dummy-login', principal: 'alice', action: 'sign_in', kinds: ['password'], approvedSaveStore: null,
+      async execute() { await pending; return 'succeeded'; },
+    };
+    const consumer = new FixedIntakeConsumer({
+      baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token', adapters: [adapter],
+      fetch: async (url) => {
+        calls.push(String(url));
+        return String(url).endsWith('/consume') ? json(consumed()) : json({ id: INTAKE_ID, state: 'succeeded' });
+      },
+    });
+    const request = { intakeId: INTAKE_ID, resourceId: 'dummy-login' };
+    const executing = consumer.execute(request);
+    const reconciling = consumer.reconcileAmbiguous(request);
+    finish!();
+
+    await expect(executing).resolves.toEqual({ id: INTAKE_ID, state: 'succeeded' });
+    await expect(reconciling).resolves.toEqual({ id: INTAKE_ID, state: 'succeeded' });
+    expect(calls).toEqual([
+      `https://links.example.test/s/api/v1/intakes/${INTAKE_ID}/consume`,
+      `https://links.example.test/s/api/v1/intakes/${INTAKE_ID}/complete`,
+    ]);
+  });
+
   it('uses a consumed credential only in the registered HTTP login and returns content-free completion', async () => {
     const fixture = await loginFixture();
     const calls: FetchCall[] = [];
@@ -275,10 +468,14 @@ describe('fixed intake consumer', () => {
     expect(consumeCalls).toBe(1);
   });
 
-  it('does not repeat fixed work after restart when the backend rejects a second consume', async () => {
+  it('does not replay a failed store write after restart when the backend rejects a second consume', async () => {
     const login = await loginFixture();
-    const links = await restartLinksFixture();
-    const adapter = fixedAdapter(login.endpoint, globalThis.fetch);
+    const links = await restartLinksFixture(true);
+    let storeAttempts = 0;
+    const adapter = fixedAdapter(login.endpoint, globalThis.fetch, registeredPasswordStore(() => {
+      storeAttempts++;
+      throw new Error('fixture store is unavailable');
+    }));
     const options = {
       baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token', adapters: [adapter], fetch: links.fetch,
     };
@@ -289,6 +486,7 @@ describe('fixed intake consumer', () => {
     await expect(afterRestart.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-login' })).resolves.toEqual({ id: INTAKE_ID, state: 'ambiguous' });
     expect(links.consumeRequests()).toBe(2);
     expect(login.accepted).toEqual([{ username: 'dummy-user', password: SECRET }]);
+    expect(storeAttempts).toBe(1);
   });
 
   it('reconciles a lost consume response as ambiguous and never sends a second consume request', async () => {
@@ -447,6 +645,170 @@ describe('fixed intake consumer', () => {
       resourceId: 'dummy-login', principal: 'alice', action: 'sign_in',
       endpoint: 'https://fixed-dummy.invalid/login', username: 'dummy-user', approvedSaveStore: 'unsupported-store',
     } as unknown as Parameters<typeof createFixedHttpLoginAdapter>[0])).toThrow('fixed HTTP login adapter is invalid');
+  });
+
+  it('persists the exact password only after a successful fixed login with Links save consent', async () => {
+    const fixture = await loginFixture();
+    const writes: string[] = [];
+    const adapter = fixedAdapter(fixture.endpoint, globalThis.fetch, registeredPasswordStore(async (value) => {
+      expect(fixture.accepted).toEqual([{ username: 'dummy-user', password: SECRET }]);
+      writes.push(value);
+    }));
+    const consumer = new FixedIntakeConsumer({
+      baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token', adapters: [adapter],
+      fetch: async (url) => {
+        if (String(url).endsWith('/consume')) return json(consumed({ save: true }));
+        if (String(url).endsWith('/complete')) return json({ id: INTAKE_ID, state: 'succeeded' });
+        throw new Error('unexpected Links route');
+      },
+    });
+
+    await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-login' }))
+      .resolves.toEqual({ id: INTAKE_ID, state: 'succeeded' });
+
+    expect(writes).toEqual([SECRET]);
+  });
+
+  it('writes a consented password to the configured fixed HTTPS store after its fixed login', async () => {
+    const login = await loginFixture();
+    const credentialStore = await credentialStoreFixture();
+    const store = createFixedHttpCredentialStore({
+      name: 'dummy-password-store',
+      resourceId: 'dummy-login',
+      principal: 'alice',
+      action: 'sign_in',
+      endpoint: 'https://credential-store.invalid/credential',
+      authorization: 'store-service-token',
+      fetch: async (_url, init) => fetch(credentialStore.endpoint, init),
+    });
+    const adapter = fixedAdapter(login.endpoint, globalThis.fetch, store);
+    const consumer = new FixedIntakeConsumer({
+      baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token', adapters: [adapter],
+      fetch: async (url) => {
+        if (String(url).endsWith('/consume')) return json(consumed({ save: true }));
+        if (String(url).endsWith('/complete')) return json({ id: INTAKE_ID, state: 'succeeded' });
+        throw new Error('unexpected Links route');
+      },
+    });
+
+    await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-login' }))
+      .resolves.toEqual({ id: INTAKE_ID, state: 'succeeded' });
+
+    expect(login.accepted).toEqual([{ username: 'dummy-user', password: SECRET }]);
+    expect(credentialStore.values).toEqual([SECRET]);
+    expect(credentialStore.authorization).toBe('Bearer store-service-token');
+  });
+
+  it('preserves a credential value exactly when its registered store persists it', async () => {
+    const writes: string[] = [];
+    const store = registeredPasswordStore((value) => { writes.push(value); });
+    const value = '  exact opaque value  ';
+
+    await store.save(value);
+
+    expect(writes).toEqual([value]);
+  });
+
+  it('snapshots the fixed writer and login account at registration', async () => {
+    const fixture = await loginFixture();
+    const firstWrites: string[] = [];
+    const redirectedWrites: string[] = [];
+    const storeOptions = {
+      name: 'dummy-password-store',
+      resourceId: 'dummy-login',
+      principal: 'alice',
+      action: 'sign_in',
+      persist: (value: string) => { firstWrites.push(value); },
+    };
+    const store = createServiceOwnedCredentialStore(storeOptions);
+    storeOptions.persist = (value) => { redirectedWrites.push(value); };
+    const adapterOptions = {
+      resourceId: 'dummy-login',
+      principal: 'alice',
+      action: 'sign_in',
+      endpoint: 'https://fixed-dummy.invalid/login',
+      username: 'dummy-user',
+      store,
+      fetch: async (_url: RequestInfo | URL, init?: RequestInit) => fetch(fixture.endpoint, init),
+    };
+    const adapter = createFixedHttpLoginAdapter(adapterOptions);
+    adapterOptions.username = 'redirected-user';
+
+    await expect(adapter.execute({ value: SECRET, kind: 'password', saveStore: 'dummy-password-store' }))
+      .resolves.toBe('succeeded');
+
+    expect(fixture.accepted).toEqual([{ username: 'dummy-user', password: SECRET }]);
+    expect(firstWrites).toEqual([SECRET]);
+    expect(redirectedWrites).toEqual([]);
+  });
+
+  it('does not persist when Links omitted save consent or the fixed login failed', async () => {
+    const fixture = await loginFixture();
+    const writes: string[] = [];
+    const adapter = fixedAdapter(fixture.endpoint, globalThis.fetch, registeredPasswordStore((value) => { writes.push(value); }));
+    const noConsent = new FixedIntakeConsumer({
+      baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token', adapters: [adapter],
+      fetch: async (url) => {
+        if (String(url).endsWith('/consume')) return json(consumed());
+        if (String(url).endsWith('/complete')) return json({ id: INTAKE_ID, state: 'succeeded' });
+        throw new Error('unexpected Links route');
+      },
+    });
+    const failedLogin = new FixedIntakeConsumer({
+      baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token', adapters: [adapter],
+      fetch: async (url) => {
+        if (String(url).endsWith('/consume')) return json(consumed({ value: 'wrong-password', save: true }));
+        if (String(url).endsWith('/complete')) return json({ id: INTAKE_ID, state: 'failed' });
+        throw new Error('unexpected Links route');
+      },
+    });
+
+    await expect(noConsent.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-login' }))
+      .resolves.toEqual({ id: INTAKE_ID, state: 'succeeded' });
+    await expect(failedLogin.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-login' }))
+      .resolves.toEqual({ id: INTAKE_ID, state: 'failed' });
+
+    expect(writes).toEqual([]);
+    expect(fixture.accepted).toEqual([{ username: 'dummy-user', password: SECRET }]);
+  });
+
+  it('denies unregistered stores and MFA before the fixed password login can run', async () => {
+    const fixture = await loginFixture();
+    const writes: string[] = [];
+    const adapter = fixedAdapter(fixture.endpoint, globalThis.fetch, registeredPasswordStore((value) => { writes.push(value); }));
+
+    await expect(adapter.execute({ value: SECRET, kind: 'password', saveStore: 'other-store' })).rejects.toThrow('fixed login outcome is ambiguous');
+    await expect(adapter.execute({ value: SECRET, kind: 'mfa', saveStore: 'dummy-password-store' })).rejects.toThrow('fixed login outcome is ambiguous');
+
+    expect(fixture.accepted).toEqual([]);
+    expect(writes).toEqual([]);
+  });
+
+  it('marks a store failure ambiguous and does not replay the login or store write', async () => {
+    const fixture = await loginFixture();
+    let storeAttempts = 0;
+    let consumeAttempts = 0;
+    const adapter = fixedAdapter(fixture.endpoint, globalThis.fetch, registeredPasswordStore(() => {
+      storeAttempts++;
+      throw new Error('fixture store is unavailable');
+    }));
+    const consumer = new FixedIntakeConsumer({
+      baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token', adapters: [adapter],
+      fetch: async (url) => {
+        if (String(url).endsWith('/consume')) { consumeAttempts++; return json(consumed({ save: true })); }
+        if (String(url).endsWith('/ambiguous')) return json({ id: INTAKE_ID, state: 'ambiguous' });
+        throw new Error('unexpected Links route');
+      },
+    });
+
+    await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-login' }))
+      .resolves.toEqual({ id: INTAKE_ID, state: 'ambiguous' });
+    await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-login' }))
+      .resolves.toEqual({ id: INTAKE_ID, state: 'ambiguous' });
+
+    expect(fixture.accepted).toEqual([{ username: 'dummy-user', password: SECRET }]);
+    expect(storeAttempts).toBe(1);
+    expect(consumeAttempts).toBe(1);
   });
 
   it('does not expose its consumer bearer through ordinary object inspection', () => {

@@ -1,3 +1,9 @@
+import { isNonEmptyString, isRecord, requireRecord } from '../lib/type-guards.ts';
+import {
+  isServiceOwnedCredentialStore,
+  type ServiceOwnedCredentialStore,
+} from './credential-store.ts';
+
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 const OPAQUE_ID = /^[A-Za-z0-9_-]{22}$/;
@@ -5,6 +11,7 @@ const RECEIPT = /^[A-Za-z0-9_-]{43}$/;
 const RESOURCE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
+const MAX_TRACKED_OPERATIONS = 1_000;
 
 export type ConsumerKind = 'password' | 'token' | 'mfa';
 export type ConsumerOutcome = 'succeeded' | 'failed' | 'ambiguous';
@@ -14,6 +21,8 @@ type FixedHttpLoginOptions = {
   action: string;
   endpoint: string;
   username: string;
+  /** An administrator-registered store; no caller can select its destination. */
+  store?: ServiceOwnedCredentialStore;
   fetch?: FetchLike;
 };
 
@@ -47,6 +56,7 @@ type ConsumedBinding = {
 };
 
 type PublicOutcome = { id: string; state: ConsumerOutcome };
+type TrackedOperation = { resourceId: string; result: Promise<PublicOutcome>; settled: boolean };
 
 type FixedConsumerOptions = {
   baseUrl: string;
@@ -65,7 +75,7 @@ export class FixedIntakeConsumer {
   readonly #token: string;
   readonly #adapters = new Map<string, FixedConsumerAdapter>();
   readonly #fetchFn: FetchLike;
-  readonly #operations = new Map<string, { resourceId: string; result: Promise<PublicOutcome> }>();
+  readonly #operations = new Map<string, TrackedOperation>();
 
   constructor(options: FixedConsumerOptions) {
     const base = new URL(options.baseUrl);
@@ -75,7 +85,17 @@ export class FixedIntakeConsumer {
     }
     for (const adapter of options.adapters) {
       if (!validAdapter(adapter) || this.#adapters.has(adapter.resourceId)) throw new Error('fixed consumer registry is invalid');
-      this.#adapters.set(adapter.resourceId, adapter);
+      const registered: FixedConsumerAdapter = {
+        resourceId: adapter.resourceId,
+        principal: adapter.principal,
+        action: adapter.action,
+        kinds: Object.freeze([...adapter.kinds]),
+        mfaOperationId: adapter.mfaOperationId,
+        approvedSaveStore: adapter.approvedSaveStore,
+        execute: adapter.execute,
+      };
+      registered.execute = adapter.execute.bind(registered);
+      this.#adapters.set(registered.resourceId, Object.freeze(registered));
     }
     this.#baseUrl = options.baseUrl.replace(/\/$/, '');
     this.#token = options.token;
@@ -86,13 +106,38 @@ export class FixedIntakeConsumer {
     if (!isExecuteRequest(request)) return Promise.reject(new Error('consumer request is invalid'));
     const adapter = this.#adapters.get(request.resourceId);
     if (!adapter) return Promise.reject(new Error('consumer request is invalid'));
-    const existing = this.#operations.get(request.intakeId);
-    if (existing) return existing.resourceId === request.resourceId
+    return this.#track(request.intakeId, request.resourceId, () => this.#executeOnce(request.intakeId, adapter));
+  }
+
+  reconcileAmbiguous(request: unknown): Promise<PublicOutcome> {
+    if (!isExecuteRequest(request) || !this.#adapters.has(request.resourceId)) {
+      return Promise.reject(new Error('consumer request is invalid'));
+    }
+    // A restarted worker cannot know whether a prior action reached its target.
+    return this.#track(request.intakeId, request.resourceId, () => this.#markAmbiguous(request.intakeId));
+  }
+
+  #track(intakeId: string, resourceId: string, run: () => Promise<PublicOutcome>): Promise<PublicOutcome> {
+    const existing = this.#operations.get(intakeId);
+    if (existing) return existing.resourceId === resourceId
       ? existing.result
       : Promise.reject(new Error('consumer request is invalid'));
-    const operation = this.#executeOnce(request.intakeId, adapter);
-    this.#operations.set(request.intakeId, { resourceId: request.resourceId, result: operation });
-    return operation;
+    if (this.#operations.size >= MAX_TRACKED_OPERATIONS) {
+      for (const [id, tracked] of this.#operations) {
+        if (tracked.settled) {
+          // Links remains the durable consume fence after cache eviction or restart.
+          this.#operations.delete(id);
+          break;
+        }
+      }
+    }
+    if (this.#operations.size >= MAX_TRACKED_OPERATIONS) {
+      return Promise.reject(new Error('consumer capacity is unavailable'));
+    }
+    const tracked: TrackedOperation = { resourceId, result: run(), settled: false };
+    tracked.result = tracked.result.finally(() => { tracked.settled = true; });
+    this.#operations.set(intakeId, tracked);
+    return tracked.result;
   }
 
   async #executeOnce(intakeId: string, adapter: FixedConsumerAdapter): Promise<PublicOutcome> {
@@ -123,9 +168,9 @@ export class FixedIntakeConsumer {
 
   async #complete(id: string, receipt: string, outcome: Exclude<ConsumerOutcome, 'ambiguous'>): Promise<PublicOutcome> {
     try {
-      const response = record(await this.#request(`/intakes/${encodeURIComponent(id)}/complete`, {
+      const response = requireRecord(await this.#request(`/intakes/${encodeURIComponent(id)}/complete`, {
         method: 'POST', body: JSON.stringify({ receipt, outcome }),
-      }));
+      }), 'Links completion');
       if (response.id !== id || response.state !== outcome) throw new Error('invalid completion');
       return { id, state: outcome };
     } catch {
@@ -135,10 +180,10 @@ export class FixedIntakeConsumer {
 
   async #markAmbiguous(id: string): Promise<PublicOutcome> {
     try {
-      const response = record(await this.#request(`/intakes/${encodeURIComponent(id)}/ambiguous`, { method: 'POST', body: '{}' }));
+      const response = requireRecord(await this.#request(`/intakes/${encodeURIComponent(id)}/ambiguous`, { method: 'POST', body: '{}' }), 'Links reconciliation');
       if (response.id !== id || response.state !== 'ambiguous') throw new Error('invalid ambiguous response');
     } catch {
-      // The consumer must never replay a value merely because reconciliation was unavailable.
+      // intentional: reconciliation failure must still return ambiguous; never replay a consumed value or claim success.
     }
     return { id, state: 'ambiguous' };
   }
@@ -165,34 +210,48 @@ export class FixedIntakeConsumer {
 /** A fixed HTTP login operation, useful for a specifically registered dummy or service account. */
 export function createFixedHttpLoginAdapter(options: FixedHttpLoginOptions): FixedConsumerAdapter {
   if (!isFixedHttpLoginOptions(options)) throw new Error('fixed HTTP login adapter is invalid');
+  const resourceId = options.resourceId;
+  const principal = options.principal;
+  const action = options.action;
   const endpoint = new URL(options.endpoint);
-  if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash || options.username.length === 0) {
+  const username = options.username;
+  if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash || username.length === 0) {
+    throw new Error('fixed HTTP login adapter is invalid');
+  }
+  const store = options.store ?? null;
+  if (store !== null && (store.resourceId !== resourceId || store.principal !== principal || store.action !== action)) {
     throw new Error('fixed HTTP login adapter is invalid');
   }
   const fetchFn = options.fetch ?? fetch;
-  return {
-    resourceId: options.resourceId,
-    principal: options.principal,
-    action: options.action,
-    kinds: ['password'],
-    approvedSaveStore: null,
+  return Object.freeze<FixedConsumerAdapter>({
+    resourceId,
+    principal,
+    action,
+    kinds: Object.freeze(['password'] as const),
+    approvedSaveStore: store?.name ?? null,
     async execute(input) {
+      if (input.kind !== 'password' || (input.saveStore !== null && input.saveStore !== store?.name)) {
+        throw new Error('fixed login outcome is ambiguous');
+      }
       try {
         const response = await fetchFn(endpoint, {
           method: 'POST',
           headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
-          body: JSON.stringify({ username: options.username, password: input.value }),
+          body: JSON.stringify({ username, password: input.value }),
           redirect: 'error',
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
-        if (response.status === 200 || response.status === 204) return 'succeeded';
+        if (response.status === 200 || response.status === 204) {
+          if (input.saveStore !== null) await store?.save(input.value);
+          return 'succeeded';
+        }
         if (response.status === 401 || response.status === 403) return 'failed';
         throw new Error('fixed login outcome is ambiguous');
       } catch {
         throw new Error('fixed login outcome is ambiguous');
       }
     },
-  };
+  });
 }
 
 function isExecuteRequest(value: unknown): value is { intakeId: string; resourceId: string } {
@@ -201,7 +260,8 @@ function isExecuteRequest(value: unknown): value is { intakeId: string; resource
 }
 
 function validAdapter(adapter: FixedConsumerAdapter): boolean {
-  return RESOURCE_ID.test(adapter.resourceId)
+  return typeof adapter.execute === 'function'
+    && RESOURCE_ID.test(adapter.resourceId)
     && validText(adapter.principal)
     && validText(adapter.action)
     && adapter.kinds.length > 0
@@ -211,7 +271,7 @@ function validAdapter(adapter: FixedConsumerAdapter): boolean {
 }
 
 function parseConsumed(value: unknown): ConsumedBinding {
-  const data = record(value);
+  const data = requireRecord(value, 'Links consumed intake');
   if (!exactKeys(data, ['id', 'resourceId', 'principal', 'kind', 'action', 'operationId', 'value', 'save', 'receipt'])
     || typeof data.id !== 'string' || !OPAQUE_ID.test(data.id)
     || typeof data.resourceId !== 'string' || !RESOURCE_ID.test(data.resourceId)
@@ -245,7 +305,7 @@ function isKind(value: unknown): value is ConsumerKind {
 }
 
 function validText(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0 && value.length <= 256;
+  return isNonEmptyString(value) && value.length <= 256;
 }
 
 function validOperationId(value: unknown): value is string {
@@ -257,13 +317,18 @@ function validOperationId(value: unknown): value is string {
 
 function isFixedHttpLoginOptions(value: FixedHttpLoginOptions): boolean {
   return isRecord(value)
-    && (exactKeys(value, ['resourceId', 'principal', 'action', 'endpoint', 'username'])
-      || exactKeys(value, ['resourceId', 'principal', 'action', 'endpoint', 'username', 'fetch']))
+    && (
+      exactKeys(value, ['resourceId', 'principal', 'action', 'endpoint', 'username'])
+      || exactKeys(value, ['resourceId', 'principal', 'action', 'endpoint', 'username', 'fetch'])
+      || exactKeys(value, ['resourceId', 'principal', 'action', 'endpoint', 'username', 'store'])
+      || exactKeys(value, ['resourceId', 'principal', 'action', 'endpoint', 'username', 'store', 'fetch'])
+    )
     && typeof value.resourceId === 'string'
     && typeof value.principal === 'string'
     && typeof value.action === 'string'
     && typeof value.endpoint === 'string'
     && typeof value.username === 'string'
+    && (value.store === undefined || isServiceOwnedCredentialStore(value.store))
     && (value.fetch === undefined || typeof value.fetch === 'function');
 }
 
@@ -271,15 +336,6 @@ function exactKeys(value: Record<string, unknown>, keys: string[]): boolean {
   const actual = Object.keys(value).sort();
   const expected = [...keys].sort();
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function record(value: unknown): Record<string, unknown> {
-  if (!isRecord(value)) throw new Error('invalid Links response');
-  return value;
 }
 
 class LinksResponseError extends Error {
@@ -293,7 +349,7 @@ class LinksResponseError extends Error {
 
 async function errorCode(response: Response): Promise<string> {
   try {
-    const value = record(await readJson(response));
+    const value = requireRecord(await readJson(response), 'Links error');
     return typeof value.error === 'string' && /^[a-z_]{1,64}$/.test(value.error) ? value.error : 'unavailable';
   } catch {
     return 'unavailable';

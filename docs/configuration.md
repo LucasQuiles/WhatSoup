@@ -1159,6 +1159,72 @@ retention transaction. The timer runs once at startup and daily thereafter;
 by its latest successful sweep. The metadata contains delivery references and
 receipt state, never the RustDesk code, browser URL, or credential value.
 
+### Secure-handoff consumer worker (pilot)
+
+`npm run secure-handoff:consumer -- --config /absolute/private/consumer.json`
+starts a separate, administrator-operated consumer process. It is not part of
+the agent runtime and is not a model tool. The process accepts exactly one
+absolute `--config` path. Its current-user-owned parent directory and regular
+file must be private (no group or other permissions), non-symlinked, and no
+larger than 16 KiB. The JSON is non-secret, has no unknown fields, and has this
+shape:
+
+```json
+{
+  "databasePath": "/var/lib/whatsoup/dummy-pilot.sqlite",
+  "linksBaseUrl": "https://<approved-link-host>/s/api/v1",
+  "pollIntervalMs": 5000,
+  "adapters": [
+    {
+      "kind": "password",
+      "resourceId": "dummy-resource",
+      "principal": "dummy-user",
+      "action": "dummy-login",
+      "endpoint": "https://intake-target.invalid/fixed-login",
+      "username": "dummy-username",
+      "saveStore": {
+        "name": "dummy-approved-store",
+        "endpoint": "https://intake-target.invalid/fixed-store",
+        "authorizationEnv": "LINKS_MANAGED_DUMMY_STORE_TOKEN"
+      }
+    }
+  ]
+}
+```
+
+`linksBaseUrl` must be the canonical managed Links API,
+`https://<approved-link-host>/s/api/v1`: HTTPS on the default port with the
+fixed `/s/api/v1` path, on a host that is a hash-pinned canonical link host.
+The source holds only SHA-256 pins of the approved hosts
+(`src/core/protected-delivery-pins.ts`), so the real host comes from this
+private file, and startup fails for any other host. Each adapter fixes its HTTPS target,
+resource, principal, and action at startup. A password adapter also fixes a
+username; a token adapter omits `username`; an MFA adapter supplies both
+`username` and the consumer's fixed `operationId`. Runtime rows, agent tools,
+and model input cannot select a destination, command, account, or operation.
+
+The worker requires separate non-empty service-environment bearer values in
+`LINKS_MANAGED_TRANSPORT_TOKEN` and `LINKS_MANAGED_CONSUMER_TOKEN`. They must
+be different credentials in normal operation: the transport bearer only reads
+the local request's safe remote metadata, while the consumer bearer receives a
+value once for the matching fixed adapter. Put neither bearer in this JSON,
+instance `config.json`, prompts, tool arguments, logs, or model context.
+`saveStore.authorizationEnv` similarly names a service-environment bearer; its
+value is never configuration data.
+
+Saving is opt-in twice. Password and token adapters may name one
+administrator-registered `saveStore`, bound to the same resource, principal,
+and action, and the person submitting the intake must explicitly request save.
+The worker then writes only to that named store. Omit `saveStore` to prohibit
+save. MFA adapters have no `saveStore` field and always prohibit persistence.
+
+The worker opens the configured database read-only and refuses startup unless
+the database is compatible with the running binary and records migration 68.
+Migration 68 supplies the metadata-only `protected_secret_inputs` table; it
+does not persist credential values, browser URLs, or upload URLs. Start the
+worker only after the instance has applied that migration. This pilot does
+not qualify standalone terminal agents or operating-system isolation.
+
 ### `memory`
 
 `memory` is the canonical BYOK configuration block. It owns every memory/search setting that used to be spread across flat fields such as `pineconeIndex`, hardwired namespace literals, and code-level knowledge profiles.

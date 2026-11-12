@@ -126,6 +126,16 @@
         "startImsgRpcRelay"
       ],
       "importGraph": true
+    },
+    {
+      "path": "src/secure-handoff/worker-main.ts",
+      "sha256": "89ab3bbaedf430b922c94fe82fc45074a837fd49d64a11200fa540c486e00f38",
+      "mustContain": [
+        "readConsumerConfig",
+        "createSecureHandoffWorker",
+        "consumer_started"
+      ],
+      "importGraph": true
     }
   ]
 }
