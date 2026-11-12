@@ -838,7 +838,7 @@ describe('LID resolver', () => {
 });
 
 describe('trusted actor access classification', () => {
-  const ADMIN_LID_NUM = '99900000000001';
+  const ADMIN_LID_NUM = '15550000000001';
   const classify = (): ((
     senderJid: string | null | undefined,
     database: Database,
