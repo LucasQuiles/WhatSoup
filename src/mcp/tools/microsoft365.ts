@@ -3,6 +3,7 @@ import { isAbsolute } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { z } from 'zod';
 
+import { probeGroupMembership, type GroupMembership } from '../../lib/process-group-membership.ts';
 import { SIGNAL } from '../../lib/signals.ts';
 import { isNonEmptyString, isRecord } from '../../lib/type-guards.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
@@ -14,6 +15,8 @@ const DEFAULT_STDERR_LIMIT_BYTES = 65_536;
 const TERMINATION_GRACE_MS = 250;
 const MAX_TIMEOUT_MS = 60_000;
 const MAX_CAPTURE_BYTES = 1_048_576;
+/** Bounds the synchronous `ps` read that runs only after a group kill reports EPERM. */
+const GROUP_PROBE_TIMEOUT_MS = 1_000;
 
 type McpOutcome =
   | { kind: 'result'; result: unknown }
@@ -53,6 +56,11 @@ export interface Microsoft365ToolOptions {
   timeoutMs?: number;
   maxStdoutBytes?: number;
   maxStderrBytes?: number;
+  /**
+   * Asks whether a process group still has a live member after a group kill reported EPERM.
+   * Defaults to one bounded `ps` read. Injectable for tests.
+   */
+  probeGroup?: (pgid: number) => GroupMembership;
 }
 
 interface ValidatedLaunch {
@@ -142,6 +150,7 @@ function requestMcp(
   timeoutMs: number,
   maxStdoutBytes: number,
   maxStderrBytes: number,
+  probeGroup: (pgid: number) => GroupMembership,
 ): Promise<McpOutcome> {
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
@@ -166,14 +175,27 @@ function requestMcp(
       resolve(next);
     };
 
+    const groupHasNoLiveMember = (pgid: number): boolean => {
+      try {
+        return probeGroup(pgid) === 'no-live-members';
+      } catch {
+        // A probe that throws proves nothing, so the group counts as live.
+        return false;
+      }
+    };
+
     const signalGroup = (signal: NodeJS.Signals): void => {
       const pid = child.pid;
       if (!Number.isSafeInteger(pid) || pid === undefined || pid <= 0) return;
       try {
         process.kill(-pid, signal);
       } catch (error) {
-        // Only ESRCH proves the group already exited; other failures leave cleanup unproven.
-        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') outcome = { kind: 'protocol_error' };
+        const code = (error as NodeJS.ErrnoException).code;
+        // ESRCH proves the group already exited. Darwin answers EPERM when every member left is
+        // an unreaped zombie, so EPERM keeps the outcome only when the group has no live member.
+        // Any other answer, or a probe that throws, leaves cleanup unproven.
+        if (code === 'ESRCH' || (code === 'EPERM' && groupHasNoLiveMember(pid))) return;
+        outcome = { kind: 'protocol_error' };
       }
     };
 
@@ -325,6 +347,7 @@ export function createMicrosoft365Tool(options: Microsoft365ToolOptions): ToolDe
   const timeoutMs = validatedPositiveOption(options.timeoutMs, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, 'timeoutMs');
   const maxStdoutBytes = validatedPositiveOption(options.maxStdoutBytes, DEFAULT_STDOUT_LIMIT_BYTES, MAX_CAPTURE_BYTES, 'maxStdoutBytes');
   const maxStderrBytes = validatedPositiveOption(options.maxStderrBytes, DEFAULT_STDERR_LIMIT_BYTES, MAX_CAPTURE_BYTES, 'maxStderrBytes');
+  const probeGroup = options.probeGroup ?? ((pgid: number) => probeGroupMembership(pgid, GROUP_PROBE_TIMEOUT_MS));
   const cacheKey = catalogueCacheKey(launch);
 
   const authorityFor = async (session: SessionContext): Promise<Microsoft365Authority | ReturnType<typeof toolError>> => {
@@ -406,6 +429,7 @@ export function createMicrosoft365Tool(options: Microsoft365ToolOptions): ToolDe
               timeoutMs,
               maxStdoutBytes,
               maxStderrBytes,
+              probeGroup,
             ).then(validCatalogue);
             cataloguesByAccountAndVersion.set(cacheKey, catalogue);
           }
@@ -445,6 +469,7 @@ export function createMicrosoft365Tool(options: Microsoft365ToolOptions): ToolDe
           timeoutMs,
           maxStdoutBytes,
           maxStderrBytes,
+          probeGroup,
         );
       } finally {
         authority.release?.();
