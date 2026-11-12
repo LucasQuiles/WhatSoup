@@ -3,13 +3,15 @@ import { accessSync, constants, lstatSync, readFileSync, readlinkSync, realpathS
 import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
+  M365_PLUGIN_KEY,
   m365MutationAdmissionGap,
   resolveM365MutationPolicy,
+  supportsM365BridgeProvider,
   type M365MutationPolicy,
   type ResolveM365MutationPolicyOptions,
 } from '../../core/m365-bridge-policy.ts';
 import { createChildLogger } from '../../logger.ts';
-import { isNonEmptyString } from '../../lib/type-guards.ts';
+import { isNonEmptyString, isRecord } from '../../lib/type-guards.ts';
 import type { SessionTokenRegistry } from '../../mcp/caller-attribution.ts';
 import type { ToolRegistry } from '../../mcp/registry.ts';
 import {
@@ -26,6 +28,8 @@ const PLUGIN_ENTRY = join('mcp-server', 'dist', 'index.cjs');
 const PLUGIN_NAME = 'microsoft_365';
 const PLUGIN_SERVER = 'microsoft_365';
 const PLUGIN_ENTRY_ARGUMENT = '${CLAUDE_PLUGIN_ROOT}/mcp-server/dist/index.cjs';
+/** The Claude CLI's record of marketplace installs, relative to its config directory. */
+const NATIVE_INSTALL_RECORD = join('plugins', 'installed_plugins.json');
 const AGENT365_LAUNCHER_RELEASE = /^[a-f0-9]{7,64}$/;
 const PYTHON_LAUNCHER_NAME = /^python(?:3(?:\.\d+)?)?$/;
 const GROUP_OR_WORLD_WRITABLE = 0o022;
@@ -153,12 +157,17 @@ function isCurrentUserOwned(stat: Stats): boolean {
   return uid !== undefined && stat.uid === uid;
 }
 
-function isTrustedInterpreterOwner(stat: Stats): boolean {
+function isTrustedOwner(stat: Stats): boolean {
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
   return uid !== undefined && (stat.uid === 0 || stat.uid === uid);
 }
 
-function hasSafeInterpreterPathChain(path: string): boolean {
+/**
+ * The path, every symlink hop and every ancestor belong to root or this user and are not
+ * group- or world-writable, apart from sticky directories. Used for the interpreter and
+ * for the plugin code that receives the bridge credentials.
+ */
+function hasSafePathChain(path: string): boolean {
   try {
     const pending = [path];
     const checked = new Set<string>();
@@ -167,7 +176,7 @@ function hasSafeInterpreterPathChain(path: string): boolean {
       if (checked.has(current)) continue;
       checked.add(current);
       const stat = lstatSync(current);
-      if (!isTrustedInterpreterOwner(stat)) return false;
+      if (!isTrustedOwner(stat)) return false;
       if (stat.isSymbolicLink()) {
         pending.push(resolve(dirname(current), readlinkSync(current)));
       } else if ((stat.mode & GROUP_OR_WORLD_WRITABLE) !== 0) {
@@ -201,7 +210,7 @@ function resolvePythonLauncher(value: unknown): string | undefined {
     if (!stat.isFile() || (stat.mode & OWNER_EXECUTABLE) === 0) return undefined;
     accessSync(value, constants.X_OK);
     // Python uses its invocation path to locate pyvenv.cfg and installed packages.
-    return hasSafeInterpreterPathChain(value) && hasSafeInterpreterPathChain(resolved)
+    return hasSafePathChain(value) && hasSafePathChain(resolved)
       ? value
       : undefined;
   } catch {
@@ -278,6 +287,9 @@ export function loadMicrosoft365PluginLaunch(
     try {
       const root = realpathSync(configuredDir);
       const manifestPath = join(root, PLUGIN_MANIFEST);
+      // The plugin receives the bridge credentials and enforces broker authorization,
+      // so its manifest, entry and their directories get the interpreter's trust rule.
+      if (!hasSafePathChain(manifestPath) || !hasSafePathChain(join(root, PLUGIN_ENTRY)) || !statSync(manifestPath).isFile()) continue;
       const parsed = parseManifest(manifestPath);
       if (!parsed || parsed.manifest.name !== PLUGIN_NAME || typeof parsed.manifest.version !== 'string' || !parsed.manifest.version.trim()) continue;
       const server = parsed.manifest.mcpServers?.[PLUGIN_SERVER];
@@ -289,7 +301,7 @@ export function loadMicrosoft365PluginLaunch(
         || !isInstalledCanonicalBridge(server.args)
       ) continue;
       const entry = realpathSync(join(root, PLUGIN_ENTRY));
-      if (!containedPath(root, entry) || !statSync(entry).isFile()) continue;
+      if (!containedPath(root, entry) || !statSync(entry).isFile() || !hasSafePathChain(entry)) continue;
       const manifestEnv = exactManifestEnvironment(server.env, policy);
       const policyEnv = projectedPolicyEnvironment(policy);
       const systemEnv = launcherSystemEnvironment();
@@ -342,18 +354,25 @@ export function microsoft365AuthorityKey(
 
 /** Register the single adapter only when a fixed launcher and account binding exist. */
 export function registerMicrosoft365Adapter(options: RegisterMicrosoft365AdapterOptions): boolean {
+  return registerAdapterLaunch(options) !== undefined;
+}
+
+function registerAdapterLaunch(options: RegisterMicrosoft365AdapterOptions): Microsoft365Launch | undefined {
   const launch = loadMicrosoft365PluginLaunch(options.pluginDirs, options.policy);
-  if (launch === undefined) return false;
+  if (launch === undefined) return undefined;
 
   options.registry.register(createMicrosoft365Tool({
     launch,
     authorityForSession: async (session: SessionContext) => {
       // An unresolved context means no turn is executing, and its purpose is not
-      // known: never fall back to the chat's live socket for it.
+      // known: never fall back to the chat's live socket for it. A turn on a route
+      // whose provider or policy is not admitted (for example a codex-cli fallback)
+      // gets neither reads nor writes.
       if (
         session.tier !== 'chat-scoped'
         || !session.deliveryJid
         || (session as Partial<ResolvedSessionContext>).executingResolution !== 'resolved'
+        || !supportsM365BridgeProvider(session.m365RouteProvider)
       ) return undefined;
       const key = microsoft365AuthorityKey({ deliveryJid: session.deliveryJid, purpose: session.purpose }, options);
       const resource = options.perChatMcpSocketManager.acquire(key.mapKey, session.deliveryJid, key.purpose);
@@ -373,7 +392,54 @@ export function registerMicrosoft365Adapter(options: RegisterMicrosoft365Adapter
       };
     },
   }));
-  return true;
+  return launch;
+}
+
+/** Why the copy that `enabledPlugins` names cannot carry workflow authority; a reason, never a path. */
+type NativePluginMismatch = 'install-record-unreadable' | 'not-installed' | 'manifest-differs' | 'entry-unreadable' | 'entry-differs';
+
+function sha256File(path: string): string {
+  return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+/**
+ * The `claude-cli` provider also loads the copy that `enabledPlugins` names, from the
+ * install record in its config directory. Every install must launch the guarded entry
+ * byte for byte, without turning the guard off; otherwise it could receive the bridge
+ * credentials without enforcing employee authorization.
+ */
+function nativePluginMismatch(admittedEntry: string): NativePluginMismatch | undefined {
+  let installs: unknown;
+  try {
+    // env-allowed: external-tool interop; must track the config dir the spawned claude CLI reads
+    const configDir = process.env['CLAUDE_CONFIG_DIR'] || join(homedir(), '.claude');
+    const record: unknown = JSON.parse(readFileSync(join(configDir, NATIVE_INSTALL_RECORD), 'utf8'));
+    installs = isRecord(record) && isRecord(record['plugins']) ? record['plugins'][M365_PLUGIN_KEY] : undefined;
+  } catch {
+    return 'install-record-unreadable';
+  }
+  const list: unknown[] = Array.isArray(installs) ? installs : installs === undefined ? [] : [installs];
+  if (list.length === 0) return 'not-installed';
+  for (const install of list) {
+    const installPath = isRecord(install) ? install['installPath'] : undefined;
+    if (!isNonEmptyString(installPath) || !isAbsolute(installPath)) return 'not-installed';
+    try {
+      const root = realpathSync(installPath);
+      const server = parseManifest(join(root, PLUGIN_MANIFEST))?.manifest.mcpServers?.[PLUGIN_SERVER];
+      const env = server?.env;
+      const guard = isRecord(env) ? env['MS365_WORKFLOW_AUTHORITY_REQUIRED'] : undefined;
+      if (
+        !Array.isArray(server?.args) || !server.args.includes(PLUGIN_ENTRY_ARGUMENT)
+        || (env !== undefined && !isRecord(env)) || (guard !== undefined && guard !== '1')
+      ) return 'manifest-differs';
+      const entry = realpathSync(join(root, PLUGIN_ENTRY));
+      if (!containedPath(root, entry) || !statSync(entry).isFile()) return 'entry-unreadable';
+      if (sha256File(entry) !== sha256File(admittedEntry)) return 'entry-differs';
+    } catch {
+      return 'entry-unreadable';
+    }
+  }
+  return undefined;
 }
 
 const log = createChildLogger('microsoft365-adapter');
@@ -396,15 +462,23 @@ export function resolveExplainedM365MutationPolicy(options: ResolveM365MutationP
 
 /**
  * Registers the adapter and returns the policy the runtime may use. Employee-bound
- * writes rely on the guarded plugin. Without its admission the workflow assignment
- * is withdrawn, so the mutation deny floor stays on every route (settings, fallback,
- * session and native plugin) and the broker refuses writes.
+ * writes rely on the guarded plugin. Without its admission, or when the native copy
+ * that `enabledPlugins` names does not run the same guarded entry, the workflow
+ * assignment is withdrawn, so the mutation deny floor stays on every route (settings,
+ * fallback, session and native plugin) and the broker refuses writes.
  */
 export function admitMicrosoft365Workflow(options: RegisterMicrosoft365AdapterOptions): M365MutationPolicy | undefined {
-  const admitted = registerMicrosoft365Adapter(options);
+  const launch = registerAdapterLaunch(options);
   const policy = options.policy;
-  if (admitted || policy?.status !== 'approved' || policy.workflowAuthority === undefined) return policy;
-  log.warn({ instance: options.instanceName, missing: 'guarded Microsoft 365 plugin under agentOptions.pluginDirs' },
-    'Microsoft 365 workflow authority withdrawn: no guarded plugin was admitted, so Microsoft 365 writes stay denied');
+  if (policy?.status !== 'approved' || policy.workflowAuthority === undefined) return policy;
+  if (launch === undefined) {
+    log.warn({ instance: options.instanceName, missing: 'guarded Microsoft 365 plugin under agentOptions.pluginDirs' },
+      'Microsoft 365 workflow authority withdrawn: no guarded plugin was admitted, so Microsoft 365 writes stay denied');
+    return { status: 'approved', childEnv: policy.childEnv };
+  }
+  const mismatch = nativePluginMismatch(launch.args[4]!);
+  if (mismatch === undefined) return policy;
+  log.warn({ instance: options.instanceName, reason: mismatch },
+    'Microsoft 365 workflow authority withdrawn: the plugin copy that enabledPlugins names does not run the admitted guarded entry, so Microsoft 365 writes stay denied');
   return { status: 'approved', childEnv: policy.childEnv };
 }

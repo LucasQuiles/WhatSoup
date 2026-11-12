@@ -25,16 +25,31 @@ import { createProviderMcpBridge } from '../../../src/runtimes/agent/providers/m
 
 type OsModule = typeof os;
 
-const { AGENT365_HOME } = vi.hoisted(() => {
+const { AGENT365_HOME, FOREIGN_OWNED } = vi.hoisted(() => {
   const nodeFs = require('node:fs') as typeof import('node:fs');
   const nodeOs = require('node:os') as typeof import('node:os');
   const nodePath = require('node:path') as typeof import('node:path');
-  return { AGENT365_HOME: nodeFs.realpathSync(nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'whatsoup-m365-home-'))) };
+  return {
+    AGENT365_HOME: nodeFs.realpathSync(nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'whatsoup-m365-home-'))),
+    // Paths that lstat reports as owned by another user: a test cannot chown without root.
+    FOREIGN_OWNED: new Set<string>(),
+  };
 });
 
 vi.mock('node:os', async (importOriginal: () => Promise<OsModule>) => {
   const actual = await importOriginal();
   return { ...actual, homedir: () => AGENT365_HOME };
+});
+
+vi.mock('node:fs', async (importOriginal: () => Promise<typeof import('node:fs')>) => {
+  const actual = await importOriginal();
+  const lstatSync = ((path: import('node:fs').PathLike, options?: import('node:fs').StatSyncOptions) => {
+    const stat = actual.lstatSync(path, options);
+    if (stat === undefined || !FOREIGN_OWNED.has(String(path))) return stat;
+    // Keep the Stats prototype so isFile, isDirectory and isSymbolicLink still answer.
+    return Object.assign(Object.create(Object.getPrototypeOf(stat) as object) as typeof stat, stat, { uid: Number(stat.uid) + 1 });
+  }) as typeof actual.lstatSync;
+  return { ...actual, lstatSync };
 });
 
 const GUARDED_FIXTURE = join(process.cwd(), 'tests/mcp/bin/fake-microsoft365-guarded-mcp.cjs');
@@ -83,6 +98,7 @@ const servers: WhatSoupSocketServer[] = [];
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  FOREIGN_OWNED.clear();
   for (const server of servers.splice(0)) server.stop();
   for (const path of temporaryPaths.splice(0)) rmSync(path, { recursive: true, force: true });
   rmSync(AGENT365_HOME, { recursive: true, force: true });
@@ -162,7 +178,31 @@ function authorizedExecuting(): ExecutingSessionContext {
   return {
     actorJid: EMPLOYEE, purpose: undefined, conversationKey: CONVERSATION_KEY, requestRef: 'request-fixture',
     workflowAuthority: { accountId: ACCOUNT_ID, employeeActorJid: EMPLOYEE }, workflowAuthorityScope: 'per_chat',
+    m365RouteProvider: 'claude-cli',
   };
+}
+
+const NATIVE_REGISTRY = join(AGENT365_HOME, '.claude', 'plugins', 'installed_plugins.json');
+
+/**
+ * Installs the copy that `enabledPlugins` names, the way the Claude CLI records it:
+ * `installed_plugins.json` lists each install path under the plugin key.
+ */
+function nativeInstall(entrySource: string, server: Record<string, unknown> = {
+  command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/mcp-server/dist/index.cjs'],
+}): string {
+  const root = join(AGENT365_HOME, '.claude', 'plugins', 'microsoft-365');
+  mkdirSync(join(root, '.claude-plugin'), { recursive: true });
+  mkdirSync(join(root, 'mcp-server', 'dist'), { recursive: true });
+  copyFileSync(entrySource, join(root, 'mcp-server', 'dist', 'index.cjs'));
+  writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({
+    name: 'microsoft_365', version: 'fixture-v1', mcpServers: { microsoft_365: server },
+  }));
+  writeFileSync(NATIVE_REGISTRY, JSON.stringify({
+    version: 2,
+    plugins: { 'microsoft_365@microsoft-365-dev': [{ scope: 'user', installPath: root, version: 'fixture-v1' }] },
+  }));
+  return root;
 }
 
 const BROKER_REQUEST = {
@@ -449,13 +489,19 @@ describe.skipIf(SYSTEM_PYTHON === '')('Microsoft 365 provider adapter', () => {
       vi.unstubAllEnvs();
     }
 
-    executing = { actorJid: undefined, purpose: undefined, conversationKey: CONVERSATION_KEY, requestRef: undefined, workflowAuthority: undefined };
+    executing = {
+      actorJid: undefined, purpose: undefined, conversationKey: CONVERSATION_KEY, requestRef: undefined, workflowAuthority: undefined,
+      m365RouteProvider: 'claude-cli',
+    };
     const blocked = await bridge.executeTool('microsoft365', { operation: 'call', name: 'send-mail', args: { subject: 'blocked' } });
     expect(blocked).toMatchObject({ isError: true });
     expect(traceRows(trace)).toEqual(expect.arrayContaining([expect.objectContaining({ event: 'workflow_authority', allowed: false })]));
     expect(traceRows(trace).some((row) => row.event === 'write_dispatched')).toBe(false);
 
-    executing = { actorJid: undefined, purpose: 'scheduled-agent-job', conversationKey: CONVERSATION_KEY, requestRef: undefined, workflowAuthority: undefined };
+    executing = {
+      actorJid: undefined, purpose: 'scheduled-agent-job', conversationKey: CONVERSATION_KEY, requestRef: undefined, workflowAuthority: undefined,
+      m365RouteProvider: 'claude-cli',
+    };
     const scheduled = createProviderMcpBridge(registry, { ...stored, purpose: 'scheduled-agent-job' }, () => executing);
     await expect(scheduled.executeTool('microsoft365', { operation: 'call', name: 'list-mail-messages', args: {} })).resolves.toMatchObject({ isError: false });
     expect(manager.acquire).toHaveBeenLastCalledWith(`map:${DELIVERY_JID}::scheduled-agent-job`, DELIVERY_JID, 'scheduled-agent-job');
@@ -470,6 +516,7 @@ describe.skipIf(SYSTEM_PYTHON === '')('Microsoft 365 provider adapter', () => {
     const tokens = new SessionTokenRegistry();
     const scheduledExecuting: ExecutingSessionContext = {
       actorJid: undefined, purpose: 'scheduled-agent-job', conversationKey: CONVERSATION_KEY, requestRef: undefined, workflowAuthority: undefined,
+      m365RouteProvider: 'claude-cli',
     };
     // The employee's live turn executes on the chat key for the whole test.
     const liveSocket = join(directory, 'live.sock');
@@ -597,11 +644,132 @@ describe.skipIf(SYSTEM_PYTHON === '')('Microsoft 365 provider adapter', () => {
     expect(m365MutationExceptionAllowed(withdrawn)).toBe(false);
     expect(listed(unguardedRegistry)).toBe(false);
 
+    vi.stubEnv('CLAUDE_CONFIG_DIR', undefined);
+    nativeInstall(GUARDED_FIXTURE);
     const guardedRegistry = new ToolRegistry();
     const kept = admitMicrosoft365Workflow(options([pluginDirectory(trace).root], guardedRegistry));
     expect(kept).toBe(approved);
     expect(m365MutationExceptionAllowed(kept)).toBe(true);
     expect(listed(guardedRegistry)).toBe(true);
+  });
+
+  it('refuses a plugin whose entry, manifest or directories are foreign-owned or group/world-writable', () => {
+    const trace = join(temporaryDirectory('whatsoup-m365-ownership-'), 'm365-fixture-trace.jsonl');
+    // Positive control: the same layout is admitted while its ownership and modes are safe.
+    expect(loadMicrosoft365PluginLaunch([pluginDirectory(trace).root], policy(trace))).toBeDefined();
+
+    const entry = (root: string) => join(root, 'mcp-server', 'dist', 'index.cjs');
+    const manifest = (root: string) => join(root, '.claude-plugin', 'plugin.json');
+    const weakenings: Array<[string, (root: string) => void]> = [
+      ['world-writable entry', (root) => chmodSync(entry(root), 0o666)],
+      ['group-writable entry', (root) => chmodSync(entry(root), 0o620)],
+      ['world-writable manifest', (root) => chmodSync(manifest(root), 0o666)],
+      ['world-writable entry directory', (root) => chmodSync(join(root, 'mcp-server', 'dist'), 0o777)],
+      ['world-writable manifest directory', (root) => chmodSync(join(root, '.claude-plugin'), 0o777)],
+      ['world-writable plugin root', (root) => chmodSync(root, 0o777)],
+      ['foreign-owned entry', (root) => FOREIGN_OWNED.add(entry(root))],
+      ['foreign-owned manifest', (root) => FOREIGN_OWNED.add(manifest(root))],
+      ['foreign-owned entry directory', (root) => FOREIGN_OWNED.add(join(root, 'mcp-server', 'dist'))],
+      ['foreign-owned plugin root', (root) => FOREIGN_OWNED.add(root)],
+    ];
+    for (const [label, weaken] of weakenings) {
+      const plugin = pluginDirectory(trace);
+      weaken(realpathSync(plugin.root));
+      expect(loadMicrosoft365PluginLaunch([plugin.root], policy(trace)), label).toBeUndefined();
+      FOREIGN_OWNED.clear();
+    }
+
+    const escaped = pluginDirectory(trace);
+    const outside = join(temporaryDirectory('whatsoup-m365-outside-entry-'), 'index.cjs');
+    copyFileSync(GUARDED_FIXTURE, outside);
+    rmSync(escaped.entry);
+    symlinkSync(outside, escaped.entry);
+    expect(loadMicrosoft365PluginLaunch([escaped.root], policy(trace)), 'entry symlink outside the plugin').toBeUndefined();
+  });
+
+  it('withdraws the workflow assignment unless the native enabledPlugins copy runs the admitted entry', () => {
+    vi.stubEnv('CLAUDE_CONFIG_DIR', undefined);
+    const trace = join(temporaryDirectory('whatsoup-m365-native-'), 'm365-fixture-trace.jsonl');
+    const approved = policy(trace);
+    const plugin = pluginDirectory(trace);
+    const admit = () => admitMicrosoft365Workflow({
+      registry: new ToolRegistry(), policy: approved, pluginDirs: [plugin.root], perChatMcpSocketManager: {} as never,
+      resolvePerChatMapKey: (jid: string) => jid, sessionTokens: new SessionTokenRegistry(),
+    });
+    const withdrawn = approved.status === 'approved' ? { status: 'approved', childEnv: approved.childEnv } : undefined;
+
+    // No native install record: the copy the Claude CLI loads cannot be checked.
+    expect(admit()).toEqual(withdrawn);
+
+    // Positive controls: the native copy runs a byte-identical entry, through the identical
+    // guarded manifest (the production shape) or through a direct node launch of that entry.
+    const admittedServer = (JSON.parse(readFileSync(join(plugin.root, '.claude-plugin', 'plugin.json'), 'utf8')) as {
+      mcpServers: { microsoft_365: Record<string, unknown> };
+    }).mcpServers.microsoft_365;
+    const nativeRoot = nativeInstall(GUARDED_FIXTURE, admittedServer);
+    expect(admit()).toBe(approved);
+    nativeInstall(GUARDED_FIXTURE);
+    expect(admit()).toBe(approved);
+
+    // The native entry differs from the admitted one.
+    nativeInstall(LAUNCHER_FIXTURE, admittedServer);
+    expect(admit()).toEqual(withdrawn);
+
+    // The native manifest runs a file other than the hashed entry.
+    nativeInstall(GUARDED_FIXTURE, { command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/mcp-server/dist/other.cjs'] });
+    expect(admit()).toEqual(withdrawn);
+
+    // The native manifest turns the guard off.
+    nativeInstall(GUARDED_FIXTURE, {
+      ...admittedServer, env: { ...(admittedServer['env'] as Record<string, string>), MS365_WORKFLOW_AUTHORITY_REQUIRED: '0' },
+    });
+    expect(admit()).toEqual(withdrawn);
+
+    // The native entry is missing or unreadable.
+    nativeInstall(GUARDED_FIXTURE);
+    rmSync(join(nativeRoot, 'mcp-server', 'dist', 'index.cjs'));
+    expect(admit()).toEqual(withdrawn);
+
+    // The install record is malformed.
+    nativeInstall(GUARDED_FIXTURE);
+    writeFileSync(NATIVE_REGISTRY, '{"version":2,"plugins":{"microsoft_365@microsoft-365-dev":[{"scope":"user"}]}}');
+    expect(admit()).toEqual(withdrawn);
+
+    // A configured CLAUDE_CONFIG_DIR is the registry the Claude CLI reads.
+    nativeInstall(GUARDED_FIXTURE);
+    vi.stubEnv('CLAUDE_CONFIG_DIR', temporaryDirectory('whatsoup-m365-empty-config-'));
+    expect(admit()).toEqual(withdrawn);
+  });
+
+  it('refuses reads and writes on a turn whose route is not an admitted Microsoft 365 provider', async () => {
+    const directory = temporaryDirectory('whatsoup-m365-route-');
+    const trace = join(directory, 'm365-fixture-trace.jsonl');
+    const registry = new ToolRegistry();
+    const tokens = new SessionTokenRegistry();
+    let executing: ExecutingSessionContext = authorizedExecuting();
+    const socketPath = await brokerServer(directory, 'chat', tokens, () => executing);
+    const manager = { acquire: vi.fn(() => ({ socketPath, ready: Promise.resolve() })) };
+    expect(registerMicrosoft365Adapter({ registry, policy: policy(trace), pluginDirs: [pluginDirectory(trace).root],
+      perChatMcpSocketManager: manager as never, resolvePerChatMapKey: (jid) => `map:${jid}`, sessionTokens: tokens })).toBe(true);
+    const bridge = createProviderMcpBridge(registry,
+      { tier: 'chat-scoped', conversationKey: CONVERSATION_KEY, deliveryJid: DELIVERY_JID }, () => executing);
+
+    // Positive control: the admitted claude-cli route reads.
+    await expect(bridge.executeTool('microsoft365', { operation: 'call', name: 'list-mail-messages', args: {} }))
+      .resolves.toMatchObject({ isError: false });
+    const acquired = manager.acquire.mock.calls.length;
+
+    for (const route of [{ m365RouteProvider: 'codex-cli' }, { m365RouteProvider: 'gemini-cli' }, { m365RouteProvider: undefined }]) {
+      // A fallback turn publishes no assignment; even a stale one must not open the adapter.
+      executing = { ...authorizedExecuting(), ...route };
+      for (const name of ['list-mail-messages', 'send-mail']) {
+        const result = await bridge.executeTool('microsoft365', { operation: 'call', name, args: {} });
+        expect(result).toMatchObject({ isError: true });
+        expect(JSON.stringify(result)).toContain('microsoft365_authority_unavailable');
+      }
+    }
+    expect(manager.acquire.mock.calls.length).toBe(acquired);
+    expect(traceRows(trace).filter((row) => row.event === 'write_dispatched')).toHaveLength(0);
   });
 
   it('lists the adapter only to chat-scoped sessions bound to a delivery chat', () => {

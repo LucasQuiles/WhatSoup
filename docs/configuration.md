@@ -2480,11 +2480,14 @@ and file or ancestor changes during the read are rejected before lookup or
 admission. This stricter authorization read does not change legacy config loading.
 
 After lookup, the launcher creates `WHATSOUP_M365_LAUNCH_ADMISSION`, an HMAC bound
-to its process ID, instance name, complete binding and resolved key. Its final
-`exec` preserves that process ID for runtime verification. The launcher clears
+to its process ID, instance name, complete binding, `agentOptions.sessionScope`
+(`single` when unset) and resolved key. The binding includes the whole
+`workflowAuthority` assignment: its account, employee and conversation restriction.
+Its final `exec` preserves that process ID for runtime verification. The launcher clears
 inherited admissions, and the runtime never forwards an admission to agent
 children. Missing, malformed or reused admissions retain the M365 deny floor;
-changing the key or binding after admission also rejects the exception.
+changing the key, binding, assignment or session scope after admission also rejects
+the exception.
 Install the matching launcher before enabling a bridge binding: an older wrapper
 or direct Node start cannot grant the exception from an ambient key. This prevents
 accidental credential reuse across launch paths; it does not isolate a malicious
@@ -2496,13 +2499,21 @@ Capability-grant writes use that runtime's verified policy on every write. Befor
 startup verifies the policy and restores persisted fallback state, they retain the
 full M365 deny floor. An approved workflow-authority assignment on a supported
 provider preserves the mutation exception during fallback; other fallback policies
-retain the full floor.
+retain the full floor. A turn publishes the assignment from the route policy of the
+session that runs it, never from the runtime-wide policy. A turn on `codex-cli`,
+`gemini-cli` or `opencode-cli`, or on any route whose policy is rejected, therefore
+publishes no assignment, and the WhatSoup `microsoft365` tool refuses its reads and
+writes with `microsoft365_authority_unavailable`.
 Startup settings repair uses the same policy. Grant groups cannot authorize M365
 mutations themselves.
 
 The assignment counts only after the guarded Microsoft plugin is admitted: exactly one
 manifest under `agentOptions.pluginDirs` with the fixed bridge launcher and
-`MS365_WORKFLOW_AUTHORITY_REQUIRED: "1"`. Without it, startup withdraws the
+`MS365_WORKFLOW_AUTHORITY_REQUIRED: "1"`. The plugin directory, its manifest, its
+`mcp-server/dist/index.cjs` entry, every directory above them and every symlink hop
+must belong to root or the service user and must not be group- or world-writable
+(apart from sticky directories). The entry must resolve inside the plugin directory.
+Without an admitted plugin, startup withdraws the
 assignment and logs the missing plugin, so the deny floor stays on every route,
 including fallback and direct plugin execution, and the broker refuses writes.
 
@@ -2533,10 +2544,18 @@ bridge is not admitted or has no assignment. `check-instance-config` prints a
 before deploying to an instance whose bot must keep writing.
 
 **One guarded plugin build.** Install the guarded plugin through `agentOptions.pluginDirs`;
-admission reads only that copy. The `claude-cli` provider also loads the copy that
-`enabledPlugins` names. If that is a marketplace copy, it must be the identical guarded
-build: before activation, compare the SHA-256 of `mcp-server/dist/index.cjs` in both
-copies, and do not activate when they differ.
+admission reads that copy. The `claude-cli` provider also loads the copy that
+`enabledPlugins` names, so startup checks that copy too. It reads the Claude CLI's install
+record, `plugins/installed_plugins.json` under `CLAUDE_CONFIG_DIR` (or `~/.claude`), and
+requires every install of `microsoft_365@microsoft-365-dev` to:
+- have a manifest whose `microsoft_365` server runs
+  `${CLAUDE_PLUGIN_ROOT}/mcp-server/dist/index.cjs` and does not set
+  `MS365_WORKFLOW_AUTHORITY_REQUIRED` to anything other than `"1"`;
+- have that entry inside its install directory, with the same SHA-256 as the admitted entry.
+
+A missing or unreadable record, a missing install or any difference withdraws the
+assignment. The startup log names the reason, never a path. The check runs at startup
+only: restart the instance after you update either copy.
 
 Settings do not record deny authorship. Approval therefore never removes existing
 entries, even if they match a previously generated floor. Legacy settings and a
