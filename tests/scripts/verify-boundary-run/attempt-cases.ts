@@ -523,7 +523,7 @@ export function registerAttemptCases(): void {
     });
   }, 10_000);
 
-  it('[BCF00-U16] detects and reaps a live descendant after its leader exits', async () => {
+  it('detects and reaps a live descendant after its leader exits', async () => {
     const api = boundaryRun as unknown as {
       runBoundaryWatchdogForTest?: (
         argv: string[],
@@ -551,7 +551,7 @@ export function registerAttemptCases(): void {
     expect(outcome.groupDead).toBe(true);
   }, 10_000);
 
-  it('[BCF00-U17] records an unobservable EPERM group teardown as not reaped', async () => {
+  it('records an unobservable EPERM group teardown as not reaped', async () => {
     const api = boundaryRun as unknown as {
       runBoundaryWatchdogForTest?: (
         argv: string[],
