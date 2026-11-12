@@ -21,6 +21,7 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  lstatSync,
   readFileSync,
   readlinkSync,
   renameSync,
@@ -29,6 +30,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 
 import {
   installedLaunchdPlistMode,
@@ -50,6 +53,7 @@ import {
 } from './host.ts';
 import { type Binding, type BindingEvidence, type ProcessSample, resolveBinding } from './invariants.ts';
 import { acquireActivationLock } from './lock.ts';
+import { ROOT_HELPER_PYTHON, ROOT_HELPER_SUDO } from './root-helper-interpreter.ts';
 import {
   type ActivationContext,
   bootstrapEntrypointFor,
@@ -153,7 +157,26 @@ function writeAtomic(filePath: string, contents: string, mode: number): void {
  * 0644). An owner-only instance plist can carry credentials in its
  * EnvironmentVariables, so neither the switch nor the rollback may widen it.
  */
-function writePlist(plistPath: string, contents: string): void {
+async function writePlist(host: ActivationHost, plistPath: string, contents: string, expected: string): Promise<void> {
+  if (readFileSync(plistPath, 'utf8') !== expected) throw new Error('installed plist changed before replacement');
+  const info = lstatSync(plistPath);
+  if (info.uid === 0 && host.uid !== 0) {
+    const helper = fileURLToPath(new URL('./protected_plist.py', import.meta.url));
+    const result = await host.exec(ROOT_HELPER_SUDO, ['-n', ROOT_HELPER_PYTHON, '-B', helper], {
+      input: JSON.stringify({ path: plistPath, contents,
+        expectedSha256: createHash('sha256').update(expected).digest('hex'),
+        metadata: { uid: info.uid, gid: info.gid, mode: info.mode & 0o777 } }),
+      timeoutMs: 30_000,
+    });
+    if (result.code !== 0 || readFileSync(plistPath, 'utf8') !== contents) {
+      throw new Error('protected plist replacement failed; inspect activation rollback receipt');
+    }
+    const after = lstatSync(plistPath);
+    if (after.uid !== info.uid || after.gid !== info.gid || after.mode !== info.mode) {
+      throw new Error('protected plist metadata changed');
+    }
+    return;
+  }
   writeAtomic(plistPath, contents, installedLaunchdPlistMode(plistPath) ?? LAUNCHD_PLIST_MAX_MODE);
 }
 
@@ -568,8 +591,11 @@ async function rollback(
     return null;
   });
   for (const entry of context.staged) {
-    await attempt(`restore-plist:${entry.label}`, () => {
-      writePlist(entry.plistPath, readFileSync(path.join(backupPath, `${entry.label}.plist`), 'utf8'));
+    await attempt(`restore-plist:${entry.label}`, async () => {
+      const original = readFileSync(path.join(backupPath, `${entry.label}.plist`), 'utf8');
+      if (readFileSync(entry.plistPath, 'utf8') !== original) {
+        await writePlist(host, entry.plistPath, original, entry.staged!);
+      }
       return null;
     });
   }
@@ -710,7 +736,9 @@ async function applyHoldingLock(host: ActivationHost, context: ActivationContext
     if (beforeSwitch !== null) return refuse(beforeSwitch, backupPath);
     repointSymlink(context.wrapperLink, wrapperTargetFor(args.release));
     steps.push({ step: 'switch-symlink', ok: true });
-    for (const entry of context.staged) writePlist(entry.plistPath, entry.staged!);
+    for (const entry of context.staged) {
+      await writePlist(host, entry.plistPath, entry.staged!, readFileSync(path.join(backupPath, `${entry.label}.plist`), 'utf8'));
+    }
     steps.push({ step: 'install-plists', ok: true });
     for (const entry of context.staged) {
       const reloadFailure = await reloadLabel(host, context, entry.label, entry.plistPath);

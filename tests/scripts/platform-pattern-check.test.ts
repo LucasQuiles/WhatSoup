@@ -64,6 +64,23 @@ describe('platform-pattern-check', () => {
     ]);
   });
 
+  // `sudo -n` must name exact binaries: a sudoers rule matches the absolute
+  // path, and a PATH lookup would let a user-writable directory choose what
+  // runs as root. Only the one constants module is exempt, not its callers.
+  it('allows the root helper interpreter module while retaining a finding in the activation code', () => {
+    const root = tmp.make('root-helper-interpreter');
+    const activation = path.join(root, 'scripts', 'lib', 'release-activation');
+    mkdirSync(activation, { recursive: true });
+    writeFileSync(path.join(activation, 'root-helper-interpreter.ts'), "export const ROOT_HELPER_PYTHON = '/usr/bin/python3';\n");
+    writeFileSync(path.join(activation, 'apply.ts'), "host.exec(SUDO, ['-n', '/usr/bin/python3']);\n");
+
+    const [rule] = loadRuleSpecs(['portability.no-hardcoded-platform-binaries']);
+
+    expect(scanRule(root, rule!).map(({ file, line, pattern }) => ({ file, line, pattern }))).toEqual([
+      { file: 'scripts/lib/release-activation/apply.ts', line: 1, pattern: "'/usr/bin/python" },
+    ]);
+  });
+
   it('does not flag direct Linux if consequents for platform paths', () => {
     expect(scanFixture([
       "if (process.platform === 'linux') {",

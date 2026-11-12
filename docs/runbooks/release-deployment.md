@@ -193,6 +193,16 @@ npm --silent run release:activate -- \
      owner-only (`0600`) instance plist, for example one carrying credentials
      in `EnvironmentVariables`, stays `0600` through the switch and through
      the automatic rollback;
+     Root-owned WhatSoup LaunchAgents use a bounded `sudo -n` replacement
+     helper. It replaces only an existing `com.whatsoup.<name>.plist`
+     directly in the invoking user's own `~/Library/LaunchAgents`: the
+     user-database home of `SUDO_UID`, with no symlinked path component. It
+     refuses `/Library/LaunchAgents` and any other home, so an activation run
+     with a `HOME` that differs from that user-database home cannot replace
+     a root-owned plist. It checks the expected bytes, preserves owner, group,
+     mode and `uchg`, and refuses symlinks, extended attributes and other
+     protection flags. A failed replacement restores its original bytes and
+     protection;
   3. reloads each label with the reload sequence below;
   4. verifies from the executing process (a new pid whose argv names
      `<release>/src/bootstrap.ts`, authenticated health with the manifest
