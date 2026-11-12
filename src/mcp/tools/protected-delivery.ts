@@ -4,6 +4,7 @@ import type { Database } from '../../core/database.ts';
 import {
   ProtectedDeliveryService,
   type ProtectedDeliveryPurpose,
+  type ProtectedSecretInputKind,
 } from '../../core/protected-delivery.ts';
 import { isGroupJid, isLidJid, JID_PERSONAL } from '../../core/jid-constants.ts';
 import { resolveLid } from '../../core/lid-resolver.ts';
@@ -35,6 +36,65 @@ export function registerProtectedDeliveryTools(
         principal: identity.principal,
         recipientJid: identity.recipientJid,
       });
+    },
+  });
+
+  registry.register({
+    name: 'request_secret_input',
+    description: 'Request a one-use password, token, or challenge-backed MFA input for a bound resource in this direct conversation.',
+    scope: 'chat',
+    targetMode: 'injected',
+    replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
+    schema: z.object({
+      chatJid: z.string(),
+      resource_id: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
+      kind: z.enum(['password', 'token', 'mfa']),
+      purpose: z.string().trim().min(1).max(256),
+    }).strict(),
+    handler: async (params, session) => {
+      const identity = directRecipient(session, deps.db);
+      return deps.service.requestSecretInput({
+        resourceId: params['resource_id'] as string,
+        kind: params['kind'] as ProtectedSecretInputKind,
+        purpose: params['purpose'] as string,
+        principal: identity.principal,
+        recipientJid: identity.recipientJid,
+      });
+    },
+  });
+
+  registry.register({
+    name: 'get_secret_input_status',
+    description: 'Get metadata-only input and delivery status for a secret-input request in this direct conversation.',
+    scope: 'chat',
+    targetMode: 'injected',
+    replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
+    schema: z.object({
+      chatJid: z.string(),
+      input_id: z.string().regex(/^[A-Za-z0-9_-]{22}$/),
+    }).strict(),
+    handler: async (params, session) => {
+      const identity = directRecipient(session, deps.db);
+      return deps.service.secretInputStatus({ id: params['input_id'] as string, principal: identity.principal });
+    },
+  });
+
+  registry.register({
+    name: 'cancel_secret_input',
+    description: 'Cancel a secret-input request in this direct conversation.',
+    scope: 'chat',
+    targetMode: 'injected',
+    replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
+    schema: z.object({
+      chatJid: z.string(),
+      input_id: z.string().regex(/^[A-Za-z0-9_-]{22}$/),
+    }).strict(),
+    handler: async (params, session) => {
+      const identity = directRecipient(session, deps.db);
+      return deps.service.cancelSecretInput({ id: params['input_id'] as string, principal: identity.principal });
     },
   });
 

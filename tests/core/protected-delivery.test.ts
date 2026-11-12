@@ -3,11 +3,13 @@ import { Database } from '../../src/core/database.ts';
 import {
   ProtectedDeliveryService,
   type ManagedDeliveryClient,
+  type ManagedSecretInputMetadata,
 } from '../../src/core/protected-delivery.ts';
+import { HttpManagedDeliveryClient } from '../../src/core/managed-delivery-client.ts';
 import { TEST_LINK_HOST } from '../helpers/protected-delivery-pins.ts';
 
-// Every service below runs with its production default pins, swapped for the
-// neutral test pins.
+// Every service and client below runs with its production default pins,
+// swapped for the neutral test pins.
 vi.mock('../../src/core/protected-delivery-pins.ts', async (importOriginal) =>
   (await import('../helpers/protected-delivery-pins.ts')).mockProtectedDeliveryPins(importOriginal));
 
@@ -15,6 +17,8 @@ const DELIVERY_REF = 'aaaaaaaaaaaaaaaaaaaaaa';
 const DELIVERY_ID = 'bbbbbbbbbbbbbbbbbbbbbb';
 const DELIVERY_LINK = `https://${TEST_LINK_HOST}/s/#v3.${DELIVERY_ID}.${'c'.repeat(43)}`;
 const EXPIRES_AT = '2026-10-29T12:05:00.000Z';
+const INTAKE_ID = 'iiiiiiiiiiiiiiiiiiiiii';
+const INTAKE_LINK = `https://${TEST_LINK_HOST}/s/#i1.${INTAKE_ID}.${'k'.repeat(43)}`;
 
 function managedStatus(overrides: Partial<Awaited<ReturnType<ManagedDeliveryClient['getStatus']>>> = {}) {
   return {
@@ -138,6 +142,197 @@ describe('protected delivery', () => {
     });
     expect(durable).not.toContain(TEST_LINK_HOST);
     expect(durable).not.toContain('c'.repeat(43));
+  });
+
+  it('sends one fixed intake link to the verified recipient and journals only metadata', async () => {
+    const sent: Array<{ recipient: string; content: Record<string, unknown>; messageId: string | undefined }> = [];
+    let created = 0;
+    let resolved = 0;
+    const client: ManagedDeliveryClient & {
+      createSecretInput: (input: Record<string, string>) => Promise<Record<string, unknown>>;
+      resolveSecretInput: (input: Record<string, string>) => Promise<Record<string, unknown>>;
+      getSecretInput: (input: Record<string, string>) => Promise<Record<string, unknown>>;
+      cancelSecretInput: (input: Record<string, string>) => Promise<Record<string, unknown>>;
+    } = {
+      async stageRustdesk() { return { deliveryRef: DELIVERY_REF, id: DELIVERY_ID, expiresAt: EXPIRES_AT, state: 'unclaimed' }; },
+      async resolve() { return { id: DELIVERY_ID, link: DELIVERY_LINK, expiresAt: EXPIRES_AT, state: 'unclaimed' }; },
+      async getStatus() { return managedStatus(); },
+      async reportEvent() {},
+      async createSecretInput(input) {
+        created += 1;
+        return {
+          id: INTAKE_ID, resourceId: 'dummy-account', accountLabel: 'Dummy account', consumerLabel: 'Dummy consumer', action: 'sign_in',
+          kind: 'password', saveAllowed: true, expiresAt: EXPIRES_AT, state: 'awaiting_input',
+        };
+      },
+      async resolveSecretInput() {
+        resolved += 1;
+        return {
+          id: INTAKE_ID, resourceId: 'dummy-account', accountLabel: 'Dummy account', consumerLabel: 'Dummy consumer', action: 'sign_in',
+          kind: 'password', saveAllowed: true, expiresAt: EXPIRES_AT, state: 'awaiting_input', link: INTAKE_LINK,
+        };
+      },
+      async getSecretInput() { throw new Error('not used'); },
+      async cancelSecretInput() { throw new Error('not used'); },
+    };
+    const ids = ['create-operation', 'resolve-operation', 'intake-message'];
+    const service = new ProtectedDeliveryService({
+      db: db.raw,
+      client,
+      messenger: {
+        async sendRaw(recipient, content, options) {
+          sent.push({ recipient, content, messageId: options?.messageId });
+          return { waMessageId: options?.messageId ?? null };
+        },
+      },
+      now: () => new Date('2026-10-29T12:00:00.000Z'),
+      randomId: () => ids.shift() ?? 'unexpected-id',
+    });
+
+    const first = await service.requestSecretInput({
+      resourceId: 'dummy-account', kind: 'password', purpose: 'dummy login', principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net',
+    });
+    const second = await service.requestSecretInput({
+      resourceId: 'dummy-account', kind: 'password', purpose: 'dummy login', principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net',
+    });
+
+    expect(first).toEqual({
+      id: INTAKE_ID, resourceId: 'dummy-account', accountLabel: 'Dummy account', consumerLabel: 'Dummy consumer', action: 'sign_in',
+      kind: 'password', saveAllowed: true, expiresAt: EXPIRES_AT, inputState: 'awaiting_input', deliveryStatus: 'submitted',
+    });
+    expect(second).toEqual(first);
+    expect(created).toBe(1);
+    expect(db.raw.prepare('SELECT create_operation_id, recipient_jid FROM protected_secret_inputs').get())
+      .toEqual({ create_operation_id: 'create-operation', recipient_jid: '15551234567@s.whatsapp.net' });
+    expect(resolved).toBe(1);
+    expect(sent).toEqual([{
+      recipient: '15551234567@s.whatsapp.net', content: { text: INTAKE_LINK, linkPreview: null }, messageId: 'intake-message',
+    }]);
+    const durable = JSON.stringify({
+      inputs: db.raw.prepare('SELECT * FROM protected_secret_inputs').all(),
+      sends: db.raw.prepare('SELECT * FROM outbound_sends').all(),
+    });
+    expect(durable).not.toContain(INTAKE_LINK);
+    expect(durable).not.toContain('k'.repeat(43));
+  });
+
+  it('uses the live HTTP intake client through create, resolve, status, and cancel', async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const metadata = (state: string) => ({
+      id: INTAKE_ID, resourceId: 'dummy-account', accountLabel: 'Dummy account', consumerLabel: 'Dummy consumer',
+      action: 'sign_in', kind: 'password', saveAllowed: true, expiresAt: EXPIRES_AT, state,
+    });
+    const client = new HttpManagedDeliveryClient({
+      baseUrl: 'https://links.example/s/api/v1', token: 'dummy-transport-token',
+      fetch: async (url, init) => {
+        calls.push({ url: String(url), init: init! });
+        const body = calls.length === 1 ? metadata('awaiting_input')
+          : calls.length === 2 ? { ...metadata('awaiting_input'), link: INTAKE_LINK }
+            : metadata(calls.length === 4 ? 'cancelled' : 'awaiting_input');
+        return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+      },
+    });
+    const sent: string[] = [];
+    const service = new ProtectedDeliveryService({
+      db: db.raw, client,
+      messenger: { async sendRaw(_recipient, content, options) { sent.push(String(content.text)); return { waMessageId: options?.messageId ?? null }; } },
+      now: () => new Date('2026-10-29T12:00:00.000Z'),
+      randomId: (() => { const ids = ['http-create', 'http-resolve', 'http-message']; return () => ids.shift() ?? 'unexpected-id'; })(),
+    });
+
+    await expect(service.requestSecretInput({
+      resourceId: 'dummy-account', kind: 'password', purpose: 'dummy login', principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net',
+    })).resolves.toMatchObject({ id: INTAKE_ID, deliveryStatus: 'submitted' });
+    await expect(service.secretInputStatus({ id: INTAKE_ID, principal: '15551234567' })).resolves.toMatchObject({ inputState: 'awaiting_input' });
+    await expect(service.cancelSecretInput({ id: INTAKE_ID, principal: '15551234567' })).resolves.toMatchObject({ inputState: 'cancelled' });
+
+    expect(calls.map(({ url }) => url)).toEqual([
+      'https://links.example/s/api/v1/intakes',
+      `https://links.example/s/api/v1/intakes/${INTAKE_ID}/resolve`,
+      `https://links.example/s/api/v1/intakes/${INTAKE_ID}?principal=15551234567`,
+      `https://links.example/s/api/v1/intakes/${INTAKE_ID}/cancel`,
+    ]);
+    expect(sent).toEqual([INTAKE_LINK]);
+  });
+
+  it('does not let maintenance abandon an in-flight HTTP intake resolution', async () => {
+    let releaseResolve: (() => void) | undefined;
+    let resolutionStarted: (() => void) | undefined;
+    const resolving = new Promise<void>((resolve) => { releaseResolve = resolve; });
+    const started = new Promise<void>((resolve) => { resolutionStarted = resolve; });
+    let calls = 0;
+    const metadata = { id: INTAKE_ID, resourceId: 'dummy-account', accountLabel: 'Dummy account', consumerLabel: 'Dummy consumer', action: 'sign_in', kind: 'password', saveAllowed: true, expiresAt: EXPIRES_AT, state: 'awaiting_input' };
+    const client = new HttpManagedDeliveryClient({
+      baseUrl: 'https://links.example/s/api/v1', token: 'dummy-transport-token',
+      fetch: async () => {
+        calls += 1;
+        if (calls === 2) {
+          resolutionStarted?.();
+          await resolving;
+          return new Response(JSON.stringify({ ...metadata, link: INTAKE_LINK }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        return new Response(JSON.stringify(metadata), { status: 200, headers: { 'content-type': 'application/json' } });
+      },
+    });
+    let sends = 0;
+    const service = new ProtectedDeliveryService({
+      db: db.raw, client,
+      messenger: { async sendRaw(_recipient, _content, options) { sends += 1; return { waMessageId: options?.messageId ?? null }; } },
+      now: () => new Date('2026-10-29T12:00:00.000Z'),
+      randomId: (() => { const ids = ['active-create', 'active-resolve', 'active-message']; return () => ids.shift() ?? 'unexpected-id'; })(),
+    });
+    const request = service.requestSecretInput({ resourceId: 'dummy-account', kind: 'password', purpose: 'dummy login', principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net' });
+    await started;
+
+    await expect(service.recoverPendingDeliveries()).resolves.toEqual({ resumed: 0, skipped: 0 });
+    expect(db.raw.prepare('SELECT delivery_status FROM protected_secret_inputs WHERE intake_id=?').get(INTAKE_ID)).toEqual({ delivery_status: 'resolving' });
+    releaseResolve?.();
+    await expect(request).resolves.toMatchObject({ id: INTAKE_ID, deliveryStatus: 'submitted' });
+    expect(sends).toBe(1);
+  });
+
+  it('refreshes an expired active intake before creating a fresh request', async () => {
+    const oldId = 'o'.repeat(22);
+    const newId = 'n'.repeat(22);
+    const oldLink = `https://${TEST_LINK_HOST}/s/#i1.${oldId}.${'o'.repeat(43)}`;
+    const newLink = `https://${TEST_LINK_HOST}/s/#i1.${newId}.${'n'.repeat(43)}`;
+    const oldExpiry = '2026-10-29T12:05:00.000Z';
+    const newExpiry = '2026-10-29T12:20:00.000Z';
+    let now = new Date('2026-10-29T12:00:00.000Z');
+    let creates = 0;
+    let refreshes = 0;
+    let resolves = 0;
+    let sends = 0;
+    const input = (id: string, expiresAt: string, state: ManagedSecretInputMetadata['state'] = 'awaiting_input') => ({
+      id, resourceId: 'dummy-account', accountLabel: 'Dummy account', consumerLabel: 'Dummy consumer', action: 'sign_in',
+      kind: 'password' as const, saveAllowed: true, expiresAt, state,
+    });
+    const client: ManagedDeliveryClient = {
+      async stageRustdesk() { throw new Error('not used'); }, async resolve() { throw new Error('not used'); },
+      async getStatus() { return managedStatus(); }, async reportEvent() {},
+      async createSecretInput() { creates += 1; return creates === 1 ? input(oldId, oldExpiry) : input(newId, newExpiry); },
+      async resolveSecretInput(request) {
+        resolves += 1;
+        const old = request.id === oldId;
+        return { ...input(request.id, old ? oldExpiry : newExpiry), link: old ? oldLink : newLink };
+      },
+      async getSecretInput() { refreshes += 1; return input(oldId, oldExpiry); },
+      async cancelSecretInput() { throw new Error('not used'); },
+    };
+    const ids = ['old-create', 'old-resolve', 'old-message', 'new-create', 'new-resolve', 'new-message'];
+    const service = new ProtectedDeliveryService({
+      db: db.raw, client,
+      messenger: { async sendRaw(_recipient, _content, options) { sends += 1; return { waMessageId: options?.messageId ?? null }; } },
+      now: () => now, randomId: () => ids.shift() ?? 'unexpected-id',
+    });
+    const request = { resourceId: 'dummy-account', kind: 'password' as const, purpose: 'dummy login', principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net' };
+
+    await service.requestSecretInput(request);
+    now = new Date('2026-10-29T12:06:00.000Z');
+    await expect(service.requestSecretInput(request)).resolves.toMatchObject({ id: newId, deliveryStatus: 'submitted' });
+
+    expect({ creates, refreshes, resolves, sends }).toEqual({ creates: 2, refreshes: 1, resolves: 2, sends: 2 });
+    expect(db.raw.prepare('SELECT input_state FROM protected_secret_inputs WHERE intake_id=?').get(oldId)).toEqual({ input_state: 'expired' });
   });
 
   it('treats a missing transport acknowledgement as ambiguous instead of submitted', async () => {
@@ -408,6 +603,41 @@ describe('protected delivery', () => {
 
     expect(resolves).toBe(0);
     expect(sends).toBe(0);
+  });
+
+  it('marks a secret intake interrupted while resolving as ambiguous on recovery', async () => {
+    let creates = 0;
+    let resolves = 0;
+    let sends = 0;
+    const client: ManagedDeliveryClient = {
+      async stageRustdesk() { throw new Error('not used'); }, async resolve() { throw new Error('not used'); },
+      async getStatus() { return managedStatus(); }, async reportEvent() {},
+      async createSecretInput() {
+        creates += 1;
+        return { id: INTAKE_ID, resourceId: 'dummy-account', accountLabel: 'Dummy account', consumerLabel: 'Dummy consumer', action: 'sign_in', kind: 'password' as const, saveAllowed: true, expiresAt: EXPIRES_AT, state: 'awaiting_input' };
+      },
+      async resolveSecretInput() {
+        resolves += 1;
+        return { id: INTAKE_ID, resourceId: 'dummy-account', accountLabel: 'Dummy account', consumerLabel: 'Dummy consumer', action: 'sign_in', kind: 'password' as const, saveAllowed: true, expiresAt: EXPIRES_AT, state: 'awaiting_input', link: INTAKE_LINK };
+      },
+      async getSecretInput() { throw new Error('not used'); }, async cancelSecretInput() { throw new Error('not used'); },
+    };
+    const service = new ProtectedDeliveryService({
+      db: db.raw, client,
+      messenger: { async sendRaw(_recipient, _content, options) { sends += 1; return { waMessageId: options?.messageId ?? null }; } },
+      now: () => new Date('2026-10-29T12:00:00.000Z'), randomId: (() => { const ids = ['create', 'resolve', 'message']; return () => ids.shift() ?? 'unexpected-id'; })(),
+    });
+    await service.requestSecretInput({ resourceId: 'dummy-account', kind: 'password', purpose: 'dummy login', principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net' });
+    db.raw.prepare(`UPDATE protected_secret_inputs SET delivery_status='resolving' WHERE intake_id=?`).run(INTAKE_ID);
+    const restarted = new ProtectedDeliveryService({
+      db: db.raw, client,
+      messenger: { async sendRaw() { throw new Error('must not replay'); } },
+      now: () => new Date('2026-10-29T12:00:00.000Z'), randomId: () => 'restarted-id',
+    });
+
+    await expect(restarted.recoverPendingDeliveries()).resolves.toEqual({ resumed: 0, skipped: 1 });
+    expect(db.raw.prepare('SELECT delivery_status FROM protected_secret_inputs WHERE intake_id=?').get(INTAKE_ID)).toEqual({ delivery_status: 'ambiguous' });
+    expect({ creates, resolves, sends }).toEqual({ creates: 1, resolves: 1, sends: 1 });
   });
 
   it('terminalizes expired uncertain rows without replaying and preserves a receipt on an active lease', async () => {

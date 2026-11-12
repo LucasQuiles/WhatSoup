@@ -140,4 +140,14 @@ describe('protected message sanitizer', () => {
     expect(isProtectedDeliveryMessage(missingTable as any, 'protected-message-id')).toBe(false);
     expect(isProtectedDeliveryMessage(correlated as any, 'protected-message-id')).toBe(true);
   });
+
+  it('correlates a secret-input WhatsApp id when the legacy delivery table has no match', () => {
+    const correlated = {
+      raw: {
+        prepare: (sql: string) => ({ get: () => sql.includes('protected_secret_inputs') ? { found: 1 } : undefined }),
+      },
+    };
+
+    expect(isProtectedDeliveryMessage(correlated as any, 'secret-input-message-id')).toBe(true);
+  });
 });

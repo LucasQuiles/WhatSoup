@@ -11,6 +11,8 @@ const DELIVERY_REF = 'D'.repeat(22);
 const SHARE_ID = 'S'.repeat(22);
 const FRAGMENT_KEY = 'K'.repeat(43);
 const MANAGED_LINK = `https://${TEST_LINK_HOST}/s/#v3.${SHARE_ID}.${FRAGMENT_KEY}`;
+const INTAKE_ID = 'I'.repeat(22);
+const INTAKE_LINK = `https://${TEST_LINK_HOST}/s/#i1.${INTAKE_ID}.${FRAGMENT_KEY}`;
 const EXPIRES_AT = '2030-10-29T12:05:00.000Z';
 const ISSUED_AT = '2030-10-29T12:00:00.000Z';
 
@@ -48,6 +50,21 @@ function resolveReply(extra: Record<string, unknown> = {}): Record<string, unkno
     link: MANAGED_LINK,
     expiresAt: EXPIRES_AT,
     state: 'unclaimed',
+    ...extra,
+  };
+}
+
+function intakeReply(extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: INTAKE_ID,
+    resourceId: 'dummy-account',
+    accountLabel: 'Dummy account',
+    consumerLabel: 'Dummy consumer',
+    action: 'sign_in',
+    kind: 'password',
+    saveAllowed: true,
+    expiresAt: EXPIRES_AT,
+    state: 'awaiting_input',
     ...extra,
   };
 }
@@ -275,5 +292,121 @@ describe('managed delivery HTTP client', () => {
       expect((error as Error).message).not.toContain(responseBody);
       expect((error as Error).message).not.toContain(MANAGED_LINK);
     }
+  });
+
+  it('uses the fixed intake routes and keeps the #i1 URL out of metadata', async () => {
+    const calls: FetchCall[] = [];
+    const managed = client(async (url, init) => {
+      calls.push({ url: String(url), init: init! });
+      if (calls.length === 1) return json(intakeReply());
+      if (calls.length === 2) return json(intakeReply({ link: INTAKE_LINK }));
+      if (calls.length === 3) return json(intakeReply({ state: 'submitted' }));
+      return json(intakeReply({ state: 'cancelled' }));
+    });
+
+    const created = await managed.createSecretInput({
+      resourceId: 'dummy-account', principal: '15551234567', kind: 'password', purpose: 'dummy login', operationId: 'create-input',
+    });
+    const resolved = await managed.resolveSecretInput({
+      id: INTAKE_ID, principal: '15551234567', operationId: 'resolve-input',
+    });
+    const status = await managed.getSecretInput({ id: INTAKE_ID, principal: '15551234567' });
+    const cancelled = await managed.cancelSecretInput({ id: INTAKE_ID, principal: '15551234567' });
+
+    expect(created).toEqual(intakeReply());
+    expect(status).toEqual(intakeReply({ state: 'submitted' }));
+    expect(cancelled).toEqual(intakeReply({ state: 'cancelled' }));
+    expect(resolved).toEqual({ ...intakeReply(), link: INTAKE_LINK });
+    expect(JSON.stringify(created)).not.toContain(INTAKE_LINK);
+    expect(JSON.stringify(status)).not.toContain(INTAKE_LINK);
+    expect(JSON.stringify(cancelled)).not.toContain(INTAKE_LINK);
+    expect(calls.map((call) => call.url)).toEqual([
+      `${TEST_DELIVERY_BASE_URL}/intakes`,
+      `${TEST_DELIVERY_BASE_URL}/intakes/${INTAKE_ID}/resolve`,
+      `${TEST_DELIVERY_BASE_URL}/intakes/${INTAKE_ID}?principal=15551234567`,
+      `${TEST_DELIVERY_BASE_URL}/intakes/${INTAKE_ID}/cancel`,
+    ]);
+    expect(String(calls[0]?.init.body)).toBe(JSON.stringify({
+      resourceId: 'dummy-account', principal: '15551234567', kind: 'password', purpose: 'dummy login',
+    }));
+    expect(String(calls[1]?.init.body)).toBe(JSON.stringify({ principal: '15551234567', operationId: 'resolve-input' }));
+    expect(String(calls[3]?.init.body)).toBe(JSON.stringify({ principal: '15551234567' }));
+    expect(new Headers(calls[0]?.init.headers).get('Idempotency-Key')).toBe('create-input');
+    expect(new Headers(calls[1]?.init.headers).get('Idempotency-Key')).toBe('resolve-input');
+    expect(calls.every((call) => call.init.redirect === 'error')).toBe(true);
+  });
+
+  it('uses the unchanged intake body for an MFA request and rejects storable MFA metadata', async () => {
+    const calls: FetchCall[] = [];
+    const managed = client(async (url, init) => {
+      calls.push({ url: String(url), init: init! });
+      return json(intakeReply({ kind: 'mfa', saveAllowed: false }));
+    });
+
+    await expect(managed.createSecretInput({
+      resourceId: 'dummy-account', principal: '15551234567', kind: 'mfa', purpose: 'dummy MFA', operationId: 'mfa-input',
+    })).resolves.toEqual(intakeReply({ kind: 'mfa', saveAllowed: false }));
+    expect(String(calls[0]?.init.body)).toBe(JSON.stringify({
+      resourceId: 'dummy-account', principal: '15551234567', kind: 'mfa', purpose: 'dummy MFA',
+    }));
+    expect(String(calls[0]?.init.body)).not.toContain('challenge');
+
+    const invalid = client(async () => json(intakeReply({ kind: 'mfa', saveAllowed: true })));
+    await expect(invalid.createSecretInput({
+      resourceId: 'dummy-account', principal: '15551234567', kind: 'mfa', purpose: 'dummy MFA', operationId: 'bad-mfa-input',
+    })).rejects.toThrow('managed delivery response has an invalid secret input metadata');
+  });
+
+  it('rejects an intake link that does not bind the fixed #i1 id and key shape', async () => {
+    const wrongId = client(async () => json(intakeReply({
+      link: `https://${TEST_LINK_HOST}/s/#i1.${SHARE_ID}.${FRAGMENT_KEY}`,
+    })));
+    await expect(wrongId.resolveSecretInput({
+      id: INTAKE_ID, principal: '15551234567', operationId: 'wrong-intake-link',
+    })).rejects.toThrow('managed delivery response is missing protected intake URL');
+
+    const shortKey = client(async () => json(intakeReply({
+      link: `https://${TEST_LINK_HOST}/s/#i1.${INTAKE_ID}.${FRAGMENT_KEY.slice(1)}`,
+    })));
+    await expect(shortKey.resolveSecretInput({
+      id: INTAKE_ID, principal: '15551234567', operationId: 'short-intake-key',
+    })).rejects.toThrow('managed delivery response is missing protected intake URL');
+  });
+
+  it('accepts an intake link only on an exactly spelled canonical pinned host', async () => {
+    const request = { id: INTAKE_ID, principal: '15551234567', operationId: 'pinned-intake-link' };
+    const replying = (link: string, options: { productionPins?: boolean; linkHosts?: readonly string[] } = {}) =>
+      new HttpManagedDeliveryClient({
+        baseUrl: TEST_DELIVERY_BASE_URL,
+        token: 'DUMMY-transport-token',
+        fetch: async () => json(intakeReply({ link })),
+        ...(options.productionPins === true ? {} : { pins: TEST_PROTECTED_DELIVERY_PINS }),
+        ...(options.linkHosts === undefined ? {} : { linkHosts: options.linkHosts }),
+      });
+    const refused = 'managed delivery response is missing protected intake URL';
+    const fragment = `/s/#i1.${INTAKE_ID}.${FRAGMENT_KEY}`;
+
+    await expect(replying(INTAKE_LINK).resolveSecretInput(request)).resolves.toMatchObject({ link: INTAKE_LINK });
+    // A host that is not pinned, a pinned host that is not a canonical link
+    // host, and spellings the URL parser would normalize are all refused.
+    for (const link of [
+      `https://unpinned.example.test${fragment}`,
+      `https://${TEST_DELIVERY_HOST}${fragment}`,
+      `https://${TEST_LINK_HOST.toUpperCase()}${fragment}`,
+      `https://www.${TEST_LINK_HOST}${fragment}`,
+      `https://${TEST_LINK_HOST}.${fragment}`,
+      `https://${TEST_LINK_HOST}:443${fragment}`,
+      `http://${TEST_LINK_HOST}${fragment}`,
+      `https://${TEST_LINK_HOST}${fragment}?x=1`,
+    ]) {
+      await expect(replying(link).resolveSecretInput(request)).rejects.toThrow(refused);
+    }
+    // Configured link hosts only narrow the pinned set.
+    await expect(replying(INTAKE_LINK, { linkHosts: [TEST_LINK_HOST] }).resolveSecretInput(request))
+      .resolves.toMatchObject({ link: INTAKE_LINK });
+    await expect(replying(INTAKE_LINK, { linkHosts: [TEST_DELIVERY_HOST] }).resolveSecretInput(request)).rejects.toThrow(refused);
+    // Without explicit pins the client uses the production pins, which never
+    // match a test host.
+    await expect(replying(INTAKE_LINK, { productionPins: true }).resolveSecretInput(request)).rejects.toThrow(refused);
   });
 });

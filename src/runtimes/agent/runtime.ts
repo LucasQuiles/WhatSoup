@@ -10636,6 +10636,9 @@ export class AgentRuntime implements Runtime {
         readiness: this.memoryReadiness, registry: this.registry, session: providerToolSession,
         instanceName: this.instanceName, memoryIndex: config.pineconeIndex, allowedMcpTools: this.sandbox?.allowedMcpTools,
       }),
+      ...(this.protectedDeliveryService === null
+        ? {}
+        : { protectedDeliveryService: this.protectedDeliveryService }),
       routePolicy: route ?? undefined,
       egressProxyPort: this.egressProxy?.port,
       providerExecutionGate: this.providerExecutionGate,

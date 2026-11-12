@@ -92,10 +92,16 @@ describe('registerAllTools', () => {
     });
 
     const protectedTools = registered.filter((tool) =>
-      ['request_rustdesk_access', 'deliver_secret', 'get_secret_delivery_status'].includes(tool.name),
+      [
+        'request_rustdesk_access', 'request_secret_input', 'get_secret_input_status',
+        'cancel_secret_input', 'deliver_secret', 'get_secret_delivery_status',
+      ].includes(tool.name),
     );
-    expect(protectedTools).toHaveLength(3);
+    expect(protectedTools).toHaveLength(6);
     expect(protectedTools.map((tool) => tool.group)).toEqual([
+      'protected-delivery',
+      'protected-delivery',
+      'protected-delivery',
       'protected-delivery',
       'protected-delivery',
       'protected-delivery',

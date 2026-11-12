@@ -315,6 +315,36 @@ describe('outbound_sends metadata-only audit writer', () => {
     expect(db.raw.prepare('SELECT id FROM outbound_sends ORDER BY id').all()).toEqual([{ id: protectedAudit.id }]);
   });
 
+  it('keeps an audit row while a retained secret-input journal references it', () => {
+    const writer = createOutboundSendsWriter({ db: db.raw });
+    const protectedAudit = writer.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });
+    const ordinaryAudit = writer.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });
+    writer.markSuccess(protectedAudit.id);
+    writer.markSuccess(ordinaryAudit.id);
+    db.raw.prepare(`
+      UPDATE outbound_sends
+      SET created_at=datetime('now', '-31 days'), completed_at=datetime('now', '-31 days')
+      WHERE id IN (?, ?)
+    `).run(protectedAudit.id, ordinaryAudit.id);
+    db.raw.prepare(`
+      INSERT INTO protected_secret_inputs (
+        create_operation_id, resolve_operation_id, intake_id, principal, recipient_jid,
+        resource_id, kind, purpose, input_state, delivery_status, whatsapp_message_id,
+        outbound_send_id, expires_at, issued_at
+      ) VALUES (
+        'input-audit-create', 'input-audit-resolve', 'IIIIIIIIIIIIIIIIIIIIII',
+        '15551234567', '15551234567@s.whatsapp.net', 'dummy-account', 'password', 'dummy login',
+        'awaiting_input', 'submitted', 'input-audit-message', ?,
+        strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+5 minutes'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-89 days')
+      )
+    `).run(protectedAudit.id);
+
+    expect(writer.maintain({ mode: 'apply', terminalDays: 30, terminalMaxRows: 10_000 })).toEqual({
+      mode: 'apply', eligibleRows: 1, deletedRows: 1,
+    });
+    expect(db.raw.prepare('SELECT id FROM outbound_sends ORDER BY id').all()).toEqual([{ id: protectedAudit.id }]);
+  });
+
   it('does not let an unlinked protected-delivery journal retain every audit row', () => {
     const writer = createOutboundSendsWriter({ db: db.raw });
     const audit = writer.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });

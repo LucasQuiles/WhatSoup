@@ -4,11 +4,14 @@ import { ProtectedDeliveryService, type ManagedDeliveryClient } from '../../../s
 import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 import { registerProtectedDeliveryTools } from '../../../src/mcp/tools/protected-delivery.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
+import { PROTECTED_MESSAGE_MARKER, sanitizeProtectedMessageText } from '../../../src/core/protected-message.ts';
 import { TEST_LINK_HOST, TEST_PROTECTED_DELIVERY_PINS } from '../../helpers/protected-delivery-pins.ts';
 
 const DELIVERY_REF = 'aaaaaaaaaaaaaaaaaaaaaa';
 const DELIVERY_ID = 'bbbbbbbbbbbbbbbbbbbbbb';
 const DELIVERY_LINK = `https://${TEST_LINK_HOST}/s/#v3.${DELIVERY_ID}.${'c'.repeat(43)}`;
+const INTAKE_ID = 'iiiiiiiiiiiiiiiiiiiiii';
+const INTAKE_LINK = `https://${TEST_LINK_HOST}/s/#i1.${INTAKE_ID}.${'k'.repeat(43)}`;
 
 const directSession: SessionContext = {
   tier: 'chat-scoped',
@@ -20,11 +23,15 @@ const directSession: SessionContext = {
 describe('protected delivery MCP tools', () => {
   let db: Database;
   let registry: ToolRegistry;
+  let inputCancels: Array<{ id: string; principal: string }>;
+  let inputKind: 'password' | 'token' | 'mfa';
 
   beforeEach(() => {
     db = new Database(':memory:');
     db.open();
     registry = new ToolRegistry();
+    inputCancels = [];
+    inputKind = 'password';
     const client: ManagedDeliveryClient = {
       async stageRustdesk() {
         return { deliveryRef: DELIVERY_REF, id: DELIVERY_ID, expiresAt: '2026-10-29T12:05:00.000Z', state: 'unclaimed' };
@@ -40,6 +47,32 @@ describe('protected delivery MCP tools', () => {
         };
       },
       async reportEvent() {},
+      async createSecretInput(input) {
+        inputKind = input.kind;
+        return {
+          id: INTAKE_ID, resourceId: 'dummy-account', accountLabel: 'Dummy account', consumerLabel: 'Dummy consumer', action: 'sign_in',
+          kind: inputKind, saveAllowed: inputKind !== 'mfa', expiresAt: '2026-10-29T12:05:00.000Z', state: 'awaiting_input',
+        };
+      },
+      async resolveSecretInput() {
+        return {
+          id: INTAKE_ID, resourceId: 'dummy-account', accountLabel: 'Dummy account', consumerLabel: 'Dummy consumer', action: 'sign_in',
+          kind: inputKind, saveAllowed: inputKind !== 'mfa', expiresAt: '2026-10-29T12:05:00.000Z', state: 'awaiting_input', link: INTAKE_LINK,
+        };
+      },
+      async getSecretInput() {
+        return {
+          id: INTAKE_ID, resourceId: 'dummy-account', accountLabel: 'Dummy account', consumerLabel: 'Dummy consumer', action: 'sign_in',
+          kind: inputKind, saveAllowed: inputKind !== 'mfa', expiresAt: '2026-10-29T12:05:00.000Z', state: 'submitted',
+        };
+      },
+      async cancelSecretInput(input) {
+        inputCancels.push({ id: input.id, principal: input.principal });
+        return {
+          id: INTAKE_ID, resourceId: 'dummy-account', accountLabel: 'Dummy account', consumerLabel: 'Dummy consumer', action: 'sign_in',
+          kind: inputKind, saveAllowed: inputKind !== 'mfa', expiresAt: '2026-10-29T12:05:00.000Z', state: 'cancelled',
+        };
+      },
     };
     const service = new ProtectedDeliveryService({
       db: db.raw,
@@ -74,6 +107,65 @@ describe('protected delivery MCP tools', () => {
     const delivered = await registry.call('deliver_secret', { delivery_ref: DELIVERY_REF }, directSession);
     expect(delivered.content[0].text).toContain('submitted');
     expect(delivered.content[0].text).not.toContain('managed.example');
+  });
+
+  it('uses the direct verified conversation for a metadata-only secret input lifecycle', async () => {
+    const names = registry.listTools(directSession).map((tool) => tool.name);
+    expect(names).toEqual(expect.arrayContaining([
+      'request_secret_input', 'get_secret_input_status', 'cancel_secret_input',
+    ]));
+
+    const created = await registry.call('request_secret_input', {
+      resource_id: 'dummy-account', kind: 'password', purpose: 'dummy login',
+    }, directSession);
+    const createdText = created.content[0]?.text ?? '';
+    expect(created.isError).toBeUndefined();
+    expect(createdText).toContain(INTAKE_ID);
+    expect(createdText).not.toContain(INTAKE_LINK);
+    expect(createdText).not.toContain(TEST_LINK_HOST);
+    expect(sanitizeProtectedMessageText(INTAKE_LINK, TEST_PROTECTED_DELIVERY_PINS)).toBe(PROTECTED_MESSAGE_MARKER);
+
+    const status = await registry.call('get_secret_input_status', { input_id: INTAKE_ID }, directSession);
+    expect(status.content[0]?.text).toContain('submitted');
+    expect(status.content[0]?.text).not.toContain(INTAKE_LINK);
+
+    const cancelled = await registry.call('cancel_secret_input', { input_id: INTAKE_ID }, directSession);
+    expect(cancelled.content[0]?.text).toContain('cancelled');
+    expect(inputCancels).toEqual([{ id: INTAKE_ID, principal: '15551234567' }]);
+
+    const injectedRecipient = await registry.call('request_secret_input', {
+      resource_id: 'dummy-account', kind: 'password', purpose: 'dummy login', recipient: '15550000000@s.whatsapp.net',
+    }, directSession);
+    expect(injectedRecipient.isError).toBe(true);
+  });
+
+  it('admits only challenge-backed MFA metadata without a caller-supplied challenge', async () => {
+    const created = await registry.call('request_secret_input', {
+      resource_id: 'dummy-account', kind: 'mfa', purpose: 'dummy MFA',
+    }, directSession);
+
+    expect(created.isError).toBeUndefined();
+    expect(created.content[0]?.text).toContain('mfa');
+    expect(created.content[0]?.text).toContain('false');
+    const injectedChallenge = await registry.call('request_secret_input', {
+      resource_id: 'dummy-account', kind: 'mfa', purpose: 'dummy MFA', challenge: 'caller-controlled',
+    }, directSession);
+    expect(injectedChallenge.isError).toBe(true);
+  });
+
+  it('rejects a different direct user before cancelling their input', async () => {
+    await registry.call('request_secret_input', {
+      resource_id: 'dummy-account', kind: 'password', purpose: 'dummy login',
+    }, directSession);
+
+    const result = await registry.call('cancel_secret_input', { input_id: INTAKE_ID }, {
+      ...directSession,
+      actorJid: '15557654321@s.whatsapp.net',
+      deliveryJid: '15557654321@s.whatsapp.net',
+      conversationKey: '15557654321',
+    });
+    expect(result.isError).toBe(true);
+    expect(inputCancels).toEqual([]);
   });
 
   it('refuses a group or a direct identity that differs from the recipient', async () => {

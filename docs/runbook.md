@@ -3067,7 +3067,7 @@ not forward the reserved namespace, but that does not limit a different local
 process running as the same OS user from potentially inspecting the service
 environment. Treat same-user shell access as trusted operator access.
 
-The three protected-delivery tools exist only in agent runtimes and require a
+The six protected-delivery tools exist only in agent runtimes and require a
 resolved, bound direct WhatsApp conversation. Configuration must use
 `sessionScope: "per_chat"`. If the primary provider and all static fallbacks use
 the in-process `managed_loop`, the runtime supplies the bound conversation.
@@ -3099,8 +3099,25 @@ replace a delivery; inspect delivery status and receipt evidence for those rows.
 Expired unresolved rows become terminal once any send lease is at least 60 seconds
 old. A fresh lease blocks reissue. Missing or mismatched WhatsApp message IDs report
 an ambiguous submission; later receipt evidence is preserved.
+
+Migration 68 is additive: it adds secret-input metadata alongside the existing
+protected-delivery tables and audit retention. Do not remove its table or rows to
+roll back an application. Use only a binary verified against a schema-68 database,
+or restore a verified pre-migration database backup through the normal rollback
+procedure. This migration does not add operating-system isolation; processes running
+under the same operating-system account remain trusted operators.
+
+Password, token, and MFA input requests use the same direct transport path and
+persist only safe intake and delivery metadata. An MFA request requires a
+current consumer-side challenge already bound to the resource and principal;
+the transport sends no challenge field and cannot create or extend one. Input
+submission or consumption state remains separate from WhatsApp delivery receipt
+state. Status and cancellation require the verified requesting principal, so a
+different bound user is rejected before an intake API call.
+On restart, an intake left in `resolving` becomes locally `ambiguous` and is never
+replayed; pending intakes are not sent by maintenance recovery.
 The daily unified database-retention transaction deletes protected-delivery
-metadata and associated event rows older than 90 days from issuance. It preserves
+and secret-input metadata and associated event rows older than 90 days from issuance. It preserves
 their referenced outbound audit rows until that deletion. Check
 `health.retention.database.lastResult.protectedDeliveries` after a successful
 sweep. A missing runtime credential is a startup configuration error, so correct
