@@ -1,4 +1,5 @@
 import { isRecord } from '../lib/type-guards.ts';
+import { normalizeFallbackEntriesFromAgentOptions } from './fallback-chain.ts';
 import { pinDigest, PROTECTED_DELIVERY_PINS, type ProtectedDeliveryPins } from './protected-delivery-pins.ts';
 
 export interface ProtectedDeliveryConfig {
@@ -20,6 +21,25 @@ function isApprovedManagedDeliveryEndpoint(endpoint: URL, pins: ProtectedDeliver
   const origin = `${endpoint.protocol}//${endpoint.host}`;
   return pins.deliveryOriginSha256.has(pinDigest(origin))
     && endpoint.pathname.replace(/\/$/, '') === APPROVED_MANAGED_DELIVERY_API_PATH;
+}
+
+export function validateProtectedDeliveryBinding(
+  opts: Record<string, unknown>,
+  isManagedLoopProvider: (provider: unknown) => boolean,
+): string | null {
+  const delivery = opts['protectedDelivery'];
+  if (!isRecord(delivery) || delivery['enabled'] !== true) return null;
+  // The caller supplies the provider-catalog decision so this configuration
+  // module does not depend on an agent runtime or duplicate its provider list.
+  const bound = opts['sessionScope'] === 'per_chat' && (
+    opts['sandboxPerChat'] === true || opts['perChatConversationBound'] === true
+    || (opts['fallbackDiscovery'] === undefined && [
+      opts['provider'],
+      ...normalizeFallbackEntriesFromAgentOptions(opts).map((entry) => entry.provider),
+    ].every(isManagedLoopProvider))
+  );
+  return bound ? null
+    : 'protectedDelivery requires per_chat scope with sandboxPerChat, perChatConversationBound, or managed-loop-only provider routes';
 }
 
 export function parseProtectedDeliveryConfig(

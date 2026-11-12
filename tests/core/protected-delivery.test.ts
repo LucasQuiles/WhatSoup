@@ -520,7 +520,7 @@ describe('protected delivery', () => {
     expect(db.raw.prepare('SELECT state FROM protected_deliveries WHERE delivery_ref=?').get(DELIVERY_REF)).toEqual({ state: 'submitted' });
   });
 
-  it('does not reissue a RustDesk delivery while its expired send lease is still active', async () => {
+  it('does not reuse a newer row while an expired staging lease is active under another alias', async () => {
     let stageCalls = 0;
     const now = new Date('2026-10-29T12:00:00.000Z');
     const client: ManagedDeliveryClient = {
@@ -541,8 +541,19 @@ describe('protected delivery', () => {
         state, expires_at, issued_at, attempt_count, send_claim_token, send_claimed_at
       ) VALUES (
         'active-request-stage', 'active-request-resolve', 'active-request-ref', 'active-request-id',
-        '15551234567', '15551234567@s.whatsapp.net', 'rustdesk', 'device-active-request', 'login', 'active-request-message',
-        'resolving', '2026-10-29T11:59:00.000Z', '2026-10-29T11:50:00.000Z', 1, 'active-request-lease', '2026-10-29T11:59:30.000Z'
+        '15551234567', '11111112345@lid', 'rustdesk', 'device-active-request', 'login', 'active-request-message',
+        'staging', '2026-10-29T11:59:00.000Z', '2026-10-29T11:50:00.000Z', 1, 'active-request-lease', '2026-10-29T11:59:30.000Z'
+      )
+    `).run();
+    db.raw.prepare(`
+      INSERT INTO protected_deliveries (
+        stage_operation_id, resolve_operation_id, delivery_ref, delivery_id,
+        principal, recipient_jid, kind, device_id, purpose, whatsapp_message_id,
+        state, expires_at, issued_at
+      ) VALUES (
+        'newer-request-stage', 'newer-request-resolve', 'newer-request-ref', 'newer-request-id',
+        '15551234567', '15551234567@s.whatsapp.net', 'rustdesk', 'device-active-request', 'login', 'newer-request-message',
+        'staged', '2026-10-29T12:05:00.000Z', '2026-10-29T11:59:45.000Z'
       )
     `).run();
 
@@ -550,8 +561,11 @@ describe('protected delivery', () => {
       deviceId: 'device-active-request', purpose: 'login', principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net',
     })).rejects.toThrow('outcome is still unresolved');
     expect(stageCalls).toBe(0);
-    expect(db.raw.prepare('SELECT state, send_claim_token FROM protected_deliveries').all())
-      .toEqual([{ state: 'resolving', send_claim_token: 'active-request-lease' }]);
+    expect(db.raw.prepare('SELECT state, send_claim_token FROM protected_deliveries ORDER BY id').all())
+      .toEqual([
+        { state: 'staging', send_claim_token: 'active-request-lease' },
+        { state: 'staged', send_claim_token: null },
+      ]);
   });
 
   it('preserves a receipt that arrives while a transport acknowledgement is ambiguous', async () => {
@@ -649,5 +663,125 @@ describe('protected delivery', () => {
 
     await expect(service.recoverPendingDeliveries()).resolves.toEqual({ resumed: 1, skipped: 0 });
     expect(sends).toBe(1);
+  });
+
+  it('recovers a verified legacy LID row through its canonical phone destination', async () => {
+    const recipients: string[] = [];
+    let stageCalls = 0;
+    const client: ManagedDeliveryClient = {
+      async stageRustdesk() { stageCalls += 1; return { deliveryRef: DELIVERY_REF, id: DELIVERY_ID, expiresAt: EXPIRES_AT, state: 'unclaimed' }; },
+      async resolve() { return { id: DELIVERY_ID, link: DELIVERY_LINK, expiresAt: EXPIRES_AT, state: 'unclaimed' }; },
+      async getStatus() { return managedStatus(); },
+      async reportEvent() {},
+    };
+    const service = new ProtectedDeliveryService({
+      db: db.raw, client,
+      messenger: { async sendRaw(recipient, _content, options) { recipients.push(recipient); return { waMessageId: options?.messageId ?? null }; } },
+      now: () => new Date('2026-10-29T12:00:00.000Z'), randomId: () => 'stable-id',
+    });
+    await service.requestRustdesk({
+      deviceId: 'legacy-lid', purpose: 'login', principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net',
+    });
+    db.raw.prepare('UPDATE protected_deliveries SET recipient_jid=? WHERE delivery_ref=?')
+      .run('11111112345@lid', DELIVERY_REF);
+    db.raw.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+      .run('11111112345', '15551234567@s.whatsapp.net');
+
+    await expect(service.requestRustdesk({
+      deviceId: 'legacy-lid', purpose: 'login', principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net',
+    })).resolves.toMatchObject({ deliveryRef: DELIVERY_REF, id: DELIVERY_ID });
+    expect(stageCalls).toBe(1);
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM protected_deliveries').get()).toEqual({ count: 1 });
+
+    await expect(service.recoverPendingDeliveries()).resolves.toEqual({ resumed: 1, skipped: 0 });
+    expect(recipients).toEqual(['15551234567@s.whatsapp.net']);
+    expect(db.raw.prepare('SELECT recipient_jid, whatsapp_message_id FROM protected_deliveries WHERE delivery_ref=?').get(DELIVERY_REF))
+      .toEqual({ recipient_jid: '15551234567@s.whatsapp.net', whatsapp_message_id: 'stable-id' });
+  });
+
+  it('does not reissue when a matching legacy LID row cannot be verified', async () => {
+    let stageCalls = 0;
+    const client: ManagedDeliveryClient = {
+      async stageRustdesk() { stageCalls += 1; return { deliveryRef: DELIVERY_REF, id: DELIVERY_ID, expiresAt: EXPIRES_AT, state: 'unclaimed' }; },
+      async resolve() { throw new Error('not used'); },
+      async getStatus() { return managedStatus(); },
+      async reportEvent() {},
+    };
+    const service = new ProtectedDeliveryService({
+      db: db.raw, client,
+      messenger: { async sendRaw() { throw new Error('not used'); } },
+      now: () => new Date('2026-10-29T12:00:00.000Z'), randomId: () => 'stable-id',
+    });
+    const request = {
+      deviceId: 'legacy-unresolved', purpose: 'login' as const, principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net',
+    };
+    await service.requestRustdesk(request);
+    db.raw.prepare('UPDATE protected_deliveries SET recipient_jid=? WHERE delivery_ref=?')
+      .run('11111112345@lid', DELIVERY_REF);
+    db.raw.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+      .run('11111112345', '15550000000@s.whatsapp.net');
+
+    await expect(service.requestRustdesk(request)).rejects.toThrow('recipient identity is unresolved');
+    expect(stageCalls).toBe(1);
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM protected_deliveries').get()).toEqual({ count: 1 });
+  });
+
+  it('does not retarget a verified legacy LID row after its outcome is ambiguous', async () => {
+    let sends = 0;
+    const client: ManagedDeliveryClient = {
+      async stageRustdesk() { return { deliveryRef: DELIVERY_REF, id: DELIVERY_ID, expiresAt: EXPIRES_AT, state: 'unclaimed' }; },
+      async resolve() { throw new Error('not used'); },
+      async getStatus() { return managedStatus(); },
+      async reportEvent() {},
+    };
+    const service = new ProtectedDeliveryService({
+      db: db.raw, client,
+      messenger: { async sendRaw() { sends += 1; return { waMessageId: 'stable-id' }; } },
+      now: () => new Date('2026-10-29T12:00:00.000Z'), randomId: () => 'stable-id',
+    });
+    await service.requestRustdesk({
+      deviceId: 'legacy-ambiguous', purpose: 'login', principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net',
+    });
+    db.raw.prepare(`UPDATE protected_deliveries SET recipient_jid='11111112345@lid',state='ambiguous'
+      WHERE delivery_ref=?`).run(DELIVERY_REF);
+    db.raw.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+      .run('11111112345', '15551234567@s.whatsapp.net');
+
+    await expect(service.deliver({
+      deliveryRef: DELIVERY_REF, principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net',
+    })).rejects.toThrow('recipient does not match');
+    expect(sends).toBe(0);
+    expect(db.raw.prepare('SELECT recipient_jid,state FROM protected_deliveries WHERE delivery_ref=?').get(DELIVERY_REF))
+      .toEqual({ recipient_jid: '11111112345@lid', state: 'ambiguous' });
+  });
+
+  it('does not rewrite a verified legacy LID row while another worker holds its send claim', async () => {
+    let sends = 0;
+    const client: ManagedDeliveryClient = {
+      async stageRustdesk() { return { deliveryRef: DELIVERY_REF, id: DELIVERY_ID, expiresAt: EXPIRES_AT, state: 'unclaimed' }; },
+      async resolve() { throw new Error('not used'); },
+      async getStatus() { return managedStatus(); },
+      async reportEvent() {},
+    };
+    const service = new ProtectedDeliveryService({
+      db: db.raw, client,
+      messenger: { async sendRaw() { sends += 1; return { waMessageId: 'stable-id' }; } },
+      now: () => new Date('2026-10-29T12:00:00.000Z'), randomId: () => 'stable-id',
+    });
+    await service.requestRustdesk({
+      deviceId: 'legacy-held', purpose: 'login', principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net',
+    });
+    db.raw.prepare(`UPDATE protected_deliveries
+      SET recipient_jid='11111112345@lid',send_claim_token='held-claim',send_claimed_at='2026-10-29T12:00:00.000Z'
+      WHERE delivery_ref=?`).run(DELIVERY_REF);
+    db.raw.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+      .run('11111112345', '15551234567@s.whatsapp.net');
+
+    await expect(service.deliver({
+      deliveryRef: DELIVERY_REF, principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net',
+    })).rejects.toThrow('recipient does not match');
+    expect(sends).toBe(0);
+    expect(db.raw.prepare('SELECT recipient_jid,send_claim_token FROM protected_deliveries WHERE delivery_ref=?').get(DELIVERY_REF))
+      .toEqual({ recipient_jid: '11111112345@lid', send_claim_token: 'held-claim' });
   });
 });

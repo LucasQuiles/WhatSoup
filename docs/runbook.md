@@ -3068,11 +3068,25 @@ process running as the same OS user from potentially inspecting the service
 environment. Treat same-user shell access as trusted operator access.
 
 The three protected-delivery tools exist only in agent runtimes and require a
-resolved, bound direct WhatsApp conversation. The protected transport sends the
+resolved, bound direct WhatsApp conversation. Configuration must use
+`sessionScope: "per_chat"`. If the primary provider and all static fallbacks use
+the in-process `managed_loop`, the runtime supplies the bound conversation.
+Any CLI route or `fallbackDiscovery` also requires `sandboxPerChat: true` or
+`perChatConversationBound: true`; create, patch, load and discovery reject an
+enabled feature without a bound conversation. Startup also enforces this rule
+for raw `INSTANCE_CONFIG` input before reading the credential. This configuration
+does not establish operating-system isolation. The protected transport sends the
 one-use URL directly and returns metadata only. It does not use the generic
 outbox, conversation history, or model result. If staging, delivery, or the
 managed API fails, inspect the content-free `protected delivery` log event and
 use delivery status; do not retry through `send_message`.
+
+The tool resolves both the actor and destination to the same verified phone
+identity before recording its canonical WhatsApp address. A mapped LID and that
+phone address reuse the same pending RustDesk request. Recovery converts older
+LID records only when the current mapping still proves the same recipient and no
+send claim is held. Conflicting mappings fail closed; submitted or ambiguous
+records are never retargeted or replayed.
 
 After the transport becomes fully connected, one maintenance loop resumes only
 recent `staged` persisted deliveries and flushes pending metadata events. It

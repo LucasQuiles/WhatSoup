@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { systemClock } from '../lib/clock.ts';
+import { bareNumber, isLidJid, JID_PERSONAL, normalizeLid } from './jid-constants.ts';
+import { lookupStoredLidPhoneJid } from './lid-resolver.ts';
 import { createOutboundSendsWriter, type OutboundSendsWriter } from './outbound-sends.ts';
 import { PROTECTED_DELIVERY_PINS, type ProtectedDeliveryPins } from './protected-delivery-pins.ts';
 import { isCanonicalManagedLink } from './protected-message.ts';
@@ -48,24 +50,28 @@ export class ProtectedDeliveryService {
   }
 
   async requestRustdesk(input: { deviceId: string; purpose: ProtectedDeliveryPurpose; principal: string; recipientJid: string }): Promise<{ deliveryRef: string; id: string; expiresAt: string; state: string }> {
+    this.assertCanonicalRecipient(input.principal, input.recipientJid);
     const now = this.now();
     const nowIso = now.toISOString();
     this.expireOverdueUncertainDeliveries(now);
     const activeLeaseCutoff = new Date(now.getTime() - RETRY_WINDOW_MS).toISOString();
     const active = this.deps.db.prepare(`SELECT 1 FROM protected_deliveries
-      WHERE kind='rustdesk' AND device_id=? AND purpose=? AND principal=? AND recipient_jid=?
+      WHERE kind='rustdesk' AND device_id=? AND purpose=? AND principal=?
         AND state IN ('staging','staged','resolving','failed','ambiguous')
         AND expires_at IS NOT NULL AND julianday(expires_at) <= julianday(?)
         AND send_claim_token IS NOT NULL AND send_claimed_at IS NOT NULL
         AND julianday(send_claimed_at) > julianday(?)
-      LIMIT 1`).get(input.deviceId, input.purpose, input.principal, input.recipientJid, nowIso, activeLeaseCutoff);
+      LIMIT 1`).get(input.deviceId, input.purpose, input.principal, nowIso, activeLeaseCutoff);
     if (active) throw new Error('protected delivery outcome is still unresolved');
     const old = this.deps.db.prepare(`SELECT * FROM protected_deliveries
-      WHERE kind='rustdesk' AND device_id=? AND purpose=? AND principal=? AND recipient_jid=?
+      WHERE kind='rustdesk' AND device_id=? AND purpose=? AND principal=?
         AND state IN ('staging','staged','resolving','failed','ambiguous')
         AND expires_at IS NOT NULL AND julianday(expires_at) > julianday(?)
       ORDER BY id DESC LIMIT 1`)
-      .get(input.deviceId, input.purpose, input.principal, input.recipientJid, nowIso) as Row | undefined;
+      .get(input.deviceId, input.purpose, input.principal, nowIso) as Row | undefined;
+    if (old && !this.matchesCanonicalRecipient(old, input.principal, input.recipientJid)) {
+      throw new Error('protected delivery recipient identity is unresolved');
+    }
     const row = old ?? this.insertRustdesk(input);
     if (row.delivery_ref && row.delivery_id && row.expires_at && row.state !== 'staging') {
       return { deliveryRef: row.delivery_ref, id: row.delivery_id, expiresAt: row.expires_at, state: row.state };
@@ -94,9 +100,10 @@ export class ProtectedDeliveryService {
 
   async deliver(input: { deliveryRef: string; principal: string; recipientJid: string }): Promise<{ deliveryRef: string; id: string; state: string }> {
     if (!opaqueId(input.deliveryRef)) throw new Error('protected delivery reference is invalid');
+    this.assertCanonicalRecipient(input.principal, input.recipientJid);
     let row = this.find(input.deliveryRef, input.principal);
     if (!row) row = await this.adopt(input);
-    if (row.recipient_jid !== input.recipientJid) throw new Error('protected delivery recipient does not match the direct conversation');
+    row = this.canonicalizeLegacyRecipient(row, input.principal, input.recipientJid);
     const claimed = this.claim(row);
     if (sent(claimed.state)) return publicRow(claimed);
     let resolved: { id: string; link: string; expiresAt: string; state: string };
@@ -188,8 +195,13 @@ export class ProtectedDeliveryService {
     let resumed = 0;
     let skipped = 0;
     for (const row of rows) {
+      const recipientJid = this.canonicalRecipient(row.principal);
+      if (!this.matchesCanonicalRecipient(row, row.principal, recipientJid)) {
+        skipped += 1;
+        continue;
+      }
       try {
-        await this.deliver({ deliveryRef: row.delivery_ref!, principal: row.principal, recipientJid: row.recipient_jid });
+        await this.deliver({ deliveryRef: row.delivery_ref!, principal: row.principal, recipientJid });
         resumed += 1;
       } catch {
         skipped += 1;
@@ -237,6 +249,36 @@ export class ProtectedDeliveryService {
   }
   private find(ref: string, principal: string): Row | undefined {
     return this.deps.db.prepare('SELECT * FROM protected_deliveries WHERE delivery_ref=? AND principal=?').get(ref, principal) as Row | undefined;
+  }
+  private canonicalRecipient(principal: string): string { return principal + JID_PERSONAL; }
+  private assertCanonicalRecipient(principal: string, recipientJid: string): void {
+    if (recipientJid !== this.canonicalRecipient(principal)) {
+      throw new Error('protected delivery recipient does not match the verified principal');
+    }
+  }
+  private matchesCanonicalRecipient(row: Pick<Row, 'recipient_jid'>, principal: string, canonicalJid: string): boolean {
+    if (canonicalJid !== this.canonicalRecipient(principal)) return false;
+    if (row.recipient_jid === canonicalJid) return true;
+    if (!isLidJid(row.recipient_jid)) return false;
+    const lid = normalizeLid(bareNumber(row.recipient_jid));
+    return lookupStoredLidPhoneJid(this.deps.db, lid) === canonicalJid;
+  }
+  private canonicalizeLegacyRecipient(row: Row, principal: string, canonicalJid: string): Row {
+    if (row.recipient_jid === canonicalJid) return row;
+    if (!this.matchesCanonicalRecipient(row, principal, canonicalJid)) {
+      throw new Error('protected delivery recipient identity is unresolved');
+    }
+    if (row.state !== 'staging' && row.state !== 'staged' && row.state !== 'failed') {
+      throw new Error('protected delivery recipient does not match the direct conversation');
+    }
+    const changed = this.deps.db.prepare(`UPDATE protected_deliveries
+      SET recipient_jid=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      WHERE id=? AND recipient_jid=? AND send_claim_token IS NULL AND state IN ('staging','staged','failed')`)
+      .run(canonicalJid, row.id, row.recipient_jid).changes;
+    if (changed !== 1) throw new Error('protected delivery recipient does not match the direct conversation');
+    const updated = this.deps.db.prepare('SELECT * FROM protected_deliveries WHERE id=?').get(row.id) as Row | undefined;
+    if (!updated || updated.recipient_jid !== canonicalJid) throw new Error('protected delivery recipient does not match the direct conversation');
+    return updated;
   }
   private async adopt(i: { deliveryRef: string; principal: string; recipientJid: string }): Promise<Row> {
     let remote: ManagedDeliveryStatus;

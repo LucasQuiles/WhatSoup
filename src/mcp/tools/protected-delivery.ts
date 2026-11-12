@@ -5,7 +5,7 @@ import {
   ProtectedDeliveryService,
   type ProtectedDeliveryPurpose,
 } from '../../core/protected-delivery.ts';
-import { isGroupJid, isLidJid } from '../../core/jid-constants.ts';
+import { isGroupJid, isLidJid, JID_PERSONAL } from '../../core/jid-constants.ts';
 import { resolveLid } from '../../core/lid-resolver.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 import type { ToolRegistry } from '../registry.ts';
@@ -100,5 +100,5 @@ function directRecipient(session: SessionContext, db: Database): { principal: st
   if (principal !== recipientPrincipal) {
     throw new Error('protected delivery requires the actor and direct recipient to match');
   }
-  return { principal, recipientJid };
+  return { principal, recipientJid: principal + JID_PERSONAL };
 }

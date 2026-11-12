@@ -71,6 +71,7 @@ import {
   hydrateLidMappings,
   importLidMappings,
   isPreferredLidObservation,
+  lookupStoredLidPhoneJid,
   mineGroupParticipants,
   mineMessageKey,
   reconcileLidMappings,
@@ -219,6 +220,24 @@ describe('resolveLid', () => {
 
   it('handles numeric-only input (no colon)', () => {
     expect(resolveLid(db, USER_LID)).toBe(USER_PHONE);
+  });
+
+  it('looks up only the normalized stored mapping without L1.5 disk fallback', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lid-stored-only-'));
+    const tempDb = createTestDb();
+    const lid = '19990001111';
+    fs.writeFileSync(path.join(tmpDir, `lid-mapping-${lid}_reverse.json`), JSON.stringify('15559990000'));
+    setLidAuthDir(tmpDir);
+    try {
+      expect(lookupStoredLidPhoneJid(tempDb.raw, lid)).toBeNull();
+      tempDb.raw.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+        .run(lid, '15559990000@s.whatsapp.net');
+      expect(lookupStoredLidPhoneJid(tempDb.raw, lid)).toBe('15559990000@s.whatsapp.net');
+    } finally {
+      setLidAuthDir('');
+      tempDb.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it('getAllLidMappings returns all entries', () => {

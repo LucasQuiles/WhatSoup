@@ -1622,6 +1622,15 @@ appear only as `outbound.legacy_unclassified`.
 
 #### Cross-field validation rules
 
+Protected delivery requires `sessionScope: "per_chat"`. When the primary provider
+and every static fallback use the in-process `managed_loop`, that scope supplies
+the bound conversation. Configurations with a CLI route or `fallbackDiscovery`
+also require `sandboxPerChat: true` or `perChatConversationBound: true`. The shared
+validator rejects other session configurations when `protectedDelivery.enabled`
+is true. Startup repeats this check before reading the credential, including for
+the legacy `INSTANCE_CONFIG` environment path. Conversation binding fixes the
+destination; it does not isolate an agent process from the service account.
+
 Beyond the per-field shapes above, the shared validator
 (`src/core/agent-config-validator.ts`) rejects these combinations at
 create/update time and at load/discovery (where the fleet surfaces them as a

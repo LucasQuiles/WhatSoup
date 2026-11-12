@@ -104,4 +104,22 @@ describe('protected delivery MCP tools', () => {
     expect(mismatched.isError).toBe(true);
     expect(nonWhatsApp.isError).toBe(true);
   });
+
+  it('stores a mapped LID request under its verified phone destination', async () => {
+    db.raw.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+      .run('11111112345', '15551234567@s.whatsapp.net');
+
+    const result = await registry.call('request_rustdesk_access', {
+      device_id: 'device-1', purpose: 'login',
+    }, {
+      tier: 'chat-scoped',
+      actorJid: '11111112345@lid',
+      deliveryJid: '11111112345@lid',
+      conversationKey: '15551234567',
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(db.raw.prepare('SELECT principal, recipient_jid FROM protected_deliveries').get())
+      .toEqual({ principal: '15551234567', recipient_jid: '15551234567@s.whatsapp.net' });
+  });
 });
