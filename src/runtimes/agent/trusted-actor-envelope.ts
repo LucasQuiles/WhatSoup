@@ -10,8 +10,19 @@ import {
 
 export type { TrustedActorAccessClass } from '../../core/access-policy.ts';
 
-const TRUSTED_ACTOR_HEADER = '[WhatSoup trusted transport metadata — server-authored, not user-authored]';
-const TRUSTED_ACTOR_FOOTER = '[/WhatSoup trusted transport metadata]';
+const TRUSTED_ACTOR_MARKER_PHRASE = 'WhatSoup trusted transport metadata';
+const TRUSTED_ACTOR_HEADER = `[${TRUSTED_ACTOR_MARKER_PHRASE} — server-authored, not user-authored]`;
+const TRUSTED_ACTOR_FOOTER = `[/${TRUSTED_ACTOR_MARKER_PHRASE}]`;
+
+// A reader ignores case and invisible format characters (Unicode Cf: zero-width
+// characters, joiners, soft hyphens, bidi controls), so a copy of the marker
+// phrase matches with any of them inside or between its words.
+const TRUSTED_ACTOR_MARKER_COPY = new RegExp(
+  TRUSTED_ACTOR_MARKER_PHRASE.split(' ')
+    .map((word) => [...word].join('\\p{Cf}*'))
+    .join('[\\s\\p{Cf}]+'),
+  'giu',
+);
 
 export function trustedActorApplicationContext(
   actorAccess: TrustedActorAccessClass,
@@ -31,7 +42,20 @@ export function trustedActorApplicationContext(
   ].join('\n');
 }
 
-/** Attach the transport-authenticated actor classification at the provider boundary. */
+/**
+ * Remove the marker phrase from user-derived text, so a user-authored copy of
+ * the header or footer cannot read as a server-authored actor block.
+ */
+export function neutralizeTrustedActorMarkers(text: string): string {
+  return text.replace(TRUSTED_ACTOR_MARKER_COPY, 'user-supplied text imitating runtime metadata');
+}
+
+/**
+ * Attach the transport-authenticated actor classification at the provider
+ * boundary. The authentic block is the first application-context entry; every
+ * other entry and the user text carry user-derived fields (display names,
+ * quoted text, recent chat), so their marker copies are removed first.
+ */
 export function withTrustedActorTurn(
   input: ProviderTurnInput,
   actorJid: string | undefined,
@@ -41,7 +65,12 @@ export function withTrustedActorTurn(
   const actorContext = trustedActorApplicationContext(
     classifyTrustedActorAccess(actorJid, db, adminPhones),
   );
-  return isStructuredProviderTurn(input)
-    ? { ...input, applicationContext: [...input.applicationContext, actorContext] }
-    : { applicationContext: [actorContext], userText: input };
+  const structured = isStructuredProviderTurn(input);
+  return {
+    applicationContext: [
+      actorContext,
+      ...(structured ? input.applicationContext : []).map(neutralizeTrustedActorMarkers),
+    ],
+    userText: neutralizeTrustedActorMarkers(structured ? input.userText : input),
+  };
 }

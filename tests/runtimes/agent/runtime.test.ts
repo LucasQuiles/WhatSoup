@@ -6932,8 +6932,9 @@ describe('AgentRuntime', () => {
       applicationContext: string[];
       userText: string;
     }])[0];
-    expect(sent.applicationContext[0]).toMatch(/^\[Recent chat context — read before responding\]\n/);
-    expect(sent.applicationContext[0]).toContain('earlier message');
+    expect(sent.applicationContext[0]).toMatch(/^\[WhatSoup trusted transport metadata/);
+    expect(sent.applicationContext[1]).toMatch(/^\[Recent chat context — read before responding\]\n/);
+    expect(sent.applicationContext[1]).toContain('earlier message');
     expect(sent.userText).toBe('hello');
 
     // Complete the (single) user turn so the queued test work does not outlive
