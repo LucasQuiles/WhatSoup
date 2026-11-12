@@ -32,10 +32,11 @@ export function classifyGroupMembership(psOutput: string, pgid: number): GroupMe
 /**
  * Default membership probe: one bounded `ps` read of the pid, group and state columns only
  * (never arguments). Any failure to read is `unknown`. It blocks the caller for at most
- * `timeoutMs`, so callers use it only on the rare EPERM path.
+ * `timeoutMs`, so callers use it only on the rare EPERM path. The absolute path keeps a
+ * `PATH` entry from substituting a `ps` that reports a live group as reaped.
  */
 export function probeGroupMembership(pgid: number, timeoutMs = DEFAULT_PROBE_TIMEOUT_MS): GroupMembership {
-  const ps = spawnSync('ps', ['-A', '-o', 'pid=,pgid=,stat='], { encoding: 'utf8', timeout: timeoutMs });
+  const ps = spawnSync('/bin/ps', ['-A', '-o', 'pid=,pgid=,stat='], { encoding: 'utf8', timeout: timeoutMs });
   if (ps.error !== undefined || ps.status !== 0) return 'unknown';
   return classifyGroupMembership(ps.stdout, pgid);
 }

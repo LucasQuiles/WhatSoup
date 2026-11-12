@@ -18,13 +18,10 @@ const MAX_CAPTURE_BYTES = 1_048_576;
 /** Bounds the synchronous `ps` read that runs only after a group kill reports EPERM. */
 const GROUP_PROBE_TIMEOUT_MS = 1_000;
 
+/** `cleanupUnproven` reports separately that the child's process group may still run. */
 type McpOutcome =
   | { kind: 'result'; result: unknown }
-  | { kind: 'protocol_error' }
-  | { kind: 'timeout' }
-  | { kind: 'output_limit' }
-  | { kind: 'spawn_error' }
-  | { kind: 'child_exit' };
+  | { kind: 'protocol_error' | 'timeout' | 'output_limit' | 'spawn_error' | 'child_exit'; cleanupUnproven?: true };
 
 export interface Microsoft365Launch {
   /** Fixed absolute executable path for the account-bound Microsoft 365 plugin. */
@@ -157,6 +154,7 @@ function requestMcp(
     let settled = false;
     let initialized = false;
     let cleanupStarted = false;
+    let cleanupUnproven = false;
     let outcome: McpOutcome | null = null;
     let deadline: ReturnType<typeof setTimeout> | undefined;
     let forceKill: ReturnType<typeof setTimeout> | undefined;
@@ -172,7 +170,13 @@ function requestMcp(
       clearTimeout(deadline);
       clearTimeout(forceKill);
       clearTimeout(cleanupDeadline);
-      resolve(next);
+      if (!cleanupUnproven) {
+        resolve(next);
+        return;
+      }
+      // The request's own outcome is kept, and the cleanup failure is reported beside it.
+      // A completed call is never returned as success while its group may still run.
+      resolve(next.kind === 'result' ? { kind: 'protocol_error', cleanupUnproven: true } : { ...next, cleanupUnproven: true });
     };
 
     const groupHasNoLiveMember = (pgid: number): boolean => {
@@ -195,7 +199,7 @@ function requestMcp(
         // an unreaped zombie, so EPERM keeps the outcome only when the group has no live member.
         // Any other answer, or a probe that throws, leaves cleanup unproven.
         if (code === 'ESRCH' || (code === 'EPERM' && groupHasNoLiveMember(pid))) return;
-        outcome = { kind: 'protocol_error' };
+        cleanupUnproven = true;
       }
     };
 
@@ -327,7 +331,11 @@ function errorFor(outcome: Exclude<McpOutcome, { kind: 'result' }>): ReturnType<
         : outcome.kind === 'spawn_error'
           ? 'microsoft365_spawn_error'
           : 'microsoft365_child_exit';
-  return toolError({ error, message: 'Microsoft 365 MCP request did not complete.' });
+  return toolError({
+    error,
+    message: 'Microsoft 365 MCP request did not complete.',
+    ...(outcome.cleanupUnproven ? { cleanup: 'unproven' } : {}),
+  });
 }
 
 function validCatalogue(outcome: McpOutcome): McpOutcome {

@@ -499,6 +499,31 @@ describe('createMicrosoft365Tool', () => {
     }
   });
 
+  it.each([
+    ['live', (): GroupMembershipAnswer => 'live'],
+    ['unknown', (): GroupMembershipAnswer => 'unknown'],
+    ['a thrown probe error', (): GroupMembershipAnswer => { throw new Error('probe failed'); }],
+  ] as const)('keeps the timeout and reports unproven cleanup separately when a group kill reports EPERM and the probe answers %s', async (_case, answer) => {
+    const trace = makeTracePath();
+    const probeGroup = vi.fn(answer);
+    const signal = epermOnGroupKill([]);
+    try {
+      const pending = callTool(
+        makeTool({ trace, catalogVersion: `timeout-unproven-${Date.now()}-${Math.random()}`, scenario: 'hang', timeoutMs: 2_000, probeGroup }),
+        { operation: 'call', name: 'send-mail', args: {} },
+      );
+      await vi.waitFor(() => expect(traceRows(trace).some((row) => row.event === 'hang')).toBe(true), { timeout: 1_500 });
+      const result = await pending;
+
+      expect(result.isError).toBe(true);
+      const payload = JSON.parse(result.content[0]?.text ?? '{}') as Record<string, unknown>;
+      expect(payload).toMatchObject({ error: 'microsoft365_timeout', cleanup: 'unproven' });
+      expect(probeGroup).toHaveBeenCalled();
+    } finally {
+      signal.mockRestore();
+    }
+  });
+
   it('returns a completed call when a group kill reports EPERM and the group has no live member', async () => {
     const trace = makeTracePath();
     const groups: number[] = [];
@@ -533,7 +558,7 @@ describe('createMicrosoft365Tool', () => {
       );
 
       expect(result.isError).toBe(true);
-      expect(result.content[0]?.text).toContain('microsoft365_protocol_error');
+      expect(JSON.parse(result.content[0]?.text ?? '{}')).toMatchObject({ error: 'microsoft365_protocol_error', cleanup: 'unproven' });
     } finally {
       signal.mockRestore();
     }
