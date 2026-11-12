@@ -62,7 +62,11 @@ function isProtectedLinkStart(match: RegExpExecArray, pins: ProtectedDeliveryPin
   if (port !== undefined && !((scheme === 'https' && port === '443') || (scheme === 'http' && port === '80'))) {
     return false;
   }
-  let host = match[2]!.toLowerCase();
+  // Under the `iu` flags the ASCII host class also admits U+017F (long s) and
+  // U+212A (Kelvin sign), which browsers map to `s` and `k`. toLowerCase()
+  // already folds the Kelvin sign; fold the long s too, or such a spelling of
+  // a pinned host would open the real host yet miss its digest.
+  let host = match[2]!.toLowerCase().replace(/ſ/g, 's');
   if (host.startsWith('www.')) host = host.slice('www.'.length);
   return pins.linkHostSha256.has(pinDigest(host));
 }

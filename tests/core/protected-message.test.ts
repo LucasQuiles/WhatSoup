@@ -44,6 +44,9 @@ describe('protected message sanitizer', () => {
       [`https://www.${TEST_LINK_HOST}/s/#n=host&k=WWWPREFIX&x=expiry`, 'WWWPREFIX'],
       [`HTTPS://${TEST_LINK_HOST.toUpperCase()}/S/#n=host&k=UPPERCASE&x=expiry`, 'UPPERCASE'],
       [`${TEST_LINK_HOST}/s/#n=host&k=BAREHOST&x=expiry`, 'BAREHOST'],
+      // Browsers map U+017F to `s` and U+212A to `k`, so these spellings open the pinned host.
+      [`https://${TEST_DELIVERY_HOST.replace(/s/g, 'ſ')}/s/#n=host&k=LONGS&x=expiry`, 'LONGS'],
+      [`https://${TEST_LINK_HOST.replace(/k/g, 'K')}/s/#n=host&k=KELVIN&x=expiry`, 'KELVIN'],
     ] as const;
 
     for (const [link, secret] of links) {
