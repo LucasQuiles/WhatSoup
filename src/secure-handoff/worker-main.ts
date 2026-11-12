@@ -28,6 +28,7 @@ async function main(): Promise<void> {
   const { createSecureHandoffWorker } = await import('./worker.ts');
   const worker = createSecureHandoffWorker({
     config: parseSecureHandoffWorkerConfig(raw),
+    // env-allowed: Standalone consumer resolves its reserved credentials once at startup.
     environment: process.env,
   });
   let stopping = false;
