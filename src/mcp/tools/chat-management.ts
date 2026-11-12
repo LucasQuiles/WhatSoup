@@ -352,7 +352,7 @@ function makeListChats(db: Database): ToolDeclaration {
           chatJid: r.chat_jid,
           lastTimestamp: r.last_timestamp ?? undefined,
           messageCount: r.message_count,
-          name: r.name ?? undefined,
+          name: r.name === null ? undefined : sanitizeProtectedMessageText(r.name),
           unreadCount: r.unread_count ?? undefined,
           isArchived: r.is_archived ? true : undefined,
           isPinned: r.is_pinned ? true : undefined,

@@ -12,6 +12,7 @@ import { projectError, validationError } from '../response-error-projection.ts';
 import { inspectLatestLogFile, readTailLinesDetailed } from '../log-utils.ts';
 import { resolveGroupNames } from '../group-resolver.ts';
 import { isGroupConversationKey, conversationKeyToJid } from '../../core/conversation-key.ts';
+import { sanitizeProtectedMessageText } from '../../core/protected-message.ts';
 import { normalizeTimestamp, toIsoFromUnix } from '../time-utils.ts';
 import { isTypingHealthEntry } from '../typing-payload.ts';
 import { isPathWithinAllowedRoot } from '../../lib/path-boundary.ts';
@@ -243,14 +244,18 @@ export function handleGetChats(
     return;
   }
 
-  // Strip internal flags before sending, trigger backfill for groups missing names
+  // Strip internal flags before sending, trigger backfill for groups missing names.
+  // Names and previews above come from this route's own queries, not the reader's
+  // message projection, so the final values are redacted here.
   const groupsNeedingBackfill: string[] = [];
   const response = enriched.data.map(({ _needsBackfill, ...chat }) => {
     if (_needsBackfill) groupsNeedingBackfill.push(chat.conversationKey);
     return {
       ...chat,
-      name: requiredString((chat as { name?: unknown }).name, chat.conversationKey),
-      lastMessagePreview: stringOrEmpty((chat as { lastMessagePreview?: unknown }).lastMessagePreview),
+      name: sanitizeProtectedMessageText(requiredString((chat as { name?: unknown }).name, chat.conversationKey)),
+      lastMessagePreview: sanitizeProtectedMessageText(
+        stringOrEmpty((chat as { lastMessagePreview?: unknown }).lastMessagePreview),
+      ),
       lastMessageAt: stringOrEmpty((chat as { lastMessageAt?: unknown }).lastMessageAt),
     };
   });

@@ -214,7 +214,7 @@ export function getRecentMessageText(
   }[];
   if (rows.some((row) => row.oversized)) throw new Error('Recent message text exceeds byte limit');
   return rows.map((row) => ({
-    content: row.content,
+    content: row.content === null ? null : sanitizeProtectedMessageText(row.content),
     senderName: row.sender_name === null ? null : sanitizeProtectedMessageText(row.sender_name),
     isFromMe: Boolean(row.is_from_me),
   })).reverse();

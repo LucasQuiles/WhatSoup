@@ -58,6 +58,7 @@ import {
   normalizeLid,
 } from './jid-constants.ts';
 import { resolveLid, resolveLidsForPhone } from './lid-resolver.ts';
+import { sanitizeProtectedMessageText } from './protected-message.ts';
 import { isPhoneLocal } from '../lib/phone.ts';
 import { asNonEmptyString } from '../lib/type-guards.ts';
 
@@ -163,7 +164,10 @@ const SQL_CHAT_EXISTS = 'SELECT 1 AS present FROM chats WHERE jid = ? LIMIT 1';
  */
 export function resolveChatDisplayName(db: Database, ref: string): string {
   try {
-    return resolveLadder(db, ref) ?? ref;
+    // Every rung reads a remote-controlled name that may predate ingress
+    // redaction. Redact here, before render filtering and truncation can cut
+    // a link into a form the scanner no longer matches.
+    return sanitizeProtectedMessageText(resolveLadder(db, ref) ?? ref);
   } catch {
     return ref;
   }
