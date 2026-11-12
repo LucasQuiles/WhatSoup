@@ -27,6 +27,7 @@ import { randomBytes } from 'node:crypto';
 
 import type { StoredMessage } from '../../core/messages.ts';
 import { neutralizeHandoffForgery } from './handoff-pii-redactor.ts';
+import { neutralizeTrustedActorMarkers } from './trusted-actor-envelope.ts';
 
 /** Minimal projection of a stored message the summarizer corpus needs (reuses the core type). */
 export type HandoffMessage = Pick<StoredMessage, 'senderName' | 'isFromMe' | 'content'>;
@@ -76,12 +77,15 @@ function composeSystemBlock(args: BuildHandoffPreludeArgs): string | null {
   if (now - artifact.updatedAt > staleAfterMs) return null;
 
   const parts: string[] = [];
-  const summary = artifact.summary?.trim();
   // Order: PII redaction first (make it safe to embed), then forgery
   // neutralization (defang delimiter/header lookalikes the redaction may leave).
-  if (summary) parts.push(neutralizeHandoffForgery(redact(summary)));
+  // Quoting a header line leaves its words intact, and the system prompt is the
+  // most trusted channel, so trusted actor marker copies are removed as well.
+  const neutralize = (text: string): string => neutralizeTrustedActorMarkers(neutralizeHandoffForgery(redact(text)));
+  const summary = artifact.summary?.trim();
+  if (summary) parts.push(neutralize(summary));
   const seeded = artifact.seededArtifacts?.trim();
-  if (seeded) parts.push(neutralizeHandoffForgery(redact(seeded)));
+  if (seeded) parts.push(neutralize(seeded));
   if (parts.length === 0) return null;
 
   const nonce = randomBytes(NONCE_BYTES).toString('hex');
