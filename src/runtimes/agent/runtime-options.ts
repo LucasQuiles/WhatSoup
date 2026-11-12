@@ -8,6 +8,7 @@ import type { ServiceRestarter } from './self-restart.ts';
 import type { M365BridgeBinding } from '../../core/m365-bridge-policy.ts';
 import type { TypedHandoffDistillConfig } from '../../lib/handoff-distill-config.ts';
 import type { MemoryReadinessSnapshot } from './memory-guidance.ts';
+import type { ProtectedDeliveryService } from '../../core/protected-delivery.ts';
 
 export interface SandboxPolicy {
   allowedPaths: string[];
@@ -104,4 +105,9 @@ export interface AgentRuntimeOptions {
   expectedAccountDigest?: string | null;
   /** Test seam for the identity verification (defaults to the real CLI probe). */
   accountIdentityVerify?: AccountIdentityVerifyFn;
+  /**
+   * Protected delivery is composed in main.ts after its runtime-only credential
+   * has been parsed. Absent keeps the model-visible tool surface unchanged.
+   */
+  protectedDeliveryService?: ProtectedDeliveryService;
 }

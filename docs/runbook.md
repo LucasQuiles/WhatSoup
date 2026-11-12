@@ -3053,6 +3053,35 @@ storage snapshots, or provider copies. Operate backup rotation/destruction and
 provider-data retention under their separate controls. This runbook describes the
 implemented lifecycle; it does not attest any deployed system or external copy.
 
+### Protected delivery
+
+Protected delivery is disabled until an agent instance explicitly sets
+`agentOptions.protectedDelivery.enabled: true` with the fixed managed-links API
+endpoint and a runtime-only credential environment-variable name. Inject that
+credential through the service environment; do not place its value in
+`config.json`, a prompt, or a tool call.
+
+The three protected-delivery tools exist only in agent runtimes and require a
+resolved, bound direct WhatsApp conversation. The protected transport sends the
+one-use URL directly and returns metadata only. It does not use the generic
+outbox, conversation history, or model result. If staging, delivery, or the
+managed API fails, inspect the content-free `protected delivery` log event and
+use delivery status; do not retry through `send_message`.
+
+After the transport becomes fully connected, one maintenance loop resumes only
+recent `staged` persisted deliveries and flushes pending metadata events. It
+repeats every five seconds while the transport remains fully connected, including
+after socket creation returns before the transport reports ready, and never
+overlaps an in-flight loop; each flush is bounded to 100 pending events. Recovery
+uses the same persisted reference and remains bounded to three attempts within
+60 seconds. It does not replay `resolving` or `ambiguous` rows, mint, adopt, or
+replace a delivery; inspect delivery status and receipt evidence for those rows.
+The daily unified database-retention transaction deletes protected-delivery
+metadata and associated event rows older than 90 days. Check
+`health.retention.database.lastResult.protectedDeliveries` after a successful
+sweep. A missing runtime credential is a startup configuration error, so correct
+the service environment before restarting the agent.
+
 ---
 
 ## 8. Monitoring

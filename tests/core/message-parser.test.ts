@@ -4,6 +4,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // Module mock: @whiskeysockets/baileys
 // We need to control isJidGroup and jidNormalizedUser
 // ---------------------------------------------------------------------------
+vi.mock('../../src/core/protected-delivery-pins.ts', async (importOriginal) =>
+  (await import('../helpers/protected-delivery-pins.ts')).mockProtectedDeliveryPins(importOriginal));
 vi.mock('@whiskeysockets/baileys', async (importOriginal) => {
   const original = (await importOriginal()) as typeof import('@whiskeysockets/baileys');
   return {
@@ -47,6 +49,7 @@ vi.mock('../../src/logger.ts', async () => {
 
 import { parseIncomingMessage, unwrapMessage, extractContextInfo } from '../../src/core/message-parser.ts';
 import { hasLoneSurrogates } from '../../src/core/sanitize-surrogates.ts';
+import { PROTECTED_MESSAGE_MARKER } from '../../src/core/protected-message.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -90,6 +93,26 @@ describe('parseIncomingMessage — surrogate sanitization (QR-056)', () => {
   it('leaves a clean senderName unchanged', () => {
     const msg = msgWith({ conversation: 'hello' }, { pushName: 'Alice' });
     expect(parseIncomingMessage(msg)!.senderName).toBe('Alice');
+  });
+});
+
+describe('parseIncomingMessage — protected managed links', () => {
+  it('redacts live content and recursively redacts its raw quoted payload without mutating the transport message', () => {
+    const link = 'https://links.example.test/s/#v3.live-protected-test';
+    const msg = msgWith({
+      extendedTextMessage: {
+        text: link,
+        contextInfo: { quotedMessage: { conversation: link } },
+      },
+    });
+
+    const result = parseIncomingMessage(msg);
+
+    expect(result!.content).toBe(PROTECTED_MESSAGE_MARKER);
+    expect((result!.rawMessage as any).message.extendedTextMessage.text).toBe(PROTECTED_MESSAGE_MARKER);
+    expect((result!.rawMessage as any).message.extendedTextMessage.contextInfo.quotedMessage.conversation)
+      .toBe(PROTECTED_MESSAGE_MARKER);
+    expect(msg.message.extendedTextMessage.text).toBe(link);
   });
 });
 

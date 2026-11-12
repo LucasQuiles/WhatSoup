@@ -1,5 +1,5 @@
 // src/mcp/register-all.ts
-// Standalone function that registers all 20 tool modules onto a ToolRegistry.
+// Standalone function that registers all 22 tool modules onto a ToolRegistry.
 // Used by AgentRuntime and PassiveRuntime so both get the same tools.
 //
 // Fail-closed contract (issue #480):
@@ -34,6 +34,7 @@ import * as auditTools from './tools/audit.ts';
 import * as substrateTools from './tools/substrate.ts';
 import * as messagingTools from './tools/messaging.ts';
 import * as mediaTools from './tools/media.ts';
+import * as protectedDeliveryTools from './tools/protected-delivery.ts';
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
 import { ToolRegistry } from './registry.ts';
@@ -49,6 +50,7 @@ import { createProfileRegistry } from '../core/profiles.ts';
 import { createOutboundSendsWriter } from '../core/outbound-sends.ts';
 import { GroupMembershipCache } from '../core/memory-scope.ts';
 import type { KnowledgeSearchDeps } from './tools/knowledge.ts';
+import type { ProtectedDeliveryService } from '../core/protected-delivery.ts';
 
 const log = createChildLogger('register-all');
 
@@ -99,6 +101,11 @@ export interface RegisterAllToolsOptions {
   enableKnowledgeSearch?: boolean;
   pollRegistrar?: import('./tools/messaging.ts').PollRegistrar;
   /**
+   * Agent-only protected delivery capability composed by main.ts. Passive
+   * runtimes omit it, leaving the module and its model-visible tools absent.
+   */
+  protectedDeliveryService?: ProtectedDeliveryService;
+  /**
    * T8-F2: query whether the runtime is currently in a fallback-provider
    * window, threaded to every MCP send tool that can reach the operator DM
    * (messaging, media) so their T8-F1 elevation stays provider-conditioned.
@@ -110,7 +117,7 @@ export interface RegisterAllToolsOptions {
 }
 
 /**
- * Register all 20 tool modules onto the given registry.
+ * Register all 22 tool modules onto the given registry.
  *
  * Preserves the three calling conventions used by the individual modules:
  *   Pattern 1 (options-object): registerMessagingTools, registerMediaTools, registerVoiceTools
@@ -280,6 +287,19 @@ export function registerAllTools(
   if (config.pineconeIndex && process.env[memWriteApiKeyEnv]) {
     runModule('memory-write', false, (register) =>
       memoryWriteTools.registerMemoryWriteTools(register),
+    );
+  }
+
+  // Protected delivery is an explicit agent-only capability. Once injected it
+  // is core: a partial protected tool surface would misrepresent delivery
+  // availability, while omission remains the deliberate default.
+  const protectedDeliveryService = options.protectedDeliveryService;
+  if (protectedDeliveryService !== undefined) {
+    runModule('protected-delivery', true, () =>
+      protectedDeliveryTools.registerProtectedDeliveryTools(registry, {
+        db,
+        service: protectedDeliveryService,
+      }),
     );
   }
 

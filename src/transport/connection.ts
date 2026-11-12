@@ -1230,7 +1230,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
    * Send a raw Baileys message payload. Used by MCP tools that need to send
    * message types not covered by the typed sendMessage/sendMedia helpers.
    */
-  async sendRaw(chatJid: string, content: Record<string, unknown>): Promise<SubmissionReceipt> {
+  async sendRaw(chatJid: string, content: Record<string, unknown>, opts?: SendOptions): Promise<SubmissionReceipt> {
     if (!this.sock) throw new WhatSoupError('WhatsApp is not connected', 'CONNECTION_UNAVAILABLE');
     applyOutboundIdentityGuard(chatJid, { caller: 'mcp', mode: this.identityMode }, this.identityStore);
     this.countOutboundSend(chatJid); // PR-G: MCP-raw sends count toward the flood threshold too
@@ -1245,7 +1245,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     let result;
     try {
       result = await withSendTimeout(
-        this.sock.sendMessage(chatJid, content as any),
+        opts?.messageId
+          ? this.sock.sendMessage(chatJid, content as any, { messageId: opts.messageId })
+          : this.sock.sendMessage(chatJid, content as any),
         'sendRaw',
       );
     } finally {

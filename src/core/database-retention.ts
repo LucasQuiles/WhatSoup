@@ -6,6 +6,7 @@ import { DEFERRED_TURN_NON_TERMINAL_STATUS_SQL } from './deferred-turn-store.ts'
 import { expireOverdueCompletedDeliveryIdentityAdmissions } from './durability.ts';
 import { deleteOldMessages } from './messages.ts';
 import { maintainOutboundSends } from './outbound-sends.ts';
+import { deleteExpiredProtectedDeliveries } from './protected-delivery.ts';
 import { systemClock } from '../lib/clock.ts';
 import {
   HANDOFF_ARTIFACT_RETENTION_MS,
@@ -90,6 +91,8 @@ export interface DatabaseRetentionResult {
   /** Reliability 4.1: quarantined identity admissions terminalized (state
    * transition with preserved receipt — not deletions). */
   identityAdmissionsExpired: number;
+  /** Protected-delivery metadata and its receipt-event rows expire after 90 days. */
+  protectedDeliveries: number;
 }
 
 export interface DatabaseRetentionHealth {
@@ -454,6 +457,10 @@ export function runDatabaseRetention(
     // location moved.
     const messages = deleteOldMessages(db, retention.messageRetentionDays);
 
+    // Delivery rows are metadata only; their linked event records are deleted
+    // in the same transaction so no principal or delivery correlation remains.
+    const protectedDeliveries = deleteExpiredProtectedDeliveries(db.raw);
+
     // #2566 slice 4 — trigger history. Terminal rows only: a running run or a
     // running/claimed occurrence is crash evidence, not history, and is never
     // pruned regardless of age. These timestamps are unix SECONDS (integer),
@@ -495,6 +502,7 @@ export function runDatabaseRetention(
       triggerOccurrences,
       handoffArtifacts,
       identityAdmissionsExpired,
+      protectedDeliveries,
     };
   });
   const total = Object.values(result).reduce((sum, count) => sum + count, 0);

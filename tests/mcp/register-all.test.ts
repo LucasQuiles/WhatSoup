@@ -8,6 +8,7 @@ import { ToolRegistry } from '../helpers/resolved-tool-registry.ts';
 import { PresenceCache } from '../../src/transport/presence-cache.ts';
 import { registerAllTools } from '../../src/mcp/register-all.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
+import type { ProtectedDeliveryService } from '../../src/core/protected-delivery.ts';
 import type { ToolDeclaration } from '../../src/mcp/types.ts';
 
 // Baseline tool count for a non-Pinecone build.
@@ -58,6 +59,62 @@ describe('registerAllTools', () => {
     // Exact count, not a loose lower-bound — a silently-dropped module must surface here.
     expect(tools.length).toBe(BASELINE_TOOL_COUNT);
 
+    db.raw.close();
+  });
+
+  it('leaves protected delivery tools absent without an injected service', () => {
+    const db = new Database(':memory:');
+    db.open();
+    const registry = new ToolRegistry();
+
+    registerAllTools(registry, makeConnection(), db);
+
+    const names = new Set(registry.listTools({ tier: 'global' }).map((tool) => tool.name));
+    expect(names.has('request_rustdesk_access')).toBe(false);
+    expect(names.has('deliver_secret')).toBe(false);
+    expect(names.has('get_secret_delivery_status')).toBe(false);
+    db.raw.close();
+  });
+
+  it('registers injected protected delivery tools through the canonical module group', () => {
+    const db = new Database(':memory:');
+    db.open();
+    const registry = new ToolRegistry();
+    const registered: ToolDeclaration[] = [];
+    const register = registry.register.bind(registry);
+    registry.register = (tool: ToolDeclaration) => {
+      register(tool);
+      registered.push(tool);
+    };
+
+    registerAllTools(registry, makeConnection(), db, {
+      protectedDeliveryService: {} as ProtectedDeliveryService,
+    });
+
+    const protectedTools = registered.filter((tool) =>
+      ['request_rustdesk_access', 'deliver_secret', 'get_secret_delivery_status'].includes(tool.name),
+    );
+    expect(protectedTools).toHaveLength(3);
+    expect(protectedTools.map((tool) => tool.group)).toEqual([
+      'protected-delivery',
+      'protected-delivery',
+      'protected-delivery',
+    ]);
+    db.raw.close();
+  });
+
+  it('fails closed when injected protected delivery tool registration throws', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    const registry = new ToolRegistry();
+    const protectedDelivery = await import('../../src/mcp/tools/protected-delivery.ts');
+    vi.spyOn(protectedDelivery, 'registerProtectedDeliveryTools').mockImplementation(() => {
+      throw new Error('synthetic protected delivery registration failure');
+    });
+
+    expect(() => registerAllTools(registry, makeConnection(), db, {
+      protectedDeliveryService: {} as ProtectedDeliveryService,
+    })).toThrow(/protected-delivery|core/i);
     db.raw.close();
   });
 

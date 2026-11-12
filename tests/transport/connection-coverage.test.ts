@@ -242,6 +242,24 @@ describe('ConnectionManager.sendRaw — text payload with autoTyping composing',
   });
 });
 
+describe('ConnectionManager.sendRaw — stable message id', () => {
+  it('passes a caller-provided stable id to Baileys for retry deduplication', async () => {
+    const { manager, mockSock } = await connected();
+    mockSock.sendMessage.mockResolvedValueOnce({ key: { id: 'protected-delivery-id' } });
+
+    const receipt = await manager.sendRaw(USER_JID, { text: 'opaque protected delivery' }, {
+      messageId: 'protected-delivery-id',
+    });
+
+    expect(receipt).toEqual({ waMessageId: 'protected-delivery-id' });
+    expect(mockSock.sendMessage).toHaveBeenCalledWith(
+      USER_JID,
+      { text: 'opaque protected delivery' },
+      { messageId: 'protected-delivery-id' },
+    );
+  });
+});
+
 // ===========================================================================
 // sendMedia — image branch + sendMedia post-send scheduling hooks fire
 // ===========================================================================

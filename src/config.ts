@@ -37,6 +37,7 @@ import { getLoadedInstanceConfigOrNull } from './lib/instance-context.ts';
 import { parseClientOutputPoliciesForInstance } from './core/client-output-policy-config.ts';
 import type { ProviderProcessIsolationConfig } from './runtimes/agent/provider-process-isolation.ts';
 import { resolveTypedHandoffDistillConfig, type TypedHandoffDistillInput } from './lib/handoff-distill-config.ts';
+import { parseProtectedDeliveryConfig } from './core/protected-delivery-config.ts';
 
 const APP_NAME = 'whatsoup';
 
@@ -1380,8 +1381,22 @@ function resolveProviderProcessIsolationConfig(): ProviderProcessIsolationConfig
 const resolvedTransportAuthority = resolveTransportAuthorityConfig();
 const resolvedProviderProcessIsolation = resolveProviderProcessIsolationConfig();
 
+function configProtectedDelivery() {
+  try {
+    return parseProtectedDeliveryConfig(resolvedAgentOptions['protectedDelivery'], process.env);
+  } catch (err) {
+    throw new ConfigValidationError(
+      `agentOptions.protectedDelivery is enabled but malformed: ${errorMessage(err)}`,
+    );
+  }
+}
+
 export const config = {
   clientOutputPolicies: parsedClientOutputPolicies.registry,
+
+  // Disabled unless a fixed trusted endpoint and an environment-held credential
+  // are both explicitly configured. This object is never model-visible.
+  protectedDelivery: configProtectedDelivery(),
 
   // Capability-obligation replay (all-or-inert; default OFF). `enabled: true`
   // with a malformed body fails startup as EX_CONFIG — never a partial activation.

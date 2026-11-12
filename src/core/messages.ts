@@ -5,6 +5,7 @@ import type { ContentType } from './types.ts';
 import { normalizeUnixTimestampSeconds } from './substrate/time.ts';
 import { type Clock, systemClock } from '../lib/clock.ts';
 import { mergeTranscriptionContent } from './audio-transcript-content.ts';
+import { sanitizeProtectedMessageText } from './protected-message.ts';
 
 // ---------------------------------------------------------------------------
 // MCP row shape — used by tool files that query the messages table directly
@@ -28,6 +29,8 @@ export interface MessageRow {
 }
 
 export function rowToMessage(row: MessageRow) {
+  const content = row.content === null ? null : sanitizeProtectedMessageText(row.content);
+  const contentText = row.content_text ?? row.content;
   return {
     pk: row.pk,
     messageId: row.message_id,
@@ -35,14 +38,14 @@ export function rowToMessage(row: MessageRow) {
     chatJid: row.chat_jid,
     senderJid: row.sender_jid,
     senderName: row.sender_name ?? null,
-    content: row.content ?? null,
+    content,
     contentType: row.content_type,
     isFromMe: Boolean(row.is_from_me),
     timestamp: row.timestamp,
     quotedMessageId: row.quoted_message_id ?? null,
     createdAt: row.created_at,
     mediaPath: row.media_path ?? null,
-    contentText: row.content_text ?? row.content ?? null,
+    contentText: contentText === null ? null : sanitizeProtectedMessageText(contentText),
   };
 }
 
@@ -85,6 +88,8 @@ export interface StoreMessageInput {
 // --- Row mapping ---
 
 function rowToStoredMessage(row: Record<string, unknown>): StoredMessage {
+  const content = (row.content as string | null) ?? null;
+  const contentText = (row.content_text as string | null) ?? content;
   return {
     pk: row.pk as number,
     chatJid: row.chat_jid as string,
@@ -92,7 +97,7 @@ function rowToStoredMessage(row: Record<string, unknown>): StoredMessage {
     senderJid: row.sender_jid as string,
     senderName: (row.sender_name as string | null) ?? null,
     messageId: row.message_id as string,
-    content: (row.content as string | null) ?? null,
+    content: content === null ? null : sanitizeProtectedMessageText(content),
     contentType: (row.content_type as ContentType) ?? 'text',
     isFromMe: Boolean(row.is_from_me),
     timestamp: row.timestamp as number,
@@ -101,7 +106,7 @@ function rowToStoredMessage(row: Record<string, unknown>): StoredMessage {
     enrichmentRetries: (row.enrichment_retries as number) ?? 0,
     createdAt: row.created_at as string,
     mediaPath: (row.media_path as string | null) ?? null,
-    contentText: (row.content_text as string | null) ?? (row.content as string | null) ?? null,
+    contentText: contentText === null ? null : sanitizeProtectedMessageText(contentText),
   };
 }
 
@@ -114,13 +119,13 @@ function toInsertParams(msg: StoreMessageInput): Record<string, null | number | 
     sender_jid: msg.senderJid,
     sender_name: msg.senderName ?? null,
     message_id: msg.messageId,
-    content: msg.content ?? null,
+    content: msg.content === null || msg.content === undefined ? null : sanitizeProtectedMessageText(msg.content),
     content_type: msg.contentType ?? 'text',
     is_from_me: msg.isFromMe ? 1 : 0,
     timestamp: normalizeUnixTimestampSeconds(msg.timestamp),
     quoted_message_id: msg.quotedMessageId ?? null,
-    raw_message: msg.rawMessage ?? null,
-    content_text: msg.contentText ?? null,
+    raw_message: msg.rawMessage === null || msg.rawMessage === undefined ? null : sanitizeProtectedMessageText(msg.rawMessage),
+    content_text: msg.contentText === null || msg.contentText === undefined ? null : sanitizeProtectedMessageText(msg.contentText),
   };
 }
 

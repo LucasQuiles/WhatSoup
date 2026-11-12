@@ -9,6 +9,11 @@ import { assertConversationAccess, resolveConversationKey } from '../types.ts';
 import type { Database } from '../../core/database.ts';
 import type { ExtendedBaileysSocket } from '../types.ts';
 import { type MessageRow, rowToMessage } from '../../core/messages.ts';
+import {
+  hasProtectedManagedLink,
+  isProtectedDeliveryMessage,
+  sanitizeProtectedMessageText,
+} from '../../core/protected-message.ts';
 import { createChildLogger } from '../../logger.ts';
 import { type Clock, systemClock } from '../../lib/clock.ts';
 import { escapeSqlLikePattern } from '../../lib/sql-like.ts';
@@ -180,7 +185,8 @@ const ListChatsSchema = z.object({
 function contentPreview(contentText: string | null, content: string | null): string | null {
   const text = contentText ?? content;
   if (text === null) return null;
-  return text.length > 100 ? `${text.slice(0, 97)}...` : text;
+  const sanitized = sanitizeProtectedMessageText(text);
+  return sanitized.length > 100 ? `${sanitized.slice(0, 97)}...` : sanitized;
 }
 
 function makeListChats(db: Database): ToolDeclaration {
@@ -514,6 +520,14 @@ function makeForwardMessage(db: Database, getSock: () => ExtendedBaileysSocket |
         rawMessage = rawRow?.raw_message ?? null;
       } catch (err) {
         log.debug({ err, messageId: message_id }, 'raw_message lookup failed — falling back to text forward');
+      }
+
+      if (isProtectedDeliveryMessage(db, message_id) || hasProtectedManagedLink([
+        row.content,
+        row.content_text,
+        rawMessage,
+      ])) {
+        throw new Error('Protected deliveries cannot be forwarded');
       }
 
       if (rawMessage) {

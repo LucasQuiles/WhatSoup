@@ -326,6 +326,7 @@ import { SessionTokenRegistry } from '../../mcp/caller-attribution.ts';
 import type { ExecutingSessionContext, SessionContext } from '../../mcp/types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
+import type { ProtectedDeliveryService } from '../../core/protected-delivery.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
 import { WorkspaceSweeper, type WorkspaceResource } from './workspace-sweeper.ts';
 import {
@@ -640,6 +641,7 @@ export class AgentRuntime implements Runtime {
   // catalogue — the reference must stay stable (ports hold it by identity).
   private readonly agentFallbacks: AgentFallbackEntry[];
   private readonly agentFallbackDiscovery: AgentFallbackDiscoveryConfig | null;
+  private readonly protectedDeliveryService: ProtectedDeliveryService | null;
   private readonly replyGuaranteeTimeoutMs: number;
   private readonly registry: ToolRegistry;
   /** Coordinate snapshot for numbered-drill stability (D16/D17) — the exact
@@ -2728,6 +2730,7 @@ export class AgentRuntime implements Runtime {
         });
     this.agentFallbacks = configuredFallbacks.map((entry) => ({ ...entry }));
     this.agentFallbackDiscovery = config.agentFallbackDiscovery ?? null;
+    this.protectedDeliveryService = options?.protectedDeliveryService ?? null;
     this.registry = new ToolRegistry(systemClock, {
       // Tool-call turn correlation is evidence; it must not wait for optional obligation replay.
       turnCorrelationResolver: (key) => turnCorrelationFromContexts(this.perChatRuntimeTurnContexts, key),
@@ -3280,6 +3283,9 @@ export class AgentRuntime implements Runtime {
           this.registerSendPollAwaiter(pollId, chatJid, options, resolution, timeoutMs, abortSignal),
       },
       fallbackActive: () => this.isFallbackWindowActive, // T8-F2: mirrors the outbound queue's fallback signal
+      ...(this.protectedDeliveryService === null
+        ? {}
+        : { protectedDeliveryService: this.protectedDeliveryService }),
     });
   }
 

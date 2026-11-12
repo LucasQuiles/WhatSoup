@@ -1,0 +1,107 @@
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { Database } from '../../../src/core/database.ts';
+import { ProtectedDeliveryService, type ManagedDeliveryClient } from '../../../src/core/protected-delivery.ts';
+import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
+import { registerProtectedDeliveryTools } from '../../../src/mcp/tools/protected-delivery.ts';
+import type { SessionContext } from '../../../src/mcp/types.ts';
+import { TEST_LINK_HOST, TEST_PROTECTED_DELIVERY_PINS } from '../../helpers/protected-delivery-pins.ts';
+
+const DELIVERY_REF = 'aaaaaaaaaaaaaaaaaaaaaa';
+const DELIVERY_ID = 'bbbbbbbbbbbbbbbbbbbbbb';
+const DELIVERY_LINK = `https://${TEST_LINK_HOST}/s/#v3.${DELIVERY_ID}.${'c'.repeat(43)}`;
+
+const directSession: SessionContext = {
+  tier: 'chat-scoped',
+  actorJid: '15551234567@s.whatsapp.net',
+  deliveryJid: '15551234567@s.whatsapp.net',
+  conversationKey: '15551234567',
+};
+
+describe('protected delivery MCP tools', () => {
+  let db: Database;
+  let registry: ToolRegistry;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.open();
+    registry = new ToolRegistry();
+    const client: ManagedDeliveryClient = {
+      async stageRustdesk() {
+        return { deliveryRef: DELIVERY_REF, id: DELIVERY_ID, expiresAt: '2026-10-29T12:05:00.000Z', state: 'unclaimed' };
+      },
+      async resolve() {
+        return { id: DELIVERY_ID, link: DELIVERY_LINK, expiresAt: '2026-10-29T12:05:00.000Z', state: 'unclaimed' };
+      },
+      async getStatus() {
+        return {
+          deliveryRef: DELIVERY_REF, id: DELIVERY_ID, state: 'unclaimed', deliveryStatus: 'staged',
+          expiresAt: '2026-10-29T12:05:00.000Z', issuedAt: '2026-10-29T12:00:00.000Z',
+          kind: 'rustdesk' as const, deviceId: 'device-1', purpose: 'login' as const,
+        };
+      },
+      async reportEvent() {},
+    };
+    const service = new ProtectedDeliveryService({
+      db: db.raw,
+      client,
+      messenger: { async sendRaw(_recipient, _content, options) { return { waMessageId: options?.messageId ?? null }; } },
+      now: () => new Date('2026-10-29T12:00:00.000Z'),
+      randomId: (() => {
+        let n = 0;
+        return () => `opaque-${++n}`;
+      })(),
+      pins: TEST_PROTECTED_DELIVERY_PINS,
+    });
+    registerProtectedDeliveryTools(registry, { db, service });
+  });
+
+  afterEach(() => db.close());
+
+  it('exposes only opaque inputs and results to a direct DM', async () => {
+    const names = registry.listTools(directSession).map((tool) => tool.name);
+    expect(names).toEqual(expect.arrayContaining([
+      'request_rustdesk_access', 'deliver_secret', 'get_secret_delivery_status',
+    ]));
+
+    const staged = await registry.call('request_rustdesk_access', {
+      device_id: 'device-1', purpose: 'login',
+    }, directSession);
+    const body = staged.content[0].text;
+    expect(body).toContain(DELIVERY_REF);
+    expect(body).not.toContain(TEST_LINK_HOST);
+    expect(body).not.toContain('fragment');
+
+    const delivered = await registry.call('deliver_secret', { delivery_ref: DELIVERY_REF }, directSession);
+    expect(delivered.content[0].text).toContain('submitted');
+    expect(delivered.content[0].text).not.toContain('managed.example');
+  });
+
+  it('refuses a group or a direct identity that differs from the recipient', async () => {
+    const group = await registry.call('request_rustdesk_access', {
+      device_id: 'device-1', purpose: 'login',
+    }, {
+      ...directSession,
+      actorJid: '15551234567@s.whatsapp.net',
+      deliveryJid: '12345@g.us',
+      conversationKey: '12345_at_g.us',
+    });
+    const mismatched = await registry.call('request_rustdesk_access', {
+      device_id: 'device-1', purpose: 'login',
+    }, {
+      ...directSession,
+      deliveryJid: '15557654321@s.whatsapp.net',
+      conversationKey: '15557654321',
+    });
+    const nonWhatsApp = await registry.call('request_rustdesk_access', {
+      device_id: 'device-1', purpose: 'login',
+    }, {
+      ...directSession,
+      actorJid: '15551234567@sms',
+      deliveryJid: '15551234567@sms',
+    });
+
+    expect(group.isError).toBe(true);
+    expect(mismatched.isError).toBe(true);
+    expect(nonWhatsApp.isError).toBe(true);
+  });
+});

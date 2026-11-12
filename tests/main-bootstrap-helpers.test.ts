@@ -314,6 +314,7 @@ async function importMainWithMocks(options: {
     // debounce window explicitly.
     startupNotificationStabilitySeconds: options.startupNotificationStabilitySeconds ?? 0,
     toolUpdateMode: options.toolUpdateMode ?? 'full',
+    protectedDelivery: null,
   };
 
   const recordStartupBoot = vi.fn(() => {
