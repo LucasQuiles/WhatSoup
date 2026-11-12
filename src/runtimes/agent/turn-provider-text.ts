@@ -11,6 +11,7 @@ import {
   withProviderApplicationContext,
   type ProviderTurnInput,
 } from './provider-boundary-dispatch.ts';
+import { neutralizeTrustedActorMarkers } from './trusted-actor-envelope.ts';
 
 function stringifyUntrustedMetadata(value: Record<string, string>): string {
   return JSON.stringify(value).replace(
@@ -88,5 +89,8 @@ export function renderPendingReplay(
     && activeTurn.inboundSeq === candidate.identity.inboundSeq
     && activeTurn.runtimeContext?.identity.logicalTurnId === candidate.identity.logicalTurnId
   ));
-  return renderUserTurnForProvider(tracker, text, context ?? null, 'recovery_replay');
+  // The replay reaches the provider with no actor block, so a forged one in the
+  // stored text would be the only block the model sees. The match above stays
+  // on the stored text; only the provider copy is neutralised.
+  return renderUserTurnForProvider(tracker, neutralizeTrustedActorMarkers(text), context ?? null, 'recovery_replay');
 }
