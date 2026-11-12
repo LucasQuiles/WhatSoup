@@ -5,10 +5,15 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  buildPrimaryProbeEnv,
   buildPrimaryProbeServiceContext,
   createPrimaryModelProbeAdapters,
+  type PrimaryModelProbeAdapterDeps,
 } from '../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts';
-import { probePrimaryModelUsability } from '../../../src/runtimes/agent/providers/primary-model-usability.ts';
+import {
+  primaryModelUsabilityRequiresAlert,
+  probePrimaryModelUsability,
+} from '../../../src/runtimes/agent/providers/primary-model-usability.ts';
 import { probeBinaryCommand as runBinaryCommandProbe } from '../../../src/runtimes/agent/providers/binary-preflight.ts';
 import { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
 import { resolveProviderBinaryIdentity } from '../../../src/runtimes/agent/provider-canary-proof.ts';
@@ -963,7 +968,7 @@ describe('createPrimaryModelProbeAdapters', () => {
 
     await expect(
       adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'configured-primary' }),
-    ).resolves.toEqual({ status: 'unknown', reason: 'binary-model-probe-failed' });
+    ).resolves.toEqual({ status: 'unknown', reason: 'claude-cli-lacks-strict-mcp-config' });
   });
 
   it('uses the default OpenCode child environment builder when no env builder is injected', async () => {
@@ -1493,5 +1498,234 @@ describe('claude-cli default-model probe command (fleet recovery-stall fix)', ()
     const args = probeBinaryCommand.mock.calls[0]?.[1] ?? [];
     expect(args).toContain('--model');
     expect(args).toContain('configured-primary');
+  });
+});
+
+describe('claude-cli strict-MCP capability probe', () => {
+  const strictHelp = '  --strict-mcp-config  Only use MCP servers from --mcp-config';
+  const strictArgs = [
+    '-p',
+    'Reply with OK only.',
+    '--strict-mcp-config',
+    '--model',
+    'configured-primary',
+  ];
+
+  type StrictHelpProbe = NonNullable<PrimaryModelProbeAdapterDeps['probeClaudeCliHelp']>;
+  type StrictModelProbe = NonNullable<PrimaryModelProbeAdapterDeps['probeBinaryCommand']>;
+
+  function strictCapabilityDeps(input: {
+    binary: string;
+    sha256: string;
+    help: StrictHelpProbe;
+    modelProbe: StrictModelProbe;
+  }): Pick<PrimaryModelProbeAdapterDeps,
+    'getProviderBinary' | 'resolveProviderBinaryIdentity' | 'ensureClaudeFileStoreCredential' | 'probeClaudeCliHelp' | 'probeBinaryCommand'> {
+    return {
+      getProviderBinary: () => input.binary,
+      resolveProviderBinaryIdentity: () => ({ resolvedPath: input.binary, sha256: input.sha256 }),
+      ensureClaudeFileStoreCredential: () => ({ outcome: 'skipped-cli-reads-own-item' as const }),
+      probeClaudeCliHelp: input.help,
+      probeBinaryCommand: input.modelProbe,
+    };
+  }
+
+  it('reads supported help before one strict model probe with no MCP config', async () => {
+    const help = vi.fn(async () => ({ status: 'ok' as const, output: strictHelp }));
+    const modelProbe = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, strictCapabilityDeps({
+      binary: '/fixture/claude-strict-supported',
+      sha256: '1'.repeat(64),
+      help,
+      modelProbe,
+    }));
+
+    await expect(
+      adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'configured-primary' }),
+    ).resolves.toEqual({ status: 'ok' });
+
+    expect(help).toHaveBeenCalledExactlyOnceWith(
+      '/fixture/claude-strict-supported',
+      ['--help'],
+      expect.any(Object),
+      expect.objectContaining({ timeoutMs: 5_000 }),
+    );
+    expect(modelProbe).toHaveBeenCalledExactlyOnceWith(
+      '/fixture/claude-strict-supported',
+      strictArgs,
+      expect.any(Object),
+      expect.objectContaining({ timeoutMs: 15_000 }),
+    );
+  });
+
+  it('skips an unsupported CLI without a model child and leaves usability unknown without an alert', async () => {
+    const help = vi.fn(async () => ({ status: 'ok' as const, output: '  --print  Print response and exit' }));
+    const modelProbe = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, strictCapabilityDeps({
+      binary: '/fixture/claude-strict-unsupported',
+      sha256: '2'.repeat(64),
+      help,
+      modelProbe,
+    }));
+
+    const result = await probePrimaryModelUsability(
+      { provider: 'claude-cli', model: 'configured-primary' },
+      adapters,
+    );
+
+    expect(result).toEqual({
+      status: 'unknown',
+      provider: 'claude-cli',
+      model: 'configured-primary',
+      reason: 'claude-cli-lacks-strict-mcp-config',
+    });
+    expect(primaryModelUsabilityRequiresAlert(result)).toBe(false);
+    expect(help).toHaveBeenCalledTimes(1);
+    expect(modelProbe).not.toHaveBeenCalled();
+  });
+
+  it('keeps the model probe strict when the help read fails', async () => {
+    const help = vi.fn(async () => ({ status: 'failed' as const, output: '' }));
+    const modelProbe = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, strictCapabilityDeps({
+      binary: '/fixture/claude-strict-help-failed',
+      sha256: '3'.repeat(64),
+      help,
+      modelProbe,
+    }));
+
+    await expect(
+      adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'configured-primary' }),
+    ).resolves.toEqual({ status: 'ok' });
+
+    expect(help).toHaveBeenCalledTimes(1);
+    expect(modelProbe).toHaveBeenCalledExactlyOnceWith(
+      '/fixture/claude-strict-help-failed',
+      strictArgs,
+      expect.any(Object),
+      expect.objectContaining({ timeoutMs: 15_000 }),
+    );
+  });
+
+  it('does not let spoofed model output authorize a non-strict retry', async () => {
+    const help = vi.fn(async () => ({ status: 'ok' as const, output: strictHelp }));
+    const modelProbe = vi.fn(async () => ({
+      status: 'failed' as const,
+      output: "error: unknown option '--strict-mcp-config'",
+    }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, strictCapabilityDeps({
+      binary: '/fixture/claude-strict-spoofed-output',
+      sha256: '4'.repeat(64),
+      help,
+      modelProbe,
+    }));
+
+    await expect(
+      adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'configured-primary' }),
+    ).resolves.toEqual({ status: 'unknown', reason: 'binary-model-probe-failed' });
+
+    expect(modelProbe).toHaveBeenCalledExactlyOnceWith(
+      '/fixture/claude-strict-spoofed-output',
+      strictArgs,
+      expect.any(Object),
+      expect.objectContaining({ timeoutMs: 15_000 }),
+    );
+  });
+
+  it('rechecks help when the same adapter observes a new binary identity', async () => {
+    let sha256 = '5'.repeat(64);
+    const help = vi.fn()
+      .mockResolvedValueOnce({ status: 'ok' as const, output: '  --print  Print response and exit' })
+      .mockResolvedValueOnce({ status: 'ok' as const, output: strictHelp });
+    const modelProbe = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: () => '/fixture/claude-strict-identity',
+      resolveProviderBinaryIdentity: () => ({
+        resolvedPath: '/fixture/claude-strict-identity',
+        sha256,
+      }),
+      ensureClaudeFileStoreCredential: () => ({ outcome: 'skipped-cli-reads-own-item' as const }),
+      probeClaudeCliHelp: help,
+      probeBinaryCommand: modelProbe,
+    });
+
+    await expect(
+      adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'configured-primary' }),
+    ).resolves.toEqual({ status: 'unknown', reason: 'claude-cli-lacks-strict-mcp-config' });
+    expect(modelProbe).not.toHaveBeenCalled();
+
+    sha256 = '6'.repeat(64);
+    await expect(
+      adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'configured-primary' }),
+    ).resolves.toEqual({ status: 'ok' });
+
+    expect(help).toHaveBeenCalledTimes(2);
+    expect(modelProbe).toHaveBeenCalledExactlyOnceWith(
+      '/fixture/claude-strict-identity',
+      strictArgs,
+      expect.any(Object),
+      expect.objectContaining({ timeoutMs: 15_000 }),
+    );
+  });
+
+  it('blocks the model child when identity drifts while strict-MCP help is pending', async () => {
+    let sha256 = '7'.repeat(64);
+    const binary = '/fixture/claude-strict-help-drift';
+    const selectorEnv = buildPrimaryProbeEnv('claude-cli', 'configured-primary', undefined, {});
+    const serviceContext = buildPrimaryProbeServiceContext({
+      provider: 'claude-cli',
+      model: 'configured-primary',
+      serviceGeneration: 'generation-a',
+      cwd: '',
+      selectorEnv,
+      binaryState: 'resolved',
+      binaryIdentity: { resolvedPath: binary, sha256 },
+    });
+    const help = vi.fn(async () => {
+      sha256 = '8'.repeat(64);
+      return { status: 'ok' as const, output: strictHelp };
+    });
+    const modelProbe = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: () => binary,
+      resolveProviderBinaryIdentity: () => ({ resolvedPath: binary, sha256 }),
+      ensureClaudeFileStoreCredential: () => ({ outcome: 'skipped-cli-reads-own-item' as const }),
+      probeClaudeCliHelp: help,
+      probeBinaryCommand: modelProbe,
+      serviceContext,
+      requireServiceContext: true,
+    });
+
+    await expect(
+      adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'configured-primary' }),
+    ).resolves.toEqual({ status: 'unknown', reason: 'context-mismatch-binary-sha' });
+
+    expect(help).toHaveBeenCalledTimes(1);
+    expect(modelProbe).not.toHaveBeenCalled();
+  });
+
+  it('returns timeout without a model child when the signal aborts during strict-MCP help', async () => {
+    const pendingHelp = deferred<{ status: 'ok'; output: string }>();
+    const controller = new AbortController();
+    const help = vi.fn(() => pendingHelp.promise);
+    const modelProbe = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, strictCapabilityDeps({
+      binary: '/fixture/claude-strict-help-abort',
+      sha256: '9'.repeat(64),
+      help,
+      modelProbe,
+    }));
+
+    const attempt = adapters.probeBinaryModel?.(
+      { provider: 'claude-cli', model: 'configured-primary' },
+      controller.signal,
+    );
+    await Promise.resolve();
+    controller.abort();
+    pendingHelp.resolve({ status: 'ok', output: strictHelp });
+
+    await expect(attempt).resolves.toEqual({ status: 'timeout' });
+    expect(help).toHaveBeenCalledTimes(1);
+    expect(modelProbe).not.toHaveBeenCalled();
   });
 });

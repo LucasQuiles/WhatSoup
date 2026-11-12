@@ -1441,7 +1441,7 @@ export const config = {
   // /model,/why,/reset stay forwarded and no preference table is created.
   nlRouting: resolvedAgentOptions['nlRouting'] === true,
   // #2949 queued receipt: a per_chat message that waits behind a running turn
-  // gets one "queued behind the current task" notice (per-chat cooldown).
+  // gets one "still working on ... request" notice (per-chat cooldown).
   // Default ON; `agentOptions.queuedTurnReceipt: false` turns it off.
   queuedTurnReceipt: resolvedAgentOptions['queuedTurnReceipt'] !== false,
   // Opt-in: append scope_blocked=finalization to agent_turn_admission_rejected

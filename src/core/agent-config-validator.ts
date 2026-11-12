@@ -420,7 +420,7 @@ export function validateInstanceConfig(
   }
 
   // --- pausedChatBypassPatterns (shape + bounds + safe-regex compile) ---
-  // Operator-supplied regex sources are compiled and matched (src/core/ingest.ts)
+  // Operator-supplied regex sources are compiled and matched (src/core/paused-chat.ts)
   // with RE2 — a linear-time engine with no catastrophic backtracking — so a
   // config cannot introduce a ReDoS. Supported syntax is RE2's safe subset:
   // NO lookaround and NO backreferences (both require backtracking). The same
