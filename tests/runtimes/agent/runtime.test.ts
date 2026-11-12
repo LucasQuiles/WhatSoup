@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { prepareRuntimeHome, ownedRuntimeCwd } from '../../helpers/runtime-home-fixture.ts';
 import { registerRuntimeHomeConfinementTests } from './runtime-home-confinement.cases.ts';
 import { registerRuntimeSettingsPolicyTests } from './runtime-settings-policy.cases.ts';
+import { registerRuntimeContextGaugeTests } from './runtime-context-gauge.cases.ts';
 import { registerRuntimeProviderProcessIsolationTest } from './runtime-provider-process-isolation.case.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
@@ -1900,95 +1901,9 @@ describe('AgentRuntime', () => {
     }
   });
 
-  // #3717 shape from production (threshold 150,000): a request context of 352,562 was
-  // compacted; the first requests after the compact had contexts of 84,216 and 93,900.
-  // That turn's summed usage (1,070,745) and the cumulative input since the compact were
-  // both over the threshold, so the cumulative measure judged the successful compact
-  // non-convergent, counted a rapid re-arm and backed the scope off.
-  describe('#3717 convergence is judged on the current request context', () => {
-    const threshold = 150_000;
-    const globalKey = '__global__';
-    const baseline = 2_000_000;
-    const preCompactCumulative = 38_160_286;
-    const compactBaseline = baseline + preCompactCumulative;
-    const overContext = 352_562;
-    const postCompactContexts = [84_216, 93_900] as const;
-    const postCompactSummedInput = 1_070_745;
-
-    type ConvergenceView = AutoCompactView & { consecutiveNonConvergentCompactions: Map<string, number> };
-
-    /** A real over-threshold context compacts, then the first post-compact turn is under it. */
-    async function compactThenUnderThresholdTurn(runtime: AgentRuntime, label: string): Promise<number> {
-      mockActiveAgentSession();
-      await runtime.start();
-
-      mockTokenSnapshot(compactBaseline, baseline);
-      await sendAndAwaitProviderDispatch(runtime, makeMsg({ messageId: `msg-${label}-over`, content: 'over' }));
-      await emitRequestUsage(overContext);
-      await emitAgentResult(overContext);
-      expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
-      await emitSuccessfulCompactResult();
-
-      // Inside the 5-minute rapid-rearm window, with cumulative input past the threshold.
-      mockSession.sendTurn.mockClear();
-      mockTokenSnapshot(compactBaseline + postCompactSummedInput, compactBaseline);
-      await sendAndAwaitProviderDispatch(runtime, makeMsg({ messageId: `msg-${label}-after`, content: 'after compact' }));
-      for (const context of postCompactContexts) await emitRequestUsage(context);
-      await emitAgentResult(postCompactSummedInput);
-      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
-      return compactBaseline + postCompactSummedInput;
-    }
-
-    it('judges a compact converged and sets no backoff when the first post-compact context is under the threshold', async () => {
-      vi.useFakeTimers();
-      try {
-        const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { autoCompactInputTokens: threshold });
-        const { autoCompact } = runtime as unknown as { autoCompact: ConvergenceView };
-
-        await compactThenUnderThresholdTurn(runtime, '3717-b1');
-
-        // The verdict: this compact converged.
-        expect(autoCompact.consecutiveNonConvergentCompactions.get(globalKey) ?? 0).toBe(0);
-        // No rapid re-arm, and no cooldown beyond the 5-minute one the successful compact set.
-        expect(autoCompact.consecutiveRapidRearms.get(globalKey) ?? 0).toBe(0);
-        const compactedAt = autoCompact.lastSuccessAt.get(globalKey);
-        expect(compactedAt).toBeDefined();
-        expect(autoCompact.cooldownUntil.get(globalKey)).toBe(compactedAt! + 5 * 60 * 1000);
-        const health = runtime.getHealthSnapshot().details as {
-          degradedReasons: string[];
-          autoCompactIneffective: number;
-          autoCompactNextTurnOverThreshold: number;
-          autoCompactState: string;
-        };
-        expect(health.autoCompactIneffective).toBe(0);
-        expect(health.autoCompactNextTurnOverThreshold).toBe(0);
-        expect(health.autoCompactState).toBe('idle');
-        expect(health.degradedReasons).not.toContain('auto_compact_backoff');
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it('compacts a real over-threshold context inside the backoff an earlier false verdict would have set', async () => {
-      vi.useFakeTimers();
-      try {
-        const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { autoCompactInputTokens: threshold });
-        const totalAfterFirstTurn = await compactThenUnderThresholdTurn(runtime, '3717-b2');
-
-        // Past the 5-minute success cooldown, inside the 15-minute tier-1 backoff a false
-        // verdict on the previous turn would have set. The context is now really over.
-        await vi.advanceTimersByTimeAsync(9 * 60 * 1000);
-        mockSession.sendTurn.mockClear();
-        mockTokenSnapshot(totalAfterFirstTurn + 2_500_000, compactBaseline);
-        await sendAndAwaitProviderDispatch(runtime, makeMsg({ messageId: 'msg-3717-b2-real-over', content: 'real over' }));
-        await emitRequestUsage(151_798);
-        await emitAgentResult(151_798);
-
-        expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
-      } finally {
-        vi.useRealTimers();
-      }
-    });
+  registerRuntimeContextGaugeTests({
+    capturedOnEventRef, mockSession, mockAccumulateTokensWithEvent, mockActiveAgentSession, mockTokenSnapshot,
+    sendAndAwaitProviderDispatch, emitAgentResult, emitRequestUsage, emitSuccessfulCompactResult,
   });
 
   it('counts only the first real high-input turn after a successful compact', async () => {
