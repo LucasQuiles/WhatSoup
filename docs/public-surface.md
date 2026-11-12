@@ -283,6 +283,7 @@ scripts are public; build/test scripts are internal.
 |---|---|---|---|---|---|
 | `cli:npm.start` | `npm run start` | `package.json` | stable | active | Start the supervisor (fleet + instances) |
 | `cli:npm.start-instance` | `npm run start:instance` | `package.json` | stable | active | Start a single instance by name |
+| `cli:npm.secure-handoff-consumer` | `npm run secure-handoff:consumer` | `package.json`, `src/secure-handoff/worker-main.ts` | beta | active | Run the administrator-configured password, token, or MFA consumer with an absolute private configuration file; reads intake metadata and uses only fixed account adapters. |
 | `cli:npm.fleet` | `npm run fleet` | `package.json` | stable | active | Start the fleet server only |
 | `cli:npm.setup` | `npm run setup` | `package.json` | stable | active | First-run setup wizard |
 | `cli:npm.doctor` | `npm run doctor` | `package.json` | stable | active | Read-only runtime, quality, or release host capability and PATH diagnostic with human or JSON output |
