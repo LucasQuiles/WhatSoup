@@ -1,5 +1,6 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { provisionWorkspace } from '../../../src/core/workspace.ts';
 import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -429,6 +430,51 @@ describe('fallback chain selection', () => {
           expect(settings.permissions.deny).toEqual(expect.arrayContaining([...M365_MUTATION_DENY]));
         }
       }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it.each([
+    { runtimeScope: 'per_chat' as const, admitted: true },
+    // Negative control: the same per_chat admission does not verify for a runtime that defaults to single.
+    { runtimeScope: undefined, admitted: false },
+  ])('verifies a per_chat launcher admission only in a runtime that normalizes sessionScope the same way ($runtimeScope)', ({ runtimeScope, admitted }) => {
+    const tenantId = '11111111-2222-3333-4444-555555555555';
+    const origin = 'https://127.0.0.1:10000';
+    const accountId = 'employee-account';
+    const binding = {
+      tenantId, origin, profile: 'user-full-v1' as const, accountId,
+      workflowAuthority: { accountId, employeeActorJid: '15551230001@s.whatsapp.net' },
+    };
+    const enabledPlugins = { 'microsoft_365@microsoft-365-dev': true };
+    const bridgeEnv = {
+      ALLOW_M365_MUTATIONS: '1', MS365_AGENT365_BRIDGE: 'true',
+      MS365_AGENT365_BASE_URL: origin, MS365_HUB_URL: origin,
+      MS365_TENANT_ID: tenantId, MS365_PROFILE: 'user-full-v1',
+      MS365_AGENT365_API_KEY: 'synthetic-key', MS365_AGENT365_ACCOUNT_ID: accountId, MS365_AGENT365_ACCOUNT_EMAIL: undefined,
+      MS365_DURABLE_MAIL_STATE_DIR: '/tmp/whatsoup-m365-durable-mail',
+    };
+    // The launcher reads the raw instance config and issues the admission for this process.
+    const configPath = join(sandboxTmp.make('launcher-config'), 'config.json');
+    writeFileSync(configPath, JSON.stringify({ name: 'test', type: 'agent', agentOptions: {
+      sessionScope: 'per_chat', provider: 'claude-cli', allowM365Mutations: true, enabledPlugins, m365Bridge: binding,
+    } }), { mode: 0o600 });
+    const launcher = spawnSync(process.execPath, [
+      '--disable-warning=ExperimentalWarning', '--experimental-strip-types', resolve('deploy/m365-bridge-credential-projection.ts'),
+      'test', configPath, '--credential-admission', String(process.pid),
+    ], { encoding: 'utf8', timeout: 10_000, env: { ...process.env, ...bridgeEnv } });
+    expect(launcher.status, launcher.stderr).toBe(0);
+    expect(launcher.stdout).toMatch(/^[0-9a-f]{64}$/);
+    for (const [key, value] of Object.entries({ ...bridgeEnv, WHATSOUP_M365_LAUNCH_ADMISSION: launcher.stdout })) vi.stubEnv(key, value);
+    try {
+      // The runtime receives agentOptions.sessionScope as main.ts passes it.
+      const runtime = makeRuntime({ model: 'primary-model' }, {
+        sessionScope: runtimeScope, allowM365Mutations: true, enabledPlugins, m365Bridge: binding,
+      });
+      const policy = (runtime as unknown as { m365MutationPolicy: M365MutationPolicy }).m365MutationPolicy;
+      expect(policy.status).toBe(admitted ? 'approved' : 'rejected');
+      if (admitted) expect(policy).toMatchObject({ workflowAuthority: binding.workflowAuthority });
     } finally {
       vi.unstubAllEnvs();
     }
