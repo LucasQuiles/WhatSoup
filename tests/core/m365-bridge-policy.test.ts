@@ -84,21 +84,35 @@ describe('m365TurnAuthority', () => {
   it('publishes the request reference and assignment only for a human request on an approved policy', () => {
     const workflowAuthority = { accountId: 'employee-account', employeeActorJid: '15551230001@s.whatsapp.net' };
     const approved = { status: 'approved' as const, childEnv: {}, workflowAuthority };
-    expect(m365TurnAuthority(approved, true, 'request-1')).toEqual({ requestRef: 'request-1', workflowAuthority });
-    expect(m365TurnAuthority(approved, false, 'request-1')).toEqual({ requestRef: undefined, workflowAuthority: undefined });
-    expect(m365TurnAuthority({ status: 'rejected' }, true, 'request-1')).toEqual({ requestRef: 'request-1', workflowAuthority: undefined });
-    expect(m365TurnAuthority(undefined, true, undefined)).toEqual({ requestRef: undefined, workflowAuthority: undefined });
+    expect(m365TurnAuthority(approved, true, 'request-1', undefined, 'claude-cli'))
+      .toEqual({ requestRef: 'request-1', workflowAuthority, m365RouteProvider: 'claude-cli' });
+    expect(m365TurnAuthority(approved, false, 'request-1', undefined, 'claude-cli'))
+      .toEqual({ requestRef: undefined, workflowAuthority: undefined, m365RouteProvider: 'claude-cli' });
+    expect(m365TurnAuthority({ status: 'rejected' }, true, 'request-1', undefined, 'claude-cli'))
+      .toEqual({ requestRef: 'request-1', workflowAuthority: undefined, m365RouteProvider: undefined });
+    expect(m365TurnAuthority(undefined, true, undefined, undefined, 'claude-cli')).toEqual({ requestRef: undefined, workflowAuthority: undefined });
   });
+
+  it.each(['codex-cli', 'gemini-cli', 'opencode-cli', undefined])(
+    'publishes neither the assignment nor a route provider for a turn on the %s route', (provider) => {
+      const workflowAuthority = { accountId: 'employee-account', employeeActorJid: '15551230001@s.whatsapp.net' };
+      const approved = { status: 'approved' as const, childEnv: {}, workflowAuthority };
+      const published = m365TurnAuthority(approved, true, 'request-1', 'per_chat', provider);
+      expect(published.workflowAuthority).toBeUndefined();
+      expect(published.workflowAuthorityScope).toBeUndefined();
+      expect(published.m365RouteProvider).toBeUndefined();
+    },
+  );
 
   it('publishes the session scope with a human request, so the broker can refuse a scope other than per-chat', () => {
     const workflowAuthority = { accountId: 'employee-account', employeeActorJid: '15551230001@s.whatsapp.net' };
     const approved = { status: 'approved' as const, childEnv: {}, workflowAuthority };
-    expect(m365TurnAuthority(approved, true, 'request-1', 'per_chat'))
-      .toEqual({ requestRef: 'request-1', workflowAuthority, workflowAuthorityScope: 'per_chat' });
-    expect(m365TurnAuthority(approved, true, 'request-1', 'shared'))
-      .toEqual({ requestRef: 'request-1', workflowAuthority, workflowAuthorityScope: 'shared' });
-    expect(m365TurnAuthority(approved, false, 'request-1', 'per_chat'))
-      .toEqual({ requestRef: undefined, workflowAuthority: undefined, workflowAuthorityScope: undefined });
+    expect(m365TurnAuthority(approved, true, 'request-1', 'per_chat', 'claude-cli'))
+      .toEqual({ requestRef: 'request-1', workflowAuthority, workflowAuthorityScope: 'per_chat', m365RouteProvider: 'claude-cli' });
+    expect(m365TurnAuthority(approved, true, 'request-1', 'shared', 'claude-cli'))
+      .toEqual({ requestRef: 'request-1', workflowAuthority, workflowAuthorityScope: 'shared', m365RouteProvider: 'claude-cli' });
+    expect(m365TurnAuthority(approved, false, 'request-1', 'per_chat', 'claude-cli'))
+      .toEqual({ requestRef: undefined, workflowAuthority: undefined, workflowAuthorityScope: undefined, m365RouteProvider: 'claude-cli' });
   });
 });
 
@@ -244,6 +258,44 @@ describe('resolveM365MutationPolicy', () => {
       status: 'approved', childEnv: { MS365_AGENT365_ACCOUNT_ID: accountId },
     });
     expect(m365MutationExceptionAllowed(result)).toBe(true);
+  });
+
+  it('binds the complete workflow assignment, so one admission cannot carry a changed assignment', () => {
+    const accountId = 'account-1';
+    const employeeActorJid = '15551230001@s.whatsapp.net';
+    const accountBinding: M365BridgeBinding = { ...binding, accountEmail: undefined, accountId };
+    const env = serviceEnv({ MS365_AGENT365_ACCOUNT_EMAIL: undefined, MS365_AGENT365_ACCOUNT_ID: accountId });
+    const admitted = (
+      admittedBinding: M365BridgeBinding,
+      runtimeBinding: M365BridgeBinding,
+      admittedScope: 'per_chat' | 'shared' | 'single' = 'per_chat',
+      runtimeScope: 'per_chat' | 'shared' | 'single' = admittedScope,
+    ) => {
+      const admission = m365BridgeCredentialAdmission(
+        { ...configured, binding: admittedBinding, sessionScope: admittedScope, env }, process.pid,
+      ) ?? undefined;
+      return resolveM365MutationPolicy({
+        ...configured, binding: runtimeBinding, sessionScope: runtimeScope, env: { ...env, WHATSOUP_M365_LAUNCH_ADMISSION: admission },
+      });
+    };
+    const assigned: M365BridgeBinding = { ...accountBinding, workflowAuthority: { accountId, employeeActorJid } };
+    const restricted: M365BridgeBinding = { ...accountBinding, workflowAuthority: { accountId, employeeActorJid, conversationKey: '15551230001' } };
+
+    // Positive controls: an unchanged binding keeps its admission.
+    expect(admitted(accountBinding, accountBinding)?.status).toBe('approved');
+    expect(admitted(assigned, assigned)?.status).toBe('approved');
+    expect(admitted(restricted, restricted)?.status).toBe('approved');
+    // Each single change after admission is refused.
+    expect(admitted(accountBinding, assigned)).toEqual({ status: 'rejected' });
+    expect(admitted(assigned, accountBinding)).toEqual({ status: 'rejected' });
+    expect(admitted(assigned, { ...accountBinding, workflowAuthority: { accountId, employeeActorJid: '15551230002@s.whatsapp.net' } }))
+      .toEqual({ status: 'rejected' });
+    expect(admitted(assigned, restricted)).toEqual({ status: 'rejected' });
+    expect(admitted(restricted, assigned)).toEqual({ status: 'rejected' });
+    expect(admitted(restricted, { ...accountBinding, workflowAuthority: { accountId, employeeActorJid, conversationKey: '15551230003' } }))
+      .toEqual({ status: 'rejected' });
+    expect(admitted(assigned, assigned, 'per_chat', 'shared')).toEqual({ status: 'rejected' });
+    expect(admitted(assigned, assigned, 'single', 'per_chat')).toEqual({ status: 'rejected' });
   });
 
   it('does not issue an admission without an exact instance, process and resolved credential', () => {

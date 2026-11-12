@@ -662,6 +662,7 @@ export class AgentRuntime implements Runtime {
   private chatQueues: Map<string, IOutboundQueue> = new Map();
   private readonly sessionOwnership = new SessionOwnershipRegistry();
   private readonly sessionManagerIds = new WeakMap<SessionManager, string>();
+  private readonly sessionM365Policies = new WeakMap<SessionManager, M365MutationPolicy | undefined>();
   private readonly sessionEventToolScopes = new WeakMap<SessionManager, string>();
   private readonly ownedSessionManagers = new Map<string, SessionManager>();
 
@@ -2699,7 +2700,7 @@ export class AgentRuntime implements Runtime {
     this.agentProvider = config.agentProvider;
     this.agentProviderConfig = config.agentProviderConfig;
     this.m365MutationPolicy = resolveExplainedM365MutationPolicy({
-      instanceName: this.instanceName,
+      instanceName: this.instanceName, sessionScope: this.sessionScope,
       provider: this.agentProvider,
       allowM365Mutations: this.allowM365Mutations,
       enabledPlugins: this.enabledPlugins,
@@ -3913,6 +3914,12 @@ export class AgentRuntime implements Runtime {
     for (const conversationKey of conversationKeys) {
       this.handoffDistill.invalidateConversation(conversationKey);
     }
+  }
+
+  /** M365 authority a turn publishes, from the route policy of the session that runs it (unknown session: rejected). */
+  private m365ExecutingAuthority(session: SessionManager, humanRequest: boolean, requestRef: string | undefined) {
+    const routePolicy = this.sessionM365Policies.has(session) ? this.sessionM365Policies.get(session) : this.m365MutationPolicy && { status: 'rejected' as const };
+    return m365TurnAuthority(routePolicy, humanRequest, requestRef, this.sessionScope, sessionProviderId(session) ?? undefined);
   }
 
   getM365SettingsPolicy(): M365MutationPolicy | undefined {
@@ -5698,7 +5705,7 @@ export class AgentRuntime implements Runtime {
         actorJid: senderJid,
         purpose,
         conversationKey: canonicalConversationKey(chatJid, this.db),
-        ...m365TurnAuthority(this.m365MutationPolicy, !recoveryDispatch && purpose === undefined, context?.replay.sourceMessageId, this.sessionScope),
+        ...this.m365ExecutingAuthority(this.session!, !recoveryDispatch && purpose === undefined, context?.replay.sourceMessageId),
       });
       this.perChatExecActorQueue.set(GLOBAL_TOOL_SCOPE_KEY, sharedExecQ);
       const scheduled = purpose === 'scheduled-agent-job';
@@ -5974,7 +5981,7 @@ export class AgentRuntime implements Runtime {
           actorJid,
           purpose,
           conversationKey: canonicalConversationKey(chatJid, this.db),
-          ...m365TurnAuthority(this.m365MutationPolicy, deliveryKind === 'live' && purpose === undefined, runtimeContext?.replay.sourceMessageId, this.sessionScope),
+          ...this.m365ExecutingAuthority(session, deliveryKind === 'live' && purpose === undefined, runtimeContext?.replay.sourceMessageId),
         });
         this.perChatExecActorQueue.set(execScopeKey, execQ);
         actorPushed = true;
@@ -10665,6 +10672,7 @@ export class AgentRuntime implements Runtime {
         : undefined,
     });
     this.sessionManagerIds.set(session, randomUUID());
+    this.sessionM365Policies.set(session, sessionM365Policy);
     this.sessionEventToolScopes.set(
       session,
       opts.eventToolScopeKey ?? GLOBAL_TOOL_SCOPE_KEY,

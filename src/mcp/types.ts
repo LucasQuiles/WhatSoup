@@ -91,6 +91,11 @@ export interface SessionContext {
   /** Session scope of the runtime whose turn published `workflowAuthority`. */
   workflowAuthorityScope?: M365WorkflowAuthorityScope;
   /**
+   * Provider of the executing turn's route, published only when that route's M365 policy
+   * is approved. The `microsoft365` adapter refuses a turn without a supported one.
+   */
+  m365RouteProvider?: string;
+  /**
    * Request-local, socket callers only: the live binding of the token this
    * connection presented, re-verified on each read. The token never travels here.
    */
@@ -111,6 +116,7 @@ export interface ExecutingSessionContext {
   workflowAuthority?: SessionContext['workflowAuthority'];
   requestRef?: SessionContext['requestRef'];
   workflowAuthorityScope?: SessionContext['workflowAuthorityScope'];
+  m365RouteProvider?: SessionContext['m365RouteProvider'];
   /**
    * Explicit assertion that a REAL executing-turn resolution produced this
    * context (#3435, L1). Optional: a real resolution is normally recognized

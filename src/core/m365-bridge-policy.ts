@@ -37,6 +37,8 @@ export interface ResolveM365MutationPolicyOptions {
   allowM365Mutations?: boolean;
   enabledPlugins?: Record<string, boolean>;
   binding?: M365BridgeBinding;
+  /** `agentOptions.sessionScope`; unset means `single`, as in the runtime. Bound into the launch admission. */
+  sessionScope?: M365WorkflowAuthorityScope;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -203,15 +205,21 @@ export function m365BridgeCredentialProjectionAllowed(
 
 function credentialAdmission(
   prerequisites: M365MutationPrerequisites,
-  instanceName: string | undefined,
+  options: Pick<ResolveM365MutationPolicyOptions, 'instanceName' | 'sessionScope'>,
   processId: number,
 ): string | null {
   const { binding, env, origin, durableMailStateDir } = prerequisites;
+  const { instanceName } = options;
   const key = env.MS365_AGENT365_API_KEY;
   if (!nonBlank(instanceName) || !Number.isSafeInteger(processId) || processId <= 0 || !nonBlank(key)) return null;
+  // The whole workflow assignment and the session scope it runs under are bound, so a
+  // launcher admission cannot be reused after either changes.
+  const authority = binding.workflowAuthority;
   return createHmac('sha256', key).update(JSON.stringify([
-    'whatsoup-m365-launch-v1', processId, instanceName, binding.tenantId,
+    'whatsoup-m365-launch-v2', processId, instanceName, binding.tenantId,
     binding.accountId ?? null, binding.accountEmail ?? null, origin, binding.profile, durableMailStateDir,
+    authority ? [authority.accountId, authority.employeeActorJid, authority.conversationKey ?? null] : null,
+    options.sessionScope ?? 'single',
   ])).digest('hex');
 }
 
@@ -221,11 +229,14 @@ export function m365BridgeCredentialAdmission(
   processId: number,
 ): string | null {
   const prerequisites = m365MutationPrerequisites(options);
-  return prerequisites ? credentialAdmission(prerequisites, options.instanceName, processId) : null;
+  return prerequisites ? credentialAdmission(prerequisites, options, processId) : null;
 }
 
-function launchAdmitted(prerequisites: M365MutationPrerequisites, instanceName: string | undefined): boolean {
-  const admission = credentialAdmission(prerequisites, instanceName, process.pid);
+function launchAdmitted(
+  prerequisites: M365MutationPrerequisites,
+  options: Pick<ResolveM365MutationPolicyOptions, 'instanceName' | 'sessionScope'>,
+): boolean {
+  const admission = credentialAdmission(prerequisites, options, process.pid);
   const supplied = prerequisites.env.WHATSOUP_M365_LAUNCH_ADMISSION;
   // An old/direct launcher cannot authorize ambient credentials; an inherited
   // admission from another process or a changed binding/key cannot be replayed.
@@ -241,7 +252,7 @@ export function m365MutationAdmissionGap(options: ResolveM365MutationPolicyOptio
   if (!options.binding) return null;
   const admission = m365MutationAdmission(options);
   if ('gap' in admission) return admission.gap;
-  return launchAdmitted(admission.prerequisites, options.instanceName) ? null : 'launch-admission';
+  return launchAdmitted(admission.prerequisites, options) ? null : 'launch-admission';
 }
 
 /**
@@ -254,7 +265,7 @@ export function resolveM365MutationPolicy(
 ): M365MutationPolicy | undefined {
   if (!options.binding) return undefined;
   const prerequisites = m365MutationPrerequisites(options);
-  if (!prerequisites || !launchAdmitted(prerequisites, options.instanceName)) return { status: 'rejected' };
+  if (!prerequisites || !launchAdmitted(prerequisites, options)) return { status: 'rejected' };
   const { binding, env, origin, durableMailStateDir } = prerequisites;
 
   const childEnv = Object.fromEntries([
@@ -284,21 +295,31 @@ export function m365MutationExceptionAllowed(policy: M365MutationPolicy | undefi
 /** The runtime session scope a turn ran under; the broker admits workflow authority only per chat. */
 export type M365WorkflowAuthorityScope = 'per_chat' | 'shared' | 'single';
 
+/**
+ * `routePolicy` is the policy of the session that runs the turn, never the runtime-wide
+ * one. A route whose policy is rejected, or whose provider cannot host the bridge,
+ * publishes neither the assignment nor `m365RouteProvider`, so the adapter refuses reads
+ * and writes and the broker refuses writes on it.
+ */
 export function m365TurnAuthority(
-  policy: M365MutationPolicy | undefined,
+  routePolicy: M365MutationPolicy | undefined,
   humanRequest: boolean,
   requestRef: string | undefined,
   sessionScope?: M365WorkflowAuthorityScope,
+  routeProvider?: string,
 ): {
   requestRef: string | undefined;
   workflowAuthority: M365WorkflowAuthority | undefined;
   workflowAuthorityScope: M365WorkflowAuthorityScope | undefined;
+  m365RouteProvider: string | undefined;
 } {
-  const workflowAuthority = humanRequest && policy?.status === 'approved' ? policy.workflowAuthority : undefined;
+  const routeAdmitted = routePolicy?.status === 'approved' && supportsM365BridgeProvider(routeProvider);
+  const workflowAuthority = humanRequest && routeAdmitted ? routePolicy.workflowAuthority : undefined;
   return {
     requestRef: humanRequest ? requestRef : undefined,
     workflowAuthority,
     workflowAuthorityScope: workflowAuthority !== undefined ? sessionScope : undefined,
+    m365RouteProvider: routeAdmitted ? routeProvider : undefined,
   };
 }
 

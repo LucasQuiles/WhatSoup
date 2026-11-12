@@ -400,14 +400,71 @@ describe('fallback chain selection', () => {
       const env = buildChildEnv('claude-cli', fallback);
       if (guarded) expect(env.MS365_AGENT365_ACCOUNT_ID).toBe(accountId);
       else expect(Object.keys(env).filter((key) => key.startsWith('MS365_') || key === 'ALLOW_M365_MUTATIONS')).toEqual([]);
-      expect(applyRequiredDeny([], fallback.m365MutationPolicy).includes(M365_MUTATION_DENY[0]!)).toBe(!guarded);
+      const fallbackDeny = applyRequiredDeny([], fallback.m365MutationPolicy);
       const args = fallback.getProviderArgs('test', process.cwd());
-      expect(args.includes(M365_MUTATION_DENY[0]!)).toBe(!guarded);
+      if (guarded) {
+        expect(M365_MUTATION_DENY.filter((entry) => fallbackDeny.includes(entry))).toEqual([]);
+        expect(M365_MUTATION_DENY.filter((entry) => args.includes(entry))).toEqual([]);
+      } else {
+        expect(fallbackDeny).toEqual(expect.arrayContaining([...M365_MUTATION_DENY]));
+        expect(args).toContain('--disallowedTools');
+        expect(args).toEqual(expect.arrayContaining([...M365_MUTATION_DENY]));
+      }
       // A legacy primary still relies on the generated settings floor above.
       expect(primary.getProviderArgs('test', process.cwd())).not.toContain('--disallowedTools');
       expect(vi.mocked(probeFallbackBinary)).toHaveBeenCalledOnce();
       const probeEnv = vi.mocked(probeFallbackBinary).mock.calls[0]![1]!;
       expect(Object.keys(probeEnv).filter((key) => key.startsWith('MS365_') || key === 'ALLOW_M365_MUTATIONS')).toEqual([]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('publishes no Microsoft 365 authority for a turn whose session fell back to an unsupported provider', () => {
+    const tenantId = '11111111-2222-3333-4444-555555555555';
+    const origin = 'https://127.0.0.1:10000';
+    const accountId = 'employee-account';
+    const workflowAuthority = { accountId, employeeActorJid: '15551230001@s.whatsapp.net' };
+    const binding = { tenantId, origin, profile: 'user-full-v1' as const, accountId, workflowAuthority };
+    for (const [key, value] of Object.entries({
+      ALLOW_M365_MUTATIONS: '1', MS365_AGENT365_BRIDGE: 'true',
+      MS365_AGENT365_BASE_URL: origin, MS365_HUB_URL: origin,
+      MS365_TENANT_ID: tenantId, MS365_PROFILE: 'user-full-v1',
+      MS365_AGENT365_API_KEY: 'synthetic-key', MS365_AGENT365_ACCOUNT_ID: accountId,
+      MS365_DURABLE_MAIL_STATE_DIR: '/tmp/whatsoup-m365-durable-mail',
+    })) vi.stubEnv(key, value);
+    vi.stubEnv('MS365_AGENT365_ACCOUNT_EMAIL', undefined);
+    vi.stubEnv('WHATSOUP_M365_LAUNCH_ADMISSION', m365BridgeCredentialAdmission({
+      instanceName: 'test', provider: 'claude-cli', allowM365Mutations: true,
+      enabledPlugins: { 'microsoft_365@microsoft-365-dev': true }, binding, env: process.env,
+    }, process.pid) ?? undefined);
+    try {
+      const runtime = makeRuntime({
+        model: 'primary-model',
+        agentFallbacks: [{ provider: 'codex-cli', model: 'codex-model' }],
+      }, { allowM365Mutations: true, enabledPlugins: { 'microsoft_365@microsoft-365-dev': true }, m365Bridge: binding });
+      type Published = { workflowAuthority?: unknown; m365RouteProvider?: string; requestRef?: string };
+      const internals = runtime as unknown as {
+        createSessionManager(opts: Record<string, unknown>): { getProviderId(): string };
+        m365ExecutingAuthority(session: unknown, humanRequest: boolean, requestRef: string | undefined): Published;
+      };
+      const session = () => internals.createSessionManager({
+        chatJid: 'bridge-test@s.whatsapp.net', onEvent: vi.fn(), onCrash: vi.fn(), notifyUser: vi.fn(),
+      });
+      // Positive control: the admitted claude-cli route publishes the assignment and its provider.
+      const primary = session();
+      expect(internals.m365ExecutingAuthority(primary, true, 'request-1'))
+        .toMatchObject({ requestRef: 'request-1', workflowAuthority, m365RouteProvider: 'claude-cli' });
+      expect(internals.m365ExecutingAuthority(primary, false, 'request-1'))
+        .toMatchObject({ workflowAuthority: undefined, m365RouteProvider: 'claude-cli' });
+
+      view(runtime).activateProviderFallback(null, 'usage-limit');
+      expect(view(runtime).effectiveProvider).toBe('codex-cli');
+      const fallback = session();
+      expect(fallback.getProviderId()).toBe('codex-cli');
+      const published = internals.m365ExecutingAuthority(fallback, true, 'request-1');
+      expect(published.workflowAuthority).toBeUndefined();
+      expect(published.m365RouteProvider).toBeUndefined();
     } finally {
       vi.unstubAllEnvs();
     }
