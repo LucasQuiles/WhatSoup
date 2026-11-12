@@ -893,6 +893,33 @@ export class CapabilityObligationStore {
   }
 
   /**
+   * Terminal supervisor refusal of a due obligation BEFORE any claim. It moves
+   * waiting_capability to cancelled, the one terminal state reachable without a
+   * claim, so no attempt is consumed and an operator cannot re-arm it. Only the
+   * lifecycle changes: the identity trigger keeps source_token and
+   * source_digest as stored.
+   */
+  refuseWaitingObligation(id: number, reasonCode: string): { applied: boolean } {
+    return withTransaction(this.db, () => {
+      const row = this.db.raw
+        .prepare(
+          `UPDATE capability_obligations
+           SET state = 'cancelled', claim_token = NULL, claim_expires_at = NULL,
+               updated_at = datetime('now')
+           WHERE id = ? AND state = 'waiting_capability'
+           RETURNING id`,
+        )
+        .get(id);
+      if (row === undefined) return { applied: false };
+      this.appendEventWithinCallerTransaction(
+        { action: 'obligation.cancel', actorType: 'supervisor', reasonCode },
+        id,
+      );
+      return { applied: true };
+    });
+  }
+
+  /**
    * Create a group-drain approval (round-15 finding 3) — the operator side of the
    * AS-08 authorization that `consumeGroupDrainApproval` later spends. Refuses
    * unless the obligation is a GROUP still in `waiting_approval` whose delivery

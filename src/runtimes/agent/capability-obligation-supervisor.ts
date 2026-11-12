@@ -7,6 +7,9 @@
  * narrow injected ports so real SQLite unit tests can drive every branch
  * without the full runtime:
  *
+ *  - PROTECTED-LINK refusal: a due row whose source token carries a protected
+ *    link is cancelled (`protected_link_source_refused`) before anything else
+ *    runs; it never claims, dispatches or reaches a provider prompt.
  *  - ATTESTATION admission (D5): `findAdmissibleAttestation` against the
  *    binding the runtime port derives from live facts + the obligation's
  *    contract. Any skip consumes zero attempts.
@@ -44,8 +47,12 @@ import type {
 } from '../../core/capability-obligation-store.ts';
 import type { Database } from '../../core/database.ts';
 import { verifyRetainedMedia } from '../../core/obligation-media-retention.ts';
+import { hasProtectedManagedLink } from '../../core/protected-message.ts';
 
 const log = createChildLogger('agent:capability-obligation-supervisor');
+
+/** Terminal reason for an obligation whose source token carries a protected link. */
+export const PROTECTED_LINK_SOURCE_REFUSED = 'protected_link_source_refused';
 
 export const OBLIGATION_LEASE_SECONDS = 300;
 export const OBLIGATION_BACKOFF_SECONDS = 60;
@@ -284,6 +291,18 @@ export class CapabilityObligationSupervisor {
     due: CapabilityObligationDueRow,
     report: ObligationTickReport,
   ): Promise<void> {
+    // The replay prompt names the source token verbatim, and the agent would
+    // fetch it. A protected link is a secret for one person's browser and may be
+    // single-use, so refuse it here, before any target resolution, admission,
+    // claim or prompt. This is the one point both the global scan and the named
+    // drain pass through. The stored token stays raw (D6 digest intact).
+    if (due.sourceToken !== null && hasProtectedManagedLink(due.sourceToken)) {
+      if (this.store.refuseWaitingObligation(due.id, PROTECTED_LINK_SOURCE_REFUSED).applied) {
+        log.warn({ obligationId: due.id }, 'obligation source token carries a protected link; refused at dispatch');
+      }
+      return;
+    }
+
     // r14 F3 — resolve the serving target ONCE; the admission binding and the
     // dispatch below both come from this single resolution (no second resolve
     // that could pick a recycled provider/generation after admission).
