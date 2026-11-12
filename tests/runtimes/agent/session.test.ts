@@ -758,7 +758,7 @@ describe('SessionManager', () => {
     } as ConstructorParameters<typeof SessionManager>[0]);
     await sm.spawnSession();
     const firstEnv = vi.mocked(spawn).mock.calls.at(-1)?.[2]?.env;
-    vi.mocked(spawn).mockReturnValue(makeMockChild(88889));
+    vi.mocked(spawn).mockReturnValue(makeMockChild(88889) as never);
     await sm.handleNew();
     const respawnedEnv = vi.mocked(spawn).mock.calls.at(-1)?.[2]?.env;
     await sm.shutdown(true);
