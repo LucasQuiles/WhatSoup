@@ -14,15 +14,22 @@ vi.mock('../../src/core/protected-delivery-pins.ts', async (importOriginal) =>
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { CapabilityObligationStore } from '../../src/core/capability-obligation-store.ts';
 import { Database } from '../../src/core/database.ts';
+import { withTransaction } from '../../src/core/db-tx.ts';
+import { DeferredTurnStore } from '../../src/core/deferred-turn-store.ts';
 import { PROTECTED_MESSAGE_MARKER } from '../../src/core/protected-message.ts';
 import { formatChatRefForOwner } from '../../src/core/chat-display-name.ts';
 import { getRecentMessageText } from '../../src/core/messages.ts';
 import { ContactsDirectory } from '../../src/core/mentions.ts';
+import { createProfileRegistry } from '../../src/core/profiles.ts';
 import { FleetDbReader } from '../../src/fleet/db-reader.ts';
 import { handleGetChats, handleGetMessages, handleSearchMessages } from '../../src/fleet/routes/data.ts';
 import { handleGetFeed } from '../../src/fleet/routes/feed.ts';
 import { registerChatManagementTools } from '../../src/mcp/tools/chat-management.ts';
+import { registerMediaTools } from '../../src/mcp/tools/media.ts';
+import { registerMessagingTools } from '../../src/mcp/tools/messaging.ts';
+import { registerSearchTools } from '../../src/mcp/tools/search.ts';
 import { dispatchTurnRecoveryReplayForJob } from '../../src/runtimes/agent/turn-recovery-dispatch.ts';
 import { sharedRuntimeApplicationContext } from '../../src/runtimes/agent/turn-provider-text.ts';
 import {
@@ -51,6 +58,10 @@ const DM_KEY = '15550100001';
 const GROUP_JID = 'protected-group@g.us';
 const GROUP_KEY = 'protected-group_at_g.us';
 const GROUP_SENDER_JID = '15550100002@s.whatsapp.net';
+// A separate contact, so the owner display row keeps resolving through the
+// sender-name rung it was built to test.
+const CONTACT_JID = '15550100003@s.whatsapp.net';
+const CONTACT_PHONE = '15550100003';
 const TS = 1_700_000_000;
 const SELF = 'self';
 
@@ -75,6 +86,8 @@ function seed(target: Database): void {
     INSERT INTO access_list (subject_type, subject_id, status, display_name, requested_at)
     VALUES ('phone', ?, 'pending', ?, '2026-01-01 00:00:00')
   `).run(DM_KEY, SENDER);
+  target.raw.prepare('INSERT INTO contacts (jid, canonical_phone, display_name, notify_name) VALUES (?, ?, ?, ?)')
+    .run(CONTACT_JID, CONTACT_PHONE, SENDER, SENDER);
 }
 
 function routeBody(handler: typeof handleGetChats, url: string): unknown {
@@ -151,6 +164,53 @@ function pineconeRecord() {
     claim: CONTENT,
     evidence: CONTENT,
   };
+}
+
+/**
+ * One capability obligation in its own database, so the due-row and operator
+ * rows each read only the obligation they seed.
+ */
+function withCapabilityObligation<T>(
+  sourceToken: string,
+  isGroup: boolean,
+  read: (store: CapabilityObligationStore, id: number) => T,
+): T {
+  const capabilityDb = new Database(':memory:');
+  capabilityDb.open();
+  try {
+    const store = new CapabilityObligationStore(capabilityDb);
+    let id = 0;
+    withTransaction(capabilityDb, () => {
+      id = store.applyDecisionWithinCallerTransaction({
+        auditEvent: { action: 'obligation.create', actorType: 'runtime', reasonCode: 'conclusive_no_effect' },
+        obligation: {
+          sourceInboundSeq: 1,
+          sourceMessageId: 'group-protected',
+          conversationKey: GROUP_KEY,
+          deliveryJid: GROUP_JID,
+          senderJid: GROUP_SENDER_JID,
+          senderName: SENDER,
+          isGroup,
+          groupName: GROUP_NAME,
+          scope: 'per_chat',
+          originRecoveryJobId: null,
+          replayText: CONTENT,
+          contentTypeHint: 'text',
+          contractVersion: 'test-instance/1',
+          requiredCapability: 'child_process_tools',
+          capabilityParams: '{"skill":"watch"}',
+          inputDigest: 'aa'.repeat(32),
+          sourceDigest: 'bb'.repeat(32),
+          sourceToken,
+          retainedMedia: null,
+          creationReason: 'harness_capability_gap',
+        },
+      }).obligationId!;
+    });
+    return read(store, id);
+  } finally {
+    capabilityDb.close();
+  }
 }
 
 interface SurfaceCase {
@@ -257,6 +317,96 @@ const SURFACES: SurfaceCase[] = [
       return [...directory.contacts.keys()];
     },
     mustContain: DM_KEY,
+  },
+  {
+    surface: 'deferred-turn obligation claim (replay text, sender and group names)',
+    probe: () => {
+      const store = new DeferredTurnStore(db);
+      store.enqueueDeferredObligation({
+        scope: 'per_chat',
+        conversationKey: GROUP_KEY,
+        deliveryJid: GROUP_JID,
+        inboundSeq: 1,
+        sourceMessageId: 'group-protected',
+        receivedAtUnixSeconds: TS + 1,
+        replaySafe: true,
+        senderJid: GROUP_SENDER_JID,
+        senderName: SENDER,
+        text: CONTENT,
+        isGroup: true,
+        groupName: GROUP_NAME,
+        contentType: 'text',
+      });
+      return store.claimNextEligible('per_chat', {
+        conversationKey: GROUP_KEY,
+        claimToken: 'claim-protected',
+        ttlSeconds: 60,
+      });
+    },
+  },
+  {
+    surface: 'capability obligation due rows (listDueObligations and dueObligationById)',
+    // A neutral source token keeps this row about the fields the store redacts.
+    // A group obligation waits for the drain-approval chain before it is due,
+    // so this one is not a group; it still stores a group name to cover that field.
+    probe: () => withCapabilityObligation('https://media.example.test/clip', false, (store, id) => [
+      store.listDueObligations(10),
+      store.dueObligationById(id),
+    ]),
+  },
+  {
+    surface: 'capability obligation operator inspect view (source token)',
+    probe: () => withCapabilityObligation(LINK, true, (store, id) => store.operatorInspectObligation(id)),
+  },
+  {
+    surface: 'search_contacts tool (display and notify names)',
+    probe: async () => {
+      const registry = new ToolRegistry();
+      registerSearchTools(db, (tool) => registry.register(tool));
+      const result = await registry.call('search_contacts', { query: CONTACT_PHONE }, { tier: 'global' });
+      return JSON.parse(result.content[0].text);
+    },
+  },
+  {
+    surface: 'reply_message tool (stored content quoted back to WhatsApp)',
+    probe: async () => {
+      const sent: unknown[] = [];
+      const registry = new ToolRegistry();
+      registerMessagingTools(registry, {
+        connection: {
+          sendRaw: async (jid: string, content: unknown) => {
+            sent.push({ jid, content });
+            return { waMessageId: null };
+          },
+        } as never,
+        db: db.raw,
+        dbWrapper: db,
+        adminPhones: new Set<string>(),
+        instanceName: SELF,
+        profiles: createProfileRegistry({}),
+      });
+      const result = await registry.call(
+        'reply_message',
+        { messageId: 'dm-protected', text: 'noted' },
+        { tier: 'chat-scoped', conversationKey: DM_KEY, deliveryJid: DM_JID },
+      );
+      return { result: result.content[0].text, sent };
+    },
+  },
+  {
+    // Last row: it adds an audio message the rows above must not read.
+    surface: 'transcribe_audio tool (cached stored transcript)',
+    probe: async () => {
+      db.raw.prepare(`
+        INSERT INTO messages
+          (chat_jid, conversation_key, sender_jid, message_id, content_text, content_type, is_from_me, timestamp)
+        VALUES (?, ?, ?, 'audio-protected', ?, 'audio', 0, ?)
+      `).run(DM_JID, DM_KEY, DM_JID, CONTENT, TS + 2);
+      const registry = new ToolRegistry();
+      registerMediaTools(registry, { connection: {} as never, db, adminPhones: new Set<string>() });
+      const result = await registry.call('transcribe_audio', { message_id: 'audio-protected' }, { tier: 'global' });
+      return result.content[0].text;
+    },
   },
 ];
 

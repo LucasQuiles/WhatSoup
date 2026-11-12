@@ -587,6 +587,23 @@ describe('messages', () => {
       .toEqual([expected]);
   });
 
+  it('applies the recent-text byte budget after redaction, so the returned text never exceeds it', () => {
+    // A bare protected link (22 bytes) is shorter than the 24-byte marker that replaces it.
+    const link = 'links.example.test/s#a';
+    db.raw.prepare(`
+      INSERT INTO messages
+        (chat_jid, conversation_key, sender_jid, message_id, content, content_type, is_from_me, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('budget@g.us', 'budget_at_g.us', 'alice@s.whatsapp.net', 'budget-protected', link, 'text', 0, BASE_TS);
+    const storedBytes = Buffer.byteLength(link);
+    const redactedBytes = Buffer.byteLength(PROTECTED_MESSAGE_MARKER);
+    expect(redactedBytes).toBeGreaterThan(storedBytes);
+
+    expect(() => getRecentMessageText(db, 'budget_at_g.us', 10, storedBytes)).toThrow(/exceeds byte limit/);
+    expect(getRecentMessageText(db, 'budget_at_g.us', 10, redactedBytes))
+      .toEqual([{ content: PROTECTED_MESSAGE_MARKER, senderName: null, isFromMe: false }]);
+  });
+
   it('redacts a protected link from a sender name passed directly to storage', () => {
     const link = 'https://links.example.test/s/#v3.write-sender-protected-test';
     storeMessageIfNew(db, makeMsg({ messageId: 'write-sender-protected', senderName: `Mallory ${link}` }));

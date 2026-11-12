@@ -27,6 +27,7 @@
  * - `last_error_class` accepts bounded class tags only — never raw errors.
  */
 import type { Database } from './database.ts';
+import { sanitizeProtectedMessageText } from './protected-message.ts';
 import { TURN_RECOVERY_MAX_TEXT_BYTES } from './turn-recovery-contract.ts';
 import { TURN_RECOVERY_MAX_ID_BYTES, validateBoundedRequired } from './turn-recovery-store.ts';
 
@@ -146,6 +147,11 @@ const OBLIGATION_COLUMNS = `
   last_error_class, terminal_reason
 `;
 
+/**
+ * The claimed obligation feeds a replayed provider turn. Rows can predate
+ * ingress redaction, so the outward copy redacts protected links; the stored
+ * row stays raw (enqueue deduplicates on scope and inbound_seq, never on text).
+ */
 function toObligation(row: ObligationRow): DeferredTurnObligation {
   return {
     id: row.id,
@@ -156,10 +162,10 @@ function toObligation(row: ObligationRow): DeferredTurnObligation {
     sourceMessageId: row.source_message_id,
     receivedAtUnixSeconds: row.received_at_unix,
     senderJid: row.sender_jid,
-    senderName: row.sender_name,
-    text: row.replay_text,
+    senderName: row.sender_name === null ? null : sanitizeProtectedMessageText(row.sender_name),
+    text: sanitizeProtectedMessageText(row.replay_text),
     isGroup: row.is_group === 1,
-    groupName: row.group_name,
+    groupName: row.group_name === null ? null : sanitizeProtectedMessageText(row.group_name),
     contentType: row.content_type,
     toolScopeKey: row.tool_scope_key,
     status: row.status,

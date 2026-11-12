@@ -12,6 +12,7 @@ import type { Database } from './database.ts';
 import { downloadMedia, writeTempFile } from './media-download.ts';
 import { extractRawMime } from './media-mime.ts';
 import { updateMediaPath, updateTranscription } from './messages.ts';
+import { sanitizeProtectedMessageText } from './protected-message.ts';
 import { errorMessage } from '../lib/error-message.ts';
 import { isUsableTranscript as usable, storedAudioTranscript } from './audio-transcript-content.ts';
 
@@ -41,8 +42,9 @@ export async function ensureStoredAudioTranscript(
   row: StoredAudioRow,
   transcribe: AudioTranscriber,
 ): Promise<StoredAudioTranscriptResult> {
+  // A cached transcript is stored row text and can predate ingress redaction.
   const cached = storedAudioTranscript(row);
-  if (cached !== null) return { status: 'cached', transcription: cached };
+  if (cached !== null) return { status: 'cached', transcription: sanitizeProtectedMessageText(cached) };
 
   let audioBuffer: Buffer | null = null;
   let audioMime = 'audio/ogg';

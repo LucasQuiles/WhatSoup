@@ -213,11 +213,19 @@ export function getRecentMessageText(
     content: string | null; sender_name: string | null; is_from_me: number; oversized: number;
   }[];
   if (rows.some((row) => row.oversized)) throw new Error('Recent message text exceeds byte limit');
-  return rows.map((row) => ({
+  const projected = rows.map((row) => ({
     content: row.content === null ? null : sanitizeProtectedMessageText(row.content),
     senderName: row.sender_name === null ? null : sanitizeProtectedMessageText(row.sender_name),
     isFromMe: Boolean(row.is_from_me),
-  })).reverse();
+  }));
+  // The stored-size check above keeps oversized text out of JavaScript. The
+  // marker can be longer than a short link it replaces, so the returned text
+  // is measured again after redaction.
+  const redactedBytes = projected.reduce((sum, row) => sum
+    + (row.content === null ? 0 : Buffer.byteLength(row.content, 'utf8'))
+    + (row.senderName === null ? 0 : Buffer.byteLength(row.senderName, 'utf8')), 0);
+  if (redactedBytes > maxBytes) throw new Error('Recent message text exceeds byte limit');
+  return projected.reverse();
 }
 
 /**
