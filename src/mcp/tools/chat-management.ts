@@ -361,7 +361,7 @@ function makeListChats(db: Database): ToolDeclaration {
           ...(include_last_message ? {
             lastMessage: r.last_message_id ? {
               messageId: r.last_message_id,
-              senderName: r.last_sender_name ?? null,
+              senderName: r.last_sender_name === null ? null : sanitizeProtectedMessageText(r.last_sender_name),
               contentPreview: contentPreview(r.last_content_text, r.last_content),
               contentType: r.last_content_type,
               timestamp: r.last_message_timestamp,

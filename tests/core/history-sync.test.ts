@@ -100,6 +100,20 @@ describe('processHistoryBatch', () => {
     expect(row.raw_message).toContain(PROTECTED_MESSAGE_MARKER);
   });
 
+  it('redacts a protected link in a history sender name before storing the row', () => {
+    const link = 'https://links.example.test/s/#v3.history-sender-protected-test';
+
+    processHistoryBatch(db, [textMsg({
+      id: 'MSG_PROTECTED_HISTORY_SENDER', chat: 'alice@s.whatsapp.net', from: `Mallory ${link}`, text: 'hello',
+    })]);
+
+    const row = db.raw.prepare('SELECT sender_name, content, raw_message FROM messages WHERE message_id=?')
+      .get('MSG_PROTECTED_HISTORY_SENDER') as { sender_name: string; content: string; raw_message: string };
+    expect(row.sender_name).toBe(`Mallory ${PROTECTED_MESSAGE_MARKER}`);
+    expect(row.content).toBe('hello');
+    expect(row.raw_message).not.toContain('links.example.test/s/#');
+  });
+
   it('does not let a later history replay overwrite a live protected marker', () => {
     const link = 'https://links.example.test/s/#v3.history-replay-protected-test';
     storeMessageIfNew(db, {

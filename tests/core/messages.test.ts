@@ -24,6 +24,7 @@ import {
   incrementEnrichmentRetries,
   resetEnrichmentErrors,
   hasFromMeReplyAfter,
+  getRecentMessageText,
   type StoreMessageInput,
   type MessageRow,
 } from '../../src/core/messages.ts';
@@ -565,6 +566,33 @@ describe('messages', () => {
     expect(mapped.content).toBe(PROTECTED_MESSAGE_MARKER);
     expect(mapped.contentText).toBe(PROTECTED_MESSAGE_MARKER);
     expect(recent.find((message) => message.messageId === 'stored-protected')!.content).toBe(PROTECTED_MESSAGE_MARKER);
+  });
+
+  it('redacts a protected link from a stored sender name before history and handoff readers see it', () => {
+    // Rows written before sender names were sanitized at ingress can still hold a link.
+    const link = 'https://links.example.test/s/#v3.stored-sender-protected-test';
+    db.raw.prepare(`
+      INSERT INTO messages
+        (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_type, is_from_me, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('group1@g.us', 'group1_at_g.us', 'alice@s.whatsapp.net', `Mallory ${link}`, 'stored-sender-protected', 'hello', 'text', 0, BASE_TS);
+
+    const row = db.raw.prepare('SELECT * FROM messages WHERE message_id = ?').get('stored-sender-protected');
+    const expected = `Mallory ${PROTECTED_MESSAGE_MARKER}`;
+
+    expect(rowToMessage(row as unknown as MessageRow).senderName).toBe(expected);
+    expect(getRecentMessages(db, 'group1_at_g.us', 10)
+      .find((message) => message.messageId === 'stored-sender-protected')!.senderName).toBe(expected);
+    expect(getRecentMessageText(db, 'group1_at_g.us', 10, 64 * 1024).map((message) => message.senderName))
+      .toEqual([expected]);
+  });
+
+  it('redacts a protected link from a sender name passed directly to storage', () => {
+    const link = 'https://links.example.test/s/#v3.write-sender-protected-test';
+    storeMessageIfNew(db, makeMsg({ messageId: 'write-sender-protected', senderName: `Mallory ${link}` }));
+
+    expect(db.raw.prepare('SELECT sender_name FROM messages WHERE message_id = ?').get('write-sender-protected'))
+      .toEqual({ sender_name: `Mallory ${PROTECTED_MESSAGE_MARKER}` });
   });
 
   it('storeMessageIfNew persists content_text when provided', () => {

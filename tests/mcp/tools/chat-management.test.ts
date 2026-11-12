@@ -448,6 +448,22 @@ describe('chat-management tools', () => {
       expect(result.content[0].text).toContain(PROTECTED_MESSAGE_MARKER);
     });
 
+    it('redacts a persisted protected link from a last-message sender name', async () => {
+      const link = 'https://links.example.test/s/#v3.preview-sender-protected-test';
+      db.raw.prepare('UPDATE messages SET sender_name = ? WHERE message_id = ?').run(`Mallory ${link}`, 'msg6');
+
+      const result = await registry.call(
+        'list_chats',
+        { limit: 1, include_last_message: true },
+        globalSession(),
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).not.toContain('links.example.test/s/#');
+      const data = JSON.parse(result.content[0].text) as { chats: Array<{ lastMessage: { senderName: string | null } }> };
+      expect(data.chats[0].lastMessage.senderName).toBe(`Mallory ${PROTECTED_MESSAGE_MARKER}`);
+    });
+
     it('truncates last-message previews to avoid bloating agent context', async () => {
       const longText = 'x'.repeat(150);
       db.raw.prepare(`

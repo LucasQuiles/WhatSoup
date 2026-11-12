@@ -31,13 +31,14 @@ export interface MessageRow {
 export function rowToMessage(row: MessageRow) {
   const content = row.content === null ? null : sanitizeProtectedMessageText(row.content);
   const contentText = row.content_text ?? row.content;
+  const senderName = row.sender_name ?? null;
   return {
     pk: row.pk,
     messageId: row.message_id,
     conversationKey: row.conversation_key,
     chatJid: row.chat_jid,
     senderJid: row.sender_jid,
-    senderName: row.sender_name ?? null,
+    senderName: senderName === null ? null : sanitizeProtectedMessageText(senderName),
     content,
     contentType: row.content_type,
     isFromMe: Boolean(row.is_from_me),
@@ -90,12 +91,14 @@ export interface StoreMessageInput {
 function rowToStoredMessage(row: Record<string, unknown>): StoredMessage {
   const content = (row.content as string | null) ?? null;
   const contentText = (row.content_text as string | null) ?? content;
+  const senderName = (row.sender_name as string | null) ?? null;
   return {
     pk: row.pk as number,
     chatJid: row.chat_jid as string,
     conversationKey: row.conversation_key as string,
     senderJid: row.sender_jid as string,
-    senderName: (row.sender_name as string | null) ?? null,
+    // Rows stored before sender names were sanitized at ingress can still hold a link.
+    senderName: senderName === null ? null : sanitizeProtectedMessageText(senderName),
     messageId: row.message_id as string,
     content: content === null ? null : sanitizeProtectedMessageText(content),
     contentType: (row.content_type as ContentType) ?? 'text',
@@ -117,7 +120,7 @@ function toInsertParams(msg: StoreMessageInput): Record<string, null | number | 
     chat_jid: msg.chatJid,
     conversation_key: msg.conversationKey,
     sender_jid: msg.senderJid,
-    sender_name: msg.senderName ?? null,
+    sender_name: msg.senderName === null || msg.senderName === undefined ? null : sanitizeProtectedMessageText(msg.senderName),
     message_id: msg.messageId,
     content: msg.content === null || msg.content === undefined ? null : sanitizeProtectedMessageText(msg.content),
     content_type: msg.contentType ?? 'text',
@@ -211,7 +214,9 @@ export function getRecentMessageText(
   }[];
   if (rows.some((row) => row.oversized)) throw new Error('Recent message text exceeds byte limit');
   return rows.map((row) => ({
-    content: row.content, senderName: row.sender_name, isFromMe: Boolean(row.is_from_me),
+    content: row.content,
+    senderName: row.sender_name === null ? null : sanitizeProtectedMessageText(row.sender_name),
+    isFromMe: Boolean(row.is_from_me),
   })).reverse();
 }
 

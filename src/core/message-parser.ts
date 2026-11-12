@@ -291,7 +291,8 @@ export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
   // QR-056: senderName (pushName) is attacker-controlled. It is JSON-escaped and
   // labeled as untrusted at the provider boundary, but lone surrogates must still
   // be removed before strict JSON serializers see it on every provider path.
-  const safeSenderName = senderName !== null ? stripLoneSurrogates(senderName) : null;
+  // It is stored and model-visible like content, so protected links are redacted too.
+  const safeSenderName = senderName !== null ? sanitizeProtectedMessageText(stripLoneSurrogates(senderName)) : null;
 
   return {
     messageId: msg.key.id!,
