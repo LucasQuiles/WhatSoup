@@ -132,6 +132,6 @@ describe('raw INSTANCE_CONFIG protected-delivery admission', () => {
       provider: 'claude-cli',
       protectedDelivery: protectedDelivery(false),
     }, undefined);
-    expect(config.protectedDelivery).toBeNull();
+    expect(config).toHaveProperty('protectedDelivery', null);
   });
 });

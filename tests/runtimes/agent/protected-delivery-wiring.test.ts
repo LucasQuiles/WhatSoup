@@ -78,6 +78,6 @@ describe('AgentRuntime protected-delivery registration', () => {
 
     expect(registerAllTools).toHaveBeenCalledOnce();
     const [, , , options] = registerAllTools.mock.calls[0]!;
-    expect(options?.protectedDeliveryService).toBeUndefined();
+    expect(options).not.toHaveProperty('protectedDeliveryService');
   });
 });
