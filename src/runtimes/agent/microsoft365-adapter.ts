@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { accessSync, constants, lstatSync, readFileSync, readlinkSync, realpathSync, statSync, type Stats } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
@@ -130,18 +130,29 @@ const LISTING_MODE = /^[-a-zA-Z?]{10}([@+.]?)$/;
 /** A macOS `ls -le` ACL entry line: `N: <principal> [inherited] allow|deny <rights>`. */
 const DARWIN_ACL_ENTRY = /^ *\d+: .+ (allow|deny) [a-z_,]+$/;
 
+/** How the ACL rule runs `ls`; injectable so every platform branch can be tested on any host. */
+export type AclListingRunner = (
+  command: string,
+  args: readonly string[],
+  options: SpawnSyncOptionsWithStringEncoding,
+) => SpawnSyncReturns<string>;
+
 /**
- * Node has no ACL API, so the verdict comes from `/bin/ls`, run without a shell. On macOS, `ls -lde` prints every ACL
- * entry after the listing line, even when extended attributes replace the `+` marker with `@`: any `allow` entry
- * refuses, and deny-only entries are admitted because they grant nothing (every macOS home directory carries
- * `group:everyone deny delete`). Linux ACLs have no deny entries, so the `+` marker refuses. A failed or unparseable
- * listing, or any other platform, refuses.
+ * Node has no ACL API, so the verdict comes from `/bin/ls`, run by absolute path with an argument vector and no
+ * shell. On macOS, `ls -lde` prints every ACL entry after the listing line, even when extended attributes replace
+ * the `+` marker with `@`: any `allow` entry refuses, inherited or not, and deny-only entries are admitted because
+ * they grant nothing (every macOS home directory carries `group:everyone deny delete`). Linux ACLs have no deny
+ * entries, so the `+` marker refuses. A failed or unparseable listing, or any other platform, refuses.
  */
-function listingGrantsNothing(path: string): boolean {
-  const darwin = process.platform === 'darwin';
-  if ((!darwin && process.platform !== 'linux') || /[\n\r]/.test(path)) return false;
+export function aclListingGrantsNothing(
+  path: string,
+  platform: NodeJS.Platform = process.platform,
+  run: AclListingRunner = spawnSync,
+): boolean {
+  const darwin = platform === 'darwin';
+  if ((!darwin && platform !== 'linux') || /[\n\r]/.test(path)) return false;
   try {
-    const listing = spawnSync(LIST_COMMAND, [darwin ? '-lde' : '-ld', '--', path], {
+    const listing = run(LIST_COMMAND, [darwin ? '-lde' : '-ld', '--', path], {
       encoding: 'utf8', env: { LC_ALL: 'C' }, shell: false, stdio: ['ignore', 'pipe', 'ignore'], timeout: LIST_TIMEOUT_MS,
     });
     if (listing.error !== undefined || listing.status !== 0 || typeof listing.stdout !== 'string') return false;
@@ -172,7 +183,7 @@ function hasNoAclGrant(path: string, stat: Stats): boolean {
   const key = `${path}\0${stat.dev}\0${stat.ino}\0${stat.ctimeMs}`;
   let verdict = aclVerdicts.get(key);
   if (verdict === undefined) {
-    verdict = listingGrantsNothing(path);
+    verdict = aclListingGrantsNothing(path);
     aclVerdicts.set(key, verdict);
   }
   return verdict;

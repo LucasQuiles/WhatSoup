@@ -317,7 +317,9 @@ describe('SessionManager host work admission', () => {
       workflowAuthority: { accountId: 'employee-account', employeeActorJid: '15551230001@s.whatsapp.net' },
       childEnv: {
         ALLOW_M365_MUTATIONS: '1', MS365_AGENT365_BRIDGE: 'true', MS365_AGENT365_API_KEY: bridgeValue,
-        MS365_AGENT365_ACCOUNT_ID: 'employee-account', MS365_PROFILE: 'user-full-v1',
+        MS365_AGENT365_BASE_URL: 'https://127.0.0.1:10000', MS365_AGENT365_ACCOUNT_ID: 'employee-account',
+        MS365_TENANT_ID: '11111111-2222-3333-4444-555555555555', MS365_PROFILE: 'user-full-v1',
+        MS365_HUB_URL: 'https://127.0.0.1:10000', MS365_DURABLE_MAIL_STATE_DIR: '/fixture/mail-state',
       },
     };
     const m365SpawnPolicy = vi.fn(() => approved);
@@ -327,6 +329,10 @@ describe('SessionManager host work admission', () => {
       allow: env.ALLOW_M365_MUTATIONS,
       authorityRequired: env.MS365_WORKFLOW_AUTHORITY_REQUIRED,
     });
+    // Every Microsoft 365 bridge, mutation or workflow-authority name the child would receive.
+    const m365Keys = (env: NodeJS.ProcessEnv) => Object.keys(env)
+      .filter((key) => env[key] !== undefined && (key.startsWith('MS365_') || key === 'ALLOW_M365_MUTATIONS'))
+      .sort();
 
     // Positive control: a direct spawn with the same live policy keeps the bridge values and no deny set.
     admission.enabled.mockReturnValue(false);
@@ -335,6 +341,9 @@ describe('SessionManager host work admission', () => {
     await direct.spawnSession();
     const [, directArgs, directOptions] = vi.mocked(spawn).mock.calls[0] as unknown as [string, string[], { env: NodeJS.ProcessEnv }];
     expect(launched(directArgs, directOptions.env)).toEqual({ denied: [], bridgeValue, allow: '1', authorityRequired: '1' });
+    expect(m365Keys(directOptions.env)).toEqual(expect.arrayContaining([
+      'ALLOW_M365_MUTATIONS', 'MS365_AGENT365_API_KEY', 'MS365_TENANT_ID', 'MS365_WORKFLOW_AUTHORITY_REQUIRED',
+    ]));
     await direct.shutdown();
 
     // Queued: the wrapper receives the arguments and environment now and starts the provider only after its lease,
@@ -357,6 +366,8 @@ describe('SessionManager host work admission', () => {
     expect(launched(queued!.args, queued!.env)).toEqual({
       denied: [...M365_MUTATION_DENY], bridgeValue: undefined, allow: undefined, authorityRequired: undefined,
     });
+    // No bridge, mutation or workflow-authority name reaches the queued child at all.
+    expect(m365Keys(queued!.env)).toEqual([]);
     expect(JSON.stringify(queued!.env)).not.toContain(bridgeValue);
     await session.shutdown();
   });

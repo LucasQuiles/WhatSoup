@@ -20,6 +20,7 @@ import { WhatSoupSocketServer } from '../../../src/mcp/socket-server.ts';
 import type { ExecutingSessionContext, SessionContext } from '../../../src/mcp/types.ts';
 import { M365_MUTATION_DENY } from '../../../src/core/settings-template.ts';
 import {
+  aclListingGrantsNothing,
   admitMicrosoft365Workflow,
   loadMicrosoft365PluginLaunch,
   Microsoft365SettingsFiles,
@@ -1473,5 +1474,68 @@ describe.skipIf(SYSTEM_PYTHON === '')('Microsoft 365 provider adapter', () => {
     expect(names({ tier: 'chat-scoped', conversationKey: CONVERSATION_KEY, deliveryJid: DELIVERY_JID })).toContain('microsoft365');
     expect(names({ tier: 'global' })).not.toContain('microsoft365');
     expect(names({ tier: 'global', deliveryJid: DELIVERY_JID })).not.toContain('microsoft365');
+  });
+});
+
+describe('ACL listing rule for the plugin trust chain', () => {
+  const PATH = '/fixture/plugin/mcp-server/dist/index.cjs';
+  const line = (mode: string) => `${mode} 1 owner staff 10 Nov 12 10:00 ${PATH}`;
+  type Listing = { status: number | null; stdout: string; error?: Error };
+  const listed = (stdout: string): Listing => ({ status: 0, stdout });
+
+  /** Runs the rule against a canned `ls` result and records how ls was invoked. */
+  function verdict(platform: NodeJS.Platform, listing: Listing, path = PATH) {
+    const calls: Array<{ command: string; args: readonly string[]; options: { shell?: unknown; env?: NodeJS.ProcessEnv } }> = [];
+    const allowed = aclListingGrantsNothing(path, platform, (command, args, options) => {
+      calls.push({ command, args, options });
+      return { pid: 0, output: [null, listing.stdout, ''], stdout: listing.stdout, stderr: '', status: listing.status, signal: null, error: listing.error };
+    });
+    return { allowed, calls };
+  }
+
+  it.each<[string, NodeJS.Platform, Listing, boolean]>([
+    ['darwin: no ACL', 'darwin', listed(`${line('-rw-r--r--')}\n`), true],
+    ['darwin: extended attributes only', 'darwin', listed(`${line('-rw-r--r--@')}\n`), true],
+    ['darwin: an allow entry', 'darwin', listed(`${line('-rw-r--r--+')}\n 0: group:everyone allow write\n`), false],
+    ['darwin: deny-only entries (the home-directory default)', 'darwin',
+      listed(`${line('drwxr-x---+')}\n 0: group:everyone deny delete\n 1: user:other deny add_file,delete_child\n`), true],
+    ['darwin: an inherited allow entry after a deny entry', 'darwin',
+      listed(`${line('drwxr-xr-x+')}\n 0: group:everyone deny delete\n 1: user:other inherited allow add_file,delete_child,file_inherit\n`), false],
+    ['darwin: an inherited deny entry', 'darwin', listed(`${line('drwxr-xr-x+')}\n 0: group:staff inherited deny delete\n`), true],
+    ['darwin: an allow entry hidden behind the @ marker', 'darwin', listed(`${line('-rw-r--r--@')}\n 0: group:everyone allow write\n`), false],
+    ['darwin: a + marker without entry lines', 'darwin', listed(`${line('-rw-r--r--+')}\n`), false],
+    ['darwin: an entry line that does not parse', 'darwin', listed(`${line('-rw-r--r--+')}\n 0: something unexpected\n`), false],
+    ['darwin: a Linux SELinux marker', 'darwin', listed(`${line('-rw-r--r--.')}\n`), false],
+    ['linux: no ACL', 'linux', listed(`${line('-rw-r--r--')}\n`), true],
+    ['linux: an SELinux context only', 'linux', listed(`${line('-rw-r--r--.')}\n`), true],
+    ['linux: an ACL (+)', 'linux', listed(`${line('-rw-r--r--+')}\n`), false],
+    ['linux: a macOS @ marker', 'linux', listed(`${line('-rw-r--r--@')}\n`), false],
+    ['linux: an extra output line', 'linux', listed(`${line('-rw-r--r--')}\nextra\n`), false],
+    ['darwin: ls exits non-zero', 'darwin', { status: 1, stdout: '' }, false],
+    ['linux: ls exits non-zero', 'linux', { status: 2, stdout: '' }, false],
+    ['darwin: ls cannot be started', 'darwin', { status: null, stdout: '', error: Object.assign(new Error('spawn /bin/ls ENOENT'), { code: 'ENOENT' }) }, false],
+    ['linux: ls times out', 'linux', { status: null, stdout: '', error: Object.assign(new Error('spawnSync /bin/ls ETIMEDOUT'), { code: 'ETIMEDOUT' }) }, false],
+    ['darwin: unparseable output', 'darwin', listed('not a listing\n'), false],
+    ['linux: unparseable output', 'linux', listed('total 0\n'), false],
+    ['darwin: empty output', 'darwin', listed(''), false],
+  ])('%s', (_case, platform, listing, expected) => {
+    const { allowed, calls } = verdict(platform, listing);
+    expect(allowed).toBe(expected);
+    // ls runs once, by absolute path, with an argument vector and no shell, in the C locale.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.command).toBe('/bin/ls');
+    expect(calls[0]!.args).toEqual(platform === 'darwin' ? ['-lde', '--', PATH] : ['-ld', '--', PATH]);
+    expect(calls[0]!.options.shell).toBe(false);
+    expect(calls[0]!.options.env).toEqual({ LC_ALL: 'C' });
+  });
+
+  it.each<[string, NodeJS.Platform, string]>([
+    ['an unknown platform', 'freebsd', PATH],
+    ['another unknown platform', 'win32', PATH],
+    ['a path with a newline, which could forge an entry line', 'darwin', `${PATH}\n 0: group:everyone deny delete`],
+  ])('refuses %s without running ls', (_case, platform, path) => {
+    const { allowed, calls } = verdict(platform, listed(`${line('-rw-r--r--')}\n`), path);
+    expect(allowed).toBe(false);
+    expect(calls).toHaveLength(0);
   });
 });

@@ -2607,14 +2607,17 @@ Settings writes lift the native deny floor only in `per_chat` scope without
 broker refuses native writes, and in `sandboxPerChat` mode the child has no authority
 socket, so those settings keep the floor; adapter writes are unaffected.
 
-With Linux host-work admission (`WHATSOUP_WORK_ADMISSION=systemd`), the external wrapper
-receives a launch's arguments and environment when the launch is queued, and starts the
-provider after its host lease without any later check. No check can run at release, so a
-queued launch never carries Microsoft 365 authority: `claude-cli` gets `--disallowedTools`
-with the full deny set and no bridge or `MS365_WORKFLOW_AUTHORITY_*` values, even while the
-assignment is live. Native Microsoft 365 tools therefore need a direct spawn. A pending floor
-rewrite still refuses a queued spawn, and adapter writes are unaffected because the adapter
-spawns its plugin directly.
+**Host-work admission disables native Microsoft 365 writes.** Under
+`WHATSOUP_WORK_ADMISSION=systemd` (Linux only), native Microsoft 365 write authority, through
+the plugin that `claude-cli` loads, is unavailable until the helper protocol can carry a
+release-time decision. The external wrapper receives a launch's arguments and environment
+when the launch is queued, and starts the provider after its host lease without any later
+check, so no check can run at release. Every queued `claude-cli` launch therefore gets the
+withdrawn shape, even while the assignment is live: `--disallowedTools` with the full
+Microsoft 365 mutation deny set, and no `MS365_*`, `ALLOW_M365_MUTATIONS` or
+`MS365_WORKFLOW_AUTHORITY_*` values. A pending floor rewrite still refuses a queued spawn.
+Writes through the `microsoft365` adapter are not affected: the adapter spawns its plugin
+directly and re-checks immediately before each spawn.
 
 **Accepted residuals.** These checks do not cover:
 - A window remains between the last re-check, which runs immediately before each direct
