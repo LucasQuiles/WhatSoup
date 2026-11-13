@@ -2347,7 +2347,7 @@ describe('AgentRuntime edge coverage', () => {
     } as never);
     session.getDbRowId.mockReturnValue(179 as never);
     state.setOwnedPerChatSession(scopeKey, session);
-    const queue = makeQueue('sched-overlap@s.whatsapp.net');
+    const queue = makeQueue();
     state.chatQueues.set(scopeKey, queue);
     vi.mocked(getSessionTokenSnapshot).mockReturnValue({
       totalInputTokens: 200,
@@ -2431,7 +2431,7 @@ describe('AgentRuntime edge coverage', () => {
     session.getDbRowId.mockReturnValue(180 as never);
     session.shutdown.mockRejectedValueOnce(new Error('reset shutdown refused') as never);
     state.setOwnedPerChatSession(scopeKey, session);
-    const queue = makeQueue('sched-reset-failure@s.whatsapp.net');
+    const queue = makeQueue();
     state.chatQueues.set(scopeKey, queue);
     vi.mocked(getSessionTokenSnapshot).mockReturnValue({
       totalInputTokens: 200,
