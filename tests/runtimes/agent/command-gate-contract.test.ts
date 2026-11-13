@@ -359,6 +359,7 @@ import { startHealthServer, HEALTH_TURN_ERROR_CLASSES, type HealthDeps } from '.
 import type { ConnectionManager } from '../../../src/transport/connection.ts';
 import { emptyConnectionStateSnapshot } from '../../../src/transport/twilio/connection-snapshot.ts';
 import { emitAlertChecked } from '../../../src/lib/emit-alert.ts';
+import { providerTurnTexts } from './lib/provider-turn-test-helpers.ts';
 
 // ─── Fixtures (fictional 1555-prefixed identities, sibling-suite idiom) ──────
 
@@ -1295,7 +1296,7 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
       expect(directTexts().some((text) => text.includes('/new is refused until it settles'))).toBe(true);
       expect(directTexts().some((text) => text.includes('Your follow-up message was not sent'))).toBe(true);
       // And the body went nowhere.
-      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('run this instead');
+      expect(providerTurnTexts(mockSession.sendTurn.mock.calls).filter((text) => text.includes('run this instead'))).toEqual([]);
       expect(mockSession.handleNew).not.toHaveBeenCalled();
       const row = duraDb.raw.prepare(
         'SELECT processing_status, terminal_reason FROM inbound_events WHERE seq = ?',

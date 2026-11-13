@@ -559,7 +559,7 @@ import {
   insertRow, makeDbWithTokenRow, makeBindingRuntime,
 } from './lib/runtime-mock-scaffold.ts';
 import {
-  providerUserText,
+  providerTurnTexts, providerUserText,
   setMockMemoryConfig,
   trustedProviderTurn,
 } from './lib/provider-turn-test-helpers.ts';
@@ -1580,7 +1580,7 @@ describe('AgentRuntime', () => {
         makeMsg({ content: 'user turn after compact timeout', inboundSeq: 502 }),
       );
       await Promise.resolve();
-      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('user turn after compact timeout');
+      expect(providerTurnTexts(mockSession.sendTurn.mock.calls)).not.toContain('user turn after compact timeout');
 
       await vi.advanceTimersByTimeAsync(4 * 60 * 1000 + 100);
       await followUpDispatch;
@@ -13083,7 +13083,7 @@ describe('AgentRuntime', () => {
       });
       const injected = sendTurnTexts().find((arg) => arg.includes('A: Use DuckDB instead (free-text response)'))!;
       expect(injected).toContain('Q: Pick a database');
-      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('Use DuckDB instead');
+      expect(providerTurnTexts(mockSession.sendTurn.mock.calls).filter((text) => text.includes('Use DuckDB instead') && !text.includes('A: Use DuckDB instead (free-text response)'))).toEqual([]);
     });
 
     it('does not resolve a pending poll from a generic vote-status text reply', async () => {
