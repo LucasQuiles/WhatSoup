@@ -23,6 +23,7 @@ import {
   registerMicrosoft365Adapter,
 } from '../../../src/runtimes/agent/microsoft365-adapter.ts';
 import { createProviderMcpBridge } from '../../../src/runtimes/agent/providers/mcp-bridge.ts';
+import type { SingletonLoggerMock } from '../../helpers/logger-mock.ts';
 
 type OsModule = typeof os;
 
@@ -38,10 +39,13 @@ const { AGENT365_HOME, FOREIGN_OWNED } = vi.hoisted(() => {
 });
 
 // The adapter's own logger, captured so a withdrawal's reason can be asserted; other components log normally.
-const { adapterLog } = vi.hoisted(() => ({ adapterLog: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
+const adapterLog = vi.hoisted(() => ({}) as SingletonLoggerMock);
 vi.mock('../../../src/logger.ts', async (importOriginal: () => Promise<typeof import('../../../src/logger.ts')>) => {
   const actual = await importOriginal();
-  return { ...actual, createChildLogger: (name: string) => name === 'microsoft365-adapter' ? adapterLog : actual.createChildLogger(name) };
+  const { componentLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const mock = componentLoggerMock('microsoft365-adapter', actual.createChildLogger);
+  Object.assign(adapterLog, mock.log);
+  return { ...actual, createChildLogger: mock.createChildLogger };
 });
 
 vi.mock('node:os', async (importOriginal: () => Promise<OsModule>) => {

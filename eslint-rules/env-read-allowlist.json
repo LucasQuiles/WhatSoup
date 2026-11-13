@@ -172,6 +172,11 @@
       "reason": "single injectable host-env seam: the opt-in predicate and helper lookup default to it; tests inject their own env."
     },
     {
+      "file": "src/runtimes/agent/microsoft365-adapter.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "external-tool interop: the native plugin check reads the install record under the CLAUDE_CONFIG_DIR the spawned claude CLI reads, the same env-late seam as session.ts; no typed config resolves the plugin config dir (claudeSecureStorageDir resolves the credential store, not plugins)."
+    },
+    {
       "file": "src/runtimes/agent/provider-canary-proof.ts",
       "allowedUnmarkedSites": 6,
       "reason": "child-env forward for canary probe (explicit allow-list of ambient vars)."
