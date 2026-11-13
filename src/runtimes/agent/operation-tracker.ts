@@ -1,8 +1,25 @@
 import { createChildLogger } from '../../logger.ts';
 import type { ToolCategory } from './providers/tool-mapping.ts';
 import type { OperationTrackerConfig, ToolThreshold } from '../../config.ts';
+import { blockingPollWaitMs } from './poll-timeouts.ts';
 
 const log = createChildLogger('operation-tracker');
+
+// The claude and opencode CLIs take the shell tool `timeout` in milliseconds, and claude caps it at 10 minutes.
+// A larger declared value therefore cannot make the shell wait longer, and must not delay the stall kill.
+export const MAX_SHELL_TIMEOUT_MS = 600_000;
+const SHELL_TOOL_NAMES: ReadonlySet<string> = new Set(['Bash', 'bash']);
+
+/**
+ * The wait a shell call declared with an explicit `timeout` (issue 3904), capped at MAX_SHELL_TIMEOUT_MS.
+ * Zero when no positive finite timeout was declared, so an undeclared hung call keeps the plain stall window.
+ */
+export function declaredShellTimeoutMs(toolName: string, toolInput: Record<string, unknown> | undefined): number {
+  if (!SHELL_TOOL_NAMES.has(toolName)) return 0;
+  const timeoutMs = toolInput?.['timeout'];
+  if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) return 0;
+  return Math.min(timeoutMs, MAX_SHELL_TIMEOUT_MS);
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -18,7 +35,7 @@ export interface TrackedOperation {
 }
 
 export type ProgressEvent =
-  | { type: 'operation_progress'; toolId: string; toolName: string; category: ToolCategory; elapsedMs: number; state: 'running' | 'slow' }
+  | { type: 'operation_progress'; toolId: string; toolName: string; category: ToolCategory; elapsedMs: number; state: 'running' | 'slow'; awaitingPoll?: boolean }
   | { type: 'operation_slow'; toolId: string; toolName: string; category: ToolCategory; elapsedMs: number; expectedMs: number }
   | { type: 'operation_stalled'; toolId: string; toolName: string; category: ToolCategory; elapsedMs: number }
   | { type: 'thinking_long'; gapMs: number }
@@ -73,7 +90,7 @@ export class OperationTracker {
     this.callbacks = callbacks;
   }
 
-  onToolStart(toolId: string, toolName: string, category: ToolCategory): void {
+  onToolStart(toolId: string, toolName: string, category: ToolCategory, toolInput?: Record<string, unknown>): void {
     this.clearThinkingTimers();
     // A phantom/replayed tool_use can re-arm a toolId that is still tracked. Clear the
     // previous op's timers before overwriting, otherwise they are orphaned but keep
@@ -96,7 +113,7 @@ export class OperationTracker {
       stallTimer: null,
     };
     this.operations.set(toolId, op);
-    this.armOperationTimers(op, threshold);
+    this.armOperationTimers(op, threshold, blockingPollWaitMs(toolName, toolInput), declaredShellTimeoutMs(toolName, toolInput));
     this.lastActivityAt = Date.now();
   }
 
@@ -135,9 +152,13 @@ export class OperationTracker {
 
   // ─── Timer management ───────────────────────────────────────────────────────
 
-  private armOperationTimers(op: TrackedOperationInternal, threshold: ToolThreshold): void {
-    const slowMs = threshold.expectedMs * threshold.slowMultiplier;
-    const stallMs = threshold.expectedMs * threshold.stallMultiplier;
+  // A poll vote wait is quiet by design, so it delays both the slow notice and the stall. A declared shell timeout
+  // delays only the stall: the user still sees the slow notice while the command runs.
+  private armOperationTimers(
+    op: TrackedOperationInternal, threshold: ToolThreshold, waitMs: number, shellTimeoutMs: number,
+  ): void {
+    const slowMs = waitMs + threshold.expectedMs * threshold.slowMultiplier;
+    const stallMs = Math.max(waitMs, shellTimeoutMs) + threshold.expectedMs * threshold.stallMultiplier;
 
     // Periodic progress
     op.progressTimer = setInterval(() => {
@@ -149,6 +170,7 @@ export class OperationTracker {
         category: op.category,
         elapsedMs: elapsed,
         state: op.state as 'running' | 'slow',
+        ...(waitMs > 0 && elapsed < waitMs ? { awaitingPoll: true } : {}),
       });
     }, this.config.progressIntervalMs);
 

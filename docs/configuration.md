@@ -1365,7 +1365,7 @@ The [migration field table](explainers/byok-memory-config-migration.md#what-the-
 
 Controls per-tool progress reporting, slow/stall detection, and automatic recovery for agent instances. When enabled (the default), the tracker monitors each tool invocation and thinking gap, sending progress updates to the user and triggering recovery actions when operations exceed their thresholds.
 
-Set `"enabled": false` to disable the tracker entirely and fall back to the legacy watchdog-only behavior (30-minute hard timeout with no per-tool granularity).
+Set `"enabled": false` to disable the tracker entirely and fall back to the legacy watchdog-only behavior: the session hard watchdog with no per-tool granularity. The hard watchdog is 30 minutes, or 10 minutes for the `anthropic-api` and `openai-api` providers. While every pending tool is an awaited `send_poll`, it fires only after the poll's wait ends plus that period. See [Operation Tracker — Stall Detection and Recovery](runbook.md#58-operation-tracker--stall-detection-and-recovery).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -1383,7 +1383,7 @@ Each tool category has three timing parameters:
 |-----------|-------------|
 | `expectedMs` | Baseline expected duration for the tool. |
 | `slowMultiplier` | After `expectedMs * slowMultiplier`, a "slow" warning is sent to the user. |
-| `stallMultiplier` | After `expectedMs * stallMultiplier`, the tool is considered stalled and recovery is triggered (Ctrl+C to stdin). |
+| `stallMultiplier` | After `expectedMs * stallMultiplier`, the tool is considered stalled and stall recovery starts (see [runbook §5.8](runbook.md#58-operation-tracker--stall-detection-and-recovery)). Two tool calls start this window later; see the exceptions below the defaults table. |
 
 **Platform defaults:**
 
@@ -1397,6 +1397,13 @@ Each tool category has three timing parameters:
 | `mcp` | 15000 | 2 | 5 | 30s | 75s |
 | `skill` | 3000 | 3 | 10 | 9s | 30s |
 | `default` | 10000 | 2 | 5 | 20s | 50s |
+
+The "Slow at" and "Stall at" columns are measured from tool start, with two exceptions:
+
+- **`Bash` with an explicit `timeout`:** a positive `timeout` (ms) delays only the stall. The stall fires at the declared timeout, capped at 10 minutes, plus the `bash` stall window (75 s by default). The slow notice is not delayed. A `Bash` call without a valid `timeout`, and every other tool, keep the plain window.
+- **Awaited `send_poll`:** with `awaitResult: true`, the poll wait delays both the slow notice and the stall. The wait is the tool's `timeoutMs`: one hour by default, clamped to between 1 second and 24 hours. See [Agent decision polls](runbooks/agent-decision-polls.md).
+
+After a stall, the stalled-operation kill grace and the CPU liveness gate still apply before a kill.
 
 Override individual categories by providing partial objects — unspecified fields inherit from the category default (or the `default` category for custom keys).
 

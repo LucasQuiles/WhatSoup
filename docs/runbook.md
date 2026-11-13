@@ -1610,6 +1610,7 @@ The operation tracker monitors each tool invocation and thinking gap. Stream-jso
 **Recovery cascade:**
 
 1. **Tool stall detected** — `expectedMs * stallMultiplier` exceeded (e.g. 75s for Bash, 6 min for Agent subagents)
+   - Exceptions: a `Bash` call with a positive `timeout` stalls at that timeout, capped at 10 minutes, plus its stall window. It is killed no sooner than timeout + 75 s + 3 min grace (at most 600 + 75 + 180 s before the liveness gate). Its slow notice is not delayed. An awaited `send_poll` (`awaitResult: true`) delays both the slow notice and the stall by its wait (default 1 h, clamped 1 s–24 h). A `Bash` call without a valid `timeout` keeps the plain 75 s window.
    - Tracker records the stall and emits a user-visible warning (format depends on `toolUpdateMode`)
    - For stream-json providers this arms a dedicated **stalled-operation kill** (`STALLED_OP_KILL_GRACE_MS`, default 3 min). Unlike the hard watchdog it is **not reset by inbound user messages**, so re-prompting a hung session cannot postpone the kill. It is cancelled if genuine provider progress arrives first.
    - **Liveness gate (CPU progress):** when the grace expires, the provider's process tree is CPU-sampled twice across a 5s window (`src/runtimes/agent/tree-liveness.ts`). A tree that burned CPU or changed shape is a **working long step, not a hang** (heavy browser automation, long bash/MCP calls): the kill is deferred, the grace re-arms, and the chat gets a rate-limited `_Long-running step still active (~N min in) — continuing. Send /new to interrupt._` notice. Extensions are bounded by `WHATSOUP_LONG_OP_CEILING_MS` (default 2 h) from the first fire of the quiet stretch. A flat tree — or any assessment failure — kills exactly as before: SIGKILL plus "_A tool call stalled and was terminated. Send your message again to retry._"
@@ -1618,10 +1619,11 @@ The operation tracker monitors each tool invocation and thinking gap. Stream-jso
    - Tracker sends a newline (`\n`) to stdin as a liveness probe
    - If the provider is alive, it will produce an event in response
 
-3. **Hard watchdog backstop** — no activity for 30 minutes (not configurable via `operationTracker`)
+3. **Hard watchdog backstop** — no activity for 30 minutes, or 10 minutes for the `anthropic-api` and `openai-api` providers (not configurable via `operationTracker`)
+   - Awaited-poll exception: when it fires while every pending tool is an awaited `send_poll`, it re-arms for the remaining poll wait plus its normal period instead of killing. Any other pending tool removes the deferral. See [Agent decision polls](runbooks/agent-decision-polls.md).
    - Reset on any agent activity (tool_use, tool_result, assistant_text) **and on every inbound user message**, so it only catches sessions that go fully silent. The stalled-operation kill (step 1) is what bounds a single hung tool while the user keeps messaging.
    - Runs the same CPU-progress liveness gate as step 1 before terminating a child provider: a working tree re-arms the watchdog (bounded by the same `WHATSOUP_LONG_OP_CEILING_MS` ceiling) instead of being killed mid-job. Managed API-provider sessions (no local process tree) keep the original behavior.
-   - On a genuine kill: SIGKILL to the provider process; user receives "_Session terminated after 30 minutes of inactivity — restarting._"; session is marked as crashed and a new session spawns on the next inbound message
+   - On a genuine kill: SIGKILL to the provider process; user receives "_Session terminated after N minutes of inactivity — restarting._" (N is the provider's period); session is marked as crashed and a new session spawns on the next inbound message
 
 **Diagnostic steps:**
 

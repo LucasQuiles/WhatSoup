@@ -404,7 +404,7 @@ Coverage includes: ingest backpressure (semaphore + overflow queue), relay guard
 | [Console Guide](docs/console-guide.md) | Full walkthrough of every console page, tab, and feature |
 | [Configuration Reference](docs/configuration.md) | Full config schema, env vars, worked examples, per-instance chat aliases, send profiles, and **per-instance plugin scoping** |
 | [MCP Tool Reference](docs/tools.md) | All 170 tools across 21 documented modules plus two runtime tools, with scopes, parameters, replay policies |
-| [Agent Decision Polls](docs/runbooks/agent-decision-polls.md) | Portable contract for blocking `AskUserQuestion` poll interactions and non-blocking MCP `send_poll` usage |
+| [Agent Decision Polls](docs/runbooks/agent-decision-polls.md) | Portable contract for blocking `AskUserQuestion`, non-blocking MCP `send_poll`, and bounded `awaitResult` waits |
 | [Runbook](docs/runbook.md) | Operational procedures and troubleshooting |
 | [Durability Design](docs/durability.md) | Durability engine design, state machines, recovery algorithms |
 | [Reply Guarantee Protocol](docs/reply-guarantee.md) | Six-layer RGP architecture, typing-only runtime liveness, terminal ownership, and hook/drain fallback recovery |

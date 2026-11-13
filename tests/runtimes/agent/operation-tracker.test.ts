@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { OperationTracker } from '../../../src/runtimes/agent/operation-tracker.ts';
+import {
+  declaredShellTimeoutMs,
+  MAX_SHELL_TIMEOUT_MS,
+  OperationTracker,
+} from '../../../src/runtimes/agent/operation-tracker.ts';
 import type {
   OperationTrackerCallbacks,
   ProgressEvent,
@@ -696,6 +700,211 @@ describe('OperationTracker', () => {
       expect(tracker.getActive()[0].expectedDurationMs).toBe(10_000);
 
       tracker.shutdown();
+    });
+  });
+
+  // ─── Blocking send_poll waiting for a vote ──────────────────────────────
+
+  describe('blocking send_poll waiting for a vote', () => {
+    const SEND_POLL = 'mcp__whatsoup__send_poll';
+    const POLL_TIMEOUT_MS = 600_000;
+    // mcp threshold: slow at 30 s, stall at 75 s.
+    const MCP_STALL_MS = 75_000;
+
+    it('does not stall while the vote wait is inside the poll timeout', () => {
+      const { callbacks, stalledCalls, progressEvents } = makeCallbacks();
+      const tracker = makeTracker(callbacks);
+
+      tracker.onToolStart('poll-1', SEND_POLL, 'other', {
+        question: 'Pick one', options: ['A', 'B'], awaitResult: true, timeoutMs: POLL_TIMEOUT_MS,
+      });
+
+      vi.advanceTimersByTime(MCP_STALL_MS + 1_000);
+      expect(stalledCalls).toEqual([]);
+      vi.advanceTimersByTime(180_000);
+      expect(stalledCalls).toEqual([]);
+      vi.advanceTimersByTime(POLL_TIMEOUT_MS - MCP_STALL_MS - 181_000);
+      expect(stalledCalls).toEqual([]);
+      expect(progressEvents.some((e) => e.type === 'operation_stalled')).toBe(false);
+      expect(tracker.getActive()[0]?.state).not.toBe('stalled');
+
+      tracker.shutdown();
+    });
+
+    it('stalls once the poll timeout plus the mcp stall window has passed', () => {
+      const { callbacks, stalledCalls } = makeCallbacks();
+      const tracker = makeTracker(callbacks);
+
+      tracker.onToolStart('poll-2', SEND_POLL, 'other', {
+        question: 'Pick one', options: ['A', 'B'], awaitResult: true, timeoutMs: POLL_TIMEOUT_MS,
+      });
+
+      vi.advanceTimersByTime(POLL_TIMEOUT_MS + MCP_STALL_MS - 1);
+      expect(stalledCalls).toEqual([]);
+      vi.advanceTimersByTime(1);
+      expect(stalledCalls).toEqual([{ toolId: 'poll-2', toolName: SEND_POLL }]);
+      expect(tracker.getActive()[0]?.state).toBe('stalled');
+
+      tracker.shutdown();
+    });
+
+    it('bounds a blocking send_poll without timeoutMs by the default poll timeout', () => {
+      const { callbacks, stalledCalls } = makeCallbacks();
+      const tracker = makeTracker(callbacks);
+
+      tracker.onToolStart('poll-3', SEND_POLL, 'other', { question: 'Pick one', options: ['A', 'B'], awaitResult: true });
+
+      vi.advanceTimersByTime(3_600_000 + MCP_STALL_MS - 1);
+      expect(stalledCalls).toEqual([]);
+      vi.advanceTimersByTime(1);
+      expect(stalledCalls).toEqual([{ toolId: 'poll-3', toolName: SEND_POLL }]);
+
+      tracker.shutdown();
+    });
+
+    it('still stalls another MCP tool at the mcp threshold', () => {
+      const { callbacks, stalledCalls } = makeCallbacks();
+      const tracker = makeTracker(callbacks);
+
+      tracker.onToolStart('other-1', 'mcp__whatsoup__send_message', 'other', {
+        text: 'hi', awaitResult: true, timeoutMs: POLL_TIMEOUT_MS,
+      });
+
+      vi.advanceTimersByTime(MCP_STALL_MS - 1);
+      expect(stalledCalls).toEqual([]);
+      vi.advanceTimersByTime(1);
+      expect(stalledCalls).toEqual([{ toolId: 'other-1', toolName: 'mcp__whatsoup__send_message' }]);
+
+      tracker.shutdown();
+    });
+
+    it('keeps the mcp threshold for a non-blocking send_poll', () => {
+      const { callbacks, stalledCalls } = makeCallbacks();
+      const tracker = makeTracker(callbacks);
+
+      tracker.onToolStart('poll-4', SEND_POLL, 'other', {
+        question: 'Pick one', options: ['A', 'B'], awaitResult: false, timeoutMs: POLL_TIMEOUT_MS,
+      });
+      tracker.onToolStart('poll-5', SEND_POLL, 'other', {
+        question: 'Pick one', options: ['A', 'B'], timeoutMs: POLL_TIMEOUT_MS,
+      });
+
+      vi.advanceTimersByTime(MCP_STALL_MS - 1);
+      expect(stalledCalls).toEqual([]);
+      vi.advanceTimersByTime(1);
+      expect(stalledCalls).toEqual([
+        { toolId: 'poll-4', toolName: SEND_POLL },
+        { toolId: 'poll-5', toolName: SEND_POLL },
+      ]);
+
+      tracker.shutdown();
+    });
+  });
+
+  // ─── Shell call with an explicit timeout (issue 3904) ───────────────────
+
+  describe('shell call with an explicit timeout', () => {
+    // bash threshold: slow at 30 s, stall at 75 s.
+    const BASH_SLOW_MS = 30_000;
+    const BASH_STALL_MS = 75_000;
+
+    it('delays the stall until the declared timeout plus the bash stall window, but keeps the slow notice', () => {
+      const { callbacks, stalledCalls, progressEvents } = makeCallbacks();
+      const tracker = makeTracker(callbacks);
+
+      tracker.onToolStart('sh-1', 'Bash', 'running', { command: 'node probe.mjs', timeout: 600_000 });
+
+      vi.advanceTimersByTime(BASH_SLOW_MS);
+      expect(progressEvents.filter((e) => e.type === 'operation_slow')).toHaveLength(1);
+      expect(progressEvents.some((e) => 'awaitingPoll' in e)).toBe(false);
+      vi.advanceTimersByTime(600_000 + BASH_STALL_MS - BASH_SLOW_MS - 1);
+      expect(stalledCalls).toEqual([]);
+      vi.advanceTimersByTime(1);
+      expect(stalledCalls).toEqual([{ toolId: 'sh-1', toolName: 'Bash' }]);
+      expect(tracker.getActive()[0]?.state).toBe('stalled');
+
+      tracker.shutdown();
+    });
+
+    it('caps a declared timeout above the shell maximum', () => {
+      const { callbacks, stalledCalls } = makeCallbacks();
+      const tracker = makeTracker(callbacks);
+
+      tracker.onToolStart('sh-2', 'bash', 'running', { command: 'sleep 1', timeout: 86_400_000 });
+
+      vi.advanceTimersByTime(MAX_SHELL_TIMEOUT_MS + BASH_STALL_MS - 1);
+      expect(stalledCalls).toEqual([]);
+      vi.advanceTimersByTime(1);
+      expect(stalledCalls).toEqual([{ toolId: 'sh-2', toolName: 'bash' }]);
+
+      tracker.shutdown();
+    });
+
+    it.each([
+      ['no timeout', { command: 'cat' }],
+      ['a string timeout', { command: 'cat', timeout: '600000' }],
+      ['a zero timeout', { command: 'cat', timeout: 0 }],
+      ['a negative timeout', { command: 'cat', timeout: -1 }],
+      ['a NaN timeout', { command: 'cat', timeout: Number.NaN }],
+      ['an infinite timeout', { command: 'cat', timeout: Number.POSITIVE_INFINITY }],
+    ])('still stalls a hung shell call with %s at the bash threshold', (_label, input) => {
+      const { callbacks, stalledCalls } = makeCallbacks();
+      const tracker = makeTracker(callbacks);
+
+      tracker.onToolStart('sh-3', 'Bash', 'running', input);
+
+      vi.advanceTimersByTime(BASH_STALL_MS - 1);
+      expect(stalledCalls).toEqual([]);
+      vi.advanceTimersByTime(1);
+      expect(stalledCalls).toEqual([{ toolId: 'sh-3', toolName: 'Bash' }]);
+
+      tracker.shutdown();
+    });
+
+    it('ignores a timeout field on a tool that is not the shell tool', () => {
+      const { callbacks, stalledCalls } = makeCallbacks();
+      const tracker = makeTracker(callbacks);
+
+      tracker.onToolStart('run-1', 'run_shell_command', 'running', { command: 'cat', timeout: 600_000 });
+      tracker.onToolStart('mcp-1', 'mcp__whatsoup__send_message', 'other', { text: 'hi', timeout: 600_000 });
+
+      vi.advanceTimersByTime(BASH_STALL_MS - 1);
+      expect(stalledCalls).toEqual([]);
+      vi.advanceTimersByTime(1);
+      expect(stalledCalls).toEqual([
+        { toolId: 'run-1', toolName: 'run_shell_command' },
+        { toolId: 'mcp-1', toolName: 'mcp__whatsoup__send_message' },
+      ]);
+
+      tracker.shutdown();
+    });
+
+    it('never stalls a shell call that ends inside its declared timeout', () => {
+      const { callbacks, stalledCalls } = makeCallbacks();
+      const tracker = makeTracker(callbacks);
+
+      tracker.onToolStart('sh-4', 'Bash', 'running', { command: 'node probe.mjs', timeout: 600_000 });
+      vi.advanceTimersByTime(260_000);
+      tracker.onToolEnd('sh-4');
+      vi.advanceTimersByTime(600_000 + BASH_STALL_MS);
+      expect(stalledCalls).toEqual([]);
+
+      tracker.shutdown();
+    });
+  });
+
+  describe('declaredShellTimeoutMs', () => {
+    it.each([
+      ['Bash', { timeout: 600_000 }, 600_000],
+      ['bash', { timeout: 90_000 }, 90_000],
+      ['Bash', { timeout: 600_001 }, MAX_SHELL_TIMEOUT_MS],
+      ['Bash', { timeout: 0 }, 0],
+      ['Bash', { timeout: '90000' }, 0],
+      ['Bash', {}, 0],
+      ['Bash', undefined, 0],
+      ['Read', { timeout: 90_000 }, 0],
+    ] as const)('%s %o -> %d', (name, input, expected) => {
+      expect(declaredShellTimeoutMs(name, input as Record<string, unknown> | undefined)).toBe(expected);
     });
   });
 });

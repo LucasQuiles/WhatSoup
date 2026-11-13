@@ -1006,7 +1006,7 @@ export class OutboundQueue implements IOutboundQueue {
       }
 
       case 'operation_progress': {
-        if (this.pollPending) {
+        if (this.pollPending || event.awaitingPoll) {
           this.startTyping();
           return;
         }
