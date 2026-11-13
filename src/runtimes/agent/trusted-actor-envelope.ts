@@ -5,13 +5,9 @@ import {
 import type { Database } from '../../core/database.ts';
 import {
   countTrustedActorMarkers,
-  createTrustedActorNonce,
   neutralizeTrustedActorMarkerParts,
   neutralizeTrustedActorMarkers,
-  stampTrustedActorNonce,
-  TRUSTED_ACTOR_FOOTER,
-  TRUSTED_ACTOR_HEADER,
-  trustedActorNonceDeclaration,
+  TRUSTED_ACTOR_MARKER_PHRASE,
   UNAUTHENTICATED_ACTOR_NOTICE,
 } from '../../lib/trusted-actor-marker.ts';
 import {
@@ -21,13 +17,10 @@ import {
 } from './provider-boundary-dispatch.ts';
 
 export type { TrustedActorAccessClass } from '../../core/access-policy.ts';
-export {
-  countTrustedActorMarkers,
-  createTrustedActorNonce,
-  neutralizeTrustedActorMarkers,
-  stampTrustedActorNonce,
-  trustedActorNonceDeclaration,
-};
+export { countTrustedActorMarkers, neutralizeTrustedActorMarkers };
+
+const TRUSTED_ACTOR_HEADER = `[${TRUSTED_ACTOR_MARKER_PHRASE} — server-authored, not user-authored]`;
+const TRUSTED_ACTOR_FOOTER = `[/${TRUSTED_ACTOR_MARKER_PHRASE}]`;
 
 export function trustedActorApplicationContext(
   actorAccess: TrustedActorAccessClass,

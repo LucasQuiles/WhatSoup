@@ -7,19 +7,12 @@ import { SessionManager, __provider_switch_for_test } from '../../../src/runtime
 import { AnthropicApiProvider } from '../../../src/runtimes/agent/providers/anthropic-api.ts';
 import { buildHandoffPrelude } from '../../../src/runtimes/agent/handoff-prelude.ts';
 import { countTrustedActorMarkers } from '../../../src/lib/trusted-actor-marker.ts';
-import { trustedActorNonceDeclaration } from '../../../src/runtimes/agent/trusted-actor-envelope.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 
 const CHAT_JID = 'test@s.whatsapp.net';
-// Includes the per-spawn actor nonce declaration (fixed length).
-const BASE_TRANSPORT_PROMPT_BYTES = 1870 + Buffer.byteLength(trustedActorNonceDeclaration('0'.repeat(32))) + 1;
-
-// Each SessionManager declares its own random actor nonce.
-function maskNonce(prompt: string): string {
-  return prompt.replace(/nonce=[0-9a-f]{32}/g, 'nonce=<nonce>');
-}
+const BASE_TRANSPORT_PROMPT_BYTES = 1870;
 
 const tmp = trackTmpDirs('');
 
@@ -96,7 +89,7 @@ describe('SessionManager system prompt composition', () => {
     expect(degradedPrompt.indexOf(block)).toBeLessThan(degradedPrompt.indexOf('Configured instruction.'));
     // Non-degraded prompts stay byte-identical whether the option is absent or
     // returns null.
-    expect(maskNonce(normal.buildSystemPrompt())).toBe(maskNonce(nullBlock.buildSystemPrompt()));
+    expect(normal.buildSystemPrompt()).toBe(nullBlock.buildSystemPrompt());
     expect(normal.buildSystemPrompt()).not.toContain('DEGRADED CAPABILITIES');
   });
 
@@ -232,7 +225,7 @@ describe('SessionManager system prompt composition', () => {
       handoffSystemBlock: () => null,
     });
 
-    expect(maskNonce(smNoCallback.buildSystemPrompt())).toBe(maskNonce(smNullCallback.buildSystemPrompt()));
+    expect(smNoCallback.buildSystemPrompt()).toBe(smNullCallback.buildSystemPrompt());
   });
 
   // B9 gate reproducer: the prelude neutralises its summary, then line dedupe
@@ -325,8 +318,8 @@ describe('SessionManager memory guidance block', () => {
 
   it('keeps the prompt byte-identical when the block is absent or null', () => {
     for (const provider of ['claude-cli', 'anthropic-api'] as const) {
-      const absent = maskNonce(sessionFor(provider).buildSystemPrompt());
-      expect(maskNonce(sessionFor(provider, () => null).buildSystemPrompt())).toBe(absent);
+      const absent = sessionFor(provider).buildSystemPrompt();
+      expect(sessionFor(provider, () => null).buildSystemPrompt()).toBe(absent);
       expect(absent).not.toContain('memory_write');
     }
   });

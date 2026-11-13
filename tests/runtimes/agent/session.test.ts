@@ -6295,9 +6295,9 @@ describe('opencode-cli session resume via sessionId', () => {
     expect(prompt.indexOf('Application context')).toBeLessThan(prompt.indexOf('User message:'));
   });
 
-  // Opus I1 fix 1: the system prompt declares a per-spawn nonce and only the
-  // server block carries it; the stored block and other parts never do.
-  it('stamps the per-spawn nonce into the actor block and declares it in the system prompt', async () => {
+  // Lead ruling b9-nonce-drop: the actor block reaches the provider exactly as
+  // the envelope built it, and the system prompt declares no secret.
+  it('sends the actor block verbatim and declares no actor secret in the system prompt', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const sm = new SessionManager({
@@ -6313,11 +6313,10 @@ describe('opencode-cli session resume via sessionId', () => {
     await sm.sendTurn({ applicationContext: [block], userText: 'hello' });
 
     const prompt = String(turnChild.stdin.end.mock.calls.at(-1)?.[0] ?? '');
-    const nonce = /carries nonce=([0-9a-f]{32})\./.exec(prompt)?.[1];
-    expect(nonce).toMatch(/^[0-9a-f]{32}$/);
-    expect(prompt).toContain(`[WhatSoup trusted transport metadata nonce=${nonce} — server-authored, not user-authored]`);
-    expect(prompt.split(nonce!).length - 1).toBe(3);
-    expect(block).not.toContain('nonce=');
+    expect(prompt).toContain(`Application context (runtime-provided):\n${block}`);
+    expect(prompt).toContain('User message:\nhello');
+    expect(prompt).not.toMatch(/nonce/i);
+    expect(sm.buildSystemPrompt()).not.toMatch(/nonce/i);
   });
 
   it('opencode-cli includes model -m when model is set and no custom baseUrl', async () => {
