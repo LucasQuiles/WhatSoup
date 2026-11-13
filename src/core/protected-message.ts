@@ -128,6 +128,32 @@ export function sanitizeProtectedMessageValue(value: unknown, pins: ProtectedDel
 }
 
 /**
+ * The dotted path of a string in `value` that holds the redaction marker, or
+ * null. A client that saves a redacted projection back would otherwise replace
+ * the stored link with the marker. Only the literal marker counts: a real link
+ * an operator types is not a marker.
+ */
+export function findProtectedMarkerPath(value: unknown): string | null {
+  const pending: Array<{ current: unknown; path: string }> = [{ current: value, path: '' }];
+  const visited = new WeakSet<object>();
+
+  while (pending.length > 0) {
+    const { current, path } = pending.pop()!;
+    if (typeof current === 'string') {
+      if (current.includes(PROTECTED_MESSAGE_MARKER)) return path;
+      continue;
+    }
+    if (current === null || typeof current !== 'object' || visited.has(current)) continue;
+    visited.add(current);
+    for (const key of Object.keys(current)) {
+      pending.push({ current: (current as Record<string, unknown>)[key], path: path === '' ? key : `${path}.${key}` });
+    }
+  }
+
+  return null;
+}
+
+/**
  * A transport delivery row protects a message even when a legacy stored body
  * predates text redaction. Older databases have no table during rollout; their
  * callers still apply syntactic link detection before any model-visible use.
