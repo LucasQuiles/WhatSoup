@@ -10,6 +10,8 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../src/core/protected-delivery-pins.ts', async (importOriginal) =>
   (await import('../helpers/protected-delivery-pins.ts')).mockProtectedDeliveryPins(importOriginal));
+// Each scratch database logs every migration; the rows assert on return values only.
+vi.mock('../../src/logger.ts', async () => (await import('../helpers/logger-mock.ts')).loggerMock());
 
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -37,6 +39,7 @@ import {
   fromPineconeHitEntity,
   toPineconeRecord,
 } from '../../src/runtimes/chat/providers/pinecone.ts';
+import { leasePendingFacts } from '../../src/runtimes/chat/enrichment/fact-export-queue.ts';
 import type { TurnRecoveryJobRow } from '../../src/core/turn-recovery-store.ts';
 import type { QueuedTurn } from '../../src/runtimes/agent/turn-queue.ts';
 import { TEST_LINK_HOST } from '../helpers/protected-delivery-pins.ts';
@@ -213,6 +216,17 @@ function withCapabilityObligation<T>(
   }
 }
 
+/** A separate database for rows whose production path changes the rows it reads. */
+async function withScratchDb<T>(read: (scratch: Database) => T | Promise<T>): Promise<T> {
+  const scratch = new Database(':memory:');
+  scratch.open();
+  try {
+    return await read(scratch);
+  } finally {
+    scratch.close();
+  }
+}
+
 interface SurfaceCase {
   surface: string;
   probe: () => unknown | Promise<unknown>;
@@ -344,15 +358,25 @@ const SURFACES: SurfaceCase[] = [
       });
     },
   },
+  // A neutral source token keeps the two due-row cases about the fields the
+  // store redacts. A group obligation waits for the drain-approval chain before
+  // it is due, so these are not groups; each still stores a group name to cover
+  // that field. Each mapper has its own row, so neither can vanish unnoticed.
   {
-    surface: 'capability obligation due rows (listDueObligations and dueObligationById)',
-    // A neutral source token keeps this row about the fields the store redacts.
-    // A group obligation waits for the drain-approval chain before it is due,
-    // so this one is not a group; it still stores a group name to cover that field.
-    probe: () => withCapabilityObligation('https://media.example.test/clip', false, (store, id) => [
-      store.listDueObligations(10),
-      store.dueObligationById(id),
-    ]),
+    surface: 'capability obligation due rows (listDueObligations)',
+    probe: () => withCapabilityObligation('https://media.example.test/clip', false, (store) => {
+      const due = store.listDueObligations(10);
+      expect(due).toHaveLength(1);
+      return due;
+    }),
+  },
+  {
+    surface: 'capability obligation due rows (dueObligationById)',
+    probe: () => withCapabilityObligation('https://media.example.test/clip', false, (store, id) => {
+      const result = store.dueObligationById(id);
+      expect(result.due).not.toBeNull();
+      return result;
+    }),
   },
   {
     surface: 'capability obligation operator inspect view (source token)',
@@ -392,6 +416,27 @@ const SURFACES: SurfaceCase[] = [
       );
       return { result: result.content[0].text, sent };
     },
+  },
+  {
+    surface: 'fact export queue lease (payload handed to the export bridge)',
+    probe: () => withScratchDb((scratch) => {
+      scratch.raw.prepare(`
+        INSERT INTO fact_export_queue (fact_uid, fact_id, chat_jid, sender_jid, namespace, payload_json)
+        VALUES ('uid-protected', 'fact-protected', ?, ?, 'facts', ?)
+      `).run(GROUP_JID, GROUP_SENDER_JID, JSON.stringify({
+        text: CONTENT,
+        memoryType: 'user_fact',
+        confidence: 0.9,
+        senderName: SENDER,
+        supersedesText: CONTENT,
+        sourceMessagePks: [1],
+        claim: CONTENT,
+        evidence: CONTENT,
+      }));
+      const leased = leasePendingFacts(scratch, { owner: 'bridge', limit: 10, leaseSeconds: 60, nowUnixSec: TS });
+      expect(leased).toHaveLength(1);
+      return leased;
+    }),
   },
   {
     // Last row: it adds an audio message the rows above must not read.
