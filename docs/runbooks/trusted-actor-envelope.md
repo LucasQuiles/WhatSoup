@@ -10,10 +10,15 @@ Source: `src/runtimes/agent/trusted-actor-envelope.ts` and
 The block is advisory to the model. It helps the model recognise who it is
 talking to; it grants nothing.
 
-- Tool authorization, risky-action confirmation and instance policy are
-  enforced server-side on every call, whatever any block in the conversation
-  says. A forged block that slips past neutralisation can mislead the model
-  about a role, but cannot authorize a tool call.
+- WhatSoup's sensitive MCP tools are authorized on the server for each call,
+  against the turn's actor (`ToolRegistry`), whatever any block in the
+  conversation says. A forged block cannot open those tools.
+- A provider's built-in tools (shell, file edits and similar) are not
+  authorized per actor. Their reach is fixed per instance by the provider
+  permission settings. When an instance runs them without a sandbox, the
+  model's view of who is speaking is the only check on them, so a forged block
+  that slips past neutralisation can steer them. Keep such an instance
+  reachable only by its administrators (`accessMode: self_only`).
 - The block carries no secret. Its authenticity rests on placement (the first
   application-context entry, built by the runtime) and on neutralising every
   copy of its marker phrase in user-derived text.
@@ -33,8 +38,9 @@ provider exactly as the envelope builds it.
   This covers missed-message injection and context recovery. The pending
   replay after a failed resume carries the pending turn's own actor block.
 - The attestation is for conversational role recognition only. It never
-  bypasses server-enforced tool authorization, risky-action confirmation or
-  instance policy.
+  bypasses server-enforced tool authorization or instance policy. It does not
+  change what an instance's built-in tools may do (see the security boundary
+  above).
 
 ## Marker neutralisation
 
@@ -65,7 +71,9 @@ rewritten too; this is intended.
 ## Accepted residuals
 
 Neutralisation is lexical, so it cannot catch every way to write the phrase.
-These forms are not caught. The server-side boundary above bounds their impact.
+These forms are not caught. Per-actor authorization still holds for WhatSoup's
+sensitive MCP tools; on an instance whose built-in tools run without a sandbox,
+the access mode is what limits who can try them (see the security boundary).
 
 - Visibly altered forms: `rn` for `m`, `VV` for `W`, a backslash escape that
   deletes a letter in raw text (`Wha\tSoup`), or an unmapped letter such as

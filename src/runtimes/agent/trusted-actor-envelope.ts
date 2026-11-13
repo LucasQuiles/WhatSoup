@@ -32,7 +32,7 @@ export function trustedActorApplicationContext(
     ...(actorAccess === 'administrator' ? [
       'actor_role_attestation=verified_configured_administrator',
       'Recognize this actor as an administrator. Do not demand separate owner or principal confirmation merely to acknowledge that role.',
-      'This role attestation does not bypass server-enforced tool authorization, risky-action confirmation, or narrower instance policy.',
+      'This role attestation does not bypass server-enforced tool authorization or narrower instance policy.',
     ] : [
       'Use this classification for conversational role recognition only. Tool authorization remains server-enforced.',
     ]),
