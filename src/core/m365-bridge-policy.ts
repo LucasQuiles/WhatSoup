@@ -323,6 +323,21 @@ export function m365TurnAuthority(
   };
 }
 
+/**
+ * The route policy a turn publishes: its session's snapshot narrowed by the runtime's current
+ * policy, so a snapshot can lose authority but never gain it. A snapshot whose authority rested on
+ * an assignment the runtime has since withdrawn is rejected outright, not merely stripped of the
+ * assignment: its child may run with settings lifted at spawn, so it keeps neither reads nor writes.
+ */
+export function narrowM365RoutePolicy(
+  snapshot: M365MutationPolicy | undefined,
+  current: M365MutationPolicy | undefined,
+): M365MutationPolicy | undefined {
+  if (current === undefined) return undefined;
+  if (snapshot?.status !== 'approved' || current.status !== 'approved') return { status: 'rejected' };
+  return m365MutationExceptionAllowed(snapshot) && !m365MutationExceptionAllowed(current) ? { status: 'rejected' } : snapshot;
+}
+
 export function validateM365BridgeAgentOptions(opts: Record<string, unknown>): { field: string; message: string } | null {
   if (opts['allowM365Mutations'] !== undefined && typeof opts['allowM365Mutations'] !== 'boolean') {
     return { field: 'agentOptions.allowM365Mutations', message: 'agentOptions.allowM365Mutations must be a boolean when provided' };

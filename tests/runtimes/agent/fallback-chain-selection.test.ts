@@ -543,6 +543,57 @@ describe('fallback chain selection', () => {
     }
   });
 
+  it('refuses Microsoft 365 authority to a session created before the runtime withdrew the assignment', () => {
+    const tenantId = '11111111-2222-3333-4444-555555555555';
+    const origin = 'https://127.0.0.1:10000';
+    const accountId = 'employee-account';
+    const workflowAuthority = { accountId, employeeActorJid: '15551230001@s.whatsapp.net' };
+    const binding = { tenantId, origin, profile: 'user-full-v1' as const, accountId, workflowAuthority };
+    const enabledPlugins = { 'microsoft_365@microsoft-365-dev': true };
+    for (const [key, value] of Object.entries({
+      ALLOW_M365_MUTATIONS: '1', MS365_AGENT365_BRIDGE: 'true',
+      MS365_AGENT365_BASE_URL: origin, MS365_HUB_URL: origin,
+      MS365_TENANT_ID: tenantId, MS365_PROFILE: 'user-full-v1',
+      MS365_AGENT365_API_KEY: 'synthetic-key', MS365_AGENT365_ACCOUNT_ID: accountId,
+      MS365_DURABLE_MAIL_STATE_DIR: '/tmp/whatsoup-m365-durable-mail',
+    })) vi.stubEnv(key, value);
+    vi.stubEnv('MS365_AGENT365_ACCOUNT_EMAIL', undefined);
+    vi.stubEnv('WHATSOUP_M365_LAUNCH_ADMISSION', m365BridgeCredentialAdmission({
+      instanceName: 'test', provider: 'claude-cli', allowM365Mutations: true, enabledPlugins, binding, env: process.env,
+    }, process.pid) ?? undefined);
+    const recheck = admittedUnchangedRecheck();
+    try {
+      const runtime = makeRuntime({ model: 'primary-model' }, { allowM365Mutations: true, enabledPlugins, m365Bridge: binding });
+      type Published = { workflowAuthority?: unknown; workflowAuthorityScope?: string; m365RouteProvider?: string };
+      const internals = runtime as unknown as {
+        createSessionManager(opts: Record<string, unknown>): { m365MutationPolicy: M365MutationPolicy };
+        m365ExecutingAuthority(session: unknown, humanRequest: boolean, requestRef: string | undefined): Published;
+      };
+      const session = () => internals.createSessionManager({
+        chatJid: 'bridge-test@s.whatsapp.net', onEvent: vi.fn(), onCrash: vi.fn(), notifyUser: vi.fn(),
+      });
+      // Positive control: a session created while approved publishes the assignment and its route provider.
+      const existing = session();
+      expect(m365MutationExceptionAllowed(existing.m365MutationPolicy)).toBe(true);
+      expect(internals.m365ExecutingAuthority(existing, true, 'request-1'))
+        .toMatchObject({ workflowAuthority, m365RouteProvider: 'claude-cli' });
+
+      // The native copy changes; the next re-check withdraws the runtime's assignment.
+      recheck.mockImplementationOnce(withdrawAssignment);
+      session();
+
+      // The existing session keeps its approved snapshot, yet its next turn publishes nothing:
+      // the snapshot is narrowed by the current runtime policy, never widened by it.
+      expect(m365MutationExceptionAllowed(existing.m365MutationPolicy)).toBe(true);
+      const published = internals.m365ExecutingAuthority(existing, true, 'request-2');
+      expect(published.workflowAuthority).toBeUndefined();
+      expect(published.workflowAuthorityScope).toBeUndefined();
+      expect(published.m365RouteProvider).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('keeps same-provider model tiers eligible for usage-limit windows', () => {
     const runtime = makeRuntime({
       model: 'claude-fable-5',

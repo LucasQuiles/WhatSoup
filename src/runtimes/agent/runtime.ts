@@ -127,7 +127,7 @@ import {
 } from './fallback-state-db.ts';
 import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
 import { workspaceSocketPath } from '../../core/workspace-paths.ts';
-import { m365MutationExceptionAllowed, m365TurnAuthority, supportsM365BridgeProvider, type M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
+import { m365MutationExceptionAllowed, m365TurnAuthority, narrowM365RoutePolicy, supportsM365BridgeProvider, type M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
 import { inspectUserClaudeSettings } from '../../core/user-claude-settings.ts';
 import { isSamePhysicalDirectory } from '../../lib/home-path.ts';
 import { classifyActiveSessions, resolveAmbiguousAgeFallback } from './session-classifier.ts';
@@ -3916,9 +3916,9 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  /** M365 authority a turn publishes, from the route policy of the session that runs it (unknown session: rejected). */
+  /** M365 authority a turn publishes: its session's route policy narrowed by the current runtime policy (unknown session: rejected). */
   private m365ExecutingAuthority(session: SessionManager, humanRequest: boolean, requestRef: string | undefined) {
-    const routePolicy = this.sessionM365Policies.has(session) ? this.sessionM365Policies.get(session) : this.m365MutationPolicy && { status: 'rejected' as const };
+    const routePolicy = narrowM365RoutePolicy(this.sessionM365Policies.get(session), this.m365MutationPolicy);
     return m365TurnAuthority(routePolicy, humanRequest, requestRef, this.sessionScope, sessionProviderId(session) ?? undefined);
   }
 

@@ -9,7 +9,9 @@ import { dirname, join, resolve as resolvePath } from 'node:path';
 import type * as os from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { m365MutationExceptionAllowed, type M365MutationPolicy } from '../../../src/core/m365-bridge-policy.ts';
+import {
+  m365MutationExceptionAllowed, m365TurnAuthority, narrowM365RoutePolicy, type M365MutationPolicy,
+} from '../../../src/core/m365-bridge-policy.ts';
 import { SessionTokenRegistry } from '../../../src/mcp/caller-attribution.ts';
 import { registerM365WorkflowAuthorityTool } from '../../../src/mcp/m365-workflow-authority.ts';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
@@ -846,6 +848,42 @@ describe.skipIf(SYSTEM_PYTHON === '')('Microsoft 365 provider adapter', () => {
     }
     expect(manager.acquire.mock.calls.length).toBe(acquired);
     expect(traceRows(trace).filter((row) => row.event === 'write_dispatched')).toHaveLength(0);
+  });
+
+  it('refuses a write before acquiring a socket once the runtime withdraws the assignment an existing session snapshotted', async () => {
+    const directory = temporaryDirectory('whatsoup-m365-narrow-');
+    const trace = join(directory, 'm365-fixture-trace.jsonl');
+    const registry = new ToolRegistry();
+    const tokens = new SessionTokenRegistry();
+    const snapshot = policy(trace);
+    // What the existing session's turn publishes, given the runtime's current policy.
+    const publish = (current: M365MutationPolicy): ExecutingSessionContext => ({
+      ...authorizedExecuting(),
+      ...m365TurnAuthority(narrowM365RoutePolicy(snapshot, current), true, 'request-fixture', 'per_chat', 'claude-cli'),
+    });
+    let executing = publish(snapshot);
+    const socketPath = await brokerServer(directory, 'chat', tokens, () => executing);
+    const manager = { acquire: vi.fn(() => ({ socketPath, ready: Promise.resolve() })) };
+    expect(registerMicrosoft365Adapter({ registry, policy: snapshot, pluginDirs: [pluginDirectory(trace).root],
+      perChatMcpSocketManager: manager as never, resolvePerChatMapKey: (jid) => `map:${jid}`, sessionTokens: tokens })).toBe(true);
+    const bridge = createProviderMcpBridge(registry,
+      { tier: 'chat-scoped', conversationKey: CONVERSATION_KEY, deliveryJid: DELIVERY_JID }, () => executing);
+
+    // Positive control: while the runtime still holds the snapshot's assignment, the write reaches the chat socket.
+    expect(executing.workflowAuthority).toEqual(snapshot.status === 'approved' ? snapshot.workflowAuthority : undefined);
+    await bridge.executeTool('microsoft365', { operation: 'call', name: 'send-mail', args: {} });
+    const acquired = manager.acquire.mock.calls.length;
+    expect(acquired).toBeGreaterThan(0);
+    const dispatched = traceRows(trace).filter((row) => row.event === 'write_dispatched').length;
+
+    // The runtime withdraws the assignment; the same session's next turn publishes nothing.
+    executing = publish({ status: 'approved', childEnv: snapshot.status === 'approved' ? snapshot.childEnv : {} });
+    expect(executing).toMatchObject({ workflowAuthority: undefined, workflowAuthorityScope: undefined, m365RouteProvider: undefined });
+    const refused = await bridge.executeTool('microsoft365', { operation: 'call', name: 'send-mail', args: {} });
+    expect(refused).toMatchObject({ isError: true });
+    expect(JSON.stringify(refused)).toContain('microsoft365_authority_unavailable');
+    expect(manager.acquire.mock.calls.length).toBe(acquired);
+    expect(traceRows(trace).filter((row) => row.event === 'write_dispatched')).toHaveLength(dispatched);
   });
 
   it('lists the adapter only to chat-scoped sessions bound to a delivery chat', () => {
