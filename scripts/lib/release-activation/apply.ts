@@ -55,6 +55,7 @@ import { acquireActivationLock } from './lock.ts';
 import {
   readInstalledRootHelper,
   readRootHelperPin,
+  ROOT_HELPER_FAILED_AS_FOUND_EXIT,
   ROOT_HELPER_RECOVERY_INCOMPLETE_EXIT,
   ROOT_HELPER_SUDO,
   rootHelperArgs,
@@ -159,11 +160,21 @@ function writeAtomic(filePath: string, contents: string, mode: number): void {
 }
 
 /**
- * The root helper exited 3: a plist may hold either version and may lack its
- * uchg protection. Node cannot read file flags, so no later step can confirm
- * protection, and a rollback after this stays unverified.
+ * The root helper ended without confirming where protection stands: exit 3, a
+ * signal, a timeout, any code but 0 and 2, or exit 0 without the new bytes. It
+ * may have stopped after clearing uchg, so a plist may hold either version and
+ * may lack that protection. Node cannot read file flags, so no later step can
+ * confirm protection, and a rollback after this stays unverified.
  */
 class RootHelperRecoveryIncomplete extends Error {}
+
+/** How a root helper run that did not confirm protection ended, for the operator message. */
+function unconfirmedRootHelperRun(result: ExecResult): string {
+  if (result.timedOut === true) return 'root plist helper timed out without confirming protection';
+  if (result.code === ROOT_HELPER_RECOVERY_INCOMPLETE_EXIT) return 'root plist helper recovery is incomplete';
+  if (result.code === 0) return 'root plist helper reported success but the plist does not hold the new bytes';
+  return `root plist helper ended without confirming protection (exit ${result.code})`;
+}
 
 /** A root-owned plist replaced by a non-root activation goes through the root helper. */
 function needsRootHelper(host: ActivationHost, plistPath: string): boolean {
@@ -199,13 +210,12 @@ async function writePlist(host: ActivationHost, plistPath: string, contents: str
         metadata: { uid: info.uid, gid: info.gid, mode: info.mode & 0o777 } }),
       timeoutMs: 30_000,
     });
-    if (result.code === ROOT_HELPER_RECOVERY_INCOMPLETE_EXIT) {
-      // The helper changed the plist and could not put back and confirm the original bytes and protection.
-      throw new RootHelperRecoveryIncomplete(`${path.basename(plistPath)}: root plist helper recovery is incomplete; the plist may hold either `
-        + 'version and may lack its protection: inspect the plist and its uchg flag before any retry');
-    }
-    if (result.code !== 0 || readFileSync(plistPath, 'utf8') !== contents) {
+    if (result.code === ROOT_HELPER_FAILED_AS_FOUND_EXIT && result.timedOut !== true) {
       throw new Error('protected plist replacement failed; inspect activation rollback receipt');
+    }
+    if (result.code !== 0 || result.timedOut === true || readFileSync(plistPath, 'utf8') !== contents) {
+      throw new RootHelperRecoveryIncomplete(`${path.basename(plistPath)}: ${unconfirmedRootHelperRun(result)}; the plist may hold either `
+        + 'version and may lack its protection: inspect the plist and its uchg flag before any retry');
     }
     const after = lstatSync(plistPath);
     if (after.uid !== info.uid || after.gid !== info.gid || after.mode !== info.mode) {

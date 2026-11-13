@@ -244,6 +244,15 @@ What the helper guarantees:
   cannot do that and confirm it, the helper exits 3 and the activation fails
   with "root plist helper recovery is incomplete": inspect that plist and its
   `uchg` flag before any retry.
+- The helper blocks the signals the bot user can relay through its own `sudo`
+  (SIGHUP, SIGINT, SIGQUIT, SIGTERM) for the whole run and raises its CPU
+  limit, so neither ends a run between clearing and restoring `uchg`. Any
+  other interruption re-protects what it can and exits 3.
+- Activation trusts only exit 0 with the new bytes in place and exit 2
+  (refused, plist as found). Every other result means unconfirmed protection
+  and the rollback reports `rollback-unverified`: exit 3, a signal (SIGKILL
+  cannot be blocked), the 30-second timeout, or another code. That includes
+  sudo's own exit 1 when the sudoers rule is missing.
 
 What it does not guarantee: the bot user owns `~/Library`, so it can always
 rename its own `LaunchAgents` folder and create another one. Between the rename

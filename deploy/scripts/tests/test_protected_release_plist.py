@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import plistlib
 import pwd
+import resource
 import stat
 import subprocess
 import sys
@@ -736,7 +737,143 @@ def test_a_name_swapped_before_re_protection_is_reported_and_left_alone(tmp_path
             os.chflags(tmp_path / name, 0)
 
 
+# ---- Opus I-1: an interruption never leaves the plist unprotected without exit 3 ----
+
+def test_an_interruption_after_the_restore_cleared_protection_re_protects_and_reports_incomplete(tmp_path, monkeypatch):
+    # Opus probe r3: the post-rename check fails, then KeyboardInterrupt arrives inside the
+    # restore just after it cleared the new file's flag. The plist was left new with flags 0
+    # and the interruption escaped run() as neither exit 2 nor exit 3.
+    path, before = _protected_plist(tmp_path)
+    real_flags = p.set_flags
+    calls = []
+
+    def flags(fd, value):
+        calls.append(value)
+        real_flags(fd, value)
+        if len(calls) == 2:  # the new file's protection: make the post-rename check fail
+            raise RuntimeError('injected post-rename failure')
+        if len(calls) == 3:  # inside the restore, after it cleared the new file's flag
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(p, 'set_flags', flags)
+    try:
+        with pytest.raises(p.RecoveryIncomplete):
+            p.replace(path, p.digest(b'old'), b'new', before, **OWN)
+        assert path.read_bytes() == b'new' and _flags(path) == stat.UF_IMMUTABLE
+        assert sorted(x.name for x in tmp_path.iterdir()) == ['p']
+    finally:
+        os.chflags(path, 0)
+
+
+def test_an_interruption_just_after_clearing_protection_re_protects_the_original(tmp_path, monkeypatch):
+    path, before = _protected_plist(tmp_path)
+    real_flags = p.set_flags
+    calls = []
+
+    def flags(fd, value):
+        calls.append(value)
+        real_flags(fd, value)
+        if len(calls) == 1:  # the target's flag is cleared; interrupted before the rename
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(p, 'set_flags', flags)
+    try:
+        with pytest.raises(KeyboardInterrupt):  # run() maps it to exit 3
+            p.replace(path, p.digest(b'old'), b'new', before, **OWN)
+        assert path.read_bytes() == b'old' and _flags(path) == stat.UF_IMMUTABLE
+        assert sorted(x.name for x in tmp_path.iterdir()) == ['p']
+    finally:
+        os.chflags(path, 0)
+
+
+# A child process sends itself the signals sudo relays (SIGTERM, SIGHUP, SIGINT, SIGQUIT)
+# once the target's uchg is cleared, as in Opus probe r2. Only a child can take real signals.
+_INTERRUPTED_CHILD = '''
+import importlib.util, os, signal, sys
+spec = importlib.util.spec_from_file_location('protected_plist', sys.argv[1])
+p = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(p)
+path = sys.argv[2]
+before = p.metadata(path)
+real_rename = p.rename_in
+def interrupted(*args):
+    for number in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGQUIT):
+        os.kill(os.getpid(), number)
+    return real_rename(*args)
+p.rename_in = interrupted
+if sys.argv[3] == 'shielded':
+    p.shield()
+p.replace(path, p.digest(b'old'), b'new', before, owner_uid=os.getuid())
+print('completed')
+'''
+
+
+def _interrupted_child(path, mode):
+    return subprocess.run([sys.executable, '-I', '-B', '-c', _INTERRUPTED_CHILD, p.__file__, str(path), mode],
+                          capture_output=True, text=True, timeout=60)
+
+
+@pytest.mark.skipif(not hasattr(os, 'chflags'), reason='file flags exist only on BSD and macOS')
+def test_the_shield_holds_relayed_signals_until_the_plist_is_protected_again(tmp_path):
+    (tmp_path / 'bare').mkdir(); (tmp_path / 'shielded').mkdir()
+    bare, _ = _protected_plist(tmp_path / 'bare')
+    shielded, before = _protected_plist(tmp_path / 'shielded')
+    try:
+        # Without the shield (Opus r2): SIGTERM kills the run after the clear, leaving flags 0.
+        result = _interrupted_child(bare, 'bare')
+        assert result.returncode == -15, result.stderr
+        assert bare.read_bytes() == b'old' and _flags(bare) == 0
+        # With it, the signals wait; the run completes and the new plist is immutable.
+        result = _interrupted_child(shielded, 'shielded')
+        assert (result.returncode, result.stdout.strip()) == (0, 'completed'), result.stderr
+        assert shielded.read_bytes() == b'new' and _flags(shielded) == stat.UF_IMMUTABLE
+        assert sorted(x.name for x in (tmp_path / 'shielded').iterdir()) == ['p']
+        # The second run, the rollback through the helper, keeps the protection.
+        p.replace(shielded, p.digest(b'new'), b'old', before, **OWN)
+        assert shielded.read_bytes() == b'old' and _flags(shielded) == stat.UF_IMMUTABLE
+    finally:
+        for folder in (tmp_path / 'bare', tmp_path / 'shielded'):
+            for name in os.listdir(folder):
+                os.chflags(folder / name, 0)
+
+
+_INFINITY = resource.RLIM_INFINITY
+
+
+# Each case is a distinct inherited limit: the caller's limits carry over through sudo, and
+# a low CPU limit would SIGKILL root mid-change. One second already used, 60 more required.
+@pytest.mark.parametrize('limits, expected', [
+    pytest.param((1, 2), (61, 61), id='low-soft-and-hard'),
+    pytest.param((30, _INFINITY), (61, _INFINITY), id='low-soft-only'),
+    pytest.param((_INFINITY, _INFINITY), None, id='unlimited'),
+    pytest.param((120, 120), None, id='already-enough'),
+])
+def test_the_shield_leaves_the_run_enough_cpu_time(monkeypatch, limits, expected):
+    calls = []
+    monkeypatch.setattr(resource, 'getrusage', lambda _who: types.SimpleNamespace(ru_utime=0.25, ru_stime=0.5))
+    monkeypatch.setattr(resource, 'getrlimit', lambda _which: limits)
+    monkeypatch.setattr(resource, 'setrlimit', lambda which, value: calls.append((which, value)))
+    p.ensure_cpu_time()
+    assert calls == ([] if expected is None else [(resource.RLIMIT_CPU, expected)])
+
+
+def test_run_shields_first_and_exits_3_for_an_interruption(monkeypatch, capsys):
+    order = []
+    monkeypatch.setattr(p, 'shield', lambda: order.append('shield'))
+
+    def interrupted():
+        order.append('main')
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(p, 'main', interrupted)
+    assert p.run() == 3
+    assert order == ['shield', 'main']
+    assert json.loads(capsys.readouterr().err) == {'error_type': 'KeyboardInterrupt'}
+
+
 def test_run_exits_3_for_incomplete_recovery_and_2_for_other_failures(monkeypatch, capsys):
+    monkeypatch.setattr(p, 'shield', lambda: None)  # never block signals in the test process
+
     def incomplete():
         raise p.RecoveryIncomplete('injected')
 

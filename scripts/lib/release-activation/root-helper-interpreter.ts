@@ -22,6 +22,8 @@ export const ROOT_HELPER_SUDO = '/usr/bin/sudo';
 export const ROOT_HELPER_PYTHON = '/usr/bin/python3';
 /** protected_plist.py's exit status when a failed replacement could not restore and confirm protection. */
 export const ROOT_HELPER_RECOVERY_INCOMPLETE_EXIT = 3;
+/** protected_plist.py's exit status when it refused or failed with the plist as found, protection unchanged. */
+export const ROOT_HELPER_FAILED_AS_FOUND_EXIT = 2;
 export const ROOT_HELPER_OUTDATED =
   'root plist helper missing or outdated; run the install step (docs/runbooks/release-deployment.md)';
 

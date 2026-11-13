@@ -2,8 +2,9 @@
  * The root plist helper as `release:activate --apply` uses it (owner ruling R45):
  * a fixed root-owned install whose digest is pinned in root-helper.json, run as
  * exactly `sudo -n /usr/bin/python3 -I -B <pinned path>`, with a missing or
- * outdated install refused before any live change and an incomplete recovery
- * (helper exit 3) reported as an activation failure.
+ * outdated install refused before any live change, and any helper result but
+ * exit 0 or exit 2 (exit 3, a signal, a timeout, another code) reported as
+ * unconfirmed protection.
  *
  * Tests cannot create root-owned files, so lstat reports one staged plist as
  * root-owned and a fake sudo stands in for the helper.
@@ -104,8 +105,11 @@ function reportRootOwned(target: string): void {
   }) as typeof fs.lstatSync);
 }
 
+/** One fake helper run: its result, and whether it wrote the requested contents first. A bare number writes. */
+type HelperReply = number | { code: number; write: boolean; timedOut?: true };
+
 /** The simulated host, with `/usr/bin/sudo` answered by `sudo` (which writes the requested contents, as the helper would). */
-function withFakeSudo(world: SimulatedLaunchd, exitCodes: number[]): { host: ActivationHost; calls: Array<{ args: readonly string[]; request: Record<string, unknown> }> } {
+function withFakeSudo(world: SimulatedLaunchd, replies: HelperReply[]): { host: ActivationHost; calls: Array<{ args: readonly string[]; request: Record<string, unknown> }> } {
   const base = world.host();
   const calls: Array<{ args: readonly string[]; request: Record<string, unknown> }> = [];
   const host: ActivationHost = {
@@ -114,17 +118,19 @@ function withFakeSudo(world: SimulatedLaunchd, exitCodes: number[]): { host: Act
       if (file !== ROOT_HELPER_SUDO) return base.exec(file, args, options);
       const request = JSON.parse(options?.input ?? '{}') as Record<string, unknown>;
       calls.push({ args, request });
-      writeFileSync(String(request['path']), String(request['contents']));
-      return { code: exitCodes[calls.length - 1] ?? 0, stdout: '', stderr: '' };
+      const raw = replies[calls.length - 1] ?? 0;
+      const reply = typeof raw === 'number' ? { code: raw, write: true } : raw;
+      if (reply.write) writeFileSync(String(request['path']), String(request['contents']));
+      return { code: reply.code, stdout: '', stderr: '', ...(reply.timedOut === true ? { timedOut: true as const } : {}) };
     },
   };
   return { host, calls };
 }
 
-async function applyWithRootOwnedTimer(exitCodes: number[]) {
+async function applyWithRootOwnedTimer(replies: HelperReply[]) {
   reportRootOwned(timerPlist());
   const world = new SimulatedLaunchd(fixture);
-  const { host, calls } = withFakeSudo(world, exitCodes);
+  const { host, calls } = withFakeSudo(world, replies);
   const context = await buildActivationContext(host, parseActivationArgs(activationArgs(fixture, ['--apply'])));
   expect(context.preconditions.filter((entry) => !entry.ok)).toEqual([]);
   const linkBefore = readlinkSync(context.wrapperLink);
@@ -170,6 +176,58 @@ describe('release:activate --apply with a root-owned plist', () => {
     expect(outcome.rollback?.verified).toBe(false);
     expect(outcome.rollback?.steps.at(-1)).toMatchObject({ step: 'confirm-plist-protection', ok: false });
     expect(calls).toHaveLength(2);
+    expect(readFileSync(timerPlist(), 'utf8')).toBe(original);
+  });
+
+  // Opus I-1: only exit 0 with the new bytes and exit 2 (failed as found) say where protection stands.
+  // A signal, a timeout or any other code can stop the helper after it cleared uchg.
+
+  it('treats a helper killed by a signal before its rename as unconfirmed protection (Opus r2)', async () => {
+    vi.mocked(readInstalledRootHelper).mockReturnValue(helperBytes());
+    // The original bytes stay, so the rollback skips the write; protection is still unknown.
+    const { outcome, calls, original } = await applyWithRootOwnedTimer([{ code: 127, write: false }]);
+
+    expect(outcome.outcome).toBe('rollback-unverified');
+    expect(outcome.failure).toMatch(/com\.whatsoup\.aux-timer\.plist: root plist helper ended without confirming protection \(exit 127\)/);
+    expect(outcome.failure).toMatch(/inspect the plist and its uchg flag before any retry/);
+    expect(outcome.rollback?.verified).toBe(false);
+    expect(outcome.rollback?.steps.at(-1)).toMatchObject({ step: 'confirm-plist-protection', ok: false });
+    expect(calls).toHaveLength(1);
+    expect(readFileSync(timerPlist(), 'utf8')).toBe(original);
+  });
+
+  it('treats a helper timeout as unconfirmed protection', async () => {
+    vi.mocked(readInstalledRootHelper).mockReturnValue(helperBytes());
+    const { outcome, calls } = await applyWithRootOwnedTimer([{ code: 127, write: false, timedOut: true }]);
+
+    expect(outcome.outcome).toBe('rollback-unverified');
+    expect(outcome.failure).toMatch(/root plist helper timed out without confirming protection/);
+    expect(outcome.rollback?.verified).toBe(false);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('treats an unknown helper exit code as unconfirmed protection', async () => {
+    vi.mocked(readInstalledRootHelper).mockReturnValue(helperBytes());
+    // Exit 1 is also sudo's own failure, for example when the rule is missing.
+    const { outcome, calls, original } = await applyWithRootOwnedTimer([{ code: 1, write: true }, 0]);
+
+    expect(outcome.outcome).toBe('rollback-unverified');
+    expect(outcome.failure).toMatch(/root plist helper ended without confirming protection \(exit 1\)/);
+    expect(outcome.rollback?.verified).toBe(false);
+    expect(outcome.rollback?.steps.at(-1)).toMatchObject({ step: 'confirm-plist-protection', ok: false });
+    expect(calls).toHaveLength(2);
+    expect(readFileSync(timerPlist(), 'utf8')).toBe(original);
+  });
+
+  it('still verifies the rollback when the helper failed with the plist as found (exit 2)', async () => {
+    vi.mocked(readInstalledRootHelper).mockReturnValue(helperBytes());
+    const { outcome, calls, original } = await applyWithRootOwnedTimer([{ code: 2, write: false }]);
+
+    expect(outcome.outcome).toBe('rolled-back');
+    expect(outcome.failure).toBe('protected plist replacement failed; inspect activation rollback receipt');
+    expect(outcome.rollback?.verified).toBe(true);
+    expect(outcome.rollback?.steps.map((entry) => entry.step)).not.toContain('confirm-plist-protection');
+    expect(calls).toHaveLength(1);
     expect(readFileSync(timerPlist(), 'utf8')).toBe(original);
   });
 });

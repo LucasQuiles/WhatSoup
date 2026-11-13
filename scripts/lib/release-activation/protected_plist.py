@@ -34,6 +34,10 @@ tamper resistance, not a security boundary.
 
 The helper also runs no other program: sudo can keep the caller's PATH, so a
 program named without a path would be one the caller chose, run as root.
+
+The caller can signal its own sudo, which relays the signal, and its resource
+limits carry over. run() therefore blocks the relayed signals and raises the
+CPU limit first; any other interruption re-protects what it can and exits 3.
 """
 import ctypes
 import fcntl
@@ -45,7 +49,9 @@ from pathlib import Path
 import plistlib
 import pwd
 import re
+import resource
 import secrets
+import signal
 import stat
 import sys
 from xml.parsers import expat
@@ -60,6 +66,13 @@ _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 # O_NONBLOCK: opening a FIFO planted under the plist name must not block the helper.
 _PLIST = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 RECOVERY_INCOMPLETE_EXIT = 3
+# Signals the sudo caller can relay to the helper (sudo passes on what it receives), or that a
+# hangup or Ctrl-C sends. Their default action would end the run between clearing uchg and
+# setting it again, with no exit 3.
+RELAYED_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM)
+# CPU seconds the run keeps beyond what it has used: resource limits carry over from the
+# caller, and the kernel kills a process at its hard CPU limit. A normal run needs well under one.
+CPU_SECONDS = 60
 
 # The interpreter's os module has no dir_fd form of rename or unlink and no
 # fchflags or flistxattr on macOS, so these come from libc directly.
@@ -265,28 +278,35 @@ def _restore(folder_fd, name, replaced_fd, original, replacement, before):
     if observed not in (before, dict(before, flags=0)):
         return False
     restore_name, restore_fd = create_temporary(folder_fd, name, original, before)
-    cleared = renamed = False
+    cleared = renamed = protected = False
     try:
         if observed['flags']:
+            cleared = True  # before the call: an interruption right after it must still re-protect
             set_flags(replaced_fd, 0)
-            cleared = True
         rename_in(folder_fd, restore_name, name)
         renamed = True
         if before['flags']:
             set_flags(restore_fd, before['flags'])
+        protected = True
         assert_current(folder_fd, name, restore_fd, original, before)
         return True
     finally:
+        # Best effort on the way out of any failure or interruption; the caller reports it as incomplete.
         if not renamed:
             try:
                 remove_in(folder_fd, restore_name)
-            except OSError:
-                pass  # the failure is reported as incomplete recovery either way
+            except BaseException:
+                pass
             if cleared:
                 try:
                     set_flags(replaced_fd, observed['flags'])
-                except OSError:
+                except BaseException:
                     pass
+        elif not protected and before['flags']:
+            try:
+                set_flags(restore_fd, before['flags'])  # this run's own file, now at the name
+            except BaseException:
+                pass
         os.close(restore_fd)
 
 
@@ -312,11 +332,13 @@ def replace_at(folder_fd, name, expected_sha, replacement, expected_metadata, re
         temporary, temp_fd = create_temporary(folder_fd, name, replacement, before)
         assert_current(folder_fd, name, target, original, before)
         assert_same_folder(folder_fd, reopen_folder)
+        # From the flag clear on, any exception or interruption (run() blocks relayed signals, but
+        # not MemoryError or an injected KeyboardInterrupt) re-protects first and is reported.
         cleared = False
         try:
             if before['flags']:
+                cleared = True  # before the call: an interruption right after it must still re-protect
                 set_flags(target, 0)
-                cleared = True
             assert_current(folder_fd, name, target, original, dict(before, flags=0))
             rename_in(folder_fd, temporary, name)
             replaced = True
@@ -324,9 +346,9 @@ def replace_at(folder_fd, name, expected_sha, replacement, expected_metadata, re
             if cleared:
                 try:
                     set_flags(target, before['flags'])
-                except OSError as exc:
+                except BaseException as exc:
                     raise RecoveryIncomplete('original plist protection could not be restored') from exc
-            raise
+            raise  # protection is back: an Exception means "as found"; run() maps an interruption to exit 3
         try:
             if before['flags']:
                 set_flags(temp_fd, before['flags'])
@@ -335,7 +357,7 @@ def replace_at(folder_fd, name, expected_sha, replacement, expected_metadata, re
         except BaseException as failure:
             try:
                 restored = _restore(folder_fd, name, temp_fd, original, replacement, before)
-            except Exception as exc:
+            except BaseException as exc:
                 raise RecoveryIncomplete('original plist could not be restored') from exc
             if not restored:
                 raise RecoveryIncomplete('plist is not this run\'s file; it was left as found') from failure
@@ -583,9 +605,34 @@ def main():
     print(json.dumps(result))
 
 
+def ensure_cpu_time(seconds=CPU_SECONDS):
+    """Raise, never lower, the CPU limits to `seconds` beyond the time used so far; root may raise a hard limit."""
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    floor = math.ceil(usage.ru_utime + usage.ru_stime) + seconds
+    soft, hard = resource.getrlimit(resource.RLIMIT_CPU)
+
+    def raised(limit):
+        return limit if limit == resource.RLIM_INFINITY or limit >= floor else floor
+
+    if (raised(soft), raised(hard)) != (soft, hard):
+        resource.setrlimit(resource.RLIMIT_CPU, (raised(soft), raised(hard)))
+
+
+def shield():
+    """Hold relayed signals for the rest of the run and keep enough CPU time, so nothing the caller sends ends it mid-change.
+
+    The signals stay blocked until the process exits, which discards them: a
+    run that completes reports its own status. SIGKILL cannot be blocked;
+    activation therefore treats any result but exit 0 or 2 as unconfirmed.
+    """
+    signal.pthread_sigmask(signal.SIG_BLOCK, RELAYED_SIGNALS)
+    ensure_cpu_time()
+
+
 def run():
     """Exit status: 0 replaced, 3 recovery incomplete (the plist may lack protection), 2 refused or failed as found."""
     try:
+        shield()
         main()
     except RecoveryIncomplete as exc:
         print(json.dumps({'error_type': type(exc).__name__}), file=sys.stderr)
@@ -593,6 +640,9 @@ def run():
     except Exception as exc:
         print(json.dumps({'error_type': type(exc).__name__}), file=sys.stderr)
         return 2
+    except BaseException as exc:  # an interruption: whatever re-protection could do is done, but unconfirmed
+        print(json.dumps({'error_type': type(exc).__name__}), file=sys.stderr)
+        return RECOVERY_INCOMPLETE_EXIT
     return 0
 
 
