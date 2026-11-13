@@ -21,6 +21,12 @@ export interface LaunchdPlistRenderOptions {
    */
   claudeConfigDir?: string;
   /**
+   * Optional Claude CLI secure-store selector. An explicit empty string selects
+   * the CLI's generic secure store; a non-empty value is a dedicated absolute
+   * secure-store root. Omission leaves the CLI's selector unset.
+   */
+  claudeSecureStorageConfigDir?: string;
+  /**
    * Absolute directories prepended, in order, ahead of the generating shell's
    * ambient PATH in the rendered service PATH. Owns what used to be hand-patched
    * plist PATH edits (e.g. prepending `~/.local/bin` so a fallback provider
@@ -91,6 +97,17 @@ export function validateLaunchdServiceConfig(
     }
   }
 
+  const claudeSecureStorageConfigDir = block['claudeSecureStorageConfigDir'];
+  if (claudeSecureStorageConfigDir !== undefined) {
+    if (typeof claudeSecureStorageConfigDir !== 'string'
+      || (claudeSecureStorageConfigDir !== '' && !isCleanAbsolutePath(claudeSecureStorageConfigDir))) {
+      return {
+        field: 'service.claudeSecureStorageConfigDir',
+        message: `service.claudeSecureStorageConfigDir must be an empty string or an absolute path of at most ${MAX_PATH_VALUE_LENGTH} characters with no surrounding whitespace or control characters`,
+      };
+    }
+  }
+
   const pathPrepend = block['pathPrepend'];
   if (pathPrepend !== undefined) {
     if (!Array.isArray(pathPrepend)) {
@@ -146,6 +163,9 @@ export function extractLaunchdPlistRenderOptions(
   return {
     ...(typeof block['claudeConfigDir'] === 'string'
       ? { claudeConfigDir: block['claudeConfigDir'] }
+      : {}),
+    ...(typeof block['claudeSecureStorageConfigDir'] === 'string'
+      ? { claudeSecureStorageConfigDir: block['claudeSecureStorageConfigDir'] }
       : {}),
     ...(Array.isArray(block['pathPrepend'])
       ? { pathPrepend: block['pathPrepend'] as string[] }

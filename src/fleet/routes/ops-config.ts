@@ -498,8 +498,9 @@ export function validatePluginDirs(dirs: unknown[], res: ServerResponse): boolea
 }
 
 /**
- * Confine the launchd `service` block's filesystem fields — `claudeConfigDir`
- * and every `pathPrepend` entry — to the instance user's home directory.
+ * Confine the launchd `service` block's filesystem fields — `claudeConfigDir`,
+ * non-empty `claudeSecureStorageConfigDir`, and every `pathPrepend` entry —
+ * to the instance user's home directory.
  *
  * Deliberately a ROUTE guard rather than a rule in
  * `validateLaunchdServiceConfig` (src/lib/launchd-service-config.ts): that
@@ -540,6 +541,15 @@ export function validateServiceHomeConfinement(service: unknown, res: ServerResp
     );
     if (accepted === null) return false;
     block['claudeConfigDir'] = accepted[0];
+  }
+
+  const claudeSecureStorageConfigDir = block['claudeSecureStorageConfigDir'];
+  if (claudeSecureStorageConfigDir !== undefined && claudeSecureStorageConfigDir !== '') {
+    const accepted = validateHomeConfinedPathList(
+      [claudeSecureStorageConfigDir], res, () => 'service.claudeSecureStorageConfigDir',
+    );
+    if (accepted === null) return false;
+    block['claudeSecureStorageConfigDir'] = accepted[0];
   }
 
   const pathPrepend = block['pathPrepend'];

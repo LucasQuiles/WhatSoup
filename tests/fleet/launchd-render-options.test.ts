@@ -40,12 +40,14 @@ describe('resolveLaunchdPlistRenderOptions', () => {
       name: 'phbot',
       service: {
         claudeConfigDir: '/opt/claude-roots/phbot',
+        claudeSecureStorageConfigDir: '',
         pathPrepend: ['/opt/service-bin'],
       },
     });
 
     expect(resolveLaunchdPlistRenderOptions('phbot', root)).toEqual({
       claudeConfigDir: '/opt/claude-roots/phbot',
+      claudeSecureStorageConfigDir: '',
       pathPrepend: ['/opt/service-bin'],
     });
   });

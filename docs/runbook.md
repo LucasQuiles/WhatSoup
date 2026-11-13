@@ -1215,13 +1215,13 @@ done
 
 ```bash
 # 1. Check service is running
-systemctl --user status whatsoup@q
+systemctl --user status whatsoup@agent
 
 # 2. Check WhatsApp connection
 curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9092/health | python3 -c "import sys,json; d=json.load(sys.stdin); print(d)"
 
 # 3. Check logs for the conversation
-journalctl --user -u whatsoup@q -n 50 | grep -E 'ingest|dispatch|session|error'
+journalctl --user -u whatsoup@agent -n 50 | grep -E 'ingest|dispatch|session|error'
 
 # 4. Check if a Claude process is running
 ps aux | grep claude | grep -v grep
@@ -1232,7 +1232,7 @@ sqlite3 ~/.local/share/whatsoup/instances/q/bot.db \
 ```
 
 **Common causes:**
-- Service is stopped — start it: `systemctl --user start whatsoup@q`
+- Service is stopped — start it: `systemctl --user start whatsoup@agent`
 - WhatsApp disconnected — see §5.3
 - Agent session crashed and didn't recover — send any message to spawn a new session
 - Access list blocks the sender — check `access_list` table (see §7.1)
@@ -1629,7 +1629,7 @@ The operation tracker monitors each tool invocation and thinking gap. Stream-jso
 
 ```bash
 # Check for recent stall events in logs
-journalctl --user -u whatsoup@q -n 200 | grep -E 'stall|liveness|interrupt|recovering'
+journalctl --user -u whatsoup@agent -n 200 | grep -E 'stall|liveness|interrupt|recovering'
 
 # Check operation tracker config in use
 grep -A 20 'operationTracker' ~/.config/whatsoup/instances/q/config.json

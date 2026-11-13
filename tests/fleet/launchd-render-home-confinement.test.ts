@@ -58,6 +58,8 @@ describe('assertHomeConfinedRenderOptions — physical render admission', () => 
   it('is a no-op when the block carries neither field', () => {
     expect(() => assertHomeConfinedRenderOptions({}, home)).not.toThrow();
     expect(() => assertHomeConfinedRenderOptions({ pathPrepend: [] }, home)).not.toThrow();
+    expect(assertHomeConfinedRenderOptions({ claudeSecureStorageConfigDir: '' }, home))
+      .toEqual({ claudeSecureStorageConfigDir: '' });
   });
 
   // -- (a) `..` after a symlinked directory ---------------------------------
@@ -127,10 +129,14 @@ describe('assertHomeConfinedRenderOptions — physical render admission', () => 
     )).not.toThrow();
   });
 
-  it.each(['pathPrepend', 'claudeConfigDir'] as const)('refuses a missing intermediate at final %s render admission', (field) => {
+  it.each(['pathPrepend', 'claudeConfigDir', 'claudeSecureStorageConfigDir'] as const)('refuses a missing intermediate at final %s render admission', (field) => {
     const raw = path.join(home, 'not-created-yet', 'bin');
     expect(fs.existsSync(raw)).toBe(false);
-    const options = field === 'pathPrepend' ? { pathPrepend: [raw] } : { claudeConfigDir: raw };
+    const options = field === 'pathPrepend'
+      ? { pathPrepend: [raw] }
+      : field === 'claudeConfigDir'
+        ? { claudeConfigDir: raw }
+        : { claudeSecureStorageConfigDir: raw };
     expect(() => assertHomeConfinedRenderOptions(options, home)).toThrow(LaunchdRenderConfigError);
 
     fs.symlinkSync(path.join(tmpDir, 'nowhere'), path.join(home, 'not-created-yet'));

@@ -574,6 +574,7 @@ config-owned and regeneration-safe:
 ```json
 "service": {
   "claudeConfigDir": "/absolute/path/to/claude-config-root",
+  "claudeSecureStorageConfigDir": "",
   "pathPrepend": ["/absolute/dir/bin"]
 }
 ```
@@ -641,6 +642,7 @@ fails closed on a hand-set `WHATSOUP_PATH_PREPEND` containing one, printing a
 | Field | Type | Rules | Effect |
 |-------|------|-------|--------|
 | `claudeConfigDir` | string | absolute path; no surrounding whitespace or control characters; within the home directory, checked at API admission and again at plist render (see below) | Rendered as `CLAUDE_CONFIG_DIR` so the launchd service context resolves the same dedicated claude-cli config root as interactive use of that root (e.g. an isolated per-bot root such as `$HOME/.claude-<instance>`). Omitted → the key is not rendered. The block governs only which config root the service resolves; it does not create or copy credentials (the CLI keeps those keychain-resident). |
+| `claudeSecureStorageConfigDir` | string | omitted, `""`, or an absolute path with no surrounding whitespace or control characters; a non-empty path must be within the home directory at API admission and plist render | Rendered as `CLAUDE_SECURESTORAGE_CONFIG_DIR`. An explicit empty string is preserved and selects the CLI's generic secure store; omission leaves the selector unset. A non-empty value selects a dedicated secure-store root. Like `claudeConfigDir`, it does not create or copy credentials, and the runtime's credential-store check never writes a store. |
 | `pathPrepend` | string[] | at most 16 entries; each an absolute path without `:` or control characters; each within the home directory, checked at API admission and again at plist render (see below) | Rendered onto **two** surfaces of the same plist: prepended in order ahead of the generating shell's ambient `PATH` in the service `PATH` (e.g. `$HOME/.local/bin` so a fallback provider binary resolves under launchd), **and** joined with `:` into a second governed key `WHATSOUP_PATH_PREPEND`. Omitted or empty → neither surface changes and the plist is byte-identical to the historical render. |
 | `expectedAccountDigest` | string | `sha256:<64 lowercase hex>` exactly, produced by `npm run --silent claude-account-digest` (the `--silent` matters — see the capture procedure); agent instances with `agentOptions.provider` `claude-cli` (the default) only — rejected elsewhere | Not a render key (never reaches the plist; applies on every platform). The ratified account identity the runtime verifies against; see [Ratified account identity](#ratified-account-identity-serviceexpectedaccountdigest). A raw email or organization id is rejected at admission on every path (create / PATCH / load / discovery). Omitted → verification disabled (one info log line at the first probe). |
 
@@ -663,9 +665,10 @@ the mode comes from the file it points to; the rename replaces the link itself
 and leaves that file untouched. A first install with no plist present creates
 the file at `0644` under the user's umask.
 
-Home-confinement of the two filesystem fields is enforced at two call sites. At
+Home-confinement of the filesystem fields is enforced at two call sites. At
 API admission (`POST /api/lines` and `PATCH /api/lines/:name/config` in
-`src/fleet/routes/ops.ts`) a `claudeConfigDir` or a `pathPrepend` entry
+`src/fleet/routes/ops.ts`) a `claudeConfigDir`, non-empty
+`claudeSecureStorageConfigDir`, or a `pathPrepend` entry
 resolving outside the instance user's home directory is refused with a `400`. At
 plist RENDER admission (`assertHomeConfinedRenderOptions` in
 `src/fleet/platform.ts`, on both the reconcile and the first-install paths) the
@@ -2858,4 +2861,4 @@ Agent and passive instances only need `openai` for the cloud transcription layer
 is absent, voice note transcription silently degrades — the agent receives the file path
 instead of transcribed text.
 
-For mwlab host-specific Pinecone/transcription setup, see `docs/runbooks/mwlab-transcription-pinecone.md`.
+For host-specific Pinecone/transcription setup, use the deployment's operator runbook.

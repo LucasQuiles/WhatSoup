@@ -147,8 +147,8 @@ interface InstanceConfig {
     serviceUid?: number;
     workerUid?: number;
   };
-  // Governed launchd service render options (config-owned CLAUDE_CONFIG_DIR +
-  // PATH prepend) and the ratified account-identity digest. Validated on every
+  // Governed launchd service render options (config-owned Claude config and
+  // secure-store selectors plus PATH prepend) and the ratified account-identity digest. Validated on every
   // path (create/patch/load) by validateLaunchdServiceConfig /
   // validateServiceIdentityConfig (core/agent-config-validator.ts); CREATE
   // passes it through PASSTHROUGH_FIELDS (#3401).
