@@ -71,7 +71,13 @@ import {
 } from './auth-disconnect-policy.ts';
 import type { DisconnectClassification, DisconnectDecisionRecord } from '../lib/disconnect-classification.ts';
 import { isBaileysEncryptedTmpEnoent } from './baileys-media-errors.ts';
-import { AuthBondGuard, type AuthBondSnapshot } from './auth-bond.ts';
+import {
+  AuthBondCaptureAbortedError,
+  AuthBondGuard,
+  type AuthBondCaptureResult,
+  type AuthBondSnapshot,
+  type AuthBondTreeProvenance,
+} from './auth-bond.ts';
 import { createAtomicCredsSaver } from './atomic-auth-save.ts';
 import { installThirdPartyConsoleRedaction, SENSITIVE_KEY_RE } from './third-party-console-redaction.ts';
 import { jidPattern } from '../lib/redaction-patterns.ts';
@@ -242,7 +248,38 @@ export interface CredentialLifecycleEvent {
   lastCaptureDeferredReason?: string | null;
   lastCaptureDeferredAgeMs?: number | null;
   lastRestoreError?: string | null;
+  /** Where this record's auth-bond tree digest came from; see AuthBondTreeSource. */
+  authBondTreeSource?: AuthBondTreeSource;
+  /** Age of that digest at record time in ms; 0 for a walk taken for the record, null when none exists. */
+  authBondTreeAgeMs?: number | null;
   note?: string;
+}
+
+/**
+ * Freshness of the auth-bond tree digest on a routine record (#3677).
+ *
+ * 'live'    — inspect() walked the tree on this thread for the record.
+ * 'capture' — the live inspection a captureAsync() run finished with.
+ * 'cached' | 'stale' | 'absent' — AuthBondTreeProvenance.source, served by
+ *   inspectCached(). Routine records take this form so they never walk the
+ *   tree on the event loop; 'stale' and 'absent' say the digest is not current.
+ */
+export type AuthBondTreeSource = 'live' | 'capture' | AuthBondTreeProvenance['source'];
+
+interface AuthBondTreeFreshness {
+  source: AuthBondTreeSource;
+  ageMs: number | null;
+}
+
+/**
+ * Read freshness off the snapshot itself. inspectCached() always attaches
+ * treeProvenance and inspect() never does, so a snapshot without it is a walk
+ * taken for this record and `walk` names which kind.
+ */
+function authBondTreeFreshness(snapshot: AuthBondSnapshot, walk: 'live' | 'capture'): AuthBondTreeFreshness {
+  const provenance = snapshot.treeProvenance;
+  if (provenance) return { source: provenance.source, ageMs: provenance.ageMs };
+  return { source: walk, ageMs: 0 };
 }
 
 export interface CredentialLifecycleEnvironment {
@@ -678,6 +715,14 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private authSnapshotFailureCount = 0;
   private authSnapshotSettledTimer: ReturnType<typeof setTimeout> | null = null;
   private lastSettledAuthSnapshotAttemptAt: number | null = null;
+  /**
+   * The handling of the most recent capture, and the guard promise it handles.
+   * The guard hands every mid-flight caller the same queued re-run, so a
+   * repeat of `authSnapshotCaptureSource` is a coalesced trigger whose result
+   * is already being handled once.
+   */
+  private authSnapshotCapture: Promise<void> | null = null;
+  private authSnapshotCaptureSource: Promise<AuthBondCaptureResult> | null = null;
   private credentialLifecycleEvents: CredentialLifecycleEvent[] = [];
   private readonly authBond = new AuthBondGuard({
     authDir: config.authDir,
@@ -981,7 +1026,18 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.log.info('Connecting to WhatsApp');
 
     try {
-      const restore = this.authBond.restoreLatestIfNeeded();
+      let restore = this.authBond.restoreLatestIfNeeded();
+      // A restore never interleaves with a capture (#3677): the guard withholds
+      // one while a capture is in flight. Only a restore that is actually
+      // needed pays for that. The capture still running from the previous
+      // socket is cancelled rather than awaited, because a capture can take far
+      // longer than a reconnect should wait and the next open captures again;
+      // cancelling leaves latest.json valid. Then the restore runs once more.
+      if (restore.deferred === true && this.authBond.isCaptureInFlight()) {
+        await this.authBond.cancelCaptures();
+        if (this.shuttingDown) return;
+        restore = this.authBond.restoreLatestIfNeeded();
+      }
       if (restore.restored) {
         this.recordCredentialLifecycle('auth_restore_succeeded', {
           authBond: restore.snapshot,
@@ -1025,6 +1081,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         return;
       }
 
+      // Live on purpose: this read gates activation (defer and reconnect, or page and load auth state).
       const preflight = this.authBond.inspect();
 
       // The SECOND read, and it needs the same gate as the first.
@@ -1409,6 +1466,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.persistConnectionRuntimeState('shutdown');
     this.clearReconnectTimers();
     this.clearAuthSnapshotSettledTimer();
+    // Closed first, so no capture starts after shutdown begins; awaited last,
+    // so the socket is not held open while a capture removes its staging.
+    const capturesClosed = this.authBond.closeCaptures();
     this.stopKeepalive();
     // Clear poll vote grace timers to prevent post-shutdown emissions
     this.pollVoteDecryptor.dispose();
@@ -1423,6 +1483,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.sock = null;
     }
     this.clearIdentity();
+    await capturesClosed;
   }
 
   private recordCredentialLifecycle(
@@ -1437,9 +1498,12 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       note?: string;
       baileysVersion?: string;
       authBond?: AuthBondSnapshot;
+      /** Which walk produced a snapshot that carries no treeProvenance. Default 'live'. */
+      authBondWalk?: 'live' | 'capture';
     } = {},
   ): void {
     const authBond = options.authBond;
+    const freshness = authBond ? authBondTreeFreshness(authBond, options.authBondWalk ?? 'live') : null;
     const entry: CredentialLifecycleEvent = {
       at: new Date().toISOString(),
       event,
@@ -1480,6 +1544,10 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       entry.lastCaptureDeferredAgeMs = authBond.backup.lastCaptureDeferredAgeMs;
       entry.lastRestoreError = authBond.backup.lastRestoreError;
     }
+    if (freshness) {
+      entry.authBondTreeSource = freshness.source;
+      entry.authBondTreeAgeMs = freshness.ageMs;
+    }
 
     this.credentialLifecycleEvents.push(entry);
     if (this.credentialLifecycleEvents.length > ConnectionManager.CREDENTIAL_LIFECYCLE_EVENT_LIMIT) {
@@ -1488,7 +1556,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         this.credentialLifecycleEvents.length - ConnectionManager.CREDENTIAL_LIFECYCLE_EVENT_LIMIT,
       );
     }
-    this.persistBondEvent(entry);
+    this.persistBondEvent(entry, authBond, freshness);
   }
 
   private sanitizeLifecycleEventForBondEvent(event: CredentialLifecycleEvent): Record<string, unknown> {
@@ -1522,15 +1590,19 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       lastCaptureDeferredReason: event.lastCaptureDeferredReason ?? null,
       lastCaptureDeferredAgeMs: event.lastCaptureDeferredAgeMs ?? null,
       lastRestoreError: event.lastRestoreError ? redactDiagnosticString(event.lastRestoreError) : null,
+      authBondTreeSource: event.authBondTreeSource ?? null,
+      authBondTreeAgeMs: event.authBondTreeAgeMs ?? null,
       notePresent: event.note !== undefined,
       noteHash: event.note ? shortHash(event.note, 20) : null,
     };
   }
 
-  private authBondEventDigest(snapshot: AuthBondSnapshot): Record<string, unknown> {
+  private authBondEventDigest(snapshot: AuthBondSnapshot, tree: AuthBondTreeFreshness): Record<string, unknown> {
     return {
       status: snapshot.status,
       issues: snapshot.issues.map(redactAuthBondIssue),
+      treeSource: tree.source,
+      treeAgeMs: tree.ageMs,
       authRoot: {
         pathHash: shortHash(snapshot.authDir.path, 20),
         exists: snapshot.authDir.exists,
@@ -1575,11 +1647,19 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     };
   }
 
-  private persistBondEvent(entry: CredentialLifecycleEvent): void {
+  private persistBondEvent(
+    entry: CredentialLifecycleEvent,
+    recordSnapshot: AuthBondSnapshot | undefined,
+    recordFreshness: AuthBondTreeFreshness | null,
+  ): void {
     if (!config.dataRoot) return;
 
     try {
-      const authBond = this.authBond.inspect();
+      // Runs on every lifecycle record, so it never walks the tree itself
+      // (#3677): it reuses the record's own observation, and a record that has
+      // none gets the cached digest with its provenance.
+      const authBond = recordSnapshot ?? this.authBond.inspectCached();
+      const tree = recordFreshness ?? authBondTreeFreshness(authBond, 'live');
       const payload = {
         version: 1,
         eventId: shortHash(`${entry.at}:${config.botName}:${process.pid}:${entry.event}:${this.credentialLifecycleEvents.length}`, 24),
@@ -1611,7 +1691,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           stateRootHash: config.stateRoot ? shortHash(config.stateRoot, 20) : null,
           dataRootHash: config.dataRoot ? shortHash(config.dataRoot, 20) : null,
           metadataClass: authBond.status,
-          bond: this.authBondEventDigest(authBond),
+          bond: this.authBondEventDigest(authBond, tree),
         },
         connection: {
           state: entry.state,
@@ -1743,7 +1823,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     };
   }
 
-  private getCredentialLifecycleSnapshot(authBond = this.authBond.inspect()): CredentialLifecycleSnapshot {
+  private getCredentialLifecycleSnapshot(authBond: AuthBondSnapshot): CredentialLifecycleSnapshot {
     return {
       version: 1,
       redaction: {
@@ -1935,7 +2015,10 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   ): void {
     if (!config.dataRoot) return;
 
-    const authBond = this.authBond.inspect();
+    // A diagnostic sidecar written on every connect, open, close, reconnect and
+    // creds update: the cached digest, with its age, never a live walk (#3677).
+    const authBond = this.authBond.inspectCached();
+    const tree = authBondTreeFreshness(authBond, 'live');
     const payload = {
       version: 1,
       updatedAt: new Date().toISOString(),
@@ -1991,6 +2074,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         credsHash: shortHashOrNull(authBond.creds.sha256),
         identityHash: authBond.meHash,
         treeHash: shortHashOrNull(authBond.treeHash),
+        treeSource: tree.source,
+        treeAgeMs: tree.ageMs,
         fileCount: authBond.fileCount,
         totalBytes: authBond.totalBytes,
         latestBackupAt: authBond.backup.latestAt,
@@ -2039,14 +2124,17 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           this.clearAuthSnapshotSettledTimer();
           this.lastCredsUpdateAt = Date.now();
           this.credsUpdateCount += 1;
-          this.recordCredentialLifecycle('creds_update_saved', { authBond: this.authBond.inspect() });
+          // Routine record (#3677): creds.json is read live by the cheap half;
+          // the tree digest is the cached one, which the saver's commit hook
+          // has just marked stale, and the record says so.
+          this.recordCredentialLifecycle('creds_update_saved', { authBond: this.authBond.inspectCached() });
           this.persistConnectionRuntimeState('creds_update_saved');
           this.log.info('Credentials saved');
           this.scheduleSettledAuthBondSnapshot('creds-update-settled');
         } catch (err) {
           this.lastCredsUpdateFailedAt = Date.now();
           this.recordCredentialLifecycle('creds_update_failed', {
-            authBond: this.authBond.inspect(),
+            authBond: this.authBond.inspectCached(),
             note: errorMessage(err),
           });
           this.persistConnectionRuntimeState('creds_update_failed');
@@ -2432,6 +2520,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (qr) {
       // QR code means auth state is missing — the auth CLI must be run separately
       this.lastQrAt = Date.now();
+      // Live on purpose: this snapshot decides the local auth-bond page and its recoverability class.
       const snapshot = this.authBond.inspect();
       this.recordCredentialLifecycle('qr_required', { authBond: snapshot });
       this.emitLocalAuthBondFailureAlert('qr-required', snapshot);
@@ -2492,8 +2581,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.approvedOperationDispatcher?.start();
       this.lastOpenAt = Date.now();
       this.startKeepalive(sock);
-      this.captureAuthBondSnapshot('connection-open');
-      this.recordCredentialLifecycle('connection_open', { authBond: this.authBond.inspect() });
+      void this.captureAuthBondSnapshot('connection-open');
+      // The capture above takes its live walk off the loop and records it as
+      // 'capture' when it settles. This record is written now, from the cache,
+      // with the digest's provenance on it (#3677).
+      this.recordCredentialLifecycle('connection_open', { authBond: this.authBond.inspectCached() });
       // Start the first off-thread walk now rather than letting the earliest
       // health poll be the one to find an empty cache.
       void this.authBond.warmTreeCache();
@@ -2554,7 +2646,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         reconnectDecision,
         disconnectClassification: this.lastDisconnectDecision.classification,
         lastDisconnectDiagnostic: this.lastDisconnectDiagnostic,
-        authBond: this.authBond.inspect(),
+        // Routine record: the reconnect decision above is made from the status
+        // code, not from this snapshot, so the cached digest serves (#3677).
+        authBond: this.authBond.inspectCached(),
       });
       this.persistConnectionRuntimeState('connection_close');
 
@@ -2614,6 +2708,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
     const decision = this.lastDisconnectDecision;
     const confirmedRemoval = decision?.classification === 'confirmed_device_removed';
+    // Live on purpose: the evidence an operator relinks on; once per logout, never on a routine path.
     const authBond = this.authBond.inspect();
     this.recordCredentialLifecycle('device_bond_lost', {
       statusCode,
@@ -2688,19 +2783,20 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           : `PHYSICAL INTERVENTION REQUIRED: whatsoup@${config.botName} parked after an unconfirmed WhatsApp 401 logout`,
         evidence,
         'critical',
-        this.deviceBondLostCriticalAsset(statusCode, reason, decision),
+        this.deviceBondLostCriticalAsset(statusCode, reason, decision, lifecycle),
       );
     } catch (err) {
       this.log.error({ err }, 'failed to enqueue WhatsApp device bond lost alert');
     }
   }
 
+  /** Built from the alert's own lifecycle snapshot, so the asset and the evidence describe one walk. */
   private deviceBondLostCriticalAsset(
     statusCode: number | undefined,
     reason: string,
     decision: DisconnectDecisionRecord | null,
+    lifecycle: CredentialLifecycleSnapshot,
   ): BotErrorsCriticalAssetDiagnostic {
-    const lifecycle = this.getCredentialLifecycleSnapshot();
     return {
       asset: {
         kind: 'whatsapp_linked_device',
@@ -2737,13 +2833,41 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     };
   }
 
-  private captureAuthBondSnapshot(reason: string): void {
-    const result = this.authBond.capture(reason);
+  /**
+   * Start a capture off the event loop and handle its result once. Never
+   * rejects, so callers may `void` it.
+   */
+  private captureAuthBondSnapshot(reason: string): Promise<void> {
+    if (this.shuttingDown) return Promise.resolve();
+    const capture = this.authBond.captureAsync(reason);
+    if (capture === this.authSnapshotCaptureSource && this.authSnapshotCapture !== null) {
+      return this.authSnapshotCapture;
+    }
+    const handled = capture
+      .then((result) => {
+        // A capture cannot outlive the connection: a result that lands after
+        // shutdown began is not reported.
+        if (!this.shuttingDown) this.recordAuthBondCaptureResult(reason, result);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof AuthBondCaptureAbortedError) {
+          this.log.debug({ reason, error: err.message }, 'auth bond snapshot cancelled');
+          return;
+        }
+        this.log.error({ err, reason }, 'auth bond snapshot handling failed');
+      });
+    this.authSnapshotCaptureSource = capture;
+    this.authSnapshotCapture = handled;
+    return handled;
+  }
+
+  private recordAuthBondCaptureResult(reason: string, result: AuthBondCaptureResult): void {
     if (result.ok) {
       this.lastAuthSnapshotAt = Date.now();
       this.authSnapshotCaptureCount += 1;
       this.recordCredentialLifecycle('auth_snapshot_captured', {
         authBond: result.snapshot,
+        authBondWalk: 'capture',
         note: result.captured ? result.path ?? 'captured' : result.path ? `reused:${result.path}` : 'unchanged',
       });
       if (result.captured) {
@@ -2754,6 +2878,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (result.deferred) {
       this.recordCredentialLifecycle('auth_snapshot_skipped', {
         authBond: result.snapshot,
+        authBondWalk: 'capture',
         note: result.error ?? 'credential-write-in-flight',
       });
       // Two conditions defer a capture now — a credential write still in
@@ -2766,6 +2891,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.authSnapshotFailureCount += 1;
     this.recordCredentialLifecycle('auth_snapshot_failed', {
       authBond: result.snapshot,
+      authBondWalk: 'capture',
       note: result.error ?? 'unknown',
     });
     this.log.error({ error: result.error, reason }, 'auth bond snapshot failed');
@@ -2867,8 +2993,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (this.shuttingDown || this.loggedOutAlertEmitted) return;
     if (this.connectionState !== 'connected' || !this.sock) return;
 
+    // Fires per settled send and key-material batch: the cached digest, never a live walk (#3677).
     this.recordCredentialLifecycle('auth_snapshot_scheduled', {
-      authBond: this.authBond.inspect(),
+      authBond: this.authBond.inspectCached(),
       note: reason,
     });
 
@@ -2883,15 +3010,16 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         && now - this.lastSettledAuthSnapshotAttemptAt < ConnectionManager.AUTH_BOND_SETTLED_SNAPSHOT_MIN_INTERVAL_MS
       ) {
         this.recordCredentialLifecycle('auth_snapshot_skipped', {
-          authBond: this.authBond.inspect(),
+          authBond: this.authBond.inspectCached(),
           note: 'settled-snapshot-min-interval',
         });
         return;
       }
 
       this.lastSettledAuthSnapshotAttemptAt = now;
-      this.captureAuthBondSnapshot(reason);
-      this.persistConnectionRuntimeState('auth_snapshot_settled');
+      void this.captureAuthBondSnapshot(reason).then(() => {
+        if (!this.shuttingDown) this.persistConnectionRuntimeState('auth_snapshot_settled');
+      });
     }, ConnectionManager.AUTH_BOND_SETTLED_SNAPSHOT_DELAY_MS);
     this.authSnapshotSettledTimer.unref?.();
   }
@@ -2942,6 +3070,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (!this.localAuthAlertEmitted) return;
     if (this.connectionState !== 'connected' || this.botJid === null) return;
 
+    // Live on purpose: this snapshot is the proof that clears an accepted incident; a stale digest would fail it open.
     const snapshot = this.authBond.inspect();
     if (!this.isVerifiedLocalAuthSnapshot(snapshot)) return;
 
