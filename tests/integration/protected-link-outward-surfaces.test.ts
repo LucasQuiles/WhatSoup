@@ -33,6 +33,11 @@ import { registerMediaTools } from '../../src/mcp/tools/media.ts';
 import { registerMessagingTools } from '../../src/mcp/tools/messaging.ts';
 import { registerSchedulingTools } from '../../src/mcp/tools/scheduling.ts';
 import { MessageScheduler } from '../../src/core/scheduler.ts';
+import { registerSubstrateTools } from '../../src/mcp/tools/substrate.ts';
+import { createBead } from '../../src/core/substrate/beads.ts';
+import { writeBeadEvent } from '../../src/core/substrate/events.ts';
+import { createTrigger } from '../../src/core/substrate/triggers.ts';
+import { TriggerPoller } from '../../src/core/substrate/poller.ts';
 import { registerSearchTools } from '../../src/mcp/tools/search.ts';
 import { dispatchTurnRecoveryReplayForJob } from '../../src/runtimes/agent/turn-recovery-dispatch.ts';
 import { sharedRuntimeApplicationContext } from '../../src/runtimes/agent/turn-provider-text.ts';
@@ -236,6 +241,22 @@ function insertScheduledText(target: Database): void {
     INSERT INTO scheduled_messages (chat_jid, chat_name, content_type, payload, scheduled_at, status, error)
     VALUES (?, ?, 'text', ?, ?, 'pending', ?)
   `).run(GROUP_JID, GROUP_NAME, JSON.stringify({ text: CONTENT }), due, CONTENT);
+}
+
+/** One agent-job bead whose stored title and body carry the link. */
+function seedBead(target: Database): number {
+  return createBead(target.raw, {
+    kind: 'agent_job', title: `Job ${LINK}`, body: CONTENT, ownerJid: SELF, actor: SELF,
+  }).id;
+}
+
+async function substrateTool(target: Database, name: string, params: Record<string, unknown>): Promise<unknown> {
+  const registry = new ToolRegistry();
+  registerSubstrateTools(registry, {
+    db: target.raw, instanceName: SELF, dbWrapper: target, adminPhones: new Set<string>(),
+  } as never);
+  const result = await registry.call(name, params, { tier: 'global' });
+  return JSON.parse(result.content[0].text);
 }
 
 interface SurfaceCase {
@@ -478,6 +499,50 @@ const SURFACES: SurfaceCase[] = [
     }),
     // The stored reason proves the refusal ran; the leak checks prove nothing was sent.
     mustContain: 'protected_link_send_refused',
+  },
+  {
+    surface: 'list_beads tool (title and body)',
+    probe: () => withScratchDb((scratch) => {
+      seedBead(scratch);
+      return substrateTool(scratch, 'list_beads', {});
+    }),
+  },
+  {
+    surface: 'get_bead tool (bead and its events)',
+    probe: () => withScratchDb((scratch) => substrateTool(scratch, 'get_bead', { id: seedBead(scratch) })),
+  },
+  {
+    surface: 'get_activity tool (bead event payloads)',
+    probe: () => withScratchDb((scratch) => {
+      writeBeadEvent(scratch.raw, { beadId: seedBead(scratch), eventType: 'note', actor: SELF, payload: { note: CONTENT } });
+      return substrateTool(scratch, 'get_activity', {});
+    }),
+  },
+  {
+    surface: 'scheduled agent job dispatch (synthetic turn prompt and title)',
+    probe: () => withScratchDb(async (scratch) => {
+      const now = Math.floor(Date.now() / 1000);
+      createTrigger(scratch.raw, {
+        beadId: seedBead(scratch), kind: 'schedule.at_time', spec: { fire_at: now },
+        reportChatJid: DM_JID, nextFireAt: now, actor: SELF,
+      });
+      const dispatched: unknown[] = [];
+      const sent: unknown[] = [];
+      const poller = new TriggerPoller(scratch.raw, {
+        sendMessage: async (jid: string, text: string) => { sent.push({ jid, text }); return { waMessageId: null }; },
+        sendMedia: async () => { throw new Error('unexpected media send'); },
+      } as never, {
+        now: () => now,
+        agentJobDispatch: (job) => { dispatched.push(job); return { dispatched: true }; },
+      });
+      try {
+        expect(await poller.tickOnce()).toBe(1);
+      } finally {
+        poller.stop();
+      }
+      expect(dispatched).toHaveLength(1);
+      return { dispatched, sent };
+    }),
   },
   {
     // Last row: it adds an audio message the rows above must not read.
