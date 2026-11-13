@@ -423,6 +423,18 @@ describe('sanitizing log hook wiring (WS-A06)', () => {
     expect(installedHook(pinoFactory)).toBeTypeOf('function');
   });
 
+  it.each([
+    ['stdout-only', undefined],
+    ['file-transport', '/tmp/ws-a06-stream-write'],
+  ] as const)('installs the final-line streamWrite sanitizer on the %s construction path', async (_path, logDir) => {
+    const transport: MockTransport = { end: vi.fn(), on: vi.fn() };
+    const { pinoFactory } = await importLoggerWithMockedPino({ logDir, transport });
+    const options = pinoFactory.mock.calls[0]?.[0] as { hooks?: { streamWrite?: unknown } } | undefined;
+    const { sanitizingStreamWrite } = await import('../src/lib/log-line-sanitizer.ts');
+
+    expect(options?.hooks?.streamWrite).toBe(sanitizingStreamWrite);
+  });
+
   it('the installed hook redacts sensitive keys before the payload reaches the sink', async () => {
     const { pinoFactory } = await importLoggerWithMockedPino({ logDir: undefined });
     const hook = installedHook(pinoFactory);

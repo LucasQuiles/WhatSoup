@@ -85,6 +85,9 @@ URL_USERINFO_RE = re.compile(r"\b([a-z][a-z0-9+.-]{0,30}://)[^\s/@:]+:[^\s/@]+@"
 # APPROVED_LINK_HOST_SHA256 in src/core/protected-delivery-pins.ts; the parity
 # fixture tests/fixtures/protected-link-parity-corpus.json pins the behaviour.
 PROTECTED_MESSAGE_MARKER = "[protected managed link]"
+# Replaces a whole text past a scan bound; mirrors PROTECTED_TEXT_WITHHELD_MARKER
+# in src/lib/protected-link-text.ts and contains the marker.
+PROTECTED_TEXT_WITHHELD_MARKER = "[protected managed link] text withheld"
 PROTECTED_LINK_HOST_SHA256 = frozenset({
     "5f91b5911802673da6a4d8a09a7c8effef8a020ce1a1b6672b42b101d71b7844",
     "8cb10c0438f97f3dfd2a7bf25d4fcd06c1b912b5cc188ef1a960fe22189c7c5a",
@@ -203,15 +206,18 @@ def _protected_fragment_end(text: str, start: int) -> int:
     end = start
     while end < limit and _is_fragment_character(text[end]):
         end += 1
-    # A fragment that reaches the bound cannot be split safely; drop the tail.
-    return len(text) if end == limit and limit < len(text) else end
+    # A fragment that reaches the bound before the text ends cannot be split
+    # safely; -1 tells the caller to withhold the whole text.
+    return -1 if end == limit and limit < len(text) else end
 
 
 def sanitize_protected_link_text(value: str, link_host_sha256: frozenset[str] | None = None) -> str:
     """Replace every pinned protected link with the stable marker.
 
     Linear in the text: the scan anchors on each `#` and walks back a bounded
-    distance. Past the per-text link bound the uninspected tail is dropped.
+    distance. Past a scan bound (more than 128 links, or a fragment that
+    reaches its bound before the text ends) the whole text becomes
+    PROTECTED_TEXT_WITHHELD_MARKER: it is never truncated.
     """
     pins = PROTECTED_LINK_HOST_SHA256 if link_host_sha256 is None else link_host_sha256
     cursor = 0
@@ -219,13 +225,15 @@ def sanitize_protected_link_text(value: str, link_host_sha256: frozenset[str] | 
     sanitized: str | None = None
     match = _next_protected_link(value, 0, pins)
     while match is not None:
+        if redactions == _MAX_PROTECTED_LINKS_PER_TEXT:
+            return PROTECTED_TEXT_WITHHELD_MARKER
         start, fragment_start = match
         end = _protected_fragment_end(value, fragment_start)
+        if end == -1:
+            return PROTECTED_TEXT_WITHHELD_MARKER
         sanitized = f"{sanitized or ''}{value[cursor:start]}{PROTECTED_MESSAGE_MARKER}"
         cursor = end
         redactions += 1
-        if redactions >= _MAX_PROTECTED_LINKS_PER_TEXT or end == len(value):
-            return sanitized
         match = _next_protected_link(value, cursor, pins)
     return value if sanitized is None else f"{sanitized}{value[cursor:]}"
 

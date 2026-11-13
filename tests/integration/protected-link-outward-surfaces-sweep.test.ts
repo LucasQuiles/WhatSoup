@@ -168,19 +168,64 @@ function feedLine(line: Record<string, unknown>): unknown {
   });
 }
 
+/** A child of a row's value that must carry the marker (or `mustContain`) on its own. */
+type ChildCheck = ((value: never) => unknown) | { pick: (value: never) => unknown; mustContain: string };
+
 interface SurfaceCase {
   surface: string;
   probe: () => unknown | Promise<unknown>;
   mustContain?: string;
+  /**
+   * One row per named child: each child needs its own positive check, so a
+   * child the probe dropped or never reached fails its row.
+   */
+  children?: Record<string, ChildCheck>;
   /** Runs after the leak checks, so a leak is always the first reported failure. */
   verify?: (value: never) => void;
 }
 
+const bodyLine = (prefix: string) => (value: { body: string }): string | undefined =>
+  value.body.split('\n').find((line) => line.startsWith(prefix));
+
+/** Every `{type:'Buffer', data}` leaf of a parsed tool result, decoded as UTF-8. */
+function decodedBufferLeaves(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap(decodedBufferLeaves);
+  if (value === null || typeof value !== 'object') return [];
+  const record = value as Record<string, unknown>;
+  if (record['type'] === 'Buffer' && Array.isArray(record['data'])) {
+    return [Buffer.from(record['data'] as number[]).toString('utf8')];
+  }
+  return Object.values(record).flatMap(decodedBufferLeaves);
+}
+
+/** Baileys rc13 newsletterFetchMessages: the raw iq node, message text as a protobuf `plaintext` Buffer. */
+function newsletterIqNode(text: string): unknown {
+  const plaintext = Buffer.concat([Buffer.from([0x0a, Buffer.byteLength(text)]), Buffer.from(text)]);
+  return {
+    tag: 'iq',
+    attrs: { type: 'result' },
+    content: [{
+      tag: 'message_updates',
+      content: [{
+        tag: 'messages',
+        content: [{ tag: 'message', attrs: { server_id: '101' }, content: [{ tag: 'plaintext', content: plaintext }] }],
+      }],
+    }],
+  };
+}
+
 const SURFACES: SurfaceCase[] = [
   {
-    surface: 'get_profile tool (entity name, metadata, alias and observation)',
+    surface: 'get_profile tool',
     probe: () => withScratchDb((scratch) =>
       substrateTool(scratch, 'get_profile', { entity_ref: { entity_id: seedEntity(scratch) } })),
+    children: {
+      'entity name': (value: { entity: { canonical_name: string } }) => value.entity.canonical_name,
+      'entity metadata': (value: { entity: { metadata_json: string } }) => value.entity.metadata_json,
+      alias: (value: { aliases: Array<{ alias: string }> }) => value.aliases[0]?.alias,
+      'alias source': (value: { aliases: Array<{ source: string }> }) => value.aliases[0]?.source,
+      observation: (value: { observations: Array<{ text: string }> }) => value.observations[0]?.text,
+    },
   },
   {
     surface: 'list_entities tool (entity name and metadata)',
@@ -225,30 +270,67 @@ const SURFACES: SurfaceCase[] = [
       schema: z.object({}),
       call: async () => ({ subject: GROUP_NAME, participants: [{ notify: SENDER }], desc: CONTENT }),
     }).handler({}, {} as never, undefined),
+    children: {
+      subject: (value: { subject: string }) => value.subject,
+      'participant name': (value: { participants: Array<{ notify: string }> }) => value.participants[0]?.notify,
+      description: (value: { desc: string }) => value.desc,
+    },
   },
   {
-    surface: 'list_groups tool (remote group subject and description)',
+    surface: 'list_groups tool',
     probe: () => sockTool(registerGroupTools as never, {
       groupFetchAllParticipating: async () => ({ [GROUP_JID]: { id: GROUP_JID, subject: GROUP_NAME, desc: CONTENT } }),
     }, 'list_groups', {}),
+    children: {
+      'remote group subject': (value: { groups: Array<{ subject: string }> }) => value.groups[0]?.subject,
+      'remote group description': (value: { groups: Array<{ desc: string }> }) => value.groups[0]?.desc,
+    },
   },
   {
-    surface: 'newsletter_fetch_messages tool (remote message text)',
+    surface: 'list_groups tool, rejected remote call (application error text)',
+    probe: async () => {
+      const registry = new ToolRegistry();
+      registerGroupTools((() => ({
+        groupFetchAllParticipating: async () => { throw new Error(`remote metadata failed for ${LINK}`); },
+      })) as never, (tool) => registry.register(tool));
+      return registry.call('list_groups', {}, { tier: 'global' });
+    },
+    verify: (value: { isError?: boolean; content: Array<{ text: string }> }) => {
+      expect(value.isError).toBe(true);
+      expect(value.content[0]!.text).toContain('remote metadata failed for');
+    },
+  },
+  {
+    surface: 'newsletter_fetch_messages tool (Baileys iq node, protobuf plaintext Buffer)',
     probe: () => sockTool(registerNewsletterTools as never, {
-      newsletterFetchMessages: async () => [{ message: { conversation: CONTENT } }],
+      newsletterFetchMessages: async () => newsletterIqNode(`see ${LINK}`),
     }, 'newsletter_fetch_messages', { jid: '120363000000000000@newsletter', count: 1 }),
+    verify: (value: unknown) => {
+      for (const leaf of decodedBufferLeaves(value)) expect(leaf).not.toContain(TEST_LINK_HOST.slice(0, 6));
+    },
   },
   {
     surface: 'knowledge search entity formatter',
     probe: () => formatEntityResults(parseHits(KNOWLEDGE_HITS)),
   },
   {
-    surface: 'knowledge search text formatter (source and summary)',
+    surface: 'knowledge search text formatter',
     probe: () => formatTextResults(parseHits(KNOWLEDGE_HITS)),
+    children: {
+      source: (value: string) => value.split('\n')[0],
+      summary: (value: string) => value.split('\n')[1],
+    },
   },
   {
-    surface: 'knowledge search parsed hits (the external rerank input)',
-    probe: () => parseHits(KNOWLEDGE_HITS),
+    // rawId is the internal duplicate key and is never output or sent; the
+    // handler rows in protected-link-knowledge-sweep.test.ts prove that end to end.
+    surface: 'knowledge search parsed hits (the fields every formatter and the rerank request read)',
+    probe: () => parseHits(KNOWLEDGE_HITS).map(({ id, text, fields }) => ({ id, text, fields })),
+    children: {
+      id: (value: Array<{ id: string }>) => value[0]?.id,
+      text: (value: Array<{ text: string }>) => value[0]?.text,
+      'filepath field': (value: Array<{ fields: { filepath: string } }>) => value[0]?.fields.filepath,
+    },
   },
   {
     surface: 'poll.pinecone watch query (sent to the search boundary)',
@@ -333,7 +415,11 @@ const SURFACES: SurfaceCase[] = [
     }),
   },
   {
-    surface: 'first transcription of a stored audio message (returned and stored)',
+    surface: 'first transcription of a stored audio message',
+    children: {
+      'returned transcription': (value: { result: { transcription?: string } }) => value.result.transcription,
+      'stored row': (value: { stored: unknown }) => value.stored,
+    },
     probe: () => withScratchDb((scratch) => withTempDir(async (dir) => {
       const mediaPath = path.join(dir, 'clip.ogg');
       fs.writeFileSync(mediaPath, Buffer.from('audio'));
@@ -350,7 +436,7 @@ const SURFACES: SurfaceCase[] = [
     verify: (value: { result: { status: string } }) => expect(value.result.status).toBe('transcribed'),
   },
   {
-    surface: 'fleet logs route (source and component metadata)',
+    surface: 'fleet logs route',
     probe: () => {
       const res = mockRes();
       handleGetLogs(mockReq({ url: `/api/lines/${SELF}/logs` }), res, {
@@ -359,11 +445,21 @@ const SURFACES: SurfaceCase[] = [
       }, { name: SELF });
       return JSON.parse(res._body);
     },
-    verify: (entries: unknown[]) => expect(entries).toHaveLength(2),
+    children: {
+      'first entry source (name)': (entries: Array<{ source: string }>) => entries[0]?.source,
+      'first entry component': (entries: Array<{ component?: string }>) => entries[0]?.component,
+      'second entry source (module)': (entries: Array<{ source: string }>) => entries[1]?.source,
+      'third entry timestamp (foreign-writer time string)': (entries: Array<{ timestamp: string }>) => entries[2]?.timestamp,
+    },
+    verify: (entries: unknown[]) => expect(entries).toHaveLength(3),
   },
   {
-    surface: 'fleet feed connection event (component and reason)',
+    surface: 'fleet feed connection event',
     probe: () => feedLine({ msg: 'WhatsApp connection closed', component: `conn ${LINK}`, reason: `closed ${LINK}` }),
+    children: {
+      component: (event: { component?: string }) => event.component,
+      reason: (event: { detail: { reason?: string } }) => event.detail.reason,
+    },
     verify: (event: { detail: { type: string } }) => expect(event.detail.type).toBe('connection'),
   },
   {
@@ -388,11 +484,19 @@ const SURFACES: SurfaceCase[] = [
     probe: () => logSink([{ target: `delivery to ${LINK}` }, 'delivery failed']),
   },
   {
-    surface: 'console config projection (systemPrompt and free text)',
+    surface: 'console config projection',
     probe: () => projectClientOutputPolicyConfig({ name: SELF, systemPrompt: `Use ${LINK}`, notes: CONTENT }),
+    children: {
+      systemPrompt: (value: { systemPrompt: string }) => value.systemPrompt,
+      'free text (notes)': (value: { notes: string }) => value.notes,
+    },
   },
   {
-    surface: 'console silences route (reason and silencedBy)',
+    surface: 'console silences route',
+    children: {
+      reason: (body: { silences: Array<{ reason: string }> }) => body.silences[0]?.reason,
+      silencedBy: (body: { silences: Array<{ silencedBy: string }> }) => body.silences[0]?.silencedBy,
+    },
     probe: async () => {
       silenceState.rules = [{
         instance: SELF, until: '2027-01-01T00:00:00.000Z', reason: `maintenance ${LINK}`, silencedBy: SENDER,
@@ -405,22 +509,40 @@ const SURFACES: SurfaceCase[] = [
     verify: (body: { silences: unknown[] }) => expect(body.silences).toHaveLength(1),
   },
   {
-    surface: 'vault bead export (file name, title and body)',
+    surface: 'vault bead export',
     probe: () => withScratchDb((scratch) => withTempDir((dir) => {
       const file = projectBead(scratch.raw, { vaultPath: dir, beadId: seedBead(scratch) });
       expect(file).not.toBeNull();
       return { file: path.relative(dir, file!), body: fs.readFileSync(file!, 'utf8') };
     })),
+    children: {
+      title: bodyLine('# Job'),
+      body: bodyLine('word '),
+    },
   },
   {
-    surface: 'vault entity export (file name, name, aliases and observations)',
+    surface: 'vault entity export',
     probe: () => withScratchDb((scratch) => withTempDir((dir) => {
       const file = projectEntity(scratch.raw, { vaultPath: dir, entityId: seedEntity(scratch) });
       expect(file).not.toBeNull();
       return { file: path.relative(dir, file!), body: fs.readFileSync(file!, 'utf8') };
     })),
+    children: {
+      'file name': { pick: (value: { file: string }) => value.file, mustContain: 'protected-managed-link' },
+      'name heading': bodyLine('# Mallory'),
+      'front matter name': bodyLine('canonical_name:'),
+      alias: bodyLine('- **url**: alias '),
+      // `)` and `_` are fragment characters, so the marker also replaces the closing `)_`.
+      'alias source': { pick: bodyLine('- **url**:'), mustContain: `_(src ${PROTECTED_MESSAGE_MARKER}` },
+      observation: bodyLine('- (0.90) **fact**'),
+    },
   },
 ];
+
+/** A surface with children becomes one row per child, each with its own positive check. */
+const ROWS = SURFACES.flatMap(({ children, ...row }) => (children === undefined
+  ? [{ ...row, child: undefined as ChildCheck | undefined }]
+  : Object.entries(children).map(([name, child]) => ({ ...row, surface: `${row.surface}: ${name}`, child }))));
 
 describe('protected links never reach the remaining outward surfaces', () => {
   beforeAll(() => {
@@ -428,6 +550,8 @@ describe('protected links never reach the remaining outward surfaces', () => {
     fs.writeFileSync(path.join(logMetaDir, 'current.log'), [
       { level: 30, time: TS * 1000, msg: 'first', name: `service ${LINK}`, component: `component ${LINK}` },
       { level: 30, time: TS * 1000 + 1, msg: 'second', module: `module ${LINK}` },
+      // A foreign writer's time string: V8 reads the parenthesized part as a comment.
+      { level: 30, time: `Jan 1 2026 (${LINK} T)`, msg: 'third' },
     ].map((line) => `${JSON.stringify(line)}\n`).join(''));
   });
 
@@ -435,13 +559,17 @@ describe('protected links never reach the remaining outward surfaces', () => {
     fs.rmSync(logMetaDir, { recursive: true, force: true });
   });
 
-  it.each(SURFACES)('$surface', async ({ probe, mustContain, verify }) => {
+  it.each(ROWS)('$surface', async ({ probe, mustContain, verify, child }) => {
     const value = await probe();
     const serialized = JSON.stringify(value);
 
     expect(serialized).not.toContain(TEST_LINK_HOST.slice(0, 6));
     expect(serialized).not.toContain('Q'.repeat(22));
-    expect(serialized).toContain(mustContain ?? PROTECTED_MESSAGE_MARKER);
+    const pick = typeof child === 'function' ? child : child?.pick;
+    const target = pick === undefined ? value : pick(value as never);
+    expect(JSON.stringify(target) ?? '').toContain(
+      (typeof child === 'object' ? child.mustContain : undefined) ?? mustContain ?? PROTECTED_MESSAGE_MARKER,
+    );
     verify?.(value as never);
   });
 });

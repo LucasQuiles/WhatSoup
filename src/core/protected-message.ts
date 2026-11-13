@@ -6,11 +6,14 @@ import {
 } from './protected-delivery-pins.ts';
 import {
   containsProtectedLink,
+  containsProtectedLinkInBinaryText,
   PROTECTED_MESSAGE_MARKER,
+  PROTECTED_TEXT_WITHHELD_MARKER,
+  redactProtectedLinksWithinBound,
   sanitizeProtectedLinkText,
 } from '../lib/protected-link-text.ts';
 
-export { PROTECTED_MESSAGE_MARKER };
+export { PROTECTED_MESSAGE_MARKER, PROTECTED_TEXT_WITHHELD_MARKER };
 
 // The scanner itself lives in src/lib/protected-link-text.ts so the log
 // sanitizer can use it. The wrappers here take their default pins from this
@@ -27,12 +30,12 @@ const MAX_SANITIZE_DEPTH = 64;
  */
 export const MAX_SANITIZE_NODES = 1_048_576;
 
-/** A tool result too large or too deep to scan for protected links. */
+/** A tool result too large, too deep or too link-dense to scan for protected links. */
 export class ProtectedValueScanLimitError extends Error {
   constructor() {
     super(
-      `result is too large to check for protected links (more than ${MAX_SANITIZE_NODES} objects `
-      + `or deeper than ${MAX_SANITIZE_DEPTH} levels); narrow the request`,
+      `result is too large to check for protected links (more than ${MAX_SANITIZE_NODES} objects, `
+      + `deeper than ${MAX_SANITIZE_DEPTH} levels, or a text with more than 128 protected links); narrow the request`,
     );
     this.name = 'ProtectedValueScanLimitError';
   }
@@ -119,22 +122,46 @@ export function sanitizeProtectedMessageValue(value: unknown, pins: ProtectedDel
 }
 
 /**
- * Clone a value returned to an MCP caller or the console while replacing every
- * protected link in strings. Past either bound it throws
- * ProtectedValueScanLimitError, which the caller sees as a tool error, rather
- * than return a result with objects silently replaced by the marker.
+ * Clone a value returned to an MCP caller while replacing every protected link
+ * in strings. A binary leaf whose bytes, decoded as UTF-8, carry a link becomes
+ * the marker. Past any bound it throws ProtectedValueScanLimitError, which the
+ * caller sees as a tool error, rather than return a cut or unscanned result.
  */
 export function sanitizeProtectedToolResult(value: unknown, pins: ProtectedDeliveryPins = PROTECTED_DELIVERY_PINS): unknown {
   return sanitizeBoundedValue(value, pins, 'throw');
 }
 
+const binaryTextDecoder = new TextDecoder();
+
+function binaryBytes(value: ArrayBuffer | ArrayBufferView): Uint8Array {
+  return value instanceof ArrayBuffer
+    ? new Uint8Array(value)
+    : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+}
+
 function sanitizeBoundedValue(value: unknown, pins: ProtectedDeliveryPins, overLimit: 'marker' | 'throw'): unknown {
+  // A tool result is serialized whole into model-visible text, so its binary
+  // leaves are scanned and other values take their JSON form. An inbound
+  // payload keeps binary fields and object shapes intact for media handling.
+  const toolResult = overLimit === 'throw';
   const seen = new WeakMap<object, unknown>();
   let visitedNodes = 0;
 
+  const sanitizeText = (current: string): string => {
+    const redacted = redactProtectedLinksWithinBound(current, pins);
+    if (redacted !== null) return redacted;
+    if (toolResult) throw new ProtectedValueScanLimitError();
+    return PROTECTED_TEXT_WITHHELD_MARKER;
+  };
+
   const sanitize = (current: unknown, depth: number): unknown => {
-    if (typeof current === 'string') return sanitizeProtectedLinkText(current, pins);
-    if (current === null || typeof current !== 'object' || current instanceof Uint8Array) return current;
+    if (typeof current === 'string') return sanitizeText(current);
+    if (current === null || typeof current !== 'object') return current;
+    if (current instanceof ArrayBuffer || ArrayBuffer.isView(current)) {
+      if (!toolResult) return current;
+      const decoded = binaryTextDecoder.decode(binaryBytes(current));
+      return containsProtectedLinkInBinaryText(decoded, pins) ? PROTECTED_MESSAGE_MARKER : current;
+    }
     if (depth >= MAX_SANITIZE_DEPTH || ++visitedNodes > MAX_SANITIZE_NODES) {
       if (overLimit === 'throw') throw new ProtectedValueScanLimitError();
       return PROTECTED_MESSAGE_MARKER;
@@ -150,8 +177,45 @@ function sanitizeBoundedValue(value: unknown, pins: ProtectedDeliveryPins, overL
       return clone;
     }
 
-    const clone = Object.create(Object.getPrototypeOf(current)) as Record<string, unknown>;
+    // Built-ins keep their value in internal slots that a prototype-and-keys
+    // clone would lose (a cloned Date throws in JSON.stringify).
+    if (current instanceof Date) return new Date(current.getTime());
+    // JSON writes a RegExp as `{}`, so its source never leaves through a result.
+    if (current instanceof RegExp) return current;
+    // JSON writes a URL as its href.
+    if (current instanceof URL) return sanitizeText(current.href);
+    if (current instanceof Map) {
+      const clone = new Map<unknown, unknown>();
+      seen.set(current, clone);
+      for (const [key, item] of current) clone.set(sanitize(key, depth + 1), sanitize(item, depth + 1));
+      return clone;
+    }
+    if (current instanceof Set) {
+      const clone = new Set<unknown>();
+      seen.set(current, clone);
+      for (const item of current) clone.add(sanitize(item, depth + 1));
+      return clone;
+    }
+
+    const prototype = Object.getPrototypeOf(current) as object | null;
+    const toJSON = (current as { toJSON?: unknown }).toJSON;
+    if (toolResult && prototype !== Object.prototype && prototype !== null
+      && !(current instanceof Error) && typeof toJSON === 'function') {
+      // The result is serialized next; a class may keep its value in private
+      // fields, so take the JSON form JSON.stringify would write.
+      return sanitize(toJSON.call(current, ''), depth + 1);
+    }
+
+    const clone = Object.create(prototype) as Record<string, unknown>;
     seen.set(current, clone);
+    if (current instanceof Error) {
+      // message and stack are own, non-enumerable properties; keep them so.
+      for (const key of ['message', 'stack'] as const) {
+        const own = Object.getOwnPropertyDescriptor(current, key);
+        const ownText: unknown = own?.value;
+        if (typeof ownText === 'string') Object.defineProperty(clone, key, { ...own, value: sanitizeText(ownText) });
+      }
+    }
     for (const key of Object.keys(current)) {
       try {
         clone[key] = sanitize((current as Record<string, unknown>)[key], depth + 1);

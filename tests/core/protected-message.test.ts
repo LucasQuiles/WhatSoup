@@ -10,6 +10,7 @@ import {
   sanitizeProtectedMessageText,
   sanitizeProtectedToolResult,
 } from '../../src/core/protected-message.ts';
+import { PROTECTED_TEXT_WITHHELD_MARKER } from '../../src/lib/protected-link-text.ts';
 import {
   TEST_DELIVERY_HOST,
   TEST_LINK_HOST,
@@ -202,5 +203,126 @@ describe('protected value scan bounds', () => {
     const result = sanitizeProtectedToolResult({ groups }, pins);
 
     expect(JSON.stringify(result)).toBe(JSON.stringify({ groups }));
+  });
+});
+
+describe('protected text scan bounds: more than 128 links, or a fragment past its bound', () => {
+  const link = `https://${TEST_LINK_HOST}/s/#v3.${'Q'.repeat(22)}.${'Z'.repeat(43)}`;
+  const links = (count: number): string => `${link} `.repeat(count);
+
+  it('keeps the text after the 128th link whole', () => {
+    const result = sanitizeProtectedMessageText(`${links(128)}IMPORTANT NEUTRAL CONTENT`, pins);
+
+    expect(result.split(PROTECTED_MESSAGE_MARKER)).toHaveLength(129);
+    expect(result.endsWith(' IMPORTANT NEUTRAL CONTENT')).toBe(true);
+    expect(result).not.toContain(TEST_LINK_HOST);
+  });
+
+  it('withholds a stored text with more than 128 links whole instead of truncating it', () => {
+    expect(sanitizeProtectedMessageText(`${links(129)}IMPORTANT NEUTRAL CONTENT`, pins)).toBe(PROTECTED_TEXT_WITHHELD_MARKER);
+  });
+
+  it('withholds a text whose fragment reaches the fragment bound before the text ends', () => {
+    const text = `see https://${TEST_LINK_HOST}/s/#${'F'.repeat(16_384)} IMPORTANT NEUTRAL CONTENT`;
+
+    expect(sanitizeProtectedMessageText(text, pins)).toBe(PROTECTED_TEXT_WITHHELD_MARKER);
+  });
+
+  it('keeps the withheld marker recognisable as protected and safe inside JSON', () => {
+    expect(PROTECTED_TEXT_WITHHELD_MARKER).toContain(PROTECTED_MESSAGE_MARKER);
+    expect(PROTECTED_TEXT_WITHHELD_MARKER).not.toMatch(/["\\]/);
+    expect(hasProtectedManagedLink(PROTECTED_TEXT_WITHHELD_MARKER, pins)).toBe(true);
+  });
+
+  it('refuses a tool result string with more than 128 links', () => {
+    expect(() => sanitizeProtectedToolResult({ text: `${links(129)}tail` }, pins)).toThrow(ProtectedValueScanLimitError);
+  });
+
+  it('stores an inbound string with more than 128 links as the withheld marker', () => {
+    expect(sanitizeProtectedMessageValue({ text: `${links(129)}tail` }, pins)).toEqual({ text: PROTECTED_TEXT_WITHHELD_MARKER });
+  });
+});
+
+describe('tool result binary leaves and built-in values', () => {
+  const link = `https://${TEST_LINK_HOST}/s/#v3.${'Q'.repeat(22)}.${'Z'.repeat(43)}`;
+  const plaintext = (text: string): Buffer =>
+    Buffer.concat([Buffer.from([0x0a, Buffer.byteLength(text)]), Buffer.from(text)]);
+
+  it('replaces a tool result Buffer leaf whose UTF-8 bytes carry a protected link', () => {
+    expect(sanitizeProtectedToolResult({ plaintext: plaintext(`see ${link}`) }, pins))
+      .toEqual({ plaintext: PROTECTED_MESSAGE_MARKER });
+  });
+
+  it('finds a bare host glued to a protobuf length byte that reads as a host character', () => {
+    const body = `${TEST_LINK_HOST}/s/#${'Q'.repeat(75)}`;
+    expect(body.length).toBe(0x61);
+
+    expect(sanitizeProtectedToolResult({ leaf: plaintext(body) }, pins)).toEqual({ leaf: PROTECTED_MESSAGE_MARKER });
+  });
+
+  it('scans every binary view in a tool result: Uint8Array, DataView and ArrayBuffer', () => {
+    const bytes = new Uint8Array(plaintext(`see ${link}`));
+    const result = sanitizeProtectedToolResult({
+      typed: bytes, view: new DataView(bytes.buffer), buffer: bytes.buffer,
+    }, pins);
+
+    expect(result).toEqual({ typed: PROTECTED_MESSAGE_MARKER, view: PROTECTED_MESSAGE_MARKER, buffer: PROTECTED_MESSAGE_MARKER });
+  });
+
+  it('passes a tool result binary leaf with no link through unchanged', () => {
+    const leaf = plaintext('hello');
+
+    expect((sanitizeProtectedToolResult({ leaf }, pins) as { leaf: Buffer }).leaf).toBe(leaf);
+  });
+
+  it('keeps binary media fields of an inbound payload intact', () => {
+    const mediaKey = plaintext(`see ${link}`);
+    const samples = new Uint16Array([1, 2, 3]);
+    const result = sanitizeProtectedMessageValue({ mediaKey, samples }, pins) as { mediaKey: Buffer; samples: Uint16Array };
+
+    expect(result.mediaKey).toBe(mediaKey);
+    expect(result.samples).toBe(samples);
+  });
+
+  it('copies a Date with its time value in both modes', () => {
+    const setAt = new Date(1_700_000_000_000);
+    for (const out of [sanitizeProtectedToolResult({ setAt }, pins), sanitizeProtectedMessageValue({ setAt }, pins)]) {
+      expect(JSON.stringify(out)).toBe(JSON.stringify({ setAt }));
+    }
+    expect((sanitizeProtectedMessageValue({ setAt }, pins) as { setAt: Date }).setAt.getTime()).toBe(setAt.getTime());
+  });
+
+  it('serializes a URL as its redacted href', () => {
+    const out = sanitizeProtectedToolResult({ url: new URL(link), plain: new URL('https://example.test/a') }, pins);
+
+    expect(JSON.parse(JSON.stringify(out))).toEqual({ url: PROTECTED_MESSAGE_MARKER, plain: 'https://example.test/a' });
+  });
+
+  it('copies Map and Set contents with links redacted', () => {
+    const out = sanitizeProtectedToolResult({
+      map: new Map([[`key ${link}`, `see ${link}`]]), set: new Set([`see ${link}`]),
+    }, pins) as { map: Map<string, string>; set: Set<string> };
+
+    expect([...out.map]).toEqual([[`key ${PROTECTED_MESSAGE_MARKER}`, `see ${PROTECTED_MESSAGE_MARKER}`]]);
+    expect([...out.set]).toEqual([`see ${PROTECTED_MESSAGE_MARKER}`]);
+  });
+
+  it('copies an Error with its message and stack redacted', () => {
+    const out = sanitizeProtectedToolResult({ error: new Error(`failed ${link}`) }, pins) as { error: Error };
+
+    expect(out.error).toBeInstanceOf(Error);
+    expect(out.error.message).toBe(`failed ${PROTECTED_MESSAGE_MARKER}`);
+    expect(out.error.stack ?? '').not.toContain(TEST_LINK_HOST);
+  });
+
+  it('serializes another value with toJSON through its redacted JSON form', () => {
+    class Opaque {
+      readonly #href: string;
+      constructor(href: string) { this.#href = href; }
+      toJSON(): string { return this.#href; }
+    }
+
+    expect(JSON.stringify(sanitizeProtectedToolResult({ opaque: new Opaque(`see ${link}`) }, pins)))
+      .toBe(JSON.stringify({ opaque: `see ${PROTECTED_MESSAGE_MARKER}` }));
   });
 });

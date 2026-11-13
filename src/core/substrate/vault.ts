@@ -1,5 +1,6 @@
 // src/core/substrate/vault.ts
 import type { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createChildLogger } from '../../logger.ts';
@@ -55,8 +56,14 @@ function ensureFolders(vaultPath: string): void {
 
 // The slug keeps the host and fragment characters of a link, so the name is
 // redacted first; projection and removal both derive the file name here.
+// Names that differ only by a protected link share the redacted slug, so a
+// redacted name also carries a short digest of the original name: distinct
+// entities keep distinct files, and the digest does not reveal the link.
 function safeSlug(s: string): string {
-  return sanitizeProtectedMessageText(s).replace(/[^\w\-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'untitled';
+  const redacted = sanitizeProtectedMessageText(s);
+  const slug = redacted.replace(/[^\w\-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'untitled';
+  if (redacted === s) return slug;
+  return `${slug}-${createHash('sha256').update(s).digest('hex').slice(0, 12)}`;
 }
 
 function beadStatusFolder(status: BeadRow['status']): string | null {

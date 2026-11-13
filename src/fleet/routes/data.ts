@@ -457,6 +457,8 @@ export function handleGetLogs(
   // redacted after the parse loop, before collapsing, so the loop's skip-non-JSON catch keeps
   // its inherited (baselined) try body.
   for (const entry of entries) {
+    // A foreign writer's time string can pass normalizeTimestamp unchanged.
+    entry.timestamp = sanitizeProtectedMessageText(entry.timestamp);
     entry.msg = sanitizeProtectedMessageText(entry.msg);
     entry.source = sanitizeProtectedMessageText(entry.source);
     if (entry.component !== undefined) entry.component = sanitizeProtectedMessageText(entry.component);

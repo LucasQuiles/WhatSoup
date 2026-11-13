@@ -61,6 +61,33 @@ def test_legacy_string_alert_content_is_redacted(monkeypatch: pytest.MonkeyPatch
     assert "links." not in _MOD.alert_text_for_fingerprint(f"failed {link}")
 
 
+_BOUND_LINK = "https://links.example.test/s/#v3." + "Q" * 22 + "." + "Z" * 43
+_TS_SCANNER_PATH = _REPO_ROOT / "src" / "lib" / "protected-link-text.ts"
+
+
+def test_text_after_the_128th_link_is_kept() -> None:
+    text = f"{_BOUND_LINK} " * 128 + "IMPORTANT NEUTRAL CONTENT"
+    result = _MOD.sanitize_protected_link_text(text, _TEST_PINS)
+    assert result.count(_MOD.PROTECTED_MESSAGE_MARKER) == 128
+    assert result.endswith(" IMPORTANT NEUTRAL CONTENT")
+
+
+def test_more_than_128_links_withhold_the_whole_text() -> None:
+    text = f"{_BOUND_LINK} " * 129 + "IMPORTANT NEUTRAL CONTENT"
+    assert _MOD.sanitize_protected_link_text(text, _TEST_PINS) == _MOD.PROTECTED_TEXT_WITHHELD_MARKER
+
+
+def test_a_fragment_past_its_bound_withholds_the_whole_text() -> None:
+    text = "see https://links.example.test/s/#" + "F" * 16_384 + " IMPORTANT NEUTRAL CONTENT"
+    assert _MOD.sanitize_protected_link_text(text, _TEST_PINS) == _MOD.PROTECTED_TEXT_WITHHELD_MARKER
+
+
+def test_withheld_marker_equals_the_typescript_marker() -> None:
+    marker = _MOD.PROTECTED_TEXT_WITHHELD_MARKER
+    assert _MOD.PROTECTED_MESSAGE_MARKER in marker
+    assert f"PROTECTED_TEXT_WITHHELD_MARKER = '{marker}';" in _TS_SCANNER_PATH.read_text(encoding="utf-8")
+
+
 def test_neutral_legacy_string_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_MOD, "PROTECTED_LINK_HOST_SHA256", _TEST_PINS)
     text = "ESCALATED still open: see https://other.example.test/s/#v3.keep"

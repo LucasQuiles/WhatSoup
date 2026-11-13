@@ -9,6 +9,14 @@ import { isPinnedHost, PROTECTED_DELIVERY_PINS, type ProtectedDeliveryPins } fro
 /** A stable, non-sensitive replacement retained in protected message records. */
 export const PROTECTED_MESSAGE_MARKER = '[protected managed link]';
 
+/**
+ * Replaces a whole value that exceeds a scan bound: more than 128 links, or a
+ * fragment that reaches its bound before the text ends. It contains the
+ * marker, so marker checks still treat the value as protected, and it has no
+ * quote or backslash, so it is safe inside JSON.
+ */
+export const PROTECTED_TEXT_WITHHELD_MARKER = '[protected managed link] text withheld';
+
 // A protected link is `[scheme://][www.]host[.][:port]/(s|setup)[/]#fragment`,
 // matched case-insensitively. The scan anchors on each `#` and walks back a
 // bounded distance, so it is linear in the text and uses no backtracking
@@ -49,14 +57,14 @@ function isFragmentCharacter(charCode: number): boolean {
     || charCode === 0x7e; // ~
 }
 
+// The fragment end, or -1 when the fragment reaches its bound before the text
+// ends. Such a fragment cannot be split safely, and dropping the suffix would
+// silently lose text, so the caller withholds or refuses the whole value.
 function protectedFragmentEnd(value: string, start: number): number {
   const limit = Math.min(value.length, start + MAX_PROTECTED_FRAGMENT_LENGTH);
   let end = start;
   while (end < limit && isFragmentCharacter(value.charCodeAt(end))) end++;
-
-  // A fragment that reaches the bound cannot be safely split. Drop the
-  // uninspected suffix rather than risk retaining a protected reference.
-  return end === limit && limit < value.length ? value.length : end;
+  return end === limit && limit < value.length ? -1 : end;
 }
 
 // The host and boundary class of the literal-host pattern this scanner
@@ -91,23 +99,29 @@ interface ProtectedLinkMatch {
   fragmentStart: number;
 }
 
-// Parses the candidate whose path ends at the `#` at `hash`. Returns null
-// unless it is a pinned protected link that starts at or after `from`.
-function protectedLinkEndingAt(text: string, hash: number, from: number, pins: ProtectedDeliveryPins): ProtectedLinkMatch | null {
+// The host end and optional port of the candidate whose `/s` or `/setup` path
+// ends at the `#` at `hash`, or null when no such path precedes it.
+function hostBeforeAnchor(text: string, hash: number): { hostEnd: number; port: string | null } | null {
   const pathEnd = text.charCodeAt(hash - 1) === 0x2f ? hash - 1 : hash;
   let pathStart: number;
   if (matchesFolded(text, pathEnd - 2, '/s')) pathStart = pathEnd - 2;
   else if (matchesFolded(text, pathEnd - 6, '/setup')) pathStart = pathEnd - 6;
   else return null;
 
-  let hostEnd = pathStart;
-  let port: string | null = null;
   let digits = pathStart;
   while (digits > 0 && pathStart - digits <= MAX_PORT_DIGITS && isAsciiDigit(text.charCodeAt(digits - 1))) digits--;
   if (digits < pathStart && text.charCodeAt(digits - 1) === 0x3a) {
-    port = text.slice(digits, pathStart);
-    hostEnd = digits - 1;
+    return { hostEnd: digits - 1, port: text.slice(digits, pathStart) };
   }
+  return { hostEnd: pathStart, port: null };
+}
+
+// Parses the candidate whose path ends at the `#` at `hash`. Returns null
+// unless it is a pinned protected link that starts at or after `from`.
+function protectedLinkEndingAt(text: string, hash: number, from: number, pins: ProtectedDeliveryPins): ProtectedLinkMatch | null {
+  const anchor = hostBeforeAnchor(text, hash);
+  if (anchor === null) return null;
+  const { hostEnd, port } = anchor;
 
   // The host is the whole run of host characters, so nothing host-like
   // precedes it; a run longer than any DNS name cannot be pinned.
@@ -149,25 +163,83 @@ export function containsProtectedLink(value: string, pins: ProtectedDeliveryPins
   return nextProtectedLink(value, 0, pins) !== null;
 }
 
-/** Replace every pinned protected link in the text with the stable marker. */
-export function sanitizeProtectedLinkText(value: string, pins: ProtectedDeliveryPins = PROTECTED_DELIVERY_PINS): string {
+/** The `[start, end)` span of one protected link in the scanned text. */
+export interface ProtectedLinkRange {
+  start: number;
+  end: number;
+}
+
+/**
+ * The span of every pinned protected link, in order, or null when the text
+ * exceeds a scan bound (more than 128 links, or a fragment that reaches its
+ * bound before the text ends). On null the caller withholds or refuses the
+ * whole value: it never truncates and never keeps unscanned text.
+ */
+export function protectedLinkRanges(
+  value: string,
+  pins: ProtectedDeliveryPins = PROTECTED_DELIVERY_PINS,
+): ProtectedLinkRange[] | null {
+  const ranges: ProtectedLinkRange[] = [];
   let cursor = 0;
-  let redactions = 0;
-  let sanitized: string | undefined;
-
   for (let match = nextProtectedLink(value, 0, pins); match; match = nextProtectedLink(value, cursor, pins)) {
+    if (ranges.length === MAX_PROTECTED_LINKS_PER_TEXT) return null;
     const end = protectedFragmentEnd(value, match.fragmentStart);
-    sanitized = `${sanitized ?? ''}${value.slice(cursor, match.start)}${PROTECTED_MESSAGE_MARKER}`;
+    if (end === -1) return null;
+    ranges.push({ start: match.start, end });
     cursor = end;
-    redactions++;
+  }
+  return ranges;
+}
 
-    // Retaining an uninspected tail after an unexpectedly link-dense input
-    // would violate the redaction boundary. The payload is model-visible, so
-    // fail closed and keep only the stable marker.
-    if (redactions >= MAX_PROTECTED_LINKS_PER_TEXT || end === value.length) {
-      return sanitized;
+/** The text with each range replaced by the stable marker. */
+export function replaceProtectedLinkRanges(value: string, ranges: readonly ProtectedLinkRange[]): string {
+  if (ranges.length === 0) return value;
+  let sanitized = '';
+  let cursor = 0;
+  for (const { start, end } of ranges) {
+    sanitized += `${value.slice(cursor, start)}${PROTECTED_MESSAGE_MARKER}`;
+    cursor = end;
+  }
+  return `${sanitized}${value.slice(cursor)}`;
+}
+
+/** The text with every pinned protected link replaced, or null past a scan bound. */
+export function redactProtectedLinksWithinBound(
+  value: string,
+  pins: ProtectedDeliveryPins = PROTECTED_DELIVERY_PINS,
+): string | null {
+  const ranges = protectedLinkRanges(value, pins);
+  return ranges === null ? null : replaceProtectedLinkRanges(value, ranges);
+}
+
+/**
+ * Replace every pinned protected link in the text with the stable marker.
+ * Past a scan bound the whole value becomes PROTECTED_TEXT_WITHHELD_MARKER.
+ */
+export function sanitizeProtectedLinkText(value: string, pins: ProtectedDeliveryPins = PROTECTED_DELIVERY_PINS): string {
+  return redactProtectedLinksWithinBound(value, pins) ?? PROTECTED_TEXT_WITHHELD_MARKER;
+}
+
+/**
+ * Detection for binary bytes decoded as text. Binary framing can glue a link
+ * to a byte that reads as a host character (a protobuf length of 0x61 reads
+ * as `a`), so every suffix of the host run before each anchor is checked.
+ * Detection only: the caller replaces the whole binary value.
+ */
+export function containsProtectedLinkInBinaryText(
+  text: string,
+  pins: ProtectedDeliveryPins = PROTECTED_DELIVERY_PINS,
+): boolean {
+  for (let hash = text.indexOf('#'); hash !== -1; hash = text.indexOf('#', hash + 1)) {
+    const anchor = hostBeforeAnchor(text, hash);
+    if (anchor === null) continue;
+    for (
+      let start = anchor.hostEnd - 1;
+      start >= 0 && anchor.hostEnd - start <= MAX_HOST_CANDIDATE_LENGTH && isHostCharacter(text.charCodeAt(start));
+      start--
+    ) {
+      if (isPinnedHost(text.slice(start, anchor.hostEnd), pins.linkHostSha256)) return true;
     }
   }
-
-  return sanitized === undefined ? value : `${sanitized}${value.slice(cursor)}`;
+  return false;
 }
