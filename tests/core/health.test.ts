@@ -8677,6 +8677,7 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     { reason: 'per_chat_session_without_owner', kind: 'directly re-probed', afterClear: RELEASED_STATE, afterReceipt: RELEASED_STATE },
     { reason: 'per_chat_respawn_abandoned', kind: 'directly re-probed', afterClear: RELEASED_STATE, afterReceipt: RELEASED_STATE },
     { reason: 'agent_respawn_failed_clear_pending', kind: 'directly re-probed', afterClear: RELEASED_STATE, afterReceipt: RELEASED_STATE },
+    { reason: 'provider_canary_unproven', kind: 'directly re-probed', afterClear: RELEASED_STATE, afterReceipt: RELEASED_STATE },
     { reason: 'provider_fallback_active', kind: 'turn-provable', afterClear: LATCHED_STATE, afterReceipt: RELEASED_STATE },
     { reason: 'session_inactive', kind: 'latched', afterClear: LATCHED_STATE, afterReceipt: LATCHED_STATE },
     { reason: 'recent_crashes', kind: 'latched', afterClear: LATCHED_STATE, afterReceipt: LATCHED_STATE },

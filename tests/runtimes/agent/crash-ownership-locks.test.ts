@@ -25,6 +25,11 @@ vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts', () => ({
   sha256File: vi.fn(() => 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),
   resolveExecutable: vi.fn(),
   canaryStoreProvisioned: vi.fn(() => false),
+  // #3832: AgentRuntime constructs this monitor; a proven-empty stub keeps these crash tests off the filesystem.
+  ProviderCanaryReadinessMonitor: class {
+    readonly unproven: readonly unknown[] = [];
+    refresh(): Promise<void> { return Promise.resolve(); }
+  },
 }));
 
 vi.mock('../../../src/logger.ts', async () => {
