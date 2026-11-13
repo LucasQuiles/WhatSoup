@@ -307,6 +307,12 @@ export interface SessionManagerOptions {
   pluginDirs?: string[];
   allowM365Mutations?: boolean;
   m365MutationPolicy?: M365MutationPolicy;
+  /**
+   * The runtime's live M365 policy for this session, read at every provider spawn (including an
+   * in-place respawn) for the child's arguments and environment. It re-checks the plugin copies and
+   * throws to refuse the spawn while a deny-floor rewrite is pending. Without it the snapshot above is used.
+   */
+  m365SpawnPolicy?: () => M365MutationPolicy | undefined;
   provider?: string;
   providerConfig?: Record<string, unknown>;
   mcpBridge?: ProviderMcpBridge;
@@ -734,6 +740,7 @@ export class SessionManager {
   private readonly pluginDirs: string[];
   private readonly allowM365Mutations: boolean | undefined;
   private readonly m365MutationPolicy: M365MutationPolicy | undefined;
+  private readonly m365SpawnPolicy: (() => M365MutationPolicy | undefined) | undefined;
   private readonly provider: string;
   private readonly providerConfig: Record<string, unknown> | undefined;
   private readonly mcpBridge: ProviderMcpBridge | undefined;
@@ -946,6 +953,7 @@ export class SessionManager {
     this.pluginDirs = opts.pluginDirs ?? [];
     this.allowM365Mutations = opts.allowM365Mutations;
     this.m365MutationPolicy = opts.m365MutationPolicy;
+    this.m365SpawnPolicy = opts.m365SpawnPolicy;
     this.provider = opts.provider ?? 'claude-cli';
     // Fail-fast on unknown provider IDs (#447). The shared validator blocks
     // these at config-load time, but direct instantiation (tests, programmatic
@@ -1210,7 +1218,17 @@ export class SessionManager {
     return resolveProviderBinary(provider);
   }
 
-  private getProviderArgs(systemPrompt: string, cwd: string, resumeSessionId?: string): string[] {
+  /** The M365 policy for one provider spawn: the runtime's live value when supplied, else the snapshot. */
+  private m365PolicyAtSpawn(): M365MutationPolicy | undefined {
+    return this.m365SpawnPolicy === undefined ? this.m365MutationPolicy : this.m365SpawnPolicy();
+  }
+
+  private getProviderArgs(
+    systemPrompt: string,
+    cwd: string,
+    resumeSessionId?: string,
+    m365Policy: M365MutationPolicy | undefined = this.m365PolicyAtSpawn(),
+  ): string[] {
     const provider = this.assertKnownProvider('getProviderArgs');
     const args = resolveProviderArgs(
       provider,
@@ -1222,8 +1240,9 @@ export class SessionManager {
       this.providerConfig,
       this.providerMcpConfigArgs,
     );
-    // A shared workspace may retain the primary route's M365 exception.
-    if (provider === 'claude-cli' && this.m365MutationPolicy?.status === 'rejected') {
+    // A shared workspace may retain the primary route's M365 exception, and a withdrawal
+    // leaves settings lifted until the floor is rewritten: a rejected policy denies on the CLI.
+    if (provider === 'claude-cli' && m365Policy?.status === 'rejected') {
       args.push('--disallowedTools', ...M365_MUTATION_DENY);
     }
     return args;
@@ -1463,6 +1482,7 @@ export class SessionManager {
     args: readonly string[],
     cwd: string,
     expectedExecutableSha256?: string,
+    m365Policy: M365MutationPolicy | undefined = this.m365PolicyAtSpawn(),
   ): ChildProcessWithoutNullStreams | Promise<ChildProcessWithoutNullStreams> {
     // Security: explicit env allowlist prevents credential leakage to child processes.
     // Without this, Node.js inherits process.env in full — meaning ALL secrets
@@ -1472,7 +1492,7 @@ export class SessionManager {
       this.provider,
       {
         allowM365Mutations: this.allowM365Mutations,
-        m365MutationPolicy: this.m365MutationPolicy,
+        m365MutationPolicy: m365Policy,
         whatsoupInstance: this.whatsoupInstance,
         whatsoupMcpSocket: this.whatsoupMcpSocket,
         whatsoupMcpSessionToken: this.whatsoupMcpSessionToken,
@@ -2989,10 +3009,12 @@ export class SessionManager {
       expectedExecutableSha256 = admission.binarySha256;
     }
     cwd = this.admitConfiguredCwd();
-    const args = this.getProviderArgs(systemPrompt, cwd, resumeSessionId);
+    // Read once, so the arguments and the environment of this child agree.
+    const m365Policy = this.m365PolicyAtSpawn();
+    const args = this.getProviderArgs(systemPrompt, cwd, resumeSessionId, m365Policy);
     if (this.configuredCwd !== undefined) this.configuredCwd = cwd;
 
-    const spawned = this.spawnProviderChild(binary, args, cwd, expectedExecutableSha256);
+    const spawned = this.spawnProviderChild(binary, args, cwd, expectedExecutableSha256, m365Policy);
     // Keep direct spawn synchronous: handlers below attach in the same turn.
     const child = spawned instanceof Promise ? await spawned : spawned;
     if (

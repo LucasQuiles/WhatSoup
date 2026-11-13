@@ -127,7 +127,7 @@ import {
 } from './fallback-state-db.ts';
 import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts } from '../../core/workspace.ts';
 import { workspaceSocketPath } from '../../core/workspace-paths.ts';
-import { m365RoutePolicy, m365TurnAuthority, narrowM365RoutePolicy, type M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
+import { m365NativeFloorPolicy, m365RoutePolicy, m365TurnAuthority, narrowM365RoutePolicy, type M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
 import { inspectUserClaudeSettings } from '../../core/user-claude-settings.ts';
 import { isSamePhysicalDirectory } from '../../lib/home-path.ts';
 import { classifyActiveSessions, resolveAmbiguousAgeFallback } from './session-classifier.ts';
@@ -323,7 +323,7 @@ import { randomUUID } from 'node:crypto';
 import { EgressProxy } from './egress-proxy.ts';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { PerChatMcpSocketManager } from './per-chat-mcp-socket-manager.ts';
-import { admitMicrosoft365Workflow, Microsoft365SettingsFiles, recheckMicrosoft365Workflow, resolveExplainedM365MutationPolicy } from './microsoft365-adapter.ts';
+import { admitMicrosoft365Workflow, Microsoft365SettingsFiles, microsoft365SpawnPolicy, recheckMicrosoft365Workflow, resolveExplainedM365MutationPolicy } from './microsoft365-adapter.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
 import { SessionTokenRegistry } from '../../mcp/caller-attribution.ts';
 import type { ExecutingSessionContext, SessionContext } from '../../mcp/types.ts';
@@ -3917,16 +3917,16 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  /** M365 authority a turn publishes: its session's route policy narrowed by the current runtime policy (unknown session: rejected). */
+  /** M365 authority a turn publishes: its session's route policy narrowed by the re-checked runtime policy (unknown session: rejected). */
   private m365ExecutingAuthority(session: SessionManager, humanRequest: boolean, requestRef: string | undefined) {
-    const routePolicy = narrowM365RoutePolicy(this.sessionM365Policies.get(session), this.m365MutationPolicy);
+    const routePolicy = narrowM365RoutePolicy(this.sessionM365Policies.get(session), this.recheckM365Policy());
     return m365TurnAuthority(routePolicy, humanRequest, requestRef, this.sessionScope, sessionProviderId(session) ?? undefined);
   }
 
   getM365SettingsPolicy(): M365MutationPolicy | undefined {
     // Grant reconciliation runs before startup restores a persisted fallback; afterwards every settings write re-checks the native plugin copy.
     if (this.m365MutationPolicy === undefined || !this.m365SettingsPolicyReady) return this.m365MutationPolicy && { status: 'rejected' as const };
-    return m365RoutePolicy(this.recheckM365Policy(), this.effectiveProvider, !this.isFallbackWindowActive);
+    return m365NativeFloorPolicy(m365RoutePolicy(this.recheckM365Policy(), this.effectiveProvider, !this.isFallbackWindowActive), this.sessionScope, this.sandboxPerChat);
   }
 
   /** Re-checks the native plugin copy; a withdrawal restores the deny floor in every settings file this runtime wrote before it returns. */
@@ -10590,7 +10590,7 @@ export class AgentRuntime implements Runtime {
     // Each sandbox cwd owns its settings; route changes must restore the deny
     // floor before a fallback can reuse a workspace approved for the primary.
     if (this.sandboxPerChat && opts.cwd) {
-      this.m365SettingsFiles.write('chat', join(opts.cwd, '.claude'), this.enabledPlugins, { hasSandbox: true, m365MutationPolicy: sessionM365Policy });
+      this.m365SettingsFiles.write('chat', join(opts.cwd, '.claude'), this.enabledPlugins, { hasSandbox: true, m365MutationPolicy: m365NativeFloorPolicy(sessionM365Policy, this.sessionScope, true) });
     }
 
     const session = new SessionManager({
@@ -10611,6 +10611,7 @@ export class AgentRuntime implements Runtime {
       pluginDirs: this.pluginDirs,
       allowM365Mutations: sessionM365Policy?.status === 'rejected' ? false : this.allowM365Mutations,
       m365MutationPolicy: sessionM365Policy,
+      m365SpawnPolicy: () => microsoft365SpawnPolicy(sessionM365Policy, this.recheckM365Policy(), this.m365SettingsFiles),
       provider: route ? route.provider : this.effectiveProvider,
       providerConfig: opts.providerConfigOverride
         ? { ...(route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()), ...opts.providerConfigOverride }

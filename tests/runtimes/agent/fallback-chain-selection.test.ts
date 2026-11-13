@@ -398,8 +398,10 @@ describe('fallback chain selection', () => {
       expect(buildChildEnv('claude-cli', primary).MS365_AGENT365_API_KEY).toBe('synthetic-key');
       expect(applyRequiredDeny([], primary.m365MutationPolicy).includes(M365_MUTATION_DENY[0]!)).toBe(!guarded);
       if (workspacePath) {
+        // A sandboxed chat's child gets no authority socket, so a guarded native write cannot succeed
+        // there: its settings keep the full floor even while the assignment holds.
         const settings = JSON.parse(readFileSync(join(workspacePath, '.claude/settings.json'), 'utf8'));
-        expect(settings.permissions.deny).toEqual(guarded ? REQUIRED_DENY.filter((entry) => !M365_MUTATION_DENY.includes(entry)) : REQUIRED_DENY);
+        expect(settings.permissions.deny).toEqual(REQUIRED_DENY);
         expect(settings.enabledPlugins).toEqual({ 'microsoft_365@microsoft-365-dev': true });
         expect(settings.hooks.PreToolUse).toHaveLength(1);
       }
@@ -411,7 +413,7 @@ describe('fallback chain selection', () => {
       expect(fallback.m365MutationPolicy.status).toBe(guarded ? 'approved' : 'rejected');
       if (workspacePath) {
         const settings = JSON.parse(readFileSync(join(workspacePath, '.claude/settings.json'), 'utf8'));
-        expect(new Set(settings.permissions.deny)).toEqual(new Set(guarded ? REQUIRED_DENY.filter((entry) => !M365_MUTATION_DENY.includes(entry)) : REQUIRED_DENY));
+        expect(new Set(settings.permissions.deny)).toEqual(new Set(REQUIRED_DENY));
         expect(settings.hooks.PreToolUse).toHaveLength(1);
       }
       const env = buildChildEnv('claude-cli', fallback);
@@ -441,7 +443,7 @@ describe('fallback chain selection', () => {
           view(runtime).createSessionManager({
             chatJid: 'bridge-other@s.whatsapp.net', cwd: otherWorkspace, onEvent: vi.fn(), onCrash: vi.fn(), notifyUser: vi.fn(),
           });
-          expect(M365_MUTATION_DENY.filter((entry) => otherSettings().permissions.deny.includes(entry))).toEqual([]);
+          expect(otherSettings().permissions.deny).toEqual(expect.arrayContaining([...M365_MUTATION_DENY]));
         }
         // A new session re-checks the native plugin copy before it writes sandbox settings. Once
         // the copy no longer matches, the session loses the exception and the sandbox floor returns.

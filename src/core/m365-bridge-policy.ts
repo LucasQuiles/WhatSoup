@@ -289,6 +289,21 @@ export function m365MutationExceptionAllowed(policy: M365MutationPolicy | undefi
   return policy?.status === 'approved' && policy.workflowAuthority !== undefined;
 }
 
+/**
+ * The policy a native settings write uses. The M365 mutation floor is lifted only where a guarded
+ * native write can succeed: `per_chat` scope without `sandboxPerChat`. Elsewhere the broker refuses
+ * native writes (shared or single scope) or the child has no authority socket (sandbox), so a lift
+ * would serve only an unguarded copy; the assignment is stripped from the settings policy there.
+ */
+export function m365NativeFloorPolicy(
+  policy: M365MutationPolicy | undefined,
+  sessionScope: M365WorkflowAuthorityScope | undefined,
+  sandboxPerChat: boolean | undefined,
+): M365MutationPolicy | undefined {
+  if (!m365MutationExceptionAllowed(policy) || (sessionScope === 'per_chat' && sandboxPerChat !== true)) return policy;
+  return policy?.status === 'approved' ? { status: 'approved', childEnv: policy.childEnv } : policy;
+}
+
 /** Assignments withdrawn mid-run. A turn publishes the assignment object itself, so its readers see the withdrawal. */
 const withdrawnAssignments = new WeakSet<M365WorkflowAuthority>();
 
