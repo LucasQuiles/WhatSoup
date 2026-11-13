@@ -783,7 +783,9 @@ async function applyHoldingLock(host: ActivationHost, context: ActivationContext
         return refuse('BOT ERRORS health consumer changed or no longer satisfies the selector capability', backupPath);
       }
     }
-    // No await from here to the last plist write: nothing else in this process runs in between.
+    // No await from this recheck through the symlink switch into the first writePlist call. Each plist
+    // write is awaited (a root-owned plist waits on the sudo root helper), so other work can run between
+    // writes; writePlist therefore rechecks every plist against its backup bytes before replacing it.
     const beforeSwitch = foreignWriterFailure(context, ['previous']);
     steps.push(beforeSwitch === null
       ? { step: 'recheck-live-identity-before-switch', ok: true }

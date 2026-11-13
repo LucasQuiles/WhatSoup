@@ -19,6 +19,13 @@ import types
 
 import pytest
 
+# The helper binds SIGEMT, fchflags and Darwin libc's ACL reader (acl_get_fd_np) when it loads, and
+# these tests use file flags and `/bin/chmod +a`, so off macOS the whole module is skipped before
+# the helper import below.
+if sys.platform != 'darwin':
+    pytest.skip('the protected plist helper runs only on macOS: SIGEMT, file flags and Darwin ACLs',
+                allow_module_level=True)
+
 spec = importlib.util.spec_from_file_location('protected_plist', Path(__file__).resolve().parents[3]/'scripts/lib/release-activation/protected_plist.py')
 p = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(p)

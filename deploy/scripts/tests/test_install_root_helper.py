@@ -12,8 +12,15 @@ import os
 from pathlib import Path
 import pwd
 import subprocess
+import sys
 
 import pytest
+
+# The helper binds Darwin libc's ACL reader (acl_get_link_np) when it loads, and the ACL cases
+# use `/bin/chmod +a`, so off macOS the whole module is skipped before the helper import below.
+if sys.platform != 'darwin':
+    pytest.skip('the root plist helper installs only on macOS: Darwin libc ACL calls and /bin/chmod +a',
+                allow_module_level=True)
 
 ACTIVATION = Path(__file__).resolve().parents[3] / 'scripts/lib/release-activation'
 spec = importlib.util.spec_from_file_location('install_root_helper', ACTIVATION / 'install_root_helper.py')
