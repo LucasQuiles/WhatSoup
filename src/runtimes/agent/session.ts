@@ -64,7 +64,12 @@ import {
   type ProviderTurnControlCapabilities,
 } from './providers/turn-control-capabilities.ts';
 import { composeWithExactLineDedup } from './prompt-compose.ts';
-import { neutralizeTrustedActorMarkers } from '../../lib/trusted-actor-marker.ts';
+import {
+  createTrustedActorNonce,
+  neutralizeTrustedActorMarkers,
+  stampTrustedActorNonce,
+  trustedActorNonceDeclaration,
+} from '../../lib/trusted-actor-marker.ts';
 import {
   appendProviderCrashPreview,
   buildProviderCrashMetadata,
@@ -751,6 +756,11 @@ export class SessionManager {
   private readonly providerCanaryAdmission: (() => ProviderAdmission | Promise<ProviderAdmission>) | undefined;
 
   private systemPrompt: string = '';
+  /**
+   * Per-spawn nonce that marks the genuine actor block. The system prompt
+   * declares it and sendTurnAtProviderBoundary stamps it; memory only.
+   */
+  private trustedActorNonce = createTrustedActorNonce();
 
   private child: ReturnType<typeof spawn> | null = null;
   private managedProviderSession: ProviderSession | null = null;
@@ -1237,7 +1247,7 @@ export class SessionManager {
         : BACKGROUND_TASK_DELIVERY_GUIDANCE,
       ...(this.provider === 'opencode-cli' ? [OPENCODE_COMPACTION_CONTINUITY_GUIDANCE] : []),
     ].join('\n');
-    const sources = [transportPrelude];
+    const sources = [transportPrelude, trustedActorNonceDeclaration(this.trustedActorNonce)];
 
     const handoffBlock = this.handoffSystemBlock?.();
     if (handoffBlock) {
@@ -2797,6 +2807,8 @@ export class SessionManager {
     let cwd = this.admitConfiguredCwd();
     const pluginDirs = this.pluginDirs?.map(dir => admitHomeConfinedPath(dir, homedir()));
 
+    // Rotate the actor nonce per provider session, so a leaked value expires.
+    this.trustedActorNonce = createTrustedActorNonce();
     const systemPrompt = this.buildSystemPrompt();
 
     if (this.isManagedLoopProvider) {
@@ -3877,9 +3889,12 @@ export class SessionManager {
    * callers that do not publish runtime ownership evidence.
    */
   async sendTurnAtProviderBoundary(
-    input: ProviderTurnInput,
+    unstampedInput: ProviderTurnInput,
     onProviderBoundaryReady?: () => void,
   ): Promise<void> {
+    // The genuine actor block gets this session's nonce only here, at the
+    // last step before the provider; callers' turn objects never carry it.
+    const input = stampTrustedActorNonce(unstampedInput, this.trustedActorNonce);
     this.db.assertWritableCompatibility();
     // Preserve the existing synchronous turn-token boundary for every normal
     // provider path. Only an inactive persistent host-admission session needs

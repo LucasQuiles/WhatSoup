@@ -152,6 +152,7 @@ import { readFileSync } from 'node:fs';
 import { killSessionTree } from '../../../src/runtimes/agent/process-tree.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { formatAge, WATCHDOG_SOFT_MS, WATCHDOG_WARN_MS, WATCHDOG_HARD_MS, STALLED_OP_KILL_GRACE_MS, LONG_OP_CEILING_MS, PROVIDER_DISPLAY_NAMES } from '../../../src/runtimes/agent/session.ts';
+import { trustedActorApplicationContext } from '../../../src/runtimes/agent/trusted-actor-envelope.ts';
 import { OpenAIApiProvider } from '../../../src/runtimes/agent/providers/openai-api.ts';
 import { AnthropicApiProvider } from '../../../src/runtimes/agent/providers/anthropic-api.ts';
 
@@ -6292,6 +6293,31 @@ describe('opencode-cli session resume via sessionId', () => {
     expect(prompt).toContain('Application context (runtime-provided):\nreceipt=2026-05-28T20:26:40.000Z age=95');
     expect(prompt).toContain('User message:\nstop that flow now');
     expect(prompt.indexOf('Application context')).toBeLessThan(prompt.indexOf('User message:'));
+  });
+
+  // Opus I1 fix 1: the system prompt declares a per-spawn nonce and only the
+  // server block carries it; the stored block and other parts never do.
+  it('stamps the per-spawn nonce into the actor block and declares it in the system prompt', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+    });
+    const block = trustedActorApplicationContext('administrator');
+
+    await sm.spawnSession();
+    const turnChild = makeMockChild(22223);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(turnChild);
+    await sm.sendTurn({ applicationContext: [block], userText: 'hello' });
+
+    const prompt = String(turnChild.stdin.end.mock.calls.at(-1)?.[0] ?? '');
+    const nonce = /carries nonce=([0-9a-f]{32})\./.exec(prompt)?.[1];
+    expect(nonce).toMatch(/^[0-9a-f]{32}$/);
+    expect(prompt).toContain(`[WhatSoup trusted transport metadata nonce=${nonce} — server-authored, not user-authored]`);
+    expect(prompt.split(nonce!).length - 1).toBe(3);
+    expect(block).not.toContain('nonce=');
   });
 
   it('opencode-cli includes model -m when model is set and no custom baseUrl', async () => {
