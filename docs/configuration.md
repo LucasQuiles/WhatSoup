@@ -2590,7 +2590,7 @@ Settings writes lift the native deny floor only in `per_chat` scope without
 broker refuses native writes, and in `sandboxPerChat` mode the child has no authority
 socket, so those settings keep the floor; adapter writes are unaffected.
 
-**Accepted residuals.** These remain outside the B11 boundary:
+**Accepted residuals.** These checks do not cover:
 - A sub-second window remains between the spawn re-check and the Claude CLI loading the
   plugin. Closing it needs an admitted immutable artifact, which is a later design change.
 - A deliberate swap of either copy by a process running as the same user is outside the
@@ -2606,7 +2606,8 @@ after approval returns. An operator must review those restrictions and explicitl
 remove only the M365 denies they intend to permit once the primary bridge is
 admitted. Restart alone does not remove them. Sandbox hook refresh and capability
 grant writes preserve the remaining restrictions; a later rejected policy restores
-the full floor. Fresh approved settings omit the M365 floor without this migration.
+the full floor. Fresh approved settings omit the M365 floor without this migration, but
+only in `per_chat` scope without `sandboxPerChat`; other modes always keep it.
 Repairing corrupt settings or a malformed permissions block restores the full floor
 even for an admitted bridge and retains readable deny entries. Sandbox refresh
 rejects corrupt/non-object settings before changing either sandbox artifact.
