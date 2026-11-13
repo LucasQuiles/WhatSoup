@@ -13,5 +13,8 @@ npm run strip-types-compat
 # converts into a truthful, bounded non-zero exit instead of silently stalling this gate.
 # The runner forwards `--coverage` (and push-gate's `--pool=forks`, which keeps CI's parallel workers)
 # to vitest and propagates its real exit code.
-bash scripts/run-with-pinned-node.sh scripts/full-suite-battery.ts --coverage "$@"
+# Gates keep machine-readable evidence; npm run coverage still offers HTML for inspection.
+bash scripts/run-with-pinned-node.sh scripts/full-suite-battery.ts --coverage \
+  --coverage.reporter=text --coverage.reporter=json \
+  --coverage.reporter=json-summary --coverage.reporter=lcovonly "$@"
 npm --prefix console run coverage:check -- --strict

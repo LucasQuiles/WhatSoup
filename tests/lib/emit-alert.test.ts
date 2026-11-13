@@ -1176,18 +1176,6 @@ describe('BOT ERRORS alert emission governance', () => {
       label: 'an element-access alias',
       body: `const legacyAccepted = result['ok']; audit(legacyAccepted); return { kind: 'dual_sink_failure', mayAdvance: false };`,
     },
-  ])('rejects legacy acceptance used as $label in the non-durable branch', ({ body }) => {
-    const findings = scanAlertEmissionGovernance([{
-      path: 'src/runtimes/agent/turn-finalizer.ts',
-      text: `const result = emitAlert('i', 's', 'sum', 'evidence');\nif (result.status !== 'durably_queued') { ${body} }\nreturn { kind: 'durable_failure_incident', mayAdvance: true };`,
-    }]);
-
-    expect(findings).toEqual([
-      expect.stringContaining("lacks a fail-closed status ===/!== 'durably_queued' decision"),
-    ]);
-  });
-
-  it.each([
     {
       label: 'a structured-result alias',
       body: `const legacy = result; advanceState(legacy.ok); return { kind: 'dual_sink_failure', mayAdvance: false };`,
@@ -1196,7 +1184,7 @@ describe('BOT ERRORS alert emission governance', () => {
       label: 'a destructured legacy flag',
       body: `const { ok } = result; advanceState(ok); return { kind: 'dual_sink_failure', mayAdvance: false };`,
     },
-  ])('rejects legacy acceptance obtained through $label', ({ body }) => {
+  ])('rejects legacy acceptance through $label in the non-durable branch', ({ body }) => {
     const findings = scanAlertEmissionGovernance([{
       path: 'src/runtimes/agent/turn-finalizer.ts',
       text: `const result = emitAlert('i', 's', 'sum', 'evidence');\nif (result.status !== 'durably_queued') { ${body} }\nreturn { kind: 'durable_failure_incident', mayAdvance: true };`,

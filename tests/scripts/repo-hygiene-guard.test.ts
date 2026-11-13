@@ -4,10 +4,11 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
-import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
+import { OGG_SIGNATURE, PNG_SIGNATURE, seededBinary as seededBinaryFixture, WOFF2_SIGNATURE } from '../helpers/seeded-binary.ts';
+import { cleanGitEnv, PUSH_BASE_OID_ENV } from '../../scripts/lib/guard-core.ts';
 import { canonicalizeBoundaryRun } from '../../scripts/lib/verification/boundary-run/shared.ts';
 import * as repoHygieneGuardModule from '../../scripts/repo-hygiene-guard.ts';
 import {
@@ -20,9 +21,11 @@ import {
   parseUnifiedDiffAddedLines,
   projectedFileSecretFixtureFiles,
   projectedFileSecretPatternCodes,
+  readCommitAuthors,
   run,
   scanAddedLines,
   scanBranchDiff,
+  scanCommitHistory,
   scanCommitMessage,
   scanCommitAuthors,
   scanContentLines,
@@ -173,6 +176,116 @@ describe('repo hygiene guard', () => {
       { filePath: 'tests/example.test.ts', line: 6, text: 'const second = true;' },
       { filePath: 'tests/example.test.ts', line: 24, text: 'const third = true;' },
     ]);
+  });
+
+  it('decodes Git-quoted target paths, so a tab, quote or non-ASCII name keeps its real extension', () => {
+    const lines = parseUnifiedDiffAddedLines([
+      '+++ "b/src/a\\tb.ts"',
+      '@@ -0,0 +1 @@',
+      '+const first = true;',
+      '+++ "b/src/caf\\303\\251.ts"',
+      '@@ -0,0 +1 @@',
+      '+const second = true;',
+      '+++ "b/src/q\\"u\\\\o.ts"',
+      '@@ -0,0 +1 @@',
+      '+const third = true;',
+      '',
+    ].join('\n'));
+
+    expect(lines.map((line) => line.filePath)).toEqual(['src/a\tb.ts', 'src/caf\u00e9.ts', 'src/q"u\\o.ts']);
+  });
+
+  it('carries each file\'s new blob id from its index line, and drops it at the next file header', () => {
+    const [oldBlob, newBlob, otherBlob] = ['a', 'b', 'c'].map((digit) => digit.repeat(40));
+    const lines = parseUnifiedDiffAddedLines([
+      'diff --git a/assets/one.png b/assets/one.png',
+      `index ${oldBlob}..${newBlob} 100644`,
+      '+++ b/assets/one.png',
+      '@@ -1 +1 @@',
+      `+index ${otherBlob}..${otherBlob}`,
+      'diff --cc assets/two.png',
+      `index ${oldBlob},${newBlob}..${otherBlob}`,
+      '+++ b/assets/two.png',
+      '@@ -0,0 +1 @@',
+      '+second',
+      'diff --git a/assets/three.png b/assets/three.png',
+      'new file mode 100644',
+      `index ${'0'.repeat(40)}..${otherBlob}`,
+      '+++ b/assets/three.png',
+      '@@ -0,0 +1 @@',
+      '+third',
+      'diff --git a/assets/four.png b/assets/four.png',
+      '+++ b/assets/four.png',
+      '@@ -0,0 +1 @@',
+      '+fourth',
+      '',
+    ].join('\n'));
+
+    // two.png: a combined header drops one.png's blob, and its index line is not read.
+    // four.png: a file header with no index line drops three.png's blob.
+    expect(lines.map((line) => [line.filePath, line.blob])).toEqual([
+      ['assets/one.png', newBlob],
+      ['assets/two.png', undefined],
+      ['assets/three.png', otherBlob],
+      ['assets/four.png', undefined],
+    ]);
+  });
+
+  it('reads an added line whose own text starts with ++ as content while its hunk lasts, not as a file header', () => {
+    const lines = parseUnifiedDiffAddedLines([
+      '+++ b/src/a.ts',
+      '@@ -0,0 +1,2 @@',
+      '+++ b/src/fake.ts',
+      '+second',
+      '+++ b/src/next.ts',
+      '@@ -0,0 +1 @@',
+      '+++ third',
+      '',
+    ].join('\n'));
+
+    expect(lines.map((line) => [line.filePath, line.line, line.text])).toEqual([
+      ['src/a.ts', 1, '++ b/src/fake.ts'],
+      ['src/a.ts', 2, 'second'],
+      ['src/next.ts', 1, '++ third'],
+    ]);
+  });
+
+  it('flags a ++ line when staged, in the final diff, and in branch and advisory history', () => {
+    const repo = makeBranchRepo();
+    mkdirSync(join(repo, 'src'), { recursive: true });
+    writeFileSync(join(repo, 'src', 'plus.ts'), "++ export const phone = '+447123456789';\n");
+    git(repo, ['add', 'src/plus.ts']);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    expect(run(['--staged'], repo).map((issue) => issue.code)).toEqual(['operator-phone']);
+    git(repo, ['commit', '-m', 'test: a ++ line']);
+    expect(scanBranchDiff(repo, 'main').map((issue) => issue.code)).toEqual(['operator-phone']);
+    writeFileSync(join(repo, 'src', 'plus.ts'), '// clean\n');
+    commitAll(repo, 'test: remove the ++ line');
+    expect(scanBranchDiff(repo, 'main').map((issue) => issue.code)).toEqual(['operator-phone']);
+    expect(scanCommitHistory(repo, 5).map((issue) => issue.code)).toContain('operator-phone');
+  });
+
+  it('prints a file name with a newline or a terminal escape escaped', () => {
+    const repo = makeBranchRepo();
+    const filePath = 'src/a\nb\u001b[2K.ts';
+    mkdirSync(join(repo, 'src'), { recursive: true });
+    writeFileSync(join(repo, filePath), "export const phone = '+447123456789';\n");
+    git(repo, ['add', filePath]);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(run(['--staged'], repo).map((issue) => issue.filePath)).toEqual([filePath]);
+    const printed = error.mock.calls.map((call) => String(call[0]));
+    expect(printed.filter((line) => /[\u0000-\u001f\u007f-\u009f]/.test(line))).toEqual([]);
+    expect(printed.join('\n')).toContain('src/a\\nb\\x1b[2K.ts:1 operator-phone:');
+  });
+
+  it('splits lines as /\\r?\\n/ does: a CR goes only before a LF, and a last line needs no newline', () => {
+    const diff = '+++ b/src/a.ts\r\n@@ -0,0 +1,4 @@\r\n+first\r\n+second\r\r\n+\r\n+last\r';
+
+    expect(parseUnifiedDiffAddedLines(diff).map((line) => line.text)).toEqual(['first', 'second\r', '', 'last\r']);
+    expect(parseUnifiedDiffAddedLines(diff).map((line) => line.line)).toEqual([1, 2, 3, 4]);
   });
 
   it('flags focused tests and real-shaped group identifiers in staged added lines', () => {
@@ -952,6 +1065,223 @@ The migrated group was 1203631234567890@g.us.
 
     expect(issues.map((issue) => issue.code)).toEqual(['branch-history-sensitive-artifact']);
     expect(issues[0].message).toContain('branch history');
+  });
+
+  describe('lines in a file Git would print as a binary difference', () => {
+    const phoneLine = "export const phone = '+447123456789';\n";
+    const secretLine = 'WEBHOOK_SECRET=a3f1c9d2e84b076f5a192c3e7d408b1f\n';
+    const binaryMarkedRepo = () => {
+      const repo = makeBranchRepo();
+      writeFileSync(join(repo, '.gitattributes'), '*.ts -diff\n');
+      commitAll(repo, 'test: mark sources as binary');
+      mkdirSync(join(repo, 'src'), { recursive: true });
+      return repo;
+    };
+
+    it('flags a line the final branch diff adds, not only through the history scan', () => {
+      const repo = binaryMarkedRepo();
+      writeFileSync(join(repo, 'src', 'leak.ts'), phoneLine);
+      commitAll(repo, 'test: binary-marked branch fixture');
+
+      expect(gitOutput(repo, ['diff', 'main..HEAD', '--', 'src/leak.ts'])).toContain('Binary files');
+      const issues = scanBranchDiff(repo, 'main');
+      expect(issues.map((issue) => issue.code)).toEqual(['operator-phone']);
+      expect(issues[0].message).not.toContain('[branch history');
+    });
+
+    it('flags a secret-shaped line added and removed within the branch', () => {
+      const repo = binaryMarkedRepo();
+      writeFileSync(join(repo, 'src', 'transient.ts'), secretLine);
+      commitAll(repo, 'test: binary-marked transient fixture');
+      git(repo, ['rm', 'src/transient.ts']);
+      git(repo, ['commit', '-m', 'test: remove binary-marked transient fixture']);
+
+      const issues = scanBranchDiff(repo, 'main');
+      expect(issues.map((issue) => issue.code)).toEqual(['secret-assignment']);
+      expect(issues[0].message).toContain('[branch history');
+    });
+
+    it('flags a staged line', () => {
+      const repo = binaryMarkedRepo();
+      writeFileSync(join(repo, 'src', 'leak.ts'), phoneLine);
+      git(repo, ['add', 'src/leak.ts']);
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      expect(gitOutput(repo, ['diff', '--cached', '--', 'src/leak.ts'])).toContain('Binary files');
+      expect(run(['--staged'], repo).map((issue) => issue.code)).toEqual(['operator-phone']);
+    });
+
+    it('flags a secret-shaped line in the advisory history scan', () => {
+      const repo = binaryMarkedRepo();
+      writeFileSync(join(repo, 'src', 'transient.ts'), secretLine);
+      commitAll(repo, 'test: binary-marked history fixture');
+
+      expect(scanCommitHistory(repo, 5).map((issue) => issue.code)).toEqual(['secret-assignment']);
+    });
+  });
+
+  describe('real binary files read as text', () => {
+    // The seeded stand-in (tests/helpers/seeded-binary.ts: seed 0x3839, 524,288 bytes)
+    // carries an internal-label run and an email run, the shapes main's own screenshots
+    // produced when read as text.
+    const phoneLine = "export const phone = '+447123456789';\n";
+    const seededBinary = (signature: readonly number[]): Buffer =>
+      seededBinaryFixture(signature, [`${['B', '1'].join('-')} `, ['qz', 'kq.io'].join('@')]);
+    const quietRun = (argv: string[], repo: string) => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      return run(argv, repo);
+    };
+    const codesFor = (issues: { code: string; filePath?: string }[], filePath: string) =>
+      issues.filter((issue) => issue.filePath === filePath).map((issue) => issue.code);
+
+    it('skips a verified image or font at every scan, as main did, and scans the same bytes under an unlisted name', () => {
+      const repo = makeBranchRepo();
+      mkdirSync(join(repo, 'assets'), { recursive: true });
+      writeFileSync(join(repo, 'assets', 'shot.PNG'), seededBinary(PNG_SIGNATURE));
+      writeFileSync(join(repo, 'assets', 'font.woff2'), seededBinary(WOFF2_SIGNATURE));
+      writeFileSync(join(repo, 'assets', 'sound.ogg'), seededBinary(OGG_SIGNATURE));
+      writeFileSync(join(repo, 'assets', 'shot.dat'), seededBinary(PNG_SIGNATURE));
+      git(repo, ['add', 'assets']);
+
+      const staged = quietRun(['--staged'], repo);
+      expect(codesFor(staged, 'assets/shot.PNG')).toEqual([]);
+      expect(codesFor(staged, 'assets/font.woff2')).toEqual([]);
+      expect(codesFor(staged, 'assets/sound.ogg')).toEqual([]);
+      expect(codesFor(staged, 'assets/shot.dat')).toEqual(expect.arrayContaining(['internal-workstream-label', 'personal-email']));
+
+      git(repo, ['commit', '-m', 'test: binary fixtures']);
+      const branch = scanBranchDiff(repo, 'main');
+      expect(codesFor(branch, 'assets/shot.PNG')).toEqual([]);
+      expect(codesFor(branch, 'assets/font.woff2')).toEqual([]);
+      expect(codesFor(branch, 'assets/sound.ogg')).toEqual([]);
+      expect(codesFor(branch, 'assets/shot.dat')).toEqual(expect.arrayContaining(['internal-workstream-label', 'personal-email']));
+
+      const history = scanCommitHistory(repo, 5);
+      expect(codesFor(history, 'assets/shot.PNG')).toEqual([]);
+      expect(codesFor(history, 'assets/font.woff2')).toEqual([]);
+      expect(codesFor(history, 'assets/sound.ogg')).toEqual([]);
+      expect(codesFor(history, 'assets/shot.dat')).toContain('personal-email');
+    });
+
+    it.each([
+      ['a NUL byte in a source file', 'src/leak.ts', () => Buffer.concat([Buffer.from([0x0a, 0]), Buffer.from(`\n${phoneLine}`)])],
+      ['a text file under an image name', 'assets/leak.png', () => Buffer.from(phoneLine)],
+      ['an image name with a NUL but no signature', 'assets/leak.png', () => Buffer.concat([Buffer.from([0x0a, 0]), Buffer.from(`\n${phoneLine}`)])],
+      ['an image signature with no NUL', 'assets/leak.png', () => Buffer.concat([Buffer.from(PNG_SIGNATURE), Buffer.from(`\n${phoneLine}`)])],
+      ['an image signature and NUL under a source name', 'src/leak.ts', () => Buffer.concat([Buffer.from(PNG_SIGNATURE), Buffer.from([0, 0, 0, 0x0d]), Buffer.from(`\n${phoneLine}`)])],
+    ])('still flags %s when staged, in the final diff, and in branch and advisory history', (_label, filePath, bytes) => {
+      const repo = makeBranchRepo();
+      mkdirSync(join(repo, filePath, '..'), { recursive: true });
+      writeFileSync(join(repo, filePath), bytes());
+      git(repo, ['add', filePath]);
+
+      expect(codesFor(quietRun(['--staged'], repo), filePath)).toContain('operator-phone');
+      git(repo, ['commit', '-m', 'test: binary-route fixture']);
+      const final = scanBranchDiff(repo, 'main').filter((issue) => issue.filePath === filePath);
+      expect(final.map((issue) => issue.code)).toEqual(['operator-phone']);
+      expect(final[0].message).not.toContain('[branch history');
+
+      git(repo, ['rm', '-q', filePath]);
+      git(repo, ['commit', '-m', 'test: remove binary-route fixture']);
+      const history = scanBranchDiff(repo, 'main').filter((issue) => issue.filePath === filePath);
+      expect(history.map((issue) => issue.code)).toEqual(['operator-phone']);
+      expect(history[0].message).toContain('[branch history');
+      expect(codesFor(scanCommitHistory(repo, 5), filePath)).toContain('operator-phone');
+    });
+
+    it('flags text that replaces a verified image, from the new blob, and still flags it from history once the image is back', () => {
+      const repo = makeBranchRepo();
+      const filePath = 'assets/shot.png';
+      mkdirSync(join(repo, 'assets'), { recursive: true });
+      writeFileSync(join(repo, filePath), seededBinary(PNG_SIGNATURE));
+      commitAll(repo, 'test: image at the base');
+      git(repo, ['branch', '-f', 'main', 'HEAD']);
+
+      writeFileSync(join(repo, filePath), phoneLine);
+      git(repo, ['add', filePath]);
+      expect(codesFor(quietRun(['--staged'], repo), filePath)).toEqual(['operator-phone']);
+      git(repo, ['commit', '-m', 'test: text under the image name']);
+      expect(codesFor(scanBranchDiff(repo, 'main'), filePath)).toEqual(['operator-phone']);
+
+      writeFileSync(join(repo, filePath), seededBinary(PNG_SIGNATURE));
+      commitAll(repo, 'test: image back');
+      const history = scanBranchDiff(repo, 'main').filter((issue) => issue.filePath === filePath);
+      expect(history.map((issue) => issue.code)).toEqual(['operator-phone']);
+      expect(history[0].message).toContain('[branch history');
+      expect(codesFor(scanCommitHistory(repo, 5), filePath)).toEqual(['operator-phone']);
+    });
+  });
+
+  describe('branch-diff base in the push hook', () => {
+    // Hosted CI sets GITHUB_BASE_REF for the whole job; each case sets what it needs.
+    beforeEach(() => {
+      vi.stubEnv('GITHUB_BASE_REF', '');
+    });
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    // origin/main stands for any local base that already holds the branch's line.
+    const repoWithBaseHoldingTheLine = () => {
+      const repo = makeBranchRepo();
+      const liveBase = gitOutput(repo, ['rev-parse', 'main']);
+      mkdirSync(join(repo, 'src'), { recursive: true });
+      writeFileSync(join(repo, 'src', 'leak.ts'), "export const phone = '+447123456789';\n");
+      commitAll(repo, 'test: branch leak fixture');
+      git(repo, ['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+      return { repo, liveBase };
+    };
+
+    it('compares with the live push base, not a local base that already holds the line', () => {
+      const { repo, liveBase } = repoWithBaseHoldingTheLine();
+
+      expect(scanBranchDiff(repo)).toEqual([]);
+      vi.stubEnv(PUSH_BASE_OID_ENV, liveBase);
+      expect(scanBranchDiff(repo).map((issue) => issue.code)).toEqual(['operator-phone']);
+    });
+
+    it('refuses a --base that names another commit than the live push base', () => {
+      const { repo, liveBase } = repoWithBaseHoldingTheLine();
+      vi.stubEnv(PUSH_BASE_OID_ENV, liveBase);
+
+      expect(() => scanBranchDiff(repo, 'origin/main')).toThrow(`--base origin/main is not the live push base ${liveBase}`);
+      expect(scanBranchDiff(repo, 'main').map((issue) => issue.code)).toEqual(['operator-phone']);
+    });
+
+    // A candidate commit with a placeholder author, and a local origin/main advanced to it.
+    const repoWithBaseHoldingTheCandidate = () => {
+      const repo = makeBranchRepo();
+      const liveBase = gitOutput(repo, ['rev-parse', 'main']);
+      writeFileSync(join(repo, 'note.txt'), 'candidate\n');
+      git(repo, ['add', 'note.txt']);
+      git(repo, ['-c', 'user.name=WhatSoup Test', '-c', 'user.email=ci@example.invalid', 'commit', '-m', 'chore: candidate']);
+      git(repo, ['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+      return { repo, liveBase };
+    };
+
+    it('reads commit authors from the live push base, not a local origin/main advanced to the candidate', () => {
+      const { repo, liveBase } = repoWithBaseHoldingTheCandidate();
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      expect(readCommitAuthors(repo)).toEqual([]);
+      expect(run(['--commit-authors'], repo)).toEqual([]);
+      vi.stubEnv(PUSH_BASE_OID_ENV, liveBase);
+      expect(readCommitAuthors(repo).map((commit) => commit.subject)).toEqual(['chore: candidate']);
+      expect(run(['--commit-authors'], repo).map((issue) => issue.code)).toEqual(['placeholder-commit-author']);
+    });
+
+    it.each([
+      ['a GITHUB_BASE_REF that names another commit', (liveBase: string) => { vi.stubEnv(PUSH_BASE_OID_ENV, liveBase); vi.stubEnv('GITHUB_BASE_REF', 'main'); }, 'GITHUB_BASE_REF origin/main is not the live push base'],
+      ['an abbreviated live push base', (liveBase: string) => { vi.stubEnv(PUSH_BASE_OID_ENV, liveBase.slice(0, 12)); }, `${PUSH_BASE_OID_ENV} is not a full id of a commit`],
+    ])('refuses the commit-author scan for %s', (_label, setUp, refusal) => {
+      const { repo, liveBase } = repoWithBaseHoldingTheCandidate();
+      setUp(liveBase);
+
+      expect(() => readCommitAuthors(repo)).toThrow(refusal);
+    });
   });
 
   // Subprocess-heavy fixture repos brush the global 10s budget under host

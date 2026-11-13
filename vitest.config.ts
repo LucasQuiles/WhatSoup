@@ -47,7 +47,7 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       include: ['src/**/*.ts', 'src/**/*.tsx'],
-      reporter: ['text', 'html', 'json', 'json-summary'],
+      reporter: ['text', 'html', 'json', 'json-summary', 'lcovonly'],
       reportsDirectory: 'coverage',
       exclude: [
         ...coverageConfigDefaults.exclude,
@@ -61,6 +61,8 @@ export default defineConfig({
     },
     env: {
       INSTANCE_CONFIG: '',
+      // A push sets the live push base for its gate steps; fixture repos never hold it.
+      WHATSOUP_PUSH_BASE_OID: '',
     },
     // vitest 4 removed test.poolOptions; the per-pool maxForks/maxThreads cap is
     // now the unified top-level maxWorkers option (applies to whichever pool runs).

@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { linkSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join as joinPath } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -107,13 +107,13 @@ describe('anonymize-private-literals', () => {
     ]));
   });
 
-  it('supports report-only and write modes for directory arguments', () => {
+  it.each(['fixture.ts', 'fixture with spaces.ts', 'fixture\nname.ts'])('supports report-only and write modes for directory arguments containing %s', (name) => {
     const dir = tmp.make('anonymizer');
     git(dir, ['init']);
     mkdirSync(joinPath(dir, 'nested'));
     const rawPhone = join(['1845', '978', '0919']);
-    writeFileSync(joinPath(dir, 'nested', 'fixture.ts'), `const phone = "${rawPhone}";\n`);
-    git(dir, ['add', 'nested/fixture.ts']);
+    writeFileSync(joinPath(dir, 'nested', name), `const phone = "${rawPhone}";\n`);
+    git(dir, ['add', `nested/${name}`]);
 
     const script = joinPath(process.cwd(), 'scripts/anonymize-private-literals.ts');
     const hookEnv = {
@@ -133,9 +133,147 @@ describe('anonymize-private-literals', () => {
 
     expect(report.status).toBe(1);
     expect(JSON.parse(report.stdout)).toMatchObject({ ok: false, write: false, files: 1 });
-    expect(readFileSync(joinPath(dir, 'nested', 'fixture.ts'), 'utf8')).toContain(rawPhone);
+    expect(readFileSync(joinPath(dir, 'nested', name), 'utf8')).toBe(`const phone = "${rawPhone}";\n`);
 
     execFileSync('node', ['--experimental-strip-types', script, '--write', 'nested'], { cwd: dir, env: hookEnv });
-    expect(readFileSync(joinPath(dir, 'nested', 'fixture.ts'), 'utf8')).toContain('15555550001');
+    expect(readFileSync(joinPath(dir, 'nested', name), 'utf8')).toBe('const phone = "15555550001";\n');
+  });
+
+  it.each([
+    { kind: '', newline: '\n' },
+    { kind: 'RSA ', newline: '\r\n' },
+    { kind: 'EC ', newline: '\n' },
+    { kind: 'OPENSSH ', newline: '\n' },
+    { kind: 'ENCRYPTED ', newline: '\\n' },
+    { kind: 'DSA ', newline: '\n' },
+  ])('removes the entire $kind private-key block', ({ kind, newline }) => {
+    const body = 'fixture-key-body-that-must-disappear';
+    const key = [join(['-----BEGIN ', kind, 'PRIVATE KEY-----']), body,
+      join(['-----END ', kind, 'PRIVATE KEY-----'])].join(newline);
+    const result = anonymizeText(`before\n${key}\nafter`);
+
+    expect(result.text).toBe('before\n<private-key>\nafter');
+    expect(result.replacements).toEqual([
+      { code: 'private-key', count: 1, fingerprint: expect.stringMatching(/^[a-f0-9]{12}$/), replacement: '<private-key>' },
+    ]);
+    expect(JSON.stringify(result)).not.toContain(body);
+    expect(anonymizeText(result.text)).toEqual({ text: result.text, replacements: [] });
+  });
+
+  it('refuses a truncated key without writing or printing its body', () => {
+    const dir = tmp.make('truncated-key');
+    git(dir, ['init']);
+    const text = join(['-----BEGIN ', 'RSA PRIVATE KEY-----\n', 'fixture-unclosed-key-body\n']);
+    const file = joinPath(dir, 'fixture.txt');
+    writeFileSync(file, text);
+    const result = spawnSync(process.execPath, [joinPath(process.cwd(), 'scripts/anonymize-private-literals.ts'), '--write', '--json', 'fixture.txt'], {
+      cwd: dir, env: cleanGitEnv(), encoding: 'utf8', timeout: 5_000,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Unterminated private-key block');
+    expect(result.stdout + result.stderr).not.toContain('fixture-unclosed-key-body');
+    expect(readFileSync(file, 'utf8')).toBe(text);
+  });
+
+  it.each(['parent', 'nested-parent', 'absolute', 'symlink-file', 'symlink-directory', 'hardlink', 'tracked-symlink'])('refuses %s paths before rewriting any file', (kind) => {
+    const root = tmp.make('path-boundary');
+    const dir = joinPath(root, 'repo');
+    mkdirSync(dir);
+    mkdirSync(joinPath(dir, 'nested'));
+    git(dir, ['init']);
+    const text = `phone=${join(['1845', '978', '0919'])}\n`;
+    const outside = joinPath(root, 'outside.txt');
+    const safe = joinPath(dir, 'a-safe.txt');
+    writeFileSync(outside, text);
+    writeFileSync(safe, text);
+    let argument = '../outside.txt';
+    if (kind === 'nested-parent') argument = 'nested/../../outside.txt';
+    if (kind === 'absolute') argument = outside;
+    if (kind === 'symlink-file' || kind === 'tracked-symlink') {
+      symlinkSync(outside, joinPath(dir, 'z-alias.txt'));
+      argument = 'z-alias.txt';
+    }
+    if (kind === 'symlink-directory') {
+      symlinkSync(root, joinPath(dir, 'z-alias'));
+      argument = 'z-alias/outside.txt';
+    }
+    if (kind === 'hardlink') {
+      linkSync(outside, joinPath(dir, 'z-alias.txt'));
+      argument = 'z-alias.txt';
+    }
+    if (kind === 'tracked-symlink') git(dir, ['add', 'a-safe.txt', argument]);
+    const paths = kind === 'tracked-symlink' ? [] : ['a-safe.txt', argument];
+    const result = spawnSync(process.execPath, [joinPath(process.cwd(), 'scripts/anonymize-private-literals.ts'), '--write', '--json', ...paths], {
+      cwd: dir, env: cleanGitEnv(), encoding: 'utf8', timeout: 5_000,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/repository-relative|symlink|hardlink/);
+    expect(readFileSync(outside, 'utf8')).toBe(text);
+    expect(readFileSync(safe, 'utf8')).toBe(text);
+    expect(result.stdout + result.stderr).not.toContain(text.trim());
+  });
+
+  it('writes a complete key as one placeholder without retaining its body or trailing bytes', () => {
+    const dir = tmp.make('complete-key');
+    git(dir, ['init']);
+    const file = joinPath(dir, 'fixture.txt');
+    const text = join(['before\n-----BEGIN ', 'RSA PRIVATE KEY-----\nfixture-key-body\n-----END ', 'RSA PRIVATE KEY-----\nafter\n']);
+    writeFileSync(file, text);
+    const result = spawnSync(process.execPath, [joinPath(process.cwd(), 'scripts/anonymize-private-literals.ts'), '--write', '--json', 'fixture.txt'], {
+      cwd: dir, env: cleanGitEnv(), encoding: 'utf8', timeout: 5_000,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ write: true, files: 1 });
+    expect(readFileSync(file, 'utf8')).toBe('before\n<private-key>\nafter\n');
+    expect(result.stdout + result.stderr).not.toContain('fixture-key-body');
+  });
+
+  it.each(['open', 'read'])('rejects a symlink replacement after %s without changing its target', (phase) => {
+    const root = tmp.make('swapped-file');
+    const dir = joinPath(root, 'repo');
+    mkdirSync(dir);
+    git(dir, ['init']);
+    const file = joinPath(dir, 'fixture.txt');
+    const outside = joinPath(root, 'outside.txt');
+    const text = `phone=${join(['1845', '978', '0919'])}\n`;
+    writeFileSync(file, text);
+    writeFileSync(outside, text);
+    const preload = joinPath(root, 'swap.mjs');
+    writeFileSync(preload, `import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const open = fs.openSync, read = fs.readFileSync;
+let selected;
+function swap() {
+  fs.unlinkSync(${JSON.stringify(file)});
+  fs.symlinkSync(${JSON.stringify(outside)}, ${JSON.stringify(file)});
+  process.stderr.write('SWAP_INJECTED\\n');
+}
+fs.openSync = (path, ...args) => {
+  const fd = open(path, ...args);
+  if (path === ${JSON.stringify(file)}) { selected = fd; if (${JSON.stringify(phase)} === 'open') swap(); }
+  return fd;
+};
+fs.readFileSync = (path, ...args) => {
+  const content = read(path, ...args);
+  if (path === selected && ${JSON.stringify(phase)} === 'read') swap();
+  return content;
+};
+syncBuiltinESMExports();
+`);
+    const result = spawnSync(process.execPath, ['--import', preload, joinPath(process.cwd(), 'scripts/anonymize-private-literals.ts'), '--write', 'fixture.txt'], {
+      cwd: dir, env: cleanGitEnv(), encoding: 'utf8', timeout: 5_000,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('SWAP_INJECTED');
+    expect(result.stderr).toContain('Anonymizer refuses symlink paths');
+    expect(readFileSync(outside, 'utf8')).toBe(text);
   });
 });

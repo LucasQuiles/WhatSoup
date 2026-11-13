@@ -5,9 +5,10 @@
 //   node scripts/check-shadow-baseline.mjs --update  -> regenerate the baseline file
 // The baseline is the C2 burn-down counter; lowering counts should be accompanied by
 // a baseline update in the same commit so the ratchet only ever tightens.
-import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -27,6 +28,12 @@ function argValue(flag) {
 const baselineArg = argValue('--baseline');
 const baselinePath = baselineArg ? resolve(baselineArg) : resolve(consoleRoot, 'lint-shadow-baseline.json');
 const resultsJsonArg = argValue('--results-json');
+const withInventories = process.argv.includes('--with-inventories');
+
+if (withInventories && (resultsJsonArg || process.argv.includes('--update'))) {
+  console.error('FAIL: --with-inventories requires a fresh scan and cannot update baselines');
+  process.exit(2);
+}
 
 // Safety: a fixture results file must never be able to rewrite a baseline. When
 // results are injected, --update is refused outright so the prod baseline (or any
@@ -41,15 +48,15 @@ if (resultsJsonArg) {
   raw = readFileSync(resolve(resultsJsonArg), 'utf8');
 } else {
   try {
-    raw = execFileSync('npx', ['eslint', '.', '-c', 'eslint.config.shadow.mjs', '--format', 'json'], {
+    raw = execFileSync(process.execPath, [resolve(consoleRoot, 'node_modules/eslint/bin/eslint.js'), '.', '-c', 'eslint.config.shadow.mjs', '--format', 'json'], {
       cwd: consoleRoot,
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
       timeout: 30_000,
     });
   } catch (err) {
-    // eslint exits non-zero when errors (not warnings) exist; its stdout still carries the JSON
-    if (err.stdout) raw = err.stdout;
+    // Only lint findings have usable JSON; operational failures are inconclusive.
+    if (err.status === 1 && !err.signal && err.stdout) raw = err.stdout;
     else throw err;
   }
 }
@@ -114,3 +121,23 @@ if (improved.length) {
   process.exit(1);
 }
 console.log(`shadow baseline OK: ${total} warnings (ceiling ${baseline.total})`);
+
+if (withInventories) {
+  const scratch = mkdtempSync(join(tmpdir(), 'whatsoup-shadow-'));
+  try {
+    const report = join(scratch, 'eslint.json');
+    writeFileSync(report, raw, { mode: 0o600 });
+    for (const script of ['check-shadow-frozen-inventory.mjs', 'check-raw-form-control-inventory.mjs']) {
+      const result = spawnSync(process.execPath, [join(here, script), '--eslint-json', report], {
+        cwd: consoleRoot, stdio: 'inherit', timeout: 30_000,
+      });
+      if (result.error || result.signal || result.status !== 0) {
+        console.error(`FAIL: ${script}: ${result.error?.message ?? result.signal ?? result.status}`);
+        process.exitCode = result.status && result.status > 0 ? result.status : 2;
+        break;
+      }
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}

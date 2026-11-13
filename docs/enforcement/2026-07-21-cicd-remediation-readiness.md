@@ -1,6 +1,11 @@
 # WhatSoup CI/CD Remediation-Readiness Specs — R-03 / R-04 / R-05
 
-**Status:** proposals only — every change below is **OWNER-GATED**. Nothing in this
+> Historical snapshot of 2026-07-21, not current operating instructions. Source
+> observations and proposed changes below apply to the pinned revision only.
+> Current triggers, required contexts and activation checks are maintained in
+> [Testing paths](../testing.md) and the [merge gate](merge-gate.md).
+
+**Status at the audit date:** proposals only — every change below is **OWNER-GATED**. Nothing in this
 document has been applied. This analyst is strictly read-only (no repo edits, no
 commit, no push).
 
@@ -77,9 +82,9 @@ Per-site application (14 edits):
 - **whatsoup-guard.yml** — L30 checkout (`- uses:` inline form), L31 setup-node
   (`- uses:` inline form).
 
-### merge_group assessment
+### merge_group assessment at the 2026-07-21 anchor
 
-- **OBSERVED:** no workflow currently declares a `merge_group:` trigger; there is no
+- **OBSERVED at the anchor:** no workflow declares a `merge_group:` trigger; there is no
   GitHub merge queue wired. `quality.yml` triggers on `pull_request` + `push:main`;
   `whatsoup-guard.yml` on `pull_request`/`push` filtered to `tools/whatsoup_guard/**`;
   `tag-release-gate.yml` on `push: tags: v*`.
