@@ -38,10 +38,18 @@ The helper also runs no other program: sudo can keep the caller's PATH, so a
 program named without a path would be one the caller chose, run as root.
 
 The caller can signal its own sudo, which relays the signal, and its resource
-limits carry over. run() therefore blocks the relayed signals and raises the
-CPU limit first; any other interruption re-protects what it can and exits 3.
+limits carry over. run() therefore first blocks, until the process exits,
+every signal except SIGKILL and SIGSTOP, which cannot be blocked, and the
+fault signals SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGTRAP, SIGABRT and SIGSYS,
+which report the helper's own crash; then it raises the CPU limit. A failure raised
+during the change re-protects what it can; it exits 2 when the plist is
+confirmed as found and 3 otherwise, and always 3 for an interruption raised as
+an exception, such as KeyboardInterrupt. A death by one of the signals left
+deliverable re-protects nothing; activation (apply.ts) reports it, like every
+result but exit 0 with the new bytes in place or exit 2, as unconfirmed.
 """
 import ctypes
+import errno
 import fcntl
 import hashlib
 import json
@@ -68,20 +76,29 @@ _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 # O_NONBLOCK: opening a FIFO planted under the plist name must not block the helper.
 _PLIST = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 RECOVERY_INCOMPLETE_EXIT = 3
-# Signals the sudo caller can relay to the helper (sudo passes on what it receives), or that a
-# hangup or Ctrl-C sends. Their default action would end the run between clearing uchg and
-# setting it again, with no exit 3.
-RELAYED_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM)
+# Signals run() blocks from its start until the process exits. sudo relays what it receives, so
+# the caller can send the helper any signal, and a hangup, Ctrl-C or Ctrl-Z sends one too; a
+# default action that ends or stops the run between clearing uchg and setting it again leaves
+# the plist unprotected with no exit 3. Left deliverable: SIGKILL and SIGSTOP, which cannot be
+# blocked, and the fault signals, which report the helper's own crash.
+_DELIVERABLE_SIGNALS = frozenset((signal.SIGKILL, signal.SIGSTOP, signal.SIGSEGV, signal.SIGBUS, signal.SIGFPE,
+                                  signal.SIGILL, signal.SIGTRAP, signal.SIGABRT, signal.SIGSYS))
+SHIELDED_SIGNALS = frozenset(signal.valid_signals()) - _DELIVERABLE_SIGNALS
 # CPU seconds the run keeps beyond what it has used: resource limits carry over from the
 # caller, and the kernel kills a process at its hard CPU limit. A normal run needs well under one.
 CPU_SECONDS = 60
+# <sys/acl.h>
+ACL_TYPE_EXTENDED = 0x00000100
 
-# The interpreter's os module has no dir_fd form of rename or unlink and no
-# fchflags or flistxattr on macOS, so these come from libc directly.
+# The interpreter's os module has no dir_fd form of rename or unlink, and no fchflags,
+# flistxattr or ACL reader on macOS, so these come from libc directly.
 _libc = ctypes.CDLL(None, use_errno=True)
 _libc.fchflags.argtypes = [ctypes.c_int, ctypes.c_uint]
 _libc.flistxattr.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_int]
 _libc.flistxattr.restype = ctypes.c_ssize_t
+_libc.acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+_libc.acl_get_fd_np.restype = ctypes.c_void_p
+_libc.acl_free.argtypes = [ctypes.c_void_p]
 _libc.renameat.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p]
 _libc.unlinkat.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
 
@@ -139,6 +156,27 @@ def _identity(fd):
     return info.st_dev, info.st_ino
 
 
+def has_acl(fd):
+    """Does the opened file carry an extended ACL? The xattr list does not show one, so libc is asked.
+
+    NULL with ENOENT means none; any other failure refuses.
+    """
+    ctypes.set_errno(0)
+    acl = _libc.acl_get_fd_np(fd, ACL_TYPE_EXTENDED)
+    if acl:
+        _libc.acl_free(acl)
+        return True
+    if ctypes.get_errno() != errno.ENOENT:
+        raise RuntimeError('plist ACL could not be read')
+    return False
+
+
+def refuse_acl(fd):
+    # Darwin applies an ACL before the mode bits, and the readability check reads mode bits only.
+    if has_acl(fd):
+        raise RuntimeError('plist must carry no ACL')
+
+
 def fd_metadata(fd):
     info = os.fstat(fd)
     # One link only: a second name could make root act on a file outside the folder.
@@ -146,6 +184,7 @@ def fd_metadata(fd):
         raise RuntimeError('plist must be a regular file with a single link')
     if _checked(_libc.flistxattr(fd, None, 0, 0)):
         raise RuntimeError('extended attributes require an explicit preservation path')
+    refuse_acl(fd)
     return {'uid': info.st_uid, 'gid': info.st_gid, 'mode': stat.S_IMODE(info.st_mode),
             'flags': info.st_flags}
 
@@ -166,7 +205,8 @@ def target_metadata(fd, owner_uid, reader):
 
     Root-owned, single-link and flagged immutable (or not flagged at all): see
     the module docstring for why this pins the inode to the folder's name.
-    Readable by the caller, so root reads nothing the caller could not.
+    Readable by the caller, so root reads nothing the caller could not; with no
+    ACL (fd_metadata refuses one), the mode bits alone decide that.
     """
     metadata = fd_metadata(fd)
     if metadata['uid'] != owner_uid:
@@ -225,6 +265,9 @@ def create_temporary(folder_fd, name, data, before):
     temporary = '.' + name + '.activate-' + secrets.token_hex(8)
     fd = os.open(temporary, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder_fd)
     try:
+        # An inheritable entry on the caller's folder would put the caller's ACL on root's new plist;
+        # refused here, before any change, rather than after the rename.
+        refuse_acl(fd)
         _write_all(fd, data)
         os.fsync(fd)
         os.fchown(fd, before['uid'], before['gid'])
@@ -334,8 +377,8 @@ def replace_at(folder_fd, name, expected_sha, replacement, expected_metadata, re
         temporary, temp_fd = create_temporary(folder_fd, name, replacement, before)
         assert_current(folder_fd, name, target, original, before)
         assert_same_folder(folder_fd, reopen_folder)
-        # From the flag clear on, any exception or interruption (run() blocks relayed signals, but
-        # not MemoryError or an injected KeyboardInterrupt) re-protects first and is reported.
+        # From the flag clear on, any exception (run() blocks SHIELDED_SIGNALS, but MemoryError or an
+        # injected KeyboardInterrupt still arrives) re-protects first and is reported.
         cleared = False
         try:
             if before['flags']:
@@ -621,13 +664,14 @@ def ensure_cpu_time(seconds=CPU_SECONDS):
 
 
 def shield():
-    """Hold relayed signals for the rest of the run and keep enough CPU time, so nothing the caller sends ends it mid-change.
+    """Block SHIELDED_SIGNALS for the rest of the run and keep enough CPU time, so no blockable signal ends or stops it mid-change.
 
     The signals stay blocked until the process exits, which discards them: a
-    run that completes reports its own status. SIGKILL cannot be blocked;
-    activation therefore treats any result but exit 0 or 2 as unconfirmed.
+    run that completes reports its own status. SIGKILL, SIGSTOP and the fault
+    signals still arrive; activation therefore treats any result but exit 0
+    with the new bytes in place or exit 2 as unconfirmed.
     """
-    signal.pthread_sigmask(signal.SIG_BLOCK, RELAYED_SIGNALS)
+    signal.pthread_sigmask(signal.SIG_BLOCK, SHIELDED_SIGNALS)
     ensure_cpu_time()
 
 

@@ -9,6 +9,7 @@ from pathlib import Path
 import plistlib
 import pwd
 import resource
+import signal
 import stat
 import subprocess
 import sys
@@ -572,6 +573,42 @@ def test_the_matching_permission_class_alone_decides_readability(tmp_path, monke
     assert path.read_bytes() == b'new'
 
 
+def _acl(path, entry):
+    """Add one ACL entry with the native tool; the test user owns `path`, so this needs no privilege."""
+    subprocess.run(['/bin/chmod', '+a', entry, str(path)], check=True)
+
+
+def test_refuses_a_plist_with_an_acl_before_reading(tmp_path, monkeypatch):
+    # Codex Important: Darwin applies an ACL deny entry before the mode bits, so a 0644 plist can be
+    # unreadable to the caller. The xattr list does not show ACLs; the helper asks libc on the opened inode.
+    # (`user:nobody`: an entry naming the test user would make the test's own open fail first.)
+    path = tmp_path / 'p'; path.write_bytes(b'old'); path.chmod(0o644)
+    before = p.metadata(path)
+    _acl(path, 'user:nobody deny read')
+    reads = _record_reads(monkeypatch)
+    with pytest.raises(RuntimeError, match='ACL'):
+        p.replace(path, p.digest(b'old'), b'new', before, **OWN)
+    assert reads == [] and path.read_bytes() == b'old'
+    assert sorted(x.name for x in tmp_path.iterdir()) == ['p']
+
+
+@pytest.mark.skipif(not hasattr(os, 'chflags'), reason='file flags exist only on BSD and macOS')
+def test_a_folder_whose_acl_new_files_inherit_is_refused_before_any_change(tmp_path):
+    # The caller owns the folder: an inheritable entry there would put its ACL on root's new plist.
+    folder = tmp_path / 'agents'; folder.mkdir()
+    path, before = _protected_plist(folder)
+    _acl(folder, 'user:nobody deny delete,file_inherit')
+    try:
+        with pytest.raises(RuntimeError, match='ACL') as refused:
+            p.replace(path, p.digest(b'old'), b'new', before, **OWN)
+        assert refused.type is RuntimeError  # refused as found, not RecoveryIncomplete
+        assert path.read_bytes() == b'old' and _flags(path) == stat.UF_IMMUTABLE
+        assert sorted(x.name for x in folder.iterdir()) == ['p']
+    finally:
+        for name in os.listdir(folder):
+            os.chflags(folder / name, 0)
+
+
 @pytest.mark.skipif(not hasattr(os, 'chflags'), reason='file flags exist only on BSD and macOS')
 def test_the_names_of_an_immutable_inode_are_frozen(tmp_path):
     # The race proof rests on this kernel behaviour: while UF_IMMUTABLE is set, even the
@@ -786,8 +823,9 @@ def test_an_interruption_just_after_clearing_protection_re_protects_the_original
         os.chflags(path, 0)
 
 
-# A child process sends itself the signals sudo relays (SIGTERM, SIGHUP, SIGINT, SIGQUIT)
-# once the target's uchg is cleared, as in Opus probe r2. Only a child can take real signals.
+# A child process sends itself signals the caller can make sudo relay once the target's uchg is
+# cleared, as in Opus probe r2 (and m-1: USR1 killed, TSTP stopped a run). SIGTERM goes first, so
+# the unshielded child dies with -15. Only a child can take real signals.
 _INTERRUPTED_CHILD = '''
 import importlib.util, os, signal, sys
 spec = importlib.util.spec_from_file_location('protected_plist', sys.argv[1])
@@ -797,7 +835,8 @@ path = sys.argv[2]
 before = p.metadata(path)
 real_rename = p.rename_in
 def interrupted(*args):
-    for number in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGQUIT):
+    for number in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGUSR1, signal.SIGUSR2,
+                   signal.SIGALRM, signal.SIGTSTP, signal.SIGTTIN, signal.SIGTTOU):
         os.kill(os.getpid(), number)
     return real_rename(*args)
 p.rename_in = interrupted
@@ -809,8 +848,21 @@ print('completed')
 
 
 def _interrupted_child(path, mode):
+    # Its own process group in this session: the kernel discards a stop signal sent to an orphaned
+    # group (a new session), and then TSTP would prove nothing.
     return subprocess.run([sys.executable, '-I', '-B', '-c', _INTERRUPTED_CHILD, p.__file__, str(path), mode],
-                          capture_output=True, text=True, timeout=60)
+                          capture_output=True, text=True, timeout=60, preexec_fn=os.setpgrp)
+
+
+def test_the_shield_blocks_every_signal_but_kill_stop_and_the_fault_signals():
+    # Opus m-1: blocking only HUP, INT, QUIT and TERM left USR1, USR2 and ALRM killing a run after
+    # the clear and TSTP stopping it. Every signal whose default ends or stops the process is held.
+    for name in ('SIGHUP', 'SIGINT', 'SIGQUIT', 'SIGTERM', 'SIGUSR1', 'SIGUSR2', 'SIGALRM', 'SIGVTALRM', 'SIGPROF',
+                 'SIGXCPU', 'SIGXFSZ', 'SIGPIPE', 'SIGEMT', 'SIGTSTP', 'SIGTTIN', 'SIGTTOU'):
+        assert getattr(signal, name) in p.SHIELDED_SIGNALS, name
+    # Left deliverable: KILL and STOP cannot be blocked, and the fault signals report the helper's own crash.
+    for name in ('SIGKILL', 'SIGSTOP', 'SIGSEGV', 'SIGBUS', 'SIGFPE', 'SIGILL', 'SIGTRAP', 'SIGABRT', 'SIGSYS'):
+        assert getattr(signal, name) not in p.SHIELDED_SIGNALS, name
 
 
 @pytest.mark.skipif(not hasattr(os, 'chflags'), reason='file flags exist only on BSD and macOS')
