@@ -170,7 +170,7 @@ function phraseUnitRanges(skeleton: string, optional: readonly boolean[]): Array
   for (let unit = 0; unit < skeleton.length; unit++) {
     const letter = skeleton[unit];
     if (!live && letter !== MARKER_SKELETON[0]) continue;
-    const next = optional[unit] && live ? [...starts] : new Array<number>(length).fill(-1);
+    const next: number[] = optional[unit] && live ? [...starts] : new Array<number>(length).fill(-1);
     let completedFrom = -1;
     if (live) {
       for (let matched = 1; matched < length; matched++) {
