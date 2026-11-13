@@ -260,7 +260,9 @@ What the helper guarantees:
   The other blocked signals (SIGURG, SIGCONT, SIGCHLD, SIGIO, SIGWINCH,
   SIGINFO) are discarded by default and keep their disposition. It also raises
   its CPU limit. When the work ends, it restores the mask and the
-  dispositions; protection is back in place by then.
+  dispositions. A signal can then end the helper again, but only after the
+  change or its recovery has finished; activation reports that death as
+  unconfirmed.
 - Signals still deliverable during the change: SIGKILL and SIGSTOP, which no
   process can block, catch or ignore, and SIGABRT and the fault signals, which
   report the helper's own crash but which the bot user can also send through

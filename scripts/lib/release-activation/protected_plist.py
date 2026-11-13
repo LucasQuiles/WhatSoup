@@ -694,11 +694,11 @@ def shield():
 
     Blocks SHIELDED_SIGNALS in this thread, then sets IGNORED_SIGNALS to
     SIG_IGN for the whole process, which discards them on arrival in any
-    thread. On the way out it restores the mask, then the dispositions; from
-    then on a signal can end the run again, after main() has put protection
-    back. SIGKILL, SIGSTOP, SIGABRT and the fault signals still arrive;
-    activation therefore treats any result but exit 0 with the new bytes in
-    place or exit 2 as unconfirmed.
+    thread. On the way out it restores the mask, then the dispositions. A
+    signal can then end the process again, but only once main() has finished
+    the change or its recovery. SIGKILL, SIGSTOP, SIGABRT and the fault signals
+    arrive throughout. Activation therefore treats any result but exit 0 with
+    the new bytes in place or exit 2 as unconfirmed, a signal death included.
     """
     previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, SHIELDED_SIGNALS)
     previous = {}
