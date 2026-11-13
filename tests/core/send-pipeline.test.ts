@@ -160,6 +160,56 @@ describe('executeSend outbound audit lifecycle', () => {
     expect(row).toEqual({ outcome_code: 'submitted', provider_submission_count: 1 });
   });
 
+  it('keeps an audit intent open when transport defers work to a durable queue', async () => {
+    const { createOutboundSendsWriter } = await import('../../src/core/outbound-sends.ts');
+    const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
+    const pipeline = createSendPipeline({ resolver: chatResolver, auditWriter: writer, caller: 'mcp' });
+
+    const result = await pipeline.executeSend(
+      { chatJid: 'raw-chat@s.whatsapp.net', text: 'queued answer' },
+      async (_prepared, context) => {
+        expect(context.deferAudit()).toBeDefined();
+        return { auditDisposition: 'deferred' as const };
+      },
+    );
+
+    expect(result).toEqual({ auditDisposition: 'deferred' });
+    const row = db.raw.prepare(`
+      SELECT outcome_code, failure_stage, mutation_state, provider_submission_count, completed_at
+      FROM outbound_sends
+    `).get() as Record<string, unknown>;
+    expect(row).toEqual({
+      outcome_code: 'intent',
+      failure_stage: 'not_started',
+      mutation_state: 'not_started',
+      provider_submission_count: 0,
+      completed_at: null,
+    });
+  });
+
+  it('records an intentionally suppressed transport as definitely not sent', async () => {
+    const { createOutboundSendsWriter } = await import('../../src/core/outbound-sends.ts');
+    const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
+    const pipeline = createSendPipeline({ resolver: chatResolver, auditWriter: writer, caller: 'mcp' });
+
+    await pipeline.executeSend(
+      { chatJid: 'raw-chat@s.whatsapp.net', text: 'superseded answer' },
+      async () => ({ auditDisposition: 'not_sent' as const }),
+    );
+
+    const row = db.raw.prepare(`
+      SELECT outcome_code, failure_stage, mutation_state, retryable, provider_submission_count
+      FROM outbound_sends
+    `).get() as Record<string, unknown>;
+    expect(row).toEqual({
+      outcome_code: 'failed_not_sent',
+      failure_stage: 'not_started',
+      mutation_state: 'not_mutated',
+      retryable: 0,
+      provider_submission_count: 0,
+    });
+  });
+
   it('executes without auditing when no audit writer is configured', async () => {
     const pipeline = createSendPipeline({ resolver: chatResolver }); // no auditWriter → skip audit
 

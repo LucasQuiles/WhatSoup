@@ -716,7 +716,9 @@ if (runtimeContext) {
   // Capture voice reply context before flush (SP4)
   const chatJidForVoice = queue.targetChatJid;
   const inboundContentType = mapKey !== undefined ? (host.perChatTurnContentType.get(mapKey) ?? null) : null;
-  const responseText = !wasSilentCompact && mapKey !== undefined ? (host.perChatTurnText.get(mapKey) ?? '') : '';
+  const responseText = !wasSilentCompact && mapKey !== undefined && !queue.hasToolReplyClaimed?.()
+    ? (host.perChatTurnText.get(mapKey) ?? '')
+    : '';
   const hadSuppressedReplySatisfaction = mapKey !== undefined
     ? host.perChatTurnSuppressedReplySatisfaction.delete(mapKey)
     : false;
@@ -1427,7 +1429,9 @@ if (runtimeContext) {
   const inboundContentType = host.currentTurnInboundContentType;
   // #3613: never voice text the client output policy withheld (see scoped path).
   const clientOutputWithheld = queue.consumeClientOutputWithheld?.() ?? false;
-  const responseText = wasSilentCompact || clientOutputWithheld ? '' : host.currentTurnAssistantText;
+  const responseText = wasSilentCompact || clientOutputWithheld || queue.hasToolReplyClaimed?.()
+    ? ''
+    : host.currentTurnAssistantText;
   // Reset per-turn voice state
   host.currentTurnInboundContentType = null;
   host.currentTurnAssistantText = '';

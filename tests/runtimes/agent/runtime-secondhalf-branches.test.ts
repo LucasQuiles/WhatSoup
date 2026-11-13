@@ -261,6 +261,7 @@ import {
   type PendingPollQuestion,
   type PollVote,
 } from '../../../src/runtimes/agent/runtime.ts';
+import { capDedupeMap } from '../../../src/runtimes/agent/dedupe-map-cap.ts';
 import {
   markOwnedSystemTurn,
   makeRuntimeTurnContext,
@@ -1017,10 +1018,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
   });
 
   it('capDedupeMap evicts oldest-first over an object-valued map (BEAD-050)', () => {
-    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger);
-    const cap = (runtime as unknown as {
-      capDedupeMap(map: Map<string, unknown>, max?: number): void;
-    }).capDedupeMap.bind(runtime);
+    const cap = capDedupeMap;
     const map = new Map<string, { adminJids: Set<string>; fetchedAt: number }>();
     for (let i = 0; i < 10; i++) {
       map.set(`group-${i}@g.us`, { adminJids: new Set([`admin-${i}`]), fetchedAt: i });
@@ -1165,7 +1163,9 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       expect(pending.answersCollected[0]).toBe('No');
       // askuser path injects the answer into the session (settlePoll → injectPollAnswers)
       await vi.waitFor(() => {
-        expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.stringContaining('No'));
+        expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.objectContaining({
+          userText: expect.stringContaining('No'),
+        }));
       });
       expect(mark).toHaveBeenCalledWith(expect.objectContaining({
         scopeKey: groupJid,
@@ -2606,9 +2606,11 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       await vi.advanceTimersByTimeAsync(2_000);
 
       await vi.waitFor(() => {
-        expect(mockSession.sendTurn).toHaveBeenCalledWith(
-          expect.stringContaining('Recent chat context'),
-        );
+        // Missed messages have no live actor, so they follow the no-actor block.
+        expect(mockSession.sendTurn).toHaveBeenCalledWith({
+          applicationContext: [expect.stringContaining('No actor is authenticated')],
+          userText: expect.stringContaining('Recent chat context'),
+        });
       });
       expect(mockSession.sendTurn).not.toHaveBeenCalledWith(
         expect.stringContaining('session resumed after crash'),
@@ -3091,10 +3093,10 @@ describe('fresh-spawn context preamble (P4 — effect-free by construction)', ()
       applicationContext: string[];
       userText: string;
     }])[0];
-    expect(sent.applicationContext[0]).toMatch(/^\[Recent chat context — read before responding\]\n/);
-    expect(sent.applicationContext[0]).toContain('earlier message one');
-    expect(sent.applicationContext[0].indexOf('earlier message one'))
-      .toBeLessThan(sent.applicationContext[0].indexOf('earlier message two'));
+    expect(sent.applicationContext[1]).toMatch(/^\[Recent chat context — read before responding\]\n/);
+    expect(sent.applicationContext[1]).toContain('earlier message one');
+    expect(sent.applicationContext[1].indexOf('earlier message one'))
+      .toBeLessThan(sent.applicationContext[1].indexOf('earlier message two'));
     expect(sent.userText).toBe('Continue');
   });
 
@@ -3116,8 +3118,8 @@ describe('fresh-spawn context preamble (P4 — effect-free by construction)', ()
     await state.sendTurnToSession(mockSession, chatJid, 'Continue');
 
     const sent = (vi.mocked(mockSession.sendTurn).mock.calls[0] as unknown as [{ applicationContext: string[] }])[0];
-    expect(sent.applicationContext[0]).toContain('[Voice note — not transcribed (message VOICE0001)]');
-    expect(sent.applicationContext[0]).not.toContain('"transcription":null');
+    expect(sent.applicationContext[1]).toContain('[Voice note — not transcribed (message VOICE0001)]');
+    expect(sent.applicationContext[1]).not.toContain('"transcription":null');
   });
 
   it('keeps the active inbound request out of recent context so it appears exactly once', async () => {
@@ -3151,7 +3153,7 @@ describe('fresh-spawn context preamble (P4 — effect-free by construction)', ()
       applicationContext: string[];
       userText: string;
     }])[0];
-    expect(sent.applicationContext[0]).not.toContain('Continue');
+    expect(sent.applicationContext[1]).not.toContain('Continue');
     expect(sent.userText).toBe('Continue');
     expect(JSON.stringify(sent).match(/Continue/g)).toHaveLength(1);
   });
@@ -3169,7 +3171,7 @@ describe('fresh-spawn context preamble (P4 — effect-free by construction)', ()
     await state.sendTurnToSession(mockSession, chatJid, 'Continue');
 
     expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
-    expect(mockSession.sendTurn).toHaveBeenCalledWith('Continue');
+    expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.objectContaining({ userText: 'Continue' }));
   });
 
   it('proceeds with the plain user text when context assembly throws', async () => {
@@ -3187,7 +3189,7 @@ describe('fresh-spawn context preamble (P4 — effect-free by construction)', ()
     await state.sendTurnToSession(mockSession, chatJid, 'Continue');
 
     expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
-    expect(mockSession.sendTurn).toHaveBeenCalledWith('Continue');
+    expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.objectContaining({ userText: 'Continue' }));
   });
 
   it('redacts fresh context for a live cross-provider session after the fallback window expires', async () => {
@@ -3213,8 +3215,8 @@ describe('fresh-spawn context preamble (P4 — effect-free by construction)', ()
       applicationContext: string[];
       userText: string;
     }])[0];
-    expect(sent.applicationContext[0]).toContain('Bearer [REDACTED]');
-    expect(sent.applicationContext[0]).not.toContain(bearerToken);
+    expect(sent.applicationContext[1]).toContain('Bearer [REDACTED]');
+    expect(sent.applicationContext[1]).not.toContain(bearerToken);
     expect(sent.userText).toBe('Continue');
   });
 
@@ -3245,8 +3247,8 @@ describe('fresh-spawn context preamble (P4 — effect-free by construction)', ()
       applicationContext: string[];
       userText: string;
     }])[0];
-    expect(sent.applicationContext[0]).toContain(bearerToken);
-    expect(sent.applicationContext[0]).not.toContain('Bearer [REDACTED]');
+    expect(sent.applicationContext[1]).toContain(bearerToken);
+    expect(sent.applicationContext[1]).not.toContain('Bearer [REDACTED]');
     expect(sent.userText).toBe('Continue');
   });
 
@@ -3271,10 +3273,10 @@ describe('fresh-spawn context preamble (P4 — effect-free by construction)', ()
     // Intro leads, identifies the stand-in, and instructs continuation; the
     // recent-context block follows in the same preamble entry so the model
     // reads WHO it is before the thread it must continue.
-    expect(sent.applicationContext[0]).toMatch(/^\[Provider handoff — read before responding\]\n/);
-    expect(sent.applicationContext[0]).toContain('glm/glm-5.2');
-    expect(sent.applicationContext[0]).toContain('introduce yourself');
-    expect(sent.applicationContext[0]).toContain('[Recent chat context — read before responding]');
+    expect(sent.applicationContext[1]).toMatch(/^\[Provider handoff — read before responding\]\n/);
+    expect(sent.applicationContext[1]).toContain('glm/glm-5.2');
+    expect(sent.applicationContext[1]).toContain('introduce yourself');
+    expect(sent.applicationContext[1]).toContain('[Recent chat context — read before responding]');
     expect(sent.userText).toBe('Continue');
 
     // One-shot per manager: the manager is marked introduced, so the next

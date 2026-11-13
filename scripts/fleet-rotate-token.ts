@@ -17,7 +17,8 @@
 //   --dry-run    print what would change but do not write
 //   --json       emit a machine-readable summary to stdout
 //   --quiet      suppress the human banner before the active token
-//   --help / -h  show usage
+//   --revoke-old  immediately invalidate every prior fleet token
+//   --help / -h   show usage
 
 import { argv, exit, stdout, stderr } from 'node:process';
 import {
@@ -32,16 +33,18 @@ interface CliArgs {
   dryRun: boolean;
   json: boolean;
   quiet: boolean;
+  revokeOld: boolean;
   help: boolean;
 }
 
 export function parseArgs(args: readonly string[]): CliArgs {
-  const out: CliArgs = { dryRun: false, json: false, quiet: false, help: false };
+  const out: CliArgs = { dryRun: false, json: false, quiet: false, revokeOld: false, help: false };
   for (const a of args) {
     switch (a) {
       case '--dry-run': out.dryRun = true; break;
       case '--json':    out.json = true; break;
       case '--quiet':   out.quiet = true; break;
+      case '--revoke-old': out.revokeOld = true; break;
       case '--help':
       case '-h':        out.help = true; break;
       default:
@@ -51,10 +54,11 @@ export function parseArgs(args: readonly string[]): CliArgs {
   return out;
 }
 
-const USAGE = `Usage: fleet-rotate-token [--dry-run] [--json] [--quiet]
+const USAGE = `Usage: fleet-rotate-token [--dry-run] [--json] [--quiet] [--revoke-old]
 
 Rotate the active fleet token. The prior active is preserved on the
-accept[] list so in-flight clients keep working until they refresh.
+accept[] list so in-flight clients keep working until they refresh, unless
+--revoke-old is set. That option immediately invalidates every prior token.
 
 Storage: ${getFleetTokensPath()}
 `;
@@ -69,9 +73,10 @@ export interface RotateResult {
  * Pure rotation step — visible for tests so they can exercise the logic
  * without spawning a subprocess.
  */
-export function rotateOnce(opts: { dryRun: boolean }): RotateResult {
+export function rotateOnce(opts: { dryRun: boolean; revokeOld?: boolean }): RotateResult {
   const before = loadOrCreateFleetTokens();
-  const after = rotateFleetTokens(before);
+  const rotated = rotateFleetTokens(before);
+  const after = opts.revokeOld ? { ...rotated, accept: [] } : rotated;
   if (!opts.dryRun) saveFleetTokens(after);
   return { before, after, wrote: !opts.dryRun };
 }
@@ -92,7 +97,7 @@ export function main(rawArgs: readonly string[]): number {
 
   let result: RotateResult;
   try {
-    result = rotateOnce({ dryRun: args.dryRun });
+    result = rotateOnce({ dryRun: args.dryRun, revokeOld: args.revokeOld });
   } catch (err) {
     stderr.write(`fleet-rotate-token: ${(err as Error).message}\n`);
     return 1;
@@ -103,6 +108,7 @@ export function main(rawArgs: readonly string[]): number {
       path: getFleetTokensPath(),
       activeToken: result.after.active,
       acceptSize: result.after.accept.length,
+      revokedPriorTokens: args.revokeOld,
       rotatedAt: result.after.rotatedAt,
       dryRun: !result.wrote,
     })}\n`);
