@@ -18,7 +18,7 @@
 // Repo-hygiene reserved IDs only.
 
 import { describe, it, expect, beforeEach, afterEach, vi, onTestFinished } from 'vitest';
-import type { Database } from '../../../src/core/database.ts';
+import { Database } from '../../../src/core/database.ts';
 import type { Messenger, IncomingMessage } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
@@ -1138,7 +1138,9 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
     });
 
     it('askuser + majority-after-timeout: settles and injects via sendTurn (~4189-4203)', async () => {
-      const db = makeDb();
+      const db = new Database(':memory:');
+      db.open();
+      onTestFinished(() => db.close());
       const { messenger } = makeMessenger();
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
       const state = runtime as unknown as PollRuntimeState;

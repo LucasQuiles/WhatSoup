@@ -9,7 +9,7 @@
 // AgentRuntime (test seams bind them on the runtime instance), and
 // deletePendingPollQuestions / fetchGroupAdminJids stay whole on the runtime
 // (structural-source and spy seams) with this module reaching them via the
-// host. Zero state lives here.
+// host. Startup reconciliation state lives with its retry orchestration here.
 
 import type { Messenger } from '../../core/types.ts';
 import type { Database } from '../../core/database.ts';
@@ -24,7 +24,8 @@ import type { ConnectionManager } from '../../transport/connection.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { createChildLogger } from '../../logger.ts';
 import type { IOutboundQueue, OutboundMessageRole } from './outbound-queue.ts';
-import type { QueuedDecisionConsumer } from './pending-poll-health.ts';
+import type { QueuedDecisionConsumer, OfflineDecisionRetryScheduler } from './pending-poll-health.ts';
+import { systemClock } from '../../lib/clock.ts';
 import type { PendingPollStore } from './pending-poll-store.ts';
 import type { PendingPollPersistence } from './pending-poll-persistence.ts';
 import type { SystemTurnLeaseToken, SystemTurnPurpose } from './pending-system-result-tracker.ts';
@@ -76,6 +77,8 @@ export interface RuntimePollBridgePort {
   readonly chatSessions: Map<string, SessionManager>;
   readonly pendingPolls: PendingPollStore;
   readonly pollPersistence: PendingPollPersistence;
+  readonly shutdownRequested: boolean;
+  readonly offlineDecisionRetry: OfflineDecisionRetryScheduler;
   readonly suppressedAskUserToolIds: Set<string>;
   readonly pendingPollSourceTurnBarriers: WeakMap<PendingPollQuestion, Promise<void>>;
   readonly queuedDecisionConsumer: QueuedDecisionConsumer;
@@ -123,9 +126,27 @@ export interface RuntimePollBridgePort {
 
 export class RuntimePollBridgeCoordinator {
   private readonly host: RuntimePollBridgePort;
+  private rehydrationComplete = false;
 
   constructor(host: RuntimePollBridgePort) {
     this.host = host;
+  }
+
+  currentPendingPollKey(mapKey: string, pending: PendingPollQuestion): string | undefined {
+    if (this.host.pendingPolls.questions.get(mapKey) === pending) return mapKey;
+    return Array.from(this.host.pendingPolls.questions).find(([, value]) => value === pending)?.[0];
+  }
+
+  preparePendingPollRekey(from: string, to: string, newJid: string, retry: () => void): boolean {
+    const pending = this.host.pendingPolls.questions.get(from);
+    if (!pending) return true;
+    const session = this.host.chatSessions.get(from);
+    const isCurrent = (): boolean => !this.host.shutdownRequested
+      && this.host.pendingPolls.questions.get(from) === pending
+      && this.host.chatSessions.get(from) === session && !this.host.chatSessions.has(to);
+    return this.host.pollPersistence.rekey(from, to, {
+      ...pending, chatJid: to, chatJidAliases: new Set([...pending.chatJidAliases, from, to, newJid]),
+    }, isCurrent, () => { if (isCurrent()) retry(); }).durable;
   }
 
   /** Remove an AskUser continuation from interception while retaining its durable row. */
@@ -149,7 +170,7 @@ export class RuntimePollBridgeCoordinator {
     if (current === pending) {
       this.host.deletePendingPollQuestions(mapKey);
     } else if (current === undefined) {
-      this.host.pollPersistence.remove(mapKey);
+      this.host.pollPersistence.remove(mapKey, pending);
     }
     this.host.getQueueForChat(pending.chatJid, mapKey)?.setPollPending(false);
     this.host.sendDirect(
@@ -166,8 +187,29 @@ export class RuntimePollBridgeCoordinator {
   stageResolvedAskUserPoll(
     mapKey: string,
     pending: PendingPollQuestion,
-  ): void {
-    pending.resolvedAt ??= Date.now();
+    onDurable?: () => void,
+  ): boolean {
+    if (this.host.pendingPolls.questions.get(mapKey) !== pending) return false;
+    const resolvedAt = pending.resolvedAt ?? systemClock.now();
+    if (!this.host.pollPersistence.save(mapKey, { ...pending, resolvedAt }, () => {
+      const currentKey = this.currentPendingPollKey(mapKey, pending);
+      if (currentKey !== undefined && pending.resolvedAt === undefined
+          && this.stageResolvedAskUserPoll(currentKey, pending, onDurable)) onDurable?.();
+    }).durable) return false;
+    return this.finishResolvedAskUserPoll(mapKey, pending, resolvedAt);
+  }
+
+  async stageResolvedAskUserPollAndWait(mapKey: string, pending: PendingPollQuestion): Promise<boolean> {
+    if (this.host.pendingPolls.questions.get(mapKey) !== pending) return false;
+    const resolvedAt = pending.resolvedAt ?? systemClock.now();
+    const result = await this.host.pollPersistence.saveAndWait(mapKey, { ...pending, resolvedAt });
+    const currentKey = this.currentPendingPollKey(mapKey, pending);
+    return result.durable && currentKey !== undefined && this.finishResolvedAskUserPoll(currentKey, pending, resolvedAt);
+  }
+
+  private finishResolvedAskUserPoll(mapKey: string, pending: PendingPollQuestion, resolvedAt: number): boolean {
+    if (this.host.pendingPolls.questions.get(mapKey) !== pending) return false;
+    pending.resolvedAt = resolvedAt;
     clearPendingPollTimers(pending);
     const connection = this.host.messenger as ConnectionManager;
     if (typeof connection.clearPollTracking === 'function') {
@@ -175,8 +217,8 @@ export class RuntimePollBridgeCoordinator {
         connection.clearPollTracking(pollMessageId);
       }
     }
-    this.host.pollPersistence.save(mapKey, pending);
     this.host.getQueueForChat(pending.chatJid, mapKey)?.setPollPending(false);
+    return true;
   }
 
   /**
@@ -185,10 +227,14 @@ export class RuntimePollBridgeCoordinator {
    * with re-armed timers using the remaining time. Expired polls
    * (hard_closes_at <= now) have a brief "decision expired during downtime"
    * message sent to the originating chat (best-effort via outbound queue) and
-   * are deleted from the table.
+   * are deleted from the table. Live send_poll rows are deleted with an
+   * "interrupted" notice: their awaiting tool call ended with the old process,
+   * and every send_poll row then belongs to a call this process admitted
+   * under its awaited-poll cap. A send_poll row whose delete fails stays
+   * stored and unnotified until the next start retries it.
    *
-   * Persistence errors are logged and swallowed; rehydration always succeeds
-   * structurally even if some rows are unreadable.
+   * An unreadable snapshot returns false; the runtime retains queued decisions
+   * and uses its bounded startup retry before consuming them.
    */
   /**
    * D-4 v1.1: consume console decisions that were queued durably while the
@@ -202,7 +248,21 @@ export class RuntimePollBridgeCoordinator {
    * read/parse/delete failure stranded rows for "next boot" only. Runs once at
    * boot, after rehydratePendingPolls.
    */
+  scheduleRecoveryRetry(): void {
+    if (this.host.shutdownRequested) return;
+    this.host.offlineDecisionRetry.scheduleRetry(async () => {
+      if (this.host.shutdownRequested) return;
+      if (!this.rehydrationComplete) await this.rehydratePendingPolls();
+      if (!this.host.shutdownRequested) await this.consumeQueuedPollDecisions();
+    });
+  }
+
   async consumeQueuedPollDecisions(): Promise<void> {
+    // An unreadable poll table is not evidence that queued answers are obsolete.
+    if (!this.rehydrationComplete) {
+      this.scheduleRecoveryRetry();
+      return;
+    }
     await this.host.queuedDecisionConsumer.consume({
       hasPending: (mapKey) => this.host.pendingPolls.questions.has(mapKey),
       resolve: (decision) => this.resolvePollDecisionFromConsole(decision),
@@ -210,8 +270,14 @@ export class RuntimePollBridgeCoordinator {
   }
 
   async rehydratePendingPolls(): Promise<void> {
-    const rows = this.host.pollPersistence.loadRows();
-    if (rows.length === 0) return;
+    this.rehydrationComplete = await this.rehydrateSnapshot();
+  }
+
+  private async rehydrateSnapshot(): Promise<boolean> {
+    const persisted = this.host.pollPersistence.readRows();
+    if (persisted.status === 'unavailable') return false;
+    const rows = persisted.rows;
+    if (rows.length === 0) return true;
 
     const now = Date.now();
     let restored = 0;
@@ -221,18 +287,41 @@ export class RuntimePollBridgeCoordinator {
     // than one message per stranded poll.
     const expiredByChat = new Map<string, number>();
     const interruptedContinuationsByChat = new Map<string, number>();
+    const orphanedAwaitsByChat = new Map<string, number>();
+    let orphanedAwaitPersistenceFailures = 0;
     for (const row of rows) {
       try {
         if (row.hard_closes_at !== null && row.hard_closes_at <= now) {
-          this.host.pollPersistence.remove(row.map_key);
+          this.host.pollPersistence.remove(row.map_key, { createdAt: row.created_at, toolId: row.tool_id });
           expiredByChat.set(row.chat_jid, (expiredByChat.get(row.chat_jid) ?? 0) + 1);
           expired += 1;
           continue;
         }
         const serialized = JSON.parse(row.payload) as SerializedPendingPoll;
         const pending = deserializePendingPoll(serialized);
+        if (pending.source === 'send_poll') {
+          // The send_poll tool call that awaited this row ended with the
+          // previous process, so no vote can reach a caller. Restoring it would
+          // also hold a row the new process's awaited-poll cap never counted.
+          // A verified terminal marker prevents restoration even if deletion
+          // fails. A failed marker write must defer the notice until recovery.
+          let notified = false;
+          const notifyRecovered = (): void => {
+            if (notified) return;
+            notified = true;
+            this.notifyAwaitedPollInterrupted(row.chat_jid);
+          };
+          const result = this.host.pollPersistence.remove(row.map_key, pending, notifyRecovered);
+          if (result.durable) {
+            notified = true;
+            orphanedAwaitsByChat.set(row.chat_jid, (orphanedAwaitsByChat.get(row.chat_jid) ?? 0) + 1);
+          } else {
+            orphanedAwaitPersistenceFailures += 1;
+          }
+          continue;
+        }
         if (pending.source === 'askuser' && pending.resolvedAt !== undefined) {
-          this.host.pollPersistence.remove(row.map_key);
+          this.host.pollPersistence.remove(row.map_key, pending);
           interruptedContinuationsByChat.set(
             row.chat_jid,
             (interruptedContinuationsByChat.get(row.chat_jid) ?? 0) + 1,
@@ -242,9 +331,9 @@ export class RuntimePollBridgeCoordinator {
         this.host.pendingPolls.questions.set(row.map_key, pending);
         this.startPendingPollExpiry(row.map_key, pending);
         restored += 1;
-      } catch (err) {
+      } catch {
         this.host.pollPersistence.errors += 1;
-        log.error({ err, mapKey: row.map_key }, 'rehydratePendingPolls: row deserialize failed; skipping');
+        log.error({ cause: 'poll restore failed' }, 'rehydratePendingPolls: row restore failed; skipping');
       }
     }
     for (const [chatJid, count] of expiredByChat) {
@@ -253,14 +342,21 @@ export class RuntimePollBridgeCoordinator {
     for (const [chatJid, count] of interruptedContinuationsByChat) {
       this.notifyPollContinuationInterrupted(chatJid, count);
     }
-    if (restored > 0 || expired > 0 || interruptedContinuationsByChat.size > 0) {
+    for (const [chatJid, count] of orphanedAwaitsByChat) {
+      this.notifyAwaitedPollInterrupted(chatJid, count);
+    }
+    if (restored > 0 || expired > 0 || interruptedContinuationsByChat.size > 0 || orphanedAwaitsByChat.size > 0
+      || orphanedAwaitPersistenceFailures > 0) {
       log.info({
         restored,
         expired,
         chatsNotified: expiredByChat.size,
         interruptedContinuationChats: interruptedContinuationsByChat.size,
+        orphanedAwaitChats: orphanedAwaitsByChat.size,
+        orphanedAwaitPersistenceFailures,
       }, 'rehydratePendingPolls: completed');
     }
+    return true;
   }
 
   /**
@@ -270,28 +366,31 @@ export class RuntimePollBridgeCoordinator {
    * JID unresolvable) is logged.
    */
   private notifyPollExpiredDuringDowntime(chatJid: string, count = 1): void {
-    const message = count > 1
+    this.sendRehydrateNotice('notifyPollExpiredDuringDowntime', chatJid, count > 1
       ? `${count} polls I was waiting on expired before I picked them back up — ask me again if you still need those decisions.`
-      : 'A poll I was waiting on expired before I picked it back up — ask me again if you still need that decision.';
-    try {
-      void this.host.messenger.sendMessage(chatJid, message).catch((err) =>
-        log.warn({ err, chatJid }, 'notifyPollExpiredDuringDowntime: send failed (non-fatal)'),
-      );
-    } catch (err) {
-      log.warn({ err, chatJid }, 'notifyPollExpiredDuringDowntime: dispatch failed (non-fatal)');
-    }
+      : 'A poll I was waiting on expired before I picked it back up — ask me again if you still need that decision.');
   }
 
   private notifyPollContinuationInterrupted(chatJid: string, count = 1): void {
-    const message = count > 1
+    this.sendRehydrateNotice('notifyPollContinuationInterrupted', chatJid, count > 1
       ? `I received ${count} poll answers before restarting, but could not continue them safely. Please send the answers again.`
-      : 'I received your poll answer before restarting, but could not continue it safely. Please send the answer again.';
+      : 'I received your poll answer before restarting, but could not continue it safely. Please send the answer again.');
+  }
+
+  private notifyAwaitedPollInterrupted(chatJid: string, count = 1): void {
+    this.sendRehydrateNotice('notifyAwaitedPollInterrupted', chatJid, count > 1
+      ? `I restarted while waiting on ${count} polls, so I can no longer act on their votes — ask me again if you still need those decisions.`
+      : 'I restarted while waiting on a poll, so I can no longer act on its votes — ask me again if you still need that decision.');
+  }
+
+  /** Best-effort send; a rejected or throwing dispatch is logged, never raised. */
+  private sendRehydrateNotice(label: string, chatJid: string, message: string): void {
     try {
       void this.host.messenger.sendMessage(chatJid, message).catch((err) =>
-        log.warn({ err, chatJid }, 'notifyPollContinuationInterrupted: send failed (non-fatal)'),
+        log.warn({ err, chatJid }, `${label}: send failed (non-fatal)`),
       );
     } catch (err) {
-      log.warn({ err, chatJid }, 'notifyPollContinuationInterrupted: dispatch failed (non-fatal)');
+      log.warn({ err, chatJid }, `${label}: dispatch failed (non-fatal)`);
     }
   }
 
@@ -367,7 +466,14 @@ export class RuntimePollBridgeCoordinator {
       log.debug({ mapKey, reason }, 'settlePoll called but poll already settled or removed');
       return;
     }
-    pending.resolvedAt = Date.now();
+    const askUserContinuation = pending.source === 'askuser' || pending.source === undefined;
+    const resolvedAt = Date.now();
+    const resume = () => this.settlePoll(mapKey, pending, reason, answer);
+    const persistence = askUserContinuation
+      ? this.host.pollPersistence.save(mapKey, { ...pending, resolvedAt }, resume)
+      : this.host.pollPersistence.remove(mapKey, pending, resume);
+    if (!persistence.durable) return;
+    pending.resolvedAt = resolvedAt;
 
     // Clear timers
     if (pending.softExpiryTimer) { clearTimeout(pending.softExpiryTimer); pending.softExpiryTimer = undefined; }
@@ -394,16 +500,7 @@ export class RuntimePollBridgeCoordinator {
       pending.awaitReject = undefined;
     }
 
-    const askUserContinuation = pending.source === 'askuser' || pending.source === undefined;
-    if (askUserContinuation) {
-      // Retain the resolved answer in memory + SQLite until the continuation
-      // has crossed the provider boundary. A crash or failed source
-      // finalization must not turn a successfully collected vote into silence.
-      this.host.pollPersistence.save(mapKey, pending);
-    } else {
-      // send_poll awaiters were settled above and have no provider continuation.
-      this.host.deletePendingPollQuestions(mapKey);
-    }
+    if (!askUserContinuation) this.host.deletePendingPollQuestions(mapKey);
 
     // AskUser: inject answer into session (treat undefined source as 'askuser' for legacy compat)
     if (askUserContinuation) {
@@ -925,6 +1022,10 @@ export class RuntimePollBridgeCoordinator {
     if (!pending) {
       return { ok: false, error: 'pending poll not found (already resolved or expired)', code: 'not_found' };
     }
+    if (pending.answersCollected[decision.questionIndex] !== undefined
+        && this.host.pollPersistence.isPending(decision.mapKey)) {
+      return { ok: false, error: 'poll answer durability is unavailable', code: 'invalid' };
+    }
     if (pending.mode === 'textFallback') {
       // v1.1: console decisions for text-fallback pendings mirror the typed-
       // answer path verbatim (answer collect → index advance → persistence →
@@ -946,16 +1047,23 @@ export class RuntimePollBridgeCoordinator {
       removePollIdsForQuestion(pending, decision.questionIndex);
       pending.currentQuestionIndex = Math.max(pending.currentQuestionIndex, decision.questionIndex + 1);
       advancePendingPollIndex(pending);
-      this.host.pollPersistence.save(decision.mapKey, pending);
+      if (Object.keys(pending.answersCollected).length >= pending.questions.length) {
+        const actorJid = pending.adminJids?.values().next().value ?? pending.chatJid;
+        if (!this.stageResolvedAskUserPoll(decision.mapKey, pending, () => {
+          void this.injectPollAnswers(decision.mapKey, pending, actorJid).catch((err) => {
+            log.error({ err }, 'failed to continue the durable console poll answer');
+          });
+        })) {
+          return { ok: false, error: 'poll answer durability is unavailable', code: 'invalid' };
+        }
+        await this.injectPollAnswers(decision.mapKey, pending, actorJid);
+      } else if (!this.host.pollPersistence.save(decision.mapKey, pending).durable) {
+        return { ok: false, error: 'poll answer durability is unavailable', code: 'invalid' };
+      }
       log.info(
         { mapKey: decision.mapKey, questionIndex: decision.questionIndex, via: 'console' },
-        'text-fallback decision delivered from the console approval queue',
+        'text-fallback decision persisted from the console approval queue',
       );
-      if (Object.keys(pending.answersCollected).length >= pending.questions.length) {
-        this.stageResolvedAskUserPoll(decision.mapKey, pending);
-        const actorJid = pending.adminJids?.values().next().value ?? pending.chatJid;
-        await this.injectPollAnswers(decision.mapKey, pending, actorJid);
-      }
       return { ok: true };
     }
     if (pending.mode !== 'poll') {
@@ -994,6 +1102,9 @@ export class RuntimePollBridgeCoordinator {
     if (pending.answersCollected[decision.questionIndex] === undefined) {
       return { ok: false, error: 'decision was not accepted (duplicate or raced resolution)', code: 'stale' };
     }
+    if (this.host.pollPersistence.isPending(decision.mapKey)) {
+      return { ok: false, error: 'poll answer durability is unavailable', code: 'invalid' };
+    }
     return { ok: true };
   }
 
@@ -1008,6 +1119,7 @@ export class RuntimePollBridgeCoordinator {
     pending: PendingPollQuestion,
     answererActorJid?: string,
   ): Promise<void> {
+    mapKey = this.currentPendingPollKey(mapKey, pending) ?? mapKey;
     // Format the answer as structured context for Claude.
     const lines = ['[User answered poll]'];
     pending.questions.forEach((q, index) => {
@@ -1036,6 +1148,7 @@ export class RuntimePollBridgeCoordinator {
         if (sourceSession) await sourceSession.waitForProviderTurnToTerminalize();
       }
 
+      mapKey = this.currentPendingPollKey(mapKey, pending) ?? mapKey;
       // An explicit reset/replacement cancels the staged continuation.
       if (this.host.pendingPolls.questions.get(mapKey) !== pending) return;
 
@@ -1070,7 +1183,7 @@ export class RuntimePollBridgeCoordinator {
       }
 
       // A newer poll may already own the same mapKey/row. Never delete it.
-      if (!this.host.pendingPolls.questions.has(mapKey)) this.host.pollPersistence.remove(mapKey);
+      if (!this.host.pendingPolls.questions.has(mapKey)) this.host.pollPersistence.remove(mapKey, pending);
       log.info({ mapKey, chatJid: pending.chatJid, questionCount: pending.questions.length }, 'poll answers injected');
     } catch (err) {
       this.abandonPendingPollContinuation(mapKey, pending, err);

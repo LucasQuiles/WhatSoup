@@ -1,4 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { registerRuntimePollPersistenceTests } from './runtime-poll-persistence.cases.ts';
+import { registerRuntimeToolTrackingTests } from './runtime-tool-tracking.cases.ts';
+import { describe, it, expect, beforeEach, afterEach, onTestFinished, vi } from 'vitest';
 import { prepareRuntimeHome, ownedRuntimeCwd } from '../../helpers/runtime-home-fixture.ts';
 import { registerRuntimeHomeConfinementTests } from './runtime-home-confinement.cases.ts';
 import { registerRuntimeSettingsPolicyTests } from './runtime-settings-policy.cases.ts';
@@ -3608,11 +3610,8 @@ describe('AgentRuntime', () => {
     vi.useFakeTimers();
     try {
       const canonicalJid = '15550004444@s.whatsapp.net';
-      const db = makeDb();
-      (db.raw.prepare as ReturnType<typeof vi.fn>).mockReturnValue({
-        run: vi.fn(),
-        get: vi.fn(() => ({ phone_jid: canonicalJid })),
-      });
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const { messenger } = makeMessenger();
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
       const state = runtime as unknown as PerChatCleanupRuntimeState & {
@@ -3816,7 +3815,8 @@ describe('AgentRuntime', () => {
   it('pending AskUser poll votes remain correlated after LID remap', async () => {
     const canonicalJid = '15550004444@s.whatsapp.net';
     const lidKey = '15550004444@lid';
-    const db = makeDb();
+    const db = makeRealDb();
+    onTestFinished(() => db.close());
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
     const state = runtime as unknown as PerChatCleanupRuntimeState & {
@@ -3880,7 +3880,8 @@ describe('AgentRuntime', () => {
   it('normalizes legacy pending poll timeout during LID remap before re-arming timers', async () => {
     const canonicalJid = '15550004444@s.whatsapp.net';
     const lidKey = '15550004444@lid';
-    const db = makeDb();
+    const db = makeRealDb();
+    onTestFinished(() => db.close());
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
     const state = runtime as unknown as PerChatCleanupRuntimeState & {
@@ -7071,6 +7072,10 @@ describe('AgentRuntime', () => {
       'ask-user-shared',
       'AskUserQuestion',
       expect.any(String),
+      { question: 'Pick one', options: ['A', 'B'] },
+    );
+    expect(sourceSession.trackToolStart).toHaveBeenCalledWith(
+      'ask-user-shared', 'AskUserQuestion', { question: 'Pick one', options: ['A', 'B'] },
     );
 
     state.handleEvent(sourceSession, { type: 'compact_boundary' });
@@ -7099,6 +7104,7 @@ describe('AgentRuntime', () => {
       toolInput: { command: 'date' },
     });
 
+    expect(sourceSession.trackToolStart).toHaveBeenCalledTimes(1);
     expect(queue.enqueueToolUpdate).not.toHaveBeenCalled();
     expect(mockRuntimeLogger.info).toHaveBeenCalledWith(
       { toolName: 'Bash' },
@@ -7318,62 +7324,7 @@ describe('AgentRuntime', () => {
     expect(mockQueue.enqueueToolUpdate).toHaveBeenCalledWith({ category: 'error', detail: 'error msg' });
   });
 
-  it('scoped result-only tool events preserve identity and make replay unsafe without a tracker start', () => {
-    const db = makeDb();
-    const { messenger } = makeMessenger();
-    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
-    const queue = makeQueueMock('scoped@s.whatsapp.net');
-    const tracker = {
-      onToolStart: vi.fn(),
-      onToolEnd: vi.fn(),
-    };
-    const mapKey = 'scoped@s.whatsapp.net';
-    const toolScopeKey = `${mapKey}#1`;
-    const context = makeRuntimeTurnContext('per_chat', 'scoped', queue.targetChatJid, 41, 'turn-scoped');
-    const state = runtime as unknown as {
-      operationTrackers: Map<string, typeof tracker>;
-      perChatRuntimeTurnContexts: Map<string, Array<typeof context>>;
-      turnHadToolActivity: Set<string>;
-      activeToolNames: Map<string, Map<string, string>>;
-      handleEventWithContext(
-        event: AgentEvent,
-        queue: IOutboundQueue,
-        session: null,
-        conversationKey: string,
-        inboundSeq: number,
-        mapKey: string,
-        toolScopeKey: string,
-      ): void;
-    };
-    state.operationTrackers.set(mapKey, tracker);
-    state.perChatRuntimeTurnContexts.set(mapKey, [context]);
-
-    state.handleEventWithContext(
-      {
-        type: 'tool_result',
-        toolId: 'call_edit_rejected',
-        toolName: 'edit',
-        isError: true,
-        content: 'permission requested: edit; auto-rejecting',
-      },
-      queue,
-      null,
-      'scoped',
-      41,
-      mapKey,
-      toolScopeKey,
-    );
-
-    expect(queue.enqueueToolUpdate).toHaveBeenCalledWith(expect.objectContaining({
-      category: 'error',
-      detail: expect.stringContaining('edit'),
-    }));
-    expect(state.turnHadToolActivity.has(toolScopeKey)).toBe(true);
-    expect(state.perChatRuntimeTurnContexts.get(mapKey)?.[0]?.replay.replaySafe).toBe(false);
-    expect(tracker.onToolEnd).toHaveBeenCalledWith('call_edit_rejected');
-    expect(tracker.onToolStart).not.toHaveBeenCalled();
-    expect(state.activeToolNames.has(toolScopeKey)).toBe(false);
-  });
+  registerRuntimeToolTrackingTests();
 
   it('global result-only tool events preserve identity and make replay unsafe without a tracker start', () => {
     const db = makeDb();
@@ -12578,7 +12529,8 @@ describe('AgentRuntime', () => {
 
     it('injects a pollVoteReceived answer back into the active per-chat session', async () => {
       const { messenger, pollSends, eventHandlers } = makePollMessenger({ waMessageId: 'POLL_ANSWER', hasSecret: true });
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
@@ -12633,7 +12585,8 @@ describe('AgentRuntime', () => {
         waMessageId: 'POLL_FAST_ANSWER',
         hasSecret: true,
       });
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
@@ -12698,7 +12651,8 @@ describe('AgentRuntime', () => {
         waMessageId: 'POLL_JOURNALED_FAST_ANSWER',
         hasSecret: true,
       });
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
@@ -12886,7 +12840,8 @@ describe('AgentRuntime', () => {
         { waMessageId: 'POLL_Q1', hasSecret: true },
         { waMessageId: 'POLL_Q2', hasSecret: true },
       ]);
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
@@ -12957,7 +12912,8 @@ describe('AgentRuntime', () => {
         { waMessageId: 'POLL_DUP_Q1', hasSecret: true },
         { waMessageId: 'POLL_DUP_Q2', hasSecret: true },
       ]);
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
@@ -13054,7 +13010,8 @@ describe('AgentRuntime', () => {
 
     it('treats text while a poll is pending as a free-text Other answer', async () => {
       const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_OTHER', hasSecret: true });
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
@@ -13100,7 +13057,8 @@ describe('AgentRuntime', () => {
 
     it('does not resolve a pending poll from a generic vote-status text reply', async () => {
       const { messenger, sentMessages, pollSends, eventHandlers } = makePollMessenger({ waMessageId: 'POLL_STATUS_TEXT', hasSecret: true });
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
@@ -13156,7 +13114,8 @@ describe('AgentRuntime', () => {
 
     it('terminalizes a fully collected typed poll answer before reinjecting the structured answer', async () => {
       const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_FULL_DURABILITY', hasSecret: true });
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
       const durability = { completeInbound: vi.fn(), ...makeTerminalDurabilityMock() };
       const replyGuarantee = { arm: vi.fn(), disarm: vi.fn(), shutdown: vi.fn(), isArmed: vi.fn(() => false) };
@@ -13214,7 +13173,8 @@ describe('AgentRuntime', () => {
 
     it('accepts a typed option label even when the label looks like generic vote status', async () => {
       const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_SUBMITTED_OPTION', hasSecret: true });
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
@@ -13259,7 +13219,8 @@ describe('AgentRuntime', () => {
 
     it('injects an Other poll vote as a structured interview directive', async () => {
       const { messenger, pollSends, eventHandlers } = makePollMessenger({ waMessageId: 'POLL_OTHER_DIRECTIVE', hasSecret: true });
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
@@ -13646,7 +13607,8 @@ describe('AgentRuntime', () => {
 
     it('pollVoteFailed switches to idempotent text fallback and accepts typed option', async () => {
       const { messenger, pollSends, eventHandlers, sentMessages } = makePollMessenger({ waMessageId: 'POLL_DECRYPT_FAIL', hasSecret: true });
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
@@ -13703,7 +13665,8 @@ describe('AgentRuntime', () => {
         { waMessageId: 'POLL_PARTIAL_1', hasSecret: true },
         { waMessageId: 'POLL_PARTIAL_2', hasSecret: false },
       ]);
-      const db = makeDb();
+      const db = makeRealDb();
+      onTestFinished(() => db.close());
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
@@ -13917,7 +13880,8 @@ describe('AgentRuntime', () => {
     }
 
     it('E2Ea — askuser source: non-admin votes are recorded but do not resolve; admin vote settles via sendTurn with the admin selection', async () => {
-      const db = makeDb();
+      const db = makeRealDb();
+      try {
       const { messenger } = makeMessenger();
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
       const state = runtime as unknown as AdminRuntimeState;
@@ -13959,6 +13923,9 @@ describe('AgentRuntime', () => {
       });
       expect(mockSession.sendTurn).not.toHaveBeenCalledWith(expect.stringContaining('No'));
       expect(state.pendingPolls.questions.has(groupJid)).toBe(false);
+      } finally {
+        db.close();
+      }
     });
 
     it('E2Eb — send_poll source: admin vote resolves the awaitResolve promise with the admin selection', async () => {
@@ -14165,311 +14132,7 @@ describe('AgentRuntime', () => {
 
   // ── P2 hardening: rehydrate consolidation + persistence error counter ─────
 
-  describe('poll persistence hardening', () => {
-    it('rehydrate consolidates expired-during-downtime notices to one message per chat', async () => {
-      const db = makeRealDb();
-      const { messenger, sentMessages } = makeMessenger();
-      const past = Date.now() - 10_000;
-      const future = Date.now() + 3_600_000;
-
-      // chatA: 3 stranded polls → one consolidated "3 polls" notice
-      insertRow(db, 'send_poll:a1', 'chatA@g.us', past, buildPayload({ chatJid: 'chatA@g.us' }));
-      insertRow(db, 'send_poll:a2', 'chatA@g.us', past, buildPayload({ chatJid: 'chatA@g.us' }));
-      insertRow(db, 'send_poll:a3', 'chatA@g.us', past, buildPayload({ chatJid: 'chatA@g.us' }));
-      // chatB: 1 stranded poll → one single-poll notice
-      insertRow(db, 'send_poll:b1', 'chatB@g.us', past, buildPayload({ chatJid: 'chatB@g.us' }));
-      // chatC: live poll → restored, no notice
-      insertRow(db, 'send_poll:c1', 'chatC@g.us', future, buildPayload({
-        chatJid: 'chatC@g.us',
-        pollMessageIdToQuestionIndex: new Map([['POLL_C', 0]]),
-        sentPollMessageIds: ['POLL_C'],
-      }));
-
-      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
-      await (runtime as unknown as { rehydratePendingPolls(): Promise<void> }).rehydratePendingPolls();
-
-      // Exactly 2 chats notified (chatA + chatB), not 4 messages
-      expect(sentMessages).toHaveLength(2);
-      const byChat = new Map(sentMessages.map((m) => [m.jid, m.text]));
-      expect(byChat.get('chatA@g.us')).toMatch(/3 polls/);
-      expect(byChat.get('chatB@g.us')).toMatch(/A poll I was waiting on/);
-      expect(byChat.has('chatC@g.us')).toBe(false);
-
-      // chatC live poll restored into the in-memory map; expired rows deleted from table
-      const state = runtime as unknown as { pendingPolls: { questions: Map<string, unknown> } };
-      expect(state.pendingPolls.questions.has('send_poll:c1')).toBe(true);
-      expect(state.pendingPolls.questions.has('send_poll:a1')).toBe(false);
-      const remaining = db.raw.prepare('SELECT COUNT(*) AS cnt FROM pending_polls').get() as { cnt: number };
-      expect(remaining.cnt).toBe(1);
-
-      db.close();
-    });
-
-    it('rehydrate removes a resolved AskUser continuation and sends a deterministic retry notice', async () => {
-      const db = makeRealDb();
-      const { messenger, sentMessages } = makeMessenger();
-      const future = Date.now() + 3_600_000;
-      insertRow(db, 'resolved-askuser', 'resolved-chat@g.us', future, buildPayload({
-        chatJid: 'resolved-chat@g.us',
-        answersCollected: { 0: 'A' },
-        resolvedAt: Date.now() - 1_000,
-      }));
-
-      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
-      await (runtime as unknown as { rehydratePendingPolls(): Promise<void> }).rehydratePendingPolls();
-
-      expect(sentMessages).toEqual([{
-        jid: 'resolved-chat@g.us',
-        text: expect.stringMatching(/received your poll answer.*send the answer again/i),
-      }]);
-      expect((runtime as unknown as {
-        pendingPolls: { questions: Map<string, unknown> };
-      }).pendingPolls.questions.has('resolved-askuser')).toBe(false);
-      const remaining = db.raw.prepare('SELECT COUNT(*) AS cnt FROM pending_polls').get() as { cnt: number };
-      expect(remaining.cnt).toBe(0);
-
-      db.close();
-    });
-
-    it('rehydrate logs and drops expired polls when the downtime notice send rejects', async () => {
-      const db = makeRealDb();
-      const { messenger } = makeMessenger();
-      const past = Date.now() - 10_000;
-      const sendError = new Error('socket closed');
-      messenger.sendMessage = vi.fn(async () => {
-        throw sendError;
-      });
-      mockRuntimeLogger.warn.mockClear();
-
-      insertRow(db, 'send_poll:reject', 'chatReject@g.us', past, buildPayload({ chatJid: 'chatReject@g.us' }));
-
-      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
-      await expect((runtime as unknown as { rehydratePendingPolls(): Promise<void> }).rehydratePendingPolls()).resolves.toBeUndefined();
-      await Promise.resolve();
-
-      expect(messenger.sendMessage).toHaveBeenCalledWith(
-        'chatReject@g.us',
-        expect.stringContaining('A poll I was waiting on expired'),
-      );
-      expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
-        { err: sendError, chatJid: 'chatReject@g.us' },
-        'notifyPollExpiredDuringDowntime: send failed (non-fatal)',
-      );
-      const remaining = db.raw.prepare('SELECT COUNT(*) AS cnt FROM pending_polls').get() as { cnt: number };
-      expect(remaining.cnt).toBe(0);
-
-      db.close();
-    });
-
-    it('rehydrate logs and drops expired polls when downtime notice dispatch throws synchronously', async () => {
-      const db = makeRealDb();
-      const { messenger } = makeMessenger();
-      const past = Date.now() - 10_000;
-      const dispatchError = new Error('transport unavailable');
-      messenger.sendMessage = vi.fn(() => {
-        throw dispatchError;
-      }) as unknown as Messenger['sendMessage'];
-      mockRuntimeLogger.warn.mockClear();
-
-      insertRow(db, 'send_poll:throw', 'chatThrow@g.us', past, buildPayload({ chatJid: 'chatThrow@g.us' }));
-
-      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
-      await expect((runtime as unknown as { rehydratePendingPolls(): Promise<void> }).rehydratePendingPolls()).resolves.toBeUndefined();
-
-      expect(messenger.sendMessage).toHaveBeenCalledWith(
-        'chatThrow@g.us',
-        expect.stringContaining('A poll I was waiting on expired'),
-      );
-      expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
-        { err: dispatchError, chatJid: 'chatThrow@g.us' },
-        'notifyPollExpiredDuringDowntime: dispatch failed (non-fatal)',
-      );
-      const remaining = db.raw.prepare('SELECT COUNT(*) AS cnt FROM pending_polls').get() as { cnt: number };
-      expect(remaining.cnt).toBe(0);
-
-      db.close();
-    });
-
-    it('persistPendingPoll failure increments pollPersistenceErrors and surfaces it in the health snapshot', async () => {
-      const db = makeRealDb();
-      const { messenger } = makeMessenger();
-      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
-
-      const snapBefore = runtime.getHealthSnapshot();
-      expect((snapBefore.details as { pollPersistenceErrors: number }).pollPersistenceErrors).toBe(0);
-
-      // Drop the table AFTER construction so the constructor's own prepares
-      // succeed but persist/remove INSERT/DELETE hit "no such table" and the
-      // catch blocks increment the counter.
-      db.raw.prepare('DROP TABLE pending_polls').run();
-
-      const pending: PendingPollQuestion = {
-        questions: [{ question: 'Q', header: 'H', options: [{ label: 'A', description: '' }, { label: 'B', description: '' }], multiSelect: false }],
-        toolId: 'tool-y',
-        chatJid: 'chatErr@g.us',
-        chatJidAliases: new Set(['chatErr@g.us']),
-        mode: 'poll',
-        pollMessageIdToQuestionIndex: new Map([['POLL_Y', 0]]),
-        currentQuestionIndex: 0,
-        answersCollected: {},
-        createdAt: Date.now(),
-        resolution: 'first-vote-wins',
-        timeoutMs: 3_600_000,
-        votesByQuestion: new Map(),
-        adminJids: null,
-        source: 'send_poll',
-        sentPollMessageIds: ['POLL_Y'],
-      };
-
-      (runtime as unknown as { pollPersistence: { save(k: string, p: PendingPollQuestion): void } })
-        .pollPersistence.save('send_poll:y', pending);
-      (runtime as unknown as { pollPersistence: { remove(k: string): void } })
-        .pollPersistence.remove('send_poll:y');
-
-      const snapAfter = runtime.getHealthSnapshot();
-      expect((snapAfter.details as { pollPersistenceErrors: number }).pollPersistenceErrors).toBe(2);
-
-      db.close();
-    });
-
-    it('CAR-20 (#2539): persistence failure surfaces a degradation cause + current-vs-historical health', () => {
-      const db = makeRealDb();
-      const { messenger } = makeMessenger();
-      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
-
-      const pending: PendingPollQuestion = {
-        questions: [{ question: 'Q', header: 'H', options: [{ label: 'A', description: '' }, { label: 'B', description: '' }], multiSelect: false }],
-        toolId: 'tool-d',
-        chatJid: 'chatD@g.us',
-        chatJidAliases: new Set(['chatD@g.us']),
-        mode: 'poll',
-        pollMessageIdToQuestionIndex: new Map([['POLL_D', 0]]),
-        currentQuestionIndex: 0,
-        answersCollected: {},
-        createdAt: Date.now(),
-        resolution: 'first-vote-wins',
-        timeoutMs: 3_600_000,
-        votesByQuestion: new Map(),
-        adminJids: null,
-        source: 'send_poll',
-        sentPollMessageIds: ['POLL_D'],
-      };
-
-      // Drop the table so save/remove hit "no such table" → recordFailure (current active failure).
-      db.raw.prepare('DROP TABLE pending_polls').run();
-      const p = (runtime as unknown as {
-        pollPersistence: { save(k: string, pp: PendingPollQuestion): void; remove(k: string): void };
-      }).pollPersistence;
-      p.save('send_poll:d', pending);
-      p.remove('send_poll:d');
-
-      const degraded = runtime.getHealthSnapshot();
-      const dDetails = degraded.details as {
-        degradedReasons: string[];
-        pollPersistenceHealth: { degraded: boolean; consecutiveFailures: number; totalRecoveries: number; lastRecoveredAt: number | null };
-      };
-      // [DISCRIMINATING (1): fails if the degradation surface is removed]
-      expect(dDetails.degradedReasons).toContain('poll_persistence_failure');
-      expect(dDetails.pollPersistenceHealth.degraded).toBe(true);         // CURRENT active failure
-      expect(dDetails.pollPersistenceHealth.consecutiveFailures).toBe(2);
-      expect(dDetails.pollPersistenceHealth.totalRecoveries).toBe(0);     // not yet recovered
-      expect(degraded.status).toBe('degraded');
-
-      // Recreate the table and succeed → historical recovery, no current failure.
-      db.raw.exec(
-        'CREATE TABLE pending_polls (map_key TEXT PRIMARY KEY, chat_jid TEXT NOT NULL, tool_id TEXT NOT NULL, ' +
-        'source TEXT NOT NULL, resolution TEXT NOT NULL, payload TEXT NOT NULL, created_at INTEGER NOT NULL, ' +
-        'closes_at INTEGER, hard_closes_at INTEGER)',
-      );
-      p.remove('send_poll:d'); // now succeeds → ends the streak, marks a recovery
-
-      const recovered = runtime.getHealthSnapshot();
-      const rDetails = recovered.details as {
-        degradedReasons: string[];
-        pollPersistenceHealth: { degraded: boolean; totalRecoveries: number; lastRecoveredAt: number | null };
-      };
-      // [DISCRIMINATING (4): current-vs-historical distinction]
-      expect(rDetails.degradedReasons).not.toContain('poll_persistence_failure');
-      expect(rDetails.pollPersistenceHealth.degraded).toBe(false);        // recovered → historical only
-      expect(rDetails.pollPersistenceHealth.totalRecoveries).toBe(1);     // one recovery recorded
-      expect(rDetails.pollPersistenceHealth.lastRecoveredAt).not.toBeNull();
-
-      db.close();
-    });
-
-    it('normalizes legacy pending poll timeout before persistence', () => {
-      const db = makeRealDb();
-      const { messenger } = makeMessenger();
-      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
-      const createdAt = 1_700_000_000_000;
-      const pending = {
-        questions: [{ question: 'Q', header: 'H', options: [{ label: 'A', description: '' }, { label: 'B', description: '' }], multiSelect: false }],
-        toolId: 'tool-legacy-timeout',
-        chatJid: 'chatLegacy@g.us',
-        chatJidAliases: new Set(['chatLegacy@g.us']),
-        mode: 'poll',
-        pollMessageIdToQuestionIndex: new Map([['POLL_LEGACY', 0]]),
-        currentQuestionIndex: 0,
-        answersCollected: {},
-        createdAt,
-        resolution: 'first-vote-wins',
-        votesByQuestion: new Map(),
-        adminJids: null,
-        source: 'askuser',
-        sentPollMessageIds: ['POLL_LEGACY'],
-      } as PendingPollQuestion;
-
-      (runtime as unknown as { pollPersistence: { save(k: string, p: PendingPollQuestion): void } })
-        .pollPersistence.save('legacy-timeout', pending);
-
-      const row = db.raw
-        .prepare('SELECT payload, closes_at, hard_closes_at FROM pending_polls WHERE map_key = ?')
-        .get('legacy-timeout') as { payload: string; closes_at: number; hard_closes_at: number };
-      const payload = JSON.parse(row.payload) as { timeoutMs?: number };
-      expect(payload.timeoutMs).toBe(3_600_000);
-      expect(row.closes_at).toBe(createdAt + 3_600_000);
-      expect(row.hard_closes_at).toBe(createdAt + 7_200_000);
-
-      db.close();
-    });
-
-    it('clamps out-of-range legacy pending poll timeout before persistence', () => {
-      const db = makeRealDb();
-      const { messenger } = makeMessenger();
-      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
-      const createdAt = 1_700_000_000_000;
-      const pending = {
-        questions: [{ question: 'Q', header: 'H', options: [{ label: 'A', description: '' }, { label: 'B', description: '' }], multiSelect: false }],
-        toolId: 'tool-huge-timeout',
-        chatJid: 'chatHuge@g.us',
-        chatJidAliases: new Set(['chatHuge@g.us']),
-        mode: 'poll',
-        pollMessageIdToQuestionIndex: new Map([['POLL_HUGE', 0]]),
-        currentQuestionIndex: 0,
-        answersCollected: {},
-        createdAt,
-        resolution: 'first-vote-wins',
-        timeoutMs: Number.MAX_SAFE_INTEGER,
-        votesByQuestion: new Map(),
-        adminJids: null,
-        source: 'askuser',
-        sentPollMessageIds: ['POLL_HUGE'],
-      } as PendingPollQuestion;
-
-      (runtime as unknown as { pollPersistence: { save(k: string, p: PendingPollQuestion): void } })
-        .pollPersistence.save('huge-timeout', pending);
-
-      const row = db.raw
-        .prepare('SELECT payload, closes_at, hard_closes_at FROM pending_polls WHERE map_key = ?')
-        .get('huge-timeout') as { payload: string; closes_at: number; hard_closes_at: number };
-      const payload = JSON.parse(row.payload) as { timeoutMs?: number };
-      expect(payload.timeoutMs).toBe(86_400_000);
-      expect(row.closes_at).toBe(createdAt + 86_400_000);
-      expect(row.hard_closes_at).toBe(createdAt + 172_800_000);
-
-      db.close();
-    });
-  });
+  registerRuntimePollPersistenceTests(mockSession, mockRuntimeLogger);
 
   // ── Admin session commands: /sessions and /kill-session ───────────────────
   // Covers the `case 'sessions':` and `case 'kill-session':` handler blocks in

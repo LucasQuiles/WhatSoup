@@ -889,10 +889,8 @@ export class AgentRuntime implements Runtime {
    *  as a boolean since that path uses a single global scope key. */
   private singleTurnHadToolActivity = false;
 
-  // Best-effort SQLite durability for pending polls (save/remove/loadRows + the
-  // swallowed-error counter surfaced in health). Initialized in the constructor —
-  // it needs the db. rehydratePendingPolls orchestrates loadRows() into the store +
-  // timers + downtime notify; settle/delete/expiry call save/remove.
+  // Poll durability owns verified writes and unresolved debt. Startup must obtain
+  // a readable snapshot before queued decisions can be consumed.
   private readonly pollPersistence: PendingPollPersistence;
   // CAR-20 (#2539): offline poll-decision retry owner + durable consumption receipts.
   private readonly offlineDecisionRetry = new OfflineDecisionRetryScheduler();
@@ -2621,9 +2619,7 @@ export class AgentRuntime implements Runtime {
     this.queuedDecisionConsumer = new QueuedDecisionConsumer(
       db,
       this.consumptionReceipts,
-      () => this.offlineDecisionRetry.scheduleRetry(() => {
-        void this.consumeQueuedPollDecisions();
-      }),
+      () => this.pollBridge.scheduleRecoveryRetry(),
     );
     this.messenger = messenger;
     this.instanceName = instanceName ?? 'personal';
@@ -3102,6 +3098,8 @@ export class AgentRuntime implements Runtime {
       get chatSessions() { return runtime.chatSessions; },
       get pendingPolls() { return runtime.pendingPolls; },
       get pollPersistence() { return runtime.pollPersistence; },
+      get shutdownRequested() { return runtime.shutdownRequested; },
+      get offlineDecisionRetry() { return runtime.offlineDecisionRetry; },
       get suppressedAskUserToolIds() { return runtime.suppressedAskUserToolIds; },
       get pendingPollSourceTurnBarriers() { return runtime.pendingPollSourceTurnBarriers; },
       get queuedDecisionConsumer() { return runtime.queuedDecisionConsumer; },
@@ -3708,6 +3706,8 @@ export class AgentRuntime implements Runtime {
       this.runtimeTurnCoordinator.rekeyPerChatOutboundQueuePoisonScope(lidKey, canonical);
       if (this.chatSessions.has(lidKey)) {
         if (canonical !== lidKey && !this.chatSessions.has(canonical)) {
+          if (!this.pollBridge.preparePendingPollRekey(lidKey, canonical, newJid,
+            () => this.handleJidAliasChanged(conversationKey, newJid))) return;
           const legacyProviderTurn = this.legacyProviderTurnOwners.get(lidKey);
           if (legacyProviderTurn && this.legacyProviderTurnOwners.has(canonical)) {
             throw new Error(`Cannot rekey provider turn ownership onto occupied scope "${canonical}"`);
@@ -3840,14 +3840,12 @@ export class AgentRuntime implements Runtime {
           const pendingPoll = this.pendingPolls.questions.get(lidKey);
           if (pendingPoll) {
             this.pendingPolls.questions.delete(lidKey);
-            this.pollPersistence.remove(lidKey);
             clearPendingPollTimers(pendingPoll);
             pendingPoll.chatJidAliases.add(lidKey);
             pendingPoll.chatJidAliases.add(newJid);
             pendingPoll.chatJidAliases.add(canonical);
             pendingPoll.chatJid = canonical;
             this.pendingPolls.questions.set(canonical, pendingPoll);
-            this.pollPersistence.save(canonical, pendingPoll);
             this.startPendingPollExpiry(canonical, pendingPoll);
           }
           const imageBuffer = this.imageCoalesce.buffers.get(lidKey);
@@ -6245,8 +6243,16 @@ export class AgentRuntime implements Runtime {
           pendingPoll.currentQuestionIndex++;
           advancePendingPollIndex(pendingPoll);
 
-          if (Object.keys(pendingPoll.answersCollected).length >= pendingPoll.questions.length) {
-            this.stageResolvedAskUserPoll(mapKey, pendingPoll);
+          const allAnswered = Object.keys(pendingPoll.answersCollected).length >= pendingPoll.questions.length;
+          const durable = allAnswered
+            ? await this.pollBridge.stageResolvedAskUserPollAndWait(mapKey, pendingPoll)
+            : (await this.pollPersistence.saveAndWait(mapKey, pendingPoll)).durable;
+          mapKey = this.pollBridge.currentPendingPollKey(mapKey, pendingPoll) ?? mapKey;
+          if (!durable || this.pendingPolls.questions.get(mapKey) !== pendingPoll) {
+            throw new Error('Poll answer durability is unavailable');
+          }
+          if (runtimeContext && this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(runtimeContext)) return;
+          if (allAnswered) {
             await this.completeConsumedPerChatInbound(
               mapKey,
               'poll_answer_collected',
@@ -7140,6 +7146,9 @@ export class AgentRuntime implements Runtime {
   private deletePendingPollQuestions(mapKey: string): void {
     const pending = this.pendingPolls.questions.get(mapKey);
     if (!pending) return;
+    if (!this.pollPersistence.remove(mapKey, pending, () => {
+      if (this.pendingPolls.questions.get(mapKey) === pending) this.deletePendingPollQuestions(mapKey);
+    }).durable) return;
     clearPendingPollTimers(pending);
     // Clean up suppression for askuser source
     if (pending.source === 'askuser' || pending.source === undefined) {
@@ -7153,15 +7162,10 @@ export class AgentRuntime implements Runtime {
       pending.awaitReject = undefined;
     }
     this.pendingPolls.questions.delete(mapKey);
-    this.pollPersistence.remove(mapKey);
   }
 
-  // ---------------------------------------------------------------------------
-  // AskUserQuestion→poll bridge (#1977 D3) — extracted to runtime-poll-bridge.ts.
-  // Spread delegators keep every externally-reached name (ctor subscriptions,
-  // start() calls, the public console API, and the characterization suites
-  // that invoke these on the runtime) working unchanged.
-  // ---------------------------------------------------------------------------
+  // The poll coordinator owns lifecycle and startup recovery. Delegates preserve
+  // runtime entry points used by subscriptions, startup, the console and tests.
 
   private detachPendingPollContinuation(...args: Parameters<RuntimePollBridgeCoordinator['detachPendingPollContinuation']>): ReturnType<RuntimePollBridgeCoordinator['detachPendingPollContinuation']> {
     return this.pollBridge.detachPendingPollContinuation(...args);
@@ -7399,7 +7403,6 @@ export class AgentRuntime implements Runtime {
         break;
 
       case 'tool_use':
-        session?.trackToolStart(event.toolId);
         session?.tickWatchdog();
         // Post-turn gate: suppress phantom tool_use events (same rationale as assistant_text)
         if (mapKey !== undefined && this.postTurnGate.has(mapKey)) {
@@ -7407,6 +7410,7 @@ export class AgentRuntime implements Runtime {
           break;
         }
         if (this.isSilentCompact(mapKey)) break;
+        session?.trackToolStart(event.toolId, event.toolName, event.toolInput);
 
         if (mapKey !== undefined && this.pendingSystemResults.count(mapKey) === 0) {
           const contexts = this.perChatRuntimeTurnContexts.get(mapKey);
@@ -7436,7 +7440,7 @@ export class AgentRuntime implements Runtime {
           const toolUpdate = buildToolUpdate(event.toolName, event.toolInput ?? {});
           // The scheduled prompt forbids exposing tool progress (#3497).
           if (scheduledScopeKey === undefined) queue.enqueueToolUpdate(toolUpdate);
-          tracker?.onToolStart(event.toolId, event.toolName, toolUpdate.category);
+          tracker?.onToolStart(event.toolId, event.toolName, toolUpdate.category, event.toolInput);
         }
         break;
 
@@ -8074,6 +8078,8 @@ export class AgentRuntime implements Runtime {
     let singletonSessionShutdownFailed = false;
     let preserveRuntimeTurnState = false;
     this.shutdownRequested = true;
+    this.pollPersistence.stop();
+    this.offlineDecisionRetry.clear();
     log.info({
       instanceName: this.instanceName,
       sessionScope: this.sessionScope,
@@ -10613,6 +10619,7 @@ export class AgentRuntime implements Runtime {
       whatsoupInstance: this.instanceName,
       whatsoupMcpSocket: mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
       whatsoupMcpSessionToken: this.sessionTokens.mint(),
+      mintOpenCodeMcpSessionToken: (owner) => this.sessionTokens.mint(owner),
       providerTransitionReady,
       handoffSystemBlock: this.buildHandoffSystemBlock(sessionConversationKey, route ? route.provider : this.effectiveProvider),
       degradedCapabilitiesBlock: managedLoopDegraded
@@ -12331,7 +12338,6 @@ export class AgentRuntime implements Runtime {
         break;
 
       case 'tool_use':
-        this.session?.trackToolStart(event.toolId);
         this.session?.tickWatchdog();
         // Post-turn gate: suppress phantom tool_use (same as handleEventWithContext)
         if (this.postTurnGate.has(GLOBAL_TOOL_SCOPE_KEY)) {
@@ -12339,6 +12345,7 @@ export class AgentRuntime implements Runtime {
           break;
         }
         if (this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY)) break;
+        this.session?.trackToolStart(event.toolId, event.toolName, event.toolInput);
 
         if (this.pendingSystemResults.count(GLOBAL_TOOL_SCOPE_KEY) === 0 && this.currentRuntimeTurnContext) {
           this.currentRuntimeTurnContext = markRuntimeTurnReplayUnsafe(this.currentRuntimeTurnContext);
@@ -12363,7 +12370,7 @@ export class AgentRuntime implements Runtime {
         {
           const toolUpdate = buildToolUpdate(event.toolName, event.toolInput ?? {});
           if (scheduledScopeKey === undefined) queue.enqueueToolUpdate(toolUpdate);
-          tracker?.onToolStart(event.toolId, event.toolName, toolUpdate.category);
+          tracker?.onToolStart(event.toolId, event.toolName, toolUpdate.category, event.toolInput);
         }
         break;
 

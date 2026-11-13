@@ -16,7 +16,12 @@ There are two poll paths with different semantics:
 2. `send_poll` for non-blocking coordination.
    - Use when the poll is a survey, lightweight preference check, brainstorming aid, or coordination signal that does not need to unblock the current agent turn.
    - Set `selectableCount` above `1` for multi-select polls.
-   - Do not expect `send_poll` votes to be injected as a tool result. It sends the poll only.
+   - By default, `send_poll` returns after sending. With `awaitResult: true`, it stays open until a vote, expiry, or cancellation and returns the result.
+   - A blocking wait uses the tool timeout (default one hour, clamped to one second through 24 hours). The operation tracker and session hard watchdog allow that bounded wait. Unrelated stalled tools retain their normal deadlines.
+   - At most 8 awaited polls can be pending per conversation and 32 per runtime. A call over either limit returns an error and sends no poll. A slot frees when a pending poll is answered, expires or is cancelled, or when its send fails.
+   - A restart ends every awaiting `send_poll` call. On start, WhatSoup deletes the stored awaited polls and tells each affected chat that their votes can no longer be acted on, so the limits start from zero with no carried-over polls. A failed terminal-marker write retains the stored poll without an active wait or limit slot; the chat is told only after the existing bounded persistence retry verifies retirement. A verified terminal marker permits the notice even if deletion fails, because startup will not restore that row or repeat its notice. Cleanup uses the same bounded retry. Pending `AskUserQuestion` polls are restored.
+   - When the provider reports a tool start and operation tracking is enabled, periodic progress during that bounded wait refreshes the typing indicator without sending “still working” text for the waiting operation. Unrelated operations keep their normal progress behavior.
+   - After the wait expires, a missing tool result still reaches ordinary stall recovery for child-process providers. Managed API providers use their hard-watchdog fallback. The session hard watchdog also bounds recovery when operation tracking is disabled.
 
 ## Agent Guidance
 
@@ -54,27 +59,45 @@ Agents should not add their own generic `Other` option unless they need custom w
 
 ## Recovery Behavior
 
-- Restart durability: pending poll state lives in the runtime's `pendingPollQuestions` map AND is mirrored to the `pending_polls` SQLite table (migration 28). `persistPendingPoll` upserts on every meaningful state change (register, ballot append, mode flip, answer collected); `removePendingPoll` deletes on settle / hard-expiry / cancellation. On `AgentRuntime.start()`, `rehydratePendingPolls` restores live polls with re-armed timers using the remaining time, and drops rows where `hard_closes_at <= now`. Expired-during-downtime polls are notified **per chat, consolidated**: a chat that stranded one poll gets a single-poll notice; a chat that stranded several gets one "N polls expired" notice rather than one message per poll. Persistence errors are logged, swallowed, and counted (`pollPersistenceErrors`, surfaced in health) — the in-memory state remains authoritative, so a misconfigured DB degrades to in-process-only behavior rather than crashing the runtime.
+- Restart durability: pending polls live in memory and in `pending_polls` (migration 28). Saves verify the expected generation and serialized state. A settled poll receives a durable terminal marker (`hard_closes_at = 0`) before deletion; a failed delete cannot make it active after restart, including on older releases. A failure to persist that marker prevents terminal effects.
+- Answer durability: typed full and partial answers retain their inbound owner until their state is durable or bounded recovery ends. Console decisions return `invalid` while persistence is unavailable. A complete console answer continues once after recovery. Replacement and shutdown cancel stale continuations; neither counts as successful delivery. Provider dispatch failures use the existing failed system-turn path and retry notice, without replaying the answer automatically.
+- Identity migration: moving a pending poll from a LID to a phone JID writes the destination and deletes the matching source generation in one verified transaction. A failed move retains the source and uses the same bounded retry owner. Active turns still defer migration until terminalization; answer continuations follow the same pending poll object across that migration, without accepting a replacement poll.
+- Recovery ownership: failed writes retain per-record debt and retry on the existing scheduler (five lifetime attempts, exponential delay from 5 seconds up to 60 seconds). A successful read or unrelated write cannot clear that debt. Shutdown cancels timers without resetting consumed attempts. Exhaustion remains degraded and requires diagnosis; restarting is not proof of recovery.
+- Startup reads: an unreadable table or undecodable live row is unavailable, not empty. Queued console decisions remain stored while bounded startup recovery retries. Corrupt rows are retained for inspection, not silently discarded. Live polls are restored with timers; expired polls are removed with one consolidated notice per chat. A previously resolved AskUser continuation is not replayed after restart; the user receives a notice requesting the answer again.
 - Expiry: there is no reminder nudge. Soft expiry fires at the poll's `timeoutMs` (default 1 h via `pollResolution.defaultTimeoutMs`): an unanswered `AskUserQuestion` poll switches to a numbered text fallback, while `majority-after-timeout` and `admin-wins` resolve from the recorded votes. Hard expiry fires at `timeoutMs * 2`: the runtime sends "This decision has expired — please re-trigger when ready." for unanswered questions and clears the poll.
 - Decrypt failure: if WhatsApp delivers a poll vote that cannot be decrypted after all bounded JID candidates fail, transport emits `pollVoteFailed`; runtime sends a one-time numbered text fallback and accepts an option number, label, or free-text answer.
 - Low-signal replies such as `I voted` do not resolve a pending poll while the native poll path is still active. The user should tap the poll or type the exact option label/number.
 
 ## Operational Notes
 
+OpenCode does not report a tool start before its poll wait. Each OpenCode process
+therefore receives a fresh MCP token that associates a tracked wait with its exact
+session incarnation and provider turn. An old token cannot extend a later turn.
+The destination chat does not identify the requesting session. External callers
+can still await polls without extending an agent's watchdog. These tokens provide
+attribution, not authentication: a same-user process that obtains a current token
+can request the same bounded extension. Existing tool permissions remain in force.
+
+This OpenCode attribution protects watchdog continuity only; it does not start
+periodic operation progress. The typing indicator can therefore stop during an
+unresolved poll wait. Continuous typing is not guaranteed for OpenCode awaits.
+
 The `pending_polls` table is bounded in normal operation: rows are deleted on settle, hard-expiry, and cancellation, so steady-state row count tracks the number of genuinely in-flight polls (typically single digits). A row count that grows without settling indicates polls that are never resolving — investigate stuck sessions or a transport that stopped delivering `pollVoteReceived`.
 
-- **Monitoring**: `GET /health` exposes `sqlite.pending_polls_total` (live row count) and `runtime.agent.pollPersistenceErrors` (cumulative count of swallowed persist/remove/rehydrate failures since process start). A nonzero and climbing `pollPersistenceErrors` means the DB mirror is failing while the in-memory map stays authoritative — polls still work for the current process lifetime but will not survive a restart. Check disk space, DB file permissions, and schema version.
+- **Monitoring**: `GET /health` exposes the row count and cumulative `runtime.agent.pollPersistenceErrors`, plus current `pollPersistence` degradation, retry attempts, exhaustion and recovery history. Use current debt to distinguish an active failure from historical errors. Diagnostics expose fixed messages or known SQLite codes; raw error text, answers and record identifiers are omitted. Check disk space, DB permissions and schema compatibility before retrying.
 - **Inspection**: `sqlite3 <db-path> "SELECT map_key, chat_jid, source, resolution, datetime(closes_at/1000,'unixepoch') AS closes, datetime(hard_closes_at/1000,'unixepoch') AS hard_closes FROM pending_polls ORDER BY created_at;"` lists every persisted poll with its soft/hard expiry. The runtime DB (bot.db) follows the data-root layout under `$XDG_DATA_HOME/whatsoup/instances/<name>/` (default `~/.local/share/whatsoup/instances/<name>/bot.db`). `pending_polls` is a table inside bot.db.
-- **Pruning**: manual deletion is rarely needed — `rehydratePendingPolls` self-prunes `hard_closes_at <= now` rows on every start. To force a clean slate without a restart, deleting rows directly is safe: the in-memory map is authoritative for the running process and the table is a mirror, so a stray delete only loses restart-survivability for that poll, not the live poll itself.
+- **Pruning**: use the runtime's generation-aware settlement and expiry paths. Direct row deletion can lose an unresolved answer or its recovery evidence; it is not a safe way to clear degradation. Retain corrupt rows and consumed-attempt evidence until an authorized repair verifies the intended state.
 - **Growth after long downtime**: a process that was down past many polls' hard expiry will, on next start, delete all expired rows and emit one consolidated "expired" notice per affected chat (not per poll). The `rehydratePendingPolls: completed` log line reports `restored`, `expired`, and `chatsNotified` counts.
 
 ## Trigger Matrix
 
 | Scope | `AskUserQuestion` poll bridge | Default Other | `send_poll` | Group voting |
 | --- | --- | --- | --- | --- |
-| Per-chat DM | Blocking, correlated, answer injected | Auto-appended when under cap and no escape hatch | Available, non-blocking | Not applicable |
-| Per-chat group | Blocking, correlated via voter policy, answer injected (default `first-vote-wins`) | Auto-appended when under cap and no escape hatch | Available; `awaitResult: true` blocks; `resolution` selects strategy | 4 strategies shipped: `first-vote-wins`, `admin-only`, `admin-wins`, `majority-after-timeout` |
-| Shared/global session | Falls through to provider-native behavior | Not applied | Available, non-blocking | Not applicable |
+| Per-chat DM | Blocking, correlated, answer injected | Auto-appended when under cap and no escape hatch | Returns after sending by default; `awaitResult: true` waits with vote tracking | Not applicable |
+| Per-chat group | Blocking, correlated via voter policy, answer injected (default `first-vote-wins`) | Auto-appended when under cap and no escape hatch | Returns after sending by default; `awaitResult: true` waits with vote tracking; `resolution` selects strategy | 4 strategies shipped: `first-vote-wins`, `admin-only`, `admin-wins`, `majority-after-timeout` |
+| Shared/global session | Falls through to provider-native behavior | Not applied | Returns after sending by default; `awaitResult: true` waits with vote tracking | Not applicable |
+
+`awaitFailed` reports an explicitly requested wait that could not complete, including unavailable vote tracking, timeout or cancellation. An ordinary successful `send_poll` does not return `awaitFailed`.
 
 Group polls support the four resolution strategies via `send_poll`'s `resolution` parameter, or via the instance-level `pollResolution.defaultStrategy` config for `AskUserQuestion`. Each strategy:
 
@@ -102,6 +125,6 @@ For release claims, also run the relevant targeted tests and `npm run guard:test
 ## Known Limits
 
 - `AskUserQuestion` poll correlation is per-chat only (DMs and groups). Shared/global agent sessions fall through to their provider's native behavior.
-- `send_poll` is not a blocking request/response protocol.
+- `send_poll` returns immediately by default. `awaitResult: true` requires vote tracking and waits for a vote, timeout, or cancellation.
 - Implicit prose-to-poll conversion is intentionally not part of this contract. It is too prone to false positives unless a future spec defines exact trigger syntax and verification gates.
 - WhatsApp poll option text has tight practical limits. For paragraph-scale brainstorming, rely on companion text and concise labels rather than trying to pack full paragraphs into poll values.
