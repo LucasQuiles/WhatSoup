@@ -13,6 +13,12 @@ conversational voice remains deferred. Several surfaces that exist for WhatsApp
 on SMS — the full list is in [Current limitations](#current-limitations).
 Automated tests are mock-based and do not prove live deliverability.
 
+Schema 67 supports canonical E.164 SMS delivery identities in agent terminal and
+checkpoint records. Polling an outbound record can provide echo evidence; an
+API acceptance or webhook-only path does not gain completion proof from this
+identity change. See the [identity and rollback contract](../durability.md#session_checkpoints)
+and #3841 for the separate provider-evidence work.
+
 ## How it works
 
 - `src/transport/registry.ts` re-exports the canonical ID registry in

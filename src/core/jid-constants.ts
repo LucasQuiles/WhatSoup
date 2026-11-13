@@ -5,7 +5,14 @@
 // Every JID parsing/normalization operation should live here or delegate here.
 // Do NOT reimplement .split('@')[0] or .endsWith('@lid') inline — use these.
 
-import { assertNeverTransport, isSignalGroupAddress, type TransportId } from './transport-refs.ts';
+import {
+  assertNeverTransport,
+  canonicalizeImessageDirectIdentity,
+  isSignalGroupAddress,
+  SIGNAL_UUID_RE,
+  type TransportId,
+} from './transport-refs.ts';
+import { isE164Wire } from '../lib/phone.ts';
 
 // ── Domain constants ────────────────────────────────────────────────────────
 
@@ -39,6 +46,11 @@ export type WhatsAppDeliveryNamespace =
   | typeof DOMAIN_PERSONAL
   | typeof DOMAIN_LID
   | typeof DOMAIN_GROUP;
+
+export type DeliveryNamespace = WhatsAppDeliveryNamespace
+  | typeof DOMAIN_SMS
+  | typeof DOMAIN_SIGNAL
+  | typeof DOMAIN_IMESSAGE;
 
 const WHATSAPP_DELIVERY_NAMESPACES: ReadonlySet<string> = new Set([
   DOMAIN_PERSONAL,
@@ -211,8 +223,8 @@ export const isWhatsAppAuthenticatedJid = isAuthenticatedSenderJid;
 
 /**
  * Return the exact namespace of a canonical WhatsApp delivery JID.
- * Completed-turn identity deliberately excludes transport and broadcast
- * pseudo-JIDs, and accepts exactly one local/namespace separator.
+ * This WhatsApp-specific parser excludes other transport and broadcast
+ * namespaces, and accepts exactly one local/namespace separator.
  */
 export function parseWhatsAppDeliveryNamespace(
   jid: string,
@@ -232,6 +244,34 @@ export function parseWhatsAppDeliveryNamespace(
   return WHATSAPP_DELIVERY_NAMESPACES.has(namespace)
     ? namespace as WhatsAppDeliveryNamespace
     : null;
+}
+
+/** Validate a delivery identity without normalizing or granting sender authority. */
+export function parseDeliveryNamespace(jid: string): DeliveryNamespace | null {
+  const whatsapp = parseWhatsAppDeliveryNamespace(jid);
+  if (whatsapp !== null) return whatsapp;
+  if (typeof jid !== 'string' || /[\s\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]/u.test(jid)) {
+    return null;
+  }
+  // AppleID email addresses contain an @ of their own; only the final suffix
+  // identifies the transport. Conversation-key encoding remains unchanged.
+  const separator = jid.lastIndexOf('@');
+  if (separator <= 0) return null;
+  const address = jid.slice(0, separator);
+  const namespace = jid.slice(separator + 1);
+  switch (namespace) {
+    case DOMAIN_SMS:
+      return isE164Wire(address) ? namespace : null;
+    case DOMAIN_SIGNAL:
+      return isE164Wire(address) || SIGNAL_UUID_RE.test(address) || isSignalGroupAddress(address)
+        ? namespace : null;
+    case DOMAIN_IMESSAGE:
+      // Chat GUIDs need qualified group lifecycle semantics before they can
+      // become resumable identities. Current group detection omits iMessage.
+      return canonicalizeImessageDirectIdentity(address) === address ? namespace : null;
+    default:
+      return null;
+  }
 }
 
 /** Extract the local part (everything before @) from a JID. Returns the input if no @ present. */

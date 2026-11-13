@@ -9,7 +9,8 @@ import {
 } from './delivery-corroboration-sql.ts';
 import { OPEN_RECOVERIES_CTE_SQL } from './open-recoveries-sql.ts';
 import { syntheticSourceMessageIdSql } from './synthetic-turn-source.ts';
-import { promoteEchoedCheckpointIdentitySql } from './turn-recovery-checkpoint-identity.ts';
+import { echoedTurnRecoverySettlementSql, promoteEchoedCheckpointIdentitySql } from './turn-recovery-checkpoint-identity.ts';
+import { parseDeliveryNamespace } from './jid-constants.ts';
 
 export const TURN_RECOVERY_MAX_ID_BYTES = 2048;
 export type TurnRecoveryAdmissionState = 'clear' | 'awaiting_delivery_echo' | 'blocked';
@@ -705,13 +706,7 @@ export class TurnRecoveryStore {
         ${VALID_RECOVERY_JOB_FROM}
         WHERE j.id = ?
       `),
-      getEchoedTurnRecoverySettlement: prepare(`
-        SELECT j.id AS job_id, j.state, i.seq AS inbound_seq,
-               i.processing_status, i.terminal_reason,
-               o.status AS outbound_status
-        ${VALID_RECOVERY_JOB_FROM}
-        WHERE o.id = ?
-      `),
+      getEchoedTurnRecoverySettlement: prepare(echoedTurnRecoverySettlementSql(VALID_RECOVERY_JOB_FROM)),
       completeEchoedTurnRecoveryInbound: prepare(`
         UPDATE inbound_events
         SET processing_status = 'complete',
@@ -1392,6 +1387,7 @@ export class TurnRecoveryStore {
           processing_status: string;
           terminal_reason: string | null;
           outbound_status: string;
+          delivery_jid: string;
         }
       | undefined;
     if (!match) {
@@ -1457,7 +1453,10 @@ export class TurnRecoveryStore {
     if (completed.changes !== 1) {
       throw new Error('Echoed recovery job settlement did not update exactly one row');
     }
-    this.statements.promoteEchoedCheckpointIdentity.run(outboundOpId);
+    const namespace = parseDeliveryNamespace(match.delivery_jid);
+    if (namespace !== null) {
+      this.statements.promoteEchoedCheckpointIdentity.run(namespace, outboundOpId);
+    }
     return {
       matched: true,
       applied: true,

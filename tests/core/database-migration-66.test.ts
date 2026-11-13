@@ -39,13 +39,12 @@ function ledgerVersions(raw: DatabaseSync): number[] {
 }
 
 describe('migration 66 through the registry', () => {
-  it('a fresh database opens at schema 66 with the closure table and its guards', () => {
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(66);
+  it('a fresh database includes migration 66 with the closure table and its guards', () => {
     const db = new Database(':memory:');
     db.open();
     try {
       const raw = db.raw;
-      expect(ledgerVersions(raw)).toEqual(Array.from({ length: 66 }, (_, i) => i + 1));
+      expect(ledgerVersions(raw)).toEqual(Array.from({ length: CURRENT_SCHEMA_MIGRATION }, (_, i) => i + 1));
       expect(objectNames(raw, 'table')).toEqual(['continuity_gap_closures']);
       expect(objectNames(raw, 'trigger')).toEqual([
         'continuity_gap_closures_append_only_delete',
@@ -68,14 +67,14 @@ describe('migration 66 through the registry', () => {
     ]);
     // Emulate a schema-65 file: remove exactly what migration 66 adds.
     first.raw.exec('DROP TABLE continuity_gap_closures');
-    first.raw.prepare('DELETE FROM schema_migrations WHERE version = 66').run();
+    first.raw.prepare('DELETE FROM schema_migrations WHERE version >= 66').run();
     first.close();
 
     const upgraded = new Database(dbPath);
     upgraded.open();
     try {
       const raw = upgraded.raw;
-      expect(ledgerVersions(raw)).toEqual(Array.from({ length: 66 }, (_, i) => i + 1));
+      expect(ledgerVersions(raw)).toEqual(Array.from({ length: CURRENT_SCHEMA_MIGRATION }, (_, i) => i + 1));
       expect(objectNames(raw, 'table')).toEqual(['continuity_gap_closures']);
       const plans = (raw.prepare(`
         SELECT plan_id FROM recovery_plans WHERE actor = 'continuity_manifest_recorder'

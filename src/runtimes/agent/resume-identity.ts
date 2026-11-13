@@ -1,13 +1,13 @@
 import { toConversationKey } from '../../core/conversation-key.ts';
 import type { SessionCheckpointRow } from '../../core/durability.ts';
 import {
-  parseWhatsAppDeliveryNamespace,
-  type WhatsAppDeliveryNamespace,
+  parseDeliveryNamespace,
+  type DeliveryNamespace,
 } from '../../core/jid-constants.ts';
 import { isRecord } from '../../lib/type-guards.ts';
 import type { TurnIdentity } from './turn-terminal.ts';
 
-export type ResumeDeliveryNamespace = WhatsAppDeliveryNamespace;
+export type ResumeDeliveryNamespace = DeliveryNamespace;
 
 export interface PersistedResumeIdentity extends Omit<TurnIdentity, 'inboundSeq'> {
   readonly deliveryNamespace: ResumeDeliveryNamespace;
@@ -56,7 +56,7 @@ export function resolveResumeIdentity(candidate: unknown): PersistedResumeIdenti
     return null;
   }
 
-  const parsedNamespace = parseWhatsAppDeliveryNamespace(deliveryJid);
+  const parsedNamespace = parseDeliveryNamespace(deliveryJid);
   if (parsedNamespace === null || parsedNamespace !== deliveryNamespace) return null;
 
   try {
