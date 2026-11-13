@@ -952,6 +952,63 @@
       ]
     },
     {
+      "path": "deploy/scripts/fleet/fleet_probe.py",
+      "sha256": "e54716968823ef1a20de3f98b787312eae4810e1f1087da40241abeff31ec27a",
+      "mustContain": [
+        "fleet targets path must be absolute",
+        "health_reader_code"
+      ]
+    },
+    {
+      "path": "deploy/scripts/fleet/fleet_probe_remote.py",
+      "sha256": "32d7a4b9ff5cbf70bfbcc31ad24822fbb94cf496cd40b8e831baf67406134b67",
+      "mustContain": [
+        "classify_projection",
+        "retired_checks"
+      ]
+    },
+    {
+      "path": "deploy/scripts/fleet/mcp_probe_remote.py",
+      "sha256": "2d2f7e09bc3393c80edd4b98e8c33385c1200f86bdce04d18810574a153d5e36",
+      "mustContain": [
+        "get-auth-status",
+        "get-diagnostics"
+      ]
+    },
+    {
+      "path": "deploy/scripts/fleet/fleet_reliability_observer.py",
+      "sha256": "0ab6eec3840bf1ba03af80588578273f8afc170392025ed2a2fb3611e1e98e60",
+      "mustContain": [
+        "schema_version",
+        "retired_checks",
+        "fleet-watchdog.json"
+      ]
+    },
+    {
+      "path": "deploy/scripts/fleet/reliability_supervisor.py",
+      "sha256": "1bc92d8b72516c4146ac3061a31f6deff4507353e27dc763dacfc11e5b7b4412",
+      "mustContain": [
+        "legacy_sent_items_probe",
+        "resolve_alert_delivery"
+      ]
+    },
+    {
+      "path": "deploy/scripts/fleet/bot_errors_delivery_receipts.py",
+      "sha256": "5e0c512e54721f419cb5cb2e6410468c12eb8b21b07b4c4bfe3a42f710e40aaa",
+      "mustContain": [
+        "delivery_receipts",
+        "storm-collapsed"
+      ]
+    },
+    {
+      "path": "deploy/scripts/install-fleet-reliability-observer.sh",
+      "sha256": "15b42f0bfafd9bae1eb6579429642396683614d0dc11560e5b30599f53d9579b",
+      "mustContain": [
+        "--activate",
+        "fleet-deadman"
+      ]
+    },
+    {
       "path": "deploy/scripts/write-health-package-pin.py",
       "sha256": "f9e7eaa04c95fb6b72653d2f4aab42086911874525d96a1682dbc84d4cb8a039"
     }

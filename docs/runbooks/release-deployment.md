@@ -903,6 +903,326 @@ findings under `release-currency`. `--clear-on-ok` clears each source only from
 its own successful observation. Installing or updating the rendered job remains
 a separately approved live-host mutation.
 
+### Portable fleet observer and deadman
+
+The delivery-receipt reader opens the queue root, stage directories and receipt
+leaves without following symlinks. It reads regular files through the same
+descriptors it validates, so replacing a pathname cannot redirect the read.
+Each receipt is limited to one MiB, including growth after the initial size
+check. Unreadable or malformed entries do not establish delivery. The queue
+root's ancestor directories remain part of the trusted host configuration.
+Supervisor collector observations match emitter filenames literally, including
+wildcard characters; an unrelated relay receipt cannot acknowledge an alert.
+Direct fleet HTTP probes accept at most 1,000,000 response bytes. They inspect
+one additional byte to detect overflow and reject the whole response, even when
+the bounded prefix is valid JSON. The same limit applies to error responses.
+
+Release exports include `deploy/scripts/fleet/` through the BOT ERRORS runtime
+manifest and `whatsoup-bot-errors-deploy.sh`. The module has no tracked host
+inventory. An operator supplies an absolute, private target file to
+`fleet_probe.py` and an absolute, private observer config to the jobs. The
+default MCP check calls only the configured authentication and diagnostics
+tools. A legacy capability probe can read a mailbox resource only when its
+private config explicitly sets `legacy_sent_items_probe: true`; it is not part
+of the default observer or deadman schedule.
+
+Target inventories, observer configuration and shared state reads require a
+regular file owned by the executing user, with mode `0600`, one hard link and
+at most one MiB of UTF-8 JSON. The reader limits bytes even if the file grows
+after validation and rejects non-regular files without waiting for a writer.
+It opens each ancestor directory and the file without following symlinks,
+and reads through the held descriptors. Ancestors must belong to root or the
+executing user and must not be writable by other users; root-owned sticky
+temporary directories are allowed. On macOS, the verified root-owned `/tmp`,
+`/var` and `/etc` aliases to `/private` are supported. These are POSIX ownership
+and mode checks; host administrators remain responsible for access-control lists.
+The runtime and installer create state directories through the same validated
+directory walk, creating missing parents with mode `0700`. Preflight does not
+create directories.
+State writes require an executing-user-owned `0700` parent and hold its
+descriptor through temporary-file creation, file sync, atomic replacement,
+directory sync and temporary-file cleanup. Replacing an ancestor pathname
+cannot redirect those operations. Serialization or replacement failure leaves
+the previous destination unchanged and removes the writer's temporary file.
+A sync failure after replacement is reported as an error; the new state may
+already be visible, and crash durability is then unverified. Pending-event
+overflow remains a separate unresolved obligation.
+The writer serializes with the same sorted-key, ASCII-escaped JSON encoding
+used to measure receipt metadata. The complete state, including its final
+newline, must fit the reader's one-MiB limit. Oversized state raises
+`state_file_oversized` before a temporary file is created or the previous file
+is replaced. Existing oversized files are not repaired or truncated.
+
+The supervisor command helper and local/SSH probe wrapper read stdout and
+stderr concurrently with byte limits. General command stdout permits one MiB;
+delivery lookup requires less than 64 KiB, and fleet probe stdout permits up
+to 64 KiB. Emitter stdout permits 4,096 bytes, and its returned filename must
+fit in 255 UTF-8 bytes. Stderr permits up to 64 KiB for all these commands. Oversized output
+fails the operation without exposing captured output. Delivery remains
+unresolved, emission remains unconfirmed and a fleet probe reports transport
+failure. Each command runs under a short-lived helper in a separate process
+group. The helper retains the group identity after the command exits. The
+caller sends SIGKILL to that group before reaping the helper, including on
+normal completion, timeout, output overflow or capture failure. It waits up to
+five seconds to reap the helper and closes its pipes on exit. Same-group children
+must finish within this command scope; background work must not depend on
+surviving a successful command return.
+
+A private pipe tells the helper when its caller has exited, including outer
+observer cancellation. The helper then stops its own group. An independent
+deadline, five seconds after the command deadline, also limits the helper's
+lifetime if another process retains the pipe. The command receives neither
+control descriptor. Its exit code and captured bytes remain the command result;
+missing helper status or a cleanup error cannot report success. These controls
+do not terminate children that create another process group or remote SSH
+commands, and do not establish a deadline for the complete monitoring cycle.
+Receipt lookup scans each stage once for the whole batch of at most 128 event
+IDs. Across the batch it permits 4,096 directory entries, eight MiB read and a
+five-second cooperative deadline. One additional entry or byte may be inspected
+to detect overflow. The existing one-MiB per-file limit and 32 matching names
+per event per stage remain; exceeding the matching-name cap now fails the batch
+instead of returning a partial disposition. JSON output, including escaping and
+the final newline, must fit in 65,535 bytes. Audit receipts are never truncated.
+Bytes read from a subsequently rejected file still consume the batch budget.
+Files rejected by metadata before reading consume only the entry budget.
+Scan errors or exhausted budgets fail the whole batch through the existing
+generic command error; they cannot return an earlier partial delivery result.
+The supervisor leaves that batch unresolved with unchanged event IDs. Its
+existing published-alert retention rules are unchanged.
+A command response that claims delivery without a nonblank audit-receipt string
+fails the batch before any alert is changed. Empty or whitespace-only strings
+do not establish delivery. The receipt reader reports a sent spool record with
+such a value as pending. This matches the dispatcher's acceptance contract;
+valid opaque receipt strings, including surrounding whitespace, are retained
+unchanged. Other malformed receipt rows remain unresolved.
+This validation applies when resolving delivery. Previously saved terminal
+records are not revalidated or migrated by this change.
+Each newly accepted successful receipt must also serialize within 4,096 bytes,
+with no non-finite numbers. The entire receipt object is retained unchanged;
+the audit string is neither truncated nor restricted to a hexadecimal format.
+An oversized or non-serializable receipt produces `invalid_output` for its
+whole batch before any alert is changed. Resolution retries keep the published
+alert and its event ID; they do not put it back into the emission queue.
+This budget limits the metadata in 128 retained terminal receipts to half of
+the readable-state limit. It is a storage allocation, not a measurement of live
+receipt sizes. Custom commands returning larger receipts will remain unresolved.
+Other fields, legacy receipt records and pending events can still exhaust the
+remaining state space. Writer refusal preserves the last readable file but
+does not establish progress or recovery. In particular, a failure after an
+emission can leave the previously saved event pending for retry with the same
+ID. Publication deduplication and post-emission recovery still require
+qualification. These limits do not authorize historical data removal.
+All four monitoring paths retain undelivered alerts regardless of age or count;
+an unsuccessful lookup or a missing receipt does not end the delivery obligation.
+Only terminal history is reduced to the newest 128 records. Preserving these
+records does not enlarge the state limit.
+Each monitoring writer reconciles its own delivery records under its existing
+state lock and saves the result before further observation. The service supervisor
+does this before its liveness probe. Each writer's cycle queries at most 128 event
+IDs through one command with a 15-second timeout and a 65,535-byte output limit.
+The saved cursor and fixed end of the current pass ensure later arrivals cannot
+extend that pass indefinitely. A failed or malformed batch advances the cursor
+without confirming any of its alerts; those alerts are retried on a later pass.
+The 4,096-byte retained-receipt limit applies to each event; the 65,535-byte limit
+applies to the entire command response. An oversized response or nonzero command
+exit halves the attempted batch size, down to one ID, for later cycles. This
+smaller limit persists across restart and does not add commands to the current
+cycle. A command outage can therefore reduce later throughput; no automatic
+increase is attempted that could recreate an oversized-response loop.
+Validated receipts are saved unchanged only when they fit without reducing the
+publication capacity already available to pending events. A receipt that cannot
+fit stays unresolved and records `state_capacity_exhausted`; new transitions stay
+paused until a complete clean pass. Other batches cannot clear that condition.
+If even cursor and failure metadata would consume reserved publication space,
+the command reports `delivery_capacity_exhausted` on stderr and retains the prior
+reconciliation state, allowing existing publication work to continue. Confirmed
+delivery is never downgraded to collector acknowledgement by observation readers.
+Remote readers use the service's persisted delivery status and perform no separate
+receipt lookup for those alerts. An older service without durable reconciliation
+can continue reporting alerts as unresolved; qualification and rollout must include
+the service writer before relying on terminal delivery observations.
+The watchdog likewise reads the observer's saved delivery status and failure count;
+it cannot confirm an observer alert independently. Observer and watchdog lookup
+failures retain their existing consecutive-cycle counters. Adding per-alert stale
+status also goes through capacity admission, so legacy alerts without that field
+cannot make an otherwise readable state exceed its limit.
+All four paths admit an observation cycle's incident changes only if the resulting
+state and bounded publication receipts fit. Otherwise they preserve the prior
+incident identifiers and pending queue, set `transition_capacity_exhausted`, and
+continue attempting the fitting prefix of existing delivery work. Clear events
+use the same admission rule: an incident remains recorded until its clear can be
+queued safely. A service restart is also withheld until its incident transition
+and restart reservation fit and the reservation has been saved. The reservation
+includes a restart result of at most 256 JSON bytes plus its status fields;
+an oversized result is recorded as a failed restart attempt without saving it.
+The normal result contains only the old and new process IDs. New transitions
+resume on a later cycle when space is available; intermediate changes during the
+pause can be missed. If even the degraded flag cannot fit in a legacy state, the
+command reports `publication_capacity_exhausted` and leaves the saved file intact.
+Before emission, all four monitoring paths reserve space for the published
+receipt, final cycle metadata and any pending events left behind. Reservation
+accounts for JSON escaping, including the maximum encoded filename. A cycle
+processes only a fitting prefix of the pending queue; the untouched suffix
+remains pending in its original order. Emitters receive a copy of each event,
+so callback mutations cannot change the reserved state. If no pending event can
+fit, no emitter is called. The command reports `publication_capacity_exhausted`
+as degraded and exits unsuccessfully. Existing receipt evidence is not
+truncated to create space.
+
+New events record `publication: not_attempted`. Before calling an emitter, the
+monitor moves the event into its existing `alerts` list with
+`delivery: publication_unknown` and durably saves that state. A confirmed,
+bounded publication response changes it to `locally_persisted`; this is not
+proof of delivery. A crash, timeout, exception, nonzero exit or invalid response
+leaves the event held. It is never automatically published again. This also
+covers a crash after the hold is saved but before the emitter runs: the alert
+may be delayed even though nothing was published. A legacy pending event without
+attempt provenance is held without invoking an emitter. IDs and incident history
+are preserved; independent pending events and delivery retries continue.
+
+The command summaries and supervisor observation expose `publication_unknown`
+and `monitoring_degraded`. Unknown alerts remain eligible for bounded delivery
+reconciliation and stale-alert detection. Positive spool evidence establishes
+publication; a valid sent receipt or dispatcher disposition establishes its
+existing delivery outcome. `unobserved`, failed or incomplete lookups do not
+prove nonpublication and do not release a hold. Reconciliation never invents a
+publication timestamp. Remote collection can move a record outside the local
+receipt reader's inventory, so such holds may require operator reconciliation.
+
+Before activating custom adapters, qualify bounded output and this recovery
+contract with the actual publication and collection paths. An adapter must not
+silently retry an ambiguous operation internally. The configured emitter command
+receives `--event-id`; its successful bounded path response acknowledges that
+invocation. The shared publisher attaches the invocation's event ID to its
+internal receipt. A held event needs separate positive reconciliation evidence;
+an acknowledgement for a different invocation cannot release it. Preserve
+its state and collect positive evidence by event ID from the publisher, collector
+and delivery audit. Allow the normal receipt path to confirm publication where
+possible. An operator may authorize requeueing only with affirmative proof that
+publication did not occur; an empty directory or nonzero emitter exit is not
+such proof. Any authorized state repair must stop the owning monitor, hold its
+state lock, preserve the original record and ID, use the private atomic state
+writer and validate the size bound before restart. Do not clear holds in bulk.
+Do not roll back to a monitor that retries pending events until the new attempt
+markers and held records have been reconciled under a reviewed migration.
+These rules prevent monitor-initiated duplicate publication after an ambiguous
+call; they do not establish exactly-once external delivery or qualify live
+activation. Legacy state without room for a hold remains degraded and preserved.
+The sentinel stores its local alert records once, in the state's `alerts` list.
+The saved observation snapshot keeps remote alerts. Detection and recovery use
+a temporary combined view of both lists, including local delivery failures and
+recent dropped-alert status. Adding those local summaries does not mutate the
+supplied observation object, so reusing it cannot accumulate stale local copies.
+Large spools may repeatedly exhaust these limits; eventual discovery and live
+capacity are not established. The deadline checks run around filesystem and
+JSON operations and cannot interrupt a blocked kernel call. The supervisor's
+15-second command timeout remains necessary. No spool cleanup is performed.
+
+The optional service supervisor records malformed or truncated HTTP framing as
+an `invalid_response` liveness failure, so that fault does not abort the cycle.
+An operating-system error during the response read, including a connection
+reset after headers arrive, is recorded as `unavailable`.
+Process cleanup across the observer, transport and independently started MCP
+process remains a separate continuity obligation. In particular, a per-request
+MCP timeout does not establish a deadline for the complete multi-request probe.
+The MCP probe starts a private helper as its process-group leader. A private pipe
+ties that helper to the observer: observer exit, including SIGTERM or SIGKILL,
+closes the pipe and makes the helper kill its current group. The server cannot
+inherit this pipe. This stops same-group server descendants even if they close
+stderr. It does not establish continuity across a broken remote SSH connection.
+The helper reports the actual server PID and keeps it unreaped until the observer
+finishes executable inspection. On normal completion, the observer requests the
+server's exit status and sends group SIGTERM. The helper allows three seconds
+for graceful stop, then kills a resistant server and waits up to one second for
+its exit status. The observer allows four seconds for that status response.
+It always sends group SIGKILL before the helper's final five-second reap wait,
+including when stderr has already closed. No group signal follows helper reaping.
+The reported exit status belongs to the server, not the helper.
+The helper captures at most 16 KiB, with one extra byte to detect overflow,
+and, when captured data remains below that limit, allows one bounded second
+after forced cleanup to observe stderr closure. A failed stderr read does not
+skip forced cleanup; the original read error remains in the result.
+It closes all three standard pipes and both private pipes. Oversized diagnostics remain incomplete rather than
+silently certifying cleanup from a truncated capture. A group-signaling error,
+cleanup exception or unreadable stderr pipe still held open is retained as
+`cleanup_error`; the fleet result reports `mcp_probe_incomplete` rather than
+healthy Microsoft 365 checks. Descendants that create another process group
+remain outside this cleanup authority. Retained stderr from an escaped child
+reports `stderr_incomplete`; closing that pipe cannot establish escaped-child
+cleanup. Whole-cycle deadlines and remote transport cleanup remain unqualified.
+
+Instance health tokens use the shared reader's precedence: per-instance
+`BOT_ERRORS_HEALTH_TOKEN_<INSTANCE>`, then `WHATSOUP_HEALTH_TOKEN`, then the
+instance's `tokens.env`. An existing launchd plist token is a compatibility
+fallback only when the shared reader resolves no token. Remote destinations
+must be SSH host aliases or addresses, not command-line options.
+Local health and broker HTTP probes connect directly to the local endpoint, ignore
+environment proxies and reject redirects, including any body returned with a
+redirect status. Credentials are never forwarded to a different endpoint.
+The optional supervisor uses this direct transport for its liveness and broker
+capability calls. Its liveness URL must use HTTP and the literal `127.0.0.1`
+address without user information, a fragment or port zero. The explicitly
+enabled legacy Microsoft Graph request retains its existing proxy behavior.
+
+Render the jobs from the release that will run them. Rendering writes only the
+named fresh staging directory, after validating the private config and its state
+path. Paths must be absolute and use letters, digits, dots, slashes, underscores,
+hyphens or `@` (no spaces or service-manager expansions). Set `PYTHON` to the
+approved absolute interpreter if it is not on `PATH`. Rendering does not create state, change the private config,
+or activate a service:
+
+```bash
+bash deploy/scripts/install-fleet-reliability-observer.sh render \
+  --platform systemd \
+  --release-root /absolute/release \
+  --config /absolute/private/fleet-observer.json \
+  --state-dir /absolute/private/fleet-state \
+  --output-dir /absolute/staging/fleet-jobs
+```
+
+The private observer config names `state_dir`, `emitter_command`,
+`delivery_command`, and each host's absolute `probe_command`. Host identifiers
+must be unique so a cycle cannot count the same host twice. Each probe
+command invokes `fleet_probe.py --targets /absolute/private/targets.json
+--target <synthetic-target>`. Keep the config mode `0600` and state directory
+mode `0700`. An empty `hosts` list requires a valid top-level `instance` for
+deadman alert delivery. Preflight rejects an existing state path that is a
+symlink, is not a directory, belongs to another user or has a mode other than
+`0700`; it does not repair permissions or create state while rendering. Installation
+creates missing state under its private umask and validates it again before
+activation. Without an explicit top-level destination,
+the deadman destination defaults to the first host.
+The observer preserves schema-v1 state files, incident IDs, and
+explicit `retired_checks`; it does not infer retirement from an unreachable
+host. The target file accepts the existing flat host map or a versioned
+`{"schema_version": 1, "hosts": {...}}` wrapper; migration need not rewrite it.
+
+Activation is a separate live-host action. After reviewing the staged files,
+run `install` with both `--install-dir` and `--activate` and a new output directory.
+The installer refuses existing new or legacy job definitions in the install
+directory and loaded `com.whatsoup.fleet-*` or `com.agent365.fleet-*` observer jobs.
+Unavailable service-manager inspection also refuses installation. This checks
+the named jobs, not arbitrarily renamed copies: inventory custom jobs before
+migration. The operator must unload the old pair and preserve its definitions
+outside the install directory under the approved cutover plan first. A partial
+activation failure stops the new pair and retains definitions and state for
+inspection. It does not automatically restart the old pair.
+
+For migration, retain the old private config and the `fleet-observer.json` and
+`fleet-watchdog.json` state files. Prepare and validate updated probe commands
+against the new release. With both job pairs stopped, install that config at
+the existing private path, preserving its owner and `0600` mode, then activate
+the new pair using the existing state directory. Check
+both job identities and the observer/deadman receipts after activation. On
+systemd, capture `systemctl --user status` for both timers and services. On
+launchd, capture `launchctl print gui/$(id -u)/com.whatsoup.fleet-observer` and
+the corresponding deadman label. To roll back, stop the new pair, restore the
+retained private config with its previous probe commands, then reactivate the
+previously recorded job pair. Retain the current incident state files; do not
+reset them to the pre-cutover copy. Do not run two observers against one state directory. A source test
+or rendered plist/unit does not prove a live job loaded; capture the
+service-manager result as continuity evidence.
+
 ## Pinned npm toolchain in `verify:release`
 
 The `verify:release` npm script routes all `npm ci`, `run typecheck`, `test`,
