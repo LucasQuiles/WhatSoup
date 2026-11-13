@@ -2562,11 +2562,14 @@ requires every install of `microsoft_365@microsoft-365-dev` to repeat the admitt
 Only a missing file (`ENOENT`) counts as absent. A root file that exists but cannot be read
 (for example `EACCES`, `EIO`, `ELOOP` or a dangling symlink) refuses the copy.
 
-The trust checks read each path's ACL with `/bin/ls`, run without a shell, because Node has
-no ACL API. On macOS any `allow` entry refuses the path; deny-only entries, such as the
+The trust checks read each path's ACL with `/bin/ls -lde` on macOS or `/bin/ls -ld` on Linux,
+run by absolute path without a shell, because Node has no ACL API. On macOS they refuse any
+`allow` entry, inherited or not, that `ls -lde` reports; deny-only entries, such as the
 `group:everyone deny delete` entry on every home directory, grant nothing and are admitted.
-On Linux any ACL (the `+` mode marker) refuses the path. A listing that fails or cannot be
-parsed refuses the path, and so does any other platform.
+On Linux any ACL that `ls` marks with `+` refuses the path. A listing that fails (a non-zero
+exit or a timeout) or cannot be parsed refuses the path, and so does any other platform.
+Each check lists every path afresh: no ACL result carries over to a later check. An ACL read
+failure that `ls` does not report is not detected (see the accepted residuals).
 
 Config-root isolation (`WHATSOUP_AGENT_CONFIG_ROOT_ISOLATION=1`) gives a sandboxed child
 another install record than the one checked here, so it withdraws the assignment.
@@ -2574,10 +2577,21 @@ another install record than the one checked here, so it withdraws the assignment
 A missing or unreadable record, a missing install or any difference withdraws the
 assignment. The log names the reason, never a path. Admission records the admitted
 copy: its configured path and real path, its manifest and entry digests, the real path of
-its entry, its server and hook shape. Every re-check covers each surface the Claude CLI
-loads from that copy: the configured path and the entry symlink must still resolve to the
-admitted paths, the manifest and entry bytes must match, both root files must be absent and
-the trust checks must pass.
+its entry, its server and hook shape. Every re-check compares exactly these surfaces:
+- the `pluginDirs` copy: its configured path and its entry symlink still resolve to the
+  admitted paths; the whole manifest and the entry keep their admitted SHA-256; its
+  plugin-root `.mcp.json` and `hooks/hooks.json` are still absent; and its configured path,
+  manifest and entry pass the trust checks;
+- the native copy: its manifest's `mcpServers` and `hooks` keep the canonical shape and equal
+  the admitted copy's; its entry, resolved again each time, stays inside its install
+  directory and keeps the admitted SHA-256; its plugin-root `.mcp.json` and
+  `hooks/hooks.json` are still absent; and its install record, install directory, manifest
+  and entry pass the trust checks.
+
+The checks do not compare other files under `mcp-server/dist` or any `node_modules` the
+entry loads, the default component directories (`commands/`, `agents/`, `skills/`), a
+plugin-root `.lsp.json`, or, on the native copy, manifest keys other than `mcpServers` and
+`hooks` (for example `lspServers`). Deploy those identically in both copies.
 The `microsoft365` adapter re-checks immediately before it spawns the plugin, after its
 socket is ready, and also before it acquires the socket. When the runtime's policy holds the
 admitted assignment, that check covers both copies and the assignment; otherwise it covers
@@ -2600,7 +2614,9 @@ After a withdrawal:
   Microsoft 365 mutation deny set and no bridge or `MS365_WORKFLOW_AUTHORITY_*` values;
 - every native settings file this runtime wrote is rewritten with the deny floor. A
   failed rewrite stays pending and is retried at every later check; while any rewrite is
-  pending, every provider spawn is refused.
+  pending, every provider spawn is refused. Each refused spawn logs one line naming each
+  pending settings file and the error code that keeps it pending (for example `EACCES` or
+  `ENOTDIR`). Repair that file's access and the next check retries the rewrite.
 
 Settings writes lift the native deny floor only in `per_chat` scope without
 `sandboxPerChat`, where a guarded native write can succeed. In single or shared scope the
@@ -2626,6 +2642,10 @@ directly and re-checks immediately before each spawn.
   also falls inside this window, so keep auto-update off for the `microsoft-365-dev`
   marketplace. Closing the window needs an admitted immutable artifact, which is a later
   design change.
+- An ACL read failure that `ls` does not report. Apple's `ls` treats a failed ACL lookup as
+  no ACL and still exits 0, so an `allow` entry on a path whose ACL cannot be read, while
+  its ownership, mode and contents can, is not detected. Reading the ACL directly would
+  need a native module or an interpreter, which this check does not use.
 - A deliberate swap of either copy by a process running as the same user is outside the
   same-user filesystem trust boundary described above.
 - The session child holds the bridge credentials (`MS365_AGENT365_API_KEY` and the
