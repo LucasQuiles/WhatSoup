@@ -99,8 +99,8 @@ Neutralisation runs at the last transformation before each provider boundary:
 
 Paths that reach a provider without a turn envelope state the no-actor rule as
 plain text: the handoff fence guard and the summarizer instructions. The
-operator control session sends operator-authored repair text without an
-envelope; it carries no WhatsApp actor.
+operator control session (`/heal`) sends its repair payload as a plain-text
+turn with no envelope; it is outside this contract's WhatsApp-actor scope.
 
 ## Changing this contract
 
