@@ -149,7 +149,8 @@ export class ScheduledProtectedLinkRefusal extends Error {
  * whenever the alert enqueue is rejected.
  */
 type TerminalSendFailure =
-  | { kind: 'payload_undecodable' | 'protected_link_refused'; scheduledId: number; error: string; recurring: boolean }
+  | { kind: 'payload_undecodable'; scheduledId: number; error: string; recurring: boolean }
+  | { kind: 'protected_link_refused'; scheduledId: number; error: string; recurring: boolean }
   | { kind: 'retry_exhausted'; scheduledId: number; error: string; attempts: number };
 
 /**
