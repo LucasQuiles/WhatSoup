@@ -178,7 +178,8 @@ describe('Microsoft 365 authority at an in-place claude-cli respawn', () => {
     vi.spyOn(internals, 'wirePerChatActorSocket').mockReturnValue({ mcpSocketPath: '/fixture/actor.sock', providerTransitionReady: Promise.resolve() });
     vi.mocked(spawn).mockImplementation(() => fakeChild(4242) as never);
 
-    const session = internals.createSessionManager({ chatJid: CHAT_JID, onEvent: vi.fn(), onCrash: vi.fn(), notifyUser: vi.fn() });
+    const onCrash = vi.fn();
+    const session = internals.createSessionManager({ chatJid: CHAT_JID, onEvent: vi.fn(), onCrash, notifyUser: vi.fn() });
     await session.spawnSession();
 
     // Positive control: the admitted session's first child keeps the lifted route and the guarded plugin's values.
@@ -197,13 +198,14 @@ describe('Microsoft 365 authority at an in-place claude-cli respawn', () => {
     const firstChild = vi.mocked(spawn).mock.results.at(-1)!.value as ReturnType<typeof fakeChild>;
     firstChild.emit('exit', null, 'SIGKILL');
     firstChild.emit('close', null, 'SIGKILL');
-    await new Promise((resolve) => setImmediate(resolve));
+    // Wait until the manager has processed the unexpected exit, not for a fixed tick.
+    await vi.waitFor(() => expect(onCrash).toHaveBeenCalled());
     const mapKey = internals.resolvePerChatMapKey(CHAT_JID);
     internals.setOwnedPerChatSession(mapKey, session);
     const owner = internals.sessionOwnership.get(mapKey)!;
     internals.sessionOwnership.transition(mapKey, owner.managerId, 'recoverable_dead');
-    const timer = setTimeout(() => {}, 0);
-    clearTimeout(timer);
+    // An identity token for the ownership record's respawn-timer slot; no real timer is armed.
+    const timer = {} as ReturnType<typeof setTimeout>;
     expect(internals.sessionOwnership.setRespawnTimer(mapKey, owner.managerId, owner.generation, timer)).toBe(true);
     vi.spyOn(internals, 'isSessionProvablyTerminated').mockReturnValue(true);
     const spawnsBefore = vi.mocked(spawn).mock.calls.length;
