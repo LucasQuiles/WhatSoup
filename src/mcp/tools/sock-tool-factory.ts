@@ -5,7 +5,15 @@
 import { z } from 'zod';
 import { sanitizeCompletedToolResult } from '../../core/protected-message.ts';
 import type { ExternalEffectDeclaration } from '../external-effect.ts';
-import type { ToolDeclaration, ToolScope, TargetMode, ExtendedBaileysSocket } from '../types.ts';
+import {
+  getToolErrorEvidence,
+  isToolErrorPayload,
+  toolError,
+  type ToolDeclaration,
+  type ToolScope,
+  type TargetMode,
+  type ExtendedBaileysSocket,
+} from '../types.ts';
 
 /**
  * Config for one factory-built tool.
@@ -85,7 +93,15 @@ export function makeSockTool<T extends z.ZodRawShape>(
       // The socket call has completed, and a mutation's effect stands, so a
       // result past the scan bound is withheld whole, never cut and never
       // reported as a failure that would invite a duplicate.
-      return sanitizeCompletedToolResult(await call(parsed, sock, recordBondEffectDispatch));
+      const result = await call(parsed, sock, recordBondEffectDispatch);
+      const safeResult = sanitizeCompletedToolResult(result);
+      if (!isToolErrorPayload(result)) return safeResult;
+      // A returned error result keeps its error flag, which the copy loses.
+      // Past the bound the copy is the withheld marker, a string that cannot
+      // carry the flag, so the result goes on to the registry, this handler's
+      // only caller, which reads the flag and withholds the result itself.
+      if (typeof safeResult === 'string') return result;
+      return toolError(safeResult as Record<string, unknown>, getToolErrorEvidence(result));
     },
   };
 }

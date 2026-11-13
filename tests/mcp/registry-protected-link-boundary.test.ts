@@ -18,7 +18,8 @@ import { PROTECTED_MESSAGE_MARKER, PROTECTED_TEXT_WITHHELD_MARKER } from '../../
 import { registerAdvancedTools } from '../../src/mcp/tools/advanced.ts';
 import { registerMessagingTools } from '../../src/mcp/tools/messaging.ts';
 import { registerProfileTools } from '../../src/mcp/tools/profile.ts';
-import { errorResult } from '../../src/mcp/types.ts';
+import { makeSockTool } from '../../src/mcp/tools/sock-tool-factory.ts';
+import { errorResult, isToolErrorPayload } from '../../src/mcp/types.ts';
 import { TEST_LINK_HOST } from '../helpers/protected-delivery-pins.ts';
 import { ToolRegistry } from '../helpers/resolved-tool-registry.ts';
 
@@ -187,6 +188,46 @@ describe('factory tools after the socket call has completed', () => {
     expectRedacted(result.content[0]!.text);
     expect(JSON.parse(result.content[0]!.text)).toMatchObject({
       sent: true, selectedRowId: `${PROTECTED_MESSAGE_MARKER} `.repeat(128),
+    });
+  });
+
+  // A factory callback that returns an error result keeps the error flag, as
+  // on main and as a hand-built tool does.
+  describe('a callback that returns an error result', () => {
+    function errorFactoryTool(message: string) {
+      return makeSockTool(() => ({}) as never, {
+        name: 'probe_factory',
+        description: 'probe',
+        schema: z.object({}),
+        call: async () => errorResult(message),
+      });
+    }
+
+    async function callErrorFactoryTool(message: string) {
+      const registry = new ToolRegistry();
+      registry.register(errorFactoryTool(message));
+      return registry.call('probe_factory', {}, { tier: 'global' });
+    }
+
+    it('keeps isError with the error text redacted', async () => {
+      const result = await callErrorFactoryTool(`lookup failed for ${LINK}`);
+
+      expect(result.isError).toBe(true);
+      expectRedacted(result.content[0]!.text);
+      expect(JSON.parse(result.content[0]!.text)).toEqual({ error: `lookup failed for ${PROTECTED_MESSAGE_MARKER}` });
+    });
+
+    it('still redacts and marks the result its handler returns', async () => {
+      const out = await errorFactoryTool(`lookup failed for ${LINK}`).handler({}, {} as never, undefined);
+
+      expect(isToolErrorPayload(out)).toBe(true);
+      expect(out).toEqual({ error: `lookup failed for ${PROTECTED_MESSAGE_MARKER}` });
+    });
+
+    it('keeps isError and returns only the withheld marker past the scan bound', async () => {
+      const result = await callErrorFactoryTool(OVER_BOUND);
+
+      expect(result).toEqual({ content: [{ type: 'text', text: PROTECTED_TEXT_WITHHELD_MARKER }], isError: true });
     });
   });
 
