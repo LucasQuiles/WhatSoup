@@ -22,7 +22,7 @@ _SCRIPTS_DIR = _TESTS_DIR.parent
 _REPO_ROOT = _SCRIPTS_DIR.parent.parent
 _SSOT_PATH = _SCRIPTS_DIR / "lib" / "bot_errors_redaction.py"
 _CORPUS_PATH = _REPO_ROOT / "tests" / "fixtures" / "protected-link-parity-corpus.json"
-_TS_PINS_PATH = _REPO_ROOT / "src" / "core" / "protected-delivery-pins.ts"
+_TS_PINS_PATH = _REPO_ROOT / "src" / "lib" / "protected-delivery-pins.ts"
 
 
 def _load_module():

@@ -10,6 +10,9 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../src/core/protected-delivery-pins.ts', async (importOriginal) =>
   (await import('../helpers/protected-delivery-pins.ts')).mockProtectedDeliveryPins(importOriginal));
+// The log sanitizer reads the shared-ring pins module directly.
+vi.mock('../../src/lib/protected-delivery-pins.ts', async (importOriginal) =>
+  (await import('../helpers/protected-delivery-pins.ts')).mockProtectedDeliveryPins(importOriginal));
 vi.mock('../../src/logger.ts', async () => (await import('../helpers/logger-mock.ts')).loggerMock());
 // Quarantine alerts from the replay row stay in memory.
 vi.mock('../../src/lib/emit-alert.ts', () => ({
@@ -375,6 +378,10 @@ const SURFACES: SurfaceCase[] = [
   {
     surface: 'log sink, message after a merge object',
     probe: () => logSink([{ attempt: 1 }, `delivery failed for ${LINK}`]),
+  },
+  {
+    surface: 'log sink, interpolation value after the message',
+    probe: () => logSink([{ attempt: 1 }, 'delivery failed for %s', LINK]),
   },
   {
     surface: 'log sink, string inside the merge object',

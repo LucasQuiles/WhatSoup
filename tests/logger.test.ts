@@ -18,6 +18,7 @@
  */
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { join } from 'node:path';
+import { TEST_LINK_HOST } from './helpers/protected-delivery-pins.ts';
 
 type LoggerModule = typeof import('../src/logger');
 
@@ -447,6 +448,29 @@ describe('sanitizing log hook wiring (WS-A06)', () => {
     expect(forwarded.component).toBe('test');
     expect(JSON.stringify(forwarded)).not.toContain('CANARY-apikey-must-not-survive');
     expect(JSON.stringify(forwarded)).not.toContain('canary-pw');
+  });
+
+  it('the hook installed at construction redacts a protected link in every string argument, with no wiring step', async () => {
+    // The logger is built at import time, before any composition code runs, so
+    // the redaction must come from the construction itself.
+    vi.doMock('../src/lib/protected-delivery-pins.ts', async (importOriginal) =>
+      (await import('./helpers/protected-delivery-pins.ts')).mockProtectedDeliveryPins(importOriginal as never));
+    try {
+      const { pinoFactory } = await importLoggerWithMockedPino({ logDir: undefined });
+      const hook = installedHook(pinoFactory);
+      const link = `https://${TEST_LINK_HOST}/s/#v3.${'Q'.repeat(22)}.${'Z'.repeat(43)}`;
+
+      const sink = vi.fn();
+      hook.call(undefined, [{ target: link }, `delivery failed for ${link}`, link], sink, 30);
+
+      expect(sink).toHaveBeenCalledOnce();
+      const forwarded = JSON.stringify(sink.mock.calls[0]);
+      expect(forwarded).not.toContain(TEST_LINK_HOST);
+      expect(forwarded).not.toContain('Q'.repeat(22));
+      expect(forwarded.split('[protected managed link]')).toHaveLength(4);
+    } finally {
+      vi.doUnmock('../src/lib/protected-delivery-pins.ts');
+    }
   });
 
   it('the installed hook forwards non-object first args untouched', async () => {

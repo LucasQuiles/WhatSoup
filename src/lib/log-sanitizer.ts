@@ -74,7 +74,9 @@
  * values are removed entirely rather than shortened.
  */
 
-import { sanitizeProtectedMessageText } from '../core/protected-message.ts';
+// The scanner sits in this ring, so a logger created at import time redacts
+// protected links from its first line; there is nothing to wire.
+import { sanitizeProtectedLinkText } from './protected-link-text.ts';
 import { homePathPattern, jidPattern } from './redaction-patterns.ts';
 
 // ─── Sensitive key patterns ─────────────────────────────────────────────────
@@ -352,7 +354,7 @@ const BEARER_RE = new RegExp(
 
 function sanitizeStringValue(value: string): string {
   // Protected links first: the fragment mask below would leave their host.
-  return sanitizeProtectedMessageText(value)
+  return sanitizeProtectedLinkText(value)
     .replace(URL_USERINFO_RE, '://***@')
     .replace(URL_QUERY_RE, '?***')
     .replace(URL_FRAGMENT_RE, '#***')
@@ -655,7 +657,7 @@ export function sanitizingLogHook(
   // protected-link scan runs on them, so other message text is unchanged.
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
-    if (typeof arg === 'string') args[index] = sanitizeProtectedMessageText(arg);
+    if (typeof arg === 'string') args[index] = sanitizeProtectedLinkText(arg);
   }
   return method.apply(this, args);
 }
