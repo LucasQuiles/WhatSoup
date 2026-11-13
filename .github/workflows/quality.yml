@@ -567,6 +567,18 @@ jobs:
       - name: Credential-probe boundedness (real macOS)
         run: npm run test:credential-probe-boundedness
 
+      # Paired diagnostic for the setup-child timing case (#3913 setup-mktemp
+      # 4,207 ms vs the 4,000 ms limit). Same runner, same suite, same limits and
+      # assertions; only the event trace is on. It runs after the step above even
+      # when that step fails, so the untraced run stays the control. The
+      # SETUP_STALL_EVENT_TRACE stderr lines carry observed event times, not phase
+      # durations.
+      - name: Credential-probe boundedness with setup event trace (real macOS)
+        if: ${{ !cancelled() }}
+        env:
+          WHATSOUP_SETUP_STALL_EVENT_TRACE: '1'
+        run: npm run test:credential-probe-boundedness
+
   # Perf lane (T5 b-12; 19-performance-budget §2). Report-only while the §1
   # numbers await owner sign-off; PERF_LANE_ENFORCE=1 flips it blocking.
   perf-lane:

@@ -1,0 +1,160 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { expect } from 'vitest';
+
+// Fixture for the lifecycle probes in ../credential-probe-boundedness.test.ts.
+
+// The driver finds these modes' worker through the live command, or stops a
+// process before the budget runs out. The budget runs three ways: the guard's
+// timer, the inner watchdog and the worker's ticker. All three start only when
+// the driver has done so; otherwise a slow host lets one end the command first.
+export const BUDGET_HOLD_MODES: ReadonlySet<string> = new Set([
+  'worker-stopped-after-authorization', 'forged-completion-worker-stopped', 'deadline-timer-descendant', 'cleanup-child-group',
+  'control-tokenless-worker-stopped', 'control-tokenless-cleanup-interrupted',
+  'dead-leader-before-authorization', 'dead-leader-clean-cleanup', 'dead-leader-finishing-cleanup',
+  'deadline-fifo-after-cleanup', 'authorization-unreadable-after-cleanup', 'parent-stopped',
+]);
+
+// The ticker's timed read is the only read with these arguments.
+export const TICKER_HOLD = [
+  'read() {',
+  '  if [ "$2 $3 $4 $5" = "-t 1 -u 9" ]; then',
+  '    local polls=0',
+  '    while [ ! -e "$TMPDIR/budget-hold-release" ] && [ "$polls" -lt 1000 ]; do /bin/sleep 0.01; polls=$((polls + 1)); done',
+  '  fi',
+  '  builtin read "$@"',
+  '}',
+].join('\n');
+
+// Each of these modes runs a budget of 1, and no other wait in them is `sleep 1`.
+export function holdBudgetForDriver(shim: string) {
+  const unheld = path.join(shim, 'sleep-unheld');
+  fs.renameSync(path.join(shim, 'sleep'), unheld);
+  fs.writeFileSync(path.join(shim, 'sleep'), [
+    '#!/bin/bash',
+    'if [ "$1" = 1 ]; then',
+    '  polls=0',
+    '  while [ ! -e "$TMPDIR/budget-hold-release" ] && [ "$polls" -lt 1000 ]; do /bin/sleep 0.01; polls=$((polls + 1)); done',
+    '  [ -e "$TMPDIR/budget-hold-release" ] || { : > "$BARRIER_EXPIRED-budget-hold"; exit 2; }',
+    'fi',
+    `exec "${unheld}" "$@"`,
+    '',
+  ].join('\n'), { mode: 0o700 });
+}
+
+export function installSleepLedgerShim(shim: string) {
+  // Record each whole-second wait with its parent, so the guard's own waits
+  // can be counted.
+  fs.unlinkSync(path.join(shim, 'sleep'));
+  fs.writeFileSync(path.join(shim, 'sleep'), [
+    '#!/bin/bash',
+    'case "$1" in *.*) ;; *) builtin printf "%s %s\\n" "$PPID" "$1" >> "$TMPDIR/sleep-ledger" ;; esac',
+    'exec /bin/sleep "$@"',
+    '',
+  ].join('\n'), { mode: 0o700 });
+}
+
+// The fields of the lifecycle driver's JSON record that the chain check reads.
+interface StoppedWorkerProbeRecord {
+  error?: unknown;
+  events: string[];
+  stopped_worker: number;
+  sleep_ledger: string[];
+}
+
+// The guard's monitor resumes the worker once, from the worker's own startup
+// stop, and exits. The worker writes its authorization only after that, and the
+// driver stops it only after reading the authorization, so this stop has no
+// resume and only the guard can end the worker: the budget, one grace for the
+// worker's timeout entry, one for the recorded groups, then SIGKILL.
+// W_WORKER_STATE checks that at run time, because worker_rc=137 would also fit
+// a worker that was resumed and then killed. It is read before the guard's
+// cleanup, whose own SIGSTOP of the group would make any later read show T.
+// The fixture holds the budget until the worker is stopped, and the events show
+// the call returned through that fixed chain and waited for nothing else, so
+// the bound holds however slowly the host runs. A wall-clock limit here
+// measured host load instead: the chain's own timers take 5 s of the 6 s it
+// allowed.
+export function expectGuardChainEndsStoppedWorker(result: StoppedWorkerProbeRecord) {
+  const evidence = JSON.stringify(result);
+  expect(result.error, evidence).toBeUndefined();
+  const events: string[] = result.events;
+  const index = (name: string) => events.findIndex((event) => event === name || event.startsWith(`${name} `));
+  const worker = result.stopped_worker;
+  expect(index('CONTROL_ERROR'), evidence).toBe(-1);
+  expect(index(`H_WORKER_STOPPED worker=${worker}`), evidence).toBeGreaterThanOrEqual(0);
+  expect(index(`S_OUTER budget=1 worker=${worker}`), evidence).toBeGreaterThan(index(`H_WORKER_STOPPED worker=${worker}`));
+  expect(events[index('O_OUTER_CLAIM')], evidence).toBe(`O_OUTER_CLAIM rc=0 worker=${worker}`);
+  expect(index('O_OUTER_CLAIM'), evidence).toBeGreaterThan(index('S_OUTER'));
+  expect(index('AUTHORITY state=0'), evidence).toBeGreaterThan(index('O_OUTER_CLAIM'));
+  expect(index(`G_GRACE_ELAPSED n=1 worker=${worker}`), evidence).toBeGreaterThan(index('AUTHORITY state=0'));
+  expect(index(`G_GRACE_ELAPSED n=2 worker=${worker}`), evidence).toBeGreaterThan(index(`G_GRACE_ELAPSED n=1 worker=${worker}`));
+  expect(index(`W_WORKER_STATE worker=${worker}`), evidence).toBeGreaterThan(index(`G_GRACE_ELAPSED n=2 worker=${worker}`));
+  expect(events[index('W_WORKER_STATE')], evidence).toMatch(new RegExp(`^W_WORKER_STATE worker=${worker} stat=T`));
+  expect(index(`P_WORKER_REAPED worker=${worker} worker_rc=137`), evidence).toBeGreaterThan(index(`W_WORKER_STATE worker=${worker}`));
+  expect(events.filter((event) => event.startsWith('P_WORKER_REAPED ')), evidence).toHaveLength(1);
+  const returned = new RegExp(`^A worker=${worker} worker_rc=137 guard=(\\d+) guard_rc=2 deadline_rc=\\d+ rc=2$`).exec(events[index('A')]);
+  expect(returned, evidence).not.toBeNull();
+  expect(index('A'), evidence).toBeGreaterThan(index('P_WORKER_REAPED'));
+  // The guard itself waits only its two graces; the budget runs in its timer.
+  const guard = returned?.[1];
+  expect(result.sleep_ledger.filter((entry: string) => entry.startsWith(`${guard} `)), evidence).toEqual([`${guard} 2`, `${guard} 2`]);
+}
+
+// A stalled setup child records its events and the driver's observation times only
+// on request (issue #3554). Unset, these modes run the untraced path, which is the
+// same-host control for a traced run.
+const SETUP_STALL_TRACE_MODES: ReadonlySet<string> = new Set(['setup-mktemp-term-ignoring', 'setup-mkfifo-term-ignoring', 'setup-ps-term-ignoring']);
+
+export function setupStallTraceOn(mode: string): boolean {
+  return SETUP_STALL_TRACE_MODES.has(mode) && process.env.WHATSOUP_SETUP_STALL_EVENT_TRACE === '1';
+}
+
+// First lines of the stalled setup shim; a traced run logs the child's entry.
+export function setupShimHead(trace: boolean): string[] {
+  return ['#!/bin/bash', ...(trace ? ['builtin printf "H_SETUP_ENTER pid=%s\\n" "$$" >> "$EVENT_ORDER_LOG"'] : [])];
+}
+
+// A traced run logs the probe's entry before its first command.
+export function probeTraceHead(trace: boolean): string[] {
+  return trace ? ['builtin printf "H_PROBE_ENTER\\n" >> "$EVENT_ORDER_LOG"'] : [];
+}
+
+// One stderr line per requested trace: "<LABEL>_EVENT_TRACE <driver record JSON>".
+export function writeEventTraces(record: unknown, traces: Record<string, boolean>): void {
+  for (const [label, on] of Object.entries(traces)) if (on) process.stderr.write(`${label}_EVENT_TRACE ${JSON.stringify(record)}\n`);
+}
+
+// Record the guard's USR1 to the worker. Valid-record cases require it;
+// the unreadable-record diagnostic requires its absence. Record the outer's
+// TERM to the guard as well. After the reap, the outer-terminated mode holds
+// the outer at its first resume of the guard until the driver sends TERM.
+// Every status passes through.
+export const AUTHORIZATION_KILL_SHIM: readonly string[] = [
+  'case "$4" in authorization-valid-*|authorization-unreadable-cleanup-interrupted)',
+  '  kill() {',
+  '    local kill_rc=0 polls=0',
+  // The worker's loop checks its command only after its USR1 trap returns; hold it there, out of read, for the driver's TERM.
+  // WORKER_RESUME_WITNESS=off withholds the witness, so the driver takes its failure path.
+  '    if [ "$1" = -0 ] && [ -n "${cmd_pid-}" ] && [ "$2" = "$cmd_pid" ] && [ "${entry_timeout-}" = 1 ] && [ "${WORKER_RESUME_WITNESS-}" != off ]; then : > "$TMPDIR/worker-resumed-after-usr1"; while [ "$polls" -lt 400 ]; do /bin/sleep 0.01; polls=$((polls + 1)); done; : > "$BARRIER_EXPIRED-worker-resumed"; fi',
+  '    if [ "$cleanup_mode" = authorization-valid-outer-terminated-after-reap ] && [ -z "${outer_held-}" ] && [ "$1" = -CONT ] && [ -n "${guard_pid-}" ] && [ "$2" = "$guard_pid" ]; then',
+  '      outer_held=1',
+  '      : > "$OUTER_HOLDING"',
+  '      while [ "$polls" -lt 400 ]; do /bin/sleep 0.01; polls=$((polls + 1)); done',
+  '      : > "$BARRIER_EXPIRED-outer-hold"',
+  '    fi',
+  '    builtin kill "$@" || kill_rc=$?',
+  // The marker carries the kill status: it proves the call, not the delivery.
+  '    if [ "$1" = -USR1 ] && [ -n "${worker_pid-}" ] && [ "$2" = "$worker_pid" ]; then builtin printf "kill_rc=%s\\n" "$kill_rc" > "$GUARD_USR1_SENT"; fi',
+  '    if [ "$1" = -TERM ] && [ -n "${guard_pid-}" ] && [ "$2" = "$guard_pid" ]; then : > "$OUTER_TERM_SENT"; fi',
+  '    return "$kill_rc"',
+  '  }',
+  '  ;; esac',
+];
+
+// Withholds the resume witness and runs a stack sample that ignores TERM and
+// leaves a child, so the driver's budget, not the sample, ends the diagnosis.
+export const BLOCKED_USR1_DIAGNOSIS_ENV: Readonly<Record<string, string>> = {
+  WORKER_RESUME_WITNESS: 'off',
+  USR1_DIAGNOSIS_SAMPLE: JSON.stringify(['/bin/sh', '-c', 'trap "" TERM; /bin/sleep 60 & /bin/sleep 60']),
+};
