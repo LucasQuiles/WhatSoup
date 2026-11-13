@@ -443,16 +443,23 @@ export function handleGetLogs(
       const level: 'debug' | 'info' | 'warn' | 'error' =
         typeof obj.level === 'number' ? (pinoLevelMap[obj.level] ?? 'info') : 'info';
 
-      // A persisted log line can carry a protected link in any copied field.
-      const source = sanitizeProtectedMessageText(logFieldToString(obj.name ?? obj.module, 'system'));
-      const rawComponent = optionalLogFieldToString(obj.component);
-      const component = rawComponent === undefined ? undefined : sanitizeProtectedMessageText(rawComponent);
-      const msg = sanitizeProtectedMessageText(logFieldToString(obj.msg));
+      const source = logFieldToString(obj.name ?? obj.module, 'system');
+      const component = optionalLogFieldToString(obj.component);
+      const msg = logFieldToString(obj.msg);
 
       entries.push({ timestamp, level, msg, source, ...(component !== undefined ? { component } : {}) });
     } catch {
       // Skip non-JSON lines
     }
+  }
+
+  // A persisted log line can carry a protected link in any copied field. The fields are
+  // redacted after the parse loop, before collapsing, so the loop's skip-non-JSON catch keeps
+  // its inherited (baselined) try body.
+  for (const entry of entries) {
+    entry.msg = sanitizeProtectedMessageText(entry.msg);
+    entry.source = sanitizeProtectedMessageText(entry.source);
+    if (entry.component !== undefined) entry.component = sanitizeProtectedMessageText(entry.component);
   }
 
   // Collapse consecutive identical messages into "msg (×N)". The count lives
