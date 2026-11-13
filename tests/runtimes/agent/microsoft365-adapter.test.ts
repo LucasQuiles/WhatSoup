@@ -33,7 +33,7 @@ import type { SingletonLoggerMock } from '../../helpers/logger-mock.ts';
 
 type OsModule = typeof os;
 
-const { AGENT365_HOME, FOREIGN_OWNED } = vi.hoisted(() => {
+const { AGENT365_HOME, FOREIGN_OWNED, IO_ERROR, LS_OVERRIDES, LS_PROBES } = vi.hoisted(() => {
   const nodeFs = require('node:fs') as typeof import('node:fs');
   const nodeOs = require('node:os') as typeof import('node:os');
   const nodePath = require('node:path') as typeof import('node:path');
@@ -41,6 +41,12 @@ const { AGENT365_HOME, FOREIGN_OWNED } = vi.hoisted(() => {
     AGENT365_HOME: nodeFs.realpathSync(nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'whatsoup-m365-home-'))),
     // Paths that lstat reports as owned by another user: a test cannot chown without root.
     FOREIGN_OWNED: new Set<string>(),
+    // Paths whose lstat, stat and read fail with EIO: a test cannot make a disk fail.
+    IO_ERROR: new Set<string>(),
+    // `/bin/ls` results to report for a path, in place of running it: a failed or unparseable listing.
+    LS_OVERRIDES: new Map<string, { status: number; stdout: string }>(),
+    // Every `/bin/ls` argument vector the adapter ran, so a test can assert which path and flags it probed.
+    LS_PROBES: [] as string[][],
   };
 });
 
@@ -61,13 +67,39 @@ vi.mock('node:os', async (importOriginal: () => Promise<OsModule>) => {
 
 vi.mock('node:fs', async (importOriginal: () => Promise<typeof import('node:fs')>) => {
   const actual = await importOriginal();
+  const failWithIoError = (path: import('node:fs').PathLike): void => {
+    if (IO_ERROR.has(String(path))) throw Object.assign(new Error(`EIO: i/o error, ${String(path)}`), { code: 'EIO' });
+  };
   const lstatSync = ((path: import('node:fs').PathLike, options?: import('node:fs').StatSyncOptions) => {
+    failWithIoError(path);
     const stat = actual.lstatSync(path, options);
     if (stat === undefined || !FOREIGN_OWNED.has(String(path))) return stat;
     // Keep the Stats prototype so isFile, isDirectory and isSymbolicLink still answer.
     return Object.assign(Object.create(Object.getPrototypeOf(stat) as object) as typeof stat, stat, { uid: Number(stat.uid) + 1 });
   }) as typeof actual.lstatSync;
-  return { ...actual, lstatSync };
+  const statSync = ((path: import('node:fs').PathLike, options?: import('node:fs').StatSyncOptions) => {
+    failWithIoError(path);
+    return actual.statSync(path, options);
+  }) as typeof actual.statSync;
+  const readFileSync = ((path: import('node:fs').PathOrFileDescriptor, options?: Parameters<typeof actual.readFileSync>[1]) => {
+    if (typeof path !== 'number') failWithIoError(path);
+    return actual.readFileSync(path, options);
+  }) as typeof actual.readFileSync;
+  const existsSync = ((path: import('node:fs').PathLike) => !IO_ERROR.has(String(path)) && actual.existsSync(path)) as typeof actual.existsSync;
+  return { ...actual, lstatSync, statSync, readFileSync, existsSync };
+});
+
+vi.mock('node:child_process', async (importOriginal: () => Promise<typeof import('node:child_process')>) => {
+  const actual = await importOriginal();
+  const spawnSync = ((command: string, args?: readonly string[], options?: object) => {
+    if (command !== '/bin/ls' || args === undefined) return actual.spawnSync(command, args ?? [], options ?? {});
+    LS_PROBES.push([...args]);
+    const override = LS_OVERRIDES.get(args[args.length - 1] ?? '');
+    return override === undefined
+      ? actual.spawnSync(command, args, options ?? {})
+      : { pid: 0, output: [null, override.stdout, ''], stdout: override.stdout, stderr: '', status: override.status, signal: null };
+  }) as typeof actual.spawnSync;
+  return { ...actual, spawnSync };
 });
 
 const GUARDED_FIXTURE = join(process.cwd(), 'tests/mcp/bin/fake-microsoft365-guarded-mcp.cjs');
@@ -114,9 +146,51 @@ const SYSTEM_PYTHON = admissibleSystemPython();
 const temporaryPaths: string[] = [];
 const servers: WhatSoupSocketServer[] = [];
 
+/**
+ * The host tool that sets a real ACL entry: macOS `chmod +a` (no root needed for an owned path) or Linux `setfacl`.
+ * Empty when neither exists, and the ACL test then cannot run.
+ */
+const ACL_TOOL = process.platform === 'darwin' ? '/bin/chmod'
+  : process.platform === 'linux' && existsSync('/usr/bin/setfacl') ? '/usr/bin/setfacl' : '';
+const aclPaths = new Set<string>();
+
+/**
+ * Adds an ACL entry that grants another principal access, leaving owner and group/other write bits unchanged.
+ * macOS grants write. Linux grants read: there a write grant also sets the group mode bits through the ACL mask,
+ * which the mode check already refuses, so only the `+` marker can show the remaining entries.
+ */
+function grantAclWrite(path: string): void {
+  const directory = statSync(path).isDirectory();
+  const args = process.platform === 'darwin'
+    ? ['+a', `group:everyone allow ${directory ? 'add_file,add_subdirectory,delete_child' : 'write,append'}`, path]
+    : ['-m', 'u:65534:r', path];
+  const result = spawnSync(ACL_TOOL, args, { encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(`could not set a fixture ACL: ${result.stderr}`);
+  aclPaths.add(path);
+}
+
+/** macOS only: an ACL entry that denies a right and grants nothing, like the default on every macOS home directory. */
+function denyAclDelete(path: string): void {
+  const result = spawnSync('/bin/chmod', ['+a', 'group:everyone deny delete', path], { encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(`could not set a fixture ACL: ${result.stderr}`);
+  aclPaths.add(path);
+}
+
+/** Removes every fixture ACL entry; a deny-delete entry also binds the owner, so it must go before removal. */
+function clearFixtureAcls(): void {
+  for (const path of aclPaths) {
+    if (existsSync(path)) spawnSync(ACL_TOOL, process.platform === 'darwin' ? ['-N', path] : ['-b', path]);
+  }
+  aclPaths.clear();
+}
+
 afterEach(() => {
   vi.unstubAllEnvs();
   FOREIGN_OWNED.clear();
+  IO_ERROR.clear();
+  LS_OVERRIDES.clear();
+  LS_PROBES.length = 0;
+  clearFixtureAcls();
   for (const server of servers.splice(0)) server.stop();
   for (const path of temporaryPaths.splice(0)) rmSync(path, { recursive: true, force: true });
   rmSync(AGENT365_HOME, { recursive: true, force: true });
@@ -172,6 +246,17 @@ function admittedServerShape(): Record<string, unknown> {
       MS365_WORKFLOW_AUTHORITY_REQUIRED: '1',
     },
   };
+}
+
+/** Adds top-level keys to a pluginDirs copy's manifest. */
+function extendManifest(root: string, extra: Record<string, unknown>): void {
+  const manifestPath = join(root, '.claude-plugin', 'plugin.json');
+  writeFileSync(manifestPath, JSON.stringify({ ...(JSON.parse(readFileSync(manifestPath, 'utf8')) as object), ...extra }));
+}
+
+/** What a withdrawal leaves: the bridge environment without the workflow assignment. */
+function withdrawnShape(approved: M365MutationPolicy): M365MutationPolicy {
+  return { status: 'approved', childEnv: approved.status === 'approved' ? approved.childEnv : {} };
 }
 
 function setManifestCommand(root: string, command: string): void {
@@ -1108,6 +1193,273 @@ describe.skipIf(SYSTEM_PYTHON === '')('Microsoft 365 provider adapter', () => {
     expect(m365WorkflowAuthorityLive(admitted.workflowAuthority)).toBe(true);
     copyFileSync(LAUNCHER_FIXTURE, join(nativeRoot, 'mcp-server', 'dist', 'index.cjs'));
     expect(m365MutationExceptionAllowed(recheckMicrosoft365Workflow(admitted, 'test'))).toBe(false);
+    expect(m365WorkflowAuthorityLive(admitted.workflowAuthority)).toBe(false);
+  });
+
+  it.each([
+    ['a plugin-root .mcp.json', (copy: { root: string }) => writeFileSync(join(copy.root, '.mcp.json'), '{"mcpServers":{}}')],
+    ['a plugin-root hooks file', (copy: { root: string }) => {
+      mkdirSync(join(copy.root, 'hooks'), { recursive: true });
+      writeFileSync(join(copy.root, 'hooks', 'hooks.json'), '{"hooks":{}}');
+    }],
+    ['the entry symlink pointed at another file', (copy: { root: string; entry: string }) => {
+      writeFileSync(join(copy.root, 'mcp-server', 'dist', 'other.cjs'), `${readFileSync(GUARDED_FIXTURE, 'utf8')}\n// another build\n`);
+      rmSync(copy.entry);
+      symlinkSync('other.cjs', copy.entry);
+    }],
+    ['the configured directory pointed at another copy', (copy: { configured: string; trace: string }) => {
+      const other = pluginDirectory(copy.trace);
+      rmSync(copy.configured);
+      symlinkSync(other.root, copy.configured);
+    }],
+  ])('withdraws the assignment when a pluginDirs loading surface changes after admission (%s)', (_case, change) => {
+    vi.stubEnv('CLAUDE_CONFIG_DIR', undefined);
+    const trace = join(temporaryDirectory('whatsoup-m365-surfaces-'), 'm365-fixture-trace.jsonl');
+    const plugin = pluginDirectory(trace);
+    // The Claude CLI receives the configured path and follows the entry symlink, so both are resolved again at each check.
+    copyFileSync(plugin.entry, join(plugin.root, 'mcp-server', 'dist', 'guarded.cjs'));
+    rmSync(plugin.entry);
+    symlinkSync('guarded.cjs', plugin.entry);
+    const configured = join(temporaryDirectory('whatsoup-m365-configured-'), 'plugin');
+    symlinkSync(plugin.root, configured);
+    nativeInstall(GUARDED_FIXTURE);
+    const approved = policy(trace);
+    const admitted = admitMicrosoft365Workflow({
+      registry: new ToolRegistry(), policy: approved, pluginDirs: [configured], perChatMcpSocketManager: {} as never,
+      resolvePerChatMapKey: (jid: string) => jid, sessionTokens: new SessionTokenRegistry(), instanceName: 'test',
+    });
+    // Positive control: the symlinked layout is admitted and an unchanged copy keeps the assignment.
+    expect(admitted).toBe(approved);
+    expect(recheckMicrosoft365Workflow(admitted, 'test')).toBe(approved);
+    adapterLog.warn.mockClear();
+
+    change({ root: plugin.root, entry: plugin.entry, configured, trace });
+    expect(recheckMicrosoft365Workflow(admitted, 'test')).toEqual(withdrawnShape(approved));
+    expect(adapterLog.warn.mock.calls.map((call) => call[0])).toContainEqual({ instance: 'test', reason: 'plugin-differs' });
+  });
+
+  it.each([
+    ['an extra server', { mcpServers: { microsoft_365: admittedServerShape(), helper: { command: 'node', args: ['/fixture/helper.cjs'] } } }, undefined],
+    ['a command hook', { hooks: { PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: '/fixture/hook.sh' }] }] } }, undefined],
+    ['a plugin-root .mcp.json', {}, (root: string) => writeFileSync(join(root, '.mcp.json'), '{"mcpServers":{}}')],
+    ['a plugin-root hooks file', {}, (root: string) => {
+      mkdirSync(join(root, 'hooks'), { recursive: true });
+      writeFileSync(join(root, 'hooks', 'hooks.json'), '{"hooks":{}}');
+    }],
+  ])('withdraws the assignment when matching copies leave the canonical guarded shape (%s)', (_case, manifestExtra, addRootFile) => {
+    vi.stubEnv('CLAUDE_CONFIG_DIR', undefined);
+    const trace = join(temporaryDirectory('whatsoup-m365-canonical-'), 'm365-fixture-trace.jsonl');
+    const approved = policy(trace);
+    const plugin = pluginDirectory(trace);
+    const admit = () => admitMicrosoft365Workflow({
+      registry: new ToolRegistry(), policy: approved, pluginDirs: [plugin.root], perChatMcpSocketManager: {} as never,
+      resolvePerChatMapKey: (jid: string) => jid, sessionTokens: new SessionTokenRegistry(),
+    });
+    // Positive control: canonical copies keep the assignment.
+    nativeInstall(GUARDED_FIXTURE);
+    expect(admit()).toBe(approved);
+
+    // Both copies carry the same addition, so they still match each other byte for byte.
+    extendManifest(plugin.root, manifestExtra);
+    const nativeRoot = nativeInstall(GUARDED_FIXTURE, admittedServerShape(), manifestExtra);
+    addRootFile?.(plugin.root);
+    addRootFile?.(nativeRoot);
+    expect(admit()).toEqual(withdrawnShape(approved));
+  });
+
+  it.each([
+    ['a directory at .mcp.json (EISDIR)', (root: string) => mkdirSync(join(root, '.mcp.json'))],
+    ['an unreadable .mcp.json (EACCES)', (root: string) => writeFileSync(join(root, '.mcp.json'), '{}', { mode: 0o000 })],
+    ['a looping .mcp.json symlink (ELOOP)', (root: string) => symlinkSync('.mcp.json', join(root, '.mcp.json'))],
+    ['a dangling .mcp.json symlink', (root: string) => symlinkSync('missing.json', join(root, '.mcp.json'))],
+    ['a regular file at hooks (ENOTDIR)', (root: string) => writeFileSync(join(root, 'hooks'), '')],
+    ['an .mcp.json that fails with EIO', (root: string) => IO_ERROR.add(join(realpathSync(root), '.mcp.json'))],
+    ['a hooks file that fails with EIO', (root: string) => IO_ERROR.add(join(realpathSync(root), 'hooks', 'hooks.json'))],
+  ])('treats only ENOENT as an absent plugin-root file: %s refuses', (_case, alter) => {
+    vi.stubEnv('CLAUDE_CONFIG_DIR', undefined);
+    const trace = join(temporaryDirectory('whatsoup-m365-enoent-'), 'm365-fixture-trace.jsonl');
+    const admit = (pluginRoot: string, approved: M365MutationPolicy) => admitMicrosoft365Workflow({
+      registry: new ToolRegistry(), policy: approved, pluginDirs: [pluginRoot], perChatMcpSocketManager: {} as never,
+      resolvePerChatMapKey: (jid: string) => jid, sessionTokens: new SessionTokenRegistry(), instanceName: 'test',
+    });
+
+    // The native copy is admitted while both root files are absent; a later check meets an error other than ENOENT.
+    const nativeRoot = nativeInstall(GUARDED_FIXTURE);
+    const approved = policy(trace);
+    const admitted = admit(pluginDirectory(trace).root, approved);
+    expect(admitted).toBe(approved);
+    alter(nativeRoot);
+    expect(recheckMicrosoft365Workflow(admitted, 'test')).toEqual(withdrawnShape(approved));
+
+    // The same error in the pluginDirs copy refuses that copy at admission.
+    IO_ERROR.clear();
+    nativeInstall(GUARDED_FIXTURE);
+    const plugin = pluginDirectory(trace);
+    const fresh = policy(trace);
+    expect(admit(plugin.root, fresh)).toBe(fresh);
+    const refused = pluginDirectory(trace);
+    alter(refused.root);
+    expect(admit(refused.root, fresh)).toEqual(withdrawnShape(fresh));
+  });
+
+  // @skip-env this host has no tool that sets a real ACL entry (macOS chmod +a or Linux setfacl).
+  it.skipIf(ACL_TOOL === '')('refuses an ACL write grant on each path the trust rule walks, in both copies', () => {
+    vi.stubEnv('CLAUDE_CONFIG_DIR', undefined);
+    const trace = join(temporaryDirectory('whatsoup-m365-acl-'), 'm365-fixture-trace.jsonl');
+    const cases: Array<[string, 'native' | 'plugin', (root: string) => string]> = [
+      ['native entry', 'native', (root) => join(root, 'mcp-server', 'dist', 'index.cjs')],
+      ['native manifest', 'native', (root) => join(root, '.claude-plugin', 'plugin.json')],
+      ['native install root', 'native', (root) => root],
+      ['install record', 'native', () => NATIVE_REGISTRY],
+      ['pluginDirs entry', 'plugin', (root) => join(root, 'mcp-server', 'dist', 'index.cjs')],
+      ['pluginDirs entry directory', 'plugin', (root) => join(root, 'mcp-server', 'dist')],
+      ['pluginDirs root', 'plugin', (root) => root],
+    ];
+    for (const [label, copy, target] of cases) {
+      const nativeRoot = nativeInstall(GUARDED_FIXTURE);
+      const plugin = pluginDirectory(trace);
+      const approved = policy(trace);
+      const admit = () => admitMicrosoft365Workflow({
+        registry: new ToolRegistry(), policy: approved, pluginDirs: [plugin.root], perChatMcpSocketManager: {} as never,
+        resolvePerChatMapKey: (jid: string) => jid, sessionTokens: new SessionTokenRegistry(),
+      });
+      // Positive control: the same copies are admitted before the ACL entry exists.
+      expect(admit(), label).toBe(approved);
+      const path = target(copy === 'native' ? nativeRoot : realpathSync(plugin.root));
+      grantAclWrite(path);
+      // Owner and mode bits are unchanged, so only the ACL entry grants the write.
+      expect(statSync(path).mode & 0o022, label).toBe(0);
+      LS_PROBES.length = 0;
+      expect(admit(), label).toEqual(withdrawnShape(approved));
+      // The decision read that exact path with the flags that print ACL entries on this platform.
+      expect(LS_PROBES, label).toContainEqual(process.platform === 'darwin' ? ['-lde', '--', path] : ['-ld', '--', path]);
+      clearFixtureAcls();
+    }
+  });
+
+  // @skip-env deny-only ACL entries and the `@` mode marker exist only on macOS.
+  it.skipIf(process.platform !== 'darwin')('admits deny-only ACL entries and finds a grant on a path that also has extended attributes', () => {
+    vi.stubEnv('CLAUDE_CONFIG_DIR', undefined);
+    const trace = join(temporaryDirectory('whatsoup-m365-acl-deny-'), 'm365-fixture-trace.jsonl');
+    const nativeRoot = nativeInstall(GUARDED_FIXTURE);
+    const nativeEntry = join(nativeRoot, 'mcp-server', 'dist', 'index.cjs');
+    const plugin = pluginDirectory(trace);
+    const approved = policy(trace);
+    const admit = () => admitMicrosoft365Workflow({
+      registry: new ToolRegistry(), policy: approved, pluginDirs: [plugin.root], perChatMcpSocketManager: {} as never,
+      resolvePerChatMapKey: (jid: string) => jid, sessionTokens: new SessionTokenRegistry(),
+    });
+    // Every macOS home directory carries a deny-only entry like these. It grants nothing, so the copies stay admitted.
+    denyAclDelete(nativeRoot);
+    denyAclDelete(nativeEntry);
+    denyAclDelete(realpathSync(plugin.root));
+    expect(admit()).toBe(approved);
+
+    // With an extended attribute present, ls marks the mode with `@` in place of `+`; the entry lines still show the grant.
+    expect(spawnSync('/usr/bin/xattr', ['-w', 'org.whatsoup.fixture', '1', nativeEntry]).status).toBe(0);
+    grantAclWrite(nativeEntry);
+    expect(spawnSync('/bin/ls', ['-ld', nativeEntry], { encoding: 'utf8' }).stdout.split(' ')[0]).toMatch(/@$/);
+    expect(admit()).toEqual(withdrawnShape(approved));
+  });
+
+  it.each([
+    ['ls fails', { status: 1, stdout: '' }],
+    ['ls prints an unparseable listing', { status: 0, stdout: 'not a listing\n' }],
+    ['ls prints an ACL entry line it cannot read', { status: 0, stdout: '-rw-r--r--+ 1 user staff 10 Nov 12 10:00 entry\n 0: unreadable entry line\n' }],
+  ])('refuses a path whose ACL listing cannot be read (%s)', async (_case, listing) => {
+    vi.stubEnv('CLAUDE_CONFIG_DIR', undefined);
+    const trace = join(temporaryDirectory('whatsoup-m365-acl-unread-'), 'm365-fixture-trace.jsonl');
+    const nativeRoot = nativeInstall(GUARDED_FIXTURE);
+    const nativeEntry = join(nativeRoot, 'mcp-server', 'dist', 'index.cjs');
+    const approved = policy(trace);
+    const admit = () => admitMicrosoft365Workflow({
+      registry: new ToolRegistry(), policy: approved, pluginDirs: [pluginDirectory(trace).root], perChatMcpSocketManager: {} as never,
+      resolvePerChatMapKey: (jid: string) => jid, sessionTokens: new SessionTokenRegistry(),
+    });
+    // Positive control: with the real listing, the copies are admitted.
+    expect(admit()).toBe(approved);
+    // A later check: verdicts are kept only for the synchronous run that listed them.
+    await Promise.resolve();
+    LS_OVERRIDES.set(nativeEntry, listing);
+    LS_PROBES.length = 0;
+    expect(admit()).toEqual(withdrawnShape(approved));
+    expect(LS_PROBES.some((args) => args[args.length - 1] === nativeEntry)).toBe(true);
+  });
+
+  it.each([
+    // The workspace directory above `.claude`: the writer repairs `.claude` itself, but not its parent.
+    ['an unsearchable workspace directory (EACCES)', (claudeDir: string) => chmodSync(dirname(claudeDir), 0o000),
+      (claudeDir: string) => chmodSync(dirname(claudeDir), 0o700)],
+    ['a settings file that fails with EIO', (claudeDir: string) => IO_ERROR.add(join(claudeDir, 'settings.json')),
+      (claudeDir: string) => IO_ERROR.delete(join(claudeDir, 'settings.json'))],
+  ])('keeps a floor rewrite pending when the settings file cannot be inspected (%s)', (_case, block, unblock) => {
+    const trace = join(temporaryDirectory('whatsoup-m365-floor-pending-'), 'm365-fixture-trace.jsonl');
+    const approved = policy(trace);
+    const withdrawn = withdrawnShape(approved);
+    const files = new Microsoft365SettingsFiles();
+    const claudeDir = join(temporaryDirectory('whatsoup-m365-uninspectable-'), '.claude');
+    const liftedM365Denies = () => {
+      const deny = (JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8')) as { permissions: { deny: string[] } }).permissions.deny;
+      return M365_MUTATION_DENY.filter((entry) => deny.includes(entry));
+    };
+    files.write('chat', claudeDir, { 'microsoft_365@microsoft-365-dev': true }, { hasSandbox: false, m365MutationPolicy: approved });
+    // Positive control: the approved write lifted the Microsoft 365 mutation denies.
+    expect(liftedM365Denies()).toEqual([]);
+
+    block(claudeDir);
+    try {
+      // existsSync cannot tell this file from a missing one.
+      expect(existsSync(join(claudeDir, 'settings.json'))).toBe(false);
+      files.restoreFloorOnWithdrawal(approved, withdrawn, 'test');
+      expect(files.hasPendingRestoration()).toBe(true);
+      expect(() => microsoft365SpawnPolicy(approved, withdrawn, files)).toThrow(/M365_FLOOR_RESTORATION_PENDING/);
+    } finally {
+      unblock(claudeDir);
+    }
+    // Once the file can be read again, the retry writes the floor and spawns may proceed.
+    files.restoreFloorOnWithdrawal(withdrawn, withdrawn, 'test');
+    expect(liftedM365Denies()).toEqual([...M365_MUTATION_DENY]);
+    expect(files.hasPendingRestoration()).toBe(false);
+  });
+
+  it('re-checks the plugin immediately before the adapter spawns it, after the socket became ready', async () => {
+    vi.stubEnv('CLAUDE_CONFIG_DIR', undefined);
+    const directory = temporaryDirectory('whatsoup-m365-ready-');
+    const trace = join(directory, 'm365-fixture-trace.jsonl');
+    const registry = new ToolRegistry();
+    const tokens = new SessionTokenRegistry();
+    const plugin = pluginDirectory(trace);
+    nativeInstall(GUARDED_FIXTURE);
+    let executing: ExecutingSessionContext = authorizedExecuting();
+    const socketPath = await brokerServer(directory, 'chat', tokens, () => executing);
+    let ready: Promise<void> = Promise.resolve();
+    const manager = { acquire: vi.fn(() => ({ socketPath, ready })) };
+    const admitted = admitMicrosoft365Workflow({ registry, policy: policy(trace), pluginDirs: [plugin.root],
+      perChatMcpSocketManager: manager as never, resolvePerChatMapKey: (jid) => `map:${jid}`, sessionTokens: tokens, instanceName: 'test' });
+    if (admitted?.status !== 'approved' || admitted.workflowAuthority === undefined) throw new Error('expected an admitted assignment');
+    executing = { ...authorizedExecuting(), workflowAuthority: admitted.workflowAuthority };
+    const bridge = createProviderMcpBridge(registry,
+      { tier: 'chat-scoped', conversationKey: CONVERSATION_KEY, deliveryJid: DELIVERY_JID }, () => executing);
+
+    // Positive control: with the socket ready at once, the admitted copy is launched.
+    await expect(bridge.executeTool('microsoft365', { operation: 'call', name: 'list-mail-messages', args: {} }))
+      .resolves.toMatchObject({ isError: false });
+    const launches = traceRows(trace).length;
+    expect(launches).toBeGreaterThan(0);
+
+    // The next call waits for its socket, and the entry changes while it waits.
+    let releaseReady!: () => void;
+    ready = new Promise<void>((resolve) => { releaseReady = resolve; });
+    const pending = bridge.executeTool('microsoft365', { operation: 'call', name: 'list-mail-messages', args: {} });
+    await vi.waitFor(() => expect(manager.acquire).toHaveBeenCalledTimes(2));
+    // The guarded code plus one line: it would boot and answer if it were spawned.
+    writeFileSync(plugin.entry, `${readFileSync(GUARDED_FIXTURE, 'utf8')}\n// replaced while the socket was not ready\n`);
+    releaseReady();
+    const refused = await pending;
+    expect(refused).toMatchObject({ isError: true });
+    expect(JSON.stringify(refused)).toContain('microsoft365_authority_unavailable');
+    // Nothing was spawned: the replacement never booted, and the assignment is withdrawn.
+    expect(traceRows(trace)).toHaveLength(launches);
     expect(m365WorkflowAuthorityLive(admitted.workflowAuthority)).toBe(false);
   });
 

@@ -23,6 +23,9 @@ type McpOutcome =
   | { kind: 'result'; result: unknown }
   | { kind: 'protocol_error' | 'timeout' | 'output_limit' | 'spawn_error' | 'child_exit'; cleanupUnproven?: true };
 
+/** A request's outcome, or the refusal of its launch check, in which case no process was started. */
+type RequestOutcome = McpOutcome | { kind: 'launch_refused' };
+
 export interface Microsoft365Launch {
   /** Fixed absolute executable path for the account-bound Microsoft 365 plugin. */
   command: string;
@@ -50,6 +53,12 @@ export interface Microsoft365Authority {
 export interface Microsoft365ToolOptions {
   launch: Microsoft365Launch;
   authorityForSession: (session: SessionContext) => Promise<Microsoft365Authority | undefined>;
+  /**
+   * Runs synchronously immediately before each plugin process is spawned, after every await, so a plugin
+   * that changed while the authority resolved is never launched with the credentials. False or a throw
+   * refuses the spawn.
+   */
+  launchAllowed: () => boolean;
   timeoutMs?: number;
   maxStdoutBytes?: number;
   maxStderrBytes?: number;
@@ -71,7 +80,7 @@ interface ValidatedLaunch {
 // The catalogue can be shared by adapter instances only when both the pinned
 // plugin version and selected account agree. The launch environment stays out
 // of the key because it can contain credentials.
-const cataloguesByAccountAndVersion = new Map<string, Promise<McpOutcome>>();
+const cataloguesByAccountAndVersion = new Map<string, Promise<RequestOutcome>>();
 
 function isBoundedInteger(value: number, maximum: number): boolean {
   return Number.isSafeInteger(value) && value > 0 && value <= maximum;
@@ -148,8 +157,20 @@ function requestMcp(
   maxStdoutBytes: number,
   maxStderrBytes: number,
   probeGroup: (pgid: number) => GroupMembership,
-): Promise<McpOutcome> {
-  return new Promise((resolve) => {
+  launchAllowed: () => boolean,
+): Promise<RequestOutcome> {
+  return new Promise<RequestOutcome>((resolve) => {
+    // Synchronous from this check to spawn(): nothing can change the decision in between.
+    let allowed = false;
+    try {
+      allowed = launchAllowed() === true;
+    } catch {
+      allowed = false;
+    }
+    if (!allowed) {
+      resolve({ kind: 'launch_refused' });
+      return;
+    }
     let child: ReturnType<typeof spawn>;
     let settled = false;
     let initialized = false;
@@ -321,7 +342,10 @@ function requestMcp(
   });
 }
 
-function errorFor(outcome: Exclude<McpOutcome, { kind: 'result' }>): ReturnType<typeof toolError> {
+function errorFor(outcome: Exclude<RequestOutcome, { kind: 'result' }>): ReturnType<typeof toolError> {
+  if (outcome.kind === 'launch_refused') {
+    return toolError({ error: 'microsoft365_authority_unavailable', message: 'Microsoft 365 authority is unavailable for this chat.' });
+  }
   const error = outcome.kind === 'timeout'
     ? 'microsoft365_timeout'
     : outcome.kind === 'output_limit'
@@ -338,7 +362,7 @@ function errorFor(outcome: Exclude<McpOutcome, { kind: 'result' }>): ReturnType<
   });
 }
 
-function validCatalogue(outcome: McpOutcome): McpOutcome {
+function validCatalogue(outcome: RequestOutcome): RequestOutcome {
   if (outcome.kind !== 'result' || !isRecord(outcome.result) || !Array.isArray(outcome.result['tools'])) {
     return outcome.kind === 'result' ? { kind: 'protocol_error' } : outcome;
   }
@@ -356,6 +380,10 @@ export function createMicrosoft365Tool(options: Microsoft365ToolOptions): ToolDe
   const maxStdoutBytes = validatedPositiveOption(options.maxStdoutBytes, DEFAULT_STDOUT_LIMIT_BYTES, MAX_CAPTURE_BYTES, 'maxStdoutBytes');
   const maxStderrBytes = validatedPositiveOption(options.maxStderrBytes, DEFAULT_STDERR_LIMIT_BYTES, MAX_CAPTURE_BYTES, 'maxStderrBytes');
   const probeGroup = options.probeGroup ?? ((pgid: number) => probeGroupMembership(pgid, GROUP_PROBE_TIMEOUT_MS));
+  if (typeof options.launchAllowed !== 'function') {
+    throw new TypeError('Microsoft 365 launchAllowed must be a function');
+  }
+  const launchAllowed = options.launchAllowed;
   const cacheKey = catalogueCacheKey(launch);
 
   const authorityFor = async (session: SessionContext): Promise<Microsoft365Authority | ReturnType<typeof toolError>> => {
@@ -438,6 +466,7 @@ export function createMicrosoft365Tool(options: Microsoft365ToolOptions): ToolDe
               maxStdoutBytes,
               maxStderrBytes,
               probeGroup,
+              launchAllowed,
             ).then(validCatalogue);
             cataloguesByAccountAndVersion.set(cacheKey, catalogue);
           }
@@ -466,7 +495,7 @@ export function createMicrosoft365Tool(options: Microsoft365ToolOptions): ToolDe
       }
       const authority = await authorityFor(session);
       if (!isMicrosoft365Authority(authority)) return authority;
-      let outcome: McpOutcome;
+      let outcome: RequestOutcome;
       try {
         // requestMcp settles only after the child closed and its process group was killed.
         outcome = await requestMcp(
@@ -478,6 +507,7 @@ export function createMicrosoft365Tool(options: Microsoft365ToolOptions): ToolDe
           maxStdoutBytes,
           maxStderrBytes,
           probeGroup,
+          launchAllowed,
         );
       } finally {
         authority.release?.();

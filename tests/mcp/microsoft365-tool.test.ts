@@ -142,6 +142,7 @@ function makeTool(options: {
     accountId: string;
     release?: () => void;
   } | undefined>;
+  launchAllowed?: () => boolean;
 }) {
   const accountId = options.accountId ?? 'employee-account';
   return createMicrosoft365Tool({
@@ -160,6 +161,7 @@ function makeTool(options: {
       accountId,
     },
     authorityForSession: options.authorityForSession ?? ((session) => authorityForFixture(session, accountId)),
+    launchAllowed: options.launchAllowed ?? (() => true),
     timeoutMs: options.timeoutMs ?? 1_000,
     maxStdoutBytes: options.maxStdoutBytes,
     maxStderrBytes: options.maxStderrBytes,
@@ -216,6 +218,39 @@ describe('createMicrosoft365Tool', () => {
         params: { name: 'list-mail-messages', arguments: { folderId: 'inbox' } },
       }),
     ]));
+  });
+
+  it.each([
+    ['refuses', () => false],
+    ['throws', () => { throw new Error('launch check failed'); }],
+  ])('starts no plugin process when the launch check %s after the authority resolved', async (_case, check) => {
+    for (const operation of [{ operation: 'call', name: 'list-mail-messages', args: {} }, { operation: 'list' }]) {
+      const trace = makeTracePath();
+      const order: string[] = [];
+      const release = vi.fn();
+      const tool = makeTool({
+        trace,
+        catalogVersion: `launch-check-${Date.now()}-${Math.random()}`,
+        authorityForSession: async (session) => {
+          const authority = await authorityForFixture(session, 'employee-account');
+          order.push('authority');
+          return authority === undefined ? undefined : { ...authority, release };
+        },
+        launchAllowed: () => {
+          order.push('launch-check');
+          return check();
+        },
+      });
+
+      const result = await callTool(tool, operation);
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain('microsoft365_authority_unavailable');
+      // The check ran once, after the authority resolved, and its token was still retired.
+      expect(order).toEqual(['authority', 'launch-check']);
+      expect(release).toHaveBeenCalledOnce();
+      expect(() => readFileSync(trace, 'utf8')).toThrow();
+    }
   });
 
   it('rejects an incomplete call request before it starts the plugin process', async () => {

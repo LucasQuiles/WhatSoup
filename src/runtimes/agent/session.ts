@@ -1218,9 +1218,21 @@ export class SessionManager {
     return resolveProviderBinary(provider);
   }
 
-  /** The M365 policy for one provider spawn: the runtime's live value when supplied, else the snapshot. */
+  /**
+   * The M365 policy for one provider spawn: the runtime's live value when supplied, else the snapshot. Read once
+   * per spawn, immediately before the child is started, for both its arguments and its environment.
+   *
+   * A queued host-work launch (`WHATSOUP_WORK_ADMISSION=systemd`) hands its arguments and environment to the
+   * external wrapper now, and the wrapper starts the provider only after its host lease, with no later check.
+   * Nothing can decide them at release, so an approved policy is launched in the withdrawn shape: `rejected`,
+   * which gives `claude-cli` the full deny set and no bridge or workflow-authority values. A pending floor
+   * rewrite still refuses the spawn, because the live read above throws.
+   */
   private m365PolicyAtSpawn(): M365MutationPolicy | undefined {
-    return this.m365SpawnPolicy === undefined ? this.m365MutationPolicy : this.m365SpawnPolicy();
+    const policy = this.m365SpawnPolicy === undefined ? this.m365MutationPolicy : this.m365SpawnPolicy();
+    // The same branch order as spawnProviderChild: isolation, then the host-work queue, then a direct spawn.
+    const queued = !this.providerProcessIsolation && isHostWorkAdmissionEnabled();
+    return queued && policy?.status === 'approved' ? { status: 'rejected' } : policy;
   }
 
   private getProviderArgs(
@@ -2011,7 +2023,11 @@ export class SessionManager {
     return sections.join('\n');
   }
 
-  private buildSpawnPerTurnArgs(cwd: string, input: ProviderTurnInput): string[] {
+  private buildSpawnPerTurnArgs(
+    cwd: string,
+    input: ProviderTurnInput,
+    m365Policy?: M365MutationPolicy,
+  ): string[] {
     switch (this.provider) {
       // codex-cli and gemini-cli are now persistent, not spawn-per-turn.
 
@@ -2039,7 +2055,7 @@ export class SessionManager {
       }
 
       default:
-        return this.getProviderArgs('', cwd);
+        return this.getProviderArgs('', cwd, undefined, m365Policy);
     }
   }
 
@@ -4144,8 +4160,10 @@ export class SessionManager {
       let child: ChildProcessWithoutNullStreams;
       try {
         cwd = this.admitConfiguredCwd();
-        args = this.buildSpawnPerTurnArgs(cwd, input);
-        const spawned = this.spawnProviderChild(binary, args, cwd, expectedExecutableSha256);
+        // Read once, so the arguments and the environment of this child agree.
+        const m365Policy = this.m365PolicyAtSpawn();
+        args = this.buildSpawnPerTurnArgs(cwd, input, m365Policy);
+        const spawned = this.spawnProviderChild(binary, args, cwd, expectedExecutableSha256, m365Policy);
         // Keep direct-spawn setup synchronous: existing callers and child error
         // handlers rely on the process being attached in this same turn.
         child = spawned instanceof Promise ? await spawned : spawned;

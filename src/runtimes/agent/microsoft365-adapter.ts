@@ -1,5 +1,6 @@
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { accessSync, constants, existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, statSync, type Stats } from 'node:fs';
+import { accessSync, constants, lstatSync, readFileSync, readlinkSync, realpathSync, statSync, type Stats } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
@@ -78,17 +79,103 @@ interface PluginManifest {
 
 /** The admitted `pluginDirs` copy: what the adapter launches and what the native copy must repeat. */
 interface PluginPin {
+  /** The path as configured: the Claude CLI receives it through `--plugin-dir`, so it is resolved again at each check. */
+  configuredDir: string;
+  /** Its real path at admission. */
+  root: string;
   manifestPath: string;
+  /** The real path the entry resolved to at admission; the entry symlink is resolved again at each check. */
   entryPath: string;
   manifestDigest: string;
   entryDigest: string;
   /** Canonical JSON of the manifest's `mcpServers` and `hooks`. */
   shape: string;
-  rootFileDigests: Array<string | undefined>;
 }
 
 function pluginShape(manifest: PluginManifest): string | null {
   return canonicalM365WorkflowParams({ mcpServers: manifest.mcpServers ?? null, hooks: manifest.hooks ?? null });
+}
+
+/** The guarded shape both copies must have: exactly the one `microsoft_365` server and no `hooks` key. */
+function hasCanonicalShape(manifest: PluginManifest): boolean {
+  const servers: unknown = manifest.mcpServers;
+  return isRecord(servers)
+    && Object.keys(servers).length === 1
+    && Object.prototype.hasOwnProperty.call(servers, PLUGIN_SERVER)
+    && !Object.prototype.hasOwnProperty.call(manifest, 'hooks');
+}
+
+/**
+ * True only when nothing exists at the path (ENOENT). `lstat` sees a dangling or looping symlink, and any other
+ * error (EACCES, EIO, ENOTDIR and so on) proves nothing, so neither counts as absent.
+ */
+function isAbsent(path: string): boolean {
+  try {
+    lstatSync(path);
+    return false;
+  } catch (err) {
+    return isRecord(err) && err['code'] === 'ENOENT';
+  }
+}
+
+/** The plugin-root files from which the Claude CLI also loads servers and hooks are absent, as the canonical shape requires. */
+function rootFilesAbsent(root: string): boolean {
+  return PLUGIN_ROOT_FILES.every((file) => isAbsent(join(root, file)));
+}
+
+const LIST_COMMAND = '/bin/ls';
+const LIST_TIMEOUT_MS = 2_000;
+/** The mode field of an `ls -l` line and its marker: `@` extended attributes or `+` ACL on macOS, `.` SELinux or `+` ACL on Linux. */
+const LISTING_MODE = /^[-a-zA-Z?]{10}([@+.]?)$/;
+/** A macOS `ls -le` ACL entry line: `N: <principal> [inherited] allow|deny <rights>`. */
+const DARWIN_ACL_ENTRY = /^ *\d+: .+ (allow|deny) [a-z_,]+$/;
+
+/**
+ * Node has no ACL API, so the verdict comes from `/bin/ls`, run without a shell. On macOS, `ls -lde` prints every ACL
+ * entry after the listing line, even when extended attributes replace the `+` marker with `@`: any `allow` entry
+ * refuses, and deny-only entries are admitted because they grant nothing (every macOS home directory carries
+ * `group:everyone deny delete`). Linux ACLs have no deny entries, so the `+` marker refuses. A failed or unparseable
+ * listing, or any other platform, refuses.
+ */
+function listingGrantsNothing(path: string): boolean {
+  const darwin = process.platform === 'darwin';
+  if ((!darwin && process.platform !== 'linux') || /[\n\r]/.test(path)) return false;
+  try {
+    const listing = spawnSync(LIST_COMMAND, [darwin ? '-lde' : '-ld', '--', path], {
+      encoding: 'utf8', env: { LC_ALL: 'C' }, shell: false, stdio: ['ignore', 'pipe', 'ignore'], timeout: LIST_TIMEOUT_MS,
+    });
+    if (listing.error !== undefined || listing.status !== 0 || typeof listing.stdout !== 'string') return false;
+    const lines = listing.stdout.split('\n');
+    if (lines[lines.length - 1] === '') lines.pop();
+    const marker = LISTING_MODE.exec(lines[0]?.split(' ', 1)[0] ?? '')?.[1];
+    if (marker === undefined) return false;
+    if (!darwin) return lines.length === 1 && (marker === '' || marker === '.');
+    const entries = lines.slice(1);
+    if (marker === '.' || (marker === '+' && entries.length === 0)) return false;
+    return entries.every((line) => DARWIN_ACL_ENTRY.exec(line)?.[1] === 'deny');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * ACL verdicts, kept only until the synchronous run that listed them ends (one check walks the same ancestors many
+ * times) and keyed by path, inode and change time: changing an ACL changes the ctime, so a changed ACL is listed again.
+ */
+let aclVerdicts: Map<string, boolean> | undefined;
+
+function hasNoAclGrant(path: string, stat: Stats): boolean {
+  if (aclVerdicts === undefined) {
+    aclVerdicts = new Map();
+    queueMicrotask(() => { aclVerdicts = undefined; });
+  }
+  const key = `${path}\0${stat.dev}\0${stat.ino}\0${stat.ctimeMs}`;
+  let verdict = aclVerdicts.get(key);
+  if (verdict === undefined) {
+    verdict = listingGrantsNothing(path);
+    aclVerdicts.set(key, verdict);
+  }
+  return verdict;
 }
 
 function containedPath(root: string, candidate: string): boolean {
@@ -187,9 +274,9 @@ function isTrustedOwner(stat: Stats): boolean {
 }
 
 /**
- * The path, every symlink hop and every ancestor belong to root or this user and are not
- * group- or world-writable, apart from sticky directories. Used for the interpreter and
- * for the plugin code that receives the bridge credentials.
+ * The path, every symlink hop and every ancestor belong to root or this user, carry no ACL entry
+ * that grants anything, and are not group- or world-writable, apart from sticky directories. Used
+ * for the interpreter and for the plugin code that receives the bridge credentials.
  */
 function hasSafePathChain(path: string): boolean {
   try {
@@ -200,7 +287,7 @@ function hasSafePathChain(path: string): boolean {
       if (checked.has(current)) continue;
       checked.add(current);
       const stat = lstatSync(current);
-      if (!isTrustedOwner(stat)) return false;
+      if (!isTrustedOwner(stat) || !hasNoAclGrant(current, stat)) return false;
       if (stat.isSymbolicLink()) {
         pending.push(resolve(dirname(current), readlinkSync(current)));
       } else if ((stat.mode & GROUP_OR_WORLD_WRITABLE) !== 0) {
@@ -245,7 +332,7 @@ function resolvePythonLauncher(value: unknown): string | undefined {
 function isSafeOwnedPath(path: string, kind: 'directory' | 'file', privateFile = false): boolean {
   try {
     const stat = lstatSync(path);
-    if (stat.isSymbolicLink() || !isCurrentUserOwned(stat)) return false;
+    if (stat.isSymbolicLink() || !isCurrentUserOwned(stat) || !hasNoAclGrant(path, stat)) return false;
     if (kind === 'directory' ? !stat.isDirectory() : !stat.isFile()) return false;
     if (realpathSync(path) !== path) return false;
     return (stat.mode & (privateFile ? 0o077 : 0o022)) === 0;
@@ -318,11 +405,16 @@ function loadPluginCandidate(
     try {
       const root = realpathSync(configuredDir);
       const manifestPath = join(root, PLUGIN_MANIFEST);
-      // The plugin receives the bridge credentials and enforces broker authorization,
-      // so its manifest, entry and their directories get the interpreter's trust rule.
-      if (!hasSafePathChain(manifestPath) || !hasSafePathChain(join(root, PLUGIN_ENTRY)) || !statSync(manifestPath).isFile()) continue;
+      // The plugin receives the bridge credentials and enforces broker authorization, so the
+      // configured path, its manifest, entry and their directories get the interpreter's trust rule.
+      if (
+        !hasSafePathChain(configuredDir) || !hasSafePathChain(manifestPath) || !hasSafePathChain(join(root, PLUGIN_ENTRY))
+        || !statSync(manifestPath).isFile()
+      ) continue;
       const parsed = parseManifest(manifestPath);
       if (!parsed || parsed.manifest.name !== PLUGIN_NAME || typeof parsed.manifest.version !== 'string' || !parsed.manifest.version.trim()) continue;
+      // The Claude CLI loads every server and hook the copy declares, so only the canonical shape is admitted.
+      if (!hasCanonicalShape(parsed.manifest) || !rootFilesAbsent(root)) continue;
       const server = parsed.manifest.mcpServers?.[PLUGIN_SERVER];
       const pythonLauncher = resolvePythonLauncher(server?.command);
       if (
@@ -351,10 +443,7 @@ function loadPluginCandidate(
           catalogVersion: `${parsed.manifest.version}:${manifestDigest}`,
           accountId,
         },
-        pin: {
-          manifestPath, entryPath: entry, manifestDigest, entryDigest, shape,
-          rootFileDigests: PLUGIN_ROOT_FILES.map((file) => fileDigest(join(root, file))),
-        },
+        pin: { configuredDir, root, manifestPath, entryPath: entry, manifestDigest, entryDigest, shape },
       });
     } catch {
       // Deliberately: omit an absent or altered plugin so registry admission fails closed.
@@ -398,12 +487,20 @@ export function registerMicrosoft365Adapter(options: RegisterMicrosoft365Adapter
 }
 
 /**
- * The admitted copy changed: a different entry or manifest, or a path that lost the trust rule.
- * Re-checked before each adapter launch because the adapter spawns that copy with the credentials.
+ * The admitted `pluginDirs` copy changed on any surface the Claude CLI loads: the configured path or the entry
+ * symlink resolves elsewhere, the manifest or entry bytes differ, a plugin-root `.mcp.json` or `hooks/hooks.json`
+ * is no longer absent, or a path lost the trust rule. Any error counts as a change.
  */
 function pluginCopyChanged(pin: PluginPin): boolean {
-  return !hasSafePathChain(pin.manifestPath) || !hasSafePathChain(pin.entryPath)
-    || fileDigest(pin.manifestPath) !== pin.manifestDigest || fileDigest(pin.entryPath) !== pin.entryDigest;
+  try {
+    const entryLink = join(pin.root, PLUGIN_ENTRY);
+    return realpathSync(pin.configuredDir) !== pin.root || realpathSync(entryLink) !== pin.entryPath
+      || !hasSafePathChain(pin.configuredDir) || !hasSafePathChain(pin.manifestPath) || !hasSafePathChain(entryLink)
+      || fileDigest(pin.manifestPath) !== pin.manifestDigest || fileDigest(pin.entryPath) !== pin.entryDigest
+      || !rootFilesAbsent(pin.root);
+  } catch {
+    return true;
+  }
 }
 
 function registerAdapterLaunch(options: RegisterMicrosoft365AdapterOptions): { launch: Microsoft365Launch; pin: PluginPin } | undefined {
@@ -412,8 +509,28 @@ function registerAdapterLaunch(options: RegisterMicrosoft365AdapterOptions): { l
   const { launch, pin } = candidate;
   let copyChanged = false;
 
+  /**
+   * The adapter's launch check: once before it acquires a socket, and again inside the tool immediately before it
+   * spawns the plugin with the bridge credentials, after every await. An admitted policy gets the runtime's full
+   * re-check (the assignment and both copies), which withdraws the assignment on failure. Without an admitted
+   * assignment only this copy, the one the adapter launches, is checked. A failure closes the adapter for the run.
+   */
+  const launchAllowed = (): boolean => {
+    if (copyChanged) return false;
+    const policy = options.policy;
+    if (policy?.status === 'approved' && admittedPlugins.has(policy)) {
+      copyChanged = recheckMicrosoft365Workflow(policy, options.instanceName) !== policy;
+    } else if (pluginCopyChanged(pin)) {
+      if (policy?.status === 'approved' && policy.workflowAuthority !== undefined) withdrawM365WorkflowAuthority(policy.workflowAuthority);
+      log.warn({ instance: options.instanceName, reason: 'plugin-differs' }, WITHDRAWAL_MESSAGE);
+      copyChanged = true;
+    }
+    return !copyChanged;
+  };
+
   options.registry.register(createMicrosoft365Tool({
     launch,
+    launchAllowed,
     authorityForSession: async (session: SessionContext) => {
       // An unresolved context means no turn is executing, and its purpose is not
       // known: never fall back to the chat's live socket for it. A turn on a route
@@ -427,16 +544,8 @@ function registerAdapterLaunch(options: RegisterMicrosoft365AdapterOptions): { l
         || !supportsM365BridgeProvider(session.m365RouteProvider)
         || (session.workflowAuthority !== undefined && !m365WorkflowAuthorityLive(session.workflowAuthority))
       ) return undefined;
-      // Once the admitted copy changes, the adapter stays closed for the rest of the run and the
-      // runtime's assignment is withdrawn, so every route loses write authority at its next check.
-      if (copyChanged || pluginCopyChanged(pin)) {
-        if (!copyChanged && options.policy?.status === 'approved' && options.policy.workflowAuthority !== undefined) {
-          withdrawM365WorkflowAuthority(options.policy.workflowAuthority);
-        }
-        if (!copyChanged) log.warn({ instance: options.instanceName, reason: 'plugin-differs' }, WITHDRAWAL_MESSAGE);
-        copyChanged = true;
-        return undefined;
-      }
+      // Checked before a socket is acquired; the tool checks again immediately before the spawn.
+      if (!launchAllowed()) return undefined;
       const key = microsoft365AuthorityKey({ deliveryJid: session.deliveryJid, purpose: session.purpose }, options);
       const resource = options.perChatMcpSocketManager.acquire(key.mapKey, session.deliveryJid, key.purpose);
       await resource.ready;
@@ -479,9 +588,10 @@ function fileDigest(path: string): string | undefined {
  * The `claude-cli` provider also loads the copy that `enabledPlugins` names, from the
  * install record in its config directory. Every install must repeat the admitted plugin:
  * the same single server (command, arguments and environment), no other servers or hooks,
- * and the guarded entry byte for byte. Its record, root, manifest and entry get the admitted
- * copy's trust rule. Otherwise it could receive the bridge credentials without enforcing
- * employee authorization.
+ * no plugin-root `.mcp.json` or `hooks/hooks.json`, and the guarded entry byte for byte,
+ * resolved again each time. Its record, root, manifest and entry get the admitted copy's
+ * trust rule. Otherwise it could receive the bridge credentials without enforcing employee
+ * authorization.
  */
 function nativePluginMismatch(pin: PluginPin): NativePluginMismatch | undefined {
   let installs: unknown;
@@ -505,8 +615,7 @@ function nativePluginMismatch(pin: PluginPin): NativePluginMismatch | undefined 
       if (!hasSafePathChain(installPath) || !hasSafePathChain(manifestPath) || !hasSafePathChain(join(root, PLUGIN_ENTRY))) return 'unsafe-path';
       const manifest = parseManifest(manifestPath)?.manifest;
       if (
-        manifest === undefined || pluginShape(manifest) !== pin.shape
-        || PLUGIN_ROOT_FILES.some((file, index) => fileDigest(join(root, file)) !== pin.rootFileDigests[index])
+        manifest === undefined || !hasCanonicalShape(manifest) || pluginShape(manifest) !== pin.shape || !rootFilesAbsent(root)
       ) return 'manifest-differs';
       const entry = realpathSync(join(root, PLUGIN_ENTRY));
       if (!containedPath(root, entry) || !statSync(entry).isFile() || !hasSafePathChain(entry)) return 'entry-unreadable';
@@ -580,9 +689,12 @@ export function admitMicrosoft365Workflow(options: RegisterMicrosoft365AdapterOp
 }
 
 /**
- * Runs before each native-settings write, each provider spawn and each turn's publication. A
- * marketplace update can replace either plugin copy mid-run, so both must still match the
- * admitted plugin, and the adapter must not have found its copy changed; otherwise the
+ * The single authority-and-bytes re-check. Every launch that can load the guarded plugin with the
+ * bridge credentials runs it immediately before its process is spawned: each `claude-cli` provider
+ * spawn (through the runtime's `microsoft365SpawnPolicy` closure) and each adapter launch (its
+ * `launchAllowed`). It also runs before each native-settings write and each turn's publication. A
+ * marketplace update can replace either plugin copy mid-run, so every loading surface of both copies
+ * must still match the admitted plugin and the assignment must still be live; otherwise the
  * assignment is withdrawn and turns that already published it lose it at their next request.
  * The withdrawn policy carries no assignment, so the withdrawal holds for the rest of the run
  * and is logged once. A policy without an assignment passes through. Any other policy with an
@@ -655,9 +767,10 @@ export class Microsoft365SettingsFiles {
    * Runs after each re-check with the runtime policy before and after it, and returns `after`.
    * When the re-check withdrew the assignment, every recorded file is queued for a rewrite with the
    * deny floor. Every call, whether or not it withdrew anything, then writes each queued file before
-   * it returns: a failed rewrite stays queued and is retried at the next check. A file that is gone
-   * (its workspace was removed) is dropped, not recreated. A failure is logged with a reason, never a
-   * path; the caller has already stored `after`, so authority stays withdrawn in memory either way.
+   * it returns: a failed rewrite stays queued and is retried at the next check. Only a file that is
+   * gone (ENOENT: its workspace was removed) is dropped, not recreated; a file that cannot be
+   * inspected stays queued. A failure is logged with a reason, never a path; the caller has already
+   * stored `after`, so authority stays withdrawn in memory either way.
    */
   restoreFloorOnWithdrawal(
     before: M365MutationPolicy | undefined,
@@ -669,7 +782,7 @@ export class Microsoft365SettingsFiles {
     }
     for (const [claudeDir, floor] of this.pending) {
       const file = this.written.get(claudeDir);
-      if (file === undefined || !existsSync(join(claudeDir, 'settings.json'))) {
+      if (file === undefined || isAbsent(join(claudeDir, 'settings.json'))) {
         this.pending.delete(claudeDir);
         continue;
       }
