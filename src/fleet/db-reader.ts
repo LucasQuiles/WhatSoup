@@ -6,7 +6,7 @@ import { queryAll, queryOne } from '../lib/db-query.ts';
 import { createChildLogger } from '../logger.ts';
 import { MS_PER_HOUR } from '../lib/time-units.ts';
 import { systemClock, type Clock } from '../lib/clock.ts';
-import { sanitizeProtectedMessageText } from '../core/protected-message.ts';
+import { sanitizeProtectedMessageText, sanitizeProtectedMessageValue } from '../core/protected-message.ts';
 
 const log = createChildLogger('fleet:db-reader');
 
@@ -436,11 +436,14 @@ export class FleetDbReader {
       for (const row of rows) {
         try {
           const p = JSON.parse(row.payload) as Record<string, unknown>;
+          // Question text, option labels and descriptions, and collected answers
+          // are stored free text. A label that held a link reaches the console
+          // as the marker, so a console decision returns the marker as its answer.
           const questions = (p.questions as Array<Record<string, unknown>>).map((q) => ({
-            question: String(q.question ?? ''),
+            question: sanitizeProtectedMessageText(String(q.question ?? '')),
             options: ((q.options as Array<Record<string, unknown>>) ?? []).map((o) => ({
-              label: String(o.label ?? ''),
-              description: String(o.description ?? ''),
+              label: sanitizeProtectedMessageText(String(o.label ?? '')),
+              description: sanitizeProtectedMessageText(String(o.description ?? '')),
             })),
             multiSelect: Boolean(q.multiSelect),
           }));
@@ -451,7 +454,7 @@ export class FleetDbReader {
             source: p.source === 'send_poll' ? 'send_poll' : 'askuser',
             questions,
             currentQuestionIndex: Number(p.currentQuestionIndex ?? 0),
-            answersCollected: (p.answersCollected ?? {}) as Record<number, string>,
+            answersCollected: sanitizeProtectedMessageValue(p.answersCollected ?? {}) as Record<number, string>,
             createdAt: Number(p.createdAt ?? 0),
             timeoutMs: Number(p.timeoutMs ?? 0),
             hardClosesAt: row.hard_closes_at,

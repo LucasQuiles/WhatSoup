@@ -169,7 +169,10 @@ export function parsePinoLine(line: string, ctx: ParseContext): FeedEvent | null
   let obj: Record<string, unknown>;
   try { obj = JSON.parse(line); } catch { return null; }
 
-  const msg = typeof obj.msg === 'string' ? obj.msg : '';
+  // A persisted log line can carry a protected link in its free text. Redacted
+  // once here, the message is safe in the event text and every detail field
+  // copied from it.
+  const msg = typeof obj.msg === 'string' ? sanitizeProtectedMessageText(obj.msg) : '';
   if (!msg) return null;
 
   const pinoLevel = typeof obj.level === 'number' ? obj.level : 30;
@@ -244,7 +247,7 @@ export function parsePinoLine(line: string, ctx: ParseContext): FeedEvent | null
         type: 'tool_error',
         toolName: typeof obj.toolName === 'string' ? obj.toolName : '',
         toolId: typeof obj.toolId === 'string' ? obj.toolId : undefined,
-        error: typeof obj.error === 'string' ? obj.error : String(obj.error ?? ''),
+        error: sanitizeProtectedMessageText(typeof obj.error === 'string' ? obj.error : String(obj.error ?? '')),
       },
     };
   }

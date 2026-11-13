@@ -445,7 +445,8 @@ export function handleGetLogs(
 
       const source = logFieldToString(obj.name ?? obj.module, 'system');
       const component = optionalLogFieldToString(obj.component);
-      const msg = logFieldToString(obj.msg);
+      // A persisted log line can carry a protected link in its free text.
+      const msg = sanitizeProtectedMessageText(logFieldToString(obj.msg));
 
       entries.push({ timestamp, level, msg, source, ...(component !== undefined ? { component } : {}) });
     } catch {

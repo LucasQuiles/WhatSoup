@@ -26,7 +26,8 @@ import { getRecentMessageText } from '../../src/core/messages.ts';
 import { ContactsDirectory } from '../../src/core/mentions.ts';
 import { createProfileRegistry } from '../../src/core/profiles.ts';
 import { FleetDbReader } from '../../src/fleet/db-reader.ts';
-import { handleGetChats, handleGetMessages, handleSearchMessages } from '../../src/fleet/routes/data.ts';
+import { handleGetChats, handleGetLogs, handleGetMessages, handleSearchMessages } from '../../src/fleet/routes/data.ts';
+import { handleGetApprovals } from '../../src/fleet/routes/approvals.ts';
 import { handleGetFeed } from '../../src/fleet/routes/feed.ts';
 import { registerChatManagementTools } from '../../src/mcp/tools/chat-management.ts';
 import { registerMediaTools } from '../../src/mcp/tools/media.ts';
@@ -78,6 +79,7 @@ const SELF = 'self';
 let db: Database;
 let reader: FleetDbReader;
 let logDir: string;
+let logTextDir: string;
 
 function seed(target: Database): void {
   const insert = target.raw.prepare(`
@@ -259,6 +261,38 @@ async function substrateTool(target: Database, name: string, params: Record<stri
   return JSON.parse(result.content[0].text);
 }
 
+/** A reader over a scratch database holding one pending decision that carries the link. */
+function withPendingDecision<T>(read: (pollReader: FleetDbReader) => T | Promise<T>): Promise<T> {
+  return withScratchDb((scratch) => {
+    scratch.raw.prepare(`
+      INSERT INTO pending_polls (map_key, chat_jid, tool_id, source, resolution, payload, created_at)
+      VALUES ('poll-protected', ?, 'tool-protected', 'askuser', 'pending', ?, ?)
+    `).run(DM_JID, JSON.stringify({
+      chatJid: DM_JID,
+      mode: 'poll',
+      source: 'askuser',
+      questions: [{ question: CONTENT, options: [{ label: `Open ${LINK}`, description: CONTENT }], multiSelect: false }],
+      currentQuestionIndex: 1,
+      answersCollected: { 0: CONTENT },
+      createdAt: TS,
+      timeoutMs: 60_000,
+    }), TS);
+    return read(new FleetDbReader(SELF, scratch.raw));
+  });
+}
+
+function feedBody(dir: string): unknown {
+  const res = mockRes();
+  handleGetFeed(mockReq({ url: '/api/feed?limit=10' }), res, {
+    discovery: {
+      getInstances: () => new Map([[SELF, { name: SELF, type: 'agent', logDir: dir, dbPath: '' }]]),
+    } as never,
+    healthPoller: { getStatus: () => null } as never,
+    dbReader: reader,
+  });
+  return JSON.parse(res._body);
+}
+
 interface SurfaceCase {
   surface: string;
   probe: () => unknown | Promise<unknown>;
@@ -308,17 +342,49 @@ const SURFACES: SurfaceCase[] = [
   },
   {
     surface: 'fleet feed (log-derived sender name and database preview)',
+    probe: () => feedBody(logDir),
+  },
+  {
+    surface: 'fleet feed (log message text and tool error text)',
+    probe: () => {
+      const events = feedBody(logTextDir) as unknown[];
+      expect(events).toHaveLength(2);
+      return events;
+    },
+  },
+  {
+    surface: 'fleet logs route (log message text)',
     probe: () => {
       const res = mockRes();
-      handleGetFeed(mockReq({ url: '/api/feed?limit=10' }), res, {
-        discovery: {
-          getInstances: () => new Map([[SELF, { name: SELF, type: 'agent', logDir, dbPath: '' }]]),
-        } as never,
-        healthPoller: { getStatus: () => null } as never,
+      handleGetLogs(mockReq({ url: `/api/lines/${SELF}/logs` }), res, {
+        discovery: { getInstance: () => ({ name: SELF, logDir: logTextDir, dbPath: '' }) } as never,
         dbReader: reader,
-      });
-      return JSON.parse(res._body);
+      }, { name: SELF });
+      const entries = JSON.parse(res._body) as unknown[];
+      expect(entries).toHaveLength(2);
+      return entries;
     },
+  },
+  {
+    surface: 'fleet db reader getPendingPolls (questions, options and answers)',
+    probe: () => withPendingDecision((pollReader) => {
+      const result = pollReader.getPendingPolls(SELF, '');
+      expect(result.ok && result.data.pending).toHaveLength(1);
+      return result;
+    }),
+  },
+  {
+    surface: 'fleet approvals route (pending decision queue)',
+    probe: () => withPendingDecision(async (pollReader) => {
+      const res = mockRes();
+      await handleGetApprovals(mockReq({ url: `/api/lines/${SELF}/approvals` }), res, {
+        discovery: { getInstance: () => ({ name: SELF, dbPath: '' }) } as never,
+        dbReader: pollReader,
+      }, { name: SELF });
+      const body = JSON.parse(res._body) as { approvals: unknown[] };
+      expect(body.approvals).toHaveLength(1);
+      return body;
+    }),
   },
   { surface: 'deferred-turn recovery replay, per_chat scope', probe: () => recoveryReplay('per_chat') },
   { surface: 'deferred-turn recovery replay, shared scope', probe: () => recoveryReplay('shared') },
@@ -576,11 +642,18 @@ describe('protected links in stored rows never reach an outward surface', () => 
       messageId: 'dm-protected',
       senderName: SENDER,
     })}\n`);
+    // Free log text: both lines pass the feed's business filter.
+    logTextDir = fs.mkdtempSync(path.join(os.tmpdir(), 'protected-link-log-text-'));
+    fs.writeFileSync(path.join(logTextDir, 'current.log'), [
+      { level: 50, time: TS * 1000, msg: `delivery failed for ${LINK}` },
+      { level: 50, time: TS * 1000 + 1, msg: 'tool error reported', toolName: 'fetch', error: `fetch failed ${LINK}` },
+    ].map((line) => `${JSON.stringify(line)}\n`).join(''));
   });
 
   afterAll(() => {
     db.close();
     fs.rmSync(logDir, { recursive: true, force: true });
+    fs.rmSync(logTextDir, { recursive: true, force: true });
   });
 
   it.each(SURFACES)('$surface', async ({ probe, mustContain }) => {
