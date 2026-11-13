@@ -95,7 +95,14 @@ def test_a_temporary_name_collision_fails_cleanly(tmp_path, monkeypatch):
     assert sorted(os.listdir(folder)) == [squatter.name]
 
 
-@pytest.mark.parametrize('break_chain', ['group-writable', 'other-writable', 'symlink', 'wrong-owner'])
+# Four distinct named ways to break the ancestor chain, each a regression of its own; the
+# body dispatches on the name, so the cases are scenarios, not samples of one input space.
+@pytest.mark.parametrize('break_chain', [
+    pytest.param('group-writable', id='group-writable'),
+    pytest.param('other-writable', id='other-writable'),
+    pytest.param('symlink', id='symlink'),
+    pytest.param('wrong-owner', id='wrong-owner'),
+])
 def test_an_untrusted_ancestor_is_refused(tmp_path, break_chain):
     anchor = _anchor(tmp_path)
     owner = OWNER
@@ -141,7 +148,14 @@ def test_an_interpreter_chain_writable_through_a_group_of_the_bot_user_is_refuse
     m.check_interpreter([str(python)], STRANGER, frozenset(), anchor=anchor)
 
 
-@pytest.mark.parametrize('argv', [[], ['--user'], ['--user', ''], ['--user', 'a', 'extra'], ['--name', 'a']])
+# Each case breaks one part of the only accepted shape, `--user <non-empty name>`.
+@pytest.mark.parametrize('argv', [
+    pytest.param([], id='no-args'),
+    pytest.param(['--user'], id='flag-without-value'),
+    pytest.param(['--user', ''], id='empty-name'),
+    pytest.param(['--user', 'a', 'extra'], id='extra-arg'),
+    pytest.param(['--name', 'a'], id='wrong-flag'),
+])
 def test_a_missing_or_malformed_user_argument_is_refused(argv):
     with pytest.raises(m.InstallRefused):
         m.parse_user(argv)
