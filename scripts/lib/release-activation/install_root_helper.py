@@ -13,12 +13,21 @@ passes on the way to the interpreter sudo will run must be unwritable by the
 bot user: each original path component, each symlink hop and each hop's
 folders, checked before anything is resolved. `/usr/bin/python3` resolves
 through the selected developer folder, and a bot user who can redirect or
-replace that folder's `python3` would run code as root.
+replace that folder's `python3` would run code as root. Root also imports the
+modules inside each import-path folder (`-S` drops site, not the standard
+library), so every file and folder below those folders must be unwritable by
+the bot user too.
+
+"Unwritable by the bot user" covers ownership, the group and other write bits,
+and ACLs: any ACL entry that is not a deny entry could grant the bot write
+access, so it refuses. A deny-only ACL, like the one on every macOS home,
+cannot grant access. ACLs are read with libc; the xattr list does not show them.
 Re-running with an up-to-date install changes nothing.
 
 Exit status: 0 installed or already current, 2 refused (nothing changed).
 """
 import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -39,16 +48,30 @@ COMMAND_LINE_TOOLS = '/Library/Developer/CommandLineTools'
 # The interpreter the sudoers rule names: a shim that runs the selected developer folder's python3.
 ROOT_PYTHON = '/usr/bin/python3'
 MAX_SYMLINK_HOPS = 32  # the kernel's MAXSYMLINKS
+# Entries below one import-path folder; past this the walk refuses. Xcode's 3.9 standard library
+# holds about 1,800 (measured); the bound only keeps a pathological tree finite.
+MAX_TREE_ENTRIES = 200_000
 ROOT = (0, 0)
 FOLDER_MODE = 0o755
 INSTALLED_MODE = 0o444
 _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+# <sys/acl.h>
+ACL_TYPE_EXTENDED = 0x00000100
+ACL_EXTENDED_DENY = 2
+_ACL_FIRST_ENTRY, _ACL_NEXT_ENTRY = 0, -1
+_ACL_MAX_ENTRIES = 1024  # the kernel allows 128; a bound keeps the entry loop finite
 
-# No dir_fd form of mkdir, rename or unlink in every interpreter this runs under, so these come from libc.
+# No dir_fd form of mkdir, rename or unlink, and no ACL reader, in every interpreter this runs under,
+# so these come from libc.
 _libc = ctypes.CDLL(None, use_errno=True)
 _libc.mkdirat.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint16]
 _libc.renameat.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p]
 _libc.unlinkat.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+_libc.acl_get_link_np.argtypes = [ctypes.c_char_p, ctypes.c_int]
+_libc.acl_get_link_np.restype = ctypes.c_void_p
+_libc.acl_get_entry.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
+_libc.acl_get_tag_type.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+_libc.acl_free.argtypes = [ctypes.c_void_p]
 
 
 class InstallRefused(RuntimeError):
@@ -105,10 +128,45 @@ def bot_identity(name):
     return user.pw_uid, frozenset(os.getgrouplist(user.pw_name, user.pw_gid))
 
 
-def _writable_by(info, uid, groups):
-    """Could this user change the entry? An owner can always chmod, so ownership alone counts."""
+def acl_tags(path):
+    """The entry tags of `path`'s own extended ACL (a symlink's own, not its target's); None when it has none.
+
+    The xattr list does not show ACLs, so libc reads them. NULL with ENOENT
+    means no ACL (the caller has just lstat'ed `path`); any other failure refuses.
+    """
+    unreadable = InstallRefused('cannot read the ACL of ' + str(path))
+    ctypes.set_errno(0)
+    acl = _libc.acl_get_link_np(os.fsencode(path), ACL_TYPE_EXTENDED)
+    if not acl:
+        if ctypes.get_errno() == errno.ENOENT:
+            return None
+        raise unreadable
+    try:
+        tags = []
+        entry = ctypes.c_void_p()
+        which = _ACL_FIRST_ENTRY
+        while _libc.acl_get_entry(acl, which, ctypes.byref(entry)) == 0:  # -1 past the last entry
+            tag = ctypes.c_int()
+            if _libc.acl_get_tag_type(entry, ctypes.byref(tag)) != 0 or len(tags) >= _ACL_MAX_ENTRIES:
+                raise unreadable
+            tags.append(tag.value)
+            which = _ACL_NEXT_ENTRY
+        return tuple(tags)
+    finally:
+        _libc.acl_free(acl)
+
+
+def _writable_by(entry, info, uid, groups):
+    """Could this user change the entry? An owner can always chmod, so ownership alone counts.
+
+    So does any ACL entry but a deny entry: an allow entry may name this user
+    or one of its groups. A deny entry only removes access.
+    """
     mode = stat.S_IMODE(info.st_mode)
-    return info.st_uid == uid or bool(mode & 0o020 and info.st_gid in groups) or bool(mode & 0o002)
+    if info.st_uid == uid or (mode & 0o020 and info.st_gid in groups) or mode & 0o002:
+        return True
+    tags = acl_tags(entry)
+    return tags is not None and any(tag != ACL_EXTENDED_DENY for tag in tags)
 
 
 def check_invocation(isolated, no_site, no_bytecode, executable, select_link=SELECT_LINK):
@@ -187,13 +245,76 @@ def check_chain(paths, uid, groups, consequence, *, anchor='/'):
     anchor = Path(anchor)
     for raw in paths:
         for entry, info in path_chain(raw):
-            if (entry == anchor or anchor in entry.parents) and _writable_by(info, uid, groups):
+            if (entry == anchor or anchor in entry.parents) and _writable_by(entry, info, uid, groups):
                 raise InstallRefused('the bot user can write ' + str(entry) + ', ' + consequence)
 
 
+def tree_entries(folder, seen):
+    """Yield (entry, lstat) for every entry below `folder`, never entering a symlink; any error refuses.
+
+    `seen` holds the (device, inode) of folders already walked, so a folder
+    reached twice (lib-dynload sits inside the standard library) is walked once.
+    """
+    pending = [Path(folder)]
+    count = 0
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as listing:
+                names = sorted(item.name for item in listing)
+        except OSError as exc:
+            raise InstallRefused('cannot list ' + str(current)) from exc
+        for name in names:
+            entry = current / name
+            try:
+                info = os.lstat(entry)
+            except OSError as exc:
+                raise InstallRefused('cannot inspect ' + str(entry)) from exc
+            count += 1
+            if count > MAX_TREE_ENTRIES:
+                raise InstallRefused('more than ' + str(MAX_TREE_ENTRIES) + ' entries below ' + str(folder))
+            yield entry, info
+            if stat.S_ISDIR(info.st_mode) and (info.st_dev, info.st_ino) not in seen:
+                seen.add((info.st_dev, info.st_ino))
+                pending.append(entry)
+
+
+def check_tree(folder, uid, groups, consequence, seen, *, anchor='/'):
+    """Refuse when the bot user could change any entry below `folder`, or reach code outside it through a link.
+
+    A symlink is checked like any other entry, then along its target chain. A
+    link to a folder refuses: imports could reach files below it that this walk
+    does not enter.
+    """
+    for entry, info in tree_entries(folder, seen):
+        if _writable_by(entry, info, uid, groups):
+            raise InstallRefused('the bot user can write ' + str(entry) + ', ' + consequence)
+        if stat.S_ISLNK(info.st_mode):
+            check_chain([entry], uid, groups, consequence, anchor=anchor)
+            if os.path.isdir(entry):
+                raise InstallRefused(str(entry) + ' links to a folder, ' + consequence)
+
+
 def check_interpreter(paths, uid, groups, *, anchor='/'):
-    check_chain(paths, uid, groups, 'which the root interpreter trusts; select a root-owned developer folder',
-                anchor=anchor)
+    """The chain to each path, then every entry below each path that is a folder: an import-path folder.
+
+    Root imports the modules inside those folders, so their trust matters as
+    much as the folders'. A missing path is skipped: its chain check covered
+    the folder that could create it.
+    """
+    consequence = 'which the root interpreter trusts; select a root-owned developer folder'
+    check_chain(paths, uid, groups, consequence, anchor=anchor)
+    seen = set()
+    for raw in paths:
+        try:
+            info = os.stat(raw)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise InstallRefused('cannot inspect ' + str(raw)) from exc
+        if stat.S_ISDIR(info.st_mode) and (info.st_dev, info.st_ino) not in seen:
+            seen.add((info.st_dev, info.st_ino))
+            check_tree(raw, uid, groups, consequence, seen, anchor=anchor)
 
 
 def clone_paths():

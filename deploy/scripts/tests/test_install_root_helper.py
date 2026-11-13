@@ -3,12 +3,15 @@
 Production installs under "/" with owner root:wheel; these tests install under a
 temporary anchor with the test's own uid and gid, which the test can chown to.
 """
+import ctypes
+import errno
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import pwd
+import subprocess
 
 import pytest
 
@@ -305,6 +308,122 @@ def test_a_clone_the_bot_user_can_write_is_refused(tmp_path):
     (anchor / 'clone').chmod(0o757)
     with pytest.raises(m.InstallRefused, match='clone'):
         m.check_clone(files, STRANGER, frozenset(), anchor=anchor)
+
+
+def _acl(path, entry):
+    """Add one ACL entry with the native tool; the test user owns `path`, so this needs no privilege."""
+    subprocess.run(['/bin/chmod', '+a', entry, str(path)], check=True)
+
+
+def test_a_clone_writable_through_an_acl_is_refused(tmp_path):
+    # Codex (Opus M-3 residual): owner and mode bits alone accepted a clone the bot user could
+    # write through an ACL allow entry. The xattr list does not show ACLs, so libc reads them.
+    anchor, files = _clone(tmp_path)
+    m.check_clone(files, STRANGER, frozenset(), anchor=anchor)
+    _acl(files[2], 'user:nobody allow write')
+    with pytest.raises(m.InstallRefused, match='protected_plist.py'):
+        m.check_clone(files, STRANGER, frozenset(), anchor=anchor)
+
+
+def test_a_deny_only_acl_grants_nothing_and_is_accepted(tmp_path):
+    # Every macOS home carries `group:everyone deny delete`, so a clone in an administrator's home
+    # passes such a folder. A deny entry only removes access; the mode bits still decide the rest.
+    # (`user:nobody`, not `group:everyone`: the test user must still be able to delete the folder.)
+    anchor, files = _clone(tmp_path)
+    _acl(anchor / 'clone', 'user:nobody deny delete')
+    m.check_clone(files, STRANGER, frozenset(), anchor=anchor)
+    _acl(anchor / 'clone', 'user:nobody allow add_file')
+    with pytest.raises(m.InstallRefused, match='clone'):
+        m.check_clone(files, STRANGER, frozenset(), anchor=anchor)
+
+
+def test_an_acl_that_cannot_be_read_is_refused(tmp_path, monkeypatch):
+    anchor, files = _clone(tmp_path)
+
+    def unreadable(path, kind):
+        ctypes.set_errno(errno.EACCES)
+        return None
+
+    monkeypatch.setattr(m._libc, 'acl_get_link_np', unreadable)
+    with pytest.raises(m.InstallRefused, match='ACL'):
+        m.check_clone(files, STRANGER, frozenset(), anchor=anchor)
+
+
+def _import_tree(tmp_path):
+    """An import-path folder the bot user (STRANGER) cannot write: the test user owns it, 0755 and 0644."""
+    anchor = tmp_path.resolve() / 'tree'
+    stdlib = anchor / 'lib' / 'python3.9'
+    cache = stdlib / 'encodings' / '__pycache__'
+    cache.mkdir(parents=True)
+    for module in (stdlib / 'plistlib.py', stdlib / 'encodings' / '__init__.py', cache / '__init__.cpython-39.pyc'):
+        module.write_bytes(b'')
+        module.chmod(0o644)
+    _folders(anchor, anchor / 'lib', stdlib, stdlib / 'encodings', cache)
+    return anchor, stdlib
+
+
+# Codex Critical: root imports the modules INSIDE each import-path folder, so one the bot user can
+# write runs as root on the next helper run, however trusted its folder. Tests cannot chown to the
+# bot, so each case is a distinct way the bot gains write access to one entry below the folder.
+@pytest.mark.parametrize('entry, opening', [
+    pytest.param('plistlib.py', 'other-write', id='other-writable-module'),
+    pytest.param('plistlib.py', 'group-write', id='group-writable-module'),
+    pytest.param('plistlib.py', 'acl-allow', id='acl-writable-module'),
+    pytest.param('encodings', 'other-write', id='writable-package-folder'),
+    pytest.param('encodings/__pycache__/__init__.cpython-39.pyc', 'other-write', id='writable-bytecode'),
+])
+def test_a_bot_writable_entry_inside_a_trusted_import_folder_is_refused(tmp_path, entry, opening):
+    anchor, stdlib = _import_tree(tmp_path)
+    target = stdlib / entry
+    groups = frozenset({os.lstat(target).st_gid}) if opening == 'group-write' else frozenset()
+    # Positive control: the same tree, the same bot groups, nothing opened.
+    m.check_interpreter([str(stdlib)], STRANGER, groups, anchor=anchor)
+    if opening == 'acl-allow':
+        _acl(target, 'user:nobody allow write')
+    else:
+        target.chmod(os.lstat(target).st_mode & 0o777 | (0o020 if opening == 'group-write' else 0o002))
+    with pytest.raises(m.InstallRefused, match=str(target)):
+        m.check_interpreter([str(stdlib)], STRANGER, groups, anchor=anchor)
+
+
+def test_a_symlink_inside_an_import_folder_is_checked_along_its_target_chain(tmp_path):
+    anchor, stdlib = _import_tree(tmp_path)
+    outside = anchor / 'outside'
+    outside.mkdir()
+    (outside / 'helper.py').write_bytes(b'')
+    _folders(outside)
+    (outside / 'helper.py').chmod(0o644)
+    (stdlib / 'helper.py').symlink_to(outside / 'helper.py')
+    m.check_interpreter([str(stdlib)], STRANGER, frozenset(), anchor=anchor)
+    outside.chmod(0o757)
+    with pytest.raises(m.InstallRefused, match=str(outside)):
+        m.check_interpreter([str(stdlib)], STRANGER, frozenset(), anchor=anchor)
+
+
+def test_a_symlink_to_a_folder_inside_an_import_folder_is_refused(tmp_path):
+    # Imports could reach modules below a linked folder, which the walk does not enter.
+    anchor, stdlib = _import_tree(tmp_path)
+    (stdlib / 'json').symlink_to(stdlib / 'encodings', target_is_directory=True)
+    with pytest.raises(m.InstallRefused, match='json'):
+        m.check_interpreter([str(stdlib)], STRANGER, frozenset(), anchor=anchor)
+
+
+def test_an_import_folder_that_cannot_be_listed_is_refused(tmp_path):
+    anchor, stdlib = _import_tree(tmp_path)
+    (stdlib / 'encodings').chmod(0)
+    try:
+        with pytest.raises(m.InstallRefused, match='encodings'):
+            m.check_interpreter([str(stdlib)], STRANGER, frozenset(), anchor=anchor)
+    finally:
+        (stdlib / 'encodings').chmod(0o755)
+
+
+def test_an_import_folder_beyond_the_walk_bound_is_refused(tmp_path, monkeypatch):
+    anchor, stdlib = _import_tree(tmp_path)
+    m.check_interpreter([str(stdlib)], STRANGER, frozenset(), anchor=anchor)
+    monkeypatch.setattr(m, 'MAX_TREE_ENTRIES', 3)  # the tree holds 5 entries
+    with pytest.raises(m.InstallRefused, match='entries'):
+        m.check_interpreter([str(stdlib)], STRANGER, frozenset(), anchor=anchor)
 
 
 def test_main_refuses_a_writable_clone_before_reading_it(monkeypatch):
