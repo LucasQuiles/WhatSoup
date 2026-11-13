@@ -208,6 +208,8 @@ function makePinecone() {
     searchForChat: vi.fn().mockResolvedValue([]),
     searchForSender: vi.fn().mockResolvedValue([]),
     searchSelfFacts: vi.fn().mockResolvedValue([]),
+    // The reader account (PineconeMemory.sourceAccount), read with instanceScopedIds on.
+    sourceAccount: vi.fn().mockReturnValue('acct-test'),
   } as unknown as PineconeMemory;
 }
 
@@ -916,6 +918,107 @@ describe('Media processing', () => {
       expect.any(String),
       'group',
     );
+  });
+
+  it('grants owner_only recall only to a verified admin in a direct chat, never in a group', async () => {
+    const mutable = configModule.config as unknown as { adminPhones: Set<string> };
+    const previousAdmins = mutable.adminPhones;
+    // The second entry is the grant resolver's identity for 15550001111@imessage,
+    // so the iMessage case below is a verified admin, not an unknown sender.
+    mutable.adminPhones = new Set(['15550001111', '15550001111_at_imessage']);
+    try {
+      const { handler, pinecone } = makeHandler();
+      await handleAndDrain(handler, makeIncomingMessage({
+        chatJid: '15550001111@s.whatsapp.net',
+        senderJid: '15550001111@s.whatsapp.net',
+      }));
+      expect(mockLoadContext).toHaveBeenLastCalledWith(
+        pinecone,
+        '15550001111@s.whatsapp.net',
+        '15550001111@s.whatsapp.net',
+        expect.any(String),
+        expect.any(String),
+        'open',
+        // R3: the owner_only records it may receive are this instance's own
+        // (memory.pinecone.ownerOnlySources lists none here).
+        { ownerOnly: true, ownerOnlySources: new Set([configModule.config.botName]) },
+      );
+
+      // Same admin in a group: recall stays open, but no owner_only access
+      // (the access argument is omitted, which loadContextDetailed reads as false).
+      const group = makeHandler();
+      await handleAndDrain(group.handler, makeIncomingMessage({
+        chatJid: '111111100000001@g.us',
+        isGroup: true,
+        senderJid: '15550001111@s.whatsapp.net',
+      }));
+      expect(mockLoadContext).toHaveBeenLastCalledWith(
+        group.pinecone,
+        '111111100000001@g.us',
+        '15550001111@s.whatsapp.net',
+        expect.any(String),
+        expect.any(String),
+        'open',
+      );
+
+      // An iMessage group id carries no group marker; the transport's isGroup
+      // flag alone classifies it, and a group never gets owner_only access.
+      // The verified admin keeps open recall; only the access argument is absent.
+      const imessageGroup = makeHandler();
+      await handleAndDrain(imessageGroup.handler, makeIncomingMessage({
+        chatJid: 'chat000111222333@imessage',
+        isGroup: true,
+        senderJid: '15550001111@imessage',
+      }));
+      expect(mockLoadContext).toHaveBeenLastCalledWith(
+        imessageGroup.pinecone,
+        'chat000111222333@imessage',
+        '15550001111@imessage',
+        expect.any(String),
+        expect.any(String),
+        'open',
+      );
+    } finally {
+      mutable.adminPhones = previousAdmins;
+    }
+  });
+
+  it('passes the instance and account boundary and restrictive recall only with instance-scoped ids on', async () => {
+    const mutable = configModule.config as unknown as { memory?: { pinecone?: Record<string, unknown> } };
+    const previousMemory = mutable.memory;
+    try {
+      // Off (this config's default): a contact's direct chat passes no access argument.
+      const off = makeHandler();
+      await handleAndDrain(off.handler, makeIncomingMessage());
+      expect(mockLoadContext).toHaveBeenLastCalledWith(
+        off.pinecone,
+        '15551230008@s.whatsapp.net',
+        '15551230008@s.whatsapp.net',
+        expect.any(String),
+        expect.any(String),
+        'this_chat',
+      );
+      expect(off.pinecone.sourceAccount).not.toHaveBeenCalled();
+
+      mutable.memory = {
+        ...previousMemory,
+        pinecone: { ...previousMemory?.pinecone, instanceScopedIds: true },
+      };
+      const on = makeHandler();
+      await handleAndDrain(on.handler, makeIncomingMessage());
+      // The reader account comes from the provider that stamps this instance's writes.
+      expect(mockLoadContext).toHaveBeenLastCalledWith(
+        on.pinecone,
+        '15551230008@s.whatsapp.net',
+        '15551230008@s.whatsapp.net',
+        expect.any(String),
+        expect.any(String),
+        'this_chat',
+        { sourceInstance: configModule.config.botName, sourceAccount: 'acct-test', restrictive: true },
+      );
+    } finally {
+      mutable.memory = previousMemory;
+    }
   });
 
   it('DB content updated when processMedia returns different content than original', async () => {

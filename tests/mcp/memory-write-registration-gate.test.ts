@@ -3,22 +3,30 @@
 //
 // registerAllTools registers memory_write only when BOTH hold:
 //   1. config.pineconeIndex is set, and
-//   2. process.env[config.memory?.pinecone?.apiKeyEnv ?? 'PINECONE_API_KEY'] is set.
+//   2. PineconeMemory's own key resolution (resolvePineconeApiKey: the keyring
+//      first, then the env var named by memory.pinecone.apiKeyEnv, default
+//      PINECONE_API_KEY) yields a key.
 //
 // This gate is why the per-tier advertised surface is environment-dependent:
 // with the gate open, a chat-scoped session sees one additional tool
 // (memory_write, scope 'chat'). The test controls the gate inputs explicitly
-// so it is deterministic on CI (no key) and on memory-configured dev hosts
-// (key exported in the shell) alike.
+// (env vars and a mocked keyring) so it is deterministic on CI (no key) and on
+// memory-configured dev hosts (key exported in the shell) alike.
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+
+vi.mock('../../src/lib/keyring.ts', () => ({
+  lookupCredential: vi.fn(() => null),
+}));
+
+import { lookupCredential } from '../../src/lib/keyring.ts';
 import { Database } from '../../src/core/database.ts';
 import { ToolRegistry } from '../../src/mcp/registry.ts';
 import { PresenceCache } from '../../src/transport/presence-cache.ts';
 import { registerAllTools } from '../../src/mcp/register-all.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
 import type { ToolDeclaration } from '../../src/mcp/types.ts';
-import { config } from '../../src/config.ts';
+import { config, resolveMemoryConfig } from '../../src/config.ts';
 
 function makeConnection(): ConnectionManager {
   return {
@@ -72,6 +80,8 @@ function registerAndInspect(): { registered: boolean; declaration?: ToolDeclarat
 }
 
 afterEach(() => {
+  vi.mocked(lookupCredential).mockReset();
+  vi.mocked(lookupCredential).mockImplementation(() => null);
   if (originalKey === undefined) delete process.env[DEFAULT_KEY_ENV];
   else process.env[DEFAULT_KEY_ENV] = originalKey;
   if (originalCustom === undefined) delete process.env.WHATSOUP_PROBE_CUSTOM_KEY;
@@ -115,6 +125,52 @@ describe('memory_write registration gate (#1976)', () => {
     // must honor memory.pinecone.apiKeyEnv, not fall back to the default.
     (config as { memory?: unknown }).memory = { pinecone: { apiKeyEnv: 'WHATSOUP_PROBE_CUSTOM_KEY' } };
     setGate('probe-index', DEFAULT_KEY_ENV, 'probe-dummy-not-a-secret');
+    const { registered } = registerAndInspect();
+    expect(registered).toBe(false);
+  });
+
+  it('registers memory_write when the key is held only in the keyring (no env var)', () => {
+    // The production route unsets an inherited env key and resolves from the
+    // keyring; PineconeMemory reads that key, so the gate must too.
+    vi.mocked(lookupCredential).mockImplementation((service: string) =>
+      service === 'pinecone' ? 'probe-keyring-dummy-not-a-secret' : null);
+    setGate('probe-index', DEFAULT_KEY_ENV, undefined);
+    const { registered, declaration } = registerAndInspect();
+    expect(registered).toBe(true);
+    expect(declaration?.scope).toBe('chat');
+    expect(vi.mocked(lookupCredential)).toHaveBeenCalledWith('pinecone', { skipEnv: true });
+  });
+
+  // From raw instance JSON through the real memory-config resolution to the
+  // gate: a key held under a configured, non-default keyring service must
+  // survive config resolution and open the gate (and only that service).
+  it('registers memory_write from a configured apiKeyService resolved by the config loader', () => {
+    vi.mocked(lookupCredential).mockImplementation((service: string) =>
+      service === 'pinecone-line-b' ? 'probe-keyring-dummy-not-a-secret' : null);
+    (config as { memory?: unknown }).memory = resolveMemoryConfig({
+      memory: { pinecone: { index: 'probe-index', apiKeyService: 'pinecone-line-b' } },
+    });
+    setGate('probe-index', DEFAULT_KEY_ENV, undefined);
+    const { registered } = registerAndInspect();
+    expect(registered).toBe(true);
+    expect(vi.mocked(lookupCredential)).toHaveBeenCalledWith('pinecone-line-b', { skipEnv: true });
+  });
+
+  it('a configured apiKeyService never borrows the default pinecone keyring entry', () => {
+    vi.mocked(lookupCredential).mockImplementation((service: string) =>
+      service === 'pinecone' ? 'probe-keyring-dummy-not-a-secret' : null);
+    (config as { memory?: unknown }).memory = resolveMemoryConfig({
+      memory: { pinecone: { index: 'probe-index', apiKeyService: 'pinecone-line-b' } },
+    });
+    setGate('probe-index', DEFAULT_KEY_ENV, undefined);
+    const { registered } = registerAndInspect();
+    expect(registered).toBe(false);
+  });
+
+  it('a keyring-held key still needs pineconeIndex', () => {
+    vi.mocked(lookupCredential).mockImplementation((service: string) =>
+      service === 'pinecone' ? 'probe-keyring-dummy-not-a-secret' : null);
+    setGate(undefined, DEFAULT_KEY_ENV, undefined);
     const { registered } = registerAndInspect();
     expect(registered).toBe(false);
   });

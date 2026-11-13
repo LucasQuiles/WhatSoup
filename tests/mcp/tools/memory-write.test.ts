@@ -15,6 +15,7 @@ vi.mock('../../../src/logger.ts', async () => {
 import { registerMemoryWriteTools, type MemoryWriter } from '../../../src/mcp/tools/memory-write.ts';
 import type { ToolDeclaration, SessionContext } from '../../../src/mcp/types.ts';
 import { fakeClock } from '../../../src/lib/clock.ts';
+import { shortHash } from '../../../src/lib/short-hash.ts';
 
 function setup(opts: { upsert?: MemoryWriter['upsert']; clock?: ReturnType<typeof fakeClock> } = {}) {
   const tools: ToolDeclaration[] = [];
@@ -69,7 +70,53 @@ describe('memory_write tool', () => {
     expect(upsert.mock.calls[0]?.[1]).toEqual({
       operationId: (res as { operation_id: string }).operation_id,
       operation: 'memory_write',
+      provenance: 'memory_write',
     });
+  });
+
+  it('tool arguments cannot set source, visibility or provenance fields', async () => {
+    const { tool, upsert } = setup();
+    await tool.handler(
+      {
+        chatJid: '12345@s.whatsapp.net',
+        text: 'Phil prefers email',
+        memory_type: 'preference',
+        visibility: 'chat_scoped',
+        source_instance: 'spoofed-instance',
+        sourceInstance: 'spoofed-instance',
+        source_account: 'acct:spoofed',
+        sourceAccount: 'acct:spoofed',
+        provenance: 'consolidation',
+      } as Record<string, unknown>,
+      chatSession(),
+    );
+    expect(upsert).toHaveBeenCalledTimes(1);
+    const [records, context] = upsert.mock.calls[0] as [MemoryRecord[], Record<string, unknown>];
+    const r = records[0] as unknown as Record<string, unknown>;
+    for (const key of ['visibility', 'source_instance', 'sourceInstance', 'source_account', 'sourceAccount', 'provenance']) {
+      expect(r).not.toHaveProperty(key);
+    }
+    // The pipeline label comes from the tool itself, never from an argument.
+    expect(context['provenance']).toBe('memory_write');
+  });
+
+  it('instance-scoped ids: identical content from two instances does not collide; off keeps the legacy id', async () => {
+    const args = { chatJid: '12345@s.whatsapp.net', text: 'same fact', memory_type: 'preference' as const };
+    const idFor = async (idScope?: () => string | null): Promise<string> => {
+      const tools: ToolDeclaration[] = [];
+      const upsert = vi.fn(async () => {});
+      registerMemoryWriteTools((t) => tools.push(t), () => ({ upsert }), undefined, idScope);
+      await tools.find((t) => t.name === 'memory_write')!.handler(args, chatSession());
+      return (upsert.mock.calls[0] as unknown as [MemoryRecord[]])[0][0].id;
+    };
+    const legacy = `preference_${shortHash(JSON.stringify(['12345@s.whatsapp.net', 'preference', 'same fact']), 24)}`;
+    expect(await idFor(() => null)).toBe(legacy);
+    expect(await idFor()).toBe(legacy); // default reads config; instance-scoped ids default off
+    const lineA = await idFor(() => 'line-a');
+    const lineB = await idFor(() => 'line-b');
+    expect(lineA).not.toBe(lineB);
+    expect(lineA).not.toBe(legacy);
+    expect(lineA).toMatch(/^preference_[0-9a-f]{24}$/);
   });
 
   it('stamps record timestamps from the injected clock, not the wall clock (#2200)', async () => {
@@ -237,7 +284,7 @@ describe('memory_write tool', () => {
       expect(upsertSpy).toHaveBeenCalledTimes(1);
       const [records, operation] = upsertSpy.mock.calls[0] as [
         MemoryRecord[],
-        { operationId: string; operation: 'memory_write' },
+        { operationId: string; operation: 'memory_write'; provenance: 'memory_write' },
       ];
       expect(records[0]).toMatchObject({
         chatJid: '12345@s.whatsapp.net',
@@ -248,6 +295,7 @@ describe('memory_write tool', () => {
       expect(operation).toEqual({
         operationId: (res as { operation_id: string }).operation_id,
         operation: 'memory_write',
+        provenance: 'memory_write',
       });
       expect(res).toMatchObject({
         operation_id: expect.stringMatching(/^[a-f0-9]{32}$/),

@@ -4,11 +4,18 @@ import { WhatSoupError as AppError } from '../../../../src/errors.ts';
 // Mock index methods — set up before mock factory so factory can reference them
 const mockSearchRecords = vi.fn();
 const mockUpsertRecords = vi.fn();
+const mockOwnerSearchRecords = vi.fn();
+// Default-namespace delete of an id moved into the owner_only namespace.
+const mockDeleteMany = vi.fn();
+// Reserved-namespace fetch of default ids a merged read must check for a reserved copy.
+const mockOwnerFetch = vi.fn();
 const mockRerank = vi.fn();
 const { mockPineconeLogger } = vi.hoisted(() => ({ mockPineconeLogger: {} as Record<string, ReturnType<typeof vi.fn>> }));
 const mockIndex = {
   searchRecords: mockSearchRecords,
   upsertRecords: mockUpsertRecords,
+  deleteMany: mockDeleteMany,
+  namespace: () => ({ searchRecords: mockOwnerSearchRecords, upsertRecords: mockUpsertRecords, fetch: mockOwnerFetch }),
 };
 const FIXED_NOW_ISO = '2026-01-15T00:00:00.000Z';
 const FIXED_NOW_MS = new Date(FIXED_NOW_ISO).getTime();
@@ -70,11 +77,45 @@ let dateNowSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(FIXED_NOW_MS);
+  mockOwnerSearchRecords.mockReset().mockResolvedValue({ result: { hits: [] } });
+  mockOwnerFetch.mockReset().mockResolvedValue({ records: {} });
 });
 
 afterEach(() => {
   dateNowSpy.mockRestore();
 });
+
+/**
+ * PineconeMemory refuses an upsert whose source instance or account is
+ * unknown. Blocks that write therefore run as the operator instance `q`
+ * (checked against the operator project, so their Pinecone mock lists
+ * indexes) with this configured opaque account scope.
+ */
+const WRITER_ACCOUNT_SCOPE = 'scope:test-line';
+
+/** Registers the instance name and account scope a writing block needs. */
+function useWritableInstance(): void {
+  const mutableConfig = configModule.config as unknown as Record<string, unknown>;
+  beforeEach(() => {
+    mutableConfig.botName = 'q';
+    mutableConfig.accountScopeId = WRITER_ACCOUNT_SCOPE;
+  });
+  afterEach(() => {
+    delete mutableConfig.botName;
+    delete mutableConfig.accountScopeId;
+  });
+}
+
+/**
+ * Server-derived fields every upsert in those blocks carries. The instance is
+ * not passive, so the stamp is chat_scoped.
+ */
+const DEFAULT_STAMP = { source_instance: 'q', source_account: WRITER_ACCOUNT_SCOPE, visibility: 'chat_scoped' } as const;
+
+/** Pre-query clause the context legs add unless the caller may read owner_only records. */
+const OWNER_ONLY_EXCLUSION = {
+  $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }],
+} as const;
 
 function makeMemoryRecord(overrides: Partial<MemoryRecord> = {}): MemoryRecord {
   return {
@@ -122,6 +163,8 @@ describe('PineconeMemory', () => {
     MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
       this.index = vi.fn().mockReturnValue(mockIndex);
       this.inference = { rerank: mockRerank };
+      // Read only by the operator instance's project check (the upsert block).
+      this.listIndexes = vi.fn().mockResolvedValue(OPERATOR_PROJECT_INDEXES);
     } as unknown as () => InstanceType<typeof Pinecone>);
     memory = new PineconeMemory();
   });
@@ -447,7 +490,7 @@ describe('PineconeMemory', () => {
             query: {
               topK: 10,
               inputs: { text: 'where is the runbook?' },
-              filter: { chat_jid: { $eq: 'chat-42@g.us' } },
+              filter: { chat_jid: { $eq: 'chat-42@g.us' }, ...OWNER_ONLY_EXCLUSION },
             },
             fields: ['*'],
           }],
@@ -455,7 +498,7 @@ describe('PineconeMemory', () => {
             query: {
               topK: 5,
               inputs: { text: 'what does Alice prefer?' },
-              filter: { sender_jid: { $eq: 'sender-17@s.whatsapp.net' } },
+              filter: { sender_jid: { $eq: 'sender-17@s.whatsapp.net' }, ...OWNER_ONLY_EXCLUSION },
             },
             fields: ['*'],
           }],
@@ -463,7 +506,7 @@ describe('PineconeMemory', () => {
             query: {
               topK: 7,
               inputs: { text: 'what should Q remember about itself?' },
-              filter: { memory_type: { $eq: 'self_fact' } },
+              filter: { memory_type: { $eq: 'self_fact' }, ...OWNER_ONLY_EXCLUSION },
             },
             fields: ['*'],
           }],
@@ -471,6 +514,80 @@ describe('PineconeMemory', () => {
       } finally {
         mutableConfig.pineconeSelfFactTopK = previousSelfFactTopK;
       }
+    });
+
+    it('context legs include owner_only records only when the caller is allowed to read them', async () => {
+      mockSearchRecords.mockResolvedValue({ result: { hits: [] } });
+      try {
+        // Same three legs twice: default (excluded) and with access (included).
+        // The default half fails on code that never excludes owner_only.
+        await memory.searchForChatDetailed('chat-42@g.us', 'q1');
+        await memory.searchForSenderDetailed('sender-17@s.whatsapp.net', 'q2');
+        await memory.searchSelfFactsDetailed('q3');
+        await memory.searchForChatDetailed('chat-42@g.us', 'q1', undefined, { includeOwnerOnly: true });
+        await memory.searchForSenderDetailed('sender-17@s.whatsapp.net', 'q2', undefined, { includeOwnerOnly: true });
+        await memory.searchSelfFactsDetailed('q3', undefined, { includeOwnerOnly: true });
+        expect(mockSearchRecords.mock.calls.map((call) => call[0].query.filter)).toEqual([
+          { chat_jid: { $eq: 'chat-42@g.us' }, ...OWNER_ONLY_EXCLUSION },
+          { sender_jid: { $eq: 'sender-17@s.whatsapp.net' }, ...OWNER_ONLY_EXCLUSION },
+          { memory_type: { $eq: 'self_fact' }, ...OWNER_ONLY_EXCLUSION },
+          { chat_jid: { $eq: 'chat-42@g.us' } },
+          { sender_jid: { $eq: 'sender-17@s.whatsapp.net' } },
+          { memory_type: { $eq: 'self_fact' } },
+        ]);
+      } finally {
+        mockSearchRecords.mockReset();
+      }
+    });
+
+    it('the owner_only leg sends exactly one query, for owner_only records only', async () => {
+      mockSearchRecords.mockResolvedValue({ result: { hits: [] } });
+      try {
+        await memory.searchOwnerOnlyDetailed('q4', undefined, { includeOwnerOnly: true });
+        // Exact request: no chat, sender or source clause rides along, and the
+        // filter is never the exclusion (that would return no owner_only record).
+        expect(mockOwnerSearchRecords.mock.calls).toEqual([
+          [{
+            query: {
+              topK: 10,
+              inputs: { text: 'q4' },
+              filter: { visibility: { $eq: 'owner_only' } },
+            },
+            fields: ['*'],
+          }],
+        ]);
+        expect(mockSearchRecords).not.toHaveBeenCalled();
+      } finally {
+        mockSearchRecords.mockReset();
+      }
+    });
+
+    it('context legs ask for chat_scoped records only under restrictive recall, unless the caller has access', async () => {
+      mockSearchRecords.mockResolvedValue({ result: { hits: [] } });
+      try {
+        await memory.searchForChatDetailed('chat-42@g.us', 'q1', undefined, { chatScopedOnly: true });
+        await memory.searchForSenderDetailed('sender-17@s.whatsapp.net', 'q2', undefined, { chatScopedOnly: true });
+        await memory.searchSelfFactsDetailed('q3', undefined, { chatScopedOnly: true });
+        // Access wins: an admitted caller is never narrowed to chat_scoped.
+        await memory.searchForChatDetailed('chat-42@g.us', 'q1', undefined, { includeOwnerOnly: true, chatScopedOnly: true });
+        expect(mockSearchRecords.mock.calls.map((call) => call[0].query.filter)).toEqual([
+          { chat_jid: { $eq: 'chat-42@g.us' }, visibility: { $eq: 'chat_scoped' } },
+          { sender_jid: { $eq: 'sender-17@s.whatsapp.net' }, visibility: { $eq: 'chat_scoped' } },
+          { memory_type: { $eq: 'self_fact' }, visibility: { $eq: 'chat_scoped' } },
+          { chat_jid: { $eq: 'chat-42@g.us' } },
+        ]);
+      } finally {
+        mockSearchRecords.mockReset();
+      }
+    });
+
+    it('sourceAccount() is the account this provider stamps, read from its own getter when called', () => {
+      let accountJid: string | null = null;
+      const reader = new PineconeMemory({ accountJid: () => accountJid });
+      expect(reader.sourceAccount()).toBe('');
+      accountJid = '15550000001@s.whatsapp.net';
+      expect(reader.sourceAccount()).toMatch(/^acct:\S+$/);
+      expect(reader.sourceAccount()).not.toContain('15550000001');
     });
 
     it('preserves a successful empty chat lookup through the detailed scoped helper', async () => {
@@ -551,7 +668,7 @@ describe('PineconeMemory', () => {
           query: {
             topK: 10,
             inputs: { text: 'query' },
-            filter: { chat_jid: { $eq: 'chat-42@g.us' } },
+            filter: { chat_jid: { $eq: 'chat-42@g.us' }, ...OWNER_ONLY_EXCLUSION },
           },
           fields: ['*'],
         },
@@ -664,6 +781,8 @@ describe('PineconeMemory', () => {
   // ── upsert ────────────────────────────────────────────────────────────────
 
   describe('upsert', () => {
+    useWritableInstance();
+
     it('calls upsertRecords with snake_case fields', async () => {
       mockUpsertRecords.mockResolvedValueOnce(undefined);
       await memory.upsert([makeMemoryRecord()]);
@@ -682,6 +801,7 @@ describe('PineconeMemory', () => {
               updated_at: '2026-01-01T00:00:00Z',
               superseded: '',
               source_message_pks: '42',
+              ...DEFAULT_STAMP,
             },
           ],
         },
@@ -718,6 +838,7 @@ describe('PineconeMemory', () => {
               updated_at: '2026-01-01T00:00:00Z',
               superseded: '',
               source_message_pks: '42',
+              ...DEFAULT_STAMP,
             },
           ],
         },
@@ -767,6 +888,7 @@ describe('PineconeMemory', () => {
               created_at: '2026-01-01T00:00:00Z',
               updated_at: '2026-01-01T00:00:00Z',
               source_message_pks: '42',
+              ...DEFAULT_STAMP,
             },
           ],
         },
@@ -793,6 +915,7 @@ describe('PineconeMemory', () => {
             updated_at: '2026-01-01T00:00:00Z',
             superseded: '',
             source_message_pks: '42',
+            ...DEFAULT_STAMP,
           },
         ],
       };
@@ -839,6 +962,7 @@ describe('PineconeMemory', () => {
             updated_at: '2026-01-01T00:00:00Z',
             superseded: '',
             source_message_pks: '42',
+            ...DEFAULT_STAMP,
           },
         ],
       };
@@ -883,6 +1007,7 @@ describe('PineconeMemory', () => {
               updated_at: '2026-01-01T00:00:00Z',
               superseded: '',
               source_message_pks: '42',
+              ...DEFAULT_STAMP,
             },
             {
               _id: 'r2',
@@ -896,6 +1021,7 @@ describe('PineconeMemory', () => {
               updated_at: '2026-01-01T00:00:00Z',
               superseded: '',
               source_message_pks: '42',
+              ...DEFAULT_STAMP,
             },
           ],
         },
@@ -1121,7 +1247,7 @@ describe('entity mode', () => {
         query: {
           topK: 20,
           inputs: { text: 'invoice 17088' },
-          filter: { source: { $ne: 'archive_db' } },
+          filter: { source: { $ne: 'archive_db' }, $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] },
         },
         fields: ['*'],
       },
@@ -1138,7 +1264,7 @@ describe('entity mode', () => {
         query: {
           topK: 20,
           inputs: { text: 'find building' },
-          filter: { source: { $ne: 'archive_db' } },
+          filter: { source: { $ne: 'archive_db' }, $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] },
         },
         fields: ['*'],
       },
@@ -1156,11 +1282,48 @@ describe('entity mode', () => {
         query: {
           topK: 15,
           inputs: { text: 'query' },
-          filter: { source: { $ne: 'archive_db' } },
+          filter: { source: { $ne: 'archive_db' }, $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] },
         },
         fields: ['*'],
       },
     ]]);
+  });
+
+  it('searchEntitiesDetailed refuses owner_only records before the query and before rerank unless included', async () => {
+    mutableConfig.pineconeRerank = true;
+    const hits = () => ({ result: { hits: [
+      makeEntityHit('ent-private', 0.9, { visibility: 'owner_only', source_instance: 'line-a' }),
+      makeEntityHit('ent-unlisted', 0.85, { visibility: 'owner_only', source_instance: 'line-c' }),
+      makeEntityHit('ent-unstamped', 0.82, { visibility: 'owner_only' }),
+      makeEntityHit('ent-shared', 0.8, { visibility: 'chat_scoped' }),
+      makeEntityHit('ent-legacy', 0.7),
+    ] } });
+    const keepOrder = (params: { documents: unknown[] }) => Promise.resolve({
+      data: params.documents.map((_doc, index) => ({ index, score: 1 - index / 10 })),
+    });
+    mockRerank.mockImplementation(keepOrder);
+    try {
+      mockSearchRecords.mockResolvedValueOnce(hits());
+      const refused = await memory.searchEntitiesDetailed('query');
+      expect(refused.results.map((r) => r.id)).toEqual(['ent-shared', 'ent-legacy']);
+      expect(mockSearchRecords.mock.calls[0][0].query.filter).toEqual({
+        source: { $ne: 'archive_db' },
+        $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }],
+      });
+      expect(mockRerank.mock.calls[0][0].documents.map((d: { id: string }) => d.id)).toEqual(['ent-shared', 'ent-legacy']);
+
+      mockSearchRecords.mockResolvedValueOnce(hits());
+      // With access, only an owner_only record from a listed source passes.
+      const owner = await memory.searchEntitiesDetailed(
+        'query', undefined, { includeOwnerOnly: true, ownerOnlySources: new Set(['line-a']) },
+      );
+      expect(owner.results.map((r) => r.id)).toEqual(['ent-private', 'ent-shared', 'ent-legacy']);
+      expect(mockSearchRecords.mock.calls[1][0].query.filter).toEqual({ source: { $ne: 'archive_db' } });
+      expect(mockRerank.mock.calls[1][0].documents.map((d: { id: string }) => d.id))
+        .toEqual(['ent-private', 'ent-shared', 'ent-legacy']);
+    } finally {
+      mockRerank.mockReset();
+    }
   });
 
   it('searchEntities skips client-side rerank when config.pineconeRerank is false', async () => {
@@ -1233,7 +1396,7 @@ describe('entity mode', () => {
       query: {
         topK: 20,
         inputs: { text: 'query' },
-        filter: { source: { $ne: 'archive_db' } },
+        filter: { source: { $ne: 'archive_db' }, $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] },
       },
       fields: ['*'],
     };
@@ -1690,6 +1853,7 @@ describe('applyDecay', () => {
 
 describe('upsert retry success', () => {
   let memory: PineconeMemory;
+  useWritableInstance();
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1697,6 +1861,7 @@ describe('upsert retry success', () => {
     MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
       this.index = vi.fn().mockReturnValue(mockIndex);
       this.inference = { rerank: mockRerank };
+      this.listIndexes = vi.fn().mockResolvedValue(OPERATOR_PROJECT_INDEXES);
     } as unknown as () => InstanceType<typeof Pinecone>);
     memory = new PineconeMemory();
   });
@@ -2049,6 +2214,268 @@ describe('alert clearing on recovery', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Server-derived provenance: source instance, account, visibility, pipeline
+// ---------------------------------------------------------------------------
+
+describe('upsert provenance stamping', () => {
+  const mutableConfig = configModule.config as unknown as Record<string, unknown>;
+  const pineconeConfig = (configModule.config as unknown as { memory: { pinecone: Record<string, unknown> } }).memory.pinecone;
+  const ACCOUNT_JID = '15550000123:7@s.whatsapp.net';
+  // The operator project check's only network call; named so a test can show it never ran.
+  const mockOperatorListIndexes = vi.fn();
+
+  function makeMemory(accountJid: string | null = ACCOUNT_JID): PineconeMemory {
+    return new PineconeMemory({ accountJid: () => accountJid });
+  }
+
+  /** Pinecone metadata-filter semantics for the operators these queries use. */
+  function matchesFilter(fields: Record<string, unknown>, filter: Record<string, unknown>): boolean {
+    return Object.entries(filter).every(([key, condition]) => {
+      if (key === '$or') return (condition as Record<string, unknown>[]).some((branch) => matchesFilter(fields, branch));
+      if (key === '$and') return (condition as Record<string, unknown>[]).every((branch) => matchesFilter(fields, branch));
+      const value = fields[key];
+      const ops = condition as { $eq?: unknown; $ne?: unknown; $exists?: boolean };
+      if ('$exists' in ops && (value !== undefined) !== ops.$exists) return false;
+      if ('$eq' in ops && value !== ops.$eq) return false;
+      if ('$ne' in ops && (value === undefined || value === ops.$ne)) return false;
+      return true;
+    });
+  }
+
+  /** A searchRecords fake that returns the best `topK` of `hits` its filter admits. */
+  function serveFiltered(hits: ReturnType<typeof makePineconeHit>[], search = mockSearchRecords): void {
+    search.mockImplementation(async ({ query }: { query: { topK: number; filter?: Record<string, unknown> } }) => ({
+      result: {
+        hits: hits
+          .filter((hit) => matchesFilter(hit.fields, query.filter ?? {}))
+          .sort((a, b) => b._score - a._score)
+          .slice(0, query.topK),
+      },
+    }));
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mutableConfig.botName = 'q'; // q is checked against the operator project
+    mockOperatorListIndexes.mockResolvedValue(OPERATOR_PROJECT_INDEXES);
+    const MockPinecone = vi.mocked(Pinecone);
+    MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
+      this.index = vi.fn().mockReturnValue(mockIndex);
+      this.inference = { rerank: mockRerank };
+      this.listIndexes = mockOperatorListIndexes;
+    } as unknown as () => InstanceType<typeof Pinecone>);
+    mockUpsertRecords.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    delete mutableConfig.botName;
+    delete mutableConfig.instanceType;
+    delete mutableConfig.accountScopeId;
+    delete pineconeConfig.recordVisibility;
+  });
+
+  function written(): Record<string, unknown> {
+    return mockUpsertRecords.mock.calls[0][0].records[0] as Record<string, unknown>;
+  }
+
+  it('stamps source instance, an opaque account id, chat_scoped visibility and the pipeline label', async () => {
+    await makeMemory(ACCOUNT_JID).upsert([makeMemoryRecord()], { provenance: 'memory_write' });
+    const record = written();
+    expect(record).toMatchObject({
+      source_instance: 'q',
+      visibility: 'chat_scoped',
+      provenance: 'memory_write',
+    });
+    expect(record['source_account']).toMatch(/^acct:[0-9a-f]{24}$/);
+    // Device suffix and domain fold away; the raw account never reaches the record.
+    expect(JSON.stringify(record)).not.toContain('15550000123');
+  });
+
+  it('derives the same account id for the same account across device suffixes', async () => {
+    await makeMemory('15550000123:7@s.whatsapp.net').upsert([makeMemoryRecord()]);
+    await makeMemory('15550000123@s.whatsapp.net').upsert([makeMemoryRecord()]);
+    const [first, second] = mockUpsertRecords.mock.calls.map((call) => call[0].records[0].source_account);
+    expect(first).toBe(second);
+  });
+
+  it('prefers the configured opaque accountScopeId over the connected account', async () => {
+    mutableConfig.accountScopeId = 'scope:line-alpha';
+    await makeMemory(ACCOUNT_JID).upsert([makeMemoryRecord()]);
+    expect(written()['source_account']).toBe('scope:line-alpha');
+  });
+
+  it('refuses a write with an unknown source account or instance before any network call, the project check included', async () => {
+    const refusal = {
+      code: 'PINECONE_UNAVAILABLE',
+      message: 'Pinecone upsert refused: the source instance or account is unknown',
+    };
+    // No accountScopeId and no connected account yet. A fresh instance, so the
+    // project check has not run and been cached.
+    await expect(makeMemory(null).upsert([makeMemoryRecord()])).rejects.toMatchObject(refusal);
+    // No instance name.
+    mutableConfig.botName = '';
+    await expect(makeMemory(ACCOUNT_JID).upsert([makeMemoryRecord()])).rejects.toMatchObject(refusal);
+    expect(mockUpsertRecords).not.toHaveBeenCalled();
+    expect(mockOperatorListIndexes).not.toHaveBeenCalled();
+  });
+
+  it('a refused write is not a provider failure, so the upsert breaker stays closed', async () => {
+    const unknownAccount = makeMemory(null);
+    // Three provider failures open the breaker (threshold 3); three refusals must not.
+    for (let i = 0; i < 3; i++) {
+      await expect(unknownAccount.upsert([makeMemoryRecord()])).rejects.toMatchObject({ code: 'PINECONE_UNAVAILABLE' });
+    }
+    await expect(makeMemory(ACCOUNT_JID).upsert([makeMemoryRecord()])).resolves.toBeUndefined();
+    expect(mockUpsertRecords).toHaveBeenCalledTimes(1);
+  });
+
+  it('a passive line supersedes its own owner_only record and never reaches another instance or account', async () => {
+    mutableConfig.instanceType = 'passive';
+    pineconeConfig.instanceScopedIds = true;
+    const memory = makeMemory(ACCOUNT_JID);
+    const ownAccount = memory.sourceAccount();
+    mockSearchRecords.mockResolvedValue({ result: { hits: [] } });
+    serveFiltered([
+      makePineconeHit('other-instance', 0.99, { source_instance: 'other-line', source_account: ownAccount, visibility: 'owner_only' }),
+      makePineconeHit('other-account', 0.98, { source_instance: 'q', source_account: 'acct:other', visibility: 'owner_only' }),
+      makePineconeHit('own', 0.9, { source_instance: 'q', source_account: ownAccount, visibility: 'owner_only' }),
+    ], mockOwnerSearchRecords);
+    try {
+      const candidate = await memory.findSupersedeCandidate('chat-1@g.us', 'old text');
+      expect(candidate?.id).toBe('own');
+      const { query } = mockOwnerSearchRecords.mock.calls[0][0];
+      expect(query.topK).toBe(1);
+      // No visibility clause: this line writes owner_only, so it must reach its own.
+      expect(query.filter).toEqual({
+        chat_jid: { $eq: 'chat-1@g.us' },
+        $and: [
+          { $or: [{ source_instance: { $eq: mutableConfig.botName } }, { source_instance: { $exists: false } }] },
+          { $or: [{ source_account: { $eq: ownAccount } }, { source_account: { $exists: false } }] },
+        ],
+      });
+    } finally {
+      delete pineconeConfig.instanceScopedIds;
+      mockSearchRecords.mockReset();
+    }
+  });
+
+  it('a chat_scoped line never supersedes an owner_only record', async () => {
+    const memory = makeMemory(ACCOUNT_JID);
+    serveFiltered([
+      makePineconeHit('private', 0.97, { source_instance: 'q', visibility: 'owner_only' }),
+      makePineconeHit('shared', 0.9, { source_instance: 'q', visibility: 'chat_scoped' }),
+    ]);
+    let filters: unknown[] = [];
+    try {
+      expect((await memory.findSupersedeCandidate('chat-1@g.us', 'old text'))?.id).toBe('shared');
+      pineconeConfig.instanceScopedIds = true;
+      await memory.findSupersedeCandidate('chat-1@g.us', 'old text');
+    } finally {
+      delete pineconeConfig.instanceScopedIds;
+      filters = mockSearchRecords.mock.calls.map((call) => call[0].query.filter);
+      mockSearchRecords.mockReset();
+    }
+    const expected = {
+      chat_jid: { $eq: 'chat-1@g.us' },
+      $and: [
+        { $or: [{ source_instance: { $eq: mutableConfig.botName } }, { source_instance: { $exists: false } }] },
+        { $or: [{ source_account: { $eq: memory.sourceAccount() } }, { source_account: { $exists: false } }] },
+      ],
+      ...OWNER_ONLY_EXCLUSION,
+    };
+    expect(filters).toEqual([expected, expected]);
+  });
+
+  it('omits provenance when the caller names no pipeline', async () => {
+    await makeMemory().upsert([makeMemoryRecord()]);
+    expect(written()).not.toHaveProperty('provenance');
+  });
+
+  it('a passive line writes owner_only, and a record value cannot relax it', async () => {
+    mutableConfig.instanceType = 'passive';
+    pineconeConfig.recordVisibility = 'chat_scoped';
+    await makeMemory().upsert([makeMemoryRecord({ visibility: 'chat_scoped' })]);
+    expect(written()['visibility']).toBe('owner_only');
+  });
+
+  it('configuration can make a non-passive instance owner_only', async () => {
+    pineconeConfig.recordVisibility = 'owner_only';
+    await makeMemory().upsert([makeMemoryRecord()]);
+    expect(written()['visibility']).toBe('owner_only');
+  });
+
+  it('a derived record keeps an owner_only source restriction on a chat_scoped instance', async () => {
+    await makeMemory().upsert([makeMemoryRecord({ visibility: 'owner_only' })]);
+    expect(written()['visibility']).toBe('owner_only');
+  });
+
+  it('record fields cannot override the server-derived source fields', async () => {
+    const spoofed = {
+      ...makeMemoryRecord(),
+      sourceInstance: 'other-instance',
+      sourceAccount: 'acct:spoofed',
+      provenance: 'consolidation',
+    } as MemoryRecord;
+    await makeMemory(ACCOUNT_JID).upsert([spoofed], { provenance: 'fact_export' });
+    const record = written();
+    expect(record['source_instance']).toBe('q');
+    expect(record['source_account']).not.toBe('acct:spoofed');
+    expect(record['provenance']).toBe('fact_export');
+  });
+
+  it('dedup and claim lookups stay inside this instance and account when instance-scoped ids are on', async () => {
+    mockSearchRecords.mockResolvedValue({ result: { hits: [] } });
+    const memory = makeMemory(ACCOUNT_JID);
+    await memory.checkDuplicate('chat-1@g.us', 'sender-1@s.whatsapp.net', 'same text');
+    pineconeConfig.instanceScopedIds = true;
+    try {
+      await memory.checkDuplicate('chat-1@g.us', 'sender-1@s.whatsapp.net', 'same text');
+      await memory.searchClaims('chat-1@g.us', '', 'claim', 3);
+    } finally {
+      delete pineconeConfig.instanceScopedIds;
+    }
+    const filters = mockSearchRecords.mock.calls.map((call) => call[0].query.filter);
+    expect(filters[0]).toEqual({ chat_jid: { $eq: 'chat-1@g.us' }, sender_jid: { $eq: 'sender-1@s.whatsapp.net' } });
+    expect(filters[1]).toEqual({
+      chat_jid: { $eq: 'chat-1@g.us' },
+      sender_jid: { $eq: 'sender-1@s.whatsapp.net' },
+      source_instance: { $eq: 'q' },
+      source_account: { $eq: expect.stringMatching(/^acct:[0-9a-f]{24}$/) },
+    });
+    expect(filters[2]).toMatchObject({ chat_jid: { $eq: 'chat-1@g.us' }, source_instance: { $eq: 'q' } });
+    mockSearchRecords.mockReset();
+  });
+
+  it('reads the stamped fields back onto search results, ignoring unknown visibility values', async () => {
+    mockSearchRecords.mockResolvedValueOnce({
+      result: {
+        hits: [
+          makePineconeHit('stamped', 0.9, {
+            source_instance: 'personal-line',
+            source_account: 'acct:abc',
+            visibility: 'owner_only',
+            provenance: 'fact_export',
+          }),
+          makePineconeHit('odd', 0.8, { visibility: 'everyone' }),
+          makePineconeHit('legacy', 0.7),
+        ],
+      },
+    });
+    const results = await makeMemory().search('q', {}, 3);
+    const byId = Object.fromEntries(results.map((r) => [r.id, r.record]));
+    expect(byId['stamped']).toMatchObject({
+      sourceInstance: 'personal-line',
+      sourceAccount: 'acct:abc',
+      visibility: 'owner_only',
+      provenance: 'fact_export',
+    });
+    expect(byId['odd']).not.toHaveProperty('visibility');
+    expect(byId['legacy']).not.toHaveProperty('visibility');
+    expect(byId['legacy']).not.toHaveProperty('sourceInstance');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // searchEntities — rerank error fallback (line 577-578)
 // ---------------------------------------------------------------------------
 
@@ -2122,6 +2549,8 @@ describe('searchEntities rerank error fallback', () => {
 
 describe('circuit breaker open — must run last', () => {
   let memory: PineconeMemory;
+  // The upsert case must reach the provider to trip its breaker.
+  useWritableInstance();
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -2129,6 +2558,7 @@ describe('circuit breaker open — must run last', () => {
     MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
       this.index = vi.fn().mockReturnValue(mockIndex);
       this.inference = { rerank: mockRerank };
+      this.listIndexes = vi.fn().mockResolvedValue(OPERATOR_PROJECT_INDEXES);
     } as unknown as () => InstanceType<typeof Pinecone>);
     memory = new PineconeMemory();
   });
@@ -2251,6 +2681,7 @@ describe('pinecone.ts uncovered-branch coverage', () => {
     mutableConfig.pineconeRerank = false;
     mutableConfig.pineconeRerankTopN = 6;
     mutableConfig.botName = 'q'; // q is checked against the operator project
+    mutableConfig.accountScopeId = WRITER_ACCOUNT_SCOPE;
     const MockPinecone = vi.mocked(Pinecone);
     MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
       this.index = vi.fn().mockReturnValue(mockIndex);
@@ -2265,6 +2696,7 @@ describe('pinecone.ts uncovered-branch coverage', () => {
     delete mutableConfig.pineconeRerank;
     delete mutableConfig.pineconeRerankTopN;
     delete mutableConfig.botName;
+    delete mutableConfig.accountScopeId;
     delete mutableConfig.memory;
     delete process.env['PINECONE_API_KEY'];
   });

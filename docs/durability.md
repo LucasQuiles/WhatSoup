@@ -1832,6 +1832,11 @@ require identical lease, acknowledgement, evidence, privacy, and health contract
 a consumer ships, the honest steady state for an enrichment-enabled instance with queue
 growth is `consumer_missing`, and that is exactly what health now reports.
 
+Whichever model ships, every exporter writes queued facts through the stamping path
+(`PineconeMemory.upsert` with `provenance: 'fact_export'`), never directly to the index,
+so each exported record carries the server-derived `source_instance`, `source_account`,
+`visibility` and `provenance` fields; the queue payload does not carry them.
+
 ## 10. Memory Consolidation Source Lineage (#2569)
 
 ### 10.1 Pipeline shape and the defects it had
@@ -1841,7 +1846,9 @@ Consolidation promotes durable knowledge out of episodic memory:
 durable run receipts, cancellation, and the post-stop write fence;
 `runConsolidation` (`src/memory/consolidation-cron.ts`) selects sources (fixed semantic
 query, top-100, with a provider-side filter excluding the `consolidated`
-confidence qualifier while retaining records without that field), scopes them by chat+sender, clusters them
+confidence qualifier while retaining records without that field; with
+`memory.pinecone.instanceScopedIds` on, only this instance's records), scopes them by
+chat+sender (plus source account when that option is on), clusters them
 (`clusterMemories`, `src/memory/consolidation.ts`), sends each cluster to the model, and
 upserts promoted claims back to the remote store under
 `durable:<shortHash(scope + claim)>` ids with `confidenceQualifier: 'consolidated'`.
@@ -1924,9 +1931,53 @@ designed contract mirrors the fact-export queue machinery (§9):
 - **Why a local ledger.** When the provider circuit breaker is open, remote state can
   be neither inspected nor repaired — a remote-metadata lifecycle strands its own
   leases exactly when reconciliation is needed. The local ledger stays repairable
-  with the provider down. Scope-claim safety across the fleet assumes chat/sender
-  scopes do not collide across instances sharing an index — the same assumption
-  current scoping makes; the owner should confirm it for the fleet topology.
+  with the provider down.
+- **Instances sharing an index.** Chat/sender scopes do collide across instances
+  that share an index: a personal line and a bot line see the same contact's DM
+  under the same `chat_jid`. This is handled by record provenance, not by an
+  assumption. Every record carries server-stamped `source_instance`,
+  `source_account`, `visibility` and `provenance` (`toPineconeRecord`; see
+  [configuration: memory record provenance](configuration.md#memory-record-provenance)).
+  `owner_only` records live only in the reserved `whatsoup-owner-only-v1`
+  namespace. Readers and writers can upgrade in either order: old readers never
+  query it, and new readers retain restrictive recall for legacy records.
+  Rollback to an earlier reader cannot expose these records because it never
+  queries the reserved namespace, and no earlier release wrote `owner_only`
+  records anywhere (the visibility field ships with the fence). An earlier
+  writer ignores visibility and would store an `owner_only` instance's new
+  memories unstamped in the default namespace, so roll such a writer back only
+  with its memory writes stopped; rolling forward again needs no migration.
+  A correction that narrows a shared record moves it (reserved write, then
+  default delete); merged reads suppress the default copy of an id
+  the reserved namespace holds, also when the reserved copy ranks below the
+  reserved `topK` cutoff and is not returned (one fetch of the unmatched
+  default ids).
+  Instances that share an index set `memory.pinecone.instanceScopedIds`, which
+  folds the instance into every id scheme (`memory_write`, the fact-export
+  `factId`, `durable:`) and makes source instance and account boundaries:
+  consolidation selects and verifies its known instance and account, groups by
+  account + visibility + chat + sender, and hashes that key into the durable id.
+  An unknown writer account produces no work. Promotions preserve both source
+  fields and visibility; an account change before writing refuses promotion.
+  Dedup and claim lookups match only the same instance and account. Recall checks
+  source eligibility before conversation scope and ranking: non-owners receive
+  no foreign-account or unstamped chat memories, even with broad recall. Only
+  admitted owners may read `owner_only` records from listed sources across that
+  boundary. With the option off, ids, dedup and recall remain unchanged.
+  Supersede always constrains each source field to the known writer's value or
+  an absent legacy field, regardless of the flag. A
+  `passive` or `owner_only` instance still recalls restrictively: callers
+  without `owner_only` access receive only `chat_scoped` records
+  ([memory record provenance](configuration.md#memory-record-provenance)). A
+  ledger built later keys its scopes the same way.
+  Personal-line records are `owner_only` and reach only the verified owner or a
+  configured trusted operator in a direct chat
+  ([owner_only records](configuration.md#owner_only-records)).
+  Agent-instance `knowledge_search` currently grants this access to no caller,
+  pending a transport-derived direct-chat flag and isolated agent session.
+  Business entities retain the compatible `owner_only` exclusion, including
+  entity profiles on `__default__`; restrictive chat-memory queries require
+  `chat_scoped` instead.
 - **`DurableKnowledge` disposition.** Resolved: the interface had zero consumers
   and was removed from `src/memory/types.ts` (#2569 contract item 13). If the
   ledger lands, its schema is authored fresh rather than reviving the dead type

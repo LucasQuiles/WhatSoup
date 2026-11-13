@@ -1,12 +1,16 @@
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { chmodSync, mkdirSync, mkdtempSync, openSync, readSync, closeSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 
 let tmpRoot = '';
+let liveWriter: DatabaseSync | null = null;
 
 afterEach(() => {
+  liveWriter?.close();
+  liveWriter = null;
   if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
   tmpRoot = '';
 });
@@ -87,6 +91,142 @@ describe('whatsoup-db-snapshot (FLOS Stage 0 S0.4)', () => {
     const remaining = readdirSync(snaps).sort();
     expect(remaining).toHaveLength(2);
     expect(remaining).not.toContain(lastReceipt!.pruned[0]);
+  });
+
+  // Retention counts only the snapshotted database's own series. Another
+  // database in the same out-root keeps its snapshots when its name starts with
+  // this stem, or when this name holds glob metacharacters that match it.
+  it.each([
+    ['a longer name with the same prefix', 'bot.db', 'bot-archive.db'],
+    ['a "*" in the name', '*.db', 'bot.db'],
+    ['a "[...]" class in the name', 'b[o]t.db', 'bot.db'],
+  ])('never prunes another database\'s snapshots (%s)', (_case, ownName, otherName) => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'whatsoup-db-snapshot-'));
+    const snaps = join(tmpRoot, 'snaps');
+    const otherDb = join(tmpRoot, otherName);
+    const ownDb = join(tmpRoot, ownName);
+    makeFixtureDb(otherDb);
+    makeFixtureDb(ownDb);
+    for (const epoch of ['1787900000', '1787900100', '1787900200']) {
+      runTool(['snapshot', '--db', otherDb, '--out-root', snaps, '--retain', '7'], { BOT_ERRORS_DRY_NOW: epoch });
+    }
+    const otherSnapshots = readdirSync(snaps).sort();
+    expect(otherSnapshots).toHaveLength(3);
+
+    const receipt = JSON.parse(runTool(['snapshot', '--db', ownDb, '--out-root', snaps, '--retain', '1'], {
+      BOT_ERRORS_DRY_NOW: '1787900300',
+    })) as { snapshot: string; pruned: string[] };
+
+    expect(receipt.pruned).toEqual([]);
+    const remaining = readdirSync(snaps);
+    expect(remaining).toHaveLength(4);
+    expect(remaining).toEqual(expect.arrayContaining([...otherSnapshots, receipt.snapshot]));
+
+    // The own series is still pruned, matched literally.
+    const second = JSON.parse(runTool(['snapshot', '--db', ownDb, '--out-root', snaps, '--retain', '1'], {
+      BOT_ERRORS_DRY_NOW: '1787900400',
+    })) as { snapshot: string; pruned: string[] };
+    expect(second.pruned).toEqual([receipt.snapshot]);
+    expect(readdirSync(snaps).sort()).toEqual([...otherSnapshots, second.snapshot].sort());
+  });
+
+  it('counts only ASCII-digit stamps in the own series', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'whatsoup-db-snapshot-'));
+    const snaps = join(tmpRoot, 'snaps');
+    const db = join(tmpRoot, 'bot.db');
+    makeFixtureDb(db);
+    mkdirSync(snaps);
+    // Arabic-Indic digits in the stamp position: not one of this tool's names.
+    const decoy = 'bot-٢٠٢٦١١١١T٠٠٠٠٠٠Z.snapshot.sqlite3';
+    writeFileSync(join(snaps, decoy), '');
+    const receipt = JSON.parse(runTool(['snapshot', '--db', db, '--out-root', snaps, '--retain', '1'], {
+      BOT_ERRORS_DRY_NOW: '1787900000',
+    })) as { snapshot: string; pruned: string[] };
+    expect(receipt.pruned).toEqual([]);
+    expect(readdirSync(snaps).sort()).toEqual([receipt.snapshot, decoy].sort());
+  });
+
+  describe('live WAL source (writer connection held open)', () => {
+    // A production instance database runs in WAL mode with the runtime's
+    // connection open, so committed rows sit in the -wal file and the source
+    // has -wal and -shm sidecars while the snapshot runs.
+    function liveWalSnapshot(): { snaps: string; snapshot: string; tables: Record<string, number> } {
+      tmpRoot = mkdtempSync(join(tmpdir(), 'whatsoup-db-snapshot-'));
+      const db = join(tmpRoot, 'bot.db');
+      liveWriter = new DatabaseSync(db);
+      liveWriter.exec('PRAGMA journal_mode=WAL');
+      liveWriter.exec('CREATE TABLE messages (pk INTEGER PRIMARY KEY, body TEXT)');
+      liveWriter.exec('CREATE TABLE inbound_events (seq INTEGER PRIMARY KEY, processing_status TEXT)');
+      for (let i = 0; i < 3; i++) liveWriter.prepare('INSERT INTO messages (body) VALUES (?)').run(`m${i}`);
+      for (let i = 0; i < 2; i++) liveWriter.exec("INSERT INTO inbound_events (processing_status) VALUES ('complete')");
+      expect(readdirSync(tmpRoot).sort()).toEqual(['bot.db', 'bot.db-shm', 'bot.db-wal']);
+      const snaps = join(tmpRoot, 'snaps');
+      const receipt = JSON.parse(runTool(
+        ['snapshot', '--db', db, '--out-root', snaps],
+        { BOT_ERRORS_DRY_NOW: '1787900000' },
+      )) as { snapshot: string; integrity: string; tables: Record<string, number> };
+      expect(receipt.integrity).toBe('ok');
+      expect(receipt.tables).toEqual({ inbound_events: 2, messages: 3 });
+      return { snaps, snapshot: receipt.snapshot, tables: receipt.tables };
+    }
+
+    it('restore rehearsal of the snapshot exits 0 with matching row counts', () => {
+      const { snaps, snapshot, tables } = liveWalSnapshot();
+      const rehearsal = spawnSync('python3', [SCRIPT, 'rehearse', '--snapshot', join(snaps, snapshot)], {
+        cwd: process.cwd(),
+        encoding: 'utf8',
+      });
+      expect({ status: rehearsal.status, stdout: rehearsal.stdout.trim() })
+        .toEqual({ status: 0, stdout: expect.stringContaining('"integrity": "ok"') });
+      const receipt = JSON.parse(rehearsal.stdout) as { integrity: string; tables: Record<string, number> };
+      expect(receipt.integrity).toBe('ok');
+      expect(receipt.tables).toEqual(tables);
+    });
+
+    it('leaves only the snapshot in out-root: no -wal, -shm or pending files', () => {
+      const { snaps, snapshot } = liveWalSnapshot();
+      expect(readdirSync(snaps)).toEqual([snapshot]);
+      spawnSync('python3', [SCRIPT, 'rehearse', '--snapshot', join(snaps, snapshot)], { cwd: process.cwd() });
+      expect(readdirSync(snaps)).toEqual([snapshot]);
+    });
+
+    // Root ignores directory permissions: chmod 0o500 would not make the
+    // directory read-only and the test would pass without exercising the case.
+    // Skip as root (reported as skipped, never as a pass).
+    const runningAsRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+    // @skip-env: root bypasses directory permissions, so the case cannot be exercised.
+    it.skipIf(runningAsRoot)('rehearses where the reader cannot create sidecars (read-only snapshot directory; skipped as root, which bypasses directory permissions)', () => {
+      // A read-only reader of a WAL-format file must find or create -wal and
+      // -shm; where it cannot, SQLite refuses with "unable to open database
+      // file". A self-contained snapshot needs neither.
+      const { snaps, snapshot, tables } = liveWalSnapshot();
+      chmodSync(snaps, 0o500);
+      try {
+        const rehearsal = spawnSync('python3', [SCRIPT, 'rehearse', '--snapshot', join(snaps, snapshot)], {
+          cwd: process.cwd(),
+          encoding: 'utf8',
+        });
+        // Both fields asserted so a failure shows the tool's own error text.
+        expect({ status: rehearsal.status, stdout: rehearsal.stdout.trim() })
+          .toEqual({ status: 0, stdout: expect.stringContaining('"integrity": "ok"') });
+        expect((JSON.parse(rehearsal.stdout) as { tables: Record<string, number> }).tables).toEqual(tables);
+      } finally {
+        chmodSync(snaps, 0o700);
+      }
+    });
+
+    it('writes a self-contained rollback-journal file (header format bytes 18-19 are 1)', () => {
+      const { snaps, snapshot } = liveWalSnapshot();
+      const header = Buffer.alloc(20);
+      const fd = openSync(join(snaps, snapshot), 'r');
+      try {
+        readSync(fd, header, 0, 20, 0);
+      } finally {
+        closeSync(fd);
+      }
+      // 2 = WAL format (a reader must find or create -wal/-shm); 1 = legacy.
+      expect([header[18], header[19]]).toEqual([1, 1]);
+    });
   });
 
   it('rehearsal fails on a corrupted snapshot', () => {

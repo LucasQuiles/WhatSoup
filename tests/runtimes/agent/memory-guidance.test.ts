@@ -129,7 +129,7 @@ describe('reach sentence agrees with memory-scope.ts', () => {
       ? { conversationKey: GROUP_KEY, deliveryJid: GROUP_JID }
       : { conversationKey: actor, deliveryJid: `${actor}@s.whatsapp.net` };
     const scope = await resolveMemoryScope(
-      { tier: 'chat-scoped', operatorInstance: false, actorJid: `${actor}@s.whatsapp.net`, ...where },
+      { tier: 'chat-scoped', operatorInstance: false, actorJid: `${actor}@s.whatsapp.net`, directChat: undefined, ...where },
       deps(overrides),
     );
     return { kind: scope.kind, tier: memoryHitTier(OTHER_CHAT_RECORD, scope, memoryIdentityFold(db)) };

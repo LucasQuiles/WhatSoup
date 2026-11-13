@@ -1,4 +1,5 @@
 import type {
+  ContextLegOptions,
   EntitySearchResult,
   PineconeMemory,
   PineconeSearchStatus,
@@ -15,15 +16,19 @@ import {
 import { routeQuery } from './memory/query-router.ts';
 import {
   foldChatAttribution,
+  isOwnerOnlyRecord,
   isOwnOrSharedGroupRecord,
+  isSameSourceInstance,
   memoryIdentityFold,
+  memorySourceEligible,
+  ownerOnlyRecordServable,
   verifiedSenderIdentity,
   type ChatRecallBoundary,
 } from '../../core/memory-scope.ts';
 
 const log = createChildLogger('conversation');
 
-export type ContextScope = 'chat' | 'sender' | 'self' | 'entity' | 'context';
+export type ContextScope = 'chat' | 'sender' | 'self' | 'owner_only' | 'entity' | 'context';
 export type ContextLoadStatus = 'not_attempted' | 'complete' | 'partial' | 'unavailable';
 
 export interface ContextScopeOutcome {
@@ -134,6 +139,21 @@ export async function loadContextDetailed(
    * member's private records.
    */
   boundary: ChatRecallBoundary = 'open',
+  /**
+   * ownerOnly: the caller may receive owner_only records (ownerOnlyRecallAllowed).
+   * Without it every leg excludes them before the query and again here.
+   * ownerOnlySources: the source instances whose owner_only records it may
+   * receive (ownerOnlySourceSet); unset serves none, even with ownerOnly.
+   */
+  access: {
+    ownerOnly?: boolean;
+    ownerOnlySources?: ReadonlySet<string>;
+    /** instanceScopedIds on: this instance; with sourceAccount, the recall boundary. */
+    sourceInstance?: string;
+    sourceAccount?: string;
+    /** Restrictive recall (memoryRecallRestrictive). */
+    restrictive?: boolean;
+  } = {},
 ): Promise<ContextLoadResult> {
   if (!messageText.trim()) {
     return { text: '', status: 'not_attempted', scopes: [] };
@@ -143,13 +163,47 @@ export async function loadContextDetailed(
     namespaces: config.memory.pinecone.namespaces,
   });
   const safeTraceId = normalizeMemoryTraceId(traceId);
+  const ownerOnly = access.ownerOnly === true;
+  const legOptions = { includeOwnerOnly: true } as const;
+  const sourceBoundary = {
+    sourceInstance: access.sourceInstance, sourceAccount: access.sourceAccount,
+    ownerOnlyAccess: ownerOnly, ownerOnlySources: access.ownerOnlySources,
+  };
+  const sourceOptions = access.sourceInstance ? {
+    sourceInstance: access.sourceInstance, sourceAccount: access.sourceAccount,
+    ownerOnlySources: access.ownerOnlySources,
+  } : undefined;
+  // Restrictive recall without access: every memory leg asks for chat_scoped
+  // records only, and the post-query gate keeps only those. Entity records keep
+  // the compatible exclusion.
+  const chatScopedOnly = !ownerOnly && access.restrictive === true;
+  const visibilityOptions: ContextLegOptions | undefined = ownerOnly
+    ? legOptions
+    : chatScopedOnly ? { chatScopedOnly: true } : undefined;
+  const memoryLegOptions = sourceOptions ? { ...visibilityOptions, ...sourceOptions } : visibilityOptions;
+  // An owner_only record is served only with access and from a listed source
+  // instance (memory-scope.ts ownerOnlyRecordServable).
+  const servable = (fields: Record<string, unknown>): boolean =>
+    !isOwnerOnlyRecord(fields) || ownerOnlyRecordServable(fields, ownerOnly, access.ownerOnlySources);
 
   if (config.pineconeSearchMode === 'entity') {
-    const details = await captureContextSearch(() =>
-      traceId
-        ? pinecone.searchEntitiesDetailed(messageText, traceId)
-        : pinecone.searchEntitiesDetailed(messageText),
+    const entityOptions = ownerOnly || sourceOptions
+      ? { ...(ownerOnly ? legOptions : {}), ...sourceOptions, ownerOnlySources: access.ownerOnlySources }
+      : undefined;
+    const detailsRaw = await captureContextSearch(() =>
+      entityOptions
+        ? pinecone.searchEntitiesDetailed(messageText, traceId, entityOptions)
+        : traceId
+          ? pinecone.searchEntitiesDetailed(messageText, traceId)
+          : pinecone.searchEntitiesDetailed(messageText),
     );
+    // Post-query gate, as for the memory legs: the provider's exclusion only narrows.
+    const details = { ...detailsRaw, results: detailsRaw.results.filter((result) =>
+      memorySourceEligible({
+        ...result.record.metadata,
+        ...(result.record.entityType !== 'unknown' ? { entity_type: result.record.entityType } : {}),
+      }, sourceBoundary, true)
+      && servable(result.record.metadata)) };
     const scopes = [scopeOutcome('entity', details)];
     log.info(
       {
@@ -171,46 +225,92 @@ export async function loadContextDetailed(
     };
   }
 
-  const [chatDetails, senderDetails, selfDetails] = await Promise.all([
+  // With owner_only access, a fourth leg fetches the owner_only records of every
+  // chat: an owner_only fact about another sender in another chat matches neither
+  // the chat leg nor the sender leg. Without access it is never queried. It runs
+  // alongside the other three.
+  const ownerOnlyLeg = ownerOnly
+    ? captureContextSearch(() =>
+      pinecone.searchOwnerOnlyDetailed(messageText, traceId, sourceOptions ? { ...legOptions, ...sourceOptions } : legOptions))
+    : Promise.resolve(null);
+  const [chatDetailsRaw, senderDetailsRaw, selfDetailsRaw] = await Promise.all([
     captureContextSearch(() =>
-      traceId
-        ? pinecone.searchForChatDetailed(chatJid, messageText, traceId)
-        : pinecone.searchForChatDetailed(chatJid, messageText),
+      memoryLegOptions
+        ? pinecone.searchForChatDetailed(chatJid, messageText, traceId, memoryLegOptions)
+        : traceId
+          ? pinecone.searchForChatDetailed(chatJid, messageText, traceId)
+          : pinecone.searchForChatDetailed(chatJid, messageText),
     ),
     captureContextSearch(() =>
-      traceId
-        ? pinecone.searchForSenderDetailed(senderJid, messageText, traceId)
-        : pinecone.searchForSenderDetailed(senderJid, messageText),
+      memoryLegOptions
+        ? pinecone.searchForSenderDetailed(senderJid, messageText, traceId, memoryLegOptions)
+        : traceId
+          ? pinecone.searchForSenderDetailed(senderJid, messageText, traceId)
+          : pinecone.searchForSenderDetailed(senderJid, messageText),
     ),
     captureContextSearch(() =>
-      traceId
-        ? pinecone.searchSelfFactsDetailed(messageText, traceId)
-        : pinecone.searchSelfFactsDetailed(messageText),
+      memoryLegOptions
+        ? pinecone.searchSelfFactsDetailed(messageText, traceId, memoryLegOptions)
+        : traceId
+          ? pinecone.searchSelfFactsDetailed(messageText, traceId)
+          : pinecone.searchSelfFactsDetailed(messageText),
     ),
   ]);
+  const ownerOnlyDetailsRaw = await ownerOnlyLeg;
+  // Post-query gate: the pre-query exclusion only narrows the fetch.
+  const recordServable = (result: SearchResult): boolean =>
+    memorySourceEligible({
+      visibility: result.record.visibility, source_instance: result.record.sourceInstance, source_account: result.record.sourceAccount,
+    }, sourceBoundary)
+    && servable({ visibility: result.record.visibility, source_instance: result.record.sourceInstance })
+    && (!chatScopedOnly || result.record.visibility === 'chat_scoped');
+  const visible = <T extends { results: SearchResult[] }>(details: T): T =>
+    ({ ...details, results: details.results.filter(recordServable) });
+  const chatDetails = visible(chatDetailsRaw);
+  const senderDetails = visible(senderDetailsRaw);
+  const selfDetails = visible(selfDetailsRaw);
   const thisChat = foldChatAttribution(chatJid);
   const fold = memoryIdentityFold();
   const sender = verifiedSenderIdentity(senderJid);
+  // Instance-scoped ids on: a record of another source instance or account is
+  // another conversation; an unstamped one is ours only with owner_only access.
+  const sameInstance = (result: SearchResult): boolean => isSameSourceInstance(
+    { source_instance: result.record.sourceInstance, source_account: result.record.sourceAccount },
+    { sourceInstance: access.sourceInstance, sourceAccount: access.sourceAccount, ownerOnlyAccess: ownerOnly },
+  );
+  const crossesBoundary = (result: SearchResult): boolean =>
+    result.record.visibility === 'owner_only' && recordServable(result);
+  const chatHeld = boundary === 'open'
+    ? chatDetails.results
+    : chatDetails.results.filter((result) => sameInstance(result) || crossesBoundary(result));
   const chatResults = boundary === 'group'
-    ? chatDetails.results.filter((result) => isOwnOrSharedGroupRecord(
+    ? chatHeld.filter((result) => isOwnOrSharedGroupRecord(
       { sender_jid: result.record.senderJid, memory_type: result.record.memoryType }, sender, fold,
     ))
-    : chatDetails.results;
+    : chatHeld;
+  // With owner_only access, owner_only records cross the chat boundary; the
+  // caller's chat_scoped and legacy records keep it.
   const senderResults = boundary === 'open'
     ? senderDetails.results
-    : senderDetails.results.filter((result) => foldChatAttribution(result.record.chatJid) === thisChat);
-  const selfResults = selfDetails.results;
+    : senderDetails.results.filter((result) =>
+      (foldChatAttribution(result.record.chatJid) === thisChat && sameInstance(result)) || crossesBoundary(result));
+  // Self facts are this bot's own identity: another instance's never apply.
+  const selfResults = selfDetails.results.filter(sameInstance);
+  // The owner_only leg asks for owner_only records only; the gate checks again.
+  const ownerOnlyResults = ownerOnlyDetailsRaw ? ownerOnlyDetailsRaw.results.filter(crossesBoundary) : [];
   const scopes = [
     scopeOutcome('chat', chatDetails),
     scopeOutcome('sender', senderDetails),
     scopeOutcome('self', selfDetails),
+    ...(ownerOnlyDetailsRaw ? [scopeOutcome('owner_only', ownerOnlyDetailsRaw)] : []),
   ];
 
-  // Merge, deduplicate by id, preserve insertion order (chat results first)
+  // Merge, deduplicate by id, preserve insertion order (chat results first,
+  // then sender, then the owner_only leg)
   const seen = new Set<string>();
   const merged: SearchResult[] = [];
 
-  for (const result of [...chatResults, ...senderResults]) {
+  for (const result of [...chatResults, ...senderResults, ...ownerOnlyResults]) {
     if (!seen.has(result.id)) {
       seen.add(result.id);
       merged.push(result);
@@ -232,7 +332,7 @@ export async function loadContextDetailed(
       ...(safeTraceId ? { trace_id: safeTraceId } : {}),
       query_intent: routed.intent,
       routed_namespace_count: routed.namespaces.length,
-      scope_coverage: ['chat', 'sender', 'self'],
+      scope_coverage: scopes.map((outcome) => outcome.scope),
       result_count: topResults.length,
       score_buckets: bucketMemoryScores(
         topResults.map((result) => result.score),

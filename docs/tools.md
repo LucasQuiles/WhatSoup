@@ -20,10 +20,13 @@ Complete reference for all 170 MCP tools exposed by WhatSoup. Tools are grouped 
 > - the runtime is not in `sandboxPerChat` mode, and
 > - the runtime is not in `sandbox` mode.
 >
-> **`memory_write`** is registered when `config.pineconeIndex` is non-empty and the
-> environment variable named by `memory.pinecone.apiKeyEnv` (default
-> `PINECONE_API_KEY`) is set. This registration gate is separate from the
-> credential resolver used by `knowledge_search`.
+> **`memory_write`** is registered when `config.pineconeIndex` is non-empty and
+> the Pinecone writer's own key resolution (`resolvePineconeApiKey` in
+> `src/lib/api-key-resolver.ts`, shared with `PineconeMemory`) yields a key: the keyring first
+> (service `pinecone` for the default `PINECONE_API_KEY` name), then the
+> environment variable named by `memory.pinecone.apiKeyEnv`. A key held only in
+> the keyring therefore registers the tool, and the gate cannot disagree with
+> the writer that performs the upsert.
 >
 > **`restart_self`** is registered when the runtime is neither sandboxed nor in
 > `sandboxPerChat` mode and a `restartSelf` capability is supplied. Control-plane
@@ -3338,7 +3341,7 @@ Search company knowledge bases using natural language queries. Results are pre-f
 | top_k | number | optional | Number of results (1-20) |
 | namespace | string | optional | Override default namespace(s) |
 
-**Returns:** `index`, `query`, `results_count`, a structured `results` array containing each result's `id`, numeric `score`, and `entity_type`, plus a human-readable `formatted` summary. Available indexes are dynamically configured per instance. When an index profile defines `minScore`, lower-scoring hits are omitted and an all-low-score search returns zero results. A search of the instance's own memory index (`memory.pinecone.index`) without a `namespace` argument also covers the default namespace `__default__`, where `memory_write` writes. Memories in that index are scoped to the calling conversation: this chat first; in groups that are not owner-and-bot only, only the group's shared records and the verified sender's own; in a non-admin contact's direct chat, only that chat unless `contactRecallScopes` sets `instance`. Document namespaces are merged in by relevance in every context (see `docs/configuration.md`, Memory recall scope).
+**Returns:** `index`, `query`, `results_count`, a structured `results` array containing each result's `id`, numeric `score`, and `entity_type`, plus a human-readable `formatted` summary. Available indexes are dynamically configured per instance. When an index profile defines `minScore`, lower-scoring hits are omitted and an all-low-score search returns zero results. A search of the instance's own memory index (`memory.pinecone.index`) without a `namespace` argument also covers the default namespace `__default__`, where `memory_write` writes `chat_scoped` records (`owner_only` records go to the reserved `whatsoup-owner-only-v1` namespace, which `knowledge_search` never queries). Memories in that index are scoped to the calling conversation: this chat first; in groups that are not owner-and-bot only, only the group's shared records and the verified sender's own; in a non-admin contact's direct chat, only that chat unless `contactRecallScopes` sets `instance`. On agent instances, `knowledge_search` currently grants `owner_only` access to no caller, including admins and trusted operators, pending a transport-derived direct-chat flag and an isolated agent session. Compatible recall excludes `owner_only`; restrictive chat-memory recall requires `visibility = chat_scoped`. Entity profiles, including an entity profile on `__default__`, and business entity records keep the compatible exclusion; like other untagged records, they never reach a configurable group. With `memory.pinecone.instanceScopedIds` on, query filters and a post-query gate enforce source eligibility before ranking, broad contact recall, or untagged-record handling. Non-owners receive no other-account or unstamped chat memories; an unknown reader account admits none. Document namespaces are merged by relevance after the applicable source and visibility gates (see `docs/configuration.md`, Memory recall scope and owner_only records).
 
 ---
 
@@ -3352,7 +3355,7 @@ Agent-facing episodic memory write into the configured per-person Pinecone index
 
 Persist a durable memory about the current conversation into the instance's configured Pinecone memory index (`memory.pinecone.index`) via the integrated-embedding upsert path. Intended for agent instances, which do not run the chat-runtime enrichment poller.
 
-> **Conditional registration.** Registered only when a Pinecone API key is available (`memory.pinecone.apiKeyEnv`, default `PINECONE_API_KEY`) and a Pinecone index is configured. `core: false` — absence is tolerated. The project guard (configured, or the operator project for `q` when none is configured) is enforced by `PineconeMemory.upsert`. Records land in the default namespace `__default__` of the memory index, which `knowledge_search` always includes for that index, ranked this chat first and held to the group boundary in groups. See `src/mcp/register-all.ts` and `src/mcp/tools/memory-write.ts`.
+> **Conditional registration.** Registered only when the Pinecone writer's own key resolution yields a key (keyring first, then the env var named by `memory.pinecone.apiKeyEnv`, default `PINECONE_API_KEY`) and a Pinecone index is configured. `core: false` — absence is tolerated. The project guard (configured, or the operator project for `q` when none is configured) is enforced by `PineconeMemory.upsert`. `chat_scoped` records land in the default namespace `__default__` of the memory index, which `knowledge_search` always includes for that index, ranked this chat first and held to the group boundary in groups; `owner_only` records land in the reserved `whatsoup-owner-only-v1` namespace, which `knowledge_search` never queries (see [Memory record provenance](configuration.md#memory-record-provenance)). See `src/mcp/register-all.ts` and `src/mcp/tools/memory-write.ts`.
 
 | | |
 |---|---|
@@ -3374,7 +3377,7 @@ Persist a durable memory about the current conversation into the instance's conf
 
 **Returns on success:** `{ operation_id, status: "written", memory_type }`, where `operation_id` is an opaque correlation reference. The internal record ID is not returned.
 
-**Returns on provider failure:** `{ error: "memory_write failed", code, retryable, operation_id }`, where `code` is a stable memory-operation failure code and no provider exception prose is exposed. The conversation and speaker are derived from the session, never caller-supplied.
+**Returns on provider failure:** `{ error: "memory_write failed", code, retryable, operation_id }`, where `code` is a stable memory-operation failure code and no provider exception prose is exposed. The conversation and speaker are derived from the session, never caller-supplied. The record's `source_instance`, `source_account`, `visibility` and `provenance` (`memory_write`) are stamped by the provider from instance configuration; no argument can set them (see `docs/configuration.md`, Memory record provenance).
 
 Although the wire-schema enum still includes `self_fact`, this handler rejects
 that value. Global self-identity memory must come from a trusted path; conversation

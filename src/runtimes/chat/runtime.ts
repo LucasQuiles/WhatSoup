@@ -37,7 +37,13 @@ import { checkRateLimit } from './rate-limiter.ts';
 import { getConversationWindow } from './window.ts';
 import { summarizeWindowBeforeTrim } from './window-trim.ts';
 import { loadContextDetailed, type ContextLoadResult } from './context.ts';
-import { chatRecallBoundary } from '../../core/memory-scope.ts';
+import {
+  chatRecallBoundary,
+  memoryRecallRestrictive,
+  ownerOnlyRecallAllowed,
+  ownerOnlySourceSet,
+  recordIdScope,
+} from '../../core/memory-scope.ts';
 import { isOperatorInstance } from '../../lib/pinecone-project-guard.ts';
 import { ChatQueue } from './queue.ts';
 import { processMedia } from './media/processor.ts';
@@ -407,6 +413,33 @@ export class ChatRuntime implements Runtime {
     // Pinecone is wrapped in a timeout race. The winning bounded outcome is
     // retained for health while the user still gets a response without context.
     const contextStart = Date.now();
+    // Read defensively: partial test configs omit the memory block.
+    const trustedOperatorPhones = (config as { memory?: { pinecone?: { trustedOperatorPhones?: string[] } } })
+      .memory?.pinecone?.trustedOperatorPhones ?? [];
+    const ownerOnly = ownerOnlyRecallAllowed({
+      actorJid: msg.senderJid,
+      conversationKey: msg.chatJid,
+      deliveryJid: msg.chatJid,
+      // The transport's classification: an iMessage group id has no group marker.
+      directChat: msg.isGroup === false,
+      adminPhones: config.adminPhones,
+      trustedOperatorPhones,
+      db: this.db,
+    });
+    const pineconeSettings = (config as { memory?: { pinecone?: { instanceScopedIds?: unknown; recordVisibility?: unknown } } })
+      .memory?.pinecone;
+    const instanceScope = recordIdScope(config.botName, pineconeSettings?.instanceScopedIds);
+    const restrictive = memoryRecallRestrictive(
+      (config as { instanceType?: unknown }).instanceType,
+      pineconeSettings?.recordVisibility,
+      pineconeSettings?.instanceScopedIds,
+    );
+    // The owner_only records an admitted caller may receive: this instance's and
+    // those of memory.pinecone.ownerOnlySources (R3).
+    const ownerOnlySources = ownerOnlySourceSet(
+      config.botName,
+      (config as { memory?: { pinecone?: { ownerOnlySources?: unknown } } }).memory?.pinecone?.ownerOnlySources,
+    );
     let contextBlock: string | null = null;
     let contextTimeout: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -426,6 +459,23 @@ export class ChatRuntime implements Runtime {
             sharedWorkflowGroups: config.sharedWorkflowGroups,
             contactRecallScopes: config.contactRecallScopes,
           }),
+          // Passed only when it carries something, so every other caller keeps
+          // the earlier call shape (and the provider default excludes).
+          ...(ownerOnly || instanceScope || restrictive
+            ? [{
+              ...(ownerOnly ? { ownerOnly: true, ownerOnlySources } : {}),
+              // The reader account comes from the provider that stamps this
+              // instance's writes (one derivation, one getter).
+              ...(instanceScope ? { sourceInstance: instanceScope, sourceAccount: this.pinecone.sourceAccount() } : {}),
+              ...(restrictive ? { restrictive: true } : {}),
+            }] as [{
+              ownerOnly?: boolean;
+              ownerOnlySources?: ReadonlySet<string>;
+              sourceInstance?: string;
+              sourceAccount?: string;
+              restrictive?: boolean;
+            }]
+            : [] as []),
         ),
         new Promise<ContextLoadResult>((resolve) => {
           contextTimeout = setTimeout(

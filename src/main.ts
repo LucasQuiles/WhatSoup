@@ -28,6 +28,7 @@ import { getLoadedInstanceConfigOrNull } from './lib/instance-context.ts';
 import { ConfigValidationError } from './lib/startup-error.ts';
 import { PassiveRuntime } from './runtimes/passive/runtime.ts';
 import { PineconeMemory, getPineconeReadinessObservation } from './runtimes/chat/providers/pinecone.ts';
+import { recordIdScope } from './core/memory-scope.ts';
 import { createAnthropicProvider } from './runtimes/chat/providers/anthropic.ts';
 import { createOpenAIProvider } from './runtimes/chat/providers/openai.ts';
 import { withDatabaseCompatibility } from './runtimes/chat/providers/database-compatibility.ts';
@@ -607,7 +608,8 @@ if (instanceType === 'agent') {
     ),
     handleDatabaseCompatibilityRejection,
   );
-  const pinecone = new PineconeMemory();
+  // The connected account feeds the opaque source_account stamp on writes.
+  const pinecone = new PineconeMemory({ accountJid: () => connectionManager.botJid });
   // Enrichment is queue-backed: the poller enqueues validated facts into
   // `fact_export_queue`. A deployment may provide an external bridge that
   // leases due rows (leasePendingFacts), writes them to Pinecone, and
@@ -636,6 +638,7 @@ if (instanceType === 'agent') {
         intervalMs: config.memory.consolidation.intervalHours * MS_PER_HOUR,
         lookbackDays: config.memory.consolidation.lookbackDays,
         dryRun: config.memory.consolidation.dryRun,
+        instanceScope: recordIdScope(config.botName, config.memory.pinecone.instanceScopedIds),
       },
       memoryConsolidationRunStore,
     );
@@ -1252,7 +1255,7 @@ messageScheduler.start();
 // poll.pinecone reuses the knowledge_search Pinecone client + index/namespace
 // allowlist (no second client). poll.file's allowed-root set is the explicit
 // fail-closed allowlist config.memory.fileWatch.allowedRoots (empty = deny-all).
-const pineconeWatch = createPineconeWatchSearch(config.memory.pinecone.allowedIndexes);
+const pineconeWatch = createPineconeWatchSearch(config.memory.pinecone.allowedIndexes, () => connectionManager.botJid);
 const triggerPoller = new TriggerPoller(db.raw, connectionManager, {
   pineconeAllowedIndexes: pineconeWatch?.allowedIndexes ?? [],
   pineconeSearch: pineconeWatch?.search,

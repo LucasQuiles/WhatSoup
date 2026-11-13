@@ -289,7 +289,8 @@ export class EnrichmentPoller {
           // captures both the "all new" and the "some idempotent duplicates"
           // happy paths; any mismatch means at least one fact did not land
           // and the source messages must remain eligible for retry.
-          const exportable = validated.map(toExportable);
+          // Arrow, not a bare reference: map's index must not reach idScope.
+          const exportable = validated.map((fact) => toExportable(fact));
           const result = enqueueFacts(this.db, exportable);
           totalQueued = totalQueued + result.inserted;
 

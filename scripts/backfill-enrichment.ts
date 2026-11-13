@@ -377,7 +377,8 @@ export async function processBatch(
       return out;
     }
 
-    const exportable = validated.map(toExportable);
+    // Arrow, not a bare reference: map's index must not reach idScope.
+    const exportable = validated.map((fact) => toExportable(fact));
 
     if (dryRun) return out;
 

@@ -793,7 +793,7 @@
     },
     {
       "path": "deploy/scripts/whatsoup-db-snapshot.py",
-      "sha256": "d73f87f3db5a4ac1f9eb7829ac89b46f76bd5d93e2a9f53a7d404a16da79d924",
+      "sha256": "1ec5ff178684903de513d7134699adf22d5eb473959ada37b12886c1936a5537",
       "mustContain": [
         "integrity_check",
         "mode=ro",

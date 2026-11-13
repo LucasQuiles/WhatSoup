@@ -1210,8 +1210,13 @@ The default is a fixed HOME-relative template — it does not consult `LANG`/`LC
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `memory.pinecone.apiKeyEnv` | string | `PINECONE_API_KEY` | Credential selector and compatibility environment-variable name for this instance's Pinecone key. The runtime resolves the corresponding secure-store service at use time; under the managed launcher the process-level `PINECONE_API_KEY` is launcher-provenanced (resolved from the secure store at launch after inherited values are scrubbed), so the compatibility name never carries an ambient value. |
+| `memory.pinecone.apiKeyService` | string | unset | Secure-store (keyring) service that holds this instance's Pinecone key, for an instance whose key is not the default `pinecone` entry. When set, only this service is consulted, never the default entry, and then the `apiKeyEnv` variable (the logged QR-104 hop below). The project guard refuses that key when it belongs to another project only if `projectId` or `expectedHostSuffix` is set in the file: fleet admission requires one, a hand-edited file is not checked for it, and a guard taken from the `PINECONE_PROJECT_ID` environment fallback is only as reliable as that variable. Every Pinecone reader and writer (memory recall and writes, the `memory_write` registration gate, `knowledge_search`) resolves the key the same way. A present value that is not a non-empty string fails config load. |
 | `memory.pinecone.projectId` | string | env/unset | Optional short project slug guard (not the UUID-form project ID). If the listed index host does not include this slug, readiness returns `project_mismatch` and `knowledge_search` refuses to query. |
 | `memory.pinecone.expectedHostSuffix` | string | env/unset | Optional exact host suffix guard. Use this when two projects have the same index name and you need fail-closed routing. |
+| `memory.pinecone.recordVisibility` | `owner_only` \| `chat_scoped` | `chat_scoped` | Visibility stamped on every memory record this instance writes (see [Memory record provenance](#memory-record-provenance)). A `passive` instance always writes `owner_only`, whatever this says. An unknown value fails config load. |
+| `memory.pinecone.trustedOperatorPhones` | string[] | `[]` | Phones, besides `adminPhones`, allowed to recall `owner_only` records from any chat: in a direct chat, over an authenticated transport, verified like an admin. Their `chat_scoped` recall keeps an ordinary contact's boundary (their own chat). See [owner_only records](#owner_only-records). |
+| `memory.pinecone.ownerOnlySources` | string[] | `[]` | Names of other instances whose `owner_only` records this instance's owner may recall. This instance's own name is always included. An `owner_only` record whose `source_instance` is not in that set, or is missing or empty, is never served. Works whether `instanceScopedIds` is on or off. See [owner_only records](#owner_only-records). |
+| `memory.pinecone.instanceScopedIds` | boolean | `false` | Set on every instance that shares a memory index with another instance. Folds the instance name into all three record id schemes (`memory_write`, fact-export `factId`, consolidation `durable:`). Recall checks source eligibility before conversation scope or ranking, including `contactRecallScopes: instance` and untagged records. Non-owners receive chat memories only from the reader's known instance and account. Consolidation selects and verifies that same provenance; an unknown writer account produces no work. See [Memory record provenance](#memory-record-provenance). Off keeps existing ids, dedup and recall unchanged. Supersede retains its known-writer boundary with either setting. Enabling this option does not rewrite stored records. With it off, ids still collide across instances: an identical write from another instance replaces a record, and any `owner_only` write deletes the default-namespace record with its id; other instances' `owner_only` records also compete for the owner leg's `topK` before the source check drops them. A present value other than `true`, `false` or `null` fails config load and admission. |
 | `memory.pinecone.index` | string | env/`whatsapp-bot` | Primary chat memory/entity index. |
 | `memory.pinecone.namespaces` | object | WhatsApp defaults | Namespaces used by chat context, fact export, and `mw-mind` intent routing. Every namespace is configurable per instance. |
 | `memory.pinecone.searchMode` | string | auto | `memory` for chat/sender/self-fact filters, `entity` for entity index search. Defaults from the index name. |
@@ -1239,11 +1244,164 @@ resolves its memory index in any other project, readiness reports
 provider logs `Pinecone project guard refused the configured key` at error
 level.
 
-`memory_write` writes to the SDK default namespace (`__default__`) of
-`memory.pinecone.index`. When `knowledge_search` searches that same index
-without an explicit `namespace` argument, it always includes `__default__`
-alongside the profile's namespaces, so an instance can find what it wrote. A
-profile that already lists the default namespace is searched as configured.
+`memory_write` writes `chat_scoped` records to the SDK default namespace
+(`__default__`) of `memory.pinecone.index`, and `owner_only` records to the
+reserved `whatsoup-owner-only-v1` namespace (see
+[Memory record provenance](#memory-record-provenance)). When `knowledge_search`
+searches that same index without an explicit `namespace` argument, it always
+includes `__default__` alongside the profile's namespaces, so an instance can
+find the `chat_scoped` records it wrote; it never queries the reserved
+namespace. A profile that already lists the default namespace is searched as
+configured.
+
+##### Memory record provenance
+
+Every memory record written through the provider's upsert path carries four
+metadata fields that the provider stamps in `toPineconeRecord`
+(`src/runtimes/chat/providers/pinecone.ts`) from instance configuration and
+runtime state. No tool argument can set or widen them. The writers on that path
+today are `memory_write` and consolidation. Fact export joins them when its
+in-process consumer ships: until then facts wait in the export queue, which
+carries no provenance (see [durability](durability.md)). Summaries join when they
+land. A `passive` line has no writer yet.
+
+| Field | Value |
+|---|---|
+| `source_instance` | The writing instance's name. |
+| `source_account` | Opaque id of the writing account: the configured `accountScopeId` is used as-is, without hashing or salting. It must be an operator-assigned opaque value and must not contain personal data such as a phone number or JID. Only when unset does the provider use `acct:` plus a truncated, versioned SHA-256 of the connected account's bare user id (never the raw JID); empty while the account is unknown. A hash of a phone-number id can be reversed by enumeration, so set an opaque `accountScopeId` where that matters. |
+| `visibility` | New writes use `owner_only` for a `passive` instance or when `memory.pinecone.recordVisibility` is `owner_only`; otherwise `chat_scoped`. Corrections and legacy consolidation keep the most restrictive visibility of their sources and writer. Instance-scoped consolidation preserves its inputs' visibility exactly. |
+| `provenance` | `memory_write`, `fact_export`, `summary` or `consolidation`: the pipeline that wrote the record. |
+
+`owner_only` records live only in the reserved `whatsoup-owner-only-v1`
+namespace; other records use the default namespace. Configuration rejects the
+reserved name in `memory.pinecone.namespaces.*` and knowledge profiles, so
+`knowledge_search` cannot query it. Admitted memory recall, entity mode included,
+searches both namespaces and merges by score; the owner-only leg searches only
+the reserved namespace and only for a caller with the explicit grant. Every
+visibility and source filter still applies. Instance-scoped consolidation reads
+both namespaces; without `instanceScopedIds` it reads only the default
+namespace, because it cannot attribute an `owner_only` record to its writer and
+a promotion carries this instance's identity. A correction that narrows a
+shared record to `owner_only` moves it: the reserved copy is written first,
+then the default copy is deleted, and a failure at either step fails the write.
+Until the delete lands, an id can exist in both namespaces; merged reads keep
+only the reserved copy. Each namespace answers within `topK`, so a merged read
+also fetches, in one call, every returned default id the reserved hits do not
+cover, and drops those the reserved namespace holds. While a move is
+incomplete, a dropped duplicate is not replaced by the default namespace's next
+candidate, so ranking at the `topK` edge can differ; no stale copy is returned.
+Pinecone has no conditional writes, so a `chat_scoped`
+write of the same id racing a move can leave the shared pre-correction text in
+the default namespace. That copy never carries `owner_only` text.
+
+Readers and writers can upgrade in either order: old readers never query the
+reserved namespace, and new readers retain the legacy-record rules below.
+For rollback, restore the earlier reader release; it cannot expose `owner_only`
+records because it never queries that namespace. No earlier release writes
+`owner_only` records, because the visibility field ships with this fence.
+An earlier writer ignores `recordVisibility` and the `passive` type, so after
+a writer rollback the instance's new memories (`memory_write`, and fact export
+on chat instances) land unstamped in the default namespace, where earlier
+readers and compatible recall return them to other callers. Roll back an
+instance that writes `owner_only` records only with its memory writes stopped
+(for example, with the instance stopped), or roll back readers only. Rolling
+forward again needs no migration.
+
+Records written before these fields existed carry none of them. Nothing ties
+such a record to an owner, so recall does not infer ownership from the missing
+fields:
+
+- **Default instances** (none of the settings below): unstamped records are
+  recalled exactly as before.
+- **Restrictive recall**: on an instance with `memory.pinecone.instanceScopedIds`
+  on, `memory.pinecone.recordVisibility` `owner_only`, or `instanceType`
+  `passive`, a caller without `owner_only` access receives only records stamped
+  `chat_scoped` from the instance's chat-memory namespaces. The pre-query filter
+  asks for `visibility` `chat_scoped`, and the returned records are checked
+  again. Unstamped records reach only a caller with `owner_only` access.
+  Documents, other allowed indexes and entity records keep the compatible filter
+  (everything except `owner_only`). Entity mode (`searchMode` `entity`) searches
+  the whole default namespace with that compatible filter, so on an index that
+  also holds chat memories it can return unstamped chat memories from other
+  chats: do not combine entity mode with restrictive recall on such an index.
+- **Instance and account boundary**: applies only with `instanceScopedIds` on.
+  Source eligibility is checked before ranking, conversation scope, and the
+  untagged-record shortcut. Other-account records are excluded, except
+  `owner_only` records read by an admitted owner from a listed source.
+  Non-owners cannot read chat memories missing either source field. An unknown
+  reader account admits no stamped or unstamped chat memory to a non-owner.
+  Business entities and documents without chat-memory attribution retain their
+  compatible unstamped behavior; their stamped records still pass the source gate.
+  An entity record in a chat namespace carries no `chat_jid`, so like any
+  untagged record it never reaches a configurable group or a caller without
+  conversation context.
+  Query filters enforce the boundary before retrieval, followed by a result gate.
+
+With `instanceScopedIds` on, consolidation selects only records with the writer's
+known instance and account, then verifies returned metadata. An unknown writer
+account produces no work. Promotions preserve source instance, source account,
+and visibility; inputs with different visibility are consolidated separately.
+If the writer account changes before promotion, the provider refuses the write.
+Supersede candidates, with either flag setting, must have each source field equal
+to the known writer's value or absent. Legacy unstamped records remain correctable.
+
+Set `accountScopeId` on every instance that uses `recordVisibility` or runs as a
+`passive` line, so `source_account` is an opaque configured id rather than the
+hash fallback.
+
+##### owner_only records
+
+A record stamped `owner_only` (a personal line's records, or an instance
+configured that way) is returned only to a caller that
+`ownerOnlyRecallAllowed` (`src/core/memory-scope.ts`) admits: a verified
+`adminPhones` identity or a `memory.pinecone.trustedOperatorPhones` entry,
+proven over an authenticated transport, in a conversation the transport
+classified as a direct chat (the inbound message's `isGroup` flag is `false`).
+The absence of a group marker proves nothing: an iMessage group id has none, and
+an unknown conversation kind is refused. Nothing else gets one:
+not ordinary contacts (whatever their `contactRecallScopes`), not any group (even
+one the admin is in, because other members read the reply), not the operator
+instance by itself, not a global session without a conversation, and not an
+unverified transport such as SMS. The operator instance's recall scope spans
+every chat, so that scope (`resolveMemoryScope`) never carries the grant, even
+for the verified owner in a direct chat.
+
+An admitted caller receives an `owner_only` record only from a source it is bound
+to: the record's `source_instance` must be this instance's name or an entry of
+`memory.pinecone.ownerOnlySources`. A record from any other instance, or one with
+a missing or empty `source_instance`, is never served, entity records included.
+The check is separate from `instanceScopedIds`, so it holds with that option off.
+
+`knowledge_search` currently grants no `owner_only` access to anyone. It
+receives no transport classification of the conversation, and its grant also
+requires an agent session isolated per chat (`agentOptions.sessionScope`
+`per_chat` or `sandboxPerChat`), because a shared session carries recalled
+records into replies to other chats. Only the chat runtime's recall returns
+`owner_only` records today.
+
+Access widens recall for `owner_only` records
+only: a caller with access receives them from any chat (`knowledge_search` would
+add one `visibility = owner_only` leg per memory namespace; the chat runtime adds
+a fourth `visibility = owner_only` leg beside its chat, sender and self-fact
+legs, merged after the chat and sender results, and lets `owner_only` records
+past its this-chat hold), while its `chat_scoped` and untagged recall keeps
+the boundary in the table above. The admin's own scope is unchanged. For callers
+without access, both readers apply visibility filters before the query and
+check returned records again. Compatible recall uses `visibility` absent or not
+`owner_only`. Restrictive chat-memory recall instead requires `chat_scoped`.
+Documents and entity profiles, including an entity profile on `__default__`,
+keep the compatible exclusion. These rules cover
+`knowledge_search` on every allowed index, `memory.pinecone.index` or not, in
+memory and document namespaces alike; the `poll.pinecone` watch search, which
+has no caller with access; and the chat runtime's chat, sender and self-fact
+legs. A per-record gate drops any `owner_only` hit that still arrives (a
+watch reports no score for it). Visibility is authorized independently of conversation scoping, so an
+allowed index other than the instance's own memory index (another instance's
+memory, for example) never returns an `owner_only` record to a contact or a
+group either. Records with no `visibility` field remain eligible under compatible
+recall, but restrictive chat-memory recall excludes them. Tests cover the
+filter shape and the gate; Pinecone's evaluation of `$exists`/`$ne` on live
+metadata is outside unit-test reach.
 
 ##### Memory recall scope
 
@@ -1251,7 +1409,8 @@ Every `knowledge_search` of `memory.pinecone.index`, with or without a
 `namespace` argument, scopes its chat memories to the calling conversation
 (`src/core/memory-scope.ts`). Recall ranks memories; it does not lock them out,
 except in groups other people can read and in direct chats with contacts who
-are not instance admins:
+are not instance admins. The source and visibility gates described above apply
+before every ranking rule in this table:
 
 | Calling context | How it is recognised | Memories returned, in order |
 |---|---|---|
@@ -1264,12 +1423,14 @@ are not instance admins:
 | Chat session, no conversation | tier `chat-scoped` with no pinned conversation | nothing |
 
 - **Chat memories and documents.** The scope applies only to the memory
-  namespaces: the default namespace `memory_write` writes to, and the WhatsApp
+  namespaces: the default namespace `memory_write` writes `chat_scoped` records
+  to (`owner_only` records go to the reserved namespace above), and the WhatsApp
   conversation roles in `memory.pinecone.namespaces` (`facts`, `chunks`,
   `summaries`, `legacy`). Every other namespace of the index (for example the
   `namespaces.contacts`, `namespaces.localDocs` and `namespaces.oneDrive`
   roles) is a document namespace: it is
-  searched unfiltered in every context, as before scoping, and its hits are
+  searched without conversation scoping in every context, as before scoping
+  (the compatible visibility exclusion and applicable source gate still apply), and its hits are
   merged into the memory order by relevance score (after rerank when the
   profile reranks), so a relevant document can sit above a weakly relevant
   memory.

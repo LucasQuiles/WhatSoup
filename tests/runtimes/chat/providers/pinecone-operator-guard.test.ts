@@ -20,10 +20,11 @@ vi.mock('@pinecone-database/pinecone', () => ({
 }));
 
 // Shaped like the operator host today: botName `q`, no memory.pinecone guard,
-// the index left at its default.
+// the index left at its default. A write also needs a known account.
 vi.mock('../../../../src/config.ts', () => ({
   config: {
     botName: 'q',
+    accountScopeId: 'scope:operator-guard-line',
     pineconeIndex: 'whatsapp-bot',
     pineconeContextTopK: 10,
     pineconeSenderTopK: 5,

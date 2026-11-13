@@ -7,8 +7,9 @@
 // Resolution order at request time:
 //   1. inline apiKey (when non-empty) — caller-supplied
 //   2. apiKeyService via lookupCredential() (when service is non-empty). An
-//      inferred canonical service skips lookupCredential's internal env-first
-//      path so the separately observed fallback below remains authoritative.
+//      inferred canonical service, or an explicit one with skipServiceEnv,
+//      skips lookupCredential's internal env-first path so the separately
+//      observed fallback below remains authoritative.
 //   3. process.env[envVar] — last-resort fallback (when allowEnvFallback !== false)
 //   4. '' — missing-key signaling is the caller's responsibility
 //
@@ -26,6 +27,7 @@
 // are unaffected until they opt in.
 
 import { lookupCredential } from './keyring.ts';
+import { isNonEmptyString } from './type-guards.ts';
 import { createChildLogger } from '../logger.ts';
 
 const log = createChildLogger('api-key-resolver');
@@ -50,6 +52,36 @@ export interface ResolveApiKeyOptions {
    * (backward-compatible — preserves the prior env-fallback behavior).
    */
   allowEnvFallback?: boolean;
+  /**
+   * When `true`, an explicit `service` is looked up with lookupCredential's
+   * env read skipped, so the env var mapped to that service (possibly another
+   * provider's) never outranks the keyring or the `envVar` fallback. Adds no
+   * env read of its own. Default: `false` (unchanged).
+   */
+  skipServiceEnv?: boolean;
+}
+
+/** The `memory.pinecone` key settings, passed in by the caller from instance config. */
+export interface PineconeKeyConfig {
+  apiKeyEnv?: unknown;
+  apiKeyService?: unknown;
+}
+
+/**
+ * The Pinecone key every Pinecone reader and writer uses: the keyring first
+ * (the configured apiKeyService, or service `pinecone` for the default env
+ * name), then only the env var named by apiKeyEnv (default PINECONE_API_KEY).
+ * An explicit service skips its mapped env var (skipServiceEnv), so an ambient
+ * key never outranks the selected credential. Shared by PineconeMemory, the
+ * memory_write registration gate, knowledge_search and the poll.pinecone watch
+ * search so they cannot disagree.
+ */
+export function resolvePineconeApiKey(pinecone: PineconeKeyConfig | undefined): string {
+  return resolveApiKey({
+    service: isNonEmptyString(pinecone?.apiKeyService) ? pinecone.apiKeyService : undefined,
+    envVar: isNonEmptyString(pinecone?.apiKeyEnv) ? pinecone.apiKeyEnv : 'PINECONE_API_KEY',
+    skipServiceEnv: true,
+  });
 }
 
 /**
@@ -72,7 +104,7 @@ export function resolveApiKey(opts: ResolveApiKeyOptions): string {
     : opts.service;
 
   if (effectiveService && effectiveService.length > 0) {
-    const fromKeyring = inferredCanonicalService
+    const fromKeyring = inferredCanonicalService || opts.skipServiceEnv === true
       ? lookupCredential(effectiveService, { skipEnv: true })
       : lookupCredential(effectiveService);
     if (fromKeyring && fromKeyring.length > 0) {

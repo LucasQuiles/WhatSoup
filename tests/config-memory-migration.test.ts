@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { migrateLegacyMemoryConfig } from '../src/config-memory-migration.ts';
+import { validateInstanceConfig } from '../src/core/agent-config-validator.ts';
 
 describe('migrateLegacyMemoryConfig', () => {
   it('preserves agentOptions (providerConfig, fallbacks) untouched while migrating legacy fields', () => {
@@ -287,5 +288,55 @@ describe('config-memory-migration.ts uncovered-branch coverage', () => {
     expect(input).toEqual(snapshot);
     expect(result.config.pineconeIndex).toBeUndefined();
     expect((result.config.memory as any).pinecone.index).toBe('canonical-index');
+  });
+});
+
+// A legacy pineconeNamespaces key names a namespace role, not a path. The
+// validator, config load and the fleet routes migrate operator-supplied JSON,
+// so a key such as "__proto__.x" must never reach Object.prototype or
+// reparent an object. Fixtures come from JSON.parse: an object literal's
+// __proto__ sets the prototype instead of creating an own key.
+describe('migrateLegacyMemoryConfig with hostile legacy namespace keys', () => {
+  const probe = 'pollutedByLegacyNamespaceKey';
+  const prototype = Object.prototype as unknown as Record<string, unknown>;
+  afterEach(() => {
+    delete prototype[probe];
+    delete prototype['systemPrompt'];
+  });
+
+  it.each(['__proto__.', 'constructor.prototype.', 'prototype.'])(
+    'never writes through a dotted key starting %s into a shared prototype',
+    (prefix) => {
+      const input = JSON.parse(`{"pineconeNamespaces": {"${prefix}${probe}": "x"}}`) as Record<string, unknown>;
+      migrateLegacyMemoryConfig(input, { removeLegacy: false });
+      expect(Object.hasOwn(Object.prototype, probe)).toBe(false);
+      expect(Object.hasOwn(Function.prototype, probe)).toBe(false);
+      expect(({} as Record<string, unknown>)[probe]).toBeUndefined();
+    },
+  );
+
+  it('never reparents the namespaces object through a bare __proto__ key', () => {
+    const input = JSON.parse(
+      `{"pineconeNamespaces": {"__proto__": {"${probe}": "x"}, "facts": "facts-ns"}}`,
+    ) as Record<string, unknown>;
+    const { config } = migrateLegacyMemoryConfig(input, { removeLegacy: false });
+    const namespaces = (config.memory as any).pinecone.namespaces as Record<string, unknown>;
+    expect(Object.getPrototypeOf(namespaces)).toBe(Object.prototype);
+    expect(namespaces[probe]).toBeUndefined();
+    expect(namespaces['facts']).toBe('facts-ns');
+  });
+
+  it('maps a dotted legacy namespace key literally, not as a path', () => {
+    const { config } = migrateLegacyMemoryConfig({ pineconeNamespaces: { 'team.docs': 'team-docs' } });
+    expect((config.memory as any).pinecone.namespaces).toEqual({ 'team.docs': 'team-docs' });
+  });
+
+  it('cannot satisfy a required field through the validator migration', () => {
+    const raw = JSON.parse(
+      '{"name":"alpha","type":"chat","accessMode":"allowlist","adminPhones":["15551234567"],'
+      + '"pineconeNamespaces":{"__proto__.systemPrompt":"x"}}',
+    ) as Record<string, unknown>;
+    expect(validateInstanceConfig(raw, { name: 'alpha', mode: 'load' })?.field).toBe('systemPrompt');
+    expect(Object.hasOwn(Object.prototype, 'systemPrompt')).toBe(false);
   });
 });

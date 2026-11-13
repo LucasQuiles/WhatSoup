@@ -24,6 +24,8 @@ export interface MemoryConsolidationSchedulerConfig {
   intervalMs: number;
   lookbackDays: number;
   dryRun: boolean;
+  /** Instance name when memory.pinecone.instanceScopedIds is on (see runConsolidation). */
+  instanceScope?: string | null;
   totalRunTimeoutMs?: number;
 }
 
@@ -219,6 +221,7 @@ export class MemoryConsolidationScheduler {
     const rawRun = runConsolidation(this.pinecone, this.provider, {
       lookbackDays: this.config.lookbackDays,
       dryRun: this.config.dryRun,
+      ...(this.config.instanceScope ? { instanceScope: this.config.instanceScope } : {}),
       runId: active.handle.runId,
       signal: active.controller.signal,
       // The report is stamped inside runConsolidation, which keeps its own

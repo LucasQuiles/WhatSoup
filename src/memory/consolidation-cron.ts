@@ -11,6 +11,11 @@ import type {
   PineconeSearchDetails,
 } from '../runtimes/chat/providers/pinecone.ts';
 import type { LLMProvider } from '../runtimes/chat/providers/types.ts';
+import {
+  narrowestVisibility,
+  type MemoryProvenance,
+  type MemoryVisibility,
+} from '../core/memory-scope.ts';
 import { clusterMemories, consolidateCluster } from './consolidation.ts';
 import type { ClusterExecutionOutcome } from './types.ts';
 import {
@@ -38,15 +43,23 @@ export interface ConsolidationOptions {
     evidenceCoverage: MemoryEvidenceCoverage,
   ) => boolean | void;
   now?: () => number;
+  /**
+   * This instance's name when `memory.pinecone.instanceScopedIds` is on, else
+   * null/absent. Folded into durable ids (and, with it on, the source
+   * selection and grouping boundaries).
+   */
+  instanceScope?: string | null;
 }
 
 export interface ConsolidationPinecone {
+  sourceAccount?(): string;
   searchDetailed(
     query: string,
     filters: Record<string, unknown>,
     topK: number,
     traceId?: string,
     signal?: AbortSignal,
+    namespaces?: 'default' | 'both',
   ): Promise<PineconeSearchDetails>;
   upsert(
     records: MemoryRecord[],
@@ -54,6 +67,7 @@ export interface ConsolidationPinecone {
       operationId?: string;
       traceId?: string;
       operation?: 'upsert' | 'memory_write';
+      provenance?: MemoryProvenance;
       signal?: AbortSignal;
     },
   ): Promise<void>;
@@ -66,6 +80,15 @@ const CONSOLIDATED_QUALIFIER = 'consolidated';
 
 function scopeKey(chatJid: string, senderJid: string): string {
   return `${chatJid}\0${senderJid}`;
+}
+
+/**
+ * Durable record id. With an instance scope (opt-in) the instance prefixes the
+ * hash input; without one the id is exactly the pre-scope formula.
+ */
+function durableId(instanceScope: string | null, scope: string, claim: string): string {
+  const input = instanceScope === null ? `${scope}\0${claim}` : `${instanceScope}\0${scope}\0${claim}`;
+  return `durable:${shortHash(input, 16)}`;
 }
 
 function searchEvidence(details: PineconeSearchDetails): MemoryEvidenceCoverage {
@@ -158,6 +181,12 @@ export async function runConsolidation(
     return finish('cancelled');
   }
 
+  const sourceAccountId = options.instanceScope ? pinecone.sourceAccount?.() : undefined;
+  if (options.instanceScope && !sourceAccountId) {
+    progress('finalize', 'local_guard');
+    return finish('no_work');
+  }
+
   progress('search', 'not_observed');
   let search: PineconeSearchDetails;
   try {
@@ -183,10 +212,22 @@ export async function runConsolidation(
           { confidence_qualifier: { $exists: false } },
           { confidence_qualifier: { $ne: CONSOLIDATED_QUALIFIER } },
         ],
+        // Instance-scoped (opt-in): consolidate only this instance's records,
+        // so a promotion keeps its sources' provenance.
+        ...(options.instanceScope ? {
+          source_instance: { $eq: options.instanceScope },
+          source_account: { $eq: sourceAccountId },
+        } : {}),
       },
       100,
       options.traceId,
       options.signal,
+      // owner_only sources live in the reserved namespace; promotions keep
+      // their sources' visibility, so owner_only promotions go back there.
+      // Unscoped, consolidation cannot tell whose an owner_only record is and
+      // a promotion carries this instance's identity: it reads the default
+      // namespace only, so another line's private text never becomes its own.
+      options.instanceScope ? 'both' : 'default',
     );
   } catch (error) {
     const failure = classifyMemoryOperationFailure(error);
@@ -231,8 +272,14 @@ export async function runConsolidation(
     isDurableId(result.id)
     || isDurableId(result.record.id)
     || (result.record.confidenceQualifier ?? '').toLowerCase() === CONSOLIDATED_QUALIFIER;
-  const recentMemories = withinWindow.filter((result) => !isConsolidatedOutput(result));
-  const consolidatedExcluded = withinWindow.length - recentMemories.length;
+  const eligible = withinWindow.filter(({ record }) => !options.instanceScope || (
+    record.sourceInstance === options.instanceScope
+    && record.sourceAccount === sourceAccountId
+    && (record.visibility === 'chat_scoped' || record.visibility === 'owner_only')
+  ));
+  counters.skipped += withinWindow.length - eligible.length;
+  const recentMemories = eligible.filter((result) => !isConsolidatedOutput(result));
+  const consolidatedExcluded = eligible.length - recentMemories.length;
   if (consolidatedExcluded > 0) {
     counters.skipped += consolidatedExcluded;
     log.info({ consolidatedExcluded }, 'Excluded prior consolidation outputs from source selection');
@@ -255,10 +302,22 @@ export async function runConsolidation(
     senderJid: result.record.senderJid ?? '',
   }));
 
+  // Source visibility by record id: a promotion is never less restricted than
+  // the records it was derived from (an owner_only source makes the durable
+  // record owner_only).
+  const sourceVisibility = new Map(recentMemories.map((result) => [result.id, result.record.visibility]));
+  // Scoped promotions preserve visibility as well as account identity.
+  const sourceAccount = new Map(recentMemories.map((result) => [result.id, result.record.sourceAccount ?? '']));
+  const groupKeyFor = (record: { id: string; chatJid: string; senderJid: string }): string => {
+    const key = scopeKey(record.chatJid, record.senderJid);
+    return options.instanceScope ? `${sourceAccount.get(record.id)}\0${sourceVisibility.get(record.id)}\0${key}` : key;
+  };
   const scopedRecords = new Map<string, {
+    key: string;
     chatJid: string;
     senderJid: string;
     records: typeof records;
+    visibility: MemoryVisibility;
   }>();
   // counters.skipped accrues both exclusion reasons (consolidated outputs
   // above, unscoped records here); the log fields keep the reasons distinct.
@@ -269,13 +328,16 @@ export async function runConsolidation(
       unscopedSkipped += 1;
       continue;
     }
-    const key = scopeKey(record.chatJid, record.senderJid);
+    const key = groupKeyFor(record);
     const group = scopedRecords.get(key) ?? {
+      key,
       chatJid: record.chatJid,
       senderJid: record.senderJid,
       records: [],
+      visibility: 'chat_scoped' as MemoryVisibility,
     };
     group.records.push(record);
+    group.visibility = narrowestVisibility(group.visibility, sourceVisibility.get(record.id));
     scopedRecords.set(key, group);
   }
 
@@ -371,7 +433,8 @@ export async function runConsolidation(
         counters.writeAttempted += 1;
         try {
           await pinecone.upsert([{
-            id: `durable:${shortHash(scopeKey(group.chatJid, group.senderJid) + `\0${durable.claim}`, 16)}`,
+            // Off: group.key is scopeKey(chat, sender), the legacy formula.
+            id: durableId(options.instanceScope ?? null, group.key, durable.claim),
             text: durable.claim,
             chatJid: group.chatJid,
             senderJid: group.senderJid,
@@ -388,8 +451,15 @@ export async function runConsolidation(
             warrant: durable.promotionReason,
             confidenceQualifier: CONSOLIDATED_QUALIFIER,
             contradicts: '',
+            // Scoped writes retain the input provenance, checked by the provider.
+            ...(options.instanceScope ? {
+              sourceInstance: options.instanceScope,
+              sourceAccount: sourceAccountId,
+              visibility: group.visibility,
+            } : group.visibility === 'owner_only' ? { visibility: group.visibility } : {}),
           }], {
             operation: 'memory_write',
+            provenance: 'consolidation',
             traceId: options.traceId,
             signal: options.signal,
           });

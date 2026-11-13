@@ -22,7 +22,12 @@ import {
   classifyMemoryOperationFailure,
   createMemoryOperationContext,
 } from '../../lib/memory-operation-telemetry.ts';
-import { PineconeMemory, type MemoryRecord } from '../../runtimes/chat/providers/pinecone.ts';
+import {
+  PineconeMemory,
+  configuredRecordIdScope,
+  type MemoryRecord,
+} from '../../runtimes/chat/providers/pinecone.ts';
+import type { MemoryProvenance } from '../../core/memory-scope.ts';
 import {
   conversationBoundKey,
   errorResult,
@@ -36,6 +41,8 @@ export interface MemoryWriteOperationContext {
   operationId?: string;
   traceId?: string;
   operation?: 'upsert' | 'memory_write';
+  /** Which pipeline wrote the record; the provider stamps it as `provenance`. */
+  provenance?: MemoryProvenance;
 }
 
 export interface MemoryWriter {
@@ -60,9 +67,21 @@ const MemoryWriteSchema = z.object({
   contradicts: z.string().max(2000).optional(),
 });
 
-function stableId(chatKey: string, memoryType: string, text: string): string {
-  const h = shortHash(JSON.stringify([chatKey, memoryType, text]), 24);
+function stableId(chatKey: string, memoryType: string, text: string, idScope: string | null): string {
+  // Instance-scoped ids (opt-in) prepend the instance to the hash input; off,
+  // the input and so every existing id stay exactly as before.
+  const input = idScope === null ? [chatKey, memoryType, text] : [idScope, chatKey, memoryType, text];
+  const h = shortHash(JSON.stringify(input), 24);
   return `${memoryType}_${h}`;
+}
+
+/**
+ * Live Pinecone writer factory that stamps the connected account. Lives here
+ * (memory_write already depends on the provider) so register-all needs no
+ * runtime import.
+ */
+export function pineconeMemoryWriter(accountJid: () => string | null | undefined): () => MemoryWriter {
+  return () => new PineconeMemory({ accountJid });
 }
 
 /**
@@ -77,6 +96,8 @@ export function registerMemoryWriteTools(
   // Injectable so record timestamps can be driven to a known instant (#2200).
   // Optional and defaulted, so this slice changes no existing call site.
   clock: Clock = systemClock,
+  // Injectable for tests; defaults to the instance configuration.
+  idScope: () => string | null = configuredRecordIdScope,
 ): void {
   let writer: MemoryWriter | null = null;
   const getWriter = (): MemoryWriter => (writer ??= makeWriter());
@@ -141,7 +162,7 @@ export function registerMemoryWriteTools(
       });
       const now = clock.nowIso();
       const record: MemoryRecord = {
-        id: stableId(rawChat, memoryType, p.text),
+        id: stableId(rawChat, memoryType, p.text, idScope()),
         text: p.text,
         chatJid: rawChat,
         senderJid,
@@ -159,9 +180,13 @@ export function registerMemoryWriteTools(
       };
 
       try {
+        // Source instance, account, visibility and provenance are stamped by
+        // the provider from instance config and runtime state; the record and
+        // the tool arguments carry none of them.
         await getWriter().upsert([record], {
           operationId: operation.operationId,
           operation: 'memory_write',
+          provenance: 'memory_write',
         });
       } catch (err) {
         const failure = classifyMemoryOperationFailure(err);

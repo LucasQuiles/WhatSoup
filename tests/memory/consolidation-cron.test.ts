@@ -12,6 +12,141 @@ vi.mock('../../src/logger.ts', async () => {
 import { classifyMemoryFilter } from '../../src/lib/memory-operation-telemetry.ts';
 import { runConsolidation } from '../../src/memory/consolidation-cron.ts';
 
+describe('runConsolidation — provenance and visibility', () => {
+  function run(visibility: string | undefined, instanceScope?: string | null) {
+    const pinecone = {
+      sourceAccount: () => 'acct:one',
+      searchDetailed: vi.fn().mockResolvedValue({
+        results: [{
+          id: 'rec-1',
+          score: 0.9,
+          record: {
+            id: 'rec-1',
+            text: 'Lives in London',
+            claim: 'Lives in London',
+            evidence: 'Said so',
+            createdAt: new Date().toISOString(),
+            confidence: 0.9,
+            chatJid: 'chat-1@g.us',
+            senderJid: 'sender-1@s.whatsapp.net',
+            ...(instanceScope ? { sourceInstance: instanceScope, sourceAccount: 'acct:one', visibility: 'chat_scoped' } : {}),
+            ...(visibility ? { visibility } : {}),
+          },
+        }],
+        status: 'ok',
+        evidenceCoverage: 'provider_response',
+      }),
+      upsert: vi.fn().mockResolvedValue(undefined),
+    };
+    const provider = {
+      name: 'test-provider',
+      generate: vi.fn().mockResolvedValue({
+        content: JSON.stringify({
+          durableKnowledge: [{
+            claim: 'User lives in London',
+            promotionReason: 'Consistent across sessions',
+            confidence: 0.92,
+            sourceRecordIds: ['rec-1'],
+          }],
+          discarded: [],
+        }),
+        inputTokens: 100,
+        outputTokens: 50,
+        model: 'test',
+        durationMs: 100,
+      }),
+    };
+    return {
+      pinecone,
+      done: runConsolidation(pinecone, provider, {
+        lookbackDays: 7,
+        dryRun: false,
+        ...(instanceScope !== undefined ? { instanceScope } : {}),
+      }),
+    };
+  }
+
+  it('durable ids keep the legacy formula when instance scope is off and differ per instance when on', async () => {
+    const legacy = `durable:${createHash('sha256')
+      .update('chat-1@g.us\0sender-1@s.whatsapp.net\0User lives in London').digest('hex').slice(0, 16)}`;
+    const idFor = async (instanceScope: string | null | undefined): Promise<string> => {
+      const { pinecone, done } = run(undefined, instanceScope);
+      await done;
+      return pinecone.upsert.mock.calls[0][0][0].id as string;
+    };
+    expect(await idFor(undefined)).toBe(legacy);
+    expect(await idFor(null)).toBe(legacy);
+    const a = await idFor('line-a');
+    const b = await idFor('line-b');
+    expect(a).not.toBe(b);
+    expect(a).not.toBe(legacy);
+    expect(a).toMatch(/^durable:[0-9a-f]{16}$/);
+  });
+
+  it('with an instance scope, skips returned records from another account', async () => {
+    const record = (id: string, sourceAccount: string) => ({
+      id,
+      score: 0.9,
+      record: {
+        id, text: 'Lives in London', claim: 'Lives in London', evidence: 'Said so',
+        createdAt: new Date().toISOString(), confidence: 0.9,
+        chatJid: 'chat-1@g.us', senderJid: 'sender-1@s.whatsapp.net',
+        sourceInstance: 'line-a', sourceAccount,
+        visibility: 'chat_scoped',
+      },
+    });
+    const pinecone = {
+      sourceAccount: () => 'acct:one',
+      searchDetailed: vi.fn().mockResolvedValue({
+        results: [record('r1', 'acct:one'), record('r2', 'acct:two')], status: 'ok', evidenceCoverage: 'provider_response',
+      }),
+      upsert: vi.fn().mockResolvedValue(undefined),
+    };
+    const provider = {
+      name: 'test-provider',
+      generate: vi.fn().mockImplementation(async (request: unknown) => {
+        const ids = JSON.stringify(request).includes('r1') ? ['r1'] : ['r2'];
+        return {
+          content: JSON.stringify({
+            durableKnowledge: [{ claim: 'User lives in London', promotionReason: 'stated', confidence: 0.9, sourceRecordIds: ids }],
+            discarded: [],
+          }),
+          inputTokens: 1, outputTokens: 1, model: 'test', durationMs: 1,
+        };
+      }),
+    };
+    await runConsolidation(pinecone, provider, { lookbackDays: 7, dryRun: false, instanceScope: 'line-a' });
+    expect(pinecone.searchDetailed.mock.calls[0][1]).toMatchObject({ source_instance: { $eq: 'line-a' } });
+    expect(pinecone.searchDetailed.mock.calls[0][1]).toMatchObject({ source_account: { $eq: 'acct:one' } });
+    // Instance-scoped consolidation also reads the reserved owner_only namespace.
+    expect(pinecone.searchDetailed.mock.calls[0][5]).toBe('both');
+    expect(provider.generate).toHaveBeenCalledTimes(1);
+    expect(pinecone.upsert).toHaveBeenCalledTimes(1);
+    expect(pinecone.upsert.mock.calls[0][0][0]).toMatchObject({ sourceInstance: 'line-a', sourceAccount: 'acct:one' });
+  });
+
+  it('labels the write as consolidation provenance', async () => {
+    const { pinecone, done } = run(undefined);
+    await done;
+    expect(pinecone.upsert).toHaveBeenCalledTimes(1);
+    expect(pinecone.upsert.mock.calls[0][1]).toMatchObject({ provenance: 'consolidation' });
+  });
+
+  it('an owner_only source makes the durable record owner_only (never widened)', async () => {
+    const { pinecone, done } = run('owner_only');
+    await done;
+    expect(pinecone.upsert.mock.calls[0][0][0].visibility).toBe('owner_only');
+  });
+
+  it('chat_scoped and legacy sources leave visibility to the provider stamp', async () => {
+    for (const visibility of ['chat_scoped', undefined]) {
+      const { pinecone, done } = run(visibility);
+      await done;
+      expect(pinecone.upsert.mock.calls[0][0][0]).not.toHaveProperty('visibility');
+    }
+  });
+});
+
 describe('runConsolidation', () => {
   function makeMockPinecone(searchResults: any[] = []) {
     return {
@@ -98,6 +233,8 @@ describe('runConsolidation', () => {
       100,
       undefined,
       undefined,
+      // Unscoped consolidation reads the default namespace only.
+      'default',
     );
   });
 

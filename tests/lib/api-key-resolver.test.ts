@@ -19,7 +19,7 @@ import { createChildLogger } from '../../src/logger.ts';
 import type { singletonLoggerMock } from '../helpers/logger-mock.ts';
 const mockLog = createChildLogger('api-key-resolver') as unknown as ReturnType<typeof singletonLoggerMock>;
 
-import { resolveApiKey } from '../../src/lib/api-key-resolver.ts';
+import { resolveApiKey, resolvePineconeApiKey } from '../../src/lib/api-key-resolver.ts';
 import { lookupCredential } from '../../src/lib/keyring.ts';
 
 const mockedLookup = vi.mocked(lookupCredential);
@@ -299,5 +299,57 @@ describe('resolveApiKey', () => {
 
       expect(result).toBe('env-key');
     });
+  });
+});
+
+describe('resolvePineconeApiKey', () => {
+  const originalEnv = { ...process.env };
+  // Models lookupCredential's unscoped order: the env var mapped to the service
+  // first unless skipEnv, then the stores (here, a keyring map).
+  const SERVICE_ENV: Record<string, string> = {
+    openai: 'OPENAI_API_KEY', pinecone: 'PINECONE_API_KEY', anthropic: 'ANTHROPIC_API_KEY',
+  };
+  const keyring = (stored: Record<string, string>) => (service: string, options: { skipEnv?: boolean } = {}) => {
+    const envName = SERVICE_ENV[service];
+    const fromEnv = envName ? process.env[envName] : undefined;
+    if (options.skipEnv !== true && fromEnv) return fromEnv;
+    return stored[service] ?? null;
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.PINECONE_API_KEY;
+    delete process.env.TENANT_PINECONE_KEY;
+  });
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  it('an explicit service keeps its keyring credential over the ambient env var mapped to it', () => {
+    process.env.PINECONE_API_KEY = 'ambient-env-key';
+    mockedLookup.mockImplementation(keyring({ pinecone: 'tenant-keyring-key' }));
+
+    expect(resolvePineconeApiKey({ apiKeyService: 'pinecone' })).toBe('tenant-keyring-key');
+  });
+
+  it('never returns the env var of the provider an explicit service maps to', () => {
+    process.env.OPENAI_API_KEY = 'openai-env-key';
+    process.env.PINECONE_API_KEY = 'pinecone-env-key';
+    mockedLookup.mockImplementation(keyring({}));
+
+    expect(resolvePineconeApiKey({ apiKeyService: 'openai' })).toBe('pinecone-env-key');
+  });
+
+  it('after a keyring miss consults only the configured apiKeyEnv', () => {
+    process.env.OPENAI_API_KEY = 'openai-env-key';
+    process.env.PINECONE_API_KEY = 'pinecone-env-key';
+    process.env.TENANT_PINECONE_KEY = 'tenant-env-key';
+    mockedLookup.mockImplementation(keyring({}));
+
+    expect(resolvePineconeApiKey({ apiKeyService: 'openai', apiKeyEnv: 'TENANT_PINECONE_KEY' })).toBe('tenant-env-key');
+    delete process.env.TENANT_PINECONE_KEY;
+    expect(resolvePineconeApiKey({ apiKeyService: 'openai', apiKeyEnv: 'TENANT_PINECONE_KEY' })).toBe('');
   });
 });

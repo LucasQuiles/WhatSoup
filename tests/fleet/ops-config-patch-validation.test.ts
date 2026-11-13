@@ -355,6 +355,29 @@ describe('handleConfigUpdate PATCH Pinecone project guard validation', () => {
     );
     expect(fs.readFileSync(cfg, 'utf-8')).toBe(before);
   });
+
+  // Admission sees what config load sees: the loader migrates legacy aliases
+  // before refusing the reserved owner_only namespace, so the PATCH must too.
+  const guarded = { projectId: 'instance-proj-id', index: 'whatsapp-bot' };
+  it.each([
+    ['a legacy namespace alias', { pineconeFactsNamespace: 'whatsoup-owner-only-v1', memory: { pinecone: guarded } }],
+    ['the canonical namespace key', {
+      memory: { pinecone: { ...guarded, namespaces: { facts: 'whatsoup-owner-only-v1' } } },
+    }],
+  ])('rejects the reserved owner_only namespace through %s and leaves the file untouched', async (_case, patch) => {
+    const cfg = writeChatConfig();
+    const before = fs.readFileSync(cfg, 'utf-8');
+    const res = mockRes();
+
+    await handleConfigUpdate(
+      mockReq({ method: 'PATCH', body: JSON.stringify(patch) }),
+      res, depsFor(fakeInstance(cfg)), { name: 'test-line' },
+    );
+
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).message).toContain('reserved owner_only namespace whatsoup-owner-only-v1');
+    expect(fs.readFileSync(cfg, 'utf-8')).toBe(before);
+  });
 });
 
 describe('handleConfigUpdate PATCH round-trip invariant (#244 #249)', () => {

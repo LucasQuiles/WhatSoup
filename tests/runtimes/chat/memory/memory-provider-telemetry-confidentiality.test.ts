@@ -17,6 +17,8 @@ vi.mock('@pinecone-database/pinecone', () => ({
 vi.mock('../../../../src/config.ts', () => ({
   config: {
     botName: 'q',
+    // A write needs a known source account.
+    accountScopeId: 'scope:synthetic-line',
     pineconeIndex: 'SYNTHETIC_PRIVATE_INDEX_MARKER',
     pineconeContextTopK: 10,
     pineconeSenderTopK: 5,
@@ -274,7 +276,7 @@ describe('memory provider telemetry confidentiality', () => {
       query: {
         topK: 10,
         inputs: { text: 'SYNTHETIC_PRIVATE_QUERY_MARKER' },
-        filter: { source: { $ne: 'archive_db' } },
+        filter: { source: { $ne: 'archive_db' }, $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] },
       },
       fields: ['*'],
     });

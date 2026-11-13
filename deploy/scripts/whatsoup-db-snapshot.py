@@ -15,8 +15,19 @@ Usage:
     whatsoup-db-snapshot.py rehearse --snapshot <file>
 
 `snapshot` writes `<stem>-<UTC>.snapshot.sqlite3` (mode 0600, fsynced), runs
-PRAGMA integrity_check on the copy, records per-table row counts, prunes to
-the newest N snapshots (default 7), and prints one JSON receipt on stdout.
+PRAGMA integrity_check on the copy, records per-table row counts, prunes that
+database's own series to the newest N snapshots (default 7), and prints one
+JSON receipt on stdout. Other databases' snapshots in the same out-root are
+never counted or pruned.
+
+The copy is switched to a rollback journal (`journal_mode=DELETE`) before it
+is published. The backup API copies the source header, so a live WAL source
+would otherwise yield a WAL-format snapshot: a read-only reader of such a file
+must find or create `-wal`/`-shm` sidecars beside it, leaves them behind, and
+fails where it cannot create them. A snapshot is therefore one self-contained
+file, and no `-wal`, `-shm` or `-journal` file of the pending copy survives
+any path. Snapshots taken before this change are WAL-format: re-take them
+rather than rehearse them in a read-only place.
 
 `rehearse` opens an existing snapshot read-only, re-runs integrity_check and
 per-table row counts, and prints a JSON receipt; a corrupt or failing
@@ -30,6 +41,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -74,7 +86,16 @@ def emit(receipt: dict) -> None:
 def prune_snapshots(out_root: Path, stem: str, retain: int) -> list[str]:
     if retain <= 0:
         return []
-    snapshots = sorted(out_root.glob(f"{stem}-*.snapshot.sqlite3"))
+    # Count only this database's own series, matched literally. A glob built
+    # from the stem would read "*" or "[...]" in a database name as a pattern,
+    # and a bare prefix would also catch another database whose name starts
+    # with this stem ("bot" and "bot-archive"). The fixed-width UTC stamp keeps
+    # name order chronological; [0-9], not \d, which also matches non-ASCII
+    # digits this tool never writes.
+    own_series = re.compile(re.escape(stem) + r"-[0-9]{8}T[0-9]{6}Z\.snapshot\.sqlite3")
+    snapshots = sorted(
+        path for path in out_root.iterdir() if own_series.fullmatch(path.name) and path.is_file()
+    )
     doomed = snapshots[:-retain] if len(snapshots) > retain else []
     for path in doomed:
         path.unlink()
@@ -104,6 +125,12 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
         try:
             src.backup(dst)
             dst.commit()
+            # The backup copied the source header; a WAL source makes the copy
+            # WAL-format. Convert it to a self-contained rollback-journal file.
+            journal_mode = str(dst.execute("PRAGMA journal_mode=DELETE").fetchone()[0]).lower()
+            if journal_mode != "delete":
+                emit({"check": "whatsoup-db-snapshot", "action": "snapshot", "error": f"snapshot journal mode stayed {journal_mode[:20]}"})
+                return 1
             integrity = dst.execute("PRAGMA integrity_check").fetchone()[0]
             counts = table_row_counts(dst)
         finally:
@@ -132,7 +159,10 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
     finally:
         src.close()
         if pending is not None:
-            pending.unlink()
+            # The pending copy and every sidecar SQLite may have created for
+            # it, on success and failure alike.
+            for path in (pending, *(Path(f"{pending}{suffix}") for suffix in ("-wal", "-shm", "-journal"))):
+                path.unlink(missing_ok=True)
     pruned = prune_snapshots(out_root, src_path.stem, args.retain)
     emit(
         {

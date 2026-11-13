@@ -64,6 +64,8 @@ import {
   validateTransportAuthorityConfig,
 } from './transport-authority-config-validation.ts';
 import { validateSignalConfig } from './signal-config-validation.ts';
+import { migrateLegacyMemoryConfig } from './config-memory-migration.ts';
+import { pineconeMemoryValueError } from './memory-scope.ts';
 
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
 export const ACCESS_MODES = [
@@ -174,6 +176,7 @@ function hasExplicitPineconeConfig(raw: Record<string, unknown>): boolean {
     ]) ||
     hasAnyOwn(pinecone, [
       'apiKeyEnv',
+      'apiKeyService',
       'index',
       'allowedIndexes',
       'namespaces',
@@ -190,8 +193,24 @@ function hasExplicitPineconeConfig(raw: Record<string, unknown>): boolean {
       'knowledgeSearch',
       'knowledgeProfiles',
       'embedUrl',
+      'recordVisibility',
+      'instanceScopedIds',
+      'trustedOperatorPhones',
+      'ownerOnlySources',
     ])
   );
+}
+
+/**
+ * The memory.pinecone values config load refuses (memory-scope.ts
+ * pineconeMemoryValueError, the same check), refused by every validator caller
+ * (admission, load, discovery, the deploy preflight) after the same
+ * legacy-alias migration the loader applies.
+ */
+function validatePineconeMemoryValues(raw: Record<string, unknown>): ValidationError | null {
+  const migrated = migrateLegacyMemoryConfig(raw, { removeLegacy: false }).config;
+  const failure = pineconeMemoryValueError(pineconeBlock(migrated));
+  return failure ? err(failure.field, failure.message) : null;
 }
 
 function validatePineconeProjectGuard(
@@ -442,6 +461,9 @@ export function validateInstanceConfig(
   // --- numeric bounds ---
   const numBoundsErr = validateNumericBounds(raw);
   if (numBoundsErr) return numBoundsErr;
+
+  const pineconeValuesErr = validatePineconeMemoryValues(raw);
+  if (pineconeValuesErr) return pineconeValuesErr;
 
   const pineconeGuardErr = validatePineconeProjectGuard(raw, ctx);
   if (pineconeGuardErr) return pineconeGuardErr;

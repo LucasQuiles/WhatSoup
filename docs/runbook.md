@@ -233,7 +233,9 @@ Chrome profile). Unlisted debug browsers still warn.
 `deploy/scripts/whatsoup-db-snapshot.py` writes a coherent per-instance
 snapshot via the SQLite backup API against a `mode=ro` source (WAL-safe — a
 bare file copy misses the `-wal`), verifies it with `PRAGMA integrity_check`,
-records per-table row counts, and prunes to `--retain` (default 7). The
+records per-table row counts, and prunes that database's own series to
+`--retain` (default 7); other databases' snapshots in the same `--out-root`
+are never pruned. The
 `rehearse` subcommand re-opens a snapshot read-only and round-trips the row
 counts; nothing in the repository schedules this — wiring a timer on a host
 is a deployment act.

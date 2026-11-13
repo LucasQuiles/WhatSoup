@@ -268,6 +268,73 @@ describe('Pinecone project guard validation', () => {
       'memory.pinecone.projectId',
     );
   });
+
+  // Admission rejects what config load rejects, so a fleet patch cannot store
+  // a config the instance then refuses to start with.
+  it.each([
+    ['an empty apiKeyService', { apiKeyService: '' }, 'memory.pinecone.apiKeyService'],
+    ['a null apiKeyService', { apiKeyService: null }, 'memory.pinecone.apiKeyService'],
+    ['a non-string apiKeyService', { apiKeyService: 7 }, 'memory.pinecone.apiKeyService'],
+    ['an unknown recordVisibility', { recordVisibility: 'everyone' }, 'memory.pinecone.recordVisibility'],
+    ['a non-boolean instanceScopedIds', { instanceScopedIds: 'true' }, 'memory.pinecone.instanceScopedIds'],
+    ['the reserved owner_only namespace', { namespaces: { facts: 'whatsoup-owner-only-v1' } }, 'memory.pinecone.namespaces.facts'],
+    [
+      'a knowledge profile on the reserved owner_only namespace',
+      { knowledgeProfiles: { 'docs-index': { namespaces: ['docs', 'whatsoup-owner-only-v1'] } } },
+      'memory.pinecone.knowledgeProfiles.docs-index',
+    ],
+  ])('rejects %s in every validator mode, as config load does', (_case, pinecone, field) => {
+    const raw = baseChat({ memory: { pinecone: { projectId: 'instance-proj-id', index: 'whatsapp-bot', ...pinecone } } });
+    for (const mode of ['create', 'patch', 'load', 'discovery'] as const) {
+      expect(validateInstanceConfig(raw, ctx(mode, { originalType: 'chat' }))?.field, mode).toBe(field);
+    }
+  });
+
+  // Config load migrates legacy aliases before it refuses the reserved
+  // namespace, so every validator caller (admission, load, discovery, the
+  // deploy preflight) must refuse it through an alias too.
+  it.each([
+    ['pineconeFactsNamespace', { pineconeFactsNamespace: 'whatsoup-owner-only-v1' }, 'memory.pinecone.namespaces.facts'],
+    ['pineconeNamespaces', { pineconeNamespaces: { chunks: 'whatsoup-owner-only-v1' } }, 'memory.pinecone.namespaces.chunks'],
+    [
+      'pineconeKnowledgeProfiles',
+      { pineconeKnowledgeProfiles: { 'docs-index': { namespaces: ['docs', 'whatsoup-owner-only-v1'] } } },
+      'memory.pinecone.knowledgeProfiles.docs-index',
+    ],
+  ])('rejects the reserved owner_only namespace through the legacy alias %s in every mode', (_alias, legacy, field) => {
+    const raw = baseChat({ ...legacy, memory: { pinecone: { projectId: 'instance-proj-id', index: 'whatsapp-bot' } } });
+    for (const mode of ['create', 'patch', 'load', 'discovery'] as const) {
+      expect(validateInstanceConfig(raw, ctx(mode, { originalType: 'chat' }))?.field, mode).toBe(field);
+    }
+  });
+
+  it('accepts a valid apiKeyService and ordinary namespaces', () => {
+    const raw = baseChat({
+      memory: { pinecone: { projectId: 'instance-proj-id', apiKeyService: 'pinecone-line-b', namespaces: { facts: 'facts' } } },
+    });
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+
+  // Config load treats an absent or null recordVisibility as chat_scoped.
+  it.each(['owner_only', 'chat_scoped', null])('accepts recordVisibility %j', (recordVisibility) => {
+    const raw = baseChat({ memory: { pinecone: { projectId: 'instance-proj-id', recordVisibility } } });
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+
+  it.each([true, false, null])('accepts instanceScopedIds %j', (instanceScopedIds) => {
+    const raw = baseChat({ memory: { pinecone: { projectId: 'instance-proj-id', instanceScopedIds } } });
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+
+  it('treats a keyring service selector alone as Pinecone config that needs a project guard', () => {
+    const keyServiceOnly = baseChat({
+      memory: { pinecone: { apiKeyService: 'pinecone-line-b' } },
+    });
+
+    expect(validateInstanceConfig(keyServiceOnly, ctx('create'))?.field).toBe(
+      'memory.pinecone.projectId',
+    );
+  });
 });
 
 describe('healthPort validation', () => {

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import type { ToolDeclaration } from '../../../src/mcp/types.ts';
 import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
+import { matchesMetadata } from '../../helpers/pinecone-metadata.ts';
 
 const {
   PineconeMock,
@@ -211,6 +212,34 @@ function parseRegistryText(result: Awaited<ReturnType<ToolRegistry['call']>>): u
 }
 
 describe('createPineconeWatchSearch - registration gating', () => {
+  it.each(['scope:reader', ''])('watch search excludes other-account and unstamped memories with reader account "%s"', async (account) => {
+    const settings = configStub as unknown as Record<string, unknown>;
+    const pinecone = configStub.memory.pinecone as unknown as Record<string, unknown>;
+    settings.botName = 'test-reader';
+    settings.pineconeIndex = 'index-a';
+    settings.accountScopeId = account;
+    pinecone.instanceScopedIds = true;
+    const fields = [
+      { visibility: 'chat_scoped', source_instance: 'test-reader', source_account: 'scope:reader' },
+      { visibility: 'chat_scoped', source_instance: 'test-reader', source_account: 'scope:previous' },
+      { visibility: 'chat_scoped' },
+    ];
+    searchRecordsMock.mockResolvedValue({ result: { hits: fields.map((metadata, index) => ({ _id: String(index), _score: 0.9, fields: metadata })) } });
+    try {
+      const watch = createPineconeWatchSearch(['index-a']);
+      expect(watch).not.toBeNull();
+      expect(await watch!.search({ index: 'index-a', namespace: '__default__', query: 'query', topK: 8 }))
+        .toEqual({ matches: account ? [{ score: 0.9 }] : [] });
+      const filter = searchRecordsMock.mock.calls[0]![0].query.filter;
+      expect(fields.filter((metadata) => matchesMetadata(metadata, filter))).toEqual(account ? [fields[0]] : []);
+    } finally {
+      delete settings.botName;
+      delete settings.pineconeIndex;
+      delete settings.accountScopeId;
+      delete pinecone.instanceScopedIds;
+    }
+  });
+
   it('returns null when the allowed-index list is empty', () => {
     const watchSearch = createPineconeWatchSearch([]);
 
@@ -259,6 +288,7 @@ describe('createPineconeWatchSearch - records search', () => {
         hits: [
           { _id: 'doc-a', _score: 0.8, fields: { text: 'must not cross boundary' } },
           { _id: 'doc-b', _score: 'not-a-number', fields: { text: 'ignored score' } },
+          { _id: 'doc-private', _score: 0.6, fields: { visibility: 'owner_only' } },
           { _id: 'doc-c', _score: 0.2, fields: { text: 'also hidden' } },
         ],
       },
@@ -273,10 +303,17 @@ describe('createPineconeWatchSearch - records search', () => {
       topK: 3,
     });
 
+    // A watch has no caller with owner_only access: the exclusion narrows the
+    // query and an owner_only hit that still arrives contributes no score.
+    // Only the visibility field is fetched, so record bodies stay out.
     expect(searchRecordsMock).toHaveBeenCalledWith({
       namespace: 'ns_a',
-      query: { topK: 3, inputs: { text: 'watch query' } },
-      fields: [],
+      query: {
+        topK: 3,
+        inputs: { text: 'watch query' },
+        filter: { $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] },
+      },
+      fields: ['visibility'],
     });
     expect(result).toEqual({ matches: [{ score: 0.8 }, { score: 0.2 }] });
   });
@@ -354,6 +391,7 @@ describe('createPineconeWatchSearch - vector search', () => {
       matches: [
         { id: 'vec-a', score: 0.95, metadata: { text: 'must not cross boundary' } },
         { id: 'vec-b', score: undefined, metadata: { text: 'ignored score' } },
+        { id: 'vec-private', score: 0.7, metadata: { visibility: 'owner_only' } },
         { id: 'vec-c', score: 0.4, metadata: { text: 'also hidden' } },
       ],
     });
@@ -376,7 +414,8 @@ describe('createPineconeWatchSearch - vector search', () => {
     expect(namespaceQueryMock).toHaveBeenCalledWith('vec_a', {
       topK: 2,
       vector: [0.4, 0.5],
-      includeMetadata: false,
+      includeMetadata: true,
+      filter: { $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] },
     });
     expect(result).toEqual({ matches: [{ score: 0.95 }, { score: 0.4 }] });
   });
@@ -761,11 +800,16 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
       { tier: 'global' },
     );
 
+    // index-a is not the instance's memory index, so no conversation scope
+    // applies; visibility is still authorized on it: a caller without
+    // owner_only access gets the exact exclusion on every leg.
+    const ownerOnlyExclusion = { $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] };
     expect(searchRecordsMock).toHaveBeenNthCalledWith(1, {
       namespace: 'ns_a',
       query: {
         topK: 3,
         inputs: { text: 'project notes' },
+        filter: ownerOnlyExclusion,
       },
       fields: ['*'],
     });
@@ -774,6 +818,7 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
       query: {
         topK: 3,
         inputs: { text: 'project notes' },
+        filter: ownerOnlyExclusion,
       },
       fields: ['*'],
     });
@@ -806,11 +851,13 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
 
     expect(routeQueryMock).not.toHaveBeenCalled();
     expect(searchRecordsMock).toHaveBeenCalledTimes(1);
+    // A caller without owner_only access: every query carries the exclusion.
     expect(searchRecordsMock).toHaveBeenCalledWith({
       namespace: 'ns_chunks',
       query: {
         topK: 6,
         inputs: { text: 'message context' },
+        filter: { $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] },
       },
       fields: ['*'],
     });
@@ -836,9 +883,20 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
     expect(routeQueryMock).toHaveBeenCalledWith('recent summary', {
       namespaces: configStub.memory.pinecone.namespaces,
     });
-    expect(searchRecordsMock).toHaveBeenNthCalledWith(1, expect.objectContaining({ namespace: 'ns_summaries' }));
-    expect(searchRecordsMock).toHaveBeenNthCalledWith(2, expect.objectContaining({ namespace: 'ns_facts' }));
-    expect(searchRecordsMock).toHaveBeenNthCalledWith(3, expect.objectContaining({ namespace: 'ns_chunks' }));
+    // Every routed leg carries the exact owner_only exclusion for this caller.
+    const routedLeg = (namespace: string) => ({
+      namespace,
+      query: {
+        topK: 6,
+        inputs: { text: 'recent summary' },
+        filter: { $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] },
+      },
+      fields: ['*'],
+    });
+    expect(searchRecordsMock).toHaveBeenCalledTimes(3);
+    expect(searchRecordsMock).toHaveBeenNthCalledWith(1, routedLeg('ns_summaries'));
+    expect(searchRecordsMock).toHaveBeenNthCalledWith(2, routedLeg('ns_facts'));
+    expect(searchRecordsMock).toHaveBeenNthCalledWith(3, routedLeg('ns_chunks'));
   });
 
   it('falls back to the primary namespace when a profile has no namespace fan-out', async () => {
@@ -856,6 +914,7 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
       query: {
         topK: 4,
         inputs: { text: 'compact profile' },
+        filter: { $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] },
       },
       fields: ['*'],
     });
@@ -992,15 +1051,18 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
       body: JSON.stringify({ texts: ['vector query'], input_type: 'query' }),
       signal: expect.any(AbortSignal),
     });
+    const ownerOnlyExclusion = { $or: [{ visibility: { $exists: false } }, { visibility: { $ne: 'owner_only' } }] };
     expect(namespaceQueryMock).toHaveBeenNthCalledWith(1, 'vec_a', {
       topK: 2,
       vector: [0.1, 0.2, 0.3],
       includeMetadata: true,
+      filter: ownerOnlyExclusion,
     });
     expect(namespaceQueryMock).toHaveBeenNthCalledWith(2, 'vec_b', {
       topK: 2,
       vector: [0.1, 0.2, 0.3],
       includeMetadata: true,
+      filter: ownerOnlyExclusion,
     });
     expect(parseRegistryText(result)).toEqual({
       index: 'vector-index',

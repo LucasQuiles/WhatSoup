@@ -2258,6 +2258,106 @@ describe('config — processTmpDir from instance.paths.tmpDir', () => {
 // PINECONE_PROJECT_ID / PINECONE_EXPECTED_HOST_SUFFIX env var overrides
 // ---------------------------------------------------------------------------
 
+describe('config — memory.pinecone.recordVisibility', () => {
+  it.each(['facts', 'custom'])('rejects the reserved owner-only namespace in namespaces.%s at load', async (key) => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: { pinecone: { namespaces: { [key]: 'whatsoup-owner-only-v1' } } },
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(/reserved.*whatsoup-owner-only-v1/i);
+  });
+
+  it('rejects the reserved owner-only namespace through a legacy namespace alias at load', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      pineconeFactsNamespace: 'whatsoup-owner-only-v1',
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(/reserved.*whatsoup-owner-only-v1/i);
+  });
+
+  it.each([
+    { namespace: 'whatsoup-owner-only-v1' },
+    { namespaces: ['public-docs', 'whatsoup-owner-only-v1'] },
+  ])('rejects a reserved owner-only knowledge profile namespace at load: %j', async (profile) => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: { pinecone: { knowledgeProfiles: { 'test-knowledge': profile } } },
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(/reserved.*whatsoup-owner-only-v1/i);
+  });
+
+  it('defaults to chat_scoped and parses owner_only through the real loader', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({}));
+    const unset = await import('../src/config.ts');
+    expect(unset.config.memory.pinecone.recordVisibility).toBe('chat_scoped');
+    expect(unset.config.memory.pinecone.instanceScopedIds).toBe(false);
+    vi.resetModules();
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: {
+        pinecone: {
+          index: 'whatsapp-bot', projectId: 'instance-proj-id', recordVisibility: 'owner_only', instanceScopedIds: true,
+        },
+      },
+    }));
+    const set = await import('../src/config.ts');
+    expect(set.config.memory.pinecone.recordVisibility).toBe('owner_only');
+    expect(set.config.memory.pinecone.instanceScopedIds).toBe(true);
+  });
+
+  it('ownerOnlySources defaults to none and keeps only non-empty instance names', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({}));
+    const unset = await import('../src/config.ts');
+    expect(unset.config.memory.pinecone.ownerOnlySources).toEqual([]);
+    vi.resetModules();
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: {
+        pinecone: { index: 'whatsapp-bot', projectId: 'instance-proj-id', ownerOnlySources: ['line-b', '', 7, 'line-c'] },
+      },
+    }));
+    const set = await import('../src/config.ts');
+    expect(set.config.memory.pinecone.ownerOnlySources).toEqual(['line-b', 'line-c']);
+  });
+
+  it('rejects an unknown value at load rather than widening recall', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: { pinecone: { index: 'whatsapp-bot', projectId: 'instance-proj-id', recordVisibility: 'everyone' } },
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(/recordVisibility must be "owner_only" or "chat_scoped"/);
+  });
+
+  // Read as false, a string "true" would silently drop the instance and
+  // account boundaries the operator asked for on a shared index.
+  it('rejects a non-boolean instanceScopedIds at load rather than turning it off', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: { pinecone: { index: 'whatsapp-bot', projectId: 'instance-proj-id', instanceScopedIds: 'true' } },
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(/instanceScopedIds must be true or false/);
+  });
+});
+
+describe('config — memory.pinecone.apiKeyService', () => {
+  it('is unset by default and survives the real loader when configured', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({}));
+    const unset = await import('../src/config.ts');
+    expect(unset.config.memory.pinecone.apiKeyService).toBeUndefined();
+    vi.resetModules();
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: { pinecone: { index: 'whatsapp-bot', projectId: 'instance-proj-id', apiKeyService: 'pinecone-line-b' } },
+    }));
+    const set = await import('../src/config.ts');
+    expect(set.config.memory.pinecone.apiKeyService).toBe('pinecone-line-b');
+  });
+
+  it.each([
+    ['an empty string', ''],
+    ['null', null],
+    ['a number', 7],
+    ['an object', { service: 'pinecone-line-b' }],
+  ])('rejects %s at load rather than falling back to the default key', async (_case, value) => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: { pinecone: { index: 'whatsapp-bot', projectId: 'instance-proj-id', apiKeyService: value } },
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(/memory\.pinecone\.apiKeyService must be a non-empty string/);
+  });
+});
+
 describe('config — pinecone env var overrides', () => {
   it('picks up PINECONE_PROJECT_ID env var when not set in instance', async () => {
     process.env.PINECONE_PROJECT_ID = 'env-proj-id';
