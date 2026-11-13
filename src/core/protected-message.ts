@@ -9,7 +9,7 @@ import {
   containsProtectedLinkInBinaryText,
   PROTECTED_MESSAGE_MARKER,
   PROTECTED_TEXT_WITHHELD_MARKER,
-  redactProtectedLinksWithinBound,
+  redactProtectedLinksAcrossEscapesWithinBound,
   sanitizeProtectedLinkText,
 } from '../lib/protected-link-text.ts';
 
@@ -74,6 +74,14 @@ export function sanitizeProtectedMessageText(value: string, pins: ProtectedDeliv
 }
 
 /**
+ * sanitizeProtectedMessageText for a tool result's text, which can carry JSON
+ * escapes: a bare host right after an escape such as `\n` is redacted too.
+ */
+export function sanitizeProtectedToolText(value: string, pins: ProtectedDeliveryPins = PROTECTED_DELIVERY_PINS): string {
+  return redactProtectedLinksAcrossEscapesWithinBound(value, pins) ?? PROTECTED_TEXT_WITHHELD_MARKER;
+}
+
+/**
  * Detect protected references through arbitrary stored message shapes without
  * serializing them. Cycles and excessively deep payloads fail closed because a
  * raw message is never a model-visible contract.
@@ -131,6 +139,16 @@ export function sanitizeProtectedToolResult(value: unknown, pins: ProtectedDeliv
   return sanitizeBoundedValue(value, pins, 'throw');
 }
 
+/**
+ * sanitizeProtectedToolResult for the result of a handler that has completed.
+ * Its effect has already happened, so past any bound the whole result becomes
+ * PROTECTED_TEXT_WITHHELD_MARKER instead of an error: a reported failure would
+ * invite a duplicate send.
+ */
+export function sanitizeCompletedToolResult(value: unknown, pins: ProtectedDeliveryPins = PROTECTED_DELIVERY_PINS): unknown {
+  return sanitizeBoundedValue(value, pins, 'withhold');
+}
+
 const binaryTextDecoder = new TextDecoder();
 
 function binaryBytes(value: ArrayBuffer | ArrayBufferView): Uint8Array {
@@ -139,22 +157,33 @@ function binaryBytes(value: ArrayBuffer | ArrayBufferView): Uint8Array {
     : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
 }
 
-function sanitizeBoundedValue(value: unknown, pins: ProtectedDeliveryPins, overLimit: 'marker' | 'throw'): unknown {
+function sanitizeBoundedValue(
+  value: unknown,
+  pins: ProtectedDeliveryPins,
+  overLimit: 'marker' | 'throw' | 'withhold',
+): unknown {
   // A tool result is serialized whole into model-visible text, so its binary
   // leaves are scanned and other values take their JSON form. An inbound
   // payload keeps binary fields and object shapes intact for media handling.
-  const toolResult = overLimit === 'throw';
+  const toolResult = overLimit !== 'marker';
   const seen = new WeakMap<object, unknown>();
   let visitedNodes = 0;
+  // Set at the first bound in withhold mode; the rest of the walk then stops.
+  let withheld = false;
 
-  const sanitizeText = (current: string): string => {
-    const redacted = redactProtectedLinksWithinBound(current, pins);
-    if (redacted !== null) return redacted;
-    if (toolResult) throw new ProtectedValueScanLimitError();
-    return PROTECTED_TEXT_WITHHELD_MARKER;
+  const pastBound = (marker: string): string => {
+    if (overLimit === 'throw') throw new ProtectedValueScanLimitError();
+    if (overLimit === 'withhold') withheld = true;
+    return marker;
   };
 
+  // A string can hold JSON text, such as a stored metadata column, so the scan
+  // also reads past its escapes.
+  const sanitizeText = (current: string): string =>
+    redactProtectedLinksAcrossEscapesWithinBound(current, pins) ?? pastBound(PROTECTED_TEXT_WITHHELD_MARKER);
+
   const sanitize = (current: unknown, depth: number): unknown => {
+    if (withheld) return undefined;
     if (typeof current === 'string') return sanitizeText(current);
     if (current === null || typeof current !== 'object') return current;
     if (current instanceof ArrayBuffer || ArrayBuffer.isView(current)) {
@@ -162,10 +191,7 @@ function sanitizeBoundedValue(value: unknown, pins: ProtectedDeliveryPins, overL
       const decoded = binaryTextDecoder.decode(binaryBytes(current));
       return containsProtectedLinkInBinaryText(decoded, pins) ? PROTECTED_MESSAGE_MARKER : current;
     }
-    if (depth >= MAX_SANITIZE_DEPTH || ++visitedNodes > MAX_SANITIZE_NODES) {
-      if (overLimit === 'throw') throw new ProtectedValueScanLimitError();
-      return PROTECTED_MESSAGE_MARKER;
-    }
+    if (depth >= MAX_SANITIZE_DEPTH || ++visitedNodes > MAX_SANITIZE_NODES) return pastBound(PROTECTED_MESSAGE_MARKER);
 
     const prior = seen.get(current);
     if (prior !== undefined) return prior;
@@ -209,11 +235,18 @@ function sanitizeBoundedValue(value: unknown, pins: ProtectedDeliveryPins, overL
     const clone = Object.create(prototype) as Record<string, unknown>;
     seen.set(current, clone);
     if (current instanceof Error) {
-      // message and stack are own, non-enumerable properties; keep them so.
+      // message and stack are copied as own data properties that keep their
+      // enumerability, normally none. Node exposes stack through an accessor,
+      // so each is read as a property, not from its descriptor's value.
       for (const key of ['message', 'stack'] as const) {
-        const own = Object.getOwnPropertyDescriptor(current, key);
-        const ownText: unknown = own?.value;
-        if (typeof ownText === 'string') Object.defineProperty(clone, key, { ...own, value: sanitizeText(ownText) });
+        const text: unknown = current[key];
+        if (typeof text !== 'string') continue;
+        Object.defineProperty(clone, key, {
+          value: sanitizeText(text),
+          writable: true,
+          enumerable: Object.getOwnPropertyDescriptor(current, key)?.enumerable ?? false,
+          configurable: true,
+        });
       }
     }
     for (const key of Object.keys(current)) {
@@ -228,7 +261,8 @@ function sanitizeBoundedValue(value: unknown, pins: ProtectedDeliveryPins, overL
     return clone;
   };
 
-  return sanitize(value, 0);
+  const sanitized = sanitize(value, 0);
+  return withheld ? PROTECTED_TEXT_WITHHELD_MARKER : sanitized;
 }
 
 /**

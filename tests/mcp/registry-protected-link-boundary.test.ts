@@ -12,12 +12,16 @@ vi.mock('../../src/lib/protected-delivery-pins.ts', async (importOriginal) =>
 vi.mock('../../src/logger.ts', async () => (await import('../helpers/logger-mock.ts')).loggerMock());
 
 import { z } from 'zod';
-import { PROTECTED_MESSAGE_MARKER } from '../../src/core/protected-message.ts';
+import { Database } from '../../src/core/database.ts';
+import { createProfileRegistry } from '../../src/core/profiles.ts';
+import { PROTECTED_MESSAGE_MARKER, PROTECTED_TEXT_WITHHELD_MARKER } from '../../src/core/protected-message.ts';
+import { registerMessagingTools } from '../../src/mcp/tools/messaging.ts';
 import { errorResult } from '../../src/mcp/types.ts';
 import { TEST_LINK_HOST } from '../helpers/protected-delivery-pins.ts';
 import { ToolRegistry } from '../helpers/resolved-tool-registry.ts';
 
 const LINK = `https://${TEST_LINK_HOST}/s/#v3.${'Q'.repeat(22)}.${'Z'.repeat(43)}`;
+const OVER_BOUND = `${LINK} `.repeat(129);
 
 async function callProbe(handler: () => unknown): Promise<{ text: string; isError?: boolean }> {
   const registry = new ToolRegistry();
@@ -63,6 +67,17 @@ describe('MCP response boundary', () => {
     expect(result.text).toContain('remote metadata failed for');
   });
 
+  // Only the final text pass sees a rejected handler's text. JSON-encoded text
+  // in it carries escapes whose letter reads as a host character.
+  it.each(['\\n', '\\t'])('redacts a scheme-less host after an escaped %s in rejected handler text', async (escape) => {
+    const bare = LINK.slice('https://'.length);
+    const result = await callProbe(() => { throw new Error(`metadata {"note":"line${escape}${bare}"} unreadable`); });
+
+    expect(result.isError).toBe(true);
+    expectRedacted(result.text);
+    expect(result.text).toContain(`line${escape}${PROTECTED_MESSAGE_MARKER}`);
+  });
+
   it('redacts a returned error payload and keeps it an error', async () => {
     const result = await callProbe(() => errorResult(`lookup failed for ${LINK}`));
 
@@ -77,11 +92,54 @@ describe('MCP response boundary', () => {
     expect(JSON.parse(result.text)).toEqual({ plaintext: PROTECTED_MESSAGE_MARKER });
   });
 
-  it('refuses a result string with more than 128 links as a tool error', async () => {
-    const result = await callProbe(() => ({ text: `${LINK} `.repeat(129) }));
+  // The handler has completed, so its effect stands: a result too large to
+  // scan whole is withheld, and the handler's own success or error is kept.
+  it('withholds a completed result with more than 128 links and keeps it a success', async () => {
+    const result = await callProbe(() => ({ text: OVER_BOUND }));
+
+    expect(result.isError).toBeUndefined();
+    expect(result.text).toBe(PROTECTED_TEXT_WITHHELD_MARKER);
+  });
+
+  it('withholds a returned error payload with more than 128 links and keeps it an error', async () => {
+    const result = await callProbe(() => errorResult(OVER_BOUND));
 
     expect(result.isError).toBe(true);
-    expect(result.text).toContain('too large to check for protected links');
-    expect(result.text).not.toContain(TEST_LINK_HOST.slice(0, 6));
+    expect(result.text).toBe(PROTECTED_TEXT_WITHHELD_MARKER);
+  });
+
+  it('reports a delivered send_message whose result is too large to scan as a success, sent once', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const sent: unknown[] = [];
+      const registry = new ToolRegistry();
+      registerMessagingTools(registry, {
+        connection: {
+          contactsDir: { contacts: new Map<string, string>(), getLidMappings: () => undefined },
+          sendRaw: async (jid: string, content: unknown) => {
+            sent.push({ jid, content });
+            return { waMessageId: null };
+          },
+        } as never,
+        db: db.raw,
+        dbWrapper: db,
+        adminPhones: new Set<string>(),
+        instanceName: 'self',
+        profiles: createProfileRegistry({}),
+      });
+
+      const result = await registry.call(
+        'send_message',
+        { text: OVER_BOUND },
+        { tier: 'chat-scoped', conversationKey: '15550100001', deliveryJid: '15550100001@s.whatsapp.net' },
+      );
+
+      expect(sent).toHaveLength(1);
+      expect(result.isError).toBeUndefined();
+      expect(result.content).toEqual([{ type: 'text', text: PROTECTED_TEXT_WITHHELD_MARKER }]);
+    } finally {
+      db.close();
+    }
   });
 });

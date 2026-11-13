@@ -32,7 +32,7 @@ import {
   type CrossConversationVerdict,
 } from './cross-conversation-guard.ts';
 import { errorMessage } from '../lib/error-message.ts';
-import { sanitizeProtectedMessageText, sanitizeProtectedToolResult } from '../core/protected-message.ts';
+import { sanitizeCompletedToolResult, sanitizeProtectedToolText } from '../core/protected-message.ts';
 import { bondActorLedger } from '../transport/bond-actor-receipt.ts';
 import { getToolCallCallerEvidence, isTurnOwned } from './caller-attribution.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
@@ -72,13 +72,24 @@ const CERTIFICATE_ERROR_CODES = new Set([
 /**
  * The MCP response boundary: every text a caller receives, error text from a
  * rejected handler included, passes the protected-link scan. Past the scan
- * bound a text becomes the withheld marker; this pass never throws.
+ * bound a text becomes the withheld marker; this pass never throws, so a
+ * text that is not a string becomes empty.
  */
 function redactToolCallText(result: ToolCallResult): ToolCallResult {
   return {
     ...result,
-    content: result.content.map((item) => ({ ...item, text: sanitizeProtectedMessageText(item.text) })),
+    content: result.content.map((item) => {
+      const text: unknown = item.text;
+      return { ...item, text: typeof text === 'string' ? sanitizeProtectedToolText(text) : '' };
+    }),
   };
+}
+
+/** The serialized result text; JSON writes nothing for undefined, a function or a symbol, which leaves it empty. */
+function toolResultText(safeResult: unknown): string {
+  if (typeof safeResult === 'string') return safeResult;
+  const json: string | undefined = JSON.stringify(safeResult, null, 2);
+  return json ?? '';
 }
 
 function isTransportOrProtocolError(err: unknown, message: string): boolean {
@@ -947,10 +958,10 @@ export class ToolRegistry {
         const returnedErrorEvidence = getToolErrorEvidence(result);
         // The error markers above are non-enumerable, so they are read from the
         // raw result. The serialized value is model-visible: protected links
-        // are redacted, binary leaves included, and a result too large to scan
-        // throws into the catch below, which records the failure.
-        const safeResult = sanitizeProtectedToolResult(result);
-        const text = typeof safeResult === 'string' ? safeResult : JSON.stringify(safeResult, null, 2);
+        // are redacted, binary leaves included. The handler has completed, so a
+        // result too large to scan whole is withheld and keeps its own isError.
+        const safeResult = sanitizeCompletedToolResult(result);
+        const text = toolResultText(safeResult);
         log.info({ tool: name, durationMs: this.clock.now() - start }, 'tool call complete');
         if (durabilityId !== undefined) {
           const durationMs = this.clock.now() - start;

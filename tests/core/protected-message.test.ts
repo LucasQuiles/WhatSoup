@@ -312,7 +312,12 @@ describe('tool result binary leaves and built-in values', () => {
 
     expect(out.error).toBeInstanceOf(Error);
     expect(out.error.message).toBe(`failed ${PROTECTED_MESSAGE_MARKER}`);
-    expect(out.error.stack ?? '').not.toContain(TEST_LINK_HOST);
+    // Node exposes stack through an accessor; the copy must still carry it.
+    expect(typeof out.error.stack).toBe('string');
+    expect(out.error.stack).toContain(`failed ${PROTECTED_MESSAGE_MARKER}`);
+    expect(out.error.stack).not.toContain(TEST_LINK_HOST);
+    // Both stay non-enumerable, so the serialized result is unchanged.
+    expect(JSON.stringify(out)).toBe('{"error":{}}');
   });
 
   it('serializes another value with toJSON through its redacted JSON form', () => {
@@ -324,5 +329,32 @@ describe('tool result binary leaves and built-in values', () => {
 
     expect(JSON.stringify(sanitizeProtectedToolResult({ opaque: new Opaque(`see ${link}`) }, pins)))
       .toBe(JSON.stringify({ opaque: `see ${PROTECTED_MESSAGE_MARKER}` }));
+  });
+});
+
+describe('a scheme-less host after a JSON escape inside a string value', () => {
+  const link = `https://${TEST_LINK_HOST}/s/#v3.${'Q'.repeat(22)}.${'Z'.repeat(43)}`;
+  const bare = link.slice('https://'.length);
+  // A stored JSON column keeps a newline or tab as a two-character escape whose
+  // letter reads as a host character and would glue onto the host.
+  const metadata = (note: string) => ({ metadata_json: JSON.stringify({ note }) });
+  const note = (value: unknown): unknown => JSON.parse((value as { metadata_json: string }).metadata_json);
+
+  it.each(['\n', '\t'])('redacts it in a tool result and an inbound value (%j)', (escape) => {
+    const input = metadata(`line${escape}${bare}`);
+
+    expect(note(sanitizeProtectedToolResult(input, pins))).toEqual({ note: `line${escape}${PROTECTED_MESSAGE_MARKER}` });
+    expect(note(sanitizeProtectedMessageValue(input, pins))).toEqual({ note: `line${escape}${PROTECTED_MESSAGE_MARKER}` });
+  });
+
+  it.each([
+    ['a real newline before the bare host', `line\n${bare}`],
+    ['a scheme-bearing link after an escape', JSON.stringify({ note: `line\n${link}` })],
+  ])('control: %s yields one marker and no link', (_, value) => {
+    const out = (sanitizeProtectedToolResult({ value }, pins) as { value: string }).value;
+
+    expect(out).not.toContain(TEST_LINK_HOST);
+    expect(out).not.toContain('Q'.repeat(22));
+    expect(out.split(PROTECTED_MESSAGE_MARKER)).toHaveLength(2);
   });
 });

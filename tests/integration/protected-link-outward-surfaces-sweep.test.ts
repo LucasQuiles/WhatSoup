@@ -531,7 +531,8 @@ const SURFACES: SurfaceCase[] = [
       'file name': { pick: (value: { file: string }) => value.file, mustContain: 'protected-managed-link' },
       'name heading': bodyLine('# Mallory'),
       'front matter name': bodyLine('canonical_name:'),
-      alias: bodyLine('- **url**: alias '),
+      // The alias and its source share one line; only the alias segment holds `alias <marker> _(`.
+      alias: { pick: bodyLine('- **url**:'), mustContain: `- **url**: alias ${PROTECTED_MESSAGE_MARKER} _(` },
       // `)` and `_` are fragment characters, so the marker also replaces the closing `)_`.
       'alias source': { pick: bodyLine('- **url**:'), mustContain: `_(src ${PROTECTED_MESSAGE_MARKER}` },
       observation: bodyLine('- (0.90) **fact**'),
@@ -571,5 +572,62 @@ describe('protected links never reach the remaining outward surfaces', () => {
       (typeof child === 'object' ? child.mustContain : undefined) ?? mustContain ?? PROTECTED_MESSAGE_MARKER,
     );
     verify?.(value as never);
+  });
+});
+
+// A stored JSON column keeps a newline or tab as a two-character escape whose
+// letter reads as a host character, so a scheme-less host right after it must
+// still be found on the way out through the production registry.
+describe('a scheme-less host after a JSON escape in entity metadata_json', () => {
+  const BARE = LINK.slice('https://'.length);
+  const TOOLS = ['get_profile', 'list_entities'] as const;
+
+  interface EntityRow { canonical_name: string; metadata_json: string }
+
+  async function readEntity(
+    scratch: Database,
+    tool: (typeof TOOLS)[number],
+    entityId: number,
+  ): Promise<{ serialized: string; entity: EntityRow }> {
+    const value = tool === 'get_profile'
+      ? await substrateTool(scratch, 'get_profile', { entity_ref: { entity_id: entityId } }) as { entity: EntityRow }
+      : { entity: (await substrateTool(scratch, 'list_entities', {}) as { entities: EntityRow[] }).entities[0]! };
+    return { serialized: JSON.stringify(value), entity: value.entity };
+  }
+
+  function expectNoLink(serialized: string): void {
+    expect(serialized).not.toContain(TEST_LINK_HOST.slice(0, 6));
+    expect(serialized).not.toContain('Q'.repeat(22));
+  }
+
+  it.each(TOOLS.flatMap((tool) => [
+    { tool, escape: '\n', stored: '\\n' },
+    { tool, escape: '\t', stored: '\\t' },
+  ]))('$tool: bare host after the stored escape $stored', async ({ tool, escape, stored }) => {
+    await withScratchDb(async (scratch) => {
+      const { id } = upsertEntity(scratch.raw, {
+        kind: 'person', canonicalName: 'Mallory', metadata: { note: `line${escape}${BARE}` },
+      });
+
+      const { serialized, entity } = await readEntity(scratch, tool, id);
+
+      expectNoLink(serialized);
+      expect(entity.metadata_json).toContain(`line${stored}`);
+      expect(JSON.parse(entity.metadata_json)).toEqual({ note: `line${escape}${PROTECTED_MESSAGE_MARKER}` });
+    });
+  });
+
+  it.each(TOOLS.flatMap((tool) => [
+    { tool, label: 'scheme-bearing link after the stored escape', canonicalName: 'Mallory', note: `line\n${LINK}` },
+    { tool, label: 'bare host after a real newline in a plain column', canonicalName: `Mallory\n${BARE}`, note: 'plain' },
+  ]))('$tool control: $label', async ({ tool, canonicalName, note }) => {
+    await withScratchDb(async (scratch) => {
+      const { id } = upsertEntity(scratch.raw, { kind: 'person', canonicalName, metadata: { note } });
+
+      const { serialized } = await readEntity(scratch, tool, id);
+
+      expectNoLink(serialized);
+      expect(serialized.split(PROTECTED_MESSAGE_MARKER)).toHaveLength(2);
+    });
   });
 });

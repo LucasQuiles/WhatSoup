@@ -212,6 +212,79 @@ export function redactProtectedLinksWithinBound(
   return ranges === null ? null : replaceProtectedLinkRanges(value, ranges);
 }
 
+const BACKSLASH = 0x5c;
+
+function isHexDigit(code: number): boolean {
+  return (code >= 0x30 && code <= 0x39) || (code >= 0x41 && code <= 0x46) || (code >= 0x61 && code <= 0x66);
+}
+
+/**
+ * JSON escapes `"`, `\` and control characters, so a link's boundary in JSON
+ * text can arrive as `\n` or `\u0001`, whose letters and hex digits read as
+ * host characters and would glue onto a bare host. Each backslash run and the
+ * escape letter (or `u` and four hex digits) after it becomes a space in a
+ * same-length view. JSON never escapes a host or fragment character, so a link
+ * never spans a replaced position and the view's ranges splice the original
+ * text without breaking an escape. Treating the letter after any backslash run
+ * as an escape also covers text encoded twice, such as a `%j` log value.
+ */
+export function escapeNeutralView(text: string): string {
+  let view = '';
+  let cursor = 0;
+  for (let index = text.indexOf('\\'); index !== -1; index = text.indexOf('\\', cursor)) {
+    let end = index;
+    while (text.charCodeAt(end) === BACKSLASH) end++;
+    const letter = text[end];
+    if (letter !== undefined && 'bfnrt"/'.includes(letter)) end++;
+    else if (letter === 'u' && [1, 2, 3, 4].every((offset) => isHexDigit(text.charCodeAt(end + offset)))) end += 5;
+    view += `${text.slice(cursor, index)}${' '.repeat(end - index)}`;
+    cursor = end;
+  }
+  return cursor === 0 ? text : `${view}${text.slice(cursor)}`;
+}
+
+// Both inputs are sorted; overlapping ranges, one link found by both scans,
+// become one range so the link gets one marker.
+function mergeProtectedLinkRanges(
+  left: readonly ProtectedLinkRange[],
+  right: readonly ProtectedLinkRange[],
+): ProtectedLinkRange[] {
+  const merged: ProtectedLinkRange[] = [];
+  for (const range of [...left, ...right].sort((a, b) => a.start - b.start)) {
+    const last = merged.at(-1);
+    if (last !== undefined && range.start < last.end) last.end = Math.max(last.end, range.end);
+    else merged.push({ ...range });
+  }
+  return merged;
+}
+
+/**
+ * protectedLinkRanges for text that can carry JSON escapes: a stored JSON
+ * column inside a tool result, or a tool result's serialized text. The
+ * escape-neutral view finds a bare host right after an escape such as `\n`.
+ * The plain scan still runs, so a host written right after a literal backslash
+ * in raw text, whose first letter the view blanks, is found as before. The
+ * view has the text's length, so both scans' ranges apply to the text.
+ */
+function protectedLinkRangesAcrossEscapes(
+  value: string,
+  pins: ProtectedDeliveryPins = PROTECTED_DELIVERY_PINS,
+): ProtectedLinkRange[] | null {
+  const plain = protectedLinkRanges(value, pins);
+  if (plain === null || !value.includes('\\')) return plain;
+  const neutral = protectedLinkRanges(escapeNeutralView(value), pins);
+  return neutral === null ? null : mergeProtectedLinkRanges(plain, neutral);
+}
+
+/** redactProtectedLinksWithinBound for text that can carry JSON escapes. */
+export function redactProtectedLinksAcrossEscapesWithinBound(
+  value: string,
+  pins: ProtectedDeliveryPins = PROTECTED_DELIVERY_PINS,
+): string | null {
+  const ranges = protectedLinkRangesAcrossEscapes(value, pins);
+  return ranges === null ? null : replaceProtectedLinkRanges(value, ranges);
+}
+
 /**
  * Replace every pinned protected link in the text with the stable marker.
  * Past a scan bound the whole value becomes PROTECTED_TEXT_WITHHELD_MARKER.
