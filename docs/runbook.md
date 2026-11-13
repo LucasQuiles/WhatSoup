@@ -3102,8 +3102,11 @@ The tool resolves both the actor and destination to the same verified phone
 identity before recording its canonical WhatsApp address. A mapped LID and that
 phone address reuse the same pending RustDesk request. Recovery converts older
 LID records only when the current mapping still proves the same recipient and no
-send claim is held. Conflicting mappings fail closed; submitted or ambiguous
-records are never retargeted or replayed.
+send claim is held. Conflicting mappings fail closed. Submitted and ambiguous
+records are never retargeted, and automatic recovery never replays them. An
+explicit `deliver_secret` call returns a submitted record as sent, and retries an
+ambiguous one with the same resolve operation and WhatsApp message ID within the
+three-attempt, 60-second limit.
 
 After the transport becomes fully connected, one maintenance loop resumes only
 recent `staged` persisted deliveries and flushes pending metadata events. It

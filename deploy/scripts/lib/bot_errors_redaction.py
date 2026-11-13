@@ -728,7 +728,11 @@ def alert_text_for_fingerprint(value: Any) -> str:
     put identity on the 8-character prefix, so two incidents sharing a prefix
     merged into one -- a regression against the pre-confinement behaviour, where
     the summary carried the whole digest. Everything else about the rendering is
-    identical, so grouping is unchanged apart from the restored entropy.
+    identical to the display rendering, including protected-link redaction: a
+    protected link becomes the shared marker before identity is formed, so
+    distinct alerts that differ only by a protected link collapse into one
+    incident. That is deliberate; keying identity on the link would make a
+    secret part of the fingerprint.
     """
     return alert_text(value, digest_chars=LEGACY_FULL_DIGEST_CHARS)
 
