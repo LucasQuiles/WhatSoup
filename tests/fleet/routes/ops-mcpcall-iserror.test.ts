@@ -16,6 +16,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import { handleSend, handleSaveContact } from '../../../src/fleet/routes/ops.ts';
+import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
 import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
@@ -34,6 +35,7 @@ vi.mock('node:fs', async (importOriginal) => {
 });
 
 import { mcpCall } from '../../../src/fleet/mcp-client.ts';
+import { proxyToInstance } from '../../../src/fleet/http-proxy.ts';
 
 function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
   return {
@@ -66,6 +68,45 @@ afterEach(() => {
 
 describe('ops.ts mcpCall consumers honor isError tool envelopes (parity follow-up #257)', () => {
   describe('handleSend (send_message)', () => {
+    it.each([
+      { body: { ok: true, chatJid: 'x@s.whatsapp.net' }, status: 200, events: 3 },
+      { body: { ok: true, sent: false }, status: 502, events: 0 },
+    ])('normalizes the health send acknowledgement %j', async ({ body, status, events }) => {
+      const instance = fakeInstance({ type: 'agent' });
+      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => instance) } }) as unknown as OpsDeps;
+      vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: JSON.stringify(body) });
+      const res = mockRes();
+      await handleSend(mockReq({ method: 'POST', body: JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' }) }), res, deps, { name: 'test-line' });
+      expect(res._status).toBe(status);
+      expect(JSON.parse(res._body)).toMatchObject(status === 200
+        ? { ok: true, sent: true, chatJid: 'x@s.whatsapp.net' }
+        : { code: 'message_send_unconfirmed', mutation_state: 'unknown', retryable: false });
+      expect(deps.realtime.publish).toHaveBeenCalledTimes(events);
+      expect(mcpCall).not.toHaveBeenCalled();
+    });
+
+    describe.each(['mcp', 'http'])('%s send result meaning', (route) => {
+      it.each([{ sent: false, suppressed: true }, null, {}, { sent: 'true' }])('does not publish success for %j', async (payload) => {
+        const instance = fakeInstance({ type: route === 'mcp' ? 'passive' : 'chat', socketPath: '/state/test-line/whatsoup.sock' });
+        const deps = makeDeps({ discovery: { getInstance: vi.fn(() => instance) } }) as unknown as OpsDeps;
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { content: [{ type: 'text', text: JSON.stringify(payload) }] } });
+        vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: JSON.stringify(payload) });
+        const res = mockRes();
+        await handleSend(mockReq({ method: 'POST', body: JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' }) }), res, deps, { name: 'test-line' });
+        if (payload?.sent === false) {
+          expect(res._status).toBe(200);
+          expect(JSON.parse(res._body)).toEqual(payload);
+        } else {
+          expect(res._status).toBe(502);
+          expect(JSON.parse(res._body)).toMatchObject({ code: 'message_send_unconfirmed', mutation_state: 'unknown', retryable: false });
+        }
+        expect(deps.realtime.publish).not.toHaveBeenCalled();
+        expect(mcpCall).toHaveBeenCalledTimes(route === 'mcp' ? 1 : 0);
+        expect(proxyToInstance).toHaveBeenCalledTimes(route === 'http' ? 1 : 0);
+      });
+    });
+
     it('maps validation-shaped isError to HTTP 422 (not 200) and preserves envelope', async () => {
       const inst = fakeInstance({ type: 'passive', socketPath: '/state/test-line/whatsoup.sock' });
       const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });

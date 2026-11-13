@@ -862,6 +862,25 @@ describe('soup/no-brand-regression', () => {
     expect(hasWarning(messages, 'no-brand-regression')).toBe(true)
   })
 
+  it('is silent for the canonical repository URL in a link target', async () => {
+    const messages = await lintWarnings(
+      'const x = <a href="https://github.com/LucasQuiles/WhatSoup/blob/main/docs/runbooks/release-deployment.md">Release deployment guide</a>'
+    )
+    expect(hasWarning(messages, 'no-brand-regression')).toBe(false)
+  })
+
+  it.each([
+    'const x = <a href="https://github.com/LucasQuiles/WhatSoup">WhatSoup</a>',
+    'const x = <a title="https://github.com/LucasQuiles/WhatSoup">Guide</a>',
+    'const x = <a aria-label="https://github.com/LucasQuiles/WhatSoup">Guide</a>',
+    'const x = <a href="https://github.com.example/LucasQuiles/WhatSoup">Guide</a>',
+    'const x = <a href="https://github.com/LucasQuiles/WhatSoupOther">Guide</a>',
+    'const x = <a href="https://github.com/LucasQuiles/WhatSoup documentation">Guide</a>',
+  ])('keeps visible copy and unrelated targets guarded: %s', async (source) => {
+    const messages = await lintWarnings(source)
+    expect(hasWarning(messages, 'no-brand-regression')).toBe(true)
+  })
+
   it('fires on document.title = "WhatSoup - ..." assignment', async () => {
     const messages = await lintWarnings(
       'document.title = "WhatSoup - Dashboard"'

@@ -110,11 +110,12 @@ export async function unlockConsole(rootToken: string): Promise<{ expiresIn: num
 
 /** Lock the console: revoke the session and clear the cookie. */
 export async function lockConsole(): Promise<void> {
-  await fetch(`${API_BASE}/api/console-session`, {
+  const res = await fetch(`${API_BASE}/api/console-session`, {
     method: 'DELETE',
     credentials: 'same-origin',
     signal: AbortSignal.timeout(5000),
   });
+  if (!res.ok) throw new Error(`Session revocation could not be confirmed (${res.status}).`);
 }
 
 // ---------------------------------------------------------------------------
@@ -563,7 +564,7 @@ export const api = {
     apiFetch<{ exists: boolean; writable: boolean }>(`/api/directories/check?path=${encodeURIComponent(dirPath)}`),
 
   getVersion: () =>
-    apiFetch<{ sha: string; remoteSha: string; updateAvailable: boolean; checkedAt: string }>('/api/version'),
+    apiFetch<{ sha: string; remoteSha: string; updateAvailable: boolean; checkedAt: string; updateMode?: string }>('/api/version'),
 
   // Fleet-process liveness (src/fleet/livez.ts) — unauthenticated loopback
   // route; the Deployments surface reads fleet uptime from it.

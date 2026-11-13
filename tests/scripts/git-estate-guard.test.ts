@@ -1043,10 +1043,11 @@ describe('git-estate guard', () => {
       .toContainEqual(expect.objectContaining({ oid: second.oid }));
   });
 
-  it('refuses invalid, absent, stale, changed, and uninspectable stash acceptance without writing the baseline', () => {
-    const { root, repo } = initRepo();
-    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
-    const baselinePath = snapshot(repo).snapshot.baselinePath;
+  it('refuses invalid and absent stash acceptance without writing the baseline', () => {
+    const { repo } = initRepo();
+    const written = run(repo, ['baseline', 'write', '--json']);
+    expect(written.status, written.stderr).toBe(0);
+    const baselinePath = (JSON.parse(written.stdout) as BaselineWriteDocument).baseline!.path;
     const original = readFileSync(baselinePath, 'utf8');
     const invalid = run(repo, [
       'baseline', 'accept-stash', '--oid', 'not-an-oid', '--reason', 'fixture', '--json',
@@ -1063,41 +1064,39 @@ describe('git-estate guard', () => {
       'baseline', 'accept-stash', '--oid', 'a'.repeat(40), '--reason', 'fixture', '--json',
     ]);
     expect(absent.status).toBe(2);
+    expect(JSON.parse(absent.stdout).error.kind).toBe('stash_not_retained');
     expect(readFileSync(baselinePath, 'utf8')).toBe(original);
+  });
 
+  it.each([
+    ['uninspectable objects', 'git_scan_failed', (root: string) => ({
+      env: gitInspectionFailureEnvironment(root), marker: null,
+    }), ''],
+    ['racing status', 'snapshot_unsafe', (root: string, repo: string) =>
+      statusRaceEnvironment(root, join(repo, 'tracked.txt')), ''],
+    ['changed stash', 'scan_racing', (root: string) => stashChangeEnvironment(root), ''],
+    ['changed baseline', 'baseline_changed', (root: string, _repo: string, baselinePath: string) =>
+      baselineChangeEnvironment(root, baselinePath), '\n'],
+  ] as const)('refuses stash acceptance with %s without overwriting baseline bytes', (_label, kind, interfere, suffix) => {
+    const { root, repo } = initRepo();
+    const written = run(repo, ['baseline', 'write', '--json']);
+    expect(written.status, written.stderr).toBe(0);
+    const baselinePath = (JSON.parse(written.stdout) as BaselineWriteDocument).baseline!.path;
+    const beforeRefusals = readFileSync(baselinePath, 'utf8');
     writeFileSync(join(repo, 'tracked.txt'), 'stash candidate\n');
     git(repo, ['stash', 'push', '-m', 'candidate']);
-    const oid = snapshot(repo).snapshot.stashes[0]!.oid;
-    const beforeRefusals = readFileSync(baselinePath, 'utf8');
-    const inspection = run(repo, [
+    const oid = git(repo, ['rev-parse', 'refs/stash']);
+    const fault = interfere(root, repo, baselinePath);
+    const refused = run(repo, [
       'baseline', 'accept-stash', '--oid', oid, '--reason', 'fixture', '--json',
-    ], gitInspectionFailureEnvironment(root));
-    expect(inspection.status).toBe(2);
-    expect(readFileSync(baselinePath, 'utf8')).toBe(beforeRefusals);
-
-    const race = statusRaceEnvironment(root, join(repo, 'tracked.txt'));
-    const stale = run(repo, [
-      'baseline', 'accept-stash', '--oid', oid, '--reason', 'fixture', '--json',
-    ], race.env);
-    expect(stale.status).toBe(2);
-    expect(readFileSync(baselinePath, 'utf8')).toBe(beforeRefusals);
-
-    writeFileSync(join(repo, 'tracked.txt'), 'base\n');
-    const stashRace = stashChangeEnvironment(root);
-    const changed = run(repo, [
-      'baseline', 'accept-stash', '--oid', oid, '--reason', 'fixture', '--json',
-    ], stashRace.env);
-    expect(changed.status).toBe(2);
-    expect(existsSync(stashRace.marker)).toBe(true);
-    expect(readFileSync(baselinePath, 'utf8')).toBe(beforeRefusals);
-
-    const baselineRace = baselineChangeEnvironment(root, baselinePath);
-    const changedBaseline = run(repo, [
-      'baseline', 'accept-stash', '--oid', oid, '--reason', 'fixture', '--json',
-    ], baselineRace.env);
-    expect(changedBaseline.status).toBe(2);
-    expect(existsSync(baselineRace.marker)).toBe(true);
-    expect(readFileSync(baselinePath, 'utf8')).toBe(`${beforeRefusals}\n`);
+    ], fault.env);
+    expect(refused.status, refused.stderr).toBe(2);
+    expect(JSON.parse(refused.stdout)).toMatchObject({
+      command: 'baseline', action: 'accept-stash', exitCode: 2,
+      baseline: null, error: { kind },
+    });
+    if (fault.marker) expect(existsSync(fault.marker)).toBe(true);
+    expect(readFileSync(baselinePath, 'utf8')).toBe(`${beforeRefusals}${suffix}`);
   });
 
   it('refuses a baseline change during the second stash closure without overwriting the concurrent bytes', () => {

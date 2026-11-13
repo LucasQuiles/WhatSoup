@@ -20,7 +20,6 @@ import { readFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 
 import { jsonResponse, parseQueryString, readBody, requireInstance } from '../../lib/http.ts';
-import { SIGNAL } from '../../lib/signals.ts';
 import { MS_PER_MINUTE, MS_PER_SECOND } from '../../lib/time-units.ts';
 import { systemClock } from '../../lib/clock.ts';
 import { instancePaths } from '../paths.ts';
@@ -40,22 +39,35 @@ import { persistIntroSentFlag } from '../../core/intro-sent-config.ts';
 import { createChildLogger } from '../../logger.ts';
 import { repoRoot } from '../paths.ts';
 import { createSSEWriter } from '../sse-helpers.ts';
-import { projectError, serviceActionError } from '../response-error-projection.ts';
+import { trackAuthHelper, type AuthHelper } from '../auth-helper.ts';
+import { projectError, serviceActionError, mutationError } from '../response-error-projection.ts';
 import { NAME_MAX_LENGTH, NAME_RE, validateInstanceName } from './instance-name.ts';
 import type { OpsDeps } from './ops.ts';
+import { claimInstanceMutation, type InstanceMutationClaim } from './instance-mutation.ts';
 
 const log = createChildLogger('fleet:ops-auth');
 
 // Active auth processes per instance — prevents duplicate concurrent auth sessions
-const activeAuthProcesses = new Map<string, ReturnType<typeof spawn>>();
+const activeAuthProcesses = new Map<string, AuthHelper>();
 // In-flight auth operations — prevents concurrent auth requests from racing
 const authInFlight = new Set<string>();
+const pendingAuthActivations = new Map<string, symbol>();
+const pairingMutations = new Map<string, { claim: InstanceMutationClaim; settled: boolean }>();
+
+function releaseSettledPairingMutation(name: string) {
+  const mutation = pairingMutations.get(name);
+  if (mutation?.settled && !activeAuthProcesses.has(name) && !pendingAuthActivations.has(name)) {
+    mutation.claim.release();
+    pairingMutations.delete(name);
+  }
+}
 
 // Auth session wall-clock timeout (5 minutes — QR codes expire in ~60s, allows 5 scan attempts)
 const AUTH_TIMEOUT_MS = 5 * MS_PER_MINUTE;
 // The helper normally exits about two seconds after it persists credentials.
 // Keep a short, bounded window so that a hung helper cannot strand its service.
 const AUTH_COMPLETION_TIMEOUT_MS = 15 * MS_PER_SECOND;
+const AUTH_ACTIVATION_TIMEOUT_MS = 30 * MS_PER_SECOND;
 const ALLOWED_SSE_EVENTS = new Set(['qr', 'connected', 'error']);
 
 /**
@@ -101,7 +113,8 @@ export async function handleAuth(
   // idempotent POST saga (q-canary lane, T5): this legacy SSE route stops the
   // service and pairs into the existing auth directory with no quarantine,
   // exactly the replay surface the saga exists to close.
-  const legacyGateScope = readInstanceAccountScope(instance.configPath);
+  const legacyGateScope = readInstanceAccountScope(instance.configPath, res);
+  if (legacyGateScope === undefined) return;
   if (legacyGateScope !== null) {
     jsonResponse(res, 409, {
       error: legacyGateScope === 'malformed'
@@ -112,18 +125,22 @@ export async function handleAuth(
   }
 
   // Prevent concurrent auth requests for the same instance from racing
-  if (authInFlight.has(params.name)) {
+  if (authInFlight.has(params.name) || activeAuthProcesses.has(params.name) || pendingAuthActivations.has(params.name)) {
     jsonResponse(res, 409, { error: 'auth already in progress for this instance' });
     return;
   }
   authInFlight.add(params.name);
 
-  // Kill any existing auth process for this instance before starting a new one
-  const existing = activeAuthProcesses.get(params.name);
-  if (existing) {
-    try { existing.kill(SIGNAL.TERM); } catch { /* already exited: the previous auth process may have exited on its own before this cleanup runs, so kill throwing here is expected and safe to ignore. */ }
-    activeAuthProcesses.delete(params.name);
+  const mutation = claimInstanceMutation(params.name, res);
+  if (!mutation) { authInFlight.delete(params.name); return; }
+  const admittedScope = readInstanceAccountScope(instance.configPath, res);
+  if (admittedScope !== null) {
+    authInFlight.delete(params.name);
+    mutation.release();
+    if (admittedScope !== undefined) jsonResponse(res, 409, { error: 'instance pairing configuration changed; retry preflight' });
+    return;
   }
+  let mutationReleased = false;
 
   // SSE headers — write BEFORE stopping the instance to avoid browser timeout
   // during a slow systemd stop (up to TimeoutStopSec=15s)
@@ -140,22 +157,53 @@ export async function handleAuth(
   let startupRequested = false;
   let restoreRequested = false;
   let preflightClosed = false;
+  let helper: AuthHelper | undefined;
+  let streamEnded = false;
+  let servicePending = false;
+  const releaseIfSettled = () => {
+    if (helper?.confirmedClosed && activeAuthProcesses.get(params.name) === helper) activeAuthProcesses.delete(params.name);
+    if (streamEnded && !servicePending && (!helper || helper.confirmedClosed)) {
+      authInFlight.delete(params.name);
+      if (!mutationReleased) { mutationReleased = true; mutation.release(); }
+    }
+  };
   const { writeSSE, endOnce } = createSSEWriter(res, () => {
-    activeAuthProcesses.delete(params.name);
-    authInFlight.delete(params.name);
+    streamEnded = true;
+    releaseIfSettled();
     if (authTimer) clearTimeout(authTimer);
   });
+  const activateService = (onComplete: (error: Error | null) => void) => {
+    servicePending = true;
+    let completed = false;
+    let expired = false;
+    const deadline = setTimeout(() => {
+      expired = true;
+      log.error({ instance: params.name }, 'Authentication service activation unconfirmed; retain admission until callback settles');
+      writeSSE('error', { message: 'Service activation was not confirmed. Inspect the instance service before retrying.' });
+      endOnce();
+    }, AUTH_ACTIVATION_TIMEOUT_MS);
+    const settle = (error: Error | null) => {
+      if (completed) return;
+      completed = true;
+      clearTimeout(deadline);
+      servicePending = false;
+      if (!expired) onComplete(error);
+      else if (error) log.error({ err: error, instance: params.name }, 'Delayed authentication service activation failed');
+      releaseIfSettled();
+    };
+    try {
+      if (deps.serviceManager.startAfterAuthFire) deps.serviceManager.startAfterAuthFire(params.name, settle);
+      else deps.serviceManager.startFire(params.name, settle);
+    } catch (error) {
+      settle(error instanceof Error ? error : new Error(String(error)));
+    }
+  };
   const restoreStoppedInstance = (reason: string) => {
     if (!stoppedForAuth || startupRequested || restoreRequested) return;
     restoreRequested = true;
-    const onError = (err: Error | null) => {
+    activateService((err) => {
       if (err) log.error({ err, instance: params.name, reason }, 'post-auth failure restart failed');
-    };
-    if (deps.serviceManager.startAfterAuthFire) {
-      deps.serviceManager.startAfterAuthFire(params.name, onError);
-    } else {
-      deps.serviceManager.startFire(params.name, onError);
-    }
+    });
   };
   const onPreflightClose = () => {
     // Keep the in-flight claim until the stop settles, then either restore the
@@ -165,23 +213,21 @@ export async function handleAuth(
   req.once('close', onPreflightClose);
 
   // Stop the running instance so the lock file is released for auth.
-  if (deps.serviceManager.stopForAuth) {
-    try {
+  try {
+    if (deps.serviceManager.stopForAuth) {
       stoppedForAuth = (await deps.serviceManager.stopForAuth(params.name)) !== false;
-    } catch (err) {
-      req.removeListener('close', onPreflightClose);
-      log.error({ err, instance: params.name }, 'auth preflight failed to stop existing service');
-      if (!preflightClosed) {
-        writeSSE('error', { message: 'Unable to stop the existing instance before authentication. Resolve its service state and retry.' });
-      }
-      endOnce();
-      return;
-    }
-  } else {
-    try {
+    } else {
       await deps.serviceManager.stop(params.name);
       stoppedForAuth = true;
-    } catch { /* intentional: the service may not be running */ }
+    }
+  } catch (err) {
+    req.removeListener('close', onPreflightClose);
+    log.error({ err, instance: params.name }, 'auth preflight failed to stop existing service');
+    if (!preflightClosed) {
+      writeSSE('error', { message: 'Unable to stop the existing instance before authentication. Resolve its service state and retry.' });
+    }
+    endOnce();
+    return;
   }
 
   req.removeListener('close', onPreflightClose);
@@ -196,16 +242,24 @@ export async function handleAuth(
   // Resolve bootstrap-auth against the repo root, not `process.cwd()`.
   // Under systemd the fleet unit ships with no `WorkingDirectory=`, so cwd
   // is the service user's `$HOME` and a relative script path ENOENTs (#419).
-  const child = spawn(process.execPath, [
+  let child: ReturnType<typeof spawn>;
+  try { child = spawn(process.execPath, [
     '--experimental-strip-types',
     path.join(repoRoot, 'src', 'bootstrap-auth.ts'),
     params.name,
   ], {
     cwd: repoRoot,
-    env: buildAuthHelperEnv(),
+    env: { ...buildAuthHelperEnv(), WHATSOUP_MUTATION_LEASE_OP: mutation.lease.operationId, WHATSOUP_MUTATION_LEASE_FENCING: String(mutation.lease.fencingToken) },
     stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  activeAuthProcesses.set(params.name, child);
+  }); } catch (error) {
+    writeSSE('error', projectError(error, { operation: 'auth', stage: 'execute' }));
+    restoreStoppedInstance('spawn-rejected');
+    endOnce();
+    return;
+  }
+  helper = trackAuthHelper(child);
+  activeAuthProcesses.set(params.name, helper);
+  void helper.closed.then(releaseIfSettled);
 
   // Guard against double res.end() — declared before any event handlers
   let connected = false;
@@ -214,10 +268,7 @@ export async function handleAuth(
   const startAfterSuccessfulAuth = () => {
     if (startupRequested) return;
     startupRequested = true;
-    let activationCompleted = false;
-    const onComplete = (err: Error | null) => {
-      if (activationCompleted) return;
-      activationCompleted = true;
+    activateService((err) => {
       if (err) {
         terminalFailure = true;
         log.error({ err, instance: params.name }, 'post-auth start failed');
@@ -232,16 +283,15 @@ export async function handleAuth(
         writeSSE('connected', {});
       }
       endOnce();
-    };
-    try {
-      if (deps.serviceManager.startAfterAuthFire) {
-        deps.serviceManager.startAfterAuthFire(params.name, onComplete);
-      } else {
-        deps.serviceManager.startFire(params.name, onComplete);
-      }
-    } catch (error) {
-      onComplete(error instanceof Error ? error : new Error(String(error)));
-    }
+    });
+  };
+
+  const stopHelper = (reason: string) => {
+    void helper!.stop().then((outcome) => {
+      if (outcome === 'closed') restoreStoppedInstance(reason);
+      else log.error({ instance: params.name, reason }, 'Authentication helper cleanup unconfirmed; inspect the helper before retrying');
+      releaseIfSettled();
+    });
   };
 
   const armAuthTimeout = (delayMs: number, message: string, reason: string) => {
@@ -249,8 +299,7 @@ export async function handleAuth(
     authTimer = setTimeout(() => {
       terminalFailure = true;
       writeSSE('error', { message });
-      child.kill(SIGNAL.TERM);
-      restoreStoppedInstance(reason);
+      stopHelper(reason);
       endOnce();
     }, delayMs);
   };
@@ -258,13 +307,14 @@ export async function handleAuth(
   // Wall-clock timeout — prevents auth process from hanging forever.
   armAuthTimeout(
     AUTH_TIMEOUT_MS,
-    'Authentication timed out. QR codes expire after ~60 seconds. Please retry.',
+    'Authentication timed out. Wait for helper cleanup and inspect the instance before retrying.',
     'timeout',
   );
 
   // Parse stdout for JSON events
   let buffer = '';
   child.stdout!.on('data', (chunk: Buffer) => {
+    if (terminalFailure || streamEnded) return;
     buffer += chunk.toString();
     const lines = buffer.split('\n');
     buffer = lines.pop() ?? '';
@@ -278,7 +328,7 @@ export async function handleAuth(
             connected = true;
             armAuthTimeout(
               AUTH_COMPLETION_TIMEOUT_MS,
-              'Authentication completed but did not finish. Please retry.',
+              'Authentication completed but did not finish. Wait for helper cleanup before retrying.',
               'completion-timeout',
             );
             // Reset introSent so the instance sends an introduction on next boot
@@ -310,7 +360,8 @@ export async function handleAuth(
   child.on('error', (err) => {
     terminalFailure = true;
     writeSSE('error', projectError(err, { operation: 'auth', stage: 'execute' }));
-    restoreStoppedInstance('child-error');
+    if (helper!.confirmedClosed) restoreStoppedInstance('child-error');
+    else stopHelper('child-error');
     endOnce();
   });
   // `exit` can arrive before the final stdout bytes. Wait for `close`, which
@@ -324,7 +375,7 @@ export async function handleAuth(
       }
       startAfterSuccessfulAuth();
       return;
-    } else if (code !== 0) {
+    } else {
       terminalFailure = true;
       writeSSE('error', serviceActionError(new Error(`auth exited with code ${code}`), 'auth', 'auth_failed'));
       restoreStoppedInstance('child-exit');
@@ -339,8 +390,7 @@ export async function handleAuth(
     // closes the SSE stream. Killing it here would strand the booted-out job.
     if (connected && !terminalFailure) return;
     terminalFailure = true;
-    child.kill(SIGNAL.TERM);
-    setTimeout(() => { try { child.kill(SIGNAL.KILL); } catch { /* already exited: the auth helper may have already exited before this escalation fires, so kill throwing here is expected and safe to ignore. */ } }, 5000);
+    stopHelper('client-close');
     endOnce();
   });
 }
@@ -364,20 +414,21 @@ export async function handleAuth(
 /** Last pairing helper event per instance, served via the status route. */
 const lastPairingEvents = new Map<string, { event: string; data: string | null; at: string }>();
 
-function readInstanceAccountScope(configPath: string): AccountScopeIdV1 | null | 'malformed' {
-  // Absent or unparseable config reads as NO scope: legacy instances predate
-  // the field and discovery already owns config-error reporting. Only a
-  // present-but-invalid value is 'malformed' (fail closed on the value, not
-  // on unrelated read failures).
-  let parsed: Record<string, unknown>;
+function readInstanceAccountScope(configPath: string, res: ServerResponse): AccountScopeIdV1 | null | 'malformed' | undefined {
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+    parsed = JSON.parse(readFileSync(configPath, 'utf-8'));
   } catch {
-    // intentional: absent or unparseable config reads as no scope - legacy
-    // instances predate the field and discovery owns config-error reporting.
-    return null;
+    // An unavailable observation cannot authorize the legacy pairing path.
+    parsed = undefined;
   }
-  const raw = parsed.accountScopeId;
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    jsonResponse(res, 500, mutationError(undefined, {
+      operation: 'auth', stage: 'precondition', mutationState: 'not_started',
+    }, 'config_read_failed'));
+    return undefined;
+  }
+  const raw = (parsed as Record<string, unknown>).accountScopeId;
   if (raw === undefined || raw === null) return null;
   const scope = parseAccountScopeId(raw);
   return scope === null ? 'malformed' : scope;
@@ -420,7 +471,8 @@ export async function handlePairingPreflight(
   const instance = requireInstance(deps.discovery, params.name, res);
   if (!instance) return;
   if (!rejectNonHeaderAuthOrCrossSite(req, res)) return;
-  const scope = readInstanceAccountScope(instance.configPath);
+  const scope = readInstanceAccountScope(instance.configPath, res);
+  if (scope === undefined) return;
   if (scope === 'malformed') {
     jsonResponse(res, 500, { error: 'instance accountScopeId is malformed; fix config before pairing' });
     return;
@@ -446,7 +498,8 @@ export async function handlePairingStatus(
   const instance = requireInstance(deps.discovery, params.name, res);
   if (!instance) return;
   if (!rejectNonHeaderAuthOrCrossSite(req, res)) return;
-  const scope = readInstanceAccountScope(instance.configPath);
+  const scope = readInstanceAccountScope(instance.configPath, res);
+  if (scope === undefined) return;
   if (scope === null || scope === 'malformed') {
     jsonResponse(res, 409, { error: 'pairing status exists only for accountScopeId-configured instances' });
     return;
@@ -479,7 +532,8 @@ export async function handlePairingApply(
   const instance = requireInstance(deps.discovery, params.name, res);
   if (!instance) return;
   if (!rejectNonHeaderAuthOrCrossSite(req, res)) return;
-  const scope = readInstanceAccountScope(instance.configPath);
+  const scope = readInstanceAccountScope(instance.configPath, res);
+  if (scope === undefined) return;
   if (scope === 'malformed') {
     jsonResponse(res, 500, { error: 'instance accountScopeId is malformed; fix config before pairing' });
     return;
@@ -491,11 +545,21 @@ export async function handlePairingApply(
   // Reserve the in-flight slot in the same synchronous section as the check:
   // an `await` between has() and add() would let two concurrent applies both
   // pass the guard and run sagas concurrently.
-  if (authInFlight.has(params.name)) {
+  if (authInFlight.has(params.name) || activeAuthProcesses.has(params.name) || pendingAuthActivations.has(params.name)) {
     jsonResponse(res, 409, { error: 'auth already in progress for this instance' });
     return;
   }
   authInFlight.add(params.name);
+  const mutation = claimInstanceMutation(params.name, res);
+  if (!mutation) { authInFlight.delete(params.name); return; }
+  const admittedScope = readInstanceAccountScope(instance.configPath, res);
+  if (admittedScope !== scope) {
+    authInFlight.delete(params.name);
+    mutation.release();
+    if (admittedScope !== undefined) jsonResponse(res, 409, { error: 'instance pairing configuration changed; retry preflight' });
+    return;
+  }
+  pairingMutations.set(params.name, { claim: mutation, settled: false });
   try {
     let body: Record<string, unknown>;
     try {
@@ -543,6 +607,8 @@ export async function handlePairingApply(
     jsonResponse(res, 500, projectError(err, { operation: 'auth', stage: 'execute' }));
   } finally {
     authInFlight.delete(params.name);
+    pairingMutations.get(params.name)!.settled = true;
+    releaseSettledPairingMutation(params.name);
   }
 }
 
@@ -559,7 +625,8 @@ export function buildSagaEffects(
     stopService: async () => {
       try {
         if (deps.serviceManager.stopForAuth) {
-          return (await deps.serviceManager.stopForAuth(name)) !== false;
+          await deps.serviceManager.stopForAuth(name);
+          return true;
         }
         await deps.serviceManager.stop(name);
         return true;
@@ -571,11 +638,22 @@ export function buildSagaEffects(
     },
     startService: () =>
       new Promise<boolean>(resolve => {
-        const onError = (err: Error | null) => resolve(err === null);
-        if (deps.serviceManager.startAfterAuthFire) {
-          deps.serviceManager.startAfterAuthFire(name, onError);
-        } else {
-          deps.serviceManager.startFire(name, onError);
+        const attempt = Symbol('activation');
+        pendingAuthActivations.set(name, attempt);
+        const settle = (started: boolean) => {
+          if (pendingAuthActivations.get(name) === attempt) pendingAuthActivations.delete(name);
+          releaseSettledPairingMutation(name);
+          resolve(started);
+        };
+        const onError = (err: Error | null) => settle(err === null);
+        try {
+          if (deps.serviceManager.startAfterAuthFire) {
+            deps.serviceManager.startAfterAuthFire(name, onError);
+          } else {
+            deps.serviceManager.startFire(name, onError);
+          }
+        } catch {
+          settle(false);
         }
       }),
     acquireLease: operationId =>
@@ -597,31 +675,66 @@ export function buildSagaEffects(
         // helper adopts exactly this lease instead of acquiring its own.
         env.WHATSOUP_PAIRING_LEASE_OP = input.lease.operationId;
         env.WHATSOUP_PAIRING_LEASE_FENCING = String(input.lease.fencingToken);
+        const mutation = pairingMutations.get(name);
+        if (mutation) {
+          env.WHATSOUP_MUTATION_LEASE_OP = mutation.claim.lease.operationId;
+          env.WHATSOUP_MUTATION_LEASE_FENCING = String(mutation.claim.lease.fencingToken);
+        }
         // A stale 'connected' from a PREVIOUS helper run must never validate
         // this one's exit; success evidence starts empty for every run.
         lastPairingEvents.delete(name);
-        const child = spawn(process.execPath, [
+        let child: ReturnType<typeof spawn>;
+        try { child = spawn(process.execPath, [
           '--experimental-strip-types',
           path.join(repoRoot, 'src', 'bootstrap-auth.ts'),
           name,
-        ], { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'] });
-        activeAuthProcesses.set(name, child);
+        ], { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'] }); } catch {
+          resolve({ ok: false, errorClass: 'unknown' });
+          return;
+        }
+        const helper = trackAuthHelper(child);
+        activeAuthProcesses.set(name, helper);
+        let releaseOnClose = false;
+        void helper.closed.then(() => {
+          if (activeAuthProcesses.get(name) === helper) activeAuthProcesses.delete(name);
+          releaseSettledPairingMutation(name);
+          if (releaseOnClose) {
+            let released = false;
+            try {
+              const result = releaseCoordinationLease({ stateRoot: paths.stateRoot, scopeId: scope, lease: input.lease });
+              released = result.ok;
+              if (!result.ok) log.error({ instance: name, refusal: result.refusal }, 'Pairing helper closed but lease release was refused');
+            } catch (err) {
+              log.error({ err, instance: name }, 'Pairing helper closed but lease release failed');
+            }
+            lastPairingEvents.set(name, { event: released ? 'cleanup_confirmed' : 'cleanup_release_unconfirmed', data: null, at: new Date(systemClock.now()).toISOString() });
+          }
+        });
 
         let settled = false;
-        const settle = (result: { ok: true } | { ok: false; errorClass: PairingErrorClass }) => {
+        let forcedFailure: PairingErrorClass | undefined;
+        const settle = (result: { ok: true } | { ok: false; errorClass: PairingErrorClass; cleanupUnconfirmed?: true }) => {
           if (settled) return;
           settled = true;
-          activeAuthProcesses.delete(name);
           clearTimeout(timer);
           resolve(result);
         };
-        const timer = setTimeout(() => {
-          try { child.kill(SIGNAL.TERM); } catch { /* already exited: the helper may finish between the timeout firing and this kill. */ }
-          settle({ ok: false, errorClass: 'pairing_timeout' });
-        }, AUTH_TIMEOUT_MS);
+        const stopHelper = (errorClass: PairingErrorClass) => {
+          forcedFailure ??= errorClass;
+          void helper.stop().then(() => {
+            if (settled) return;
+            releaseOnClose = !helper.confirmedClosed;
+            if (releaseOnClose) {
+              lastPairingEvents.set(name, { event: 'cleanup_unconfirmed', data: null, at: new Date(systemClock.now()).toISOString() });
+            }
+            settle({ ok: false, errorClass: forcedFailure!, ...(releaseOnClose ? { cleanupUnconfirmed: true } : {}) });
+          });
+        };
+        const timer = setTimeout(() => stopHelper('pairing_timeout'), AUTH_TIMEOUT_MS);
 
         let stdoutBuffer = '';
         child.stdout?.on('data', (chunk: Buffer) => {
+          if (settled || forcedFailure) return;
           stdoutBuffer += chunk.toString('utf-8');
           let newlineAt = stdoutBuffer.indexOf('\n');
           while (newlineAt !== -1) {
@@ -651,15 +764,20 @@ export function buildSagaEffects(
           const text = chunk.toString('utf-8').trim();
           if (text) log.info({ instance: name, stderr: text.slice(0, 200) }, 'pairing helper stderr');
         });
-        child.on('exit', code => {
+        child.on('close', code => {
           const last = lastPairingEvents.get(name);
-          if (last?.event === 'connected' && code === 0) {
+          if (forcedFailure) {
+            settle({ ok: false, errorClass: forcedFailure });
+          } else if (last?.event === 'connected' && code === 0) {
             settle({ ok: true });
           } else {
             settle({ ok: false, errorClass: code === 0 ? 'pairing_rejected' : 'unknown' });
           }
         });
-        child.on('error', () => settle({ ok: false, errorClass: 'unknown' }));
+        child.on('error', () => {
+          if (helper.confirmedClosed) settle({ ok: false, errorClass: 'unknown' });
+          else stopHelper('unknown');
+        });
       }),
   };
 }

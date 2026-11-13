@@ -80,7 +80,7 @@ function decodeJidOr400(rawJid: string, res: ServerResponse): string | null {
 }
 
 /** Unwrap MCP tool result envelope — extracts JSON from content[0].text if present. */
-function unwrapMcpResult(raw: unknown): unknown {
+export function unwrapMcpResult(raw: unknown): unknown {
   if (raw && typeof raw === 'object' && 'content' in raw) {
     const content = (raw as { content: unknown[] }).content;
     if (Array.isArray(content) && content.length > 0) {

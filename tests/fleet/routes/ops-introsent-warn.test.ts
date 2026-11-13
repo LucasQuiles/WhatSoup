@@ -25,8 +25,8 @@ vi.mock('../../../src/fleet/http-proxy.ts', () => ({
   proxyToInstance: vi.fn(),
 }));
 vi.mock('node:child_process', async () => {
-  const { childProcessMock } = await import('../../helpers/child-process.ts');
-  return childProcessMock();
+  const { childProcessMockWithNativeOwnership } = await import('../../helpers/child-process.ts');
+  return childProcessMockWithNativeOwnership();
 });
 
 import { handleAuth } from '../../../src/fleet/routes/ops.ts';
@@ -36,6 +36,9 @@ import { privateConfigLockPath } from '../../../src/core/private-config-file.ts'
 import { acquireProcessLock, releaseProcessLock } from '../../../src/lib/process-lock.ts';
 import { spawn } from 'node:child_process';
 import { makeDeps, mockReq, mockSseRes } from '../../helpers/http-mocks.ts';
+import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
+
+const authConfigs = trackTmpDirs('auth-introsent-');
 
 function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
   return {
@@ -63,7 +66,10 @@ describe('handleAuth introSent reset failure', () => {
   });
 
   it('warns when the introSent config rewrite fails after auth connects', async () => {
-    const instance = fakeInstance();
+    const dir = authConfigs.make('instance');
+    const configPath = path.join(dir, 'config.json');
+    fs.writeFileSync(configPath, '{}');
+    const instance = fakeInstance({ configPath });
     const deps = depsFor(instance);
     const req = mockReq({ method: 'POST', url: '/api/lines/test-line/auth' });
     const res = mockSseRes();
@@ -76,8 +82,8 @@ describe('handleAuth introSent reset failure', () => {
       emit: (event: string, code: number) => void;
     };
 
-    // The auth process reports connected; the configPath directory does not
-    // exist, so the introSent rewrite throws inside the handler.
+    // The config becomes unavailable after admission, before the rewrite.
+    fs.rmSync(dir, { recursive: true, force: true });
     child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'connected' }) + '\n'));
 
     await vi.waitFor(() => {

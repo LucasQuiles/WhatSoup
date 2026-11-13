@@ -1049,8 +1049,14 @@ def test_acknowledgement_drains_only_what_was_committed(tmp_path: Path) -> None:
     _mod.ack_unrenderable_quarantine_telemetry(
         _mod.flush_unrenderable_quarantine_telemetry({})
     )
-    _quarantine_one_unrenderable(tmp_path)
-    _quarantine_one_unrenderable(tmp_path)
+    with patch.object(_mod.time, "time", return_value=1700000000) as clock:
+        first_path = tmp_path / "first"
+        first_path.mkdir()
+        _quarantine_one_unrenderable(first_path)
+        clock.return_value += 1
+        second_path = tmp_path / "second"
+        second_path.mkdir()
+        _quarantine_one_unrenderable(second_path)
 
     first: dict[str, Any] = {}
     folded = _mod.flush_unrenderable_quarantine_telemetry(first)

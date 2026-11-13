@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import * as fs from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -11,10 +12,16 @@ import {
   readCoordinationLease,
   coordinationLeasePath,
   defaultLeaseProbes,
+  registerCoordinationLeaseHelper,
   resolveConfiguredAccountScope,
   type LeaseProbes,
 } from '../../src/transport/coordination-lease.ts';
 import { parseCoordinationLease, parseAccountScopeId } from '../../src/transport/auth-custody-contracts.ts';
+
+vi.mock('node:fs', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return { ...actual, unlinkSync: vi.fn(actual.unlinkSync), closeSync: vi.fn(actual.closeSync) };
+});
 
 const SCOPE = parseAccountScopeId('scope:line-a-wa')!;
 const T0 = Date.parse('2026-08-18T18:00:00.000Z');
@@ -68,6 +75,27 @@ afterEach(() => {
 });
 
 describe('acquireCoordinationLease', () => {
+  it.each(['live', 'unknown', 'dead', 'reused'] as const)('checks a delegated helper after coordinator death: %s', (helperState) => {
+    const acquired = acquireCoordinationLease(baseArgs());
+    if (!acquired.ok) throw new Error('fixture acquire failed');
+    const lease = { ...acquired.lease, helper: { pid: 102, processBirthToken: 'helper-birth' } };
+    writeFileSync(coordinationLeasePath(root, SCOPE), JSON.stringify(lease));
+    const result = acquireCoordinationLease(baseArgs({
+      operationId: 'recovery',
+      probes: probes({
+        pid: 103,
+        pidAlive: pid => pid === 102 && helperState !== 'dead',
+        birthToken: pid => pid !== 102 ? 'next-owner' : helperState === 'unknown' ? null : helperState === 'reused' ? 'new-process' : 'helper-birth',
+      }),
+    }));
+    if (helperState === 'live' || helperState === 'unknown') {
+      expect(result).toEqual({ ok: false, refusal: helperState === 'live' ? 'held_by_live_owner' : 'owner_unknown' });
+      expect(JSON.parse(readFileSync(coordinationLeasePath(root, SCOPE), 'utf8'))).toEqual(lease);
+    } else {
+      expect(result).toMatchObject({ ok: true, lease: { fencingToken: 2, pid: 103 } });
+    }
+  });
+
   it('acquires a fresh lease with fencing token 1 and a parseable V1 payload', () => {
     const result = acquireCoordinationLease(baseArgs());
     if (!result.ok) throw new Error(`unexpected refusal: ${result.refusal}`);
@@ -180,6 +208,72 @@ describe('acquireCoordinationLease', () => {
 });
 
 describe('renew and release', () => {
+  it('returns an I/O refusal when closing the acquired guard fails', () => {
+    const acquired = acquireCoordinationLease(baseArgs());
+    if (!acquired.ok) throw new Error('fixture acquire failed');
+    const original = vi.mocked(fs.closeSync).getMockImplementation()!;
+    const close = vi.mocked(fs.closeSync).mockImplementation(fd => {
+      original(fd);
+      throw new Error('fixture close refused');
+    });
+    try {
+      expect(releaseCoordinationLease({ stateRoot: root, scopeId: SCOPE, lease: acquired.lease })).toEqual({ ok: false, refusal: 'io_error' });
+      expect(readCoordinationLease(root, SCOPE)).toEqual(acquired.lease);
+    } finally { close.mockRestore(); }
+  });
+
+  it('returns an I/O refusal and preserves custody when its tombstone cannot be written', () => {
+    const acquired = acquireCoordinationLease(baseArgs());
+    if (!acquired.ok) throw new Error('fixture acquire failed');
+    mkdirSync(coordinationLeasePath(root, SCOPE).replace(/\.json$/, '.last-token.json'));
+    expect(releaseCoordinationLease({ stateRoot: root, scopeId: SCOPE, lease: acquired.lease })).toEqual({ ok: false, refusal: 'io_error' });
+    expect(readCoordinationLease(root, SCOPE)).toEqual(acquired.lease);
+    expect(acquireCoordinationLease(baseArgs({ operationId: 'next' }))).toEqual({ ok: false, refusal: 'held_by_live_owner' });
+  });
+
+  it.each(['lease', 'guard'] as const)('returns an I/O refusal when %s unlink fails', (target) => {
+    const acquired = acquireCoordinationLease(baseArgs());
+    if (!acquired.ok) throw new Error('fixture acquire failed');
+    const leasePath = coordinationLeasePath(root, SCOPE);
+    const original = vi.mocked(fs.unlinkSync).getMockImplementation()!;
+    const unlink = vi.mocked(fs.unlinkSync).mockImplementation(path => {
+      if (String(path) === (target === 'lease' ? leasePath : `${leasePath}.reclaim`)) throw new Error('fixture unlink refused');
+      original(path);
+    });
+    try {
+      expect(releaseCoordinationLease({ stateRoot: root, scopeId: SCOPE, lease: acquired.lease })).toEqual({ ok: false, refusal: 'io_error' });
+      if (target === 'lease') expect(readCoordinationLease(root, SCOPE)).toEqual(acquired.lease);
+      else expect(existsSync(`${leasePath}.reclaim`)).toBe(true);
+    } finally { unlink.mockRestore(); }
+  });
+
+  it('registers the direct helper and refuses release until that exact process is gone', () => {
+    const parent = acquireCoordinationLease(baseArgs({ probes: probes({ pid: 101 }) }));
+    if (!parent.ok) throw new Error('fixture acquire failed');
+    const helperProbes = probes({ pid: 102, pidAlive: () => true, birthToken: pid => pid === 101 ? 'birth-self' : 'helper-birth' });
+    const registered = registerCoordinationLeaseHelper({ stateRoot: root, scopeId: SCOPE, operationId: parent.lease.operationId, fencingToken: parent.lease.fencingToken, parentPid: 101, probes: helperProbes });
+    expect(registered).toMatchObject({ ok: true, lease: { helper: { pid: 102, processBirthToken: 'helper-birth' } } });
+    expect(renewCoordinationLease({ stateRoot: root, scopeId: SCOPE, lease: parent.lease, ttlMs: 60_000, probes: probes() })).toMatchObject({ ok: true, lease: { helper: { pid: 102 } } });
+    expect(releaseCoordinationLease({ stateRoot: root, scopeId: SCOPE, lease: parent.lease, probes: helperProbes })).toEqual({ ok: false, refusal: 'helper_unconfirmed' });
+    expect(releaseCoordinationLease({ stateRoot: root, scopeId: SCOPE, lease: parent.lease, probes: { ...helperProbes, birthToken: () => null } })).toEqual({ ok: false, refusal: 'helper_unconfirmed' });
+    expect(releaseCoordinationLease({ stateRoot: root, scopeId: SCOPE, lease: parent.lease, probes: { ...helperProbes, pidAlive: () => false } })).toEqual({ ok: true });
+    expect(readCoordinationLease(root, SCOPE)).toBeNull();
+  });
+
+  it.each(['dead-parent', 'reused-parent', 'wrong-parent', 'wrong-operation', 'wrong-token', 'unknown-helper'] as const)('refuses helper registration after %s without replacing custody', (condition) => {
+    const parent = acquireCoordinationLease(baseArgs({ probes: probes({ pid: 101 }) }));
+    if (!parent.ok) throw new Error('fixture acquire failed');
+    const result = registerCoordinationLeaseHelper({
+      stateRoot: root, scopeId: SCOPE,
+      operationId: condition === 'wrong-operation' ? 'other' : parent.lease.operationId,
+      fencingToken: condition === 'wrong-token' ? 2 : 1,
+      parentPid: condition === 'wrong-parent' ? 103 : 101,
+      probes: probes({ pid: 102, pidAlive: () => condition !== 'dead-parent', birthToken: pid => pid === 101 ? (condition === 'reused-parent' ? 'other' : 'birth-self') : condition === 'unknown-helper' ? null : 'helper-birth' }),
+    });
+    expect(result).toEqual({ ok: false, refusal: 'fencing_token_mismatch' });
+    expect(readCoordinationLease(root, SCOPE)).toEqual(parent.lease);
+  });
+
   it('renew extends the heartbeat only for the exact fencing token holder', () => {
     const acquired = acquireCoordinationLease(baseArgs());
     if (!acquired.ok) throw new Error('fixture acquire failed');

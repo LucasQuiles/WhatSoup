@@ -17,8 +17,8 @@ import { REQUIRED_DENY } from '../../src/core/settings-template.ts';
 vi.mock('../../src/fleet/mcp-client.ts', () => ({ mcpCall: vi.fn() }));
 vi.mock('../../src/fleet/http-proxy.ts', () => ({ proxyToInstance: vi.fn() }));
 vi.mock('node:child_process', async () => {
-  const { childProcessMock } = await import('../helpers/child-process.ts');
-  return childProcessMock();
+  const { childProcessMockWithNativeOwnership } = await import('../helpers/child-process.ts');
+  return childProcessMockWithNativeOwnership();
 });
 
 // ---------------------------------------------------------------------------

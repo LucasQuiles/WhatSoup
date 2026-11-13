@@ -134,17 +134,20 @@ def test_watchdog_state_rejects_unproven_publication(
     # OSError.
     state_file = module.watchdog_state_path()
     state_file.write_text(json.dumps({"version": 1, "open": {}}), encoding="utf-8")
+    original_mode = state_file.parent.stat().st_mode
     state_file.parent.chmod(0o555)  # read-only + execute for dir access
+    try:
+        with pytest.raises(module.ControllerStateRequired) as raised:
+            with module.open_watchdog_state_session() as session:
+                load_result = session.load()
+                state = load_result.payload
+                state.setdefault("pendingStale", {})
+                state.setdefault("recentlyRecovered", {})
+                session.save(state, load_result.capability)
 
-    with pytest.raises(module.ControllerStateRequired) as raised:
-        with module.open_watchdog_state_session() as session:
-            load_result = session.load()
-            state = load_result.payload
-            state.setdefault("pendingStale", {})
-            state.setdefault("recentlyRecovered", {})
-            session.save(state, load_result.capability)
-
-    assert raised.value.diagnostic.mode == "recovery_required"
+        assert raised.value.diagnostic.mode == "recovery_required"
+    finally:
+        state_file.parent.chmod(original_mode)
 
 
 def test_q_loop_state_rejects_unproven_publication(

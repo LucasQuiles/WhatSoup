@@ -1,3 +1,4 @@
+import { claimInstanceMutation } from './instance-mutation.ts';
 /**
  * PATCH /api/lines/:name/config handler for the fleet ops API.
  *
@@ -96,216 +97,220 @@ export async function handleConfigUpdate(
   if (!validateInstanceName(params.name, res)) return;
   const instance = requireInstance(deps.discovery, params.name, res);
   if (!instance) return;
-
-  const body = await readBody(req);
-  let patch: Record<string, unknown>;
+  const mutation = claimInstanceMutation(params.name, res);
+  if (!mutation) return;
   try {
-    patch = JSON.parse(body);
-    if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
-      throw new Error('body must be a JSON object');
+    const body = await readBody(req);
+    let patch: Record<string, unknown>;
+    try {
+      patch = JSON.parse(body);
+      if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
+        throw new Error('body must be a JSON object');
+      }
+    } catch (err) {
+      jsonResponse(res, 400, validationError('invalid_json', 'unknown'));
+      return;
     }
-  } catch (err) {
-    jsonResponse(res, 400, validationError('invalid_json', 'unknown'));
-    return;
-  }
 
-  let mergedClean: Record<string, unknown>;
-  try {
-    mergedClean = withPrivateConfigLockSync(instance.configPath, () => {
-      // Read existing config under the same advisory lock used by the instance
-      // process, so read-merge-write cannot clobber introSent updates.
-      let existing: Record<string, unknown>;
-      try {
-        existing = JSON.parse(readPrivateConfigFileSync(instance.configPath));
-      } catch (err) {
-        jsonResponse(res, 500, projectError(err, { operation: 'config_read', stage: 'execute' }));
-        haltConfigUpdateAfterResponse();
-      }
-
-      // 0. Transport is IMMUTABLE after line creation — a patch that changes
-      //    the transport kind is rejected with 409 (switching transports means
-      //    re-linking; create a new line instead). Checked against the
-      //    pre-merge existing config so the merged view can't smuggle it.
-      if (
-        patch.transport !== undefined &&
-        patch.transport !== existing.transport
-      ) {
-        jsonResponse(res, 409, {
-          error: 'transport is immutable; create a new line to change transports',
-        });
-        haltConfigUpdateAfterResponse();
-      }
-
-      // Deep merge nested config so partial memory.pinecone patches do not destroy
-      // sibling namespaces, BYOK key-env settings, or project guards.
-      const merged = deepMergeRecords(existing, patch);
-
-      // --- Shape/normalization that must run BEFORE the shared validator ---
-      // 1. agentOptions defaulting + cwd traversal check (paths are inherently
-      //    filesystem-aware; the shared validator only does type/range/enum).
-      if (merged.type === 'agent') {
-        if (merged.agentOptions == null) {
-          merged.agentOptions = defaultAgentOptions(params.name);
-        }
-        if (typeof merged.agentOptions !== 'object' || Array.isArray(merged.agentOptions)) {
-          jsonResponse(res, 400, { error: 'agentOptions must be an object' });
+    let mergedClean: Record<string, unknown>;
+    try {
+      mergedClean = withPrivateConfigLockSync(instance.configPath, () => {
+        // Read existing config under the same advisory lock used by the instance
+        // process, so read-merge-write cannot clobber introSent updates.
+        let existing: Record<string, unknown>;
+        try {
+          existing = JSON.parse(readPrivateConfigFileSync(instance.configPath));
+        } catch (err) {
+          jsonResponse(res, 500, projectError(err, { operation: 'config_read', stage: 'execute' }));
           haltConfigUpdateAfterResponse();
         }
-        if (resolveAndValidateAgentCwd(params.name, merged.agentOptions as Record<string, unknown>, res) === null) {
-          haltConfigUpdateAfterResponse();
-        }
-      }
 
-      // 2. Normalize adminPhones if patched, per the (merged) transport —
-      //    signal accepts E.164 or UUID; imessage accepts E.164 or AppleID
-      //    email; other transports E.164-only.
-      if (patch.adminPhones !== undefined) {
+        // 0. Transport is IMMUTABLE after line creation — a patch that changes
+        //    the transport kind is rejected with 409 (switching transports means
+        //    re-linking; create a new line instead). Checked against the
+        //    pre-merge existing config so the merged view can't smuggle it.
         if (
-          !Array.isArray(patch.adminPhones) ||
-          patch.adminPhones.length === 0 ||
-          !patch.adminPhones.every((p: unknown) => isNonEmptyString(p))
+          patch.transport !== undefined &&
+          patch.transport !== existing.transport
         ) {
-          jsonResponse(res, 400, { error: 'adminPhones must be a non-empty array of strings' });
+          jsonResponse(res, 409, {
+            error: 'transport is immutable; create a new line to change transports',
+          });
           haltConfigUpdateAfterResponse();
         }
-        const mergedTransport = typeof merged.transport === 'string' ? merged.transport : 'baileys';
-        merged.adminPhones = normalizeAdminIdsForTransport(mergedTransport, patch.adminPhones as string[]);
-      }
 
-      // --- Shared validator: closes #244 + #249 PATCH validation gaps ---
-      // Runs on the post-merge view so partial patches are checked against the
-      // assembled config, not the bare patch. Mirrors loader + CREATE.
-      {
-        const portInventory = patch.healthPort === undefined ? null : scanHealthPortInventory(params.name);
-        if (portInventory && !portInventory.ok) {
-          emitInventoryFailure(res, portInventory);
-          haltConfigUpdateAfterResponse();
-        }
-        const validationError = validateInstanceConfig(merged, {
-          name: params.name,
-          mode: 'patch',
-          ...(portInventory ? { existingHealthPorts: portInventory.ports } : {}),
-          originalType: existing.type,
-        });
-        if (validationError) {
-          emitValidationError(validationError, res);
-          haltConfigUpdateAfterResponse();
-        }
-      }
+        // Deep merge nested config so partial memory.pinecone patches do not destroy
+        // sibling namespaces, BYOK key-env settings, or project guards.
+        const merged = deepMergeRecords(existing, patch);
 
-      // pluginDirs home-confinement is fs-aware (not in the shared validator).
-      const mergedAo = merged.agentOptions as Record<string, unknown> | undefined;
-      if (Array.isArray(mergedAo?.pluginDirs)) {
-        if (!validatePluginDirs(mergedAo!.pluginDirs as unknown[], res)) haltConfigUpdateAfterResponse();
-      }
-      // service-block home-confinement is fs-aware for the same reason, and runs
-      // on the MERGED view: a patch that leaves an out-of-home entry standing is
-      // refused even when the entry came from the existing config, matching the
-      // pluginDirs sibling. An instance already carrying one is therefore
-      // un-patchable until the entry is corrected.
-      if (!validateServiceHomeConfinement(merged.service, res)) haltConfigUpdateAfterResponse();
-      if (patch.claudeMd && merged.type === 'agent') {
-        // Invariant: resolveAndValidateAgentCwd() (called above whenever
-        // merged.type === 'agent') always leaves agentOptions.cwd a validated
-        // non-empty string, or halts the request first.
-        const ao = merged.agentOptions as Record<string, unknown>;
-        const cwd = ao.cwd as string;
-        try {
-          let claudeDir = path.join(cwd, '.claude');
-          claudeDir = ensureHomeConfinedDirectory(claudeDir);
-          writePrivateFileSync(path.join(claudeDir, 'CLAUDE.md'), patch.claudeMd as string);
-        } catch (err) {
-          jsonResponse(res, 500, projectError(err, { operation: 'config_write', stage: 'commit' }));
-          haltConfigUpdateAfterResponse();
-        }
-      }
-
-      // Write settings.json when settingsJson is in the patch (agent instances only)
-      if (patch.settingsJson && merged.type === 'agent') {
-        const ao = merged.agentOptions as Record<string, unknown>;
-        const cwd = ao.cwd as string;
-        try {
-          let claudeDir = path.join(cwd, '.claude');
-          const settings = mergeSettingsJson('agent', patch.settingsJson as PermissionsSettings);
-          if (settings) {
-            claudeDir = ensureHomeConfinedDirectory(claudeDir);
-            writePermissionsSettings(claudeDir, settings);
+        // --- Shape/normalization that must run BEFORE the shared validator ---
+        // 1. agentOptions defaulting + cwd traversal check (paths are inherently
+        //    filesystem-aware; the shared validator only does type/range/enum).
+        if (merged.type === 'agent') {
+          if (merged.agentOptions == null) {
+            merged.agentOptions = defaultAgentOptions(params.name);
           }
-        } catch (err) {
-          jsonResponse(res, 500, projectError(err, { operation: 'config_write', stage: 'commit' }));
-          haltConfigUpdateAfterResponse();
+          if (typeof merged.agentOptions !== 'object' || Array.isArray(merged.agentOptions)) {
+            jsonResponse(res, 400, { error: 'agentOptions must be an object' });
+            haltConfigUpdateAfterResponse();
+          }
+          if (resolveAndValidateAgentCwd(params.name, merged.agentOptions as Record<string, unknown>, res) === null) {
+            haltConfigUpdateAfterResponse();
+          }
         }
-      }
 
-      // Write enabledPlugins to .claude/settings.json when agentOptions.enabledPlugins changes
-      if (patch.agentOptions && merged.type === 'agent') {
-        const patchAo = patch.agentOptions as Record<string, unknown>;
-        if (patchAo.enabledPlugins !== undefined && (patchAo.enabledPlugins === null || typeof patchAo.enabledPlugins === 'object')) {
+        // 2. Normalize adminPhones if patched, per the (merged) transport —
+        //    signal accepts E.164 or UUID; imessage accepts E.164 or AppleID
+        //    email; other transports E.164-only.
+        if (patch.adminPhones !== undefined) {
+          if (
+            !Array.isArray(patch.adminPhones) ||
+            patch.adminPhones.length === 0 ||
+            !patch.adminPhones.every((p: unknown) => isNonEmptyString(p))
+          ) {
+            jsonResponse(res, 400, { error: 'adminPhones must be a non-empty array of strings' });
+            haltConfigUpdateAfterResponse();
+          }
+          const mergedTransport = typeof merged.transport === 'string' ? merged.transport : 'baileys';
+          merged.adminPhones = normalizeAdminIdsForTransport(mergedTransport, patch.adminPhones as string[]);
+        }
+
+        // --- Shared validator: closes #244 + #249 PATCH validation gaps ---
+        // Runs on the post-merge view so partial patches are checked against the
+        // assembled config, not the bare patch. Mirrors loader + CREATE.
+        {
+          const portInventory = patch.healthPort === undefined ? null : scanHealthPortInventory(params.name);
+          if (portInventory && !portInventory.ok) {
+            emitInventoryFailure(res, portInventory);
+            haltConfigUpdateAfterResponse();
+          }
+          const validationError = validateInstanceConfig(merged, {
+            name: params.name,
+            mode: 'patch',
+            ...(portInventory ? { existingHealthPorts: portInventory.ports } : {}),
+            originalType: existing.type,
+          });
+          if (validationError) {
+            emitValidationError(validationError, res);
+            haltConfigUpdateAfterResponse();
+          }
+        }
+
+        // pluginDirs home-confinement is fs-aware (not in the shared validator).
+        const mergedAo = merged.agentOptions as Record<string, unknown> | undefined;
+        if (Array.isArray(mergedAo?.pluginDirs)) {
+          if (!validatePluginDirs(mergedAo!.pluginDirs as unknown[], res)) haltConfigUpdateAfterResponse();
+        }
+        // service-block home-confinement is fs-aware for the same reason, and runs
+        // on the MERGED view: a patch that leaves an out-of-home entry standing is
+        // refused even when the entry came from the existing config, matching the
+        // pluginDirs sibling. An instance already carrying one is therefore
+        // un-patchable until the entry is corrected.
+        if (!validateServiceHomeConfinement(merged.service, res)) haltConfigUpdateAfterResponse();
+        if (patch.claudeMd && merged.type === 'agent') {
+          // Invariant: resolveAndValidateAgentCwd() (called above whenever
+          // merged.type === 'agent') always leaves agentOptions.cwd a validated
+          // non-empty string, or halts the request first.
           const ao = merged.agentOptions as Record<string, unknown>;
           const cwd = ao.cwd as string;
           try {
             let claudeDir = path.join(cwd, '.claude');
             claudeDir = ensureHomeConfinedDirectory(claudeDir);
-            // Build a full PermissionsSettings so writePermissionsSettings handles the merge
-            const settingsPath = path.join(claudeDir, 'settings.json');
-            let existingPerms = defaultSettingsJson('agent')!.permissions;
-            try {
-              const existing = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-              if (existing.permissions) {
-                const permissions = existing.permissions as PermissionsSettings['permissions'];
-                existingPerms = {
-                  ...permissions,
-                  deny: applyRequiredDeny(Array.isArray(permissions.deny) ? permissions.deny : []),
-                };
-              }
-            } catch { /* intentional: use defaults when settings.json is missing or unreadable */ }
-            writePermissionsSettings(claudeDir, {
-              permissions: existingPerms,
-              // null or {} = reset to global inheritance
-              enabledPlugins: (patchAo.enabledPlugins ?? {}) as Record<string, boolean>,
-            });
+            writePrivateFileSync(path.join(claudeDir, 'CLAUDE.md'), patch.claudeMd as string);
           } catch (err) {
             jsonResponse(res, 500, projectError(err, { operation: 'config_write', stage: 'commit' }));
             haltConfigUpdateAfterResponse();
           }
         }
-      }
 
-      // chatOptions is chat-only (mirrors handleCreateLine's `type === 'chat' &&
-      // body.chatOptions != null` gate). deepMergeRecords above has no type
-      // awareness, so a patch carrying chatOptions onto an agent/passive
-      // instance would otherwise merge straight through — and validateChatOptions
-      // only runs for type === 'chat', so it would reach disk unvalidated. Drop,
-      // don't reject, matching CREATE's drop-not-reject behavior.
-      if (merged.type !== 'chat' && 'chatOptions' in merged) {
-        delete merged.chatOptions;
-      }
+        // Write settings.json when settingsJson is in the patch (agent instances only)
+        if (patch.settingsJson && merged.type === 'agent') {
+          const ao = merged.agentOptions as Record<string, unknown>;
+          const cwd = ao.cwd as string;
+          try {
+            let claudeDir = path.join(cwd, '.claude');
+            const settings = mergeSettingsJson('agent', patch.settingsJson as PermissionsSettings);
+            if (settings) {
+              claudeDir = ensureHomeConfinedDirectory(claudeDir);
+              writePermissionsSettings(claudeDir, settings);
+            }
+          } catch (err) {
+            jsonResponse(res, 500, projectError(err, { operation: 'config_write', stage: 'commit' }));
+            haltConfigUpdateAfterResponse();
+          }
+        }
 
-      // Strip settingsJson from persisted config (it lives in .claude/settings.json, not config.json)
-      // and inert plaintext provider keys (wizard-era apiKey/openaiKey — nothing reads them;
-      // stripping here also scrubs legacy on-disk victims on their next config write).
-      const { settingsJson: _stripped, ...mergedCleanRaw } = merged;
-      const scrubbed = stripPlaintextProviderKeys(mergedCleanRaw).clean;
-      const clean = migrateLegacyMemoryConfig(scrubbed, { removeLegacy: true }).config;
-      try {
-        writePrivateConfigFileSync(instance.configPath, JSON.stringify(clean, null, 2) + '\n');
-      } catch (err) {
-        jsonResponse(res, 500, projectError(err, { operation: 'config_write', stage: 'execute' }));
-        haltConfigUpdateAfterResponse();
+        // Write enabledPlugins to .claude/settings.json when agentOptions.enabledPlugins changes
+        if (patch.agentOptions && merged.type === 'agent') {
+          const patchAo = patch.agentOptions as Record<string, unknown>;
+          if (patchAo.enabledPlugins !== undefined && (patchAo.enabledPlugins === null || typeof patchAo.enabledPlugins === 'object')) {
+            const ao = merged.agentOptions as Record<string, unknown>;
+            const cwd = ao.cwd as string;
+            try {
+              let claudeDir = path.join(cwd, '.claude');
+              claudeDir = ensureHomeConfinedDirectory(claudeDir);
+              // Build a full PermissionsSettings so writePermissionsSettings handles the merge
+              const settingsPath = path.join(claudeDir, 'settings.json');
+              let existingPerms = defaultSettingsJson('agent')!.permissions;
+              try {
+                const existing = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+                if (existing.permissions) {
+                  const permissions = existing.permissions as PermissionsSettings['permissions'];
+                  existingPerms = {
+                    ...permissions,
+                    deny: applyRequiredDeny(Array.isArray(permissions.deny) ? permissions.deny : []),
+                  };
+                }
+              } catch { /* intentional: use defaults when settings.json is missing or unreadable */ }
+              writePermissionsSettings(claudeDir, {
+                permissions: existingPerms,
+                // null or {} = reset to global inheritance
+                enabledPlugins: (patchAo.enabledPlugins ?? {}) as Record<string, boolean>,
+              });
+            } catch (err) {
+              jsonResponse(res, 500, projectError(err, { operation: 'config_write', stage: 'commit' }));
+              haltConfigUpdateAfterResponse();
+            }
+          }
+        }
+
+        // chatOptions is chat-only (mirrors handleCreateLine's `type === 'chat' &&
+        // body.chatOptions != null` gate). deepMergeRecords above has no type
+        // awareness, so a patch carrying chatOptions onto an agent/passive
+        // instance would otherwise merge straight through — and validateChatOptions
+        // only runs for type === 'chat', so it would reach disk unvalidated. Drop,
+        // don't reject, matching CREATE's drop-not-reject behavior.
+        if (merged.type !== 'chat' && 'chatOptions' in merged) {
+          delete merged.chatOptions;
+        }
+
+        // Strip settingsJson from persisted config (it lives in .claude/settings.json, not config.json)
+        // and inert plaintext provider keys (wizard-era apiKey/openaiKey — nothing reads them;
+        // stripping here also scrubs legacy on-disk victims on their next config write).
+        const { settingsJson: _stripped, ...mergedCleanRaw } = merged;
+        const scrubbed = stripPlaintextProviderKeys(mergedCleanRaw).clean;
+        const clean = migrateLegacyMemoryConfig(scrubbed, { removeLegacy: true }).config;
+        try {
+          writePrivateConfigFileSync(instance.configPath, JSON.stringify(clean, null, 2) + '\n');
+        } catch (err) {
+          jsonResponse(res, 500, projectError(err, { operation: 'config_write', stage: 'execute' }));
+          haltConfigUpdateAfterResponse();
+        }
+        return clean;
+      });
+    } catch (err) {
+      if (err instanceof ConfigUpdateResponseSent) {
+        return;
       }
-      return clean;
-    });
-  } catch (err) {
-    if (err instanceof ConfigUpdateResponseSent) {
+      jsonResponse(res, 500, projectError(err, { operation: 'config_write', stage: 'execute' }));
       return;
     }
-    jsonResponse(res, 500, projectError(err, { operation: 'config_write', stage: 'execute' }));
-    return;
-  }
 
-  publishInstanceStatus(deps.realtime, params.name);
-  publishFeedEvent(deps.realtime, params.name);
-  jsonResponse(res, 200, projectClientOutputPolicyConfig(mergedClean));
+    publishInstanceStatus(deps.realtime, params.name);
+    publishFeedEvent(deps.realtime, params.name);
+    jsonResponse(res, 200, projectClientOutputPolicyConfig(mergedClean));
+
+  } finally { mutation.release(); }
 }
 
 function resolveHomeConfinedPath(

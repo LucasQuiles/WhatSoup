@@ -10,9 +10,10 @@
  * sweepStuckInbound runs on a slow interval and reconciles three buckets:
  *   1. open (pending/processing/turn_done) with an echoed terminal op, older than
  *      5 minutes  → complete, terminal_reason='recovered_response_sent'
- *   2. turn_done older than 24h with no echoed terminal op
+ *   2. turn_done older than 24h with no terminal op
  *      → complete, terminal_reason='recovered_turn_done'
- *   3. pending/processing older than 24h with no echoed terminal op
+ *   3. pending/processing, or turn_done with a terminal op, older than 24h
+ *      with no echoed terminal op
  *      → failed, terminal_reason='error'
  * The 5-minute / 24h grace windows keep it from racing normal in-flight delivery.
  */
@@ -119,6 +120,62 @@ describe('sweepStuckInbound — live stuck-inbound reconciler (W2b)', () => {
 
     expect(status(seq)).toBe('processing');
     expect(res).toEqual({ completedEchoed: 0, completedTurnDone: 0, failedStale: 0, reclaimedRecoveryOwned: 0, terminalRecordCloseCandidates: 0 });
+  });
+
+  it.each(['pending', 'submitted', 'maybe_sent', 'quarantined', 'failed_permanent'] as const)(
+    'reclaims a stale turn_done with %s delivery as failed, never no-reply success', (deliveryStatus) => {
+      const seq = engine.journalInbound('unconfirmed-reply', 'conversation', 'peer@s.whatsapp.net', 'chat');
+      const op = engine.createOutboundOp({
+        conversationKey: 'conversation', chatJid: 'peer@s.whatsapp.net', opType: 'text',
+        payload: '{"text":"reply"}', replayPolicy: 'unsafe', sourceInboundSeq: seq, isTerminal: true,
+      });
+      engine.markTurnDone(seq);
+      if (deliveryStatus === 'submitted') { engine.markSending(op); engine.markSubmitted(op, null); }
+      if (deliveryStatus === 'maybe_sent') { engine.markSending(op); engine.markMaybeSent(op, 'unknown'); }
+      if (deliveryStatus === 'quarantined') engine.markQuarantined(op);
+      if (deliveryStatus === 'failed_permanent') engine.markFailedPermanent(op, 'rejected');
+
+      // Fresh delivery remains with its normal owner, even if no receipt exists.
+      expect(engine.sweepStuckInbound().failedStale).toBe(0);
+      expect(status(seq)).toBe('turn_done');
+      backdate(seq, '-25 hours');
+
+      const result = engine.sweepStuckInbound();
+
+      expect(result).toMatchObject({ completedEchoed: 0, completedTurnDone: 0, failedStale: 1 });
+      expect(status(seq)).toBe('failed');
+      expect(reason(seq)).toBe('error');
+      expect(failureClass(seq)).toBe('stale_reclaim');
+      expect(db.raw.prepare('SELECT status FROM outbound_ops WHERE id = ?').get(op)).toEqual({ status: deliveryStatus });
+      expect(engine.sweepStuckInbound().failedStale).toBe(0);
+      expect(db.raw.prepare('SELECT disposition FROM inbound_disposition_links WHERE inbound_seq = ?').all(seq))
+        .toEqual([{ disposition: 'recovery_pending_operator_catchup' }]);
+    },
+  );
+
+  it('rolls back stale turn_done failure if operator catch-up evidence cannot be recorded', () => {
+    const seq = engine.journalInbound('sweep-evidence-fault', 'conversation', 'peer@s.whatsapp.net', 'chat');
+    const op = engine.createOutboundOp({
+      conversationKey: 'conversation', chatJid: 'peer@s.whatsapp.net', opType: 'text',
+      payload: '{"text":"reply"}', replayPolicy: 'unsafe', sourceInboundSeq: seq, isTerminal: true,
+    });
+    engine.markTurnDone(seq);
+    engine.markQuarantined(op);
+    backdate(seq, '-25 hours');
+    db.raw.exec(`CREATE TRIGGER reject_sweep_catchup BEFORE INSERT ON inbound_disposition_links
+      BEGIN SELECT RAISE(ABORT, 'injected sweep evidence fault'); END`);
+
+    expect(() => engine.sweepStuckInbound()).toThrow('injected sweep evidence fault');
+    expect(status(seq)).toBe('turn_done');
+    expect(db.raw.prepare('SELECT status FROM outbound_ops WHERE id = ?').get(op)).toEqual({ status: 'quarantined' });
+    expect(db.raw.prepare('SELECT disposition FROM inbound_disposition_links WHERE inbound_seq = ?').all(seq)).toEqual([]);
+    db.raw.exec('DROP TRIGGER reject_sweep_catchup');
+
+    expect(engine.sweepStuckInbound().failedStale).toBe(1);
+    expect(engine.sweepStuckInbound().failedStale).toBe(0);
+    expect(status(seq)).toBe('failed');
+    expect(db.raw.prepare('SELECT disposition FROM inbound_disposition_links WHERE inbound_seq = ?').all(seq))
+      .toEqual([{ disposition: 'recovery_pending_operator_catchup' }]);
   });
 
   it('a second sweep makes no further changes (idempotent)', () => {

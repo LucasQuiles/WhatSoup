@@ -8,7 +8,8 @@ import type { EstateScanCapture, EstateSnapshot } from '../../scripts/lib/git-es
 import {
   repoRoot, script, tmp, STATUS_TIMEOUT_GIT_BUDGET_MS, type SnapshotDocument, type GuardDocument,
   run, git, initRepo, snapshot, shellQuote, betweenScansEnvironment, worktreeOutputEnvironment,
-  gitCallLogEnvironment, readGitCalls,
+  gitCallLogEnvironment, readGitCalls, type BaselineAcceptStashDocument,
+  expectOnlyNarrowBaselineFieldsChanged,
 } from '../helpers/git-estate-guard-fixtures.ts';
 
 describe('round 3 scan scope and diagnostics', () => {
@@ -738,5 +739,89 @@ describe('scoped consistency and attribution', () => {
     expect(doc.snapshot!.worktrees[0]!.detached).toBe(true);
     expect(doc.decision.reasons).toContain('new_conflicts');
     expect(doc.decision.blockingFindingIds).toContain(doc.snapshot!.findings.find(({ kind }) => kind === 'conflict')!.id);
+  });
+});
+
+describe('git-estate guard', () => {
+  it('accepts an attributed stash despite an unreadable unrelated worktree', () => {
+    const { root, repo } = initRepo();
+    const unrelated = join(root, 'unrelated-worktree');
+    git(repo, ['worktree', 'add', '-b', 'unrelated', unrelated]);
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    const baselinePath = snapshot(repo).snapshot.baselinePath;
+    const beforeRaw = readFileSync(baselinePath, 'utf8');
+
+    writeFileSync(join(repo, 'tracked.txt'), 'stash on main\n');
+    git(repo, ['stash', 'push', '-m', 'main stash']);
+    const retained = snapshot(repo).snapshot.stashes.find(({ branch }) => branch === 'main')!;
+    rmSync(unrelated, { recursive: true, force: true });
+
+    const accepted = run(repo, [
+      'baseline', 'accept-stash', '--oid', retained.oid, '--reason', 'scoped fixture', '--json',
+    ]);
+
+    expect(accepted.status, accepted.stderr).toBe(0);
+    const receipt = JSON.parse(accepted.stdout) as BaselineAcceptStashDocument;
+    expectOnlyNarrowBaselineFieldsChanged(
+      beforeRaw,
+      readFileSync(baselinePath, 'utf8'),
+      receipt.acceptedStash!.findingId,
+    );
+    const guarded = run(repo, ['guard', '--phase', 'pre-push', '--json']);
+    expect(guarded.status, guarded.stderr).toBe(0);
+    const guardDocument = JSON.parse(guarded.stdout) as GuardDocument;
+    const prunable = guardDocument.snapshot!.findings.find(({ kind }) => kind === 'prunable')!;
+    expect(guardDocument.decision.advisoryFindingIds).toContain(prunable.id);
+  });
+
+  it('refuses a retained stash whose branch attribution is unknown', () => {
+    const { repo } = initRepo();
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    const baselinePath = snapshot(repo).snapshot.baselinePath;
+    const beforeRaw = readFileSync(baselinePath, 'utf8');
+    writeFileSync(join(repo, 'tracked.txt'), 'unattributed stash\n');
+    const oid = git(repo, ['stash', 'create']);
+    git(repo, ['stash', 'store', '-m', 'On customer notes: retained', oid]);
+
+    const refused = run(repo, [
+      'baseline', 'accept-stash', '--oid', oid, '--reason', 'scoped fixture', '--json',
+    ]);
+
+    expect(refused.status, refused.stderr).toBe(2);
+    expect(JSON.parse(refused.stdout)).toMatchObject({
+      command: 'baseline',
+      action: 'accept-stash',
+      exitCode: 2,
+      baseline: null,
+      error: { kind: 'stash_scope_unknown' },
+    });
+    expect(readFileSync(baselinePath, 'utf8')).toBe(beforeRaw);
+  });
+
+  it('refuses a retained stash when an attributed worktree becomes unreadable', () => {
+    const { root, repo } = initRepo();
+    const scoped = join(root, 'scoped-worktree');
+    git(repo, ['worktree', 'add', '-b', 'scoped', scoped]);
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    const baselinePath = snapshot(repo).snapshot.baselinePath;
+    const beforeRaw = readFileSync(baselinePath, 'utf8');
+    writeFileSync(join(scoped, 'tracked.txt'), 'stash on scoped branch\n');
+    git(scoped, ['stash', 'push', '-m', 'scoped stash']);
+    const retained = snapshot(repo).snapshot.stashes.find(({ branch }) => branch === 'scoped')!;
+    rmSync(scoped, { recursive: true, force: true });
+
+    const refused = run(repo, [
+      'baseline', 'accept-stash', '--oid', retained.oid, '--reason', 'scoped fixture', '--json',
+    ]);
+
+    expect(refused.status, refused.stderr).toBe(2);
+    expect(JSON.parse(refused.stdout)).toMatchObject({
+      command: 'baseline',
+      action: 'accept-stash',
+      exitCode: 2,
+      baseline: null,
+      error: { kind: 'snapshot_unsafe' },
+    });
+    expect(readFileSync(baselinePath, 'utf8')).toBe(beforeRaw);
   });
 });

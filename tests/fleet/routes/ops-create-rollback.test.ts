@@ -103,7 +103,8 @@ describe('handleCreateLine — rollback preserves pre-existing user files (#248)
     expect(body.schema).toBe('fleet-error-v1');
     expect(body.code).toBe('internal_error');
     expect(body.operation).toBe('instance_create');
-    expect(body.mutation_state).toBe('not_started');
+    expect(body.mutation_state).toBe('rolled_back');
+    expect(body.rollback_state).toBe('succeeded');
 
     // CLAUDE.md must be byte-for-byte restored.
     expect(fs.existsSync(claudeMdPath)).toBe(true);

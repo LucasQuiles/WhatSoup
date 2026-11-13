@@ -1,6 +1,8 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
+    "incremental": true,
+    "tsBuildInfoFile": "./.local/typescript/tsconfig.test.tsbuildinfo",
     "types": ["vitest/globals", "node"],
     "moduleResolution": "Bundler",
     "module": "ESNext",

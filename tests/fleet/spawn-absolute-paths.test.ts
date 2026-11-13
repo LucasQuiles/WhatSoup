@@ -7,6 +7,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { EventEmitter } from 'node:events';
 
 import { repoRoot } from '../../src/fleet/paths.ts';
 
@@ -27,14 +28,11 @@ const { DockerSupervisorServiceManager } = await import('../../src/fleet/platfor
 const REL_BOOTSTRAP_AUTH = 'src/bootstrap-auth.ts';
 
 function makeFakeChild() {
-  return {
-    on(event: string, cb: (...args: unknown[]) => void) {
-      if (event === 'spawn') queueMicrotask(() => cb());
-      return this;
-    },
-    once() { return this; },
-    kill() { /* noop */ },
-  };
+  const child = Object.assign(new EventEmitter(), {
+    kill: vi.fn(() => { child.emit('exit', 0); return true; }),
+  });
+  queueMicrotask(() => child.emit('spawn'));
+  return child;
 }
 
 describe('fleet spawn argv uses absolute repo-root paths (#419)', () => {
@@ -71,6 +69,7 @@ describe('fleet spawn argv uses absolute repo-root paths (#419)', () => {
     const opts = call[2] as { cwd?: string } | undefined;
     const effectiveCwd = opts?.cwd ?? repoRoot;
     expect(effectiveCwd).toBe(repoRoot);
+    await mgr.stop('test-instance');
   });
 
   it('ops-auth.ts handleAuth uses path.join(repoRoot, ...) for bootstrap-auth.ts', () => {

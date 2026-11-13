@@ -1,5 +1,10 @@
 # WhatSoup CI/CD & Quality-Controls Audit
 
+> Historical snapshot of 2026-07-21, not current enforcement evidence. Counts,
+> trigger and protection observations below describe that audit's pinned sources
+> and API reads. Current behavior and activation checks are maintained in
+> [Testing paths](../testing.md) and the [merge gate](merge-gate.md).
+
 **Audit ID:** `WHATSOUP-CICD-AUDIT-2026-07-21` · **Date (UTC):** 2026-07-21 · **Class:** read-only documentation audit (no control executed, no source/hosted state mutated)
 
 This audit inventories and classifies WhatSoup's CI/CD and quality-control estate against a pinned source generation, distinguishing *declared* from *configured*, *reachable*, and *blocking* controls. It executes no CI, browser, mutation, or deploy suite; where a claim requires runtime execution it is capped at the strongest state actually observed. Companion deliverables: the dated control registry (`docs/enforcement/2026-07-21-cicd-control-registry.md`) (the checklist refresh itself shipped as merged PR #2021).

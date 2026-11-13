@@ -13,14 +13,54 @@ credentials — enter the fleet token on the lock screen to start a session:
 - Authenticated HTTP and SSE requests use short-lived audience tickets minted
   against that session; WebSocket connections use a separate `/api/ws-ticket`.
   A fleet-server restart relocks the console.
-- To log out, click **Lock** in the navigation rail's utility area — it revokes the
-  session server-side (`DELETE /api/console-session`), clears the cookie, and
-  returns to the lock screen. (`DELETE /api/console-session` can also be called
-  directly.)
+- **Lock** closes local access immediately, then requests server revocation with
+  `DELETE /api/console-session`. Only a successful response confirms revocation
+  and cookie clearing. Failure leaves the screen locked with **Retry lock** and
+  an explicit unconfirmed outcome; pending duplicate requests are coalesced.
+  The lock screen serializes token unlock and retry handlers so an older unlock
+  response cannot overtake a newer revocation request.
+  A non-secret session-storage marker preserves an unfinished lock across reload
+  in the same tab. It is cleared by confirmed revocation or explicit token unlock.
+  If storage cannot be read, the console stays closed. If it cannot save the marker,
+  the screen explains, including while revocation is pending, that reload may
+  reopen the session until revocation succeeds.
+  If the marker cannot be cleared after a confirmed session change, local access
+  stays closed with **Retry browser storage**. Recovery clears the marker, then
+  checks the current server session without repeating the mutation.
+  This local marker does not revoke credentials or replace server authorization.
+- An unavailable session check stays closed with **Retry session check**; it is
+  distinguished from the server confirming that the session is absent or expired.
+  Retired probes and revocation responses cannot overwrite a newer local action.
 - The fleet token lives in `~/.config/whatsoup/fleet-tokens.json` on the
   fleet host.
 - Dev mode (Vite proxy) bypasses the lock screen — the proxy injects auth
   server-side and the page carries no `fleet-auth-mode` meta tag.
+
+## Connection and update outcomes
+
+Realtime readiness requires the server's `connected` hello. An open socket alone
+keeps ordinary polling active. If hello does not arrive within ten seconds, the
+console retires that connection and retries with the existing one-to-thirty-second
+exponential backoff. The hello deadline bounds each socket's wait; it does not
+remove the delay between failed connection attempts.
+Callbacks from retired connections cannot change the current connection or its
+caches. Existing stream-gap reconciliation runs before readiness; legacy hello
+frames remain supported. Line queries retain their slower polling backstop after
+readiness.
+
+`GET /api/version` advertises `updateMode: release_deploy`. The update dialog then
+links to the [release deployment runbook](runbooks/release-deployment.md) without
+issuing an in-place update or restarting instances. Unknown advertised update modes
+also withhold those mutations. Servers that omit the field retain the compatibility
+flow; the existing `update-by-release-deploy-required` refusal switches that flow
+to deployment guidance. A fleet recovery timeout is unconfirmed recovery, not an
+update-complete result. Closing or reopening the dialog invalidates pending callbacks.
+
+An instance restart's HTTP202 response confirms a request, not recovered health.
+Restart batches prevent duplicate pending requests and do not resubmit an already
+accepted item when another item fails. Check instance health after acceptance or an
+unconfirmed result. Mode changes persist configuration before requesting restart;
+both line views refresh after that write, even when restart cannot be confirmed.
 
 ## Pages
 
@@ -66,6 +106,22 @@ Fleet health monitoring with instance management actions.
 
 The left panel shows every instance with its status, phone number, message count, and session info. Unhealthy instances display restart and delete buttons inline.
 
+Deletion succeeds only after the service is stopped and disabled and its config,
+data and state directories are removed. If cleanup is incomplete, the API returns
+`instance_cleanup_failed` with `mutation_state: unknown` and `retryable: false`.
+The line detail page shows the recovery message and stays open. Inspect the
+remaining directories and the correlated server log, correct the cleanup failure,
+then explicitly retry deletion. A failure can leave only part of the instance;
+it does not mean that deletion had no effect.
+
+Failed creation reports `rolled_back` with `rollback_state: succeeded` only after
+service compensation and filesystem restoration succeed. A rejected enable call
+can have changed service state before losing its response, so creation attempts
+disable before removing its files. Failed compensation retains the files and
+reports `rollback_failed` with `rollback_state: failed`. Inspect service state and
+the correlated server log before repair or another creation attempt; the API does
+not automatically retry an uncertain service operation.
+
 ![Unhealthy Instance Management](screenshots/ops-unhealthy.png)
 
 The console tab shows a structured log viewer with level filtering (all, error,
@@ -75,19 +131,45 @@ available at `/metrics`.
 
 ### Inbox
 
-Unified message inbox across all instances. Read conversations, send replies, and manage contact access — all from one view.
+Unified message inbox across all instances. Read conversations and send replies
+from one view. Channel filters and the Direct/Rooms selector narrow the shared
+conversation list; selecting a conversation binds its thread to that line.
 
 ![Inbox — Personal Messages](screenshots/inbox.png)
 
-**Line picker** (top-left dropdown) switches between instances. Shows each line's status, name, mode, and phone number.
-
-![Line Picker](screenshots/inbox-line-picker.png)
-
-**Chat list** shows conversations for the selected instance with contact avatars, last message preview, timestamps, and unread badges.
+**Chat list** shows matching conversations across lines with contact avatars,
+last message previews, timestamps, and unread badges.
 
 **Message view** renders the conversation with bubble-style messages. Outgoing messages appear on the right in the accent color; incoming messages on the left in a neutral tone.
 
-**Contact details** panel (right side) shows the contact name, which line they're on, conversation type (direct/group), mode, and action buttons (Allow Contact / Block Contact).
+History loading and end-of-history state belong to each conversation. Switching
+threads leaves an existing request attached to its original conversation and
+allows the new thread to load independently. Overlapping history pages retain
+the current cached message once. Returning to a thread preserves its pagination
+state until the Inbox is remounted.
+
+Drafts and pending sends belong to the same line and conversation. The draft
+stays visible while sending; message history contains only recorded messages.
+An unconfirmed result keeps the draft and blocks another submission. **Refresh
+messages** requests current history without resending. After checking the
+conversation, **Discard draft** clears that local draft and permits a new message;
+it does not cancel or undo the earlier attempt. Back navigation preserves drafts
+within the current Inbox visit. Leaving Inbox or reloading ends this local
+protection, so inspect history before re-entering an uncertain message. A late
+response from an abandoned Inbox cannot change its cache or announce an outcome.
+
+Inbox, the line-detail History tab, and the first-message ceremony clear a draft
+only after an explicit `sent: true` acknowledgement. A `sent: false` result keeps
+the draft editable and reports that the message was not sent. Missing or malformed
+acknowledgements remain unconfirmed. The fleet normalizes the health server's
+existing `ok` acknowledgement into `sent`, preserving its other response fields;
+neither a rejection nor an invalid acknowledgement publishes message activity.
+History uses the same composer state as Inbox, with drafts retained across chat
+and line selection for the current History mount. Leaving that view ends its
+local duplicate-submission protection.
+
+**Contact details** panel (right side) shows the contact, line, conversation type,
+and recorded agent session. Contact access controls live on the line detail page.
 
 #### Inbox by Mode
 
@@ -152,9 +234,35 @@ Data is fetched from `GET /api/lines/:name/metrics?range=24h|7d|30d` (per-line) 
 
 **Scheduled** — Queue of scheduled messages for this instance. The header bar shows the total count and a "New Scheduled Message" button that opens the composer modal. Each row exposes Cancel, Edit, and Duplicate actions; pending and processing messages sort to the top by send time, with sent / failed / cancelled rows below in reverse chronological order. The list polls every 30 s. Empty, loading, and error states each render an `EmptyState` panel. This tab is only shown for instances with a global MCP socket (not sandbox-per-chat). Backed by `GET/POST/DELETE /api/lines/:name/scheduled` (list, create, cancel-all) and `GET/PUT/DELETE /api/lines/:name/scheduled/:id` (fetch, update, cancel one) — see the [Fleet API table](../README.md#fleet-api).
 
-**Groups** — Groups this instance participates in. The header bar shows the total count and a "Create Group" button that opens the create modal. Each group card opens a detail modal with the participant list, promote / demote, add and remove participants, editable subject and description, invite link (get and revoke), ephemeral message duration, member-add mode (admins only vs all members), join-approval mode, pending join requests (approve / reject), and a Leave Group action. The list polls every 30 s. This tab is only shown for instances with a global MCP socket (not sandbox-per-chat). Backed by 15 routes under `/api/lines/:name/groups/...` (list, create, get detail, leave, subject, description, participants, settings, invite get and revoke, ephemeral, member-add-mode, join-approval, requests get and update) — see the [Fleet API table](../README.md#fleet-api).
+**Groups** — Groups this instance participates in. The header bar shows the total count and a "Create Group" button that opens the create modal. Each group card opens a detail modal with the participant list, promote / demote, add and remove participants, editable subject and description, invite link (get and revoke), ephemeral message duration, member-add mode (admins only vs all members), join-approval mode, pending join requests (approve / reject), and a Leave Group action. Successful detail mutations refresh both the detail and the group list immediately; the dialog heading uses the current detail. The list also polls every 30 s. This tab is only shown for instances with a global MCP socket (not sandbox-per-chat). Backed by 15 routes under `/api/lines/:name/groups/...` (list, create, get detail, leave, subject, description, participants, settings, invite get and revoke, ephemeral, member-add-mode, join-approval, requests get and update) — see the [Fleet API table](../README.md#fleet-api).
 
 ### Add Line Wizard
+
+The `/hatch` onboarding journey creates a line before opening its link stream.
+Leaving the page preserves that line and closes the owned stream; late responses
+cannot open a new stream or advance the abandoned journey. A creation error is
+unconfirmed until inspected in Lines, so Hatch offers that route and does not
+automatically repeat creation. The link wait ends after six minutes with a visible
+unconfirmed result. Check the line status before requesting a fresh code.
+
+Only the current stream's confirmed connection advances to the ceremony. Going
+back closes that stream; saving an unlinked line's persona returns to linking.
+For a previously linked line, a successful persona save returns to the ceremony.
+A rejected save keeps the editor and its input open. Pending creates and persona
+saves admit one request and disable navigation that would discard their outcome.
+
+The optional first message admits one attempt while the ceremony is open. A lost
+response leaves the draft visible with an unconfirmed status and **Check Inbox**;
+it does not automatically resend or announce success. Inspect that line's message
+history before another send. Leaving the page does not cancel an accepted send,
+and a late response cannot navigate or announce success on the abandoned page.
+This is a per-page duplicate guard, not delivery deduplication across reloads or
+other clients. At the fleet API, a failed socket response or HTTP server error returns
+`message_send_unconfirmed` with `mutation_state: unknown` and `retryable: false`;
+the existing HTTP status is retained. A thrown socket send has the same outcome
+with status 500 and cannot fall through into a second HTTP send. HTTP routing remains available
+when the socket is absent before any send attempt. A successful `dryRun` retains
+its result without publishing message, chat or feed activity.
 
 5-step provisioning flow for creating new instances. Accessed via the "Add Line" button on the fleet overview.
 

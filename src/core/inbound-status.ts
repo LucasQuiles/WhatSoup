@@ -8,9 +8,9 @@
  * import graphs — and so the enum and predicate can never drift again.
  *
  * Membership notes:
- * - The DB writes 'pending' (ingest), 'turn_done', 'complete', and 'failed'.
- * - 'processing' is not written by current code, but is retained because
- *   recovery queries reference it and historical production rows may carry it.
+ * - Ingest journals 'processing'; the runtime also writes 'turn_done',
+ *   'complete', and 'failed'. 'pending' is the schema default, retained for
+ *   compatibility with stored records and defensive recovery queries.
  * - 'skipped' is deliberately NOT a member: `markInboundSkipped` has always
  *   written 'complete' (with a terminal_reason), so the phantom union member
  *   in the old reply-guarantee `InboundProcessingStatus` modelled nothing.

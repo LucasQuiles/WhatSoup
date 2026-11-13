@@ -1,6 +1,7 @@
 /**
  * Tests for src/fleet/routes/ops.ts
  */
+import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -31,8 +32,8 @@ vi.mock('../../../src/fleet/http-proxy.ts', () => ({
   proxyToInstance: vi.fn(),
 }));
 vi.mock('node:child_process', async () => {
-  const { childProcessMock } = await import('../../helpers/child-process.ts');
-  return childProcessMock();
+  const { childProcessMockWithNativeOwnership } = await import('../../helpers/child-process.ts');
+  return childProcessMockWithNativeOwnership();
 });
 vi.mock('node:fs', async (importOriginal) => {
   const actual = (await importOriginal()) as typeof import('node:fs');
@@ -82,6 +83,14 @@ function writePermissiveFile(filePath: string, contents: string): void {
   expect(fileMode(filePath)).toBe(0o644);
 }
 
+const authConfigs = trackTmpDirs('auth-route-');
+
+function fakeAuthInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
+  const configPath = path.join(authConfigs.make('instance'), 'config.json');
+  fs.writeFileSync(configPath, '{}');
+  return fakeInstance({ configPath, ...overrides });
+}
+
 function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
   return {
     name: 'test-line',
@@ -109,6 +118,12 @@ function mockServiceManager() {
   };
 }
 
+const authChildren: EventEmitter[] = [];
+afterEach(async () => {
+  for (const child of authChildren.splice(0)) child.emit('close', 1);
+  await Promise.resolve();
+});
+
 function fakeChildProcess({ emitCloseOnExit = true }: { emitCloseOnExit?: boolean } = {}) {
   const child = new EventEmitter() as EventEmitter & {
     stdout: PassThrough;
@@ -118,6 +133,7 @@ function fakeChildProcess({ emitCloseOnExit = true }: { emitCloseOnExit?: boolea
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
   child.kill = vi.fn();
+  authChildren.push(child);
   if (emitCloseOnExit) {
     child.once('exit', (code, signal) => child.emit('close', code, signal));
   }
@@ -143,7 +159,7 @@ describe('handleAuth', () => {
   });
 
   it('spawns bootstrap-auth with process.execPath, an absolute script path, and repoRoot cwd', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
 
@@ -155,7 +171,7 @@ describe('handleAuth', () => {
 
     await handleAuth(req, res, deps, { name: 'test-line' });
 
-    expect(res._status).toBe(200);
+    expect(res._status, res._chunks.join('')).toBe(200);
     expect(deps.serviceManager.stop).toHaveBeenCalledWith('test-line');
     expect(spawn).toHaveBeenCalledTimes(1);
     expect(spawn).toHaveBeenCalledWith(
@@ -176,7 +192,7 @@ describe('handleAuth', () => {
   });
 
   it('restarts a stopped instance when auth exits nonzero before connecting', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
 
@@ -200,7 +216,7 @@ describe('handleAuth', () => {
   });
 
   it('restarts a stopped instance when auth spawn reports an error before connecting', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
 
@@ -227,7 +243,7 @@ describe('handleAuth', () => {
   it('restarts a stopped instance when auth times out before connecting', async () => {
     vi.useFakeTimers();
     try {
-      const inst = fakeInstance({ name: 'test-line' });
+      const inst = fakeAuthInstance({ name: 'test-line' });
       const child = fakeChildProcess();
       vi.mocked(spawn).mockReturnValue(child as any);
 
@@ -244,6 +260,8 @@ describe('handleAuth', () => {
 
       expect(child.kill).toHaveBeenCalledWith('SIGTERM');
       expect(svc.stop).toHaveBeenCalledWith('test-line');
+      expect(svc.startFire).not.toHaveBeenCalled();
+      child.emit('close', 1);
       expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
       expect(res._chunks.join('')).toContain('Authentication timed out');
       expect(res._ended).toBe(true);
@@ -265,6 +283,27 @@ describe('handleSend', () => {
 
   afterEach(() => {
     vi.mocked(fs.existsSync).mockImplementation(actualExistsSync);
+  });
+
+  it.each(['mcp', 'http'])('does not publish message activity for a %s dry run', async (route) => {
+    const inst = fakeInstance({ type: route === 'mcp' ? 'passive' : 'agent', socketPath: '/state/test-line/whatsoup.sock' });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    const outcome = { sent: false, dryRun: true, resolved_chatJid: '123@s.whatsapp.net' };
+    vi.mocked(mcpCall).mockResolvedValue({ success: true, result: outcome });
+    vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: JSON.stringify(outcome) });
+    const res = mockRes();
+    await handleSend(mockReq({ method: 'POST', body: JSON.stringify({ chatJid: '123', text: 'hi', dryRun: true }) }), res, deps, { name: 'test-line' });
+    expect(res._status).toBe(200);
+    expect(JSON.parse(res._body)).toEqual(outcome);
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
+    if (route === 'mcp') {
+      expect(mcpCall).toHaveBeenCalledExactlyOnceWith(inst.socketPath, 'send_message', { chatJid: '123@s.whatsapp.net', text: 'hi', dryRun: true });
+      expect(proxyToInstance).not.toHaveBeenCalled();
+    } else {
+      expect(proxyToInstance).toHaveBeenCalledExactlyOnceWith(3010, '/send', 'POST', JSON.stringify({ chatJid: '123@s.whatsapp.net', text: 'hi', dryRun: true }), 'tok123');
+      expect(mcpCall).not.toHaveBeenCalled();
+    }
   });
 
   it('returns 404 for unknown instance', async () => {
@@ -319,6 +358,38 @@ describe('handleSend', () => {
       mockReq({ method: 'POST', body: JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' }) }),
       res, deps, { name: 'test-line' });
     expect(res._status).toBe(502);
+    expect(JSON.parse(res._body)).toMatchObject({ code: 'message_send_unconfirmed', mutation_state: 'unknown', retryable: false });
+    expect(proxyToInstance).not.toHaveBeenCalled();
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
+  });
+
+  it.each([500, 502, 504])('reports HTTP send uncertainty at status %s without a success event or retry', async (status) => {
+    const inst = fakeInstance({ type: 'chat' });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    vi.mocked(proxyToInstance).mockResolvedValue({ status, body: '{"error":"private-upstream-canary"}' });
+    const res = mockRes();
+    await handleSend(mockReq({ method: 'POST', body: JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' }) }), res, deps, { name: 'test-line' });
+    expect(proxyToInstance).toHaveBeenCalledTimes(1);
+    expect(mcpCall).not.toHaveBeenCalled();
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
+    expect(res._status).toBe(status);
+    expect(JSON.parse(res._body)).toMatchObject({ code: 'message_send_unconfirmed', mutation_state: 'unknown', retryable: false });
+    expect(res._body).not.toContain('private-upstream-canary');
+  });
+
+  it.each([200, 400])('preserves HTTP outcome %s when no socket send was attempted', async (status) => {
+    const inst = fakeInstance({ type: 'passive', socketPath: '/missing/sock' });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+    const body = JSON.stringify(status === 200 ? { ok: true } : { error: 'invalid recipient' });
+    vi.mocked(proxyToInstance).mockResolvedValue({ status, body });
+    const res = mockRes();
+    await handleSend(mockReq({ method: 'POST', body: JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' }) }), res, deps, { name: 'test-line' });
+    expect(mcpCall).not.toHaveBeenCalled();
+    expect(proxyToInstance).toHaveBeenCalledTimes(1);
+    expect(res._status).toBe(status);
+    expect(JSON.parse(res._body)).toEqual(status === 200 ? { ok: true, sent: true } : { error: 'invalid recipient' });
+    expect(deps.realtime.publish).toHaveBeenCalledTimes(status === 200 ? 3 : 0);
   });
 
   it('returns 400 for invalid JSON body without forwarding downstream', async () => {
@@ -457,12 +528,12 @@ describe('handleSend', () => {
     expect(JSON.parse(res._body).error).toMatch(/chatJid.*to|to.*chatJid/);
   });
 
-  it('propagates 502 when instance reports unknown alias not found', async () => {
+  it('does not infer a confirmed tool rejection from transport error prose', async () => {
     const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
     const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     vi.mocked(fs.existsSync).mockReturnValue(true);
-    // Simulate the per-instance MCP returning an alias-not-found error.
+    // Only a tool-error envelope establishes a validation rejection.
     vi.mocked(mcpCall).mockResolvedValue({
       success: false, error: 'alias not found: unknown',
     });
@@ -473,7 +544,23 @@ describe('handleSend', () => {
       res, deps, { name: 'test-line' });
 
     expect(res._status).toBe(502);
-    expect(JSON.parse(res._body).error).toMatch(/alias not found/);
+    expect(JSON.parse(res._body)).toMatchObject({ code: 'message_send_unconfirmed', mutation_state: 'unknown', retryable: false });
+    expect(proxyToInstance).not.toHaveBeenCalled();
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
+  });
+
+  it('preserves the documented alias rejection from a confirmed MCP tool-error envelope', async () => {
+    const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
+    const deps = depsFor({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(mcpCall).mockResolvedValue({ success: true, toolError: true,
+      result: { isError: true, content: [{ type: 'text', text: 'alias not found: unknown' }] } });
+    const res = mockRes();
+    await handleSend(mockReq({ method: 'POST', body: JSON.stringify({ to: 'unknown', text: 'hi' }) }), res, deps, { name: 'test-line' });
+    expect(res._status).toBe(422);
+    expect(JSON.parse(res._body)).toMatchObject({ error: 'alias not found: unknown', isError: true });
+    expect(proxyToInstance).not.toHaveBeenCalled();
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
   });
 
   // ── P1-D code-review I-1 / I-2 regression guards ──────────────────────────
@@ -682,7 +769,7 @@ describe('handleDeleteLine', () => {
     await handleDeleteLine(mockReq({ method: 'POST', body: '', url: `/api/lines/${name}` }), res, deps, { name });
 
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body).error).toMatch(/stop failed/);
+    expect(JSON.parse(res._body)).toMatchObject({ code: 'service_stop_failed', mutation_state: 'unknown', retryable: false });
     expect(svc.disable).not.toHaveBeenCalled();
     expect(deps.discovery.scan).not.toHaveBeenCalled();
     expect(deps.realtime.publish).not.toHaveBeenCalled();
@@ -705,7 +792,7 @@ describe('handleDeleteLine', () => {
     await handleDeleteLine(mockReq({ method: 'POST', body: '', url: `/api/lines/${name}` }), res, deps, { name });
 
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body).error).toMatch(/disable failed/);
+    expect(JSON.parse(res._body)).toMatchObject({ code: 'service_action_failed', mutation_state: 'unknown', retryable: false });
     expect(deps.discovery.scan).not.toHaveBeenCalled();
     expect(deps.realtime.publish).not.toHaveBeenCalled();
     expect(fs.existsSync(dirs.configDir)).toBe(true);
@@ -777,7 +864,7 @@ describe('handleDeleteLine', () => {
     await handleDeleteLine(mockReq({ method: 'POST', body: '', url: `/api/lines/${name}` }), res, deps, { name });
 
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body).error).toMatch(/stop failed/);
+    expect(JSON.parse(res._body)).toMatchObject({ code: 'service_stop_failed', mutation_state: 'unknown', retryable: false });
     expect(svc.disable).not.toHaveBeenCalled();
     expect(deps.discovery.scan).not.toHaveBeenCalled();
     expect(deps.realtime.publish).not.toHaveBeenCalled();
@@ -1255,7 +1342,8 @@ describe('handleCreateLine', () => {
     expect(disabledBody.schema).toBe('fleet-error-v1');
     expect(disabledBody.code).toBe('internal_error');
     expect(disabledBody.operation).toBe('instance_create');
-    expect(disabledBody.mutation_state).toBe('not_started');
+    expect(disabledBody.mutation_state).toBe('rolled_back');
+    expect(disabledBody.rollback_state).toBe('succeeded');
     expect(svc.enable).toHaveBeenCalledWith(name);
     expect(svc.disable).toHaveBeenCalledWith(name);
     expect(fs.existsSync(path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', name))).toBe(false);
@@ -1293,7 +1381,7 @@ describe('handleCreateLine', () => {
     expect(res._status).toBe(500);
     const rollbackBody = JSON.parse(res._body);
     expect(rollbackBody.schema).toBe('fleet-error-v1');
-    expect(rollbackBody.code).toBe('internal_error');
+    expect(rollbackBody.code).toBe('rollback_failed');
     expect(rollbackBody.operation).toBe('instance_create');
     expect(rollbackBody.stage).toBe('rollback');
     expect(rollbackBody.mutation_state).toBe('rollback_failed');
@@ -3003,12 +3091,13 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
 
   it('forwards XDG_STATE_HOME to the pairing helper', async () => {
     const previousStateHome = process.env.XDG_STATE_HOME;
-    process.env.XDG_STATE_HOME = '/custom/xdg-state';
+    const customStateHome = authConfigs.make('custom-state');
+    process.env.XDG_STATE_HOME = customStateHome;
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const deps = depsFor({
       discovery: {
-        getInstance: vi.fn(() => fakeInstance({ name: 'test-line' })),
+        getInstance: vi.fn(() => fakeAuthInstance({ name: 'test-line' })),
         scan: vi.fn(),
       } as any,
     });
@@ -3024,7 +3113,7 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
       const spawnOptions = vi.mocked(spawn).mock.calls.at(-1)?.[2] as
         | { env?: NodeJS.ProcessEnv }
         | undefined;
-      expect(spawnOptions?.env?.XDG_STATE_HOME).toBe('/custom/xdg-state');
+      expect(spawnOptions?.env?.XDG_STATE_HOME).toBe(customStateHome);
     } finally {
       child.emit('exit', 1);
       if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME;
@@ -3033,7 +3122,7 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
   });
 
   it('skips non-JSON stdout lines without emitting an SSE event (line 1360)', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const deps = depsFor({
@@ -3053,7 +3142,7 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
   });
 
   it('drops stdout events whose event name is not in the allow-list (line 1337)', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const deps = depsFor({
@@ -3072,7 +3161,7 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
   });
 
   it('forwards an allowed "qr" stdout event through SSE (lines 1338-1339)', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const deps = depsFor({
@@ -3094,7 +3183,7 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
   });
 
   it('forwards an "error" stdout event that omits data, using the empty default (line 1338)', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const deps = depsFor({
@@ -3116,7 +3205,7 @@ describe('ops.ts handleAuth uncovered-branch coverage', () => {
   });
 
   it('handles a partial stdout line followed by completion on the next chunk (line 1332)', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const deps = depsFor({
@@ -3176,8 +3265,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     expect(forwarded.chatJid).toBe('1111111000000000@g.us');
   });
 
-  // --- handleSend: passive instance whose socket exists but mcpCall throws -> fall to HTTP (ops.ts:222) ---
-  it('handleSend falls back to healthPort when mcpCall throws on the passive socket route', async () => {
+  it('handleSend preserves uncertainty after a socket send throws without duplicating it over HTTP', async () => {
     const inst = fakeInstance({
       type: 'passive',
       socketPath: '/state/test-line/whatsoup.sock',
@@ -3187,16 +3275,19 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       discovery: { getInstance: vi.fn(() => inst) } as any,
     });
     vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(mcpCall).mockRejectedValue(new Error('socket gone'));
+    vi.mocked(mcpCall).mockRejectedValue(new Error('response lost: secret-path-canary'));
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
     const res = mockRes();
     await handleSend(
       mockReq({ method: 'POST', body: JSON.stringify({ chatJid: '15550000001@s.whatsapp.net', text: 'hi' }) }),
       res, deps, { name: 'test-line' });
-    // Fell through to HTTP route.
-    expect(proxyToInstance).toHaveBeenCalledWith(
-      4602, '/send', 'POST', expect.any(String), 'tok123');
-    expect(res._status).toBe(200);
+    expect(mcpCall).toHaveBeenCalledTimes(1);
+    expect(proxyToInstance).not.toHaveBeenCalled();
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body)).toMatchObject({ schema: 'fleet-error-v1', code: 'message_send_unconfirmed',
+      operation: 'message_send', mutation_state: 'unknown', retryable: false });
+    expect(res._body).not.toContain('secret-path-canary');
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
   });
 
   // --- handleConfigUpdate: invalid instance name (ops.ts:442 true branch) ---
@@ -3417,7 +3508,8 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       const res = mockRes();
       await handleDeleteLine(mockReq({ method: 'POST', body: '', url: `/api/lines/${name}` }), res, deps, { name });
       expect(res._status).toBe(500);
-      expect(JSON.parse(res._body).error).toMatch(/stop failed: a string failure/);
+      expect(res._body).not.toContain('a string failure');
+      expect(JSON.parse(res._body)).toMatchObject({ code: 'service_stop_failed', mutation_state: 'unknown', retryable: false });
     } finally {
       if (origConfig === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = origConfig;
       if (origData === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = origData;
@@ -3620,7 +3712,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
 
   // --- handleAuth: stderr logging branch (ops.ts:1365-1367) ---
   it('handleAuth logs trimmed stderr output from the auth process (lines 1365-1367)', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const deps = depsFor({
@@ -3652,7 +3744,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       fs.writeFileSync(cfgPath, JSON.stringify({ name: 'test-line', introSent: true }));
       fs.chmodSync(cfgPath, 0o600);
 
-      const inst = fakeInstance({ name: 'test-line', configPath: cfgPath });
+      const inst = fakeAuthInstance({ name: 'test-line', configPath: cfgPath });
       const child = fakeChildProcess();
       vi.mocked(spawn).mockReturnValue(child as any);
       const svc = mockServiceManager();
@@ -3684,7 +3776,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
   });
 
   it('waits for the pairing helper to exit successfully before using the authenticated-start hook', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const svc = mockServiceManager();
@@ -3719,7 +3811,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
   });
 
   it('waits for stdout to close before deciding whether a successful helper persisted credentials', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess({ emitCloseOnExit: false });
     vi.mocked(spawn).mockReturnValue(child as any);
     const svc = mockServiceManager();
@@ -3750,7 +3842,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
   });
 
   it('keeps a persisted pairing alive through an SSE client close and activates it on exit 0', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const svc = mockServiceManager();
@@ -3775,7 +3867,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
   it('restores the stopped instance when a persisted pairing helper does not exit promptly', async () => {
     vi.useFakeTimers();
     try {
-      const inst = fakeInstance({ name: 'test-line' });
+      const inst = fakeAuthInstance({ name: 'test-line' });
       const child = fakeChildProcess();
       vi.mocked(spawn).mockReturnValue(child as any);
       const svc = mockServiceManager();
@@ -3793,6 +3885,8 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       vi.advanceTimersByTime(15_000);
 
       expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(startAfterAuthFire).not.toHaveBeenCalled();
+      child.emit('close', 1);
       expect(startAfterAuthFire).toHaveBeenCalledWith('test-line', expect.any(Function));
       expect(svc.startFire).not.toHaveBeenCalled();
       expect(res._chunks.join('')).toContain('Authentication completed but did not finish');
@@ -3803,7 +3897,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
   });
 
   it('reports a sanitized activation failure after persisted pairing exits successfully', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const svc = mockServiceManager();
@@ -3830,7 +3924,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
   });
 
   it('does not activate an uninstalled macOS instance when auth teardown finds no existing job', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const svc = mockServiceManager();
@@ -3860,7 +3954,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
   });
 
   it('fails authentication before spawning when macOS teardown cannot stop an existing job', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const svc = mockServiceManager();
@@ -3883,7 +3977,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
   });
 
   it('suppresses a preflight-stop failure after the auth SSE client closes', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     let rejectStop: ((reason?: unknown) => void) | undefined;
@@ -3914,7 +4008,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
   });
 
   it('restores a stopped service when the auth SSE client closes during preflight', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     let resolveStop: (() => void) | undefined;
@@ -3944,8 +4038,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
 
   // --- handleAuth: connected event when introSent reset throws (warn branch, ops.ts:1349-1352) ---
   it('handleAuth continues the connected flow when introSent reset fails (lines 1349-1352)', async () => {
-    // Make the config path unreadable so writePrivateFileSync throws.
-    const inst = fakeInstance({ name: 'test-line', configPath: '/definitely/missing/path/config.json' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const svc = mockServiceManager();
@@ -3957,6 +4050,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     const res = mockSseRes();
     await handleAuth(req, res, deps, { name: 'test-line' });
 
+    fs.rmSync(inst.configPath);
     // The connected branch records the event even though introSent reset throws.
     child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'connected', data: {} }) + '\n'));
 
@@ -3972,7 +4066,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
   // authInFlight is a module-level singleton. We trigger an in-flight auth session
   // by awaiting one whose child never exits, then immediately call again.
   it('handleAuth returns 409 when an auth session is already in flight (lines 1256-1258)', async () => {
-    const inst = fakeInstance({ name: 'inflight-line' });
+    const inst = fakeAuthInstance({ name: 'inflight-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const deps = depsFor({
@@ -3998,7 +4092,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
 
   // --- handleAuth: kills any pre-existing auth child for the same instance (ops.ts:1264-1266) ---
   it('handleAuth kills a previously-spawned auth child for the same instance (lines 1264-1266)', async () => {
-    const inst = fakeInstance({ name: 'reuse-line' });
+    const inst = fakeAuthInstance({ name: 'reuse-line' });
     const firstChild = fakeChildProcess();
     const secondChild = fakeChildProcess();
     vi.mocked(spawn)
@@ -4046,7 +4140,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       fs.writeFileSync(cfgPath, JSON.stringify({ name: 'norestart-line', introSent: true }));
       fs.chmodSync(cfgPath, 0o600);
 
-      const inst = fakeInstance({ name: 'norestart-line', configPath: cfgPath });
+      const inst = fakeAuthInstance({ name: 'norestart-line', configPath: cfgPath });
       const child = fakeChildProcess();
       vi.mocked(spawn).mockReturnValue(child as any);
       const svc = mockServiceManager();
@@ -4135,7 +4229,7 @@ describe('ops.ts uncovered-branch coverage', () => {
   it('handleAuth logs post-auth start failure when startFire invokes its error callback (line 1315)', async () => {
     vi.useFakeTimers();
     try {
-      const inst = fakeInstance({ name: 'test-line' });
+      const inst = fakeAuthInstance({ name: 'test-line' });
       const child = fakeChildProcess();
       vi.mocked(spawn).mockReturnValue(child as any);
       const svc = mockServiceManager();
@@ -4153,8 +4247,10 @@ describe('ops.ts uncovered-branch coverage', () => {
 
       await handleAuth(req, res, deps, { name: 'test-line' });
 
-      // Advance fake clock past the AUTH_TIMEOUT_MS to trigger restoreStoppedInstance.
+      // Timeout requests termination; confirmed closure permits restoration.
       vi.advanceTimersByTime(5 * 60 * 1000);
+      expect(svc.startFire).not.toHaveBeenCalled();
+      child.emit('close', 1);
       expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
       expect(res._ended).toBe(true);
     } finally {
@@ -4163,7 +4259,7 @@ describe('ops.ts uncovered-branch coverage', () => {
   });
 
   it('handleAuth logs connected-branch start failure when startFire invokes its error callback (line 1355)', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const svc = mockServiceManager();
@@ -4760,7 +4856,7 @@ describe('ops.ts uncovered-branch coverage', () => {
   it('handleAuth completes the timeout path without logging when startFire reports no error (line 1315 false)', async () => {
     vi.useFakeTimers();
     try {
-      const inst = fakeInstance({ name: 'test-line' });
+      const inst = fakeAuthInstance({ name: 'test-line' });
       const child = fakeChildProcess();
       vi.mocked(spawn).mockReturnValue(child as any);
       const svc = mockServiceManager();
@@ -4778,6 +4874,8 @@ describe('ops.ts uncovered-branch coverage', () => {
       await handleAuth(req, res, deps, { name: 'test-line' });
       vi.advanceTimersByTime(5 * 60 * 1000);
 
+      expect(svc.startFire).not.toHaveBeenCalled();
+      child.emit('close', 1);
       expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
       expect(res._ended).toBe(true);
     } finally {
@@ -5075,7 +5173,7 @@ describe('ops.ts uncovered-branch coverage', () => {
 
   // ---- Line 1355 (false branch): handleAuth connected-branch startFire with null err ----
   it('handleAuth completes the connected path without logging when startFire reports no error (line 1355 false)', async () => {
-    const inst = fakeInstance({ name: 'test-line' });
+    const inst = fakeAuthInstance({ name: 'test-line' });
     const child = fakeChildProcess();
     vi.mocked(spawn).mockReturnValue(child as any);
     const svc = mockServiceManager();

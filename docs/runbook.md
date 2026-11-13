@@ -1658,6 +1658,69 @@ Use when credentials are expired (logged out) or the auth directory is corrupted
 
 **Prerequisites:** The bot instance must be stopped before running auth.
 
+All fleet pairing entry points require a readable JSON object configuration.
+Missing, unreadable, invalid JSON or a non-object configuration returns
+`fleet-error-v1` with `config_read_failed` and `mutation_state=not_started` before
+service or credential changes. This unavailable observation does not imply an
+unscoped legacy instance. Repair the configuration and inspect pairing preflight
+again. A failed service stop also ends authentication before a helper is launched;
+an explicit platform report that no job exists still permits first-time pairing.
+
+The fleet authentication routes retain the helper's ownership until its process
+and output streams close. Closing the browser or reaching the five-minute limit
+requests termination; it does not establish that the helper stopped. The fleet
+requests SIGKILL after five seconds and reports unconfirmed cleanup after another
+five seconds. While closure is unconfirmed, another authentication request gets
+409 and the legacy flow does not restart the instance over the credential writer.
+A legacy SSE service activation callback has a 30-second response deadline. If it does not
+settle, the response ends with an error and admission stays held until it settles.
+A late callback cannot turn that ended response into success.
+
+For account-scoped pairing, `pairing_helper_cleanup_unconfirmed` leaves the
+operation journal at `pairing`, preserves the active credential tree, and retains
+the coordination lease. Inspect `GET /api/lines/:name/pairing/status` with the
+original idempotency key and header-borne credentials. Its `lastEvent` distinguishes
+`cleanup_unconfirmed`, `cleanup_confirmed`, and `cleanup_release_unconfirmed`.
+Confirmed late closure releases only the original fenced lease. It does not
+complete the interrupted pairing or authorize an automatic retry. Resolve the
+recorded operation and verify that no helper owns the tree before starting a new
+pairing; do not delete the lease or credentials to bypass admission.
+
+An account-scoped service activation failure, including a thrown or rejected
+service-manager call, records `failed` and returns `service_start_unverified`.
+The paired generation remains preserved. Reusing that operation key returns
+`operation_already_failed` without repeating effects. If activation was requested
+but the journal ends at `receipt_persisted`, replay returns
+`operation_interrupted`; a receipt alone does not confirm service activation.
+The saga returns `service_start_unconfirmed` after a 30-second activation deadline.
+It preserves the generation, records the operation as failed, and retains the
+coordination lease and fleet admission until the activation callback settles.
+A late callback releases only the original fenced lease; it does not rewrite
+the failed operation as success. Inspect service state before starting a new
+operation. Lease-release errors retain the lease for reconciliation.
+
+Configuration updates, creation, deletion, service actions, checkpoint restores,
+and pairing share an instance mutation lease. Conflicting requests return
+`instance_mutation_in_progress` before changing service or stored state. The
+mutation directory is a sibling of the instance state directory, so deleting
+the instance cannot remove its exclusion record prematurely.
+
+Before accessing credentials, a delegated helper registers its PID and process
+birth identity in the lease. A surviving helper prevents reclaim after the fleet
+coordinator dies. Unknown helper identity also prevents reclaim. A helper that
+reaches registration after its coordinator was replaced refuses to open
+credentials. Reclaim after both processes exit advances the fencing token;
+an old operation cannot release the replacement lease. Older versions that do
+not understand helper records refuse them as corrupt; never remove such a
+record to permit a downgrade while its helper may still be running.
+
+Restarting the fleet does not prove that an orphaned helper stopped. Inspect
+the recorded process identities and service state before retrying. The ordinary
+root suite includes native coordinator-crash and late-helper tests, alongside
+route exclusion tests. Maintained controls are `src/transport/coordination-lease.ts`,
+`src/fleet/routes/instance-mutation.ts`, `src/fleet/auth-helper.ts`, the auth routes,
+and `src/transport/pairing-saga.ts`.
+
 ```bash
 # 1. Stop the instance
 systemctl --user stop whatsoup@sandbox-agent
@@ -3394,6 +3457,17 @@ Groups used for multi-agent orchestration (where a conductor agent like Q coordi
 ## 9. Docker Deployment
 
 WhatSoup can run in a Docker container as an alternative to the systemd/launchd host deployment. The container runs fleet + instances in a single supervisor process.
+
+The supervisor shares pending starts and stops for each instance. Start confirms
+that the child spawned, not that the instance is healthy. Stop listens for exit
+before sending SIGTERM, allows 15 seconds for graceful shutdown, then sends
+SIGKILL and waits up to five more seconds for exit confirmation. Sending a signal
+alone is not a successful stop. A failed or unconfirmed stop retains the child
+record and rejects restart and deletion; inspect the child and correlated fleet
+error, then retry the managed stop to reconcile its exit. An error before spawn
+removes the failed attempt so a later start can retry. These controls are local to
+the supervisor process; they do not serialize filesystem mutations across fleet
+processes.
 
 ### Build
 

@@ -217,9 +217,19 @@ describe('ChatRuntime queue admission', () => {
     releaseGenerate();
     await vi.waitFor(() => {
       expect(messenger.sendMessage).toHaveBeenCalledOnce();
-      expect(durability.getInboundStatus(inboundSeq)).toBe('complete');
+      expect(durability.getInboundStatus(inboundSeq)).toBe('turn_done');
       expect(queue.stats.trackedChats).toBe(0);
     });
+    const submitted = durability.getOutboundByStatus('submitted');
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0]).toMatchObject({ source_inbound_seq: inboundSeq, is_terminal: 1 });
+
+    durability.markEchoed(submitted[0].id);
+
+    expect(durability.getInboundStatus(inboundSeq)).toBe('complete');
+    expect(durability.getOutboundByStatus('submitted')).toHaveLength(0);
+    expect(durability.getOutboundByStatus('echoed')).toHaveLength(1);
+    expect(messenger.sendMessage).toHaveBeenCalledOnce();
     expect(queue.droppedCount).toBe(0);
     await runtime.shutdown();
   });

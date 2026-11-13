@@ -18,6 +18,7 @@ import {
   handleStop,
 } from '../../../src/fleet/routes/ops-lifecycle.ts';
 import * as opsShim from '../../../src/fleet/routes/ops.ts';
+import { handlePairingPreflight } from '../../../src/fleet/routes/ops-auth.ts';
 import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
 import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
@@ -25,6 +26,10 @@ vi.mock('../../../src/lib/keyring.ts', () => ({ lookupCredential: vi.fn(() => nu
 
 vi.mock('../../../src/fleet/mcp-client.ts', () => ({ mcpCall: vi.fn() }));
 vi.mock('../../../src/fleet/http-proxy.ts', () => ({ proxyToInstance: vi.fn() }));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return { ...actual, rmSync: vi.fn(actual.rmSync) };
+});
 
 const XDG_KEYS = ['XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME'] as const;
 
@@ -101,9 +106,115 @@ describe('ops-lifecycle handlers', () => {
     await handleDeleteLine(mockReq({ method: 'DELETE' }), res, deps, { name });
 
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body)).toEqual({ error: 'stop failed: permission denied', instance: name });
+    expect(JSON.parse(res._body)).toMatchObject({ schema: 'fleet-error-v1', code: 'service_stop_failed',
+      instance: name, operation: 'instance_delete', stage: 'execute', mutation_state: 'unknown', retryable: false });
     expect(deps.serviceManager.disable).not.toHaveBeenCalled();
     expect(fs.existsSync(dirs.configDir)).toBe(true);
+  });
+
+  it.each(['stop', 'disable'] as const)('bounds %s failures and preserves files without publishing success', async (action) => {
+    const name = 'delete-private-failure';
+    const dirs = seedInstanceDirs(name);
+    const deps = makeDeps<any>({}) as OpsDeps;
+    vi.mocked(deps.serviceManager[action]).mockRejectedValueOnce(new Error('private path /secret/service.log token=canary'));
+    const res = mockRes();
+
+    await handleDeleteLine(mockReq({ method: 'DELETE' }), res, deps, { name });
+
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body)).toMatchObject({ schema: 'fleet-error-v1',
+      instance: name,
+      code: action === 'stop' ? 'service_stop_failed' : 'service_action_failed',
+      operation: 'instance_delete', stage: 'execute', mutation_state: 'unknown', rollback_state: 'not_applicable', retryable: false,
+      correlation_id: expect.any(String),
+    });
+    expect(res._body).not.toContain('/secret/service.log');
+    expect(res._body).not.toContain('canary');
+    expect(deps.discovery.scan).not.toHaveBeenCalled();
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
+    expect(fs.existsSync(dirs.configDir)).toBe(true);
+    expect(fs.existsSync(dirs.dataDir)).toBe(true);
+    expect(fs.existsSync(dirs.stateDir)).toBe(true);
+  });
+
+  it('reports incomplete deletion and succeeds only after the remaining files can be removed', async () => {
+    const name = 'delete-incomplete';
+    const dirs = seedInstanceDirs(name);
+    const deps = makeDeps<any>({}) as OpsDeps;
+    const { rmSync: remove } = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const fault = vi.mocked(fs.rmSync).mockImplementation((target, options) => {
+      if (target === dirs.configDir) throw Object.assign(new Error('private cleanup diagnostic'), { code: 'EACCES' });
+      return remove(target, options);
+    });
+    try {
+      const failed = mockRes();
+      await handleDeleteLine(mockReq({ method: 'DELETE' }), failed, deps, { name });
+      expect(failed._status).toBe(500);
+      expect(JSON.parse(failed._body)).toMatchObject({ schema: 'fleet-error-v1', operation: 'instance_delete', code: 'instance_cleanup_failed',
+        message: 'Instance cleanup is incomplete. Inspect remaining state before retrying.',
+        stage: 'commit', mutation_state: 'unknown', rollback_state: 'not_applicable', retryable: false });
+      expect(failed._body).not.toContain('private cleanup diagnostic');
+      expect(fs.existsSync(dirs.configDir)).toBe(true);
+      expect(fs.existsSync(dirs.dataDir)).toBe(false);
+      expect(fs.existsSync(dirs.stateDir)).toBe(false);
+      expect(deps.realtime.publish).not.toHaveBeenCalled();
+    } finally {
+      fault.mockImplementation(remove);
+    }
+
+    const recovered = mockRes();
+    await handleDeleteLine(mockReq({ method: 'DELETE' }), recovered, deps, { name });
+    expect(recovered._status).toBe(200);
+    expect(JSON.parse(recovered._body)).toEqual({ deleted: name });
+    expect(fs.existsSync(dirs.configDir)).toBe(false);
+    expect(deps.serviceManager.stop).toHaveBeenCalledTimes(2);
+    expect(deps.serviceManager.disable).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports failed creation cleanup instead of claiming that no mutation started', async () => {
+    const name = 'create-incomplete';
+    const configDir = path.join(tmpDir, 'config', 'whatsoup', 'instances', name);
+    const deps = makeDeps<any>({}) as OpsDeps;
+    vi.mocked(deps.serviceManager.enable).mockRejectedValueOnce(new Error('enable response lost'));
+    const { rmSync: remove } = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const fault = vi.mocked(fs.rmSync).mockImplementation((target, options) => {
+      if (target === configDir) throw Object.assign(new Error('private cleanup diagnostic'), { code: 'EACCES' });
+      return remove(target, options);
+    });
+    try {
+      const res = mockRes();
+      await handleCreateLine(mockReq({ method: 'POST', body: JSON.stringify({
+        name, type: 'chat', adminPhones: ['15551230006'], healthPort: 3202,
+      }) }), res, deps);
+      expect(res._status).toBe(500);
+      expect(JSON.parse(res._body)).toMatchObject({ schema: 'fleet-error-v1', operation: 'instance_create', code: 'rollback_failed',
+        stage: 'rollback', mutation_state: 'rollback_failed', rollback_state: 'failed', retryable: false });
+      expect(res._body).not.toContain('private cleanup diagnostic');
+      expect(fs.existsSync(path.join(configDir, 'config.json'))).toBe(true);
+      expect(deps.serviceManager.disable).toHaveBeenCalledWith(name);
+      expect(deps.realtime.publish).not.toHaveBeenCalled();
+    } finally {
+      fault.mockImplementation(remove);
+    }
+  });
+
+  it('retains recovery state when a failed enable cannot be compensated', async () => {
+    const name = 'enable-uncertain';
+    const deps = makeDeps<any>({}) as OpsDeps;
+    vi.mocked(deps.serviceManager.enable).mockRejectedValueOnce(new Error('enable response lost'));
+    vi.mocked(deps.serviceManager.disable).mockRejectedValueOnce(new Error('disable response lost'));
+    const res = mockRes();
+    await handleCreateLine(mockReq({ method: 'POST', body: JSON.stringify({
+      name, type: 'chat', adminPhones: ['15551230006'], healthPort: 3202,
+    }) }), res, deps);
+
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body)).toMatchObject({ operation: 'instance_create', stage: 'rollback', code: 'rollback_failed',
+      mutation_state: 'rollback_failed', rollback_state: 'failed', retryable: false });
+    expect(deps.serviceManager.disable).toHaveBeenCalledWith(name);
+    expect(fs.existsSync(path.join(tmpDir, 'config', 'whatsoup', 'instances', name, 'config.json'))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'whatsoup', 'instances', name))).toBe(true);
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
   });
 
   it('create refuses an invalid name with the unchanged 400 message and writes nothing', async () => {
@@ -122,6 +233,46 @@ describe('ops-lifecycle handlers', () => {
     expect(fs.existsSync(path.join(tmpDir, 'config'))).toBe(false);
     expect(deps.serviceManager.enable).not.toHaveBeenCalled();
   });
+
+  it('preserves the configured account scope from creation through pairing preflight', async () => {
+    const name = 'scoped-line';
+    const accountScopeId = 'scope:create-roundtrip';
+    const deps = makeDeps<any>({}) as OpsDeps;
+    const res = mockRes();
+    await handleCreateLine(mockReq({ method: 'POST', body: JSON.stringify({
+      name, type: 'chat', adminPhones: ['15551230006'], accountScopeId,
+    }) }), res, deps);
+
+    expect(res._status).toBe(201);
+    const configPath = path.join(tmpDir, 'config', 'whatsoup', 'instances', name, 'config.json');
+    expect(JSON.parse(fs.readFileSync(configPath, 'utf8')).accountScopeId).toBe(accountScopeId);
+    vi.mocked(deps.discovery.getInstance).mockReturnValue({
+      name, configPath, stateRoot: path.join(tmpDir, 'state', 'whatsoup', 'instances', name),
+    } as never);
+    const preflight = mockRes();
+    await handlePairingPreflight(mockReq({
+      method: 'POST', headers: { authorization: 'Bearer test-token' },
+    }), preflight, deps, { name });
+    expect(preflight._status).toBe(200);
+    expect(JSON.parse(preflight._body).scopeId).toBe(accountScopeId);
+  });
+
+  it.each(['not-a-scope', '/tmp/account', 'scope:15551230006', 42, {}, []].map((accountScopeId) => ({ accountScopeId })))(
+    'rejects malformed account scope %j before creating instance state', async ({ accountScopeId }) => {
+      const name = 'invalid-scope';
+      const deps = makeDeps<any>({}) as OpsDeps;
+      const res = mockRes();
+      await handleCreateLine(mockReq({ method: 'POST', body: JSON.stringify({
+        name, type: 'chat', adminPhones: ['15551230006'], accountScopeId,
+      }) }), res, deps);
+
+      expect(res._status).toBe(400);
+      expect(JSON.parse(res._body).error).toContain('accountScopeId');
+      expect(fs.existsSync(path.join(tmpDir, 'config', 'whatsoup', 'instances', name))).toBe(false);
+      expect(fs.existsSync(path.join(tmpDir, 'data', 'whatsoup', 'instances', name))).toBe(false);
+      expect(deps.serviceManager.enable).not.toHaveBeenCalled();
+    },
+  );
 
   it('creates a configured M365 agent with the full deny floor before launch', async () => {
     const { REQUIRED_DENY } = await import('../../../src/core/settings-template.ts');

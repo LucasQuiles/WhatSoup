@@ -87,6 +87,24 @@ Every migrated surface must classify these cases:
 Allowed statuses: **PASS, FAIL, BLOCKED, DEFERRED, NOT APPLICABLE, INCONCLUSIVE**. No row may be blank
 in the final slice evidence. If a case cannot be simulated, document why and classify it.
 
+The Inbox journey in `tests/browser/viewport-matrix.test.tsx` uses the existing
+mocked API fixture and bundled Chromium at 390×844. It verifies keyboard double
+submission, visible pending status without a sent-message bubble, draft retention
+after an uncertain response and back navigation, refresh without resend, and focus
+restoration after explicit discard and a subsequent successful send. The ordinary
+`test:browser` command includes this check. It does not establish delivery over a
+real transport or persistence after leaving Inbox or reloading.
+
+The component journeys in `tests/console/history-tab.test.tsx`,
+`inbox-page.test.tsx`, and `ceremony-send.test.tsx` distinguish confirmed,
+rejected, and unconfirmed acknowledgements. History shares Inbox's synchronous
+send ownership and retained drafts; its tests cover repeated Enter, line changes,
+deselection, late completion, refresh without resend, and explicit discard.
+Only `sent: true` clears a draft. These isolated fixtures establish local UI
+behavior; they do not establish transport delivery or cross-client deduplication.
+The History browser journey also exercises repeated Enter, conversation changes,
+refresh without resend, and keyboard focus after discard at a 390px viewport.
+
 ## 5. Visual Drift Sentinel
 
 Before a screen is accepted, compare it against locked SOUP v2 Blend. Flag any of:
@@ -136,6 +154,14 @@ Use `/frontend-design` for this review and record the verdict.
 **Harness note (react-router 8.3.0 consolidation):** the `react-router-dom` → `react-router` package consolidation (CSRF fix GHSA-7v8v-6qfh-68rf) re-points the browser harness's module surface without changing any proof: `tests/browser/smoke.test.tsx`'s Pattern-C `vi.mock` and its interception test now target `react-router` (the v8 root package exports the full former `-dom` surface), the other browser suites (`a11y-contracts`, `keyboard-proofs`, `perf-budget`, `viewport-matrix`) flip import specifiers only, and `vitest.browser.config.ts` re-aims its resolve alias + `deps.inline` at the consolidated package — the old `react-router-dom` node_modules path no longer exists after the bump, and a stale alias fails every browser session at module fetch. No visual, contrast, landmark, motion, or assertion contract changed — specifier/alias re-pointing only (console suite 224/225 with the single failure proven pre-existing at base; tsc clean).
 
 ## 6. Coverage Matrix
+
+Browser performance budgets remain provisional and report-only by default.
+`PERF_LANE_ENFORCE=1 npm run test:browser -- tests/browser/perf-budget.test.tsx`
+enforces the existing 50 ms mount and 16 ms update limits through the browser
+configuration. The flag reaches the test through `import.meta.env`; it must not
+be replaced with a constant. Budget overruns return a failed test command when
+enabled. A default browser pass establishes rendering and measurement, not budget
+compliance. No visual, contrast, layout or timing threshold changes with this flag.
 
 Maintain one coverage row per slice-surface combination:
 
@@ -559,9 +585,11 @@ The hook and CI wiring are protected by `scripts/safeguard-diagnostics.ts`: the 
 must fail if `.husky/pre-commit` drops repo hygiene, publication, design-system documentation
 hygiene, node-pin, settings, or console lint coverage; if quality.yml drops the changed-range
 design-system hygiene step, shared console design verification, Playwright install, either browser
-proof suite, or the browser failure-artifact path list; or if tag-release CI drops shared console
-design verification, Playwright install, either browser proof suite, or the browser failure-artifact
-path list. Playwright browser caching is a runtime-cost optimization, not a correctness guard.
+proof suite, or the browser failure-artifact path list. The tag-gate safeguard requires receipt
+delegation for every direct-tag Quality completion, including failed Quality runs so the consumer
+can report failure. Quality performs the design and browser checks; `tag-release-gate` selects and
+verifies the authenticated private-scanner receipt for that exact Quality attempt. Playwright
+browser caching is a runtime-cost optimization, not a correctness guard.
 Failure screenshots are best-effort diagnostics: the workflows keep their artifact paths wired, but
 `if-no-files-found: ignore` means absence of screenshots does not itself fail a run that already
 failed for a primary browser assertion.
@@ -574,28 +602,28 @@ The root verification scripts call one shared design-system audit tail:
 npm run verify:console-design
 ```
 
-This chain is the DRY owner for non-browser console design checks in `verify:push:branch`,
-`verify:release`, quality.yml CI, and tag-release CI. It currently runs, in order:
+This chain combines `verify:console-design:live` with the design-guard fixture tests for
+`verify:push:branch`. Local `verify:release` and Quality's full profile run the live portion after
+full-suite coverage has already exercised those fixtures. Quality uses that full profile for tags;
+the separate tag gate verifies the resulting private-scanner receipt. The complete chain runs:
 
 1. `npm --prefix console run design:theme-parity`
 2. `npm --prefix console run design:token-drift`
 3. `npm --prefix console run design:contrast`
-4. `npm --prefix console run lint:shadow:baseline`
-5. `npm --prefix console run design:shadow-frozen-inventory`
-6. `npm --prefix console run design:raw-form-control-inventory`
-7. `npm --prefix console run design:regression`
-8. `npm --prefix console run design:metrics`
-9. `npm --prefix console run design:burndown`
-10. `npm --prefix console run design:color-semantics`
-11. `npm --prefix console run design:resilience`
-12. `npm --prefix console run design:font-assets`
-13. `npm --prefix console run design:brand-assets`
-14. `npm --prefix console run design:lint-fixtures`
-15. `npm run test:design-guards`
+4. `npm --prefix console run lint:shadow:baseline -- --with-inventories` (also checks frozen shadow and raw-form inventories)
+5. `npm --prefix console run design:regression`
+6. `npm --prefix console run design:metrics`
+7. `npm --prefix console run design:burndown`
+8. `npm --prefix console run design:color-semantics`
+9. `npm --prefix console run design:resilience`
+10. `npm --prefix console run design:font-assets`
+11. `npm --prefix console run design:brand-assets`
+12. `npm --prefix console run design:lint-fixtures`
+13. `npm run test:design-guards`
 
-`scripts/safeguard-diagnostics.ts` enforces the shared chain and the fact that push/release
-verification plus CI workflows call it. Removing, reordering, or bypassing this chain is a
-guard-chain failure.
+`scripts/safeguard-diagnostics.ts` enforces the shared chain, its local and Quality callers, and
+the tag gate's authenticated receipt delegation. Removing or bypassing a required caller is a
+guard-chain failure; the tag consumer does not repeat the design checks.
 
 Release verification has an additional browser proof tail:
 
@@ -603,10 +631,12 @@ Release verification has an additional browser proof tail:
 npm run verify:console-browser
 ```
 
-That shared script runs `test:browser` and `test:browser:motion`. It is wired into
-`verify:release` and tag-release CI so trusted-keyboard, viewport, target-size, reduced-motion, and
-no-reduce exit-motion proofs cannot be skipped on release/tag paths. Branch-push verification still
-uses the faster non-browser design chain; quality.yml remains the PR/main browser gate.
+That shared script runs `test:browser` and `test:browser:motion` in local `verify:release`.
+Quality's full profile invokes both commands directly for tags and other full-validation inputs,
+covering trusted-keyboard, viewport, target-size, reduced-motion and no-reduce exit-motion behavior.
+The tag gate requires the matching successful Quality run and private-scanner receipt. Branch-push
+verification uses the non-browser design chain; reduced PR profiles follow the selection policy
+in [Testing paths](../../testing.md).
 
 Report-only audits inside this chain remain report-only. Their presence in the shared chain proves
 that a structured inventory was generated during the verification run; it does not prove the inventory is

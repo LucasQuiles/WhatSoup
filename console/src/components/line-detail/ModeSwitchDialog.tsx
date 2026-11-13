@@ -36,14 +36,18 @@ export function ModeSwitchDialog({
     if (switchingRef.current) return
     switchingRef.current = true
     setSwitching(true)
+    let configSaved = false
     try {
       await api.updateConfig(lineName, { type: selected })
+      configSaved = true
+      void queryClient.invalidateQueries({ queryKey: ['lines'] })
       await api.restart(lineName)
-      toast.success(`Switched to ${selected} mode — restarting...`)
-      await queryClient.invalidateQueries({ queryKey: ['lines', lineName] })
+      toast.success(`Mode configuration saved as ${selected}; restart requested. Check instance health to confirm it is running.`)
       onClose()
     } catch (e) {
-      toast.error(`Mode switch failed: ${(e as Error).message}`)
+      toast.error(configSaved
+        ? `Mode configuration saved as ${selected}; restart could not be confirmed. Check instance health before retrying. ${(e as Error).message}`
+        : `Mode switch failed: ${(e as Error).message}`)
     } finally {
       switchingRef.current = false
       setSwitching(false)

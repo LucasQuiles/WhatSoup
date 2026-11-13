@@ -17,7 +17,7 @@
  */
 import { createHash } from 'node:crypto';
 import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { loadavg, tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { createServer, request } from 'node:http';
 import { fileURLToPath } from 'node:url';
@@ -147,8 +147,8 @@ function referenceTreeDigest(dir: string): { hash: string; fileCount: number; to
  * Measure the longest stretch the event loop was unable to run a macrotask.
  *
  * A setImmediate chain re-arms itself as fast as the loop allows, so the
- * largest gap between consecutive runs is the longest synchronous block that
- * occurred while the probe was armed. This is the only instrument in these
+ * largest gap between consecutive runs includes synchronous work and time the
+ * operating system did not schedule this process. This is the instrument in these
  * tests that can tell "the walk moved off the request path" from "the walk got
  * faster" — a wall-clock timing of the call would pass for both.
  */
@@ -330,6 +330,9 @@ describe('AuthBondGuard.inspectCached — the auth-tree walk is off the read pat
     const guard = makeGuard();
     const probe = startBlockProbe();
     await settle(5);
+    const startedAt = performance.now();
+    const startedCpu = process.cpuUsage();
+    const initialLoad = loadavg();
 
     await guard.warmTreeCache();
 
@@ -339,7 +342,10 @@ describe('AuthBondGuard.inspectCached — the auth-tree walk is off the read pat
     // The yielding walk hands the loop back between slices, so no single slice
     // may approach the cost of the whole tree.
     expect(guard.inspectCached().treeHash).toHaveLength(64);
-    expect(maxGapMs).toBeLessThan(MAX_BLOCK_MS);
+    expect(maxGapMs, JSON.stringify({
+      maxGapMs, wallMs: performance.now() - startedAt,
+      cpuMicroseconds: process.cpuUsage(startedCpu), initialLoad, finalLoad: loadavg(),
+    })).toBeLessThan(MAX_BLOCK_MS);
   });
 
   it('picks up a changed tree after invalidation', async () => {

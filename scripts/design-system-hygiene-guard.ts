@@ -134,11 +134,7 @@ function hasRequiredDoc(staged: Set<string>, required: string[]): boolean {
 }
 
 function readChangedAddedLines(cwd: string, changedSince: string, filePath: string): string {
-  try {
-    return git(['diff', '--unified=0', `${changedSince}...HEAD`, '--', filePath], cwd);
-  } catch {
-    return '';
-  }
+  return git(['diff', '--unified=0', `${changedSince}...HEAD`, '--', filePath], cwd);
 }
 
 export function findDesignSystemHygieneIssues(
@@ -227,7 +223,13 @@ export function runDesignSystemHygieneGuard(argv = process.argv.slice(2), cwd = 
     return 0;
   }
 
-  const issues = findDesignSystemHygieneIssues(cwd, args.changedSince ? { changedSince: args.changedSince } : {});
+  let issues: DesignSystemHygieneIssue[];
+  try {
+    issues = findDesignSystemHygieneIssues(cwd, args.changedSince ? { changedSince: args.changedSince } : {});
+  } catch (err) {
+    console.error(`design-system hygiene guard: ${(err as Error).message}`);
+    return 2;
+  }
   if (args.json) {
     console.log(JSON.stringify({
       issues,

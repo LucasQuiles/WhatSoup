@@ -12,7 +12,8 @@
  *   same keep semantics as the wizard.
  * - Link mirrors the wizard's SSE flow: qr → QrDisplay, connected = linked.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router'
 import { useTheme } from '../hooks/use-theme'
 import { useToast } from '../hooks/toast-context'
 import { useProviders } from '../hooks/use-fleet'
@@ -56,13 +57,34 @@ export default function Hatch() {
   const [adminPhone, setAdminPhone] = useState('')
   const [lineName, setLineName] = useState<string | null>(null)
   const [link, setLink] = useState<LinkState>({ phase: 'watching' })
+  const [saving, setSaving] = useState(false)
+  const pendingAction = useRef(false)
+  const mounted = useRef(false)
+  const linked = useRef(false)
+  const streamGeneration = useRef(0)
+  const streamPending = useRef(false)
+  const streamTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const esRef = useRef<EventSource | null>(null)
 
   const { data: providers } = useProviders()
   const selectedProvider = providers?.find((provider) => provider.id === providerId)
   const credentialService = selectedProvider?.credentialService ?? null
 
-  useEffect(() => () => esRef.current?.close(), [])
+  const closeQrStream = useCallback(() => {
+    streamGeneration.current += 1
+    streamPending.current = false
+    clearTimeout(streamTimer.current)
+    esRef.current?.close()
+    esRef.current = null
+  }, [])
+
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+      closeQrStream()
+    }
+  }, [closeQrStream])
 
   const pickKind = (k: (typeof KIND_PRESETS)[number]) => {
     setKind(k)
@@ -70,10 +92,13 @@ export default function Hatch() {
   }
 
   const startLink = async () => {
+    if (pendingAction.current) return
     // Adjust-persona path: the line already exists (name locked) — persist the
     // persona edit via the config deep-merge and return to the ceremony. A
     // second createLine would 409 on the name and strand the flow.
     if (lineName) {
+      pendingAction.current = true
+      setSaving(true)
       try {
         await api.updateConfig(lineName, {
           ...(kind.type === 'agent' && soul.trim() ? { claudeMd: soul.trim() } : {}),
@@ -81,11 +106,19 @@ export default function Hatch() {
           ...(model ? { models: { conversation: model } } : {}),
           agentOptions: { provider: providerId },
         })
+        if (!mounted.current) return
         toast.success('Persona updated')
+        if (linked.current) setStep(4)
+        else {
+          setStep(3)
+          void openQrStream(lineName)
+        }
       } catch (e) {
-        toast.error(`Persona update failed: ${e instanceof Error ? e.message : e}`)
+        if (mounted.current) toast.error(`Persona update failed: ${e instanceof Error ? e.message : e}`)
+      } finally {
+        pendingAction.current = false
+        if (mounted.current) setSaving(false)
       }
-      setStep(4)
       return
     }
     if (apiKey.trim() && !credentialService) {
@@ -97,6 +130,8 @@ export default function Hatch() {
       toast.error('Name must contain at least one letter')
       return
     }
+    pendingAction.current = true
+    setSaving(true)
     setStep(3)
     setLink({ phase: 'creating' })
     try {
@@ -109,27 +144,44 @@ export default function Hatch() {
         ...(kind.type === 'agent' && soul.trim() ? { claudeMd: soul.trim() } : {}),
         ...(kind.type === 'chat' && soul.trim() ? { systemPrompt: soul.trim() } : {}),
       })
+      if (!mounted.current) return
       setLineName(created.name)
       if (apiKey.trim() && credentialService) {
         try {
           await api.setCredential(credentialService, apiKey.trim())
         } catch (e) {
-          toast.error(`Key store failed: ${e instanceof Error ? e.message : e} — set it later in Settings → API tokens`)
+          if (mounted.current) toast.error(`Key store failed: ${e instanceof Error ? e.message : e} — set it later in Settings → API tokens`)
         }
       }
-      openQrStream(created.name)
+      if (mounted.current) void openQrStream(created.name)
     } catch (e) {
-      setLink({ phase: 'error', message: e instanceof Error ? e.message : String(e) })
+      if (mounted.current) setLink({ phase: 'error', message: `Creation was not confirmed: ${e instanceof Error ? e.message : String(e)}. Check Lines before starting another hatch.` })
+    } finally {
+      pendingAction.current = false
+      if (mounted.current) setSaving(false)
     }
   }
 
   const openQrStream = async (line: string) => {
+    if (!mounted.current || streamPending.current) return
+    closeQrStream()
+    const generation = streamGeneration.current
+    const current = () => mounted.current && streamGeneration.current === generation
+    streamPending.current = true
     setLink({ phase: 'watching' })
+    streamTimer.current = setTimeout(() => {
+      if (!current()) return
+      closeQrStream()
+      setLink({ phase: 'error', message: 'Linking was not confirmed before the wait ended. Check the line status before requesting a fresh code.' })
+    // Preserve the server's five-minute scan window plus setup and completion.
+    }, 360_000)
     try {
       const qs = isProductionConsole() ? `?ticket=${encodeURIComponent(await getApiTicket('sse'))}` : ''
+      if (!current()) return
       const es = new EventSource(`/api/lines/${encodeURIComponent(line)}/auth${qs}`)
       esRef.current = es
       es.addEventListener('qr', (ev) => {
+        if (!current()) return
         const raw = (ev as MessageEvent).data as string
         let value = raw
         try {
@@ -141,17 +193,20 @@ export default function Hatch() {
         setLink({ phase: 'qr', value })
       })
       es.addEventListener('connected', () => {
-        es.close()
-        esRef.current = null
+        if (!current()) return
+        closeQrStream()
+        linked.current = true
         setLink({ phase: 'linked' })
         setStep(4)
       })
       es.addEventListener('error', () => {
-        es.close()
-        esRef.current = null
+        if (!current()) return
+        closeQrStream()
         setLink({ phase: 'error', message: 'The link stream ended before a connection was reported. Retry to get a fresh code.' })
       })
     } catch (e) {
+      if (!current()) return
+      closeQrStream()
       setLink({ phase: 'error', message: e instanceof Error ? e.message : String(e) })
     }
   }
@@ -306,11 +361,11 @@ export default function Hatch() {
               />
             </div>
             <div className="journey-actions">
-              <Button variant="ghost" onClick={() => setStep(1)}>
+              <Button variant="ghost" disabled={saving} onClick={() => setStep(1)}>
                 ← Back
               </Button>
-              <Button variant="primary" disabled={!agentStepValid} onClick={() => void startLink()}>
-                {lineName ? 'Save persona →' : 'Continue to link →'}
+              <Button variant="primary" disabled={!agentStepValid || saving} onClick={() => void startLink()}>
+                {saving ? 'Saving…' : lineName ? 'Save persona →' : 'Continue to link →'}
               </Button>
             </div>
           </div>
@@ -320,7 +375,7 @@ export default function Hatch() {
           <div className="journey-card">
             <h1>{`Link ${CHANNEL_LABEL.wa}`}</h1>
             <p className="journey-sub">{`Scan the code from ${CHANNEL_LABEL.wa} → Linked devices → Link a device. The line is created as the flow opens; its name locks here.`}</p>
-            <div className="journey-linkstage" data-testid="link-stage">
+            <div className="journey-linkstage" data-testid="link-stage" role="status" aria-live="polite">
               {link.phase === 'creating' ? <p className="journey-note">Creating the line…</p> : null}
               {link.phase === 'watching' ? <p className="journey-note">Waiting for the first code…</p> : null}
               {link.phase === 'qr' ? <QrDisplay value={link.value} /> : null}
@@ -328,15 +383,15 @@ export default function Hatch() {
                 <>
                   <p className="journey-note journey-note--crit">{link.message}</p>
                   <div className="journey-actions">
-                    <Button variant="neutral" onClick={() => lineName && void openQrStream(lineName)}>
+                    {lineName ? <Button variant="neutral" onClick={() => void openQrStream(lineName)}>
                       New code
-                    </Button>
+                    </Button> : <Link to="/">Check Lines</Link>}
                   </div>
                 </>
               ) : null}
             </div>
             <div className="journey-actions">
-              <Button variant="ghost" onClick={() => setStep(2)}>
+              <Button variant="ghost" disabled={saving || (!lineName && link.phase === 'error')} onClick={() => { closeQrStream(); setStep(2) }}>
                 ← Back
               </Button>
             </div>

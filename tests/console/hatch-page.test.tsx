@@ -43,7 +43,7 @@ vi.mock('../../console/src/lib/api', () => ({
     sendMessage: vi.fn().mockResolvedValue({ sent: true }),
   },
   getApiTicket: vi.fn().mockResolvedValue('ticket'),
-  isProductionConsole: () => false,
+  isProductionConsole: vi.fn().mockReturnValue(false),
 }))
 
 // QrDisplay renders a canvas; jsdom has no canvas — stub the component.
@@ -59,7 +59,7 @@ vi.mock('react-router', async (importOriginal) => {
 
 import Hatch from '../../console/src/pages/Hatch'
 import { Ceremony } from '../../console/src/components/journey/Ceremony'
-import { api } from '../../console/src/lib/api'
+import { api, getApiTicket, isProductionConsole } from '../../console/src/lib/api'
 
 const createLineMock = api.createLine as unknown as ReturnType<typeof vi.fn>
 const sendMessageMock = api.sendMessage as unknown as ReturnType<typeof vi.fn>
@@ -85,10 +85,14 @@ beforeEach(() => {
   getProviderModelsMock.mockClear()
   getProvidersMock.mockClear()
   setCredentialMock.mockClear()
+  vi.mocked(api.updateConfig).mockReset().mockResolvedValue({})
+  vi.mocked(getApiTicket).mockReset().mockResolvedValue('ticket')
+  vi.mocked(isProductionConsole).mockReturnValue(false)
 })
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   vi.unstubAllGlobals()
 })
 
@@ -111,6 +115,141 @@ async function enterKeyedDraft() {
   const submit = [...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Continue to link'))!
   return { ...view, client, submit }
 }
+
+class ControlledLinkStream {
+  static instances: ControlledLinkStream[] = []
+  listeners = new Map<string, (event: MessageEvent) => void>()
+  close = vi.fn()
+  constructor(public url: string) { ControlledLinkStream.instances.push(this) }
+  addEventListener(type: string, callback: (event: MessageEvent) => void) { this.listeners.set(type, callback) }
+  emit(type: string, data = '') { this.listeners.get(type)?.({ data } as MessageEvent) }
+}
+
+async function controlledDraft() {
+  const view = await enterKeyedDraft()
+  ControlledLinkStream.instances = []
+  vi.stubGlobal('EventSource', ControlledLinkStream)
+  return view
+}
+
+describe('hatch lifecycle ownership', () => {
+  it('retains persona edits after a rejected save and admits only one pending save', async () => {
+    const { container, submit } = await controlledDraft()
+    fireEvent.click(submit)
+    await waitFor(() => expect(ControlledLinkStream.instances).toHaveLength(1))
+    act(() => ControlledLinkStream.instances[0]!.emit('connected'))
+    fireEvent.click([...container.querySelectorAll('button')].find((button) => button.textContent === 'Adjust persona')!)
+    const save = [...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Save persona'))!
+    const pending = Promise.withResolvers<Record<string, unknown>>()
+    vi.mocked(api.updateConfig).mockReturnValue(pending.promise)
+    act(() => { fireEvent.click(save); fireEvent.click(save) })
+    expect(api.updateConfig).toHaveBeenCalledTimes(1)
+    await act(async () => pending.reject(new Error('save refused')))
+    expect(container.querySelector('#hatch-name')).not.toBeNull()
+    expect(container.querySelector('[data-testid="hatch-ceremony"]')).toBeNull()
+    expect(toastMock.error).toHaveBeenCalledWith(expect.stringContaining('save refused'))
+  })
+
+  it('does not let old stream events replace a confirmed link', async () => {
+    const { container, submit } = await controlledDraft()
+    fireEvent.click(submit)
+    await waitFor(() => expect(ControlledLinkStream.instances).toHaveLength(1))
+    const stream = ControlledLinkStream.instances[0]!
+    act(() => stream.emit('connected'))
+    act(() => { stream.emit('error'); stream.emit('qr', 'old-code') })
+    fireEvent.click([...container.querySelectorAll('button')].find((button) => button.textContent === 'Adjust persona')!)
+    fireEvent.click([...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Save persona'))!)
+    await waitFor(() => expect(container.querySelector('[data-testid="hatch-ceremony"]')).not.toBeNull())
+    expect(ControlledLinkStream.instances).toHaveLength(1)
+    expect(stream.close).toHaveBeenCalledTimes(1)
+  })
+
+  it('closes an abandoned stream and requires linking before ceremony', async () => {
+    const { container, submit } = await controlledDraft()
+    fireEvent.click(submit)
+    await waitFor(() => expect(ControlledLinkStream.instances).toHaveLength(1))
+    const old = ControlledLinkStream.instances[0]!
+    fireEvent.click([...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Back'))!)
+    expect(old.close).toHaveBeenCalledTimes(1)
+    act(() => old.emit('connected'))
+    expect(container.querySelector('#hatch-name')).not.toBeNull()
+    fireEvent.click([...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Save persona'))!)
+    await waitFor(() => expect(ControlledLinkStream.instances).toHaveLength(2))
+    expect(container.querySelector('[data-testid="hatch-ceremony"]')).toBeNull()
+    act(() => ControlledLinkStream.instances[1]!.emit('connected'))
+    expect(container.querySelector('[data-testid="hatch-ceremony"]')).not.toBeNull()
+    expect(createLineMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not open auth or write a credential after creation settles on an unmounted page', async () => {
+    const { submit, unmount } = await controlledDraft()
+    const pending = Promise.withResolvers<{ name: string; healthPort: number }>()
+    createLineMock.mockReturnValue(pending.promise)
+    fireEvent.click(submit)
+    unmount()
+    await act(async () => pending.resolve({ name: 'quinn', healthPort: 9096 }))
+    expect(ControlledLinkStream.instances).toHaveLength(0)
+    expect(setCredentialMock).not.toHaveBeenCalled()
+  })
+
+  it('does not open an auth stream when its ticket arrives after navigation', async () => {
+    const { submit, unmount } = await controlledDraft()
+    const ticket = Promise.withResolvers<string>()
+    vi.mocked(isProductionConsole).mockReturnValue(true)
+    vi.mocked(getApiTicket).mockReturnValue(ticket.promise)
+    fireEvent.click(submit)
+    await waitFor(() => expect(getApiTicket).toHaveBeenCalledOnce())
+    unmount()
+    await act(async () => ticket.resolve('late-ticket'))
+    expect(ControlledLinkStream.instances).toHaveLength(0)
+  })
+
+  it('bounds a silent auth stream and offers a fresh code without re-creating', async () => {
+    const { container, submit } = await controlledDraft()
+    vi.useFakeTimers()
+    await act(async () => { fireEvent.click(submit) })
+    expect(ControlledLinkStream.instances).toHaveLength(1)
+    await act(async () => vi.advanceTimersByTimeAsync(130_000))
+    expect(container.textContent).toContain('Waiting for the first code')
+    expect(ControlledLinkStream.instances[0]!.close).not.toHaveBeenCalled()
+    await act(async () => vi.advanceTimersByTimeAsync(230_000))
+    const retry = [...container.querySelectorAll('button')].find((button) => button.textContent === 'New code')
+    expect(retry).toBeDefined()
+    expect(container.textContent).toContain('not confirmed')
+    expect(ControlledLinkStream.instances[0]!.close).toHaveBeenCalledTimes(1)
+    await act(async () => { fireEvent.click(retry!) })
+    expect(ControlledLinkStream.instances).toHaveLength(2)
+    expect(createLineMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('discards a pending auth ticket after Back while the page remains mounted', async () => {
+    const { container, submit } = await controlledDraft()
+    const ticket = Promise.withResolvers<string>()
+    vi.mocked(isProductionConsole).mockReturnValue(true)
+    vi.mocked(getApiTicket).mockReturnValue(ticket.promise)
+    fireEvent.click(submit)
+    await waitFor(() => expect(getApiTicket).toHaveBeenCalledOnce())
+    fireEvent.click([...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Back'))!)
+    await act(async () => ticket.resolve('late-ticket'))
+    expect(ControlledLinkStream.instances).toHaveLength(0)
+    expect(container.querySelector('#hatch-name')).not.toBeNull()
+    expect(container.textContent).toContain('Name your agent')
+  })
+
+  it('does not offer a no-op auth retry or blindly repeat an uncertain creation', async () => {
+    const { container, submit } = await controlledDraft()
+    createLineMock.mockRejectedValue(new TypeError('response lost'))
+    fireEvent.click(submit)
+    await waitFor(() => expect(container.textContent).toContain('response lost'))
+    expect([...container.querySelectorAll('button')].find((button) => button.textContent === 'New code')).toBeUndefined()
+    expect(container.querySelector('a[href="/"]')?.textContent).toContain('Check Lines')
+    const back = [...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Back'))!
+    expect(back.disabled).toBe(true)
+    fireEvent.click(back)
+    expect(ControlledLinkStream.instances).toHaveLength(0)
+    expect(createLineMock).toHaveBeenCalledTimes(1)
+  })
+})
 
 describe('hatch flow — step discipline (14-onboarding §1, wave-4 law)', () => {
   it('stores an entered key once for the server-advertised credential service', async () => {

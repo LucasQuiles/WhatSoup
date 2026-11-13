@@ -24,12 +24,15 @@
  * additionally cover argv/env/cwd differences, which this does not.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const PAIRING_STATE_ROOT = mkdtempSync(join(tmpdir(), 'wa-boundary-state-'));
-const DAEMON_DATA_ROOT = mkdtempSync(join(tmpdir(), 'wa-boundary-data-'));
+const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+let fixtureRoot: string;
+let pairingStateRoot: string;
+let daemonDataRoot: string;
+let exitListeners: Set<Function>;
 
 const mocks = vi.hoisted(() => ({
   makeWASocket: vi.fn(),
@@ -115,12 +118,21 @@ async function flush(): Promise<void> {
 
 describe('S2/S3 — pairing receipt crosses the process boundary', () => {
   beforeEach(() => {
+    fixtureRoot = mkdtempSync(join(tmpdir(), 'wa-boundary-'));
+    pairingStateRoot = join(fixtureRoot, 'state');
+    daemonDataRoot = join(fixtureRoot, 'data');
+    mkdirSync(pairingStateRoot);
+    mkdirSync(daemonDataRoot);
+    exitListeners = new Set(process.listeners('exit'));
     vi.resetModules();
-    mockConfig.stateRoot = PAIRING_STATE_ROOT;
-    mockConfig.dataRoot = DAEMON_DATA_ROOT;
+    mockConfig.stateRoot = pairingStateRoot;
+    mockConfig.dataRoot = daemonDataRoot;
+    mockConfig.lockPath = join(fixtureRoot, 'auth.lock');
+    mockConfig.authDir = join(fixtureRoot, 'auth');
+    mockConfig.mediaDir = join(fixtureRoot, 'media');
     mocks.connectionHandlers.length = 0;
     mocks.existsSync.mockReset();
-    mocks.existsSync.mockReturnValue(false);
+    mocks.existsSync.mockImplementation(actualFs.existsSync);
     mocks.saveCreds.mockReset();
     mocks.saveCreds.mockResolvedValue(undefined);
     mocks.qrcodeGenerate.mockReset();
@@ -146,6 +158,10 @@ describe('S2/S3 — pairing receipt crosses the process boundary', () => {
   });
 
   afterEach(() => {
+    for (const listener of process.listeners('exit')) {
+      if (!exitListeners.has(listener)) { listener(0); process.off('exit', listener); }
+    }
+    rmSync(fixtureRoot, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
 
@@ -162,11 +178,8 @@ describe('S2/S3 — pairing receipt crosses the process boundary', () => {
   it('persists the generation and pairing client to disk, not just to memory', async () => {
     await runPairing();
 
-    const receiptPath = join(PAIRING_STATE_ROOT, 'auth-generation.json');
-    // NOT existsSync: this file mocks node:fs's existsSync for auth.ts, so calling it
-    // here would read the mock's `false` and the assertion would lie about the
-    // filesystem. readFileSync is the real implementation (the mock spreads actual),
-    // so a genuinely missing file throws ENOENT and this reports it as such.
+    const receiptPath = join(pairingStateRoot, 'auth-generation.json');
+    // Read the real carrier; a missing file must fail before inspecting its contents.
     let raw: string;
     try {
       raw = readFileSync(receiptPath, 'utf8');
@@ -212,7 +225,7 @@ describe('S2/S3 — pairing receipt crosses the process boundary', () => {
       }
     ).recordCredentialLifecycle('device_bond_lost');
 
-    const lines = readFileSync(join(DAEMON_DATA_ROOT, 'bond-events.ndjson'), 'utf8')
+    const lines = readFileSync(join(daemonDataRoot, 'bond-events.ndjson'), 'utf8')
       .split('\n')
       .filter((l) => l.trim().length > 0);
     const event = JSON.parse(lines[lines.length - 1]!) as Record<string, unknown>;

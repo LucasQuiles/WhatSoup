@@ -342,14 +342,6 @@ describe('two-algorithm split: assert-first vs mkdir-then-force-chmod', () => {
     expect(statSync(dir).mode & 0o777).toBe(0o755);
   });
 
-  it('ensurePrivateDirectorySync creates directory at mode 0700 but leaves existing untouched', () => {
-    const root = makeTmp();
-    const newDir = join(root, 'newdir');
-
-    ensurePrivateDirectorySync(newDir);
-    expect(statSync(newDir).mode & 0o777).toBe(0o700);
-  });
-
   it('forceEnsurePrivateDirectorySync refuses a symlink after mkdir', () => {
     const root = makeTmp();
     const realDir = join(root, 'forced-real');

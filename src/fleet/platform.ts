@@ -916,15 +916,28 @@ class NoSystemdServiceManager implements ServiceManager {
 
 // ---- Docker supervisor (in-process child spawning) ----
 
+interface SupervisedChild {
+  child: ChildProcess;
+  started: Promise<void>;
+  spawned: boolean;
+  exited: boolean;
+  stopping?: Promise<void>;
+}
+
 export class DockerSupervisorServiceManager extends BaseServiceManager {
-  private processes = new Map<string, ChildProcess>();
+  private processes = new Map<string, SupervisedChild>();
 
   async enable(): Promise<void> { /* no-op in Docker */ }
   async disable(): Promise<void> { /* no-op in Docker */ }
 
   // Called by the fleet auth flow after a successful QR handshake (see routes/ops.ts handleAuth).
   async start(name: string): Promise<void> {
-    if (this.processes.has(name)) return; // already running
+    const existing = this.processes.get(name);
+    if (existing?.stopping) {
+      await existing.stopping;
+      return this.start(name);
+    }
+    if (existing) return existing.started;
 
     // Resolve bootstrap script against the repo root, not `process.cwd()`.
     // Under systemd the unit ships with no `WorkingDirectory=`, so cwd is
@@ -939,26 +952,64 @@ export class DockerSupervisorServiceManager extends BaseServiceManager {
       stdio: 'inherit',
     });
 
-    this.processes.set(name, child);
-    child.on('exit', () => this.processes.delete(name));
-
-    await new Promise<void>((resolve, reject) => {
-      child.on('spawn', resolve);
-      child.on('error', reject);
+    const started = Promise.withResolvers<void>();
+    const record: SupervisedChild = { child, started: started.promise, spawned: false, exited: false };
+    const forget = () => {
+      if (this.processes.get(name) === record) this.processes.delete(name);
+    };
+    this.processes.set(name, record);
+    child.once('spawn', () => {
+      record.spawned = true;
+      started.resolve();
     });
+    child.on('error', (error) => {
+      // A later signal error is not evidence that the running child exited.
+      if (!record.spawned) {
+        forget();
+        started.reject(error);
+      }
+    });
+    child.once('exit', () => {
+      record.exited = true;
+      forget();
+      if (!record.spawned) started.reject(new Error(`Instance ${name} exited before startup was confirmed`));
+    });
+    return record.started;
   }
 
   async stop(name: string): Promise<void> {
-    const child = this.processes.get(name);
-    if (!child) return;
+    const record = this.processes.get(name);
+    if (!record) return;
+    if (record.stopping) return record.stopping;
+    record.stopping = this.stopChild(name, record).finally(() => {
+      record.stopping = undefined;
+    });
+    return record.stopping;
+  }
 
-    child.kill(SIGNAL.TERM);
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => {
-        try { child.kill(SIGNAL.KILL); } catch { /* already exited: the graceful stop above may have already reaped the child, so kill throwing here is expected and safe to ignore. */ }
-        resolve();
+  private async stopChild(name: string, record: SupervisedChild): Promise<void> {
+    if (!record.spawned) await record.started;
+    const { child } = record;
+    const exited = () => record.exited || child.exitCode != null || child.signalCode != null;
+    if (exited()) return;
+    await new Promise<void>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout>;
+      const finish = (error?: Error) => {
+        clearTimeout(timer);
+        child.off('exit', onExit);
+        child.off('error', onError);
+        if (error && !exited()) reject(error);
+        else resolve();
+      };
+      const onExit = () => finish();
+      const onError = (error: Error) => finish(error);
+      child.once('exit', onExit);
+      child.once('error', onError);
+      timer = setTimeout(() => {
+        timer = setTimeout(() => finish(new Error(`Instance ${name} exit is unconfirmed after SIGKILL; reconcile before retrying`)), 5_000);
+        try { child.kill(SIGNAL.KILL); } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
       }, 15_000);
-      child.once('exit', () => { clearTimeout(timer); resolve(); });
+      try { child.kill(SIGNAL.TERM); } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
     });
   }
 

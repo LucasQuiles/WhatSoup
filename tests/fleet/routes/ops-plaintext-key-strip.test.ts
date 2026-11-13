@@ -10,14 +10,11 @@ vi.mock('../../../src/fleet/http-proxy.ts', () => ({ proxyToInstance: vi.fn() })
 // An incomplete mock ({ execFile, spawn } only) leaves execFileSync as undefined,
 // which the keyring backend probe catches — but vitest logs a warning per call and
 // the fork worker can hang on teardown under --pool=forks (issue #1834).
-vi.mock('node:child_process', () => ({
-  execFile: vi.fn(),
-  execFileSync: vi.fn(),
-  spawn: vi.fn(),
-  spawnSync: vi.fn(),
-  exec: vi.fn(),
-  execSync: vi.fn(),
-}));
+vi.mock('node:child_process', async () => {
+  const { childProcessMockWithNativeOwnership } = await import('../../helpers/child-process.ts');
+  const mock = await childProcessMockWithNativeOwnership();
+  return { ...mock, exec: vi.fn(), execSync: vi.fn() };
+});
 
 import { handleConfigUpdate } from '../../../src/fleet/routes/ops.ts';
 import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';

@@ -22,6 +22,13 @@
  * demonstrated difference.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+let fixtureRoot: string;
+let exitListeners: Set<Function>;
 
 type Handler = (update?: unknown) => unknown | Promise<unknown>;
 
@@ -61,8 +68,9 @@ vi.mock('qrcode-terminal', () => ({ default: { generate: mocks.qrcodeGenerate } 
 
 vi.mock('../../src/config.ts', () => ({
   config: {
-    authDir: '/tmp/wa-test-auth-effective-client-pairing',
-    lockPath: '/tmp/wa-test-auth-effective-client-pairing.lock',
+    get authDir() { return join(fixtureRoot, 'auth'); },
+    get lockPath() { return join(fixtureRoot, 'auth.lock'); },
+    get stateRoot() { return join(fixtureRoot, 'state'); },
   },
 }));
 
@@ -101,10 +109,13 @@ async function flushPromises(): Promise<void> {
 
 describe('S2 — pairing CLI effective-client receipt', () => {
   beforeEach(() => {
+    fixtureRoot = mkdtempSync(join(tmpdir(), 'pairing-receipt-'));
+    mkdirSync(join(fixtureRoot, 'state'));
+    exitListeners = new Set(process.listeners('exit'));
     vi.useFakeTimers();
     vi.resetModules();
     mocks.existsSync.mockReset();
-    mocks.existsSync.mockReturnValue(false);
+    mocks.existsSync.mockImplementation(actualFs.existsSync);
     mocks.saveCreds.mockReset();
     mocks.saveCreds.mockResolvedValue(undefined);
     mocks.qrcodeGenerate.mockReset();
@@ -126,6 +137,10 @@ describe('S2 — pairing CLI effective-client receipt', () => {
   });
 
   afterEach(() => {
+    for (const listener of process.listeners('exit')) {
+      if (!exitListeners.has(listener)) { listener(0); process.off('exit', listener); }
+    }
+    rmSync(fixtureRoot, { recursive: true, force: true });
     vi.restoreAllMocks();
     vi.useRealTimers();
   });

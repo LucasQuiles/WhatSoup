@@ -40,9 +40,10 @@ vi.mock('../../../src/fleet/mcp-client.ts', () => ({
 vi.mock('../../../src/fleet/http-proxy.ts', () => ({
   proxyToInstance: vi.fn(),
 }));
-vi.mock('node:child_process', () => ({
-  execFile: vi.fn(),
-}));
+vi.mock('node:child_process', async () => {
+  const { childProcessMockWithNativeOwnership } = await import('../../helpers/child-process.ts');
+  return childProcessMockWithNativeOwnership();
+});
 
 import { handleConfigUpdate } from '../../../src/fleet/routes/ops.ts';
 import { makeDeps } from '../../helpers/http-mocks.ts';

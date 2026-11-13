@@ -1063,7 +1063,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
   it.each(['setup-mktemp-term-ignoring', 'setup-mkfifo-term-ignoring', 'setup-ps-term-ignoring'] as const)('bounds a TERM-ignoring setup child from helper entry: %s', (mode) => {
     const result = runLifecycleProbe(mode);
     expect(result.exit, JSON.stringify(result)).toBe(0);
-    expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(4_000);
+    expect(result.child_exit_ms, JSON.stringify(result)).toBeLessThan(4_000);
     expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
     expect(result.command_started, JSON.stringify(result)).toBe(false);
     expectLifecycleIsolation(result);

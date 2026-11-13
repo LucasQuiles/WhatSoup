@@ -104,6 +104,27 @@ describe('api write operations', () => {
   });
 });
 
+describe('instance mutation outcomes', () => {
+  it('rejects incomplete deletion with the projected recovery message', async () => {
+    stubProductionConsole(false);
+    const fetch = vi.fn().mockResolvedValue(errorResponse(500, JSON.stringify({
+      schema: 'fleet-error-v1', code: 'instance_cleanup_failed',
+      message: 'Instance cleanup is incomplete. Inspect remaining state before retrying.',
+      correlation_id: 'cleanup-correlation', mutation_state: 'unknown',
+      rollback_state: 'not_applicable', retryable: false,
+      diagnostic: 'private filesystem details',
+    })));
+    vi.stubGlobal('fetch', fetch);
+
+    await expect(api.deleteLine('test-line')).rejects.toMatchObject({
+      name: 'FleetApiError', status: 500, code: 'instance_cleanup_failed',
+      message: 'Instance cleanup is incomplete. Inspect remaining state before retrying. (instance_cleanup_failed) [cleanup-correlation]',
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledWith('/api/lines/test-line', expect.objectContaining({ method: 'DELETE' }));
+  });
+});
+
 describe('console session endpoints', () => {
   it('unlockConsole posts the operator token through Authorization and returns expiry', async () => {
     const fetch = vi.fn().mockResolvedValue(jsonResponse({ expiresIn: 900 }));
@@ -142,6 +163,12 @@ describe('console session endpoints', () => {
       method: 'DELETE',
       credentials: 'same-origin',
     }));
+  });
+
+  it('reports an unconfirmed revocation when the server rejects DELETE', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(errorResponse(503, 'private server detail')));
+    const { lockConsole } = await import('../../console/src/lib/api.ts');
+    await expect(lockConsole()).rejects.toThrow('Session revocation could not be confirmed (503).');
   });
 });
 

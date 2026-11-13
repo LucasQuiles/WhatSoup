@@ -6,8 +6,8 @@ import * as path from 'node:path';
 vi.mock('../../../src/fleet/mcp-client.ts', () => ({ mcpCall: vi.fn() }));
 vi.mock('../../../src/fleet/http-proxy.ts', () => ({ proxyToInstance: vi.fn() }));
 vi.mock('node:child_process', async () => {
-  const { childProcessMock } = await import('../../helpers/child-process.ts');
-  return childProcessMock();
+  const { childProcessMockWithNativeOwnership } = await import('../../helpers/child-process.ts');
+  return childProcessMockWithNativeOwnership();
 });
 
 import {

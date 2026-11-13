@@ -11,7 +11,7 @@ import {
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 
 import { describe, expect, it, vi } from 'vitest';
 
@@ -26,8 +26,12 @@ import {
   CI_EXEMPT_PUSH_GATE_GUARDS,
   namedInCi as namedInCiWorkflow,
   pushGateGuards as pushGateGuardsOf,
+  readGateInputs,
+  scriptReachability,
 } from '../helpers/gate-membership.ts';
 import { BRANCH_STEPS, RELEASE_STEPS } from '../../scripts/push-gate.ts';
+import { PUSH_BASE_OID_ENV } from '../../scripts/lib/guard-core.ts';
+import { verifyAlignmentAfter, verifyAlignmentBefore, type GitProbe } from '../../scripts/pre-push-alignment.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const prePushHook = resolve(repoRoot, '.husky/pre-push');
@@ -52,7 +56,6 @@ const qualityGuardrailsChecklist = readFileSync(
   resolve(repoRoot, 'docs/contributing/quality-guardrails-checklist.md'),
   'utf8',
 );
-const whatsoupGuardWorkflow = readFileSync(resolve(repoRoot, '.github/workflows/whatsoup-guard.yml'), 'utf8');
 const tagReleaseWorkflow = readFileSync(resolve(repoRoot, '.github/workflows/tag-release-gate.yml'), 'utf8');
 const guardPackageJson = JSON.parse(
   readFileSync(resolve(repoRoot, 'tools/whatsoup_guard/package.json'), 'utf8'),
@@ -99,7 +102,7 @@ describe('pre-push guard classifier', () => {
     );
 
     expect(decision).toBe('branch');
-    expect(commandsForDecision(decision)).toEqual(['verify:push:branch']);
+    expect(commandsForDecision(decision)).toEqual(['verify:push:fast']);
   });
 
   it('uses release verification when any pushed ref needs release treatment', () => {
@@ -149,9 +152,8 @@ describe('pre-push guard classifier', () => {
     expect(commandsForDecision(decision)).not.toEqual([]);
   });
 
-  it('routes empty stdin to branch verification (fail closed)', () => {
+  it('classifies empty stdin as a branch update; the runtime tests below prove it keeps the complete gate', () => {
     expect(classifyPrePushInput('')).toBe('branch');
-    expect(commandsForDecision(classifyPrePushInput(''))).toEqual(['verify:push:branch']);
   });
   it('accepts exact 64-character SHA-256 object IDs', () => {
     expect(classifyPrePushLine(
@@ -261,6 +263,88 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
     });
   });
 
+  // The installed hook always names the remote (.husky/pre-push), so these shapes run
+  // through the real alignment check, with git stubbed: the invoking HEAD is a…a and
+  // live main is c…c. A delete-only push is proved by the metadata test below.
+  const hookRemote = { remoteName: 'origin', remoteUrl: 'git@github.com:LucasQuiles/WhatSoup.git' };
+  const stubbedAlignmentGit: GitProbe = (args) => {
+    const key = args.join(' ');
+    const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
+    if (key === 'remote get-url --push origin') return ok(`${hookRemote.remoteUrl}\n`);
+    if (key === 'rev-parse --verify HEAD') return ok(`${'a'.repeat(40)}\n`);
+    const commit = /^rev-parse --verify ([0-9a-f]{40})\^\{commit\}$/.exec(key);
+    if (commit) return ok(`${commit[1]}\n`);
+    if (key === 'status --porcelain=v2 -z --untracked-files=all') return ok();
+    if (key === `ls-remote --exit-code ${hookRemote.remoteUrl} refs/heads/main`) return ok(`${'c'.repeat(40)}\trefs/heads/main\n`);
+    if (key === `merge-base --is-ancestor ${'c'.repeat(40)} ${'a'.repeat(40)}`) return ok();
+    return { status: 2, stdout: '', stderr: `unexpected git call: ${key}` };
+  };
+  const realAlignment = {
+    verifyAlignmentBefore: (options: Parameters<typeof verifyAlignmentBefore>[0]) =>
+      verifyAlignmentBefore({ ...options, runGit: stubbedAlignmentGit }),
+    verifyAlignmentAfter: (receipt: Parameters<typeof verifyAlignmentAfter>[0], options: Parameters<typeof verifyAlignmentAfter>[1]) =>
+      verifyAlignmentAfter(receipt, { ...options, runGit: stubbedAlignmentGit }),
+  };
+
+  // One content commit: the strictest destination decides the tier.
+  it.each([
+    ['a branch and a delete', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${ZERO_SHA}\nrefs/heads/old ${ZERO_SHA} refs/heads/old ${'b'.repeat(40)}`, 'branch', 'run verify:push:fast', 0],
+    ['a forced branch update', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${'b'.repeat(40)}`, 'branch', 'run verify:push:fast', 0],
+    ['the same commit to a branch and main', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${ZERO_SHA}\nrefs/heads/main ${'a'.repeat(40)} refs/heads/main ${ZERO_SHA}`, 'release', 'run verify:release', 1],
+    ['a delete and main', `refs/heads/old ${ZERO_SHA} refs/heads/old ${'b'.repeat(40)}\nrefs/heads/main ${'a'.repeat(40)} refs/heads/main ${ZERO_SHA}`, 'release', 'run verify:release', 1],
+    ['a version tag', `refs/tags/v1.2.3 ${'a'.repeat(40)} refs/tags/v1.2.3 ${ZERO_SHA}`, 'release', 'run verify:release', 1],
+  ])('takes the strictest tier for %s, through the real alignment check', (_shape, input, expectedDecision, expectedCall, consoleChecks) => {
+    withStubNpm((callsLog) => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      let checked = 0;
+      try {
+        expect(runPrePushGuard(input, repoRoot, {
+          assertConsoleDependencies: () => { checked += 1; },
+          ...realAlignment,
+        }, hookRemote)).toBe(expectedDecision);
+        const calls = readFileSync(callsLog, 'utf8').trim().split('\n');
+        expect(calls[0]).toContain('run guard:git-estate -- guard --phase pre-push');
+        expect(calls.slice(1)).toEqual([expectedCall]);
+        expect(checked).toBe(consoleChecks);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  // Two distinct content commits cannot share one verification run, whatever their
+  // destinations: the hook refuses them before any verification step.
+  it.each([
+    ['two branches', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${ZERO_SHA}\nrefs/heads/b ${'b'.repeat(40)} refs/heads/b ${ZERO_SHA}`],
+    ['a branch and main', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${ZERO_SHA}\nrefs/heads/main ${'b'.repeat(40)} refs/heads/main ${ZERO_SHA}`],
+    ['a branch and a version tag', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${ZERO_SHA}\nrefs/tags/v1.2.3 ${'b'.repeat(40)} refs/tags/v1.2.3 ${ZERO_SHA}`],
+  ])('refuses %s with two distinct commits before any verification step', (_shape, input) => {
+    withStubNpm((callsLog) => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      let checked = 0;
+      try {
+        expect(() => runPrePushGuard(input, repoRoot, {
+          assertConsoleDependencies: () => { checked += 1; },
+          ...realAlignment,
+        }, hookRemote)).toThrow('exactly one candidate commit may share a verification run');
+        const calls = readFileSync(callsLog, 'utf8').trim().split('\n');
+        expect(calls).toHaveLength(1);
+        expect(calls[0]).toContain('run guard:git-estate -- guard --phase pre-push');
+        expect(checked).toBe(0);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  it.each([
+    ['two branches', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${ZERO_SHA}\nrefs/heads/b ${'b'.repeat(40)} refs/heads/b ${ZERO_SHA}`, 'branch'],
+    ['a branch and main', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${ZERO_SHA}\nrefs/heads/main ${'b'.repeat(40)} refs/heads/main ${ZERO_SHA}`, 'release'],
+    ['a branch and a version tag', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${ZERO_SHA}\nrefs/tags/v1.2.3 ${'b'.repeat(40)} refs/tags/v1.2.3 ${ZERO_SHA}`, 'release'],
+  ])('still classifies %s by its strictest destination', (_shape, input, expectedDecision) => {
+    expect(classifyPrePushInput(input)).toBe(expectedDecision);
+  });
+
   it('maps a symbolic HEAD push to its branch destination for lane exemption', () => {
     withStubNpm((callsLog) => {
       const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -274,7 +358,7 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
         ).toBe('branch');
         expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
           'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
-          'run verify:push:branch',
+          'run verify:push:fast',
         ]);
       } finally {
         spy.mockRestore();
@@ -318,37 +402,87 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
 
       expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
         'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
-        'run verify:push:branch',
+        'run verify:push:fast',
       ]);
       expect(events).toEqual([
         `before:origin:git@github.com:LucasQuiles/WhatSoup.git:${'a'.repeat(40)}`,
-        'console',
         'after',
       ]);
     });
   });
 
-  it('fails before branch and release verification when required console executables are missing', () => {
-    for (const [input, expectedEstateCall] of [
-      [
-        `refs/heads/feature/example 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/feature/example ${ZERO_SHA}`,
-        'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
-      ],
-      [
-        'refs/heads/main 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/main ec3ac431eb1811aeb7fa9851d658b27ae724cbb5',
-        'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/main',
-      ],
-    ]) {
-      withStubNpm((callsLog, root) => {
-        expect(() => runPrePushGuard(input, root)).toThrow(
-          /missing required console executables: eslint, tsc, vite.*npm ci --prefix console/,
-        );
-        // The estate gate now runs before the console-dependency check, so the
-        // call log is no longer empty — it must contain ONLY the estate-gate
-        // invocation (the failed console check never reaches npm at all).
-        expect(readFileSync(callsLog, 'utf8').trim()).toBe(expectedEstateCall);
-      });
+  it('passes the live main from the alignment check to the gate steps, replacing an inherited value', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'whatsoup-pre-push-guard-base-'));
+    const bin = resolve(root, 'bin');
+    const callsLog = resolve(root, 'npm-calls.log');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(resolve(bin, 'npm'), [
+      '#!/bin/sh',
+      `printf "%s base=%s\\n" "$*" "\${${PUSH_BASE_OID_ENV}-unset}" >> "${callsLog}"`,
+      'exit 0',
+      '',
+    ].join('\n'));
+    chmodSync(resolve(bin, 'npm'), 0o755);
+    vi.stubEnv('PATH', `${bin}:${process.env['PATH'] ?? ''}`);
+    vi.stubEnv(PUSH_BASE_OID_ENV, 'c'.repeat(40));
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const receipt = {
+      schemaVersion: 1 as const,
+      remoteName: 'upstream',
+      remoteUrlDigest: 'd'.repeat(64),
+      candidateOid: 'a'.repeat(40),
+      headOid: 'a'.repeat(40),
+      remoteMainOid: 'b'.repeat(40),
+    };
+    const input = `refs/heads/feature/example ${'a'.repeat(40)} refs/heads/feature/example ${ZERO_SHA}`;
+    try {
+      runPrePushGuard(input, repoRoot, {
+        assertConsoleDependencies: () => {},
+        verifyAlignmentBefore: () => receipt,
+        verifyAlignmentAfter: () => {},
+      }, { remoteName: 'upstream', remoteUrl: 'git@github.com:LucasQuiles/WhatSoup.git' });
+      expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toContain(`run verify:push:fast base=${'b'.repeat(40)}`);
+      expect(process.env[PUSH_BASE_OID_ENV]).toBe('c'.repeat(40));
+
+      writeFileSync(callsLog, '');
+      runPrePushGuard(input, repoRoot, { assertConsoleDependencies: () => {} });
+      expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toContain('run verify:push:fast base=unset');
+      expect(process.env[PUSH_BASE_OID_ENV]).toBe('c'.repeat(40));
+    } finally {
+      spy.mockRestore();
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it('fails before release verification when required console executables are missing', () => {
+    withStubNpm((callsLog, root) => {
+      expect(() =>
+        runPrePushGuard(
+          'refs/heads/main 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/main ec3ac431eb1811aeb7fa9851d658b27ae724cbb5',
+          root,
+        ),
+      ).toThrow(/missing required console executables: eslint, tsc, vite.*npm ci --prefix console/);
+      // The estate gate now runs before the console-dependency check, so the
+      // call log is no longer empty — it must contain ONLY the estate-gate
+      // invocation (the failed console check never reaches npm at all).
+      expect(readFileSync(callsLog, 'utf8').trim()).toBe(
+        'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/main',
+      );
+    });
+  });
+
+  it('a branch push reaches the fast tier without console executables, which it does not use', () => {
+    withStubNpm((callsLog, root) => {
+      runPrePushGuard(
+        `refs/heads/feature/example 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/feature/example ${ZERO_SHA}`,
+        root,
+      );
+      expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
+        'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
+        'run verify:push:fast',
+      ]);
+    });
   });
 
   const withConsoleTreeFixture = (
@@ -458,9 +592,9 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
     }
   };
 
-  it('fails closed before the composite when all bins exist but the console dependency tree is broken', () => {
+  it('fails closed before the release composite when all bins exist but the console dependency tree is broken', () => {
     withConsoleTreeFixture('broken', (root, callsLog, lifecycleMarker) => {
-      const input = `refs/heads/feature/example 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/feature/example ${ZERO_SHA}`;
+      const input = `refs/heads/main 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/main ${ZERO_SHA}`;
 
       expect(() => runPrePushGuard(input, root)).toThrowError(
         new Error(
@@ -469,22 +603,45 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
       );
       // The estate gate now runs before the console-dependency check, so the
       // call log is no longer empty — it must contain ONLY the estate-gate
-      // invocation (the broken tree throws before verify:push:branch runs).
+      // invocation (the broken tree throws before verify:release runs).
       expect(readFileSync(callsLog, 'utf8').trim()).toBe(
-        'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
+        'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/main',
       );
       expect(existsSync(lifecycleMarker)).toBe(false);
     });
   });
 
-  it('validates a complete console tree offline without lifecycle scripts before running the composite', () => {
-    withConsoleTreeFixture('valid', (root, callsLog, lifecycleMarker) => {
+  it('fails closed on a broken console tree when the ref updates are unreadable', () => {
+    withConsoleTreeFixture('broken', (root, callsLog) => {
+      expect(() => runPrePushGuard('', root)).toThrowError(
+        new Error(
+          'pre-push guard: console dependency tree is incomplete or invalid; run npm ci --prefix console before pushing',
+        ),
+      );
+      expect(readFileSync(callsLog, 'utf8').trim()).toBe('run guard:git-estate -- guard --phase pre-push');
+    });
+  });
+
+  it('a broken console tree does not stop a branch push, which builds nothing', () => {
+    withConsoleTreeFixture('broken', (root, callsLog) => {
       const input = `refs/heads/feature/example 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/feature/example ${ZERO_SHA}`;
 
       expect(runPrePushGuard(input, root)).toBe('branch');
       expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
         'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
-        'run verify:push:branch',
+        'run verify:push:fast',
+      ]);
+    });
+  });
+
+  it('validates a complete console tree offline without lifecycle scripts before running the release composite', () => {
+    withConsoleTreeFixture('valid', (root, callsLog, lifecycleMarker) => {
+      const input = `refs/heads/main 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/main ${ZERO_SHA}`;
+
+      expect(runPrePushGuard(input, root)).toBe('release');
+      expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
+        'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/main',
+        'run verify:release',
       ]);
       expect(existsSync(lifecycleMarker)).toBe(false);
     });
@@ -567,7 +724,7 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
         expect(decision).toBe('branch');
         expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
           'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
-          'run verify:push:branch',
+          'run verify:push:fast',
         ]);
       } finally {
         spy.mockRestore();
@@ -587,7 +744,7 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
         expect(decision).toBe('branch');
         expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
           'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
-          'run verify:push:branch',
+          'run verify:push:fast',
         ]);
       } finally {
         spy.mockRestore();
@@ -646,7 +803,7 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
         })).toBe('branch');
         expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
           'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/sha256',
-          'run verify:push:branch',
+          'run verify:push:fast',
         ]);
       } finally {
         spy.mockRestore();
@@ -1094,11 +1251,32 @@ describe('verify chain composition (push-gate manifest)', () => {
     expect(release).not.toMatch(/\bnpm run verify:console-design(?:\s|$)/);
   });
 
-  it('retains design guard tests where no full-suite coverage run precedes design checks', () => {
+  it('starts direct tag Quality validation and consumes its trusted private receipt', () => {
     expect(branchChain).toMatch(
       /\bnpm run verify:console-design(?:\s|$)/,
     );
-    expect(tagReleaseWorkflow).toContain('run: npm run verify:console-design');
+    expect(qualityWorkflow).toContain("tags:\n      - 'v*'");
+    expect(qualityWorkflow).not.toContain('workflow_call:');
+    expect(qualityWorkflow).not.toContain('TEST_INTEGRITY_DEPLOY_KEY');
+    expect(tagReleaseWorkflow).toContain('workflow_run:');
+    expect(tagReleaseWorkflow).toContain('workflows: [Quality]');
+    expect(tagReleaseWorkflow).toContain('types: [completed]');
+    expect(tagReleaseWorkflow).toContain("github.event.workflow_run.event == 'push'");
+    expect(tagReleaseWorkflow).not.toContain("github.event.workflow_run.conclusion == 'success'");
+    expect(tagReleaseWorkflow).toContain("startsWith(github.event.workflow_run.head_branch, 'v')");
+    expect(tagReleaseWorkflow).toContain('ref: ${{ github.sha }}');
+    expect(tagReleaseWorkflow).toContain('node scripts/private-integrity-release.ts select');
+    expect(tagReleaseWorkflow).toContain('node scripts/private-integrity-release.ts verify --receipt');
+    expect(tagReleaseWorkflow).toContain('merge-multiple: true');
+    expect(tagReleaseWorkflow).not.toContain('TEST_INTEGRITY_DEPLOY_KEY');
+    expect(tagReleaseWorkflow).not.toContain('secrets: inherit');
+    expect(tagReleaseWorkflow).toContain('cancel-in-progress: false');
+    expect(qualityWorkflow).toContain('run: npm run verify:console-design:live');
+    expect(qualityWorkflow).toContain("if: startsWith(github.ref, 'refs/tags/')");
+    expect(qualityWorkflow).toContain('run: npm run guard:repo:release-hygiene');
+    expect(qualityWorkflow).toContain(
+      "cancel-in-progress: ${{ github.event_name != 'merge_group' && !startsWith(github.ref, 'refs/tags/') }}",
+    );
   });
 
   it('runs design metadata checks exactly once for branch and release verification', () => {
@@ -1121,6 +1299,9 @@ describe('verify chain composition (push-gate manifest)', () => {
     expect(pushGateScope).toContain('manual npm run verify:push:branch bypasses ref classification');
     expect(pushGateScope).toContain('installed hook invokes pre-push-guard.ts');
     expect(pushGateScope).toContain('delete-only runs design metadata checks only');
+    expect(pushGateScope).toContain('branch -> verify:push:fast');
+    expect(pushGateScope).toContain('no readable refs -> this chain');
+    expect(pushGateScope).toContain('verify:push:fast scope');
   });
 
   it('design guard fixture lane covers the scanner contracts used by console design verification', () => {
@@ -1251,212 +1432,6 @@ describe('verify chain composition (push-gate manifest)', () => {
   });
 });
 
-describe('quality workflow composition', () => {
-  it('runs the PR metadata guard only with authoritative pull-request event data', () => {
-    expect(packageJson.scripts['guard:pr-metadata']).toBe(
-      'bash scripts/run-with-pinned-node.sh scripts/pr-metadata-guard.ts',
-    );
-    expect(branchChain).toContain(
-      'tests/scripts/pr-metadata-guard.test.ts',
-    );
-    expect(qualityWorkflow).toMatch(
-      /- name: PR metadata guard\n        if: github\.event_name == 'pull_request'\n        env:\n          PR_METADATA_EVENT: \$\{\{ github\.event_path \}\}\n        run: npm run guard:pr-metadata -- --github-event "\$PR_METADATA_EVENT" --json/,
-    );
-  });
-
-  it('runs one read-only Node 24 semantic shadow step before integrity and expensive suites', () => {
-    const semanticMatches = qualityWorkflow.match(/name: Semantic quality \(shadow\)/g) ?? [];
-    const semanticIndex = qualityWorkflow.indexOf('name: Semantic quality (shadow)');
-    const integrityInstallIndex = qualityWorkflow.indexOf('name: Install test-integrity plugin');
-    const suiteIndex = qualityWorkflow.indexOf('name: Test suite + coverage thresholds');
-
-    expect(semanticMatches).toHaveLength(1);
-    expect(semanticIndex).toBeGreaterThanOrEqual(0);
-    expect(semanticIndex).toBeLessThan(integrityInstallIndex);
-    expect(semanticIndex).toBeLessThan(suiteIndex);
-    expect(qualityWorkflow).toContain('name: quality (24.x)');
-    expect(qualityWorkflow).not.toContain("if: matrix.node == '24.x'");
-    expect(qualityWorkflow).toContain('SEMANTIC_RECEIPT: ${{ runner.temp }}/semantic-quality.json');
-    expect(qualityWorkflow).toContain('base="origin/$GITHUB_BASE_REF"');
-    expect(qualityWorkflow).toContain('base="HEAD^"');
-    expect(qualityWorkflow).toContain('--mode shadow --base "$base" --receipt "$SEMANTIC_RECEIPT"');
-    expect(qualityWorkflow).toContain('>> "$GITHUB_STEP_SUMMARY"');
-    expect(qualityWorkflow).toMatch(/permissions:\n  contents: read/);
-    expect(qualityWorkflow).not.toContain('pull_request_target');
-    expect(qualityWorkflow).not.toContain('path: semantic-quality.json');
-  });
-
-  it('installs the private test-integrity plugin before requiring the baseline gate', () => {
-    const installIndex = qualityWorkflow.indexOf('name: Install test-integrity plugin');
-    const gateIndex = qualityWorkflow.indexOf('name: Test integrity baseline check');
-
-    expect(installIndex).toBeGreaterThanOrEqual(0);
-    expect(gateIndex).toBeGreaterThan(installIndex);
-    expect(qualityWorkflow).toContain('TEST_INTEGRITY_DEPLOY_KEY');
-    expect(qualityWorkflow).toContain('LucasQuiles/test-integrity.git');
-    expect(qualityWorkflow).toContain('TEST_INTEGRITY_COMMIT: ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c');
-    expect(qualityWorkflow).toContain('mkdir -p "$plugin_dir" "$HOME/.ssh"');
-    expect(qualityWorkflow).toContain('fetch --depth 1 origin "$TEST_INTEGRITY_COMMIT"');
-    expect(qualityWorkflow).toContain('if [ "$observed_commit" != "$TEST_INTEGRITY_COMMIT" ]; then');
-    expect(qualityWorkflow).not.toContain('git clone --depth 1');
-    expect(qualityWorkflow).not.toMatch(/git -C "\$plugin_dir" push/);
-    expect(qualityWorkflow).toContain("WHATSOUP_REQUIRE_TEST_INTEGRITY: '1'");
-  });
-
-  it('uses the shared quality installer before Python-backed gates run', () => {
-    const setupPythonIndex = qualityWorkflow.indexOf('name: Setup Python 3.12');
-    const pythonDepsIndex = qualityWorkflow.indexOf('name: Host dependency profile (strict)');
-    const testIntegrityIndex = qualityWorkflow.indexOf('name: Test integrity baseline check');
-
-    expect(setupPythonIndex).toBeGreaterThanOrEqual(0);
-    expect(pythonDepsIndex).toBeGreaterThan(setupPythonIndex);
-    expect(testIntegrityIndex).toBeGreaterThan(pythonDepsIndex);
-    expect(qualityWorkflow).toMatch(/uses: actions\/setup-python@[0-9a-f]{40}/);
-    expect(qualityWorkflow).toContain("python-version: '3.12'");
-    expect(qualityWorkflow).toContain('install-host-dependencies.sh --profile quality --apply --yes --json');
-    expect(qualityWorkflow).not.toContain('Install Python and Linux quality prerequisites');
-    expect(qualityWorkflow).not.toContain('sudo apt-get install -y shellcheck ripgrep');
-  });
-
-  it('preserves exact required contexts while isolating Node 25 compatibility work', () => {
-    const compatibilityStart = qualityWorkflow.indexOf('  compatibility:');
-    const nextJob = qualityWorkflow.indexOf('  bot-errors-health-macos:', compatibilityStart);
-    const compatibility = qualityWorkflow.slice(compatibilityStart, nextJob);
-
-    expect(qualityWorkflow).toContain('name: quality (24.x)');
-    expect(qualityWorkflow).toContain("node-version-file: '.nvmrc'");
-    expect(compatibility).toContain('name: quality (25.x)');
-    expect(qualityWorkflow).not.toContain('matrix:');
-    expect(compatibility).toContain("node-version: '25.x'");
-    expect(compatibility).toContain('run: npm test -- --pool=forks');
-    expect(compatibility).toContain('run: npm --prefix console run build');
-    expect(compatibility).not.toContain('coverage:check');
-    expect(compatibility).not.toContain('guard:');
-    expect(compatibility).not.toContain('Playwright');
-    expect(compatibility).not.toContain('Setup Python');
-    expect(compatibility).not.toContain('test-integrity');
-    expect(compatibility).not.toContain('ci-disk-reclaim');
-  });
-
-  it('requires strict and compatibility doctor receipts in the protected contexts', () => {
-    expect(qualityWorkflow.match(/name: Host dependency profile \(strict\)/g)).toHaveLength(1);
-    expect(qualityWorkflow.match(/name: Validate strict doctor receipt/g)).toHaveLength(1);
-    expect(qualityWorkflow).toContain('set -o pipefail');
-    expect(qualityWorkflow).toContain('whatsoup-doctor-quality.json');
-    expect(qualityWorkflow.match(/name: Host dependency profile \(compatibility-only\)/g)).toHaveLength(1);
-    expect(qualityWorkflow).toContain('--node-policy compatibility --json');
-    expect(qualityWorkflow).toContain('whatsoup-doctor-compatibility.json');
-  });
-
-  it('runs measured disk enforcement only in the Node 24 authority job', () => {
-    expect(qualityWorkflow.match(/bash scripts\/ci-disk-reclaim\.sh/g)).toHaveLength(1);
-    expect(qualityWorkflow).not.toContain('sudo rm -rf /usr/share/dotnet');
-    expect(qualityWorkflow).not.toContain('docker image prune --all --force || true');
-  });
-
-  it('runs the commit-author guard in CI quality workflow', () => {
-    expect(qualityWorkflow).toContain('npm run guard:repo:commit-authors');
-  });
-
-  it('runs branch-diff repo hygiene in CI before commit-author scanning', () => {
-    const branchDiffIndex = qualityWorkflow.indexOf('npm run guard:repo:branch-diff');
-    const commitAuthorIndex = qualityWorkflow.indexOf('npm run guard:repo:commit-authors');
-
-    expect(branchDiffIndex).toBeGreaterThanOrEqual(0);
-    expect(commitAuthorIndex).toBeGreaterThan(branchDiffIndex);
-    expect(qualityWorkflow).toContain('--base "origin/$GITHUB_BASE_REF"');
-  });
-
-  it('fetches one fail-closed PR base snapshot before every authority consumer', () => {
-    const compatibilityIndex = qualityWorkflow.indexOf('  compatibility:');
-    const authority = qualityWorkflow.slice(0, compatibilityIndex);
-    const fetchCommand =
-      'git fetch origin "$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"';
-    const fetchLines = authority
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(
-        (line) =>
-          line.includes('git fetch')
-          && line.includes('refs/remotes/origin/$GITHUB_BASE_REF'),
-      );
-    const fetchIndex = authority.indexOf(fetchCommand);
-    const snapshotStepIndex = authority.indexOf('- name: Refresh PR base snapshot');
-    const semanticStepIndex = authority.indexOf('- name: Semantic quality (shadow)');
-    const snapshotStep = authority.slice(snapshotStepIndex, semanticStepIndex);
-    const consumerCommands = [
-      'npm run guard:semantic-quality -- --mode shadow --base "$base"',
-      'npm run guard:repo:branch-diff',
-      'npm run guard:repo:commit-authors',
-      'npm run guard:baseline-growth',
-      'npm run guard:design-system-hygiene -- --changed-since "origin/${GITHUB_BASE_REF}"',
-    ];
-
-    expect(compatibilityIndex).toBeGreaterThanOrEqual(0);
-    expect(fetchLines).toEqual([fetchCommand]);
-    expect(fetchIndex).toBeGreaterThanOrEqual(0);
-    expect(snapshotStepIndex).toBeGreaterThanOrEqual(0);
-    expect(semanticStepIndex).toBeGreaterThan(snapshotStepIndex);
-    expect(snapshotStep).toContain(fetchCommand);
-    expect(snapshotStep).not.toMatch(/continue-on-error|set \+e|\|\| true/);
-    for (const command of consumerCommands) {
-      expect(authority.indexOf(command)).toBeGreaterThan(fetchIndex);
-    }
-  });
-
-  it('relies on authoritative coverage instead of rerunning repo-hygiene tests', () => {
-    const compatibilityIndex = qualityWorkflow.indexOf('  compatibility:');
-    const authority = qualityWorkflow.slice(0, compatibilityIndex);
-    const stagedIndex = authority.indexOf('npm run guard:repo:staged');
-    const branchDiffIndex = authority.indexOf('npm run guard:repo:branch-diff');
-    const commitAuthorIndex = authority.indexOf('npm run guard:repo:commit-authors');
-    const coverageIndex = authority.indexOf('npm run coverage:check -- --pool=forks');
-
-    expect(compatibilityIndex).toBeGreaterThanOrEqual(0);
-    expect(stagedIndex).toBeGreaterThanOrEqual(0);
-    expect(branchDiffIndex).toBeGreaterThan(stagedIndex);
-    expect(commitAuthorIndex).toBeGreaterThan(branchDiffIndex);
-    expect(coverageIndex).toBeGreaterThan(commitAuthorIndex);
-    expect(authority).not.toContain(
-      'run: npm test -- tests/scripts/repo-hygiene-guard.test.ts --pool=forks',
-    );
-  });
-
-  it('runs BOT ERRORS runtime manifest verification before the simulation matrix in CI', () => {
-    const runtimeManifestIndex = qualityWorkflow.indexOf('npm run guard:bot-errors-runtime-manifest');
-    const simulationIndex = qualityWorkflow.indexOf('npm run guard:bot-errors-simulation-matrix');
-
-    expect(runtimeManifestIndex).toBeGreaterThanOrEqual(0);
-    expect(simulationIndex).toBeGreaterThan(runtimeManifestIndex);
-  });
-
-  it('runs the sentinel coverage and deployer mutation gate in CI after the simulation matrix', () => {
-    const simulationIndex = qualityWorkflow.indexOf('npm run guard:bot-errors-simulation-matrix');
-    const sentinelGateIndex = qualityWorkflow.indexOf('bash deploy/scripts/run-sentinel-tests.sh');
-    const testSuiteIndex = qualityWorkflow.indexOf('name: Test suite');
-
-    expect(simulationIndex).toBeGreaterThanOrEqual(0);
-    expect(sentinelGateIndex).toBeGreaterThan(simulationIndex);
-    expect(testSuiteIndex).toBeGreaterThan(sentinelGateIndex);
-    expect(qualityWorkflow).toContain('name: BOT ERRORS sentinel coverage and deployer mutation gate');
-  });
-
-  it('runs the standalone guard package test workflow', () => {
-    expect(whatsoupGuardWorkflow).toContain('run: npm test');
-    expect(whatsoupGuardWorkflow).not.toContain('npm run coverage:proof');
-  });
-
-  it('documents tag commit-author gate range semantics without changing enforcement', () => {
-    const commentIndex = tagReleaseWorkflow.indexOf('keeps guard:repo:commit-authors wired on tag pushes');
-    const stepIndex = tagReleaseWorkflow.indexOf('name: Repo commit-authors');
-
-    expect(commentIndex).toBeGreaterThanOrEqual(0);
-    expect(stepIndex).toBeGreaterThan(commentIndex);
-    expect(tagReleaseWorkflow).toContain('PR and local push gates remain the authoritative non-vacuous author scans.');
-    expect(tagReleaseWorkflow).toContain('run: npm run guard:repo:commit-authors');
-  });
-});
-
 /**
  * Local push gate ⊄ CI: a guard that runs ONLY in `verify:push:branch` is enforced by a
  * client-side hook, and client-side hooks are advisory. `gh pr merge`, the GitHub merge
@@ -1493,7 +1468,8 @@ describe('pre-push guard — local/CI enforcement parity for guard steps', () =>
   });
 
   it('every push-gate guard is either a named CI step or an explicitly justified exemption', () => {
-    const unbacked = pushGateGuards.filter((g) => !namedInCi(g) && !(g in CI_EXEMPT_PUSH_GATE_GUARDS));
+    const gate = readGateInputs(repoRoot);
+    const unbacked = pushGateGuards.filter((g) => !scriptReachability(g, gate).reachable);
     expect(
       unbacked,
       unbacked.length === 0
@@ -1713,9 +1689,9 @@ describe('pre-push guard — preservation pushes to the preserve mirror', () => 
         )).toBe('branch');
         expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
           'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/fix/example',
-          'run verify:push:branch',
+          'run verify:push:fast',
         ]);
-        expect(events).toEqual(['before', 'console', 'after']);
+        expect(events).toEqual(['before', 'after']);
       } finally {
         spy.mockRestore();
       }

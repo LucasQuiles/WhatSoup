@@ -1,7 +1,7 @@
 import React from 'react'
 import { Send, MessageSquareOff, ChevronsUp } from 'lucide-react'
-import { useQueryClient } from '@tanstack/react-query'
 import { useToast } from '../../hooks/toast-context'
+import { useInboxComposer, type InboxComposer } from '../../hooks/use-inbox-composer'
 import { api } from '../../lib/api'
 import { useVirtualMessages } from '../../hooks/use-virtual-messages'
 import { selectVirtualMessageRows } from '../../lib/inbox-virtualization'
@@ -15,14 +15,15 @@ import { ActionButton } from '../primitives/ActionButton'
 import type { Mode, ChatItem, Message } from './types'
 
 /* HistoryMessages — scroll-to-bottom + load older + send input */
-function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
-  messages: Message[]; outgoingBg: string; selectedChat: string; lineName: string;
+function HistoryMessages({ messages, outgoingBg, selectedChat, lineName, composer }: {
+  messages: Message[]; outgoingBg: string; selectedChat: string; lineName: string; composer: InboxComposer;
 }) {
   const toast = useToast()
-  const queryClient = useQueryClient()
   const textareaRef = React.useRef<HTMLTextAreaElement>(null)
-  const [msgText, setMsgText] = React.useState('')
-  const [isSending, setIsSending] = React.useState(false)
+  const msgText = composer.text
+  const isSending = composer.status === 'pending'
+  const unconfirmed = composer.status === 'unconfirmed'
+  const rejected = composer.status === 'rejected'
 
   // Reset textarea height when text is cleared
   React.useEffect(() => {
@@ -32,8 +33,9 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
     }
   }, [msgText])
 
-  // Clear message input when switching conversations
-  React.useEffect(() => { setMsgText('') }, [selectedChat])
+  React.useEffect(() => {
+    if (composer.status === 'editing' || composer.status === 'rejected') textareaRef.current?.focus()
+  }, [lineName, selectedChat, composer.status])
 
   // Cursor pagination state
   const [olderMessages, setOlderMessages] = React.useState<Message[]>([])
@@ -62,53 +64,6 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
       toast.error(`Failed to load older messages: ${e instanceof Error ? e.message : e}`)
     } finally {
       setLoadingOlder(false)
-    }
-  }
-
-  // Track which message PKs were just added optimistically so we can animate them
-  const [animatedPks, setAnimatedPks] = React.useState<Set<number>>(new Set())
-
-  const handleSend = async () => {
-    if (!msgText.trim() || !selectedChat || isSending) return
-    const text = msgText.trim()
-    setIsSending(true)
-    setMsgText('')
-
-    // Optimistic: inject message into cache immediately with a negative pk
-    const optimisticPk = -Date.now()
-    const optimisticMsg: Message = {
-      pk: optimisticPk,
-      conversationKey: selectedChat,
-      senderName: 'You',
-      senderJid: '',
-      content: text,
-      timestamp: new Date().toISOString(),
-      fromMe: true,
-      type: 'text',
-    }
-    const queryKey = ['messages', lineName, selectedChat]
-    queryClient.setQueryData<Message[]>(queryKey, (old) => [optimisticMsg, ...(old ?? [])])
-    setAnimatedPks(prev => new Set(prev).add(optimisticPk))
-
-    try {
-      await api.sendMessage(lineName, selectedChat, text)
-      // Refetch to get the real persisted message (replaces the optimistic one)
-      queryClient.invalidateQueries({ queryKey })
-    } catch (e) {
-      // Remove optimistic message on failure
-      queryClient.setQueryData<Message[]>(queryKey, (old) => (old ?? []).filter(m => m.pk !== optimisticPk))
-      toast.error(`Send failed: ${e instanceof Error ? e.message : e}`)
-    } finally {
-      setIsSending(false)
-      // Drop the optimistic PK from the animation set: the entrance animation has played and
-      // the optimistic bubble is now replaced by server data (or removed on error). Without
-      // this the Set grows by one negative PK per send for the component's lifetime.
-      setAnimatedPks(prev => {
-        if (!prev.has(optimisticPk)) return prev
-        const next = new Set(prev)
-        next.delete(optimisticPk)
-        return next
-      })
     }
   }
 
@@ -182,7 +137,6 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
               <MessageBubble
                 msg={row.message}
                 outgoingBg={outgoingBg}
-                animate={animatedPks.has(row.message.pk)}
               />
             </div>
           ))}
@@ -208,6 +162,18 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
       )}
       </div>
 
+      {isSending || unconfirmed || rejected ? (
+        <div role="status" className="text-text-2 px-[var(--sp-4)] py-[var(--sp-3)]">
+          {isSending ? 'Sending message…' : rejected
+            ? 'Message was not sent. Review it before trying again.'
+            : 'Send not confirmed. Check this conversation before sending again.'}
+          {unconfirmed ? <>
+            <Button variant="ghost" onClick={composer.refresh}>Refresh messages</Button>
+            <Button variant="ghost" onClick={composer.discard}>Discard draft</Button>
+          </> : null}
+        </div>
+      ) : null}
+
       {/* Input bar */}
       <div
         className="flex flex-shrink-0 items-center py-[var(--sp-3)] px-[var(--sp-4)] gap-[var(--sp-3)] c-border-t bg-surface-raised"
@@ -224,21 +190,22 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
           placeholder="Type a reply..."
           aria-label="Type a reply"
           value={msgText}
+          disabled={isSending || unconfirmed}
           onChange={e => {
-            setMsgText(e.target.value)
+            composer.setText(e.target.value)
             const el = e.target
             el.style.height = '0'
             el.style.height = Math.min(el.scrollHeight, 120) + 'px'
             el.style.overflow = el.scrollHeight > 120 ? 'auto' : 'hidden'
           }}
-          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
+          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void composer.send() } }}
         />
         <ActionButton
           label="Send"
           icon={<Send size={16} strokeWidth={1.75} />}
           className="flex-shrink-0"
-          onClick={handleSend}
-          disabled={isSending || !msgText.trim()}
+          onClick={() => void composer.send()}
+          disabled={isSending || unconfirmed || !msgText.trim()}
         />
       </div>
     </>
@@ -248,6 +215,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
 export function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode, lineName, typingJids }: {
   chats: ChatItem[]; messages: Message[]; selectedChat: string | null; onSelectChat: (key: string) => void; mode: Mode; lineName: string; typingJids: Set<string>;
 }) {
+  const composer = useInboxComposer(selectedChat ? { line: lineName, conversationKey: selectedChat } : null)
   const outgoingBg = mode === 'agent' ? 'var(--m-agt-soft)' : 'var(--m-cht-soft)'
   return (
     // soup-history-split: container-query root for the split-fold law
@@ -289,6 +257,7 @@ export function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode, 
             outgoingBg={outgoingBg}
             selectedChat={selectedChat}
             lineName={lineName}
+            composer={composer}
           />
         ) : (
           <div className="flex-1 flex items-center justify-center">

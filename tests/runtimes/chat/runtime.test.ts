@@ -13,6 +13,9 @@
  * handleMessage().
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import { OUTBOUND_GOVERNOR_SHED_LOG } from '../../../src/transport/outbound-governor.ts';
 import {
@@ -23,7 +26,8 @@ import {
 } from '../../../src/transport/contract/errors.ts';
 import { makeChannelId } from '../../../src/core/transport-refs.ts';
 import type { LLMProvider } from '../../../src/runtimes/chat/providers/types.ts';
-import type { Database } from '../../../src/core/database.ts';
+import { Database } from '../../../src/core/database.ts';
+import { DurabilityEngine, drainPendingOutbound } from '../../../src/core/durability.ts';
 import { DatabaseCompatibilityError } from '../../../src/core/database-compatibility.ts';
 import type { PineconeMemory } from '../../../src/runtimes/chat/providers/pinecone.ts';
 import { withDatabaseCompatibility } from '../../../src/runtimes/chat/providers/database-compatibility.ts';
@@ -121,7 +125,7 @@ vi.mock('../../../src/logger.ts', () => {
   (globalThis as any).__logWarn = warn;
   (globalThis as any).__logError = error;
   (globalThis as any).__logInfo = info;
-  const child = { warn, error, info };
+  const child = { warn, error, info, debug: vi.fn() };
   return {
     logger: { child: () => child },
     createChildLogger: () => child,
@@ -270,8 +274,7 @@ function setHappyPathDefaults() {
 // Handler factory
 // ---------------------------------------------------------------------------
 
-function makeHandler() {
-  const db = makeDb();
+function makeHandler(db = makeDb()) {
   const messenger = makeMessenger();
   const pinecone = makePinecone();
   const primary = makePrimaryProvider();
@@ -2161,6 +2164,7 @@ function makeDurability() {
     markDeferred: vi.fn(),
     markInboundSkipped: vi.fn(),
     markInboundFailed: vi.fn(),
+    markTurnDone: vi.fn(),
     completeInbound: vi.fn(),
   } as unknown as import('../../../src/core/durability.ts').DurabilityEngine;
 }
@@ -2179,7 +2183,7 @@ describe('DurabilityEngine integration', () => {
     expect(messenger.sendMessage).toHaveBeenCalledWith(expect.any(String), 'hey whats up');
   });
 
-  it('completeInbound called with inboundSeq on successful send', async () => {
+  it('leaves submitted inbound completion to delivery evidence', async () => {
     const { handler } = makeHandler();
     const durability = makeDurability();
     handler.setDurability(durability);
@@ -2187,7 +2191,8 @@ describe('DurabilityEngine integration', () => {
     const msg = makeIncomingMessage({ inboundSeq: 7 });
     await handleAndDrain(handler, msg);
 
-    expect(vi.mocked(durability.completeInbound)).toHaveBeenCalledWith(7, 'response_sent');
+    expect(vi.mocked(durability.markTurnDone)).toHaveBeenCalledWith(7);
+    expect(vi.mocked(durability.completeInbound)).not.toHaveBeenCalled();
   });
 
   it('does not retry a confirmed reply when durability settlement fails', async () => {
@@ -2217,7 +2222,8 @@ describe('DurabilityEngine integration', () => {
     )).toHaveLength(0);
     expect(vi.mocked(durability.markMaybeSent)).not.toHaveBeenCalled();
     expect(vi.mocked(durability.markInboundFailed)).not.toHaveBeenCalled();
-    expect(vi.mocked(durability.completeInbound)).toHaveBeenCalledWith(7, 'response_sent');
+    expect(vi.mocked(durability.markTurnDone)).toHaveBeenCalledWith(7);
+    expect(vi.mocked(durability.completeInbound)).not.toHaveBeenCalled();
     expect(mockRecordResponse).toHaveBeenCalledOnce();
 
     const settlementErrors = mockLogError().mock.calls.filter(
@@ -2253,7 +2259,8 @@ describe('DurabilityEngine integration', () => {
     expect(vi.mocked(durability.markSubmitted)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(durability.markSubmitted)).toHaveBeenCalledWith(42, 'wamid.after-retry', 2);
     expect(vi.mocked(durability.markMaybeSent)).not.toHaveBeenCalled();
-    expect(vi.mocked(durability.completeInbound)).toHaveBeenCalledWith(8, 'response_sent');
+    expect(vi.mocked(durability.markTurnDone)).toHaveBeenCalledWith(8);
+    expect(vi.mocked(durability.completeInbound)).not.toHaveBeenCalled();
     expect(mockRecordResponse).toHaveBeenCalledOnce();
   });
 
@@ -2717,5 +2724,126 @@ describe("?? 'unknown' fallback in log calls (non-Error thrown values)", () => {
       }),
       undefined,
     );
+  });
+});
+
+
+describe('chat delivery state with real persistence', () => {
+  let directory: string;
+  let db: Database;
+  let engine: DurabilityEngine;
+
+  beforeEach(async () => {
+    const alerts = await vi.importActual<typeof import('../../../src/lib/emit-alert.ts')>('../../../src/lib/emit-alert.ts');
+    mockEmitAlert.mockImplementation(alerts.emitAlertChecked);
+    vi.mocked(clearAlertSourceChecked).mockImplementation(alerts.clearAlertSourceChecked);
+    directory = mkdtempSync(join(tmpdir(), 'chat-delivery-state-'));
+    db = new Database(join(directory, 'test.db'));
+    db.open();
+    engine = new DurabilityEngine(db);
+  });
+  afterEach(() => {
+    db.close();
+    rmSync(directory, { recursive: true, force: true });
+    mockEmitAlert.mockReset();
+    vi.mocked(clearAlertSourceChecked).mockReset();
+  });
+
+  function setup() {
+    const { handler, messenger } = makeHandler(db);
+    handler.setDurability(engine);
+    const msg = makeIncomingMessage();
+    const seq = engine.journalInbound(msg.messageId, msg.chatJid, msg.chatJid, 'chat');
+    return { handler, messenger, seq, msg: { ...msg, inboundSeq: seq } };
+  }
+
+  function reopen() {
+    db.close();
+    db = new Database(join(directory, 'test.db'));
+    db.open();
+    engine = new DurabilityEngine(db);
+  }
+
+  it('preserves deferred delivery ownership across restart without another send', async () => {
+    const { handler, messenger, seq, msg } = setup();
+    messenger.sendMessage.mockRejectedValueOnce(new RateLimitedError({
+      channelId: makeChannelId('signal', 'test'), operation: 'sendText',
+      correlationId: 'deferred-reply', scope: 'conversation', message: 'synthetic',
+      phase: 'not_started', retryAfterMs: 60_000,
+    }));
+
+    await handleAndDrain(handler, msg);
+
+    expect(engine.getInboundStatus(seq)).toBe('turn_done');
+    expect(db.raw.prepare('SELECT status FROM outbound_ops').get()).toEqual({ status: 'pending' });
+    reopen();
+    engine.preConnectRecovery();
+    expect(engine.postConnectRecovery().outboundReplayed).toBe(0);
+    expect(await drainPendingOutbound(messenger, engine)).toEqual({ resent: 0, expired: 0 });
+    expect(engine.getInboundStatus(seq)).toBe('turn_done');
+    expect(engine.getOutboundByStatus('pending')).toEqual([
+      expect.objectContaining({
+        source_inbound_seq: seq,
+        failure_evidence: expect.objectContaining({ retry_owner: 'pending_drainer', retry_decision: 'retry_not_before' }),
+      }),
+    ]);
+    expect(engine.sweepStuckInbound().failedStale).toBe(0);
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('submission stays turn_done until its own echo completes the inbound', async () => {
+    const { handler, messenger, seq, msg } = setup();
+    const observed: string[] = [];
+    const linkedBeforeTurnDone: unknown[] = [];
+    const markTurnDone = engine.markTurnDone.bind(engine);
+    vi.spyOn(engine, 'markTurnDone').mockImplementation((inboundSeq) => {
+      linkedBeforeTurnDone.push(db.raw.prepare('SELECT status, source_inbound_seq, is_terminal FROM outbound_ops').all());
+      markTurnDone(inboundSeq);
+    });
+    messenger.sendMessage.mockImplementationOnce(async () => {
+      observed.push(engine.getInboundStatus(seq)!);
+      return { waMessageId: 'reply-receipt' };
+    });
+
+    await handleAndDrain(handler, msg);
+
+    expect(observed).toEqual(['turn_done']);
+    expect(linkedBeforeTurnDone).toEqual([[{ status: 'sending', source_inbound_seq: seq, is_terminal: 1 }]]);
+    expect(engine.getInboundStatus(seq)).toBe('turn_done');
+    expect(db.raw.prepare('SELECT status, source_inbound_seq, is_terminal FROM outbound_ops').get())
+      .toEqual({ status: 'submitted', source_inbound_seq: seq, is_terminal: 1 });
+    engine.matchEcho('reply-receipt');
+    expect(engine.getInboundStatus(seq)).toBe('complete');
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(1);
+    reopen();
+    engine.preConnectRecovery();
+    expect(engine.getInboundStatus(seq)).toBe('complete');
+  });
+
+  it.each(['missing receipt', 'settlement fault'] as const)('%s cannot become success after reopening', async (cause) => {
+    const { handler, messenger, seq, msg } = setup();
+    const settlement = cause === 'settlement fault'
+      ? vi.spyOn(engine, 'markSubmitted').mockImplementation(() => { throw new Error('injected write fault'); })
+      : undefined;
+    try {
+      await handleAndDrain(handler, msg);
+      expect(engine.getInboundStatus(seq)).toBe('turn_done');
+      expect(db.raw.prepare('SELECT status FROM outbound_ops').get())
+        .toEqual({ status: cause === 'settlement fault' ? 'sending' : 'submitted' });
+      expect(messenger.sendMessage).toHaveBeenCalledTimes(1);
+    } finally {
+      settlement?.mockRestore();
+    }
+    db.raw.prepare("UPDATE outbound_ops SET submitted_at = datetime('now', '-60 seconds')").run();
+    reopen();
+    engine.preConnectRecovery();
+    const recovery = engine.postConnectRecovery();
+    expect(recovery.outboundReplayed).toBe(0);
+    expect(db.raw.prepare('SELECT status FROM outbound_ops').get()).toEqual({ status: 'quarantined' });
+    engine.preConnectRecovery();
+    expect(engine.getInboundStatus(seq)).toBe('failed');
+    expect(db.raw.prepare('SELECT terminal_reason, failure_class FROM inbound_events WHERE seq = ?').get(seq))
+      .toEqual({ terminal_reason: 'error', failure_class: 'transport_send_failed' });
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(1);
   });
 });

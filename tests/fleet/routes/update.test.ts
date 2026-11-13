@@ -33,5 +33,6 @@ describe('handleGetVersion', () => {
     // B1 observability pin: the closure posture rides this endpoint.
     expect(body.consoleAuthMode).toBe('session');
     expect(body.rootTokenInHtml).toBe(false);
+    expect(body.updateMode).toBe('release_deploy');
   });
 });

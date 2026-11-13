@@ -8,9 +8,8 @@
  * "agent" message — the API carries no agent-attribution field. Takeover is
  * local UI state only (no runtime pause endpoint exists); the toggle says so.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router'
-import { useQueryClient } from '@tanstack/react-query'
 import type { Message } from '../../types'
 import type { Conversation } from '../../lib/inbox-unified'
 import {
@@ -22,8 +21,7 @@ import { CHANNEL_LABEL } from '../../lib/transport-identity'
 import { useStickyScroll } from '../../hooks/use-sticky-scroll'
 import { useVirtualMessages } from '../../hooks/use-virtual-messages'
 import { selectVirtualMessageRows, toChronologicalMessages } from '../../lib/inbox-virtualization'
-import { useToast } from '../../hooks/toast-context'
-import { api } from '../../lib/api'
+import type { InboxComposer } from '../../hooks/use-inbox-composer'
 import { Button } from '../primitives/Button'
 import { TextInput } from '../primitives/FormControl'
 import EmptyState from '../EmptyState'
@@ -57,6 +55,7 @@ function MessageRow({ msg, isGroup }: { msg: Message; isGroup: boolean }) {
 
 export function ThreadPane({
   conversation,
+  composer,
   messages,
   hasMore,
   loadingOlder,
@@ -66,6 +65,7 @@ export function ThreadPane({
   onBack,
 }: {
   conversation: Conversation
+  composer: InboxComposer
   messages: Message[]
   hasMore: boolean
   loadingOlder: boolean
@@ -75,17 +75,15 @@ export function ThreadPane({
   onBack: () => void
 }) {
   const navigate = useNavigate()
-  const toast = useToast()
-  const queryClient = useQueryClient()
-  const [msgText, setMsgText] = useState('')
-  const [isSending, setIsSending] = useState(false)
+  const isSending = composer.status === 'pending'
+  const unconfirmed = composer.status === 'unconfirmed'
+  const rejected = composer.status === 'rejected'
   const inputRef = useRef<HTMLInputElement>(null)
 
   const selectionKey = `${conversation.line}\n${conversation.conversationKey}`
   useEffect(() => {
-    setMsgText('')
-    inputRef.current?.focus()
-  }, [selectionKey])
+    if (composer.status === 'editing' || composer.status === 'rejected') inputRef.current?.focus()
+  }, [selectionKey, composer.status])
 
   const renderedMessages = toChronologicalMessages(messages)
   const { scrollRef, showJump, handleScroll, jumpToBottom } = useStickyScroll(
@@ -97,35 +95,6 @@ export function ThreadPane({
     getScrollElement: () => scrollRef.current,
   })
   const virtualMessageRows = selectVirtualMessageRows(renderedMessages, messageVirtualizer.getVirtualItems())
-
-  const handleSend = async () => {
-    const text = msgText.trim()
-    if (!text || isSending) return
-    setIsSending(true)
-    setMsgText('')
-    const optimisticPk = -Date.now()
-    const optimisticMsg: Message = {
-      pk: optimisticPk,
-      conversationKey: conversation.conversationKey,
-      senderName: 'You',
-      senderJid: '',
-      content: text,
-      timestamp: new Date().toISOString(),
-      fromMe: true,
-      type: 'text',
-    }
-    const queryKey = ['messages', conversation.line, conversation.conversationKey]
-    queryClient.setQueryData<Message[]>(queryKey, (old) => [optimisticMsg, ...(old ?? [])])
-    try {
-      await api.sendMessage(conversation.line, conversation.conversationKey, text)
-      queryClient.invalidateQueries({ queryKey })
-    } catch (e) {
-      queryClient.setQueryData<Message[]>(queryKey, (old) => (old ?? []).filter((m) => m.pk !== optimisticPk))
-      toast.error(`Send failed: ${e instanceof Error ? e.message : e}`)
-    } finally {
-      setIsSending(false)
-    }
-  }
 
   return (
     <section className="inbox-thread" aria-label="Conversation thread">
@@ -200,6 +169,17 @@ export function ThreadPane({
             <EmptyState title="No messages loaded" description="Messages will appear here." />
           </div>
         )}
+        {isSending || unconfirmed || rejected ? (
+          <div className="inbox-sys" role="status">
+            {isSending ? 'Sending message…' : rejected
+              ? 'Message was not sent. Review it before trying again.'
+              : 'Send not confirmed. Check this conversation before sending again.'}
+            {unconfirmed ? <>
+              <Button variant="ghost" onClick={composer.refresh}>Refresh messages</Button>
+              <Button variant="ghost" onClick={composer.discard}>Discard draft</Button>
+            </> : null}
+          </div>
+        ) : null}
         {takeover ? (
           <div className="inbox-sys" role="status">
             takeover enabled — local only; no runtime pause endpoint yet
@@ -269,12 +249,13 @@ export function ThreadPane({
         <TextInput
           ref={inputRef}
           className="inbox-input"
-          value={msgText}
-          onChange={(e) => setMsgText(e.target.value)}
+          value={composer.text}
+          disabled={isSending || unconfirmed}
+          onChange={(e) => composer.setText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
               e.preventDefault()
-              void handleSend()
+              void composer.send()
             }
           }}
           placeholder={takeover ? 'Message as yourself (takeover)…' : `Message ${conversation.name}…`}
@@ -283,8 +264,8 @@ export function ThreadPane({
         <Button
           variant="primary"
           className="inbox-send"
-          disabled={isSending || !msgText.trim()}
-          onClick={() => void handleSend()}
+          disabled={isSending || unconfirmed || !composer.text.trim()}
+          onClick={() => void composer.send()}
         >
           {isSending ? 'Sending' : 'Send'}
         </Button>

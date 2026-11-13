@@ -22,7 +22,10 @@ import { makeDeps, mockReq, mockRes } from '../helpers/http-mocks.ts';
 
 vi.mock('../../src/fleet/mcp-client.ts', () => ({ mcpCall: vi.fn() }));
 vi.mock('../../src/fleet/http-proxy.ts', () => ({ proxyToInstance: vi.fn() }));
-vi.mock('node:child_process', () => ({ execFile: vi.fn(), spawn: vi.fn() }));
+vi.mock('node:child_process', async () => {
+  const { childProcessMockWithNativeOwnership } = await import('../helpers/child-process.ts');
+  return childProcessMockWithNativeOwnership();
+});
 
 function fakeInstance(configPath: string, overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
   return {
@@ -434,6 +437,32 @@ describe('handleConfigUpdate PATCH round-trip invariant (#244 #249)', () => {
     const persisted = JSON.parse(fs.readFileSync(cfg, 'utf-8'));
     expect(persisted.agentOptions.sessionScope).toBe('per_chat');
     expect(persisted).toEqual(original);
+  });
+
+  it('rejects an invalid account scope without changing the config bytes', async () => {
+    const dir = path.join(tmpDir, 'whatsoup', 'instances', 'roundtrip-scope');
+    fs.mkdirSync(dir, { recursive: true });
+    const cfg = path.join(dir, 'config.json');
+    const before = JSON.stringify({
+      name: 'roundtrip-scope',
+      type: 'chat',
+      accessMode: 'self_only',
+      adminPhones: ['15551230006'],
+      healthPort: 9095,
+      accountScopeId: 'scope:roundtrip-test',
+    }, null, 2) + '\n';
+    fs.writeFileSync(cfg, before);
+    const inst = fakeInstance(cfg, { name: 'roundtrip-scope' });
+    const res = mockRes();
+
+    await handleConfigUpdate(
+      mockReq({ method: 'PATCH', body: JSON.stringify({ accountScopeId: '/tmp/account' }) }),
+      res, depsFor(inst), { name: 'roundtrip-scope' },
+    );
+
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).message).toContain('accountScopeId');
+    expect(fs.readFileSync(cfg, 'utf-8')).toBe(before);
   });
 
   it('persists a valid BYOK providerConfig + fallbacks patch (positive round-trip)', async () => {

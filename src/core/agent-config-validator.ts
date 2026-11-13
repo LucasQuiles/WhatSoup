@@ -64,6 +64,7 @@ import {
   validateTransportAuthorityConfig,
 } from './transport-authority-config-validation.ts';
 import { validateSignalConfig } from './signal-config-validation.ts';
+import { parseAccountScopeId } from '../lib/account-scope.ts';
 
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
 export const ACCESS_MODES = [
@@ -308,6 +309,10 @@ export function validateInstanceConfig(
       'accessMode',
       `Invalid accessMode "${String(raw['accessMode'])}": must be one of ${[...VALID_ACCESS_MODES].join(', ')}`,
     );
+  }
+
+  if (raw['accountScopeId'] != null && parseAccountScopeId(raw['accountScopeId']) === null) {
+    return err('accountScopeId', 'accountScopeId must be an opaque scope: identifier with 4-59 lowercase letters, digits or hyphens and at least one letter');
   }
 
   // --- healthPort ---

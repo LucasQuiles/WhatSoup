@@ -802,7 +802,8 @@ export class DurabilityEngine {
       // #3754: these three seq-keyed writers and markInboundSkipped leave a
       // scheduled-turn loss row as recovery wrote it: the first terminal wins.
       markTurnDone: prepare(
-        `UPDATE inbound_events SET processing_status = 'turn_done' WHERE seq = ? AND ${NOT_SCHEDULED_TURN_LOSS_ROW_SQL}`,
+        `UPDATE inbound_events SET processing_status = 'turn_done'
+         WHERE seq = ? AND processing_status = 'processing' AND ${NOT_SCHEDULED_TURN_LOSS_ROW_SQL}`,
       ),
       markInboundComplete: prepare(
         `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ? WHERE seq = ?
@@ -1249,17 +1250,20 @@ export class DurabilityEngine {
       getTerminalOutboundForInbound: prepare(
         `SELECT id, status FROM outbound_ops
          WHERE source_inbound_seq = ? AND is_terminal = 1
-           AND status NOT IN ('quarantined', 'failed_permanent')`,
+         ORDER BY CASE
+           WHEN status = 'echoed' THEN 0
+           WHEN status IN ('quarantined', 'failed_permanent') THEN 2
+           ELSE 1
+         END, id DESC
+         LIMIT 1`,
       ),
       // W2 stuck-inbound reconciler buckets. Open set is ('pending','processing',
       // 'turn_done'). 'pending' is the schema DEFAULT but journalInbound (the sole
       // INSERT site) always writes 'processing' explicitly, so no row is ever
       // actually 'pending' — matched defensively, not because it occurs. There is
       // no 'queued' state. An echoed terminal op is the
-      // delivery-confirmed success signal (mirrors getTerminalOutboundForInbound's
-      // exclusion of quarantined/failed_permanent by matching status='echoed'
-      // directly). Each bounded to 200 rows so a large backlog drains over several
-      // sweeps rather than in one long transaction.
+      // delivery-confirmed success signal. Each bucket is bounded to 200 rows
+      // so a large backlog drains over several sweeps.
       getOpenInboundWithEchoedTerminal: prepare(
         `SELECT DISTINCT i.seq AS seq
          FROM inbound_events i
@@ -1283,7 +1287,7 @@ export class DurabilityEngine {
            )
            AND NOT EXISTS (
              SELECT 1 FROM outbound_ops o
-             WHERE o.source_inbound_seq = i.seq AND o.is_terminal = 1 AND o.status = 'echoed'
+             WHERE o.source_inbound_seq = i.seq AND o.is_terminal = 1
            )
          ORDER BY i.seq ASC
          LIMIT 200`,
@@ -1291,7 +1295,12 @@ export class DurabilityEngine {
       getStaleOpenNoSuccess: prepare(
         `SELECT i.seq AS seq, i.message_id AS message_id, i.conversation_key AS conversation_key
          FROM inbound_events i
-         WHERE i.processing_status IN ('pending', 'processing')
+         WHERE (
+             i.processing_status IN ('pending', 'processing')
+             OR (i.processing_status = 'turn_done' AND EXISTS (
+               SELECT 1 FROM outbound_ops o WHERE o.source_inbound_seq = i.seq AND o.is_terminal = 1
+             ))
+           )
            AND i.received_at < datetime('now', '-24 hours')
            AND NOT EXISTS (
              SELECT 1 FROM turn_terminal_records t WHERE t.inbound_seq_key = i.seq
@@ -2931,7 +2940,7 @@ export class DurabilityEngine {
         const terminalOp = this.statements.getTerminalOutboundForInbound.get(ev.seq) as
           { id: number; status: OutboundStatus } | undefined;
 
-        if (!terminalOp) {
+        if (!terminalOp || terminalOp.status === 'quarantined' || terminalOp.status === 'failed_permanent') {
           this.recoveryEvidence.recordPending(
             ev.seq,
             recovery,
@@ -2982,6 +2991,17 @@ export class DurabilityEngine {
             log.info(
               { inboundSeq: ev.seq, terminalOpId: terminalOp.id },
               'preConnectRecovery: stranded turn_done inbound with echoed terminal op finalized (QR-102)',
+            );
+          } else if (terminalOp.status === 'quarantined' || terminalOp.status === 'failed_permanent') {
+            this.recoveryEvidence.recordPending(
+              ev.seq,
+              recovery,
+              'terminal_reply_unconfirmed',
+              () => this.markInboundFailed(ev.seq, 'transport_send_failed'),
+            );
+            log.warn(
+              { inboundSeq: ev.seq, terminalOpId: terminalOp.id, outboundStatus: terminalOp.status },
+              'preConnectRecovery: reply delivery unresolved after terminal send failure',
             );
           }
           continue;

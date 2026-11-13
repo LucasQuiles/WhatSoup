@@ -1662,7 +1662,7 @@ describe('platform service managers', () => {
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
   });
 
-  it('still resolves docker stop when the forced kill reports an exited process', async () => {
+  it('rejects docker stop when forced kill fails without confirmed exit', async () => {
     vi.useFakeTimers();
     const child = new MockChild();
     child.kill.mockImplementation((signal) => {
@@ -1678,11 +1678,14 @@ describe('platform service managers', () => {
     await start;
 
     const stop = manager.stop('bot-a');
+    const outcomes = Promise.allSettled([stop]);
     await vi.advanceTimersByTimeAsync(15_000);
-    await stop;
+    expect(await outcomes).toEqual([{ status: 'rejected', reason: new Error('already exited') }]);
 
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
     expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+    await manager.start('bot-a');
+    expect(childProcessMocks.spawn).toHaveBeenCalledTimes(1);
   });
 
   it('kills docker instances after the graceful stop timeout and restarts with a new child', async () => {
@@ -1703,9 +1706,9 @@ describe('platform service managers', () => {
     const stop = manager.stop('bot-a');
     expect(children[0].kill).toHaveBeenCalledWith('SIGTERM');
     await vi.advanceTimersByTimeAsync(15_000);
-    await stop;
     expect(children[0].kill).toHaveBeenCalledWith('SIGKILL');
     children[0].emit('exit');
+    await stop;
 
     const restart = manager.restart('bot-a');
     await Promise.resolve();
@@ -1713,5 +1716,155 @@ describe('platform service managers', () => {
     children[1].emit('spawn');
     await restart;
     expect(childProcessMocks.spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares pending docker starts and permits retry after spawn failure', async () => {
+    const children: MockChild[] = [];
+    childProcessMocks.spawn.mockImplementation(() => {
+      const child = new MockChild();
+      children.push(child);
+      return child;
+    });
+    const { DockerSupervisorServiceManager } = await importPlatform();
+    const manager = new DockerSupervisorServiceManager();
+    const first = manager.start('bot-a');
+    const second = manager.start('bot-a');
+    let secondSettled = false;
+    void second.then(() => { secondSettled = true; }, () => { secondSettled = true; });
+    await Promise.resolve();
+    expect(secondSettled).toBe(false);
+    const outcomes = Promise.allSettled([first, second]);
+    children[0].emit('error', new Error('spawn denied'));
+    expect((await outcomes).map((result) => result.status)).toEqual(['rejected', 'rejected']);
+    const retry = manager.start('bot-a');
+    expect(children).toHaveLength(2);
+    children[1].emit('spawn');
+    await retry;
+  });
+
+  it('observes an exit emitted while sending docker SIGTERM', async () => {
+    vi.useFakeTimers();
+    const child = new MockChild();
+    child.kill.mockImplementation(() => { child.emit('exit'); return true; });
+    childProcessMocks.spawn.mockReturnValue(child);
+    const { DockerSupervisorServiceManager } = await importPlatform();
+    const manager = new DockerSupervisorServiceManager();
+    const start = manager.start('bot-a');
+    child.emit('spawn');
+    await start;
+    let stopped = false;
+    const stop = manager.stop('bot-a').then(() => { stopped = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(stopped).toBe(true);
+    await stop;
+    expect(vi.getTimerCount()).toBe(0);
+    expect(child.kill.mock.calls).toEqual([['SIGTERM']]);
+  });
+
+  it('waits for pending startup before stopping the docker child', async () => {
+    const child = new MockChild();
+    childProcessMocks.spawn.mockReturnValue(child);
+    const { DockerSupervisorServiceManager } = await importPlatform();
+    const manager = new DockerSupervisorServiceManager();
+    const start = manager.start('bot-a');
+    const stop = manager.stop('bot-a');
+    expect(child.kill).not.toHaveBeenCalled();
+    child.emit('spawn');
+    await start;
+    expect(child.kill.mock.calls).toEqual([['SIGTERM']]);
+    child.emit('exit');
+    await stop;
+    expect(childProcessMocks.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects both pending start and stop on spawn failure without signalling a child', async () => {
+    const children: MockChild[] = [];
+    childProcessMocks.spawn.mockImplementation(() => {
+      const child = new MockChild();
+      children.push(child);
+      return child;
+    });
+    const { DockerSupervisorServiceManager } = await importPlatform();
+    const manager = new DockerSupervisorServiceManager();
+    const outcomes = Promise.allSettled([manager.start('bot-a'), manager.stop('bot-a')]);
+    children[0].emit('error', new Error('spawn denied'));
+    expect((await outcomes).map((result) => result.status)).toEqual(['rejected', 'rejected']);
+    expect(children[0].kill).not.toHaveBeenCalled();
+    const retry = manager.start('bot-a');
+    children[1].emit('spawn');
+    await retry;
+    // A late event from the failed generation cannot evict its replacement.
+    children[0].emit('exit');
+    await manager.start('bot-a');
+    expect(children).toHaveLength(2);
+  });
+
+  it('retains a running docker child after a signal error and permits confirmed recovery', async () => {
+    const child = new MockChild();
+    childProcessMocks.spawn.mockReturnValue(child);
+    const { DockerSupervisorServiceManager } = await importPlatform();
+    const manager = new DockerSupervisorServiceManager();
+    const start = manager.start('bot-a');
+    child.emit('spawn');
+    await start;
+    const stop = manager.stop('bot-a');
+    const outcomes = Promise.allSettled([stop]);
+    child.emit('error', new Error('signal denied'));
+    expect(await outcomes).toEqual([{ status: 'rejected', reason: new Error('signal denied') }]);
+    await manager.start('bot-a');
+    expect(childProcessMocks.spawn).toHaveBeenCalledTimes(1);
+    const recovery = manager.stop('bot-a');
+    child.emit('exit');
+    await recovery;
+    expect(child.kill.mock.calls).toEqual([['SIGTERM'], ['SIGTERM']]);
+  });
+
+  it('waits for confirmed docker exit before a concurrent start and shares stop requests', async () => {
+    vi.useFakeTimers();
+    const children: MockChild[] = [];
+    childProcessMocks.spawn.mockImplementation(() => {
+      const child = new MockChild();
+      children.push(child);
+      return child;
+    });
+    const { DockerSupervisorServiceManager } = await importPlatform();
+    const manager = new DockerSupervisorServiceManager();
+    const initial = manager.start('bot-a');
+    children[0].emit('spawn');
+    await initial;
+    const stopped = Promise.all([manager.stop('bot-a'), manager.stop('bot-a')]);
+    let started = false;
+    const next = manager.start('bot-a').then(() => { started = true; });
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(started).toBe(false);
+    expect(children).toHaveLength(1);
+    expect(children[0].kill.mock.calls).toEqual([['SIGTERM'], ['SIGKILL']]);
+    children[0].emit('exit');
+    await stopped;
+    expect(children).toHaveLength(2);
+    children[1].emit('spawn');
+    await next;
+  });
+
+  it('rejects unconfirmed docker termination and retains the child for reconciliation', async () => {
+    vi.useFakeTimers();
+    const child = new MockChild();
+    childProcessMocks.spawn.mockReturnValue(child);
+    const { DockerSupervisorServiceManager } = await importPlatform();
+    const manager = new DockerSupervisorServiceManager();
+    const initial = manager.start('bot-a');
+    child.emit('spawn');
+    await initial;
+    const stop = manager.stop('bot-a');
+    const restart = manager.restart('bot-a');
+    const outcomes = Promise.allSettled([stop, restart]);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(await outcomes).toEqual(Array.from({ length: 2 }, () => ({ status: 'rejected', reason: expect.objectContaining({ message: expect.stringMatching(/exit.*unconfirmed/i) }) })));
+    await manager.start('bot-a');
+    expect(childProcessMocks.spawn).toHaveBeenCalledTimes(1);
+    const reconciled = manager.stop('bot-a');
+    child.emit('exit');
+    await reconciled;
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

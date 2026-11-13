@@ -21,8 +21,10 @@
   "required_status_checks": {
     "contexts": [
       "CodeQL",
+      "pr metadata",
       "quality (24.x)",
-      "quality (25.x)"
+      "quality (25.x)",
+      "test-integrity (private)"
     ],
     "strict": true
   }
