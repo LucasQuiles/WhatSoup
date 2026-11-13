@@ -12,6 +12,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { REMOVE_RETRY, resolveWorkerTempRoot } from './vitest-run-root.ts';
 
 const LIVE_ROUTING_ENV_KEYS = [
   'BOT_ERRORS_ALLOW_LIVE_IN_TESTS',
@@ -35,7 +36,10 @@ for (const key of LIVE_ROUTING_ENV_KEYS) {
 
 const workerId = safeSegment(process.env['VITEST_POOL_ID'] ?? process.env['VITEST_WORKER_ID'] ?? 'main');
 
-const tempRoot = realpathSync('/tmp');
+// Under the run's root (vitest-run-root.ts, a globalSetup that removes it once
+// the run ends) when one is exported, else /tmp. Either way it is the
+// containment root the cleanup below checks.
+const tempRoot = resolveWorkerTempRoot();
 const isolatedHome = mkdtempSync(join(tempRoot, 'ws-vh-'));
 const ownershipToken = randomUUID();
 const ownershipMarker = join(isolatedHome, '.whatsoup-vitest-home');
@@ -62,7 +66,7 @@ function removeIsolatedHome(): void {
   if (readFileSync(ownershipMarker, 'utf8') !== ownershipToken) {
     throw new Error('refusing to remove Vitest HOME without its ownership marker');
   }
-  rmSync(isolatedHome, { recursive: true, force: true });
+  rmSync(isolatedHome, { recursive: true, force: true, ...REMOVE_RETRY });
   isolatedHomeRemoved = true;
 }
 
@@ -71,7 +75,9 @@ afterAll(() => {
 });
 
 // afterAll only runs after a completed test-file run; collection-only passes
-// (`vitest list`) and bailed/crashed workers exit without it and leak the dir.
+// (`vitest list`) and bailed/crashed workers exit without it. This fallback
+// covers a worker that exits on its own, but Vitest ends a finished worker with
+// SIGTERM, which emits no `exit`: the run root's teardown removes those dirs.
 process.once('exit', () => {
   try {
     removeIsolatedHome();

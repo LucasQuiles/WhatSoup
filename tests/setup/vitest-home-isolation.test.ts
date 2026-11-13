@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { accessSync, constants, existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, isAbsolute, join, relative } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, relative } from 'node:path';
 
 describe('Vitest filesystem isolation', () => {
   it('routes HOME and XDG roots into a worker-owned temporary directory', () => {
@@ -24,6 +24,21 @@ describe('Vitest filesystem isolation', () => {
     expect(process.env['XDG_CACHE_HOME']).toBe(join(isolatedHome!, '.cache'));
     expect(process.env['CLAUDE_CONFIG_DIR']).toBeUndefined();
     expect(existsSync(join(isolatedHome!, '.whatsoup-vitest-home'))).toBe(true);
+  });
+
+  // The real config's globalSetup exports the run root before the workers fork;
+  // the worker HOME and its containment root both sit in it, so the run's
+  // teardown removes the HOME even when this worker dies by signal.
+  it('nests the worker HOME under the run root that the globalSetup exported', () => {
+    const runRoot = process.env['WHATSOUP_VITEST_RUN_ROOT'];
+    const isolatedHome = process.env['WHATSOUP_VITEST_HOME']!;
+
+    expect(runRoot).toBeTruthy();
+    expect(basename(runRoot!)).toMatch(/^ws-vr-/);
+    expect(existsSync(join(runRoot!, '.whatsoup-vitest-run-root'))).toBe(true);
+    expect(process.env['WHATSOUP_VITEST_TEMP_ROOT']).toBe(runRoot);
+    expect(dirname(isolatedHome)).toBe(runRoot);
+    expect(basename(isolatedHome)).toMatch(/^ws-vh-/);
   });
 
   // The credential-isolation regression loads the setup file through its own
