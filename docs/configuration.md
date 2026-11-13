@@ -2543,8 +2543,20 @@ writes therefore fail closed in that mode.
   rejects the whole binding, so the bridge environment is not projected either.
 Startup logs `missing` with the setting's name (never its value) when a configured
 bridge is not admitted or has no assignment. `check-instance-config` prints a
-`WARN [m365-upgrade]` line, without failing, for bindings that lose writes. Set both
-before deploying to an instance whose bot must keep writing.
+`WARN [m365-upgrade]` line, without failing, for bindings that lose writes.
+
+**Deploy order.** The previous release refuses a binding that carries
+`workflowAuthority` (an unknown key), so it cannot start on a configuration written for
+this release. For an instance whose bot must keep writing:
+1. Before deploying, set `MS365_DURABLE_MAIL_STATE_DIR` and switch the binding to
+   `accountId`; the previous release accepts both.
+2. Deploy and activate this release without `workflowAuthority`, so an automatic
+   rollback during activation can still start the previous release.
+3. Then add `workflowAuthority` and restart the instance. Microsoft 365 writes stay
+   denied from the deploy until this restart.
+
+To roll back afterwards, remove `workflowAuthority` before starting the previous release
+(see [Rollback](runbooks/release-deployment.md#rollback)).
 
 **One guarded plugin build.** Install the guarded plugin through `agentOptions.pluginDirs`;
 admission reads that copy. It must have the canonical shape: a manifest whose `mcpServers`
@@ -2579,8 +2591,8 @@ ACL grants at all. Both limits are listed with the accepted residuals.
 Config-root isolation (`WHATSOUP_AGENT_CONFIG_ROOT_ISOLATION=1`) gives a sandboxed child
 another install record than the one checked here, so it withdraws the assignment.
 
-A missing or unreadable record, a missing install or any difference withdraws the
-assignment. The log names the reason, never a path. Admission records the admitted
+No guarded plugin admitted under `pluginDirs`, a missing or unreadable record, a missing
+install or any difference withdraws the assignment. The log names the reason, never a path. Admission records the admitted
 copy: its configured path and real path, its manifest and entry digests, the real path of
 its entry, its server and hook shape. Every re-check compares exactly these surfaces:
 - the `pluginDirs` copy: its configured path and its entry symlink still resolve to the
