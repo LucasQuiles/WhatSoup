@@ -618,7 +618,8 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
   and a recurring fault can leave a window between detections. Each therefore
   stays reported, with the same reason and cause, until a hold has passed
   since the condition was last detected. It then clears with no turn
-  (`src/core/health-reason-hold.ts`). The producer records when the condition
+  (`src/core/health-reason-hold.ts`), so chat and passive instances, which
+  have no provider receipts, recover the same way. The producer records when the condition
   last held as it computes it, so detection does not depend on when or how
   often `/health` is read. Health also counts the evaluations at which it sees
   the condition, or an unreadable input, itself. Each hold, and when the
@@ -3289,7 +3290,17 @@ The default `autoCompactInputTokens` threshold is 150,000 tokens. This triggers 
 
 After a successful auto-compact, the runtime applies a 5-minute success cooldown. If the same scope becomes eligible again inside that rapid re-arm window, the runtime treats the compact as operationally ineffective and escalates the cooldown: 15 minutes, then 30 minutes, then 60 minutes capped. This bounds the slow-response spiral where a high-volume chat repeatedly spends turns compacting instead of replying.
 
-The trigger compares `autoCompactInputTokens` with the session's known context: the size of the last distinct API request, not the sum of a turn's requests. When the context is unknown (see `autoCompactInputTokens` in docs/configuration.md), it falls back to the cumulative input since the last compact; the `auto compact triggered` log shows which in `crossed` (`context` or `cumulative_fallback`).
+The trigger compares `autoCompactInputTokens` with the session's known context: the size of the last distinct main-loop API request, not the sum of a turn's requests. A subagent's requests measure the subagent's own context and never replace the session's value. `/status` shows the known context, or `unknown` with the cumulative fallback figure. When the context is unknown (see `autoCompactInputTokens` in docs/configuration.md), it falls back to the cumulative input since the last compact; the `auto compact triggered` log shows which in `crossed` (`context` or `cumulative_fallback`).
+
+When a scheduled-agent-job scope reaches the compaction convergence limit, its
+hard reset remains part of the completed turn's finalization barrier. Later
+scheduled occurrences wait until the reset settles; an overlapping reset request
+joins the same operation. Shutdown joins that terminal owner and rejects queued
+occurrences without dispatching them. A reset that fails before or during
+teardown of the old session retains its convergence evidence and recovery
+state. Once teardown succeeds, that bookkeeping is cleared before the
+replacement session starts, so a failed replacement spawn reports a failed
+reset without it. Neither case establishes that the scope recovered.
 
 The next real user turn after a successful compact is measured separately. If that turn's known context exceeds `autoCompactInputTokens`, `runtime.agent.autoCompactNextTurnOverThreshold` increments. An unknown context records nothing. If it happens inside the rapid re-arm window, it also counts as the rapid re-arm for that compact cycle. If it happens later, it remains telemetry only; delayed eligibility is not the spiral condition.
 

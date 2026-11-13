@@ -523,4 +523,115 @@ export function registerAttemptCases(): void {
     });
   }, 10_000);
 
+  it('detects and reaps a live descendant after its leader exits', async () => {
+    const api = boundaryRun as unknown as {
+      runBoundaryWatchdogForTest?: (
+        argv: string[],
+        options: { deadlineMs: number; killGraceMs: number; expectedExit: string },
+      ) => Promise<{ result: ReturnType<typeof validateBoundaryRun>; rawExit: number | null; groupDead: boolean }>;
+    };
+    expect(typeof api.runBoundaryWatchdogForTest).toBe('function');
+    if (!api.runBoundaryWatchdogForTest) return;
+
+    const orphanProgram = 'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,2000);';
+    const parentProgram = [
+      'const { spawn } = require("node:child_process");',
+      `const child = spawn(process.execPath, ["-e", ${JSON.stringify(orphanProgram)}], { stdio: "ignore" });`,
+      'child.unref();',
+    ].join('');
+    const outcome = await api.runBoundaryWatchdogForTest([
+      process.execPath,
+      '-e',
+      parentProgram,
+    ], { deadlineMs: 250, killGraceMs: 100, expectedExit: '0' });
+
+    expect(outcome.rawExit).toBe(0);
+    expect(outcome.result.ok).toBe(false);
+    expect(outcome.result.issues.map((entry) => entry.code)).toContain('watchdog-group-survivor');
+    expect(outcome.groupDead).toBe(true);
+  }, 10_000);
+
+  it('records an unobservable EPERM group teardown as not reaped', async () => {
+    const api = boundaryRun as unknown as {
+      runBoundaryWatchdogForTest?: (
+        argv: string[],
+        options: {
+          deadlineMs: number;
+          killGraceMs: number;
+          expectedExit: string;
+          kill?: (pid: number, signal: NodeJS.Signals | number) => void;
+          probeGroup?: (pgid: number) => 'live' | 'no-live-members' | 'unknown';
+        },
+      ) => Promise<{ result: ReturnType<typeof validateBoundaryRun>; groupDead: boolean }>;
+    };
+    expect(typeof api.runBoundaryWatchdogForTest).toBe('function');
+    if (!api.runBoundaryWatchdogForTest) return;
+
+    const eperm = (): never => {
+      const error = new Error('operation not permitted') as NodeJS.ErrnoException;
+      error.code = 'EPERM';
+      throw error;
+    };
+    const outcome = await api.runBoundaryWatchdogForTest([
+      process.execPath,
+      '-e',
+      'process.exit(0)',
+    ], {
+      deadlineMs: 250,
+      killGraceMs: 100,
+      expectedExit: '0',
+      kill: eperm,
+      probeGroup: () => 'unknown',
+    });
+
+    expect(outcome.result.ok).toBe(false);
+    expect(outcome.result.issues.map((entry) => entry.code)).toContain('watchdog-group-signal-failed');
+    expect(outcome.result.issues.map((entry) => entry.code)).toContain('watchdog-group-unknown');
+    expect(outcome.groupDead).toBe(false);
+  }, 10_000);
+
+  // Supplementary regression, deliberately unmarked: BCF00 markers must match the
+  // closed contract roster in contracts.ts exactly.
+  it('reports a survivor that teardown finds after an unknown first probe', async () => {
+    const api = boundaryRun as unknown as {
+      runBoundaryWatchdogForTest?: (
+        argv: string[],
+        options: {
+          deadlineMs: number;
+          killGraceMs: number;
+          expectedExit: string;
+          kill?: (pid: number, signal: NodeJS.Signals | number) => void;
+          probeGroup?: (pgid: number) => 'live' | 'no-live-members' | 'unknown';
+        },
+      ) => Promise<{ result: ReturnType<typeof validateBoundaryRun>; rawExit: number | null; groupDead: boolean }>;
+    };
+    expect(typeof api.runBoundaryWatchdogForTest).toBe('function');
+    if (!api.runBoundaryWatchdogForTest) return;
+
+    // The first probe after a clean leader exit is inconclusive, so only
+    // teardown sees the live member. Teardown reaps it; the run must still fail.
+    const probes = ['unknown', 'live'] as const;
+    let probeCalls = 0;
+    const probeGroup = (): 'live' | 'no-live-members' | 'unknown' => probes[probeCalls++] ?? 'no-live-members';
+    const signals: Array<NodeJS.Signals | number> = [];
+    const outcome = await api.runBoundaryWatchdogForTest([
+      process.execPath,
+      '-e',
+      'process.exit(0)',
+    ], {
+      deadlineMs: 250,
+      killGraceMs: 100,
+      expectedExit: '0',
+      kill: (_pid, signal) => { signals.push(signal); },
+      probeGroup,
+    });
+
+    expect(probeCalls).toBeGreaterThanOrEqual(3);
+    expect(signals).toEqual(['SIGTERM']);
+    expect(outcome.rawExit).toBe(0);
+    expect(outcome.result.ok).toBe(false);
+    expect(outcome.result.issues.map((entry) => entry.code)).toContain('watchdog-group-survivor');
+    expect(outcome.groupDead).toBe(true);
+  }, 10_000);
+
 }

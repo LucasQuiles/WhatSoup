@@ -86,7 +86,7 @@ export class ControlQueue implements IOutboundQueue {
   }
 
   /** No-op — control sessions have no typing indicator to clear at turn end. */
-  endTurn(_options?: { resultTextPending?: boolean }): void {
+  endTurn(_options?: { resultTextPending?: boolean; recoverDeferredText?: boolean }): void {
     // intentional no-op
   }
 

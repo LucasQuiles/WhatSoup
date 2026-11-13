@@ -4497,9 +4497,8 @@ describe('AgentRuntime', () => {
   // limits'. Model follows the same honesty rule as /model status
   // ('(configured)' label; the served weight is unobservable). Token counts
   // come from the agent_sessions denorm columns; the context budget pairs the
-  // since-last-compact quantity maybeStartAutoCompact actually compares with
-  // the threshold the runtime actually applies (configured, else the 150k
-  // default).
+  // known context gauge (or the labelled cumulative fallback while it is unknown)
+  // with the threshold the runtime applies (configured, else the 150k default).
 
   it('B26: /status renders the configured model, token counts, and the auto-compact context budget', async () => {
     const cfg = mockConfig as unknown as Record<string, unknown>;
@@ -4524,14 +4523,14 @@ describe('AgentRuntime', () => {
       expect(text).toContain('Model: claude-opus-4-8 (configured)');
       expect(text).toContain('Tokens: 96.2k in / 4.1k out');
       // Unconfigured threshold → the default the runtime actually applies (150k).
-      expect(text).toContain('Context: 96.2k / 150k before auto-compact');
+      expect(text).toContain('Context: unknown (cumulative fallback 96.2k) / 150k before auto-compact');
     } finally {
       delete cfg.agentProvider;
       mockGetSessionTokenSnapshot.mockReturnValue(null);
     }
   });
 
-  it('B26: /status context budget uses the configured threshold and the since-last-compact quantity', async () => {
+  it('B26: /status context budget uses the latest observed request and configured threshold', async () => {
     const cfg = mockConfig as unknown as Record<string, unknown>;
     cfg.agentProvider = 'claude-cli';
     try {
@@ -4549,11 +4548,13 @@ describe('AgentRuntime', () => {
       });
       const runtime = new AgentRuntime(db, messenger, 'test', { model: 'claude-opus-4-8', autoCompactInputTokens: 200_000 });
       await runtime.start();
+      await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hello' }));
+      await emitRequestUsage(80_000);
+      await emitAgentResult(2_000_000);
+      mockQueue.enqueueText.mockClear();
       await runtime.handleMessage(makeMsg({ content: '/status' }));
       const text = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string)[0];
-      // (150k + 50k) − (40k + 10k) = 150k consumed since last compact — the
-      // exact quantity the auto-compact trigger compares (runtime.ts:1273-76).
-      expect(text).toContain('Context: 150k / 200k before auto-compact');
+      expect(text).toContain('Context: 80k / 200k before auto-compact');
       expect(text).toContain('Tokens: 150k in / 500 out');
     } finally {
       delete cfg.agentProvider;

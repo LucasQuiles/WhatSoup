@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import {
   accessSync,
   closeSync,
@@ -136,6 +136,7 @@ import {
 } from './shared.ts';
 
 import { parseBoundaryExpectedExit } from './attempts.ts';
+import { probeGroupMembership, type GroupMembership } from '../../../full-suite-battery.ts';
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -151,51 +152,79 @@ async function waitForPromiseOrTimeout(promise: Promise<void>, milliseconds: num
   });
 }
 
-function processGroupAlive(pid: number): boolean {
+type ProcessGroupState = 'alive' | 'reaped' | 'unknown';
+type ProcessGroupSignal = (pid: number, signal: NodeJS.Signals | number) => void;
+type ProcessGroupProbe = (pgid: number) => GroupMembership;
+
+function processGroupState(pgid: number, probeGroup: ProcessGroupProbe): ProcessGroupState {
   try {
-    // #2979: targeted process-group check without scanning ALL processes.
-    // 1. Get the PGID of the target PID (portable: ps -p on macOS/Linux).
-    const pgidOut = execFileSync('ps', ['-p', String(pid), '-o', 'pgid='], {
-      encoding: 'utf8',
-      env: cleanGitEnv(),
-      timeout: 30_000,
-    }).toString().trim();
-    // ps output: one header line + one data line. Take the last line.
-    const lines = pgidOut.split('\n');
-    const pgid = parseInt(lines[lines.length - 1]?.trim() ?? '', 10);
-    if (isNaN(pgid) || pgid <= 0) return false;
-    // 2. Check if the process group leader (PID == PGID) is alive.
-    //    The leader being alive implies the group is alive. If the leader
-    //    died, children are re-parented to init but the PGID persists;
-    //    however boundary-run kills the group from the leader, so checking
-    //    the leader covers the common case.
-    execFileSync('ps', ['-p', String(pgid), '-o', 'pid='], {
-      encoding: 'utf8',
-      env: cleanGitEnv(),
-      timeout: 30_000,
-    });
-    return true;
+    const membership = probeGroup(pgid);
+    if (membership === 'live') return 'alive';
+    if (membership === 'no-live-members') return 'reaped';
+    return 'unknown';
   } catch {
-    return false;
+    return 'unknown';
   }
 }
 
-function signalProcessGroup(pid: number, signal: NodeJS.Signals): void {
+function signalProcessGroup(
+  pgid: number,
+  signal: NodeJS.Signals,
+  killGroup: ProcessGroupSignal,
+): string | null {
   try {
-    process.kill(-pid, signal);
+    killGroup(-pgid, signal);
+    return null;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') return null;
+    return `${signal} failed: ${code ?? (error instanceof Error ? error.message : String(error))}`;
   }
 }
 
-async function waitForProcessGroupExit(pid: number, milliseconds: number): Promise<boolean> {
+async function waitForProcessGroupExit(
+  pgid: number,
+  milliseconds: number,
+  probeGroup: ProcessGroupProbe,
+): Promise<ProcessGroupState> {
   const deadline = Date.now() + milliseconds;
-  while (processGroupAlive(pid)) {
+  let state = processGroupState(pgid, probeGroup);
+  while (state === 'alive') {
     const remaining = deadline - Date.now();
-    if (remaining <= 0) return false;
+    if (remaining <= 0) return state;
     await delay(Math.min(remaining, 10));
+    state = processGroupState(pgid, probeGroup);
   }
-  return true;
+  return state;
+}
+
+async function reapProcessGroup(
+  pgid: number,
+  killGraceMs: number,
+  killGroup: ProcessGroupSignal,
+  probeGroup: ProcessGroupProbe,
+): Promise<{ state: ProcessGroupState; signalFailures: string[]; observedLive: boolean }> {
+  // A survivor that teardown kills still ends `reaped`, so record every live
+  // sighting; the caller must report it even when the pre-teardown probe was inconclusive.
+  let observedLive = false;
+  const observingProbe: ProcessGroupProbe = (group) => {
+    const membership = probeGroup(group);
+    if (membership === 'live') observedLive = true;
+    return membership;
+  };
+  let state = processGroupState(pgid, observingProbe);
+  const signalFailures: string[] = [];
+  if (state === 'reaped') return { state, signalFailures, observedLive };
+
+  const termFailure = signalProcessGroup(pgid, 'SIGTERM', killGroup);
+  if (termFailure !== null) signalFailures.push(termFailure);
+  state = await waitForProcessGroupExit(pgid, killGraceMs, observingProbe);
+  if (state === 'reaped') return { state, signalFailures, observedLive };
+
+  const killFailure = signalProcessGroup(pgid, 'SIGKILL', killGroup);
+  if (killFailure !== null) signalFailures.push(killFailure);
+  state = await waitForProcessGroupExit(pgid, 500, observingProbe);
+  return { state, signalFailures, observedLive };
 }
 
 interface BoundaryWatchdogCoreOptions {
@@ -207,6 +236,8 @@ interface BoundaryWatchdogCoreOptions {
   stdinFd?: number | 'ignore';
   stdoutFd?: number | 'ignore';
   stderrFd?: number | 'ignore';
+  killGroup?: ProcessGroupSignal;
+  probeGroup?: ProcessGroupProbe;
 }
 
 export interface BoundaryWatchdogOutcome {
@@ -258,23 +289,27 @@ async function executeBoundaryWatchdog(
   });
   const completedBeforeDeadline = await waitForPromiseOrTimeout(closed, options.deadlineMs);
   const timedOut = !completedBeforeDeadline;
+  const killGroup = options.killGroup ?? process.kill;
+  const probeGroup = options.probeGroup ?? probeGroupMembership;
+  const initialGroupState = processGroupState(pid, probeGroup);
+  let finalGroupState = initialGroupState;
+  const signalFailures: string[] = [];
   if (timedOut) {
-    signalProcessGroup(pid, 'SIGTERM');
-    if (!await waitForProcessGroupExit(pid, options.killGraceMs)) {
-      signalProcessGroup(pid, 'SIGKILL');
-      await waitForProcessGroupExit(pid, 500);
-    }
+    const teardown = await reapProcessGroup(pid, options.killGraceMs, killGroup, probeGroup);
+    finalGroupState = teardown.state;
+    signalFailures.push(...teardown.signalFailures);
     await waitForPromiseOrTimeout(closed, 100);
   }
-  const survivedNaturalExit = !timedOut && processGroupAlive(pid);
-  if (survivedNaturalExit) {
-    signalProcessGroup(pid, 'SIGTERM');
-    if (!await waitForProcessGroupExit(pid, options.killGraceMs)) {
-      signalProcessGroup(pid, 'SIGKILL');
-      await waitForProcessGroupExit(pid, 500);
-    }
+  let teardownObservedLive = false;
+  if (!timedOut && initialGroupState !== 'reaped') {
+    const teardown = await reapProcessGroup(pid, options.killGraceMs, killGroup, probeGroup);
+    finalGroupState = teardown.state;
+    signalFailures.push(...teardown.signalFailures);
+    teardownObservedLive = teardown.observedLive;
   }
-  const groupDead = !processGroupAlive(pid);
+  const survivedNaturalExit = !timedOut && (initialGroupState === 'alive' || teardownObservedLive);
+  if (!timedOut && initialGroupState === 'reaped') finalGroupState = initialGroupState;
+  const groupDead = finalGroupState === 'reaped';
   const issues: BoundaryValidationIssue[] = [];
   if (spawnError !== null) issues.push(issue('watchdog-spawn-failed', spawnError));
   if (timedOut) issues.push(issue('watchdog-timeout', 'child exceeded the helper-owned monotonic deadline'));
@@ -286,7 +321,13 @@ async function executeBoundaryWatchdog(
   if (!timedOut && rawSignal === null && !expectationMet) {
     issues.push(issue('watchdog-exit-mismatch', 'direct child exit did not satisfy the expected status'));
   }
-  if (survivedNaturalExit || !groupDead) {
+  for (const failure of signalFailures) {
+    issues.push(issue('watchdog-group-signal-failed', `owned process group teardown ${failure}`));
+  }
+  if (finalGroupState === 'unknown') {
+    issues.push(issue('watchdog-group-unknown', 'owned process group liveness could not be determined'));
+  }
+  if (survivedNaturalExit || finalGroupState === 'alive') {
     issues.push(issue('watchdog-group-survivor', 'child process group survived leader completion or teardown'));
   }
   return {
@@ -297,7 +338,13 @@ async function executeBoundaryWatchdog(
 
 export async function runBoundaryWatchdogForTest(
   argv: string[],
-  options: { deadlineMs: number; killGraceMs: number; expectedExit: string },
+  options: {
+    deadlineMs: number;
+    killGraceMs: number;
+    expectedExit: string;
+    kill?: ProcessGroupSignal;
+    probeGroup?: ProcessGroupProbe;
+  },
 ): Promise<BoundaryWatchdogOutcome> {
   if (
     argv.length === 0
@@ -317,7 +364,10 @@ export async function runBoundaryWatchdogForTest(
       endedAtUtc: now,
     };
   }
-  return executeBoundaryWatchdog(argv, options);
+  return executeBoundaryWatchdog(argv, {
+    ...options,
+    killGroup: options.kill,
+  });
 }
 
 export async function runBoundaryAttemptProcess(

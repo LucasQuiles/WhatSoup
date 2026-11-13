@@ -435,6 +435,44 @@ describe('host-admission terminal suspension', () => {
     expect(harness.session.suspendHostWorkAdmissionAfterTerminal).not.toHaveBeenCalled();
   });
 
+  for (const path of ['scoped', 'global'] as const) {
+    it.each([
+      { label: 'a compact successor starts', compactStarted: true, suspend: false },
+      { label: 'no compact successor starts', compactStarted: false, suspend: true },
+    ])(`${path} awaits an asynchronous compact-start result when $label`, async ({ compactStarted, suspend }) => {
+      const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+      let resolveCompactStart!: (started: boolean) => void;
+      const compactStart = new Promise<boolean>((resolve) => { resolveCompactStart = resolve; });
+      (harness.host.maybeStartAutoCompact as ReturnType<typeof vi.fn>).mockReturnValue(compactStart);
+
+      driveResult(path, harness, 'done', { isError: false });
+
+      const append = harness.host.runtimeTurnCoordinator.appendRuntimeTurnAfterTerminalAction as ReturnType<typeof vi.fn>;
+      expect(append).toHaveBeenCalledOnce();
+      expect(harness.host.maybeStartAutoCompact).not.toHaveBeenCalled();
+      const action = append.mock.calls[0]?.[1] as (() => Promise<void> | void) | undefined;
+      expect(action).toEqual(expect.any(Function));
+
+      const actionPromise = Promise.resolve(action!());
+      let actionSettled = false;
+      void actionPromise.then(() => { actionSettled = true; });
+      await Promise.resolve();
+
+      expect(harness.host.maybeStartAutoCompact).toHaveBeenCalledOnce();
+      expect(actionSettled).toBe(false);
+      expect(harness.session.suspendHostWorkAdmissionAfterTerminal).not.toHaveBeenCalled();
+
+      resolveCompactStart(compactStarted);
+      await actionPromise;
+
+      if (suspend) {
+        expect(harness.session.suspendHostWorkAdmissionAfterTerminal).toHaveBeenCalledOnce();
+      } else {
+        expect(harness.session.suspendHostWorkAdmissionAfterTerminal).not.toHaveBeenCalled();
+      }
+    });
+  }
+
   it.each(['scoped', 'global'] as const)('publishes host suspension for a %s transient terminal before returning', async (path) => {
     const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
 
@@ -485,6 +523,35 @@ describe('auto-compact start failure without runtime turn context', () => {
     expect(logSink.map((entry) => entry.msg)).toContain('auto-compact start threw after a terminal result with no runtime context');
     expect(logSink.map((entry) => entry.msg)).not.toContain('host-admission terminal suspension threw');
     expect(harness.session.suspendHostWorkAdmissionAfterTerminal).not.toHaveBeenCalled();
+  });
+
+  it.each(['scoped', 'global'] as const)('contains an asynchronous %s compact-start rejection without host suspension', async (path) => {
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+    const coordinator = harness.host.runtimeTurnCoordinator as unknown as { runtimeTurnContext: ReturnType<typeof vi.fn> };
+    coordinator.runtimeTurnContext.mockReturnValue(null);
+    let rejectCompactStart!: (error: Error) => void;
+    const compactStart = new Promise<boolean>((_resolve, reject) => { rejectCompactStart = reject; });
+    (harness.host.maybeStartAutoCompact as ReturnType<typeof vi.fn>).mockReturnValue(compactStart);
+    const escaped: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { escaped.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    logSink.length = 0;
+    try {
+      driveResult(path, harness, 'done', { isError: false });
+      rejectCompactStart(new Error('snapshot read rejected'));
+      await Promise.resolve();
+      await Promise.resolve();
+    } finally {
+      process.removeListener('unhandledRejection', onUnhandled);
+    }
+
+    const message = path === 'scoped'
+      ? 'auto-compact start rejected after a terminal result with no runtime context'
+      : 'auto-compact start rejected after a global terminal result with no runtime context';
+    expect(logSink.map((entry) => entry.msg)).toContain(message);
+    expect(logSink.map((entry) => entry.msg)).not.toContain('host-admission terminal suspension rejected');
+    expect(harness.session.suspendHostWorkAdmissionAfterTerminal).not.toHaveBeenCalled();
+    expect(escaped).toEqual([]);
   });
 });
 
@@ -908,5 +975,45 @@ describe('minimal-mode result text after narration held at a tool boundary (#342
     await vi.runAllTimersAsync();
 
     expect(sent).toEqual([TOOL_LOOP_LIMIT_TEXT]);
+  });
+
+  it.each([
+    { path: 'scoped', suppressed: true, expected: [] },
+    { path: 'global', suppressed: true, expected: [] },
+    { path: 'scoped', suppressed: false, expected: ['The queue command completed.'] },
+    { path: 'global', suppressed: false, expected: ['The queue command completed.'] },
+  ] as const)('$path deferred reply honors policy suppression=$suppressed', async ({ path, suppressed, expected }) => {
+    vi.useFakeTimers();
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+    const coordinator = harness.host.runtimeTurnCoordinator as unknown as {
+      attemptOutcomeForResult: ReturnType<typeof vi.fn>;
+    };
+    coordinator.attemptOutcomeForResult.mockReturnValue({ kind: 'completed' });
+    if (suppressed) {
+      harness.host.perChatTurnSuppressedReplySatisfaction.add('15550190050');
+      harness.host.turnHadSuppressedReplySatisfaction = true;
+    }
+    const sent: string[] = [];
+    const messenger: Messenger = {
+      sendMessage: vi.fn(async (_jid: string, text: string) => {
+        sent.push(text);
+        return { waMessageId: null };
+      }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+      setTyping: vi.fn(async () => {}),
+    };
+    const queue = new OutboundQueue(messenger, '15550190050@s.whatsapp.net');
+    queue.setToolUpdateMode('minimal');
+    queue.enqueueStreamingText('The queue command completed.', 'answer', () => {
+      harness.host.turnHadVisibleOutput = true;
+      harness.host.perChatTurnText.set('15550190050', 'The queue command completed.');
+    });
+    queue.discardPreToolAssistantText();
+
+    driveResult(path, harness, '', { queue, isError: false });
+    await vi.runAllTimersAsync();
+
+    expect(sent).toEqual(expected);
+    expect(queue.hasPendingWork()).toBe(false);
   });
 });
