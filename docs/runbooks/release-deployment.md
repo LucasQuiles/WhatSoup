@@ -249,14 +249,29 @@ What the helper guarantees:
   with "root plist helper recovery is incomplete": inspect that plist and its
   `uchg` flag before any retry.
 - `sudo` relays every signal it receives, so the bot user can send the helper
-  any signal. For the whole run the helper blocks every signal except SIGKILL
-  and SIGSTOP, which cannot be blocked, and the fault signals SIGSEGV, SIGBUS,
-  SIGFPE, SIGILL, SIGTRAP, SIGABRT and SIGSYS. It also raises its CPU limit.
-  No blockable signal and no CPU limit therefore ends or stops a run between
-  clearing and restoring `uchg`. An interruption raised as an exception, such
-  as KeyboardInterrupt, re-protects what it can and exits 3. A death by a
-  signal left deliverable re-protects nothing, and activation reports it as
-  unconfirmed (next item).
+  any signal. While the helper's work runs, it blocks in its own thread every
+  signal except SIGKILL, SIGSTOP, SIGABRT and the fault signals (SIGSEGV,
+  SIGBUS, SIGFPE, SIGILL, SIGTRAP, SIGSYS). A mask holds only in one thread,
+  and a system call the helper makes starts a second thread that leaves
+  SIGPROF and SIGEMT deliverable. So, for the whole process, the helper also
+  ignores the blocked signals whose default action terminates, cores or stops
+  it: SIGHUP, SIGINT, SIGQUIT, SIGEMT, SIGPIPE, SIGALRM, SIGTERM, SIGTSTP,
+  SIGTTIN, SIGTTOU, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGUSR1 and SIGUSR2.
+  The other blocked signals (SIGURG, SIGCONT, SIGCHLD, SIGIO, SIGWINCH,
+  SIGINFO) are discarded by default and keep their disposition. It also raises
+  its CPU limit. When the work ends, it restores the mask and the
+  dispositions; protection is back in place by then.
+- Signals still deliverable during the change: SIGKILL and SIGSTOP, which no
+  process can block, catch or ignore, and SIGABRT and the fault signals, which
+  report the helper's own crash but which the bot user can also send through
+  sudo. Whether the bot user can cause a SIGKILL or SIGSTOP of the helper is
+  not established. A death by SIGKILL, SIGABRT or a fault signal after `uchg`
+  is cleared re-protects nothing. It leaves the plist without `uchg`, holding
+  the old bytes before the rename or the new bytes after it, possibly with a
+  leftover `.<name>.activate-*` file in the folder. A SIGSTOP there holds the
+  plist in that state until the helper continues. Activation reports any of
+  these as unconfirmed (next item). An interruption raised as an exception,
+  such as KeyboardInterrupt, re-protects what it can and exits 3.
 - Activation trusts only exit 0 with the new bytes in place and exit 2
   (refused, plist as found). Every other result means unconfirmed protection
   and the rollback reports `rollback-unverified`: exit 3, a signal (SIGKILL or
@@ -295,11 +310,14 @@ Owner steps, once per host and again after any helper change:
    then walks every file and folder below each import-path folder (the
    standard library and `lib-dynload`; root imports these modules) and refuses
    any the bot user can write. A symlink there is checked along its target
-   chain, and one that links to a folder refuses. "Can write" covers the owner,
+   chain, and one that links to a folder, or whose target cannot be inspected
+   (a dangling link included), refuses. "Can write" covers the owner,
    the group and other write bits, and ACLs: any ACL entry that is not a deny
    entry refuses. A deny-only ACL, such as `group:everyone deny delete` on
    every macOS home, cannot grant write access and passes. Any error while
-   walking or reading an ACL refuses. When the install is already current, it
+   walking, reading an ACL or inspecting `/var/db/xcode_select_link` refuses;
+   only a missing select link means the Command Line Tools. When the install is
+   already current, it
    changes nothing:
 
    ```bash

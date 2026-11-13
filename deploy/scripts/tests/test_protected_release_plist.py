@@ -1,3 +1,4 @@
+import contextlib
 import ctypes
 import datetime
 import errno
@@ -840,70 +841,156 @@ def test_an_interruption_just_after_clearing_protection_re_protects_the_original
         os.chflags(path, 0)
 
 
-# A child process sends itself signals the caller can make sudo relay once the target's uchg is
-# cleared, as in Opus probe r2 (and m-1: USR1 killed, TSTP stopped a run). SIGTERM goes first, so
-# the unshielded child dies with -15. Only a child can take real signals.
-_INTERRUPTED_CHILD = '''
-import importlib.util, os, signal, sys
+# ---- Opus N-1: no relayed signal ends a shielded run, whichever thread the kernel picks ----
+# The classes are named here, not read from the helper, so a change there cannot shrink these tests.
+# Left deliverable by design: KILL and STOP cannot be blocked or ignored; the fault signals and ABRT
+# report the helper's own crash.
+_DELIVERABLE = ('SIGKILL', 'SIGSTOP', 'SIGSEGV', 'SIGBUS', 'SIGFPE', 'SIGILL', 'SIGTRAP', 'SIGABRT', 'SIGSYS')
+# Darwin's default action for these discards the signal (signal(3)); SIGCHLD must keep its disposition.
+_DISCARDED_BY_DEFAULT = ('SIGURG', 'SIGCONT', 'SIGCHLD', 'SIGIO', 'SIGWINCH', 'SIGINFO')
+# Everything else the caller can make sudo relay: the shield blocks all of these.
+_RELAYABLE = [signal.Signals(int(n)).name for n in sorted(signal.valid_signals())
+              if signal.Signals(int(n)).name not in _DELIVERABLE]
+# Their default action terminates, cores or stops the process, so the shield also ignores them.
+_TERMINATING = [name for name in _RELAYABLE if name not in _DISCARDED_BY_DEFAULT]
+
+# The real run() and main() in a child, the test user standing in for root and the sudo caller as in
+# the in-process main() tests. main() calls os.getgrouplist before the flag clear, which starts a
+# second thread (Opus N-1). Right after the real clear, the child sends itself the named signals.
+_RUN_CHILD = '''
+import contextlib, importlib.util, os, pwd, signal, sys, threading, types
 spec = importlib.util.spec_from_file_location('protected_plist', sys.argv[1])
 p = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(p)
-path = sys.argv[2]
-before = p.metadata(path)
-real_rename = p.rename_in
-def interrupted(*args):
-    for number in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGUSR1, signal.SIGUSR2,
-                   signal.SIGALRM, signal.SIGTSTP, signal.SIGTTIN, signal.SIGTTOU):
-        os.kill(os.getpid(), number)
-    return real_rename(*args)
-p.rename_in = interrupted
-if sys.argv[3] == 'shielded':
-    p.shield()
-p.replace(path, p.digest(b'old'), b'new', before, owner_uid=os.getuid())
-print('completed')
+home, mode, names = sys.argv[2], sys.argv[3], sys.argv[4].split(',')
+me = pwd.getpwuid(os.getuid())
+os.environ['SUDO_UID'] = str(me.pw_uid)
+p.PLIST_OWNER_UID = me.pw_uid
+p.os.getuid = lambda: 0
+p.pwd.getpwuid = lambda uid: types.SimpleNamespace(pw_dir=home, pw_name=me.pw_name, pw_gid=me.pw_gid)
+real_flags = p.set_flags
+sent = []
+def set_flags(fd, flags):
+    real_flags(fd, flags)
+    if flags == 0 and not sent:
+        for name in names:
+            os.kill(os.getpid(), getattr(signal, name))
+        sent.append(True)
+        print('sent', flush=True)
+p.set_flags = set_flags
+if mode == 'bare':
+    p.shield = contextlib.nullcontext
+elif mode == 'unblocked-thread':
+    # Any thread the helper did not start and that blocks nothing: the class behind N-1.
+    real_main = p.main
+    def main():
+        ready = threading.Event()
+        def unblocked():
+            signal.pthread_sigmask(signal.SIG_SETMASK, [])
+            ready.set()
+            threading.Event().wait()
+        threading.Thread(target=unblocked, daemon=True).start()
+        ready.wait()
+        real_main()
+    p.main = main
+sys.exit(p.run())
 '''
 
 
-def _interrupted_child(path, mode):
-    # Its own process group in this session: the kernel discards a stop signal sent to an orphaned
-    # group (a new session), and then TSTP would prove nothing.
-    return subprocess.run([sys.executable, '-I', '-B', '-c', _INTERRUPTED_CHILD, p.__file__, str(path), mode],
-                          capture_output=True, text=True, timeout=60, preexec_fn=os.setpgrp)
+def _run_helper_child(tmp_path, mode, names):
+    """Run the helper's run() in a child against a uchg plist in a temporary LaunchAgents folder."""
+    home, folder = _own_launch_agents(tmp_path.resolve())
+    target = folder / 'com.whatsoup.alpha.plist'
+    target.chmod(0o644)
+    os.chflags(target, stat.UF_IMMUTABLE)
+    contents = plistlib.dumps({'Label': 'com.whatsoup.alpha'}).decode()
+    request = {'path': str(target), 'contents': contents, 'expectedSha256': p.digest(b'old'),
+               'metadata': p.metadata(target)}
+    try:
+        # Its own process group in this session: the kernel discards a stop signal sent to an orphaned
+        # group (a new session), and then TSTP would prove nothing.
+        result = subprocess.run([sys.executable, '-I', '-S', '-B', '-c', _RUN_CHILD, p.__file__, str(home), mode,
+                                 ','.join(names)], input=json.dumps(request), capture_output=True, text=True,
+                                timeout=20, preexec_fn=os.setpgrp)
+        return (result, contents.encode('utf-8'), sorted(x.name for x in folder.iterdir()), target.read_bytes(),
+                _flags(target))
+    finally:
+        for entry in folder.iterdir():
+            os.chflags(entry, 0)
 
 
-def test_the_shield_blocks_every_signal_but_kill_stop_and_the_fault_signals():
-    # Opus m-1: blocking only HUP, INT, QUIT and TERM left USR1, USR2 and ALRM killing a run after
-    # the clear and TSTP stopping it. Every signal whose default ends or stops the process is held.
-    for name in ('SIGHUP', 'SIGINT', 'SIGQUIT', 'SIGTERM', 'SIGUSR1', 'SIGUSR2', 'SIGALRM', 'SIGVTALRM', 'SIGPROF',
-                 'SIGXCPU', 'SIGXFSZ', 'SIGPIPE', 'SIGEMT', 'SIGTSTP', 'SIGTTIN', 'SIGTTOU'):
-        assert getattr(signal, name) in p.SHIELDED_SIGNALS, name
-    # Left deliverable: KILL and STOP cannot be blocked, and the fault signals report the helper's own crash.
-    for name in ('SIGKILL', 'SIGSTOP', 'SIGSEGV', 'SIGBUS', 'SIGFPE', 'SIGILL', 'SIGTRAP', 'SIGABRT', 'SIGSYS'):
-        assert getattr(signal, name) not in p.SHIELDED_SIGNALS, name
+def _assert_replaced_and_protected(outcome):
+    result, new, listing, data, flags = outcome
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    sent, printed = result.stdout.splitlines()
+    assert sent == 'sent' and json.loads(printed)['sha256'] == p.digest(new)
+    assert (listing, data, flags) == (['com.whatsoup.alpha.plist'], new, stat.UF_IMMUTABLE)
+
+
+def test_the_signal_classes_cover_every_signal_once():
+    assert sorted(_DELIVERABLE + tuple(_RELAYABLE)) == sorted(signal.Signals(int(n)).name for n in signal.valid_signals())
+    assert len(_RELAYABLE) == 22 and len(_TERMINATING) == 16
+    assert {'SIGPROF', 'SIGEMT', 'SIGTERM', 'SIGTSTP'} <= set(_TERMINATING)
 
 
 @pytest.mark.skipif(not hasattr(os, 'chflags'), reason='file flags exist only on BSD and macOS')
-def test_the_shield_holds_relayed_signals_until_the_plist_is_protected_again(tmp_path):
-    (tmp_path / 'bare').mkdir(); (tmp_path / 'shielded').mkdir()
-    bare, _ = _protected_plist(tmp_path / 'bare')
-    shielded, before = _protected_plist(tmp_path / 'shielded')
-    try:
-        # Without the shield (Opus r2): SIGTERM kills the run after the clear, leaving flags 0.
-        result = _interrupted_child(bare, 'bare')
-        assert result.returncode == -15, result.stderr
-        assert bare.read_bytes() == b'old' and _flags(bare) == 0
-        # With it, the signals wait; the run completes and the new plist is immutable.
-        result = _interrupted_child(shielded, 'shielded')
-        assert (result.returncode, result.stdout.strip()) == (0, 'completed'), result.stderr
-        assert shielded.read_bytes() == b'new' and _flags(shielded) == stat.UF_IMMUTABLE
-        assert sorted(x.name for x in (tmp_path / 'shielded').iterdir()) == ['p']
-        # The second run, the rollback through the helper, keeps the protection.
-        p.replace(shielded, p.digest(b'new'), b'old', before, **OWN)
-        assert shielded.read_bytes() == b'old' and _flags(shielded) == stat.UF_IMMUTABLE
-    finally:
-        for folder in (tmp_path / 'bare', tmp_path / 'shielded'):
-            for name in os.listdir(folder):
-                os.chflags(folder / name, 0)
+def test_without_the_shield_a_relayed_sigterm_ends_the_run_with_the_plist_unprotected(tmp_path):
+    # The control (Opus r2): the same child, unshielded, dies after the clear, leaving flags 0.
+    result, _, _, data, flags = _run_helper_child(tmp_path, 'bare', ['SIGTERM'])
+    assert result.returncode == -15, (result.returncode, result.stderr)
+    assert (data, flags) == (b'old', 0)
+
+
+@pytest.mark.skipif(not hasattr(os, 'chflags'), reason='file flags exist only on BSD and macOS')
+@pytest.mark.parametrize('name', _RELAYABLE)
+def test_a_relayed_signal_after_the_clear_leaves_the_new_plist_protected(tmp_path, name):
+    # Opus N-1: with the mask alone, SIGPROF (-27) and SIGEMT (-7) reached getgrouplist's thread and
+    # ended the run after the clear; the plist was left with flags 0.
+    _assert_replaced_and_protected(_run_helper_child(tmp_path, 'shielded', [name]))
+
+
+@pytest.mark.skipif(not hasattr(os, 'chflags'), reason='file flags exist only on BSD and macOS')
+def test_every_relayed_signal_at_once_reaches_a_thread_that_blocks_nothing_and_still_ends_nothing(tmp_path):
+    # A mask holds only in the thread that sets it; a process-wide disposition holds in every thread.
+    _assert_replaced_and_protected(_run_helper_child(tmp_path, 'unblocked-thread', _RELAYABLE))
+
+
+# The real shield() in a child: the thread mask and the dispositions inside it, and both restored after.
+_SHIELD_STATE_CHILD = '''
+import importlib.util, json, signal, sys
+spec = importlib.util.spec_from_file_location('protected_plist', sys.argv[1])
+p = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(p)
+def state():
+    numbers = [signal.Signals(int(n)) for n in sorted(signal.valid_signals())]
+    blocked = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+    return {'blocked': [n.name for n in numbers if n in blocked],
+            'ignored': [n.name for n in numbers if n not in (signal.SIGKILL, signal.SIGSTOP)
+                        and signal.getsignal(n) == signal.SIG_IGN],
+            'handled': [n.name for n in numbers if callable(signal.getsignal(n))]}
+before = state()
+try:
+    with p.shield():
+        inside = state()
+        raise LookupError('leaves the shield by an exception')
+except LookupError:
+    pass
+print(json.dumps({'before': before, 'inside': inside, 'after': state()}))
+'''
+
+
+def test_the_shield_blocks_and_ignores_by_name_and_restores_both_after():
+    # Codex regate3 Minor 3: a constant check survived a mask that dropped SIGEMT. This reads the real
+    # mask and dispositions. SIGCHLD keeps its disposition: ignoring it changes waitpid.
+    result = subprocess.run([sys.executable, '-I', '-S', '-B', '-c', _SHIELD_STATE_CHILD, p.__file__],
+                            capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    states = json.loads(result.stdout)
+    assert states['inside']['blocked'] == _RELAYABLE
+    assert states['inside']['ignored'] == _TERMINATING
+    assert states['inside']['handled'] == []  # SIGINT's KeyboardInterrupt handler is set aside too
+    assert states['after'] == states['before'] and 'SIGINT' in states['before']['handled']
+    assert 'SIGCHLD' not in states['inside']['ignored']
 
 
 _INFINITY = resource.RLIM_INFINITY
@@ -926,9 +1013,18 @@ def test_the_shield_leaves_the_run_enough_cpu_time(monkeypatch, limits, expected
     assert calls == ([] if expected is None else [(resource.RLIMIT_CPU, expected)])
 
 
-def test_run_shields_first_and_exits_3_for_an_interruption(monkeypatch, capsys):
+def test_run_shields_all_of_main_and_exits_3_for_an_interruption(monkeypatch, capsys):
     order = []
-    monkeypatch.setattr(p, 'shield', lambda: order.append('shield'))
+
+    @contextlib.contextmanager
+    def recording():
+        order.append('enter')
+        try:
+            yield
+        finally:
+            order.append('exit')
+
+    monkeypatch.setattr(p, 'shield', recording)
 
     def interrupted():
         order.append('main')
@@ -936,12 +1032,12 @@ def test_run_shields_first_and_exits_3_for_an_interruption(monkeypatch, capsys):
 
     monkeypatch.setattr(p, 'main', interrupted)
     assert p.run() == 3
-    assert order == ['shield', 'main']
+    assert order == ['enter', 'main', 'exit']
     assert json.loads(capsys.readouterr().err) == {'error_type': 'KeyboardInterrupt'}
 
 
 def test_run_exits_3_for_incomplete_recovery_and_2_for_other_failures(monkeypatch, capsys):
-    monkeypatch.setattr(p, 'shield', lambda: None)  # never block signals in the test process
+    monkeypatch.setattr(p, 'shield', contextlib.nullcontext)  # never block signals in the test process
 
     def incomplete():
         raise p.RecoveryIncomplete('injected')

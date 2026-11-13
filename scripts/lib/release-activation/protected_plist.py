@@ -38,16 +38,31 @@ The helper also runs no other program: sudo can keep the caller's PATH, so a
 program named without a path would be one the caller chose, run as root.
 
 The caller can signal its own sudo, which relays the signal, and its resource
-limits carry over. run() therefore first blocks, until the process exits,
-every signal except SIGKILL and SIGSTOP, which cannot be blocked, and the
-fault signals SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGTRAP, SIGABRT and SIGSYS,
-which report the helper's own crash; then it raises the CPU limit. A failure raised
-during the change re-protects what it can; it exits 2 when the plist is
-confirmed as found and 3 otherwise, and always 3 for an interruption raised as
-an exception, such as KeyboardInterrupt. A death by one of the signals left
-deliverable re-protects nothing; activation (apply.ts) reports it, like every
-result but exit 0 with the new bytes in place or exit 2, as unconfirmed.
+limits carry over. While main() runs, run() therefore blocks in its own thread
+every signal except SIGKILL, SIGSTOP and the crash signals (SIGSEGV, SIGBUS,
+SIGFPE, SIGILL, SIGTRAP, SIGABRT, SIGSYS), and it sets to SIG_IGN, for the
+whole process, the blocked ones whose default action terminates, cores or
+stops: SIGHUP, SIGINT, SIGQUIT, SIGEMT, SIGPIPE, SIGALRM, SIGTERM, SIGTSTP,
+SIGTTIN, SIGTTOU, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGUSR1 and SIGUSR2.
+A mask alone is not enough: os.getgrouplist starts a thread that leaves
+SIGPROF and SIGEMT deliverable. An ignored signal is discarded whichever
+thread it reaches. The other blocked signals (SIGURG, SIGCONT, SIGCHLD, SIGIO,
+SIGWINCH, SIGINFO) default to discard and keep their disposition. It also
+raises the CPU limit. When main() returns or raises, the mask and the
+dispositions are restored. SIGKILL and SIGSTOP cannot be blocked, caught or
+ignored. SIGABRT and the fault signals stay deliverable because they report
+the helper's own crash, but the caller can also relay them.
+
+A failure raised during the change re-protects what it can; it exits 2 when
+the plist is confirmed as found and 3 otherwise, and always 3 for an
+interruption raised as an exception, such as KeyboardInterrupt. A death by a
+signal left deliverable re-protects nothing. After the flag clear it leaves
+the target without uchg, holding the old bytes before the rename or the new
+bytes after it, and possibly this run's temporary file in the folder.
+Activation (apply.ts) reports it, like every result but exit 0 with the new
+bytes in place or exit 2, as unconfirmed.
 """
+import contextlib
 import ctypes
 import errno
 import fcntl
@@ -76,14 +91,23 @@ _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 # O_NONBLOCK: opening a FIFO planted under the plist name must not block the helper.
 _PLIST = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 RECOVERY_INCOMPLETE_EXIT = 3
-# Signals run() blocks from its start until the process exits. sudo relays what it receives, so
-# the caller can send the helper any signal, and a hangup, Ctrl-C or Ctrl-Z sends one too; a
-# default action that ends or stops the run between clearing uchg and setting it again leaves
-# the plist unprotected with no exit 3. Left deliverable: SIGKILL and SIGSTOP, which cannot be
-# blocked, and the fault signals, which report the helper's own crash.
+# Signals shield() holds off while main() runs. sudo relays what it receives, so the caller can
+# send the helper any signal, and a hangup, Ctrl-C or Ctrl-Z sends one too; a default action that
+# ends or stops the run between clearing uchg and setting it again leaves the plist unprotected
+# with no exit 3. Left deliverable: SIGKILL and SIGSTOP, which cannot be blocked, caught or
+# ignored, and the fault signals and SIGABRT, which report the helper's own crash.
 _DELIVERABLE_SIGNALS = frozenset((signal.SIGKILL, signal.SIGSTOP, signal.SIGSEGV, signal.SIGBUS, signal.SIGFPE,
                                   signal.SIGILL, signal.SIGTRAP, signal.SIGABRT, signal.SIGSYS))
 SHIELDED_SIGNALS = frozenset(signal.valid_signals()) - _DELIVERABLE_SIGNALS
+# A mask holds only in the thread that sets it. os.getgrouplist starts a thread that leaves SIGPROF
+# and SIGEMT deliverable (Opus N-1), and a delivered default action ends the whole process, so the
+# shielded signals whose default action terminates, cores or stops are also ignored, process-wide.
+# The rest default to discard (signal(3)) and keep their disposition; SIGCHLD above all, since
+# ignoring it changes waitpid. The helper starts and waits on no child process.
+IGNORED_SIGNALS = frozenset((signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGEMT, signal.SIGPIPE,
+                             signal.SIGALRM, signal.SIGTERM, signal.SIGTSTP, signal.SIGTTIN, signal.SIGTTOU,
+                             signal.SIGXCPU, signal.SIGXFSZ, signal.SIGVTALRM, signal.SIGPROF, signal.SIGUSR1,
+                             signal.SIGUSR2))
 # CPU seconds the run keeps beyond what it has used: resource limits carry over from the
 # caller, and the kernel kills a process at its hard CPU limit. A normal run needs well under one.
 CPU_SECONDS = 60
@@ -377,8 +401,9 @@ def replace_at(folder_fd, name, expected_sha, replacement, expected_metadata, re
         temporary, temp_fd = create_temporary(folder_fd, name, replacement, before)
         assert_current(folder_fd, name, target, original, before)
         assert_same_folder(folder_fd, reopen_folder)
-        # From the flag clear on, any exception (run() blocks SHIELDED_SIGNALS, but MemoryError or an
-        # injected KeyboardInterrupt still arrives) re-protects first and is reported.
+        # From the flag clear on, any exception (shield() holds off every signal but KILL, STOP, ABRT and the
+        # fault signals, but MemoryError or an injected KeyboardInterrupt still arrives) re-protects first and
+        # is reported.
         cleared = False
         try:
             if before['flags']:
@@ -663,23 +688,37 @@ def ensure_cpu_time(seconds=CPU_SECONDS):
         resource.setrlimit(resource.RLIMIT_CPU, (raised(soft), raised(hard)))
 
 
+@contextlib.contextmanager
 def shield():
-    """Block SHIELDED_SIGNALS for the rest of the run and keep enough CPU time, so no blockable signal ends or stops it mid-change.
+    """While the block runs, no relayed signal ends or stops it, and the CPU limit leaves it time to finish.
 
-    The signals stay blocked until the process exits, which discards them: a
-    run that completes reports its own status. SIGKILL, SIGSTOP and the fault
-    signals still arrive; activation therefore treats any result but exit 0
-    with the new bytes in place or exit 2 as unconfirmed.
+    Blocks SHIELDED_SIGNALS in this thread, then sets IGNORED_SIGNALS to
+    SIG_IGN for the whole process, which discards them on arrival in any
+    thread. On the way out it restores the mask, then the dispositions; from
+    then on a signal can end the run again, after main() has put protection
+    back. SIGKILL, SIGSTOP, SIGABRT and the fault signals still arrive;
+    activation therefore treats any result but exit 0 with the new bytes in
+    place or exit 2 as unconfirmed.
     """
-    signal.pthread_sigmask(signal.SIG_BLOCK, SHIELDED_SIGNALS)
-    ensure_cpu_time()
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, SHIELDED_SIGNALS)
+    previous = {}
+    try:
+        for number in sorted(IGNORED_SIGNALS):
+            previous[number] = signal.signal(number, signal.SIG_IGN)
+        ensure_cpu_time()
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        for number, handler in previous.items():
+            if handler is not None:  # None: set outside Python, which cannot put it back; it stays ignored
+                signal.signal(number, handler)
 
 
 def run():
     """Exit status: 0 replaced, 3 recovery incomplete (the plist may lack protection), 2 refused or failed as found."""
     try:
-        shield()
-        main()
+        with shield():
+            main()
     except RecoveryIncomplete as exc:
         print(json.dumps({'error_type': type(exc).__name__}), file=sys.stderr)
         return RECOVERY_INCOMPLETE_EXIT
