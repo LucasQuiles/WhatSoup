@@ -252,7 +252,7 @@ What the helper guarantees:
   any signal. While the helper's work runs, it blocks in its own thread every
   signal except SIGKILL, SIGSTOP, SIGABRT and the fault signals (SIGSEGV,
   SIGBUS, SIGFPE, SIGILL, SIGTRAP, SIGSYS). A mask holds only in one thread,
-  and a system call the helper makes starts a second thread that leaves
+  and the helper's `os.getgrouplist` call starts a second thread that leaves
   SIGPROF and SIGEMT deliverable. So, for the whole process, the helper also
   ignores the blocked signals whose default action terminates, cores or stops
   it: SIGHUP, SIGINT, SIGQUIT, SIGEMT, SIGPIPE, SIGALRM, SIGTERM, SIGTSTP,
