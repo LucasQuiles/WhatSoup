@@ -508,6 +508,30 @@ def test_refuses_a_plist_the_caller_cannot_read_before_reading(tmp_path, monkeyp
     assert path.read_bytes() == b'new'
 
 
+def test_the_matching_permission_class_alone_decides_readability(tmp_path, monkeypatch):
+    # Codex I2: Darwin picks one class, owner if the uid matches, else group if any of the
+    # caller's groups matches, else other, and never falls through. A 0604 root file is
+    # unreadable to a caller in its group, though "other" may read it.
+    path = tmp_path / 'p'; path.write_bytes(b'old'); path.chmod(0o604)
+    gid = os.stat(path).st_gid
+    reads = _record_reads(monkeypatch)
+    in_group = (os.getuid() + 1, frozenset({gid}))
+    with pytest.raises(RuntimeError):
+        p.replace(path, p.digest(b'old'), b'new', p.metadata(path), owner_uid=os.getuid(), reader=in_group)
+    assert reads == [] and path.read_bytes() == b'old'
+    # The owner class decides for the owner: 0044 is unreadable to its owner (the kernel agrees).
+    path.chmod(0o044)
+    with pytest.raises(PermissionError):
+        path.read_bytes()
+    with pytest.raises(RuntimeError):
+        p.replace(path, p.digest(b'old'), b'new', p.metadata(path), owner_uid=os.getuid(), reader=(os.getuid(), frozenset({gid})))
+    path.chmod(0o604)
+    assert reads == [] and path.read_bytes() == b'old'
+    # Positive control: outside the group, the other class applies and allows the read.
+    p.replace(path, p.digest(b'old'), b'new', p.metadata(path), owner_uid=os.getuid(), reader=(os.getuid() + 1, frozenset()))
+    assert path.read_bytes() == b'new'
+
+
 @pytest.mark.skipif(not hasattr(os, 'chflags'), reason='file flags exist only on BSD and macOS')
 def test_the_names_of_an_immutable_inode_are_frozen(tmp_path):
     # The race proof rests on this kernel behaviour: while UF_IMMUTABLE is set, even the

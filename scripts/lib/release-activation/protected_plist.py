@@ -136,10 +136,14 @@ def fd_metadata(fd):
 
 
 def _readable_by(metadata, reader):
+    """Darwin's read check by mode bits: exactly one class applies, with no fall-through to a wider one."""
     uid, groups = reader
     mode = metadata['mode']
-    return bool((metadata['uid'] == uid and mode & 0o400) or (metadata['gid'] in groups and mode & 0o040)
-                or mode & 0o004)
+    if metadata['uid'] == uid:
+        return bool(mode & 0o400)
+    if metadata['gid'] in groups:
+        return bool(mode & 0o040)
+    return bool(mode & 0o004)
 
 
 def target_metadata(fd, owner_uid, reader):
