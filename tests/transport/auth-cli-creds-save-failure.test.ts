@@ -74,7 +74,9 @@ describe('#2165 auth CLI credential-save failure', () => {
   let onUnhandled: (reason: unknown) => void;
 
   beforeEach(() => {
-    vi.useFakeTimers();
+    // setImmediate stays real: the pairing-completion gate needs one real
+    // macrotask turn to observe key-store quiescence (pairing-completion.ts).
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
     vi.resetModules();
     mocks.connectionHandlers.length = 0;
     mocks.credsHandlers.length = 0;
@@ -84,7 +86,12 @@ describe('#2165 auth CLI credential-save failure', () => {
     mocks.saveCreds.mockResolvedValue(undefined);
     mocks.qrcodeGenerate.mockReset();
     mocks.useMultiFileAuthState.mockReset();
-    mocks.useMultiFileAuthState.mockResolvedValue({ state: { creds: {}, keys: {} }, saveCreds: mocks.saveCreds });
+    // A key store with get/set, like useMultiFileAuthState's. An empty object has no
+    // trackable writes, and the pairing completion gate now refuses success on it.
+    mocks.useMultiFileAuthState.mockResolvedValue({
+      state: { creds: {}, keys: { get: async () => ({}), set: async () => {} } },
+      saveCreds: mocks.saveCreds,
+    });
     mocks.makeWASocket.mockReset();
     mocks.makeWASocket.mockImplementation(() => ({
       ev: {
@@ -240,11 +247,11 @@ describe('#2165 auth CLI credential-save failure', () => {
       expect(errorLines().filter((l) => l.includes('FATAL'))).toHaveLength(0);
     });
 
-    it('#2322 M5: exits immediately after a durable save, with no wall-clock delay', async () => {
-      // saveCreds() (createAtomicCredsSaver) already fsyncs + renames before
-      // resolving — durability is complete when the await returns, so nothing
-      // should wait on a timer afterward. Assert completion WITHOUT advancing
-      // fake timers at all: if a `setTimeout` still gates the exit, this fails.
+    it('#2322 M5: exits once writes are quiescent, with no wall-clock delay', async () => {
+      // The exit waits on observed state (settled saves, a quiescent key store),
+      // not on a timer. Assert completion WITHOUT advancing fake timers at all:
+      // if a `setTimeout` gates the exit, this fails. With no key-store activity
+      // and no LID, one real macrotask turn is the whole wait.
       await openConnection();
 
       expect(process.exit).toHaveBeenCalledWith(0);
