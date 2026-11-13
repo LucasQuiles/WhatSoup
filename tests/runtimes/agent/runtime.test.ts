@@ -2785,7 +2785,7 @@ describe('AgentRuntime', () => {
   {
     const makeActivation = () => ({
       primaryProvider: 'claude-cli', fallbackProvider: 'openai-api', fallbackModel: undefined,
-      reason: 'usage-limit', resetAt: null, activeUntil: 0, extended: false,
+      reason: 'usage-limit', resetAt: null, primaryResetAt: null, activeUntil: 0, extended: false,
       keyPresent: true, recoveryProbeRequired: false,
     });
 

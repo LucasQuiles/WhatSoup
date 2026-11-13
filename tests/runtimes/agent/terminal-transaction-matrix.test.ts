@@ -6,6 +6,7 @@ import { DurabilityEngine } from '../../../src/core/durability.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 import { createRuntimeTurnContext, type RuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
+import type { ProviderFallbackActivation } from '../../../src/runtimes/agent/runtime-turn-result-handler.ts';
 import type { QueuedTurn } from '../../../src/runtimes/agent/turn-queue.ts';
 import { makeMessenger } from './lib/session-harness.ts';
 
@@ -43,17 +44,8 @@ interface RuntimeState {
     clearReplayOnSuccess: boolean;
   }): Promise<unknown>;
   scheduleFallbackReplay(args: {
-    activation: {
-      primaryProvider: string;
-      fallbackProvider: string;
-      fallbackModel: string | undefined;
-      reason: 'usage-limit';
-      resetAt: Date | null;
-      activeUntil: number;
-      extended: boolean;
-      keyPresent: boolean | null;
-      recoveryProbeRequired: boolean;
-    };
+    // The real type, so a new activation field cannot drift from this test.
+    activation: ProviderFallbackActivation;
     chatJid: string;
     mapKey: string;
     oldSession: null;
@@ -328,6 +320,7 @@ describe('runtime terminal transaction reachability', () => {
           fallbackModel: undefined,
           reason: 'usage-limit',
           resetAt: null,
+          primaryResetAt: null,
           activeUntil: Date.now() + 60_000,
           extended: false,
           keyPresent: true,
