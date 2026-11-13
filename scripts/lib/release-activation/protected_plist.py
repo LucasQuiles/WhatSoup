@@ -425,10 +425,27 @@ _TEXT_VALUES = ('key', 'string', 'integer', 'real')
 _EMPTY_VALUES = ('true', 'false')
 # The only document type the helper accepts: the one plistlib and the renderers write, with no internal subset.
 _APPLE_DOCTYPE = ('plist', 'http://www.apple.com/DTDs/PropertyList-1.0.dtd', '-//Apple//DTD PLIST 1.0//EN', 0)
+# plistlib parses numbers with int() and float(), which accept underscores, non-ASCII digits and any
+# magnitude. These are ASCII-only subsets of what native plutil accepts (measured), checked first.
+_INTEGER = re.compile(r'[+-]?[0-9]+')
+_REAL = re.compile(r'[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?')
+# plutil's <integer> range: signed 64-bit below zero, unsigned 64-bit above.
+_INTEGER_MIN, _INTEGER_MAX = -(1 << 63), (1 << 64) - 1
+_NUMBERS = ('integer', 'real')
 
 
 def _refuse_structure(*_):
     raise RuntimeError('plist contents must be a strict XML property list')
+
+
+def _check_number(element, text):
+    if element == 'integer':
+        # 2**64 - 1 has 20 digits; the length bound keeps int() off a huge string.
+        if (not _INTEGER.fullmatch(text) or len(text.lstrip('+-').lstrip('0')) > 20
+                or not _INTEGER_MIN <= int(text) <= _INTEGER_MAX):
+            _refuse_structure()
+    elif not _REAL.fullmatch(text):
+        _refuse_structure()
 
 
 def check_xml_structure(data):
@@ -437,10 +454,11 @@ def check_xml_structure(data):
     One <plist> root holding one value; only plist elements; keys and values
     alternate in a dictionary; no text between elements; no processing
     instruction (the XML declaration is not one); no document type but Apple's,
-    and no internal subset or entity declaration.
+    and no internal subset or entity declaration; integers and reals in strict
+    ASCII form, integers within plutil's 64-bit range.
     """
     parser = expat.ParserCreate()
-    stack = []  # [element, children so far]
+    stack = []  # [element, children so far, text pieces]
     roots = []
 
     def start(name, attributes):
@@ -462,18 +480,22 @@ def check_xml_structure(data):
             elif name == 'key':
                 _refuse_structure()
             parent[1] += 1
-        stack.append([name, 0])
+        stack.append([name, 0, []])
 
     def end(name):
-        element, children = stack.pop()
+        element, children, pieces = stack.pop()
         if (element == 'dict' and children % 2) or (element == 'plist' and children != 1):
             _refuse_structure()
+        if element in _NUMBERS:
+            _check_number(element, ''.join(pieces))  # expat may split one text node
 
     def text(content):
         if stack and stack[-1][0] not in _TEXT_VALUES and content.strip(' \t\r\n'):
             _refuse_structure()
         if stack and stack[-1][0] in _EMPTY_VALUES and content:
             _refuse_structure()
+        if stack and stack[-1][0] in _NUMBERS:
+            stack[-1][2].append(content)
 
     def doctype(name, system_id, public_id, has_internal_subset):
         if (name, system_id, public_id, has_internal_subset) != _APPLE_DOCTYPE:

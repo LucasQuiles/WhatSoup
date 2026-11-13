@@ -445,7 +445,7 @@ _needs_plutil = pytest.mark.skipif(sys.platform != 'darwin' or not os.path.exist
 
 def _plutil_accepts(tmp_path, contents):
     candidate = tmp_path / 'candidate.plist'
-    candidate.write_text(contents)
+    candidate.write_text(contents, encoding='utf-8')
     return subprocess.run([_PLUTIL, '-lint', str(candidate)], capture_output=True).returncode == 0
 
 
@@ -464,6 +464,45 @@ def test_strict_xml_accepts_the_renderers_plist_as_native_plutil_does(tmp_path):
                     '<key>Env</key><dict><key>MODE</key><string><![CDATA[release]]></string></dict></dict>')
     assert _plutil_accepts(tmp_path, contents)
     p.check_contents(contents.encode(), 'com.whatsoup.alpha')
+
+
+def _number(kind, text):
+    return _xml('<dict>' + _LABEL + '<key>N</key><' + kind + '>' + text + '</' + kind + '></dict>')
+
+
+# Codex Minor 4: plistlib parses numbers with int() and float(), which accept underscores,
+# non-ASCII digits and any magnitude. Native plutil refuses each of these (measured).
+@_needs_plutil
+@pytest.mark.parametrize('contents', [
+    pytest.param(_number('integer', '1_0'), id='integer-underscore'),
+    pytest.param(_number('integer', '١٠'), id='integer-unicode-digits'),
+    pytest.param(_number('integer', '18446744073709551616'), id='integer-above-unsigned-64-bit'),
+    pytest.param(_number('integer', '-9223372036854775809'), id='integer-below-signed-64-bit'),
+    pytest.param(_number('real', '1_0.5'), id='real-underscore'),
+    pytest.param(_number('real', '١.٥'), id='real-unicode-digits'),
+])
+def test_strict_numbers_refuse_what_native_plutil_refuses(tmp_path, contents):
+    assert not _plutil_accepts(tmp_path, contents)
+    with pytest.raises(RuntimeError):
+        p.check_contents(contents.encode('utf-8'), 'com.whatsoup.alpha')
+
+
+# The range ends plutil accepts: signed 64-bit below zero, unsigned 64-bit above.
+@_needs_plutil
+@pytest.mark.parametrize('contents', [
+    pytest.param(_number('integer', '18446744073709551615'), id='integer-unsigned-64-bit-max'),
+    pytest.param(_number('integer', '-9223372036854775808'), id='integer-signed-64-bit-min'),
+    pytest.param(_number('real', '-1.5e-07'), id='real-with-exponent'),
+])
+def test_strict_numbers_accept_the_range_native_plutil_accepts(tmp_path, contents):
+    assert _plutil_accepts(tmp_path, contents)
+    p.check_contents(contents.encode('utf-8'), 'com.whatsoup.alpha')
+
+
+def test_strict_numbers_refuse_an_integer_too_long_to_parse():
+    # Leading zeros keep it in range on paper; the length bound keeps int() off huge strings.
+    with pytest.raises(RuntimeError):
+        p.check_contents(_number('integer', '1' * 5000).encode('utf-8'), 'com.whatsoup.alpha')
 
 
 # ---- R45: what the helper requires of the target, checked before it reads a byte ----
