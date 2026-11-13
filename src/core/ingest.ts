@@ -78,11 +78,19 @@ interface StoredIncomingMessage {
   isNew: boolean;
 }
 
-function persistIncomingMessage(db: Database, msg: IncomingMessage): StoredIncomingMessage | null {
+function incomingConversationKey(db: Database, msg: IncomingMessage): string {
+  return !msg.isGroup && isLidJid(msg.chatJid)
+    ? resolvePhoneFromJid(msg.chatJid, db)
+    : toConversationKey(msg.chatJid);
+}
+
+function persistIncomingMessage(
+  db: Database,
+  msg: IncomingMessage,
+  knownConversationKey?: string,
+): StoredIncomingMessage | null {
   try {
-    const conversationKey = !msg.isGroup && isLidJid(msg.chatJid)
-      ? resolvePhoneFromJid(msg.chatJid, db)
-      : toConversationKey(msg.chatJid);
+    const conversationKey = knownConversationKey ?? incomingConversationKey(db, msg);
     const isNew = storeMessageIfNew(db, {
       chatJid: msg.chatJid,
       conversationKey,
@@ -267,12 +275,19 @@ export function createIngestHandler(
         // bounded admission capacity. The shared helper below keeps the normal
         // downstream storage path behavior-identical without double writes.
         if (msg.isFromMe) {
-          // Store first: settling a recovered turn's echo records its completed
-          // identity only when the outgoing message is stored.
-          const storedEcho = persistIncomingMessage(db, msg);
+          let conversationKey: string;
+          try {
+            conversationKey = incomingConversationKey(db, msg);
+          } catch (err) {
+            log.error({ err, messageId: msg.messageId }, 'failed to derive conversation key for outbound echo');
+            return;
+          }
+          // Storage failure must not erase a separately verified correlation
+          // identity, but no echo is settled until that identity was derived.
+          const storedEcho = persistIncomingMessage(db, msg, conversationKey);
           if (durability) {
             try {
-              durability.matchEcho(msg.messageId);
+              durability.matchEcho(msg.messageId, conversationKey);
             } catch (err) {
               log.error({ err, messageId: msg.messageId }, 'failed to correlate outbound echo');
             }

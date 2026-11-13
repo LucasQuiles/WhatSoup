@@ -123,3 +123,115 @@ describe.each(['startup', 'live'] as const)('Signal %s stored recovery evidence'
     );
   });
 });
+
+describe.each(['startup', 'live'] as const)('Signal %s wrong-conversation self-echo evidence', (phase) => {
+  it.each(['operation-before-evidence', 'evidence-before-operation'] as const)(
+    '%s cannot settle or replay A from B\'s matching raw timestamp',
+    async (arrivalOrder) => {
+      const directory = mkdtempSync(join(tmpdir(), 'signal-cross-conversation-recovery-'));
+      const databasePath = join(directory, 'store.db');
+      let db = new Database(databasePath);
+      const port = new MockSignalPort();
+      vi.spyOn(port, 'send').mockImplementation(async (args) => {
+        port.sent.push(args);
+        return { timestamp: receiptTimestamp + port.sent.length - 1 };
+      });
+      const adapter = new SignalAdapter(makeSignalConfig({ pollIntervalMs: 60_000 }), port);
+      const connection = new SignalConnection(adapter);
+      const storedResults: boolean[] = [];
+      const wrongConversationId = '00000000-0000-4000-8000-000000000003';
+      const wrongDestination = `${wrongConversationId}@signal`;
+      connection.onMessage = (message) => {
+        storedResults.push(storeMessageIfNew(db, {
+          chatJid: message.chatJid, senderJid: message.senderJid,
+          messageId: message.messageId, isFromMe: message.isFromMe,
+          content: message.content, contentType: message.contentType,
+          timestamp: message.timestamp,
+          conversationKey: toConversationKey(message.chatJid),
+        }));
+      };
+
+      const storeWrongConversationEcho = (): void => {
+        expect(adapter.handleInboundRecord({
+          timestamp: receiptTimestamp,
+          source: 'self-uuid',
+          destination: wrongConversationId,
+          body: 'wrong-conversation provider record',
+          fromMe: true,
+          type: 'sync',
+        })).toBe(true);
+      };
+
+      try {
+        db.open();
+        await connection.connect();
+        let engine = new DurabilityEngine(db);
+        const conversationKey = toConversationKey(destination);
+        const seq = engine.journalInbound('source-request-A', conversationKey, destination, 'agent');
+
+        if (arrivalOrder === 'evidence-before-operation') storeWrongConversationEcho();
+
+        const op = engine.createOutboundOp({
+          conversationKey, chatJid: destination, opType: 'text',
+          payload: JSON.stringify({ text: 'answer A' }), replayPolicy: 'safe',
+          sourceInboundSeq: seq, isTerminal: true,
+        });
+        expect(engine.markSending(op)).toBe(true);
+        const receipt = await connection.sendMessage(destination, 'answer A');
+        expect(receipt.waMessageId).toBe(String(receiptTimestamp));
+        if (receipt.waMessageId === null) throw new Error('Controlled send did not return its receipt');
+        engine.markSubmitted(op, receipt.waMessageId);
+        expect(engine.markMaybeSent(op, 'controlled echo uncertainty', receipt.waMessageId)).toBe(true);
+
+        if (arrivalOrder === 'operation-before-evidence') storeWrongConversationEcho();
+
+        expect(storedResults).toEqual([true]);
+        expect(db.raw.prepare(
+          'SELECT message_id, conversation_key, is_from_me FROM messages WHERE message_id = ?',
+        ).get(String(receiptTimestamp))).toEqual({
+          message_id: String(receiptTimestamp),
+          conversation_key: toConversationKey(wrongDestination),
+          is_from_me: 1,
+        });
+
+        if (phase === 'startup') {
+          db.close();
+          db = new Database(databasePath);
+          db.open();
+          engine = new DurabilityEngine(db);
+        } else {
+          db.raw.prepare(
+            "UPDATE outbound_ops SET ambiguity_at = datetime('now', '-60 seconds') WHERE id = ?",
+          ).run(op);
+        }
+        const recovery = phase === 'startup'
+          ? engine.postConnectRecovery() : engine.reconcileLiveMaybeSent();
+
+        expect(db.raw.prepare('SELECT status FROM outbound_ops WHERE id = ?').get(op))
+          .toEqual({ status: 'quarantined' });
+        expect(engine.getInboundStatus(seq)).toBe('processing');
+        expect(recovery.outboundReplayed).toBe(0);
+        expect(recovery.outboundQuarantined).toBe(1);
+        expect(await drainPendingOutboundLocked(connection, engine)).toEqual({ resent: 0, expired: 0 });
+        expect(port.sent).toHaveLength(1);
+        expect(port.sent[0]?.recipient).toBe(destinationId);
+        expect(db.raw.prepare(
+          'SELECT conversation_key, is_from_me FROM messages WHERE message_id = ?',
+        ).get(String(receiptTimestamp))).toEqual({
+          conversation_key: toConversationKey(wrongDestination),
+          is_from_me: 1,
+        });
+      } finally {
+        try {
+          await connection.shutdown();
+        } finally {
+          try {
+            db.close();
+          } finally {
+            rmSync(directory, { recursive: true, force: true });
+          }
+        }
+      }
+    },
+  );
+});

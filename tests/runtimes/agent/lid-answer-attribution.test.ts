@@ -274,8 +274,11 @@ vi.mock('node:fs', async (importOriginal) => {
 // ─── Imports under test (after mocks) ───────────────────────────────────────
 
 import { Database } from '../../../src/core/database.ts';
+import { resolvePhoneFromJid } from '../../../src/core/access-list.ts';
+import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { createIngestHandler } from '../../../src/core/ingest.ts';
+import { isLidJid } from '../../../src/core/jid-constants.ts';
 import { upsertLidMapping } from '../../../src/core/lid-resolver.ts';
 import { parseClientOutputPolicies } from '../../../src/core/client-output-policy-config.ts';
 import { AgentRuntime, type AgentRuntimeOptions } from '../../../src/runtimes/agent/runtime.ts';
@@ -329,20 +332,28 @@ function makeMessenger(): Messenger {
 type MediaSend = [string, { type: string; ptt?: boolean }];
 
 /** The runtime's transport: records each send and returns a distinct id for its echo. */
-function makeRecordingTransport(): { messenger: Messenger; texts: Array<[string, string]>; media: MediaSend[] } {
+function makeRecordingTransport(): {
+  messenger: Messenger;
+  texts: Array<[string, string]>;
+  media: MediaSend[];
+  echoDestinationByMessageId: Map<string, string>;
+} {
   const texts: Array<[string, string]> = [];
   const media: MediaSend[] = [];
+  const echoDestinationByMessageId = new Map<string, string>();
   const messenger = {
     sendMessage: vi.fn(async (jid: string, text: string) => {
       texts.push([jid, text]);
-      return { waMessageId: `wa-${texts.length}` };
+      const waMessageId = `wa-${texts.length}`;
+      echoDestinationByMessageId.set(waMessageId, jid);
+      return { waMessageId };
     }),
     sendMedia: vi.fn(async (jid: string, content: { type: string; ptt?: boolean }) => {
       media.push([jid, content]);
       return { waMessageId: null };
     }),
   } as unknown as Messenger;
-  return { messenger, texts, media };
+  return { messenger, texts, media, echoDestinationByMessageId };
 }
 
 /** An inbound DM as the transport hands it to ingest. */
@@ -524,7 +535,16 @@ describe('a turn\'s outbound operations carry the turn\'s attribution', () => {
     const markSubmitted = engine.markSubmitted.bind(engine);
     vi.spyOn(engine, 'markSubmitted').mockImplementation((id, waMessageId, logicalAttemptCount) => {
       markSubmitted(id, waMessageId, logicalAttemptCount);
-      if (echoOnSubmit && waMessageId !== null) engine.matchEcho(waMessageId);
+      if (echoOnSubmit && waMessageId !== null) {
+        const destination = transport.echoDestinationByMessageId.get(waMessageId);
+        if (destination === undefined) {
+          throw new Error(`missing observed destination for submitted outbound message ${waMessageId}`);
+        }
+        const conversationKey = isLidJid(destination)
+          ? resolvePhoneFromJid(destination, db)
+          : toConversationKey(destination);
+        engine.matchEcho(waMessageId, conversationKey);
+      }
     });
   });
 

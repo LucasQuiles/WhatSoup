@@ -31,6 +31,12 @@ import type { InboundStatus } from './inbound-status.ts';
 import type { Messenger } from './types.ts';
 import type { GuardCaller } from './outbound-identity/types.ts';
 import { toConversationKey } from './conversation-key.ts';
+import { resolvePersistedLidToJid } from './lid-resolver.ts';
+import {
+  DOMAIN_LID,
+  DOMAIN_PERSONAL,
+  parseWhatsAppDeliveryNamespace,
+} from './jid-constants.ts';
 import { getImmediateTransactionRunner, withImmediateTransaction, withTransaction } from './db-tx.ts';
 import {
   createRecoveryStats,
@@ -495,6 +501,7 @@ export interface InboundEventRow {
 export interface OutboundOpRow {
   id: number;
   status: OutboundStatus;
+  conversation_key: string;
   chat_jid: string;
   op_type: string;
   payload: string;
@@ -509,6 +516,11 @@ export interface OutboundOpRow {
   failure_evidence: DecodedOutboundFailureEvidence;
   is_terminal: number;
 }
+
+type OutboundProviderIdClaim = Pick<
+  OutboundOpRow,
+  'id' | 'status' | 'conversation_key' | 'chat_jid'
+>;
 
 /**
  * Derive the age of the active ambiguity episode without treating missing or
@@ -734,6 +746,7 @@ type DurabilityStatements = {
   markTerminal: PreparedStatement;
   selectOutboundTerminalIdentity: PreparedStatement;
   selectOutboundForEchoMatch: PreparedStatement;
+  selectOutboundClaimsByWaMessageId: PreparedStatement;
   recordToolCall: PreparedStatement;
   markToolExecuting: PreparedStatement;
   markToolComplete: PreparedStatement;
@@ -1007,7 +1020,12 @@ export class DurabilityEngine {
       selectOutboundForEchoMatch: prepare(
         `SELECT id FROM outbound_ops
          WHERE wa_message_id = ?
+           AND conversation_key = ?
            AND status IN ('submitted', 'maybe_sent', 'quarantined', 'failed_permanent')`,
+      ),
+      selectOutboundClaimsByWaMessageId: prepare(
+        `SELECT id, status, conversation_key, chat_jid FROM outbound_ops
+         WHERE wa_message_id = ?`,
       ),
       recordToolCall: prepare(
         `INSERT INTO tool_calls (
@@ -1178,12 +1196,12 @@ export class DurabilityEngine {
         `SELECT seq, message_id, processing_status, routed_to FROM inbound_events WHERE processing_status IN ('pending', 'processing', 'turn_done')`,
       ),
       getOutboundByStatus: prepare(
-        `SELECT id, status, chat_jid, op_type, payload, wa_message_id, replay_policy,
+        `SELECT id, status, conversation_key, chat_jid, op_type, payload, wa_message_id, replay_policy,
                 created_at, submitted_at, ambiguity_at, source_inbound_seq, retry_count, error, is_terminal
          FROM outbound_ops WHERE status = ? ORDER BY id ASC`,
       ),
       getLiveReconcileMaybeSent: prepare(
-        `SELECT o.id, o.status, o.chat_jid, o.op_type, o.payload, o.wa_message_id,
+        `SELECT o.id, o.status, o.conversation_key, o.chat_jid, o.op_type, o.payload, o.wa_message_id,
                 o.replay_policy, o.created_at, o.submitted_at, o.ambiguity_at, o.source_inbound_seq,
                 o.retry_count, o.error, o.is_terminal
          FROM outbound_ops o
@@ -1342,13 +1360,13 @@ export class DurabilityEngine {
          LIMIT 200`,
       ),
       getStaleSubmitted: prepare(
-        `SELECT id, status, chat_jid, op_type, payload, wa_message_id, replay_policy,
+        `SELECT id, status, conversation_key, chat_jid, op_type, payload, wa_message_id, replay_policy,
                 created_at, submitted_at, ambiguity_at, source_inbound_seq, retry_count, error, is_terminal
          FROM outbound_ops
          WHERE status = 'submitted' AND submitted_at < datetime('now', '-30 seconds')`,
       ),
       getMessageByWaMessageId: prepare(
-        `SELECT pk, is_from_me FROM messages WHERE message_id = ?`,
+        `SELECT pk, is_from_me, conversation_key, chat_jid FROM messages WHERE message_id = ?`,
       ),
       resetMaybeSentWithWaToPending: prepare(
         `UPDATE outbound_ops
@@ -2577,13 +2595,140 @@ export class DurabilityEngine {
   }
 
   // ── Echo matching ──
-  matchEcho(waMessageId: string): boolean {
-    const row = this.statements.selectOutboundForEchoMatch.get(waMessageId) as { id: number } | undefined;
+  matchEcho(waMessageId: string, conversationKey: string): boolean {
+    if (conversationKey === '') return false;
+    const row = this.statements.selectOutboundForEchoMatch.get(waMessageId, conversationKey) as { id: number } | undefined;
     if (row) {
       this.markEchoed(row.id);
       return true;
     }
-    return false;
+
+    // Ingest calls this only for self echoes after deriving the canonical key.
+    // Do not make an independently proven live alias depend on message storage.
+    const claim = this.getUniqueEligibleLiveAliasClaim(waMessageId, conversationKey);
+    if (!claim) return false;
+
+    this.markEchoed(claim.id);
+    return true;
+  }
+
+  private hasExactEchoConversationIdentity(
+    left: string,
+    right: string | null,
+  ): boolean {
+    return left !== '' && right !== null && right !== '' && left === right;
+  }
+
+  private areProvenWhatsAppLidAliases(
+    leftKey: string | null,
+    leftChatJid: string | null,
+    rightKey: string | null,
+    rightChatJid: string | null,
+  ): boolean {
+    return this.isHistoricalWhatsAppLidKeyMappedTo(
+      leftKey,
+      leftChatJid,
+      rightKey,
+      rightChatJid,
+    ) || this.isHistoricalWhatsAppLidKeyMappedTo(
+      rightKey,
+      rightChatJid,
+      leftKey,
+      leftChatJid,
+    );
+  }
+
+  private getOutboundClaimsByWaMessageId(waMessageId: string): OutboundProviderIdClaim[] {
+    return this.statements.selectOutboundClaimsByWaMessageId.all(waMessageId) as OutboundProviderIdClaim[];
+  }
+
+  private isEchoEligibleClaim(claim: OutboundProviderIdClaim): boolean {
+    return claim.status === 'submitted'
+      || claim.status === 'maybe_sent'
+      || claim.status === 'quarantined'
+      || claim.status === 'failed_permanent';
+  }
+
+  private getUniqueEligibleLiveAliasClaim(
+    waMessageId: string,
+    conversationKey: string,
+  ): OutboundProviderIdClaim | undefined {
+    const equivalent = this.getOutboundClaimsByWaMessageId(waMessageId).filter((claim) =>
+      this.hasExactEchoConversationIdentity(claim.conversation_key, conversationKey)
+      || this.isHistoricalWhatsAppLidKeyMappedToCanonical(
+        claim.conversation_key,
+        claim.chat_jid,
+        conversationKey,
+      ));
+    return equivalent.length === 1 && this.isEchoEligibleClaim(equivalent[0])
+      ? equivalent[0]
+      : undefined;
+  }
+
+  private isUniqueEquivalentClaimForRecovery(
+    waMessageId: string,
+    opId: number,
+    witnessKey: string | null,
+    witnessChatJid: string | null,
+  ): boolean {
+    const equivalent = this.getOutboundClaimsByWaMessageId(waMessageId).filter((claim) =>
+      this.hasExactEchoConversationIdentity(claim.conversation_key, witnessKey)
+      || this.areProvenWhatsAppLidAliases(
+        claim.conversation_key,
+        claim.chat_jid,
+        witnessKey,
+        witnessChatJid,
+      ));
+    return equivalent.length === 1
+      && equivalent[0].id === opId
+      && this.isEchoEligibleClaim(equivalent[0]);
+  }
+
+  private isHistoricalWhatsAppLidKeyMappedTo(
+    lidKey: string | null,
+    lidChatJid: string | null,
+    phoneKey: string | null,
+    phoneChatJid: string | null,
+  ): boolean {
+    if (
+      !phoneKey
+      || !phoneChatJid
+      || parseWhatsAppDeliveryNamespace(phoneChatJid) !== DOMAIN_PERSONAL
+    ) {
+      return false;
+    }
+
+    try {
+      return toConversationKey(phoneChatJid) === phoneKey
+        && this.isHistoricalWhatsAppLidKeyMappedToCanonical(lidKey, lidChatJid, phoneKey);
+    } catch {
+      return false;
+    }
+  }
+
+  private isHistoricalWhatsAppLidKeyMappedToCanonical(
+    lidKey: string | null,
+    lidChatJid: string | null,
+    phoneKey: string | null,
+  ): boolean {
+    if (
+      !lidKey
+      || !lidChatJid
+      || !phoneKey
+      || parseWhatsAppDeliveryNamespace(lidChatJid) !== DOMAIN_LID
+    ) {
+      return false;
+    }
+
+    try {
+      const lid = toConversationKey(lidChatJid);
+      if (lid === '' || lidKey !== lid) return false;
+
+      const phoneJid = resolvePersistedLidToJid(this.db, lid);
+      return phoneJid !== null && toConversationKey(phoneJid) === phoneKey;
+    } catch {
+      return false;
+    }
   }
 
   // ── Tool calls ──
@@ -3311,10 +3456,19 @@ export class DurabilityEngine {
 
         if (op.wa_message_id) {
           const found = this.statements.getMessageByWaMessageId.get(op.wa_message_id) as
-            | { pk: number; is_from_me: number }
+            | { pk: number; is_from_me: number; conversation_key: string | null; chat_jid: string | null }
             | undefined;
 
-          if (found && found.is_from_me !== 1) {
+          if (found && (
+            found.is_from_me !== 1
+            || (!this.hasExactEchoConversationIdentity(op.conversation_key, found.conversation_key)
+              && !this.isUniqueEquivalentClaimForRecovery(
+                op.wa_message_id,
+                op.id,
+                found.conversation_key,
+                found.chat_jid,
+              ))
+          )) {
             this.quarantineMaybeSent(op, recoveryRun, operation);
           } else if (found) {
             this.markEchoed(op.id);

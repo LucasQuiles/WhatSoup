@@ -1777,6 +1777,9 @@ export class OutboundQueue implements IOutboundQueue {
     // dedupe it instead of delivering the reply twice. 32 uppercase-hex chars
     // (a dashless UUID) is a valid, unique key.id.
     const stableMessageId = crypto.randomUUID().replace(/-/g, '').toUpperCase();
+    const correlationMessageId = this.messenger.requestedIdIsProviderId === true
+      ? stableMessageId
+      : undefined;
 
     let lastEvidence: OutboundFailureEvidenceV1 | undefined;
     let shutdownDeadlineExpired = false;
@@ -1894,7 +1897,7 @@ export class OutboundQueue implements IOutboundQueue {
           this.durability,
           opId,
           lastEvidence,
-          lastEvidence.mutation_state === 'ambiguous' ? stableMessageId : undefined,
+          lastEvidence.mutation_state === 'ambiguous' ? correlationMessageId : undefined,
         );
       }
       return;
@@ -1911,7 +1914,7 @@ export class OutboundQueue implements IOutboundQueue {
     }, 'outbound send stopped with bounded failure disposition');
 
     if (opId !== undefined && this.durability) {
-      persistOutboundFailureDisposition(this.durability, opId, lastEvidence);
+      persistOutboundFailureDisposition(this.durability, opId, lastEvidence, correlationMessageId);
     }
 
     if (outboundFailureWarrantsUserNotice(lastEvidence)) {

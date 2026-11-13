@@ -311,6 +311,25 @@ describe('outbound failure disposition', () => {
     });
   });
 
+  it.each([
+    ['shed', new WhatSoupError(OUTBOUND_GOVERNOR_SHED_LOG, 'OUTBOUND_GOVERNOR_SHED'), 1],
+    ['admission rate limit', new RateLimitedError({ ...base, phase: 'not_started', retryAfterMs: 60_000 }), 1],
+    ['provider rejection', new AuthRequiredError({ ...base, phase: 'provider_call_started' }), 2],
+  ] as const)('retains unresolved ambiguity across a later %s without transferring retry ownership', (_name, error, submissions) => {
+    const first = classifyOutboundFailure(new Error('SEND_TIMEOUT'), {
+      retryOwner: 'agent_queue', attemptsRemaining: 2,
+    });
+    const second = classifyOutboundFailure(error, {
+      retryOwner: 'agent_queue', attemptsRemaining: 1, previousEvidence: first,
+    });
+    expect(second).toMatchObject({
+      mutation_state: 'ambiguous', retry_decision: 'stop', retry_owner: 'none',
+      retry_not_before: null, logical_attempt_count: 2, provider_submission_count: submissions,
+      evidence_coverage: 'partial',
+    });
+    expect(decodeOutboundFailureEvidence(encodeOutboundFailureEvidence(second))).toEqual(second);
+  });
+
   it('keeps failure timestamps monotonic across wall-clock rollback', () => {
     const first = classifyOutboundFailure(new Error('first'), {
       nowMs: Date.parse('2026-07-28T00:02:00.000Z'),

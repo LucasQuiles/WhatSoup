@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
 import type { RecoveryStats } from '../../src/core/durability.ts';
-import { canonicalizeChatJid } from '../../src/core/lid-resolver.ts';
+import { canonicalizeChatJid, resolvePersistedLidToJid } from '../../src/core/lid-resolver.ts';
 
 function makeDb(): Database {
   const db = new Database(':memory:');
@@ -28,9 +28,17 @@ describe('prepared statement caching', () => {
 
     // The engine and its stores prepare fixed SQL in the constructor, including
     // synthetic-source classification, scheduled-turn loss counts and late-echo
-    // checkpoint identity. Recovery and lifecycle methods must reuse those
+    // checkpoint identity and provider-ID claims.
+    // Recovery and lifecycle methods must reuse those
     // statements without preparing more.
-    expect(prepareSpy).toHaveBeenCalledTimes(168);
+    expect(prepareSpy).toHaveBeenCalledTimes(169);
+    prepareSpy.mockClear();
+
+    db.raw.exec(
+      "INSERT INTO lid_mappings (lid, phone_jid) VALUES ('12345', '15551234567@s.whatsapp.net')",
+    );
+    expect(resolvePersistedLidToJid(db, '12345@lid')).toBe('15551234567@s.whatsapp.net');
+    expect(prepareSpy).toHaveBeenCalledTimes(1);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');
@@ -68,7 +76,38 @@ describe('prepared statement caching', () => {
     });
     engine.markSending(outboundId);
     engine.markSubmitted(outboundId, 'wa-1');
-    engine.matchEcho('wa-1');
+    engine.matchEcho('wa-1', 'conv-1');
+
+    const aliasId = engine.createOutboundOp({
+      conversationKey: '12345',
+      chatJid: '12345@lid',
+      opType: 'text',
+      payload: '{"text":"alias"}',
+      replayPolicy: 'unsafe',
+    });
+    engine.markSending(aliasId);
+    engine.markSubmitted(aliasId, 'wa-alias');
+    expect(engine.matchEcho('wa-alias', '15551234567')).toBe(true);
+    expect(engine.matchEcho('wa-alias', '15551234567')).toBe(false);
+
+    const recoveryAliasId = engine.createOutboundOp({
+      conversationKey: '12345',
+      chatJid: '12345@lid',
+      opType: 'text',
+      payload: '{"text":"recover-alias"}',
+      replayPolicy: 'unsafe',
+    });
+    engine.markSending(recoveryAliasId);
+    engine.markSubmitted(recoveryAliasId, 'wa-alias-recovery');
+    engine.markMaybeSent(recoveryAliasId, 'uncertain delivery', 'wa-alias-recovery');
+    db.raw.exec(
+      `INSERT INTO messages (
+         chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp
+       ) VALUES (
+         '15551234567@s.whatsapp.net', '15551234567', 'bot@s.whatsapp.net',
+         'wa-alias-recovery', 'text', 1, 1
+       )`,
+    );
 
     const maybeSentId = engine.createOutboundOp({
       conversationKey: 'conv-2',
@@ -142,6 +181,7 @@ describe('prepared statement caching', () => {
     engine.preConnectRecovery();
     expect(engine.getTurnRecoverySupervisorCounts().scheduledTurnsLost).toBe(1);
     engine.postConnectRecovery();
+    expect(engine.getOutboundByStatus('echoed').map((op) => op.id)).toContain(recoveryAliasId);
     engine.sweepStaleSubmitted();
     engine.getHealthStats();
 

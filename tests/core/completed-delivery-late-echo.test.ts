@@ -99,7 +99,7 @@ describe('completed checkpoint identity after a late delivery echo', () => {
     const { seq } = pendingCompletion();
     storeWitness();
 
-    expect(engine.matchEcho(outgoingId)).toBe(true);
+    expect(engine.matchEcho(outgoingId, key)).toBe(true);
 
     expect(completedIdentity()).toBe(seq);
   });
@@ -269,7 +269,7 @@ describe('completed checkpoint identity after a late delivery echo', () => {
     const first = engine.getSessionCheckpoint(key);
 
     engine.markEchoed(op);
-    expect(engine.matchEcho(outgoingId)).toBe(false);
+    expect(engine.matchEcho(outgoingId, key)).toBe(false);
 
     expect(engine.getSessionCheckpoint(key)).toEqual(first);
   });

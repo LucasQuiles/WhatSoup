@@ -694,7 +694,7 @@ describe('durability.ts uncovered-branch coverage', () => {
 
   // ── matchEcho: no-row branch (line 477) ──
   it('matchEcho returns false when no submitted op matches the wa_message_id', () => {
-    expect(engine.matchEcho('WA_DOES_NOT_EXIST')).toBe(false);
+    expect(engine.matchEcho('WA_DOES_NOT_EXIST', 'unknown-conversation')).toBe(false);
   });
 
   // ── markEchoed: terminal + source_inbound_seq branch (lines 449-451) ──
