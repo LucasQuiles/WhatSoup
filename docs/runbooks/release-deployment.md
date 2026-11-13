@@ -125,6 +125,27 @@ it is not evidence of a published or qualified release.
 
 Export properties under those preconditions (all fail closed):
 
+- the commit must be `refs/remotes/origin/main` or an ancestor of it, in a
+  clone whose `origin` resolves (after `insteadOf` rewrites) to
+  `github.com/LucasQuiles/WhatSoup`. Run
+  `git fetch origin +refs/heads/main:refs/remotes/origin/main` in the exporting
+  clone first; that form also works in a single-branch clone. A commit that has
+  not landed on `main` is refused with `release source must be on main: commit
+  <sha> is not refs/remotes/origin/main (<main-sha>) or an ancestor of it`
+  before anything is written. The check reads the local remote-tracking ref and
+  never the network. Because `main` on that repository is protected against
+  force-push, a stale ref can refuse a landed commit (fetch, then retry) but
+  never admit an unlanded one. An `origin` that is a fork, mirror or local
+  checkout is refused, because its own unpushed commits would look landed. The
+  ref is read by its full name only, replace refs are ignored for every git read
+  in the export, and a repository with a legacy `info/grafts` file is refused,
+  so local history rewrites cannot make a commit look landed. A shallow clone
+  can refuse a landed commit beyond its depth; `git fetch --unshallow origin`
+  fixes that. The JSON report records the main commit used as `sourceOnMain`.
+  Hosts that start directly from a git checkout (`deploy/preflight-check.sh` on
+  a non-release tree) are not covered by this check; until every host runs a
+  release from `main`, refusing those restarts would stop hosts whose current
+  build has not landed yet;
 - source bytes come from `git archive <commit>`, so working-tree drift can
   never leak into a release;
 - the release is assembled in a staging directory and self-checked with the
