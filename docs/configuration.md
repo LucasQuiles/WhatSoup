@@ -2715,6 +2715,19 @@ bot persona.
 `passive` instances have no `systemPrompt` and are restricted to `self_only` access. No
 `ANTHROPIC_API_KEY` or `PINECONE_API_KEY` is needed.
 
+A passive instance connects with Baileys `markOnlineOnConnect: false` (`src/transport/connection.ts`),
+so its connect-time presence update is `unavailable`. Chat and agent instances pass `true` (`available`).
+The reason: a passive line is usually a person's own number, and the Baileys README states that
+WhatsApp does not send push notifications to the phone while a linked client is online. The test suite
+does not verify that phone-side effect. Message delivery and the device link do not depend on presence.
+
+Baileys 7.0.0-rc13 also announces the push name on every partial `creds.update`, as a presence stanza
+with no type, which WhatsApp reads as `available` (upstream issue #2553).
+`patches/@whiskeysockets+baileys+7.0.0-rc13+push-name-presence.patch`, applied by `postinstall`, announces
+only a new name, and as `unavailable` when `markOnlineOnConnect` is `false`
+(`tests/transport/baileys-push-name-presence.test.ts`). Drop the patch when upstream ships a fix (proposed
+in #2789).
+
 ---
 
 ## Database Migration History

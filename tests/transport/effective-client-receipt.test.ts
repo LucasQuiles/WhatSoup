@@ -189,10 +189,11 @@ describe('S2 — the receipt describes the socket that was actually built', () =
   });
 
   it('marks inherited library defaults as library_default, not as a blank', () => {
-    // The finding this exists for: neither socket path passes browser,
-    // syncFullHistory or markOnlineOnConnect, so both silently run with
-    // syncFullHistory=true and markOnlineOnConnect=true. That is a real behaviour
-    // nobody chose and nobody could see.
+    // The finding this exists for: neither socket path passes browser or
+    // syncFullHistory, and the pairing CLI does not pass markOnlineOnConnect, so
+    // they silently run with the library defaults (syncFullHistory=true,
+    // markOnlineOnConnect=true). That is a real behaviour nobody chose and nobody
+    // could see.
     const receipt = buildEffectiveClientReceipt({ version: [2, 3000, 1] }, RESOLVED, 'connection');
     expect(receipt.syncFullHistory).toEqual({ value: true, provenance: 'library_default' });
     expect(receipt.markOnlineOnConnect).toEqual({ value: true, provenance: 'library_default' });

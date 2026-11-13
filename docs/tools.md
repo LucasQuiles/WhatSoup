@@ -3247,7 +3247,7 @@ Send a typing indicator to the current chat.
 
 ### subscribe_presence
 
-Subscribe to presence updates for a WhatsApp contact or group JID. After subscribing, presence status will be available via `get_presence`.
+Subscribe to presence updates for a WhatsApp contact or group JID. Updates that WhatsApp delivers after subscribing are cached for `get_presence`; none may arrive, so an empty `get_presence` result means "no update received".
 
 | | |
 |---|---|
@@ -3260,6 +3260,11 @@ Subscribe to presence updates for a WhatsApp contact or group JID. After subscri
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | jid | string | required | Contact or group JID to subscribe to |
+
+**Passive lines:** a passive instance connects with presence `unavailable`
+([configuration](configuration.md#passive--mcp-only)). It is not verified whether WhatsApp
+delivers contacts' presence updates to a client in that state, so on a passive line an empty
+`get_presence` result does not mean the contact is offline.
 
 ---
 

@@ -161,8 +161,10 @@ async function startSocket(): Promise<void> {
 
   // S2: the pairing CLI is the SECOND, independent socket path, and it does not
   // match the runtime one — it hard-codes generateHighQualityLinkPreview: false
-  // where connection.ts passes the configured value. Both must emit a receipt or
-  // a bond paired here and run there has an unrecorded client difference.
+  // where connection.ts passes the configured value, and it leaves
+  // markOnlineOnConnect at the library default where connection.ts passes false
+  // for passive lines. Both must emit a receipt or a bond paired here and run
+  // there has an unrecorded client difference.
   const socketConfig = {
     version: resolvedVersion.version,
     logger: baileysLogger,

@@ -1117,6 +1117,12 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           ),
         },
         generateHighQualityLinkPreview: config.generateHighQualityLinkPreview,
+        // A passive line is a person's own number. The Baileys README says the phone
+        // app shows no notifications while a linked client is online (not verified on a
+        // live line), so a passive line connects as unavailable. This sets presence only;
+        // delivery and linking are unaffected. Chat and agent lines stay online, matching
+        // the library default.
+        markOnlineOnConnect: config.instanceType !== 'passive',
       };
       // Record AFTER makeWASocket returns. Recording first would log an ATTEMPTED
       // configuration as an effective client whenever the constructor throws, which

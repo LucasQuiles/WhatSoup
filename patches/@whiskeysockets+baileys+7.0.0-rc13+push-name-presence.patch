@@ -1,0 +1,19 @@
+diff --git a/node_modules/@whiskeysockets/baileys/lib/Socket/socket.js b/node_modules/@whiskeysockets/baileys/lib/Socket/socket.js
+--- a/node_modules/@whiskeysockets/baileys/lib/Socket/socket.js
++++ b/node_modules/@whiskeysockets/baileys/lib/Socket/socket.js
+@@ -840,9 +840,11 @@
+     ev.on('creds.update', update => {
+         const name = update.me?.name;
+-        // if name has just been received
+-        if (creds.me?.name !== name) {
+-            logger.debug({ name }, 'updated pushName');
++        // WhatSoup patch (upstream Baileys #2553, fix proposed in #2789): announce only a real new name; a partial
++        // update carries no `me`. A presence with no type reads as "available", so honour markOnlineOnConnect: false.
++        if (name && creds.me?.name !== name) {
++            const attrs = config.markOnlineOnConnect === false ? { name, type: 'unavailable' } : { name };
++            logger.debug(attrs, 'updated pushName');
+             sendNode({
+                 tag: 'presence',
+-                attrs: { name: name }
++                attrs
+             }).catch(err => {
