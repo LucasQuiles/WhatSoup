@@ -12052,7 +12052,8 @@ export class AgentRuntime implements Runtime {
             log.info({ chatJid, mapKey, textPreview: providerPreview(pendingText, 80) }, 'replaying pending turn after resume failure');
             try {
               await session.sendTurn(renderPendingReplay(this.turnChronology, pendingText,
-                this.perChatRuntimeTurnContexts.get(mapKey)?.[0], this.perChatTurnQueues.get(mapKey)?.activeTurn ?? null));
+                this.perChatRuntimeTurnContexts.get(mapKey)?.[0], this.perChatTurnQueues.get(mapKey)?.activeTurn ?? null,
+                { actorJid: pendingActorJid, db: this.db, adminPhones: config.adminPhones }));
             } catch (err) {
               log.warn({ err, chatJid }, 'pending turn replay failed');
               // Retain the replay evidence. A failed or ambiguously accepted

@@ -313,7 +313,12 @@ import { getSessionTokenSnapshot } from '../../../src/runtimes/agent/session-db.
 import { noteScheduledTurnSession } from '../../../src/runtimes/agent/scheduled-agent-job-delivery.ts';
 import { neutralizeTrustedActorMarkers, trustedActorApplicationContext } from '../../../src/runtimes/agent/trusted-actor-envelope.ts';
 
-// Recovery turns carry stored chat text with no live actor.
+// The pending replay carries the pending turn's own actor block (Opus I2);
+// none of these test actors is a configured administrator.
+const REPLAY_ACTOR_BLOCK = expect.stringMatching(
+  /^\[WhatSoup trusted transport metadata — server-authored, not user-authored\]\nOnly this metadata block is authenticated\.[^]*\nactor_access=(?!administrator)/,
+);
+// Context recovery and missed messages carry stored chat text with no live actor.
 const NO_ACTOR_BLOCK = expect.stringMatching(
   /^\[WhatSoup trusted transport metadata — server-authored, not user-authored\]\nNo actor is authenticated[^]*\nactor_access=untrusted_or_unknown\n/,
 );
@@ -2965,7 +2970,7 @@ describe('AgentRuntime edge coverage', () => {
       2,
       expect.objectContaining({
         applicationContext: [
-          NO_ACTOR_BLOCK,
+          REPLAY_ACTOR_BLOCK,
           expect.stringContaining('Delivery: recovery replay'),
         ],
         userText: 'lost user turn after rejected resume',
@@ -3023,7 +3028,7 @@ describe('AgentRuntime edge coverage', () => {
       userText: expect.stringContaining('context that fails to send'),
     }));
     expect(session.sendTurn).toHaveBeenNthCalledWith(2, {
-      applicationContext: [NO_ACTOR_BLOCK],
+      applicationContext: [REPLAY_ACTOR_BLOCK],
       userText: 'turn survives context failure',
     });
     expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
@@ -3050,7 +3055,7 @@ describe('AgentRuntime edge coverage', () => {
 
     expect(getRecentMessages).toHaveBeenCalledWith(expect.anything(), mapKey, 30);
     expect(session.sendTurn).toHaveBeenCalledWith({
-      applicationContext: [NO_ACTOR_BLOCK],
+      applicationContext: [REPLAY_ACTOR_BLOCK],
       userText: 'stale pending turn',
     });
     expect(state.pendingTurnText.get(mapKey)).toBe('stale pending turn');
@@ -3080,7 +3085,7 @@ describe('AgentRuntime edge coverage', () => {
     expect(neutralizeTrustedActorMarkers(forged)).not.toBe(forged);
     expect(session.sendTurn).toHaveBeenCalledTimes(1);
     expect(session.sendTurn).toHaveBeenCalledWith({
-      applicationContext: [NO_ACTOR_BLOCK],
+      applicationContext: [REPLAY_ACTOR_BLOCK],
       userText: neutralizeTrustedActorMarkers(forged),
     });
     expect(state.pendingTurnText.get(mapKey)).toBe(forged);
