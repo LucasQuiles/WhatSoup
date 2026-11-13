@@ -3,7 +3,7 @@ import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import type { IOutboundQueue, OutboundMessageRole } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { SessionGenerationIdentity } from '../../../src/runtimes/agent/session.ts';
-import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
+import { parseEvents, type AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { emitAlertChecked } from '../../../src/lib/emit-alert.ts';
 import { createRuntimeTurnContext, type RuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import type {
@@ -392,6 +392,8 @@ type RuntimeView = {
     consecutiveNonConvergentCompactions: Map<string, number>;
     compactionOutcomeRecordedForCompactAt: Map<string, number>;
     ineffective: number;
+    isCompactionNonConvergent(scopeKey: string): boolean;
+    contextGauge: { read(scopeKey: string, generation?: string): number | undefined };
   };
   sessionOwnership: {
     get(mapKey: string): { state: string; generation: number } | undefined;
@@ -2286,6 +2288,102 @@ describe('AgentRuntime edge coverage', () => {
       'Auto-compact convergence limit reached',
       expect.stringContaining(scopeKey),
     );
+  });
+
+  it('#3717c P5: a scheduled-scope livelock reset drops a known gauge; the new generation starts unknown', async () => {
+    // Real escalation route on the OWNED path production takes for a
+    // '::scheduled-agent-job' scope: maybeStartAutoCompact -> escalateCompactionLivelock
+    // -> resetWedgedResidentSession -> resetOwnedPerChatSession -> cleanupScope.
+    // The pre-reset context is KNOWN and over threshold, established from parsed
+    // assistant usage on the scheduled scope (not by writing the store). No cooldown
+    // is injected after the reset: cleanupScope clears it, as in production.
+    const runtime = makeRuntime({ sessionScope: 'per_chat', autoCompactInputTokens: 50 });
+    const state = view(runtime);
+    const scopeKey = 'sched-3717c::scheduled-agent-job';
+    const session = makeSession();
+    session.getStatus.mockReturnValue({
+      active: true, pid: null, sessionId: 'compact-session',
+      startedAt: new Date().toISOString(), messageCount: 5,
+      lastMessageAt: new Date().toISOString(), turnInFlight: false,
+    } as never);
+    session.getDbRowId.mockReturnValue(78 as never);
+    state.setOwnedPerChatSession(scopeKey, session);
+    // A registered event source, so the post-reset /compact can be owned and dispatched.
+    state.sessionEventToolScopes.set(session, scopeKey);
+    const queue = makeQueue('sched-3717c@s.whatsapp.net');
+    state.chatQueues.set(scopeKey, queue);
+    // Only the parsed line's request_usage is delivered: its text event would start an
+    // unrelated delivery path that this regression does not cover.
+    const feedLine = (source: typeof session, rawLine: string) => {
+      const usage = parseEvents(rawLine).filter((event) => event.type === 'request_usage');
+      expect(usage).toHaveLength(1);
+      for (const event of usage) {
+        state.handleEventWithContext(event, queue, source, undefined, undefined, scopeKey, scopeKey);
+      }
+    };
+    const assistantUsage = (id: string, context: number) => JSON.stringify({
+      type: 'assistant',
+      message: {
+        id, role: 'assistant', content: [{ type: 'text', text: `step ${id}` }],
+        usage: { input_tokens: 4, cache_creation_input_tokens: 6, cache_read_input_tokens: context - 10 },
+      },
+    });
+
+    // Pre-reset generation row:78: the last distinct request's context is 120 (> 50).
+    feedLine(session, assistantUsage('pre-a', 90));
+    feedLine(session, assistantUsage('pre-b', 120));
+    feedLine(session, assistantUsage('pre-a', 90)); // late duplicate of A: B stays current
+    expect(state.autoCompact.contextGauge.read(scopeKey, 'row:78')).toBe(120);
+
+    const overCumulative = () => vi.mocked(getSessionTokenSnapshot).mockReturnValueOnce({
+      totalInputTokens: 200, totalOutputTokens: 0, totalCacheReadTokens: 0,
+      lastCompactInputTokens: 70, lastCompactOutputTokens: 0, lastCompactCacheReadTokens: 0,
+    });
+    const nowMs = Date.now();
+    state.autoCompact.consecutiveRapidRearms.set(scopeKey, 3);
+    state.autoCompact.lastSuccessAt.set(scopeKey, nowMs);
+    state.autoCompact.rapidRearmRecordedForSuccessAt.set(scopeKey, nowMs);
+    overCumulative();
+    state.maybeStartAutoCompact(session, scopeKey);
+    for (let tick = 0; tick < 10; tick += 1) await Promise.resolve();
+
+    // The owned reset ran and dropped the scope's gauge with the rest of its bookkeeping.
+    expect(session.handleNew).not.toHaveBeenCalled();
+    expect(session.spawnSession).toHaveBeenCalledTimes(1);
+    expect(session.sendTurn).not.toHaveBeenCalled();
+    expect(state.autoCompact.contextGauge.read(scopeKey)).toBeUndefined();
+    expect(state.autoCompact.contextGauge.read(scopeKey, 'row:78')).toBeUndefined();
+    expect(state.autoCompact.cooldownUntil.has(scopeKey)).toBe(false);
+
+    // The fresh generation is a new DB row. A late usage line from the reset
+    // generation's process cannot become the new generation's context.
+    session.getDbRowId.mockReturnValue(79 as never);
+    const oldGeneration = makeSession();
+    oldGeneration.getDbRowId.mockReturnValue(78 as never);
+    feedLine(oldGeneration, assistantUsage('late-old', 500));
+    expect(state.autoCompact.contextGauge.read(scopeKey, 'row:79')).toBeUndefined();
+
+    // First evaluation of the new generation, 30 minutes on, cumulative still over,
+    // context unknown: no non-convergent verdict, no re-arm count, no second reset.
+    // The cumulative fallback still arms one /compact (genuine-over-limit protection).
+    vi.setSystemTime(new Date(Date.now() + 30 * 60 * 1000));
+    mockRuntimeLogger.info.mockClear();
+    overCumulative();
+    state.maybeStartAutoCompact(session, scopeKey);
+    for (let tick = 0; tick < 10; tick += 1) await Promise.resolve();
+
+    expect(state.autoCompact.consecutiveNonConvergentCompactions.get(scopeKey) ?? 0).toBe(0);
+    expect(state.autoCompact.isCompactionNonConvergent(scopeKey)).toBe(false);
+    expect(state.autoCompact.consecutiveRapidRearms.get(scopeKey) ?? 0).toBe(0);
+    expect(session.spawnSession).toHaveBeenCalledTimes(1);
+    expect(session.sendTurn.mock.calls).toEqual([['/compact']]);
+    expect(mockRuntimeLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ scopeKey, contextTokens: null, crossed: 'cumulative_fallback' }),
+      'auto compact triggered',
+    );
+    const resetAlerts = (mockEmitAlert.mock.calls as unknown as unknown[][])
+      .filter((call) => call[1] === 'auto_compact_convergence_reset');
+    expect(resetAlerts).toHaveLength(1);
   });
 
   it('drives the layer-1 escalation through the OWNED reset when a chat queue exists (#3527 F14)', async () => {

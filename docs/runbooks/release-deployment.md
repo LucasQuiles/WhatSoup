@@ -214,6 +214,11 @@ npm --silent run release:activate -- \
      owner-only (`0600`) instance plist, for example one carrying credentials
      in `EnvironmentVariables`, stays `0600` through the switch and through
      the automatic rollback;
+     Root-owned WhatSoup LaunchAgents are replaced through the root plist
+     helper installed on the host (see "Root-owned LaunchAgents: the root
+     plist helper" below). A missing or outdated helper refuses the
+     activation before the switch; a helper that reports incomplete recovery
+     fails the activation;
   3. reloads each label with the reload sequence below;
   4. verifies from the executing process (a new pid whose argv names
      `<release>/src/bootstrap.ts`, authenticated health with the manifest
@@ -232,6 +237,136 @@ Preconditions include: the wrapper symlink points at
 `deploy/whatsoup`, `src/bootstrap.ts` and `node_modules`; each auxiliary job
 currently runs from `--expect-current`; a health token and port resolve; the
 database exists; and no staged plist still references `--expect-current`.
+
+#### Root-owned LaunchAgents: the root plist helper
+
+A root-owned, `uchg`-protected `com.whatsoup.<name>.plist` in the bot user's
+`~/Library/LaunchAgents` cannot be replaced by the bot user. Activation
+replaces it through `protected_plist.py`, run as root by exactly one sudoers
+rule, from a fixed root-owned install:
+`/Library/PrivilegedHelperTools/com.whatsoup.protected-plist.py` (root:wheel
+`0444`). `scripts/lib/release-activation/root-helper.json` is the one record of
+that path and of the helper's sha256. Change the helper and that pin in the
+same commit; a test fails when they differ. Before any live change, activation
+compares the installed helper with the pin. This is a version check, not a
+security control. A mismatch refuses with "root plist helper missing or
+outdated; run the install step".
+
+What the helper guarantees:
+- Root changes no inode except the intended plist and the files that run
+  itself creates. It never writes, chmods, chowns or changes the flags of
+  anything else, whatever the bot user does to its folders during the run.
+- The plist must be root-owned, single-link, at most `0644`, readable by the
+  bot user, free of any ACL, and either unflagged or flagged `uchg` only. Root
+  changes only the `uchg` flag, and only while that flag freezes the plist's
+  single name. The ACL check runs on the opened file before any byte is read:
+  Darwin applies an ACL before the mode bits, so a deny entry could hide the
+  plist from the bot user while its mode bits allow the read. A folder whose
+  inheritable ACL would reach root's new copy is refused before any change.
+- The new contents must be a strict XML plist (Apple's document type, known
+  elements only, one top-level dictionary) whose `Label` names the target.
+- A failed replacement restores the original bytes and protection. When it
+  cannot do that and confirm it, the helper exits 3 and the activation fails
+  with "root plist helper recovery is incomplete": inspect that plist and its
+  `uchg` flag before any retry.
+- `sudo` relays every signal it receives, so the bot user can send the helper
+  any signal. While the helper's work runs, it blocks in its own thread every
+  signal except SIGKILL, SIGSTOP, SIGABRT and the fault signals (SIGSEGV,
+  SIGBUS, SIGFPE, SIGILL, SIGTRAP, SIGSYS). A mask holds only in one thread,
+  and the helper's `os.getgrouplist` call starts a second thread that leaves
+  SIGPROF and SIGEMT deliverable. So, for the whole process, the helper also
+  ignores the blocked signals whose default action terminates, cores or stops
+  it: SIGHUP, SIGINT, SIGQUIT, SIGEMT, SIGPIPE, SIGALRM, SIGTERM, SIGTSTP,
+  SIGTTIN, SIGTTOU, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGUSR1 and SIGUSR2.
+  The other blocked signals (SIGURG, SIGCONT, SIGCHLD, SIGIO, SIGWINCH,
+  SIGINFO) are discarded by default and keep their disposition. It also raises
+  its CPU limit. When the work ends, it restores the mask and the
+  dispositions. A signal can then end the helper again, but only after the
+  change or its recovery has finished; activation reports that death as
+  unconfirmed.
+- Signals still deliverable during the change: SIGKILL and SIGSTOP, which no
+  process can block, catch or ignore, and SIGABRT and the fault signals, which
+  report the helper's own crash but which the bot user can also send through
+  sudo. Whether the bot user can cause a SIGKILL or SIGSTOP of the helper is
+  not established. A death by SIGKILL, SIGABRT or a fault signal after `uchg`
+  is cleared re-protects nothing. It leaves the plist without `uchg`, holding
+  the old bytes before the rename or the new bytes after it, possibly with a
+  leftover `.<name>.activate-*` file in the folder. A SIGSTOP there holds the
+  plist in that state until the helper continues. Activation reports any of
+  these as unconfirmed (next item). An interruption raised as an exception,
+  such as KeyboardInterrupt, re-protects what it can and exits 3.
+- Activation trusts only exit 0 with the new bytes in place and exit 2
+  (refused, plist as found). Every other result means unconfirmed protection
+  and the rollback reports `rollback-unverified`: exit 3, a signal (SIGKILL or
+  a fault signal), the 30-second timeout, or another code. That includes
+  sudo's own exit 1 when the sudoers rule is missing.
+
+What it does not guarantee: the bot user owns `~/Library`, so it can always
+rename its own `LaunchAgents` folder and create another one. Between the rename
+into place and setting `uchg`, it can also swap the new plist; the helper
+detects that and reports incomplete recovery (exit 3), but cannot prevent it.
+In a user-owned home, `uchg` gives tamper resistance, not a security boundary.
+
+A host that lets the bot user run anything as root gets no protection from the
+helper. That includes a host whose sudoers grants the bot user
+`NOPASSWD: ALL`; check with `sudo -l -U <bot-user>`. It also includes a bot
+user in the `admin` group while an Xcode under `/Applications` is the selected
+developer folder: `/Applications` is admin-writable, and `/usr/bin/python3`
+resolves through that folder.
+sudo keeps `HOME`, so the rule runs Python isolated (`-I`), without
+`site` (`-S`, so no site-packages or `.pth` file loads) and without bytecode
+writes (`-B`); keep `DEVELOPER_DIR` and `TMPDIR` out of `env_keep`.
+
+Owner steps, once per host and again after any helper change:
+
+1. Check out the reviewed `origin/main` commit in a clone the bot user cannot
+   write (owned by an administrator, not inside the bot user's home). Running
+   the install step from the bot user's release tree would let that user change
+   what root installs.
+2. Install the helper. The step refuses, before it reads the pin or the helper,
+   when the bot user can write the clone's script, pin or helper or any folder
+   on their path from `/`. It also refuses on a pin mismatch, on an install
+   folder or ancestor that is not root-owned or is group- or other-writable, and
+   when the bot user can write any entry on the way to the interpreter: each
+   original path component and each symlink hop of `/usr/bin/python3`, the
+   selected developer folder and the import path, with the hops' folders. It
+   then walks every file and folder below each import-path folder (the
+   standard library and `lib-dynload`; root imports these modules) and refuses
+   any the bot user can write. A symlink there is checked along its target
+   chain, and one that links to a folder, or whose target cannot be inspected
+   (a dangling link included), refuses. "Can write" covers the owner,
+   the group and other write bits, and ACLs: any ACL entry that is not a deny
+   entry refuses. A deny-only ACL, such as `group:everyone deny delete` on
+   every macOS home, cannot grant write access and passes. Any error while
+   walking, reading an ACL or inspecting `/var/db/xcode_select_link` refuses;
+   only a missing select link means the Command Line Tools. When the install is
+   already current, it
+   changes nothing:
+
+   ```bash
+   sudo /usr/bin/python3 -I -S -B <clone>/scripts/lib/release-activation/install_root_helper.py --user <bot-user>
+   ```
+
+3. Install the one sudoers rule it prints, replacing any earlier `-I -B` rule.
+   Use no wildcards: sudo then matches these exact arguments, in this order.
+
+   ```bash
+   sudo visudo -f /etc/sudoers.d/whatsoup-protected-plist
+   # <bot-user> ALL = (root) NOPASSWD: /usr/bin/python3 -I -S -B /Library/PrivilegedHelperTools/com.whatsoup.protected-plist.py
+   ```
+
+4. Verify the install and the rule:
+
+   ```bash
+   shasum -a 256 /Library/PrivilegedHelperTools/com.whatsoup.protected-plist.py   # equals the sha256 in root-helper.json
+   ls -le /Library/PrivilegedHelperTools/com.whatsoup.protected-plist.py          # root wheel, -r--r--r--, no ACL
+   sudo -l -U <bot-user>   # lists the one rule and no broader NOPASSWD grant
+   ```
+
+The install step checks owners, mode bits and ACLs on the clone, the
+interpreter chain and the import-path folders. It does not walk the
+interpreter's framework library (`Python3`), which sits outside the import
+path. Step 4's `ls -le` shows any ACL on the installed helper.
 
 #### BOT ERRORS health-consumer prerequisite
 

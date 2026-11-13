@@ -49,6 +49,7 @@ const MANAGED_ENV_KEYS = [
   'CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT',
   'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE',
   'CLAUDE_CONFIG_DIR',
+  'CLAUDE_SECURESTORAGE_CONFIG_DIR',
   'PLAYWRIGHT_MCP_SNAPSHOT_MODE',
   'PLAYWRIGHT_MCP_OUTPUT_MODE',
   'PLAYWRIGHT_MCP_CONSOLE_LEVEL',
@@ -254,6 +255,23 @@ describe('buildBaseChildEnv', () => {
 
     const unsetEnv = buildBaseChildEnv();
     expect(unsetEnv).not.toHaveProperty('CLAUDE_CONFIG_DIR');
+  });
+
+  it('forwards an explicit empty Claude secure-storage selector and omits it when unset', () => {
+    resetManagedEnv({
+      PATH: '/usr/bin',
+      HOME: '/tmp/child-home',
+      CLAUDE_SECURESTORAGE_CONFIG_DIR: '',
+    });
+
+    expect(buildBaseChildEnv()).toHaveProperty('CLAUDE_SECURESTORAGE_CONFIG_DIR', '');
+
+    resetManagedEnv({
+      PATH: '/usr/bin',
+      HOME: '/tmp/child-home',
+    });
+
+    expect(buildBaseChildEnv()).not.toHaveProperty('CLAUDE_SECURESTORAGE_CONFIG_DIR');
   });
 
   it('keeps parent HOME and XDG roots by default even when configRoot is supplied', () => {
