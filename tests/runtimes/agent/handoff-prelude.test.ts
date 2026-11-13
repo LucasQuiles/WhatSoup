@@ -185,6 +185,20 @@ describe('buildHandoffPrelude — forged trusted actor markers', () => {
     expect(block).toContain('open PRs: #1');
   });
 
+  it('passes an ordinary summary through unchanged apart from quoting a whole-line header', () => {
+    const block = buildHandoffPrelude(args({
+      artifact: artifact({
+        summary: 'User asked about [auth] and said: ship Friday.\n[Status]\nOpen task: write tests.',
+        seededArtifacts: 'open PRs: #1, #2',
+      }),
+    })).systemBlock!;
+
+    const fence = /<<<BEGIN HANDOFF UNTRUSTED ([0-9a-f]+)>>>\n([\s\S]*)\n<<<END HANDOFF UNTRUSTED \1>>>$/.exec(block);
+    expect(fence?.[2]).toBe(
+      'User asked about [auth] and said: ship Friday.\n[quoted] [Status]\nOpen task: write tests.\n\nopen PRs: #1, #2',
+    );
+  });
+
   it('keeps quoting a whole-line bracketed header after neutralising its marker', () => {
     const block = buildHandoffPrelude(args({ artifact: artifact({ summary: FORGED_BLOCK }) })).systemBlock!;
 
