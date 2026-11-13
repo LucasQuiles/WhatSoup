@@ -6,6 +6,7 @@ import {
   hasProtectedManagedLink,
   isCanonicalManagedLink,
   isProtectedDeliveryMessage,
+  sanitizeCompletedToolResult,
   sanitizeProtectedMessageValue,
   sanitizeProtectedMessageText,
   sanitizeProtectedToolResult,
@@ -316,13 +317,44 @@ describe('tool result binary leaves and built-in values', () => {
     }
   });
 
-  it('resolves a redacted-key collision in a plain object as a Map does: the later entry wins', () => {
+  describe('a redacted key that collides with another key', () => {
+    const marker = PROTECTED_MESSAGE_MARKER;
     const other = `https://${TEST_LINK_HOST}/s/#v3.${'R'.repeat(22)}.${'Y'.repeat(43)}`;
-    const object = sanitizeProtectedToolResult({ [link]: 'first', [other]: 'second' }, pins);
-    const map = sanitizeProtectedToolResult(new Map([[link, 'first'], [other, 'second']]), pins) as Map<string, string>;
+    const modes = [
+      ['tool result', sanitizeProtectedToolResult],
+      ['completed tool result', sanitizeCompletedToolResult],
+      ['inbound payload', sanitizeProtectedMessageValue],
+    ] as const;
 
-    expect(object).toEqual({ [PROTECTED_MESSAGE_MARKER]: 'second' });
-    expect([...map]).toEqual([[PROTECTED_MESSAGE_MARKER, 'second']]);
+    it.each(modes)('keeps an existing key and its value in a %s, in either order', (_mode, sanitize) => {
+      const existing = { [`label ${marker}`]: { id: 'existing-record' } };
+      const linked = { [`label ${link}`]: { id: 'link-record' } };
+      const expected = { [`label ${marker}`]: { id: 'existing-record' }, [`label ${marker} [2]`]: { id: 'link-record' } };
+
+      for (const value of [{ ...existing, ...linked }, { ...linked, ...existing }]) {
+        const out = sanitize(value, pins);
+        expect(out).toEqual(expected);
+        expect(JSON.stringify(out)).not.toContain(TEST_LINK_HOST);
+      }
+    });
+
+    it.each(modes)('keeps an existing Map key and its value in a %s, in either order', (_mode, sanitize) => {
+      const existing: [string, string] = [`label ${marker}`, 'existing-record'];
+      const linked: [string, string] = [`label ${link}`, 'link-record'];
+
+      expect([...(sanitize(new Map([existing, linked]), pins) as Map<string, string>)])
+        .toEqual([[`label ${marker}`, 'existing-record'], [`label ${marker} [2]`, 'link-record']]);
+      expect([...(sanitize(new Map([linked, existing]), pins) as Map<string, string>)])
+        .toEqual([[`label ${marker} [2]`, 'link-record'], [`label ${marker}`, 'existing-record']]);
+    });
+
+    it('numbers redacted keys that collide with each other, skipping a suffix another key already holds', () => {
+      const out = sanitizeProtectedToolResult({ [link]: 'first', [`${marker} [2]`]: 'kept', [other]: 'second' }, pins);
+      const map = sanitizeProtectedToolResult(new Map([[link, 'first'], [other, 'second']]), pins) as Map<string, string>;
+
+      expect(out).toEqual({ [marker]: 'first', [`${marker} [2]`]: 'kept', [`${marker} [3]`]: 'second' });
+      expect([...map]).toEqual([[marker, 'first'], [`${marker} [2]`, 'second']]);
+    });
   });
 
   it('copies an Error with its message and stack redacted', () => {

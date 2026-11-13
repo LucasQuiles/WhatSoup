@@ -157,6 +157,27 @@ function binaryBytes(value: ArrayBuffer | ArrayBufferView): Uint8Array {
     : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
 }
 
+/**
+ * Names the keys of one cloned object or Map. A key that had no link keeps its
+ * name. A redacted key that equals a kept key or an earlier redacted key takes
+ * the first free ` [n]` suffix from 2, so no entry is overwritten or dropped;
+ * the suffix holds only digits, brackets and a space, so it cannot form a link.
+ */
+function createRedactedKeyNamer(keptKeys: Iterable<string>): (key: string, safeKey: string) => string {
+  const used = new Set(keptKeys);
+  // Per base, the next suffix to try, so repeated collisions stay linear.
+  const nextSuffix = new Map<string, number>();
+  return (key, safeKey) => {
+    if (safeKey === key) return key;
+    let suffix = nextSuffix.get(safeKey) ?? 2;
+    let name = safeKey;
+    while (used.has(name)) name = `${safeKey} [${suffix++}]`;
+    nextSuffix.set(safeKey, suffix);
+    used.add(name);
+    return name;
+  };
+}
+
 function sanitizeBoundedValue(
   value: unknown,
   pins: ProtectedDeliveryPins,
@@ -213,7 +234,19 @@ function sanitizeBoundedValue(
     if (current instanceof Map) {
       const clone = new Map<unknown, unknown>();
       seen.set(current, clone);
-      for (const [key, item] of current) clone.set(sanitize(key, depth + 1), sanitize(item, depth + 1));
+      // String keys are scanned first, which counts no node, so every kept key
+      // is known before a redacted key is named.
+      const entries = [...current];
+      const textKeys = entries.map(([key]) => (typeof key === 'string' ? sanitizeText(key) : undefined));
+      // Only a string key has a scanned text; one equal to its key had no link.
+      const nameKey = createRedactedKeyNamer(entries.flatMap(([key], index) => {
+        const text = textKeys[index];
+        return text !== undefined && text === key ? [text] : [];
+      }));
+      entries.forEach(([key, item], index) => {
+        const safeKey = typeof key === 'string' ? nameKey(key, textKeys[index]!) : sanitize(key, depth + 1);
+        clone.set(safeKey, sanitize(item, depth + 1));
+      });
       return clone;
     }
     if (current instanceof Set) {
@@ -249,10 +282,12 @@ function sanitizeBoundedValue(
         });
       }
     }
-    for (const key of Object.keys(current)) {
-      // JSON writes a key as text too, so it is redacted as a Map key is: a
-      // redacted key equal to an earlier one replaces that entry.
-      const safeKey = sanitizeText(key);
+    // JSON writes a key as text too, so keys are redacted as Map keys are.
+    const keys = Object.keys(current);
+    const textKeys = keys.map(sanitizeText);
+    const nameKey = createRedactedKeyNamer(keys.filter((key, index) => textKeys[index] === key));
+    for (const [index, key] of keys.entries()) {
+      const safeKey = nameKey(key, textKeys[index]!);
       try {
         clone[safeKey] = sanitize((current as Record<string, unknown>)[key], depth + 1);
       } catch (error) {

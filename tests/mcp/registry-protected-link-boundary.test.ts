@@ -67,6 +67,20 @@ describe('MCP response boundary', () => {
     });
   });
 
+  it('keeps an existing key whose text equals a redacted key', async () => {
+    const result = await callProbe(() => ({
+      [`label ${PROTECTED_MESSAGE_MARKER}`]: { id: 'existing-record' },
+      [`label ${LINK}`]: { id: 'link-record' },
+    }));
+
+    expect(result.isError).toBeUndefined();
+    expectRedacted(result.text);
+    expect(JSON.parse(result.text)).toEqual({
+      [`label ${PROTECTED_MESSAGE_MARKER}`]: { id: 'existing-record' },
+      [`label ${PROTECTED_MESSAGE_MARKER} [2]`]: { id: 'link-record' },
+    });
+  });
+
   it('redacts a string result', async () => {
     const result = await callProbe(() => `see ${LINK}`);
 
