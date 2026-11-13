@@ -16,7 +16,11 @@ There are two poll paths with different semantics:
 2. `send_poll` for non-blocking coordination.
    - Use when the poll is a survey, lightweight preference check, brainstorming aid, or coordination signal that does not need to unblock the current agent turn.
    - Set `selectableCount` above `1` for multi-select polls.
-   - Do not expect `send_poll` votes to be injected as a tool result. It sends the poll only.
+   - By default, `send_poll` returns after sending. With `awaitResult: true`, it stays open until a vote, expiry, or cancellation and returns the result.
+   - A blocking wait uses the tool timeout (default one hour, clamped to one second through 24 hours). The operation tracker and session hard watchdog allow that bounded wait. Unrelated stalled tools retain their normal deadlines.
+   - At most 8 awaited polls can be pending per conversation and 32 per runtime. A call over either limit returns an error and sends no poll. A slot frees when a pending poll is answered, expires or is cancelled, or when its send fails.
+   - When the provider reports a tool start and operation tracking is enabled, periodic progress during that bounded wait refreshes the typing indicator without sending “still working” text for the waiting operation. Unrelated operations keep their normal progress behavior.
+   - After the wait expires, a missing tool result still reaches ordinary stall recovery for child-process providers. Managed API providers use their hard-watchdog fallback. The session hard watchdog also bounds recovery when operation tracking is disabled.
 
 ## Agent Guidance
 
@@ -61,6 +65,18 @@ Agents should not add their own generic `Other` option unless they need custom w
 
 ## Operational Notes
 
+OpenCode does not report a tool start before its poll wait. Each OpenCode process
+therefore receives a fresh MCP token that associates a tracked wait with its exact
+session incarnation and provider turn. An old token cannot extend a later turn.
+The destination chat does not identify the requesting session. External callers
+can still await polls without extending an agent's watchdog. These tokens provide
+attribution, not authentication: a same-user process that obtains a current token
+can request the same bounded extension. Existing tool permissions remain in force.
+
+This OpenCode attribution protects watchdog continuity only; it does not start
+periodic operation progress. The typing indicator can therefore stop during an
+unresolved poll wait. Continuous typing is not guaranteed for OpenCode awaits.
+
 The `pending_polls` table is bounded in normal operation: rows are deleted on settle, hard-expiry, and cancellation, so steady-state row count tracks the number of genuinely in-flight polls (typically single digits). A row count that grows without settling indicates polls that are never resolving — investigate stuck sessions or a transport that stopped delivering `pollVoteReceived`.
 
 - **Monitoring**: `GET /health` exposes `sqlite.pending_polls_total` (live row count) and `runtime.agent.pollPersistenceErrors` (cumulative count of swallowed persist/remove/rehydrate failures since process start). A nonzero and climbing `pollPersistenceErrors` means the DB mirror is failing while the in-memory map stays authoritative — polls still work for the current process lifetime but will not survive a restart. Check disk space, DB file permissions, and schema version.
@@ -72,9 +88,11 @@ The `pending_polls` table is bounded in normal operation: rows are deleted on se
 
 | Scope | `AskUserQuestion` poll bridge | Default Other | `send_poll` | Group voting |
 | --- | --- | --- | --- | --- |
-| Per-chat DM | Blocking, correlated, answer injected | Auto-appended when under cap and no escape hatch | Available, non-blocking | Not applicable |
-| Per-chat group | Blocking, correlated via voter policy, answer injected (default `first-vote-wins`) | Auto-appended when under cap and no escape hatch | Available; `awaitResult: true` blocks; `resolution` selects strategy | 4 strategies shipped: `first-vote-wins`, `admin-only`, `admin-wins`, `majority-after-timeout` |
-| Shared/global session | Falls through to provider-native behavior | Not applied | Available, non-blocking | Not applicable |
+| Per-chat DM | Blocking, correlated, answer injected | Auto-appended when under cap and no escape hatch | Returns after sending by default; `awaitResult: true` waits with vote tracking | Not applicable |
+| Per-chat group | Blocking, correlated via voter policy, answer injected (default `first-vote-wins`) | Auto-appended when under cap and no escape hatch | Returns after sending by default; `awaitResult: true` waits with vote tracking; `resolution` selects strategy | 4 strategies shipped: `first-vote-wins`, `admin-only`, `admin-wins`, `majority-after-timeout` |
+| Shared/global session | Falls through to provider-native behavior | Not applied | Returns after sending by default; `awaitResult: true` waits with vote tracking | Not applicable |
+
+`awaitFailed` reports an explicitly requested wait that could not complete, including unavailable vote tracking, timeout or cancellation. An ordinary successful `send_poll` does not return `awaitFailed`.
 
 Group polls support the four resolution strategies via `send_poll`'s `resolution` parameter, or via the instance-level `pollResolution.defaultStrategy` config for `AskUserQuestion`. Each strategy:
 
@@ -102,6 +120,6 @@ For release claims, also run the relevant targeted tests and `npm run guard:test
 ## Known Limits
 
 - `AskUserQuestion` poll correlation is per-chat only (DMs and groups). Shared/global agent sessions fall through to their provider's native behavior.
-- `send_poll` is not a blocking request/response protocol.
+- `send_poll` returns immediately by default. `awaitResult: true` requires vote tracking and waits for a vote, timeout, or cancellation.
 - Implicit prose-to-poll conversion is intentionally not part of this contract. It is too prone to false positives unless a future spec defines exact trigger syntax and verification gates.
 - WhatsApp poll option text has tight practical limits. For paragraph-scale brainstorming, rely on companion text and concise labels rather than trying to pack full paragraphs into poll values.
