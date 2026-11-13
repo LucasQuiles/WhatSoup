@@ -22,6 +22,11 @@ import tailwindcss from '@tailwindcss/vite';
 import path from 'path';
 
 export default defineConfig({
+  // Browser tests cannot read the invoking process environment directly.
+  define: {
+    'import.meta.env.PERF_LANE_ENFORCE': JSON.stringify(process.env.PERF_LANE_ENFORCE ?? ''),
+  },
+
   // esbuild JSX: same transform the root config uses for console component tests.
   // @vitejs/plugin-react is NOT imported — it requires vite ^8 (console-only).
   esbuild: {

@@ -608,6 +608,15 @@ That shared script runs `test:browser` and `test:browser:motion`. It is wired in
 no-reduce exit-motion proofs cannot be skipped on release/tag paths. Branch-push verification still
 uses the faster non-browser design chain; quality.yml remains the PR/main browser gate.
 
+The performance harness in `tests/browser/perf-budget.test.tsx` receives only the named
+`PERF_LANE_ENFORCE` variable through `vitest.browser.config.ts`. The exact value `1` enables
+the existing mount and event-storm budget assertions; unset values and `0` keep measurements
+report-only. The harness uses valid disabled metrics-query fixtures and rejects console errors
+so a broken fixture cannot silently contaminate render measurements. Qualify enforcement with
+`PERF_LANE_ENFORCE=1 npm run test:browser -- tests/browser/perf-budget.test.tsx`; an over-budget
+run must fail. This does not change thresholds or enable blocking CI. See the
+[performance budget](../v35/19-performance-budget.md) for the separate policy and CI disposition.
+
 Report-only audits inside this chain remain report-only. Their presence in the shared chain proves
 that a structured inventory was generated during the verification run; it does not prove the inventory is
 empty. Any final acceptance claim must cite the finding counts and promotion mode, not merely the
