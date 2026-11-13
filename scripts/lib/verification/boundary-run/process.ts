@@ -203,20 +203,28 @@ async function reapProcessGroup(
   killGraceMs: number,
   killGroup: ProcessGroupSignal,
   probeGroup: ProcessGroupProbe,
-): Promise<{ state: ProcessGroupState; signalFailures: string[] }> {
-  let state = processGroupState(pgid, probeGroup);
+): Promise<{ state: ProcessGroupState; signalFailures: string[]; observedLive: boolean }> {
+  // A survivor that teardown kills still ends `reaped`, so record every live
+  // sighting; the caller must report it even when the pre-teardown probe was inconclusive.
+  let observedLive = false;
+  const observingProbe: ProcessGroupProbe = (group) => {
+    const membership = probeGroup(group);
+    if (membership === 'live') observedLive = true;
+    return membership;
+  };
+  let state = processGroupState(pgid, observingProbe);
   const signalFailures: string[] = [];
-  if (state === 'reaped') return { state, signalFailures };
+  if (state === 'reaped') return { state, signalFailures, observedLive };
 
   const termFailure = signalProcessGroup(pgid, 'SIGTERM', killGroup);
   if (termFailure !== null) signalFailures.push(termFailure);
-  state = await waitForProcessGroupExit(pgid, killGraceMs, probeGroup);
-  if (state === 'reaped') return { state, signalFailures };
+  state = await waitForProcessGroupExit(pgid, killGraceMs, observingProbe);
+  if (state === 'reaped') return { state, signalFailures, observedLive };
 
   const killFailure = signalProcessGroup(pgid, 'SIGKILL', killGroup);
   if (killFailure !== null) signalFailures.push(killFailure);
-  state = await waitForProcessGroupExit(pgid, 500, probeGroup);
-  return { state, signalFailures };
+  state = await waitForProcessGroupExit(pgid, 500, observingProbe);
+  return { state, signalFailures, observedLive };
 }
 
 interface BoundaryWatchdogCoreOptions {
@@ -292,12 +300,14 @@ async function executeBoundaryWatchdog(
     signalFailures.push(...teardown.signalFailures);
     await waitForPromiseOrTimeout(closed, 100);
   }
-  const survivedNaturalExit = !timedOut && initialGroupState === 'alive';
+  let teardownObservedLive = false;
   if (!timedOut && initialGroupState !== 'reaped') {
     const teardown = await reapProcessGroup(pid, options.killGraceMs, killGroup, probeGroup);
     finalGroupState = teardown.state;
     signalFailures.push(...teardown.signalFailures);
+    teardownObservedLive = teardown.observedLive;
   }
+  const survivedNaturalExit = !timedOut && (initialGroupState === 'alive' || teardownObservedLive);
   if (!timedOut && initialGroupState === 'reaped') finalGroupState = initialGroupState;
   const groupDead = finalGroupState === 'reaped';
   const issues: BoundaryValidationIssue[] = [];

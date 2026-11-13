@@ -3297,8 +3297,11 @@ When a scheduled-agent-job scope reaches the compaction convergence limit, its
 hard reset remains part of the completed turn's finalization barrier. Later
 scheduled occurrences wait until the reset settles; an overlapping reset request
 joins the same operation. Shutdown joins that terminal owner and rejects queued
-occurrences without dispatching them. A failed reset retains its convergence
-evidence and recovery state. It does not establish that the scope recovered.
+occurrences without dispatching them. A reset that fails before or during
+teardown of the old session retains its convergence evidence and recovery
+state. Once teardown succeeds, that bookkeeping is cleared before the
+replacement session starts, so a failed replacement spawn reports a failed
+reset without it. Neither case establishes that the scope recovered.
 
 The next real user turn after a successful compact is measured separately. If that turn's known context exceeds `autoCompactInputTokens`, `runtime.agent.autoCompactNextTurnOverThreshold` increments. An unknown context records nothing. If it happens inside the rapid re-arm window, it also counts as the rapid re-arm for that compact cycle. If it happens later, it remains telemetry only; delayed eligibility is not the spiral condition.
 
