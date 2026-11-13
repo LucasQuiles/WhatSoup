@@ -17,9 +17,11 @@ import { registerM365WorkflowAuthorityTool } from '../../../src/mcp/m365-workflo
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { WhatSoupSocketServer } from '../../../src/mcp/socket-server.ts';
 import type { ExecutingSessionContext, SessionContext } from '../../../src/mcp/types.ts';
+import { M365_MUTATION_DENY } from '../../../src/core/settings-template.ts';
 import {
   admitMicrosoft365Workflow,
   loadMicrosoft365PluginLaunch,
+  Microsoft365SettingsFiles,
   microsoft365AuthorityKey,
   recheckMicrosoft365Workflow,
   registerMicrosoft365Adapter,
@@ -795,6 +797,68 @@ describe.skipIf(SYSTEM_PYTHON === '')('Microsoft 365 provider adapter', () => {
     // A policy without an assignment passes through unchecked.
     expect(recheckMicrosoft365Workflow({ status: 'rejected' }, 'test')).toEqual({ status: 'rejected' });
     expect(recheckMicrosoft365Workflow(undefined, 'test')).toBeUndefined();
+  });
+
+  it('restores the deny floor in every settings file the runtime wrote once the native copy changes', () => {
+    vi.stubEnv('CLAUDE_CONFIG_DIR', undefined);
+    const trace = join(temporaryDirectory('whatsoup-m365-floor-'), 'm365-fixture-trace.jsonl');
+    const approved = policy(trace);
+    const plugin = pluginDirectory(trace);
+    const admittedServer = (JSON.parse(readFileSync(join(plugin.root, '.claude-plugin', 'plugin.json'), 'utf8')) as {
+      mcpServers: { microsoft_365: Record<string, unknown> };
+    }).mcpServers.microsoft_365;
+    const nativeRoot = nativeInstall(GUARDED_FIXTURE, admittedServer);
+    const admitted = admitMicrosoft365Workflow({
+      registry: new ToolRegistry(), policy: approved, pluginDirs: [plugin.root], perChatMcpSocketManager: {} as never,
+      resolvePerChatMapKey: (jid: string) => jid, sessionTokens: new SessionTokenRegistry(), instanceName: 'test',
+    });
+    expect(admitted).toBe(approved);
+    const enabledPlugins = { 'microsoft_365@microsoft-365-dev': true };
+    const settings = (claudeDir: string) => JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8')) as {
+      permissions: { deny: string[] }; enabledPlugins?: unknown; hooks?: { PreToolUse?: unknown[] };
+    };
+    const liftedM365Denies = (claudeDir: string) => M365_MUTATION_DENY.filter((entry) => settings(claudeDir).permissions.deny.includes(entry));
+    const sandboxHook = { PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: '/fixture/agent-sandbox.sh' }] }] };
+    const files = new Microsoft365SettingsFiles();
+    // Recorded first, so a failed rewrite must not stop the files after it.
+    const failing = join(temporaryDirectory('whatsoup-m365-failing-'), '.claude');
+    files.write('chat', failing, enabledPlugins, { hasSandbox: true, m365MutationPolicy: admitted });
+    const shared = join(temporaryDirectory('whatsoup-m365-shared-'), '.claude');
+    files.write('shared', shared, enabledPlugins, { hasSandbox: false, m365MutationPolicy: admitted });
+    const chat = join(temporaryDirectory('whatsoup-m365-chat-'), '.claude');
+    mkdirSync(chat, { recursive: true, mode: 0o700 });
+    writeFileSync(join(chat, 'settings.json'), JSON.stringify({ hooks: sandboxHook }), { mode: 0o600 });
+    files.write('chat', chat, enabledPlugins, { hasSandbox: true, m365MutationPolicy: admitted });
+    const removed = join(temporaryDirectory('whatsoup-m365-removed-'), '.claude');
+    files.write('chat', removed, enabledPlugins, { hasSandbox: true, m365MutationPolicy: admitted });
+    // Positive control: the approved writes lifted the Microsoft 365 mutation denies.
+    for (const claudeDir of [failing, shared, chat]) expect(liftedM365Denies(claudeDir)).toEqual([]);
+    // One workspace is removed; another can no longer be written.
+    rmSync(dirname(removed), { recursive: true, force: true });
+    rmSync(join(failing, 'settings.json'));
+    mkdirSync(join(failing, 'settings.json'));
+    adapterLog.error.mockClear();
+
+    // A re-check that keeps the assignment rewrites nothing.
+    expect(files.restoreFloorOnWithdrawal(admitted, recheckMicrosoft365Workflow(admitted, 'test'), 'test')).toBe(approved);
+    expect(liftedM365Denies(shared)).toEqual([]);
+
+    // A marketplace update replaces the native entry: the withdrawing re-check restores the floor everywhere.
+    copyFileSync(LAUNCHER_FIXTURE, join(nativeRoot, 'mcp-server', 'dist', 'index.cjs'));
+    const withdrawn = files.restoreFloorOnWithdrawal(admitted, recheckMicrosoft365Workflow(admitted, 'test'), 'test');
+    expect(m365MutationExceptionAllowed(withdrawn)).toBe(false);
+    expect(liftedM365Denies(shared)).toEqual([...M365_MUTATION_DENY]);
+    expect(liftedM365Denies(chat)).toEqual([...M365_MUTATION_DENY]);
+    // Each file keeps the sandbox flag it was written with: the per-chat sandbox hook survives.
+    expect(settings(chat).hooks?.PreToolUse).toEqual(sandboxHook.PreToolUse);
+    expect(settings(shared).enabledPlugins).toEqual(enabledPlugins);
+    // A removed workspace is not recreated.
+    expect(existsSync(removed)).toBe(false);
+    // The failed write is logged with a reason, never a path.
+    expect(adapterLog.error).toHaveBeenCalledTimes(1);
+    expect(adapterLog.error.mock.calls[0]![0]).toMatchObject({ instance: 'test', target: 'chat' });
+    expect(JSON.stringify(adapterLog.error.mock.calls[0])).not.toContain(failing);
+    expect(JSON.stringify(adapterLog.error.mock.calls[0])).not.toContain(tmpdir());
   });
 
   it('rejects any policy that carries a workflow assignment but is not the admitted one', () => {

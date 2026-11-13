@@ -108,12 +108,29 @@ export function registerRuntimeSettingsPolicyTests(
         // A marketplace update replaces the native copy mid-run: the next settings write
         // re-checks it, and the withdrawal holds for every later write.
         const admittedPolicy = runtime.getM365SettingsPolicy();
+        // The shared settings file exists on disk (this harness mocks the writer itself).
+        const { writeFileSync } = await import('node:fs');
+        writeFileSync(join(cwd, '.claude', 'settings.json'), '{}');
+        const writer = vi.mocked(ensurePermissionsSettings);
+        writer.mockClear();
+        // The floor write fails: the failure stays contained and the withdrawal stands in memory.
+        writer.mockImplementationOnce(() => { throw new Error('synthetic settings write failure'); });
         recheckSpy.mockImplementationOnce((p) => p?.status === 'approved' ? { status: 'approved', childEnv: p.childEnv } : p);
         expect(m365MutationExceptionAllowed(runtime.getM365SettingsPolicy())).toBe(false);
+        // Before the withdrawing call returned, the shared file was rewritten with the deny floor.
+        expect(writer).toHaveBeenCalledTimes(1);
+        const [claudeDir, type, plugins, opts] = writer.mock.calls[0]!;
+        expect([claudeDir, type, plugins, opts?.hasSandbox]).toEqual([join(cwd, '.claude'), 'agent', enabledPlugins, false]);
+        expect(opts?.m365MutationPolicy?.status).toBe('approved');
+        expect(m365MutationExceptionAllowed(opts?.m365MutationPolicy)).toBe(false);
         expect(m365MutationExceptionAllowed(runtime.getM365SettingsPolicy())).toBe(false);
+        // Later re-checks find nothing left to withdraw, so the floor is written once.
+        expect(writer).toHaveBeenCalledTimes(1);
         expect(recheckSpy).toHaveBeenCalledWith(admittedPolicy, 'test');
       }
     } finally {
+      // An unconsumed one-off writer failure must not leak into the next row.
+      vi.mocked(ensurePermissionsSettings).mockReset();
       recheckSpy.mockRestore();
       admitSpy.mockRestore();
       stateSpy.mockRestore();

@@ -125,9 +125,9 @@ import {
   ensureFallbackStateSchema,
   getFallbackState,
 } from './fallback-state-db.ts';
-import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
+import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts } from '../../core/workspace.ts';
 import { workspaceSocketPath } from '../../core/workspace-paths.ts';
-import { m365MutationExceptionAllowed, m365TurnAuthority, narrowM365RoutePolicy, supportsM365BridgeProvider, type M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
+import { m365RoutePolicy, m365TurnAuthority, narrowM365RoutePolicy, type M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
 import { inspectUserClaudeSettings } from '../../core/user-claude-settings.ts';
 import { isSamePhysicalDirectory } from '../../lib/home-path.ts';
 import { classifyActiveSessions, resolveAmbiguousAgeFallback } from './session-classifier.ts';
@@ -323,7 +323,7 @@ import { randomUUID } from 'node:crypto';
 import { EgressProxy } from './egress-proxy.ts';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { PerChatMcpSocketManager } from './per-chat-mcp-socket-manager.ts';
-import { admitMicrosoft365Workflow, recheckMicrosoft365Workflow, resolveExplainedM365MutationPolicy } from './microsoft365-adapter.ts';
+import { admitMicrosoft365Workflow, Microsoft365SettingsFiles, recheckMicrosoft365Workflow, resolveExplainedM365MutationPolicy } from './microsoft365-adapter.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
 import { SessionTokenRegistry } from '../../mcp/caller-attribution.ts';
 import type { ExecutingSessionContext, SessionContext } from '../../mcp/types.ts';
@@ -619,6 +619,7 @@ export class AgentRuntime implements Runtime {
   private readonly providerProcessIsolation: ProviderProcessIsolationConfig | undefined;
   private m365MutationPolicy: M365MutationPolicy | undefined;
   private m365SettingsPolicyReady = false;
+  private readonly m365SettingsFiles = new Microsoft365SettingsFiles();
   private readonly autoCompactInputTokens: number | undefined;
   private readonly memoryReadiness: MemoryReadinessSnapshot | undefined;
   private readonly agentProvider: string;
@@ -3925,9 +3926,14 @@ export class AgentRuntime implements Runtime {
   getM365SettingsPolicy(): M365MutationPolicy | undefined {
     // Grant reconciliation runs before startup restores a persisted fallback; afterwards every settings write re-checks the native plugin copy.
     if (this.m365MutationPolicy === undefined || !this.m365SettingsPolicyReady) return this.m365MutationPolicy && { status: 'rejected' as const };
-    this.m365MutationPolicy = recheckMicrosoft365Workflow(this.m365MutationPolicy, this.instanceName);
-    const guardedProvider = supportsM365BridgeProvider(this.effectiveProvider) && m365MutationExceptionAllowed(this.m365MutationPolicy);
-    return !this.isFallbackWindowActive || guardedProvider ? this.m365MutationPolicy : { status: 'rejected' };
+    return m365RoutePolicy(this.recheckM365Policy(), this.effectiveProvider, !this.isFallbackWindowActive);
+  }
+
+  /** Re-checks the native plugin copy; a withdrawal restores the deny floor in every settings file this runtime wrote before it returns. */
+  private recheckM365Policy(): M365MutationPolicy | undefined {
+    const before = this.m365MutationPolicy;
+    this.m365MutationPolicy = recheckMicrosoft365Workflow(before, this.instanceName);
+    return this.m365SettingsFiles.restoreFloorOnWithdrawal(before, this.m365MutationPolicy, this.instanceName);
   }
 
   async start(): Promise<void> {
@@ -4052,10 +4058,7 @@ export class AgentRuntime implements Runtime {
       const cwd = this.cwd ?? homedir();
       try {
         const claudeDir = ensureHomeConfinedDirectory(join(cwd, '.claude'), home);
-        ensurePermissionsSettings(claudeDir, 'agent', this.enabledPlugins, {
-          hasSandbox: !!this.sandbox,
-          m365MutationPolicy: this.getM365SettingsPolicy(),
-        });
+        this.m365SettingsFiles.write('shared', claudeDir, this.enabledPlugins, { hasSandbox: !!this.sandbox, m365MutationPolicy: this.getM365SettingsPolicy() });
         // User-level settings are not owned by this instance. Startup only
         // inspects for its exact hook and warns; it never repairs or normalizes
         // global hooks, permissions, or plugins.
@@ -10581,20 +10584,13 @@ export class AgentRuntime implements Runtime {
     const primaryBridgeRoute = !this.isFallbackWindowActive && route.source !== 'fallback'
       && route.provider === this.agentProvider && route.model === this.model
       && opts.providerConfigOverride === undefined;
-    // The guarded plugin binds writes to the employee and Microsoft account, so changing the language model need not
-    // revoke that employee's request. The native plugin copy is re-checked first: this session may write sandbox settings.
-    const m365Policy = this.m365MutationPolicy = recheckMicrosoft365Workflow(this.m365MutationPolicy, this.instanceName);
-    const guardedM365BridgeRoute = supportsM365BridgeProvider(sessionProvider) && m365MutationExceptionAllowed(m365Policy);
-    const sessionM365Policy: M365MutationPolicy | undefined = m365Policy === undefined ? undefined
-      : primaryBridgeRoute || guardedM365BridgeRoute ? m365Policy : { status: 'rejected' };
+    // The native plugin copy is re-checked first: this session may write sandbox settings.
+    const sessionM365Policy = m365RoutePolicy(this.recheckM365Policy(), sessionProvider, primaryBridgeRoute);
 
     // Each sandbox cwd owns its settings; route changes must restore the deny
     // floor before a fallback can reuse a workspace approved for the primary.
     if (this.sandboxPerChat && opts.cwd) {
-      ensurePermissionsSettings(join(opts.cwd, '.claude'), 'agent', this.enabledPlugins, {
-        hasSandbox: true,
-        m365MutationPolicy: sessionM365Policy,
-      });
+      this.m365SettingsFiles.write('chat', join(opts.cwd, '.claude'), this.enabledPlugins, { hasSandbox: true, m365MutationPolicy: sessionM365Policy });
     }
 
     const session = new SessionManager({

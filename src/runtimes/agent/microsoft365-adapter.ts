@@ -1,15 +1,17 @@
 import { createHash } from 'node:crypto';
-import { accessSync, constants, lstatSync, readFileSync, readlinkSync, realpathSync, statSync, type Stats } from 'node:fs';
+import { accessSync, constants, existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, statSync, type Stats } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
   M365_PLUGIN_KEY,
   m365MutationAdmissionGap,
+  m365MutationExceptionAllowed,
   resolveM365MutationPolicy,
   supportsM365BridgeProvider,
   type M365MutationPolicy,
   type ResolveM365MutationPolicyOptions,
 } from '../../core/m365-bridge-policy.ts';
+import { ensurePermissionsSettings } from '../../core/workspace.ts';
 import { createChildLogger } from '../../logger.ts';
 import { isNonEmptyString, isRecord } from '../../lib/type-guards.ts';
 import type { SessionTokenRegistry } from '../../mcp/caller-attribution.ts';
@@ -523,4 +525,52 @@ export function recheckMicrosoft365Workflow(policy: M365MutationPolicy | undefin
   }
   const mismatch = nativePluginMismatch(digest);
   return mismatch === undefined ? policy : withdrawnForNativeCopy(policy, mismatch, instanceName);
+}
+
+/** Which native settings file a runtime wrote, logged in place of its path. */
+export type Microsoft365SettingsTarget = 'shared' | 'chat';
+
+/**
+ * The native settings files a runtime writes: its shared `.claude` directory and each sandboxed
+ * chat's. Every write goes through the settings writer and records its directory, its sandbox flag
+ * and its plugins, so a withdrawal can restore the deny floor in each file exactly as it was written.
+ */
+export class Microsoft365SettingsFiles {
+  private readonly written = new Map<string, { target: Microsoft365SettingsTarget; enabledPlugins?: Record<string, boolean>; hasSandbox: boolean }>();
+
+  write(
+    target: Microsoft365SettingsTarget,
+    claudeDir: string,
+    enabledPlugins: Record<string, boolean> | undefined,
+    opts: { hasSandbox: boolean; m365MutationPolicy?: M365MutationPolicy },
+  ): void {
+    ensurePermissionsSettings(claudeDir, 'agent', enabledPlugins, opts);
+    this.written.set(claudeDir, { target, enabledPlugins, hasSandbox: opts.hasSandbox });
+  }
+
+  /**
+   * Runs after each re-check with the runtime policy before and after it, and returns `after`.
+   * When the re-check withdrew the assignment, every recorded file is rewritten with the deny floor
+   * before this returns. A file that is gone (its workspace was removed) is not recreated. A failed
+   * write is logged with a reason, never a path, and the next file is still written; the caller has
+   * already stored `after`, so authority stays withdrawn in memory either way.
+   */
+  restoreFloorOnWithdrawal(
+    before: M365MutationPolicy | undefined,
+    after: M365MutationPolicy | undefined,
+    instanceName?: string,
+  ): M365MutationPolicy | undefined {
+    if (!m365MutationExceptionAllowed(before) || m365MutationExceptionAllowed(after)) return after;
+    for (const [claudeDir, file] of this.written) {
+      if (!existsSync(join(claudeDir, 'settings.json'))) continue;
+      try {
+        ensurePermissionsSettings(claudeDir, 'agent', file.enabledPlugins, { hasSandbox: file.hasSandbox, m365MutationPolicy: after });
+      } catch (err) {
+        const code = isRecord(err) ? err['code'] : undefined;
+        log.error({ instance: instanceName, target: file.target, reason: typeof code === 'string' ? code : 'write-failed' },
+          'Microsoft 365 deny floor not restored in a settings file; workflow authority stays withdrawn');
+      }
+    }
+    return after;
+  }
 }

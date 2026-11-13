@@ -373,12 +373,13 @@ describe('fallback chain selection', () => {
     }, process.pid) ?? undefined);
     const recheck = admittedUnchangedRecheck();
     try {
-      const workspacePath = sandboxPerChat ? sandboxTmp.make('chat') : undefined;
-      if (workspacePath) provisionWorkspace({
-        workspacePath, instanceCwd: workspacePath,
-        sandbox: { allowedPaths: [workspacePath], allowedTools: ['Read'], allowedMcpTools: ['mcp__github__create_issue'], bash: { enabled: false } },
+      const provision = (path: string) => provisionWorkspace({
+        workspacePath: path, instanceCwd: path,
+        sandbox: { allowedPaths: [path], allowedTools: ['Read'], allowedMcpTools: ['mcp__github__create_issue'], bash: { enabled: false } },
         hookPath: '/fixture/agent-sandbox.sh', mcpServerPath: '/fixture/proxy.ts',
       });
+      const workspacePath = sandboxPerChat ? sandboxTmp.make('chat') : undefined;
+      if (workspacePath) provision(workspacePath);
       const runtime = makeRuntime({
         model: 'primary-model',
         agentFallbacks: [{ provider: 'claude-cli', model: 'fallback-model' }],
@@ -432,14 +433,27 @@ describe('fallback chain selection', () => {
       const probeEnv = vi.mocked(probeFallbackBinary).mock.calls[0]![1]!;
       expect(Object.keys(probeEnv).filter((key) => key.startsWith('MS365_') || key === 'ALLOW_M365_MUTATIONS')).toEqual([]);
       if (guarded) {
+        // Another sandboxed chat's settings were written while the assignment held.
+        const otherWorkspace = workspacePath ? sandboxTmp.make('other-chat') : undefined;
+        const otherSettings = () => JSON.parse(readFileSync(join(otherWorkspace!, '.claude/settings.json'), 'utf8'));
+        if (otherWorkspace) {
+          provision(otherWorkspace);
+          view(runtime).createSessionManager({
+            chatJid: 'bridge-other@s.whatsapp.net', cwd: otherWorkspace, onEvent: vi.fn(), onCrash: vi.fn(), notifyUser: vi.fn(),
+          });
+          expect(M365_MUTATION_DENY.filter((entry) => otherSettings().permissions.deny.includes(entry))).toEqual([]);
+        }
         // A new session re-checks the native plugin copy before it writes sandbox settings. Once
         // the copy no longer matches, the session loses the exception and the sandbox floor returns.
         recheck.mockImplementationOnce(withdrawAssignment);
         const rechecked = session();
         expect(m365MutationExceptionAllowed(rechecked.m365MutationPolicy)).toBe(false);
-        if (workspacePath) {
+        if (workspacePath && otherWorkspace) {
           const settings = JSON.parse(readFileSync(join(workspacePath, '.claude/settings.json'), 'utf8'));
           expect(settings.permissions.deny).toEqual(expect.arrayContaining([...M365_MUTATION_DENY]));
+          // The withdrawal also rewrote the other chat's file, keeping its sandbox hook.
+          expect(otherSettings().permissions.deny).toEqual(expect.arrayContaining([...M365_MUTATION_DENY]));
+          expect(otherSettings().hooks.PreToolUse).toHaveLength(1);
         }
       }
     } finally {

@@ -338,6 +338,21 @@ export function narrowM365RoutePolicy(
   return m365MutationExceptionAllowed(snapshot) && !m365MutationExceptionAllowed(current) ? { status: 'rejected' } : snapshot;
 }
 
+/**
+ * The policy a route gets from the runtime policy. The primary route keeps it. The guarded plugin
+ * binds writes to the employee and Microsoft account, so changing the language model need not revoke
+ * that employee's request: another route on a bridge provider keeps a policy that carries the
+ * assignment. Any other route is rejected.
+ */
+export function m365RoutePolicy(
+  policy: M365MutationPolicy | undefined,
+  provider: string | undefined,
+  primaryRoute: boolean,
+): M365MutationPolicy | undefined {
+  if (policy === undefined) return undefined;
+  return primaryRoute || (supportsM365BridgeProvider(provider) && m365MutationExceptionAllowed(policy)) ? policy : { status: 'rejected' };
+}
+
 export function validateM365BridgeAgentOptions(opts: Record<string, unknown>): { field: string; message: string } | null {
   if (opts['allowM365Mutations'] !== undefined && typeof opts['allowM365Mutations'] !== 'boolean') {
     return { field: 'agentOptions.allowM365Mutations', message: 'agentOptions.allowM365Mutations must be a boolean when provided' };
