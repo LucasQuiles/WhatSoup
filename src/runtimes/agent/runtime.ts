@@ -125,7 +125,6 @@ import {
   getFallbackState,
 } from './fallback-state-db.ts';
 import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts } from '../../core/workspace.ts';
-import { workspaceSocketPath } from '../../core/workspace-paths.ts';
 import { m365NativeFloorPolicy, m365RoutePolicy, m365TurnAuthority, narrowM365RoutePolicy, type M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
 import { inspectUserClaudeSettings } from '../../core/user-claude-settings.ts';
 import { isSamePhysicalDirectory } from '../../lib/home-path.ts';
@@ -343,7 +342,6 @@ import {
   templateForFallbackReason,
 } from './runtime-presentation.ts';
 import {
-  buildProviderMcpConfigArgs,
   createProviderMcpBridge,
   providerMcpProxyScriptPath,
   writeProviderMcpConfig,
@@ -378,7 +376,9 @@ import {
   suppressStreamedProviderFailure as gateStreamedProviderFailure,
 } from './streamed-provider-failure.ts';
 import { isProcessAlive, sessionUsesInProcessBridge } from './runtime-predicates.ts';
-import { canaryStoreProvisioned, readProviderCanaryAdmission } from './provider-canary-proof.ts';
+import {
+  buildProviderToolSession, providerCanaryAdmissionGate, sessionProviderMcpConfigArgs, sessionTokenLeaseBinding,
+} from './session-mcp-wiring.ts';
 import { probeBinaryCommand, type listModelCatalog } from './providers/binary-preflight.ts';
 import { claudeRefreshLockGrace, refreshClaudeLoginAhead } from './providers/claude-refresh-ahead.ts';
 import { probePrimaryModelUsability, type PrimaryProbeServiceContext } from './providers/primary-model-usability.ts';
@@ -10574,24 +10574,11 @@ export class AgentRuntime implements Runtime {
       throw new Error(`per_chat ${sessionProvider} session for ${sessionConversationKey} would spawn without an actor-bound socket`);
     }
     const sessionManagerId = randomUUID();
-    const providerToolSession: SessionContext =
-      this.sandboxPerChat || this.sessionScope === 'per_chat'
-        ? {
-            tier: 'chat-scoped',
-            conversationKey: deliveryConversationKey,
-            deliveryJid: opts.chatJid,
-            ...(opts.actorJid ? { actorJid: opts.actorJid } : {}),
-            ...(opts.cwd ? { allowedRoot: opts.cwd } : {}),
-            ...(isScheduledAgentJobMapKey(sessionConversationKey)
-              ? { purpose: 'scheduled-agent-job' as const }
-              : {}),
-          }
-        : {
-            tier: 'global',
-            ...(opts.actorJid ? { actorJid: opts.actorJid } : {}),
-            ...(!this.shared ? { conversationKey: deliveryConversationKey } : {}),
-          };
-    providerToolSession.turnReplySessionId = sessionManagerId;
+    const providerToolSession = buildProviderToolSession({
+      chatScoped: this.sandboxPerChat || this.sessionScope === 'per_chat', shared: this.shared,
+      chatJid: opts.chatJid, deliveryConversationKey, sessionConversationKey,
+      actorJid: opts.actorJid, cwd: opts.cwd, turnReplySessionId: sessionManagerId,
+    });
     if (opts.trackSingletonMcpSession) {
       this.singletonProviderToolSession = providerToolSession;
     }
@@ -10644,11 +10631,9 @@ export class AgentRuntime implements Runtime {
       mcpSessionContext: providerToolSession,
       whatsoupInstance: this.instanceName,
       whatsoupMcpSocket: mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
-      whatsoupMcpSessionLease: this.sessionTokens.mintLease({
-        kind: 'session',
-        socketPath: mcpSocketPath ?? this.globalMcpSocketPath ?? (this.sandboxPerChat && opts.cwd ? workspaceSocketPath(opts.cwd) : ''),
-        turnReplySessionId: sessionManagerId,
-      }),
+      whatsoupMcpSessionLease: this.sessionTokens.mintLease(sessionTokenLeaseBinding({
+        mcpSocketPath, globalMcpSocketPath: this.globalMcpSocketPath, sandboxPerChat: this.sandboxPerChat, cwd: opts.cwd, turnReplySessionId: sessionManagerId,
+      })),
       providerTransitionReady,
       handoffSystemBlock: this.buildHandoffSystemBlock(sessionConversationKey, route ? route.provider : this.effectiveProvider),
       degradedCapabilitiesBlock: managedLoopDegraded
@@ -10663,30 +10648,13 @@ export class AgentRuntime implements Runtime {
       egressProxyPort: this.egressProxy?.port,
       providerExecutionGate: this.providerExecutionGate,
       providerProcessIsolation: this.providerProcessIsolation,
-      providerMcpConfigArgs: this.globalMcpSocketPath
-        ? buildProviderMcpConfigArgs(
-            sessionProvider,
-            opts.cwd ?? this.cwd ?? homedir(),
-            this.globalMcpSocketPath,
-            mcpServerScript,
-          )
-        : [],
-      providerCanaryAdmission: actorSocketRequired && canaryStoreProvisioned(config.stateRoot)
-        ? async () => {
-            const admission = await readProviderCanaryAdmission({
-              providerId: sessionProvider,
-              binary: getProviderBinary(sessionProvider) ?? '',
-              proxyScriptPath: mcpServerScript,
-              stateRoot: config.stateRoot,
-              sessionScope: this.sessionScope,
-              sandboxPerChat: this.sandboxPerChat,
-            });
-            if (!admission.allowed) {
-              throw new Error('provider MCP canary proof unavailable');
-            }
-            return admission;
-          }
-        : undefined,
+      providerMcpConfigArgs: sessionProviderMcpConfigArgs({
+        provider: sessionProvider, cwd: opts.cwd ?? this.cwd, globalMcpSocketPath: this.globalMcpSocketPath, proxyScriptPath: mcpServerScript,
+      }),
+      providerCanaryAdmission: providerCanaryAdmissionGate(actorSocketRequired, {
+        providerId: sessionProvider, proxyScriptPath: mcpServerScript, stateRoot: config.stateRoot,
+        sessionScope: this.sessionScope, sandboxPerChat: this.sandboxPerChat,
+      }),
     });
     providerToolSession.turnReplySink = this.turnReplySinks.forSession(session, opts.sessionMapKey);
     this.sessionManagerIds.set(session, sessionManagerId);
