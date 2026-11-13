@@ -97,21 +97,21 @@ describe('validateInstanceConfig clientOutputPolicies admission', () => {
     expect(JSON.stringify(result)).not.toContain(privateValue);
   });
 
-  it('rejects key IDs containing a colon under the approved ASCII-token grammar', () => {
+  it.each([
+    ['undefined', undefined],
+    ['null', null],
+    ['an empty object', {}],
+    ['a populated legacy object', {
+      keyId: 'legacy-key',
+      publicKey: 'legacy-public-key',
+      requiredActions: ['send_message'],
+    }],
+  ])('rejects client-output authorization set to %s in the shared validator', (_shape, authorization) => {
     expect(validate({
-      clientOutputPolicies: [{
-        ...SYNTHETIC_POLICY,
-        authorization: {
-          keyId: 'synthetic:key',
-          publicKey: Buffer.concat([
-            Buffer.from('302a300506032b6570032100', 'hex'),
-            Buffer.alloc(32, 9),
-          ]).toString('base64url'),
-          requiredActions: ['send_message'],
-        },
-      }],
+      clientOutputPolicies: [{ ...SYNTHETIC_POLICY, authorization }],
     })).toMatchObject({
-      field: 'clientOutputPolicies[0].authorization.keyId',
+      field: 'clientOutputPolicies[0].authorization',
+      message: 'clientOutputPolicies[0].authorization is unsupported because client-output authorization is not enforced',
     });
   });
 });

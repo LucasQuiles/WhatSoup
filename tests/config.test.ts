@@ -2567,6 +2567,24 @@ describe('config — client-output policy registry', () => {
   });
 
   it.each([
+    ['an empty object', {}],
+    ['a populated legacy object', {
+      keyId: 'legacy-key',
+      publicKey: 'legacy-public-key',
+      requiredActions: ['send_message'],
+    }],
+  ])('fails closed when direct INSTANCE_CONFIG has authorization set to %s', async (_shape, authorization) => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      type: 'agent',
+      clientOutputPolicies: [{ ...policy('legacy-authorization-key'), authorization }],
+    }));
+
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /clientOutputPolicies\[0\]\.authorization is unsupported because client-output authorization is not enforced/,
+    );
+  });
+
+  it.each([
     { type: 'chat', transport: undefined },
     { type: 'agent', transport: 'signal' },
   ])('does not activate environment policies for an incompatible $type/$transport runtime', async ({ type, transport }) => {

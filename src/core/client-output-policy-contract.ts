@@ -33,26 +33,8 @@ export type ClientOutputDecision =
       satisfiesReplyGuarantee: false;
     }>;
 
-export const CLIENT_OUTPUT_POLICY_ACTIONS = Object.freeze([
-  'assistant_text',
-  'send_message',
-  'reply_message',
-  'edit_message',
-  'send_poll',
-  'send_media',
-] as const);
-
-export type ClientOutputPolicyAction = (typeof CLIENT_OUTPUT_POLICY_ACTIONS)[number];
-
-export type ClientOutputPolicyAuthorization = Readonly<{
-  keyId: string;
-  publicKey: string;
-  requiredActions: readonly ClientOutputPolicyAction[];
-}>;
-
 export type ConfiguredClientOutputPolicy = ClientOutputPolicy & Readonly<{
   conversationKey: string;
-  authorization?: ClientOutputPolicyAuthorization;
 }>;
 
 const CHEROKEE_CODE_POINT = /^\p{Script=Cherokee}$/u;
