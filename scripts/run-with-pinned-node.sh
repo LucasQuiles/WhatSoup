@@ -1,10 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+bootstrap_exit_code=1
+bootstrap_active=0
+
+usage() {
+  echo "Usage: scripts/run-with-pinned-node.sh [--bootstrap-exit-code 2] <script.ts> [args...]" >&2
+}
+
+if [ "${1:-}" = "--bootstrap-exit-code" ]; then
+  if [ "${2:-}" != "2" ]; then
+    usage
+    exit 64
+  fi
+  bootstrap_exit_code=2
+  shift 2
+fi
+
 if [ "$#" -lt 1 ]; then
-  echo "Usage: scripts/run-with-pinned-node.sh <script.ts> [args...]" >&2
+  usage
   exit 64
 fi
+
+bootstrap_active=1
+if [ "$bootstrap_exit_code" -eq 2 ]; then
+  trap 'exit_code=$?; trap - EXIT; if [ "$bootstrap_active" -eq 1 ] && [ "$exit_code" -eq 1 ]; then exit "$bootstrap_exit_code"; fi; exit "$exit_code"' EXIT
+fi
+
+bootstrap_fail() {
+  bootstrap_active=0
+  exit "$bootstrap_exit_code"
+}
 
 # Resolve a path to its physical (fully symlink-free) location. Uses `pwd -P`
 # so directory-level symlinks are resolved too — not just a trailing symlinked
@@ -33,7 +59,7 @@ esac
 
 if [ ! -f "$TARGET" ]; then
   echo "FATAL: script not found: $TARGET" >&2
-  exit 1
+  bootstrap_fail
 fi
 
 # Pass Node the physical (realpath'd) entrypoint so process.argv[1] matches the
@@ -48,11 +74,11 @@ TARGET="$(_resolve_symlinks "$TARGET")"
 NVMRC_VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/.nvmrc" 2>/dev/null || true)"
 if [ -z "$NVMRC_VERSION" ]; then
   echo "FATAL: cannot read Node version from $REPO_ROOT/.nvmrc" >&2
-  exit 1
+  bootstrap_fail
 fi
 if ! printf '%s' "$NVMRC_VERSION" | grep -qE '^[0-9]'; then
   echo "FATAL: .nvmrc must be a dotted version (e.g. 24.15.0), not '$NVMRC_VERSION'" >&2
-  exit 1
+  bootstrap_fail
 fi
 
 DEFAULT_NODE="$HOME/.nvm/versions/node/v${NVMRC_VERSION}/bin/node"
@@ -69,7 +95,7 @@ fi
 
 if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
   echo "FATAL: node not found. Set WHATSOUP_NODE or install node v${NVMRC_VERSION}." >&2
-  exit 1
+  bootstrap_fail
 fi
 
 required_major="${NVMRC_VERSION%%.*}"
@@ -84,7 +110,7 @@ process.stdout.write(match[1]);
 ' "$REPO_ROOT/package.json" 2>/dev/null || true)"
 if ! printf '%s' "$engine_max_exclusive_major" | grep -qE '^[0-9]+$'; then
   echo "FATAL: cannot parse package.json#engines.node upper bound from $REPO_ROOT/package.json (expected range like >=24.0.0 <26)" >&2
-  exit 1
+  bootstrap_fail
 fi
 
 node_major="$("$NODE" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
@@ -106,7 +132,7 @@ Install the pinned version on this host:
 
 Or override with WHATSOUP_NODE=/path/to/compatible/node.
 EOF
-  exit 1
+  bootstrap_fail
 fi
 
 if [ "$node_major" -ge "$engine_max_exclusive_major" ]; then
@@ -117,10 +143,18 @@ fi
 if ! "$NODE" --experimental-strip-types -e '' >/dev/null 2>&1; then
   resolved_version="$("$NODE" --version 2>/dev/null || echo "unknown")"
   echo "FATAL: resolved Node does not support --experimental-strip-types: $NODE ($resolved_version)" >&2
-  exit 1
+  bootstrap_fail
 fi
 
 export PATH="$(dirname "$NODE"):$PATH"
+if [ "$bootstrap_exit_code" -eq 2 ]; then
+  exec "$NODE" \
+    --disable-warning=ExperimentalWarning \
+    --experimental-strip-types \
+    --input-type=module \
+    -e 'import { pathToFileURL } from "node:url"; const target = process.argv[1]; try { await import(pathToFileURL(target).href); } catch (error) { console.error(error); process.exitCode = 2; }' \
+    "$TARGET" "$@" || exit "$bootstrap_exit_code"
+fi
 exec "$NODE" \
   --disable-warning=ExperimentalWarning \
   --experimental-strip-types \

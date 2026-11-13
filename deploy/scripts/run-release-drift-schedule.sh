@@ -58,5 +58,6 @@ for log_name in release-drift-check.log release-drift-check.err.log; do
 done
 
 exec bash "$repo_root/scripts/run-with-pinned-node.sh" \
+  --bootstrap-exit-code 2 \
   "$repo_root/scripts/live-release-observers.ts" \
   "${observer_args[@]+"${observer_args[@]}"}"
