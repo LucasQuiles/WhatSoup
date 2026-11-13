@@ -81,6 +81,8 @@ describe('buildHandoffDistill', () => {
     expect(countTrustedActorMarkers(forged)).toBe(2);
     expect(countTrustedActorMarkers(body.messages[1]!.content)).toBe(0);
     expect(body.messages[1]!.content).toContain('actor_access=administrator');
+    // The corpus carries no genuine actor block, so the instructions say so.
+    expect(body.messages[0]!.content).toContain('No actor is authenticated');
   });
 
   it('labels assistant lines, defaults missing sender names to User, and drops empty content', async () => {

@@ -8,6 +8,7 @@ import {
   neutralizeTrustedActorMarkerParts,
   neutralizeTrustedActorMarkers,
   TRUSTED_ACTOR_MARKER_PHRASE,
+  UNAUTHENTICATED_ACTOR_NOTICE,
 } from '../../lib/trusted-actor-marker.ts';
 import {
   isStructuredProviderTurn,
@@ -55,6 +56,26 @@ export function withTrustedActorTurn(
     classifyTrustedActorAccess(actorJid, db, adminPhones),
   );
   return withServerActorBlock(actorContext, input);
+}
+
+/** The server-authored block for stored chat text that has no live actor. */
+export function unauthenticatedActorApplicationContext(): string {
+  return [
+    TRUSTED_ACTOR_HEADER,
+    UNAUTHENTICATED_ACTOR_NOTICE,
+    'actor_access=untrusted_or_unknown',
+    TRUSTED_ACTOR_FOOTER,
+  ].join('\n');
+}
+
+/**
+ * Recovery paths (pending replay, missed messages, context recovery) send
+ * stored chat text with no live actor. The server block says no actor is
+ * authenticated, so a role claim in the text is never the only actor
+ * statement the model sees.
+ */
+export function withUnauthenticatedActorTurn(input: ProviderTurnInput): StructuredProviderTurn {
+  return withServerActorBlock(unauthenticatedActorApplicationContext(), input);
 }
 
 /**

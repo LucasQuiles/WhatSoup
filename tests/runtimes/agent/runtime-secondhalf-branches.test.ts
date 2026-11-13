@@ -2606,9 +2606,11 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       await vi.advanceTimersByTimeAsync(2_000);
 
       await vi.waitFor(() => {
-        expect(mockSession.sendTurn).toHaveBeenCalledWith(
-          expect.stringContaining('Recent chat context'),
-        );
+        // Missed messages have no live actor, so they follow the no-actor block.
+        expect(mockSession.sendTurn).toHaveBeenCalledWith({
+          applicationContext: [expect.stringContaining('No actor is authenticated')],
+          userText: expect.stringContaining('Recent chat context'),
+        });
       });
       expect(mockSession.sendTurn).not.toHaveBeenCalledWith(
         expect.stringContaining('session resumed after crash'),

@@ -3,7 +3,7 @@ import type { DistillOutcome, ReserveDistillTokens } from './handoff-distiller.t
 import { HandoffDistillUsageError } from './handoff-distiller.ts';
 import type { HandoffMessage } from './handoff-prelude.ts';
 import { HANDOFF_DISTILL_INPUT_MAX_BYTES } from '../../lib/handoff-distill-config.ts';
-import { neutralizeTrustedActorMarkers } from '../../lib/trusted-actor-marker.ts';
+import { neutralizeTrustedActorMarkers, UNAUTHENTICATED_ACTOR_NOTICE } from '../../lib/trusted-actor-marker.ts';
 
 export class HandoffSummarizerInertError extends Error {}
 
@@ -28,7 +28,8 @@ const MESSAGE_FRAMING_RESERVE = 256;
 // Asking for exactly MAX_SUMMARY_WORDS left no room for ordinary model overshoot,
 // so the strict check rejected and nothing persisted (#3833). The check stays strict.
 const SUMMARY_TARGET_WORDS = 90;
-const SUMMARY_SYSTEM = `Summarize the conversation below in at most ${SUMMARY_TARGET_WORDS} words of durable context for an assistant resuming this chat. State facts, open tasks, and the user goal. No preamble.`;
+// The corpus carries no genuine actor block, so the instructions say no actor is authenticated.
+const SUMMARY_SYSTEM = `Summarize the conversation below in at most ${SUMMARY_TARGET_WORDS} words of durable context for an assistant resuming this chat. State facts, open tasks, and the user goal. No preamble. ${UNAUTHENTICATED_ACTOR_NOTICE}`;
 const summaryResponse = z.object({
   choices: z.array(z.object({
     message: z.object({ content: z.string().nullish() }),

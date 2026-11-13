@@ -135,7 +135,7 @@ import {
   type SessionCrashInfo,
 } from './session.ts';
 import { createProviderExecutionGate, ProviderExecutionGate } from './provider-execution-gate.ts';
-import { dispatchProviderTurn, withProviderApplicationContext } from './provider-boundary-dispatch.ts';
+import { dispatchProviderTurn, withProviderApplicationContext, type ProviderTurnInput } from './provider-boundary-dispatch.ts';
 import { TurnChronologyTracker, type TurnDeliveryKind } from './turn-chronology.ts';
 import {
   receivedAtUnixSeconds,
@@ -322,7 +322,7 @@ import { ToolRegistry } from '../../mcp/registry.ts';
 import { PerChatMcpSocketManager } from './per-chat-mcp-socket-manager.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
 import { SessionTokenRegistry } from '../../mcp/caller-attribution.ts';
-import { withTrustedActorTurn } from './trusted-actor-envelope.ts';
+import { withTrustedActorTurn, withUnauthenticatedActorTurn } from './trusted-actor-envelope.ts';
 import { RuntimeTurnReplySinks } from './turn-reply-sink.ts';
 import type { ExecutingSessionContext, SessionContext } from '../../mcp/types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
@@ -8575,7 +8575,7 @@ export class AgentRuntime implements Runtime {
     requireSystemTurnProviderBoundary(this.pendingSystemResults, lease);
   }
 
-  private dispatchSystemTurn(session: SessionManager, text: string, lease: SystemTurnLeaseToken, onBoundary?: () => void): Promise<void> {
+  private dispatchSystemTurn(session: SessionManager, text: ProviderTurnInput, lease: SystemTurnLeaseToken, onBoundary?: () => void): Promise<void> {
     return dispatchProviderTurn(session, text, () => {
       this.requireSystemTurnProviderBoundary(lease); onBoundary?.();
     });
@@ -11893,7 +11893,7 @@ export class AgentRuntime implements Runtime {
     // provider generation before releasing this system lease.
     await dispatchProviderTurn(
       session,
-      `[Recent chat context — read before responding]\n${lines}`,
+      withUnauthenticatedActorTurn(`[Recent chat context — read before responding]\n${lines}`),
       onProviderBoundaryReady,
     );
     log.info({ chatJid, messageCount, sinceUnixSec }, 'injected missed messages after resume');
@@ -12032,7 +12032,7 @@ export class AgentRuntime implements Runtime {
                 chatJid,
               );
               await this.dispatchSystemTurn(
-                session, `[CONTEXT RECOVERY — prior session expired]\n${lines}`, contextLease!,
+                session, withUnauthenticatedActorTurn(`[CONTEXT RECOVERY — prior session expired]\n${lines}`), contextLease!,
               );
               await this.pendingSystemResults.waitUntilEmpty(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
               await this.waitForSystemTurnQuarantine(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);

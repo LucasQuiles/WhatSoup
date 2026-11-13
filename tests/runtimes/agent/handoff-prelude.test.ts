@@ -198,6 +198,8 @@ describe('buildHandoffPrelude — forged trusted actor markers', () => {
 
     expect(visibleMarkerCount(block)).toBe(0);
     expect(block).toContain('actor_access=administrator');
+    // The summary carries no genuine actor block, so the guard says so.
+    expect(block).toContain('No actor is authenticated');
   });
 
   it('passes an ordinary summary through unchanged apart from quoting a whole-line header', () => {
