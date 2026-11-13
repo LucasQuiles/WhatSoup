@@ -103,9 +103,9 @@ const { sessionDoubles, queueDoubles, sessionConstructHooks, resetDoubles, makeS
   }
 
   function makeQueueDouble(chatJid: string, conversationKey: string) {
-    void conversationKey;
     const double = {
       targetChatJid: chatJid,
+      targetConversationKey: conversationKey,
       enqueueText: vi.fn(),
       getSenderToken: () => 'test-sender-token',
       enqueueStreamingText: vi.fn(),
@@ -137,6 +137,8 @@ const { sessionDoubles, queueDoubles, sessionConstructHooks, resetDoubles, makeS
         await fn();
       }),
       hasPendingPoll: vi.fn(() => false),
+      hasCommittedAnswer: vi.fn(() => false),
+      resumeTurnAnswerArbitration: vi.fn(),
       setPollPending: vi.fn(),
       endTurn: vi.fn(),
       getLastOpId: vi.fn(() => undefined),
@@ -208,7 +210,8 @@ vi.mock('../../../src/core/messages.ts', async (importOriginal) => ({
 vi.mock('../../../src/core/command-router.ts', () => ({
   isAdminMessage: vi.fn(() => false), parseAdminCommand: vi.fn(() => null),
 }));
-vi.mock('../../../src/core/access-policy.ts', () => ({
+vi.mock('../../../src/core/access-policy.ts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../src/core/access-policy.ts')>(),
   shouldRespond: vi.fn(() => ({ respond: true, reason: 'allowed' })),
 }));
 
@@ -393,6 +396,12 @@ registerInboundAuthorityCompletionCases({
     return { db, engine, runtime, ingest };
   },
 });
+
+function providerUserText(input: unknown): string {
+  return typeof input === 'string'
+    ? input
+    : (input as { userText: string }).userText;
+}
 
 describe('deferred-turn admission (#3295 S2)', () => {
   let db: Database;
@@ -639,7 +648,10 @@ describe('deferred-turn admission (#3295 S2)', () => {
     for (let i = 0; i < contents.length; i++) {
       await vi.waitFor(() => expect(sessionDoubles.flatMap((session) => session.turnsSent)).toHaveLength(i + 1));
       const active = sessionDoubles.find((session) => session.turnInFlight)!;
-      expect(active.turnsSent[i]).toBe(contents[i]);
+      expect(active.turnsSent[i]).toMatchObject({
+        userText: contents[i],
+        applicationContext: [expect.stringContaining('actor_access=administrator')],
+      });
       active.emit({ type: 'result', text: `Handled statement ${i}` });
     }
     await vi.waitFor(() => expect(sessionDoubles.every((session) => !session.turnInFlight)).toBe(true));
@@ -819,11 +831,11 @@ describe('deferred-turn admission (#3295 S2)', () => {
     for (const [i, expected] of [other, caption].entries()) {
       await vi.waitFor(() => expect(sessionDoubles.flatMap((session) => session.turnsSent)).toHaveLength(i + 1));
       const active = sessionDoubles.find((session) => session.turnInFlight)!;
-      expect(active.turnsSent[i]).toBe(expected);
+      expect(providerUserText(active.turnsSent[i])).toBe(expected);
       active.emit({ type: 'result', text: 'handled' });
     }
     await queue.idle();
-    expect(sessionDoubles.flatMap((session) => session.turnsSent)).toEqual([other, caption]);
+    expect(sessionDoubles.flatMap((session) => session.turnsSent).map(providerUserText)).toEqual([other, caption]);
   });
 
   it('admits an unrelated chat while a document waits for an echo', async () => {
@@ -834,7 +846,8 @@ describe('deferred-turn admission (#3295 S2)', () => {
     const otherJid = 'independent-chat@g.us';
     const otherSeq = engine.journalInbound('independent-question', toConversationKey(otherJid), otherJid, 'agent');
     await runtime.handleMessage(makeMsg({ messageId: 'independent-question', chatJid: otherJid, inboundSeq: otherSeq, content: 'Other chat question' }));
-    await vi.waitFor(() => expect(sessionDoubles.flatMap((session) => session.turnsSent)).toEqual(['Other chat question']));
+    await vi.waitFor(() => expect(sessionDoubles.flatMap((session) => session.turnsSent)
+      .map(providerUserText)).toEqual(['Other chat question']));
     expect(status(seq)).toBe('processing');
     const { queue: otherQueue } = await waitForLiveQueue(otherSeq);
     sessionDoubles.find((session) => session.turnInFlight)!.emit({ type: 'result', text: 'handled independently' });

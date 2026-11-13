@@ -430,7 +430,7 @@ describe('per-chat /new ownership transition', () => {
       expect(state.perChatExecActorQueue.has(lidKey)).toBe(false);
       expect(routedTurns).toHaveLength(1);
       expect(routedTurns[0]?.mapKey).toBe(canonicalKey);
-      expect(routedTurns[0]?.applicationContext[0]).toMatch(
+      expect(routedTurns[0]?.applicationContext[1]).toMatch(
         /^\[Recent chat context — read before responding\]\n/,
       );
       expect(routedTurns[0]?.text).toBe('turn crossing a LID rekey');

@@ -10,6 +10,7 @@ import {
 import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import { toConversationKey } from '../../core/conversation-key.ts';
+import type { TurnReplySink } from '../../core/turn-reply.ts';
 import type { ToolRegistry } from '../../mcp/registry.ts';
 import type { ExecutingSessionContext, SessionContext } from '../../mcp/types.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
@@ -23,6 +24,8 @@ interface PerChatMcpSocketManagerOptions {
   allowedRoot: string;
   conversationBound: boolean;
   resolveExecutingSession: (conversationIdentity: string) => ExecutingSessionContext;
+  /** Routes an admitted active-turn answer through its owning durable queue. */
+  resolveTurnReplySink?: (conversationIdentity: string) => TurnReplySink;
   /** #3421 step 1: verifies session tokens for caller attribution only. */
   sessionTokens?: SessionTokenVerifier;
 }
@@ -114,16 +117,20 @@ export class PerChatMcpSocketManager {
     chmodSync(directory, 0o700);
     const socketPath = this.socketPathFor(conversationIdentity);
     const identity = { value: conversationIdentity };
+    const baseSession = perChatActorSession(
+      deliveryJid,
+      this.options.allowedRoot,
+      this.options.conversationBound,
+      deliveryJid,
+      purpose,
+    );
+    if (this.options.resolveTurnReplySink) {
+      baseSession.turnReplySink = this.options.resolveTurnReplySink(identity.value);
+    }
     const server = new WhatSoupSocketServer(
       socketPath,
       this.options.registry,
-      perChatActorSession(
-        deliveryJid,
-        this.options.allowedRoot,
-        this.options.conversationBound,
-        deliveryJid,
-        purpose,
-      ),
+      baseSession,
       () => {
         const executing = this.options.resolveExecutingSession(identity.value);
         // The scheduled isolation suffix is a session key, not a conversation:

@@ -37,6 +37,7 @@ import { bondActorLedger } from '../transport/bond-actor-receipt.ts';
 import { getToolCallCallerEvidence, isTurnOwned } from './caller-attribution.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
 import { type Clock, systemClock } from '../lib/clock.ts';
+import { neutralizeTrustedActorMarkerParts } from '../lib/trusted-actor-marker.ts';
 import {
   classifyThrownToolFailure,
   normalizeToolDurabilityGroup,
@@ -649,13 +650,26 @@ export class ToolRegistry {
    *    from session and chatJid must NOT be present in params.
    * 3. For injected tools in global sessions, chatJid must be supplied in params.
    *    The resolved conversationKey must match (no cross-conversation calls).
+   *
+   * Every result goes to a provider: through the socket server to CLI
+   * providers and through the in-process bridge to API providers. Results
+   * carry stored chat text, so trusted actor marker copies are removed here,
+   * from the final text parts, for both paths.
    */
   async call(
     name: string,
     params: Record<string, unknown>,
     session: ResolvedSessionContext,
   ): Promise<ToolCallResult> {
-    return redactToolCallText(await this.dispatch(name, params, session));
+    // Redaction runs first: it makes every text a string and replaces a
+    // protected link whole, before a marker rewrite could split it. The marker
+    // pass then sees the final text; its replacement holds only letters, spaces
+    // and a hyphen, so it cannot form a protected link.
+    const result = redactToolCallText(await this.dispatch(name, params, session));
+    const texts = result.content.map((part) => part.text);
+    const neutralized = neutralizeTrustedActorMarkerParts(texts);
+    if (neutralized.every((text, index) => text === texts[index])) return result;
+    return { ...result, content: result.content.map((part, index) => ({ ...part, text: neutralized[index]! })) };
   }
 
   private async dispatch(

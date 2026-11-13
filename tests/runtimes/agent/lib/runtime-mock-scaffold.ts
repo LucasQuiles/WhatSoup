@@ -206,7 +206,11 @@ export async function awaitDispatchedTurn(
   sendTurn: ReturnType<typeof vi.fn>,
   text: string,
 ): Promise<void> {
-  await vi.waitFor(() => { expect(sendTurn).toHaveBeenCalledWith(text); });
+  await vi.waitFor(() => {
+    expect(sendTurn.mock.calls.some(([input]) => (
+      typeof input === 'string' ? input === text : input?.userText === text
+    ))).toBe(true);
+  });
 }
 
 /**

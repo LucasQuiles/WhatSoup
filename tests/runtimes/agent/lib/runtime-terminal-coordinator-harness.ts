@@ -350,6 +350,8 @@ export function queueStub(chatJid: string): IOutboundQueue {
     indicateTyping: vi.fn(),
     enqueuePoll: vi.fn(async (fn) => { await fn(); }),
     hasPendingPoll: vi.fn(() => false),
+    hasCommittedAnswer: vi.fn(() => false),
+    resumeTurnAnswerArbitration: vi.fn(),
     setPollPending: vi.fn(),
     flush: vi.fn(async () => {}),
     isPoisoned: vi.fn(() => false),

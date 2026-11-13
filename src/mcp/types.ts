@@ -9,6 +9,7 @@ import {
   type ToolFailureStage,
 } from '../core/durability-evidence-contract.ts';
 import type { ClientOutputGateResult } from '../core/client-output-policy-gate.ts';
+import type { TurnReplySink } from '../core/turn-reply.ts';
 export { isPathWithinAllowedRoot } from '../lib/path-boundary.ts';
 
 export type ToolScope = 'chat' | 'global';
@@ -82,6 +83,10 @@ export interface SessionContext {
    * Replaced, never mutated, when the connection learns more about its client.
    */
   callerAttribution?: Readonly<CallerAttribution>;
+  /** Routes an admitted agent-turn reply through the durable outbound queue. */
+  turnReplySink?: TurnReplySink;
+  /** Opaque SessionManager identity admitted from the provider bridge or a matched socket token. */
+  turnReplySessionId?: string;
 }
 
 /** The connection-level half of {@link ToolCallCallerEvidence}. */

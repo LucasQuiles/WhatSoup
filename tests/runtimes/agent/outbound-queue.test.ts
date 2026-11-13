@@ -2000,6 +2000,184 @@ describe('OutboundQueue', () => {
     expect(calls).toHaveLength(callCountBefore); // no new message added
   });
 
+  it('suppresses an identical terminal result already streamed in the same ordinary turn', async () => {
+    const { messenger, calls } = makeMessenger();
+    const durability = makeDurabilityStub();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(durability);
+    queue.setInboundSeq(41);
+
+    queue.enqueueStreamingText('Fleet check complete.', 'answer');
+    queue.endTurn();
+    queue.enqueueResultText('Fleet check complete.', 'answer');
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual(['Fleet check complete.']);
+    expect(durability.createOutboundOp).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['full', 'friendly'] as const)(
+    'suppresses a CRLF and outer-whitespace equivalent result in %s mode',
+    async (mode) => {
+      const { messenger, calls } = makeMessenger();
+      const durability = makeDurabilityStub();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setDurability(durability);
+      queue.setToolUpdateMode(mode);
+
+      queue.enqueueStreamingText('Line one\r\n', 'answer');
+      queue.enqueueStreamingText('Line two', 'answer');
+      queue.endTurn();
+      queue.enqueueResultText('  Line one\nLine two\n', 'answer');
+      await vi.runAllTimersAsync();
+
+      expect(calls).toEqual(['Line one\r\nLine two']);
+      expect(durability.createOutboundOp).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('keeps a distinct terminal result and later-turn repeat visible', async () => {
+    const { messenger, calls } = makeMessenger();
+    const durability = makeDurabilityStub();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(durability);
+
+    queue.setInboundSeq(51);
+    queue.enqueueStreamingText('Repeatable answer.', 'answer');
+    queue.endTurn();
+    queue.enqueueResultText('Distinct follow-up.', 'answer');
+    await vi.runAllTimersAsync();
+    queue.setInboundSeq(52);
+    queue.endTurn();
+    queue.enqueueResultText('Repeatable answer.', 'answer');
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual(['Repeatable answer.', 'Distinct follow-up.', 'Repeatable answer.']);
+    expect(durability.createOutboundOp).toHaveBeenCalledTimes(3);
+  });
+
+  it('lets a live-turn tool reply own the answer over buffered provider narration', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(makeDurabilityStub());
+    queue.setInboundSeq(61);
+    queue.beginTurnEvidence('tool-owner-turn');
+    try {
+      queue.enqueueStreamingText('Provider narration that must not become a second answer.', 'answer');
+      await vi.advanceTimersByTimeAsync(TEXT_AGGREGATE_DELAY_MS + 1);
+
+      const activeTurnQueue = queue as unknown as {
+        enqueueToolReplyText?: (text: string, turnId: string) => unknown;
+      };
+      expect(activeTurnQueue.enqueueToolReplyText).toBeTypeOf('function');
+      expect(activeTurnQueue.enqueueToolReplyText!('Tool-selected answer.', 'tool-owner-turn')).toEqual({ disposition: 'queued' });
+      queue.endTurn();
+      expect(queue.enqueueResultText('Provider terminal result.', 'answer')).toBe(false);
+      await vi.runAllTimersAsync();
+
+      expect(calls).toEqual(['Tool-selected answer.']);
+    } finally {
+      queue.abortTurn();
+    }
+  });
+
+  it('refuses to reopen a committed answer for a fallback continuation', async () => {
+    const { messenger } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(makeDurabilityStub());
+    queue.beginTurnEvidence('committed-owner-turn');
+    try {
+      queue.enqueueText('Primary answer already committed.', 'answer');
+
+      expect(() => queue.resumeTurnAnswerArbitration('committed-owner-turn'))
+        .toThrow(/already committed/i);
+      expect(queue.enqueueToolReplyText('Fallback tool answer.', 'committed-owner-turn'))
+        .toEqual({ disposition: 'suppressed', reason: 'answer_already_claimed' });
+    } finally {
+      queue.abortTurn();
+    }
+  });
+
+  it('rejects an ended turn reply before another turn can claim the queue', () => {
+    const { messenger } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.beginTurnEvidence('ended-owner-turn');
+    try {
+      queue.endTurn({ resultTextPending: true });
+
+      expect(queue.enqueueToolReplyText('Late old-turn tool output.', 'ended-owner-turn'))
+        .toEqual({ disposition: 'inactive' });
+    } finally {
+      queue.abortTurn();
+    }
+  });
+
+  it('reports a tool reply queued before any provider acknowledgement exists', async () => {
+    const sent = deferred<{ waMessageId: string | null }>();
+    const messenger: Messenger = {
+      sendMessage: vi.fn(() => sent.promise),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+    };
+    const durability = makeDurabilityStub();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(durability);
+    queue.beginTurnEvidence('pending-tool-reply-turn');
+    try {
+      expect(queue.enqueueToolReplyText('Queued durable answer.', 'pending-tool-reply-turn')).toEqual({ disposition: 'queued' });
+      expect(messenger.sendMessage).not.toHaveBeenCalled();
+      expect(durability.markSubmitted).not.toHaveBeenCalled();
+
+      await Promise.resolve();
+      expect(messenger.sendMessage).toHaveBeenCalledOnce();
+      expect(durability.markSubmitted).not.toHaveBeenCalled();
+
+      sent.resolve({ waMessageId: null });
+      await queue.flush();
+      expect(durability.markSubmitted).toHaveBeenCalledOnce();
+    } finally {
+      queue.abortTurn();
+    }
+  });
+
+  it('reserves raw-option delivery as the sole active-turn answer until its acknowledgement commits', () => {
+    const { messenger } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.beginTurnEvidence('raw-option-owner-turn');
+    try {
+      const reserved = queue.reserveToolReply('raw-option-owner-turn');
+      expect(reserved).toMatchObject({ disposition: 'reserved' });
+      if (reserved.disposition !== 'reserved') throw new Error('expected raw reply reservation');
+      expect(queue.enqueueResultText('Provider terminal duplicate.', 'answer')).toBe(false);
+      expect(queue.commitReservedToolReply('raw-option-owner-turn', reserved.reservationId))
+        .toEqual({ disposition: 'committed' });
+      expect(queue.hasCommittedAnswer()).toBe(true);
+      expect(queue.enqueueToolReplyText('Second tool answer.', 'raw-option-owner-turn'))
+        .toEqual({ disposition: 'suppressed', reason: 'answer_already_claimed' });
+    } finally {
+      queue.abortTurn();
+    }
+  });
+
+  it('rejects a delayed raw acknowledgement after the queue advances to another logical turn', () => {
+    const { messenger } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.beginTurnEvidence('raw-old-turn');
+    try {
+      const reserved = queue.reserveToolReply('raw-old-turn');
+      if (reserved.disposition !== 'reserved') throw new Error('expected raw reply reservation');
+
+      queue.abortTurn();
+      queue.beginTurnEvidence('raw-new-turn');
+      expect(queue.commitReservedToolReply('raw-old-turn', reserved.reservationId))
+        .toEqual({ disposition: 'inactive' });
+      expect(queue.hasCommittedAnswer()).toBe(false);
+      expect(queue.enqueueToolReplyText('New turn answer.', 'raw-new-turn'))
+        .toEqual({ disposition: 'queued' });
+    } finally {
+      queue.abortTurn();
+    }
+  });
+
   it('minimal mode drops buffered pre-tool narration and still delivers the terminal result', async () => {
     const { messenger, calls } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
