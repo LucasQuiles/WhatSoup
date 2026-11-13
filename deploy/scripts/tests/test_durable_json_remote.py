@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import os
 from pathlib import Path
 
 import pytest
@@ -67,6 +68,22 @@ def test_remote_canonical_event_bytes_match_local(
         remote_root / "event.json"
     ).read_bytes()
     assert remote.public_projection() == local.public_projection()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions")
+def test_remote_write_works_beneath_search_only_ancestor(tmp_path: Path) -> None:
+    searchonly = tmp_path / "searchonly"
+    searchonly.mkdir()
+    inner = searchonly / "inner"
+    inner.mkdir(mode=0o700)
+    searchonly.chmod(0o311)  # search-only for its owner too: no read bit
+    try:
+        _, target = _targets(inner)
+        result = _publish(durable_json_remote, target, {"kind": "ack"}, "remote.event")
+        assert result.advance_allowed, result
+        assert (inner / "event.json").exists()
+    finally:
+        searchonly.chmod(0o700)
 
 
 def test_remote_event_reconciles_identical_existing_bytes(tmp_path: Path) -> None:
