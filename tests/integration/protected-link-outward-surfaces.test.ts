@@ -31,6 +31,8 @@ import { handleGetFeed } from '../../src/fleet/routes/feed.ts';
 import { registerChatManagementTools } from '../../src/mcp/tools/chat-management.ts';
 import { registerMediaTools } from '../../src/mcp/tools/media.ts';
 import { registerMessagingTools } from '../../src/mcp/tools/messaging.ts';
+import { registerSchedulingTools } from '../../src/mcp/tools/scheduling.ts';
+import { MessageScheduler } from '../../src/core/scheduler.ts';
 import { registerSearchTools } from '../../src/mcp/tools/search.ts';
 import { dispatchTurnRecoveryReplayForJob } from '../../src/runtimes/agent/turn-recovery-dispatch.ts';
 import { sharedRuntimeApplicationContext } from '../../src/runtimes/agent/turn-provider-text.ts';
@@ -225,6 +227,15 @@ async function withScratchDb<T>(read: (scratch: Database) => T | Promise<T>): Pr
   } finally {
     scratch.close();
   }
+}
+
+/** One due, pending scheduled text whose stored fields all carry the link. */
+function insertScheduledText(target: Database): void {
+  const due = Math.floor(Date.now() / 1000) - 60;
+  target.raw.prepare(`
+    INSERT INTO scheduled_messages (chat_jid, chat_name, content_type, payload, scheduled_at, status, error)
+    VALUES (?, ?, 'text', ?, ?, 'pending', ?)
+  `).run(GROUP_JID, GROUP_NAME, JSON.stringify({ text: CONTENT }), due, CONTENT);
 }
 
 interface SurfaceCase {
@@ -437,6 +448,36 @@ const SURFACES: SurfaceCase[] = [
       expect(leased).toHaveLength(1);
       return leased;
     }),
+  },
+  {
+    surface: 'list_scheduled tool (chat name, payload and error)',
+    probe: () => withScratchDb(async (scratch) => {
+      insertScheduledText(scratch);
+      const registry = new ToolRegistry();
+      registerSchedulingTools(registry, { db: scratch });
+      const result = await registry.call('list_scheduled', {}, { tier: 'global' });
+      const listed = JSON.parse(result.content[0].text) as { count: number };
+      expect(listed.count).toBe(1);
+      return listed;
+    }),
+  },
+  {
+    surface: 'scheduler send of a stored text (refused before the transport)',
+    probe: () => withScratchDb(async (scratch) => {
+      insertScheduledText(scratch);
+      const sent: unknown[] = [];
+      const scheduler = new MessageScheduler(scratch, {
+        sendRaw: async (jid: string, content: unknown) => { sent.push({ jid, content }); },
+        sendMedia: async (jid: string, media: unknown) => { sent.push({ jid, media }); },
+      } as never, { intervalMs: 60_000, maxRetries: 3 });
+      await scheduler.tick();
+      return {
+        sent,
+        row: scratch.raw.prepare('SELECT status, retry_count, error FROM scheduled_messages').get(),
+      };
+    }),
+    // The stored reason proves the refusal ran; the leak checks prove nothing was sent.
+    mustContain: 'protected_link_send_refused',
   },
   {
     // Last row: it adds an audio message the rows above must not read.

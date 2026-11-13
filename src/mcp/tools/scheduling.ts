@@ -7,6 +7,7 @@ import { parseCron, nextCronRun } from '../../core/cron.ts';
 import { type Clock, systemClock } from '../../lib/clock.ts';
 import { enqueueScheduledMessage, isValidIanaTimeZone } from '../../core/schedule-enqueue.ts';
 import { assertScheduledPayloadWritable } from '../../core/scheduled-payload.ts';
+import { sanitizeProtectedMessageText, sanitizeProtectedMessageValue } from '../../core/protected-message.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 // #1067: validate a recurrence timezone is a real IANA zone before storing it.
@@ -112,12 +113,14 @@ function rowToScheduledMessage(row: ScheduledMessageRow) {
   } catch {
     payload = { corrupt: true };
   }
+  // A stored row can predate ingress redaction, and a dead-letter error can
+  // quote payload bytes, so every free-text field is redacted on the way out.
   return {
     id: row.id,
     chatJid: row.chat_jid,
-    chatName: row.chat_name,
+    chatName: row.chat_name === null ? null : sanitizeProtectedMessageText(row.chat_name),
     contentType: row.content_type,
-    payload,
+    payload: sanitizeProtectedMessageValue(payload) as Record<string, unknown>,
     scheduledAt: row.scheduled_at,
     recurrence: row.recurrence,
     timezone: row.timezone,
@@ -126,7 +129,7 @@ function rowToScheduledMessage(row: ScheduledMessageRow) {
     status: row.status,
     createdAt: row.created_at,
     sentAt: row.sent_at,
-    error: row.error,
+    error: row.error === null ? null : sanitizeProtectedMessageText(row.error),
     retryCount: row.retry_count,
   };
 }
