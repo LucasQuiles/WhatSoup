@@ -1008,12 +1008,17 @@ describe.skipIf(SYSTEM_PYTHON === '')('Microsoft 365 provider adapter', () => {
     expect(JSON.stringify(adapterLog.error.mock.calls[0])).not.toContain(tmpdir());
 
     // The failed rewrite stays pending: every provider spawn is refused, whatever the session's snapshot.
+    // Each refusal logs its own line, separate from the restoration failures counted below.
+    const restorationFailures = () => adapterLog.error.mock.calls
+      .filter((call) => String(call[1]).startsWith('Microsoft 365 deny floor not restored')).length;
     expect(files.hasPendingRestoration()).toBe(true);
     expect(() => microsoft365SpawnPolicy(approved, withdrawn, files)).toThrow(/M365_FLOOR_RESTORATION_PENDING/);
     expect(() => microsoft365SpawnPolicy(withdrawn, withdrawn, files)).toThrow(/M365_FLOOR_RESTORATION_PENDING/);
+    expect(adapterLog.error).toHaveBeenCalledTimes(3);
     // A later check that withdraws nothing still retries it; while the file stays unwritable it stays pending.
     expect(files.restoreFloorOnWithdrawal(withdrawn, withdrawn, 'test')).toBe(withdrawn);
-    expect(adapterLog.error).toHaveBeenCalledTimes(2);
+    expect(restorationFailures()).toBe(2);
+    expect(adapterLog.error).toHaveBeenCalledTimes(4);
     expect(files.hasPendingRestoration()).toBe(true);
     // Once the file can be written, the next check writes the floor there and spawns may proceed.
     rmSync(join(failing, 'settings.json'), { recursive: true });
@@ -1021,7 +1026,8 @@ describe.skipIf(SYSTEM_PYTHON === '')('Microsoft 365 provider adapter', () => {
     files.restoreFloorOnWithdrawal(withdrawn, withdrawn, 'test');
     expect(liftedM365Denies(failing)).toEqual([...M365_MUTATION_DENY]);
     expect(files.hasPendingRestoration()).toBe(false);
-    expect(adapterLog.error).toHaveBeenCalledTimes(2);
+    expect(restorationFailures()).toBe(2);
+    expect(adapterLog.error).toHaveBeenCalledTimes(4);
     // The admitted snapshot narrowed by the withdrawn runtime policy: rejected, so claude-cli gets the
     // full deny set as --disallowedTools and no bridge values.
     expect(microsoft365SpawnPolicy(approved, withdrawn, files)).toEqual({ status: 'rejected' });
@@ -1367,7 +1373,7 @@ describe.skipIf(SYSTEM_PYTHON === '')('Microsoft 365 provider adapter', () => {
     ['ls fails', { status: 1, stdout: '' }],
     ['ls prints an unparseable listing', { status: 0, stdout: 'not a listing\n' }],
     ['ls prints an ACL entry line it cannot read', { status: 0, stdout: '-rw-r--r--+ 1 user staff 10 Nov 12 10:00 entry\n 0: unreadable entry line\n' }],
-  ])('refuses a path whose ACL listing cannot be read (%s)', async (_case, listing) => {
+  ])('refuses a path whose ACL listing cannot be read (%s)', (_case, listing) => {
     vi.stubEnv('CLAUDE_CONFIG_DIR', undefined);
     const trace = join(temporaryDirectory('whatsoup-m365-acl-unread-'), 'm365-fixture-trace.jsonl');
     const nativeRoot = nativeInstall(GUARDED_FIXTURE);
@@ -1379,8 +1385,7 @@ describe.skipIf(SYSTEM_PYTHON === '')('Microsoft 365 provider adapter', () => {
     });
     // Positive control: with the real listing, the copies are admitted.
     expect(admit()).toBe(approved);
-    // A later check: verdicts are kept only for the synchronous run that listed them.
-    await Promise.resolve();
+    // The next check, in the same synchronous run: no verdict carries over from the previous check.
     LS_OVERRIDES.set(nativeEntry, listing);
     LS_PROBES.length = 0;
     expect(admit()).toEqual(withdrawnShape(approved));
@@ -1423,6 +1428,50 @@ describe.skipIf(SYSTEM_PYTHON === '')('Microsoft 365 provider adapter', () => {
     expect(files.hasPendingRestoration()).toBe(false);
   });
 
+  it.each([
+    ['an unsearchable workspace directory', (claudeDir: string) => chmodSync(dirname(claudeDir), 0o000),
+      (claudeDir: string) => chmodSync(dirname(claudeDir), 0o700), 'EACCES'],
+    ['a regular file in place of the .claude directory', (claudeDir: string) => {
+      rmSync(claudeDir, { recursive: true, force: true });
+      writeFileSync(claudeDir, '');
+    }, (claudeDir: string) => {
+      rmSync(claudeDir, { force: true });
+      mkdirSync(claudeDir, { mode: 0o700 });
+    }, 'ENOTDIR'],
+  ])('logs the pending settings path and its error code at every refused spawn (%s)', (_case, block, unblock, code) => {
+    const trace = join(temporaryDirectory('whatsoup-m365-refusal-log-'), 'm365-fixture-trace.jsonl');
+    const approved = policy(trace);
+    const withdrawn = withdrawnShape(approved);
+    const files = new Microsoft365SettingsFiles();
+    const claudeDir = join(temporaryDirectory('whatsoup-m365-refusal-'), '.claude');
+    files.write('chat', claudeDir, { 'microsoft_365@microsoft-365-dev': true }, { hasSandbox: false, m365MutationPolicy: approved });
+
+    block(claudeDir);
+    try {
+      files.restoreFloorOnWithdrawal(approved, withdrawn, 'test');
+      expect(files.hasPendingRestoration()).toBe(true);
+      adapterLog.error.mockClear();
+      // The spawn stays refused (fail closed), and each refusal logs one line naming the file and the error code
+      // that keeps its rewrite pending, so an operator can repair it.
+      for (const attempt of [1, 2]) {
+        expect(() => microsoft365SpawnPolicy(approved, withdrawn, files)).toThrow(/M365_FLOOR_RESTORATION_PENDING/);
+        expect(adapterLog.error).toHaveBeenCalledTimes(attempt);
+        expect(adapterLog.error.mock.calls[attempt - 1]![0]).toEqual({ pending: [{ path: join(claudeDir, 'settings.json'), code }] });
+        expect(adapterLog.error.mock.calls[attempt - 1]![1]).toMatch(/spawn refused/);
+      }
+      // A path and a code only: no policy value reaches the line.
+      expect(JSON.stringify(adapterLog.error.mock.calls)).not.toContain('test-agent365-key');
+    } finally {
+      unblock(claudeDir);
+    }
+    // After the repair the next check writes the floor, and a spawn proceeds without the line.
+    files.restoreFloorOnWithdrawal(withdrawn, withdrawn, 'test');
+    expect(files.hasPendingRestoration()).toBe(false);
+    adapterLog.error.mockClear();
+    expect(microsoft365SpawnPolicy(approved, withdrawn, files)).toEqual({ status: 'rejected' });
+    expect(adapterLog.error).not.toHaveBeenCalled();
+  });
+
   it('re-checks the plugin immediately before the adapter spawns it, after the socket became ready', async () => {
     vi.stubEnv('CLAUDE_CONFIG_DIR', undefined);
     const directory = temporaryDirectory('whatsoup-m365-ready-');
@@ -1462,6 +1511,34 @@ describe.skipIf(SYSTEM_PYTHON === '')('Microsoft 365 provider adapter', () => {
     // Nothing was spawned: the replacement never booted, and the assignment is withdrawn.
     expect(traceRows(trace)).toHaveLength(launches);
     expect(m365WorkflowAuthorityLive(admitted.workflowAuthority)).toBe(false);
+  });
+
+  it('lists ACLs again at every check, even when the inode and its change time are unchanged', () => {
+    vi.stubEnv('CLAUDE_CONFIG_DIR', undefined);
+    const trace = join(temporaryDirectory('whatsoup-m365-acl-recheck-'), 'm365-fixture-trace.jsonl');
+    const nativeRoot = nativeInstall(GUARDED_FIXTURE);
+    const nativeEntry = join(nativeRoot, 'mcp-server', 'dist', 'index.cjs');
+    const approved = policy(trace);
+    const admitted = admitMicrosoft365Workflow({
+      registry: new ToolRegistry(), policy: approved, pluginDirs: [pluginDirectory(trace).root], perChatMcpSocketManager: {} as never,
+      resolvePerChatMapKey: (jid: string) => jid, sessionTokens: new SessionTokenRegistry(), instanceName: 'test',
+    });
+    expect(admitted).toBe(approved);
+
+    // Positive control, in the same synchronous run: the unchanged chain keeps the assignment, and one check lists
+    // the entry once although several chains pass through it.
+    LS_PROBES.length = 0;
+    expect(recheckMicrosoft365Workflow(admitted, 'test')).toBe(approved);
+    expect(LS_PROBES.filter((args) => args[args.length - 1] === nativeEntry)).toHaveLength(1);
+
+    // HFS+ keeps change times in whole seconds, so a grant added within the same second leaves the stat tuple as
+    // it was. Model that: the listing now shows an allow entry while lstat reports the same inode and ctime.
+    const before = lstatSync(nativeEntry);
+    LS_OVERRIDES.set(nativeEntry, { status: 0, stdout: `-rw-r--r--+ 1 owner staff 10 Nov 12 10:00 ${nativeEntry}\n 0: user:other allow write,append\n` });
+    expect([lstatSync(nativeEntry).ino, lstatSync(nativeEntry).ctimeMs]).toEqual([before.ino, before.ctimeMs]);
+    LS_PROBES.length = 0;
+    expect(recheckMicrosoft365Workflow(admitted, 'test')).toEqual(withdrawnShape(approved));
+    expect(LS_PROBES.some((args) => args[args.length - 1] === nativeEntry)).toBe(true);
   });
 
   it('lists the adapter only to chat-scoped sessions bound to a delivery chat', () => {

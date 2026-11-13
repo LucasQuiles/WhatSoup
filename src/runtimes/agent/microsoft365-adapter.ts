@@ -110,11 +110,17 @@ function hasCanonicalShape(manifest: PluginManifest): boolean {
  * error (EACCES, EIO, ENOTDIR and so on) proves nothing, so neither counts as absent.
  */
 function isAbsent(path: string): boolean {
+  return lstatErrorCode(path) === 'ENOENT';
+}
+
+/** The error code `lstat` fails with, `unknown` for an error without one, or undefined when it succeeds. */
+function lstatErrorCode(path: string): string | undefined {
   try {
     lstatSync(path);
-    return false;
+    return undefined;
   } catch (err) {
-    return isRecord(err) && err['code'] === 'ENOENT';
+    const code = isRecord(err) ? err['code'] : undefined;
+    return typeof code === 'string' ? code : 'unknown';
   }
 }
 
@@ -170,22 +176,30 @@ export function aclListingGrantsNothing(
 }
 
 /**
- * ACL verdicts, kept only until the synchronous run that listed them ends (one check walks the same ancestors many
- * times) and keyed by path, inode and change time: changing an ACL changes the ctime, so a changed ACL is listed again.
+ * ACL verdicts of the one top-level check that is running: an admission, a re-check or an adapter launch check
+ * walks the same ancestors many times, so each path is listed once per check. A verdict is never reused by a
+ * later check, because a filesystem with coarse change times (HFS+ keeps whole seconds) can change an ACL
+ * without changing the inode or its ctime.
  */
 let aclVerdicts: Map<string, boolean> | undefined;
 
+/** Runs one top-level check with its own ACL verdicts; a nested call shares its caller's. */
+function withAclVerdicts<T>(check: () => T): T {
+  if (aclVerdicts !== undefined) return check();
+  aclVerdicts = new Map();
+  try {
+    return check();
+  } finally {
+    aclVerdicts = undefined;
+  }
+}
+
 function hasNoAclGrant(path: string, stat: Stats): boolean {
-  if (aclVerdicts === undefined) {
-    aclVerdicts = new Map();
-    queueMicrotask(() => { aclVerdicts = undefined; });
-  }
   const key = `${path}\0${stat.dev}\0${stat.ino}\0${stat.ctimeMs}`;
-  let verdict = aclVerdicts.get(key);
-  if (verdict === undefined) {
-    verdict = aclListingGrantsNothing(path);
-    aclVerdicts.set(key, verdict);
-  }
+  const known = aclVerdicts?.get(key);
+  if (known !== undefined) return known;
+  const verdict = aclListingGrantsNothing(path);
+  aclVerdicts?.set(key, verdict);
   return verdict;
 }
 
@@ -407,6 +421,13 @@ function loadPluginCandidate(
   pluginDirs: readonly string[],
   policy: M365MutationPolicy | undefined,
 ): { launch: Microsoft365Launch; pin: PluginPin } | undefined {
+  return withAclVerdicts(() => loadPluginCandidateChecked(pluginDirs, policy));
+}
+
+function loadPluginCandidateChecked(
+  pluginDirs: readonly string[],
+  policy: M365MutationPolicy | undefined,
+): { launch: Microsoft365Launch; pin: PluginPin } | undefined {
   if (policy?.status !== 'approved') return undefined;
   const accountId = policy.childEnv.MS365_AGENT365_ACCOUNT_ID;
   if (!isNonEmptyString(accountId) || accountId !== accountId.trim()) return undefined;
@@ -526,7 +547,7 @@ function registerAdapterLaunch(options: RegisterMicrosoft365AdapterOptions): { l
    * re-check (the assignment and both copies), which withdraws the assignment on failure. Without an admitted
    * assignment only this copy, the one the adapter launches, is checked. A failure closes the adapter for the run.
    */
-  const launchAllowed = (): boolean => {
+  const launchAllowed = (): boolean => withAclVerdicts(() => {
     if (copyChanged) return false;
     const policy = options.policy;
     if (policy?.status === 'approved' && admittedPlugins.has(policy)) {
@@ -537,7 +558,7 @@ function registerAdapterLaunch(options: RegisterMicrosoft365AdapterOptions): { l
       copyChanged = true;
     }
     return !copyChanged;
-  };
+  });
 
   options.registry.register(createMicrosoft365Tool({
     launch,
@@ -684,6 +705,10 @@ export function resolveExplainedM365MutationPolicy(options: ResolveM365MutationP
  * fallback, session and native plugin) and the broker refuses writes.
  */
 export function admitMicrosoft365Workflow(options: RegisterMicrosoft365AdapterOptions): M365MutationPolicy | undefined {
+  return withAclVerdicts(() => admitMicrosoft365WorkflowChecked(options));
+}
+
+function admitMicrosoft365WorkflowChecked(options: RegisterMicrosoft365AdapterOptions): M365MutationPolicy | undefined {
   const candidate = registerAdapterLaunch(options);
   const policy = options.policy;
   if (policy?.status !== 'approved' || policy.workflowAuthority === undefined) return policy;
@@ -712,6 +737,10 @@ export function admitMicrosoft365Workflow(options: RegisterMicrosoft365AdapterOp
  * assignment, including an equal copy of the admitted one, was never admitted and is rejected.
  */
 export function recheckMicrosoft365Workflow(policy: M365MutationPolicy | undefined, instanceName?: string): M365MutationPolicy | undefined {
+  return withAclVerdicts(() => recheckMicrosoft365WorkflowChecked(policy, instanceName));
+}
+
+function recheckMicrosoft365WorkflowChecked(policy: M365MutationPolicy | undefined, instanceName?: string): M365MutationPolicy | undefined {
   if (policy?.status !== 'approved' || policy.workflowAuthority === undefined) return policy;
   const pin = admittedPlugins.get(policy);
   if (pin === undefined) {
@@ -739,6 +768,9 @@ export function microsoft365SpawnPolicy(
   files: Microsoft365SettingsFiles,
 ): M365MutationPolicy | undefined {
   if (files.hasPendingRestoration()) {
+    // One actionable line per refused spawn: each file to repair and the error code that keeps its rewrite pending.
+    log.error({ pending: files.pendingRestorations() },
+      'Microsoft 365 provider spawn refused: the deny floor rewrite of each named settings file is still pending; repair its access (see code) and the next check retries it');
     throw new Error('M365_FLOOR_RESTORATION_PENDING: a Microsoft 365 deny floor rewrite is pending, so the provider spawn is refused');
   }
   const narrowed = narrowM365RoutePolicy(snapshot, current);
@@ -755,8 +787,8 @@ export type Microsoft365SettingsTarget = 'shared' | 'chat';
  */
 export class Microsoft365SettingsFiles {
   private readonly written = new Map<string, { target: Microsoft365SettingsTarget; enabledPlugins?: Record<string, boolean>; hasSandbox: boolean }>();
-  /** Files whose deny-floor rewrite has not succeeded yet, with the floor policy to write. */
-  private readonly pending = new Map<string, M365MutationPolicy | undefined>();
+  /** Files whose deny-floor rewrite has not succeeded yet: the floor policy to write and the last attempt's error code. */
+  private readonly pending = new Map<string, { floor: M365MutationPolicy | undefined; code: string }>();
 
   write(
     target: Microsoft365SettingsTarget,
@@ -774,14 +806,20 @@ export class Microsoft365SettingsFiles {
     return this.pending.size > 0;
   }
 
+  /** Each settings file whose rewrite is still pending, with the error code that keeps it pending; for the refusal log. */
+  pendingRestorations(): Array<{ path: string; code: string }> {
+    return [...this.pending].map(([claudeDir, { code }]) => ({ path: join(claudeDir, 'settings.json'), code }));
+  }
+
   /**
    * Runs after each re-check with the runtime policy before and after it, and returns `after`.
    * When the re-check withdrew the assignment, every recorded file is queued for a rewrite with the
    * deny floor. Every call, whether or not it withdrew anything, then writes each queued file before
    * it returns: a failed rewrite stays queued and is retried at the next check. Only a file that is
    * gone (ENOENT: its workspace was removed) is dropped, not recreated; a file that cannot be
-   * inspected stays queued. A failure is logged with a reason, never a path; the caller has already
-   * stored `after`, so authority stays withdrawn in memory either way.
+   * inspected stays queued. A failed rewrite is logged with a reason, never a path; each spawn refused
+   * meanwhile logs the file's path and that error code (`microsoft365SpawnPolicy`). The caller has
+   * already stored `after`, so authority stays withdrawn in memory either way.
    */
   restoreFloorOnWithdrawal(
     before: M365MutationPolicy | undefined,
@@ -789,20 +827,23 @@ export class Microsoft365SettingsFiles {
     instanceName?: string,
   ): M365MutationPolicy | undefined {
     if (m365MutationExceptionAllowed(before) && !m365MutationExceptionAllowed(after)) {
-      for (const claudeDir of this.written.keys()) this.pending.set(claudeDir, after);
+      for (const claudeDir of this.written.keys()) this.pending.set(claudeDir, { floor: after, code: 'not-attempted' });
     }
-    for (const [claudeDir, floor] of this.pending) {
+    for (const [claudeDir, entry] of this.pending) {
       const file = this.written.get(claudeDir);
-      if (file === undefined || isAbsent(join(claudeDir, 'settings.json'))) {
+      const inspection = lstatErrorCode(join(claudeDir, 'settings.json'));
+      if (file === undefined || inspection === 'ENOENT') {
         this.pending.delete(claudeDir);
         continue;
       }
       try {
-        ensurePermissionsSettings(claudeDir, 'agent', file.enabledPlugins, { hasSandbox: file.hasSandbox, m365MutationPolicy: floor });
+        ensurePermissionsSettings(claudeDir, 'agent', file.enabledPlugins, { hasSandbox: file.hasSandbox, m365MutationPolicy: entry.floor });
         this.pending.delete(claudeDir);
       } catch (err) {
+        // A failed inspection is the cause an operator can repair; otherwise the write's own error code.
         const code = isRecord(err) ? err['code'] : undefined;
-        log.error({ instance: instanceName, target: file.target, reason: typeof code === 'string' ? code : 'write-failed' },
+        entry.code = inspection ?? (typeof code === 'string' ? code : 'write-failed');
+        log.error({ instance: instanceName, target: file.target, reason: entry.code },
           'Microsoft 365 deny floor not restored in a settings file; it stays pending and provider spawns are refused until a retry succeeds');
       }
     }
