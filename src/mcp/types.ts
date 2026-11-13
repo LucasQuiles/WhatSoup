@@ -10,7 +10,7 @@ import {
 } from '../core/durability-evidence-contract.ts';
 import type { ClientOutputGateResult } from '../core/client-output-policy-gate.ts';
 import type { M365WorkflowAuthority, M365WorkflowAuthorityScope } from '../core/m365-bridge-policy.ts';
-import type { SessionTokenBinding } from './caller-attribution.ts';
+import type { SessionTokenBinding, SessionTokenRefusal } from './caller-attribution.ts';
 import type { TurnReplySink } from '../core/turn-reply.ts';
 export { isPathWithinAllowedRoot } from '../lib/path-boundary.ts';
 
@@ -105,6 +105,11 @@ export interface SessionContext {
   turnReplySink?: TurnReplySink;
   /** Opaque SessionManager identity admitted from the provider bridge or a matched socket token. */
   turnReplySessionId?: string;
+  /**
+   * Socket callers only: why the session token this connection presented was refused
+   * here. Such a caller's replies are suppressed, never sent raw.
+   */
+  sessionTokenRefusal?: SessionTokenRefusal;
 }
 
 /** The connection-level half of {@link ToolCallCallerEvidence}. */

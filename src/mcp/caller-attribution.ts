@@ -43,9 +43,20 @@ export interface SessionTokenLease {
   revoke(): void;
 }
 
+/**
+ * Why a token the registry minted is refused on a socket: it is live but bound
+ * to another socket, or its lease was revoked.
+ */
+export type SessionTokenRefusal = 'wrong_socket' | 'revoked';
+
 /** Anything that can say which live binding, if any, a token presented on a socket has. */
 export interface SessionTokenVerifier {
   verify(presented: unknown, socketPath: string): Readonly<SessionTokenBinding> | undefined;
+  /**
+   * Why a token this verifier minted is refused on `socketPath`. Undefined when the
+   * token verifies there, was never minted, or has been forgotten past the capacity.
+   */
+  refusal?(presented: unknown, socketPath: string): SessionTokenRefusal | undefined;
 }
 
 /** How many live tokens are kept before the oldest is forgotten (a backstop; leases revoke). */
@@ -62,11 +73,15 @@ export const SESSION_TOKEN_CAPACITY = 4096;
  * for one adapter call. Past the capacity the oldest token is forgotten and its
  * holder is recorded as an outside caller, which only makes evidence stricter.
  *
+ * A revoked token is remembered, up to the same capacity, so a caller still
+ * presenting it can be refused rather than treated as one that presented none.
+ *
  * A same-user process can read another process's environment, so a match is
  * still attribution evidence, not authentication against such a process.
  */
 export class SessionTokenRegistry implements SessionTokenVerifier {
   private readonly live = new Map<string, Readonly<SessionTokenBinding>>();
+  private readonly revoked = new Set<string>();
   private readonly capacity: number;
 
   constructor(capacity: number = SESSION_TOKEN_CAPACITY) {
@@ -96,17 +111,42 @@ export class SessionTokenRegistry implements SessionTokenVerifier {
   }
 
   revoke(token: string): void {
-    this.live.delete(token);
+    if (!this.live.delete(token)) return;
+    this.revoked.add(token);
+    while (this.revoked.size > this.capacity) {
+      const oldest = this.revoked.values().next().value;
+      if (oldest === undefined) break;
+      this.revoked.delete(oldest);
+    }
   }
 
   verify(presented: unknown, socketPath: string): Readonly<SessionTokenBinding> | undefined {
     if (!isNonEmptyString(presented) || !isNonEmptyString(socketPath)) return undefined;
+    const matched = this.findLive(presented);
+    return matched?.socketPath === socketPath ? matched : undefined;
+  }
+
+  refusal(presented: unknown, socketPath: string): SessionTokenRefusal | undefined {
+    if (!isNonEmptyString(presented)) return undefined;
+    const live = this.findLive(presented);
+    let revoked = false;
+    // Visit every revoked token so the comparison time does not depend on which one matches.
+    for (const token of this.revoked) {
+      if (safeStringEqual(token, presented)) revoked = true;
+    }
+    if (live !== undefined) {
+      return isNonEmptyString(socketPath) && live.socketPath === socketPath ? undefined : 'wrong_socket';
+    }
+    return revoked ? 'revoked' : undefined;
+  }
+
+  private findLive(presented: string): Readonly<SessionTokenBinding> | undefined {
     let matched: Readonly<SessionTokenBinding> | undefined;
     // Visit every live token so the comparison time does not depend on which one matches.
     for (const [token, binding] of this.live) {
       if (safeStringEqual(token, presented)) matched = binding;
     }
-    return matched?.socketPath === socketPath ? matched : undefined;
+    return matched;
   }
 }
 

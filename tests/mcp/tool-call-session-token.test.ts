@@ -260,4 +260,33 @@ describe('SessionTokenRegistry bindings (M365 r4, W4)', () => {
     sessionLease.revoke();
     expect(identity(sessionLease.token, SOCKET_A)).toBeUndefined();
   });
+
+  it('names why a token it minted is refused on a socket, and nothing for a verified or unknown token', async () => {
+    const module = await import('../../src/mcp/caller-attribution.ts');
+    const tokens = new module.SessionTokenRegistry();
+    const live = tokens.mint({ kind: 'session', socketPath: SOCKET_A });
+    const lease = tokens.mintLease({ kind: 'request', socketPath: SOCKET_A, conversationKey: 'chat-a', requestRef: 'r-1' });
+    lease.revoke();
+
+    expect(tokens.refusal(live, SOCKET_A)).toBeUndefined();
+    expect(tokens.refusal(live, SOCKET_B)).toBe('wrong_socket');
+    expect(tokens.refusal(lease.token, SOCKET_A)).toBe('revoked');
+    expect(tokens.refusal(lease.token, SOCKET_B)).toBe('revoked');
+    expect(tokens.refusal('0'.repeat(64), SOCKET_A)).toBeUndefined();
+    expect(tokens.refusal(undefined, SOCKET_A)).toBeUndefined();
+    expect(tokens.verify(lease.token, SOCKET_A)).toBeUndefined();
+  });
+
+  it('keeps at most its capacity of revoked tokens, oldest first out', async () => {
+    const module = await import('../../src/mcp/caller-attribution.ts');
+    const tokens = new module.SessionTokenRegistry(2);
+    // Each lease is revoked before the next is minted, so only the revoked set reaches its bound.
+    const leases = [0, 1, 2].map(() => {
+      const lease = tokens.mintLease({ kind: 'session', socketPath: SOCKET_A });
+      lease.revoke();
+      return lease;
+    });
+
+    expect(leases.map((lease) => tokens.refusal(lease.token, SOCKET_A))).toEqual([undefined, 'revoked', 'revoked']);
+  });
 });

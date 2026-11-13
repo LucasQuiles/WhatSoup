@@ -273,6 +273,11 @@ export class WhatSoupSocketServer {
               this.sessionTokens,
               this.socketPath,
             );
+            // A recognized token refused here (other socket, revoked lease) must
+            // not leave its caller looking like one that presented no token.
+            connSession.sessionTokenRefusal = presented === undefined
+              ? undefined
+              : this.sessionTokens?.refusal?.(presented, this.socketPath);
             continue;
           }
 
