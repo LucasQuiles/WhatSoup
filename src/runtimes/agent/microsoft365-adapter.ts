@@ -710,7 +710,10 @@ export function resolveExplainedM365MutationPolicy(options: ResolveM365MutationP
  * writes rely on the guarded plugin. Without its admission, or when the native copy
  * that `enabledPlugins` names does not run the same guarded entry, the workflow
  * assignment is withdrawn, so the mutation deny floor stays on every route (settings,
- * fallback, session and native plugin) and the broker refuses writes.
+ * fallback, session and native plugin) and the broker refuses writes. A policy without
+ * an assignment (no `workflowAuthority`, or an `accountEmail` binding) is returned
+ * unchecked: its `claude-cli` children still get the bridge environment and load the
+ * native copy, and only the settings deny floor guards native writes.
  */
 export function admitMicrosoft365Workflow(options: RegisterMicrosoft365AdapterOptions): M365MutationPolicy | undefined {
   return withAclVerdicts(() => admitMicrosoft365WorkflowChecked(options));
@@ -742,8 +745,10 @@ function admitMicrosoft365WorkflowChecked(options: RegisterMicrosoft365AdapterOp
  * must still match the admitted plugin and the assignment must still be live; otherwise the
  * assignment is withdrawn and turns that already published it lose it at their next request.
  * The withdrawn policy carries no assignment, so the withdrawal holds for the rest of the run
- * and is logged once. A policy without an assignment passes through. Any other policy with an
- * assignment, including an equal copy of the admitted one, was never admitted and is rejected.
+ * and is logged once. A policy without an assignment passes through with neither copy checked:
+ * its children still get the bridge environment, and the settings deny floor is their only
+ * native-write guard. Any other policy with an assignment, including an equal copy of the
+ * admitted one, was never admitted and is rejected.
  */
 export function recheckMicrosoft365Workflow(policy: M365MutationPolicy | undefined, instanceName?: string): M365MutationPolicy | undefined {
   return withAclVerdicts(() => recheckMicrosoft365WorkflowChecked(policy, instanceName));
@@ -768,9 +773,10 @@ function recheckMicrosoft365WorkflowChecked(policy: M365MutationPolicy | undefin
  * (`current`), so an in-place respawn of an existing session never reuses a stale approval. A
  * snapshot whose assignment was withdrawn is rejected: `claude-cli` then gets `--disallowedTools`
  * with the full deny set and no bridge or workflow-authority values. When startup admitted no
- * guarded plugin, or after a plugin-copy withdrawal, every child is rejected that way. While any
- * deny-floor rewrite is pending the spawn
- * is refused, because a settings file may still lift the floor.
+ * guarded plugin, or after a plugin-copy withdrawal, every child is rejected that way. A policy
+ * that never carried an assignment is not rejected: its child gets the bridge environment with
+ * no native-copy check, under the settings deny floor. While any deny-floor rewrite is pending
+ * the spawn is refused, because a settings file may still lift the floor.
  */
 export function microsoft365SpawnPolicy(
   snapshot: M365MutationPolicy | undefined,

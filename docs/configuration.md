@@ -2531,9 +2531,12 @@ must present a live token on the socket it was bound to:
   A turn that has moved on is refused with `STALE_REQUEST`.
 The receipt's `caller` field (`adapter` or `session`) names the token kind.
 
-**Limit in `sandboxPerChat` mode.** Session tokens bind to the workspace socket, but the
-session child gets no `MS365_WORKFLOW_AUTHORITY_SOCKET` there. Native Microsoft 365
-writes therefore fail closed in that mode.
+**Limit in `sandboxPerChat` mode.** Session tokens bind to the workspace socket. The session
+child keeps that socket (`WHATSOUP_MCP_SOCKET`) and its session token for its WhatSoup
+tools, but gets no `MS365_WORKFLOW_AUTHORITY_SOCKET`, so the guarded plugin refuses native
+Microsoft 365 writes in that mode. The workspace socket still serves the private broker, so
+the missing variable alone does not guard native writes: the settings deny floor, which
+sandbox settings always keep, does.
 
 **Upgrade note.** This release changes two things for an existing `m365Bridge` binding:
 - A binding without `workflowAuthority`, and every `accountEmail` binding, keeps the
@@ -2562,7 +2565,8 @@ To roll back afterwards, remove `workflowAuthority` before starting the previous
 admission reads that copy. It must have the canonical shape: a manifest whose `mcpServers`
 holds only the `microsoft_365` server and which has no `hooks` key, and no plugin-root
 `.mcp.json` or `hooks/hooks.json`. The `claude-cli` provider also loads the copy that
-`enabledPlugins` names, so startup checks that copy too. It reads the Claude CLI's install
+`enabledPlugins` names, so for a binding with `workflowAuthority` startup checks that copy
+too. It reads the Claude CLI's install
 record, `plugins/installed_plugins.json` under `CLAUDE_CONFIG_DIR` (or `~/.claude`), and
 requires every install of `microsoft_365@microsoft-365-dev` to repeat the admitted plugin:
 - its manifest's `mcpServers` and `hooks` equal the admitted manifest's: the single
@@ -2573,6 +2577,14 @@ requires every install of `microsoft_365@microsoft-365-dev` to repeat the admitt
   same SHA-256 as the admitted entry;
 - the install record, the install directory, the manifest and the entry pass the same
   ownership, permission, ACL and symlink checks as the admitted copy.
+
+**A binding without `workflowAuthority` gets no native-copy check.** The startup and
+re-check comparisons below guard the workflow assignment, so they run only for a binding
+with `workflowAuthority`. A binding without it, and every `accountEmail` binding, still
+projects the bridge environment, including `MS365_AGENT365_API_KEY`, into each `claude-cli`
+child, and that child loads the `enabledPlugins` copy with no manifest, entry or trust
+check. There the settings deny floor is the only guard against native Microsoft 365 writes.
+The `microsoft365` adapter, where registered, still checks the `pluginDirs` copy it launches.
 
 Only a missing file (`ENOENT`) counts as absent. A root file that exists but cannot be read
 (for example `EACCES`, `EIO`, `ELOOP` or a dangling symlink) refuses the copy.
@@ -2591,8 +2603,8 @@ ACL grants at all. Both limits are listed with the accepted residuals.
 Config-root isolation (`WHATSOUP_AGENT_CONFIG_ROOT_ISOLATION=1`) gives a sandboxed child
 another install record than the one checked here, so it withdraws the assignment.
 
-No guarded plugin admitted under `pluginDirs`, a missing or unreadable record, a missing
-install or any difference withdraws the assignment. The log names the reason, never a path. Admission records the admitted
+For a binding with `workflowAuthority`, no guarded plugin admitted under `pluginDirs`, a
+missing or unreadable record, a missing install or any difference withdraws the assignment. The log names the reason, never a path. Admission records the admitted
 copy: its configured path and real path, its manifest and entry digests, the real path of
 its entry, its server and hook shape. Every re-check compares exactly these surfaces:
 - the `pluginDirs` copy: its configured path and its entry symlink still resolve to the
@@ -2614,7 +2626,8 @@ socket is ready, and also before it acquires the socket. When the runtime's poli
 admitted assignment, that check covers both copies and the assignment; otherwise it covers
 the `pluginDirs` copy that the adapter launches. A change closes the adapter for the rest of
 the run and withdraws the assignment.
-The native copy is re-checked at startup, before each later write of native settings (a
+For a binding with `workflowAuthority`, the native copy is re-checked at startup, before
+each later write of native settings (a
 capability-grant write, or the settings of a new sandbox per-chat session), before each
 `claude-cli` spawn (including an in-place respawn of an existing session: a crash
 auto-respawn, a `/new` reset, a failed resume or a later message to an inactive session)

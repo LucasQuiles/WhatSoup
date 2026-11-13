@@ -238,9 +238,14 @@ Preconditions include: the wrapper symlink points at
 currently runs from `--expect-current`; a health token and port resolve; the
 database exists; and no staged plist still references `--expect-current`.
 
-The script does not check Microsoft 365 plugin copies; the runtime checks them at
-startup, before each later native-settings write, before each `claude-cli` spawn, before
-each turn publishes its authority and before each `microsoft365` adapter launch. Before
+The script does not check Microsoft 365 plugin copies. For a binding with
+`workflowAuthority`, the runtime checks both copies at startup, before each later
+native-settings write, before each `claude-cli` spawn, before each turn publishes its
+authority and before each `microsoft365` adapter launch. A binding without
+`workflowAuthority`, and every `accountEmail` binding, gets no native-copy check: its
+`claude-cli` children receive the bridge key and load the `enabledPlugins` copy unchecked,
+so only the settings deny floor stops native writes, and the adapter checks only the
+`pluginDirs` copy it launches. Before
 activating a release for an instance with an `m365Bridge` binding, check that the guarded
 plugin is installed through `agentOptions.pluginDirs`. When no guarded plugin is admitted
 there, or the copy that `enabledPlugins` names is missing or differs from the guarded

@@ -178,16 +178,22 @@ non-sandboxed runtime receives a restart capability, and `microsoft365` when the
 runtime's Microsoft 365 bridge policy is approved, an account ID is bound and exactly one
 configured Microsoft plugin has the admitted launcher; see
 [docs/tools.md](tools.md#whatsoup-mcp-tool-api-reference) for the full gating conditions).
-Tool definitions live under [`src/mcp/tools/*.ts`](../src/mcp/tools/) — each module listed
-below exports a factory that registers tools with the names listed — except for the three
-runtime tools. `emit_heal_result` is declared in
-[`src/runtimes/agent/runtime-tool-registrations.ts`](../src/runtimes/agent/runtime-tool-registrations.ts)
-and `restart_self` in
-[`src/runtimes/agent/self-restart.ts`](../src/runtimes/agent/self-restart.ts); both are
-registered through `registerRuntimeInlineTools` from `AgentRuntime.start()`. `microsoft365`
-is declared in [`src/mcp/tools/microsoft365.ts`](../src/mcp/tools/microsoft365.ts) and
-registered by the agent runtime through `registerMicrosoft365Adapter`, not by
-`register-all.ts`.
+Each module in the table below lives under [`src/mcp/tools/*.ts`](../src/mcp/tools/) and
+exports a factory that `register-all.ts` calls to register the tools named in its row. Four
+tool declarations sit outside the table:
+- Three runtime tools, counted in the total above. `emit_heal_result` is declared in
+  [`src/runtimes/agent/runtime-tool-registrations.ts`](../src/runtimes/agent/runtime-tool-registrations.ts)
+  and `restart_self` in
+  [`src/runtimes/agent/self-restart.ts`](../src/runtimes/agent/self-restart.ts); both are
+  registered through `registerRuntimeInlineTools` from `AgentRuntime.start()`.
+  `microsoft365` is declared in [`src/mcp/tools/microsoft365.ts`](../src/mcp/tools/microsoft365.ts)
+  but is not a module row: the agent runtime registers it through
+  `registerMicrosoft365Adapter`, not `register-all.ts`.
+- The private `authorize_m365_action` broker, not counted in the total above.
+  `register-all.ts` always registers it from
+  [`src/mcp/m365-workflow-authority.ts`](../src/mcp/m365-workflow-authority.ts), outside
+  `src/mcp/tools/`. It is marked private, so tool listings omit it; only the guarded
+  Microsoft 365 plugin calls it (see [`microsoft365`](tools.md#microsoft365)).
 Tool counts and module groupings come from the
 [docs/tools.md table of contents](tools.md#table-of-contents).
 
@@ -218,11 +224,12 @@ individual tool inventory is `docs/tools.md`). Tool-level entries follow on prom
 | `mcp:tools.audit` | 3 | [`src/mcp/tools/audit.ts`](../src/mcp/tools/audit.ts) | stable | active | `read_outbound_sends`, `maintain_outbound_audit`, `list_fact_export_queue` |
 | `mcp:tools.substrate` | 23 | [`src/mcp/tools/substrate.ts`](../src/mcp/tools/substrate.ts) | beta | active | Agent substrate: beads, watches, triggers, vault, observations, entities, aliases, activity timeline. Schema still settling. |
 
-> The three runtime tools are outside the per-module registry above, which mirrors the
-> per-module table of `register-all.ts` modules in docs/tools.md. See
-> [`emit_heal_result`](tools.md#emit_heal_result),
+> The three runtime tools and the private `authorize_m365_action` broker are outside the
+> per-module registry above, which mirrors the per-module table of `register-all.ts` modules
+> in docs/tools.md. See [`emit_heal_result`](tools.md#emit_heal_result),
 > [`restart_self`](tools.md#restart_self) and
-> [`microsoft365`](tools.md#microsoft365) for their schemas and distinct gates.
+> [`microsoft365`](tools.md#microsoft365) for their schemas and distinct gates; the
+> `microsoft365` section also describes the broker.
 
 Sock-tool factory infrastructure: [`src/mcp/tools/sock-tool-factory.ts`](../src/mcp/tools/sock-tool-factory.ts) — internal.
 
