@@ -4333,6 +4333,61 @@ def email_fallback(subject: str, body: str, timeout: float = 20) -> bool:
     return proc.returncode == 0
 
 
+# The producer's canonical UTC timestamp (Date#toISOString). ASCII digits only
+# (Python's \d also matches other scripts' digits), and fullmatch, so a trailing
+# newline cannot ride along.
+_OUTAGE_STARTED_AT_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z")
+
+
+def event_outage_started_at(event: dict[str, Any]) -> str | None:
+    """When the reported outage began, from structured diagnostics, or None.
+
+    Confinement turns the summary and evidence that also carry the start into
+    digests, so a card that must name the time reads it here. Anything not
+    shaped like the producer's timestamp is dropped rather than rendered.
+    """
+    diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    value = diagnostics.get("outageStartedAt")
+    if not isinstance(value, str) or not _OUTAGE_STARTED_AT_RE.fullmatch(value):
+        return None
+    try:
+        # Same rule as the producer: an impossible date is dropped.
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
+    except ValueError:
+        return None
+    return value
+
+
+# The producer's outage identity: a lower-case UUID. Anything else is not trusted.
+_OUTAGE_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+LINK_DEAD_SOURCE = "whatsapp_link_dead"
+LINK_DEAD_OUTAGES_FIELD = "linkDeadOutages"
+
+
+def event_outage_id(event: dict[str, Any]) -> str | None:
+    """The outage a whatsapp_link_dead card or clear reports, or None.
+
+    The producer sends a card at least once per outage and may resend it, so
+    this identity is what lets the hub collapse the repeats. An event without a
+    valid ID (an older producer) is handled as before.
+    """
+    if str(event.get("source") or "") != LINK_DEAD_SOURCE:
+        return None
+    diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    value = diagnostics.get("outageId")
+    if not isinstance(value, str) or not _OUTAGE_ID_RE.fullmatch(value):
+        return None
+    return value
+
+
+def recorded_link_dead_outage(incident_state: dict[str, Any], key: str) -> str | None:
+    """The newest outage ID DELIVERED for this incident key (one entry per key)."""
+    outages = incident_state.get(LINK_DEAD_OUTAGES_FIELD)
+    record = outages.get(key) if isinstance(outages, dict) else None
+    value = record.get("outageId") if isinstance(record, dict) else None
+    return value if isinstance(value, str) else None
+
+
 def event_line(label: str, value: Any, limit: int = 700) -> str | None:
     if value is None or value == "":
         return None
@@ -4550,6 +4605,7 @@ def format_event(event: dict[str, Any]) -> str:
         event_line("severity", event.get("severity")),
         event_line("machine", event.get("machine")),
         event_line("instance", event.get("instance")),
+        event_line("outage_started", event_outage_started_at(event)),
         event_line("source", event.get("source")),
         event_line("alert_source", event.get("alertSource")),
         event_line("incident_key", incident_key(event)),
@@ -5173,6 +5229,22 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
     key = incident_key(event)
     current = int(time.time())
     open_incidents = incident_state.setdefault("openIncidents", {})
+    # Outage identity (whatsapp_link_dead): the producer sends at least once per
+    # outage, so a repeat of a delivered outage is collapsed and a DIFFERENT
+    # outage always pages, whether the old incident is open, closed or cooling
+    # down. Delivery is what records an ID (mark_incident_sent), so a send that
+    # failed is retried, not collapsed.
+    outage_id = event_outage_id(event)
+    if outage_id is not None:
+        recorded_outage = recorded_link_dead_outage(incident_state, key)
+        if is_incident_clear(event):
+            if recorded_outage is not None and recorded_outage != outage_id:
+                return f"clear for outage {outage_id} is stale: outage {recorded_outage} is the current one for {key}"
+        elif is_incident_alert(event):
+            if recorded_outage == outage_id:
+                return f"outage {outage_id} already delivered for {key}; duplicate suppressed"
+            if recorded_outage is not None:
+                return None
     # Pattern F — suppress individual members of an OPEN flap storm; the
     # consolidated flap_storm alert (emitted by the pre-collapse scan) already
     # carries the count/rate. The storm itself never routes through here
@@ -5665,6 +5737,12 @@ def mark_incident_sent(event: dict[str, Any], incident_state: dict[str, Any]) ->
     # pure. Recording it pre-delivery meant a dead-lettered alert marked its
     # conversation covered and silenced the next distinct one.
     record_conversation_scope_delivered(event, incident_state, key, current)
+    delivered_outage = event_outage_id(event)
+    if delivered_outage is not None:
+        incident_state.setdefault(LINK_DEAD_OUTAGES_FIELD, {})[key] = {
+            "outageId": delivered_outage,
+            "deliveredAt": current,
+        }
     if is_incident_alert(event):
         close_superseded_incidents(event, incident_state)
         incident_state.setdefault("lastSentAt", {})[key] = current

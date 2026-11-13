@@ -108,6 +108,20 @@ export interface BotErrorsOutboxInput {
    * their emitted shape unchanged.
    */
   degradationDiagnostics?: BotErrorsDegradationDiagnostics;
+  /**
+   * When the outage an alert reports began, as a canonical UTC ISO-8601
+   * timestamp. Summary and evidence are confined to digests (#2386), so a card
+   * that must name the time needs it here. Validated in the builder and merged
+   * into `diagnostics`; anything not shaped like a timestamp is dropped.
+   * Omitted for every other source, which keeps their emitted shape unchanged.
+   */
+  outageStartedAt?: string;
+  /**
+   * Identity of the outage an alert or its clear reports: a lower-case UUID.
+   * Validated in the builder and merged into `diagnostics`; anything else is
+   * dropped. The dispatcher collapses repeats of one ID, so a resend is safe.
+   */
+  outageId?: string;
 }
 
 export interface BotErrorsOutboxWrite {
@@ -428,6 +442,24 @@ function boundedDegradationDiagnostics(
   };
 }
 
+// A canonical UTC timestamp, as Date#toISOString writes it. Digits, fixed
+// separators and `Z` only, so the value carries no content across confinement.
+const OUTAGE_STARTED_AT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+function boundedOutageStartedAt(value: unknown): { outageStartedAt?: string } {
+  if (typeof value !== 'string' || !OUTAGE_STARTED_AT_RE.test(value)) return {};
+  const parsed = Date.parse(value);
+  // Round-trip rejects impossible dates that the shape alone admits.
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) return {};
+  return { outageStartedAt: value };
+}
+
+const OUTAGE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function boundedOutageId(value: unknown): { outageId?: string } {
+  return typeof value === 'string' && OUTAGE_ID_RE.test(value) ? { outageId: value } : {};
+}
+
 export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = randomUUID(), createdAt = nowIso()) {
   const instance = input.instance.trim() || 'unknown';
   const source = input.source.trim() || 'unknown';
@@ -484,6 +516,9 @@ export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = rando
       // Additive, absent-by-default: only a degraded-health alert carries
       // these. See BotErrorsDegradationDiagnostics.
       ...boundedDegradationDiagnostics(input.degradationDiagnostics),
+      // Additive, absent-by-default: only an outage alert carries it.
+      ...boundedOutageStartedAt(input.outageStartedAt),
+      ...boundedOutageId(input.outageId),
     },
     delivery: {
       attempts: 0,

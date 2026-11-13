@@ -67,7 +67,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "b81b5fc962b249573e87bbc7ecf59b8b302f8685359103bc6ff7ac7a9eb8e2f0",
+      "sha256": "c1f4ae16615a2902fefebb2f054ed18b0a14f0cf751a7de06b7a1cdda9403a65",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",
@@ -811,7 +811,7 @@
     },
     {
       "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "f2000451bdb02083841c9bdf113f2202c5bc2eec3b6395515dbe91bf4b16bc87",
+      "sha256": "61b7ee2eec88c72fa6e2f6c5fce359adf7a2c4641c625053796062a9802f281d",
       "mustContain": [
         "import { redactText } from './redaction-text.ts';",
         "export { redactText as redactBotErrorsText } from './redaction-text.ts';",
@@ -869,7 +869,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "eeac03eaec87a8aebd6c382037a333726f79a3b018888c9799f4cc6a228f1b58",
+      "sha256": "32c25a6b05c9baec1c315c2fd3596603f451649dbede1ebcdda0839f043015f0",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",

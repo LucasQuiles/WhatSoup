@@ -68,6 +68,7 @@ const AUDITED_STRUCTURED_ALERT_RESULT_CALLERS = new Set([
   'src/core/ingest.ts',
   'src/fleet/health-poller.ts',
   'src/runtimes/agent/turn-finalizer.ts',
+  'src/transport/dead-link-alert.ts',
 ]);
 
 interface AlertGovernanceSource {
@@ -743,6 +744,61 @@ describe('emitAlert', () => {
       },
       'bot-errors outbox write failed',
     );
+  });
+
+  it('requireDurableOutbox: an alert the outbox cannot take fails and is never handed to the legacy helper', () => {
+    process.env['BOT_ERRORS_OUTBOX_DIR'] = '/dev/null/outbox';
+
+    const result = emitAlert('whatsoup-prod', 'whatsapp_link_dead', 'link down', 'no reconnect', 'critical', undefined, {
+      requireDurableOutbox: true,
+    });
+
+    expect(spawn).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false, channel: 'none', status: 'failed', outboxError: expect.any(String) });
+    expect(emitAlertChecked('whatsoup-prod', 'whatsapp_link_dead', 'link down', 'no reconnect', 'critical', undefined, undefined, {
+      requireDurableOutbox: true,
+    })).toBe(false);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('requireDurableOutbox: an alert is written to the outbox, not captured to the dry-run sink', () => {
+    // Same contract as the outbox-backed clear: capture is not durable.
+    const sinkPath = join(outboxDir, 'dry-run-capture.jsonl');
+    process.env['WHATSOUP_ALERT_SINK'] = sinkPath;
+
+    const result = emitAlert('whatsoup-prod', 'whatsapp_link_dead', 'link down', 'no reconnect', 'critical', undefined, {
+      requireDurableOutbox: true,
+    });
+
+    expect(result).toMatchObject({ ok: true, channel: 'outbox', status: 'durably_queued' });
+    expect(readdirSync(outboxDir).filter((file) => file.endsWith('.json'))).toHaveLength(1);
+    expect(() => readFileSync(sinkPath, 'utf8')).toThrow();
+  });
+
+  it('carries a well-formed outage start into the event diagnostics', () => {
+    emitAlert('whatsoup-prod', 'whatsapp_link_dead', 'link down', 'no reconnect', 'critical', undefined, {
+      outageStartedAt: '2026-11-09T05:00:00.000Z',
+    });
+
+    expect(readOnlyEvent().diagnostics).toMatchObject({ outageStartedAt: '2026-11-09T05:00:00.000Z' });
+  });
+
+  it('carries the outage ID on the card and on its strict clear', () => {
+    const id = '0b6f6a52-3f43-4a58-9d8c-7a1f2f5b9c11';
+    emitAlert('whatsoup-prod', 'whatsapp_link_dead', 'link down', 'no reconnect', 'critical', undefined, {
+      requireDurableOutbox: true,
+      outageId: id,
+    });
+    clearAlertSource('whatsoup-prod', 'whatsapp_link_dead', 'relinked', undefined, {
+      requireDurableOutbox: true,
+      outageId: id,
+    });
+
+    const events = readdirSync(outboxDir)
+      .filter((file) => file.endsWith('.json'))
+      .map((file) => JSON.parse(readFileSync(join(outboxDir, file), 'utf8')) as { eventType: string; diagnostics: { outageId?: string } });
+    expect(events.map((event) => event.eventType).sort()).toEqual(['alert', 'clear']);
+    expect(events.map((event) => event.diagnostics.outageId)).toEqual([id, id]);
   });
 
   it('logs legacy helper spawn errors after a fallback send is attempted', () => {
@@ -1484,6 +1540,17 @@ describe('clearAlertSource', () => {
       undefined,
       { requireDurableOutbox: true },
     )).toBe(false);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('requireDurableOutbox on the direct clear reports failure without the legacy helper', () => {
+    process.env['BOT_ERRORS_OUTBOX_DIR'] = '/dev/null/outbox';
+
+    const result = clearAlertSource('whatsoup-prod', 'whatsapp_link_dead', 'evidence', undefined, {
+      requireDurableOutbox: true,
+    });
+
+    expect(result).toMatchObject({ ok: false, channel: 'none', status: 'failed' });
     expect(spawn).not.toHaveBeenCalled();
   });
 

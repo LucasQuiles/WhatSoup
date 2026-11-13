@@ -575,3 +575,68 @@ describe('degradation diagnostics on a degraded-health alert', () => {
     expect(Object.keys(degradedEvent().diagnostics)).toEqual(['queue']);
   });
 });
+
+describe('outage start on a dead-link alert', () => {
+  // The dead-link card must name when the outage began. Summary and evidence
+  // are confined to digests (#2386), so the start rides this structured field,
+  // which the dispatcher renders on the card.
+  function deadLinkEvent(outageStartedAt?: string) {
+    return buildBotErrorsEvent({
+      eventType: 'alert',
+      instance: 'agent-alpha',
+      source: 'whatsapp_link_dead',
+      summary: 'WhatsApp link down',
+      evidence: 'outage_started_at: 2026-11-09T05:00:00.000Z',
+      outageStartedAt,
+    });
+  }
+
+  it('carries a canonical UTC timestamp into diagnostics', () => {
+    expect(deadLinkEvent('2026-11-09T05:00:00.000Z').diagnostics).toEqual({
+      queue: botErrorsOutboxDir(),
+      outageStartedAt: '2026-11-09T05:00:00.000Z',
+    });
+  });
+
+  it.each([
+    ['a phone number', '+1 (555) 123-4567'],
+    ['a path', '/home/testuser/.config/whatsoup/tokens.env'],
+    ['free text', 'yesterday morning'],
+    ['a non-UTC offset', '2026-11-09T05:00:00.000+02:00'],
+    ['an impossible date', '2026-13-45T25:61:00.000Z'],
+    ['a trailing line', '2026-11-09T05:00:00.000Z\nextra'],
+    ['a non-string', 1762664400000 as unknown as string],
+  ])('drops %s', (_label, outageStartedAt) => {
+    expect(deadLinkEvent(outageStartedAt).diagnostics).toEqual({ queue: botErrorsOutboxDir() });
+  });
+
+  it('leaves the diagnostics shape unchanged when the emitter passes none', () => {
+    expect(Object.keys(deadLinkEvent().diagnostics)).toEqual(['queue']);
+  });
+});
+
+describe('outage ID on a dead-link alert and its clear', () => {
+  const ID = '0b6f6a52-3f43-4a58-9d8c-7a1f2f5b9c11';
+  const build = (eventType: 'alert' | 'clear', outageId?: unknown) =>
+    buildBotErrorsEvent({
+      eventType,
+      instance: 'agent-alpha',
+      source: 'whatsapp_link_dead',
+      summary: 'WhatsApp link down',
+      outageId: outageId as string | undefined,
+    });
+
+  it.each(['alert', 'clear'] as const)('carries a UUID into the %s diagnostics', (eventType) => {
+    expect(build(eventType, ID).diagnostics).toEqual({ queue: botErrorsOutboxDir(), outageId: ID });
+  });
+
+  it.each([
+    ['free text', 'yesterday morning'],
+    ['a path', '/home/testuser/.config/whatsoup/tokens.env'],
+    ['upper case', ID.toUpperCase()],
+    ['a trailing line', `${ID}\nextra`],
+    ['a non-string', 42],
+  ])('drops %s', (_label, outageId) => {
+    expect(build('alert', outageId).diagnostics).toEqual({ queue: botErrorsOutboxDir() });
+  });
+});

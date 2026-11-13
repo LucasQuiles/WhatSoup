@@ -6,6 +6,7 @@ import {
   writeBotErrorsEvent,
   type BotErrorsCriticalAssetDiagnostic,
   type BotErrorsDegradationDiagnostics,
+  type BotErrorsOutboxInput,
   type BotErrorsOutboxWrite,
   type BotErrorsSeverity,
 } from './bot-errors-outbox.ts';
@@ -91,6 +92,16 @@ export interface AlertEmissionOptions {
   conversationKey?: string;
   /** Cause codes and connected flag of a degraded instance; validated by the event builder. */
   degradationDiagnostics?: BotErrorsDegradationDiagnostics;
+  /** When the reported outage began; validated by the event builder. */
+  outageStartedAt?: string;
+  /** Identity of the reported outage (a UUID); the hub collapses repeats of one ID. */
+  outageId?: string;
+  /**
+   * Write the durable outbox or fail: no dry-run sink capture and no legacy
+   * helper, whose acceptance does not prove the dispatcher has the event.
+   * For callers whose state must not advance on anything less.
+   */
+  requireDurableOutbox?: boolean;
 }
 
 export interface AlertEmissionContext {
@@ -102,6 +113,8 @@ export interface AlertEmissionContext {
 export interface ClearAlertSourceOptions {
   /** Reject sink and legacy paths when a clear must preserve outbox causality. */
   requireDurableOutbox?: boolean;
+  /** Identity of the outage this clear ends; the hub ignores a clear for another outage. */
+  outageId?: string;
 }
 
 // BOT_ERRORS_{JID,EXPECTED_JID,REQUIRE_EXPECTED} are config-published (#2192
@@ -226,21 +239,7 @@ if (!process.env['VITEST'] && alertSinkPath()) {
   );
 }
 
-function captureToAlertSink(
-  sink: string,
-  input: {
-    eventType: 'alert' | 'clear' | 'observation';
-    instance: string;
-    source: string;
-    summary: string;
-    evidence: string;
-    severity: BotErrorsSeverity;
-    criticalAsset?: BotErrorsCriticalAssetDiagnostic;
-    renotify?: boolean;
-    conversationKey?: string;
-    degradationDiagnostics?: BotErrorsDegradationDiagnostics;
-  },
-): AlertEmissionResult {
+function captureToAlertSink(sink: string, input: BotErrorsOutboxInput): AlertEmissionResult {
   try {
     // Reuse buildBotErrorsEvent so the captured record is identical-shape AND
     // redacted exactly like a real outbox event — a secret in evidence must
@@ -303,12 +302,17 @@ export function emitAlert(
   // Fixed codes and a boolean; like the conversation key, not forwarded to the
   // legacy spawn path, whose payload stays fixed.
   const degradationDiagnostics = opts?.degradationDiagnostics;
+  const outageStartedAt = opts?.outageStartedAt;
+  const input: BotErrorsOutboxInput = {
+    eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset, renotify, conversationKey, degradationDiagnostics, outageStartedAt, outageId: opts?.outageId,
+  };
+  if (opts?.requireDurableOutbox) return writeDurableOutboxOnly(input, 'bot-errors strict alert outbox write failed');
   const sink = alertSinkPath();
   if (sink) {
-    return captureToAlertSink(sink, { eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset, renotify, conversationKey, degradationDiagnostics });
+    return captureToAlertSink(sink, input);
   }
   try {
-    const outbox = writeBotErrorsEvent({ eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset, renotify, conversationKey, degradationDiagnostics });
+    const outbox = writeBotErrorsEvent(input);
     return { ok: true, channel: 'outbox', status: 'durably_queued', outbox };
   } catch (err) {
     const reason = errorMessage(err);
@@ -404,7 +408,14 @@ export function clearAlertSource(
   source: string,
   evidence = `repair_lane:${instance}`,
   criticalAsset?: BotErrorsCriticalAssetDiagnostic,
+  options: ClearAlertSourceOptions = {},
 ): AlertEmissionResult {
+  if (options.requireDurableOutbox) {
+    return writeDurableOutboxOnly(
+      { eventType: 'clear', instance, source, summary: `alert source cleared: ${source}`, evidence, severity: 'info', criticalAsset, outageId: options.outageId },
+      'bot-errors strict clear outbox write failed',
+    );
+  }
   const sink = alertSinkPath();
   if (sink) {
     return captureToAlertSink(sink, {
@@ -446,26 +457,18 @@ export function clearAlertSource(
   }
 }
 
-function clearAlertSourceDurablyQueued(
-  instance: string,
-  source: string,
-  evidence: string,
-  criticalAsset?: BotErrorsCriticalAssetDiagnostic,
-): AlertEmissionResult {
+/**
+ * The `requireDurableOutbox` path for alerts and clears: the outbox write is
+ * the only channel. The dry-run sink is bypassed too, because a capture is not
+ * durable and a caller that requires durability must not advance on it.
+ */
+function writeDurableOutboxOnly(input: BotErrorsOutboxInput, failureMessage: string): AlertEmissionResult {
   try {
-    const outbox = writeBotErrorsEvent({
-      eventType: 'clear',
-      instance,
-      source,
-      summary: `alert source cleared: ${source}`,
-      evidence,
-      severity: 'info',
-      criticalAsset,
-    });
+    const outbox = writeBotErrorsEvent(input);
     return { ok: true, channel: 'outbox', status: 'durably_queued', outbox };
   } catch (err) {
     const reason = errorMessage(err);
-    log.warn({ instance, source, err: reason }, 'bot-errors strict clear outbox write failed');
+    log.warn({ instance: input.instance, source: input.source, err: reason }, failureMessage);
     return { ok: false, channel: 'none', status: 'failed', outboxError: reason };
   }
 }
@@ -544,9 +547,7 @@ export function clearAlertSourceChecked(
   options: ClearAlertSourceOptions = {},
 ): boolean {
   return observeAlertEmission(
-    options.requireDurableOutbox
-      ? clearAlertSourceDurablyQueued(instance, source, evidence, criticalAsset)
-      : clearAlertSource(instance, source, evidence, criticalAsset),
+    clearAlertSource(instance, source, evidence, criticalAsset, options),
     { instance, source, operation: 'clear' },
   );
 }
