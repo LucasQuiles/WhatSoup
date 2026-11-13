@@ -8,7 +8,11 @@ import {
   m365MutationAdmissionGap,
   m365MutationExceptionAllowed,
   m365TurnAuthority,
+  m365WorkflowAuthorityLive,
+  narrowM365RoutePolicy,
+  withdrawM365WorkflowAuthority,
   type M365BridgeBinding,
+  type M365MutationPolicy,
 } from '../../src/core/m365-bridge-policy.ts';
 import { applyRequiredDeny, M365_MUTATION_DENY } from '../../src/core/settings-template.ts';
 
@@ -113,6 +117,30 @@ describe('m365TurnAuthority', () => {
       .toEqual({ requestRef: 'request-1', workflowAuthority, workflowAuthorityScope: 'shared', m365RouteProvider: 'claude-cli' });
     expect(m365TurnAuthority(approved, false, 'request-1', 'per_chat', 'claude-cli'))
       .toEqual({ requestRef: undefined, workflowAuthority: undefined, workflowAuthorityScope: undefined, m365RouteProvider: 'claude-cli' });
+  });
+});
+
+describe('narrowM365RoutePolicy', () => {
+  const childEnv = { ALLOW_M365_MUTATIONS: '1' };
+  const current: M365MutationPolicy = {
+    status: 'approved', childEnv, workflowAuthority: { accountId: 'account-1', employeeActorJid: '15551230001@s.whatsapp.net' },
+  };
+
+  it('publishes the current assignment, never a snapshot that only looks like it', () => {
+    const forged: M365MutationPolicy = {
+      status: 'approved', childEnv, workflowAuthority: { accountId: 'x', employeeActorJid: '15559990000@s.whatsapp.net' },
+    };
+    expect(narrowM365RoutePolicy(forged, current)).toBe(current);
+    expect(narrowM365RoutePolicy({ ...current }, current)).toBe(current);
+    expect(narrowM365RoutePolicy(current, current)).toBe(current);
+  });
+
+  it('narrows a snapshot by the current policy and never widens it', () => {
+    const withdrawn: M365MutationPolicy = { status: 'approved', childEnv };
+    expect(narrowM365RoutePolicy(current, withdrawn)).toEqual({ status: 'rejected' });
+    expect(narrowM365RoutePolicy(withdrawn, current)).toBe(withdrawn);
+    expect(narrowM365RoutePolicy(current, { status: 'rejected' })).toEqual({ status: 'rejected' });
+    expect(narrowM365RoutePolicy(current, undefined)).toBeUndefined();
   });
 });
 
@@ -258,6 +286,15 @@ describe('resolveM365MutationPolicy', () => {
       status: 'approved', childEnv: { MS365_AGENT365_ACCOUNT_ID: accountId },
     });
     expect(m365MutationExceptionAllowed(result)).toBe(true);
+    // Each resolved policy owns its assignment object, so withdrawing one runtime's assignment never marks
+    // another policy resolved from the same configured binding.
+    const second = resolveM365MutationPolicy(options);
+    if (result?.status !== 'approved' || second?.status !== 'approved') throw new Error('expected approved policies');
+    expect(result.workflowAuthority).toEqual(options.binding.workflowAuthority);
+    expect(result.workflowAuthority).not.toBe(options.binding.workflowAuthority);
+    withdrawM365WorkflowAuthority(result.workflowAuthority!);
+    expect(m365WorkflowAuthorityLive(result.workflowAuthority)).toBe(false);
+    expect(m365WorkflowAuthorityLive(second.workflowAuthority)).toBe(true);
   });
 
   it('binds the complete workflow assignment, so one admission cannot carry a changed assignment', () => {

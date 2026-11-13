@@ -6,8 +6,11 @@ import {
   M365_PLUGIN_KEY,
   m365MutationAdmissionGap,
   m365MutationExceptionAllowed,
+  m365WorkflowAuthorityLive,
+  narrowM365RoutePolicy,
   resolveM365MutationPolicy,
   supportsM365BridgeProvider,
+  withdrawM365WorkflowAuthority,
   type M365MutationPolicy,
   type ResolveM365MutationPolicyOptions,
 } from '../../core/m365-bridge-policy.ts';
@@ -15,6 +18,7 @@ import { ensurePermissionsSettings } from '../../core/workspace.ts';
 import { createChildLogger } from '../../logger.ts';
 import { isNonEmptyString, isRecord } from '../../lib/type-guards.ts';
 import type { SessionTokenRegistry } from '../../mcp/caller-attribution.ts';
+import { canonicalM365WorkflowParams } from '../../mcp/m365-workflow-authority.ts';
 import type { ToolRegistry } from '../../mcp/registry.ts';
 import {
   createMicrosoft365Tool,
@@ -22,11 +26,13 @@ import {
 } from '../../mcp/tools/microsoft365.ts';
 import type { ResolvedSessionContext, SessionContext } from '../../mcp/types.ts';
 import type { PerChatMcpSocketManager } from './per-chat-mcp-socket-manager.ts';
-import { buildBaseChildEnv } from './providers/child-env.ts';
+import { buildBaseChildEnv, isConfigRootIsolationEnabled } from './providers/child-env.ts';
 import { resolveAgentTurnMapKey } from './scheduled-agent-job-isolation.ts';
 
 const PLUGIN_MANIFEST = join('.claude-plugin', 'plugin.json');
 const PLUGIN_ENTRY = join('mcp-server', 'dist', 'index.cjs');
+/** Plugin-root files from which the Claude CLI also loads MCP servers and hooks. */
+const PLUGIN_ROOT_FILES = ['.mcp.json', join('hooks', 'hooks.json')] as const;
 const PLUGIN_NAME = 'microsoft_365';
 const PLUGIN_SERVER = 'microsoft_365';
 const PLUGIN_ENTRY_ARGUMENT = '${CLAUDE_PLUGIN_ROOT}/mcp-server/dist/index.cjs';
@@ -67,6 +73,22 @@ interface PluginManifest {
   name?: unknown;
   version?: unknown;
   mcpServers?: Record<string, PluginServerManifest>;
+  hooks?: unknown;
+}
+
+/** The admitted `pluginDirs` copy: what the adapter launches and what the native copy must repeat. */
+interface PluginPin {
+  manifestPath: string;
+  entryPath: string;
+  manifestDigest: string;
+  entryDigest: string;
+  /** Canonical JSON of the manifest's `mcpServers` and `hooks`. */
+  shape: string;
+  rootFileDigests: Array<string | undefined>;
+}
+
+function pluginShape(manifest: PluginManifest): string | null {
+  return canonicalM365WorkflowParams({ mcpServers: manifest.mcpServers ?? null, hooks: manifest.hooks ?? null });
 }
 
 function containedPath(root: string, candidate: string): boolean {
@@ -280,11 +302,18 @@ export function loadMicrosoft365PluginLaunch(
   pluginDirs: readonly string[],
   policy: M365MutationPolicy | undefined,
 ): Microsoft365Launch | undefined {
+  return loadPluginCandidate(pluginDirs, policy)?.launch;
+}
+
+function loadPluginCandidate(
+  pluginDirs: readonly string[],
+  policy: M365MutationPolicy | undefined,
+): { launch: Microsoft365Launch; pin: PluginPin } | undefined {
   if (policy?.status !== 'approved') return undefined;
   const accountId = policy.childEnv.MS365_AGENT365_ACCOUNT_ID;
   if (!isNonEmptyString(accountId) || accountId !== accountId.trim()) return undefined;
 
-  const candidates: Microsoft365Launch[] = [];
+  const candidates: Array<{ launch: Microsoft365Launch; pin: PluginPin }> = [];
   for (const configuredDir of pluginDirs) {
     try {
       const root = realpathSync(configuredDir);
@@ -307,16 +336,25 @@ export function loadMicrosoft365PluginLaunch(
       const manifestEnv = exactManifestEnvironment(server.env, policy);
       const policyEnv = projectedPolicyEnvironment(policy);
       const systemEnv = launcherSystemEnvironment();
-      if (manifestEnv === undefined || policyEnv === undefined || systemEnv === undefined) continue;
+      const entryDigest = fileDigest(entry);
+      const shape = pluginShape(parsed.manifest);
+      if (manifestEnv === undefined || policyEnv === undefined || systemEnv === undefined || entryDigest === undefined || shape === null) continue;
+      const manifestDigest = createHash('sha256').update(parsed.raw, 'utf8').digest('hex');
       candidates.push({
-        command: pythonLauncher,
-        args: [server.args[0], '--config', server.args[2], '--', entry],
-        // The manifest has a deliberately small non-secret environment. The
-        // process-bound policy adds its account and credential projection only
-        // after those fixed manifest values have matched it.
-        env: { ...systemEnv, ...policyEnv, ...manifestEnv },
-        catalogVersion: `${parsed.manifest.version}:${createHash('sha256').update(parsed.raw, 'utf8').digest('hex')}`,
-        accountId,
+        launch: {
+          command: pythonLauncher,
+          args: [server.args[0], '--config', server.args[2], '--', entry],
+          // The manifest has a deliberately small non-secret environment. The
+          // process-bound policy adds its account and credential projection only
+          // after those fixed manifest values have matched it.
+          env: { ...systemEnv, ...policyEnv, ...manifestEnv },
+          catalogVersion: `${parsed.manifest.version}:${manifestDigest}`,
+          accountId,
+        },
+        pin: {
+          manifestPath, entryPath: entry, manifestDigest, entryDigest, shape,
+          rootFileDigests: PLUGIN_ROOT_FILES.map((file) => fileDigest(join(root, file))),
+        },
       });
     } catch {
       // Deliberately: omit an absent or altered plugin so registry admission fails closed.
@@ -359,9 +397,20 @@ export function registerMicrosoft365Adapter(options: RegisterMicrosoft365Adapter
   return registerAdapterLaunch(options) !== undefined;
 }
 
-function registerAdapterLaunch(options: RegisterMicrosoft365AdapterOptions): Microsoft365Launch | undefined {
-  const launch = loadMicrosoft365PluginLaunch(options.pluginDirs, options.policy);
-  if (launch === undefined) return undefined;
+/**
+ * The admitted copy changed: a different entry or manifest, or a path that lost the trust rule.
+ * Re-checked before each adapter launch because the adapter spawns that copy with the credentials.
+ */
+function pluginCopyChanged(pin: PluginPin): boolean {
+  return !hasSafePathChain(pin.manifestPath) || !hasSafePathChain(pin.entryPath)
+    || fileDigest(pin.manifestPath) !== pin.manifestDigest || fileDigest(pin.entryPath) !== pin.entryDigest;
+}
+
+function registerAdapterLaunch(options: RegisterMicrosoft365AdapterOptions): { launch: Microsoft365Launch; pin: PluginPin } | undefined {
+  const candidate = loadPluginCandidate(options.pluginDirs, options.policy);
+  if (candidate === undefined) return undefined;
+  const { launch, pin } = candidate;
+  let copyChanged = false;
 
   options.registry.register(createMicrosoft365Tool({
     launch,
@@ -369,13 +418,25 @@ function registerAdapterLaunch(options: RegisterMicrosoft365AdapterOptions): Mic
       // An unresolved context means no turn is executing, and its purpose is not
       // known: never fall back to the chat's live socket for it. A turn on a route
       // whose provider or policy is not admitted (for example a codex-cli fallback)
-      // gets neither reads nor writes.
+      // gets neither reads nor writes, and neither does a turn whose published
+      // assignment was withdrawn after it started (its next turn would publish nothing).
       if (
         session.tier !== 'chat-scoped'
         || !session.deliveryJid
         || (session as Partial<ResolvedSessionContext>).executingResolution !== 'resolved'
         || !supportsM365BridgeProvider(session.m365RouteProvider)
+        || (session.workflowAuthority !== undefined && !m365WorkflowAuthorityLive(session.workflowAuthority))
       ) return undefined;
+      // Once the admitted copy changes, the adapter stays closed for the rest of the run and the
+      // runtime's assignment is withdrawn, so every route loses write authority at its next check.
+      if (copyChanged || pluginCopyChanged(pin)) {
+        if (!copyChanged && options.policy?.status === 'approved' && options.policy.workflowAuthority !== undefined) {
+          withdrawM365WorkflowAuthority(options.policy.workflowAuthority);
+        }
+        if (!copyChanged) log.warn({ instance: options.instanceName, reason: 'plugin-differs' }, WITHDRAWAL_MESSAGE);
+        copyChanged = true;
+        return undefined;
+      }
       const key = microsoft365AuthorityKey({ deliveryJid: session.deliveryJid, purpose: session.purpose }, options);
       const resource = options.perChatMcpSocketManager.acquire(key.mapKey, session.deliveryJid, key.purpose);
       await resource.ready;
@@ -394,11 +455,13 @@ function registerAdapterLaunch(options: RegisterMicrosoft365AdapterOptions): Mic
       };
     },
   }));
-  return launch;
+  return candidate;
 }
 
-/** Why the copy that `enabledPlugins` names cannot carry workflow authority; a reason, never a path. */
-type NativePluginMismatch = 'install-record-unreadable' | 'not-installed' | 'manifest-differs' | 'entry-unreadable' | 'entry-differs';
+/** Why a plugin copy cannot carry workflow authority; a reason, never a path. */
+type NativePluginMismatch =
+  | 'install-record-unreadable' | 'not-installed' | 'unsafe-path' | 'manifest-differs' | 'entry-unreadable' | 'entry-differs'
+  | 'plugin-differs' | 'config-root-isolation';
 
 function sha256File(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -414,20 +477,23 @@ function fileDigest(path: string): string | undefined {
 
 /**
  * The `claude-cli` provider also loads the copy that `enabledPlugins` names, from the
- * install record in its config directory. Every install must launch the guarded entry
- * byte for byte (the SHA-256 recorded at admission), without turning the guard off;
- * otherwise it could receive the bridge credentials without enforcing employee authorization.
+ * install record in its config directory. Every install must repeat the admitted plugin:
+ * the same single server (command, arguments and environment), no other servers or hooks,
+ * and the guarded entry byte for byte. Its record, root, manifest and entry get the admitted
+ * copy's trust rule. Otherwise it could receive the bridge credentials without enforcing
+ * employee authorization.
  */
-function nativePluginMismatch(admittedDigest: string): NativePluginMismatch | undefined {
+function nativePluginMismatch(pin: PluginPin): NativePluginMismatch | undefined {
   let installs: unknown;
+  // env-allowed: external-tool interop; must track the config dir the spawned claude CLI reads
+  const recordPath = join(process.env['CLAUDE_CONFIG_DIR'] || join(homedir(), '.claude'), NATIVE_INSTALL_RECORD);
   try {
-    // env-allowed: external-tool interop; must track the config dir the spawned claude CLI reads
-    const configDir = process.env['CLAUDE_CONFIG_DIR'] || join(homedir(), '.claude');
-    const record: unknown = JSON.parse(readFileSync(join(configDir, NATIVE_INSTALL_RECORD), 'utf8'));
+    const record: unknown = JSON.parse(readFileSync(recordPath, 'utf8'));
     installs = isRecord(record) && isRecord(record['plugins']) ? record['plugins'][M365_PLUGIN_KEY] : undefined;
   } catch {
     return 'install-record-unreadable';
   }
+  if (!hasSafePathChain(recordPath)) return 'unsafe-path';
   const list: unknown[] = Array.isArray(installs) ? installs : installs === undefined ? [] : [installs];
   if (list.length === 0) return 'not-installed';
   for (const install of list) {
@@ -435,16 +501,16 @@ function nativePluginMismatch(admittedDigest: string): NativePluginMismatch | un
     if (!isNonEmptyString(installPath) || !isAbsolute(installPath)) return 'not-installed';
     try {
       const root = realpathSync(installPath);
-      const server = parseManifest(join(root, PLUGIN_MANIFEST))?.manifest.mcpServers?.[PLUGIN_SERVER];
-      const env = server?.env;
-      const guard = isRecord(env) ? env['MS365_WORKFLOW_AUTHORITY_REQUIRED'] : undefined;
+      const manifestPath = join(root, PLUGIN_MANIFEST);
+      if (!hasSafePathChain(installPath) || !hasSafePathChain(manifestPath) || !hasSafePathChain(join(root, PLUGIN_ENTRY))) return 'unsafe-path';
+      const manifest = parseManifest(manifestPath)?.manifest;
       if (
-        !Array.isArray(server?.args) || !server.args.includes(PLUGIN_ENTRY_ARGUMENT)
-        || (env !== undefined && !isRecord(env)) || (guard !== undefined && guard !== '1')
+        manifest === undefined || pluginShape(manifest) !== pin.shape
+        || PLUGIN_ROOT_FILES.some((file, index) => fileDigest(join(root, file)) !== pin.rootFileDigests[index])
       ) return 'manifest-differs';
       const entry = realpathSync(join(root, PLUGIN_ENTRY));
-      if (!containedPath(root, entry) || !statSync(entry).isFile()) return 'entry-unreadable';
-      if (sha256File(entry) !== admittedDigest) return 'entry-differs';
+      if (!containedPath(root, entry) || !statSync(entry).isFile() || !hasSafePathChain(entry)) return 'entry-unreadable';
+      if (sha256File(entry) !== pin.entryDigest) return 'entry-differs';
     } catch {
       return 'entry-unreadable';
     }
@@ -453,18 +519,25 @@ function nativePluginMismatch(admittedDigest: string): NativePluginMismatch | un
 }
 
 const log = createChildLogger('microsoft365-adapter');
+const WITHDRAWAL_MESSAGE = 'Microsoft 365 workflow authority withdrawn: a plugin copy does not match the admitted guarded plugin, so Microsoft 365 writes stay denied';
 
-/** The admitted guarded entry's SHA-256, per policy that kept its workflow assignment at admission. */
-const admittedEntryDigests = new WeakMap<M365MutationPolicy, string>();
+/** The admitted plugin copy, per policy that kept its workflow assignment at admission. */
+const admittedPlugins = new WeakMap<M365MutationPolicy, PluginPin>();
+/** Policies withdrawn because a plugin copy changed: their `claude-cli` children get no bridge values at all. */
+const pluginWithdrawals = new WeakSet<M365MutationPolicy>();
 
+/** `midRun`: the assignment may already be published, so its turns lose it at their next request. */
 function withdrawnForNativeCopy(
   policy: Extract<M365MutationPolicy, { status: 'approved' }>,
   reason: NativePluginMismatch,
   instanceName: string | undefined,
+  midRun = false,
 ): M365MutationPolicy {
-  log.warn({ instance: instanceName, reason },
-    'Microsoft 365 workflow authority withdrawn: the plugin copy that enabledPlugins names does not run the admitted guarded entry, so Microsoft 365 writes stay denied');
-  return { status: 'approved', childEnv: policy.childEnv };
+  log.warn({ instance: instanceName, reason }, WITHDRAWAL_MESSAGE);
+  if (midRun && policy.workflowAuthority !== undefined) withdrawM365WorkflowAuthority(policy.workflowAuthority);
+  const withdrawn: M365MutationPolicy = { status: 'approved', childEnv: policy.childEnv };
+  pluginWithdrawals.add(withdrawn);
+  return withdrawn;
 }
 
 /**
@@ -491,40 +564,62 @@ export function resolveExplainedM365MutationPolicy(options: ResolveM365MutationP
  * fallback, session and native plugin) and the broker refuses writes.
  */
 export function admitMicrosoft365Workflow(options: RegisterMicrosoft365AdapterOptions): M365MutationPolicy | undefined {
-  const launch = registerAdapterLaunch(options);
+  const candidate = registerAdapterLaunch(options);
   const policy = options.policy;
   if (policy?.status !== 'approved' || policy.workflowAuthority === undefined) return policy;
-  if (launch === undefined) {
+  if (candidate === undefined) {
     log.warn({ instance: options.instanceName, missing: 'guarded Microsoft 365 plugin under agentOptions.pluginDirs' },
       'Microsoft 365 workflow authority withdrawn: no guarded plugin was admitted, so Microsoft 365 writes stay denied');
     return { status: 'approved', childEnv: policy.childEnv };
   }
-  const digest = fileDigest(launch.args[4]!);
-  if (digest === undefined) return withdrawnForNativeCopy(policy, 'entry-unreadable', options.instanceName);
-  const mismatch = nativePluginMismatch(digest);
+  // An isolated child config root holds another install record than the one checked here.
+  const mismatch = isConfigRootIsolationEnabled() ? 'config-root-isolation' : nativePluginMismatch(candidate.pin);
   if (mismatch !== undefined) return withdrawnForNativeCopy(policy, mismatch, options.instanceName);
-  admittedEntryDigests.set(policy, digest);
+  admittedPlugins.set(policy, candidate.pin);
   return policy;
 }
 
 /**
- * Runs before each native-settings write. A marketplace update can replace the copy that
- * `enabledPlugins` names mid-run, so it must still run the entry this policy was admitted
- * with; otherwise the assignment is withdrawn. The withdrawn policy carries no assignment,
- * so the withdrawal holds for the rest of the run and is logged once. A policy without an
- * assignment passes through. Any other policy with an assignment, including an equal copy
- * of the admitted one, was never admitted and is rejected (fail closed).
+ * Runs before each native-settings write, each provider spawn and each turn's publication. A
+ * marketplace update can replace either plugin copy mid-run, so both must still match the
+ * admitted plugin, and the adapter must not have found its copy changed; otherwise the
+ * assignment is withdrawn and turns that already published it lose it at their next request.
+ * The withdrawn policy carries no assignment, so the withdrawal holds for the rest of the run
+ * and is logged once. A policy without an assignment passes through. Any other policy with an
+ * assignment, including an equal copy of the admitted one, was never admitted and is rejected.
  */
 export function recheckMicrosoft365Workflow(policy: M365MutationPolicy | undefined, instanceName?: string): M365MutationPolicy | undefined {
   if (policy?.status !== 'approved' || policy.workflowAuthority === undefined) return policy;
-  const digest = admittedEntryDigests.get(policy);
-  if (digest === undefined) {
+  const pin = admittedPlugins.get(policy);
+  if (pin === undefined) {
     log.warn({ instance: instanceName, reason: 'not-admitted' },
       'Microsoft 365 policy rejected: it carries a workflow assignment that the plugin admission did not keep');
     return { status: 'rejected' };
   }
-  const mismatch = nativePluginMismatch(digest);
-  return mismatch === undefined ? policy : withdrawnForNativeCopy(policy, mismatch, instanceName);
+  const mismatch = !m365WorkflowAuthorityLive(policy.workflowAuthority) || pluginCopyChanged(pin) ? 'plugin-differs'
+    : isConfigRootIsolationEnabled() ? 'config-root-isolation'
+      : nativePluginMismatch(pin);
+  return mismatch === undefined ? policy : withdrawnForNativeCopy(policy, mismatch, instanceName, true);
+}
+
+/**
+ * The policy a session's provider child gets, read at every spawn after the caller's re-check
+ * (`current`), so an in-place respawn of an existing session never reuses a stale approval. A
+ * snapshot whose assignment was withdrawn is rejected: `claude-cli` then gets `--disallowedTools`
+ * with the full deny set and no bridge or workflow-authority values. After a plugin-copy
+ * withdrawal every child is rejected that way. While any deny-floor rewrite is pending the spawn
+ * is refused, because a settings file may still lift the floor.
+ */
+export function microsoft365SpawnPolicy(
+  snapshot: M365MutationPolicy | undefined,
+  current: M365MutationPolicy | undefined,
+  files: Microsoft365SettingsFiles,
+): M365MutationPolicy | undefined {
+  if (files.hasPendingRestoration()) {
+    throw new Error('M365_FLOOR_RESTORATION_PENDING: a Microsoft 365 deny floor rewrite is pending, so the provider spawn is refused');
+  }
+  const narrowed = narrowM365RoutePolicy(snapshot, current);
+  return narrowed?.status === 'approved' && current !== undefined && pluginWithdrawals.has(current) ? { status: 'rejected' } : narrowed;
 }
 
 /** Which native settings file a runtime wrote, logged in place of its path. */
@@ -537,6 +632,8 @@ export type Microsoft365SettingsTarget = 'shared' | 'chat';
  */
 export class Microsoft365SettingsFiles {
   private readonly written = new Map<string, { target: Microsoft365SettingsTarget; enabledPlugins?: Record<string, boolean>; hasSandbox: boolean }>();
+  /** Files whose deny-floor rewrite has not succeeded yet, with the floor policy to write. */
+  private readonly pending = new Map<string, M365MutationPolicy | undefined>();
 
   write(
     target: Microsoft365SettingsTarget,
@@ -546,29 +643,43 @@ export class Microsoft365SettingsFiles {
   ): void {
     ensurePermissionsSettings(claudeDir, 'agent', enabledPlugins, opts);
     this.written.set(claudeDir, { target, enabledPlugins, hasSandbox: opts.hasSandbox });
+    if (!m365MutationExceptionAllowed(opts.m365MutationPolicy)) this.pending.delete(claudeDir);
+  }
+
+  /** True while a withdrawal's floor rewrite has failed for some file; provider spawns are refused meanwhile. */
+  hasPendingRestoration(): boolean {
+    return this.pending.size > 0;
   }
 
   /**
    * Runs after each re-check with the runtime policy before and after it, and returns `after`.
-   * When the re-check withdrew the assignment, every recorded file is rewritten with the deny floor
-   * before this returns. A file that is gone (its workspace was removed) is not recreated. A failed
-   * write is logged with a reason, never a path, and the next file is still written; the caller has
-   * already stored `after`, so authority stays withdrawn in memory either way.
+   * When the re-check withdrew the assignment, every recorded file is queued for a rewrite with the
+   * deny floor. Every call, whether or not it withdrew anything, then writes each queued file before
+   * it returns: a failed rewrite stays queued and is retried at the next check. A file that is gone
+   * (its workspace was removed) is dropped, not recreated. A failure is logged with a reason, never a
+   * path; the caller has already stored `after`, so authority stays withdrawn in memory either way.
    */
   restoreFloorOnWithdrawal(
     before: M365MutationPolicy | undefined,
     after: M365MutationPolicy | undefined,
     instanceName?: string,
   ): M365MutationPolicy | undefined {
-    if (!m365MutationExceptionAllowed(before) || m365MutationExceptionAllowed(after)) return after;
-    for (const [claudeDir, file] of this.written) {
-      if (!existsSync(join(claudeDir, 'settings.json'))) continue;
+    if (m365MutationExceptionAllowed(before) && !m365MutationExceptionAllowed(after)) {
+      for (const claudeDir of this.written.keys()) this.pending.set(claudeDir, after);
+    }
+    for (const [claudeDir, floor] of this.pending) {
+      const file = this.written.get(claudeDir);
+      if (file === undefined || !existsSync(join(claudeDir, 'settings.json'))) {
+        this.pending.delete(claudeDir);
+        continue;
+      }
       try {
-        ensurePermissionsSettings(claudeDir, 'agent', file.enabledPlugins, { hasSandbox: file.hasSandbox, m365MutationPolicy: after });
+        ensurePermissionsSettings(claudeDir, 'agent', file.enabledPlugins, { hasSandbox: file.hasSandbox, m365MutationPolicy: floor });
+        this.pending.delete(claudeDir);
       } catch (err) {
         const code = isRecord(err) ? err['code'] : undefined;
         log.error({ instance: instanceName, target: file.target, reason: typeof code === 'string' ? code : 'write-failed' },
-          'Microsoft 365 deny floor not restored in a settings file; workflow authority stays withdrawn');
+          'Microsoft 365 deny floor not restored in a settings file; it stays pending and provider spawns are refused until a retry succeeds');
       }
     }
     return after;

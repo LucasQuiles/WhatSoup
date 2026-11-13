@@ -281,11 +281,25 @@ export function resolveM365MutationPolicy(
     ['MS365_DURABLE_MAIL_STATE_DIR', durableMailStateDir],
   ]) as NodeJS.ProcessEnv;
 
-  return { status: 'approved', childEnv, ...(binding.workflowAuthority ? { workflowAuthority: binding.workflowAuthority } : {}) };
+  // A copy per policy: a withdrawal marks this runtime's assignment object, never the configured binding.
+  return { status: 'approved', childEnv, ...(binding.workflowAuthority ? { workflowAuthority: { ...binding.workflowAuthority } } : {}) };
 }
 
 export function m365MutationExceptionAllowed(policy: M365MutationPolicy | undefined): boolean {
   return policy?.status === 'approved' && policy.workflowAuthority !== undefined;
+}
+
+/** Assignments withdrawn mid-run. A turn publishes the assignment object itself, so its readers see the withdrawal. */
+const withdrawnAssignments = new WeakSet<M365WorkflowAuthority>();
+
+/** Withdraws an assignment for the rest of the run; turns that already published it lose it at their next request. */
+export function withdrawM365WorkflowAuthority(authority: M365WorkflowAuthority): void {
+  withdrawnAssignments.add(authority);
+}
+
+/** False once the runtime withdrew this assignment object; the broker and the adapter read it per request. */
+export function m365WorkflowAuthorityLive(authority: M365WorkflowAuthority | undefined): boolean {
+  return authority !== undefined && !withdrawnAssignments.has(authority);
 }
 
 /**
@@ -328,6 +342,7 @@ export function m365TurnAuthority(
  * policy, so a snapshot can lose authority but never gain it. A snapshot whose authority rested on
  * an assignment the runtime has since withdrawn is rejected outright, not merely stripped of the
  * assignment: its child may run with settings lifted at spawn, so it keeps neither reads nor writes.
+ * When both carry an assignment, the current one is published: the snapshot's shape is never trusted.
  */
 export function narrowM365RoutePolicy(
   snapshot: M365MutationPolicy | undefined,
@@ -335,7 +350,8 @@ export function narrowM365RoutePolicy(
 ): M365MutationPolicy | undefined {
   if (current === undefined) return undefined;
   if (snapshot?.status !== 'approved' || current.status !== 'approved') return { status: 'rejected' };
-  return m365MutationExceptionAllowed(snapshot) && !m365MutationExceptionAllowed(current) ? { status: 'rejected' } : snapshot;
+  if (!m365MutationExceptionAllowed(snapshot)) return snapshot;
+  return m365MutationExceptionAllowed(current) ? current : { status: 'rejected' };
 }
 
 /**

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { withdrawM365WorkflowAuthority } from '../../src/core/m365-bridge-policy.ts';
 import {
   authorizeM365WorkflowAction,
   type M365WorkflowAuthorityContext,
@@ -181,5 +182,31 @@ describe('authorizeM365WorkflowAction', () => {
     if (!first.allowed || !duplicate.allowed || !changed.allowed) throw new Error('expected admitted receipts');
     expect(duplicate.receipt.operationId).toBe(first.receipt.operationId);
     expect(changed.receipt.operationId).not.toBe(first.receipt.operationId);
+  });
+
+  it('refuses a turn that published no workflow assignment', () => {
+    expect(authorizeM365WorkflowAction(request, { ...currentHumanRequest, workflowAuthority: undefined }, 1_000))
+      .toEqual({ allowed: false, code: 'WORKFLOW_AUTHORITY_DISABLED' });
+  });
+
+  it('refuses an in-flight turn whose published assignment the runtime has since withdrawn', () => {
+    // A fresh assignment object: the withdrawal is permanent for the object it marks.
+    const published = { ...authority };
+    const context = { ...currentHumanRequest, workflowAuthority: published };
+    // Positive control: the same published turn is authorized while its assignment is live.
+    expect(authorizeM365WorkflowAction(request, context, 1_000)).toMatchObject({ allowed: true });
+    withdrawM365WorkflowAuthority(published);
+    expect(authorizeM365WorkflowAction(request, context, 1_000)).toEqual({ allowed: false, code: 'WORKFLOW_AUTHORITY_DISABLED' });
+    // An equal assignment that was never withdrawn is unaffected.
+    expect(authorizeM365WorkflowAction(request, { ...context, workflowAuthority: { ...authority } }, 1_000)).toMatchObject({ allowed: true });
+  });
+
+  it.each([
+    ['a non-finite number', { subject: 'Hi', count: Number.NaN }],
+    ['a non-plain object', { subject: 'Hi', when: new Date(0) }],
+    ['an undefined value', { subject: 'Hi', body: undefined }],
+  ])('refuses params that carry %s', (_case, params) => {
+    expect(authorizeM365WorkflowAction({ ...request, params }, currentHumanRequest, 1_000))
+      .toEqual({ allowed: false, code: 'INVALID_PARAMS' });
   });
 });

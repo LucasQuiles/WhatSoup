@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import type { M365WorkflowAuthority as M365WorkflowAuthorityAssignment } from '../core/m365-bridge-policy.ts';
+import { m365WorkflowAuthorityLive, type M365WorkflowAuthority as M365WorkflowAuthorityAssignment } from '../core/m365-bridge-policy.ts';
 import type { ToolRegistry } from './registry.ts';
 import type { SessionContext } from './types.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from './external-effect.ts';
@@ -134,7 +134,8 @@ export function authorizeM365WorkflowAction(
     return { allowed: false, code: context.purpose === 'scheduled-agent-job' ? 'BACKGROUND_REQUEST' : 'MISSING_CURRENT_HUMAN_REQUEST' };
   }
   const authority = context.workflowAuthority;
-  if (!authority) return { allowed: false, code: 'WORKFLOW_AUTHORITY_DISABLED' };
+  // Read per request: a turn that published the assignment before a withdrawal loses it here.
+  if (!authority || !m365WorkflowAuthorityLive(authority)) return { allowed: false, code: 'WORKFLOW_AUTHORITY_DISABLED' };
   // Outside per-chat scope one socket serves every chat, so a write could borrow another actor's turn.
   if (context.workflowAuthorityScope !== 'per_chat') return { allowed: false, code: 'WORKFLOW_AUTHORITY_SCOPE_NOT_PER_CHAT' };
   if (!context.callerAttribution || !isTurnOwned(context.callerAttribution)) {

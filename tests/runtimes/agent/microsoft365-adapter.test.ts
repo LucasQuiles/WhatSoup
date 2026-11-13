@@ -10,7 +10,8 @@ import type * as os from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
-  m365MutationExceptionAllowed, m365TurnAuthority, narrowM365RoutePolicy, type M365MutationPolicy,
+  m365MutationExceptionAllowed, m365TurnAuthority, m365WorkflowAuthorityLive, narrowM365RoutePolicy, withdrawM365WorkflowAuthority,
+  type M365MutationPolicy,
 } from '../../../src/core/m365-bridge-policy.ts';
 import { SessionTokenRegistry } from '../../../src/mcp/caller-attribution.ts';
 import { registerM365WorkflowAuthorityTool } from '../../../src/mcp/m365-workflow-authority.ts';
@@ -23,6 +24,7 @@ import {
   loadMicrosoft365PluginLaunch,
   Microsoft365SettingsFiles,
   microsoft365AuthorityKey,
+  microsoft365SpawnPolicy,
   recheckMicrosoft365Workflow,
   registerMicrosoft365Adapter,
 } from '../../../src/runtimes/agent/microsoft365-adapter.ts';
@@ -149,18 +151,27 @@ function pluginDirectory(trace: string, valid = true): { root: string; python: s
   chmodSync(config, 0o600);
   writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({
     name: 'microsoft_365', version: 'fixture-v1',
-    mcpServers: { microsoft_365: valid ? {
-      command: SYSTEM_PYTHON,
-      args: [launcher, '--config', config, '--', '${CLAUDE_PLUGIN_ROOT}/mcp-server/dist/index.cjs'],
-      env: {
-        MS365_CLIENT_ID: 'fixture-client-id',
-        MS365_TENANT_ID: '11111111-2222-3333-4444-555555555555',
-        MS365_PROFILE: 'user-full-v1',
-        MS365_WORKFLOW_AUTHORITY_REQUIRED: '1',
-      },
-    } : { command: '/bin/sh', args: ['-c', 'bad'] } },
+    mcpServers: { microsoft_365: valid ? admittedServerShape() : { command: '/bin/sh', args: ['-c', 'bad'] } },
   }));
   return { root, python, launcher, config, entry };
+}
+
+/** The guarded manifest's single server, as `pluginDirectory` writes it: the shape a native copy must repeat exactly. */
+function admittedServerShape(): Record<string, unknown> {
+  const release = join(AGENT365_HOME, '.local', 'opt', 'agent365', 'launchers', '57a3b84');
+  return {
+    command: SYSTEM_PYTHON,
+    args: [
+      join(release, 'm365_bridge_launcher.py'), '--config', join(AGENT365_HOME, '.config', 'agent365', 'm365-bridge.json'),
+      '--', '${CLAUDE_PLUGIN_ROOT}/mcp-server/dist/index.cjs',
+    ],
+    env: {
+      MS365_CLIENT_ID: 'fixture-client-id',
+      MS365_TENANT_ID: '11111111-2222-3333-4444-555555555555',
+      MS365_PROFILE: 'user-full-v1',
+      MS365_WORKFLOW_AUTHORITY_REQUIRED: '1',
+    },
+  };
 }
 
 function setManifestCommand(root: string, command: string): void {
@@ -204,15 +215,19 @@ const NATIVE_REGISTRY = join(AGENT365_HOME, '.claude', 'plugins', 'installed_plu
  * Installs the copy that `enabledPlugins` names, the way the Claude CLI records it:
  * `installed_plugins.json` lists each install path under the plugin key.
  */
-function nativeInstall(entrySource: string, server: Record<string, unknown> = {
-  command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/mcp-server/dist/index.cjs'],
-}): string {
+function nativeInstall(
+  entrySource: string,
+  server: Record<string, unknown> = admittedServerShape(),
+  manifestExtra: Record<string, unknown> = {},
+): string {
   const root = join(AGENT365_HOME, '.claude', 'plugins', 'microsoft-365');
+  // Each install starts from an empty directory, so no file of an earlier install survives.
+  rmSync(root, { recursive: true, force: true });
   mkdirSync(join(root, '.claude-plugin'), { recursive: true });
   mkdirSync(join(root, 'mcp-server', 'dist'), { recursive: true });
   copyFileSync(entrySource, join(root, 'mcp-server', 'dist', 'index.cjs'));
   writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({
-    name: 'microsoft_365', version: 'fixture-v1', mcpServers: { microsoft_365: server },
+    name: 'microsoft_365', version: 'fixture-v1', mcpServers: { microsoft_365: server }, ...manifestExtra,
   }));
   writeFileSync(NATIVE_REGISTRY, JSON.stringify({
     version: 2,
@@ -717,15 +732,61 @@ describe.skipIf(SYSTEM_PYTHON === '')('Microsoft 365 provider adapter', () => {
     // No native install record: the copy the Claude CLI loads cannot be checked.
     expect(admit()).toEqual(withdrawn);
 
-    // Positive controls: the native copy runs a byte-identical entry, through the identical
-    // guarded manifest (the production shape) or through a direct node launch of that entry.
+    // Positive control: the native copy runs a byte-identical entry through the identical guarded manifest.
     const admittedServer = (JSON.parse(readFileSync(join(plugin.root, '.claude-plugin', 'plugin.json'), 'utf8')) as {
       mcpServers: { microsoft_365: Record<string, unknown> };
     }).mcpServers.microsoft_365;
+    expect(admittedServer).toEqual(admittedServerShape());
     const nativeRoot = nativeInstall(GUARDED_FIXTURE, admittedServer);
     expect(admit()).toBe(approved);
+
+    // The native manifest must repeat the admitted server exactly: one server, the same command, args and env,
+    // and no hooks or extra servers in the manifest or in the plugin-root files the Claude CLI also loads.
+    const nativeVariants: Array<[string, Record<string, unknown>, Record<string, unknown>?, ((root: string) => void)?]> = [
+      ['a direct node launch of the entry', { command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/mcp-server/dist/index.cjs'] }],
+      ['another interpreter', { ...admittedServer, command: '/bin/sh' }],
+      ['an extra argument', { ...admittedServer, args: ['--require', '/fixture/preload.cjs', ...(admittedServer['args'] as string[])] }],
+      ['an extra environment value', { ...admittedServer, env: { ...(admittedServer['env'] as Record<string, string>), NODE_OPTIONS: '--require /fixture/preload.cjs' } }],
+      ['no environment', { command: admittedServer['command'], args: admittedServer['args'] }],
+      ['an extra server', admittedServer, { mcpServers: { microsoft_365: admittedServer, helper: { command: 'node', args: ['/fixture/helper.cjs'] } } }],
+      ['a server file path in place of the object', admittedServer, { mcpServers: './.mcp.json' }],
+      ['manifest hooks', admittedServer, { hooks: { PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: '/fixture/hook.sh' }] }] } }],
+      ['a plugin-root .mcp.json', admittedServer, {}, (root) => writeFileSync(join(root, '.mcp.json'), '{"mcpServers":{}}')],
+      ['a plugin-root hooks file', admittedServer, {}, (root) => {
+        mkdirSync(join(root, 'hooks'), { recursive: true });
+        writeFileSync(join(root, 'hooks', 'hooks.json'), '{"hooks":{}}');
+      }],
+    ];
+    for (const [label, server, extra, alter] of nativeVariants) {
+      const root = nativeInstall(GUARDED_FIXTURE, server, extra);
+      alter?.(root);
+      expect(admit(), label).toEqual(withdrawn);
+    }
+
+    // The native install root, its manifest, its entry and the install record get the plugin's trust rule.
+    const nativeWeakenings: Array<[string, (root: string) => void]> = [
+      ['world-writable native entry', (root) => chmodSync(join(root, 'mcp-server', 'dist', 'index.cjs'), 0o666)],
+      ['world-writable native manifest', (root) => chmodSync(join(root, '.claude-plugin', 'plugin.json'), 0o666)],
+      ['world-writable native install root', (root) => chmodSync(root, 0o777)],
+      ['world-writable install record', () => chmodSync(NATIVE_REGISTRY, 0o666)],
+      ['foreign-owned native entry', (root) => FOREIGN_OWNED.add(join(root, 'mcp-server', 'dist', 'index.cjs'))],
+      ['foreign-owned native manifest', (root) => FOREIGN_OWNED.add(join(root, '.claude-plugin', 'plugin.json'))],
+      ['foreign-owned native install root', (root) => FOREIGN_OWNED.add(root)],
+      ['foreign-owned install record', () => FOREIGN_OWNED.add(NATIVE_REGISTRY)],
+    ];
+    for (const [label, weaken] of nativeWeakenings) {
+      weaken(nativeInstall(GUARDED_FIXTURE));
+      expect(admit(), label).toEqual(withdrawn);
+      FOREIGN_OWNED.clear();
+      chmodSync(NATIVE_REGISTRY, 0o644);
+    }
+
+    // Config-root isolation gives a sandboxed child another install record, so the assignment is refused.
     nativeInstall(GUARDED_FIXTURE);
     expect(admit()).toBe(approved);
+    vi.stubEnv('WHATSOUP_AGENT_CONFIG_ROOT_ISOLATION', '1');
+    expect(admit()).toEqual(withdrawn);
+    vi.stubEnv('WHATSOUP_AGENT_CONFIG_ROOT_ISOLATION', undefined);
 
     // The native entry differs from the admitted one.
     nativeInstall(LAUNCHER_FIXTURE, admittedServer);
@@ -859,6 +920,29 @@ describe.skipIf(SYSTEM_PYTHON === '')('Microsoft 365 provider adapter', () => {
     expect(adapterLog.error.mock.calls[0]![0]).toMatchObject({ instance: 'test', target: 'chat' });
     expect(JSON.stringify(adapterLog.error.mock.calls[0])).not.toContain(failing);
     expect(JSON.stringify(adapterLog.error.mock.calls[0])).not.toContain(tmpdir());
+
+    // The failed rewrite stays pending: every provider spawn is refused, whatever the session's snapshot.
+    expect(files.hasPendingRestoration()).toBe(true);
+    expect(() => microsoft365SpawnPolicy(approved, withdrawn, files)).toThrow(/M365_FLOOR_RESTORATION_PENDING/);
+    expect(() => microsoft365SpawnPolicy(withdrawn, withdrawn, files)).toThrow(/M365_FLOOR_RESTORATION_PENDING/);
+    // A later check that withdraws nothing still retries it; while the file stays unwritable it stays pending.
+    expect(files.restoreFloorOnWithdrawal(withdrawn, withdrawn, 'test')).toBe(withdrawn);
+    expect(adapterLog.error).toHaveBeenCalledTimes(2);
+    expect(files.hasPendingRestoration()).toBe(true);
+    // Once the file can be written, the next check writes the floor there and spawns may proceed.
+    rmSync(join(failing, 'settings.json'), { recursive: true });
+    writeFileSync(join(failing, 'settings.json'), JSON.stringify({ permissions: { allow: [], deny: [] } }), { mode: 0o600 });
+    files.restoreFloorOnWithdrawal(withdrawn, withdrawn, 'test');
+    expect(liftedM365Denies(failing)).toEqual([...M365_MUTATION_DENY]);
+    expect(files.hasPendingRestoration()).toBe(false);
+    expect(adapterLog.error).toHaveBeenCalledTimes(2);
+    // The admitted snapshot narrowed by the withdrawn runtime policy: rejected, so claude-cli gets the
+    // full deny set as --disallowedTools and no bridge values.
+    expect(microsoft365SpawnPolicy(approved, withdrawn, files)).toEqual({ status: 'rejected' });
+    // After a plugin-copy withdrawal even a session created later, without the assignment, is rejected.
+    expect(microsoft365SpawnPolicy(withdrawn, withdrawn, files)).toEqual({ status: 'rejected' });
+    // Positive control: an admitted runtime keeps its policy at spawn.
+    expect(microsoft365SpawnPolicy(admitted, admitted, new Microsoft365SettingsFiles())).toBe(approved);
   });
 
   it('rejects any policy that carries a workflow assignment but is not the admitted one', () => {
@@ -933,14 +1017,28 @@ describe.skipIf(SYSTEM_PYTHON === '')('Microsoft 365 provider adapter', () => {
     const bridge = createProviderMcpBridge(registry,
       { tier: 'chat-scoped', conversationKey: CONVERSATION_KEY, deliveryJid: DELIVERY_JID }, () => executing);
 
-    // Positive control: while the runtime still holds the snapshot's assignment, the write reaches the chat socket.
-    expect(executing.workflowAuthority).toEqual(snapshot.status === 'approved' ? snapshot.workflowAuthority : undefined);
-    await bridge.executeTool('microsoft365', { operation: 'call', name: 'send-mail', args: {} });
+    // Positive control: while the runtime still holds the snapshot's assignment, the write is authorized and dispatched.
+    expect(executing.workflowAuthority).toBe(snapshot.status === 'approved' ? snapshot.workflowAuthority : undefined);
+    await expect(bridge.executeTool('microsoft365', { operation: 'call', name: 'send-mail', args: {} }))
+      .resolves.toMatchObject({ isError: false });
     const acquired = manager.acquire.mock.calls.length;
     expect(acquired).toBeGreaterThan(0);
     const dispatched = traceRows(trace).filter((row) => row.event === 'write_dispatched').length;
+    expect(dispatched).toBeGreaterThan(0);
+    const sessionToken = (tokens as BindingTokens).mint({ kind: 'session', socketPath });
+    await expect(brokerExchange(socketPath, sessionToken)).resolves.toMatchObject({ allowed: true });
 
-    // The runtime withdraws the assignment; the same session's next turn publishes nothing.
+    // The runtime withdraws the assignment while this turn is still executing: the context is NOT republished,
+    // yet the adapter refuses before acquiring a socket and the broker refuses the native session's request.
+    if (snapshot.status === 'approved') withdrawM365WorkflowAuthority(snapshot.workflowAuthority!);
+    const inFlight = await bridge.executeTool('microsoft365', { operation: 'call', name: 'send-mail', args: {} });
+    expect(inFlight).toMatchObject({ isError: true });
+    expect(JSON.stringify(inFlight)).toContain('microsoft365_authority_unavailable');
+    expect(manager.acquire.mock.calls.length).toBe(acquired);
+    await expect(brokerExchange(socketPath, sessionToken)).resolves.toEqual({ allowed: false, code: 'WORKFLOW_AUTHORITY_DISABLED' });
+    expect(traceRows(trace).filter((row) => row.event === 'write_dispatched')).toHaveLength(dispatched);
+
+    // The same session's next turn publishes nothing.
     executing = publish({ status: 'approved', childEnv: snapshot.status === 'approved' ? snapshot.childEnv : {} });
     expect(executing).toMatchObject({ workflowAuthority: undefined, workflowAuthorityScope: undefined, m365RouteProvider: undefined });
     const refused = await bridge.executeTool('microsoft365', { operation: 'call', name: 'send-mail', args: {} });
@@ -948,6 +1046,69 @@ describe.skipIf(SYSTEM_PYTHON === '')('Microsoft 365 provider adapter', () => {
     expect(JSON.stringify(refused)).toContain('microsoft365_authority_unavailable');
     expect(manager.acquire.mock.calls.length).toBe(acquired);
     expect(traceRows(trace).filter((row) => row.event === 'write_dispatched')).toHaveLength(dispatched);
+  });
+
+  it.each([
+    ['replaced entry bytes', (plugin: { entry: string }) => copyFileSync(LAUNCHER_FIXTURE, plugin.entry)],
+    ['a world-writable entry', (plugin: { entry: string }) => chmodSync(plugin.entry, 0o666)],
+    ['a changed manifest', (plugin: { root: string }) => {
+      const manifestPath = join(plugin.root, '.claude-plugin', 'plugin.json');
+      writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace('fixture-v1', 'fixture-v2'));
+    }],
+  ])('withdraws the assignment and refuses the next adapter launch once the pluginDirs copy changes (%s)', async (_case, change) => {
+    vi.stubEnv('CLAUDE_CONFIG_DIR', undefined);
+    const directory = temporaryDirectory('whatsoup-m365-plugin-pin-');
+    const trace = join(directory, 'm365-fixture-trace.jsonl');
+    const registry = new ToolRegistry();
+    const tokens = new SessionTokenRegistry();
+    const plugin = pluginDirectory(trace);
+    nativeInstall(GUARDED_FIXTURE);
+    let executing: ExecutingSessionContext = authorizedExecuting();
+    const socketPath = await brokerServer(directory, 'chat', tokens, () => executing);
+    const manager = { acquire: vi.fn(() => ({ socketPath, ready: Promise.resolve() })) };
+    const admitted = admitMicrosoft365Workflow({ registry, policy: policy(trace), pluginDirs: [plugin.root],
+      perChatMcpSocketManager: manager as never, resolvePerChatMapKey: (jid) => `map:${jid}`, sessionTokens: tokens, instanceName: 'test' });
+    if (admitted?.status !== 'approved' || admitted.workflowAuthority === undefined) throw new Error('expected an admitted assignment');
+    executing = { ...authorizedExecuting(), workflowAuthority: admitted.workflowAuthority };
+    const bridge = createProviderMcpBridge(registry,
+      { tier: 'chat-scoped', conversationKey: CONVERSATION_KEY, deliveryJid: DELIVERY_JID }, () => executing);
+
+    // Positive control: the admitted copy is launched and the assignment holds.
+    await expect(bridge.executeTool('microsoft365', { operation: 'call', name: 'list-mail-messages', args: {} }))
+      .resolves.toMatchObject({ isError: false });
+    expect(recheckMicrosoft365Workflow(admitted, 'test')).toBe(admitted);
+    const acquired = manager.acquire.mock.calls.length;
+    const launches = traceRows(trace).length;
+    adapterLog.warn.mockClear();
+
+    change(plugin);
+    const refused = await bridge.executeTool('microsoft365', { operation: 'call', name: 'list-mail-messages', args: {} });
+    expect(refused).toMatchObject({ isError: true });
+    expect(JSON.stringify(refused)).toContain('microsoft365_authority_unavailable');
+    expect(manager.acquire.mock.calls.length).toBe(acquired);
+    expect(traceRows(trace)).toHaveLength(launches);
+    // The adapter withdrew the assignment for the whole runtime: the in-flight turn's assignment is dead,
+    // the next re-check returns the withdrawn policy, and the log names a reason, never a path.
+    expect(m365WorkflowAuthorityLive(admitted.workflowAuthority)).toBe(false);
+    expect(m365MutationExceptionAllowed(recheckMicrosoft365Workflow(admitted, 'test'))).toBe(false);
+    expect(adapterLog.warn.mock.calls.map((call) => call[0])).toContainEqual({ instance: 'test', reason: 'plugin-differs' });
+    expect(JSON.stringify(adapterLog.warn.mock.calls)).not.toContain(plugin.root);
+  });
+
+  it('marks the published assignment dead when a re-check finds a changed native copy', () => {
+    vi.stubEnv('CLAUDE_CONFIG_DIR', undefined);
+    const trace = join(temporaryDirectory('whatsoup-m365-native-dead-'), 'm365-fixture-trace.jsonl');
+    const nativeRoot = nativeInstall(GUARDED_FIXTURE);
+    const admitted = admitMicrosoft365Workflow({
+      registry: new ToolRegistry(), policy: policy(trace), pluginDirs: [pluginDirectory(trace).root], perChatMcpSocketManager: {} as never,
+      resolvePerChatMapKey: (jid: string) => jid, sessionTokens: new SessionTokenRegistry(), instanceName: 'test',
+    });
+    if (admitted?.status !== 'approved' || admitted.workflowAuthority === undefined) throw new Error('expected an admitted assignment');
+    expect(recheckMicrosoft365Workflow(admitted, 'test')).toBe(admitted);
+    expect(m365WorkflowAuthorityLive(admitted.workflowAuthority)).toBe(true);
+    copyFileSync(LAUNCHER_FIXTURE, join(nativeRoot, 'mcp-server', 'dist', 'index.cjs'));
+    expect(m365MutationExceptionAllowed(recheckMicrosoft365Workflow(admitted, 'test'))).toBe(false);
+    expect(m365WorkflowAuthorityLive(admitted.workflowAuthority)).toBe(false);
   });
 
   it('lists the adapter only to chat-scoped sessions bound to a delivery chat', () => {

@@ -69,7 +69,7 @@ function isFailClosedEnabled(): boolean {
   return process.env[FAILCLOSED_FLAG] === '1';
 }
 
-function isConfigRootIsolationEnabled(): boolean {
+export function isConfigRootIsolationEnabled(): boolean {
   // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
   return process.env[CONFIG_ROOT_ISOLATION_FLAG] === '1';
 }
