@@ -88,6 +88,11 @@ jobs:
         timeout-minutes: 10
         run: docker build --file docker/Dockerfile --tag whatsoup-ci .
 
+      - name: Build Docker dependency stage with native builds forced
+        # Proves the source-build fallback works when a prebuilt download fails (#3889).
+        timeout-minutes: 10
+        run: docker build --file docker/Dockerfile --target deps --build-arg RE2_DOWNLOAD_FORCE_BUILD=1 --tag whatsoup-ci-deps-native .
+
       - name: Verify Linux policy ownership and controller readability
         timeout-minutes: 2
         run: |

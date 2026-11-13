@@ -2,10 +2,15 @@
 # Node version pinned to match .nvmrc and package.json#volta.node.
 FROM node:24.15.0-slim AS deps
 
+# python3, make and g++ let native dependencies (re2) build from source when
+# their prebuilt download fails (#3889). They stay in this build stage: the
+# runtime stage copies only node_modules and package.json from here.
+# RE2_DOWNLOAD_FORCE_BUILD=1 (build arg) skips the download to test that path.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates git \
+      ca-certificates git python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
 
+ARG RE2_DOWNLOAD_FORCE_BUILD=
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY patches/ ./patches/
