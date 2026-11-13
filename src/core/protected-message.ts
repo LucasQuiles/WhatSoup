@@ -17,7 +17,26 @@ export { PROTECTED_MESSAGE_MARKER };
 // ring's pins module, which is the module domain tests replace.
 const MANAGED_LINK_FRAGMENT = /^#v3\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/;
 const MAX_SANITIZE_DEPTH = 64;
-const MAX_SANITIZE_NODES = 10_000;
+/**
+ * Objects and arrays visited per value; strings are scanned and not counted.
+ * Sized from the largest realistic tool result, list_groups: each group costs
+ * its metadata object, its participants array and one object per participant.
+ * 256 groups at WhatsApp's 1,024-member cap is 262,658 nodes; this bound is
+ * four times that. The previous bound of 10,000 was reached by about ten full
+ * groups.
+ */
+export const MAX_SANITIZE_NODES = 1_048_576;
+
+/** A tool result too large or too deep to scan for protected links. */
+export class ProtectedValueScanLimitError extends Error {
+  constructor() {
+    super(
+      `result is too large to check for protected links (more than ${MAX_SANITIZE_NODES} objects `
+      + `or deeper than ${MAX_SANITIZE_DEPTH} levels); narrow the request`,
+    );
+    this.name = 'ProtectedValueScanLimitError';
+  }
+}
 
 /**
  * True only for the exact canonical managed link the delivery service may send:
@@ -91,16 +110,35 @@ export function hasProtectedManagedLink(value: unknown, pins: ProtectedDeliveryP
 /**
  * Clone an inbound/raw payload while replacing every protected link in strings.
  * Keep binary fields intact for media handling and fail closed beyond a bounded
- * traversal depth rather than preserving an uninspected tail.
+ * traversal depth rather than preserving an uninspected tail. Past either bound
+ * each further object becomes the marker: an inbound message is still stored,
+ * and no unscanned text is kept. A tool result uses sanitizeProtectedToolResult.
  */
 export function sanitizeProtectedMessageValue(value: unknown, pins: ProtectedDeliveryPins = PROTECTED_DELIVERY_PINS): unknown {
+  return sanitizeBoundedValue(value, pins, 'marker');
+}
+
+/**
+ * Clone a value returned to an MCP caller or the console while replacing every
+ * protected link in strings. Past either bound it throws
+ * ProtectedValueScanLimitError, which the caller sees as a tool error, rather
+ * than return a result with objects silently replaced by the marker.
+ */
+export function sanitizeProtectedToolResult(value: unknown, pins: ProtectedDeliveryPins = PROTECTED_DELIVERY_PINS): unknown {
+  return sanitizeBoundedValue(value, pins, 'throw');
+}
+
+function sanitizeBoundedValue(value: unknown, pins: ProtectedDeliveryPins, overLimit: 'marker' | 'throw'): unknown {
   const seen = new WeakMap<object, unknown>();
   let visitedNodes = 0;
 
   const sanitize = (current: unknown, depth: number): unknown => {
     if (typeof current === 'string') return sanitizeProtectedLinkText(current, pins);
     if (current === null || typeof current !== 'object' || current instanceof Uint8Array) return current;
-    if (depth >= MAX_SANITIZE_DEPTH || ++visitedNodes > MAX_SANITIZE_NODES) return PROTECTED_MESSAGE_MARKER;
+    if (depth >= MAX_SANITIZE_DEPTH || ++visitedNodes > MAX_SANITIZE_NODES) {
+      if (overLimit === 'throw') throw new ProtectedValueScanLimitError();
+      return PROTECTED_MESSAGE_MARKER;
+    }
 
     const prior = seen.get(current);
     if (prior !== undefined) return prior;
@@ -117,7 +155,9 @@ export function sanitizeProtectedMessageValue(value: unknown, pins: ProtectedDel
     for (const key of Object.keys(current)) {
       try {
         clone[key] = sanitize((current as Record<string, unknown>)[key], depth + 1);
-      } catch {
+      } catch (error) {
+        // A throwing accessor reads as the marker; the bound must still escape.
+        if (error instanceof ProtectedValueScanLimitError) throw error;
         clone[key] = PROTECTED_MESSAGE_MARKER;
       }
     }

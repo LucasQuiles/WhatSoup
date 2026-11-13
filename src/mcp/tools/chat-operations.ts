@@ -6,7 +6,7 @@
 import { z } from 'zod';
 import { assertConversationAccess, type SessionContext, type ToolDeclaration } from '../types.ts';
 import type { Database } from '../../core/database.ts';
-import { sanitizeProtectedMessageValue } from '../../core/protected-message.ts';
+import { sanitizeProtectedToolResult } from '../../core/protected-message.ts';
 import type { ExtendedBaileysSocket } from '../types.ts';
 import { createChildLogger } from '../../logger.ts';
 import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
@@ -299,7 +299,7 @@ function makeGetReactions(db: Database): ToolDeclaration {
         .all(message_id) as Array<{ sender_jid: string; reaction: string; timestamp: string }>;
 
       // A reaction is stored remote text.
-      return { reactions: sanitizeProtectedMessageValue(rows), count: rows.length };
+      return { reactions: sanitizeProtectedToolResult(rows), count: rows.length };
     },
   };
 }

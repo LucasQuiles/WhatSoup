@@ -7,7 +7,7 @@ import { z } from 'zod';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Database } from '../../core/database.ts';
 import { createChildLogger } from '../../logger.ts';
-import { sanitizeProtectedMessageValue } from '../../core/protected-message.ts';
+import { sanitizeProtectedToolResult } from '../../core/protected-message.ts';
 import type { ToolRegistry } from '../registry.ts';
 import type { SessionContext } from '../types.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
@@ -38,7 +38,7 @@ const log = createChildLogger('mcp:substrate');
 // can predate ingress redaction, so the read tools redact each row. Rows are
 // redacted one at a time so a long list never reaches the sanitizer's bound.
 function redactStoredRow<T>(row: T): T {
-  return sanitizeProtectedMessageValue(row) as T;
+  return sanitizeProtectedToolResult(row) as T;
 }
 
 export interface SubstrateDeps {
@@ -602,7 +602,7 @@ export function registerSubstrateTools(
       const p = raw as { bead_id?: number; kind?: string; status?: 'active'|'paused'|'expired'|'cancelled'; limit?: number; after_id?: number };
       const filter = { beadId: p.bead_id, kind: p.kind as TriggerKind | undefined, status: p.status };
       // spec_json is stored text (a watch query or URL) and can hold a protected link.
-      return sanitizeProtectedMessageValue(p.limit === undefined && p.after_id === undefined
+      return sanitizeProtectedToolResult(p.limit === undefined && p.after_id === undefined
         ? { triggers: listTriggers(deps.db, filter), next_after_id: null }
         : listTriggersPage(deps.db, { ...filter, limit: p.limit, afterId: p.after_id }));
     },
@@ -710,7 +710,7 @@ export function registerSubstrateTools(
       const profile = getProfile(deps.db, toEntityRef(p.entity_ref));
       if (!profile) return { profile: null };
       // Entity names, aliases and observations are stored text.
-      return sanitizeProtectedMessageValue(profile);
+      return sanitizeProtectedToolResult(profile);
     },
   });
 
@@ -726,7 +726,7 @@ export function registerSubstrateTools(
     }),
     handler: async (raw) => {
       const p = raw as { kind?: 'person'|'org'|'project'|'place'|'topic'|'other'; text_match?: string; limit?: number };
-      return sanitizeProtectedMessageValue({
+      return sanitizeProtectedToolResult({
         entities: listEntities(deps.db, { kind: p.kind, textMatch: p.text_match, limit: p.limit }),
       });
     },

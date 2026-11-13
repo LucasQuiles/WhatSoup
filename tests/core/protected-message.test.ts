@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_SANITIZE_NODES,
   PROTECTED_MESSAGE_MARKER,
+  ProtectedValueScanLimitError,
   hasProtectedManagedLink,
   isCanonicalManagedLink,
   isProtectedDeliveryMessage,
   sanitizeProtectedMessageValue,
   sanitizeProtectedMessageText,
+  sanitizeProtectedToolResult,
 } from '../../src/core/protected-message.ts';
 import {
   TEST_DELIVERY_HOST,
@@ -139,5 +142,65 @@ describe('protected message sanitizer', () => {
 
     expect(isProtectedDeliveryMessage(missingTable as any, 'protected-message-id')).toBe(false);
     expect(isProtectedDeliveryMessage(correlated as any, 'protected-message-id')).toBe(true);
+  });
+});
+
+describe('protected value scan bounds', () => {
+  // The root counts one node and each object or array one more; strings are
+  // scanned and not counted. A root array of N objects is N + 1 nodes.
+  const objects = (count: number): unknown[] => Array.from({ length: count }, (_, n) => ({ n }));
+  const link = `https://${TEST_LINK_HOST}/s/#v3.${'Q'.repeat(22)}.${'Z'.repeat(43)}`;
+
+  it('returns a tool result of exactly MAX_SANITIZE_NODES nodes whole', () => {
+    const atCap = objects(MAX_SANITIZE_NODES - 1);
+
+    const result = sanitizeProtectedToolResult(atCap, pins) as unknown[];
+
+    expect(result).toHaveLength(atCap.length);
+    expect(result[result.length - 1]).toEqual({ n: atCap.length - 1 });
+    expect(result).not.toContain(PROTECTED_MESSAGE_MARKER);
+  });
+
+  it('refuses a tool result one node over the bound with an explicit error', () => {
+    expect(() => sanitizeProtectedToolResult(objects(MAX_SANITIZE_NODES), pins)).toThrow(ProtectedValueScanLimitError);
+  });
+
+  it('lets the bound escape a nested property instead of reading it as a throwing accessor', () => {
+    const nested = { outer: { inner: objects(MAX_SANITIZE_NODES) } };
+
+    expect(() => sanitizeProtectedToolResult(nested, pins)).toThrow(ProtectedValueScanLimitError);
+  });
+
+  it('refuses a tool result nested deeper than the depth bound', () => {
+    let deep: Record<string, unknown> = { text: link };
+    for (let level = 0; level < 70; level++) deep = { next: deep };
+
+    expect(() => sanitizeProtectedToolResult(deep, pins)).toThrow(ProtectedValueScanLimitError);
+  });
+
+  it('stores an inbound payload past the bound with the marker, never the unscanned text', () => {
+    const overCap = objects(MAX_SANITIZE_NODES);
+    overCap[overCap.length - 1] = { text: `see ${link}` };
+
+    const result = sanitizeProtectedMessageValue(overCap, pins) as unknown[];
+
+    expect(result[result.length - 1]).toBe(PROTECTED_MESSAGE_MARKER);
+    expect(JSON.stringify(result)).not.toContain(TEST_LINK_HOST);
+  });
+
+  it('returns a realistic list_groups result whole: 256 groups at the 1,024-member cap', () => {
+    // 1 root + 1 groups array + 256 x (group + participants array + 1,024 members) = 262,658 nodes.
+    const groups = Array.from({ length: 256 }, (_, group) => ({
+      id: `group-${group}@g.us`,
+      subject: `group ${group}`,
+      participants: Array.from({ length: 1024 }, (_, member) => ({
+        id: `${group}-${member}@lid`,
+        admin: member === 0 ? 'superadmin' : null,
+      })),
+    }));
+
+    const result = sanitizeProtectedToolResult({ groups }, pins);
+
+    expect(JSON.stringify(result)).toBe(JSON.stringify({ groups }));
   });
 });

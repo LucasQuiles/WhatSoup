@@ -25,7 +25,7 @@ import {
   type PineconeProjectGuard,
 } from '../../lib/pinecone-project-guard.ts';
 import type { Database } from '../../core/database.ts';
-import { sanitizeProtectedMessageText, sanitizeProtectedMessageValue } from '../../core/protected-message.ts';
+import { sanitizeProtectedMessageText, sanitizeProtectedToolResult } from '../../core/protected-message.ts';
 import {
   memoryHitTier,
   memoryIdentityFold,
@@ -303,7 +303,7 @@ export function parseHits(
   return rawHits.map((hit) => {
     // Stored record text (text, summary, filepath and the id used as a source)
     // reaches the caller and the external rerank input, so redact it once here.
-    const fields = sanitizeProtectedMessageValue(hit.fields ?? {}) as Record<string, unknown>;
+    const fields = sanitizeProtectedToolResult(hit.fields ?? {}) as Record<string, unknown>;
     return {
       id: sanitizeProtectedMessageText(hit._id),
       score: hit._score,
