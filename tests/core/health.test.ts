@@ -107,6 +107,12 @@ import { emptyConnectionStateSnapshot } from '../../src/transport/twilio/connect
 import { systemClock } from '../../src/lib/clock.ts';
 import { LOOP_LAG_WINDOW_SAMPLES } from '../../src/lib/loop-lag-sampler.ts';
 import { OutboundFloodDetector } from '../../src/transport/outbound-flood-detector.ts';
+import {
+  accountIdentityDegradedReasons,
+  deriveAccountIdentityHealth,
+  type AccountIdentityHealth,
+  type AccountIdentityVerification,
+} from '../../src/runtimes/agent/providers/claude-account-identity.ts';
 import { getShadowGateRecorder, __resetShadowGateForTests } from '../../src/core/shadow-gate-adapter.ts';
 import { SHADOW_GATE_COUNT_KEYS } from '../../src/core/shadow-gate-events.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
@@ -7790,14 +7796,13 @@ describe('degradation classification symmetry', () => {
 //       (TURN_PROVABLE_STATUS_REASONS): a turn proves the turn pipeline (turn
 //       capability, agent runtime, the connection it rode in on, and — by
 //       construction of the release guard — the end of a fallback window) —
-//       never enrichment/memory/durability/etc. FULL-VISIBILITY evaluations
-//       (the normal degraded path, which re-checks every reason source)
-//       REPLACE the latched set with their reasons — a blip that cleared
-//       before such an evaluation was observed clearing, so it is not
-//       unproven silence and must not poison the latch; SHORT-CIRCUIT
-//       evaluations (auth / not-connected / runtime-unhealthy) UNION their
-//       observed reasons in, never removing members they had no visibility
-//       to re-check. Only real EARLY-path reasons on the full-visibility
+//       never enrichment/memory/durability/etc. Every evaluation that
+//       observes real reasons UNIONS them into the latched set (#3562): a
+//       reason a later evaluation stops showing has not been proven
+//       recovered, so only a release channel removes it — this receipt for a
+//       turn-provable set, or the direct re-probe
+//       (health-silence-latch-reprobe.test.ts) for each reason it proves
+//       clear. Only real EARLY-path reasons on the full-visibility
 //       path ARM a new latch — late-source-only reasons are directly probed
 //       every evaluation and never arm.
 // Silence alone, elapsed time alone, an empty reason list alone, a stale
@@ -7878,8 +7883,10 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     setDeliveryDebt: (stale: boolean) => void;
     setRetentionFailed: (failed: boolean) => void;
     setBeforeConnectionRead: (hook: (() => void) | null) => void;
+    setAccountIdentity: (identity: AccountIdentityHealth | null) => void;
   }> {
     let authBond: Record<string, unknown> | null = null;
+    let accountIdentity: AccountIdentityHealth | null = null;
     let connectionExtras: Record<string, unknown> = {};
     let beforeConnectionRead: (() => void) | null = null;
     // The sampler's verdict contract (src/lib/loop-lag-sampler.ts): starved
@@ -8019,6 +8026,7 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
             ...(tc === null ? {} : { turnCapability: tc }),
             ...(runtimeReasons === null ? {} : { degradedReasons: runtimeReasons }),
             ...(chatQueue === null ? {} : { queue: chatQueue }),
+            ...(accountIdentity === null ? {} : { accountIdentity }),
           },
         }),
         getFallbackState: () => (fallback === null ? null : {
@@ -8067,6 +8075,7 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
       setDeliveryDebt: (stale: boolean) => { deliveryDebt = stale; },
       setRetentionFailed: (failed: boolean) => { retentionFailed = failed; },
       setBeforeConnectionRead: (hook: (() => void) | null) => { beforeConnectionRead = hook; },
+      setAccountIdentity: (identity: AccountIdentityHealth | null) => { accountIdentity = identity; },
     };
   }
 
@@ -8141,6 +8150,142 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
       h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
       const second = JSON.parse((await healthReq(h.port)).body);
       expectLatched(second);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  // #3823: the identity verdict the agent runtime publishes, built by the
+  // runtime's own projection so the expiry rule under test is the real one.
+  // A match older than the freshness window reads unverifiable (stale-receipt)
+  // until the next identity check lands, which can be seconds after a poll
+  // sees the expired receipt and arms the latch.
+  const IDENTITY_FRESHNESS_MS = 32 * MINUTE_MS;
+  function identityCheck(status: 'match' | 'mismatch', checkedAt: number): AccountIdentityVerification {
+    return {
+      status,
+      reason: null,
+      expectedDigestPrefix: 'f861333f7a73',
+      observedDigestPrefix: status === 'match' ? 'f861333f7a73' : '0123456789ab',
+      checkedAt,
+    };
+  }
+  function publishIdentity(
+    h: Awaited<ReturnType<typeof buildLatchHarness>>,
+    verification: AccountIdentityVerification | null,
+  ): AccountIdentityHealth {
+    const identity = deriveAccountIdentityHealth({
+      expectedConfigured: true,
+      verification,
+      armedAtMs: 0,
+      nowMs: harnessNow(),
+      freshnessMs: IDENTITY_FRESHNESS_MS,
+    });
+    const reasons = accountIdentityDegradedReasons(identity);
+    h.setAccountIdentity(identity);
+    h.setRuntimeSnapshot(reasons.length > 0 ? 'degraded' : 'healthy', reasons.length > 0 ? reasons : null);
+    return identity;
+  }
+  // Seed: a matched identity whose receipt then expires before the next check
+  // lands. The poll in that gap arms the latch on the unverifiable reason.
+  async function seedExpiredIdentityLatch(h: Awaited<ReturnType<typeof buildLatchHarness>>): Promise<number> {
+    const firstCheckAt = harnessNow();
+    publishIdentity(h, identityCheck('match', firstCheckAt));
+    expectReleased(JSON.parse((await healthReq(h.port)).body));
+    advanceClock(IDENTITY_FRESHNESS_MS + 1);
+    const expired = publishIdentity(h, identityCheck('match', firstCheckAt));
+    expect(expired).toMatchObject({ status: 'unverifiable', reason: 'stale-receipt' });
+    const armed = JSON.parse((await healthReq(h.port)).body);
+    expect(armed.status).toBe('degraded');
+    expect(armed.status_reasons).toContain('runtime.credential_identity_unverifiable');
+    return harnessNow();
+  }
+
+  it('#3823: expiry -> unverifiable -> matched identity releases once the newer match holds across the re-probe window', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedExpiredIdentityLatch(h);
+      advanceClock(2_000);
+      publishIdentity(h, identityCheck('match', harnessNow()));
+      // One clean read is not a window: the latch holds until the match is re-read a minute later.
+      expectLatched(JSON.parse((await healthReq(h.port)).body));
+      advanceClock(MINUTE_MS);
+      expectReleased(JSON.parse((await healthReq(h.port)).body));
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('#3823: missing identity proof does not release the identity latch', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedExpiredIdentityLatch(h);
+      h.setAccountIdentity(null);
+      h.setRuntimeSnapshot('healthy', null);
+      for (let poll = 0; poll < 4; poll += 1) {
+        advanceClock(MINUTE_MS);
+        expectLatched(JSON.parse((await healthReq(h.port)).body));
+      }
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('#3823: a match checked at or before the latch point is stale proof and does not release', async () => {
+    const h = await buildLatchHarness();
+    try {
+      const latchPoint = await seedExpiredIdentityLatch(h);
+      // A runtime that still reads the old check as fresh (its window moved) is
+      // not a new check: the proof must postdate the latch point.
+      h.setAccountIdentity({
+        status: 'match',
+        reason: null,
+        stale: false,
+        checkedAt: latchPoint,
+        expectedDigestPrefix: 'f861333f7a73',
+        observedDigestPrefix: 'f861333f7a73',
+      });
+      h.setRuntimeSnapshot('healthy', null);
+      for (let poll = 0; poll < 4; poll += 1) {
+        advanceClock(MINUTE_MS);
+        expectLatched(JSON.parse((await healthReq(h.port)).body));
+      }
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('#3823: a mismatch never clears identity debt, even when a later check matches', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedExpiredIdentityLatch(h);
+      advanceClock(2_000);
+      publishIdentity(h, identityCheck('mismatch', harnessNow()));
+      const mismatched = JSON.parse((await healthReq(h.port)).body);
+      expect(mismatched.status_reasons).toContain('runtime.credential_identity_mismatch');
+      advanceClock(2_000);
+      publishIdentity(h, identityCheck('match', harnessNow()));
+      for (let poll = 0; poll < 4; poll += 1) {
+        advanceClock(MINUTE_MS);
+        expectLatched(JSON.parse((await healthReq(h.port)).body));
+      }
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('#3823: an ordinary successful primary turn does not clear identity debt', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedExpiredIdentityLatch(h);
+      h.setAccountIdentity(null);
+      h.setRuntimeSnapshot('healthy', null);
+      advanceClock(1_000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+      expectLatched(JSON.parse((await healthReq(h.port)).body));
+      advanceClock(MINUTE_MS);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+      expectLatched(JSON.parse((await healthReq(h.port)).body));
     } finally {
       await new Promise<void>((resolve) => h.server.close(() => resolve()));
     }
@@ -8271,11 +8416,11 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     }
   });
 
-  it('a non-provable blip that clears before the last real evaluation does not poison the latch', async () => {
+  it('a non-provable reason a later degraded evaluation stops showing stays latched (#3562)', async () => {
     const h = await buildLatchHarness();
     try {
       await seedTurnClassLatch(h);
-      // A non-provable enrichment blip arrives WHILE the turn-class
+      // A non-provable enrichment fault arrives WHILE the turn-class
       // degradation is still live...
       h.setTurnCapability(degradedTurnCapability());
       h.setRuntimeDegraded(true);
@@ -8284,20 +8429,21 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
       expect(second.status_reasons).toContain('turn_capability_degraded');
       expect(second.status_reasons).toContain('enrichment_runtime_degraded');
 
-      // ...and clears while a real evaluation still observes the turn-class
-      // reason: the LAST real evaluation shows turn-class only, so the blip
-      // was observed clearing — it is not unproven silence.
+      // ...and stops being reported while a real evaluation still observes the
+      // turn-class reason. Absence from a child-reported source is not proof
+      // that it recovered, so the latch keeps it.
       h.setRuntimeDegraded(false);
       const third = JSON.parse((await healthReq(h.port)).body);
       expect(third.status).toBe('degraded');
       expect(third.status_reasons).toContain('turn_capability_degraded');
       expect(third.status_reasons).not.toContain('enrichment_runtime_degraded');
 
+      // A turn proves the turn pipeline only, so its receipt cannot release it.
       h.setTurnCapability(null);
       advanceClock(1000);
       h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
       const fourth = JSON.parse((await healthReq(h.port)).body);
-      expectReleased(fourth);
+      expectLatched(fourth);
     } finally {
       await new Promise<void>((resolve) => h.server.close(() => resolve()));
     }
@@ -8606,9 +8752,10 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     const h = await buildLatchHarness();
     try {
       await seedTurnClassLatch(h);
-      // A full-visibility evaluation replaces the latched set with the reasons
-      // it observes. When the backoff is the ONLY reason, latching it would
-      // swap a provable set for an unprovable one.
+      // Every evaluation that observes real reasons unions them into the
+      // latched set (#3562). The backoff is directly re-probed, so it never
+      // joins: latching it would add a reason no turn can prove to a
+      // turn-provable set.
       h.setRuntimeSnapshot('degraded', ['auto_compact_backoff']);
       const second = JSON.parse((await healthReq(h.port)).body);
       expect(second.status).toBe('degraded');
@@ -8891,6 +9038,73 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
       h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
       const receipted = JSON.parse((await healthReq(h.port)).body);
       expect(latchState(receipted)).toEqual(LATCHED_STATE);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('(#3562) an agent auth-bond latch is released by direct re-probe past 60 s, with no turn', async () => {
+    const h = await buildLatchHarness();
+    try {
+      h.setAuthBond(makeAuthBond({ issues: ['auth_mode_chmod_failed:creds.json:EPERM'], treeProvenance: treeProvenance() }));
+      expect((await poll(h)).status_reasons).toContain('auth_failure.auth_bond_at_risk');
+      h.setAuthBond(walkedCleanBond());
+      expect(latchState(await poll(h))).toEqual(LATCHED_STATE);
+      advanceClock(MINUTE_MS - 1);
+      expect(latchState(await poll(h))).toEqual(LATCHED_STATE);
+      advanceClock(1);
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('(#3562) an agent turn-class latch stays latched past 60 s of clean re-probes until a turn receipt', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      expect(latchState(await poll(h))).toEqual(LATCHED_STATE);
+      advanceClock(MINUTE_MS);
+      expect(latchState(await poll(h))).toEqual(LATCHED_STATE);
+      advanceClock(5 * MINUTE_MS);
+      expect(latchState(await poll(h))).toEqual(LATCHED_STATE);
+      // No re-probe reads the turn pipeline; a primary receipt still does.
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('(#3562) an evaluation that narrows by re-probe and then releases by turn receipt names nothing it released as remaining', async () => {
+    const h = await buildLatchHarness();
+    try {
+      const callsBefore = healthLogger.info.mock.calls.length;
+      h.setAuthBond(makeAuthBond({ issues: ['auth_mode_chmod_failed:creds.json:EPERM'], treeProvenance: treeProvenance() }));
+      h.setTurnCapability(degradedTurnCapability());
+      const armed = await poll(h);
+      expect(armed.status_reasons).toContain('auth_failure.auth_bond_at_risk');
+      expect(armed.status_reasons).toContain('turn_capability_degraded');
+      h.setAuthBond(walkedCleanBond());
+      h.setTurnCapability(null);
+      expect(latchState(await poll(h))).toEqual(LATCHED_STATE);
+      // One evaluation: the auth window ends, so the re-probe narrows the set to
+      // the turn-class reason, and the fresh receipt then releases that.
+      advanceClock(MINUTE_MS);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+      const lines = healthLogger.info.mock.calls.slice(callsBefore);
+      const narrowed = lines
+        .filter((call) => call[1] === 'degradation silence latch narrowed: direct re-probe')
+        .map((call) => call[0] as { reasons: string[]; remaining: string[] });
+      const released = lines
+        .filter((call) => call[1] === 'degradation silence latch released: fresh primary-turn receipt')
+        .map((call) => call[0] as { reasons: string[] });
+      expect(released.map(({ reasons }) => reasons)).toEqual([['turn_capability_degraded']]);
+      expect(narrowed.map(({ reasons, remaining }) => ({ reasons, remaining }))).toEqual([
+        { reasons: ['auth_failure.auth_bond_at_risk'], remaining: [] },
+      ]);
     } finally {
       await new Promise<void>((resolve) => h.server.close(() => resolve()));
     }
