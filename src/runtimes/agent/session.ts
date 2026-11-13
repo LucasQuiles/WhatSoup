@@ -3212,13 +3212,15 @@ export class SessionManager {
               if (this.dbRowId !== null) {
                 updateSessionId(this.db, this.dbRowId, '');
               }
-              // Send a fresh thread/start without threadId
+              // Send a fresh thread/start without threadId. It carries this
+              // spawn's composed prompt: the persistent branch never assigns
+              // this.systemPrompt, so that field would be empty or stale.
               this.sendCodexRequest(child, 'thread/start', {
                 cwd: this.admitConfiguredCwd(),
                 approvalPolicy: 'never' as const,
                 sandbox: 'danger-full-access' as const,
                 persistExtendedHistory: true,
-                ...(this.systemPrompt ? { baseInstructions: this.systemPrompt } : {}),
+                ...(systemPrompt ? { baseInstructions: systemPrompt } : {}),
               });
               continue;
             }

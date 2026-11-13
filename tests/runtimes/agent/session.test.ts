@@ -4312,6 +4312,7 @@ describe('Codex session resume via thread ID', () => {
     });
     expect(freshThreadStart).toBeDefined();
     const payload = JSON.parse(String(freshThreadStart![0]));
+    // The fresh thread keeps the spawn's composed instructions (Opus m3).
     expect(payload).toEqual({
       jsonrpc: '2.0',
       id: expect.any(String),
@@ -4321,6 +4322,7 @@ describe('Codex session resume via thread ID', () => {
         approvalPolicy: 'never',
         sandbox: 'danger-full-access',
         persistExtendedHistory: true,
+        baseInstructions: expect.stringMatching(/a personal .+ CLI agent/),
       },
     });
   });
@@ -4398,6 +4400,36 @@ describe('Codex session resume via thread ID', () => {
 
     // updateSessionId should have been called with empty string to clear the stale ID
     expect(updateSessionId).toHaveBeenCalledWith(db, 42, '');
+  });
+
+  // Opus m3: the persistent branch never assigns this.systemPrompt, so the
+  // fresh thread after a rejected resume used to start without instructions.
+  it('sends the composed system prompt in the fresh thread/start after a rejected resume', async () => {
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      provider: 'codex-cli', onEvent: vi.fn(),
+    });
+    await sm.spawnSession('thread_rejected_777', 42);
+    type ThreadStart = { id: string; method?: string; params?: { threadId?: string; baseInstructions?: string } };
+    const resumeRequest = mockChild.stdin.write.mock.calls
+      .map(call => JSON.parse(String(call[0])) as ThreadStart)
+      .find(call => call.method === 'thread/start');
+    expect(resumeRequest?.params?.threadId).toBe('thread_rejected_777');
+    const composed = resumeRequest?.params?.baseInstructions;
+    expect(composed).toContain('a personal Codex CLI agent');
+    expect(composed).toBe(sm.buildSystemPrompt());
+
+    mockChild.stdin.write.mockClear();
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0', id: resumeRequest!.id, error: { code: -32600, message: 'Thread not found' },
+    }) + '\n'));
+
+    const retries = mockChild.stdin.write.mock.calls
+      .map(call => JSON.parse(String(call[0])) as ThreadStart)
+      .filter(call => call.method === 'thread/start');
+    expect(retries).toHaveLength(1);
+    expect(retries[0]?.params?.threadId).toBeUndefined();
+    expect(retries[0]?.params?.baseInstructions).toBe(composed);
   });
 
   it('does not include threadId in thread/start for fresh spawn (no resume)', async () => {
