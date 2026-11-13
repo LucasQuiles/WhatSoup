@@ -148,6 +148,90 @@ def test_an_interpreter_chain_writable_through_a_group_of_the_bot_user_is_refuse
     m.check_interpreter([str(python)], STRANGER, frozenset(), anchor=anchor)
 
 
+def _folders(*paths, mode=0o755):
+    for path in paths:
+        path.chmod(mode)
+
+
+def _alias_tree(tmp_path, alias_mode):
+    """Codex C1: the select link reaches a trusted developer folder through an alias in a home the bot may write."""
+    anchor = tmp_path.resolve() / 'tree'
+    developer = anchor / 'Applications' / 'Xcode.app' / 'Contents' / 'Developer'
+    python = developer / 'usr' / 'bin' / 'python3'
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b'')
+    home = anchor / 'Users' / 'bot'
+    home.mkdir(parents=True)
+    (home / 'current').symlink_to(developer, target_is_directory=True)
+    select = anchor / 'db' / 'xcode_select_link'
+    select.parent.mkdir()
+    select.symlink_to(home / 'current', target_is_directory=True)
+    _folders(anchor, *[developer.parents[n] for n in range(3)], developer, python.parent.parent, python.parent, python,
+             home.parent, select.parent)
+    home.chmod(alias_mode)
+    return anchor, select, home
+
+
+def test_a_select_link_through_a_bot_writable_alias_is_refused(tmp_path):
+    anchor, select, home = _alias_tree(tmp_path, 0o757)
+    lexical = str(select / 'usr' / 'bin' / 'python3')
+    # Resolution discards the alias: every folder of the real path is trusted.
+    m.check_interpreter([os.path.realpath(lexical)], STRANGER, frozenset(), anchor=anchor)
+    # Walking the original components and each symlink hop reaches the bot's folder.
+    with pytest.raises(m.InstallRefused, match=str(home)):
+        m.check_interpreter([lexical], STRANGER, frozenset(), anchor=anchor)
+
+
+def test_a_select_link_through_a_trusted_alias_is_accepted(tmp_path):
+    anchor, select, _ = _alias_tree(tmp_path, 0o755)
+    m.check_interpreter([str(select / 'usr' / 'bin' / 'python3')], STRANGER, frozenset(), anchor=anchor)
+
+
+def test_a_bot_writable_folder_reached_by_a_relative_hop_is_refused(tmp_path):
+    # Opus M-1 layout: Developer/usr/bin/python3 -> ../../Library/Frameworks/.../bin/python3.9.
+    # ".." leaves the folder actually reached, so the hop lands in the framework's bin folder.
+    anchor, python = _interpreter_tree(tmp_path)
+    framework_bin = anchor / 'Developer' / 'Library' / 'Frameworks' / 'Python3.framework' / 'bin'
+    framework_bin.mkdir(parents=True)
+    (framework_bin / 'python3.9').write_bytes(b'')
+    _folders(*[framework_bin.parents[n] for n in range(3)], framework_bin)
+    python.unlink()
+    python.symlink_to('../../Library/Frameworks/Python3.framework/bin/python3.9')
+    m.check_interpreter([str(python)], STRANGER, frozenset(), anchor=anchor)
+    framework_bin.chmod(0o757)
+    with pytest.raises(m.InstallRefused, match=str(framework_bin)):
+        m.check_interpreter([str(python)], STRANGER, frozenset(), anchor=anchor)
+
+
+def test_a_missing_entry_in_a_bot_writable_folder_is_refused(tmp_path):
+    # python39.zip need not exist, but whoever can write its folder can create it.
+    anchor = tmp_path.resolve() / 'tree'
+    lib = anchor / 'lib'
+    lib.mkdir(parents=True)
+    _folders(anchor, lib)
+    m.check_interpreter([str(lib / 'python39.zip')], STRANGER, frozenset(), anchor=anchor)
+    lib.chmod(0o757)
+    with pytest.raises(m.InstallRefused, match=str(lib)):
+        m.check_interpreter([str(lib / 'python39.zip')], STRANGER, frozenset(), anchor=anchor)
+
+
+def test_a_symlink_loop_is_refused(tmp_path):
+    anchor = tmp_path.resolve() / 'tree'
+    anchor.mkdir()
+    (anchor / 'a').symlink_to(anchor / 'b')
+    (anchor / 'b').symlink_to(anchor / 'a')
+    with pytest.raises(m.InstallRefused, match='too many symlinks'):
+        m.check_interpreter([str(anchor / 'a' / 'python3')], STRANGER, frozenset(), anchor=anchor)
+
+
+def test_the_interpreter_paths_are_the_original_unresolved_paths(tmp_path):
+    _, select, _ = _alias_tree(tmp_path, 0o755)
+    paths = m.interpreter_paths(executable=str(select / 'usr' / 'bin' / 'python3'),
+                                path_entries=['', str(select / 'Library' / 'python39.zip')], select_link=str(select))
+    assert paths == ['/usr/bin/python3', str(select / 'usr' / 'bin' / 'python3'), str(select / 'usr' / 'bin' / 'python3'),
+                     str(select / 'Library' / 'python39.zip')]
+
+
 # Each case breaks one part of the only accepted shape, `--user <non-empty name>`.
 @pytest.mark.parametrize('argv', [
     pytest.param([], id='no-args'),

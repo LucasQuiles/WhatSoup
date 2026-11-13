@@ -8,10 +8,12 @@ script and the pin before root runs them.
 
 The helper bytes are read once, compared with the digest in root-helper.json,
 and those same bytes are written. The install folder and every ancestor must
-be root-owned and not writable by group or other, and every folder on the
-path of the interpreter that sudo will run must be unwritable by the bot user:
-`/usr/bin/python3` resolves through the selected developer folder, and a bot
-user who can replace that folder's `python3` would run code as root.
+be root-owned and not writable by group or other. Every entry the kernel
+passes on the way to the interpreter sudo will run must be unwritable by the
+bot user: each original path component, each symlink hop and each hop's
+folders, checked before anything is resolved. `/usr/bin/python3` resolves
+through the selected developer folder, and a bot user who can redirect or
+replace that folder's `python3` would run code as root.
 Re-running with an up-to-date install changes nothing.
 
 Exit status: 0 installed or already current, 2 refused (nothing changed).
@@ -33,6 +35,10 @@ HELPER = HERE / 'protected_plist.py'
 INSTALL_PATH = re.compile(r'/Library/PrivilegedHelperTools/[A-Za-z0-9][A-Za-z0-9._-]*')
 SHA256 = re.compile(r'[0-9a-f]{64}')
 SELECT_LINK = '/var/db/xcode_select_link'
+COMMAND_LINE_TOOLS = '/Library/Developer/CommandLineTools'
+# The interpreter the sudoers rule names: a shim that runs the selected developer folder's python3.
+ROOT_PYTHON = '/usr/bin/python3'
+MAX_SYMLINK_HOPS = 32  # the kernel's MAXSYMLINKS
 ROOT = (0, 0)
 FOLDER_MODE = 0o755
 INSTALLED_MODE = 0o444
@@ -113,7 +119,7 @@ def check_invocation(isolated, no_bytecode, executable, select_link=SELECT_LINK)
     """
     if not (isolated and no_bytecode):
         raise InstallRefused('run the install step as /usr/bin/python3 -I -B')
-    roots = [Path('/Library/Developer/CommandLineTools')]
+    roots = [Path(COMMAND_LINE_TOOLS)]
     if os.path.lexists(select_link):
         roots.append(Path(os.path.realpath(select_link)))
     real = Path(os.path.realpath(executable))
@@ -121,26 +127,72 @@ def check_invocation(isolated, no_bytecode, executable, select_link=SELECT_LINK)
         raise InstallRefused('run the install step as /usr/bin/python3, the interpreter the sudoers rule names')
 
 
-def interpreter_paths():
-    """The real paths root trusts when sudo runs `/usr/bin/python3 -I -B`: this same interpreter's."""
-    paths = [os.path.realpath(sys.executable)]
-    paths += [os.path.realpath(entry) for entry in sys.path if entry and os.path.exists(entry)]
-    if os.path.lexists(SELECT_LINK):
-        paths += [os.path.realpath(os.path.dirname(SELECT_LINK)), os.path.realpath(SELECT_LINK)]
+def interpreter_paths(executable=None, path_entries=None, select_link=SELECT_LINK):
+    """The ORIGINAL, unresolved paths root trusts when sudo runs ROOT_PYTHON: this same interpreter's.
+
+    The shim sudo runs, this interpreter as invoked, the selected developer
+    folder's python3 (the Command Line Tools when nothing is selected) and
+    each import path entry. Resolving them first would discard the symlinks
+    and folders the kernel passes through.
+    """
+    executable = sys.executable if executable is None else executable
+    entries = sys.path if path_entries is None else path_entries
+    developer = select_link if os.path.lexists(select_link) else COMMAND_LINE_TOOLS
+    paths = [ROOT_PYTHON, executable, developer + '/usr/bin/python3']
+    paths += [entry if entry.startswith('/') else os.path.join(os.getcwd(), entry) for entry in entries if entry]
     return paths
 
 
-def check_interpreter(paths, uid, groups, *, anchor='/'):
-    """Refuse when the bot user could change any folder or file on these real paths (from `anchor` down)."""
+def path_chain(path):
+    """Yield (entry, lstat) for every entry the kernel passes to resolve the absolute `path`, symlinks included.
+
+    Walks the original components from "/": each folder, each symlink itself,
+    then its target's components, from "/" when absolute and from the link's
+    folder otherwise; ".." leaves the folder actually reached, as the kernel
+    does. A missing component ends the walk: its folder was yielded, and
+    whoever can write that folder could create it.
+    """
+    pending = [part for part in reversed(str(path).split('/')) if part]
+    current = Path('/')
+    yield current, os.lstat(current)
+    hops = 0
+    while pending:
+        part = pending.pop()
+        if part == '.':
+            continue
+        if part == '..':
+            current = current.parent
+            continue
+        entry = current / part
+        try:
+            info = os.lstat(entry)
+        except FileNotFoundError:
+            return
+        yield entry, info
+        if not stat.S_ISLNK(info.st_mode):
+            current = entry
+            continue
+        hops += 1
+        if hops > MAX_SYMLINK_HOPS:
+            raise InstallRefused('too many symlinks on the way to ' + str(path))
+        target = os.readlink(entry)
+        if target.startswith('/'):
+            current = Path('/')
+        pending.extend(piece for piece in reversed(target.split('/')) if piece)
+
+
+def check_chain(paths, uid, groups, consequence, *, anchor='/'):
+    """Refuse when the bot user could change any entry on the way to these paths (from `anchor` down)."""
     anchor = Path(anchor)
     for raw in paths:
-        path = Path(raw)
-        for component in [path, *path.parents]:
-            if component != anchor and anchor not in component.parents:
-                continue
-            if _writable_by(os.lstat(component), uid, groups):
-                raise InstallRefused('the bot user can write ' + str(component)
-                                     + ', which the root interpreter trusts; select a root-owned developer folder')
+        for entry, info in path_chain(raw):
+            if (entry == anchor or anchor in entry.parents) and _writable_by(info, uid, groups):
+                raise InstallRefused('the bot user can write ' + str(entry) + ', ' + consequence)
+
+
+def check_interpreter(paths, uid, groups, *, anchor='/'):
+    check_chain(paths, uid, groups, 'which the root interpreter trusts; select a root-owned developer folder',
+                anchor=anchor)
 
 
 def _trusted_folder(fd, owner):
