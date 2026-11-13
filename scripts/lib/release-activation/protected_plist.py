@@ -2,8 +2,10 @@
 
 The helper runs as root from a fixed root-owned path (root-helper.json; see
 docs/runbooks/release-deployment.md), started by the one sudoers rule
-`/usr/bin/python3 -I -B <that path>`. `-I` keeps the caller's environment, user
-site and script folder off the import path, because sudo keeps HOME.
+`/usr/bin/python3 -I -S -B <that path>`. `-I` keeps the caller's environment,
+user site and script folder off the import path, because sudo keeps HOME; `-S`
+keeps site-packages and .pth files off it. The helper imports only the
+standard library.
 
 The sudo caller owns the folders on the path to its plist. Every filesystem
 step therefore works through file descriptors bound to the inodes that were

@@ -1,7 +1,7 @@
 /**
  * The root plist helper as `release:activate --apply` uses it (owner ruling R45):
  * a fixed root-owned install whose digest is pinned in root-helper.json, run as
- * exactly `sudo -n /usr/bin/python3 -I -B <pinned path>`, with a missing or
+ * exactly `sudo -n /usr/bin/python3 -I -S -B <pinned path>`, with a missing or
  * outdated install refused before any live change, and any helper result but
  * exit 0 or exit 2 (exit 3, a signal, a timeout, another code) reported as
  * unconfirmed protection.
@@ -62,9 +62,9 @@ describe('root plist helper pin and invocation', () => {
     expect(pin.path).toMatch(/^\/Library\/PrivilegedHelperTools\/[A-Za-z0-9][A-Za-z0-9._-]*$/);
   });
 
-  it('runs exactly sudo -n /usr/bin/python3 -I -B <pinned path>', () => {
+  it('runs exactly sudo -n /usr/bin/python3 -I -S -B <pinned path>', () => {
     const pin = readRootHelperPin();
-    expect([ROOT_HELPER_SUDO, ...rootHelperArgs(pin)]).toEqual(['/usr/bin/sudo', '-n', '/usr/bin/python3', '-I', '-B', pin.path]);
+    expect([ROOT_HELPER_SUDO, ...rootHelperArgs(pin)]).toEqual(['/usr/bin/sudo', '-n', '/usr/bin/python3', '-I', '-S', '-B', pin.path]);
   });
 
   it('accepts only an installed helper with the pinned bytes', () => {
@@ -158,7 +158,7 @@ describe('release:activate --apply with a root-owned plist', () => {
 
     expect(outcome.outcome).toBe('activated');
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.args).toEqual(['-n', '/usr/bin/python3', '-I', '-B', readRootHelperPin().path]);
+    expect(calls[0]!.args).toEqual(['-n', '/usr/bin/python3', '-I', '-S', '-B', readRootHelperPin().path]);
     expect(calls[0]!.request).toMatchObject({ path: timerPlist(), expectedSha256: sha256(original), metadata: { uid: 0 } });
     expect(vi.mocked(readInstalledRootHelper)).toHaveBeenCalledWith(readRootHelperPin().path);
   });

@@ -268,17 +268,18 @@ def _developer_tree(tmp_path):
 
 
 def test_the_installer_must_run_as_the_isolated_interpreter_sudo_will_run(tmp_path):
-    # The chain check inspects the interpreter running the installer, so that must be /usr/bin/python3 -I -B.
+    # The chain check inspects the interpreter running the installer and its import path,
+    # so that must be /usr/bin/python3 -I -S -B (Opus M-2: -S keeps site-packages off the path).
     python, link = _developer_tree(tmp_path)
-    m.check_invocation(True, True, str(python), select_link=str(link))
-    for isolated, no_bytecode in ((False, True), (True, False)):
-        with pytest.raises(m.InstallRefused):
-            m.check_invocation(isolated, no_bytecode, str(python), select_link=str(link))
+    m.check_invocation(True, True, True, str(python), select_link=str(link))
+    for isolated, no_site, no_bytecode in ((False, True, True), (True, False, True), (True, True, False)):
+        with pytest.raises(m.InstallRefused, match='-I -S -B'):
+            m.check_invocation(isolated, no_site, no_bytecode, str(python), select_link=str(link))
     elsewhere = tmp_path.resolve() / 'homebrew' / 'bin' / 'python3.12'
     elsewhere.parent.mkdir(parents=True)
     elsewhere.write_bytes(b'')
     with pytest.raises(m.InstallRefused):
-        m.check_invocation(True, True, str(elsewhere), select_link=str(link))
+        m.check_invocation(True, True, True, str(elsewhere), select_link=str(link))
 
 
 def _clone(tmp_path):
@@ -331,5 +332,5 @@ def test_main_reports_the_exact_sudoers_line_for_the_bot_user(monkeypatch, capsy
         'changed': True,
         'path': pin['path'],
         'sha256': pin['sha256'],
-        'sudoers': f"{name} ALL = (root) NOPASSWD: /usr/bin/python3 -I -B {pin['path']}",
+        'sudoers': f"{name} ALL = (root) NOPASSWD: /usr/bin/python3 -I -S -B {pin['path']}",
     }

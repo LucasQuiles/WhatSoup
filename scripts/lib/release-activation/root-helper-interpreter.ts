@@ -49,9 +49,13 @@ export function readRootHelperPin(): RootHelperPin {
   return { path, sha256 };
 }
 
-/** The sudo argv: exactly the one sudoers rule, `-n` so a missing rule fails instead of prompting. */
+/**
+ * The sudo argv: exactly the one sudoers rule, `-n` so a missing rule fails instead of prompting.
+ * `-I` keeps the caller's environment, user site and script folder off the import path; `-S` keeps
+ * site-packages and .pth files off it; `-B` writes no bytecode. sudo matches the argument order exactly.
+ */
 export function rootHelperArgs(pin: RootHelperPin): readonly string[] {
-  return ['-n', ROOT_HELPER_PYTHON, '-I', '-B', pin.path];
+  return ['-n', ROOT_HELPER_PYTHON, '-I', '-S', '-B', pin.path];
 }
 
 /** The installed helper's bytes, or null when it cannot be read. */

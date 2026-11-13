@@ -266,8 +266,9 @@ helper. That includes a host whose sudoers grants the bot user
 user in the `admin` group while an Xcode under `/Applications` is the selected
 developer folder: `/Applications` is admin-writable, and `/usr/bin/python3`
 resolves through that folder.
-sudo keeps `HOME`, so the rule runs Python isolated (`-I`); keep
-`DEVELOPER_DIR` and `TMPDIR` out of `env_keep`.
+sudo keeps `HOME`, so the rule runs Python isolated (`-I`), without
+`site` (`-S`, so no site-packages or `.pth` file loads) and without bytecode
+writes (`-B`); keep `DEVELOPER_DIR` and `TMPDIR` out of `env_keep`.
 
 Owner steps, once per host and again after any helper change:
 
@@ -285,15 +286,15 @@ Owner steps, once per host and again after any helper change:
    the install is already current, it changes nothing:
 
    ```bash
-   sudo /usr/bin/python3 -I -B <clone>/scripts/lib/release-activation/install_root_helper.py --user <bot-user>
+   sudo /usr/bin/python3 -I -S -B <clone>/scripts/lib/release-activation/install_root_helper.py --user <bot-user>
    ```
 
-3. Install the one sudoers rule it prints. Use no wildcards: sudo then matches
-   these exact arguments.
+3. Install the one sudoers rule it prints, replacing any earlier `-I -B` rule.
+   Use no wildcards: sudo then matches these exact arguments, in this order.
 
    ```bash
    sudo visudo -f /etc/sudoers.d/whatsoup-protected-plist
-   # <bot-user> ALL = (root) NOPASSWD: /usr/bin/python3 -I -B /Library/PrivilegedHelperTools/com.whatsoup.protected-plist.py
+   # <bot-user> ALL = (root) NOPASSWD: /usr/bin/python3 -I -S -B /Library/PrivilegedHelperTools/com.whatsoup.protected-plist.py
    ```
 
 4. Verify the install and the rule:

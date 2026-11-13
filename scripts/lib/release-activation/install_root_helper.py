@@ -1,6 +1,6 @@
 """Install the root plist helper at its fixed root-owned path. The owner runs this once per host, as root.
 
-    sudo /usr/bin/python3 -I -B <clone>/scripts/lib/release-activation/install_root_helper.py --user <bot-user>
+    sudo /usr/bin/python3 -I -S -B <clone>/scripts/lib/release-activation/install_root_helper.py --user <bot-user>
 
 Run it from a clone the bot user cannot write, checked out at the reviewed
 commit: run from the bot's own release tree, the bot user could change this
@@ -111,14 +111,15 @@ def _writable_by(info, uid, groups):
     return info.st_uid == uid or bool(mode & 0o020 and info.st_gid in groups) or bool(mode & 0o002)
 
 
-def check_invocation(isolated, no_bytecode, executable, select_link=SELECT_LINK):
+def check_invocation(isolated, no_site, no_bytecode, executable, select_link=SELECT_LINK):
     """The chain check below inspects whichever interpreter runs this script; it must be the one sudo will run.
 
-    That is `/usr/bin/python3 -I -B`, which resolves to a python3 inside the
-    selected developer folder (or the Command Line Tools).
+    That is `/usr/bin/python3 -I -S -B`, which resolves to a python3 inside the
+    selected developer folder (or the Command Line Tools). `-S` keeps
+    site-packages and their .pth files off the import path being checked.
     """
-    if not (isolated and no_bytecode):
-        raise InstallRefused('run the install step as /usr/bin/python3 -I -B')
+    if not (isolated and no_site and no_bytecode):
+        raise InstallRefused('run the install step as /usr/bin/python3 -I -S -B')
     roots = [Path(COMMAND_LINE_TOOLS)]
     if os.path.lexists(select_link):
         roots.append(Path(os.path.realpath(select_link)))
@@ -299,7 +300,7 @@ def main(argv):
     name = parse_user(argv)
     if os.geteuid() != 0:
         raise InstallRefused('run the install step as root (sudo)')
-    check_invocation(sys.flags.isolated, sys.dont_write_bytecode, sys.executable)
+    check_invocation(sys.flags.isolated, sys.flags.no_site, sys.dont_write_bytecode, sys.executable)
     uid, groups = bot_identity(name)
     check_clone(clone_paths(), uid, groups)
     pin = read_pin()
@@ -307,7 +308,7 @@ def main(argv):
     check_interpreter(interpreter_paths(), uid, groups)
     result = install(data, pin)
     result.update(path=pin['path'], sha256=pin['sha256'],
-                  sudoers=name + ' ALL = (root) NOPASSWD: /usr/bin/python3 -I -B ' + pin['path'])
+                  sudoers=name + ' ALL = (root) NOPASSWD: ' + ROOT_PYTHON + ' -I -S -B ' + pin['path'])
     print(json.dumps(result))
 
 
