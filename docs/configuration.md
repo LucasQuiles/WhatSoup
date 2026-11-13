@@ -2544,28 +2544,45 @@ bridge is not admitted or has no assignment. `check-instance-config` prints a
 before deploying to an instance whose bot must keep writing.
 
 **One guarded plugin build.** Install the guarded plugin through `agentOptions.pluginDirs`;
-admission reads that copy. The `claude-cli` provider also loads the copy that
+admission reads that copy. It must have the canonical shape: a manifest whose `mcpServers`
+holds only the `microsoft_365` server and which has no `hooks` key, and no plugin-root
+`.mcp.json` or `hooks/hooks.json`. The `claude-cli` provider also loads the copy that
 `enabledPlugins` names, so startup checks that copy too. It reads the Claude CLI's install
 record, `plugins/installed_plugins.json` under `CLAUDE_CONFIG_DIR` (or `~/.claude`), and
 requires every install of `microsoft_365@microsoft-365-dev` to repeat the admitted plugin:
 - its manifest's `mcpServers` and `hooks` equal the admitted manifest's: the single
   `microsoft_365` server with the same `command`, `args` and `env`, and no other server
   or hook;
-- its plugin-root `.mcp.json` and `hooks/hooks.json` match the admitted copy's (normally
-  both absent);
+- it has no plugin-root `.mcp.json` or `hooks/hooks.json`;
 - its `mcp-server/dist/index.cjs` entry resolves inside its install directory and has the
   same SHA-256 as the admitted entry;
 - the install record, the install directory, the manifest and the entry pass the same
-  ownership, permission and symlink checks as the admitted copy.
+  ownership, permission, ACL and symlink checks as the admitted copy.
+
+Only a missing file (`ENOENT`) counts as absent. A root file that exists but cannot be read
+(for example `EACCES`, `EIO`, `ELOOP` or a dangling symlink) refuses the copy.
+
+The trust checks read each path's ACL with `/bin/ls`, run without a shell, because Node has
+no ACL API. On macOS any `allow` entry refuses the path; deny-only entries, such as the
+`group:everyone deny delete` entry on every home directory, grant nothing and are admitted.
+On Linux any ACL (the `+` mode marker) refuses the path. A listing that fails or cannot be
+parsed refuses the path, and so does any other platform.
 
 Config-root isolation (`WHATSOUP_AGENT_CONFIG_ROOT_ISOLATION=1`) gives a sandboxed child
 another install record than the one checked here, so it withdraws the assignment.
 
 A missing or unreadable record, a missing install or any difference withdraws the
 assignment. The log names the reason, never a path. Admission records the admitted
-copy: its manifest and entry digests, its server and hook shape and its paths.
-The `microsoft365` adapter re-hashes and re-checks that `pluginDirs` copy before each
-launch; a change closes the adapter for the rest of the run and withdraws the assignment.
+copy: its configured path and real path, its manifest and entry digests, the real path of
+its entry, its server and hook shape. Every re-check covers each surface the Claude CLI
+loads from that copy: the configured path and the entry symlink must still resolve to the
+admitted paths, the manifest and entry bytes must match, both root files must be absent and
+the trust checks must pass.
+The `microsoft365` adapter re-checks immediately before it spawns the plugin, after its
+socket is ready, and also before it acquires the socket. When the runtime's policy holds the
+admitted assignment, that check covers both copies and the assignment; otherwise it covers
+the `pluginDirs` copy that the adapter launches. A change closes the adapter for the rest of
+the run and withdraws the assignment.
 The native copy is re-checked at startup, before each later write of native settings (a
 capability-grant write, or the settings of a new sandbox per-chat session), before each
 `claude-cli` spawn (including an in-place respawn of an existing session: a crash
@@ -2590,9 +2607,22 @@ Settings writes lift the native deny floor only in `per_chat` scope without
 broker refuses native writes, and in `sandboxPerChat` mode the child has no authority
 socket, so those settings keep the floor; adapter writes are unaffected.
 
+With Linux host-work admission (`WHATSOUP_WORK_ADMISSION=systemd`), the external wrapper
+receives a launch's arguments and environment when the launch is queued, and starts the
+provider after its host lease without any later check. No check can run at release, so a
+queued launch never carries Microsoft 365 authority: `claude-cli` gets `--disallowedTools`
+with the full deny set and no bridge or `MS365_WORKFLOW_AUTHORITY_*` values, even while the
+assignment is live. Native Microsoft 365 tools therefore need a direct spawn. A pending floor
+rewrite still refuses a queued spawn, and adapter writes are unaffected because the adapter
+spawns its plugin directly.
+
 **Accepted residuals.** These checks do not cover:
-- A sub-second window remains between the spawn re-check and the Claude CLI loading the
-  plugin. Closing it needs an admitted immutable artifact, which is a later design change.
+- A window remains between the last re-check, which runs immediately before each direct
+  spawn, and the spawned process loading the plugin: for `claude-cli` this is the CLI's
+  start-up time. If the Claude CLI updates the marketplace plugin when it starts, that update
+  also falls inside this window, so keep auto-update off for the `microsoft-365-dev`
+  marketplace. Closing the window needs an admitted immutable artifact, which is a later
+  design change.
 - A deliberate swap of either copy by a process running as the same user is outside the
   same-user filesystem trust boundary described above.
 - The session child holds the bridge credentials (`MS365_AGENT365_API_KEY` and the
