@@ -183,8 +183,12 @@ def test_a_select_link_through_a_bot_writable_alias_is_refused(tmp_path):
 
 
 def test_a_select_link_through_a_trusted_alias_is_accepted(tmp_path):
-    anchor, select, _ = _alias_tree(tmp_path, 0o755)
-    m.check_interpreter([str(select / 'usr' / 'bin' / 'python3')], STRANGER, frozenset(), anchor=anchor)
+    anchor, select, home = _alias_tree(tmp_path, 0o755)
+    lexical = str(select / 'usr' / 'bin' / 'python3')
+    assert m.check_interpreter([lexical], STRANGER, frozenset(), anchor=anchor) is None
+    # The walk passed through the alias and its folder, so the acceptance covered them.
+    walked = [entry for entry, _ in m.path_chain(lexical)]
+    assert home in walked and home / 'current' in walked
 
 
 def test_a_bot_writable_folder_reached_by_a_relative_hop_is_refused(tmp_path):
