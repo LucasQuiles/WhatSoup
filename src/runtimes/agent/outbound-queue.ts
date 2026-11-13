@@ -30,7 +30,7 @@ import { formatProviderErrorForUser } from '../../lib/provider-errors.ts';
 import { MS_PER_SECOND, MS_PER_MINUTE } from '../../lib/time-units.ts';
 import { isGroupJid } from '../../core/jid-constants.ts';
 import { config } from '../../config.ts';
-import { FRIENDLY_CATEGORY_META, hasVisibleToolText, TOOL_CATEGORY_META } from './tool-update.ts';
+import { formatElapsed, FRIENDLY_CATEGORY_META, hasVisibleToolText, TOOL_CATEGORY_META } from './tool-update.ts';
 import { preprocessText, repairChunkFormatting, splitMessage } from './whatsapp-format.ts';
 import type { ToolCategory } from './providers/tool-mapping.ts';
 export type { ToolCategory } from './providers/tool-mapping.ts';
@@ -268,15 +268,6 @@ function statusMessageWindowState(senderToken: string, now: number): StatusMessa
   return created;
 }
 
-/** Format milliseconds as human-readable elapsed: "30s", "1m", "2m 15s". */
-function formatElapsed(ms: number): string {
-  const totalSeconds = Math.round(ms / 1000);
-  if (totalSeconds < 60) return `${totalSeconds}s`;
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
-}
-
 /**
  * Public interface of OutboundQueue. Imported by tests to enforce that mocks
  * stay in sync with the real implementation — if a new public method is added
@@ -316,7 +307,9 @@ export interface IOutboundQueue {
    * is for PROVIDER-CRASH finalization only: when the dying turn produced no
    * visible text, its undelivered buffered/deferred narration is delivered as a
    * status-role salvage message (never answer evidence) instead of being
-   * destroyed. Interrupt/reset/fence-lost callers must NOT pass it.
+   * destroyed. Interrupt/reset/fence-lost callers must NOT pass it. restart_self
+   * passes it too (#3829): the restart's shutdown abort would destroy that text
+   * and nothing else would deliver it.
    */
   abortTurn(options?: { preserveEvidence?: boolean; salvageOwedReply?: boolean }): void;
   /** The chat JID this queue is currently targeting. */
@@ -346,6 +339,14 @@ export interface IOutboundQueue {
   hasPendingWork?(): boolean;
   /** Whether a genuine send or durability failure has permanently poisoned this queue. */
   isPoisoned(): boolean;
+  /**
+   * Monotonic count of text sends that ended without a confirmed provider
+   * submission: failed, ambiguous, deferred, or dropped by the echo guard.
+   * Such a send returns without throwing, so flush() still resolves; #3829:
+   * restart_self compares this count across its owed-reply flush to tell a
+   * delivered reply from a lost one.
+   */
+  getSendFailureCount(): number;
   /**
    * Turn-end choke point. Called unconditionally when a `result` event is
    * received, so the typing indicator is cleared even on early-return branches
@@ -443,6 +444,8 @@ export class OutboundQueue implements IOutboundQueue {
   private readonly shutdownDeadlineSignal: Promise<typeof OUTBOUND_SHUTDOWN_DEADLINE>;
   private resolveShutdownDeadlineSignal: (() => void) | null = null;
   private shutdownDeadlineReached = false;
+  /** #3829: see IOutboundQueue.getSendFailureCount. */
+  private sendFailureCount = 0;
 
   /** Controls tool update verbosity. 'minimal' suppresses noise, 'friendly' shows all in plain language. */
   private toolUpdateMode: 'full' | 'minimal' | 'friendly' = 'full';
@@ -1369,6 +1372,10 @@ export class OutboundQueue implements IOutboundQueue {
     return this.drainFailure !== undefined;
   }
 
+  getSendFailureCount(): number {
+    return this.sendFailureCount;
+  }
+
   /** Retarget subsequent sends without changing durable conversation attribution. */
   updateDeliveryJid(jid: string): void {
     this.deliveryJid = jid;
@@ -1744,8 +1751,10 @@ export class OutboundQueue implements IOutboundQueue {
     }
     // AE4: Echo guard — suppress cross-session group echo loops.
     // Passes senderToken so intra-session rapid sends (tool status + text) are exempt.
+    // #3829: the dropped chunk never reached the provider, so it counts as undelivered.
     if (!canSendToGroup(chunk.chatJid, config.echoGuard, this.senderToken)) {
-      return; // silently drop
+      this.sendFailureCount += 1;
+      return;
     }
     await this.sendWithRetry(chunk);
     this.lastSentAt = Date.now();
@@ -1889,6 +1898,7 @@ export class OutboundQueue implements IOutboundQueue {
         stage: lastEvidence.stage,
         mutationState: lastEvidence.mutation_state,
       }, 'outbound send stopped at runtime shutdown deadline');
+      this.sendFailureCount += 1;
       if (opId !== undefined && this.durability) {
         persistOutboundFailureDisposition(
           this.durability,
@@ -1909,6 +1919,7 @@ export class OutboundQueue implements IOutboundQueue {
       mutationState: lastEvidence.mutation_state,
       retryDecision: lastEvidence.retry_decision,
     }, 'outbound send stopped with bounded failure disposition');
+    this.sendFailureCount += 1;
 
     if (opId !== undefined && this.durability) {
       persistOutboundFailureDisposition(this.durability, opId, lastEvidence);

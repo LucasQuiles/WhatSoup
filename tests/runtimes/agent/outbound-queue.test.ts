@@ -3118,6 +3118,8 @@ describe('OutboundQueue', () => {
       // The echo guard dropped the send before it reached messenger.sendMessage.
       expect(messenger.sendMessage).not.toHaveBeenCalled();
       expect(calls).toEqual([]);
+      // #3829: the drop is counted as undelivered so restart_self can refuse.
+      expect(queue.getSendFailureCount()).toBe(1);
 
       __resetForTests();
     });

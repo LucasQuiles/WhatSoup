@@ -107,6 +107,7 @@ const {
     targetChatJid: '15550001@s.whatsapp.net',
     getLastOpId: vi.fn(() => undefined),
     setDurability: vi.fn(),
+    getSendFailureCount: vi.fn(() => 0),
   };
 
   return { mockSession, mockQueue, capturedOnEventRef, capturedOnCrashRef, capturedNotifyUserRef };
@@ -3360,6 +3361,7 @@ describe('AgentRuntime route recycle publication and shutdown ownership', () => 
       targetChatJid,
       getLastOpId: vi.fn(() => undefined),
       setDurability: vi.fn(),
+      getSendFailureCount: vi.fn(() => 0),
     };
   }
 

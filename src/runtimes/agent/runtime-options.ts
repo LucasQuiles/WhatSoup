@@ -78,7 +78,7 @@ export interface AgentRuntimeOptions {
   /** Catch-up reconciler gate (default OFF); see turn-recovery-catchup-config.ts. */
   turnRecoveryCatchupReconcile?: TurnRecoveryCatchupReconcileOptions;
   /**
-   * Systemd restart capability, injected from the composition root. The runtimes
+   * Self-restart capability, injected from the composition root. The runtimes
    * layer cannot import the fleet layer, so main.ts constructs the concrete
    * ServiceManager and passes it here. When absent, the restart_self tool is not
    * registered (the agent cannot restart itself without it).

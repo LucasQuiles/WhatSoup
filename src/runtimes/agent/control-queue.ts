@@ -109,6 +109,11 @@ export class ControlQueue implements IOutboundQueue {
     return false;
   }
 
+  /** Always 0 — queued control output stays in the local log, so no queued send can fail. */
+  getSendFailureCount(): number {
+    return 0;
+  }
+
   /** Clear evidence ownership; control queues have no timers or send resources. */
   async shutdown(): Promise<void> {
     this.activeTurnId = undefined;

@@ -126,6 +126,7 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
     targetChatJid: 'test@s.whatsapp.net',
     getLastOpId: vi.fn(() => undefined),
     setDurability: vi.fn(),
+    getSendFailureCount: vi.fn(() => 0),
   };
 
   return { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRef, capturedOnResumeFailedRef, capturedOnCrashRef, capturedNotifyUserRef };

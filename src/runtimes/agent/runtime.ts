@@ -51,7 +51,7 @@ import { seamForProvider } from './handoff-seam-routing.ts';
 import { ensureHandoffArtifactSchema, getHandoffArtifact, deleteHandoffArtifact } from './handoff-artifact.ts';
 import { buildHandoffPrelude } from './handoff-prelude.ts';
 import type { AgentProvider } from './providers/types.ts';
-import { triggerSelfRestart, assertRestartSelfAdmin, type ServiceRestarter } from './self-restart.ts';
+import { triggerSelfRestart, assertRestartSelfAdmin, deliverOwedReplyBeforeRestart, type ServiceRestarter } from './self-restart.ts';
 import { registerRuntimeInlineTools } from './runtime-tool-registrations.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { allowlistedHealCrashClass, errorClassForHealEvidence } from '../../core/heal-evidence.ts';
@@ -4549,7 +4549,11 @@ export class AgentRuntime implements Runtime {
       restartSelf: serviceRestarter ? {
         instanceName: this.instanceName,
         dataRoot: config.dataRoot,
-        resolveChatJid: () => this.currentTurnChatJid ?? this.activeChatJid ?? undefined,
+        // #3829: the executing global turn's own delivery JID (an @lid DM keeps
+        // its @lid). activeChatJid is consulted only when no turn is in flight,
+        // so the ack and "back online" notice cannot go to another chat.
+        resolveChatJid: () => this.getGlobalInterruptChatJid() ?? undefined,
+        deliverOwedReply: () => deliverOwedReplyBeforeRestart(this.getGlobalInterruptQueue()),
         sendAck: async (chatJid, text) => {
           await sendTracked(this.messenger, chatJid, text, this.durability ?? undefined, { replayPolicy: 'unsafe' });
         },

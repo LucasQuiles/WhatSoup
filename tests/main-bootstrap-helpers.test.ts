@@ -1671,6 +1671,40 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       );
     });
 
+    // #3829: triggerSelfRestart keeps an @lid DM in the marker; main.ts passes
+    // marker.chatJid to the receipt unchanged, so the ping must reach that JID.
+    it('sends the dedicated back-online ping to an @lid DM named by the marker', async () => {
+      // Synthetic 1111111* fixture: the repo hygiene guard rejects real-shaped JIDs.
+      const lidJid = '111111100000002@lid';
+      const h = await importMainWithMocks({
+        adminPhones: [],
+        instanceConfig: {
+          name: 'q',
+          type: 'agent',
+          introSent: true,
+          agentOptions: { sessionScope: 'shared' },
+        },
+        selfRestartMarker: {
+          chatJid: lidJid,
+          reason: 'load merged main',
+          code: 'self_restart',
+          timestamp: new Date(Date.now() - 2_000).toISOString(),
+        },
+      });
+
+      h.capturedTimeouts.find((timer) => timer.ms === 3_000)!.callback();
+      await flushMicrotasks();
+
+      expect(h.sendTracked).toHaveBeenCalledOnce();
+      expect(h.sendTracked).toHaveBeenCalledWith(
+        h.connection,
+        lidJid,
+        expect.stringContaining('Back online'),
+        h.durability,
+        { replayPolicy: 'unsafe', opType: 'status_ping' },
+      );
+    });
+
     it('keeps booting when the dedicated self-restart receipt submission rejects', async () => {
       const h = await importMainWithMocks({
         adminPhones: [],

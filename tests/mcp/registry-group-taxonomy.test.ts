@@ -250,6 +250,7 @@ describe('inline control-plane tools are tag-able (QR-017)', () => {
       instanceName: 'test',
       dataRoot: '/tmp',
       resolveChatJid: () => undefined,
+      deliverOwedReply: async () => ({ delivered: true }),
       sendAck: async () => {},
       serviceManager: {} as never,
       trigger: (async () => ({ ok: true })) as never,

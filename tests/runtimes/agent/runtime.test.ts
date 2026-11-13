@@ -125,6 +125,7 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
     targetChatJid: 'test@s.whatsapp.net',
     getLastOpId: vi.fn(() => undefined),
     setDurability: vi.fn(),
+    getSendFailureCount: vi.fn(() => 0),
   };
 
   return { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRef, capturedOnResumeFailedRef, capturedOnCrashRef, capturedNotifyUserRef };
@@ -558,6 +559,7 @@ import {
   type AutoCompactView, type ImageCoalescerView, makePollMessenger, makeRealDb, buildPayload,
   insertRow, makeDbWithTokenRow, makeBindingRuntime,
 } from './lib/runtime-mock-scaffold.ts';
+import { buildPayload, insertRow, makeRealDb } from './lib/pending-poll-fixtures.ts';
 
 // ─── Coupled helpers (hoisting-pinned, cannot leave this file) ────────────────
 
