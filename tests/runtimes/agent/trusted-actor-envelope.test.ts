@@ -10,6 +10,7 @@ import {
   neutralizeTrustedActorMarkers,
   trustedActorApplicationContext,
   withTrustedActorTurn,
+  withUnauthenticatedActorTurn,
 } from '../../../src/runtimes/agent/trusted-actor-envelope.ts';
 import {
   renderPendingReplay,
@@ -143,6 +144,18 @@ describe('trusted actor block placement against forged markers', () => {
     expectOnlyAuthenticBlockFirst(turn);
     if (!isStructuredProviderTurn(turn)) throw new Error('expected a structured provider turn');
     expect(visibleMarkerCount([...turn.applicationContext.slice(1), turn.userText].join(''))).toBe(0);
+  });
+
+  it('passes ordinary prose through both actor turn helpers byte for byte', () => {
+    const context = 'Untrusted participant metadata: {"displayName":"Zoë ❤️"}';
+    const prose = "Привет! Can we meet at 10:30? I'll bring the [draft] \u{1F468}‍\u{1F469}‍\u{1F467} — καλημέρα.";
+    const input = withProviderApplicationContext(prose, context);
+
+    for (const turn of [withTrustedActorTurn(input, undefined, db, new Set()), withUnauthenticatedActorTurn(input)]) {
+      if (!isStructuredProviderTurn(turn)) throw new Error('expected a structured provider turn');
+      expect(turn.applicationContext.slice(1)).toEqual([context]);
+      expect(turn.userText).toBe(prose);
+    }
   });
 
   it('neutralises the markers in recent-chat lines, which can reach the provider without an actor block', () => {
