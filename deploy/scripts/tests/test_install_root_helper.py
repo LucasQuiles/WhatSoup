@@ -281,10 +281,45 @@ def test_the_installer_must_run_as_the_isolated_interpreter_sudo_will_run(tmp_pa
         m.check_invocation(True, True, str(elsewhere), select_link=str(link))
 
 
+def _clone(tmp_path):
+    anchor = tmp_path.resolve() / 'tree'
+    activation = anchor / 'clone' / 'scripts' / 'lib' / 'release-activation'
+    activation.mkdir(parents=True)
+    files = [activation / name for name in ('install_root_helper.py', 'root-helper.json', 'protected_plist.py')]
+    for path in files:
+        path.write_bytes(b'')
+    _folders(anchor, *[activation.parents[n] for n in range(3)], activation)
+    return anchor, [str(path) for path in files]
+
+
+def test_a_clone_the_bot_user_can_write_is_refused(tmp_path):
+    # Opus M-3: the bot user could change the script, the pin or the helper before root reads them,
+    # or rename a writable ancestor and put another clone in its place.
+    anchor, files = _clone(tmp_path)
+    m.check_clone(files, STRANGER, frozenset(), anchor=anchor)
+    (anchor / 'clone').chmod(0o757)
+    with pytest.raises(m.InstallRefused, match='clone'):
+        m.check_clone(files, STRANGER, frozenset(), anchor=anchor)
+
+
+def test_main_refuses_a_writable_clone_before_reading_it(monkeypatch):
+    # The test user owns this worktree, so as the bot user it can write the clone.
+    monkeypatch.setattr(m.os, 'geteuid', lambda: 0)
+    monkeypatch.setattr(m, 'check_invocation', lambda *args: None)
+    reads = []
+    monkeypatch.setattr(m, 'read_pin', lambda *args: reads.append('pin'))
+    monkeypatch.setattr(m, 'read_bytes', lambda *args: reads.append('bytes'))
+    with pytest.raises(m.InstallRefused, match='clone'):
+        m.main(['--user', pwd.getpwuid(os.getuid()).pw_name])
+    assert reads == []
+    assert set(m.clone_paths()) == {str(m.HERE / 'install_root_helper.py'), str(m.PIN), str(m.HELPER)}
+
+
 def test_main_reports_the_exact_sudoers_line_for_the_bot_user(monkeypatch, capsys):
     name = pwd.getpwuid(os.getuid()).pw_name
     monkeypatch.setattr(m.os, 'geteuid', lambda: 0)
     monkeypatch.setattr(m, 'check_invocation', lambda *args: None)
+    monkeypatch.setattr(m, 'check_clone', lambda paths, uid, groups, **_: None)
     checked = []
     monkeypatch.setattr(m, 'check_interpreter', lambda paths, uid, groups, **_: checked.append(uid))
     monkeypatch.setattr(m, 'install', lambda data, pin, **_: {'changed': True} if data == HELPER else pytest.fail('wrong bytes'))

@@ -275,10 +275,14 @@ Owner steps, once per host and again after any helper change:
    write (owned by an administrator, not inside the bot user's home). Running
    the install step from the bot user's release tree would let that user change
    what root installs.
-2. Install the helper. The step refuses on a pin mismatch, on an install folder
-   or ancestor that is not root-owned or is group- or other-writable, and on an
-   interpreter path the bot user can write. When the install is already
-   current, it changes nothing:
+2. Install the helper. The step refuses, before it reads the pin or the helper,
+   when the bot user can write the clone's script, pin or helper or any folder
+   on their path from `/`. It also refuses on a pin mismatch, on an install
+   folder or ancestor that is not root-owned or is group- or other-writable, and
+   when the bot user can write any entry on the way to the interpreter: each
+   original path component and each symlink hop of `/usr/bin/python3`, the
+   selected developer folder and the import path, with the hops' folders. When
+   the install is already current, it changes nothing:
 
    ```bash
    sudo /usr/bin/python3 -I -B <clone>/scripts/lib/release-activation/install_root_helper.py --user <bot-user>

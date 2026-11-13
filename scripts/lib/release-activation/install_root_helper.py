@@ -195,6 +195,17 @@ def check_interpreter(paths, uid, groups, *, anchor='/'):
                 anchor=anchor)
 
 
+def clone_paths():
+    """This script, the pin and the helper, as root reads them from the clone."""
+    return [str(HERE / 'install_root_helper.py'), str(PIN), str(HELPER)]
+
+
+def check_clone(paths, uid, groups, *, anchor='/'):
+    """The whole chain from "/": a writable ancestor would let the bot user put another clone in its place."""
+    check_chain(paths, uid, groups, 'on the path of the clone this install runs from; run it from a clone the bot '
+                'user cannot write', anchor=anchor)
+
+
 def _trusted_folder(fd, owner):
     info = os.fstat(fd)
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != owner[0] or stat.S_IMODE(info.st_mode) & 0o022:
@@ -290,6 +301,7 @@ def main(argv):
         raise InstallRefused('run the install step as root (sudo)')
     check_invocation(sys.flags.isolated, sys.dont_write_bytecode, sys.executable)
     uid, groups = bot_identity(name)
+    check_clone(clone_paths(), uid, groups)
     pin = read_pin()
     data = read_bytes(HELPER)
     check_interpreter(interpreter_paths(), uid, groups)
