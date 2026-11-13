@@ -6,7 +6,9 @@ import {
   m365BridgeCredentialProjectionAllowed,
   m365BridgeCredentialAdmission,
   m365MutationAdmissionGap,
+  m365AuthoritySocketWithheld,
   m365MutationExceptionAllowed,
+  m365SessionChildPolicy,
   m365TurnAuthority,
   m365WorkflowAuthorityLive,
   narrowM365RoutePolicy,
@@ -141,6 +143,36 @@ describe('narrowM365RoutePolicy', () => {
     expect(narrowM365RoutePolicy(withdrawn, current)).toBe(withdrawn);
     expect(narrowM365RoutePolicy(current, { status: 'rejected' })).toEqual({ status: 'rejected' });
     expect(narrowM365RoutePolicy(current, undefined)).toBeUndefined();
+  });
+});
+
+describe('m365SessionChildPolicy', () => {
+  const childEnv = { ALLOW_M365_MUTATIONS: '1' };
+  const assigned = (): Extract<M365MutationPolicy, { status: 'approved' }> => ({
+    status: 'approved', childEnv, workflowAuthority: { accountId: 'account-1', employeeActorJid: '15551230001@s.whatsapp.net' },
+  });
+
+  it('withholds the authority socket from a sandbox child and keeps the assignment it must still require', () => {
+    const policy = assigned();
+    const child = m365SessionChildPolicy(policy, true);
+    expect(m365AuthoritySocketWithheld(child)).toBe(true);
+    expect(child).toEqual(policy);
+    expect(m365AuthoritySocketWithheld(policy)).toBe(false);
+    // The copy shares the assignment object, so a mid-run withdrawal reaches the child's policy too.
+    expect(child?.status === 'approved' && child.workflowAuthority).toBe(policy.workflowAuthority);
+    withdrawM365WorkflowAuthority(policy.workflowAuthority!);
+    expect(child?.status === 'approved' && m365WorkflowAuthorityLive(child.workflowAuthority!)).toBe(false);
+  });
+
+  it('passes every other policy through unchanged', () => {
+    const policy = assigned();
+    expect(m365SessionChildPolicy(policy, false)).toBe(policy);
+    const unassigned: M365MutationPolicy = { status: 'approved', childEnv };
+    const rejected: M365MutationPolicy = { status: 'rejected' };
+    for (const other of [unassigned, rejected, undefined]) {
+      expect(m365SessionChildPolicy(other, true)).toBe(other);
+      expect(m365AuthoritySocketWithheld(other)).toBe(false);
+    }
   });
 });
 

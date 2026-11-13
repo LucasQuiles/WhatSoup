@@ -292,8 +292,9 @@ export function m365MutationExceptionAllowed(policy: M365MutationPolicy | undefi
 /**
  * The policy a native settings write uses. The M365 mutation floor is lifted only where a guarded
  * native write can succeed: `per_chat` scope without `sandboxPerChat`. Elsewhere the broker refuses
- * native writes (shared or single scope) or the child has no authority socket (sandbox), so a lift
- * would serve only an unguarded copy; the assignment is stripped from the settings policy there.
+ * native writes (shared or single scope) or the child has no authority socket (sandbox, see
+ * `m365SessionChildPolicy`), so a lift would serve only an unguarded copy; the assignment is
+ * stripped from the settings policy there.
  */
 export function m365NativeFloorPolicy(
   policy: M365MutationPolicy | undefined,
@@ -302,6 +303,27 @@ export function m365NativeFloorPolicy(
 ): M365MutationPolicy | undefined {
   if (!m365MutationExceptionAllowed(policy) || (sessionScope === 'per_chat' && sandboxPerChat !== true)) return policy;
   return policy?.status === 'approved' ? { status: 'approved', childEnv: policy.childEnv } : policy;
+}
+
+/** Session-child policies whose child gets no `MS365_WORKFLOW_AUTHORITY_SOCKET`. */
+const authoritySocketWithheld = new WeakSet<M365MutationPolicy>();
+
+/**
+ * The policy a session child is spawned with. A `sandboxPerChat` child keeps the assignment, so its
+ * guarded plugin still requires authority, but it gets no authority socket, so that plugin refuses
+ * writes. Its `WHATSOUP_MCP_SOCKET` and session token stay: its WhatSoup proxy presents them for turn
+ * replies. The settings deny floor, not a missing socket, is the native-write guard in that mode. The
+ * copy keeps the assignment object, so a mid-run withdrawal still reaches it.
+ */
+export function m365SessionChildPolicy(policy: M365MutationPolicy | undefined, sandboxPerChat: boolean): M365MutationPolicy | undefined {
+  if (!sandboxPerChat || policy?.status !== 'approved' || policy.workflowAuthority === undefined) return policy;
+  const child: M365MutationPolicy = { ...policy };
+  authoritySocketWithheld.add(child);
+  return child;
+}
+
+export function m365AuthoritySocketWithheld(policy: M365MutationPolicy | undefined): boolean {
+  return policy !== undefined && authoritySocketWithheld.has(policy);
 }
 
 /** Assignments withdrawn mid-run. A turn publishes the assignment object itself, so its readers see the withdrawal. */

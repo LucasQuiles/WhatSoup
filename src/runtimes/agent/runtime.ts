@@ -125,7 +125,7 @@ import {
   getFallbackState,
 } from './fallback-state-db.ts';
 import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts } from '../../core/workspace.ts';
-import { m365NativeFloorPolicy, m365RoutePolicy, m365TurnAuthority, narrowM365RoutePolicy, type M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
+import { m365NativeFloorPolicy, m365RoutePolicy, m365SessionChildPolicy, m365TurnAuthority, narrowM365RoutePolicy, type M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
 import { inspectUserClaudeSettings } from '../../core/user-claude-settings.ts';
 import { isSamePhysicalDirectory } from '../../lib/home-path.ts';
 import { classifyActiveSessions, resolveAmbiguousAgeFallback } from './session-classifier.ts';
@@ -10563,7 +10563,7 @@ export class AgentRuntime implements Runtime {
       pluginDirs: this.pluginDirs,
       allowM365Mutations: sessionM365Policy?.status === 'rejected' ? false : this.allowM365Mutations,
       m365MutationPolicy: sessionM365Policy,
-      m365SpawnPolicy: () => microsoft365SpawnPolicy(sessionM365Policy, this.recheckM365Policy(), this.m365SettingsFiles),
+      m365SpawnPolicy: () => m365SessionChildPolicy(microsoft365SpawnPolicy(sessionM365Policy, this.recheckM365Policy(), this.m365SettingsFiles), this.sandboxPerChat),
       provider: route ? route.provider : this.effectiveProvider,
       providerConfig: opts.providerConfigOverride
         ? { ...(route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()), ...opts.providerConfigOverride }

@@ -10,8 +10,14 @@
  *
  * A startup that admits no guarded plugin (qpi-lab2 review of #3935, finding 1) must give every later
  * claude-cli spawn the same withdrawn shape, because nothing verified the plugin that child loads.
+ *
+ * A sandboxPerChat session child (qpi-lab2 review 5898990442, finding 2) gets no authority socket, so
+ * its guarded plugin fails closed, while it keeps its WhatSoup socket and session token.
  */
 import { EventEmitter } from 'node:events';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -191,6 +197,8 @@ describe('Microsoft 365 authority at an in-place claude-cli respawn', () => {
     const first = vi.mocked(spawn).mock.calls.at(-1)!;
     expect(first[1]).not.toContain('--disallowedTools');
     expect((first[2] as { env?: NodeJS.ProcessEnv }).env?.MS365_WORKFLOW_AUTHORITY_REQUIRED).toBe('1');
+    // Outside sandboxPerChat the guarded plugin reaches the broker on the session's own socket.
+    expect((first[2] as { env?: NodeJS.ProcessEnv }).env?.MS365_WORKFLOW_AUTHORITY_SOCKET).toBe('/fixture/actor.sock');
     expect((first[2] as { env?: NodeJS.ProcessEnv }).env?.MS365_AGENT365_API_KEY).toBe('synthetic-key');
     expect(internals.m365ExecutingAuthority(session, true, 'request-1')).toMatchObject({ m365RouteProvider: 'claude-cli' });
     expect(internals.m365ExecutingAuthority(session, true, 'request-1').workflowAuthority).toBeDefined();
@@ -264,5 +272,44 @@ describe('Microsoft 365 authority at an in-place claude-cli respawn', () => {
     expect(env?.MS365_AGENT365_API_KEY).toBeUndefined();
     // Its turns carry no assignment; with no candidate the microsoft365 adapter was never registered.
     expect(internals.m365ExecutingAuthority(session, true, 'request-1').workflowAuthority).toBeUndefined();
+  }, 15_000);
+
+  it('gives a sandboxPerChat claude-cli child no authority socket but keeps its WhatSoup socket and session token', async () => {
+    const binding = (globalThis as Record<string, unknown>)['__m365RespawnBinding__'] as Record<string, unknown>;
+    // These runtimes never call start(); the re-check passes the admitted policy through unchanged.
+    vi.spyOn(microsoft365Adapter, 'recheckMicrosoft365Workflow').mockImplementation((p: M365MutationPolicy | undefined) => p);
+    const workspace = mkdtempSync(join(tmpdir(), 'whatsoup-m365-sandbox-'));
+    try {
+      const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', {
+        model: 'primary-model', sessionScope: 'per_chat', sandboxPerChat: true,
+        allowM365Mutations: true, enabledPlugins: ENABLED_PLUGINS, m365Bridge: binding as never,
+      });
+      const internals = runtime as unknown as RuntimeInternals & { m365MutationPolicy: M365MutationPolicy | undefined };
+      expect(internals.m365MutationPolicy).toMatchObject({ status: 'approved', workflowAuthority: expect.anything() });
+      // A sandbox session uses its workspace socket, never a per-chat actor socket.
+      vi.spyOn(internals, 'wirePerChatActorSocket').mockReturnValue(undefined);
+      vi.mocked(spawn).mockImplementation(() => fakeChild(4444) as never);
+
+      const session = internals.createSessionManager({
+        chatJid: CHAT_JID, cwd: workspace, mcpSocketPath: join(workspace, '.claude', 'whatsoup.sock'),
+        onEvent: vi.fn(), onCrash: vi.fn(), notifyUser: vi.fn(),
+      });
+      await session.spawnSession();
+
+      const spawned = vi.mocked(spawn).mock.calls.at(-1)!;
+      const env = (spawned[2] as { env?: NodeJS.ProcessEnv }).env;
+      // The guarded plugin still requires authority and still gets the bridge, so it fails closed on writes.
+      expect(env?.MS365_WORKFLOW_AUTHORITY_REQUIRED).toBe('1');
+      expect(env?.MS365_AGENT365_API_KEY).toBe('synthetic-key');
+      expect(env).not.toHaveProperty('MS365_WORKFLOW_AUTHORITY_SOCKET');
+      // The WhatSoup proxy keeps its socket and the session token that attributes its turn replies.
+      expect(env?.WHATSOUP_MCP_SOCKET).toBe(join(workspace, '.claude', 'whatsoup.sock'));
+      expect(env?.WHATSOUP_MCP_SESSION_TOKEN).toEqual(expect.any(String));
+      expect(env?.WHATSOUP_MCP_SESSION_TOKEN).not.toBe('');
+      // The provider arguments are unchanged: the sandbox settings file carries the deny floor.
+      expect(spawned[1]).not.toContain('--disallowedTools');
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
   }, 15_000);
 });

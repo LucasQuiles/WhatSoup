@@ -2,7 +2,7 @@
 // Shared base environment builder for provider child processes.
 
 import { join } from 'node:path';
-import type { M365MutationPolicy } from '../../../core/m365-bridge-policy.ts';
+import { m365AuthoritySocketWithheld, type M365MutationPolicy } from '../../../core/m365-bridge-policy.ts';
 
 /**
  * Legacy opt-in env flag (#411). When set to `"1"`, `buildBaseChildEnv` drops
@@ -182,10 +182,11 @@ export function buildBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.Proce
       WHATSOUP_MCP_SOCKET: opts?.whatsoupMcpSocket,
       WHATSOUP_MCP_SESSION_TOKEN: opts?.whatsoupMcpSessionToken,
       // The Microsoft plugin may use this only through the same scoped MCP
-      // socket and session token as its hosting provider turn.
+      // socket and session token as its hosting provider turn. A sandbox
+      // session child gets no authority socket, so its plugin refuses writes.
       MS365_WORKFLOW_AUTHORITY_REQUIRED: m365Policy?.status === 'approved' && m365Policy.workflowAuthority !== undefined ? '1' : undefined,
       MS365_WORKFLOW_AUTHORITY_SOCKET: m365Policy?.status === 'approved' && m365Policy.workflowAuthority !== undefined
-        && opts?.whatsoupMcpSessionToken !== undefined ? opts?.whatsoupMcpSocket : undefined,
+        && opts?.whatsoupMcpSessionToken !== undefined && !m365AuthoritySocketWithheld(m365Policy) ? opts?.whatsoupMcpSocket : undefined,
       // Egress proxy (#1607): only present when a caller supplies a positive
       // egressProxyPort — instances that haven't opted into the allowlist
       // see zero change. Both UPPER and lower case variants are set (F4):

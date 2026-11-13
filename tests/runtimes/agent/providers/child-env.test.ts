@@ -5,6 +5,7 @@ import {
   CONFIG_ROOT_ISOLATION_FLAG,
   FAILCLOSED_FLAG,
 } from '../../../../src/runtimes/agent/providers/child-env.ts';
+import { m365SessionChildPolicy } from '../../../../src/core/m365-bridge-policy.ts';
 
 const MANAGED_ENV_KEYS = [
   'PATH',
@@ -498,6 +499,19 @@ describe('buildBaseChildEnv (account-bound M365 policy)', () => {
       expect(env.MS365_WORKFLOW_AUTHORITY_REQUIRED).toBe('1');
       expect(env).not.toHaveProperty('MS365_WORKFLOW_AUTHORITY_SOCKET');
     }
+    // A sandbox session child keeps its WhatSoup socket and token but gets no authority socket.
+    const sandboxed = buildBaseChildEnv({
+      m365MutationPolicy: m365SessionChildPolicy(policy, true),
+      whatsoupMcpSocket: '/private/workspace.sock',
+      whatsoupMcpSessionToken: 'turn-token',
+    });
+    expect(sandboxed).toMatchObject({
+      WHATSOUP_MCP_SOCKET: '/private/workspace.sock',
+      WHATSOUP_MCP_SESSION_TOKEN: 'turn-token',
+      MS365_WORKFLOW_AUTHORITY_REQUIRED: '1',
+      MS365_AGENT365_ACCOUNT_ID: 'employee-account',
+    });
+    expect(sandboxed).not.toHaveProperty('MS365_WORKFLOW_AUTHORITY_SOCKET');
   });
 
   it('drops ambient mutation authority when a configured bridge policy is rejected', () => {
