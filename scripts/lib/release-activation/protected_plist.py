@@ -525,8 +525,13 @@ def check_contents(replacement, label):
         raise RuntimeError('plist label does not match target')
 
 
+def read_request(stream):
+    """The JSON request, decoded from bytes as strict UTF-8: sudo keeps LANG and LC_ALL, so a text read would follow the caller's locale."""
+    return json.loads(stream.buffer.read().decode('utf-8'))
+
+
 def main():
-    request = json.load(sys.stdin)
+    request = read_request(sys.stdin)
     if os.getuid() != 0:
         raise RuntimeError('root replacement must run as root')
     lock_fd = lock_helper(__file__)
@@ -540,7 +545,7 @@ def main():
         folder_fd = open_caller_folder(home, uid)
         try:
             os.close(open_plist(folder_fd, path.name))
-            replacement = request['contents'].encode()
+            replacement = request['contents'].encode('utf-8')
             check_contents(replacement, path.name[:-6])
             result = replace_at(folder_fd, path.name, request['expectedSha256'], replacement, request['metadata'],
                                 lambda: open_caller_folder(home, uid),

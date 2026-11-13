@@ -83,6 +83,11 @@ def _own_launch_agents(root):
     return home, folder
 
 
+def _stdin(data, encoding='utf-8'):
+    """A text stdin over these bytes; `encoding` stands for the caller's locale, which sudo keeps."""
+    return io.TextIOWrapper(io.BytesIO(data), encoding=encoding)
+
+
 def _drive_main_as_root(monkeypatch, target, home, sudo_uid, *, stub_write=True, original=None, contents=None):
     replaced = []
     looked_up = []
@@ -108,7 +113,7 @@ def _drive_main_as_root(monkeypatch, target, home, sudo_uid, *, stub_write=True,
         monkeypatch.setattr(p, 'replace_at', lambda *args, **_: replaced.append(args[1]) or {}, raising=False)
     expected = p.digest(original) if original is not None else '0' * 64
     request = {'path': str(target), 'contents': contents, 'expectedSha256': expected, 'metadata': {}}
-    monkeypatch.setattr(p.sys, 'stdin', io.StringIO(json.dumps(request)))
+    monkeypatch.setattr(p.sys, 'stdin', _stdin(json.dumps(request).encode('utf-8')))
     return replaced, looked_up
 
 
@@ -158,6 +163,39 @@ def test_root_replacement_accepts_json_shaped_plist_values(tmp_path, monkeypatch
     replaced, _ = _drive_main_as_root(monkeypatch, target, home, OWN_UID, contents=contents)
     p.main()
     assert replaced == [target.name]
+
+
+def _request_bytes(target, contents):
+    request = {'path': str(target), 'contents': contents, 'expectedSha256': '0' * 64, 'metadata': {}}
+    return json.dumps(request, ensure_ascii=False).encode('utf-8')
+
+
+def test_root_replacement_decodes_the_request_as_utf8_whatever_the_callers_locale(tmp_path, monkeypatch):
+    # Opus M-7: sudo keeps LANG and LC_ALL. Under an ISO-8859-1 locale a text read of
+    # stdin turned "café" (63 61 66 c3 a9) into 63 61 66 c3 83 c2 a9.
+    home, folder = _own_launch_agents(tmp_path.resolve())
+    target = folder / 'com.whatsoup.alpha.plist'
+    contents = plistlib.dumps({'Label': 'com.whatsoup.alpha', 'Note': 'café'}).decode()
+    _drive_main_as_root(monkeypatch, target, home, OWN_UID)
+    monkeypatch.setattr(p.sys, 'stdin', _stdin(_request_bytes(target, contents), encoding='iso-8859-1'))
+    written = []
+    monkeypatch.setattr(p, 'replace_at', lambda *args, **_: written.append(args[3]) or {})
+    p.main()
+    assert written == [contents.encode('utf-8')]
+    assert b'caf\xc3\xa9' in written[0]
+
+
+def test_root_replacement_refuses_a_request_that_is_not_utf8(tmp_path, monkeypatch):
+    home, folder = _own_launch_agents(tmp_path.resolve())
+    target = folder / 'com.whatsoup.alpha.plist'
+    contents = plistlib.dumps({'Label': 'com.whatsoup.alpha', 'Note': 'MARK'}).decode()
+    replaced, _ = _drive_main_as_root(monkeypatch, target, home, OWN_UID)
+    # A lone 0xff byte is valid ISO-8859-1 and never valid UTF-8.
+    data = _request_bytes(target, contents).replace(b'MARK', b'\xff')
+    monkeypatch.setattr(p.sys, 'stdin', _stdin(data, encoding='iso-8859-1'))
+    with pytest.raises(UnicodeDecodeError):
+        p.main()
+    assert replaced == []
 
 
 def _plist(value):
