@@ -919,12 +919,19 @@ def _run_helper_child(tmp_path, mode, names):
             os.chflags(entry, 0)
 
 
-def _assert_replaced_and_protected(outcome):
+def _completed_run(outcome):
+    """(observed, expected, stderr) for a run that must complete.
+
+    Expected: exit 0; exactly two output lines, the child's 'sent' and the
+    helper's JSON naming the new digest; then only the plist in the folder,
+    holding the new bytes under uchg.
+    """
     result, new, listing, data, flags = outcome
-    assert result.returncode == 0, (result.returncode, result.stderr)
-    sent, printed = result.stdout.splitlines()
-    assert sent == 'sent' and json.loads(printed)['sha256'] == p.digest(new)
-    assert (listing, data, flags) == (['com.whatsoup.alpha.plist'], new, stat.UF_IMMUTABLE)
+    lines = result.stdout.splitlines()
+    reported = json.loads(lines[1])['sha256'] if len(lines) == 2 else lines
+    observed = (result.returncode, lines[:1], reported, listing, data, flags)
+    expected = (0, ['sent'], p.digest(new), ['com.whatsoup.alpha.plist'], new, stat.UF_IMMUTABLE)
+    return observed, expected, result.stderr
 
 
 def test_the_signal_classes_cover_every_signal_once():
@@ -946,13 +953,15 @@ def test_without_the_shield_a_relayed_sigterm_ends_the_run_with_the_plist_unprot
 def test_a_relayed_signal_after_the_clear_leaves_the_new_plist_protected(tmp_path, name):
     # Opus N-1: with the mask alone, SIGPROF (-27) and SIGEMT (-7) reached getgrouplist's thread and
     # ended the run after the clear; the plist was left with flags 0.
-    _assert_replaced_and_protected(_run_helper_child(tmp_path, 'shielded', [name]))
+    observed, expected, stderr = _completed_run(_run_helper_child(tmp_path, 'shielded', [name]))
+    assert observed == expected, stderr
 
 
 @pytest.mark.skipif(not hasattr(os, 'chflags'), reason='file flags exist only on BSD and macOS')
 def test_every_relayed_signal_at_once_reaches_a_thread_that_blocks_nothing_and_still_ends_nothing(tmp_path):
     # A mask holds only in the thread that sets it; a process-wide disposition holds in every thread.
-    _assert_replaced_and_protected(_run_helper_child(tmp_path, 'unblocked-thread', _RELAYABLE))
+    observed, expected, stderr = _completed_run(_run_helper_child(tmp_path, 'unblocked-thread', _RELAYABLE))
+    assert observed == expected, stderr
 
 
 # The real shield() in a child: the thread mask and the dispositions inside it, and both restored after.
