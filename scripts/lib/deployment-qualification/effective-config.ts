@@ -170,7 +170,12 @@ function resolveEffectiveConfig(rawOptions: unknown) {
   const healthPort = Object.hasOwn(instance, 'healthPort') ? instance.healthPort : settings.healthPort;
   if (!port.safeParse(healthPort).success) fail('INPUT_INVALID');
   const service = isRecord(instance.service) ? instance.service : {};
-  const serviceKeys = ['claudeConfigDir', 'pathPrepend', 'expectedAccountDigest'];
+  const serviceKeys = [
+    'claudeConfigDir',
+    'claudeSecureStorageConfigDir',
+    'pathPrepend',
+    'expectedAccountDigest',
+  ];
   if (binding.requested.service !== undefined && binding.requested.service !== null) {
     if (Object.keys(binding.requested.service).some((key) => !serviceKeys.includes(key))) fail('OWNER_CONFLICT');
     if (validateInstanceConfig({ ...instance, service: binding.requested.service },

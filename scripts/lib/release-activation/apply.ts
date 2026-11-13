@@ -21,6 +21,7 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  lstatSync,
   readFileSync,
   readlinkSync,
   renameSync,
@@ -29,6 +30,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 
 import {
   installedLaunchdPlistMode,
@@ -50,6 +52,15 @@ import {
 } from './host.ts';
 import { type Binding, type BindingEvidence, type ProcessSample, resolveBinding } from './invariants.ts';
 import { acquireActivationLock } from './lock.ts';
+import {
+  readInstalledRootHelper,
+  readRootHelperPin,
+  ROOT_HELPER_FAILED_AS_FOUND_EXIT,
+  ROOT_HELPER_RECOVERY_INCOMPLETE_EXIT,
+  ROOT_HELPER_SUDO,
+  rootHelperArgs,
+  rootHelperFailure,
+} from './root-helper-interpreter.ts';
 import {
   type ActivationContext,
   bootstrapEntrypointFor,
@@ -149,11 +160,69 @@ function writeAtomic(filePath: string, contents: string, mode: number): void {
 }
 
 /**
+ * The root helper ended without confirming where protection stands: exit 3, a
+ * signal, a timeout, any code but 0 and 2, or exit 0 without the new bytes. It
+ * may have stopped after clearing uchg, so a plist may hold either version and
+ * may lack that protection. Node cannot read file flags, so no later step can
+ * confirm protection, and a rollback after this stays unverified.
+ */
+class RootHelperRecoveryIncomplete extends Error {}
+
+/** How a root helper run that did not confirm protection ended, for the operator message. */
+function unconfirmedRootHelperRun(result: ExecResult): string {
+  if (result.timedOut === true) return 'root plist helper timed out without confirming protection';
+  if (result.code === ROOT_HELPER_RECOVERY_INCOMPLETE_EXIT) return 'root plist helper recovery is incomplete';
+  if (result.code === 0) return 'root plist helper reported success but the plist does not hold the new bytes';
+  return `root plist helper ended without confirming protection (exit ${result.code})`;
+}
+
+/** A root-owned plist replaced by a non-root activation goes through the root helper. */
+function needsRootHelper(host: ActivationHost, plistPath: string): boolean {
+  return lstatSync(plistPath).uid === 0 && host.uid !== 0;
+}
+
+/** Null when the installed root helper matches this tree's pin; otherwise the operator message. */
+function installedRootHelperFailure(): string | null {
+  let pin;
+  try {
+    pin = readRootHelperPin();
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  return rootHelperFailure(pin, readInstalledRootHelper(pin.path));
+}
+
+/**
  * Replace an installed plist, keeping its permission bits (never wider than
  * 0644). An owner-only instance plist can carry credentials in its
  * EnvironmentVariables, so neither the switch nor the rollback may widen it.
  */
-function writePlist(plistPath: string, contents: string): void {
+async function writePlist(host: ActivationHost, plistPath: string, contents: string, expected: string): Promise<void> {
+  if (readFileSync(plistPath, 'utf8') !== expected) throw new Error('installed plist changed before replacement');
+  const info = lstatSync(plistPath);
+  if (info.uid === 0 && host.uid !== 0) {
+    const pin = readRootHelperPin();
+    const outdated = rootHelperFailure(pin, readInstalledRootHelper(pin.path));
+    if (outdated !== null) throw new Error(outdated);
+    const result = await host.exec(ROOT_HELPER_SUDO, rootHelperArgs(pin), {
+      input: JSON.stringify({ path: plistPath, contents,
+        expectedSha256: createHash('sha256').update(expected).digest('hex'),
+        metadata: { uid: info.uid, gid: info.gid, mode: info.mode & 0o777 } }),
+      timeoutMs: 30_000,
+    });
+    if (result.code === ROOT_HELPER_FAILED_AS_FOUND_EXIT && result.timedOut !== true) {
+      throw new Error('protected plist replacement failed; inspect activation rollback receipt');
+    }
+    if (result.code !== 0 || result.timedOut === true || readFileSync(plistPath, 'utf8') !== contents) {
+      throw new RootHelperRecoveryIncomplete(`${path.basename(plistPath)}: ${unconfirmedRootHelperRun(result)}; the plist may hold either `
+        + 'version and may lack its protection: inspect the plist and its uchg flag before any retry');
+    }
+    const after = lstatSync(plistPath);
+    if (after.uid !== info.uid || after.gid !== info.gid || after.mode !== info.mode) {
+      throw new Error('protected plist metadata changed');
+    }
+    return;
+  }
   writeAtomic(plistPath, contents, installedLaunchdPlistMode(plistPath) ?? LAUNCHD_PLIST_MAX_MODE);
 }
 
@@ -568,8 +637,11 @@ async function rollback(
     return null;
   });
   for (const entry of context.staged) {
-    await attempt(`restore-plist:${entry.label}`, () => {
-      writePlist(entry.plistPath, readFileSync(path.join(backupPath, `${entry.label}.plist`), 'utf8'));
+    await attempt(`restore-plist:${entry.label}`, async () => {
+      const original = readFileSync(path.join(backupPath, `${entry.label}.plist`), 'utf8');
+      if (readFileSync(entry.plistPath, 'utf8') !== original) {
+        await writePlist(host, entry.plistPath, original, entry.staged!);
+      }
       return null;
     });
   }
@@ -670,6 +742,14 @@ async function applyHoldingLock(host: ActivationHost, context: ActivationContext
       ].join('\n'), { mode: PRIVATE_FILE_MODE });
     }
     steps.push({ step: 'stage-plists', ok: true });
+    // A missing or outdated root helper refuses here, before the switch, not as a failed switch and a rollback.
+    if (context.staged.some((entry) => needsRootHelper(host, entry.plistPath))) {
+      const helperFailure = installedRootHelperFailure();
+      steps.push(helperFailure === null
+        ? { step: 'check-root-plist-helper', ok: true }
+        : { step: 'check-root-plist-helper', ok: false, detail: helperFailure });
+      if (helperFailure !== null) return refuse(helperFailure, backupPath);
+    }
   } catch (error) {
     return refuse(error instanceof Error ? error.message : String(error), existsSync(backupPath) ? backupPath : null);
   }
@@ -678,6 +758,7 @@ async function applyHoldingLock(host: ActivationHost, context: ActivationContext
 
   // ---- coordinated switch ----
   let failure: string | null = null;
+  let protectionUnconfirmed = false;
   try {
     const candidateRefreshFence = recheckCandidateRefreshRollbackFence(context);
     steps.push({ step: 'recheck-refresh-rollback-fence-requirement-before-switch', ok: candidateRefreshFence.ok, detail: candidateRefreshFence.detail });
@@ -702,7 +783,9 @@ async function applyHoldingLock(host: ActivationHost, context: ActivationContext
         return refuse('BOT ERRORS health consumer changed or no longer satisfies the selector capability', backupPath);
       }
     }
-    // No await from here to the last plist write: nothing else in this process runs in between.
+    // No await from this recheck through the symlink switch into the first writePlist call. Each plist
+    // write is awaited (a root-owned plist waits on the sudo root helper), so other work can run between
+    // writes; writePlist therefore rechecks every plist against its backup bytes before replacing it.
     const beforeSwitch = foreignWriterFailure(context, ['previous']);
     steps.push(beforeSwitch === null
       ? { step: 'recheck-live-identity-before-switch', ok: true }
@@ -710,7 +793,9 @@ async function applyHoldingLock(host: ActivationHost, context: ActivationContext
     if (beforeSwitch !== null) return refuse(beforeSwitch, backupPath);
     repointSymlink(context.wrapperLink, wrapperTargetFor(args.release));
     steps.push({ step: 'switch-symlink', ok: true });
-    for (const entry of context.staged) writePlist(entry.plistPath, entry.staged!);
+    for (const entry of context.staged) {
+      await writePlist(host, entry.plistPath, entry.staged!, readFileSync(path.join(backupPath, `${entry.label}.plist`), 'utf8'));
+    }
     steps.push({ step: 'install-plists', ok: true });
     for (const entry of context.staged) {
       const reloadFailure = await reloadLabel(host, context, entry.label, entry.plistPath);
@@ -724,6 +809,7 @@ async function applyHoldingLock(host: ActivationHost, context: ActivationContext
     }
   } catch (error) {
     failure = error instanceof Error ? error.message : String(error);
+    protectionUnconfirmed = error instanceof RootHelperRecoveryIncomplete;
     steps.push({ step: 'switch', ok: false, detail: failure });
   }
 
@@ -766,6 +852,14 @@ async function applyHoldingLock(host: ActivationHost, context: ActivationContext
     return { outcome: 'rollback-blocked-migrated', backupPath, steps, failure, verification, schemaMigration, rollback: null };
   }
   const { blocked, ...rolledBack } = await rollback(host, context, backupPath, schemaBefore);
+  if (protectionUnconfirmed) {
+    rolledBack.steps.push({
+      step: 'confirm-plist-protection',
+      ok: false,
+      detail: 'the root plist helper reported incomplete recovery; inspect the plist and its uchg flag',
+    });
+    rolledBack.verified = false;
+  }
   if (rolledBack.refreshFenceBlockedAt !== null) {
     return { outcome: 'rollback-blocked-refresh-fence', backupPath, steps, failure, verification, schemaMigration, rollback: rolledBack };
   }

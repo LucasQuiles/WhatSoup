@@ -145,10 +145,12 @@ describe('createPrimaryModelProbeAdapters', () => {
     expect(probeBinaryCommand).not.toHaveBeenCalled();
   });
 
-  it('forwards CLAUDE_CONFIG_DIR into the Claude CLI probe env when the parent sets it', async () => {
+  it('forwards explicit Claude store selectors into the CLI probe env and preserves an empty secure-store selector', async () => {
     const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
     const prev = process.env.CLAUDE_CONFIG_DIR;
+    const previousSecureStorage = process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
     process.env.CLAUDE_CONFIG_DIR = '/tmp/rachel/.claude';
+    process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = '';
     try {
       const adapters = createPrimaryModelProbeAdapters(undefined, {
       resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
@@ -159,20 +161,29 @@ describe('createPrimaryModelProbeAdapters', () => {
     } finally {
       if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR;
       else process.env.CLAUDE_CONFIG_DIR = prev;
+      if (previousSecureStorage === undefined) delete process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
+      else process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = previousSecureStorage;
     }
 
     expect(probeBinaryCommand).toHaveBeenCalledWith(
       'claude',
       expect.any(Array),
-      expect.objectContaining({ CLAUDE_CONFIG_DIR: '/tmp/rachel/.claude' }),
+      expect.objectContaining({
+        CLAUDE_CONFIG_DIR: '/tmp/rachel/.claude',
+        CLAUDE_SECURESTORAGE_CONFIG_DIR: '',
+      }),
       expect.objectContaining({ timeoutMs: 15_000 }),
     );
   });
 
-  it('omits CLAUDE_CONFIG_DIR from the Claude CLI probe env when the parent does not set it', async () => {
-    const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+  it('omits both Claude store selectors from the CLI probe env when the parent does not set them', async () => {
+    const probeBinaryCommand = vi.fn(
+      async (_binary: string, _args: string[], _env: NodeJS.ProcessEnv) => ({ status: 'ok' as const, output: 'OK' }),
+    );
     const prev = process.env.CLAUDE_CONFIG_DIR;
+    const previousSecureStorage = process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
     delete process.env.CLAUDE_CONFIG_DIR;
+    delete process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
     try {
       const adapters = createPrimaryModelProbeAdapters(undefined, {
       resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
@@ -182,6 +193,7 @@ describe('createPrimaryModelProbeAdapters', () => {
       await adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'claude-opus-4-8' });
     } finally {
       if (prev !== undefined) process.env.CLAUDE_CONFIG_DIR = prev;
+      if (previousSecureStorage !== undefined) process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = previousSecureStorage;
     }
 
     expect(probeBinaryCommand).toHaveBeenCalledWith(
@@ -190,6 +202,7 @@ describe('createPrimaryModelProbeAdapters', () => {
       expect.not.objectContaining({ CLAUDE_CONFIG_DIR: expect.anything() }),
       expect.objectContaining({ timeoutMs: 15_000 }),
     );
+    expect(probeBinaryCommand.mock.calls[0]?.[2]).not.toHaveProperty('CLAUDE_SECURESTORAGE_CONFIG_DIR');
   });
 
   it('threads the egress proxy port (UPPER + lower case) into the Claude CLI probe env (F6)', async () => {
