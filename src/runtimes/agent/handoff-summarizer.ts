@@ -3,6 +3,7 @@ import type { DistillOutcome, ReserveDistillTokens } from './handoff-distiller.t
 import { HandoffDistillUsageError } from './handoff-distiller.ts';
 import type { HandoffMessage } from './handoff-prelude.ts';
 import { HANDOFF_DISTILL_INPUT_MAX_BYTES } from '../../lib/handoff-distill-config.ts';
+import { neutralizeTrustedActorMarkers } from '../../lib/trusted-actor-marker.ts';
 
 export class HandoffSummarizerInertError extends Error {}
 
@@ -87,8 +88,11 @@ export function buildHandoffDistill(cfg: HandoffDistillConfig): (reserveTokens: 
       if (corpusBytes > MAX_REQUEST_BYTES) throw new Error('handoff summarizer request exceeds byte limit');
       lines.push(line);
     }
+    // The corpus is the last text before the summarizer provider; a marker copy
+    // can span a sender name and its message, so it is neutralised whole.
+    const corpus = neutralizeTrustedActorMarkers(lines.join('\n'));
     const body = JSON.stringify({ model: cfg.model, temperature: 0, max_tokens: MAX_COMPLETION_TOKENS, stream: false,
-      messages: [{ role: 'system', content: SUMMARY_SYSTEM }, { role: 'user', content: lines.join('\n') }] });
+      messages: [{ role: 'system', content: SUMMARY_SYSTEM }, { role: 'user', content: corpus }] });
     if (Buffer.byteLength(body) > MAX_REQUEST_BYTES) throw new Error('handoff summarizer request exceeds byte limit');
 
     // Reserve one token per serialized UTF-8 byte, plus framing and the output cap.

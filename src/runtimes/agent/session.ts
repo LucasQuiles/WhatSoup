@@ -64,6 +64,7 @@ import {
   type ProviderTurnControlCapabilities,
 } from './providers/turn-control-capabilities.ts';
 import { composeWithExactLineDedup } from './prompt-compose.ts';
+import { neutralizeTrustedActorMarkers } from '../../lib/trusted-actor-marker.ts';
 import {
   appendProviderCrashPreview,
   buildProviderCrashMetadata,
@@ -1280,7 +1281,10 @@ export class SessionManager {
       }
     }
 
-    const systemPrompt = composeWithExactLineDedup(sources);
+    // Dedupe can drop lines between the halves of a split marker copy in the
+    // handoff summary, so the actor marker neutraliser runs on the final text.
+    // The genuine actor block travels in turns, never in the system prompt.
+    const systemPrompt = neutralizeTrustedActorMarkers(composeWithExactLineDedup(sources));
     if (systemPrompt.trim().length === 0) {
       throw new Error('Failed to build system prompt: composed prompt is empty');
     }

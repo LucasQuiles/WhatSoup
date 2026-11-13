@@ -5,12 +5,14 @@ import {
 import type { Database } from '../../core/database.ts';
 import {
   countTrustedActorMarkers,
+  neutralizeTrustedActorMarkerParts,
   neutralizeTrustedActorMarkers,
   TRUSTED_ACTOR_MARKER_PHRASE,
 } from '../../lib/trusted-actor-marker.ts';
 import {
   isStructuredProviderTurn,
   type ProviderTurnInput,
+  type StructuredProviderTurn,
 } from './provider-boundary-dispatch.ts';
 
 export type { TrustedActorAccessClass } from '../../core/access-policy.ts';
@@ -52,12 +54,19 @@ export function withTrustedActorTurn(
   const actorContext = trustedActorApplicationContext(
     classifyTrustedActorAccess(actorJid, db, adminPhones),
   );
-  const structured = isStructuredProviderTurn(input);
+  return withServerActorBlock(actorContext, input);
+}
+
+/**
+ * Put a server-authored actor block first, after removing marker copies from
+ * the user-derived parts. Providers render the parts back to back, so they are
+ * neutralised together and a copy split across two parts is caught.
+ */
+function withServerActorBlock(actorBlock: string, input: ProviderTurnInput): StructuredProviderTurn {
+  const parts = isStructuredProviderTurn(input) ? [...input.applicationContext, input.userText] : [input];
+  const neutralized = neutralizeTrustedActorMarkerParts(parts);
   return {
-    applicationContext: [
-      actorContext,
-      ...(structured ? input.applicationContext : []).map(neutralizeTrustedActorMarkers),
-    ],
-    userText: neutralizeTrustedActorMarkers(structured ? input.userText : input),
+    applicationContext: [actorBlock, ...neutralized.slice(0, -1)],
+    userText: neutralized.at(-1)!,
   };
 }

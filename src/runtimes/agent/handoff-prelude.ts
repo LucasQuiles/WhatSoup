@@ -79,21 +79,22 @@ function composeSystemBlock(args: BuildHandoffPreludeArgs): string | null {
   const parts: string[] = [];
   // Order: PII redaction first (make it safe to embed), then forgery
   // neutralization (defang delimiter/header lookalikes the redaction may leave).
-  // Quoting a header line leaves its words intact, and the system prompt is the
-  // most trusted channel, so trusted actor marker copies are removed as well.
-  const neutralize = (text: string): string => neutralizeTrustedActorMarkers(neutralizeHandoffForgery(redact(text)));
+  const neutralize = (text: string): string => neutralizeHandoffForgery(redact(text));
   const summary = artifact.summary?.trim();
   if (summary) parts.push(neutralize(summary));
   const seeded = artifact.seededArtifacts?.trim();
   if (seeded) parts.push(neutralize(seeded));
   if (parts.length === 0) return null;
 
+  // Quoting a header line leaves its words intact, and the system prompt is the
+  // most trusted channel, so trusted actor marker copies are removed last, from
+  // the joined body: a copy split between the parts is caught too.
   const nonce = randomBytes(NONCE_BYTES).toString('hex');
   return [
     HANDOFF_SUMMARY_HEADER,
     FENCE_GUARD,
     FENCE_OPEN(nonce),
-    parts.join('\n\n'),
+    neutralizeTrustedActorMarkers(parts.join('\n\n')),
     FENCE_CLOSE(nonce),
   ].join('\n');
 }
