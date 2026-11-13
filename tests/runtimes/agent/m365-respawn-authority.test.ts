@@ -7,6 +7,9 @@
  *
  * The swap is simulated through the re-check (as fallback-chain-selection.test.ts does); the adapter
  * tests prove that a real changed native copy is detected by that re-check.
+ *
+ * A startup that admits no guarded plugin (qpi-lab2 review of #3935, finding 1) must give every later
+ * claude-cli spawn the same withdrawn shape, because nothing verified the plugin that child loads.
  */
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
@@ -85,6 +88,8 @@ import type { Messenger } from '../../../src/core/types.ts';
 import { m365BridgeCredentialAdmission, type M365MutationPolicy } from '../../../src/core/m365-bridge-policy.ts';
 import { M365_MUTATION_DENY } from '../../../src/core/settings-template.ts';
 import * as microsoft365Adapter from '../../../src/runtimes/agent/microsoft365-adapter.ts';
+import { ToolRegistry } from '../../../src/mcp/registry.ts';
+import { SessionTokenRegistry } from '../../../src/mcp/caller-attribution.ts';
 
 const TENANT_ID = '11111111-2222-3333-4444-555555555555';
 const ORIGIN = 'https://127.0.0.1:10000';
@@ -227,5 +232,37 @@ describe('Microsoft 365 authority at an in-place claude-cli respawn', () => {
     expect(published.workflowAuthority).toBeUndefined();
     expect(published.workflowAuthorityScope).toBeUndefined();
     expect(published.m365RouteProvider).toBeUndefined();
+  }, 15_000);
+
+  it('gives a later claude-cli spawn the withdrawn shape when startup admitted no guarded plugin', async () => {
+    const binding = (globalThis as Record<string, unknown>)['__m365RespawnBinding__'] as Record<string, unknown>;
+    const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', {
+      model: 'primary-model', sessionScope: 'per_chat', allowM365Mutations: true, enabledPlugins: ENABLED_PLUGINS, m365Bridge: binding as never,
+    });
+    const internals = runtime as unknown as RuntimeInternals & { m365MutationPolicy: M365MutationPolicy | undefined };
+    expect(internals.m365MutationPolicy).toMatchObject({ status: 'approved', workflowAuthority: expect.anything() });
+    // What start() does: admission with no guarded plugin under pluginDirs, so no adapter candidate.
+    internals.m365MutationPolicy = microsoft365Adapter.admitMicrosoft365Workflow({
+      registry: new ToolRegistry(), policy: internals.m365MutationPolicy, pluginDirs: [],
+      perChatMcpSocketManager: {} as never, resolvePerChatMapKey: (jid: string) => jid,
+      sessionTokens: new SessionTokenRegistry(), sandboxPerChat: false, instanceName: 'test',
+    });
+    vi.spyOn(internals, 'wirePerChatActorSocket').mockReturnValue({ mcpSocketPath: '/fixture/actor.sock', providerTransitionReady: Promise.resolve() });
+    vi.mocked(spawn).mockImplementation(() => fakeChild(4343) as never);
+
+    // A session created after startup spawns its child.
+    const session = internals.createSessionManager({ chatJid: CHAT_JID, onEvent: vi.fn(), onCrash: vi.fn(), notifyUser: vi.fn() });
+    await session.spawnSession();
+
+    const spawned = vi.mocked(spawn).mock.calls.at(-1)!;
+    const args = spawned[1] as string[];
+    const env = (spawned[2] as { env?: NodeJS.ProcessEnv }).env;
+    expect(args).toContain('--disallowedTools');
+    expect(M365_MUTATION_DENY.filter((entry) => !args.includes(entry))).toEqual([]);
+    // No bridge, credential or workflow-authority values reach the unverified plugin.
+    expect(m365Keys(env)).toEqual([]);
+    expect(env?.MS365_AGENT365_API_KEY).toBeUndefined();
+    // Its turns carry no assignment; with no candidate the microsoft365 adapter was never registered.
+    expect(internals.m365ExecutingAuthority(session, true, 'request-1').workflowAuthority).toBeUndefined();
   }, 15_000);
 });

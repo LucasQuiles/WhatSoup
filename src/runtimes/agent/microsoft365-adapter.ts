@@ -664,8 +664,18 @@ const WITHDRAWAL_MESSAGE = 'Microsoft 365 workflow authority withdrawn: a plugin
 
 /** The admitted plugin copy, per policy that kept its workflow assignment at admission. */
 const admittedPlugins = new WeakMap<M365MutationPolicy, PluginPin>();
-/** Policies withdrawn because a plugin copy changed: their `claude-cli` children get no bridge values at all. */
+/**
+ * Policies withdrawn because no guarded plugin was admitted or a plugin copy changed: their
+ * `claude-cli` children get no bridge values at all.
+ */
 const pluginWithdrawals = new WeakSet<M365MutationPolicy>();
+
+/** The assignment-free policy every later spawn is rejected under. */
+function pluginWithdrawn(policy: Extract<M365MutationPolicy, { status: 'approved' }>): M365MutationPolicy {
+  const withdrawn: M365MutationPolicy = { status: 'approved', childEnv: policy.childEnv };
+  pluginWithdrawals.add(withdrawn);
+  return withdrawn;
+}
 
 /** `midRun`: the assignment may already be published, so its turns lose it at their next request. */
 function withdrawnForNativeCopy(
@@ -676,9 +686,7 @@ function withdrawnForNativeCopy(
 ): M365MutationPolicy {
   log.warn({ instance: instanceName, reason }, WITHDRAWAL_MESSAGE);
   if (midRun && policy.workflowAuthority !== undefined) withdrawM365WorkflowAuthority(policy.workflowAuthority);
-  const withdrawn: M365MutationPolicy = { status: 'approved', childEnv: policy.childEnv };
-  pluginWithdrawals.add(withdrawn);
-  return withdrawn;
+  return pluginWithdrawn(policy);
 }
 
 /**
@@ -715,7 +723,8 @@ function admitMicrosoft365WorkflowChecked(options: RegisterMicrosoft365AdapterOp
   if (candidate === undefined) {
     log.warn({ instance: options.instanceName, missing: 'guarded Microsoft 365 plugin under agentOptions.pluginDirs' },
       'Microsoft 365 workflow authority withdrawn: no guarded plugin was admitted, so Microsoft 365 writes stay denied');
-    return { status: 'approved', childEnv: policy.childEnv };
+    // Nothing verified the plugin that claude-cli loads, so it gets the bridge credentials no more than after a withdrawal.
+    return pluginWithdrawn(policy);
   }
   // An isolated child config root holds another install record than the one checked here.
   const mismatch = isConfigRootIsolationEnabled() ? 'config-root-isolation' : nativePluginMismatch(candidate.pin);
@@ -758,8 +767,9 @@ function recheckMicrosoft365WorkflowChecked(policy: M365MutationPolicy | undefin
  * The policy a session's provider child gets, read at every spawn after the caller's re-check
  * (`current`), so an in-place respawn of an existing session never reuses a stale approval. A
  * snapshot whose assignment was withdrawn is rejected: `claude-cli` then gets `--disallowedTools`
- * with the full deny set and no bridge or workflow-authority values. After a plugin-copy
- * withdrawal every child is rejected that way. While any deny-floor rewrite is pending the spawn
+ * with the full deny set and no bridge or workflow-authority values. When startup admitted no
+ * guarded plugin, or after a plugin-copy withdrawal, every child is rejected that way. While any
+ * deny-floor rewrite is pending the spawn
  * is refused, because a settings file may still lift the floor.
  */
 export function microsoft365SpawnPolicy(
