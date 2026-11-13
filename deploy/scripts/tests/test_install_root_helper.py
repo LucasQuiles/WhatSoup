@@ -408,6 +408,59 @@ def test_a_symlink_to_a_folder_inside_an_import_folder_is_refused(tmp_path):
         m.check_interpreter([str(stdlib)], STRANGER, frozenset(), anchor=anchor)
 
 
+def _failing(monkeypatch, name, path):
+    """Make os.<name> fail with EIO for `path` alone. os.path's helpers look the function up on os when called."""
+    real = getattr(os, name)
+
+    def failing(target, *args, **kwargs):
+        if isinstance(target, (str, bytes, os.PathLike)) and os.fspath(target) == str(path):
+            raise OSError(errno.EIO, os.strerror(errno.EIO), str(path))
+        return real(target, *args, **kwargs)
+
+    monkeypatch.setattr(m.os, name, failing)
+
+
+def test_a_symlink_whose_target_cannot_be_inspected_is_refused(tmp_path, monkeypatch):
+    # Codex regate3 Critical: os.path.isdir swallowed EIO on the link's final stat and returned False,
+    # so a link to a trusted folder holding a bot-owned module was accepted and that folder never walked.
+    anchor, stdlib = _import_tree(tmp_path)
+    outside = anchor / 'outside'
+    outside.mkdir()
+    (outside / '__init__.py').write_bytes(b'')
+    _folders(outside)
+    link = stdlib / 'json'
+    link.symlink_to(outside, target_is_directory=True)
+    _failing(monkeypatch, 'stat', link)
+    # The chain to the target is trusted, so only the failed stat can refuse.
+    m.check_chain([str(link)], STRANGER, frozenset(), 'chain', anchor=anchor)
+    with pytest.raises(m.InstallRefused, match='cannot inspect the target of ' + str(link)):
+        m.check_interpreter([str(stdlib)], STRANGER, frozenset(), anchor=anchor)
+
+
+def test_a_dangling_symlink_inside_an_import_folder_is_refused(tmp_path):
+    # Any error on a link's target refuses, ENOENT included: the walk cannot say what an import would reach.
+    anchor, stdlib = _import_tree(tmp_path)
+    outside = anchor / 'outside'
+    outside.mkdir()
+    _folders(outside)
+    link = stdlib / 'helper.py'
+    link.symlink_to(outside / 'missing.py')
+    with pytest.raises(m.InstallRefused, match='cannot inspect the target of ' + str(link)):
+        m.check_interpreter([str(stdlib)], STRANGER, frozenset(), anchor=anchor)
+
+
+def test_a_select_link_that_cannot_be_inspected_is_refused(tmp_path, monkeypatch):
+    # os.path.lexists swallowed EIO and returned False, so the Command Line Tools stood in for the selected
+    # developer folder and the select link's chain, the one /usr/bin/python3 follows, was never checked.
+    _, select, _ = _alias_tree(tmp_path, 0o755)
+    python = str(select / 'usr' / 'bin' / 'python3')
+    _failing(monkeypatch, 'lstat', select)
+    with pytest.raises(m.InstallRefused, match='cannot inspect ' + str(select)):
+        m.interpreter_paths(executable=python, path_entries=[], select_link=str(select))
+    with pytest.raises(m.InstallRefused, match='cannot inspect ' + str(select)):
+        m.check_invocation(True, True, True, python, select_link=str(select))
+
+
 def test_an_import_folder_that_cannot_be_listed_is_refused(tmp_path):
     anchor, stdlib = _import_tree(tmp_path)
     (stdlib / 'encodings').chmod(0)

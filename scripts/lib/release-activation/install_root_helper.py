@@ -169,6 +169,21 @@ def _writable_by(entry, info, uid, groups):
     return tags is not None and any(tag != ACL_EXTENDED_DENY for tag in tags)
 
 
+def select_link_exists(select_link):
+    """Is a developer folder selected? Only ENOENT means no; any other error refuses.
+
+    os.path.lexists answers False on every error, and a False here would
+    check the Command Line Tools in place of the folder /usr/bin/python3 runs.
+    """
+    try:
+        os.lstat(select_link)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise InstallRefused('cannot inspect ' + str(select_link)) from exc
+    return True
+
+
 def check_invocation(isolated, no_site, no_bytecode, executable, select_link=SELECT_LINK):
     """The chain check below inspects whichever interpreter runs this script; it must be the one sudo will run.
 
@@ -179,7 +194,7 @@ def check_invocation(isolated, no_site, no_bytecode, executable, select_link=SEL
     if not (isolated and no_site and no_bytecode):
         raise InstallRefused('run the install step as /usr/bin/python3 -I -S -B')
     roots = [Path(COMMAND_LINE_TOOLS)]
-    if os.path.lexists(select_link):
+    if select_link_exists(select_link):
         roots.append(Path(os.path.realpath(select_link)))
     real = Path(os.path.realpath(executable))
     if not any(root in real.parents for root in roots):
@@ -196,7 +211,7 @@ def interpreter_paths(executable=None, path_entries=None, select_link=SELECT_LIN
     """
     executable = sys.executable if executable is None else executable
     entries = sys.path if path_entries is None else path_entries
-    developer = select_link if os.path.lexists(select_link) else COMMAND_LINE_TOOLS
+    developer = select_link if select_link_exists(select_link) else COMMAND_LINE_TOOLS
     paths = [ROOT_PYTHON, executable, developer + '/usr/bin/python3']
     paths += [entry if entry.startswith('/') else os.path.join(os.getcwd(), entry) for entry in entries if entry]
     return paths
@@ -284,14 +299,19 @@ def check_tree(folder, uid, groups, consequence, seen, *, anchor='/'):
 
     A symlink is checked like any other entry, then along its target chain. A
     link to a folder refuses: imports could reach files below it that this walk
-    does not enter.
+    does not enter. So does a link whose target cannot be inspected, a dangling
+    one included: os.path.isdir would answer False and admit it.
     """
     for entry, info in tree_entries(folder, seen):
         if _writable_by(entry, info, uid, groups):
             raise InstallRefused('the bot user can write ' + str(entry) + ', ' + consequence)
         if stat.S_ISLNK(info.st_mode):
             check_chain([entry], uid, groups, consequence, anchor=anchor)
-            if os.path.isdir(entry):
+            try:
+                target = os.stat(entry)
+            except OSError as exc:
+                raise InstallRefused('cannot inspect the target of ' + str(entry) + ', ' + consequence) from exc
+            if stat.S_ISDIR(target.st_mode):
                 raise InstallRefused(str(entry) + ' links to a folder, ' + consequence)
 
 
