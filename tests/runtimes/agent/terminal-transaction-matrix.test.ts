@@ -133,6 +133,8 @@ function evidenceQueue(): IOutboundQueue {
     })),
     setInboundSeq: vi.fn(),
     clearLastOpId: vi.fn(),
+    hasCommittedAnswer: vi.fn(() => false),
+    resumeTurnAnswerArbitration: vi.fn(),
   } as unknown as IOutboundQueue;
 }
 

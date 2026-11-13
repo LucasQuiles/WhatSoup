@@ -356,6 +356,7 @@ describe('per-chat dispatch that creates the session and queue', () => {
       // Two sends, separated by the queue's minimum send gap.
       await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(2), { timeout: 4_000 });
       expect(state.chatQueues.get(MAP_KEY)).toBeInstanceOf(OutboundQueue);
+      expect(provider.session.sendTurn).toHaveBeenCalledTimes(1);
       return { inboundSeq, ops: storedOps(db) };
     } finally {
       await teardown(state, db);

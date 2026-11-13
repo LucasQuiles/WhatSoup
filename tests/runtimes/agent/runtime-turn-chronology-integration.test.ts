@@ -63,9 +63,11 @@ describe('runtime turn chronology integration', () => {
         applicationContext: string[];
         userText: string;
       };
-      expect(providerInput.applicationContext[0]).toContain('WhatSoup delivery context');
-      expect(providerInput.applicationContext[0]).toContain('Queue age: 95 seconds');
-      expect(providerInput.applicationContext[0]).toContain('Delivery: queued');
+      // The server-authored actor block is first; runtime context follows it.
+      expect(providerInput.applicationContext[0]).toMatch(/^\[WhatSoup trusted transport metadata/);
+      expect(providerInput.applicationContext[1]).toContain('WhatSoup delivery context');
+      expect(providerInput.applicationContext[1]).toContain('Queue age: 95 seconds');
+      expect(providerInput.applicationContext[1]).toContain('Delivery: queued');
       expect(providerInput.userText).toBe('stop the stale action');
       expect(runtime.getHealthSnapshot().details).toMatchObject({
         chronologyDelayedDispatches: 1,
@@ -102,7 +104,9 @@ describe('runtime turn chronology integration', () => {
         'queued',
       );
 
-      expect(session.sendTurn).toHaveBeenCalledWith('deliver this exact text');
+      expect(session.sendTurn).toHaveBeenCalledWith(expect.objectContaining({
+        userText: 'deliver this exact text',
+      }));
     } finally {
       db.close();
     }
@@ -517,7 +521,7 @@ describe('runtime turn chronology integration', () => {
         applicationContext: string[];
         userText: string;
       };
-      expect(providerInput.applicationContext[0]).toContain('Delivery: recovery replay');
+      expect(providerInput.applicationContext[1]).toContain('Delivery: recovery replay');
       expect(providerInput.userText).toBe(captured.replay.text);
       expect(runtime.getHealthSnapshot().details).toMatchObject({
         chronologyRecoveryReplayDispatches: 1,
@@ -607,7 +611,7 @@ describe('runtime turn chronology integration', () => {
         applicationContext: string[];
         userText: string;
       };
-      expect(providerInput.applicationContext[0]).toContain('Delivery: recovery replay');
+      expect(providerInput.applicationContext[1]).toContain('Delivery: recovery replay');
       expect(providerInput.userText).toBe(captured.replay.text);
       // The held head is re-bound, never duplicated behind itself.
       expect(state.perChatRuntimeTurnContexts.get(mapKey)).toHaveLength(1);
@@ -795,7 +799,7 @@ describe('runtime turn chronology integration', () => {
         applicationContext: string[];
         userText: string;
       };
-      expect(providerInput.applicationContext[0]).toContain('Delivery: recovery replay');
+      expect(providerInput.applicationContext[1]).toContain('Delivery: recovery replay');
       expect(providerInput.userText).toBe(runtimeContext.replay.text);
       expect(state.perChatRuntimeTurnContexts.get(mapKey)?.[0]).toBe(runtimeContext);
     } finally {

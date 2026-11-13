@@ -210,6 +210,7 @@ type FallbackView = {
   effectiveModel: string | undefined;
   pendingTurnText: Map<string, string>;
   pendingTurnActorJid: Map<string, string | undefined>;
+  chatQueues: Map<string, ReturnType<typeof makeFakeQueue>>;
   perChatRuntimeTurnContexts: Map<string, ReturnType<typeof createRuntimeTurnContext>[]>;
   activateProviderFallback(
     resetAt: Date | null,
@@ -556,6 +557,8 @@ describe('AgentRuntime — provider fallback state machine', () => {
       toolScopeKey: 'chat-key',
     });
     v.perChatRuntimeTurnContexts.set('chat-key', [runtimeContext]);
+    const queue = makeFakeQueue();
+    v.chatQueues.set('chat-key', queue);
     v.replayTurnOnFallback = vi.fn(async () => {});
 
     expect(v.scheduleFallbackReplay({
@@ -564,6 +567,7 @@ describe('AgentRuntime — provider fallback state machine', () => {
       mapKey: 'chat-key',
       oldSession: null,
     })).toBe(true);
+    expect(queue.resumeTurnAnswerArbitration).toHaveBeenCalledWith('fallback-context-91');
     expect(v.replayTurnOnFallback).toHaveBeenCalledWith({
       chatJid: 'chat@s.whatsapp.net',
       mapKey: 'chat-key',
@@ -856,6 +860,8 @@ function makeFakeQueue() {
     clearLastOpId: vi.fn(),
     indicateTyping: vi.fn(),
     endTurn: vi.fn(),
+    hasCommittedAnswer: vi.fn(() => false),
+    resumeTurnAnswerArbitration: vi.fn(),
   };
 }
 

@@ -11,6 +11,7 @@ import type { ToolRegistry } from './registry.ts';
 import {
   initialSocketAttribution,
   SESSION_TOKEN_NOTIFICATION,
+  turnReplySessionIdFromPresentedToken,
   withDeclaredClient,
   withPresentedToken,
   type SessionTokenVerifier,
@@ -251,6 +252,10 @@ export class WhatSoupSocketServer {
           // notification.
           if (req.id === undefined && req.method === SESSION_TOKEN_NOTIFICATION && connSession.callerAttribution) {
             connSession.callerAttribution = withPresentedToken(connSession.callerAttribution, req.params, this.sessionTokens);
+            connSession.turnReplySessionId = turnReplySessionIdFromPresentedToken(
+              req.params,
+              this.sessionTokens,
+            );
             continue;
           }
 
