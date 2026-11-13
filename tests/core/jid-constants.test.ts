@@ -161,6 +161,15 @@ describe('isWhatsAppAuthenticatedJid (QR-143)', () => {
 });
 
 describe('isGroupJid', () => {
+  it('recognizes canonical iMessage groups without classifying direct or malformed addresses as groups', () => {
+    expect(isGroupJid('iMessage;+;chat-example@imessage')).toBe(true);
+    for (const jid of [
+      '+15550000002@imessage', 'member@example.com@imessage',
+      'iMessage;-;+15550000002@imessage', 'iMessage;+;@imessage',
+      'iMessage;+;chat-example', 'iMessage;+;chat-example@sms',
+    ]) expect(isGroupJid(jid)).toBe(false);
+  });
+
   it('returns true for @g.us JIDs', () => {
     expect(isGroupJid('test-group-id@g.us')).toBe(true);
   });

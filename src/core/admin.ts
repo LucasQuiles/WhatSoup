@@ -239,7 +239,7 @@ function resolveAdminChatJid(db: Database): string | null {
   // #3566: an admin-authored GROUP or status-broadcast row is never a direct
   // chat, so it can never be the approval destination. Walk the same
   // newest-first order and take the first direct chat; isGroupJid covers
-  // WhatsApp and Signal groups, isStatusBroadcastJid the status pseudo-chat.
+  // transport groups, isStatusBroadcastJid the status pseudo-chat.
   const latestDirectChat = (senderJid: string): string | null => {
     for (const row of msgStmt.iterate(senderJid) as Iterable<{ chat_jid: string }>) {
       if (!isGroupJid(row.chat_jid) && !isStatusBroadcastJid(row.chat_jid)) return row.chat_jid;

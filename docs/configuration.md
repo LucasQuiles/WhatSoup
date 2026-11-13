@@ -522,7 +522,7 @@ the runtime at the audited revision.
 | `siblingPhones` | string[] | no | `[]` | Phone numbers of other WhatSoup instances that share groups with this instance. Messages from siblings are silently ignored in groups to prevent infinite echo loops between co-located bots. Normalized to E.164 on load. |
 | `chatAliases` | object | no | `{}` | Per-instance alias map used by send surfaces. Keys are aliases such as `ops` or `support`; values are raw WhatsApp JIDs. Seeded into the instance's `chat_aliases` table at startup. |
 | `autoRespondGroups` | string[] | no | `[]` | Group JIDs (e.g. `120363...@g.us`) the bot auto-responds to without an `@mention`. At startup each JID is seeded into `access_list` as `allowed` (insert-only-when-absent: a group that already has any `allowed`/`blocked`/`pending` row is left untouched, so an explicit decision is never overridden). Non-string and blank entries are dropped. Skipped entirely when `accessMode` is `self_only`, which rejects all group messages at the policy layer. The durable, source-reproducible equivalent of a hand-inserted group access grant. |
-| `sharedWorkflowGroups` | string[] | no | `[]` | Group JIDs (`120363...@g.us`, or the `_at_g.us` conversation key) run as shared workflows: `knowledge_search` gives every member all of that group's memories, instead of the group's shared records plus the sender's own. It never adds other chats, direct-chat records or untagged records. Non-string and blank entries are dropped. See [Memory recall scope](#memory-recall-scope). |
+| `sharedWorkflowGroups` | string[] | no | `[]` | Recognized group JIDs or their conversation keys (WhatsApp, iMessage or Signal) run as shared workflows: `knowledge_search` gives every member all of that group's memories, instead of the group's shared records plus the sender's own. It never adds other chats, direct-chat records or untagged records. Non-string and blank entries are dropped. See [Memory recall scope](#memory-recall-scope) for address examples. |
 | `profiles` | object | no | `{}` | Per-instance send decoration policies. Keys are profile names; values can define `prefix`, `tag`, and `linkPreview`. Loaded from private instance config at startup. |
 | `toolUpdateMode` | string | no | `full` | Controls what the user sees during agent tool execution. `full`: elapsed time and technical details. `friendly`: plain-language status, one-time per tool. `minimal`: typing indicator only during tools; pre-tool assistant narration is suppressed and the terminal answer is preserved. |
 | `echoGuard` | object | no | `{ enabled: true, groupCooldownMs: 1000 }` | Suppresses outbound echo loops in group chats. When enabled, group messages sent within `groupCooldownMs` of a prior send are suppressed. DMs are never affected. In-memory state, resets on restart. |
@@ -1282,9 +1282,16 @@ are not instance admins:
   `sender_jid` is the person the fact is about; for `memory_write` records it is
   the speaker.
 - A group listed in `sharedWorkflowGroups` gives every member all of that
-  group's records. It never adds other chats or untagged records.
-- Stored `chat_jid` spellings (`<id>@g.us` and `<id>_at_g.us`, a phone JID and
-  its bare digits, a mapped `@lid`) all count as the same chat.
+  group's records. It never adds other chats or untagged records. Use the
+  transport's canonical group JID or its corresponding conversation key:
+  `120363...@g.us` / `120363..._at_g.us` for WhatsApp,
+  `iMessage;+;chat-example@imessage` / `iMessage;+;chat-example_at_imessage`
+  for iMessage, or `YWJjZGVmZ2hpamtsbW5vcA==@signal` /
+  `YWJjZGVmZ2hpamtsbW5vcA==_at_signal` for Signal. Use the actual group
+  identifier from the instance; these are illustrative values.
+- Stored `chat_jid` attribution treats each canonical group JID and its
+  conversation-key spelling above as the same chat. WhatsApp phone JIDs and
+  their bare digits also match, and mapped `@lid` values fold to that phone.
 
 The chat runtime applies the same rules to its recall (`chatRecallBoundary`).
 Unless the instance is `q` or the sender is a verified admin: in a direct chat
