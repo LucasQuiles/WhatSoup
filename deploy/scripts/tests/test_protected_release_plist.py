@@ -1,5 +1,6 @@
 import ctypes
 import datetime
+import errno
 import fcntl
 import importlib.util
 import io
@@ -590,6 +591,22 @@ def test_refuses_a_plist_with_an_acl_before_reading(tmp_path, monkeypatch):
         p.replace(path, p.digest(b'old'), b'new', before, **OWN)
     assert reads == [] and path.read_bytes() == b'old'
     assert sorted(x.name for x in tmp_path.iterdir()) == ['p']
+
+
+def test_a_plist_acl_that_cannot_be_read_is_refused_before_reading(tmp_path, monkeypatch):
+    # Only "no ACL" (NULL with ENOENT) lets the run go on; any other answer fails closed.
+    path = tmp_path / 'p'; path.write_bytes(b'old'); path.chmod(0o644)
+    before = p.metadata(path)
+
+    def unreadable(fd, kind):
+        ctypes.set_errno(errno.EACCES)
+        return None
+
+    monkeypatch.setattr(p._libc, 'acl_get_fd_np', unreadable)
+    reads = _record_reads(monkeypatch)
+    with pytest.raises(RuntimeError, match='ACL'):
+        p.replace(path, p.digest(b'old'), b'new', before, **OWN)
+    assert reads == [] and path.read_bytes() == b'old'
 
 
 @pytest.mark.skipif(not hasattr(os, 'chflags'), reason='file flags exist only on BSD and macOS')
