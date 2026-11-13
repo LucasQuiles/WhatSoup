@@ -28,9 +28,9 @@ describe('prepared statement caching', () => {
 
     // The engine and its stores prepare fixed SQL in the constructor, including
     // synthetic-source classification, scheduled-turn loss counts and late-echo
-    // checkpoint identity. Recovery and lifecycle methods must reuse those
-    // statements without preparing more.
-    expect(prepareSpy).toHaveBeenCalledTimes(168);
+    // checkpoint identity and ambiguity replay policy. Recovery and lifecycle
+    // methods must reuse those statements without preparing more.
+    expect(prepareSpy).toHaveBeenCalledTimes(169);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');
