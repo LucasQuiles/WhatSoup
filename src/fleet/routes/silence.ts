@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { z } from 'zod';
+import { sanitizeProtectedMessageValue } from '../../core/protected-message.ts';
 import { readBody, jsonResponse } from '../../lib/http.ts';
 import {
   silenceRegistryUnavailableError,
@@ -112,7 +113,8 @@ export async function handleGetSilences(_req: IncomingMessage, res: ServerRespon
     return;
   }
   const { rules, ...metadata } = result;
-  jsonResponse(res, 200, { ...metadata, silences: rules });
+  // reason and silencedBy are stored operator free text.
+  jsonResponse(res, 200, { ...metadata, silences: sanitizeProtectedMessageValue(rules) });
 }
 
 /** POST /api/fleet/silence — add a silence */

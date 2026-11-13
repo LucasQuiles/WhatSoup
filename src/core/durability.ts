@@ -29,6 +29,7 @@ import {
 import { isInboundStatus } from './inbound-status.ts';
 import type { InboundStatus } from './inbound-status.ts';
 import type { Messenger } from './types.ts';
+import { hasProtectedManagedLink } from './protected-message.ts';
 import type { GuardCaller } from './outbound-identity/types.ts';
 import { toConversationKey } from './conversation-key.ts';
 import { getImmediateTransactionRunner, withImmediateTransaction, withTransaction } from './db-tx.ts';
@@ -4039,6 +4040,30 @@ export async function drainPendingOutbound(
         log.warn(
           { opId: op.id, opType: op.op_type, replayPolicy: op.replay_policy },
           'drainPendingOutbound: pending op not reconstructable → quarantined',
+        );
+        emitOutboundQuarantineAlert(evidence);
+        continue;
+      }
+
+      if (hasProtectedManagedLink(text)) {
+        // A protected link leaves only through protected delivery, which binds
+        // it to one recipient. Replaying the stored body would send it outside
+        // that path, so the replay is refused, as the scheduler and
+        // forward_message refuse, rather than sent with the link replaced.
+        const evidence = createInternalOutboundFailureEvidence({
+          failureCode: 'outbound.protected_link_send_refused',
+          stage: 'admission',
+          mutationState: 'not_started',
+          logicalAttemptCount: op.retry_count,
+          providerSubmissionCount: priorEvidence?.provider_submission_count ?? 0,
+          previousEvidence: priorEvidence,
+          evidenceCoverage: priorEvidence ? 'complete' : 'partial',
+        });
+        const changed = durability.markQuarantined(op.id, evidence);
+        if (!changed) continue;
+        log.warn(
+          { opId: op.id, opType: op.op_type, reason: 'protected_link_send_refused' },
+          'drainPendingOutbound: pending op holds a protected link → refused and quarantined',
         );
         emitOutboundQuarantineAlert(evidence);
         continue;

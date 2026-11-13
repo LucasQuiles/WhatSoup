@@ -12,7 +12,7 @@ import { inspectLatestLogFile, readTailLinesDetailed, type LogReadFailure } from
 import { normalizeTimestamp } from '../time-utils.ts';
 import type { FleetDbReader } from '../db-reader.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
-import { sanitizeProtectedMessageText } from '../../core/protected-message.ts';
+import { sanitizeProtectedMessageText, sanitizeProtectedMessageValue } from '../../core/protected-message.ts';
 import type { ConnectionLifecycleState } from '../../transport/connection.ts';
 import { createChildLogger } from '../../logger.ts';
 import { isNonEmptyString } from '../../lib/type-guards.ts';
@@ -166,13 +166,14 @@ interface ParseContext {
 }
 
 export function parsePinoLine(line: string, ctx: ParseContext): FeedEvent | null {
+  // A persisted log line can carry a protected link in any string field
+  // (message, component, reason, tool name, error). Redacted once here, every
+  // field copied from the line into the event is safe.
   let obj: Record<string, unknown>;
-  try { obj = JSON.parse(line); } catch { return null; }
+  try { obj = sanitizeProtectedMessageValue(JSON.parse(line)) as Record<string, unknown>; } catch { return null; }
+  if (obj === null || typeof obj !== 'object') return null;
 
-  // A persisted log line can carry a protected link in its free text. Redacted
-  // once here, the message is safe in the event text and every detail field
-  // copied from it.
-  const msg = typeof obj.msg === 'string' ? sanitizeProtectedMessageText(obj.msg) : '';
+  const msg = typeof obj.msg === 'string' ? obj.msg : '';
   if (!msg) return null;
 
   const pinoLevel = typeof obj.level === 'number' ? obj.level : 30;

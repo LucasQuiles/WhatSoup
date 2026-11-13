@@ -80,6 +80,7 @@ KNOWN_FAILURE_CODES = {
     "outbound.replay_attempt_limit_exceeded",
     "outbound.replay_failed",
     "outbound.deferral_limit_exceeded",
+    "outbound.protected_link_send_refused",
 }
 RETIRABLE_POLICIES = {
     "delivery_ambiguous_unsafe": {

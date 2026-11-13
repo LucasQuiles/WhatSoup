@@ -443,9 +443,10 @@ export function handleGetLogs(
       const level: 'debug' | 'info' | 'warn' | 'error' =
         typeof obj.level === 'number' ? (pinoLevelMap[obj.level] ?? 'info') : 'info';
 
-      const source = logFieldToString(obj.name ?? obj.module, 'system');
-      const component = optionalLogFieldToString(obj.component);
-      // A persisted log line can carry a protected link in its free text.
+      // A persisted log line can carry a protected link in any copied field.
+      const source = sanitizeProtectedMessageText(logFieldToString(obj.name ?? obj.module, 'system'));
+      const rawComponent = optionalLogFieldToString(obj.component);
+      const component = rawComponent === undefined ? undefined : sanitizeProtectedMessageText(rawComponent);
       const msg = sanitizeProtectedMessageText(logFieldToString(obj.msg));
 
       entries.push({ timestamp, level, msg, source, ...(component !== undefined ? { component } : {}) });

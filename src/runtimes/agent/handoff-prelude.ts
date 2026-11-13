@@ -26,6 +26,7 @@
 import { randomBytes } from 'node:crypto';
 
 import type { StoredMessage } from '../../core/messages.ts';
+import { sanitizeProtectedMessageText } from '../../core/protected-message.ts';
 import { neutralizeHandoffForgery } from './handoff-pii-redactor.ts';
 
 /** Minimal projection of a stored message the summarizer corpus needs (reuses the core type). */
@@ -77,11 +78,14 @@ function composeSystemBlock(args: BuildHandoffPreludeArgs): string | null {
 
   const parts: string[] = [];
   const summary = artifact.summary?.trim();
-  // Order: PII redaction first (make it safe to embed), then forgery
-  // neutralization (defang delimiter/header lookalikes the redaction may leave).
-  if (summary) parts.push(neutralizeHandoffForgery(redact(summary)));
+  // Order: protected links, then PII redaction (make it safe to embed), then
+  // forgery neutralization (defang delimiter/header lookalikes the redaction
+  // may leave). Links are redacted here, not by the injected redactor, so every
+  // caller's system block is covered.
+  const safe = (text: string): string => neutralizeHandoffForgery(redact(sanitizeProtectedMessageText(text)));
+  if (summary) parts.push(safe(summary));
   const seeded = artifact.seededArtifacts?.trim();
-  if (seeded) parts.push(neutralizeHandoffForgery(redact(seeded)));
+  if (seeded) parts.push(safe(seeded));
   if (parts.length === 0) return null;
 
   const nonce = randomBytes(NONCE_BYTES).toString('hex');

@@ -3,6 +3,7 @@
 // Eliminates per-tool boilerplate: schema parsing, getSock(), null check, call, return.
 
 import { z } from 'zod';
+import { sanitizeProtectedMessageValue } from '../../core/protected-message.ts';
 import type { ExternalEffectDeclaration } from '../external-effect.ts';
 import type { ToolDeclaration, ToolScope, TargetMode, ExtendedBaileysSocket } from '../types.ts';
 
@@ -78,7 +79,10 @@ export function makeSockTool<T extends z.ZodRawShape>(
       const parsed = config.schema.parse(params);
       const sock = getSock();
       if (!sock) throw new Error('WhatsApp is not connected');
-      return call(parsed, sock, recordBondEffectDispatch);
+      // Every factory-built reader returns remote WhatsApp text (names,
+      // descriptions, statuses, newsletter messages) to an MCP caller or the
+      // console proxy, so protected links are redacted at this one boundary.
+      return sanitizeProtectedMessageValue(await call(parsed, sock, recordBondEffectDispatch));
     },
   };
 }

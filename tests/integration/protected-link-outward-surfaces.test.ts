@@ -298,12 +298,19 @@ interface SurfaceCase {
   probe: () => unknown | Promise<unknown>;
   /** Surfaces that drop a protected name entirely instead of carrying the marker. */
   mustContain?: string;
+  /** Runs after the leak checks, so a leak is always the first reported failure. */
+  verify?: (value: never) => void;
 }
 
 const SURFACES: SurfaceCase[] = [
+  // Each child of a former pair has its own row, so neither can vanish unnoticed.
   {
-    surface: 'owner display name (formatChatRefForOwner, DM sender-name rung and group subject)',
-    probe: () => [formatChatRefForOwner(db, DM_KEY), formatChatRefForOwner(db, GROUP_KEY)],
+    surface: 'owner display name (formatChatRefForOwner, DM sender-name rung)',
+    probe: () => formatChatRefForOwner(db, DM_KEY),
+  },
+  {
+    surface: 'owner display name (formatChatRefForOwner, group subject)',
+    probe: () => formatChatRefForOwner(db, GROUP_KEY),
   },
   {
     surface: 'fleet db reader getChats',
@@ -318,11 +325,12 @@ const SURFACES: SurfaceCase[] = [
     probe: () => reader.searchMessages(SELF, '', { query: 'word', limit: 10 }),
   },
   {
-    surface: 'fleet db reader getMessagesByIds and getRecentMessagesByChat',
-    probe: () => [
-      reader.getMessagesByIds(SELF, '', ['dm-protected']),
-      reader.getRecentMessagesByChat(SELF, '', DM_KEY, 'inbound', TS, 3),
-    ],
+    surface: 'fleet db reader getMessagesByIds',
+    probe: () => reader.getMessagesByIds(SELF, '', ['dm-protected']),
+  },
+  {
+    surface: 'fleet db reader getRecentMessagesByChat',
+    probe: () => reader.getRecentMessagesByChat(SELF, '', DM_KEY, 'inbound', TS, 3),
   },
   {
     surface: 'fleet db reader getAccessList',
@@ -394,19 +402,20 @@ const SURFACES: SurfaceCase[] = [
     probe: () => toPineconeRecord(pineconeRecord()),
   },
   {
-    surface: 'Pinecone read boundary (memory and entity hits)',
-    probe: () => [
-      fromPineconeHit({
-        _id: 'rec-protected',
-        _score: 0.9,
-        fields: { text: CONTENT, sender_name: SENDER, claim: CONTENT, chat_jid: GROUP_JID },
-      }),
-      fromPineconeHitEntity({
-        _id: 'entity-protected',
-        _score: 0.9,
-        fields: { text: CONTENT, entity_type: 'person', source: 'chat', name: SENDER },
-      }),
-    ],
+    surface: 'Pinecone read boundary (memory hit)',
+    probe: () => fromPineconeHit({
+      _id: 'rec-protected',
+      _score: 0.9,
+      fields: { text: CONTENT, sender_name: SENDER, claim: CONTENT, chat_jid: GROUP_JID },
+    }),
+  },
+  {
+    surface: 'Pinecone read boundary (entity hit)',
+    probe: () => fromPineconeHitEntity({
+      _id: 'entity-protected',
+      _score: 0.9,
+      fields: { text: CONTENT, entity_type: 'person', source: 'chat', name: SENDER },
+    }),
   },
   {
     surface: 'getRecentMessageText (handoff summarizer input)',
@@ -563,8 +572,14 @@ const SURFACES: SurfaceCase[] = [
         row: scratch.raw.prepare('SELECT status, retry_count, error FROM scheduled_messages').get(),
       };
     }),
-    // The stored reason proves the refusal ran; the leak checks prove nothing was sent.
+    // The stored reason proves the refusal ran; verify proves nothing was sent
+    // and the row reached its terminal state without consuming a retry.
     mustContain: 'protected_link_send_refused',
+    verify: (value: { sent: unknown[]; row: { status: string; retry_count: number } }) => {
+      expect(value.sent).toHaveLength(0);
+      expect(value.row.status).toBe('failed');
+      expect(value.row.retry_count).toBe(0);
+    },
   },
   {
     surface: 'list_beads tool (title and body)',
@@ -656,13 +671,15 @@ describe('protected links in stored rows never reach an outward surface', () => 
     fs.rmSync(logTextDir, { recursive: true, force: true });
   });
 
-  it.each(SURFACES)('$surface', async ({ probe, mustContain }) => {
-    const serialized = JSON.stringify(await probe());
+  it.each(SURFACES)('$surface', async ({ probe, mustContain, verify }) => {
+    const value = await probe();
+    const serialized = JSON.stringify(value);
 
     // Any surviving part of the link counts: a truncated host is still a leak.
     expect(serialized).not.toContain(TEST_LINK_HOST.slice(0, 6));
     expect(serialized).not.toContain('Q'.repeat(22));
     // The positive check proves the probe reached the stored row at all.
     expect(serialized).toContain(mustContain ?? PROTECTED_MESSAGE_MARKER);
+    verify?.(value as never);
   });
 });

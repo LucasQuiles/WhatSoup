@@ -1,6 +1,7 @@
 import { createPublicKey } from 'node:crypto';
 import { asRecord, isNonEmptyString } from '../lib/type-guards.ts';
 import { conversationKeyToJid, toConversationKey } from './conversation-key.ts';
+import { sanitizeProtectedMessageValue } from './protected-message.ts';
 import { DEFAULT_TRANSPORT_ID } from './transport-refs.ts';
 import {
   CLIENT_OUTPUT_POLICY_ACTIONS,
@@ -369,6 +370,13 @@ export function selectClientOutputPolicy(
  * redacted. Do not reuse this projector for telemetry or discovery output.
  */
 export function projectClientOutputPolicyConfig(
+  config: Record<string, unknown>,
+): Record<string, unknown> {
+  // systemPrompt and the other free-text fields are stored operator input.
+  return sanitizeProtectedMessageValue(projectClientOutputPolicyFields(config)) as Record<string, unknown>;
+}
+
+function projectClientOutputPolicyFields(
   config: Record<string, unknown>,
 ): Record<string, unknown> {
   if (!Object.prototype.hasOwnProperty.call(config, 'clientOutputPolicies')) return { ...config };

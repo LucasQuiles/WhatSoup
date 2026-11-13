@@ -601,9 +601,10 @@ export function registerSubstrateTools(
     handler: async (raw) => {
       const p = raw as { bead_id?: number; kind?: string; status?: 'active'|'paused'|'expired'|'cancelled'; limit?: number; after_id?: number };
       const filter = { beadId: p.bead_id, kind: p.kind as TriggerKind | undefined, status: p.status };
-      return p.limit === undefined && p.after_id === undefined
+      // spec_json is stored text (a watch query or URL) and can hold a protected link.
+      return sanitizeProtectedMessageValue(p.limit === undefined && p.after_id === undefined
         ? { triggers: listTriggers(deps.db, filter), next_after_id: null }
-        : listTriggersPage(deps.db, { ...filter, limit: p.limit, afterId: p.after_id });
+        : listTriggersPage(deps.db, { ...filter, limit: p.limit, afterId: p.after_id }));
     },
   });
 
@@ -708,7 +709,8 @@ export function registerSubstrateTools(
       const p = raw as { entity_ref: z.infer<typeof EntityRefSchema> };
       const profile = getProfile(deps.db, toEntityRef(p.entity_ref));
       if (!profile) return { profile: null };
-      return profile;
+      // Entity names, aliases and observations are stored text.
+      return sanitizeProtectedMessageValue(profile);
     },
   });
 
@@ -724,7 +726,9 @@ export function registerSubstrateTools(
     }),
     handler: async (raw) => {
       const p = raw as { kind?: 'person'|'org'|'project'|'place'|'topic'|'other'; text_match?: string; limit?: number };
-      return { entities: listEntities(deps.db, { kind: p.kind, textMatch: p.text_match, limit: p.limit }) };
+      return sanitizeProtectedMessageValue({
+        entities: listEntities(deps.db, { kind: p.kind, textMatch: p.text_match, limit: p.limit }),
+      });
     },
   });
 

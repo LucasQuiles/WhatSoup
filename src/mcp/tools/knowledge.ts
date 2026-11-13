@@ -25,6 +25,7 @@ import {
   type PineconeProjectGuard,
 } from '../../lib/pinecone-project-guard.ts';
 import type { Database } from '../../core/database.ts';
+import { sanitizeProtectedMessageText, sanitizeProtectedMessageValue } from '../../core/protected-message.ts';
 import {
   memoryHitTier,
   memoryIdentityFold,
@@ -295,13 +296,16 @@ async function validatePineconeProject(
   });
 }
 
-function parseHits(
+/** Exported for the protected-link surface test; every formatter and the rerank input read these hits. */
+export function parseHits(
   rawHits: Array<{ _id: string; _score: number; fields?: object | null }>,
 ): ParsedHit[] {
   return rawHits.map((hit) => {
-    const fields = (hit.fields ?? {}) as Record<string, unknown>;
+    // Stored record text (text, summary, filepath and the id used as a source)
+    // reaches the caller and the external rerank input, so redact it once here.
+    const fields = sanitizeProtectedMessageValue(hit.fields ?? {}) as Record<string, unknown>;
     return {
-      id: hit._id,
+      id: sanitizeProtectedMessageText(hit._id),
       score: hit._score,
       text: (fields['text'] as string) ?? '',
       entityType: (fields['entity_type'] as string) ?? 'unknown',
@@ -314,7 +318,7 @@ function parseHits(
  * Format entity results grouped by type. Output is plain text suitable for
  * WhatsApp relay — no markdown tables or complex formatting.
  */
-function formatEntityResults(hits: ParsedHit[]): string {
+export function formatEntityResults(hits: ParsedHit[]): string {
   if (hits.length === 0) return 'No results found.';
 
   // Group by entity_type
@@ -339,7 +343,7 @@ function formatEntityResults(hits: ParsedHit[]): string {
 /**
  * Format text/document results. Each result shows source and a preview.
  */
-function formatTextResults(hits: ParsedHit[]): string {
+export function formatTextResults(hits: ParsedHit[]): string {
   if (hits.length === 0) return 'No results found.';
 
   return hits.map((hit) => {

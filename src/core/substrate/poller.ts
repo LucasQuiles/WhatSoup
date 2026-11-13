@@ -1797,7 +1797,8 @@ export class TriggerPoller {
       const result = await this.pineconeSearch({
         index: spec.index,
         namespace: spec.namespace,
-        query: spec.query,
+        // The watch query is stored text sent to an external search service.
+        query: sanitizeProtectedMessageText(spec.query),
         topK: spec.top_k ?? PINECONE_DEFAULT_TOP_K,
       });
       matches = Array.isArray(result.matches) ? result.matches : [];

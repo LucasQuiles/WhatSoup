@@ -99,6 +99,9 @@ export async function ensureStoredAudioTranscript(
     return { status: 'transcription_failed', message: 'Transcription failed or is unavailable.' };
   }
 
-  updateTranscription(db, row.message_id, transcription);
-  return { status: 'transcribed', transcription };
+  // Stored and returned in the same redacted form, so the first response is as
+  // safe as every later cached read.
+  const safeTranscription = sanitizeProtectedMessageText(transcription);
+  updateTranscription(db, row.message_id, safeTranscription);
+  return { status: 'transcribed', transcription: safeTranscription };
 }
