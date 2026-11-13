@@ -2,26 +2,26 @@ name: Quality
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, edited]
-  # `quality (24.x)` / `quality (25.x)` are REQUIRED contexts on main. A merge queue
-  # only advances once every required check reports on the merge_group ref, so without
-  # this trigger an enabled queue would stall every PR indefinitely waiting for a run
-  # that never starts. Wire the trigger BEFORE enabling the queue, never after.
+    types: [opened, synchronize, reopened]
+  # Retain Quality's queue-ref trigger as a prerequisite for a future queue.
+  # Repository-wide queue support is unqualified: the required private-integrity
+  # producer does not yet admit merge_group. See docs/testing.md before activation.
   merge_group:
   push:
     branches:
       - main
     tags:
       - 'v*'
+  # A scheduled run must never inherit a stale changed-file classification.
+  # selection below forces the complete profile for all non-PR events.
   schedule:
     - cron: '23 6 * * *'
 
 # Cancel superseded runs for the same ref. A new push/PR-sync supersedes the
 # in-flight run instead of leaving it orphaned at "pending 0s" for hours (the
 # close+reopen-to-retrigger workaround) and frees a runner slot immediately.
-# merge_group is deliberately EXEMPT: cancelling an in-flight merge-queue run
-# reports a failed/cancelled required check and ejects the PR from the queue, so
-# queue runs must always finish (same reasoning as tag-release-gate.yml).
+# merge_group and tag refs are deliberately EXEMPT: cancelling either can report a
+# failed/cancelled required check. Both must always finish.
 concurrency:
   group: quality-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name != 'merge_group' && !startsWith(github.ref, 'refs/tags/') }}
@@ -30,8 +30,276 @@ permissions:
   contents: read
 
 jobs:
-  quality:
-    name: quality (24.x)
+  selection:
+    name: Quality selection
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      plan: ${{ steps.plan.outputs.plan }}
+      profile: ${{ steps.plan.outputs.profile }}
+      lanes: ${{ steps.plan.outputs.lanes }}
+      reasons: ${{ steps.plan.outputs.reasons }}
+      changed-files: ${{ steps.plan.outputs.changed-files }}
+      test-base: ${{ steps.plan.outputs.test-base }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version-file: '.nvmrc'
+
+      - name: Select Quality profile before dependency installation
+        id: plan
+        env:
+          TEST_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { execFileSync } from 'node:child_process';
+          import { appendFileSync } from 'node:fs';
+
+          const laneNames = ['root', 'console', 'browser', 'python', 'guard', 'docker', 'compatibility'];
+          const git = (...args) => execFileSync('git', args, { encoding: 'utf8', timeout: 10000, maxBuffer: 4 * 1024 * 1024 }).trimEnd();
+          const isPr = process.env.GITHUB_EVENT_NAME === 'pull_request';
+          const base = isPr ? process.env.TEST_BASE : null;
+          if (isPr && !/^[0-9a-f]{40}$/.test(base ?? '')) throw new Error('An immutable PR base is required');
+          const changedFiles = isPr ? git('diff', '--no-renames', '--name-only', '-z', `${base}...HEAD`, '--').split('\0').filter(Boolean) : [];
+          // Candidate selection code cannot approve changes to itself or its transitive inputs.
+          const controlsChanged = changedFiles.some((file) => /^(?:scripts\/|\.github\/|deploy\/|src\/lib\/(?:git-env|type-guards)\.ts$|package(?:-lock)?\.json$|\.nvmrc$|\.npmrc$)/.test(file));
+          const plan = !isPr || controlsChanged ? {
+            profile: 'full', lanes: Object.fromEntries(laneNames.map((lane) => [lane, true])),
+            changedFiles, base, reasons: [controlsChanged ? 'Selection controls changed; full validation required' : 'Non-PR event requires full validation'],
+          } : JSON.parse(execFileSync(process.execPath, ['--experimental-strip-types', 'scripts/test-plan.ts', '--base', base, '--json'], {
+            encoding: 'utf8', timeout: 60000, maxBuffer: 1024 * 1024,
+          }));
+          if (
+            !['docs', 'affected', 'full'].includes(plan.profile)
+            || !Array.isArray(plan.reasons)
+            || !Array.isArray(plan.changedFiles)
+            || laneNames.some((lane) => typeof plan.lanes?.[lane] !== 'boolean')
+          ) throw new Error('test-plan returned an invalid selection');
+
+          const output = process.env.GITHUB_OUTPUT;
+          if (!output) throw new Error('GITHUB_OUTPUT is required');
+          const values = {
+            plan: JSON.stringify(plan),
+            profile: plan.profile,
+            lanes: JSON.stringify(plan.lanes),
+            reasons: JSON.stringify(plan.reasons),
+            'changed-files': JSON.stringify(plan.changedFiles),
+            'test-base': typeof plan.base === 'string' ? plan.base : '',
+          };
+          appendFileSync(output, Object.entries(values).map(([key, value]) => `${key}=${value}\n`).join(''));
+          NODE
+
+      - name: Summarize Quality selection
+        env:
+          TEST_PLAN: ${{ steps.plan.outputs.plan }}
+        run: |
+          TEST_PLAN="$TEST_PLAN" node --input-type=module <<'NODE'
+          const plan = JSON.parse(process.env.TEST_PLAN);
+          const lanes = Object.entries(plan.lanes).filter(([, selected]) => selected).map(([name]) => name).join(', ') || 'static only';
+          console.log(`profile=${plan.profile}`);
+          console.log(`lanes=${lanes}`);
+          console.log(`reasons=${plan.reasons.join('; ')}`);
+          NODE
+
+      - name: Disclosure guards before reduced PR validation
+        if: github.event_name == 'pull_request' && steps.plan.outputs.profile != 'full'
+        env:
+          TEST_BASE: ${{ steps.plan.outputs.test-base }}
+        run: |
+          test -n "$TEST_BASE"
+          node --experimental-strip-types scripts/repo-hygiene-guard.ts --branch-diff --base "$TEST_BASE"
+          node --experimental-strip-types scripts/repo-hygiene-guard.ts --commit-authors
+          node --experimental-strip-types scripts/publication-guard.ts --all
+          node --experimental-strip-types scripts/publication-guard.ts --branch-diff
+          node --experimental-strip-types scripts/public-surface-drift-check.ts
+
+  docs:
+    name: Quality documentation validation
+    needs: selection
+    if: needs.selection.outputs.profile == 'docs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - name: Setup Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version-file: '.nvmrc'
+
+      # Docs profile intentionally installs no application dependencies and never
+      # creates a Docker image. It still checks the repository's live doc claims.
+      - name: Documentation drift guard
+        run: node --experimental-strip-types scripts/doc-drift-check.ts
+
+  affected:
+    name: Quality affected (24.x)
+    needs: selection
+    if: needs.selection.outputs.profile == 'affected'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            console/package-lock.json
+
+      - name: Read exact Node cache key component
+        id: affected-typescript-node
+        run: echo "version=$(tr -d '[:space:]' < .nvmrc)" >> "$GITHUB_OUTPUT"
+
+      # Compiler state only: test outputs, coverage, and dependency trees stay uncached.
+      - name: Cache TypeScript incremental state
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: .local/typescript
+          key: typescript-${{ runner.os }}-node${{ steps.affected-typescript-node.outputs.version }}-${{ hashFiles('.nvmrc', 'package-lock.json', 'console/package-lock.json', 'tsconfig*.json') }}-${{ github.sha }}
+          restore-keys: |
+            typescript-${{ runner.os }}-node${{ steps.affected-typescript-node.outputs.version }}-${{ hashFiles('.nvmrc', 'package-lock.json', 'console/package-lock.json', 'tsconfig*.json') }}-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install console dependencies when selected
+        if: fromJSON(needs.selection.outputs.lanes).root || fromJSON(needs.selection.outputs.lanes).console
+        run: npm --prefix console ci
+
+      - name: Install console design checker dependency when selected
+        if: fromJSON(needs.selection.outputs.lanes).console
+        timeout-minutes: 3
+        run: |
+          if ! command -v rg >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --no-install-recommends -y ripgrep
+          fi
+          rg --version
+
+      - name: Install guard tool dependencies when selected
+        if: fromJSON(needs.selection.outputs.lanes).guard
+        run: npm --prefix tools/whatsoup_guard ci
+
+      - name: Typecheck source when selected
+        if: fromJSON(needs.selection.outputs.lanes).root
+        run: npm run typecheck
+
+      - name: Typecheck full source surface when selected
+        if: fromJSON(needs.selection.outputs.lanes).root
+        run: npm run typecheck:all
+
+      - name: Import boundary guard when selected
+        if: fromJSON(needs.selection.outputs.lanes).root
+        run: npm run guard:boundaries
+
+      - name: Import cycle guard when selected
+        if: fromJSON(needs.selection.outputs.lanes).root
+        run: npm run guard:import-cycle
+
+      - name: Phantom dependency guard when selected
+        if: fromJSON(needs.selection.outputs.lanes).root
+        run: npm run guard:phantom-deps
+
+      - name: ESLint fitness ring when selected
+        if: fromJSON(needs.selection.outputs.lanes).root
+        run: npm run guard:lint:src
+
+      - name: Documentation guards when selected
+        if: fromJSON(needs.selection.outputs.lanes).root
+        run: npm run guard:doc-drift
+
+      - name: Cache Playwright browsers when selected
+        if: fromJSON(needs.selection.outputs.lanes).browser
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-node24-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-node24-
+            playwright-${{ runner.os }}-
+
+      - name: Install Playwright system deps when selected
+        if: fromJSON(needs.selection.outputs.lanes).browser
+        timeout-minutes: 5
+        run: npx playwright install-deps chromium
+
+      - name: Install Playwright browser when selected
+        if: fromJSON(needs.selection.outputs.lanes).browser
+        run: |
+          TIMEOUT_BIN="$(bash scripts/resolve-timeout-bin.sh)"
+          for attempt in 1 2 3; do
+            echo "::group::Playwright chromium download attempt ${attempt}/3"
+            if "$TIMEOUT_BIN" 300 npx playwright install chromium; then
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "::endgroup::"
+            sleep $((attempt * 15))
+          done
+          echo "Playwright chromium download failed after 3 attempts"
+          exit 1
+
+      - name: Run affected Quality suites
+        env:
+          TEST_BASE: ${{ needs.selection.outputs.test-base }}
+        run: npm run test:affected -- --base "$TEST_BASE" --max-workers 2 --timeout-ms 600000
+
+  compatibility-affected:
+    name: Quality affected (25.x)
+    needs: selection
+    if: needs.selection.outputs.profile == 'affected' && fromJSON(needs.selection.outputs.lanes).compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node 25
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: '25.x'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            console/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install console dependencies when selected
+        if: fromJSON(needs.selection.outputs.lanes).root || fromJSON(needs.selection.outputs.lanes).console
+        run: npm --prefix console ci
+
+      - name: Run affected compatibility root suite
+        env:
+          TEST_BASE: ${{ needs.selection.outputs.test-base }}
+        run: npm run test:affected -- --base "$TEST_BASE" --suite root --max-workers 2 --timeout-ms 600000
+
+      - name: Console compatibility build when selected
+        if: fromJSON(needs.selection.outputs.lanes).console
+        run: npm --prefix console run build
+
+  full:
+    name: Quality full (24.x)
+    needs: selection
+    if: needs.selection.outputs.profile == 'full'
     runs-on: ubuntu-latest
     # Generous cap so it only kills a genuinely hung run, not a slow-but-live
     # one (the authority job runs the full suite + coverage and can take ~40min).
@@ -65,10 +333,25 @@ jobs:
             package-lock.json
             console/package-lock.json
 
+      - name: Read exact Node cache key component
+        id: full-typescript-node
+        run: echo "version=$(tr -d '[:space:]' < .nvmrc)" >> "$GITHUB_OUTPUT"
+
+      # Compiler state only: test outputs, coverage, and dependency trees stay uncached.
+      - name: Cache TypeScript incremental state
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: .local/typescript
+          key: typescript-${{ runner.os }}-node${{ steps.full-typescript-node.outputs.version }}-${{ hashFiles('.nvmrc', 'package-lock.json', 'console/package-lock.json', 'tsconfig*.json') }}-${{ github.sha }}
+          restore-keys: |
+            typescript-${{ runner.os }}-node${{ steps.full-typescript-node.outputs.version }}-${{ hashFiles('.nvmrc', 'package-lock.json', 'console/package-lock.json', 'tsconfig*.json') }}-
+
       - name: Setup Python 3.12
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: '3.12'
+          cache: pip
+          cache-dependency-path: deploy/scripts/install-host-dependencies.sh
 
       - name: Host dependency profile (strict)
         run: |
@@ -84,9 +367,34 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.34.2
+
       - name: Build Docker deployment image
         timeout-minutes: 10
-        run: docker build --file docker/Dockerfile --tag whatsoup-ci .
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: 'false'
+        with:
+          context: .
+          file: docker/Dockerfile
+          tags: whatsoup-ci
+          load: true
+          push: false
+          cache-from: type=gha,version=2,scope=whatsoup-ci,timeout=1m
+          # Only main populates the shared cache. Cache export cannot fail a build.
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,version=2,scope=whatsoup-ci,mode=max,ignore-error=true,timeout=1m' || '' }}
+
+      - name: Install guard tool dependencies
+        run: npm --prefix tools/whatsoup_guard ci
+
+      - name: Guard tool typecheck
+        run: npm --prefix tools/whatsoup_guard run typecheck
+
+      - name: Guard tool tests
+        run: npm --prefix tools/whatsoup_guard test -- --maxWorkers=2
 
       - name: Verify Linux policy ownership and controller readability
         timeout-minutes: 2
@@ -108,12 +416,6 @@ jobs:
           if [ -n "${GITHUB_BASE_REF:-}" ]; then
             git fetch origin "$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"
           fi
-
-      - name: PR metadata guard
-        if: github.event_name == 'pull_request'
-        env:
-          PR_METADATA_EVENT: ${{ github.event_path }}
-        run: npm run guard:pr-metadata -- --github-event "$PR_METADATA_EVENT" --json
 
       - name: Semantic quality (shadow)
         env:
@@ -178,37 +480,11 @@ jobs:
       - name: Repo hygiene commit-author guard
         run: npm run guard:repo:commit-authors
 
-      - name: Install test-integrity plugin
-        env:
-          TEST_INTEGRITY_DEPLOY_KEY: ${{ secrets.TEST_INTEGRITY_DEPLOY_KEY }}
-          TEST_INTEGRITY_COMMIT: ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c
-        run: |
-          if [ -z "$TEST_INTEGRITY_DEPLOY_KEY" ]; then
-            echo "::error::TEST_INTEGRITY_DEPLOY_KEY secret is required to install the private LucasQuiles/test-integrity plugin"
-            exit 2
-          fi
-          plugin_dir="$HOME/.claude/plugins/test-integrity"
-          mkdir -p "$plugin_dir" "$HOME/.ssh"
-          chmod 700 "$HOME/.ssh"
-          printf '%s\n' "$TEST_INTEGRITY_DEPLOY_KEY" > "$HOME/.ssh/test_integrity_deploy"
-          chmod 600 "$HOME/.ssh/test_integrity_deploy"
-          trap 'rm -f "$HOME/.ssh/test_integrity_deploy"' EXIT
-          ssh-keyscan -t ed25519 github.com >> "$HOME/.ssh/known_hosts" 2>/dev/null
-          git -C "$plugin_dir" init
-          git -C "$plugin_dir" remote add origin git@github.com:LucasQuiles/test-integrity.git
-          GIT_SSH_COMMAND="ssh -i $HOME/.ssh/test_integrity_deploy -o IdentitiesOnly=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
-            git -C "$plugin_dir" fetch --depth 1 origin "$TEST_INTEGRITY_COMMIT"
-          git -C "$plugin_dir" switch --detach FETCH_HEAD
-          observed_commit="$(git -C "$plugin_dir" rev-parse HEAD)"
-          if [ "$observed_commit" != "$TEST_INTEGRITY_COMMIT" ]; then
-            echo "::error::test-integrity checkout mismatch: expected $TEST_INTEGRITY_COMMIT observed $observed_commit"
-            exit 2
-          fi
-
-      - name: Test integrity baseline check
-        env:
-          WHATSOUP_REQUIRE_TEST_INTEGRITY: '1'
-        run: npm run guard:test-integrity
+      # Keep release-only hygiene here so a tag cannot report success before this
+      # canonical full validation path has run.
+      - name: Release hygiene guard (tags)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: npm run guard:repo:release-hygiene
 
       - name: ESLint fitness ring
         run: npm run guard:lint:src
@@ -297,6 +573,12 @@ jobs:
       - name: Publication guard
         run: npm run guard:publication:all
 
+      # The push hook's private-literal scan of every commit the branch adds. Run
+      # here as well, so a merge that skips the local hook still meets it. It reads
+      # GITHUB_BASE_REF for the base; on a push to main the range is empty.
+      - name: Publication branch-diff scan
+        run: npm run guard:publication:branch-diff
+
       - name: Node pin consistency guard
         run: npm run guard:node-pin-consistency
 
@@ -317,9 +599,8 @@ jobs:
       - name: BOT ERRORS sentinel coverage and deployer mutation gate
         run: bash deploy/scripts/run-sentinel-tests.sh
 
-      - name: Deployment qualification source suite
-        run: npm run test:deployment-qualification
-
+      # Directory collection includes deployment qualification; local gates keep
+      # its focused command because they do not run this complete Python suite.
       - name: BOT ERRORS full behavioral suite gate
         run: bash deploy/scripts/run-bot-errors-full-suite.sh
 
@@ -393,6 +674,16 @@ jobs:
       - name: Install console dependencies
         run: npm --prefix console ci
 
+      - name: Console lint
+        run: npm --prefix console run lint
+
+      - name: Console build
+        run: npm --prefix console run build
+
+      - name: Console design verification
+        # Fail live design checks before coverage; coverage still runs every root design test.
+        run: npm run verify:console-design:live
+
       # Single full-suite gate. `coverage:check` runs `vitest run --coverage`,
       # which executes the ENTIRE suite (and fails on any test failure) before
       # enforcing thresholds — a strict superset of a plain `vitest run`. The
@@ -422,17 +713,6 @@ jobs:
 
       - name: Failure-scenario drills
         run: npm run test:drills
-
-      - name: Console lint
-        run: npm --prefix console run lint
-
-      - name: Console build
-        run: npm --prefix console run build
-
-      - name: Console design verification
-        # coverage:check above already ran every root design-guard test. Keep
-        # the live filesystem checks without rerunning the same 14 test files.
-        run: npm run verify:console-design:live
 
       - name: Cache Playwright browsers
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
@@ -490,8 +770,15 @@ jobs:
             tests/browser-motion/__screenshots__
           if-no-files-found: ignore
 
-  compatibility:
-    name: quality (25.x)
+  guard-compatibility:
+    needs: selection
+    if: fromJSON(needs.selection.outputs.lanes).guard
+    uses: ./.github/workflows/whatsoup-guard.yml
+
+  compatibility-full:
+    name: Quality full (25.x)
+    needs: selection
+    if: needs.selection.outputs.profile == 'full'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -527,12 +814,14 @@ jobs:
         run: npm --prefix console ci
 
       - name: Full compatibility test suite
-        run: npm test -- --pool=forks
+        run: node --experimental-strip-types scripts/full-suite-battery.ts --pool=forks
 
       - name: Console compatibility build
         run: npm --prefix console run build
 
   bot-errors-health-macos:
+    needs: selection
+    if: needs.selection.outputs.profile == 'full'
     runs-on: macos-15
     timeout-minutes: 10
     steps:
@@ -570,6 +859,8 @@ jobs:
   # Perf lane (T5 b-12; 19-performance-budget §2). Report-only while the §1
   # numbers await owner sign-off; PERF_LANE_ENFORCE=1 flips it blocking.
   perf-lane:
+    needs: selection
+    if: needs.selection.outputs.profile == 'full' || (needs.selection.outputs.profile == 'affected' && fromJSON(needs.selection.outputs.lanes).console)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     continue-on-error: true
@@ -582,6 +873,9 @@ jobs:
         with:
           node-version: '24.x'
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            console/package-lock.json
 
       - name: Install dependencies
         run: npm ci && npm --prefix console ci
@@ -589,8 +883,68 @@ jobs:
       - name: Build console
         run: npm --prefix console run build
 
+      - name: Cache Playwright browsers
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-node24-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-node24-
+            playwright-${{ runner.os }}-
+
+      - name: Install Playwright system deps
+        timeout-minutes: 5
+        run: npx playwright install-deps chromium
+
       - name: Install Playwright chromium
-        run: npx playwright install chromium --with-deps
+        timeout-minutes: 5
+        run: npx playwright install chromium
 
       - name: Perf lane (report-only)
         run: npm --prefix console run perf:lane -- --json
+
+  # Keep these two names stable: main branch protection requires them. They
+  # aggregate profile-selected work instead of being the costly workers.
+  quality:
+    name: quality (24.x)
+    needs: [selection, docs, affected, full, bot-errors-health-macos]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - name: Setup Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version-file: '.nvmrc'
+
+      - name: Fail closed on selected Node 24 validation
+        env:
+          TEST_JOB_MATRIX: node24
+          TEST_PLAN_JSON: ${{ needs.selection.outputs.plan }}
+          TEST_JOB_RESULTS: ${{ toJSON(needs) }}
+        run: node --experimental-strip-types scripts/check-test-jobs.ts
+
+  compatibility:
+    name: quality (25.x)
+    needs: [selection, docs, compatibility-affected, compatibility-full, guard-compatibility]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - name: Setup Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version-file: '.nvmrc'
+
+      - name: Fail closed on selected Node 25 validation
+        env:
+          TEST_JOB_MATRIX: node25
+          TEST_PLAN_JSON: ${{ needs.selection.outputs.plan }}
+          TEST_JOB_RESULTS: ${{ toJSON(needs) }}
+        run: node --experimental-strip-types scripts/check-test-jobs.ts

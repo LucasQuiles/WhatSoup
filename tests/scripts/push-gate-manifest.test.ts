@@ -1,12 +1,18 @@
-import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { describe, expect, it, vi } from 'vitest';
+import { parse as parseYaml } from 'yaml';
+import { cleanGitEnv } from '../../src/lib/git-env.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import {
   BRANCH_STEPS,
   CI_ONLY_GUARDS,
   CURATED_TEST_PATHS,
+  FAST_PUSH_STEPS,
   NEUTRALIZED_SKIP_VARS,
   RELEASE_STEPS,
+  runStep,
 } from '../../scripts/push-gate.ts';
 
 /**
@@ -47,6 +53,107 @@ const pipelineGuards = new Set(
 );
 
 const ciOnlyNames = new Set(CI_ONLY_GUARDS.map((entry) => entry.name));
+const gateTmp = trackTmpDirs('push-gate-outcomes-');
+
+describe('push-gate child outcomes', () => {
+  it.each([['SIGTERM', 143], ['SIGKILL', 137]] as const)('preserves and identifies %s', async (signal, exitCode) => {
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const result = await runStep({ name: 'signal-probe', cmd: `${process.execPath} -e process.kill(process.pid,'${signal}')` });
+      expect(result).toBe(exitCode);
+      expect(diagnostic.mock.calls).toHaveLength(1);
+      expect(diagnostic.mock.calls[0]?.[0]).toMatch(new RegExp(`^push-gate: signal-probe terminated by ${signal} \\(pid \\d+\\); exit ${exitCode}$`));
+    } finally {
+      diagnostic.mockRestore();
+    }
+  });
+
+  it('reports an unavailable executable as inconclusive', async () => {
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(await runStep({ name: 'unavailable-probe', cmd: '/whatsoup-nonexistent-test-executable' })).toBe(125);
+      expect(diagnostic.mock.calls).toEqual([['push-gate: unavailable-probe could not start (ENOENT); exit 125']]);
+    } finally {
+      diagnostic.mockRestore();
+    }
+  });
+
+  it('preserves a completed check failure', async () => {
+    expect(await runStep({ name: 'failed-check', cmd: `${process.execPath} -e process.exit(7)` })).toBe(7);
+  });
+
+  it.each([
+    ['exit 7', 7],
+    ['exit 125', 125],
+    ['kill -TERM "$$"', 143],
+  ] as const)('propagates %s through the normal release entry point', (body, exitCode) => {
+    const cwd = gateTmp.make('repo');
+    execFileSync('git', ['init', '--quiet', cwd], { env: cleanGitEnv(), timeout: 5_000 });
+    writeFileSync(join(cwd, 'npm'), `#!/bin/sh\necho fixture-step >&2\n${body}\n`, { mode: 0o700 });
+    const result = spawnSync(process.execPath, [resolve('scripts/push-gate.ts'), 'release'], {
+      cwd,
+      env: { ...cleanGitEnv(), PATH: `${cwd}:${process.env.PATH}` },
+      encoding: 'utf8',
+      timeout: 5_000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status).toBe(exitCode);
+    expect(result.stderr.match(/^fixture-step$/gm)).toHaveLength(1);
+    expect(result.stderr).toContain(`FAIL at step 1/${RELEASE_STEPS.length}`);
+    expect(result.stderr).toContain(`(exit ${exitCode})`);
+    if (exitCode === 143) {
+      expect(result.stderr).toMatch(/push-gate: guard:repo:release-hygiene terminated by SIGTERM \(pid \d+\); exit 143/);
+    }
+    expect(result.stdout).not.toContain('steps passed');
+  });
+
+  it.each([
+    ['local', 'console-build', '--prefix console run build'],
+    ['local', 'verify:console-design:live', 'run verify:console-design:live'],
+    ['hosted', 'Console build', '--prefix console run build'],
+    ['hosted', 'Console design verification', 'run verify:console-design:live'],
+  ])('%s fails %s before starting coverage', (lane, name, command) => {
+    const cwd = gateTmp.make('early-failure');
+    execFileSync('git', ['init', '--quiet', cwd], { env: cleanGitEnv(), timeout: 5_000 });
+    mkdirSync(join(cwd, 'scripts'));
+    writeFileSync(join(cwd, 'scripts/run-with-pinned-npm.sh'), '#!/bin/sh\nexec npm "$@"\n');
+    writeFileSync(join(cwd, 'npm'), `#!/bin/sh
+printf '%s\\n' "$*" >> "$(dirname "$0")/.git/events"
+if [ "$*" = '${command}' ]; then exit 17; fi
+`, { mode: 0o700 });
+    let executable = process.execPath;
+    let args = [resolve('scripts/push-gate.ts'), 'release'];
+    if (lane === 'hosted') {
+      const workflow = parseYaml(readFileSync('.github/workflows/quality.yml', 'utf8'));
+      const names = ['Install console dependencies', 'Console lint', 'Console build', 'Console design verification', 'Test suite + coverage thresholds'];
+      const steps = workflow.jobs.full.steps.filter((step: { name: string }) => names.includes(step.name));
+      expect(steps).toHaveLength(names.length);
+      for (const step of steps) {
+        expect(step.if).toBeUndefined();
+        expect(step['continue-on-error']).toBeUndefined();
+      }
+      executable = 'bash';
+      args = ['-e', '-o', 'pipefail', '-c', steps.map((step: { run: string }) => step.run).join('\n')];
+    }
+    const result = spawnSync(executable, args, {
+      cwd,
+      env: { ...cleanGitEnv(), PATH: `${cwd}:${process.env.PATH}` },
+      encoding: 'utf8', timeout: 10_000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status, result.stderr).toBe(17);
+    if (lane === 'local') {
+      expect(result.stderr).toContain(`[${name}]`);
+      expect(result.stderr).toContain('(exit 17)');
+    }
+    expect(result.stderr).not.toContain('FINAL-SOURCE drift');
+    const events = readFileSync(join(cwd, '.git/events'), 'utf8').trim().split('\n');
+    expect(events.at(-1)).toBe(command);
+    expect(events.some((event) => event.includes('coverage:check'))).toBe(false);
+  });
+});
 
 describe('push-gate manifest registry (#2224)', () => {
   it('every package.json guard:* script is in a pipeline or explicitly CI-only', () => {
@@ -107,7 +214,32 @@ describe('push-gate manifest registry (#2224)', () => {
     );
   });
 
-  it('keeps deployment qualification in both local lanes and the Quality workflow', () => {
+  it('the fast push tier keeps the disclosure checks and builds nothing', () => {
+    expect(pkg.scripts['verify:push:fast']).toBe(
+      'bash scripts/run-with-pinned-node.sh scripts/push-gate.ts fast',
+    );
+    expect(FAST_PUSH_STEPS.map((step) => step.name)).toEqual([
+      'guard:repo:branch-diff',
+      'guard:repo:commit-authors',
+      'guard:publication:all',
+      'guard:publication:branch-diff',
+      'push-gate-scope',
+    ]);
+    for (const step of FAST_PUSH_STEPS) {
+      expect(step.cmd, `${step.name} must not build or run a suite`).not.toMatch(/npm test|typecheck|--prefix console|vitest|pytest/);
+      if (step.name.startsWith('guard:')) expect(allGuardScripts).toContain(step.name);
+    }
+    expect(FAST_PUSH_STEPS[FAST_PUSH_STEPS.length - 1].cmd).toBe('bash scripts/print-push-gate-scope.sh fast');
+  });
+
+  it('the heavy checks the fast tier omits stay in the complete gate', () => {
+    const branchNames = BRANCH_STEPS.map((step) => step.name);
+    for (const name of ['typecheck:all', 'curated-tests', 'verify:console-design', 'console-build', 'test:deployment-qualification']) {
+      expect(branchNames).toContain(name);
+    }
+  });
+
+  it('keeps focused deployment qualification in both local lanes', () => {
     const expectedCommand = 'npm run test:deployment-qualification';
     for (const steps of [BRANCH_STEPS, RELEASE_STEPS]) {
       expect(steps).toContainEqual(
@@ -115,15 +247,54 @@ describe('push-gate manifest registry (#2224)', () => {
       );
     }
 
-    const qualityWorkflow = readFileSync('.github/workflows/quality.yml', 'utf8');
-    expect(qualityWorkflow).toContain(
-      '      - name: Deployment qualification source suite\n        run: npm run test:deployment-qualification',
-    );
-
     const command = pkg.scripts['test:deployment-qualification'];
     expect(command).toContain('bash -euc');
     expect(command).not.toContain('bash -lc');
     expect(command).toContain('deploy/scripts/lib/pytest-runner.sh');
+  });
+
+  it.each([0, 17])('runs deployment qualification once in CI and preserves pytest exit %i', (exitCode) => {
+    const workflow = parseYaml(readFileSync('.github/workflows/quality.yml', 'utf8'));
+    const steps = workflow.jobs.full.steps.filter((step: { run?: string }) =>
+      /test:deployment-qualification|run-bot-errors-full-suite\.sh/.test(step.run ?? ''),
+    );
+    expect(steps).toHaveLength(1);
+    expect(steps[0].if).toBeUndefined();
+    expect(steps[0]['continue-on-error']).toBeUndefined();
+
+    const scratch = gateTmp.make('python-suite');
+    const python = join(scratch, 'python');
+    writeFileSync(python, `#!/bin/sh
+if [ "$1" = '-c' ] && [ "$2" = 'import pytest' ]; then exit 0; fi
+printf '%s\\n' "$@"
+exit ${exitCode}
+`, { mode: 0o700 });
+    const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', steps[0].run], {
+      cwd: process.cwd(),
+      env: { ...process.env, SENTINEL_PYTEST_PYTHON: python, TMPDIR: scratch },
+      encoding: 'utf8', timeout: 5_000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status, result.stderr).toBe(exitCode);
+    // Only the separately executed sentinel coverage cases may leave directory collection.
+    expect(result.stdout.split('\n').filter((line) => line !== '' && !line.startsWith('==') && !line.startsWith('ALL_'))).toEqual([
+      '-m', 'pytest', 'deploy/scripts/tests/',
+      '--ignore=deploy/scripts/tests/test_sentinel_pin.py',
+      '--ignore=deploy/scripts/tests/test_bot_errors_selfcheck.py',
+      '--ignore=deploy/scripts/tests/test_bot_errors_sentinel.py',
+      '--ignore=deploy/scripts/tests/test_bot_errors_heartbeat_watchdog_auth.py',
+      '--ignore=deploy/scripts/tests/test_bot_errors_redaction_parity.py',
+      '--ignore=deploy/scripts/tests/test_bot_errors_gui_session_monitor.py',
+      '--import-mode=importlib', '-q',
+    ]);
+    expect(result.stdout.includes('ALL_BOT_ERRORS_FULL_SUITE_TESTS_PASS')).toBe(exitCode === 0);
+    const focusedFiles = pkg.scripts['test:deployment-qualification'].match(/deploy\/scripts\/tests\/test_[\w]+\.py/g);
+    expect(focusedFiles).toHaveLength(7);
+    for (const file of focusedFiles!) {
+      expect(existsSync(file), file).toBe(true);
+      expect(result.stdout).not.toContain(`--ignore=${file}`);
+    }
   });
 
   it('every curated test path exists on disk', () => {
@@ -149,6 +320,7 @@ describe('push-gate manifest registry (#2224)', () => {
       'WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT',
       'WHATSOUP_SKIP_NODE_PIN_CHECK',
       'WHATSOUP_SKIP_BOUNDARY_CHECK',
+      'WHATSOUP_SKIP_ESLINT_FITNESS',
     ]);
   });
 
@@ -185,7 +357,7 @@ describe('push-gate manifest registry (#2224)', () => {
     // A cmd containing shell metacharacters would silently change semantics
     // when tokenized — so it must fail review here instead.
     const shellMetachar = /["';|&$`<>()\\{}[\]\n]/;
-    for (const step of [...BRANCH_STEPS, ...RELEASE_STEPS]) {
+    for (const step of [...BRANCH_STEPS, ...RELEASE_STEPS, ...FAST_PUSH_STEPS]) {
       expect(
         shellMetachar.test(step.cmd),
         `${step.name}: '${step.cmd}' needs a shell — rewrite as plain argv tokens`,
@@ -194,42 +366,76 @@ describe('push-gate manifest registry (#2224)', () => {
     }
   });
 
-  it('the child env allowlist excludes the neutralized skip-vars and passes WHATSOUP_* through', async () => {
+  it('gate children receive required controls without credentials or arbitrary WHATSOUP variables', async () => {
     const { pushGateChildEnv } = await import('../../scripts/push-gate.ts');
-    process.env.WHATSOUP_SKIP_DOC_DRIFT = '1';
-    process.env.WHATSOUP_TEST_PASSTHROUGH_PROBE = 'probe';
+    const supplied = {
+      WHATSOUP_SKIP_DOC_DRIFT: '1',
+      WHATSOUP_SKIP_ESLINT_FITNESS: '1',
+      WHATSOUP_TEST_PASSTHROUGH_PROBE: 'probe',
+      WHATSOUP_HEALTH_TOKEN: 'synthetic-health-credential',
+      WHATSOUP_REQUIRE_TEST_INTEGRITY: '1',
+    };
+    const prior = Object.fromEntries(Object.keys(supplied).map((key) => [key, process.env[key]]));
+    Object.assign(process.env, supplied);
     try {
       const env = pushGateChildEnv();
       expect(env.WHATSOUP_SKIP_DOC_DRIFT).toBeUndefined();
-      expect(env.WHATSOUP_TEST_PASSTHROUGH_PROBE).toBe('probe');
+      expect(env.WHATSOUP_SKIP_ESLINT_FITNESS).toBeUndefined();
+      const child = execFileSync(process.execPath, ['-e', `
+        process.stdout.write(JSON.stringify({
+          health: 'WHATSOUP_HEALTH_TOKEN' in process.env,
+          arbitrary: 'WHATSOUP_TEST_PASSTHROUGH_PROBE' in process.env,
+          integrity: process.env.WHATSOUP_REQUIRE_TEST_INTEGRITY,
+        }));
+      `], { env, encoding: 'utf8', timeout: 5000 });
+      expect(JSON.parse(child)).toEqual({ health: false, arbitrary: false, integrity: '1' });
       expect(typeof env.PATH).toBe('string');
-      delete process.env.WHATSOUP_SKIP_DOC_DRIFT;
-      delete process.env.WHATSOUP_TEST_PASSTHROUGH_PROBE;
     } finally {
-      delete process.env.WHATSOUP_SKIP_DOC_DRIFT;
-      delete process.env.WHATSOUP_TEST_PASSTHROUGH_PROBE;
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     }
   });
 
-  it('every env var a gate step reads survives the child allowlist', async () => {
+  it('passes the live push base through to the branch-diff steps', async () => {
     const { pushGateChildEnv } = await import('../../scripts/push-gate.ts');
-    const source = readFileSync('scripts/full-suite-battery.ts', 'utf8');
-    const envNames = [...source.matchAll(/process\.env\.([A-Za-z0-9_]+)/g)].map((match) => match[1]);
+    const { PUSH_BASE_OID_ENV } = await import('../../scripts/lib/guard-core.ts');
+    const priorValue = process.env[PUSH_BASE_OID_ENV];
+    process.env[PUSH_BASE_OID_ENV] = 'b'.repeat(40);
+    try {
+      expect(pushGateChildEnv()[PUSH_BASE_OID_ENV]).toBe('b'.repeat(40));
+    } finally {
+      if (priorValue === undefined) delete process.env[PUSH_BASE_OID_ENV];
+      else process.env[PUSH_BASE_OID_ENV] = priorValue;
+    }
+  });
 
-    expect(envNames.length, 'no process.env reads found — scan is vacuous').toBeGreaterThan(0);
-
-    for (const envName of envNames) {
-      const wasPresent = Object.prototype.hasOwnProperty.call(process.env, envName);
-      const priorValue = process.env[envName];
-      process.env[envName] = 'reachability-probe';
-      try {
-        expect(
-          pushGateChildEnv()[envName],
-          `scripts/full-suite-battery.ts reads ${envName}, but pushGateChildEnv() strips it`,
-        ).toBe('reachability-probe');
-      } finally {
-        if (wasPresent) process.env[envName] = priorValue;
-        else delete process.env[envName];
+  it('passes each required gate control to a real child', async () => {
+    const { pushGateChildEnv } = await import('../../scripts/push-gate.ts');
+    const controls = {
+      WHATSOUP_PUSH_BASE_OID: 'b'.repeat(40),
+      WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS: '600000',
+      WHATSOUP_BOUNDED_BATTERY_OWNER_PID: '1234',
+      WHATSOUP_TRIPWIRE_MAIN_SHA256: 'c'.repeat(64),
+      WHATSOUP_REQUIRE_TEST_INTEGRITY: '1',
+      WHATSOUP_NODE: '/test-toolchain/node',
+      WHATSOUP_NPM: '/test-toolchain/npm',
+      WHATSOUP_GIT_ESTATE_GIT_TIMEOUT_MS: '10000',
+    };
+    const prior = Object.fromEntries(Object.keys(controls).map((key) => [key, process.env[key]]));
+    Object.assign(process.env, controls);
+    try {
+      const child = execFileSync(process.execPath, ['-e', `
+        process.stdout.write(JSON.stringify(Object.fromEntries(
+          Object.entries(process.env).filter(([key]) => key.startsWith('WHATSOUP_'))
+        )));
+      `], { env: pushGateChildEnv(), encoding: 'utf8', timeout: 5000 });
+      expect(JSON.parse(child)).toEqual(controls);
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
       }
     }
   });

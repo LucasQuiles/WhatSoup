@@ -8,9 +8,9 @@
  * an ordered array, the curated test list is one path per line, and the
  * runner reports per-step timing with fail-fast attribution.
  *
- * Behavior parity with the legacy strings is the contract:
- *  - same steps, same order (including verify:semantic:shadow's position
- *    mid-guard-block and the trailing scope print);
+ * Required behavior from the legacy strings is the contract:
+ *  - same steps and prerequisite order, including verify:semantic:shadow's
+ *    position mid-guard-block and the trailing scope print;
  *  - same fail-fast semantics (first non-zero exit aborts the pipeline);
  *  - the legacy `unset WHATSOUP_SKIP_*` preamble is preserved by deleting
  *    those variables from the environment before any step spawns.
@@ -21,8 +21,10 @@
  * gate-drop is a test failure, not a scrolling accident.
  */
 import { spawn } from 'node:child_process';
+import { constants as osConstants } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { cleanGitEnv } from '../src/lib/git-env.ts';
+import { assertRepositoryInputUnchanged, captureRepositoryInputSnapshot } from './lib/source-mutation.ts';
 import { TEST_WORKER_LIMIT } from './lib/test-worker-limit.ts';
 
 export interface GateStep {
@@ -36,6 +38,7 @@ export const NEUTRALIZED_SKIP_VARS = [
   'WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT',
   'WHATSOUP_SKIP_NODE_PIN_CHECK',
   'WHATSOUP_SKIP_BOUNDARY_CHECK',
+  'WHATSOUP_SKIP_ESLINT_FITNESS',
 ] as const;
 
 /**
@@ -45,6 +48,7 @@ export const NEUTRALIZED_SKIP_VARS = [
  */
 export const CURATED_TEST_PATHS = [
   'tests/redaction-parity.test.ts',
+  'tests/helpers/gate-membership.test.ts',
   'tests/scripts/check-commit-identity.test.ts',
   'tests/scripts/repo-hygiene-guard.test.ts',
   'tests/scripts/png-estate-guard.test.ts',
@@ -56,6 +60,7 @@ export const CURATED_TEST_PATHS = [
   'tests/scripts/ci-control-ref-policy.test.ts',
   'tests/scripts/ci-control-classifier.test.ts',
   'tests/scripts/ci-required-contexts-guard.test.ts',
+  'tests/scripts/check-test-jobs.test.ts',
   'tests/scripts/hooks-installed-guard.test.ts',
   'tests/scripts/ci-control-result.test.ts',
   'tests/scripts/git-estate-guard.test.ts',
@@ -119,6 +124,7 @@ export const CURATED_TEST_PATHS = [
   'tests/scripts/harness-maintenance-guard.test.ts',
   'tests/scripts/logger-mock-residue.test.ts',
   'tests/scripts/publication-guard.test.ts',
+  'tests/scripts/publication-branch-scan.test.ts',
   'tests/scripts/guard-test-coverage-check.test.ts',
   'tests/deploy/preflight-check.test.ts',
   'tests/scripts/import-boundary-check.test.ts',
@@ -126,6 +132,7 @@ export const CURATED_TEST_PATHS = [
   'tests/scripts/check-hardcoded-tmpdir.test.ts',
   'tests/scripts/eslint-fitness-check.test.ts',
   'tests/scripts/fitness-registry.test.ts',
+  'tests/scripts/fitness-registry-backing.test.ts',
   'tests/scripts/fitness-file-size-warning-budget.test.ts',
   'tests/lib/provider-key-service.test.ts',
   'tests/core/agent-config-validator-crossfield.test.ts',
@@ -139,6 +146,9 @@ export const CURATED_TEST_PATHS = [
   'tests/scripts/generate-catch-ratchet.test.ts',
   'tests/eslint-rules/require-catch-justification.test.ts',
   'tests/deploy/watchdog-credential-dead.test.ts',
+  'tests/setup/source-mutation-tripwire.test.ts',
+  'tests/scripts/source-mutation.test.ts',
+  'tests/scripts/private-integrity-release.test.ts',
   // The manifest's own registry test dogfoods into the gate.
   'tests/scripts/push-gate-manifest.test.ts',
 ] as const;
@@ -146,12 +156,28 @@ export const CURATED_TEST_PATHS = [
 const guard = (name: string): GateStep => ({ name, cmd: `npm run ${name}` });
 const step = (name: string, cmd: string): GateStep => ({ name, cmd });
 
+/**
+ * What the installed hook runs for a branch push: the checks that must pass before
+ * content reaches the public remote. They take seconds and build nothing. Each of
+ * these guards is also a named step of the quality workflow, and the rest of
+ * BRANCH_STEPS is backed by the required hosted checks, which block merge
+ * (tests/scripts/pre-push-guard.test.ts keeps every push-gate guard backed there).
+ */
+export const FAST_PUSH_STEPS: readonly GateStep[] = [
+  guard('guard:repo:branch-diff'),
+  guard('guard:repo:commit-authors'),
+  guard('guard:publication:all'),
+  guard('guard:publication:branch-diff'),
+  step('push-gate-scope', 'bash scripts/print-push-gate-scope.sh fast'),
+];
+
 /** verify:push:branch — exact legacy order (semantic:shadow sits mid-block). */
 export const BRANCH_STEPS: readonly GateStep[] = [
   guard('guard:repo:staged'),
   guard('guard:repo:branch-diff'),
   guard('guard:repo:commit-authors'),
   guard('guard:publication:staged'),
+  guard('guard:publication:branch-diff'),
   guard('guard:doc-drift'),
   guard('guard:public-surface-drift'),
   guard('guard:work-index'),
@@ -209,7 +235,7 @@ export const BRANCH_STEPS: readonly GateStep[] = [
   step('push-gate-scope', 'bash scripts/print-push-gate-scope.sh'),
 ];
 
-/** verify:release — exact legacy order. */
+/** verify:release — build and design failures precede the expensive coverage suite. */
 export const RELEASE_STEPS: readonly GateStep[] = [
   guard('guard:repo:release-hygiene'),
   guard('guard:repo:commit-authors'),
@@ -256,9 +282,9 @@ export const RELEASE_STEPS: readonly GateStep[] = [
   step('console-ci', 'bash scripts/run-with-pinned-npm.sh --prefix console ci'),
   step('console-lint', 'bash scripts/run-with-pinned-npm.sh --prefix console run lint'),
   step('typecheck:all', 'npm run typecheck:all'),
-  step('coverage:check', 'npm run coverage:check -- --pool=forks'),
   step('console-build', 'bash scripts/run-with-pinned-npm.sh --prefix console run build'),
   step('verify:console-design:live', 'npm run verify:console-design:live'),
+  step('coverage:check', 'npm run coverage:check -- --pool=forks'),
   step('verify:console-browser', 'npm run verify:console-browser'),
 ];
 
@@ -295,11 +321,10 @@ export const CI_ONLY_GUARDS: ReadonlyArray<{ readonly name: string; readonly rea
 
 /**
  * Explicit allowlisted child env (repo-hygiene: no process.env inheritance).
- * Base is the repo's git-child allowlist (PATH/HOME/TMPDIR/XDG/…); WHATSOUP_*
- * vars pass through EXCEPT the neutralized skip-vars — which implements the
- * legacy `unset WHATSOUP_SKIP_*` preamble structurally rather than by
- * mutation: the skips simply never reach the children. Vitest's worker-count
- * setting may reduce the repository default so resource limits reach both lanes.
+ * Base is the repo's git-child allowlist (PATH/HOME/TMPDIR/XDG/…). Only named
+ * gate controls pass through; runtime credentials and skip flags do not.
+ * Vitest's worker-count setting may reduce the repository default so resource
+ * limits reach both lanes.
  */
 export function pushGateChildEnv(): NodeJS.ProcessEnv {
   const env = cleanGitEnv();
@@ -310,14 +335,18 @@ export function pushGateChildEnv(): NodeJS.ProcessEnv {
     }
     env.VITEST_MAX_WORKERS = workers;
   }
-  for (const [key, value] of Object.entries(process.env)) {
-    if (
-      key.startsWith('WHATSOUP_')
-      && value !== undefined
-      && !(NEUTRALIZED_SKIP_VARS as readonly string[]).includes(key)
-    ) {
-      env[key] = value;
-    }
+  for (const key of [
+    'WHATSOUP_PUSH_BASE_OID',
+    'WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS',
+    'WHATSOUP_BOUNDED_BATTERY_OWNER_PID',
+    'WHATSOUP_TRIPWIRE_MAIN_SHA256',
+    'WHATSOUP_REQUIRE_TEST_INTEGRITY',
+    'WHATSOUP_NODE',
+    'WHATSOUP_NPM',
+    'WHATSOUP_GIT_ESTATE_GIT_TIMEOUT_MS',
+  ]) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
   }
   return env;
 }
@@ -341,28 +370,55 @@ function tokenize(cmd: string): { exe: string; args: string[] } {
   return { exe, args };
 }
 
-function runStep(gateStep: GateStep): Promise<number> {
+export function runStep(gateStep: GateStep): Promise<number> {
   return new Promise((resolvePromise) => {
     const { exe, args } = tokenize(gateStep.cmd);
     const child = spawn(exe, args, {
       stdio: 'inherit',
       env: pushGateChildEnv(),
     });
-    child.on('close', (code) => resolvePromise(code ?? 1));
-    child.on('error', () => resolvePromise(1));
+    child.on('close', (code, signal) => {
+      if (signal !== null) {
+        const signalNumber = osConstants.signals[signal];
+        const exitCode = signalNumber === undefined ? 125 : 128 + signalNumber;
+        console.error(`push-gate: ${gateStep.name} terminated by ${signal} (pid ${child.pid}); exit ${exitCode}`);
+        resolvePromise(exitCode);
+        return;
+      }
+      resolvePromise(code ?? 125);
+    });
+    child.on('error', (error: NodeJS.ErrnoException) => {
+      console.error(`push-gate: ${gateStep.name} could not start (${error.code ?? 'UNKNOWN'}); exit 125`);
+      resolvePromise(125);
+    });
   });
 }
 
 export async function main(argv: readonly string[]): Promise<number> {
   const lane = argv[0];
-  const steps = lane === 'branch' ? BRANCH_STEPS : lane === 'release' ? RELEASE_STEPS : undefined;
+  const steps = lane === 'branch'
+    ? BRANCH_STEPS
+    : lane === 'release'
+      ? RELEASE_STEPS
+      : lane === 'fast'
+        ? FAST_PUSH_STEPS
+        : undefined;
   if (!steps) {
-    console.error('Usage: push-gate.ts <branch|release>');
+    console.error('Usage: push-gate.ts <branch|release|fast>');
     return 64;
+  }
+
+  let inputSnapshot;
+  try {
+    inputSnapshot = captureRepositoryInputSnapshot({ cwd: process.cwd() });
+  } catch (error) {
+    console.error(`push-gate(${lane}): FINAL-SOURCE INCONCLUSIVE — ${error instanceof Error ? error.message : String(error)}`);
+    return 125;
   }
 
   const startedAt = Date.now();
   let completed = 0;
+  let gateExit = 0;
   for (const gateStep of steps) {
     const stepStarted = Date.now();
     const code = await runStep(gateStep);
@@ -373,11 +429,30 @@ export async function main(argv: readonly string[]): Promise<number> {
           + ` [${gateStep.name}] after ${formatElapsed(elapsed)} (exit ${code});`
           + ` ${steps.length - completed - 1} step(s) not run`,
       );
-      return 1;
+      gateExit = code;
+      break;
     }
     completed += 1;
     console.log(`push-gate(${lane}): [${completed}/${steps.length}] ${gateStep.name} ok (${formatElapsed(elapsed)})`);
   }
+
+  try {
+    assertRepositoryInputUnchanged({
+      cwd: process.cwd(),
+      snapshot: inputSnapshot,
+      stage: `push-gate-${lane}`,
+      report: (message) => console.error(`push-gate(${lane}): ${message}`),
+    });
+  } catch (error) {
+    // A prior guard failure remains a failure; this check adds drift evidence but never clears it.
+    if (gateExit !== 0) return gateExit;
+    const message = error instanceof Error ? error.message : String(error);
+    const drift = message.startsWith('FINAL-SOURCE drift:');
+    console.error(`push-gate(${lane}): FINAL-SOURCE ${drift ? 'FAILURE' : 'INCONCLUSIVE'} — ${message}`);
+    return drift ? 1 : 125;
+  }
+
+  if (gateExit !== 0) return gateExit;
 
   console.log(
     `push-gate(${lane}): ${completed}/${steps.length} steps passed in ${formatElapsed(Date.now() - startedAt)}`,

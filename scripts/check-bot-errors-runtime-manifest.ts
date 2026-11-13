@@ -143,7 +143,7 @@ function isSafeRepoRelativePath(filePath: string): boolean {
   return parts.every((part) => part !== '' && part !== '.' && part !== '..');
 }
 
-function parseManifestEntries(payload: unknown): {
+export function parseManifestEntries(payload: unknown): {
   entries: ManifestFileEntry[];
   findings: RuntimeManifestFinding[];
 } {

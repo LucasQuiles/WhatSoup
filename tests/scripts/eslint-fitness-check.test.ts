@@ -4,9 +4,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 
-import { runEslintFitness } from '../../scripts/eslint-fitness-check.ts';
 import { fitnessRules } from '../../scripts/lib/fitness/registry.ts';
 // @ts-expect-error -- flat config is a .mjs module with no type declarations; expires 2026-12-31
 import fitnessConfigRaw, { eslintRingRuleIds as eslintRingRuleIdsRaw, enabledFitnessRuleNames as enabledFitnessRuleNamesRaw, eslintRingRuleNames as eslintRingRuleNamesRaw } from '../../eslint.config.fitness.mjs';
@@ -77,59 +76,6 @@ describe('eslint fitness config — registry drift', () => {
     );
     expect(envBlocks).toHaveLength(1);
     expect(envBlocks[0]?.files).toEqual(['src/**/*.ts']);
-  });
-});
-
-describe('eslint fitness wrapper — full repository scan', () => {
-  let result: Awaited<ReturnType<typeof runEslintFitness>>;
-
-  beforeAll(async () => {
-    // Both assertions need the same real repository scan. Keep it in this
-    // suite so Vitest's isolated file workers do not repeat the expensive pass.
-    result = await runEslintFitness(repoRoot);
-    // Coverage instrumentation and CPU contention make this scan much slower
-    // in CI. Preserve the existing 420s scan budget without loosening failures.
-  }, 420_000);
-
-  it('treats warning-only results as non-blocking and reports errors as blocking', () => {
-
-    // The repo currently has known fitness warnings (AgentRuntime god-class,
-    // oversized files, uncategorized skips, fail-open catches) and NO configured
-    // errors. The wrapper must see warnings but zero errors / no fatal parse.
-    expect(result.warningCount).toBeGreaterThan(0);
-    expect(result.errorCount).toBe(0);
-    expect(result.fatal).toBe(false);
-
-    // The flagship dark-ring rule must be live: AgentRuntime is reported.
-    const godClass = result.issues.find(
-      (i) => i.code === 'fitness/god-class' && i.filePath?.endsWith('runtime.ts'),
-    );
-    expect(godClass).toBeDefined();
-
-    // Non-vacuity: the real ring lints hundreds of files, so a pass is not a pass-over-nothing.
-    expect(result.filesLinted).toBeGreaterThan(100);
-  });
-
-  it('no sync exec call in the linted tree lacks a timeout (spread-carried sites pinned)', () => {
-    // The fitness ring is warn-only, so this assertion enforces zero new bare
-    // execSync / execFileSync / spawnSync calls. Fix new offenders by adding
-    // timeout options; do not grow the grandfather set.
-    // These four rule false positives spread keyringExecOptions, which carries
-    // KEYRING_COMMAND_TIMEOUT_MS. Re-verify that timeout before moving a pin.
-    const spreadCarriedTimeoutSites = [
-      'src/lib/keyring.ts:514',
-      'src/lib/keyring.ts:542',
-      'src/lib/keyring.ts:802',
-      'src/lib/keyring.ts:843',
-    ];
-    expect(result.filesLinted).toBeGreaterThan(0);
-    const offenders = result.issues
-      .filter((issue) => issue.code === 'fitness/sync-exec-timeout')
-      .map((issue) => `${issue.filePath}:${issue.line}`)
-      .sort();
-
-    expect(offenders, `Sync exec timeout findings:\n${offenders.join('\n')}`)
-      .toEqual(spreadCarriedTimeoutSites);
   });
 });
 

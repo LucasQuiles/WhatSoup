@@ -176,7 +176,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
     id: 'release-chain',
     scriptName: 'verify:release',
     orderedSteps: [
-      'unset WHATSOUP_SKIP_DOC_DRIFT WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT WHATSOUP_SKIP_NODE_PIN_CHECK WHATSOUP_SKIP_BOUNDARY_CHECK',
+      'unset WHATSOUP_SKIP_DOC_DRIFT WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT WHATSOUP_SKIP_NODE_PIN_CHECK WHATSOUP_SKIP_BOUNDARY_CHECK WHATSOUP_SKIP_ESLINT_FITNESS',
       'npm run guard:repo:release-hygiene',
       'npm run guard:repo:commit-authors',
       'npm run guard:publication:all',
@@ -219,9 +219,9 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'bash scripts/run-with-pinned-npm.sh --prefix console ci',
       'bash scripts/run-with-pinned-npm.sh --prefix console run lint',
       'npm run typecheck:all',
-      'npm run coverage:check -- --pool=forks',
       'bash scripts/run-with-pinned-npm.sh --prefix console run build',
       'npm run verify:console-design:live',
+      'npm run coverage:check -- --pool=forks',
       'npm run verify:console-browser',
     ],
     exactSequence: true,
@@ -445,7 +445,7 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
     anchors: [],
     validate: qualityCiLanePartitionFailures,
     remediation:
-      'Restore the exact quality (24.x) authority job, quality (25.x) compatibility job, pinned Test Integrity checkout, and measured disk-budget step.',
+      'Restore the exact quality (24.x) authority job, quality (25.x) compatibility job, direct v* trigger, and measured disk-budget step.',
   },
   {
     id: 'quality-ci-console-design-chain',
@@ -473,7 +473,7 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
       'run: npm run test:browser',
       'run: npm run test:browser:motion',
     ],
-    requiredWorkflowJob: 'quality',
+    requiredWorkflowJob: 'full',
     remediation: 'Restore the shared console design verification chain in quality.yml CI.',
   },
   {
@@ -489,27 +489,25 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
     id: 'tag-release-console-design-chain',
     category: 'guard-chain',
     file: '.github/workflows/tag-release-gate.yml',
-    anchors: [
-      'name: Install console dependencies',
-      'name: Console build',
-      'name: Console design verification',
-      'run: npm run verify:console-design',
-      'name: Install Playwright chromium',
-      'run: npx playwright install chromium --with-deps',
-      'name: Browser test suite',
-      'run: npm run test:browser',
-      'name: Browser motion test suite',
-      'run: npm run test:browser:motion',
-      'tests/browser/__screenshots__',
-      'tests/browser-motion/__screenshots__',
-    ],
-    requiredUnconditionalRuns: [
-      'run: npx playwright install chromium --with-deps',
-      'run: npm run test:browser',
-      'run: npm run test:browser:motion',
-    ],
-    requiredWorkflowJob: 'release-gate',
-    remediation: 'Restore the shared console design and browser verification chain in tag-release-gate.yml.',
+    anchors: [],
+    validate: tagReleaseDelegationFailures,
+    remediation: 'Consume every direct-tag Quality completion and let the authenticated receipt consumer fail closed.',
+  },
+  {
+    id: 'private-test-integrity-trusted-receipt',
+    category: 'secret-surface',
+    file: '.github/workflows/private-test-integrity.yml',
+    anchors: [],
+    validate: privateTestIntegrityFailures,
+    remediation: 'Keep private credentials and scanner execution in the trusted workflow_run receipt producer.',
+  },
+  {
+    id: 'whatsoup-guard-node25-compatibility',
+    category: 'guard-chain',
+    file: '.github/workflows/whatsoup-guard.yml',
+    anchors: [],
+    validate: whatsoupGuardNode25CompatibilityFailures,
+    remediation: 'Keep the standalone Node 25 Whatsoup guard compatibility lane; Quality owns the redundant Node 24 work.',
   },
   {
     id: 'pre-commit-design-system-hygiene',
@@ -772,6 +770,27 @@ function consoleDesignScriptSteps(consoleScripts: Record<string, string>): strin
     .map((scriptName) => `npm --prefix console run ${scriptName}`);
 }
 
+function consoleDesignChainView(cwd: string, scripts: Record<string, string>, consoleScripts: Record<string, string>): Record<string, string> {
+  const chain = scripts['verify:console-design:live'];
+  const combined = 'npm --prefix console run lint:shadow:baseline -- --with-inventories';
+  if (!chain?.split(/\s+&&\s+/).includes(combined)) return scripts;
+  const source = readText(cwd, 'console/scripts/check-shadow-baseline.mjs') ?? '';
+  const consumers = ['shadow-frozen', 'raw-form-control'];
+  const connected = consoleScripts['lint:shadow:baseline'] === 'node scripts/check-shadow-baseline.mjs'
+    && consumers.every((name) => consoleScripts[`design:${name}-inventory`] === `node scripts/check-${name}-inventory.mjs`
+      && source.includes(`'check-${name}-inventory.mjs'`))
+    && ['if (withInventories)', 'spawnSync(process.execPath', "'--eslint-json', report", 'result.status !== 0'].every((anchor) => source.includes(anchor));
+  if (!connected) return scripts;
+  // Expand the verified shared consumer for the existing order/coverage checks.
+  return {
+    ...scripts,
+    'verify:console-design:live': chain.replace(combined, [
+      'npm --prefix console run lint:shadow:baseline',
+      ...consumers.map((name) => `npm --prefix console run design:${name}-inventory`),
+    ].join(' && ')),
+  };
+}
+
 function checkConsoleDesignScriptCoverage(rootScripts: Record<string, string>, consoleScripts: Record<string, string>): DiagnosticCheck {
   const chain = rootScripts['verify:console-design:live'];
   if (!chain) {
@@ -821,9 +840,13 @@ function collectStringValues(value: unknown, seen = new WeakSet<object>()): stri
   return entries.flatMap((entry) => collectStringValues(entry, seen));
 }
 
-function runControlFailures(step: Record<string, unknown>, label: string): string[] {
+function runControlFailures(
+  step: Record<string, unknown>,
+  label: string,
+  allowed: readonly string[] = [],
+): string[] {
   return ['shell', 'env', 'working-directory', 'background']
-    .filter((key) => hasOwn(step, key))
+    .filter((key) => !allowed.includes(key) && hasOwn(step, key))
     .map((key) => `${label} must not declare ${key}`);
 }
 
@@ -869,12 +892,12 @@ function qualityCiSemanticShadowFailures(text: string): string[] {
   }
 
   const jobs = asRecord(root.jobs);
-  const quality = asRecord(jobs?.quality);
-  if (!quality || !Array.isArray(quality.steps)) {
-    failures.push('workflow must declare jobs.quality.steps as an array');
+  const full = asRecord(jobs?.full);
+  if (!full || !Array.isArray(full.steps)) {
+    failures.push('workflow must declare jobs.full.steps as an array');
     return failures;
   }
-  const steps = quality.steps.map(asRecord);
+  const steps = full.steps.map(asRecord);
   if (steps.some((step) => !step)) {
     failures.push('every quality-job step must be a mapping');
     return failures;
@@ -882,21 +905,17 @@ function qualityCiSemanticShadowFailures(text: string): string[] {
   const stepRecords = steps as Record<string, unknown>[];
   const semanticSteps = stepRecords.filter((step) => step.name === 'Semantic quality (shadow)');
   if (semanticSteps.length !== 1) {
-    failures.push(`quality job must contain exactly one Semantic quality (shadow) step (found ${semanticSteps.length})`);
+    failures.push(`full job must contain exactly one Semantic quality (shadow) step (found ${semanticSteps.length})`);
     return failures;
   }
   const semantic = semanticSteps[0]!;
   const semanticIndex = stepRecords.indexOf(semantic);
-  const integrityIndex = stepRecords.findIndex((step) => step.name === 'Install test-integrity plugin');
   const suiteIndex = stepRecords.findIndex((step) => step.name === 'Test suite + coverage thresholds');
-  if (integrityIndex < 0 || semanticIndex > integrityIndex) {
-    failures.push('Semantic quality (shadow) must run before Install test-integrity plugin');
-  }
   if (suiteIndex < 0 || semanticIndex > suiteIndex) {
     failures.push('Semantic quality (shadow) must run before Test suite + coverage thresholds');
   }
   if (hasOwn(semantic, 'if')) {
-    failures.push('Semantic quality (shadow) must be unconditional inside the Node 24 authority job');
+    failures.push('Semantic quality (shadow) must be unconditional inside the full Node 24 job');
   }
   if (hasOwn(semantic, 'continue-on-error') || hasOwn(semantic, 'uses')) {
     failures.push('Semantic quality (shadow) must use a blocking run step without continue-on-error');
@@ -915,11 +934,15 @@ function qualityCiSemanticShadowFailures(text: string): string[] {
     'base="HEAD^"',
     'npm run guard:semantic-quality -- --mode shadow --base "$base" --receipt "$SEMANTIC_RECEIPT"',
     'process.env.SEMANTIC_RECEIPT',
-    'r.decision',
-    'r.findings.length',
     '>> "$GITHUB_STEP_SUMMARY"',
   ]) {
     if (!run.includes(required)) failures.push(`Semantic quality (shadow) run script is missing ${required}`);
+  }
+  if (!run.includes('r.decision') && !run.includes('receipt.decision')) {
+    failures.push('Semantic quality (shadow) run script is missing a receipt decision summary');
+  }
+  if (!run.includes('r.findings.length') && !run.includes('receipt.findings.length')) {
+    failures.push('Semantic quality (shadow) run script is missing a receipt finding count');
   }
 
   const uploadsSemanticReceipt = stepRecords.some((step) => (
@@ -928,6 +951,252 @@ function qualityCiSemanticShadowFailures(text: string): string[] {
     && collectStringValues(step).some((value) => value.includes('semantic-quality'))
   ));
   if (uploadsSemanticReceipt) failures.push('semantic quality receipts must not be uploaded as artifacts');
+  return failures;
+}
+
+function tagReleaseDelegationFailures(text: string): string[] {
+  const { root, failures: parseFailures } = parseWorkflow(text, 'tag release workflow');
+  if (!root) return parseFailures;
+  const failures: string[] = [];
+  const triggers = asRecord(root.on);
+  const workflowRun = asRecord(triggers?.workflow_run);
+  if (
+    !workflowRun
+    || !Array.isArray(workflowRun.workflows)
+    || workflowRun.workflows.length !== 1
+    || workflowRun.workflows[0] !== 'Quality'
+    || !Array.isArray(workflowRun.types)
+    || workflowRun.types.length !== 1
+    || workflowRun.types[0] !== 'completed'
+    || hasOwn(triggers ?? {}, 'push')
+  ) {
+    failures.push('tag release gate must consume completed Quality workflow runs');
+  }
+  const concurrency = asRecord(root.concurrency);
+  if (
+    concurrency?.group !== 'tag-release-${{ github.event.workflow_run.head_branch }}'
+    || concurrency['cancel-in-progress'] !== false
+  ) {
+    failures.push('tag release gate must preserve per-tag non-cancelling concurrency');
+  }
+  const permissions = asRecord(root.permissions);
+  if (
+    !permissions
+    || permissions.contents !== 'read'
+    || permissions.actions !== 'read'
+    || Object.keys(permissions).length !== 2
+  ) {
+    failures.push('tag release gate permissions must be exactly actions: read and contents: read');
+  }
+  const releaseGate = asRecord(asRecord(root.jobs)?.['release-gate']);
+  const condition = typeof releaseGate?.if === 'string' ? releaseGate.if : '';
+  for (const required of [
+    "github.event.workflow_run.event == 'push'",
+    "startsWith(github.event.workflow_run.head_branch, 'v')",
+  ]) {
+    if (!condition.includes(required)) {
+      failures.push(required.includes('head_branch')
+          ? 'tag release gate must require a v* Quality source ref'
+          : 'tag release gate must require a push Quality source run');
+    }
+  }
+  if (condition.includes("github.event.workflow_run.conclusion == 'success'")) {
+    failures.push('tag release gate must not skip failed Quality tag runs');
+  }
+  if (!releaseGate || releaseGate['runs-on'] !== 'ubuntu-latest' || releaseGate['timeout-minutes'] !== 35) {
+    failures.push('tag release gate must retain the bounded public receipt-consumer job');
+  }
+  if (hasOwn(releaseGate ?? {}, 'uses') || hasOwn(releaseGate ?? {}, 'secrets')) {
+    failures.push('tag release gate must not access private scanner credentials');
+  }
+  const steps = Array.isArray(releaseGate?.steps)
+    ? releaseGate.steps.map(asRecord).filter(Boolean) as Record<string, unknown>[]
+    : [];
+  const checkout = steps.filter((step) => step.uses === 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262');
+  if (checkout.length !== 1 || asRecord(checkout[0]?.with)?.ref !== '${{ github.sha }}') {
+    failures.push('tag release gate must pin checkout to the trusted workflow revision');
+  }
+  const node = steps.filter((step) => step.uses === 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020');
+  if (node.length !== 1 || asRecord(node[0]?.with)?.['node-version-file'] !== '.nvmrc') {
+    failures.push('tag release gate must run the receipt consumer under Node from .nvmrc');
+  }
+  const select = steps.filter((step) => step.id === 'select');
+  if (select.length !== 1 || select[0]?.run !== 'node scripts/private-integrity-release.ts select') {
+    failures.push('tag release gate must select the authenticated private receipt');
+  }
+  const selectEnv = asRecord(select[0]?.env);
+  if (
+    !selectEnv
+    || selectEnv.QUALITY_RUN_ID !== '${{ github.event.workflow_run.id }}'
+    || selectEnv.QUALITY_RUN_ATTEMPT !== '${{ github.event.workflow_run.run_attempt }}'
+    || selectEnv.QUALITY_HEAD_SHA !== '${{ github.event.workflow_run.head_sha }}'
+    || selectEnv.GH_TOKEN !== '${{ github.token }}'
+    || Object.keys(selectEnv).length !== 4
+  ) failures.push('tag release gate must bind receipt selection to the exact Quality attempt');
+  const downloads = steps.filter((step) => step.uses === 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093');
+  const downloadWith = asRecord(downloads[0]?.with);
+  if (
+    downloads.length !== 1
+    || downloadWith?.['artifact-ids'] !== '${{ steps.select.outputs.artifact-id }}'
+    || downloadWith?.['run-id'] !== '${{ steps.select.outputs.scanner-run-id }}'
+    || downloadWith?.path !== '${{ runner.temp }}/private-integrity'
+    || downloadWith?.['github-token'] !== '${{ github.token }}'
+    || downloadWith?.['merge-multiple'] !== true
+  ) failures.push('tag release gate must download only the authenticated scanner artifact');
+  const verify = steps.filter((step) => step.name === 'Verify private integrity receipt');
+  if (
+    verify.length !== 1
+    || verify[0]?.run !== 'node scripts/private-integrity-release.ts verify --receipt "$RUNNER_TEMP/private-integrity/receipt.json"'
+    || asRecord(verify[0]?.env)?.SCANNER_ARTIFACT_ID !== '${{ steps.select.outputs.artifact-id }}'
+    || asRecord(verify[0]?.env)?.SCANNER_RUN_ID !== '${{ steps.select.outputs.scanner-run-id }}'
+  ) failures.push('tag release gate must verify the exact downloaded private receipt');
+  return failures;
+}
+
+export function privateTestIntegrityFailures(text: string): string[] {
+  const { root, failures: parseFailures } = parseWorkflow(text, 'private test integrity workflow');
+  if (!root) return parseFailures;
+  const failures: string[] = [];
+  const workflowRun = asRecord(asRecord(root.on)?.workflow_run);
+  if (
+    !workflowRun
+    || !Array.isArray(workflowRun.workflows)
+    || workflowRun.workflows.length !== 1
+    || workflowRun.workflows[0] !== 'Quality'
+    || !Array.isArray(workflowRun.types)
+    || workflowRun.types.length !== 1
+    || workflowRun.types[0] !== 'completed'
+  ) failures.push('private test integrity must trigger only from completed Quality workflow runs');
+  const scanner = asRecord(asRecord(root.jobs)?.['private-scanner']);
+  const condition = typeof scanner?.if === 'string' ? scanner.if : '';
+  for (const required of [
+    "github.repository == 'LucasQuiles/WhatSoup'",
+    "github.event.workflow_run.status == 'completed'",
+    'github.event.workflow_run.head_repository.full_name == github.repository',
+    "github.event.workflow_run.event == 'pull_request'",
+    "github.event.workflow_run.head_branch == 'main'",
+    "startsWith(github.event.workflow_run.head_branch, 'v')",
+    "github.event.workflow_run.event == 'schedule'",
+  ]) {
+    if (!condition.includes(required)) {
+      failures.push(required.includes("'v'")
+        ? 'private test integrity must admit successful same-repository v* Quality pushes'
+        : 'private test integrity must retain its trusted source admission predicate');
+    }
+  }
+  if (scanner?.['runs-on'] !== 'ubuntu-24.04' || scanner.environment !== 'private-scanner-trusted') {
+    failures.push('private test integrity must remain an environment-protected trusted runner');
+  }
+  const steps = Array.isArray(scanner?.steps)
+    ? scanner.steps.map(asRecord).filter(Boolean) as Record<string, unknown>[]
+    : [];
+  const scan = steps.filter((step) => step.name === 'Qualify runtime and scan exact pull request data');
+  if (scan.length !== 1) {
+    failures.push('private test integrity must run one trusted scanner step');
+    return failures;
+  }
+  if (hasOwn(scan[0]!, 'continue-on-error')) {
+    failures.push('private test integrity scanner must not mask its terminal result');
+  }
+  const scanEnv = asRecord(scan[0]?.env);
+  if (
+    !scanEnv
+    || scanEnv.QUALITY_RUN_ID !== '${{ github.event.workflow_run.id }}'
+    || scanEnv.QUALITY_EVENT !== '${{ github.event.workflow_run.event }}'
+    || scanEnv.QUALITY_RUN_ATTEMPT !== '${{ github.event.workflow_run.run_attempt }}'
+    || scanEnv.QUALITY_HEAD_SHA !== '${{ github.event.workflow_run.head_sha }}'
+    || scanEnv.GITHUB_RUN_ID !== '${{ github.run_id }}'
+    || scanEnv.GITHUB_RUN_ATTEMPT !== '${{ github.run_attempt }}'
+    || scanEnv.GITHUB_TOKEN !== '${{ github.token }}'
+  ) failures.push('private test integrity must bind the scanner to exact source and producer attempts');
+  const scanRun = typeof scan[0]?.run === 'string' ? scan[0].run : '';
+  for (const required of [
+    'GITHUB_TOKEN="$GITHUB_TOKEN"',
+    'QUALITY_RUN_ID="$QUALITY_RUN_ID"',
+    'QUALITY_EVENT="$QUALITY_EVENT"',
+    'QUALITY_RUN_ATTEMPT="$QUALITY_RUN_ATTEMPT"',
+    'QUALITY_HEAD_SHA="$QUALITY_HEAD_SHA"',
+    'GITHUB_RUN_ID="$GITHUB_RUN_ID"',
+    'GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT"',
+  ]) {
+    if (!scanRun.includes(required)) {
+      failures.push(required.startsWith('GITHUB_TOKEN')
+        ? 'private test integrity must pass the GitHub token to the isolated driver'
+        : 'private test integrity must pass the trusted scanner run identity to the isolated driver');
+    }
+  }
+  if (
+    !scanRun.includes('RECEIPT_PATH="$SCANNER_ROOT/receipt.json"')
+    || !scanRun.includes('receipt_args=(--receipt "$RECEIPT_PATH")')
+    || !scanRun.includes('test -s "$RECEIPT_PATH"')
+    || !scanRun.includes('mv -- "$RECEIPT_PATH" "$RUNNER_TEMP/private-integrity/receipt.json"')
+    || !scanRun.includes('scanner-exit=')
+    || (scanRun.match(/if \[\[ "\$QUALITY_EVENT" != 'pull_request' \]\]; then/g)?.length ?? 0) !== 2
+  ) {
+    failures.push('private test integrity must produce a receipt only for non-PR sources');
+  }
+  const cleanupIndex = steps.findIndex((step) => step.name === 'Remove owned scanner scratch');
+  const cleanup = steps[cleanupIndex];
+  const uploads = steps.filter((step) => step.name === 'Upload private integrity receipt');
+  const uploadIndex = steps.findIndex((step) => step.name === 'Upload private integrity receipt');
+  const uploadWith = asRecord(uploads[0]?.with);
+  if (
+    uploads.length !== 1
+    || cleanupIndex < 0
+    || uploadIndex <= cleanupIndex
+    || cleanup?.id !== 'cleanup'
+    || uploads[0]?.if !== "always() && github.event.workflow_run.event != 'pull_request' && steps.cleanup.outcome == 'success'"
+    || uploads[0]?.uses !== 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
+    || uploadWith?.name !== 'private-integrity-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}'
+    || uploadWith?.path !== '${{ runner.temp }}/private-integrity/receipt.json'
+    || uploadWith?.['if-no-files-found'] !== 'error'
+    || uploadWith?.overwrite !== true
+    || uploadWith?.['retention-days'] !== 30
+  ) failures.push('private test integrity must upload only the receipt after scanner scratch cleanup');
+  const terminal = steps.filter((step) => step.name === 'Enforce private scanner conclusion');
+  if (
+    terminal.length !== 1
+    || terminal[0]?.if !== 'always()'
+    || String(terminal[0]?.run).trim() !== 'case "$SCANNER_EXIT" in\n  0|1|2) exit "$SCANNER_EXIT" ;;\n  *) exit 2 ;;\nesac'
+    || asRecord(terminal[0]?.env)?.SCANNER_EXIT !== '${{ steps.scan.outputs.scanner-exit }}'
+    || hasOwn(terminal[0]!, 'continue-on-error')
+  ) failures.push('private test integrity must return the scanner result after receipt publication');
+  return failures;
+}
+
+function whatsoupGuardNode25CompatibilityFailures(text: string): string[] {
+  const { root, failures: parseFailures } = parseWorkflow(text, 'whatsoup guard workflow');
+  if (!root) return parseFailures;
+  const failures: string[] = [];
+  const triggers = asRecord(root.on);
+  if (!triggers || Object.keys(triggers).length !== 1 || !hasOwn(triggers, 'workflow_call') || hasOwn(root, 'concurrency')) {
+    failures.push('whatsoup guard workflow must be callable only through Quality without separate concurrency');
+  }
+  const test = asRecord(asRecord(root.jobs)?.test);
+  const matrix = asRecord(asRecord(test?.strategy)?.matrix);
+  const nodes = matrix?.node;
+  if (!Array.isArray(nodes) || nodes.length !== 1 || nodes[0] !== '25.x') {
+    failures.push('whatsoup guard workflow must retain exactly the Node 25 compatibility lane');
+  }
+  const steps = Array.isArray(test?.steps)
+    ? test.steps.map(asRecord).filter(Boolean) as Record<string, unknown>[]
+    : [];
+  const setup = steps.filter((step) => step.uses === 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020');
+  if (setup.length !== 1 || asRecord(setup[0]?.with)?.['node-version'] !== '${{ matrix.node }}') {
+    failures.push('whatsoup guard workflow must select its setup Node from the retained matrix lane');
+  }
+  const commands = ['npm ci', 'npm run typecheck', 'npm test'];
+  const runSteps = steps.filter((step) => hasOwn(step, 'run'));
+  if (
+    !test || hasOwn(test, 'if') || hasOwn(test, 'continue-on-error')
+    || asRecord(asRecord(test.defaults)?.run)?.['working-directory'] !== 'tools/whatsoup_guard'
+    || runSteps.length !== commands.length
+    || commands.some((command, index) => runSteps[index]?.run !== command)
+    || steps.some((step) => hasOwn(step, 'if') || hasOwn(step, 'continue-on-error'))
+    || runSteps.some((step) => runControlFailures(step, 'guard validation').length > 0)
+  ) {
+    failures.push('whatsoup guard validation must run npm ci, typecheck and tests unconditionally and block on failure');
+  }
   return failures;
 }
 
@@ -942,33 +1211,164 @@ function qualityCiLanePartitionFailures(text: string): string[] {
   const jobs = asRecord(root.jobs);
   const quality = asRecord(jobs?.quality);
   const compatibility = asRecord(jobs?.compatibility);
-  if (!quality || !compatibility) {
-    return ['quality workflow must declare jobs.quality and jobs.compatibility'];
+  const docs = asRecord(jobs?.docs);
+  const affected = asRecord(jobs?.affected);
+  const compatibilityAffected = asRecord(jobs?.['compatibility-affected']);
+  const full = asRecord(jobs?.full);
+  const compatibilityFull = asRecord(jobs?.['compatibility-full']);
+  const guardCompatibility = asRecord(jobs?.['guard-compatibility']);
+  if (!quality || !compatibility || !docs || !affected || !compatibilityAffected || !full || !compatibilityFull) {
+    return ['quality workflow must declare stable aggregators and every selected-profile validation job'];
+  }
+  const directTags = asRecord(triggers?.push)?.tags;
+  if (!Array.isArray(directTags) || directTags.length !== 1 || directTags[0] !== 'v*') {
+    failures.push('quality workflow must trigger directly on v* tags');
+  }
+  if (hasOwn(triggers ?? {}, 'workflow_call')) {
+    failures.push('quality workflow must not expose a reusable workflow entrypoint');
+  }
+  if (text.includes('TEST_INTEGRITY_DEPLOY_KEY') || text.includes('LucasQuiles/test-integrity.git')) {
+    failures.push('quality workflow must not access private Test Integrity credentials');
   }
   if (quality.name !== 'quality (24.x)') failures.push('jobs.quality name must be exactly quality (24.x)');
   if (compatibility.name !== 'quality (25.x)') {
     failures.push('jobs.compatibility name must be exactly quality (25.x)');
   }
-  if (hasOwn(quality, 'strategy') || hasOwn(compatibility, 'strategy')) {
-    failures.push('quality authority and compatibility jobs must not use a matrix strategy');
+  if (hasOwn(full, 'strategy') || hasOwn(compatibilityFull, 'strategy')) {
+    failures.push('full validation workers must not use a matrix strategy');
   }
-  if (compatibility['timeout-minutes'] !== 40) {
-    failures.push('quality (25.x) compatibility timeout must be exactly 40 minutes');
+  if (full.name !== 'Quality full (24.x)' || full['timeout-minutes'] !== 60) {
+    failures.push('full Node 24 worker must retain its 60-minute authority contract');
   }
-  if (compatibility['runs-on'] !== 'ubuntu-latest') {
-    failures.push('quality (25.x) compatibility runner must be exactly ubuntu-latest');
+  if (compatibilityFull.name !== 'Quality full (25.x)' || compatibilityFull['timeout-minutes'] !== 40) {
+    failures.push('full Node 25 worker must retain its 40-minute compatibility contract');
   }
-  if (hasOwn(compatibility, 'continue-on-error') && compatibility['continue-on-error'] !== false) {
+  if (full['runs-on'] !== 'ubuntu-latest' || compatibilityFull['runs-on'] !== 'ubuntu-latest') {
+    failures.push('full validation workers must run on ubuntu-latest');
+  }
+  if (
+    (hasOwn(full, 'continue-on-error') && full['continue-on-error'] !== false)
+    || (hasOwn(compatibilityFull, 'continue-on-error') && compatibilityFull['continue-on-error'] !== false)
+  ) {
     failures.push('quality (25.x) compatibility job must be blocking');
   }
-  for (const forbiddenKey of ['if', 'needs', 'defaults', 'env']) {
-    if (hasOwn(compatibility, forbiddenKey)) {
-      failures.push(`quality (25.x) compatibility job must not declare ${forbiddenKey}`);
+  const fullGate = "needs.selection.outputs.profile == 'full'";
+  const needsSelection = (job: Record<string, unknown>): boolean => Array.isArray(job.needs)
+    ? job.needs.length === 1 && job.needs[0] === 'selection'
+    : job.needs === 'selection';
+  if (full.if !== fullGate || compatibilityFull.if !== fullGate || !needsSelection(full) || !needsSelection(compatibilityFull)) {
+    failures.push('full validation workers must be selected only by the full profile after selection');
+  }
+  const aggregate = (job: Record<string, unknown>, matrix: string, requiredNeeds: string[]): void => {
+    if (job.if !== 'always()') failures.push(`quality (${matrix}) aggregator must use if: always()`);
+    const jobNeeds = job.needs;
+    if (
+      !Array.isArray(jobNeeds)
+      || jobNeeds.length !== requiredNeeds.length
+      || requiredNeeds.some((need) => !jobNeeds.includes(need))
+    ) {
+      failures.push(`quality (${matrix}) aggregator must depend exactly on every selected validation job`);
     }
+    if (hasOwn(job, 'continue-on-error') && job['continue-on-error'] !== false) {
+      failures.push(`quality (${matrix}) aggregator must be blocking`);
+    }
+    const steps = Array.isArray(job.steps) ? job.steps.map(asRecord).filter(Boolean) as Record<string, unknown>[] : [];
+    const checks = steps.filter((step) => typeof step.run === 'string' && step.run.includes('scripts/check-test-jobs.ts'));
+    const checkerRun = 'node --experimental-strip-types scripts/check-test-jobs.ts';
+    if (checks.length !== 1 || checks[0]?.run !== checkerRun) {
+      failures.push(`quality (${matrix}) aggregator must run the exact check-test-jobs command`);
+      return;
+    }
+    const checker = checks[0]!;
+    if (hasOwn(checker, 'if') || (hasOwn(checker, 'continue-on-error') && checker['continue-on-error'] !== false)) {
+      failures.push(`quality (${matrix}) aggregator checker must be unconditional and blocking`);
+    }
+    failures.push(...runControlFailures(checker, `quality (${matrix}) aggregator checker`, ['env']));
+    const checkerEnv = asRecord(checker.env);
+    if (checkerEnv?.TEST_JOB_MATRIX !== matrix) {
+      failures.push(`quality (${matrix}) aggregator checker must receive TEST_JOB_MATRIX: ${matrix}`);
+    }
+    if (checkerEnv?.TEST_PLAN_JSON !== '${{ needs.selection.outputs.plan }}') {
+      failures.push(`quality (${matrix}) aggregator checker must receive TEST_PLAN_JSON from selection`);
+    }
+    if (checkerEnv?.TEST_JOB_RESULTS !== '${{ toJSON(needs) }}') {
+      failures.push(`quality (${matrix}) aggregator checker must receive TEST_JOB_RESULTS from needs`);
+    }
+    if (!checkerEnv || Object.keys(checkerEnv).length !== 3) {
+      failures.push(`quality (${matrix}) aggregator checker must expose only authoritative inputs`);
+    }
+  };
+  aggregate(quality, 'node24', ['selection', 'docs', 'affected', 'full', 'bot-errors-health-macos']);
+  aggregate(compatibility, 'node25', ['selection', 'docs', 'compatibility-affected', 'compatibility-full', 'guard-compatibility']);
+  if (
+    !guardCompatibility || !needsSelection(guardCompatibility)
+    || guardCompatibility.if !== 'fromJSON(needs.selection.outputs.lanes).guard'
+    || guardCompatibility.uses !== './.github/workflows/whatsoup-guard.yml'
+    || Object.keys(guardCompatibility).some((key) => !['needs', 'if', 'uses', 'name'].includes(key))
+  ) {
+    failures.push('guard compatibility must call the local guard workflow after guard selection without overrides');
+  }
+  if (hasOwn(quality, 'strategy') || hasOwn(compatibility, 'strategy')) {
+    failures.push('required-context aggregators must not use a matrix strategy');
   }
 
-  const qualitySteps = Array.isArray(quality.steps) ? quality.steps.map(asRecord) : [];
-  const compatibilitySteps = Array.isArray(compatibility.steps) ? compatibility.steps.map(asRecord) : [];
+  const requireSelectedWorker = (
+    id: string,
+    job: Record<string, unknown>,
+    selectionCondition: string,
+    terminalStep: string,
+  ): void => {
+    if (job.if !== selectionCondition || !needsSelection(job)) {
+      failures.push(`${id} validation job must retain its selection condition`);
+    }
+    if (hasOwn(job, 'continue-on-error') && job['continue-on-error'] !== false) {
+      failures.push(`${id} validation job must be blocking`);
+    }
+    const steps = Array.isArray(job.steps) ? job.steps.map(asRecord) : [];
+    const terminals = steps.filter((step) => step?.name === terminalStep);
+    if (terminals.length !== 1) {
+      failures.push(`${id} validation job must contain exactly one ${terminalStep} step`);
+      return;
+    }
+    const terminal = terminals[0]!;
+    if (hasOwn(terminal, 'if') || hasOwn(terminal, 'continue-on-error')) {
+      failures.push(`${id} validation terminal step must be unconditional and blocking`);
+    }
+  };
+  requireSelectedWorker('docs', docs, "needs.selection.outputs.profile == 'docs'", 'Documentation drift guard');
+  requireSelectedWorker('affected', affected, "needs.selection.outputs.profile == 'affected'", 'Run affected Quality suites');
+  requireSelectedWorker(
+    'compatibility-affected',
+    compatibilityAffected,
+    "needs.selection.outputs.profile == 'affected' && fromJSON(needs.selection.outputs.lanes).compatibility",
+    'Run affected compatibility root suite',
+  );
+  requireSelectedWorker('full', full, fullGate, 'Test suite + coverage thresholds');
+  requireSelectedWorker('compatibility-full', compatibilityFull, fullGate, 'Full compatibility test suite');
+
+  const affectedSteps = Array.isArray(affected.steps)
+    ? affected.steps.map(asRecord).filter(Boolean) as Record<string, unknown>[]
+    : [];
+  const requireAffectedRootGuard = (name: string, run: string): void => {
+    const named = affectedSteps.filter((step) => step.name === name);
+    const runCount = affectedSteps.filter((step) => step.run === run).length;
+    if (named.length !== 1 || runCount !== 1 || named[0]?.run !== run) {
+      failures.push(`affected root lane must run exactly once: ${run}`);
+      return;
+    }
+    const step = named[0]!;
+    if (step.if !== 'fromJSON(needs.selection.outputs.lanes).root') {
+      failures.push(`affected root guard must be selected by root lane: ${run}`);
+    }
+    if (hasOwn(step, 'continue-on-error') && step['continue-on-error'] !== false) {
+      failures.push(`affected root guard must be blocking: ${run}`);
+    }
+  };
+  requireAffectedRootGuard('Import cycle guard when selected', 'npm run guard:import-cycle');
+  requireAffectedRootGuard('Phantom dependency guard when selected', 'npm run guard:phantom-deps');
+
+  const qualitySteps = Array.isArray(full.steps) ? full.steps.map(asRecord) : [];
+  const compatibilitySteps = Array.isArray(compatibilityFull.steps) ? compatibilityFull.steps.map(asRecord) : [];
   if (qualitySteps.some((step) => !step) || compatibilitySteps.some((step) => !step)) {
     failures.push('quality authority and compatibility steps must all be mappings');
     return failures;
@@ -1050,6 +1450,20 @@ function qualityCiLanePartitionFailures(text: string): string[] {
   if (exactRunCount(macosSteps, macosPortableRun) !== 1) {
     failures.push('bot-errors-health-macos must run the portable Python and release-proof prerequisite suites exactly once');
   }
+  if (macos?.['timeout-minutes'] !== 10) {
+    failures.push('bot-errors-health-macos must retain its 10-minute qualification budget');
+  }
+  if (macos?.if !== fullGate || !needsSelection(macos)) {
+    failures.push('bot-errors-health-macos must remain a full-profile validation job');
+  }
+  if (macos) {
+    requireSelectedWorker(
+      'bot-errors-health-macos',
+      macos,
+      fullGate,
+      'Portable Python and release-proof prerequisites (real macOS)',
+    );
+  }
   for (const run of [
     'npm run coverage:check -- --pool=forks',
     'npm run verify:console-design:live',
@@ -1061,7 +1475,7 @@ function qualityCiLanePartitionFailures(text: string): string[] {
   for (const run of [
     'npm ci',
     'npm --prefix console ci',
-    'npm test -- --pool=forks',
+    'node --experimental-strip-types scripts/full-suite-battery.ts --pool=forks',
     'npm --prefix console run build',
   ]) {
     const matchingSteps = compat.filter((step) => step.run === run);
@@ -1074,7 +1488,7 @@ function qualityCiLanePartitionFailures(text: string): string[] {
       }
     }
   }
-  const compatibilityText = collectStringValues(compatibility).join('\n');
+  const compatibilityText = collectStringValues(compatibilityFull).join('\n');
   for (const forbidden of [
     'coverage:check',
     'guard:',
@@ -1091,33 +1505,28 @@ function qualityCiLanePartitionFailures(text: string): string[] {
   if (exactRunCount(authority, 'bash scripts/ci-disk-reclaim.sh') !== 1) {
     failures.push('quality (24.x) must run the measured CI disk-budget helper exactly once');
   }
+  for (const run of [
+    'npm --prefix tools/whatsoup_guard ci',
+    'npm --prefix tools/whatsoup_guard run typecheck',
+    'npm --prefix tools/whatsoup_guard test -- --maxWorkers=2',
+  ]) {
+    if (exactRunCount(authority, run) !== 1) failures.push(`full Node 24 worker must run exactly once: ${run}`);
+  }
+  const tagReleaseHygiene = authority.filter((step) => step.name === 'Release hygiene guard (tags)');
+  if (
+    tagReleaseHygiene.length !== 1
+    || tagReleaseHygiene[0]?.if !== "startsWith(github.ref, 'refs/tags/')"
+    || tagReleaseHygiene[0]?.run !== 'npm run guard:repo:release-hygiene'
+    || hasOwn(tagReleaseHygiene[0]!, 'continue-on-error')
+  ) {
+    failures.push('full Node 24 worker must run release hygiene on tag refs');
+  }
   if (text.includes('docker image prune --all --force || true') || text.includes('sudo rm -rf /usr/share/dotnet')) {
     failures.push('quality workflow must not retain masked unconditional disk cleanup');
   }
 
-  const integritySteps = authority.filter((step) => step.name === 'Install test-integrity plugin');
-  const integrity = integritySteps[0];
-  if (integritySteps.length !== 1 || !integrity) {
-    failures.push('quality (24.x) must install Test Integrity exactly once');
-  } else {
-    const env = asRecord(integrity.env);
-    const pin = env?.TEST_INTEGRITY_COMMIT;
-    if (pin !== 'ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c') {
-      failures.push('Test Integrity commit pin must match the reviewed 40-hex object');
-    }
-    const run = typeof integrity.run === 'string' ? integrity.run : '';
-    for (const required of [
-      'mkdir -p "$plugin_dir" "$HOME/.ssh"',
-      'fetch --depth 1 origin "$TEST_INTEGRITY_COMMIT"',
-      'switch --detach FETCH_HEAD',
-      'observed_commit="$(git -C "$plugin_dir" rev-parse HEAD)"',
-      'if [ "$observed_commit" != "$TEST_INTEGRITY_COMMIT" ]; then',
-    ]) {
-      if (!run.includes(required)) failures.push(`Test Integrity install is missing ${required}`);
-    }
-    if (/\bgit\b[^\n]*\b(?:push|clone)\b/.test(run)) {
-      failures.push('Test Integrity install must not use floating clone or any push command');
-    }
+  if (authority.some((step) => step.name === 'Install test-integrity plugin' || step.name === 'Test integrity baseline check')) {
+    failures.push('quality workflow must keep private Test Integrity execution in the trusted scanner');
   }
   return failures;
 }
@@ -1126,30 +1535,30 @@ function qualityCiPlaywrightTimeoutFailures(text: string): string[] {
   const { root, failures: parseFailures } = parseWorkflow(text, 'quality workflow');
   if (!root) return parseFailures;
   const jobs = asRecord(root?.jobs);
-  const quality = asRecord(jobs?.quality);
-  if (!quality) return ['workflow must declare jobs.quality as a mapping'];
+  const full = asRecord(jobs?.full);
+  if (!full) return ['workflow must declare jobs.full as a mapping'];
 
   const failures: string[] = [];
   if (hasOwn(root, 'defaults')) failures.push('quality workflow must not declare defaults');
   if (hasOwn(root, 'env')) failures.push('quality workflow must not declare env');
-  if (quality['timeout-minutes'] !== 60) {
+  if (full['timeout-minutes'] !== 60) {
     failures.push('quality job timeout must be exactly 60 minutes');
   }
-  if (hasOwn(quality, 'continue-on-error') && quality['continue-on-error'] !== false) {
+  if (hasOwn(full, 'continue-on-error') && full['continue-on-error'] !== false) {
     failures.push('quality job continue-on-error must be absent or false');
   }
-  if (hasOwn(quality, 'if')) {
-    failures.push('quality job must not declare if');
+  if (full.if !== "needs.selection.outputs.profile == 'full'") {
+    failures.push('full job must be gated by the full selection profile');
   }
-  if (hasOwn(quality, 'needs')) failures.push('quality job must not declare needs');
-  if (hasOwn(quality, 'defaults')) failures.push('quality job must not declare defaults');
-  if (hasOwn(quality, 'env')) failures.push('quality job must not declare env');
+  if (full.needs !== 'selection') failures.push('full job must depend only on selection');
+  if (hasOwn(full, 'defaults')) failures.push('quality job must not declare defaults');
+  if (hasOwn(full, 'env')) failures.push('full job must not declare env');
 
-  if (!Array.isArray(quality.steps)) {
-    failures.push('quality job must declare steps as an array');
+  if (!Array.isArray(full.steps)) {
+    failures.push('full job must declare steps as an array');
     return failures;
   }
-  const steps = quality.steps.map(asRecord);
+  const steps = full.steps.map(asRecord);
   if (steps.some((step) => !step)) {
     failures.push('every quality-job step must be a mapping');
     return failures;
@@ -1239,7 +1648,10 @@ function conditionalRunFailures(text: string, runs: string[], requiredJobId?: st
   for (const [jobId, jobValue] of jobEntries) {
     const job = asRecord(jobValue);
     if (!job || !Array.isArray(job.steps)) continue;
-    if (hasOwn(job, 'needs')) failures.add(`workflow job ${jobId} must not declare needs`);
+    const fullProfileWorker = jobId === 'full'
+      && job.if === "needs.selection.outputs.profile == 'full'"
+      && job.needs === 'selection';
+    if (hasOwn(job, 'needs') && !fullProfileWorker) failures.add(`workflow job ${jobId} must not declare needs`);
     if (hasOwn(job, 'defaults')) failures.add(`workflow job ${jobId} must not declare defaults`);
     if (hasOwn(job, 'env')) failures.add(`workflow job ${jobId} must not declare env`);
     for (const stepValue of job.steps) {
@@ -1259,6 +1671,9 @@ function conditionalRunFailures(text: string, runs: string[], requiredJobId?: st
       failures.add(`workflow must contain exactly one ${requiredRun} step (found ${matches.length})`);
     }
     for (const { jobId, job, step } of matches) {
+      const fullProfileWorker = jobId === 'full'
+        && job.if === "needs.selection.outputs.profile == 'full'"
+        && job.needs === 'selection';
       if (hasOwn(step, 'if')) {
         failures.add(`conditional ${requiredRun} (if: ${renderValue(step.if)})`);
       }
@@ -1268,7 +1683,7 @@ function conditionalRunFailures(text: string, runs: string[], requiredJobId?: st
         );
       }
       for (const failure of runControlFailures(step, requiredRun)) failures.add(failure);
-      if (hasOwn(job, 'if')) {
+      if (hasOwn(job, 'if') && !fullProfileWorker) {
         failures.add(`conditional job ${jobId} for ${requiredRun} (if: ${renderValue(job.if)})`);
       }
       if (hasOwn(job, 'continue-on-error') && job['continue-on-error'] !== false) {
@@ -1398,11 +1813,12 @@ function summarize(checks: DiagnosticCheck[]): Record<DiagnosticStatus, number> 
 export function checkSafeguards(cwd = process.cwd(), strict = false): SafeguardDiagnosticsReport {
   const scripts = loadPackageScripts(cwd);
   const consoleScripts = loadPackageScripts(cwd, 'console/package.json');
+  const chainScripts = consoleDesignChainView(cwd, scripts, consoleScripts);
   const gitContext = collectGitContext(cwd);
   const checks = [
     checkScriptPresence(scripts),
-    checkConsoleDesignScriptCoverage(scripts, consoleScripts),
-    ...CHAIN_REQUIREMENTS.map((requirement) => checkChainRequirement(scripts, requirement)),
+    checkConsoleDesignScriptCoverage(chainScripts, consoleScripts),
+    ...CHAIN_REQUIREMENTS.map((requirement) => checkChainRequirement(chainScripts, requirement)),
     ...ANCHOR_REQUIREMENTS.map((requirement) => checkAnchors(cwd, requirement)),
     ...portableArtifactChecks(gitContext),
     ...repoStateChecks(gitContext),

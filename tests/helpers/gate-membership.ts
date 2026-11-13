@@ -1,5 +1,5 @@
 /**
- * One definition of "this check actually runs on a merge nobody can bypass".
+ * One definition of full-profile check reachability in the committed workflows.
  *
  * Two suites need that answer and they must not compute it separately:
  *
@@ -14,27 +14,29 @@
  * WHY server-side matters (2026-07-22): `verify:push:branch` runs from a husky pre-push
  * hook, and client-side hooks are advisory. `gh pr merge`, the GitHub merge button,
  * `--no-verify`, and any clone where husky was never installed all bypass it entirely.
- * A check that lives ONLY in the push gate is therefore not enforcement — it is a
- * courtesy. `guard:transport-patterns` was in exactly that state while backing three
+ * A local-only check cannot establish server-side enforcement.
+ * `guard:transport-patterns` was in exactly that state while backing three
  * block-severity rules.
  *
  * WHICH GATE, not just "the gate" (2026-07-22, second pass). The first version of this
  * helper read `quality.yml` alone and answered "gate-reachable" without saying which gate
- * it meant. There are two independent server-side paths and they are NOT equivalent:
- * `tag-release-gate.yml` runs fifteen discrete guard steps and **no unit suite at all**
- * (`grep -c "npm run coverage:check"` → 0). Every reachability answer is therefore
- * per-path, and the caller must choose. See `GatePath`.
+ * it meant. There are two server-side paths. A v* tag starts Quality directly; the
+ * tag-release consumer waits for that Quality completion and validates its
+ * trusted private-integrity receipt before this helper credits the full path. See `GatePath`.
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { parseDocument } from 'yaml';
 import { BRANCH_STEPS } from '../../scripts/push-gate.ts';
+import { privateTestIntegrityFailures } from '../../scripts/safeguard-diagnostics.ts';
 
 /**
- * The independent server-side gates. Neither subsumes the other:
- *   - `pull-request` (`quality.yml`) runs the full suite via `coverage:check`, so a
- *     live-tree test can carry a guard that has no named step of its own.
- *   - `tag-release` (`tag-release-gate.yml`) runs NO unit suite, so on that path a named
- *     step is the ONLY way a check runs. The exemption route does not exist there.
+ * The independent server-side gates:
+ *   - `pull-request` (`quality.yml`) has a full profile that runs `coverage:check`, so a
+ *     live-tree test can carry a guard that has no named step of its own. This helper does
+ *     not claim that eligible docs/affected fast paths execute every full-profile backstop.
+ *   - `tag-release` starts Quality's non-PR full profile directly. Its trusted completion
+ *     consumer is verified before this path receives Quality's coverage.
  */
 export const GATE_PATHS = ['pull-request', 'tag-release'] as const;
 export type GatePath = (typeof GATE_PATHS)[number];
@@ -46,6 +48,93 @@ export interface GateInputs {
   qualityWorkflow: string;
   /** Raw text of `.github/workflows/tag-release-gate.yml` — the tag/release gate. */
   tagReleaseWorkflow: string;
+  /** Trusted scanner is a separate workflow; Quality must not acquire its credentials. */
+  privateIntegrityWorkflow?: string;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string')
+    ? value
+    : [];
+}
+
+function workflowRoot(text: string): Record<string, unknown> | null {
+  const document = parseDocument(text);
+  if (document.errors.length > 0) return null;
+  return asRecord(document.toJSON());
+}
+
+/** The raw text of one top-level workflow job, or null when the job is absent. */
+function workflowJob(workflow: string, id: string): string | null {
+  const header = new RegExp(`^ {2}${id}:\\s*\\n`, 'm').exec(workflow);
+  if (!header || header.index === undefined) return null;
+  const start = header.index + header[0].length;
+  const followingJob = /^ {2}[A-Za-z0-9_-]+:\s*(?:#.*)?$/m.exec(workflow.slice(start));
+  return workflow.slice(start, followingJob ? start + followingJob.index : undefined);
+}
+
+/** Structural counterpart of the selection step's executable contract tests. */
+function forcedFullSelection(root: Record<string, unknown> | null): boolean {
+  const selection = asRecord(asRecord(root?.jobs)?.selection);
+  if (asRecord(selection?.outputs)?.profile !== '${{ steps.plan.outputs.profile }}'
+    || !Array.isArray(selection?.steps)) return false;
+  const step = selection.steps.map(asRecord).find((entry) => entry?.id === 'plan');
+  return typeof step?.run === 'string'
+    && /^\s*const isPr = process\.env\.GITHUB_EVENT_NAME === 'pull_request';\s*$/m.test(step.run)
+    && /^\s*const plan = !isPr \|\| controlsChanged \? \{\s*profile: 'full'/m.test(step.run);
+}
+
+/**
+ * The tag path reaches this exact full job, not every command that happens to appear in
+ * an otherwise unused Quality workflow. All facts below are required for a callable path.
+ */
+function callableTagFullJob(inputs: GateInputs): string | null {
+  const qualityRoot = workflowRoot(inputs.qualityWorkflow);
+  const tagRoot = workflowRoot(inputs.tagReleaseWorkflow);
+  const qualityTriggers = asRecord(qualityRoot?.on);
+  const tagTriggers = asRecord(tagRoot?.on);
+  const qualityPush = asRecord(qualityTriggers?.push);
+  if (!stringList(qualityPush?.tags).includes('v*')) {
+    return null;
+  }
+  const workflowRun = asRecord(tagTriggers?.workflow_run);
+  if (
+    !workflowRun
+    || !stringList(workflowRun.workflows).includes('Quality')
+    || !stringList(workflowRun.types).includes('completed')
+    || tagTriggers?.push !== undefined
+  ) {
+    return null;
+  }
+  const releaseGate = asRecord(asRecord(tagRoot?.jobs)?.['release-gate']);
+  const gateCondition = typeof releaseGate?.if === 'string' ? releaseGate.if : '';
+  if (
+    !releaseGate
+    || !gateCondition.includes("github.event.workflow_run.event == 'push'")
+    || !gateCondition.includes("startsWith(github.event.workflow_run.head_branch, 'v')")
+    || gateCondition.includes("github.event.workflow_run.conclusion == 'success'")
+    || !Array.isArray(releaseGate.steps)
+    || !releaseGate.steps.some((step) => (
+      asRecord(step)?.uses === 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262'
+      && asRecord(asRecord(step)?.with)?.ref === '${{ github.sha }}'
+    ))
+    || !releaseGate.steps.some((step) => asRecord(step)?.run === 'node scripts/private-integrity-release.ts select')
+    || !releaseGate.steps.some((step) => (
+      asRecord(step)?.run === 'node scripts/private-integrity-release.ts verify --receipt \"$RUNNER_TEMP/private-integrity/receipt.json\"'
+    ))
+    || !forcedFullSelection(qualityRoot)
+  ) return null;
+  const full = workflowJob(inputs.qualityWorkflow, 'full');
+  if (!full || !/^ {4}if:\s*needs\.selection\.outputs\.profile == 'full'\s*$/m.test(full)) {
+    return null;
+  }
+  return full;
 }
 
 export function readGateInputs(repoRoot: string): GateInputs {
@@ -59,20 +148,21 @@ export function readGateInputs(repoRoot: string): GateInputs {
       resolve(repoRoot, '.github/workflows/tag-release-gate.yml'),
       'utf8',
     ),
+    privateIntegrityWorkflow: readFileSync(resolve(repoRoot, '.github/workflows/private-test-integrity.yml'), 'utf8'),
   };
 }
 
-/** The workflow text for a given path. */
+/** The commands actually reachable for a given path. */
 export function workflowFor(path: GatePath, inputs: GateInputs): string {
-  return path === 'pull-request' ? inputs.qualityWorkflow : inputs.tagReleaseWorkflow;
+  if (path === 'pull-request') return inputs.qualityWorkflow;
+  return callableTagFullJob(inputs) ?? inputs.tagReleaseWorkflow;
 }
 
 /**
  * Does this path run the full vitest suite?
  *
- * This is the single fact that makes the two paths behave differently, so it is derived
- * from the workflow text rather than hardcoded per path — if `tag-release-gate.yml` ever
- * gains `coverage:check`, every dependent answer updates without editing this file.
+ * It is derived from the commands actually callable on each path rather than hardcoded.
+ * A tag consumer earns its full-suite result only by resolving to Quality's selected full job.
  */
 export function runsFullSuite(path: GatePath, inputs: GateInputs): boolean {
   return /npm run coverage:check/.test(workflowFor(path, inputs));
@@ -173,22 +263,25 @@ export interface Reachability {
 }
 
 /**
- * Can a server-side merge on `path` bypass this npm script?
+ * Is this check connected to the full server-side profile on `path`?
  *
  * Reachable two ways, and only two:
- *   - `ci-step`             — named directly in that path's workflow. Unbypassable.
+ *   - `ci-step`             — named in that workflow or connected through the validated
+ *                             trusted private scanner workflow.
  *   - `push-gate-exemption` — in `verify:push:branch` with an entry in
  *                             CI_EXEMPT_PUSH_GATE_GUARDS, i.e. a live-tree test carries the
  *                             same assertion inside the full suite.
  *
  * The exemption route is conditional on the path actually running the full suite, which is
- * why `runsFullSuite` is consulted rather than assumed. On `tag-release` it is false, so an
- * exempted guard is genuinely unreachable there even though it is reachable on
- * `pull-request` — the asymmetry that made the first, path-blind version of this function
- * overstate its answer.
+ * why `runsFullSuite` is consulted rather than assumed. This is a full-profile audit, not
+ * a claim that an eligible docs/affected fast path runs every backstop. The trusted tag
+ * consumer gets that coverage only when direct tag dispatch reaches Quality's selected full
+ * job; a broken or redirected completion remains unreachable instead of borrowing unrelated
+ * Quality commands.
  *
  * Anything else is `none`: on that path it runs from an advisory client-side hook, or not
- * at all.
+ * at all. This static wiring audit does not authenticate live branch protection,
+ * workflow execution or the implementation's semantic guarantees.
  */
 export function scriptReachability(
   script: string,
@@ -196,6 +289,12 @@ export function scriptReachability(
   path: GatePath = 'pull-request',
 ): Reachability {
   const workflow = workflowFor(path, inputs);
+  if (script === 'guard:test-integrity'
+    && inputs.privateIntegrityWorkflow
+    && privateTestIntegrityFailures(inputs.privateIntegrityWorkflow).length === 0
+    && (path === 'pull-request' || callableTagFullJob(inputs) !== null)) {
+    return { reachable: true, via: 'ci-step', detail: `trusted private scanner workflow on ${path}; live required-check configuration is verified separately` };
+  }
   if (namedInCi(script, workflow)) {
     return { reachable: true, via: 'ci-step', detail: `named step in the ${path} workflow` };
   }

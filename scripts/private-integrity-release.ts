@@ -157,7 +157,7 @@ function githubReader(deadline: number, environment: NodeJS.ProcessEnv): GetJson
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new IntegrityReleaseError('GitHub read deadline expired');
     try {
-      const output = execFileSync('gh', ['api', '--hostname', 'github.com', '--method', 'GET', `repos/${REPOSITORY}/${suffix}`], {
+      const output = execFileSync('gh', ['api', '--hostname', 'github.com', '--method', 'GET', `repos/${REPOSITORY}${suffix ? `/${suffix}` : ''}`], {
         encoding: 'utf8', maxBuffer: 2 * 1024 * 1024, timeout: Math.min(15_000, remaining),
         stdio: ['ignore', 'pipe', 'pipe'],
         env: { ...cleanGitEnv(), GH_TOKEN: environment.GH_TOKEN ?? environment.GITHUB_TOKEN, GH_PROMPT_DISABLED: '1', GH_DEBUG: '' },

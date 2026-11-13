@@ -28,7 +28,7 @@ import type { ToastContextValue } from '../../console/src/hooks/toast-context';
 import type { LineInstance } from '../../console/src/types';
 import '../../console/src/index.css';
 
-const ENFORCE = false; // flip with PERF_LANE_ENFORCE once §1 numbers are owner-approved
+const ENFORCE = import.meta.env.PERF_LANE_ENFORCE === '1';
 
 function makeLine(i: number): LineInstance {
   return {
@@ -150,7 +150,7 @@ describe('Perf budget legs (b-12 deferred, provisional §1 numbers)', () => {
     if (ENFORCE) expect(mountMs).toBeLessThan(50);
   });
 
-  it('event storm: 10 rapid single-line updates stay under the frame budget', async () => {
+  it('measures render cost for 10 rapid single-line updates', async () => {
     const frameCosts: number[] = [];
     const onRender = (
       _id: string,
