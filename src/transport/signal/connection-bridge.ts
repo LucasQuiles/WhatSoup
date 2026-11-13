@@ -138,7 +138,11 @@ export class SignalConnection extends EventEmitter implements RuntimeConnection 
 
   private emitUnregisteredAlert(error: unknown): void {
     const payload = (error as { payload?: { code?: unknown; providerCode?: unknown } })?.payload;
-    if (payload?.code !== 'transport.auth_required' || this.unregisteredAlertEmitted) return;
+    if (payload?.code !== 'transport.auth_required') return;
+    // A newer auth failure invalidates recovery even when the original
+    // accepted onset still suppresses duplicate alerts after a rejected clear.
+    this.unregisteredClearPending = false;
+    if (this.unregisteredAlertEmitted) return;
     this.unregisteredAlertEmitted = emitAlertChecked(
       this.instanceName,
       'signal_cli_unregistered',
@@ -152,10 +156,6 @@ export class SignalConnection extends EventEmitter implements RuntimeConnection 
       }),
       'critical',
     );
-    // #2394: a fresh accepted onset means the account is broken AGAIN — any
-    // pending clear proven by an earlier connect is no longer recovery
-    // evidence and must not close the new incident.
-    if (this.unregisteredAlertEmitted) this.unregisteredClearPending = false;
   }
 
   /**
