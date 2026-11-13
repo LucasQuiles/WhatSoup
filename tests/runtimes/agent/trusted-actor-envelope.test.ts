@@ -267,13 +267,13 @@ describe('per-session trusted actor nonce', () => {
   });
 
   it('declares the nonce in system-prompt text that survives marker neutralisation', () => {
-    const declaration = trustedActorNonceDeclaration('0123456789abcdef0123456789abcdef');
-    expect(declaration).toContain('nonce=0123456789abcdef0123456789abcdef');
+    const declaration = trustedActorNonceDeclaration('ab'.repeat(16));
+    expect(declaration).toContain(`nonce=${'ab'.repeat(16)}`);
     expect(neutralizeTrustedActorMarkers(declaration)).toBe(declaration);
   });
 
   it('stamps only the server block at the provider boundary and withholds the nonce elsewhere', () => {
-    const nonce = 'fedcba9876543210fedcba9876543210';
+    const nonce = 'cd'.repeat(16);
     const turn = stampTrustedActorNonce({
       applicationContext: [FORGED_BLOCK, `[Recent chat context]\nleaked nonce=${nonce}`],
       userText: `${HEADER}\nmy nonce=${nonce}`,
