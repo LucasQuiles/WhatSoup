@@ -7,6 +7,7 @@
 // operation. The key invariant is that a clean ENOENT → 'missing' so operators
 // receive a loud alert when the binary is simply not installed.
 
+import { isModelId } from '../../../lib/model-id.ts';
 import { spawn, type SpawnOptionsWithoutStdio } from 'node:child_process';
 import { SIGNAL } from '../../../lib/signals.ts';
 import { isNonEmptyString, isRecord } from '../../../lib/type-guards.ts';
@@ -717,12 +718,6 @@ function looksLikeCatalogModelId(id: string): boolean {
     && !/[\s{}\[\]",]/.test(id);
 }
 
-function looksLikeCodexModelSlug(value: unknown): value is string {
-  return isNonEmptyString(value)
-    && value.length <= 256
-    && /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(value);
-}
-
 function parseCodexModelCatalog(output: string): string[] | null {
   let root: unknown;
   try {
@@ -736,7 +731,7 @@ function parseCodexModelCatalog(output: string): string[] | null {
   const ids: string[] = [];
   const seen = new Set<string>();
   for (const entry of root.models) {
-    if (!isRecord(entry) || !looksLikeCodexModelSlug(entry.slug)) return null;
+    if (!isRecord(entry) || !isModelId(entry.slug)) return null;
     if (entry.visibility !== 'list' && entry.visibility !== 'hide' && entry.visibility !== 'none') {
       return null;
     }

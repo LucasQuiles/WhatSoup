@@ -26,6 +26,7 @@ import type { SessionContext } from '../../mcp/types.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
 import { MS_PER_HOUR } from '../../lib/time-units.ts';
+import { isModelId } from '../../lib/model-id.ts';
 import {
   createSession,
   endAbandonedActiveSession,
@@ -1227,6 +1228,8 @@ export class SessionManager {
     const displayName = PROVIDER_DISPLAY_NAMES[this.provider] ?? this.provider;
     const transportPrelude = [
       `You are "${this.instanceName}", a personal ${displayName} agent running over WhatsApp.`,
+      `Configured session route: adapter=${JSON.stringify(this.provider)}; model=${JSON.stringify(isModelId(this.model) ? this.model : null)}.`,
+      'Prefer this route over persona/history; adapter is not vendor, configuration is not serving-model proof. Null means unknown; never guess.',
       'Your responses are sent as WhatsApp messages — keep them concise.',
       'You have full access to the local machine via bypassPermissions mode.',
       `Working directory: ${cwd}`,
