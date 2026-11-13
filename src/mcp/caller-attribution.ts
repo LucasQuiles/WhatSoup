@@ -33,6 +33,8 @@ export interface SessionTokenBinding {
   socketPath: string;
   conversationKey?: string;
   requestRef?: string;
+  /** Opaque runtime session identity for turn-reply routing; honoured on session tokens only. */
+  turnReplySessionId?: string;
 }
 
 /** A minted token and the only handle that retires it. */
@@ -112,6 +114,19 @@ export class SessionTokenRegistry implements SessionTokenVerifier {
 export function presentedSessionToken(notificationParams: unknown): string | undefined {
   const presented = isRecord(notificationParams) ? notificationParams['token'] : undefined;
   return isNonEmptyString(presented) ? presented : undefined;
+}
+
+/**
+ * A session token matched on `socketPath` identifies its runtime session, never
+ * a bare token value. A request token never carries turn-reply authority.
+ */
+export function turnReplySessionIdFromPresentedToken(
+  notificationParams: unknown,
+  verifier: SessionTokenVerifier | undefined,
+  socketPath: string,
+): string | undefined {
+  const binding = verifier?.verify(presentedSessionToken(notificationParams), socketPath);
+  return binding?.kind === 'session' ? binding.turnReplySessionId : undefined;
 }
 
 /** Fold a token presented on `socketPath` into a connection's attribution. */

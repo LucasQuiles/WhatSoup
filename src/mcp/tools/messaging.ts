@@ -48,6 +48,7 @@ import type { ResolutionStrategy } from '../../runtimes/agent/runtime.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 import { CrossConversationDenied } from '../cross-conversation-guard.ts';
+import { isTurnOwned } from '../caller-attribution.ts';
 
 // ---------------------------------------------------------------------------
 // Error sanitization — prevent raw API/protocol errors from leaking to agents
@@ -354,8 +355,9 @@ export function registerMessagingTools(
       let auditReceipt: string | undefined;
       let resolvedChatJid: string | undefined;
       let guardDecision: OutboundMessageSafetyDecision | null = null;
+      let turnReplyDisposition: 'queued' | 'suppressed' | 'inactive' | null = null;
       try {
-        await sendPipeline.executeSend(params, async (prepared) => {
+        await sendPipeline.executeSend(params, async (prepared, transportContext) => {
           // Issue 3150 echo: the resolved (alias- and `@lid`-canonicalized)
           // target actually dispatched to, surfaced in the response so callers
           // can verify routing even when a phone JID canonicalized onto an
@@ -374,6 +376,69 @@ export function registerMessagingTools(
             : { text: formatted };
           if (prepared.linkPreviewMode === 'off') content['linkPreview'] = null;
           if (viewOnce) content['viewOnce'] = true;
+          // The durable answer queue only represents ordinary text. Explicit
+          // preview/view-once sends retain raw transport, but reserve the same
+          // one-answer owner before that call and commit only after its ack.
+          // Socket callers need current turn-owned evidence in either case.
+          const turnReplySessionId = session.turnReplySessionId;
+          const canCaptureTurnReply = session.callerAttribution !== undefined
+            && isTurnOwned(session.callerAttribution)
+            && typeof turnReplySessionId === 'string'
+            && turnReplySessionId.length > 0;
+          if (canCaptureTurnReply) {
+            const request = {
+              chatJid: prepared.chatJid,
+              conversationKey: canonicalConversationKey(prepared.chatJid, deps.dbWrapper),
+              text: formatted,
+              runtimeSessionId: turnReplySessionId,
+            };
+            const queueSupportsOptions = !viewOnce && prepared.linkPreviewMode === 'auto';
+            const deferredAudit = transportContext.deferAudit();
+            const turnReply = session.turnReplySink?.({
+              ...request,
+              action: queueSupportsOptions ? 'enqueue' : 'reserve',
+              ...(queueSupportsOptions && deferredAudit ? { deliveryObserver: deferredAudit } : {}),
+            });
+            if (turnReply?.disposition === 'queued' || turnReply?.disposition === 'suppressed') {
+              turnReplyDisposition = turnReply.disposition;
+              return { auditDisposition: turnReply.disposition === 'queued' ? 'deferred' : 'not_sent' };
+            }
+            if (turnReply?.disposition === 'reserved') {
+              try {
+                const receipt = await connection.sendRaw(prepared.chatJid, content);
+                const committed = session.turnReplySink?.({
+                  ...request,
+                  action: 'commit',
+                  reservationId: turnReply.reservationId,
+                });
+                if (committed?.disposition !== 'committed') {
+                  // The provider has already acknowledged this raw send. A turn
+                  // boundary may have invalidated the old reservation while the
+                  // transport awaited its acknowledgement; never rebind that
+                  // acknowledgement to the newer turn, but preserve the actual
+                  // provider submission in the audit instead of misclassifying
+                  // it as a pre-send failure.
+                  log.warn(
+                    { disposition: committed?.disposition ?? 'inactive' },
+                    'raw active-turn reply acknowledged after answer owner expired',
+                  );
+                }
+                return { transportId: receipt.waMessageId };
+              } catch (err) {
+                session.turnReplySink?.({
+                  ...request,
+                  action: 'release',
+                  reservationId: turnReply.reservationId,
+                });
+                throw err;
+              }
+            }
+            if (turnReply?.disposition === 'rejected') {
+              throw new Error('Active turn reply target does not match the admitted conversation');
+            }
+            turnReplyDisposition = 'inactive';
+            return { auditDisposition: 'not_sent' };
+          }
           const receipt = await connection.sendRaw(prepared.chatJid, content);
           return { transportId: receipt.waMessageId };
         }, {
@@ -434,6 +499,22 @@ export function registerMessagingTools(
       }
 
       routeDivertToOps(guardDecision, deps.instanceName);
+      if (turnReplyDisposition === 'suppressed') {
+        return { sent: false, suppressed: true, reason: 'answer_already_claimed' };
+      }
+      if (turnReplyDisposition === 'inactive') {
+        return { sent: false, suppressed: true, reason: 'active_turn_unavailable' };
+      }
+      if (turnReplyDisposition === 'queued') {
+        return {
+          sent: false,
+          queued: true,
+          delivery: 'pending',
+          text: formattedText,
+          ...(resolvedChatJid ? { resolved_chatJid: resolvedChatJid } : {}),
+          ...(auditReceipt ? { audit_receipt: auditReceipt } : {}),
+        };
+      }
       return {
         sent: true,
         text: formattedText,

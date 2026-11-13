@@ -1554,7 +1554,9 @@ describe('runtime terminal coordinator integration', () => {
       state.pendingSystemResults.consumeIfPending('chat-system-barrier');
       await sending;
       expect(beforeUserSend).toHaveBeenCalledOnce();
-      expect(session.sendTurn).toHaveBeenCalledWith('real user turn');
+      expect(session.sendTurn).toHaveBeenCalledWith(expect.objectContaining({
+        userText: 'real user turn',
+      }));
     } finally {
       db.close();
     }
@@ -1612,6 +1614,7 @@ describe('runtime terminal coordinator integration', () => {
       const mapKey = '15550190003';
       const runtimeContext = context('per_chat', mapKey, 9, 'turn-partial-output');
       const queue = queueStub(runtimeContext.identity.deliveryJid);
+      queue.hasCommittedAnswer = vi.fn(() => true);
       state.perChatRuntimeTurnContexts.set(mapKey, [runtimeContext]);
 
       state.handleEventWithContext(

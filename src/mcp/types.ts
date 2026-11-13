@@ -11,6 +11,7 @@ import {
 import type { ClientOutputGateResult } from '../core/client-output-policy-gate.ts';
 import type { M365WorkflowAuthority, M365WorkflowAuthorityScope } from '../core/m365-bridge-policy.ts';
 import type { SessionTokenBinding } from './caller-attribution.ts';
+import type { TurnReplySink } from '../core/turn-reply.ts';
 export { isPathWithinAllowedRoot } from '../lib/path-boundary.ts';
 
 export type ToolScope = 'chat' | 'global';
@@ -100,6 +101,10 @@ export interface SessionContext {
    * connection presented, re-verified on each read. The token never travels here.
    */
   tokenBinding?: () => Readonly<SessionTokenBinding> | undefined;
+  /** Routes an admitted agent-turn reply through the durable outbound queue. */
+  turnReplySink?: TurnReplySink;
+  /** Opaque SessionManager identity admitted from the provider bridge or a matched socket token. */
+  turnReplySessionId?: string;
 }
 
 /** The connection-level half of {@link ToolCallCallerEvidence}. */

@@ -496,11 +496,17 @@ describe('global-socket actor scoping (#2976 direction ii)', () => {
     await arriveMessage({ content: 'sandbox token binding turn' });
     const session = await waitForInFlightTurn((text) => text.includes('sandbox token binding turn'));
     const served = (workspaceSocket() as unknown as { socketPath: string }).socketPath;
-    const lease = (session as unknown as { ctorOpts: { whatsoupMcpSessionLease?: { token: string } } }).ctorOpts.whatsoupMcpSessionLease;
+    const ctorOpts = (session as unknown as {
+      ctorOpts: { whatsoupMcpSessionLease?: { token: string }; mcpSessionContext?: { turnReplySessionId?: string } };
+    }).ctorOpts;
+    const lease = ctorOpts.whatsoupMcpSessionLease;
     const tokens = (runtime as unknown as { sessionTokens: { verify(token: unknown, socketPath: string): unknown } }).sessionTokens;
+    // The socket token carries the same turn-reply identity as the in-process bridge session.
+    const turnReplySessionId = ctorOpts.mcpSessionContext?.turnReplySessionId;
 
     expect(served).toBe(workspaceSocketPath(`/tmp/whatsoup-test-ws-${chatJid.replace(/@.*$/, '')}`));
-    expect(tokens.verify(lease?.token, served)).toEqual({ kind: 'session', socketPath: served });
+    expect(turnReplySessionId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(tokens.verify(lease?.token, served)).toEqual({ kind: 'session', socketPath: served, turnReplySessionId });
     for (const other of [
       '/tmp/whatsoup-test-agent/.claude/whatsoup.sock',
       workspaceSocketPath('/tmp/whatsoup-test-ws-15551230099'),

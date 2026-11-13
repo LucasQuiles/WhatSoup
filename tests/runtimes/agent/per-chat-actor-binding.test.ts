@@ -680,12 +680,19 @@ describe('F-STICKY-ACTOR hardening: createSessionManager is the single wiring ch
       .mockReturnValue({ mcpSocketPath: '/tmp/actor.sock', providerTransitionReady: Promise.resolve() });
     const mock = SessionManager as unknown as ReturnType<typeof vi.fn>;
     priv().createSessionManager(baseOpts());
-    const options = mock.mock.calls.at(-1)?.[0] as { whatsoupMcpSocket?: string; whatsoupMcpSessionLease?: { token: string } };
+    const options = mock.mock.calls.at(-1)?.[0] as {
+      whatsoupMcpSocket?: string;
+      whatsoupMcpSessionLease?: { token: string };
+      mcpSessionContext?: { turnReplySessionId?: string };
+    };
     const tokens = (runtime as unknown as { sessionTokens: { verify(token: unknown, socketPath: string): unknown } }).sessionTokens;
+    // The socket token carries the same turn-reply identity as the in-process bridge session.
+    const turnReplySessionId = options.mcpSessionContext?.turnReplySessionId;
 
     expect(options.whatsoupMcpSocket).toBe('/tmp/actor.sock');
+    expect(turnReplySessionId).toMatch(/^[0-9a-f-]{36}$/);
     expect(tokens.verify(options.whatsoupMcpSessionLease?.token, '/tmp/actor.sock'))
-      .toEqual({ kind: 'session', socketPath: '/tmp/actor.sock' });
+      .toEqual({ kind: 'session', socketPath: '/tmp/actor.sock', turnReplySessionId });
     expect(tokens.verify(options.whatsoupMcpSessionLease?.token, '/tmp/other-actor.sock')).toBeUndefined();
   });
 

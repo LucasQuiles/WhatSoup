@@ -12,13 +12,17 @@ import {
 } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { createServer, type Server } from 'node:net';
+import { createConnection, createServer, type Server } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
+import { Database } from '../../../src/core/database.ts';
+import { createOutboundSendsWriter } from '../../../src/core/outbound-sends.ts';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
+import { SESSION_TOKEN_NOTIFICATION, SessionTokenRegistry } from '../../../src/mcp/caller-attribution.ts';
 import { WhatSoupSocketServer } from '../../../src/mcp/socket-server.ts';
+import { registerMessagingTools } from '../../../src/mcp/tools/messaging.ts';
 import { noExecutingSession } from '../../../src/mcp/types.ts';
 import { isPathWithinAllowedRoot } from '../../../src/lib/path-boundary.ts';
 import { admitHomeConfinedPath } from '../../../src/lib/home-confinement.ts';
@@ -26,6 +30,8 @@ import {
   assertSafeOwnedSocket,
   PerChatMcpSocketManager,
 } from '../../../src/runtimes/agent/per-chat-mcp-socket-manager.ts';
+import { OutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
+import { createActiveTurnReplySink } from '../../../src/runtimes/agent/turn-reply-sink.ts';
 import { waitForSocket } from '../../helpers/wait-for.ts';
 import { sendJsonRpc } from '../../helpers/socket-rpc.ts';
 import { outsideRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
@@ -41,6 +47,10 @@ describe('PerChatMcpSocketManager', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  function makeShortStateRoot(): string {
+    return mkdtempSync(join(tmpdir(), 'ws-'));
+  }
 
   function makeManager(
     root: string,
@@ -76,6 +86,25 @@ describe('PerChatMcpSocketManager', () => {
     }) as { id?: number; result?: { tools?: unknown[] } };
     expect(response.id).toBe(1);
     expect(response.result?.tools).toEqual(expect.any(Array));
+  }
+
+  async function exchange(socketPath: string, lines: unknown[]): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const client = createConnection(socketPath, () => {
+        for (const line of lines) client.write(JSON.stringify(line) + '\n');
+      });
+      let buffer = '';
+      client.setEncoding('utf8');
+      client.on('data', (chunk: string) => {
+        buffer += chunk;
+        const line = buffer.split('\n').find((candidate) => candidate.trim() !== '');
+        if (!line) return;
+        client.end();
+        resolve(JSON.parse(line));
+      });
+      client.on('error', reject);
+      setTimeout(() => reject(new Error('timeout')), 3000).unref();
+    });
   }
 
   it('F6 carries an admitted runtime root into the first actor socket after alias retarget', async () => {
@@ -117,7 +146,7 @@ describe('PerChatMcpSocketManager', () => {
   });
 
   it('binds an awaitable mode-0600 socket below a mode-0700 state-root directory using only a digest', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
+    const root = makeShortStateRoot();
     roots.push(root);
     const manager = makeManager(root);
     const identity = '15551234567@s.whatsapp.net';
@@ -138,11 +167,271 @@ describe('PerChatMcpSocketManager', () => {
     manager.release(identity);
   });
 
+  it('retains the runtime-provided active-turn reply sink on the socket session', async () => {
+    const root = makeShortStateRoot();
+    roots.push(root);
+    const identities: string[] = [];
+    const sink = () => ({ disposition: 'inactive' as const });
+    const manager = new PerChatMcpSocketManager({
+      stateRoot: root,
+      registry: new ToolRegistry(),
+      allowedRoot: root,
+      conversationBound: true,
+      resolveExecutingSession: noExecutingSession,
+      resolveTurnReplySink: (identity) => {
+        identities.push(identity);
+        return sink;
+      },
+    });
+    const identity = 'active-turn@s.whatsapp.net';
+    const lease = manager.acquire(identity, identity);
+    await lease.ready;
+    try {
+      const resources = (manager as unknown as {
+        resources: Map<string, { server: { baseSession: { turnReplySink?: unknown } } }>;
+      }).resources;
+      expect(identities).toEqual([identity]);
+      expect(resources.get(identity)!.server.baseSession.turnReplySink).toBe(sink);
+    } finally {
+      manager.release(identity);
+    }
+  });
+
+  it('rejects a stale session token and a delayed raw acknowledgement at the real socket boundary', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ws-'));
+    roots.push(root);
+    const identity = 'socket-turn@s.whatsapp.net';
+    const conversationKey = 'socket-turn';
+    const tokens = new SessionTokenRegistry();
+    const queue = new OutboundQueue({
+      sendMessage: async () => ({ waMessageId: null }),
+      sendMedia: async () => ({ waMessageId: null }),
+    }, identity, { conversationKey });
+    let active = { managerId: 'live-manager', logicalTurnId: 'socket-old-turn' };
+    queue.beginTurnEvidence(active.logicalTurnId);
+    const sink = createActiveTurnReplySink((request) => (
+      request.runtimeSessionId === active.managerId
+        ? { queue, logicalTurnId: active.logicalTurnId }
+        : undefined
+    ));
+    const dispositions: unknown[] = [];
+    const registry = new ToolRegistry();
+    registry.register({
+      name: 'capture_active_turn',
+      description: 'test-only active turn reply capture',
+      scope: 'chat',
+      targetMode: 'injected',
+      schema: z.object({ delayedAck: z.boolean().optional() }),
+      handler: async (params, session) => {
+        const request = {
+          chatJid: identity,
+          conversationKey,
+          text: 'socket reply',
+          runtimeSessionId: session.turnReplySessionId ?? '',
+        };
+        const reserved = session.turnReplySink?.({ ...request, action: 'reserve' });
+        if (params['delayedAck'] === true && reserved?.disposition === 'reserved') {
+          queue.abortTurn();
+          active = { managerId: 'live-manager', logicalTurnId: 'socket-new-turn' };
+          queue.beginTurnEvidence(active.logicalTurnId);
+          dispositions.push(reserved, session.turnReplySink?.({
+            ...request,
+            action: 'commit',
+            reservationId: reserved.reservationId,
+          }));
+        } else {
+          dispositions.push(reserved);
+        }
+        return { ok: true };
+      },
+    });
+    const manager = new PerChatMcpSocketManager({
+      stateRoot: root,
+      registry,
+      allowedRoot: root,
+      conversationBound: true,
+      resolveExecutingSession: noExecutingSession,
+      resolveTurnReplySink: () => sink,
+      sessionTokens: tokens,
+    });
+    const lease = manager.acquire(identity, identity);
+    await lease.ready;
+    // Both tokens are bound to this socket, so the stale case is refused by the
+    // turn-reply arbitration, not by the socket binding.
+    const staleToken = tokens.mint({ kind: 'session', socketPath: lease.socketPath, turnReplySessionId: 'stale-manager' });
+    const liveToken = tokens.mint({ kind: 'session', socketPath: lease.socketPath, turnReplySessionId: 'live-manager' });
+    try {
+      await exchange(lease.socketPath, [
+        { jsonrpc: '2.0', method: SESSION_TOKEN_NOTIFICATION, params: { token: staleToken } },
+        { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'capture_active_turn', arguments: {} } },
+      ]);
+      expect(dispositions).toEqual([{ disposition: 'inactive' }]);
+
+      await exchange(lease.socketPath, [
+        { jsonrpc: '2.0', method: SESSION_TOKEN_NOTIFICATION, params: { token: liveToken } },
+        { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'capture_active_turn', arguments: { delayedAck: true } } },
+      ]);
+      expect(dispositions.slice(1)).toMatchObject([
+        { disposition: 'reserved' },
+        { disposition: 'inactive' },
+      ]);
+      expect(queue.hasCommittedAnswer()).toBe(false);
+    } finally {
+      manager.release(identity);
+      queue.abortTurn();
+    }
+  });
+
+  it('does not let a stale socket session bypass active-turn reply arbitration through send_message', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ws-'));
+    roots.push(root);
+    const identity = 'socket-turn@s.whatsapp.net';
+    const tokens = new SessionTokenRegistry();
+    const rawSends: Array<{ jid: string; content: unknown }> = [];
+    const db = new Database(':memory:');
+    db.open();
+    const registry = new ToolRegistry();
+    registerMessagingTools(registry, {
+      connection: {
+        contactsDir: { contacts: new Map(), getLidMappings: () => undefined },
+        sendRaw: async (jid: string, content: unknown) => {
+          rawSends.push({ jid, content });
+          return { waMessageId: 'unexpected-raw-send' };
+        },
+      } as never,
+      db: db.raw,
+      dbWrapper: db,
+      adminPhones: new Set<string>(),
+    });
+    const queue = new OutboundQueue({
+      sendMessage: async () => ({ waMessageId: null }),
+      sendMedia: async () => ({ waMessageId: null }),
+    }, identity, { conversationKey: 'socket-turn' });
+    queue.beginTurnEvidence('live-turn');
+    const sink = createActiveTurnReplySink((request) => (
+      request.runtimeSessionId === 'live-manager'
+        ? { queue, logicalTurnId: 'live-turn' }
+        : undefined
+    ));
+    const manager = new PerChatMcpSocketManager({
+      stateRoot: root,
+      registry,
+      allowedRoot: root,
+      conversationBound: true,
+      resolveExecutingSession: noExecutingSession,
+      resolveTurnReplySink: () => sink,
+      sessionTokens: tokens,
+    });
+    const lease = manager.acquire(identity, identity);
+    await lease.ready;
+    // Bound to this socket, so only the turn-reply arbitration refuses it.
+    const staleToken = tokens.mint({ kind: 'session', socketPath: lease.socketPath, turnReplySessionId: 'stale-manager' });
+    try {
+      const response = await exchange(lease.socketPath, [
+        { jsonrpc: '2.0', method: SESSION_TOKEN_NOTIFICATION, params: { token: staleToken } },
+        {
+          jsonrpc: '2.0', id: 1, method: 'tools/call',
+          params: { name: 'send_message', arguments: { text: 'stale socket reply' } },
+        },
+      ]) as { result: { content: Array<{ text: string }> } };
+
+      expect(rawSends).toEqual([]);
+      expect(JSON.parse(response.result.content[0]!.text)).toMatchObject({
+        sent: false,
+        suppressed: true,
+        reason: 'active_turn_unavailable',
+      });
+    } finally {
+      manager.release(identity);
+      queue.abortTurn();
+      db.close();
+    }
+  });
+
+  it('keeps a delayed raw acknowledgement submitted without committing the newer socket turn', async () => {
+    const root = makeShortStateRoot();
+    roots.push(root);
+    const identity = 'socket-delayed-ack@s.whatsapp.net';
+    const tokens = new SessionTokenRegistry();
+    const db = new Database(':memory:');
+    db.open();
+    const queue = new OutboundQueue({
+      sendMessage: async () => ({ waMessageId: null }),
+      sendMedia: async () => ({ waMessageId: null }),
+    }, identity, { conversationKey: 'socket-delayed-ack' });
+    let activeTurnId = 'socket-old-turn';
+    queue.beginTurnEvidence(activeTurnId);
+    const sink = createActiveTurnReplySink((request) => (
+      request.runtimeSessionId === 'live-manager'
+        ? { queue, logicalTurnId: activeTurnId }
+        : undefined
+    ));
+    const rawSends: Array<{ jid: string; content: unknown }> = [];
+    const registry = new ToolRegistry();
+    registerMessagingTools(registry, {
+      connection: {
+        contactsDir: { contacts: new Map(), getLidMappings: () => undefined },
+        sendRaw: async (jid: string, content: unknown) => {
+          rawSends.push({ jid, content });
+          queue.abortTurn();
+          activeTurnId = 'socket-new-turn';
+          queue.beginTurnEvidence(activeTurnId);
+          return { waMessageId: 'delayed-provider-ack' };
+        },
+      } as never,
+      db: db.raw,
+      dbWrapper: db,
+      adminPhones: new Set<string>(),
+      auditWriter: createOutboundSendsWriter({ db: db.raw, line: 'test-line' }),
+    });
+    const manager = new PerChatMcpSocketManager({
+      stateRoot: root,
+      registry,
+      allowedRoot: root,
+      conversationBound: true,
+      resolveExecutingSession: noExecutingSession,
+      resolveTurnReplySink: () => sink,
+      sessionTokens: tokens,
+    });
+    const lease = manager.acquire(identity, identity);
+    await lease.ready;
+    const liveToken = tokens.mint({ kind: 'session', socketPath: lease.socketPath, turnReplySessionId: 'live-manager' });
+    try {
+      const response = await exchange(lease.socketPath, [
+        { jsonrpc: '2.0', method: SESSION_TOKEN_NOTIFICATION, params: { token: liveToken } },
+        {
+          jsonrpc: '2.0', id: 1, method: 'tools/call',
+          params: {
+            name: 'send_message',
+            arguments: { text: 'https://example.com', link_preview: 'off' },
+          },
+        },
+      ]) as { result: { content: Array<{ text: string }> } };
+
+      expect(rawSends).toHaveLength(1);
+      expect(JSON.parse(response.result.content[0]!.text)).toMatchObject({ sent: true });
+      expect(queue.hasCommittedAnswer()).toBe(false);
+      expect(db.raw.prepare(`
+        SELECT outcome_code, failure_stage, mutation_state, provider_submission_count
+        FROM outbound_sends
+      `).get()).toEqual({
+        outcome_code: 'submitted',
+        failure_stage: 'ack_received',
+        mutation_state: 'acknowledged',
+        provider_submission_count: 1,
+      });
+    } finally {
+      manager.release(identity);
+      queue.abortTurn();
+      db.close();
+    }
+  });
+
   it.each([
     ['symlink', (path: string) => symlinkSync('/private/actor-target', path)],
     ['non-socket', (path: string) => writeFileSync(path, 'owned data', { mode: 0o600 })],
   ])('rejects an exact-path %s collision without unlinking it', async (_kind, createCollision) => {
-    const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
+    const root = makeShortStateRoot();
     roots.push(root);
     const identity = 'collision@s.whatsapp.net';
     const socketPath = await unusedSocketPath(root, identity);
@@ -162,7 +451,7 @@ describe('PerChatMcpSocketManager', () => {
   });
 
   it('rejects a live same-uid socket collision without unlinking it', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
+    const root = makeShortStateRoot();
     roots.push(root);
     const identity = 'live-collision@s.whatsapp.net';
     const socketPath = await unusedSocketPath(root, identity);
@@ -187,7 +476,7 @@ describe('PerChatMcpSocketManager', () => {
   });
 
   it('the awaitable server boundary can refuse to unlink an existing exact path', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
+    const root = makeShortStateRoot();
     roots.push(root);
     const socketPath = join(root, 'occupied.sock');
     writeFileSync(socketPath, 'collision', { mode: 0o600 });
@@ -206,7 +495,7 @@ describe('PerChatMcpSocketManager', () => {
   });
 
   it('replaces an unreachable same-uid stale socket at only the exact known path', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
+    const root = makeShortStateRoot();
     roots.push(root);
     const identity = 'stale-collision@s.whatsapp.net';
     const socketPath = await unusedSocketPath(root, identity);
@@ -236,7 +525,7 @@ describe('PerChatMcpSocketManager', () => {
   });
 
   it('rejects a foreign-owned socket before any unlink decision', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
+    const root = makeShortStateRoot();
     roots.push(root);
     const identity = 'foreign-collision@s.whatsapp.net';
     const manager = makeManager(root);
@@ -256,7 +545,7 @@ describe('PerChatMcpSocketManager', () => {
   });
 
   it('rekeys the live actor resolver and conversation binding without replacing the socket', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
+    const root = makeShortStateRoot();
     roots.push(root);
     const observedIdentities: string[] = [];
     const manager = new PerChatMcpSocketManager({
@@ -314,7 +603,7 @@ describe('PerChatMcpSocketManager', () => {
   });
 
   it('drops a failed readiness lease so the same identity can retry cleanly', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
+    const root = makeShortStateRoot();
     roots.push(root);
     const identity = 'retry-after-collision@s.whatsapp.net';
     const socketPath = await unusedSocketPath(root, identity);
@@ -333,7 +622,7 @@ describe('PerChatMcpSocketManager', () => {
   });
 
   it('does not make a replacement socket ready until the previous child has stopped', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
+    const root = makeShortStateRoot();
     roots.push(root);
     const identity = 'teardown-order@s.whatsapp.net';
     const manager = makeManager(root);
@@ -358,7 +647,7 @@ describe('PerChatMcpSocketManager', () => {
   });
 
   it('does not make a no-socket provider transition ready until retirement completes', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
+    const root = makeShortStateRoot();
     roots.push(root);
     const identity = 'cli-to-api@s.whatsapp.net';
     const manager = makeManager(root);
@@ -383,7 +672,7 @@ describe('PerChatMcpSocketManager', () => {
   });
 
   it('keeps a no-socket provider transition fail-closed after rejected retirement proof', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
+    const root = makeShortStateRoot();
     roots.push(root);
     const identity = 'cli-to-api-rejected@s.whatsapp.net';
     const manager = makeManager(root);
@@ -398,7 +687,7 @@ describe('PerChatMcpSocketManager', () => {
   });
 
   it('accepts a later successful child-stop proof after the first proof rejects', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
+    const root = makeShortStateRoot();
     roots.push(root);
     const identity = 'retry-teardown@s.whatsapp.net';
     const manager = makeManager(root);
@@ -419,7 +708,7 @@ describe('PerChatMcpSocketManager', () => {
   });
 
   it('preflights resource and teardown-barrier collisions before changing either identity', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
+    const root = makeShortStateRoot();
     roots.push(root);
     const sourceIdentity = 'source@lid';
     const targetIdentity = 'target@s.whatsapp.net';
@@ -462,7 +751,7 @@ describe('PerChatMcpSocketManager', () => {
 
   it('retains socket ownership when unlink is denied and releases it on a later retry', async () => {
     if (typeof process.getuid === 'function' && process.getuid() === 0) return;
-    const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
+    const root = makeShortStateRoot();
     roots.push(root);
     const identity = 'unlink-retry@s.whatsapp.net';
     const manager = makeManager(root);
@@ -488,7 +777,7 @@ describe('PerChatMcpSocketManager', () => {
   });
 
   it('moves an active teardown barrier across rekey and refuses an early direct release', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
+    const root = makeShortStateRoot();
     roots.push(root);
     const oldIdentity = '15559990000@lid';
     const newIdentity = '15559990000@s.whatsapp.net';
@@ -515,7 +804,7 @@ describe('PerChatMcpSocketManager', () => {
   it.each([false, true])(
     'rekeys the pinned conversation identity in %s conversation-bound mode',
     async (conversationBound) => {
-      const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
+      const root = makeShortStateRoot();
       roots.push(root);
       const oldIdentity = 'legacy-lid@lid';
       const newIdentity = 'canonical-user@s.whatsapp.net';
@@ -552,7 +841,7 @@ describe('PerChatMcpSocketManager', () => {
   );
 
   it('uses the rekeyed default conversation pin for request-level confinement', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
+    const root = makeShortStateRoot();
     roots.push(root);
     const registry = new ToolRegistry();
     const calls: string[] = [];

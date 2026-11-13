@@ -12,6 +12,7 @@ import {
   initialSocketAttribution,
   presentedSessionToken,
   SESSION_TOKEN_NOTIFICATION,
+  turnReplySessionIdFromPresentedToken,
   withDeclaredClient,
   withPresentedToken,
   type SessionTokenBinding,
@@ -266,6 +267,11 @@ export class WhatSoupSocketServer {
             else this.presentedTokens.set(clientId, presented);
             connSession.callerAttribution = withPresentedToken(
               connSession.callerAttribution, req.params, this.sessionTokens, this.socketPath,
+            );
+            connSession.turnReplySessionId = turnReplySessionIdFromPresentedToken(
+              req.params,
+              this.sessionTokens,
+              this.socketPath,
             );
             continue;
           }

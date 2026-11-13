@@ -558,30 +558,13 @@ import {
   type AutoCompactView, type ImageCoalescerView, makePollMessenger, makeRealDb, buildPayload,
   insertRow, makeDbWithTokenRow, makeBindingRuntime,
 } from './lib/runtime-mock-scaffold.ts';
+import {
+  providerTurnTexts, providerUserText,
+  setMockMemoryConfig,
+  trustedProviderTurn,
+} from './lib/provider-turn-test-helpers.ts';
 
 // ─── Coupled helpers (hoisting-pinned, cannot leave this file) ────────────────
-
-function setMockMemoryConfig(): () => void {
-  const configWithMemory = mockConfig as typeof mockConfig & {
-    memory?: {
-      adminJid: string | null;
-      sweep: { reviewByDays: number };
-    };
-  };
-  const previous = configWithMemory.memory;
-  configWithMemory.memory = {
-    adminJid: null,
-    sweep: { reviewByDays: 7 },
-  };
-
-  return () => {
-    if (previous === undefined) {
-      delete configWithMemory.memory;
-    } else {
-      configWithMemory.memory = previous;
-    }
-  };
-}
 
 async function waitForProviderDispatch(
   runtime: AgentRuntime,
@@ -1422,7 +1405,7 @@ describe('AgentRuntime', () => {
     capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 250, outputTokens: 5 });
     await Promise.resolve();
 
-    expect(mockSession.sendTurn).toHaveBeenNthCalledWith(1, 'hello');
+    expect(mockSession.sendTurn).toHaveBeenNthCalledWith(1, trustedProviderTurn('hello'));
     expect(mockSession.sendTurn).toHaveBeenNthCalledWith(2, '/compact');
 
     const followUp = sendAndDrain(runtime, makeMsg({ content: 'follow-up' }));
@@ -1434,7 +1417,7 @@ describe('AgentRuntime', () => {
     capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 10, outputTokens: 1 });
     await followUp;
 
-    expect(mockSession.sendTurn).toHaveBeenNthCalledWith(3, 'follow-up');
+    expect(mockSession.sendTurn).toHaveBeenNthCalledWith(3, trustedProviderTurn('follow-up'));
   });
 
   it('clears auto-compact bookkeeping when the compact send fails immediately', async () => {
@@ -1597,13 +1580,13 @@ describe('AgentRuntime', () => {
         makeMsg({ content: 'user turn after compact timeout', inboundSeq: 502 }),
       );
       await Promise.resolve();
-      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('user turn after compact timeout');
+      expect(providerTurnTexts(mockSession.sendTurn.mock.calls)).not.toContain('user turn after compact timeout');
 
       await vi.advanceTimersByTimeAsync(4 * 60 * 1000 + 100);
       await followUpDispatch;
 
-      const followUpIndex = (mockSession.sendTurn.mock.calls as unknown as Array<[string]>).findIndex(
-        ([text]) => text === 'user turn after compact timeout',
+      const followUpIndex = (mockSession.sendTurn.mock.calls as unknown as Array<[unknown]>).findIndex(
+        ([input]) => providerUserText(input) === 'user turn after compact timeout',
       );
       const followUpOrder = mockSession.sendTurn.mock.invocationCallOrder[followUpIndex]
         ?? Number.MAX_SAFE_INTEGER;
@@ -2305,7 +2288,7 @@ describe('AgentRuntime', () => {
     (runtime as unknown as { replyGuarantee: typeof replyGuarantee }).replyGuarantee = replyGuarantee;
     await runtime.start();
     await runtime.handleMessage(makeMsg({ content: 'hello claude', inboundSeq: 31 }));
-    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('hello claude'));
+    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith(trustedProviderTurn('hello claude')));
     capturedOnEventRef.current?.({ type: 'result', text: 'done' });
     await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
 
@@ -2317,7 +2300,7 @@ describe('AgentRuntime', () => {
   });
 
   it('continues the agent turn when inline extraction hits a recoverable persistence error', async () => {
-    const restoreMemory = setMockMemoryConfig();
+    const restoreMemory = setMockMemoryConfig(mockConfig);
     try {
       const db = makeDb();
       const raw = db.raw as unknown as { exec: ReturnType<typeof vi.fn> };
@@ -2343,14 +2326,14 @@ describe('AgentRuntime', () => {
         expect.any(String),
         expect.any(String),
       );
-      expect(mockSession.sendTurn).toHaveBeenCalledWith('remind me to check backup status');
+      expect(mockSession.sendTurn).toHaveBeenCalledWith(trustedProviderTurn('remind me to check backup status'));
     } finally {
       restoreMemory();
     }
   });
 
   it('alerts and marks inbound failed when inline extraction hits an unrecoverable DB error', async () => {
-    const restoreMemory = setMockMemoryConfig();
+    const restoreMemory = setMockMemoryConfig(mockConfig);
     try {
       const db = makeDb();
       const raw = db.raw as unknown as { exec: ReturnType<typeof vi.fn> };
@@ -2737,7 +2720,7 @@ describe('AgentRuntime', () => {
     const { durability } = attachRuntimeFaultMarkerSpies(runtime);
 
     await sendAndDrain(runtime, makeMsg({ content: 'hello', inboundSeq: 77 }));
-    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('hello'));
+    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith(trustedProviderTurn('hello')));
 
     (runtime as unknown as { chatQueues: Map<string, typeof mockQueue> }).chatQueues.set('test@s.whatsapp.net', mockQueue);
     (runtime as unknown as { perChatInboundSeqQueue: Map<string, number[]> }).perChatInboundSeqQueue.set('test@s.whatsapp.net', [77]);
@@ -2852,7 +2835,7 @@ describe('AgentRuntime', () => {
 
     await runtime.start();
     await runtime.handleMessage(makeMsg({ content: 'hello', inboundSeq: 88 }));
-    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('hello'));
+    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith(trustedProviderTurn('hello')));
     expect(capturedOnCrashRef.current).toBeTypeOf('function');
 
     capturedOnCrashRef.current!({
@@ -3872,7 +3855,7 @@ describe('AgentRuntime', () => {
     });
 
     await vi.waitFor(() => {
-      expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.stringContaining('A: Go'));
+      expect((mockSession.sendTurn.mock.calls as unknown as Array<[unknown]>).some(([input]) => providerUserText(input).includes('A: Go'))).toBe(true);
     });
     expect(state.pendingPolls.questions.has(canonicalJid)).toBe(false);
   });
@@ -4126,7 +4109,7 @@ describe('AgentRuntime', () => {
       await vi.advanceTimersByTimeAsync(3_000);
 
       expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
-      expect(mockSession.sendTurn).toHaveBeenCalledWith('[2 images received]\nimage one\nimage two');
+      expect(mockSession.sendTurn).toHaveBeenCalledWith(trustedProviderTurn('[2 images received]\nimage one\nimage two'));
       expect(durability.markInboundSkipped).toHaveBeenCalledWith(1, 'coalesced_image');
       expect(mockQueue.setInboundSeq).toHaveBeenCalledWith(2);
     } finally {
@@ -4152,7 +4135,7 @@ describe('AgentRuntime', () => {
       handlePerChatProviderEvent(runtime, mockSession, { type: 'result', text: null });
       await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledTimes(2));
 
-      const sentTurns = (mockSession.sendTurn.mock.calls as unknown as Array<[string]>).map(([text]) => text);
+      const sentTurns = (mockSession.sendTurn.mock.calls as unknown as Array<[unknown]>).map(([input]) => providerUserText(input));
       expect(sentTurns).toEqual(['image one', 'after image']);
       // Each turn's sequence is written twice: by the turn-queue processor before
       // the dispatch, and at the dispatch boundary on the queue the turn is sent through.
@@ -4231,7 +4214,7 @@ describe('AgentRuntime', () => {
       makeMsg({ content: 'do not reply', inboundSeq: 102 }),
       'test@s.whatsapp.net',
     );
-    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('do not reply'));
+    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith(trustedProviderTurn('do not reply')));
     (runtime as unknown as { replyGuarantee: typeof replyGuarantee }).replyGuarantee = replyGuarantee;
     mockQueue.enqueueStreamingText.mockClear();
     mockQueue.flush.mockClear();
@@ -4280,7 +4263,7 @@ describe('AgentRuntime', () => {
       await vi.advanceTimersByTimeAsync(3_000);
 
       await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledTimes(1));
-      const firstTurn = (mockSession.sendTurn.mock.calls as unknown as Array<[string]>)[0][0];
+      const firstTurn = providerUserText((mockSession.sendTurn.mock.calls as unknown as Array<[unknown]>)[0][0]);
       expect(firstTurn).toContain('[3 images received]');
     } finally {
       vi.useRealTimers();
@@ -4307,7 +4290,7 @@ describe('AgentRuntime', () => {
       }
 
       await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledTimes(1));
-      const firstTurn = (mockSession.sendTurn.mock.calls as unknown as Array<[string]>)[0][0];
+      const firstTurn = providerUserText((mockSession.sendTurn.mock.calls as unknown as Array<[unknown]>)[0][0]);
       expect(firstTurn).toContain('[20 images received]');
     } finally {
       vi.useRealTimers();
@@ -4644,7 +4627,7 @@ describe('AgentRuntime', () => {
     await sendAndDrain(runtime, makeMsg({ content: 'hello claude' }));
 
     expect(mockSession.spawnSession).toHaveBeenCalled();
-    expect(mockSession.sendTurn).toHaveBeenCalledWith('hello claude');
+    expect(mockSession.sendTurn).toHaveBeenCalledWith(trustedProviderTurn('hello claude'));
   });
 
   it('handleMessage regular message does not re-spawn if already active', async () => {
@@ -4658,7 +4641,7 @@ describe('AgentRuntime', () => {
     await sendAndDrain(runtime, makeMsg({ content: 'follow-up' }));
 
     expect(mockSession.spawnSession).not.toHaveBeenCalled();
-    expect(mockSession.sendTurn).toHaveBeenCalledWith('follow-up');
+    expect(mockSession.sendTurn).toHaveBeenCalledWith(trustedProviderTurn('follow-up'));
   });
 
   it('forwarded slash command is sent as a turn', async () => {
@@ -4671,7 +4654,7 @@ describe('AgentRuntime', () => {
     await runtime.start();
     await sendAndDrain(runtime, makeMsg({ content: '/compact' }));
 
-    expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+    expect(mockSession.sendTurn).toHaveBeenCalledWith(trustedProviderTurn('/compact'));
   });
 
   it('per_chat handleAgentCommand silently sends /compact to the target session', async () => {
@@ -6949,8 +6932,9 @@ describe('AgentRuntime', () => {
       applicationContext: string[];
       userText: string;
     }])[0];
-    expect(sent.applicationContext[0]).toMatch(/^\[Recent chat context — read before responding\]\n/);
-    expect(sent.applicationContext[0]).toContain('earlier message');
+    expect(sent.applicationContext[0]).toMatch(/^\[WhatSoup trusted transport metadata/);
+    expect(sent.applicationContext[1]).toMatch(/^\[Recent chat context — read before responding\]\n/);
+    expect(sent.applicationContext[1]).toContain('earlier message');
     expect(sent.userText).toBe('hello');
 
     // Complete the (single) user turn so the queued test work does not outlive
@@ -8927,16 +8911,16 @@ describe('AgentRuntime', () => {
 
     capturedOnResumeFailedRef.current!();
 
-    let contextCall: [string] | undefined;
+    let contextCall: [unknown] | undefined;
     await vi.waitFor(() => {
-      const sendTurnCalls = mockSession.sendTurn.mock.calls as unknown as [string][];
+      const sendTurnCalls = mockSession.sendTurn.mock.calls as unknown as [unknown][];
       contextCall = sendTurnCalls.find((args) =>
-        args[0].includes('CONTEXT RECOVERY'),
+        providerUserText(args[0]).includes('CONTEXT RECOVERY'),
       );
       expect(contextCall).toBeDefined();
     });
     expect(contextCall).toBeDefined();
-    expect(contextCall![0]).toContain('Alice');
+    expect(providerUserText(contextCall![0])).toContain('Alice');
   });
 
   it('/new creates a fresh OutboundQueue to isolate sessions', async () => {
@@ -9014,12 +8998,13 @@ describe('AgentRuntime', () => {
       isGroup: true,
     }))).resolves.toBeUndefined();
 
-    expect(mockSession.sendTurn).toHaveBeenCalledWith({
-      applicationContext: [
+    expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.objectContaining({
+      applicationContext: expect.arrayContaining([
         expect.stringContaining('"displayName":"Taylor"'),
-      ],
+        expect.stringContaining('[WhatSoup trusted transport metadata'),
+      ]),
       userText: 'wake up',
-    });
+    }));
     expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({
         chatJid: 'chat-timeout@g.us',
@@ -9128,12 +9113,13 @@ describe('AgentRuntime', () => {
       isGroup: false,
     }));
 
-    expect(mockSession.sendTurn).toHaveBeenCalledWith({
-      applicationContext: [
+    expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.objectContaining({
+      applicationContext: expect.arrayContaining([
         expect.stringContaining('"kind":"direct"'),
-      ],
+        expect.stringContaining('[WhatSoup trusted transport metadata'),
+      ]),
       userText: 'test message',
-    });
+    }));
   });
 
   // @check CHK-064
@@ -9154,12 +9140,13 @@ describe('AgentRuntime', () => {
       isGroup: true,
     }));
 
-    expect(mockSession.sendTurn).toHaveBeenCalledWith({
-      applicationContext: [
+    expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.objectContaining({
+      applicationContext: expect.arrayContaining([
         expect.stringContaining('"kind":"group"'),
-      ],
+        expect.stringContaining('[WhatSoup trusted transport metadata'),
+      ]),
       userText: 'group message',
-    });
+    }));
   });
 
   // @check CHK-065
@@ -9387,7 +9374,7 @@ describe('AgentRuntime', () => {
         const runtime = new AgentRuntime(db, messenger);
         await runtime.start();
         await sendAndDrain(runtime, makeMsg({ content: '/stats' }));
-        await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('/stats'));
+        await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith(trustedProviderTurn('/stats')));
         expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
           expect.objectContaining({ command: 'stats' }),
           expect.stringContaining('no handler'),
@@ -9455,8 +9442,8 @@ describe('AgentRuntime', () => {
     releaseSpawn();
     await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
     await vi.waitFor(() => {
-      const sent = (localSession.sendTurn.mock.calls as unknown as Array<[string]>)
-        .map(([turnText]) => turnText)
+      const sent = (localSession.sendTurn.mock.calls as unknown as Array<[unknown]>)
+        .map(([turnInput]) => providerUserText(turnInput))
         .filter((turnText) => turnText === 'first' || turnText === 'second');
       expect(sent).toEqual(['first']);
     });
@@ -9466,8 +9453,8 @@ describe('AgentRuntime', () => {
     emitLocalEvent({ type: 'result', text: 'first complete' });
     await vi.waitFor(() => expect(mockSession.completeProviderTurn).toHaveBeenCalledOnce());
     await vi.waitFor(() => {
-      const sent = (localSession.sendTurn.mock.calls as unknown as Array<[string]>)
-        .map(([turnText]) => turnText)
+      const sent = (localSession.sendTurn.mock.calls as unknown as Array<[unknown]>)
+        .map(([turnInput]) => providerUserText(turnInput))
         .filter((turnText) => turnText === 'first' || turnText === 'second');
       expect(sent).toEqual(['first', 'second']);
     });
@@ -9481,8 +9468,8 @@ describe('AgentRuntime', () => {
     expect(chatSessions.has('same@s.whatsapp.net')).toBe(true);
     expect(localSession.shutdown).toHaveBeenCalledTimes(1);
     expect(localSession.spawnSession).toHaveBeenCalledTimes(1);
-    const userTurns = (localSession.sendTurn.mock.calls as unknown as Array<[string]>)
-      .map(([turnText]) => turnText as string)
+    const userTurns = (localSession.sendTurn.mock.calls as unknown as Array<[unknown]>)
+      .map(([turnInput]) => providerUserText(turnInput))
       .filter((turnText) => turnText === 'first' || turnText === 'second');
     expect(userTurns).toEqual(['first', 'second']);
   });
@@ -9521,8 +9508,8 @@ describe('AgentRuntime', () => {
       perChatTurnQueues: Map<string, { idle(): Promise<void> }>;
     }).perChatTurnQueues.get(canonicalJid)?.idle();
     await vi.waitFor(() => {
-      const sent = (mockSession.sendTurn.mock.calls as unknown as Array<[string]>)
-        .map(([turnText]) => turnText)
+      const sent = (mockSession.sendTurn.mock.calls as unknown as Array<[unknown]>)
+        .map(([turnInput]) => providerUserText(turnInput))
         .filter((turnText) => turnText === 'hello' || turnText === 'follow-up');
       expect(sent).toEqual(['hello', 'follow-up']);
     });
@@ -9536,8 +9523,8 @@ describe('AgentRuntime', () => {
     expect(chatQueues.has(canonicalJid)).toBe(true);
     expect(mockQueue.updateDeliveryJid).toHaveBeenCalledWith('15550100001@lid');
 
-    const userTurns = (mockSession.sendTurn.mock.calls as unknown as Array<[string]>)
-      .map(([turnText]) => turnText as string)
+    const userTurns = (mockSession.sendTurn.mock.calls as unknown as Array<[unknown]>)
+      .map(([turnInput]) => providerUserText(turnInput))
       .filter((turnText) => turnText === 'hello' || turnText === 'follow-up');
     expect(userTurns).toEqual(['hello', 'follow-up']);
   });
@@ -12100,7 +12087,7 @@ describe('AgentRuntime', () => {
 
   describe('AskUserQuestion poll bridge queue behavior', () => {
     function sendTurnTexts(): string[] {
-      return mockSession.sendTurn.mock.calls.map((call) => String((call as unknown as [unknown])[0]));
+      return mockSession.sendTurn.mock.calls.map((call) => providerUserText((call as unknown as [unknown])[0]));
     }
 
     it('sends poll with no follow-up when all descriptions fit in poll options', async () => {
@@ -13096,7 +13083,7 @@ describe('AgentRuntime', () => {
       });
       const injected = sendTurnTexts().find((arg) => arg.includes('A: Use DuckDB instead (free-text response)'))!;
       expect(injected).toContain('Q: Pick a database');
-      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('Use DuckDB instead');
+      expect(providerTurnTexts(mockSession.sendTurn.mock.calls).filter((text) => text.includes('Use DuckDB instead') && !text.includes('A: Use DuckDB instead (free-text response)'))).toEqual([]);
     });
 
     it('does not resolve a pending poll from a generic vote-status text reply', async () => {
@@ -13758,7 +13745,7 @@ describe('AgentRuntime', () => {
         chatJid: '5678@s.whatsapp.net',
         senderJid: '5678@s.whatsapp.net',
       }));
-      expect(mockSession.sendTurn).not.toHaveBeenCalledWith(expect.stringContaining('fallback answer one'));
+      expect((mockSession.sendTurn.mock.calls as unknown as Array<[unknown]>).some(([input]) => providerUserText(input).includes('fallback answer one'))).toBe(false);
 
       await sendAndDrain(runtime, makeMsg({
         content: 'fallback answer two',
@@ -13956,9 +13943,9 @@ describe('AgentRuntime', () => {
       });
 
       await vi.waitFor(() => {
-        expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.stringContaining('Yes'));
+        expect((mockSession.sendTurn.mock.calls as unknown as Array<[unknown]>).some(([input]) => providerUserText(input).includes('Yes'))).toBe(true);
       });
-      expect(mockSession.sendTurn).not.toHaveBeenCalledWith(expect.stringContaining('No'));
+      expect((mockSession.sendTurn.mock.calls as unknown as Array<[unknown]>).some(([input]) => providerUserText(input).includes('No'))).toBe(false);
       expect(state.pendingPolls.questions.has(groupJid)).toBe(false);
     });
 
@@ -15851,7 +15838,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     // turnQueue.enqueue and non-shared sendTurn surfaces — the routing harness
     // exercises the non-shared sendTurn path).
     const dispatchedTurnTexts = [
-      ...(mockSession.sendTurn.mock.calls as unknown as [string][]).map((c) => c[0]),
+      ...(mockSession.sendTurn.mock.calls as unknown as [unknown][]).map((c) => providerUserText(c[0])),
       ...mockQueue.enqueueText.mock.calls.map((c) => String(c[0])),
     ];
     expect(dispatchedTurnTexts.some((t) => t === 'remind me')).toBe(true);
@@ -15877,7 +15864,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     // AC4-1: body NOT dispatched as a turn (handler failed; running the body
     // under failed-command semantics would violate exactly-once).
     const dispatchedTurnTexts = [
-      ...(mockSession.sendTurn.mock.calls as unknown as [string][]).map((c) => c[0]),
+      ...(mockSession.sendTurn.mock.calls as unknown as [unknown][]).map((c) => providerUserText(c[0])),
       ...mockQueue.enqueueText.mock.calls.map((c) => String(c[0])),
     ];
     expect(dispatchedTurnTexts.some((t) => t === 'remind me')).toBe(false);
@@ -15895,7 +15882,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     // entry, so classifyInput forwards it raw (the reassurance it used to
     // carry now lives on /model status instead — see the D11 fold test above).
     expect(allReplies(sentMessages).some((t) => t.includes('Route:'))).toBe(false);
-    const forwarded = (mockSession.sendTurn.mock.calls as unknown as [string][]).map((c) => c[0]);
+    const forwarded = (mockSession.sendTurn.mock.calls as unknown as [unknown][]).map((c) => providerUserText(c[0]));
     expect(forwarded.some((t) => t.includes('/why'))).toBe(true);
   });
   it('injects the NL routing prompt contract at spawn (flag on) and omits it when off', async () => {
@@ -16178,7 +16165,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(allReplies(sentMessages).some((t) => t.includes('Back to the default route'))).toBe(false);
     // ...and the raw command is forwarded untouched so the agent CLI's own
     // /model default still runs.
-    const forwarded = (mockSession.sendTurn.mock.calls as unknown as [string][]).map((c) => c[0]);
+    const forwarded = (mockSession.sendTurn.mock.calls as unknown as [unknown][]).map((c) => providerUserText(c[0]));
     expect(forwarded.some((t) => t.includes('/model default'))).toBe(true);
   });
 
@@ -16548,7 +16535,7 @@ describe('B3 inline imperative extractor — QR-143 transport gate', () => {
   }
 
   it('ALLOWS an authenticated WhatsApp admin: imperative → proposed bead created (preserved)', async () => {
-    const restoreMemory = setMockMemoryConfig();
+    const restoreMemory = setMockMemoryConfig(mockConfig);
     const db = makeRealDb();
     try {
       const { messenger } = makeMessenger();
@@ -16563,7 +16550,7 @@ describe('B3 inline imperative extractor — QR-143 transport gate', () => {
   });
 
   it('DENIES a spoofed <admin-digits>@sms: imperative → NO proposed bead (new)', async () => {
-    const restoreMemory = setMockMemoryConfig();
+    const restoreMemory = setMockMemoryConfig(mockConfig);
     const db = makeRealDb();
     try {
       const { messenger } = makeMessenger();

@@ -24,6 +24,7 @@
 - [Fleet Bot Hardening Standard](runbooks/fleet-bot-hardening-standard.md)
 - [Release Snapshot Deployment](runbooks/release-deployment.md) — includes `npm run release:activate`, the coordinated macOS launchd release switch with verification and automatic rollback
 - [macOS Launchd Deployment](runbooks/macos-launchd-deployment.md)
+- [Trusted Actor Envelope](runbooks/trusted-actor-envelope.md) — the server-authored actor block and where marker copies are neutralised
 
 ---
 

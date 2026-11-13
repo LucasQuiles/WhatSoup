@@ -242,4 +242,22 @@ describe('SessionTokenRegistry bindings (M365 r4, W4)', () => {
     expect(tokens.verify(lease.token, SOCKET_A)).toBeUndefined();
     expect(tokens.liveCount).toBe(baseline);
   });
+
+  it('admits a turn-reply session identity only from a live session token on its own socket', async () => {
+    const module = await import('../../src/mcp/caller-attribution.ts');
+    const tokens = new module.SessionTokenRegistry();
+    const sessionLease = tokens.mintLease({ kind: 'session', socketPath: SOCKET_A, turnReplySessionId: 'manager-a' });
+    const requestToken = tokens.mint({ kind: 'request', socketPath: SOCKET_A, turnReplySessionId: 'manager-a' });
+    const identity = (token: unknown, socketPath: string) =>
+      module.turnReplySessionIdFromPresentedToken({ token }, tokens, socketPath);
+
+    expect(identity(sessionLease.token, SOCKET_A)).toBe('manager-a');
+    expect(identity(sessionLease.token, SOCKET_B)).toBeUndefined();
+    expect(identity(requestToken, SOCKET_A)).toBeUndefined();
+    expect(identity('0'.repeat(64), SOCKET_A)).toBeUndefined();
+    expect(module.turnReplySessionIdFromPresentedToken({ token: sessionLease.token }, undefined, SOCKET_A)).toBeUndefined();
+
+    sessionLease.revoke();
+    expect(identity(sessionLease.token, SOCKET_A)).toBeUndefined();
+  });
 });

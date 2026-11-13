@@ -87,7 +87,6 @@ import {
   SESSION_MIN_RESIDENCY_MS,
   sessionIdleMs,
   RESIDENT_TURN_PROGRESS_DEADLINE_MS,
-  MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS,
   diagnosticBundleEnabled,
   DIAGNOSTIC_BUNDLE_THROTTLE_MS,
   HANDOFF_STALE_MS,
@@ -138,7 +137,7 @@ import {
   type SessionCrashInfo,
 } from './session.ts';
 import { createProviderExecutionGate, ProviderExecutionGate } from './provider-execution-gate.ts';
-import { dispatchProviderTurn, withProviderApplicationContext } from './provider-boundary-dispatch.ts';
+import { dispatchProviderTurn, withProviderApplicationContext, type ProviderTurnInput } from './provider-boundary-dispatch.ts';
 import { TurnChronologyTracker, type TurnDeliveryKind } from './turn-chronology.ts';
 import {
   receivedAtUnixSeconds,
@@ -326,6 +325,8 @@ import { PerChatMcpSocketManager } from './per-chat-mcp-socket-manager.ts';
 import { admitMicrosoft365Workflow, Microsoft365SettingsFiles, microsoft365SpawnPolicy, recheckMicrosoft365Workflow, resolveExplainedM365MutationPolicy } from './microsoft365-adapter.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
 import { SessionTokenRegistry } from '../../mcp/caller-attribution.ts';
+import { withTrustedActorTurn, withUnauthenticatedActorTurn } from './trusted-actor-envelope.ts';
+import { RuntimeTurnReplySinks } from './turn-reply-sink.ts';
 import type { ExecutingSessionContext, SessionContext } from '../../mcp/types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
@@ -550,17 +551,8 @@ import { errorMessage } from '../../lib/error-message.ts';
 
 
 // `isPromptTooLongMessage` lives in `./failure-taxonomy.ts` (imported + re-exported above).
-
-/**
- * What a wedged-lane release did to the provider (#3374 C7). `reaped_child` is
- * the real-process wedge, where an intentional SIGKILL routes the exit through
- * the session's own crash machinery. `reap_skipped_no_child` is the
- * managed-provider wedge: the session holds no child, so nothing is killed and
- * the remote request is left outstanding — the release still frees the lane,
- * but it must not be recorded as a reap that happened.
- * `reap_unavailable` is a session surface that does not implement the reap.
- */
-type WedgedLaneReapOutcome = 'reaped_child' | 'reap_skipped_no_child' | 'reap_unavailable';
+import { reapWedgedLaneProvider, type WedgedLaneReapOutcome } from './wedged-lane-reap.ts';
+import { capDedupeMap } from './dedupe-map-cap.ts';
 
 export class AgentRuntime implements Runtime {
 
@@ -661,6 +653,7 @@ export class AgentRuntime implements Runtime {
   // When sandboxPerChat=true, maps are keyed by workspaceKey; when false, keyed by raw chatJid.
   private chatSessions: Map<string, SessionManager> = new Map();
   private chatQueues: Map<string, IOutboundQueue> = new Map();
+  private readonly turnReplySinks: RuntimeTurnReplySinks<SessionManager>;
   private readonly sessionOwnership = new SessionOwnershipRegistry();
   private readonly sessionManagerIds = new WeakMap<SessionManager, string>();
   private readonly sessionM365Policies = new WeakMap<SessionManager, M365MutationPolicy | undefined>();
@@ -961,19 +954,6 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
-   * Bound an evict-oldest dedup map. Mirrors the recentToolFailureAlerts cap so
-   * window-pruned maps can't grow without limit between prunes (e.g. one entry per
-   * distinct chat that never recurs within the window).
-   */
-  private capDedupeMap(map: Map<string, unknown>, max = MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS): void {
-    while (map.size > max) {
-      const oldest = map.keys().next().value;
-      if (oldest === undefined) break;
-      map.delete(oldest);
-    }
-  }
-
-  /**
    * Clear all tool-scope state belonging to one mapKey. Tool scope keys are
    * `${mapKey}#${ordinal}` (see createToolScopeKey), so on a per_chat crash we must
    * drop only the crashing chat's scopes — a blanket `.clear()` would stomp other
@@ -1007,7 +987,7 @@ export class AgentRuntime implements Runtime {
       toolFailureAlertsEnabled: config.toolFailureAlertsEnabled,
       resolveProvider: () => this.effectiveProvider || this.agentProvider || 'unknown-provider',
       recentToolFailureAlerts: this.recentToolFailureAlerts,
-      capDedupeMap: (map) => this.capDedupeMap(map),
+      capDedupeMap: (map) => capDedupeMap(map),
     };
   }
 
@@ -2664,6 +2644,17 @@ export class AgentRuntime implements Runtime {
     });
     this.sessionScope = options?.sessionScope ?? (options?.shared ? 'shared' : 'single');
     this.shared = this.sessionScope === 'shared';
+    this.turnReplySinks = new RuntimeTurnReplySinks({
+      mapKeyFor: (session, fallback) => this.findMapKeyForSession(session, fallback),
+      perChat: (mapKey) => ({ active: this.perChatRuntimeTurnContexts.get(mapKey)?.[0], queue: this.chatQueues.get(mapKey) }),
+      global: () => {
+        const active = this.currentRuntimeTurnContext;
+        const queue = active === null ? undefined : this.shared
+          ? this.outboundQueues.get(active.identity.deliveryJid) ?? this.outboundQueues.get(canonicalizeChatJid(active.identity.deliveryJid, this.db))
+          : this.queue;
+        return { active, queue };
+      },
+    });
     this.cwd = options?.cwd;
     this.configSystemPrompt = options?.configSystemPrompt;
     this.instructionsPath = options?.instructionsPath;
@@ -2730,6 +2721,7 @@ export class AgentRuntime implements Runtime {
       get allowedRoot() { return getAllowedRoot(); },
       conversationBound: this.perChatConversationBound,
       resolveExecutingSession: (mapKey) => this.resolveExecutingSessionByMapKey(mapKey),
+      resolveTurnReplySink: (mapKey) => this.turnReplySinks.forPerChat(mapKey),
       sessionTokens: this.sessionTokens,
     });
     this.catalogueSnapshot = createCatalogueSnapshotCache();
@@ -3040,7 +3032,7 @@ export class AgentRuntime implements Runtime {
       get isFallbackWindowActive() { return runtime.isFallbackWindowActive; },
       isEntryCredentialed: (entry) => runtime.isEntryCredentialed(entry),
       emitRouteEventChecked: (ev) => runtime.emitRouteEventChecked(ev),
-      capDedupeMap: (map, max) => runtime.capDedupeMap(map, max),
+      capDedupeMap: (map, max) => capDedupeMap(map, max),
       getTurnCapability: () => runtime.getTurnCapability(),
       verifyAccountIdentity: (trigger) => runtime.verifyAccountIdentity(trigger),
       scheduleFallbackReplay: (args) => runtime.scheduleFallbackReplay(args),
@@ -3447,7 +3439,7 @@ export class AgentRuntime implements Runtime {
       // actually did rather than what the release intended (#3374 C7). Both
       // statements are synchronous and adjacent, so no lane state can change
       // between them.
-      const reapOutcome = this.reapWedgedLaneProvider(session);
+      const reapOutcome = reapWedgedLaneProvider(session);
       this.announceWedgedLaneRelease(row.seq, turnQueue.pending, reapOutcome);
       // Reject the held turn's runtime completion (the turn-recovery
       // replay-abort pattern), then settle the session's provider-turn
@@ -3470,19 +3462,6 @@ export class AgentRuntime implements Runtime {
       );
       session.completeProviderTurn();
     }
-  }
-
-  /**
-   * Kill the wedged lane's provider child, if it has one, and report what
-   * happened. `reapWedgedProviderChild` returns false when the session holds no
-   * child — every managed-loop provider — so a bare call cannot distinguish a
-   * reap from a no-op (#3374 C7). The absent-method case is a session surface
-   * older than the reap and is named separately: it is not evidence that the
-   * session had no child.
-   */
-  private reapWedgedLaneProvider(session: SessionManager): WedgedLaneReapOutcome {
-    if (typeof session.reapWedgedProviderChild !== 'function') return 'reap_unavailable';
-    return session.reapWedgedProviderChild() ? 'reaped_child' : 'reap_skipped_no_child';
   }
 
   /**
@@ -3569,7 +3548,7 @@ export class AgentRuntime implements Runtime {
     // with nothing to count.
     // Same ordering as the per-chat path: the reap's answer is what the
     // announcement reports (#3374 C7).
-    const reapOutcome = this.reapWedgedLaneProvider(session);
+    const reapOutcome = reapWedgedLaneProvider(session);
     this.announceWedgedLaneRelease(row.seq, this.shared ? this.turnQueue.pending : 0, reapOutcome);
     // The reject is the live-turn interlock, not just a signal: it refuses
     // unless the published completion IS this context's logical turn
@@ -4094,7 +4073,11 @@ export class AgentRuntime implements Runtime {
             'agent cwd unset; global MCP file boundary falls back to home directory',
           );
         }
-        const globalSession: SessionContext = { tier: 'global', allowedRoot: agentCwd };
+        const globalSession: SessionContext = {
+          tier: 'global',
+          allowedRoot: agentCwd,
+          turnReplySink: this.turnReplySinks.forGlobal(),
+        };
         // #2976 (ii): identity is resolved per request from the executing-turn
         // register — never stored on the session (no broadcast to go stale).
         this.globalSocketServer = new WhatSoupSocketServer(
@@ -5714,11 +5697,13 @@ export class AgentRuntime implements Runtime {
       const scheduled = purpose === 'scheduled-agent-job';
       this.noteScheduledDispatch(this.session!, undefined, scheduled);
       try {
-        await this.session!.sendTurn(withProviderApplicationContext(
-          renderUserTurnForProvider(this.turnChronology, scheduled
-            ? scheduledAgentJobTurnForProvider(exactText, sessionProviderId(this.session))
-            : exactText, context, 'live'),
-          participantContext,
+        await this.session!.sendTurn(withTrustedActorTurn(
+          withProviderApplicationContext(
+            renderUserTurnForProvider(this.turnChronology, scheduled
+              ? scheduledAgentJobTurnForProvider(exactText, sessionProviderId(this.session))
+              : exactText, context, 'live'),
+            participantContext,
+          ), senderJid, this.db, config.adminPhones,
         ));
       } catch (sendErr) {
         this.removeFailedExecutingActor(GLOBAL_TOOL_SCOPE_KEY, senderJid);
@@ -6027,7 +6012,11 @@ export class AgentRuntime implements Runtime {
       const turnInput = contextPreamble === null
         ? userTurnText
         : withProviderApplicationContext(userTurnText, contextPreamble);
-      await dispatchProviderTurn(session, turnInput, onProviderBoundaryReady);
+      await dispatchProviderTurn(
+        session,
+        withTrustedActorTurn(turnInput, actorJid, this.db, config.adminPhones),
+        onProviderBoundaryReady,
+      );
     } catch (err) {
       if (actorPushed && pushedExecScopeKey !== undefined) {
         this.removeFailedExecutingActor(
@@ -6044,6 +6033,10 @@ export class AgentRuntime implements Runtime {
           sessionId: status.sessionId,
           pid: status.pid,
         }, 'stdin write timed out — notifying user');
+        // A provider can emit an answer before its stdin write rejects. Commit
+        // that answer before the status notice so the queue preserves ordering
+        // and fallback arbitration observes the delivered answer.
+        (mapKey === undefined ? this.getQueueForChat(chatJid) : this.chatQueues.get(mapKey))?.endTurn();
         this.sendDirect(chatJid, 'Agent is not responding — try /new to start a fresh session.', 'status');
         throw err;
       } else {
@@ -7290,7 +7283,7 @@ export class AgentRuntime implements Runtime {
         }
       }
       this.groupMetadataCache.set(chatJid, { adminJids, fetchedAt: Date.now() });
-      this.capDedupeMap(this.groupMetadataCache, AgentRuntime.GROUP_METADATA_CACHE_MAX);
+      capDedupeMap(this.groupMetadataCache, AgentRuntime.GROUP_METADATA_CACHE_MAX);
       return adminJids;
     } catch (err) {
       // QR-036: returns null → callers KEEP the admin gate (fail-closed), they no
@@ -7399,7 +7392,7 @@ export class AgentRuntime implements Runtime {
             });
           } else {
             queue.enqueueStreamingText(normalizedText, 'answer');
-            if (markReplayUnsafe) {
+            if (markReplayUnsafe && queue.hasCommittedAnswer?.()) {
               this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe(mapKey);
             }
             // Reply-guarantee: visible output reached the user, so reset the
@@ -8603,7 +8596,7 @@ export class AgentRuntime implements Runtime {
     requireSystemTurnProviderBoundary(this.pendingSystemResults, lease);
   }
 
-  private dispatchSystemTurn(session: SessionManager, text: string, lease: SystemTurnLeaseToken, onBoundary?: () => void): Promise<void> {
+  private dispatchSystemTurn(session: SessionManager, text: ProviderTurnInput, lease: SystemTurnLeaseToken, onBoundary?: () => void): Promise<void> {
     return dispatchProviderTurn(session, text, () => {
       this.requireSystemTurnProviderBoundary(lease); onBoundary?.();
     });
@@ -9898,7 +9891,7 @@ export class AgentRuntime implements Runtime {
     ].join(':');
     if (this.recentProviderFallbackNotices.has(noticeKey)) return;
     this.recentProviderFallbackNotices.set(noticeKey, now);
-    this.capDedupeMap(this.recentProviderFallbackNotices);
+    capDedupeMap(this.recentProviderFallbackNotices);
 
     const card = modelCardLabel(activation.fallbackProvider, activation.fallbackModel);
     const credentialsMissing = activation.keyPresent === false;
@@ -10137,9 +10130,18 @@ export class AgentRuntime implements Runtime {
     // perChatTurnText[mapKey], singleton/shared reads turnHadVisibleOutput. Uses
     // the streamed reply text, NOT the terminal result text (which is the failure
     // string that was just classified) — so a genuinely silent turn still replays.
-    const hadVisibleOutput = args.mapKey !== undefined
+    const activeQueue = args.mapKey !== undefined
+      ? this.chatQueues.get(args.mapKey)
+      : this.getActiveQueue();
+    const legacyVisibleOutput = args.mapKey !== undefined
       ? ((this.perChatTurnText.get(args.mapKey)?.trim() ?? '') !== '')
       : this.turnHadVisibleOutput;
+    const heldRuntimeContext = args.mapKey !== undefined
+      ? this.perChatRuntimeTurnContexts.get(args.mapKey)?.[0]
+      : this.currentRuntimeTurnContext;
+    const hadVisibleOutput = heldRuntimeContext && activeQueue
+      ? activeQueue.hasCommittedAnswer?.() ?? legacyVisibleOutput
+      : legacyVisibleOutput;
     if (
       args.activation.keyPresent === false
       || args.hadToolActivity
@@ -10178,9 +10180,7 @@ export class AgentRuntime implements Runtime {
 
     const runtimeContext = args.forceFresh
       ? undefined
-      : args.mapKey !== undefined
-        ? this.perChatRuntimeTurnContexts.get(args.mapKey)?.[0]
-        : this.currentRuntimeTurnContext;
+      : heldRuntimeContext;
     if (runtimeContext) {
       if (
         runtimeContext.replay.text !== replayText
@@ -10193,7 +10193,21 @@ export class AgentRuntime implements Runtime {
         }, 'refusing fallback replay with mismatched captured turn context');
         return false;
       }
-      if (!this.runtimeTurnCoordinator.beginRuntimeTurnContinuation(runtimeContext)) return false;
+      if (
+        !activeQueue
+        || !activeQueue.resumeTurnAnswerArbitration
+        || !this.runtimeTurnCoordinator.beginRuntimeTurnContinuation(runtimeContext)
+      ) return false;
+      try {
+        activeQueue.resumeTurnAnswerArbitration(runtimeContext.identity.logicalTurnId);
+      } catch (err) {
+        this.runtimeTurnCoordinator.cancelRuntimeTurnContinuation(runtimeContext);
+        log.error({ err, logicalTurnId: runtimeContext.identity.logicalTurnId },
+          'failed to reopen fallback answer arbitration');
+        return false;
+      }
+      if (args.mapKey === undefined) this.currentTurnAssistantText = '';
+      else this.perChatTurnText.set(args.mapKey, '');
       let scopeRef: PerChatRuntimeScopeRef | undefined;
       if (args.mapKey !== undefined) {
         scopeRef = this.perChatRuntimeTurnScopeRefs.get(runtimeContext.identity.logicalTurnId);
@@ -10559,6 +10573,7 @@ export class AgentRuntime implements Runtime {
     if (actorSocketRequired && !mcpSocketPath?.trim()) {
       throw new Error(`per_chat ${sessionProvider} session for ${sessionConversationKey} would spawn without an actor-bound socket`);
     }
+    const sessionManagerId = randomUUID();
     const providerToolSession: SessionContext =
       this.sandboxPerChat || this.sessionScope === 'per_chat'
         ? {
@@ -10575,7 +10590,8 @@ export class AgentRuntime implements Runtime {
             tier: 'global',
             ...(opts.actorJid ? { actorJid: opts.actorJid } : {}),
             ...(!this.shared ? { conversationKey: deliveryConversationKey } : {}),
-        };
+          };
+    providerToolSession.turnReplySessionId = sessionManagerId;
     if (opts.trackSingletonMcpSession) {
       this.singletonProviderToolSession = providerToolSession;
     }
@@ -10628,7 +10644,11 @@ export class AgentRuntime implements Runtime {
       mcpSessionContext: providerToolSession,
       whatsoupInstance: this.instanceName,
       whatsoupMcpSocket: mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
-      whatsoupMcpSessionLease: this.sessionTokens.mintLease({ kind: 'session', socketPath: mcpSocketPath ?? this.globalMcpSocketPath ?? (this.sandboxPerChat && opts.cwd ? workspaceSocketPath(opts.cwd) : '') }),
+      whatsoupMcpSessionLease: this.sessionTokens.mintLease({
+        kind: 'session',
+        socketPath: mcpSocketPath ?? this.globalMcpSocketPath ?? (this.sandboxPerChat && opts.cwd ? workspaceSocketPath(opts.cwd) : ''),
+        turnReplySessionId: sessionManagerId,
+      }),
       providerTransitionReady,
       handoffSystemBlock: this.buildHandoffSystemBlock(sessionConversationKey, route ? route.provider : this.effectiveProvider),
       degradedCapabilitiesBlock: managedLoopDegraded
@@ -10668,7 +10688,8 @@ export class AgentRuntime implements Runtime {
           }
         : undefined,
     });
-    this.sessionManagerIds.set(session, randomUUID());
+    providerToolSession.turnReplySink = this.turnReplySinks.forSession(session, opts.sessionMapKey);
+    this.sessionManagerIds.set(session, sessionManagerId);
     this.sessionM365Policies.set(session, sessionM365Policy);
     this.sessionEventToolScopes.set(
       session,
@@ -10683,7 +10704,7 @@ export class AgentRuntime implements Runtime {
           queue: degradedQueue,
           recentNotices: this.recentManagedLoopDegradedNotices,
           noticeDedupMs: config.fallbackTunables.noticeDedupMs,
-          capDedupeMap: (map) => this.capDedupeMap(map),
+          capDedupeMap: (map) => capDedupeMap(map),
         });
       }
     }
@@ -10775,6 +10796,7 @@ export class AgentRuntime implements Runtime {
               deliveryJid: chatJid,
               ...(actorJid ? { actorJid } : {}),
               allowedRoot: workspacePath,
+              turnReplySink: this.turnReplySinks.forPerChat(workspaceKey),
             };
             socketServer = new WhatSoupSocketServer(
               socketPath,
@@ -11895,7 +11917,7 @@ export class AgentRuntime implements Runtime {
     // provider generation before releasing this system lease.
     await dispatchProviderTurn(
       session,
-      `[Recent chat context — read before responding]\n${lines}`,
+      withUnauthenticatedActorTurn(`[Recent chat context — read before responding]\n${lines}`),
       onProviderBoundaryReady,
     );
     log.info({ chatJid, messageCount, sinceUnixSec }, 'injected missed messages after resume');
@@ -12034,7 +12056,7 @@ export class AgentRuntime implements Runtime {
                 chatJid,
               );
               await this.dispatchSystemTurn(
-                session, `[CONTEXT RECOVERY — prior session expired]\n${lines}`, contextLease!,
+                session, withUnauthenticatedActorTurn(`[CONTEXT RECOVERY — prior session expired]\n${lines}`), contextLease!,
               );
               await this.pendingSystemResults.waitUntilEmpty(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
               await this.waitForSystemTurnQuarantine(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
@@ -12054,7 +12076,8 @@ export class AgentRuntime implements Runtime {
             log.info({ chatJid, mapKey, textPreview: providerPreview(pendingText, 80) }, 'replaying pending turn after resume failure');
             try {
               await session.sendTurn(renderPendingReplay(this.turnChronology, pendingText,
-                this.perChatRuntimeTurnContexts.get(mapKey)?.[0], this.perChatTurnQueues.get(mapKey)?.activeTurn ?? null));
+                this.perChatRuntimeTurnContexts.get(mapKey)?.[0], this.perChatTurnQueues.get(mapKey)?.activeTurn ?? null,
+                { actorJid: pendingActorJid, db: this.db, adminPhones: config.adminPhones }));
             } catch (err) {
               log.warn({ err, chatJid }, 'pending turn replay failed');
               // Retain the replay evidence. A failed or ambiguously accepted
@@ -12333,8 +12356,8 @@ export class AgentRuntime implements Runtime {
             });
           } else {
             queue.enqueueStreamingText(normalizedText, 'answer');
-            this.turnHadVisibleOutput = true;
-            if (markReplayUnsafe) {
+            this.turnHadVisibleOutput ||= queue.hasCommittedAnswer?.() ?? true;
+            if (markReplayUnsafe && queue.hasCommittedAnswer?.()) {
               this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe();
             }
             // Reply-guarantee: visible output reached the user — reset the silence
