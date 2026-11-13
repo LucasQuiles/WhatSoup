@@ -15,7 +15,9 @@ import { z } from 'zod';
 import { Database } from '../../src/core/database.ts';
 import { createProfileRegistry } from '../../src/core/profiles.ts';
 import { PROTECTED_MESSAGE_MARKER, PROTECTED_TEXT_WITHHELD_MARKER } from '../../src/core/protected-message.ts';
+import { registerAdvancedTools } from '../../src/mcp/tools/advanced.ts';
 import { registerMessagingTools } from '../../src/mcp/tools/messaging.ts';
+import { registerProfileTools } from '../../src/mcp/tools/profile.ts';
 import { errorResult } from '../../src/mcp/types.ts';
 import { TEST_LINK_HOST } from '../helpers/protected-delivery-pins.ts';
 import { ToolRegistry } from '../helpers/resolved-tool-registry.ts';
@@ -136,6 +138,75 @@ describe('MCP response boundary', () => {
       );
 
       expect(sent).toHaveLength(1);
+      expect(result.isError).toBeUndefined();
+      expect(result.content).toEqual([{ type: 'text', text: PROTECTED_TEXT_WITHHELD_MARKER }]);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+// A factory tool scans its result after the socket call has completed, so a
+// result too large to scan whole is withheld there too and keeps its success.
+describe('factory tools after the socket call has completed', () => {
+  const BARE = LINK.slice('https://'.length);
+
+  async function sendListReply(selectedRowId: string): Promise<{ sent: unknown[]; result: Awaited<ReturnType<ToolRegistry['call']>> }> {
+    const sent: unknown[] = [];
+    const registry = new ToolRegistry();
+    registerAdvancedTools(() => ({
+      sendMessage: async (jid: string, content: unknown) => {
+        sent.push({ jid, content });
+        return { key: { id: 'synthetic' } };
+      },
+    }) as never, (tool) => registry.register(tool));
+    const result = await registry.call(
+      'send_list_reply',
+      { title: 'Select', listType: 1, selectedRowId },
+      { tier: 'chat-scoped', conversationKey: '15550100001', deliveryJid: '15550100001@s.whatsapp.net' },
+    );
+    return { sent, result };
+  }
+
+  it.each([
+    ['a bare host after an escaped newline', `\\n${BARE} `],
+    ['a scheme-bearing link', `${LINK} `],
+  ])('send_list_reply echoing 129 links (%s) is sent once and reported as a success', async (_, unit) => {
+    const { sent, result } = await sendListReply(unit.repeat(129));
+
+    expect(sent).toHaveLength(1);
+    expect(result.isError).toBeUndefined();
+    expect(result.content).toEqual([{ type: 'text', text: PROTECTED_TEXT_WITHHELD_MARKER }]);
+  });
+
+  it('control: send_list_reply echoing 128 links stays a redacted success', async () => {
+    const { sent, result } = await sendListReply(`${LINK} `.repeat(128));
+
+    expect(sent).toHaveLength(1);
+    expect(result.isError).toBeUndefined();
+    expectRedacted(result.content[0]!.text);
+    expect(JSON.parse(result.content[0]!.text)).toMatchObject({
+      sent: true, selectedRowId: `${PROTECTED_MESSAGE_MARKER} `.repeat(128),
+    });
+  });
+
+  it('update_privacy_settings echoing a value with 129 links is applied once and reported as a success', async () => {
+    const applied: unknown[] = [];
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const registry = new ToolRegistry();
+      registerProfileTools(() => ({
+        updateDisableLinkPreviewsPrivacy: async (disabled: boolean) => { applied.push(disabled); },
+      }) as never, db, (tool) => registry.register(tool));
+
+      const result = await registry.call(
+        'update_privacy_settings',
+        { setting: 'link_previews', value: `${LINK} `.repeat(129) },
+        { tier: 'global' },
+      );
+
+      expect(applied).toEqual([false]);
       expect(result.isError).toBeUndefined();
       expect(result.content).toEqual([{ type: 'text', text: PROTECTED_TEXT_WITHHELD_MARKER }]);
     } finally {

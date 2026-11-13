@@ -1,13 +1,18 @@
 /**
  * The sock tool factory redacts protected links in every WhatsApp-backed
- * reader's result. A large but legitimate result must come back whole, and a
- * result past the scan bound must be a tool error, never a silently cut one.
+ * reader's result. A large but legitimate result must come back whole. The
+ * socket call has completed before the scan, so a result past the scan bound
+ * is withheld whole and keeps its success, never a silently cut result.
  */
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../../src/logger.ts', async () => (await import('../../helpers/logger-mock.ts')).loggerMock());
 
-import { MAX_SANITIZE_NODES, PROTECTED_MESSAGE_MARKER } from '../../../src/core/protected-message.ts';
+import {
+  MAX_SANITIZE_NODES,
+  PROTECTED_MESSAGE_MARKER,
+  PROTECTED_TEXT_WITHHELD_MARKER,
+} from '../../../src/core/protected-message.ts';
 import { registerGroupTools } from '../../../src/mcp/tools/groups.ts';
 import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 
@@ -39,12 +44,11 @@ describe('list_groups through the sock tool factory scan bound', () => {
     expect(result.content[0].text).not.toContain(PROTECTED_MESSAGE_MARKER);
   });
 
-  it('reports a result past the scan bound as a tool error', async () => {
+  it('withholds a result past the scan bound whole and keeps it a success', async () => {
     // One group whose member count alone reaches the bound.
     const result = await listGroups([group(0, MAX_SANITIZE_NODES)]);
 
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toMatch(/^Tool "list_groups" failed: result is too large to check for protected links/);
-    expect(result.content[0].text).not.toContain(PROTECTED_MESSAGE_MARKER);
+    expect(result.isError).toBeUndefined();
+    expect(result.content).toEqual([{ type: 'text', text: PROTECTED_TEXT_WITHHELD_MARKER }]);
   });
 });
