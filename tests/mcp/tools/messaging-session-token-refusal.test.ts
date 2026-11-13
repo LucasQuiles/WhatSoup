@@ -11,7 +11,11 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Database } from '../../../src/core/database.ts';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
-import { SESSION_TOKEN_NOTIFICATION, SessionTokenRegistry } from '../../../src/mcp/caller-attribution.ts';
+import {
+  SESSION_TOKEN_CAPACITY,
+  SESSION_TOKEN_NOTIFICATION,
+  SessionTokenRegistry,
+} from '../../../src/mcp/caller-attribution.ts';
 import { registerMessagingTools } from '../../../src/mcp/tools/messaging.ts';
 import { noExecutingSession } from '../../../src/mcp/types.ts';
 import { PerChatMcpSocketManager } from '../../../src/runtimes/agent/per-chat-mcp-socket-manager.ts';
@@ -135,6 +139,21 @@ describe('send_message with a refused session token', () => {
     expect(line.rawSends).toEqual([]);
     expect(result).toMatchObject({ sent: false, suppressed: true, reason: 'active_turn_unavailable' });
     expect(line.queue.hasCommittedAnswer()).toBe(false);
+  });
+
+  it('still suppresses a revoked session lease after a full capacity of request leases has come and gone', async () => {
+    const line = await startLine();
+    const retired = line.tokens.mintLease({ kind: 'session', socketPath: line.socketPath, turnReplySessionId: LIVE_MANAGER });
+    retired.revoke();
+    // Ordinary Microsoft 365 adapter calls each mint and revoke one request lease.
+    for (let call = 0; call <= SESSION_TOKEN_CAPACITY; call += 1) {
+      line.tokens.mintLease({ kind: 'request', socketPath: line.socketPath, conversationKey: 'socket-refusal', requestRef: `r-${call}` }).revoke();
+    }
+
+    const result = await line.send(retired.token);
+
+    expect(line.rawSends).toEqual([]);
+    expect(result).toMatchObject({ sent: false, suppressed: true, reason: 'active_turn_unavailable' });
   });
 
   it('still queues the reply of a live session token presented on its own socket', async () => {

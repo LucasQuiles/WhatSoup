@@ -59,8 +59,26 @@ export interface SessionTokenVerifier {
   refusal?(presented: unknown, socketPath: string): SessionTokenRefusal | undefined;
 }
 
-/** How many live tokens are kept before the oldest is forgotten (a backstop; leases revoke). */
+/**
+ * How many live tokens, and separately how many revoked tokens, of each kind are
+ * kept before the oldest of that kind is forgotten (a backstop; leases revoke).
+ */
 export const SESSION_TOKEN_CAPACITY = 4096;
+
+type SessionTokenKind = SessionTokenBinding['kind'];
+const SESSION_TOKEN_KINDS: readonly SessionTokenKind[] = ['session', 'request'];
+
+/** Drops the oldest entries until `size` is within `capacity`; returns how many it dropped. */
+function trimOldest(entries: Map<string, unknown> | Set<string>, capacity: number): number {
+  let dropped = 0;
+  while (entries.size > capacity) {
+    const oldest = entries.keys().next().value;
+    if (oldest === undefined) break;
+    entries.delete(oldest);
+    dropped += 1;
+  }
+  return dropped;
+}
 
 /**
  * Tokens minted for the runtime's own sessions and adapter calls. Each is handed
@@ -70,18 +88,25 @@ export const SESSION_TOKEN_CAPACITY = 4096;
  * A token is a scoped capability with a lifetime: it verifies only on the socket
  * it is bound to, and only until its lease is revoked. A session token lives as
  * long as its session manager (child respawns keep it); a request token lives
- * for one adapter call. Past the capacity the oldest token is forgotten and its
- * holder is recorded as an outside caller, which only makes evidence stricter.
+ * for one adapter call. Past the capacity the oldest token of the same kind is
+ * forgotten and its holder is recorded as an outside caller, which only makes
+ * evidence stricter.
  *
- * A revoked token is remembered, up to the same capacity, so a caller still
- * presenting it can be refused rather than treated as one that presented none.
+ * A revoked token is remembered, up to the same capacity per kind, so a caller
+ * still presenting it can be refused rather than treated as one that presented
+ * none. Each kind has its own bounds, so request-token churn (one per adapter
+ * call) can never displace a session token, live or revoked; only newer session
+ * tokens can.
  *
  * A same-user process can read another process's environment, so a match is
  * still attribution evidence, not authentication against such a process.
  */
 export class SessionTokenRegistry implements SessionTokenVerifier {
-  private readonly live = new Map<string, Readonly<SessionTokenBinding>>();
-  private readonly revoked = new Set<string>();
+  private readonly live: Record<SessionTokenKind, Map<string, Readonly<SessionTokenBinding>>> = {
+    session: new Map(),
+    request: new Map(),
+  };
+  private readonly revoked: Record<SessionTokenKind, Set<string>> = { session: new Set(), request: new Set() };
   private readonly capacity: number;
 
   constructor(capacity: number = SESSION_TOKEN_CAPACITY) {
@@ -90,17 +115,15 @@ export class SessionTokenRegistry implements SessionTokenVerifier {
 
   /** Number of live tokens; a settled adapter call returns it to its baseline. */
   get liveCount(): number {
-    return this.live.size;
+    return this.live.session.size + this.live.request.size;
   }
 
   mint(binding: SessionTokenBinding): string {
     const token = randomBytes(32).toString('hex');
-    this.live.set(token, Object.freeze({ ...binding }));
-    while (this.live.size > this.capacity) {
-      const oldest = this.live.keys().next().value;
-      if (oldest === undefined) break;
-      this.live.delete(oldest);
-      log.warn({ capacity: this.capacity }, 'session token capacity reached: the oldest live token was forgotten');
+    const live = this.live[binding.kind];
+    live.set(token, Object.freeze({ ...binding }));
+    if (trimOldest(live, this.capacity) > 0) {
+      log.warn({ capacity: this.capacity, kind: binding.kind }, 'session token capacity reached: the oldest live token was forgotten');
     }
     return token;
   }
@@ -111,12 +134,11 @@ export class SessionTokenRegistry implements SessionTokenVerifier {
   }
 
   revoke(token: string): void {
-    if (!this.live.delete(token)) return;
-    this.revoked.add(token);
-    while (this.revoked.size > this.capacity) {
-      const oldest = this.revoked.values().next().value;
-      if (oldest === undefined) break;
-      this.revoked.delete(oldest);
+    for (const kind of SESSION_TOKEN_KINDS) {
+      if (!this.live[kind].delete(token)) continue;
+      this.revoked[kind].add(token);
+      trimOldest(this.revoked[kind], this.capacity);
+      return;
     }
   }
 
@@ -131,8 +153,10 @@ export class SessionTokenRegistry implements SessionTokenVerifier {
     const live = this.findLive(presented);
     let revoked = false;
     // Visit every revoked token so the comparison time does not depend on which one matches.
-    for (const token of this.revoked) {
-      if (safeStringEqual(token, presented)) revoked = true;
+    for (const kind of SESSION_TOKEN_KINDS) {
+      for (const token of this.revoked[kind]) {
+        if (safeStringEqual(token, presented)) revoked = true;
+      }
     }
     if (live !== undefined) {
       return isNonEmptyString(socketPath) && live.socketPath === socketPath ? undefined : 'wrong_socket';
@@ -143,8 +167,10 @@ export class SessionTokenRegistry implements SessionTokenVerifier {
   private findLive(presented: string): Readonly<SessionTokenBinding> | undefined {
     let matched: Readonly<SessionTokenBinding> | undefined;
     // Visit every live token so the comparison time does not depend on which one matches.
-    for (const [token, binding] of this.live) {
-      if (safeStringEqual(token, presented)) matched = binding;
+    for (const kind of SESSION_TOKEN_KINDS) {
+      for (const [token, binding] of this.live[kind]) {
+        if (safeStringEqual(token, presented)) matched = binding;
+      }
     }
     return matched;
   }

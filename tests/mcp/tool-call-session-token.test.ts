@@ -289,4 +289,20 @@ describe('SessionTokenRegistry bindings (M365 r4, W4)', () => {
 
     expect(leases.map((lease) => tokens.refusal(lease.token, SOCKET_A))).toEqual([undefined, 'revoked', 'revoked']);
   });
+
+  it('never lets request tokens displace a session token, live or revoked', async () => {
+    const module = await import('../../src/mcp/caller-attribution.ts');
+    const tokens = new module.SessionTokenRegistry(2);
+    const live = tokens.mint({ kind: 'session', socketPath: SOCKET_A });
+    const retired = tokens.mintLease({ kind: 'session', socketPath: SOCKET_A });
+    retired.revoke();
+    const request = { kind: 'request' as const, socketPath: SOCKET_A, conversationKey: 'chat-a', requestRef: 'r' };
+    for (let call = 0; call < 3; call += 1) tokens.mintLease(request).revoke();
+    const openRequests = [0, 1, 2].map(() => tokens.mint(request));
+
+    expect(tokens.verify(live, SOCKET_A)).toEqual({ kind: 'session', socketPath: SOCKET_A });
+    expect(tokens.refusal(retired.token, SOCKET_A)).toBe('revoked');
+    // Each kind keeps its own bound: the oldest open request token is the one forgotten.
+    expect(openRequests.map((token) => tokens.verify(token, SOCKET_A) !== undefined)).toEqual([false, true, true]);
+  });
 });
