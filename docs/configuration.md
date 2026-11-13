@@ -2547,20 +2547,57 @@ before deploying to an instance whose bot must keep writing.
 admission reads that copy. The `claude-cli` provider also loads the copy that
 `enabledPlugins` names, so startup checks that copy too. It reads the Claude CLI's install
 record, `plugins/installed_plugins.json` under `CLAUDE_CONFIG_DIR` (or `~/.claude`), and
-requires every install of `microsoft_365@microsoft-365-dev` to:
-- have a manifest whose `microsoft_365` server runs
-  `${CLAUDE_PLUGIN_ROOT}/mcp-server/dist/index.cjs` and does not set
-  `MS365_WORKFLOW_AUTHORITY_REQUIRED` to anything other than `"1"`;
-- have that entry inside its install directory, with the same SHA-256 as the admitted entry.
+requires every install of `microsoft_365@microsoft-365-dev` to repeat the admitted plugin:
+- its manifest's `mcpServers` and `hooks` equal the admitted manifest's: the single
+  `microsoft_365` server with the same `command`, `args` and `env`, and no other server
+  or hook;
+- its plugin-root `.mcp.json` and `hooks/hooks.json` match the admitted copy's (normally
+  both absent);
+- its `mcp-server/dist/index.cjs` entry resolves inside its install directory and has the
+  same SHA-256 as the admitted entry;
+- the install record, the install directory, the manifest and the entry pass the same
+  ownership, permission and symlink checks as the admitted copy.
+
+Config-root isolation (`WHATSOUP_AGENT_CONFIG_ROOT_ISOLATION=1`) gives a sandboxed child
+another install record than the one checked here, so it withdraws the assignment.
 
 A missing or unreadable record, a missing install or any difference withdraws the
-assignment. The log names the reason, never a path. Admission records the SHA-256 of
-the admitted entry. The check runs at startup and again before each later write of
-native settings (a capability-grant write, or the settings of a new sandbox per-chat
-session), because a marketplace update can replace the native copy mid-run. A
-withdrawal holds until the instance restarts, even if the copies match again: restart
-it after you update either copy. Sessions that started before the withdrawal keep
-their snapshot of the assignment until they respawn.
+assignment. The log names the reason, never a path. Admission records the admitted
+copy: its manifest and entry digests, its server and hook shape and its paths.
+The `microsoft365` adapter re-hashes and re-checks that `pluginDirs` copy before each
+launch; a change closes the adapter for the rest of the run and withdraws the assignment.
+The native copy is re-checked at startup, before each later write of native settings (a
+capability-grant write, or the settings of a new sandbox per-chat session), before each
+`claude-cli` spawn (including an in-place respawn of an existing session: a crash
+auto-respawn, a `/new` reset, a failed resume or a later message to an inactive session)
+and before each turn publishes its authority, because a marketplace update can replace
+either copy mid-run. A withdrawal holds until the instance restarts, even if the copies
+match again: restart it after you update either copy.
+
+After a withdrawal:
+- the next turn of every existing session publishes no assignment and no route provider,
+  so the adapter refuses its reads and writes;
+- a turn that published the assignment before the withdrawal loses it at its next
+  request: the adapter refuses it and the broker answers `WORKFLOW_AUTHORITY_DISABLED`;
+- the next `claude-cli` spawn of any session gets `--disallowedTools` with the full
+  Microsoft 365 mutation deny set and no bridge or `MS365_WORKFLOW_AUTHORITY_*` values;
+- every native settings file this runtime wrote is rewritten with the deny floor. A
+  failed rewrite stays pending and is retried at every later check; while any rewrite is
+  pending, every provider spawn is refused.
+
+Settings writes lift the native deny floor only in `per_chat` scope without
+`sandboxPerChat`, where a guarded native write can succeed. In single or shared scope the
+broker refuses native writes, and in `sandboxPerChat` mode the child has no authority
+socket, so those settings keep the floor; adapter writes are unaffected.
+
+**Accepted residuals.** These remain outside the B11 boundary:
+- A sub-second window remains between the spawn re-check and the Claude CLI loading the
+  plugin. Closing it needs an admitted immutable artifact, which is a later design change.
+- A deliberate swap of either copy by a process running as the same user is outside the
+  same-user filesystem trust boundary described above.
+- The session child holds the bridge credentials (`MS365_AGENT365_API_KEY` and the
+  origin). A shell-capable model in that child is outside these guards, which protect
+  against accidental drift, not against a malicious model.
 
 Settings do not record deny authorship. Approval therefore never removes existing
 entries, even if they match a previously generated floor. Legacy settings and a
