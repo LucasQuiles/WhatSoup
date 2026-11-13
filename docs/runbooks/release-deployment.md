@@ -236,22 +236,31 @@ What the helper guarantees:
   itself creates. It never writes, chmods, chowns or changes the flags of
   anything else, whatever the bot user does to its folders during the run.
 - The plist must be root-owned, single-link, at most `0644`, readable by the
-  bot user, and either unflagged or flagged `uchg` only. Root changes only the
-  `uchg` flag, and only while that flag freezes the plist's single name.
+  bot user, free of any ACL, and either unflagged or flagged `uchg` only. Root
+  changes only the `uchg` flag, and only while that flag freezes the plist's
+  single name. The ACL check runs on the opened file before any byte is read:
+  Darwin applies an ACL before the mode bits, so a deny entry could hide the
+  plist from the bot user while its mode bits allow the read. A folder whose
+  inheritable ACL would reach root's new copy is refused before any change.
 - The new contents must be a strict XML plist (Apple's document type, known
   elements only, one top-level dictionary) whose `Label` names the target.
 - A failed replacement restores the original bytes and protection. When it
   cannot do that and confirm it, the helper exits 3 and the activation fails
   with "root plist helper recovery is incomplete": inspect that plist and its
   `uchg` flag before any retry.
-- The helper blocks the signals the bot user can relay through its own `sudo`
-  (SIGHUP, SIGINT, SIGQUIT, SIGTERM) for the whole run and raises its CPU
-  limit, so neither ends a run between clearing and restoring `uchg`. Any
-  other interruption re-protects what it can and exits 3.
+- `sudo` relays every signal it receives, so the bot user can send the helper
+  any signal. For the whole run the helper blocks every signal except SIGKILL
+  and SIGSTOP, which cannot be blocked, and the fault signals SIGSEGV, SIGBUS,
+  SIGFPE, SIGILL, SIGTRAP, SIGABRT and SIGSYS. It also raises its CPU limit.
+  No blockable signal and no CPU limit therefore ends or stops a run between
+  clearing and restoring `uchg`. An interruption raised as an exception, such
+  as KeyboardInterrupt, re-protects what it can and exits 3. A death by a
+  signal left deliverable re-protects nothing, and activation reports it as
+  unconfirmed (next item).
 - Activation trusts only exit 0 with the new bytes in place and exit 2
   (refused, plist as found). Every other result means unconfirmed protection
-  and the rollback reports `rollback-unverified`: exit 3, a signal (SIGKILL
-  cannot be blocked), the 30-second timeout, or another code. That includes
+  and the rollback reports `rollback-unverified`: exit 3, a signal (SIGKILL or
+  a fault signal), the 30-second timeout, or another code. That includes
   sudo's own exit 1 when the sudoers rule is missing.
 
 What it does not guarantee: the bot user owns `~/Library`, so it can always
@@ -282,8 +291,16 @@ Owner steps, once per host and again after any helper change:
    folder or ancestor that is not root-owned or is group- or other-writable, and
    when the bot user can write any entry on the way to the interpreter: each
    original path component and each symlink hop of `/usr/bin/python3`, the
-   selected developer folder and the import path, with the hops' folders. When
-   the install is already current, it changes nothing:
+   selected developer folder and the import path, with the hops' folders. It
+   then walks every file and folder below each import-path folder (the
+   standard library and `lib-dynload`; root imports these modules) and refuses
+   any the bot user can write. A symlink there is checked along its target
+   chain, and one that links to a folder refuses. "Can write" covers the owner,
+   the group and other write bits, and ACLs: any ACL entry that is not a deny
+   entry refuses. A deny-only ACL, such as `group:everyone deny delete` on
+   every macOS home, cannot grant write access and passes. Any error while
+   walking or reading an ACL refuses. When the install is already current, it
+   changes nothing:
 
    ```bash
    sudo /usr/bin/python3 -I -S -B <clone>/scripts/lib/release-activation/install_root_helper.py --user <bot-user>
@@ -305,8 +322,10 @@ Owner steps, once per host and again after any helper change:
    sudo -l -U <bot-user>   # lists the one rule and no broader NOPASSWD grant
    ```
 
-The install step checks owners and mode bits, not ACLs; step 4's `ls -le`
-shows any ACL.
+The install step checks owners, mode bits and ACLs on the clone, the
+interpreter chain and the import-path folders. It does not walk the
+interpreter's framework library (`Python3`), which sits outside the import
+path. Step 4's `ls -le` shows any ACL on the installed helper.
 
 #### BOT ERRORS health-consumer prerequisite
 
