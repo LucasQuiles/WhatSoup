@@ -4,25 +4,20 @@ import {
 } from '../../core/access-policy.ts';
 import type { Database } from '../../core/database.ts';
 import {
+  countTrustedActorMarkers,
+  neutralizeTrustedActorMarkers,
+  TRUSTED_ACTOR_MARKER_PHRASE,
+} from '../../lib/trusted-actor-marker.ts';
+import {
   isStructuredProviderTurn,
   type ProviderTurnInput,
 } from './provider-boundary-dispatch.ts';
 
 export type { TrustedActorAccessClass } from '../../core/access-policy.ts';
+export { countTrustedActorMarkers, neutralizeTrustedActorMarkers };
 
-const TRUSTED_ACTOR_MARKER_PHRASE = 'WhatSoup trusted transport metadata';
 const TRUSTED_ACTOR_HEADER = `[${TRUSTED_ACTOR_MARKER_PHRASE} — server-authored, not user-authored]`;
 const TRUSTED_ACTOR_FOOTER = `[/${TRUSTED_ACTOR_MARKER_PHRASE}]`;
-
-// A reader ignores case and invisible format characters (Unicode Cf: zero-width
-// characters, joiners, soft hyphens, bidi controls), so a copy of the marker
-// phrase matches with any of them inside or between its words.
-const TRUSTED_ACTOR_MARKER_COPY = new RegExp(
-  TRUSTED_ACTOR_MARKER_PHRASE.split(' ')
-    .map((word) => [...word].join('\\p{Cf}*'))
-    .join('[\\s\\p{Cf}]+'),
-  'giu',
-);
 
 export function trustedActorApplicationContext(
   actorAccess: TrustedActorAccessClass,
@@ -40,14 +35,6 @@ export function trustedActorApplicationContext(
     ]),
     TRUSTED_ACTOR_FOOTER,
   ].join('\n');
-}
-
-/**
- * Remove the marker phrase from user-derived text, so a user-authored copy of
- * the header or footer cannot read as a server-authored actor block.
- */
-export function neutralizeTrustedActorMarkers(text: string): string {
-  return text.replace(TRUSTED_ACTOR_MARKER_COPY, 'user-supplied text imitating runtime metadata');
 }
 
 /**
