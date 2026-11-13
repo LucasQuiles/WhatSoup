@@ -2436,11 +2436,13 @@ Output is one JSON line with `ok`, `mode`, `decision` (`ready`, `applied`, `alre
 contradicts the recorded gap or an existing closure); `1` usage or I/O error. Output never contains
 message text, JIDs, or media.
 
-**Schema 66 rollback.** Migration 66 adds only the new table. After it is recorded, a binary whose
-ceiling is 65 refuses the database and will not write, so **binary-only rollback is unavailable**.
-Keep the 66-aware release for containment or forward repair. Restoring a pre-migration backup is an
-owner decision that requires a proven zero-new-writes window. **Never overwrite a newer database with
-an older backup**: messages received after the upgrade would be lost.
+**Schema 66 and 67 rollback.** Migration 66 adds only the closure table; migration 67 adds only the
+protected-delivery tables. After a migration is recorded, a binary whose ceiling is below it refuses
+the database and will not write: a schema-65 binary refuses a schema-66 database, and a schema-66
+binary refuses a schema-67 database, both as `future_schema`. **Binary-only rollback is unavailable**
+for either. Keep the 67-aware release for containment or forward repair. Restoring a pre-migration
+backup is an owner decision that requires a proven zero-new-writes window. **Never overwrite a newer
+database with an older backup**: messages received after the upgrade would be lost.
 
 The refusal is rehearsed with two real checkouts on disposable files. The work directory must not
 exist; the harness creates its own database there:
@@ -2452,10 +2454,11 @@ bash scripts/run-with-pinned-node.sh scripts/schema-rollback-rehearsal.ts \
   --old-root "$OLD" --new-root "$PWD" --work-dir "$SCRATCH/rehearsal"
 ```
 
-The old binary creates the database at 65, this release migrates it to 66, and the old binary reopens
-it. Exit `0` means the old binary refused with `DatabaseCompatibilityError` reason `future_schema`
-("Database schema migration 66 exceeds binary ceiling 65; refusing writes") and every file in the
-work directory, including the WAL and shared-memory sidecars, stayed byte-identical.
+The old binary creates the database at its own ceiling, this release migrates it to 67, and the old
+binary reopens it. From a schema-66 previous release, exit `0` means the old binary refused with
+`DatabaseCompatibilityError` reason `future_schema` ("Database schema migration 67 exceeds binary
+ceiling 66; refusing writes") and every file in the work directory, including the WAL and
+shared-memory sidecars, stayed byte-identical.
 
 #### Close a proven operator catch-up recovery (admitted inbound sequences)
 
@@ -3081,6 +3084,19 @@ one-use URL directly and returns metadata only. It does not use the generic
 outbox, conversation history, or model result. If staging, delivery, or the
 managed API fails, inspect the content-free `protected delivery` log event and
 use delivery status; do not retry through `send_message`.
+
+Redaction covers more paths than refusal. A protected link or its redaction
+marker is refused before sending only by a due scheduled message, a pending
+outbound replay (`outbound.protected_link_send_refused`), `forward_message`
+(which also refuses a source message that was itself a protected delivery) and
+a capability-obligation dispatch whose source token carries one
+(`protected_link_source_refused`). Other send tools, including `send_message`,
+`reply_message`, `edit_message` and `post_status`, send their text without this
+check; `reply_message` redacts only the quoted stored text. Agents do not see raw
+links: inbound text is redacted at ingest and every MCP tool response is
+redacted, so these tools can carry a link only if the caller already holds it
+from outside WhatSoup. A fleet config save refuses a value containing the
+redaction marker, so saving a redacted projection cannot overwrite a stored link.
 
 The tool resolves both the actor and destination to the same verified phone
 identity before recording its canonical WhatsApp address. A mapped LID and that

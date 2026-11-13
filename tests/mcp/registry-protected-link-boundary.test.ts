@@ -56,6 +56,17 @@ describe('MCP response boundary', () => {
     expect(JSON.parse(result.text)).toEqual({ subject: `Team ${PROTECTED_MESSAGE_MARKER}` });
   });
 
+  it('redacts a protected link used as an object key', async () => {
+    const result = await callProbe(() => ({ [LINK]: 'value', nested: { [`see ${LINK}`]: 1 } }));
+
+    expect(result.isError).toBeUndefined();
+    expectRedacted(result.text);
+    expect(JSON.parse(result.text)).toEqual({
+      [PROTECTED_MESSAGE_MARKER]: 'value',
+      nested: { [`see ${PROTECTED_MESSAGE_MARKER}`]: 1 },
+    });
+  });
+
   it('redacts a string result', async () => {
     const result = await callProbe(() => `see ${LINK}`);
 

@@ -250,12 +250,15 @@ function sanitizeBoundedValue(
       }
     }
     for (const key of Object.keys(current)) {
+      // JSON writes a key as text too, so it is redacted as a Map key is: a
+      // redacted key equal to an earlier one replaces that entry.
+      const safeKey = sanitizeText(key);
       try {
-        clone[key] = sanitize((current as Record<string, unknown>)[key], depth + 1);
+        clone[safeKey] = sanitize((current as Record<string, unknown>)[key], depth + 1);
       } catch (error) {
         // A throwing accessor reads as the marker; the bound must still escape.
         if (error instanceof ProtectedValueScanLimitError) throw error;
-        clone[key] = PROTECTED_MESSAGE_MARKER;
+        clone[safeKey] = PROTECTED_MESSAGE_MARKER;
       }
     }
     return clone;

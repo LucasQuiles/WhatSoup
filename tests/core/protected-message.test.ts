@@ -307,6 +307,24 @@ describe('tool result binary leaves and built-in values', () => {
     expect([...out.set]).toEqual([`see ${PROTECTED_MESSAGE_MARKER}`]);
   });
 
+  it('redacts a protected link used as a plain object key, in both modes', () => {
+    const value = { [link]: 'first', nested: { [`key ${link}`]: 'second' } };
+
+    for (const out of [sanitizeProtectedToolResult(value, pins), sanitizeProtectedMessageValue(value, pins)]) {
+      expect(out).toEqual({ [PROTECTED_MESSAGE_MARKER]: 'first', nested: { [`key ${PROTECTED_MESSAGE_MARKER}`]: 'second' } });
+      expect(JSON.stringify(out)).not.toContain(TEST_LINK_HOST);
+    }
+  });
+
+  it('resolves a redacted-key collision in a plain object as a Map does: the later entry wins', () => {
+    const other = `https://${TEST_LINK_HOST}/s/#v3.${'R'.repeat(22)}.${'Y'.repeat(43)}`;
+    const object = sanitizeProtectedToolResult({ [link]: 'first', [other]: 'second' }, pins);
+    const map = sanitizeProtectedToolResult(new Map([[link, 'first'], [other, 'second']]), pins) as Map<string, string>;
+
+    expect(object).toEqual({ [PROTECTED_MESSAGE_MARKER]: 'second' });
+    expect([...map]).toEqual([[PROTECTED_MESSAGE_MARKER, 'second']]);
+  });
+
   it('copies an Error with its message and stack redacted', () => {
     const out = sanitizeProtectedToolResult({ error: new Error(`failed ${link}`) }, pins) as { error: Error };
 
