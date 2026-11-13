@@ -80,9 +80,25 @@ Before recording, the command is **fail-closed** on three observations (hardened
    finding 2; use a fresh `--receipt-out` per run). The receipt records probe evidence only; it
    does not assert admission (admission = the `capability_attestations` row carrying this `nonce`).
 
-The canary also owns a **process group** (`detached`) and SIGKILLs it on timeout AND on clean
-exit, so a resolver that forks a grandchild (yt-dlp → ffmpeg) cannot leave it to land a side
-effect after the outcome is reported.
+The canary also owns a **process group** (`detached`) and SIGKILLs it on timeout AND on every
+exit, so that a resolver that forks a grandchild (yt-dlp → ffmpeg) cannot leave it to land a side
+effect after the outcome is reported. **A canary passes only when every group kill is proven
+reaped:** the kill succeeds or returns `ESRCH`, or it returns `EPERM` (macOS can do so for a group
+that holds only zombies, issue 3568) and one `ps` read of the group finds no live member.
+Otherwise a group member may have survived, and the canary FAILS:
+
+- an `EPERM` whose `ps` read finds a live member (`live`) or gives no answer (`unknown`), or any
+  other kill error, fails the canary with a `reapError` that names it;
+- after a timeout, a `close` that does not arrive within a fixed 5 s reap grace fails the canary
+  with reason `resolver_close_not_observed`. A member the kill could not reach, such as one that
+  called `setsid()`, can hold the resolver's output open. The canary then drops the pipes and the
+  child handle so the CLI exits, and it never kills the group a second time.
+
+Either way nothing is recorded: no attestation, no `--receipt-out` receipt, exit status 3. The
+text output is `NOT RECORDED attest <capability>: canary_failed`, followed by the canary's
+`reason` and `reapError` when set and, for `resolver_close_not_observed`, the note that a resolver
+descendant may still be running. With `--json` the output carries only `"reason":"canary_failed"`,
+without that detail.
 
 **NARROW CLAIM (read this).** A passing canary attests ONLY that the observed installed
 resolver, run against `sha256(probeSource)`, exited 0 within bound and produced ≥

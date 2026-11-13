@@ -20,6 +20,18 @@ import { Database } from '../../src/core/database.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import { trustedNodePath } from '../helpers/trusted-node.ts';
 import {
+  deliverThenThrow,
+  grandchildResolverSource,
+  killLeaderOnceThenEperm,
+  readFixturePid,
+  reapFixtureGroups,
+  settleWithin,
+  throwOnly,
+  waitForPidGone,
+  type GroupMembershipAnswer,
+  type GroupSignalSeam,
+} from '../helpers/group-kill-seams.ts';
+import {
   assertArgsMatchConfig,
   assertMediaRootReadable,
   attest,
@@ -50,6 +62,16 @@ const NODE = trustedNodePath();
 function TIMING(waitMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, waitMs));
 }
+
+/** runResolverCanary with its test-only group-kill, membership-probe and reap-grace seams (issue 3568). */
+type CanaryWithSeams = (params: Parameters<typeof runResolverCanary>[0] & {
+  kill?: GroupSignalSeam;
+  probeGroup?: (pgid: number) => GroupMembershipAnswer;
+  reapGraceMs?: number;
+}) => ReturnType<typeof runResolverCanary>;
+const canaryWithSeams = runResolverCanary as unknown as CanaryWithSeams;
+const CLEAN_RESOLVER = 'process.stdout.write("processed:" + process.argv[2])\n';
+const listResolverStages = (): string[] => readdirSync(tmpdir()).filter((n) => n.startsWith('ws-resolver-stage-'));
 
 /**
  * A parsed `capabilityObligations` block whose mediaRoot / contract version /
@@ -256,6 +278,149 @@ describe('runResolverCanary (bounded, non-sending resolver probe)', () => {
     // With the close-handler group reap, the grandchild was SIGKILLed → the marker never lands.
     expect(existsSync(marker)).toBe(false);
   }, 30_000);
+
+  it('issue 3568: an EPERM close-time group reap on a group with no live member passes, the same as ESRCH', async () => {
+    const dir = tmp.make('canary-eperm-reaped');
+    const input = canaryInput(dir, CLEAN_RESOLVER);
+    const targets: number[] = [];
+    const probed: number[] = [];
+    const eperm = await canaryWithSeams({
+      ...input, probeSource: 'https://probe.example/clip', nonce: 'eperm-reaped',
+      kill: deliverThenThrow('EPERM', targets),
+      probeGroup: (pgid) => { probed.push(pgid); return 'no-live-members'; },
+    });
+    const esrchProbed: number[] = [];
+    const esrch = await canaryWithSeams({
+      ...input, probeSource: 'https://probe.example/clip', nonce: 'esrch-reaped',
+      kill: deliverThenThrow('ESRCH', []),
+      probeGroup: (pgid) => { esrchProbed.push(pgid); return 'live'; },
+    });
+    expect(probed.length).toBeGreaterThan(0);
+    expect(probed.every((pgid) => pgid > 0 && targets.includes(-pgid))).toBe(true);
+    expect(esrchProbed).toEqual([]);
+    expect(esrch.result, JSON.stringify(esrch.detail)).toBe('pass');
+    expect(eperm.result, JSON.stringify(eperm.detail)).toBe('pass');
+    expect((eperm.detail as Record<string, unknown>)?.['reapError']).toBeUndefined();
+  }, 30_000);
+
+  it('issue 3568: an EPERM close-time group reap fails the canary while a same-group grandchild is live (default ps probe)', async () => {
+    const dir = tmp.make('canary-eperm-live');
+    // The resolver leaves a same-group grandchild alive for about 3 s, then exits 0 with output.
+    const parentSrc = [
+      'const cp=require("node:child_process");',
+      'cp.spawn(process.execPath,["-e","Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,3000)"],{stdio:"ignore"}).unref();',
+      'process.stdout.write("processed-with-grandchild");process.exit(0);',
+    ].join('');
+    const targets: number[] = [];
+    try {
+      const outcome = await canaryWithSeams({
+        ...canaryInput(dir, parentSrc, { name: 'parent.cjs' }), probeSource: 'https://probe.example/clip', nonce: 'eperm-live',
+        kill: throwOnly('EPERM', targets),
+      });
+      expect(outcome.result).toBe('fail');
+      expect(String((outcome.detail as Record<string, unknown>)?.['reapError'])).toMatch(/EPERM; group membership probe: live/);
+    } finally {
+      reapFixtureGroups(targets); // the grandchild is still alive here, so its group id is still allocated
+    }
+  }, 30_000);
+
+  it('issue 3568: an EPERM close-time group reap that the membership probe cannot read fails closed', async () => {
+    const dir = tmp.make('canary-eperm-unknown');
+    const probed: number[] = [];
+    const outcome = await canaryWithSeams({
+      ...canaryInput(dir, CLEAN_RESOLVER), probeSource: 'https://probe.example/clip', nonce: 'eperm-unknown',
+      kill: throwOnly('EPERM', []),
+      probeGroup: (pgid) => { probed.push(pgid); return 'unknown'; },
+    });
+    expect(outcome.result).toBe('fail');
+    expect(String((outcome.detail as Record<string, unknown>)?.['reapError'])).toMatch(/EPERM; group membership probe: unknown/);
+    expect(probed.length).toBeGreaterThan(0);
+    // No fixture reap: the leader exited and was reaped, so its group id may already be reused.
+  }, 30_000);
+
+  it('issue 3568: a group-reap error other than EPERM fails the canary without consulting the membership probe', async () => {
+    const dir = tmp.make('canary-einval');
+    let probeCalls = 0;
+    const outcome = await canaryWithSeams({
+      ...canaryInput(dir, CLEAN_RESOLVER), probeSource: 'https://probe.example/clip', nonce: 'einval',
+      kill: throwOnly('EINVAL', []),
+      probeGroup: () => { probeCalls += 1; return 'no-live-members'; },
+    });
+    expect(outcome.result).toBe('fail');
+    expect(String((outcome.detail as Record<string, unknown>)?.['reapError'])).toMatch(/EINVAL/);
+    expect(probeCalls).toBe(0);
+  }, 30_000);
+
+  it('issue 3568: a watchdog EPERM that leaves a live grandchild holding stdout settles fail within the reap grace and removes the staging dir', async () => {
+    const dir = tmp.make('canary-eperm-no-close');
+    // The grandchild inherits the canary's stdout pipe and holds it for 15 s, so `close` cannot
+    // fire before the grace. The resolver then blocks, so the 3 s watchdog fires; 3 s leaves room
+    // for two node start-ups under load.
+    const parentSrc = [
+      'const cp=require("node:child_process");',
+      'cp.spawn(process.execPath,["-e","Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,15000)"],{stdio:"inherit"}).unref();',
+      'process.stdout.write("started");setInterval(function(){},1000);',
+    ].join('');
+    const targets: number[] = [];
+    const before = new Set(listResolverStages());
+    const start = Date.now();
+    try {
+      const outcome = await canaryWithSeams({
+        ...canaryInput(dir, parentSrc, { name: 'parent.cjs', timeoutMs: 3_000, minOutputBytes: 1 }),
+        probeSource: 'https://probe.example/clip', nonce: 'eperm-no-close',
+        kill: killLeaderOnceThenEperm(targets),
+        reapGraceMs: 400,
+      });
+      const elapsed = Date.now() - start;
+      const detail = outcome.detail as Record<string, unknown>;
+      expect(outcome.result).toBe('fail');
+      expect(String(detail?.['reapError'])).toMatch(/EPERM; group membership probe: live/);
+      expect(detail?.['reason']).toBe('resolver_close_not_observed');
+      expect(elapsed).toBeLessThan(10_000); // the grace settled it, not a close at the grandchild's 15 s release
+      expect(listResolverStages().filter((n) => !before.has(n))).toEqual([]); // cleanup ran on the grace path
+      // Grace expiry does not signal the group again: the failed first kill is the only one.
+      expect(targets).toHaveLength(1);
+    } finally {
+      reapFixtureGroups(targets); // the grandchild is still alive, so its group id is still allocated
+    }
+  }, 20_000);
+
+  it('issue 3568: a watchdog group kill that succeeds while a setsid descendant holds stdout settles fail after the reap grace', async () => {
+    const dir = tmp.make('canary-setsid');
+    // The descendant leaves the resolver's group, so the watchdog's group kill succeeds yet never
+    // reaches it, and it holds stdout and stderr until this test's teardown. The pid goes to a
+    // tracked dir OUTSIDE the resolver dir, whose manifest the digest binds.
+    const pidFile = join(tmp.make('canary-setsid-pid'), 'grandchild.pid');
+    const before = new Set(listResolverStages());
+    const targets: number[] = [];
+    const run = canaryWithSeams({
+      ...canaryInput(dir, grandchildResolverSource(pidFile, { holdStdio: true, setsid: true, block: true }), { name: 'parent.cjs', timeoutMs: 3_000, minOutputBytes: 1 }),
+      probeSource: 'https://probe.example/clip', nonce: 'setsid-holder',
+      // Records each group kill and still delivers it, so the real kill succeeds.
+      kill: (target, signal) => { targets.push(target); process.kill(target, signal); },
+      reapGraceMs: 400,
+    });
+    try {
+      // 3 s watchdog + 0.4 s grace: a run that never arms the grace hangs, and this bound fails it.
+      const outcome = await settleWithin(run, 8_000, 'the canary did not settle within 8 s: no reap grace after a successful watchdog kill');
+      const detail = outcome.detail as Record<string, unknown>;
+      expect(existsSync(pidFile)).toBe(true); // the descendant existed before the watchdog fired
+      expect(outcome.result).toBe('fail');
+      expect(detail?.['reason']).toBe('resolver_close_not_observed');
+      expect(detail?.['reapError']).toBeUndefined(); // the group kill itself succeeded
+      expect(listResolverStages().filter((n) => !before.has(n))).toEqual([]); // cleanup ran on the grace path
+      // Exactly one group kill, the watchdog's: grace expiry never signals the group again.
+      expect(targets).toHaveLength(1);
+    } finally {
+      const gcPid = readFixturePid(pidFile);
+      // The descendant is alive and leads its own group, so that group id is still allocated.
+      if (gcPid !== undefined) reapFixtureGroups([-gcPid]);
+      const gone = gcPid === undefined ? true : await waitForPidGone(gcPid);
+      // A canary still pending here settles once the descendant is gone; let its cleanup finish.
+      await settleWithin(run, 2_000, 'the canary did not settle after teardown').catch(() => undefined);
+      expect(gone).toBe(true);
+    }
+  }, 20_000);
 });
 
 describe('capability-obligation-attest CLI (the operator front-door records end-to-end)', () => {
@@ -297,24 +462,25 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
     return resolverCompositeDigest(contentDigest, manifestDigest, { command, resolverArtifactPath: ex.resolverArtifactPath, interpreted, timeoutMs: ex.timeoutMs, minOutputBytes: ex.minOutputBytes }, interpreterDigest);
   }
 
-  function writeConfig(dir: string, over: { mediaRoot?: string; resolverDigest?: string; command?: readonly string[]; resolverArtifactPath?: string; interpreted?: boolean; rawExecution?: Record<string, unknown> } = {}): string {
+  function writeConfig(dir: string, over: { mediaRoot?: string; resolverDigest?: string; command?: readonly string[]; resolverArtifactPath?: string; interpreted?: boolean; rawExecution?: Record<string, unknown>; resolverSrc?: string; timeoutMs?: number } = {}): string {
     // round-20 (advisor): the composite now binds the WHOLE resolver directory. `dir` itself
     // accumulates instance.json, obligations.db, media, and receipts, which would poison and drift
     // the manifest — so the resolver lives in its own isolated subdirectory holding ONLY resolver.cjs.
     const resolverDir = join(dir, 'resolver-src');
     mkdirSync(resolverDir, { recursive: true });
     const resolverPath = over.resolverArtifactPath ?? join(resolverDir, 'resolver.cjs');
-    writeFileSync(resolverPath, RESOLVER_SRC);
+    const resolverSrc = over.resolverSrc ?? RESOLVER_SRC;
+    writeFileSync(resolverPath, resolverSrc);
     const command = over.command ?? [NODE, resolverPath, '{source}'];
     const resolverArtifactPath = over.resolverArtifactPath ?? resolverPath;
     const interpreted = over.interpreted ?? true;
-    const timeoutMs = 10_000;
+    const timeoutMs = over.timeoutMs ?? 10_000;
     const minOutputBytes = 5;
     // The config declares the COMPOSITE (unless a test overrides with a deliberately-wrong one).
     // round-20: the composite binds the interpreter content, the envelope, AND the directory manifest.
     const interpreterDigest = interpreted ? createHash('sha256').update(readFileSync(realpathSync(command[0]!))).digest('hex') : null;
     const manifestDigest = directoryManifestDigest(dirname(realpathSync(resolverPath)));
-    const composite = resolverCompositeDigest(createHash('sha256').update(RESOLVER_SRC).digest('hex'), manifestDigest, { command, resolverArtifactPath, interpreted, timeoutMs, minOutputBytes }, interpreterDigest);
+    const composite = resolverCompositeDigest(createHash('sha256').update(resolverSrc).digest('hex'), manifestDigest, { command, resolverArtifactPath, interpreted, timeoutMs, minOutputBytes }, interpreterDigest);
     const configFile = join(dir, 'instance.json');
     writeFileSync(configFile, JSON.stringify({
       agentOptions: {
@@ -352,7 +518,7 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
     return dbFile;
   }
 
-  function runCli(dbFile: string, configFile: string, mediaRoot: string, extra: readonly string[] = [], resolverDigest?: string): ReturnType<typeof spawnSync> {
+  function runCli(dbFile: string, configFile: string, mediaRoot: string, extra: readonly string[] = [], resolverDigest?: string, timeoutMs?: number): ReturnType<typeof spawnSync> {
     const digest = resolverDigest ?? compositeFromConfigFile(configFile);
     const cliArgs = [
       '--db', dbFile, '--provider', 'claude-cli', '--contract-version', 'c/1', '--capability', 'child_process_tools',
@@ -364,7 +530,7 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
     return spawnSync(
       process.execPath,
       ['--disable-warning=ExperimentalWarning', '--experimental-strip-types', CLI_PATH, ...cliArgs],
-      { encoding: 'utf8' },
+      { encoding: 'utf8', ...(timeoutMs === undefined ? {} : { timeout: timeoutMs }) },
     );
   }
 
@@ -494,6 +660,33 @@ describe('capability-obligation-attest CLI (the operator front-door records end-
     expect(result.stderr).toMatch(/--run-canary requires --confirm/);
     expect(admissibleOutcome(dbFile, dir, configFile)).toBe('skip');
   }, 30_000);
+
+  it('issue 3568: the CLI settles and exits after the reap grace while a setsid descendant still holds the resolver pipes', async () => {
+    const dir = tmp.make('cli-setsid');
+    // The descendant leaves the resolver's group and holds its stdout and stderr until this test's
+    // teardown, far past the run bound below. Its pid goes to a dir OUTSIDE the resolver dir.
+    const pidFile = join(tmp.make('cli-setsid-pid'), 'grandchild.pid');
+    const dbFile = seedSchemaCurrentDb(dir);
+    const configFile = writeConfig(dir, {
+      resolverSrc: grandchildResolverSource(pidFile, { holdStdio: true, setsid: true, block: true }),
+      timeoutMs: 3_000,
+    });
+    try {
+      // 3 s watchdog + 5 s grace + CLI start-up. A CLI kept alive by the open pipes is killed at
+      // the 20 s bound, so it reports no exit status.
+      const result = runCli(dbFile, configFile, dir, ['--run-canary', '--confirm', '--probe-source', 'https://probe.example/clip', '--receipt-out', join(dir, 'probe-receipt.json')], undefined, 20_000);
+      expect(existsSync(pidFile)).toBe(true); // the descendant existed before the watchdog fired
+      expect(result.status, `signal: ${String(result.signal)}; stderr: ${String(result.stderr)}`).toBe(3);
+      // The operator sees why: the canary's own reason, and that a descendant may still be running.
+      expect(result.stdout).toMatch(/NOT RECORDED attest child_process_tools: canary_failed reason=resolver_close_not_observed \(a resolver descendant may still be running; no attestation, no receipt\)/);
+      expect(admissibleOutcome(dbFile, dir, configFile)).toBe('skip');
+    } finally {
+      const gcPid = readFixturePid(pidFile);
+      // The descendant is alive and leads its own group, so that group id is still allocated.
+      if (gcPid !== undefined) reapFixtureGroups([-gcPid]);
+      if (gcPid !== undefined) expect(await waitForPidGone(gcPid)).toBe(true);
+    }
+  }, 40_000);
 });
 
 describe('observeResolverArtifact (round-18: verify the EXPLICITLY-declared artifact + digest compare)', () => {

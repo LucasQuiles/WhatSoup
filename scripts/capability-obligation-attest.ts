@@ -86,6 +86,7 @@ import {
 import { CURRENT_SCHEMA_MIGRATION } from '../src/core/database-schema-version.ts';
 import { Database } from '../src/core/database.ts';
 import { resolveHarnessType } from '../src/runtimes/agent/capability-obligation-runtime.ts';
+import { type GroupMembership, probeGroupMembership } from './lib/process-group-membership.ts';
 
 export interface AttestArgs {
   dbPath: string;
@@ -274,6 +275,8 @@ export function assertArgsMatchConfig(args: AttestArgs, options: CapabilityOblig
 }
 
 const CANARY_STREAM_CAP_BYTES = 262_144;
+/** How long the canary waits for `close` after the watchdog fires before it settles fail. */
+const RESOLVER_REAP_GRACE_MS = 5_000;
 
 /**
  * The bounded, NON-SENDING resolver canary — the gated real execution.
@@ -292,13 +295,21 @@ const CANARY_STREAM_CAP_BYTES = 262_144;
  * its OWN group leader (`detached`), and the group is SIGKILLed on timeout AND in
  * the close handler — a resolver that forks a grandchild (yt-dlp → ffmpeg, a shell)
  * cannot leave it alive to land a side effect after the outcome is reported. Node's
- * built-in `timeout` only signals the direct child, so we own the watchdog.
+ * built-in `timeout` only signals the direct child, so we own the watchdog. A group
+ * that cannot be proven reaped fails the canary with `detail.reapError`; an EPERM
+ * counts as reaped only when the group has no live member (issue 3568).
  */
 export function runResolverCanary(params: {
   execution: ResolverArtifactDeclaration & { command: readonly string[]; timeoutMs: number; minOutputBytes: number };
   declaredResolverDigest: string;
   probeSource: string;
   nonce: string;
+  /** Test-only group-signal seam; defaults to `process.kill`. */
+  kill?: (pid: number, signal: NodeJS.Signals) => void;
+  /** Test-only membership probe, consulted only on an EPERM group kill. */
+  probeGroup?: (pgid: number) => GroupMembership;
+  /** Test-only bound on how long the canary waits for `close` after the watchdog fires. */
+  reapGraceMs?: number;
 }): Promise<CapabilityCanaryOutcome> {
   const probeSourceDigest = createHash('sha256').update(params.probeSource).digest('hex');
   // round-20 finding 3: the canary must execute EXACTLY the bytes it verifies — the SAME
@@ -354,11 +365,55 @@ export function runResolverCanary(params: {
     let stderr = '';
     let timedOut = false;
     let settled = false;
-    const killGroup = (): void => {
-      if (pid === undefined) return;
-      try { process.kill(-pid, 'SIGKILL'); } catch { /* already reaped by a clean exit or an earlier kill */ }
+    let reapError: string | undefined;
+    let reapGrace: ReturnType<typeof setTimeout> | undefined;
+    const killSignal = params.kill ?? process.kill;
+    const probeGroup = params.probeGroup ?? probeGroupMembership;
+    // Reports a reap failure in reapError rather than throwing: every caller is a timer or child
+    // event callback, where a throw would be an uncaught exception that skips cleanup().
+    const killGroup = (): boolean => {
+      if (pid === undefined) return true;
+      try {
+        killSignal(-pid, 'SIGKILL');
+        return true;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === 'ESRCH') return true; // already reaped by a clean exit or an earlier kill
+        if (code === 'EPERM') {
+          // Issue 3568: macOS can return EPERM for kill(-pgid) when the group holds only zombies.
+          const membership = probeGroup(pid);
+          if (membership === 'no-live-members') return true;
+          reapError ??= `group kill failed: EPERM; group membership probe: ${membership}`;
+          return false;
+        }
+        reapError ??= `group kill failed: ${code ?? (err instanceof Error ? err.message : String(err))}`;
+        return false;
+      }
     };
-    const watchdog = setTimeout(() => { timedOut = true; killGroup(); }, params.execution.timeoutMs);
+    const withReapError = (detail: Record<string, unknown>): Record<string, unknown> =>
+      (reapError === undefined ? detail : { ...detail, reapError });
+    const watchdog = setTimeout(() => {
+      timedOut = true;
+      killGroup();
+      // Armed whatever killGroup() returned: a live member the kill could not reach (one that
+      // called setsid(), or one an EPERM left alive) can hold the child's stdio open, so `close`
+      // may never arrive. Not unref'd: the canary promise must settle even when nothing else
+      // keeps the event loop alive.
+      reapGrace = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        // No second group kill. A first kill that failed would fail the same way again. By now
+        // the original group may have exited, and nothing pins its id, so a kill could reach an
+        // unrelated group that reused it. A probe answer of `unknown` never proved a live member.
+        // Instead, drop the pipes and the child handle, so a surviving member cannot keep the CLI
+        // alive, and report the unreaped failure in detail.reapError.
+        child.stdout.destroy();
+        child.stderr.destroy();
+        child.unref();
+        cleanup();
+        resolvePromise({ result: 'fail', nonce: params.nonce, detail: withReapError({ reason: 'resolver_close_not_observed', timedOut: true, probeSourceDigest }) });
+      }, params.reapGraceMs ?? RESOLVER_REAP_GRACE_MS);
+    }, params.execution.timeoutMs);
     watchdog.unref?.();
     child.stdout.on('data', (c: Buffer) => { if (stdout.length < CANARY_STREAM_CAP_BYTES) stdout += c.toString('utf8'); });
     child.stderr.on('data', (c: Buffer) => { if (stderr.length < CANARY_STREAM_CAP_BYTES) stderr += c.toString('utf8'); });
@@ -366,26 +421,29 @@ export function runResolverCanary(params: {
       if (settled) return;
       settled = true;
       clearTimeout(watchdog);
+      clearTimeout(reapGrace);
       killGroup();
       cleanup();
-      resolvePromise({ result: 'fail', nonce: params.nonce, detail: { reason: 'resolver_spawn_failed', probeSourceDigest } });
+      resolvePromise({ result: 'fail', nonce: params.nonce, detail: withReapError({ reason: 'resolver_spawn_failed', probeSourceDigest }) });
     });
     child.on('close', (code, signal) => {
       if (settled) return;
       settled = true;
       clearTimeout(watchdog);
+      clearTimeout(reapGrace);
       if (signal !== null) timedOut = true; // a SIGKILLed resolver is a timeout, not a plain non-zero exit
       // Reap the (now-leaderless) group before reporting: the leader has exited, so
       // signalling the negative pid only sweeps a grandchild that outlived it.
-      killGroup();
+      const reaped = killGroup();
       cleanup();
       const stdoutBytes = Buffer.byteLength(stdout, 'utf8');
       const stderrBytes = Buffer.byteLength(stderr, 'utf8');
-      const pass = !timedOut && code === 0 && stdoutBytes >= params.execution.minOutputBytes;
+      // A group that could not be proven reaped may hold a live descendant: never a pass.
+      const pass = reaped && reapError === undefined && !timedOut && code === 0 && stdoutBytes >= params.execution.minOutputBytes;
       resolvePromise({
         result: pass ? 'pass' : 'fail',
         nonce: params.nonce,
-        detail: {
+        detail: withReapError({
           exitCode: code,
           signal,
           timedOut,
@@ -394,10 +452,25 @@ export function runResolverCanary(params: {
           stdoutSha256: createHash('sha256').update(stdout).digest('hex'),
           stderrSha256: createHash('sha256').update(stderr).digest('hex'),
           probeSourceDigest,
-        },
+        }),
       });
     });
   });
+}
+
+/**
+ * The CLI's note after `canary_failed`: the canary's own reason and reapError when it set them,
+ * so an operator sees more than `canary_failed`. A missing close means a resolver descendant may
+ * still be running, even after a group kill that succeeded.
+ */
+function canaryFailureNote(detail: unknown): string {
+  const fields = (typeof detail === 'object' && detail !== null ? detail : {}) as Record<string, unknown>;
+  const reason = fields['reason'];
+  const reapError = fields['reapError'];
+  const reasonNote = typeof reason === 'string' ? ` reason=${reason}` : '';
+  const reapNote = typeof reapError === 'string' ? ` reapError=${reapError}` : '';
+  const descendantNote = reason === 'resolver_close_not_observed' ? 'a resolver descendant may still be running; ' : '';
+  return `${reasonNote}${reapNote} (${descendantNote}no attestation, no receipt)`;
 }
 
 /**
@@ -609,7 +682,7 @@ if (import.meta.url === invokedPath) {
           if (canary.result !== 'pass') {
             // Failed/insufficient canary: record NOTHING and do NOT write the admission
             // receipt (a receipt at --receipt-out means an admission was attempted).
-            process.stdout.write((args.json ? JSON.stringify({ mode: 'record', recorded: false, reason: 'canary_failed' }) : `NOT RECORDED attest ${args.capability}: canary_failed (no attestation, no receipt)`) + '\n');
+            process.stdout.write((args.json ? JSON.stringify({ mode: 'record', recorded: false, reason: 'canary_failed' }) : `NOT RECORDED attest ${args.capability}: canary_failed${canaryFailureNote(canary.detail)}`) + '\n');
             process.exitCode = 3;
             return;
           }
