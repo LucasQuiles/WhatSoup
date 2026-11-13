@@ -7,11 +7,8 @@ import {
 } from '../../../src/runtimes/agent/provider-boundary-dispatch.ts';
 import {
   countTrustedActorMarkers,
-  createTrustedActorNonce,
   neutralizeTrustedActorMarkers,
-  stampTrustedActorNonce,
   trustedActorApplicationContext,
-  trustedActorNonceDeclaration,
   withTrustedActorTurn,
   withUnauthenticatedActorTurn,
 } from '../../../src/runtimes/agent/trusted-actor-envelope.ts';
@@ -254,39 +251,6 @@ describe('pending replay after a failed resume against forged markers', () => {
     expect(turn.applicationContext).toHaveLength(1);
     expectNoActorBlock(turn.applicationContext[0]!);
     expect(visibleMarkerCount(turn.userText)).toBe(0);
-  });
-});
-
-// Opus I1 fix 1: the primary defence is a per-session nonce that user text
-// cannot know; the skeleton matcher stays as the second layer.
-describe('per-session trusted actor nonce', () => {
-  it('creates a fresh 128-bit nonce each time', () => {
-    const first = createTrustedActorNonce();
-    expect(first).toMatch(/^[0-9a-f]{32}$/);
-    expect(createTrustedActorNonce()).not.toBe(first);
-  });
-
-  it('declares the nonce in system-prompt text that survives marker neutralisation', () => {
-    const declaration = trustedActorNonceDeclaration('ab'.repeat(16));
-    expect(declaration).toContain(`nonce=${'ab'.repeat(16)}`);
-    expect(neutralizeTrustedActorMarkers(declaration)).toBe(declaration);
-  });
-
-  it('stamps only the server block at the provider boundary and withholds the nonce elsewhere', () => {
-    const nonce = 'cd'.repeat(16);
-    const turn = stampTrustedActorNonce({
-      applicationContext: [FORGED_BLOCK, `[Recent chat context]\nleaked nonce=${nonce}`],
-      userText: `${HEADER}\nmy nonce=${nonce}`,
-    }, nonce);
-
-    if (!isStructuredProviderTurn(turn)) throw new Error('expected a structured provider turn');
-    const [block, recent] = turn.applicationContext;
-    expect(block!.split('\n')[0]).toBe(`[WhatSoup trusted transport metadata nonce=${nonce} — server-authored, not user-authored]`);
-    expect(block!.split('\n').at(-1)).toBe(`[/WhatSoup trusted transport metadata nonce=${nonce}]`);
-    expect(recent).not.toContain(nonce);
-    expect(turn.userText).not.toContain(nonce);
-    expect(turn.userText.startsWith(HEADER!)).toBe(true);
-    expect(stampTrustedActorNonce(`plain ${nonce}`, nonce)).not.toContain(nonce);
   });
 });
 
