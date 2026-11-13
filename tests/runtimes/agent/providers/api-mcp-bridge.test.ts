@@ -250,7 +250,7 @@ describe('HTTP provider MCP bridge', () => {
       mcpBridge: createProviderMcpBridge(registry, {
         tier: 'chat-scoped',
         conversationKey: 'chat-key',
-        deliveryJid: '123@s.whatsapp.net',
+        deliveryJid: '15550000123@s.whatsapp.net',
       }),
     });
 
