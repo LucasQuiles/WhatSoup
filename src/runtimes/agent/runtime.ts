@@ -244,6 +244,7 @@ import {
   AUTO_COMPACT_RAPID_REARM_WINDOW_MS,
   AUTO_COMPACT_CONVERGENCE_LIMIT,
 } from './auto-compact-controller.ts';
+import { contextGeneration } from './context-gauge.ts';
 import { ImageCoalescer } from './image-coalescer.ts';
 import {
   PendingSystemResultTracker,
@@ -445,12 +446,6 @@ const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * MS_PER_MINUTE;
 // Single-sourced from conversation-key.ts so the tool/crash scope keys and the
 // tool_calls telemetry sentinel can never drift apart.
 const GLOBAL_TOOL_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
-
-/** #3717c G4: the context gauge belongs to one session generation (its DB row). */
-function contextGeneration(session: SessionManager | null | undefined): string {
-  const rowId = session?.getDbRowId() ?? null;
-  return rowId === null ? 'none' : `row:${rowId}`;
-}
 const GLOBAL_CRASH_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
 // (TOOL_FAILURE_ALERT_EXCERPT_CHARS moved to ./tool-update.ts with alertExcerpt.)
 

@@ -33,6 +33,8 @@
  *   turn's result, compact_boundary, a new generation or session id, or
  *   delete/clear. The result closes it unknown.
  */
+import type { SessionManager } from './session.ts';
+
 const MAX_REQUEST_ID_LENGTH = 256;
 const MAX_REQUEST_IDS_PER_TURN = 1024;
 
@@ -49,6 +51,12 @@ interface ScopeGauge {
   /** Id of the last distinct request, or undefined for an id-less request. */
   currentId: string | undefined;
   current: number | undefined;
+}
+
+/** #3717c G4: the context gauge belongs to one session generation (its DB row). */
+export function contextGeneration(session: SessionManager | null | undefined): string {
+  const rowId = session?.getDbRowId() ?? null;
+  return rowId === null ? 'none' : `row:${rowId}`;
 }
 
 export class ContextGaugeStore {
