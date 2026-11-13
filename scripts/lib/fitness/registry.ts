@@ -608,6 +608,11 @@ export const fitnessRules = [
         // user-writable directory choose what runs as root. Only this constants
         // module is exempt; its callers import the constant.
         'scripts/lib/release-activation/root-helper-interpreter.ts',
+        // Its installer runs as root under `/usr/bin/python3 -I -S -B` and must
+        // check the same literal interpreter the sudoers rule names, plus the
+        // developer folder's python3 that shim runs. A PATH lookup here would
+        // let a user-writable directory choose what root trusts.
+        'scripts/lib/release-activation/install_root_helper.py',
       ],
     },
     source: ['issue:2616', 'issue:2623'],
