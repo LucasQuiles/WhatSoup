@@ -2569,7 +2569,9 @@ run by absolute path without a shell, because Node has no ACL API. On macOS they
 On Linux any ACL that `ls` marks with `+` refuses the path. A listing that fails (a non-zero
 exit or a timeout) or cannot be parsed refuses the path, and so does any other platform.
 Each check lists every path afresh: no ACL result carries over to a later check. An ACL read
-failure that `ls` does not report is not detected (see the accepted residuals).
+failure that `ls` does not report is not detected. On Linux, an `ls` without ACL support
+(BusyBox, or coreutils built without libacl) prints no `+`, so there the check cannot see
+ACL grants at all. Both limits are listed with the accepted residuals.
 
 Config-root isolation (`WHATSOUP_AGENT_CONFIG_ROOT_ISOLATION=1`) gives a sandboxed child
 another install record than the one checked here, so it withdraws the assignment.
@@ -2623,17 +2625,18 @@ Settings writes lift the native deny floor only in `per_chat` scope without
 broker refuses native writes, and in `sandboxPerChat` mode the child has no authority
 socket, so those settings keep the floor; adapter writes are unaffected.
 
-**Host-work admission disables native Microsoft 365 writes.** Under
-`WHATSOUP_WORK_ADMISSION=systemd` (Linux only), native Microsoft 365 write authority, through
-the plugin that `claude-cli` loads, is unavailable until the helper protocol can carry a
-release-time decision. The external wrapper receives a launch's arguments and environment
-when the launch is queued, and starts the provider after its host lease without any later
-check, so no check can run at release. Every queued `claude-cli` launch therefore gets the
-withdrawn shape, even while the assignment is live: `--disallowedTools` with the full
-Microsoft 365 mutation deny set, and no `MS365_*`, `ALLOW_M365_MUTATIONS` or
-`MS365_WORKFLOW_AUTHORITY_*` values. A pending floor rewrite still refuses a queued spawn.
-Writes through the `microsoft365` adapter are not affected: the adapter spawns its plugin
-directly and re-checks immediately before each spawn.
+**Host-work admission disables native Microsoft 365 access.** Under
+`WHATSOUP_WORK_ADMISSION=systemd` (Linux only), native Microsoft 365 access, both reads and
+writes through the plugin that `claude-cli` loads, is unavailable to queued launches until
+the helper protocol can carry a release-time decision. The external wrapper receives a
+launch's arguments and environment when the launch is queued, and starts the provider after
+its host lease without any later check, so no check can run at release. Every queued
+`claude-cli` launch therefore gets the withdrawn shape, even while the assignment is live:
+`--disallowedTools` with the full Microsoft 365 mutation deny set, and no `MS365_*`,
+`ALLOW_M365_MUTATIONS` or `MS365_WORKFLOW_AUTHORITY_*` values, so no Microsoft 365 credential
+reaches the queued child. A pending floor rewrite still refuses a queued spawn. The
+`microsoft365` adapter tool remains available for reads and writes: the adapter spawns its
+plugin directly and re-checks immediately before each spawn.
 
 **Accepted residuals.** These checks do not cover:
 - A window remains between the last re-check, which runs immediately before each direct
@@ -2646,6 +2649,9 @@ directly and re-checks immediately before each spawn.
   no ACL and still exits 0, so an `allow` entry on a path whose ACL cannot be read, while
   its ownership, mode and contents can, is not detected. Reading the ACL directly would
   need a native module or an interpreter, which this check does not use.
+- ACL grants on Linux hosts whose `ls` has no ACL support (BusyBox, or coreutils built
+  without libacl). That `ls` prints no `+` marker, so the check cannot see such grants;
+  the owner and mode checks still apply.
 - A deliberate swap of either copy by a process running as the same user is outside the
   same-user filesystem trust boundary described above.
 - The session child holds the bridge credentials (`MS365_AGENT365_API_KEY` and the
