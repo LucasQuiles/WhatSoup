@@ -76,8 +76,10 @@ export function registerRuntimeSettingsPolicyTests(
     // rows run the real admission, which finds no plugin and withdraws authority.
     const admitSpy = vi.spyOn(adapter, 'admitMicrosoft365Workflow');
     if (admitted) admitSpy.mockImplementation(options => options.policy);
-    // The real re-check passes a policy it did not admit through; one row below makes it withdraw.
+    // The real re-check rejects an assignment the real admission did not keep, so a stubbed
+    // admission pairs with a re-check that finds the native copy unchanged; one row below makes it withdraw.
     const recheckSpy = vi.spyOn(adapter, 'recheckMicrosoft365Workflow');
+    if (admitted) recheckSpy.mockImplementation(p => p);
     try {
       const cwd = await ownedRuntimeCwd('m365-startup-policy');
       const runtime = createRuntime({

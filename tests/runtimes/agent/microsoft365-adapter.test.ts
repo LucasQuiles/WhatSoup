@@ -790,10 +790,31 @@ describe.skipIf(SYSTEM_PYTHON === '')('Microsoft 365 provider adapter', () => {
     expect(recheckMicrosoft365Workflow(withdrawn, 'test')).toBe(withdrawn);
     expect(adapterLog.warn).toHaveBeenCalledTimes(1);
 
-    // A policy this adapter never admitted, or one without an assignment, passes through unchecked.
-    expect(recheckMicrosoft365Workflow(policy(trace), 'test')).toEqual(policy(trace));
+    // A policy without an assignment passes through unchecked.
     expect(recheckMicrosoft365Workflow({ status: 'rejected' }, 'test')).toEqual({ status: 'rejected' });
     expect(recheckMicrosoft365Workflow(undefined, 'test')).toBeUndefined();
+  });
+
+  it('rejects any policy that carries a workflow assignment but is not the admitted one', () => {
+    vi.stubEnv('CLAUDE_CONFIG_DIR', undefined);
+    const trace = join(temporaryDirectory('whatsoup-m365-unadmitted-'), 'm365-fixture-trace.jsonl');
+    const approved = policy(trace);
+    const plugin = pluginDirectory(trace);
+    nativeInstall(GUARDED_FIXTURE);
+    const admitted = admitMicrosoft365Workflow({
+      registry: new ToolRegistry(), policy: approved, pluginDirs: [plugin.root], perChatMcpSocketManager: {} as never,
+      resolvePerChatMapKey: (jid: string) => jid, sessionTokens: new SessionTokenRegistry(), instanceName: 'test',
+    });
+    // Positive control: the admitted policy itself keeps its assignment.
+    expect(recheckMicrosoft365Workflow(admitted, 'test')).toBe(approved);
+
+    // The admission is bound to the policy it kept, not to its shape: an equal copy or a fresh policy is refused.
+    expect(recheckMicrosoft365Workflow(admitted === undefined ? undefined : { ...admitted }, 'test')).toEqual({ status: 'rejected' });
+    expect(recheckMicrosoft365Workflow(policy(trace), 'test')).toEqual({ status: 'rejected' });
+
+    // The withdrawn shape carries no assignment, so it still passes through.
+    const withdrawn: M365MutationPolicy = { status: 'approved', childEnv: approved.status === 'approved' ? approved.childEnv : {} };
+    expect(recheckMicrosoft365Workflow(withdrawn, 'test')).toBe(withdrawn);
   });
 
   it('refuses reads and writes on a turn whose route is not an admitted Microsoft 365 provider', async () => {

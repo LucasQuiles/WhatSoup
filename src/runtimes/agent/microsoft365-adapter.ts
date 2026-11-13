@@ -509,13 +509,18 @@ export function admitMicrosoft365Workflow(options: RegisterMicrosoft365AdapterOp
  * Runs before each native-settings write. A marketplace update can replace the copy that
  * `enabledPlugins` names mid-run, so it must still run the entry this policy was admitted
  * with; otherwise the assignment is withdrawn. The withdrawn policy carries no assignment,
- * so the withdrawal holds for the rest of the run and is logged once. A policy that
- * `admitMicrosoft365Workflow` did not keep is returned unchanged: after `start()` the
- * runtime holds no other policy with an assignment.
+ * so the withdrawal holds for the rest of the run and is logged once. A policy without an
+ * assignment passes through. Any other policy with an assignment, including an equal copy
+ * of the admitted one, was never admitted and is rejected (fail closed).
  */
 export function recheckMicrosoft365Workflow(policy: M365MutationPolicy | undefined, instanceName?: string): M365MutationPolicy | undefined {
-  const digest = policy === undefined ? undefined : admittedEntryDigests.get(policy);
-  if (digest === undefined || policy?.status !== 'approved') return policy;
+  if (policy?.status !== 'approved' || policy.workflowAuthority === undefined) return policy;
+  const digest = admittedEntryDigests.get(policy);
+  if (digest === undefined) {
+    log.warn({ instance: instanceName, reason: 'not-admitted' },
+      'Microsoft 365 policy rejected: it carries a workflow assignment that the plugin admission did not keep');
+    return { status: 'rejected' };
+  }
   const mismatch = nativePluginMismatch(digest);
   return mismatch === undefined ? policy : withdrawnForNativeCopy(policy, mismatch, instanceName);
 }

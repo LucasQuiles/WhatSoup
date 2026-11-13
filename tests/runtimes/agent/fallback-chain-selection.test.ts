@@ -188,6 +188,19 @@ function view(runtime: AgentRuntime): FallbackView {
   return runtime as unknown as FallbackView;
 }
 
+/**
+ * These runtimes never call start(), so no plugin admission ran and the real re-check rejects a
+ * policy with an assignment. Simulate an admitted policy whose native plugin copy is unchanged.
+ */
+function admittedUnchangedRecheck() {
+  return vi.spyOn(microsoft365Adapter, 'recheckMicrosoft365Workflow').mockImplementation((p) => p);
+}
+
+/** The withdrawal a changed native plugin copy causes: the assignment is dropped, the bridge stays approved. */
+function withdrawAssignment(p: M365MutationPolicy | undefined): M365MutationPolicy | undefined {
+  return p?.status === 'approved' ? { status: 'approved', childEnv: p.childEnv } : p;
+}
+
 describe('fallback chain selection', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -358,6 +371,7 @@ describe('fallback chain selection', () => {
       binding,
       env: process.env,
     }, process.pid) ?? undefined);
+    const recheck = admittedUnchangedRecheck();
     try {
       const workspacePath = sandboxPerChat ? sandboxTmp.make('chat') : undefined;
       if (workspacePath) provisionWorkspace({
@@ -420,10 +434,8 @@ describe('fallback chain selection', () => {
       if (guarded) {
         // A new session re-checks the native plugin copy before it writes sandbox settings. Once
         // the copy no longer matches, the session loses the exception and the sandbox floor returns.
-        const recheck = vi.spyOn(microsoft365Adapter, 'recheckMicrosoft365Workflow')
-          .mockImplementationOnce((p) => p?.status === 'approved' ? { status: 'approved', childEnv: p.childEnv } : p);
+        recheck.mockImplementationOnce(withdrawAssignment);
         const rechecked = session();
-        recheck.mockRestore();
         expect(m365MutationExceptionAllowed(rechecked.m365MutationPolicy)).toBe(false);
         if (workspacePath) {
           const settings = JSON.parse(readFileSync(join(workspacePath, '.claude/settings.json'), 'utf8'));
@@ -498,6 +510,7 @@ describe('fallback chain selection', () => {
       instanceName: 'test', provider: 'claude-cli', allowM365Mutations: true,
       enabledPlugins: { 'microsoft_365@microsoft-365-dev': true }, binding, env: process.env,
     }, process.pid) ?? undefined);
+    admittedUnchangedRecheck();
     try {
       const runtime = makeRuntime({
         model: 'primary-model',
