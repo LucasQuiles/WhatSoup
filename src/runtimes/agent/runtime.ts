@@ -379,6 +379,9 @@ import { isProcessAlive, sessionUsesInProcessBridge } from './runtime-predicates
 import {
   buildProviderToolSession, providerCanaryAdmissionGate, sessionProviderMcpConfigArgs, sessionTokenLeaseBinding,
 } from './session-mcp-wiring.ts';
+import {
+  perChatDegradedReasons, singleSessionDegradedReasons, singleSessionHealthStatus, summarizePerChatSessions,
+} from './runtime-health-status.ts';
 import { probeBinaryCommand, type listModelCatalog } from './providers/binary-preflight.ts';
 import { claudeRefreshLockGrace, refreshClaudeLoginAhead } from './providers/claude-refresh-ahead.ts';
 import { probePrimaryModelUsability, type PrimaryProbeServiceContext } from './providers/primary-model-usability.ts';
@@ -7665,53 +7668,17 @@ export class AgentRuntime implements Runtime {
       ...recoveryHealth,
       ...fallbackState,
     };
+    const degradationInput = {
+      autoCompactHealth, fallbackState, finalizationDegraded, completedDeliveryIdentityDebt, agentRespawnFailedClearPending,
+      turnQueueHealth, poisonHealth, providerExecution, pollPersistenceHealth, offlineDecisionRetry, accountIdentityReasons,
+    };
     if (this.sessionScope === 'per_chat') {
       const sessions = [...this.chatSessions.values()];
-      let activeSessions = 0;
-      let lastSessionStatus: string | null = null;
-      let lastSessionStartedAt: string | null = null;
-      let mostRecentStartMs = -1;
-      for (const s of sessions) {
-        const st = s.getStatus();
-        if (st.active) activeSessions++;
-        // Track the most recently started session for lastSession* fields
-        if (st.startedAt) {
-          const startMs = new Date(st.startedAt).getTime();
-          if (startMs > mostRecentStartMs) {
-            mostRecentStartMs = startMs;
-            lastSessionStatus = st.active ? 'active' : 'idle';
-            lastSessionStartedAt = st.startedAt;
-          }
-        }
-      }
-      const degradedReasons: string[] = [];
-      // Idle per-chat sessions are normal; recent crashes degrade even after map cleanup.
+      const { activeSessions, lastSessionStatus, lastSessionStartedAt } = summarizePerChatSessions(sessions.map((s) => s.getStatus()));
       const recentCrashCount = this.getRecentCrashCount();
-      if (recentCrashCount > 0) degradedReasons.push('recent_crashes');
-      if (autoCompactHealth.activeBackoffScopes > 0) degradedReasons.push('auto_compact_backoff');
-      if (fallbackState.fallbackActiveUntil !== null) degradedReasons.push('provider_fallback_active');
-      if (finalizationDegraded) degradedReasons.push('turn_finalization_debt');
-      if (completedDeliveryIdentityDebt) degradedReasons.push('completed_delivery_identity_debt');
-      // This state rejects every inbound turn in the affected chat and, before
-      // the eviction path, did so with no operator-visible signal at all.
-      if (perChatSessionsWithoutOwner.length > 0) {
-        degradedReasons.push('per_chat_session_without_owner');
-      }
-      // An abandoned respawn stops recovering this chat until the user writes
-      // again, and unlike recent_crashes this signal does not decay inside the
-      // crash-health window.
-      if (perChatRespawnAbandoned > 0) {
-        degradedReasons.push('per_chat_respawn_abandoned');
-      }
-      if (agentRespawnFailedClearPending) {
-        degradedReasons.push('agent_respawn_failed_clear_pending');
-      }
-      if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
-      if (poisonHealth.outboundQueuePoisoned) degradedReasons.push('outbound_queue_poisoned');
-      if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
-      if (pollPersistenceHealth.degraded) degradedReasons.push('poll_persistence_failure');
-      if (offlineDecisionRetry.exhausted) degradedReasons.push('offline_decision_retry_exhausted');
-      degradedReasons.push(...accountIdentityReasons);
+      const degradedReasons = perChatDegradedReasons({
+        ...degradationInput, recentCrashCount, perChatSessionsWithoutOwner: perChatSessionsWithoutOwner.length, perChatRespawnAbandoned,
+      });
       const healthStatus: RuntimeHealth['status'] = degradedReasons.length > 0 ? 'degraded' : 'healthy';
       return {
         status: healthStatus,
@@ -7729,30 +7696,12 @@ export class AgentRuntime implements Runtime {
     }
 
     const status = this.session?.getStatus();
-    // If a session exists but its child process is not active, it has crashed
-    const degradedReasons: string[] = [];
-    if (this.session !== null && status?.active === false) degradedReasons.push('session_inactive');
-    if (autoCompactHealth.activeBackoffScopes > 0) degradedReasons.push('auto_compact_backoff');
-    if (fallbackState.fallbackActiveUntil !== null) degradedReasons.push('provider_fallback_active');
-    if (finalizationDegraded) degradedReasons.push('turn_finalization_debt');
-    if (completedDeliveryIdentityDebt) degradedReasons.push('completed_delivery_identity_debt');
-    if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
-    if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
-    if (poisonHealth.outboundQueuePoisoned) degradedReasons.push('outbound_queue_poisoned');
-    if (pollPersistenceHealth.degraded) degradedReasons.push('poll_persistence_failure');
-    if (offlineDecisionRetry.exhausted) degradedReasons.push('offline_decision_retry_exhausted');
-    if (agentRespawnFailedClearPending) {
-      degradedReasons.push('agent_respawn_failed_clear_pending');
-    }
-    degradedReasons.push(...accountIdentityReasons);
-    // A halted single/shared queue is the active admission path — unhealthy/503,
-    // matching the public-surface contract; every other reason degrades only.
-    const healthStatus: RuntimeHealth['status'] =
-      turnQueueHealth.turnQueueHalted || poisonHealth.activeAdmissionLaneBlocked
-        ? 'unhealthy'
-        : degradedReasons.length > 0
-          ? 'degraded'
-          : 'healthy';
+    const degradedReasons = singleSessionDegradedReasons({
+      ...degradationInput, sessionInactive: this.session !== null && status?.active === false,
+    });
+    const healthStatus = singleSessionHealthStatus(
+      degradedReasons, turnQueueHealth.turnQueueHalted, poisonHealth.activeAdmissionLaneBlocked,
+    );
     return {
       status: healthStatus,
       details: {
