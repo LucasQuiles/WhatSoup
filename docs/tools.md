@@ -3358,7 +3358,10 @@ Search company knowledge bases using natural language queries. Results are pre-f
 List or call operations from the configured, account-bound Microsoft 365 plugin.
 Registration requires the approved bridge policy and the fixed installed launcher
 described in [Connector mutation policy](configuration.md#connector-mutation-policy-411).
-The caller cannot select an account, credential or executable.
+The caller cannot select an account, credential or executable: the adapter refuses
+the `select-account` and `select-dataverse-environment` operations
+(`microsoft365_invalid_request`) before it acquires authority or starts the plugin, in
+any letter case. The settings deny floor lists the same operations.
 
 | | |
 |---|---|

@@ -413,6 +413,22 @@ describe('createMicrosoft365Tool', () => {
     },
   );
 
+  it.each(['select-account', 'select-dataverse-environment', 'Select-Account', ' select-account '])(
+    'refuses the account or environment selection %j before acquiring authority or starting the plugin',
+    async (name) => {
+      const trace = makeTracePath();
+      const authorityForSession = vi.fn(async () => undefined);
+      const tool = makeTool({ trace, catalogVersion: `selection-${Date.now()}-${Math.random()}`, authorityForSession });
+
+      const result = await callTool(tool, { operation: 'call', name, args: {} });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain('microsoft365_invalid_request');
+      expect(authorityForSession).not.toHaveBeenCalled();
+      expect(() => readFileSync(trace, 'utf8')).toThrow();
+    },
+  );
+
   it('does not launch the plugin when asynchronous authority acquisition fails closed', async () => {
     const trace = makeTracePath();
     const tool = makeTool({

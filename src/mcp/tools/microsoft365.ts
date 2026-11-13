@@ -3,6 +3,7 @@ import { isAbsolute } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { z } from 'zod';
 
+import { M365_ACCOUNT_SELECTION_TOOLS } from '../../core/settings-template.ts';
 import { probeGroupMembership, type GroupMembership } from '../../lib/process-group-membership.ts';
 import { SIGNAL } from '../../lib/signals.ts';
 import { isNonEmptyString, isRecord } from '../../lib/type-guards.ts';
@@ -484,6 +485,10 @@ export function createMicrosoft365Tool(options: Microsoft365ToolOptions): ToolDe
       const name = params['name'];
       if (operation !== 'call' || typeof name !== 'string' || name.length === 0) {
         return toolError({ error: 'microsoft365_invalid_request', message: 'Microsoft 365 calls require an operation name.' });
+      }
+      // The authority binds one account; an operation that switches account or environment is never forwarded.
+      if (M365_ACCOUNT_SELECTION_TOOLS.includes(name.trim().toLowerCase())) {
+        return toolError({ error: 'microsoft365_invalid_request', message: 'Microsoft 365 calls must not select an account or environment.' });
       }
       const args = params['args'];
       if (args !== undefined && !isRecord(args)) {

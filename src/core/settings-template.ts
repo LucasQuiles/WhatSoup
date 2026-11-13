@@ -40,6 +40,16 @@ export const AGENT_DEFAULT_ALLOW: readonly string[] = Object.freeze([
 ]);
 
 /**
+ * Microsoft 365 plugin operations that change which account or environment later calls reach.
+ * The deny floor lists them, and the `microsoft365` adapter refuses them even under workflow
+ * authority, because the broker binds the declared account, not what an operation does.
+ */
+export const M365_ACCOUNT_SELECTION_TOOLS: readonly string[] = Object.freeze([
+  'select-account',
+  'select-dataverse-environment',
+]);
+
+/**
  * Repo-owned deny floor — patterns that must appear in `permissions.deny`
  * for an agent instance, except for an approved account-bound M365 bridge.
  *
@@ -156,8 +166,8 @@ export const REQUIRED_DENY: readonly string[] = Object.freeze([
   'mcp__plugin_microsoft_365_microsoft_365__reply-to-message',
   'mcp__plugin_microsoft_365_microsoft_365__respond-to-event',
   'mcp__plugin_microsoft_365_microsoft_365__restore-item-version',
-  'mcp__plugin_microsoft_365_microsoft_365__select-account',
-  'mcp__plugin_microsoft_365_microsoft_365__select-dataverse-environment',
+  // These change which account or environment later calls reach; the microsoft365 adapter refuses them too.
+  ...M365_ACCOUNT_SELECTION_TOOLS.map((tool) => `mcp__plugin_microsoft_365_microsoft_365__${tool}`),
   'mcp__plugin_microsoft_365_microsoft_365__send-channel-message',
   'mcp__plugin_microsoft_365_microsoft_365__send-chat-message',
   'mcp__plugin_microsoft_365_microsoft_365__send-draft',

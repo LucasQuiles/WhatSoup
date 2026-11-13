@@ -21,6 +21,24 @@ describe('classifyGroupMembership', () => {
   });
 });
 
+describe('classifyGroupMembership (a multithreaded zombie can still run)', () => {
+  // On Linux, a thread-group leader whose main thread exited while its other threads run shows as
+  // `Zl` or `Zsl`. The `l` flag marks a multithreaded process, and those other threads can still run.
+  it.each([
+    ['Zl', 'live'],
+    ['Zsl', 'live'],
+    ['Z', 'no-live-members'],
+    ['Z+', 'no-live-members'],
+    ['Zs', 'no-live-members'],
+  ] as const)('reads a group member in state %s as %s', (stat, expected) => {
+    expect(classifyGroupMembership(` 101   100 ${stat}\n 200   200 S\n`, 100)).toBe(expected);
+  });
+
+  it('reads uppercase L (locked pages) on a zombie as no running thread', () => {
+    expect(classifyGroupMembership(' 101   100 ZL\n 200   200 S\n', 100)).toBe('no-live-members');
+  });
+});
+
 describe('probeGroupMembership', () => {
   it('reads this process group as live', () => {
     const listing = spawnSync('ps', ['-o', 'pgid=', '-p', String(process.pid)], { encoding: 'utf8', timeout: 5_000 });
