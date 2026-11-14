@@ -32,6 +32,8 @@ async function listGroups(groups: ReturnType<typeof group>[]) {
 }
 
 describe('list_groups through the sock tool factory scan bound', () => {
+  // 262,144 participants pass through the factory and registry scans: about 3 s locally, and over the default
+  // 10 s on a loaded CI runner (12.4 s observed), so this case gets its own limit.
   it('returns 256 groups at the 1,024-member cap whole', async () => {
     const groups = Array.from({ length: 256 }, (_, index) => group(index, 1024));
 
@@ -42,7 +44,7 @@ describe('list_groups through the sock tool factory scan bound', () => {
     expect(parsed.groups).toHaveLength(256);
     expect(parsed.groups.every((entry) => entry.participants.length === 1024)).toBe(true);
     expect(result.content[0].text).not.toContain(PROTECTED_MESSAGE_MARKER);
-  });
+  }, 30_000);
 
   it('withholds a result past the scan bound whole and keeps it a success', async () => {
     // One group whose member count alone reaches the bound.
