@@ -656,7 +656,7 @@ ORDER BY t.id DESC;
 
 Every tool call records which caller made it in the migration 65 columns (§6, `tool_calls`). No admission or authorization depends on the record directly. One decision does: with capability-obligation replay active, `caller_turn_owned` decides whether the call is correlated to the executing turn (`logical_turn_id`), and so whether an obligation can be created, because an uncorrelated row in the conversation window makes the effect fold enumeration-incomplete. The runtime mints one random token per agent session in memory and passes it to the child only through its environment. The session's MCP proxy and hooks present it as a `notifications/whatsoup/session` line, which gets no reply. A same-user process can read another process's environment, so `match` is attribution evidence and does not authenticate the caller. Calls from other clients, such as the fleet client and the bot-errors provider probe, record as outside callers.
 
-The read-only report answers how often outside callers act while a turn is executing, and whether any outside caller reached a sensitive tool. Its `turnCorrelation` section, one entry per transport, measures how many of the turn's own mid-turn calls carry their `logical_turn_id` (`eligible` against `attributed`), and counts outside mid-turn calls apart (`outsideMidTurn`, with `outsideMidTurnCorrelated` expected to be 0). `eligible` also counts rows that are NULL by design: shared and single scopes, two heads with one conversation key, and a global session with no chat key. So `attributed` below `eligible` is expected outside `per_chat`; on a `per_chat` instance, a gap beyond those cases means missing correlation. The gap cannot show a turn's helper whose socket presented no matching token: its calls record `caller_turn_owned = 0`, so they leave both `eligible` and `attributed` and count in `outsideMidTurn`, where the report cannot tell them from an outside client's. Read `outsideMidTurn` together with the `capability_obligation_events` rows whose action is `obligation.not_created` and whose `reason_code` is `not_created_side_effect_uncertain`. A journaled turn whose decision is recorded (§5.8) and whose inbound matches exactly one contract rule, but whose receipt time is unavailable or invalid, records `not_created_receipt_time_invalid` instead, so it does not add to that count. A lost-decision event whose `detail.derivedReasonCode` is `not_created_side_effect_uncertain` belongs with that count too. Rows written by a release that correlated every mid-turn call whatever its caller can keep `outsideMidTurnCorrelated` above 0 until they leave the window. Run the report with:
+The read-only report answers how often outside callers act while a turn is executing, and whether any outside caller reached a sensitive tool. Its `turnCorrelation` section, one entry per transport, measures how many of the turn's own mid-turn calls carry their `logical_turn_id` (`eligible` against `attributed`), and counts outside mid-turn calls apart (`outsideMidTurn`, with `outsideMidTurnCorrelated` expected to be 0). `eligible` also counts rows that are NULL by design: shared and single scopes, two heads with one conversation key, and a global session with no chat key. So `attributed` below `eligible` is expected outside `per_chat`; on a `per_chat` instance, a gap beyond those cases means missing correlation. The gap cannot show a turn's helper whose socket presented no matching token: its calls record `caller_turn_owned = 0`, so they leave both `eligible` and `attributed` and count in `outsideMidTurn`, where the report cannot tell them from an outside client's. Read `outsideMidTurn` together with the `capability_obligation_events` rows whose action is `obligation.not_created` and whose `reason_code` is `not_created_side_effect_uncertain`. A journaled turn whose decision is recorded (§5.7) and whose inbound matches exactly one contract rule, but whose receipt time is unavailable or invalid, records `not_created_receipt_time_invalid` instead, so it does not add to that count. A lost-decision event whose `detail.derivedReasonCode` is `not_created_side_effect_uncertain` belongs with that count too. Rows written by a release that correlated every mid-turn call whatever its caller can keep `outsideMidTurnCorrelated` above 0 until they leave the window. Run the report with:
 
 ```bash
 bash scripts/run-with-pinned-node.sh scripts/caller-attribution-report.ts --db <instance>/bot.db --out-dir <dir> [--window-days 30]
@@ -741,37 +741,7 @@ saturating consecutive-failure count, and `retention_failed` without exception p
 Unreadable audit/tool aggregates and failed retention degrade authenticated diagnostic
 health with closed causes rather than reporting measured zeroes.
 
-### 5.6 Protected delivery
-
-`request_rustdesk_access` and `deliver_secret` are separate from ordinary MCP
-message delivery. Their managed one-use URL is resolved only inside
-`ProtectedDeliveryService` and passed directly to the protected `sendRaw` path
-with a stable WhatsApp message ID. The URL, RustDesk code, device seed, and
-managed credential never enter a model result, generic outbox, message history,
-or durable generic-send record. The service writes only delivery metadata and a
-metadata-only outbound audit intent. Submission requires the expected stable
-WhatsApp message ID; a missing or mismatched ID is ambiguous. An ambiguous outcome
-must not be retried through generic send tooling. A concurrent delivery/read receipt
-remains stronger evidence and is not overwritten by a later ambiguous acknowledgement.
-
-Receipt status is joined by that stable message ID and queued as a bounded
-metadata event for managed-side reporting. After the transport is fully
-connected, one maintenance loop resumes only recent `staged` rows with their
-persisted delivery references and then flushes pending events. It repeats every
-five seconds while the transport remains fully connected, so a connection whose
-socket is created before it reports ready still recovers within the 60-second
-window. A second loop does not start until the prior loop completes; each event
-flush is bounded to 100 rows. Automatic
-recovery does not replay `resolving` or `ambiguous` rows, mint, adopt, or replace
-a managed delivery. The same-reference retry limit remains three attempts within
-60 seconds. Expired unresolved deliveries become terminal after any active send
-lease has passed its 60-second window. An active lease blocks replacement issuance;
-late receipts remain admissible without restarting delivery. Database retention
-removes delivery metadata and its associated events after 90 days from issuance.
-Referenced outbound audit rows remain until that journal expires; ordinary audit
-age and row limits continue to apply to unreferenced records.
-
-### 5.7 `sendTracked` — Shared Send Helper
+### 5.6 `sendTracked` — Shared Send Helper
 
 All autonomous sends (bot responses, startup notifications, admin messages) go through `sendTracked()`:
 
@@ -801,7 +771,7 @@ If `durability` is `undefined` (rare, test contexts only), the send proceeds wit
 
 ---
 
-### 5.8 Capability-Obligation Replay (Migrations 58, 60, 63)
+### 5.7 Capability-Obligation Replay (Migrations 58, 60, 63)
 
 Off by default; activates only under `agentOptions.capabilityObligations.enabled === true`
 (see `docs/configuration.md`) and only for `per_chat` scope. When a managed-loop provider
@@ -1177,6 +1147,36 @@ disproven, never proven, so `--network-isolated` stays an operator attestation t
 fails-closed against; no-SEND is guaranteed by construction (it never opens a WhatsApp session).
 Backfill EXECUTION,
 the DM drain, both group drains, and the old-binary rehearsal are separately owner-gated.
+
+### 5.8 Protected delivery
+
+`request_rustdesk_access` and `deliver_secret` are separate from ordinary MCP
+message delivery. Their managed one-use URL is resolved only inside
+`ProtectedDeliveryService` and passed directly to the protected `sendRaw` path
+with a stable WhatsApp message ID. The URL, RustDesk code, device seed, and
+managed credential never enter a model result, generic outbox, message history,
+or durable generic-send record. The service writes only delivery metadata and a
+metadata-only outbound audit intent. Submission requires the expected stable
+WhatsApp message ID; a missing or mismatched ID is ambiguous. An ambiguous outcome
+must not be retried through generic send tooling. A concurrent delivery/read receipt
+remains stronger evidence and is not overwritten by a later ambiguous acknowledgement.
+
+Receipt status is joined by that stable message ID and queued as a bounded
+metadata event for managed-side reporting. After the transport is fully
+connected, one maintenance loop resumes only recent `staged` rows with their
+persisted delivery references and then flushes pending events. It repeats every
+five seconds while the transport remains fully connected, so a connection whose
+socket is created before it reports ready still recovers within the 60-second
+window. A second loop does not start until the prior loop completes; each event
+flush is bounded to 100 rows. Automatic
+recovery does not replay `resolving` or `ambiguous` rows, mint, adopt, or replace
+a managed delivery. The same-reference retry limit remains three attempts within
+60 seconds. Expired unresolved deliveries become terminal after any active send
+lease has passed its 60-second window. An active lease blocks replacement issuance;
+late receipts remain admissible without restarting delivery. Database retention
+removes delivery metadata and its associated events after 90 days from issuance.
+Referenced outbound audit rows remain until that journal expires; ordinary audit
+age and row limits continue to apply to unreferenced records.
 
 ---
 

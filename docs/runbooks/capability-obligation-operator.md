@@ -228,5 +228,5 @@ oracle when the automated harness cannot run; keep both receipts.
   on the new binary by design (re-attest after upgrade).
 - The same-UID staged-copy window (F4, incl. the EUID-owned interpreter) and the direct-mode
   positional-code residual (awk-shape) are OWNER-RATIFIED threat-model boundaries
-  (2026-08-13) — documented in `docs/durability.md` §5.8, not open defects. The drain-now
+  (2026-08-13) — documented in `docs/durability.md` §5.7, not open defects. The drain-now
   drop-file shares the same single-trusted-UID boundary.
