@@ -1,4 +1,7 @@
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
+
+vi.mock('../../src/core/protected-delivery-pins.ts', async (importOriginal) =>
+  (await import('../helpers/protected-delivery-pins.ts')).mockProtectedDeliveryPins(importOriginal));
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { unlinkSync, existsSync } from 'node:fs';
@@ -21,9 +24,11 @@ import {
   incrementEnrichmentRetries,
   resetEnrichmentErrors,
   hasFromMeReplyAfter,
+  getRecentMessageText,
   type StoreMessageInput,
   type MessageRow,
 } from '../../src/core/messages.ts';
+import { PROTECTED_MESSAGE_MARKER } from '../../src/core/protected-message.ts';
 import { fakeClock } from '../../src/lib/clock.ts';
 
 function tempDbPath(): string {
@@ -543,6 +548,68 @@ describe('messages', () => {
 
     const mapped = rowToMessage(rows[0]);
     expect(mapped.contentText).toBe('hello world');
+  });
+
+  it('redacts a protected link from an existing stored row before it is returned to history readers', () => {
+    const link = 'https://links.example.test/s/#v3.stored-protected-test';
+    db.raw.prepare(`
+      INSERT INTO messages
+        (chat_jid, conversation_key, sender_jid, message_id, content, content_text, content_type, is_from_me, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('group1@g.us', 'group1_at_g.us', 'alice@s.whatsapp.net', 'stored-protected', link, link, 'text', 0, BASE_TS);
+
+    const row = db.raw.prepare('SELECT * FROM messages WHERE message_id = ?').get('stored-protected');
+    expect(row).toBeDefined();
+    const mapped = rowToMessage(row as unknown as MessageRow);
+    const recent = getRecentMessages(db, 'group1_at_g.us', 10);
+
+    expect(mapped.content).toBe(PROTECTED_MESSAGE_MARKER);
+    expect(mapped.contentText).toBe(PROTECTED_MESSAGE_MARKER);
+    expect(recent.find((message) => message.messageId === 'stored-protected')!.content).toBe(PROTECTED_MESSAGE_MARKER);
+  });
+
+  it('redacts a protected link from a stored sender name before history and handoff readers see it', () => {
+    // Rows written before sender names were sanitized at ingress can still hold a link.
+    const link = 'https://links.example.test/s/#v3.stored-sender-protected-test';
+    db.raw.prepare(`
+      INSERT INTO messages
+        (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_type, is_from_me, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('group1@g.us', 'group1_at_g.us', 'alice@s.whatsapp.net', `Mallory ${link}`, 'stored-sender-protected', 'hello', 'text', 0, BASE_TS);
+
+    const row = db.raw.prepare('SELECT * FROM messages WHERE message_id = ?').get('stored-sender-protected');
+    const expected = `Mallory ${PROTECTED_MESSAGE_MARKER}`;
+
+    expect(rowToMessage(row as unknown as MessageRow).senderName).toBe(expected);
+    expect(getRecentMessages(db, 'group1_at_g.us', 10)
+      .find((message) => message.messageId === 'stored-sender-protected')!.senderName).toBe(expected);
+    expect(getRecentMessageText(db, 'group1_at_g.us', 10, 64 * 1024).map((message) => message.senderName))
+      .toEqual([expected]);
+  });
+
+  it('applies the recent-text byte budget after redaction, so the returned text never exceeds it', () => {
+    // A bare protected link (22 bytes) is shorter than the 24-byte marker that replaces it.
+    const link = 'links.example.test/s#a';
+    db.raw.prepare(`
+      INSERT INTO messages
+        (chat_jid, conversation_key, sender_jid, message_id, content, content_type, is_from_me, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('budget@g.us', 'budget_at_g.us', 'alice@s.whatsapp.net', 'budget-protected', link, 'text', 0, BASE_TS);
+    const storedBytes = Buffer.byteLength(link);
+    const redactedBytes = Buffer.byteLength(PROTECTED_MESSAGE_MARKER);
+    expect(redactedBytes).toBeGreaterThan(storedBytes);
+
+    expect(() => getRecentMessageText(db, 'budget_at_g.us', 10, storedBytes)).toThrow(/exceeds byte limit/);
+    expect(getRecentMessageText(db, 'budget_at_g.us', 10, redactedBytes))
+      .toEqual([{ content: PROTECTED_MESSAGE_MARKER, senderName: null, isFromMe: false }]);
+  });
+
+  it('redacts a protected link from a sender name passed directly to storage', () => {
+    const link = 'https://links.example.test/s/#v3.write-sender-protected-test';
+    storeMessageIfNew(db, makeMsg({ messageId: 'write-sender-protected', senderName: `Mallory ${link}` }));
+
+    expect(db.raw.prepare('SELECT sender_name FROM messages WHERE message_id = ?').get('write-sender-protected'))
+      .toEqual({ sender_name: `Mallory ${PROTECTED_MESSAGE_MARKER}` });
   });
 
   it('storeMessageIfNew persists content_text when provided', () => {

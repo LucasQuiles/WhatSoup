@@ -69,6 +69,71 @@ describe('database retention', () => {
     expect(runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION).handoffArtifacts).toBe(0);
   });
 
+  it('prunes protected delivery metadata and events after the fixed 90-day retention window', () => {
+    const insertDelivery = db.raw.prepare(`
+      INSERT INTO protected_deliveries (
+        stage_operation_id, resolve_operation_id, delivery_ref, delivery_id,
+        principal, recipient_jid, kind, device_id, purpose,
+        whatsapp_message_id, state, issued_at
+      ) VALUES (?, ?, ?, ?, '15551230000', '15551230000@s.whatsapp.net', 'rustdesk', 'fixture-desktop', 'login', ?, 'read', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?))
+    `);
+    insertDelivery.run(
+      'stage-expired', 'resolve-expired', 'delivery-expired', 'delivery-id-expired',
+      'message-expired', '-91 days',
+    );
+    insertDelivery.run(
+      'stage-recent', 'resolve-recent', 'delivery-recent', 'delivery-id-recent',
+      'message-recent', '-89 days',
+    );
+    db.raw.prepare(`
+      INSERT INTO protected_delivery_events (event_id, delivery_ref, status, observed_at)
+      VALUES ('event-expired', 'delivery-expired', 'read', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-91 days'))
+    `).run();
+
+    const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+
+    expect(result.protectedDeliveries).toBe(1);
+    expect(db.raw.prepare('SELECT delivery_ref FROM protected_deliveries ORDER BY delivery_ref').all())
+      .toEqual([{ delivery_ref: 'delivery-recent' }]);
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM protected_delivery_events').get())
+      .toEqual({ count: 0 });
+  });
+
+  it('keeps a referenced outbound audit until the protected-delivery journal expires', () => {
+    const writer = createOutboundSendsWriter({ db: db.raw });
+    const audit = writer.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });
+    writer.markSuccess(audit.id);
+    db.raw.prepare(`
+      UPDATE outbound_sends
+      SET created_at=datetime('now', '-31 days'), completed_at=datetime('now', '-31 days')
+      WHERE id=?
+    `).run(audit.id);
+    db.raw.prepare(`
+      INSERT INTO protected_deliveries (
+        stage_operation_id, resolve_operation_id, delivery_ref, delivery_id,
+        principal, recipient_jid, kind, device_id, purpose, whatsapp_message_id,
+        outbound_send_id, state, issued_at
+      ) VALUES (
+        'retained-audit-stage', 'retained-audit-resolve', 'retained-audit-ref', 'retained-audit-id',
+        '15551230000', '15551230000@s.whatsapp.net', 'rustdesk', 'fixture-desktop', 'login', 'retained-audit-message',
+        ?, 'submitted', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-89 days')
+      )
+    `).run(audit.id);
+
+    const retained = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+    expect(retained).toMatchObject({ protectedDeliveries: 0, outboundSends: 0 });
+    expect(db.raw.prepare('SELECT id FROM outbound_sends').all()).toEqual([{ id: audit.id }]);
+
+    db.raw.prepare(`
+      UPDATE protected_deliveries
+      SET issued_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-91 days')
+      WHERE delivery_ref='retained-audit-ref'
+    `).run();
+    const expired = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+    expect(expired).toMatchObject({ protectedDeliveries: 1, outboundSends: 1 });
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM outbound_sends').get()).toEqual({ count: 0 });
+  });
+
   it('rolls back every bounded handoff batch after a later SQLite failure and drains it once on retry', () => {
     const now = 2_000_000_000_000;
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
@@ -228,6 +293,7 @@ describe('database retention', () => {
       triggerOccurrences: 0,
       handoffArtifacts: 0,
       identityAdmissionsExpired: 0,
+      protectedDeliveries: 0,
     });
     expect(rowCount('inbound_events')).toBe(1);
     expect(rowCount('outbound_ops')).toBe(1);
@@ -739,6 +805,7 @@ describe('database retention', () => {
       triggerOccurrences: 0,
       handoffArtifacts: 0,
       identityAdmissionsExpired: 0,
+      protectedDeliveries: 0,
     });
     expect(rowCount('inbound_events')).toBe(2);
     expect(rowCount('outbound_ops')).toBe(2);
@@ -1367,6 +1434,7 @@ describe('database retention', () => {
         triggerOccurrences: 0,
         handoffArtifacts: 0,
         identityAdmissionsExpired: 0,
+        protectedDeliveries: 0,
       };
       const runSpy = vi.spyOn(timer, 'runCleanup')
         .mockRejectedValueOnce(new Error('immediate-retention-failed'))

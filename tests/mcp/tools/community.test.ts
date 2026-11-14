@@ -185,6 +185,19 @@ describe('community tools', () => {
       expect(result.isError).toBeUndefined();
       expect((mockSock as any).communityLinkGroup).toHaveBeenCalledWith('group1@g.us', 'community1@g.us');
     });
+
+    // Baileys rc13 communityLinkGroup resolves undefined. The link is made, so
+    // the call must resolve normally with an empty text, not reject.
+    it('returns normally when the socket resolves undefined', async () => {
+      (mockSock as any).communityLinkGroup = vi.fn().mockResolvedValue(undefined);
+
+      await expect(registry.call(
+        'community_link_group',
+        { groupJid: 'group1@g.us', communityJid: 'community1@g.us' },
+        globalSession(),
+      )).resolves.toEqual({ content: [{ type: 'text', text: '' }] });
+      expect((mockSock as any).communityLinkGroup).toHaveBeenCalledTimes(1);
+    });
   });
 
   // --- community_unlink_group ---
@@ -198,6 +211,18 @@ describe('community tools', () => {
       );
       expect(result.isError).toBeUndefined();
       expect((mockSock as any).communityUnlinkGroup).toHaveBeenCalledWith('group1@g.us', 'community1@g.us');
+    });
+
+    // Baileys rc13 communityUnlinkGroup resolves undefined, as link does.
+    it('returns normally when the socket resolves undefined', async () => {
+      (mockSock as any).communityUnlinkGroup = vi.fn().mockResolvedValue(undefined);
+
+      await expect(registry.call(
+        'community_unlink_group',
+        { groupJid: 'group1@g.us', communityJid: 'community1@g.us' },
+        globalSession(),
+      )).resolves.toEqual({ content: [{ type: 'text', text: '' }] });
+      expect((mockSock as any).communityUnlinkGroup).toHaveBeenCalledTimes(1);
     });
   });
 

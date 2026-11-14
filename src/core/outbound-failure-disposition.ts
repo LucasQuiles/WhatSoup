@@ -154,7 +154,8 @@ export type InternalOutboundFailureCode =
   | 'outbound.identity_blocked'
   | 'outbound.replay_failed'
   | 'outbound.deferral_limit_exceeded'
-  | 'outbound.replay_attempt_limit_exceeded';
+  | 'outbound.replay_attempt_limit_exceeded'
+  | 'outbound.protected_link_send_refused';
 
 export type OutboundFailureCode = TransportErrorCode | InternalOutboundFailureCode;
 
@@ -247,6 +248,7 @@ const INTERNAL_CODES = new Set<string>([
   'outbound.replay_failed',
   'outbound.deferral_limit_exceeded',
   'outbound.replay_attempt_limit_exceeded',
+  'outbound.protected_link_send_refused',
 ]);
 /** Runtime source of truth for every code accepted in v1 outbound evidence. */
 export const OUTBOUND_FAILURE_EVIDENCE_CODES = Object.freeze([
@@ -639,6 +641,8 @@ export function classifyOutboundQuarantineDisposition(
     case 'outbound.deferral_limit_exceeded':
       return 'delivery_not_attempted';
     case 'outbound.replay_attempt_limit_exceeded':
+      return 'delivery_not_attempted';
+    case 'outbound.protected_link_send_refused':
       return 'delivery_not_attempted';
     case 'outbound.pending_replay_unreconstructable':
       return 'record_unreconstructable';

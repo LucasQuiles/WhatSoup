@@ -2436,11 +2436,13 @@ Output is one JSON line with `ok`, `mode`, `decision` (`ready`, `applied`, `alre
 contradicts the recorded gap or an existing closure); `1` usage or I/O error. Output never contains
 message text, JIDs, or media.
 
-**Schema 66 rollback.** Migration 66 adds only the new table. After it is recorded, a binary whose
-ceiling is 65 refuses the database and will not write, so **binary-only rollback is unavailable**.
-Keep the 66-aware release for containment or forward repair. Restoring a pre-migration backup is an
-owner decision that requires a proven zero-new-writes window. **Never overwrite a newer database with
-an older backup**: messages received after the upgrade would be lost.
+**Schema 66 and 67 rollback.** Migration 66 adds only the closure table; migration 67 adds only the
+protected-delivery tables. After a migration is recorded, a binary whose ceiling is below it refuses
+the database and will not write: a schema-65 binary refuses a schema-66 database, and a schema-66
+binary refuses a schema-67 database, both as `future_schema`. **Binary-only rollback is unavailable**
+for either. Keep the 67-aware release for containment or forward repair. Restoring a pre-migration
+backup is an owner decision that requires a proven zero-new-writes window. **Never overwrite a newer
+database with an older backup**: messages received after the upgrade would be lost.
 
 The refusal is rehearsed with two real checkouts on disposable files. The work directory must not
 exist; the harness creates its own database there:
@@ -2452,10 +2454,11 @@ bash scripts/run-with-pinned-node.sh scripts/schema-rollback-rehearsal.ts \
   --old-root "$OLD" --new-root "$PWD" --work-dir "$SCRATCH/rehearsal"
 ```
 
-The old binary creates the database at 65, this release migrates it to 66, and the old binary reopens
-it. Exit `0` means the old binary refused with `DatabaseCompatibilityError` reason `future_schema`
-("Database schema migration 66 exceeds binary ceiling 65; refusing writes") and every file in the
-work directory, including the WAL and shared-memory sidecars, stayed byte-identical.
+The old binary creates the database at its own ceiling, this release migrates it to 67, and the old
+binary reopens it. From a schema-66 previous release, exit `0` means the old binary refused with
+`DatabaseCompatibilityError` reason `future_schema` ("Database schema migration 67 exceeds binary
+ceiling 66; refusing writes") and every file in the work directory, including the WAL and
+shared-memory sidecars, stayed byte-identical.
 
 #### Close a proven operator catch-up recovery (admitted inbound sequences)
 
@@ -3053,6 +3056,75 @@ Online deletion does not erase bytes already captured in backups, WAL copies,
 storage snapshots, or provider copies. Operate backup rotation/destruction and
 provider-data retention under their separate controls. This runbook describes the
 implemented lifecycle; it does not attest any deployed system or external copy.
+
+### Protected delivery
+
+Protected delivery is disabled until an agent instance explicitly sets
+`agentOptions.protectedDelivery.enabled: true` with the fixed managed-links API
+endpoint and a runtime-only credential environment-variable name. The name must
+match `^LINKS_MANAGED_[A-Z][A-Z0-9_]*$`, such as
+`LINKS_MANAGED_TRANSPORT_TOKEN`; the parser rejects `LANG`, `PATH`, provider
+authentication, and WhatSoup session names before it reads the environment.
+Inject that credential through the service environment; do not place its value
+in `config.json`, a prompt, or a tool call. The child-environment builders do
+not forward the reserved namespace, but that does not limit a different local
+process running as the same OS user from potentially inspecting the service
+environment. Treat same-user shell access as trusted operator access.
+
+The three protected-delivery tools exist only in agent runtimes and require a
+resolved, bound direct WhatsApp conversation. Configuration must use
+`sessionScope: "per_chat"`. If the primary provider and all static fallbacks use
+the in-process `managed_loop`, the runtime supplies the bound conversation.
+Any CLI route or `fallbackDiscovery` also requires `sandboxPerChat: true` or
+`perChatConversationBound: true`; create, patch, load and discovery reject an
+enabled feature without a bound conversation. Startup also enforces this rule
+for raw `INSTANCE_CONFIG` input before reading the credential. This configuration
+does not establish operating-system isolation. The protected transport sends the
+one-use URL directly and returns metadata only. It does not use the generic
+outbox, conversation history, or model result. If staging, delivery, or the
+managed API fails, inspect the content-free `protected delivery` log event and
+use delivery status; do not retry through `send_message`.
+
+Redaction covers more paths than refusal. A protected link or its redaction
+marker is refused before sending only by a due scheduled message, a pending
+outbound replay (`outbound.protected_link_send_refused`), `forward_message`
+(which also refuses a source message that was itself a protected delivery) and
+a capability-obligation dispatch whose source token carries one
+(`protected_link_source_refused`). Other send tools, including `send_message`,
+`reply_message`, `edit_message` and `post_status`, send their text without this
+check; `reply_message` redacts only the quoted stored text. Agents do not see raw
+links: inbound text is redacted at ingest and every MCP tool response is
+redacted, so these tools can carry a link only if the caller already holds it
+from outside WhatSoup. A fleet config save refuses a value containing the
+redaction marker, so saving a redacted projection cannot overwrite a stored link.
+
+The tool resolves both the actor and destination to the same verified phone
+identity before recording its canonical WhatsApp address. A mapped LID and that
+phone address reuse the same pending RustDesk request. Recovery converts older
+LID records only when the current mapping still proves the same recipient and no
+send claim is held. Conflicting mappings fail closed. Submitted and ambiguous
+records are never retargeted, and automatic recovery never replays them. An
+explicit `deliver_secret` call returns a submitted record as sent, and retries an
+ambiguous one with the same resolve operation and WhatsApp message ID within the
+three-attempt, 60-second limit.
+
+After the transport becomes fully connected, one maintenance loop resumes only
+recent `staged` persisted deliveries and flushes pending metadata events. It
+repeats every five seconds while the transport remains fully connected, including
+after socket creation returns before the transport reports ready, and never
+overlaps an in-flight loop; each flush is bounded to 100 pending events. Recovery
+uses the same persisted reference and remains bounded to three attempts within
+60 seconds. It does not replay `resolving` or `ambiguous` rows, mint, adopt, or
+replace a delivery; inspect delivery status and receipt evidence for those rows.
+Expired unresolved rows become terminal once any send lease is at least 60 seconds
+old. A fresh lease blocks reissue. Missing or mismatched WhatsApp message IDs report
+an ambiguous submission; later receipt evidence is preserved.
+The daily unified database-retention transaction deletes protected-delivery
+metadata and associated event rows older than 90 days from issuance. It preserves
+their referenced outbound audit rows until that deletion. Check
+`health.retention.database.lastResult.protectedDeliveries` after a successful
+sweep. A missing runtime credential is a startup configuration error, so correct
+the service environment before restarting the agent.
 
 ---
 

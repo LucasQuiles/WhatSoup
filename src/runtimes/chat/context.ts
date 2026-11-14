@@ -20,6 +20,7 @@ import {
   verifiedSenderIdentity,
   type ChatRecallBoundary,
 } from '../../core/memory-scope.ts';
+import { sanitizeProtectedMessageText } from '../../core/protected-message.ts';
 
 const log = createChildLogger('conversation');
 
@@ -100,7 +101,7 @@ function loadEntityContext(results: EntitySearchResult[]): string {
     const label = entityType.endsWith('s')
       ? entityType.charAt(0).toUpperCase() + entityType.slice(1)
       : entityType.charAt(0).toUpperCase() + entityType.slice(1) + 's';
-    const lines = items.map((r) => `- ${r.record.text}`).join('\n');
+    const lines = items.map((r) => `- ${sanitizeProtectedMessageText(r.record.text)}`).join('\n');
     parts.push(`${label}:\n${lines}`);
   }
 
@@ -135,11 +136,12 @@ export async function loadContextDetailed(
    */
   boundary: ChatRecallBoundary = 'open',
 ): Promise<ContextLoadResult> {
-  if (!messageText.trim()) {
+  const safeMessageText = sanitizeProtectedMessageText(messageText);
+  if (!safeMessageText.trim()) {
     return { text: '', status: 'not_attempted', scopes: [] };
   }
 
-  const routed = routeQuery(messageText, {
+  const routed = routeQuery(safeMessageText, {
     namespaces: config.memory.pinecone.namespaces,
   });
   const safeTraceId = normalizeMemoryTraceId(traceId);
@@ -147,8 +149,8 @@ export async function loadContextDetailed(
   if (config.pineconeSearchMode === 'entity') {
     const details = await captureContextSearch(() =>
       traceId
-        ? pinecone.searchEntitiesDetailed(messageText, traceId)
-        : pinecone.searchEntitiesDetailed(messageText),
+        ? pinecone.searchEntitiesDetailed(safeMessageText, traceId)
+        : pinecone.searchEntitiesDetailed(safeMessageText),
     );
     const scopes = [scopeOutcome('entity', details)];
     log.info(
@@ -174,18 +176,18 @@ export async function loadContextDetailed(
   const [chatDetails, senderDetails, selfDetails] = await Promise.all([
     captureContextSearch(() =>
       traceId
-        ? pinecone.searchForChatDetailed(chatJid, messageText, traceId)
-        : pinecone.searchForChatDetailed(chatJid, messageText),
+        ? pinecone.searchForChatDetailed(chatJid, safeMessageText, traceId)
+        : pinecone.searchForChatDetailed(chatJid, safeMessageText),
     ),
     captureContextSearch(() =>
       traceId
-        ? pinecone.searchForSenderDetailed(senderJid, messageText, traceId)
-        : pinecone.searchForSenderDetailed(senderJid, messageText),
+        ? pinecone.searchForSenderDetailed(senderJid, safeMessageText, traceId)
+        : pinecone.searchForSenderDetailed(senderJid, safeMessageText),
     ),
     captureContextSearch(() =>
       traceId
-        ? pinecone.searchSelfFactsDetailed(messageText, traceId)
-        : pinecone.searchSelfFactsDetailed(messageText),
+        ? pinecone.searchSelfFactsDetailed(safeMessageText, traceId)
+        : pinecone.searchSelfFactsDetailed(safeMessageText),
     ),
   ]);
   const thisChat = foldChatAttribution(chatJid);
@@ -248,7 +250,7 @@ export async function loadContextDetailed(
   const parts: string[] = [];
 
   if (merged.length > 0) {
-    const lines = merged.map((r) => `- ${r.record.text}`).join('\n');
+    const lines = merged.map((r) => `- ${sanitizeProtectedMessageText(r.record.text)}`).join('\n');
     // LLM-001/002 (QR-031): memory-mode recall injects fact text derived from
     // UNTRUSTED message content (extractor.ts) into the system prompt. Frame it
     // as retrieved, reference-only background data — parity with entity mode's
@@ -260,7 +262,7 @@ export async function loadContextDetailed(
   }
 
   if (selfFacts.length > 0) {
-    const lines = selfFacts.map((r) => `- ${r.record.text}`).join('\n');
+    const lines = selfFacts.map((r) => `- ${sanitizeProtectedMessageText(r.record.text)}`).join('\n');
     parts.push(`Things you (Loops) have said about yourself before — stay consistent with these:\n${lines}`);
   }
 

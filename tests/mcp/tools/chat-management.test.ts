@@ -1,10 +1,14 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+
+vi.mock('../../../src/core/protected-delivery-pins.ts', async (importOriginal) =>
+  (await import('../../helpers/protected-delivery-pins.ts')).mockProtectedDeliveryPins(importOriginal));
 import { Database } from '../../../src/core/database.ts';
 import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 import { registerChatManagementTools } from '../../../src/mcp/tools/chat-management.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import type { WhatsAppSocket } from '../../../src/transport/connection.ts';
 import { fakeClock } from '../../../src/lib/clock.ts';
+import { PROTECTED_MESSAGE_MARKER } from '../../../src/core/protected-message.ts';
 import { countTrustedActorMarkers } from '../../../src/lib/trusted-actor-marker.ts';
 
 // ---------------------------------------------------------------------------
@@ -448,6 +452,37 @@ describe('chat-management tools', () => {
       expect(withData.chats[0].lastMessage.contentType).toBe('text');
     });
 
+    it('redacts a persisted protected link from a last-message preview', async () => {
+      const link = 'https://links.example.test/setup/#legacy-preview-protected-test';
+      db.raw.prepare('UPDATE messages SET content = ?, content_text = ? WHERE message_id = ?').run(link, link, 'msg6');
+
+      const result = await registry.call(
+        'list_chats',
+        { limit: 1, include_last_message: true },
+        globalSession(),
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).not.toContain('links.example.test/setup/#');
+      expect(result.content[0].text).toContain(PROTECTED_MESSAGE_MARKER);
+    });
+
+    it('redacts a persisted protected link from a last-message sender name', async () => {
+      const link = 'https://links.example.test/s/#v3.preview-sender-protected-test';
+      db.raw.prepare('UPDATE messages SET sender_name = ? WHERE message_id = ?').run(`Mallory ${link}`, 'msg6');
+
+      const result = await registry.call(
+        'list_chats',
+        { limit: 1, include_last_message: true },
+        globalSession(),
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).not.toContain('links.example.test/s/#');
+      const data = JSON.parse(result.content[0].text) as { chats: Array<{ lastMessage: { senderName: string | null } }> };
+      expect(data.chats[0].lastMessage.senderName).toBe(`Mallory ${PROTECTED_MESSAGE_MARKER}`);
+    });
+
     it('truncates last-message previews to avoid bloating agent context', async () => {
       const longText = 'x'.repeat(150);
       db.raw.prepare(`
@@ -547,6 +582,71 @@ describe('chat-management tools', () => {
   // --- forward_message ---
 
   describe('forward_message', () => {
+    it('blocks a protected delivery before sending its stored message', async () => {
+      const link = 'https://links.example.test/s/#v3.forward-protected-test';
+      db.raw.prepare('UPDATE messages SET content = ?, content_text = ? WHERE message_id = ?').run(link, link, 'msg1');
+
+      const result = await registry.call(
+        'forward_message',
+        { message_id: 'msg1', to_jid: '333@s.whatsapp.net' },
+        globalSession(),
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/protected deliver/i);
+      expect(mockSock.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('blocks the persisted protected marker when no correlation table is available', async () => {
+      db.raw.prepare('UPDATE messages SET content = ?, content_text = ?, raw_message = ? WHERE message_id = ?')
+        .run(PROTECTED_MESSAGE_MARKER, PROTECTED_MESSAGE_MARKER, PROTECTED_MESSAGE_MARKER, 'msg1');
+      db.raw.exec('DROP TABLE protected_deliveries');
+
+      const result = await registry.call(
+        'forward_message',
+        { message_id: 'msg1', to_jid: '333@s.whatsapp.net' },
+        globalSession(),
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/protected deliver/i);
+      expect(mockSock.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('blocks a protected delivery correlated by its persisted WhatsApp message id', async () => {
+      db.raw.prepare(`
+        INSERT INTO protected_deliveries (
+          stage_operation_id, resolve_operation_id, principal, recipient_jid, kind, device_id, purpose,
+          whatsapp_message_id, state, issued_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        'stage-chat-management-protected', 'resolve-chat-management-protected', '111',
+        '111@s.whatsapp.net', 'rustdesk', 'device-1', 'login', 'msg1', 'staged',
+        '2026-10-29T00:00:00.000Z',
+      );
+
+      const result = await registry.call(
+        'forward_message',
+        { message_id: 'msg1', to_jid: '333@s.whatsapp.net' },
+        globalSession(),
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/protected deliver/i);
+      expect(mockSock.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('redacts a preexisting protected link from list_messages output', async () => {
+      const link = 'https://links.example.test/s/#legacy-chat-tool-protected-test';
+      db.raw.prepare('UPDATE messages SET content = ?, content_text = ? WHERE message_id = ?').run(link, link, 'msg1');
+
+      const result = await registry.call('list_messages', { conversation_key: '111', limit: 10 }, globalSession());
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).not.toContain('links.example.test/s/#');
+      expect(result.content[0].text).toContain(PROTECTED_MESSAGE_MARKER);
+    });
+
     it('calls sock.sendMessage with the content', async () => {
       const result = await registry.call(
         'forward_message',

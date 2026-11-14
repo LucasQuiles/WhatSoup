@@ -1,8 +1,12 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+
+vi.mock('../../../src/core/protected-delivery-pins.ts', async (importOriginal) =>
+  (await import('../../helpers/protected-delivery-pins.ts')).mockProtectedDeliveryPins(importOriginal));
 import { Database } from '../../../src/core/database.ts';
 import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 import { registerSearchTools } from '../../../src/mcp/tools/search.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
+import { PROTECTED_MESSAGE_MARKER } from '../../../src/core/protected-message.ts';
 import { countTrustedActorMarkers } from '../../../src/lib/trusted-actor-marker.ts';
 
 // ---------------------------------------------------------------------------
@@ -116,6 +120,21 @@ describe('search tools', () => {
       expect(ids).toContain('msg1');
       expect(ids).toContain('msg3');
       expect(ids).not.toContain('msg2');
+    });
+
+    it('redacts a protected link that exists in historical search results', async () => {
+      const link = 'https://links.example.test/s/#v3.search-protected-test';
+      db.raw.prepare(`
+        INSERT INTO messages
+          (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_text, content_type, is_from_me, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run('111@s.whatsapp.net', '111', '111@s.whatsapp.net', 'Alice', 'protected-search', link, link, 'text', 0, 9000);
+
+      const result = await registry.call('search_messages', { query: 'search-protected-test' }, globalSession());
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).not.toContain('links.example.test/s/#');
+      expect(result.content[0].text).toContain(PROTECTED_MESSAGE_MARKER);
     });
 
     it('respects limit parameter', async () => {

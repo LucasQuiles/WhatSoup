@@ -13,6 +13,7 @@ import type { IncomingMessage } from './types.ts';
 import { bareNumber, isLidJid, isStatusBroadcastJid } from './jid-constants.ts';
 import { normalizeUnixTimestampSeconds } from './substrate/time.ts';
 import { stripLoneSurrogates } from './sanitize-surrogates.ts';
+import { sanitizeProtectedMessageText, sanitizeProtectedMessageValue } from './protected-message.ts';
 
 /**
  * Unwrap Baileys container types to reach the real message payload.
@@ -285,12 +286,13 @@ export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
 
   // Sanitize content at ingestion — WhatsApp messages can contain lone surrogates
   // that produce invalid JSON when serialized for LLM API calls.
-  const safeContent = content !== null ? stripLoneSurrogates(content) : null;
-  const safeContentText = contentText !== null ? stripLoneSurrogates(contentText) : null;
+  const safeContent = content !== null ? sanitizeProtectedMessageText(stripLoneSurrogates(content)) : null;
+  const safeContentText = contentText !== null ? sanitizeProtectedMessageText(stripLoneSurrogates(contentText)) : null;
   // QR-056: senderName (pushName) is attacker-controlled. It is JSON-escaped and
   // labeled as untrusted at the provider boundary, but lone surrogates must still
   // be removed before strict JSON serializers see it on every provider path.
-  const safeSenderName = senderName !== null ? stripLoneSurrogates(senderName) : null;
+  // It is stored and model-visible like content, so protected links are redacted too.
+  const safeSenderName = senderName !== null ? sanitizeProtectedMessageText(stripLoneSurrogates(senderName)) : null;
 
   return {
     messageId: msg.key.id!,
@@ -306,6 +308,6 @@ export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
     timestamp,
     quotedMessageId,
     isResponseWorthy,
-    rawMessage: msg,
+    rawMessage: sanitizeProtectedMessageValue(msg),
   };
 }

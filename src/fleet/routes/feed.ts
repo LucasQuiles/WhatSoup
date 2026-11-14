@@ -12,6 +12,7 @@ import { inspectLatestLogFile, readTailLinesDetailed, type LogReadFailure } from
 import { normalizeTimestamp } from '../time-utils.ts';
 import type { FleetDbReader } from '../db-reader.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
+import { sanitizeProtectedMessageText, sanitizeProtectedMessageValue } from '../../core/protected-message.ts';
 import type { ConnectionLifecycleState } from '../../transport/connection.ts';
 import { createChildLogger } from '../../logger.ts';
 import { isNonEmptyString } from '../../lib/type-guards.ts';
@@ -111,8 +112,21 @@ function createFeedObservability(): FeedObservability {
 
 function sanitizePreview(content: string | null | undefined): string | undefined {
   if (!content) return undefined;
-  const trimmed = content.trim();
+  // Redact before the cut: a slice inside a link's host leaves text the
+  // scanner can no longer match.
+  const trimmed = sanitizeProtectedMessageText(content).trim();
   return trimmed ? trimmed.slice(0, 120) : undefined;
+}
+
+/**
+ * Log-derived sender names take precedence over database names, so the final
+ * message detail is redacted whatever its source.
+ */
+function redactMessageDetail(event: FeedEvent): void {
+  const detail = event.detail;
+  if (detail?.type !== 'message') return;
+  if (detail.senderName !== undefined) detail.senderName = sanitizeProtectedMessageText(detail.senderName);
+  if (detail.preview !== undefined) detail.preview = sanitizeProtectedMessageText(detail.preview);
 }
 
 // ---------------------------------------------------------------------------
@@ -152,8 +166,12 @@ interface ParseContext {
 }
 
 export function parsePinoLine(line: string, ctx: ParseContext): FeedEvent | null {
+  // A persisted log line can carry a protected link in any string field
+  // (message, component, reason, tool name, error). Redacted once here, every
+  // field copied from the line into the event is safe.
   let obj: Record<string, unknown>;
-  try { obj = JSON.parse(line); } catch { return null; }
+  try { obj = sanitizeProtectedMessageValue(JSON.parse(line)) as Record<string, unknown>; } catch { return null; }
+  if (obj === null || typeof obj !== 'object') return null;
 
   const msg = typeof obj.msg === 'string' ? obj.msg : '';
   if (!msg) return null;
@@ -230,7 +248,7 @@ export function parsePinoLine(line: string, ctx: ParseContext): FeedEvent | null
         type: 'tool_error',
         toolName: typeof obj.toolName === 'string' ? obj.toolName : '',
         toolId: typeof obj.toolId === 'string' ? obj.toolId : undefined,
-        error: typeof obj.error === 'string' ? obj.error : String(obj.error ?? ''),
+        error: sanitizeProtectedMessageText(typeof obj.error === 'string' ? obj.error : String(obj.error ?? '')),
       },
     };
   }
@@ -917,7 +935,9 @@ export function handleGetFeed(
 
   // 7. Sort descending by time, take the first `limit`
   deduped.sort((a, b) => (a.time > b.time ? -1 : a.time < b.time ? 1 : 0));
-  jsonResponse(res, 200, deduped.slice(0, limit));
+  const page = deduped.slice(0, limit);
+  page.forEach(redactMessageDetail);
+  jsonResponse(res, 200, page);
 }
 
 // readTailLinesDetailed and inspectLatestLogFile imported from ../log-utils.ts

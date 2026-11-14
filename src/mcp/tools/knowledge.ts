@@ -25,6 +25,7 @@ import {
   type PineconeProjectGuard,
 } from '../../lib/pinecone-project-guard.ts';
 import type { Database } from '../../core/database.ts';
+import { sanitizeProtectedMessageText, sanitizeProtectedToolResult } from '../../core/protected-message.ts';
 import {
   memoryHitTier,
   memoryIdentityFold,
@@ -53,6 +54,9 @@ const MAX_RESULTS = 8;
 const RERANK_CANDIDATE_CAP = 100;
 
 interface ParsedHit {
+  /** The stored record id: the duplicate key only, never output or sent. */
+  rawId: string;
+  /** The id with protected links redacted; two records may share it. */
   id: string;
   score: number;
   text: string;
@@ -224,8 +228,10 @@ function tierHits(
     const tier = isDocument ? null : scope ? memoryHitTier(hit.fields, scope, fold) : 0;
     if (!isDocument && tier === null) continue;
     const candidate: TieredHit = { ...hit, tier };
-    const existing = byId.get(hit.id);
-    if (!existing || preferHit(candidate, existing)) byId.set(hit.id, candidate);
+    // Raw ids: records whose ids differ only by a protected link share a
+    // redacted id and must both survive.
+    const existing = byId.get(hit.rawId);
+    if (!existing || preferHit(candidate, existing)) byId.set(hit.rawId, candidate);
   }
   return [...byId.values()];
 }
@@ -295,16 +301,25 @@ async function validatePineconeProject(
   });
 }
 
-function parseHits(
+/**
+ * Exported for the protected-link surface test; every formatter and the rerank
+ * input read these hits. Both the integrated-index and the vector branch build
+ * their hits here.
+ */
+export function parseHits(
   rawHits: Array<{ _id: string; _score: number; fields?: object | null }>,
+  defaultEntityType = 'unknown',
 ): ParsedHit[] {
   return rawHits.map((hit) => {
-    const fields = (hit.fields ?? {}) as Record<string, unknown>;
+    // Stored record text (text, summary, filepath and the id used as a source)
+    // reaches the caller and the external rerank input, so redact it once here.
+    const fields = sanitizeProtectedToolResult(hit.fields ?? {}) as Record<string, unknown>;
     return {
-      id: hit._id,
+      rawId: hit._id,
+      id: sanitizeProtectedMessageText(hit._id),
       score: hit._score,
       text: (fields['text'] as string) ?? '',
-      entityType: (fields['entity_type'] as string) ?? 'unknown',
+      entityType: (fields['entity_type'] as string) ?? defaultEntityType,
       fields,
     };
   });
@@ -314,7 +329,7 @@ function parseHits(
  * Format entity results grouped by type. Output is plain text suitable for
  * WhatsApp relay — no markdown tables or complex formatting.
  */
-function formatEntityResults(hits: ParsedHit[]): string {
+export function formatEntityResults(hits: ParsedHit[]): string {
   if (hits.length === 0) return 'No results found.';
 
   // Group by entity_type
@@ -339,7 +354,7 @@ function formatEntityResults(hits: ParsedHit[]): string {
 /**
  * Format text/document results. Each result shows source and a preview.
  */
-function formatTextResults(hits: ParsedHit[]): string {
+export function formatTextResults(hits: ParsedHit[]): string {
   if (hits.length === 0) return 'No results found.';
 
   return hits.map((hit) => {
@@ -622,17 +637,13 @@ export function registerKnowledgeTools(
           const responses = await Promise.all(queryPromises);
           responses.forEach((response, legIndex) => {
             if (!response || !Array.isArray(response.matches)) return;
-            for (const match of response.matches) {
-              const fields = (match.metadata ?? {}) as Record<string, unknown>;
-              hits.push({
-                id: String(match.id),
-                score: typeof match.score === 'number' ? match.score : 0,
-                text: (fields['text'] as string) ?? '',
-                entityType: (fields['entity_type'] as string) ?? 'document',
-                fields,
-                namespace: legs[legIndex]!.namespace,
-              });
-            }
+            const namespace = legs[legIndex]!.namespace;
+            const parsed = parseHits(response.matches.map((match) => ({
+              _id: String(match.id),
+              _score: typeof match.score === 'number' ? match.score : 0,
+              fields: match.metadata ?? {},
+            })), 'document');
+            hits.push(...parsed.map((hit) => ({ ...hit, namespace })));
           });
         } else {
           // Integrated-index branch: Pinecone-hosted embedding via searchRecords.
@@ -675,10 +686,12 @@ export function registerKnowledgeTools(
             const rerankResult = await pc.inference.rerank({
               model: profile.rerankModel,
               query,
-              documents: ranked.map((h) => ({
+              // An external request: the hits are already redacted, and the
+              // documents are scanned again where they leave.
+              documents: sanitizeProtectedToolResult(ranked.map((h) => ({
                 id: h.id,
                 text: truncateForRerank(h.text),
-              })),
+              }))) as Array<{ id: string; text: string }>,
               topN: ranked.length,
               rankFields: ['text'],
               returnDocuments: false,

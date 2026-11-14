@@ -6,8 +6,29 @@ import { queryAll, queryOne } from '../lib/db-query.ts';
 import { createChildLogger } from '../logger.ts';
 import { MS_PER_HOUR } from '../lib/time-units.ts';
 import { systemClock, type Clock } from '../lib/clock.ts';
+import { sanitizeProtectedMessageText, sanitizeProtectedMessageValue } from '../core/protected-message.ts';
 
 const log = createChildLogger('fleet:db-reader');
+
+// Stored rows can predate ingress redaction (or come from an older deployed
+// build), so every outward message projection of this reader redacts here.
+// The fleet data routes and the feed read message rows only through it.
+function redactText(value: string | null): string | null {
+  return value === null ? null : sanitizeProtectedMessageText(value);
+}
+
+function redactMessageRow<T extends { sender_name: string | null; content: string | null; raw_message?: string | null }>(
+  row: T,
+): T {
+  return {
+    ...row,
+    sender_name: redactText(row.sender_name),
+    content: redactText(row.content),
+    // raw_message is stored JSON text; `"` and `\` end a link's fragment, so a
+    // text-level redaction keeps the JSON valid.
+    ...(row.raw_message === undefined ? {} : { raw_message: redactText(row.raw_message) }),
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -290,7 +311,7 @@ export class FleetDbReader {
 
       return rows.map((r) => ({
         conversationKey: r.conversation_key,
-        senderName: r.sender_name,
+        senderName: redactText(r.sender_name),
         messageCount: r.message_count,
         lastMessageAt: r.last_message_at,
         isGroup: !!r.is_group,
@@ -363,7 +384,7 @@ export class FleetDbReader {
           )
         ORDER BY m.pk DESC
         LIMIT ?
-      `, ...params);
+      `, ...params).map(redactMessageRow);
     });
   }
 
@@ -380,7 +401,7 @@ export class FleetDbReader {
         subjectType: r.subject_type,
         subjectId: r.subject_id,
         status: r.status,
-        displayName: r.display_name,
+        displayName: redactText(r.display_name),
         requestedAt: r.requested_at,
         decidedAt: r.decided_at,
       }));
@@ -415,11 +436,14 @@ export class FleetDbReader {
       for (const row of rows) {
         try {
           const p = JSON.parse(row.payload) as Record<string, unknown>;
+          // Question text, option labels and descriptions, and collected answers
+          // are stored free text. A label that held a link reaches the console
+          // as the marker, so a console decision returns the marker as its answer.
           const questions = (p.questions as Array<Record<string, unknown>>).map((q) => ({
-            question: String(q.question ?? ''),
+            question: sanitizeProtectedMessageText(String(q.question ?? '')),
             options: ((q.options as Array<Record<string, unknown>>) ?? []).map((o) => ({
-              label: String(o.label ?? ''),
-              description: String(o.description ?? ''),
+              label: sanitizeProtectedMessageText(String(o.label ?? '')),
+              description: sanitizeProtectedMessageText(String(o.description ?? '')),
             })),
             multiSelect: Boolean(q.multiSelect),
           }));
@@ -430,7 +454,7 @@ export class FleetDbReader {
             source: p.source === 'send_poll' ? 'send_poll' : 'askuser',
             questions,
             currentQuestionIndex: Number(p.currentQuestionIndex ?? 0),
-            answersCollected: (p.answersCollected ?? {}) as Record<number, string>,
+            answersCollected: sanitizeProtectedMessageValue(p.answersCollected ?? {}) as Record<number, string>,
             createdAt: Number(p.createdAt ?? 0),
             timeoutMs: Number(p.timeoutMs ?? 0),
             hardClosesAt: row.hard_closes_at,
@@ -463,7 +487,7 @@ export class FleetDbReader {
             AND m.conversation_key = ?
           ORDER BY m.timestamp DESC
           LIMIT ?
-        `, matchQuery, opts.conversationKey, opts.limit);
+        `, matchQuery, opts.conversationKey, opts.limit).map(redactMessageRow);
       }
       return queryAll<MessageRow>(db, `
         SELECT m.pk, m.conversation_key, m.chat_jid, m.sender_jid, m.sender_name,
@@ -474,7 +498,7 @@ export class FleetDbReader {
           AND m.deleted_at IS NULL
         ORDER BY m.timestamp DESC
         LIMIT ?
-      `, matchQuery, opts.limit);
+      `, matchQuery, opts.limit).map(redactMessageRow);
     });
   }
 
@@ -757,7 +781,7 @@ export class FleetDbReader {
         FROM messages
         WHERE message_id IN (${placeholders})
           AND deleted_at IS NULL
-      `, ...messageIds);
+      `, ...messageIds).map(redactMessageRow);
     });
   }
 
@@ -785,7 +809,7 @@ export class FleetDbReader {
         conversationKey, isFromMe,
         aroundTimestamp - windowSec, aroundTimestamp + windowSec,
         aroundTimestamp, limit,
-      );
+      ).map(redactMessageRow);
     });
   }
 

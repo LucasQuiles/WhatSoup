@@ -6,6 +6,7 @@ import type { Database } from './database.ts';
 import type { SubmissionReceipt, OutboundMedia } from './types.ts';
 import { nextCronRun } from './cron.ts';
 import { decodeScheduledPayload, payloadUndecodableReason } from './scheduled-payload.ts';
+import { hasProtectedManagedLink } from './protected-message.ts';
 import { type Clock, systemClock } from '../lib/clock.ts';
 import { errorMessage } from '../lib/error-message.ts';
 import { confineAlertContent } from '../lib/alert-evidence.ts';
@@ -120,6 +121,25 @@ export class ScheduledPayloadError extends Error {
 }
 
 /**
+ * A scheduled row whose stored payload holds a protected link.
+ *
+ * A protected link leaves only through protected delivery, which binds it to
+ * one direct recipient. A scheduled send would re-send the stored body to any
+ * chat later, so it is refused, as forward_message refuses a stored message
+ * that holds one, rather than sent with the link silently replaced. Like an
+ * undecodable payload it is a property of the row: no retry or later
+ * occurrence can change it.
+ */
+export class ScheduledProtectedLinkRefusal extends Error {
+  static readonly REASON = 'protected_link_send_refused';
+
+  constructor() {
+    super(`scheduled send refused: ${ScheduledProtectedLinkRefusal.REASON}`);
+    this.name = 'ScheduledProtectedLinkRefusal';
+  }
+}
+
+/**
  * A scheduled send that has reached a TERMINAL disposition (#2387).
  *
  * The row is written `failed` and leaves the due query forever, so the operator
@@ -130,6 +150,7 @@ export class ScheduledPayloadError extends Error {
  */
 type TerminalSendFailure =
   | { kind: 'payload_undecodable'; scheduledId: number; error: string; recurring: boolean }
+  | { kind: 'protected_link_refused'; scheduledId: number; error: string; recurring: boolean }
   | { kind: 'retry_exhausted'; scheduledId: number; error: string; attempts: number };
 
 /**
@@ -154,6 +175,20 @@ function terminalSendAlertText(
   instance: string,
   failure: TerminalSendFailure,
 ): { summary: string; evidence: string } {
+  if (failure.kind === 'protected_link_refused') {
+    return {
+      summary:
+        `whatsoup@${instance} refused a scheduled send (id ${failure.scheduledId}) — `
+        + `stored text holds a protected link, message DROPPED: ${failure.error}`,
+      evidence: [
+        `scheduledId=${failure.scheduledId}`,
+        `recurring=${failure.recurring}`,
+        `error=${failure.error}`,
+        'A protected link leaves only through protected delivery to its bound recipient, so a scheduled send that holds one is refused on its first occurrence. '
+        + 'If the message is still wanted, schedule a new one without the link.',
+      ].join('\n'),
+    };
+  }
   if (failure.kind === 'payload_undecodable') {
     return {
       summary:
@@ -292,8 +327,9 @@ function parseTerminalSendFailure(raw: Record<string, unknown>): TerminalSendFai
   if (typeof scheduledId !== 'number' || typeof error !== 'string') return null;
 
   const recurring = raw['recurring'];
-  if (raw['kind'] === 'payload_undecodable' && typeof recurring === 'boolean') {
-    return { kind: 'payload_undecodable', scheduledId, error, recurring };
+  const kind = raw['kind'];
+  if ((kind === 'payload_undecodable' || kind === 'protected_link_refused') && typeof recurring === 'boolean') {
+    return { kind, scheduledId, error, recurring };
   }
   const attempts = raw['attempts'];
   if (raw['kind'] === 'retry_exhausted' && typeof attempts === 'number') {
@@ -1023,8 +1059,10 @@ export class MessageScheduler {
     // This applies to recurring rows too. The recurrence-preservation path
     // below deliberately refuses to destroy a schedule over transient
     // per-occurrence failures — but a corrupt payload is not transient, and
-    // advancing to the next slot would re-fail forever rather than heal.
-    if (err instanceof ScheduledPayloadError) {
+    // advancing to the next slot would re-fail forever rather than heal. A
+    // protected-link refusal is permanent for the same reason.
+    const refused = err instanceof ScheduledProtectedLinkRefusal;
+    if (refused || err instanceof ScheduledPayloadError) {
       this.db.raw
         .prepare(
           `UPDATE scheduled_messages
@@ -1033,11 +1071,18 @@ export class MessageScheduler {
         )
         .run(row.retry_count, errorMsg, row.id);
       log.error(
-        { event: 'scheduler_payload_undecodable', id: row.id, recurring: row.recurrence !== null, err },
-        'scheduler: scheduled payload is undecodable; dead-lettered without retry',
+        {
+          event: refused ? 'scheduler_protected_link_refused' : 'scheduler_payload_undecodable',
+          id: row.id,
+          recurring: row.recurrence !== null,
+          err,
+        },
+        refused
+          ? 'scheduler: scheduled payload holds a protected link; refused without retry'
+          : 'scheduler: scheduled payload is undecodable; dead-lettered without retry',
       );
       this.emitTerminalSendAlert({
-        kind: 'payload_undecodable',
+        kind: refused ? 'protected_link_refused' : 'payload_undecodable',
         scheduledId: row.id,
         error: errorMsg,
         recurring: row.recurrence !== null,
@@ -1143,6 +1188,8 @@ export class MessageScheduler {
       const reason = payloadUndecodableReason(verdict.shape);
       throw new ScheduledPayloadError(verdict.parseError === undefined ? reason : `${reason}: ${verdict.parseError}`);
     }
+    // Checked on the validated send, the exact value the transport would get.
+    if (hasProtectedManagedLink(verdict.send)) throw new ScheduledProtectedLinkRefusal();
 
     if (verdict.send.kind === 'text') {
       await this.connection.sendRaw(row.chat_jid, verdict.send.content);

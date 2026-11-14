@@ -54,6 +54,7 @@ import {
 import { TERMINAL, countOverdueProposals } from './beads.ts';
 import { writeBeadEvent } from './events.ts';
 import { nextCronRun } from '../cron.ts';
+import { sanitizeProtectedMessageText } from '../protected-message.ts';
 import type { BeadStatus, TriggerKind, TriggerRow } from './types.ts';
 import type { Messenger } from '../types.ts';
 import { createChildLogger } from '../../logger.ts';
@@ -1578,7 +1579,10 @@ export class TriggerPoller {
       }
       throw err;
     }
-    const prompt = bead.body?.trim();
+    // The stored title and body become a synthetic agent turn, and either can
+    // predate ingress redaction, so both are redacted after the budget check.
+    const prompt = bead.body === null ? undefined : sanitizeProtectedMessageText(bead.body).trim();
+    const title = sanitizeProtectedMessageText(bead.title);
     if (!prompt) {
       return {
         status: 'failed', fired: true,
@@ -1601,7 +1605,7 @@ export class TriggerPoller {
     try {
       const result = this.agentJobDispatch({
         beadId: t.bead_id, triggerId: t.id, occurrenceId,
-        prompt, title: bead.title, reportChatJid: t.report_chat_jid,
+        prompt, title, reportChatJid: t.report_chat_jid,
       });
       if (result === null || typeof result !== 'object' || Array.isArray(result)) {
         throw new TypeError('invalid agent job dispatcher result');
@@ -1793,7 +1797,8 @@ export class TriggerPoller {
       const result = await this.pineconeSearch({
         index: spec.index,
         namespace: spec.namespace,
-        query: spec.query,
+        // The watch query is stored text sent to an external search service.
+        query: sanitizeProtectedMessageText(spec.query),
         topK: spec.top_k ?? PINECONE_DEFAULT_TOP_K,
       });
       matches = Array.isArray(result.matches) ? result.matches : [];

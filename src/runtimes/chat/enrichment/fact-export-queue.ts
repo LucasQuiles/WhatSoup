@@ -4,6 +4,7 @@ import { createChildLogger } from '../../../logger.ts';
 import { config } from '../../../config.ts';
 import type { Database } from '../../../core/database.ts';
 import { deriveFactUid, getFactUidSalt } from '../../../core/fact-uid.ts';
+import { sanitizeProtectedMessageValue } from '../../../core/protected-message.ts';
 import type { ValidatedFact } from './validator.ts';
 
 const log = createChildLogger('enrichment');
@@ -348,7 +349,11 @@ export function leasePendingFacts(db: Database, opts: LeaseOptions): LeasedFact[
       chatJid: row.chat_jid,
       senderJid: row.sender_jid,
       namespace: row.namespace,
-      payload: validated.data as LeasedFact['payload'],
+      // The bridge writes the payload to an external store. A row queued before
+      // ingress redaction (or by an older build) can still hold a protected
+      // link, so every string field is redacted here. The bridge keys acks and
+      // remote records on factUid, which the payload text does not change.
+      payload: sanitizeProtectedMessageValue(validated.data) as LeasedFact['payload'],
       createdAt: row.created_at,
       attemptCount: row.attempt_count,
     });

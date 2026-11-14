@@ -22,7 +22,10 @@
 // PROVIDER_IDS is the single source of truth for agentOptions.provider —
 // see src/runtimes/agent/providers/index.ts and issue #447.
 import { homedir } from 'node:os';
-import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
+import {
+  providerUsesManagedLoop,
+  PROVIDER_IDS,
+} from '../runtimes/agent/providers/index.ts';
 import { PROVIDER_API_KEY_SERVICES, SERVICE_ENV_MAP, isKeylessOpenCodeRoute, resolveProviderKeyService } from '../lib/provider-key-service.ts';
 import { isNonEmptyString, isRecord } from '../lib/type-guards.ts';
 import { validateLaunchdServiceConfig } from '../lib/launchd-service-config.ts';
@@ -64,6 +67,7 @@ import {
   validateTransportAuthorityConfig,
 } from './transport-authority-config-validation.ts';
 import { validateSignalConfig } from './signal-config-validation.ts';
+import { validateProtectedDeliveryBinding } from './protected-delivery-config.ts';
 
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
 export const ACCESS_MODES = [
@@ -780,7 +784,6 @@ function opencodeModelPrefixResolvesToService(model: unknown): boolean {
   return service !== null && PROVIDER_API_KEY_SERVICES.has(service) && Boolean(SERVICE_ENV_MAP[service]);
 }
 
-
 function validateAgentOptions(
   raw: Record<string, unknown>,
   ctx: ValidatorContext,
@@ -1297,6 +1300,9 @@ function validateAgentOptions(
       `agentOptions.fallbackProvider "opencode-cli" model ${JSON.stringify(opts['fallbackModel'])} does not resolve to a mapped provider credential service — use a "<provider>/<model>" id whose provider prefix is a known service (e.g. "minimax/...", "xai/...", "anthropic/...")`,
     );
   }
+
+  const protectedDeliveryError = validateProtectedDeliveryBinding(opts, providerUsesManagedLoop);
+  if (protectedDeliveryError) return err('agentOptions.protectedDelivery', protectedDeliveryError);
 
   // providerConfig: plain object when present.
   if (opts['providerConfig'] !== undefined) {

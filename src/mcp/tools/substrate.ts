@@ -7,6 +7,7 @@ import { z } from 'zod';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Database } from '../../core/database.ts';
 import { createChildLogger } from '../../logger.ts';
+import { sanitizeProtectedToolResult } from '../../core/protected-message.ts';
 import type { ToolRegistry } from '../registry.ts';
 import type { SessionContext } from '../types.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
@@ -32,6 +33,13 @@ import { regenerateVault, projectBead, projectEntity, removeEntityProjection } f
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 const log = createChildLogger('mcp:substrate');
+
+// Bead titles, bodies, metadata and event payloads are stored free text that
+// can predate ingress redaction, so the read tools redact each row. Rows are
+// redacted one at a time so a long list never reaches the sanitizer's bound.
+function redactStoredRow<T>(row: T): T {
+  return sanitizeProtectedToolResult(row) as T;
+}
 
 export interface SubstrateDeps {
   db: DatabaseSync;
@@ -451,7 +459,7 @@ export function registerSubstrateTools(
         ownerJid: p.owner_jid, kind: p.kind, status: p.status, chatJid: p.chat_jid,
         dueBefore: p.due_before, since: p.since, limit: p.limit,
         reviewOverdue: p.review_overdue,
-      }) };
+      }).map(redactStoredRow) };
     },
   });
 
@@ -469,7 +477,7 @@ export function registerSubstrateTools(
       const p = raw as { owner_jid?: string; since?: number; limit?: number };
       return { activity: activityFeed(deps.db, {
         ownerJid: p.owner_jid, since: p.since, limit: p.limit,
-      }) };
+      }).map(redactStoredRow) };
     },
   });
 
@@ -483,7 +491,7 @@ export function registerSubstrateTools(
       const p = raw as { id: number };
       const r = getBead(deps.db, p.id);
       if (!r) return { bead: null };
-      return { bead: r.bead, events: r.events };
+      return { bead: redactStoredRow(r.bead), events: r.events.map(redactStoredRow) };
     },
   });
 
@@ -593,9 +601,10 @@ export function registerSubstrateTools(
     handler: async (raw) => {
       const p = raw as { bead_id?: number; kind?: string; status?: 'active'|'paused'|'expired'|'cancelled'; limit?: number; after_id?: number };
       const filter = { beadId: p.bead_id, kind: p.kind as TriggerKind | undefined, status: p.status };
-      return p.limit === undefined && p.after_id === undefined
+      // spec_json is stored text (a watch query or URL) and can hold a protected link.
+      return sanitizeProtectedToolResult(p.limit === undefined && p.after_id === undefined
         ? { triggers: listTriggers(deps.db, filter), next_after_id: null }
-        : listTriggersPage(deps.db, { ...filter, limit: p.limit, afterId: p.after_id });
+        : listTriggersPage(deps.db, { ...filter, limit: p.limit, afterId: p.after_id }));
     },
   });
 
@@ -700,7 +709,8 @@ export function registerSubstrateTools(
       const p = raw as { entity_ref: z.infer<typeof EntityRefSchema> };
       const profile = getProfile(deps.db, toEntityRef(p.entity_ref));
       if (!profile) return { profile: null };
-      return profile;
+      // Entity names, aliases and observations are stored text.
+      return sanitizeProtectedToolResult(profile);
     },
   });
 
@@ -716,7 +726,9 @@ export function registerSubstrateTools(
     }),
     handler: async (raw) => {
       const p = raw as { kind?: 'person'|'org'|'project'|'place'|'topic'|'other'; text_match?: string; limit?: number };
-      return { entities: listEntities(deps.db, { kind: p.kind, textMatch: p.text_match, limit: p.limit }) };
+      return sanitizeProtectedToolResult({
+        entities: listEntities(deps.db, { kind: p.kind, textMatch: p.text_match, limit: p.limit }),
+      });
     },
   });
 

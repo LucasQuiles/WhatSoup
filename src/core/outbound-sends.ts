@@ -220,6 +220,11 @@ const TERMINAL_RETENTION_PREDICATE = `
     'submitted', 'confirmed', 'failed_not_sent',
     'ambiguous', 'legacy_unclassified'
   )
+  AND id NOT IN (
+    SELECT outbound_send_id
+    FROM protected_deliveries
+    WHERE outbound_send_id IS NOT NULL
+  )
   AND (
     COALESCE(completed_at, created_at) < datetime('now', ?)
     OR id IN (
@@ -228,6 +233,11 @@ const TERMINAL_RETENTION_PREDICATE = `
       WHERE outcome_code IN (
         'submitted', 'confirmed', 'failed_not_sent',
         'ambiguous', 'legacy_unclassified'
+      )
+      AND id NOT IN (
+        SELECT outbound_send_id
+        FROM protected_deliveries
+        WHERE outbound_send_id IS NOT NULL
       )
       ORDER BY COALESCE(completed_at, created_at) DESC, id DESC
       LIMIT -1 OFFSET ?

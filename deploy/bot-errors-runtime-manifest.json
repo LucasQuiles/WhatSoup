@@ -529,7 +529,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_redaction.py",
-      "sha256": "49820d24b454f565c172d1ceac867baf679fa4eff569e4fbdc312a50a62ee16b",
+      "sha256": "7392929f3a045fbb1dd5f21ff79c24a335bb6f700c68e9523a578c9339453501",
       "mustContain": [
         "redact_bot_errors_text",
         "CREDENTIAL_PATH_RE",
@@ -869,7 +869,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "6db4002c918fce9603b076f30d8862173576985e9ef0d2b1ed1028193384f500",
+      "sha256": "4ac740104260dcf208070f714e4f35f7b45680ebba2c32b607abd3ccc2ffb0ad",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",

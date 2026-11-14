@@ -56,6 +56,8 @@ import { waitForHistorySyncThenRecover } from './core/post-connect-recovery.ts';
 import { seedChatAliases } from './core/chats-resolver.ts';
 import { createProfileRegistry } from './core/profiles.ts';
 import { createOutboundSendsWriter } from './core/outbound-sends.ts';
+import { HttpManagedDeliveryClient } from './core/managed-delivery-client.ts';
+import { ProtectedDeliveryService } from './core/protected-delivery.ts';
 import { SqliteIdentityStore } from './core/outbound-identity/store.ts';
 import { handleContactsUpsert, handleContactsUpdate } from './core/contacts-sync.ts';
 import {
@@ -484,6 +486,19 @@ if (config.transportAuthority?.enabled) {
   installAuthority.call(connectionManager, authority);
 }
 
+// Protected delivery remains absent unless an agent instance supplies the
+// explicit runtime-only credential configuration. The service resolves and
+// sends its secret URL directly through the transport; it never enters the
+// generic outbound queue or model-visible configuration.
+const protectedDeliveryService = instanceType !== 'agent' || config.protectedDelivery === null
+  ? null
+  : new ProtectedDeliveryService({
+      db: db.raw,
+      client: new HttpManagedDeliveryClient(config.protectedDelivery),
+      messenger: connectionManager,
+      auditWriter: outboundSendsWriter,
+    });
+
 // 5. Runtime — selected by instance type
 let runtime: Runtime;
 let chatRuntime: ChatRuntime | null = null;
@@ -554,6 +569,7 @@ if (instanceType === 'agent') {
     // The memory guidance prompt block needs memory usable; this startup
     // observation says whether it was ready or failed only transiently.
     memoryReadiness: pineconeReadiness,
+    protectedDeliveryService: protectedDeliveryService ?? undefined,
     // Composition root owns the fleet/systemd binding; inject it so the runtimes
     // layer (which cannot import fleet) can offer the restart_self tool.
     serviceRestarter: createServiceManager(),
@@ -776,6 +792,15 @@ connectionManager.on('receiptUpdate', (data) => {
     handleReceipt(db, data);
   } catch (err) {
     log.error({ err }, 'receiptUpdate: failed to persist receipt');
+  }
+  if (protectedDeliveryService !== null) {
+    void protectedDeliveryService.recordReceipt({
+      whatsappMessageId: data.messageId,
+      recipientJid: data.recipientJid,
+      type: data.type,
+    }).catch((err) => {
+      log.error({ err, messageId: data.messageId, recipientJid: data.recipientJid }, 'receiptUpdate: protected delivery reconciliation failed');
+    });
   }
 });
 
@@ -1107,6 +1132,47 @@ const healthServer = startHealthServer({
 // 8. ffmpeg check
 if (!resolveBinaryPath('ffmpeg')) log.warn('ffmpeg not found — video processing will fail');
 
+const PROTECTED_DELIVERY_MAINTENANCE_INTERVAL_MS = 5_000;
+let protectedDeliveryMaintenanceInFlight = false;
+const runProtectedDeliveryMaintenance = (): void => {
+  if (
+    protectedDeliveryService === null
+    || protectedDeliveryMaintenanceInFlight
+    || !strictStartupConnectionReady()
+  ) return;
+
+  protectedDeliveryMaintenanceInFlight = true;
+  void (async () => {
+    try {
+      await protectedDeliveryService.recoverPendingDeliveries();
+    } catch (err) {
+      log.error({ err }, 'protected delivery recovery failed');
+    }
+    try {
+      const flush = await protectedDeliveryService.flushPendingEvents();
+      if (flush.failed) {
+        log.warn(
+          { relayed: flush.relayed, pending: flush.pending, failed: flush.failed },
+          'protected delivery event relay deferred',
+        );
+      }
+    } catch (err) {
+      log.error({ err }, 'protected delivery event flush failed');
+    } finally {
+      protectedDeliveryMaintenanceInFlight = false;
+    }
+  })();
+};
+// Recovery resumes only existing short-window rows after the transport is
+// ready. connect() returns before the transport reports open, so the short
+// interval revisits that readiness gate inside the 60-second retry window.
+// One in-flight loop prevents a slow managed API call from overlapping a later
+// pass; durable rows remain pending for that later pass.
+const protectedDeliveryMaintenanceInterval = protectedDeliveryService === null
+  ? null
+  : setInterval(runProtectedDeliveryMaintenance, PROTECTED_DELIVERY_MAINTENANCE_INTERVAL_MS);
+protectedDeliveryMaintenanceInterval?.unref();
+
 // 9. (#1445 QR-012) Messages/receipts retention no longer runs its own
 // standalone startup timeout — it is folded into the unified
 // `databaseRetentionTimer` sweep below (item 12a), which already performs an
@@ -1305,6 +1371,7 @@ async function start(): Promise<void> {
   // runtime.start() starts enrichment poller internally
   await runtime.start();
   await connectionManager.connect();
+  runProtectedDeliveryMaintenance();
 
   // Wait for history sync or timeout, then allow echo grace before recovery so
   // echoes from inflight messages can arrive.
@@ -1418,6 +1485,7 @@ async function shutdown(signal: string): Promise<void> {
         { name: 'metrics-backfill-timeout', stop: () => clearTimeout(metricsBackfillTimeout) },
         { name: 'metrics-interval', stop: () => clearInterval(metricsInterval) },
         { name: 'retention-interval', stop: () => clearInterval(retentionInterval) },
+        { name: 'protected-delivery-maintenance-interval', stop: () => { if (protectedDeliveryMaintenanceInterval) clearInterval(protectedDeliveryMaintenanceInterval); } },
         { name: 'media-retention-timer', stop: () => mediaRetentionTimer.stop() },
         { name: 'process-tmp-retention-timer', stop: () => processTmpRetentionTimer.stop() },
         { name: 'database-retention-timer', stop: () => databaseRetentionTimer.stop() },

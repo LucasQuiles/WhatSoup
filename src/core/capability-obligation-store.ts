@@ -20,6 +20,19 @@
 import { canonicalDependencyVersions } from './capability-attestation.ts';
 import type { Database } from './database.ts';
 import { withTransaction } from './db-tx.ts';
+import { sanitizeProtectedMessageText } from './protected-message.ts';
+
+/**
+ * Due rows feed the replayed provider turn, and rows can predate ingress
+ * redaction. Names and replay text are redacted on that outward copy only:
+ * creation deduplicates on (source_inbound_seq, source_message_id,
+ * contract_version, required_capability), never on text. The source token is
+ * not redacted here, because execution checks its sha256 against
+ * source_digest.
+ */
+function redactedOrNull(value: unknown): string | null {
+  return typeof value === 'string' ? sanitizeProtectedMessageText(value) : null;
+}
 
 /** D7 bounded retry: total claim attempts before an obligation exhausts. */
 export const CAPABILITY_OBLIGATION_MAX_ATTEMPTS = 5;
@@ -359,10 +372,10 @@ export class CapabilityObligationStore {
       conversationKey: r.conversation_key as string,
       deliveryJid: r.delivery_jid as string,
       senderJid: r.sender_jid as string,
-      senderName: (r.sender_name as string | null) ?? null,
+      senderName: redactedOrNull(r.sender_name),
       isGroup: (r.is_group as number) === 1,
-      groupName: (r.group_name as string | null) ?? null,
-      replayText: r.replay_text as string,
+      groupName: redactedOrNull(r.group_name),
+      replayText: sanitizeProtectedMessageText(r.replay_text as string),
       contentTypeHint: (r.content_type_hint as string | null) ?? null,
       contractVersion: r.contract_version as string,
       requiredCapability: r.required_capability as string,
@@ -423,10 +436,10 @@ export class CapabilityObligationStore {
         conversationKey: row.conversation_key as string,
         deliveryJid: row.delivery_jid as string,
         senderJid: row.sender_jid as string,
-        senderName: (row.sender_name as string | null) ?? null,
+        senderName: redactedOrNull(row.sender_name),
         isGroup: (row.is_group as number) === 1,
-        groupName: (row.group_name as string | null) ?? null,
-        replayText: row.replay_text as string,
+        groupName: redactedOrNull(row.group_name),
+        replayText: sanitizeProtectedMessageText(row.replay_text as string),
         contentTypeHint: (row.content_type_hint as string | null) ?? null,
         contractVersion: row.contract_version as string,
         requiredCapability: row.required_capability as string,
@@ -751,6 +764,8 @@ export class CapabilityObligationStore {
       )
       .get(id) as Record<string, unknown> | undefined;
     if (obligation === undefined) return null;
+    // Display only: the operator view never feeds the source digest check.
+    obligation.source_token = redactedOrNull(obligation.source_token);
     // The creation event is appended BEFORE the obligation row exists (its id
     // becomes creation_evidence_event_id), so it carries obligation_id = NULL;
     // include it via that back-reference for a complete operator history.
@@ -871,6 +886,33 @@ export class CapabilityObligationStore {
       if (row === undefined) return { applied: false };
       this.appendEventWithinCallerTransaction(
         { action: 'obligation.block', actorType: 'supervisor', reasonCode },
+        id,
+      );
+      return { applied: true };
+    });
+  }
+
+  /**
+   * Terminal supervisor refusal of a due obligation BEFORE any claim. It moves
+   * waiting_capability to cancelled, the one terminal state reachable without a
+   * claim, so no attempt is consumed and an operator cannot re-arm it. Only the
+   * lifecycle changes: the identity trigger keeps source_token and
+   * source_digest as stored.
+   */
+  refuseWaitingObligation(id: number, reasonCode: string): { applied: boolean } {
+    return withTransaction(this.db, () => {
+      const row = this.db.raw
+        .prepare(
+          `UPDATE capability_obligations
+           SET state = 'cancelled', claim_token = NULL, claim_expires_at = NULL,
+               updated_at = datetime('now')
+           WHERE id = ? AND state = 'waiting_capability'
+           RETURNING id`,
+        )
+        .get(id);
+      if (row === undefined) return { applied: false };
+      this.appendEventWithinCallerTransaction(
+        { action: 'obligation.cancel', actorType: 'supervisor', reasonCode },
         id,
       );
       return { applied: true };

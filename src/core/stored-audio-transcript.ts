@@ -12,6 +12,7 @@ import type { Database } from './database.ts';
 import { downloadMedia, writeTempFile } from './media-download.ts';
 import { extractRawMime } from './media-mime.ts';
 import { updateMediaPath, updateTranscription } from './messages.ts';
+import { sanitizeProtectedMessageText } from './protected-message.ts';
 import { errorMessage } from '../lib/error-message.ts';
 import { isUsableTranscript as usable, storedAudioTranscript } from './audio-transcript-content.ts';
 
@@ -41,8 +42,9 @@ export async function ensureStoredAudioTranscript(
   row: StoredAudioRow,
   transcribe: AudioTranscriber,
 ): Promise<StoredAudioTranscriptResult> {
+  // A cached transcript is stored row text and can predate ingress redaction.
   const cached = storedAudioTranscript(row);
-  if (cached !== null) return { status: 'cached', transcription: cached };
+  if (cached !== null) return { status: 'cached', transcription: sanitizeProtectedMessageText(cached) };
 
   let audioBuffer: Buffer | null = null;
   let audioMime = 'audio/ogg';
@@ -97,6 +99,9 @@ export async function ensureStoredAudioTranscript(
     return { status: 'transcription_failed', message: 'Transcription failed or is unavailable.' };
   }
 
-  updateTranscription(db, row.message_id, transcription);
-  return { status: 'transcribed', transcription };
+  // Stored and returned in the same redacted form, so the first response is as
+  // safe as every later cached read.
+  const safeTranscription = sanitizeProtectedMessageText(transcription);
+  updateTranscription(db, row.message_id, safeTranscription);
+  return { status: 'transcribed', transcription: safeTranscription };
 }

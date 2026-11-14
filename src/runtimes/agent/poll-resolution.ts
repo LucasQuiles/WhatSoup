@@ -11,6 +11,16 @@
  */
 import { config } from '../../config.ts';
 import { redactInternalArtifacts, type OutboundAudience } from '../../core/outbound-message-safety.ts';
+import { sanitizeProtectedMessageText } from '../../core/protected-message.ts';
+
+/**
+ * Poll text bound for WhatsApp or the provider: protected links first (the
+ * artifact redactor may rewrite the URL so the link scan no longer matches),
+ * then audience-scoped internal-artifact redaction.
+ */
+function pollSafeText(text: string, audience: OutboundAudience): string {
+  return redactInternalArtifacts(sanitizeProtectedMessageText(text), audience).text;
+}
 
 // ---------------------------------------------------------------------------
 // AskUserQuestion → Poll formatting
@@ -259,10 +269,10 @@ export function formatPollQuestion(q: {
   // keep coordination vocabulary and only have secrets/emails masked. No-op on
   // benign content.
   q = {
-    question: redactInternalArtifacts(q.question, audience).text,
+    question: pollSafeText(q.question, audience),
     options: q.options.map((o) => ({
-      label: redactInternalArtifacts(o.label, audience).text,
-      description: redactInternalArtifacts(o.description, audience).text,
+      label: pollSafeText(o.label, audience),
+      description: pollSafeText(o.description, audience),
     })),
   };
 
@@ -451,10 +461,10 @@ export function formatTextFallbackQuestion(
   // audience-scoped (internal groups keep vocabulary, secrets/emails still masked).
   q = {
     ...q,
-    question: redactInternalArtifacts(q.question, audience).text,
+    question: pollSafeText(q.question, audience),
     options: q.options.map((o) => ({
-      label: redactInternalArtifacts(o.label, audience).text,
-      description: redactInternalArtifacts(o.description, audience).text,
+      label: pollSafeText(o.label, audience),
+      description: pollSafeText(o.description, audience),
     })),
   };
   const optionLines = q.options.map((option, index) => {
@@ -477,7 +487,8 @@ export function formatOtherDirective(q: AskUserQuestion, selectedOptions: string
     .filter((option) => !isOtherOptionLabel(option.label))
     .map((option, index) => formatOptionLine(option, index));
 
-  return [
+  // A provider turn built from stored poll text.
+  return sanitizeProtectedMessageText([
     '[User selected Other — none of the proposed options fit]',
     `Question requiring follow-up: ${q.question}`,
     selectedOptions.length > 0 ? `Selected option(s): ${selectedOptions.join(', ')}` : null,
@@ -485,7 +496,29 @@ export function formatOtherDirective(q: AskUserQuestion, selectedOptions: string
     ...(originalOptions.length > 0 ? originalOptions : ['(none recorded)']),
     'Directive:',
     'Ask the user what they have in mind. Explore their reasoning with 1-2 follow-up questions, then either propose a revised option or re-present the decision with the new option added.',
-  ].filter((line): line is string => line !== null).join('\n');
+  ].filter((line): line is string => line !== null).join('\n'));
+}
+
+/**
+ * The user turn that carries collected poll answers back to the provider.
+ * Questions and answers are stored text, so protected links are redacted.
+ */
+export function formatPollAnswerTurnText(
+  pending: Pick<PendingPollQuestion, 'questions' | 'answersCollected'>,
+): string {
+  const lines = ['[User answered poll]'];
+  pending.questions.forEach((q, index) => {
+    const a = pending.answersCollected[index] ?? '(no answer)';
+    lines.push(`Q: ${q.question}`);
+    if (a.includes('\n')) {
+      lines.push('A:');
+      lines.push(a);
+    } else {
+      lines.push(`A: ${a}`);
+    }
+    lines.push('');
+  });
+  return sanitizeProtectedMessageText(lines.join('\n').trim());
 }
 
 export function resolveTypedPollAnswer(text: string, q: AskUserQuestion): string {

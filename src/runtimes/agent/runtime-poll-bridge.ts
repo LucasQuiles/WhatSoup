@@ -44,6 +44,7 @@ import {
   deserializePendingPoll,
   evaluateResolution,
   evaluateResolutionOnTimeout,
+  formatPollAnswerTurnText,
   formatPollQuestion,
   formatTextFallbackQuestion,
   hasEscapeHatchOption,
@@ -1008,20 +1009,7 @@ export class RuntimePollBridgeCoordinator {
     pending: PendingPollQuestion,
     answererActorJid?: string,
   ): Promise<void> {
-    // Format the answer as structured context for Claude.
-    const lines = ['[User answered poll]'];
-    pending.questions.forEach((q, index) => {
-      const a = pending.answersCollected[index] ?? '(no answer)';
-      lines.push(`Q: ${q.question}`);
-      if (a.includes('\n')) {
-        lines.push('A:');
-        lines.push(a);
-      } else {
-        lines.push(`A: ${a}`);
-      }
-      lines.push('');
-    });
-    const answerText = lines.join('\n').trim();
+    const answerText = formatPollAnswerTurnText(pending);
 
     // A fast vote can arrive before the provider emits the terminal result for
     // the AskUser turn. Wait for that exact logical owner to finish before even

@@ -81,6 +81,10 @@ async function importMainWithMocks(options: {
   grantReconcileError?: Error;
   expectStartupFailure?: boolean;
   transportAuthority?: boolean;
+  protectedDelivery?: { baseUrl: string; token: string } | null;
+  protectedDeliveryRecovery?: () => Promise<{ resumed: number; skipped: number }>;
+  protectedDeliveryFlush?: () => Promise<{ relayed: number; pending: number; failed: boolean }>;
+  connectionState?: { connected: boolean; state: string };
 } = {}) {
   vi.resetModules();
   vi.useFakeTimers();
@@ -139,6 +143,12 @@ async function importMainWithMocks(options: {
   };
   const settingsPolicyAdapter = { read: vi.fn(), apply: vi.fn() };
   const fileGrantStore = { read: vi.fn(), write: vi.fn() };
+  const outboundSendsWriter = { writeIntent: vi.fn(), markSuccess: vi.fn(), markFailure: vi.fn() };
+  const protectedDeliveryService = {
+    recordReceipt: vi.fn(async () => false),
+    recoverPendingDeliveries: vi.fn(options.protectedDeliveryRecovery ?? (async () => ({ resumed: 0, skipped: 0 }))),
+    flushPendingEvents: vi.fn(options.protectedDeliveryFlush ?? (async () => ({ relayed: 0, pending: 0, failed: false }))),
+  };
   const durability = {
     preConnectRecovery: vi.fn(),
     postConnectRecovery: vi.fn(),
@@ -225,7 +235,10 @@ async function importMainWithMocks(options: {
           serviceUid: null,
           workerUid: null,
         },
+    protectedDelivery: options.protectedDelivery ?? null,
   };
+
+  connection.getConnectionState.mockImplementation(() => options.connectionState ?? { connected: true, state: 'connected' });
 
   const Database = vi.fn(function () {
     return db;
@@ -243,6 +256,12 @@ async function importMainWithMocks(options: {
     const runtime = runtimeStub();
     Object.assign(this, runtime);
     agentInstances.push(this);
+  });
+  const HttpManagedDeliveryClient = vi.fn(function () {
+    return { client: 'managed-delivery-client' };
+  });
+  const ProtectedDeliveryService = vi.fn(function () {
+    return protectedDeliveryService;
   });
 
   const mocks = {
@@ -266,6 +285,10 @@ async function importMainWithMocks(options: {
     ChatRuntime,
     PassiveRuntime,
     AgentRuntime,
+    HttpManagedDeliveryClient,
+    ProtectedDeliveryService,
+    protectedDeliveryService,
+    outboundSendsWriter,
     grantManager,
     settingsPolicyAdapter,
     fileGrantStore,
@@ -356,7 +379,7 @@ async function importMainWithMocks(options: {
     }),
     seedChatAliases: vi.fn(() => 1),
     createProfileRegistry: vi.fn(() => ({ profiles: ['q'] })),
-    createOutboundSendsWriter: vi.fn(() => ({ write: vi.fn() })),
+    createOutboundSendsWriter: vi.fn(() => outboundSendsWriter),
     handleContactsUpsert: vi.fn(),
     handleContactsUpdate: vi.fn(),
     handleReaction: vi.fn(),
@@ -444,6 +467,8 @@ async function importMainWithMocks(options: {
   }));
   vi.doMock('../src/runtimes/chat/runtime.ts', () => ({ ChatRuntime }));
   vi.doMock('../src/runtimes/agent/runtime.ts', () => ({ AgentRuntime }));
+  vi.doMock('../src/core/managed-delivery-client.ts', () => ({ HttpManagedDeliveryClient }));
+  vi.doMock('../src/core/protected-delivery.ts', () => ({ ProtectedDeliveryService }));
   vi.doMock('../src/runtimes/agent/handoff-artifact.ts', () => ({
     clearChatAndDeleteHandoffArtifact: mocks.clearChatAndDeleteHandoffArtifact,
     deleteMessagesAndHandoffArtifacts: mocks.deleteMessagesAndHandoffArtifacts,
@@ -626,6 +651,7 @@ describe('main bootstrap', () => {
   it('boots the default chat runtime and wires recovery, health, timers, and connection handlers', async () => {
     const h = await importMainWithMocks();
 
+    expect(h.ProtectedDeliveryService).not.toHaveBeenCalled();
     expect(h.acquireProcessLock).toHaveBeenCalledWith('/tmp/whatsoup-main.lock', { reclaimDeadSameBoot: true });
     expect(h.db.open).toHaveBeenCalledOnce();
     expect(h.seedChatAliases).toHaveBeenCalledWith(h.db.raw, h.config.chatAliases);
@@ -1130,6 +1156,148 @@ describe('main bootstrap', () => {
       h.durability,
       { replayPolicy: 'unsafe', opType: 'status_ping' },
     );
+  });
+
+  it('wires an enabled protected delivery service through agent tools, post-connect recovery, receipt recovery, and a bounded event flush', async () => {
+    const protectedDelivery = {
+      baseUrl: 'https://delivery.example.test/s/api/v1',
+      token: 'test-token',
+    };
+    const h = await importMainWithMocks({
+      instanceConfig: {
+        name: 'q',
+        type: 'agent',
+        agentOptions: { cwd: '~/testuser/LAB/WhatSoup' },
+      },
+      protectedDelivery,
+    });
+
+    expect(h.HttpManagedDeliveryClient).toHaveBeenCalledWith(protectedDelivery);
+    expect(h.ProtectedDeliveryService).toHaveBeenCalledWith({
+      db: h.db.raw,
+      client: h.HttpManagedDeliveryClient.mock.results[0]?.value,
+      messenger: h.connection,
+      auditWriter: h.outboundSendsWriter,
+    });
+    expect(h.AgentRuntime).toHaveBeenCalledWith(
+      h.db,
+      h.connection,
+      'q',
+      expect.objectContaining({ protectedDeliveryService: h.protectedDeliveryService }),
+    );
+
+    await vi.waitFor(() => expect(h.protectedDeliveryService.recoverPendingDeliveries).toHaveBeenCalledOnce());
+    expect(
+      h.protectedDeliveryService.recoverPendingDeliveries.mock.invocationCallOrder[0],
+    ).toBeGreaterThan(h.connection.connect.mock.invocationCallOrder[0]!);
+    expect(h.protectedDeliveryService.flushPendingEvents).toHaveBeenCalledOnce();
+
+    h.connection.emit('receiptUpdate', {
+      messageId: 'protected-message-id',
+      recipientJid: '15551230000@s.whatsapp.net',
+      type: 'delivery',
+    });
+    await Promise.resolve();
+    expect(h.protectedDeliveryService.recordReceipt).toHaveBeenCalledWith({
+      whatsappMessageId: 'protected-message-id',
+      recipientJid: '15551230000@s.whatsapp.net',
+      type: 'delivery',
+    });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(h.protectedDeliveryService.recoverPendingDeliveries).toHaveBeenCalledTimes(2);
+    expect(h.protectedDeliveryService.flushPendingEvents).toHaveBeenCalledTimes(2);
+  });
+
+  it('recovers within five seconds when connect resolves before transport readiness', async () => {
+    const h = await importMainWithMocks({
+      instanceConfig: {
+        name: 'q',
+        type: 'agent',
+        agentOptions: { cwd: '~/testuser/LAB/WhatSoup' },
+      },
+      protectedDelivery: {
+        baseUrl: 'https://delivery.example.test/s/api/v1',
+        token: 'test-token',
+      },
+      connectionState: { connected: false, state: 'connecting' },
+    });
+
+    await vi.waitFor(() => expect(h.waitForHistorySyncThenRecover).toHaveBeenCalledOnce());
+    expect(h.connection.connect).toHaveBeenCalledOnce();
+    expect(h.protectedDeliveryService.recoverPendingDeliveries).not.toHaveBeenCalled();
+    expect(h.protectedDeliveryService.flushPendingEvents).not.toHaveBeenCalled();
+
+    h.connection.getConnectionState.mockReturnValue({ connected: true, state: 'connected' });
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(h.protectedDeliveryService.recoverPendingDeliveries).toHaveBeenCalledOnce();
+    expect(h.protectedDeliveryService.flushPendingEvents).toHaveBeenCalledOnce();
+  });
+
+  it('does not overlap protected-delivery recovery intervals', async () => {
+    let resolveRecovery: ((value: { resumed: number; skipped: number }) => void) | undefined;
+    const firstRecovery = new Promise<{ resumed: number; skipped: number }>((resolve) => {
+      resolveRecovery = resolve;
+    });
+    const h = await importMainWithMocks({
+      instanceConfig: {
+        name: 'q',
+        type: 'agent',
+        agentOptions: { cwd: '~/testuser/LAB/WhatSoup' },
+      },
+      protectedDelivery: {
+        baseUrl: 'https://delivery.example.test/s/api/v1',
+        token: 'test-token',
+      },
+      protectedDeliveryRecovery: vi.fn(() => firstRecovery),
+    });
+
+    await vi.waitFor(() => expect(h.protectedDeliveryService.recoverPendingDeliveries).toHaveBeenCalledOnce());
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(h.protectedDeliveryService.recoverPendingDeliveries).toHaveBeenCalledOnce();
+
+    resolveRecovery?.({ resumed: 0, skipped: 0 });
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(h.protectedDeliveryService.recoverPendingDeliveries).toHaveBeenCalledTimes(2);
+  });
+
+  it('logs only relay batch counts when protected event relay remains pending', async () => {
+    const h = await importMainWithMocks({
+      instanceConfig: {
+        name: 'q',
+        type: 'agent',
+        agentOptions: { cwd: '~/testuser/LAB/WhatSoup' },
+      },
+      protectedDelivery: {
+        baseUrl: 'https://delivery.example.test/s/api/v1',
+        token: 'test-token',
+      },
+      protectedDeliveryFlush: async () => ({ relayed: 1, pending: 2, failed: true }),
+    });
+
+    await vi.waitFor(() => expect(h.protectedDeliveryService.flushPendingEvents).toHaveBeenCalledOnce());
+    expect(h.logger.warn).toHaveBeenCalledWith(
+      { relayed: 1, pending: 2, failed: true },
+      'protected delivery event relay deferred',
+    );
+  });
+
+  it('omits protected delivery from passive runtimes', async () => {
+    const h = await importMainWithMocks({
+      instanceConfig: {
+        name: 'passive',
+        type: 'passive',
+      },
+      protectedDelivery: {
+        baseUrl: 'https://delivery.example.test/s/api/v1',
+        token: 'test-token',
+      },
+    });
+
+    expect(h.ProtectedDeliveryService).not.toHaveBeenCalled();
+    expect(h.protectedDeliveryService.recoverPendingDeliveries).not.toHaveBeenCalled();
   });
 
   it('aborts before health, pollers, runtime, or transport when grant reconciliation fails', async () => {

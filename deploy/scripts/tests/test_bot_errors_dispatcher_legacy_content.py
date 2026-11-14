@@ -13,6 +13,7 @@ All fixtures are synthetic.
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import json
 import re
@@ -930,6 +931,51 @@ def test_identical_digests_still_collapse_across_hosts() -> None:
     first = _event_with_digest(DIGEST_TAIL_A, "fixture-host-a")
     second = _event_with_digest(DIGEST_TAIL_A, "fixture-host-b")
     assert _mod.storm_fingerprint(first) == _mod.storm_fingerprint(second)
+
+
+# A protected link is redacted to the shared marker before identity is formed,
+# so alerts that differ only by the link share one incident; keying identity on
+# the link would make a secret part of the fingerprint.
+PROTECTED_LINK_HOST = "links.example.test"
+PROTECTED_MARKER = "[protected managed link]"
+
+
+def _protected_link(token: str) -> str:
+    return f"https://{PROTECTED_LINK_HOST}/s/#v3.{token * 22}.{'Z' * 43}"
+
+
+def _pin_protected_link_host(monkeypatch: Any) -> None:
+    # Patch the globals the dispatcher's own redaction functions read, whichever
+    # module object another test file may have loaded under the same name.
+    pin = hashlib.sha256(PROTECTED_LINK_HOST.encode("utf-8")).hexdigest()
+    monkeypatch.setitem(_mod.alert_text_for_fingerprint.__globals__, "PROTECTED_LINK_HOST_SHA256", frozenset({pin}))
+
+
+def _identities(event: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        _mod.storm_fingerprint(event),
+        _mod.recovery_episode_fingerprint(event),
+        _mod.recovery_duplicate_fingerprint(event),
+    )
+
+
+def test_alerts_differing_only_by_a_protected_link_share_one_incident(monkeypatch: Any) -> None:
+    _pin_protected_link_host(monkeypatch)
+    first = _make_event(summary=f"delivery failed for {_protected_link('Q')}")
+    second = _make_event(summary=f"delivery failed for {_protected_link('R')}")
+
+    assert _identities(first) == _identities(second)
+    assert PROTECTED_MARKER in _mod.storm_fingerprint(first)
+    assert PROTECTED_LINK_HOST not in "".join(_identities(first))
+
+
+def test_alerts_differing_in_other_text_stay_distinct(monkeypatch: Any) -> None:
+    _pin_protected_link_host(monkeypatch)
+    first = _make_event(summary=f"delivery failed for {_protected_link('Q')}")
+    second = _make_event(summary=f"delivery timed out for {_protected_link('Q')}")
+
+    for left, right in zip(_identities(first), _identities(second)):
+        assert left != right
 
 
 def test_display_rendering_keeps_the_eight_character_prefix() -> None:

@@ -26,6 +26,11 @@ import { parseIncomingMessage } from './message-parser.ts';
 import { withTransaction } from './db-tx.ts';
 import { canonicalConversationKey } from './access-list.ts';
 import { normalizeUnixTimestampSeconds } from './substrate/time.ts';
+import {
+  isProtectedDeliveryMessage,
+  PROTECTED_MESSAGE_MARKER,
+  sanitizeProtectedMessageValue,
+} from './protected-message.ts';
 
 /** Raw Baileys WAMessage shape we rely on. Cast through unknown at the boundary. */
 export interface HistoryInput {
@@ -184,6 +189,12 @@ function processHistoryMessage(
       log?.debug({ msgId }, 'historyMessages: parseIncomingMessage returned null for message with body');
       return 'skipped_null_parse';
     }
+    const protectedDelivery = isProtectedDeliveryMessage(db, msgId);
+    if (protectedDelivery) {
+      parsedMsg.content = PROTECTED_MESSAGE_MARKER;
+      parsedMsg.contentText = PROTECTED_MESSAGE_MARKER;
+      parsedMsg.rawMessage = PROTECTED_MESSAGE_MARKER;
+    }
 
     const before = stmts.check.get(msgId) as { content_type?: string } | undefined;
     const result = stmts.upsertBody.run({
@@ -198,7 +209,11 @@ function processHistoryMessage(
       is_from_me: parsedMsg.isFromMe ? 1 : 0,
       timestamp: parsedMsg.timestamp,
       quoted_message_id: parsedMsg.quotedMessageId ?? null,
-      raw_message: stringifyWaMsg(waMsg, log, msgId),
+      raw_message: stringifyWaMsg(
+        protectedDelivery ? PROTECTED_MESSAGE_MARKER : sanitizeProtectedMessageValue(waMsg),
+        log,
+        msgId,
+      ),
     });
 
     if (!before) return 'inserted';

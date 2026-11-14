@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { loadContext, loadContextDetailed } from '../../../src/runtimes/chat/context.ts';
 import type { SearchResult, MemoryRecord, EntitySearchResult } from '../../../src/runtimes/chat/providers/pinecone.ts';
 
+vi.mock('../../../src/core/protected-delivery-pins.ts', async (importOriginal) =>
+  (await import('../../helpers/protected-delivery-pins.ts')).mockProtectedDeliveryPins(importOriginal));
 vi.mock('../../../src/config.ts', () => ({
   config: {
     pineconeSearchMode: 'memory',
@@ -29,6 +31,7 @@ vi.mock('../../../src/logger.ts', async () => {
 });
 
 import * as configModule from '../../../src/config.ts';
+import { PROTECTED_MESSAGE_MARKER } from '../../../src/core/protected-message.ts';
 
 // ---- Mock factory ----
 
@@ -138,6 +141,16 @@ describe('loadContext', () => {
 
     expect(result).toContain('chat fact one');
     expect(result).toContain('sender fact two');
+  });
+
+  it('redacts protected links recalled from memory before they enter provider context', async () => {
+    const link = 'https://links.example.test/s/#v3.context-protected-test';
+    const pinecone = makeMockPinecone([makeResult('protected', `remember ${link}`)], []);
+
+    const result = await loadContext(pinecone as any, 'chat@g.us', 'alice@s.whatsapp.net', 'test query');
+
+    expect(result).not.toContain('links.example.test/s/#');
+    expect(result).toContain(PROTECTED_MESSAGE_MARKER);
   });
 
   it('formats each result on its own line with "- " prefix', async () => {

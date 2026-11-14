@@ -5,7 +5,7 @@
 // interface to allow transport selection at startup.
 
 import type { EventEmitter } from 'node:events';
-import type { IncomingMessage, Messenger, SubmissionReceipt } from '../core/types.ts';
+import type { IncomingMessage, Messenger, SendOptions, SubmissionReceipt } from '../core/types.ts';
 import type { IdentityStore, GuardMode } from '../core/outbound-identity/types.ts';
 import type { ContactsDirectory } from '../core/mentions.ts';
 import type { PresenceCache } from './presence-cache.ts';
@@ -61,7 +61,7 @@ export interface RuntimeConnection extends EventEmitter, Messenger {
   setOperationsAuthorityClient?(authority: OperationsAuthorityPort): void;
   connect(): Promise<void>;
   shutdown(): void;
-  sendRaw(chatJid: string, content: Record<string, unknown>): Promise<SubmissionReceipt>;
+  sendRaw(chatJid: string, content: Record<string, unknown>, options?: SendOptions): Promise<SubmissionReceipt>;
   sendPollMessage(
     chatJid: string,
     name: string,
