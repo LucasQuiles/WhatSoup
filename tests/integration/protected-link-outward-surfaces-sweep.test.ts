@@ -42,7 +42,9 @@ import { addAlias, captureObservation, upsertEntity } from '../../src/core/subst
 import { TriggerPoller } from '../../src/core/substrate/poller.ts';
 import { createTrigger } from '../../src/core/substrate/triggers.ts';
 import { projectBead, projectEntity } from '../../src/core/substrate/vault.ts';
+import { FleetDiscovery } from '../../src/fleet/discovery.ts';
 import { handleGetLogs } from '../../src/fleet/routes/data.ts';
+import { enrichInstance } from '../../src/fleet/routes/lines.ts';
 import { parsePinoLine } from '../../src/fleet/routes/feed.ts';
 import { handleGetSilences } from '../../src/fleet/routes/silence.ts';
 import { sanitizingLogHook } from '../../src/lib/log-sanitizer.ts';
@@ -490,6 +492,26 @@ const SURFACES: SurfaceCase[] = [
       systemPrompt: (value: { systemPrompt: string }) => value.systemPrompt,
       'free text (notes)': (value: { notes: string }) => value.notes,
     },
+  },
+  {
+    // The validator echoes the rejected value into configError, which the line
+    // response repeats in statusEvidence, error and configError.
+    surface: 'fleet line response for an invalid config',
+    probe: () => withTempDir((root) => {
+      fs.mkdirSync(path.join(root, SELF));
+      fs.writeFileSync(path.join(root, SELF, 'config.json'), JSON.stringify({
+        name: SELF, type: `agent ${LINK}`, accessMode: 'self_only', adminPhones: ['15551234567'],
+      }));
+      const inst = new FleetDiscovery(root).scan().get(SELF);
+      expect(inst?.configError).toMatch(/^Invalid type /);
+      return enrichInstance(inst!, undefined);
+    }),
+    children: {
+      statusEvidence: (line: { statusEvidence: string[] }) => line.statusEvidence[0],
+      error: (line: { error: string }) => line.error,
+      configError: (line: { configError: string }) => line.configError,
+    },
+    verify: (line: { status: string }) => expect(line.status).toBe('config_error'),
   },
   {
     surface: 'console silences route',
