@@ -82,8 +82,13 @@ export function registerProtectedDeliveryTools(
 
 function directRecipient(session: SessionContext, db: Database): { principal: string; recipientJid: string } {
   // As send_message does, a refused session token (other socket, revoked lease) never reaches a
-  // protected delivery; a socket token that no longer binds is refused the same way.
-  if (session.sessionTokenRefusal !== undefined || (session.tokenBinding !== undefined && session.tokenBinding() === undefined)) {
+  // protected delivery. A token that was presented and matched but no longer binds is refused too.
+  // Every socket request carries a binding callback that also answers undefined when no token was
+  // presented; such a tokenless caller stays accepted, as it is for send_message.
+  const attribution = session.callerAttribution;
+  const matchedTokenUnbound = attribution?.transport === 'socket' && attribution.tokenResult === 'match'
+    && session.tokenBinding !== undefined && session.tokenBinding() === undefined;
+  if (session.sessionTokenRefusal !== undefined || matchedTokenUnbound) {
     throw new Error('protected delivery requires an accepted session token');
   }
   const actorJid = session.actorJid;

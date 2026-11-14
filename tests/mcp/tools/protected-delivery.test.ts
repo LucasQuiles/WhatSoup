@@ -124,11 +124,16 @@ describe('protected delivery MCP tools', () => {
     expect(nonWhatsApp.isError).toBe(true);
   });
 
-  // Parity with send_message: a refused or withdrawn session token never stages, sends or reads a delivery.
+  const socketAttribution = (tokenResult: 'match' | 'absent') => ({
+    transport: 'socket' as const, connectionId: 'test-connection', tokenResult, clientName: null, clientVersion: null,
+  });
+
+  // Parity with send_message: a refused session token never stages, sends or reads a delivery; neither does a
+  // presented, matched token whose binding has since been revoked.
   it.each([
     ['refused on another socket', { sessionTokenRefusal: 'wrong_socket' as const }],
     ['revoked', { sessionTokenRefusal: 'revoked' as const }],
-    ['no longer bound', { tokenBinding: () => undefined }],
+    ['matched but no longer bound', { callerAttribution: socketAttribution('match'), tokenBinding: () => undefined }],
   ])('refuses protected delivery when the session token is %s', async (_case, overrides) => {
     const refused: SessionContext = { ...directSession, ...overrides };
     const staged = await registry.call('request_rustdesk_access', { device_id: 'device-1', purpose: 'login' }, refused);
@@ -136,16 +141,26 @@ describe('protected delivery MCP tools', () => {
     expect(staged.content[0].text).toContain('accepted session token');
     expect(sends).toEqual([]);
 
-    // A delivery an accepted caller staged can be neither sent nor read through the refused one.
+    // The refusal comes from the shared identity check, before the service is reached for either call.
     await registry.call('request_rustdesk_access', { device_id: 'device-1', purpose: 'login' }, directSession);
-    const sentBefore = sends.length;
     const delivered = await registry.call('deliver_secret', { delivery_ref: DELIVERY_REF }, refused);
     const status = await registry.call('get_secret_delivery_status', { delivery_id: DELIVERY_ID }, refused);
     expect(delivered.isError).toBe(true);
     expect(delivered.content[0].text).toContain('accepted session token');
     expect(status.isError).toBe(true);
     expect(status.content[0].text).toContain('accepted session token');
-    expect(sends.length).toBe(sentBefore);
+  });
+
+  // send_message keeps tokenless socket callers working; so does protected delivery. Every socket request
+  // carries a binding callback, which answers undefined when no token was presented.
+  it('accepts a bound direct socket caller that presented no session token', async () => {
+    const tokenless: SessionContext = {
+      ...directSession, callerAttribution: socketAttribution('absent'), tokenBinding: () => undefined,
+    };
+    const staged = await registry.call('request_rustdesk_access', { device_id: 'device-1', purpose: 'login' }, tokenless);
+    expect(staged.isError).toBeFalsy();
+    expectOpaqueSubmittedResponse(staged.content[0].text);
+    expect(sends).toHaveLength(1);
   });
 
   it('stores a mapped LID request under its verified phone destination', async () => {
