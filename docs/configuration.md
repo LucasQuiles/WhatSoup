@@ -1489,7 +1489,7 @@ proof unless a WhatSoup-specific proof artifact says so.
 | `autoCompactInputTokens` | number | no | `150000` | For Claude CLI agent sessions, automatically send a silent `/compact` when the session's known context reaches this many tokens. The known context is the size of the last distinct main-loop API request of the current session generation (that request's input + cache creation + cache read; a repeated message id replaces, never adds). A subagent's requests (assistant lines with `parent_tool_use_id`) measure the subagent's own context and are not counted. Context is unknown before the first valid usage, when usage is missing or invalid, in a new session generation, from a compact boundary until the next request after the compact result, and for the rest of a turn whose provider message ids pass the retention bounds (an id over 256 characters, or more than 1,024 distinct ids in one turn) until that turn's result. While it is unknown, the trigger falls back to the cumulative input since the last successful compact so the session still compacts, and no convergence verdict or rapid re-arm is recorded. Logs carry both values: `auto compact triggered` has `contextTokens` (null when unknown), `inputSinceCompact` and `crossed` (`context` or `cumulative_fallback`). Billing and the token totals are unchanged. Default: 150,000 tokens (prevents prompt-too-long errors while leaving headroom for tool results). Valid range: 50,000-100,000,000. **Bootstrap behavior:** on a session whose `last_compact_input_tokens=0` (a fresh enable, or a brand-new session), the first over-threshold check whose cumulative total (input + cache read) is also at or above the threshold initialises the baseline silently instead of firing `/compact`. This prevents a compact storm on rollout. What follows depends on the measure. With a known context, the next eligible check compacts if the known context is still at or above the threshold; there is no second cumulative wait. With an unknown context (cumulative fallback), the first real compact waits for another full threshold of cumulative input after the new baseline. A known context at or above the threshold while the cumulative total is still below it skips the bootstrap, so that check can compact. **Cooldown behavior:** successful auto-compacts wait 5 minutes before re-arming; scopes that become eligible again inside the rapid re-arm window escalate to 15, 30, then 60 minute cooldowns. A compact still unfinished after 4 minutes releases the following dispatch and applies a 5-minute retry backoff, but retains its FIFO result-classification slot: a late compact result is still consumed as a system result and cannot steal the next user's inbound identity. `GET /health` exposes current aggregate state through `runtime.agent.autoCompactState`, `autoCompactActiveBackoffScopes`, and `autoCompactWorstCurrentBackoffTier`. It also preserves the process-lifetime diagnostics `autoCompactIneffective`, `autoCompactConsecutiveRapidRearmsMax`, and `autoCompactNextTurnOverThreshold`; those totals/maxima do not independently degrade current health. |
 | `handoffDistill` | object | no | legacy environment behavior | Typed, per-instance warm-handoff policy. Requires the matching launcher, config reader, and runtime before config rollout; follow the [code-first rollout gate](runbooks/error-response-workflows.md#handoff-distiller-rollout-gate). Only a process started through those updated components honors `{ "enabled": false }` as disabling distillation and ignoring legacy `WHATSOUP_HANDOFF_*` controls. Writing this object and restarting an older installation does not provide that guarantee. An enabled object must use exactly `{ "provider": "deepseek", "model": "deepseek-flash" }`; it may set `contextInjection` and the documented sweep, growth, verbatim, budget, breaker, and concurrency bounds. The launcher projects only the existing `deepseek` credential for that exact enabled object. An absent object preserves the legacy environment path for existing fleet instances. Context injection remains restricted to a fresh fallback session for the same conversation. |
 | `allowM365Mutations` | boolean | no | `false` | Required with `m365Bridge` before the account-bound M365 mutation exception can be granted. Without `m365Bridge`, legacy child-env behavior remains unchanged. See [Connector mutation policy (#411)](#connector-mutation-policy-411). |
-| `m365Bridge` | object | no | — | Exact Agent365 binding: concrete Azure tenant GUID `tenantId`, exactly one `accountId` or `accountEmail`, loopback `origin`, and fixed profile `user-full-v1`. Requires `provider: "claude-cli"`, `allowM365Mutations: true`, and enabled plugin `microsoft_365@microsoft-365-dev`. |
+| `m365Bridge` | object | no | — | Exact Agent365 binding: concrete Azure tenant GUID `tenantId`, exactly one `accountId` or `accountEmail`, numeric HTTPS loopback `origin`, and fixed profile `user-full-v1`. The mutation exception requires an `accountId` binding and `workflowAuthority` with the same account ID and exact employee actor JID. Its optional `conversationKey` restricts writes to one conversation; otherwise existing chat admission controls apply. A binding without workflow authority retains the mutation deny floor. Requires `provider: "claude-cli"`, `"openai-api"`, or `"anthropic-api"`, `allowM365Mutations: true`, and enabled plugin `microsoft_365@microsoft-365-dev`. The provider-independent `microsoft365` tool is registered only for an account-id binding and one exact installed Microsoft plugin manifest under `agentOptions.pluginDirs`; it launches the manifest's fixed Agent365 bridge launcher with the policy-projected account and credential environment. |
 | `capabilityObligations` | object | no | — (inert) | Capability-obligation replay activation — all-or-inert, default OFF. Absent, or anything not exactly `enabled: true`, activates nothing. `enabled: true` requires a fully valid body — `contract` (versioned rule list: exact leading token, exact URL-host allowlist, declared prepared-media class), `mediaRoot`, `retentionPolicyVersion` (must name the owner-approved `policy/media-retention.json` artifact's `policyVersion` verbatim — #3221 Debt 3), `retentionHorizonDays` (finite 1–365 media-retention horizon; A-08 — additionally must not EXCEED the owner-approved horizon in `policy/media-retention.json` (90 days, ruled 2026-08-28); both policy checks are verified fail-closed at load, upstream of every DM/group media drain), `execution` (the TYPED resolver execution struct — #3221 Debt 4, owner-ratified: `interpreter` (an explicit interpreter PATH, or `null` for a directly executable artifact — the KEY is required, so the mode is DECLARED, never guessed; a bare `$PATH` name like `node` is unpinnable and refused at load), `resolverArtifactPath` (the code file whose content is hashed and executed — ALWAYS the executing token by construction), `args` (the data argv tail: at least one arg MUST embed the `{source}` placeholder, and with `interpreter: null` EVERY arg must embed `{source}` and must not be a flag — round-21 finding 2 made structural, so `["-c","{source}"]` and `["--eval={source}"]` are unrepresentable), plus `timeoutMs` and `minOutputBytes`. The schema DERIVES `command` = `[interpreter?, resolverArtifactPath, ...args]` and `interpreted` = `interpreter !== null` for the executor and the canonicalizer (an equivalent declaration canonicalizes byte-identically — no attested composite-digest drift); the legacy free-form `command`/`interpreted` body is refused loudly at load — spawned shell-lessly by the trusted `execute_capability` tool, which re-verifies the artifact by realpath, refuses an `interpreted:false` mislabel of an interpreter (and in direct mode any token after the artifact that is a flag or does not embed `{source}` — round-21 finding 2, so `["-c","{source}"]` cannot run the source as code), requires an EXPLICIT interpreter PATH when `interpreted:true` (a bare `$PATH` name like `node` is unpinnable and refused at config LOAD) that is NOT writable by a different untrusted actor (world/group-writable, non-sticky — round-21 finding 1, since the interpreter is executed from its realpath not staged), and CONTENT-ADDRESSED STAGES the artifact's whole directory into a private root — re-hashing and executing the immutable COPY (round-20), so a post-attest rename or in-place write cannot substitute unverified bytes; the substituted source is refused if it begins with `-`. **The resolver artifact MUST live in an ISOLATED, symlink-free directory containing ONLY itself and its intentional siblings** — nothing else may be written next to it (no `.DS_Store`, editor swap file, `__pycache__`, log, db, or media) or the whole-directory manifest drifts and every drain fails closed with `resolver_digest_mismatch`), and `attestation` (expected skill name/version/digest, resolver digest — a COMPOSITE binding the artifact content, the whole-DIRECTORY manifest (artifact + every sibling), the INTERPRETER content, AND the canonical execution shape + envelope (`timeoutMs`/`minOutputBytes`), re-derived and re-compared at the drain seam so a post-attest content swap, sibling swap, interpreter swap, or shape/envelope change is refused — dependency versions, probe version, canary id) — validated at config load by `parseCapabilityObligationsOptions` (`src/core/capability-contract.ts`); a malformed enabled body is a startup `ConfigValidationError` (exit `EX_CONFIG`), never a partial activation. `per_chat` session scope only. |
 | `turnRecoveryCatchupReconcile` | object | no | — (off) | Turns on the turn-recovery supervisor's automatic operator catch-up reconciler for this instance: `{ "enabled": true, "groupLimit": 50 }`. Each scan cycle closes up to `groupLimit` recovery groups whose conversation already got a delivered catch-up reply (closure rows carry `actor = 'auto_reconciler'`). `enabled` is a required boolean inside the block; `groupLimit` is an optional integer 1–1000 (default 50). Closed shape: an unknown inner key or an invalid value is a load-time `ConfigValidationError`. Absent or `enabled: false` = the pre-reconciler behavior. Read once at startup, so a change needs an instance restart. Enablement and observation steps: [Enabling per instance](turn-recovery-continuity-reconciler.md#enabling-per-instance). |
 | `observability` | object | no | — (phase `off`) | Fleet Lifecycle Observability Standard dark flag. Closed shape with one key, `fleetLifecycle`: the promotion phase `off` \| `shadow` \| `alerting` \| `default` (design §11; `off` when the block or key is absent). Anything else — a boolean, a case variant, an unknown key inside the block — is a load-time `ConfigValidationError` (fail-closed, never a partial enable). Code behind the flag ships dark; every phase transition is a separate owner act per cohort with single-step rollback (one phase back). |
@@ -1594,7 +1594,7 @@ Agent runtimes launch a non-blocking startup probe for the configured primary co
 
 Probe mechanism is provider-specific and intentionally separate from fallback activation: `claude-cli` performs a cheap model-addressed CLI probe, `opencode-cli` performs a minimal model-addressed `opencode run` probe from the agent cwd using the same model routing and credential env as normal turns, and `openai-api` / `anthropic-api` POST a minimal generation-class probe (`/chat/completions` / `/messages`) to the configured endpoint — `providerConfig.baseUrl` when set, else the provider default — authenticated with the key resolved via `providerConfig.apiKeyService` when set (`src/runtimes/agent/providers/primary-model-usability-adapters.ts`). A custom-endpoint instance therefore probes the endpoint it will actually serve from, not the provider's public API. This probe makes the startup surface explicit about account/model access. API generation probes refuse redirects, and read non-success diagnostic bodies through a 64 KiB byte cap that cancels the stream at the limit. Successful probes cancel the unused response body without waiting for cancellation to settle and abort their request at completion.
 
-Claude strict-MCP compatibility: the model probe never falls back to a non-strict argv. WhatSoup first resolves and hashes the executable selected by the probe PATH, then reads that exact executable's bounded `--help` with the scrubbed probe environment. A clean listing without `--strict-mcp-config` produces the non-alerting `unknown` reason `claude-cli-lacks-strict-mcp-config`; no model child runs until the CLI is upgraded. A failed help read is inconclusive, so the only model attempt remains strict, and model output never authorizes a non-strict retry. The executable identity and serving context are checked again after help before a model child can start.
+Claude strict-MCP compatibility: the model probe never falls back to a non-strict argv. WhatSoup first resolves and hashes the executable selected by the probe PATH, then reads that exact executable's bounded `--help` with the scrubbed probe environment. A clean listing without `--strict-mcp-config` produces the non-alerting `unknown` reason `claude-cli-lacks-strict-mcp-config`; no model child runs until the CLI is upgraded. That result raises the warning alert `primary_model_probe_incompatible` on its own source, which tells operators to upgrade the Claude CLI; it never raises `primary_model_unusable`. Only a later usable probe clears it: a turn success is not a probe, an inconclusive probe keeps it, and a clear that is not queued keeps it open for the next usable probe. A failed help read is inconclusive, so the only model attempt remains strict, and model output never authorizes a non-strict retry. The executable identity and serving context are checked again after help before a model child can start.
 
 Probe deadlines are cancellation boundaries, not detached result timers. A queued OpenCode probe is removed from the shared execution gate before its `timeout` result completes. If its process has already started, cancellation terminates the process and retains the execution lease until process closure, so later turns cannot overlap a timed-out probe. Diagnostic primary-usability and recovery probes use the same cancellation path. A cancelled probe's `timeout` carries a bounded `reason` naming the cause (the probe deadline or the caller's abort) and the probe stage in flight at that moment, for example `deadline-credential-heal`, `deadline-gate-wait`, `caller-abort-child-run`, or `caller-pre-aborted`; the full vocabulary is in `docs/public-surface.md` (`http:health.status`).
 
@@ -2415,13 +2415,20 @@ The source of truth is `REQUIRED_DENY`; this document describes categories only.
 **2. Account-bound Microsoft 365 bridge exception (`src/core/m365-bridge-policy.ts`).**
 
 The M365 mutation deny entries remain in the floor unless one instance supplies a
-complete `agentOptions.m365Bridge` binding. The binding requires the fixed
+complete `agentOptions.m365Bridge` binding **and** its closed `workflowAuthority`
+assignment. The assignment requires the bridge's exact `accountId`, an exact employee
+actor JID. An optional conversation key further restricts where that employee may
+request writes; when omitted, the bot's existing chat admission controls apply.
+The actor is normalized through the existing LID-to-phone mapping, so the same
+employee's phone and privacy alias cannot produce conflicting decisions.
+The binding requires the fixed
 `"user-full-v1"` profile, one concrete Azure tenant GUID, exactly one account selector,
 and one exact numeric `https://` loopback origin (`127.0.0.1` or `[::1]`).
 Hostnames, including `localhost`, cannot authorize credential projection because
 their resolution is not part of admission. Configure the same numeric origin in
 the binding and both service origin variables before launching. It also requires
-`agentOptions.allowM365Mutations: true`, an explicit `agentOptions.provider: "claude-cli"`, and the
+`agentOptions.allowM365Mutations: true`, an explicit `agentOptions.provider` of `"claude-cli"`,
+`"openai-api"`, or `"anthropic-api"`, and the
 exact enabled plugin key `"microsoft_365@microsoft-365-dev": true`.
 
 HTTPS authenticates the receiving endpoint before the plugin sends its bearer
@@ -2439,9 +2446,42 @@ endpoint.
 At startup, WhatSoup compares that binding with its own service environment:
 `ALLOW_M365_MUTATIONS=1`, `MS365_AGENT365_BRIDGE=true`, tenant, profile, exactly
 one matching account selector, non-empty Agent365 API key, and matching loopback
-Agent365 and hub origins, plus the current launcher's process-bound credential
+Agent365 and hub origins, a non-empty absolute `MS365_DURABLE_MAIL_STATE_DIR`, plus the current launcher's process-bound credential
 admission. Only a complete match generates the child M365
-environment and omits Microsoft 365 entries from the generated deny floor.
+environment and omits Microsoft 365 entries from the generated deny floor. The
+`select-account` and `select-dataverse-environment` entries stay in the floor even then.
+For an admitted workflow assignment, the private `authorize_m365_action` MCP
+tool derives the actor, conversation, and inbound request reference from the
+currently executing human turn, then issues a 15-minute receipt bound to the
+exact account, tool name, and canonical parameter payload. Socket callers must
+present a runtime-issued session token. Tokens provide caller attribution within
+the trusted host; they do not authenticate processes against a compromised host
+user or prove that a token belongs to the currently executing turn. It does not interpret
+natural-language scope: the Microsoft workflow/plugin must request only the
+unambiguous employee action it has already identified, and must ask that employee
+when the requested action, target, or scope is unclear. The provider-independent
+adapter resolves one exact Microsoft plugin manifest from `agentOptions.pluginDirs`
+and launches its fixed Agent365 bridge launcher with only the projected environment.
+Its manifest-pinned Python command must be an absolute `python`, `python3`, or versioned
+Python 3 executable. The adapter validates the resolved path and every symlink hop without
+a `PATH` lookup, but launches the manifest path to preserve virtual-environment packages.
+The interpreter and its ancestors must belong to root or the current user and must not be
+group/world-writable (apart from trusted sticky directories). The interpreter must be executable.
+It admits that launcher only from `~/.local/opt/agent365/launchers/<release>/m365_bridge_launcher.py`
+and its configuration only from `~/.config/agent365/m365-bridge.json`, after current-user
+ownership, non-writable path, regular-file, and no-symlink checks. There is no content
+attestation for these local artifacts, so this is a same-user filesystem trust boundary,
+not protection against a hostile process running as that user.
+The child receives only the policy-projected Agent365 values, the launcher manifest's
+non-secret values, stable launcher variables (`HOME`, `USER`, `LOGNAME`, `PATH`,
+`TMPDIR`, `LANG`), and the launcher-admitted `MS365_DURABLE_MAIL_STATE_DIR`; unrelated
+ambient credentials and authority variables are not inherited.
+The guarded plugin asks this broker only for catalogued writes; reads retain their
+account-bound socket during scheduled, recovery, and other non-human turns. Those
+non-human turns receive no write receipt. A duplicate attempt for the same human
+request and exact action has the same operation ID; the Microsoft durable outbox
+uses its own idempotency and reconciliation records before any retry. This is not
+a general exactly-once guarantee for Microsoft Graph writes.
 Approval preserves caller-supplied denies and startup preserves valid stored denies,
 including exact M365 entries. Explicit settings replacement still replaces the
 permissions block; approval itself never removes entries from that input.
@@ -2463,11 +2503,14 @@ and file or ancestor changes during the read are rejected before lookup or
 admission. This stricter authorization read does not change legacy config loading.
 
 After lookup, the launcher creates `WHATSOUP_M365_LAUNCH_ADMISSION`, an HMAC bound
-to its process ID, instance name, complete binding and resolved key. Its final
-`exec` preserves that process ID for runtime verification. The launcher clears
+to its process ID, instance name, complete binding, `agentOptions.sessionScope`
+(`single` when unset) and resolved key. The binding includes the whole
+`workflowAuthority` assignment: its account, employee and conversation restriction.
+Its final `exec` preserves that process ID for runtime verification. The launcher clears
 inherited admissions, and the runtime never forwards an admission to agent
 children. Missing, malformed or reused admissions retain the M365 deny floor;
-changing the key or binding after admission also rejects the exception.
+changing the key, binding, assignment or session scope after admission also rejects
+the exception.
 Install the matching launcher before enabling a bridge binding: an older wrapper
 or direct Node start cannot grant the exception from an ambient key. This prevents
 accidental credential reuse across launch paths; it does not isolate a malicious
@@ -2476,9 +2519,197 @@ authenticates launcher inputs, while HTTPS authenticates the bridge peer; neithe
 replaces the other.
 
 Capability-grant writes use that runtime's verified policy on every write. Before
-startup restores persisted fallback state, and while a fallback window is active,
-they retain the full M365 deny floor. Startup settings repair uses the same policy.
-Grant groups cannot authorize M365 mutations themselves.
+startup verifies the policy and restores persisted fallback state, they retain the
+full M365 deny floor. An approved workflow-authority assignment on a supported
+provider preserves the mutation exception during fallback; other fallback policies
+retain the full floor. A turn publishes the assignment from the route policy of the
+session that runs it, never from the runtime-wide policy. A turn on `codex-cli`,
+`gemini-cli` or `opencode-cli`, or on any route whose policy is rejected, therefore
+publishes no assignment, and the WhatSoup `microsoft365` tool refuses its reads and
+writes with `microsoft365_authority_unavailable`.
+Startup settings repair uses the same policy. Grant groups cannot authorize M365
+mutations themselves.
+
+The assignment counts only after the guarded Microsoft plugin is admitted: exactly one
+manifest under `agentOptions.pluginDirs` with the fixed bridge launcher and
+`MS365_WORKFLOW_AUTHORITY_REQUIRED: "1"`. The plugin directory, its manifest, its
+`mcp-server/dist/index.cjs` entry, every directory above them and every symlink hop
+must belong to root or the service user and must not be group- or world-writable
+(apart from sticky directories). The entry must resolve inside the plugin directory.
+Without an admitted plugin, startup withdraws the
+assignment and logs the missing plugin, so the deny floor stays on every route,
+including fallback and direct plugin execution, and the broker refuses writes.
+
+**Scope and token binding.** The broker admits workflow authority only for a turn that
+ran under `sessionScope: "per_chat"`. A shared or single scope serves every chat on one
+socket, so the broker refuses it with `WORKFLOW_AUTHORITY_SCOPE_NOT_PER_CHAT`. The plugin
+must present a live token on the socket it was bound to:
+- A session's native plugin uses the session token. It is bound to the session's own MCP
+  socket and is revoked when the runtime retires that session.
+- Each `microsoft365` adapter call uses a request token. It is bound to its socket and to
+  the turn's conversation and request reference, and it is revoked when the call settles.
+  A turn that has moved on is refused with `STALE_REQUEST`.
+The receipt's `caller` field (`adapter` or `session`) names the token kind.
+
+**Limit in `sandboxPerChat` mode.** Session tokens bind to the workspace socket. The session
+child keeps that socket (`WHATSOUP_MCP_SOCKET`) and its session token for its WhatSoup
+tools, but gets no `MS365_WORKFLOW_AUTHORITY_SOCKET`, so the guarded plugin refuses native
+Microsoft 365 writes in that mode. Code in that child could still present its session token
+to the broker on the workspace socket, so the broker refuses every session caller of a
+`sandboxPerChat` instance, over a socket or in process, with
+`WORKFLOW_AUTHORITY_SANDBOX_SESSION`. Each turn there still publishes the assignment, so the
+`microsoft365` adapter's request tokens are admitted and adapter writes are unaffected.
+Sandbox settings also always keep the settings deny floor.
+
+**Upgrade note.** This release changes two things for an existing `m365Bridge` binding:
+- A binding without `workflowAuthority`, and every `accountEmail` binding, keeps the
+  mutation deny floor; Microsoft 365 writes stop until the binding uses `accountId`
+  with `workflowAuthority`.
+- A missing or relative `MS365_DURABLE_MAIL_STATE_DIR` in the service environment now
+  rejects the whole binding, so the bridge environment is not projected either.
+Startup logs `missing` with the setting's name (never its value) when a configured
+bridge is not admitted or has no assignment. `check-instance-config` prints a
+`WARN [m365-upgrade]` line, without failing, for bindings that lose writes.
+
+**Deploy order.** The previous release refuses a binding that carries
+`workflowAuthority` (an unknown key), so it cannot start on a configuration written for
+this release. For an instance whose bot must keep writing:
+1. Before deploying, set `MS365_DURABLE_MAIL_STATE_DIR` and switch the binding to
+   `accountId`; the previous release accepts both.
+2. Deploy and activate this release without `workflowAuthority`, so an automatic
+   rollback during activation can still start the previous release.
+3. Then add `workflowAuthority` and restart the instance. Microsoft 365 writes stay
+   denied from the deploy until this restart.
+
+To roll back afterwards, remove `workflowAuthority` before starting the previous release
+(see [Rollback](runbooks/release-deployment.md#rollback)).
+
+**One guarded plugin build.** Install the guarded plugin through `agentOptions.pluginDirs`;
+admission reads that copy. It must have the canonical shape: a manifest whose `mcpServers`
+holds only the `microsoft_365` server and which has no `hooks` key, and no plugin-root
+`.mcp.json` or `hooks/hooks.json`. The `claude-cli` provider also loads the copy that
+`enabledPlugins` names, so for a binding with `workflowAuthority` startup checks that copy
+too. It reads the Claude CLI's install
+record, `plugins/installed_plugins.json` under `CLAUDE_CONFIG_DIR` (or `~/.claude`), and
+requires every install of `microsoft_365@microsoft-365-dev` to repeat the admitted plugin:
+- its manifest's `mcpServers` and `hooks` equal the admitted manifest's: the single
+  `microsoft_365` server with the same `command`, `args` and `env`, and no other server
+  or hook;
+- it has no plugin-root `.mcp.json` or `hooks/hooks.json`;
+- its `mcp-server/dist/index.cjs` entry resolves inside its install directory and has the
+  same SHA-256 as the admitted entry;
+- the install record, the install directory, the manifest and the entry pass the same
+  ownership, permission, ACL and symlink checks as the admitted copy.
+
+**A binding without `workflowAuthority` gets no native-copy check.** The startup and
+re-check comparisons below guard the workflow assignment, so they run only for a binding
+with `workflowAuthority`. A binding without it, and every `accountEmail` binding, still
+projects the bridge environment, including `MS365_AGENT365_API_KEY`, into each `claude-cli`
+child, and that child loads the `enabledPlugins` copy with no manifest, entry or trust
+check. There the settings deny floor is the only guard against native Microsoft 365 writes.
+The `microsoft365` adapter, where registered, still checks the `pluginDirs` copy it launches.
+
+Only a missing file (`ENOENT`) counts as absent. A root file that exists but cannot be read
+(for example `EACCES`, `EIO`, `ELOOP` or a dangling symlink) refuses the copy.
+
+The trust checks read each path's ACL with `/bin/ls -lde` on macOS or `/bin/ls -ld` on Linux,
+run by absolute path without a shell, because Node has no ACL API. On macOS they refuse any
+`allow` entry, inherited or not, that `ls -lde` reports; deny-only entries, such as the
+`group:everyone deny delete` entry on every home directory, grant nothing and are admitted.
+On Linux any ACL that `ls` marks with `+` refuses the path. A listing that fails (a non-zero
+exit or a timeout) or cannot be parsed refuses the path, and so does any other platform.
+Each check lists every path afresh: no ACL result carries over to a later check. An ACL read
+failure that `ls` does not report is not detected. On Linux, an `ls` without ACL support
+(BusyBox, or coreutils built without libacl) prints no `+`, so there the check cannot see
+ACL grants at all. Both limits are listed with the accepted residuals.
+
+Config-root isolation (`WHATSOUP_AGENT_CONFIG_ROOT_ISOLATION=1`) gives a sandboxed child
+another install record than the one checked here, so it withdraws the assignment.
+
+For a binding with `workflowAuthority`, no guarded plugin admitted under `pluginDirs`, a
+missing or unreadable record, a missing install or any difference withdraws the assignment. The log names the reason, never a path. Admission records the admitted
+copy: its configured path and real path, its manifest and entry digests, the real path of
+its entry, its server and hook shape. Every re-check compares exactly these surfaces:
+- the `pluginDirs` copy: its configured path and its entry symlink still resolve to the
+  admitted paths; the whole manifest and the entry keep their admitted SHA-256; its
+  plugin-root `.mcp.json` and `hooks/hooks.json` are still absent; and its configured path,
+  manifest and entry pass the trust checks;
+- the native copy: its manifest's `mcpServers` and `hooks` keep the canonical shape and equal
+  the admitted copy's; its entry, resolved again each time, stays inside its install
+  directory and keeps the admitted SHA-256; its plugin-root `.mcp.json` and
+  `hooks/hooks.json` are still absent; and its install record, install directory, manifest
+  and entry pass the trust checks.
+
+The checks do not compare other files under `mcp-server/dist` or any `node_modules` the
+entry loads, the default component directories (`commands/`, `agents/`, `skills/`), a
+plugin-root `.lsp.json`, or, on the native copy, manifest keys other than `mcpServers` and
+`hooks` (for example `lspServers`). Deploy those identically in both copies.
+The `microsoft365` adapter re-checks immediately before it spawns the plugin, after its
+socket is ready, and also before it acquires the socket. When the runtime's policy holds the
+admitted assignment, that check covers both copies and the assignment; otherwise it covers
+the `pluginDirs` copy that the adapter launches. A change closes the adapter for the rest of
+the run and withdraws the assignment.
+For a binding with `workflowAuthority`, the native copy is re-checked at startup, before
+each later write of native settings (a
+capability-grant write, or the settings of a new sandbox per-chat session), before each
+`claude-cli` spawn (including an in-place respawn of an existing session: a crash
+auto-respawn, a `/new` reset, a failed resume or a later message to an inactive session)
+and before each turn publishes its authority, because a marketplace update can replace
+either copy mid-run. A withdrawal holds until the instance restarts, even if the copies
+match again: restart it after you update either copy.
+
+After a withdrawal:
+- the next turn of every existing session publishes no assignment and no route provider,
+  so the adapter refuses its reads and writes;
+- a turn that published the assignment before the withdrawal loses it at its next
+  request: the adapter refuses it and the broker answers `WORKFLOW_AUTHORITY_DISABLED`;
+- the next `claude-cli` spawn of any session gets `--disallowedTools` with the full
+  Microsoft 365 mutation deny set and no bridge or `MS365_WORKFLOW_AUTHORITY_*` values;
+- every native settings file this runtime wrote is rewritten with the deny floor. A
+  failed rewrite stays pending and is retried at every later check; while any rewrite is
+  pending, every provider spawn is refused. Each refused spawn logs one line naming each
+  pending settings file and the error code that keeps it pending (for example `EACCES` or
+  `ENOTDIR`). Repair that file's access and the next check retries the rewrite.
+
+Settings writes lift the native deny floor only in `per_chat` scope without
+`sandboxPerChat`, where a guarded native write can succeed; the account and environment
+selection entries stay denied even there. In single or shared scope the
+broker refuses native writes, and in `sandboxPerChat` mode the child has no authority
+socket and the broker refuses session callers, so those settings keep the floor; adapter
+writes are unaffected.
+
+**Host-work admission disables native Microsoft 365 access.** Under
+`WHATSOUP_WORK_ADMISSION=systemd` (Linux only), native Microsoft 365 access, both reads and
+writes through the plugin that `claude-cli` loads, is unavailable to queued launches until
+the helper protocol can carry a release-time decision. The external wrapper receives a
+launch's arguments and environment when the launch is queued, and starts the provider after
+its host lease without any later check, so no check can run at release. Every queued
+`claude-cli` launch therefore gets the withdrawn shape, even while the assignment is live:
+`--disallowedTools` with the full Microsoft 365 mutation deny set, and no `MS365_*`,
+`ALLOW_M365_MUTATIONS` or `MS365_WORKFLOW_AUTHORITY_*` values, so no Microsoft 365 credential
+reaches the queued child. A pending floor rewrite still refuses a queued spawn. The
+`microsoft365` adapter tool remains available for reads and writes: the adapter spawns its
+plugin directly and re-checks immediately before each spawn.
+
+**Accepted residuals.** These checks do not cover:
+- A window remains between the last re-check, which runs immediately before each direct
+  spawn, and the spawned process loading the plugin: for `claude-cli` this is the CLI's
+  start-up time. If the Claude CLI updates the marketplace plugin when it starts, that update
+  also falls inside this window, so keep auto-update off for the `microsoft-365-dev`
+  marketplace. Closing the window needs an admitted immutable artifact, which is a later
+  design change.
+- An ACL read failure that `ls` does not report. Apple's `ls` treats a failed ACL lookup as
+  no ACL and still exits 0, so an `allow` entry on a path whose ACL cannot be read, while
+  its ownership, mode and contents can, is not detected. Reading the ACL directly would
+  need a native module or an interpreter, which this check does not use.
+- ACL grants on Linux hosts whose `ls` has no ACL support (BusyBox, or coreutils built
+  without libacl). That `ls` prints no `+` marker, so the check cannot see such grants;
+  the owner and mode checks still apply.
+- A deliberate swap of either copy by a process running as the same user is outside the
+  same-user filesystem trust boundary described above.
+- The session child holds the bridge credentials (`MS365_AGENT365_API_KEY` and the
+  origin). A shell-capable model in that child is outside these guards, which protect
+  against accidental drift, not against a malicious model.
 
 Settings do not record deny authorship. Approval therefore never removes existing
 entries, even if they match a previously generated floor. Legacy settings and a
@@ -2487,7 +2718,9 @@ after approval returns. An operator must review those restrictions and explicitl
 remove only the M365 denies they intend to permit once the primary bridge is
 admitted. Restart alone does not remove them. Sandbox hook refresh and capability
 grant writes preserve the remaining restrictions; a later rejected policy restores
-the full floor. Fresh approved settings omit the M365 floor without this migration.
+the full floor. Fresh approved settings omit the M365 floor, apart from the two account
+and environment selection entries, without this migration, but only in `per_chat` scope
+without `sandboxPerChat`; other modes always keep it.
 Repairing corrupt settings or a malformed permissions block restores the full floor
 even for an admitted bridge and retains readable deny entries. Sandbox refresh
 rejects corrupt/non-object settings before changing either sandbox artifact.
@@ -2511,9 +2744,14 @@ existing restrictions; use the explicit review above for previously written deni
     "allowM365Mutations": true,
     "m365Bridge": {
       "tenantId": "11111111-2222-3333-4444-555555555555",
-      "accountEmail": "user@custom-domain.example",
+      "accountId": "employee-account",
       "origin": "https://127.0.0.1:10000",
-      "profile": "user-full-v1"
+      "profile": "user-full-v1",
+      "workflowAuthority": {
+        "accountId": "employee-account",
+        "employeeActorJid": "15551230001@s.whatsapp.net",
+        "conversationKey": "15551230001"
+      }
     }
   }
 }

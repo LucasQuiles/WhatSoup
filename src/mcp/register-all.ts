@@ -35,6 +35,8 @@ import * as substrateTools from './tools/substrate.ts';
 import * as messagingTools from './tools/messaging.ts';
 import * as mediaTools from './tools/media.ts';
 import * as protectedDeliveryTools from './tools/protected-delivery.ts';
+import { registerM365WorkflowAuthorityTool } from './m365-workflow-authority.ts';
+import { canonicalizeChatJid } from '../core/lid-resolver.ts';
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
 import { ToolRegistry } from './registry.ts';
@@ -257,6 +259,7 @@ export function registerAllTools(
 
   // Presence needs the shared presenceCache from ConnectionManager
   runModule('presence', true, (register) => presenceTools.registerPresenceTools(getSock, connection.presenceCache, register));
+  runModule('m365-workflow-authority', true, () => registerM365WorkflowAuthorityTool(registry, (jid) => canonicalizeChatJid(jid, db)));
 
   // Knowledge search — only when instance config specifies allowed indexes.
   // Vendor-gated (Pinecone): tagged core: false so failure is tolerated.

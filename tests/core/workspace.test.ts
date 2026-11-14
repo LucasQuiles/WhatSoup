@@ -19,6 +19,10 @@ const tmp = trackTmpDirs('');
 const approvedM365Policy: M365MutationPolicy = {
   status: 'approved',
   childEnv: { ALLOW_M365_MUTATIONS: '1' },
+  workflowAuthority: {
+    accountId: 'bridge-account',
+    employeeActorJid: '15551230001@s.whatsapp.net',
+  },
 };
 
 describe('chatJidToWorkspace', () => {
@@ -344,6 +348,14 @@ describe('provisionWorkspace', () => {
     const socketPath = provisionWorkspace(makeOpts(workspacePath, instanceCwd));
 
     expect(socketPath).toBe(join(workspacePath, '.claude', 'whatsoup.sock'));
+  });
+
+  it('serves the socket at the one shared workspace path that session tokens are bound to (W4)', async () => {
+    const { workspaceSocketPath } = await import('../../src/core/workspace-paths.ts');
+    const workspacePath = makeTmp();
+    const instanceCwd = makeTmp();
+
+    expect(provisionWorkspace(makeOpts(workspacePath, instanceCwd))).toBe(workspaceSocketPath(workspacePath));
   });
 
   it('bash.pathRestricted is preserved in the generated sandbox policy', () => {

@@ -4,10 +4,12 @@
 // caller may do. The socket server learns about a connection (its id, the
 // client's declared name, whether it presented the executing session's
 // token); the registry combines that with the resolved turn context and writes
-// it onto the tool_calls row. Nothing here is an authorization input.
+// it onto the tool_calls row. The Microsoft workflow broker also requires this
+// attribution alongside its current employee request and account binding.
 
 import { randomBytes } from 'node:crypto';
 import type { ToolCallCallerEvidence } from '../core/durability-evidence-contract.ts';
+import { createChildLogger } from '../logger.ts';
 import { safeStringEqual } from '../lib/safe-compare.ts';
 import { isNonEmptyString, isRecord } from '../lib/type-guards.ts';
 import type { CallerAttribution, ResolvedSessionContext } from './types.ts';
@@ -19,86 +21,189 @@ import type { CallerAttribution, ResolvedSessionContext } from './types.ts';
  */
 export const SESSION_TOKEN_NOTIFICATION = 'notifications/whatsoup/session';
 
-/** Anything that can say whether a presented token belongs to a live session. */
-export interface SessionTokenVerifier {
-  verify(presented: unknown): boolean;
-  /** Returns an opaque runtime session identity only for a matched token. */
-  turnReplySessionId?(presented: unknown): string | undefined;
-}
-
-/** How many live session tokens are kept before the oldest is forgotten. */
-export const SESSION_TOKEN_CAPACITY = 4096;
+const log = createChildLogger('caller-attribution');
 
 /**
- * Tokens minted for the runtime's own sessions. One per session; handed to the
- * child only through its environment and never written to disk or the database.
+ * What a token stands for. A session token is bound to the socket its child is
+ * given. A request token is also bound to the one turn (conversation and request
+ * reference) that the adapter call was made for.
+ */
+export interface SessionTokenBinding {
+  kind: 'session' | 'request';
+  socketPath: string;
+  conversationKey?: string;
+  requestRef?: string;
+  /** Opaque runtime session identity for turn-reply routing; honoured on session tokens only. */
+  turnReplySessionId?: string;
+}
+
+/** A minted token and the only handle that retires it. */
+export interface SessionTokenLease {
+  readonly token: string;
+  revoke(): void;
+}
+
+/**
+ * Why a token the registry minted is refused on a socket: it is live but bound
+ * to another socket, or its lease was revoked.
+ */
+export type SessionTokenRefusal = 'wrong_socket' | 'revoked';
+
+/** Anything that can say which live binding, if any, a token presented on a socket has. */
+export interface SessionTokenVerifier {
+  verify(presented: unknown, socketPath: string): Readonly<SessionTokenBinding> | undefined;
+  /**
+   * Why a token this verifier minted is refused on `socketPath`. Undefined when the
+   * token verifies there, was never minted, or has been forgotten past the capacity.
+   */
+  refusal?(presented: unknown, socketPath: string): SessionTokenRefusal | undefined;
+}
+
+/**
+ * How many live tokens, and separately how many revoked tokens, of each kind are
+ * kept before the oldest of that kind is forgotten (a backstop; leases revoke).
+ */
+export const SESSION_TOKEN_CAPACITY = 4096;
+
+type SessionTokenKind = SessionTokenBinding['kind'];
+const SESSION_TOKEN_KINDS: readonly SessionTokenKind[] = ['session', 'request'];
+
+/** Drops the oldest entries until `size` is within `capacity`; returns how many it dropped. */
+function trimOldest(entries: Map<string, unknown> | Set<string>, capacity: number): number {
+  let dropped = 0;
+  while (entries.size > capacity) {
+    const oldest = entries.keys().next().value;
+    if (oldest === undefined) break;
+    entries.delete(oldest);
+    dropped += 1;
+  }
+  return dropped;
+}
+
+/**
+ * Tokens minted for the runtime's own sessions and adapter calls. Each is handed
+ * to its child only through the environment and never written to disk or the
+ * database.
  *
- * Tokens are not revoked at session shutdown, because a suspended session can
- * spawn again. The set is bounded instead: past its capacity the oldest token is
- * forgotten, and a caller still holding it is recorded as an outside caller.
- * That can only make the evidence more conservative.
+ * A token is a scoped capability with a lifetime: it verifies only on the socket
+ * it is bound to, and only until its lease is revoked. A session token lives as
+ * long as its session manager (child respawns keep it); a request token lives
+ * for one adapter call. Past the capacity the oldest token of the same kind is
+ * forgotten and its holder is recorded as an outside caller, which only makes
+ * evidence stricter.
+ *
+ * A revoked token is remembered, up to the same capacity per kind, so a caller
+ * still presenting it can be refused rather than treated as one that presented
+ * none. Each kind has its own bounds, so request-token churn (one per adapter
+ * call) can never displace a session token, live or revoked; only newer session
+ * tokens can.
  *
  * A same-user process can read another process's environment, so a match is
- * attribution evidence, not authentication.
+ * still attribution evidence, not authentication against such a process.
  */
 export class SessionTokenRegistry implements SessionTokenVerifier {
-  private readonly live = new Map<string, string | undefined>();
+  private readonly live: Record<SessionTokenKind, Map<string, Readonly<SessionTokenBinding>>> = {
+    session: new Map(),
+    request: new Map(),
+  };
+  private readonly revoked: Record<SessionTokenKind, Set<string>> = { session: new Set(), request: new Set() };
   private readonly capacity: number;
 
   constructor(capacity: number = SESSION_TOKEN_CAPACITY) {
     this.capacity = capacity;
   }
 
-  mint(turnReplySessionId?: string): string {
+  /** Number of live tokens; a settled adapter call returns it to its baseline. */
+  get liveCount(): number {
+    return this.live.session.size + this.live.request.size;
+  }
+
+  mint(binding: SessionTokenBinding): string {
     const token = randomBytes(32).toString('hex');
-    this.live.set(token, turnReplySessionId);
-    while (this.live.size > this.capacity) {
-      const oldestToken = this.live.keys().next().value;
-      if (oldestToken === undefined) break;
-      this.live.delete(oldestToken);
+    const live = this.live[binding.kind];
+    live.set(token, Object.freeze({ ...binding }));
+    if (trimOldest(live, this.capacity) > 0) {
+      log.warn({ capacity: this.capacity, kind: binding.kind }, 'session token capacity reached: the oldest live token was forgotten');
     }
     return token;
   }
 
-  verify(presented: unknown): boolean {
-    return this.findTurnReplySessionId(presented).matched;
+  mintLease(binding: SessionTokenBinding): SessionTokenLease {
+    const token = this.mint(binding);
+    return { token, revoke: () => this.revoke(token) };
   }
 
-  turnReplySessionId(presented: unknown): string | undefined {
-    return this.findTurnReplySessionId(presented).sessionId;
+  revoke(token: string): void {
+    for (const kind of SESSION_TOKEN_KINDS) {
+      if (!this.live[kind].delete(token)) continue;
+      this.revoked[kind].add(token);
+      trimOldest(this.revoked[kind], this.capacity);
+      return;
+    }
   }
 
-  private findTurnReplySessionId(presented: unknown): { matched: boolean; sessionId: string | undefined } {
-    if (!isNonEmptyString(presented)) return { matched: false, sessionId: undefined };
-    let matched = false;
-    let sessionId: string | undefined;
-    for (const [token, owner] of this.live) {
-      if (safeStringEqual(token, presented)) {
-        matched = true;
-        sessionId = owner;
+  verify(presented: unknown, socketPath: string): Readonly<SessionTokenBinding> | undefined {
+    if (!isNonEmptyString(presented) || !isNonEmptyString(socketPath)) return undefined;
+    const matched = this.findLive(presented);
+    return matched?.socketPath === socketPath ? matched : undefined;
+  }
+
+  refusal(presented: unknown, socketPath: string): SessionTokenRefusal | undefined {
+    if (!isNonEmptyString(presented)) return undefined;
+    const live = this.findLive(presented);
+    let revoked = false;
+    // Visit every revoked token so the comparison time does not depend on which one matches.
+    for (const kind of SESSION_TOKEN_KINDS) {
+      for (const token of this.revoked[kind]) {
+        if (safeStringEqual(token, presented)) revoked = true;
       }
     }
-    return { matched, sessionId };
+    if (live !== undefined) {
+      return isNonEmptyString(socketPath) && live.socketPath === socketPath ? undefined : 'wrong_socket';
+    }
+    return revoked ? 'revoked' : undefined;
+  }
+
+  private findLive(presented: string): Readonly<SessionTokenBinding> | undefined {
+    let matched: Readonly<SessionTokenBinding> | undefined;
+    // Visit every live token so the comparison time does not depend on which one matches.
+    for (const kind of SESSION_TOKEN_KINDS) {
+      for (const [token, binding] of this.live[kind]) {
+        if (safeStringEqual(token, presented)) matched = binding;
+      }
+    }
+    return matched;
   }
 }
 
-/** A matched socket token identifies its runtime session, never a bare token value. */
+/** The token a session notification presents, if it carries a non-empty one. */
+export function presentedSessionToken(notificationParams: unknown): string | undefined {
+  const presented = isRecord(notificationParams) ? notificationParams['token'] : undefined;
+  return isNonEmptyString(presented) ? presented : undefined;
+}
+
+/**
+ * A session token matched on `socketPath` identifies its runtime session, never
+ * a bare token value. A request token never carries turn-reply authority.
+ */
 export function turnReplySessionIdFromPresentedToken(
   notificationParams: unknown,
   verifier: SessionTokenVerifier | undefined,
+  socketPath: string,
 ): string | undefined {
-  const presented = isRecord(notificationParams) ? notificationParams['token'] : undefined;
-  return verifier?.turnReplySessionId?.(presented);
+  const binding = verifier?.verify(presentedSessionToken(notificationParams), socketPath);
+  return binding?.kind === 'session' ? binding.turnReplySessionId : undefined;
 }
 
-/** Fold a presented session token into a connection's attribution. */
+/** Fold a token presented on `socketPath` into a connection's attribution. */
 export function withPresentedToken(
   current: Readonly<CallerAttribution>,
   notificationParams: unknown,
   verifier: SessionTokenVerifier | undefined,
+  socketPath: string,
 ): Readonly<CallerAttribution> {
-  const presented = isRecord(notificationParams) ? notificationParams['token'] : undefined;
-  const matched = verifier !== undefined && verifier.verify(presented);
+  const presented = presentedSessionToken(notificationParams);
+  const matched = verifier !== undefined && verifier.verify(presented, socketPath) !== undefined;
   return Object.freeze({ ...current, tokenResult: matched ? 'match' : 'mismatch' });
 }
 

@@ -13,6 +13,7 @@ const tmp = trackTmpDirs('m365-bridge-projection');
 
 const tenantId = '11111111-2222-3333-4444-555555555555';
 const accountEmail = 'user@example.test';
+const accountId = 'bridge-account';
 const origin = 'https://127.0.0.1:10000';
 
 function qualifiedConfig(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -46,12 +47,41 @@ function qualifiedBridgeEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEn
     MS365_TENANT_ID: tenantId,
     MS365_PROFILE: 'user-full-v1',
     MS365_HUB_URL: origin,
+    MS365_DURABLE_MAIL_STATE_DIR: '/tmp/whatsoup-m365-durable-mail',
     ...overrides,
   };
 }
 
+function qualifiedWorkflowConfig(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return qualifiedConfig({
+    m365Bridge: {
+      tenantId,
+      accountId,
+      origin,
+      profile: 'user-full-v1',
+      workflowAuthority: {
+        accountId,
+        employeeActorJid: '15551230001@s.whatsapp.net',
+      },
+    },
+    ...overrides,
+  });
+}
+
+function workflowBridgeEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return qualifiedBridgeEnv({
+    MS365_AGENT365_ACCOUNT_EMAIL: undefined,
+    MS365_AGENT365_ACCOUNT_ID: accountId,
+    ...overrides,
+  });
+}
+
 function namedConfig(name: string): Record<string, unknown> {
   return { ...qualifiedConfig(), name };
+}
+
+function namedWorkflowConfig(name: string): Record<string, unknown> {
+  return { ...qualifiedWorkflowConfig(), name };
 }
 
 function writeConfig(root: string, config: Record<string, unknown>): string {
@@ -167,6 +197,19 @@ describe('deploy/m365-bridge-credential-projection.ts', () => {
     const result = runProjection('bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({
       MS365_AGENT365_API_KEY: undefined,
     }), ['--credential-admission', String(process.pid)]);
+    expect(result.status, result.stderr).toBe(3);
+    expect(result.stdout).toBe('');
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['relative', 'whatsoup-m365-durable-mail'],
+  ])('rejects a %s durable mail state directory before issuing an admission', (_case, durableMailStateDir) => {
+    const result = runProjection('bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({
+      MS365_AGENT365_API_KEY: 'synthetic-bridge-key',
+      MS365_DURABLE_MAIL_STATE_DIR: durableMailStateDir,
+    }), ['--credential-admission', String(process.pid)]);
+
     expect(result.status, result.stderr).toBe(3);
     expect(result.stdout).toBe('');
   });
@@ -424,8 +467,8 @@ describe('deploy/whatsoup instance bridge credential projection', () => {
     expect(result.stderr).toContain('FATAL: invalid instance name');
   });
 
-  it.each(['bridge-agent', 'second-agent'])('resolves only %s private credential and forwards it only to the primary child', (instance) => {
-    const result = runLauncher(instance, namedConfig(instance), qualifiedBridgeEnv());
+  it.each(['bridge-agent', 'second-agent'])('resolves only %s private credential and forwards it only to the primary child with workflow authority', (instance) => {
+    const result = runLauncher(instance, namedWorkflowConfig(instance), workflowBridgeEnv());
 
     expect(result.status, result.stderr).toBe(0);
     expect(result.lookupLog).not.toContain('agent365-bridge-agent');
@@ -435,6 +478,19 @@ describe('deploy/whatsoup instance bridge credential projection', () => {
       primary: 'synthetic-bridge-key',
       fallback: null,
       m365Denied: false,
+      admissionForwarded: null,
+    });
+  });
+
+  it('keeps the M365 deny floor for an approved bridge without workflow authority', () => {
+    const result = runLauncher('bridge-agent', qualifiedConfig(), qualifiedBridgeEnv());
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result).toMatchObject({
+      policy: 'approved',
+      primary: 'synthetic-bridge-key',
+      fallback: null,
+      m365Denied: true,
       admissionForwarded: null,
     });
   });

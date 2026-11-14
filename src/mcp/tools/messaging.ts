@@ -440,6 +440,13 @@ export function registerMessagingTools(
             turnReplyDisposition = 'inactive';
             return { auditDisposition: 'not_sent' };
           }
+          // A refused session token (other socket, revoked lease) gets the same
+          // outcome as a stale manager, never the raw send of a tokenless caller.
+          if (session.sessionTokenRefusal !== undefined) {
+            log.warn({ refusal: session.sessionTokenRefusal }, 'send_message suppressed: the presented session token was refused');
+            turnReplyDisposition = 'inactive';
+            return { auditDisposition: 'not_sent' };
+          }
           const receipt = await connection.sendRaw(prepared.chatJid, content);
           return { transportId: receipt.waMessageId };
         }, {

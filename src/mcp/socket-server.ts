@@ -10,10 +10,12 @@ import { type Clock, systemClock } from '../lib/clock.ts';
 import type { ToolRegistry } from './registry.ts';
 import {
   initialSocketAttribution,
+  presentedSessionToken,
   SESSION_TOKEN_NOTIFICATION,
   turnReplySessionIdFromPresentedToken,
   withDeclaredClient,
   withPresentedToken,
+  type SessionTokenBinding,
   type SessionTokenVerifier,
 } from './caller-attribution.ts';
 import {
@@ -98,6 +100,14 @@ export class WhatSoupSocketServer {
   private readonly connectionIdPrefix = randomBytes(6).toString('hex');
   /** #3421: verifies the token a session's own helper presents; absent = none can match. */
   private readonly sessionTokens: SessionTokenVerifier | undefined;
+  /** Each connection's presented token. Never copied into a session or attribution. */
+  private readonly presentedTokens = new Map<number, string>();
+
+  /** The live binding of the token this connection presented here, read at call time. */
+  private presentedTokenBinding(clientId: number): Readonly<SessionTokenBinding> | undefined {
+    const presented = this.presentedTokens.get(clientId);
+    return presented === undefined ? undefined : this.sessionTokens?.verify(presented, this.socketPath);
+  }
 
   constructor(
     socketPath: string,
@@ -211,6 +221,7 @@ export class WhatSoupSocketServer {
       socket.on('close', () => {
         abortController.abort(); // Signal all pending tool calls for this client
         this.connectionSessions.delete(clientId);
+        this.presentedTokens.delete(clientId);
         this.activeSockets.delete(clientId);
         log.info({ clientId, connections: this.connectionSessions.size }, 'client disconnected');
       });
@@ -251,11 +262,22 @@ export class WhatSoupSocketServer {
           // Record the result and send nothing back, exactly like any other
           // notification.
           if (req.id === undefined && req.method === SESSION_TOKEN_NOTIFICATION && connSession.callerAttribution) {
-            connSession.callerAttribution = withPresentedToken(connSession.callerAttribution, req.params, this.sessionTokens);
+            const presented = presentedSessionToken(req.params);
+            if (presented === undefined) this.presentedTokens.delete(clientId);
+            else this.presentedTokens.set(clientId, presented);
+            connSession.callerAttribution = withPresentedToken(
+              connSession.callerAttribution, req.params, this.sessionTokens, this.socketPath,
+            );
             connSession.turnReplySessionId = turnReplySessionIdFromPresentedToken(
               req.params,
               this.sessionTokens,
+              this.socketPath,
             );
+            // A recognized token refused here (other socket, revoked lease) must
+            // not leave its caller looking like one that presented no token.
+            connSession.sessionTokenRefusal = presented === undefined
+              ? undefined
+              : this.sessionTokens?.refusal?.(presented, this.socketPath);
             continue;
           }
 
@@ -279,8 +301,10 @@ export class WhatSoupSocketServer {
           // abortSignal is preserved by reference so client-disconnect still aborts.
           // Dynamic authorization fields are pinned to the executing turn.
           // Explicit undefined values overwrite stale base-session values.
+          // The token binding is re-verified when a tool asks, so a revocation
+          // reaches an open connection. The token itself stays in this server.
           const requestSession = resolveSessionContext(
-            connSession,
+            { ...connSession, tokenBinding: () => this.presentedTokenBinding(clientId) },
             this.executingSessionResolver(),
           );
           void this.handleRequest(req, requestSession).then((response) => {
@@ -333,6 +357,7 @@ export class WhatSoupSocketServer {
     }
     this.activeSockets.clear();
     this.connectionSessions.clear();
+    this.presentedTokens.clear();
     let cleanupError: SocketCleanupError | null = null;
     if (this.ownedSocket) {
       try {

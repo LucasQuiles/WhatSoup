@@ -1,4 +1,4 @@
-import { M365_MUTATION_DENY } from '../../core/settings-template.ts';
+import { M365_ACCOUNT_SELECTION_DENY, M365_MUTATION_DENY } from '../../core/settings-template.ts';
 import {
   getTransportInboundContext,
   withTransportInboundContext,
@@ -23,6 +23,7 @@ import {
 } from '../../core/provider-data-policy.ts';
 import type { M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
 import type { SessionContext } from '../../mcp/types.ts';
+import type { SessionTokenLease } from '../../mcp/caller-attribution.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
 import { MS_PER_HOUR } from '../../lib/time-units.ts';
@@ -307,14 +308,23 @@ export interface SessionManagerOptions {
   pluginDirs?: string[];
   allowM365Mutations?: boolean;
   m365MutationPolicy?: M365MutationPolicy;
+  /**
+   * The runtime's live M365 policy for this session, read at every provider spawn (including an
+   * in-place respawn) for the child's arguments and environment. It re-checks the plugin copies and
+   * throws to refuse the spawn while a deny-floor rewrite is pending. Without it the snapshot above is used.
+   */
+  m365SpawnPolicy?: () => M365MutationPolicy | undefined;
   provider?: string;
   providerConfig?: Record<string, unknown>;
   mcpBridge?: ProviderMcpBridge;
   mcpSessionContext?: SessionContext;
   whatsoupInstance?: string;
   whatsoupMcpSocket?: string;
-  /** #3421 step 1: this session's MCP token, passed to its child env only. */
-  whatsoupMcpSessionToken?: string;
+  /**
+   * #3421: this session's MCP token lease. The token reaches its child env only;
+   * it lives as long as this manager, and the runtime revokes it on retirement.
+   */
+  whatsoupMcpSessionLease?: SessionTokenLease;
   providerTransitionReady?: Promise<void>;
   handoffSystemBlock?: () => string | null;
   /**
@@ -731,6 +741,7 @@ export class SessionManager {
   private readonly pluginDirs: string[];
   private readonly allowM365Mutations: boolean | undefined;
   private readonly m365MutationPolicy: M365MutationPolicy | undefined;
+  private readonly m365SpawnPolicy: (() => M365MutationPolicy | undefined) | undefined;
   private readonly provider: string;
   private readonly providerConfig: Record<string, unknown> | undefined;
   private readonly mcpBridge: ProviderMcpBridge | undefined;
@@ -738,6 +749,8 @@ export class SessionManager {
   private readonly whatsoupInstance: string | undefined;
   private readonly whatsoupMcpSocket: string | undefined;
   private readonly whatsoupMcpSessionToken: string | undefined;
+  /** Read by the runtime when it retires this manager; never revoked here, so respawns keep it. */
+  readonly mcpSessionLease: SessionTokenLease | undefined;
   private readonly providerTransitionReady: Promise<void> | undefined;
   private readonly handoffSystemBlock: (() => string | null) | undefined;
   private readonly degradedCapabilitiesBlock: (() => string | null) | undefined;
@@ -941,6 +954,7 @@ export class SessionManager {
     this.pluginDirs = opts.pluginDirs ?? [];
     this.allowM365Mutations = opts.allowM365Mutations;
     this.m365MutationPolicy = opts.m365MutationPolicy;
+    this.m365SpawnPolicy = opts.m365SpawnPolicy;
     this.provider = opts.provider ?? 'claude-cli';
     // Fail-fast on unknown provider IDs (#447). The shared validator blocks
     // these at config-load time, but direct instantiation (tests, programmatic
@@ -963,7 +977,8 @@ export class SessionManager {
     this.mcpSessionContext = opts.mcpSessionContext;
     this.whatsoupInstance = opts.whatsoupInstance;
     this.whatsoupMcpSocket = opts.whatsoupMcpSocket;
-    this.whatsoupMcpSessionToken = opts.whatsoupMcpSessionToken;
+    this.mcpSessionLease = opts.whatsoupMcpSessionLease;
+    this.whatsoupMcpSessionToken = opts.whatsoupMcpSessionLease?.token;
     this.providerTransitionReady = opts.providerTransitionReady;
     this.handoffSystemBlock = opts.handoffSystemBlock;
     this.degradedCapabilitiesBlock = opts.degradedCapabilitiesBlock;
@@ -1204,7 +1219,29 @@ export class SessionManager {
     return resolveProviderBinary(provider);
   }
 
-  private getProviderArgs(systemPrompt: string, cwd: string, resumeSessionId?: string): string[] {
+  /**
+   * The M365 policy for one provider spawn: the runtime's live value when supplied, else the snapshot. Read once
+   * per spawn, immediately before the child is started, for both its arguments and its environment.
+   *
+   * A queued host-work launch (`WHATSOUP_WORK_ADMISSION=systemd`) hands its arguments and environment to the
+   * external wrapper now, and the wrapper starts the provider only after its host lease, with no later check.
+   * Nothing can decide them at release, so an approved policy is launched in the withdrawn shape: `rejected`,
+   * which gives `claude-cli` the full deny set and no bridge or workflow-authority values. A pending floor
+   * rewrite still refuses the spawn, because the live read above throws.
+   */
+  private m365PolicyAtSpawn(): M365MutationPolicy | undefined {
+    const policy = this.m365SpawnPolicy === undefined ? this.m365MutationPolicy : this.m365SpawnPolicy();
+    // The same branch order as spawnProviderChild: isolation, then the host-work queue, then a direct spawn.
+    const queued = !this.providerProcessIsolation && isHostWorkAdmissionEnabled();
+    return queued && policy?.status === 'approved' ? { status: 'rejected' } : policy;
+  }
+
+  private getProviderArgs(
+    systemPrompt: string,
+    cwd: string,
+    resumeSessionId?: string,
+    m365Policy: M365MutationPolicy | undefined = this.m365PolicyAtSpawn(),
+  ): string[] {
     const provider = this.assertKnownProvider('getProviderArgs');
     const args = resolveProviderArgs(
       provider,
@@ -1216,9 +1253,11 @@ export class SessionManager {
       this.providerConfig,
       this.providerMcpConfigArgs,
     );
-    // A shared workspace may retain the primary route's M365 exception.
-    if (provider === 'claude-cli' && this.m365MutationPolicy?.status === 'rejected') {
-      args.push('--disallowedTools', ...M365_MUTATION_DENY);
+    // A shared workspace may retain the primary route's M365 exception, and a withdrawal
+    // leaves settings lifted until the floor is rewritten: a rejected policy denies on the CLI.
+    // Settings written by an earlier release may also have lifted account selection.
+    if (provider === 'claude-cli' && m365Policy?.status === 'rejected') {
+      args.push('--disallowedTools', ...M365_MUTATION_DENY, ...M365_ACCOUNT_SELECTION_DENY);
     }
     return args;
   }
@@ -1460,6 +1499,7 @@ export class SessionManager {
     args: readonly string[],
     cwd: string,
     expectedExecutableSha256?: string,
+    m365Policy: M365MutationPolicy | undefined = this.m365PolicyAtSpawn(),
   ): ChildProcessWithoutNullStreams | Promise<ChildProcessWithoutNullStreams> {
     // Security: explicit env allowlist prevents credential leakage to child processes.
     // Without this, Node.js inherits process.env in full — meaning ALL secrets
@@ -1469,7 +1509,7 @@ export class SessionManager {
       this.provider,
       {
         allowM365Mutations: this.allowM365Mutations,
-        m365MutationPolicy: this.m365MutationPolicy,
+        m365MutationPolicy: m365Policy,
         whatsoupInstance: this.whatsoupInstance,
         whatsoupMcpSocket: this.whatsoupMcpSocket,
         whatsoupMcpSessionToken: this.whatsoupMcpSessionToken,
@@ -1988,7 +2028,11 @@ export class SessionManager {
     return sections.join('\n');
   }
 
-  private buildSpawnPerTurnArgs(cwd: string, input: ProviderTurnInput): string[] {
+  private buildSpawnPerTurnArgs(
+    cwd: string,
+    input: ProviderTurnInput,
+    m365Policy?: M365MutationPolicy,
+  ): string[] {
     switch (this.provider) {
       // codex-cli and gemini-cli are now persistent, not spawn-per-turn.
 
@@ -2016,7 +2060,7 @@ export class SessionManager {
       }
 
       default:
-        return this.getProviderArgs('', cwd);
+        return this.getProviderArgs('', cwd, undefined, m365Policy);
     }
   }
 
@@ -2986,10 +3030,12 @@ export class SessionManager {
       expectedExecutableSha256 = admission.binarySha256;
     }
     cwd = this.admitConfiguredCwd();
-    const args = this.getProviderArgs(systemPrompt, cwd, resumeSessionId);
+    // Read once, so the arguments and the environment of this child agree.
+    const m365Policy = this.m365PolicyAtSpawn();
+    const args = this.getProviderArgs(systemPrompt, cwd, resumeSessionId, m365Policy);
     if (this.configuredCwd !== undefined) this.configuredCwd = cwd;
 
-    const spawned = this.spawnProviderChild(binary, args, cwd, expectedExecutableSha256);
+    const spawned = this.spawnProviderChild(binary, args, cwd, expectedExecutableSha256, m365Policy);
     // Keep direct spawn synchronous: handlers below attach in the same turn.
     const child = spawned instanceof Promise ? await spawned : spawned;
     if (
@@ -4121,8 +4167,10 @@ export class SessionManager {
       let child: ChildProcessWithoutNullStreams;
       try {
         cwd = this.admitConfiguredCwd();
-        args = this.buildSpawnPerTurnArgs(cwd, input);
-        const spawned = this.spawnProviderChild(binary, args, cwd, expectedExecutableSha256);
+        // Read once, so the arguments and the environment of this child agree.
+        const m365Policy = this.m365PolicyAtSpawn();
+        args = this.buildSpawnPerTurnArgs(cwd, input, m365Policy);
+        const spawned = this.spawnProviderChild(binary, args, cwd, expectedExecutableSha256, m365Policy);
         // Keep direct-spawn setup synchronous: existing callers and child error
         // handlers rely on the process being attached in this same turn.
         child = spawned instanceof Promise ? await spawned : spawned;

@@ -1626,6 +1626,11 @@
       "owner": "src/runtimes/chat/providers/pinecone.ts",
       "test": "tests/runtimes/chat/memory/memory-telemetry-cross-surface.test.ts"
     },
+    "primary_model_probe_incompatible": {
+      "disposition": "claude_cli_upgrade_required_for_primary_probe_cleared_when_a_probe_runs_again",
+      "owner": "src/runtimes/agent/runtime-fallback.ts",
+      "test": "tests/runtimes/agent/primary-model-usability-adapters.test.ts"
+    },
     "primary_model_unusable": {
       "disposition": "primary_model_verdict_requires_operator_model_or_credential_repair",
       "owner": "src/runtimes/agent/runtime.ts",
