@@ -29,8 +29,10 @@ const directSession: SessionContext = {
 describe('protected delivery MCP tools', () => {
   let db: Database;
   let registry: ToolRegistry;
+  let sends: string[];
 
   beforeEach(() => {
+    sends = [];
     db = new Database(':memory:');
     db.open();
     registry = new ToolRegistry();
@@ -53,7 +55,12 @@ describe('protected delivery MCP tools', () => {
     const service = new ProtectedDeliveryService({
       db: db.raw,
       client,
-      messenger: { async sendRaw(_recipient, _content, options) { return { waMessageId: options?.messageId ?? null }; } },
+      messenger: {
+        async sendRaw(recipient, _content, options) {
+          sends.push(recipient);
+          return { waMessageId: options?.messageId ?? null };
+        },
+      },
       now: () => new Date('2026-10-29T12:00:00.000Z'),
       randomId: (() => {
         let n = 0;
@@ -115,6 +122,30 @@ describe('protected delivery MCP tools', () => {
     expect(group.isError).toBe(true);
     expect(mismatched.isError).toBe(true);
     expect(nonWhatsApp.isError).toBe(true);
+  });
+
+  // Parity with send_message: a refused or withdrawn session token never stages, sends or reads a delivery.
+  it.each([
+    ['refused on another socket', { sessionTokenRefusal: 'wrong_socket' as const }],
+    ['revoked', { sessionTokenRefusal: 'revoked' as const }],
+    ['no longer bound', { tokenBinding: () => undefined }],
+  ])('refuses protected delivery when the session token is %s', async (_case, overrides) => {
+    const refused: SessionContext = { ...directSession, ...overrides };
+    const staged = await registry.call('request_rustdesk_access', { device_id: 'device-1', purpose: 'login' }, refused);
+    expect(staged.isError).toBe(true);
+    expect(staged.content[0].text).toContain('accepted session token');
+    expect(sends).toEqual([]);
+
+    // A delivery an accepted caller staged can be neither sent nor read through the refused one.
+    await registry.call('request_rustdesk_access', { device_id: 'device-1', purpose: 'login' }, directSession);
+    const sentBefore = sends.length;
+    const delivered = await registry.call('deliver_secret', { delivery_ref: DELIVERY_REF }, refused);
+    const status = await registry.call('get_secret_delivery_status', { delivery_id: DELIVERY_ID }, refused);
+    expect(delivered.isError).toBe(true);
+    expect(delivered.content[0].text).toContain('accepted session token');
+    expect(status.isError).toBe(true);
+    expect(status.content[0].text).toContain('accepted session token');
+    expect(sends.length).toBe(sentBefore);
   });
 
   it('stores a mapped LID request under its verified phone destination', async () => {
