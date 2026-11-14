@@ -92,6 +92,11 @@ export interface SessionContext {
   /** Session scope of the runtime whose turn published `workflowAuthority`. */
   workflowAuthorityScope?: M365WorkflowAuthorityScope;
   /**
+   * Set when a `sandboxPerChat` runtime's turn published `workflowAuthority`: the broker then
+   * refuses session callers and admits only the `microsoft365` adapter's request tokens.
+   */
+  workflowAuthoritySandboxPerChat?: true;
+  /**
    * Provider of the executing turn's route, published only when that route's M365 policy
    * is approved. The `microsoft365` adapter refuses a turn without a supported one.
    */
@@ -126,6 +131,7 @@ export interface ExecutingSessionContext {
   workflowAuthority?: SessionContext['workflowAuthority'];
   requestRef?: SessionContext['requestRef'];
   workflowAuthorityScope?: SessionContext['workflowAuthorityScope'];
+  workflowAuthoritySandboxPerChat?: SessionContext['workflowAuthoritySandboxPerChat'];
   m365RouteProvider?: SessionContext['m365RouteProvider'];
   /**
    * Explicit assertion that a REAL executing-turn resolution produced this

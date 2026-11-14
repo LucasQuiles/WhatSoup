@@ -12,10 +12,13 @@
  * claude-cli spawn the same withdrawn shape, because nothing verified the plugin that child loads.
  *
  * A sandboxPerChat session child (qpi-lab2 review 5898990442, finding 2) gets no authority socket, so
- * its guarded plugin fails closed, while it keeps its WhatSoup socket and session token.
+ * its guarded plugin fails closed, while it keeps its WhatSoup socket and session token. Code in that
+ * child can still present its session token on that socket, so the broker itself refuses a session
+ * caller of a sandboxPerChat instance; the adapter's request tokens and non-sandbox sessions keep working.
  */
 import { EventEmitter } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -96,12 +99,65 @@ import { M365_MUTATION_DENY } from '../../../src/core/settings-template.ts';
 import * as microsoft365Adapter from '../../../src/runtimes/agent/microsoft365-adapter.ts';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { SessionTokenRegistry } from '../../../src/mcp/caller-attribution.ts';
+import { registerM365WorkflowAuthorityTool } from '../../../src/mcp/m365-workflow-authority.ts';
+import { WhatSoupSocketServer } from '../../../src/mcp/socket-server.ts';
+import type { ExecutingSessionContext } from '../../../src/mcp/types.ts';
 
 const TENANT_ID = '11111111-2222-3333-4444-555555555555';
 const ORIGIN = 'https://127.0.0.1:10000';
 const ACCOUNT_ID = 'employee-account';
+const EMPLOYEE_JID = '15551230001@s.whatsapp.net';
 const CHAT_JID = '15551230002@s.whatsapp.net';
+const CONVERSATION_KEY = '15551230002';
 const ENABLED_PLUGINS = { 'microsoft_365@microsoft-365-dev': true };
+
+/**
+ * Calls the broker the way the guarded plugin does: the session-token notification, then
+ * `initialize`, then one `authorize_m365_action` for a write. Resolves with the broker's verdict.
+ */
+function brokerCall(socketPath: string, token: string): Promise<Record<string, unknown>> {
+  const request = { version: 1, toolName: 'send-mail', params: { subject: 'Hi' }, accountId: ACCOUNT_ID, requestId: 'plugin-request-1' };
+  return new Promise((resolve, reject) => {
+    const client = createConnection(socketPath, () => {
+      client.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/whatsoup/session', params: { token } })}\n`);
+      client.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'broker-test', version: '1' } } })}\n`);
+    });
+    let buffer = '';
+    client.setEncoding('utf8');
+    client.on('data', (chunk: string) => {
+      buffer += chunk;
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const message = JSON.parse(line) as { id?: number; result?: { content?: Array<{ text?: string }> } };
+        if (message.id === 1) {
+          client.write(`${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'authorize_m365_action', arguments: request } })}\n`);
+        } else if (message.id === 2) {
+          client.end();
+          resolve(JSON.parse(message.result?.content?.[0]?.text ?? '{}') as Record<string, unknown>);
+        }
+      }
+    });
+    client.on('error', reject);
+  });
+}
+
+/** The real broker registration behind a real socket request handler, as a runtime socket serves it. */
+async function brokerSocket(
+  socketPath: string,
+  sessionTokens: SessionTokenRegistry,
+  executing: () => ExecutingSessionContext,
+): Promise<WhatSoupSocketServer> {
+  // This file mocks the registry module for the runtime; the broker needs the real one.
+  const { ToolRegistry: RealToolRegistry } = await vi.importActual<typeof import('../../../src/mcp/registry.ts')>('../../../src/mcp/registry.ts');
+  const registry = new RealToolRegistry();
+  registerM365WorkflowAuthorityTool(registry);
+  const server = new WhatSoupSocketServer(socketPath, registry,
+    { tier: 'chat-scoped', conversationKey: CONVERSATION_KEY, deliveryJid: CHAT_JID }, executing, undefined, { sessionTokens });
+  await server.startAndWait();
+  return server;
+}
 
 function makeDb(): Database {
   return {
@@ -132,6 +188,7 @@ function fakeChild(pid: number) {
 type SpawnedSession = { spawnSession(sessionId?: string, dbRowId?: number): Promise<void> };
 type Published = { workflowAuthority?: unknown; workflowAuthorityScope?: string; m365RouteProvider?: string };
 type RuntimeInternals = {
+  sessionTokens: SessionTokenRegistry;
   createSessionManager(opts: Record<string, unknown>): SpawnedSession;
   m365ExecutingAuthority(session: unknown, humanRequest: boolean, requestRef: string | undefined): Published;
   wirePerChatActorSocket(chatJid: string, provider: string): { mcpSocketPath?: string; providerTransitionReady: Promise<void> } | undefined;
@@ -310,6 +367,80 @@ describe('Microsoft 365 authority at an in-place claude-cli respawn', () => {
       expect(spawned[1]).not.toContain('--disallowedTools');
     } finally {
       rmSync(workspace, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  /**
+   * A spawned claude-cli session of a fresh runtime, its session token, and a real broker socket at the
+   * socket that token is bound to. The broker resolves the turn the runtime publishes for a live request
+   * from the assigned employee, in the shape `runtime.ts` pushes onto the executing-turn register.
+   */
+  async function brokerForSession(sandboxPerChat: boolean) {
+    const binding = (globalThis as Record<string, unknown>)['__m365RespawnBinding__'] as Record<string, unknown>;
+    // These runtimes never call start(); the re-check passes the admitted policy through unchanged.
+    vi.spyOn(microsoft365Adapter, 'recheckMicrosoft365Workflow').mockImplementation((p: M365MutationPolicy | undefined) => p);
+    // A short directory: a Unix socket path is limited to about 100 bytes.
+    const directory = mkdtempSync(join(tmpdir(), 'wsb-'));
+    const socketPath = join(directory, 'w.sock');
+    const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', {
+      model: 'primary-model', sessionScope: 'per_chat', sandboxPerChat,
+      allowM365Mutations: true, enabledPlugins: ENABLED_PLUGINS, m365Bridge: binding as never,
+    });
+    const internals = runtime as unknown as RuntimeInternals;
+    // A sandbox session uses its workspace socket; any other per_chat session uses its per-chat actor socket.
+    vi.spyOn(internals, 'wirePerChatActorSocket').mockReturnValue(sandboxPerChat
+      ? undefined
+      : { mcpSocketPath: socketPath, providerTransitionReady: Promise.resolve() });
+    vi.mocked(spawn).mockImplementation(() => fakeChild(4545) as never);
+    const session = internals.createSessionManager({
+      chatJid: CHAT_JID, onEvent: vi.fn(), onCrash: vi.fn(), notifyUser: vi.fn(),
+      ...(sandboxPerChat ? { cwd: directory, mcpSocketPath: socketPath } : {}),
+    });
+    await session.spawnSession();
+    const token = (vi.mocked(spawn).mock.calls.at(-1)![2] as { env?: NodeJS.ProcessEnv }).env?.WHATSOUP_MCP_SESSION_TOKEN;
+    if (token === undefined) throw new Error('the session child received no session token');
+    const published = internals.m365ExecutingAuthority(session, true, 'request-1');
+    const server = await brokerSocket(socketPath, internals.sessionTokens,
+      () => ({ actorJid: EMPLOYEE_JID, purpose: undefined, conversationKey: CONVERSATION_KEY, ...(published as Partial<ExecutingSessionContext>) }));
+    return {
+      socketPath, token, published, sessionTokens: internals.sessionTokens,
+      cleanup: () => { server.stop(); rmSync(directory, { recursive: true, force: true }); },
+    };
+  }
+
+  it('refuses a sandboxPerChat session caller at the broker, through the real registry and socket handler', async () => {
+    const broker = await brokerForSession(true);
+    try {
+      // The sandbox turn still publishes the assignment under per_chat scope: only its session callers are refused.
+      expect(broker.published).toMatchObject({ workflowAuthority: expect.anything(), workflowAuthorityScope: 'per_chat', m365RouteProvider: 'claude-cli' });
+      await expect(brokerCall(broker.socketPath, broker.token))
+        .resolves.toEqual({ allowed: false, code: 'WORKFLOW_AUTHORITY_SANDBOX_SESSION' });
+    } finally {
+      broker.cleanup();
+    }
+  }, 15_000);
+
+  it('control: still authorizes an adapter request token in a sandboxPerChat instance', async () => {
+    const broker = await brokerForSession(true);
+    try {
+      // The binding the microsoft365 adapter mints for one call: this socket, this turn's conversation and request.
+      const lease = broker.sessionTokens.mintLease({
+        kind: 'request', socketPath: broker.socketPath, conversationKey: CONVERSATION_KEY, requestRef: 'request-1',
+      });
+      await expect(brokerCall(broker.socketPath, lease.token))
+        .resolves.toMatchObject({ allowed: true, receipt: { caller: 'adapter', requestRef: 'request-1' } });
+    } finally {
+      broker.cleanup();
+    }
+  }, 15_000);
+
+  it('control: still authorizes a session caller outside sandboxPerChat', async () => {
+    const broker = await brokerForSession(false);
+    try {
+      await expect(brokerCall(broker.socketPath, broker.token))
+        .resolves.toMatchObject({ allowed: true, receipt: { caller: 'session', requestRef: 'request-1' } });
+    } finally {
+      broker.cleanup();
     }
   }, 15_000);
 });

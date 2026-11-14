@@ -2534,9 +2534,12 @@ The receipt's `caller` field (`adapter` or `session`) names the token kind.
 **Limit in `sandboxPerChat` mode.** Session tokens bind to the workspace socket. The session
 child keeps that socket (`WHATSOUP_MCP_SOCKET`) and its session token for its WhatSoup
 tools, but gets no `MS365_WORKFLOW_AUTHORITY_SOCKET`, so the guarded plugin refuses native
-Microsoft 365 writes in that mode. The workspace socket still serves the private broker, so
-the missing variable alone does not guard native writes: the settings deny floor, which
-sandbox settings always keep, does.
+Microsoft 365 writes in that mode. Code in that child could still present its session token
+to the broker on the workspace socket, so the broker refuses every session caller of a
+`sandboxPerChat` instance, over a socket or in process, with
+`WORKFLOW_AUTHORITY_SANDBOX_SESSION`. Each turn there still publishes the assignment, so the
+`microsoft365` adapter's request tokens are admitted and adapter writes are unaffected.
+Sandbox settings also always keep the settings deny floor.
 
 **Upgrade note.** This release changes two things for an existing `m365Bridge` binding:
 - A binding without `workflowAuthority`, and every `accountEmail` binding, keeps the
@@ -2651,7 +2654,8 @@ After a withdrawal:
 Settings writes lift the native deny floor only in `per_chat` scope without
 `sandboxPerChat`, where a guarded native write can succeed. In single or shared scope the
 broker refuses native writes, and in `sandboxPerChat` mode the child has no authority
-socket, so those settings keep the floor; adapter writes are unaffected.
+socket and the broker refuses session callers, so those settings keep the floor; adapter
+writes are unaffected.
 
 **Host-work admission disables native Microsoft 365 access.** Under
 `WHATSOUP_WORK_ADMISSION=systemd` (Linux only), native Microsoft 365 access, both reads and

@@ -3902,7 +3902,7 @@ export class AgentRuntime implements Runtime {
   /** M365 authority a turn publishes: its session's route policy narrowed by the re-checked runtime policy (unknown session: rejected). */
   private m365ExecutingAuthority(session: SessionManager, humanRequest: boolean, requestRef: string | undefined) {
     const routePolicy = narrowM365RoutePolicy(this.sessionM365Policies.get(session), this.recheckM365Policy());
-    return m365TurnAuthority(routePolicy, humanRequest, requestRef, this.sessionScope, sessionProviderId(session) ?? undefined);
+    return m365TurnAuthority(routePolicy, humanRequest, requestRef, this.sessionScope, sessionProviderId(session) ?? undefined, this.sandboxPerChat);
   }
 
   getM365SettingsPolicy(): M365MutationPolicy | undefined {

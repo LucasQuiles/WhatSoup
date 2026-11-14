@@ -146,6 +146,35 @@ describe('authorizeM365WorkflowAction', () => {
     }, 1_000)).toMatchObject({ allowed: true, receipt: { caller: 'session' } });
   });
 
+  describe('in a sandboxPerChat instance', () => {
+    const sandboxTurn = { ...currentHumanRequest, workflowAuthoritySandboxPerChat: true as const };
+
+    it('refuses a session token caller before any receipt is minted', () => {
+      expect(authorizeM365WorkflowAction(request, sandboxTurn, 1_000))
+        .toEqual({ allowed: false, code: 'WORKFLOW_AUTHORITY_SANDBOX_SESSION' });
+    });
+
+    it('refuses an in-process session caller', () => {
+      expect(authorizeM365WorkflowAction(request, {
+        ...sandboxTurn,
+        callerAttribution: { transport: 'in_process', connectionId: null, tokenResult: 'not_applicable', clientName: null, clientVersion: null },
+        tokenBinding: undefined,
+      }, 1_000)).toEqual({ allowed: false, code: 'WORKFLOW_AUTHORITY_SANDBOX_SESSION' });
+    });
+
+    it('still admits the adapter request token caller', () => {
+      expect(authorizeM365WorkflowAction(request, { ...sandboxTurn, tokenBinding: requestTokenBinding() }, 1_000))
+        .toMatchObject({ allowed: true, receipt: { caller: 'adapter' } });
+    });
+
+    it('keeps the earlier refusals ahead of it', () => {
+      expect(authorizeM365WorkflowAction(request, { ...sandboxTurn, workflowAuthorityScope: 'shared' }, 1_000))
+        .toEqual({ allowed: false, code: 'WORKFLOW_AUTHORITY_SCOPE_NOT_PER_CHAT' });
+      expect(authorizeM365WorkflowAction(request, { ...sandboxTurn, tokenBinding: () => undefined }, 1_000))
+        .toEqual({ allowed: false, code: 'MISSING_SESSION_BINDING' });
+    });
+  });
+
   it.each([
     ['no token binding resolver', { tokenBinding: undefined }],
     ['a token that is no longer live', { tokenBinding: () => undefined }],

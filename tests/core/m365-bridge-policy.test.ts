@@ -120,6 +120,23 @@ describe('m365TurnAuthority', () => {
     expect(m365TurnAuthority(approved, false, 'request-1', 'per_chat', 'claude-cli'))
       .toEqual({ requestRef: undefined, workflowAuthority: undefined, workflowAuthorityScope: undefined, m365RouteProvider: 'claude-cli' });
   });
+
+  it('marks a sandboxPerChat turn that publishes the assignment, and adds no key to any other turn', () => {
+    const workflowAuthority = { accountId: 'employee-account', employeeActorJid: '15551230001@s.whatsapp.net' };
+    const approved = { status: 'approved' as const, childEnv: {}, workflowAuthority };
+    // The sandbox turn keeps publishing the assignment and its scope.
+    expect(m365TurnAuthority(approved, true, 'request-1', 'per_chat', 'claude-cli', true)).toStrictEqual({
+      requestRef: 'request-1', workflowAuthority, workflowAuthorityScope: 'per_chat', m365RouteProvider: 'claude-cli',
+      workflowAuthoritySandboxPerChat: true,
+    });
+    for (const published of [
+      m365TurnAuthority(approved, true, 'request-1', 'per_chat', 'claude-cli', false),
+      m365TurnAuthority(approved, true, 'request-1', 'per_chat', 'claude-cli'),
+      m365TurnAuthority(approved, false, 'request-1', 'per_chat', 'claude-cli', true),
+      m365TurnAuthority({ status: 'rejected' }, true, 'request-1', 'per_chat', 'claude-cli', true),
+      m365TurnAuthority(approved, true, 'request-1', 'per_chat', 'codex-cli', true),
+    ]) expect(published).not.toHaveProperty('workflowAuthoritySandboxPerChat');
+  });
 });
 
 describe('narrowM365RoutePolicy', () => {

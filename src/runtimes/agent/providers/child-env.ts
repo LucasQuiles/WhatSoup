@@ -183,7 +183,8 @@ export function buildBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.Proce
       WHATSOUP_MCP_SESSION_TOKEN: opts?.whatsoupMcpSessionToken,
       // The Microsoft plugin may use this only through the same scoped MCP
       // socket and session token as its hosting provider turn. A sandbox
-      // session child gets no authority socket, so its plugin refuses writes.
+      // session child gets no authority socket, so its plugin refuses writes;
+      // the broker also refuses that child's session token.
       MS365_WORKFLOW_AUTHORITY_REQUIRED: m365Policy?.status === 'approved' && m365Policy.workflowAuthority !== undefined ? '1' : undefined,
       MS365_WORKFLOW_AUTHORITY_SOCKET: m365Policy?.status === 'approved' && m365Policy.workflowAuthority !== undefined
         && opts?.whatsoupMcpSessionToken !== undefined && !m365AuthoritySocketWithheld(m365Policy) ? opts?.whatsoupMcpSocket : undefined,

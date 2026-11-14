@@ -3380,7 +3380,11 @@ broker socket bound to the same account. Reads remain available in scheduled tur
 The guarded plugin requests a write receipt from the private `authorize_m365_action`
 broker only for an executing request from the assigned employee, in the assigned
 conversation when one is configured. This is separate from natural-language approval:
-the agent must still obtain an unambiguous employee request for the action.
+the agent must still obtain an unambiguous employee request for the action. The broker
+admits the plugin this adapter launches (a request token) and, outside `sandboxPerChat`
+mode, a session's native plugin (its session token). In `sandboxPerChat` mode it refuses
+every session caller with `WORKFLOW_AUTHORITY_SANDBOX_SESSION`, so there only this adapter
+can obtain write receipts.
 
 `list` returns `{ tools: [...] }`; `call` returns the plugin result. Authority,
 account mismatch, process, deadline and protocol failures return tool errors. Plugin

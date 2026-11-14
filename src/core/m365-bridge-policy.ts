@@ -292,9 +292,9 @@ export function m365MutationExceptionAllowed(policy: M365MutationPolicy | undefi
 /**
  * The policy a native settings write uses. The M365 mutation floor is lifted only where a guarded
  * native write can succeed: `per_chat` scope without `sandboxPerChat`. Elsewhere the broker refuses
- * native writes (shared or single scope) or the child has no authority socket (sandbox, see
- * `m365SessionChildPolicy`), so a lift would serve only an unguarded copy; the assignment is
- * stripped from the settings policy there.
+ * native writes (shared or single scope, or any session caller in sandbox) and a sandbox child has no
+ * authority socket (see `m365SessionChildPolicy`), so a lift would serve only an unguarded copy; the
+ * assignment is stripped from the settings policy there.
  */
 export function m365NativeFloorPolicy(
   policy: M365MutationPolicy | undefined,
@@ -312,8 +312,9 @@ const authoritySocketWithheld = new WeakSet<M365MutationPolicy>();
  * The policy a session child is spawned with. A `sandboxPerChat` child keeps the assignment, so its
  * guarded plugin still requires authority, but it gets no authority socket, so that plugin refuses
  * writes. Its `WHATSOUP_MCP_SOCKET` and session token stay: its WhatSoup proxy presents them for turn
- * replies. The settings deny floor, not a missing socket, is the native-write guard in that mode. The
- * copy keeps the assignment object, so a mid-run withdrawal still reaches it.
+ * replies. Code in the child could present that token to the broker itself, so the broker also
+ * refuses session callers in this mode (`workflowAuthoritySandboxPerChat`), and the settings keep the
+ * deny floor. The copy keeps the assignment object, so a mid-run withdrawal still reaches it.
  */
 export function m365SessionChildPolicy(policy: M365MutationPolicy | undefined, sandboxPerChat: boolean): M365MutationPolicy | undefined {
   if (!sandboxPerChat || policy?.status !== 'approved' || policy.workflowAuthority === undefined) return policy;
@@ -350,7 +351,10 @@ export type M365WorkflowAuthorityScope = 'per_chat' | 'shared' | 'single';
  * `routePolicy` is the policy of the session that runs the turn, never the runtime-wide
  * one. A route whose policy is rejected, or whose provider cannot host the bridge,
  * publishes neither the assignment nor `m365RouteProvider`, so the adapter refuses reads
- * and writes and the broker refuses writes on it.
+ * and writes and the broker refuses writes on it. A `sandboxPerChat` runtime's turn that
+ * publishes the assignment also publishes `workflowAuthoritySandboxPerChat: true`, so the
+ * broker refuses its session callers and admits only the adapter's request tokens; any
+ * other turn publishes no such key.
  */
 export function m365TurnAuthority(
   routePolicy: M365MutationPolicy | undefined,
@@ -358,11 +362,13 @@ export function m365TurnAuthority(
   requestRef: string | undefined,
   sessionScope?: M365WorkflowAuthorityScope,
   routeProvider?: string,
+  sandboxPerChat?: boolean,
 ): {
   requestRef: string | undefined;
   workflowAuthority: M365WorkflowAuthority | undefined;
   workflowAuthorityScope: M365WorkflowAuthorityScope | undefined;
   m365RouteProvider: string | undefined;
+  workflowAuthoritySandboxPerChat?: true;
 } {
   const routeAdmitted = routePolicy?.status === 'approved' && supportsM365BridgeProvider(routeProvider);
   const workflowAuthority = humanRequest && routeAdmitted ? routePolicy.workflowAuthority : undefined;
@@ -371,6 +377,7 @@ export function m365TurnAuthority(
     workflowAuthority,
     workflowAuthorityScope: workflowAuthority !== undefined ? sessionScope : undefined,
     m365RouteProvider: routeAdmitted ? routeProvider : undefined,
+    ...(workflowAuthority !== undefined && sandboxPerChat === true ? { workflowAuthoritySandboxPerChat: true as const } : {}),
   };
 }
 

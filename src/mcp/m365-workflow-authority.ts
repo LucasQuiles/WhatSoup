@@ -18,6 +18,7 @@ export interface M365WorkflowAuthorityContext {
   executingResolution?: 'resolved' | 'unresolved';
   workflowAuthority?: M365WorkflowAuthorityAssignment;
   workflowAuthorityScope?: SessionContext['workflowAuthorityScope'];
+  workflowAuthoritySandboxPerChat?: SessionContext['workflowAuthoritySandboxPerChat'];
   callerAttribution?: SessionContext['callerAttribution'];
   tokenBinding?: SessionContext['tokenBinding'];
 }
@@ -152,6 +153,11 @@ export function authorizeM365WorkflowAction(
       }
       caller = 'adapter';
     }
+  }
+  // A sandboxPerChat session child gets no authority socket, yet code in it still holds its
+  // session token and WhatSoup socket; there only the adapter's request tokens are admitted.
+  if (caller === 'session' && context.workflowAuthoritySandboxPerChat === true) {
+    return { allowed: false, code: 'WORKFLOW_AUTHORITY_SANDBOX_SESSION' };
   }
   if (context.actorJid !== authority.employeeActorJid) return { allowed: false, code: 'ACTOR_NOT_ASSIGNED' };
   if (authority.conversationKey !== undefined && context.conversationKey !== authority.conversationKey) {
