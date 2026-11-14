@@ -82,7 +82,7 @@ describe('M365 bridge policy exception', () => {
     expect(applyRequiredDeny([explicit], approvedM365Policy)).toContain(explicit);
   });
 
-  it('omits the generated M365 floor for an approved bridge', () => {
+  it('omits the liftable M365 mutation entries for an approved bridge', () => {
     const deny = applyRequiredDeny([
       'mcp__claude_ai_Gmail__create_draft',
       'mcp__operator_owned__keep',

@@ -2653,7 +2653,8 @@ After a withdrawal:
   `ENOTDIR`). Repair that file's access and the next check retries the rewrite.
 
 Settings writes lift the native deny floor only in `per_chat` scope without
-`sandboxPerChat`, where a guarded native write can succeed. In single or shared scope the
+`sandboxPerChat`, where a guarded native write can succeed; the account and environment
+selection entries stay denied even there. In single or shared scope the
 broker refuses native writes, and in `sandboxPerChat` mode the child has no authority
 socket and the broker refuses session callers, so those settings keep the floor; adapter
 writes are unaffected.
@@ -2698,8 +2699,9 @@ after approval returns. An operator must review those restrictions and explicitl
 remove only the M365 denies they intend to permit once the primary bridge is
 admitted. Restart alone does not remove them. Sandbox hook refresh and capability
 grant writes preserve the remaining restrictions; a later rejected policy restores
-the full floor. Fresh approved settings omit the M365 floor without this migration, but
-only in `per_chat` scope without `sandboxPerChat`; other modes always keep it.
+the full floor. Fresh approved settings omit the M365 floor, apart from the two account
+and environment selection entries, without this migration, but only in `per_chat` scope
+without `sandboxPerChat`; other modes always keep it.
 Repairing corrupt settings or a malformed permissions block restores the full floor
 even for an admitted bridge and retains readable deny entries. Sandbox refresh
 rejects corrupt/non-object settings before changing either sandbox artifact.
