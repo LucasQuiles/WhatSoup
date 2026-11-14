@@ -38,8 +38,19 @@ function ledgerVersions(raw: DatabaseSync): number[] {
     .all() as Array<{ version: number }>).map((row) => Number(row.version));
 }
 
+/** Tables that migrations after 65 add: 66 the closure ledger, 67 protected delivery. */
+const TABLES_AFTER_65 = ['continuity_gap_closures', 'protected_deliveries', 'protected_delivery_events'];
+
+function presentTables(raw: DatabaseSync, names: readonly string[]): string[] {
+  return names.filter((name) => raw.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+  ).get(name) !== undefined);
+}
+
+const versionsThrough = (last: number): number[] => Array.from({ length: last }, (_, i) => i + 1);
+
 describe('migration 66 through the registry', () => {
-  it('a fresh database opens at schema 66 with the closure table and its guards', () => {
+  it('a fresh database opens at the current schema, 67, with the closure table and its guards', () => {
     expect(CURRENT_SCHEMA_MIGRATION).toBe(67);
     const db = new Database(':memory:');
     db.open();
@@ -66,17 +77,25 @@ describe('migration 66 through the registry', () => {
       gapObservation(1, 'absent'),
       gapObservation(2, 'ambiguous'),
     ]);
-    // Emulate a schema-65 file: remove exactly what migration 66 adds.
+    // Emulate a schema-65 file, as the close-continuity-gap fixture does: remove
+    // every version above 65 and the objects those migrations add (66: the
+    // closure ledger; 67: the protected-delivery tables and their indexes).
     first.raw.exec('DROP TABLE continuity_gap_closures');
-    first.raw.prepare('DELETE FROM schema_migrations WHERE version = 66').run();
+    first.raw.exec('DROP TABLE protected_delivery_events');
+    first.raw.exec('DROP TABLE protected_deliveries');
+    first.raw.prepare('DELETE FROM schema_migrations WHERE version >= 66').run();
+    // The fixture must really be a schema-65 file before the upgrade.
+    expect(ledgerVersions(first.raw)).toEqual(versionsThrough(65));
+    expect(presentTables(first.raw, TABLES_AFTER_65)).toEqual([]);
     first.close();
 
     const upgraded = new Database(dbPath);
     upgraded.open();
     try {
       const raw = upgraded.raw;
-      expect(ledgerVersions(raw)).toEqual(Array.from({ length: 67 }, (_, i) => i + 1));
+      expect(ledgerVersions(raw)).toEqual(versionsThrough(67));
       expect(objectNames(raw, 'table')).toEqual(['continuity_gap_closures']);
+      expect(presentTables(raw, TABLES_AFTER_65)).toEqual(TABLES_AFTER_65);
       const plans = (raw.prepare(`
         SELECT plan_id FROM recovery_plans WHERE actor = 'continuity_manifest_recorder'
         ORDER BY plan_id
