@@ -96,6 +96,12 @@ import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import { m365BridgeCredentialAdmission, type M365MutationPolicy } from '../../../src/core/m365-bridge-policy.ts';
 import { M365_MUTATION_DENY } from '../../../src/core/settings-template.ts';
+
+// Settings written before account selection left the liftable subset may still lift these two.
+const ACCOUNT_SELECTION_DENY = [
+  'mcp__plugin_microsoft_365_microsoft_365__select-account',
+  'mcp__plugin_microsoft_365_microsoft_365__select-dataverse-environment',
+];
 import * as microsoft365Adapter from '../../../src/runtimes/agent/microsoft365-adapter.ts';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { SessionTokenRegistry } from '../../../src/mcp/caller-attribution.ts';
@@ -291,6 +297,7 @@ describe('Microsoft 365 authority at an in-place claude-cli respawn', () => {
     const args = respawned[1] as string[];
     expect(args).toContain('--disallowedTools');
     expect(M365_MUTATION_DENY.filter((entry) => !args.includes(entry))).toEqual([]);
+    expect(ACCOUNT_SELECTION_DENY.filter((entry) => !args.includes(entry))).toEqual([]);
     expect(m365Keys((respawned[2] as { env?: NodeJS.ProcessEnv }).env)).toEqual([]);
     // The respawned child's turn publishes no assignment and no route provider.
     const published = internals.m365ExecutingAuthority(session, true, 'request-2');
@@ -324,6 +331,7 @@ describe('Microsoft 365 authority at an in-place claude-cli respawn', () => {
     const env = (spawned[2] as { env?: NodeJS.ProcessEnv }).env;
     expect(args).toContain('--disallowedTools');
     expect(M365_MUTATION_DENY.filter((entry) => !args.includes(entry))).toEqual([]);
+    expect(ACCOUNT_SELECTION_DENY.filter((entry) => !args.includes(entry))).toEqual([]);
     // No bridge, credential or workflow-authority values reach the unverified plugin.
     expect(m365Keys(env)).toEqual([]);
     expect(env?.MS365_AGENT365_API_KEY).toBeUndefined();

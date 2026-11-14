@@ -5,6 +5,7 @@ import type { ToolRegistry } from './registry.ts';
 import type { SessionContext } from './types.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from './external-effect.ts';
 import { isTurnOwned } from './caller-attribution.ts';
+import { M365_ACCOUNT_SELECTION_TOOLS } from '../core/settings-template.ts';
 import { systemClock } from '../lib/clock.ts';
 
 export const M365_WORKFLOW_AUTHORITY_VERSION = 1 as const;
@@ -125,6 +126,14 @@ export function deriveM365WorkflowOperationId(
   return `m365-v1-${createHash('sha256').update(identity, 'utf8').digest('hex')}`;
 }
 
+const M365_PLUGIN_TOOL_PREFIX = 'mcp__plugin_microsoft_365_microsoft_365__';
+
+function selectsAccountOrEnvironment(toolName: string): boolean {
+  const name = toolName.trim().toLowerCase();
+  const operation = name.startsWith(M365_PLUGIN_TOOL_PREFIX) ? name.slice(M365_PLUGIN_TOOL_PREFIX.length) : name;
+  return M365_ACCOUNT_SELECTION_TOOLS.includes(operation);
+}
+
 export function authorizeM365WorkflowAction(
   request: M365WorkflowAuthorityRequest,
   context: M365WorkflowAuthorityContext,
@@ -165,6 +174,8 @@ export function authorizeM365WorkflowAction(
   }
   if (request.version !== M365_WORKFLOW_AUTHORITY_VERSION || !nonBlank(request.toolName) ||
       !nonBlank(request.accountId) || !nonBlank(request.requestId)) return { allowed: false, code: 'INVALID_REQUEST' };
+  // The receipt binds the declared account, not what an operation does; a switch would escape it.
+  if (selectsAccountOrEnvironment(request.toolName)) return { allowed: false, code: 'ACCOUNT_SELECTION_REFUSED' };
   if (request.accountId !== authority.accountId) return { allowed: false, code: 'ACCOUNT_NOT_ASSIGNED' };
   const canonicalParams = canonicalM365WorkflowParams(request.params);
   if (canonicalParams === null) return { allowed: false, code: 'INVALID_PARAMS' };

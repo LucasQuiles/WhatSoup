@@ -79,8 +79,20 @@ describe('authorizeM365WorkflowAction', () => {
     });
   });
 
-  // Lock-in: the broker keeps no tool list; the plugin decides which tools need a receipt.
-  it('binds a receipt to any tool name the plugin asks for, and never to another tool', () => {
+  // The receipt binds the declared account, not what an operation does, so no switch is authorized.
+  it.each([
+    'select-account',
+    'select-dataverse-environment',
+    'Select-Account',
+    'SELECT-DATAVERSE-ENVIRONMENT',
+    'mcp__plugin_microsoft_365_microsoft_365__select-account',
+  ])('refuses the account or environment selection operation %j', (toolName) => {
+    expect(authorizeM365WorkflowAction({ ...request, toolName }, currentHumanRequest, 1_000))
+      .toEqual({ allowed: false, code: 'ACCOUNT_SELECTION_REFUSED' });
+  });
+
+  // Lock-in: apart from account and environment selection, the plugin decides which tools need a receipt.
+  it('binds a receipt to any other tool name the plugin asks for, and never to another tool', () => {
     const result = authorizeM365WorkflowAction({ ...request, toolName: 'execute-dataverse-function' }, currentHumanRequest, 1_000);
     expect(result).toMatchObject({
       allowed: true,

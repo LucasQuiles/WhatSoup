@@ -2429,7 +2429,8 @@ At startup, WhatSoup compares that binding with its own service environment:
 one matching account selector, non-empty Agent365 API key, and matching loopback
 Agent365 and hub origins, a non-empty absolute `MS365_DURABLE_MAIL_STATE_DIR`, plus the current launcher's process-bound credential
 admission. Only a complete match generates the child M365
-environment and omits Microsoft 365 entries from the generated deny floor.
+environment and omits Microsoft 365 entries from the generated deny floor. The
+`select-account` and `select-dataverse-environment` entries stay in the floor even then.
 For an admitted workflow assignment, the private `authorize_m365_action` MCP
 tool derives the actor, conversation, and inbound request reference from the
 currently executing human turn, then issues a 15-minute receipt bound to the

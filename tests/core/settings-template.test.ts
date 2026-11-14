@@ -7,6 +7,7 @@ import {
   isValidPermissionsSettings,
   AGENT_DEFAULT_ALLOW,
   REQUIRED_DENY,
+  M365_MUTATION_DENY,
   applyRequiredDeny,
 } from '../../src/core/settings-template.ts';
 import type { M365MutationPolicy } from '../../src/core/m365-bridge-policy.ts';
@@ -90,6 +91,17 @@ describe('M365 bridge policy exception', () => {
     expect(deny).not.toContain('mcp__plugin_microsoft_365_microsoft_365__create-event');
     expect(deny).toContain('mcp__claude_ai_Gmail__create_draft');
     expect(deny).toContain('mcp__operator_owned__keep');
+  });
+
+  // The bridge binds one account; the receipt does not cover what an operation switches to.
+  it('keeps account and environment selection in the floor for an approved bridge', () => {
+    const deny = applyRequiredDeny([], approvedM365Policy);
+
+    expect(deny).toContain('mcp__plugin_microsoft_365_microsoft_365__select-account');
+    expect(deny).toContain('mcp__plugin_microsoft_365_microsoft_365__select-dataverse-environment');
+    expect(deny).not.toContain('mcp__plugin_microsoft_365_microsoft_365__create-event');
+    expect(M365_MUTATION_DENY).not.toContain('mcp__plugin_microsoft_365_microsoft_365__select-account');
+    expect(M365_MUTATION_DENY).not.toContain('mcp__plugin_microsoft_365_microsoft_365__select-dataverse-environment');
   });
 
   it('preserves a legacy full deny list because its authorship is unknown', () => {

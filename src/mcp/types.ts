@@ -81,7 +81,8 @@ export interface SessionContext {
   abortSignal?: AbortSignal;
   /**
    * #3421 step 1: who is on the other end of this session. Recorded on each
-   * tool_calls row; never read by any admission or authorization check.
+   * tool_calls row. The Microsoft workflow broker requires a turn-owned caller
+   * (m365-workflow-authority.ts); no other admission or authorization check reads it.
    * Replaced, never mutated, when the connection learns more about its client.
    */
   callerAttribution?: Readonly<CallerAttribution>;

@@ -53,7 +53,7 @@ vi.mock('../../../src/lib/keyring.ts', async (importOriginal) => {
 
 import { spawn } from 'node:child_process';
 import type { M365MutationPolicy } from '../../../src/core/m365-bridge-policy.ts';
-import { M365_MUTATION_DENY } from '../../../src/core/settings-template.ts';
+import { M365_ACCOUNT_SELECTION_DENY, M365_MUTATION_DENY } from '../../../src/core/settings-template.ts';
 import { killSessionTree } from '../../../src/runtimes/agent/process-tree.ts';
 import { resolveResumableAgentSession, updateResumedSessionStatus } from '../../../src/runtimes/agent/session-db.ts';
 import { SessionManager, type SessionManagerOptions } from '../../../src/runtimes/agent/session.ts';
@@ -364,7 +364,7 @@ describe('SessionManager host work admission', () => {
     expect(m365SpawnPolicy).toHaveBeenCalled();
     expect(m365SpawnPolicy.mock.results.every((result) => result.value === approved)).toBe(true);
     expect(launched(queued!.args, queued!.env)).toEqual({
-      denied: [...M365_MUTATION_DENY], bridgeValue: undefined, allow: undefined, authorityRequired: undefined,
+      denied: [...M365_MUTATION_DENY, ...M365_ACCOUNT_SELECTION_DENY], bridgeValue: undefined, allow: undefined, authorityRequired: undefined,
     });
     // No bridge, mutation or workflow-authority name reaches the queued child at all.
     expect(m365Keys(queued!.env)).toEqual([]);

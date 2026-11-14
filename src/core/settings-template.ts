@@ -49,6 +49,11 @@ export const M365_ACCOUNT_SELECTION_TOOLS: readonly string[] = Object.freeze([
   'select-dataverse-environment',
 ]);
 
+/** Deny entries for those operations; they stay in the floor in every mode, including an admitted bridge. */
+export const M365_ACCOUNT_SELECTION_DENY: readonly string[] = Object.freeze(
+  M365_ACCOUNT_SELECTION_TOOLS.map((tool) => `mcp__plugin_microsoft_365_microsoft_365__${tool}`),
+);
+
 /**
  * Repo-owned deny floor — patterns that must appear in `permissions.deny`
  * for an agent instance, except for an approved account-bound M365 bridge.
@@ -167,7 +172,7 @@ export const REQUIRED_DENY: readonly string[] = Object.freeze([
   'mcp__plugin_microsoft_365_microsoft_365__respond-to-event',
   'mcp__plugin_microsoft_365_microsoft_365__restore-item-version',
   // These change which account or environment later calls reach; the microsoft365 adapter refuses them too.
-  ...M365_ACCOUNT_SELECTION_TOOLS.map((tool) => `mcp__plugin_microsoft_365_microsoft_365__${tool}`),
+  ...M365_ACCOUNT_SELECTION_DENY,
   'mcp__plugin_microsoft_365_microsoft_365__send-channel-message',
   'mcp__plugin_microsoft_365_microsoft_365__send-chat-message',
   'mcp__plugin_microsoft_365_microsoft_365__send-draft',
@@ -200,9 +205,13 @@ export const REQUIRED_DENY: readonly string[] = Object.freeze([
   'mcp__plugin_microsoft_365_microsoft_365__upsert-dataverse-record',
 ]);
 
-/** Exact static subset eligible for a bound Agent365 bridge exception. */
+/**
+ * Exact static subset eligible for a bound Agent365 bridge exception. Account and environment
+ * selection stay denied even then: the bridge binds one account, and a switch escapes it.
+ */
 export const M365_MUTATION_DENY: readonly string[] = Object.freeze(
-  REQUIRED_DENY.filter((entry) => entry.startsWith('mcp__plugin_microsoft_365_microsoft_365__')),
+  REQUIRED_DENY.filter((entry) =>
+    entry.startsWith('mcp__plugin_microsoft_365_microsoft_365__') && !M365_ACCOUNT_SELECTION_DENY.includes(entry)),
 );
 
 /**

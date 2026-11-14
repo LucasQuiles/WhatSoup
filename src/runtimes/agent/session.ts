@@ -1,4 +1,4 @@
-import { M365_MUTATION_DENY } from '../../core/settings-template.ts';
+import { M365_ACCOUNT_SELECTION_DENY, M365_MUTATION_DENY } from '../../core/settings-template.ts';
 import {
   getTransportInboundContext,
   withTransportInboundContext,
@@ -1255,8 +1255,9 @@ export class SessionManager {
     );
     // A shared workspace may retain the primary route's M365 exception, and a withdrawal
     // leaves settings lifted until the floor is rewritten: a rejected policy denies on the CLI.
+    // Settings written by an earlier release may also have lifted account selection.
     if (provider === 'claude-cli' && m365Policy?.status === 'rejected') {
-      args.push('--disallowedTools', ...M365_MUTATION_DENY);
+      args.push('--disallowedTools', ...M365_MUTATION_DENY, ...M365_ACCOUNT_SELECTION_DENY);
     }
     return args;
   }

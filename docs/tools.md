@@ -3361,7 +3361,9 @@ described in [Connector mutation policy](configuration.md#connector-mutation-pol
 The caller cannot select an account, credential or executable: the adapter refuses
 the `select-account` and `select-dataverse-environment` operations
 (`microsoft365_invalid_request`) before it acquires authority or starts the plugin, in
-any letter case. The settings deny floor lists the same operations.
+any letter case. The settings deny floor lists the same operations in every mode, including
+under an admitted bridge exception, and the broker refuses a receipt for either one
+(`ACCOUNT_SELECTION_REFUSED`).
 
 | | |
 |---|---|
