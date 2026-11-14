@@ -84,6 +84,11 @@ interface AgentOptions {
     accountEmail?: string;
     origin: string;
     profile: 'user-full-v1';
+    workflowAuthority?: {
+      accountId: string;
+      employeeActorJid: string;
+      conversationKey?: string;
+    };
   };
   /**
    * Capability-obligation replay activation (all-or-inert; default OFF).

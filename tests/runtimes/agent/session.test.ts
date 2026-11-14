@@ -9,6 +9,7 @@ import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { ProviderMcpBridge } from '../../../src/runtimes/agent/providers/types.ts';
 import { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
 import { shortHash } from '../../../src/lib/short-hash.ts';
+import { M365_MUTATION_DENY } from '../../../src/core/settings-template.ts';
 import { outsideRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
 import {
   CONFIG_ROOT_ISOLATION_FLAG,
@@ -722,7 +723,7 @@ describe('SessionManager', () => {
       messenger: makeMessenger().messenger,
       chatJid: CHAT_JID,
       onEvent: vi.fn(),
-      whatsoupMcpSessionToken: 'session-token-persistent',
+      whatsoupMcpSessionLease: { token: 'session-token-persistent', revoke: vi.fn() },
     });
     await persistent.spawnSession();
     const persistentEnv = vi.mocked(spawn).mock.calls[0]?.[2]?.env;
@@ -735,7 +736,7 @@ describe('SessionManager', () => {
       onEvent: vi.fn(),
       provider: 'opencode-cli',
       model: 'glm/test-model',
-      whatsoupMcpSessionToken: 'session-token-per-turn',
+      whatsoupMcpSessionLease: { token: 'session-token-per-turn', revoke: vi.fn() },
     });
     await perTurn.spawnSession();
     void perTurn.sendTurn('hello').catch(() => {});
@@ -744,6 +745,76 @@ describe('SessionManager', () => {
 
     expect([persistentEnv?.WHATSOUP_MCP_SESSION_TOKEN, perTurnEnv?.WHATSOUP_MCP_SESSION_TOKEN])
       .toEqual(['session-token-persistent', 'session-token-per-turn']);
+  });
+
+  // M365 r4 W4/T6: the session token lives as long as its manager. A child
+  // respawned inside the manager keeps it, and the manager never revokes it itself.
+  it('keeps its session token lease across a child respawn and a kept shutdown', async () => {
+    const lease = { token: 'session-token-lease', revoke: vi.fn() };
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      whatsoupMcpSessionLease: lease,
+    } as ConstructorParameters<typeof SessionManager>[0]);
+    await sm.spawnSession();
+    const firstEnv = vi.mocked(spawn).mock.calls.at(-1)?.[2]?.env;
+    vi.mocked(spawn).mockReturnValue(makeMockChild(88889) as never);
+    await sm.handleNew();
+    const respawnedEnv = vi.mocked(spawn).mock.calls.at(-1)?.[2]?.env;
+    await sm.shutdown(true);
+
+    expect([firstEnv?.WHATSOUP_MCP_SESSION_TOKEN, respawnedEnv?.WHATSOUP_MCP_SESSION_TOKEN])
+      .toEqual(['session-token-lease', 'session-token-lease']);
+    expect((sm as unknown as { mcpSessionLease?: unknown }).mcpSessionLease).toBe(lease);
+    expect(lease.revoke).not.toHaveBeenCalled();
+  });
+
+  // B11: the runtime's live M365 policy is read at every spawn, so an in-place respawn after a
+  // withdrawal denies on the CLI and drops the bridge values, and a pending floor rewrite refuses it.
+  it('reads the live Microsoft 365 policy at each spawn, including an in-place respawn', async () => {
+    const childEnv = {
+      ALLOW_M365_MUTATIONS: '1', MS365_AGENT365_BRIDGE: 'true', MS365_AGENT365_API_KEY: 'synthetic-key',
+      MS365_AGENT365_ACCOUNT_ID: 'employee-account', MS365_TENANT_ID: '11111111-2222-3333-4444-555555555555',
+    };
+    const approved = { status: 'approved' as const, childEnv, workflowAuthority: { accountId: 'employee-account', employeeActorJid: '15551230001@s.whatsapp.net' } };
+    let live: { status: 'rejected' } | typeof approved = approved;
+    let refuse = false;
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      whatsoupMcpSocket: '/private/actor.sock', whatsoupMcpSessionLease: { token: 'session-token-lease', revoke: vi.fn() },
+      m365MutationPolicy: approved,
+      m365SpawnPolicy: () => {
+        if (refuse) throw new Error('M365_FLOOR_RESTORATION_PENDING: synthetic');
+        return live;
+      },
+    } as ConstructorParameters<typeof SessionManager>[0]);
+    const m365Keys = (env: NodeJS.ProcessEnv | undefined) => Object.keys(env ?? {})
+      .filter((key) => key.startsWith('MS365_') || key === 'ALLOW_M365_MUTATIONS');
+
+    await sm.spawnSession();
+    const first = vi.mocked(spawn).mock.calls.at(-1)!;
+    expect(first[1]).not.toContain('--disallowedTools');
+    expect(first[2]?.env?.MS365_WORKFLOW_AUTHORITY_REQUIRED).toBe('1');
+    expect(first[2]?.env?.MS365_AGENT365_API_KEY).toBe('synthetic-key');
+
+    // Withdrawn after the first spawn: the same manager's respawn gets the deny set and no bridge values.
+    live = { status: 'rejected' };
+    vi.mocked(spawn).mockReturnValue(makeMockChild(88890) as never);
+    await sm.handleNew();
+    const respawned = vi.mocked(spawn).mock.calls.at(-1)!;
+    expect(respawned[1]).toContain('--disallowedTools');
+    expect(respawned[1]).toEqual(expect.arrayContaining([...M365_MUTATION_DENY]));
+    expect(m365Keys(respawned[2]?.env)).toEqual([]);
+
+    // A pending floor rewrite refuses the next respawn before any child is spawned.
+    refuse = true;
+    const spawns = vi.mocked(spawn).mock.calls.length;
+    vi.mocked(spawn).mockReturnValue(makeMockChild(88891) as never);
+    await expect(sm.handleNew()).rejects.toThrow(/M365_FLOOR_RESTORATION_PENDING/);
+    expect(vi.mocked(spawn).mock.calls.length).toBe(spawns);
+    await sm.shutdown(true);
   });
 
   it('spawnSession propagates ALLOW_M365_MUTATIONS when fail-closed mode is unset', async () => {

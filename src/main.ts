@@ -513,6 +513,11 @@ if (instanceType === 'agent') {
       accountEmail?: string;
       origin: string;
       profile: 'user-full-v1';
+      workflowAuthority?: {
+        accountId: string;
+        employeeActorJid: string;
+        conversationKey?: string;
+      };
     };
     autoCompactInputTokens?: number;
     turnRecoveryCatchupReconcile?: { enabled: boolean; groupLimit?: number };

@@ -1,8 +1,8 @@
 # WhatSoup MCP Tool API Reference
 
-Complete reference for all 170 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
+Complete reference for all 171 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
 
-> **Conditionally-registered tools.** Of the 170 documented tools, 166 are always registered at startup and 4 are conditionally registered. Conditional tools are tagged `core: false` in their `ToolDeclaration` so that absence on an instance which does not meet the gate is tolerated rather than fatal (see `src/mcp/types.ts`).
+> **Conditionally-registered tools.** Of the 171 documented tools, 166 are always registered at startup and 5 are conditionally registered. Conditional tools are tagged `core: false` in their `ToolDeclaration` so that absence on an instance which does not meet the gate is tolerated rather than fatal (see `src/mcp/types.ts`).
 >
 > **`knowledge_search`** is registered only when all of the following hold:
 >
@@ -29,7 +29,12 @@ Complete reference for all 170 MCP tools exposed by WhatSoup. Tools are grouped 
 > `sandboxPerChat` mode and a `restartSelf` capability is supplied. Control-plane
 > peers are not required for this tool. Calls also require an authenticated admin.
 >
-> The total of 170 describes the full declaration surface, including all four
+> **`microsoft365`** is registered by the agent runtime only when its Microsoft
+> bridge policy is approved, an account ID is bound, and exactly one configured
+> Microsoft plugin has the admitted fixed launcher and environment. See
+> [`microsoft365`](#microsoft365) for its call-time authority checks.
+>
+> The total of 171 describes the full declaration surface, including all five
 > conditional tools. An instance's available tools depend on registration gates,
 > session scope and authorization. Instance names do not confer these capabilities.
 
@@ -92,13 +97,17 @@ Conversation-bound sessions have an additional registry allowlist and target bou
 | [audit.ts](#auditts) | 3 |
 | [substrate.ts](#substratets) | 23 |
 | [memory-write.ts](#memory-writets) | 1 |
-| **Total** | **170** |
+| **Total** | **171** |
 
-> The total above (`170`) includes `168` declarations in the per-module
-> `src/mcp/tools/*.ts` factories and two runtime declarations:
-> [`emit_heal_result`](#emit_heal_result) and [`restart_self`](#restart_self).
-> `registerRuntimeInlineTools` wires both from `AgentRuntime.start()`; their
-> declaration files are outside the per-module breakdown above.
+> The total above (`171`) includes `168` declarations wired through
+> `src/mcp/register-all.ts` and three tools registered by the agent runtime:
+> [`emit_heal_result`](#emit_heal_result), [`restart_self`](#restart_self), and
+> [`microsoft365`](#microsoft365). `registerRuntimeInlineTools` wires the first
+> two; `registerMicrosoft365Adapter` wires the third. These runtime registrations
+> are outside the per-module breakdown above. `register-all.ts` also always wires
+> the private `authorize_m365_action` broker from `src/mcp/m365-workflow-authority.ts`.
+> It is not counted here: it is marked private, so tool listings omit it. See
+> [`microsoft365`](#microsoft365).
 
 ---
 
@@ -3339,6 +3348,51 @@ Search company knowledge bases using natural language queries. Results are pre-f
 | namespace | string | optional | Override default namespace(s) |
 
 **Returns:** `index`, `query`, `results_count`, a structured `results` array containing each result's `id`, numeric `score`, and `entity_type`, plus a human-readable `formatted` summary. Available indexes are dynamically configured per instance. When an index profile defines `minScore`, lower-scoring hits are omitted and an all-low-score search returns zero results. A search of the instance's own memory index (`memory.pinecone.index`) without a `namespace` argument also covers the default namespace `__default__`, where `memory_write` writes. Memories in that index are scoped to the calling conversation: this chat first; in groups that are not owner-and-bot only, only the group's shared records and the verified sender's own; in a non-admin contact's direct chat, only that chat unless `contactRecallScopes` sets `instance`. Document namespaces are merged in by relevance in every context (see `docs/configuration.md`, Memory recall scope).
+
+---
+
+## microsoft365.ts
+
+### microsoft365
+
+List or call operations from the configured, account-bound Microsoft 365 plugin.
+Registration requires the approved bridge policy and the fixed installed launcher
+described in [Connector mutation policy](configuration.md#connector-mutation-policy-411).
+The caller cannot select an account, credential or executable: the adapter refuses
+the `select-account` and `select-dataverse-environment` operations
+(`microsoft365_invalid_request`) before it acquires authority or starts the plugin, in
+any letter case. The settings deny floor lists the same operations in every mode, including
+under an admitted bridge exception, and the broker refuses a receipt for either one
+(`ACCOUNT_SELECTION_REFUSED`).
+
+| | |
+|---|---|
+| **Scope** | `chat` |
+| **Target Mode** | `caller-supplied` |
+| **Replay Policy** | `unsafe` |
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| operation | `list` or `call` | required | Discover the plugin catalogue or invoke one operation |
+| name | non-empty string | for `call` | Exact operation name returned by `list` |
+| args | object | optional | Operation arguments; defaults to an empty object |
+
+Calls require a chat-scoped session with a delivery identity and a ready, runtime-owned
+broker socket bound to the same account. Reads remain available in scheduled turns.
+The guarded plugin requests a write receipt from the private `authorize_m365_action`
+broker only for an executing request from the assigned employee, in the assigned
+conversation when one is configured. This is separate from natural-language approval:
+the agent must still obtain an unambiguous employee request for the action. The broker
+admits the plugin this adapter launches (a request token) and, outside `sandboxPerChat`
+mode, a session's native plugin (its session token). In `sandboxPerChat` mode it refuses
+every session caller with `WORKFLOW_AUTHORITY_SANDBOX_SESSION`, so there only this adapter
+can obtain write receipts.
+
+`list` returns `{ tools: [...] }`; `call` returns the plugin result. Authority,
+account mismatch, process, deadline and protocol failures return tool errors. Plugin
+error details are not exposed by this adapter. The generic tool is marked unsafe to
+replay because its operations can write; durable mail reconciliation belongs to the
+Microsoft plugin rather than to automatic replay of this wrapper.
 
 ---
 

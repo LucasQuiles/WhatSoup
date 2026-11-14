@@ -12,6 +12,7 @@ import {
 } from '../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts';
 import {
   primaryModelUsabilityRequiresAlert,
+  probeIncompatibilityAlertAction,
   probePrimaryModelUsability,
 } from '../../../src/runtimes/agent/providers/primary-model-usability.ts';
 import { probeBinaryCommand as runBinaryCommandProbe } from '../../../src/runtimes/agent/providers/binary-preflight.ts';
@@ -1740,5 +1741,22 @@ describe('claude-cli strict-MCP capability probe', () => {
     await expect(attempt).resolves.toEqual({ status: 'timeout' });
     expect(help).toHaveBeenCalledTimes(1);
     expect(modelProbe).not.toHaveBeenCalled();
+  });
+});
+
+describe('probeIncompatibilityAlertAction', () => {
+  it('raises once for a CLI without strict MCP support and clears only on a usable result', () => {
+    const lacks = { status: 'unknown' as const, provider: 'claude-cli', model: 'm', reason: 'claude-cli-lacks-strict-mcp-config' };
+    const unavailable = { status: 'model-unavailable' as const, provider: 'claude-cli', model: 'm' };
+    const usable = { status: 'usable' as const, provider: 'claude-cli', model: 'm' };
+    expect(probeIncompatibilityAlertAction(lacks, false)).toBe('raise');
+    expect(probeIncompatibilityAlertAction(lacks, true)).toBe('none');
+    // An unavailable model says nothing about the CLI option, so the alert stays.
+    expect(probeIncompatibilityAlertAction(unavailable, true)).toBe('none');
+    expect(probeIncompatibilityAlertAction(unavailable, false)).toBe('none');
+    expect(probeIncompatibilityAlertAction(usable, true)).toBe('clear');
+    expect(probeIncompatibilityAlertAction(usable, false)).toBe('clear');
+    // The skip still makes no usability claim.
+    expect(primaryModelUsabilityRequiresAlert(lacks)).toBe(false);
   });
 });

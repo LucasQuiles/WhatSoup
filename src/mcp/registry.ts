@@ -150,6 +150,7 @@ function conversationBoundMaySee(tool: ToolDeclaration): boolean {
  *  non-disclosing "Unknown tool" reply). */
 function sessionWouldList(tool: ToolDeclaration, session: ResolvedSessionContext): boolean {
   if (!scheduledAgentJobMaySee(tool, session)) return false;
+  if (tool.chatSessionsOnly === true && (session.tier !== 'chat-scoped' || !session.deliveryJid)) return false;
   if (session.tier === 'chat-scoped' && tool.scope === 'global') return false;
   if (conversationBoundKey(session) !== undefined && !conversationBoundMaySee(tool)) return false;
   return true;
@@ -605,6 +606,7 @@ export class ToolRegistry {
 
     const isBound = conversationBoundKey(session) !== undefined;
     for (const tool of this.tools.values()) {
+      if (tool.private === true) continue;
       if (!sessionWouldList(tool, session)) continue;
 
       result.push({

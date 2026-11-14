@@ -5,6 +5,7 @@ import {
   CONFIG_ROOT_ISOLATION_FLAG,
   FAILCLOSED_FLAG,
 } from '../../../../src/runtimes/agent/providers/child-env.ts';
+import { m365SessionChildPolicy } from '../../../../src/core/m365-bridge-policy.ts';
 
 const MANAGED_ENV_KEYS = [
   'PATH',
@@ -41,6 +42,8 @@ const MANAGED_ENV_KEYS = [
   'WHATSOUP_INSTANCE',
   'WHATSOUP_MCP_SOCKET',
   'WHATSOUP_MCP_SESSION_TOKEN',
+  'MS365_WORKFLOW_AUTHORITY_REQUIRED',
+  'MS365_WORKFLOW_AUTHORITY_SOCKET',
   'ENABLE_TOOL_SEARCH',
   'TOKENOMICS_BOT',
   'BASH_MAX_OUTPUT_LENGTH',
@@ -455,6 +458,60 @@ describe('buildBaseChildEnv (account-bound M365 policy)', () => {
     expect(env).not.toHaveProperty('NODE_OPTIONS');
     expect(env).not.toHaveProperty('NODE_TLS_REJECT_UNAUTHORIZED');
     expect(env).not.toHaveProperty('NODE_EXTRA_CA_CERTS');
+  });
+
+  it('binds workflow authority only to the hosting turn scoped socket and token', () => {
+    resetManagedEnv({ PATH: '/usr/bin', HOME: '/tmp/child-home' });
+    const policy = {
+      status: 'approved' as const,
+      childEnv: {
+        ALLOW_M365_MUTATIONS: '1',
+        MS365_AGENT365_BRIDGE: 'true',
+        MS365_AGENT365_ACCOUNT_ID: 'employee-account',
+      },
+      workflowAuthority: {
+        accountId: 'employee-account',
+        employeeActorJid: '15551230001@s.whatsapp.net',
+        conversationKey: '15551230001',
+      },
+    };
+
+    const scoped = buildBaseChildEnv({
+      m365MutationPolicy: policy,
+      whatsoupMcpSocket: '/private/per-chat.sock',
+      whatsoupMcpSessionToken: 'turn-token',
+    });
+    const unscoped = buildBaseChildEnv({ m365MutationPolicy: policy });
+
+    expect(scoped).toMatchObject({
+      WHATSOUP_MCP_SOCKET: '/private/per-chat.sock',
+      WHATSOUP_MCP_SESSION_TOKEN: 'turn-token',
+      MS365_WORKFLOW_AUTHORITY_REQUIRED: '1',
+      MS365_WORKFLOW_AUTHORITY_SOCKET: '/private/per-chat.sock',
+    });
+    expect(unscoped.MS365_WORKFLOW_AUTHORITY_REQUIRED).toBe('1');
+    expect(unscoped).not.toHaveProperty('MS365_WORKFLOW_AUTHORITY_SOCKET');
+    for (const partial of [
+      { whatsoupMcpSocket: '/private/per-chat.sock' },
+      { whatsoupMcpSessionToken: 'turn-token' },
+    ]) {
+      const env = buildBaseChildEnv({ m365MutationPolicy: policy, ...partial });
+      expect(env.MS365_WORKFLOW_AUTHORITY_REQUIRED).toBe('1');
+      expect(env).not.toHaveProperty('MS365_WORKFLOW_AUTHORITY_SOCKET');
+    }
+    // A sandbox session child keeps its WhatSoup socket and token but gets no authority socket.
+    const sandboxed = buildBaseChildEnv({
+      m365MutationPolicy: m365SessionChildPolicy(policy, true),
+      whatsoupMcpSocket: '/private/workspace.sock',
+      whatsoupMcpSessionToken: 'turn-token',
+    });
+    expect(sandboxed).toMatchObject({
+      WHATSOUP_MCP_SOCKET: '/private/workspace.sock',
+      WHATSOUP_MCP_SESSION_TOKEN: 'turn-token',
+      MS365_WORKFLOW_AUTHORITY_REQUIRED: '1',
+      MS365_AGENT365_ACCOUNT_ID: 'employee-account',
+    });
+    expect(sandboxed).not.toHaveProperty('MS365_WORKFLOW_AUTHORITY_SOCKET');
   });
 
   it('drops ambient mutation authority when a configured bridge policy is rejected', () => {

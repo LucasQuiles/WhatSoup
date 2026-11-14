@@ -69,10 +69,38 @@ export interface ConfigFinding {
   message: string;
 }
 
+/** A non-failing note: the config loads, but a behaviour changes for it. */
+export interface ConfigWarning {
+  instance: string;
+  filePath: string;
+  field: string;
+  message: string;
+}
+
 export interface CheckResult {
   /** Files scanned. */
   scanned: { instance: string; filePath: string; healthPort?: number }[];
   findings: ConfigFinding[];
+  /** Upgrade notes; they never change the exit code. */
+  warnings?: ConfigWarning[];
+}
+
+/**
+ * Upgrade note for an M365 bridge binding without workflowAuthority. Such a binding
+ * still loads, but this release keeps Microsoft 365 writes denied for it.
+ */
+export function checkM365UpgradeWarnings(
+  raw: Record<string, unknown>,
+  instance: string,
+  filePath: string,
+): ConfigWarning[] {
+  const agentOptions = raw['agentOptions'];
+  const bridge = isRecord(agentOptions) ? agentOptions['m365Bridge'] : undefined;
+  if (!isRecord(bridge) || bridge['workflowAuthority'] !== undefined) return [];
+  const message = bridge['accountEmail'] !== undefined
+    ? 'an accountEmail binding cannot carry workflowAuthority, so Microsoft 365 writes stay denied; use accountId with workflowAuthority to keep employee-bound writes'
+    : 'no workflowAuthority, so Microsoft 365 writes stay denied; add workflowAuthority to keep employee-bound writes';
+  return [{ instance, filePath, field: 'agentOptions.m365Bridge.workflowAuthority', message }];
 }
 
 export interface CheckOptions {
@@ -366,6 +394,7 @@ export function checkInstanceConfigs(
 
   const files = discoverConfigFiles(root);
   const findings: ConfigFinding[] = [];
+  const warnings: ConfigWarning[] = [];
   const scanned: CheckResult['scanned'] = [];
   const portConfigs: PortConfig[] = [];
 
@@ -392,12 +421,13 @@ export function checkInstanceConfigs(
 
     findings.push(...checkSchema(raw, name, filePath));
     findings.push(...checkMemoryIntegrity(raw, name, filePath));
+    warnings.push(...checkM365UpgradeWarnings(raw, name, filePath));
   }
 
   // Port map is cross-config (per host/root).
   findings.push(...checkPortMap(portConfigs, opts));
 
-  return { scanned, findings };
+  return { scanned, findings, warnings };
 }
 
 /**
@@ -620,6 +650,7 @@ export function run(
         const healthResult = checkHealthProfiles(defaultHealthProfilesRoot(cwd), options);
         return {
           scanned: [...instanceResult.scanned, ...healthResult.scanned],
+          warnings: instanceResult.warnings,
           findings: [
             ...instanceResult.findings,
             ...healthResult.findings,
@@ -630,6 +661,9 @@ export function run(
   const scope = args.explicitRoot
     ? args.root
     : `${args.root} + ${defaultHealthProfilesRoot(cwd)}`;
+  for (const w of result.warnings ?? []) {
+    console.warn(`WARN [m365-upgrade] ${w.instance} (${w.field}): ${w.message}`);
+  }
 
   if (result.findings.length === 0) {
     console.log(

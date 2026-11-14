@@ -955,8 +955,9 @@ function qualityCiLanePartitionFailures(text: string): string[] {
   if (compatibility['timeout-minutes'] !== 40) {
     failures.push('quality (25.x) compatibility timeout must be exactly 40 minutes');
   }
-  if (compatibility['runs-on'] !== 'ubuntu-latest') {
-    failures.push('quality (25.x) compatibility runner must be exactly ubuntu-latest');
+  // Pinned with the workflow: ubuntu-latest (ubuntu-26.04) cannot build re2 on Node 25.
+  if (compatibility['runs-on'] !== 'ubuntu-24.04') {
+    failures.push('quality (25.x) compatibility runner must be exactly ubuntu-24.04');
   }
   if (hasOwn(compatibility, 'continue-on-error') && compatibility['continue-on-error'] !== false) {
     failures.push('quality (25.x) compatibility job must be blocking');

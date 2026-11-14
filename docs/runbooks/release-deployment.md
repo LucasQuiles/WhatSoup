@@ -238,6 +238,28 @@ Preconditions include: the wrapper symlink points at
 currently runs from `--expect-current`; a health token and port resolve; the
 database exists; and no staged plist still references `--expect-current`.
 
+The script does not check Microsoft 365 plugin copies. For a binding with
+`workflowAuthority`, the runtime checks both copies at startup, before each later
+native-settings write, before each `claude-cli` spawn, before each turn publishes its
+authority and before each `microsoft365` adapter launch. A binding without
+`workflowAuthority`, and every `accountEmail` binding, gets no native-copy check: its
+`claude-cli` children receive the bridge key and load the `enabledPlugins` copy unchecked,
+so only the settings deny floor stops native writes, and the adapter checks only the
+`pluginDirs` copy it launches. Before
+activating a release for an instance with an `m365Bridge` binding, check that the guarded
+plugin is installed through `agentOptions.pluginDirs`. When no guarded plugin is admitted
+there, or the copy that `enabledPlugins` names is missing or differs from the guarded
+copy, including after a marketplace update during the run, the runtime withdraws
+`workflowAuthority` and logs `Microsoft 365 workflow authority withdrawn` with a reason.
+Microsoft 365 writes then stay denied until both copies match and the instance restarts.
+See the "One guarded plugin build" note in
+[the configuration reference](../configuration.md#connector-mutation-policy-411).
+
+Activate a release that introduces `workflowAuthority` before you add that key to the
+instance configuration: the previous release refuses it, so the automatic rollback
+could not start the old binary on such a configuration. See "Deploy order" in the
+configuration reference.
+
 #### Root-owned LaunchAgents: the root plist helper
 
 A root-owned, `uchg`-protected `com.whatsoup.<name>.plist` in the bot user's
@@ -795,6 +817,12 @@ manifest's rollback path when it does not.
 
 Verify a rollback the same way as an activation: from the executing process,
 not from the restored configuration.
+
+Before a rollback starts a release older than the one that introduced
+`agentOptions.m365Bridge.workflowAuthority`, remove `workflowAuthority` from the
+instance configuration. That release refuses the key, so the old binary would not
+start. It also refuses an `m365Bridge` binding on provider `openai-api` or
+`anthropic-api`: return such an instance to `claude-cli`, or remove the binding, first.
 
 `release:activate` performs this rollback automatically. It keeps the symlink
 target and plist copies in `<backup-dir>/activation-<commit12>-<utc>/` rather

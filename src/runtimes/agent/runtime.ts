@@ -85,6 +85,7 @@ import {
   AMBIGUOUS_SESSION_MAX_AGE_MS,
   MAX_RESIDENT_SESSIONS,
   SESSION_MIN_RESIDENCY_MS,
+  sessionIdleMs,
   RESIDENT_TURN_PROGRESS_DEADLINE_MS,
   diagnosticBundleEnabled,
   DIAGNOSTIC_BUNDLE_THROTTLE_MS,
@@ -123,8 +124,8 @@ import {
   ensureFallbackStateSchema,
   getFallbackState,
 } from './fallback-state-db.ts';
-import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
-import { resolveM365MutationPolicy, type M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
+import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts } from '../../core/workspace.ts';
+import { m365NativeFloorPolicy, m365RoutePolicy, m365SessionChildPolicy, m365TurnAuthority, narrowM365RoutePolicy, type M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
 import { inspectUserClaudeSettings } from '../../core/user-claude-settings.ts';
 import { isSamePhysicalDirectory } from '../../lib/home-path.ts';
 import { classifyActiveSessions, resolveAmbiguousAgeFallback } from './session-classifier.ts';
@@ -320,6 +321,7 @@ import { randomUUID } from 'node:crypto';
 import { EgressProxy } from './egress-proxy.ts';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { PerChatMcpSocketManager } from './per-chat-mcp-socket-manager.ts';
+import { admitMicrosoft365Workflow, Microsoft365SettingsFiles, microsoft365SpawnPolicy, recheckMicrosoft365Workflow, resolveExplainedM365MutationPolicy } from './microsoft365-adapter.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
 import { SessionTokenRegistry } from '../../mcp/caller-attribution.ts';
 import { withTrustedActorTurn, withUnauthenticatedActorTurn } from './trusted-actor-envelope.ts';
@@ -340,7 +342,6 @@ import {
   templateForFallbackReason,
 } from './runtime-presentation.ts';
 import {
-  buildProviderMcpConfigArgs,
   createProviderMcpBridge,
   providerMcpProxyScriptPath,
   writeProviderMcpConfig,
@@ -375,7 +376,12 @@ import {
   suppressStreamedProviderFailure as gateStreamedProviderFailure,
 } from './streamed-provider-failure.ts';
 import { isProcessAlive, sessionUsesInProcessBridge } from './runtime-predicates.ts';
-import { canaryStoreProvisioned, readProviderCanaryAdmission } from './provider-canary-proof.ts';
+import {
+  buildProviderToolSession, providerCanaryAdmissionGate, sessionProviderMcpConfigArgs, sessionTokenLeaseBinding,
+} from './session-mcp-wiring.ts';
+import {
+  perChatDegradedReasons, singleSessionDegradedReasons, singleSessionHealthStatus, summarizePerChatSessions,
+} from './runtime-health-status.ts';
 import { probeBinaryCommand, type listModelCatalog } from './providers/binary-preflight.ts';
 import { claudeRefreshLockGrace, refreshClaudeLoginAhead } from './providers/claude-refresh-ahead.ts';
 import { probePrimaryModelUsability, type PrimaryProbeServiceContext } from './providers/primary-model-usability.ts';
@@ -606,8 +612,9 @@ export class AgentRuntime implements Runtime {
   private readonly enabledPlugins: Record<string, boolean> | undefined;
   private readonly allowM365Mutations: boolean | undefined;
   private readonly providerProcessIsolation: ProviderProcessIsolationConfig | undefined;
-  private readonly m365MutationPolicy: M365MutationPolicy | undefined;
+  private m365MutationPolicy: M365MutationPolicy | undefined;
   private m365SettingsPolicyReady = false;
+  private readonly m365SettingsFiles = new Microsoft365SettingsFiles();
   private readonly autoCompactInputTokens: number | undefined;
   private readonly memoryReadiness: MemoryReadinessSnapshot | undefined;
   private readonly agentProvider: string;
@@ -635,7 +642,10 @@ export class AgentRuntime implements Runtime {
   private primaryProbeServiceContext: PrimaryProbeServiceContext | null = null;
 
   // single mode: one session, one queue
-  private session: SessionManager | null = null;
+  private sessionSlot: SessionManager | null = null;
+  private get session(): SessionManager | null { return this.sessionSlot; }
+  /** Retiring or replacing the singleton manager revokes its session token; keeping it does not. */
+  private set session(next: SessionManager | null) { if (this.sessionSlot !== next) this.sessionSlot?.mcpSessionLease?.revoke(); this.sessionSlot = next; }
   private queue: IOutboundQueue | null = null;
   private activeChatJid: string | null = null;
 
@@ -649,6 +659,7 @@ export class AgentRuntime implements Runtime {
   private readonly turnReplySinks: RuntimeTurnReplySinks<SessionManager>;
   private readonly sessionOwnership = new SessionOwnershipRegistry();
   private readonly sessionManagerIds = new WeakMap<SessionManager, string>();
+  private readonly sessionM365Policies = new WeakMap<SessionManager, M365MutationPolicy | undefined>();
   private readonly sessionEventToolScopes = new WeakMap<SessionManager, string>();
   private readonly ownedSessionManagers = new Map<string, SessionManager>();
 
@@ -1896,16 +1907,9 @@ export class AgentRuntime implements Runtime {
     return true;
   }
 
-  private sessionIdleMs(session: SessionManager, now: number): number {
-    const st = session.getStatus();
-    const startedMs = st.startedAt ? Date.parse(st.startedAt) : now;
-    const lastMs = st.lastMessageAt ? Date.parse(st.lastMessageAt) : startedMs;
-    return Number.isFinite(lastMs) ? now - lastMs : 0;
-  }
-
   /** TTL-pass eligibility: safe to evict AND idle beyond the TTL. */
   private isSessionEvictable(mapKey: string, session: SessionManager, now: number): boolean {
-    return this.isSessionSafeToEvict(mapKey, session, now) && this.sessionIdleMs(session, now) > SESSION_IDLE_MS;
+    return this.isSessionSafeToEvict(mapKey, session, now) && sessionIdleMs(session.getStatus(), now) > SESSION_IDLE_MS;
   }
 
   /**
@@ -1936,7 +1940,7 @@ export class AgentRuntime implements Runtime {
       const overBy = this.chatSessions.size - MAX_RESIDENT_SESSIONS;
       const candidates = [...this.chatSessions.entries()]
         .filter(([mapKey, session]) => this.isSessionSafeToEvict(mapKey, session, now))
-        .map(([mapKey, session]) => ({ mapKey, session, idleMs: this.sessionIdleMs(session, now) }))
+        .map(([mapKey, session]) => ({ mapKey, session, idleMs: sessionIdleMs(session.getStatus(), now) }))
         .sort((a, b) => b.idleMs - a.idleMs); // longest-idle first
       for (const { mapKey, session } of candidates.slice(0, overBy)) {
         this.evictIdleSession(mapKey, session, 'lru-ceiling');
@@ -2690,8 +2694,8 @@ export class AgentRuntime implements Runtime {
     this.memoryReadiness = options?.memoryReadiness;
     this.agentProvider = config.agentProvider;
     this.agentProviderConfig = config.agentProviderConfig;
-    this.m365MutationPolicy = resolveM365MutationPolicy({
-      instanceName: this.instanceName,
+    this.m365MutationPolicy = resolveExplainedM365MutationPolicy({
+      instanceName: this.instanceName, sessionScope: this.sessionScope,
       provider: this.agentProvider,
       allowM365Mutations: this.allowM365Mutations,
       enabledPlugins: this.enabledPlugins,
@@ -3895,11 +3899,23 @@ export class AgentRuntime implements Runtime {
     }
   }
 
+  /** M365 authority a turn publishes: its session's route policy narrowed by the re-checked runtime policy (unknown session: rejected). */
+  private m365ExecutingAuthority(session: SessionManager, humanRequest: boolean, requestRef: string | undefined) {
+    const routePolicy = narrowM365RoutePolicy(this.sessionM365Policies.get(session), this.recheckM365Policy());
+    return m365TurnAuthority(routePolicy, humanRequest, requestRef, this.sessionScope, sessionProviderId(session) ?? undefined, this.sandboxPerChat);
+  }
+
   getM365SettingsPolicy(): M365MutationPolicy | undefined {
-    if (this.m365MutationPolicy === undefined) return undefined;
-    // Grant reconciliation runs before startup restores a persisted fallback.
-    return this.m365SettingsPolicyReady && !this.isFallbackWindowActive
-      ? this.m365MutationPolicy : { status: 'rejected' };
+    // Grant reconciliation runs before startup restores a persisted fallback; afterwards every settings write re-checks the native plugin copy.
+    if (this.m365MutationPolicy === undefined || !this.m365SettingsPolicyReady) return this.m365MutationPolicy && { status: 'rejected' as const };
+    return m365NativeFloorPolicy(m365RoutePolicy(this.recheckM365Policy(), this.effectiveProvider, !this.isFallbackWindowActive), this.sessionScope, this.sandboxPerChat);
+  }
+
+  /** Re-checks the native plugin copy; a withdrawal restores the deny floor in every settings file this runtime wrote before it returns. */
+  private recheckM365Policy(): M365MutationPolicy | undefined {
+    const before = this.m365MutationPolicy;
+    this.m365MutationPolicy = recheckMicrosoft365Workflow(before, this.instanceName);
+    return this.m365SettingsFiles.restoreFloorOnWithdrawal(before, this.m365MutationPolicy, this.instanceName);
   }
 
   async start(): Promise<void> {
@@ -3908,6 +3924,15 @@ export class AgentRuntime implements Runtime {
     if (this.cwd && isSamePhysicalDirectory(this.cwd, homedir())) throw new Error('configured agent cwd must not resolve to the user home directory');
     if (this.cwd) this.cwd = admitHomeConfinedPath(this.cwd, home);
     this.pluginDirs = this.pluginDirs?.map(dir => admitHomeConfinedPath(dir, home));
+    this.m365MutationPolicy = admitMicrosoft365Workflow({
+      registry: this.registry,
+      policy: this.m365MutationPolicy,
+      pluginDirs: this.pluginDirs,
+      perChatMcpSocketManager: this.perChatMcpSocketManager,
+      resolvePerChatMapKey: (deliveryJid) => this.resolvePerChatMapKey(deliveryJid),
+      sessionTokens: this.sessionTokens,
+      sandboxPerChat: this.sandboxPerChat, instanceName: this.instanceName,
+    });
 
     // C5 restart-loop guard: mark this boot BEFORE any fallible work so a
     // later crash leaves the marker standing. Consumed at the resume gate
@@ -4015,10 +4040,7 @@ export class AgentRuntime implements Runtime {
       const cwd = this.cwd ?? homedir();
       try {
         const claudeDir = ensureHomeConfinedDirectory(join(cwd, '.claude'), home);
-        ensurePermissionsSettings(claudeDir, 'agent', this.enabledPlugins, {
-          hasSandbox: !!this.sandbox,
-          m365MutationPolicy: this.getM365SettingsPolicy(),
-        });
+        this.m365SettingsFiles.write('shared', claudeDir, this.enabledPlugins, { hasSandbox: !!this.sandbox, m365MutationPolicy: this.getM365SettingsPolicy() });
         // User-level settings are not owned by this instance. Startup only
         // inspects for its exact hook and warns; it never repairs or normalizes
         // global hooks, permissions, or plugins.
@@ -5672,6 +5694,7 @@ export class AgentRuntime implements Runtime {
         actorJid: senderJid,
         purpose,
         conversationKey: canonicalConversationKey(chatJid, this.db),
+        ...this.m365ExecutingAuthority(this.session!, !recoveryDispatch && purpose === undefined, context?.replay.sourceMessageId),
       });
       this.perChatExecActorQueue.set(GLOBAL_TOOL_SCOPE_KEY, sharedExecQ);
       const scheduled = purpose === 'scheduled-agent-job';
@@ -5949,6 +5972,7 @@ export class AgentRuntime implements Runtime {
           actorJid,
           purpose,
           conversationKey: canonicalConversationKey(chatJid, this.db),
+          ...this.m365ExecutingAuthority(session, deliveryKind === 'live' && purpose === undefined, runtimeContext?.replay.sourceMessageId),
         });
         this.perChatExecActorQueue.set(execScopeKey, execQ);
         actorPushed = true;
@@ -7644,53 +7668,17 @@ export class AgentRuntime implements Runtime {
       ...recoveryHealth,
       ...fallbackState,
     };
+    const degradationInput = {
+      autoCompactHealth, fallbackState, finalizationDegraded, completedDeliveryIdentityDebt, agentRespawnFailedClearPending,
+      turnQueueHealth, poisonHealth, providerExecution, pollPersistenceHealth, offlineDecisionRetry, accountIdentityReasons,
+    };
     if (this.sessionScope === 'per_chat') {
       const sessions = [...this.chatSessions.values()];
-      let activeSessions = 0;
-      let lastSessionStatus: string | null = null;
-      let lastSessionStartedAt: string | null = null;
-      let mostRecentStartMs = -1;
-      for (const s of sessions) {
-        const st = s.getStatus();
-        if (st.active) activeSessions++;
-        // Track the most recently started session for lastSession* fields
-        if (st.startedAt) {
-          const startMs = new Date(st.startedAt).getTime();
-          if (startMs > mostRecentStartMs) {
-            mostRecentStartMs = startMs;
-            lastSessionStatus = st.active ? 'active' : 'idle';
-            lastSessionStartedAt = st.startedAt;
-          }
-        }
-      }
-      const degradedReasons: string[] = [];
-      // Idle per-chat sessions are normal; recent crashes degrade even after map cleanup.
+      const { activeSessions, lastSessionStatus, lastSessionStartedAt } = summarizePerChatSessions(sessions.map((s) => s.getStatus()));
       const recentCrashCount = this.getRecentCrashCount();
-      if (recentCrashCount > 0) degradedReasons.push('recent_crashes');
-      if (autoCompactHealth.activeBackoffScopes > 0) degradedReasons.push('auto_compact_backoff');
-      if (fallbackState.fallbackActiveUntil !== null) degradedReasons.push('provider_fallback_active');
-      if (finalizationDegraded) degradedReasons.push('turn_finalization_debt');
-      if (completedDeliveryIdentityDebt) degradedReasons.push('completed_delivery_identity_debt');
-      // This state rejects every inbound turn in the affected chat and, before
-      // the eviction path, did so with no operator-visible signal at all.
-      if (perChatSessionsWithoutOwner.length > 0) {
-        degradedReasons.push('per_chat_session_without_owner');
-      }
-      // An abandoned respawn stops recovering this chat until the user writes
-      // again, and unlike recent_crashes this signal does not decay inside the
-      // crash-health window.
-      if (perChatRespawnAbandoned > 0) {
-        degradedReasons.push('per_chat_respawn_abandoned');
-      }
-      if (agentRespawnFailedClearPending) {
-        degradedReasons.push('agent_respawn_failed_clear_pending');
-      }
-      if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
-      if (poisonHealth.outboundQueuePoisoned) degradedReasons.push('outbound_queue_poisoned');
-      if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
-      if (pollPersistenceHealth.degraded) degradedReasons.push('poll_persistence_failure');
-      if (offlineDecisionRetry.exhausted) degradedReasons.push('offline_decision_retry_exhausted');
-      degradedReasons.push(...accountIdentityReasons);
+      const degradedReasons = perChatDegradedReasons({
+        ...degradationInput, recentCrashCount, perChatSessionsWithoutOwner: perChatSessionsWithoutOwner.length, perChatRespawnAbandoned,
+      });
       const healthStatus: RuntimeHealth['status'] = degradedReasons.length > 0 ? 'degraded' : 'healthy';
       return {
         status: healthStatus,
@@ -7708,30 +7696,12 @@ export class AgentRuntime implements Runtime {
     }
 
     const status = this.session?.getStatus();
-    // If a session exists but its child process is not active, it has crashed
-    const degradedReasons: string[] = [];
-    if (this.session !== null && status?.active === false) degradedReasons.push('session_inactive');
-    if (autoCompactHealth.activeBackoffScopes > 0) degradedReasons.push('auto_compact_backoff');
-    if (fallbackState.fallbackActiveUntil !== null) degradedReasons.push('provider_fallback_active');
-    if (finalizationDegraded) degradedReasons.push('turn_finalization_debt');
-    if (completedDeliveryIdentityDebt) degradedReasons.push('completed_delivery_identity_debt');
-    if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
-    if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
-    if (poisonHealth.outboundQueuePoisoned) degradedReasons.push('outbound_queue_poisoned');
-    if (pollPersistenceHealth.degraded) degradedReasons.push('poll_persistence_failure');
-    if (offlineDecisionRetry.exhausted) degradedReasons.push('offline_decision_retry_exhausted');
-    if (agentRespawnFailedClearPending) {
-      degradedReasons.push('agent_respawn_failed_clear_pending');
-    }
-    degradedReasons.push(...accountIdentityReasons);
-    // A halted single/shared queue is the active admission path — unhealthy/503,
-    // matching the public-surface contract; every other reason degrades only.
-    const healthStatus: RuntimeHealth['status'] =
-      turnQueueHealth.turnQueueHalted || poisonHealth.activeAdmissionLaneBlocked
-        ? 'unhealthy'
-        : degradedReasons.length > 0
-          ? 'degraded'
-          : 'healthy';
+    const degradedReasons = singleSessionDegradedReasons({
+      ...degradationInput, sessionInactive: this.session !== null && status?.active === false,
+    });
+    const healthStatus = singleSessionHealthStatus(
+      degradedReasons, turnQueueHealth.turnQueueHalted, poisonHealth.activeAdmissionLaneBlocked,
+    );
     return {
       status: healthStatus,
       details: {
@@ -8591,6 +8561,7 @@ export class AgentRuntime implements Runtime {
       }
       this.sessionOwnership.transition(mapKey, current.managerId, 'closing');
       this.sessionOwnership.release(mapKey, current.managerId);
+      previous?.mcpSessionLease?.revoke();
       this.ownedSessionManagers.delete(current.managerId);
     }
     if (!this.sessionOwnership.get(mapKey)) {
@@ -8649,6 +8620,7 @@ export class AgentRuntime implements Runtime {
         this.sessionOwnership.discardIfOwned(mapKey, current.managerId);
       }
       this.chatSessions.delete(mapKey);
+      mapped?.mcpSessionLease?.revoke();
       if (mapped !== undefined) this.lazyRestoreScopes.noteRetired(mapKey);
       // Forget the chat's throttle history here, alongside the map entry the
       // sweep iterates. Deliberately OUTSIDE the `if (current)` above: the
@@ -10551,25 +10523,11 @@ export class AgentRuntime implements Runtime {
       throw new Error(`per_chat ${sessionProvider} session for ${sessionConversationKey} would spawn without an actor-bound socket`);
     }
     const sessionManagerId = randomUUID();
-    const providerToolSession: SessionContext =
-      this.sandboxPerChat || this.sessionScope === 'per_chat'
-        ? {
-            tier: 'chat-scoped',
-            conversationKey: deliveryConversationKey,
-            deliveryJid: opts.chatJid,
-            ...(opts.actorJid ? { actorJid: opts.actorJid } : {}),
-            ...(opts.cwd ? { allowedRoot: opts.cwd } : {}),
-            ...(isScheduledAgentJobMapKey(sessionConversationKey)
-              ? { purpose: 'scheduled-agent-job' as const }
-              : {}),
-          }
-        : {
-            tier: 'global',
-            ...(opts.actorJid ? { actorJid: opts.actorJid } : {}),
-            ...(!this.shared ? { conversationKey: deliveryConversationKey } : {}),
-          };
-    providerToolSession.turnReplySessionId = sessionManagerId;
-    const mcpSessionToken = this.sessionTokens.mint(sessionManagerId);
+    const providerToolSession = buildProviderToolSession({
+      chatScoped: this.sandboxPerChat || this.sessionScope === 'per_chat', shared: this.shared,
+      chatJid: opts.chatJid, deliveryConversationKey, sessionConversationKey,
+      actorJid: opts.actorJid, cwd: opts.cwd, turnReplySessionId: sessionManagerId,
+    });
     if (opts.trackSingletonMcpSession) {
       this.singletonProviderToolSession = providerToolSession;
     }
@@ -10578,17 +10536,13 @@ export class AgentRuntime implements Runtime {
     const primaryBridgeRoute = !this.isFallbackWindowActive && route.source !== 'fallback'
       && route.provider === this.agentProvider && route.model === this.model
       && opts.providerConfigOverride === undefined;
-    const sessionM365Policy: M365MutationPolicy | undefined = this.m365MutationPolicy === undefined
-      ? undefined
-      : primaryBridgeRoute ? this.m365MutationPolicy : { status: 'rejected' };
+    // The native plugin copy is re-checked first: this session may write sandbox settings.
+    const sessionM365Policy = m365RoutePolicy(this.recheckM365Policy(), sessionProvider, primaryBridgeRoute);
 
     // Each sandbox cwd owns its settings; route changes must restore the deny
     // floor before a fallback can reuse a workspace approved for the primary.
     if (this.sandboxPerChat && opts.cwd) {
-      ensurePermissionsSettings(join(opts.cwd, '.claude'), 'agent', this.enabledPlugins, {
-        hasSandbox: true,
-        m365MutationPolicy: sessionM365Policy,
-      });
+      this.m365SettingsFiles.write('chat', join(opts.cwd, '.claude'), this.enabledPlugins, { hasSandbox: true, m365MutationPolicy: m365NativeFloorPolicy(sessionM365Policy, this.sessionScope, true) });
     }
 
     const session = new SessionManager({
@@ -10609,6 +10563,7 @@ export class AgentRuntime implements Runtime {
       pluginDirs: this.pluginDirs,
       allowM365Mutations: sessionM365Policy?.status === 'rejected' ? false : this.allowM365Mutations,
       m365MutationPolicy: sessionM365Policy,
+      m365SpawnPolicy: () => m365SessionChildPolicy(microsoft365SpawnPolicy(sessionM365Policy, this.recheckM365Policy(), this.m365SettingsFiles), this.sandboxPerChat),
       provider: route ? route.provider : this.effectiveProvider,
       providerConfig: opts.providerConfigOverride
         ? { ...(route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()), ...opts.providerConfigOverride }
@@ -10625,7 +10580,9 @@ export class AgentRuntime implements Runtime {
       mcpSessionContext: providerToolSession,
       whatsoupInstance: this.instanceName,
       whatsoupMcpSocket: mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
-      whatsoupMcpSessionToken: mcpSessionToken,
+      whatsoupMcpSessionLease: this.sessionTokens.mintLease(sessionTokenLeaseBinding({
+        mcpSocketPath, globalMcpSocketPath: this.globalMcpSocketPath, sandboxPerChat: this.sandboxPerChat, cwd: opts.cwd, turnReplySessionId: sessionManagerId,
+      })),
       providerTransitionReady,
       handoffSystemBlock: this.buildHandoffSystemBlock(sessionConversationKey, route ? route.provider : this.effectiveProvider),
       degradedCapabilitiesBlock: managedLoopDegraded
@@ -10640,33 +10597,17 @@ export class AgentRuntime implements Runtime {
       egressProxyPort: this.egressProxy?.port,
       providerExecutionGate: this.providerExecutionGate,
       providerProcessIsolation: this.providerProcessIsolation,
-      providerMcpConfigArgs: this.globalMcpSocketPath
-        ? buildProviderMcpConfigArgs(
-            sessionProvider,
-            opts.cwd ?? this.cwd ?? homedir(),
-            this.globalMcpSocketPath,
-            mcpServerScript,
-          )
-        : [],
-      providerCanaryAdmission: actorSocketRequired && canaryStoreProvisioned(config.stateRoot)
-        ? async () => {
-            const admission = await readProviderCanaryAdmission({
-              providerId: sessionProvider,
-              binary: getProviderBinary(sessionProvider) ?? '',
-              proxyScriptPath: mcpServerScript,
-              stateRoot: config.stateRoot,
-              sessionScope: this.sessionScope,
-              sandboxPerChat: this.sandboxPerChat,
-            });
-            if (!admission.allowed) {
-              throw new Error('provider MCP canary proof unavailable');
-            }
-            return admission;
-          }
-        : undefined,
+      providerMcpConfigArgs: sessionProviderMcpConfigArgs({
+        provider: sessionProvider, cwd: opts.cwd ?? this.cwd, globalMcpSocketPath: this.globalMcpSocketPath, proxyScriptPath: mcpServerScript,
+      }),
+      providerCanaryAdmission: providerCanaryAdmissionGate(actorSocketRequired, {
+        providerId: sessionProvider, proxyScriptPath: mcpServerScript, stateRoot: config.stateRoot,
+        sessionScope: this.sessionScope, sandboxPerChat: this.sandboxPerChat,
+      }),
     });
     providerToolSession.turnReplySink = this.turnReplySinks.forSession(session, opts.sessionMapKey);
     this.sessionManagerIds.set(session, sessionManagerId);
+    this.sessionM365Policies.set(session, sessionM365Policy);
     this.sessionEventToolScopes.set(
       session,
       opts.eventToolScopeKey ?? GLOBAL_TOOL_SCOPE_KEY,

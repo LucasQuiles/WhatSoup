@@ -203,8 +203,6 @@ describe('PerChatMcpSocketManager', () => {
     const identity = 'socket-turn@s.whatsapp.net';
     const conversationKey = 'socket-turn';
     const tokens = new SessionTokenRegistry();
-    const staleToken = tokens.mint('stale-manager');
-    const liveToken = tokens.mint('live-manager');
     const queue = new OutboundQueue({
       sendMessage: async () => ({ waMessageId: null }),
       sendMedia: async () => ({ waMessageId: null }),
@@ -258,6 +256,10 @@ describe('PerChatMcpSocketManager', () => {
     });
     const lease = manager.acquire(identity, identity);
     await lease.ready;
+    // Both tokens are bound to this socket, so the stale case is refused by the
+    // turn-reply arbitration, not by the socket binding.
+    const staleToken = tokens.mint({ kind: 'session', socketPath: lease.socketPath, turnReplySessionId: 'stale-manager' });
+    const liveToken = tokens.mint({ kind: 'session', socketPath: lease.socketPath, turnReplySessionId: 'live-manager' });
     try {
       await exchange(lease.socketPath, [
         { jsonrpc: '2.0', method: SESSION_TOKEN_NOTIFICATION, params: { token: staleToken } },
@@ -285,7 +287,6 @@ describe('PerChatMcpSocketManager', () => {
     roots.push(root);
     const identity = 'socket-turn@s.whatsapp.net';
     const tokens = new SessionTokenRegistry();
-    const staleToken = tokens.mint('stale-manager');
     const rawSends: Array<{ jid: string; content: unknown }> = [];
     const db = new Database(':memory:');
     db.open();
@@ -323,6 +324,8 @@ describe('PerChatMcpSocketManager', () => {
     });
     const lease = manager.acquire(identity, identity);
     await lease.ready;
+    // Bound to this socket, so only the turn-reply arbitration refuses it.
+    const staleToken = tokens.mint({ kind: 'session', socketPath: lease.socketPath, turnReplySessionId: 'stale-manager' });
     try {
       const response = await exchange(lease.socketPath, [
         { jsonrpc: '2.0', method: SESSION_TOKEN_NOTIFICATION, params: { token: staleToken } },
@@ -350,7 +353,6 @@ describe('PerChatMcpSocketManager', () => {
     roots.push(root);
     const identity = 'socket-delayed-ack@s.whatsapp.net';
     const tokens = new SessionTokenRegistry();
-    const liveToken = tokens.mint('live-manager');
     const db = new Database(':memory:');
     db.open();
     const queue = new OutboundQueue({
@@ -393,6 +395,7 @@ describe('PerChatMcpSocketManager', () => {
     });
     const lease = manager.acquire(identity, identity);
     await lease.ready;
+    const liveToken = tokens.mint({ kind: 'session', socketPath: lease.socketPath, turnReplySessionId: 'live-manager' });
     try {
       const response = await exchange(lease.socketPath, [
         { jsonrpc: '2.0', method: SESSION_TOKEN_NOTIFICATION, params: { token: liveToken } },

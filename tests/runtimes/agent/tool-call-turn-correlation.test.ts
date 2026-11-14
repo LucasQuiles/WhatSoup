@@ -240,7 +240,7 @@ describe('tool-call turn correlation without capability replay', () => {
     live.perChatRuntimeTurnContexts.set(JID_A, [ctx]);
     const socketPath = await startPerChatSocket(live, KEY_A);
 
-    const responses = await exchange(socketPath, [presentToken(live.sessionTokens.mint()), callProbe(1)]);
+    const responses = await exchange(socketPath, [presentToken(live.sessionTokens.mint({ kind: 'session', socketPath })), callProbe(1)]);
 
     expect(responses.get(1)).toMatchObject({ id: 1, result: { content: [{ type: 'text' }] } });
     expect(rows(db)).toEqual([{

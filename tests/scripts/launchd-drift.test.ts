@@ -815,15 +815,16 @@ describe('verified installed scripts', () => {
 });
 
 describe('structural checks and secret safety', () => {
-  it('passes structural checks and NEVER prints the planted secret (default and --show-diff)', () => {
+  it.each([
+    ['default', []],
+    ['--show-diff', ['--show-diff']],
+  ] as [string, string[]][])('passes structural checks and NEVER prints the planted secret (%s)', (_mode, extra) => {
     const f = makeFixture();
     installAllOk(f);
-    for (const extra of [[], ['--show-diff']] as string[][]) {
-      const result = run(f, extra);
-      expect(result.status).toBe(0);
-      expect(result.stdout).toContain('ok: tbot plist structural');
-      expect(result.stdout + result.stderr).not.toContain(FAKE_SECRET);
-    }
+    const result = run(f, extra);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('ok: tbot plist structural');
+    expect(result.stdout + result.stderr).not.toContain(FAKE_SECRET);
   });
 
   it('flags an unpinned /usr/bin/env interpreter without printing plist content', () => {

@@ -9,6 +9,8 @@ import {
   type ToolFailureStage,
 } from '../core/durability-evidence-contract.ts';
 import type { ClientOutputGateResult } from '../core/client-output-policy-gate.ts';
+import type { M365WorkflowAuthority, M365WorkflowAuthorityScope } from '../core/m365-bridge-policy.ts';
+import type { SessionTokenBinding, SessionTokenRefusal } from './caller-attribution.ts';
 import type { TurnReplySink } from '../core/turn-reply.ts';
 export { isPathWithinAllowedRoot } from '../lib/path-boundary.ts';
 
@@ -79,14 +81,41 @@ export interface SessionContext {
   abortSignal?: AbortSignal;
   /**
    * #3421 step 1: who is on the other end of this session. Recorded on each
-   * tool_calls row; never read by any admission or authorization check.
+   * tool_calls row. The Microsoft workflow broker requires a turn-owned caller
+   * (m365-workflow-authority.ts); no other admission or authorization check reads it.
    * Replaced, never mutated, when the connection learns more about its client.
    */
   callerAttribution?: Readonly<CallerAttribution>;
+  /** Exact per-instance assignment for the private Microsoft workflow broker. */
+  workflowAuthority?: M365WorkflowAuthority;
+  /** Immutable inbound message identity for the currently executing human request. */
+  requestRef?: string;
+  /** Session scope of the runtime whose turn published `workflowAuthority`. */
+  workflowAuthorityScope?: M365WorkflowAuthorityScope;
+  /**
+   * Set when a `sandboxPerChat` runtime's turn published `workflowAuthority`: the broker then
+   * refuses session callers and admits only the `microsoft365` adapter's request tokens.
+   */
+  workflowAuthoritySandboxPerChat?: true;
+  /**
+   * Provider of the executing turn's route, published only when that route's M365 policy
+   * is approved. The `microsoft365` adapter refuses a turn without a supported one.
+   */
+  m365RouteProvider?: string;
+  /**
+   * Request-local, socket callers only: the live binding of the token this
+   * connection presented, re-verified on each read. The token never travels here.
+   */
+  tokenBinding?: () => Readonly<SessionTokenBinding> | undefined;
   /** Routes an admitted agent-turn reply through the durable outbound queue. */
   turnReplySink?: TurnReplySink;
   /** Opaque SessionManager identity admitted from the provider bridge or a matched socket token. */
   turnReplySessionId?: string;
+  /**
+   * Socket callers only: why the session token this connection presented was refused
+   * here. Such a caller's replies are suppressed, never sent raw.
+   */
+  sessionTokenRefusal?: SessionTokenRefusal;
 }
 
 /** The connection-level half of {@link ToolCallCallerEvidence}. */
@@ -100,6 +129,11 @@ export interface ExecutingSessionContext {
   actorJid: SessionContext['actorJid'];
   purpose: SessionContext['purpose'];
   conversationKey: SessionContext['conversationKey'];
+  workflowAuthority?: SessionContext['workflowAuthority'];
+  requestRef?: SessionContext['requestRef'];
+  workflowAuthorityScope?: SessionContext['workflowAuthorityScope'];
+  workflowAuthoritySandboxPerChat?: SessionContext['workflowAuthoritySandboxPerChat'];
+  m365RouteProvider?: SessionContext['m365RouteProvider'];
   /**
    * Explicit assertion that a REAL executing-turn resolution produced this
    * context (#3435, L1). Optional: a real resolution is normally recognized
@@ -240,6 +274,10 @@ export interface ToolDeclaration {
    * docs/tools.md for the authoritative model.)
    */
   sensitive?: boolean;
+  /** Excluded from MCP discovery; authenticated callers may still invoke it directly. */
+  private?: boolean;
+  /** Listed only to chat-scoped sessions bound to a delivery chat; other sessions can never resolve its authority. */
+  chatSessionsOnly?: boolean;
   /**
    * S1 (bond-revocation programme, 2026-08-17). Marks a tool that intentionally
    * asks WhatsApp to remove this companion device. The registry writes an actor
