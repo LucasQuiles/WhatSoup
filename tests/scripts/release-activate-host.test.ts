@@ -29,7 +29,7 @@ import { diagnosticBody, plist, writeRelease } from '../helpers/release-activate
 const DOMAIN = [
   'gui/501 = {',
   '\tservices = {',
-  '\t\t   56045      0 \tcom.whatsoup.ana-bot',
+  '\t\t   56045      0 \tcom.whatsoup.alpha-line',
   '\t\t       0      0 \tcom.whatsoup.reply-guarantee',
   '\t\t       0   (pe) \tcom.apple.finder',
   '\t}',
@@ -38,8 +38,8 @@ const DOMAIN = [
 ].join('\n');
 
 const JOB = [
-  'gui/501/com.whatsoup.ana-bot = {',
-  '\tpath = /fixture-home/Library/LaunchAgents/com.whatsoup.ana-bot.plist',
+  'gui/501/com.whatsoup.alpha-line = {',
+  '\tpath = /fixture-home/Library/LaunchAgents/com.whatsoup.alpha-line.plist',
   '\ttype = LaunchAgent',
   '\tprogram = /fixture-home/.local/bin/whatsoup',
   '\tstate = running',
@@ -51,7 +51,7 @@ const JOB = [
   '\t}',
   '\targuments = {',
   '\t\t/fixture-home/.local/bin/whatsoup',
-  '\t\tana-bot',
+  '\t\talpha-line',
   '\t}',
   '}',
   '',
@@ -206,22 +206,22 @@ describe('release:activate-host loaded launchd contract', () => {
 
   it('requires explicit unique member and auxiliary ownership', () => {
     expect(parseHostUnitDeclaration({ schemaVersion: 1, members: [
-      { instance: 'ana-bot', expectCurrent: '/releases/old-a', auxLabels: [{ label: 'com.whatsoup.reply-guarantee', renderer: 'setup-timer' }] },
+      { instance: 'alpha-line', expectCurrent: '/releases/old-a', auxLabels: [{ label: 'com.whatsoup.reply-guarantee', renderer: 'setup-timer' }] },
       { instance: 'personal', expectCurrent: '/releases/old-b', auxLabels: [] },
     ] })).not.toBeNull();
     expect(parseHostUnitDeclaration({ schemaVersion: 1, members: [
-      { instance: 'ana-bot', expectCurrent: '/releases/old-a', auxLabels: [] },
-      { instance: 'ana-bot', expectCurrent: '/releases/old-b', auxLabels: [] },
+      { instance: 'alpha-line', expectCurrent: '/releases/old-a', auxLabels: [] },
+      { instance: 'alpha-line', expectCurrent: '/releases/old-b', auxLabels: [] },
     ] })).toBeNull();
     expect(parseHostUnitDeclaration({ schemaVersion: 1, members: [
-      { instance: 'ana-bot', expectCurrent: '/releases/old-a', auxLabels: [{ label: 'com.whatsoup.personal', renderer: 'setup-timer' }] },
+      { instance: 'alpha-line', expectCurrent: '/releases/old-a', auxLabels: [{ label: 'com.whatsoup.personal', renderer: 'setup-timer' }] },
       { instance: 'personal', expectCurrent: '/releases/old-b', auxLabels: [] },
     ] })).toBeNull();
   });
 
   it('accepts selected primary and loaded-but-idle auxiliary services', () => {
     expect(parseLoadedDomain(DOMAIN)).toEqual([
-      { label: 'com.whatsoup.ana-bot', pid: 56045, status: '0' },
+      { label: 'com.whatsoup.alpha-line', pid: 56045, status: '0' },
       { label: 'com.whatsoup.reply-guarantee', pid: 0, status: '0' },
     ]);
   });
@@ -241,20 +241,20 @@ describe('release:activate-host loaded launchd contract', () => {
   });
 
   it('fails closed on duplicate, truncated, or malformed services', () => {
-    expect(parseLoadedDomain(DOMAIN.replace('com.apple.finder', 'com.whatsoup.ana-bot'))).toBeNull();
+    expect(parseLoadedDomain(DOMAIN.replace('com.apple.finder', 'com.whatsoup.alpha-line'))).toBeNull();
     expect(parseLoadedDomain(DOMAIN.replace('\t}', ''))).toBeNull();
     expect(parseLoadedDomain(DOMAIN.replace('56045      0', 'pid = nope'))).toBeNull();
   });
 
   it('retains only selector-bearing loaded job fields', () => {
-    expect(parseLoadedJob(JOB, 'com.whatsoup.ana-bot', 'gui/501')).toEqual({
-      label: 'com.whatsoup.ana-bot',
-      path: '/fixture-home/Library/LaunchAgents/com.whatsoup.ana-bot.plist',
+    expect(parseLoadedJob(JOB, 'com.whatsoup.alpha-line', 'gui/501')).toEqual({
+      label: 'com.whatsoup.alpha-line',
+      path: '/fixture-home/Library/LaunchAgents/com.whatsoup.alpha-line.plist',
       type: 'LaunchAgent',
       program: '/fixture-home/.local/bin/whatsoup',
       state: 'running',
       pid: 56045,
-      arguments: ['/fixture-home/.local/bin/whatsoup', 'ana-bot'],
+      arguments: ['/fixture-home/.local/bin/whatsoup', 'alpha-line'],
       workingDirectory: '/ignored',
       pythonEnvironmentKeys: [],
     });
@@ -262,46 +262,46 @@ describe('release:activate-host loaded launchd contract', () => {
 
   it('accepts native jetsam limit metadata while retaining exact selector fields', () => {
     const native = JOB.replace('\truns = 3', '\truns = 3\n\tjetsam memory limit (active) = (unlimited)\n\tjetsam memory limit (inactive) = (unlimited)');
-    expect(parseLoadedJob(native, 'com.whatsoup.ana-bot', 'gui/501')).toEqual(parseLoadedJob(JOB, 'com.whatsoup.ana-bot', 'gui/501'));
-    expect(parseLoadedJob(native.replace('\tstate = running', '\tstate = running\n\tstate = waiting'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
+    expect(parseLoadedJob(native, 'com.whatsoup.alpha-line', 'gui/501')).toEqual(parseLoadedJob(JOB, 'com.whatsoup.alpha-line', 'gui/501'));
+    expect(parseLoadedJob(native.replace('\tstate = running', '\tstate = running\n\tstate = waiting'), 'com.whatsoup.alpha-line', 'gui/501')).toBeNull();
   });
 
   it('accepts the observed submitted-job metadata without weakening selector checks', () => {
     const native = JOB.replace('\truns = 3', '\truns = 3\n\tsubmitted job. ignore execute allowed');
-    expect(parseLoadedJob(native, 'com.whatsoup.ana-bot', 'gui/501')).toEqual(parseLoadedJob(JOB, 'com.whatsoup.ana-bot', 'gui/501'));
-    expect(parseLoadedJob(native.replace('ignore execute allowed', 'ignore execute denied'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
-    expect(parseLoadedJob(native.replace('\tstate = running', '\tstate = running\n\tstate = waiting'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
+    expect(parseLoadedJob(native, 'com.whatsoup.alpha-line', 'gui/501')).toEqual(parseLoadedJob(JOB, 'com.whatsoup.alpha-line', 'gui/501'));
+    expect(parseLoadedJob(native.replace('ignore execute allowed', 'ignore execute denied'), 'com.whatsoup.alpha-line', 'gui/501')).toBeNull();
+    expect(parseLoadedJob(native.replace('\tstate = running', '\tstate = running\n\tstate = waiting'), 'com.whatsoup.alpha-line', 'gui/501')).toBeNull();
   });
 
   it('accepts native pid-local endpoint metadata with a closed outer block', () => {
     const endpoints = ['\tpid-local endpoints = {', '\t\t"com.apple.coredrag" = {', '\t\t\tport = 0xa6c2b', '\t\t\tactive = 1', '\t\t}', '\t}'].join('\n');
     const native = JOB.replace('\truns = 3', `\truns = 3\n${endpoints}`);
-    expect(parseLoadedJob(native, 'com.whatsoup.ana-bot', 'gui/501')).toEqual(parseLoadedJob(JOB, 'com.whatsoup.ana-bot', 'gui/501'));
-    expect(parseLoadedJob(native.replace('pid-local endpoints', 'unknown-endpoints'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
-    expect(parseLoadedJob(native.replace(endpoints, endpoints.slice(0, -3)), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
-    expect(parseLoadedJob(native.replace('\tprogram = ', '\tprogram = /other\n\tprogram = '), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
+    expect(parseLoadedJob(native, 'com.whatsoup.alpha-line', 'gui/501')).toEqual(parseLoadedJob(JOB, 'com.whatsoup.alpha-line', 'gui/501'));
+    expect(parseLoadedJob(native.replace('pid-local endpoints', 'unknown-endpoints'), 'com.whatsoup.alpha-line', 'gui/501')).toBeNull();
+    expect(parseLoadedJob(native.replace(endpoints, endpoints.slice(0, -3)), 'com.whatsoup.alpha-line', 'gui/501')).toBeNull();
+    expect(parseLoadedJob(native.replace('\tprogram = ', '\tprogram = /other\n\tprogram = '), 'com.whatsoup.alpha-line', 'gui/501')).toBeNull();
   });
 
   it('refuses malformed, duplicate, or mismatched loaded definitions', () => {
-    expect(parseLoadedJob(JOB.replace('gui/501/com.whatsoup.ana-bot = {', 'gui/501/com.whatsoup.other = {'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
-    expect(parseLoadedJob(JOB.replace('\tstate = running', '\tstate = running\n\tstate = waiting'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
-    expect(parseLoadedJob(JOB.replace('\t\tana-bot', '\t'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
-    expect(parseLoadedJob(JOB.replace('\t}\n\targuments', '\targuments'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
+    expect(parseLoadedJob(JOB.replace('gui/501/com.whatsoup.alpha-line = {', 'gui/501/com.whatsoup.other = {'), 'com.whatsoup.alpha-line', 'gui/501')).toBeNull();
+    expect(parseLoadedJob(JOB.replace('\tstate = running', '\tstate = running\n\tstate = waiting'), 'com.whatsoup.alpha-line', 'gui/501')).toBeNull();
+    expect(parseLoadedJob(JOB.replace('\t\talpha-line', '\t'), 'com.whatsoup.alpha-line', 'gui/501')).toBeNull();
+    expect(parseLoadedJob(JOB.replace('\t}\n\targuments', '\targuments'), 'com.whatsoup.alpha-line', 'gui/501')).toBeNull();
   });
 
   it('retains Python resolution environment names while rejecting duplicate or malformed proof blocks', () => {
     const withEnvironment = JOB.replace('\targuments = {', [
       '\tenvironment = {', '\t\tPYTHONPATH => /untrusted', '\t}', '\targuments = {',
     ].join('\n'));
-    expect(parseLoadedJob(withEnvironment, 'com.whatsoup.ana-bot', 'gui/501')).toEqual(expect.objectContaining({
+    expect(parseLoadedJob(withEnvironment, 'com.whatsoup.alpha-line', 'gui/501')).toEqual(expect.objectContaining({
       workingDirectory: '/ignored', pythonEnvironmentKeys: ['PYTHONPATH'],
     }));
-    expect(parseLoadedJob(withEnvironment.replace('\tenvironment = {', '\tenvironment = {\n\t}\n\tenvironment = {'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
-    expect(parseLoadedJob(withEnvironment.replace('\t\tPYTHONPATH => /untrusted', '\t\tPYTHONPATH'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
-    expect(parseLoadedJob(withEnvironment.replace('\t\tPYTHONPATH => /untrusted', '\t\tPATH => first\n\t\tPATH => second'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
+    expect(parseLoadedJob(withEnvironment.replace('\tenvironment = {', '\tenvironment = {\n\t}\n\tenvironment = {'), 'com.whatsoup.alpha-line', 'gui/501')).toBeNull();
+    expect(parseLoadedJob(withEnvironment.replace('\t\tPYTHONPATH => /untrusted', '\t\tPYTHONPATH'), 'com.whatsoup.alpha-line', 'gui/501')).toBeNull();
+    expect(parseLoadedJob(withEnvironment.replace('\t\tPYTHONPATH => /untrusted', '\t\tPATH => first\n\t\tPATH => second'), 'com.whatsoup.alpha-line', 'gui/501')).toBeNull();
     const normalOverride = JOB.replace('\targuments = {', '\tdefault environment = {\n\t\tPATH => default\n\t}\n\targuments = {');
-    expect(parseLoadedJob(normalOverride, 'com.whatsoup.ana-bot', 'gui/501')).toEqual(expect.objectContaining({ pythonEnvironmentKeys: [] }));
-    expect(parseLoadedJob(withEnvironment.replace('\tworking directory = /ignored', '\tworking directory = /ignored\n\tworking directory = /other'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
+    expect(parseLoadedJob(normalOverride, 'com.whatsoup.alpha-line', 'gui/501')).toEqual(expect.objectContaining({ pythonEnvironmentKeys: [] }));
+    expect(parseLoadedJob(withEnvironment.replace('\tworking directory = /ignored', '\tworking directory = /ignored\n\tworking directory = /other'), 'com.whatsoup.alpha-line', 'gui/501')).toBeNull();
   });
 });
 
@@ -759,15 +759,15 @@ describe('release:activate-host closed host auxiliaries', () => {
 
   it('admits only explicit host auxiliary modes and ownership', () => {
     expect(parseHostUnitDeclaration({ schemaVersion: 2, members: [
-      { instance: 'ana-bot', expectCurrent: '/releases/ana', auxLabels: [] },
+      { instance: 'alpha-line', expectCurrent: '/releases/ana', auxLabels: [] },
     ], hostAuxiliaries: [
       { label: 'com.bot-errors.health', mode: 'path-rebase', expectCurrent: '/checkout' },
       { label: 'com.whatsoup.harness-maintenance', mode: 'setup-timer', expectCurrent: '/checkout' },
       { label: 'com.whatsoup.whatsoup-fleet', mode: 'fleet-wrapper', expectCurrent: '/checkout', link: '/fixture/.local/bin/whatsoup-fleet' },
-      { label: 'com.whatsoup.ana-bot-watchdog', mode: 'quiesce' },
+      { label: 'com.whatsoup.alpha-line-watchdog', mode: 'quiesce' },
     ] })).not.toBeNull();
     expect(parseHostUnitDeclaration({ schemaVersion: 2, members: [
-      { instance: 'ana-bot', expectCurrent: '/releases/ana', auxLabels: [] },
+      { instance: 'alpha-line', expectCurrent: '/releases/ana', auxLabels: [] },
     ], hostAuxiliaries: [
       { label: 'com.bot-errors.health', mode: 'path-rebase', expectCurrent: '/checkout', hiddenSelector: '/unchecked' },
     ] })).toBeNull();
