@@ -5,7 +5,7 @@ import { bareNumber, isLidJid, JID_PERSONAL, normalizeLid } from './jid-constant
 import { lookupStoredLidPhoneJid } from './lid-resolver.ts';
 import { createOutboundSendsWriter, type OutboundSendsWriter } from './outbound-sends.ts';
 import { PROTECTED_DELIVERY_PINS, type ProtectedDeliveryPins } from './protected-delivery-pins.ts';
-import { isCanonicalManagedLink } from './protected-message.ts';
+import { isCanonicalManagedLink, isCanonicalSecretInputLink } from './protected-message.ts';
 import type { SendOptions, SubmissionReceipt } from './types.ts';
 
 export type ProtectedDeliveryPurpose = 'login' | 'recovery';
@@ -49,6 +49,14 @@ interface SecretInputRow {
   delivery_status: 'pending' | 'resolving' | 'submitted' | 'delivered' | 'read' | 'ambiguous' | 'failed';
   whatsapp_message_id: string; expires_at: string | null; issued_at: string;
 }
+/**
+ * A secret input's delivery status only moves forward. A receipt recorded
+ * while the send is in flight outranks that send's own outcome, and `read`
+ * outranks `delivered`.
+ */
+const SECRET_INPUT_DELIVERY_RANK: Readonly<Record<SecretInputRow['delivery_status'], number>> = {
+  pending: 0, resolving: 1, ambiguous: 2, failed: 2, submitted: 3, delivered: 4, read: 5,
+};
 const MAX_ATTEMPTS = 3;
 const RETRY_WINDOW_MS = 60_000;
 /**
@@ -137,9 +145,13 @@ export class ProtectedDeliveryService {
     }
     const client = this.secretInputClient();
     let row = this.findActiveSecretInput(input);
-    if (row && row.intake_id !== null && (row.delivery_status === 'pending' || this.isSecretInputExpired(row))) {
-      row = await this.refreshSecretInputForRequest(row, client);
+    if (row && row.intake_id === null && this.isSecretInputCreateWindowElapsed(row)) {
+      this.closeSecretInputCreate(row.id);
+      row = this.findActiveSecretInput(input);
     }
+    // The intake service may have finished, failed or revoked an intake that is
+    // still active locally, so it is re-read before it is reused.
+    if (row && row.intake_id !== null) row = await this.refreshSecretInputForRequest(row, client);
     if (!row || this.isSecretInputTerminal(row)) row = this.insertSecretInput(input);
     if (row.intake_id === null) {
       let created: ManagedSecretInputMetadata;
@@ -169,6 +181,12 @@ export class ProtectedDeliveryService {
       } catch {
         this.updateSecretInputDelivery(row.id, 'ambiguous');
         throw new Error('protected secret input delivery is ambiguous');
+      }
+      // The HTTP client checks the link too; the service checks it again, as
+      // deliver() does, so no client can send to another host or intake.
+      if (!isCanonicalSecretInputLink(resolved.link, row.intake_id!, this.deps.pins ?? PROTECTED_DELIVERY_PINS)) {
+        this.updateSecretInputDelivery(row.id, 'failed');
+        throw new Error('protected secret input resolution failed');
       }
       if (new Date(resolved.expiresAt).getTime() <= this.now().getTime()) {
         this.updateSecretInputMetadata(row.id, resolved);
@@ -291,16 +309,15 @@ export class ProtectedDeliveryService {
       this.event(row, status, row.delivery_ref + ':wa:' + input.whatsappMessageId + ':' + status);
       return true;
     }
-    let secretInput: Pick<SecretInputRow, 'id' | 'delivery_status'> | undefined;
+    let secretInput: Pick<SecretInputRow, 'id'> | undefined;
     try {
-      secretInput = this.deps.db.prepare('SELECT id,delivery_status FROM protected_secret_inputs WHERE whatsapp_message_id=? AND recipient_jid=?')
-        .get(input.whatsappMessageId, input.recipientJid) as Pick<SecretInputRow, 'id' | 'delivery_status'> | undefined;
+      secretInput = this.deps.db.prepare('SELECT id FROM protected_secret_inputs WHERE whatsapp_message_id=? AND recipient_jid=?')
+        .get(input.whatsappMessageId, input.recipientJid) as Pick<SecretInputRow, 'id'> | undefined;
     } catch {
       return false;
     }
     if (!secretInput) return false;
-    const next = status === 'read' || secretInput.delivery_status !== 'read' ? status : secretInput.delivery_status;
-    this.updateSecretInputDelivery(secretInput.id, next);
+    this.updateSecretInputDelivery(secretInput.id, status);
     return true;
   }
 
@@ -395,10 +412,6 @@ export class ProtectedDeliveryService {
       || row.input_state === 'revoked' || row.input_state === 'ambiguous' || row.input_state === 'cancelled';
   }
 
-  private isSecretInputExpired(row: Pick<SecretInputRow, 'expires_at'>): boolean {
-    return row.expires_at !== null && new Date(row.expires_at).getTime() <= this.now().getTime();
-  }
-
   private findActiveSecretInput(input: { resourceId: string; kind: ProtectedSecretInputKind; purpose: string; principal: string }): SecretInputRow | undefined {
     return this.deps.db.prepare(`SELECT * FROM protected_secret_inputs
       WHERE resource_id=? AND kind=? AND purpose=? AND principal=?
@@ -463,9 +476,29 @@ export class ProtectedDeliveryService {
     );
   }
 
+  /** Compare-and-set: applies only over a lower-ranked status, so evidence never moves backwards. */
   private updateSecretInputDelivery(id: number, status: SecretInputRow['delivery_status']): void {
-    this.deps.db.prepare('UPDATE protected_secret_inputs SET delivery_status=?,updated_at=? WHERE id=?')
-      .run(status, this.nowIso(), id);
+    const lower = (Object.keys(SECRET_INPUT_DELIVERY_RANK) as Array<SecretInputRow['delivery_status']>)
+      .filter((current) => SECRET_INPUT_DELIVERY_RANK[current] < SECRET_INPUT_DELIVERY_RANK[status]);
+    if (lower.length === 0) return;
+    this.deps.db.prepare(`UPDATE protected_secret_inputs SET delivery_status=?,updated_at=?
+      WHERE id=? AND delivery_status IN (${lower.map(() => '?').join(',')})`)
+      .run(status, this.nowIso(), id, ...lower);
+  }
+
+  /**
+   * A failed create is retried with its operation id, which the intake service
+   * treats as idempotent, only within the retry window from issuance. After it
+   * the uncreated row is closed, so a permanent create failure cannot block the
+   * same request until retention.
+   */
+  private isSecretInputCreateWindowElapsed(row: Pick<SecretInputRow, 'input_state' | 'issued_at'>): boolean {
+    return row.input_state === 'creating' && new Date(row.issued_at).getTime() + RETRY_WINDOW_MS <= this.now().getTime();
+  }
+
+  private closeSecretInputCreate(id: number): void {
+    this.deps.db.prepare(`UPDATE protected_secret_inputs SET input_state='failed',updated_at=?
+      WHERE id=? AND input_state='creating' AND intake_id IS NULL`).run(this.nowIso(), id);
   }
 
   private insertRustdesk(i: { deviceId: string; purpose: ProtectedDeliveryPurpose; principal: string; recipientJid: string }): Row {

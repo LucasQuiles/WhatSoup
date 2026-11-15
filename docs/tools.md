@@ -3719,7 +3719,11 @@ return a RustDesk code, browser URL, seed, or credential.
 
 Creates an opaque, one-use password, token, or challenge-backed MFA input request for the resource
 bound to the caller's direct conversation. The input link is sent only through
-the protected WhatsApp transport and never returned by the tool.
+the protected WhatsApp transport and never returned by the tool. A repeat call
+for the same resource, kind and purpose first reads the existing request's
+state from the intake service. It returns that request while it is active and
+creates and sends a new one when it has ended. If that read fails, the call
+fails without a send.
 
 | | |
 |---|---|
