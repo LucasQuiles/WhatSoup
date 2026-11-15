@@ -153,7 +153,6 @@ describe('protected delivery', () => {
     const sent: Array<{ recipient: string; content: Record<string, unknown>; messageId: string | undefined }> = [];
     let created = 0;
     let resolved = 0;
-    let refreshed = 0;
     const client: ManagedDeliveryClient & {
       createSecretInput: (input: Record<string, string>) => Promise<Record<string, unknown>>;
       resolveSecretInput: (input: Record<string, string>) => Promise<Record<string, unknown>>;
@@ -178,13 +177,7 @@ describe('protected delivery', () => {
           kind: 'password', saveAllowed: true, expiresAt: EXPIRES_AT, state: 'awaiting_input', link: INTAKE_LINK,
         };
       },
-      async getSecretInput() {
-        refreshed += 1;
-        return {
-          id: INTAKE_ID, resourceId: 'dummy-account', accountLabel: 'Dummy account', consumerLabel: 'Dummy consumer', action: 'sign_in',
-          kind: 'password', saveAllowed: true, expiresAt: EXPIRES_AT, state: 'awaiting_input',
-        };
-      },
+      async getSecretInput() { throw new Error('not used'); },
       async cancelSecretInput() { throw new Error('not used'); },
     };
     const ids = ['create-operation', 'resolve-operation', 'intake-message'];
@@ -214,8 +207,6 @@ describe('protected delivery', () => {
     });
     expect(second).toEqual(first);
     expect(created).toBe(1);
-    // A repeat request re-reads a live intake's remote state before reusing it.
-    expect(refreshed).toBe(1);
     expect(db.raw.prepare('SELECT create_operation_id, recipient_jid FROM protected_secret_inputs').get())
       .toEqual({ create_operation_id: 'create-operation', recipient_jid: '15551234567@s.whatsapp.net' });
     expect(resolved).toBe(1);
@@ -660,9 +651,9 @@ describe('protected delivery', () => {
     const REQUEST = {
       resourceId: 'dummy-account', kind: 'password' as const, purpose: 'dummy login', principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net',
     };
-    const metadata = (id = INTAKE_ID, state: ManagedSecretInputMetadata['state'] = 'awaiting_input'): ManagedSecretInputMetadata => ({
-      id, resourceId: 'dummy-account', accountLabel: 'Dummy account', consumerLabel: 'Dummy consumer', action: 'sign_in',
-      kind: 'password', saveAllowed: true, expiresAt: EXPIRES_AT, state,
+    const metadata = (): ManagedSecretInputMetadata => ({
+      id: INTAKE_ID, resourceId: 'dummy-account', accountLabel: 'Dummy account', consumerLabel: 'Dummy consumer', action: 'sign_in',
+      kind: 'password', saveAllowed: true, expiresAt: EXPIRES_AT, state: 'awaiting_input',
     });
     const rustdeskUnused = {
       async stageRustdesk(): Promise<never> { throw new Error('not used'); },
@@ -670,8 +661,8 @@ describe('protected delivery', () => {
       async getStatus() { return managedStatus(); },
       async reportEvent() {},
     };
-    const deliveryStatus = (intakeId = INTAKE_ID) =>
-      db.raw.prepare('SELECT delivery_status FROM protected_secret_inputs WHERE intake_id=?').get(intakeId);
+    const deliveryStatus = () =>
+      db.raw.prepare('SELECT delivery_status FROM protected_secret_inputs WHERE intake_id=?').get(INTAKE_ID);
     const sequence = (...ids: string[]) => () => ids.shift() ?? 'unexpected-id';
 
     function blockedSendService(ack: 'stable' | 'missing') {
@@ -757,70 +748,6 @@ describe('protected delivery', () => {
       expect(db.raw.prepare('SELECT COUNT(*) AS count FROM outbound_sends').get()).toEqual({ count: 0 });
       expect(db.raw.prepare('SELECT delivery_status, outbound_send_id FROM protected_secret_inputs WHERE intake_id=?').get(INTAKE_ID))
         .toEqual({ delivery_status: 'failed', outbound_send_id: null });
-    });
-
-    it('retries a failed intake creation with the same operation only inside the retry window', async () => {
-      let now = new Date('2026-10-29T12:00:00.000Z');
-      const createOperations: string[] = [];
-      let sends = 0;
-      const service = new ProtectedDeliveryService({
-        db: db.raw,
-        client: {
-          ...rustdeskUnused,
-          async createSecretInput(request) {
-            createOperations.push(request.operationId);
-            if (request.operationId === 'stuck-create') throw new Error('permanent create refusal');
-            return metadata();
-          },
-          async resolveSecretInput() { return { ...metadata(), link: INTAKE_LINK }; },
-          async getSecretInput() { throw new Error('not used'); },
-          async cancelSecretInput() { throw new Error('not used'); },
-        },
-        messenger: { async sendRaw(_recipient, _content, options) { sends += 1; return { waMessageId: options?.messageId ?? null }; } },
-        now: () => now,
-        randomId: sequence('stuck-create', 'stuck-resolve', 'stuck-message', 'fresh-create', 'fresh-resolve', 'fresh-message'),
-      });
-
-      await expect(service.requestSecretInput(REQUEST)).rejects.toThrow('protected secret input creation failed');
-      now = new Date('2026-10-29T12:00:59.999Z');
-      await expect(service.requestSecretInput(REQUEST)).rejects.toThrow('protected secret input creation failed');
-      now = new Date('2026-10-29T12:01:00.000Z');
-      await expect(service.requestSecretInput(REQUEST)).resolves.toMatchObject({ id: INTAKE_ID, deliveryStatus: 'submitted' });
-
-      expect(createOperations).toEqual(['stuck-create', 'stuck-create', 'fresh-create']);
-      expect(sends).toBe(1);
-      expect(db.raw.prepare('SELECT create_operation_id, intake_id, input_state FROM protected_secret_inputs ORDER BY id').all()).toEqual([
-        { create_operation_id: 'stuck-create', intake_id: null, input_state: 'failed' },
-        { create_operation_id: 'fresh-create', intake_id: INTAKE_ID, input_state: 'awaiting_input' },
-      ]);
-    });
-
-    it.each(['succeeded', 'revoked', 'failed'] as const)('replaces a sent intake that the intake service now reports %s', async (remoteState) => {
-      const secondId = 'j'.repeat(22);
-      const secondLink = `https://${TEST_LINK_HOST}/s/#i1.${secondId}.${'m'.repeat(43)}`;
-      let creates = 0;
-      let refreshes = 0;
-      const sent: unknown[] = [];
-      const service = new ProtectedDeliveryService({
-        db: db.raw,
-        client: {
-          ...rustdeskUnused,
-          async createSecretInput() { creates += 1; return metadata(creates === 1 ? INTAKE_ID : secondId); },
-          async resolveSecretInput(request) { return { ...metadata(request.id), link: request.id === INTAKE_ID ? INTAKE_LINK : secondLink }; },
-          async getSecretInput(request) { refreshes += 1; return metadata(request.id, remoteState); },
-          async cancelSecretInput() { throw new Error('not used'); },
-        },
-        messenger: { async sendRaw(_recipient, content, options) { sent.push(content.text); return { waMessageId: options?.messageId ?? null }; } },
-        now: () => new Date('2026-10-29T12:00:00.000Z'),
-        randomId: sequence('first-create', 'first-resolve', 'first-message', 'second-create', 'second-resolve', 'second-message'),
-      });
-
-      await expect(service.requestSecretInput(REQUEST)).resolves.toMatchObject({ id: INTAKE_ID, deliveryStatus: 'submitted' });
-      await expect(service.requestSecretInput(REQUEST)).resolves.toMatchObject({ id: secondId, deliveryStatus: 'submitted' });
-
-      expect({ creates, refreshes }).toEqual({ creates: 2, refreshes: 1 });
-      expect(sent).toEqual([INTAKE_LINK, secondLink]);
-      expect(db.raw.prepare('SELECT input_state FROM protected_secret_inputs WHERE intake_id=?').get(INTAKE_ID)).toEqual({ input_state: remoteState });
     });
   });
 

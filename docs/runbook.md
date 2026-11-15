@@ -3137,17 +3137,14 @@ the transport sends no challenge field and cannot create or extend one. Input
 submission or consumption state remains separate from WhatsApp delivery receipt
 state. Delivery status only moves forward: a receipt recorded while the send is
 in flight is kept over that send's `submitted` or `ambiguous` outcome, and `read`
-is kept over a later `delivered`. Before the send, the service checks that the
-resolved link is the canonical intake link for that intake on a pinned link host.
-Any other link is refused without a send or outbound audit row, and the delivery
-status becomes `failed`. Status and cancellation require the verified requesting principal, so a
+is kept over a later `delivered`. Only the canonical intake link for that intake
+on a pinned link host is sent. The HTTP intake client refuses any other link in
+the resolve response, also applying the optional `linkHosts`; the service then
+records delivery status `ambiguous`, as for any failed resolve. The service
+checks the link again against the pinned hosts and records `failed` when a
+client returns any other link. Neither refusal sends a message or writes an
+outbound audit row. Status and cancellation require the verified requesting principal, so a
 different bound user is rejected before an intake API call.
-A repeat request reads an existing intake's state from the intake service before
-reusing it. When that state is terminal (for example `succeeded`, `failed` or
-`revoked`), the request creates and sends a new intake. When the read fails, the
-request fails without a send. A failed intake creation is retried with the same
-operation ID for 60 seconds from issuance. After that, the uncreated request is
-closed as `failed` and the next request creates a new one.
 On restart, an intake left in `resolving` becomes locally `ambiguous` and is never
 replayed; pending intakes are not sent by maintenance recovery.
 The daily unified database-retention transaction deletes protected-delivery

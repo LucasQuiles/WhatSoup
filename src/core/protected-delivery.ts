@@ -145,13 +145,9 @@ export class ProtectedDeliveryService {
     }
     const client = this.secretInputClient();
     let row = this.findActiveSecretInput(input);
-    if (row && row.intake_id === null && this.isSecretInputCreateWindowElapsed(row)) {
-      this.closeSecretInputCreate(row.id);
-      row = this.findActiveSecretInput(input);
+    if (row && row.intake_id !== null && (row.delivery_status === 'pending' || this.isSecretInputExpired(row))) {
+      row = await this.refreshSecretInputForRequest(row, client);
     }
-    // The intake service may have finished, failed or revoked an intake that is
-    // still active locally, so it is re-read before it is reused.
-    if (row && row.intake_id !== null) row = await this.refreshSecretInputForRequest(row, client);
     if (!row || this.isSecretInputTerminal(row)) row = this.insertSecretInput(input);
     if (row.intake_id === null) {
       let created: ManagedSecretInputMetadata;
@@ -412,6 +408,10 @@ export class ProtectedDeliveryService {
       || row.input_state === 'revoked' || row.input_state === 'ambiguous' || row.input_state === 'cancelled';
   }
 
+  private isSecretInputExpired(row: Pick<SecretInputRow, 'expires_at'>): boolean {
+    return row.expires_at !== null && new Date(row.expires_at).getTime() <= this.now().getTime();
+  }
+
   private findActiveSecretInput(input: { resourceId: string; kind: ProtectedSecretInputKind; purpose: string; principal: string }): SecretInputRow | undefined {
     return this.deps.db.prepare(`SELECT * FROM protected_secret_inputs
       WHERE resource_id=? AND kind=? AND purpose=? AND principal=?
@@ -484,21 +484,6 @@ export class ProtectedDeliveryService {
     this.deps.db.prepare(`UPDATE protected_secret_inputs SET delivery_status=?,updated_at=?
       WHERE id=? AND delivery_status IN (${lower.map(() => '?').join(',')})`)
       .run(status, this.nowIso(), id, ...lower);
-  }
-
-  /**
-   * A failed create is retried with its operation id, which the intake service
-   * treats as idempotent, only within the retry window from issuance. After it
-   * the uncreated row is closed, so a permanent create failure cannot block the
-   * same request until retention.
-   */
-  private isSecretInputCreateWindowElapsed(row: Pick<SecretInputRow, 'input_state' | 'issued_at'>): boolean {
-    return row.input_state === 'creating' && new Date(row.issued_at).getTime() + RETRY_WINDOW_MS <= this.now().getTime();
-  }
-
-  private closeSecretInputCreate(id: number): void {
-    this.deps.db.prepare(`UPDATE protected_secret_inputs SET input_state='failed',updated_at=?
-      WHERE id=? AND input_state='creating' AND intake_id IS NULL`).run(this.nowIso(), id);
   }
 
   private insertRustdesk(i: { deviceId: string; purpose: ProtectedDeliveryPurpose; principal: string; recipientJid: string }): Row {
