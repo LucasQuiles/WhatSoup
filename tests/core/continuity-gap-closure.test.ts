@@ -165,7 +165,7 @@ describe('continuity gap health with closures', () => {
   it('a database that never ran migration 66 reports an absent closure ledger, not zero debt', () => {
     recordGaps(raw, [gapObservation(1, 'absent'), gapObservation(2, 'ambiguous')]);
     raw.exec('DROP TABLE continuity_gap_closures');
-    raw.prepare('DELETE FROM schema_migrations WHERE version = 66').run();
+    raw.prepare('DELETE FROM schema_migrations WHERE version >= 66').run();
     expect(readContinuityGapHealth(raw)).toEqual({
       readable: true,
       closure_ledger: 'absent',

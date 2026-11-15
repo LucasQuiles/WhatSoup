@@ -56,6 +56,7 @@ const MANAGED_ENV_KEYS = [
   'PLAYWRIGHT_MCP_SNAPSHOT_MODE',
   'PLAYWRIGHT_MCP_OUTPUT_MODE',
   'PLAYWRIGHT_MCP_CONSOLE_LEVEL',
+  'LINKS_MANAGED_TRANSPORT_TOKEN',
 ] as const;
 
 const TOKENOMICS_ENV_VARS = {
@@ -125,6 +126,20 @@ describe('buildBaseChildEnv', () => {
     expect(env).not.toHaveProperty('ANTHROPIC_API_KEY');
     expect(env).not.toHaveProperty('PINECONE_API_KEY');
     expect(env).not.toHaveProperty('CUSTOM_SECRET');
+  });
+
+  it('omits a reserved managed-delivery credential from both child environment builders', () => {
+    resetManagedEnv({
+      PATH: '/usr/bin',
+      HOME: '/tmp/child-home',
+      LINKS_MANAGED_TRANSPORT_TOKEN: 'synthetic-managed-token',
+    });
+
+    const childEnvs = [buildBaseChildEnv(), buildOpenCodeBaseChildEnv()];
+
+    for (const env of childEnvs) {
+      expect(env).not.toHaveProperty('LINKS_MANAGED_TRANSPORT_TOKEN');
+    }
   });
 
   it('returns an isolated copy instead of a live process.env reference', () => {

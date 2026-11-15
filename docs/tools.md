@@ -1,8 +1,8 @@
 # WhatSoup MCP Tool API Reference
 
-Complete reference for all 171 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
+Complete reference for all 174 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
 
-> **Conditionally-registered tools.** Of the 171 documented tools, 166 are always registered at startup and 5 are conditionally registered. Conditional tools are tagged `core: false` in their `ToolDeclaration` so that absence on an instance which does not meet the gate is tolerated rather than fatal (see `src/mcp/types.ts`).
+> **Conditionally-registered tools.** Of the 174 documented tools, 166 are always registered at startup and 8 are conditionally registered. Provider-gated modules are tagged `core: false` so that absence on an instance which does not meet their gate is tolerated. Protected delivery is absent until its service is injected, then registers as a core module so a registration failure aborts startup (see `src/mcp/types.ts`).
 >
 > **`knowledge_search`** is registered only when all of the following hold:
 >
@@ -29,12 +29,16 @@ Complete reference for all 171 MCP tools exposed by WhatSoup. Tools are grouped 
 > `sandboxPerChat` mode and a `restartSelf` capability is supplied. Control-plane
 > peers are not required for this tool. Calls also require an authenticated admin.
 >
+> **Protected-delivery tools** are registered only for an agent runtime with an
+> enabled `agentOptions.protectedDelivery` configuration. They require a resolved,
+> bound direct WhatsApp conversation and are absent from passive MCP instances.
+>
 > **`microsoft365`** is registered by the agent runtime only when its Microsoft
 > bridge policy is approved, an account ID is bound, and exactly one configured
 > Microsoft plugin has the admitted fixed launcher and environment. See
 > [`microsoft365`](#microsoft365) for its call-time authority checks.
 >
-> The total of 171 describes the full declaration surface, including all five
+> The total of 174 describes the full declaration surface, including all eight
 > conditional tools. An instance's available tools depend on registration gates,
 > session scope and authorization. Instance names do not confer these capabilities.
 
@@ -97,9 +101,14 @@ Conversation-bound sessions have an additional registry allowlist and target bou
 | [audit.ts](#auditts) | 3 |
 | [substrate.ts](#substratets) | 23 |
 | [memory-write.ts](#memory-writets) | 1 |
-| **Total** | **171** |
+| [protected-delivery.ts](#protected-deliveryts) | 3 |
+| **Total** | **174** |
 
-> The total above (`171`) includes `168` declarations wired through
+> All 22 rows are registered through `registerAllTools`. The protected-delivery
+> module is registered only after an agent runtime injects its protected-delivery
+> service; passive and default agent runtimes omit that option.
+>
+> The total above (`174`) includes `171` declarations wired through
 > `src/mcp/register-all.ts` and three tools registered by the agent runtime:
 > [`emit_heal_result`](#emit_heal_result), [`restart_self`](#restart_self), and
 > [`microsoft365`](#microsoft365). `registerRuntimeInlineTools` wires the first
@@ -3693,6 +3702,73 @@ Update a pending scheduled message. Can change time, text, or recurrence.
 | `Error` | Cron expression is invalid |
 | `Error` | The row as updated would hold a payload the scheduler could never send, for example empty `text`, or a time-only update on a row whose stored payload is invalid (`Invalid scheduled payload: payload_undecodable shape=<class>`); the row is unchanged |
 | `Error` | No fields to update |
+
+---
+
+## protected-delivery.ts
+
+These agent-only tools stage or deliver a managed protected secret, including
+a RustDesk access session, to the caller's bound direct WhatsApp conversation. They are absent unless
+`agentOptions.protectedDelivery.enabled` is `true`. Calls require resolved
+direct identities for both the actor and recipient; groups, unbound sessions,
+and unresolved LID identities are rejected. Results contain metadata only: a
+delivery reference, identifier, state, and expiry where applicable. They never
+return a RustDesk code, browser URL, seed, or credential.
+
+### request_rustdesk_access
+
+Stages and submits a RustDesk login or recovery access delivery to the bound
+conversation. The link travels only through the protected transport send.
+
+| | |
+|---|---|
+| **Scope** | `chat` |
+| **Target Mode** | `injected` |
+| **Replay Policy** | `unsafe` |
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| device_id | string | yes | Managed RustDesk device identifier. |
+| purpose | enum | yes | `login` or `recovery`. |
+
+**Returns:** `{ deliveryRef, id, state }`.
+
+### deliver_secret
+
+Delivers a previously staged protected delivery to the same bound direct
+conversation. The service rejects a delivery reference owned by another person
+or recipient and reports ambiguous provider outcomes without exposing content.
+
+| | |
+|---|---|
+| **Scope** | `chat` |
+| **Target Mode** | `injected` |
+| **Replay Policy** | `unsafe` |
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| delivery_ref | string | yes | Opaque delivery reference returned by staging. |
+
+**Returns:** `{ deliveryRef, id, state }`.
+
+### get_secret_delivery_status
+
+Reads the metadata-only managed delivery state for the caller's direct
+conversation.
+
+| | |
+|---|---|
+| **Scope** | `chat` |
+| **Target Mode** | `injected` |
+| **Replay Policy** | `read_only` |
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| delivery_id | string | yes | Opaque managed-delivery identifier. |
+
+**Returns:** `{ id, state, deliveryStatus, expiresAt }`. `state` is the
+authoritative managed-grant state; `deliveryStatus` is the protected-message
+delivery state.
 
 ---
 

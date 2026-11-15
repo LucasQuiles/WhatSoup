@@ -50,6 +50,8 @@ const ctx = (mode: ValidatorContext['mode'], over: Partial<ValidatorContext> = {
   ...over,
 });
 
+// Protected-delivery validator cases live in agent-config-validator-protected-delivery.test.ts.
+
 // #1862: the home-root working-directory invariant — AgentRuntime.start() rejects
 // an explicitly-configured cwd that resolves to the user home directory
 // (runtime.ts). The validator must enforce the SAME invariant so config load,

@@ -6,6 +6,7 @@ import { DEFERRED_TURN_NON_TERMINAL_STATUS_SQL } from './deferred-turn-store.ts'
 import { expireOverdueCompletedDeliveryIdentityAdmissions } from './durability.ts';
 import { deleteOldMessages } from './messages.ts';
 import { maintainOutboundSends } from './outbound-sends.ts';
+import { deleteExpiredProtectedDeliveries } from './protected-delivery.ts';
 import { systemClock } from '../lib/clock.ts';
 import {
   HANDOFF_ARTIFACT_RETENTION_MS,
@@ -90,6 +91,8 @@ export interface DatabaseRetentionResult {
   /** Reliability 4.1: quarantined identity admissions terminalized (state
    * transition with preserved receipt — not deletions). */
   identityAdmissionsExpired: number;
+  /** Protected-delivery metadata and its receipt-event rows expire after 90 days. */
+  protectedDeliveries: number;
 }
 
 export interface DatabaseRetentionHealth {
@@ -372,6 +375,10 @@ export function runDatabaseRetention(
          AND COALESCE(completed_at, created_at) < datetime('now', ?)
     `).run(terminalCutoff));
 
+    // Remove expired protected-delivery journals before their generic audit
+    // rows, so each linked audit is retained for the journal's full lifecycle.
+    const protectedDeliveries = deleteExpiredProtectedDeliveries(db.raw);
+
     const outboundSends = maintainOutboundSends(db.raw, {
       mode: 'apply',
       terminalDays: retention.outboundSendDays,
@@ -495,6 +502,7 @@ export function runDatabaseRetention(
       triggerOccurrences,
       handoffArtifacts,
       identityAdmissionsExpired,
+      protectedDeliveries,
     };
   });
   const total = Object.values(result).reduce((sum, count) => sum + count, 0);

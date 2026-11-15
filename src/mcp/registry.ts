@@ -32,6 +32,7 @@ import {
   type CrossConversationVerdict,
 } from './cross-conversation-guard.ts';
 import { errorMessage } from '../lib/error-message.ts';
+import { sanitizeCompletedToolResult, sanitizeProtectedToolText } from '../core/protected-message.ts';
 import { bondActorLedger } from '../transport/bond-actor-receipt.ts';
 import { getToolCallCallerEvidence, isTurnOwned } from './caller-attribution.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
@@ -68,6 +69,29 @@ const CERTIFICATE_ERROR_CODES = new Set([
   'SELF_SIGNED_CERT_IN_CHAIN',
   'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
 ]);
+
+/**
+ * The MCP response boundary: every text a caller receives, error text from a
+ * rejected handler included, passes the protected-link scan. Past the scan
+ * bound a text becomes the withheld marker; this pass never throws, so a
+ * text that is not a string becomes empty.
+ */
+function redactToolCallText(result: ToolCallResult): ToolCallResult {
+  return {
+    ...result,
+    content: result.content.map((item) => {
+      const text: unknown = item.text;
+      return { ...item, text: typeof text === 'string' ? sanitizeProtectedToolText(text) : '' };
+    }),
+  };
+}
+
+/** The serialized result text; JSON writes nothing for undefined, a function or a symbol, which leaves it empty. */
+function toolResultText(safeResult: unknown): string {
+  if (typeof safeResult === 'string') return safeResult;
+  const json: string | undefined = JSON.stringify(safeResult, null, 2);
+  return json ?? '';
+}
 
 function isTransportOrProtocolError(err: unknown, message: string): boolean {
   const code = typeof err === 'object' && err !== null && 'code' in err && typeof err.code === 'string'
@@ -639,14 +663,18 @@ export class ToolRegistry {
     params: Record<string, unknown>,
     session: ResolvedSessionContext,
   ): Promise<ToolCallResult> {
-    const result = await this.callTool(name, params, session);
+    // Redaction runs first: it makes every text a string and replaces a
+    // protected link whole, before a marker rewrite could split it. The marker
+    // pass then sees the final text; its replacement holds only letters, spaces
+    // and a hyphen, so it cannot form a protected link.
+    const result = redactToolCallText(await this.dispatch(name, params, session));
     const texts = result.content.map((part) => part.text);
     const neutralized = neutralizeTrustedActorMarkerParts(texts);
     if (neutralized.every((text, index) => text === texts[index])) return result;
     return { ...result, content: result.content.map((part, index) => ({ ...part, text: neutralized[index]! })) };
   }
 
-  private async callTool(
+  private async dispatch(
     name: string,
     params: Record<string, unknown>,
     session: ResolvedSessionContext,
@@ -944,7 +972,12 @@ export class ToolRegistry {
         const result = await tool.handler(effectiveParams, session, recordBondEffectDispatch, assertTargetConversation);
         const isError = isToolErrorPayload(result);
         const returnedErrorEvidence = getToolErrorEvidence(result);
-        const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+        // The error markers above are non-enumerable, so they are read from the
+        // raw result. The serialized value is model-visible: protected links
+        // are redacted, binary leaves included. The handler has completed, so a
+        // result too large to scan whole is withheld and keeps its own isError.
+        const safeResult = sanitizeCompletedToolResult(result);
+        const text = toolResultText(safeResult);
         log.info({ tool: name, durationMs: this.clock.now() - start }, 'tool call complete');
         if (durabilityId !== undefined) {
           const durationMs = this.clock.now() - start;

@@ -16,6 +16,8 @@ import type { Runtime } from '../../src/runtimes/types.ts';
 // Module mocks — before any imports of the modules they replace
 // ---------------------------------------------------------------------------
 
+vi.mock('../../src/core/protected-delivery-pins.ts', async (importOriginal) =>
+  (await import('../helpers/protected-delivery-pins.ts')).mockProtectedDeliveryPins(importOriginal));
 vi.mock('../../src/logger.ts', async () => {
   const { loggerMock } = await import('../helpers/logger-mock.ts');
   return loggerMock();
@@ -72,6 +74,7 @@ import { shouldRespond } from '../../src/core/access-policy.ts';
 import { extractLocal } from '../../src/core/access-list.ts';
 import { getMessagesBySender } from '../../src/core/messages.ts';
 import { config } from '../../src/config.ts';
+import { PROTECTED_MESSAGE_MARKER } from '../../src/core/protected-message.ts';
 
 // ---------------------------------------------------------------------------
 // Typed mock helpers
@@ -224,6 +227,78 @@ describe('REQ-002.AC-01: message storage', () => {
 
     // Runtime was called
     expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
+  });
+
+  it('redacts a protected link at the shared ingress before storage, raw retention, and runtime dispatch', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const handler = makeIngest(db, messenger, runtime);
+    const link = 'https://links.example.test/s/#v3.ingest-protected-test';
+    const msg = makeIncomingMessage({
+      content: link,
+      contentText: link,
+      rawMessage: { message: { contextInfo: { quotedMessage: { conversation: link } } } },
+    });
+
+    await runIngest(handler, msg);
+
+    const stored = db.raw.prepare('SELECT content, content_text, raw_message FROM messages WHERE message_id = ?')
+      .get(msg.messageId) as { content: string; content_text: string; raw_message: string };
+    expect(stored.content).toBe(PROTECTED_MESSAGE_MARKER);
+    expect(stored.content_text).toBe(PROTECTED_MESSAGE_MARKER);
+    expect(stored.raw_message).not.toContain('links.example.test/s/#');
+    expect(vi.mocked(runtime.handleMessage).mock.calls[0][0].content).toBe(PROTECTED_MESSAGE_MARKER);
+  });
+
+  it('redacts a protected link in the sender name at the shared ingress before storage and runtime dispatch', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const handler = makeIngest(db, messenger, runtime);
+    const link = 'https://links.example.test/s/#v3.ingest-sender-protected-test';
+    // Non-WhatsApp bridges hand ingest a sender name that never passed the WhatsApp parser.
+    const msg = makeIncomingMessage({ senderName: `Mallory ${link}` });
+
+    await runIngest(handler, msg);
+
+    const stored = db.raw.prepare('SELECT sender_name FROM messages WHERE message_id = ?')
+      .get(msg.messageId) as { sender_name: string };
+    expect(stored.sender_name).toBe(`Mallory ${PROTECTED_MESSAGE_MARKER}`);
+    expect(vi.mocked(runtime.handleMessage).mock.calls[0][0].senderName).toBe(`Mallory ${PROTECTED_MESSAGE_MARKER}`);
+  });
+
+  it('uses a correlated protected-delivery message id to redact a live echo whose body is not syntactically recognizable', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const handler = makeIngest(db, messenger, runtime);
+    const opaquePayload = 'opaque-live-echo-payload';
+    const msg = makeIncomingMessage({
+      messageId: 'MSG_PROTECTED_INGEST_CORRELATED',
+      content: opaquePayload,
+      contentText: opaquePayload,
+      rawMessage: { message: { conversation: opaquePayload } },
+    });
+    db.raw.prepare(`
+      INSERT INTO protected_deliveries (
+        stage_operation_id, resolve_operation_id, principal, recipient_jid, kind, device_id, purpose,
+        whatsapp_message_id, state, issued_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'stage-ingest-correlation', 'resolve-ingest-correlation', '15551230008',
+      msg.chatJid, 'rustdesk', 'device-1', 'login', msg.messageId, 'staged',
+      '2026-10-29T00:00:00.000Z',
+    );
+
+    await runIngest(handler, msg);
+
+    const stored = db.raw.prepare('SELECT content, content_text, raw_message FROM messages WHERE message_id = ?')
+      .get(msg.messageId) as { content: string; content_text: string; raw_message: string };
+    expect(stored.content).toBe(PROTECTED_MESSAGE_MARKER);
+    expect(stored.content_text).toBe(PROTECTED_MESSAGE_MARKER);
+    expect(stored.raw_message).not.toContain(opaquePayload);
+    expect(vi.mocked(runtime.handleMessage).mock.calls[0][0].content).toBe(PROTECTED_MESSAGE_MARKER);
   });
 
   it('strips the bot\'s own @mention from inbound group text before dispatch, keeping the stored copy raw (#1854)', async () => {

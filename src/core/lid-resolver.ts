@@ -816,6 +816,17 @@ function lookupLidFromDisk(db: Database, lid: string): string | null {
  */
 let _resolveLidStmt: ReturnType<typeof import('node:sqlite').DatabaseSync.prototype.prepare> | null = null;
 let _resolveLidDb: Database | null = null;
+const LID_MAPPING_PHONE_LOOKUP_SQL = 'SELECT phone_jid FROM lid_mappings WHERE lid = ?';
+
+/**
+ * Read one already-normalized LID mapping from SQLite without disk fallback.
+ * Callers that require only a verified persisted mapping must normalize before
+ * calling this helper and compare the returned full phone JID exactly.
+ */
+export function lookupStoredLidPhoneJid(rawDb: DatabaseSync, normalizedLid: string): string | null {
+  const row = rawDb.prepare(LID_MAPPING_PHONE_LOOKUP_SQL).get(normalizedLid) as { phone_jid: string } | undefined;
+  return row?.phone_jid ?? null;
+}
 
 export function resolveLid(db: Database, rawLid: string): string | null {
   // Normalize: strip colon-device suffix (e.g. '12345:67' → '12345')
@@ -827,7 +838,7 @@ export function resolveLid(db: Database, rawLid: string): string | null {
     _resolveLidDb = db;
   }
   if (!_resolveLidStmt) {
-    _resolveLidStmt = db.raw.prepare('SELECT phone_jid FROM lid_mappings WHERE lid = ?');
+    _resolveLidStmt = db.raw.prepare(LID_MAPPING_PHONE_LOOKUP_SQL);
   }
 
   const row = _resolveLidStmt.get(lid) as { phone_jid: string } | undefined;

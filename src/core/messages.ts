@@ -5,6 +5,7 @@ import type { ContentType } from './types.ts';
 import { normalizeUnixTimestampSeconds } from './substrate/time.ts';
 import { type Clock, systemClock } from '../lib/clock.ts';
 import { mergeTranscriptionContent } from './audio-transcript-content.ts';
+import { sanitizeProtectedMessageText } from './protected-message.ts';
 
 // ---------------------------------------------------------------------------
 // MCP row shape — used by tool files that query the messages table directly
@@ -28,21 +29,24 @@ export interface MessageRow {
 }
 
 export function rowToMessage(row: MessageRow) {
+  const content = row.content === null ? null : sanitizeProtectedMessageText(row.content);
+  const contentText = row.content_text ?? row.content;
+  const senderName = row.sender_name ?? null;
   return {
     pk: row.pk,
     messageId: row.message_id,
     conversationKey: row.conversation_key,
     chatJid: row.chat_jid,
     senderJid: row.sender_jid,
-    senderName: row.sender_name ?? null,
-    content: row.content ?? null,
+    senderName: senderName === null ? null : sanitizeProtectedMessageText(senderName),
+    content,
     contentType: row.content_type,
     isFromMe: Boolean(row.is_from_me),
     timestamp: row.timestamp,
     quotedMessageId: row.quoted_message_id ?? null,
     createdAt: row.created_at,
     mediaPath: row.media_path ?? null,
-    contentText: row.content_text ?? row.content ?? null,
+    contentText: contentText === null ? null : sanitizeProtectedMessageText(contentText),
   };
 }
 
@@ -85,14 +89,18 @@ export interface StoreMessageInput {
 // --- Row mapping ---
 
 function rowToStoredMessage(row: Record<string, unknown>): StoredMessage {
+  const content = (row.content as string | null) ?? null;
+  const contentText = (row.content_text as string | null) ?? content;
+  const senderName = (row.sender_name as string | null) ?? null;
   return {
     pk: row.pk as number,
     chatJid: row.chat_jid as string,
     conversationKey: row.conversation_key as string,
     senderJid: row.sender_jid as string,
-    senderName: (row.sender_name as string | null) ?? null,
+    // Rows stored before sender names were sanitized at ingress can still hold a link.
+    senderName: senderName === null ? null : sanitizeProtectedMessageText(senderName),
     messageId: row.message_id as string,
-    content: (row.content as string | null) ?? null,
+    content: content === null ? null : sanitizeProtectedMessageText(content),
     contentType: (row.content_type as ContentType) ?? 'text',
     isFromMe: Boolean(row.is_from_me),
     timestamp: row.timestamp as number,
@@ -101,7 +109,7 @@ function rowToStoredMessage(row: Record<string, unknown>): StoredMessage {
     enrichmentRetries: (row.enrichment_retries as number) ?? 0,
     createdAt: row.created_at as string,
     mediaPath: (row.media_path as string | null) ?? null,
-    contentText: (row.content_text as string | null) ?? (row.content as string | null) ?? null,
+    contentText: contentText === null ? null : sanitizeProtectedMessageText(contentText),
   };
 }
 
@@ -112,15 +120,15 @@ function toInsertParams(msg: StoreMessageInput): Record<string, null | number | 
     chat_jid: msg.chatJid,
     conversation_key: msg.conversationKey,
     sender_jid: msg.senderJid,
-    sender_name: msg.senderName ?? null,
+    sender_name: msg.senderName === null || msg.senderName === undefined ? null : sanitizeProtectedMessageText(msg.senderName),
     message_id: msg.messageId,
-    content: msg.content ?? null,
+    content: msg.content === null || msg.content === undefined ? null : sanitizeProtectedMessageText(msg.content),
     content_type: msg.contentType ?? 'text',
     is_from_me: msg.isFromMe ? 1 : 0,
     timestamp: normalizeUnixTimestampSeconds(msg.timestamp),
     quoted_message_id: msg.quotedMessageId ?? null,
-    raw_message: msg.rawMessage ?? null,
-    content_text: msg.contentText ?? null,
+    raw_message: msg.rawMessage === null || msg.rawMessage === undefined ? null : sanitizeProtectedMessageText(msg.rawMessage),
+    content_text: msg.contentText === null || msg.contentText === undefined ? null : sanitizeProtectedMessageText(msg.contentText),
   };
 }
 
@@ -205,9 +213,19 @@ export function getRecentMessageText(
     content: string | null; sender_name: string | null; is_from_me: number; oversized: number;
   }[];
   if (rows.some((row) => row.oversized)) throw new Error('Recent message text exceeds byte limit');
-  return rows.map((row) => ({
-    content: row.content, senderName: row.sender_name, isFromMe: Boolean(row.is_from_me),
-  })).reverse();
+  const projected = rows.map((row) => ({
+    content: row.content === null ? null : sanitizeProtectedMessageText(row.content),
+    senderName: row.sender_name === null ? null : sanitizeProtectedMessageText(row.sender_name),
+    isFromMe: Boolean(row.is_from_me),
+  }));
+  // The stored-size check above keeps oversized text out of JavaScript. The
+  // marker can be longer than a short link it replaces, so the returned text
+  // is measured again after redaction.
+  const redactedBytes = projected.reduce((sum, row) => sum
+    + (row.content === null ? 0 : Buffer.byteLength(row.content, 'utf8'))
+    + (row.senderName === null ? 0 : Buffer.byteLength(row.senderName, 'utf8')), 0);
+  if (redactedBytes > maxBytes) throw new Error('Recent message text exceeds byte limit');
+  return projected.reverse();
 }
 
 /**

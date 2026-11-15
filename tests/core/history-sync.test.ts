@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+vi.mock('../../src/core/protected-delivery-pins.ts', async (importOriginal) =>
+  (await import('../helpers/protected-delivery-pins.ts')).mockProtectedDeliveryPins(importOriginal));
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { unlinkSync, existsSync } from 'node:fs';
@@ -6,6 +9,7 @@ import { randomBytes } from 'node:crypto';
 import { Database } from '../../src/core/database.ts';
 import { processHistoryBatch, type HistoryInput } from '../../src/core/history-sync.ts';
 import { storeMessageIfNew } from '../../src/core/messages.ts';
+import { PROTECTED_MESSAGE_MARKER } from '../../src/core/protected-message.ts';
 
 function makeDb(): { db: Database; path: string } {
   const path = join(tmpdir(), `whatsoup-history-sync-${randomBytes(4).toString('hex')}.db`);
@@ -69,6 +73,99 @@ describe('processHistoryBatch', () => {
       key: { id: 'MSG1', remoteJid: 'alice@s.whatsapp.net' },
       message: { conversation: 'hello' },
     });
+  });
+
+  it('redacts history content and recursively stored raw quote fields, then cannot be overwritten by a replay', () => {
+    const link = 'https://links.example.test/setup/#history-protected-test';
+    const protectedMessage = {
+      key: { id: 'MSG_PROTECTED_HISTORY', remoteJid: 'alice@s.whatsapp.net', fromMe: false },
+      messageTimestamp: 1_700_000_000,
+      message: {
+        extendedTextMessage: {
+          text: link,
+          contextInfo: { quotedMessage: { conversation: link } },
+        },
+      },
+    } as HistoryInput;
+
+    processHistoryBatch(db, [protectedMessage]);
+    processHistoryBatch(db, [protectedMessage]);
+
+    const row = db.raw.prepare('SELECT content, raw_message FROM messages WHERE message_id=?').get('MSG_PROTECTED_HISTORY') as {
+      content: string;
+      raw_message: string;
+    };
+    expect(row.content).toBe(PROTECTED_MESSAGE_MARKER);
+    expect(row.raw_message).not.toContain('links.example.test/setup/#');
+    expect(row.raw_message).toContain(PROTECTED_MESSAGE_MARKER);
+  });
+
+  it('redacts a protected link in a history sender name before storing the row', () => {
+    const link = 'https://links.example.test/s/#v3.history-sender-protected-test';
+
+    processHistoryBatch(db, [textMsg({
+      id: 'MSG_PROTECTED_HISTORY_SENDER', chat: 'alice@s.whatsapp.net', from: `Mallory ${link}`, text: 'hello',
+    })]);
+
+    const row = db.raw.prepare('SELECT sender_name, content, raw_message FROM messages WHERE message_id=?')
+      .get('MSG_PROTECTED_HISTORY_SENDER') as { sender_name: string; content: string; raw_message: string };
+    expect(row.sender_name).toBe(`Mallory ${PROTECTED_MESSAGE_MARKER}`);
+    expect(row.content).toBe('hello');
+    expect(row.raw_message).not.toContain('links.example.test/s/#');
+  });
+
+  it('does not let a later history replay overwrite a live protected marker', () => {
+    const link = 'https://links.example.test/s/#v3.history-replay-protected-test';
+    storeMessageIfNew(db, {
+      chatJid: 'alice@s.whatsapp.net',
+      conversationKey: 'alice_at_s.whatsapp.net',
+      senderJid: 'alice@s.whatsapp.net',
+      senderName: 'Alice',
+      messageId: 'MSG_PROTECTED_LIVE_FIRST',
+      content: PROTECTED_MESSAGE_MARKER,
+      contentText: PROTECTED_MESSAGE_MARKER,
+      contentType: 'text',
+      isFromMe: false,
+      timestamp: 1_700_000_100,
+      quotedMessageId: null,
+      rawMessage: PROTECTED_MESSAGE_MARKER,
+    });
+
+    processHistoryBatch(db, [textMsg({
+      id: 'MSG_PROTECTED_LIVE_FIRST', chat: 'alice@s.whatsapp.net', text: link, ts: 1_700_000_999,
+    })]);
+
+    const row = db.raw.prepare('SELECT content, content_text, timestamp FROM messages WHERE message_id=?')
+      .get('MSG_PROTECTED_LIVE_FIRST') as { content: string; content_text: string; timestamp: number };
+    expect(row).toEqual({
+      content: PROTECTED_MESSAGE_MARKER,
+      content_text: PROTECTED_MESSAGE_MARKER,
+      timestamp: 1_700_000_100,
+    });
+  });
+
+  it('uses the protected-delivery message id to replace an unrecognized history body and raw payload', () => {
+    db.raw.prepare(`
+      INSERT INTO protected_deliveries (
+        stage_operation_id, resolve_operation_id, principal, recipient_jid, kind, device_id, purpose,
+        whatsapp_message_id, state, issued_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'stage-history-correlation', 'resolve-history-correlation', 'alice',
+      'alice@s.whatsapp.net', 'rustdesk', 'device-1', 'login', 'MSG_PROTECTED_HISTORY_CORRELATED', 'staged',
+      '2026-10-29T00:00:00.000Z',
+    );
+    const opaquePayload = 'opaque-history-payload';
+
+    processHistoryBatch(db, [textMsg({
+      id: 'MSG_PROTECTED_HISTORY_CORRELATED', chat: 'alice@s.whatsapp.net', text: opaquePayload,
+    })]);
+
+    const row = db.raw.prepare('SELECT content, content_text, raw_message FROM messages WHERE message_id=?')
+      .get('MSG_PROTECTED_HISTORY_CORRELATED') as { content: string; content_text: string; raw_message: string };
+    expect(row.content).toBe(PROTECTED_MESSAGE_MARKER);
+    expect(row.content_text).toBe(PROTECTED_MESSAGE_MARKER);
+    expect(row.raw_message).not.toContain(opaquePayload);
   });
 
   it('upgrades a prior placeholder row in place when a body arrives later', () => {

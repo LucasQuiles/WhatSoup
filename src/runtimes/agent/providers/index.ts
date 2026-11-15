@@ -60,6 +60,13 @@ export function executionModeForProvider(provider: ProviderId): ExecutionMode {
   }
 }
 
+/** True when a known provider executes through the in-process managed loop. */
+export function providerUsesManagedLoop(
+  provider: unknown = DEFAULT_PROVIDER_ID,
+): provider is ProviderId {
+  return isProviderId(provider) && executionModeForProvider(provider) === 'managed_loop';
+}
+
 /** Exhaustive WhatSoup MCP exposure decision for every supported provider. */
 export function mcpModeForProvider(provider: ProviderId): ProviderMcpMode {
   switch (provider) {

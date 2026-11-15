@@ -5027,6 +5027,7 @@ describe('POST /send — Authorization header check', () => {
         triggerOccurrences: 0,
         handoffArtifacts: 2,
         identityAdmissionsExpired: 0,
+        protectedDeliveries: 0,
       },
     });
 

@@ -180,6 +180,8 @@ the drain settles.
 1. `capability-obligation-attest … --run-canary --confirm` (readiness attestation).
 2. For a group: `capability-obligation-approve-drain … --confirm` (AS-08 approval + arm).
 3. The supervisor scans → admits (attestation) → claims (fenced) → dispatches → settles.
+   A source token that carries a protected link stops this sequence before admission (see
+   the Safety recap).
 4. (Cold restart only) `capability-obligation-drain-now … --confirm` (§3) to activate the
    named obligation's session; the same scan then drains it.
 
@@ -209,12 +211,21 @@ oracle when the automated harness cannot run; keep both receipts.
 
 - Schema-guarded, dry-run-by-default, `--json` for automation.
 - No live DB write, provider call, or WhatsApp send occurs from a dry run.
+- An obligation whose source token carries a protected link is refused at dispatch. The
+  replay prompt would hand the agent that link to fetch, and a protected link is a secret
+  for one person's browser that may work only once. The scan and drain-now both stop it
+  before admission: the obligation moves to `cancelled` with the event reason
+  `protected_link_source_refused`, uses no attempt, and no replay prompt is built. Only
+  the state, claim fields and update time change; the stored source token is unchanged, so
+  its source digest check still holds, and the inspect view shows the token redacted. Drain-now still activates the session before this refusal.
+  The user must send a fresh request.
 - Recording an attestation and approving a group drain are owner-gated actions (H5 / AS-08);
   a live migration additionally requires the AS-01 old-binary rehearsal to pass. Migration 63
   (#3221 Debt 2: attestation-evidence columns in the row; the `--receipt-out` file is now
-  corroborating) is on main and bumped the schema INSIDE the attestation binding — rolling it
-  out to a host requires the AS-01 rehearsal re-run 44→63, and every previously recorded
-  attestation digest stops admitting on the new binary by design (re-attest after upgrade).
+  corroborating) is on main and bumped the schema INSIDE the attestation binding, as every
+  later migration through 67 does — rolling this release out to a host requires the AS-01
+  rehearsal re-run 44→67, and every previously recorded attestation digest stops admitting
+  on the new binary by design (re-attest after upgrade).
 - The same-UID staged-copy window (F4, incl. the EUID-owned interpreter) and the direct-mode
   positional-code residual (awk-shape) are OWNER-RATIFIED threat-model boundaries
   (2026-08-13) — documented in `docs/durability.md` §5.7, not open defects. The drain-now

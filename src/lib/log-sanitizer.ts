@@ -74,6 +74,9 @@
  * values are removed entirely rather than shortened.
  */
 
+// The scanner sits in this ring, so a logger created at import time redacts
+// protected links from its first line; there is nothing to wire.
+import { sanitizeProtectedLinkText } from './protected-link-text.ts';
 import { homePathPattern, jidPattern } from './redaction-patterns.ts';
 
 // ─── Sensitive key patterns ─────────────────────────────────────────────────
@@ -350,7 +353,8 @@ const BEARER_RE = new RegExp(
 );
 
 function sanitizeStringValue(value: string): string {
-  return value
+  // Protected links first: the fragment mask below would leave their host.
+  return sanitizeProtectedLinkText(value)
     .replace(URL_USERINFO_RE, '://***@')
     .replace(URL_QUERY_RE, '?***')
     .replace(URL_FRAGMENT_RE, '#***')
@@ -647,6 +651,13 @@ export function sanitizingLogHook(
   if (args.length > 0 && typeof args[0] === 'object' && args[0] !== null) {
     const original = args[0];
     args[0] = markNonErrorValues(original, sanitizeLogValue(original));
+  }
+  // Every string argument (a message alone, the message after a merge object,
+  // or an interpolation value) is written to the log sink as is. Only the
+  // protected-link scan runs on them, so other message text is unchanged.
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    if (typeof arg === 'string') args[index] = sanitizeProtectedLinkText(arg);
   }
   return method.apply(this, args);
 }

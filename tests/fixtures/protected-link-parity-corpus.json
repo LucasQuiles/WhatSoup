@@ -1,0 +1,66 @@
+{
+  "description": "Shared cases for the protected-link scanner: sanitizeProtectedMessageText (src/core/protected-message.ts) and sanitize_protected_link_text (deploy/scripts/lib/bot_errors_redaction.py) must agree on every row. Hosts are reserved .test names pinned only by the test suites.",
+  "linkHosts": ["links.example.test", "delivery.example.test"],
+  "cases": [
+    {
+      "id": "canonical-link",
+      "input": "see https://links.example.test/s/#v3.AAAAAAAAAAAAAAAAAAAAAA.BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB now",
+      "expected": "see [protected managed link] now"
+    },
+    {
+      "id": "case-folded",
+      "input": "OPEN HTTPS://LINKS.EXAMPLE.TEST/S/#TOKEN done",
+      "expected": "OPEN [protected managed link] done"
+    },
+    {
+      "id": "www-trailing-dot-https-port-setup-path",
+      "input": "go https://www.links.example.test.:443/setup/#seed=abc&id=1 end",
+      "expected": "go [protected managed link] end"
+    },
+    {
+      "id": "bare-host-to-end-of-text",
+      "input": "visit links.example.test/s#frag-1.",
+      "expected": "visit [protected managed link]"
+    },
+    {
+      "id": "delivery-host",
+      "input": "api https://delivery.example.test/s/#x",
+      "expected": "api [protected managed link]"
+    },
+    {
+      "id": "unpinned-host-unchanged",
+      "input": "safe https://other.example.test/s/#v3.keep",
+      "expected": "safe https://other.example.test/s/#v3.keep"
+    },
+    {
+      "id": "long-s-host",
+      "input": "x https://linkſ.example.test/s/#frag y",
+      "expected": "x [protected managed link] y"
+    },
+    {
+      "id": "kelvin-sign-host",
+      "input": "x https://linKs.example.test/s/#frag y",
+      "expected": "x [protected managed link] y"
+    },
+    {
+      "id": "hash-without-link-unchanged",
+      "input": "issue #12 and path /s#top",
+      "expected": "issue #12 and path /s#top"
+    },
+    {
+      "id": "two-links",
+      "input": "a links.example.test/s/#one b https://links.example.test/setup#two c",
+      "expected": "a [protected managed link] b [protected managed link] c"
+    },
+    {
+      "id": "http-default-port",
+      "input": "h http://links.example.test:80/s/#z",
+      "expected": "h [protected managed link]"
+    },
+    {
+      "id": "astral-prefix",
+      "input": "😀 links.example.test/s#q tail",
+      "expected": "😀 [protected managed link] tail"
+    }
+  ]
+}

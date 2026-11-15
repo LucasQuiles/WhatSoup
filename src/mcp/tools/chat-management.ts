@@ -9,6 +9,11 @@ import { assertConversationAccess, resolveConversationKey } from '../types.ts';
 import type { Database } from '../../core/database.ts';
 import type { ExtendedBaileysSocket } from '../types.ts';
 import { type MessageRow, rowToMessage } from '../../core/messages.ts';
+import {
+  hasProtectedManagedLink,
+  isProtectedDeliveryMessage,
+  sanitizeProtectedMessageText,
+} from '../../core/protected-message.ts';
 import { createChildLogger } from '../../logger.ts';
 import { type Clock, systemClock } from '../../lib/clock.ts';
 import { escapeSqlLikePattern } from '../../lib/sql-like.ts';
@@ -180,7 +185,8 @@ const ListChatsSchema = z.object({
 function contentPreview(contentText: string | null, content: string | null): string | null {
   const text = contentText ?? content;
   if (text === null) return null;
-  return text.length > 100 ? `${text.slice(0, 97)}...` : text;
+  const sanitized = sanitizeProtectedMessageText(text);
+  return sanitized.length > 100 ? `${sanitized.slice(0, 97)}...` : sanitized;
 }
 
 function makeListChats(db: Database): ToolDeclaration {
@@ -346,7 +352,7 @@ function makeListChats(db: Database): ToolDeclaration {
           chatJid: r.chat_jid,
           lastTimestamp: r.last_timestamp ?? undefined,
           messageCount: r.message_count,
-          name: r.name ?? undefined,
+          name: r.name === null ? undefined : sanitizeProtectedMessageText(r.name),
           unreadCount: r.unread_count ?? undefined,
           isArchived: r.is_archived ? true : undefined,
           isPinned: r.is_pinned ? true : undefined,
@@ -355,7 +361,7 @@ function makeListChats(db: Database): ToolDeclaration {
           ...(include_last_message ? {
             lastMessage: r.last_message_id ? {
               messageId: r.last_message_id,
-              senderName: r.last_sender_name ?? null,
+              senderName: r.last_sender_name === null ? null : sanitizeProtectedMessageText(r.last_sender_name),
               contentPreview: contentPreview(r.last_content_text, r.last_content),
               contentType: r.last_content_type,
               timestamp: r.last_message_timestamp,
@@ -514,6 +520,14 @@ function makeForwardMessage(db: Database, getSock: () => ExtendedBaileysSocket |
         rawMessage = rawRow?.raw_message ?? null;
       } catch (err) {
         log.debug({ err, messageId: message_id }, 'raw_message lookup failed — falling back to text forward');
+      }
+
+      if (isProtectedDeliveryMessage(db, message_id) || hasProtectedManagedLink([
+        row.content,
+        row.content_text,
+        rawMessage,
+      ])) {
+        throw new Error('Protected deliveries cannot be forwarded');
       }
 
       if (rawMessage) {

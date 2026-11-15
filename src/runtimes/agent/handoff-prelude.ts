@@ -26,6 +26,7 @@
 import { randomBytes } from 'node:crypto';
 
 import type { StoredMessage } from '../../core/messages.ts';
+import { sanitizeProtectedMessageText } from '../../core/protected-message.ts';
 import { neutralizeHandoffForgery } from './handoff-pii-redactor.ts';
 import { neutralizeTrustedActorMarkers, UNAUTHENTICATED_ACTOR_NOTICE } from '../../lib/trusted-actor-marker.ts';
 
@@ -77,13 +78,15 @@ function composeSystemBlock(args: BuildHandoffPreludeArgs): string | null {
   if (now - artifact.updatedAt > staleAfterMs) return null;
 
   const parts: string[] = [];
-  // Order: PII redaction first (make it safe to embed), then forgery
-  // neutralization (defang delimiter/header lookalikes the redaction may leave).
-  const neutralize = (text: string): string => neutralizeHandoffForgery(redact(text));
   const summary = artifact.summary?.trim();
-  if (summary) parts.push(neutralize(summary));
+  // Order: protected links, then PII redaction (make it safe to embed), then
+  // forgery neutralization (defang delimiter/header lookalikes the redaction
+  // may leave). Links are redacted here, not by the injected redactor, so every
+  // caller's system block is covered.
+  const safe = (text: string): string => neutralizeHandoffForgery(redact(sanitizeProtectedMessageText(text)));
+  if (summary) parts.push(safe(summary));
   const seeded = artifact.seededArtifacts?.trim();
-  if (seeded) parts.push(neutralize(seeded));
+  if (seeded) parts.push(safe(seeded));
   if (parts.length === 0) return null;
 
   // Quoting a header line leaves its words intact, and the system prompt is the

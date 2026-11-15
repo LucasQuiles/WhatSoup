@@ -9,6 +9,7 @@ import { isNonEmptyString } from '../../../lib/type-guards.ts';
 import { clearRecoveryMarker, loadRecoveryMarkers, setRecoveryMarker } from '../../../lib/recovery-authority-store.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../../lib/emit-alert.ts';
 import { CircuitBreaker } from '../../../core/circuit-breaker.ts';
+import { sanitizeProtectedMessageValue } from '../../../core/protected-message.ts';
 import { sleep, sleepWithAbort } from '../../../core/retry.ts';
 import {
   findPineconeIndex,
@@ -596,7 +597,8 @@ type PineconeRecord = {
   [key: string]: string | number | boolean | string[];
 };
 
-function toPineconeRecord(record: MemoryRecord): PineconeRecord {
+/** Write boundary: the record shape sent to Pinecone by `upsertRecords`. */
+export function toPineconeRecord(record: MemoryRecord): PineconeRecord {
   const raw: Record<string, string | number | boolean | string[] | undefined | null> = {
     _id: record.id,
     text: record.text,
@@ -617,23 +619,27 @@ function toPineconeRecord(record: MemoryRecord): PineconeRecord {
     contradicts: record.contradicts,
   };
 
-  // Strip null/undefined values — Pinecone requires primitive fields only
+  // Strip null/undefined values — Pinecone requires primitive fields only.
+  // Memory text and names derive from chat history that can predate ingress
+  // redaction, and this record leaves the host, so protected links are redacted.
   const cleaned: Record<string, string | number | boolean | string[]> = {};
   for (const [key, value] of Object.entries(raw)) {
     if (value !== null && value !== undefined) {
-      cleaned[key] = value;
+      cleaned[key] = sanitizeProtectedMessageValue(value) as string | number | boolean | string[];
     }
   }
 
   return cleaned as PineconeRecord;
 }
 
-function fromPineconeHit(hit: {
+/** Read boundary for memory hits returned by `searchRecords`. */
+export function fromPineconeHit(hit: {
   _id: string;
   _score: number;
   fields: object;
 }): SearchResult {
-  const f = hit.fields as Record<string, unknown>;
+  // Records written before write-side redaction can still hold a protected link.
+  const f = sanitizeProtectedMessageValue(hit.fields) as Record<string, unknown>;
 
   const record: MemoryRecord = {
     id: hit._id,
@@ -659,12 +665,14 @@ function fromPineconeHit(hit: {
   return { id: hit._id, score: hit._score, record };
 }
 
-function fromPineconeHitEntity(hit: {
+/** Read boundary for entity hits returned by `searchRecords`. */
+export function fromPineconeHitEntity(hit: {
   _id: string;
   _score: number;
   fields: object;
 }): EntitySearchResult {
-  const f = hit.fields as Record<string, unknown>;
+  // Records written before write-side redaction can still hold a protected link.
+  const f = sanitizeProtectedMessageValue(hit.fields) as Record<string, unknown>;
 
   // Collect all non-reserved fields as metadata
   const reservedFields = new Set(['text', 'entity_type', 'source']);

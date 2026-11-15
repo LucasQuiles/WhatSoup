@@ -3,6 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { VALID_TYPES } from '../instance-loader.ts';
 import { validateInstanceConfig } from '../core/agent-config-validator.ts';
+import { sanitizeProtectedMessageText } from '../core/protected-message.ts';
 import { expandHomePath } from '../lib/home-path.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
 import { createChildLogger } from '../logger.ts';
@@ -111,6 +112,10 @@ export class FleetDiscovery {
         } catch (err) {
           configError = `Invalid config.json: ${(err as Error).message}`;
         }
+        // Every line response repeats this text (statusEvidence, error and
+        // configError). The validator and the parser can echo config text, so a
+        // protected link is redacted here, once, for every reader.
+        if (configError !== null) configError = sanitizeProtectedMessageText(configError);
 
         // Honor the `enabled: false` opt-out so operators can keep a config on
         // disk while taking it out of fleet rotation (no polling, no proxy).

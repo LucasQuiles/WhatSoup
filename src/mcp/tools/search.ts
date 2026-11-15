@@ -6,6 +6,7 @@ import type { ToolDeclaration, SessionContext } from '../types.ts';
 import { resolveConversationKey } from '../types.ts';
 import type { Database } from '../../core/database.ts';
 import { type MessageRow, rowToMessage } from '../../core/messages.ts';
+import { sanitizeProtectedMessageText } from '../../core/protected-message.ts';
 import { buildSafeFtsMatchQuery } from '../../lib/sql-fts.ts';
 import { escapeSqlLikePattern } from '../../lib/sql-like.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
@@ -150,8 +151,9 @@ function makeSearchContacts(db: Database): ToolDeclaration {
       const contacts = rows.map((row) => ({
         jid: row.jid,
         canonicalPhone: row.canonical_phone ?? null,
-        displayName: row.display_name ?? null,
-        notifyName: row.notify_name ?? null,
+        // Stored contact names are remote-controlled and can predate ingress redaction.
+        displayName: row.display_name === null ? null : sanitizeProtectedMessageText(row.display_name),
+        notifyName: row.notify_name === null ? null : sanitizeProtectedMessageText(row.notify_name),
         firstSeenAt: row.first_seen_at,
         lastSeenAt: row.last_seen_at,
       }));

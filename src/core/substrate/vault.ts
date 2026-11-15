@@ -1,9 +1,11 @@
 // src/core/substrate/vault.ts
 import type { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createChildLogger } from '../../logger.ts';
 import { privateWriteError } from '../../lib/private-fs.ts';
+import { sanitizeProtectedMessageText } from '../protected-message.ts';
 import { listBeads, getBead } from './beads.ts';
 import { getProfile, listEntities } from './entities.ts';
 import type { BeadRow, EntityRow, ObservationRow } from './types.ts';
@@ -27,7 +29,8 @@ const log = createChildLogger('substrate:vault');
  */
 function writeProjection(file: string, body: string, projection: 'bead' | 'entity'): void {
   try {
-    writeFileSync(file, body, 'utf8');
+    // An export carries stored bead and entity text out of the database.
+    writeFileSync(file, sanitizeProtectedMessageText(body), 'utf8');
   } catch (err) {
     const code = (err as NodeJS.ErrnoException | null)?.code ?? 'EIO';
     log.error({ err, code, path: file, projection }, 'vault projection write failed');
@@ -51,8 +54,16 @@ function ensureFolders(vaultPath: string): void {
   for (const f of PROJECTED_FOLDERS) mkdirSync(join(vaultPath, f), { recursive: true });
 }
 
+// The slug keeps the host and fragment characters of a link, so the name is
+// redacted first; projection and removal both derive the file name here.
+// Names that differ only by a protected link share the redacted slug, so a
+// redacted name also carries a short digest of the original name: distinct
+// entities keep distinct files, and the digest does not reveal the link.
 function safeSlug(s: string): string {
-  return s.replace(/[^\w\-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'untitled';
+  const redacted = sanitizeProtectedMessageText(s);
+  const slug = redacted.replace(/[^\w\-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'untitled';
+  if (redacted === s) return slug;
+  return `${slug}-${createHash('sha256').update(s).digest('hex').slice(0, 12)}`;
 }
 
 function beadStatusFolder(status: BeadRow['status']): string | null {

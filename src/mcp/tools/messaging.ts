@@ -44,6 +44,7 @@ import { emitAlertChecked } from '../../lib/emit-alert.ts';
 import type { OutboundSendsWriter } from '../../core/outbound-sends.ts';
 import { formatMentions } from '../../core/mentions.ts';
 import type { MessageRow } from '../../core/messages.ts';
+import { sanitizeProtectedMessageText } from '../../core/protected-message.ts';
 import type { ResolutionStrategy } from '../../runtimes/agent/runtime.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
@@ -573,7 +574,8 @@ export function registerMessagingTools(
           contextInfo: {
             stanzaId: row!.message_id,
             participant: row!.sender_jid,
-            quotedMessage: { conversation: row!.content ?? '' },
+            // The quote re-sends stored text, which can predate ingress redaction.
+            quotedMessage: { conversation: sanitizeProtectedMessageText(row!.content ?? '') },
           },
         };
         if (linkPreviewMode === 'off') content['linkPreview'] = null;

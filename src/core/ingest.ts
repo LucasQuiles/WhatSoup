@@ -13,6 +13,12 @@ import { MS_PER_MINUTE } from '../lib/time-units.ts';
 import { classifyErrorForInbound } from './inbound-failure-class.ts';
 import { storeMessageIfNew } from './messages.ts';
 import { stripLoneSurrogates } from './sanitize-surrogates.ts';
+import {
+  isProtectedDeliveryMessage,
+  PROTECTED_MESSAGE_MARKER,
+  sanitizeProtectedMessageText,
+  sanitizeProtectedMessageValue,
+} from './protected-message.ts';
 import { isAdminMessage, parseAdminCommand } from './command-router.ts';
 import { pausedChatAdmission } from './paused-chat.ts';
 import { handleAdminCommand, handleFallbackCommand, handleGrantCommand, sendApprovalRequest } from './admin.ts';
@@ -259,9 +265,15 @@ export function createIngestHandler(
         // strips content but not senderName; the Twilio bridge strips neither) and
         // cleans the in-memory msg before BOTH storage and runtime dispatch.
         // stripLoneSurrogates fast-paths strings with no surrogates (no realloc).
-        if (msg.content !== null) msg.content = stripLoneSurrogates(msg.content);
-        if (msg.senderName !== null) msg.senderName = stripLoneSurrogates(msg.senderName);
-        if (msg.contentText !== null) msg.contentText = stripLoneSurrogates(msg.contentText);
+        if (msg.content !== null) msg.content = sanitizeProtectedMessageText(stripLoneSurrogates(msg.content));
+        if (msg.senderName !== null) msg.senderName = sanitizeProtectedMessageText(stripLoneSurrogates(msg.senderName));
+        if (msg.contentText !== null) msg.contentText = sanitizeProtectedMessageText(stripLoneSurrogates(msg.contentText));
+        if (msg.rawMessage !== undefined) msg.rawMessage = sanitizeProtectedMessageValue(msg.rawMessage);
+        if (isProtectedDeliveryMessage(db, msg.messageId)) {
+          msg.content = PROTECTED_MESSAGE_MARKER;
+          msg.contentText = PROTECTED_MESSAGE_MARKER;
+          msg.rawMessage = PROTECTED_MESSAGE_MARKER;
+        }
 
         // Correlate and idempotently store outbound echoes without consuming
         // bounded admission capacity. The shared helper below keeps the normal

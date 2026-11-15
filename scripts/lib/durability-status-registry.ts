@@ -249,6 +249,22 @@ export const REGISTRY: DurabilityStatusEntry[] = [
     ],
   },
   {
+    table: 'protected_deliveries',
+    statusColumn: 'state',
+    vocabulary: ['staging', 'staged', 'resolving', 'submitted', 'delivered', 'read', 'ambiguous', 'failed', 'expired'],
+    vocabularySource: 'sql-check',
+    terminalFailureValues: ['ambiguous', 'failed', 'expired'],
+    writerSites: ['src/core/protected-delivery.ts'],
+  },
+  {
+    table: 'protected_delivery_events',
+    statusColumn: 'status',
+    vocabulary: ['submitted', 'delivered', 'read', 'ambiguous', 'failed'],
+    vocabularySource: 'sql-check',
+    terminalFailureValues: ['ambiguous', 'failed'],
+    writerSites: ['src/core/protected-delivery.ts'],
+  },
+  {
     table: 'scheduled_messages',
     statusColumn: 'status',
     vocabulary: ['pending', 'processing', 'sent', 'failed'],

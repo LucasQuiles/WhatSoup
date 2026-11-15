@@ -6,6 +6,7 @@ import { toConversationKey } from './conversation-key.ts';
 import type { Database } from './database.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { toPersonalJid, toLidJid, isLidJid, bareNumber } from './jid-constants.ts';
+import { sanitizeProtectedMessageText } from './protected-message.ts';
 
 /**
  * Result of formatting + extracting mentions from a text string.
@@ -128,7 +129,9 @@ export class ContactsDirectory {
     // Always map phone → phone (so @15550100001 always resolves)
     keys.push(phone);
 
-    if (senderName) {
+    // A name carrying a protected link never becomes a mention alias. Startup
+    // seeding reads stored names that can predate ingress redaction.
+    if (senderName && sanitizeProtectedMessageText(senderName) === senderName) {
       const lower = senderName.toLowerCase().trim();
       if (lower) {
         keys.push(lower);
