@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { systemClock } from '../lib/clock.ts';
 import { isNonEmptyString, isRecord, requireRecord } from '../lib/type-guards.ts';
 import {
   isServiceOwnedCredentialStore,
@@ -436,7 +437,8 @@ async function parseSourceChallenge(
     throw new Error('fixed MFA source response is invalid');
   }
   const expiresAt = Date.parse(value.expiresAt);
-  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now() || expiresAt > Date.now() + MAX_CHALLENGE_TTL_MS) {
+  const now = systemClock.now();
+  if (!Number.isFinite(expiresAt) || expiresAt <= now || expiresAt > now + MAX_CHALLENGE_TTL_MS) {
     throw new Error('fixed MFA source response is invalid');
   }
   return Object.freeze({ resourceId: value.resourceId, principal, operationId: value.operationId, expiresAt: new Date(expiresAt).toISOString() });
