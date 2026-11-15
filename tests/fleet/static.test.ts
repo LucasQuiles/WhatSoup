@@ -9,6 +9,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
+import { matchRoutes } from 'react-router';
 import { createStaticHandler } from '../../src/fleet/static.ts';
 
 // ---------------------------------------------------------------------------
@@ -105,6 +106,45 @@ describe('static file handler', () => {
     expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
     const body = await res.text();
     expect(body).toContain('app');
+  });
+
+  // React Router 8 compiles each declared path case-insensitively and accepts
+  // any run of trailing slashes (compilePath: `\/*$` with the `i` flag), so a
+  // refresh on these URLs renders the route and must get the SPA, not a 404.
+  it.each(['/OPS', '/LiNeS/example', '/ops//', '/lines/example/', '/%6Fps'])(
+    'SPA fallback serves %s, which the client router matches',
+    async (url) => {
+      const res = await fetchLocal(url);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
+      expect(await res.text()).toContain('app');
+    },
+  );
+
+  it.each(['/ops/extra', '/lines/a/b', '/lines', '//ops'])(
+    'returns 404 for %s, which no declared client route matches',
+    async (url) => {
+      const res = await fetchLocal(url);
+      expect(res.status).toBe(404);
+      expect(await res.text()).toBe('Not Found');
+    },
+  );
+
+  it('serves the SPA exactly when the installed router matches a declared console route', async () => {
+    const appSource = fs.readFileSync(path.join(import.meta.dirname, '../../console/src/App.tsx'), 'utf8');
+    const declared = [...appSource.matchAll(/<Route path="([^"]+)"/g)].map((match) => match[1]!).filter((route) => route !== '*');
+    expect(declared).toContain('/lines/:name');
+    const routes = declared.map((route) => ({ path: route }));
+    const urls = [
+      ...declared.map((route) => route.replace(':name', 'example')),
+      '/OPS', '/Settings/', '/LiNeS/example', '/lines/example//', '/ops//', '/%6Fps', '/lines/a%2Fb',
+      '/ops/extra', '/lines/a/b', '/lines', '//ops', '/opsx', '/dashboard', '/%E0%A4%A',
+    ];
+    for (const url of urls) {
+      const res = await fetchLocal(url);
+      await res.text();
+      expect({ url, status: res.status }).toEqual({ url, status: matchRoutes(routes, url) === null ? 404 : 200 });
+    }
   });
 
   it('returns 404 for an undeclared extensionless route', async () => {

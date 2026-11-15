@@ -46,25 +46,41 @@ const MIME_TYPES: Record<string, string> = {
   '.map': 'application/json',
 };
 
+/**
+ * The paths declared in console/src/App.tsx, matched the way the installed
+ * React Router (8.x `compilePath`) matches them: case-insensitively, a `:param`
+ * as one non-empty segment, and any run of trailing slashes. The `*` catch-all
+ * is deliberately not mirrored, so an undeclared path gets a 404 instead of the
+ * SPA's redirect to `/`.
+ */
 const CONSOLE_SPA_ROUTES: readonly RegExp[] = [
-  /^\/$/,
-  /^\/welcome$/,
-  /^\/hatch$/,
-  /^\/lines\/[^/]+$/,
-  /^\/inbox$/,
-  /^\/ops$/,
-  /^\/operator$/,
-  /^\/metrics$/,
-  /^\/agents$/,
-  /^\/skills$/,
-  /^\/dream-lab$/,
-  /^\/deployments$/,
-  /^\/settings$/,
+  /^\/\/*$/i,
+  /^\/welcome\/*$/i,
+  /^\/hatch\/*$/i,
+  /^\/lines\/[^/]+\/*$/i,
+  /^\/inbox\/*$/i,
+  /^\/ops\/*$/i,
+  /^\/operator\/*$/i,
+  /^\/metrics\/*$/i,
+  /^\/agents\/*$/i,
+  /^\/skills\/*$/i,
+  /^\/dream-lab\/*$/i,
+  /^\/deployments\/*$/i,
+  /^\/settings\/*$/i,
 ];
 
+/** React Router's `decodePath`: decode each segment, keep an encoded `/` inside it, leave a malformed path as is. */
+function decodeRoutePath(pathname: string): string {
+  try {
+    return pathname.split('/').map((segment) => decodeURIComponent(segment).replace(/\//g, '%2F')).join('/');
+  } catch {
+    return pathname;
+  }
+}
+
 function isConsoleSpaRoute(url: string): boolean {
-  const normalized = url.length > 1 && url.endsWith('/') ? url.slice(0, -1) : url;
-  return CONSOLE_SPA_ROUTES.some((route) => route.test(normalized));
+  const pathname = decodeRoutePath(url);
+  return CONSOLE_SPA_ROUTES.some((route) => route.test(pathname));
 }
 
 /**
