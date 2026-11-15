@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import type { Database } from '../../core/database.ts';
+import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import type { ToolRegistry } from '../registry.ts';
 import { conversationBoundKey, type SessionContext } from '../types.ts';
 import { parseCron, nextCronRun } from '../../core/cron.ts';
@@ -81,7 +82,7 @@ interface ScheduledMessageRow {
   media_blob: Uint8Array | null;
 }
 
-function assertSessionAccess(rowChatJid: string, session: SessionContext): void {
+function assertSessionAccess(rowChatJid: string, session: SessionContext, db: Database): void {
   // Confined sessions: chat-scoped, or conversation-bound (per-chat actor
   // socket — tier:'global' with a binding). Unbound global sessions —
   // including turn-pinned operator sessions — keep full visibility.
@@ -99,9 +100,13 @@ function assertSessionAccess(rowChatJid: string, session: SessionContext): void 
     throw new Error('Scheduled message has invalid chat target');
   }
 
-  if (conversationKey !== enforcedKey) {
-    throw new Error('Access denied: scheduled message belongs to a different conversation');
-  }
+  if (conversationKey === enforcedKey) return;
+  // A binding keyed by the canonical conversation (a LID DM mapped to its
+  // phone) still owns the rows it scheduled under its LID delivery JID, so a
+  // bound session also compares the row's canonical fold. Chat-scoped sessions
+  // key on the raw delivery JID and keep the raw comparison only.
+  if (boundKey !== undefined && toConversationKey(canonicalizeChatJid(rowChatJid, db)) === enforcedKey) return;
+  throw new Error('Access denied: scheduled message belongs to a different conversation');
 }
 
 function rowToScheduledMessage(row: ScheduledMessageRow) {
@@ -177,7 +182,7 @@ function listScheduledMessages(
 
   rows = rows.filter((row) => {
     try {
-      assertSessionAccess(row.chat_jid, session);
+      assertSessionAccess(row.chat_jid, session, db);
       return true;
     } catch {
       return false;
@@ -242,7 +247,7 @@ export function registerSchedulingTools(
         throw new Error(`Scheduled message ${id} not found`);
       }
 
-      assertSessionAccess(row.chat_jid, session);
+      assertSessionAccess(row.chat_jid, session, db);
 
       if (row.status !== 'pending') {
         throw new Error(`Scheduled message ${id} is ${row.status} and cannot be cancelled`);
@@ -270,7 +275,7 @@ export function registerSchedulingTools(
       const { id } = GetScheduledSchema.parse(params);
       const row = db.raw.prepare('SELECT * FROM scheduled_messages WHERE id = ?').get(id) as ScheduledMessageRow | undefined;
       if (!row) throw new Error(`Scheduled message ${id} not found`);
-      assertSessionAccess(row.chat_jid, session);
+      assertSessionAccess(row.chat_jid, session, db);
       return rowToScheduledMessage(row);
     },
   });
@@ -287,7 +292,7 @@ export function registerSchedulingTools(
       const { id, scheduled_at, text, recurrence } = UpdateScheduledSchema.parse(params);
       const row = db.raw.prepare('SELECT * FROM scheduled_messages WHERE id = ?').get(id) as ScheduledMessageRow | undefined;
       if (!row) throw new Error(`Scheduled message ${id} not found`);
-      assertSessionAccess(row.chat_jid, session);
+      assertSessionAccess(row.chat_jid, session, db);
       if (row.status !== 'pending') throw new Error(`Scheduled message ${id} is ${row.status} and cannot be updated`);
 
       if (scheduled_at !== undefined && scheduled_at <= clock.nowUnixSec()) {
