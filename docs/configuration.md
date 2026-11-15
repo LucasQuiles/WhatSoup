@@ -1502,6 +1502,10 @@ proof unless a WhatSoup-specific proof artifact says so.
 
 #### Per-chat MCP actor socket lifecycle
 
+Conversation reads use the logical chat's canonical identity, including when
+WhatsApp delivers its messages through a different LID. The delivery JID remains
+the outbound address; it does not replace the canonical conversation key.
+
 In a non-sandbox `per_chat` runtime, each logical chat session owns one mode-`0600`
 Unix socket below a mode-`0700` runtime directory. All four MCP-capable CLI
 providers—Claude, Codex, Gemini, and OpenCode—receive that session-specific

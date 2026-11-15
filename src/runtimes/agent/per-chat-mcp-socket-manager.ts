@@ -117,8 +117,10 @@ export class PerChatMcpSocketManager {
     chmodSync(directory, 0o700);
     const socketPath = this.socketPathFor(conversationIdentity);
     const identity = { value: conversationIdentity };
+    // The canonical conversation keys the binding; a LID delivery JID stays the
+    // outbound address only, so phone-keyed history remains readable.
     const baseSession = perChatActorSession(
-      deliveryJid,
+      scheduledAgentJobBaseMapKey(conversationIdentity),
       this.options.allowedRoot,
       this.options.conversationBound,
       deliveryJid,
