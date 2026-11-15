@@ -2436,11 +2436,12 @@ Output is one JSON line with `ok`, `mode`, `decision` (`ready`, `applied`, `alre
 contradicts the recorded gap or an existing closure); `1` usage or I/O error. Output never contains
 message text, JIDs, or media.
 
-**Schema 66 and 67 rollback.** Migration 66 adds only the closure table; migration 67 adds only the
-protected-delivery tables. After a migration is recorded, a binary whose ceiling is below it refuses
-the database and will not write: a schema-65 binary refuses a schema-66 database, and a schema-66
-binary refuses a schema-67 database, both as `future_schema`. **Binary-only rollback is unavailable**
-for either. Keep the 67-aware release for containment or forward repair. Restoring a pre-migration
+**Schema 66, 67 and 68 rollback.** Migration 66 adds only the closure table; migration 67 adds only
+the protected-delivery tables; migration 68 adds only the protected secret-input table. After a
+migration is recorded, a binary whose ceiling is below it refuses the database and will not write: a
+schema-65 binary refuses a schema-66 database, a schema-66 binary refuses a schema-67 database, and a
+schema-67 binary refuses a schema-68 database, all as `future_schema`. **Binary-only rollback is
+unavailable** for any of them. Keep the 68-aware release for containment or forward repair. Restoring a pre-migration
 backup is an owner decision that requires a proven zero-new-writes window. **Never overwrite a newer
 database with an older backup**: messages received after the upgrade would be lost.
 
@@ -2454,10 +2455,10 @@ bash scripts/run-with-pinned-node.sh scripts/schema-rollback-rehearsal.ts \
   --old-root "$OLD" --new-root "$PWD" --work-dir "$SCRATCH/rehearsal"
 ```
 
-The old binary creates the database at its own ceiling, this release migrates it to 67, and the old
-binary reopens it. From a schema-66 previous release, exit `0` means the old binary refused with
-`DatabaseCompatibilityError` reason `future_schema` ("Database schema migration 67 exceeds binary
-ceiling 66; refusing writes") and every file in the work directory, including the WAL and
+The old binary creates the database at its own ceiling, this release migrates it to 68, and the old
+binary reopens it. From a schema-67 previous release, exit `0` means the old binary refused with
+`DatabaseCompatibilityError` reason `future_schema` ("Database schema migration 68 exceeds binary
+ceiling 67; refusing writes") and every file in the work directory, including the WAL and
 shared-memory sidecars, stayed byte-identical.
 
 #### Close a proven operator catch-up recovery (admitted inbound sequences)

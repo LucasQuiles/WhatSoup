@@ -223,8 +223,8 @@ oracle when the automated harness cannot run; keep both receipts.
   a live migration additionally requires the AS-01 old-binary rehearsal to pass. Migration 63
   (#3221 Debt 2: attestation-evidence columns in the row; the `--receipt-out` file is now
   corroborating) is on main and bumped the schema INSIDE the attestation binding, as every
-  later migration through 67 does — rolling this release out to a host requires the AS-01
-  rehearsal re-run 44→67, and every previously recorded attestation digest stops admitting
+  later migration through 68 does — rolling this release out to a host requires the AS-01
+  rehearsal re-run 44→68, and every previously recorded attestation digest stops admitting
   on the new binary by design (re-attest after upgrade).
 - The same-UID staged-copy window (F4, incl. the EUID-owned interpreter) and the direct-mode
   positional-code residual (awk-shape) are OWNER-RATIFIED threat-model boundaries
