@@ -829,6 +829,35 @@ describe('agent type rules', () => {
     }
   });
 
+  it('checks sandboxPerChat instructions only where the per-chat session reads them', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-validator-home-'));
+    const cwd = path.join(home, 'workspace');
+    // A per-chat session reads a relative path from its chat workspace under cwd.
+    const chatWorkspace = path.join(cwd, 'users', 'chat-key');
+    fs.mkdirSync(chatWorkspace, { recursive: true });
+    fs.writeFileSync(path.join(chatWorkspace, 'persona.md'), 'instructions\n');
+    const live = { ...ctx('load'), filesystem: { homeDirectory: home } };
+    const sandboxed = (instructionsPath: string) => baseAgent({
+      agentOptions: { sessionScope: 'per_chat', sandboxPerChat: true, cwd, instructionsPath },
+    });
+    try {
+      // Not knowable at load time: the session reads <chat workspace>/persona.md, never <cwd>/persona.md.
+      expect(validateInstanceConfig(sandboxed('persona.md'), live)).toBeNull();
+      // CLAUDE.md is: every chat workspace links it to <cwd>/CLAUDE.md, so a missing target refuses.
+      expect(validateInstanceConfig(sandboxed('CLAUDE.md'), live)?.field).toBe('agentOptions.instructionsPath');
+      expect(validateInstanceConfig(sandboxed('./CLAUDE.md'), live)?.field).toBe('agentOptions.instructionsPath');
+      // An absolute path is read as given, so it is still checked.
+      expect(validateInstanceConfig(sandboxed(path.join(cwd, 'persona.md')), live)?.field).toBe('agentOptions.instructionsPath');
+      // Without sandboxPerChat the session reads <cwd>/persona.md, which is missing.
+      const shared = baseAgent({ agentOptions: { sessionScope: 'per_chat', cwd, instructionsPath: 'persona.md' } });
+      expect(validateInstanceConfig(shared, live)?.field).toBe('agentOptions.instructionsPath');
+      fs.writeFileSync(path.join(cwd, 'CLAUDE.md'), 'instructions\n');
+      expect(validateInstanceConfig(sandboxed('CLAUDE.md'), live)).toBeNull();
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it('accepts minimal valid agent on create (any accessMode with or without agentOptions)', () => {
     const raw = baseAgent();
     const result = validateInstanceConfig(raw, ctx('create'));

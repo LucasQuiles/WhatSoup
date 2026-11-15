@@ -68,7 +68,7 @@ import {
 } from './transport-authority-config-validation.ts';
 import { validateSignalConfig } from './signal-config-validation.ts';
 import { validateProtectedDeliveryBinding } from './protected-delivery-config.ts';
-import { validateAgentInstructionsPath } from './agent-instructions-path.ts';
+import { isReadOnlyFromChatWorkspace, validateAgentInstructionsPath } from './agent-instructions-path.ts';
 
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
 export const ACCESS_MODES = [
@@ -886,7 +886,13 @@ function validateAgentOptions(
   }
   // The session reads this file on every spawn; refusing it here stops a restart
   // before the service is replaced, instead of failing each turn afterwards.
-  if (typeof opts['instructionsPath'] === 'string' && ctx.filesystem) {
+  // A path a sandboxPerChat session reads only from its chat workspace has no
+  // load-time location, so the session's own read decides it.
+  if (
+    typeof opts['instructionsPath'] === 'string'
+    && ctx.filesystem
+    && !(opts['sandboxPerChat'] === true && isReadOnlyFromChatWorkspace(opts['instructionsPath']))
+  ) {
     const pathResult = validateAgentInstructionsPath({
       instructionsPath: opts['instructionsPath'],
       cwd: typeof opts['cwd'] === 'string' ? opts['cwd'] : undefined,
@@ -895,7 +901,7 @@ function validateAgentOptions(
     if (!pathResult.ok) {
       return err(
         'agentOptions.instructionsPath',
-        'agentOptions.instructionsPath must resolve within the service-user home to a readable regular file',
+        `agentOptions.instructionsPath must resolve within the service-user home to a readable regular file (${pathResult.reason})`,
       );
     }
   }

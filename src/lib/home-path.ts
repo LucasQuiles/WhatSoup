@@ -62,9 +62,10 @@ export function hasUnsupportedTildePrefix(inputPath: string): boolean {
   return trimmed.startsWith('~') && trimmed !== '~' && !trimmed.startsWith('~/');
 }
 
-export function expandHomePath(inputPath: string): string {
+/** Expand `~` and `~/…` against `homeDirectory` (the process home by default); `~user` stays as given. */
+export function expandHomePath(inputPath: string, homeDirectory = os.homedir()): string {
   const trimmed = inputPath.trim();
-  if (trimmed === '~') return os.homedir();
-  if (trimmed.startsWith('~/')) return path.join(os.homedir(), trimmed.slice(2));
+  if (trimmed === '~') return homeDirectory;
+  if (trimmed.startsWith('~/')) return path.join(homeDirectory, trimmed.slice(2));
   return trimmed;
 }

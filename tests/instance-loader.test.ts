@@ -1025,7 +1025,8 @@ describe('passive instance type', () => {
 
 describe('loadInstance — loops instance config', () => {
   it('loads the loops instance.json from repo and validates correctly', () => {
-    const cwd = path.join(tmpDir, 'LAB', 'Loops');
+    // HOME is tmpDir, so the runtime expands the `~` cwd below to this directory.
+    const cwd = path.join(tmpDir, 'whatsoup', 'loops');
     fs.mkdirSync(cwd, { recursive: true });
     fs.writeFileSync(path.join(cwd, 'CLAUDE.md'), 'instructions', 'utf8');
     // Sanitized fixture — mirrors the real loops config shape without committing
@@ -1038,7 +1039,7 @@ describe('loadInstance — loops instance config', () => {
       agentOptions: {
         sessionScope: 'per_chat',
         sandboxPerChat: true,
-        cwd,
+        cwd: '~/whatsoup/loops',
         instructionsPath: 'CLAUDE.md',
       },
     };
@@ -1054,8 +1055,12 @@ describe('loadInstance — loops instance config', () => {
     expect(config.agentOptions).toBeDefined();
     expect(config.agentOptions.sessionScope).toBe('per_chat');
     expect(config.agentOptions.sandboxPerChat).toBe(true);
-    expect(config.agentOptions.cwd).toBe(cwd);
+    expect(config.agentOptions.cwd).toBe('~/whatsoup/loops');
     expect(config.agentOptions.instructionsPath).toBe('CLAUDE.md');
+
+    // The same `~` cwd is still checked: without the file there, load refuses.
+    fs.rmSync(path.join(cwd, 'CLAUDE.md'));
+    expect(() => loadInstance('loops')).toThrow(/readable regular file/);
   });
 });
 

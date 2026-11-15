@@ -1,6 +1,8 @@
 import { accessSync, constants, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 
+import { expandHomePath } from '../lib/home-path.ts';
+
 export type AgentInstructionsPathFailureReason =
   | 'blank'
   | 'ambiguous_cwd'
@@ -26,6 +28,19 @@ export function resolveAgentInstructionsPath(input: AgentInstructionsPathInput):
   return path.resolve(input.cwd?.trim() || input.homeDirectory, configuredPath);
 }
 
+/**
+ * Whether a sandboxPerChat session reads `instructionsPath` only inside a
+ * per-chat workspace, which does not exist when config loads. The session
+ * resolves a relative path against that workspace; the one relative file known
+ * there is CLAUDE.md, which provisioning links to `<cwd>/CLAUDE.md`. Blank and
+ * `~` forms are refused wherever they would be read, so they stay checked.
+ */
+export function isReadOnlyFromChatWorkspace(instructionsPath: string): boolean {
+  const configuredPath = instructionsPath.trim();
+  if (!configuredPath || configuredPath === '~' || configuredPath.startsWith('~/')) return false;
+  return !path.isAbsolute(configuredPath) && path.normalize(configuredPath) !== 'CLAUDE.md';
+}
+
 function isAtOrInside(candidate: string, parent: string): boolean {
   const relative = path.relative(parent, candidate);
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
@@ -48,8 +63,11 @@ export function validateAgentInstructionsPath(
     return { ok: false, reason: 'invalid_home' };
   }
 
-  const effectiveCwd = input.cwd?.trim() || homePath;
-  if (!path.isAbsolute(effectiveCwd) || effectiveCwd === '~' || effectiveCwd.startsWith('~/')) {
+  // main.ts expands a `~` cwd before the session reads the file, so the check
+  // expands it the same way; any other relative cwd has no known read location.
+  const configuredCwd = input.cwd?.trim();
+  const effectiveCwd = configuredCwd ? expandHomePath(configuredCwd, homePath) : homePath;
+  if (!path.isAbsolute(effectiveCwd)) {
     return { ok: false, reason: 'ambiguous_cwd' };
   }
 
