@@ -186,8 +186,16 @@ export async function applyHostUnitActivation(host: ActivationHost, context: Hos
   let watchdogsMayBeRunning = false;
   try {
     for (const launcher of launchers) repointSymlink(launcher.link, launcher.target);
-    for (const item of [...primary, ...memberAuxiliaries]) writePlist(item.plistPath, item.context.staged.find((entry) => entry.label === item.label)!.staged!);
-    for (const auxiliary of hostAuxiliaries) writePlist(auxiliary.plistPath, auxiliary.staged);
+    // writePlist refuses a plist whose bytes no longer match its backup, so a write between staging and
+    // this switch fails the activation instead of being overwritten.
+    for (const item of [...primary, ...memberAuxiliaries]) {
+      const original = readFileSync(path.join(backupPath, 'members', item.context.args.instance, `${item.label}.plist`), 'utf8');
+      await writePlist(host, item.plistPath, item.context.staged.find((entry) => entry.label === item.label)!.staged!, original);
+    }
+    for (const auxiliary of hostAuxiliaries) {
+      const original = readFileSync(path.join(backupPath, 'host-auxiliaries', `${auxiliary.label}.plist`), 'utf8');
+      await writePlist(host, auxiliary.plistPath, auxiliary.staged, original);
+    }
     steps.push({ step: 'switch-all-selectors', ok: true });
     for (const item of [...primary, ...auxiliary]) {
       const error = await reloadLabel(host, item.context, item.label, item.plistPath);
@@ -248,8 +256,15 @@ export async function applyHostUnitActivation(host: ActivationHost, context: Hos
   if (!gate('after-quiesce')) return fail('rollback-blocked-migrated', failure, { verified: false, steps: rollbackSteps });
   try {
     for (const launcher of launchers) repointSymlink(launcher.link, readFileSync(path.join(backupPath, `launcher-${Buffer.from(launcher.link).toString('hex')}.before`), 'utf8'));
-    for (const member of context.members) for (const staged of member.staged) writePlist(staged.plistPath, readFileSync(path.join(backupPath, 'members', member.args.instance, `${staged.label}.plist`), 'utf8'));
-    for (const auxiliary of hostAuxiliaries) writePlist(auxiliary.plistPath, readFileSync(path.join(backupPath, 'host-auxiliaries', `${auxiliary.label}.plist`), 'utf8'));
+    // A plist the forward switch never reached still holds its original; any other must hold the staged bytes.
+    for (const member of context.members) for (const staged of member.staged) {
+      const original = readFileSync(path.join(backupPath, 'members', member.args.instance, `${staged.label}.plist`), 'utf8');
+      if (readFileSync(staged.plistPath, 'utf8') !== original) await writePlist(host, staged.plistPath, original, staged.staged!);
+    }
+    for (const auxiliary of hostAuxiliaries) {
+      const original = readFileSync(path.join(backupPath, 'host-auxiliaries', `${auxiliary.label}.plist`), 'utf8');
+      if (readFileSync(auxiliary.plistPath, 'utf8') !== original) await writePlist(host, auxiliary.plistPath, original, auxiliary.staged);
+    }
     for (const item of affected) {
       const error = await reloadLabel(host, item.context, item.label, item.plistPath);
       rollbackSteps.push(error === null ? { step: `reload:${item.label}`, ok: true } : { step: `reload:${item.label}`, ok: false, detail: error });

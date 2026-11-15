@@ -21,7 +21,7 @@ import { parseLoadedDomain, parseLoadedJob } from '../../scripts/lib/release-act
 import type { ActivationHost } from '../../scripts/lib/release-activation/host.ts';
 import { applyHostUnitActivation } from '../../scripts/lib/release-activation/host-unit-apply.ts';
 import { buildHostUnitPlan, parseHostUnitDeclaration } from '../../scripts/lib/release-activation/host-unit-plan.ts';
-import type { ActivationContext } from '../../scripts/lib/release-activation/plan.ts';
+import { plistDigest, type ActivationContext } from '../../scripts/lib/release-activation/plan.ts';
 import { parseHostActivationArgs, RELEASE_ACTIVATE_HOST_EXIT, runReleaseActivateHostCli } from '../../scripts/release-activate-host.ts';
 import { parsePlist } from '../../scripts/check-service-units.ts';
 import { diagnosticBody, plist, writeRelease } from '../helpers/release-activate-world.ts';
@@ -103,7 +103,9 @@ function twoMemberWorld({ sharedFirst = true }: { sharedFirst?: boolean } = {}):
   const context = (instance: string, label: string, plistPath: string, db: string, port: number, shared: boolean): ActivationContext => ({
     args: { instance, release: newRelease, expectCurrent: oldRelease, auxLabels: [], healthPort: port, backupDir, wrapperLink: link, mode: 'apply', exitTimeoutSeconds: 1, verifyTimeoutSeconds: 1 },
     home, domain: 'gui/501', launchAgentsDir: agents, wrapperLink: link, dbPath: db, healthPort: port, healthToken: 'private-token', newCommit: NEXT, oldCommit: OLD, instanceLabel: label, preconditions: [],
-    staged: [{ label, role: 'instance', renderer: 'instance-edit', plistPath, staged: plist(label, [shared ? link : path.join(newRelease, 'deploy', 'whatsoup'), instance], newRelease), edits: [], renderDriftLines: 0 }],
+    botErrorsHealthConsumer: null,
+    refreshRollbackFence: { required: null, candidateDigest: null, targetCapability: null, targetDigest: null, targetCompatibleAtPlan: false, candidateDetail: 'not read', targetDetail: 'not read' },
+    staged: [{ label, role: 'instance', renderer: 'instance-edit', plistPath, installedSha256: plistDigest(readFileSync(plistPath, 'utf8')), staged: plist(label, [shared ? link : path.join(newRelease, 'deploy', 'whatsoup'), instance], newRelease), edits: [], renderDriftLines: 0 }],
   });
   const contexts = [context('shared', firstLabel, firstPlist, firstDb, 19001, sharedFirst), context('direct', secondLabel, directPlist, secondDb, 19002, false)];
   let nextPid = 900;
