@@ -1,5 +1,4 @@
 import { parseSecretInputOperationResult } from './secret-input-operation-result.ts';
-import { ManagedDeliveryResponseError } from './protected-delivery.ts';
 import type {
   DeliveryEventStatus,
   ManagedDeliveryClient,
@@ -187,7 +186,7 @@ export class HttpManagedDeliveryClient implements ManagedDeliveryClient {
     } catch {
       throw new Error('managed delivery request is unavailable');
     }
-    if (!response.ok) throw new ManagedDeliveryResponseError(response.status);
+    if (!response.ok) throw new Error('managed delivery request failed');
     return readJson(response);
   }
 }

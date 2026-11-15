@@ -271,7 +271,7 @@ describe('protected delivery', () => {
     await expect(restarted.secretInputStatus({ id: INTAKE_ID, principal: '15551234567' })).rejects.toThrow('status is unavailable');
   });
 
-  it.each([403, 410])('terminalizes a first-attempt HTTP %i intake rejection before delivery and creates a fresh later intent', async (status) => {
+  it.each([403, 410])('keeps a first-attempt HTTP %i intake rejection uncertain and retries its own create operation', async (status) => {
     const createOperations: string[] = [];
     let sends = 0;
     const client = new HttpManagedDeliveryClient({
@@ -298,7 +298,7 @@ describe('protected delivery', () => {
     await expect(service.requestSecretInput(request)).rejects.toThrow('protected secret input creation failed');
     expect(db.raw.prepare(`SELECT input_state,delivery_status,intake_id,outbound_send_id
       FROM protected_secret_inputs`).get()).toEqual({
-      input_state: 'failed', delivery_status: 'failed', intake_id: null, outbound_send_id: null,
+      input_state: 'creating', delivery_status: 'pending', intake_id: null, outbound_send_id: null,
     });
     expect(db.raw.prepare('SELECT COUNT(*) AS n FROM outbound_sends').get()).toEqual({ n: 0 });
     expect(sends).toBe(0);
@@ -306,10 +306,58 @@ describe('protected delivery', () => {
     expect(createOperations).toEqual(['first-create']);
 
     await expect(service.requestSecretInput(request)).rejects.toThrow('protected secret input creation failed');
-    expect(createOperations).toEqual(['first-create', 'second-create']);
+    expect(createOperations).toEqual(['first-create', 'first-create']);
     expect(db.raw.prepare('SELECT create_operation_id FROM protected_secret_inputs ORDER BY id ASC').all())
-      .toEqual([{ create_operation_id: 'first-create' }, { create_operation_id: 'second-create' }]);
+      .toEqual([{ create_operation_id: 'first-create' }]);
     expect(sends).toBe(0);
+  });
+
+  it('sends once through a joiner whose create succeeds after the inserter on the same operation gets HTTP 403', async () => {
+    const creates: Array<{ operationId: string; settle: (response: Response) => void }> = [];
+    let sends = 0;
+    const metadata = {
+      id: INTAKE_ID, resourceId: 'dummy-account', accountLabel: 'Dummy account', consumerLabel: 'Dummy consumer',
+      action: 'sign_in', kind: 'password', saveAllowed: true, expiresAt: EXPIRES_AT, state: 'awaiting_input',
+    };
+    const client = new HttpManagedDeliveryClient({
+      baseUrl: 'https://links.example/s/api/v1', token: 'dummy-transport-token',
+      fetch: (url, init) => {
+        if (String(url).endsWith('/resolve')) {
+          return Promise.resolve(new Response(JSON.stringify({ ...metadata, link: INTAKE_LINK }), {
+            status: 200, headers: { 'content-type': 'application/json' },
+          }));
+        }
+        return new Promise<Response>((settle) => {
+          creates.push({ operationId: new Headers(init?.headers).get('Idempotency-Key') ?? 'missing', settle });
+        });
+      },
+    });
+    const ids = ['race-create', 'race-resolve', 'race-message'];
+    const service = new ProtectedDeliveryService({
+      db: db.raw, client,
+      messenger: { async sendRaw(_recipient, _content, options) { sends += 1; return { waMessageId: options?.messageId ?? null }; } },
+      now: () => new Date('2026-10-29T12:00:00.000Z'),
+      randomId: () => ids.shift() ?? 'unexpected-id',
+    });
+    const request = {
+      resourceId: 'dummy-account', kind: 'password' as const, purpose: 'dummy login',
+      principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net',
+    };
+
+    const inserter = service.requestSecretInput(request);
+    const joiner = service.requestSecretInput(request);
+    await vi.waitFor(() => expect(creates).toHaveLength(2));
+    expect(creates.map((create) => create.operationId)).toEqual(['race-create', 'race-create']);
+
+    creates[0]!.settle(new Response(null, { status: 403 }));
+    await expect(inserter).rejects.toThrow('protected secret input creation failed');
+    creates[1]!.settle(new Response(JSON.stringify(metadata), { status: 201, headers: { 'content-type': 'application/json' } }));
+
+    await expect(joiner).resolves.toMatchObject({ id: INTAKE_ID, inputState: 'awaiting_input', deliveryStatus: 'submitted' });
+    expect(sends).toBe(1);
+    expect(db.raw.prepare('SELECT input_state,delivery_status,intake_id FROM protected_secret_inputs').all())
+      .toEqual([{ input_state: 'awaiting_input', delivery_status: 'submitted', intake_id: INTAKE_ID }]);
+    expect(creates).toHaveLength(2);
   });
 
   it.each([403, 410])('retains an existing uncertain intake reservation after a later HTTP %i rejection', async (status) => {

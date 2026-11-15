@@ -24,15 +24,6 @@ export interface ManagedSecretInputMetadata {
   kind: ProtectedSecretInputKind; saveAllowed: boolean; expiresAt: string; state: ProtectedSecretInputState;
   operationResult?: SecretInputOperationResult | null;
 }
-export class ManagedDeliveryResponseError extends Error {
-  readonly status: number;
-
-  constructor(status: number) {
-    super('managed delivery request failed');
-    this.name = 'ManagedDeliveryResponseError';
-    this.status = status;
-  }
-}
 export interface ManagedSecretInputResource {
   resourceId: string; accountLabel: string; consumerLabel: string; action: string;
   kinds: ProtectedSecretInputKind[]; saveAllowed: boolean; revision: number;
@@ -167,11 +158,7 @@ export class ProtectedDeliveryService {
     if (row && row.intake_id !== null && (row.delivery_status === 'pending' || this.isSecretInputExpired(row))) {
       row = await this.refreshSecretInputForRequest(row, client);
     }
-    let insertedForThisRequest = false;
-    if (!row || this.isSecretInputTerminal(row)) {
-      row = this.insertSecretInput(input);
-      insertedForThisRequest = true;
-    }
+    if (!row || this.isSecretInputTerminal(row)) row = this.insertSecretInput(input);
     if (row.intake_id === null) {
       let created: ManagedSecretInputMetadata;
       try {
@@ -179,9 +166,7 @@ export class ProtectedDeliveryService {
           resourceId: row.resource_id, principal: row.principal, kind: row.kind, purpose: row.purpose, operationId: row.create_operation_id,
         });
         this.assertSecretInputMetadata(row, created);
-      } catch (error) {
-        // A prior intent may have lost its create response; retain that operation's uncertainty.
-        if (insertedForThisRequest && isDefinitiveSecretInputCreateRejection(error)) this.failSecretInputCreation(row.id);
+      } catch {
         throw new Error('protected secret input creation failed');
       }
       this.updateSecretInputMetadata(row.id, created);
@@ -527,13 +512,6 @@ export class ProtectedDeliveryService {
       .run(status, this.nowIso(), id, ...lower);
   }
 
-  private failSecretInputCreation(id: number): void {
-    this.deps.db.prepare(`UPDATE protected_secret_inputs
-      SET input_state='failed',delivery_status='failed',updated_at=?
-      WHERE id=? AND intake_id IS NULL AND input_state='creating' AND delivery_status='pending'`)
-      .run(this.nowIso(), id);
-  }
-
   private insertRustdesk(i: { deviceId: string; purpose: ProtectedDeliveryPurpose; principal: string; recipientJid: string }): Row {
     const issuedAt = this.nowIso();
     // RustDesk issuances are capped at five minutes. A local deadline bounds a lost stage response.
@@ -688,10 +666,6 @@ export function deleteExpiredProtectedDeliveries(db: DatabaseSync): number {
   } catch {
     return deliveries;
   }
-}
-function isDefinitiveSecretInputCreateRejection(error: unknown): error is ManagedDeliveryResponseError {
-  return error instanceof ManagedDeliveryResponseError
-    && (error.status === 400 || error.status === 401 || error.status === 403 || error.status === 404 || error.status === 410);
 }
 function validStatus(v: ManagedDeliveryStatus, ref: string, id?: string): void {
   if (v.deliveryRef !== ref || !opaqueId(v.deliveryRef) || !opaqueId(v.id) || (id !== undefined && v.id !== id) || !instant(v.expiresAt) || !instant(v.issuedAt) || !grantState(v.state) || !deliveryStatus(v.deliveryStatus) || (v.kind !== 'secret' && v.kind !== 'rustdesk') || (v.kind === 'secret' && (v.deviceId !== null || v.purpose !== null)) || (v.kind === 'rustdesk' && (!text(v.deviceId ?? '') || (v.purpose !== 'login' && v.purpose !== 'recovery')))) throw new Error('invalid status');
