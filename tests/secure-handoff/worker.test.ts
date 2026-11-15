@@ -151,7 +151,12 @@ async function loginFixture(): Promise<{ endpoint: string; accepted: Array<Recor
   return { endpoint: `http://127.0.0.1:${address.port}/login`, accepted };
 }
 
-function fetchFixture(loginEndpoint: string, intakes: Map<string, Intake>, calls: string[]): typeof fetch {
+function fetchFixture(
+  loginEndpoint: string,
+  intakes: Map<string, Intake>,
+  calls: string[],
+  completions: Array<Record<string, unknown>> = [],
+): typeof fetch {
   return async (input, init) => {
     const url = new URL(String(input));
     if (url.hostname === 'fixed-dummy.invalid') return fetch(loginEndpoint, init);
@@ -165,7 +170,9 @@ function fetchFixture(loginEndpoint: string, intakes: Map<string, Intake>, calls
       return new Response(JSON.stringify(consumed(id)), { status: 200 });
     }
     if (init?.method === 'POST' && url.pathname.endsWith('/complete') && id) {
-      return new Response(JSON.stringify({ id, state: 'succeeded' }), { status: 200 });
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      completions.push(body);
+      return new Response(JSON.stringify({ id, state: 'succeeded', operationResult: body.operationResult ?? null }), { status: 200 });
     }
     if (init?.method === 'POST' && url.pathname.endsWith('/ambiguous') && id) {
       return new Response(JSON.stringify({ id, state: 'ambiguous' }), { status: 200 });
@@ -318,9 +325,10 @@ describe('secure handoff worker', () => {
     ]);
     const fixture = await loginFixture();
     const calls: string[] = [];
+    const completions: Array<Record<string, unknown>> = [];
     const worker = createSecureHandoffWorker({
       config: config(dbPath), environment: environment(), clock: fixedClock(),
-      fetch: fetchFixture(fixture.endpoint, new Map([[INTAKE_ID, { id: INTAKE_ID, resourceId: 'dummy-login', action: 'sign_in', kind: 'password', state: 'submitted' }]]), calls),
+      fetch: fetchFixture(fixture.endpoint, new Map([[INTAKE_ID, { id: INTAKE_ID, resourceId: 'dummy-login', action: 'sign_in', kind: 'password', state: 'submitted' }]]), calls, completions),
     });
     await worker.start();
     await worker.tick();
@@ -332,6 +340,11 @@ describe('secure handoff worker', () => {
       `POST /s/api/v1/intakes/${INTAKE_ID}/consume`,
       `POST /s/api/v1/intakes/${INTAKE_ID}/complete`,
     ]);
+    expect(completions).toEqual([{
+      receipt: RECEIPT,
+      outcome: 'succeeded',
+      operationResult: { phase: 'password', outcome: 'completed' },
+    }]);
   });
 
   it('registers a direct source 202 as one paired MFA challenge before completing the password precursor', async () => {
@@ -370,7 +383,8 @@ describe('secure handoff worker', () => {
           }), { status: 201 });
         }
         if (init?.method === 'POST' && url.pathname.endsWith('/complete') && id) {
-          return new Response(JSON.stringify({ id, state: 'succeeded' }), { status: 200 });
+          const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+          return new Response(JSON.stringify({ id, state: 'succeeded', operationResult: body.operationResult ?? null }), { status: 200 });
         }
         return new Response('{}', { status: 404 });
       },
@@ -387,7 +401,14 @@ describe('secure handoff worker', () => {
         method: 'POST', path: '/s/api/v1/resources/dummy-mfa/challenges',
         body: JSON.stringify({ principal: 'alice', operationId: 'source-operation-1', expiresAt }),
       },
-      { method: 'POST', path: `/s/api/v1/intakes/${INTAKE_ID}/complete`, body: expect.any(String) },
+      {
+        method: 'POST', path: `/s/api/v1/intakes/${INTAKE_ID}/complete`,
+        body: JSON.stringify({
+          receipt: RECEIPT,
+          outcome: 'succeeded',
+          operationResult: { phase: 'password', outcome: 'mfa_required' },
+        }),
+      },
     ]);
   });
 

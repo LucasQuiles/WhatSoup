@@ -65,6 +65,7 @@ function intakeReply(extra: Record<string, unknown> = {}): Record<string, unknow
     saveAllowed: true,
     expiresAt: EXPIRES_AT,
     state: 'awaiting_input',
+    operationResult: null,
     ...extra,
   };
 }
@@ -350,6 +351,32 @@ describe('managed delivery HTTP client', () => {
     expect(new Headers(calls[0]?.init.headers).get('Idempotency-Key')).toBe('create-input');
     expect(new Headers(calls[1]?.init.headers).get('Idempotency-Key')).toBe('resolve-input');
     expect(calls.every((call) => call.init.redirect === 'error')).toBe(true);
+  });
+
+  it.each([
+    ['password', { phase: 'password', outcome: 'mfa_required' }],
+    ['password', { phase: 'password', outcome: 'completed' }],
+    ['token', { phase: 'token', outcome: 'completed' }],
+    ['mfa', { phase: 'mfa', outcome: 'completed' }],
+  ])('reads a recorded %s operation result without inferring it from input state', async (kind, operationResult) => {
+    const managed = client(async () => json(intakeReply({ kind, saveAllowed: false, state: 'succeeded', operationResult })));
+    await expect(managed.getSecretInput({ id: INTAKE_ID, principal: '15551234567' }))
+      .resolves.toMatchObject({ state: 'succeeded', operationResult });
+    const legacy = client(async () => json(intakeReply({ kind, saveAllowed: false, state: 'succeeded', operationResult: undefined })));
+    await expect(legacy.getSecretInput({ id: INTAKE_ID, principal: '15551234567' }))
+      .resolves.toMatchObject({ state: 'succeeded', operationResult: null });
+  });
+
+  it.each([
+    { state: 'failed', operationResult: { phase: 'password', outcome: 'completed' } },
+    { state: 'ambiguous', operationResult: { phase: 'password', outcome: 'completed' } },
+    { state: 'succeeded', operationResult: { phase: 'mfa', outcome: 'completed' } },
+    { state: 'succeeded', operationResult: { phase: 'password', outcome: 'completed', value: 'must-not-escape' } },
+    { state: 'succeeded', operationResult: { phase: 'password', outcome: 'arbitrary' } },
+    { state: 'succeeded', kind: 'mfa', saveAllowed: false, operationResult: { phase: 'mfa', outcome: 'mfa_required' } },
+  ])('rejects inconsistent or unapproved operation metadata %#', async (override) => {
+    const managed = client(async () => json(intakeReply(override)));
+    await expect(managed.getSecretInput({ id: INTAKE_ID, principal: '15551234567' })).rejects.toThrow();
   });
 
   it('lists only safe resource metadata through the bound transport principal', async () => {

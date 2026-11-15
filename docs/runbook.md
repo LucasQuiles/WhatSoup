@@ -3150,6 +3150,20 @@ checks the link again against the pinned hosts and records `failed` when a
 client returns any other link. Neither refusal sends a message or writes an
 outbound audit row. Status and cancellation require the verified requesting principal, so a
 different bound user is rejected before an intake API call.
+`get_secret_input_status` also returns nullable `operationResult`, read from the
+authenticated Links status on every request. This is the fixed consumer's recorded
+result at settlement: `mfa_required` means the password step required MFA;
+`completed` means the registered action completed. It does not establish that a
+challenge remains open, a login session remains active, or a credential was saved.
+Legacy completions and unknown outcomes return null; never infer completion from
+`inputState: succeeded`. Links owns this durable result. Q refreshes it after
+restart and fails the status request if Links is unavailable, without a local
+completion fallback. Deploy the additive Links completion contract before an
+upgraded consumer, since the old endpoint rejects the new result field.
+An initial create rejection with HTTP 400, 401, 403, 404 or 410 marks only that
+new local intent failed, before any message is sent. A prior intent whose response
+was lost keeps its original operation ID after a later rejection; a new login must
+not be inferred safe from an uncertain earlier create.
 On restart, an intake left in `resolving` becomes locally `ambiguous` and is never
 replayed; pending intakes are not sent by maintenance recovery.
 The daily unified database-retention transaction deletes protected-delivery

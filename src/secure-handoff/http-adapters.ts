@@ -83,7 +83,7 @@ export function createFixedHttpTokenAdapter(options: FixedHttpTokenOptions): Fix
         });
         if (response.status === 200 || response.status === 204) {
           if (input.saveStore !== null) await store?.save(input.value);
-          return 'succeeded';
+          return { outcome: 'succeeded', operationResult: { phase: 'token', outcome: 'completed' } } as const;
         }
         if (response.status === 401 || response.status === 403) return 'failed';
         throw ambiguous('token');
@@ -127,7 +127,9 @@ export function createFixedHttpMfaAdapter(options: FixedHttpMfaOptions): FixedCo
           redirect: 'error',
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
-        if (response.status === 200 || response.status === 204) return 'succeeded';
+        if (response.status === 200 || response.status === 204) {
+          return { outcome: 'succeeded', operationResult: { phase: 'mfa', outcome: 'completed' } } as const;
+        }
         if (response.status === 401 || response.status === 403) return 'failed';
         throw ambiguous('MFA');
       } catch {

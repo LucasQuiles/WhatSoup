@@ -214,7 +214,9 @@ const PROTECTED_SECRET_WORKFLOW_GUIDANCE = [
   '- Never ask the user to paste a secret into chat; do not read credential stores, use shell/browser workarounds, or offer an alternate secret path.',
   '- Unknown resource or unavailable adapter: report the operation is blocked.',
   '- Do not invent resource IDs, recipients, or destinations. Discovery does not prove a challenge exists or that login completed; the protected service selects authority and delivery targets.',
-  '- Submission or delivery metadata is not proof that a login completed. Verify the trusted operation result before claiming completion.',
+  '- Read get_secret_input_status.operationResult before claiming completion. Input succeeded alone does not establish a completed operation. A null result means completion is unknown.',
+  '- A recorded mfa_required result means the password operation required MFA; request the next form through the protected service, which checks whether a challenge is still available. Do not claim login completed.',
+  '- A recorded completed result confirms the registered fixed action completed. Describe that action; do not infer an ongoing login session or credential storage from it. saveAllowed is permission to offer saving, not proof a credential was saved.',
 ].join('\n');
 
 /**

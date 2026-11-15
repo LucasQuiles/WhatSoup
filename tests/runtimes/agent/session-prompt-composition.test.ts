@@ -250,7 +250,13 @@ describe('SessionManager system prompt composition', () => {
       'Unknown resource or unavailable adapter: report the operation is blocked.',
       'Do not invent resource IDs, recipients, or destinations.',
       'Discovery does not prove a challenge exists or that login completed',
-      'metadata is not proof that a login completed',
+      'Input succeeded alone does not establish a completed operation.',
+      'A null result means completion is unknown.',
+      'A recorded mfa_required result means the password operation required MFA',
+      'Do not claim login completed.',
+      'A recorded completed result confirms the registered fixed action completed.',
+      'do not infer an ongoing login session or credential storage from it',
+      'saveAllowed is permission to offer saving, not proof a credential was saved.',
     ];
 
     for (const provider of ['claude-cli', 'codex-cli', 'opencode-cli', 'openai-api'] as const) {

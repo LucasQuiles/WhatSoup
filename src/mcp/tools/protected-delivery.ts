@@ -88,7 +88,7 @@ export function registerProtectedDeliveryTools(
 
   registry.register({
     name: 'get_secret_input_status',
-    description: 'Get metadata-only input and delivery status for a secret-input request in this direct conversation.',
+    description: 'Get metadata-only input, delivery status, and the recorded fixed-consumer operationResult for this direct conversation. A null result leaves completion unknown; mfa_required does not mean login completed or that a challenge is still open.',
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'read_only',

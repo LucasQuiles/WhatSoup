@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { systemClock } from '../lib/clock.ts';
 import { isNonEmptyString, isRecord, requireRecord } from '../lib/type-guards.ts';
+import { parseSecretInputOperationResult, type SecretInputOperationResult } from '../core/secret-input-operation-result.ts';
 import {
   isServiceOwnedCredentialStore,
   type ServiceOwnedCredentialStore,
@@ -44,10 +45,9 @@ type RegisteredChallenge = Readonly<{
   expiresAt: string;
 }>;
 
-type AdapterExecution = Exclude<ConsumerOutcome, 'ambiguous'> | Readonly<{
-  outcome: 'succeeded';
-  challenge: RegisteredChallenge;
-}>;
+type AdapterExecution = Exclude<ConsumerOutcome, 'ambiguous'>
+  | Readonly<{ outcome: 'succeeded'; challenge: RegisteredChallenge }>
+  | Readonly<{ outcome: 'succeeded'; operationResult: SecretInputOperationResult }>;
 
 /** A fixed, administrator-registered operation. It has no caller-selected destination or command. */
 export interface FixedConsumerAdapter {
@@ -84,7 +84,7 @@ type ConsumedBinding = {
   receipt: string;
 };
 
-type PublicOutcome = { id: string; state: ConsumerOutcome };
+type PublicOutcome = { id: string; state: ConsumerOutcome; operationResult?: SecretInputOperationResult };
 type TrackedOperation = { resourceId: string; result: Promise<PublicOutcome>; settled: boolean };
 
 type FixedConsumerOptions = {
@@ -195,21 +195,41 @@ export class FixedIntakeConsumer {
         value: consumed.value, kind: consumed.kind, saveStore, intakeId, operationId: consumed.operationId,
       });
       const outcome = typeof executed === 'string' ? executed : executed.outcome;
-      if (typeof executed !== 'string') await this.#registerMfaChallenge(intakeId, adapter, executed.challenge);
       if (outcome !== 'succeeded' && outcome !== 'failed') return this.#markAmbiguous(intakeId);
-      return await this.#complete(intakeId, consumed.receipt, outcome);
+      let operationResult: SecretInputOperationResult | null = null;
+      if (typeof executed !== 'string') {
+        if ('challenge' in executed) {
+          await this.#registerMfaChallenge(intakeId, adapter, executed.challenge);
+          operationResult = { phase: 'password', outcome: 'mfa_required' };
+        } else {
+          operationResult = parseSecretInputOperationResult(executed.operationResult, consumed.kind, outcome);
+        }
+      }
+      return await this.#complete(intakeId, consumed.receipt, consumed.kind, outcome, operationResult);
     } catch {
       return this.#markAmbiguous(intakeId);
     }
   }
 
-  async #complete(id: string, receipt: string, outcome: Exclude<ConsumerOutcome, 'ambiguous'>): Promise<PublicOutcome> {
+  async #complete(
+    id: string,
+    receipt: string,
+    kind: ConsumerKind,
+    outcome: Exclude<ConsumerOutcome, 'ambiguous'>,
+    operationResult: SecretInputOperationResult | null,
+  ): Promise<PublicOutcome> {
     try {
+      const body = operationResult === null ? { receipt, outcome } : { receipt, outcome, operationResult };
       const response = requireRecord(await this.#request(`/intakes/${encodeURIComponent(id)}/complete`, {
-        method: 'POST', body: JSON.stringify({ receipt, outcome }),
+        method: 'POST', body: JSON.stringify(body),
       }), 'Links completion');
       if (response.id !== id || response.state !== outcome) throw new Error('invalid completion');
-      return { id, state: outcome };
+      const recorded = parseSecretInputOperationResult(response.operationResult, kind, outcome);
+      if ((recorded === null && operationResult !== null)
+        || (recorded !== null && (operationResult === null || recorded.phase !== operationResult.phase || recorded.outcome !== operationResult.outcome))) {
+        throw new Error('invalid completion operation result');
+      }
+      return recorded === null ? { id, state: outcome } : { id, state: outcome, operationResult: recorded };
     } catch {
       return this.#markAmbiguous(id);
     }
@@ -316,7 +336,7 @@ export function createFixedHttpLoginAdapter(options: FixedHttpLoginOptions): Fix
         }
         if (transition === undefined && (response.status === 200 || response.status === 204)) {
           if (input.saveStore !== null) await store?.save(input.value);
-          return 'succeeded';
+          return { outcome: 'succeeded', operationResult: { phase: 'password', outcome: 'completed' } };
         }
         if (response.status === 401 || response.status === 403) return 'failed';
         throw new Error('fixed login outcome is ambiguous');

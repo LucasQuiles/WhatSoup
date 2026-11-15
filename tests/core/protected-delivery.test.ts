@@ -204,6 +204,7 @@ describe('protected delivery', () => {
     expect(first).toEqual({
       id: INTAKE_ID, resourceId: 'dummy-account', accountLabel: 'Dummy account', consumerLabel: 'Dummy consumer', action: 'sign_in',
       kind: 'password', saveAllowed: true, expiresAt: EXPIRES_AT, inputState: 'awaiting_input', deliveryStatus: 'submitted',
+      operationResult: null,
     });
     expect(second).toEqual(first);
     expect(created).toBe(1);
@@ -219,6 +220,184 @@ describe('protected delivery', () => {
     });
     expect(durable).not.toContain(INTAKE_LINK);
     expect(durable).not.toContain('k'.repeat(43));
+  });
+
+  it('refreshes recorded operation results after service restart and never infers completion from local state', async () => {
+    let remoteResult: unknown = { phase: 'password', outcome: 'mfa_required' };
+    let unavailable = false;
+    let reads = 0;
+    const metadata = {
+      id: INTAKE_ID, resourceId: 'dummy-account', accountLabel: 'Dummy account', consumerLabel: 'Dummy consumer',
+      action: 'Verify password for two-step sign-in', kind: 'password', saveAllowed: false, expiresAt: EXPIRES_AT,
+    };
+    const client = new HttpManagedDeliveryClient({
+      baseUrl: 'https://links.example/s/api/v1', token: 'dummy-transport-token',
+      fetch: async (url, init) => {
+        if (init?.method === 'GET') {
+          reads += 1;
+          if (unavailable) throw new Error('offline');
+          return new Response(JSON.stringify({ ...metadata, state: 'succeeded', operationResult: remoteResult }));
+        }
+        return new Response(JSON.stringify({
+          ...metadata, state: 'awaiting_input', ...(String(url).endsWith('/resolve') ? { link: INTAKE_LINK } : {}),
+        }));
+      },
+    });
+    const dependencies = {
+      db: db.raw, client,
+      messenger: { async sendRaw(_recipient: string, _content: unknown, options?: { messageId?: string }) {
+        return { waMessageId: options?.messageId ?? null };
+      } },
+      now: () => new Date('2026-10-29T12:00:00.000Z'),
+    };
+    const first = new ProtectedDeliveryService(dependencies);
+    await expect(first.requestSecretInput({
+      resourceId: 'dummy-account', kind: 'password', purpose: 'dummy login', principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net',
+    })).resolves.toMatchObject({ operationResult: null });
+    await expect(first.secretInputStatus({ id: INTAKE_ID, principal: '15551234567' }))
+      .resolves.toMatchObject({ inputState: 'succeeded', operationResult: remoteResult });
+
+    const restarted = new ProtectedDeliveryService(dependencies);
+    await expect(restarted.secretInputStatus({ id: INTAKE_ID, principal: '15551234567' }))
+      .resolves.toMatchObject({ inputState: 'succeeded', operationResult: remoteResult });
+    expect(reads).toBe(2);
+    await expect(restarted.secretInputStatus({ id: INTAKE_ID, principal: '15557654321' })).rejects.toThrow('not found');
+    expect(reads).toBe(2);
+
+    remoteResult = undefined;
+    await expect(restarted.secretInputStatus({ id: INTAKE_ID, principal: '15551234567' }))
+      .resolves.toMatchObject({ inputState: 'succeeded', operationResult: null });
+    unavailable = true;
+    await expect(restarted.secretInputStatus({ id: INTAKE_ID, principal: '15551234567' })).rejects.toThrow('status is unavailable');
+  });
+
+  it.each([403, 410])('terminalizes a first-attempt HTTP %i intake rejection before delivery and creates a fresh later intent', async (status) => {
+    const createOperations: string[] = [];
+    let sends = 0;
+    const client = new HttpManagedDeliveryClient({
+      baseUrl: 'https://links.example/s/api/v1',
+      token: 'dummy-transport-token',
+      fetch: async (_url, init) => {
+        createOperations.push(new Headers(init?.headers).get('Idempotency-Key') ?? 'missing');
+        return new Response(null, { status });
+      },
+    });
+    const ids = ['first-create', 'first-resolve', 'first-message', 'second-create', 'second-resolve', 'second-message'];
+    const service = new ProtectedDeliveryService({
+      db: db.raw,
+      client,
+      messenger: { async sendRaw() { sends += 1; return { waMessageId: null }; } },
+      now: () => new Date('2026-10-29T12:00:00.000Z'),
+      randomId: () => ids.shift() ?? 'unexpected-id',
+    });
+    const request = {
+      resourceId: 'dummy-account', kind: 'mfa' as const, purpose: 'dummy login',
+      principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net',
+    };
+
+    await expect(service.requestSecretInput(request)).rejects.toThrow('protected secret input creation failed');
+    expect(db.raw.prepare(`SELECT input_state,delivery_status,intake_id,outbound_send_id
+      FROM protected_secret_inputs`).get()).toEqual({
+      input_state: 'failed', delivery_status: 'failed', intake_id: null, outbound_send_id: null,
+    });
+    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM outbound_sends').get()).toEqual({ n: 0 });
+    expect(sends).toBe(0);
+    await expect(service.recoverPendingDeliveries()).resolves.toEqual({ resumed: 0, skipped: 0 });
+    expect(createOperations).toEqual(['first-create']);
+
+    await expect(service.requestSecretInput(request)).rejects.toThrow('protected secret input creation failed');
+    expect(createOperations).toEqual(['first-create', 'second-create']);
+    expect(db.raw.prepare('SELECT create_operation_id FROM protected_secret_inputs ORDER BY id ASC').all())
+      .toEqual([{ create_operation_id: 'first-create' }, { create_operation_id: 'second-create' }]);
+    expect(sends).toBe(0);
+  });
+
+  it.each([403, 410])('retains an existing uncertain intake reservation after a later HTTP %i rejection', async (status) => {
+    const calls: Array<{ url: string; operationId: string }> = [];
+    let sends = 0;
+    const metadata = {
+      id: INTAKE_ID, resourceId: 'dummy-account', accountLabel: 'Dummy account', consumerLabel: 'Dummy consumer',
+      action: 'sign_in', kind: 'password', saveAllowed: true, expiresAt: EXPIRES_AT, state: 'awaiting_input',
+    };
+    const client = new HttpManagedDeliveryClient({
+      baseUrl: 'https://links.example/s/api/v1', token: 'dummy-transport-token',
+      fetch: async (url, init) => {
+        calls.push({ url: String(url), operationId: new Headers(init?.headers).get('Idempotency-Key') ?? 'missing' });
+        if (calls.length === 1) throw new TypeError('response lost after remote create');
+        if (calls.length === 2) return new Response(null, { status });
+        if (calls.length === 3) return new Response(JSON.stringify(metadata), { status: 201, headers: { 'content-type': 'application/json' } });
+        return new Response(JSON.stringify({ ...metadata, link: INTAKE_LINK }), { status: 200, headers: { 'content-type': 'application/json' } });
+      },
+    });
+    const service = new ProtectedDeliveryService({
+      db: db.raw, client,
+      messenger: { async sendRaw(_recipient, _content, options) { sends += 1; return { waMessageId: options?.messageId ?? null }; } },
+      now: () => new Date('2026-10-29T12:00:00.000Z'),
+      randomId: (() => { const ids = ['uncertain-create', 'uncertain-resolve', 'uncertain-message']; return () => ids.shift() ?? 'unexpected-id'; })(),
+    });
+    const request = {
+      resourceId: 'dummy-account', kind: 'password' as const, purpose: 'dummy login',
+      principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net',
+    };
+
+    await expect(service.requestSecretInput(request)).rejects.toThrow('protected secret input creation failed');
+    await expect(service.requestSecretInput(request)).rejects.toThrow('protected secret input creation failed');
+    expect(db.raw.prepare('SELECT input_state,delivery_status,intake_id FROM protected_secret_inputs').get())
+      .toEqual({ input_state: 'creating', delivery_status: 'pending', intake_id: null });
+    expect(calls.map((call) => call.operationId)).toEqual(['uncertain-create', 'uncertain-create']);
+    expect(sends).toBe(0);
+
+    await expect(service.requestSecretInput(request)).resolves.toMatchObject({ id: INTAKE_ID, deliveryStatus: 'submitted' });
+    expect(calls.map((call) => call.operationId))
+      .toEqual(['uncertain-create', 'uncertain-create', 'uncertain-create', 'uncertain-resolve']);
+    expect(sends).toBe(1);
+  });
+
+  it('retains an uncertain intake creation reservation without sending or recovery retries', async () => {
+    const failures: Array<{
+      name: string;
+      fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+    }> = [
+      { name: 'unavailable', fetch: async () => { throw new TypeError('offline'); } },
+      { name: 'server', fetch: async () => new Response(null, { status: 503 }) },
+      { name: 'malformed', fetch: async () => new Response('{}', { status: 201, headers: { 'content-type': 'application/json' } }) },
+    ];
+    for (const failure of failures) {
+      const caseDb = new Database(':memory:');
+      caseDb.open();
+      try {
+        const createOperations: string[] = [];
+        let sends = 0;
+        const client = new HttpManagedDeliveryClient({
+          baseUrl: 'https://links.example/s/api/v1', token: 'dummy-transport-token',
+          fetch: async (url, init) => {
+            createOperations.push(new Headers(init?.headers).get('Idempotency-Key') ?? 'missing');
+            return failure.fetch(url, init);
+          },
+        });
+        const service = new ProtectedDeliveryService({
+          db: caseDb.raw, client,
+          messenger: { async sendRaw() { sends += 1; return { waMessageId: null }; } },
+          now: () => new Date('2026-10-29T12:00:00.000Z'), randomId: () => `${failure.name}-create`,
+        });
+        const request = {
+          resourceId: 'dummy-account', kind: 'password' as const, purpose: 'dummy login',
+          principal: '15551234567', recipientJid: '15551234567@s.whatsapp.net',
+        };
+
+        await expect(service.requestSecretInput(request)).rejects.toThrow('protected secret input creation failed');
+        await expect(service.requestSecretInput(request)).rejects.toThrow('protected secret input creation failed');
+        expect(createOperations).toEqual([`${failure.name}-create`, `${failure.name}-create`]);
+        expect(caseDb.raw.prepare('SELECT input_state,delivery_status,intake_id,outbound_send_id FROM protected_secret_inputs').get())
+          .toEqual({ input_state: 'creating', delivery_status: 'pending', intake_id: null, outbound_send_id: null });
+        expect(caseDb.raw.prepare('SELECT COUNT(*) AS n FROM outbound_sends').get()).toEqual({ n: 0 });
+        expect(sends).toBe(0);
+        await expect(service.recoverPendingDeliveries()).resolves.toEqual({ resumed: 0, skipped: 0 });
+        expect(createOperations).toHaveLength(2);
+      } finally {
+        caseDb.close();
+      }
+    }
   });
 
   it('uses the live HTTP intake client through create, resolve, status, and cancel', async () => {

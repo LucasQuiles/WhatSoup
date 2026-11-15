@@ -416,7 +416,7 @@ describe('fixed intake consumer', () => {
     ]);
   });
 
-  it('uses a consumed credential only in the registered HTTP login and returns content-free completion', async () => {
+  it('records a completed fixed HTTP login without returning credential material', async () => {
     const fixture = await loginFixture();
     const calls: FetchCall[] = [];
     const adapter = fixedAdapter(fixture.endpoint, globalThis.fetch);
@@ -427,14 +427,19 @@ describe('fixed intake consumer', () => {
       fetch: async (url, init) => {
         calls.push({ url: String(url), init: init! });
         if (String(url).endsWith('/consume')) return json(consumed());
-        if (String(url).endsWith('/complete')) return json({ id: INTAKE_ID, state: 'succeeded' });
+        if (String(url).endsWith('/complete')) {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return json({ id: INTAKE_ID, state: 'succeeded', operationResult: body.operationResult ?? null });
+        }
         throw new Error('unexpected Links route');
       },
     });
 
     const outcome = await consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-login' });
 
-    expect(outcome).toEqual({ id: INTAKE_ID, state: 'succeeded' });
+    expect(outcome).toEqual({
+      id: INTAKE_ID, state: 'succeeded', operationResult: { phase: 'password', outcome: 'completed' },
+    });
     expect(JSON.stringify(outcome)).not.toContain(SECRET);
     expect(fixture.accepted).toEqual([{ username: 'dummy-user', password: SECRET }]);
     expect(calls.map((call) => call.url)).toEqual([
@@ -443,9 +448,34 @@ describe('fixed intake consumer', () => {
     ]);
     expect(String(calls[0].init.body)).toBe('{}');
     expect(new Headers(calls[0].init.headers).get('Content-Type')).toBe('application/json');
-    expect(String(calls[1].init.body)).toBe(JSON.stringify({ receipt: RECEIPT, outcome: 'succeeded' }));
+    expect(String(calls[1].init.body)).toBe(JSON.stringify({
+      receipt: RECEIPT,
+      outcome: 'succeeded',
+      operationResult: { phase: 'password', outcome: 'completed' },
+    }));
     expect(new Headers(calls[0].init.headers).get('Authorization')).toBe('Bearer consumer-only-token');
     expect(JSON.stringify(calls)).not.toContain(SECRET);
+  });
+
+  it('keeps a legacy string adapter completion free of operation attestation', async () => {
+    const calls: FetchCall[] = [];
+    const adapter: FixedConsumerAdapter = {
+      resourceId: 'dummy-login', principal: 'alice', action: 'sign_in', kinds: ['password'], approvedSaveStore: null,
+      async execute() { return 'succeeded'; },
+    };
+    const consumer = new FixedIntakeConsumer({
+      baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token', adapters: [adapter],
+      fetch: async (url, init) => {
+        calls.push({ url: String(url), init: init! });
+        if (String(url).endsWith('/consume')) return json(consumed());
+        if (String(url).endsWith('/complete')) return json({ id: INTAKE_ID, state: 'succeeded', operationResult: null });
+        throw new Error('unexpected Links route');
+      },
+    });
+
+    await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-login' }))
+      .resolves.toEqual({ id: INTAKE_ID, state: 'succeeded' });
+    expect(JSON.parse(String(calls[1]?.init.body))).toEqual({ receipt: RECEIPT, outcome: 'succeeded' });
   });
 
   it('does not run a fixed operation when the consumed binding or save consent is invalid', async () => {
@@ -531,9 +561,12 @@ describe('fixed intake consumer', () => {
     };
     const consumer = new FixedIntakeConsumer({
       baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token', adapters: [adapter],
-      fetch: async (url) => {
+      fetch: async (url, init) => {
         if (String(url).endsWith('/consume')) return json(consumed({ save: true }));
-        if (String(url).endsWith('/complete')) return json({ id: INTAKE_ID, state: 'succeeded' });
+        if (String(url).endsWith('/complete')) {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return json({ id: INTAKE_ID, state: 'succeeded', operationResult: body.operationResult ?? null });
+        }
         throw new Error('unexpected Links route');
       },
     });
@@ -762,13 +795,18 @@ describe('fixed intake consumer', () => {
         if (String(url).endsWith('/resources/dummy-mfa/challenges')) {
           return json({ id: 'C'.repeat(22), resourceId: 'dummy-mfa', operationId: 'source-step-1', expiresAt: canonicalExpiresAt, state: 'open' }, 201);
         }
-        if (String(url).endsWith('/complete')) return json({ id: INTAKE_ID, state: 'succeeded' });
+        if (String(url).endsWith('/complete')) {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return json({ id: INTAKE_ID, state: 'succeeded', operationResult: body.operationResult ?? null });
+        }
         throw new Error('unexpected Links route');
       },
     });
 
     await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-password' }))
-      .resolves.toEqual({ id: INTAKE_ID, state: 'succeeded' });
+      .resolves.toEqual({
+        id: INTAKE_ID, state: 'succeeded', operationResult: { phase: 'password', outcome: 'mfa_required' },
+      });
 
     expect(sourceCalls).toEqual([{ username: 'dummy-user', password: SECRET, intakeId: INTAKE_ID }]);
     expect(calls).toEqual([
@@ -777,13 +815,21 @@ describe('fixed intake consumer', () => {
         method: 'POST', url: 'https://links.example.test/s/api/v1/resources/dummy-mfa/challenges', authorization: 'Bearer consumer-only-token',
         body: JSON.stringify({ principal: 'alice', operationId: 'source-step-1', expiresAt: canonicalExpiresAt }),
       }),
-      expect.objectContaining({ method: 'POST', url: expect.stringMatching(/\/intakes\/.+\/complete$/), authorization: 'Bearer consumer-only-token' }),
+      expect.objectContaining({
+        method: 'POST', url: expect.stringMatching(/\/intakes\/.+\/complete$/), authorization: 'Bearer consumer-only-token',
+        body: JSON.stringify({
+          receipt: RECEIPT,
+          outcome: 'succeeded',
+          operationResult: { phase: 'password', outcome: 'mfa_required' },
+        }),
+      }),
     ]);
   });
 
   it('uses a locally trusted TLS source 202 without signing in, then signs in exactly once after the registered MFA code', async () => {
     const target = await tlsLoginFixture();
     let expiresAt = '';
+    const completions: Array<{ id: string; body: Record<string, unknown> }> = [];
     const password = createFixedHttpLoginAdapter({
       resourceId: 'dummy-password', principal: 'alice', action: 'Verify password for two-step sign-in',
       endpoint: `${target.endpoint}/password`, username: 'dummy-user',
@@ -811,20 +857,152 @@ describe('fixed intake consumer', () => {
           expiresAt = String(request.expiresAt);
           return json({ id: 'C'.repeat(22), resourceId: 'dummy-mfa', operationId: 'tls-source-operation', expiresAt, state: 'open' }, 201);
         }
-        if (targetUrl.endsWith(`/intakes/${INTAKE_ID}/complete`)) return json({ id: INTAKE_ID, state: 'succeeded' });
-        if (targetUrl.endsWith(`/intakes/${MFA_INTAKE_ID}/complete`)) return json({ id: MFA_INTAKE_ID, state: 'succeeded' });
+        if (targetUrl.endsWith(`/intakes/${INTAKE_ID}/complete`)) {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          completions.push({ id: INTAKE_ID, body });
+          return json({ id: INTAKE_ID, state: 'succeeded', operationResult: body.operationResult ?? null });
+        }
+        if (targetUrl.endsWith(`/intakes/${MFA_INTAKE_ID}/complete`)) {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          completions.push({ id: MFA_INTAKE_ID, body });
+          return json({ id: MFA_INTAKE_ID, state: 'succeeded', operationResult: body.operationResult ?? null });
+        }
         throw new Error('unexpected Links route');
       },
     });
 
     await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-password' }))
-      .resolves.toEqual({ id: INTAKE_ID, state: 'succeeded' });
+      .resolves.toEqual({
+        id: INTAKE_ID, state: 'succeeded', operationResult: { phase: 'password', outcome: 'mfa_required' },
+      });
     expect(target.passwordStarts()).toBe(1);
     expect(target.signIns()).toBe(0);
 
     await expect(consumer.execute({ intakeId: MFA_INTAKE_ID, resourceId: 'dummy-mfa' }))
-      .resolves.toEqual({ id: MFA_INTAKE_ID, state: 'succeeded' });
+      .resolves.toEqual({
+        id: MFA_INTAKE_ID, state: 'succeeded', operationResult: { phase: 'mfa', outcome: 'completed' },
+      });
     expect(target.signIns()).toBe(1);
+    expect(completions).toEqual([
+      {
+        id: INTAKE_ID,
+        body: {
+          receipt: RECEIPT,
+          outcome: 'succeeded',
+          operationResult: { phase: 'password', outcome: 'mfa_required' },
+        },
+      },
+      {
+        id: MFA_INTAKE_ID,
+        body: {
+          receipt: 'Z'.repeat(43),
+          outcome: 'succeeded',
+          operationResult: { phase: 'mfa', outcome: 'completed' },
+        },
+      },
+    ]);
+    expect(JSON.stringify(completions)).not.toContain(SECRET);
+    expect(JSON.stringify(completions)).not.toContain(MFA_CODE);
+    expect(JSON.stringify(completions)).not.toContain('tls-source-operation');
+  });
+
+  it('does not attest a rejected fixed MFA code after registering its live source challenge', async () => {
+    const target = await tlsLoginFixture();
+    const completions: Record<string, unknown>[] = [];
+    const password = createFixedHttpLoginAdapter({
+      resourceId: 'dummy-password', principal: 'alice', action: 'Verify password for two-step sign-in',
+      endpoint: `${target.endpoint}/password`, username: 'dummy-user',
+      mfaTransition: { resourceId: 'dummy-mfa', account: 'dummy-account' }, fetch: target.fetch,
+    });
+    const mfa = createFixedHttpMfaAdapter({
+      resourceId: 'dummy-mfa', principal: 'alice', action: 'confirm_mfa', endpoint: `${target.endpoint}/mfa`,
+      username: 'dummy-user', operationMode: 'links_registered', fetch: target.fetch,
+    });
+    const consumer = new FixedIntakeConsumer({
+      baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token', adapters: [password, mfa],
+      fetch: async (url, init) => {
+        const targetUrl = String(url);
+        if (targetUrl.endsWith(`/intakes/${INTAKE_ID}/consume`)) {
+          return json(consumed({ resourceId: 'dummy-password', action: 'Verify password for two-step sign-in' }));
+        }
+        if (targetUrl.endsWith(`/intakes/${MFA_INTAKE_ID}/consume`)) {
+          return json(consumed({
+            id: MFA_INTAKE_ID, resourceId: 'dummy-mfa', kind: 'mfa', action: 'confirm_mfa',
+            operationId: 'tls-source-operation', value: 'wrong-mfa-code', receipt: 'Z'.repeat(43),
+          }));
+        }
+        if (targetUrl.endsWith('/resources/dummy-mfa/challenges')) {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return json({
+            id: 'C'.repeat(22), resourceId: 'dummy-mfa', operationId: 'tls-source-operation',
+            expiresAt: body.expiresAt, state: 'open',
+          }, 201);
+        }
+        if (targetUrl.endsWith(`/intakes/${INTAKE_ID}/complete`)) {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          completions.push(body);
+          return json({ id: INTAKE_ID, state: 'succeeded', operationResult: body.operationResult ?? null });
+        }
+        if (targetUrl.endsWith(`/intakes/${MFA_INTAKE_ID}/complete`)) {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          completions.push(body);
+          return json({ id: MFA_INTAKE_ID, state: 'failed', operationResult: null });
+        }
+        throw new Error('unexpected Links route');
+      },
+    });
+
+    await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-password' }))
+      .resolves.toEqual({
+        id: INTAKE_ID, state: 'succeeded', operationResult: { phase: 'password', outcome: 'mfa_required' },
+      });
+    expect(target.passwordStarts()).toBe(1);
+    expect(target.signIns()).toBe(0);
+
+    await expect(consumer.execute({ intakeId: MFA_INTAKE_ID, resourceId: 'dummy-mfa' }))
+      .resolves.toEqual({ id: MFA_INTAKE_ID, state: 'failed' });
+    expect(target.signIns()).toBe(0);
+    expect(completions).toEqual([
+      {
+        receipt: RECEIPT,
+        outcome: 'succeeded',
+        operationResult: { phase: 'password', outcome: 'mfa_required' },
+      },
+      { receipt: 'Z'.repeat(43), outcome: 'failed' },
+    ]);
+  });
+
+  it.each([
+    ['omits', undefined],
+    ['mismatches', { phase: 'password', outcome: 'mfa_required' }],
+  ])('does not claim a completed fixed login when Links %s its operation result echo', async (_case, operationResult) => {
+    const fixture = await loginFixture();
+    const adapter = fixedAdapter(fixture.endpoint, globalThis.fetch);
+    const calls: string[] = [];
+    const consumer = new FixedIntakeConsumer({
+      baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token', adapters: [adapter],
+      fetch: async (url) => {
+        calls.push(String(url));
+        if (String(url).endsWith('/consume')) return json(consumed());
+        if (String(url).endsWith('/complete')) {
+          return json({
+            id: INTAKE_ID,
+            state: 'succeeded',
+            ...(operationResult === undefined ? {} : { operationResult }),
+          });
+        }
+        if (String(url).endsWith('/ambiguous')) return json({ id: INTAKE_ID, state: 'ambiguous' });
+        throw new Error('unexpected Links route');
+      },
+    });
+
+    await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-login' }))
+      .resolves.toEqual({ id: INTAKE_ID, state: 'ambiguous' });
+    expect(calls.map((url) => new URL(url).pathname)).toEqual([
+      `/s/api/v1/intakes/${INTAKE_ID}/consume`,
+      `/s/api/v1/intakes/${INTAKE_ID}/complete`,
+      `/s/api/v1/intakes/${INTAKE_ID}/ambiguous`,
+    ]);
   });
 
   it('marks a mismatched source challenge ambiguous without registering it or replaying the password source', async () => {
@@ -1013,15 +1191,20 @@ describe('fixed intake consumer', () => {
     }));
     const consumer = new FixedIntakeConsumer({
       baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token', adapters: [adapter],
-      fetch: async (url) => {
+      fetch: async (url, init) => {
         if (String(url).endsWith('/consume')) return json(consumed({ save: true }));
-        if (String(url).endsWith('/complete')) return json({ id: INTAKE_ID, state: 'succeeded' });
+        if (String(url).endsWith('/complete')) {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return json({ id: INTAKE_ID, state: 'succeeded', operationResult: body.operationResult ?? null });
+        }
         throw new Error('unexpected Links route');
       },
     });
 
     await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-login' }))
-      .resolves.toEqual({ id: INTAKE_ID, state: 'succeeded' });
+      .resolves.toEqual({
+        id: INTAKE_ID, state: 'succeeded', operationResult: { phase: 'password', outcome: 'completed' },
+      });
 
     expect(writes).toEqual([SECRET]);
   });
@@ -1041,15 +1224,20 @@ describe('fixed intake consumer', () => {
     const adapter = fixedAdapter(login.endpoint, globalThis.fetch, store);
     const consumer = new FixedIntakeConsumer({
       baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token', adapters: [adapter],
-      fetch: async (url) => {
+      fetch: async (url, init) => {
         if (String(url).endsWith('/consume')) return json(consumed({ save: true }));
-        if (String(url).endsWith('/complete')) return json({ id: INTAKE_ID, state: 'succeeded' });
+        if (String(url).endsWith('/complete')) {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return json({ id: INTAKE_ID, state: 'succeeded', operationResult: body.operationResult ?? null });
+        }
         throw new Error('unexpected Links route');
       },
     });
 
     await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-login' }))
-      .resolves.toEqual({ id: INTAKE_ID, state: 'succeeded' });
+      .resolves.toEqual({
+        id: INTAKE_ID, state: 'succeeded', operationResult: { phase: 'password', outcome: 'completed' },
+      });
 
     expect(login.accepted).toEqual([{ username: 'dummy-user', password: SECRET }]);
     expect(credentialStore.values).toEqual([SECRET]);
@@ -1092,7 +1280,7 @@ describe('fixed intake consumer', () => {
     adapterOptions.username = 'redirected-user';
 
     await expect(adapter.execute({ value: SECRET, kind: 'password', saveStore: 'dummy-password-store' }))
-      .resolves.toBe('succeeded');
+      .resolves.toEqual({ outcome: 'succeeded', operationResult: { phase: 'password', outcome: 'completed' } });
 
     expect(fixture.accepted).toEqual([{ username: 'dummy-user', password: SECRET }]);
     expect(firstWrites).toEqual([SECRET]);
@@ -1105,9 +1293,12 @@ describe('fixed intake consumer', () => {
     const adapter = fixedAdapter(fixture.endpoint, globalThis.fetch, registeredPasswordStore((value) => { writes.push(value); }));
     const noConsent = new FixedIntakeConsumer({
       baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token', adapters: [adapter],
-      fetch: async (url) => {
+      fetch: async (url, init) => {
         if (String(url).endsWith('/consume')) return json(consumed());
-        if (String(url).endsWith('/complete')) return json({ id: INTAKE_ID, state: 'succeeded' });
+        if (String(url).endsWith('/complete')) {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return json({ id: INTAKE_ID, state: 'succeeded', operationResult: body.operationResult ?? null });
+        }
         throw new Error('unexpected Links route');
       },
     });
@@ -1121,7 +1312,9 @@ describe('fixed intake consumer', () => {
     });
 
     await expect(noConsent.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-login' }))
-      .resolves.toEqual({ id: INTAKE_ID, state: 'succeeded' });
+      .resolves.toEqual({
+        id: INTAKE_ID, state: 'succeeded', operationResult: { phase: 'password', outcome: 'completed' },
+      });
     await expect(failedLogin.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-login' }))
       .resolves.toEqual({ id: INTAKE_ID, state: 'failed' });
 
