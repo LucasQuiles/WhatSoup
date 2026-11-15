@@ -1,5 +1,7 @@
 # Provider-Event Lifecycle Requirements
 
+**Note:** Migrations 69 and 70 are reserved for other pending work; the numbers in this spec are planning placeholders; final numbers are assigned at landing by the migration register, in batch order.
+
 **Status:** Active specification — the source reconciliation at `59cc562bc` (2026-10-06) was audited at schema 66; the current canonical schema is 68. Provider-lifecycle implementation and activation remain unauthorized until the terminal-recovery prerequisite and the existing owner authorization requirements are satisfied.
 
 ## Schema allocation
