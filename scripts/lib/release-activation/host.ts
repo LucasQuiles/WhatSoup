@@ -66,13 +66,13 @@ export interface LoadedJobDefinition {
 
 const SERVICE_OPEN = '\tservices = {';
 const SERVICE_CLOSE = '\t}';
-const SERVICE_ROW = /^\t\t\s*(\d+)\s+(-?\d+|-|\(pe\))\s+\t(\S+)$/;
+const SERVICE_ROW = /^\t\t\s*(\d+)\s+(-?\d+|-|\((?:pe|jt)\))\s+\t(\S+)$/;
 const JOB_OPEN = /^(\S+) = \{$/;
-const FIELD = /^\t([a-z ]+) = (.*)$/;
+const FIELD = /^\t([a-z ]+(?: \((?:active|inactive)\))?) = (.*)$/;
 
 /**
  * Parse only the accepted, bounded `launchctl print gui/<uid>` service section.
- * The observed `(pe)` status is retained as a status string; it is never a
+ * Observed `(pe)` and `(jt)` statuses are retained as strings; they are never a
  * selector or a readiness signal. Anything else, including a duplicate label,
  * is an unsupported host contract and fails closed.
  */
@@ -93,7 +93,7 @@ export function parseLoadedDomain(stdout: string): LoadedDomainService[] | null 
     const label = match[3]!;
     if (!Number.isSafeInteger(pid) || pid < 0 || labels.has(label)) return null;
     labels.add(label);
-    if (label.startsWith('com.whatsoup.')) services.push({ label, pid, status: match[2]! });
+    if (label.startsWith('com.whatsoup.') || label === 'com.bot-errors.health') services.push({ label, pid, status: match[2]! });
   }
   return services.length === 0 ? null : services;
 }

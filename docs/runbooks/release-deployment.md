@@ -475,9 +475,10 @@ by an incompatible or unreadable sealed refresh fence — outcome
 
 ### `npm run release:activate-host`
 
-Host activation is a separate, explicitly declared transaction for more than
-one launchd member. It is not permission to discover a wider member set or to
-run `release:activate --apply` once per instance:
+Host activation is a separate, explicitly declared transaction for one or
+more launchd members and their declared shared host consumers. It is not
+permission to discover a wider member set or to run `release:activate --apply`
+once per instance:
 
 ```bash
 npm --silent run release:activate-host -- \
@@ -493,6 +494,104 @@ consumer of a selected shared wrapper is declared. It prints only paths,
 digests, membership, port numbers, and state; it never prints health tokens,
 config contents, plist environment values, or health bodies.
 
+Schema version 2 adds an explicit `hostAuxiliaries` array for the closed host
+jobs that are not owned by one member. It accepts only these label/mode pairs:
+`com.bot-errors.health` with `path-rebase`;
+`com.whatsoup.harness-maintenance` or `com.whatsoup.reply-guarantee` with
+`setup-timer` or their closed legacy `path-rebase` form;
+`com.whatsoup.whatsoup-fleet` with `fleet-wrapper`; and a declared member's
+`com.whatsoup.<instance>-watchdog` with `quiesce`.
+Selector-bearing entries name their reviewed `expectCurrent`; the fleet entry
+also names its absolute wrapper link. The planner proves the installed and
+loaded path, executable, and complete argument list agree before switching.
+For a host `setup-timer`, its newly rendered complete `ProgramArguments` must
+also equal the installed list after only exact `expectCurrent` path values are
+rebased to the target release. An external guard or other argument the template
+does not render is a drift refusal; this coordinator does not preserve or
+reconstruct it.
+It refuses an undeclared loaded `com.bot-errors.health` job, including when
+its definition cannot be read reliably.
+
+Schema version 3 adds a closed `outsideUnits` array for reviewed, unrelated
+LaunchAgents that the transaction must prove are outside the host unit but must
+never edit, reload, stop, or start. Each entry pins `label`, the installed
+`plistSha256`, and either `loadState: "loaded"` or `"unloaded-113"`. Its
+`reviewInputs` lists lexically ordered, normalized absolute `roots`, `links`,
+and `{ path, sha256 }` source files, plus ordered
+`argumentBindings: [{ index, path, kind }]`. The roots and links must exactly
+equal the release roots and shared launchers selected by this host transaction.
+Each source file must remain outside those paths both by spelling and after
+symlink resolution; it is reread and rehashed from the same bytes during
+planning and immediately before the first `--apply` filesystem or launchd
+mutation. Every selected root and launcher must itself resolve, so an
+unresolvable selected path is a refusal.
+
+An outside label cannot be `com.whatsoup.*` or a closed host consumer such as
+`com.bot-errors.health`. The pinned plist and every reviewed input must contain
+no raw or XML-escaped reference to a selected root or launcher. A `loaded`
+entry must have a matching plist label and exact installed/loaded path,
+program, and argv. For an interpreter, every absolute argv value after argv[0]
+must have one exact index-and-path binding: `review-file` must name a hashed
+source input, and `runtime-data` explicitly declares a generated data path.
+Runtime data is checked against selected roots and launchers by its lexical
+path and nearest existing realpath ancestor; it cannot reuse a reviewed source
+path. Every loaded interpreter needs at least one reviewed source input. The
+only accepted ordinary script forms are `python` (optionally `-I`) followed by
+an absolute script, `node`/`nodejs` followed by an absolute script, and
+`bash`/`sh`/`zsh` followed by an absolute script; that script has to use a
+`review-file` binding. Shell `-c` and `-lc` forms remain opaque commands pinned
+by the reviewed plist and still need a reviewed source input. Module and other
+option forms refuse. The reviewed declaration must classify any script,
+environment, or other input that can affect release selection as `review-file`;
+the bounded checker does not discover arbitrary dynamic dependencies. An `unloaded-113` entry may
+use `files: []` and `argumentBindings: []` for a digest-pinned empty stub, but
+only if the bounded
+`launchctl print gui/<uid>/<label>` check returns exactly exit 113. This is a
+review-bound exception, not general dependency discovery: any changed plist,
+runtime definition, review input, root/link tuple, unreadable input, or new
+consumer refuses the transaction and requires a new review declaration. Plan
+output and the apply receipt retain `reviewTupleSha256`, over the normalized
+label, plist digest, load state, roots, links, files, and argument bindings.
+
+`path-rebase` changes only plist string values that are exactly the reviewed
+root or lie below it; fields containing a prefix-sibling path are retained and
+embedded shell-style references are refused. The selected shared-wrapper union
+includes installed and loaded consumers. A standard `~/.local/bin/whatsoup`
+link that has no launchd consumer still joins the transaction when it already
+resolves exactly to a declared old release; a link to any other root remains
+outside the transaction. A missing link is also outside the transaction, but
+an unreadable path or a non-symlink is a preflight refusal rather than evidence
+that no launcher exists.
+
+The only shell-style exception is the closed, legacy
+`com.bot-errors.health` Mini wrapper: its exact reviewed argv and wrapper shape
+may carry the default `BOT_ERRORS_HEALTH_PROFILE` at
+`<expect-current>/deploy/health-profiles/miniN.json`, where `N` is 1 through
+28. Planning changes only that default to the target release, then applies the
+ordinary embedded-reference refusal to every remaining value. A malformed
+wrapper, non-canonical profile path, or any additional embedded release
+reference refuses. Both selected release roots must also be normalized absolute
+shell-token paths matching `^/[A-Za-z0-9._/-]+$`; whitespace or shell metacharacters
+refuse rather than being interpolated into the wrapper.
+
+The only other `path-rebase` forms are the observed legacy timer argv contracts.
+`com.whatsoup.harness-maintenance` must be exactly
+`[/bin/bash, <home>/.local/libexec/fleet-reauth/maint-ccd-guard.sh, /bin/bash,
+<expect-current>/deploy/scripts/harness-maintenance.sh]`.
+`com.whatsoup.reply-guarantee` must be exactly
+`[<home>/.nvm/versions/node/vX.Y.Z/bin/node,
+<expect-current>/deploy/hooks/drain-stuck-replies.mjs]`, optionally followed by
+the sole literal `--once`. The planner rebases only the exact selected-root path
+and preserves every other installed plist byte, including launchd schedule
+fields and the optional-argument form. A mismatched home, node shape, guard,
+hook, extra argument, or embedded selected-root reference refuses. These are
+closed installed-argv validators, not a general wrapper-preservation facility.
+
+The guard script and the pinned node executable are transitive reviewed inputs.
+This path-rebase check intentionally validates their literal installed paths and
+does not read, hash, execute, or resolve their symlinks; the owner must qualify
+those inputs separately before a native apply.
+
 `--apply` rebuilds that proof, snapshots every database with `quick_check`,
 backs up all changed plists and each shared link, then changes the group. It
 reloads all primary labels before auxiliaries and verifies each primary's new
@@ -501,6 +600,10 @@ the schema level of every member before restoration and again after quiescing
 the group. A change or unreadable schema blocks restoration for the whole host;
 no old member is restarted. One private `receipt.json` under the host backup
 directory records the group outcome. Its exit codes match `release:activate`.
+Schema-v2 watchdogs are quiesced before selectors move. They are restored only
+after the new terminal is verified, or after every old member, auxiliary, and
+host selector is verified during rollback. A migration block or an unverified
+old terminal leaves them stopped and reports the non-success rollback outcome.
 
 #### Health invariants verdict (report-only, #2481)
 

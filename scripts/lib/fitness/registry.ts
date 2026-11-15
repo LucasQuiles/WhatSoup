@@ -613,6 +613,9 @@ export const fitnessRules = [
         // developer folder's python3 that shim runs. A PATH lookup here would
         // let a user-writable directory choose what root trusts.
         'scripts/lib/release-activation/install_root_helper.py',
+        // Closed legacy macOS LaunchAgent argv contracts validate installed
+        // bytes only; they never resolve, select, or execute Python.
+        'scripts/lib/release-activation/legacy-host-auxiliaries.ts',
       ],
     },
     source: ['issue:2616', 'issue:2623'],

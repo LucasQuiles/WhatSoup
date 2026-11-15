@@ -11,9 +11,10 @@ import {
   launchdState, reloadLabel, repointSymlink, stopLabel, verifyAuxDefinitions, verifyInstance, writePlist,
   type InstanceObservation, type StepRecord,
 } from './apply.ts';
-import type { ActivationHost } from './host.ts';
+import { loadedJobDefinition, type ActivationHost } from './host.ts';
 import { bootstrapEntrypointFor, type ActivationContext, wrapperTargetFor } from './plan.ts';
 import { parsePlist } from '../../check-service-units.ts';
+import { verifyReviewedOutsideUnits, type ReviewedOutsideUnit } from './host-unit-plan.ts';
 
 const PRIVATE_FILE_MODE = 0o600;
 
@@ -24,6 +25,14 @@ export interface HostUnitApplyContext {
   members: ActivationContext[];
   /** A wrapper path has one backup and one atomic repoint, even when several jobs consume it. */
   sharedLaunchers: ReadonlyMap<string, readonly string[]>;
+  /** Explicit host jobs whose ProgramArguments are staged outside a member surface. */
+  hostAuxiliaries?: readonly { label: string; plistPath: string; staged: string; expectCurrent: string }[];
+  /** The fleet console has a separate wrapper link and is never inferred from the bot wrapper. */
+  hostLaunchers?: readonly { label: string; plistPath: string; link: string; wrapper: 'whatsoup-fleet'; expectCurrent: string }[];
+  /** Watchdogs are stopped before selectors move and restarted only after a verified terminal state. */
+  watchdogs?: readonly { label: string; plistPath: string }[];
+  /** Read-only v3 declarations rechecked before the first backup or selector mutation. */
+  outsideUnits?: readonly ReviewedOutsideUnit[];
 }
 
 export interface HostUnitApplyOutcome {
@@ -43,6 +52,9 @@ function allLabels(contexts: readonly ActivationContext[], role: 'primary' | 'au
     .map((entry) => ({ context, label: entry.label, plistPath: entry.plistPath })))
     .sort((left, right) => left.label.localeCompare(right.label));
 }
+function sameArgs(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
 function schema(pathname: string, before: number): { after: number | null; error: string | null; changed: boolean } {
   try { const after = readSchemaMigrationLevel(pathname); return { after, error: null, changed: after !== before }; }
   catch (error) { return { after: null, error: error instanceof Error ? error.message : String(error), changed: true }; }
@@ -56,8 +68,61 @@ export async function applyHostUnitActivation(host: ActivationHost, context: Hos
   const backupPath = path.join(context.backupDir, `activation-host-${context.commit.slice(0, 12)}-${stamp(host.now())}`);
   const fail = (outcome: HostUnitApplyOutcome['outcome'], failure: string, rollback: HostUnitApplyOutcome['rollback'] = null): HostUnitApplyOutcome => ({ outcome, backupPath: existsSync(backupPath) ? backupPath : null, failure, steps, members, schemaGates, rollback });
   const primary = allLabels(context.members, 'primary');
-  const auxiliary = allLabels(context.members, 'aux');
+  const memberAuxiliaries = allLabels(context.members, 'aux');
+  const representative = context.members[0];
+  if (representative === undefined) return fail('refused', 'host unit has no members');
+  const hostAuxiliaries = context.hostAuxiliaries ?? [];
+  const hostLaunchers = context.hostLaunchers ?? [];
+  const watchdogs = context.watchdogs ?? [];
+  const outsideUnits = context.outsideUnits ?? [];
+  const externalAuxiliaries = hostAuxiliaries.map((auxiliary) => ({ context: representative, label: auxiliary.label, plistPath: auxiliary.plistPath, staged: auxiliary.staged }));
+  const launcherLabels = hostLaunchers.map((launcher) => ({ context: representative, label: launcher.label, plistPath: launcher.plistPath, staged: null }));
+  const auxiliary = [...memberAuxiliaries, ...externalAuxiliaries, ...launcherLabels].sort((left, right) => left.label.localeCompare(right.label));
   const affected = [...primary, ...auxiliary];
+  const launchers = [
+    ...[...context.sharedLaunchers.keys()].map((link) => ({ link, target: wrapperTargetFor(context.release) })),
+    ...hostLaunchers.map((launcher) => ({ link: launcher.link, target: path.join(context.release, 'deploy', launcher.wrapper) })),
+  ];
+
+  const installedMatchesLoaded = async (label: string, plistPath: string): Promise<boolean> => {
+    try {
+      const installed = parsePlist(readFileSync(plistPath, 'utf8'));
+      const loaded = await loadedJobDefinition(host, representative.domain, label);
+      return installed !== null && loaded !== null
+        && loaded.path === plistPath
+        && loaded.program === installed.programArguments[0]
+        && sameArgs(loaded.arguments, installed.programArguments);
+    } catch { return false; }
+  };
+  const verifyHostSelectors = async (targetRelease: string | null): Promise<string | null> => {
+    try {
+      for (const auxiliary of hostAuxiliaries) {
+        const root = targetRelease ?? auxiliary.expectCurrent;
+        if (resolveLaunchdReleaseSelection(auxiliary.plistPath).releasePath !== root) return `${auxiliary.label}: selector does not resolve ${root}`;
+        if (!(await installedMatchesLoaded(auxiliary.label, auxiliary.plistPath))) return `${auxiliary.label}: installed and loaded definitions differ`;
+      }
+      for (const launcher of hostLaunchers) {
+        const root = targetRelease ?? launcher.expectCurrent;
+        if (readlinkSync(launcher.link) !== path.join(root, 'deploy', launcher.wrapper)) return `${launcher.label}: wrapper link does not resolve ${root}`;
+        if (resolveLaunchdReleaseSelection(launcher.plistPath).releasePath !== root) return `${launcher.label}: selector does not resolve ${root}`;
+        if (!(await installedMatchesLoaded(launcher.label, launcher.plistPath))) return `${launcher.label}: installed and loaded definitions differ`;
+      }
+      return null;
+    } catch (error) { return error instanceof Error ? error.message : String(error); }
+  };
+
+  const outsideChecks = await verifyReviewedOutsideUnits(host, outsideUnits);
+  const outsideFailure = outsideChecks.find((entry) => !entry.ok);
+  if (outsideFailure !== undefined) return fail('refused', `${outsideFailure.label}: ${outsideFailure.detail}`);
+  const restoreWatchdogs = async (records: StepRecord[]): Promise<boolean> => {
+    let restored = true;
+    for (const watchdog of watchdogs) {
+      const error = await reloadLabel(host, representative, watchdog.label, watchdog.plistPath);
+      records.push(error === null ? { step: `restore-watchdog:${watchdog.label}`, ok: true } : { step: `restore-watchdog:${watchdog.label}`, ok: false, detail: error });
+      if (error !== null) restored = false;
+    }
+    return restored;
+  };
 
   try {
     mkdirSync(context.backupDir, { recursive: true, mode: 0o700 });
@@ -85,18 +150,46 @@ export async function applyHostUnitActivation(host: ActivationHost, context: Hos
         }
       }
     }
-    for (const link of context.sharedLaunchers.keys()) writeFileSync(path.join(backupPath, `launcher-${Buffer.from(link).toString('hex')}.before`), readlinkSync(link), { mode: PRIVATE_FILE_MODE });
-    steps.push({ step: 'backup-and-stage-all-members', ok: true });
+    const hostBackupDir = path.join(backupPath, 'host-auxiliaries');
+    mkdirSync(hostBackupDir, { recursive: true, mode: 0o700 });
+    for (const auxiliary of hostAuxiliaries) {
+      const backup = path.join(hostBackupDir, `${auxiliary.label}.plist`);
+      copyFileSync(auxiliary.plistPath, backup); chmodSync(backup, PRIVATE_FILE_MODE);
+      writeFileSync(path.join(hostBackupDir, `${auxiliary.label}.staged.plist`), auxiliary.staged, { mode: PRIVATE_FILE_MODE });
+      const lint = await host.exec('plutil', ['-lint', path.join(hostBackupDir, `${auxiliary.label}.staged.plist`)]);
+      if (lint.code !== 0) return fail('refused', `${auxiliary.label}: staged plist failed plutil -lint`);
+      if (resolveLaunchdReleaseSelection(path.join(hostBackupDir, `${auxiliary.label}.staged.plist`)).releasePath !== context.release) return fail('refused', `${auxiliary.label}: staged host auxiliary does not select the target release`);
+    }
+    for (const launcher of hostLaunchers) {
+      const backup = path.join(hostBackupDir, `${launcher.label}.plist`);
+      copyFileSync(launcher.plistPath, backup); chmodSync(backup, PRIVATE_FILE_MODE);
+    }
+    for (const watchdog of watchdogs) {
+      const backup = path.join(hostBackupDir, `${watchdog.label}.plist`);
+      copyFileSync(watchdog.plistPath, backup); chmodSync(backup, PRIVATE_FILE_MODE);
+    }
+    for (const launcher of launchers) writeFileSync(path.join(backupPath, `launcher-${Buffer.from(launcher.link).toString('hex')}.before`), readlinkSync(launcher.link), { mode: PRIVATE_FILE_MODE });
+    steps.push({ step: 'backup-and-stage-all-members-and-host-auxiliaries', ok: true });
   } catch (error) { return fail('refused', error instanceof Error ? error.message : String(error)); }
 
   const previous = new Map<string, number | null>();
   for (const item of primary) previous.set(item.label, (await launchdState(host, item.context.domain, item.label)).pid);
+  for (const watchdog of watchdogs) {
+    const error = await stopLabel(host, representative, watchdog.label);
+    steps.push(error === null ? { step: `quiesce-watchdog:${watchdog.label}`, ok: true } : { step: `quiesce-watchdog:${watchdog.label}`, ok: false, detail: error });
+    if (error !== null) {
+      const restored = await restoreWatchdogs(steps);
+      return fail(restored ? 'refused' : 'rollback-unverified', error);
+    }
+  }
   let failure: string | null = null;
+  let watchdogsMayBeRunning = false;
   try {
-    for (const link of context.sharedLaunchers.keys()) repointSymlink(link, wrapperTargetFor(context.release));
-    for (const item of affected) writePlist(item.plistPath, item.context.staged.find((entry) => entry.label === item.label)!.staged!);
+    for (const launcher of launchers) repointSymlink(launcher.link, launcher.target);
+    for (const item of [...primary, ...memberAuxiliaries]) writePlist(item.plistPath, item.context.staged.find((entry) => entry.label === item.label)!.staged!);
+    for (const auxiliary of hostAuxiliaries) writePlist(auxiliary.plistPath, auxiliary.staged);
     steps.push({ step: 'switch-all-selectors', ok: true });
-    for (const item of affected) {
+    for (const item of [...primary, ...auxiliary]) {
       const error = await reloadLabel(host, item.context, item.label, item.plistPath);
       steps.push(error === null ? { step: `reload:${item.label}`, ok: true } : { step: `reload:${item.label}`, ok: false, detail: error });
       if (error !== null) { failure = error; break; }
@@ -112,7 +205,17 @@ export async function applyHostUnitActivation(host: ActivationHost, context: Hos
     steps.push(aux === null ? { step: `verify-aux:${member.args.instance}`, ok: true } : { step: `verify-aux:${member.args.instance}`, ok: false, detail: aux });
     if (aux !== null) { failure = aux; break; }
   }
-  if (failure === null) return fail('activated', '');
+  if (failure === null) {
+    const hostSelectors = await verifyHostSelectors(context.release);
+    steps.push(hostSelectors === null ? { step: 'verify-host-auxiliaries', ok: true } : { step: 'verify-host-auxiliaries', ok: false, detail: hostSelectors });
+    if (hostSelectors !== null) failure = hostSelectors;
+  }
+  if (failure === null) {
+    watchdogsMayBeRunning = true;
+    const restored = await restoreWatchdogs(steps);
+    if (restored) return fail('activated', '');
+    failure = 'watchdog restoration failed';
+  }
 
   const gate = (stage: 'before-rollback' | 'after-quiesce'): boolean => {
     let clear = true;
@@ -128,8 +231,15 @@ export async function applyHostUnitActivation(host: ActivationHost, context: Hos
     schemaGates.push({ stage, members: observations });
     return clear;
   };
-  if (!gate('before-rollback')) return fail('rollback-blocked-migrated', failure);
   const rollbackSteps: StepRecord[] = [];
+  if (watchdogsMayBeRunning) {
+    for (const watchdog of watchdogs) {
+      const stopped = await stopLabel(host, representative, watchdog.label);
+      rollbackSteps.push(stopped === null ? { step: `requiesce-watchdog:${watchdog.label}`, ok: true } : { step: `requiesce-watchdog:${watchdog.label}`, ok: false, detail: stopped ?? undefined });
+      if (stopped !== null) return fail('rollback-unverified', failure, { verified: false, steps: rollbackSteps });
+    }
+  }
+  if (!gate('before-rollback')) return fail('rollback-blocked-migrated', failure, watchdogsMayBeRunning ? { verified: false, steps: rollbackSteps } : null);
   for (const item of [...primary, ...auxiliary]) {
     const stopped = await stopLabel(host, item.context, item.label);
     rollbackSteps.push(stopped === null ? { step: `stop:${item.label}`, ok: true } : { step: `stop:${item.label}`, ok: false, detail: stopped ?? undefined });
@@ -137,8 +247,9 @@ export async function applyHostUnitActivation(host: ActivationHost, context: Hos
   }
   if (!gate('after-quiesce')) return fail('rollback-blocked-migrated', failure, { verified: false, steps: rollbackSteps });
   try {
-    for (const link of context.sharedLaunchers.keys()) repointSymlink(link, readFileSync(path.join(backupPath, `launcher-${Buffer.from(link).toString('hex')}.before`), 'utf8'));
+    for (const launcher of launchers) repointSymlink(launcher.link, readFileSync(path.join(backupPath, `launcher-${Buffer.from(launcher.link).toString('hex')}.before`), 'utf8'));
     for (const member of context.members) for (const staged of member.staged) writePlist(staged.plistPath, readFileSync(path.join(backupPath, 'members', member.args.instance, `${staged.label}.plist`), 'utf8'));
+    for (const auxiliary of hostAuxiliaries) writePlist(auxiliary.plistPath, readFileSync(path.join(backupPath, 'host-auxiliaries', `${auxiliary.label}.plist`), 'utf8'));
     for (const item of affected) {
       const error = await reloadLabel(host, item.context, item.label, item.plistPath);
       rollbackSteps.push(error === null ? { step: `reload:${item.label}`, ok: true } : { step: `reload:${item.label}`, ok: false, detail: error });
@@ -149,6 +260,13 @@ export async function applyHostUnitActivation(host: ActivationHost, context: Hos
     rollbackSteps.push({ step: `verify-old:${member.instanceLabel}`, ok: verified.ok });
     const aux = await verifyAuxDefinitions(host, member, member.args.expectCurrent, context.release);
     rollbackSteps.push(aux === null ? { step: `verify-old-aux:${member.args.instance}`, ok: true } : { step: `verify-old-aux:${member.args.instance}`, ok: false, detail: aux });
+  }
+  const hostSelectors = await verifyHostSelectors(null);
+  rollbackSteps.push(hostSelectors === null ? { step: 'verify-old-host-auxiliaries', ok: true } : { step: 'verify-old-host-auxiliaries', ok: false, detail: hostSelectors });
+  const oldTerminalVerified = rollbackSteps.every((step) => step.ok);
+  if (oldTerminalVerified) await restoreWatchdogs(rollbackSteps);
+  else for (const watchdog of watchdogs) {
+    rollbackSteps.push({ step: `watchdog-retained:${watchdog.label}`, ok: false, detail: 'old terminal verification failed' });
   }
   const rollback = { verified: rollbackSteps.every((step) => step.ok), steps: rollbackSteps };
   return fail(rollback.verified ? 'rolled-back' : 'rollback-unverified', failure, rollback);
