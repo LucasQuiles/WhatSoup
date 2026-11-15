@@ -47,7 +47,7 @@ const JOB = [
   '\truns = 3',
   '\tworking directory = /ignored',
   '\tinherited environment = {',
-  '\t\tPATH = redacted',
+  '\t\tPATH => redacted',
   '\t}',
   '\targuments = {',
   '\t\t/fixture-home/.local/bin/whatsoup',
@@ -161,7 +161,8 @@ function twoMemberWorld({ sharedFirst = true }: { sharedFirst?: boolean } = {}):
         if (fault === 'outside-loaded-program-mismatch' && name === 'com.agent365.token-warmer') program = '/bin/false';
         if (fault === 'outside-loaded-argv-mismatch' && name === 'com.agent365.token-warmer') argv.push('--stale');
         const loadedPath = (fault === 'host-loaded-mismatch' && name === 'com.whatsoup.whatsoup-fleet') || (fault === 'outside-loaded-mismatch' && name === 'com.agent365.token-warmer') ? `${job.plist}.stale` : job.plist;
-        return { code: 0, stdout: `gui/501/${name} = {\n\tpath = ${loadedPath}\n\ttype = LaunchAgent\n\tprogram = ${program}\n\tstate = running\n\tpid = ${job.pid}\n\targuments = {\n${argv.map((entry) => `\t\t${entry}\n`).join('')}\t}\n}\n`, stderr: '' };
+        const workingDirectory = definition?.scalarKeys['WorkingDirectory'];
+        return { code: 0, stdout: `gui/501/${name} = {\n\tpath = ${loadedPath}\n\ttype = LaunchAgent\n\tprogram = ${program}\n\tstate = running\n\tpid = ${job.pid}\n${workingDirectory === undefined ? '' : `\tworking directory = ${workingDirectory}\n`}\targuments = {\n${argv.map((entry) => `\t\t${entry}\n`).join('')}\t}\n}\n`, stderr: '' };
       }
       if (file === 'launchctl') {
         const verb = args[0]!; const target = args.at(-1) ?? ''; const name = verb === 'bootstrap' ? path.basename(args[2]!, '.plist') : label(target); const job = jobs.get(name);
@@ -252,6 +253,8 @@ describe('release:activate-host loaded launchd contract', () => {
       state: 'running',
       pid: 56045,
       arguments: ['/fixture-home/.local/bin/whatsoup', 'ana-bot'],
+      workingDirectory: '/ignored',
+      pythonEnvironmentKeys: [],
     });
   });
 
@@ -261,11 +264,42 @@ describe('release:activate-host loaded launchd contract', () => {
     expect(parseLoadedJob(native.replace('\tstate = running', '\tstate = running\n\tstate = waiting'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
   });
 
+  it('accepts the observed submitted-job metadata without weakening selector checks', () => {
+    const native = JOB.replace('\truns = 3', '\truns = 3\n\tsubmitted job. ignore execute allowed');
+    expect(parseLoadedJob(native, 'com.whatsoup.ana-bot', 'gui/501')).toEqual(parseLoadedJob(JOB, 'com.whatsoup.ana-bot', 'gui/501'));
+    expect(parseLoadedJob(native.replace('ignore execute allowed', 'ignore execute denied'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
+    expect(parseLoadedJob(native.replace('\tstate = running', '\tstate = running\n\tstate = waiting'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
+  });
+
+  it('accepts native pid-local endpoint metadata with a closed outer block', () => {
+    const endpoints = ['\tpid-local endpoints = {', '\t\t"com.apple.coredrag" = {', '\t\t\tport = 0xa6c2b', '\t\t\tactive = 1', '\t\t}', '\t}'].join('\n');
+    const native = JOB.replace('\truns = 3', `\truns = 3\n${endpoints}`);
+    expect(parseLoadedJob(native, 'com.whatsoup.ana-bot', 'gui/501')).toEqual(parseLoadedJob(JOB, 'com.whatsoup.ana-bot', 'gui/501'));
+    expect(parseLoadedJob(native.replace('pid-local endpoints', 'unknown-endpoints'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
+    expect(parseLoadedJob(native.replace(endpoints, endpoints.slice(0, -3)), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
+    expect(parseLoadedJob(native.replace('\tprogram = ', '\tprogram = /other\n\tprogram = '), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
+  });
+
   it('refuses malformed, duplicate, or mismatched loaded definitions', () => {
     expect(parseLoadedJob(JOB.replace('gui/501/com.whatsoup.ana-bot = {', 'gui/501/com.whatsoup.other = {'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
     expect(parseLoadedJob(JOB.replace('\tstate = running', '\tstate = running\n\tstate = waiting'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
     expect(parseLoadedJob(JOB.replace('\t\tana-bot', '\t'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
     expect(parseLoadedJob(JOB.replace('\t}\n\targuments', '\targuments'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
+  });
+
+  it('retains Python resolution environment names while rejecting duplicate or malformed proof blocks', () => {
+    const withEnvironment = JOB.replace('\targuments = {', [
+      '\tenvironment = {', '\t\tPYTHONPATH => /untrusted', '\t}', '\targuments = {',
+    ].join('\n'));
+    expect(parseLoadedJob(withEnvironment, 'com.whatsoup.ana-bot', 'gui/501')).toEqual(expect.objectContaining({
+      workingDirectory: '/ignored', pythonEnvironmentKeys: ['PYTHONPATH'],
+    }));
+    expect(parseLoadedJob(withEnvironment.replace('\tenvironment = {', '\tenvironment = {\n\t}\n\tenvironment = {'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
+    expect(parseLoadedJob(withEnvironment.replace('\t\tPYTHONPATH => /untrusted', '\t\tPYTHONPATH'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
+    expect(parseLoadedJob(withEnvironment.replace('\t\tPYTHONPATH => /untrusted', '\t\tPATH => first\n\t\tPATH => second'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
+    const normalOverride = JOB.replace('\targuments = {', '\tdefault environment = {\n\t\tPATH => default\n\t}\n\targuments = {');
+    expect(parseLoadedJob(normalOverride, 'com.whatsoup.ana-bot', 'gui/501')).toEqual(expect.objectContaining({ pythonEnvironmentKeys: [] }));
+    expect(parseLoadedJob(withEnvironment.replace('\tworking directory = /ignored', '\tworking directory = /ignored\n\tworking directory = /other'), 'com.whatsoup.ana-bot', 'gui/501')).toBeNull();
   });
 });
 
@@ -458,6 +492,34 @@ describe('release:activate-host reviewed outside-unit declarations', () => {
     };
     return { label, script, dataDirectory, dataPath, source, plistPath, declaration };
   };
+  const reviewedPythonModule = (world: TwoMemberWorld) => {
+    const label = 'com.operations.dashboard';
+    const workingDirectory = path.join(world.root, 'outside', 'operations-dashboard');
+    const packageDirectory = path.join(workingDirectory, 'app');
+    const init = path.join(packageDirectory, '__init__.py');
+    const module = path.join(packageDirectory, 'watchdog.py');
+    mkdirSync(packageDirectory, { recursive: true }); writeFileSync(init, ''); writeFileSync(module, 'print("watch")\n');
+    const source = plist(label, [path.join(workingDirectory, 'venv', 'bin', 'python'), '-m', 'app.watchdog'], workingDirectory);
+    const plistPath = world.addJob(label, source);
+    const files = [init, module].sort().map((file) => ({ path: file, sha256: digest(readFileSync(file, 'utf8')) }));
+    const declaration = {
+      schemaVersion: 3,
+      members: members(world),
+      hostAuxiliaries: [],
+      outsideUnits: [{
+        label,
+        plistSha256: digest(source),
+        loadState: 'loaded',
+        reviewInputs: {
+          roots: [world.newRelease, world.oldRelease].sort(),
+          links: [world.link],
+          files,
+          argumentBindings: [],
+        },
+      }],
+    };
+    return { label, workingDirectory, init, module, source, plistPath, declaration };
+  };
 
   it('admits only a v3 exact reviewed declaration for an unrelated loaded interpreter job', async () => {
     const world = twoMemberWorld(); const outside = reviewedInterpreter(world);
@@ -494,14 +556,73 @@ describe('release:activate-host reviewed outside-unit declarations', () => {
     expect(danglingEscape.document.preconditions).toEqual(expect.arrayContaining([expect.objectContaining({ id: `outside-unit:${outside.label}`, ok: false })]));
   });
 
-  it('refuses interpreter module and option forms whose reviewed script cannot be bounded', async () => {
+  it('refuses an initially unreviewed Python module form', async () => {
     const world = twoMemberWorld(); const outside = reviewedInterpreter(world);
     const source = plist(outside.label, ['/usr/bin/python3', '-m', 'agent365.token_warmer'], path.dirname(outside.script));
     writeFileSync(outside.plistPath, source);
     const declaration = { ...outside.declaration, outsideUnits: [{ ...outside.declaration.outsideUnits[0], plistSha256: digest(source), reviewInputs: { ...outside.declaration.outsideUnits[0].reviewInputs, argumentBindings: [] } }] };
     const plan = await planHostUnit(world, declaration);
     expect(plan.ready).toBe(false);
-    expect(plan.document.preconditions).toEqual(expect.arrayContaining([expect.objectContaining({ id: `outside-unit:${outside.label}`, ok: false, detail: expect.stringContaining('not a bounded') })]));
+    expect(plan.document.preconditions).toEqual(expect.arrayContaining([expect.objectContaining({ id: `outside-unit:${outside.label}`, ok: false })]));
+  });
+
+  it('admits only a reviewed Python -m module with exact cwd and package inputs', async () => {
+    const world = twoMemberWorld(); const outside = reviewedPythonModule(world);
+    expect((await planHostUnit(world, outside.declaration)).ready).toBe(true);
+
+    const missingInit = { ...outside.declaration, outsideUnits: [{ ...outside.declaration.outsideUnits[0], reviewInputs: { ...outside.declaration.outsideUnits[0].reviewInputs, files: outside.declaration.outsideUnits[0].reviewInputs.files.filter((file) => file.path !== outside.init) } }] };
+    expect((await planHostUnit(world, missingInit)).ready).toBe(false);
+
+    for (const source of [
+      outside.source.replace('  <key>WorkingDirectory</key>', `  <key>WorkingDirectory</key>\n  <string>${outside.workingDirectory}</string>\n  <key>WorkingDirectory</key>`),
+      outside.source.replace(`  <key>WorkingDirectory</key>\n  <string>${outside.workingDirectory}</string>`, '  <key>WorkingDirectory</key>\n  <true/>'),
+    ]) {
+      writeFileSync(outside.plistPath, source);
+      const declaration = { ...outside.declaration, outsideUnits: [{ ...outside.declaration.outsideUnits[0], plistSha256: digest(source) }] };
+      expect((await planHostUnit(world, declaration)).ready).toBe(false);
+    }
+    writeFileSync(outside.plistPath, outside.source);
+
+    const selectedModule = path.join(world.oldRelease, 'deploy', 'selected-module.py');
+    writeFileSync(selectedModule, 'print("watch")\n'); unlinkSync(outside.module); symlinkSync(selectedModule, outside.module);
+    expect((await planHostUnit(world, outside.declaration)).ready).toBe(false);
+    unlinkSync(outside.module); writeFileSync(outside.module, 'print("watch")\n');
+
+    for (const argv of [
+      [path.join(outside.workingDirectory, 'venv', 'bin', 'python'), '-m', 'app'],
+      [path.join(outside.workingDirectory, 'venv', 'bin', 'python'), '-m', 'app.watchdog', '--once'],
+    ]) {
+      const source = plist(outside.label, argv, outside.workingDirectory);
+      writeFileSync(outside.plistPath, source);
+      const declaration = { ...outside.declaration, outsideUnits: [{ ...outside.declaration.outsideUnits[0], plistSha256: digest(source) }] };
+      expect((await planHostUnit(world, declaration)).ready).toBe(false);
+    }
+  });
+
+  it('refuses Python module cwd and environment resolution drift', async () => {
+    const world = twoMemberWorld(); const outside = reviewedPythonModule(world);
+    const installedPythonEnv = outside.source.replace('  <key>WorkingDirectory</key>', [
+      '  <key>EnvironmentVariables</key>', '  <dict><key>PYTHONPATH</key><string>/untrusted</string></dict>', '  <key>WorkingDirectory</key>',
+    ].join('\n'));
+    writeFileSync(outside.plistPath, installedPythonEnv);
+    const installedEnvDeclaration = { ...outside.declaration, outsideUnits: [{ ...outside.declaration.outsideUnits[0], plistSha256: digest(installedPythonEnv) }] };
+    expect((await planHostUnit(world, installedEnvDeclaration)).ready).toBe(false);
+
+    writeFileSync(outside.plistPath, outside.source);
+    const baseExec = world.host.exec;
+    world.host.exec = async (file, args, options) => {
+      const result = await baseExec(file, args, options);
+      if (file !== '/bin/launchctl' || args[0] !== 'print' || args[1] !== `gui/501/${outside.label}` || result.code !== 0) return result;
+      return { ...result, stdout: result.stdout.replace('\targuments = {', '\tenvironment = {\n\t\tPYTHONHOME => /untrusted\n\t}\n\targuments = {') };
+    };
+    expect((await planHostUnit(world, outside.declaration)).ready).toBe(false);
+
+    world.host.exec = async (file, args, options) => {
+      const result = await baseExec(file, args, options);
+      if (file !== '/bin/launchctl' || args[0] !== 'print' || args[1] !== `gui/501/${outside.label}` || result.code !== 0) return result;
+      return { ...result, stdout: result.stdout.replace(`\tworking directory = ${outside.workingDirectory}`, '\tworking directory = /outside/mismatch') };
+    };
+    expect((await planHostUnit(world, outside.declaration)).ready).toBe(false);
   });
 
   it('admits a digest-pinned opaque shell command only with reviewed source inputs', async () => {
@@ -598,6 +719,17 @@ describe('release:activate-host reviewed outside-unit declarations', () => {
     expect(world.calls).toEqual([]);
     expect(readlinkSync(world.link)).toBe(path.join(world.oldRelease, 'deploy', 'whatsoup'));
     expect(readFileSync(world.directPlist, 'utf8')).toContain(path.join(world.oldRelease, 'deploy', 'whatsoup'));
+  });
+
+  it('rechecks reviewed Python module sources before its first mutation', async () => {
+    const world = twoMemberWorld(); const outside = reviewedPythonModule(world);
+    const plan = await planHostUnit(world, outside.declaration);
+    expect(plan.ready).toBe(true);
+    writeFileSync(outside.module, 'print("changed")\n');
+    const result = await applyHostUnitActivation(world.host, plan.applyContext!);
+    expect(result.outcome).toBe('refused');
+    expect(result.backupPath).toBeNull();
+    expect(world.calls).toEqual([]);
   });
 
   it('retains the normalized reviewed tuple digest in the plan and successful apply receipt', async () => {

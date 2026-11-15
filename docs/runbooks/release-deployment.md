@@ -540,10 +540,20 @@ only accepted ordinary script forms are `python` (optionally `-I`) followed by
 an absolute script, `node`/`nodejs` followed by an absolute script, and
 `bash`/`sh`/`zsh` followed by an absolute script; that script has to use a
 `review-file` binding. Shell `-c` and `-lc` forms remain opaque commands pinned
-by the reviewed plist and still need a reviewed source input. Module and other
-option forms refuse. The reviewed declaration must classify any script,
+by the reviewed plist and still need a reviewed source input. The sole module
+form is exact Python `[python, -m, dotted.package.module]`, with no other
+argument. Its normalized absolute installed `WorkingDirectory` must be an
+existing directory outside every selected root and launcher, must exactly match
+the loaded working directory, and must have no `PYTHON*` variable in the plist
+or the loaded inherited, default, or explicit environment. The reviewed files
+must hash-bind the resulting `module.py` and every parent package
+`__init__.py`; namespace packages and package-as-entry forms refuse. Other module
+or option forms refuse. The reviewed declaration must classify any script,
 environment, or other input that can affect release selection as `review-file`;
-the bounded checker does not discover arbitrary dynamic dependencies. An `unloaded-113` entry may
+the bounded checker does not discover arbitrary dynamic dependencies. It does
+not prove Python import hooks, `sitecustomize`, `.pth` files, native extensions,
+or same-name package precedence; those remain separate transitive review
+inputs. An `unloaded-113` entry may
 use `files: []` and `argumentBindings: []` for a digest-pinned empty stub, but
 only if the bounded
 `launchctl print gui/<uid>/<label>` check returns exactly exit 113. This is a

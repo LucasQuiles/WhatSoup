@@ -68,6 +68,9 @@ const HOST_AUXILIARY_LABEL = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const HOST_TIMER_LABELS = new Set(['com.whatsoup.harness-maintenance', 'com.whatsoup.reply-guarantee']);
 const SHA256 = /^sha256:[0-9a-f]{64}$/;
 const INTERPRETER = /^(?:ba|z|da|k|fi)?sh$|^(?:env|node|nodejs|osascript|perl|ruby)$|^python(?:\d+(?:\.\d+)*)?$/;
+const PYTHON_MODULE = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/;
+const ENVIRONMENT_VARIABLES = /<key>\s*EnvironmentVariables\s*<\/key>\s*<dict>([\s\S]*?)<\/dict>/g;
+const ENVIRONMENT_VARIABLE = /<key>\s*([A-Za-z_][A-Za-z0-9_]*)\s*<\/key>\s*<string>[\s\S]*?<\/string>/g;
 
 function absolute(value: unknown): string | null {
   return typeof value === 'string' && path.isAbsolute(value) ? path.normalize(value).replace(/\/+$/, '') || '/' : null;
@@ -286,6 +289,61 @@ function readDigest(filePath: string): { bytes: Buffer; sha256: string } | null 
   } catch { return null; }
 }
 
+function isRegularFile(filePath: string): boolean {
+  try { return statSync(filePath).isFile(); } catch { return false; }
+}
+
+function isDirectory(directoryPath: string): boolean {
+  try { return statSync(directoryPath).isDirectory(); } catch { return false; }
+}
+
+/** Reject malformed or duplicate plist environment data in the closed Python-module form. */
+function installedPythonEnvironmentClear(plistText: string): boolean {
+  const text = withoutXmlComments(plistText);
+  const declarations = [...text.matchAll(/<key>\s*EnvironmentVariables\s*<\/key>/g)];
+  ENVIRONMENT_VARIABLES.lastIndex = 0;
+  const blocks = [...text.matchAll(ENVIRONMENT_VARIABLES)];
+  if (blocks.length > 1 || declarations.length !== blocks.length) return false;
+  if (blocks.length === 0) return true;
+  const body = blocks[0]![1]!;
+  const keys = new Set<string>();
+  let offset = 0;
+  ENVIRONMENT_VARIABLE.lastIndex = 0;
+  for (let entry: RegExpExecArray | null; (entry = ENVIRONMENT_VARIABLE.exec(body)) !== null;) {
+    if (body.slice(offset, entry.index).trim() !== '') return false;
+    const key = entry[1]!;
+    if (keys.has(key) || key.startsWith('PYTHON')) return false;
+    keys.add(key); offset = entry.index + entry[0].length;
+  }
+  return body.slice(offset).trim() === '';
+}
+
+function withoutXmlComments(plistText: string): string {
+  let text = plistText;
+  for (let previous = ''; previous !== text;) {
+    previous = text;
+    text = text.replace(/<!--[\s\S]*?-->/g, '');
+  }
+  return text;
+}
+
+/** The generic plist shape takes its first scalar; module cwd proof needs exactly one. */
+function installedWorkingDirectory(plistText: string): string | null {
+  const text = withoutXmlComments(plistText);
+  const declarations = [...text.matchAll(/<key>\s*WorkingDirectory\s*<\/key>/g)];
+  const values = [...text.matchAll(/<key>\s*WorkingDirectory\s*<\/key>\s*<string>([\s\S]*?)<\/string>/g)];
+  if (declarations.length !== 1 || values.length !== 1) return null;
+  return values[0]![1]!.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+}
+
+function reviewedPythonModuleSources(workingDirectory: string, moduleName: string): string[] | null {
+  if (!PYTHON_MODULE.test(moduleName)) return null;
+  const segments = moduleName.split('.');
+  const packages = segments.slice(0, -1);
+  const source = path.join(workingDirectory, ...segments.slice(0, -1), `${segments.at(-1)}.py`);
+  return [...packages.map((_segment, index) => path.join(workingDirectory, ...packages.slice(0, index + 1), '__init__.py')), source];
+}
+
 function resolveSelectedPaths(selected: readonly string[]): string[] | null {
   try { return selected.map((entry) => realpathSync(entry)); } catch { return null; }
 }
@@ -334,7 +392,7 @@ function reviewTupleSha256(outsideUnit: HostUnitOutsideUnit): string {
  * to interpret arbitrary shell or language command lines. `inline` remains
  * pinned by the reviewed plist and still requires a reviewed source input.
  */
-function interpreterScriptIndex(programArguments: readonly string[]): number | 'inline' | null {
+function interpreterScriptIndex(programArguments: readonly string[]): number | 'inline' | 'python-module' | null {
   const executable = path.basename(programArguments[0] ?? '');
   const first = programArguments[1];
   if (executable === 'bash' || executable === 'sh' || executable === 'zsh') {
@@ -342,6 +400,7 @@ function interpreterScriptIndex(programArguments: readonly string[]): number | '
     return first !== undefined && !first.startsWith('-') ? 1 : null;
   }
   if (/^python(?:\d+(?:\.\d+)*)?$/.test(executable)) {
+    if (first === '-m') return programArguments.length === 3 && PYTHON_MODULE.test(programArguments[2] ?? '') ? 'python-module' : null;
     if (first === '-I') return programArguments[2] !== undefined && !programArguments[2]!.startsWith('-') ? 2 : null;
     return first !== undefined && !first.startsWith('-') ? 1 : null;
   }
@@ -391,6 +450,7 @@ export async function verifyReviewedOutsideUnits(
     if (installed === null || installed.label !== outsideUnit.label || installed.programArguments.length === 0) { fail('installed loaded plist is unreadable or has a mismatched label'); continue; }
     const interpreter = INTERPRETER.test(path.basename(installed.programArguments[0]!));
     const reviewedFiles = new Set(outsideUnit.reviewInputs.files.map((file) => file.path));
+    let pythonModule: { workingDirectory: string; sources: string[] } | null = null;
     if (interpreter) {
       if (reviewedFiles.size === 0) { fail('loaded interpreter has no reviewed source input'); continue; }
       const scriptIndex = interpreterScriptIndex(installed.programArguments);
@@ -411,7 +471,18 @@ export async function verifyReviewedOutsideUnits(
           || (binding.kind === 'runtime-data' && reviewedFiles.has(binding.path))) { bindingsValid = false; break; }
       }
       if (!bindingsValid) { fail('loaded interpreter binding is not a reviewed source or declared outside runtime data path'); continue; }
-      if (scriptIndex !== 'inline') {
+      if (scriptIndex === 'python-module') {
+        const plistWorkingDirectory = installedWorkingDirectory(plistText);
+        const workingDirectory = plistWorkingDirectory === null ? null : absolute(plistWorkingDirectory);
+        const cwdLocation = workingDirectory === null ? null : underSelectedPath(workingDirectory, selected, resolvedSelected, false);
+        const sources = workingDirectory === null ? null : reviewedPythonModuleSources(workingDirectory, installed.programArguments[2]!);
+        if (workingDirectory === null || workingDirectory !== plistWorkingDirectory || installed.scalarKeys['WorkingDirectory'] !== plistWorkingDirectory || cwdLocation !== false
+          || !isDirectory(workingDirectory) || sources === null || !installedPythonEnvironmentClear(plistText)
+          || sources.some((source) => !reviewedFiles.has(source) || !isRegularFile(source))) {
+          fail('loaded Python module lacks an exact outside working-directory, environment, or reviewed package source proof'); continue;
+        }
+        pythonModule = { workingDirectory, sources };
+      } else if (scriptIndex !== 'inline') {
         const scriptPath = absolute(installed.programArguments[scriptIndex]);
         const scriptBinding = bindings.find((binding) => binding.index === scriptIndex);
         if (scriptPath === null || scriptBinding?.path !== scriptPath || scriptBinding.kind !== 'review-file' || !reviewedFiles.has(scriptPath)) {
@@ -423,6 +494,9 @@ export async function verifyReviewedOutsideUnits(
     const exact = loaded !== null && loaded.path === outsideUnit.plistPath
       && loaded.program === installed.programArguments[0] && sameArgs(loaded.arguments, installed.programArguments);
     if (!exact) { fail('loaded definition differs from the reviewed installed plist'); continue; }
+    if (pythonModule !== null && (loaded.workingDirectory !== pythonModule.workingDirectory || loaded.pythonEnvironmentKeys.length !== 0)) {
+      fail('loaded Python module working directory or environment differs from the reviewed installed proof'); continue;
+    }
     results.push({ label: outsideUnit.label, ok: true, detail: 'exact installed and loaded reviewed definition' });
   }
   return results;

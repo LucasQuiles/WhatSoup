@@ -53,7 +53,7 @@ export interface LoadedDomainService {
   status: string;
 }
 
-/** Only selector-bearing fields from a bounded per-job `launchctl print` response. */
+/** Bounded fields needed to prove an installed launchd job is still loaded. */
 export interface LoadedJobDefinition {
   label: string;
   path: string;
@@ -62,13 +62,17 @@ export interface LoadedJobDefinition {
   state: string;
   pid: number | null;
   arguments: string[];
+  workingDirectory: string | null;
+  pythonEnvironmentKeys: string[];
 }
 
 const SERVICE_OPEN = '\tservices = {';
 const SERVICE_CLOSE = '\t}';
 const SERVICE_ROW = /^\t\t\s*(\d+)\s+(-?\d+|-|\((?:pe|jt)\))\s+\t(\S+)$/;
 const JOB_OPEN = /^(\S+) = \{$/;
-const FIELD = /^\t([a-z ]+(?: \((?:active|inactive)\))?) = (.*)$/;
+const FIELD = /^\t([a-z ]+(?: \((?:active|inactive)\))?|pid-local endpoints) = (.*)$/;
+const ENVIRONMENT_BLOCKS = new Set(['inherited environment', 'default environment', 'environment']);
+const ENVIRONMENT_ENTRY = /^([A-Za-z_][A-Za-z0-9_]*) (?:=>|=) .*$/;
 
 /**
  * Parse only the accepted, bounded `launchctl print gui/<uid>` service section.
@@ -99,8 +103,9 @@ export function parseLoadedDomain(stdout: string): LoadedDomainService[] | null 
 }
 
 /**
- * Parse the selector-bearing subset of one bounded `launchctl print gui/<uid>/<label>` response.
- * Environment and other metadata are deliberately neither accepted as proof nor returned.
+ * Parse the bounded `launchctl print gui/<uid>/<label>` response. Normal
+ * activation uses selector-bearing fields; reviewed Python modules additionally
+ * require the loaded cwd and the absence of Python-resolution env overrides.
  */
 export function parseLoadedJob(stdout: string, requestedLabel: string, requestedDomain: string): LoadedJobDefinition | null {
   const lines = stdout.split('\n');
@@ -108,10 +113,15 @@ export function parseLoadedJob(stdout: string, requestedLabel: string, requested
   if (header === null || header[1] !== `${requestedDomain}/${requestedLabel}`) return null;
   const fields = new Map<string, string>();
   let parsedArguments: string[] | null = null;
+  let workingDirectory: string | null = null;
+  let sawWorkingDirectory = false;
+  const environmentBlocks = new Set<string>();
+  const pythonEnvironmentKeys: string[] = [];
   let closed = false;
   let nestedBlocks = 0;
   for (let index = 1; index < lines.length; index += 1) {
     const line = lines[index]!;
+    if (line === '\tsubmitted job. ignore execute allowed') continue;
     if (line === '}') { if (nestedBlocks !== 0) return null; closed = true; if (lines.slice(index + 1).some((tail) => tail.trim() !== '')) return null; break; }
     if (line === '\t}') { if (nestedBlocks === 0) return null; nestedBlocks -= 1; continue; }
     if (line === '\targuments = {') {
@@ -128,6 +138,27 @@ export function parseLoadedJob(stdout: string, requestedLabel: string, requested
     const field = FIELD.exec(line);
     if (field === null) { if (line.trim() === '' || line.startsWith('\t\t')) continue; return null; }
     const key = field[1]!;
+    if (key === 'working directory') {
+      if (sawWorkingDirectory) return null;
+      sawWorkingDirectory = true;
+      workingDirectory = field[2]!;
+      continue;
+    }
+    if (ENVIRONMENT_BLOCKS.has(key)) {
+      if (field[2] !== '{' || environmentBlocks.has(key)) return null;
+      environmentBlocks.add(key);
+      const environmentKeys = new Set<string>();
+      for (index += 1; index < lines.length && lines[index] !== '\t}'; index += 1) {
+        const entry = lines[index]!;
+        if (!entry.startsWith('\t\t')) return null;
+        const parsed = ENVIRONMENT_ENTRY.exec(entry.slice(2));
+        if (parsed === null || environmentKeys.has(parsed[1]!)) return null;
+        environmentKeys.add(parsed[1]!);
+        if (parsed[1]!.startsWith('PYTHON')) pythonEnvironmentKeys.push(parsed[1]!);
+      }
+      if (lines[index] !== '\t}') return null;
+      continue;
+    }
     if (field[2]!.endsWith('{')) nestedBlocks += 1;
     if (['path', 'type', 'program', 'state', 'pid'].includes(key)) { if (fields.has(key)) return null; fields.set(key, field[2]!); }
   }
@@ -137,7 +168,7 @@ export function parseLoadedJob(stdout: string, requestedLabel: string, requested
   const state = fields.get('state');
   const pidText = fields.get('pid'); const pid = pidText === undefined ? null : /^\d+$/.test(pidText) ? Number(pidText) : null;
   if (!closed || path === undefined || type !== 'LaunchAgent' || program === undefined || state === undefined || parsedArguments === null || (pidText !== undefined && (pid === null || !Number.isSafeInteger(pid)))) return null;
-  return { label: requestedLabel, path, type, program, state, pid, arguments: parsedArguments };
+  return { label: requestedLabel, path, type, program, state, pid, arguments: parsedArguments, workingDirectory, pythonEnvironmentKeys };
 }
 
 /** Read a loaded domain through the accepted bounded argv-only transport. */
