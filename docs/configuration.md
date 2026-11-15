@@ -1202,8 +1202,9 @@ The source holds only SHA-256 pins of the approved hosts
 (`src/core/protected-delivery-pins.ts`), so the real host comes from this
 private file, and startup fails for any other host. Each adapter fixes its HTTPS target,
 resource, principal, and action at startup. A password adapter also fixes a
-username; a token adapter omits `username`; an MFA adapter supplies both
-`username` and the consumer's fixed `operationId`. Runtime rows, agent tools,
+username; a token adapter omits `username`; an MFA adapter supplies `username`
+and either the consumer's fixed `operationId` (legacy static mode) or
+`operationMode: "links_registered"` (the paired mode below). Runtime rows, agent tools,
 and model input cannot select a destination, command, account, or operation.
 
 For a fixed two-step account, a password adapter may instead use the exact

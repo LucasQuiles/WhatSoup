@@ -3159,7 +3159,11 @@ Legacy completions and unknown outcomes return null; never infer completion from
 `inputState: succeeded`. Links owns this durable result. WhatSoup refreshes it after
 restart and fails the status request if Links is unavailable, without a local
 completion fallback. Deploy the additive Links completion contract before an
-upgraded consumer, since the old endpoint rejects the new result field.
+upgraded consumer, since the old endpoint rejects the new result field. The
+order also holds in reverse: roll the consumer back before rolling Links back
+to an endpoint without that contract. Otherwise Links refuses each completion
+that carries a result, the consumer marks that intake `ambiguous`, and the
+result is not recorded.
 On restart, an intake left in `resolving` becomes locally `ambiguous` and is never
 replayed; pending intakes are not sent by maintenance recovery.
 The daily unified database-retention transaction deletes protected-delivery
