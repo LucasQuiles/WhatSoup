@@ -198,6 +198,7 @@ export async function handleConfigUpdate(
           mode: 'patch',
           ...(portInventory ? { existingHealthPorts: portInventory.ports } : {}),
           originalType: existing.type,
+          filesystem: { homeDirectory: os.homedir() },
         });
         if (validationError) {
           emitValidationError(validationError, res);

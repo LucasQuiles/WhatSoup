@@ -25,6 +25,7 @@ import type { M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
 import type { SessionContext } from '../../mcp/types.ts';
 import type { SessionTokenLease } from '../../mcp/caller-attribution.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
+import { resolveAgentInstructionsPath } from '../../core/agent-instructions-path.ts';
 import { createChildLogger } from '../../logger.ts';
 import { MS_PER_HOUR } from '../../lib/time-units.ts';
 import {
@@ -1307,7 +1308,12 @@ export class SessionManager {
     }
 
     if (this.instructionsPath) {
-      const fullInstructionsPath = join(cwd, this.instructionsPath);
+      // Resolve exactly as config load validated it: an absolute path stays absolute.
+      const fullInstructionsPath = resolveAgentInstructionsPath({
+        instructionsPath: this.instructionsPath,
+        cwd,
+        homeDirectory: homedir(),
+      });
       let instructionsContent: string;
       try {
         instructionsContent = readFileSync(fullInstructionsPath, 'utf8');
