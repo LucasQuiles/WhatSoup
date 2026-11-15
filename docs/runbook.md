@@ -3194,6 +3194,26 @@ perform these exact operations:
   to the configured challenge target. The request must match the live,
   consumer-registered challenge; this worker neither creates nor extends one.
 
+A fixed password precursor may use action `Verify password for two-step sign-in` and a
+configured `mfaTransition` pair. Its direct fixed HTTPS source returns a
+strictly bound `202` response only after accepting the password and creating
+the source-side MFA operation. The consumer validates the echoed intake ID,
+principal, account, paired resource, operation ID, and clipped deadline, then
+uses the consumer bearer to register the existing Links challenge. The paired
+MFA adapter uses `operationMode: "links_registered"`; Links supplies its
+operation ID only when the exact MFA intake is consumed. A password `202` is
+not a completed account sign-in. Registered-mode MFA cannot run without its
+one configured password pair. The fixed MFA target alone performs the account
+action after an accepted code.
+
+Do not configure a store for this password precursor or any MFA adapter. If
+the source response, Links registration, target request, completion, or
+restart is uncertain, the worker marks that intake ambiguous and does not
+repeat the password source or MFA target request. A registered challenge may
+expire; inspect the fixed account source before any operator-directed recovery.
+The Links `accountLabel` for either paired resource must equal the configured
+pair account; a changed label is rejected before consume.
+
 The consumer verifies the returned intake ID, resource, principal, kind,
 action, and MFA operation ID before an adapter receives a value. It reports
 success or failure with the returned receipt. A transport or consumer failure,

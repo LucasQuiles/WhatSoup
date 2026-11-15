@@ -176,6 +176,32 @@ describe('fixed token and MFA HTTP adapters', () => {
     ]);
   });
 
+  it('uses an operation only when the registered MFA consumer supplies it from Links', async () => {
+    const received: CapturedRequest[] = [];
+    const fixture = await localHttpFixture(async (request, response) => {
+      received.push(await capture(request));
+      response.writeHead(204).end();
+    });
+    const requested: URL[] = [];
+    const adapter = createFixedHttpMfaAdapter({
+      resourceId: 'fixed-mfa-resource', principal: 'fixed-principal', action: 'confirm_mfa',
+      endpoint: 'https://fixed-target.invalid/mfa', username: 'fixed-username', operationMode: 'links_registered',
+      fetch: httpsFixtureSeam(fixture.origin, requested),
+    } as unknown as Parameters<typeof createFixedHttpMfaAdapter>[0]);
+
+    await expect(adapter.execute({ value: MFA_CODE, kind: 'mfa', saveStore: null, operationId: 'live-source-operation' }))
+      .resolves.toBe('succeeded');
+    await expect(adapter.execute({ value: MFA_CODE, kind: 'mfa', saveStore: null }))
+      .rejects.toThrow('fixed MFA outcome is ambiguous');
+
+    expect(adapter).toMatchObject({ kinds: ['mfa'], acceptsRegisteredMfa: true, approvedSaveStore: null });
+    expect(adapter.mfaOperationId).toBeUndefined();
+    expect(requested.map(String)).toEqual(['https://fixed-target.invalid/mfa']);
+    expect(JSON.parse(received[0]?.body ?? '{}')).toEqual({
+      username: 'fixed-username', code: MFA_CODE, operationId: 'live-source-operation',
+    });
+  });
+
   it('rejects untrusted endpoints, unregistered store scope, and unknown configuration keys without echoing a value', () => {
     const fetch: FetchLike = async () => new Response(null, { status: 204 });
     const scopedElsewhere = createServiceOwnedCredentialStore({

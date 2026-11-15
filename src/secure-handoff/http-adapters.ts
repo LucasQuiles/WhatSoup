@@ -20,7 +20,7 @@ type FixedHttpTokenOptions = {
   fetch?: FetchLike;
 };
 
-type FixedHttpMfaOptions = {
+type FixedHttpMfaStaticOptions = {
   resourceId: string;
   principal: string;
   action: string;
@@ -30,10 +30,24 @@ type FixedHttpMfaOptions = {
   fetch?: FetchLike;
 };
 
+type FixedHttpMfaRegisteredOptions = {
+  resourceId: string;
+  principal: string;
+  action: string;
+  endpoint: string;
+  username: string;
+  operationMode: 'links_registered';
+  fetch?: FetchLike;
+};
+
+type FixedHttpMfaOptions = FixedHttpMfaStaticOptions | FixedHttpMfaRegisteredOptions;
+
 type ExecutionInput = {
   value: string;
   kind: ConsumerKind;
   saveStore: string | null;
+  intakeId?: string;
+  operationId?: string | null;
 };
 
 /** A registered fixed token validation operation with no caller-selected target. */
@@ -85,7 +99,9 @@ export function createFixedHttpMfaAdapter(options: FixedHttpMfaOptions): FixedCo
   if (!isFixedHttpMfaOptions(options)) throw new Error('fixed MFA adapter is invalid');
   const endpoint = trustedEndpoint(options.endpoint);
   if (!endpoint) throw new Error('fixed MFA adapter is invalid');
-  const { resourceId, principal, action, username, mfaOperationId } = options;
+  const { resourceId, principal, action, username } = options;
+  const mfaOperationId = 'mfaOperationId' in options ? options.mfaOperationId : undefined;
+  const registeredOperation = 'operationMode' in options;
   const fetchFn = options.fetch ?? fetch;
 
   return Object.freeze({
@@ -93,10 +109,12 @@ export function createFixedHttpMfaAdapter(options: FixedHttpMfaOptions): FixedCo
     principal,
     action,
     kinds: Object.freeze(['mfa'] as const),
-    mfaOperationId,
+    ...(mfaOperationId === undefined ? { acceptsRegisteredMfa: true as const } : { mfaOperationId }),
     approvedSaveStore: null,
     async execute(input: ExecutionInput) {
       if (!validExecution(input, 'mfa', null)) throw ambiguous('MFA');
+      const operationId = registeredOperation ? input.operationId : mfaOperationId;
+      if (!validOperationId(operationId)) throw ambiguous('MFA');
       try {
         const response = await fetchFn(endpoint, {
           method: 'POST',
@@ -105,7 +123,7 @@ export function createFixedHttpMfaAdapter(options: FixedHttpMfaOptions): FixedCo
             'Content-Type': 'application/json',
             'Cache-Control': 'no-store',
           },
-          body: JSON.stringify({ username, code: input.value, operationId: mfaOperationId }),
+          body: JSON.stringify({ username, code: input.value, operationId }),
           redirect: 'error',
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
@@ -132,13 +150,14 @@ function isFixedHttpTokenOptions(value: unknown): value is FixedHttpTokenOptions
 }
 
 function isFixedHttpMfaOptions(value: unknown): value is FixedHttpMfaOptions {
-  return (isRecord(value)
-    && (exactKeys(value, ['resourceId', 'principal', 'action', 'endpoint', 'username', 'mfaOperationId'])
-      || exactKeys(value, ['resourceId', 'principal', 'action', 'endpoint', 'username', 'mfaOperationId', 'fetch'])))
-    && validCommonOptions(value)
-    && validText(value.username)
-    && validOperationId(value.mfaOperationId)
-    && (value.fetch === undefined || typeof value.fetch === 'function');
+  if (!isRecord(value) || !validCommonOptions(value) || !validText(value.username)
+    || (value.fetch !== undefined && typeof value.fetch !== 'function')) return false;
+  if ((exactKeys(value, ['resourceId', 'principal', 'action', 'endpoint', 'username', 'mfaOperationId'])
+    || exactKeys(value, ['resourceId', 'principal', 'action', 'endpoint', 'username', 'mfaOperationId', 'fetch']))
+    && validOperationId(value.mfaOperationId)) return true;
+  return (exactKeys(value, ['resourceId', 'principal', 'action', 'endpoint', 'username', 'operationMode'])
+    || exactKeys(value, ['resourceId', 'principal', 'action', 'endpoint', 'username', 'operationMode', 'fetch']))
+    && value.operationMode === 'links_registered';
 }
 
 function validCommonOptions(value: Record<string, unknown>): boolean {
@@ -170,10 +189,15 @@ function validExecution(
   approvedSaveStore: string | null,
 ): value is ExecutionInput {
   return isRecord(value)
-    && exactKeys(value, ['value', 'kind', 'saveStore'])
+    && (exactKeys(value, ['value', 'kind', 'saveStore'])
+      || exactKeys(value, ['value', 'kind', 'saveStore', 'operationId'])
+      || exactKeys(value, ['value', 'kind', 'saveStore', 'intakeId'])
+      || exactKeys(value, ['value', 'kind', 'saveStore', 'intakeId', 'operationId']))
     && value.kind === kind
     && typeof value.value === 'string' && value.value.length > 0 && value.value.length <= MAX_CREDENTIAL_LENGTH
-    && (value.saveStore === null || value.saveStore === approvedSaveStore);
+    && (value.saveStore === null || value.saveStore === approvedSaveStore)
+    && (value.intakeId === undefined || validText(value.intakeId))
+    && (value.operationId === undefined || value.operationId === null || validOperationId(value.operationId));
 }
 
 function validText(value: unknown): value is string {

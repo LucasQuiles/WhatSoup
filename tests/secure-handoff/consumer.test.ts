@@ -1,11 +1,17 @@
 import { createServer } from 'node:http';
+import { createServer as createHttpsServer, request as httpsRequest } from 'node:https';
 import { once } from 'node:events';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createFixedHttpLoginAdapter,
   FixedIntakeConsumer,
   type FixedConsumerAdapter,
 } from '../../src/secure-handoff/consumer.ts';
+import { createFixedHttpMfaAdapter } from '../../src/secure-handoff/http-adapters.ts';
 import {
   createFixedHttpCredentialStore,
   createServiceOwnedCredentialStore,
@@ -15,6 +21,8 @@ import {
 const INTAKE_ID = 'I'.repeat(22);
 const RECEIPT = 'R'.repeat(43);
 const SECRET = 'dummy-password-that-must-not-leave-the-consumer';
+const MFA_INTAKE_ID = 'M'.repeat(22);
+const MFA_CODE = 'dummy-mfa-code';
 
 type FetchCall = { url: string; init: RequestInit };
 
@@ -37,14 +45,100 @@ function consumed(overrides: Record<string, unknown> = {}): Record<string, unkno
   };
 }
 
+function sourceChallenge(): Record<string, unknown> {
+  return {
+    parentIntakeId: INTAKE_ID,
+    principal: 'alice',
+    account: 'dummy-account',
+    resourceId: 'dummy-mfa',
+    operationId: 'source-operation-1',
+    expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+  };
+}
+
 const servers: Array<ReturnType<typeof createServer>> = [];
+const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map(async (server) => {
     server.close();
     await once(server, 'close');
   }));
+  for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
+
+async function tlsLoginFixture(): Promise<{
+  endpoint: string;
+  fetch: typeof globalThis.fetch;
+  signIns: () => number;
+  passwordStarts: () => number;
+}> {
+  const directory = mkdtempSync(join(tmpdir(), 'secure-handoff-tls-'));
+  temporaryDirectories.push(directory);
+  const keyPath = join(directory, 'key.pem');
+  const certPath = join(directory, 'cert.pem');
+  execFileSync('/usr/bin/openssl', [
+    'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=localhost',
+    '-addext', 'subjectAltName=DNS:localhost', '-keyout', keyPath, '-out', certPath,
+  ], { stdio: 'ignore' });
+  const certificate = readFileSync(certPath);
+  let starts = 0;
+  let signIns = 0;
+  const server = createHttpsServer({ key: readFileSync(keyPath), cert: certificate }, async (request, response) => {
+    const captured: string[] = [];
+    request.setEncoding('utf8');
+    for await (const chunk of request) captured.push(chunk);
+    const payload = JSON.parse(captured.join('')) as Record<string, unknown>;
+    if (request.method === 'POST' && request.url === '/password' && payload.username === 'dummy-user' && payload.password === SECRET) {
+      starts++;
+      response.writeHead(202, { 'content-type': 'application/json' }).end(JSON.stringify({
+        parentIntakeId: INTAKE_ID, principal: 'alice', account: 'dummy-account', resourceId: 'dummy-mfa',
+        operationId: 'tls-source-operation', expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+      }));
+      return;
+    }
+    if (request.method === 'POST' && request.url === '/mfa'
+      && payload.username === 'dummy-user' && payload.code === MFA_CODE && payload.operationId === 'tls-source-operation') {
+      signIns++;
+      response.writeHead(204).end();
+      return;
+    }
+    response.writeHead(403).end();
+  });
+  servers.push(server as unknown as ReturnType<typeof createServer>);
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('TLS fixture did not bind TCP');
+  const endpoint = `https://localhost:${address.port}`;
+  const scopedFetch: typeof globalThis.fetch = async (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : input instanceof URL ? input : input.toString());
+    return await new Promise<Response>((resolve, reject) => {
+      const request = httpsRequest(url, {
+        method: init?.method,
+        headers: init?.headers === undefined ? undefined : Object.fromEntries(new Headers(init.headers).entries()),
+        ca: certificate, servername: 'localhost', rejectUnauthorized: true,
+      }, (response) => {
+        const chunks: Buffer[] = [];
+        response.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+        response.on('end', () => {
+          const bytes = Buffer.concat(chunks);
+          const headers = new Headers();
+          for (const [name, value] of Object.entries(response.headers)) {
+            if (typeof value === 'string') headers.set(name, value);
+          }
+          resolve(new Response([204, 205, 304].includes(response.statusCode ?? 0) ? null : bytes, {
+            status: response.statusCode ?? 500, headers,
+          }));
+        });
+      });
+      request.once('error', reject);
+      if (typeof init?.body === 'string') request.end(init.body);
+      else request.end();
+    });
+  };
+  return { endpoint, fetch: scopedFetch, signIns: () => signIns, passwordStarts: () => starts };
+}
 
 async function loginFixture(): Promise<{ endpoint: string; accepted: Array<Record<string, unknown>> }> {
   const accepted: Array<Record<string, unknown>> = [];
@@ -445,7 +539,9 @@ describe('fixed intake consumer', () => {
     });
 
     await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-login' })).resolves.toEqual({ id: INTAKE_ID, state: 'succeeded' });
-    expect(inputs).toEqual([{ value: SECRET, kind: 'password', saveStore: 'registered-store' }]);
+    expect(inputs).toEqual([{
+      value: SECRET, kind: 'password', saveStore: 'registered-store', intakeId: INTAKE_ID, operationId: null,
+    }]);
   });
 
   it('preserves an adapter timeout as ambiguous and never re-consumes on retry', async () => {
@@ -580,7 +676,9 @@ describe('fixed intake consumer', () => {
     });
 
     await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-login' })).resolves.toEqual({ id: INTAKE_ID, state: 'succeeded' });
-    expect(inputs).toEqual([{ value: SECRET, kind: 'mfa', saveStore: null }]);
+    expect(inputs).toEqual([{
+      value: SECRET, kind: 'mfa', saveStore: null, intakeId: INTAKE_ID, operationId: challengeId,
+    }]);
   });
 
   it('marks MFA save consent ambiguous even when the registered challenge job matches', async () => {
@@ -632,6 +730,265 @@ describe('fixed intake consumer', () => {
       resourceId: 'dummy-login', principal: 'alice', action: 'sign_in',
       endpoint: 'https://user:password@fixed-dummy.invalid/login', username: 'dummy-user',
     })).toThrow('fixed HTTP login adapter is invalid');
+  });
+
+  it('registers only the source-bound MFA challenge before settling the fixed password precursor', async () => {
+    const canonicalExpiresAt = new Date(Date.now() + 5 * 60_000).toISOString();
+    const sourceExpiresAt = canonicalExpiresAt.replace('Z', '+00:00');
+    const sourceCalls: Array<Record<string, unknown>> = [];
+    const adapter = createFixedHttpLoginAdapter({
+      resourceId: 'dummy-password', principal: 'alice', action: 'Verify password for two-step sign-in',
+      endpoint: 'https://fixed-dummy.invalid/password', username: 'dummy-user',
+      mfaTransition: { resourceId: 'dummy-mfa', account: 'dummy-account' },
+      fetch: async (_url, init) => {
+        sourceCalls.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return json({
+          parentIntakeId: INTAKE_ID, principal: 'alice', account: 'dummy-account', resourceId: 'dummy-mfa',
+          operationId: 'source-step-1', expiresAt: sourceExpiresAt,
+        }, 202);
+      },
+    });
+    const calls: Array<{ url: string; method: string; body: string | undefined; authorization: string | null }> = [];
+    const consumer = new FixedIntakeConsumer({
+      baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token', adapters: [adapter],
+      fetch: async (url, init) => {
+        calls.push({
+          url: String(url), method: init?.method ?? 'GET', body: typeof init?.body === 'string' ? init.body : undefined,
+          authorization: new Headers(init?.headers).get('authorization'),
+        });
+        if (String(url).endsWith('/consume')) {
+          return json(consumed({ resourceId: 'dummy-password', action: 'Verify password for two-step sign-in' }));
+        }
+        if (String(url).endsWith('/resources/dummy-mfa/challenges')) {
+          return json({ id: 'C'.repeat(22), resourceId: 'dummy-mfa', operationId: 'source-step-1', expiresAt: canonicalExpiresAt, state: 'open' }, 201);
+        }
+        if (String(url).endsWith('/complete')) return json({ id: INTAKE_ID, state: 'succeeded' });
+        throw new Error('unexpected Links route');
+      },
+    });
+
+    await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-password' }))
+      .resolves.toEqual({ id: INTAKE_ID, state: 'succeeded' });
+
+    expect(sourceCalls).toEqual([{ username: 'dummy-user', password: SECRET, intakeId: INTAKE_ID }]);
+    expect(calls).toEqual([
+      expect.objectContaining({ method: 'POST', url: expect.stringMatching(/\/intakes\/.+\/consume$/), authorization: 'Bearer consumer-only-token' }),
+      expect.objectContaining({
+        method: 'POST', url: 'https://links.example.test/s/api/v1/resources/dummy-mfa/challenges', authorization: 'Bearer consumer-only-token',
+        body: JSON.stringify({ principal: 'alice', operationId: 'source-step-1', expiresAt: canonicalExpiresAt }),
+      }),
+      expect.objectContaining({ method: 'POST', url: expect.stringMatching(/\/intakes\/.+\/complete$/), authorization: 'Bearer consumer-only-token' }),
+    ]);
+  });
+
+  it('uses a locally trusted TLS source 202 without signing in, then signs in exactly once after the registered MFA code', async () => {
+    const target = await tlsLoginFixture();
+    let expiresAt = '';
+    const password = createFixedHttpLoginAdapter({
+      resourceId: 'dummy-password', principal: 'alice', action: 'Verify password for two-step sign-in',
+      endpoint: `${target.endpoint}/password`, username: 'dummy-user',
+      mfaTransition: { resourceId: 'dummy-mfa', account: 'dummy-account' }, fetch: target.fetch,
+    });
+    const mfa = createFixedHttpMfaAdapter({
+      resourceId: 'dummy-mfa', principal: 'alice', action: 'confirm_mfa', endpoint: `${target.endpoint}/mfa`,
+      username: 'dummy-user', operationMode: 'links_registered', fetch: target.fetch,
+    });
+    const consumer = new FixedIntakeConsumer({
+      baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token', adapters: [password, mfa],
+      fetch: async (url, init) => {
+        const targetUrl = String(url);
+        if (targetUrl.endsWith(`/intakes/${INTAKE_ID}/consume`)) {
+          return json(consumed({ resourceId: 'dummy-password', action: 'Verify password for two-step sign-in' }));
+        }
+        if (targetUrl.endsWith(`/intakes/${MFA_INTAKE_ID}/consume`)) {
+          return json(consumed({
+            id: MFA_INTAKE_ID, resourceId: 'dummy-mfa', kind: 'mfa', action: 'confirm_mfa',
+            operationId: 'tls-source-operation', value: MFA_CODE, receipt: 'Z'.repeat(43),
+          }));
+        }
+        if (targetUrl.endsWith('/resources/dummy-mfa/challenges')) {
+          const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          expiresAt = String(request.expiresAt);
+          return json({ id: 'C'.repeat(22), resourceId: 'dummy-mfa', operationId: 'tls-source-operation', expiresAt, state: 'open' }, 201);
+        }
+        if (targetUrl.endsWith(`/intakes/${INTAKE_ID}/complete`)) return json({ id: INTAKE_ID, state: 'succeeded' });
+        if (targetUrl.endsWith(`/intakes/${MFA_INTAKE_ID}/complete`)) return json({ id: MFA_INTAKE_ID, state: 'succeeded' });
+        throw new Error('unexpected Links route');
+      },
+    });
+
+    await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-password' }))
+      .resolves.toEqual({ id: INTAKE_ID, state: 'succeeded' });
+    expect(target.passwordStarts()).toBe(1);
+    expect(target.signIns()).toBe(0);
+
+    await expect(consumer.execute({ intakeId: MFA_INTAKE_ID, resourceId: 'dummy-mfa' }))
+      .resolves.toEqual({ id: MFA_INTAKE_ID, state: 'succeeded' });
+    expect(target.signIns()).toBe(1);
+  });
+
+  it('marks a mismatched source challenge ambiguous without registering it or replaying the password source', async () => {
+    let sourceCalls = 0;
+    const linksCalls: string[] = [];
+    const adapter = createFixedHttpLoginAdapter({
+      resourceId: 'dummy-password', principal: 'alice', action: 'Verify password for two-step sign-in',
+      endpoint: 'https://fixed-dummy.invalid/password', username: 'dummy-user',
+      mfaTransition: { resourceId: 'dummy-mfa', account: 'dummy-account' },
+      fetch: async () => {
+        sourceCalls++;
+        return json({
+          parentIntakeId: INTAKE_ID, principal: 'alice', account: 'wrong-account', resourceId: 'dummy-mfa',
+          operationId: 'source-operation-1', expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+        }, 202);
+      },
+    });
+    const consumer = new FixedIntakeConsumer({
+      baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token', adapters: [adapter],
+      fetch: async (url) => {
+        linksCalls.push(String(url));
+        if (String(url).endsWith('/consume')) return json(consumed({ resourceId: 'dummy-password', action: 'Verify password for two-step sign-in' }));
+        if (String(url).endsWith('/ambiguous')) return json({ id: INTAKE_ID, state: 'ambiguous' });
+        throw new Error('source mismatch must not register or complete');
+      },
+    });
+
+    await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-password' }))
+      .resolves.toEqual({ id: INTAKE_ID, state: 'ambiguous' });
+    await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-password' }))
+      .resolves.toEqual({ id: INTAKE_ID, state: 'ambiguous' });
+
+    expect(sourceCalls).toBe(1);
+    expect(linksCalls.map((url) => new URL(url).pathname)).toEqual([
+      `/s/api/v1/intakes/${INTAKE_ID}/consume`, `/s/api/v1/intakes/${INTAKE_ID}/ambiguous`,
+    ]);
+  });
+
+  it.each([
+    ['parent intake ID', { parentIntakeId: 'P'.repeat(22) }],
+    ['principal', { principal: 'mallory' }],
+    ['MFA resource', { resourceId: 'other-mfa' }],
+    ['expired deadline', { expiresAt: new Date(Date.now() - 1_000).toISOString() }],
+    ['deadline beyond ten minutes', { expiresAt: new Date(Date.now() + 11 * 60_000).toISOString() }],
+  ])('rejects a source 202 with a changed %s before challenge registration', async (_field, changed) => {
+    let sourceCalls = 0;
+    const linksCalls: string[] = [];
+    const adapter = createFixedHttpLoginAdapter({
+      resourceId: 'dummy-password', principal: 'alice', action: 'Verify password for two-step sign-in',
+      endpoint: 'https://fixed-dummy.invalid/password', username: 'dummy-user',
+      mfaTransition: { resourceId: 'dummy-mfa', account: 'dummy-account' },
+      fetch: async () => {
+        sourceCalls++;
+        return json({
+          parentIntakeId: INTAKE_ID, principal: 'alice', account: 'dummy-account', resourceId: 'dummy-mfa',
+          operationId: 'source-operation-1', expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(), ...changed,
+        }, 202);
+      },
+    });
+    const consumer = new FixedIntakeConsumer({
+      baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token', adapters: [adapter],
+      fetch: async (url) => {
+        linksCalls.push(String(url));
+        if (String(url).endsWith('/consume')) return json(consumed({ resourceId: 'dummy-password', action: 'Verify password for two-step sign-in' }));
+        if (String(url).endsWith('/ambiguous')) return json({ id: INTAKE_ID, state: 'ambiguous' });
+        throw new Error('invalid source binding must not register or complete');
+      },
+    });
+
+    await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-password' }))
+      .resolves.toEqual({ id: INTAKE_ID, state: 'ambiguous' });
+    await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-password' }))
+      .resolves.toEqual({ id: INTAKE_ID, state: 'ambiguous' });
+
+    expect(sourceCalls).toBe(1);
+    expect(linksCalls.map((url) => new URL(url).pathname)).toEqual([
+      `/s/api/v1/intakes/${INTAKE_ID}/consume`, `/s/api/v1/intakes/${INTAKE_ID}/ambiguous`,
+    ]);
+  });
+
+  it.each([
+    ['malformed JSON', () => new Response('{not-json', { status: 202, headers: { 'content-type': 'application/json' } })],
+    ['missing field', () => {
+      const { operationId: _operationId, ...withoutOperationId } = sourceChallenge();
+      return json(withoutOperationId, 202);
+    }],
+    ['extra field', () => json({ ...sourceChallenge(), unexpected: true }, 202)],
+    ['invalid operation ID', () => json({ ...sourceChallenge(), operationId: 'source-operation\n1' }, 202)],
+  ])('does not register, save, complete, or replay a malformed source 202: %s', async (_case, sourceResponse) => {
+    let sourceCalls = 0;
+    let challengeRegistrations = 0;
+    let completions = 0;
+    const linksCalls: string[] = [];
+    const adapter = createFixedHttpLoginAdapter({
+      resourceId: 'dummy-password', principal: 'alice', action: 'Verify password for two-step sign-in',
+      endpoint: 'https://fixed-dummy.invalid/password', username: 'dummy-user',
+      mfaTransition: { resourceId: 'dummy-mfa', account: 'dummy-account' },
+      fetch: async () => {
+        sourceCalls++;
+        return sourceResponse();
+      },
+    });
+    const consumer = new FixedIntakeConsumer({
+      baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token', adapters: [adapter],
+      fetch: async (url) => {
+        linksCalls.push(String(url));
+        if (String(url).endsWith('/consume')) return json(consumed({ resourceId: 'dummy-password', action: 'Verify password for two-step sign-in' }));
+        if (String(url).endsWith('/challenges')) challengeRegistrations++;
+        if (String(url).endsWith('/complete')) completions++;
+        if (String(url).endsWith('/ambiguous')) return json({ id: INTAKE_ID, state: 'ambiguous' });
+        throw new Error('malformed source response must not register or complete');
+      },
+    });
+
+    await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-password' }))
+      .resolves.toEqual({ id: INTAKE_ID, state: 'ambiguous' });
+    await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-password' }))
+      .resolves.toEqual({ id: INTAKE_ID, state: 'ambiguous' });
+
+    expect(adapter.approvedSaveStore).toBeNull();
+    expect(sourceCalls).toBe(1);
+    expect(challengeRegistrations).toBe(0);
+    expect(completions).toBe(0);
+    expect(linksCalls.map((url) => new URL(url).pathname)).toEqual([
+      `/s/api/v1/intakes/${INTAKE_ID}/consume`, `/s/api/v1/intakes/${INTAKE_ID}/ambiguous`,
+    ]);
+  });
+
+  it('does not replay a password source after uncertain MFA registration', async () => {
+    let sourceCalls = 0;
+    const linksCalls: string[] = [];
+    const adapter = createFixedHttpLoginAdapter({
+      resourceId: 'dummy-password', principal: 'alice', action: 'Verify password for two-step sign-in',
+      endpoint: 'https://fixed-dummy.invalid/password', username: 'dummy-user',
+      mfaTransition: { resourceId: 'dummy-mfa', account: 'dummy-account' },
+      fetch: async () => {
+        sourceCalls++;
+        return json({
+          parentIntakeId: INTAKE_ID, principal: 'alice', account: 'dummy-account', resourceId: 'dummy-mfa',
+          operationId: 'source-operation-1', expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+        }, 202);
+      },
+    });
+    const consumer = new FixedIntakeConsumer({
+      baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token', adapters: [adapter],
+      fetch: async (url) => {
+        linksCalls.push(String(url));
+        if (String(url).endsWith('/consume')) return json(consumed({ resourceId: 'dummy-password', action: 'Verify password for two-step sign-in' }));
+        if (String(url).endsWith('/challenges')) return json({ error: 'unavailable' }, 503);
+        if (String(url).endsWith('/ambiguous')) return json({ id: INTAKE_ID, state: 'ambiguous' });
+        throw new Error('uncertain registration must not complete');
+      },
+    });
+
+    await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-password' }))
+      .resolves.toEqual({ id: INTAKE_ID, state: 'ambiguous' });
+    await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-password' }))
+      .resolves.toEqual({ id: INTAKE_ID, state: 'ambiguous' });
+
+    expect(sourceCalls).toBe(1);
+    expect(linksCalls.map((url) => new URL(url).pathname)).toEqual([
+      `/s/api/v1/intakes/${INTAKE_ID}/consume`, '/s/api/v1/resources/dummy-mfa/challenges',
+      `/s/api/v1/intakes/${INTAKE_ID}/ambiguous`,
+    ]);
   });
 
   it('only registers password login and rejects an unsupported save configuration', () => {
