@@ -3716,6 +3716,19 @@ and unresolved LID identities are rejected. Results contain metadata only: a
 delivery reference, identifier, state, and expiry where applicable. They never
 return a RustDesk code, browser URL, seed, or credential.
 
+This managed-input boundary does not prohibit authorized browser logins,
+registration, existing authenticated sessions, or credential helpers that consume
+saved secrets internally without returning them to the model. Resource discovery
+does not categorically forbid authorized token creation or storage
+inside a tool or service; account, permissions and storage consent must be known.
+Missing resource discovery blocks that managed request, not the whole account workflow. Inspect
+the existing integration and complete authorized setup before collecting input;
+recipient binding, consent, tool scope and secret-read denials still apply.
+The agent performs technical steps itself. WhatsApp users receive only decisions
+or human-required phone steps, never terminal commands or instructions to operate
+the agent's browser. An actual site rejection must be reported as the observed
+attempt result, not a general inability to automate authentication.
+
 ### list_secret_input_resources
 
 Lists metadata for enabled managed resources authorized to the caller's resolved

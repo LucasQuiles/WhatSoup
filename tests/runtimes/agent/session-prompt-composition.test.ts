@@ -13,7 +13,7 @@ import type { ProtectedDeliveryService } from '../../../src/core/protected-deliv
 import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 
 const CHAT_JID = 'test@s.whatsapp.net';
-const BASE_TRANSPORT_PROMPT_BYTES = 1870;
+const BASE_TRANSPORT_PROMPT_BYTES = 3900;
 
 const tmp = trackTmpDirs('');
 
@@ -175,6 +175,24 @@ describe('SessionManager system prompt composition', () => {
     expect(prompt).toContain('Never say work is dispatched or running unless the dispatching tool call happened in the same turn');
   });
 
+  it('keeps authorized execution with the agent in every WhatsApp provider and secret-service mode', () => {
+    for (const provider of ['claude-cli', 'codex-cli', 'opencode-cli', 'openai-api'] as const) {
+      for (const protectedDeliveryService of [undefined, {} as ProtectedDeliveryService]) {
+        const prompt = new SessionManager({
+          db: makeDb(), messenger: makeMessenger(), chatJid: CHAT_JID,
+          onEvent: () => undefined, cwd: '/mock/home', provider, protectedDeliveryService,
+        }).buildSystemPrompt();
+        expect(prompt).toContain('Never ask a WhatsApp user to run terminal commands');
+        expect(prompt).toContain('Execute authorized technical steps yourself');
+        expect(prompt).toContain('check the available tools and existing integrations');
+        expect(prompt).toContain('Browser logins, registration and account setup are normal authorized tasks');
+        expect(prompt).toContain('A site error is evidence about that attempt, not a blanket ban');
+        expect(prompt).toContain('Do not bypass a denied operation or weaken a guard');
+        expect(prompt).toContain('Ask only for a missing decision, permission or genuinely human-only step');
+      }
+    }
+  });
+
   it('keeps the no-extra-instructions prompt within the recorded byte budget', () => {
     const sm = new SessionManager({
       db: makeDb(),
@@ -246,8 +264,13 @@ describe('SessionManager system prompt composition', () => {
       'If labels are ambiguous, ask the user which account they mean.',
       'metadata, never secret values',
       'Never ask the user to paste a secret into chat',
-      'do not read credential stores, use shell/browser workarounds',
-      'Unknown resource or unavailable adapter: report the operation is blocked.',
+      'never expose secret values in model context, chat, tool output or logs',
+      'Existing authorized credential helpers may consume saved credentials internally',
+      'Authorized credential creation and storage belong inside tools or services',
+      'Confirm the intended account, permissions and storage consent before acting.',
+      'An absent resource blocks that managed input request, not all account work.',
+      'configure the existing integration within that authorization',
+      'Do not bypass recipient binding, consent, tool scope or a secret-read denial',
       'Do not invent resource IDs, recipients, or destinations.',
       'Discovery does not prove a challenge exists or that login completed',
       'Input succeeded alone does not establish a completed operation.',
@@ -271,6 +294,8 @@ describe('SessionManager system prompt composition', () => {
       const availablePrompt = available.buildSystemPrompt();
       expect(disabledPrompt).not.toContain('Protected secret workflow:');
       for (const expected of policy) expect(availablePrompt).toContain(expected);
+      expect(availablePrompt).not.toContain('do not read credential stores, use shell/browser workarounds');
+      expect(availablePrompt).not.toContain('Unknown resource or unavailable adapter: report the operation is blocked.');
     }
   });
 
