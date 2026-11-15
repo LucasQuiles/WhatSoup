@@ -15,7 +15,7 @@ describe('migration 67 — protected delivery metadata', () => {
     db = new Database(':memory:');
     db.open();
 
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(67);
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(68);
     expect(db.raw.prepare('SELECT 1 AS ok FROM schema_migrations WHERE version = 67').get())
       .toEqual({ ok: 1 });
     const deliveryColumns = (db.raw.prepare("PRAGMA table_info('protected_deliveries')").all() as Array<{ name: string }>)

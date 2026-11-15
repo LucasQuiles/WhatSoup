@@ -69,6 +69,15 @@ describe('import-boundary-check', () => {
   // -------------------------------------------------------------------------
 
   describe('allowed edges', () => {
+    it('allows the standalone consumer to reuse core contracts and shared library primitives', () => {
+      createFixtureTree({
+        'src/lib/clock.ts': 'export const clock = {};\n',
+        'src/core/metadata.ts': 'export const metadata = {};\n',
+        'src/secure-handoff/worker.ts': "import { clock } from '../lib/clock.ts';\nimport { metadata } from '../core/metadata.ts';\n",
+      });
+      expect(findImportViolations(fixtureRoot)).toEqual([]);
+    });
+
     it('allows core → lib import', () => {
       createFixtureTree({
         'src/lib/util.ts': 'export function util() {}\n',
@@ -139,6 +148,29 @@ describe('import-boundary-check', () => {
   // -------------------------------------------------------------------------
 
   describe('forbidden edges', () => {
+    it.each(['static', 'dynamic'])('keeps %s consumer imports separate from transport, MCP, agent, and fleet layers', (mode) => {
+      const dependency = (name: string, target: string): string => mode === 'static'
+        ? `import { ${name} } from '${target}';` : `const ${name} = await import('${target}');`;
+      createFixtureTree({
+        'src/transport/connection.ts': 'export const connection = {};\n',
+        'src/mcp/server.ts': 'export const server = {};\n',
+        'src/runtimes/agent/runtime.ts': "import { consumer } from '../../secure-handoff/consumer.ts';\nexport const agent = {};\n",
+        'src/fleet/server.ts': 'export const fleet = {};\n',
+        'src/secure-handoff/consumer.ts': 'export const consumer = {};\n',
+        'src/secure-handoff/worker.ts': [
+          dependency('connection', '../transport/connection.ts'),
+          dependency('server', '../mcp/server.ts'),
+          dependency('agent', '../runtimes/agent/runtime.ts'),
+          dependency('fleet', '../fleet/server.ts'),
+        ].join('\n'),
+      });
+      const edges = findImportViolations(fixtureRoot).map((violation) => `${violation.fromLayer}->${violation.toLayer}`);
+      expect(edges.sort()).toEqual([
+        'runtimes->secure-handoff', 'secure-handoff->fleet', 'secure-handoff->mcp',
+        'secure-handoff->runtimes', 'secure-handoff->transport',
+      ]);
+    });
+
     it('blocks lib → core import and includes file:line in violation', () => {
       createFixtureTree({
         'src/core/db.ts': 'export function db() {}\n',

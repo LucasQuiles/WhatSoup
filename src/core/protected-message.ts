@@ -19,6 +19,7 @@ export { PROTECTED_MESSAGE_MARKER, PROTECTED_TEXT_WITHHELD_MARKER };
 // sanitizer can use it. The wrappers here take their default pins from this
 // ring's pins module, which is the module domain tests replace.
 const MANAGED_LINK_FRAGMENT = /^#v3\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/;
+const SECRET_INPUT_LINK_SECRET = /^[A-Za-z0-9_-]{43}$/;
 const MAX_SANITIZE_DEPTH = 64;
 /**
  * Objects and arrays visited per value; strings are scanned and not counted.
@@ -50,6 +51,35 @@ export function isCanonicalManagedLink(
   pins: ProtectedDeliveryPins = PROTECTED_DELIVERY_PINS,
   linkHosts?: readonly string[],
 ): boolean {
+  return isCanonicalPinnedLink(value, (fragment) => MANAGED_LINK_FRAGMENT.test(fragment), pins, linkHosts);
+}
+
+/**
+ * True only for the exact intake link the delivery service may send for
+ * intake `id`: `https://<pinned host>/s/#i1.<id>.<43>`, under the same host,
+ * port, credential and query rules as a managed link.
+ */
+export function isCanonicalSecretInputLink(
+  value: unknown,
+  id: string,
+  pins: ProtectedDeliveryPins = PROTECTED_DELIVERY_PINS,
+  linkHosts?: readonly string[],
+): value is string {
+  const prefix = `#i1.${id}.`;
+  return isCanonicalPinnedLink(
+    value,
+    (fragment) => fragment.startsWith(prefix) && SECRET_INPUT_LINK_SECRET.test(fragment.slice(prefix.length)),
+    pins,
+    linkHosts,
+  );
+}
+
+function isCanonicalPinnedLink(
+  value: unknown,
+  fragmentMatches: (fragment: string) => boolean,
+  pins: ProtectedDeliveryPins,
+  linkHosts: readonly string[] | undefined,
+): boolean {
   if (typeof value !== 'string') return false;
   let url: URL;
   try {
@@ -63,7 +93,7 @@ export function isCanonicalManagedLink(
   // The parsed parts must rebuild the input byte for byte, so case and port
   // spellings that the parser normalizes are still refused; the exact pin
   // check also refuses `www.` and trailing-dot spellings.
-  if (!MANAGED_LINK_FRAGMENT.test(url.hash) || value !== `https://${url.hostname}/s/${url.hash}`) return false;
+  if (!fragmentMatches(url.hash) || value !== `https://${url.hostname}/s/${url.hash}`) return false;
   // Configured link hosts can only narrow the pinned set, never widen it.
   if (linkHosts !== undefined && !linkHosts.includes(url.hostname)) return false;
   return isExactPinnedHost(url.hostname, pins.canonicalLinkHostSha256);
@@ -336,9 +366,18 @@ export function findProtectedMarkerPath(value: unknown): string | null {
  */
 export function isProtectedDeliveryMessage(db: Pick<Database, 'raw'>, messageId: string): boolean {
   try {
-    return Boolean(
+    if (Boolean(
       db.raw
         .prepare('SELECT 1 FROM protected_deliveries WHERE whatsapp_message_id = ? LIMIT 1')
+        .get(messageId),
+    )) return true;
+  } catch {
+    return false;
+  }
+  try {
+    return Boolean(
+      db.raw
+        .prepare('SELECT 1 FROM protected_secret_inputs WHERE whatsapp_message_id = ? LIMIT 1')
         .get(messageId),
     );
   } catch {

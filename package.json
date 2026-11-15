@@ -14,6 +14,7 @@
     "postinstall": "node patches/apply.mjs",
     "start": "bash scripts/run-with-pinned-node.sh src/main.ts",
     "start:instance": "bash scripts/run-with-pinned-node.sh src/bootstrap.ts",
+    "secure-handoff:consumer": "bash scripts/run-with-pinned-node.sh src/secure-handoff/worker-main.ts",
     "fleet": "bash scripts/run-with-pinned-node.sh src/fleet/standalone.ts 9099",
     "setup": "bash deploy/setup.sh",
     "doctor": "bash deploy/scripts/whatsoup-host-doctor.sh",

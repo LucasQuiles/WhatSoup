@@ -9,6 +9,7 @@ import { buildHandoffPrelude } from '../../../src/runtimes/agent/handoff-prelude
 import { countTrustedActorMarkers } from '../../../src/lib/trusted-actor-marker.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
+import type { ProtectedDeliveryService } from '../../../src/core/protected-delivery.ts';
 import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 
 const CHAT_JID = 'test@s.whatsapp.net';
@@ -226,6 +227,42 @@ describe('SessionManager system prompt composition', () => {
     });
 
     expect(smNoCallback.buildSystemPrompt()).toBe(smNullCallback.buildSystemPrompt());
+  });
+
+  it('routes protected-secret work only when the protected delivery service is available across provider seams', () => {
+    const base = {
+      db: makeDb(),
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: () => undefined,
+      cwd: '/mock/home',
+    } as const;
+    const policy = [
+      'Protected secret workflow:',
+      'request_secret_input',
+      'request_rustdesk_access',
+      'deliver_secret',
+      'metadata, never secret values',
+      'Never ask the user to paste a secret into chat',
+      'do not read credential stores, use shell/browser workarounds',
+      'Unknown resource or unavailable adapter: report the operation is blocked.',
+      'Do not invent resource IDs, recipients, or destinations.',
+      'metadata is not proof that a login completed',
+    ];
+
+    for (const provider of ['claude-cli', 'codex-cli', 'opencode-cli', 'openai-api'] as const) {
+      const disabled = new SessionManager({ ...base, provider });
+      const available = new SessionManager({
+        ...base,
+        provider,
+        protectedDeliveryService: {} as ProtectedDeliveryService,
+      });
+
+      const disabledPrompt = disabled.buildSystemPrompt();
+      const availablePrompt = available.buildSystemPrompt();
+      expect(disabledPrompt).not.toContain('Protected secret workflow:');
+      for (const expected of policy) expect(availablePrompt).toContain(expected);
+    }
   });
 
   // B9 gate reproducer: the prelude neutralises its summary, then line dedupe

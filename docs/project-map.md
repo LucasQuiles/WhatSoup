@@ -34,6 +34,7 @@ no-systemd fallback.
 | `src/runtimes/agent/` | Agent session lifecycle, providers, fallback, handoff distiller, polls, media bridge, response registry. | `docs/runbooks/error-response-workflows.md`, `docs/runbooks/agent-decision-polls.md` |
 | `src/runtimes/chat/` | Direct chat runtime, rate limits, context, queueing, provider integrations. | `docs/configuration.md` |
 | `src/memory/` | Memory consolidation scheduler and types. | `docs/explainers/byok-memory-config-migration.md` |
+| `src/secure-handoff/` | Separate administrator-run consumer process, fixed account adapters, and explicit-save stores. Direct imports may use `lib`, `core`, and the checker's existing root exception (currently `src/logger.ts`); direct agent, MCP, transport, and fleet imports are prohibited. This rule does not establish transitive or operating-system isolation. | `docs/configuration.md#secure-handoff-consumer-worker-pilot`, `docs/runbook.md#secure-handoff-consumer-worker-pilot` |
 | `src/fleet/` | HTTP API, health polling, realtime events, ops routes, credentials, update checks, console serving. | `README.md`, `docs/runbook.md`, `docs/public-surface.md` |
 | `console/src/` | Fleet console pages, primitives, design system usage, realtime hooks, API client. | `docs/console-guide.md`, `docs/design-system/README.md` |
 | `deploy/` | systemd units, launchd templates, bot-errors services, hooks, setup scripts. | `docs/runbook.md`, `docs/runbooks/macos-launchd-deployment.md` |

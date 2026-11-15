@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { CapabilityObligationStore } from '../../src/core/capability-obligation-store.ts';
 import { Database } from '../../src/core/database.ts';
+import { CURRENT_SCHEMA_MIGRATION } from '../../src/core/database-schema-version.ts';
 import { withTransaction } from '../../src/core/db-tx.ts';
 import {
   parseAdminArgs,
@@ -106,7 +107,7 @@ describe('schema guard', () => {
     const { io } = captureIo();
     expect(() =>
       runCapabilityObligationAdmin(parseAdminArgs(['list', '--db', dbPath]), io),
-    ).toThrow(/schema 44, expected 67/);
+    ).toThrow(new RegExp(`schema 44, expected ${CURRENT_SCHEMA_MIGRATION}`));
   });
 
   it('an absent schema_migrations table refuses cleanly as schema 0', () => {
@@ -117,7 +118,7 @@ describe('schema guard', () => {
     const { io } = captureIo();
     expect(() =>
       runCapabilityObligationAdmin(parseAdminArgs(['list', '--db', dbPath]), io),
-    ).toThrow(/schema 0, expected 67/);
+    ).toThrow(new RegExp(`schema 0, expected ${CURRENT_SCHEMA_MIGRATION}`));
   });
 
   it('a non-schema read error (corrupt/locked DB) surfaces distinctly, NOT as schema 0', () => {

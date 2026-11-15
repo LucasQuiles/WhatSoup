@@ -224,6 +224,10 @@ const TERMINAL_RETENTION_PREDICATE = `
     SELECT outbound_send_id
     FROM protected_deliveries
     WHERE outbound_send_id IS NOT NULL
+    UNION
+    SELECT outbound_send_id
+    FROM protected_secret_inputs
+    WHERE outbound_send_id IS NOT NULL
   )
   AND (
     COALESCE(completed_at, created_at) < datetime('now', ?)
@@ -237,6 +241,10 @@ const TERMINAL_RETENTION_PREDICATE = `
       AND id NOT IN (
         SELECT outbound_send_id
         FROM protected_deliveries
+        WHERE outbound_send_id IS NOT NULL
+        UNION
+        SELECT outbound_send_id
+        FROM protected_secret_inputs
         WHERE outbound_send_id IS NOT NULL
       )
       ORDER BY COALESCE(completed_at, created_at) DESC, id DESC
