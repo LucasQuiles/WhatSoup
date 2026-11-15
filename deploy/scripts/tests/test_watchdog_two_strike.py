@@ -10,7 +10,7 @@ passed, the same run re-reads the target every CONFIRM_STEP_SECONDS until
 CONFIRM_WINDOW_SECONDS have passed:
 
 - a trusted answer cancels the restart (RESTART-AVOIDED): the fleet console's
-  HTTP status below 400, or a bot body the decision block reads without a
+  JSON liveness body bound to the loaded PID, or a bot body the decision block reads without a
   restart verdict (exits 0, 3, 4, 5, 7);
 - every other result continues the window and changes no run state;
 - at the window's end the restart runs only while the reader still verifies
@@ -71,6 +71,7 @@ from test_watchdog_restart_policy import _health, _run_decision  # noqa: E402
 _ZSH = pytest.mark.skipif(shutil.which("zsh") is None, reason="zsh not available")
 
 _TEMPLATE = Path(__file__).resolve().parents[2] / "templates" / "watchdog-script.sh"
+_HEALTH_READER = Path(__file__).resolve().parents[1] / "lib" / "health_reader.py"
 _PROJECTIONS = (
     Path(__file__).resolve().parents[2] / "observation-plane" / "outcome-projections.json"
 )
@@ -107,6 +108,9 @@ import errno
 import json
 import os
 from pathlib import Path
+from runpy import run_path
+
+verify_fleet_liveness = run_path(HEALTH_READER)["verify_fleet_liveness"]
 
 
 class HealthTransportError(Exception):
@@ -126,7 +130,7 @@ def fetch_loopback_health(port, path, headers, **kwargs):
         stream.write(f"read {port}{path} {mode}\\n")
     _apply(control.get("actions", {}).get(str(port), {}).get(str(index), []))
     if mode == "answer":
-        return 200, (BOT_BODY if port == 9999 else "ok")
+        return 200, (BOT_BODY if port == 9999 else json.dumps({"alive": True, "pid": 4242}))
     if mode == "custom":
         return control["status"], control["body"]
     if mode == "untrusted":
@@ -216,7 +220,11 @@ _LAUNCHCTL_STUB = '''#!/bin/sh
 printf '%s\\n' "$*" >> "{events}"
 conf="{conf}"
 if [ "$1" = print ]; then
-  n="$(/usr/bin/grep -c '^print ' "{events}")"
+  if [ -f "$conf/target_label" ] && [ "$2" != "gui/501/$(cat "$conf/target_label")" ]; then
+    printf 'pid = 4242\\n'
+    exit 0
+  fi
+  n="$(/usr/bin/grep -c "^print $2$" "{events}")"
   [ -f "$conf/unload_from" ] && [ "$n" -ge "$(cat "$conf/unload_from")" ] && exit 113
   [ -f "$conf/print_body" ] && cat "$conf/print_body"
   [ -f "$conf/print_rc.$n" ] && exit "$(cat "$conf/print_rc.$n")"
@@ -253,6 +261,7 @@ class ConfirmHarness(Harness):
         self.helper.write_text(
             f"CONTROL = {str(self.control)!r}\n"
             f"EVENTS = {str(self.calls)!r}\n"
+            f"HEALTH_READER = {str(_HEALTH_READER)!r}\n"
             f"BOT_BODY = {bot_body!r}\n" + _READER_STUB,
             encoding="utf-8",
         )
@@ -272,7 +281,7 @@ class ConfirmHarness(Harness):
         self.script.write_text(rendered, encoding="utf-8")
         self.script.chmod(self.script.stat().st_mode | stat.S_IEXEC)
 
-    def write_launchctl_stub(self, kickstart_rc: int = 0, print_body: str = "", print_rc: int = 0,
+    def write_launchctl_stub(self, kickstart_rc: int = 0, print_body: str = "    pid = 4242\n", print_rc: int = 0,
                              bootstrap_rc: int = 0, **_unused):
         self.conf = self.home / "launchctl-conf"
         self.conf.mkdir(exist_ok=True)
@@ -293,13 +302,20 @@ class ConfirmHarness(Harness):
             "verify_binding": verify_binding or [],
         }), encoding="utf-8")
 
-    def fail_print(self, call: int, rc: int):
-        """The `call`-th launchctl print of the run (any label) exits `rc`."""
+    def _restart_print_number(self, call: int, target: str) -> int:
+        """Map a restart-gate/identity query to its native call number.
+
+        Fleet liveness adds a PID read before the main HTTP read and each
+        confirmation. Those reads precede the window-end identity query.
+        """
+        return call + (1 + (_SHIPPED_READS if call >= 3 else 0) if target == "fleet" else 0)
+
+    def fail_print(self, call: int, rc: int, *, target: str):
+        call = self._restart_print_number(call, target)
         (self.conf / f"print_rc.{call}").write_text(f"{rc}\n", encoding="utf-8")
 
-    def unload_from_print(self, call: int):
-        """From the `call`-th launchctl print of the run on, launchctl cannot
-        find the job (exit 113): the job is booted out at that moment."""
+    def unload_from_print(self, call: int, *, target: str):
+        call = self._restart_print_number(call, target)
         (self.conf / "unload_from").write_text(f"{call}\n", encoding="utf-8")
 
     def lock_released(self) -> bool:
@@ -344,6 +360,7 @@ class ConfirmHarness(Harness):
 def _silent_plan(h: ConfirmHarness, target: str, *, main: str = "response", later: list[str] | None = None,
                  **extra):
     """`target`'s first read is silent (`main`), then `later` per read; the other target answers."""
+    (h.conf / "target_label").write_text(h.label(target), encoding="utf-8")
     sequence = [main, *(later or ["read"])]
     if target == "bot":
         h.plan(bot=sequence, **extra)
@@ -368,6 +385,18 @@ def _assert_restart_after_window(h: ConfirmHarness, target: str):
 
 
 # --- the rule ------------------------------------------------------------------------
+
+@_ZSH
+@pytest.mark.parametrize("body", ['<html>ok</html>', '{"alive":true,"pid":4243}', '{"alive":false,"pid":4242}'])
+def test_fleet_confirm_requires_the_loaded_process_liveness(tmp_path, body):
+    h = ConfirmHarness(tmp_path, "confirm-bound-fleet-bot")
+    h.plan(bot=["answer"], fleet=["response", "custom", "answer"], body=body)
+    proc = h.run()
+    assert proc.returncode == 0, proc.stderr
+    assert h.kicks(_FLEET_LABEL) == 0 and h.bootstraps(_FLEET_LABEL) == 0
+    assert len(h.reads("fleet")) == 3
+    assert h.sleeps() == ["sleep 15", "sleep 15"]
+    assert h.final_log_state() == "RESTART-AVOIDED"
 
 _SILENT_STAGES = st.sampled_from([("bot", "response"), ("bot", "read"), ("fleet", "response"), ("fleet", "read")])
 
@@ -433,7 +462,8 @@ def test_binding_failure_during_the_window_never_bootstraps_on_that_read(tmp_pat
     assert proc.returncode == 0, proc.stderr
     reads = h.reads(target)
     assert reads[1].endswith(" binding") and len(reads) == 1 + _SHIPPED_READS
-    assert f"{label} confirm read 1: no HTTP answer (reader exit 3)" in h.log_text()
+    reason = "liveness unverified" if target == "fleet" else "no HTTP answer"
+    assert f"{label} confirm read 1: {reason} (reader exit 3)" in h.log_text()
     events = h.events()
     after_binding = events[events.index(reads[1]) + 1]
     assert after_binding.startswith("sleep "), events
@@ -652,6 +682,10 @@ def test_gate_closing_during_the_window_acts_as_base_at_its_end(target, gate):
         h = ConfirmHarness(tmp_path, f"confirm-closing-{target}-{gate.replace('_', '-')}-bot")
         label = h.label(target)
         port = _BOT_PORT if target == "bot" else _FLEET_PORT
+        if gate == "permanent_stop":
+            # Keep the job's identity constant so this case reaches the
+            # permanent-stop gate; PID changes have their own deferral test.
+            h.write_launchctl_stub(print_body="")
         _silent_plan(h, target, actions={port: {"3": _gate_ops(h, gate, label)}})
         proc = h.run()
         assert proc.returncode == status, proc.stderr
@@ -728,7 +762,8 @@ def test_reader_unverifiable_at_the_window_end_takes_no_action(tmp_path, target)
     log = h.log_text()
     confirms = [line for line in log.splitlines() if f"{label} confirm read " in line]
     assert len(confirms) == _SHIPPED_READS, log
-    assert all(line.endswith("no HTTP answer (reader exit 3)") for line in confirms), confirms
+    reason = "liveness unverified" if target == "fleet" else "no HTTP answer"
+    assert all(line.endswith(f"{reason} (reader exit 3)") for line in confirms), confirms
     assert "HEALTH-UNKNOWN: health reader binding unavailable or invalid" in log
     assert h.final_log_state() == "HEALTH-UNKNOWN"
     assert h.lock_released(), "the run ended inside restart_label without releasing its lock"
@@ -760,7 +795,12 @@ def _identity_prints(h: ConfirmHarness, target: str) -> tuple[list[int], list[in
     confirm reads), in the run's event order."""
     port = _BOT_PORT if target == "bot" else _FLEET_PORT
     events = h.events()
-    prints = _index(events, lambda row: row.startswith("print "))
+    prints = _index(events, lambda row: row == f"print gui/501/{h.label(target)}")
+    if target == "fleet":
+        # Exclude PID queries immediately paired with liveness reads; retain
+        # every restart gate and start/end identity query for ordering proof.
+        prints = [i for i in prints if i + 1 == len(events)
+                  or not events[i + 1].startswith(f"read {_FLEET_PORT}/")]
     window = _index(events, lambda row: row.startswith("sleep ") or row.startswith(f"read {port}/"))
     return prints, window[1:]
 
@@ -775,7 +815,7 @@ def test_identity_unreadable_at_the_silent_read_defers_even_after_a_real_unload(
     # the job; an unreadable identity defers the restart to the next run.
     h = ConfirmHarness(tmp_path, f"confirm-unread-start-{target}-bot")
     h.write_launchctl_stub(print_body=_LOADED_PID_123)
-    h.fail_print(2, 124)
+    h.fail_print(2, 124, target=target)
     label = h.label(target)
     unload = [{"op": "write", "path": str(h.conf / "print_rc"), "text": f"{_NOT_FOUND}\n"}]
     _silent_plan(h, target, sleep_actions={"3": unload})
@@ -802,7 +842,7 @@ def test_identity_unreadable_at_the_window_end_defers_without_claiming_a_change(
     # reported as a job change.
     h = ConfirmHarness(tmp_path, f"confirm-unread-end-{target}-bot")
     h.write_launchctl_stub(print_body=_LOADED_PID_123)
-    h.fail_print(3, 1)
+    h.fail_print(3, 1, target=target)
     label = h.label(target)
     _silent_plan(h, target)
     proc = h.run()
@@ -827,7 +867,7 @@ def test_job_unloaded_after_the_window_end_check_is_not_bootstrapped(tmp_path, t
     # finds the job it is deferred, not bootstrapped.
     h = ConfirmHarness(tmp_path, f"confirm-late-unload-{target}-bot")
     h.write_launchctl_stub(print_body=_LOADED_PID_123)
-    h.unload_from_print(4)
+    h.unload_from_print(4, target=target)
     label = h.label(target)
     _silent_plan(h, target)
     proc = h.run()
@@ -854,7 +894,7 @@ def test_failed_restart_print_on_a_still_loaded_job_defers_without_bootstrap(tmp
     # kickstart, so any failed print there defers it; nothing is bootstrapped.
     h = ConfirmHarness(tmp_path, f"confirm-late-printfail-{target}-bot")
     h.write_launchctl_stub(print_body=_LOADED_PID_123)
-    h.fail_print(5, 1)
+    h.fail_print(5, 1, target=target)
     label = h.label(target)
     _silent_plan(h, target)
     proc = h.run()
@@ -1080,3 +1120,25 @@ def test_avoided_state_ranks_below_suppressed_and_above_error():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+@_ZSH
+def test_fleet_confirmation_bounds_the_pid_query(tmp_path):
+    h = ConfirmHarness(tmp_path, "confirm-slow-pid-bot")
+    _silent_plan(h, "fleet", later=["answer"])
+    stub = h.home / ".local" / "bin" / "launchctl"
+    source = stub.read_text()
+    marker = '  [ -f "$conf/unload_from" ]'
+    assert source.count(marker) == 1
+    source = source.replace(marker, '  [ "$n" -eq 4 ] && /bin/sleep 3\n' + marker)
+    stub.write_text(source)
+    rendered = h.script.read_text()
+    assert rendered.count("HEALTH_READ_DEADLINE_SECONDS=8") == 1
+    h.script.write_text(rendered.replace("HEALTH_READ_DEADLINE_SECONDS=8",
+                                        "HEALTH_READ_DEADLINE_SECONDS=1"))
+    proc = h.run()
+    assert proc.returncode == 0, (proc.stderr, h.log_text())
+    assert len(h.reads("fleet")) == 3, h.events()
+    assert h.kicks(_FLEET_LABEL) == 0 and h.bootstraps(_FLEET_LABEL) == 0
+    assert "confirm read 1: liveness unverified" in h.log_text()
+    assert "answered on confirm read 2; restart avoided" in h.log_text()

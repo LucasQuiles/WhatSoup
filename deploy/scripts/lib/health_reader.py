@@ -74,6 +74,30 @@ def fetch_loopback_health(
         connection.close()
 
 
+def verify_fleet_liveness(status: Any, body: Any, expected_pid: Any) -> tuple[bool, str]:
+    """Verify the public /livez contract against the launchd service PID."""
+    if type(status) is not int or status != 200:
+        return (False, "http_status")
+    if type(body) is not str:
+        return (False, "body_invalid")
+    if type(expected_pid) is not int or expected_pid <= 0:
+        return (False, "expected_pid_invalid")
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError):
+        return (False, "invalid_json")
+    if not isinstance(payload, dict):
+        return (False, "body_not_object")
+    if payload.get("alive") is not True:
+        return (False, "alive_not_true")
+    pid = payload.get("pid")
+    if type(pid) is not int or pid <= 0:
+        return (False, "pid_invalid")
+    if pid != expected_pid:
+        return (False, "pid_mismatch")
+    return (True, "verified")
+
+
 def instance_health_token(name: str) -> Optional[str]:
     """Resolve the instance health token so a probe reads the privileged body.
 

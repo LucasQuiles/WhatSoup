@@ -64,6 +64,18 @@ def test_classify_projection_unrecognised_and_none_are_unobserved() -> None:
     assert health_reader.classify_projection({"weird": 1}, token_sent=False) == "unobserved"
 
 
+@pytest.mark.parametrize(("status", "body", "expected_pid", "verified", "reason"), [
+    (200, '{"alive":true,"pid":4242}', 4242, True, "verified"),
+    (200, '<!doctype html>', 4242, False, "invalid_json"),
+    (200, '{"alive":true,"pid":0}', 4242, False, "pid_invalid"),
+    (200, '{"alive":true,"pid":4243}', 4242, False, "pid_mismatch"),
+    (503, '{"alive":true,"pid":4242}', 4242, False, "http_status"),
+])
+def test_verify_fleet_liveness_requires_json_alive_positive_matching_pid(
+        status, body, expected_pid, verified, reason) -> None:
+    assert health_reader.verify_fleet_liveness(status, body, expected_pid) == (verified, reason)
+
+
 def test_instance_health_token_env_override(monkeypatch) -> None:
     monkeypatch.setenv("BOT_ERRORS_HEALTH_TOKEN_PRIMARY_BOT", "  tok-override  ")
     assert health_reader.instance_health_token("primary-bot") == "tok-override"

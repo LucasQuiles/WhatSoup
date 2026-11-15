@@ -79,7 +79,7 @@ describe('createStaticHandler — metadata injection (no secrets)', () => {
   });
 
   it('SECURITY: never serves a fleet-token meta tag in any HTML path', async () => {
-    for (const p of ['/', '/sub/', '/page.html', '/dashboard']) {
+    for (const p of ['/', '/sub/', '/page.html', '/inbox']) {
       const body = await fetch(`http://127.0.0.1:${portWithMeta}${p}`).then((r) => r.text());
       expect(body).not.toContain('fleet-token');
     }
@@ -148,11 +148,23 @@ describe('createStaticHandler — metadata injection (no secrets)', () => {
     expect(body).toContain('fleet-version');
   });
 
-  it('SPA fallback HTML gets metadata too', async () => {
-    const res = await fetch(`http://127.0.0.1:${portWithMeta}/dashboard`);
-    expect(res.status).toBe(200);
-    const body = await res.text();
-    expect(body).toContain('fleet-version');
-    expect(body).toContain('fleet-auth-mode');
+  it('SPA fallback serves every declared console route with metadata', async () => {
+    for (const p of [
+      '/', '/welcome', '/hatch', '/lines/route.with.dot', '/lines/route.with.dot/',
+      '/inbox', '/inbox/', '/ops',
+      '/operator', '/metrics', '/agents', '/skills', '/dream-lab',
+      '/deployments', '/settings',
+    ]) {
+      const res = await fetch(`http://127.0.0.1:${portWithMeta}${p}`);
+      expect(res.status).toBe(200);
+      const body = await res.text();
+      expect(body).toContain('fleet-version');
+      expect(body).toContain('fleet-auth-mode');
+    }
+  });
+
+  it('does not turn an unknown extensionless route into HTML 200', async () => {
+    const res = await fetch(`http://127.0.0.1:${portWithMeta}/__console_health_invalid__`);
+    expect(res.status).toBe(404);
   });
 });

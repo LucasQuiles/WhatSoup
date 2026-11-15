@@ -46,6 +46,27 @@ const MIME_TYPES: Record<string, string> = {
   '.map': 'application/json',
 };
 
+const CONSOLE_SPA_ROUTES: readonly RegExp[] = [
+  /^\/$/,
+  /^\/welcome$/,
+  /^\/hatch$/,
+  /^\/lines\/[^/]+$/,
+  /^\/inbox$/,
+  /^\/ops$/,
+  /^\/operator$/,
+  /^\/metrics$/,
+  /^\/agents$/,
+  /^\/skills$/,
+  /^\/dream-lab$/,
+  /^\/deployments$/,
+  /^\/settings$/,
+];
+
+function isConsoleSpaRoute(url: string): boolean {
+  const normalized = url.length > 1 && url.endsWith('/') ? url.slice(0, -1) : url;
+  return CONSOLE_SPA_ROUTES.some((route) => route.test(normalized));
+}
+
 /**
  * @param getVersion — function returning current version (called per-request so it stays fresh
  *   after git pull updates the code without restarting the fleet server).
@@ -93,9 +114,8 @@ export function createStaticHandler(distDir: string, getVersion?: () => string) 
       return serveHtml(realDirIndex);
     }
 
-    // SPA fallback: non-API routes without file extensions → index.html
-    const ext = path.extname(safePath);
-    if (!ext && !url.startsWith('/api/')) {
+    // Only routes declared by console/src/App.tsx may fall through to the SPA.
+    if (!url.startsWith('/api/') && isConsoleSpaRoute(url)) {
       const realIndex = confineToRoot(path.join(distDir, 'index.html'), distDir);
       if (realIndex) {
         return serveHtml(realIndex);

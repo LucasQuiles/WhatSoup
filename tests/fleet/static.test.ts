@@ -1,7 +1,7 @@
 /**
  * Tests for src/fleet/static.ts
  *
- * Uses a temporary dist directory to verify static file serving, SPA fallback,
+ * Uses a temporary dist directory to verify static file serving, declared SPA routes,
  * MIME types, cache headers, and path traversal prevention.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -99,12 +99,26 @@ describe('static file handler', () => {
     expect(body).toContain('app');
   });
 
-  it('SPA fallback: /dashboard serves index.html', async () => {
-    const res = await fetchLocal('/dashboard');
+  it('SPA fallback serves a declared console route', async () => {
+    const res = await fetchLocal('/metrics');
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
     const body = await res.text();
     expect(body).toContain('app');
+  });
+
+  it('returns 404 for an undeclared extensionless route', async () => {
+    const res = await fetchLocal('/dashboard');
+    expect(res.status).toBe(404);
+    expect(res.headers.get('content-type')).toBe('text/plain');
+    expect(await res.text()).toBe('Not Found');
+  });
+
+  it('does not serve HTML for the liveness route', async () => {
+    const res = await fetchLocal('/livez');
+    expect(res.status).toBe(404);
+    expect(res.headers.get('content-type')).toBe('text/plain');
+    expect(await res.text()).toBe('Not Found');
   });
 
   it('SPA fallback does NOT apply to /api/ routes', async () => {

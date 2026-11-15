@@ -653,7 +653,7 @@
     },
     {
       "path": "deploy/scripts/lib/health_reader.py",
-      "sha256": "e56636f191dae587ccbe9cfd22c2e52b60fdc015829930d0b24bf0ea234cd240",
+      "sha256": "dbf53d3f9ffdd1897f75d29067e93e319d63f3c6c6e21a8aeef8eeebe3d9b135",
       "mustContain": [
         "def classify_projection(payload: Any, *, token_sent: bool) -> str:",
         "def health_body_is_disclosed(payload: Any) -> bool:",
