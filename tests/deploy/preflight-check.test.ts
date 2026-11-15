@@ -1610,7 +1610,8 @@ describe('deploy/whatsoup — source wiring', () => {
     const ledgerGate = wrapper.slice(ledgerBegin, ledgerEnd);
     expect(ledgerGate).toContain('scripts/restart-safety-preflight.ts');
     expect(ledgerGate).toMatch(/blocked instance[^\n]*\n\s*exit 78\n/);
-    expect(wrapper.match(/preflight-check\.sh" "\$REPO_ROOT"/g)).toHaveLength(1);
+    // Exactly one preflight-check.sh call: splitting on it yields two parts.
+    expect(wrapper.split('preflight-check.sh" "$REPO_ROOT"')).toHaveLength(2);
   });
 
   it('wires preflight-check BEFORE the node exec of bootstrap.ts', () => {

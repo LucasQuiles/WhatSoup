@@ -855,7 +855,7 @@ describe('release:activate-host reviewed outside-unit declarations', () => {
     const fleetLink = path.join(world.home, '.local', 'bin', 'whatsoup&fleet');
     symlinkSync(path.join(world.oldRelease, 'deploy', 'whatsoup-fleet'), fleetLink);
     const fleetLabel = 'com.whatsoup.whatsoup-fleet'; world.addJob(fleetLabel, plist(fleetLabel, [fleetLink, '9099'], world.oldRelease));
-    const source = outside.source.replace('</dict>', `  <key>OpaqueRef</key>\n  <string>${fleetLink.replace('&', '&amp;')}</string>\n</dict>`);
+    const source = outside.source.replace('</dict>', `  <key>OpaqueRef</key>\n  <string>${fleetLink.replaceAll('&', '&amp;')}</string>\n</dict>`);
     writeFileSync(outside.plistPath, source);
     const declaration = {
       ...outside.declaration,
