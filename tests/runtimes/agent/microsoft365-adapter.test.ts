@@ -29,7 +29,9 @@ import {
   recheckMicrosoft365Workflow,
   registerMicrosoft365Adapter,
 } from '../../../src/runtimes/agent/microsoft365-adapter.ts';
+import { PerChatMcpSocketManager } from '../../../src/runtimes/agent/per-chat-mcp-socket-manager.ts';
 import { createProviderMcpBridge } from '../../../src/runtimes/agent/providers/mcp-bridge.ts';
+import { chatJidToWorkspace } from '../../../src/core/workspace.ts';
 import type { SingletonLoggerMock } from '../../helpers/logger-mock.ts';
 
 type OsModule = typeof os;
@@ -622,6 +624,43 @@ describe.skipIf(SYSTEM_PYTHON === '')('Microsoft 365 provider adapter', () => {
     const scheduled = createProviderMcpBridge(registry, { ...stored, purpose: 'scheduled-agent-job' }, () => executing);
     await expect(scheduled.executeTool('microsoft365', { operation: 'call', name: 'list-mail-messages', args: {} })).resolves.toMatchObject({ isError: false });
     expect(manager.acquire).toHaveBeenLastCalledWith(`map:${DELIVERY_JID}::scheduled-agent-job`, DELIVERY_JID, 'scheduled-agent-job');
+  });
+
+  // A sandboxPerChat runtime keys the real actor-socket manager by the chat's workspace key, which is already
+  // folded and carries no `@`; the manager must still start the authority socket for it.
+  it.each([
+    { kind: 'dm', deliveryJid: '15551230002@s.whatsapp.net', conversationKey: '15551230002', purpose: undefined },
+    { kind: 'dm', deliveryJid: '15551230002@s.whatsapp.net', conversationKey: '15551230002', purpose: 'scheduled-agent-job' },
+    { kind: 'group', deliveryJid: DELIVERY_JID, conversationKey: CONVERSATION_KEY, purpose: undefined },
+    { kind: 'group', deliveryJid: DELIVERY_JID, conversationKey: CONVERSATION_KEY, purpose: 'scheduled-agent-job' },
+  ] as const)('serves a sandboxPerChat $kind call (purpose $purpose) through the real actor-socket manager', async ({ deliveryJid, conversationKey, purpose }) => {
+    const directory = temporaryDirectory('m365-sbx-');
+    const trace = join(directory, 'm365-fixture-trace.jsonl');
+    const registry = new ToolRegistry();
+    const authorityRegistry = new ToolRegistry();
+    registerM365WorkflowAuthorityTool(authorityRegistry);
+    const tokens = new SessionTokenRegistry();
+    const executing = (): ExecutingSessionContext => ({ ...authorizedExecuting(), conversationKey, purpose });
+    const manager = new PerChatMcpSocketManager({
+      stateRoot: directory, registry: authorityRegistry, allowedRoot: directory, conversationBound: true,
+      resolveExecutingSession: executing, sessionTokens: tokens,
+    });
+    const mapKey = chatJidToWorkspace(directory, deliveryJid).workspaceKey;
+    expect(mapKey).toBe(conversationKey);
+    expect(registerMicrosoft365Adapter({ registry, policy: policy(trace), pluginDirs: [pluginDirectory(trace).root],
+      perChatMcpSocketManager: manager, resolvePerChatMapKey: (jid) => chatJidToWorkspace(directory, jid).workspaceKey,
+      sessionTokens: tokens, sandboxPerChat: true })).toBe(true);
+    const stored: SessionContext = { tier: 'chat-scoped', conversationKey, deliveryJid, ...(purpose ? { purpose } : {}) };
+    try {
+      const read = await createProviderMcpBridge(registry, stored, executing)
+        .executeTool('microsoft365', { operation: 'call', name: 'list-mail-messages', args: {} });
+      expect(JSON.stringify(read)).not.toContain('microsoft365_authority_unavailable');
+      expect(read).toMatchObject({ isError: false });
+      const boot = traceRows(trace).find((row) => row.event === 'boot');
+      expect(String(boot?.authoritySocket).startsWith(join(directory, 'mcp'))).toBe(true);
+    } finally {
+      manager.release(mapKey);
+    }
   });
 
   it('checks a scheduled write against its own turn while a live employee turn runs in the same chat', async () => {

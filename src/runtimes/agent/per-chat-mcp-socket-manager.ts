@@ -118,9 +118,12 @@ export class PerChatMcpSocketManager {
     const socketPath = this.socketPathFor(conversationIdentity);
     const identity = { value: conversationIdentity };
     // The canonical conversation keys the binding; a LID delivery JID stays the
-    // outbound address only, so phone-keyed history remains readable.
+    // outbound address only, so phone-keyed history remains readable. A
+    // sandbox workspace key is already folded (no `@`) and names no JID, so
+    // that socket keeps binding by its delivery JID.
+    const baseMapKey = scheduledAgentJobBaseMapKey(conversationIdentity);
     const baseSession = perChatActorSession(
-      scheduledAgentJobBaseMapKey(conversationIdentity),
+      baseMapKey.includes('@') ? baseMapKey : deliveryJid,
       this.options.allowedRoot,
       this.options.conversationBound,
       deliveryJid,
