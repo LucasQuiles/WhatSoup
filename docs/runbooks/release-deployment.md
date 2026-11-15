@@ -473,6 +473,35 @@ restore required; `5` activation failed and the automatic rollback was blocked
 by an incompatible or unreadable sealed refresh fence — outcome
 `rollback-blocked-refresh-fence`, manual recovery required.
 
+### `npm run release:activate-host`
+
+Host activation is a separate, explicitly declared transaction for more than
+one launchd member. It is not permission to discover a wider member set or to
+run `release:activate --apply` once per instance:
+
+```bash
+npm --silent run release:activate-host -- \
+  --unit /absolute/path/host-unit.json \
+  --release /absolute/path/to/exported-release \
+  --backup-dir /absolute/private/retained-backups --plan
+```
+
+The schema-v1 declaration lists each instance, its reviewed current release,
+and each owned auxiliary label plus its renderer. Planning re-reads installed
+and loaded launchd definitions, refuses disagreement, and proves every
+consumer of a selected shared wrapper is declared. It prints only paths,
+digests, membership, port numbers, and state; it never prints health tokens,
+config contents, plist environment values, or health bodies.
+
+`--apply` rebuilds that proof, snapshots every database with `quick_check`,
+backs up all changed plists and each shared link, then changes the group. It
+reloads all primary labels before auxiliaries and verifies each primary's new
+pid, argv, authenticated commit and WhatsApp connection. Any failure checks
+the schema level of every member before restoration and again after quiescing
+the group. A change or unreadable schema blocks restoration for the whole host;
+no old member is restarted. One private `receipt.json` under the host backup
+directory records the group outcome. Its exit codes match `release:activate`.
+
 #### Health invariants verdict (report-only, #2481)
 
 Under `--apply`, after the outcome is final, `receipt.json` (and the stdout

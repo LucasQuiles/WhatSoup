@@ -197,7 +197,7 @@ function installedRootHelperFailure(): string | null {
  * 0644). An owner-only instance plist can carry credentials in its
  * EnvironmentVariables, so neither the switch nor the rollback may widen it.
  */
-async function writePlist(host: ActivationHost, plistPath: string, contents: string, expected: string): Promise<void> {
+export async function writePlist(host: ActivationHost, plistPath: string, contents: string, expected: string): Promise<void> {
   if (readFileSync(plistPath, 'utf8') !== expected) throw new Error('installed plist changed before replacement');
   const info = lstatSync(plistPath);
   if (info.uid === 0 && host.uid !== 0) {
@@ -227,7 +227,7 @@ async function writePlist(host: ActivationHost, plistPath: string, contents: str
 }
 
 /** `ln -sfn` without a window where the link is absent. */
-function repointSymlink(link: string, target: string): void {
+export function repointSymlink(link: string, target: string): void {
   const temporary = path.join(path.dirname(link), `.${path.basename(link)}.activate-${process.pid}`);
   try { unlinkSync(temporary); } catch { /* no stale temporary link */ }
   symlinkSync(target, temporary);
@@ -258,7 +258,7 @@ export async function launchdState(host: ActivationHost, domain: string, label: 
 }
 
 /** bootout → bounded wait for the old pid to exit. Returns a failure string, or null once it is gone. */
-async function stopLabel(host: ActivationHost, context: ActivationContext, label: string): Promise<string | null> {
+export async function stopLabel(host: ActivationHost, context: ActivationContext, label: string): Promise<string | null> {
   const { domain } = context;
   const before = await launchdState(host, domain, label);
   if (before.loaded) {
@@ -495,20 +495,21 @@ function recordObservation(polled: PolledObservation, passed: boolean, entrypoin
 
 function instancePasses(
   observation: PolledObservation,
-  expected: { commit: string | null; previousPid: number | null },
+  expected: { commit: string | null; previousPid: number | null; requireResponderPid?: boolean },
 ): boolean {
   if (observation.pid === null || !observation.argvMatches) return false;
   if (expected.previousPid !== null && observation.pid === expected.previousPid) return false;
   const health = observation.health;
   if (health === null || health.projection !== 'diagnostic' || health.connected !== true) return false;
+  if (expected.requireResponderPid === true && health.responderPid !== observation.pid) return false;
   return expected.commit === null || health.commit === expected.commit;
 }
 
 /** Poll until the instance passes or the verify timeout elapses, then record the final observation. */
-async function verifyInstance(
+export async function verifyInstance(
   host: ActivationHost,
   context: ActivationContext,
-  expected: { entrypoint: string; commit: string | null; previousPid: number | null },
+  expected: { entrypoint: string; commit: string | null; previousPid: number | null; requireResponderPid?: boolean },
 ): Promise<{ ok: boolean; observation: InstanceObservation }> {
   const deadline = host.now() + context.args.verifyTimeoutSeconds * 1_000;
   let ok: boolean;
@@ -522,7 +523,7 @@ async function verifyInstance(
   return { ok, observation: recordObservation(polled, ok, expected.entrypoint) };
 }
 
-async function verifyAuxDefinitions(
+export async function verifyAuxDefinitions(
   host: ActivationHost,
   context: ActivationContext,
   onRoot: string,

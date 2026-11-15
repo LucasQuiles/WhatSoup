@@ -130,6 +130,7 @@
     "release:snapshot": "bash scripts/run-with-pinned-node.sh scripts/release-snapshot-plan.ts",
     "release:export": "bash scripts/run-with-pinned-node.sh scripts/release-export.ts",
     "release:activate": "bash scripts/run-with-pinned-node.sh scripts/release-activate.ts",
+    "release:activate-host": "bash scripts/run-with-pinned-node.sh scripts/release-activate-host.ts",
     "leaks:anonymize": "bash scripts/run-with-pinned-node.sh scripts/anonymize-private-literals.ts",
     "work-index:regen": "bash scripts/run-with-pinned-node.sh scripts/work-index.ts",
     "strip-types-compat": "bash scripts/strip-types-compat.sh",

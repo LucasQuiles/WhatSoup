@@ -45,6 +45,119 @@ export interface HealthResponse {
   body: string;
 }
 
+/** A selected launchd service from the bounded `launchctl print gui/<uid>` contract. */
+export interface LoadedDomainService {
+  label: string;
+  /** Zero is a loaded, currently idle scheduled job; it is not an unloaded service. */
+  pid: number;
+  status: string;
+}
+
+/** Only selector-bearing fields from a bounded per-job `launchctl print` response. */
+export interface LoadedJobDefinition {
+  label: string;
+  path: string;
+  type: 'LaunchAgent';
+  program: string;
+  state: string;
+  pid: number | null;
+  arguments: string[];
+}
+
+const SERVICE_OPEN = '\tservices = {';
+const SERVICE_CLOSE = '\t}';
+const SERVICE_ROW = /^\t\t\s*(\d+)\s+(-?\d+|-|\(pe\))\s+\t(\S+)$/;
+const JOB_OPEN = /^(\S+) = \{$/;
+const FIELD = /^\t([a-z ]+) = (.*)$/;
+
+/**
+ * Parse only the accepted, bounded `launchctl print gui/<uid>` service section.
+ * The observed `(pe)` status is retained as a status string; it is never a
+ * selector or a readiness signal. Anything else, including a duplicate label,
+ * is an unsupported host contract and fails closed.
+ */
+export function parseLoadedDomain(stdout: string): LoadedDomainService[] | null {
+  const lines = stdout.split('\n');
+  const openings = lines.filter((line) => line === SERVICE_OPEN);
+  if (openings.length !== 1) return null;
+  const start = lines.indexOf(SERVICE_OPEN);
+  const end = lines.findIndex((line, index) => index > start && line === SERVICE_CLOSE);
+  if (end < 0) return null;
+  const services: LoadedDomainService[] = [];
+  const labels = new Set<string>();
+  for (const line of lines.slice(start + 1, end)) {
+    if (line.trim() === '') continue;
+    const match = SERVICE_ROW.exec(line);
+    if (match === null) return null;
+    const pid = Number(match[1]);
+    const label = match[3]!;
+    if (!Number.isSafeInteger(pid) || pid < 0 || labels.has(label)) return null;
+    labels.add(label);
+    if (label.startsWith('com.whatsoup.')) services.push({ label, pid, status: match[2]! });
+  }
+  return services.length === 0 ? null : services;
+}
+
+/**
+ * Parse the selector-bearing subset of one bounded `launchctl print gui/<uid>/<label>` response.
+ * Environment and other metadata are deliberately neither accepted as proof nor returned.
+ */
+export function parseLoadedJob(stdout: string, requestedLabel: string, requestedDomain: string): LoadedJobDefinition | null {
+  const lines = stdout.split('\n');
+  const header = JOB_OPEN.exec(lines[0] ?? '');
+  if (header === null || header[1] !== `${requestedDomain}/${requestedLabel}`) return null;
+  const fields = new Map<string, string>();
+  let parsedArguments: string[] | null = null;
+  let closed = false;
+  let nestedBlocks = 0;
+  for (let index = 1; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    if (line === '}') { if (nestedBlocks !== 0) return null; closed = true; if (lines.slice(index + 1).some((tail) => tail.trim() !== '')) return null; break; }
+    if (line === '\t}') { if (nestedBlocks === 0) return null; nestedBlocks -= 1; continue; }
+    if (line === '\targuments = {') {
+      if (parsedArguments !== null) return null;
+      parsedArguments = [];
+      for (index += 1; index < lines.length && lines[index] !== '\t}'; index += 1) {
+        const argument = lines[index]!;
+        if (!argument.startsWith('\t\t') || argument.slice(2).trim() === '') return null;
+        parsedArguments.push(argument.slice(2));
+      }
+      if (lines[index] !== '\t}' || parsedArguments.length === 0) return null;
+      continue;
+    }
+    const field = FIELD.exec(line);
+    if (field === null) { if (line.trim() === '' || line.startsWith('\t\t')) continue; return null; }
+    const key = field[1]!;
+    if (field[2]!.endsWith('{')) nestedBlocks += 1;
+    if (['path', 'type', 'program', 'state', 'pid'].includes(key)) { if (fields.has(key)) return null; fields.set(key, field[2]!); }
+  }
+  const path = fields.get('path');
+  const type = fields.get('type');
+  const program = fields.get('program');
+  const state = fields.get('state');
+  const pidText = fields.get('pid'); const pid = pidText === undefined ? null : /^\d+$/.test(pidText) ? Number(pidText) : null;
+  if (!closed || path === undefined || type !== 'LaunchAgent' || program === undefined || state === undefined || parsedArguments === null || (pidText !== undefined && (pid === null || !Number.isSafeInteger(pid)))) return null;
+  return { label: requestedLabel, path, type, program, state, pid, arguments: parsedArguments };
+}
+
+/** Read a loaded domain through the accepted bounded argv-only transport. */
+export async function loadedDomainInventory(host: ActivationHost, domain: string): Promise<LoadedDomainService[] | null> {
+  const result = await host.exec('/bin/launchctl', ['print', domain], { timeoutMs: 5_000 });
+  if (result.code !== 0 || result.timedOut === true || result.stdout.length > 8 * 1024 * 1024) return null;
+  return parseLoadedDomain(result.stdout);
+}
+
+/** Read a loaded job through the accepted bounded argv-only transport. */
+export async function loadedJobDefinition(
+  host: ActivationHost,
+  domain: string,
+  label: string,
+): Promise<LoadedJobDefinition | null> {
+  const result = await host.exec('/bin/launchctl', ['print', `${domain}/${label}`], { timeoutMs: 5_000 });
+  if (result.code !== 0 || result.timedOut === true || result.stdout.length > 8 * 1024 * 1024) return null;
+  return parseLoadedJob(result.stdout, label, domain);
+}
+
 export interface ActivationHost {
   platform: NodeJS.Platform;
   uid: number;

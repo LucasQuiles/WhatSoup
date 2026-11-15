@@ -49,6 +49,8 @@ export interface ActivationArgs {
   mode: 'plan' | 'apply';
   exitTimeoutSeconds: number;
   verifyTimeoutSeconds: number;
+  /** Host-unit planning proves shared-wrapper ownership separately. */
+  skipWrapperLinkPrecondition?: boolean;
 }
 
 export interface Precondition {
@@ -790,8 +792,10 @@ export async function buildActivationContext(host: ActivationHost, args: Activat
   };
 
   const linkTarget = readLinkOrNull(wrapperLink);
-  check('wrapper-link-on-expected-release', linkTarget === wrapperTargetFor(args.expectCurrent),
-    linkTarget === null ? 'wrapper symlink missing or not a symlink' : `wrapper symlink -> ${linkTarget}`);
+  if (!args.skipWrapperLinkPrecondition) {
+    check('wrapper-link-on-expected-release', linkTarget === wrapperTargetFor(args.expectCurrent),
+      linkTarget === null ? 'wrapper symlink missing or not a symlink' : `wrapper symlink -> ${linkTarget}`);
+  }
 
   const port = resolveHealthPort(args);
   context.healthPort = port.port;
