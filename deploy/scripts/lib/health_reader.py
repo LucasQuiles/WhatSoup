@@ -76,7 +76,13 @@ def fetch_loopback_health(
 
 def verify_fleet_liveness(status: Any, body: Any, expected_pid: Any) -> tuple[bool, str]:
     """Verify the public /livez contract against the launchd service PID."""
-    if type(status) is not int or status != 200:
+    if type(status) is not int:
+        return (False, "http_status")
+    if 400 <= status <= 599:
+        # An HTTP error is a failing console whatever its body names; the
+        # watchdog restarts on it, as it did before /livez was PID-bound.
+        return (False, "http_error_status")
+    if status != 200:
         return (False, "http_status")
     if type(body) is not str:
         return (False, "body_invalid")

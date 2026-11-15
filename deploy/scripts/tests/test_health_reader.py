@@ -27,7 +27,7 @@ PUBLIC = {"schema_version": "health.public.v1", "status": "healthy", "generated_
 @st.composite
 def _fleet_liveness_cases(draw):
     expected_pid = draw(st.integers(min_value=1, max_value=2**31 - 1))
-    kind = draw(st.sampled_from(("verified", "invalid_json", "pid_invalid", "pid_mismatch", "http_status", "body_not_object", "alive_not_true")))
+    kind = draw(st.sampled_from(("verified", "invalid_json", "pid_invalid", "pid_mismatch", "http_status", "http_error_status", "body_not_object", "alive_not_true")))
     if kind == "verified":
         return 200, json.dumps({"alive": True, "pid": expected_pid}), expected_pid, (True, "verified")
     if kind == "invalid_json":
@@ -41,8 +41,13 @@ def _fleet_liveness_cases(draw):
         pid = alternate if alternate < expected_pid else alternate + 1
         return 200, json.dumps({"alive": True, "pid": pid}), expected_pid, (False, "pid_mismatch")
     if kind == "http_status":
-        status = draw(st.one_of(st.integers(max_value=199), st.integers(min_value=201, max_value=599)))
+        status = draw(st.one_of(st.integers(max_value=199), st.integers(min_value=201, max_value=399), st.integers(min_value=600)))
         return status, json.dumps({"alive": True, "pid": expected_pid}), expected_pid, (False, "http_status")
+    if kind == "http_error_status":
+        # The watchdog restarts on these, so even a body naming the loaded PID cannot verify.
+        status = draw(st.integers(min_value=400, max_value=599))
+        body = draw(st.sampled_from((json.dumps({"alive": True, "pid": expected_pid}), "down", "")))
+        return status, body, expected_pid, (False, "http_error_status")
     if kind == "body_not_object":
         body = draw(st.sampled_from(("[]", "null", "true", '\"healthy\"')))
         return 200, body, expected_pid, (False, "body_not_object")
@@ -99,7 +104,9 @@ def test_classify_projection_unrecognised_and_none_are_unobserved() -> None:
 @example(case=(200, '<!doctype html>', 4242, (False, "invalid_json")))
 @example(case=(200, '{"alive":true,"pid":0}', 4242, (False, "pid_invalid")))
 @example(case=(200, '{"alive":true,"pid":4243}', 4242, (False, "pid_mismatch")))
-@example(case=(503, '{"alive":true,"pid":4242}', 4242, (False, "http_status")))
+@example(case=(503, '{"alive":true,"pid":4242}', 4242, (False, "http_error_status")))
+@example(case=(503, 'down', 4242, (False, "http_error_status")))
+@example(case=(301, '{"alive":true,"pid":4242}', 4242, (False, "http_status")))
 @given(case=_fleet_liveness_cases())
 def test_verify_fleet_liveness_requires_json_alive_positive_matching_pid(case) -> None:
     status, body, expected_pid, expected = case

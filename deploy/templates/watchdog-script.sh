@@ -1729,10 +1729,17 @@ elif [ "$probe_rc" -eq 8 ] && [ "$fleet_resp" = TRANSPORT_SILENT ]; then
   restart_label "$FLEET_LABEL" "fleet console unreachable: connection accepted, response timed out or was reset" silent
 elif [ "$probe_rc" -eq 124 ] && [ -z "$fleet_resp" ]; then
   restart_label "$FLEET_LABEL" "fleet console health read exceeded ${HEALTH_READ_DEADLINE_SECONDS}s" silent
+elif [ "$probe_rc" -eq 8 ] && [ "$fleet_resp" = FLEET_LIVENESS_UNVERIFIED:http_error_status ]; then
+  # An HTTP 4xx/5xx answer restarts whatever its body names, as before PID binding.
+  restart_label "$FLEET_LABEL" "fleet console unreachable"
 elif [ "$probe_rc" -eq 8 ] && [[ "$fleet_resp" == FLEET_LIVENESS_UNVERIFIED:* ]]; then
   health_unknown "fleet liveness contract or PID unverified"
 elif [ "$probe_rc" -ne 0 ]; then
   health_unknown "fleet health reader unavailable or invalid"
+elif [ "$fleet_pid_rc" -ne 0 ] && [[ "${fleet_resp##*$'\n'}" == [45][0-9][0-9] ]]; then
+  # Without a launchd PID the reader returns the raw answer, status last; an
+  # HTTP error still restarts, as a refused transport does above.
+  restart_label "$FLEET_LABEL" "fleet console unreachable"
 elif [ "$fleet_pid_rc" -ne 0 ]; then
   log "HEALTH-UNKNOWN: fleet loaded PID unavailable or invalid"
   if [ "$WD_FINAL" != ERROR ]; then

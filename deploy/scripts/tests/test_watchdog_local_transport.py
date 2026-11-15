@@ -85,7 +85,9 @@ def _run(tmp_path, bot, fleet, *, helper_mode="valid", marker=False, unloaded=Fa
     token.parent.mkdir(parents=True)
     token.write_text("WHATSOUP_HEALTH_TOKEN=" + "a" * 64 + "\n"); token.chmod(0o600)
     helper = home / "health_reader.py"
+    # Only the transport is faked; the /livez classifier is the shipped one.
     helper.write_text('''import json, os
+from runpy import run_path
 class HealthTransportError(Exception):
     def __init__(self, stage, number): self.stage=stage; self.errno=number
 def fetch_loopback_health(port, path, headers, **kwargs):
@@ -93,16 +95,7 @@ def fetch_loopback_health(port, path, headers, **kwargs):
     if "errno" in item: raise HealthTransportError(item["stage"],item["errno"])
     if "exception" in item: raise ValueError("synthetic private value")
     return item["status"], item["body"]
-def verify_fleet_liveness(status, body, expected_pid):
-    if status != 200: return False, "http_status"
-    try: payload=json.loads(body)
-    except Exception: return False, "invalid_json"
-    if not isinstance(payload, dict): return False, "body_not_object"
-    if payload.get("alive") is not True: return False, "alive_not_true"
-    pid=payload.get("pid")
-    if type(pid) is not int or pid <= 0: return False, "pid_invalid"
-    if pid != expected_pid: return False, "pid_mismatch"
-    return True, "verified"
+verify_fleet_liveness = run_path(''' + repr(str(SCRIPTS / "lib/health_reader.py")) + ''')["verify_fleet_liveness"]
 ''')
     digest = hashlib.sha256(helper.read_bytes()).hexdigest()
     text = TEMPLATE.read_text().replace("__HOME__", str(home)).replace("BOT_NAME", "test-agent").replace("USERNAME", "tester").replace("FLEET_PORT", "9998").replace("BOT_PORT", "9999")
@@ -157,6 +150,21 @@ def test_fleet_liveness_contract_or_pid_error_is_unknown_without_restart(tmp_pat
     assert proc.returncode == 2, proc.stderr
     assert "HEALTH-UNKNOWN: fleet liveness contract or PID unverified" in log
     assert "kickstart" not in calls and "bootstrap" not in calls
+
+
+FLEET_503_LOADED_PID = {"status":503,"body":'{"alive":true,"pid":4242}'}
+FLEET_503_NO_PID = {"status":503,"body":"down"}
+
+
+@pytest.mark.parametrize("fleet", [FLEET_503_LOADED_PID, FLEET_503_NO_PID], ids=["loaded-pid-body", "no-pid-body"])
+@pytest.mark.parametrize("fleet_pid", [4242, 0], ids=["launchd-pid", "launchd-pid-unavailable"])
+def test_fleet_http_error_status_restarts_the_fleet(tmp_path, fleet, fleet_pid):
+    # An HTTP error from /livez is a failing console whatever its body names,
+    # so it keeps main's recovery: one restart, as for a refused connection.
+    proc, calls, log, _ = _run(tmp_path, OK, fleet, fleet_pid=fleet_pid)
+    assert "fleet console unreachable" in log, log
+    assert sum("kickstart -k" in row and row.endswith("com.whatsoup.whatsoup-fleet") for row in calls.splitlines()) == 1
+    assert "fleet liveness contract or PID unverified" not in log
 
 
 def test_missing_loaded_fleet_pid_is_unknown_without_restart(tmp_path):
