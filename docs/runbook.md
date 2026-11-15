@@ -3639,7 +3639,10 @@ recovery have been verified; stopping containers alone does not migrate their da
 
 ## Restart-safety preflight blocked a start
 
-`deploy/whatsoup` exits `78` when `scripts/restart-safety-preflight.ts` blocks a boot. Recovery:
+`deploy/whatsoup` exits `78` when `scripts/restart-safety-preflight.ts` blocks a boot. To see this
+refusal before stopping a running instance, run `deploy/preflight-check.sh <repo-root> <instance>`: it
+runs the same start check and exits `3` on a block (at boot the wrapper defers that copy to its own
+exit-`78` gate). Recovery:
 
 - `reason=missing_database` without the `initial-database-create` marker: an instance DB is expected but
   absent — restore the DB from the host backup path before restarting; creating a fresh DB silently
