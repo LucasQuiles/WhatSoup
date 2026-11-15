@@ -6,10 +6,14 @@ authenticated diagnostics, and a missing/rejected token yields `unobserved`
 """
 import http.server
 import importlib.util
+import json
 import pathlib
 import threading
 
 import pytest
+from hypothesis import example, given, strategies as st
+
+from bot_errors_property_support import properties
 
 _MOD_PATH = pathlib.Path(__file__).resolve().parents[1] / "lib" / "health_reader.py"
 _spec = importlib.util.spec_from_file_location("health_reader", _MOD_PATH)
@@ -18,6 +22,32 @@ _spec.loader.exec_module(health_reader)
 
 DISCLOSED = {"schema_version": "health.v3", "status": "degraded", "whatsapp": {"connected": True}, "instance": {"name": "primary-bot"}}
 PUBLIC = {"schema_version": "health.public.v1", "status": "healthy", "generated_at": "2026-08-20T00:00:00Z"}
+
+
+@st.composite
+def _fleet_liveness_cases(draw):
+    expected_pid = draw(st.integers(min_value=1, max_value=2**31 - 1))
+    kind = draw(st.sampled_from(("verified", "invalid_json", "pid_invalid", "pid_mismatch", "http_status", "body_not_object", "alive_not_true")))
+    if kind == "verified":
+        return 200, json.dumps({"alive": True, "pid": expected_pid}), expected_pid, (True, "verified")
+    if kind == "invalid_json":
+        suffix = draw(st.text(alphabet="abcdefghijklmnopqrstuvwxyz<>!", max_size=64))
+        return 200, f"<!doctype {suffix}>", expected_pid, (False, "invalid_json")
+    if kind == "pid_invalid":
+        pid = draw(st.one_of(st.none(), st.booleans(), st.integers(max_value=0), st.text(max_size=32)))
+        return 200, json.dumps({"alive": True, "pid": pid}), expected_pid, (False, "pid_invalid")
+    if kind == "pid_mismatch":
+        alternate = draw(st.integers(min_value=1, max_value=2**31 - 2))
+        pid = alternate if alternate < expected_pid else alternate + 1
+        return 200, json.dumps({"alive": True, "pid": pid}), expected_pid, (False, "pid_mismatch")
+    if kind == "http_status":
+        status = draw(st.one_of(st.integers(max_value=199), st.integers(min_value=201, max_value=599)))
+        return status, json.dumps({"alive": True, "pid": expected_pid}), expected_pid, (False, "http_status")
+    if kind == "body_not_object":
+        body = draw(st.sampled_from(("[]", "null", "true", '\"healthy\"')))
+        return 200, body, expected_pid, (False, "body_not_object")
+    alive = draw(st.sampled_from((False, None, 0, "true")))
+    return 200, json.dumps({"alive": alive, "pid": expected_pid}), expected_pid, (False, "alive_not_true")
 
 
 def test_disclosed_body_is_disclosed() -> None:
@@ -64,16 +94,16 @@ def test_classify_projection_unrecognised_and_none_are_unobserved() -> None:
     assert health_reader.classify_projection({"weird": 1}, token_sent=False) == "unobserved"
 
 
-@pytest.mark.parametrize(("status", "body", "expected_pid", "verified", "reason"), [
-    (200, '{"alive":true,"pid":4242}', 4242, True, "verified"),
-    (200, '<!doctype html>', 4242, False, "invalid_json"),
-    (200, '{"alive":true,"pid":0}', 4242, False, "pid_invalid"),
-    (200, '{"alive":true,"pid":4243}', 4242, False, "pid_mismatch"),
-    (503, '{"alive":true,"pid":4242}', 4242, False, "http_status"),
-])
-def test_verify_fleet_liveness_requires_json_alive_positive_matching_pid(
-        status, body, expected_pid, verified, reason) -> None:
-    assert health_reader.verify_fleet_liveness(status, body, expected_pid) == (verified, reason)
+@properties
+@example(case=(200, '{"alive":true,"pid":4242}', 4242, (True, "verified")))
+@example(case=(200, '<!doctype html>', 4242, (False, "invalid_json")))
+@example(case=(200, '{"alive":true,"pid":0}', 4242, (False, "pid_invalid")))
+@example(case=(200, '{"alive":true,"pid":4243}', 4242, (False, "pid_mismatch")))
+@example(case=(503, '{"alive":true,"pid":4242}', 4242, (False, "http_status")))
+@given(case=_fleet_liveness_cases())
+def test_verify_fleet_liveness_requires_json_alive_positive_matching_pid(case) -> None:
+    status, body, expected_pid, expected = case
+    assert health_reader.verify_fleet_liveness(status, body, expected_pid) == expected
 
 
 def test_instance_health_token_env_override(monkeypatch) -> None:

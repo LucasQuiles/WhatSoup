@@ -50,7 +50,7 @@ import time
 from pathlib import Path
 
 import pytest
-from hypothesis import given, strategies as st
+from hypothesis import example, given, strategies as st
 
 _TESTS = Path(__file__).resolve().parent
 if str(_TESTS) not in sys.path:
@@ -386,17 +386,38 @@ def _assert_restart_after_window(h: ConfirmHarness, target: str):
 
 # --- the rule ------------------------------------------------------------------------
 
+
+@st.composite
+def _untrusted_fleet_liveness_bodies(draw):
+    kind = draw(st.sampled_from(("invalid_json", "pid_mismatch", "alive_not_true", "body_not_object")))
+    if kind == "invalid_json":
+        content = draw(st.text(alphabet="abcdefghijklmnopqrstuvwxyz<>!", max_size=64))
+        return f"<html>{content}</html>"
+    if kind == "pid_mismatch":
+        pid = draw(st.integers(min_value=1, max_value=2**31 - 1).filter(lambda value: value != 4242))
+        return json.dumps({"alive": True, "pid": pid})
+    if kind == "alive_not_true":
+        alive = draw(st.sampled_from((False, None, 0, "true")))
+        return json.dumps({"alive": alive, "pid": 4242})
+    return draw(st.sampled_from(("[]", "null", "true", '"healthy"')))
+
+
 @_ZSH
-@pytest.mark.parametrize("body", ['<html>ok</html>', '{"alive":true,"pid":4243}', '{"alive":false,"pid":4242}'])
-def test_fleet_confirm_requires_the_loaded_process_liveness(tmp_path, body):
-    h = ConfirmHarness(tmp_path, "confirm-bound-fleet-bot")
-    h.plan(bot=["answer"], fleet=["response", "custom", "answer"], body=body)
-    proc = h.run()
-    assert proc.returncode == 0, proc.stderr
-    assert h.kicks(_FLEET_LABEL) == 0 and h.bootstraps(_FLEET_LABEL) == 0
-    assert len(h.reads("fleet")) == 3
-    assert h.sleeps() == ["sleep 15", "sleep 15"]
-    assert h.final_log_state() == "RESTART-AVOIDED"
+@properties
+@example(body='<html>ok</html>')
+@example(body='{"alive":true,"pid":4243}')
+@example(body='{"alive":false,"pid":4242}')
+@given(body=_untrusted_fleet_liveness_bodies())
+def test_fleet_confirm_requires_the_loaded_process_liveness(body):
+    with private_case() as (tmp_path, _patch):
+        h = ConfirmHarness(tmp_path, "confirm-bound-fleet-bot")
+        h.plan(bot=["answer"], fleet=["response", "custom", "answer"], body=body)
+        proc = h.run()
+        assert proc.returncode == 0, proc.stderr
+        assert h.kicks(_FLEET_LABEL) == 0 and h.bootstraps(_FLEET_LABEL) == 0
+        assert len(h.reads("fleet")) == 3
+        assert h.sleeps() == ["sleep 15", "sleep 15"]
+        assert h.final_log_state() == "RESTART-AVOIDED"
 
 _SILENT_STAGES = st.sampled_from([("bot", "response"), ("bot", "read"), ("fleet", "response"), ("fleet", "read")])
 
