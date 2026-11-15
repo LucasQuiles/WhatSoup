@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,14 +17,30 @@ vi.mock('../../src/lib/private-fs.ts', async (importOriginal) => {
   };
 });
 
+// Tests cannot create root-owned files: lstat may report one plist as root-owned, and the installed helper is faked.
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const lstatSync = vi.fn(actual.lstatSync);
+  return { ...actual, default: { ...actual, lstatSync }, lstatSync };
+});
+vi.mock('../../scripts/lib/release-activation/root-helper-interpreter.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../scripts/lib/release-activation/root-helper-interpreter.ts')>();
+  return { ...actual, readInstalledRootHelper: vi.fn(() => null) };
+});
+
+import * as fs from 'node:fs';
 import { parseLoadedDomain, parseLoadedJob } from '../../scripts/lib/release-activation/host.ts';
+import { acquireActivationLock } from '../../scripts/lib/release-activation/lock.ts';
+import { readInstalledRootHelper, ROOT_HELPER_SUDO } from '../../scripts/lib/release-activation/root-helper-interpreter.ts';
+import { releaseProcessLock } from '../../src/lib/process-lock.ts';
+import { RELEASE_ACTIVATE_EXIT } from '../../scripts/release-activate.ts';
 import type { ActivationHost } from '../../scripts/lib/release-activation/host.ts';
 import { applyHostUnitActivation } from '../../scripts/lib/release-activation/host-unit-apply.ts';
 import { buildHostUnitPlan, parseHostUnitDeclaration } from '../../scripts/lib/release-activation/host-unit-plan.ts';
 import { plistDigest, type ActivationContext } from '../../scripts/lib/release-activation/plan.ts';
 import { parseHostActivationArgs, RELEASE_ACTIVATE_HOST_EXIT, runReleaseActivateHostCli } from '../../scripts/release-activate-host.ts';
 import { parsePlist } from '../../scripts/check-service-units.ts';
-import { diagnosticBody, plist, writeRelease } from '../helpers/release-activate-world.ts';
+import { diagnosticBody, plist, writeRefreshRollbackFence, writeRelease } from '../helpers/release-activate-world.ts';
 
 const DOMAIN = [
   'gui/501 = {',
@@ -104,7 +120,8 @@ function twoMemberWorld({ sharedFirst = true }: { sharedFirst?: boolean } = {}):
     args: { instance, release: newRelease, expectCurrent: oldRelease, auxLabels: [], healthPort: port, backupDir, wrapperLink: link, mode: 'apply', exitTimeoutSeconds: 1, verifyTimeoutSeconds: 1 },
     home, domain: 'gui/501', launchAgentsDir: agents, wrapperLink: link, dbPath: db, healthPort: port, healthToken: 'private-token', newCommit: NEXT, oldCommit: OLD, instanceLabel: label, preconditions: [],
     botErrorsHealthConsumer: null,
-    refreshRollbackFence: { required: null, candidateDigest: null, targetCapability: null, targetDigest: null, targetCompatibleAtPlan: false, candidateDetail: 'not read', targetDetail: 'not read' },
+    // What planning records for releases without a refresh rollback fence (plan.ts readRefreshRollbackFence).
+    refreshRollbackFence: { required: 0, candidateDigest: null, targetCapability: 0, targetDigest: null, targetCompatibleAtPlan: true, candidateDetail: 'no refresh rollback fence (legacy release)', targetDetail: 'no refresh rollback fence (legacy release)' },
     staged: [{ label, role: 'instance', renderer: 'instance-edit', plistPath, installedSha256: plistDigest(readFileSync(plistPath, 'utf8')), staged: plist(label, [shared ? link : path.join(newRelease, 'deploy', 'whatsoup'), instance], newRelease), edits: [], renderDriftLines: 0 }],
   });
   const contexts = [context('shared', firstLabel, firstPlist, firstDb, 19001, sharedFirst), context('direct', secondLabel, directPlist, secondDb, 19002, false)];
@@ -457,6 +474,148 @@ describe('release:activate-host group transaction', () => {
       ? [{ stage: 'before-rollback', members: ['direct', 'shared'] }, { stage: 'after-quiesce', members: ['direct', 'shared'] }]
       : [{ stage: 'before-rollback', members: ['direct', 'shared'] }]);
     expect(result.schemaGates.some((gate) => gate.members.some((member) => member.changed))).toBe(true);
+  });
+});
+
+describe('release:activate-host keeps release:activate single-apply guards', () => {
+  const actualFs = vi.importActual<typeof import('node:fs')>('node:fs');
+  const oldWrapper = (world: TwoMemberWorld): string => path.join(world.oldRelease, 'deploy', 'whatsoup');
+  const newWrapper = (world: TwoMemberWorld): string => path.join(world.newRelease, 'deploy', 'whatsoup');
+  const apply = (world: TwoMemberWorld, host: ActivationHost = world.host) => applyHostUnitActivation(host, {
+    release: world.newRelease, commit: NEXT, backupDir: path.join(world.root, 'backups'), members: world.contexts, sharedLaunchers: new Map([[world.link, ['shared']]]),
+  });
+  const liveMutations = (world: TwoMemberWorld): string[] => world.calls.filter((call) => /^(bootout|bootstrap|kickstart):/.test(call));
+  /** lstat reports `target` as root-owned; every other path is unchanged. */
+  const reportRootOwned = async (target: string): Promise<void> => {
+    const real = (await actualFs).lstatSync;
+    vi.mocked(fs.lstatSync).mockImplementation(((file: fs.PathLike, options?: fs.StatSyncOptions) => {
+      const stats = real(file, options);
+      if (stats === undefined || String(file) !== target) return stats;
+      return Object.assign(Object.create(Object.getPrototypeOf(stats) as object) as fs.Stats, stats, { uid: 0 });
+    }) as typeof fs.lstatSync);
+  };
+  /** The installed helper matches the pin; the fake sudo answers each run in turn, writing the requested bytes only when told to. */
+  const withFakeSudo = async (world: TwoMemberWorld, replies: Array<{ code: number; write: boolean; timedOut?: true }>): Promise<{ host: ActivationHost; runs: () => number }> => {
+    const helper = (await actualFs).readFileSync(path.join(import.meta.dirname, '../../scripts/lib/release-activation/protected_plist.py'));
+    vi.mocked(readInstalledRootHelper).mockReturnValue(helper);
+    let runs = 0;
+    return {
+      runs: () => runs,
+      host: {
+        ...world.host,
+        exec: async (file, args, options) => {
+          if (file !== ROOT_HELPER_SUDO) return world.host.exec(file, args, options);
+          const reply = replies[runs++] ?? { code: 0, write: true };
+          const request = JSON.parse(options?.input ?? '{}') as { path: string; contents: string };
+          if (reply.write) writeFileSync(request.path, request.contents);
+          return { code: reply.code, stdout: '', stderr: '', ...(reply.timedOut ? { timedOut: true as const } : {}) };
+        },
+      },
+    };
+  };
+  afterEach(async () => {
+    vi.mocked(fs.lstatSync).mockImplementation((await actualFs).lstatSync);
+    vi.mocked(readInstalledRootHelper).mockReturnValue(null);
+  });
+
+  it('uses the release:activate exit codes, including 5 for a fence-blocked rollback', () => {
+    expect(RELEASE_ACTIVATE_HOST_EXIT).toEqual(RELEASE_ACTIVATE_EXIT);
+    expect(RELEASE_ACTIVATE_HOST_EXIT.rollbackBlockedRefreshFence).toBe(5);
+  });
+
+  it('refuses before any effect while another activation holds the activation lock', async () => {
+    const world = twoMemberWorld();
+    const directBefore = readFileSync(world.directPlist, 'utf8');
+    const holder = acquireActivationLock(world.home);
+    let result;
+    try { result = await apply(world); } finally { releaseProcessLock(holder); }
+    expect(result.outcome).toBe('refused');
+    expect(result.steps).toEqual([expect.objectContaining({ step: 'acquire-activation-lock', ok: false })]);
+    expect(result.backupPath).toBeNull();
+    expect(existsSync(path.join(world.root, 'backups'))).toBe(false);
+    expect(readlinkSync(world.link)).toBe(oldWrapper(world));
+    expect(readFileSync(world.directPlist, 'utf8')).toBe(directBefore);
+    expect(world.calls).toEqual([]);
+  });
+
+  it('refuses before the switch when the candidate refresh fence changed after planning', async () => {
+    const world = twoMemberWorld();
+    const directBefore = readFileSync(world.directPlist, 'utf8');
+    writeRefreshRollbackFence(world.newRelease, { requirement: 3, capability: 3 });
+    const result = await apply(world);
+    expect(result.outcome).toBe('refused');
+    expect(result.failure).toBe('refresh rollback fence requirement changed or cannot be revalidated before switch');
+    expect(readlinkSync(world.link)).toBe(oldWrapper(world));
+    expect(readFileSync(world.directPlist, 'utf8')).toBe(directBefore);
+    expect(liveMutations(world)).toEqual([]);
+  });
+
+  it('blocks the group rollback with exit 5 when the old release lacks the candidate refresh fence', async () => {
+    const world = twoMemberWorld();
+    writeRefreshRollbackFence(world.newRelease, { requirement: 3, capability: 3 });
+    writeRefreshRollbackFence(world.oldRelease, { requirement: 1, capability: 1 });
+    expect((await planTwoMemberWorld(world)).ready).toBe(true);
+    world.setFailure('second-health');
+    let stdout = '';
+    vi.stubEnv('HOME', world.home); vi.stubEnv('XDG_CONFIG_HOME', path.join(world.home, '.config')); vi.stubEnv('XDG_DATA_HOME', path.join(world.home, '.local', 'share'));
+    let code: number;
+    try {
+      code = await runReleaseActivateHostCli(['--unit', path.join(world.root, 'host-unit.json'), '--release', world.newRelease, '--backup-dir', path.join(world.root, 'backups'), '--apply'], world.host, { stdout: (text) => { stdout += text; }, stderr: () => {} });
+    } finally { vi.unstubAllEnvs(); }
+    expect(code).toBe(5);
+    const receipt = JSON.parse(stdout) as { outcome: { outcome: string; rollback: { steps: Array<{ step: string; ok: boolean }> } } };
+    expect(receipt.outcome.outcome).toBe('rollback-blocked-refresh-fence');
+    expect(receipt.outcome.rollback.steps).toContainEqual(expect.objectContaining({ step: 'recheck-refresh-rollback-fence-before-instance-stop:shared', ok: false }));
+    // The old release was never restored or restarted: no member was stopped for rollback.
+    expect(readlinkSync(world.link)).toBe(newWrapper(world));
+    expect(readFileSync(world.directPlist, 'utf8')).toContain(newWrapper(world));
+    expect(receipt.outcome.rollback.steps.some((step) => step.step.startsWith('stop:'))).toBe(false);
+  });
+
+  it('refuses and installs nothing when a plist changed after planning', async () => {
+    const world = twoMemberWorld();
+    const foreign = readFileSync(world.directPlist, 'utf8').replace('</plist>', '<!-- edited after planning -->\n</plist>');
+    writeFileSync(world.directPlist, foreign);
+    const result = await apply(world);
+    expect(result.outcome).toBe('refused');
+    expect(result.failure).toBe('com.whatsoup.direct: installed plist changed outside this activation');
+    expect(readFileSync(world.directPlist, 'utf8')).toBe(foreign);
+    expect(readlinkSync(world.link)).toBe(oldWrapper(world));
+    expect(liveMutations(world)).toEqual([]);
+  });
+
+  it('refuses before the switch when a root-owned plist has no current root helper', async () => {
+    const world = twoMemberWorld();
+    const directBefore = readFileSync(world.directPlist, 'utf8');
+    await reportRootOwned(world.directPlist);
+    const result = await apply(world);
+    expect(result.outcome).toBe('refused');
+    expect(result.steps).toContainEqual(expect.objectContaining({ step: 'check-root-plist-helper', ok: false }));
+    expect(readlinkSync(world.link)).toBe(oldWrapper(world));
+    expect(readFileSync(world.directPlist, 'utf8')).toBe(directBefore);
+    expect(liveMutations(world)).toEqual([]);
+  });
+
+  it('ends rollback-unverified, never rolled-back, when the root helper times out during the switch', async () => {
+    const world = twoMemberWorld();
+    await reportRootOwned(world.directPlist);
+    // The helper times out without writing: the plist keeps its original bytes, but uchg may be gone.
+    const { host, runs } = await withFakeSudo(world, [{ code: 127, write: false, timedOut: true }]);
+    const result = await apply(world, host);
+    expect(runs()).toBe(1);
+    expect(result.outcome).toBe('rollback-unverified');
+    expect(result.rollback?.verified).toBe(false);
+    expect(result.rollback?.steps).toContainEqual(expect.objectContaining({ step: 'confirm-plist-protection', ok: false }));
+  });
+
+  it('ends rollback-unverified when the root helper times out while restoring a plist', async () => {
+    const world = twoMemberWorld(); world.setFailure('second-health');
+    await reportRootOwned(world.directPlist);
+    const { host, runs } = await withFakeSudo(world, [{ code: 0, write: true }, { code: 127, write: false, timedOut: true }]);
+    const result = await apply(world, host);
+    expect(runs()).toBe(2);
+    expect(result.outcome).toBe('rollback-unverified');
+    expect(result.rollback?.verified).toBe(false);
   });
 });
 

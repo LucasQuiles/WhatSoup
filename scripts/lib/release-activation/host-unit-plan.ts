@@ -10,7 +10,7 @@ import { resolveLaunchdReleaseSelection } from '../launchd-release-selector.ts';
 import { configRoot } from '../../../src/fleet/paths.ts';
 import { isNonEmptyString } from '../../../src/lib/type-guards.ts';
 import { AUX_RENDERERS, LABEL_PATTERN, mentionsReleaseRoot, renderAuxPlist, type AuxRenderer } from './plan.ts';
-import { buildActivationContext, preconditionsMet, wrapperTargetFor, type ActivationArgs, type ActivationContext } from './plan.ts';
+import { buildActivationContext, plistDigest, preconditionsMet, wrapperTargetFor, type ActivationArgs, type ActivationContext } from './plan.ts';
 import { isLegacyPathRebaseLabel, rebaseLegacyHostAuxiliaryForPathRebase, type LegacyPathRebaseLabel } from './legacy-host-auxiliaries.ts';
 import type { HostUnitApplyContext } from './host-unit-apply.ts';
 
@@ -658,7 +658,7 @@ export async function buildHostUnitPlan(
       auxiliaries: context.staged.filter((entry) => entry.label !== context.instanceLabel).map((entry) => entry.label),
     });
   }
-  const hostAuxiliaryApply: Array<{ label: string; plistPath: string; staged: string; expectCurrent: string }> = [];
+  const hostAuxiliaryApply: Array<{ label: string; plistPath: string; installedSha256: string; staged: string; expectCurrent: string }> = [];
   const hostLaunchers: Array<{ label: string; plistPath: string; link: string; wrapper: 'whatsoup-fleet'; expectCurrent: string }> = [];
   const watchdogs: Array<{ label: string; plistPath: string }> = [];
   for (const auxiliary of declaration.hostAuxiliaries) {
@@ -711,7 +711,7 @@ export async function buildHostUnitPlan(
       }
     }
     check(`host-aux-plist-staged:${auxiliary.label}`, stagedOk, stagedDetail);
-    if (stagedOk) hostAuxiliaryApply.push({ label: auxiliary.label, plistPath, staged: staged!, expectCurrent });
+    if (stagedOk) hostAuxiliaryApply.push({ label: auxiliary.label, plistPath, installedSha256: plistDigest(installed), staged: staged!, expectCurrent });
   }
 
   // A host operator may use the standard launcher even when every member

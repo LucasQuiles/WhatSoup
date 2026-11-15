@@ -8,11 +8,16 @@ import { resolveLaunchdReleaseSelection } from '../launchd-release-selector.ts';
 import { backupSqliteConsistent } from '../sqlite-consistent-backup.ts';
 import { readSchemaMigrationLevel } from '../sqlite-schema-level.ts';
 import {
-  launchdState, reloadLabel, repointSymlink, stopLabel, verifyAuxDefinitions, verifyInstance, writePlist,
-  type InstanceObservation, type StepRecord,
+  activationIdentityFailure, BOT_ERRORS_HEALTH_CONSUMER_CHANGED, checkRootPlistHelper, isUnconfirmedPlistProtection,
+  launchdState, recheckBotErrorsHealthConsumer, reloadLabel, repointSymlink, stopLabel, UNCONFIRMED_PLIST_PROTECTION_STEP,
+  verifyAuxDefinitions, verifyInstance, withActivationLock, writePlist,
+  type ActivationIdentity, type ActivationSide, type InstanceObservation, type StepRecord,
 } from './apply.ts';
 import { loadedJobDefinition, type ActivationHost } from './host.ts';
-import { bootstrapEntrypointFor, type ActivationContext, wrapperTargetFor } from './plan.ts';
+import {
+  bootstrapEntrypointFor, recheckCandidateRefreshRollbackFence, recheckRollbackRefreshFenceTarget,
+  type ActivationContext, wrapperTargetFor,
+} from './plan.ts';
 import { parsePlist } from '../../check-service-units.ts';
 import { verifyReviewedOutsideUnits, type ReviewedOutsideUnit } from './host-unit-plan.ts';
 
@@ -26,7 +31,7 @@ export interface HostUnitApplyContext {
   /** A wrapper path has one backup and one atomic repoint, even when several jobs consume it. */
   sharedLaunchers: ReadonlyMap<string, readonly string[]>;
   /** Explicit host jobs whose ProgramArguments are staged outside a member surface. */
-  hostAuxiliaries?: readonly { label: string; plistPath: string; staged: string; expectCurrent: string }[];
+  hostAuxiliaries?: readonly { label: string; plistPath: string; installedSha256: string; staged: string; expectCurrent: string }[];
   /** The fleet console has a separate wrapper link and is never inferred from the bot wrapper. */
   hostLaunchers?: readonly { label: string; plistPath: string; link: string; wrapper: 'whatsoup-fleet'; expectCurrent: string }[];
   /** Watchdogs are stopped before selectors move and restarted only after a verified terminal state. */
@@ -36,7 +41,7 @@ export interface HostUnitApplyContext {
 }
 
 export interface HostUnitApplyOutcome {
-  outcome: 'activated' | 'refused' | 'rolled-back' | 'rollback-unverified' | 'rollback-blocked-migrated';
+  outcome: 'activated' | 'refused' | 'rolled-back' | 'rollback-unverified' | 'rollback-blocked-migrated' | 'rollback-blocked-refresh-fence';
   backupPath: string | null;
   failure: string | null;
   steps: StepRecord[];
@@ -60,17 +65,32 @@ function schema(pathname: string, before: number): { after: number | null; error
   catch (error) { return { after: null, error: error instanceof Error ? error.message : String(error), changed: true }; }
 }
 
-/** Apply only after the caller has rebuilt and accepted the complete host plan. */
+function memberRecords(context: HostUnitApplyContext): HostUnitApplyOutcome['members'] {
+  return context.members.map((member) => ({ instance: member.args.instance, verification: null, schemaBefore: null, schemaAfter: null, schemaError: null, databaseBackup: null }));
+}
+
+/**
+ * Apply only after the caller has rebuilt and accepted the complete host plan,
+ * as the only writer of this user's launchd state: the same activation lock as
+ * `release:activate`, so a held lock refuses before any effect.
+ */
 export async function applyHostUnitActivation(host: ActivationHost, context: HostUnitApplyContext): Promise<HostUnitApplyOutcome> {
+  const representative = context.members[0];
+  const refused = (failure: string, steps: StepRecord[]): HostUnitApplyOutcome => ({ outcome: 'refused', backupPath: null, failure, steps, members: memberRecords(context), schemaGates: [], rollback: null });
+  if (representative === undefined) return refused('host unit has no members', []);
+  return withActivationLock(representative.home,
+    (failure) => refused(failure, [{ step: 'acquire-activation-lock', ok: false, detail: failure }]),
+    () => applyHoldingLock(host, context, representative));
+}
+
+async function applyHoldingLock(host: ActivationHost, context: HostUnitApplyContext, representative: ActivationContext): Promise<HostUnitApplyOutcome> {
   const steps: StepRecord[] = [];
   const schemaGates: HostUnitApplyOutcome['schemaGates'] = [];
-  const members = context.members.map((member) => ({ instance: member.args.instance, verification: null as InstanceObservation | null, schemaBefore: null as number | null, schemaAfter: null as number | null, schemaError: null as string | null, databaseBackup: null as { path: string; pages: number; quickCheck: 'ok' } | null }));
+  const members = memberRecords(context);
   const backupPath = path.join(context.backupDir, `activation-host-${context.commit.slice(0, 12)}-${stamp(host.now())}`);
   const fail = (outcome: HostUnitApplyOutcome['outcome'], failure: string, rollback: HostUnitApplyOutcome['rollback'] = null): HostUnitApplyOutcome => ({ outcome, backupPath: existsSync(backupPath) ? backupPath : null, failure, steps, members, schemaGates, rollback });
   const primary = allLabels(context.members, 'primary');
   const memberAuxiliaries = allLabels(context.members, 'aux');
-  const representative = context.members[0];
-  if (representative === undefined) return fail('refused', 'host unit has no members');
   const hostAuxiliaries = context.hostAuxiliaries ?? [];
   const hostLaunchers = context.hostLaunchers ?? [];
   const watchdogs = context.watchdogs ?? [];
@@ -83,6 +103,23 @@ export async function applyHostUnitActivation(host: ActivationHost, context: Hos
     ...[...context.sharedLaunchers.keys()].map((link) => ({ link, target: wrapperTargetFor(context.release) })),
     ...hostLaunchers.map((launcher) => ({ link: launcher.link, target: path.join(context.release, 'deploy', launcher.wrapper) })),
   ];
+  // What the plan accepted: each launcher on a declared old release, each written plist at its planned digest.
+  const identity: ActivationIdentity = {
+    links: [
+      ...[...context.sharedLaunchers.keys()].map((link) => ({
+        link, previous: context.members.filter((member) => member.wrapperLink === link).map((member) => wrapperTargetFor(member.args.expectCurrent)), activated: wrapperTargetFor(context.release),
+      })),
+      ...hostLaunchers.map((launcher) => ({
+        link: launcher.link, previous: [path.join(launcher.expectCurrent, 'deploy', launcher.wrapper)], activated: path.join(context.release, 'deploy', launcher.wrapper),
+      })),
+    ],
+    plists: [...context.members.flatMap((member) => member.staged), ...hostAuxiliaries],
+  };
+  const identityHolds = (step: string, sides: readonly ActivationSide[], records: StepRecord[]): boolean => {
+    const foreign = activationIdentityFailure(identity, sides);
+    records.push(foreign === null ? { step, ok: true } : { step, ok: false, detail: foreign });
+    return foreign === null;
+  };
 
   const installedMatchesLoaded = async (label: string, plistPath: string): Promise<boolean> => {
     try {
@@ -170,6 +207,12 @@ export async function applyHostUnitActivation(host: ActivationHost, context: Hos
     }
     for (const launcher of launchers) writeFileSync(path.join(backupPath, `launcher-${Buffer.from(launcher.link).toString('hex')}.before`), readlinkSync(launcher.link), { mode: PRIVATE_FILE_MODE });
     steps.push({ step: 'backup-and-stage-all-members-and-host-auxiliaries', ok: true });
+    // A missing or outdated root helper refuses here, before the switch, not as a failed switch and a rollback.
+    const helperCheck = checkRootPlistHelper(host, identity.plists.map((entry) => entry.plistPath));
+    if (helperCheck !== null) {
+      steps.push(helperCheck);
+      if (!helperCheck.ok) return fail('refused', helperCheck.detail!);
+    }
   } catch (error) { return fail('refused', error instanceof Error ? error.message : String(error)); }
 
   const previous = new Map<string, number | null>();
@@ -182,7 +225,24 @@ export async function applyHostUnitActivation(host: ActivationHost, context: Hos
       return fail(restored ? 'refused' : 'rollback-unverified', error);
     }
   }
+  // release:activate's rechecks before its switch, for every member. Only the watchdogs have changed so far.
+  let refusal: string | null = null;
+  for (const member of context.members) {
+    const fence = recheckCandidateRefreshRollbackFence(member);
+    steps.push({ step: `recheck-refresh-rollback-fence-requirement-before-switch:${member.args.instance}`, ok: fence.ok, detail: fence.detail });
+    if (!fence.ok) { refusal = 'refresh rollback fence requirement changed or cannot be revalidated before switch'; break; }
+    const consumer = await recheckBotErrorsHealthConsumer(host, member);
+    if (consumer !== null) steps.push({ ...consumer, step: `${consumer.step}:${member.args.instance}` });
+    if (consumer !== null && !consumer.ok) { refusal = BOT_ERRORS_HEALTH_CONSUMER_CHANGED; break; }
+  }
+  // No await from this recheck into the first writePlist, which then rechecks each plist against its backup.
+  if (refusal === null && !identityHolds('recheck-live-identity-before-switch', ['previous'], steps)) refusal = steps.at(-1)!.detail!;
+  if (refusal !== null) {
+    const restored = await restoreWatchdogs(steps);
+    return fail(restored ? 'refused' : 'rollback-unverified', refusal);
+  }
   let failure: string | null = null;
+  let protectionUnconfirmed = false;
   let watchdogsMayBeRunning = false;
   try {
     for (const launcher of launchers) repointSymlink(launcher.link, launcher.target);
@@ -202,7 +262,11 @@ export async function applyHostUnitActivation(host: ActivationHost, context: Hos
       steps.push(error === null ? { step: `reload:${item.label}`, ok: true } : { step: `reload:${item.label}`, ok: false, detail: error });
       if (error !== null) { failure = error; break; }
     }
-  } catch (error) { failure = error instanceof Error ? error.message : String(error); steps.push({ step: 'switch', ok: false, detail: failure }); }
+  } catch (error) {
+    failure = error instanceof Error ? error.message : String(error);
+    protectionUnconfirmed = isUnconfirmedPlistProtection(error);
+    steps.push({ step: 'switch', ok: false, detail: failure });
+  }
 
   if (failure === null) for (const member of context.members) {
     const result = await verifyInstance(host, member, { entrypoint: bootstrapEntrypointFor(context.release), commit: member.newCommit, previousPid: previous.get(member.instanceLabel) ?? null, requireResponderPid: true });
@@ -218,6 +282,7 @@ export async function applyHostUnitActivation(host: ActivationHost, context: Hos
     steps.push(hostSelectors === null ? { step: 'verify-host-auxiliaries', ok: true } : { step: 'verify-host-auxiliaries', ok: false, detail: hostSelectors });
     if (hostSelectors !== null) failure = hostSelectors;
   }
+  if (failure === null && !identityHolds('verify-live-identity', ['activated'], steps)) failure = steps.at(-1)!.detail!;
   if (failure === null) {
     watchdogsMayBeRunning = true;
     const restored = await restoreWatchdogs(steps);
@@ -239,7 +304,18 @@ export async function applyHostUnitActivation(host: ActivationHost, context: Hos
     schemaGates.push({ stage, members: observations });
     return clear;
   };
-  const rollbackSteps: StepRecord[] = [];
+  // A plist write that may have dropped protection makes every rollback unverified, as in release:activate.
+  const rollbackSteps: StepRecord[] = protectionUnconfirmed ? [{ ...UNCONFIRMED_PLIST_PROTECTION_STEP }] : [];
+  // The old release must still provide each candidate's refresh rollback fence, or it is never restarted.
+  const refreshFenceBlocks = (stage: 'before-instance-stop' | 'after-instance-stop'): boolean => {
+    let blocked = false;
+    for (const member of context.members) {
+      const fence = recheckRollbackRefreshFenceTarget(member);
+      rollbackSteps.push({ step: `recheck-refresh-rollback-fence-${stage}:${member.args.instance}`, ok: fence.ok, detail: fence.detail });
+      if (!fence.ok) blocked = true;
+    }
+    return blocked;
+  };
   if (watchdogsMayBeRunning) {
     for (const watchdog of watchdogs) {
       const stopped = await stopLabel(host, representative, watchdog.label);
@@ -247,13 +323,18 @@ export async function applyHostUnitActivation(host: ActivationHost, context: Hos
       if (stopped !== null) return fail('rollback-unverified', failure, { verified: false, steps: rollbackSteps });
     }
   }
-  if (!gate('before-rollback')) return fail('rollback-blocked-migrated', failure, watchdogsMayBeRunning ? { verified: false, steps: rollbackSteps } : null);
+  if (!gate('before-rollback')) return fail('rollback-blocked-migrated', failure, watchdogsMayBeRunning || protectionUnconfirmed ? { verified: false, steps: rollbackSteps } : null);
+  if (refreshFenceBlocks('before-instance-stop')) return fail('rollback-blocked-refresh-fence', failure, { verified: false, steps: rollbackSteps });
+  // Either side of each file is still this run's own; anything else is another writer's state.
+  if (!identityHolds('recheck-live-identity-before-instance-stop', ['previous', 'activated'], rollbackSteps)) return fail('rollback-unverified', failure, { verified: false, steps: rollbackSteps });
   for (const item of [...primary, ...auxiliary]) {
     const stopped = await stopLabel(host, item.context, item.label);
     rollbackSteps.push(stopped === null ? { step: `stop:${item.label}`, ok: true } : { step: `stop:${item.label}`, ok: false, detail: stopped ?? undefined });
     if (stopped !== null) return fail('rollback-unverified', failure, { verified: false, steps: rollbackSteps });
   }
   if (!gate('after-quiesce')) return fail('rollback-blocked-migrated', failure, { verified: false, steps: rollbackSteps });
+  if (refreshFenceBlocks('after-instance-stop')) return fail('rollback-blocked-refresh-fence', failure, { verified: false, steps: rollbackSteps });
+  if (!identityHolds('recheck-live-identity-before-restore', ['previous', 'activated'], rollbackSteps)) return fail('rollback-unverified', failure, { verified: false, steps: rollbackSteps });
   try {
     for (const launcher of launchers) repointSymlink(launcher.link, readFileSync(path.join(backupPath, `launcher-${Buffer.from(launcher.link).toString('hex')}.before`), 'utf8'));
     // A plist the forward switch never reached still holds its original; any other must hold the staged bytes.

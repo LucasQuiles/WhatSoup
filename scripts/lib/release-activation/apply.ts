@@ -168,6 +168,18 @@ function writeAtomic(filePath: string, contents: string, mode: number): void {
  */
 class RootHelperRecoveryIncomplete extends Error {}
 
+/** Whether a failed plist write left protection unconfirmed, so no later rollback can be verified. */
+export function isUnconfirmedPlistProtection(error: unknown): boolean {
+  return error instanceof RootHelperRecoveryIncomplete;
+}
+
+/** The failing rollback step recorded after such a write. */
+export const UNCONFIRMED_PLIST_PROTECTION_STEP: Readonly<StepRecord> = {
+  step: 'confirm-plist-protection',
+  ok: false,
+  detail: 'the root plist helper reported incomplete recovery; inspect the plist and its uchg flag',
+};
+
 /** How a root helper run that did not confirm protection ended, for the operator message. */
 function unconfirmedRootHelperRun(result: ExecResult): string {
   if (result.timedOut === true) return 'root plist helper timed out without confirming protection';
@@ -190,6 +202,19 @@ function installedRootHelperFailure(): string | null {
     return error instanceof Error ? error.message : String(error);
   }
   return rootHelperFailure(pin, readInstalledRootHelper(pin.path));
+}
+
+/**
+ * When any listed plist needs the root helper, the step recording whether the
+ * installed helper matches this tree's pin; null when none needs it. A missing
+ * or outdated helper must refuse before the switch, not fail it midway.
+ */
+export function checkRootPlistHelper(host: ActivationHost, plistPaths: readonly string[]): StepRecord | null {
+  if (!plistPaths.some((plistPath) => needsRootHelper(host, plistPath))) return null;
+  const helperFailure = installedRootHelperFailure();
+  return helperFailure === null
+    ? { step: 'check-root-plist-helper', ok: true }
+    : { step: 'check-root-plist-helper', ok: false, detail: helperFailure };
 }
 
 /**
@@ -547,19 +572,26 @@ interface SchemaLevelCheck {
   changed: boolean;
 }
 
-type ActivationSide = 'previous' | 'activated';
+export type ActivationSide = 'previous' | 'activated';
+
+/** The live state one activation owns: each link's planned targets and each plist's planned and staged bytes. */
+export interface ActivationIdentity {
+  links: ReadonlyArray<{ link: string; previous: readonly string[]; activated: string }>;
+  plists: ReadonlyArray<{ label: string; plistPath: string; installedSha256: string; staged: string | null }>;
+}
 
 /**
- * Why the live wrapper symlink or a plist is not on one of the named sides of
- * this activation; null when all are. The lock stops other activations and
+ * Why a live link or plist is not on one of the named sides of this
+ * activation; null when all are. The lock stops other activations and
  * reconciles, and this catches any writer that changed the state regardless.
  */
-function foreignWriterFailure(context: ActivationContext, sides: readonly ActivationSide[]): string | null {
-  const { args } = context;
+export function activationIdentityFailure(identity: ActivationIdentity, sides: readonly ActivationSide[]): string | null {
   try {
-    const targets = sides.map((side) => wrapperTargetFor(side === 'previous' ? args.expectCurrent : args.release));
-    if (!targets.includes(readlinkSync(context.wrapperLink))) return 'wrapper symlink changed outside this activation';
-    for (const entry of context.staged) {
+    for (const entry of identity.links) {
+      const targets = sides.flatMap((side) => (side === 'previous' ? entry.previous : [entry.activated]));
+      if (!targets.includes(readlinkSync(entry.link))) return 'wrapper symlink changed outside this activation';
+    }
+    for (const entry of identity.plists) {
       const digests = sides.map((side) => (side === 'previous' ? entry.installedSha256 : plistDigest(entry.staged!)));
       if (!digests.includes(plistDigest(readFileSync(entry.plistPath, 'utf8')))) {
         return `${entry.label}: installed plist changed outside this activation`;
@@ -569,6 +601,31 @@ function foreignWriterFailure(context: ActivationContext, sides: readonly Activa
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }
+}
+
+function foreignWriterFailure(context: ActivationContext, sides: readonly ActivationSide[]): string | null {
+  const { args } = context;
+  return activationIdentityFailure({
+    links: [{ link: context.wrapperLink, previous: [wrapperTargetFor(args.expectCurrent)], activated: wrapperTargetFor(args.release) }],
+    plists: context.staged,
+  }, sides);
+}
+
+export const BOT_ERRORS_HEALTH_CONSUMER_CHANGED = 'BOT ERRORS health consumer changed or no longer satisfies the selector capability';
+
+/** The step comparing the loaded BOT ERRORS health consumer with the one sealed at plan time; null when none was sealed. */
+export async function recheckBotErrorsHealthConsumer(host: ActivationHost, context: ActivationContext): Promise<StepRecord | null> {
+  const planned = context.botErrorsHealthConsumer;
+  if (planned === null) return null;
+  const consumer = await readBotErrorsHealthConsumer(host, context.domain, context.home);
+  const sameConsumer = consumer.consumer !== null
+    && consumer.consumer.root === planned.root
+    && consumer.consumer.capability === planned.capability
+    && consumer.consumer.capability >= planned.required
+    && consumer.consumer.manifestSha256 === planned.manifestSha256
+    && consumer.consumer.runnerSha256 === planned.runnerSha256
+    && consumer.consumer.checkerSha256 === planned.checkerSha256;
+  return { step: 'recheck-bot-errors-health-consumer-before-switch', ok: sameConsumer, detail: consumer.detail };
 }
 
 function checkSchemaLevel(dbPath: string, before: number): SchemaLevelCheck {
@@ -672,23 +729,27 @@ async function rollback(
  * effect, including the backup directory.
  */
 export async function applyActivation(host: ActivationHost, context: ActivationContext): Promise<ApplyOutcome> {
+  return withActivationLock(context.home, (failure) => ({
+    outcome: 'refused',
+    backupPath: null,
+    steps: [{ step: 'acquire-activation-lock', ok: false, detail: failure }],
+    failure,
+    verification: null,
+    schemaMigration: { before: null, after: null, afterError: null, blockedAt: null },
+    rollback: null,
+  }), () => applyHoldingLock(host, context));
+}
+
+/** Run `apply` as the only writer of the launchd state under `home`; a held lock returns `refused(reason)` with no effect. */
+export async function withActivationLock<T>(home: string, refused: (failure: string) => T, apply: () => Promise<T>): Promise<T> {
   let lock: ProcessLockHandle;
   try {
-    lock = acquireActivationLock(context.home);
+    lock = acquireActivationLock(home);
   } catch (error) {
-    const failure = error instanceof Error ? error.message : String(error);
-    return {
-      outcome: 'refused',
-      backupPath: null,
-      steps: [{ step: 'acquire-activation-lock', ok: false, detail: failure }],
-      failure,
-      verification: null,
-      schemaMigration: { before: null, after: null, afterError: null, blockedAt: null },
-      rollback: null,
-    };
+    return refused(error instanceof Error ? error.message : String(error));
   }
   try {
-    return await applyHoldingLock(host, context);
+    return await apply();
   } finally {
     // A lock that cannot be removed names this pid, so the next run reclaims it once this process exits.
     try { releaseProcessLock(lock); } catch { /* the outcome stands */ }
@@ -744,12 +805,10 @@ async function applyHoldingLock(host: ActivationHost, context: ActivationContext
     }
     steps.push({ step: 'stage-plists', ok: true });
     // A missing or outdated root helper refuses here, before the switch, not as a failed switch and a rollback.
-    if (context.staged.some((entry) => needsRootHelper(host, entry.plistPath))) {
-      const helperFailure = installedRootHelperFailure();
-      steps.push(helperFailure === null
-        ? { step: 'check-root-plist-helper', ok: true }
-        : { step: 'check-root-plist-helper', ok: false, detail: helperFailure });
-      if (helperFailure !== null) return refuse(helperFailure, backupPath);
+    const helperCheck = checkRootPlistHelper(host, context.staged.map((entry) => entry.plistPath));
+    if (helperCheck !== null) {
+      steps.push(helperCheck);
+      if (!helperCheck.ok) return refuse(helperCheck.detail!, backupPath);
     }
   } catch (error) {
     return refuse(error instanceof Error ? error.message : String(error), existsSync(backupPath) ? backupPath : null);
@@ -766,22 +825,11 @@ async function applyHoldingLock(host: ActivationHost, context: ActivationContext
     if (!candidateRefreshFence.ok) {
       return refuse('refresh rollback fence requirement changed or cannot be revalidated before switch', backupPath);
     }
-    if (context.botErrorsHealthConsumer !== null) {
-      const consumer = await readBotErrorsHealthConsumer(host, context.domain, context.home);
-      const sameConsumer = consumer.consumer !== null
-        && consumer.consumer.root === context.botErrorsHealthConsumer.root
-        && consumer.consumer.capability === context.botErrorsHealthConsumer.capability
-        && consumer.consumer.capability >= context.botErrorsHealthConsumer.required
-        && consumer.consumer.manifestSha256 === context.botErrorsHealthConsumer.manifestSha256
-        && consumer.consumer.runnerSha256 === context.botErrorsHealthConsumer.runnerSha256
-        && consumer.consumer.checkerSha256 === context.botErrorsHealthConsumer.checkerSha256;
-      steps.push({
-        step: 'recheck-bot-errors-health-consumer-before-switch',
-        ok: sameConsumer,
-        detail: consumer.detail,
-      });
-      if (!sameConsumer) {
-        return refuse('BOT ERRORS health consumer changed or no longer satisfies the selector capability', backupPath);
+    const consumerCheck = await recheckBotErrorsHealthConsumer(host, context);
+    if (consumerCheck !== null) {
+      steps.push(consumerCheck);
+      if (!consumerCheck.ok) {
+        return refuse(BOT_ERRORS_HEALTH_CONSUMER_CHANGED, backupPath);
       }
     }
     // No await from this recheck through the symlink switch into the first writePlist call. Each plist
@@ -854,11 +902,7 @@ async function applyHoldingLock(host: ActivationHost, context: ActivationContext
   }
   const { blocked, ...rolledBack } = await rollback(host, context, backupPath, schemaBefore);
   if (protectionUnconfirmed) {
-    rolledBack.steps.push({
-      step: 'confirm-plist-protection',
-      ok: false,
-      detail: 'the root plist helper reported incomplete recovery; inspect the plist and its uchg flag',
-    });
+    rolledBack.steps.push({ ...UNCONFIRMED_PLIST_PROTECTION_STEP });
     rolledBack.verified = false;
   }
   if (rolledBack.refreshFenceBlockedAt !== null) {

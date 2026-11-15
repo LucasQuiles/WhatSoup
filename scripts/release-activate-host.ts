@@ -4,11 +4,13 @@ import { pathToFileURL } from 'node:url';
 
 import { writeAtomicPrivateFileSync } from '../src/lib/private-fs.ts';
 import { CliArgError, isHelpFlag, takeValue } from './lib/cli-args.ts';
-import { applyHostUnitActivation } from './lib/release-activation/host-unit-apply.ts';
+import { applyHostUnitActivation, type HostUnitApplyOutcome } from './lib/release-activation/host-unit-apply.ts';
+import { RELEASE_ACTIVATE_EXIT } from './release-activate.ts';
 import { createDefaultActivationHost, type ActivationHost } from './lib/release-activation/host.ts';
 import { buildHostUnitPlan } from './lib/release-activation/host-unit-plan.ts';
 
-export const RELEASE_ACTIVATE_HOST_EXIT = { ok: 0, rolledBack: 1, refused: 2, rollbackUnverified: 3, rollbackBlockedMigrated: 4 } as const;
+/** The same exit codes as release:activate, including 5 for a rollback the refresh fence blocked. */
+export const RELEASE_ACTIVATE_HOST_EXIT = RELEASE_ACTIVATE_EXIT;
 export interface HostActivationArgs { unit: string; release: string; backupDir: string; mode: 'plan' | 'apply'; exitTimeoutSeconds: number; verifyTimeoutSeconds: number; }
 const USAGE = 'Usage: release:activate-host --unit /absolute/host-unit.json --release /absolute/release --backup-dir /absolute/backups [--exit-timeout S] [--verify-timeout S] [--plan|--apply]';
 function absolute(flag: string, value: string): string { if (!path.isAbsolute(value)) throw new CliArgError(`${flag} must be an absolute path`); return path.normalize(value).replace(/\/+$/, '') || '/'; }
@@ -25,11 +27,12 @@ export function parseHostActivationArgs(argv: readonly string[]): HostActivation
   const required = (flag: string) => { const value = values.get(flag); if (!value) throw new CliArgError(`${flag} is required`); return absolute(flag, value); };
   return { unit: required('--unit'), release: required('--release'), backupDir: required('--backup-dir'), mode: mode ?? 'plan', exitTimeoutSeconds: values.has('--exit-timeout') ? seconds('--exit-timeout', values.get('--exit-timeout')!) : 60, verifyTimeoutSeconds: values.has('--verify-timeout') ? seconds('--verify-timeout', values.get('--verify-timeout')!) : 180 };
 }
-function outcomeExit(outcome: 'activated' | 'refused' | 'rolled-back' | 'rollback-unverified' | 'rollback-blocked-migrated'): number {
+function outcomeExit(outcome: HostUnitApplyOutcome['outcome']): number {
   if (outcome === 'activated') return RELEASE_ACTIVATE_HOST_EXIT.ok;
   if (outcome === 'rolled-back') return RELEASE_ACTIVATE_HOST_EXIT.rolledBack;
   if (outcome === 'rollback-unverified') return RELEASE_ACTIVATE_HOST_EXIT.rollbackUnverified;
   if (outcome === 'rollback-blocked-migrated') return RELEASE_ACTIVATE_HOST_EXIT.rollbackBlockedMigrated;
+  if (outcome === 'rollback-blocked-refresh-fence') return RELEASE_ACTIVATE_HOST_EXIT.rollbackBlockedRefreshFence;
   return RELEASE_ACTIVATE_HOST_EXIT.refused;
 }
 
