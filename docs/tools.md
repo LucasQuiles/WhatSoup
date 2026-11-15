@@ -3768,7 +3768,7 @@ the protected WhatsApp transport and never returned by the tool.
 | kind | enum | yes | `password`, `token`, or `mfa`. MFA requires a current consumer-side challenge; callers cannot supply a challenge. |
 | purpose | string | yes | Reason for the one-use input request. |
 
-**Returns:** `{ id, resourceId, accountLabel, consumerLabel, action, kind, saveAllowed, expiresAt, inputState, deliveryStatus }`.
+**Returns:** `{ id, resourceId, accountLabel, consumerLabel, action, kind, saveAllowed, expiresAt, inputState, deliveryStatus, operationResult }`. This tool always returns `operationResult: null`; read the recorded result with `get_secret_input_status`.
 
 ### get_secret_input_status
 
@@ -3786,7 +3786,12 @@ separate WhatsApp transport receipt state.
 |---|---|---|---|
 | input_id | string | yes | Opaque secret-input identifier. |
 
-**Returns:** `{ id, resourceId, accountLabel, consumerLabel, action, kind, saveAllowed, expiresAt, inputState, deliveryStatus }`.
+**Returns:** `{ id, resourceId, accountLabel, consumerLabel, action, kind, saveAllowed, expiresAt, inputState, deliveryStatus, operationResult }`.
+`operationResult` is `null`, `{ phase: "password", outcome: "mfa_required" }`, or
+`{ phase, outcome: "completed" }` with `phase` equal to `kind`. It is read from the
+managed service on every call and is non-null only when `inputState` is `succeeded`.
+`null` leaves completion unknown, and `mfa_required` does not mean that a login
+completed or that a challenge is still open.
 
 ### cancel_secret_input
 
@@ -3804,7 +3809,7 @@ managed delivery service.
 |---|---|---|---|
 | input_id | string | yes | Opaque secret-input identifier. |
 
-**Returns:** `{ id, resourceId, accountLabel, consumerLabel, action, kind, saveAllowed, expiresAt, inputState, deliveryStatus }`.
+**Returns:** `{ id, resourceId, accountLabel, consumerLabel, action, kind, saveAllowed, expiresAt, inputState, deliveryStatus, operationResult }`, with `operationResult` as for `get_secret_input_status`.
 
 ### request_rustdesk_access
 
