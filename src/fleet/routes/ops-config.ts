@@ -53,6 +53,7 @@ import { writePrivateFileSync } from '../../lib/private-fs.ts';
 import { projectError, validationError, configValidationError } from '../response-error-projection.ts';
 import { validateInstanceName } from './instance-name.ts';
 import { projectClientOutputPolicyConfig } from '../../core/client-output-policy-config.ts';
+import { findProtectedMarkerPath } from '../../core/protected-message.ts';
 import type { OpsDeps } from './ops.ts';
 
 // Same component name as ops.ts: log lines from the moved code are unchanged.
@@ -106,6 +107,17 @@ export async function handleConfigUpdate(
     }
   } catch (err) {
     jsonResponse(res, 400, validationError('invalid_json', 'unknown'));
+    return;
+  }
+
+  // The console reads config through a projection that replaces protected
+  // links with a marker. Saving that text back would replace the stored link
+  // with the marker, so refuse it; the path is named, never the value.
+  const markerPath = findProtectedMarkerPath(patch);
+  if (markerPath !== null) {
+    jsonResponse(res, 400, {
+      error: `${markerPath} contains the protected-link redaction marker; enter the full value instead of the redacted one`,
+    });
     return;
   }
 
@@ -486,8 +498,9 @@ export function validatePluginDirs(dirs: unknown[], res: ServerResponse): boolea
 }
 
 /**
- * Confine the launchd `service` block's filesystem fields — `claudeConfigDir`
- * and every `pathPrepend` entry — to the instance user's home directory.
+ * Confine the launchd `service` block's filesystem fields — `claudeConfigDir`,
+ * non-empty `claudeSecureStorageConfigDir`, and every `pathPrepend` entry —
+ * to the instance user's home directory.
  *
  * Deliberately a ROUTE guard rather than a rule in
  * `validateLaunchdServiceConfig` (src/lib/launchd-service-config.ts): that
@@ -528,6 +541,15 @@ export function validateServiceHomeConfinement(service: unknown, res: ServerResp
     );
     if (accepted === null) return false;
     block['claudeConfigDir'] = accepted[0];
+  }
+
+  const claudeSecureStorageConfigDir = block['claudeSecureStorageConfigDir'];
+  if (claudeSecureStorageConfigDir !== undefined && claudeSecureStorageConfigDir !== '') {
+    const accepted = validateHomeConfinedPathList(
+      [claudeSecureStorageConfigDir], res, () => 'service.claudeSecureStorageConfigDir',
+    );
+    if (accepted === null) return false;
+    block['claudeSecureStorageConfigDir'] = accepted[0];
   }
 
   const pathPrepend = block['pathPrepend'];

@@ -32,7 +32,11 @@ function fixture(suffix = 'a') {
   const config = {
     name, type: 'agent', accessMode: 'self_only', healthPort: 8123,
     adminPhones: ['15550000001'],
-    service: { claudeConfigDir: join(root, 'provider'), pathPrepend: [] },
+    service: {
+      claudeConfigDir: join(root, 'provider'),
+      claudeSecureStorageConfigDir: '',
+      pathPrepend: [],
+    },
   };
   expect(validateInstanceConfig(config, { name, mode: 'load' })).toBeNull();
   const host = { tier: 'alert', probe: 'local', role: 'collector', principal: `user-${suffix}`, services: [],
@@ -124,6 +128,19 @@ describe('deployment effective configuration', () => {
       .toMatchObject({ presence: 'absent' });
     expect(result.fields.find((field) => field.field === 'configured.service.pathPrepend'))
       .toMatchObject({ presence: 'value', value: [] });
+  });
+
+  it('admits and records an explicit empty secure-store selector without treating it as absent', () => {
+    const f = fixture();
+    f.save(f.bindingPath, {
+      ...f.binding,
+      requested: { ...f.binding.requested, service: { claudeSecureStorageConfigDir: '' } },
+    });
+    const result = resolveDeploymentEffectiveConfig(f.options);
+    expect(result.configured.service.claudeSecureStorageConfigDir).toBe('');
+    expect(result.requested.service).toEqual({ claudeSecureStorageConfigDir: '' });
+    expect(result.fields.find((field) => field.field === 'configured.service.claudeSecureStorageConfigDir'))
+      .toMatchObject({ presence: 'value', value: '' });
   });
 
   it.each([

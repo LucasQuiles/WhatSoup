@@ -53,6 +53,8 @@ export interface OutboundSendReadRow {
 export interface OutboundSendsWriter {
   writeIntent(input: OutboundSendIntentInput): OutboundSendIntentReceipt;
   markSuccess(id: number): void;
+  /** Finalize an admitted intent that was deliberately not passed to a provider. */
+  markNotSent(id: number): void;
   markFailure(id: number, error: unknown): void;
   listRecent(options?: OutboundSendListOptions): OutboundSendReadRow[];
   maintain(options: OutboundSendMaintenanceOptions): OutboundSendMaintenanceResult;
@@ -100,6 +102,19 @@ export function createOutboundSendsWriter({
            retryable = ?,
            evidence_coverage = ?,
            provider_submission_count = ?,
+           completed_at = datetime('now')
+     WHERE id = ?
+       AND outcome_code = 'intent'
+  `);
+  const markNotSent = db.prepare(`
+    UPDATE outbound_sends
+       SET outcome_code = 'failed_not_sent',
+           failure_code = 'unknown',
+           failure_stage = 'not_started',
+           mutation_state = 'not_mutated',
+           retryable = 0,
+           evidence_coverage = 'typed',
+           provider_submission_count = 0,
            completed_at = datetime('now')
      WHERE id = ?
        AND outcome_code = 'intent'
@@ -161,6 +176,10 @@ export function createOutboundSendsWriter({
 
     markSuccess(id: number): void {
       assertFinalized(markSubmitted.run(id), selectOutcome, id);
+    },
+
+    markNotSent(id: number): void {
+      assertFinalized(markNotSent.run(id), selectOutcome, id);
     },
 
     markFailure(id: number, error: unknown): void {

@@ -230,6 +230,12 @@ export function buildPlist(name: string, renderOptions: LaunchdPlistRenderOption
           `    <string>${escapeXml(renderOptions.claudeConfigDir)}</string>`,
         ]
       : []),
+    ...(renderOptions.claudeSecureStorageConfigDir !== undefined
+      ? [
+          '    <key>CLAUDE_SECURESTORAGE_CONFIG_DIR</key>',
+          `    <string>${escapeXml(renderOptions.claudeSecureStorageConfigDir)}</string>`,
+        ]
+      : []),
     ...(whatsoupNode
       ? [
           '    <key>WHATSOUP_NODE</key>',
@@ -288,7 +294,8 @@ export interface LaunchdReconcileResult {
   dryRun: boolean;
   /**
    * Governed-environment comparison between the fresh render and the
-   * previously installed plist (CLAUDE_CONFIG_DIR, PATH, WHATSOUP_PATH_PREPEND
+   * previously installed plist (CLAUDE_CONFIG_DIR, CLAUDE_SECURESTORAGE_CONFIG_DIR,
+   * PATH, WHATSOUP_PATH_PREPEND
    * — by key and value digest, never values). The key set is
    * GOVERNED_LAUNCHD_ENV_KEYS; keep this list and that constant in step. Set on
    * every successful reconcile, dry-run included.
@@ -550,17 +557,24 @@ export function assertHomeConfinedRenderOptions(
   options: LaunchdPlistRenderOptions,
   homeDir: string = os.homedir(),
 ): LaunchdPlistRenderOptions {
-  const entries: Array<{ field: string; value: string; index?: number }> = [];
+  const entries: Array<{ field: string; value: string; kind: 'claude-config' | 'secure-store' | 'path-prepend'; index?: number }> = [];
   const pathPrepend = options.pathPrepend ? [...options.pathPrepend] : undefined;
   const accepted = { ...options, ...(pathPrepend ? { pathPrepend } : {}) };
   if (options.claudeConfigDir !== undefined) {
-    entries.push({ field: 'service.claudeConfigDir', value: options.claudeConfigDir });
+    entries.push({ field: 'service.claudeConfigDir', value: options.claudeConfigDir, kind: 'claude-config' });
+  }
+  if (options.claudeSecureStorageConfigDir !== undefined && options.claudeSecureStorageConfigDir !== '') {
+    entries.push({
+      field: 'service.claudeSecureStorageConfigDir',
+      value: options.claudeSecureStorageConfigDir,
+      kind: 'secure-store',
+    });
   }
   (options.pathPrepend ?? []).forEach((value, index) => {
-    entries.push({ field: `service.pathPrepend[${index}]`, value, index });
+    entries.push({ field: `service.pathPrepend[${index}]`, value, kind: 'path-prepend', index });
   });
 
-  for (const { field, value, index } of entries) {
+  for (const { field, value, kind, index } of entries) {
     // Fail closed WITHOUT consulting the filesystem or the working directory.
     if (!isCanonicalAbsolutePath(value)) {
       throw new LaunchdRenderConfigError(
@@ -575,8 +589,9 @@ export function assertHomeConfinedRenderOptions(
         `${field} must resolve to a path inside the home directory`,
       );
     }
-    if (index === undefined) accepted.claudeConfigDir = physical;
-    else if (pathPrepend) pathPrepend[index] = physical;
+    if (kind === 'claude-config') accepted.claudeConfigDir = physical;
+    else if (kind === 'secure-store') accepted.claudeSecureStorageConfigDir = physical;
+    else if (pathPrepend && index !== undefined) pathPrepend[index] = physical;
   }
   return accepted;
 }

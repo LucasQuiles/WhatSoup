@@ -26,6 +26,21 @@ describe('validateLaunchdServiceConfig', () => {
     })).toBeNull();
   });
 
+  it('accepts an explicit empty or absolute Claude secure-storage selector', () => {
+    for (const claudeSecureStorageConfigDir of ['', '/opt/claude-roots/credential-store']) {
+      expect(validateLaunchdServiceConfig({
+        service: { claudeSecureStorageConfigDir },
+      })).toBeNull();
+    }
+  });
+
+  it('rejects invalid non-empty Claude secure-storage selectors', () => {
+    for (const claudeSecureStorageConfigDir of ['relative/root', ' /opt/claude-roots/store', '/opt/claude\nroots', 42]) {
+      const error = validateLaunchdServiceConfig({ service: { claudeSecureStorageConfigDir } });
+      expect(error).toMatchObject({ field: 'service.claudeSecureStorageConfigDir' });
+    }
+  });
+
   it('rejects a non-object service block', () => {
     for (const service of ['x', 42, ['/opt/service-bin']]) {
       const error = validateLaunchdServiceConfig({ service });
@@ -113,10 +128,12 @@ describe('extractLaunchdPlistRenderOptions', () => {
     expect(extractLaunchdPlistRenderOptions({
       service: {
         claudeConfigDir: '/opt/claude-roots/phbot',
+        claudeSecureStorageConfigDir: '',
         pathPrepend: ['/opt/service-bin'],
       },
     })).toEqual({
       claudeConfigDir: '/opt/claude-roots/phbot',
+      claudeSecureStorageConfigDir: '',
       pathPrepend: ['/opt/service-bin'],
     });
   });

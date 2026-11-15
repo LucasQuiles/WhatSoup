@@ -1417,27 +1417,28 @@ describe('exact added lines', () => {
     expect(result.accounting.limit.changeCount).toBe(2);
   });
 
-  it('enforces each narrowed materialization pool at its real boundary', () => {
-    const addedCase = (content: string, overrides: Partial<ExactAddedLineBudgetV1>) => {
-      const { root, baseOid } = fixture();
-      write(root, 'added.txt', content);
-      const candidateOid = commit(root, 'added budget fixture');
-      return () => readExactAddedLinesWithinBudget(root, {
-        baseOid,
-        candidateOid,
-        budget: addedLineBudget(overrides),
-      });
-    };
+  it.each([
+    ['change count', 'x', { changeCount: 0 }],
+    ['source blob bytes', 'long-line', { sourceBlobBytes: Buffer.byteLength('long-line') - 1 }],
+    ['source line count', '\n\n', { sourceLineCount: 1 }],
+    ['added line count', '\n', { addedLineCount: 0 }],
+    ['added text bytes', 'é', { addedTextBytes: 1 }],
+  ] as [string, string, Partial<ExactAddedLineBudgetV1>][])('enforces narrowed %s at its real Git boundary', (
+    _pool,
+    content,
+    overrides,
+  ) => {
+    const { root, baseOid } = fixture();
+    write(root, 'added.txt', content);
+    const candidateOid = commit(root, 'added budget fixture');
+    expectCode(() => readExactAddedLinesWithinBudget(root, {
+      baseOid,
+      candidateOid,
+      budget: addedLineBudget(overrides),
+    }), 'ci.input.added-lines.budget');
+  });
 
-    expectCode(addedCase('x', { changeCount: 0 }), 'ci.input.added-lines.budget');
-    expectCode(addedCase('long-line', { sourceBlobBytes: Buffer.byteLength('long-line') - 1 }),
-      'ci.input.added-lines.budget');
-    expectCode(addedCase('\n\n', { sourceLineCount: 1 }), 'ci.input.added-lines.budget');
-    expectCode(addedCase('\n', { addedLineCount: 0 }), 'ci.input.added-lines.budget');
-    expectCode(addedCase('é', { addedTextBytes: 1 }), 'ci.input.added-lines.budget');
-
-    const baseOid = 'a'.repeat(40);
-    const candidateOid = 'b'.repeat(40);
+  it('enforces narrowed patch bytes at its shim boundary', () => {
     const oldBytes = Buffer.from('old\n');
     const newBytes = Buffer.from('new\n');
     const oldOid = blobOid(oldBytes);

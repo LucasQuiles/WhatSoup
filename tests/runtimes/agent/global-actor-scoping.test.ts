@@ -271,7 +271,7 @@ vi.mock('../../../src/core/workspace.ts', () => ({
 vi.mock('../../../src/mcp/socket-server.ts', () => ({
   // eslint-disable-next-line prefer-arrow-callback -- constructor mock requires function keyword; expires 2026-12-31
   WhatSoupSocketServer: vi.fn().mockImplementation(function (
-    _socketPath: string,
+    socketPath: string,
     _registry: unknown,
     session: { tier?: string },
     executingSessionResolver?: () => {
@@ -281,6 +281,7 @@ vi.mock('../../../src/mcp/socket-server.ts', () => ({
     },
   ) {
     const instance = {
+      socketPath,
       session,
       executingSessionResolver,
       start: vi.fn(),
@@ -451,6 +452,8 @@ describe('global-socket actor scoping (#2976 direction ii)', () => {
       actorJid: senderJid,
       purpose: undefined,
       conversationKey: toConversationKey(chatJid),
+      requestRef: expect.stringMatching(/^msg-actor-/),
+      workflowAuthority: undefined,
     });
 
     session.emit({ type: 'result', text: 'done' });
@@ -463,6 +466,57 @@ describe('global-socket actor scoping (#2976 direction ii)', () => {
         conversationKey: undefined,
       });
     }, { timeout: 4_000 });
+  });
+
+  it('shared scope: a scheduled turn publishes no request reference or workflow authority (M365 r5 W9)', async () => {
+    makeRuntime({ sessionScope: 'shared' });
+    await runtime.start();
+    const resolver = globalSocket().executingSessionResolver;
+
+    await arriveMessage({ content: 'scheduled scoping job', isSyntheticJob: true });
+    const session = await waitForInFlightTurn((t) => t.includes('scheduled scoping job'));
+    // Same human-request predicate as the per-chat site: a scheduled turn is not a human request.
+    expect(resolver!()).toMatchObject({
+      purpose: 'scheduled-agent-job',
+      requestRef: undefined,
+      workflowAuthority: undefined,
+    });
+
+    session.emit({ type: 'result', text: 'done' });
+    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+  });
+
+  it('sandboxPerChat: the session token is bound to the workspace socket it is served on, and to no other socket (M365 r4 W4)', async () => {
+    const { workspaceSocketPath } = await import('../../../src/core/workspace-paths.ts');
+    const workspace = await import('../../../src/core/workspace.ts');
+    vi.mocked(workspace.provisionWorkspace).mockImplementationOnce((options) => workspaceSocketPath(options.workspacePath));
+    makeRuntime({ sessionScope: 'per_chat', sandboxPerChat: true });
+    await runtime.start();
+
+    await arriveMessage({ content: 'sandbox token binding turn' });
+    const session = await waitForInFlightTurn((text) => text.includes('sandbox token binding turn'));
+    const served = (workspaceSocket() as unknown as { socketPath: string }).socketPath;
+    const ctorOpts = (session as unknown as {
+      ctorOpts: { whatsoupMcpSessionLease?: { token: string }; mcpSessionContext?: { turnReplySessionId?: string } };
+    }).ctorOpts;
+    const lease = ctorOpts.whatsoupMcpSessionLease;
+    const tokens = (runtime as unknown as { sessionTokens: { verify(token: unknown, socketPath: string): unknown } }).sessionTokens;
+    // The socket token carries the same turn-reply identity as the in-process bridge session.
+    const turnReplySessionId = ctorOpts.mcpSessionContext?.turnReplySessionId;
+
+    expect(served).toBe(workspaceSocketPath(`/tmp/whatsoup-test-ws-${chatJid.replace(/@.*$/, '')}`));
+    expect(turnReplySessionId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(tokens.verify(lease?.token, served)).toEqual({ kind: 'session', socketPath: served, turnReplySessionId });
+    for (const other of [
+      '/tmp/whatsoup-test-agent/.claude/whatsoup.sock',
+      workspaceSocketPath('/tmp/whatsoup-test-ws-15551230099'),
+      '/tmp/whatsoup-test-state/mcp/0123456789abcdef.sock',
+    ]) {
+      expect(tokens.verify(lease?.token, other)).toBeUndefined();
+    }
+
+    session.emit({ type: 'result', text: 'done' });
+    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
   });
 
   it('per_chat (non-sandbox): the global socket resolver never exposes a per-chat sender', async () => {

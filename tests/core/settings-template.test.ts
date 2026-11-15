@@ -7,6 +7,7 @@ import {
   isValidPermissionsSettings,
   AGENT_DEFAULT_ALLOW,
   REQUIRED_DENY,
+  M365_MUTATION_DENY,
   applyRequiredDeny,
 } from '../../src/core/settings-template.ts';
 import type { M365MutationPolicy } from '../../src/core/m365-bridge-policy.ts';
@@ -24,6 +25,10 @@ const approvedM365Policy: M365MutationPolicy = {
   childEnv: {
     ALLOW_M365_MUTATIONS: '1',
     MS365_AGENT365_BRIDGE: 'true',
+  },
+  workflowAuthority: {
+    accountId: 'bridge-account',
+    employeeActorJid: '15551230001@s.whatsapp.net',
   },
 };
 
@@ -77,7 +82,7 @@ describe('M365 bridge policy exception', () => {
     expect(applyRequiredDeny([explicit], approvedM365Policy)).toContain(explicit);
   });
 
-  it('omits the generated M365 floor for an approved bridge', () => {
+  it('omits the liftable M365 mutation entries for an approved bridge', () => {
     const deny = applyRequiredDeny([
       'mcp__claude_ai_Gmail__create_draft',
       'mcp__operator_owned__keep',
@@ -86,6 +91,17 @@ describe('M365 bridge policy exception', () => {
     expect(deny).not.toContain('mcp__plugin_microsoft_365_microsoft_365__create-event');
     expect(deny).toContain('mcp__claude_ai_Gmail__create_draft');
     expect(deny).toContain('mcp__operator_owned__keep');
+  });
+
+  // The bridge binds one account; the receipt does not cover what an operation switches to.
+  it('keeps account and environment selection in the floor for an approved bridge', () => {
+    const deny = applyRequiredDeny([], approvedM365Policy);
+
+    expect(deny).toContain('mcp__plugin_microsoft_365_microsoft_365__select-account');
+    expect(deny).toContain('mcp__plugin_microsoft_365_microsoft_365__select-dataverse-environment');
+    expect(deny).not.toContain('mcp__plugin_microsoft_365_microsoft_365__create-event');
+    expect(M365_MUTATION_DENY).not.toContain('mcp__plugin_microsoft_365_microsoft_365__select-account');
+    expect(M365_MUTATION_DENY).not.toContain('mcp__plugin_microsoft_365_microsoft_365__select-dataverse-environment');
   });
 
   it('preserves a legacy full deny list because its authorship is unknown', () => {
@@ -227,6 +243,8 @@ const MUTATION_EXACT = new Set([
   'upsert-dataverse-record',
   'associate-dataverse-records',
   'execute-dataverse-action',
+  // The plugin classes this a write: a GET to a tenant Custom API function can run its code.
+  'execute-dataverse-function',
   'execute-tool',
   'batch-dataverse',
   'graph-batch',
@@ -235,6 +253,11 @@ const MUTATION_EXACT = new Set([
   'hub-recover-delta',
   'hub-refresh-account',
   'hub-trigger-enrich',
+  'hub-operation-cancel',
+  'hub-operation-request-review',
+  // These change which account or environment later calls reach.
+  'select-account',
+  'select-dataverse-environment',
 ]);
 
 function m365ToolName(permission: string): string | null {
@@ -246,11 +269,13 @@ function m365ToolName(permission: string): string | null {
 // REQUIRED_DENY is populated from the approved connector mutation inventory.
 
 describe('REQUIRED_DENY (deny-floor scaffold, #411)', () => {
-  it('denies the live Agent365 enrichment writer but not the read-only Dataverse function', () => {
+  // PR #1737 dropped the Dataverse function as a read-only GET. The plugin now classes it a write,
+  // because a tenant Custom API function runs its code on GET, so the floor denies it again.
+  it('denies the live Agent365 enrichment writer and the Dataverse function the plugin classes as a write', () => {
     expect(REQUIRED_DENY).toContain(
       'mcp__plugin_microsoft_365_microsoft_365__hub-trigger-enrich',
     );
-    expect(REQUIRED_DENY).not.toContain(
+    expect(REQUIRED_DENY).toContain(
       'mcp__plugin_microsoft_365_microsoft_365__execute-dataverse-function',
     );
   });
@@ -268,7 +293,7 @@ describe('REQUIRED_DENY (deny-floor scaffold, #411)', () => {
   });
 
   it('contains full permission strings without duplicates', () => {
-    expect(REQUIRED_DENY.length).toBe(124);
+    expect(REQUIRED_DENY.length).toBe(130);
     expect(new Set(REQUIRED_DENY).size).toBe(REQUIRED_DENY.length);
     for (const permission of REQUIRED_DENY) {
       expect(permission).toMatch(/^mcp__[^_]+.*__/);

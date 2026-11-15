@@ -266,7 +266,7 @@ export function createIngestHandler(
         // cleans the in-memory msg before BOTH storage and runtime dispatch.
         // stripLoneSurrogates fast-paths strings with no surrogates (no realloc).
         if (msg.content !== null) msg.content = sanitizeProtectedMessageText(stripLoneSurrogates(msg.content));
-        if (msg.senderName !== null) msg.senderName = stripLoneSurrogates(msg.senderName);
+        if (msg.senderName !== null) msg.senderName = sanitizeProtectedMessageText(stripLoneSurrogates(msg.senderName));
         if (msg.contentText !== null) msg.contentText = sanitizeProtectedMessageText(stripLoneSurrogates(msg.contentText));
         if (msg.rawMessage !== undefined) msg.rawMessage = sanitizeProtectedMessageValue(msg.rawMessage);
         if (isProtectedDeliveryMessage(db, msg.messageId)) {

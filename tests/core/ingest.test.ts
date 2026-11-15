@@ -251,6 +251,23 @@ describe('REQ-002.AC-01: message storage', () => {
     expect(vi.mocked(runtime.handleMessage).mock.calls[0][0].content).toBe(PROTECTED_MESSAGE_MARKER);
   });
 
+  it('redacts a protected link in the sender name at the shared ingress before storage and runtime dispatch', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const handler = makeIngest(db, messenger, runtime);
+    const link = 'https://links.example.test/s/#v3.ingest-sender-protected-test';
+    // Non-WhatsApp bridges hand ingest a sender name that never passed the WhatsApp parser.
+    const msg = makeIncomingMessage({ senderName: `Mallory ${link}` });
+
+    await runIngest(handler, msg);
+
+    const stored = db.raw.prepare('SELECT sender_name FROM messages WHERE message_id = ?')
+      .get(msg.messageId) as { sender_name: string };
+    expect(stored.sender_name).toBe(`Mallory ${PROTECTED_MESSAGE_MARKER}`);
+    expect(vi.mocked(runtime.handleMessage).mock.calls[0][0].senderName).toBe(`Mallory ${PROTECTED_MESSAGE_MARKER}`);
+  });
+
   it('uses a correlated protected-delivery message id to redact a live echo whose body is not syntactically recognizable', async () => {
     const db = makeTempDb();
     const messenger = makeMessenger();

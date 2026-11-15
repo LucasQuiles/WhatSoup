@@ -51,6 +51,9 @@ vi.mock('../../../src/lib/keyring.ts', async (importOriginal) => {
   return { ...actual, lookupCredential: vi.fn(() => null) };
 });
 
+import { spawn } from 'node:child_process';
+import type { M365MutationPolicy } from '../../../src/core/m365-bridge-policy.ts';
+import { M365_ACCOUNT_SELECTION_DENY, M365_MUTATION_DENY } from '../../../src/core/settings-template.ts';
 import { killSessionTree } from '../../../src/runtimes/agent/process-tree.ts';
 import { resolveResumableAgentSession, updateResumedSessionStatus } from '../../../src/runtimes/agent/session-db.ts';
 import { SessionManager, type SessionManagerOptions } from '../../../src/runtimes/agent/session.ts';
@@ -303,6 +306,69 @@ describe('SessionManager host work admission', () => {
     await session.spawnSession();
     await session.sendTurn('canary-boundary');
     expect(captured?.expectedExecutableSha256).toBe('a'.repeat(64));
+    await session.shutdown();
+  });
+
+  it('gives a queued claude-cli launch the withdrawn Microsoft 365 shape, because the host wrapper fixes its arguments and environment before the lease', async () => {
+    // Synthetic credential, assembled at run time.
+    const bridgeValue = ['fixture', 'agent365', 'key'].join('-');
+    const approved: M365MutationPolicy = {
+      status: 'approved',
+      workflowAuthority: { accountId: 'employee-account', employeeActorJid: '15551230001@s.whatsapp.net' },
+      childEnv: {
+        ALLOW_M365_MUTATIONS: '1', MS365_AGENT365_BRIDGE: 'true', MS365_AGENT365_API_KEY: bridgeValue,
+        MS365_AGENT365_BASE_URL: 'https://127.0.0.1:10000', MS365_AGENT365_ACCOUNT_ID: 'employee-account',
+        MS365_TENANT_ID: '11111111-2222-3333-4444-555555555555', MS365_PROFILE: 'user-full-v1',
+        MS365_HUB_URL: 'https://127.0.0.1:10000', MS365_DURABLE_MAIL_STATE_DIR: '/fixture/mail-state',
+      },
+    };
+    const m365SpawnPolicy = vi.fn(() => approved);
+    const launched = (args: readonly string[], env: NodeJS.ProcessEnv) => ({
+      denied: args.includes('--disallowedTools') ? args.slice(args.indexOf('--disallowedTools') + 1) : [],
+      bridgeValue: env.MS365_AGENT365_API_KEY,
+      allow: env.ALLOW_M365_MUTATIONS,
+      authorityRequired: env.MS365_WORKFLOW_AUTHORITY_REQUIRED,
+    });
+    // Every Microsoft 365 bridge, mutation or workflow-authority name the child would receive.
+    const m365Keys = (env: NodeJS.ProcessEnv) => Object.keys(env)
+      .filter((key) => env[key] !== undefined && (key.startsWith('MS365_') || key === 'ALLOW_M365_MUTATIONS'))
+      .sort();
+
+    // Positive control: a direct spawn with the same live policy keeps the bridge values and no deny set.
+    admission.enabled.mockReturnValue(false);
+    vi.mocked(spawn).mockReturnValueOnce(makeChild() as never);
+    const direct = makeSession('claude-cli', { m365SpawnPolicy });
+    await direct.spawnSession();
+    const [, directArgs, directOptions] = vi.mocked(spawn).mock.calls[0] as unknown as [string, string[], { env: NodeJS.ProcessEnv }];
+    expect(launched(directArgs, directOptions.env)).toEqual({ denied: [], bridgeValue, allow: '1', authorityRequired: '1' });
+    expect(m365Keys(directOptions.env)).toEqual(expect.arrayContaining([
+      'ALLOW_M365_MUTATIONS', 'MS365_AGENT365_API_KEY', 'MS365_TENANT_ID', 'MS365_WORKFLOW_AUTHORITY_REQUIRED',
+    ]));
+    await direct.shutdown();
+
+    // Queued: the wrapper receives the arguments and environment now and starts the provider only after its lease,
+    // with no later check. The launch is therefore built in the withdrawn shape.
+    admission.enabled.mockReturnValue(true);
+    m365SpawnPolicy.mockClear();
+    const child = makeChild();
+    let queued: { args: string[]; env: NodeJS.ProcessEnv } | undefined;
+    admission.spawn.mockImplementationOnce((options: { args: string[]; env: NodeJS.ProcessEnv; onSpawned?: (value: typeof child) => void }) => {
+      queued = options;
+      options.onSpawned?.(child);
+      return Promise.resolve(child);
+    });
+    const session = makeSession('claude-cli', { m365SpawnPolicy });
+    await session.spawnSession();
+    await session.sendTurn('queued-m365');
+    // The live policy was read for this launch, and it still carried the assignment.
+    expect(m365SpawnPolicy).toHaveBeenCalled();
+    expect(m365SpawnPolicy.mock.results.every((result) => result.value === approved)).toBe(true);
+    expect(launched(queued!.args, queued!.env)).toEqual({
+      denied: [...M365_MUTATION_DENY, ...M365_ACCOUNT_SELECTION_DENY], bridgeValue: undefined, allow: undefined, authorityRequired: undefined,
+    });
+    // No bridge, mutation or workflow-authority name reaches the queued child at all.
+    expect(m365Keys(queued!.env)).toEqual([]);
+    expect(JSON.stringify(queued!.env)).not.toContain(bridgeValue);
     await session.shutdown();
   });
 

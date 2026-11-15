@@ -10,6 +10,10 @@ import type { SessionContext } from '../../../src/mcp/types.ts';
 import type { WhatsAppSocket } from '../../../src/transport/connection.ts';
 import { wrapWithOutboundGovernor } from '../../../src/transport/outbound-governor.ts';
 import type { OutboundAuthorityGate } from '../../../src/transport/operations-authority-gate.ts';
+import { PROTECTED_MESSAGE_MARKER } from '../../../src/core/protected-message.ts';
+
+vi.mock('../../../src/core/protected-delivery-pins.ts', async (importOriginal) =>
+  (await import('../../helpers/protected-delivery-pins.ts')).mockProtectedDeliveryPins(importOriginal));
 
 const STATUS_JID = 'status@broadcast';
 const ALICE_JID = 'alice-status@s.whatsapp.net';
@@ -438,6 +442,21 @@ describe('status tools', () => {
       count: 2,
     });
     expect(body.senders[1].statuses.map((status) => status.messageId)).toEqual(['status-2', 'status-1']);
+  });
+
+  it('list_statuses redacts a protected link stored in a sender name', async () => {
+    const link = 'https://links.example.test/s/#v3.status-sender-protected-test';
+    insertStatus(db, { senderJid: ALICE_JID, senderName: `Mallory ${link}`, messageId: 'status-protected-sender' });
+
+    const result = await registry.call('list_statuses', {}, globalSession(scratchDir));
+
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).not.toContain('links.example.test/s/#');
+    const body = JSON.parse(result.content[0].text) as {
+      senders: Array<{ senderName: string | null; statuses: Array<{ senderName: string | null }> }>;
+    };
+    expect(body.senders[0].senderName).toBe(`Mallory ${PROTECTED_MESSAGE_MARKER}`);
+    expect(body.senders[0].statuses[0].senderName).toBe(`Mallory ${PROTECTED_MESSAGE_MARKER}`);
   });
 
   it('list_statuses can filter by sender and mark fallback keys as read', async () => {

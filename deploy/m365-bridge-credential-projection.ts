@@ -9,6 +9,7 @@ import {
   m365BridgeCredentialProjectionAllowed,
   m365BridgeCredentialAdmission,
   type M365BridgeBinding,
+  type ResolveM365MutationPolicyOptions,
 } from '../src/core/m365-bridge-policy.ts';
 
 const [instance, configPath, mode, processIdText] = process.argv.slice(2);
@@ -51,6 +52,8 @@ const options = {
   allowM365Mutations: agentOptions['allowM365Mutations'] === true,
   enabledPlugins: agentOptions['enabledPlugins'] as Record<string, boolean> | undefined,
   binding: agentOptions['m365Bridge'] as M365BridgeBinding | undefined,
+  // Raw, as the runtime receives it; the shared policy applies the runtime's `single` default.
+  sessionScope: agentOptions['sessionScope'] as ResolveM365MutationPolicyOptions['sessionScope'],
 };
 if (!m365BridgeCredentialProjectionAllowed(options)) process.exit(3);
 

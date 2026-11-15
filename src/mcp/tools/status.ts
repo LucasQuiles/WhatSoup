@@ -270,11 +270,13 @@ function makeListStatuses(deps: StatusDeps): ToolDeclaration {
           continue;
         }
 
+        // rowToMessage redacts protected links from the stored sender name.
+        const status = rowToMessage(row);
         grouped.set(row.sender_jid, {
           senderJid: row.sender_jid,
-          senderName: row.sender_name ?? null,
+          senderName: status.senderName,
           count: 1,
-          statuses: [rowToMessage(row)],
+          statuses: [status],
         });
       }
 

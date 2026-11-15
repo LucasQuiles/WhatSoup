@@ -580,4 +580,37 @@ describe('profile tools', () => {
       expect(result.isError).toBe(true);
     });
   });
+
+  // Baileys rc13 USync results carry Date values (USyncStatusProtocol and
+  // USyncDisappearingModeProtocol); the protected-link result scan must keep them.
+  describe('Baileys Date-bearing results through the production registry', () => {
+    const JID = '15550100001@s.whatsapp.net';
+    const setAt = new Date(1_700_000_000_000);
+
+    it('get_contact_status returns a status with null text and its setAt time', async () => {
+      (mockSock.fetchStatus as ReturnType<typeof vi.fn>).mockResolvedValue([
+        { id: JID, status: { status: null, setAt } },
+      ]);
+
+      const result = await registry.call('get_contact_status', { jid: JID }, globalSession());
+
+      expect(result.isError).toBeUndefined();
+      expect(JSON.parse(result.content[0].text)).toEqual({
+        jid: JID, status: { status: null, setAt: setAt.toISOString() },
+      });
+    });
+
+    it('fetch_disappearing_duration returns each disappearing mode with its setAt time', async () => {
+      (mockSock.fetchDisappearingDuration as ReturnType<typeof vi.fn>).mockResolvedValue([
+        { id: JID, disappearing_mode: { duration: 86_400, setAt } },
+      ]);
+
+      const result = await registry.call('fetch_disappearing_duration', { jids: [JID] }, globalSession());
+
+      expect(result.isError).toBeUndefined();
+      expect(JSON.parse(result.content[0].text)).toEqual({
+        result: [{ id: JID, disappearing_mode: { duration: 86_400, setAt: setAt.toISOString() } }],
+      });
+    });
+  });
 });

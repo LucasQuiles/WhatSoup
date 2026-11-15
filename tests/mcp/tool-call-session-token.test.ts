@@ -103,7 +103,7 @@ describe('per-session token on the socket (#3421 step 1)', () => {
       { tier: 'global' },
       () => executing,
       undefined,
-      { sessionTokens: { verify } },
+      { sessionTokens: { verify: (presented, path) => (verify(presented) ? { kind: 'session', socketPath: path } : undefined) } },
     );
     server.start();
     await waitForSocket(socketPath);
@@ -158,20 +158,22 @@ describe('SessionTokenRegistry', () => {
   async function loadRegistry() {
     const module = await import('../../src/mcp/caller-attribution.ts') as Record<string, unknown>;
     const SessionTokenRegistry = module['SessionTokenRegistry'] as new (capacity?: number) => {
-      mint(): string;
-      verify(presented: unknown): boolean;
+      mint(binding: { kind: 'session'; socketPath: string }): string;
+      verify(presented: unknown, socketPath: string): unknown;
     };
     return SessionTokenRegistry;
   }
+  const SOCKET = '/tmp/whatsoup-test-session.sock';
+  const binding = { kind: 'session' as const, socketPath: SOCKET };
 
   it('verifies a minted token and rejects anything else', async () => {
     const SessionTokenRegistry = await loadRegistry();
     const tokens = new SessionTokenRegistry();
 
-    const minted = tokens.mint();
+    const minted = tokens.mint(binding);
 
     expect(minted).toMatch(/^[0-9a-f]{64}$/);
-    expect([tokens.verify(minted), tokens.verify('0'.repeat(64)), tokens.verify(undefined), tokens.verify(42)])
+    expect([minted, '0'.repeat(64), undefined, 42].map((presented) => tokens.verify(presented, SOCKET) !== undefined))
       .toEqual([true, false, false, false]);
   });
 
@@ -179,10 +181,128 @@ describe('SessionTokenRegistry', () => {
     const SessionTokenRegistry = await loadRegistry();
     const tokens = new SessionTokenRegistry(2);
 
-    const first = tokens.mint();
-    const second = tokens.mint();
-    const third = tokens.mint();
+    const first = tokens.mint(binding);
+    const second = tokens.mint(binding);
+    const third = tokens.mint(binding);
 
-    expect([tokens.verify(first), tokens.verify(second), tokens.verify(third)]).toEqual([false, true, true]);
+    expect([first, second, third].map((token) => tokens.verify(token, SOCKET) !== undefined)).toEqual([false, true, true]);
+  });
+});
+
+describe('SessionTokenRegistry bindings (M365 r4, W4)', () => {
+  const SOCKET_A = '/tmp/whatsoup-test-a.sock';
+  const SOCKET_B = '/tmp/whatsoup-test-b.sock';
+
+  async function loadBindingRegistry() {
+    const module = await import('../../src/mcp/caller-attribution.ts') as Record<string, unknown>;
+    return module['SessionTokenRegistry'] as new (capacity?: number) => {
+      mint(binding: Record<string, unknown>): string;
+      mintLease(binding: Record<string, unknown>): { token: string; revoke(): void };
+      revoke(token: string): void;
+      verify(presented: unknown, socketPath: string): unknown;
+      readonly liveCount: number;
+    };
+  }
+
+  it('verifies a token only on the socket it was minted for and returns its binding', async () => {
+    const SessionTokenRegistry = await loadBindingRegistry();
+    const tokens = new SessionTokenRegistry();
+
+    const token = tokens.mint({ kind: 'session', socketPath: SOCKET_A });
+
+    expect(tokens.verify(token, SOCKET_A)).toEqual({ kind: 'session', socketPath: SOCKET_A });
+    expect(tokens.verify(token, SOCKET_B)).toBeUndefined();
+    expect(tokens.verify('0'.repeat(64), SOCKET_A)).toBeUndefined();
+  });
+
+  it('never verifies a revoked token', async () => {
+    const SessionTokenRegistry = await loadBindingRegistry();
+    const tokens = new SessionTokenRegistry();
+    const kept = tokens.mint({ kind: 'session', socketPath: SOCKET_A });
+    const revoked = tokens.mint({ kind: 'session', socketPath: SOCKET_A });
+
+    tokens.revoke(revoked);
+
+    expect(tokens.verify(revoked, SOCKET_A)).toBeUndefined();
+    expect(tokens.verify(kept, SOCKET_A)).toEqual({ kind: 'session', socketPath: SOCKET_A });
+  });
+
+  it('hands out a request lease whose revoke retires exactly its own token', async () => {
+    const SessionTokenRegistry = await loadBindingRegistry();
+    const tokens = new SessionTokenRegistry();
+    const baseline = tokens.liveCount;
+    const binding = { kind: 'request', socketPath: SOCKET_A, conversationKey: 'chat-a', requestRef: 'request-1' };
+
+    const lease = tokens.mintLease(binding);
+    expect(tokens.verify(lease.token, SOCKET_A)).toEqual(binding);
+    expect(tokens.liveCount).toBe(baseline + 1);
+
+    lease.revoke();
+    lease.revoke();
+    expect(tokens.verify(lease.token, SOCKET_A)).toBeUndefined();
+    expect(tokens.liveCount).toBe(baseline);
+  });
+
+  it('admits a turn-reply session identity only from a live session token on its own socket', async () => {
+    const module = await import('../../src/mcp/caller-attribution.ts');
+    const tokens = new module.SessionTokenRegistry();
+    const sessionLease = tokens.mintLease({ kind: 'session', socketPath: SOCKET_A, turnReplySessionId: 'manager-a' });
+    const requestToken = tokens.mint({ kind: 'request', socketPath: SOCKET_A, turnReplySessionId: 'manager-a' });
+    const identity = (token: unknown, socketPath: string) =>
+      module.turnReplySessionIdFromPresentedToken({ token }, tokens, socketPath);
+
+    expect(identity(sessionLease.token, SOCKET_A)).toBe('manager-a');
+    expect(identity(sessionLease.token, SOCKET_B)).toBeUndefined();
+    expect(identity(requestToken, SOCKET_A)).toBeUndefined();
+    expect(identity('0'.repeat(64), SOCKET_A)).toBeUndefined();
+    expect(module.turnReplySessionIdFromPresentedToken({ token: sessionLease.token }, undefined, SOCKET_A)).toBeUndefined();
+
+    sessionLease.revoke();
+    expect(identity(sessionLease.token, SOCKET_A)).toBeUndefined();
+  });
+
+  it('names why a token it minted is refused on a socket, and nothing for a verified or unknown token', async () => {
+    const module = await import('../../src/mcp/caller-attribution.ts');
+    const tokens = new module.SessionTokenRegistry();
+    const live = tokens.mint({ kind: 'session', socketPath: SOCKET_A });
+    const lease = tokens.mintLease({ kind: 'request', socketPath: SOCKET_A, conversationKey: 'chat-a', requestRef: 'r-1' });
+    lease.revoke();
+
+    expect(tokens.refusal(live, SOCKET_A)).toBeUndefined();
+    expect(tokens.refusal(live, SOCKET_B)).toBe('wrong_socket');
+    expect(tokens.refusal(lease.token, SOCKET_A)).toBe('revoked');
+    expect(tokens.refusal(lease.token, SOCKET_B)).toBe('revoked');
+    expect(tokens.refusal('0'.repeat(64), SOCKET_A)).toBeUndefined();
+    expect(tokens.refusal(undefined, SOCKET_A)).toBeUndefined();
+    expect(tokens.verify(lease.token, SOCKET_A)).toBeUndefined();
+  });
+
+  it('keeps at most its capacity of revoked tokens, oldest first out', async () => {
+    const module = await import('../../src/mcp/caller-attribution.ts');
+    const tokens = new module.SessionTokenRegistry(2);
+    // Each lease is revoked before the next is minted, so only the revoked set reaches its bound.
+    const leases = [0, 1, 2].map(() => {
+      const lease = tokens.mintLease({ kind: 'session', socketPath: SOCKET_A });
+      lease.revoke();
+      return lease;
+    });
+
+    expect(leases.map((lease) => tokens.refusal(lease.token, SOCKET_A))).toEqual([undefined, 'revoked', 'revoked']);
+  });
+
+  it('never lets request tokens displace a session token, live or revoked', async () => {
+    const module = await import('../../src/mcp/caller-attribution.ts');
+    const tokens = new module.SessionTokenRegistry(2);
+    const live = tokens.mint({ kind: 'session', socketPath: SOCKET_A });
+    const retired = tokens.mintLease({ kind: 'session', socketPath: SOCKET_A });
+    retired.revoke();
+    const request = { kind: 'request' as const, socketPath: SOCKET_A, conversationKey: 'chat-a', requestRef: 'r' };
+    for (let call = 0; call < 3; call += 1) tokens.mintLease(request).revoke();
+    const openRequests = [0, 1, 2].map(() => tokens.mint(request));
+
+    expect(tokens.verify(live, SOCKET_A)).toEqual({ kind: 'session', socketPath: SOCKET_A });
+    expect(tokens.refusal(retired.token, SOCKET_A)).toBe('revoked');
+    // Each kind keeps its own bound: the oldest open request token is the one forgotten.
+    expect(openRequests.map((token) => tokens.verify(token, SOCKET_A) !== undefined)).toEqual([false, true, true]);
   });
 });

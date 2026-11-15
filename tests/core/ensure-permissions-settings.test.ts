@@ -88,7 +88,7 @@ describe('ensurePermissionsSettings', () => {
     const legacyMicrosoft = REQUIRED_DENY.filter((entry) =>
       entry.startsWith('mcp__plugin_microsoft_365_microsoft_365__'));
     const legacyDeny = [...legacyGoogle, ...legacyMicrosoft];
-    expect(legacyDeny).toHaveLength(120);
+    expect(legacyDeny).toHaveLength(126);
 
     writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify({
       permissions: {
@@ -104,10 +104,10 @@ describe('ensurePermissionsSettings', () => {
     const settings = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
     expect(settings.permissions.allow).toEqual(['CustomTool']);
     expect(settings.hooks).toEqual({ Stop: [] });
-    expect(settings.permissions.deny).toHaveLength(124);
+    expect(settings.permissions.deny).toHaveLength(130);
     expect(new Set(settings.permissions.deny)).toEqual(new Set(REQUIRED_DENY));
     expect(settings.permissions.deny.filter((entry: string) =>
-      entry.startsWith('mcp__plugin_microsoft_365_microsoft_365__'))).toHaveLength(108);
+      entry.startsWith('mcp__plugin_microsoft_365_microsoft_365__'))).toHaveLength(114);
     expect(settings.permissions.deny.filter((entry: string) =>
       entry.startsWith('mcp__claude_ai_'))).toHaveLength(16);
   });

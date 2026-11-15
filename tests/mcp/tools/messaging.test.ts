@@ -9,6 +9,7 @@ import { createProfileRegistry } from '../../../src/core/profiles.ts';
 import { createOutboundSendsWriter } from '../../../src/core/outbound-sends.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import { emitAlertChecked } from '../../../src/lib/emit-alert.ts';
+import { IN_PROCESS_CALLER } from '../../../src/mcp/caller-attribution.ts';
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlertChecked: vi.fn(() => true),

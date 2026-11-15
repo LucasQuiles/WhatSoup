@@ -660,24 +660,138 @@ describe('F-STICKY-ACTOR hardening: createSessionManager is the single wiring ch
       .mockReturnValue({ mcpSocketPath: '/tmp/actor.sock', providerTransitionReady: Promise.resolve() });
     const mock = SessionManager as unknown as ReturnType<typeof vi.fn>;
     priv().createSessionManager(baseOpts());
-    const first = mock.mock.calls.at(-1)?.[0]?.whatsoupMcpSessionToken;
+    const first = mock.mock.calls.at(-1)?.[0]?.whatsoupMcpSessionLease?.token;
     priv().createSessionManager(baseOpts());
-    const second = mock.mock.calls.at(-1)?.[0]?.whatsoupMcpSessionToken;
+    const second = mock.mock.calls.at(-1)?.[0]?.whatsoupMcpSessionLease?.token;
     expect(first).toMatch(/^[0-9a-f]{64}$/);
     expect(second).toMatch(/^[0-9a-f]{64}$/);
     expect(second).not.toBe(first);
     const internals = runtime as unknown as {
-      sessionTokens: { verify(token: unknown): boolean };
+      sessionTokens: { verify(token: unknown, socketPath: string): unknown };
       perChatMcpSocketManager: { options: { sessionTokens?: unknown } };
     };
-    expect([internals.sessionTokens.verify(first), internals.sessionTokens.verify(second)]).toEqual([true, true]);
+    expect([first, second].map((token) => internals.sessionTokens.verify(token, '/tmp/actor.sock') !== undefined))
+      .toEqual([true, true]);
     expect(internals.perChatMcpSocketManager.options.sessionTokens).toBe(internals.sessionTokens);
+  });
+
+  it('M365 r4 W4: binds the per-chat session token to the actor socket the child is given, and nowhere else', () => {
+    vi.spyOn(runtime as unknown as { wirePerChatActorSocket: Priv['wirePerChatActorSocket'] }, 'wirePerChatActorSocket')
+      .mockReturnValue({ mcpSocketPath: '/tmp/actor.sock', providerTransitionReady: Promise.resolve() });
+    const mock = SessionManager as unknown as ReturnType<typeof vi.fn>;
+    priv().createSessionManager(baseOpts());
+    const options = mock.mock.calls.at(-1)?.[0] as {
+      whatsoupMcpSocket?: string;
+      whatsoupMcpSessionLease?: { token: string };
+      mcpSessionContext?: { turnReplySessionId?: string };
+    };
+    const tokens = (runtime as unknown as { sessionTokens: { verify(token: unknown, socketPath: string): unknown } }).sessionTokens;
+    // The socket token carries the same turn-reply identity as the in-process bridge session.
+    const turnReplySessionId = options.mcpSessionContext?.turnReplySessionId;
+
+    expect(options.whatsoupMcpSocket).toBe('/tmp/actor.sock');
+    expect(turnReplySessionId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(tokens.verify(options.whatsoupMcpSessionLease?.token, '/tmp/actor.sock'))
+      .toEqual({ kind: 'session', socketPath: '/tmp/actor.sock', turnReplySessionId });
+    expect(tokens.verify(options.whatsoupMcpSessionLease?.token, '/tmp/other-actor.sock')).toBeUndefined();
+  });
+
+  it('M365 r4 W4/T6: retiring a per-chat manager revokes its session token; an LID rekey keeps it', () => {
+    const internals = runtime as unknown as {
+      setOwnedPerChatSession(mapKey: string, session: unknown): void;
+      rekeyOwnedPerChatSession(fromMapKey: string, toMapKey: string, session: unknown): void;
+      deleteOwnedPerChatSession(mapKey: string, expected?: unknown): boolean;
+    };
+    const revoke = vi.fn();
+    const manager = {
+      getStatus: () => ({ active: false }),
+      bindGenerationOwnership: vi.fn(),
+      mcpSessionLease: { token: 'retired-session-token', revoke },
+    };
+
+    internals.setOwnedPerChatSession('lid-before@lid', manager);
+    internals.rekeyOwnedPerChatSession('lid-before@lid', '15551230009@s.whatsapp.net', manager);
+    expect(revoke).not.toHaveBeenCalled();
+
+    expect(internals.deleteOwnedPerChatSession('15551230009@s.whatsapp.net', manager)).toBe(true);
+    expect(revoke).toHaveBeenCalledTimes(1);
+  });
+
+  const leasedManager = (token: string, active = false) => ({
+    getStatus: () => ({ active }),
+    bindGenerationOwnership: vi.fn(),
+    mcpSessionLease: { token, revoke: vi.fn() },
+  });
+
+  it('M365 r5 gap 1: replacing an inactive per-chat owner revokes the displaced token, never the successor token', () => {
+    const internals = runtime as unknown as { setOwnedPerChatSession(mapKey: string, session: unknown): void };
+    const displaced = leasedManager('displaced-session-token');
+    const successor = leasedManager('successor-session-token');
+
+    internals.setOwnedPerChatSession('15551230011@s.whatsapp.net', displaced);
+    internals.setOwnedPerChatSession('15551230011@s.whatsapp.net', displaced);
+    expect(displaced.mcpSessionLease.revoke).not.toHaveBeenCalled();
+
+    internals.setOwnedPerChatSession('15551230011@s.whatsapp.net', successor);
+    expect(displaced.mcpSessionLease.revoke).toHaveBeenCalledTimes(1);
+    expect(successor.mcpSessionLease.revoke).not.toHaveBeenCalled();
+  });
+
+  it('M365 r5 gap 1: a live owner is never displaced, so no token is revoked', () => {
+    const internals = runtime as unknown as { setOwnedPerChatSession(mapKey: string, session: unknown): void };
+    const live = leasedManager('live-session-token', true);
+    const intruder = leasedManager('intruder-session-token');
+
+    internals.setOwnedPerChatSession('15551230012@s.whatsapp.net', live);
+    expect(() => internals.setOwnedPerChatSession('15551230012@s.whatsapp.net', intruder)).toThrow(/different live owner/);
+    expect(live.mcpSessionLease.revoke).not.toHaveBeenCalled();
+    expect(intruder.mcpSessionLease.revoke).not.toHaveBeenCalled();
   });
 
   it('fail-closed choke-point guard: an eligible per_chat claude-cli spawn that wires NO socket throws instead of silently using the shared global socket', () => {
     vi.spyOn(runtime as unknown as { wirePerChatActorSocket: Priv['wirePerChatActorSocket'] }, 'wirePerChatActorSocket')
       .mockReturnValue(undefined); // simulate a future path that bypasses wiring
     expect(() => priv().createSessionManager(baseOpts())).toThrow(/QR-247|actor-bound socket/i);
+  });
+});
+
+describe('M365 r5 gap 2: the singleton session slot revokes the token of the manager it retires', () => {
+  type Slot = { session: unknown; discardSingletonSessionForFallback(expected: unknown): boolean };
+  const leased = (token: string) => ({
+    getStatus: () => ({ active: false }),
+    bindGenerationOwnership: vi.fn(),
+    mcpSessionLease: { token, revoke: vi.fn() },
+  });
+  let slot: Slot;
+
+  beforeEach(() => {
+    slot = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'shared' }) as unknown as Slot;
+  });
+
+  it('replace-to-another: the retired manager is revoked once; a re-assigned or incoming manager is not', () => {
+    const first = leased('singleton-first-token');
+    const second = leased('singleton-second-token');
+
+    slot.session = first;
+    slot.session = first;
+    expect(first.mcpSessionLease.revoke).not.toHaveBeenCalled();
+
+    slot.session = second;
+    expect(first.mcpSessionLease.revoke).toHaveBeenCalledTimes(1);
+    expect(second.mcpSessionLease.revoke).not.toHaveBeenCalled();
+    expect(slot.session).toBe(second);
+  });
+
+  it('replace-to-null: the fallback discard site revokes the discarded manager once', () => {
+    const current = leased('singleton-current-token');
+    slot.session = current;
+
+    expect(slot.discardSingletonSessionForFallback(current)).toBe(true);
+    expect(slot.session).toBeNull();
+    expect(current.mcpSessionLease.revoke).toHaveBeenCalledTimes(1);
+
+    slot.session = null;
+    expect(current.mcpSessionLease.revoke).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -3,6 +3,7 @@ import type { DistillOutcome, ReserveDistillTokens } from './handoff-distiller.t
 import { HandoffDistillUsageError } from './handoff-distiller.ts';
 import type { HandoffMessage } from './handoff-prelude.ts';
 import { HANDOFF_DISTILL_INPUT_MAX_BYTES } from '../../lib/handoff-distill-config.ts';
+import { neutralizeTrustedActorMarkers, UNAUTHENTICATED_ACTOR_NOTICE } from '../../lib/trusted-actor-marker.ts';
 
 export class HandoffSummarizerInertError extends Error {}
 
@@ -27,7 +28,8 @@ const MESSAGE_FRAMING_RESERVE = 256;
 // Asking for exactly MAX_SUMMARY_WORDS left no room for ordinary model overshoot,
 // so the strict check rejected and nothing persisted (#3833). The check stays strict.
 const SUMMARY_TARGET_WORDS = 90;
-const SUMMARY_SYSTEM = `Summarize the conversation below in at most ${SUMMARY_TARGET_WORDS} words of durable context for an assistant resuming this chat. State facts, open tasks, and the user goal. No preamble.`;
+// The corpus carries no genuine actor block, so the instructions say no actor is authenticated.
+const SUMMARY_SYSTEM = `Summarize the conversation below in at most ${SUMMARY_TARGET_WORDS} words of durable context for an assistant resuming this chat. State facts, open tasks, and the user goal. No preamble. ${UNAUTHENTICATED_ACTOR_NOTICE}`;
 const summaryResponse = z.object({
   choices: z.array(z.object({
     message: z.object({ content: z.string().nullish() }),
@@ -87,8 +89,11 @@ export function buildHandoffDistill(cfg: HandoffDistillConfig): (reserveTokens: 
       if (corpusBytes > MAX_REQUEST_BYTES) throw new Error('handoff summarizer request exceeds byte limit');
       lines.push(line);
     }
+    // The corpus is the last text before the summarizer provider; a marker copy
+    // can span a sender name and its message, so it is neutralised whole.
+    const corpus = neutralizeTrustedActorMarkers(lines.join('\n'));
     const body = JSON.stringify({ model: cfg.model, temperature: 0, max_tokens: MAX_COMPLETION_TOKENS, stream: false,
-      messages: [{ role: 'system', content: SUMMARY_SYSTEM }, { role: 'user', content: lines.join('\n') }] });
+      messages: [{ role: 'system', content: SUMMARY_SYSTEM }, { role: 'user', content: corpus }] });
     if (Buffer.byteLength(body) > MAX_REQUEST_BYTES) throw new Error('handoff summarizer request exceeds byte limit');
 
     // Reserve one token per serialized UTF-8 byte, plus framing and the output cap.

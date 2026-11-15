@@ -78,6 +78,19 @@ function writeSourceRuntimeManifest(sourceRoot: string, mainSource: string): voi
   }, null, 2));
 }
 
+const CANONICAL_ORIGIN = 'https://github.com/LucasQuiles/WhatSoup.git';
+
+/** A parentless commit that is not on main (same tree as `main`). */
+function unlandedRoot(fixture: Fixture): string {
+  const tree = execGit(fixture.sourceRoot, ['rev-parse', `${fixture.commit}^{tree}`]);
+  return execGit(fixture.sourceRoot, ['commit-tree', tree, '-m', 'unlanded side root']);
+}
+
+/** Stand-in for `git fetch origin main` after the commit landed on main. */
+function landOnMain(fixture: Fixture): void {
+  execGit(fixture.sourceRoot, ['update-ref', 'refs/remotes/origin/main', fixture.commit]);
+}
+
 function makeGitFixture(): Fixture {
   tmpRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-release-export-'));
   const sourceRoot = path.join(tmpRoot, 'source');
@@ -94,10 +107,12 @@ function makeGitFixture(): Fixture {
   writeFileSync(path.join(sourceRoot, 'tokens.env'), 'WHATSOUP_HEALTH_TOKEN=fixture-secret\n', 'utf8');
   writeFileSync(path.join(sourceRoot, 'state.db'), 'not-a-real-db\n', 'utf8');
   execGit(sourceRoot, ['init']);
+  execGit(sourceRoot, ['remote', 'add', 'origin', CANONICAL_ORIGIN]);
   execGit(sourceRoot, ['add', '-A']);
   execGit(sourceRoot, ['commit', '-m', 'fixture v1']);
-  const commit = execGit(sourceRoot, ['rev-parse', 'HEAD']);
-  return { sourceRoot, releaseRoot, commit };
+  const fixture = { sourceRoot, releaseRoot, commit: execGit(sourceRoot, ['rev-parse', 'HEAD']) };
+  landOnMain(fixture);
+  return fixture;
 }
 
 function makeQualificationGitFixture(): Fixture {
@@ -110,6 +125,7 @@ function makeQualificationGitFixture(): Fixture {
   execGit(fixture.sourceRoot, ['add', '-A']);
   execGit(fixture.sourceRoot, ['commit', '-m', 'qualification closure']);
   fixture.commit = execGit(fixture.sourceRoot, ['rev-parse', 'HEAD']);
+  landOnMain(fixture);
   return fixture;
 }
 
@@ -134,10 +150,11 @@ function qualificationBinding(fixture: Fixture) {
   };
 }
 
-function recommitFixture(fixture: Fixture, message: string): void {
+function recommitFixture(fixture: Fixture, message: string, land = true): void {
   execGit(fixture.sourceRoot, ['add', '-A']);
-  execGit(fixture.sourceRoot, ['commit', '-m', message]);
+  execGit(fixture.sourceRoot, ['commit', '--allow-empty', '-m', message]);
   fixture.commit = execGit(fixture.sourceRoot, ['rev-parse', 'HEAD']);
+  if (land) landOnMain(fixture);
 }
 
 function exportOk(fixture: Fixture, extra: Partial<Parameters<typeof exportRelease>[0]> = {}): ReleaseExportReport {
@@ -219,6 +236,79 @@ describe('exportRelease', () => {
     expect(readFileSync(path.join(second.releasePath, 'src/main.ts'), 'utf8')).toBe('export const main = true;\n');
   });
 
+  it('refuses a commit that has not landed on origin/main, before writing anything', () => {
+    const fixture = makeGitFixture();
+    recommitFixture(fixture, 'local-only work', false);
+    rmSync(fixture.releaseRoot, { recursive: true, force: true });
+
+    expect(() => exportOk(fixture)).toThrow(
+      /release source must be on main: commit [0-9a-f]{40} is not refs\/remotes\/origin\/main \([0-9a-f]{40}\) or an ancestor of it/,
+    );
+    expect(existsSync(fixture.releaseRoot)).toBe(false);
+  });
+
+  it('refuses when refs/remotes/origin/main is absent, naming a fetch that creates it', () => {
+    const fixture = makeGitFixture();
+    execGit(fixture.sourceRoot, ['update-ref', '-d', 'refs/remotes/origin/main']);
+    rmSync(fixture.releaseRoot, { recursive: true, force: true });
+
+    expect(() => exportOk(fixture)).toThrow(
+      /release source must be on main: refs\/remotes\/origin\/main is missing .*git fetch origin \+refs\/heads\/main:refs\/remotes\/origin\/main/,
+    );
+    expect(existsSync(fixture.releaseRoot)).toBe(false);
+  });
+
+  it('does not resolve the main ref through a look-alike branch name', () => {
+    const fixture = makeGitFixture();
+    execGit(fixture.sourceRoot, ['update-ref', '-d', 'refs/remotes/origin/main']);
+    execGit(fixture.sourceRoot, ['update-ref', 'refs/heads/refs/remotes/origin/main', fixture.commit]);
+
+    expect(() => exportOk(fixture)).toThrow(/release source must be on main: refs\/remotes\/origin\/main is missing/);
+  });
+
+  it('ignores a local replace ref that grafts an unlanded commit under main', () => {
+    const fixture = makeGitFixture();
+    const unlanded = unlandedRoot(fixture);
+    execGit(fixture.sourceRoot, ['replace', '--graft', fixture.commit, unlanded]);
+
+    expect(() => exportOk({ ...fixture, commit: unlanded })).toThrow(
+      /release source must be on main: commit [0-9a-f]{40} is not refs\/remotes\/origin\/main/,
+    );
+  });
+
+  it('refuses a repository that carries legacy history grafts', () => {
+    const fixture = makeGitFixture();
+    const unlanded = unlandedRoot(fixture);
+    writeFileSync(path.join(fixture.sourceRoot, '.git/info/grafts'), `${fixture.commit} ${unlanded}\n`, 'utf8');
+
+    expect(() => exportOk({ ...fixture, commit: unlanded })).toThrow(/release source must be on main: .*grafts/);
+  });
+
+  it.each([
+    ['a local path', ['remote', 'set-url', 'origin', '/tmp/not-the-canonical-whatsoup']],
+    ['rewritten by insteadOf', ['config', 'url./tmp/fork-of-whatsoup.git.insteadOf', CANONICAL_ORIGIN]],
+    ['absent', ['remote', 'remove', 'origin']],
+  ])('refuses when origin is %s', (_case, args) => {
+    const fixture = makeGitFixture();
+    execGit(fixture.sourceRoot, args);
+    landOnMain(fixture);
+
+    expect(() => exportOk(fixture)).toThrow(
+      /release source must be on main: origin does not resolve to github\.com\/LucasQuiles\/WhatSoup/,
+    );
+  });
+
+  it('admits an older ancestor of origin/main and reports the main commit it was checked against', () => {
+    const fixture = makeGitFixture();
+    const older = fixture.commit;
+    recommitFixture(fixture, 'newer main');
+    const main = fixture.commit;
+
+    const report = exportOk({ ...fixture, commit: older });
+    expect(report.commit).toBe(older);
+    expect(report.sourceOnMain).toEqual({ ref: 'refs/remotes/origin/main', mainCommit: main });
+  });
+
   it('rejects an unknown or abbreviated commit', () => {
     const fixture = makeGitFixture();
     expect(() =>
@@ -228,7 +318,7 @@ describe('exportRelease', () => {
         releaseRoot: fixture.releaseRoot,
         buildTime: '2026-08-26T17:00:00.000Z',
       }),
-    ).toThrow(/commit/i);
+    ).toThrow(/commit not found in repository/);
     expect(() =>
       exportRelease({
         repoRoot: fixture.sourceRoot,
@@ -364,6 +454,7 @@ describe('exportRelease', () => {
     execGit(fixture.sourceRoot, ['rm', 'deploy/scripts/lib/durable_json.py']);
     execGit(fixture.sourceRoot, ['commit', '-m', 'remove declared helper']);
     fixture.commit = execGit(fixture.sourceRoot, ['rev-parse', 'HEAD']);
+    landOnMain(fixture);
 
     expect(() => exportRelease({
       repoRoot: fixture.sourceRoot,

@@ -184,6 +184,24 @@ describe('compareGovernedLaunchdEnv', () => {
     }]);
   });
 
+  it('treats an explicit empty secure-storage selector as governed rather than droppable', () => {
+    const expected = plistWithEnv({
+      PATH: '/usr/bin',
+      CLAUDE_SECURESTORAGE_CONFIG_DIR: '',
+    });
+    const observed = plistWithEnv({ PATH: '/usr/bin' });
+
+    const comparison = compareGovernedLaunchdEnv(expected, observed);
+
+    expect(comparison.drift).toEqual([{
+      key: 'CLAUDE_SECURESTORAGE_CONFIG_DIR',
+      state: 'missing',
+      expectedDigest: sha256(''),
+      observedDigest: null,
+    }]);
+    expect(comparison.droppedNonGovernedKeys).toEqual([]);
+  });
+
   it('reports an installed governed key with no expected source as extra', () => {
     const expected = plistWithEnv({ PATH: '/usr/bin' });
     const observed = plistWithEnv({ PATH: '/usr/bin', CLAUDE_CONFIG_DIR: '/opt/claude-roots/hand-added' });
@@ -925,7 +943,12 @@ describe('launchd governed-env reader contract corpus', () => {
    * wrongly and the rows that prove the widening wrong change meaning while the
    * suite stays green. The equality assertion below pins production to it.
    */
-  const GOVERNED_KEYS_UNDER_CONTRACT = ['CLAUDE_CONFIG_DIR', 'PATH', 'WHATSOUP_PATH_PREPEND'];
+  const GOVERNED_KEYS_UNDER_CONTRACT = [
+    'CLAUDE_CONFIG_DIR',
+    'CLAUDE_SECURESTORAGE_CONFIG_DIR',
+    'PATH',
+    'WHATSOUP_PATH_PREPEND',
+  ];
 
   function readManifest(): ContractManifest {
     return JSON.parse(readFileSync(path.join(CORPUS_DIR, 'manifest.json'), 'utf-8')) as ContractManifest;

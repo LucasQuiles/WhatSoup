@@ -32,7 +32,10 @@ permissions:
 jobs:
   quality:
     name: quality (24.x)
-    runs-on: ubuntu-latest
+    # The three Ubuntu jobs here pin ubuntu-24.04: ubuntu-26.04 (now ubuntu-latest) breaks
+    # the re2 build on Node 25 (GCC 15), the GNU coreutils timeout the boundary-run
+    # validator requires, and the Playwright Chromium install. Move back once those work.
+    runs-on: ubuntu-24.04
     # Generous cap so it only kills a genuinely hung run, not a slow-but-live
     # one (the authority job runs the full suite + coverage and can take ~40min).
     # Without this a hung run rides to the 6h GitHub default.
@@ -492,7 +495,7 @@ jobs:
 
   compatibility:
     name: quality (25.x)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - name: Checkout
@@ -570,7 +573,7 @@ jobs:
   # Perf lane (T5 b-12; 19-performance-budget §2). Report-only while the §1
   # numbers await owner sign-off; PERF_LANE_ENFORCE=1 flips it blocking.
   perf-lane:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     continue-on-error: true
     steps:

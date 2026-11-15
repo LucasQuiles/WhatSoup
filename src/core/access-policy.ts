@@ -1,7 +1,7 @@
 import type { IncomingMessage } from './types.ts';
 import type { Database } from './database.ts';
 import { lookupAccess, resolvePhoneFromJid } from './access-list.ts';
-import { bareNumber, normalizeLid, isLidJid } from './jid-constants.ts';
+import { bareNumber, normalizeLid, isAuthenticatedSenderJid, isLidJid } from './jid-constants.ts';
 import { createChildLogger } from '../logger.ts';
 import { config, type AccessMode } from '../config.ts';
 import { isAuthenticatedAdmin, isBotMentioned } from './access-predicates.ts';
@@ -15,6 +15,32 @@ export interface TriggerResult {
   respond: boolean;
   reason: string;
   accessStatus?: string; // 'allowed' | 'blocked' | 'pending' | 'unknown'
+}
+
+export type TrustedActorAccessClass =
+  | 'administrator'
+  | 'authorized_user'
+  | 'untrusted_or_unknown'
+  | 'system';
+
+/**
+ * Derive provider-visible actor context from transport-authenticated identity.
+ * This deliberately remains narrower than a permissive response mode.
+ */
+export function classifyTrustedActorAccess(
+  senderJid: string | null | undefined,
+  db: Database,
+  adminPhones: Set<string>,
+): TrustedActorAccessClass {
+  if (!senderJid || !isAuthenticatedSenderJid(senderJid)) return 'untrusted_or_unknown';
+
+  const effectivePhone = resolvePhoneFromJid(senderJid, db);
+  const lidLocal = normalizeLid(bareNumber(senderJid));
+  if (isLidJid(senderJid) && effectivePhone === lidLocal) return 'untrusted_or_unknown';
+
+  if (isAuthenticatedAdmin(senderJid, effectivePhone, adminPhones)) return 'administrator';
+  if (lookupAccess(db, 'phone', effectivePhone)?.status === 'allowed') return 'authorized_user';
+  return 'untrusted_or_unknown';
 }
 
 /**

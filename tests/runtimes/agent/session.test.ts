@@ -9,6 +9,7 @@ import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { ProviderMcpBridge } from '../../../src/runtimes/agent/providers/types.ts';
 import { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
 import { shortHash } from '../../../src/lib/short-hash.ts';
+import { M365_MUTATION_DENY } from '../../../src/core/settings-template.ts';
 import { outsideRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
 import {
   CONFIG_ROOT_ISOLATION_FLAG,
@@ -152,6 +153,7 @@ import { readFileSync } from 'node:fs';
 import { killSessionTree } from '../../../src/runtimes/agent/process-tree.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { formatAge, WATCHDOG_SOFT_MS, WATCHDOG_WARN_MS, WATCHDOG_HARD_MS, STALLED_OP_KILL_GRACE_MS, LONG_OP_CEILING_MS, PROVIDER_DISPLAY_NAMES } from '../../../src/runtimes/agent/session.ts';
+import { trustedActorApplicationContext } from '../../../src/runtimes/agent/trusted-actor-envelope.ts';
 import { OpenAIApiProvider } from '../../../src/runtimes/agent/providers/openai-api.ts';
 import { AnthropicApiProvider } from '../../../src/runtimes/agent/providers/anthropic-api.ts';
 
@@ -721,7 +723,7 @@ describe('SessionManager', () => {
       messenger: makeMessenger().messenger,
       chatJid: CHAT_JID,
       onEvent: vi.fn(),
-      whatsoupMcpSessionToken: 'session-token-persistent',
+      whatsoupMcpSessionLease: { token: 'session-token-persistent', revoke: vi.fn() },
     });
     await persistent.spawnSession();
     const persistentEnv = vi.mocked(spawn).mock.calls[0]?.[2]?.env;
@@ -734,7 +736,7 @@ describe('SessionManager', () => {
       onEvent: vi.fn(),
       provider: 'opencode-cli',
       model: 'glm/test-model',
-      whatsoupMcpSessionToken: 'session-token-per-turn',
+      whatsoupMcpSessionLease: { token: 'session-token-per-turn', revoke: vi.fn() },
     });
     await perTurn.spawnSession();
     void perTurn.sendTurn('hello').catch(() => {});
@@ -743,6 +745,76 @@ describe('SessionManager', () => {
 
     expect([persistentEnv?.WHATSOUP_MCP_SESSION_TOKEN, perTurnEnv?.WHATSOUP_MCP_SESSION_TOKEN])
       .toEqual(['session-token-persistent', 'session-token-per-turn']);
+  });
+
+  // M365 r4 W4/T6: the session token lives as long as its manager. A child
+  // respawned inside the manager keeps it, and the manager never revokes it itself.
+  it('keeps its session token lease across a child respawn and a kept shutdown', async () => {
+    const lease = { token: 'session-token-lease', revoke: vi.fn() };
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      whatsoupMcpSessionLease: lease,
+    } as ConstructorParameters<typeof SessionManager>[0]);
+    await sm.spawnSession();
+    const firstEnv = vi.mocked(spawn).mock.calls.at(-1)?.[2]?.env;
+    vi.mocked(spawn).mockReturnValue(makeMockChild(88889) as never);
+    await sm.handleNew();
+    const respawnedEnv = vi.mocked(spawn).mock.calls.at(-1)?.[2]?.env;
+    await sm.shutdown(true);
+
+    expect([firstEnv?.WHATSOUP_MCP_SESSION_TOKEN, respawnedEnv?.WHATSOUP_MCP_SESSION_TOKEN])
+      .toEqual(['session-token-lease', 'session-token-lease']);
+    expect((sm as unknown as { mcpSessionLease?: unknown }).mcpSessionLease).toBe(lease);
+    expect(lease.revoke).not.toHaveBeenCalled();
+  });
+
+  // B11: the runtime's live M365 policy is read at every spawn, so an in-place respawn after a
+  // withdrawal denies on the CLI and drops the bridge values, and a pending floor rewrite refuses it.
+  it('reads the live Microsoft 365 policy at each spawn, including an in-place respawn', async () => {
+    const childEnv = {
+      ALLOW_M365_MUTATIONS: '1', MS365_AGENT365_BRIDGE: 'true', MS365_AGENT365_API_KEY: 'synthetic-key',
+      MS365_AGENT365_ACCOUNT_ID: 'employee-account', MS365_TENANT_ID: '11111111-2222-3333-4444-555555555555',
+    };
+    const approved = { status: 'approved' as const, childEnv, workflowAuthority: { accountId: 'employee-account', employeeActorJid: '15551230001@s.whatsapp.net' } };
+    let live: { status: 'rejected' } | typeof approved = approved;
+    let refuse = false;
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      whatsoupMcpSocket: '/private/actor.sock', whatsoupMcpSessionLease: { token: 'session-token-lease', revoke: vi.fn() },
+      m365MutationPolicy: approved,
+      m365SpawnPolicy: () => {
+        if (refuse) throw new Error('M365_FLOOR_RESTORATION_PENDING: synthetic');
+        return live;
+      },
+    } as ConstructorParameters<typeof SessionManager>[0]);
+    const m365Keys = (env: NodeJS.ProcessEnv | undefined) => Object.keys(env ?? {})
+      .filter((key) => key.startsWith('MS365_') || key === 'ALLOW_M365_MUTATIONS');
+
+    await sm.spawnSession();
+    const first = vi.mocked(spawn).mock.calls.at(-1)!;
+    expect(first[1]).not.toContain('--disallowedTools');
+    expect(first[2]?.env?.MS365_WORKFLOW_AUTHORITY_REQUIRED).toBe('1');
+    expect(first[2]?.env?.MS365_AGENT365_API_KEY).toBe('synthetic-key');
+
+    // Withdrawn after the first spawn: the same manager's respawn gets the deny set and no bridge values.
+    live = { status: 'rejected' };
+    vi.mocked(spawn).mockReturnValue(makeMockChild(88890) as never);
+    await sm.handleNew();
+    const respawned = vi.mocked(spawn).mock.calls.at(-1)!;
+    expect(respawned[1]).toContain('--disallowedTools');
+    expect(respawned[1]).toEqual(expect.arrayContaining([...M365_MUTATION_DENY]));
+    expect(m365Keys(respawned[2]?.env)).toEqual([]);
+
+    // A pending floor rewrite refuses the next respawn before any child is spawned.
+    refuse = true;
+    const spawns = vi.mocked(spawn).mock.calls.length;
+    vi.mocked(spawn).mockReturnValue(makeMockChild(88891) as never);
+    await expect(sm.handleNew()).rejects.toThrow(/M365_FLOOR_RESTORATION_PENDING/);
+    expect(vi.mocked(spawn).mock.calls.length).toBe(spawns);
+    await sm.shutdown(true);
   });
 
   it('spawnSession propagates ALLOW_M365_MUTATIONS when fail-closed mode is unset', async () => {
@@ -4311,6 +4383,7 @@ describe('Codex session resume via thread ID', () => {
     });
     expect(freshThreadStart).toBeDefined();
     const payload = JSON.parse(String(freshThreadStart![0]));
+    // The fresh thread keeps the spawn's composed instructions (Opus m3).
     expect(payload).toEqual({
       jsonrpc: '2.0',
       id: expect.any(String),
@@ -4320,6 +4393,7 @@ describe('Codex session resume via thread ID', () => {
         approvalPolicy: 'never',
         sandbox: 'danger-full-access',
         persistExtendedHistory: true,
+        baseInstructions: expect.stringMatching(/a personal .+ CLI agent/),
       },
     });
   });
@@ -4397,6 +4471,36 @@ describe('Codex session resume via thread ID', () => {
 
     // updateSessionId should have been called with empty string to clear the stale ID
     expect(updateSessionId).toHaveBeenCalledWith(db, 42, '');
+  });
+
+  // Opus m3: the persistent branch never assigns this.systemPrompt, so the
+  // fresh thread after a rejected resume used to start without instructions.
+  it('sends the composed system prompt in the fresh thread/start after a rejected resume', async () => {
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      provider: 'codex-cli', onEvent: vi.fn(),
+    });
+    await sm.spawnSession('thread_rejected_777', 42);
+    type ThreadStart = { id: string; method?: string; params?: { threadId?: string; baseInstructions?: string } };
+    const resumeRequest = mockChild.stdin.write.mock.calls
+      .map(call => JSON.parse(String(call[0])) as ThreadStart)
+      .find(call => call.method === 'thread/start');
+    expect(resumeRequest?.params?.threadId).toBe('thread_rejected_777');
+    const composed = resumeRequest?.params?.baseInstructions;
+    expect(composed).toContain('a personal Codex CLI agent');
+    expect(composed).toBe(sm.buildSystemPrompt());
+
+    mockChild.stdin.write.mockClear();
+    mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+      jsonrpc: '2.0', id: resumeRequest!.id, error: { code: -32600, message: 'Thread not found' },
+    }) + '\n'));
+
+    const retries = mockChild.stdin.write.mock.calls
+      .map(call => JSON.parse(String(call[0])) as ThreadStart)
+      .filter(call => call.method === 'thread/start');
+    expect(retries).toHaveLength(1);
+    expect(retries[0]?.params?.threadId).toBeUndefined();
+    expect(retries[0]?.params?.baseInstructions).toBe(composed);
   });
 
   it('does not include threadId in thread/start for fresh spawn (no resume)', async () => {
@@ -6292,6 +6396,30 @@ describe('opencode-cli session resume via sessionId', () => {
     expect(prompt).toContain('Application context (runtime-provided):\nreceipt=2026-05-28T20:26:40.000Z age=95');
     expect(prompt).toContain('User message:\nstop that flow now');
     expect(prompt.indexOf('Application context')).toBeLessThan(prompt.indexOf('User message:'));
+  });
+
+  // Lead ruling b9-nonce-drop: the actor block reaches the provider exactly as
+  // the envelope built it, and the system prompt declares no secret.
+  it('sends the actor block verbatim and declares no actor secret in the system prompt', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+    });
+    const block = trustedActorApplicationContext('administrator');
+
+    await sm.spawnSession();
+    const turnChild = makeMockChild(22223);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(turnChild);
+    await sm.sendTurn({ applicationContext: [block], userText: 'hello' });
+
+    const prompt = String(turnChild.stdin.end.mock.calls.at(-1)?.[0] ?? '');
+    expect(prompt).toContain(`Application context (runtime-provided):\n${block}`);
+    expect(prompt).toContain('User message:\nhello');
+    expect(prompt).not.toMatch(/nonce/i);
+    expect(sm.buildSystemPrompt()).not.toMatch(/nonce/i);
   });
 
   it('opencode-cli includes model -m when model is set and no custom baseUrl', async () => {

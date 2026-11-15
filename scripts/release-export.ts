@@ -11,7 +11,7 @@
  * restarting it remain separately-approved host mutations, exactly as the
  * planner's `approval-required` action records.
  */
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -23,6 +23,7 @@ import {
   type DeploymentQualificationBundleReport,
   type DeploymentQualificationExportBinding,
 } from './lib/deployment-qualification-export.ts';
+import { assertNoLegacyGrafts } from './lib/ci-control/git-input-core.ts';
 import { cleanGitEnv } from './lib/guard-core.ts';
 import {
   RELEASE_MANIFEST_FILE,
@@ -38,7 +39,7 @@ import {
 } from './source-runtime-drift-check.ts';
 
 export interface ReleaseExportOptions {
-  /** Git repository that contains the commit (bare or work tree). */
+  /** Clone of the canonical repository that contains the commit and `refs/remotes/origin/main`. */
   repoRoot: string;
   /** Full 40-hex commit id to export. Abbreviations are rejected. */
   commit: string;
@@ -72,12 +73,90 @@ export interface ReleaseExportReport {
   /** Digest over the sorted (path, sha256) manifest rows — the release identity. */
   treeSha256: string;
   selfCheck: ReleaseSnapshotDriftReport;
+  /** The main commit the source was proven to be (an ancestor of) at export time. */
+  sourceOnMain: { ref: string; mainCommit: string };
   qualificationBundle?: DeploymentQualificationBundleReport;
   approvalPending: string;
 }
 
+/**
+ * Every host runs `main` or an ancestor of it; a commit that has not landed on
+ * main is backlog, not a deployable build. The check reads the local
+ * remote-tracking ref of an `origin` that resolves to the canonical GitHub
+ * repository, not the network: `main` there is protected against force-push,
+ * so a stale ref can only refuse a landed commit (fetch, then retry), never
+ * admit an unlanded one. Local `refs/heads/main` is not used because a clone
+ * can carry unpushed commits there, and an `origin` that is a fork, mirror or
+ * local checkout would make its own unpushed commits look landed. Replace refs
+ * and legacy grafts can rewrite ancestry locally, so every git call here runs
+ * with `--no-replace-objects` and a graft file refuses the export.
+ */
+export const RELEASE_MAIN_REF = 'refs/remotes/origin/main';
+export const RELEASE_MAIN_REPOSITORY = 'github.com/LucasQuiles/WhatSoup';
+const CANONICAL_ORIGIN_RE = /^(?:https:\/\/github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)LucasQuiles\/WhatSoup(?:\.git)?\/?$/i;
+const FETCH_MAIN = `git fetch origin +refs/heads/main:${RELEASE_MAIN_REF}`;
+
+function gitStatus(repoRoot: string, args: string[]): SpawnSyncReturns<string> {
+  return spawnSync('git', ['--no-replace-objects', '-C', repoRoot, ...args], {
+    encoding: 'utf8',
+    env: cleanGitEnv(),
+    timeout: 30_000,
+  });
+}
+
+function mainCheckFailed(step: string, proc: ReturnType<typeof gitStatus>): Error {
+  return new Error(
+    `release source must be on main: ${step} failed: ${(proc.stderr || proc.error?.message || `git exited ${String(proc.status)}`).trim()}`,
+  );
+}
+
+function requireCommitOnMain(repoRoot: string, commit: string): ReleaseExportReport['sourceOnMain'] {
+  try {
+    assertNoLegacyGrafts(repoRoot);
+  } catch {
+    throw new Error(
+      `release source must be on main: ${repoRoot} carries legacy history grafts (info/grafts) or its git directory is unreadable; export from a clean clone`,
+    );
+  }
+
+  // `--get-url` applies insteadOf rewrites and never contacts the remote. The
+  // URL itself is not echoed: it can carry credentials.
+  const origin = gitStatus(repoRoot, ['ls-remote', '--get-url', 'origin']);
+  if (origin.status !== 0) throw mainCheckFailed('reading the origin URL', origin);
+  if (!CANONICAL_ORIGIN_RE.test(origin.stdout.trim())) {
+    throw new Error(
+      `release source must be on main: origin does not resolve to ${RELEASE_MAIN_REPOSITORY} in ${repoRoot}; export from a clone of that repository`,
+    );
+  }
+
+  // show-ref --verify takes the full ref name only; rev-parse would fall back
+  // to look-alikes such as refs/heads/refs/remotes/origin/main.
+  const ref = gitStatus(repoRoot, ['show-ref', '--verify', '--hash', RELEASE_MAIN_REF]);
+  if (ref.status === 1 || (ref.status === 128 && /not a valid ref/.test(ref.stderr))) {
+    throw new Error(
+      `release source must be on main: ${RELEASE_MAIN_REF} is missing in ${repoRoot}; run \`${FETCH_MAIN}\` and retry`,
+    );
+  }
+  if (ref.status !== 0) throw mainCheckFailed(`reading ${RELEASE_MAIN_REF}`, ref);
+  const peeled = gitStatus(repoRoot, ['rev-parse', '--verify', '--quiet', `${ref.stdout.trim()}^{commit}`]);
+  const mainCommit = peeled.stdout?.trim() ?? '';
+  if (peeled.status !== 0 || !/^[0-9a-f]{40}$/.test(mainCommit)) throw mainCheckFailed(`peeling ${RELEASE_MAIN_REF}`, peeled);
+
+  const ancestry = gitStatus(repoRoot, ['merge-base', '--is-ancestor', commit, mainCommit]);
+  if (ancestry.status === 0) return { ref: RELEASE_MAIN_REF, mainCommit };
+  if (ancestry.status !== 1) throw mainCheckFailed('the ancestry check', ancestry);
+  const shallow = gitStatus(repoRoot, ['rev-parse', '--is-shallow-repository']);
+  const remedy = shallow.status === 0 && shallow.stdout.trim() === 'true'
+    ? 'this clone is shallow, so older history is unknown: run `git fetch --unshallow origin` and retry'
+    : `land it on main first (if it already landed, run \`${FETCH_MAIN}\` and retry)`;
+  throw new Error(
+    `release source must be on main: commit ${commit} is not ${RELEASE_MAIN_REF} (${mainCommit}) or an ancestor of it; ${remedy}`,
+  );
+}
+
 function git(repoRoot: string, args: string[], input?: string): Buffer {
-  const proc = spawnSync('git', ['-C', repoRoot, ...args], {
+  // Replace refs would make the exported bytes differ from the named commit.
+  const proc = spawnSync('git', ['--no-replace-objects', '-C', repoRoot, ...args], {
     env: cleanGitEnv(),
     input,
     maxBuffer: 1024 * 1024 * 1024,
@@ -145,13 +224,14 @@ export function exportRelease(options: ReleaseExportOptions): ReleaseExportRepor
   if (!/^[0-9a-f]{40}$/.test(commit)) {
     throw new Error(`commit must be the full 40-hex object id, got: ${commit}`);
   }
-  const exists = spawnSync('git', ['-C', repoRoot, 'cat-file', '-e', `${commit}^{commit}`], {
+  const exists = spawnSync('git', ['--no-replace-objects', '-C', repoRoot, 'cat-file', '-e', `${commit}^{commit}`], {
     env: cleanGitEnv(),
     timeout: 30_000,
   });
   if (exists.status !== 0) {
     throw new Error(`commit not found in repository ${repoRoot}: ${commit}`);
   }
+  const sourceOnMain = requireCommitOnMain(repoRoot, commit);
 
   mkdirSync(releaseRoot, { recursive: true });
   const stagingRoot = mkdtempSync(path.join(releaseRoot, '.export-staging-'));
@@ -260,6 +340,7 @@ export function exportRelease(options: ReleaseExportOptions): ReleaseExportRepor
       fileCount: manifest.files.length,
       treeSha256: manifestTreeSha256(manifest),
       selfCheck,
+      sourceOnMain,
       qualificationBundle: stagedQualificationBundle
         ? {
           ...stagedQualificationBundle.report,
@@ -400,6 +481,7 @@ export function run(argv: string[] = process.argv.slice(2), cwd = process.cwd())
   else {
     console.log(`exported ${report.commit} -> ${report.releasePath}`);
     console.log(`files=${report.fileCount} tree=${report.treeSha256}`);
+    console.log(`source on main: ${report.sourceOnMain.ref} ${report.sourceOnMain.mainCommit}`);
     console.log(`self-check ok=${report.selfCheck.ok}`);
     if (report.qualificationBundle) {
       console.log(`qualification bundle=${report.qualificationBundle.manifestPath} sha256=${report.qualificationBundle.manifestSha256}`);

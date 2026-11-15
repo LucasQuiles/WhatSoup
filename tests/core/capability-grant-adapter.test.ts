@@ -29,7 +29,15 @@ function readSettings(): { allow: string[]; deny: string[] } {
 
 describe('createSettingsPolicyAdapter', () => {
   it('preserves explicit denies through approved grants, fallback and renewed approval', async () => {
-    let policy: M365MutationPolicy = { status: 'approved', childEnv: {} };
+    const approvedPolicy: M365MutationPolicy = {
+      status: 'approved',
+      childEnv: {},
+      workflowAuthority: {
+        accountId: 'bridge-account',
+        employeeActorJid: '15551230001@s.whatsapp.net',
+      },
+    };
+    let policy: M365MutationPolicy = approvedPolicy;
     const explicit = 'mcp__plugin_microsoft_365_microsoft_365__send-mail';
     writePermissionsSettings(dir, {
       permissions: { allow: [], deny: [explicit], defaultMode: 'bypassPermissions' },
@@ -46,7 +54,7 @@ describe('createSettingsPolicyAdapter', () => {
     expect(readSettings().allow).not.toContain('camera.snap');
     expect(readSettings().deny).toEqual(expect.arrayContaining([...M365_MUTATION_DENY]));
 
-    policy = { status: 'approved', childEnv: {} };
+    policy = approvedPolicy;
     await adapter.apply({ addAllow: ['camera.snap'], removeAllow: [], addDeny: [], removeDeny: [] });
     // Stored entries have no authorship provenance; renewed approval cannot erase them.
     expect(readSettings().deny).toEqual(expect.arrayContaining([...M365_MUTATION_DENY]));

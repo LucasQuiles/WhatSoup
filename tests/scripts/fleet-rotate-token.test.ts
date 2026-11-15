@@ -46,12 +46,12 @@ afterEach(() => {
 
 describe('parseArgs', () => {
   it('defaults to non-dry-run', () => {
-    expect(parseArgs([])).toEqual({ dryRun: false, json: false, quiet: false, help: false });
+    expect(parseArgs([])).toEqual({ dryRun: false, json: false, quiet: false, revokeOld: false, help: false });
   });
 
-  it('recognizes --dry-run, --json, --quiet, --help', () => {
-    expect(parseArgs(['--dry-run', '--json', '--quiet'])).toEqual({
-      dryRun: true, json: true, quiet: true, help: false,
+  it('recognizes --dry-run, --json, --quiet, --revoke-old, --help', () => {
+    expect(parseArgs(['--dry-run', '--json', '--quiet', '--revoke-old'])).toEqual({
+      dryRun: true, json: true, quiet: true, revokeOld: true, help: false,
     });
     expect(parseArgs(['--help'])).toMatchObject({ help: true });
   });
@@ -82,6 +82,20 @@ describe('rotateOnce', () => {
     const onDisk = JSON.parse(fs.readFileSync(getFleetTokensPath(), 'utf-8')) as FleetTokensFile;
     expect(onDisk.active).toBe(initial.active);
   });
+
+  it('drops every previously accepted token when revoke-old is requested', () => {
+    const initial = loadOrCreateFleetTokens();
+    const first = rotateOnce({ dryRun: false });
+    expect(first.after.accept).toContain(initial.active);
+
+    const { before, after } = rotateOnce({ dryRun: false, revokeOld: true });
+    expect(before.accept.length).toBeGreaterThan(0);
+    expect(after.active).not.toBe(before.active);
+    expect(after.accept).toEqual([]);
+
+    const onDisk = JSON.parse(fs.readFileSync(getFleetTokensPath(), 'utf-8')) as FleetTokensFile;
+    expect(onDisk).toEqual(after);
+  });
 });
 
 describe('main — stdout / exit codes', () => {
@@ -106,6 +120,14 @@ describe('main — stdout / exit codes', () => {
     expect(typeof parsed.activeToken).toBe('string');
     expect((parsed.activeToken as string)).toMatch(/^[0-9a-f]{64}$/);
     expect(parsed.path).toBe(getFleetTokensPath());
+  });
+
+  it('reports that prior tokens were revoked in JSON mode', () => {
+    const code = main(['--json', '--revoke-old']);
+    expect(code).toBe(0);
+    const parsed = JSON.parse(writeCaptured.join('').trim()) as Record<string, unknown>;
+    expect(parsed.revokedPriorTokens).toBe(true);
+    expect(parsed.acceptSize).toBe(0);
   });
 
   it('migrates a legacy single-string token, then rotates', () => {

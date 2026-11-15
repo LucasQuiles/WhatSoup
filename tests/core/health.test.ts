@@ -1035,7 +1035,6 @@ describe('GET /health', () => {
     // A passive instance has no provider receipts, so no turn can release a
     // latched reason. Churn must clear on its own once its hold has passed.
     let monotonicMs = 1000;
-    vi.spyOn(performance, 'now').mockImplementation(() => monotonicMs);
     let churnCount = 3;
     const connectionManager = {
       botJid: '15555550123@s.whatsapp.net',
@@ -1066,33 +1065,38 @@ describe('GET /health', () => {
       })),
     } as unknown as ConnectionManager;
 
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    ({ server, port } = await buildTestServer(makeDeps(db, {
-      connectionManager,
-      instanceName: 'passive-churn-reprobe',
-      instanceType: 'passive',
-    })));
+    const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => monotonicMs);
+    try {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      ({ server, port } = await buildTestServer(makeDeps(db, {
+        connectionManager,
+        instanceName: 'passive-churn-reprobe',
+        instanceType: 'passive',
+      })));
 
-    let response = JSON.parse((await healthReq(port)).body);
-    expect(response.status).toBe('degraded');
-    expect(response.status_reasons).toContain('connection_churn');
+      let response = JSON.parse((await healthReq(port)).body);
+      expect(response.status).toBe('degraded');
+      expect(response.status_reasons).toContain('connection_churn');
 
-    // The transport's ten-minute window has expired. The reason stays held
-    // for one hold after the last read that saw churn, then clears with no turn.
-    churnCount = 0;
-    response = JSON.parse((await healthReq(port)).body);
-    expect(response.status_reasons).toContain('connection_churn');
-    monotonicMs += 11 * 60_000;
-    response = JSON.parse((await healthReq(port)).body);
-    expect(response.status, 'a clean passive transport must not remain latched degraded').toBe('healthy');
-    expect(response.status_reasons).not.toContain('connection_churn');
-    expect(response.status_reasons).not.toContain('degradation_silence_unproven');
+      // The transport's ten-minute window has expired. The reason stays held
+      // for one hold after the last read that saw churn, then clears with no turn.
+      churnCount = 0;
+      response = JSON.parse((await healthReq(port)).body);
+      expect(response.status_reasons).toContain('connection_churn');
+      monotonicMs += 11 * 60_000;
+      response = JSON.parse((await healthReq(port)).body);
+      expect(response.status, 'a clean passive transport must not remain latched degraded').toBe('healthy');
+      expect(response.status_reasons).not.toContain('connection_churn');
+      expect(response.status_reasons).not.toContain('degradation_silence_unproven');
 
-    // A later real churn burst must become visible again rather than being muted.
-    churnCount = 3;
-    response = JSON.parse((await healthReq(port)).body);
-    expect(response.status).toBe('degraded');
-    expect(response.status_reasons).toContain('connection_churn');
+      // A later real churn burst must become visible again rather than being muted.
+      churnCount = 3;
+      response = JSON.parse((await healthReq(port)).body);
+      expect(response.status).toBe('degraded');
+      expect(response.status_reasons).toContain('connection_churn');
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it('marks a connected instance degraded and surfaces outbound_flood when a flood is active (T3.3)', async () => {
@@ -7371,32 +7375,36 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
 
     it.each(['chat', 'passive'] as const)('re-probes event-loop recovery without a provider receipt (%s)', async (instanceType) => {
       let monotonicMs = 1000;
-      vi.spyOn(performance, 'now').mockImplementation(() => monotonicMs);
-      const sampler = fakeLoopLagSampler({
-        sampleCount: 20, p95LagMs: 412, locallyStarved: true, discontinuityCount: 0,
-      });
-      const snapshot = sampler.snapshot();
-      ({ server, port } = await buildTestServer(makeDeps(db, {
-        instanceType, loopLagSampler: sampler as any,
-      })));
-      const starved = JSON.parse((await healthReq(port)).body);
-      expect(starved.status).toBe('degraded');
-      expect(starved.status_reasons).toContain('event_loop_starvation');
+      const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => monotonicMs);
+      try {
+        const sampler = fakeLoopLagSampler({
+          sampleCount: 20, p95LagMs: 412, locallyStarved: true, discontinuityCount: 0,
+        });
+        const snapshot = sampler.snapshot();
+        ({ server, port } = await buildTestServer(makeDeps(db, {
+          instanceType, loopLagSampler: sampler as any,
+        })));
+        const starved = JSON.parse((await healthReq(port)).body);
+        expect(starved.status).toBe('degraded');
+        expect(starved.status_reasons).toContain('event_loop_starvation');
 
-      sampler.snapshot.mockReturnValue({ ...snapshot, p95LagMs: 5, locallyStarved: false });
-      const held = JSON.parse((await healthReq(port)).body);
-      expect(held.status_reasons).toContain('event_loop_starvation');
-      monotonicMs += 5 * 60_000;
-      const recovered = JSON.parse((await healthReq(port)).body);
-      expect(recovered.status).toBe('healthy');
-      expect(recovered.status_reasons).not.toContain('degradation_silence_unproven');
-      expect(recovered.degradation_causes).not.toContain('event_loop_starved');
+        sampler.snapshot.mockReturnValue({ ...snapshot, p95LagMs: 5, locallyStarved: false });
+        const held = JSON.parse((await healthReq(port)).body);
+        expect(held.status_reasons).toContain('event_loop_starvation');
+        monotonicMs += 5 * 60_000;
+        const recovered = JSON.parse((await healthReq(port)).body);
+        expect(recovered.status).toBe('healthy');
+        expect(recovered.status_reasons).not.toContain('degradation_silence_unproven');
+        expect(recovered.degradation_causes).not.toContain('event_loop_starved');
 
-      sampler.snapshot.mockReturnValue(snapshot);
-      const recurred = JSON.parse((await healthReq(port)).body);
-      expect(recurred.status).toBe('degraded');
-      expect(recurred.status_reasons).toContain('event_loop_starvation');
-      expect(recurred.degradation_causes).toContain('event_loop_starved');
+        sampler.snapshot.mockReturnValue(snapshot);
+        const recurred = JSON.parse((await healthReq(port)).body);
+        expect(recurred.status).toBe('degraded');
+        expect(recurred.status_reasons).toContain('event_loop_starvation');
+        expect(recurred.degradation_causes).toContain('event_loop_starved');
+      } finally {
+        nowSpy.mockRestore();
+      }
     });
 
     it('folds a starved sampler snapshot into the event_loop body and degrades status', async () => {

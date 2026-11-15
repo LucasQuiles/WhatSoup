@@ -127,6 +127,7 @@ const API_ERROR_RESPONSE_LIMIT_BYTES = 64 * 1024;
 const CLI_MODEL_PROBE_TIMEOUT_MS = 15_000;
 const CLAUDE_HELP_TIMEOUT_MS = 5_000;
 const CLAUDE_MODEL_PROBE_PROMPT = 'Reply with OK only.';
+const log = createChildLogger('primary-model-usability-adapters');
 const OPENCODE_MODEL_PROBE_PROMPT = 'Reply with OK only.';
 const API_MODEL_PROBE_PROMPT = 'Reply with OK only.';
 const CLAUDE_STRICT_MCP_CONFIG_FLAG = '--strict-mcp-config';
@@ -485,6 +486,10 @@ async function probeCliModel(
         return { status: 'unknown', reason: identityDrift };
       }
       if (support === 'unsupported') {
+        log.warn(
+          { binary: afterHelp.executablePath },
+          'claude CLI --help lists no --strict-mcp-config; model probe skipped so it starts no MCP servers',
+        );
         releaseExecutionLease();
         return { status: 'unknown', reason: CLAUDE_CLI_LACKS_STRICT_MCP_CONFIG };
       }

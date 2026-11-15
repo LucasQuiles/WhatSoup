@@ -1,4 +1,5 @@
 import { sanitizeProviderPreviewText } from './provider-preview-sanitizer.ts';
+import { neutralizeTrustedActorMarkers } from './trusted-actor-envelope.ts';
 
 export interface ContextLineMessage {
   timestamp: number;
@@ -31,7 +32,10 @@ export function formatContextLines(
     const timestamp = new Date(message.timestamp * 1000).toTimeString().slice(0, 5);
     const content = message.content ?? '[media]';
     const safe = redactForBackup ? sanitizeProviderPreviewText(content) : content;
-    return `[${timestamp}] ${message.senderName ?? message.senderJid}: ${capMessageText(safe)}`;
+    // Missed-message injection sends these lines with no actor block, so a forged
+    // marker in a sender name or message must not reach the provider intact.
+    const sender = neutralizeTrustedActorMarkers(message.senderName ?? message.senderJid);
+    return `[${timestamp}] ${sender}: ${capMessageText(neutralizeTrustedActorMarkers(safe))}`;
   });
   // Enforce the total budget newest-first so the most recent context survives;
   // the per-message cap guarantees at least the newest line always fits.

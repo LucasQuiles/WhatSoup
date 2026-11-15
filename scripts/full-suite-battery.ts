@@ -17,10 +17,14 @@
  * killed and reported), whereas a per-fixture `timeout` on a shared helper used by
  * dozens of unowned tests cannot be red-tested (git cannot be made to hang on demand).
  */
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { constants as osConstants } from 'node:os';
 
+import { probeGroupMembership, type GroupMembership } from '../src/lib/process-group-membership.ts';
 import { SIGNAL } from '../src/lib/signals.ts';
+
+// Re-exported: the boundary-run verifier and this script's tests import them from here.
+export { classifyGroupMembership, probeGroupMembership, type GroupMembership } from '../src/lib/process-group-membership.ts';
 
 /**
  * The semantic outcome — kept DISTINCT from the exit code so an INCONCLUSIVE result
@@ -76,37 +80,6 @@ export interface BoundedBatteryOptions {
    * (issue 3568). Defaults to `probeGroupMembership`, which reads `ps`.
    */
   probeGroup?: (pgid: number) => GroupMembership;
-}
-
-/**
- * What a process group holds. `no-live-members` means every member is a zombie, or the group
- * has none: nothing can still run. `unknown` means the probe could not tell, and is treated
- * exactly like `live`.
- */
-export type GroupMembership = 'live' | 'no-live-members' | 'unknown';
-
-/**
- * Classify `ps -A -o pid=,pgid=,stat=` output for process group `pgid`. An empty or malformed
- * listing is `unknown`, never `no-live-members`: a probe that cannot be read must not clear a
- * group.
- */
-export function classifyGroupMembership(psOutput: string, pgid: number): GroupMembership {
-  const lines = psOutput.split('\n').map((line) => line.trim()).filter((line) => line !== '');
-  if (lines.length === 0) return 'unknown';
-  let live = false;
-  for (const line of lines) {
-    const [pidField, pgidField, stat] = line.split(/\s+/);
-    if (stat === undefined || !/^\d+$/.test(pidField ?? '') || !/^\d+$/.test(pgidField ?? '')) return 'unknown';
-    if (Number(pgidField) === pgid && !stat.startsWith('Z')) live = true;
-  }
-  return live ? 'live' : 'no-live-members';
-}
-
-/** Default membership probe: one bounded `ps` read. Any failure to read is `unknown`. */
-export function probeGroupMembership(pgid: number): GroupMembership {
-  const ps = spawnSync('ps', ['-A', '-o', 'pid=,pgid=,stat='], { encoding: 'utf8', timeout: 5_000 });
-  if (ps.error !== undefined || ps.status !== 0) return 'unknown';
-  return classifyGroupMembership(ps.stdout, pgid);
 }
 
 /** How long to wait for the group to die after a kill before declaring the result inconclusive. */

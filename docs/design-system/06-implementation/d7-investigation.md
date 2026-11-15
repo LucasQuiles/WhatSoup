@@ -53,7 +53,8 @@ INCONCLUSIVE markers.
    @vitejs/plugin-react** (already proven by 132 console component test files running
    under root vitest today), plus `@tailwindcss/vite` at root (vite-7-compatible) for
    the CSS pipeline. No console-side config is touched.
-4. **CI claim VERIFIED.** `.github/workflows/quality.yml`: `runs-on: ubuntu-latest`,
+4. **CI claim VERIFIED.** `.github/workflows/quality.yml`: `runs-on: ubuntu-latest` at the
+   time of this investigation (now pinned to `ubuntu-24.04`),
    Node matrix `['24.x', '25.x']`, root `npm ci` runs before the test suite and the
    console install (`npm --prefix console ci`) runs after — so a browser-test step
    placed after "Test suite" needs only root devDependencies. Headless chromium on

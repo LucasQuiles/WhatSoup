@@ -133,6 +133,7 @@ describe('handleCreateLine — service block passthrough (issue #3401 item 2)', 
     // per-test tmp tree created in beforeEach).
     const service = {
       claudeConfigDir: path.join(home, '.config', 'claude-agent'),
+      claudeSecureStorageConfigDir: '',
       pathPrepend: [path.join(home, 'pin', 'bin'), path.join(home, '.local', 'bin')],
     };
     const res = mockRes();
@@ -198,12 +199,20 @@ describe('handleCreateLine — service block passthrough (issue #3401 item 2)', 
     await handleCreateLine(mockReq({ method: 'POST', body: JSON.stringify({
       name: 'svc-physical-paths', type: 'agent', adminPhones: ['15551234567'],
       agentOptions: { cwd: real, pluginDirs: [alias] },
-      service: { claudeConfigDir: alias, pathPrepend: [alias] },
+      service: {
+        claudeConfigDir: alias,
+        claudeSecureStorageConfigDir: alias,
+        pathPrepend: [alias],
+      },
     }) }), res, successDeps());
     expect(res._status, res._body).toBe(201);
     const config = JSON.parse(fs.readFileSync(cfgPathFor('svc-physical-paths'), 'utf8'));
     expect(config.agentOptions.pluginDirs).toEqual([real]);
-    expect(config.service).toEqual({ claudeConfigDir: real, pathPrepend: [real] });
+    expect(config.service).toEqual({
+      claudeConfigDir: real,
+      claudeSecureStorageConfigDir: real,
+      pathPrepend: [real],
+    });
   });
 
   it('rejects malformed expectedAccountDigest CREATE without creating config or enabling a service', async () => {

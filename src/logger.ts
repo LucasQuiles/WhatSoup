@@ -1,5 +1,6 @@
 import pino from 'pino';
 import { join } from 'node:path';
+import { sanitizingStreamWrite } from './lib/log-line-sanitizer.ts';
 import { sanitizingLogHook } from './lib/log-sanitizer.ts';
 
 // env-allowed: bootstrap-early logger; cannot import config (eval-order cycle)
@@ -87,19 +88,22 @@ if (transport) {
 
 // WS-A06: the same recursive pre-sink sanitizer applies to both construction
 // paths so every sink (stdout, rolling-file, third-party child logger) receives
-// sanitized payloads. The hook intercepts at the API boundary, before Pino's
-// serialization pipeline.
-const baseOptions: pino.LoggerOptions = {
+// sanitized payloads. logMethod intercepts at the API boundary, before Pino's
+// serialization pipeline; streamWrite scans the final serialized line, so a
+// protected link assembled by format arguments, objects or errors is redacted
+// too. Child loggers inherit both hooks.
+export const loggerOptions: pino.LoggerOptions = {
   level,
   serializers: errorLikeSerializers,
   hooks: {
     logMethod: sanitizingLogHook,
+    streamWrite: sanitizingStreamWrite,
   } as pino.LoggerOptions['hooks'],
 };
 
 const logger = transport
-  ? pino(baseOptions, transport)
-  : pino(baseOptions);
+  ? pino(loggerOptions, transport)
+  : pino(loggerOptions);
 
 export default logger;
 

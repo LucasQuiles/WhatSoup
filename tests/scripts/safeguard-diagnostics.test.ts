@@ -287,7 +287,7 @@ const requiredQualityWorkflow = [
   '            tests/browser-motion/__screenshots__',
   '  compatibility:',
   '    name: quality (25.x)',
-  '    runs-on: ubuntu-latest',
+  '    runs-on: ubuntu-24.04',
   '    timeout-minutes: 40',
   '    steps:',
   '      - name: Setup Node 25',
@@ -1101,6 +1101,14 @@ describe('safeguard diagnostics', () => {
         '  bot-errors-health-macos:\n    runs-on: macos-latest',
       ),
       evidence: 'bot-errors-health-macos runs-on must be exactly macos-15',
+    },
+    {
+      name: 'floats the Node 25 lane back to ubuntu-latest',
+      mutate: (workflow: string) => workflow.replace(
+        '    name: quality (25.x)\n    runs-on: ubuntu-24.04',
+        '    name: quality (25.x)\n    runs-on: ubuntu-latest',
+      ),
+      evidence: 'quality (25.x) compatibility runner must be exactly ubuntu-24.04',
     },
   ])('fails when Quality $name', ({ mutate, evidence }) => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];

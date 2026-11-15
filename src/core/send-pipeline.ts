@@ -14,9 +14,32 @@ import type {
 import { isNonEmptyString, isRecord } from '../lib/type-guards.ts';
 
 export type LinkPreviewMode = 'auto' | 'off';
-export type TextSendTransportResult = { transportId?: string | null } | void;
+/**
+ * A text transport may accept work into the durable answer queue without
+ * submitting it to the messaging provider. That is an outstanding intent,
+ * not provider acknowledgement. `not_sent` is a deliberate no-op after
+ * admission, for example when another answer already owns the live turn.
+ */
+export type TextSendTransportResult = {
+  transportId?: string | null;
+  auditDisposition?: 'deferred' | 'not_sent';
+} | void;
+
+/** A deferred transport must close this when its own durable send reaches a terminal outcome. */
+export interface DeferredTextSendAudit {
+  onProviderAcknowledged(): void;
+  onProviderFailure(error: unknown): void;
+  onNotSent(): void;
+}
+
+export interface TextSendTransportContext {
+  /** Claims the audit intent for a durable transport that will finish it asynchronously. */
+  deferAudit(): DeferredTextSendAudit | undefined;
+}
+
 export type TextSendTransport<T extends TextSendTransportResult = TextSendTransportResult> = (
   prepared: PreparedTextSend,
+  context: TextSendTransportContext,
 ) => Promise<T>;
 
 export interface ExecuteSendOptions {
@@ -103,6 +126,15 @@ export function createSendPipeline({
       await options.beforeAudit?.(prepared);
 
       let auditId: number | undefined;
+      let auditFinalized = false;
+      let deferredAuditClaimed = false;
+      const finalizeAudit = (outcome: 'submitted' | 'not_sent' | 'failed', error?: unknown): void => {
+        if (auditId === undefined || auditFinalized) return;
+        auditFinalized = true;
+        if (outcome === 'submitted') auditWriter!.markSuccess(auditId);
+        else if (outcome === 'not_sent') auditWriter!.markNotSent(auditId);
+        else auditWriter!.markFailure(auditId, error);
+      };
       if (auditWriter) {
         if (!caller) {
           throw new InvalidSendRequestError('send audit caller is required');
@@ -115,20 +147,41 @@ export function createSendPipeline({
         options.onAuditReceipt?.(auditIntent.auditReceipt);
       }
 
+      const transportContext: TextSendTransportContext = {
+        deferAudit: (): DeferredTextSendAudit | undefined => {
+          if (auditId === undefined) return undefined;
+          deferredAuditClaimed = true;
+          return {
+            onProviderAcknowledged: () => finalizeAudit('submitted'),
+            onProviderFailure: (error: unknown) => finalizeAudit('failed', error),
+            onNotSent: () => finalizeAudit('not_sent'),
+          };
+        },
+      };
+
       try {
-        const result = await transport(prepared);
+        const result = await transport(prepared, transportContext);
         if (auditId !== undefined) {
-          auditWriter!.markSuccess(auditId);
+          const disposition = transportAuditDisposition(result);
+          if (disposition === 'not_sent') finalizeAudit('not_sent');
+          else if (disposition === 'deferred') {
+            if (!deferredAuditClaimed) {
+              throw new InvalidSendRequestError('deferred transport did not claim its audit intent');
+            }
+          } else finalizeAudit('submitted');
         }
         return result;
       } catch (err) {
-        if (auditId !== undefined) {
-          auditWriter!.markFailure(auditId, err);
-        }
+        finalizeAudit('failed', err);
         throw err;
       }
     },
   };
+}
+
+function transportAuditDisposition(result: TextSendTransportResult): 'deferred' | 'not_sent' | undefined {
+  if (typeof result !== 'object' || result === null) return undefined;
+  return result.auditDisposition;
 }
 
 

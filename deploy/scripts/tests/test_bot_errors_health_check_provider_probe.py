@@ -1147,6 +1147,23 @@ def test_governed_child_environment_retains_the_configured_claude_config_dir():
     assert child.get("CLAUDE_CONFIG_DIR") == "/fixture/config/agent-alpha"
 
 
+def test_governed_child_environment_retains_an_explicit_empty_claude_secure_storage_selector():
+    child = _mod.governed_child_environment(
+        "/fixture/pin/bin:/usr/bin",
+        "agent-alpha",
+        "/fixture/work",
+        {
+            "PATH": "/fixture/pin/bin:/usr/bin",
+            "CLAUDE_CONFIG_DIR": "/fixture/config/agent-alpha",
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR": "",
+        },
+        env_keys=_mod.CLAUDE_FUNCTIONAL_ENV_KEYS,
+    )
+
+    assert child["CLAUDE_CONFIG_DIR"] == "/fixture/config/agent-alpha"
+    assert child["CLAUDE_SECURESTORAGE_CONFIG_DIR"] == ""
+
+
 def test_governed_child_environment_leaves_absent_claude_config_dir_absent():
     child = _mod.governed_child_environment(
         "/fixture/pin/bin:/usr/bin",
@@ -1271,13 +1288,14 @@ def test_opencode_probe_child_environment_admits_no_claude_or_anthropic_class_ke
 
     The constants row above can be satisfied by a tuple that never reaches the
     child. This one drives governed_child_environment with a base environment
-    that really does offer four keys of the class, so an empty result is a fact
+    that really does offer five keys of the class, so an empty result is a fact
     about the allowlist rather than about the fixture.
     """
     base_env = {
         "PATH": "/fixture/pin/bin:/usr/bin",
         "HOME": "/fixture/home",
         "CLAUDE_CONFIG_DIR": "/fixture/config/agent-alpha",
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR": "",
         "CLAUDE_CODE_ENTRYPOINT": "cli",
         "ANTHROPIC_API_KEY": "must-not-propagate",
         "ANTHROPIC_AUTH_TOKEN": "must-not-propagate",
@@ -1288,6 +1306,7 @@ def test_opencode_probe_child_environment_admits_no_claude_or_anthropic_class_ke
         "ANTHROPIC_AUTH_TOKEN",
         "CLAUDE_CODE_ENTRYPOINT",
         "CLAUDE_CONFIG_DIR",
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
     ], "fixture must actually offer keys of the class, or the assertion is vacuous"
 
     opencode_child = _mod.governed_child_environment(
@@ -1306,8 +1325,8 @@ def test_opencode_probe_child_environment_admits_no_claude_or_anthropic_class_ke
     assert opencode_child["WHATSOUP_INSTANCE"] == "agent-alpha"
 
     # Contrast from the SAME base environment: the claude allowlist admits the
-    # per-instance config root and nothing else of the class, so the rule is
-    # "one named config key for one provider", not "no such key anywhere".
+    # named Claude configuration selectors and nothing else of the class, so
+    # the rule is "named config keys for one provider", not "no such key anywhere".
     claude_child = _mod.governed_child_environment(
         "/fixture/pin/bin:/usr/bin",
         "agent-alpha",
@@ -1316,7 +1335,10 @@ def test_opencode_probe_child_environment_admits_no_claude_or_anthropic_class_ke
         env_keys=_mod.CLAUDE_FUNCTIONAL_ENV_KEYS,
     )
     assert sorted(k for k in claude_child
-                  if k.startswith(CLAUDE_CLASS_ENV_PREFIXES)) == ["CLAUDE_CONFIG_DIR"]
+                  if k.startswith(CLAUDE_CLASS_ENV_PREFIXES)) == [
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+    ]
     assert claude_child["CLAUDE_CONFIG_DIR"] == "/fixture/config/agent-alpha"
 
 
@@ -1328,6 +1350,7 @@ def test_default_provider_probe_child_keeps_the_claude_config_root(monkeypatch, 
     """
     environment = _matrix_environment(tmp_path)
     environment["CLAUDE_CONFIG_DIR"] = str(tmp_path / "config" / "agent-alpha")
+    environment["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = ""
     _arm_darwin_plist(
         monkeypatch, tmp_path, "agent-alpha",
         {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
@@ -1349,6 +1372,7 @@ def test_default_provider_probe_child_keeps_the_claude_config_root(monkeypatch, 
     child_env = seen.get("child_env")
     assert child_env is not None, "the probe never reached the provider spawn"
     assert child_env["CLAUDE_CONFIG_DIR"] == str(tmp_path / "config" / "agent-alpha")
+    assert child_env["CLAUDE_SECURESTORAGE_CONFIG_DIR"] == ""
 
 
 def test_governed_child_environment_excludes_provider_credentials():

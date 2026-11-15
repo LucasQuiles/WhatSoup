@@ -9,9 +9,18 @@ import { TEST_LINK_HOST, TEST_PROTECTED_DELIVERY_PINS } from '../../helpers/prot
 
 const DELIVERY_REF = 'aaaaaaaaaaaaaaaaaaaaaa';
 const DELIVERY_ID = 'bbbbbbbbbbbbbbbbbbbbbb';
-const DELIVERY_LINK = `https://${TEST_LINK_HOST}/s/#v3.${DELIVERY_ID}.${'c'.repeat(43)}`;
+// The fragment key is the secret part of the link; the delivery id beside it is public.
+const DELIVERY_LINK_KEY = 'c'.repeat(43);
+const DELIVERY_LINK = `https://${TEST_LINK_HOST}/s/#v3.${DELIVERY_ID}.${DELIVERY_LINK_KEY}`;
 const INTAKE_ID = 'iiiiiiiiiiiiiiiiiiiiii';
 const INTAKE_LINK = `https://${TEST_LINK_HOST}/s/#i1.${INTAKE_ID}.${'k'.repeat(43)}`;
+
+function expectOpaqueSubmittedResponse(text: string): void {
+  expect(text).not.toContain(DELIVERY_LINK);
+  expect(text).not.toContain(DELIVERY_LINK_KEY);
+  expect(text).not.toContain(TEST_LINK_HOST);
+  expect(JSON.parse(text)).toEqual({ deliveryRef: DELIVERY_REF, id: DELIVERY_ID, state: 'submitted' });
+}
 
 const directSession: SessionContext = {
   tier: 'chat-scoped',
@@ -25,8 +34,10 @@ describe('protected delivery MCP tools', () => {
   let registry: ToolRegistry;
   let inputCancels: Array<{ id: string; principal: string }>;
   let inputKind: 'password' | 'token' | 'mfa';
+  let sends: string[];
 
   beforeEach(() => {
+    sends = [];
     db = new Database(':memory:');
     db.open();
     registry = new ToolRegistry();
@@ -77,7 +88,12 @@ describe('protected delivery MCP tools', () => {
     const service = new ProtectedDeliveryService({
       db: db.raw,
       client,
-      messenger: { async sendRaw(_recipient, _content, options) { return { waMessageId: options?.messageId ?? null }; } },
+      messenger: {
+        async sendRaw(recipient, _content, options) {
+          sends.push(recipient);
+          return { waMessageId: options?.messageId ?? null };
+        },
+      },
       now: () => new Date('2026-10-29T12:00:00.000Z'),
       randomId: (() => {
         let n = 0;
@@ -103,10 +119,13 @@ describe('protected delivery MCP tools', () => {
     expect(body).toContain(DELIVERY_REF);
     expect(body).not.toContain(TEST_LINK_HOST);
     expect(body).not.toContain('fragment');
+    // request_rustdesk_access stages and sends, so it already reports the submitted delivery.
+    expectOpaqueSubmittedResponse(body);
 
     const delivered = await registry.call('deliver_secret', { delivery_ref: DELIVERY_REF }, directSession);
     expect(delivered.content[0].text).toContain('submitted');
     expect(delivered.content[0].text).not.toContain('managed.example');
+    expectOpaqueSubmittedResponse(delivered.content[0].text);
   });
 
   it('uses the direct verified conversation for a metadata-only secret input lifecycle', async () => {
@@ -195,6 +214,45 @@ describe('protected delivery MCP tools', () => {
     expect(group.isError).toBe(true);
     expect(mismatched.isError).toBe(true);
     expect(nonWhatsApp.isError).toBe(true);
+  });
+
+  const socketAttribution = (tokenResult: 'match' | 'absent') => ({
+    transport: 'socket' as const, connectionId: 'test-connection', tokenResult, clientName: null, clientVersion: null,
+  });
+
+  // Parity with send_message: a refused session token never stages, sends or reads a delivery; neither does a
+  // presented, matched token whose binding has since been revoked.
+  it.each([
+    ['refused on another socket', { sessionTokenRefusal: 'wrong_socket' as const }],
+    ['revoked', { sessionTokenRefusal: 'revoked' as const }],
+    ['matched but no longer bound', { callerAttribution: socketAttribution('match'), tokenBinding: () => undefined }],
+  ])('refuses protected delivery when the session token is %s', async (_case, overrides) => {
+    const refused: SessionContext = { ...directSession, ...overrides };
+    const staged = await registry.call('request_rustdesk_access', { device_id: 'device-1', purpose: 'login' }, refused);
+    expect(staged.isError).toBe(true);
+    expect(staged.content[0].text).toContain('accepted session token');
+    expect(sends).toEqual([]);
+
+    // The refusal comes from the shared identity check, before the service is reached for either call.
+    await registry.call('request_rustdesk_access', { device_id: 'device-1', purpose: 'login' }, directSession);
+    const delivered = await registry.call('deliver_secret', { delivery_ref: DELIVERY_REF }, refused);
+    const status = await registry.call('get_secret_delivery_status', { delivery_id: DELIVERY_ID }, refused);
+    expect(delivered.isError).toBe(true);
+    expect(delivered.content[0].text).toContain('accepted session token');
+    expect(status.isError).toBe(true);
+    expect(status.content[0].text).toContain('accepted session token');
+  });
+
+  // send_message keeps tokenless socket callers working; so does protected delivery. Every socket request
+  // carries a binding callback, which answers undefined when no token was presented.
+  it('accepts a bound direct socket caller that presented no session token', async () => {
+    const tokenless: SessionContext = {
+      ...directSession, callerAttribution: socketAttribution('absent'), tokenBinding: () => undefined,
+    };
+    const staged = await registry.call('request_rustdesk_access', { device_id: 'device-1', purpose: 'login' }, tokenless);
+    expect(staged.isError).toBeFalsy();
+    expectOpaqueSubmittedResponse(staged.content[0].text);
+    expect(sends).toHaveLength(1);
   });
 
   it('stores a mapped LID request under its verified phone destination', async () => {

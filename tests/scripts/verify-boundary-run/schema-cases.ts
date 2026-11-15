@@ -76,7 +76,7 @@ import {
 } from './support.ts';
 
 export function registerSchemaCases(): void {
-  it('[BCF00-S01] parses expected exits in linear bounded form', () => {
+  it('parses expected exits in linear bounded form', () => {
     const api = boundaryRun as unknown as {
       parseBoundaryExpectedExit?: (value: string) => Set<number> | 'nonzero' | null;
     };

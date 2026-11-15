@@ -156,6 +156,13 @@ describe('platform', () => {
       expect(buildPlist('phbot')).not.toContain('CLAUDE_CONFIG_DIR');
     });
 
+    it('renders an explicit empty secure-storage selector and omits it when absent', () => {
+      const selected = buildPlist('phbot', { claudeSecureStorageConfigDir: '' });
+      expect(selected).toContain('<key>CLAUDE_SECURESTORAGE_CONFIG_DIR</key>');
+      expect(selected).toContain('<string></string>');
+      expect(buildPlist('phbot')).not.toContain('CLAUDE_SECURESTORAGE_CONFIG_DIR');
+    });
+
     it('prepends configured service PATH entries ahead of the ambient PATH, preserving order', () => {
       const origPath = process.env.PATH;
       process.env.PATH = '/usr/bin:/bin';

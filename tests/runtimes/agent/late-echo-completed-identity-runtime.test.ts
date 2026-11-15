@@ -170,7 +170,8 @@ vi.mock('../../../src/core/messages.ts', async (importOriginal) => ({
 vi.mock('../../../src/core/command-router.ts', () => ({
   isAdminMessage: vi.fn(() => false), parseAdminCommand: vi.fn(() => null),
 }));
-vi.mock('../../../src/core/access-policy.ts', () => ({
+vi.mock('../../../src/core/access-policy.ts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../src/core/access-policy.ts')>(),
   shouldRespond: vi.fn(() => ({ respond: true, reason: 'allowed' })),
 }));
 

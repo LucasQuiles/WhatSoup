@@ -106,6 +106,7 @@ const INTERNAL_OUTBOUND_FAILURE_CODE_MAP: Record<InternalOutboundFailureCode, tr
   'outbound.replay_failed': true,
   'outbound.deferral_limit_exceeded': true,
   'outbound.replay_attempt_limit_exceeded': true,
+  'outbound.protected_link_send_refused': true,
 };
 
 const sorted = (values: Iterable<string>): string[] => [...values].sort();

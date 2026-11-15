@@ -94,21 +94,33 @@ describe('account-auth-status probe — CLI providers', () => {
     expect(r).toMatchObject({ ok: false, confidence: 'suspected' });
   });
 
-  it('forwards CLAUDE_CONFIG_DIR into the probe env when present, omits it when absent', async () => {
+  it('forwards explicit Claude store selectors into the probe env and preserves an empty secure-store selector', async () => {
     const withVar = vi.fn(async () => ({ status: 'ok' as const, output: 'authenticated' }));
     await makeAccountAuthStatusProbe(
       TARGET,
-      deps({ probeBinaryAuthStatus: withVar, env: { HOME: '/home/x', PATH: '/usr/bin', USER: 'x', CLAUDE_CONFIG_DIR: '/tmp/cfg/.claude' } }),
+      deps({
+        probeBinaryAuthStatus: withVar,
+        env: {
+          HOME: '/home/x', PATH: '/usr/bin', USER: 'x',
+          CLAUDE_CONFIG_DIR: '/tmp/cfg/.claude',
+          CLAUDE_SECURESTORAGE_CONFIG_DIR: '',
+        },
+      }),
     )(liveSignal());
     expect(withVar).toHaveBeenCalledWith(
       'claude',
       ['auth', 'status', '--json'],
-      expect.objectContaining({ CLAUDE_CONFIG_DIR: '/tmp/cfg/.claude' }),
+      expect.objectContaining({
+        CLAUDE_CONFIG_DIR: '/tmp/cfg/.claude',
+        CLAUDE_SECURESTORAGE_CONFIG_DIR: '',
+      }),
       // claude-cli children carry the spawn/exit lifecycle observers.
       expect.objectContaining({ onSpawned: expect.any(Function), onExited: expect.any(Function) }),
     );
 
-    const withoutVar = vi.fn(async () => ({ status: 'ok' as const, output: 'authenticated' }));
+    const withoutVar = vi.fn(
+      async (_binary: string, _args: string[], _env: NodeJS.ProcessEnv) => ({ status: 'ok' as const, output: 'authenticated' }),
+    );
     await makeAccountAuthStatusProbe(
       TARGET,
       deps({ probeBinaryAuthStatus: withoutVar, env: { HOME: '/home/x', PATH: '/usr/bin', USER: 'x' } }),
@@ -119,6 +131,7 @@ describe('account-auth-status probe — CLI providers', () => {
       expect.not.objectContaining({ CLAUDE_CONFIG_DIR: expect.anything() }),
       expect.objectContaining({ onSpawned: expect.any(Function), onExited: expect.any(Function) }),
     );
+    expect(withoutVar.mock.calls[0]?.[2]).not.toHaveProperty('CLAUDE_SECURESTORAGE_CONFIG_DIR');
   });
 
   it('never leaks raw probe output (which may carry tokens) into the summary', async () => {

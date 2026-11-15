@@ -24,6 +24,7 @@
 - [Fleet Bot Hardening Standard](runbooks/fleet-bot-hardening-standard.md)
 - [Release Snapshot Deployment](runbooks/release-deployment.md) — includes `npm run release:activate`, the coordinated macOS launchd release switch with verification and automatic rollback
 - [macOS Launchd Deployment](runbooks/macos-launchd-deployment.md)
+- [Trusted Actor Envelope](runbooks/trusted-actor-envelope.md) — the server-authored actor block and where marker copies are neutralised
 
 ---
 
@@ -1214,13 +1215,13 @@ done
 
 ```bash
 # 1. Check service is running
-systemctl --user status whatsoup@q
+systemctl --user status whatsoup@agent
 
 # 2. Check WhatsApp connection
 curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9092/health | python3 -c "import sys,json; d=json.load(sys.stdin); print(d)"
 
 # 3. Check logs for the conversation
-journalctl --user -u whatsoup@q -n 50 | grep -E 'ingest|dispatch|session|error'
+journalctl --user -u whatsoup@agent -n 50 | grep -E 'ingest|dispatch|session|error'
 
 # 4. Check if a Claude process is running
 ps aux | grep claude | grep -v grep
@@ -1231,7 +1232,7 @@ sqlite3 ~/.local/share/whatsoup/instances/q/bot.db \
 ```
 
 **Common causes:**
-- Service is stopped — start it: `systemctl --user start whatsoup@q`
+- Service is stopped — start it: `systemctl --user start whatsoup@agent`
 - WhatsApp disconnected — see §5.3
 - Agent session crashed and didn't recover — send any message to spawn a new session
 - Access list blocks the sender — check `access_list` table (see §7.1)
@@ -1628,7 +1629,7 @@ The operation tracker monitors each tool invocation and thinking gap. Stream-jso
 
 ```bash
 # Check for recent stall events in logs
-journalctl --user -u whatsoup@q -n 200 | grep -E 'stall|liveness|interrupt|recovering'
+journalctl --user -u whatsoup@agent -n 200 | grep -E 'stall|liveness|interrupt|recovering'
 
 # Check operation tracker config in use
 grep -A 20 'operationTracker' ~/.config/whatsoup/instances/q/config.json
@@ -2435,11 +2436,13 @@ Output is one JSON line with `ok`, `mode`, `decision` (`ready`, `applied`, `alre
 contradicts the recorded gap or an existing closure); `1` usage or I/O error. Output never contains
 message text, JIDs, or media.
 
-**Schema 66 rollback.** Migration 66 adds only the new table. After it is recorded, a binary whose
-ceiling is 65 refuses the database and will not write, so **binary-only rollback is unavailable**.
-Keep the 66-aware release for containment or forward repair. Restoring a pre-migration backup is an
-owner decision that requires a proven zero-new-writes window. **Never overwrite a newer database with
-an older backup**: messages received after the upgrade would be lost.
+**Schema 66 and 67 rollback.** Migration 66 adds only the closure table; migration 67 adds only the
+protected-delivery tables. After a migration is recorded, a binary whose ceiling is below it refuses
+the database and will not write: a schema-65 binary refuses a schema-66 database, and a schema-66
+binary refuses a schema-67 database, both as `future_schema`. **Binary-only rollback is unavailable**
+for either. Keep the 67-aware release for containment or forward repair. Restoring a pre-migration
+backup is an owner decision that requires a proven zero-new-writes window. **Never overwrite a newer
+database with an older backup**: messages received after the upgrade would be lost.
 
 The refusal is rehearsed with two real checkouts on disposable files. The work directory must not
 exist; the harness creates its own database there:
@@ -2451,10 +2454,11 @@ bash scripts/run-with-pinned-node.sh scripts/schema-rollback-rehearsal.ts \
   --old-root "$OLD" --new-root "$PWD" --work-dir "$SCRATCH/rehearsal"
 ```
 
-The old binary creates the database at 65, this release migrates it to 66, and the old binary reopens
-it. Exit `0` means the old binary refused with `DatabaseCompatibilityError` reason `future_schema`
-("Database schema migration 66 exceeds binary ceiling 65; refusing writes") and every file in the
-work directory, including the WAL and shared-memory sidecars, stayed byte-identical.
+The old binary creates the database at its own ceiling, this release migrates it to 67, and the old
+binary reopens it. From a schema-66 previous release, exit `0` means the old binary refused with
+`DatabaseCompatibilityError` reason `future_schema` ("Database schema migration 67 exceeds binary
+ceiling 66; refusing writes") and every file in the work directory, including the WAL and
+shared-memory sidecars, stayed byte-identical.
 
 #### Close a proven operator catch-up recovery (admitted inbound sequences)
 
@@ -3081,12 +3085,28 @@ outbox, conversation history, or model result. If staging, delivery, or the
 managed API fails, inspect the content-free `protected delivery` log event and
 use delivery status; do not retry through `send_message`.
 
+Redaction covers more paths than refusal. A protected link or its redaction
+marker is refused before sending only by a due scheduled message, a pending
+outbound replay (`outbound.protected_link_send_refused`), `forward_message`
+(which also refuses a source message that was itself a protected delivery) and
+a capability-obligation dispatch whose source token carries one
+(`protected_link_source_refused`). Other send tools, including `send_message`,
+`reply_message`, `edit_message` and `post_status`, send their text without this
+check; `reply_message` redacts only the quoted stored text. Agents do not see raw
+links: inbound text is redacted at ingest and every MCP tool response is
+redacted, so these tools can carry a link only if the caller already holds it
+from outside WhatSoup. A fleet config save refuses a value containing the
+redaction marker, so saving a redacted projection cannot overwrite a stored link.
+
 The tool resolves both the actor and destination to the same verified phone
 identity before recording its canonical WhatsApp address. A mapped LID and that
 phone address reuse the same pending RustDesk request. Recovery converts older
 LID records only when the current mapping still proves the same recipient and no
-send claim is held. Conflicting mappings fail closed; submitted or ambiguous
-records are never retargeted or replayed.
+send claim is held. Conflicting mappings fail closed. Submitted and ambiguous
+records are never retargeted, and automatic recovery never replays them. An
+explicit `deliver_secret` call returns a submitted record as sent, and retries an
+ambiguous one with the same resolve operation and WhatsApp message ID within the
+three-attempt, 60-second limit.
 
 After the transport becomes fully connected, one maintenance loop resumes only
 recent `staged` persisted deliveries and flushes pending metadata events. It
@@ -3435,8 +3455,11 @@ When a scheduled-agent-job scope reaches the compaction convergence limit, its
 hard reset remains part of the completed turn's finalization barrier. Later
 scheduled occurrences wait until the reset settles; an overlapping reset request
 joins the same operation. Shutdown joins that terminal owner and rejects queued
-occurrences without dispatching them. A failed reset retains its convergence
-evidence and recovery state. It does not establish that the scope recovered.
+occurrences without dispatching them. A reset that fails before or during
+teardown of the old session retains its convergence evidence and recovery
+state. Once teardown succeeds, that bookkeeping is cleared before the
+replacement session starts, so a failed replacement spawn reports a failed
+reset without it. Neither case establishes that the scope recovered.
 
 The next real user turn after a successful compact is measured separately. If that turn's known context exceeds `autoCompactInputTokens`, `runtime.agent.autoCompactNextTurnOverThreshold` increments. An unknown context records nothing. If it happens inside the rapid re-arm window, it also counts as the rapid re-arm for that compact cycle. If it happens later, it remains telemetry only; delayed eligibility is not the spiral condition.
 

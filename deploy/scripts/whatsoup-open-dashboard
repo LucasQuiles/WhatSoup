@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Open the local fleet dashboard in a dedicated Chrome profile and unlock it
+# through the login keychain. The root token never enters the URL, argv, disk,
+# or clipboard.
+set -euo pipefail
+
+FLEET="${FLEET:-http://127.0.0.1:9099}"
+CDP_PORT="${CDP_PORT:-9333}"
+PROFILE="${WHATSOUP_CONSOLE_PROFILE:-$HOME/.chrome-console}"
+RETRIES="${WHATSOUP_DASHBOARD_RETRIES:-30}"
+CURL_BIN="${WHATSOUP_CURL_BIN:-/usr/bin/curl}"
+OPEN_BIN="${WHATSOUP_OPEN_BIN:-/usr/bin/open}"
+UNLOCK_BIN="${WHATSOUP_CONSOLE_UNLOCK_BIN:-$HOME/.local/bin/whatsoup-console-unlock}"
+
+fleet_ready=0
+for ((attempt = 1; attempt <= RETRIES; attempt += 1)); do
+  if "$CURL_BIN" --fail --silent --show-error --max-time 2 -o /dev/null "$FLEET/"; then
+    fleet_ready=1
+    break
+  fi
+  if (( attempt < RETRIES )); then sleep 1; fi
+done
+if (( fleet_ready == 0 )); then
+  echo "fleet not reachable after ${RETRIES}s" >&2
+  exit 1
+fi
+
+if ! "$CURL_BIN" --fail --silent --max-time 2 -o /dev/null "http://127.0.0.1:$CDP_PORT/json/version"; then
+  "$OPEN_BIN" -na "Google Chrome" --args \
+    "--user-data-dir=$PROFILE" \
+    "--remote-debugging-port=$CDP_PORT" \
+    --no-first-run \
+    --no-default-browser-check \
+    "$FLEET/" >/dev/null 2>&1
+fi
+
+cdp_ready=0
+for ((attempt = 1; attempt <= RETRIES; attempt += 1)); do
+  if "$CURL_BIN" --fail --silent --max-time 2 -o /dev/null "http://127.0.0.1:$CDP_PORT/json/version"; then
+    cdp_ready=1
+    break
+  fi
+  if (( attempt < RETRIES )); then sleep 1; fi
+done
+if (( cdp_ready == 0 )); then
+  echo "dashboard browser not reachable after ${RETRIES}s" >&2
+  exit 1
+fi
+
+FLEET="$FLEET" CDP_PORT="$CDP_PORT" exec "$UNLOCK_BIN"

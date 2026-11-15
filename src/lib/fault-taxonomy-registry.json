@@ -286,7 +286,8 @@
         "outbound.identity_blocked",
         "outbound.replay_attempt_limit_exceeded",
         "outbound.replay_failed",
-        "outbound.deferral_limit_exceeded"
+        "outbound.deferral_limit_exceeded",
+        "outbound.protected_link_send_refused"
       ],
       "owner": "src/core/outbound-failure-disposition.ts",
       "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
@@ -1624,6 +1625,11 @@
       "disposition": "memory_provider_degradation_recovery_contract_owned_by_2412",
       "owner": "src/runtimes/chat/providers/pinecone.ts",
       "test": "tests/runtimes/chat/memory/memory-telemetry-cross-surface.test.ts"
+    },
+    "primary_model_probe_incompatible": {
+      "disposition": "claude_cli_upgrade_required_for_primary_probe_cleared_when_a_probe_runs_again",
+      "owner": "src/runtimes/agent/runtime-fallback.ts",
+      "test": "tests/runtimes/agent/primary-model-usability-adapters.test.ts"
     },
     "primary_model_unusable": {
       "disposition": "primary_model_verdict_requires_operator_model_or_credential_repair",

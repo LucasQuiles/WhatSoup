@@ -286,7 +286,7 @@ describe('S5 — the sock-tool factory propagates the sensitive flag', () => {
     // destructured out in makeSockTool, and if someone forgets, this turns red.
     const ALLOWED = new Set([
       'name', 'description', 'schema', 'scope', 'targetMode', 'replayPolicy',
-      'core', 'sensitive', 'bondEffect', 'group', 'externalEffect', 'handler',
+      'core', 'private', 'sensitive', 'bondEffect', 'group', 'externalEffect', 'handler',
     ]);
     const { captured } = buildRealRegistry();
     // Non-vacuity: a trivially small or empty capture would assert nothing.

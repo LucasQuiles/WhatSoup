@@ -115,6 +115,18 @@ describe('parseIncomingMessage — protected managed links', () => {
     expect(msg.message.extendedTextMessage.text).toBe(link);
   });
 
+  it('redacts a protected link supplied as the sender display name', () => {
+    // pushName is sender-controlled and reaches storage and agent context as senderName.
+    const link = 'https://links.example.test/s/#v3.sender-name-protected-test';
+    const msg = msgWith({ conversation: 'hello' }, { pushName: `Mallory ${link}` });
+
+    const result = parseIncomingMessage(msg);
+
+    expect(result!.senderName).toBe(`Mallory ${PROTECTED_MESSAGE_MARKER}`);
+    expect((result!.rawMessage as any).pushName).toBe(`Mallory ${PROTECTED_MESSAGE_MARKER}`);
+    expect(msg.pushName).toBe(`Mallory ${link}`);
+  });
+
   it('redacts a hash-pinned host on an instance with no protectedDelivery configuration', async () => {
     // Redaction must not depend on delivery configuration: a line that only
     // receives a protected link (for example a passive personal line) has none.

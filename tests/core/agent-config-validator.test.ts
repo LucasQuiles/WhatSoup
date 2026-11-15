@@ -50,85 +50,7 @@ const ctx = (mode: ValidatorContext['mode'], over: Partial<ValidatorContext> = {
   ...over,
 });
 
-describe('protected delivery requires a bound conversation', () => {
-  for (const mode of ['create', 'patch', 'load', 'discovery'] as const) {
-    it(`rejects enabled delivery on unbound sessions during ${mode}`, () => {
-      for (const sessionScope of [undefined, 'single', 'shared', 'per_chat']) {
-        const result = validateInstanceConfig(baseAgent({ agentOptions: {
-          ...(sessionScope ? { sessionScope } : {}),
-          protectedDelivery: { enabled: true },
-        } }), ctx(mode));
-        expect(result?.field).toBe('agentOptions.protectedDelivery');
-      }
-    });
-  }
-
-  it('accepts both destination-carrying per-chat configurations', () => {
-    for (const confinement of [{ sandboxPerChat: true }, { perChatConversationBound: true }]) {
-      expect(validateInstanceConfig(baseAgent({ agentOptions: {
-        sessionScope: 'per_chat', ...confinement,
-        protectedDelivery: { enabled: true },
-      } }), ctx('load'))).toBeNull();
-    }
-  });
-
-  it('accepts an unflagged per-chat managed-loop provider route', () => {
-    for (const provider of ['openai-api', 'anthropic-api']) {
-      expect(validateInstanceConfig(baseAgent({
-        model: 'test-model',
-        agentOptions: {
-          sessionScope: 'per_chat',
-          provider,
-          protectedDelivery: { enabled: true },
-        },
-      }), ctx('load'))).toBeNull();
-    }
-  });
-
-  it('accepts an unflagged per-chat route when every static fallback is managed-loop', () => {
-    expect(validateInstanceConfig(baseAgent({
-      model: 'test-model',
-      agentOptions: {
-        sessionScope: 'per_chat',
-        provider: 'openai-api',
-        fallbacks: [{ provider: 'anthropic-api', model: 'fallback-model' }],
-        protectedDelivery: { enabled: true },
-      },
-    }), ctx('load'))).toBeNull();
-  });
-
-  it('rejects an unflagged per-chat route with a stdio fallback', () => {
-    const result = validateInstanceConfig(baseAgent({
-      model: 'test-model',
-      agentOptions: {
-        sessionScope: 'per_chat',
-        provider: 'openai-api',
-        fallbacks: [{ provider: 'claude-cli' }],
-        protectedDelivery: { enabled: true },
-      },
-    }), ctx('load'));
-    expect(result?.field).toBe('agentOptions.protectedDelivery');
-  });
-
-  it('rejects an unflagged per-chat route with dynamic fallback discovery', () => {
-    const result = validateInstanceConfig(baseAgent({
-      model: 'test-model',
-      agentOptions: {
-        sessionScope: 'per_chat',
-        provider: 'openai-api',
-        fallbackDiscovery: { mode: 'auto' },
-        protectedDelivery: { enabled: true },
-      },
-    }), ctx('load'));
-    expect(result?.field).toBe('agentOptions.protectedDelivery');
-  });
-
-  it('preserves unbound sessions when protected delivery is disabled', () => {
-    expect(validateInstanceConfig(baseAgent({ agentOptions: {
-      sessionScope: 'single', protectedDelivery: { enabled: false },
-    } }), ctx('load'))).toBeNull();
-  });
-});
+// Protected-delivery validator cases live in agent-config-validator-protected-delivery.test.ts.
 
 // #1862: the home-root working-directory invariant — AgentRuntime.start() rejects
 // an explicitly-configured cwd that resolves to the user home directory
@@ -971,7 +893,7 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     });
   });
 
-  it.each(['create', 'patch', 'load', 'discovery'] as const)('rejects an M365 bridge without an explicit provider in %s mode', (mode) => {
+  it.each(['create', 'patch', 'load', 'discovery'] as const)('rejects an M365 bridge without an approved provider in %s mode', (mode) => {
     const raw = baseAgent({
       agentOptions: {
         sessionScope: 'single',
@@ -988,8 +910,27 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     expect(validateInstanceConfig(raw, ctx(mode))).toMatchObject({
       field: 'agentOptions.m365Bridge',
       status: 400,
-      message: 'agentOptions.m365Bridge requires agentOptions.provider to be claude-cli',
+      message: 'agentOptions.m365Bridge requires agentOptions.provider to be claude-cli, openai-api, or anthropic-api',
     });
+  });
+
+  it.each(['openai-api', 'anthropic-api'])('accepts an M365 bridge for the guarded API provider %s', (provider) => {
+    const raw = baseAgent({
+      agentOptions: {
+        sessionScope: 'per_chat',
+        provider,
+        allowM365Mutations: true,
+        enabledPlugins: { 'microsoft_365@microsoft-365-dev': true },
+        m365Bridge: {
+          tenantId: '11111111-2222-3333-4444-555555555555',
+          accountId: 'employee-account',
+          origin: 'https://127.0.0.1:10000',
+          profile: 'user-full-v1',
+          workflowAuthority: { accountId: 'employee-account', employeeActorJid: '15551230001@s.whatsapp.net' },
+        },
+      },
+    });
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
   });
 
   it('accepts a structurally complete M365 bridge binding with a dynamic account domain', () => {
@@ -1009,6 +950,33 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     });
 
     expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+
+  it('requires a workflow authority to use the exact account-id bridge selector', () => {
+    const raw = baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        provider: 'claude-cli',
+        allowM365Mutations: true,
+        enabledPlugins: { 'microsoft_365@microsoft-365-dev': true },
+        m365Bridge: {
+          tenantId: '11111111-2222-3333-4444-555555555555',
+          accountEmail: 'user@custom-domain.example',
+          origin: 'https://127.0.0.1:10000',
+          profile: 'user-full-v1',
+          workflowAuthority: {
+            accountId: 'account-1',
+            employeeActorJid: '15551230001@s.whatsapp.net',
+            conversationKey: '15551230001',
+          },
+        },
+      },
+    });
+
+    expect(validateInstanceConfig(raw, ctx('create'))).toMatchObject({
+      field: 'agentOptions.m365Bridge.workflowAuthority',
+      status: 400,
+    });
   });
 
   it.each(['COMMON', 'CONSUMERS', 'organizations'])('rejects an M365 directory-wide tenant alias: %s', (tenantId) => {

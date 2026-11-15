@@ -75,6 +75,7 @@ import type { OpencodeProviderConfig } from './providers/mcp-bridge.ts';
 import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
 import {
   primaryModelUsabilityRequiresAlert,
+  probeIncompatibilityAlertAction,
   probePrimaryModelUsability,
   type PrimaryProbeServiceContext,
   type PrimaryModelUsabilityResult,
@@ -1232,6 +1233,8 @@ export class RuntimeFallbackCoordinator {
   private readonly chainCanary = new Map<string, ChainEntryCanaryResult & { checkedAt: number }>();
   private chainCanaryTimer: ReturnType<typeof setInterval> | null = null;
   private chainCanarySweepInFlight = false;
+  /** This process raised the alert for a CLI that cannot run an MCP-free model probe. */
+  private probeIncompatibleAlertActive = false;
   /**
    * `fallback_chain_entry_unhealthy` incident state. The dispatcher keys the
    * incident per instance+source, not per entry, so one field covers every
@@ -2304,6 +2307,20 @@ export class RuntimeFallbackCoordinator {
       this.scheduleNextPeriodicUsabilityProbe(PERIODIC_PROBE_TIMEOUT_RETRY_MS);
     } else if (trigger === 'periodic' || (backoffChanged && this.host.periodicUsabilityProbeTimer !== null && !timeoutRetryPending)) {
       this.scheduleNextPeriodicUsabilityProbe();
+    }
+
+    // The missing CLI capability alerts on its own source, never as primary_model_unusable.
+    // Only a probe tests that CLI option; a turn success says nothing about it.
+    const incompatibility = source === 'probe' ? probeIncompatibilityAlertAction(result, this.probeIncompatibleAlertActive) : 'none';
+    if (incompatibility === 'raise') {
+      this.probeIncompatibleAlertActive = emitAlertChecked(this.host.instanceName, 'primary_model_probe_incompatible',
+        'Claude CLI lacks --strict-mcp-config; primary model probes are skipped until it is upgraded',
+        this.primaryModelUsabilityEvidence(result, trigger), 'warning');
+    } else if (incompatibility === 'clear') {
+      // A clear that was not queued leaves the incident open, so the flag stays set and a later
+      // incompatible probe does not raise it twice; the next usable probe retries the clear.
+      if (clearAlertSourceChecked(this.host.instanceName, 'primary_model_probe_incompatible',
+        `provider=${alertEvidenceValue(result.provider)} model=${alertEvidenceValue(result.model)}`)) this.probeIncompatibleAlertActive = false;
     }
 
     if (result.status === 'usable') {

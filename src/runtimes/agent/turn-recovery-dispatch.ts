@@ -21,6 +21,7 @@ import type { RuntimeTurnContext } from './runtime-turn-context.ts';
 import type { SessionManager } from './session.ts';
 import type { QueuedTurn } from './turn-queue.ts';
 import { classifyTurnLane } from '../../core/observability/lifecycle-emission.ts';
+import { sanitizeProtectedMessageText } from '../../core/protected-message.ts';
 import type { SessionContext } from '../../mcp/types.ts';
 import {
   TurnRecoverySupervisor,
@@ -30,6 +31,20 @@ import {
 } from './turn-recovery-supervisor.ts';
 
 const log = createChildLogger('turn-recovery-dispatch');
+
+/**
+ * Recovery rows can predate ingress redaction. Both scope branches, and the
+ * provider metadata built from the replay source, read this redacted copy.
+ * The store keeps the original text: its idempotent re-enqueue compares it.
+ */
+function redactRecoveryJobText(job: TurnRecoveryJobRow): TurnRecoveryJobRow {
+  return {
+    ...job,
+    replay_text: sanitizeProtectedMessageText(job.replay_text),
+    sender_name: job.sender_name === null ? null : sanitizeProtectedMessageText(job.sender_name),
+    group_name: job.group_name === null ? null : sanitizeProtectedMessageText(job.group_name),
+  };
+}
 
 function recoveryPurpose(sourceMessageId: string): SessionContext['purpose'] {
   return classifyTurnLane(sourceMessageId).lane === 'L-SCH'
@@ -164,10 +179,11 @@ export async function dispatchTurnRecoveryReplayForJob(
     },
   ) => Promise<void>,
   globalToolScopeKey: string,
-  job: TurnRecoveryJobRow,
+  storedJob: TurnRecoveryJobRow,
   target?: TurnRecoveryDispatchTarget,
   abortControl?: TurnRecoveryReplayAbortControl,
 ): Promise<TurnRecoveryReplayDispatchResult> {
+  const job = redactRecoveryJobText(storedJob);
   // Route by scope: per_chat goes through the per-chat replay pipeline;
   // shared/singleton go through the global-turn pipeline (#2170). Unknown
   // scopes fail safe (retryable) so this never silently drops a job.

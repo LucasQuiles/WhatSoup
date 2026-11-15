@@ -77,6 +77,167 @@ PEM_PRIVATE_KEY_RE = re.compile(
 URL_USERINFO_RE = re.compile(r"\b([a-z][a-z0-9+.-]{0,30}://)[^\s/@:]+:[^\s/@]+@", re.IGNORECASE)
 
 
+# Protected managed links: a port of sanitizeProtectedMessageText in
+# src/core/protected-message.ts. Legacy alert content is persisted free text, so
+# a link stored before the TypeScript producers confined it is redacted when
+# the content is read. A candidate counts only when its normalized host digest
+# is pinned, so source never names an approved host. The digests mirror
+# APPROVED_LINK_HOST_SHA256 in src/core/protected-delivery-pins.ts; the parity
+# fixture tests/fixtures/protected-link-parity-corpus.json pins the behaviour.
+PROTECTED_MESSAGE_MARKER = "[protected managed link]"
+# Replaces a whole text past a scan bound; mirrors PROTECTED_TEXT_WITHHELD_MARKER
+# in src/lib/protected-link-text.ts and contains the marker.
+PROTECTED_TEXT_WITHHELD_MARKER = "[protected managed link] text withheld"
+PROTECTED_LINK_HOST_SHA256 = frozenset({
+    "5f91b5911802673da6a4d8a09a7c8effef8a020ce1a1b6672b42b101d71b7844",
+    "8cb10c0438f97f3dfd2a7bf25d4fcd06c1b912b5cc188ef1a960fe22189c7c5a",
+})
+_MAX_HOST_CANDIDATE_LENGTH = 253 + len("www.") + len(".")
+_MAX_PORT_DIGITS = 5
+_MAX_PROTECTED_FRAGMENT_LENGTH = 16_384
+_MAX_PROTECTED_LINKS_PER_TEXT = 128
+_FRAGMENT_PUNCTUATION = frozenset("!#$%&'()*+,-./:;=?@_~")
+# The two non-ASCII characters browsers map to ASCII host letters: U+017F
+# (long s) and U+212A (Kelvin sign).
+_HOST_EXTRA_CHARACTERS = frozenset("-.ſK")
+
+
+def _is_ascii_alnum(character: str) -> bool:
+    return "0" <= character <= "9" or "A" <= character <= "Z" or "a" <= character <= "z"
+
+
+def _is_fragment_character(character: str) -> bool:
+    return _is_ascii_alnum(character) or character in _FRAGMENT_PUNCTUATION
+
+
+def _is_host_character(character: str) -> bool:
+    return _is_ascii_alnum(character) or character in _HOST_EXTRA_CHARACTERS
+
+
+def _matches_folded(text: str, at: int, literal: str) -> bool:
+    """Case-insensitive match of a lowercase ASCII literal, folding U+017F and U+212A."""
+    if at < 0 or at + len(literal) > len(text):
+        return False
+    for index, expected in enumerate(literal):
+        character = text[at + index]
+        if "A" <= character <= "Z":
+            character = character.lower()
+        elif character == "ſ":
+            character = "s"
+        elif character == "K":
+            character = "k"
+        if character != expected:
+            return False
+    return True
+
+
+def _normalize_pinned_host(host: str) -> str:
+    normalized = host.lower().replace("ſ", "s")
+    if normalized.endswith("."):
+        normalized = normalized[:-1]
+    if normalized.startswith("www."):
+        normalized = normalized[len("www."):]
+    return normalized
+
+
+def _is_pinned_host(host: str, pins: frozenset[str]) -> bool:
+    return hashlib.sha256(_normalize_pinned_host(host).encode("utf-8")).hexdigest() in pins
+
+
+def _protected_link_ending_at(
+    text: str, hash_index: int, start_from: int, pins: frozenset[str]
+) -> tuple[int, int] | None:
+    """The link whose path ends at the `#` at hash_index, as (start, fragment start)."""
+    path_end = hash_index - 1 if hash_index > 0 and text[hash_index - 1] == "/" else hash_index
+    if _matches_folded(text, path_end - 2, "/s"):
+        path_start = path_end - 2
+    elif _matches_folded(text, path_end - 6, "/setup"):
+        path_start = path_end - 6
+    else:
+        return None
+
+    host_end = path_start
+    port: str | None = None
+    digits = path_start
+    while digits > 0 and path_start - digits <= _MAX_PORT_DIGITS and "0" <= text[digits - 1] <= "9":
+        digits -= 1
+    if digits < path_start and digits > 0 and text[digits - 1] == ":":
+        port = text[digits:path_start]
+        host_end = digits - 1
+
+    start = host_end
+    while start > 0 and _is_host_character(text[start - 1]):
+        if host_end - start >= _MAX_HOST_CANDIDATE_LENGTH:
+            return None
+        start -= 1
+    if start == host_end or start < start_from or not _is_pinned_host(text[start:host_end], pins):
+        return None
+
+    scheme_start = -1
+    scheme_port: str | None = None
+    if _matches_folded(text, start - 8, "https://"):
+        scheme_start = start - 8
+        scheme_port = "443"
+    elif _matches_folded(text, start - 7, "http://"):
+        scheme_start = start - 7
+        scheme_port = "80"
+    scheme_belongs = (
+        scheme_start >= start_from
+        and (scheme_start == 0 or not _is_host_character(text[scheme_start - 1]))
+        and (port is None or port == scheme_port)
+    )
+    if scheme_belongs:
+        return scheme_start, hash_index + 1
+    return (start, hash_index + 1) if port is None else None
+
+
+def _next_protected_link(text: str, start_from: int, pins: frozenset[str]) -> tuple[int, int] | None:
+    hash_index = text.find("#", start_from)
+    while hash_index != -1:
+        match = _protected_link_ending_at(text, hash_index, start_from, pins)
+        if match is not None:
+            return match
+        hash_index = text.find("#", hash_index + 1)
+    return None
+
+
+def _protected_fragment_end(text: str, start: int) -> int:
+    limit = min(len(text), start + _MAX_PROTECTED_FRAGMENT_LENGTH)
+    end = start
+    while end < limit and _is_fragment_character(text[end]):
+        end += 1
+    # A fragment that reaches the bound before the text ends cannot be split
+    # safely; -1 tells the caller to withhold the whole text.
+    return -1 if end == limit and limit < len(text) else end
+
+
+def sanitize_protected_link_text(value: str, link_host_sha256: frozenset[str] | None = None) -> str:
+    """Replace every pinned protected link with the stable marker.
+
+    Linear in the text: the scan anchors on each `#` and walks back a bounded
+    distance. Past a scan bound (more than 128 links, or a fragment that
+    reaches its bound before the text ends) the whole text becomes
+    PROTECTED_TEXT_WITHHELD_MARKER: it is never truncated.
+    """
+    pins = PROTECTED_LINK_HOST_SHA256 if link_host_sha256 is None else link_host_sha256
+    cursor = 0
+    redactions = 0
+    sanitized: str | None = None
+    match = _next_protected_link(value, 0, pins)
+    while match is not None:
+        if redactions == _MAX_PROTECTED_LINKS_PER_TEXT:
+            return PROTECTED_TEXT_WITHHELD_MARKER
+        start, fragment_start = match
+        end = _protected_fragment_end(value, fragment_start)
+        if end == -1:
+            return PROTECTED_TEXT_WITHHELD_MARKER
+        sanitized = f"{sanitized or ''}{value[cursor:start]}{PROTECTED_MESSAGE_MARKER}"
+        cursor = end
+        redactions += 1
+        match = _next_protected_link(value, cursor, pins)
+    return value if sanitized is None else f"{sanitized}{value[cursor:]}"
+
+
 def redact_phone_like_match(match: re.Match[str], marker: str) -> str:
     candidate = match.group(2)
     stripped = candidate.strip()
@@ -548,7 +709,11 @@ def alert_text(value: Any, *, digest_chars: int = LEGACY_DISPLAY_DIGEST_CHARS) -
     if rendered is not None:
         return rendered
     if isinstance(value, str):
-        return _render_embedded_baked_reprs(value, digest_chars=digest_chars)
+        # Legacy string content is persisted free text and can hold a protected
+        # link written before the producers confined alert content.
+        return sanitize_protected_link_text(
+            _render_embedded_baked_reprs(value, digest_chars=digest_chars)
+        )
     synthesised = unconfined_mapping_to_text(value, digest_chars=digest_chars)
     if synthesised is not None:
         return synthesised
@@ -563,7 +728,11 @@ def alert_text_for_fingerprint(value: Any) -> str:
     put identity on the 8-character prefix, so two incidents sharing a prefix
     merged into one -- a regression against the pre-confinement behaviour, where
     the summary carried the whole digest. Everything else about the rendering is
-    identical, so grouping is unchanged apart from the restored entropy.
+    identical to the display rendering, including protected-link redaction: a
+    protected link becomes the shared marker before identity is formed, so
+    distinct alerts that differ only by a protected link collapse into one
+    incident. That is deliberate; keying identity on the link would make a
+    secret part of the fingerprint.
     """
     return alert_text(value, digest_chars=LEGACY_FULL_DIGEST_CHARS)
 

@@ -40,6 +40,21 @@ export const AGENT_DEFAULT_ALLOW: readonly string[] = Object.freeze([
 ]);
 
 /**
+ * Microsoft 365 plugin operations that change which account or environment later calls reach.
+ * The deny floor lists them, and the `microsoft365` adapter refuses them even under workflow
+ * authority, because the broker binds the declared account, not what an operation does.
+ */
+export const M365_ACCOUNT_SELECTION_TOOLS: readonly string[] = Object.freeze([
+  'select-account',
+  'select-dataverse-environment',
+]);
+
+/** Deny entries for those operations; they stay in the floor in every mode, including an admitted bridge. */
+export const M365_ACCOUNT_SELECTION_DENY: readonly string[] = Object.freeze(
+  M365_ACCOUNT_SELECTION_TOOLS.map((tool) => `mcp__plugin_microsoft_365_microsoft_365__${tool}`),
+);
+
+/**
  * Repo-owned deny floor — patterns that must appear in `permissions.deny`
  * for an agent instance, except for an approved account-bound M365 bridge.
  *
@@ -83,6 +98,7 @@ export const REQUIRED_DENY: readonly string[] = Object.freeze([
   'mcp__plugin_microsoft_365_microsoft_365__batch-dataverse',
   'mcp__plugin_microsoft_365_microsoft_365__cancel-booking-appointment',
   'mcp__plugin_microsoft_365_microsoft_365__cancel-event',
+  'mcp__plugin_microsoft_365_microsoft_365__cancel-mail-operation',
   'mcp__plugin_microsoft_365_microsoft_365__close-workbook-session',
   'mcp__plugin_microsoft_365_microsoft_365__copy-drive-item',
   'mcp__plugin_microsoft_365_microsoft_365__copy-message',
@@ -133,11 +149,14 @@ export const REQUIRED_DENY: readonly string[] = Object.freeze([
   'mcp__plugin_microsoft_365_microsoft_365__delete-task-list',
   'mcp__plugin_microsoft_365_microsoft_365__delete-worksheet',
   'mcp__plugin_microsoft_365_microsoft_365__execute-dataverse-action',
+  'mcp__plugin_microsoft_365_microsoft_365__execute-dataverse-function',
   'mcp__plugin_microsoft_365_microsoft_365__execute-tool',
   'mcp__plugin_microsoft_365_microsoft_365__forward-event',
   'mcp__plugin_microsoft_365_microsoft_365__forward-message',
   'mcp__plugin_microsoft_365_microsoft_365__graph-batch',
   'mcp__plugin_microsoft_365_microsoft_365__hub-manage-subscription',
+  'mcp__plugin_microsoft_365_microsoft_365__hub-operation-cancel',
+  'mcp__plugin_microsoft_365_microsoft_365__hub-operation-request-review',
   'mcp__plugin_microsoft_365_microsoft_365__hub-recover-delta',
   'mcp__plugin_microsoft_365_microsoft_365__hub-refresh-account',
   'mcp__plugin_microsoft_365_microsoft_365__hub-trigger-enrich',
@@ -152,6 +171,8 @@ export const REQUIRED_DENY: readonly string[] = Object.freeze([
   'mcp__plugin_microsoft_365_microsoft_365__reply-to-message',
   'mcp__plugin_microsoft_365_microsoft_365__respond-to-event',
   'mcp__plugin_microsoft_365_microsoft_365__restore-item-version',
+  // These change which account or environment later calls reach; the microsoft365 adapter refuses them too.
+  ...M365_ACCOUNT_SELECTION_DENY,
   'mcp__plugin_microsoft_365_microsoft_365__send-channel-message',
   'mcp__plugin_microsoft_365_microsoft_365__send-chat-message',
   'mcp__plugin_microsoft_365_microsoft_365__send-draft',
@@ -184,9 +205,13 @@ export const REQUIRED_DENY: readonly string[] = Object.freeze([
   'mcp__plugin_microsoft_365_microsoft_365__upsert-dataverse-record',
 ]);
 
-/** Exact static subset eligible for a bound Agent365 bridge exception. */
+/**
+ * Exact static subset eligible for a bound Agent365 bridge exception. Account and environment
+ * selection stay denied even then: the bridge binds one account, and a switch escapes it.
+ */
 export const M365_MUTATION_DENY: readonly string[] = Object.freeze(
-  REQUIRED_DENY.filter((entry) => entry.startsWith('mcp__plugin_microsoft_365_microsoft_365__')),
+  REQUIRED_DENY.filter((entry) =>
+    entry.startsWith('mcp__plugin_microsoft_365_microsoft_365__') && !M365_ACCOUNT_SELECTION_DENY.includes(entry)),
 );
 
 /**

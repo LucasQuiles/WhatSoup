@@ -17,6 +17,7 @@ import {
 import type { M365MutationPolicy } from './m365-bridge-policy.ts';
 import { toConversationKey } from './conversation-key.ts';
 import { JID_PERSONAL, JID_LID, JID_GROUP } from './jid-constants.ts';
+import { workspaceSocketPath } from './workspace-paths.ts';
 import {
   writeProviderMcpConfig,
   type AdditionalMcpServerConfig,
@@ -395,8 +396,8 @@ export function provisionWorkspace(opts: ProvisionOptions): string {
     };
     writeSandboxArtifacts(claudeDir, sandboxPolicy, hookPath, pollLintHookPath, postToolUseLogHookPath);
 
-    // 3. Compute socket path (whatsoup.sock)
-    const socketPath = join(claudeDir, 'whatsoup.sock');
+    // 3. Compute socket path (whatsoup.sock); session tokens bind to the same helper's value.
+    const socketPath = workspaceSocketPath(workspacePath);
 
     // 4. Write provider-specific MCP config — whatsoup-proxy + optional send-media entry
     const mediaBridgeSocketPath = join(claudeDir, 'media-bridge.sock');
