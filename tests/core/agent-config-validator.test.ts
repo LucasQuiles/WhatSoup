@@ -833,26 +833,20 @@ describe('agent type rules', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-validator-home-'));
     const cwd = path.join(home, 'workspace');
     // A per-chat session reads a relative path from its chat workspace under cwd.
-    const chatWorkspace = path.join(cwd, 'users', 'chat-key');
-    fs.mkdirSync(chatWorkspace, { recursive: true });
-    fs.writeFileSync(path.join(chatWorkspace, 'persona.md'), 'instructions\n');
+    fs.mkdirSync(path.join(cwd, 'users', 'chat-key'), { recursive: true });
+    fs.writeFileSync(path.join(cwd, 'users', 'chat-key', 'persona.md'), 'instructions\n');
     const live = { ...ctx('load'), filesystem: { homeDirectory: home } };
-    const sandboxed = (instructionsPath: string) => baseAgent({
-      agentOptions: { sessionScope: 'per_chat', sandboxPerChat: true, cwd, instructionsPath },
-    });
+    const field = (instructionsPath: string, sandboxPerChat = true) => validateInstanceConfig(baseAgent({
+      agentOptions: { sessionScope: 'per_chat', ...(sandboxPerChat ? { sandboxPerChat } : {}), cwd, instructionsPath } }), live)?.field ?? null;
     try {
       // Not knowable at load time: the session reads <chat workspace>/persona.md, never <cwd>/persona.md.
-      expect(validateInstanceConfig(sandboxed('persona.md'), live)).toBeNull();
-      // CLAUDE.md is: every chat workspace links it to <cwd>/CLAUDE.md, so a missing target refuses.
-      expect(validateInstanceConfig(sandboxed('CLAUDE.md'), live)?.field).toBe('agentOptions.instructionsPath');
-      expect(validateInstanceConfig(sandboxed('./CLAUDE.md'), live)?.field).toBe('agentOptions.instructionsPath');
-      // An absolute path is read as given, so it is still checked.
-      expect(validateInstanceConfig(sandboxed(path.join(cwd, 'persona.md')), live)?.field).toBe('agentOptions.instructionsPath');
+      expect(field('persona.md')).toBeNull();
+      // CLAUDE.md is: every chat workspace links it to <cwd>/CLAUDE.md. An absolute path is read as given.
+      for (const known of ['CLAUDE.md', './CLAUDE.md', path.join(cwd, 'persona.md')]) expect(field(known)).toBe('agentOptions.instructionsPath');
       // Without sandboxPerChat the session reads <cwd>/persona.md, which is missing.
-      const shared = baseAgent({ agentOptions: { sessionScope: 'per_chat', cwd, instructionsPath: 'persona.md' } });
-      expect(validateInstanceConfig(shared, live)?.field).toBe('agentOptions.instructionsPath');
+      expect(field('persona.md', false)).toBe('agentOptions.instructionsPath');
       fs.writeFileSync(path.join(cwd, 'CLAUDE.md'), 'instructions\n');
-      expect(validateInstanceConfig(sandboxed('CLAUDE.md'), live)).toBeNull();
+      expect(field('CLAUDE.md')).toBeNull();
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
