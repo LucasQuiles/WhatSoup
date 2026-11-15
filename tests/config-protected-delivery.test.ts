@@ -133,6 +133,11 @@ describe('raw INSTANCE_CONFIG protected-delivery admission', () => {
       protectedDelivery: protectedDelivery(false),
     }, undefined);
     expect(config).toHaveProperty('protectedDelivery', null);
+    expect(config).toMatchObject({
+      instanceType: 'agent',
+      agentProvider: 'claude-cli',
+      protectedDelivery: null,
+    });
   });
 
   it('admits linkHosts taken from config when every host is hash-pinned', async () => {

@@ -22,6 +22,7 @@ import {
   type ProviderRoutePolicy,
 } from '../../core/provider-data-policy.ts';
 import type { M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
+import type { ProtectedDeliveryService } from '../../core/protected-delivery.ts';
 import type { SessionContext } from '../../mcp/types.ts';
 import type { SessionTokenLease } from '../../mcp/caller-attribution.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
@@ -205,6 +206,16 @@ const OPENCODE_BACKGROUND_TASK_DELIVERY_GUIDANCE = [
   '- Runtime durability and fallback recovery own interrupted user turns. Do not promise a later self-delivery or claim work is running unless it will complete inside this turn.',
 ].join('\n');
 
+const PROTECTED_SECRET_WORKFLOW_GUIDANCE = [
+  'Protected secret workflow:',
+  '- For a registered resource, use request_secret_input only for password, token, or a live MFA challenge. The tool returns metadata, never secret values.',
+  '- Use request_rustdesk_access only for an authorized device. Use deliver_secret only with an opaque pre-staged delivery reference.',
+  '- Never ask the user to paste a secret into chat; do not read credential stores, use shell/browser workarounds, or offer an alternate secret path.',
+  '- Unknown resource or unavailable adapter: report the operation is blocked.',
+  '- Do not invent resource IDs, recipients, or destinations. The protected service selects authority and delivery targets.',
+  '- Submission or delivery metadata is not proof that a login completed. Verify the trusted operation result before claiming completion.',
+].join('\n');
+
 /**
  * Why the supervisor itself terminated the provider. Absent on a genuine provider fault.
  * `idle_watchdog` is routine housekeeping (the 30-min inactivity reap); `stalled_operation`
@@ -341,6 +352,8 @@ export interface SessionManagerOptions {
    * session. Absent or null keeps the prompt byte-identical.
    */
   memoryGuidanceBlock?: () => string | null;
+  /** Present only when this runtime registered the protected-delivery tool surface. */
+  protectedDeliveryService?: ProtectedDeliveryService;
   /** Egress proxy port (#1607) — forwarded into buildChildEnv's baseOpts so spawned children pick up HTTP_PROXY/HTTPS_PROXY. Undefined when the instance has no allowedEgress. */
   egressProxyPort?: number;
   /** Shared process-lifetime gate for providers whose local state store is single-writer. */
@@ -933,6 +946,7 @@ export class SessionManager {
 
   /** Per-provider budget enforcement — null means unlimited (no budget config). */
   private budget: ProviderBudget | null = null;
+  private readonly protectedDeliveryService: ProtectedDeliveryService | null;
 
   constructor(opts: SessionManagerOptions) {
     this.db = opts.db;
@@ -984,6 +998,7 @@ export class SessionManager {
     this.degradedCapabilitiesBlock = opts.degradedCapabilitiesBlock;
     this.routingSystemBlock = opts.routingSystemBlock;
     this.memoryGuidanceBlock = opts.memoryGuidanceBlock;
+    this.protectedDeliveryService = opts.protectedDeliveryService ?? null;
     this.egressProxyPort = opts.egressProxyPort;
     this.providerExecutionGate = opts.providerExecutionGate;
     this.providerProcessIsolation = opts.providerProcessIsolation;
@@ -1277,6 +1292,10 @@ export class SessionManager {
       ...(this.provider === 'opencode-cli' ? [OPENCODE_COMPACTION_CONTINUITY_GUIDANCE] : []),
     ].join('\n');
     const sources = [transportPrelude];
+
+    if (this.protectedDeliveryService !== null) {
+      sources.push(PROTECTED_SECRET_WORKFLOW_GUIDANCE);
+    }
 
     const handoffBlock = this.handoffSystemBlock?.();
     if (handoffBlock) {

@@ -13,6 +13,7 @@ import {
   TOOL_RESULT_MARKERS,
 } from '../../src/core/durability-evidence-contract.ts';
 import { createOutboundSendsWriter } from '../../src/core/outbound-sends.ts';
+import { countExpiredProtectedDeliveries } from '../../src/core/protected-delivery.ts';
 import {
   HANDOFF_ARTIFACT_RETENTION_BATCH_SIZE,
   HANDOFF_ARTIFACT_RETENTION_MS,
@@ -97,6 +98,37 @@ describe('database retention', () => {
       .toEqual([{ delivery_ref: 'delivery-recent' }]);
     expect(db.raw.prepare('SELECT COUNT(*) AS count FROM protected_delivery_events').get())
       .toEqual({ count: 0 });
+  });
+
+  it('counts and prunes secret-input metadata in the same 90-day protected-delivery window', () => {
+    db.raw.prepare(`
+      INSERT INTO protected_deliveries (
+        stage_operation_id, resolve_operation_id, delivery_ref, delivery_id,
+        principal, recipient_jid, kind, device_id, purpose,
+        whatsapp_message_id, state, issued_at
+      ) VALUES ('stage-expired', 'resolve-expired', 'delivery-expired', 'delivery-id-expired',
+                '15551230000', '15551230000@s.whatsapp.net', 'rustdesk', 'fixture-desktop', 'login',
+                'message-expired', 'read', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-91 days'))
+    `).run();
+    const insertInput = db.raw.prepare(`
+      INSERT INTO protected_secret_inputs (
+        create_operation_id, resolve_operation_id, intake_id, principal, recipient_jid,
+        resource_id, kind, purpose, input_state, delivery_status, whatsapp_message_id, issued_at
+      ) VALUES (?, ?, ?, '15551230000', '15551230000@s.whatsapp.net', 'fixture-resource', 'password',
+                'fixture purpose', 'succeeded', 'read', ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?))
+    `);
+    insertInput.run('input-create-expired', 'input-resolve-expired', 'intake-expired', 'input-message-expired', '-91 days');
+    insertInput.run('input-create-recent', 'input-resolve-recent', 'intake-recent', 'input-message-recent', '-89 days');
+
+    expect(countExpiredProtectedDeliveries(db.raw)).toBe(2);
+
+    const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+
+    expect(result.protectedDeliveries).toBe(2);
+    expect(db.raw.prepare('SELECT intake_id FROM protected_secret_inputs').all())
+      .toEqual([{ intake_id: 'intake-recent' }]);
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM protected_deliveries').get()).toEqual({ count: 0 });
+    expect(countExpiredProtectedDeliveries(db.raw)).toBe(0);
   });
 
   it('keeps a referenced outbound audit until the protected-delivery journal expires', () => {

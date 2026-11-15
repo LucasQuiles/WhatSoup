@@ -242,6 +242,11 @@
       "reason": "transcription model/bin \u2014 env-late by design (#2192 s4 verdict: host-level model path + explicit binary override, ambient toolchain)."
     },
     {
+      "file": "src/secure-handoff/worker-main.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "Standalone consumer startup passes its environment to the validated worker configuration boundary, which resolves only reserved LINKS_MANAGED_ credential names. Importing the WhatsApp runtime config would initialize an unrelated instance and credential surface."
+    },
+    {
       "file": "src/transport/auth.ts",
       "allowedUnmarkedSites": 6,
       "reason": "WHATSOUP_PAIR_NUMBER \u2014 env-late by design (#2192 s4 verdict: per-CLI-run mode selector (QR vs pairing-code) + operator PII; a typed field would persist E.164 at rest and make an ephemeral per-run choice permanent). + WHATSOUP_PAIRING_LEASE_{OP,FENCING} \u2014 env-late by design (q-canary lane: per-spawn delegated coordination-lease handoff from the fleet pairing coordinator to the helper child; a typed config field would persist an ephemeral single-operation capability at rest)."

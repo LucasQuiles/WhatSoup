@@ -170,13 +170,13 @@ message content, identities, or exporter payloads. `state` is one of `disabled`,
 ## MCP tools
 
 Canonical tool index: [docs/tools.md](tools.md) — full schemas, scopes, replay policies for
-all 174 MCP tools (166 always-registered + 8 conditionally-registered: `knowledge_search` when
+all 177 MCP tools (166 always-registered + 11 conditionally-registered: `knowledge_search` when
 Pinecone is configured, `emit_heal_result` when the runtime has at least one configured
 control-plane peer and is not in any sandbox mode, `memory_write` when its Pinecone
 key environment variable and index are configured, `restart_self` when the
 non-sandboxed runtime receives a restart capability, `microsoft365` when the agent
 runtime's Microsoft 365 bridge policy is approved, an account ID is bound and exactly one
-configured Microsoft plugin has the admitted launcher, plus three protected-delivery
+configured Microsoft plugin has the admitted launcher, plus six protected-delivery
 tools when an agent runtime has the explicit protected-delivery configuration; see
 [docs/tools.md](tools.md#whatsoup-mcp-tool-api-reference) for the full gating conditions).
 Each module in the table below lives under [`src/mcp/tools/*.ts`](../src/mcp/tools/) and
@@ -224,7 +224,7 @@ individual tool inventory is `docs/tools.md`). Tool-level entries follow on prom
 | `mcp:tools.presence` | 3 | [`src/mcp/tools/presence.ts`](../src/mcp/tools/presence.ts) | stable | active | `get_presence`, `subscribe_presence`, `send_typing` |
 | `mcp:tools.voice` | 1 | [`src/mcp/tools/voice.ts`](../src/mcp/tools/voice.ts) | stable | active | `send_voice_reply` |
 | `mcp:tools.memory-write` | 1 | [`src/mcp/tools/memory-write.ts`](../src/mcp/tools/memory-write.ts) | stable | active | `memory_write` (agent episodic write to the configured per-person Pinecone index; Pinecone-gated, `core: false`). |
-| `mcp:tools.protected-delivery` | 3 | [`src/mcp/tools/protected-delivery.ts`](../src/mcp/tools/protected-delivery.ts) | beta | active | Agent-only managed RustDesk delivery: `request_rustdesk_access`, `deliver_secret`, `get_secret_delivery_status`. Registered only with the explicit protected-delivery runtime configuration and a resolved bound direct conversation. |
+| `mcp:tools.protected-delivery` | 6 | [`src/mcp/tools/protected-delivery.ts`](../src/mcp/tools/protected-delivery.ts) | beta | active | Agent-only managed RustDesk delivery and secret input: `request_rustdesk_access`, `request_secret_input`, `get_secret_input_status`, `cancel_secret_input`, `deliver_secret`, `get_secret_delivery_status`. Registered only with the explicit protected-delivery runtime configuration and a resolved bound direct conversation. |
 | `mcp:tools.knowledge` | 1 | [`src/mcp/tools/knowledge.ts`](../src/mcp/tools/knowledge.ts) | stable | active | `knowledge_search` (BYOK Pinecone). Pinecone-gated registration: conditionally-registered only when the instance's Pinecone allowed-indexes, credentials, and knowledge profiles are usable; see [docs/tools.md](tools.md#whatsoup-mcp-tool-api-reference) for full gating conditions. |
 | `mcp:tools.retention` | 1 | [`src/mcp/tools/retention.ts`](../src/mcp/tools/retention.ts) | stable | active | `cleanup_media` retention controls |
 | `mcp:tools.status` | 2 | [`src/mcp/tools/status.ts`](../src/mcp/tools/status.ts) | stable | active | `post_status`, `list_statuses` |
@@ -304,6 +304,7 @@ scripts are public; build/test scripts are internal.
 |---|---|---|---|---|---|
 | `cli:npm.start` | `npm run start` | `package.json` | stable | active | Start the supervisor (fleet + instances) |
 | `cli:npm.start-instance` | `npm run start:instance` | `package.json` | stable | active | Start a single instance by name |
+| `cli:npm.secure-handoff-consumer` | `npm run secure-handoff:consumer` | `package.json`, `src/secure-handoff/worker-main.ts` | beta | active | Run the administrator-configured password, token, or MFA consumer with an absolute private configuration file; reads intake metadata and uses only fixed account adapters. |
 | `cli:npm.fleet` | `npm run fleet` | `package.json` | stable | active | Start the fleet server only |
 | `cli:npm.setup` | `npm run setup` | `package.json` | stable | active | First-run setup wizard |
 | `cli:npm.doctor` | `npm run doctor` | `package.json` | stable | active | Read-only runtime, quality, or release host capability and PATH diagnostic with human or JSON output |

@@ -80,4 +80,41 @@ describe('AgentRuntime protected-delivery registration', () => {
     const [, , , options] = registerAllTools.mock.calls[0]!;
     expect(options).not.toHaveProperty('protectedDeliveryService');
   });
+
+  it('carries protected-secret routing into the actual runtime-created session only when the service exists', () => {
+    type SessionFactory = {
+      createSessionManager(options: {
+        chatJid: string;
+        cwd: string | undefined;
+        onEvent: () => void;
+        onCrash: () => void;
+        notifyUser: () => void;
+      }): { buildSystemPrompt(): string };
+    };
+    const sessionOptions = {
+      chatJid: 'protected-session@s.whatsapp.net',
+      cwd: undefined,
+      onEvent: () => undefined,
+      onCrash: () => undefined,
+      notifyUser: () => undefined,
+    };
+    const disabled = new AgentRuntime(makeDb(), makeMessenger(), 'protected-test');
+    const enabled = new AgentRuntime(
+      makeDb(),
+      makeMessenger(),
+      'protected-test',
+      { protectedDeliveryService: {} as ProtectedDeliveryService },
+    );
+
+    const disabledPrompt = (disabled as unknown as SessionFactory)
+      .createSessionManager(sessionOptions)
+      .buildSystemPrompt();
+    const enabledPrompt = (enabled as unknown as SessionFactory)
+      .createSessionManager(sessionOptions)
+      .buildSystemPrompt();
+
+    expect(disabledPrompt).not.toContain('Protected secret workflow:');
+    expect(enabledPrompt).toContain('Protected secret workflow:');
+    expect(enabledPrompt).toContain('request_secret_input');
+  });
 });

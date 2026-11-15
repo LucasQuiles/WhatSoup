@@ -296,6 +296,26 @@ describe('durability-writer-guard — recovery_runs / enrichment_runs assert-pas
   });
 });
 
+describe('durability-writer-guard — protected secret input lifecycle', () => {
+  it('classifies the full migration-68 input lifecycle with its protected-delivery terminal writer', async () => {
+    const snapshot = await loadRealSnapshot();
+    const entry = REGISTRY.find((candidate) => candidate.table === 'protected_secret_inputs');
+
+    expect(entry).toMatchObject({
+      statusColumn: 'input_state',
+      vocabulary: [
+        'creating', 'awaiting_input', 'submitted', 'consuming', 'succeeded',
+        'failed', 'expired', 'revoked', 'ambiguous', 'cancelled',
+      ],
+      terminalFailureValues: ['failed', 'expired', 'revoked', 'ambiguous', 'cancelled'],
+      writerSites: ['src/core/protected-delivery.ts'],
+    });
+
+    const result = scanDurabilityWriterInvariant(snapshot, repoRoot, { registry: entry ? [entry] : [] });
+    expect(result.findings.filter((finding) => finding.table === 'protected_secret_inputs')).toEqual([]);
+  });
+});
+
 describe('durability-writer-guard — sweep_runs reserved exception (case e)', () => {
   it('TRACKED_RESERVED declares exactly sweep_runs with issue #1789 and a non-empty reason', () => {
     expect(TRACKED_RESERVED).toHaveLength(1);

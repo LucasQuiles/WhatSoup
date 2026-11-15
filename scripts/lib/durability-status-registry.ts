@@ -257,6 +257,19 @@ export const REGISTRY: DurabilityStatusEntry[] = [
     writerSites: ['src/core/protected-delivery.ts'],
   },
   {
+    // Migration 68 keeps delivery corroboration in delivery_status, but the
+    // resource-bound input's own lifecycle and reuse boundary are input_state.
+    table: 'protected_secret_inputs',
+    statusColumn: 'input_state',
+    vocabulary: [
+      'creating', 'awaiting_input', 'submitted', 'consuming', 'succeeded',
+      'failed', 'expired', 'revoked', 'ambiguous', 'cancelled',
+    ],
+    vocabularySource: 'sql-check',
+    terminalFailureValues: ['failed', 'expired', 'revoked', 'ambiguous', 'cancelled'],
+    writerSites: ['src/core/protected-delivery.ts'],
+  },
+  {
     table: 'protected_delivery_events',
     statusColumn: 'status',
     vocabulary: ['submitted', 'delivered', 'read', 'ambiguous', 'failed'],
