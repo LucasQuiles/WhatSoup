@@ -3074,7 +3074,7 @@ not forward the reserved namespace, but that does not limit a different local
 process running as the same OS user from potentially inspecting the service
 environment. Treat same-user shell access as trusted operator access.
 
-The six protected-delivery tools exist only in agent runtimes and require a
+The seven protected-delivery tools exist only in agent runtimes and require a
 resolved, bound direct WhatsApp conversation. Configuration must use
 `sessionScope: "per_chat"`. If the primary provider and all static fallbacks use
 the in-process `managed_loop`, the runtime supplies the bound conversation.
@@ -3100,6 +3100,11 @@ links: inbound text is redacted at ingest and every MCP tool response is
 redacted, so these tools can carry a link only if the caller already holds it
 from outside WhatSoup. A fleet config save refuses a value containing the
 redaction marker, so saving a redacted projection cannot overwrite a stored link.
+
+For a named account, first use `list_secret_input_resources`; it returns only
+authorized resource metadata. Do not invent a resource ID, and ask for
+clarification when labels are ambiguous. Listing a resource does not prove an
+MFA challenge is live or that a login completed.
 
 The tool resolves both the actor and destination to the same verified phone
 identity before recording its canonical WhatsApp address. A mapped LID and that

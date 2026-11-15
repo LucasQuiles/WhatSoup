@@ -69,6 +69,22 @@ function intakeReply(extra: Record<string, unknown> = {}): Record<string, unknow
   };
 }
 
+function resourcePageReply(extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    resources: [{
+      resourceId: 'dummy-account',
+      accountLabel: 'Dummy account',
+      consumerLabel: 'Dummy consumer',
+      action: 'sign_in',
+      kinds: ['password', 'token'],
+      saveAllowed: true,
+      revision: 1,
+    }],
+    cursor: null,
+    ...extra,
+  };
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -334,6 +350,44 @@ describe('managed delivery HTTP client', () => {
     expect(new Headers(calls[0]?.init.headers).get('Idempotency-Key')).toBe('create-input');
     expect(new Headers(calls[1]?.init.headers).get('Idempotency-Key')).toBe('resolve-input');
     expect(calls.every((call) => call.init.redirect === 'error')).toBe(true);
+  });
+
+  it('lists only safe resource metadata through the bound transport principal', async () => {
+    const calls: FetchCall[] = [];
+    const managed = client(async (url, init) => {
+      calls.push({ url: String(url), init: init! });
+      return json(resourcePageReply());
+    });
+
+    await expect(managed.listSecretInputResources({
+      principal: '15551234567',
+      cursor: 'C'.repeat(43),
+      limit: 2,
+    })).resolves.toEqual(resourcePageReply());
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe(
+      `${TEST_DELIVERY_BASE_URL}/resources?principal=15551234567&cursor=` + 'C'.repeat(43) + '&limit=2',
+    );
+    expect(calls[0]?.init.method).toBe('GET');
+    expect(calls[0]?.init.body).toBeUndefined();
+    expect(calls[0]?.init.redirect).toBe('error');
+    expect(new Headers(calls[0]?.init.headers).get('Authorization')).toBe('Bearer DUMMY-transport-token');
+    expect(JSON.stringify(resourcePageReply())).not.toContain('transportIssuerId');
+    expect(JSON.stringify(resourcePageReply())).not.toContain('consumerIssuerId');
+    expect(JSON.stringify(resourcePageReply())).not.toContain('principal');
+  });
+
+  it('rejects a resource page that carries unapproved metadata', async () => {
+    const unsafe = client(async () => json(resourcePageReply({
+      resources: [{
+        resourceId: 'dummy-account', accountLabel: 'Dummy account', consumerLabel: 'Dummy consumer', action: 'sign_in',
+        kinds: ['password'], saveAllowed: true, revision: 1, principal: '15551234567',
+      }],
+    })));
+
+    await expect(unsafe.listSecretInputResources({ principal: '15551234567' }))
+      .rejects.toThrow('managed delivery response has an invalid secret resource metadata');
   });
 
   it('projects a claimed browser form onto the local awaiting-input state and rejects unknown states', async () => {

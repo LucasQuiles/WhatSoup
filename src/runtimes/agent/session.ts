@@ -208,11 +208,12 @@ const OPENCODE_BACKGROUND_TASK_DELIVERY_GUIDANCE = [
 
 const PROTECTED_SECRET_WORKFLOW_GUIDANCE = [
   'Protected secret workflow:',
+  '- For a named account, call list_secret_input_resources first and use only a returned resource ID. If labels are ambiguous, ask the user which account they mean.',
   '- For a registered resource, use request_secret_input only for password, token, or a live MFA challenge. The tool returns metadata, never secret values.',
   '- Use request_rustdesk_access only for an authorized device. Use deliver_secret only with an opaque pre-staged delivery reference.',
   '- Never ask the user to paste a secret into chat; do not read credential stores, use shell/browser workarounds, or offer an alternate secret path.',
   '- Unknown resource or unavailable adapter: report the operation is blocked.',
-  '- Do not invent resource IDs, recipients, or destinations. The protected service selects authority and delivery targets.',
+  '- Do not invent resource IDs, recipients, or destinations. Discovery does not prove a challenge exists or that login completed; the protected service selects authority and delivery targets.',
   '- Submission or delivery metadata is not proof that a login completed. Verify the trusted operation result before claiming completion.',
 ].join('\n');
 

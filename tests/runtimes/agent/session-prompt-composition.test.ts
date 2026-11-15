@@ -242,11 +242,14 @@ describe('SessionManager system prompt composition', () => {
       'request_secret_input',
       'request_rustdesk_access',
       'deliver_secret',
+      'list_secret_input_resources',
+      'If labels are ambiguous, ask the user which account they mean.',
       'metadata, never secret values',
       'Never ask the user to paste a secret into chat',
       'do not read credential stores, use shell/browser workarounds',
       'Unknown resource or unavailable adapter: report the operation is blocked.',
       'Do not invent resource IDs, recipients, or destinations.',
+      'Discovery does not prove a challenge exists or that login completed',
       'metadata is not proof that a login completed',
     ];
 

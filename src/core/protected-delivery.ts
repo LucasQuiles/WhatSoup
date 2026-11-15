@@ -22,6 +22,13 @@ export interface ManagedSecretInputMetadata {
   id: string; resourceId: string; accountLabel: string; consumerLabel: string; action: string;
   kind: ProtectedSecretInputKind; saveAllowed: boolean; expiresAt: string; state: ProtectedSecretInputState;
 }
+export interface ManagedSecretInputResource {
+  resourceId: string; accountLabel: string; consumerLabel: string; action: string;
+  kinds: ProtectedSecretInputKind[]; saveAllowed: boolean; revision: number;
+}
+export interface ManagedSecretInputResourcePage {
+  resources: ManagedSecretInputResource[]; cursor: string | null;
+}
 export interface ManagedDeliveryClient {
   stageRustdesk(r: { deviceId: string; purpose: ProtectedDeliveryPurpose; principal: string; operationId: string }): Promise<{ deliveryRef: string; id: string; expiresAt: string; state: string }>;
   resolve(r: { deliveryRef: string; principal: string; operationId: string }): Promise<{ id: string; link: string; expiresAt: string; state: string }>;
@@ -31,6 +38,7 @@ export interface ManagedDeliveryClient {
   resolveSecretInput?(r: { id: string; principal: string; operationId: string }): Promise<ManagedSecretInputMetadata & { link: string }>;
   getSecretInput?(r: { id: string; principal: string }): Promise<ManagedSecretInputMetadata>;
   cancelSecretInput?(r: { id: string; principal: string }): Promise<ManagedSecretInputMetadata>;
+  listSecretInputResources?(r: { principal: string; cursor?: string; limit?: number }): Promise<ManagedSecretInputResourcePage>;
 }
 export interface ProtectedDeliveryMessenger {
   sendRaw(jid: string, content: Record<string, unknown>, options?: SendOptions): Promise<SubmissionReceipt>;
@@ -239,6 +247,15 @@ export class ProtectedDeliveryService {
     return publicSecretInput(this.findSecretInputById(row.id) ?? row);
   }
 
+  async listSecretInputResources(input: { principal: string; cursor?: string; limit?: number }): Promise<ManagedSecretInputResourcePage> {
+    if (!input.principal) throw new Error('protected secret input principal is invalid');
+    try {
+      return await this.secretInputResourceClient().listSecretInputResources(input);
+    } catch {
+      throw new Error('protected secret resource discovery is unavailable');
+    }
+  }
+
   async deliver(input: { deliveryRef: string; principal: string; recipientJid: string }): Promise<{ deliveryRef: string; id: string; state: string }> {
     if (!opaqueId(input.deliveryRef)) throw new Error('protected delivery reference is invalid');
     this.assertCanonicalRecipient(input.principal, input.recipientJid);
@@ -386,6 +403,12 @@ export class ProtectedDeliveryService {
       || client.cancelSecretInput === undefined
     ) throw new Error('protected secret input client is unavailable');
     return client as Required<Pick<ManagedDeliveryClient, 'createSecretInput' | 'resolveSecretInput' | 'getSecretInput' | 'cancelSecretInput'>>;
+  }
+
+  private secretInputResourceClient(): Required<Pick<ManagedDeliveryClient, 'listSecretInputResources'>> {
+    const client = this.deps.client;
+    if (client.listSecretInputResources === undefined) throw new Error('protected secret resource client is unavailable');
+    return client as Required<Pick<ManagedDeliveryClient, 'listSecretInputResources'>>;
   }
 
   private async refreshSecretInputForRequest(
