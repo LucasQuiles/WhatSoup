@@ -71,6 +71,9 @@ describe('registerAllTools', () => {
 
     const names = new Set(registry.listTools({ tier: 'global' }).map((tool) => tool.name));
     expect(names.has('request_rustdesk_access')).toBe(false);
+    expect(names.has('request_secret_input')).toBe(false);
+    expect(names.has('get_secret_input_status')).toBe(false);
+    expect(names.has('cancel_secret_input')).toBe(false);
     expect(names.has('deliver_secret')).toBe(false);
     expect(names.has('get_secret_delivery_status')).toBe(false);
     db.raw.close();
