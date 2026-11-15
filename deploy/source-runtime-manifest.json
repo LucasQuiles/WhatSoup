@@ -94,7 +94,7 @@
     },
     {
       "path": "src/runtimes/agent/session.ts",
-      "sha256": "9b3545ade2994ea57a6f5a34216ff2ac321d2b75cbd6617f2927bc9876503b9b",
+      "sha256": "3fb62de2b12678e4c3666652f637aa1c0b45abc7239f29024ff6b6f1dc57e1f4",
       "mustContain": [
         "composeWithExactLineDedup",
         "managedTerminationUnknown",
@@ -124,6 +124,16 @@
       "mustContain": [
         "SUPPORTED_IMSG_VERSIONS",
         "startImsgRpcRelay"
+      ],
+      "importGraph": true
+    },
+    {
+      "path": "src/secure-handoff/worker-main.ts",
+      "sha256": "8331b843f40e1b334bffc741384a7d9303fbcc257c33e0eb7125dd30547d14b0",
+      "mustContain": [
+        "readConsumerConfig",
+        "createSecureHandoffWorker",
+        "consumer_started"
       ],
       "importGraph": true
     }

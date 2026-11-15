@@ -5,22 +5,32 @@ import { bareNumber, isLidJid, JID_PERSONAL, normalizeLid } from './jid-constant
 import { lookupStoredLidPhoneJid } from './lid-resolver.ts';
 import { createOutboundSendsWriter, type OutboundSendsWriter } from './outbound-sends.ts';
 import { PROTECTED_DELIVERY_PINS, type ProtectedDeliveryPins } from './protected-delivery-pins.ts';
-import { isCanonicalManagedLink } from './protected-message.ts';
+import { isCanonicalManagedLink, isCanonicalSecretInputLink } from './protected-message.ts';
 import type { SendOptions, SubmissionReceipt } from './types.ts';
 
 export type ProtectedDeliveryPurpose = 'login' | 'recovery';
 export type ProtectedDeliveryKind = 'rustdesk' | 'secret';
+export type ProtectedSecretInputKind = 'password' | 'token' | 'mfa';
+export type ProtectedSecretInputState = 'awaiting_input' | 'submitted' | 'consuming' | 'succeeded' | 'failed' | 'expired' | 'revoked' | 'ambiguous' | 'cancelled';
 export type ProtectedDeliveryState = 'staging' | 'staged' | 'resolving' | 'submitted' | 'delivered' | 'read' | 'ambiguous' | 'failed' | 'expired';
 export type DeliveryEventStatus = 'submitted' | 'delivered' | 'read' | 'ambiguous' | 'failed';
 export interface ManagedDeliveryStatus {
   deliveryRef: string; id: string; state: string; deliveryStatus: string; expiresAt: string; issuedAt: string;
   kind: ProtectedDeliveryKind; deviceId: string | null; purpose: ProtectedDeliveryPurpose | null;
 }
+export interface ManagedSecretInputMetadata {
+  id: string; resourceId: string; accountLabel: string; consumerLabel: string; action: string;
+  kind: ProtectedSecretInputKind; saveAllowed: boolean; expiresAt: string; state: ProtectedSecretInputState;
+}
 export interface ManagedDeliveryClient {
   stageRustdesk(r: { deviceId: string; purpose: ProtectedDeliveryPurpose; principal: string; operationId: string }): Promise<{ deliveryRef: string; id: string; expiresAt: string; state: string }>;
   resolve(r: { deliveryRef: string; principal: string; operationId: string }): Promise<{ id: string; link: string; expiresAt: string; state: string }>;
   getStatus(r: { deliveryRef: string; principal: string }): Promise<ManagedDeliveryStatus>;
   reportEvent(e: { deliveryRef: string; eventId: string; status: DeliveryEventStatus; observedAt: string }): Promise<void>;
+  createSecretInput?(r: { resourceId: string; principal: string; kind: ProtectedSecretInputKind; purpose: string; operationId: string }): Promise<ManagedSecretInputMetadata>;
+  resolveSecretInput?(r: { id: string; principal: string; operationId: string }): Promise<ManagedSecretInputMetadata & { link: string }>;
+  getSecretInput?(r: { id: string; principal: string }): Promise<ManagedSecretInputMetadata>;
+  cancelSecretInput?(r: { id: string; principal: string }): Promise<ManagedSecretInputMetadata>;
 }
 export interface ProtectedDeliveryMessenger {
   sendRaw(jid: string, content: Record<string, unknown>, options?: SendOptions): Promise<SubmissionReceipt>;
@@ -31,6 +41,22 @@ interface Row {
   whatsapp_message_id: string; state: ProtectedDeliveryState; expires_at: string | null; issued_at: string;
   first_attempt_at: string | null; attempt_count: number; send_claim_token: string | null; send_claimed_at: string | null;
 }
+interface SecretInputRow {
+  id: number; create_operation_id: string; resolve_operation_id: string; intake_id: string | null;
+  principal: string; recipient_jid: string; resource_id: string; kind: ProtectedSecretInputKind; purpose: string;
+  account_label: string | null; consumer_label: string | null; action: string | null; save_allowed: number | null;
+  input_state: 'creating' | ProtectedSecretInputState;
+  delivery_status: 'pending' | 'resolving' | 'submitted' | 'delivered' | 'read' | 'ambiguous' | 'failed';
+  whatsapp_message_id: string; expires_at: string | null; issued_at: string;
+}
+/**
+ * A secret input's delivery status only moves forward. A receipt recorded
+ * while the send is in flight outranks that send's own outcome, and `read`
+ * outranks `delivered`.
+ */
+const SECRET_INPUT_DELIVERY_RANK: Readonly<Record<SecretInputRow['delivery_status'], number>> = {
+  pending: 0, resolving: 1, ambiguous: 2, failed: 2, submitted: 3, delivered: 4, read: 5,
+};
 const MAX_ATTEMPTS = 3;
 const RETRY_WINDOW_MS = 60_000;
 /**
@@ -48,6 +74,7 @@ export const PROTECTED_DELIVERY_RETENTION_DAYS = 90;
 
 export class ProtectedDeliveryService {
   private readonly audit: OutboundSendsWriter;
+  private readonly activeSecretInputResolutionIds = new Set<number>();
   private readonly deps: {
     db: DatabaseSync; client: ManagedDeliveryClient; messenger: ProtectedDeliveryMessenger;
     now?: () => Date; randomId?: () => string; auditWriter?: OutboundSendsWriter; pins?: ProtectedDeliveryPins;
@@ -107,6 +134,109 @@ export class ProtectedDeliveryService {
     const stage = await this.requestRustdesk(input);
     if (stage.state !== 'staged') return { deliveryRef: stage.deliveryRef, id: stage.id, state: stage.state };
     return this.deliver({ deliveryRef: stage.deliveryRef, principal: input.principal, recipientJid: input.recipientJid });
+  }
+
+  async requestSecretInput(input: {
+    resourceId: string; kind: ProtectedSecretInputKind; purpose: string; principal: string; recipientJid: string;
+  }): Promise<PublicSecretInput> {
+    this.assertCanonicalRecipient(input.principal, input.recipientJid);
+    if (!resourceId(input.resourceId) || !boundedText(input.purpose, 256)) {
+      throw new Error('protected secret input is invalid');
+    }
+    const client = this.secretInputClient();
+    let row = this.findActiveSecretInput(input);
+    if (row && row.intake_id !== null && (row.delivery_status === 'pending' || this.isSecretInputExpired(row))) {
+      row = await this.refreshSecretInputForRequest(row, client);
+    }
+    if (!row || this.isSecretInputTerminal(row)) row = this.insertSecretInput(input);
+    if (row.intake_id === null) {
+      let created: ManagedSecretInputMetadata;
+      try {
+        created = await client.createSecretInput({
+          resourceId: row.resource_id, principal: row.principal, kind: row.kind, purpose: row.purpose, operationId: row.create_operation_id,
+        });
+        this.assertSecretInputMetadata(row, created);
+      } catch {
+        throw new Error('protected secret input creation failed');
+      }
+      this.updateSecretInputMetadata(row.id, created);
+      row = this.findSecretInputById(row.id) ?? row;
+    }
+    if (row.delivery_status !== 'pending') return publicSecretInput(row);
+    const claimed = this.deps.db.prepare(`UPDATE protected_secret_inputs
+      SET delivery_status='resolving',updated_at=? WHERE id=? AND delivery_status='pending'`)
+      .run(this.nowIso(), row.id).changes;
+    if (claimed !== 1) return publicSecretInput(this.findSecretInputById(row.id) ?? row);
+    row = this.findSecretInputById(row.id) ?? row;
+    this.activeSecretInputResolutionIds.add(row.id);
+    try {
+      let resolved: ManagedSecretInputMetadata & { link: string };
+      try {
+        resolved = await client.resolveSecretInput({ id: row.intake_id!, principal: row.principal, operationId: row.resolve_operation_id });
+        this.assertSecretInputMetadata(row, resolved);
+      } catch {
+        this.updateSecretInputDelivery(row.id, 'ambiguous');
+        throw new Error('protected secret input delivery is ambiguous');
+      }
+      // The HTTP client checks the link too; the service checks it again, as
+      // deliver() does, so no client can send to another host or intake.
+      if (!isCanonicalSecretInputLink(resolved.link, row.intake_id!, this.deps.pins ?? PROTECTED_DELIVERY_PINS)) {
+        this.updateSecretInputDelivery(row.id, 'failed');
+        throw new Error('protected secret input resolution failed');
+      }
+      if (new Date(resolved.expiresAt).getTime() <= this.now().getTime()) {
+        this.updateSecretInputMetadata(row.id, resolved);
+        throw new Error('protected secret input is expired');
+      }
+      const outbound = this.audit.writeIntent({ caller: 'mcp', targetKind: 'chatJid' });
+      this.deps.db.prepare(`UPDATE protected_secret_inputs SET outbound_send_id=?,expires_at=?,updated_at=? WHERE id=?`)
+        .run(outbound.id, resolved.expiresAt, this.nowIso(), row.id);
+      try {
+        const result = await this.deps.messenger.sendRaw(row.recipient_jid, { text: resolved.link, linkPreview: null }, { messageId: row.whatsapp_message_id });
+        if (result.waMessageId !== row.whatsapp_message_id) throw new Error('stable id rejected');
+      } catch {
+        const safe = new Error('protected secret input transport outcome is ambiguous');
+        this.audit.markFailure(outbound.id, safe);
+        this.updateSecretInputDelivery(row.id, 'ambiguous');
+        throw safe;
+      }
+      this.audit.markSuccess(outbound.id);
+      this.updateSecretInputMetadata(row.id, resolved);
+      this.updateSecretInputDelivery(row.id, 'submitted');
+      return publicSecretInput(this.findSecretInputById(row.id) ?? row);
+    } finally {
+      this.activeSecretInputResolutionIds.delete(row.id);
+    }
+  }
+
+  async secretInputStatus(input: { id: string; principal: string }): Promise<PublicSecretInput> {
+    if (!opaqueId(input.id)) throw new Error('protected secret input id is invalid');
+    const row = this.findSecretInput(input.id, input.principal);
+    if (!row) throw new Error('protected secret input not found');
+    let remote: ManagedSecretInputMetadata;
+    try {
+      remote = await this.secretInputClient().getSecretInput({ id: row.intake_id!, principal: row.principal });
+      this.assertSecretInputMetadata(row, remote);
+    } catch {
+      throw new Error('protected secret input status is unavailable');
+    }
+    this.updateSecretInputMetadata(row.id, remote);
+    return publicSecretInput(this.findSecretInputById(row.id) ?? row);
+  }
+
+  async cancelSecretInput(input: { id: string; principal: string }): Promise<PublicSecretInput> {
+    if (!opaqueId(input.id)) throw new Error('protected secret input id is invalid');
+    const row = this.findSecretInput(input.id, input.principal);
+    if (!row) throw new Error('protected secret input not found');
+    let remote: ManagedSecretInputMetadata;
+    try {
+      remote = await this.secretInputClient().cancelSecretInput({ id: row.intake_id!, principal: row.principal });
+      this.assertSecretInputMetadata(row, remote);
+    } catch {
+      throw new Error('protected secret input cancellation failed');
+    }
+    this.updateSecretInputMetadata(row.id, remote);
+    return publicSecretInput(this.findSecretInputById(row.id) ?? row);
   }
 
   async deliver(input: { deliveryRef: string; principal: string; recipientJid: string }): Promise<{ deliveryRef: string; id: string; state: string }> {
@@ -169,10 +299,21 @@ export class ProtectedDeliveryService {
     const status = input.type === 'delivery' ? 'delivered' : input.type === 'read' ? 'read' : null;
     if (!status) return false;
     const row = this.deps.db.prepare('SELECT * FROM protected_deliveries WHERE whatsapp_message_id=? AND recipient_jid=?').get(input.whatsappMessageId, input.recipientJid) as Row | undefined;
-    if (!row?.delivery_ref) return false;
-    const next = status === 'read' || row.state !== 'read' ? status : row.state;
-    this.deps.db.prepare(`UPDATE protected_deliveries SET state=?,send_claim_token=NULL,send_claimed_at=NULL,terminal_at=CASE WHEN ?='read' THEN COALESCE(terminal_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')) ELSE terminal_at END,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?`).run(next, next, row.id);
-    this.event(row, status, row.delivery_ref + ':wa:' + input.whatsappMessageId + ':' + status);
+    if (row?.delivery_ref) {
+      const next = status === 'read' || row.state !== 'read' ? status : row.state;
+      this.deps.db.prepare(`UPDATE protected_deliveries SET state=?,send_claim_token=NULL,send_claimed_at=NULL,terminal_at=CASE WHEN ?='read' THEN COALESCE(terminal_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')) ELSE terminal_at END,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?`).run(next, next, row.id);
+      this.event(row, status, row.delivery_ref + ':wa:' + input.whatsappMessageId + ':' + status);
+      return true;
+    }
+    let secretInput: Pick<SecretInputRow, 'id'> | undefined;
+    try {
+      secretInput = this.deps.db.prepare('SELECT id FROM protected_secret_inputs WHERE whatsapp_message_id=? AND recipient_jid=?')
+        .get(input.whatsappMessageId, input.recipientJid) as Pick<SecretInputRow, 'id'> | undefined;
+    } catch {
+      return false;
+    }
+    if (!secretInput) return false;
+    this.updateSecretInputDelivery(secretInput.id, status);
     return true;
   }
 
@@ -198,6 +339,15 @@ export class ProtectedDeliveryService {
   async recoverPendingDeliveries(): Promise<{ resumed: number; skipped: number }> {
     const now = this.now();
     this.expireOverdueUncertainDeliveries(now);
+    const resolvingSecretInputs = this.deps.db.prepare(`SELECT id FROM protected_secret_inputs
+      WHERE delivery_status='resolving' ORDER BY id ASC LIMIT 100`).all() as Array<Pick<SecretInputRow, 'id'>>;
+    let abandonedSecretInputs = 0;
+    for (const input of resolvingSecretInputs) {
+      if (this.activeSecretInputResolutionIds.has(input.id)) continue;
+      abandonedSecretInputs += Number(this.deps.db.prepare(`UPDATE protected_secret_inputs
+        SET delivery_status='ambiguous',updated_at=? WHERE id=? AND delivery_status='resolving'`)
+        .run(now.toISOString(), input.id).changes);
+    }
     const cutoff = new Date(now.getTime() - RETRY_WINDOW_MS).toISOString();
     const rows = this.deps.db.prepare(`SELECT delivery_ref,principal,recipient_jid FROM protected_deliveries
       WHERE state='staged' AND delivery_ref IS NOT NULL AND delivery_id IS NOT NULL
@@ -219,12 +369,121 @@ export class ProtectedDeliveryService {
         skipped += 1;
       }
     }
-    return { resumed, skipped };
+    return { resumed, skipped: skipped + abandonedSecretInputs };
   }
 
   maintain(mode: 'preview' | 'apply'): { mode: 'preview' | 'apply'; eligibleRows: number; deletedRows: number } {
     const eligibleRows = countExpiredProtectedDeliveries(this.deps.db);
     return mode === 'preview' || eligibleRows === 0 ? { mode, eligibleRows, deletedRows: 0 } : { mode, eligibleRows, deletedRows: deleteExpiredProtectedDeliveries(this.deps.db) };
+  }
+
+  private secretInputClient(): Required<Pick<ManagedDeliveryClient, 'createSecretInput' | 'resolveSecretInput' | 'getSecretInput' | 'cancelSecretInput'>> {
+    const client = this.deps.client;
+    if (
+      client.createSecretInput === undefined
+      || client.resolveSecretInput === undefined
+      || client.getSecretInput === undefined
+      || client.cancelSecretInput === undefined
+    ) throw new Error('protected secret input client is unavailable');
+    return client as Required<Pick<ManagedDeliveryClient, 'createSecretInput' | 'resolveSecretInput' | 'getSecretInput' | 'cancelSecretInput'>>;
+  }
+
+  private async refreshSecretInputForRequest(
+    row: SecretInputRow,
+    client: Required<Pick<ManagedDeliveryClient, 'createSecretInput' | 'resolveSecretInput' | 'getSecretInput' | 'cancelSecretInput'>>,
+  ): Promise<SecretInputRow> {
+    let remote: ManagedSecretInputMetadata;
+    try {
+      remote = await client.getSecretInput({ id: row.intake_id!, principal: row.principal });
+      this.assertSecretInputMetadata(row, remote);
+    } catch {
+      throw new Error('protected secret input status is unavailable');
+    }
+    this.updateSecretInputMetadata(row.id, remote);
+    return this.findSecretInputById(row.id) ?? row;
+  }
+
+  private isSecretInputTerminal(row: Pick<SecretInputRow, 'input_state'>): boolean {
+    return row.input_state === 'succeeded' || row.input_state === 'failed' || row.input_state === 'expired'
+      || row.input_state === 'revoked' || row.input_state === 'ambiguous' || row.input_state === 'cancelled';
+  }
+
+  private isSecretInputExpired(row: Pick<SecretInputRow, 'expires_at'>): boolean {
+    return row.expires_at !== null && new Date(row.expires_at).getTime() <= this.now().getTime();
+  }
+
+  private findActiveSecretInput(input: { resourceId: string; kind: ProtectedSecretInputKind; purpose: string; principal: string }): SecretInputRow | undefined {
+    return this.deps.db.prepare(`SELECT * FROM protected_secret_inputs
+      WHERE resource_id=? AND kind=? AND purpose=? AND principal=?
+        AND input_state NOT IN ('succeeded','failed','expired','revoked','ambiguous','cancelled')
+      ORDER BY id DESC LIMIT 1`).get(input.resourceId, input.kind, input.purpose, input.principal) as SecretInputRow | undefined;
+  }
+
+  private findSecretInput(id: string, principal: string): SecretInputRow | undefined {
+    return this.deps.db.prepare('SELECT * FROM protected_secret_inputs WHERE intake_id=? AND principal=?')
+      .get(id, principal) as SecretInputRow | undefined;
+  }
+
+  private findSecretInputById(id: number): SecretInputRow | undefined {
+    return this.deps.db.prepare('SELECT * FROM protected_secret_inputs WHERE id=?').get(id) as SecretInputRow | undefined;
+  }
+
+  private insertSecretInput(input: { resourceId: string; kind: ProtectedSecretInputKind; purpose: string; principal: string; recipientJid: string }): SecretInputRow {
+    const row: SecretInputRow = {
+      id: 0,
+      create_operation_id: this.id(),
+      resolve_operation_id: this.id(),
+      intake_id: null,
+      principal: input.principal,
+      recipient_jid: input.recipientJid,
+      resource_id: input.resourceId,
+      kind: input.kind,
+      purpose: input.purpose,
+      account_label: null,
+      consumer_label: null,
+      action: null,
+      save_allowed: null,
+      input_state: 'creating',
+      delivery_status: 'pending',
+      whatsapp_message_id: this.id(),
+      expires_at: null,
+      issued_at: this.nowIso(),
+    };
+    row.id = Number(this.deps.db.prepare(`INSERT INTO protected_secret_inputs (
+      create_operation_id,resolve_operation_id,principal,recipient_jid,resource_id,kind,purpose,input_state,delivery_status,whatsapp_message_id,issued_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(
+      row.create_operation_id,row.resolve_operation_id,row.principal,row.recipient_jid,row.resource_id,row.kind,row.purpose,row.input_state,row.delivery_status,row.whatsapp_message_id,row.issued_at,
+    ).lastInsertRowid);
+    return row;
+  }
+
+  private assertSecretInputMetadata(row: Pick<SecretInputRow, 'intake_id' | 'resource_id' | 'kind'>, metadata: ManagedSecretInputMetadata): void {
+    if (
+      (row.intake_id !== null && metadata.id !== row.intake_id)
+      || metadata.resourceId !== row.resource_id
+      || metadata.kind !== row.kind
+      || (metadata.kind === 'mfa' && metadata.saveAllowed)
+    ) throw new Error('protected secret input metadata is invalid');
+  }
+
+  private updateSecretInputMetadata(id: number, metadata: ManagedSecretInputMetadata): void {
+    const expired = new Date(metadata.expiresAt).getTime() <= this.now().getTime();
+    const state = expired && !this.isSecretInputTerminal({ input_state: metadata.state }) ? 'expired' : metadata.state;
+    this.deps.db.prepare(`UPDATE protected_secret_inputs SET
+      intake_id=?,account_label=?,consumer_label=?,action=?,save_allowed=?,input_state=?,expires_at=?,updated_at=? WHERE id=?`).run(
+      metadata.id, metadata.accountLabel, metadata.consumerLabel, metadata.action, metadata.saveAllowed ? 1 : 0,
+      state, metadata.expiresAt, this.nowIso(), id,
+    );
+  }
+
+  /** Compare-and-set: applies only over a lower-ranked status, so evidence never moves backwards. */
+  private updateSecretInputDelivery(id: number, status: SecretInputRow['delivery_status']): void {
+    const lower = (Object.keys(SECRET_INPUT_DELIVERY_RANK) as Array<SecretInputRow['delivery_status']>)
+      .filter((current) => SECRET_INPUT_DELIVERY_RANK[current] < SECRET_INPUT_DELIVERY_RANK[status]);
+    if (lower.length === 0) return;
+    this.deps.db.prepare(`UPDATE protected_secret_inputs SET delivery_status=?,updated_at=?
+      WHERE id=? AND delivery_status IN (${lower.map(() => '?').join(',')})`)
+      .run(status, this.nowIso(), id, ...lower);
   }
 
   private insertRustdesk(i: { deviceId: string; purpose: ProtectedDeliveryPurpose; principal: string; recipientJid: string }): Row {
@@ -362,21 +621,58 @@ export class ProtectedDeliveryService {
 }
 
 export function countExpiredProtectedDeliveries(db: DatabaseSync): number {
-  return Number((db.prepare(`SELECT COUNT(*) AS count FROM protected_deliveries WHERE julianday(issued_at)<julianday('now',?)`).get('-' + PROTECTED_DELIVERY_RETENTION_DAYS + ' days') as { count: number }).count);
+  const cutoff = '-' + PROTECTED_DELIVERY_RETENTION_DAYS + ' days';
+  const deliveries = Number((db.prepare(`SELECT COUNT(*) AS count FROM protected_deliveries WHERE julianday(issued_at)<julianday('now',?)`).get(cutoff) as { count: number }).count);
+  try {
+    const inputs = Number((db.prepare(`SELECT COUNT(*) AS count FROM protected_secret_inputs WHERE julianday(issued_at)<julianday('now',?)`).get(cutoff) as { count: number }).count);
+    return deliveries + inputs;
+  } catch {
+    return deliveries;
+  }
 }
 export function deleteExpiredProtectedDeliveries(db: DatabaseSync): number {
   const cutoff = '-' + PROTECTED_DELIVERY_RETENTION_DAYS + ' days';
   db.prepare(`DELETE FROM protected_delivery_events WHERE delivery_ref IN (SELECT delivery_ref FROM protected_deliveries WHERE julianday(issued_at)<julianday('now',?))`).run(cutoff);
-  return Number(db.prepare(`DELETE FROM protected_deliveries WHERE julianday(issued_at)<julianday('now',?)`).run(cutoff).changes);
+  const deliveries = Number(db.prepare(`DELETE FROM protected_deliveries WHERE julianday(issued_at)<julianday('now',?)`).run(cutoff).changes);
+  try {
+    const inputs = Number(db.prepare(`DELETE FROM protected_secret_inputs WHERE julianday(issued_at)<julianday('now',?)`).run(cutoff).changes);
+    return deliveries + inputs;
+  } catch {
+    return deliveries;
+  }
 }
 function validStatus(v: ManagedDeliveryStatus, ref: string, id?: string): void {
   if (v.deliveryRef !== ref || !opaqueId(v.deliveryRef) || !opaqueId(v.id) || (id !== undefined && v.id !== id) || !instant(v.expiresAt) || !instant(v.issuedAt) || !grantState(v.state) || !deliveryStatus(v.deliveryStatus) || (v.kind !== 'secret' && v.kind !== 'rustdesk') || (v.kind === 'secret' && (v.deviceId !== null || v.purpose !== null)) || (v.kind === 'rustdesk' && (!text(v.deviceId ?? '') || (v.purpose !== 'login' && v.purpose !== 'recovery')))) throw new Error('invalid status');
 }
 function text(v: string): boolean { return typeof v === 'string' && v.length > 0; }
+function boundedText(v: string, maximum: number): boolean { return text(v) && v.length <= maximum; }
+function resourceId(v: string): boolean { return typeof v === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(v); }
 function opaqueId(v: string): boolean { return typeof v === 'string' && /^[A-Za-z0-9_-]{22}$/.test(v); }
 function instant(v: string): boolean { return Number.isFinite(new Date(v).getTime()); }
 function sent(v: ProtectedDeliveryState): v is 'submitted' | 'delivered' | 'read' { return v === 'submitted' || v === 'delivered' || v === 'read'; }
 function publicRow(row: Row): { deliveryRef: string; id: string; state: string } { return { deliveryRef: row.delivery_ref!, id: row.delivery_id!, state: row.state }; }
+type PublicSecretInput = {
+  id: string; resourceId: string; accountLabel: string; consumerLabel: string; action: string;
+  kind: ProtectedSecretInputKind; saveAllowed: boolean; expiresAt: string; inputState: string; deliveryStatus: string;
+};
+function publicSecretInput(row: SecretInputRow): PublicSecretInput {
+  if (
+    row.intake_id === null || row.account_label === null || row.consumer_label === null || row.action === null
+    || row.save_allowed === null || row.expires_at === null || row.input_state === 'creating'
+  ) throw new Error('protected secret input is not available');
+  return {
+    id: row.intake_id,
+    resourceId: row.resource_id,
+    accountLabel: row.account_label,
+    consumerLabel: row.consumer_label,
+    action: row.action,
+    kind: row.kind,
+    saveAllowed: row.save_allowed === 1,
+    expiresAt: row.expires_at,
+    inputState: row.input_state,
+    deliveryStatus: row.delivery_status,
+  };
+}
 function grantState(value: string): boolean { return value === 'unclaimed' || value === 'claimed' || value === 'revoked' || value === 'expired' || value === 'done' || value === 'replaced'; }
 function deliveryStatus(value: string): boolean { return value === 'staged' || value === 'submitted' || value === 'delivered' || value === 'read' || value === 'ambiguous' || value === 'failed'; }
 function projectDeliveryStatus(local: ProtectedDeliveryState, remote: string): string {

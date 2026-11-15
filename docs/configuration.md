@@ -1162,6 +1162,72 @@ retention transaction. The timer runs once at startup and daily thereafter;
 by its latest successful sweep. The metadata contains delivery references and
 receipt state, never the RustDesk code, browser URL, or credential value.
 
+### Secure-handoff consumer worker (pilot)
+
+`npm run secure-handoff:consumer -- --config /absolute/private/consumer.json`
+starts a separate, administrator-operated consumer process. It is not part of
+the agent runtime and is not a model tool. The process accepts exactly one
+absolute `--config` path. Its current-user-owned parent directory and regular
+file must be private (no group or other permissions), non-symlinked, and no
+larger than 16 KiB. The JSON is non-secret, has no unknown fields, and has this
+shape:
+
+```json
+{
+  "databasePath": "/var/lib/whatsoup/dummy-pilot.sqlite",
+  "linksBaseUrl": "https://<approved-link-host>/s/api/v1",
+  "pollIntervalMs": 5000,
+  "adapters": [
+    {
+      "kind": "password",
+      "resourceId": "dummy-resource",
+      "principal": "dummy-user",
+      "action": "dummy-login",
+      "endpoint": "https://intake-target.invalid/fixed-login",
+      "username": "dummy-username",
+      "saveStore": {
+        "name": "dummy-approved-store",
+        "endpoint": "https://intake-target.invalid/fixed-store",
+        "authorizationEnv": "LINKS_MANAGED_DUMMY_STORE_TOKEN"
+      }
+    }
+  ]
+}
+```
+
+`linksBaseUrl` must be the canonical managed Links API,
+`https://<approved-link-host>/s/api/v1`: HTTPS on the default port with the
+fixed `/s/api/v1` path, on a host that is a hash-pinned canonical link host.
+The source holds only SHA-256 pins of the approved hosts
+(`src/core/protected-delivery-pins.ts`), so the real host comes from this
+private file, and startup fails for any other host. Each adapter fixes its HTTPS target,
+resource, principal, and action at startup. A password adapter also fixes a
+username; a token adapter omits `username`; an MFA adapter supplies both
+`username` and the consumer's fixed `operationId`. Runtime rows, agent tools,
+and model input cannot select a destination, command, account, or operation.
+
+The worker requires separate non-empty service-environment bearer values in
+`LINKS_MANAGED_TRANSPORT_TOKEN` and `LINKS_MANAGED_CONSUMER_TOKEN`. They must
+be different credentials in normal operation: the transport bearer only reads
+the local request's safe remote metadata, while the consumer bearer receives a
+value once for the matching fixed adapter. Put neither bearer in this JSON,
+instance `config.json`, prompts, tool arguments, logs, or model context.
+`saveStore.authorizationEnv` similarly names a service-environment bearer; its
+value is never configuration data.
+
+Saving is opt-in twice. Password and token adapters may name one
+administrator-registered `saveStore`, bound to the same resource, principal,
+and action, and the person submitting the intake must explicitly request save.
+The worker then writes only to that named store. Omit `saveStore` to prohibit
+save. MFA adapters have no `saveStore` field and always prohibit persistence.
+
+The worker opens the configured database read-only and refuses startup unless
+the database is compatible with the running binary and records migration 68.
+Migration 68 supplies the metadata-only `protected_secret_inputs` table; it
+does not persist credential values, browser URLs, or upload URLs. Start the
+worker only after the instance has applied that migration. This pilot does
+not qualify standalone terminal agents or operating-system isolation.
+
 ### `memory`
 
 `memory` is the canonical BYOK configuration block. It owns every memory/search setting that used to be spread across flat fields such as `pineconeIndex`, hardwired namespace literals, and code-level knowledge profiles.
@@ -1467,7 +1533,7 @@ proof unless a WhatSoup-specific proof artifact says so.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `sessionScope` | string | no | `single` at runtime (`per_chat` via fleet API) | `single`, `shared`, or `per_chat`. See [Session Scopes](#session-scopes). Omitted = the runtime defaults to `single`; the fleet create/update APIs fill `per_chat` when the whole `agentOptions` block is omitted. Invalid values are rejected on every path (create, update, load, discovery). |
-| `protectedDelivery` | object | no | disabled | Enables the RustDesk protected-delivery MCP tools only for an `agent` instance when `{ "enabled": true, "baseUrl": "https://<approved-host>/s/api/v1", "credentialEnv": "LINKS_MANAGED_<NAME>" }` is present. The source holds no endpoint or link-host names, only SHA-256 pins of the hash-pinned approved hosts (`src/lib/protected-delivery-pins.ts`); one check normalizes a host (lowercase, long s folded, one trailing dot and one leading `www.` dropped) and compares its digest. `baseUrl` must be HTTPS on the default port with the fixed `/s/api/v1` path, and its host, spelled exactly in normalized form, must be a pinned delivery host, otherwise startup fails. Protected-link redaction and the managed-link check use the same pins, so they need no host configuration on any instance. The optional `linkHosts` array narrows the hosts a managed link may be sent on; every entry must be a hash-pinned approved host in lowercase form, otherwise startup fails. It never narrows redaction. `credentialEnv` must match `^LINKS_MANAGED_[A-Z][A-Z0-9_]*$` (for example, `LINKS_MANAGED_TRANSPORT_TOKEN`); validation occurs before the value is read, so standard, provider-auth, and WhatSoup session variable names are rejected. Its value is never stored in `config.json`, exposed to a model, or returned by a tool, and the child-environment builders do not forward this reserved namespace. This does not restrict another local process running as the same OS user, which may be able to inspect the service process environment; same-user shell access remains trusted operator access. Only a resolved, bound direct WhatsApp conversation can call the tools. Passive MCP instances do not construct the delivery service or expose this surface. |
+| `protectedDelivery` | object | no | disabled | Enables the protected-delivery MCP tools only for an `agent` instance when `{ "enabled": true, "baseUrl": "https://<approved-host>/s/api/v1", "credentialEnv": "LINKS_MANAGED_<NAME>" }` is present. The source holds no endpoint or link-host names, only SHA-256 pins of the hash-pinned approved hosts (`src/lib/protected-delivery-pins.ts`); one check normalizes a host (lowercase, long s folded, one trailing dot and one leading `www.` dropped) and compares its digest. `baseUrl` must be HTTPS on the default port with the fixed `/s/api/v1` path, and its host, spelled exactly in normalized form, must be a pinned delivery host, otherwise startup fails. Protected-link redaction and the managed-link and intake-link checks use the same pins, so they need no host configuration on any instance. The optional `linkHosts` array narrows the hosts a managed or intake link may be sent on; every entry must be a hash-pinned approved host in lowercase form, otherwise startup fails. It never narrows redaction. `credentialEnv` must match `^LINKS_MANAGED_[A-Z][A-Z0-9_]*$` (for example, `LINKS_MANAGED_TRANSPORT_TOKEN`); validation occurs before the value is read, so standard, provider-auth, and WhatSoup session variable names are rejected. Its value is never stored in `config.json`, exposed to a model, or returned by a tool, and the child-environment builders do not forward this reserved namespace. This does not restrict another local process running as the same OS user, which may be able to inspect the service process environment; same-user shell access remains trusted operator access. Only a resolved, bound direct WhatsApp conversation can call the tools. Passive MCP instances do not construct the delivery service or expose this surface. |
 | `model` | string | no | provider default | Agent-scoped model override, passed to the provider CLI as `--model` at spawn. Highest-precedence agent-model source: wins over top-level `model` and `models.conversation` (`resolveAgentModel`, `src/core/agent-model.ts`). When set, the provider CLI runs this model regardless of the harness's own settings default. |
 | `provider` | string | no | `claude-cli` | Agent provider ID. Must be one of `claude-cli`, `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, or `anthropic-api`. A primary `opencode-cli` route requires a non-empty top-level `model` or `models.conversation`; other CLI providers may use their own default model. |
 | `providerConfig` | object | no | — | Provider-specific overrides. The selected provider owns the accepted keys; unknown provider IDs are rejected before runtime startup. For `opencode-cli`, `providerConfig.executionProfile` selects an explicit OpenCode agent and `providerConfig.autoApprovePermissions` opts a trusted unattended lane into OpenCode `--auto`. `providerConfig.baseUrl` selects a custom endpoint and `providerConfig.apiKeyService` names the keyring service that authenticates it — see [OpenCode headless execution profile](#opencode-headless-execution-profile) and [Custom endpoint](#custom-endpoint-providerconfigbaseurl) for routing, auth, and validation semantics. |
@@ -3052,6 +3118,7 @@ All migration sources are in `src/core/database.ts` unless noted otherwise.
 | 65 | Tool-call caller attribution on `tool_calls` (#3421 step 1): eight nullable columns with no CHECK and no default, added by idempotent ALTER — `caller_transport`, `caller_connection_id`, `caller_client_name`, `caller_client_version`, `caller_token_result`, `caller_turn_owned`, `caller_actor_source`, `tool_sensitive`. Every tool call records which caller made it: the transport, the client's own declared name, whether it presented a session token this runtime minted (not bound to the executing session), and whether it resolved the turn's actor. Evidence only — no admission, authorization or reply reads these columns. Legacy rows carry NULL, and a no-op when `tool_calls` is absent. See `docs/durability.md` §5.2.1 for the read-only report (`src/core/database-migration-65.ts`). |
 | 66 | Append-only `continuity_gap_closures` table: one closure per recorded continuity-gap plan (primary key and `RESTRICT` foreign key to `recovery_plans`), keyed to the original receipt fingerprint, with digest, disposition (`addressed` \| `declined`) and proof-shape CHECKs, a `BEFORE INSERT` trigger that requires the parent to be the recorder's open gap for that exact receipt and classification, and `BEFORE UPDATE`/`BEFORE DELETE` abort triggers. The recorded plan and its `started` run are never changed. Written only by `close-continuity-gap --apply`; read by `/health` continuity counts (`src/core/database-migration-66.ts`). Rollback: a schema-65 binary refuses the migrated file as `future_schema`, so a binary-only rollback is unavailable. Like every bump, it changes the `schema_version` inside D5 capability attestation bindings, so previously recorded attestation digests stop admitting on this binary and AS-01 must be re-run at rollout. |
 | 67 | `protected_deliveries` and `protected_delivery_events` tables for agent-only managed RustDesk delivery. The rows retain opaque delivery references, fixed WhatsApp message IDs, state, attempts, receipt events, and timestamps; they contain no browser URL, code, seed, or managed credential (`src/core/database-migration-67.ts`). Rollback: a schema-66 binary refuses the migrated file as `future_schema`, so a binary-only rollback is unavailable. Like every bump, it changes the `schema_version` inside D5 capability attestation bindings, so previously recorded attestation digests stop admitting on this binary and AS-01 must be re-run at rollout. |
+| 68 | `protected_secret_inputs` stores resource-bound password, token and MFA intake metadata, fixed WhatsApp message IDs and separate input/delivery states; no values or upload URLs are retained. The exact consumer owns operation completion. Earlier binaries refuse schema 68; use a compatible binary or a verified pre-migration backup (`src/core/database-migration-68.ts`). Like every bump, it changes the `schema_version` inside D5 capability attestation bindings, so previously recorded attestation digests stop admitting on this binary and AS-01 must be re-run at rollout. |
 
 Migrations 50 and 51 logically remove the old values from live rows and the current schema. SQLite may still retain prior bytes in free pages, WAL files, backups, or storage-layer snapshots. Do not claim forensic erasure from migration success alone. Physical compaction such as `VACUUM`, `secure_delete` policy changes, backup rotation, or snapshot retirement must be separately scheduled and operator-approved for the deployment.
 

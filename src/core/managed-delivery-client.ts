@@ -3,9 +3,11 @@ import type {
   ManagedDeliveryClient,
   ManagedDeliveryStatus,
   ProtectedDeliveryPurpose,
+  ManagedSecretInputMetadata,
+  ProtectedSecretInputKind,
 } from './protected-delivery.ts';
 import { PROTECTED_DELIVERY_PINS, type ProtectedDeliveryPins } from './protected-delivery-pins.ts';
-import { isCanonicalManagedLink } from './protected-message.ts';
+import { isCanonicalManagedLink, isCanonicalSecretInputLink } from './protected-message.ts';
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -98,6 +100,53 @@ export class HttpManagedDeliveryClient implements ManagedDeliveryClient {
     });
   }
 
+  async createSecretInput(request: {
+    resourceId: string;
+    principal: string;
+    kind: ProtectedSecretInputKind;
+    purpose: string;
+    operationId: string;
+  }): Promise<ManagedSecretInputMetadata> {
+    const body = await this.mutate('/intakes', request.operationId, {
+      resourceId: request.resourceId,
+      principal: request.principal,
+      kind: request.kind,
+      purpose: request.purpose,
+    });
+    return requireSecretInput(body);
+  }
+
+  async resolveSecretInput(request: {
+    id: string;
+    principal: string;
+    operationId: string;
+  }): Promise<ManagedSecretInputMetadata & { link: string }> {
+    const body = await this.mutate(`/intakes/${encodeURIComponent(request.id)}/resolve`, request.operationId, {
+      principal: request.principal,
+      operationId: request.operationId,
+    });
+    const metadata = requireSecretInput(body);
+    const link = asRecord(body)['link'];
+    if (!isCanonicalSecretInputLink(link, metadata.id, this.pins, this.linkHosts)) {
+      throw new Error('managed delivery response is missing protected intake URL');
+    }
+    return { ...metadata, link };
+  }
+
+  async getSecretInput(request: { id: string; principal: string }): Promise<ManagedSecretInputMetadata> {
+    const query = new URLSearchParams({ principal: request.principal });
+    const body = await this.request(`/intakes/${encodeURIComponent(request.id)}?${query.toString()}`, { method: 'GET' });
+    return requireSecretInput(body);
+  }
+
+  async cancelSecretInput(request: { id: string; principal: string }): Promise<ManagedSecretInputMetadata> {
+    const body = await this.request(`/intakes/${encodeURIComponent(request.id)}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({ principal: request.principal }),
+    });
+    return requireSecretInput(body);
+  }
+
   private async mutate(path: string, operationId: string, body: Record<string, unknown>): Promise<unknown> {
     return this.request(path, {
       method: 'POST',
@@ -149,6 +198,28 @@ function requireDelivery(
   return result;
 }
 
+function requireSecretInput(value: unknown): ManagedSecretInputMetadata {
+  const record = asRecord(value);
+  const state = record['state'] === 'awaiting_submission' ? 'awaiting_input' : record['state'];
+  const kind = record['kind'];
+  const saveAllowed = record['saveAllowed'];
+  if (!isSecretInputState(state) || !isSecretInputKind(kind) || typeof saveAllowed !== 'boolean') {
+    throw new Error('managed delivery response has an invalid secret input metadata');
+  }
+  if (kind === 'mfa' && saveAllowed) throw new Error('managed delivery response has an invalid secret input metadata');
+  return {
+    id: requiredOpaqueId(record['id'], 'id'),
+    resourceId: requiredResourceId(record['resourceId']),
+    accountLabel: requiredBoundedLabel(record['accountLabel'], 'accountLabel'),
+    consumerLabel: requiredBoundedLabel(record['consumerLabel'], 'consumerLabel'),
+    action: requiredBoundedLabel(record['action'], 'action'),
+    kind,
+    saveAllowed,
+    expiresAt: requiredInstant(record['expiresAt'], 'expiresAt'),
+    state,
+  };
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error('managed delivery response has an invalid shape');
@@ -167,6 +238,18 @@ function requiredOpaqueId(value: unknown, field: string): string {
   return result;
 }
 
+function requiredResourceId(value: unknown): string {
+  const result = requiredString(value, 'resourceId');
+  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(result)) throw new Error('managed delivery response has an invalid resourceId');
+  return result;
+}
+
+function requiredBoundedLabel(value: unknown, field: string): string {
+  const result = requiredString(value, field);
+  if (result.length > 256) throw new Error(`managed delivery response has an invalid ${field}`);
+  return result;
+}
+
 function requiredInstant(value: unknown, field: string): string {
   const result = requiredString(value, field);
   if (!Number.isFinite(new Date(result).getTime())) throw new Error(`managed delivery response has an invalid ${field}`);
@@ -181,6 +264,15 @@ function requiredGrantState(value: unknown): string {
 function requiredDeliveryStatus(value: unknown): string {
   if (value === 'staged' || value === 'submitted' || value === 'delivered' || value === 'read' || value === 'ambiguous' || value === 'failed') return value;
   throw new Error('managed delivery response has an invalid delivery status');
+}
+
+function isSecretInputKind(value: unknown): value is ProtectedSecretInputKind {
+  return value === 'password' || value === 'token' || value === 'mfa';
+}
+
+function isSecretInputState(value: unknown): value is ManagedSecretInputMetadata['state'] {
+  return value === 'awaiting_input' || value === 'submitted' || value === 'consuming' || value === 'succeeded'
+    || value === 'failed' || value === 'expired' || value === 'revoked' || value === 'ambiguous' || value === 'cancelled';
 }
 
 function nullableString(value: unknown, field: string): string | null {
