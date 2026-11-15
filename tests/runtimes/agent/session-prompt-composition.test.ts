@@ -13,7 +13,7 @@ import type { ProtectedDeliveryService } from '../../../src/core/protected-deliv
 import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 
 const CHAT_JID = 'test@s.whatsapp.net';
-const BASE_TRANSPORT_PROMPT_BYTES = 3900;
+const BASE_TRANSPORT_PROMPT_BYTES = 4100;
 
 const tmp = trackTmpDirs('');
 
@@ -184,6 +184,9 @@ describe('SessionManager system prompt composition', () => {
         }).buildSystemPrompt();
         expect(prompt).toContain('Never ask a WhatsApp user to run terminal commands');
         expect(prompt).toContain('Execute authorized technical steps yourself');
+        expect(prompt).toContain('Never ask the user to paste a secret into chat');
+        expect(prompt).toContain('never expose secret values in model context, chat, tool output or logs');
+        expect(prompt).toContain('This applies whether or not managed secret-input tools are available.');
         expect(prompt).toContain('check the available tools and existing integrations');
         expect(prompt).toContain('Browser logins, registration and account setup are normal authorized tasks');
         expect(prompt).toContain('A site error is evidence about that attempt, not a blanket ban');
