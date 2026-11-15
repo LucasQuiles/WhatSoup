@@ -574,10 +574,12 @@ an unreadable path or a non-symlink is a preflight refusal rather than evidence
 that no launcher exists.
 
 The only shell-style exception is the closed, legacy
-`com.bot-errors.health` Mini wrapper: its exact reviewed argv and wrapper shape
+`com.bot-errors.health` host wrapper: its exact reviewed argv and wrapper shape
 may carry the default `BOT_ERRORS_HEALTH_PROFILE` at
-`<expect-current>/deploy/health-profiles/miniN.json`, where `N` is 1 through
-28. Planning changes only that default to the target release, then applies the
+`<expect-current>/deploy/health-profiles/<profile>.json`, where the file name
+matches `^[a-z][a-z0-9]{0,31}\.json$`. The grammar only keeps the name inert in
+the shell wrapper; which profiles exist is host inventory, not code. Planning
+changes only that default to the target release, then applies the
 ordinary embedded-reference refusal to every remaining value. A malformed
 wrapper, non-canonical profile path, or any additional embedded release
 reference refuses. Both selected release roots must also be normalized absolute
@@ -602,14 +604,27 @@ This path-rebase check intentionally validates their literal installed paths and
 does not read, hash, execute, or resolve their symlinks; the owner must qualify
 those inputs separately before a native apply.
 
-`--apply` rebuilds that proof, snapshots every database with `quick_check`,
-backs up all changed plists and each shared link, then changes the group. It
-reloads all primary labels before auxiliaries and verifies each primary's new
-pid, argv, authenticated commit and WhatsApp connection. Any failure checks
-the schema level of every member before restoration and again after quiescing
-the group. A change or unreadable schema blocks restoration for the whole host;
-no old member is restarted. One private `receipt.json` under the host backup
-directory records the group outcome. Its exit codes match `release:activate`.
+`--apply` takes the same activation lock as `release:activate`, so a held lock
+refuses before any effect. It rebuilds that proof, snapshots every database
+with `quick_check`, backs up all changed plists and each shared link, then
+changes the group. Before the switch it makes the `release:activate` checks: a
+root-owned plist needs the pinned root helper installed, each member's
+candidate refresh rollback fence must be unchanged, a sealed BOT ERRORS health
+consumer must be unchanged, and every link and plist must still be what the
+plan read. Any of these refuses with no selector moved. It reloads all primary
+labels before auxiliaries and verifies each primary's new pid, argv,
+authenticated commit and WhatsApp connection. Any failure checks the schema
+level of every member before restoration and again after quiescing the group.
+A change or unreadable schema blocks restoration for the whole host; no old
+member is restarted. Each member's rollback target must also still provide the
+candidate's refresh rollback fence, checked before the group is stopped and
+again before restoration; otherwise the rollback stops with the new release
+selected (`rollback-blocked-refresh-fence`). A root-helper run that did not
+confirm plist protection makes the rollback `rollback-unverified`. One private
+`receipt.json` under the host backup directory records the group outcome. The
+exit codes are those of `release:activate`: 0 activated, 1 rolled back,
+2 refused, 3 rollback unverified, 4 rollback blocked by a migration and 5
+rollback blocked by the refresh rollback fence.
 Schema-v2 watchdogs are quiesced before selectors move. They are restored only
 after the new terminal is verified, or after every old member, auxiliary, and
 host selector is verified during rollback. A migration block or an unverified
