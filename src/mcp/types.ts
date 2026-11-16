@@ -424,19 +424,37 @@ export function conversationBoundKey(session: SessionContext): string | undefine
 }
 
 /**
+ * Is `key` one of a conversation-bound session's own conversation keys? A
+ * LID DM mapped to its phone binds to the phone key but keeps rows journaled
+ * before the mapping under its LID, so the binding's own delivery JID names a
+ * second key for the same conversation. Both come from the frozen binding,
+ * never from caller input or the top-level mirror. No DB lookup: rows stay
+ * under the key they were stored with.
+ */
+function isOwnBoundConversationKey(session: SessionContext, key: string): boolean {
+  if (key === conversationBoundKey(session)) return true;
+  try {
+    return key === toConversationKey(session.binding!.deliveryJid);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Normalize a caller-supplied key that may be a raw JID (`…@g.us`) into the
  * `_at_` encoded conversation_key used in the DB.  When the session is
  * chat-scoped the already-normalized session key wins. A conversation-bound
- * session may address its OWN conversation in either form; any other key is
- * rejected (fail-closed — never silently redirected).
+ * session may address its OWN conversation by its binding key or by its
+ * delivery JID's key, each as a JID or an encoded key, and reads the rows
+ * stored under the key passed; any other key is rejected (fail-closed —
+ * never silently redirected).
  */
 export function resolveConversationKey(session: SessionContext, callerKey: string): string {
   if (session.tier === 'chat-scoped') return session.conversationKey!;
   // Caller may pass a raw JID — normalize it to the DB encoding.
   let resolved: string;
   try { resolved = toConversationKey(callerKey); } catch { resolved = callerKey; }
-  const boundKey = conversationBoundKey(session);
-  if (boundKey !== undefined && resolved !== boundKey) {
+  if (conversationBoundKey(session) !== undefined && !isOwnBoundConversationKey(session, resolved)) {
     throw new Error(`conversation_key "${callerKey}" is not available to this conversation-bound session`);
   }
   return resolved;
@@ -449,7 +467,13 @@ export function assertConversationAccess(
 ): void {
   // The binding is the source of truth for a conversation-bound session —
   // enforce from it even if the top-level mirror is absent or diverged.
-  const enforcedKey = conversationBoundKey(session) ?? session.conversationKey;
+  if (conversationBoundKey(session) !== undefined) {
+    if (!isOwnBoundConversationKey(session, conversationKey)) {
+      throw new Error(`${label} belongs to a different conversation`);
+    }
+    return;
+  }
+  const enforcedKey = session.conversationKey;
   if (!enforcedKey) return;
   if (conversationKey !== enforcedKey) {
     throw new Error(`${label} belongs to a different conversation`);

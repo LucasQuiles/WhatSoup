@@ -956,6 +956,47 @@ describe('transcribe_audio', () => {
     expect(body.cached).toBe(true);
   });
 
+  it('conversation-bound session delivered through a mapped LID: serves transcripts stored under either of its own keys and denies foreign ones', async () => {
+    // A LID DM mapped to its phone binds to the phone key and delivers to the
+    // LID; an audio row journaled before the mapping keeps the LID key.
+    const insert = testDb.raw.prepare(`
+      INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type,
+        content, content_text, is_from_me, timestamp)
+      VALUES (?, ?, ?, ?, 'audio', ?, ?, 0, 1700000000)
+    `);
+    for (const [chatJid, conversationKey, messageId, text] of [
+      ['15550009999@lid', '15550009999', 'msg-pre-mapping-audio', 'Pre-mapping transcript'],
+      ['15550009999@lid', '15550001111', 'msg-post-mapping-audio', 'Post-mapping transcript'],
+      ['15550008888@lid', '15550008888', 'msg-foreign-lid-audio', 'Secret transcript'],
+      ['15550002222@s.whatsapp.net', '15550002222', 'msg-foreign-phone-audio', 'Secret transcript'],
+    ] as const) {
+      insert.run(chatJid, conversationKey, chatJid, messageId, JSON.stringify({ type: 'audio', transcription: text }), text);
+    }
+    const session = {
+      tier: 'global',
+      conversationKey: '15550001111',
+      deliveryJid: '15550009999@lid',
+      binding: Object.freeze({ kind: 'conversation-bound', conversationKey: '15550001111', deliveryJid: '15550009999@lid' }),
+    } as SessionContext;
+
+    for (const [messageId, text] of [
+      ['msg-pre-mapping-audio', 'Pre-mapping transcript'],
+      ['msg-post-mapping-audio', 'Post-mapping transcript'],
+    ] as const) {
+      const result = await registry.call('transcribe_audio', { message_id: messageId }, session);
+      expect(result.isError).toBeFalsy();
+      const body = JSON.parse(result.content[0].text);
+      expect(body.transcription).toBe(text);
+      expect(body.cached).toBe(true);
+    }
+    for (const messageId of ['msg-foreign-lid-audio', 'msg-foreign-phone-audio']) {
+      const result = await registry.call('transcribe_audio', { message_id: messageId }, session);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('different conversation');
+      expect(result.content[0].text).not.toContain('Secret transcript');
+    }
+  });
+
   it('returns error when no media_path and no raw_message', async () => {
     insertAudioMessage('msg-no-media');
 

@@ -207,14 +207,28 @@ const OPENCODE_BACKGROUND_TASK_DELIVERY_GUIDANCE = [
   '- Runtime durability and fallback recovery own interrupted user turns. Do not promise a later self-delivery or claim work is running unless it will complete inside this turn.',
 ].join('\n');
 
+const WHATSAPP_EXECUTION_GUIDANCE = [
+  'WhatsApp execution:',
+  '- The user has chat and a phone, not a terminal or access to your machine. Never ask a WhatsApp user to run terminal commands, edit server files, restart services or manually operate your browser. Execute authorized technical steps yourself using available tools.',
+  '- Never ask the user to paste a secret into chat; never expose secret values in model context, chat, tool output or logs. Use authorized internal credential handling for the intended account and destination, with consent for storage. This applies whether or not managed secret-input tools are available.',
+  '- Before claiming you cannot act, check the available tools and existing integrations, account sessions, skills and runbooks. Diagnose tool errors and use a supported recovery route within the existing authorization. Do not turn a missing tool in one interface into a claim that no route exists.',
+  '- Browser logins, registration and account setup are normal authorized tasks. Use the correct account and browser profile; complete supported authentication and challenge steps with your tools. A site error is evidence about that attempt, not a blanket ban on browser automation. Verify the resulting account and state before reporting success.',
+  '- Ask only for a missing decision, permission or genuinely human-only step, such as a phone approval or identity check. Keep that step usable from WhatsApp or the approved mobile portal, then continue the task. Existing authorization carries through routine setup and recovery; do not ask for it again.',
+  '- Do not bypass a denied operation or weaken a guard. Identify the exact denied action and use its admitted remediation or approval route. A WhatsApp approval or poll is preferable when supported; never substitute terminal work for a user decision. If no route is available, report the specific limitation and continue independent authorized work.',
+].join('\n');
+
 const PROTECTED_SECRET_WORKFLOW_GUIDANCE = [
   'Protected secret workflow:',
+  '- For a named account, call list_secret_input_resources first and use only a returned resource ID. If labels are ambiguous, ask the user which account they mean.',
   '- For a registered resource, use request_secret_input only for password, token, or a live MFA challenge. The tool returns metadata, never secret values.',
   '- Use request_rustdesk_access only for an authorized device. Use deliver_secret only with an opaque pre-staged delivery reference.',
-  '- Never ask the user to paste a secret into chat; do not read credential stores, use shell/browser workarounds, or offer an alternate secret path.',
-  '- Unknown resource or unavailable adapter: report the operation is blocked.',
-  '- Do not invent resource IDs, recipients, or destinations. The protected service selects authority and delivery targets.',
-  '- Submission or delivery metadata is not proof that a login completed. Verify the trusted operation result before claiming completion.',
+  '- Existing authorized credential helpers may consume saved credentials internally for the intended account and destination, returning only non-secret results. This is distinct from reading a secret into the conversation.',
+  '- Authorized credential creation and storage belong inside tools or services that keep values out of model context. Inspect or repair the existing integration within the requested scope; do not hand the user a terminal command or claim token generation is categorically forbidden. Confirm the intended account, permissions and storage consent before acting.',
+  '- These tools govern managed secret input and delivery, not every browser or account operation. An absent resource blocks that managed input request, not all account work. Inspect existing authorized sessions, credential helpers and integration setup; when setup is requested, configure the existing integration within that authorization. Do not bypass recipient binding, consent, tool scope or a secret-read denial, invent an input form, or collect credentials before its consumer is ready.',
+  '- Do not invent resource IDs, recipients, or destinations. Discovery does not prove a challenge exists or that login completed; the protected service selects authority and delivery targets.',
+  '- Read get_secret_input_status.operationResult before claiming completion. Input succeeded alone does not establish a completed operation. A null result means completion is unknown.',
+  '- A recorded mfa_required result means the password operation required MFA; request the next form through the protected service, which checks whether a challenge is still available. Do not claim login completed.',
+  '- A recorded completed result confirms the registered fixed action completed. Describe that action; do not infer an ongoing login session or credential storage from it. saveAllowed is permission to offer saving, not proof a credential was saved.',
 ].join('\n');
 
 /**
@@ -1284,8 +1298,9 @@ export class SessionManager {
     const transportPrelude = [
       `You are "${this.instanceName}", a personal ${displayName} agent running over WhatsApp.`,
       'Your responses are sent as WhatsApp messages — keep them concise.',
-      'You have full access to the local machine via bypassPermissions mode.',
+      'Use the tools available in this session within the user\'s authorization and enforced access controls.',
       `Working directory: ${cwd}`,
+      WHATSAPP_EXECUTION_GUIDANCE,
       POLL_DECISION_GUIDANCE,
       this.provider === 'opencode-cli'
         ? OPENCODE_BACKGROUND_TASK_DELIVERY_GUIDANCE

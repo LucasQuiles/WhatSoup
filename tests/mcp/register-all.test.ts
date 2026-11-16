@@ -71,6 +71,7 @@ describe('registerAllTools', () => {
 
     const names = new Set(registry.listTools({ tier: 'global' }).map((tool) => tool.name));
     expect(names.has('request_rustdesk_access')).toBe(false);
+    expect(names.has('list_secret_input_resources')).toBe(false);
     expect(names.has('request_secret_input')).toBe(false);
     expect(names.has('get_secret_input_status')).toBe(false);
     expect(names.has('cancel_secret_input')).toBe(false);
@@ -96,12 +97,13 @@ describe('registerAllTools', () => {
 
     const protectedTools = registered.filter((tool) =>
       [
-        'request_rustdesk_access', 'request_secret_input', 'get_secret_input_status',
+        'request_rustdesk_access', 'list_secret_input_resources', 'request_secret_input', 'get_secret_input_status',
         'cancel_secret_input', 'deliver_secret', 'get_secret_delivery_status',
       ].includes(tool.name),
     );
-    expect(protectedTools).toHaveLength(6);
+    expect(protectedTools).toHaveLength(7);
     expect(protectedTools.map((tool) => tool.group)).toEqual([
+      'protected-delivery',
       'protected-delivery',
       'protected-delivery',
       'protected-delivery',

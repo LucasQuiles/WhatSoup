@@ -115,12 +115,20 @@ function makeBareHome(): string {
  * Run the whatsoup wrapper script as a subprocess, capturing stdout, stderr
  * and exit code.
  */
+interface WrapperResult {
+  stdout: string;
+  stderr: string;
+  status: number | null;
+  signal: NodeJS.Signals | null;
+  error: Error | undefined;
+}
+
 function runWrapper(opts: {
   home: string;
   env?: Record<string, string>;
   instanceName?: string;
   wrapperOverride?: string;
-}): { stdout: string; stderr: string; exitCode: number } {
+}): WrapperResult {
   const {
     home,
     env = {},
@@ -170,12 +178,20 @@ function runWrapper(opts: {
     timeout: 8_000,
   });
 
-  const exitCode = result.status ?? 1;
   return {
     stdout: result.stdout ?? '',
     stderr: result.stderr ?? '',
-    exitCode,
+    status: result.status,
+    signal: result.signal,
+    error: result.error,
   };
+}
+
+function requireExited(result: WrapperResult, label: string): number {
+  if (result.error !== undefined) throw new Error(`${label}: spawnSync error: ${result.error.message}`);
+  if (result.signal !== null) throw new Error(`${label}: terminated by signal ${result.signal}`);
+  if (result.status === null) throw new Error(`${label}: returned no exit status`);
+  return result.status;
 }
 
 /**
@@ -217,6 +233,33 @@ function makeFixtureRepoWithNvmrc(
 }
 
 describe('deploy/whatsoup — Node major-version gate', () => {
+  it('keeps real subprocess completion distinct from a synthesized failure exit', () => {
+    const binDir = makeTmpDir('whatsoup-gate-completion-bin-');
+    const home = makeBareHome();
+    writeFakeNode(binDir, '20');
+
+    const result = runWrapper({
+      home,
+      env: { WHATSOUP_NODE: path.join(binDir, 'node') },
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(requireExited(result, 'real wrapper')).toBe(1);
+  });
+
+  it('rejects timed-out or interrupted subprocess results instead of synthesizing exit 1', () => {
+    const interrupted: WrapperResult = {
+      stdout: '', stderr: '', status: null, signal: 'SIGTERM', error: undefined,
+    };
+    const timedOut: WrapperResult = {
+      stdout: '', stderr: '', status: null, signal: null, error: new Error('ETIMEDOUT'),
+    };
+
+    expect(() => requireExited(interrupted, 'synthetic interrupt')).toThrow('terminated by signal SIGTERM');
+    expect(() => requireExited(timedOut, 'synthetic timeout')).toThrow('spawnSync error: ETIMEDOUT');
+  });
+
   it('run-with-pinned-npm executes npm from the resolved pinned Node directory', () => {
     const fixtureScript = makeFixtureRepoWithNvmrc('24.15.0', path.join('scripts', 'run-with-pinned-npm.sh'));
     const home = makeBareHome();
@@ -245,12 +288,14 @@ describe('deploy/whatsoup — Node major-version gate', () => {
     const home = makeBareHome();
     writeFakeNode(binDir, '20'); // Too old: .nvmrc pins major 24
 
-    const { stdout, stderr, exitCode } = runWrapper({
+    const result = runWrapper({
       home,
       env: {
         WHATSOUP_NODE: path.join(binDir, 'node'),
       },
     });
+    const { stdout, stderr } = result;
+    const exitCode = requireExited(result, 'old Node wrapper');
 
     // The gate must fire — exit must be non-zero
     expect(exitCode, 'gate must prevent execution (non-zero exit)').not.toBe(0);
@@ -285,12 +330,14 @@ describe('deploy/whatsoup — Node major-version gate', () => {
     const home = makeBareHome();
     writeFakeNode(binDir, '24'); // Matches .nvmrc major 24
 
-    const { stdout, stderr, exitCode } = runWrapper({
+    const result = runWrapper({
       home,
       env: {
         WHATSOUP_NODE: path.join(binDir, 'node'),
       },
     });
+    const { stdout, stderr } = result;
+    const exitCode = requireExited(result, 'matching Node wrapper');
 
     // The gate should pass — exec runs — fake node prints gate-passed and exits 0
     expect(exitCode, 'gate-passing Node should result in exit 0').toBe(0);
@@ -307,12 +354,14 @@ describe('deploy/whatsoup — Node major-version gate', () => {
     const home = makeBareHome();
     writeFakeNode(binDir, '25');
 
-    const { stdout, stderr, exitCode } = runWrapper({
+    const result = runWrapper({
       home,
       env: {
         WHATSOUP_NODE: path.join(binDir, 'node'),
       },
     });
+    const { stdout, stderr } = result;
+    const exitCode = requireExited(result, 'Node 25 wrapper');
 
     expect(exitCode, 'Node 25 is within package.json#engines.node').toBe(0);
     expect(stdout).toContain('gate-passed');
@@ -330,13 +379,15 @@ describe('deploy/whatsoup — Node major-version gate', () => {
       const home = makeBareHome();
       writeFakeNode(binDir, '26');
 
-      const { stdout, stderr, exitCode } = runWrapper({
+      const result = runWrapper({
         home,
         env: {
           WHATSOUP_NODE: path.join(binDir, 'node'),
         },
         wrapperOverride: fixtureWrapper,
       });
+      const { stdout, stderr } = result;
+      const exitCode = requireExited(result, `${wrapperRelPath} Node 26 wrapper`);
 
       expect(exitCode, `${wrapperRelPath} must reject Node 26`).toBe(1);
       expect(stderr, `${wrapperRelPath} must cite package.json engines`).toContain('package.json#engines.node');
@@ -351,13 +402,15 @@ describe('deploy/whatsoup — Node major-version gate', () => {
     const home = makeBareHome();
     writeFakeNode(binDir, '24', { engineMaxMajor: null });
 
-    const { stdout, stderr, exitCode } = runWrapper({
+    const result = runWrapper({
       home,
       env: {
         WHATSOUP_NODE: path.join(binDir, 'node'),
       },
       wrapperOverride: fixtureWrapper,
     });
+    const { stdout, stderr } = result;
+    const exitCode = requireExited(result, 'unparseable engine wrapper');
 
     expect(exitCode, 'unparseable package engines must fail closed').toBe(1);
     expect(stderr).toContain('package.json#engines.node');
@@ -378,13 +431,15 @@ describe('deploy/whatsoup — Node major-version gate', () => {
     // Do NOT set WHATSOUP_NODE so the wrapper uses the missing DEFAULT_NODE path.
     const controlledPath = `${binDir}:${process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin'}`;
 
-    const { stdout, stderr, exitCode } = runWrapper({
+    const result = runWrapper({
       home,
       env: {
         PATH: controlledPath,
         // Explicitly unset WHATSOUP_NODE to exercise the missing pinned-node path.
       },
     });
+    const { stdout, stderr } = result;
+    const exitCode = requireExited(result, 'missing pinned Node wrapper');
 
     // Missing pinned Node must fail cleanly without invoking PATH fallback.
     expect(exitCode, 'missing pinned node must prevent execution').not.toBe(0);
@@ -414,13 +469,15 @@ describe('deploy/whatsoup — Node major-version gate', () => {
     // place, the wrapper must abort BEFORE invoking node at all.
     writeFakeNode(binDir, '24');
 
-    const { stdout, stderr, exitCode } = runWrapper({
+    const result = runWrapper({
       home,
       env: {
         WHATSOUP_NODE: path.join(binDir, 'node'),
       },
       wrapperOverride: fixtureWrapper,
     });
+    const { stdout, stderr } = result;
+    const exitCode = requireExited(result, 'invalid .nvmrc wrapper');
 
     expect(exitCode, 'non-dotted .nvmrc must fail fast (non-zero exit)').not.toBe(0);
     expect(exitCode, 'non-dotted .nvmrc must exit 1, not 9').toBe(1);

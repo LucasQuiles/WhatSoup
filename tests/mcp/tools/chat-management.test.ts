@@ -5,6 +5,7 @@ vi.mock('../../../src/core/protected-delivery-pins.ts', async (importOriginal) =
 import { Database } from '../../../src/core/database.ts';
 import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 import { registerChatManagementTools } from '../../../src/mcp/tools/chat-management.ts';
+import { registerSearchTools } from '../../../src/mcp/tools/search.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import type { WhatsAppSocket } from '../../../src/transport/connection.ts';
 import { fakeClock } from '../../../src/lib/clock.ts';
@@ -124,6 +125,80 @@ describe('chat-management tools', () => {
       );
       expect(result.isError).toBe(true);
       expect(result.content[0].text).not.toContain('Bob chat');
+    });
+
+    // A LID DM mapped to its phone binds to the phone key and delivers to the
+    // LID; rows journaled before the mapping keep the LID key.
+    describe('delivered through a mapped LID', () => {
+      const lidDelivered = (): SessionContext => ({
+        tier: 'global',
+        conversationKey: '15550001111',
+        deliveryJid: '15550009999@lid',
+        binding: Object.freeze({
+          kind: 'conversation-bound' as const,
+          conversationKey: '15550001111',
+          deliveryJid: '15550009999@lid',
+        }),
+      });
+
+      beforeEach(() => {
+        registerSearchTools(db, (tool) => registry.register(tool));
+        db.raw.exec(`
+          INSERT INTO messages
+            (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_text, content_type, is_from_me, timestamp)
+          VALUES
+            ('15550009999@lid', '15550009999', '15550009999@lid', 'Lid', 'pre-mapping', 'reminder journaled before the mapping', 'reminder journaled before the mapping', 'text', 0, 7000),
+            ('15550009999@lid', '15550001111', '15550009999@lid', 'Lid', 'post-mapping', 'reminder journaled after the mapping', 'reminder journaled after the mapping', 'text', 0, 7001),
+            ('15550008888@lid', '15550008888', '15550008888@lid', 'Other', 'other-lid', 'private reminder for another lid', 'private reminder for another lid', 'text', 0, 7002),
+            ('15550002222@s.whatsapp.net', '15550002222', '15550002222@s.whatsapp.net', 'Other', 'other-phone', 'private reminder for another phone', 'private reminder for another phone', 'text', 0, 7003);
+        `);
+      });
+
+      const ids = (result: { content: Array<{ text: string }> }, field: 'messages' | 'results') =>
+        (JSON.parse(result.content[0].text) as Record<string, Array<{ messageId: string }>>)[field]!.map((m) => m.messageId);
+
+      it('list_messages, search_chat_messages and get_message_context read the rows stored under the key passed', async () => {
+        for (const [key, messageId] of [
+          ['15550001111', 'post-mapping'],
+          ['15550001111@s.whatsapp.net', 'post-mapping'],
+          ['15550009999', 'pre-mapping'],
+          ['15550009999@lid', 'pre-mapping'],
+        ] as const) {
+          const listed = await registry.call('list_messages', { conversation_key: key, limit: 10 }, lidDelivered());
+          expect(listed.isError).toBeUndefined();
+          expect(ids(listed, 'messages')).toEqual([messageId]);
+          const found = await registry.call('search_chat_messages', { conversation_key: key, query: 'reminder' }, lidDelivered());
+          expect(found.isError).toBeUndefined();
+          expect(ids(found, 'results')).toEqual([messageId]);
+          const context = await registry.call('get_message_context', { message_id: messageId, conversation_key: key }, lidDelivered());
+          expect(context.isError).toBeUndefined();
+          expect((JSON.parse(context.content[0].text) as { target: { messageId: string } }).target.messageId).toBe(messageId);
+        }
+      });
+
+      it('refuses a foreign phone, a foreign or unmapped LID and a group, leaking no content', async () => {
+        for (const key of ['15550002222', '15550002222@s.whatsapp.net', '15550008888', '15550008888@lid', '15550007777@lid', '123456@g.us']) {
+          for (const [name, args] of [
+            ['list_messages', { conversation_key: key, limit: 10 }],
+            ['search_chat_messages', { conversation_key: key, query: 'reminder' }],
+            ['get_message_context', { message_id: 'other-lid', conversation_key: key }],
+          ] as const) {
+            const result = await registry.call(name, args, lidDelivered());
+            expect(result.isError).toBe(true);
+            expect(result.content[0].text).toContain('not available to this conversation-bound session');
+            expect(result.content[0].text).not.toContain('private reminder');
+          }
+        }
+      });
+
+      it('control: a chat-scoped session with a LID delivery JID still reads only its session key', async () => {
+        const session: SessionContext = { tier: 'chat-scoped', conversationKey: '15550001111', deliveryJid: '15550009999@lid' };
+        for (const key of ['15550009999', '15550009999@lid', '15550002222']) {
+          const listed = await registry.call('list_messages', { conversation_key: key, limit: 10 }, session);
+          expect(listed.isError).toBeUndefined();
+          expect(ids(listed, 'messages')).toEqual(['post-mapping']);
+        }
+      });
     });
 
     it('an unbound global session with a turn-pinned conversationKey keeps cross-conversation reads (operator non-regression)', async () => {

@@ -1202,9 +1202,35 @@ The source holds only SHA-256 pins of the approved hosts
 (`src/core/protected-delivery-pins.ts`), so the real host comes from this
 private file, and startup fails for any other host. Each adapter fixes its HTTPS target,
 resource, principal, and action at startup. A password adapter also fixes a
-username; a token adapter omits `username`; an MFA adapter supplies both
-`username` and the consumer's fixed `operationId`. Runtime rows, agent tools,
+username; a token adapter omits `username`; an MFA adapter supplies `username`
+and either the consumer's fixed `operationId` (legacy static mode) or
+`operationMode: "links_registered"` (the paired mode below). Runtime rows, agent tools,
 and model input cannot select a destination, command, account, or operation.
+
+For a fixed two-step account, a password adapter may instead use the exact
+action `Verify password for two-step sign-in` and declare
+`mfaTransition: { "resourceId": "...", "account": "..." }`. Its paired MFA
+adapter must use `operationMode: "links_registered"` and the same `account`,
+principal, username, and HTTPS origin. The password source is still the fixed
+HTTPS endpoint. A `202` response must contain only the exact consumed intake
+ID, configured principal and account, paired MFA resource, opaque operation
+ID, and a future deadline no more than ten minutes away. The operation ID must
+not equal the submitted password, and must not contain it when the password is
+four or more UTF-16 code units long; such a response marks the intake ambiguous
+and nothing is registered. The consumer uses its
+own bearer to register that challenge with Links. It rejects any other source
+response or binding and never exposes this response to a model or tool. A
+registered-mode MFA adapter cannot be configured without exactly one such pair.
+For both paired resources, Links `accountLabel` must exactly equal this
+configured `account` before the worker consumes a value or calls a fixed target.
+
+`202` means the password precursor was accepted and MFA is required; it is not
+an account sign-in. The worker completes the fixed precursor action only after
+Links accepted the matching challenge. The registered MFA adapter receives its
+operation ID only from the matching Links consume response. Legacy static MFA
+`operationId` configuration remains supported for existing fixed operations.
+Paired password adapters cannot name `saveStore`, and MFA codes are never
+saved.
 
 The worker requires separate non-empty service-environment bearer values in
 `LINKS_MANAGED_TRANSPORT_TOKEN` and `LINKS_MANAGED_CONSUMER_TOKEN`. They must
@@ -1567,6 +1593,28 @@ proof unless a WhatSoup-specific proof artifact says so.
 | `commandSurface` | object | no | — | Per-instance command-surface policy overlay (disable commands, cosmetic defaults). See [agentOptions.commandSurface](#agentoptionscommandsurface). **Accepted but not yet enforced (enforcement lands with T9c)** — the validator warns at config-validation time. |
 
 #### Per-chat MCP actor socket lifecycle
+
+A per-chat actor socket in a non-sandbox `per_chat` runtime binds to the logical
+chat's canonical identity, including when WhatsApp delivers the chat's messages
+through a different LID. With `perChatConversationBound: true`, caller-supplied
+conversation keys are confined to the socket's own conversation: its canonical
+key or the key of its own delivery JID. For a LID DM mapped to a phone, the
+phone key and the LID key both name the socket's conversation, each written as a
+JID or as an encoded key. A read returns the rows stored under the key it
+passes. The two keys are not merged and stored rows are not re-keyed, so
+messages journaled under the LID before the mapping are read with the LID key.
+`transcribe_audio`, the one global tool a bound session may call, admits a
+stored message under either key. `reply_message`, `edit_message`,
+`delete_message`, `pin_message`, and `react_message` given a `messageId`, match
+the session's conversation key only, so they refuse a message journaled under
+the LID before the mapping. `react_message` without a `messageId` reacts to the
+latest inbound message from the delivery JID, whichever key it is stored under.
+A scheduled message stored under the LID delivery JID stays visible to its own
+chat. The delivery JID remains the outbound address. When LID resolution re-keys
+a live bound socket, its binding and delivery JID move to the new JID, and the
+socket then accepts that JID's key only. A `sandboxPerChat` runtime keys the
+socket by its already-folded workspace key, so that socket binds to the
+delivery JID.
 
 In a non-sandbox `per_chat` runtime, each logical chat session owns one mode-`0600`
 Unix socket below a mode-`0700` runtime directory. All four MCP-capable CLI

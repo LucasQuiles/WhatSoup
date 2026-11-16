@@ -6,6 +6,7 @@ import { registerProtectedDeliveryTools } from '../../../src/mcp/tools/protected
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import { PROTECTED_MESSAGE_MARKER, sanitizeProtectedMessageText } from '../../../src/core/protected-message.ts';
 import { TEST_LINK_HOST, TEST_PROTECTED_DELIVERY_PINS } from '../../helpers/protected-delivery-pins.ts';
+import type { SecretInputOperationResult } from '../../../src/core/secret-input-operation-result.ts';
 
 const DELIVERY_REF = 'aaaaaaaaaaaaaaaaaaaaaa';
 const DELIVERY_ID = 'bbbbbbbbbbbbbbbbbbbbbb';
@@ -33,8 +34,10 @@ describe('protected delivery MCP tools', () => {
   let db: Database;
   let registry: ToolRegistry;
   let inputCancels: Array<{ id: string; principal: string }>;
+  let resourceCatalogCalls: Array<{ principal: string; cursor?: string; limit?: number }>;
   let inputKind: 'password' | 'token' | 'mfa';
   let sends: string[];
+  let recordedResult: SecretInputOperationResult | null;
 
   beforeEach(() => {
     sends = [];
@@ -42,8 +45,18 @@ describe('protected delivery MCP tools', () => {
     db.open();
     registry = new ToolRegistry();
     inputCancels = [];
+    resourceCatalogCalls = [];
     inputKind = 'password';
-    const client: ManagedDeliveryClient = {
+    recordedResult = null;
+    const client: ManagedDeliveryClient & {
+      listSecretInputResources(input: { principal: string; cursor?: string; limit?: number }): Promise<{
+        resources: Array<{
+          resourceId: string; accountLabel: string; consumerLabel: string; action: string;
+          kinds: Array<'password' | 'token' | 'mfa'>; saveAllowed: boolean; revision: number;
+        }>;
+        cursor: string | null;
+      }>;
+    } = {
       async stageRustdesk() {
         return { deliveryRef: DELIVERY_REF, id: DELIVERY_ID, expiresAt: '2026-10-29T12:05:00.000Z', state: 'unclaimed' };
       },
@@ -74,7 +87,8 @@ describe('protected delivery MCP tools', () => {
       async getSecretInput() {
         return {
           id: INTAKE_ID, resourceId: 'dummy-account', accountLabel: 'Dummy account', consumerLabel: 'Dummy consumer', action: 'sign_in',
-          kind: inputKind, saveAllowed: inputKind !== 'mfa', expiresAt: '2026-10-29T12:05:00.000Z', state: 'submitted',
+          kind: inputKind, saveAllowed: inputKind !== 'mfa', expiresAt: '2026-10-29T12:05:00.000Z', state: recordedResult === null ? 'submitted' : 'succeeded',
+          operationResult: recordedResult,
         };
       },
       async cancelSecretInput(input) {
@@ -82,6 +96,16 @@ describe('protected delivery MCP tools', () => {
         return {
           id: INTAKE_ID, resourceId: 'dummy-account', accountLabel: 'Dummy account', consumerLabel: 'Dummy consumer', action: 'sign_in',
           kind: inputKind, saveAllowed: inputKind !== 'mfa', expiresAt: '2026-10-29T12:05:00.000Z', state: 'cancelled',
+        };
+      },
+      async listSecretInputResources(input) {
+        resourceCatalogCalls.push(input);
+        return {
+          resources: [{
+            resourceId: 'dummy-account', accountLabel: 'Dummy account', consumerLabel: 'Dummy consumer', action: 'sign_in',
+            kinds: ['password', 'token'], saveAllowed: true, revision: 1,
+          }],
+          cursor: null,
         };
       },
     };
@@ -156,6 +180,50 @@ describe('protected delivery MCP tools', () => {
       resource_id: 'dummy-account', kind: 'password', purpose: 'dummy login', recipient: '15550000000@s.whatsapp.net',
     }, directSession);
     expect(injectedRecipient.isError).toBe(true);
+  });
+
+  it.each([
+    { phase: 'password', outcome: 'mfa_required' },
+    { phase: 'mfa', outcome: 'completed' },
+  ] as const)('returns the recorded $phase result while refusing a caller-supplied outcome', async (operationResult) => {
+    const created = await registry.call('request_secret_input', {
+      resource_id: 'dummy-account', kind: operationResult.phase, purpose: 'dummy login',
+    }, directSession);
+    expect(created.isError).toBeUndefined();
+    recordedResult = operationResult;
+    const status = await registry.call('get_secret_input_status', { input_id: INTAKE_ID }, directSession);
+    expect(status.isError).toBeUndefined();
+    expect(JSON.parse(status.content[0]?.text ?? '{}')).toMatchObject({ inputState: 'succeeded', operationResult });
+    expect(status.content[0]?.text).not.toContain(INTAKE_LINK);
+    const forged = await registry.call('get_secret_input_status', {
+      input_id: INTAKE_ID, operationResult: { phase: 'password', outcome: 'completed' },
+    }, directSession);
+    expect(forged.isError).toBe(true);
+  });
+
+  it('discovers safe resource metadata only for the verified direct requester', async () => {
+    const discovered = await registry.call('list_secret_input_resources', {}, directSession);
+    const text = discovered.content[0]?.text ?? '';
+    expect(discovered.isError).toBeUndefined();
+    expect(text).toContain('dummy-account');
+    expect(text).toContain('Dummy account');
+    expect(text).not.toContain('15551234567');
+    expect(text).not.toContain('transportIssuerId');
+    expect(resourceCatalogCalls).toEqual([{ principal: '15551234567' }]);
+
+    const injected = await registry.call('list_secret_input_resources', {
+      principal: '15550000000', recipient: '15550000000@s.whatsapp.net',
+    }, directSession);
+    expect(injected.isError).toBe(true);
+    expect(resourceCatalogCalls).toHaveLength(1);
+
+    const group = await registry.call('list_secret_input_resources', {}, {
+      ...directSession,
+      actorJid: '15551234567@g.us',
+      deliveryJid: '15551234567@g.us',
+    });
+    expect(group.isError).toBe(true);
+    expect(resourceCatalogCalls).toHaveLength(1);
   });
 
   it('admits only challenge-backed MFA metadata without a caller-supplied challenge', async () => {

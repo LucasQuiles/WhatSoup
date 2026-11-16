@@ -264,7 +264,8 @@ function createAdapters(
     if (adapter.kind === 'password') {
       return createFixedHttpLoginAdapter({
         resourceId: adapter.resourceId, principal: adapter.principal, action: adapter.action,
-        endpoint: adapter.endpoint, username: adapter.username, ...(store === undefined ? {} : { store }), fetch: fetchFn,
+        endpoint: adapter.endpoint, username: adapter.username, ...(store === undefined ? {} : { store }),
+        ...(adapter.mfaTransition === undefined ? {} : { mfaTransition: adapter.mfaTransition }), fetch: fetchFn,
       });
     }
     if (adapter.kind === 'token') {
@@ -273,10 +274,13 @@ function createAdapters(
         endpoint: adapter.endpoint, ...(store === undefined ? {} : { store }), fetch: fetchFn,
       });
     }
-    return createFixedHttpMfaAdapter({
+    const mfaOptions = {
       resourceId: adapter.resourceId, principal: adapter.principal, action: adapter.action,
-      endpoint: adapter.endpoint, username: adapter.username, mfaOperationId: adapter.operationId, fetch: fetchFn,
-    });
+      endpoint: adapter.endpoint, username: adapter.username, fetch: fetchFn,
+    };
+    return createFixedHttpMfaAdapter('operationMode' in adapter
+      ? { ...mfaOptions, operationMode: adapter.operationMode }
+      : { ...mfaOptions, mfaOperationId: adapter.operationId });
   });
 }
 
@@ -339,7 +343,17 @@ function isLocalRow(value: unknown): value is {
 
 function matchesRemoteBinding(remote: ManagedSecretInputMetadata, row: LocalIntake, adapter: FixedAdapterConfig): boolean {
   return remote.id === row.intakeId && remote.resourceId === adapter.resourceId && remote.kind === adapter.kind
-    && remote.action === adapter.action;
+    && remote.action === adapter.action && matchesConfiguredAccount(remote, adapter);
+}
+
+function matchesConfiguredAccount(remote: ManagedSecretInputMetadata, adapter: FixedAdapterConfig): boolean {
+  if (adapter.kind === 'password' && adapter.mfaTransition !== undefined) {
+    return remote.accountLabel === adapter.mfaTransition.account;
+  }
+  if (adapter.kind === 'mfa' && 'operationMode' in adapter && adapter.operationMode === 'links_registered') {
+    return remote.accountLabel === adapter.account;
+  }
+  return true;
 }
 
 function isTerminalState(state: ManagedSecretInputMetadata['state']): boolean {
