@@ -24,7 +24,7 @@ function absolute(value: unknown): string | null {
 }
 
 /**
- * The shell-token path grammar of docs/runbooks/release-deployment.md:625-627:
+ * The shell-token path grammar of docs/runbooks/release-deployment.md:635-637:
  * such a path is one inert word wherever a shell reads it.
  */
 export const SHELL_TOKEN_PATH = /^\/[A-Za-z0-9._/-]+$/;

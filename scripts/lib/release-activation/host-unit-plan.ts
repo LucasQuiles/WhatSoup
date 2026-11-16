@@ -247,10 +247,10 @@ function stagePathRebase(installed: string, expectCurrent: string, release: stri
   const source = compatible ?? installed;
   const encodedCurrent = escapeXml(expectCurrent);
   const encodedRelease = escapeXml(release);
-  // docs/runbooks/release-deployment.md:616-627: the closed legacy wrapper above is the only shell-style
+  // docs/runbooks/release-deployment.md:626-637: the closed legacy wrapper above is the only shell-style
   // exception, and a root that lands in a shell argument must be a shell token. No value can be proven
-  // never to reach a shell, so only a bare shell-token path is rewritten; a command that merely starts
-  // with the root is refused below like any other embedded reference.
+  // never to reach a shell, so only a bare shell-token path is rewritten (:592-598); a command that merely
+  // starts with the root is refused below like any other embedded reference.
   for (const match of source.matchAll(/<string>([\s\S]*?)<\/string>/g)) {
     const value = match[1]!;
     const selectedPath = (value === encodedCurrent || value.startsWith(`${encodedCurrent}/`)) && SHELL_TOKEN_PATH.test(value);

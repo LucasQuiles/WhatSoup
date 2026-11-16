@@ -498,8 +498,13 @@ npm --silent run release:activate-host -- \
 ```
 
 The schema-v1 declaration lists each instance, its reviewed current release,
-and each owned auxiliary label plus its renderer. Planning re-reads installed
-and loaded launchd definitions, refuses disagreement, and proves every
+and each owned auxiliary label plus its renderer. An auxiliary label cannot be
+another configured instance's primary label (`com.whatsoup.<name>` where
+`<name>/config.json` exists under the instance config root): a declared
+member's label refuses when the declaration is read, any other instance's when
+planning. A rendered auxiliary plist must carry the declared `Label`, because
+`--apply` writes it to `<label>.plist` and reloads that label.
+Planning re-reads installed and loaded launchd definitions, refuses disagreement, and proves every
 installed consumer of a selected shared wrapper is declared (the limits are
 below). It prints only paths,
 digests, membership, port numbers, and state; it never prints health tokens,
@@ -520,6 +525,7 @@ jobs that are not owned by one member. It accepts only these label/mode pairs:
 Selector-bearing entries name their reviewed `expectCurrent`; the fleet entry
 also names its absolute wrapper link. The planner proves the installed and
 loaded path, executable, and complete argument list agree before switching.
+A staged host-auxiliary plist must carry its declared `Label`.
 For a host `setup-timer`, its newly rendered complete `ProgramArguments` must
 also equal the installed list after only exact `expectCurrent` path values are
 rebased to the target release. An external guard or other argument the template
@@ -584,8 +590,12 @@ output and the apply receipt retain `reviewTupleSha256`, over the normalized
 label, plist digest, load state, roots, links, files, and argument bindings.
 
 `path-rebase` changes only plist string values that are exactly the reviewed
-root or lie below it; fields containing a prefix-sibling path are retained and
-embedded shell-style references are refused.
+root or a path below it, and only when the value is a shell-token path matching
+`^/[A-Za-z0-9._/-]+$`, because no value can be proven never to reach a shell.
+Fields containing a prefix-sibling path are retained. Any other value that
+contains the root, including a command that starts with it, is an embedded
+shell-style reference and refuses. The target release lands in every rewritten
+value, so a release outside that grammar refuses too.
 
 The shared-wrapper consumer proof reads installed plists only. For each
 selected shared wrapper, the plists in `~/Library/LaunchAgents` whose
@@ -677,7 +687,11 @@ candidate's refresh rollback fence, checked before the group is stopped and
 again before restoration; otherwise the rollback stops with the new release
 selected (`rollback-blocked-refresh-fence`). A root-helper run that did not
 confirm plist protection makes the rollback `rollback-unverified`. One private
-`receipt.json` under the host backup directory records the group outcome. The
+`receipt.json` in the host backup directory records the group outcome, written
+only when this run created that directory. The directory is created
+exclusively: a path that already exists, such as one an earlier run made in
+the same second, refuses and keeps that run's receipt unchanged. A refusal
+before the directory exists prints the outcome without writing a receipt. The
 exit codes are those of `release:activate`: 0 activated, 1 rolled back,
 2 refused, 3 rollback unverified, 4 rollback blocked by a migration and 5
 rollback blocked by the refresh rollback fence.
