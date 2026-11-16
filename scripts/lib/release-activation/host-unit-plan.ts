@@ -12,6 +12,7 @@ import { isNonEmptyString } from '../../../src/lib/type-guards.ts';
 import { AUX_RENDERERS, LABEL_PATTERN, mentionsReleaseRoot, renderAuxPlist, type AuxRenderer } from './plan.ts';
 import { buildActivationContext, plistDigest, preconditionsMet, wrapperTargetFor, type ActivationArgs, type ActivationContext } from './plan.ts';
 import { isLegacyPathRebaseLabel, rebaseLegacyHostAuxiliaryForPathRebase, type LegacyPathRebaseLabel } from './legacy-host-auxiliaries.ts';
+import { checkoutCommit } from './tool-commit.ts';
 import type { HostUnitApplyContext } from './host-unit-apply.ts';
 
 export interface HostUnitMember {
@@ -501,11 +502,21 @@ export async function verifyReviewedOutsideUnits(
   }
   return results;
 }
+/**
+ * A manifestless old release is admitted only by the HEAD of its own work tree:
+ * tool-commit.ts asks git with the clean git environment and accepts the answer
+ * only when git's top level is this release directory, so an inherited
+ * GIT_DIR/GIT_WORK_TREE or an enclosing checkout yields no commit.
+ */
 async function exactOldCommit(host: ActivationHost, context: ActivationContext): Promise<string | null> {
   if (context.oldCommit !== null) return context.oldCommit;
-  const result = await host.exec('git', ['-C', context.args.expectCurrent, 'rev-parse', 'HEAD'], { timeoutMs: 5_000 });
-  const commit = result.code === 0 ? result.stdout.trim() : '';
-  if (!/^[0-9a-f]{40}$/.test(commit)) return null;
+  const commit = await checkoutCommit(context.args.expectCurrent, async (file, args, { env, timeoutMs }) => {
+    // host.exec runs the child with exactly these variables plus the tool's PATH.
+    const variables = Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined));
+    const result = await host.exec(file, args, { env: variables, timeoutMs });
+    return { code: result.code, stdout: result.stdout };
+  });
+  if (commit === null) return null;
   context.oldCommit = commit;
   return commit;
 }
