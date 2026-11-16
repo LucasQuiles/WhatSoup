@@ -598,7 +598,7 @@ describe('pre-push gitleaks step', () => {
       }
     });
     expect(message).toBe(
-      'pre-push guard: gitleaks found 3 leak(s) in the pushed commits (custom-rule 1, generic-api-key 2); push refused',
+      'pre-push guard: gitleaks found 3 leak(s) in the pushed commits (generic-api-key 2, unnamed-rule 1); push refused',
     );
     expect(errors).toEqual([]);
     for (const leaked of ['zorblab', 'zqline', 'quorpine', 'conf/', 'REDACTED', first, second]) {
@@ -623,6 +623,9 @@ describe('pre-push gitleaks step', () => {
         { ...finding, RuleID: 'generic.key' },
         { ...finding, RuleID: 'k'.repeat(65) },
         { ...finding, RuleID: 7 },
+        { ...finding, RuleID: 'zorblab' },
+        { ...finding, RuleID: 'Zorblab' },
+        { ...finding, RuleID: '' },
       ],
     });
     const env = isolatedGitEnv({
@@ -644,16 +647,17 @@ describe('pre-push gitleaks step', () => {
 
     const leaks = refusal(env);
     expect(leaks).toEqual({
-      message: 'pre-push guard: gitleaks found 8 leak(s) in the pushed commits (custom-rule 7, generic-api-key 1); push refused',
+      message: 'pre-push guard: gitleaks found 11 leak(s) in the pushed commits (generic-api-key 1, unnamed-rule 10); push refused',
       errors: [],
     });
-    expect(leaks.message.toLowerCase()).not.toContain(fallbackLabel.toLowerCase());
+    // Neither a term, in any case, nor a fallback label reaches the output.
+    for (const leaked of ['zorblab', fallbackLabel]) expect(leaks.message.toLowerCase()).not.toContain(leaked.toLowerCase());
 
     // A term file that cannot be loaded leaves no way to check an id, so none is printed.
     const brokenTerms = join(root, 'broken-terms.json');
     writeFileSync(brokenTerms, '{');
     expect(refusal({ ...env, WHATSOUP_PRIVATE_TERMS_FILE: brokenTerms })).toEqual({
-      message: 'pre-push guard: gitleaks found 8 leak(s) in the pushed commits (custom-rule 8); push refused',
+      message: 'pre-push guard: gitleaks found 11 leak(s) in the pushed commits (unnamed-rule 11); push refused',
       errors: [],
     });
   });

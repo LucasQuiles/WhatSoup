@@ -168,7 +168,7 @@ const REMOTE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const NEUTRAL_RULE_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const MAX_PRINTED_RULE_ID_LENGTH = 64;
 /** Every other rule id is counted under this label: a custom rule's id can itself be a secret or a private name. */
-const CUSTOM_RULE_LABEL = 'custom-rule';
+const WITHHELD_RULE_LABEL = 'unnamed-rule';
 const SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
 
 /** WHATSOUP_GITLEAKS when set and non-empty (the WHATSOUP_NODE convention), else `gitleaks` on PATH. */
@@ -247,7 +247,7 @@ function leakCountsByRule(reportPath: string, printable: (ruleId: string) => boo
   const counts = new Map<string, number>();
   for (const finding of findings) {
     const ruleId = (finding as { RuleID?: unknown } | null)?.RuleID;
-    const label = typeof ruleId === 'string' && printable(ruleId) ? ruleId : CUSTOM_RULE_LABEL;
+    const label = typeof ruleId === 'string' && printable(ruleId) ? ruleId : WITHHELD_RULE_LABEL;
     counts.set(label, (counts.get(label) ?? 0) + 1);
   }
   return counts;
