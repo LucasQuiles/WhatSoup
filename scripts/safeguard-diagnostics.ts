@@ -952,8 +952,9 @@ function qualityCiLanePartitionFailures(text: string): string[] {
   if (hasOwn(quality, 'strategy') || hasOwn(compatibility, 'strategy')) {
     failures.push('quality authority and compatibility jobs must not use a matrix strategy');
   }
-  if (compatibility['timeout-minutes'] !== 40) {
-    failures.push('quality (25.x) compatibility timeout must be exactly 40 minutes');
+  // Pinned together with the full-suite battery bound below: the 45-minute bound must fire first.
+  if (compatibility['timeout-minutes'] !== 55) {
+    failures.push('quality (25.x) compatibility timeout must be exactly 55 minutes');
   }
   // Pinned with the workflow: ubuntu-latest (ubuntu-26.04) cannot build re2 on Node 25.
   if (compatibility['runs-on'] !== 'ubuntu-24.04') {
@@ -1074,6 +1075,16 @@ function qualityCiLanePartitionFailures(text: string): string[] {
         failures.push(`quality (25.x) required step must be unconditional and blocking: ${run}`);
       }
     }
+  }
+  // The Node 25 suite runs under the same 45-minute battery bound as the Node 24 suite, below the
+  // 55-minute job cap, so a slow hosted runner ends in the battery's attributed timeout (exit 124)
+  // rather than a runner kill (one hosted 25.x run hit the 30-minute default bound).
+  const compatibilitySuite = compat.find((step) => step.run === 'npm test -- --pool=forks');
+  if (
+    compatibilitySuite
+    && asRecord(compatibilitySuite.env)?.WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS !== '2700000'
+  ) {
+    failures.push('quality (25.x) full suite must set WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS to exactly 2700000');
   }
   const compatibilityText = collectStringValues(compatibility).join('\n');
   for (const forbidden of [

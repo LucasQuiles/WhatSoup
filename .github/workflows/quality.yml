@@ -496,7 +496,11 @@ jobs:
   compatibility:
     name: quality (25.x)
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    # The full-suite step bounds the suite at 45 minutes (2700000 ms below). Setup, the two
+    # dependency installs and the console build add about 10 minutes, so this cap sits above
+    # both and the battery's own bound (exit 124, attributed to the suite) fires before the
+    # runner kills the job.
+    timeout-minutes: 55
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
@@ -530,6 +534,8 @@ jobs:
         run: npm --prefix console ci
 
       - name: Full compatibility test suite
+        env:
+          WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS: '2700000'
         run: npm test -- --pool=forks
 
       - name: Console compatibility build
