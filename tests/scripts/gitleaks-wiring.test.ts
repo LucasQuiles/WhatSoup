@@ -453,7 +453,7 @@ describe('Quality workflow scan step, run under bash with a fake gitleaks on PAT
     const fake = writeFakeGitleaks(bin, { name: 'gitleaks', version: GITLEAKS_VERSION });
     expect(runScan(event())).toEqual({
       status: 1,
-      lines: ['gitleaks: the event gives no complete change range (an empty base or head, or an all-zero base); the scan fails closed'],
+      lines: ['gitleaks: the event gives no usable change range (a missing or malformed base or head, an all-zero base or head, or an unknown head); the scan fails closed'],
     });
     expect(existsSync(fake.calls)).toBe(false);
   });
@@ -472,7 +472,7 @@ describe('Quality workflow scan step, run under bash with a fake gitleaks on PAT
     const fake = writeFakeGitleaks(bin, { name: 'gitleaks', version: GITLEAKS_VERSION });
     expect(runScan(event())).toEqual({
       status: 1,
-      lines: ['gitleaks: the event gives no complete change range (an empty base or head, or an all-zero base); the scan fails closed'],
+      lines: ['gitleaks: the event gives no usable change range (a missing or malformed base or head, an all-zero base or head, or an unknown head); the scan fails closed'],
     });
     expect(existsSync(fake.calls)).toBe(false);
   });
