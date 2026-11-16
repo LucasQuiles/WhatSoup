@@ -62,16 +62,21 @@ term file that names what must never appear (`private-terms.json`, or the path i
 (`boundary-baseline.json`, or `WHATSOUP_BOUNDARY_BASELINE_FILE`).
 [CONTRIBUTING.md](CONTRIBUTING.md#private-term-file) explains both.
 
-The checks print a location and a rule code, never the matched text:
+The checks:
 
 - `npm run guard:repo:staged` and `npm run guard:repo:branch-diff`: added lines.
-- `npm run guard:repo:tree`: every tracked file and path name at `HEAD`, against
-  the private baseline; it skips without a private term file.
+- `npm run guard:repo:tree`: the text of every tracked file and every tracked
+  path name at `HEAD`, against the private baseline; binary files are checked
+  by path name only. It skips without a private term file.
 - `npm run guard:repo:text -- <file>`: one text file, such as a PR body or an
   issue draft, before you post it.
 - `npm run guard:repo:refs -- <file>`: ref names; the pre-push hook runs it.
 - gitleaks: the pre-push hook and the Quality job `gitleaks` scan new commits
-  for secrets.
+  for secrets. The Quality job prints a count only.
+
+The `guard:repo` checks print a file, a line and a rule code, with the matched
+text masked. A term regex with anchors (`^`, `$`) or lookarounds is not masked
+inside a longer file name, so write term regexes without them.
 
 ## Release convergence
 
