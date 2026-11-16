@@ -207,9 +207,10 @@ npm --silent run release:activate -- \
   mode 0700, or be a real directory (not a symlink) owned by the current user
   with no group or other permission bits. Planning (precondition
   `backup-dir-private-owned`) and `--apply` both refuse any other directory;
-  neither changes its mode. `--apply` checks it once, just after creating or
-  finding it and before the first backup write; a process running as the same
-  user that replaces or loosens it after that check is not detected. Each
+  neither changes its mode. `--apply` re-runs that precondition and makes its
+  last check just after creating or finding the directory, before the first
+  backup write; a process running as the same user that replaces or loosens it
+  after that last check is not detected. Each
   activation writes its backups into a new child directory created with mode
   0700 (the process umask can only remove bits from that mode).
 - `--apply` re-checks every precondition, then:
@@ -655,8 +656,9 @@ wrapper link on its planned old release, and the digest of every plist the
 plan read: the member and host auxiliary plists it writes, and the fleet
 wrapper and watchdog plists it only reloads. The identity is checked before any
 watchdog is stopped and again immediately before the switch. Any of these
-stops the activation with no selector moved: it refuses, except that a
-watchdog plist changed while the watchdogs are stopped ends it
+stops the activation with no selector moved: it refuses, unless a stopped
+watchdog cannot be restored (for example, its plist changed while it was
+stopped, or its bootstrap or kickstart failed), which ends it
 `rollback-unverified` (below). The fleet wrapper and watchdog plists are also
 checked against their planned digest before each reload and again immediately
 before each `launchctl bootstrap`, so a plist changed before that last check is
