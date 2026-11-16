@@ -124,7 +124,11 @@ export interface FindingLocation {
   readonly file: string;
   /** 1-based line. Absent for a file-level finding, such as a hit in a tracked path name. */
   readonly line?: number;
+  /** For a history finding: the commit that added the line (hex; anything else is dropped). */
+  readonly history?: { readonly kind: 'history' | 'branch history'; readonly commit: string };
 }
+
+const COMMIT_ID = /^[0-9a-f]{7,64}$/;
 
 export type FindingFormatter = (location: FindingLocation, code: string) => string;
 
@@ -197,7 +201,10 @@ export function createFindingFormatter(termRules: readonly PrivateTermRule[]): F
     const label = maskPrivateText(location.file, termRules);
     const where = location.line === undefined ? label : `${label}:${location.line}`;
     const safeCode = RULE_CODE.test(code) ? code : 'unknown-rule';
-    return `${where} ${safeCode}: ${RULE_MESSAGES.get(safeCode) ?? 'See the rule code.'}`;
+    const history = location.history !== undefined && COMMIT_ID.test(location.history.commit)
+      ? `[${location.history.kind} ${maskPrivateText(location.history.commit, termRules)}] `
+      : '';
+    return `${where} ${safeCode}: ${history}${RULE_MESSAGES.get(safeCode) ?? 'See the rule code.'}`;
   };
 }
 

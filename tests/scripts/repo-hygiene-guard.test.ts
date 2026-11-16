@@ -1430,7 +1430,7 @@ The migrated group was 1203631234567890@g.us.
         'commitRangeDigest', 'completeness', 'createdAt', 'decisionOwner', 'detectorId',
         'exitCode', 'findings', 'limitations', 'localOid', 'metadataDigest', 'nativeCauses',
         'observedBlobOidDigest', 'observedPathDigest', 'observedPathDisclosure', 'observedScope', 'outcome', 'policyDigest',
-        'rangeStartOid', 'remoteOid', 'schemaVersion', 'toolDigest', 'validUntil',
+        'privateTerms', 'rangeStartOid', 'remoteOid', 'schemaVersion', 'toolDigest', 'validUntil',
       ].sort());
       const validated = validateRepoHygieneExactRangeArtifact(
         artifact,

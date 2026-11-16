@@ -10,11 +10,14 @@ import { pathKey, parseBoundaryBaseline } from '../../scripts/lib/repo-hygiene-b
 import {
   canonicalRepoHygienePolicyProjection,
   createRepoHygieneExactRangeArtifact,
+  currentRepoHygienePolicyDigest,
+  currentRepoHygieneToolDigest,
   main,
   privateHostLabels,
   run,
   validateRepoHygieneExactRangeArtifact,
 } from '../../scripts/repo-hygiene-guard.ts';
+import { adaptRepoHygieneExactRangeReportOnly } from '../../scripts/lib/ci-control/native-adapter.ts';
 import { isolatedGitEnv } from '../helpers/isolated-git-env.ts';
 import { ABSENT_PRIVATE_TERMS_FILE, SYNTHETIC_PRIVATE_TERMS_FILE } from '../helpers/private-terms-env.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
@@ -153,6 +156,25 @@ describe('repo hygiene guard with a private term file', () => {
     expect(result.exitCode).toBe(1);
     expect(result.codes).toEqual(['private-host-label', 'private-person']);
     expectNoTermText(result.lines);
+  });
+
+  it('prints the commit of a history finding, as main does (--branch-diff and --scan-history)', () => {
+    useTerms();
+    const repo = makeRepo();
+    commit(repo, { 'README.md': '# fixture\n' });
+    git(repo, ['checkout', '-b', 'feature']);
+    const added = commit(repo, { 'src/transient.ts': 'ssh zorblab\n' });
+    commit(repo, { 'src/transient.ts': 'ssh host-a\n' });
+    const message = 'Public repo text must not include private host labels.';
+
+    const branch = capture(['--branch-diff', '--base', 'main'], repo);
+    expect(branch.exitCode).toBe(1);
+    expect(branch.lines).toContain(`src/transient.ts:1 private-host-label: [branch history ${added.slice(0, 12)}] ${message}`);
+
+    const history = capture(['--scan-history', '5'], repo);
+    expect(history.exitCode).toBe(0);
+    expect(history.lines).toContain(`src/transient.ts:1 private-host-label: [history ${added.slice(0, 12)}] ${message}`);
+    expectNoTermText([...branch.lines, ...history.lines]);
   });
 
   it('adds the term rules to --commit-msg', () => {
@@ -539,16 +561,41 @@ describe('exact-range receipts carry term-rule causes without term text', () => 
     expect(validation.ok).toBe(true);
   });
 
-  it('binds the term file digest into the policy projection', () => {
+  it('keeps the term file out of the compared policy digest', () => {
     useTerms(ABSENT_PRIVATE_TERMS_FILE);
-    const absent = JSON.parse(canonicalRepoHygienePolicyProjection()) as { privateTerms: { status: string; termsSha256: unknown } };
+    const absent = canonicalRepoHygienePolicyProjection();
     useTerms();
-    const loaded = JSON.parse(canonicalRepoHygienePolicyProjection()) as { privateTerms: { status: string; termsSha256: unknown } };
-    expect(absent.privateTerms).toMatchObject({ status: 'absent', termsSha256: null });
-    expect(loaded.privateTerms).toMatchObject({
-      status: 'loaded',
-      termsSha256: createHash('sha256').update(readFileSync(SYNTHETIC_PRIVATE_TERMS_FILE)).digest('hex'),
-    });
+    expect(canonicalRepoHygienePolicyProjection()).toBe(absent);
+  });
+
+  it('validates a receipt made with the term file where none exists, and the reverse', () => {
+    const repo = makeRepo();
+    const baseOid = commit(repo, { 'README.md': '# fixture\n' });
+    const localOid = commit(repo, { 'src/x.ts': 'const clean = 1;\n' });
+    const input = { baseOid, remoteOid: null, localOid };
+    const termsDigest = `sha256:${createHash('sha256').update(readFileSync(SYNTHETIC_PRIVATE_TERMS_FILE)).digest('hex')}`;
+    const directions = [
+      { producer: SYNTHETIC_PRIVATE_TERMS_FILE, consumer: ABSENT_PRIVATE_TERMS_FILE, recorded: { status: 'loaded', termsSha256: termsDigest } },
+      { producer: ABSENT_PRIVATE_TERMS_FILE, consumer: SYNTHETIC_PRIVATE_TERMS_FILE, recorded: { status: 'absent', termsSha256: null } },
+    ];
+    for (const { producer, consumer, recorded } of directions) {
+      useTerms(producer);
+      const built = createRepoHygieneExactRangeArtifact(repo, input);
+      expect(built.ok).toBe(true);
+      if (!built.ok) return;
+      const payload = JSON.parse(Buffer.from(built.artifact.payloadBytes).toString('utf8')) as { privateTerms: unknown };
+      expect(payload.privateTerms).toEqual(recorded);
+      useTerms(consumer);
+      const expected = {
+        ...input,
+        currentToolDigest: currentRepoHygieneToolDigest(),
+        currentPolicyDigest: currentRepoHygienePolicyDigest(),
+        expectedPayloadByteLength: built.artifact.binding.payloadByteLength,
+        expectedPayloadSha256: built.artifact.binding.payloadSha256,
+      };
+      expect(validateRepoHygieneExactRangeArtifact(built.artifact, expected).ok).toBe(true);
+      expect(adaptRepoHygieneExactRangeReportOnly(built.artifact, expected).outcome).toBe('pass');
+    }
   });
 });
 

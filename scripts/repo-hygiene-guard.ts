@@ -67,7 +67,6 @@ import {
   PRIVATE_TERM_CODES,
   PRIVATE_TERMS_ABSENT_NOTICE,
   PrivateTermsError,
-  loadPrivateTerms,
   type PrivateTermRule,
 } from './lib/private-terms.ts';
 import {
@@ -151,6 +150,9 @@ export interface GuardIssue {
   message: string;
   filePath?: string;
   line?: number;
+  /** The commit a history finding came from (12 hex characters); printed with the finding. */
+  commit?: string;
+  history?: 'history' | 'branch history';
 }
 
 export interface CommitAuthor {
@@ -594,6 +596,8 @@ export function scanCommitHistory(
             message: `[history ${sha.slice(0, 12)}] ${pattern.message}`,
             filePath: line.filePath,
             line: line.line,
+            commit: sha.slice(0, 12),
+            history: 'history',
           });
         }
       }
@@ -674,6 +678,8 @@ function scanBranchCommitSecretLines(
           message: `[branch history ${sha.slice(0, 12)}] ${pattern.message}`,
           filePath: line.filePath,
           line: line.line,
+          commit: sha.slice(0, 12),
+          history: 'branch history',
         });
       }
     }
@@ -692,7 +698,7 @@ function scanBranchCommitSensitiveArtifacts(cwd: string, sha: string): GuardIssu
     changedFiles,
     'branch-history-sensitive-artifact',
     `Runtime credential, database, key, workspace, or scratch artifact was committed in branch history ${sha.slice(0, 12)}.`,
-  );
+  ).map((issue) => ({ ...issue, commit: sha.slice(0, 12), history: 'branch history' as const }));
 }
 
 export function scanBranchSecretHistory(
@@ -1002,6 +1008,8 @@ export interface RepoHygieneExactRangeReceiptV1 {
   localOid: string;
   toolDigest: `sha256:${string}`;
   policyDigest: `sha256:${string}`;
+  /** The term file this receipt's scan loaded; recorded beside the policy digest, never inside it. */
+  privateTerms: RepoHygieneExactRangePrivateTermsV1;
   commitBindings: RepoHygieneExactRangeCommitBindingV1[];
   commitRangeDigest: `sha256:${string}`;
   metadataDigest: `sha256:${string}`;
@@ -1142,17 +1150,21 @@ function readToolBytes(): Buffer {
   return Buffer.concat(chunks);
 }
 
-// The term rules bind to a receipt by digest only (the term file bytes and the loader and
-// boundary module bytes), never by their regex sources, which would serialize private names.
+// The compared policy digest covers the public policy only: the loader and boundary module
+// bytes and the term codes. Whether a term file was loaded, and its digest, sit in the receipt's
+// own privateTerms field, so a receipt made where a term file exists validates where none does,
+// and the reverse. Regex sources of term rules are never serialized: they hold private names.
 function privateTermsPolicyBinding(): unknown {
-  const load = loadPrivateTerms(process.env);
   return {
     loaderDigest: sha256Bytes(readFileSync(PRIVATE_TERMS_MODULE_PATH)),
     boundaryDigest: sha256Bytes(readFileSync(REPO_HYGIENE_BOUNDARY_MODULE_PATH)),
-    status: load.status,
-    termsSha256: load.sha256,
     codes: [...PRIVATE_TERM_CODES],
   };
+}
+
+export interface RepoHygieneExactRangePrivateTermsV1 {
+  status: 'loaded' | 'absent';
+  termsSha256: `sha256:${string}` | null;
 }
 
 function repoHygienePolicyProjection(): unknown {
@@ -1466,8 +1478,13 @@ export function createRepoHygieneExactRangeArtifact(
   if (validated === null) return exactRangeFailure('repo-hygiene.exact-range.input-malformed');
 
   try {
-    // One term-rule load for the whole range; the policy digest binds the same file bytes.
-    const termRules = activePrivateTermRules();
+    // One term-file snapshot for the whole range: the rules and the recorded digest come from
+    // the same bytes (the loader hashes and compiles one read).
+    const terms = resolveBoundaryTerms(process.env);
+    const termRules = terms.rules;
+    const privateTerms: RepoHygieneExactRangePrivateTermsV1 = terms.load.status === 'loaded' && terms.load.sha256 !== null
+      ? { status: 'loaded', termsSha256: `sha256:${terms.load.sha256}` }
+      : { status: 'absent', termsSha256: null };
     const initialToolBytes = readToolBytes();
     const initialPolicyDigest = policyDigest();
     const range = readExactCommitRange(cwd, validated);
@@ -1674,6 +1691,7 @@ export function createRepoHygieneExactRangeArtifact(
       localOid: range.localOid,
       toolDigest: sha256Bytes(initialToolBytes),
       policyDigest: initialPolicyDigest,
+      privateTerms,
       commitBindings,
       commitRangeDigest: sha256Canonical(range),
       metadataDigest: sha256Canonical(commitBindings),
@@ -1867,11 +1885,19 @@ function validateExactRangeReceipt(value: unknown): RepoHygieneExactRangeReceipt
   const record = strictRecord(value, [
     'schemaVersion', 'detectorId', 'decisionOwner', 'authorization', 'outcome', 'exitCode',
     'completeness', 'baseOid', 'remoteOid', 'rangeStartOid', 'localOid', 'toolDigest',
-    'policyDigest', 'commitBindings', 'commitRangeDigest', 'metadataDigest',
+    'policyDigest', 'privateTerms', 'commitBindings', 'commitRangeDigest', 'metadataDigest',
     'observedPathDisclosure', 'observedPathDigest', 'observedBlobOidDigest', 'budget', 'claimedScope', 'observedScope',
     'nativeCauses', 'findings', 'limitations', 'createdAt', 'validUntil',
   ]);
   if (record === null) return null;
+  const privateTerms = strictRecord(record.privateTerms, ['status', 'termsSha256']);
+  if (
+    privateTerms === null
+    || (privateTerms.status === 'absent' && privateTerms.termsSha256 !== null)
+    || (privateTerms.status === 'loaded'
+      && (typeof privateTerms.termsSha256 !== 'string' || !SHA256.test(privateTerms.termsSha256)))
+    || (privateTerms.status !== 'absent' && privateTerms.status !== 'loaded')
+  ) return null;
   const commitBindings = validateCommitBindings(record.commitBindings);
   const findings = validateFindings(record.findings);
   const nativeCauses = validateStringArray(record.nativeCauses, MAX_REPO_HYGIENE_EXACT_RANGE_FINDINGS);
@@ -2106,7 +2132,13 @@ export function validateRepoHygieneExactRangeArtifact(
 // location and a rule code. An issue's message can quote a commit subject, so it is never printed.
 function printIssues(issues: GuardIssue[], format: FindingFormatter): void {
   for (const issue of issues) {
-    console.error(format({ file: issue.filePath || 'commit-msg', line: issue.line ?? 1 }, issue.code));
+    console.error(format({
+      file: issue.filePath || 'commit-msg',
+      line: issue.line ?? 1,
+      ...(issue.commit !== undefined && issue.history !== undefined
+        ? { history: { kind: issue.history, commit: issue.commit } }
+        : {}),
+    }, issue.code));
   }
 }
 
