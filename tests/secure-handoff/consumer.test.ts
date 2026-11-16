@@ -67,12 +67,14 @@ afterEach(async () => {
   for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
-async function tlsLoginFixture(): Promise<{
+async function tlsLoginFixture(source: { acceptedValue?: string; sourceOperationId?: string } = {}): Promise<{
   endpoint: string;
   fetch: typeof globalThis.fetch;
   signIns: () => number;
   passwordStarts: () => number;
 }> {
+  const acceptedValue = source.acceptedValue ?? SECRET;
+  const sourceOperationId = source.sourceOperationId ?? 'tls-source-operation';
   const directory = mkdtempSync(join(tmpdir(), 'secure-handoff-tls-'));
   temporaryDirectories.push(directory);
   const keyPath = join(directory, 'key.pem');
@@ -89,16 +91,16 @@ async function tlsLoginFixture(): Promise<{
     request.setEncoding('utf8');
     for await (const chunk of request) captured.push(chunk);
     const payload = JSON.parse(captured.join('')) as Record<string, unknown>;
-    if (request.method === 'POST' && request.url === '/password' && payload.username === 'dummy-user' && payload.password === SECRET) {
+    if (request.method === 'POST' && request.url === '/password' && payload.username === 'dummy-user' && payload.password === acceptedValue) {
       starts++;
       response.writeHead(202, { 'content-type': 'application/json' }).end(JSON.stringify({
         parentIntakeId: INTAKE_ID, principal: 'alice', account: 'dummy-account', resourceId: 'dummy-mfa',
-        operationId: 'tls-source-operation', expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+        operationId: sourceOperationId, expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
       }));
       return;
     }
     if (request.method === 'POST' && request.url === '/mfa'
-      && payload.username === 'dummy-user' && payload.code === MFA_CODE && payload.operationId === 'tls-source-operation') {
+      && payload.username === 'dummy-user' && payload.code === MFA_CODE && payload.operationId === sourceOperationId) {
       signIns++;
       response.writeHead(204).end();
       return;
@@ -270,6 +272,46 @@ function registeredPasswordStore(persist: (value: string) => Promise<void> | voi
     action: 'sign_in',
     persist,
   });
+}
+
+function pairedTlsSourceAdapter(target: { endpoint: string; fetch: typeof globalThis.fetch }): FixedConsumerAdapter {
+  return createFixedHttpLoginAdapter({
+    resourceId: 'dummy-password', principal: 'alice', action: 'Verify password for two-step sign-in',
+    endpoint: `${target.endpoint}/password`, username: 'dummy-user',
+    mfaTransition: { resourceId: 'dummy-mfa', account: 'dummy-account' }, fetch: target.fetch,
+  });
+}
+
+function pairedSourceLinks(adapter: FixedConsumerAdapter, consumedValue: string): {
+  consumer: FixedIntakeConsumer;
+  linksCalls: Array<{ path: string; body: string | undefined }>;
+} {
+  const linksCalls: Array<{ path: string; body: string | undefined }> = [];
+  const consumer = new FixedIntakeConsumer({
+    baseUrl: 'https://links.example.test/s/api/v1', token: 'consumer-only-token', adapters: [adapter],
+    fetch: async (url, init) => {
+      const path = new URL(String(url)).pathname;
+      const body = typeof init?.body === 'string' ? init.body : undefined;
+      linksCalls.push({ path, body });
+      if (path === `/s/api/v1/intakes/${INTAKE_ID}/consume`) {
+        return json(consumed({ resourceId: 'dummy-password', action: 'Verify password for two-step sign-in', value: consumedValue }));
+      }
+      if (path === '/s/api/v1/resources/dummy-mfa/challenges') {
+        const registration = JSON.parse(String(body)) as Record<string, unknown>;
+        return json({
+          id: 'C'.repeat(22), resourceId: 'dummy-mfa', operationId: registration.operationId,
+          expiresAt: registration.expiresAt, state: 'open',
+        }, 201);
+      }
+      if (path === `/s/api/v1/intakes/${INTAKE_ID}/complete`) {
+        const completion = JSON.parse(String(body)) as Record<string, unknown>;
+        return json({ id: INTAKE_ID, state: 'succeeded', operationResult: completion.operationResult ?? null });
+      }
+      if (path === `/s/api/v1/intakes/${INTAKE_ID}/ambiguous`) return json({ id: INTAKE_ID, state: 'ambiguous' });
+      throw new Error('unexpected Links route');
+    },
+  });
+  return { consumer, linksCalls };
 }
 
 describe('fixed intake consumer', () => {
@@ -970,6 +1012,67 @@ describe('fixed intake consumer', () => {
       },
       { receipt: 'Z'.repeat(43), outcome: 'failed' },
     ]);
+  });
+
+  it.each([
+    ['equals the submitted password', SECRET, SECRET],
+    ['equals a two-character password', 'q7', 'q7'],
+    ['contains the submitted password', SECRET, `tls-${SECRET}-operation`],
+    ['contains a four-character password', 'wxyz', 'tls-wxyz-operation'],
+  ])('refuses a TLS source 202 whose operation ID %s without registering, completing, or replaying it', async (
+    _case, submittedValue, echoedOperationId,
+  ) => {
+    const target = await tlsLoginFixture({ acceptedValue: submittedValue, sourceOperationId: echoedOperationId });
+    const signInAdapter = pairedTlsSourceAdapter(target);
+    const adapterErrors: unknown[] = [];
+    const observedAdapter: FixedConsumerAdapter = {
+      ...signInAdapter,
+      execute: async (input) => signInAdapter.execute(input).catch((error: unknown) => {
+        adapterErrors.push(error);
+        throw error;
+      }),
+    };
+    const { consumer, linksCalls } = pairedSourceLinks(observedAdapter, submittedValue);
+
+    await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-password' }))
+      .resolves.toEqual({ id: INTAKE_ID, state: 'ambiguous' });
+    await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-password' }))
+      .resolves.toEqual({ id: INTAKE_ID, state: 'ambiguous' });
+
+    expect(target.passwordStarts()).toBe(1);
+    expect(target.signIns()).toBe(0);
+    expect(linksCalls.filter((call) => call.path.endsWith('/challenges'))).toHaveLength(0);
+    expect(linksCalls.map((call) => call.path)).toEqual([
+      `/s/api/v1/intakes/${INTAKE_ID}/consume`, `/s/api/v1/intakes/${INTAKE_ID}/ambiguous`,
+    ]);
+    const errorText = adapterErrors.map((error) => error instanceof Error ? `${error.name}: ${error.message}` : String(error));
+    expect(errorText).toEqual(['Error: fixed login outcome is ambiguous']);
+    expect(adapterErrors.map((error) => (error as Error).cause)).toEqual([undefined]);
+    expect(errorText.join('\n')).not.toContain(submittedValue);
+    expect(errorText.join('\n')).not.toContain(echoedOperationId);
+    expect(JSON.stringify(linksCalls)).not.toContain(submittedValue);
+    expect(JSON.stringify(linksCalls)).not.toContain(echoedOperationId);
+  });
+
+  it('registers an honest TLS source operation ID that contains a password shorter than four characters', async () => {
+    const honestOperationId = 'tls-source-operation';
+    const shortValue = honestOperationId.slice(4, 7);
+    const target = await tlsLoginFixture({ acceptedValue: shortValue, sourceOperationId: honestOperationId });
+    const { consumer, linksCalls } = pairedSourceLinks(pairedTlsSourceAdapter(target), shortValue);
+
+    await expect(consumer.execute({ intakeId: INTAKE_ID, resourceId: 'dummy-password' }))
+      .resolves.toEqual({
+        id: INTAKE_ID, state: 'succeeded', operationResult: { phase: 'password', outcome: 'mfa_required' },
+      });
+
+    expect(target.passwordStarts()).toBe(1);
+    expect(linksCalls.map((call) => call.path)).toEqual([
+      `/s/api/v1/intakes/${INTAKE_ID}/consume`, '/s/api/v1/resources/dummy-mfa/challenges',
+      `/s/api/v1/intakes/${INTAKE_ID}/complete`,
+    ]);
+    expect(JSON.parse(String(linksCalls[1]?.body))).toEqual(expect.objectContaining({
+      principal: 'alice', operationId: honestOperationId,
+    }));
   });
 
   it.each([

@@ -1214,7 +1214,10 @@ adapter must use `operationMode: "links_registered"` and the same `account`,
 principal, username, and HTTPS origin. The password source is still the fixed
 HTTPS endpoint. A `202` response must contain only the exact consumed intake
 ID, configured principal and account, paired MFA resource, opaque operation
-ID, and a future deadline no more than ten minutes away. The consumer uses its
+ID, and a future deadline no more than ten minutes away. The operation ID must
+not equal the submitted password, and must not contain it when the password is
+four or more UTF-16 code units long; such a response marks the intake ambiguous
+and nothing is registered. The consumer uses its
 own bearer to register that challenge with Links. It rejects any other source
 response or binding and never exposes this response to a model or tool. A
 registered-mode MFA adapter cannot be configured without exactly one such pair.

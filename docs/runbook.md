@@ -3229,7 +3229,10 @@ strictly bound `202` response only after accepting the password and creating
 the source-side MFA operation. The consumer validates the echoed intake ID,
 principal, account, paired resource, operation ID, and a deadline no more than
 ten minutes away (a later deadline is refused, not shortened), then
-uses the consumer bearer to register the existing Links challenge. The paired
+uses the consumer bearer to register the existing Links challenge. It refuses
+an operation ID that equals the submitted password, or that contains it when
+the password is four or more UTF-16 code units long; the intake is then marked
+ambiguous and no challenge is registered. The paired
 MFA adapter uses `operationMode: "links_registered"`; Links supplies its
 operation ID only when the exact MFA intake is consumed. A password `202` is
 not a completed account sign-in. Registered-mode MFA cannot run without its

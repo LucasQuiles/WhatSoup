@@ -329,10 +329,9 @@ export function createFixedHttpLoginAdapter(options: FixedHttpLoginOptions): Fix
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
         if (transition !== undefined && response.status === 202) {
-          return {
-            outcome: 'succeeded',
-            challenge: await parseSourceChallenge(response, input.intakeId, principal, transition),
-          };
+          const challenge = await parseSourceChallenge(response, input.intakeId, principal, transition);
+          if (echoesSubmittedValue(challenge.operationId, input.value)) throw new Error('fixed MFA source response is invalid');
+          return { outcome: 'succeeded', challenge };
         }
         if (transition === undefined && (response.status === 200 || response.status === 204)) {
           if (input.saveStore !== null) await store?.save(input.value);
@@ -462,6 +461,11 @@ async function parseSourceChallenge(
     throw new Error('fixed MFA source response is invalid');
   }
   return Object.freeze({ resourceId: value.resourceId, principal, operationId: value.operationId, expiresAt: new Date(expiresAt).toISOString() });
+}
+
+// A source operation ID is refused if it equals the submitted password, or contains it when the password is 4+ UTF-16 code units.
+function echoesSubmittedValue(operationId: string, value: string): boolean {
+  return operationId === value || (value.length >= 4 && operationId.includes(value));
 }
 
 function challengeIdempotencyKey(intakeId: string, operationId: string): string {
