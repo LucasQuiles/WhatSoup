@@ -1,9 +1,10 @@
 /**
  * gitleaks wiring.
  *
- * - `.gitleaks.toml` allowlists exactly the tracked paths the repository hygiene check exempts
- *   from secret shapes, judged path by path, because gitleaks reads its config from the tree it
- *   scans and a change can edit it.
+ * - `.gitleaks.toml` holds only the default rules and one path allowlist (a strict parse of the
+ *   whole file refuses any other table, key or string form, at any indent), and that allowlist
+ *   names exactly the tracked paths the repository hygiene check exempts from secret shapes,
+ *   judged path by path.
  * - The Quality workflow's `gitleaks` job keeps its supply-chain and output contract: its scan
  *   step prints the finding count only and keeps the scanner's own output in RUNNER_TEMP (the
  *   step's script runs here under bash with a fake gitleaks).
@@ -46,16 +47,123 @@ function captureErrors(fn: () => void): string[] {
   return errors;
 }
 
+interface GitleaksAllowlist {
+  readonly description: string | null;
+  readonly paths: readonly string[];
+}
+
+/**
+ * Parses .gitleaks.toml strictly. The file may hold only comments, an [extend] table whose one key
+ * is `useDefault = true`, and one [[allowlists]] table whose only keys are `description` (one plain
+ * double-quoted string) and `paths` (one '''…''' literal per line). Any other line, at any indent,
+ * throws: another table, another key, `useDefault = false`, an [extend] `path`, or a path in any
+ * other string form.
+ */
+function parseGitleaksConfig(text: string): { readonly allowlists: readonly GitleaksAllowlist[] } {
+  let section: 'top' | 'extend' | 'allowlists' | 'paths' = 'top';
+  let extendSeen = false;
+  let useDefault = false;
+  const allowlists: Array<{ description: string | null; paths: string[] | null }> = [];
+  const blankOrComment = /^\s*(?:#.*)?$/;
+  for (const [index, line] of text.split('\n').entries()) {
+    const refusal = new Error(`.gitleaks.toml line ${index + 1} is not allowed`);
+    const current = allowlists[allowlists.length - 1];
+    if (section === 'paths') {
+      if (line === ']') {
+        section = 'allowlists';
+        continue;
+      }
+      const entry = /^ {2}'''([^']+)''',$/.exec(line);
+      if (entry !== null && current !== undefined && current.paths !== null) {
+        current.paths.push(entry[1]!);
+        continue;
+      }
+      if (blankOrComment.test(line)) continue;
+      throw refusal;
+    }
+    if (blankOrComment.test(line)) continue;
+    if (line === '[extend]' && !extendSeen) {
+      extendSeen = true;
+      section = 'extend';
+      continue;
+    }
+    if (line === '[[allowlists]]' && allowlists.length === 0) {
+      allowlists.push({ description: null, paths: null });
+      section = 'allowlists';
+      continue;
+    }
+    if (section === 'extend' && line === 'useDefault = true' && !useDefault) {
+      useDefault = true;
+      continue;
+    }
+    if (section === 'allowlists' && current !== undefined) {
+      const description = /^description = "([^"\\]*)"$/.exec(line);
+      if (description !== null && current.description === null) {
+        current.description = description[1]!;
+        continue;
+      }
+      if (line === 'paths = [' && current.paths === null) {
+        current.paths = [];
+        section = 'paths';
+        continue;
+      }
+    }
+    throw refusal;
+  }
+  if (section === 'paths' || !useDefault || allowlists.some((table) => table.paths === null || table.paths.length === 0)) {
+    throw new Error('.gitleaks.toml is incomplete');
+  }
+  return { allowlists: allowlists.map((table) => ({ description: table.description, paths: table.paths! })) };
+}
+
 describe('.gitleaks.toml', () => {
   const config = readFileSync(resolve(repoRoot, '.gitleaks.toml'), 'utf8');
-  const allowlisted = [...config.matchAll(/^ {2}'''(.+)''',$/gm)].map((match) => new RegExp(match[1]!));
+  const parsed = parseGitleaksConfig(config);
+  const allowlisted = parsed.allowlists.flatMap((table) => table.paths).map((source) => new RegExp(source));
 
   it('extends the default rule set with one path-only allowlist table', () => {
     expect(config).toMatch(/^\[extend\]\nuseDefault = true$/m);
     expect(config.match(/^\[\[allowlists\]\]$/gm)).toEqual(['[[allowlists]]']);
     expect(config).not.toMatch(/^\[allowlist\]$/m);
     expect(config).not.toMatch(/^(?:regexes|stopwords|commits|targetRules|regexTarget|condition|disabledRules)\s*=/m);
+    expect(parsed.allowlists).toHaveLength(1);
     expect(allowlisted).toHaveLength(8);
+  });
+
+  // Each change would add a rule, drop the default rules or widen the allowlist past the fixture
+  // paths. The strict parse refuses every one, at the start of a line and indented.
+  const insertAfter = (anchor: string, line: string): string => {
+    if (!config.includes(`${anchor}\n`)) throw new Error(`.gitleaks.toml lacks the line ${anchor}`);
+    return config.replace(`${anchor}\n`, `${anchor}\n${line}\n`);
+  };
+  type Mutation = (indent: string) => string;
+  const FORBIDDEN: ReadonlyArray<readonly [string, Mutation]> = [
+    ['a [[rules]] table', (indent) => `${config}\n${indent}[[rules]]\n${indent}id = "custom"\n${indent}regex = '''x'''\n`],
+    ['an [allowlist] table', (indent) => `${config}\n${indent}[allowlist]\n${indent}paths = ['''.*''']\n`],
+    ['a second [[allowlists]] table', (indent) => `${config}\n${indent}[[allowlists]]\n${indent}paths = ['''.*''']\n`],
+    ['a top-level key', (indent) => `${indent}title = "custom"\n${config}`],
+    ['an allowlist regexes key', (indent) => insertAfter('[[allowlists]]', `${indent}regexes = ['''.*''']`)],
+    ['an allowlist stopwords key', (indent) => insertAfter('[[allowlists]]', `${indent}stopwords = ['''key''']`)],
+    ['an allowlist commits key', (indent) => insertAfter('[[allowlists]]', `${indent}commits = ['''0123456789abcdef''']`)],
+    ['an allowlist targetRules key', (indent) => insertAfter('[[allowlists]]', `${indent}targetRules = ['''generic-api-key''']`)],
+    ['an allowlist condition key', (indent) => insertAfter('[[allowlists]]', `${indent}condition = "AND"`)],
+    ['an allowlist regexTarget key', (indent) => insertAfter('[[allowlists]]', `${indent}regexTarget = "line"`)],
+    ['an [extend] disabledRules key', (indent) => insertAfter('[extend]', `${indent}disabledRules = ['''generic-api-key''']`)],
+    ['an [extend] path key', (indent) => insertAfter('[extend]', `${indent}path = '''other.toml'''`)],
+    ['useDefault = false', (indent) => config.replace('useDefault = true\n', `${indent}useDefault = false\n`)],
+    ['a double-quoted path entry', (indent) => insertAfter('paths = [', `${indent}".*",`)],
+    ['a single-quoted path entry', (indent) => insertAfter('paths = [', `${indent}'.*',`)],
+    ['a multi-line basic string path entry', (indent) => insertAfter('paths = [', `${indent}""".*""",`)],
+  ];
+  const CASES: Array<[string, Mutation, string]> = FORBIDDEN.flatMap(([label, mutate]): Array<[string, Mutation, string]> => [
+    [label, mutate, ''],
+    [`${label}, indented`, mutate, '  '],
+  ]);
+
+  it.each(CASES)('refuses %s', (_label, mutate, indent) => {
+    const mutated = mutate(indent);
+    expect(mutated).not.toBe(config);
+    expect(() => parseGitleaksConfig(mutated)).toThrow(/\.gitleaks\.toml/);
   });
 
   it('allowlists exactly the tracked paths the hygiene check exempts from secret shapes', () => {
