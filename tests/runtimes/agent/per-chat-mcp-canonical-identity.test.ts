@@ -13,7 +13,7 @@ import { sendJsonRpc } from '../../helpers/socket-rpc.ts';
 
 describe('canonical identity on a conversation-bound actor socket', () => {
   it.each(['', '::scheduled-agent-job'])(
-    'reads its phone-keyed messages when delivery uses a different LID (%s)',
+    'reads its phone-keyed rows by its phone key and its pre-mapping LID-keyed rows by its own LID key (%s)',
     async (suffix) => {
       const root = mkdtempSync(join(tmpdir(), 'actor-canonical-'));
       const db = new Database(':memory:');
@@ -24,10 +24,18 @@ describe('canonical identity on a conversation-bound actor socket', () => {
         INSERT INTO messages
           (chat_jid, conversation_key, sender_jid, message_id, content, timestamp)
         VALUES
+          ('15550009999@lid', '15550009999', '15550009999@lid', 'pre-mapping', 'journaled before the mapping', 999),
           ('15550009999@lid', '15550001111', '15550009999@lid', 'own', 'own message', 1000),
-          ('15550002222@s.whatsapp.net', '15550002222', '15550002222@s.whatsapp.net', 'other', 'private other message', 1001)
+          ('15550002222@s.whatsapp.net', '15550002222', '15550002222@s.whatsapp.net', 'other', 'private other message', 1001),
+          ('15550008888@lid', '15550008888', '15550008888@lid', 'other-lid', 'private other lid message', 1002),
+          ('15550007777@lid', '15550007777', '15550007777@lid', 'unmapped', 'private unmapped message', 1003),
+          ('123456@g.us', '123456_at_g.us', '15550002222@s.whatsapp.net', 'group', 'private group message', 1004)
       `);
+      db.raw.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)').run('15550009999', '15550001111@s.whatsapp.net');
+      db.raw.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)').run('15550008888', '15550002222@s.whatsapp.net');
       const identity = `15550001111@s.whatsapp.net${suffix}`;
+      // A scheduled map key acquires with its purpose, as chat-transport does.
+      const purpose = suffix === '' ? undefined : 'scheduled-agent-job' as const;
       const manager = new PerChatMcpSocketManager({
         stateRoot: root,
         registry,
@@ -35,12 +43,12 @@ describe('canonical identity on a conversation-bound actor socket', () => {
         conversationBound: true,
         resolveExecutingSession: () => ({
           actorJid: '15550009999@lid',
-          purpose: undefined,
+          purpose,
           conversationKey: '15550001111',
         }),
       });
       try {
-        const lease = manager.acquire(identity, '15550009999@lid');
+        const lease = manager.acquire(identity, '15550009999@lid', purpose);
         await lease.ready;
         const read = async (key: string) => {
           const response = await sendJsonRpc(lease.socketPath, {
@@ -49,18 +57,26 @@ describe('canonical identity on a conversation-bound actor socket', () => {
           }) as { result: { isError?: boolean; content: Array<{ text: string }> } };
           return response.result;
         };
-        for (const key of ['15550001111', '15550001111@s.whatsapp.net']) {
+        // Each spelling of its own conversation reads the rows stored under it.
+        for (const [key, messageId] of [
+          ['15550001111', 'own'],
+          ['15550001111@s.whatsapp.net', 'own'],
+          ['15550009999', 'pre-mapping'],
+          ['15550009999@lid', 'pre-mapping'],
+        ] as const) {
           const own = await read(key);
           expect(own.isError).toBeFalsy();
           const page = JSON.parse(own.content[0]!.text);
           expect(page.count).toBe(1);
-          expect(page.messages[0].messageId).toBe('own');
+          expect(page.messages[0].messageId).toBe(messageId);
         }
-        for (const key of ['15550002222', '15550009999', '123456@g.us']) {
+        for (const key of [
+          '15550002222', '15550002222@s.whatsapp.net', '15550008888', '15550008888@lid', '15550007777@lid', '123456@g.us',
+        ]) {
           const other = await read(key);
           expect(other.isError).toBe(true);
           expect(other.content[0]!.text).toContain('not available to this conversation-bound session');
-          expect(JSON.stringify(other)).not.toContain('private other message');
+          expect(JSON.stringify(other)).not.toContain('private');
         }
       } finally {
         manager.release(identity);
@@ -69,6 +85,63 @@ describe('canonical identity on a conversation-bound actor socket', () => {
       }
     },
   );
+
+  it('control: a group-bound socket reads its group by either encoding and refuses every DM spelling', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'actor-group-'));
+    const db = new Database(':memory:');
+    db.open();
+    const registry = new ToolRegistry();
+    registerChatManagementTools(db, () => null, (tool) => registry.register(tool));
+    db.raw.exec(`
+      INSERT INTO messages
+        (chat_jid, conversation_key, sender_jid, message_id, content, timestamp)
+      VALUES
+        ('123456@g.us', '123456_at_g.us', '15550002222@s.whatsapp.net', 'group', 'group message', 1000),
+        ('15550009999@lid', '15550009999', '15550009999@lid', 'dm-lid', 'private dm lid message', 1001),
+        ('15550009999@lid', '15550001111', '15550009999@lid', 'dm-phone', 'private dm phone message', 1002),
+        ('654321@g.us', '654321_at_g.us', '15550002222@s.whatsapp.net', 'other-group', 'private other group message', 1003)
+    `);
+    db.raw.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)').run('15550009999', '15550001111@s.whatsapp.net');
+    const manager = new PerChatMcpSocketManager({
+      stateRoot: root,
+      registry,
+      allowedRoot: root,
+      conversationBound: true,
+      resolveExecutingSession: () => ({
+        actorJid: '15550002222@s.whatsapp.net',
+        purpose: undefined,
+        conversationKey: '123456_at_g.us',
+      }),
+    });
+    try {
+      const lease = manager.acquire('123456@g.us', '123456@g.us');
+      await lease.ready;
+      const read = async (key: string) => {
+        const response = await sendJsonRpc(lease.socketPath, {
+          jsonrpc: '2.0', id: 1, method: 'tools/call',
+          params: { name: 'list_messages', arguments: { conversation_key: key, limit: 10 } },
+        }) as { result: { isError?: boolean; content: Array<{ text: string }> } };
+        return response.result;
+      };
+      for (const key of ['123456_at_g.us', '123456@g.us']) {
+        const own = await read(key);
+        expect(own.isError).toBeFalsy();
+        const page = JSON.parse(own.content[0]!.text);
+        expect(page.count).toBe(1);
+        expect(page.messages[0].messageId).toBe('group');
+      }
+      for (const key of ['15550001111', '15550001111@s.whatsapp.net', '15550009999', '15550009999@lid', '654321@g.us']) {
+        const other = await read(key);
+        expect(other.isError).toBe(true);
+        expect(other.content[0]!.text).toContain('not available to this conversation-bound session');
+        expect(JSON.stringify(other)).not.toContain('private');
+      }
+    } finally {
+      manager.release('123456@g.us');
+      db.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('scheduled messages on a conversation-bound actor socket', () => {
@@ -84,7 +157,12 @@ describe('scheduled messages on a conversation-bound actor socket', () => {
 
   type ToolResult = { isError?: boolean; content: Array<{ text: string }> };
 
-  async function openSocket(identity: string, deliveryJid: string, conversationKey: string) {
+  async function openSocket(
+    identity: string,
+    deliveryJid: string,
+    conversationKey: string,
+    purpose?: 'scheduled-agent-job',
+  ) {
     const root = mkdtempSync(join(tmpdir(), 'actor-sched-'));
     const db = new Database(':memory:');
     db.open();
@@ -99,9 +177,9 @@ describe('scheduled messages on a conversation-bound actor socket', () => {
       registry,
       allowedRoot: root,
       conversationBound: true,
-      resolveExecutingSession: () => ({ actorJid: deliveryJid, purpose: undefined, conversationKey }),
+      resolveExecutingSession: () => ({ actorJid: deliveryJid, purpose, conversationKey }),
     });
-    const lease = manager.acquire(identity, deliveryJid);
+    const lease = manager.acquire(identity, deliveryJid, purpose);
     await lease.ready;
     let nextId = 1;
     const call = async (name: string, args: Record<string, unknown>): Promise<ToolResult> => {
@@ -168,6 +246,16 @@ describe('scheduled messages on a conversation-bound actor socket', () => {
     const socket = await openSocket(PHONE, LID, '15550001111');
     try {
       await expectOwnRoundTrip(socket, LID);
+    } finally {
+      socket.close();
+    }
+  });
+
+  it('a LID-delivered scheduled agent job manages its own row and is denied foreign rows', async () => {
+    const socket = await openSocket(`${PHONE}::scheduled-agent-job`, LID, '15550001111', 'scheduled-agent-job');
+    try {
+      await expectOwnRoundTrip(socket, LID);
+      await expectForeignDenied(socket, [FOREIGN_PHONE, FOREIGN_LID, UNMAPPED_LID, GROUP]);
     } finally {
       socket.close();
     }
