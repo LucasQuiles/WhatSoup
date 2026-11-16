@@ -1,12 +1,12 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { pathKey, parseBoundaryBaseline } from '../../scripts/lib/repo-hygiene-boundary.ts';
+import { parseBoundaryBaseline } from '../../scripts/lib/repo-hygiene-boundary.ts';
 import {
   canonicalRepoHygienePolicyProjection,
   createRepoHygieneExactRangeArtifact,
@@ -390,8 +390,13 @@ describe('no output line of any mode or failure path carries a term', () => {
   });
 });
 
-describe('repo hygiene --tree and its baseline', () => {
-  const baselinePath = (repo: string) => join(repo, 'scripts', 'boundary-baseline.json');
+describe('repo hygiene --tree and its private baseline', () => {
+  // The private baseline lives outside the repository; each test names its own file.
+  function useBaseline(): string {
+    const file = join(tmp.make('baseline'), 'whatsoup', 'boundary-baseline.json');
+    vi.stubEnv('WHATSOUP_BOUNDARY_BASELINE_FILE', file);
+    return file;
+  }
 
   function treeRepo(): string {
     const repo = makeRepo();
@@ -400,137 +405,195 @@ describe('repo hygiene --tree and its baseline', () => {
       'docs/home.md': `${HOME_PATH}\n`,
       'notes/zorblab.md': 'clean content\n',
     });
+    git(repo, ['update-ref', 'refs/remotes/origin/main', 'HEAD']);
     return repo;
   }
 
-  function commitBaselineAsMain(repo: string): void {
-    git(repo, ['add', 'scripts/boundary-baseline.json']);
-    git(repo, ['commit', '-m', 'chore: boundary baseline']);
-    git(repo, ['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+  const counts = (file: string): Record<string, Record<string, number>> => Object.fromEntries(
+    [...parseBoundaryBaseline(readFileSync(file, 'utf8')).files].map(([key, codes]) => [key, Object.fromEntries(codes)]),
+  );
+
+  function firstBaseline(repo: string): void {
+    expect(capture(['--tree', '--write-baseline', '--allow-increase'], repo).exitCode).toBe(0);
   }
+
+  it('is skipped in one line without a term file, and fails under the require switch', () => {
+    useTerms(ABSENT_PRIVATE_TERMS_FILE);
+    useBaseline();
+    const repo = treeRepo();
+    const skipped = capture(['--tree'], repo);
+    expect(skipped.exitCode).toBe(0);
+    expect(skipped.lines).toHaveLength(1);
+    expect(skipped.lines[0]).toContain('skipped');
+    expect(capture(['--tree', '--write-baseline'], repo).exitCode).toBe(2);
+    vi.stubEnv('WHATSOUP_REQUIRE_PRIVATE_TERMS', '1');
+    expect(capture(['--tree'], repo).exitCode).toBe(2);
+  });
 
   it('refuses an empty repository as INCONCLUSIVE (exit 2)', () => {
     useTerms();
+    useBaseline();
     const result = capture(['--tree'], makeRepo());
     expect(result.exitCode).toBe(2);
     expect(result.lines.join('\n')).toMatch(/INCONCLUSIVE/);
   });
 
-  it('fails every file with hits when no baseline exists, masking a private path name', () => {
+  it('fails every file with hits when no baseline exists, and names the first-baseline command', () => {
     useTerms();
+    useBaseline();
     const repo = treeRepo();
     const result = capture(['--tree'], repo);
 
     expect(result.exitCode).toBe(1);
     const output = result.lines.join('\n');
-    expect(output).toContain('src/a.ts private-host-label: Public repo text must not include private host labels. (2 hit(s) in a file with no baseline entry)');
+    expect(output).toContain('--write-baseline -- --allow-increase');
+    expect(output).toContain('src/a.ts private-host-label: Public repo text must not include private host labels. (term rules: 2 hit(s) in a file with no baseline entry)');
     expect(output).toContain('  src/a.ts:1 private-host-label:');
-    expect(output).toContain('docs/home.md local-home-path:');
     expect(output).toContain('notes/<private>.md private-host-label:');
+    // Generic shapes (a home path) stay with the diff modes.
+    expect(output).not.toContain('docs/home.md');
     expectNoTermText(result.lines);
   });
 
-  it('writes the first baseline only with --allow-increase, with hashed keys and the term digest', () => {
+  it('writes the first baseline only with --allow-increase: plain paths, 0600, in a new 0700 folder', () => {
     useTerms();
+    const file = useBaseline();
     const repo = treeRepo();
 
     const refused = capture(['--tree', '--write-baseline'], repo);
     expect(refused.exitCode).toBe(1);
-    expect(refused.lines.join('\n')).toContain(`refusing to raise #${pathKey('src/a.ts')} private-host-label from 0 to 2`);
-    expect(existsSync(baselinePath(repo))).toBe(false);
+    expect(refused.lines.join('\n')).toContain('refusing to raise src/a.ts term:private-host-label from 0 to 2');
+    expect(existsSync(file)).toBe(false);
 
     const written = capture(['--tree', '--write-baseline', '--allow-increase'], repo);
     expect(written.exitCode).toBe(0);
-    const text = readFileSync(baselinePath(repo), 'utf8');
-    for (const tracked of ['src/a.ts', 'docs/home.md', 'notes/zorblab.md']) expect(text).not.toContain(tracked);
-    expectNoTermText([text]);
-    const baseline = parseBoundaryBaseline(text);
-    expect(baseline.termsSha256).toBe(
-      createHash('sha256').update(readFileSync(SYNTHETIC_PRIVATE_TERMS_FILE)).digest('hex'),
-    );
-    expect(Object.fromEntries([...baseline.files].map(([key, codes]) => [key, Object.fromEntries(codes)]))).toEqual({
-      [pathKey('src/a.ts')]: { 'private-host-label': 2 },
-      [pathKey('docs/home.md')]: { 'local-home-path': 1 },
-      [pathKey('notes/zorblab.md')]: { 'private-host-label': 1 },
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(statSync(dirname(file)).mode & 0o777).toBe(0o700);
+    expect(counts(file)).toEqual({
+      'notes/zorblab.md': { 'term:private-host-label': 1 },
+      'src/a.ts': { 'term:private-host-label': 2 },
     });
-    expect(JSON.parse(text).header.note).toContain('take the side from main');
-
-    commitBaselineAsMain(repo);
+    const baseline = parseBoundaryBaseline(readFileSync(file, 'utf8'));
+    expect(baseline.termsSha256).toBe(createHash('sha256').update(readFileSync(SYNTHETIC_PRIVATE_TERMS_FILE)).digest('hex'));
+    expect(baseline.commit).toBe(git(repo, ['rev-parse', 'HEAD']));
+    expect(git(repo, ['status', '--porcelain'])).toBe('');
+    expectNoTermText([...refused.lines, ...written.lines]);
     expect(capture(['--tree'], repo).exitCode).toBe(0);
   });
 
-  it('fails a rise and a new file, fails a fall until --write-baseline, and lets the writer only lower', () => {
+  it('fails a rise and a new file, passes a fall with one advisory line, and lets the writer only lower', () => {
     useTerms();
+    const file = useBaseline();
     const repo = treeRepo();
-    capture(['--tree', '--write-baseline', '--allow-increase'], repo);
-    commitBaselineAsMain(repo);
+    firstBaseline(repo);
 
     commit(repo, { 'src/a.ts': 'ssh zorblab\nssh zorblab again\nssh zorblab thrice\n' });
     const rise = capture(['--tree'], repo);
     expect(rise.exitCode).toBe(1);
-    expect(rise.lines.join('\n')).toContain('src/a.ts private-host-label: Public repo text must not include private host labels. (count rose from 2 to 3)');
+    expect(rise.lines.join('\n')).toContain('src/a.ts private-host-label: Public repo text must not include private host labels. (term rules: count rose from 2 to 3)');
     const raise = capture(['--tree', '--write-baseline'], repo);
     expect(raise.exitCode).toBe(1);
-    expect(raise.lines.join('\n')).toContain(`refusing to raise #${pathKey('src/a.ts')} private-host-label from 2 to 3`);
+    expect(raise.lines.join('\n')).toContain('refusing to raise src/a.ts term:private-host-label from 2 to 3');
 
     commit(repo, { 'src/a.ts': 'ssh zorblab\nconst clean = 1;\n', 'src/b.ts': 'ask Quorpine\n' });
     const added = capture(['--tree'], repo);
     expect(added.exitCode).toBe(1);
     expect(added.lines.join('\n')).toContain('src/b.ts private-person:');
-    expect(added.lines.join('\n')).toContain('(count fell from 2 to 1; run npm run guard:repo:tree:write-baseline');
 
     commit(repo, { 'src/b.ts': 'ask user-a\n' });
     const fall = capture(['--tree'], repo);
-    expect(fall.exitCode).toBe(1);
-    const lowered = capture(['--tree', '--write-baseline'], repo);
+    expect(fall.exitCode).toBe(0);
+    expect(fall.lines.filter((line) => line.includes('fell below the private baseline'))).toHaveLength(1);
+    expect(capture(['--tree', '--write-baseline'], repo).exitCode).toBe(0);
+    expect(counts(file)['src/a.ts']).toEqual({ 'term:private-host-label': 1 });
+    const lowered = capture(['--tree'], repo);
     expect(lowered.exitCode).toBe(0);
-    expect(parseBoundaryBaseline(readFileSync(baselinePath(repo), 'utf8')).files.get(pathKey('src/a.ts'))?.get('private-host-label'))
-      .toBe(1);
-    git(repo, ['add', 'scripts/boundary-baseline.json']);
-    git(repo, ['commit', '-m', 'chore: lower boundary baseline']);
-    expect(capture(['--tree'], repo).exitCode).toBe(0);
+    expect(lowered.lines.join('\n')).not.toContain('fell below');
     expectNoTermText([...rise.lines, ...raise.lines, ...added.lines, ...fall.lines, ...lowered.lines]);
   });
 
-  it('compares only generic and fallback codes when the term file differs, and fails under the require switch', () => {
+  it('keeps term and fallback counts apart: a fallback rise fails while term hits fall', () => {
     useTerms();
+    useBaseline();
     const repo = treeRepo();
-    capture(['--tree', '--write-baseline', '--allow-increase'], repo);
-    commitBaselineAsMain(repo);
+    firstBaseline(repo);
+    // A fallback label read from the inline list at runtime, never spelled in this file.
+    const fallbackLabel = privateHostLabels[0]!;
+    commit(repo, { 'src/a.ts': `ssh zorblab\ndeploy to ${fallbackLabel}\n` });
+    const result = capture(['--tree'], repo);
+    expect(result.exitCode).toBe(1);
+    expect(result.lines.join('\n')).toContain('(fallback rules: count rose from 0 to 1)');
+    expect(result.lines.join('\n').toLowerCase()).not.toContain(fallbackLabel.toLowerCase());
+  });
+
+  it('compares only the fallback counts when the term file differs; the require switch and the writer refuse', () => {
+    useTerms();
+    useBaseline();
+    const repo = treeRepo();
+    firstBaseline(repo);
 
     const revised = JSON.parse(readFileSync(SYNTHETIC_PRIVATE_TERMS_FILE, 'utf8')) as { terms: unknown[] };
     revised.terms.push({ id: 'M002', class: 'machine', value: 'zarnlab', match: 'word', case: 'sensitive', replace: 'host-b' });
     const revisedFile = join(tmp.make('revised'), 'private-terms.json');
     writeFileSync(revisedFile, JSON.stringify(revised));
     useTerms(revisedFile);
+    commit(repo, { 'src/c.ts': 'ssh zorblab\n' });
 
     const degraded = capture(['--tree'], repo);
     expect(degraded.exitCode).toBe(0);
-    expect(degraded.lines.join('\n')).toContain('differs from the one scripts/boundary-baseline.json was built from');
+    expect(degraded.lines.join('\n')).toContain('differs from the one the private baseline was built from');
+    expect(capture(['--tree', '--write-baseline'], repo).exitCode).toBe(1);
+    expect(capture(['--tree', '--write-baseline', '--allow-increase'], repo).exitCode).toBe(0);
+    expect(capture(['--tree'], repo).exitCode).toBe(0);
 
+    useTerms();
     vi.stubEnv('WHATSOUP_REQUIRE_PRIVATE_TERMS', '1');
-    const required = capture(['--tree'], repo);
-    expect(required.exitCode).toBe(2);
-    expect(required.lines.join('\n')).toContain('--allow-increase');
+    expect(capture(['--tree'], repo).exitCode).toBe(2);
   });
 
-  it('compares only the generic codes, and still fails a fallback rise, when the term file is absent', () => {
+  it('refuses to write unless origin/main is an ancestor of HEAD, and keeps entries a branch behind lacks', () => {
     useTerms();
+    const file = useBaseline();
     const repo = treeRepo();
-    capture(['--tree', '--write-baseline', '--allow-increase'], repo);
-    commitBaselineAsMain(repo);
+    firstBaseline(repo);
+    const fork = git(repo, ['rev-parse', 'HEAD']);
+    git(repo, ['checkout', '-b', 'ahead']);
+    commit(repo, { 'src/d.ts': 'ssh zorblab\n' });
+    expect(capture(['--tree', '--write-baseline', '--allow-increase'], repo).exitCode).toBe(0);
+    expect(counts(file)['src/d.ts']).toEqual({ 'term:private-host-label': 1 });
 
-    useTerms(ABSENT_PRIVATE_TERMS_FILE);
-    const absent = capture(['--tree'], repo);
-    expect(absent.exitCode).toBe(0);
-    expect(absent.lines.filter((line) => line.includes('private term file absent'))).toHaveLength(1);
+    // A branch from the fork point lacks src/d.ts only because it is behind the baseline's commit.
+    git(repo, ['checkout', '-b', 'behind', fork]);
+    commit(repo, { 'src/e.ts': 'const clean = 1;\n' });
+    expect(capture(['--tree', '--write-baseline'], repo).exitCode).toBe(0);
+    expect(counts(file)['src/d.ts']).toEqual({ 'term:private-host-label': 1 });
 
-    // A fallback label read from the inline list at runtime, never spelled in this file.
-    const fallbackLabel = privateHostLabels[0]!;
-    commit(repo, { 'src/c.ts': `deploy to ${fallbackLabel}\n` });
-    const rise = capture(['--tree'], repo);
-    expect(rise.exitCode).toBe(1);
-    expect(rise.lines.join('\n')).toContain('private-host-label');
+    git(repo, ['update-ref', 'refs/remotes/origin/main', 'ahead']);
+    const refused = capture(['--tree', '--write-baseline'], repo);
+    expect(refused.exitCode).toBe(1);
+    expect(refused.lines.join('\n')).toContain('origin/main is missing or is not an ancestor of HEAD');
+  });
+
+  it('scans a gitlink path name, and a whole-blob prefilter never hides a line match', () => {
+    const termsFile = join(tmp.make('lookahead'), 'private-terms.json');
+    writeFileSync(termsFile, JSON.stringify({
+      schema: 'whatsoup-private-terms',
+      version: 1,
+      terms: [{ id: 'M001', class: 'machine', regex: 'zorblab(?![\\s\\S]*public)', match: 'word', case: 'sensitive' }],
+    }));
+    useTerms(termsFile);
+    useBaseline();
+    const repo = makeRepo();
+    commit(repo, { 'src/p.ts': 'zorblab\npublic\n' });
+    git(repo, ['update-index', '--add', '--cacheinfo', `160000,${git(repo, ['rev-parse', 'HEAD'])},vendor/zorblab`]);
+    git(repo, ['commit', '-m', 'test: gitlink']);
+
+    const result = capture(['--tree'], repo);
+    expect(result.exitCode).toBe(1);
+    const output = result.lines.join('\n');
+    expect(output).toContain('  src/p.ts:1 private-host-label:');
+    expect(output).toContain('vendor/<private> private-host-label:');
+    expectNoTermText(result.lines);
   });
 });
 

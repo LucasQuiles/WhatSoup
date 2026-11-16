@@ -6,16 +6,16 @@
  * scripts/pr-metadata-guard.ts (PR title and body). It holds:
  *
  * - the single finding formatter: it accepts only a location and a rule code and prints a
- *   static message chosen by code, so no output path can carry matched text, a term id or a
- *   term value;
+ *   static message chosen by code, with every private match in the location masked, so no
+ *   output path can carry matched text, a term id or a term value;
  * - the rule sets: generic boundary rules (secret, contact and path shapes), the inline
  *   fallback rules, and the term rules loaded from the private term file;
  * - the text and ref-name scans;
- * - the whole-tree scan of HEAD and its per-file, per-code baseline.
+ * - the whole-tree scan of HEAD and its private per-path baseline, kept outside the repository.
  */
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import path from 'node:path';
 
 import { cleanGitEnv, git } from './guard-core.ts';
@@ -24,10 +24,6 @@ import {
   commitMessagePatterns,
   disallowedCommitAuthorPatterns,
   findDisallowedMatch,
-  isFixtureFile,
-  patternMatches,
-  projectedFileSecretFixtureFileSet,
-  projectedFileSecretPatterns,
   type GuardPattern,
 } from './repo-hygiene-policy.ts';
 import {
@@ -51,9 +47,9 @@ export const FALLBACK_PRIVATE_CODES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Generic boundary codes: secret, contact and home-path shapes that need no term file. The
- * whole-tree, text and ref scans use these plus the private-name codes; the hygiene-only codes
- * (focused tests, console calls, planning labels and the like) stay with the diff scans.
+ * Generic boundary codes: secret, contact and home-path shapes that need no term file. The text
+ * and ref scans use these plus the private-name codes; the whole-tree scan does not (generic
+ * shapes stay with the diff modes), and the hygiene-only codes stay with the diff scans.
  */
 export const GENERIC_BOUNDARY_CODES: ReadonlySet<string> = new Set([
   'anthropic-key',
@@ -151,11 +147,6 @@ const RULE_MESSAGES: ReadonlyMap<string, string> = new Map<string, string>([
 ]);
 
 const RULE_CODE = /^[a-z0-9][a-z0-9.-]*$/;
-
-/** First 16 hex characters of sha256(path): the baseline key and the printed form of a private path. */
-export function pathKey(filePath: string): string {
-  return createHash('sha256').update(filePath, 'utf8').digest('hex').slice(0, 16);
-}
 
 /** The printed form of every term or fallback match inside a path, a ref name or a number. */
 export const PRIVATE_MASK = '<private>';
@@ -285,27 +276,50 @@ export function scanRefNames(input: string, termRules: readonly PrivateTermRule[
 }
 
 // ---------------------------------------------------------------------------
-// Whole tree (--tree) and its baseline
+// Whole tree (--tree) and its private baseline
 // ---------------------------------------------------------------------------
 
-export const BOUNDARY_BASELINE_PATH = 'scripts/boundary-baseline.json';
-export const BOUNDARY_BASELINE_SCHEMA_VERSION = 1;
+export const BOUNDARY_BASELINE_FILE_ENV = 'WHATSOUP_BOUNDARY_BASELINE_FILE';
+export const BOUNDARY_BASELINE_FORMAT_VERSION = 2;
 export const BOUNDARY_BASELINE_NOTE =
-  'Public-boundary hits already in the tree, per file and rule code. A file key is the first 16 hex '
-  + 'characters of sha256 of its path. Counts may only fall: npm run guard:repo:tree:write-baseline '
-  + 'rewrites this file and refuses to raise a count or add a file entry compared with origin/main. '
-  + 'On a merge conflict in this file, take the side from main, then run '
-  + 'npm run guard:repo:tree:write-baseline, which can only lower counts.';
+  'Private-name hits (term rules and the inline fallback rules, counted apart) in the tree of the '
+  + 'recorded commit, per repository path. This file is private: it lives outside the repository '
+  + 'and is never committed. Only --tree --write-baseline writes it; raising a count, adding a '
+  + 'path or a new term file needs --allow-increase.';
 const WRITE_BASELINE_COMMAND = 'npm run guard:repo:tree:write-baseline';
+const FIRST_BASELINE_COMMAND = `${WRITE_BASELINE_COMMAND} -- --allow-increase`;
 
-export interface BoundaryBaseline {
-  /** False when no baseline file exists at the ref read. */
-  readonly present: boolean;
-  readonly termsSha256: string | null;
-  readonly files: ReadonlyMap<string, ReadonlyMap<string, number>>;
+/** The private baseline: WHATSOUP_BOUNDARY_BASELINE_FILE when set and not empty, else ~/.config/whatsoup/boundary-baseline.json. */
+export function boundaryBaselinePath(env: NodeJS.ProcessEnv): string {
+  const configured = env[BOUNDARY_BASELINE_FILE_ENV];
+  if (configured !== undefined && configured !== '') return configured;
+  const home = env.HOME !== undefined && env.HOME !== '' ? env.HOME : homedir();
+  return path.join(home, '.config', 'whatsoup', 'boundary-baseline.json');
 }
 
-const EMPTY_BASELINE: BoundaryBaseline = Object.freeze({ present: false, termsSha256: null, files: new Map() });
+/** How output names the baseline file; never the resolved path, which can hold a private name. */
+function boundaryBaselineLabel(env: NodeJS.ProcessEnv): string {
+  const configured = env[BOUNDARY_BASELINE_FILE_ENV];
+  return configured !== undefined && configured !== ''
+    ? `the file named by ${BOUNDARY_BASELINE_FILE_ENV}`
+    : '~/.config/whatsoup/boundary-baseline.json';
+}
+
+/** Term rules and the inline fallback lists can share a code, so their counts are kept apart. */
+export type CountOrigin = 'term' | 'fallback';
+/** `term:<code>` or `fallback:<code>`. */
+export type CountKey = `${CountOrigin}:${string}`;
+
+const COUNT_KEY = /^(?:term|fallback):[a-z0-9][a-z0-9.-]*$/;
+
+export interface BoundaryBaseline {
+  /** sha256 of the term file bytes the counts were built from. */
+  readonly termsSha256: string;
+  /** The commit whose tree the counts describe. */
+  readonly commit: string;
+  /** Plain repository path (the file is private) -> count key -> count. */
+  readonly files: ReadonlyMap<string, ReadonlyMap<CountKey, number>>;
+}
 
 /** A baseline that cannot be read or parsed; the tree check is then inconclusive (exit 2). */
 export class BoundaryBaselineError extends Error {}
@@ -317,65 +331,91 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+// Messages name no path: a path can hold a private name.
 export function parseBoundaryBaseline(text: string): BoundaryBaseline {
   let document: unknown;
   try {
     document = JSON.parse(text);
   } catch {
-    throw new BoundaryBaselineError(`${BOUNDARY_BASELINE_PATH} is not valid JSON`);
+    throw new BoundaryBaselineError('the private baseline is not valid JSON');
   }
   const header = isRecord(document) ? document.header : undefined;
   const fileEntries = isRecord(document) ? document.files : undefined;
   if (!isRecord(header) || !isRecord(fileEntries)) {
-    throw new BoundaryBaselineError(`${BOUNDARY_BASELINE_PATH} must hold a header object and a files object`);
+    throw new BoundaryBaselineError('the private baseline must hold a header object and a files object');
   }
-  if (header.schemaVersion !== BOUNDARY_BASELINE_SCHEMA_VERSION) {
-    throw new BoundaryBaselineError(`${BOUNDARY_BASELINE_PATH} header.schemaVersion must be ${BOUNDARY_BASELINE_SCHEMA_VERSION}`);
+  if (header.formatVersion !== BOUNDARY_BASELINE_FORMAT_VERSION) {
+    throw new BoundaryBaselineError(`the private baseline header.formatVersion must be ${BOUNDARY_BASELINE_FORMAT_VERSION}`);
   }
-  const termsSha256 = header.termsSha256;
-  if (termsSha256 !== null && (typeof termsSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(termsSha256))) {
-    throw new BoundaryBaselineError(`${BOUNDARY_BASELINE_PATH} header.termsSha256 must be null or 64 hex characters`);
+  if (typeof header.termsSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(header.termsSha256)) {
+    throw new BoundaryBaselineError('the private baseline header.termsSha256 must be 64 hex characters');
   }
-  const files = new Map<string, Map<string, number>>();
-  for (const [key, codes] of Object.entries(fileEntries)) {
-    if (!/^[0-9a-f]{16}$/.test(key) || !isRecord(codes)) {
-      throw new BoundaryBaselineError(`${BOUNDARY_BASELINE_PATH} has a malformed file entry`);
-    }
-    const counts = new Map<string, number>();
-    for (const [code, count] of Object.entries(codes)) {
-      if (!RULE_CODE.test(code) || typeof count !== 'number' || !Number.isSafeInteger(count) || count <= 0) {
-        throw new BoundaryBaselineError(`${BOUNDARY_BASELINE_PATH} has a malformed count under #${key}`);
+  if (typeof header.commit !== 'string' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(header.commit)) {
+    throw new BoundaryBaselineError('the private baseline header.commit must be a full object id');
+  }
+  const files = new Map<string, Map<CountKey, number>>();
+  for (const [filePath, counts] of Object.entries(fileEntries)) {
+    if (filePath === '' || !isRecord(counts)) throw new BoundaryBaselineError('the private baseline has a malformed path entry');
+    const entry = new Map<CountKey, number>();
+    for (const [key, count] of Object.entries(counts)) {
+      if (!COUNT_KEY.test(key) || typeof count !== 'number' || !Number.isSafeInteger(count) || count <= 0) {
+        throw new BoundaryBaselineError('the private baseline has a malformed count');
       }
-      counts.set(code, count);
+      entry.set(key as CountKey, count);
     }
-    files.set(key, counts);
+    files.set(filePath, entry);
   }
-  return { present: true, termsSha256: termsSha256 as string | null, files };
+  return { termsSha256: header.termsSha256, commit: header.commit, files };
 }
 
 export function serializeBoundaryBaseline(baseline: BoundaryBaseline): string {
   const files: Record<string, Record<string, number>> = {};
-  for (const key of [...baseline.files.keys()].sort()) {
-    const counts = baseline.files.get(key)!;
-    const entries = [...counts].filter(([, count]) => count > 0).sort(([left], [right]) => left.localeCompare(right));
-    if (entries.length > 0) files[key] = Object.fromEntries(entries);
+  for (const filePath of [...baseline.files.keys()].sort()) {
+    const entries = [...baseline.files.get(filePath)!]
+      .filter(([, count]) => count > 0)
+      .sort(([left], [right]) => left.localeCompare(right));
+    if (entries.length > 0) files[filePath] = Object.fromEntries(entries);
   }
   const document = {
     header: {
-      schemaVersion: BOUNDARY_BASELINE_SCHEMA_VERSION,
+      formatVersion: BOUNDARY_BASELINE_FORMAT_VERSION,
       note: BOUNDARY_BASELINE_NOTE,
       termsSha256: baseline.termsSha256,
+      commit: baseline.commit,
     },
     files,
   };
   return `${JSON.stringify(document, null, 2)}\n`;
 }
 
-/** Sum of every count: the ordinal debt weight scripts/lib/baseline-weight.ts compares. */
+/** Sum of every count. */
 export function boundaryBaselineWeight(baseline: BoundaryBaseline): number {
   let total = 0;
   for (const counts of baseline.files.values()) for (const count of counts.values()) total += count;
   return total;
+}
+
+/** The private baseline, or null when the file does not exist. */
+export function readBoundaryBaseline(env: NodeJS.ProcessEnv): BoundaryBaseline | null {
+  let text: string;
+  try {
+    text = readFileSync(boundaryBaselinePath(env), 'utf8');
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+    throw new BoundaryBaselineError('the private baseline cannot be read');
+  }
+  return parseBoundaryBaseline(text);
+}
+
+/** Write the private baseline: the folder is created 0700, the file is written 0600 and renamed into place. */
+function writeBoundaryBaseline(env: NodeJS.ProcessEnv, baseline: BoundaryBaseline): void {
+  const target = boundaryBaselinePath(env);
+  mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+  const temporary = `${target}.${process.pid}.tmp`;
+  writeFileSync(temporary, serializeBoundaryBaseline(baseline), { mode: 0o600 });
+  chmodSync(temporary, 0o600);
+  renameSync(temporary, target);
 }
 
 function refHasCommit(cwd: string, ref: string): boolean {
@@ -387,15 +427,19 @@ function refHasCommit(cwd: string, ref: string): boolean {
   }
 }
 
-/** The baseline committed at `ref`; an absent ref or file reads as an empty baseline. */
-export function readBoundaryBaselineAt(cwd: string, ref: string): BoundaryBaseline {
-  if (!refHasCommit(cwd, ref)) return EMPTY_BASELINE;
-  if (git(['ls-tree', '--full-tree', ref, '--', BOUNDARY_BASELINE_PATH], cwd).trim() === '') return EMPTY_BASELINE;
-  return parseBoundaryBaseline(git(['show', `${ref}:${BOUNDARY_BASELINE_PATH}`], cwd));
+function isAncestor(cwd: string, ancestor: string, descendant: string): boolean {
+  try {
+    git(['merge-base', '--is-ancestor', ancestor, descendant], cwd);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 interface TreeEntry {
   readonly path: string;
+  /** `blob` (files and symlinks) or `commit` (a gitlink, which has no content here). */
+  readonly type: string;
   readonly oid: string;
   readonly size: number;
 }
@@ -403,15 +447,14 @@ interface TreeEntry {
 const BLOB_BATCH_BYTES = 32 * 1024 * 1024;
 const MAX_BLOB_BYTES = 128 * 1024 * 1024;
 
-function listHeadBlobs(cwd: string): TreeEntry[] {
+// Every tracked entry: a gitlink has no content in this tree, but its path name is still scanned.
+function listHeadEntries(cwd: string): TreeEntry[] {
   const entries: TreeEntry[] = [];
   for (const record of git(['ls-tree', '-r', '-z', '-l', '--full-tree', 'HEAD'], cwd, 120_000).split('\0')) {
     if (record === '') continue;
     const match = /^(\d{6}) (\S+) ([0-9a-f]{40,64}) +(\d+|-)\t([\s\S]+)$/.exec(record);
     if (match === null) throw new TreeScanInconclusive('git ls-tree output is malformed');
-    // Gitlinks (submodule commits) have no content in this tree.
-    if (match[2] !== 'blob') continue;
-    entries.push({ path: match[5]!, oid: match[3]!, size: Number(match[4]) });
+    entries.push({ path: match[5]!, type: match[2]!, oid: match[3]!, size: match[4] === '-' ? 0 : Number(match[4]) });
   }
   return entries;
 }
@@ -465,8 +508,19 @@ function readBlobs(cwd: string, entries: readonly TreeEntry[]): Map<string, Buff
   return blobs;
 }
 
-// A whole-blob test is a superset of the per-line test once `$` and `^` may match at line
-// breaks, so blobs that cannot hit a rule skip line splitting entirely.
+// A whole-blob test (with `^` and `$` matching at line breaks) finds every match a line test
+// finds, unless a negative lookaround can see past the end of the line: in a blob it sees the
+// next lines too (`x(?![\s\S]*y)` fails on `x\ny`). The boundary forms below test one character
+// class that never holds a line break, so they stay sound; a rule with any other negative
+// lookaround is tested line by line on every text file.
+const SOUND_LOOKAROUNDS = ['(?<![A-Za-z0-9_])', '(?![A-Za-z0-9_])', '(?<![0-9.])', '(?![0-9]|\\.[0-9])'];
+
+function blobPrefilterIsSound(regex: RegExp): boolean {
+  let source = regex.source;
+  for (const form of SOUND_LOOKAROUNDS) source = source.split(form).join('');
+  return !/\(\?<?!/.test(source);
+}
+
 const blobPrefilters = new WeakMap<RegExp, RegExp>();
 
 function blobPrefilter(regex: RegExp): RegExp {
@@ -479,7 +533,7 @@ function blobPrefilter(regex: RegExp): RegExp {
   return prefilter;
 }
 
-/** Combined prefilters for the term rules, one per flag set. Rules with backreferences or named groups test alone. */
+/** Combined prefilters for sound term rules, one per flag set. Rules with backreferences or named groups test alone. */
 function termPrefilters(rules: readonly PrivateTermRule[]): RegExp[] {
   const grouped = new Map<string, string[]>();
   const alone: RegExp[] = [];
@@ -499,8 +553,8 @@ function termPrefilters(rules: readonly PrivateTermRule[]): RegExp[] {
   }
 }
 
-/** path -> rule code -> hit lines (0 = the path name itself). */
-export type TreeHits = ReadonlyMap<string, ReadonlyMap<string, ReadonlySet<number>>>;
+/** path -> count key -> hit lines (0 = the path name itself). */
+export type TreeHits = ReadonlyMap<string, ReadonlyMap<CountKey, ReadonlySet<number>>>;
 
 export interface TreeScan {
   readonly trackedPaths: readonly string[];
@@ -508,183 +562,139 @@ export interface TreeScan {
   readonly hits: TreeHits;
 }
 
-function addHit(hits: Map<string, Map<string, Set<number>>>, filePath: string, code: string, line: number): void {
-  let codes = hits.get(filePath);
-  if (codes === undefined) {
-    codes = new Map();
-    hits.set(filePath, codes);
+function addHit(hits: Map<string, Map<CountKey, Set<number>>>, filePath: string, key: CountKey, line: number): void {
+  let keys = hits.get(filePath);
+  if (keys === undefined) {
+    keys = new Map();
+    hits.set(filePath, keys);
   }
-  let lines = codes.get(code);
+  let lines = keys.get(key);
   if (lines === undefined) {
     lines = new Set();
-    codes.set(code, lines);
+    keys.set(key, lines);
   }
   lines.add(line);
 }
 
+interface TreeRules {
+  readonly soundTerms: readonly PrivateTermRule[];
+  readonly lineTerms: readonly PrivateTermRule[];
+  readonly termFilters: readonly RegExp[];
+}
+
+// Term and fallback rules only: generic shapes stay with the diff modes, and fixture paths get
+// no exemption here (a fixture is exempt from generic shapes only, never from private names).
 function scanTreeContent(
   filePath: string,
   text: string,
-  patterns: readonly GuardPattern[],
-  termRules: readonly PrivateTermRule[],
-  termFilters: readonly RegExp[],
-  hits: Map<string, Map<string, Set<number>>>,
+  rules: TreeRules,
+  hits: Map<string, Map<CountKey, Set<number>>>,
 ): void {
   let rows: string[] | null = null;
-  const scan = (pattern: GuardPattern, allowlisted: boolean): void => {
-    if (!blobPrefilter(pattern.regex).test(text)) return;
+  const scan = (pattern: GuardPattern, key: CountKey, prefilter: boolean): void => {
+    if (prefilter && !blobPrefilter(pattern.regex).test(text)) return;
     rows ??= text.split(/\r?\n/);
     rows.forEach((row, index) => {
-      const hit = allowlisted
-        ? findDisallowedMatch(filePath, pattern, row) !== null
-        : patternMatches(pattern, row).length > 0;
-      if (hit) addHit(hits, filePath, pattern.code, index + 1);
+      if (findDisallowedMatch(filePath, pattern, row) !== null) addHit(hits, filePath, key, index + 1);
     });
   };
-  // The fixture allow-list works as in the diff scans: fixture files are exempt, except that
-  // the projected-file fixtures still may not carry literal provider-key or key-block shapes.
-  if (isFixtureFile(filePath)) {
-    if (projectedFileSecretFixtureFileSet.has(filePath)) {
-      for (const pattern of projectedFileSecretPatterns) scan(pattern, false);
-    }
-    return;
+  for (const pattern of fallbackPrivatePatterns) scan(pattern, `fallback:${pattern.code}`, blobPrefilterIsSound(pattern.regex));
+  if (rules.soundTerms.length > 0 && rules.termFilters.some((filter) => filter.test(text))) {
+    for (const rule of rules.soundTerms) scan(rule, `term:${rule.code}`, true);
   }
-  for (const pattern of patterns) scan(pattern, true);
-  if (termRules.length > 0 && termFilters.some((filter) => filter.test(text))) {
-    for (const rule of termRules) scan(rule, true);
-  }
+  for (const rule of rules.lineTerms) scan(rule, `term:${rule.code}`, false);
 }
 
-/** Scan every tracked blob at HEAD (read from git, never the working tree) and every tracked path name. */
+/** Scan every tracked entry at HEAD (read from git, never the working tree): each path name, and the content of each blob. */
 export function scanHeadTree(cwd: string, termRules: readonly PrivateTermRule[]): TreeScan {
   if (!refHasCommit(cwd, 'HEAD')) throw new TreeScanInconclusive('HEAD has no commit');
-  const entries = listHeadBlobs(cwd);
+  const entries = listHeadEntries(cwd);
   if (entries.length === 0) throw new TreeScanInconclusive('HEAD tracks no files');
-  const blobs = readBlobs(cwd, entries);
-  const patterns = [...genericBoundaryPatterns, ...fallbackPrivatePatterns];
-  const termFilters = termPrefilters(termRules);
-  const hits = new Map<string, Map<string, Set<number>>>();
+  const blobs = readBlobs(cwd, entries.filter((entry) => entry.type === 'blob'));
+  const soundTerms = termRules.filter((rule) => blobPrefilterIsSound(rule.regex));
+  const rules: TreeRules = {
+    soundTerms,
+    lineTerms: termRules.filter((rule) => !blobPrefilterIsSound(rule.regex)),
+    termFilters: termPrefilters(soundTerms),
+  };
+  const hits = new Map<string, Map<CountKey, Set<number>>>();
   let textFileCount = 0;
   for (const entry of entries) {
-    for (const code of boundaryCodesInLine(entry.path, entry.path, [...patterns, ...termRules])) {
-      addHit(hits, entry.path, code, 0);
+    for (const pattern of fallbackPrivatePatterns) {
+      if (findDisallowedMatch(entry.path, pattern, entry.path) !== null) addHit(hits, entry.path, `fallback:${pattern.code}`, 0);
     }
+    for (const rule of termRules) {
+      if (findDisallowedMatch(entry.path, rule, entry.path) !== null) addHit(hits, entry.path, `term:${rule.code}`, 0);
+    }
+    if (entry.type !== 'blob') continue;
     const bytes = blobs.get(entry.oid);
     if (bytes === undefined) throw new TreeScanInconclusive('a tracked blob could not be read');
     if (bytes.includes(0)) continue;
     textFileCount += 1;
-    scanTreeContent(entry.path, bytes.toString('utf8'), patterns, termRules, termFilters, hits);
+    scanTreeContent(entry.path, bytes.toString('utf8'), rules, hits);
   }
   return { trackedPaths: entries.map((entry) => entry.path), textFileCount, hits };
 }
 
-/** `full`: the baseline was built from the loaded term file. `generic`: no term file, or a different one. */
-export type TreeCompareMode = 'full' | 'generic';
-
 export interface BaselineDelta {
   readonly kind: 'rise' | 'new-file' | 'fall';
-  readonly key: string;
-  /** Real path from the current tree; null when the file no longer exists. */
-  readonly path: string | null;
-  readonly code: string;
+  readonly path: string;
+  readonly key: CountKey;
   readonly baseline: number;
   readonly current: number;
 }
 
 /**
- * Compare a tree scan with a baseline, per file and per rule code.
- *
- * In `generic` mode the counts a term rule could have raised are unknown: codes shared with the
- * fallback rules fail only on a rise or a new file entry (a fallback-only count can only sit at
- * or below a term-built count), and term-only codes are skipped. Generic codes always compare
- * in both directions.
+ * Compare a tree scan with the private baseline, per path and count key. No baseline means every
+ * path with hits is new. `compared` selects the keys that take part (only the fallback keys when
+ * the term file differs from the one the baseline was built from).
  */
-export function compareTreeToBaseline(scan: TreeScan, baseline: BoundaryBaseline, mode: TreeCompareMode): BaselineDelta[] {
-  const compared = (code: string): boolean => mode === 'full' || !TERM_ONLY_CODES.has(code);
-  const fallCompared = (code: string): boolean => mode === 'full' || GENERIC_BOUNDARY_CODES.has(code);
-  const deltas: BaselineDelta[] = [];
-  for (const [filePath, codes] of scan.hits) {
-    const key = pathKey(filePath);
-    const entry = baseline.files.get(key);
-    for (const [code, lines] of codes) {
-      if (!compared(code)) continue;
-      const current = lines.size;
-      const before = entry?.get(code) ?? 0;
-      if (entry === undefined) deltas.push({ kind: 'new-file', key, path: filePath, code, baseline: 0, current });
-      else if (current > before) deltas.push({ kind: 'rise', key, path: filePath, code, baseline: before, current });
-      else if (current < before && fallCompared(code)) {
-        deltas.push({ kind: 'fall', key, path: filePath, code, baseline: before, current });
-      }
-    }
-  }
-  const pathsByKey = new Map(scan.trackedPaths.map((filePath) => [pathKey(filePath), filePath] as const));
-  for (const [key, codes] of baseline.files) {
-    const filePath = pathsByKey.get(key) ?? null;
-    const current = filePath === null ? undefined : scan.hits.get(filePath);
-    for (const [code, before] of codes) {
-      if (!compared(code) || !fallCompared(code)) continue;
-      if ((current?.get(code)?.size ?? 0) === 0) {
-        deltas.push({ kind: 'fall', key, path: filePath, code, baseline: before, current: 0 });
-      }
-    }
-  }
-  return deltas.sort((left, right) =>
-    `${left.path ?? left.key}\0${left.code}`.localeCompare(`${right.path ?? right.key}\0${right.code}`));
-}
-
-/**
- * The baseline a write produces. `full` rebuilds every count from the scan and binds the loaded
- * term file. `generic` (no term file) rewrites the generic counts only and keeps every count a
- * term rule could have produced, and termsSha256, from the current baseline.
- */
-export function nextBoundaryBaseline(
+export function compareTreeToBaseline(
   scan: TreeScan,
-  mode: TreeCompareMode,
-  termsSha256: string | null,
-  current: BoundaryBaseline,
-): BoundaryBaseline {
-  const files = new Map<string, Map<string, number>>();
-  for (const [filePath, codes] of scan.hits) {
-    const counts = new Map<string, number>();
-    for (const [code, lines] of codes) {
-      if (mode === 'full' || GENERIC_BOUNDARY_CODES.has(code)) counts.set(code, lines.size);
+  baseline: BoundaryBaseline | null,
+  compared: (key: CountKey) => boolean,
+): BaselineDelta[] {
+  const deltas: BaselineDelta[] = [];
+  for (const [filePath, keys] of scan.hits) {
+    const entry = baseline?.files.get(filePath);
+    for (const [key, lines] of keys) {
+      if (!compared(key)) continue;
+      const current = lines.size;
+      const before = entry?.get(key) ?? 0;
+      if (entry === undefined) deltas.push({ kind: 'new-file', path: filePath, key, baseline: 0, current });
+      else if (current > before) deltas.push({ kind: 'rise', path: filePath, key, baseline: before, current });
+      else if (current < before) deltas.push({ kind: 'fall', path: filePath, key, baseline: before, current });
     }
-    files.set(pathKey(filePath), counts);
   }
-  if (mode === 'full') return { present: true, termsSha256, files };
-  for (const [key, codes] of current.files) {
-    for (const [code, count] of codes) {
-      if (GENERIC_BOUNDARY_CODES.has(code)) continue;
-      let counts = files.get(key);
-      if (counts === undefined) {
-        counts = new Map();
-        files.set(key, counts);
+  for (const [filePath, counts] of baseline?.files ?? []) {
+    for (const [key, before] of counts) {
+      if (compared(key) && (scan.hits.get(filePath)?.get(key)?.size ?? 0) === 0) {
+        deltas.push({ kind: 'fall', path: filePath, key, baseline: before, current: 0 });
       }
-      counts.set(code, count);
     }
   }
-  return { present: true, termsSha256: current.termsSha256, files };
+  return deltas.sort((left, right) => `${left.path}\0${left.key}`.localeCompare(`${right.path}\0${right.key}`));
 }
 
 export interface BaselineIncrease {
-  readonly key: string;
-  readonly code: string;
+  readonly path: string;
+  readonly key: CountKey;
   readonly before: number;
   readonly after: number;
 }
 
-/** Every count `next` raises above `reference`, including any file entry `reference` lacks. */
-export function boundaryBaselineIncreases(next: BoundaryBaseline, reference: BoundaryBaseline): BaselineIncrease[] {
+/** Every count `next` raises above `reference` (none: an empty baseline), including any path `reference` lacks. */
+export function boundaryBaselineIncreases(next: BoundaryBaseline, reference: BoundaryBaseline | null): BaselineIncrease[] {
   const increases: BaselineIncrease[] = [];
-  for (const [key, codes] of next.files) {
-    const entry = reference.files.get(key);
-    for (const [code, after] of codes) {
+  for (const [filePath, counts] of next.files) {
+    const entry = reference?.files.get(filePath);
+    for (const [key, after] of counts) {
       if (after <= 0) continue;
-      const before = entry?.get(code) ?? 0;
-      if (entry === undefined || after > before) increases.push({ key, code, before, after });
+      const before = entry?.get(key) ?? 0;
+      if (entry === undefined || after > before) increases.push({ path: filePath, key, before, after });
     }
   }
-  return increases.sort((left, right) => `${left.key}\0${left.code}`.localeCompare(`${right.key}\0${right.code}`));
+  return increases.sort((left, right) => `${left.path}\0${left.key}`.localeCompare(`${right.path}\0${right.key}`));
 }
 
 export interface TreeCheckOptions {
@@ -692,80 +702,140 @@ export interface TreeCheckOptions {
   readonly allowIncrease: boolean;
 }
 
-const TREE_ABSENT_LINE =
-  'repo hygiene tree: private term file absent; comparing only the generic codes (codes shared with the fallback rules fail only on a rise)';
+const TREE_SKIPPED_LINE =
+  'repo hygiene tree: skipped — no private term file is present (generic shapes stay with the diff modes)';
+const TREE_WRITE_WITHOUT_TERMS_LINE =
+  'repo hygiene tree: the private baseline cannot be written without the private term file';
 const TREE_MISMATCH_LINE =
-  'repo hygiene tree: the private term file differs from the one scripts/boundary-baseline.json was built from; comparing only the generic and fallback codes';
+  'repo hygiene tree: the private term file differs from the one the private baseline was built from; comparing only the fallback counts';
+
+function codeOf(key: CountKey): string {
+  return key.slice(key.indexOf(':') + 1);
+}
+
+function originOf(key: CountKey): string {
+  return key.startsWith('term:') ? 'term rules' : 'fallback rules';
+}
 
 function printDelta(delta: BaselineDelta, scan: TreeScan, format: FindingFormatter): void {
-  const label = delta.path ?? `#${delta.key}`;
-  const head = format({ file: label }, delta.code);
-  if (delta.kind === 'fall') {
-    console.error(`${head} (count fell from ${delta.baseline} to ${delta.current}; run ${WRITE_BASELINE_COMMAND} and commit ${BOUNDARY_BASELINE_PATH})`);
-    return;
-  }
+  const code = codeOf(delta.key);
+  const head = format({ file: delta.path }, code);
   console.error(delta.kind === 'rise'
-    ? `${head} (count rose from ${delta.baseline} to ${delta.current})`
-    : `${head} (${delta.current} hit(s) in a file with no baseline entry)`);
-  if (delta.path === null) return;
-  const lines = [...(scan.hits.get(delta.path)?.get(delta.code) ?? [])].sort((left, right) => left - right);
+    ? `${head} (${originOf(delta.key)}: count rose from ${delta.baseline} to ${delta.current})`
+    : `${head} (${originOf(delta.key)}: ${delta.current} hit(s) in a file with no baseline entry)`);
+  const lines = [...(scan.hits.get(delta.path)?.get(delta.key) ?? [])].sort((left, right) => left - right);
   for (const line of lines) {
-    console.error(`  ${format(line === 0 ? { file: delta.path } : { file: delta.path, line }, delta.code)}`);
+    console.error(`  ${format(line === 0 ? { file: delta.path } : { file: delta.path, line }, code)}`);
   }
 }
 
-function writeBaseline(cwd: string, scan: TreeScan, mode: TreeCompareMode, terms: BoundaryTerms, head: BoundaryBaseline, allowIncrease: boolean): number {
-  const next = nextBoundaryBaseline(scan, mode, terms.load.sha256, head);
+function writeBaseline(
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  terms: BoundaryTerms,
+  termsSha256: string,
+  current: BoundaryBaseline | null,
+  allowIncrease: boolean,
+): number {
+  if (!refHasCommit(cwd, 'origin/main') || !isAncestor(cwd, 'origin/main', 'HEAD')) {
+    console.error('repo hygiene tree: refusing to write the private baseline: origin/main is missing or is not an ancestor of HEAD; fetch and merge main first');
+    return 1;
+  }
+  if (current !== null && current.termsSha256 !== termsSha256 && !allowIncrease) {
+    console.error(
+      'repo hygiene tree: refusing to write the private baseline: the private term file differs from the one it was built from; '
+        + `a term-list revision rebuilds it with ${FIRST_BASELINE_COMMAND}`,
+    );
+    return 1;
+  }
+  const head = git(['rev-parse', 'HEAD'], cwd).trim();
+  const scan = scanHeadTree(cwd, terms.rules);
+  const files = new Map<string, Map<CountKey, number>>();
+  for (const [filePath, keys] of scan.hits) {
+    files.set(filePath, new Map([...keys].map(([key, lines]) => [key, lines.size] as const)));
+  }
+  // An entry for a path absent from HEAD's tree is dropped only when HEAD contains the commit the
+  // counts describe (the file was deleted since). Otherwise HEAD may be behind that commit, and
+  // the entry stays.
+  if (current !== null && !isAncestor(cwd, current.commit, 'HEAD')) {
+    const tracked = new Set(scan.trackedPaths);
+    for (const [filePath, counts] of current.files) {
+      if (!tracked.has(filePath)) files.set(filePath, new Map(counts));
+    }
+  }
+  const next: BoundaryBaseline = { termsSha256, commit: head, files };
   if (!allowIncrease) {
-    const increases = boundaryBaselineIncreases(next, readBoundaryBaselineAt(cwd, 'origin/main'));
+    const increases = boundaryBaselineIncreases(next, current);
     if (increases.length > 0) {
-      for (const { key, code, before, after } of increases) {
-        console.error(`repo hygiene tree: refusing to raise #${key} ${code} from ${before} to ${after} compared with origin/main`);
+      for (const { path: filePath, key, before, after } of increases) {
+        console.error(`repo hygiene tree: refusing to raise ${maskPrivateText(filePath, terms.rules)} ${key} from ${before} to ${after}`);
       }
-      console.error(`repo hygiene tree: ${increases.length} count(s) would rise; ${BOUNDARY_BASELINE_PATH} was not written (only a term-list revision or the first baseline passes --allow-increase)`);
+      console.error(
+        `repo hygiene tree: ${increases.length} count(s) would rise; the private baseline was not written `
+          + '(the first baseline and a term-list revision pass --allow-increase)',
+      );
       return 1;
     }
   }
-  const target = path.join(cwd, BOUNDARY_BASELINE_PATH);
-  mkdirSync(path.dirname(target), { recursive: true });
-  writeFileSync(target, serializeBoundaryBaseline(next));
-  const entries = [...next.files.values()].filter((counts) => counts.size > 0).length;
+  writeBoundaryBaseline(env, next);
   console.log(
-    `repo hygiene tree: wrote ${BOUNDARY_BASELINE_PATH} (${entries} file entries, weight ${boundaryBaselineWeight(next)}, `
-      + `${mode === 'full' ? 'term rules included' : 'generic codes rewritten, term-affected counts kept'})`,
+    `repo hygiene tree: wrote the private baseline (${boundaryBaselineLabel(env)}): ${files.size} path(s), `
+      + `weight ${boundaryBaselineWeight(next)}, commit ${head.slice(0, 12)}`,
   );
   return 0;
 }
 
-/** Run --tree or --tree --write-baseline. Returns the exit code: 0 clean, 1 differences or refusal, 2 inconclusive. */
-export function runTreeCheck(cwd: string, terms: BoundaryTerms, options: TreeCheckOptions): number {
+/**
+ * Run --tree or --tree --write-baseline. Returns the exit code: 0 clean (a fall passes with one
+ * advisory line), 1 a rise, a new file with hits or a refused write, 2 inconclusive.
+ */
+export function runTreeCheck(
+  cwd: string,
+  terms: BoundaryTerms,
+  options: TreeCheckOptions,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
   try {
+    if (terms.load.status !== 'loaded' || terms.load.sha256 === null) {
+      if (options.writeBaseline) {
+        console.error(TREE_WRITE_WITHOUT_TERMS_LINE);
+        return 2;
+      }
+      console.log(TREE_SKIPPED_LINE);
+      return 0;
+    }
     if (!refHasCommit(cwd, 'HEAD')) throw new TreeScanInconclusive('HEAD has no commit');
-    const head = readBoundaryBaselineAt(cwd, 'HEAD');
-    const loaded = terms.load.status === 'loaded';
-    // No baseline file means nothing was built from any term list: everything is new.
-    const sameTerms = loaded && (!head.present || terms.load.sha256 === head.termsSha256);
-    if (!options.writeBaseline && loaded && !sameTerms && terms.load.required) {
-      console.error(
-        `${TREE_MISMATCH_LINE}. WHATSOUP_REQUIRE_PRIVATE_TERMS=1 refuses that: rebuild it with ${WRITE_BASELINE_COMMAND} -- --allow-increase`,
-      );
+    const baseline = readBoundaryBaseline(env);
+    if (options.writeBaseline) {
+      return writeBaseline(cwd, env, terms, terms.load.sha256, baseline, options.allowIncrease);
+    }
+    const sameTerms = baseline !== null && baseline.termsSha256 === terms.load.sha256;
+    if (baseline !== null && !sameTerms && terms.load.required) {
+      console.error(`${TREE_MISMATCH_LINE}. WHATSOUP_REQUIRE_PRIVATE_TERMS=1 refuses that: rebuild it with ${FIRST_BASELINE_COMMAND}`);
       return 2;
     }
-    const mode: TreeCompareMode = options.writeBaseline ? (loaded ? 'full' : 'generic') : (sameTerms ? 'full' : 'generic');
-    if (!loaded) console.error(TREE_ABSENT_LINE);
-    else if (!options.writeBaseline && !sameTerms) console.error(TREE_MISMATCH_LINE);
-    const scan = scanHeadTree(cwd, mode === 'full' ? terms.rules : []);
-    if (options.writeBaseline) return writeBaseline(cwd, scan, mode, terms, head, options.allowIncrease);
+    const scan = scanHeadTree(cwd, terms.rules);
+    if (baseline === null) {
+      console.error(`repo hygiene tree: no private baseline (${boundaryBaselineLabel(env)}); build the first one with ${FIRST_BASELINE_COMMAND}`);
+    } else if (!sameTerms) {
+      console.error(TREE_MISMATCH_LINE);
+    }
+    const compared = (key: CountKey): boolean => baseline === null || sameTerms || key.startsWith('fallback:');
+    const deltas = compareTreeToBaseline(scan, baseline, compared);
+    const failures = deltas.filter((delta) => delta.kind !== 'fall');
     const format = createFindingFormatter(terms.rules);
-    const deltas = compareTreeToBaseline(scan, head, mode);
-    for (const delta of deltas) printDelta(delta, scan, format);
-    if (deltas.length > 0) {
-      console.error(`repo hygiene tree: ${deltas.length} difference(s) from ${BOUNDARY_BASELINE_PATH}`);
+    for (const delta of failures) printDelta(delta, scan, format);
+    const falls = deltas.length - failures.length;
+    if (falls > 0) {
+      console.log(`repo hygiene tree: ${falls} count(s) fell below the private baseline; ${WRITE_BASELINE_COMMAND} lowers it`);
+    }
+    if (failures.length > 0) {
+      console.error(`repo hygiene tree: ${failures.length} rise(s) or new file(s) with private-name hits`);
       return 1;
     }
     console.log(
       `repo hygiene tree passed: ${scan.trackedPaths.length} tracked path(s), ${scan.textFileCount} text file(s), `
-        + `${head.files.size} baselined file entr${head.files.size === 1 ? 'y' : 'ies'}`,
+        + `${baseline?.files.size ?? 0} baselined path(s)`,
     );
     return 0;
   } catch (error) {
@@ -774,7 +844,7 @@ export function runTreeCheck(cwd: string, terms: BoundaryTerms, options: TreeChe
       return 2;
     }
     if (error instanceof BoundaryBaselineError) {
-      console.error(`repo hygiene tree: INCONCLUSIVE — ${error.message}`);
+      console.error(`repo hygiene tree: INCONCLUSIVE — ${error.message} (${boundaryBaselineLabel(env)})`);
       return 2;
     }
     throw error;

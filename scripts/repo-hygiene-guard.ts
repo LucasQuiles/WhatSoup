@@ -2175,11 +2175,15 @@ Modes:
                         for leaked secret shapes. Report-only; exit code stays 0.
   --commit-msg <file>   Scan a commit message file.
   --tree                Scan every tracked file at HEAD (from git, not the working tree) and
-                        every tracked path name; compare per file and rule code with
-                        scripts/boundary-baseline.json. A finding with no line number is the
-                        path name itself.
-  --write-baseline      With --tree: rewrite scripts/boundary-baseline.json from HEAD. Refuses
-                        to raise a count or add a file entry compared with origin/main.
+                        every tracked path name with the term and fallback rules; compare per
+                        path and rule with the private baseline (WHATSOUP_BOUNDARY_BASELINE_FILE,
+                        else ~/.config/whatsoup/boundary-baseline.json, never committed). A rise
+                        or a new file with hits fails; a fall passes with one advisory line.
+                        Skipped (exit 0) without a private term file. A finding with no line
+                        number is the path name itself.
+  --write-baseline      With --tree: rewrite the private baseline from HEAD. Refuses to raise a
+                        count, add a path or follow a new term file, and refuses unless
+                        origin/main is an ancestor of HEAD.
   --allow-increase      With --write-baseline: accept rises (first baseline, term-list revision).
   --text <file>         Scan one text file (a PR title and body, an issue, a comment).
   --refs [file]         Scan ref names, one per line, or pre-push hook lines from stdin.
