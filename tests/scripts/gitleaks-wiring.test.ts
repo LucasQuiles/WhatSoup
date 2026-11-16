@@ -432,18 +432,6 @@ describe('Quality workflow scan step, run under bash with a fake gitleaks on PAT
     expect(argOf(fake, '--config')).toBe('.gitleaks.toml');
   });
 
-  it.each([
-    ['a base commit missing from the checkout', 'c'.repeat(40)],
-  ])('fails closed with one fixed line on %s, before any scan', (_label, base) => {
-    const fake = writeFakeGitleaks(bin, { name: 'gitleaks', version: GITLEAKS_VERSION });
-    const result = runScan({ EVENT_NAME: 'pull_request', PR_BASE_SHA: base, PR_HEAD_SHA: commits.head });
-    expect(result).toEqual({
-      status: 1,
-      lines: ['gitleaks: cannot read .gitleaks.toml from the base commit; the scan fails closed'],
-    });
-    expect(existsSync(fake.calls)).toBe(false);
-  });
-
   // Events are built when each case runs: the commits exist only after beforeEach.
   it.each<[string, () => Record<string, string>]>([
     ['a pull_request with an empty base', () => ({ EVENT_NAME: 'pull_request', PR_BASE_SHA: '', PR_HEAD_SHA: commits.head })],
@@ -453,7 +441,7 @@ describe('Quality workflow scan step, run under bash with a fake gitleaks on PAT
     const fake = writeFakeGitleaks(bin, { name: 'gitleaks', version: GITLEAKS_VERSION });
     expect(runScan(event())).toEqual({
       status: 1,
-      lines: ['gitleaks: the event gives no usable change range (a missing or malformed base or head, an all-zero base or head, or an unknown head); the scan fails closed'],
+      lines: ['gitleaks: the event gives no usable change range (a base or head that is missing, malformed, all-zero or not a commit); the scan fails closed'],
     });
     expect(existsSync(fake.calls)).toBe(false);
   });
@@ -472,7 +460,32 @@ describe('Quality workflow scan step, run under bash with a fake gitleaks on PAT
     const fake = writeFakeGitleaks(bin, { name: 'gitleaks', version: GITLEAKS_VERSION });
     expect(runScan(event())).toEqual({
       status: 1,
-      lines: ['gitleaks: the event gives no usable change range (a missing or malformed base or head, an all-zero base or head, or an unknown head); the scan fails closed'],
+      lines: ['gitleaks: the event gives no usable change range (a base or head that is missing, malformed, all-zero or not a commit); the scan fails closed'],
+    });
+    expect(existsSync(fake.calls)).toBe(false);
+  });
+
+  /** The id of an object in the test repository, such as a tree or a blob, which is not a commit. */
+  const objectId = (spec: string): string => execFileSync('git', ['rev-parse', spec], {
+    cwd: repo,
+    env: isolatedGitEnv(),
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+
+  // A pull request's or merge group's base and head must be commit objects themselves, with no
+  // peeling. A tree id as the base would otherwise let git show read a .gitleaks.toml that no
+  // commit holds: HEAD's tree holds one.
+  it.each<[string, () => Record<string, string>]>([
+    ['a pull_request whose base is a tree id', () => ({ EVENT_NAME: 'pull_request', PR_BASE_SHA: objectId('HEAD^{tree}'), PR_HEAD_SHA: commits.head })],
+    ['a merge_group whose head is a tree id', () => ({ EVENT_NAME: 'merge_group', MERGE_GROUP_BASE_SHA: commits.base, MERGE_GROUP_HEAD_SHA: objectId('HEAD^{tree}') })],
+    ['a pull_request whose base is a blob id', () => ({ EVENT_NAME: 'pull_request', PR_BASE_SHA: objectId('HEAD:.gitleaks.toml'), PR_HEAD_SHA: commits.head })],
+    ['a pull_request whose well-formed base names no object', () => ({ EVENT_NAME: 'pull_request', PR_BASE_SHA: 'c'.repeat(40), PR_HEAD_SHA: commits.head })],
+  ])('refuses %s, which is not a commit, with the same fixed line, before any scan', (_label, event) => {
+    const fake = writeFakeGitleaks(bin, { name: 'gitleaks', version: GITLEAKS_VERSION });
+    expect(runScan(event())).toEqual({
+      status: 1,
+      lines: ['gitleaks: the event gives no usable change range (a base or head that is missing, malformed, all-zero or not a commit); the scan fails closed'],
     });
     expect(existsSync(fake.calls)).toBe(false);
   });

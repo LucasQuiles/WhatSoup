@@ -662,7 +662,7 @@ jobs:
           esac
           zero="0000000000000000000000000000000000000000"
           refuse_range() {
-            echo "gitleaks: the event gives no usable change range (a missing or malformed base or head, an all-zero base or head, or an unknown head); the scan fails closed"
+            echo "gitleaks: the event gives no usable change range (a base or head that is missing, malformed, all-zero or not a commit); the scan fails closed"
             exit 1
           }
           # Base and head reach git and --log-opts only as 40-character lower-case hex commit ids: a
@@ -681,11 +681,15 @@ jobs:
             echo "gitleaks: the ${EVENT_NAME} event names no change range; nothing to scan"
             exit 0
           fi
-          # A pull request or merge group must also name an existing head commit.
+          # A pull request or merge group must name a base and a head that are commit objects
+          # themselves, with no peeling: a tree id as the base would let git show below read a
+          # .gitleaks.toml that no commit holds. An unknown id or an all-zero head fails here too.
           if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "merge_group" ]; then
-            if [ "$head" = "$zero" ] || ! git cat-file -e "${head}^{commit}" 2>/dev/null; then
-              refuse_range
-            fi
+            for value in "$base" "$head"; do
+              if ! [ "$(git cat-file -t "$value" 2>/dev/null)" = commit ]; then
+                refuse_range
+              fi
+            done
           fi
           # A pull request or merge group is judged by the base commit's .gitleaks.toml, so a change
           # cannot edit the rules or the allowlist that judge it. Only the change that adds the file
