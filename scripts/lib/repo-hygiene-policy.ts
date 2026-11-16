@@ -10,7 +10,17 @@ export interface GuardPattern {
   code: string;
   message: string;
   regex: RegExp;
+  /** True for a rule built from the private term file: the environment-token allowance never applies to it. */
+  readonly privateTerm?: boolean;
 }
+
+/**
+ * Range scans of commit text (messages and identities, in --commit-authors and exact-range
+ * receipts) block private-term hits only in commits whose committer date is at or after this
+ * instant. Older commits are already published; their term hits are counted, not blocked.
+ * Hits of the other rules block at any date, as before.
+ */
+export const BOUNDARY_COMMIT_MESSAGE_EPOCH = '2026-11-16T00:00:00Z';
 
 export const projectedFileSecretFixtureFiles = [
   'scripts/anonymize-private-literals.ts',
@@ -149,8 +159,10 @@ export const disallowedCommitAuthorPatterns: GuardPattern[] = [
   },
 ];
 
-export function isAllowedPatternMatch(filePath: string, code: string, token: string): boolean {
-  if (allowedEnvVarNameToken.test(token)) return true;
+export function isAllowedPatternMatch(filePath: string, code: string, token: string, privateTerm = false): boolean {
+  // A private term is a name the operator listed explicitly: an environment-variable shape
+  // (ZQ_ACCOUNT_KEY) is no reason to let it through.
+  if (!privateTerm && allowedEnvVarNameToken.test(token)) return true;
   if (code === 'personal-email' && allowedMessagingAddressRhs.test(token)) return true;
   if (code === 'personal-email' && isGitHubSshTransportPrincipal(token)) return true;
   // GitHub's support service mailbox appears in every dependabot commit's
@@ -412,7 +424,7 @@ export function patternMatches(pattern: GuardPattern, text: string): GuardPatter
 
 export function findDisallowedMatch(filePath: string, pattern: GuardPattern, text: string): string | null {
   for (const match of patternMatches(pattern, text)) {
-    if (!isAllowedPatternMatch(filePath, pattern.code, match.allowlistToken)) {
+    if (!isAllowedPatternMatch(filePath, pattern.code, match.allowlistToken, pattern.privateTerm === true)) {
       return match.token;
     }
   }

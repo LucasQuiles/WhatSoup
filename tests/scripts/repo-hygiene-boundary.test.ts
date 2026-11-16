@@ -15,8 +15,10 @@ import {
   main,
   privateHostLabels,
   run,
+  scanCommitAuthors,
   validateRepoHygieneExactRangeArtifact,
 } from '../../scripts/repo-hygiene-guard.ts';
+import { loadPrivateTerms, requirePrivateTermsUsable } from '../../scripts/lib/private-terms.ts';
 import { adaptRepoHygieneExactRangeReportOnly } from '../../scripts/lib/ci-control/native-adapter.ts';
 import { isolatedGitEnv } from '../helpers/isolated-git-env.ts';
 import { ABSENT_PRIVATE_TERMS_FILE, SYNTHETIC_PRIVATE_TERMS_FILE } from '../helpers/private-terms-env.ts';
@@ -45,14 +47,18 @@ function useTerms(file: string = SYNTHETIC_PRIVATE_TERMS_FILE): void {
   vi.stubEnv('WHATSOUP_PRIVATE_TERMS_FILE', file);
 }
 
-function git(cwd: string, args: string[]): string {
+function git(cwd: string, args: string[], extra: Readonly<Record<string, string>> = {}): string {
   return execFileSync('git', args, {
     cwd,
     encoding: 'utf8',
-    env: isolatedGitEnv(),
+    env: isolatedGitEnv(extra),
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trim();
 }
+
+// Committer dates far from any term-list epoch, so commit-text tests never depend on the clock.
+const BEFORE_EPOCH = { GIT_COMMITTER_DATE: '2001-01-01 00:00:00 +0000' };
+const AFTER_EPOCH = { GIT_COMMITTER_DATE: '2099-01-01 00:00:00 +0000' };
 
 function makeRepo(): string {
   const repo = tmp.make('repo');
@@ -70,10 +76,15 @@ function writeFiles(repo: string, files: Record<string, string>): void {
   }
 }
 
-function commit(repo: string, files: Record<string, string>, message = 'test: fixture'): string {
+function commit(
+  repo: string,
+  files: Record<string, string>,
+  message = 'test: fixture',
+  extra: Readonly<Record<string, string>> = {},
+): string {
   writeFiles(repo, files);
   git(repo, ['add', '-A']);
-  git(repo, ['commit', '-m', message]);
+  git(repo, ['commit', '-m', message], extra);
   return git(repo, ['rev-parse', 'HEAD']);
 }
 
@@ -196,7 +207,7 @@ describe('repo hygiene guard with a private term file', () => {
     const repo = makeRepo();
     commit(repo, { 'README.md': '# fixture\n' });
     git(repo, ['update-ref', 'refs/remotes/origin/main', 'HEAD']);
-    commit(repo, { 'a.txt': 'a\n' }, 'fix: restart zorblab\n\nasked Quorpine');
+    commit(repo, { 'a.txt': 'a\n' }, 'fix: restart zorblab\n\nasked Quorpine', AFTER_EPOCH);
 
     const result = capture(['--commit-authors'], repo);
 
@@ -638,8 +649,8 @@ describe('exact-range receipts carry term-rule causes without term text', () => 
     const input = { baseOid, remoteOid: null, localOid };
     const termsDigest = `sha256:${createHash('sha256').update(readFileSync(SYNTHETIC_PRIVATE_TERMS_FILE)).digest('hex')}`;
     const directions = [
-      { producer: SYNTHETIC_PRIVATE_TERMS_FILE, consumer: ABSENT_PRIVATE_TERMS_FILE, recorded: { status: 'loaded', termsSha256: termsDigest } },
-      { producer: ABSENT_PRIVATE_TERMS_FILE, consumer: SYNTHETIC_PRIVATE_TERMS_FILE, recorded: { status: 'absent', termsSha256: null } },
+      { producer: SYNTHETIC_PRIVATE_TERMS_FILE, consumer: ABSENT_PRIVATE_TERMS_FILE, recorded: { status: 'loaded', termsSha256: termsDigest, preEpochTermHits: 0 } },
+      { producer: ABSENT_PRIVATE_TERMS_FILE, consumer: SYNTHETIC_PRIVATE_TERMS_FILE, recorded: { status: 'absent', termsSha256: null, preEpochTermHits: 0 } },
     ];
     for (const { producer, consumer, recorded } of directions) {
       useTerms(producer);
@@ -659,6 +670,119 @@ describe('exact-range receipts carry term-rule causes without term text', () => 
       expect(validateRepoHygieneExactRangeArtifact(built.artifact, expected).ok).toBe(true);
       expect(adaptRepoHygieneExactRangeReportOnly(built.artifact, expected).outcome).toBe('pass');
     }
+  });
+});
+
+describe('commit identities and the commit-text epoch', () => {
+  const syntheticRules = () => requirePrivateTermsUsable(loadPrivateTerms({ WHATSOUP_PRIVATE_TERMS_FILE: SYNTHETIC_PRIVATE_TERMS_FILE }));
+
+  it('blocks term hits in commit text only from the epoch on, counts older ones, and keeps the other rules', () => {
+    useTerms();
+    const repo = makeRepo();
+    commit(repo, { 'README.md': '# fixture\n' });
+    git(repo, ['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+    commit(repo, { 'a.txt': 'a\n' }, 'fix: restart zorblab\n\nCo-Authored-By: Pat <pat@example.com>', BEFORE_EPOCH);
+    commit(repo, { 'b.txt': 'b\n' }, 'docs: ask Quorpine', AFTER_EPOCH);
+
+    const result = capture(['--commit-authors'], repo);
+
+    expect(result.exitCode).toBe(1);
+    // The older commit's trailer and address still block; its term hit is counted only.
+    expect(result.codes).toEqual(['commit-coauthor-trailer', 'personal-email', 'private-person']);
+    expect(result.lines.some((line) => line.includes('1 private-term hit(s) in commits older than the term-list epoch'))).toBe(true);
+    expectNoTermText(result.lines);
+  });
+
+  it('applies an explicit epoch: a commit one second before it is counted, one at it is blocked', () => {
+    const at = (iso: string) => ({
+      sha: 'a'.repeat(40),
+      name: 'Pat',
+      email: 'pat@users.noreply.github.com',
+      subject: 'fix',
+      message: 'fix: restart zorblab',
+      committerTime: Date.parse(iso) / 1000,
+    });
+    const tally = { olderTermHits: 0 };
+    expect(scanCommitAuthors([at('2026-11-15T23:59:59Z')], syntheticRules(), '2026-11-16T00:00:00Z', tally)).toEqual([]);
+    expect(tally.olderTermHits).toBe(1);
+    expect(scanCommitAuthors([at('2026-11-16T00:00:00Z')], syntheticRules(), '2026-11-16T00:00:00Z').map((issue) => issue.code))
+      .toEqual(['private-host-label']);
+    // No committer time: blocking, as before.
+    const { committerTime: _unknown, ...undated } = at('2001-01-01T00:00:00Z');
+    expect(scanCommitAuthors([undated], syntheticRules(), '2026-11-16T00:00:00Z').map((issue) => issue.code)).toEqual(['private-host-label']);
+  });
+
+  it('scans author and committer identities with every term code except person names', () => {
+    useTerms();
+    const repo = makeRepo();
+    commit(repo, { 'README.md': '# fixture\n' });
+    git(repo, ['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+    commit(repo, { 'a.txt': 'a\n' }, 'fix: neutral change', {
+      ...AFTER_EPOCH,
+      GIT_AUTHOR_NAME: 'Quorpine Zed',
+      // Addresses are assembled at runtime so this file never carries an address literally.
+      GIT_AUTHOR_EMAIL: ['ops', 'corp-zz.example'].join('@'),
+      GIT_COMMITTER_NAME: 'Build Agent',
+      GIT_COMMITTER_EMAIL: ['agent', 'zorblab.local'].join('@'),
+    });
+
+    const result = capture(['--commit-authors'], repo);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.codes).toEqual(['private-domain', 'private-host-label']);
+    expectNoTermText(result.lines);
+  });
+
+  it('never lets the environment-token allowance pass an explicit term', () => {
+    const cwd = tmp.make('env-token');
+    const termsFile = join(cwd, 'private-terms.json');
+    writeFileSync(termsFile, JSON.stringify({
+      schema: 'whatsoup-private-terms',
+      version: 1,
+      terms: [{ id: 'A002', class: 'account-id', value: 'ZQ_ACCOUNT_KEY', match: 'literal', case: 'sensitive', replace: 'account-b' }],
+    }));
+    useTerms(termsFile);
+    const file = join(cwd, 'body.md');
+    writeFileSync(file, 'set ZQ_ACCOUNT_KEY first\n');
+
+    const result = capture(['--text', file], cwd);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.codes).toEqual(['private-account-id']);
+    expect(result.lines.join('\n')).not.toContain('ZQ_ACCOUNT_KEY');
+  });
+
+  it('counts an older commit\'s term hit in the receipt instead of blocking it', () => {
+    useTerms();
+    const repo = makeRepo();
+    const baseOid = commit(repo, { 'README.md': '# fixture\n' });
+    const olderOid = commit(repo, { 'src/x.ts': 'const clean = 1;\n' }, 'fix: restart zorblab', BEFORE_EPOCH);
+    const newerOid = commit(repo, { 'src/y.ts': 'const clean = 2;\n' }, 'fix: restart zorblab', AFTER_EPOCH);
+
+    const older = createRepoHygieneExactRangeArtifact(repo, { baseOid, remoteOid: null, localOid: olderOid });
+    expect(older.ok).toBe(true);
+    if (!older.ok) return;
+    const olderPayload = JSON.parse(Buffer.from(older.artifact.payloadBytes).toString('utf8')) as {
+      nativeCauses: string[];
+      privateTerms: { preEpochTermHits: number };
+    };
+    expect(olderPayload.nativeCauses).toEqual([]);
+    expect(olderPayload.privateTerms.preEpochTermHits).toBe(1);
+    expect(validateRepoHygieneExactRangeArtifact(older.artifact, {
+      baseOid,
+      remoteOid: null,
+      localOid: olderOid,
+      currentToolDigest: currentRepoHygieneToolDigest(),
+      currentPolicyDigest: currentRepoHygienePolicyDigest(),
+      expectedPayloadByteLength: older.artifact.binding.payloadByteLength,
+      expectedPayloadSha256: older.artifact.binding.payloadSha256,
+    }).ok).toBe(true);
+
+    const newer = createRepoHygieneExactRangeArtifact(repo, { baseOid: olderOid, remoteOid: null, localOid: newerOid });
+    expect(newer.ok).toBe(true);
+    if (!newer.ok) return;
+    const newerPayload = JSON.parse(Buffer.from(newer.artifact.payloadBytes).toString('utf8')) as { nativeCauses: string[] };
+    expect(newerPayload.nativeCauses).toEqual(['private-host-label']);
   });
 });
 

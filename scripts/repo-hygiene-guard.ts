@@ -31,6 +31,7 @@ import { canonicalizeBoundaryRun } from './lib/verification/boundary-run/shared.
 import { parseBoundaryJsonBytes } from './lib/verification/boundary-run/schema.ts';
 import { validateExactRangeProvenance } from './lib/ci-control/exact-range-provenance.ts';
 import {
+  BOUNDARY_COMMIT_MESSAGE_EPOCH,
   addedLinePatterns,
   allowedEnvVarNameToken,
   allowedMessagingAddressRhs,
@@ -153,6 +154,11 @@ export interface GuardIssue {
   /** The commit a history finding came from (12 hex characters); printed with the finding. */
   commit?: string;
   history?: 'history' | 'branch history';
+  /**
+   * A hit only the private-term layer finds (a term-file rule). Range scans of commit text
+   * block it only in commits from BOUNDARY_COMMIT_MESSAGE_EPOCH on.
+   */
+  termHit?: true;
 }
 
 export interface CommitAuthor {
@@ -161,6 +167,15 @@ export interface CommitAuthor {
   email: string;
   subject: string;
   message?: string;
+  committerName?: string;
+  committerEmail?: string;
+  /** Committer time in seconds; an unknown time is treated as at or after the epoch (blocking). */
+  committerTime?: number;
+}
+
+/** Term hits in commits older than the epoch: counted, not blocked. */
+export interface CommitTermTally {
+  olderTermHits: number;
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
@@ -329,6 +344,7 @@ function termRuleIssues(
     code,
     message: PRIVATE_TERM_CODE_MESSAGES[code] ?? code,
     ...location,
+    termHit: true as const,
   }));
 }
 
@@ -724,45 +740,79 @@ export function parseCommitAuthorLog(log: string): CommitAuthor[] {
     .map((record) => record.trim())
     .filter(Boolean)
     .map((record) => {
-      const [sha, name, email, subject, message] = record.split('\x00');
+      // The message (%B) cannot hold a NUL, so the committer fields after it split cleanly.
+      const [sha, name, email, subject, message, committerName, committerEmail, committerTime] = record.split('\x00');
       return {
         sha: sha ?? '',
         name: name ?? '',
         email: email ?? '',
         subject: subject ?? '',
         ...(message === undefined ? {} : { message }),
+        ...(committerName === undefined ? {} : { committerName }),
+        ...(committerEmail === undefined ? {} : { committerEmail }),
+        ...(committerTime === undefined || !/^[0-9]+$/.test(committerTime) ? {} : { committerTime: Number(committerTime) }),
       };
     })
     .filter((commit) => commit.sha !== '');
 }
 
-// Term rules apply to the commit message only, never to the author name or email: the
-// sanctioned public author identity is a real person's name.
+/** The epoch in seconds; an unparsable constant yields NaN, so every commit counts as recent (blocking). */
+function epochSeconds(epoch: string): number {
+  return Date.parse(epoch) / 1000;
+}
+
+// Identities get every term code except person names: the sanctioned public author identity
+// is a person's name by design, while a default `user@<host>.local` identity carries a machine
+// name and an address can carry a private domain or account.
 export function scanCommitAuthors(
   commits: CommitAuthor[],
   termRules: readonly PrivateTermRule[] = activePrivateTermRules(),
+  epoch: string = BOUNDARY_COMMIT_MESSAGE_EPOCH,
+  tally?: CommitTermTally,
 ): GuardIssue[] {
   const issues: GuardIssue[] = [];
+  const identityRules = termRules.filter((rule) => rule.code !== 'private-person');
+  const since = epochSeconds(epoch);
 
   for (const commit of commits) {
+    const location = `commit:${commit.sha.slice(0, 12)}`;
     const author = `${commit.name} ${commit.email}`;
     for (const pattern of disallowedCommitAuthorPatterns) {
       if (pattern.regex.test(author)) {
         issues.push({
           code: pattern.code,
           message: `${pattern.message} (${commit.subject || 'no subject'})`,
-          filePath: `commit:${commit.sha.slice(0, 12)}`,
+          filePath: location,
         });
         break;
       }
     }
 
+    const commitIssues: GuardIssue[] = [];
+    const identityCodes = new Set<string>();
+    const identities = [commit.name, commit.email, commit.committerName ?? '', commit.committerEmail ?? ''];
+    for (const text of identities.filter((identity) => identity !== '')) {
+      for (const code of boundaryCodesInLine('', text, identityRules, identityCodes)) {
+        identityCodes.add(code);
+        commitIssues.push({ code, message: PRIVATE_TERM_CODE_MESSAGES[code] ?? code, filePath: location, termHit: true });
+      }
+    }
     for (const issue of scanCommitMessage(commit.message ?? commit.subject, termRules)) {
-      issues.push({
+      commitIssues.push({
         ...issue,
         message: `${issue.message} (${commit.subject || 'no subject'})`,
-        filePath: `commit:${commit.sha.slice(0, 12)}`,
+        filePath: location,
       });
+    }
+
+    // Only a known committer time before the epoch exempts a term hit; the other rules block at any date.
+    const older = commit.committerTime !== undefined && commit.committerTime < since;
+    for (const issue of commitIssues) {
+      if (older && issue.termHit === true) {
+        if (tally !== undefined) tally.olderTermHits += 1;
+        continue;
+      }
+      issues.push(issue);
     }
   }
 
@@ -889,10 +939,13 @@ function commitAuthorBaseRef(cwd: string): string | null {
   return null;
 }
 
+// sha, author name and email, subject, message, committer name, email and time (seconds).
+const COMMIT_AUTHOR_LOG_FORMAT = '%H%x00%an%x00%ae%x00%s%x00%B%x00%cn%x00%ce%x00%ct%x1e';
+
 export function readCommitAuthors(cwd: string): CommitAuthor[] {
   const baseRef = commitAuthorBaseRef(cwd);
   if (!baseRef) {
-    const log = git(['log', '--format=%H%x00%an%x00%ae%x00%s%x00%B%x1e', '-1', 'HEAD'], cwd);
+    const log = git(['log', `--format=${COMMIT_AUTHOR_LOG_FORMAT}`, '-1', 'HEAD'], cwd);
     return parseCommitAuthorLog(log);
   }
   // Exclude commits already reachable from origin/main.  This matters when the
@@ -909,7 +962,7 @@ export function readCommitAuthors(cwd: string): CommitAuthor[] {
   // generated trailer automatically.
   const excludeArgs = gitRefExists(cwd, 'origin/main') ? ['--not', 'origin/main'] : [];
   const log = git(
-    ['log', '--format=%H%x00%an%x00%ae%x00%s%x00%B%x1e', `${baseRef}..HEAD`, ...excludeArgs],
+    ['log', `--format=${COMMIT_AUTHOR_LOG_FORMAT}`, `${baseRef}..HEAD`, ...excludeArgs],
     cwd,
   );
   return parseCommitAuthorLog(log);
@@ -1165,6 +1218,8 @@ function privateTermsPolicyBinding(): unknown {
 export interface RepoHygieneExactRangePrivateTermsV1 {
   status: 'loaded' | 'absent';
   termsSha256: `sha256:${string}` | null;
+  /** Term hits in commit text older than BOUNDARY_COMMIT_MESSAGE_EPOCH: counted here, not findings. */
+  preEpochTermHits: number;
 }
 
 function repoHygienePolicyProjection(): unknown {
@@ -1203,6 +1258,7 @@ function repoHygienePolicyProjection(): unknown {
     },
     sourceConsoleAllowedFiles: [...srcConsoleAllowedFiles].sort(),
     privateTerms: privateTermsPolicyBinding(),
+    commitTextTermEpoch: BOUNDARY_COMMIT_MESSAGE_EPOCH,
     historyPolicy: {
       patterns: [...secretPatternCodes].sort(),
       baselineSuppression: 'range-start-same-path-byte-identical-crlf-line',
@@ -1482,9 +1538,11 @@ export function createRepoHygieneExactRangeArtifact(
     // the same bytes (the loader hashes and compiles one read).
     const terms = resolveBoundaryTerms(process.env);
     const termRules = terms.rules;
-    const privateTerms: RepoHygieneExactRangePrivateTermsV1 = terms.load.status === 'loaded' && terms.load.sha256 !== null
-      ? { status: 'loaded', termsSha256: `sha256:${terms.load.sha256}` }
-      : { status: 'absent', termsSha256: null };
+    const termsStatus: Pick<RepoHygieneExactRangePrivateTermsV1, 'status' | 'termsSha256'> =
+      terms.load.status === 'loaded' && terms.load.sha256 !== null
+        ? { status: 'loaded', termsSha256: `sha256:${terms.load.sha256}` }
+        : { status: 'absent', termsSha256: null };
+    const commitTermTally: CommitTermTally = { olderTermHits: 0 };
     const initialToolBytes = readToolBytes();
     const initialPolicyDigest = policyDigest();
     const range = readExactCommitRange(cwd, validated);
@@ -1649,7 +1707,10 @@ export function createRepoHygieneExactRangeArtifact(
         email: metadata.authorEmail,
         subject: metadata.subject,
         message: metadata.message,
-      }], termRules)) {
+        committerName: metadata.committerName,
+        committerEmail: metadata.committerEmail,
+        committerTime: metadata.committerTime,
+      }], termRules, BOUNDARY_COMMIT_MESSAGE_EPOCH, commitTermTally)) {
         appendExactRangeFinding(findings, projectedFindingKeys, {
           cause: issue.code,
           observationKind: 'commit-metadata',
@@ -1691,7 +1752,7 @@ export function createRepoHygieneExactRangeArtifact(
       localOid: range.localOid,
       toolDigest: sha256Bytes(initialToolBytes),
       policyDigest: initialPolicyDigest,
-      privateTerms,
+      privateTerms: { ...termsStatus, preEpochTermHits: commitTermTally.olderTermHits },
       commitBindings,
       commitRangeDigest: sha256Canonical(range),
       metadataDigest: sha256Canonical(commitBindings),
@@ -1890,10 +1951,12 @@ function validateExactRangeReceipt(value: unknown): RepoHygieneExactRangeReceipt
     'nativeCauses', 'findings', 'limitations', 'createdAt', 'validUntil',
   ]);
   if (record === null) return null;
-  const privateTerms = strictRecord(record.privateTerms, ['status', 'termsSha256']);
+  const privateTerms = strictRecord(record.privateTerms, ['status', 'termsSha256', 'preEpochTermHits']);
   if (
     privateTerms === null
-    || (privateTerms.status === 'absent' && privateTerms.termsSha256 !== null)
+    || !safeInteger(privateTerms.preEpochTermHits)
+    // Without a term file no rule can produce a term hit.
+    || (privateTerms.status === 'absent' && (privateTerms.termsSha256 !== null || privateTerms.preEpochTermHits !== 0))
     || (privateTerms.status === 'loaded'
       && (typeof privateTerms.termsSha256 !== 'string' || !SHA256.test(privateTerms.termsSha256)))
     || (privateTerms.status !== 'absent' && privateTerms.status !== 'loaded')
@@ -2279,12 +2342,13 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
     return [];
   }
 
+  const commitTermTally: CommitTermTally = { olderTermHits: 0 };
   const issues = args.mode === 'commit-msg'
     ? scanCommitMessage(readInputFile(args.messageFile ?? '', '--commit-msg'), termRules)
     : args.mode === 'release-hygiene'
       ? scanTrackedFiles(cwd, termRules)
       : args.mode === 'commit-authors'
-        ? scanCommitAuthors(readCommitAuthors(cwd), termRules)
+        ? scanCommitAuthors(readCommitAuthors(cwd), termRules, BOUNDARY_COMMIT_MESSAGE_EPOCH, commitTermTally)
         : args.mode === 'branch-diff'
           ? scanBranchDiff(cwd, args.baseRef, termRules)
           : [
@@ -2292,6 +2356,12 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
               ...scanAddedLines(parseUnifiedDiffAddedLines(stagedDiff(cwd)), termRules),
             ];
 
+  if (commitTermTally.olderTermHits > 0) {
+    console.log(
+      `repo hygiene guard: ${commitTermTally.olderTermHits} private-term hit(s) in commits older than the term-list epoch `
+        + `(${BOUNDARY_COMMIT_MESSAGE_EPOCH}) were counted, not blocked`,
+    );
+  }
   if (issues.length > 0) {
     printIssues(issues, format);
     process.exitCode = 1;

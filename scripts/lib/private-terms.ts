@@ -75,6 +75,8 @@ export const PRIVATE_TERM_CODES: readonly string[] = Object.freeze(
 export interface PrivateTermRule {
   readonly code: string;
   readonly message: string;
+  /** Marks a term-file rule: no environment-token allowance applies to it (repo-hygiene-policy). */
+  readonly privateTerm: true;
   /** Detection form, built exactly as the reference matcher describes; never global. */
   readonly regex: RegExp;
   /**
@@ -269,6 +271,7 @@ function compileTerm(term: ValidTerm, topLevelContexts: readonly ContextForm[]):
     return Object.freeze({
       code,
       message: PRIVATE_TERM_CODE_MESSAGES[code]!,
+      privateTerm: true as const,
       regex: new RegExp(detection, flags),
       replaceRegex: new RegExp(replacement, `${flags}g`),
       coreRegex: new RegExp(`^${core}$`, flags),
