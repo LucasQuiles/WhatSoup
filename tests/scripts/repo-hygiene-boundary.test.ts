@@ -10,6 +10,7 @@ import { pathKey, parseBoundaryBaseline } from '../../scripts/lib/repo-hygiene-b
 import {
   canonicalRepoHygienePolicyProjection,
   createRepoHygieneExactRangeArtifact,
+  main,
   privateHostLabels,
   run,
   validateRepoHygieneExactRangeArtifact,
@@ -270,6 +271,103 @@ describe('repo hygiene guard without a private term file', () => {
   });
 });
 
+describe('no output line of any mode or failure path carries a term', () => {
+  // The command-line entry, in process: its error mapping is part of every mode's output.
+  function captureMain(argv: string[], cwd: string): Captured {
+    const lines: string[] = [];
+    const record = (...args: unknown[]) => {
+      lines.push(args.map(String).join(' '));
+    };
+    vi.spyOn(console, 'error').mockImplementation(record);
+    vi.spyOn(console, 'log').mockImplementation(record);
+    process.exitCode = undefined;
+    main(argv, cwd);
+    const exitCode = Number(process.exitCode ?? 0);
+    vi.restoreAllMocks();
+    return { lines, exitCode, codes: [] };
+  }
+
+  // A folder named after a synthetic term: every path below it holds that term.
+  function privateFolder(): string {
+    const folder = join(tmp.make('named'), 'zorblab');
+    mkdirSync(folder);
+    return folder;
+  }
+
+  it('withholds paths, refs and arguments on input, usage and unexpected-error paths', () => {
+    useTerms();
+    const folder = privateFolder();
+    const missing = join(folder, 'zorblab.txt');
+    const repo = makeRepo();
+    commit(repo, { 'README.md': '# fixture\n' });
+    const cases: Array<{ argv: string[]; cwd: string; exitCode: number }> = [
+      { argv: ['--text', missing], cwd: folder, exitCode: 1 },
+      { argv: ['--refs', missing], cwd: folder, exitCode: 1 },
+      { argv: ['--commit-msg', missing], cwd: folder, exitCode: 1 },
+      { argv: ['--branch-diff', '--base', 'zorblab'], cwd: repo, exitCode: 1 },
+      { argv: ['--scan-history', 'zorblab'], cwd: repo, exitCode: 2 },
+      { argv: ['--zorblab'], cwd: repo, exitCode: 2 },
+      // Not a repository: git fails, and its error text names the folder.
+      { argv: ['--staged'], cwd: folder, exitCode: 1 },
+    ];
+    for (const { argv, cwd, exitCode } of cases) {
+      const result = captureMain(argv, cwd);
+      expect(result.exitCode, argv[0]).toBe(exitCode);
+      expect(result.lines.length, argv[0]).toBeGreaterThan(0);
+      expectNoTermText(result.lines);
+    }
+    expect(captureMain(['--staged'], folder).lines.join('\n')).toContain('its text is withheld');
+  });
+
+  it('names no folder when the release-hygiene scope is empty', () => {
+    useTerms();
+    const repo = join(privateFolder(), 'repo');
+    mkdirSync(repo);
+    git(repo, ['init', '-b', 'main']);
+    const result = captureMain(['--release-hygiene'], repo);
+    expect(result.exitCode).toBe(2);
+    expect(result.lines.join('\n')).toContain('INCONCLUSIVE');
+    expectNoTermText(result.lines);
+  });
+
+  it('masks a term inside a path even where no detection rule matches the path', () => {
+    useTerms();
+    const repo = makeRepo();
+    commit(repo, { 'README.md': '# fixture\n' });
+    writeFiles(repo, { 'docs/zqline.md': 'see whatsoup@zqline\n', 'docs/myzorblab.md': 'ssh zorblab\n' });
+    git(repo, ['add', '-A']);
+    const result = capture(['--staged'], repo);
+    expect(result.exitCode).toBe(1);
+    expect(result.lines).toContain('docs/<private>.md:1 private-instance-label: Public repo text must not include private instance labels.');
+    expect(result.lines).toContain('docs/my<private>.md:1 private-host-label: Public repo text must not include private host labels.');
+    expectNoTermText(result.lines);
+  });
+
+  it('reports a term file JSON error by position, never by its text', () => {
+    const file = join(tmp.make('bad-json'), 'private-terms.json');
+    writeFileSync(file, '{"schema": "whatsoup-private-terms", "terms": [zorblab]}');
+    useTerms(file);
+    const result = captureMain(['--refs', file], tmp.make('cwd'));
+    expect(result.exitCode).toBe(2);
+    expect(result.lines.join('\n')).toContain('not valid JSON (the file named by WHATSOUP_PRIVATE_TERMS_FILE, position 47, line 1, column 48)');
+    expectNoTermText(result.lines);
+  });
+
+  it('reports a term regex that does not compile by its index only', () => {
+    const file = join(tmp.make('bad-regex'), 'private-terms.json');
+    writeFileSync(file, JSON.stringify({
+      schema: 'whatsoup-private-terms',
+      version: 1,
+      terms: [{ id: 'M001', class: 'machine', regex: 'zorblab(', match: 'word', case: 'sensitive' }],
+    }));
+    useTerms(file);
+    const result = captureMain(['--text', file], tmp.make('cwd'));
+    expect(result.exitCode).toBe(2);
+    expect(result.lines.join('\n')).toContain('terms[0]: regex does not compile');
+    expectNoTermText(result.lines);
+  });
+});
+
 describe('repo hygiene --tree and its baseline', () => {
   const baselinePath = (repo: string) => join(repo, 'scripts', 'boundary-baseline.json');
 
@@ -306,7 +404,7 @@ describe('repo hygiene --tree and its baseline', () => {
     expect(output).toContain('src/a.ts private-host-label: Public repo text must not include private host labels. (2 hit(s) in a file with no baseline entry)');
     expect(output).toContain('  src/a.ts:1 private-host-label:');
     expect(output).toContain('docs/home.md local-home-path:');
-    expect(output).toContain(`#${pathKey('notes/zorblab.md')} private-host-label:`);
+    expect(output).toContain('notes/<private>.md private-host-label:');
     expectNoTermText(result.lines);
   });
 

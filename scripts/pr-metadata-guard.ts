@@ -6,7 +6,13 @@ import { pathToFileURL } from 'node:url';
 import { parseClosedOptions } from './lib/cli-args.ts';
 import { cleanGitEnv } from './lib/guard-core.ts';
 import { PrivateTermsError } from './lib/private-terms.ts';
-import { resolveBoundaryTerms, scanPublicText } from './lib/repo-hygiene-boundary.ts';
+import { maskPrivateText, resolveBoundaryTerms, scanPublicText } from './lib/repo-hygiene-boundary.ts';
+
+// An issue or PR number can be a private account number that the term file names. The receipt
+// then withholds that number: the finding code stays, the number does not.
+function publicNumbers(numbers: readonly number[], rules: Parameters<typeof maskPrivateText>[1]): number[] {
+  return numbers.filter((value) => maskPrivateText(String(value), rules) === String(value));
+}
 
 export type GuardDecision = 'pass' | 'warn' | 'fail' | 'inconclusive';
 
@@ -313,7 +319,8 @@ export function runPrMetadataGuard(
     input = { title: '', body, base, head, target, defaultBranch, pullRequestNumber: null };
   }
 
-  const { base, head, target, defaultBranch, pullRequestNumber } = input;
+  const { base, head, target, defaultBranch } = input;
+  let { pullRequestNumber } = input;
   if (!isFullObjectId(base) || !isFullObjectId(head)) return inconclusive('pr-metadata.revision-invalid');
 
   // GitHub event payloads freeze base.sha at the base branch's tip when the event
@@ -365,12 +372,18 @@ export function runPrMetadataGuard(
     ].map(({ source, line, code }) => ({ source: source as PrTextFinding['source'], line, code })),
   };
 
-  const body = scanBody(input.body);
-  const findings: PrMetadataFinding[] = [...body.findings];
+  const keep = (numbers: readonly number[]): number[] => publicNumbers(numbers, terms.rules);
+  if (pullRequestNumber !== null && keep([pullRequestNumber]).length === 0) pullRequestNumber = null;
+  const scanned = scanBody(input.body);
+  const body = { ...scanned, intentionalIssueNumbers: keep(scanned.intentionalIssueNumbers) };
+  const findings: PrMetadataFinding[] = scanned.findings.map((finding) => ({
+    ...finding,
+    issueNumbers: keep(finding.issueNumbers),
+  }));
 
   const commitIssues = issueNumbers(commits);
   if (commitIssues.length > 0) {
-    findings.push({ code: 'pr-metadata.commit-closing-directive', issueNumbers: commitIssues });
+    findings.push({ code: 'pr-metadata.commit-closing-directive', issueNumbers: keep(commitIssues) });
   }
   if (text.textFindings.length > 0) findings.push({ code: 'pr-metadata.public-boundary-text', issueNumbers: [] });
 
@@ -410,7 +423,13 @@ function main(argv: readonly string[]): void {
     }
   }
 
-  const result = runPrMetadataGuard(argv, process.cwd(), stdin);
+  let result: PrMetadataGuardResult;
+  try {
+    result = runPrMetadataGuard(argv, process.cwd(), stdin);
+  } catch {
+    // An unexpected error's text can quote a path or the PR text; the receipt names a code only.
+    result = inconclusive('pr-metadata.unexpected-error');
+  }
   process.stdout.write(`${argv.includes('--json') ? JSON.stringify(result.receipt) : formatPrMetadataReceipt(result.receipt)}\n`);
   process.exitCode = result.exitCode;
 }

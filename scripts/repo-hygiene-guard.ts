@@ -114,9 +114,30 @@ export interface ParsedArgs {
   help: boolean;
 }
 
-/** A command-line usage error: exit code 2. */
+/** A command-line usage error: exit code 2. Its message never quotes an argument. */
 export class UsageError extends Error {
   readonly exitCode = 2;
+}
+
+/**
+ * An input the guard cannot use: a missing ref, an unreadable file, no merge base. Exit code 1,
+ * as before. The message is fixed text: a ref name, a path or git's own error text can hold a
+ * private name, so none is quoted.
+ */
+export class GuardInputError extends Error {
+  readonly exitCode = 1;
+}
+
+function readInputFile(file: string | number, flag: string): string {
+  try {
+    return readFileSync(file, 'utf8');
+  } catch {
+    throw new GuardInputError(`the ${flag} input cannot be read`);
+  }
+}
+
+function errorClass(error: unknown): string {
+  return error instanceof Error ? error.constructor.name : typeof error;
 }
 
 export interface AddedLine {
@@ -168,7 +189,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       if (next && !next.startsWith('--')) {
         const depth = Number(next);
         if (!Number.isInteger(depth) || depth <= 0) {
-          throw new UsageError(`--scan-history depth must be a positive integer: ${next}`);
+          // The value is not echoed: an argument can hold a private name.
+          throw new UsageError('--scan-history depth must be a positive integer');
         }
         args.historyDepth = depth;
         i += 1;
@@ -204,7 +226,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     } else if (args.mode === 'commit-msg' && !args.messageFile) {
       args.messageFile = arg;
     } else {
-      throw new UsageError(`Unknown argument: ${arg}`);
+      throw new UsageError(`Unknown argument at position ${i + 1}; see --help`);
     }
   }
 
@@ -754,7 +776,7 @@ function branchDiffBaseRef(cwd: string, requestedBaseRef?: string): string | nul
   const explicitBaseRef = requestedBaseRef?.trim();
   if (explicitBaseRef) {
     if (!gitRefExists(cwd, explicitBaseRef)) {
-      throw new Error(`--base ref does not exist: ${explicitBaseRef}`);
+      throw new GuardInputError('the --base ref does not exist');
     }
     return explicitBaseRef;
   }
@@ -782,7 +804,7 @@ function branchDiffBaseRef(cwd: string, requestedBaseRef?: string): string | nul
 function branchMergeBase(cwd: string, baseRef: string): string {
   const mergeBase = git(['merge-base', baseRef, 'HEAD'], cwd).trim();
   if (!mergeBase) {
-    throw new Error(`No merge base found between ${baseRef} and HEAD`);
+    throw new GuardInputError('No merge base found between the base ref and HEAD');
   }
   return mergeBase;
 }
@@ -794,7 +816,7 @@ export function scanBranchDiff(
 ): GuardIssue[] {
   const baseRef = branchDiffBaseRef(cwd, requestedBaseRef);
   if (!baseRef) {
-    throw new Error('No branch-diff base ref found; pass --base <ref> or fetch origin/main');
+    throw new GuardInputError('No branch-diff base ref found; pass --base <ref> or fetch origin/main');
   }
 
   const mergeBase = branchMergeBase(cwd, baseRef);
@@ -2170,8 +2192,8 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
 
   if (args.mode === 'text' || args.mode === 'refs') {
     const hits = args.mode === 'text'
-      ? scanPublicText('text', readFileSync(args.textFile ?? '', 'utf8'), termRules)
-      : scanRefNames(readFileSync(args.refsFile ?? 0, 'utf8'), termRules);
+      ? scanPublicText('text', readInputFile(args.textFile ?? '', '--text'), termRules)
+      : scanRefNames(readInputFile(args.refsFile ?? 0, '--refs'), termRules);
     const hitIssues = hits.map(issueForHit);
     if (hitIssues.length > 0) {
       printIssues(hitIssues, format);
@@ -2190,8 +2212,9 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
     try {
       historyIssues = scanCommitHistory(cwd, depth, termRules);
     } catch (err) {
+      // git's error text can quote a path or ref; name the error class only.
       console.error(
-        `repo hygiene history scan (advisory): skipped — ${(err as Error).message}`,
+        `repo hygiene history scan (advisory): skipped — the history could not be read (${errorClass(err)})`,
       );
       return [];
     }
@@ -2213,7 +2236,7 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
   if (args.mode === 'release-hygiene' && trackedFiles(cwd, releaseHygieneFiles).length === 0) {
     console.error(
       `repo hygiene guard: INCONCLUSIVE — none of the ${releaseHygieneFiles.length} release-hygiene ` +
-        `file(s) are tracked under ${cwd}. A release-hygiene scan over an empty tree certifies ` +
+        'file(s) are tracked in this repository. A release-hygiene scan over an empty tree certifies ' +
         'nothing, which is not a pass.',
     );
     process.exitCode = 2;
@@ -2221,7 +2244,7 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
   }
 
   const issues = args.mode === 'commit-msg'
-    ? scanCommitMessage(readFileSync(args.messageFile ?? '', 'utf8'), termRules)
+    ? scanCommitMessage(readInputFile(args.messageFile ?? '', '--commit-msg'), termRules)
     : args.mode === 'release-hygiene'
       ? scanTrackedFiles(cwd, termRules)
       : args.mode === 'commit-authors'
@@ -2243,12 +2266,28 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
   return issues;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+/**
+ * The command-line entry. A usage, input or term-file error prints its own fixed message and
+ * exits with its code (2 usage or term file, 1 input). Any other error prints its class and a
+ * fixed sentence only: its message (git's stderr, a file system error) can quote a private path,
+ * ref or name, and the stack goes nowhere.
+ */
+export function main(argv: string[] = process.argv.slice(2), cwd: string = process.cwd()): void {
   try {
-    run();
-  } catch (err) {
-    console.error((err as Error).message);
-    // Usage errors and term-file failures exit 2; any other failure exits 1.
-    process.exitCode = (err as { exitCode?: unknown }).exitCode === 2 ? 2 : 1;
+    run(argv, cwd);
+  } catch (error) {
+    if (error instanceof UsageError || error instanceof GuardInputError || error instanceof PrivateTermsError) {
+      console.error(`repo hygiene guard: ${error.message}`);
+      process.exitCode = error.exitCode;
+      return;
+    }
+    console.error(
+      `repo hygiene guard: unexpected ${errorClass(error)}; its text is withheld because it can quote a private path, ref or name`,
+    );
+    process.exitCode = 1;
   }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
 }

@@ -84,6 +84,12 @@ export interface PrivateTermRule {
   readonly replaceRegex: RegExp;
   /** The bare term core, anchored, used to read `{1}`-style groups from a replaced span. */
   readonly coreRegex: RegExp;
+  /**
+   * Masking form for output: the bare core with no boundary and no context, global. It matches
+   * wherever the term's text appears (inside a longer word, outside its contexts), so a printed
+   * path or ref never shows a term even where the detection form does not match it.
+   */
+  readonly maskRegex: RegExp;
   /** Replacement template; `{N}` is group N of the term's own regex. */
   readonly replace: string;
 }
@@ -266,6 +272,7 @@ function compileTerm(term: ValidTerm, topLevelContexts: readonly ContextForm[]):
       regex: new RegExp(detection, flags),
       replaceRegex: new RegExp(replacement, `${flags}g`),
       coreRegex: new RegExp(`^${core}$`, flags),
+      maskRegex: new RegExp(core, `${flags}g`),
       replace: term.replace,
     });
   } catch {
@@ -293,6 +300,118 @@ function readTermBytes(filePath: string): { status: 'absent' } | { status: 'unre
   }
 }
 
+/**
+ * How output names the term file: the variable when it names the file, else the default path.
+ * Never the resolved path: a home folder or a chosen folder name can be a private name, and a
+ * file that cannot be loaded gives no rules to mask it with.
+ */
+export function privateTermsPathLabel(env: NodeJS.ProcessEnv): string {
+  const configured = env[PRIVATE_TERMS_FILE_ENV];
+  return configured !== undefined && configured !== ''
+    ? `the file named by ${PRIVATE_TERMS_FILE_ENV}`
+    : '~/.config/whatsoup/private-terms.json';
+}
+
+const JSON_NUMBER = /-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/y;
+
+/**
+ * Offset of the first JSON syntax error, found by a minimal scanner, or null when the scanner
+ * finds none. JSON.parse error text quotes the input around the error (a term value, say), so
+ * only this offset is ever reported.
+ */
+function jsonErrorOffset(text: string): number | null {
+  let at = 0;
+  const fail = (): never => {
+    throw new RangeError(String(at));
+  };
+  const skipSpace = (): void => {
+    while (at < text.length && ' \t\n\r'.includes(text[at]!)) at += 1;
+  };
+  const scanString = (): void => {
+    at += 1;
+    while (at < text.length && text[at] !== '"') {
+      if (text.charCodeAt(at) < 0x20) fail();
+      if (text[at] !== '\\') {
+        at += 1;
+        continue;
+      }
+      at += 1;
+      if (text[at] === 'u') {
+        if (!/^[0-9a-fA-F]{4}$/.test(text.slice(at + 1, at + 5))) fail();
+        at += 5;
+      } else if (text[at] !== undefined && '"\\/bfnrt'.includes(text[at]!)) {
+        at += 1;
+      } else {
+        fail();
+      }
+    }
+    if (at >= text.length) fail();
+    at += 1;
+  };
+  const scanValue = (depth: number): void => {
+    if (depth > 64) fail();
+    skipSpace();
+    const open = text[at];
+    if (open === '{' || open === '[') {
+      const close = open === '{' ? '}' : ']';
+      at += 1;
+      skipSpace();
+      if (text[at] === close) {
+        at += 1;
+        return;
+      }
+      for (;;) {
+        skipSpace();
+        if (open === '{') {
+          if (text[at] !== '"') fail();
+          scanString();
+          skipSpace();
+          if (text[at] !== ':') fail();
+          at += 1;
+        }
+        scanValue(depth + 1);
+        skipSpace();
+        if (text[at] === ',') {
+          at += 1;
+          continue;
+        }
+        if (text[at] !== close) fail();
+        at += 1;
+        return;
+      }
+    }
+    if (open === '"') return scanString();
+    for (const word of ['true', 'false', 'null']) {
+      if (text.startsWith(word, at)) {
+        at += word.length;
+        return;
+      }
+    }
+    JSON_NUMBER.lastIndex = at;
+    const number = JSON_NUMBER.exec(text);
+    if (number === null) fail();
+    at += number![0].length;
+  };
+  try {
+    scanValue(0);
+    skipSpace();
+    if (at < text.length) fail();
+    return null;
+  } catch (error) {
+    if (error instanceof RangeError && /^[0-9]+$/.test(error.message)) return Number(error.message);
+    return null;
+  }
+}
+
+function jsonErrorPosition(text: string): string {
+  const offset = jsonErrorOffset(text);
+  if (offset === null) return 'position unknown';
+  const before = text.slice(0, offset);
+  const line = before.split('\n').length;
+  const column = offset - before.lastIndexOf('\n');
+  return `position ${offset}, line ${line}, column ${column}`;
+}
+
 const compiledBySha = new Map<string, PrivateTermRule[]>();
 
 /**
@@ -302,22 +421,31 @@ const compiledBySha = new Map<string, PrivateTermRule[]>();
  */
 export function loadPrivateTerms(env: NodeJS.ProcessEnv): PrivateTermsLoad {
   const required = privateTermsRequired(env);
+  const label = privateTermsPathLabel(env);
   const read = readTermBytes(privateTermsPath(env));
   if (read.status === 'absent') {
     return { status: 'absent', required, sha256: null, rules: [], problem: null };
   }
   if (read.status === 'unreadable') {
-    return { status: 'unreadable', required, sha256: null, rules: [], problem: 'private term file is unreadable' };
+    return { status: 'unreadable', required, sha256: null, rules: [], problem: `private term file is unreadable (${label})` };
   }
+  // One snapshot: these bytes are hashed, parsed and compiled; nothing re-reads the file.
   const sha256 = createHash('sha256').update(read.bytes).digest('hex');
   const cached = compiledBySha.get(sha256);
   if (cached !== undefined) return { status: 'loaded', required, sha256, rules: cached, problem: null };
+  const text = read.bytes.toString('utf8');
   let document: unknown;
   try {
-    document = JSON.parse(read.bytes.toString('utf8'));
+    document = JSON.parse(text);
   } catch {
-    // JSON.parse errors quote part of the input; never surface them.
-    return { status: 'invalid', required, sha256, rules: [], problem: 'private term file is not valid JSON' };
+    // JSON.parse error text quotes the input around the error; report a position only.
+    return {
+      status: 'invalid',
+      required,
+      sha256,
+      rules: [],
+      problem: `private term file is not valid JSON (${label}, ${jsonErrorPosition(text)})`,
+    };
   }
   try {
     const rules = compilePrivateTerms(document);
@@ -325,7 +453,7 @@ export function loadPrivateTerms(env: NodeJS.ProcessEnv): PrivateTermsLoad {
     return { status: 'loaded', required, sha256, rules, problem: null };
   } catch (error) {
     const detail = error instanceof InvalidTermsFile ? error.message : 'unexpected compile failure';
-    return { status: 'invalid', required, sha256, rules: [], problem: `private term file is invalid: ${detail}` };
+    return { status: 'invalid', required, sha256, rules: [], problem: `private term file is invalid (${label}): ${detail}` };
   }
 }
 

@@ -153,17 +153,48 @@ export function pathKey(filePath: string): string {
   return createHash('sha256').update(filePath, 'utf8').digest('hex').slice(0, 16);
 }
 
+/** The printed form of every term or fallback match inside a path, a ref name or a number. */
+export const PRIVATE_MASK = '<private>';
+
+const fallbackMaskRegexes: readonly RegExp[] = fallbackPrivatePatterns.map((pattern) =>
+  new RegExp(pattern.regex.source, pattern.regex.flags.includes('g') ? pattern.regex.flags : `${pattern.regex.flags}g`));
+
+/**
+ * `text` with every term match (the bare term, wherever it appears: inside a longer word or
+ * outside its contexts) and every fallback match replaced by `<private>`. Spans are collected on
+ * the original text and merged, so one term inside another is masked whole and no mask is
+ * matched again.
+ */
+export function maskPrivateText(text: string, termRules: readonly PrivateTermRule[]): string {
+  const spans: Array<readonly [number, number]> = [];
+  for (const regex of [...termRules.map((rule) => rule.maskRegex), ...fallbackMaskRegexes]) {
+    regex.lastIndex = 0;
+    for (let match = regex.exec(text); match !== null; match = regex.exec(text)) {
+      if (match[0] === '') regex.lastIndex += 1;
+      else spans.push([match.index, match.index + match[0].length]);
+    }
+  }
+  if (spans.length === 0) return text;
+  spans.sort((left, right) => left[0] - right[0]);
+  let masked = '';
+  let cursor = 0;
+  for (const [start, end] of spans) {
+    if (end <= cursor) continue;
+    if (start >= cursor) masked += `${text.slice(cursor, start)}${PRIVATE_MASK}`;
+    cursor = end;
+  }
+  return `${masked}${text.slice(cursor)}`;
+}
+
 /**
  * The single output path for findings in every mode. It receives only a location and a rule
  * code and prints a static message chosen by code, so a caller cannot route matched text, a
- * term id or a term value to the output. A location that itself matches a private-name rule
- * (a file or a branch named after a private host, say) prints as `#<pathKey>` instead.
+ * term id or a term value to the output. A location (a path, a branch, a source label) prints
+ * with every term or fallback match replaced by `<private>`.
  */
 export function createFindingFormatter(termRules: readonly PrivateTermRule[]): FindingFormatter {
-  const locationRules: readonly GuardPattern[] = [...fallbackPrivatePatterns, ...termRules];
   return (location, code) => {
-    const isPrivate = locationRules.some((rule) => rule.regex.test(location.file));
-    const label = isPrivate ? `#${pathKey(location.file)}` : location.file;
+    const label = maskPrivateText(location.file, termRules);
     const where = location.line === undefined ? label : `${label}:${location.line}`;
     const safeCode = RULE_CODE.test(code) ? code : 'unknown-rule';
     return `${where} ${safeCode}: ${RULE_MESSAGES.get(safeCode) ?? 'See the rule code.'}`;

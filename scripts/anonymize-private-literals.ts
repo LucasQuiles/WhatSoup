@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { escapeRegExp } from '../src/lib/regex-utils.ts';
 import { cleanGitEnv, normalizeRepoPath } from './lib/guard-core.ts';
+import { maskPrivateText } from './lib/repo-hygiene-boundary.ts';
 import {
   PRIVATE_TERMS_ABSENT_NOTICE,
   PrivateTermsError,
@@ -387,7 +388,8 @@ function run(argv = process.argv.slice(2), cwd = process.cwd()): number {
     const anonymized = anonymizeText(original, termRules);
     if (anonymized.replacements.length === 0 && anonymized.refused.length === 0) continue;
 
-    changes.push({ filePath, replacements: anonymized.replacements, refused: anonymized.refused });
+    // The printed path masks every term or fallback match: a file name can be a private name.
+    changes.push({ filePath: maskPrivateText(filePath, termRules), replacements: anonymized.replacements, refused: anonymized.refused });
     if (args.write && anonymized.replacements.length > 0) writeFileSync(fullPath, anonymized.text);
   }
   const refusedAny = changes.some((change) => change.refused.length > 0);

@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parse } from 'yaml';
 
 import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
-import { runPrMetadataGuard } from '../../scripts/pr-metadata-guard.ts';
+import { formatPrMetadataReceipt, runPrMetadataGuard } from '../../scripts/pr-metadata-guard.ts';
 import { isolatedGitEnv } from '../helpers/isolated-git-env.ts';
 import { SYNTHETIC_PRIVATE_TERMS_FILE, privateTermsTestEnv } from '../helpers/private-terms-env.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
@@ -558,6 +558,30 @@ describe('PR metadata guard', () => {
       exitCode: 2,
       receipt: { decision: 'inconclusive', errors: ['pr-metadata.commit-range-invalid'] },
     });
+  });
+
+  it('withholds an issue number that is a private account number, in both receipt formats', () => {
+    // A synthetic account number, assembled at runtime so no digit run sits in this file.
+    const accountNumber = ['44712', '34567'].join('');
+    const termsFile = path.join(tmp.make('terms'), 'private-terms.json');
+    writeFileSync(termsFile, JSON.stringify({
+      schema: 'whatsoup-private-terms',
+      version: 1,
+      terms: [{ id: 'A002', class: 'account-id', value: accountNumber, match: 'literal', case: 'sensitive' }],
+    }));
+    vi.stubEnv('WHATSOUP_PRIVATE_TERMS_FILE', termsFile);
+    const { repo, baseOid, headOid } = makeRangeRepo();
+    const result = runPrMetadataGuard(
+      ['--stdin', '--base', baseOid, '--head', headOid, '--target', 'main', '--default-branch', 'main'],
+      repo,
+      `Fix #${accountNumber}\n`,
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.receipt.textFindings).toContainEqual({ source: 'body', line: 1, code: 'private-account-id' });
+    expect(result.receipt.findings.map((finding) => finding.code)).toContain('pr-metadata.closing-directive-outside-section');
+    for (const output of [JSON.stringify(result.receipt), formatPrMetadataReceipt(result.receipt)]) {
+      expect(output).not.toContain(accountNumber);
+    }
   });
 
   it('emits only bounded JSON receipts without echoing the PR body', () => {
