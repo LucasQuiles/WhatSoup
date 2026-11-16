@@ -3,6 +3,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
+  isReadOnlyFromChatWorkspace,
   validateAgentInstructionsPath,
   type AgentInstructionsPathFailureReason,
 } from './lib/agent-instructions-path.ts';
@@ -16,17 +17,20 @@ export interface InstructionsPathPreflightResult {
   reason:
     | 'not_configured'
     | 'configured_file_ready'
+    | 'read_from_chat_workspace'
     | 'unsafe_config_file'
     | 'invalid_config'
     | AgentInstructionsPathFailureReason;
 }
 
-function allow(reason: 'not_configured' | 'configured_file_ready'): InstructionsPathPreflightResult {
+type AllowReason = 'not_configured' | 'configured_file_ready' | 'read_from_chat_workspace';
+
+function allow(reason: AllowReason): InstructionsPathPreflightResult {
   return { schemaVersion: 1, ok: true, decision: 'allow', reason };
 }
 
 function block(
-  reason: Exclude<InstructionsPathPreflightResult['reason'], 'not_configured' | 'configured_file_ready'>,
+  reason: Exclude<InstructionsPathPreflightResult['reason'], AllowReason>,
 ): InstructionsPathPreflightResult {
   return { schemaVersion: 1, ok: false, decision: 'block', reason };
 }
@@ -60,6 +64,12 @@ export function inspectInstructionsPathConfig(
 
   const cwd = agentOptions['cwd'];
   if (cwd !== undefined && typeof cwd !== 'string') return block('invalid_config');
+
+  // Config load leaves this path to the session's own read in its chat workspace
+  // (src/core/agent-config-validator.ts), so the preflight does not block it either.
+  if (agentOptions['sandboxPerChat'] === true && isReadOnlyFromChatWorkspace(instructionsPath)) {
+    return allow('read_from_chat_workspace');
+  }
 
   const result = validateAgentInstructionsPath({
     instructionsPath,

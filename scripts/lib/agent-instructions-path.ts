@@ -1,6 +1,7 @@
 // The validator lives in src/core because config load, discovery and the fleet
 // config routes now call it; this module keeps the preflight's import path.
 export {
+  isReadOnlyFromChatWorkspace,
   resolveAgentInstructionsPath,
   validateAgentInstructionsPath,
   type AgentInstructionsPathFailureReason,
