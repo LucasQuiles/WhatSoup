@@ -21,7 +21,7 @@ import {
 const INTAKE_ID = 'I'.repeat(22);
 const RECEIPT = 'R'.repeat(43);
 const SECRET = 'dummy-password-that-must-not-leave-the-consumer';
-const MFA_INTAKE_ID = 'M'.repeat(22);
+const SECOND_INTAKE_ID = 'M'.repeat(22);
 const MFA_CODE = 'dummy-mfa-code';
 
 type FetchCall = { url: string; init: RequestInit };
@@ -888,9 +888,9 @@ describe('fixed intake consumer', () => {
         if (targetUrl.endsWith(`/intakes/${INTAKE_ID}/consume`)) {
           return json(consumed({ resourceId: 'dummy-password', action: 'Verify password for two-step sign-in' }));
         }
-        if (targetUrl.endsWith(`/intakes/${MFA_INTAKE_ID}/consume`)) {
+        if (targetUrl.endsWith(`/intakes/${SECOND_INTAKE_ID}/consume`)) {
           return json(consumed({
-            id: MFA_INTAKE_ID, resourceId: 'dummy-mfa', kind: 'mfa', action: 'confirm_mfa',
+            id: SECOND_INTAKE_ID, resourceId: 'dummy-mfa', kind: 'mfa', action: 'confirm_mfa',
             operationId: 'tls-source-operation', value: MFA_CODE, receipt: 'Z'.repeat(43),
           }));
         }
@@ -904,10 +904,10 @@ describe('fixed intake consumer', () => {
           completions.push({ id: INTAKE_ID, body });
           return json({ id: INTAKE_ID, state: 'succeeded', operationResult: body.operationResult ?? null });
         }
-        if (targetUrl.endsWith(`/intakes/${MFA_INTAKE_ID}/complete`)) {
+        if (targetUrl.endsWith(`/intakes/${SECOND_INTAKE_ID}/complete`)) {
           const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-          completions.push({ id: MFA_INTAKE_ID, body });
-          return json({ id: MFA_INTAKE_ID, state: 'succeeded', operationResult: body.operationResult ?? null });
+          completions.push({ id: SECOND_INTAKE_ID, body });
+          return json({ id: SECOND_INTAKE_ID, state: 'succeeded', operationResult: body.operationResult ?? null });
         }
         throw new Error('unexpected Links route');
       },
@@ -920,9 +920,9 @@ describe('fixed intake consumer', () => {
     expect(target.passwordStarts()).toBe(1);
     expect(target.signIns()).toBe(0);
 
-    await expect(consumer.execute({ intakeId: MFA_INTAKE_ID, resourceId: 'dummy-mfa' }))
+    await expect(consumer.execute({ intakeId: SECOND_INTAKE_ID, resourceId: 'dummy-mfa' }))
       .resolves.toEqual({
-        id: MFA_INTAKE_ID, state: 'succeeded', operationResult: { phase: 'mfa', outcome: 'completed' },
+        id: SECOND_INTAKE_ID, state: 'succeeded', operationResult: { phase: 'mfa', outcome: 'completed' },
       });
     expect(target.signIns()).toBe(1);
     expect(completions).toEqual([
@@ -935,7 +935,7 @@ describe('fixed intake consumer', () => {
         },
       },
       {
-        id: MFA_INTAKE_ID,
+        id: SECOND_INTAKE_ID,
         body: {
           receipt: 'Z'.repeat(43),
           outcome: 'succeeded',
@@ -967,9 +967,9 @@ describe('fixed intake consumer', () => {
         if (targetUrl.endsWith(`/intakes/${INTAKE_ID}/consume`)) {
           return json(consumed({ resourceId: 'dummy-password', action: 'Verify password for two-step sign-in' }));
         }
-        if (targetUrl.endsWith(`/intakes/${MFA_INTAKE_ID}/consume`)) {
+        if (targetUrl.endsWith(`/intakes/${SECOND_INTAKE_ID}/consume`)) {
           return json(consumed({
-            id: MFA_INTAKE_ID, resourceId: 'dummy-mfa', kind: 'mfa', action: 'confirm_mfa',
+            id: SECOND_INTAKE_ID, resourceId: 'dummy-mfa', kind: 'mfa', action: 'confirm_mfa',
             operationId: 'tls-source-operation', value: 'wrong-mfa-code', receipt: 'Z'.repeat(43),
           }));
         }
@@ -985,10 +985,10 @@ describe('fixed intake consumer', () => {
           completions.push(body);
           return json({ id: INTAKE_ID, state: 'succeeded', operationResult: body.operationResult ?? null });
         }
-        if (targetUrl.endsWith(`/intakes/${MFA_INTAKE_ID}/complete`)) {
+        if (targetUrl.endsWith(`/intakes/${SECOND_INTAKE_ID}/complete`)) {
           const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
           completions.push(body);
-          return json({ id: MFA_INTAKE_ID, state: 'failed', operationResult: null });
+          return json({ id: SECOND_INTAKE_ID, state: 'failed', operationResult: null });
         }
         throw new Error('unexpected Links route');
       },
@@ -1001,8 +1001,8 @@ describe('fixed intake consumer', () => {
     expect(target.passwordStarts()).toBe(1);
     expect(target.signIns()).toBe(0);
 
-    await expect(consumer.execute({ intakeId: MFA_INTAKE_ID, resourceId: 'dummy-mfa' }))
-      .resolves.toEqual({ id: MFA_INTAKE_ID, state: 'failed' });
+    await expect(consumer.execute({ intakeId: SECOND_INTAKE_ID, resourceId: 'dummy-mfa' }))
+      .resolves.toEqual({ id: SECOND_INTAKE_ID, state: 'failed' });
     expect(target.signIns()).toBe(0);
     expect(completions).toEqual([
       {
