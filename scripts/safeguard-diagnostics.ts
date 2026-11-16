@@ -179,6 +179,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'unset WHATSOUP_SKIP_DOC_DRIFT WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT WHATSOUP_SKIP_NODE_PIN_CHECK WHATSOUP_SKIP_BOUNDARY_CHECK',
       'npm run guard:repo:release-hygiene',
       'npm run guard:repo:commit-authors',
+      'npm run guard:repo:tree',
       'npm run guard:publication:all',
       'npm run guard:doc-drift',
       'npm run guard:public-surface-drift',
