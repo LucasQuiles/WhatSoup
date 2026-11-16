@@ -175,6 +175,35 @@ describe('private term file loader', () => {
       .toBe('ssh host-12');
   });
 
+  it('applies a term\'s own contexts instead of the top-level list, for that term only', () => {
+    const file = writeTerms({
+      ...baseDocument,
+      contexts: ['whatsoup@{t}'],
+      terms: [
+        { id: 'W001', class: 'person-user', value: 'zqhome', match: 'context', case: 'sensitive', contexts: [homeForm('{t}', ''), ['', 'home', '{t}', ''].join('/')], replace: 'user' },
+        { id: 'W002', class: 'instance', value: 'zqhome', match: 'context', case: 'sensitive', contexts: ['instances/{t}/', 'com.whatsoup.{t}'], replace: 'bot-a' },
+        { id: 'W003', class: 'machine', value: 'zqother', match: 'context', case: 'sensitive', replace: 'host-a' },
+      ],
+    });
+    const rules = requirePrivateTermsUsable(loadPrivateTerms({ WHATSOUP_PRIVATE_TERMS_FILE: file }));
+
+    // The same value is a person only in home-folder forms and an instance only in instance forms.
+    expect(hitCodes(rules, homeForm('zqhome', 'x'))).toEqual(['private-person']);
+    expect(hitCodes(rules, ['', 'home', 'zqhome', 'x'].join('/'))).toEqual(['private-person']);
+    expect(hitCodes(rules, 'instances/zqhome/')).toEqual(['private-instance-label']);
+    expect(hitCodes(rules, 'com.whatsoup.zqhome')).toEqual(['private-instance-label']);
+    // A term with its own list ignores the top-level forms; a term without one keeps them.
+    expect(hitCodes(rules, 'whatsoup@zqhome')).toEqual([]);
+    expect(hitCodes(rules, 'zqhome')).toEqual([]);
+    expect(hitCodes(rules, 'whatsoup@zqother')).toEqual(['private-host-label']);
+    expect(hitCodes(rules, 'instances/zqother/')).toEqual([]);
+
+    const person = rules.find((rule) => rule.code === 'private-person')!;
+    const input = `${homeForm('zqhome', 'x')} instances/zqhome/`;
+    expect(input.replace(person.replaceRegex, (span) => expandPrivateTermReplacement(person, span)))
+      .toBe(`${homeForm('user', 'x')} instances/zqhome/`);
+  });
+
   const term = (fields: Record<string, unknown>) => ({ ...baseDocument, terms: [fields] });
   it.each<{ label: string; document: unknown }>([
     { label: 'not JSON, with a term value inside the broken input', document: '{"terms": [zorblab' },
@@ -188,6 +217,9 @@ describe('private term file loader', () => {
     { label: 'regex that does not compile', document: term({ id: 'F001', class: 'machine', regex: 'zmini([0-9]', match: 'word', case: 'sensitive' }) },
     { label: 'context term without contexts', document: term({ id: 'C001', class: 'instance', value: 'zqline', match: 'context', case: 'sensitive' }) },
     { label: 'context form without its marker', document: { ...baseDocument, contexts: ['whatsoup@zqline'] } },
+    { label: 'term contexts not an array', document: term({ id: 'C001', class: 'instance', value: 'zqline', match: 'context', case: 'sensitive', contexts: 'whatsoup@{t}' }) },
+    { label: 'term context form without its marker', document: term({ id: 'C001', class: 'instance', value: 'zqline', match: 'context', case: 'sensitive', contexts: ['whatsoup@zqline'] }) },
+    { label: 'context term with an empty own list', document: { ...baseDocument, contexts: ['whatsoup@{t}'], terms: [{ id: 'C001', class: 'instance', value: 'zqline', match: 'context', case: 'sensitive', contexts: [] }] } },
   ])('reports an invalid file ($label) without any term id or value', ({ document }) => {
     const load = loadPrivateTerms({ WHATSOUP_PRIVATE_TERMS_FILE: writeTerms(document) });
     expect(load.status).toBe('invalid');

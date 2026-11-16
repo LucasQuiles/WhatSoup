@@ -31,15 +31,26 @@ export interface AnonymizedReplacement {
   replacement: string;
 }
 
+export interface AnonymizedRefusal {
+  code: string;
+  count: number;
+  reason: 'would-create-mention';
+}
+
 export interface AnonymizedText {
   text: string;
   replacements: AnonymizedReplacement[];
+  /** Replacements left undone because they would have created a new `@login` mention. */
+  refused: AnonymizedRefusal[];
 }
 
 interface ReplacementState {
   records: Map<string, AnonymizedReplacement>;
   counters: Map<string, number>;
   values: Map<string, string>;
+  /** Lower-cased logins the original text already mentions. */
+  mentions: ReadonlySet<string>;
+  refused: Map<string, number>;
 }
 
 const textExtensions = new Set([
@@ -135,6 +146,37 @@ function replacementFor(
   return replacement;
 }
 
+// GitHub notifies the owner of every `@login` it finds, so a replacement must never create a
+// mention the original text did not have. A mention is `@` plus a login-shaped word with no word
+// character before the `@` (`name@host` is not one); logins compare case-insensitively.
+const MENTION = /(?<![A-Za-z0-9_])@([A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9]))*)/g;
+// A login is at most 39 characters, so this much text on each side covers any mention that
+// touches a replacement.
+const MENTION_WINDOW = 41;
+
+function mentionsIn(text: string): Set<string> {
+  return new Set([...text.matchAll(MENTION)].map((mention) => mention[1]!.toLowerCase()));
+}
+
+function createsMention(
+  input: string,
+  offset: number,
+  original: string,
+  replacement: string,
+  known: ReadonlySet<string>,
+): boolean {
+  const left = input.slice(Math.max(0, offset - MENTION_WINDOW), offset);
+  const right = input.slice(offset + original.length, offset + original.length + MENTION_WINDOW);
+  const window = `${left}${replacement}${right}`;
+  const from = left.length;
+  const to = left.length + replacement.length;
+  for (const mention of window.matchAll(MENTION)) {
+    const at = mention.index ?? 0;
+    if (at <= to && at + mention[0].length >= from && !known.has(mention[1]!.toLowerCase())) return true;
+  }
+  return false;
+}
+
 function replacePattern(
   text: string,
   state: ReplacementState,
@@ -144,9 +186,18 @@ function replacePattern(
 ): string {
   return text.replace(regex, (...args: unknown[]) => {
     const original = String(args[0]);
-    const groups = args.slice(1, -2) as string[];
+    // The callback arguments end with (offset, input), plus a groups object for named groups.
+    const tail = typeof args[args.length - 1] === 'object' && args[args.length - 1] !== null ? 3 : 2;
+    const offset = args[args.length - tail] as number;
+    const input = args[args.length - tail + 1] as string;
+    const groups = args.slice(1, args.length - tail) as string[];
     const match = [original, ...groups] as RegExpMatchArray;
-    return replacementFor(state, code, original, () => createReplacement(match));
+    const candidate = state.values.get(`${code}\0${original}`) ?? createReplacement(match);
+    if (createsMention(input, offset, original, candidate, state.mentions)) {
+      state.refused.set(code, (state.refused.get(code) ?? 0) + 1);
+      return original;
+    }
+    return replacementFor(state, code, original, () => candidate);
   });
 }
 
@@ -158,6 +209,8 @@ export function anonymizeText(text: string, termRules: readonly PrivateTermRule[
     records: new Map(),
     counters: new Map(),
     values: new Map(),
+    mentions: mentionsIn(text),
+    refused: new Map(),
   };
 
   let next = text;
@@ -237,9 +290,19 @@ export function anonymizeText(text: string, termRules: readonly PrivateTermRule[
   next = replacePattern(next, state, 'aws-secret', /((?:SECRET|AWS)[_A-Z]*[=:]\s*)([A-Za-z0-9/+=]{40})\b/g, (match) => `${match[1]}<aws-secret>`);
   next = replacePattern(next, state, 'private-key', /\b(BEGIN|END) (?:RSA |OPENSSH |EC )?PRIVATE KEY\b/g, (match) => `${match[1]} REDACTED PRIVATE KEY`);
 
+  const refused: AnonymizedRefusal[] = [...state.refused]
+    .map(([code, count]) => ({ code, count, reason: 'would-create-mention' as const }))
+    .sort((a, b) => a.code.localeCompare(b.code));
+  // Each replacement is checked on its own; two replacements in one pass could still form a
+  // mention together. Then nothing in this text is replaced, and the refusal says so.
+  const created = [...mentionsIn(next)].filter((login) => !state.mentions.has(login)).length;
+  if (created > 0) {
+    return { text, replacements: [], refused: [...refused, { code: 'mention-guard', count: created, reason: 'would-create-mention' }] };
+  }
   return {
     text: next,
     replacements: [...state.records.values()].sort((a, b) => a.code.localeCompare(b.code)),
+    refused,
   };
 }
 
@@ -322,11 +385,12 @@ function run(argv = process.argv.slice(2), cwd = process.cwd()): number {
     const fullPath = path.join(cwd, filePath);
     const original = readFileSync(fullPath, 'utf8');
     const anonymized = anonymizeText(original, termRules);
-    if (anonymized.replacements.length === 0) continue;
+    if (anonymized.replacements.length === 0 && anonymized.refused.length === 0) continue;
 
-    changes.push({ filePath, replacements: anonymized.replacements });
-    if (args.write) writeFileSync(fullPath, anonymized.text);
+    changes.push({ filePath, replacements: anonymized.replacements, refused: anonymized.refused });
+    if (args.write && anonymized.replacements.length > 0) writeFileSync(fullPath, anonymized.text);
   }
+  const refusedAny = changes.some((change) => change.refused.length > 0);
 
   if (args.json) {
     console.log(JSON.stringify({ ok: changes.length === 0, write: args.write, files: changes.length, changes }, null, 2));
@@ -336,12 +400,16 @@ function run(argv = process.argv.slice(2), cwd = process.cwd()): number {
     console.log(`${args.write ? 'Anonymized' : 'Would anonymize'} ${changes.length} file(s):`);
     for (const change of changes) {
       const summary = change.replacements.map((replacement) => `${replacement.code}=${replacement.count}`).join(', ');
-      console.log(`  ${change.filePath}: ${summary}`);
+      const refusedSummary = change.refused.map((refusal) => `${refusal.code}=${refusal.count}`).join(', ');
+      const parts = [summary, refusedSummary === '' ? '' : `refused (would create a new GitHub mention): ${refusedSummary}`];
+      console.log(`  ${change.filePath}: ${parts.filter((part) => part !== '').join('; ')}`);
     }
+    if (refusedAny) console.log('Refused replacements leave the original text; edit those lines by hand.');
     if (!args.write) console.log('Run again with --write to update files.');
   }
 
-  return args.write || changes.length === 0 ? 0 : 1;
+  // A refused replacement leaves a private literal in place, so the run cannot report success.
+  return (args.write || changes.length === 0) && !refusedAny ? 0 : 1;
 }
 
 function printHelp(): void {

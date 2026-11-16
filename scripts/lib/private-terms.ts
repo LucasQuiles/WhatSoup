@@ -141,6 +141,8 @@ interface ValidTerm {
   readonly regex: string | null;
   readonly variants: boolean;
   readonly replace: string;
+  /** The term's own context forms; null means the top-level list applies. */
+  readonly contexts: readonly ContextForm[] | null;
 }
 
 class InvalidTermsFile extends Error {}
@@ -198,6 +200,9 @@ function validateTerm(raw: unknown, index: number): ValidTerm {
     regex,
     variants: raw.variants === true,
     replace: typeof raw.replace === 'string' ? raw.replace : 'redacted',
+    // A term's own list replaces the top-level list for that term only, so one value can be
+    // private in some forms (an instance name) without matching every top-level form.
+    contexts: raw.contexts === undefined ? null : validateContexts(raw.contexts, `${where}.contexts`),
   };
 }
 
@@ -215,19 +220,20 @@ interface ContextForm {
   readonly after: string;
 }
 
-function validateContexts(raw: unknown): ContextForm[] {
+function validateContexts(raw: unknown, where = 'contexts'): ContextForm[] {
   if (raw === undefined) return [];
-  if (!Array.isArray(raw)) throw new InvalidTermsFile('contexts must be an array of strings');
+  if (!Array.isArray(raw)) throw new InvalidTermsFile(`${where} must be an array of strings`);
   return raw.map((form, index) => {
-    if (typeof form !== 'string') throw new InvalidTermsFile(`contexts[${index}] must be a string`);
+    if (typeof form !== 'string') throw new InvalidTermsFile(`${where}[${index}] must be a string`);
     const parts = form.split('{t}');
-    if (parts.length !== 2) throw new InvalidTermsFile(`contexts[${index}] must contain {t} exactly once`);
+    if (parts.length !== 2) throw new InvalidTermsFile(`${where}[${index}] must contain {t} exactly once`);
     return { before: parts[0]!, after: parts[1]! };
   });
 }
 
-function compileTerm(term: ValidTerm, contexts: readonly ContextForm[]): PrivateTermRule {
+function compileTerm(term: ValidTerm, topLevelContexts: readonly ContextForm[]): PrivateTermRule {
   const where = `terms[${term.index}]`;
+  const contexts = term.contexts ?? topLevelContexts;
   // The core is grouped (non-capturing) so a core with a top-level alternation
   // keeps its meaning inside the boundaries; its own groups keep their numbers.
   const core = `(?:${termCore(term)})`;
