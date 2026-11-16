@@ -110,6 +110,8 @@ describe('classifyDrift — path classification', () => {
     ['policy/media-retention.json', 'POLICY_OR_WORKFLOW'],
     // The secret scanner's allowlist decides what the gitleaks job reports: policy, never UNKNOWN.
     ['.gitleaks.toml', 'POLICY_OR_WORKFLOW'],
+    ['.github/PULL_REQUEST_TEMPLATE.md', 'DISJOINT_METADATA'],
+    ['.github/ISSUE_TEMPLATE/config.yml', 'DISJOINT_METADATA'],
     ['package-lock.json', 'DEPENDENCY'],
     ['.nvmrc', 'DEPENDENCY'],
     ['src/lib/phone.ts', 'SHARED_RUNTIME'],
