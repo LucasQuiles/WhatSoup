@@ -125,7 +125,15 @@ describe('Quality workflow gitleaks job', () => {
       'pull_request) base="$PR_BASE_SHA"; head="$PR_HEAD_SHA"',
       'merge_group) base="$MERGE_GROUP_BASE_SHA"; head="$MERGE_GROUP_HEAD_SHA"',
       'push) base="$PUSH_BEFORE_SHA"; head="$PUSH_AFTER_SHA"',
-      '--log-opts="${base}..${head}" --config .gitleaks.toml --redact --no-banner',
+      '--log-opts="${base}..${head}" --config "$config" --ignore-gitleaks-allow',
+      '--gitleaks-ignore-path "$ignore_dir" --redact --no-banner',
+      'ignore_dir="$(mktemp -d "$RUNNER_TEMP/gitleaks-ignore.XXXXXX")"',
+      // A pull request or merge group is judged by the base commit's configuration, failing closed.
+      'if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "merge_group" ]; then',
+      'if git cat-file -e "${base}^{commit}" 2>/dev/null && ! git cat-file -e "${base}:.gitleaks.toml" 2>/dev/null; then',
+      'config="$RUNNER_TEMP/gitleaks-base.toml"',
+      'if ! git show "${base}:.gitleaks.toml" > "$config" 2>/dev/null; then',
+      'if [ -e .gitleaksignore ] || [ -L .gitleaksignore ]; then',
       '--report-format json --report-path "$report" --exit-code 42 . > "$scan_log" 2>&1',
       `count="$(jq 'length' "$report" 2>/dev/null)"`,
       'echo "gitleaks: the pre-push secret scan shows the rule ids on a local push"',
@@ -148,6 +156,8 @@ describe('Quality workflow gitleaks job', () => {
 interface FakeGitleaks {
   bin: string;
   calls: string;
+  /** What the folder named by --gitleaks-ignore-path held (`missing` when it was no folder). */
+  ignoreListing: string;
 }
 
 /**
@@ -160,6 +170,7 @@ function writeFakeGitleaks(
 ): FakeGitleaks {
   const bin = join(dir, options.name ?? 'fake-gitleaks');
   const calls = join(dir, 'fake-gitleaks-calls.log');
+  const ignoreListing = join(dir, 'fake-gitleaks-ignore-listing.txt');
   const reportSource = join(dir, 'fake-gitleaks-report.json');
   if (options.report !== undefined) writeFileSync(reportSource, JSON.stringify(options.report));
   writeFileSync(bin, [
@@ -167,17 +178,20 @@ function writeFakeGitleaks(
     `if [ "$1" = "version" ]; then printf '%s\\n' '${options.version}'; exit 0; fi`,
     `printf '%s\\n' "$*" >> '${calls}'`,
     'report=""',
+    'ignore=""',
     'while [ "$#" -gt 0 ]; do',
     '  if [ "$1" = "--report-path" ]; then report="$2"; fi',
+    '  if [ "$1" = "--gitleaks-ignore-path" ]; then ignore="$2"; fi',
     '  shift',
     'done',
+    `if [ -n "$ignore" ]; then if [ -d "$ignore" ]; then ls -A "$ignore"; else echo missing; fi > '${ignoreListing}'; fi`,
     options.report === undefined ? ':' : `cp '${reportSource}' "$report"`,
     options.noise === undefined ? ':' : `printf '%s\\n' '${options.noise}'; printf '%s\\n' '${options.noise}' >&2`,
     `exit ${options.exit ?? 0}`,
     '',
   ].join('\n'));
   chmodSync(bin, 0o755);
-  return { bin, calls };
+  return { bin, calls, ignoreListing };
 }
 
 describe('Quality workflow scan step, run under bash with a fake gitleaks on PATH', () => {
@@ -275,6 +289,70 @@ describe('Quality workflow scan step, run under bash with a fake gitleaks on PAT
       expect(output, leaked).not.toContain(leaked);
     }
   });
+
+  /** The value the scanner got for `flag`, from the fake's call log. */
+  const argOf = (fake: FakeGitleaks, flag: string): string | undefined =>
+    new RegExp(`(?:^| )${escapeRegex(flag)} (\\S+)`).exec(readFileSync(fake.calls, 'utf8'))?.[1];
+
+  it.each([
+    ['pull_request', 'PR'],
+    ['merge_group', 'MERGE_GROUP'],
+  ])('judges a %s with the base commit\'s .gitleaks.toml, and lets no allow comment or ignore file suppress a finding', (eventName, prefix) => {
+    const fake = writeFakeGitleaks(bin, { name: 'gitleaks', version: GITLEAKS_VERSION });
+    const result = runScan({ EVENT_NAME: eventName, [`${prefix}_BASE_SHA`]: commits.base, [`${prefix}_HEAD_SHA`]: commits.head });
+    expect(result).toEqual({ status: 0, lines: [`gitleaks: no findings in ${commits.base}..${commits.head}`] });
+    const config = argOf(fake, '--config')!;
+    expect(config).toBe(join(runnerTemp, 'gitleaks-base.toml'));
+    expect(readFileSync(config, 'utf8')).toBe('# base config\n');
+    expect(readFileSync(fake.calls, 'utf8')).toContain(' --ignore-gitleaks-allow --gitleaks-ignore-path ');
+    expect(argOf(fake, '--gitleaks-ignore-path')!.startsWith(join(runnerTemp, 'gitleaks-ignore.'))).toBe(true);
+    expect(readFileSync(fake.ignoreListing, 'utf8')).toBe('');
+  });
+
+  it('uses the change\'s own .gitleaks.toml only when the base commit has none, and says so', () => {
+    const fake = writeFakeGitleaks(bin, { name: 'gitleaks', version: GITLEAKS_VERSION });
+    const result = runScan({ EVENT_NAME: 'pull_request', PR_BASE_SHA: commits.plain, PR_HEAD_SHA: commits.base });
+    expect(result).toEqual({
+      status: 0,
+      lines: [
+        'gitleaks: the base commit has no .gitleaks.toml, so the change\'s own copy is used (true only for the change that adds it)',
+        `gitleaks: no findings in ${commits.plain}..${commits.base}`,
+      ],
+    });
+    expect(argOf(fake, '--config')).toBe('.gitleaks.toml');
+  });
+
+  it.each([
+    ['a base commit missing from the checkout', 'c'.repeat(40)],
+    ['a base that names no commit', 'not-a-commit'],
+  ])('fails closed with one fixed line on %s, before any scan', (_label, base) => {
+    const fake = writeFakeGitleaks(bin, { name: 'gitleaks', version: GITLEAKS_VERSION });
+    const result = runScan({ EVENT_NAME: 'pull_request', PR_BASE_SHA: base, PR_HEAD_SHA: commits.head });
+    expect(result).toEqual({
+      status: 1,
+      lines: ['gitleaks: cannot read .gitleaks.toml from the base commit; the scan fails closed'],
+    });
+    expect(existsSync(fake.calls)).toBe(false);
+  });
+
+  it('scans a push with the pushed commit\'s own .gitleaks.toml and an empty ignore folder', () => {
+    const fake = writeFakeGitleaks(bin, { name: 'gitleaks', version: GITLEAKS_VERSION });
+    expect(runScan(pushEvent())).toEqual({ status: 0, lines: [`gitleaks: no findings in ${commits.base}..${commits.head}`] });
+    expect(argOf(fake, '--config')).toBe('.gitleaks.toml');
+    expect(readFileSync(fake.ignoreListing, 'utf8')).toBe('');
+  });
+
+  it('refuses a checkout that holds a .gitleaksignore, which gitleaks reads from the scanned folder whatever -i names', () => {
+    const fake = writeFakeGitleaks(bin, { name: 'gitleaks', version: GITLEAKS_VERSION });
+    writeFileSync(join(repo, '.gitleaksignore'), 'notes.txt:generic-api-key:1\n');
+    for (const event of [pushEvent(), { EVENT_NAME: 'pull_request', PR_BASE_SHA: commits.base, PR_HEAD_SHA: commits.head }]) {
+      expect(runScan(event)).toEqual({
+        status: 1,
+        lines: ['gitleaks: the checkout holds a .gitleaksignore, which would suppress findings; the scan fails closed'],
+      });
+    }
+    expect(existsSync(fake.calls)).toBe(false);
+  });
 });
 
 describe('pre-push gitleaks step', () => {
@@ -350,9 +428,30 @@ describe('pre-push gitleaks step', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatch(new RegExp(
       `^git --log-opts ${first}\\.\\.${second} --config ${escapeRegex(join(repo, '.gitleaks.toml'))} `
+        + '--ignore-gitleaks-allow --gitleaks-ignore-path \\S+ '
         + '--redact --no-banner --log-level error --report-format json --report-path \\S+report-0\\.json '
         + '--exit-code 42 \\.$',
     ));
+  });
+
+  it('lets no allow comment or ignore file suppress a finding, as the Quality job does', () => {
+    const fake = writeFakeGitleaks(root, { version: GITLEAKS_VERSION });
+    captureErrors(() => runGitleaksStep(update(second, first), repo, 'origin', envFor(fake.bin)));
+    const call = readFileSync(fake.calls, 'utf8');
+    expect(call).toContain(' --ignore-gitleaks-allow --gitleaks-ignore-path ');
+    // Its own empty folder, removed with the step's temporary folder.
+    const ignorePath = /--gitleaks-ignore-path (\S+) /.exec(call)?.[1];
+    expect(ignorePath).toBeDefined();
+    expect(readFileSync(fake.ignoreListing, 'utf8')).toBe('');
+    expect(existsSync(ignorePath!)).toBe(false);
+
+    // gitleaks reads .gitleaksignore from the folder it scans whatever -i names, so the step refuses one.
+    rmSync(fake.calls);
+    writeFileSync(join(repo, '.gitleaksignore'), 'notes.txt:generic-api-key:1\n');
+    expect(() => captureErrors(() => runGitleaksStep(update(second, first), repo, 'origin', envFor(fake.bin)))).toThrow(new Error(
+      'pre-push guard: a .gitleaksignore at the top of the working tree would suppress gitleaks findings; push refused',
+    ));
+    expect(existsSync(fake.calls)).toBe(false);
   });
 
   it('scans a new ref, or an old tip this clone lacks, against the remote tracking refs only', () => {

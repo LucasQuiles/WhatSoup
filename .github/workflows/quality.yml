@@ -611,7 +611,9 @@ jobs:
   # rule id or matched text: no PR comment, no SARIF upload, no artifact. A scanner error prints
   # one fixed line with its exit code. Ranges: a pull request's base..head; a merge group's base..head (a
   # required check must report on merge_group or the queue stalls); a push's before..after. Any
-  # other event (schedule, a new tag) names no range and scans nothing.
+  # other event (schedule, a new tag) names no range and scans nothing. A pull request or merge
+  # group is judged by the base commit's .gitleaks.toml (fail closed), a push by its own; no
+  # gitleaks:allow comment and no .gitleaksignore can suppress a finding.
   gitleaks:
     name: gitleaks
     runs-on: ubuntu-24.04
@@ -662,12 +664,36 @@ jobs:
             echo "gitleaks: the ${EVENT_NAME} event names no change range; nothing to scan"
             exit 0
           fi
+          # A pull request or merge group is judged by the base commit's .gitleaks.toml, so a change
+          # cannot edit the rules or the allowlist that judge it. Only the change that adds the file
+          # finds no base copy; any other failure to read one fails closed. A push uses its own copy.
+          config=".gitleaks.toml"
+          if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "merge_group" ]; then
+            if git cat-file -e "${base}^{commit}" 2>/dev/null && ! git cat-file -e "${base}:.gitleaks.toml" 2>/dev/null; then
+              echo "gitleaks: the base commit has no .gitleaks.toml, so the change's own copy is used (true only for the change that adds it)"
+            else
+              config="$RUNNER_TEMP/gitleaks-base.toml"
+              if ! git show "${base}:.gitleaks.toml" > "$config" 2>/dev/null; then
+                echo "gitleaks: cannot read .gitleaks.toml from the base commit; the scan fails closed"
+                exit 1
+              fi
+            fi
+          fi
+          # gitleaks reads .gitleaksignore from the folder it scans whatever --gitleaks-ignore-path
+          # names, so a change could suppress its own findings with one. The repository tracks none.
+          if [ -e .gitleaksignore ] || [ -L .gitleaksignore ]; then
+            echo "gitleaks: the checkout holds a .gitleaksignore, which would suppress findings; the scan fails closed"
+            exit 1
+          fi
+          # Neither an inline gitleaks:allow comment nor an ignore file may suppress a finding.
+          ignore_dir="$(mktemp -d "$RUNNER_TEMP/gitleaks-ignore.XXXXXX")"
           report="$RUNNER_TEMP/gitleaks-report.json"
           # The scanner's own output stays in RUNNER_TEMP: its errors can quote paths, refs and config text.
           scan_log="$RUNNER_TEMP/gitleaks-output.txt"
           # Exit 42 marks leaks; gitleaks exits 1 on its own errors too, so leaks get their own code.
           status=0
-          gitleaks git --log-opts="${base}..${head}" --config .gitleaks.toml --redact --no-banner \
+          gitleaks git --log-opts="${base}..${head}" --config "$config" --ignore-gitleaks-allow \
+            --gitleaks-ignore-path "$ignore_dir" --redact --no-banner \
             --log-level error --report-format json --report-path "$report" --exit-code 42 . > "$scan_log" 2>&1 || status=$?
           if [ "$status" -eq 42 ]; then
             # The count only: a custom rule's id can itself be a secret or a private name.

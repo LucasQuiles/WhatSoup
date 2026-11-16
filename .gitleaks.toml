@@ -1,5 +1,8 @@
 # gitleaks configuration for the secret scan in the Quality workflow (job `gitleaks`) and in the
-# pre-push hook (scripts/pre-push-guard.ts). Both pass this file with --config.
+# pre-push hook (scripts/pre-push-guard.ts). Both pass this file with --config: the Quality job
+# judges a pull request or merge group with the base commit's copy (a change cannot edit the file
+# that judges it), and a push with its own. Neither honours gitleaks:allow comments or a
+# .gitleaksignore.
 #
 # The default rule set applies in full. The one allowlist names exactly the fixture paths that the
 # repository hygiene check already exempts from secret shapes: `fixtureFiles` and the

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { accessSync, constants, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -253,19 +253,40 @@ function leakCountsByRule(reportPath: string, printable: (ruleId: string) => boo
   return counts;
 }
 
-/** gitleaks' exit status for one range. Its output is discarded: it names files, commits and authors. */
+/**
+ * Whether the folder gitleaks scans holds a .gitleaksignore. gitleaks reads that file whatever
+ * --gitleaks-ignore-path names, so its entries would suppress findings. Any answer but "absent"
+ * counts as present.
+ */
+function scanFolderHasIgnoreFile(cwd: string): boolean {
+  try {
+    lstatSync(join(cwd, '.gitleaksignore'));
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
+}
+
+/**
+ * gitleaks' exit status for one range. Its output is discarded: it names files, commits and
+ * authors. Neither an inline gitleaks:allow comment nor an ignore file may suppress a finding:
+ * --ignore-gitleaks-allow, and --gitleaks-ignore-path naming an empty folder, as in the Quality job.
+ */
 function gitleaksExit(
   command: string,
   cwd: string,
   env: NodeJS.ProcessEnv,
   logOptions: string,
   reportPath: string,
+  emptyIgnoreDir: string,
 ): number {
   try {
     execFileSync(command, [
       'git',
       '--log-opts', logOptions,
       '--config', resolve(cwd, '.gitleaks.toml'),
+      '--ignore-gitleaks-allow',
+      '--gitleaks-ignore-path', emptyIgnoreDir,
       '--redact',
       '--no-banner',
       '--log-level', 'error',
@@ -311,6 +332,10 @@ export function runGitleaksStep(
     return;
   }
 
+  if (scanFolderHasIgnoreFile(cwd)) {
+    throw new Error('pre-push guard: a .gitleaksignore at the top of the working tree would suppress gitleaks findings; push refused');
+  }
+
   const pushed = nonBlankLines(input)
     .map(parsePrePushLine)
     .filter((update) => !isZeroObjectId(update.localSha));
@@ -321,12 +346,14 @@ export function runGitleaksStep(
 
   const reportDir = mkdtempSync(join(tmpdir(), 'whatsoup-gitleaks-'));
   try {
+    const emptyIgnoreDir = join(reportDir, 'no-ignore-file');
+    mkdirSync(emptyIgnoreDir);
     const leaks = new Map<string, number>();
     // The term file is read only when there is a rule id to check.
     let printable: ((ruleId: string) => boolean) | undefined;
     ranges.forEach((logOptions, index) => {
       const reportPath = join(reportDir, `report-${index}.json`);
-      const status = gitleaksExit(command, cwd, env, logOptions, reportPath);
+      const status = gitleaksExit(command, cwd, env, logOptions, reportPath, emptyIgnoreDir);
       if (status === 0) return;
       const counts = status === GITLEAKS_LEAK_EXIT ? leakCountsByRule(reportPath, printable ??= ruleIdPrinter(env)) : null;
       if (counts === null || counts.size === 0) {
