@@ -885,6 +885,10 @@ export async function buildActivationContext(host: ActivationHost, args: Activat
       } else if (mentionsReleaseRoot(rendered.staged!, args.expectCurrent)) {
         stagedOk = false;
         detail = 'rendered plist still references the expected-current release';
+      } else if (stagedParsed.label !== spec.label) {
+        // Apply writes this content to <spec.label>.plist and reloads that label; another Label is another job.
+        stagedOk = false;
+        detail = 'rendered plist Label is not the declared auxiliary label';
       }
     }
     check(`aux-plist-staged:${spec.label}`, stagedOk, detail);

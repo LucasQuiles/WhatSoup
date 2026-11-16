@@ -1,5 +1,5 @@
 /** Strict, declarative membership input for the host activation coordinator. */
-import { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
@@ -541,6 +541,16 @@ export async function buildHostUnitPlan(
   check('platform-macos-launchd', host.platform === 'darwin', host.platform);
   check('unit-declaration', declaration !== null, declaration === null ? 'invalid schema or label ownership' : `${declaration.members.length} members`);
   if (declaration === null) return { ready: false, document: { mode: options.mode, ready: false, preconditions: checks, members: [] }, applyContext: null };
+  // A member auxiliary is that member's own job, never another configured instance's primary label (an
+  // instance as fleet discovery finds it, <config root>/<name>/config.json): the declaration does not widen
+  // the member set (docs/runbooks/release-deployment.md:488-491). A declared member's label refuses at parse.
+  for (const member of declaration.members) {
+    for (const auxiliary of member.auxLabels) {
+      const named = instance(auxiliary.label.slice('com.whatsoup.'.length));
+      const configured = named !== null && existsSync(path.join(configRoot(), named, 'config.json'));
+      check(`member-aux-not-instance:${auxiliary.label}`, !configured, configured ? 'names another configured instance' : 'names no configured instance');
+    }
+  }
 
   const memberArgs = (member: HostUnitMember): ActivationArgs => ({
     instance: member.instance, release: options.release, expectCurrent: member.expectCurrent, auxLabels: member.auxLabels,
@@ -722,6 +732,10 @@ export async function buildHostUnitPlan(
         || mentionsReleaseRoot(staged!, expectCurrent)) {
         stagedOk = false;
         stagedDetail = 'staged plist does not select only the target release';
+      } else if (stagedParsed.label !== auxiliary.label) {
+        // Apply writes the staged content to <label>.plist and reloads that label.
+        stagedOk = false;
+        stagedDetail = 'staged plist Label is not the declared host auxiliary label';
       } else if (auxiliary.mode === 'setup-timer'
         && !sameArgs(stagedParsed.programArguments, rebaseProgramArguments(parsed.programArguments, expectCurrent, options.release))) {
         stagedOk = false;
