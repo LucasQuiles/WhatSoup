@@ -1568,12 +1568,19 @@ proof unless a WhatSoup-specific proof artifact says so.
 
 #### Per-chat MCP actor socket lifecycle
 
-In a non-sandbox `per_chat` runtime, the actor socket binds to the logical
-chat's canonical identity, including when WhatsApp delivers its messages
-through a different LID. Message reads and scheduled-message access follow that
-identity: a scheduled message stored under the LID delivery JID stays visible
-to its own chat. The delivery JID remains the outbound address; it does not
-replace the canonical conversation key. A `sandboxPerChat` runtime keys the
+A per-chat actor socket in a non-sandbox `per_chat` runtime binds to the logical
+chat's canonical identity, including when WhatsApp delivers the chat's messages
+through a different LID. The socket also accepts the key of its own delivery
+JID. For a LID DM mapped to a phone, the phone key and the LID key both name the
+socket's conversation, each written as a JID or as an encoded key. A read
+returns the rows stored under the key it passes. The two keys are not merged and
+stored rows are not re-keyed, so messages journaled under the LID before the
+mapping are read with the LID key. A tool that checks a stored message's
+conversation, such as `transcribe_audio`, admits a row under either key. A
+scheduled message stored under the LID delivery JID stays visible to its own
+chat. The delivery JID remains the outbound address. When LID resolution
+re-keys a live socket, its binding and delivery JID move to the new JID, and the
+socket then accepts that JID's key only. A `sandboxPerChat` runtime keys the
 socket by its already-folded workspace key, so that socket binds to the
 delivery JID.
 

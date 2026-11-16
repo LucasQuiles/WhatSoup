@@ -54,6 +54,8 @@ Complete reference for all 177 MCP tools exposed by WhatSoup. Tools are grouped 
 
 Conversation-bound sessions have an additional registry allowlist and target boundary even when their tier is `global`. For injected tools, the target comes from the binding and caller-supplied `chatJid`/supported `to` values are rejected. Unbound global tools with a declared `to` alias may accept that alias instead of `chatJid`; consult the individual schema. Optional caller parameters remain optional.
 
+A conversation-bound session's caller-supplied `conversation_key` must name its own conversation: the binding's canonical key, or the key of the binding's own delivery JID when the two differ (a LID DM mapped to a phone). Either may be written as a JID or as an encoded key, and a read returns the rows stored under the key passed; the keys are not merged. Tools that check a stored message's conversation, such as `transcribe_audio`, admit a row under either key. Any other key is refused.
+
 **Replay Policy**
 - `read_only` — safe to replay on recovery; read-only operation.
 - `safe` — idempotent write; safe to replay (e.g., set/overwrite).
