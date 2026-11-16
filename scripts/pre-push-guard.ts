@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { accessSync, constants, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { accessSync, constants, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -123,6 +123,37 @@ export function commandsForDecision(decision: PushDecision): string[] {
   if (decision === 'release') return ['verify:release'];
   if (decision === 'branch') return ['verify:push:branch'];
   return [];
+}
+
+/**
+ * The ref names a push publishes, scanned with the repository guard's --refs rules (the private
+ * term rules and the fallback labels). The lines reach the guard through a private file, not a
+ * pipe through two npm layers: the guard passes empty input, so a lost pipe would pass silently.
+ * Deleted refs are not scanned: removing a privately named remote ref is the remedy, not a leak.
+ */
+function scanPushedRefNames(updates: readonly RefUpdate[], cwd: string): void {
+  const published = updates.filter((update) => !isZeroObjectId(update.localSha));
+  if (published.length === 0) return;
+  const dir = mkdtempSync(join(tmpdir(), 'whatsoup-pushed-refs-'));
+  try {
+    const refsFile = join(dir, 'refs.txt');
+    const lines = published.map((update) => `${update.localRef} ${update.localSha} ${update.remoteRef} ${update.remoteSha}`);
+    writeFileSync(refsFile, `${lines.join('\n')}\n`, { mode: 0o600 });
+    console.error('pre-push guard: scanning the pushed ref names (npm run guard:repo:refs)');
+    try {
+      execFileSync('npm', ['run', 'guard:repo:refs', '--', refsFile], { cwd, timeout: 30_000, stdio: 'inherit' });
+    } catch (error) {
+      // Fixed text: the child error quotes its arguments. The guard's exit code (1 findings, 2 term file) is kept.
+      const failure: Error & { status?: number } = new Error(
+        'pre-push guard: the pushed ref names failed the public-boundary check (npm run guard:repo:refs); push refused',
+      );
+      const status = (error as { status?: unknown }).status;
+      if (typeof status === 'number' && status > 0) failure.status = status;
+      throw failure;
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /** The one gitleaks release the pre-push step runs; the Quality workflow downloads it sha256-verified. */
@@ -455,8 +486,9 @@ export function runPrePushGuard(
 
   dependencies.assertConsoleDependencies(cwd);
 
-  // The secret scan is quick next to the composite, so it runs first. Preservation and
-  // delete-only pushes returned above: they send no new commits to the public remote.
+  // The ref-name scan and the secret scan are quick next to the composite, so they run first.
+  // Preservation and delete-only pushes returned above: they publish no new ref or commit.
+  scanPushedRefNames(parsedUpdates, cwd);
   runGitleaksStep(input, cwd, remote?.remoteName ?? '');
 
   for (const script of commands) {

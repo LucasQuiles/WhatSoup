@@ -173,6 +173,19 @@ describe('push-gate manifest registry (#2224)', () => {
     }
   });
 
+  it('runs the private boundary tree check in both lanes, and never its baseline writer', () => {
+    expect(pkg.scripts['guard:repo:tree']).toBe('npm run guard:repo -- --tree');
+    for (const steps of [BRANCH_STEPS, RELEASE_STEPS]) {
+      const names = steps.map((step) => step.name);
+      expect(names.indexOf('guard:repo:tree')).toBe(names.indexOf('guard:repo:commit-authors') + 1);
+      expect(names).not.toContain('guard:repo:tree:write-baseline');
+    }
+    // The writer, the one-file text scan and the hook-fed ref scan stay out of the composite.
+    for (const name of ['guard:repo:tree:write-baseline', 'guard:repo:text', 'guard:repo:refs']) {
+      expect(ciOnlyNames.has(name), name).toBe(true);
+    }
+  });
+
   it('step names are unique within each lane (attribution is unambiguous)', () => {
     for (const steps of [BRANCH_STEPS, RELEASE_STEPS]) {
       const names = steps.map((step) => step.name);

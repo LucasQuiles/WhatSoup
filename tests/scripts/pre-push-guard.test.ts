@@ -57,6 +57,8 @@ const tagReleaseWorkflow = readFileSync(resolve(repoRoot, '.github/workflows/tag
 const guardPackageJson = JSON.parse(
   readFileSync(resolve(repoRoot, 'tools/whatsoup_guard/package.json'), 'utf8'),
 ) as { scripts: Record<string, string>; devDependencies?: Record<string, string> };
+// A push that publishes a ref hands its ref lines to guard:repo:refs through a temporary file.
+const REFS_SCAN_CALL = expect.stringMatching(/^run guard:repo:refs -- \S+\/refs\.txt$/);
 
 describe('pre-push guard classifier', () => {
   it('classifies delete-only ref updates as metadata-only', () => {
@@ -274,6 +276,7 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
         ).toBe('branch');
         expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
           'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
+          REFS_SCAN_CALL,
           'run verify:push:branch',
         ]);
       } finally {
@@ -318,6 +321,7 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
 
       expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
         'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
+        REFS_SCAN_CALL,
         'run verify:push:branch',
       ]);
       expect(events).toEqual([
@@ -484,6 +488,7 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
       expect(runPrePushGuard(input, root)).toBe('branch');
       expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
         'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
+        REFS_SCAN_CALL,
         'run verify:push:branch',
       ]);
       expect(existsSync(lifecycleMarker)).toBe(false);
@@ -567,6 +572,7 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
         expect(decision).toBe('branch');
         expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
           'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
+          REFS_SCAN_CALL,
           'run verify:push:branch',
         ]);
       } finally {
@@ -587,6 +593,7 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
         expect(decision).toBe('branch');
         expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
           'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
+          REFS_SCAN_CALL,
           'run verify:push:branch',
         ]);
       } finally {
@@ -646,6 +653,7 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
         })).toBe('branch');
         expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
           'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/sha256',
+          REFS_SCAN_CALL,
           'run verify:push:branch',
         ]);
       } finally {
@@ -1713,12 +1721,80 @@ describe('pre-push guard — preservation pushes to the preserve mirror', () => 
         )).toBe('branch');
         expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
           'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/fix/example',
+          REFS_SCAN_CALL,
           'run verify:push:branch',
         ]);
         expect(events).toEqual(['before', 'console', 'after']);
       } finally {
         spy.mockRestore();
       }
+    });
+  });
+});
+
+describe('pre-push guard — pushed ref names (guard:repo:refs)', () => {
+  // The stub logs each npm call's script name and, for guard:repo:refs, the content of the
+  // file it was handed, so the test proves the ref lines arrived rather than an empty input.
+  const withRefsStub = (refsExit: number, fn: (callsLog: string, refsLog: string) => void) => {
+    const root = mkdtempSync(resolve(tmpdir(), 'whatsoup-pre-push-refs-'));
+    const bin = resolve(root, 'bin');
+    const callsLog = resolve(root, 'npm-calls.log');
+    const refsLog = resolve(root, 'refs-input.log');
+    const originalPath = process.env['PATH'];
+    try {
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(resolve(bin, 'npm'), [
+        '#!/bin/sh',
+        `printf "%s\\n" "$1 $2" >> "${callsLog}"`,
+        `if [ "$2" = "guard:repo:refs" ]; then cat "$4" >> "${refsLog}"; exit ${refsExit}; fi`,
+        'exit 0',
+        '',
+      ].join('\n'));
+      chmodSync(resolve(bin, 'npm'), 0o755);
+      process.env['PATH'] = `${bin}:${originalPath ?? ''}`;
+      fn(callsLog, refsLog);
+    } finally {
+      if (originalPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = originalPath;
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+  const published = `refs/heads/feature/example ${'a'.repeat(40)} refs/heads/feature/example ${ZERO_SHA}`;
+
+  it('hands the published ref lines to guard:repo:refs through a file, and never the deleted ones', () => {
+    withRefsStub(0, (callsLog, refsLog) => {
+      const input = [published, `refs/heads/old-a ${ZERO_SHA} refs/heads/old-a ${'b'.repeat(40)}`].join('\n');
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        expect(runPrePushGuard(input, repoRoot, { assertConsoleDependencies: () => {} })).toBe('branch');
+      } finally {
+        spy.mockRestore();
+      }
+      expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
+        'run guard:git-estate',
+        'run guard:repo:refs',
+        'run verify:push:branch',
+      ]);
+      expect(readFileSync(refsLog, 'utf8')).toBe(`${published}\n`);
+    });
+  });
+
+  it.each([1, 2])('refuses the push before the composite when the ref scan exits %s, keeping that exit code', (refsExit) => {
+    withRefsStub(refsExit, (callsLog) => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      let failure: (Error & { status?: number }) | null = null;
+      try {
+        runPrePushGuard(published, repoRoot, { assertConsoleDependencies: () => {} });
+      } catch (error) {
+        failure = error as Error & { status?: number };
+      } finally {
+        spy.mockRestore();
+      }
+      expect(failure?.message).toBe(
+        'pre-push guard: the pushed ref names failed the public-boundary check (npm run guard:repo:refs); push refused',
+      );
+      expect(failure?.status).toBe(refsExit);
+      expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual(['run guard:git-estate', 'run guard:repo:refs']);
     });
   });
 });
