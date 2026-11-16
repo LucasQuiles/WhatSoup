@@ -717,14 +717,58 @@ describe('split literals: a term stored as fragments joined at run time', () => 
   const SPLIT_CODES = ['private-host-label', 'private-instance-label', 'private-tailnet-ip'];
   const HOST_MESSAGE = 'Public repo text must not include private host labels.';
 
-  it('builds the joined view of a line: lists with four joiners, chains with none', () => {
+  it('builds the joined view of a line only where the code joins: lists by their own joiner, chains with none', () => {
     expect(splitLiteralViews("x = ['zor', 'blab'].join('')")).toContain('zorblab');
     expect(splitLiteralViews('x = "qx" + `-bot`')).toEqual(['qx-bot']);
-    expect(splitLiteralViews("x = ['100', '1', '2', '3',]")).toContain('100.1.2.3');
-    expect(splitLiteralViews(CONTROL)).toEqual(['abcdef', 'ab.cd.ef', 'ab-cd-ef', 'ab_cd_ef']);
+    // A bare list is never joined by the code, so it builds nothing.
+    expect(splitLiteralViews("x = ['100', '1', '2', '3',]")).toEqual([]);
+    expect(splitLiteralViews(CONTROL)).toEqual([]);
     // One literal is not split, and a template with a substitution is not a literal.
     expect(splitLiteralViews("x = ['zorblab']")).toEqual([]);
     expect(splitLiteralViews('x = `zor${y}` + `blab`')).toEqual([]);
+  });
+
+  it('joins a list with the literal its .join names, directly or after one .map call', () => {
+    expect(splitLiteralViews("x = ['zor', 'blab'].join('')")).toEqual(['zorblab']);
+    expect(splitLiteralViews("x = ['100', '1', '2', '3'].join('.')")).toEqual(['100.1.2.3']);
+    expect(splitLiteralViews("x = ['zor', 'blab'].map(String).join('')")).toEqual(['zorblab']);
+    expect(splitLiteralViews("x = ['zor', 'blab'].map((part) => part.trim()).join('')")).toEqual(['zorblab']);
+    expect(splitLiteralViews("x = 'zor' + 'blab'")).toEqual(['zorblab']);
+    // No join, or a joiner that is not a literal: nothing is built.
+    expect(splitLiteralViews("const weights = ['100', '1', '2', '3'].map(Number);")).toEqual([]);
+    expect(splitLiteralViews("x = ['zor', 'blab'].join(separator)")).toEqual([]);
+    expect(splitLiteralViews("x = ['zor', 'blab'].join()")).toEqual([]);
+  });
+
+  it('never reconstructs a name across an escape', () => {
+    expect(splitLiteralViews(String.raw`x = 'zo\r' + 'blab'`)).toEqual([]);
+    expect(splitLiteralViews(String.raw`x = ['zo\r', 'blab'].join('')`)).toEqual([]);
+    expect(splitLiteralViews(String.raw`x = ['zor', 'blab'].join('\n')`)).toEqual([]);
+    // The fragment that holds the escape is skipped: only the plain fragments after it join.
+    expect(splitLiteralViews(String.raw`x = '\n' + 'zor' + 'blab'`)).toEqual(['zorblab']);
+  });
+
+  it('passes a list the code only maps and a chain across an escape, in --staged and --text', () => {
+    useTerms();
+    // Joined with '.', these four number strings would read as the synthetic address term.
+    const ORDINARY = [
+      "const weights = ['100', '1', '2', '3'].map(Number);",
+      String.raw`const h = 'zo\r' + 'blab';`,
+    ].join('\n');
+    const repo = makeRepo();
+    commit(repo, { 'README.md': '# fixture\n' });
+    writeFiles(repo, { 'src/ordinary.ts': `${ORDINARY}\n` });
+    git(repo, ['add', '-A']);
+    const staged = capture(['--staged'], repo);
+    expect(staged.codes).toEqual([]);
+    expect(staged.exitCode).toBe(0);
+
+    const cwd = tmp.make('ordinary-text');
+    const textFile = join(cwd, 'body.md');
+    writeFileSync(textFile, `${ORDINARY}\n`);
+    const text = capture(['--text', textFile], cwd);
+    expect(text.codes).toEqual([]);
+    expect(text.exitCode).toBe(0);
   });
 
   it('finds a split term in --staged, --branch-diff, --tree, --text and --commit-msg; an ordinary list passes', () => {

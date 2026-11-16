@@ -121,29 +121,63 @@ const QUOTED_LITERAL = [
   String.raw`"(?:[^"\\\r\n]|\\.)*"`,
   '`(?:[^`\\\\$\\r\\n]|\\\\.)*`',
 ].join('|');
-const SPLIT_LIST = new RegExp(String.raw`\[\s*(?:${QUOTED_LITERAL})(?:\s*,\s*(?:${QUOTED_LITERAL}))+\s*,?\s*\]`, 'g');
+const LITERAL_LIST = String.raw`\[\s*(?:${QUOTED_LITERAL})(?:\s*,\s*(?:${QUOTED_LITERAL}))+\s*,?\s*\]`;
+// One call's arguments on one line, with at most one level of nested parentheses.
+const CALL_ARGUMENTS = String.raw`\((?:[^()\r\n]|\([^()\r\n]*\))*\)`;
+// A list the code joins where it stands: `[...].join('x')`, or `[...].map(...).join('x')`.
+// Group 1 is the list, group 2 the joiner literal.
+const JOINED_LIST = new RegExp(
+  String.raw`(${LITERAL_LIST})\s*(?:\.map${CALL_ARGUMENTS}\s*)?\.join\(\s*(${QUOTED_LITERAL})\s*\)`,
+  'g',
+);
 const SPLIT_CHAIN = new RegExp(String.raw`(?:${QUOTED_LITERAL})(?:\s*\+\s*(?:${QUOTED_LITERAL}))+`, 'g');
 const QUOTED_PART = new RegExp(QUOTED_LITERAL, 'g');
-const SPLIT_JOINERS = ['', '.', '-', '_'] as const;
 
-function literalParts(text: string): string[] {
-  return [...text.matchAll(QUOTED_PART)].map((part) => part[0].slice(1, -1).replace(/\\(.)/g, '$1'));
+/** The text between the quotes of each literal in `source`, escapes left as written. */
+function literalParts(source: string): string[] {
+  return [...source.matchAll(QUOTED_PART)].map((part) => part[0].slice(1, -1));
 }
 
 /**
- * The joined view of one line: each bracketed list of two or more quoted literals joined with
- * '', '.', '-' and '_', and each chain of quoted literals joined by `+`. Source that stores a
- * name as short fragments joined at run time hides it from a whole-term matcher, while any
- * reader reassembles it at a glance; this view shows it to the matcher too.
+ * Each run of two or more adjacent parts without a backslash, joined by `joiner`. An escape is
+ * never decoded, so the part that holds one is skipped and no join spans it: `'zo\r' + 'blab'`
+ * builds nothing.
+ */
+function joinedRuns(parts: readonly string[], joiner: string): string[] {
+  const views: string[] = [];
+  let run: string[] = [];
+  const flush = (): void => {
+    if (run.length >= 2) views.push(run.join(joiner));
+    run = [];
+  };
+  for (const part of parts) {
+    if (part.includes('\\')) flush();
+    else run.push(part);
+  }
+  flush();
+  return views;
+}
+
+/**
+ * The joined view of one line, built only where the code joins: a bracketed list of two or more
+ * quoted literals followed by `.join(<literal>)`, directly or after one `.map(...)`, joined with
+ * that literal; and a `+` chain of quoted literals, joined with nothing. Source that stores a name
+ * as short fragments joined at run time hides it from a whole-term matcher, while any reader
+ * reassembles it at a glance; this view shows it to the matcher too. A list the code never joins
+ * builds nothing, so ordinary data such as `['100', '1', '2', '3'].map(Number)` is never read as
+ * one name.
  */
 export function splitLiteralViews(line: string): string[] {
   if (!/['"`]/.test(line)) return [];
   const views = new Set<string>();
-  for (const list of line.matchAll(SPLIT_LIST)) {
-    const parts = literalParts(list[0]);
-    for (const joiner of SPLIT_JOINERS) views.add(parts.join(joiner));
+  for (const list of line.matchAll(JOINED_LIST)) {
+    const joiner = literalParts(list[2]!)[0]!;
+    if (joiner.includes('\\')) continue;
+    for (const view of joinedRuns(literalParts(list[1]!), joiner)) views.add(view);
   }
-  for (const chain of line.matchAll(SPLIT_CHAIN)) views.add(literalParts(chain[0]).join(''));
+  for (const chain of line.matchAll(SPLIT_CHAIN)) {
+    for (const view of joinedRuns(literalParts(chain[0]), '')) views.add(view);
+  }
   return [...views];
 }
 
