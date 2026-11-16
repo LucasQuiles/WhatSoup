@@ -36,8 +36,8 @@ export const fixtureFiles = new Set([
   'tests/eslint-rules/categorized-skips.test.ts',
   // BEAD-052 redaction-parity corpus: intentionally secret-, email-, and
   // path-SHAPED inputs that exercise the bot-errors redactor on both the TS and
-  // Python sides. NOTE: no external secret scanner backstops this repo (the
-  // repo hooksPath shadows the global git hooks; CI runs none) - keep this
+  // Python sides. gitleaks (.gitleaks.toml) allowlists exactly these fixture
+  // paths too, so an entry here also leaves the external secret scan: keep this
   // blanket set minimal and prefer the code-scoped
   // selfReferentialAllowlistFiles mechanism below.
   'tests/fixtures/redaction-parity-corpus.jsonl',
@@ -46,8 +46,8 @@ export const fixtureFiles = new Set([
 // The CAPE agent-runtime probe suite (tools/agent-runtime-probes/) is security/masking tooling:
 // its corpus is intentionally secret-, email-, and path-SHAPED test fixtures. Treat the whole
 // subtree as fixtures for these hygiene SHAPE patterns; the suite's own corpus_guard /
-// sensitive_pattern_loader covers its corpus. NOTE: no external secret scanner backstops this
-// repo (the repo hooksPath shadows the global git hooks) - keep exemptions minimal.
+// sensitive_pattern_loader covers its corpus. gitleaks (.gitleaks.toml) allowlists the same
+// subtree, so it leaves the external secret scan too - keep exemptions minimal.
 export const isFixtureFile = (filePath: string): boolean =>
   fixtureFiles.has(filePath)
   || filePath.startsWith('tools/agent-runtime-probes/');

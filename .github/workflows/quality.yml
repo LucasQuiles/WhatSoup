@@ -603,3 +603,77 @@ jobs:
 
       - name: Perf lane (report-only)
         run: npm --prefix console run perf:lane -- --json
+
+  # Secret scan of the change range with the pinned gitleaks release and .gitleaks.toml (the
+  # default rules plus the hygiene check's fixture paths). The archive is checked against its
+  # published sha256 before it is extracted; a mismatch fails the job. The JSON report stays in
+  # RUNNER_TEMP and the log shows counts per rule id only, never matched text: no PR comment, no
+  # SARIF upload, no artifact. Ranges: a pull request's base..head; a merge group's base..head (a
+  # required check must report on merge_group or the queue stalls); a push's before..after. Any
+  # other event (schedule, a new tag) names no range and scans nothing.
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install gitleaks 8.30.1
+        env:
+          GITLEAKS_VERSION: '8.30.1'
+          GITLEAKS_ARCHIVE_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          set -euo pipefail
+          install_dir="$RUNNER_TEMP/gitleaks"
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          mkdir -p "$install_dir"
+          curl --fail --silent --show-error --location --retry 3 \
+            --output "$install_dir/$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          printf '%s  %s\n' "$GITLEAKS_ARCHIVE_SHA256" "$install_dir/$archive" | sha256sum -c -
+          tar -xzf "$install_dir/$archive" -C "$install_dir" gitleaks
+          echo "$install_dir" >> "$GITHUB_PATH"
+
+      - name: Scan the change range
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MERGE_GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_AFTER_SHA: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request) base="$PR_BASE_SHA"; head="$PR_HEAD_SHA" ;;
+            merge_group) base="$MERGE_GROUP_BASE_SHA"; head="$MERGE_GROUP_HEAD_SHA" ;;
+            push) base="$PUSH_BEFORE_SHA"; head="$PUSH_AFTER_SHA" ;;
+            *) base=""; head="" ;;
+          esac
+          if [ -z "$base" ] || [ -z "$head" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            echo "gitleaks: the ${EVENT_NAME} event names no change range; nothing to scan"
+            exit 0
+          fi
+          gitleaks version
+          report="$RUNNER_TEMP/gitleaks-report.json"
+          # Exit 42 marks leaks; gitleaks exits 1 on its own errors too, so leaks get their own code.
+          status=0
+          gitleaks git --log-opts="${base}..${head}" --config .gitleaks.toml --redact --no-banner \
+            --log-level error --report-format json --report-path "$report" --exit-code 42 . || status=$?
+          if [ "$status" -eq 42 ]; then
+            echo "gitleaks: findings per rule id (matched text withheld):"
+            jq -r 'group_by(.RuleID)[] | "  \(.[0].RuleID): \(length)"' "$report"
+            exit 1
+          fi
+          if [ "$status" -ne 0 ]; then
+            echo "gitleaks: the scan did not complete (exit ${status})"
+            exit "$status"
+          fi
+          echo "gitleaks: no findings in ${base}..${head}"

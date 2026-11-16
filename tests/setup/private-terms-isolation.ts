@@ -10,3 +10,7 @@ process.env['WHATSOUP_PRIVATE_TERMS_FILE'] = ABSENT_PRIVATE_TERMS_FILE;
 process.env['WHATSOUP_BOUNDARY_BASELINE_FILE'] = ABSENT_PRIVATE_TERMS_FILE.replace(/private-terms\.json$/, 'boundary-baseline.json');
 delete process.env['WHATSOUP_REQUIRE_PRIVATE_TERMS'];
 delete process.env['WHATSOUP_REQUIRE_GITLEAKS'];
+// The pre-push secret scan runs gitleaks from WHATSOUP_GITLEAKS, else PATH, and a developer machine
+// may have a real gitleaks installed: point the variable at an absent path so no test can run it.
+// Gitleaks tests point it at a fake script instead.
+process.env['WHATSOUP_GITLEAKS'] = ABSENT_PRIVATE_TERMS_FILE.replace(/private-terms\.json$/, 'gitleaks');

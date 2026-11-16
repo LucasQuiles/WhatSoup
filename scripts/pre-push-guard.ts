@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { accessSync, constants, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { accessSync, constants, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
@@ -122,6 +123,174 @@ export function commandsForDecision(decision: PushDecision): string[] {
   if (decision === 'release') return ['verify:release'];
   if (decision === 'branch') return ['verify:push:branch'];
   return [];
+}
+
+/** The one gitleaks release the pre-push step runs; the Quality workflow downloads it sha256-verified. */
+export const GITLEAKS_VERSION = '8.30.1';
+/** gitleaks exits 1 on its own errors as well as on leaks, so leaks get this exit code instead. */
+const GITLEAKS_LEAK_EXIT = 42;
+const GITLEAKS_TIMEOUT_MS = 300_000;
+/** A remote named on the command line; a push to a URL has no remote-tracking refs of its own. */
+const REMOTE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const GITLEAKS_RULE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
+
+/** WHATSOUP_GITLEAKS when set and non-empty (the WHATSOUP_NODE convention), else `gitleaks` on PATH. */
+function gitleaksCommand(env: NodeJS.ProcessEnv): string {
+  const configured = env['WHATSOUP_GITLEAKS'];
+  return configured !== undefined && configured !== '' ? configured : 'gitleaks';
+}
+
+/** The version the binary reports, without a leading `v`; null when it is absent or does not run. */
+function gitleaksVersion(command: string, cwd: string, env: NodeJS.ProcessEnv): string | null {
+  try {
+    const output = execFileSync(command, ['version'], {
+      cwd,
+      env,
+      encoding: 'utf8',
+      timeout: 30_000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return output.trim().replace(/^v/, '');
+  } catch {
+    return null;
+  }
+}
+
+function commitExists(cwd: string, oid: string, env: NodeJS.ProcessEnv): boolean {
+  try {
+    execFileSync('git', ['cat-file', '-e', `${oid}^{commit}`], { cwd, env, timeout: 30_000, stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function remoteTrackingRefs(remoteName: string): string {
+  return REMOTE_NAME_PATTERN.test(remoteName) ? `--remotes=${remoteName}` : '--remotes';
+}
+
+/**
+ * `git log` options naming the commits one update sends; gitleaks splits them on single spaces.
+ * The remote's old tip is known here: old..new. A new ref, or an old tip this clone never
+ * fetched: new minus everything the remote's tracking refs already hold.
+ */
+function pushedLogOptions(update: RefUpdate, remoteName: string, cwd: string, env: NodeJS.ProcessEnv): string {
+  if (!isZeroObjectId(update.remoteSha) && commitExists(cwd, update.remoteSha, env)) {
+    return `${update.remoteSha}..${update.localSha}`;
+  }
+  return `${update.localSha} --not ${remoteTrackingRefs(remoteName)}`;
+}
+
+/** Findings per rule id from a gitleaks JSON report; null when the report is unreadable. */
+function leakCountsByRule(reportPath: string): Map<string, number> | null {
+  let findings: unknown;
+  try {
+    findings = JSON.parse(readFileSync(reportPath, 'utf8'));
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(findings)) return null;
+  const counts = new Map<string, number>();
+  for (const finding of findings) {
+    const ruleId = (finding as { RuleID?: unknown } | null)?.RuleID;
+    // Only a plain rule id is printed; anything else is counted under one fixed label.
+    const label = typeof ruleId === 'string' && GITLEAKS_RULE_ID_PATTERN.test(ruleId) ? ruleId : 'unnamed-rule';
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/** gitleaks' exit status for one range. Its output is discarded: it names files, commits and authors. */
+function gitleaksExit(
+  command: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  logOptions: string,
+  reportPath: string,
+): number {
+  try {
+    execFileSync(command, [
+      'git',
+      '--log-opts', logOptions,
+      '--config', resolve(cwd, '.gitleaks.toml'),
+      '--redact',
+      '--no-banner',
+      '--log-level', 'error',
+      '--report-format', 'json',
+      '--report-path', reportPath,
+      '--exit-code', String(GITLEAKS_LEAK_EXIT),
+      '.',
+    ], { cwd, env, timeout: GITLEAKS_TIMEOUT_MS, stdio: 'ignore' });
+    return 0;
+  } catch (error) {
+    // The error's message quotes the whole argument list (refs, commits); only the status is used.
+    const status = (error as { status?: unknown }).status;
+    return typeof status === 'number' ? status : -1;
+  }
+}
+
+/**
+ * The pre-push secret scan: gitleaks over exactly the commits this push sends.
+ *
+ * Only the pinned release runs. A missing or different binary skips the step with one line, or
+ * refuses the push under WHATSOUP_REQUIRE_GITLEAKS=1. Every line and error is counts and rule ids
+ * only; a failure is rethrown as fixed text, because a child process error quotes its arguments.
+ */
+export function runGitleaksStep(
+  input: string,
+  cwd: string,
+  remoteName: string,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  const command = gitleaksCommand(env);
+  const version = gitleaksVersion(command, cwd, env);
+  const problem = version === null
+    ? 'gitleaks is not on PATH (or at WHATSOUP_GITLEAKS) or does not run'
+    : version !== GITLEAKS_VERSION
+      ? `gitleaks ${SEMVER_PATTERN.test(version) ? version : 'of an unrecognised version'} is not the pinned ${GITLEAKS_VERSION}`
+      : null;
+  if (problem !== null) {
+    if (env['WHATSOUP_REQUIRE_GITLEAKS'] === '1') {
+      throw new Error(`pre-push guard: ${problem}; WHATSOUP_REQUIRE_GITLEAKS=1 refuses the push`);
+    }
+    console.error(`pre-push guard: secret scan skipped: ${problem} (WHATSOUP_REQUIRE_GITLEAKS=1 makes this a failure)`);
+    return;
+  }
+
+  const pushed = nonBlankLines(input)
+    .map(parsePrePushLine)
+    .filter((update) => !isZeroObjectId(update.localSha));
+  // Empty stdin is the fail-closed case above: scan what HEAD would send, never the whole history.
+  const ranges = pushed.length > 0
+    ? pushed.map((update) => pushedLogOptions(update, remoteName, cwd, env))
+    : [`HEAD --not ${remoteTrackingRefs(remoteName)}`];
+
+  const reportDir = mkdtempSync(join(tmpdir(), 'whatsoup-gitleaks-'));
+  try {
+    const leaks = new Map<string, number>();
+    ranges.forEach((logOptions, index) => {
+      const reportPath = join(reportDir, `report-${index}.json`);
+      const status = gitleaksExit(command, cwd, env, logOptions, reportPath);
+      if (status === 0) return;
+      const counts = status === GITLEAKS_LEAK_EXIT ? leakCountsByRule(reportPath) : null;
+      if (counts === null || counts.size === 0) {
+        throw new Error(`pre-push guard: gitleaks did not complete (exit ${status}); push refused`);
+      }
+      for (const [rule, count] of counts) leaks.set(rule, (leaks.get(rule) ?? 0) + count);
+    });
+    if (leaks.size > 0) {
+      const total = [...leaks.values()].reduce((sum, count) => sum + count, 0);
+      const perRule = [...leaks.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([rule, count]) => `${rule} ${count}`)
+        .join(', ');
+      throw new Error(`pre-push guard: gitleaks found ${total} leak(s) in the pushed commits (${perRule}); push refused`);
+    }
+    console.error(`pre-push guard: gitleaks ${GITLEAKS_VERSION} found no leaks in ${ranges.length} pushed range(s)`);
+  } finally {
+    rmSync(reportDir, { recursive: true, force: true });
+  }
 }
 
 function assertConsoleDependencies(cwd: string): void {
@@ -285,6 +454,10 @@ export function runPrePushGuard(
     : null;
 
   dependencies.assertConsoleDependencies(cwd);
+
+  // The secret scan is quick next to the composite, so it runs first. Preservation and
+  // delete-only pushes returned above: they send no new commits to the public remote.
+  runGitleaksStep(input, cwd, remote?.remoteName ?? '');
 
   for (const script of commands) {
     console.error(`pre-push guard: running npm run ${script}`);

@@ -1,0 +1,24 @@
+# gitleaks configuration for the secret scan in the Quality workflow (job `gitleaks`) and in the
+# pre-push hook (scripts/pre-push-guard.ts). Both pass this file with --config.
+#
+# The default rule set applies in full. The one allowlist names exactly the fixture paths that the
+# repository hygiene check already exempts from secret shapes: `fixtureFiles` and the
+# tools/agent-runtime-probes/ subtree of `isFixtureFile` in scripts/lib/repo-hygiene-policy.ts.
+# Change both together: tests/scripts/gitleaks-wiring.test.ts compares them for every tracked
+# path. No entry allowlists a rule id, a commit or a value pattern.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Fixture paths the repository hygiene check exempts from secret shapes"
+paths = [
+  '''^scripts/anonymize-private-literals\.ts$''',
+  '''^scripts/lib/repo-hygiene-policy\.ts$''',
+  '''^scripts/repo-hygiene-guard\.ts$''',
+  '''^tests/scripts/anonymize-private-literals\.test\.ts$''',
+  '''^tests/scripts/repo-hygiene-guard\.test\.ts$''',
+  '''^tests/eslint-rules/categorized-skips\.test\.ts$''',
+  '''^tests/fixtures/redaction-parity-corpus\.jsonl$''',
+  '''^tools/agent-runtime-probes/''',
+]
