@@ -11,7 +11,7 @@ import { configRoot } from '../../../src/fleet/paths.ts';
 import { isNonEmptyString } from '../../../src/lib/type-guards.ts';
 import { AUX_RENDERERS, LABEL_PATTERN, mentionsReleaseRoot, renderAuxPlist, type AuxRenderer } from './plan.ts';
 import { buildActivationContext, plistDigest, preconditionsMet, wrapperTargetFor, type ActivationArgs, type ActivationContext } from './plan.ts';
-import { isLegacyPathRebaseLabel, rebaseLegacyHostAuxiliaryForPathRebase, type LegacyPathRebaseLabel } from './legacy-host-auxiliaries.ts';
+import { isLegacyPathRebaseLabel, rebaseLegacyHostAuxiliaryForPathRebase, SHELL_TOKEN_PATH, type LegacyPathRebaseLabel } from './legacy-host-auxiliaries.ts';
 import { checkoutCommit } from './tool-commit.ts';
 import type { HostUnitApplyContext } from './host-unit-apply.ts';
 
@@ -247,9 +247,13 @@ function stagePathRebase(installed: string, expectCurrent: string, release: stri
   const source = compatible ?? installed;
   const encodedCurrent = escapeXml(expectCurrent);
   const encodedRelease = escapeXml(release);
+  // docs/runbooks/release-deployment.md:616-627: the closed legacy wrapper above is the only shell-style
+  // exception, and a root that lands in a shell argument must be a shell token. No value can be proven
+  // never to reach a shell, so only a bare shell-token path is rewritten; a command that merely starts
+  // with the root is refused below like any other embedded reference.
   for (const match of source.matchAll(/<string>([\s\S]*?)<\/string>/g)) {
     const value = match[1]!;
-    const selectedPath = value === encodedCurrent || value.startsWith(`${encodedCurrent}/`);
+    const selectedPath = (value === encodedCurrent || value.startsWith(`${encodedCurrent}/`)) && SHELL_TOKEN_PATH.test(value);
     if (selectedPath || !value.includes(encodedCurrent)) continue;
     // A distinct path that merely shares the prefix is not a selected root.
     // Embedded shell fragments and other opaque strings are unsafe to rewrite.
@@ -257,6 +261,8 @@ function stagePathRebase(installed: string, expectCurrent: string, release: stri
     if (value.startsWith(encodedCurrent) && /^[A-Za-z0-9._-]+(?:\/[^<]*)?$/.test(suffix)) continue;
     return { staged: null, error: 'expected-current root is embedded in a non-path string value' };
   }
+  // The target release then lands in each rewritten value, so it must be a shell token too.
+  if (!SHELL_TOKEN_PATH.test(release)) return { staged: null, error: 'target release is not a shell-token path (^/[A-Za-z0-9._/-]+$)' };
   const rootString = new RegExp(`(<string>)${escapeForRegExp(encodedCurrent)}((?:/[^<]*)?)(</string>)`, 'g');
   const staged = source.replace(rootString, (_match, open: string, suffix: string, close: string) => `${open}${encodedRelease}${suffix}${close}`);
   if (staged === source || mentionsReleaseRoot(staged, expectCurrent)) return { staged: null, error: 'staged plist did not remove the declared expected-current root' };

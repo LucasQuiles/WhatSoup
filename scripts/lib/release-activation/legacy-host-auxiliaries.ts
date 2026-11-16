@@ -23,9 +23,15 @@ function absolute(value: unknown): string | null {
   return typeof value === 'string' && path.isAbsolute(value) ? path.normalize(value).replace(/\/+$/, '') || '/' : null;
 }
 
+/**
+ * The shell-token path grammar of docs/runbooks/release-deployment.md:625-627:
+ * such a path is one inert word wherever a shell reads it.
+ */
+export const SHELL_TOKEN_PATH = /^\/[A-Za-z0-9._/-]+$/;
+
 function safeShellAbsolutePath(value: string): string | null {
   const normalized = absolute(value);
-  return normalized === value && /^\/[A-Za-z0-9._/-]+$/.test(value) ? value : null;
+  return normalized === value && SHELL_TOKEN_PATH.test(value) ? value : null;
 }
 
 function sameArgs(left: readonly string[], right: readonly string[]): boolean {
