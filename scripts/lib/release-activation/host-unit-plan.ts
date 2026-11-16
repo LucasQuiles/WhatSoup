@@ -659,8 +659,9 @@ export async function buildHostUnitPlan(
     });
   }
   const hostAuxiliaryApply: Array<{ label: string; plistPath: string; installedSha256: string; staged: string; expectCurrent: string }> = [];
-  const hostLaunchers: Array<{ label: string; plistPath: string; link: string; wrapper: 'whatsoup-fleet'; expectCurrent: string }> = [];
-  const watchdogs: Array<{ label: string; plistPath: string }> = [];
+  // Launcher and watchdog plists are loaded but never written: apply rechecks them against the digest read here.
+  const hostLaunchers: Array<{ label: string; plistPath: string; installedSha256: string; link: string; wrapper: 'whatsoup-fleet'; expectCurrent: string }> = [];
+  const watchdogs: Array<{ label: string; plistPath: string; installedSha256: string }> = [];
   for (const auxiliary of declaration.hostAuxiliaries) {
     const plistPath = path.join(launchAgentsDir, `${auxiliary.label}.plist`);
     const installed = (() => { try { return readFileSync(plistPath, 'utf8'); } catch { return null; } })();
@@ -672,7 +673,7 @@ export async function buildHostUnitPlan(
     if (installed === null || parsed === null || loaded === null) continue;
     if (auxiliary.mode === 'quiesce') {
       check(`host-watchdog-outside-unit:${auxiliary.label}`, provenOutsideUnit(parsed, installed, selectionRoots, selectionLinks), 'watchdog must not select a member, host auxiliary, or managed launcher root');
-      watchdogs.push({ label: auxiliary.label, plistPath });
+      watchdogs.push({ label: auxiliary.label, plistPath, installedSha256: plistDigest(installed) });
       continue;
     }
     const expectCurrent = auxiliary.expectCurrent!;
@@ -683,7 +684,7 @@ export async function buildHostUnitPlan(
       let resolverCurrent = false;
       try { resolverCurrent = resolveLaunchdReleaseSelection(plistPath).releasePath === expectCurrent; } catch { /* recorded below */ }
       check(`host-aux-on-expected-release:${auxiliary.label}`, selected && linkCurrent && resolverCurrent, 'fleet ProgramArguments and wrapper link select the declared expected-current release');
-      hostLaunchers.push({ label: auxiliary.label, plistPath, link: auxiliary.link!, wrapper: 'whatsoup-fleet', expectCurrent });
+      hostLaunchers.push({ label: auxiliary.label, plistPath, installedSha256: plistDigest(installed), link: auxiliary.link!, wrapper: 'whatsoup-fleet', expectCurrent });
       continue;
     }
     const onExpected = programArgumentsUnder(parsed.programArguments, expectCurrent);

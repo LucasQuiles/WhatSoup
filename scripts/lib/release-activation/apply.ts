@@ -63,6 +63,7 @@ import {
 } from './root-helper-interpreter.ts';
 import {
   type ActivationContext,
+  backupDirectoryFailure,
   bootstrapEntrypointFor,
   countRenderDriftLines,
   plistDigest,
@@ -305,17 +306,24 @@ export async function stopLabel(host: ActivationHost, context: ActivationContext
 /**
  * bootout → bounded wait for the old pid → bootstrap with bounded retry on the
  * transient error → kickstart -k. Returns a failure string, or null on success.
+ * `admit`, when given, runs before the bootout and again immediately before
+ * each bootstrap; a reason it returns is the failure, and nothing is loaded.
  */
 export async function reloadLabel(
   host: ActivationHost,
   context: ActivationContext,
   label: string,
   plistPath: string,
+  admit?: () => string | null,
 ): Promise<string | null> {
   const { domain } = context;
+  const refusedBeforeStop = admit?.() ?? null;
+  if (refusedBeforeStop !== null) return refusedBeforeStop;
   const stopFailure = await stopLabel(host, context, label);
   if (stopFailure !== null) return stopFailure;
   for (let attempt = 1; ; attempt += 1) {
+    const refused = admit?.() ?? null;
+    if (refused !== null) return refused;
     const bootstrap = await host.exec('launchctl', ['bootstrap', domain, plistPath]);
     if (bootstrap.code === 0) break;
     const transient = isTransientLaunchdBootstrapError({ code: bootstrap.code, stderr: bootstrap.stderr });
@@ -574,7 +582,11 @@ interface SchemaLevelCheck {
 
 export type ActivationSide = 'previous' | 'activated';
 
-/** The live state one activation owns: each link's planned targets and each plist's planned and staged bytes. */
+/**
+ * The live state one activation owns: each link's planned targets and each
+ * plist's planned and staged bytes. A plist with `staged: null` is one the
+ * activation loads but never writes, so both sides are its planned bytes.
+ */
 export interface ActivationIdentity {
   links: ReadonlyArray<{ link: string; previous: readonly string[]; activated: string }>;
   plists: ReadonlyArray<{ label: string; plistPath: string; installedSha256: string; staged: string | null }>;
@@ -592,7 +604,7 @@ export function activationIdentityFailure(identity: ActivationIdentity, sides: r
       if (!targets.includes(readlinkSync(entry.link))) return 'wrapper symlink changed outside this activation';
     }
     for (const entry of identity.plists) {
-      const digests = sides.map((side) => (side === 'previous' ? entry.installedSha256 : plistDigest(entry.staged!)));
+      const digests = sides.map((side) => (side === 'previous' || entry.staged === null ? entry.installedSha256 : plistDigest(entry.staged)));
       if (!digests.includes(plistDigest(readFileSync(entry.plistPath, 'utf8')))) {
         return `${entry.label}: installed plist changed outside this activation`;
       }
@@ -775,6 +787,12 @@ async function applyHoldingLock(host: ActivationHost, context: ActivationContext
   // ---- backups and staged files (no live change) ----
   try {
     mkdirSync(args.backupDir!, { recursive: true, mode: 0o700 });
+    // mkdir leaves an existing directory as it is; one that is not private refuses, never gets chmod.
+    const backupDir = backupDirectoryFailure(args.backupDir!);
+    if (backupDir !== null) {
+      steps.push({ step: 'check-backup-dir-private', ok: false, detail: backupDir });
+      return refuse(backupDir, null);
+    }
     mkdirSync(backupPath, { mode: 0o700 });
     steps.push({ step: 'create-backup-dir', ok: true });
     const db = await backupSqliteConsistent(context.dbPath, path.join(backupPath, 'bot.db'));

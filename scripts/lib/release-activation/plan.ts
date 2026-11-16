@@ -195,6 +195,24 @@ export function plistDigest(text: string): string {
   return sha256(Buffer.from(text, 'utf8'));
 }
 
+export const BACKUP_DIR_ABSENT = 'backup directory is absent';
+
+/**
+ * Why `--backup-dir` is not private to the current user: it must be a real
+ * directory (never a symlink), owned by this uid, with no group or other
+ * permission bits. Null when it is; BACKUP_DIR_ABSENT when it does not exist.
+ */
+export function backupDirectoryFailure(backupDir: string): string | null {
+  let stat;
+  try { stat = lstatSync(backupDir); } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? BACKUP_DIR_ABSENT : 'backup directory cannot be inspected';
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) return 'backup directory is a symlink or not a directory';
+  if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) return 'backup directory is not owned by the current user';
+  if ((stat.mode & 0o077) !== 0) return 'backup directory grants group or other access';
+  return null;
+}
+
 function positiveInteger(value: unknown): number | null {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null;
 }
@@ -807,6 +825,12 @@ export async function buildActivationContext(host: ActivationHost, args: Activat
   check('database-present', isRegularFile(context.dbPath), 'instance bot.db is a regular file');
   check('backup-dir-set', args.backupDir !== null && path.isAbsolute(args.backupDir),
     args.backupDir === null ? '--backup-dir is required for --apply' : 'absolute');
+  if (args.backupDir !== null && path.isAbsolute(args.backupDir)) {
+    // An absent directory is created 0700 by apply; an existing one must already be private.
+    const backupDir = backupDirectoryFailure(args.backupDir);
+    check('backup-dir-private-owned', backupDir === null || backupDir === BACKUP_DIR_ABSENT,
+      backupDir === BACKUP_DIR_ABSENT ? 'absent; apply creates it 0700' : backupDir ?? 'current-user private');
+  }
 
   // Instance plist.
   const instancePlistPath = path.join(launchAgentsDir, `${instanceLabel}.plist`);

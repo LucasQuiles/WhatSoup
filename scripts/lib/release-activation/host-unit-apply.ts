@@ -15,7 +15,7 @@ import {
 } from './apply.ts';
 import { loadedJobDefinition, type ActivationHost } from './host.ts';
 import {
-  bootstrapEntrypointFor, recheckCandidateRefreshRollbackFence, recheckRollbackRefreshFenceTarget,
+  backupDirectoryFailure, bootstrapEntrypointFor, recheckCandidateRefreshRollbackFence, recheckRollbackRefreshFenceTarget,
   type ActivationContext, wrapperTargetFor,
 } from './plan.ts';
 import { parsePlist } from '../../check-service-units.ts';
@@ -32,10 +32,16 @@ export interface HostUnitApplyContext {
   sharedLaunchers: ReadonlyMap<string, readonly string[]>;
   /** Explicit host jobs whose ProgramArguments are staged outside a member surface. */
   hostAuxiliaries?: readonly { label: string; plistPath: string; installedSha256: string; staged: string; expectCurrent: string }[];
-  /** The fleet console has a separate wrapper link and is never inferred from the bot wrapper. */
-  hostLaunchers?: readonly { label: string; plistPath: string; link: string; wrapper: 'whatsoup-fleet'; expectCurrent: string }[];
-  /** Watchdogs are stopped before selectors move and restarted only after a verified terminal state. */
-  watchdogs?: readonly { label: string; plistPath: string }[];
+  /**
+   * The fleet console has a separate wrapper link and is never inferred from the bot wrapper.
+   * Its plist is reloaded but never written, so it must keep the digest the plan read.
+   */
+  hostLaunchers?: readonly { label: string; plistPath: string; installedSha256: string; link: string; wrapper: 'whatsoup-fleet'; expectCurrent: string }[];
+  /**
+   * Watchdogs are stopped before selectors move and restarted only after a verified terminal state.
+   * Their plists are never written, so each must keep the digest the plan read.
+   */
+  watchdogs?: readonly { label: string; plistPath: string; installedSha256: string }[];
   /** Read-only v3 declarations rechecked before the first backup or selector mutation. */
   outsideUnits?: readonly ReviewedOutsideUnit[];
 }
@@ -103,7 +109,10 @@ async function applyHoldingLock(host: ActivationHost, context: HostUnitApplyCont
     ...[...context.sharedLaunchers.keys()].map((link) => ({ link, target: wrapperTargetFor(context.release) })),
     ...hostLaunchers.map((launcher) => ({ link: launcher.link, target: path.join(context.release, 'deploy', launcher.wrapper) })),
   ];
-  // What the plan accepted: each launcher on a declared old release, each written plist at its planned digest.
+  // What the plan accepted: each launcher on a declared old release, each written plist at its planned digest,
+  // and each launcher and watchdog plist this run loads but never writes at the digest the plan read.
+  const writtenPlists = [...context.members.flatMap((member) => member.staged), ...hostAuxiliaries];
+  const unwrittenPlists = [...hostLaunchers, ...watchdogs].map((entry) => ({ label: entry.label, plistPath: entry.plistPath, installedSha256: entry.installedSha256, staged: null }));
   const identity: ActivationIdentity = {
     links: [
       ...[...context.sharedLaunchers.keys()].map((link) => ({
@@ -113,12 +122,17 @@ async function applyHoldingLock(host: ActivationHost, context: HostUnitApplyCont
         link: launcher.link, previous: [path.join(launcher.expectCurrent, 'deploy', launcher.wrapper)], activated: path.join(context.release, 'deploy', launcher.wrapper),
       })),
     ],
-    plists: [...context.members.flatMap((member) => member.staged), ...hostAuxiliaries],
+    plists: [...writtenPlists, ...unwrittenPlists],
   };
   const identityHolds = (step: string, sides: readonly ActivationSide[], records: StepRecord[]): boolean => {
     const foreign = activationIdentityFailure(identity, sides);
     records.push(foreign === null ? { step, ok: true } : { step, ok: false, detail: foreign });
     return foreign === null;
+  };
+  /** For a plist this run never writes: the reload refuses, loading nothing, once its bytes are not the planned ones. */
+  const admitUnwritten = (label: string): (() => string | null) | undefined => {
+    const entry = unwrittenPlists.find((candidate) => candidate.label === label);
+    return entry === undefined ? undefined : () => activationIdentityFailure({ links: [], plists: [entry] }, ['previous']);
   };
 
   const installedMatchesLoaded = async (label: string, plistPath: string): Promise<boolean> => {
@@ -154,7 +168,7 @@ async function applyHoldingLock(host: ActivationHost, context: HostUnitApplyCont
   const restoreWatchdogs = async (records: StepRecord[]): Promise<boolean> => {
     let restored = true;
     for (const watchdog of watchdogs) {
-      const error = await reloadLabel(host, representative, watchdog.label, watchdog.plistPath);
+      const error = await reloadLabel(host, representative, watchdog.label, watchdog.plistPath, admitUnwritten(watchdog.label));
       records.push(error === null ? { step: `restore-watchdog:${watchdog.label}`, ok: true } : { step: `restore-watchdog:${watchdog.label}`, ok: false, detail: error });
       if (error !== null) restored = false;
     }
@@ -163,6 +177,9 @@ async function applyHoldingLock(host: ActivationHost, context: HostUnitApplyCont
 
   try {
     mkdirSync(context.backupDir, { recursive: true, mode: 0o700 });
+    // mkdir leaves an existing directory as it is; one that is not private refuses, never gets chmod.
+    const backupDir = backupDirectoryFailure(context.backupDir);
+    if (backupDir !== null) return fail('refused', backupDir);
     mkdirSync(backupPath, { mode: 0o700 });
     for (const member of context.members) {
       const directory = path.join(backupPath, 'members', member.args.instance);
@@ -208,13 +225,16 @@ async function applyHoldingLock(host: ActivationHost, context: HostUnitApplyCont
     for (const launcher of launchers) writeFileSync(path.join(backupPath, `launcher-${Buffer.from(launcher.link).toString('hex')}.before`), readlinkSync(launcher.link), { mode: PRIVATE_FILE_MODE });
     steps.push({ step: 'backup-and-stage-all-members-and-host-auxiliaries', ok: true });
     // A missing or outdated root helper refuses here, before the switch, not as a failed switch and a rollback.
-    const helperCheck = checkRootPlistHelper(host, identity.plists.map((entry) => entry.plistPath));
+    // Only a plist this run writes can need the helper.
+    const helperCheck = checkRootPlistHelper(host, writtenPlists.map((entry) => entry.plistPath));
     if (helperCheck !== null) {
       steps.push(helperCheck);
       if (!helperCheck.ok) return fail('refused', helperCheck.detail!);
     }
   } catch (error) { return fail('refused', error instanceof Error ? error.message : String(error)); }
 
+  // Another writer's link or plist refuses here, before any watchdog is stopped.
+  if (!identityHolds('recheck-live-identity-before-quiesce', ['previous'], steps)) return fail('refused', steps.at(-1)!.detail!);
   const previous = new Map<string, number | null>();
   for (const item of primary) previous.set(item.label, (await launchdState(host, item.context.domain, item.label)).pid);
   for (const watchdog of watchdogs) {
@@ -258,7 +278,7 @@ async function applyHoldingLock(host: ActivationHost, context: HostUnitApplyCont
     }
     steps.push({ step: 'switch-all-selectors', ok: true });
     for (const item of [...primary, ...auxiliary]) {
-      const error = await reloadLabel(host, item.context, item.label, item.plistPath);
+      const error = await reloadLabel(host, item.context, item.label, item.plistPath, admitUnwritten(item.label));
       steps.push(error === null ? { step: `reload:${item.label}`, ok: true } : { step: `reload:${item.label}`, ok: false, detail: error });
       if (error !== null) { failure = error; break; }
     }
@@ -347,7 +367,7 @@ async function applyHoldingLock(host: ActivationHost, context: HostUnitApplyCont
       if (readFileSync(auxiliary.plistPath, 'utf8') !== original) await writePlist(host, auxiliary.plistPath, original, auxiliary.staged);
     }
     for (const item of affected) {
-      const error = await reloadLabel(host, item.context, item.label, item.plistPath);
+      const error = await reloadLabel(host, item.context, item.label, item.plistPath, admitUnwritten(item.label));
       rollbackSteps.push(error === null ? { step: `reload:${item.label}`, ok: true } : { step: `reload:${item.label}`, ok: false, detail: error });
     }
   } catch (error) { rollbackSteps.push({ step: 'restore', ok: false, detail: error instanceof Error ? error.message : String(error) }); }

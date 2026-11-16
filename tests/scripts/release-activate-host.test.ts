@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
@@ -584,6 +584,48 @@ describe('release:activate-host keeps release:activate single-apply guards', () 
     expect(liveMutations(world)).toEqual([]);
   });
 
+  it.each([
+    { kind: 'grants group or other access', failure: 'backup directory grants group or other access', prepare: (dir: string) => { mkdirSync(dir); chmodSync(dir, 0o755); } },
+    { kind: 'is a symlink to a private directory', failure: 'backup directory is a symlink or not a directory', prepare: (dir: string) => { mkdirSync(`${dir}-target`, { mode: 0o700 }); chmodSync(`${dir}-target`, 0o700); symlinkSync(`${dir}-target`, dir); } },
+  ])('refuses an existing final backup directory that $kind before any effect', async ({ failure, prepare }) => {
+    const world = twoMemberWorld();
+    const backupDir = path.join(world.root, 'backups');
+    prepare(backupDir);
+    const directBefore = readFileSync(world.directPlist, 'utf8');
+    const result = await apply(world);
+    expect(result.outcome).toBe('refused');
+    expect(result.failure).toBe(failure);
+    expect(result.backupPath).toBeNull();
+    expect(readdirSync(backupDir)).toEqual([]);
+    expect(readlinkSync(world.link)).toBe(oldWrapper(world));
+    expect(readFileSync(world.directPlist, 'utf8')).toBe(directBefore);
+    expect(liveMutations(world)).toEqual([]);
+  });
+
+  it('accepts an existing current-user private final backup directory', async () => {
+    const world = twoMemberWorld();
+    const backupDir = path.join(world.root, 'backups');
+    mkdirSync(backupDir, { mode: 0o700 }); chmodSync(backupDir, 0o700);
+    const result = await apply(world);
+    expect(result.outcome).toBe('activated');
+    expect(path.dirname(result.backupPath!)).toBe(backupDir);
+  });
+
+  it('plans only with an absent or current-user private final backup directory', async () => {
+    const world = twoMemberWorld();
+    const backupDir = path.join(world.root, 'backups');
+    expect((await planTwoMemberWorld(world)).ready).toBe(true);
+    mkdirSync(backupDir); chmodSync(backupDir, 0o755);
+    const open = await planTwoMemberWorld(world);
+    expect(open.ready).toBe(false);
+    expect(open.document.preconditions).toEqual(expect.arrayContaining([
+      { id: 'shared:backup-dir-private-owned', ok: false, detail: 'backup directory grants group or other access' },
+      { id: 'direct:backup-dir-private-owned', ok: false, detail: 'backup directory grants group or other access' },
+    ]));
+    chmodSync(backupDir, 0o700);
+    expect((await planTwoMemberWorld(world)).ready).toBe(true);
+  });
+
   it('refuses before the switch when a root-owned plist has no current root helper', async () => {
     const world = twoMemberWorld();
     const directBefore = readFileSync(world.directPlist, 'utf8');
@@ -1162,7 +1204,7 @@ describe('release:activate-host closed host auxiliaries', () => {
     const result = await applyHostUnitActivation(world.host, {
       release: world.newRelease, commit: NEXT, backupDir: path.join(world.root, 'backups'), members: world.contexts,
       sharedLaunchers: new Map([[world.link, ['shared']]]),
-      hostLaunchers: [{ label: fleetLabel, plistPath: fleetPlist, link: fleetLink, wrapper: 'whatsoup-fleet', expectCurrent: world.oldRelease }],
+      hostLaunchers: [{ label: fleetLabel, plistPath: fleetPlist, installedSha256: plistDigest(readFileSync(fleetPlist, 'utf8')), link: fleetLink, wrapper: 'whatsoup-fleet', expectCurrent: world.oldRelease }],
     } as never);
     expect(result.outcome).toBe('rolled-back');
     expect(world.calls).toContain(`bootout:${fleetLabel}`);
@@ -1181,7 +1223,7 @@ describe('release:activate-host closed host auxiliaries', () => {
     const result = await applyHostUnitActivation(world.host, {
       release: world.newRelease, commit: NEXT, backupDir: path.join(world.root, 'backups'), members: world.contexts,
       sharedLaunchers: new Map([[world.link, ['shared']]]),
-      hostLaunchers: [{ label: fleetLabel, plistPath: fleetPlist, link: fleetLink, wrapper: 'whatsoup-fleet', expectCurrent: world.oldRelease }],
+      hostLaunchers: [{ label: fleetLabel, plistPath: fleetPlist, installedSha256: plistDigest(readFileSync(fleetPlist, 'utf8')), link: fleetLink, wrapper: 'whatsoup-fleet', expectCurrent: world.oldRelease }],
     } as never);
     expect(result.outcome).toBe('rollback-unverified');
     expect(result.steps).toEqual(expect.arrayContaining([
@@ -1197,7 +1239,7 @@ describe('release:activate-host closed host auxiliaries', () => {
     const result = await applyHostUnitActivation(world.host, {
       release: world.newRelease, commit: NEXT, backupDir: path.join(world.root, 'backups'), members: world.contexts,
       sharedLaunchers: new Map([[world.link, ['shared']]]),
-      watchdogs: [{ label: watchdogLabel, plistPath: watchdogPlist }],
+      watchdogs: [{ label: watchdogLabel, plistPath: watchdogPlist, installedSha256: plistDigest(readFileSync(watchdogPlist, 'utf8')) }],
     } as never);
     expect(result.outcome).toBe('rollback-blocked-migrated');
     expect(world.calls.indexOf(`bootout:${watchdogLabel}`)).toBeGreaterThanOrEqual(0);
@@ -1212,12 +1254,145 @@ describe('release:activate-host closed host auxiliaries', () => {
       plist(watchdogLabel, [path.join(world.home, '.local', 'bin', 'shared-watchdog')], path.join(world.home, '.local')));
     const result = await applyHostUnitActivation(world.host, {
       release: world.newRelease, commit: NEXT, backupDir: path.join(world.root, 'backups'), members: world.contexts,
-      sharedLaunchers: new Map([[world.link, ['shared']]]), watchdogs: [{ label: watchdogLabel, plistPath: watchdogPlist }],
+      sharedLaunchers: new Map([[world.link, ['shared']]]), watchdogs: [{ label: watchdogLabel, plistPath: watchdogPlist, installedSha256: plistDigest(readFileSync(watchdogPlist, 'utf8')) }],
     } as never);
     expect(result.outcome).toBe('rollback-unverified');
     expect(world.calls).not.toContain(`bootstrap:${watchdogLabel}`);
     expect(result.rollback?.steps).toEqual(expect.arrayContaining([
       expect.objectContaining({ step: `watchdog-retained:${watchdogLabel}`, ok: false }),
     ]));
+  });
+});
+
+describe('release:activate-host rechecks launcher and watchdog plists it loads but never writes', () => {
+  const FLEET_LABEL = 'com.whatsoup.whatsoup-fleet';
+  const WATCHDOG_LABEL = 'com.whatsoup.shared-watchdog';
+  const changedOutside = (label: string): string => `${label}: installed plist changed outside this activation`;
+  const liveMutations = (world: TwoMemberWorld): string[] => world.calls.filter((call) => /^(bootout|bootstrap|kickstart):/.test(call));
+  /** Schema v2 with the separate fleet wrapper and one member watchdog. */
+  const launcherAndWatchdog = (world: TwoMemberWorld) => {
+    writeFileSync(path.join(world.oldRelease, 'deploy', 'whatsoup-fleet'), '#!/bin/bash\n', { mode: 0o755 });
+    writeFileSync(path.join(world.newRelease, 'deploy', 'whatsoup-fleet'), '#!/bin/bash\n', { mode: 0o755 });
+    const fleetLink = path.join(world.home, '.local', 'bin', 'whatsoup-fleet');
+    symlinkSync(path.join(world.oldRelease, 'deploy', 'whatsoup-fleet'), fleetLink);
+    const fleetPlist = world.addJob(FLEET_LABEL, plist(FLEET_LABEL, [fleetLink, '9099'], world.oldRelease));
+    const watchdogPlist = world.addJob(WATCHDOG_LABEL,
+      plist(WATCHDOG_LABEL, [path.join(world.home, '.local', 'bin', 'shared-watchdog')], path.join(world.home, '.local')));
+    const declaration = { schemaVersion: 2, members: [
+      { instance: 'shared', expectCurrent: world.oldRelease, auxLabels: [] },
+      { instance: 'direct', expectCurrent: world.oldRelease, auxLabels: [] },
+    ], hostAuxiliaries: [
+      { label: FLEET_LABEL, mode: 'fleet-wrapper', expectCurrent: world.oldRelease, link: fleetLink },
+      { label: WATCHDOG_LABEL, mode: 'quiesce' },
+    ] };
+    return { fleetLink, fleetPlist, watchdogPlist, declaration };
+  };
+  const editAfterPlanning = (plistPath: string): string => {
+    const edited = readFileSync(plistPath, 'utf8').replace('</plist>', '<!-- edited after planning -->\n</plist>');
+    writeFileSync(plistPath, edited);
+    return edited;
+  };
+  /** Apply exactly the context the planner accepted, under the planning home. */
+  const applyPlanned = async (world: TwoMemberWorld, plan: Awaited<ReturnType<typeof buildHostUnitPlan>>, host: ActivationHost = world.host) => {
+    expect(plan.ready).toBe(true);
+    vi.stubEnv('HOME', world.home); vi.stubEnv('XDG_CONFIG_HOME', path.join(world.home, '.config')); vi.stubEnv('XDG_DATA_HOME', path.join(world.home, '.local', 'share'));
+    try { return await applyHostUnitActivation(host, plan.applyContext!); } finally { vi.unstubAllEnvs(); }
+  };
+  /** Another writer that runs `write` once, right after the first launchctl call recorded as `trigger`. */
+  const writerAfter = (world: TwoMemberWorld, trigger: string, write: () => void): ActivationHost => {
+    let written = false;
+    return {
+      ...world.host,
+      exec: async (file, args, options) => {
+        const result = await world.host.exec(file, args, options);
+        if (!written && world.calls.at(-1) === trigger) { written = true; write(); }
+        return result;
+      },
+    };
+  };
+
+  it('plans each launcher and watchdog plist digest and activates while both are unchanged', async () => {
+    const world = twoMemberWorld();
+    const { fleetLink, fleetPlist, watchdogPlist, declaration } = launcherAndWatchdog(world);
+    const plan = await planHostUnit(world, declaration);
+    expect(plan.applyContext?.hostLaunchers).toEqual([expect.objectContaining({ plistPath: fleetPlist, installedSha256: plistDigest(readFileSync(fleetPlist, 'utf8')) })]);
+    expect(plan.applyContext?.watchdogs).toEqual([expect.objectContaining({ plistPath: watchdogPlist, installedSha256: plistDigest(readFileSync(watchdogPlist, 'utf8')) })]);
+    const result = await applyPlanned(world, plan);
+    expect(result.outcome).toBe('activated');
+    expect(result.steps).toEqual(expect.arrayContaining([
+      { step: 'recheck-live-identity-before-switch', ok: true },
+      { step: 'verify-live-identity', ok: true },
+      { step: `restore-watchdog:${WATCHDOG_LABEL}`, ok: true },
+    ]));
+    expect(readlinkSync(fleetLink)).toBe(path.join(world.newRelease, 'deploy', 'whatsoup-fleet'));
+    expect(world.calls).toContain(`bootstrap:${FLEET_LABEL}`);
+    expect(world.calls).toContain(`bootstrap:${WATCHDOG_LABEL}`);
+  });
+
+  it('refuses before any selector move when a host launcher plist changed after planning', async () => {
+    const world = twoMemberWorld();
+    const { fleetLink, fleetPlist, declaration } = launcherAndWatchdog(world);
+    const plan = await planHostUnit(world, declaration);
+    const directBefore = readFileSync(world.directPlist, 'utf8');
+    const edited = editAfterPlanning(fleetPlist);
+    const result = await applyPlanned(world, plan);
+    expect(result.outcome).toBe('refused');
+    expect(result.failure).toBe(changedOutside(FLEET_LABEL));
+    expect(readlinkSync(fleetLink)).toBe(path.join(world.oldRelease, 'deploy', 'whatsoup-fleet'));
+    expect(readlinkSync(world.link)).toBe(path.join(world.oldRelease, 'deploy', 'whatsoup'));
+    expect(readFileSync(world.directPlist, 'utf8')).toBe(directBefore);
+    expect(readFileSync(fleetPlist, 'utf8')).toBe(edited);
+    expect(liveMutations(world)).toEqual([]);
+  });
+
+  it.each([
+    { when: 'before its reload', trigger: 'bootstrap:com.whatsoup.shared' },
+    { when: 'between its bootout and bootstrap', trigger: `bootout:${FLEET_LABEL}` },
+  ])('never loads a host launcher plist changed after the switch $when, and fails into the group rollback', async ({ trigger }) => {
+    const world = twoMemberWorld();
+    const { fleetPlist, declaration } = launcherAndWatchdog(world);
+    const plan = await planHostUnit(world, declaration);
+    const result = await applyPlanned(world, plan, writerAfter(world, trigger, () => { editAfterPlanning(fleetPlist); }));
+    expect(result.outcome).toBe('rollback-unverified');
+    expect(result.failure).toBe(changedOutside(FLEET_LABEL));
+    expect(result.steps).toContainEqual({ step: `reload:${FLEET_LABEL}`, ok: false, detail: changedOutside(FLEET_LABEL) });
+    expect(result.rollback?.steps).toContainEqual(expect.objectContaining({ step: 'recheck-live-identity-before-instance-stop', ok: false }));
+    expect(world.calls).not.toContain(`bootstrap:${FLEET_LABEL}`);
+    expect(world.calls).not.toContain(`bootstrap:${WATCHDOG_LABEL}`);
+  });
+
+  it('refuses with no live change when a watchdog plist changed after planning', async () => {
+    const world = twoMemberWorld();
+    const { watchdogPlist, declaration } = launcherAndWatchdog(world);
+    const plan = await planHostUnit(world, declaration);
+    editAfterPlanning(watchdogPlist);
+    const result = await applyPlanned(world, plan);
+    expect(result.outcome).toBe('refused');
+    expect(result.failure).toBe(changedOutside(WATCHDOG_LABEL));
+    expect(readlinkSync(world.link)).toBe(path.join(world.oldRelease, 'deploy', 'whatsoup'));
+    expect(liveMutations(world)).toEqual([]);
+  });
+
+  it('never reloads a watchdog whose plist another writer replaced while it was quiesced', async () => {
+    const world = twoMemberWorld();
+    const { watchdogPlist, declaration } = launcherAndWatchdog(world);
+    const plan = await planHostUnit(world, declaration);
+    const result = await applyPlanned(world, plan, writerAfter(world, `bootout:${WATCHDOG_LABEL}`, () => { editAfterPlanning(watchdogPlist); }));
+    expect(result.outcome).toBe('rollback-unverified');
+    expect(result.failure).toBe(changedOutside(WATCHDOG_LABEL));
+    expect(result.steps).toContainEqual({ step: `restore-watchdog:${WATCHDOG_LABEL}`, ok: false, detail: changedOutside(WATCHDOG_LABEL) });
+    expect(readlinkSync(world.link)).toBe(path.join(world.oldRelease, 'deploy', 'whatsoup'));
+    expect(world.calls).not.toContain(`bootstrap:${WATCHDOG_LABEL}`);
+  });
+
+  it('never reloads a watchdog whose plist changed after the switch, and does not report activated', async () => {
+    const world = twoMemberWorld();
+    const { watchdogPlist, declaration } = launcherAndWatchdog(world);
+    const plan = await planHostUnit(world, declaration);
+    const result = await applyPlanned(world, plan, writerAfter(world, 'bootstrap:com.whatsoup.shared', () => { editAfterPlanning(watchdogPlist); }));
+    expect(result.outcome).toBe('rollback-unverified');
+    expect(result.failure).toBe(changedOutside(WATCHDOG_LABEL));
+    expect(result.steps).toContainEqual({ step: 'verify-live-identity', ok: false, detail: changedOutside(WATCHDOG_LABEL) });
+    expect(world.calls).not.toContain(`bootstrap:${WATCHDOG_LABEL}`);
   });
 });
