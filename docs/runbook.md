@@ -3158,12 +3158,19 @@ challenge remains open, a login session remains active, or a credential was save
 Legacy completions and unknown outcomes return null; never infer completion from
 `inputState: succeeded`. Links owns this durable result. WhatSoup refreshes it after
 restart and fails the status request if Links is unavailable, without a local
-completion fallback. Deploy the additive Links completion contract before an
-upgraded consumer, since the old endpoint rejects the new result field. The
-order also holds in reverse: roll the consumer back before rolling Links back
-to an endpoint without that contract. Otherwise Links refuses each completion
-that carries a result, the consumer marks that intake `ambiguous`, and the
-result is not recorded.
+completion fallback. Deploy the Links side first: the additive completion
+contract (the old endpoint rejects the new result field), resource listing
+(`GET /resources`, used by `list_secret_input_resources`) and challenge
+registration (`POST /resources/<id>/challenges`, used by a paired password
+adapter). Without listing, the tool fails closed. Without challenge
+registration, a paired password intake is consumed and then marked
+`ambiguous`, so configure an `mfaTransition` pair only after Links supports it.
+The order also holds in reverse: roll the consumer back before rolling Links
+back to an endpoint without these contracts, and restore the previous consumer
+configuration with it, because the previous release refuses an adapter that
+declares `mfaTransition` or `operationMode`. Otherwise Links refuses each
+completion that carries a result, the consumer marks that intake `ambiguous`,
+and the result is not recorded.
 On restart, an intake left in `resolving` becomes locally `ambiguous` and is never
 replayed; pending intakes are not sent by maintenance recovery.
 The daily unified database-retention transaction deletes protected-delivery
@@ -3220,7 +3227,8 @@ A fixed password precursor may use action `Verify password for two-step sign-in`
 configured `mfaTransition` pair. Its direct fixed HTTPS source returns a
 strictly bound `202` response only after accepting the password and creating
 the source-side MFA operation. The consumer validates the echoed intake ID,
-principal, account, paired resource, operation ID, and clipped deadline, then
+principal, account, paired resource, operation ID, and a deadline no more than
+ten minutes away (a later deadline is refused, not shortened), then
 uses the consumer bearer to register the existing Links challenge. The paired
 MFA adapter uses `operationMode: "links_registered"`; Links supplies its
 operation ID only when the exact MFA intake is consumed. A password `202` is
