@@ -661,6 +661,11 @@ jobs:
             *) base=""; head="" ;;
           esac
           if [ -z "$base" ] || [ -z "$head" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            # A pull request or merge group always names a base and a head, so a missing one fails closed.
+            if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "merge_group" ]; then
+              echo "gitleaks: the event gives no complete change range (an empty base or head, or an all-zero base); the scan fails closed"
+              exit 1
+            fi
             echo "gitleaks: the ${EVENT_NAME} event names no change range; nothing to scan"
             exit 0
           fi

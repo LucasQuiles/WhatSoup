@@ -445,6 +445,29 @@ describe('Quality workflow scan step, run under bash with a fake gitleaks on PAT
     expect(existsSync(fake.calls)).toBe(false);
   });
 
+  // Events are built when each case runs: the commits exist only after beforeEach.
+  it.each<[string, () => Record<string, string>]>([
+    ['a pull_request with an empty base', () => ({ EVENT_NAME: 'pull_request', PR_BASE_SHA: '', PR_HEAD_SHA: commits.head })],
+    ['a merge_group with an empty head', () => ({ EVENT_NAME: 'merge_group', MERGE_GROUP_BASE_SHA: commits.base, MERGE_GROUP_HEAD_SHA: '' })],
+    ['a pull_request with an all-zero base', () => ({ EVENT_NAME: 'pull_request', PR_BASE_SHA: ZERO_SHA, PR_HEAD_SHA: commits.head })],
+  ])('fails closed with one fixed line on %s, before any scan', (_label, event) => {
+    const fake = writeFakeGitleaks(bin, { name: 'gitleaks', version: GITLEAKS_VERSION });
+    expect(runScan(event())).toEqual({
+      status: 1,
+      lines: ['gitleaks: the event gives no complete change range (an empty base or head, or an all-zero base); the scan fails closed'],
+    });
+    expect(existsSync(fake.calls)).toBe(false);
+  });
+
+  it('still lets a push with an all-zero before pass with the nothing-to-scan line', () => {
+    const fake = writeFakeGitleaks(bin, { name: 'gitleaks', version: GITLEAKS_VERSION });
+    expect(runScan({ EVENT_NAME: 'push', PUSH_BEFORE_SHA: ZERO_SHA, PUSH_AFTER_SHA: commits.head })).toEqual({
+      status: 0,
+      lines: ['gitleaks: the push event names no change range; nothing to scan'],
+    });
+    expect(existsSync(fake.calls)).toBe(false);
+  });
+
   it('scans a push with the pushed commit\'s own .gitleaks.toml and an empty ignore folder', () => {
     const fake = writeFakeGitleaks(bin, { name: 'gitleaks', version: GITLEAKS_VERSION });
     expect(runScan(pushEvent())).toEqual({ status: 0, lines: [`gitleaks: no findings in ${commits.base}..${commits.head}`] });
