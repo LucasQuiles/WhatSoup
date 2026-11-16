@@ -142,7 +142,7 @@ describe('.gitleaks.toml', () => {
     ['an [allowlist] table', (indent) => `${config}\n${indent}[allowlist]\n${indent}paths = ['''.*''']\n`],
     ['a second [[allowlists]] table', (indent) => `${config}\n${indent}[[allowlists]]\n${indent}paths = ['''.*''']\n`],
     ['a top-level key', (indent) => `${indent}title = "custom"\n${config}`],
-    ['an allowlist regexes key', (indent) => insertAfter('[[allowlists]]', `${indent}regexes = ['''.*''']`)],
+    ['an allowlist regexes key', (indent) => insertAfter('[[allowlists]]', `${indent}regexes = ['''zorblab''']`)],
     ['an allowlist stopwords key', (indent) => insertAfter('[[allowlists]]', `${indent}stopwords = ['''key''']`)],
     ['an allowlist commits key', (indent) => insertAfter('[[allowlists]]', `${indent}commits = ['''0123456789abcdef''']`)],
     ['an allowlist targetRules key', (indent) => insertAfter('[[allowlists]]', `${indent}targetRules = ['''generic-api-key''']`)],
@@ -222,6 +222,8 @@ describe('Quality workflow gitleaks job', () => {
     expect(run.split('\n')[0]).toBe('set -euo pipefail');
     expect(run).toContain('archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"');
     expect(run).toContain('"https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"');
+    // An absent fragment's index is -1, which the order checks below would pass, so each must be present first.
+    for (const fragment of ['curl --fail', 'sha256sum -c -', 'tar -xzf']) expect(run, fragment).toContain(fragment);
     expect(run.indexOf('sha256sum -c -')).toBeGreaterThan(run.indexOf('curl --fail'));
     expect(run.indexOf('tar -xzf')).toBeGreaterThan(run.indexOf('sha256sum -c -'));
   });
