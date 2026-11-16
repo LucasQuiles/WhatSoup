@@ -74,9 +74,9 @@ The checks:
 - gitleaks: the pre-push hook and the Quality job `gitleaks` scan new commits
   for secrets. The Quality job prints a count only.
 
-The `guard:repo` checks print a file, a line and a rule code, with the matched
-text masked. A term regex with anchors (`^`, `$`) or lookarounds is not masked
-inside a longer file name, so write term regexes without them.
+The `guard:repo` checks print a file, a line where one applies, and a rule code,
+with the matched text masked. A term regex with anchors (`^`, `$`) or lookarounds
+may not be masked inside a longer file name, so write term regexes without them.
 
 ## Release convergence
 
