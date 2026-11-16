@@ -77,6 +77,16 @@ export interface PrivateTermRule {
   readonly message: string;
   /** Marks a term-file rule: no environment-token allowance applies to it (repo-hygiene-policy). */
   readonly privateTerm: true;
+  /** The term's id. Guard output never prints it; only the anonymizer's local report counts by it. */
+  readonly termId: string;
+  readonly match: PrivateTermMatch;
+  /**
+   * Characters of context text the detection form matches before and after the term itself
+   * (context terms; 0 otherwise). A context term compiles to one rule per form, so these are
+   * fixed per rule.
+   */
+  readonly contextBefore: number;
+  readonly contextAfter: number;
   /** Detection form, built exactly as the reference matcher describes; never global. */
   readonly regex: RegExp;
   /**
@@ -142,6 +152,7 @@ const WORD_AFTER = '(?![A-Za-z0-9_])';
 
 interface ValidTerm {
   readonly index: number;
+  readonly id: string;
   readonly termClass: PrivateTermClass;
   readonly match: PrivateTermMatch;
   readonly insensitive: boolean;
@@ -201,6 +212,7 @@ function validateTerm(raw: unknown, index: number): ValidTerm {
   }
   return {
     index,
+    id: raw.id,
     termClass: raw.class as PrivateTermClass,
     match,
     insensitive: raw.case === 'insensitive',
@@ -239,59 +251,72 @@ function validateContexts(raw: unknown, where = 'contexts'): ContextForm[] {
   });
 }
 
-function compileTerm(term: ValidTerm, topLevelContexts: readonly ContextForm[]): PrivateTermRule {
+interface CompiledForm {
+  readonly detection: string;
+  readonly replacement: string;
+  readonly before: number;
+  readonly after: number;
+}
+
+// One rule per context form: an alternation of forms would repeat the core once per form and
+// shift the numbers of its groups, so `\1` in the second form would name a group of the first.
+function compileTerm(term: ValidTerm, topLevelContexts: readonly ContextForm[]): PrivateTermRule[] {
   const where = `terms[${term.index}]`;
   const contexts = term.contexts ?? topLevelContexts;
   // The core is grouped (non-capturing) so a core with a top-level alternation
   // keeps its meaning inside the boundaries; its own groups keep their numbers.
   const core = `(?:${termCore(term)})`;
   const flags = term.insensitive ? 'i' : '';
-  let detection: string;
-  let replacement: string;
+  let forms: CompiledForm[];
   if (term.match === 'word') {
-    detection = `${WORD_BEFORE}${core}${WORD_AFTER}`;
-    replacement = detection;
+    const detection = `${WORD_BEFORE}${core}${WORD_AFTER}`;
+    forms = [{ detection, replacement: detection, before: 0, after: 0 }];
   } else if (term.match === 'context') {
     if (contexts.length === 0) throw new InvalidTermsFile(`${where}: context terms need at least one contexts form`);
-    detection = `(?:${contexts
-      .map(({ before, after }) => `${escapeRegex(before)}${core}${after === '' ? WORD_AFTER : escapeRegex(after)}`)
-      .join('|')})`;
-    replacement = `(?:${contexts
-      .map(({ before, after }) => `(?<=${escapeRegex(before)})${core}${after === '' ? WORD_AFTER : `(?=${escapeRegex(after)})`}`)
-      .join('|')})`;
+    forms = contexts.map(({ before, after }) => ({
+      detection: `${escapeRegex(before)}${core}${after === '' ? WORD_AFTER : escapeRegex(after)}`,
+      replacement: `(?<=${escapeRegex(before)})${core}${after === '' ? WORD_AFTER : `(?=${escapeRegex(after)})`}`,
+      before: before.length,
+      after: after.length,
+    }));
   } else if (term.match === 'literal') {
-    detection = core;
-    replacement = detection;
+    forms = [{ detection: core, replacement: core, before: 0, after: 0 }];
   } else {
-    detection = `(?<![0-9.])${core}(?![0-9]|\\.[0-9])`;
-    replacement = detection;
+    const detection = `(?<![0-9.])${core}(?![0-9]|\\.[0-9])`;
+    forms = [{ detection, replacement: detection, before: 0, after: 0 }];
   }
   try {
     const code = PRIVATE_TERM_CLASS_CODES[term.termClass];
-    return Object.freeze({
+    const coreRegex = new RegExp(`^${core}$`, flags);
+    const maskRegex = new RegExp(core, `${flags}g`);
+    return forms.map((form) => Object.freeze({
       code,
       message: PRIVATE_TERM_CODE_MESSAGES[code]!,
       privateTerm: true as const,
-      regex: new RegExp(detection, flags),
-      replaceRegex: new RegExp(replacement, `${flags}g`),
-      coreRegex: new RegExp(`^${core}$`, flags),
-      maskRegex: new RegExp(core, `${flags}g`),
+      termId: term.id,
+      match: term.match,
+      contextBefore: form.before,
+      contextAfter: form.after,
+      regex: new RegExp(form.detection, flags),
+      replaceRegex: new RegExp(form.replacement, `${flags}g`),
+      coreRegex,
+      maskRegex,
       replace: term.replace,
-    });
+    }));
   } catch {
     // A RegExp SyntaxError quotes the pattern; report the index only.
     throw new InvalidTermsFile(`${where}: regex does not compile`);
   }
 }
 
-/** Compile parsed term-file JSON into rules. Throws a fixed-message error for invalid input. */
+/** Compile parsed term-file JSON into rules (one per context form). Throws a fixed-message error for invalid input. */
 export function compilePrivateTerms(document: unknown): PrivateTermRule[] {
   if (!isRecord(document)) throw new InvalidTermsFile('top level is not an object');
   if (document.schema !== PRIVATE_TERMS_SCHEMA) throw new InvalidTermsFile(`schema must be ${PRIVATE_TERMS_SCHEMA}`);
   if (document.version !== PRIVATE_TERMS_VERSION) throw new InvalidTermsFile(`version must be ${PRIVATE_TERMS_VERSION}`);
   const contexts = validateContexts(document.contexts);
   if (!Array.isArray(document.terms)) throw new InvalidTermsFile('terms must be an array');
-  return document.terms.map((raw, index) => compileTerm(validateTerm(raw, index), contexts));
+  return document.terms.flatMap((raw, index) => compileTerm(validateTerm(raw, index), contexts));
 }
 
 function readTermBytes(filePath: string): { status: 'absent' } | { status: 'unreadable' } | { status: 'read'; bytes: Buffer } {

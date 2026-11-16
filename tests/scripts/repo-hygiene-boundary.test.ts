@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { parseBoundaryBaseline } from '../../scripts/lib/repo-hygiene-boundary.ts';
+import { parseBoundaryBaseline, refNamesByLine } from '../../scripts/lib/repo-hygiene-boundary.ts';
 import {
   canonicalRepoHygienePolicyProjection,
   createRepoHygieneExactRangeArtifact,
@@ -252,6 +252,38 @@ describe('repo hygiene guard with a private term file', () => {
     expect(result.lines).toContain('refs:2 private-host-label: Public repo text must not include private host labels.');
     expect(result.lines).toContain('refs:3 private-instance-label: Public repo text must not include private instance labels.');
     expect(result.lines.some((line) => line.startsWith('refs:4 '))).toBe(false);
+    expectNoTermText(result.lines);
+  });
+
+  it('reads git pre-push stdin exactly: a new branch, an update, a deletion (parsed, not scanned), CRLF', () => {
+    useTerms();
+    const cwd = tmp.make('pre-push');
+    const zero = '0'.repeat(40);
+    const [one, two, three] = ['1', '2', '3'].map((digit) => digit.repeat(40));
+    // git push writes `<local ref> SP <local oid> SP <remote ref> SP <remote oid> LF` per ref. A new
+    // branch has a zero remote oid; a deletion has the local ref `(delete)` and a zero local oid.
+    const stdin = [
+      `refs/heads/zorblab-new ${one} refs/heads/zorblab-new ${zero}`,
+      `refs/heads/main ${two} refs/heads/main ${three}`,
+      `refs/heads/topic ${two} refs/heads/qx-bot-topic ${three}`,
+      `(delete) ${zero} refs/heads/quorpine-old ${three}`,
+      '',
+    ].join('\r\n');
+    expect(refNamesByLine(stdin)).toEqual([
+      { line: 1, names: ['refs/heads/zorblab-new', 'refs/heads/zorblab-new'] },
+      { line: 2, names: ['refs/heads/main', 'refs/heads/main'] },
+      { line: 3, names: ['refs/heads/topic', 'refs/heads/qx-bot-topic'] },
+    ]);
+    const file = join(cwd, 'pre-push-stdin');
+    writeFileSync(file, stdin);
+
+    const result = capture(['--refs', file], cwd);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.lines.filter((line) => line.startsWith('refs:'))).toEqual([
+      'refs:1 private-host-label: Public repo text must not include private host labels.',
+      'refs:3 private-instance-label: Public repo text must not include private instance labels.',
+    ]);
     expectNoTermText(result.lines);
   });
 

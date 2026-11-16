@@ -84,9 +84,13 @@ describe('private term file loader', () => {
     const load = loadPrivateTerms({ WHATSOUP_PRIVATE_TERMS_FILE: SYNTHETIC_PRIVATE_TERMS_FILE });
     expect(load.status).toBe('loaded');
     expect(load.sha256).toBe(createHash('sha256').update(readFileSync(SYNTHETIC_PRIVATE_TERMS_FILE)).digest('hex'));
+    // One rule per term, and one per context form for the context term (four top-level forms).
     expect(load.rules.map((rule) => rule.code)).toEqual([
       'private-host-label',
       'private-host-label',
+      'private-instance-label',
+      'private-instance-label',
+      'private-instance-label',
       'private-instance-label',
       'private-instance-label',
       'private-person',
@@ -165,14 +169,32 @@ describe('private term file loader', () => {
 
   it('replaces only the term inside a context and expands the first regex group', () => {
     const rules = syntheticRules();
-    const context = rules.find((rule) => rule.code === 'private-instance-label' && rule.replace === 'line-a')!;
+    const contextForms = rules.filter((rule) => rule.code === 'private-instance-label' && rule.replace === 'line-a');
+    expect(contextForms).toHaveLength(4);
     const input = 'whatsoup@zqline and instances/zqline/ and zqline';
-    const output = input.replace(context.replaceRegex, (span) => expandPrivateTermReplacement(context, span));
+    const output = contextForms.reduce(
+      (text, form) => text.replace(form.replaceRegex, (span) => expandPrivateTermReplacement(form, span)),
+      input,
+    );
     expect(output).toBe('whatsoup@line-a and instances/line-a/ and zqline');
 
     const numbered = rules.find((rule) => rule.replace === 'host-{1}')!;
     expect('ssh zmini12'.replace(numbered.replaceRegex, (span) => expandPrivateTermReplacement(numbered, span)))
       .toBe('ssh host-12');
+  });
+
+  it('keeps a core\'s numbered backreferences in every context form', () => {
+    const file = writeTerms({
+      ...baseDocument,
+      contexts: ['a/{t}/', 'b/{t}/'],
+      terms: [{ id: 'R001', class: 'machine', regex: 'z([0-9])\\1', match: 'context', case: 'sensitive', replace: 'host-a' }],
+    });
+    const rules = requirePrivateTermsUsable(loadPrivateTerms({ WHATSOUP_PRIVATE_TERMS_FILE: file }));
+    expect(hitCodes(rules, 'a/z77/')).toEqual(['private-host-label']);
+    expect(hitCodes(rules, 'b/z77/')).toEqual(['private-host-label']);
+    expect(hitCodes(rules, 'a/z7/')).toEqual([]);
+    expect(hitCodes(rules, 'b/z7/')).toEqual([]);
+    expect(hitCodes(rules, 'b/z78/')).toEqual([]);
   });
 
   it('applies a term\'s own contexts instead of the top-level list, for that term only', () => {
