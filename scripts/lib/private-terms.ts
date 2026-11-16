@@ -8,8 +8,9 @@
  * public source.
  *
  * Path: WHATSOUP_PRIVATE_TERMS_FILE when set, else
- * ~/.config/whatsoup/private-terms.json. An absent file yields no term rules;
- * the caller then reports that only the generic rules ran. With
+ * ~/.config/whatsoup/private-terms.json (an empty variable counts as unset). An absent file
+ * yields no term rules; the caller then reports, once per run, that only the generic and
+ * fallback rules ran. With
  * WHATSOUP_REQUIRE_PRIVATE_TERMS=1 an absent file is a failure. An unreadable
  * or invalid file is always a failure: a term file that exists but cannot be
  * applied must not silently weaken the check.
@@ -130,7 +131,7 @@ export class PrivateTermsError extends Error {
 }
 
 export const PRIVATE_TERMS_ABSENT_NOTICE =
-  'private term file absent (WHATSOUP_PRIVATE_TERMS_FILE or ~/.config/whatsoup/private-terms.json); only the generic rules ran';
+  'private term file absent (WHATSOUP_PRIVATE_TERMS_FILE or ~/.config/whatsoup/private-terms.json); only the generic and fallback rules ran';
 
 export function privateTermsRequired(env: NodeJS.ProcessEnv): boolean {
   return env[REQUIRE_PRIVATE_TERMS_ENV] === '1';
@@ -196,6 +197,10 @@ function validateTerm(raw: unknown, index: number): ValidTerm {
   if (raw.variants !== undefined && typeof raw.variants !== 'boolean') {
     throw new InvalidTermsFile(`${where}: variants must be a boolean`);
   }
+  // `variants` widens only a `-bot` suffix (x-bot, x_bot, xbot); on any other value it would be ignored.
+  if (raw.variants === true && (typeof raw.value !== 'string' || !raw.value.endsWith('-bot'))) {
+    throw new InvalidTermsFile(`${where}: variants needs a value that ends in -bot`);
+  }
   if (raw.replace !== undefined && typeof raw.replace !== 'string') {
     throw new InvalidTermsFile(`${where}: replace must be a string`);
   }
@@ -245,8 +250,11 @@ function validateContexts(raw: unknown, where = 'contexts'): ContextForm[] {
   if (!Array.isArray(raw)) throw new InvalidTermsFile(`${where} must be an array of strings`);
   return raw.map((form, index) => {
     if (typeof form !== 'string') throw new InvalidTermsFile(`${where}[${index}] must be a string`);
+    if (form === '') throw new InvalidTermsFile(`${where}[${index}] is empty`);
     const parts = form.split('{t}');
     if (parts.length !== 2) throw new InvalidTermsFile(`${where}[${index}] must contain {t} exactly once`);
+    // A form of `{t}` alone has no context: the term would match wherever its value appears.
+    if (parts[0] === '' && parts[1] === '') throw new InvalidTermsFile(`${where}[${index}] must hold context text around {t}`);
     return { before: parts[0]!, after: parts[1]! };
   });
 }
@@ -316,7 +324,50 @@ export function compilePrivateTerms(document: unknown): PrivateTermRule[] {
   if (document.version !== PRIVATE_TERMS_VERSION) throw new InvalidTermsFile(`version must be ${PRIVATE_TERMS_VERSION}`);
   const contexts = validateContexts(document.contexts);
   if (!Array.isArray(document.terms)) throw new InvalidTermsFile('terms must be an array');
-  return document.terms.flatMap((raw, index) => compileTerm(validateTerm(raw, index), contexts));
+  const terms = document.terms.map((raw, index) => validateTerm(raw, index));
+  const firstIndexById = new Map<string, number>();
+  for (const term of terms) {
+    const first = firstIndexById.get(term.id);
+    if (first !== undefined) throw new InvalidTermsFile(`terms[${term.index}]: id repeats terms[${first}]`);
+    firstIndexById.set(term.id, term.index);
+  }
+  const compiled = terms.map((term) => ({ term, rules: compileTerm(term, contexts) }));
+  for (const { term } of compiled) checkReplacement(term, term.contexts ?? contexts, compiled);
+  return compiled.flatMap(({ rules }) => rules);
+}
+
+/** Capture groups of a term's core (0 for literal and address terms, and for a plain value). */
+function coreGroupCount(term: ValidTerm): number {
+  return new RegExp(`(?:${termCore(term)})|`).exec('')!.length - 1;
+}
+
+// A replacement must never publish a private term. Its `{N}` names a group the term has, and
+// its fixed text (the template with `{N}` removed) equals no term's value and holds nothing a
+// term rule detects: alone, and for a context term also where it lands, inside its own forms.
+// The anonymizer still checks every expanded replacement in place (anonymize-private-literals).
+function checkReplacement(
+  term: ValidTerm,
+  forms: readonly ContextForm[],
+  compiled: ReadonlyArray<{ readonly term: ValidTerm; readonly rules: readonly PrivateTermRule[] }>,
+): void {
+  const where = `terms[${term.index}]`;
+  const groups = coreGroupCount(term);
+  for (const reference of term.replace.matchAll(/\{([1-9])\}/g)) {
+    if (Number(reference[1]) > groups) {
+      throw new InvalidTermsFile(`${where}: replace names group ${reference[1]}, which the term does not have`);
+    }
+  }
+  const fixed = term.replace.replace(/\{[1-9]\}/g, '');
+  const placed = term.match === 'context' ? forms.map(({ before, after }) => `${before}${fixed}${after}`) : [];
+  for (const other of compiled) {
+    const value = other.term.value;
+    if ((value !== null && fixed.toLowerCase() === value.toLowerCase()) || other.rules.some((rule) => rule.coreRegex.test(fixed))) {
+      throw new InvalidTermsFile(`${where}: replace equals the value of terms[${other.term.index}]`);
+    }
+    if (other.rules.some((rule) => [fixed, ...placed].some((text) => rule.regex.test(text)))) {
+      throw new InvalidTermsFile(`${where}: replace holds the private term of terms[${other.term.index}]`);
+    }
+  }
 }
 
 function readTermBytes(filePath: string): { status: 'absent' } | { status: 'unreadable' } | { status: 'read'; bytes: Buffer } {

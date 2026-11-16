@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
+  PRIVATE_TERMS_ABSENT_NOTICE,
   PRIVATE_TERM_CODES,
   PrivateTermsError,
   expandPrivateTermReplacement,
@@ -58,6 +59,23 @@ describe('private term file loader', () => {
     expect(privateTermsPath({ HOME: '/h' })).toBe(join('/h', '.config', 'whatsoup', 'private-terms.json'));
     expect(privateTermsPath({ WHATSOUP_PRIVATE_TERMS_FILE: '', HOME: '/h' }))
       .toBe(join('/h', '.config', 'whatsoup', 'private-terms.json'));
+  });
+
+  it('treats an empty WHATSOUP_PRIVATE_TERMS_FILE as unset, and names the fallback rules in the absent notice', () => {
+    expect(loadPrivateTerms({ WHATSOUP_PRIVATE_TERMS_FILE: '', HOME: tmp.make('home') }).status).toBe('absent');
+    expect(PRIVATE_TERMS_ABSENT_NOTICE).toContain('only the generic and fallback rules ran');
+  });
+
+  it('accepts a {N} the core has and a replacement that holds no term', () => {
+    const file = writeTerms({
+      ...baseDocument,
+      contexts: ['whatsoup@{t}'],
+      terms: [
+        { id: 'F001', class: 'machine', regex: 'zmini([0-9]{1,2})', match: 'word', case: 'insensitive', replace: 'host-{1}' },
+        { id: 'C001', class: 'instance', value: 'zqline', match: 'context', case: 'sensitive', replace: 'line-a' },
+      ],
+    });
+    expect(loadPrivateTerms({ WHATSOUP_PRIVATE_TERMS_FILE: file }).status).toBe('loaded');
   });
 
   it('treats an absent file as no rules, and as a failure only under the require switch', () => {
@@ -242,6 +260,40 @@ describe('private term file loader', () => {
     { label: 'term contexts not an array', document: term({ id: 'C001', class: 'instance', value: 'zqline', match: 'context', case: 'sensitive', contexts: 'whatsoup@{t}' }) },
     { label: 'term context form without its marker', document: term({ id: 'C001', class: 'instance', value: 'zqline', match: 'context', case: 'sensitive', contexts: ['whatsoup@zqline'] }) },
     { label: 'context term with an empty own list', document: { ...baseDocument, contexts: ['whatsoup@{t}'], terms: [{ id: 'C001', class: 'instance', value: 'zqline', match: 'context', case: 'sensitive', contexts: [] }] } },
+    { label: 'empty context form', document: { ...baseDocument, contexts: [''] } },
+    { label: 'context form with no text around its marker', document: { ...baseDocument, contexts: ['{t}'] } },
+    { label: 'variants on a value without the -bot suffix', document: term({ id: 'B001', class: 'instance', value: 'qxbot', match: 'word', case: 'sensitive', variants: true }) },
+    { label: 'variants on a regex term', document: term({ id: 'B001', class: 'instance', regex: 'qx-?bot', match: 'word', case: 'sensitive', variants: true }) },
+    {
+      label: 'repeated id',
+      document: { ...baseDocument, terms: [
+        { id: 'M001', class: 'machine', value: 'zorblab', match: 'word', case: 'sensitive', replace: 'host-a' },
+        { id: 'M001', class: 'person', value: 'quorpine', match: 'word', case: 'sensitive', replace: 'user-a' },
+      ] },
+    },
+    { label: 'replace names a group the term lacks', document: term({ id: 'M001', class: 'machine', value: 'zorblab', match: 'word', case: 'sensitive', replace: 'host-{1}' }) },
+    { label: 'replace is the term\'s own value', document: term({ id: 'M001', class: 'machine', value: 'zorblab', match: 'word', case: 'insensitive', replace: 'ZORBLAB' }) },
+    {
+      label: 'replace holds another term',
+      document: { ...baseDocument, terms: [
+        { id: 'P001', class: 'person', value: 'quorpine', match: 'word', case: 'insensitive', replace: 'user-a' },
+        { id: 'M001', class: 'machine', value: 'zorblab', match: 'word', case: 'insensitive', replace: 'quorpine' },
+      ] },
+    },
+    {
+      label: 'replace equals a context term\'s value',
+      document: { ...baseDocument, contexts: ['whatsoup@{t}'], terms: [
+        { id: 'C001', class: 'instance', value: 'zqline', match: 'context', case: 'sensitive', replace: 'line-a' },
+        { id: 'M001', class: 'machine', value: 'zorblab', match: 'word', case: 'sensitive', replace: 'zqline' },
+      ] },
+    },
+    {
+      label: 'replace forms a term inside its own context',
+      document: { ...baseDocument, contexts: ['whatsoup@{t}'], terms: [
+        { id: 'C001', class: 'instance', value: 'zqline', match: 'context', case: 'sensitive', replace: 'line-a' },
+        { id: 'C002', class: 'instance', value: 'zqother', match: 'context', case: 'sensitive', replace: 'zqline-x' },
+      ] },
+    },
   ])('reports an invalid file ($label) without any term id or value', ({ document }) => {
     const load = loadPrivateTerms({ WHATSOUP_PRIVATE_TERMS_FILE: writeTerms(document) });
     expect(load.status).toBe('invalid');
