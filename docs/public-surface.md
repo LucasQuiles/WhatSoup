@@ -379,6 +379,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-repo-branch-diff` | `npm run guard:repo:branch-diff` | `package.json` | stable | active | Repo hygiene guard over the branch/base diff |
 | `cli:npm.guard-repo-commit-msg` | `npm run guard:repo:commit-msg` | `package.json` | stable | active | Repo hygiene guard over commit-msg input |
 | `cli:npm.guard-repo-commit-authors` | `npm run guard:repo:commit-authors` | `package.json` | stable | active | Repo hygiene guard over branch-range commit authors |
+| `cli:npm.guard-repo-tree-write-baseline` | `npm run guard:repo:tree:write-baseline` | `package.json` | beta | active | Rewrite the private tree baseline (`WHATSOUP_BOUNDARY_BASELINE_FILE`, else `~/.config/whatsoup/boundary-baseline.json`, never committed) from HEAD; it may only lower counts or drop entries unless `--allow-increase` is given, and it refuses unless origin/main is an ancestor of HEAD |
 | `cli:npm.guard-harness-maintenance` | `npm run guard:harness-maintenance` | `package.json` | internal | active | Validate harness-maintenance manifest and npm cooldown gates |
 | `cli:npm.guard-agent-iteration-review` | `npm run guard:agent-iteration-review` | `package.json` | internal | active | Validate a self-review markdown artifact has required sections and a valid decision |
 | `cli:npm.guard-worker-artifacts` | `npm run guard:worker-artifacts` | `package.json` | internal | active | Validate worker-delegation report artifacts (JSON validity, metadata, manifest completeness) |
