@@ -74,6 +74,9 @@ export const allowedMessagingAddressRhs = /@(?:s\.whatsapp\.net|c\.us|lid)$/i;
 
 // SSOT for the fleet private-host labels: the publication detection rule below,
 // and consumers like the bot-errors collector-unit hygiene test, import this.
+// Fallback rule set: privateHostLabels and privateTailnetIps run alone when no private term file
+// is loaded (CI today) and join the term rules, under the same codes, when one is.
+// TODO(PB2): remove both lists once the term-aware hosted check is required.
 export const privateHostLabels = [
   ['mw', 'lab'],
   ['nuc', 'les'],
@@ -258,6 +261,8 @@ export const addedLinePatterns: GuardPattern[] = [
   {
     code: 'private-instance-label',
     message: 'Public repo text must not include private instance labels.',
+    // Fallback rule set: the literal labels below run alone without a private term file.
+    // TODO(PB2): remove the literal labels once the term-aware hosted check is required.
     regex: /\b(?:BES Bot|Loops-managed|mw-bot|whatsapp:mw-bot|whatsapp-bot@(?:personal|loops|besbot)|whatsoup@(?:q|loops|besbot|personal)|whatsoup-personal|Q's (?:number|WhatsApp number))\b|instances\/personal\/(?:whatsoup\.sock|bot\.db)|\/home\/q\//,
   },
   {

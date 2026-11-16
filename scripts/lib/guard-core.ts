@@ -1043,6 +1043,7 @@ export function isTextCandidate(filePath: string): boolean {
 // profile_coverage check matches their entries against on-disk instance
 // dirs and live unit names, so the literal labels must appear verbatim
 // (issue #1422).
+// TODO(PB2): replace this file list with generic path patterns.
 export const operationalReleaseHygieneFiles = new Set([
   'scripts/cutover.sh',
   'scripts/migrate-namespace.sh',
@@ -1052,6 +1053,7 @@ export const operationalReleaseHygieneFiles = new Set([
   'deploy/bot-errors-expected-fleet.json',
 ]);
 
+// TODO(PB2): drop these private identifiers; the private term file carries them instead.
 export const operationalProtocolIdentifiers = new Set([
   'whatsapp-bot@personal',
   'whatsapp-bot@loops',
