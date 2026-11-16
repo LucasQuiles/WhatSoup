@@ -490,7 +490,8 @@ npm --silent run release:activate-host -- \
 The schema-v1 declaration lists each instance, its reviewed current release,
 and each owned auxiliary label plus its renderer. Planning re-reads installed
 and loaded launchd definitions, refuses disagreement, and proves every
-consumer of a selected shared wrapper is declared. It prints only paths,
+installed consumer of a selected shared wrapper is declared (the limits are
+below). It prints only paths,
 digests, membership, port numbers, and state; it never prints health tokens,
 config contents, plist environment values, or health bodies.
 
@@ -518,8 +519,12 @@ never edit, reload, stop, or start. Each entry pins `label`, the installed
 `plistSha256`, and either `loadState: "loaded"` or `"unloaded-113"`. Its
 `reviewInputs` lists lexically ordered, normalized absolute `roots`, `links`,
 and `{ path, sha256 }` source files, plus ordered
-`argumentBindings: [{ index, path, kind }]`. The roots and links must exactly
-equal the release roots and shared launchers selected by this host transaction.
+`argumentBindings: [{ index, path, kind }]`. The roots must exactly equal the
+target release plus every declared `expectCurrent` (members and host
+auxiliaries). The links must exactly equal the members' standard
+`~/.local/bin/whatsoup` launcher path (listed once) plus every declared
+host-auxiliary link, whether or not that standard launcher joins the
+transaction.
 Each source file must remain outside those paths both by spelling and after
 symlink resolution; it is reread and rehashed from the same bytes during
 planning and immediately before the first `--apply` filesystem or launchd
@@ -565,13 +570,33 @@ label, plist digest, load state, roots, links, files, and argument bindings.
 
 `path-rebase` changes only plist string values that are exactly the reviewed
 root or lie below it; fields containing a prefix-sibling path are retained and
-embedded shell-style references are refused. The selected shared-wrapper union
-includes installed and loaded consumers. A standard `~/.local/bin/whatsoup`
+embedded shell-style references are refused.
+
+The shared-wrapper consumer proof reads installed plists only. For each
+selected shared wrapper, the plists in `~/Library/LaunchAgents` whose
+`ProgramArguments[0]` is that link must be exactly the declared members'
+primary plists that use it, and an unreadable installed plist refuses. For
+the fleet wrapper's declared link they must be exactly that auxiliary's plist;
+there an unreadable plist is not counted. Loaded
+definitions are not read for this proof. The loaded-domain inventory keeps
+only `com.whatsoup.*` labels and `com.bot-errors.health`, which planning
+proves against their installed plists or refuses; a loaded job under any
+other label, for
+example one bootstrapped from a plist outside `~/Library/LaunchAgents`, can
+use a selected wrapper without being detected.
+
+A standard `~/.local/bin/whatsoup`
 link that has no launchd consumer still joins the transaction when it already
 resolves exactly to a declared old release; a link to any other root remains
 outside the transaction. A missing link is also outside the transaction, but
 an unreadable path or a non-symlink is a preflight refusal rather than evidence
-that no launcher exists.
+that no launcher exists. A declaration with `outsideUnits` cannot use the
+missing-link case today: the review `links` must still list the standard link,
+and every listed link must resolve, so a missing standard link, or one whose
+target does not exist, refuses every outside unit (`selected root or launcher
+unavailable`) and with it the plan. A standard link that resolves to an
+existing undeclared root passes that check, but it stays in the outside units'
+review tuple and their no-reference checks.
 
 The only shell-style exception is the closed, legacy
 `com.bot-errors.health` host wrapper: its exact reviewed argv and wrapper shape
