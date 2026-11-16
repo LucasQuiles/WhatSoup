@@ -1,6 +1,6 @@
 /** One all-member transaction for `release:activate-host`; never calls the single-instance apply. */
 import {
-  chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readlinkSync, writeFileSync,
+  chmodSync, copyFileSync, mkdirSync, readFileSync, readlinkSync, writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
 
@@ -94,7 +94,10 @@ async function applyHoldingLock(host: ActivationHost, context: HostUnitApplyCont
   const schemaGates: HostUnitApplyOutcome['schemaGates'] = [];
   const members = memberRecords(context);
   const backupPath = path.join(context.backupDir, `activation-host-${context.commit.slice(0, 12)}-${stamp(host.now())}`);
-  const fail = (outcome: HostUnitApplyOutcome['outcome'], failure: string, rollback: HostUnitApplyOutcome['rollback'] = null): HostUnitApplyOutcome => ({ outcome, backupPath: existsSync(backupPath) ? backupPath : null, failure, steps, members, schemaGates, rollback });
+  // Only a directory this run created is its backup. A path an earlier run left (the same second, or a retry)
+  // is never reported, so the caller writes no receipt over that run's evidence.
+  let backupCreated = false;
+  const fail = (outcome: HostUnitApplyOutcome['outcome'], failure: string, rollback: HostUnitApplyOutcome['rollback'] = null): HostUnitApplyOutcome => ({ outcome, backupPath: backupCreated ? backupPath : null, failure, steps, members, schemaGates, rollback });
   const primary = allLabels(context.members, 'primary');
   const memberAuxiliaries = allLabels(context.members, 'aux');
   const hostAuxiliaries = context.hostAuxiliaries ?? [];
@@ -180,7 +183,9 @@ async function applyHoldingLock(host: ActivationHost, context: HostUnitApplyCont
     // mkdir leaves an existing directory as it is; one that is not private refuses, never gets chmod.
     const backupDir = backupDirectoryFailure(context.backupDir);
     if (backupDir !== null) return fail('refused', backupDir);
+    // Exclusive: an existing path fails with EEXIST, refuses, and is left untouched.
     mkdirSync(backupPath, { mode: 0o700 });
+    backupCreated = true;
     for (const member of context.members) {
       const directory = path.join(backupPath, 'members', member.args.instance);
       mkdirSync(directory, { recursive: true, mode: 0o700 });
