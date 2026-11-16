@@ -434,7 +434,6 @@ describe('Quality workflow scan step, run under bash with a fake gitleaks on PAT
 
   it.each([
     ['a base commit missing from the checkout', 'c'.repeat(40)],
-    ['a base that names no commit', 'not-a-commit'],
   ])('fails closed with one fixed line on %s, before any scan', (_label, base) => {
     const fake = writeFakeGitleaks(bin, { name: 'gitleaks', version: GITLEAKS_VERSION });
     const result = runScan({ EVENT_NAME: 'pull_request', PR_BASE_SHA: base, PR_HEAD_SHA: commits.head });
@@ -451,6 +450,25 @@ describe('Quality workflow scan step, run under bash with a fake gitleaks on PAT
     ['a merge_group with an empty head', () => ({ EVENT_NAME: 'merge_group', MERGE_GROUP_BASE_SHA: commits.base, MERGE_GROUP_HEAD_SHA: '' })],
     ['a pull_request with an all-zero base', () => ({ EVENT_NAME: 'pull_request', PR_BASE_SHA: ZERO_SHA, PR_HEAD_SHA: commits.head })],
   ])('fails closed with one fixed line on %s, before any scan', (_label, event) => {
+    const fake = writeFakeGitleaks(bin, { name: 'gitleaks', version: GITLEAKS_VERSION });
+    expect(runScan(event())).toEqual({
+      status: 1,
+      lines: ['gitleaks: the event gives no complete change range (an empty base or head, or an all-zero base); the scan fails closed'],
+    });
+    expect(existsSync(fake.calls)).toBe(false);
+  });
+
+  // Base and head reach git and --log-opts only as 40-character lower-case hex commit ids, and a
+  // pull request or merge group must name an existing head commit. One option in a value (such as
+  // --max-count=0) could make the scan cover nothing and pass.
+  it.each<[string, () => Record<string, string>]>([
+    ['a merge_group with a whitespace-only base', () => ({ EVENT_NAME: 'merge_group', MERGE_GROUP_BASE_SHA: '   ', MERGE_GROUP_HEAD_SHA: commits.head })],
+    ['a pull_request whose base is not a commit id', () => ({ EVENT_NAME: 'pull_request', PR_BASE_SHA: 'not-a-commit', PR_HEAD_SHA: commits.head })],
+    ['a pull_request whose head carries an option', () => ({ EVENT_NAME: 'pull_request', PR_BASE_SHA: commits.base, PR_HEAD_SHA: `${commits.head} --max-count=0` })],
+    ['a pull_request with an all-zero head', () => ({ EVENT_NAME: 'pull_request', PR_BASE_SHA: commits.base, PR_HEAD_SHA: ZERO_SHA })],
+    ['a merge_group whose well-formed head names no commit', () => ({ EVENT_NAME: 'merge_group', MERGE_GROUP_BASE_SHA: commits.base, MERGE_GROUP_HEAD_SHA: 'd'.repeat(40) })],
+    ['a push whose after-value carries an option', () => ({ EVENT_NAME: 'push', PUSH_BEFORE_SHA: commits.base, PUSH_AFTER_SHA: `${commits.head} --max-count=0` })],
+  ])('refuses %s with the same fixed line, before any scan', (_label, event) => {
     const fake = writeFakeGitleaks(bin, { name: 'gitleaks', version: GITLEAKS_VERSION });
     expect(runScan(event())).toEqual({
       status: 1,

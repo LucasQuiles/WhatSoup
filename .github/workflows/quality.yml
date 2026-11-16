@@ -660,14 +660,32 @@ jobs:
             push) base="$PUSH_BEFORE_SHA"; head="$PUSH_AFTER_SHA" ;;
             *) base=""; head="" ;;
           esac
-          if [ -z "$base" ] || [ -z "$head" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+          zero="0000000000000000000000000000000000000000"
+          refuse_range() {
+            echo "gitleaks: the event gives no complete change range (an empty base or head, or an all-zero base); the scan fails closed"
+            exit 1
+          }
+          # Base and head reach git and --log-opts only as 40-character lower-case hex commit ids: a
+          # space or an option in a value (such as --max-count=0) could make the scan cover nothing.
+          # The characters are listed, not ranged, so no locale widens the class.
+          for value in "$base" "$head"; do
+            if [ -n "$value" ] && ! [[ "$value" =~ ^[0123456789abcdef]{40}$ ]]; then
+              refuse_range
+            fi
+          done
+          if [ -z "$base" ] || [ -z "$head" ] || [ "$base" = "$zero" ]; then
             # A pull request or merge group always names a base and a head, so a missing one fails closed.
             if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "merge_group" ]; then
-              echo "gitleaks: the event gives no complete change range (an empty base or head, or an all-zero base); the scan fails closed"
-              exit 1
+              refuse_range
             fi
             echo "gitleaks: the ${EVENT_NAME} event names no change range; nothing to scan"
             exit 0
+          fi
+          # A pull request or merge group must also name an existing head commit.
+          if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "merge_group" ]; then
+            if [ "$head" = "$zero" ] || ! git cat-file -e "${head}^{commit}" 2>/dev/null; then
+              refuse_range
+            fi
           fi
           # A pull request or merge group is judged by the base commit's .gitleaks.toml, so a change
           # cannot edit the rules or the allowlist that judge it. Only the change that adds the file
