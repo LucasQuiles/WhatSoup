@@ -297,7 +297,7 @@ describe('pre-push gitleaks step', () => {
     );
   });
 
-  it('runs inside runPrePushGuard after the console check and before the composite', () => {
+  it('runs inside runPrePushGuard after the console check and the ref-name scan, before the composite', () => {
     const bin = join(root, 'bin');
     mkdirSync(bin);
     const npmCalls = join(root, 'npm-calls.log');
@@ -322,8 +322,11 @@ describe('pre-push gitleaks step', () => {
       else process.env['WHATSOUP_REQUIRE_GITLEAKS'] = savedRequire;
     }
     expect(events).toEqual(['console']);
+    // Order: the estate gate, the ref-name scan (through its temporary file), then the refused
+    // secret scan; the composite never starts.
     expect(readFileSync(npmCalls, 'utf8').trim().split('\n')).toEqual([
       'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
+      expect.stringMatching(/^run guard:repo:refs -- \S+\/refs\.txt$/),
     ]);
   });
 });
