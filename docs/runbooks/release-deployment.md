@@ -207,7 +207,11 @@ npm --silent run release:activate -- \
   mode 0700, or be a real directory (not a symlink) owned by the current user
   with no group or other permission bits. Planning (precondition
   `backup-dir-private-owned`) and `--apply` both refuse any other directory;
-  neither changes its mode.
+  neither changes its mode. `--apply` checks it once, just after creating or
+  finding it and before the first backup write; a process running as the same
+  user that replaces or loosens it after that check is not detected. Each
+  activation writes its backups into a new child directory created with mode
+  0700 (the process umask can only remove bits from that mode).
 - `--apply` re-checks every precondition, then:
   1. takes a quick_check-verified SQLite backup, records the backup's schema
      migration level (`schemaMigration.before` in the receipt), records
@@ -651,11 +655,17 @@ wrapper link on its planned old release, and the digest of every plist the
 plan read: the member and host auxiliary plists it writes, and the fleet
 wrapper and watchdog plists it only reloads. The identity is checked before any
 watchdog is stopped and again immediately before the switch. Any of these
-refuses with no selector moved. The fleet wrapper and watchdog plists are also
+stops the activation with no selector moved: it refuses, except that a
+watchdog plist changed while the watchdogs are stopped ends it
+`rollback-unverified` (below). The fleet wrapper and watchdog plists are also
 checked against their planned digest before each reload and again immediately
-before each `launchctl bootstrap`, so a changed one is never loaded: after the
-switch, that fails the activation into the group rollback, whose identity
-check then ends it `rollback-unverified`. It reloads all primary
+before each `launchctl bootstrap`, so a plist changed before that last check is
+not loaded. `launchctl bootstrap` reads the plist by path, so a writer running
+as the same user that swaps the file during the bootstrap call itself is not
+detected. A change found after the switch fails the activation into the group
+rollback; unless the rollback's schema or refresh-fence checks have already
+ended it `rollback-blocked-*`, its identity check ends it
+`rollback-unverified`. It reloads all primary
 labels before auxiliaries and verifies each primary's new pid, argv,
 authenticated commit and WhatsApp connection. Any failure checks the schema
 level of every member before restoration and again after quiescing the group.
@@ -673,9 +683,11 @@ Schema-v2 watchdogs are quiesced before selectors move. They are restored only
 after the new terminal is verified, or after every old member, auxiliary, and
 host selector is verified during rollback. A migration block or an unverified
 old terminal leaves them stopped and reports the non-success rollback outcome.
-A watchdog whose plist no longer has its planned digest is never restored: it
-stays stopped and the outcome is `rollback-unverified`, also when no selector
-moved. A change found before the watchdogs are stopped refuses instead.
+A watchdog whose plist no longer has its planned digest at the checks before
+its bootout and bootstrap is not restored: it stays stopped and the outcome is
+`rollback-unverified`, also when no selector moved, unless a migration or
+refresh-fence block already set a `rollback-blocked-*` outcome. A change found
+before the watchdogs are stopped refuses instead.
 
 #### Health invariants verdict (report-only, #2481)
 
