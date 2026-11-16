@@ -1,4 +1,7 @@
+import { createHash } from 'node:crypto';
+import { systemClock } from '../lib/clock.ts';
 import { isNonEmptyString, isRecord, requireRecord } from '../lib/type-guards.ts';
+import { parseSecretInputOperationResult, type SecretInputOperationResult } from '../core/secret-input-operation-result.ts';
 import {
   isServiceOwnedCredentialStore,
   type ServiceOwnedCredentialStore,
@@ -12,6 +15,8 @@ const RESOURCE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_TRACKED_OPERATIONS = 1_000;
+const MAX_CHALLENGE_RESPONSE_BYTES = 4 * 1024;
+const MAX_CHALLENGE_TTL_MS = 10 * 60_000;
 
 export type ConsumerKind = 'password' | 'token' | 'mfa';
 export type ConsumerOutcome = 'succeeded' | 'failed' | 'ambiguous';
@@ -23,8 +28,26 @@ type FixedHttpLoginOptions = {
   username: string;
   /** An administrator-registered store; no caller can select its destination. */
   store?: ServiceOwnedCredentialStore;
+  /** A fixed, one-way transition to one registered MFA resource. */
+  mfaTransition?: FixedMfaTransition;
   fetch?: FetchLike;
 };
+
+export type FixedMfaTransition = Readonly<{
+  resourceId: string;
+  account: string;
+}>;
+
+type RegisteredChallenge = Readonly<{
+  resourceId: string;
+  principal: string;
+  operationId: string;
+  expiresAt: string;
+}>;
+
+type AdapterExecution = Exclude<ConsumerOutcome, 'ambiguous'>
+  | Readonly<{ outcome: 'succeeded'; challenge: RegisteredChallenge }>
+  | Readonly<{ outcome: 'succeeded'; operationResult: SecretInputOperationResult }>;
 
 /** A fixed, administrator-registered operation. It has no caller-selected destination or command. */
 export interface FixedConsumerAdapter {
@@ -34,13 +57,19 @@ export interface FixedConsumerAdapter {
   readonly kinds: readonly ConsumerKind[];
   /** Required only for MFA, where Links binds one live challenge operation. */
   readonly mfaOperationId?: string;
+  /** Accepts an MFA operation only when Links returned it from a registered challenge consume. */
+  readonly acceptsRegisteredMfa?: true;
+  /** A fixed password source may register exactly this MFA resource after a strict 202 response. */
+  readonly mfaTransition?: FixedMfaTransition;
   /** A registered service-owned credential store, or null when saving is prohibited. */
   readonly approvedSaveStore: string | null;
   execute(input: {
     value: string;
     kind: ConsumerKind;
     saveStore: string | null;
-  }): Promise<Exclude<ConsumerOutcome, 'ambiguous'>>;
+    intakeId?: string;
+    operationId?: string | null;
+  }): Promise<AdapterExecution>;
 }
 
 type ConsumedBinding = {
@@ -55,7 +84,7 @@ type ConsumedBinding = {
   receipt: string;
 };
 
-type PublicOutcome = { id: string; state: ConsumerOutcome };
+type PublicOutcome = { id: string; state: ConsumerOutcome; operationResult?: SecretInputOperationResult };
 type TrackedOperation = { resourceId: string; result: Promise<PublicOutcome>; settled: boolean };
 
 type FixedConsumerOptions = {
@@ -91,6 +120,10 @@ export class FixedIntakeConsumer {
         action: adapter.action,
         kinds: Object.freeze([...adapter.kinds]),
         mfaOperationId: adapter.mfaOperationId,
+        ...(adapter.acceptsRegisteredMfa === true ? { acceptsRegisteredMfa: true as const } : {}),
+        ...(adapter.mfaTransition === undefined ? {} : {
+          mfaTransition: Object.freeze({ resourceId: adapter.mfaTransition.resourceId, account: adapter.mfaTransition.account }),
+        }),
         approvedSaveStore: adapter.approvedSaveStore,
         execute: adapter.execute,
       };
@@ -158,21 +191,45 @@ export class FixedIntakeConsumer {
     try {
       if (!matchesAdapter(consumed, intakeId, adapter)) return this.#markAmbiguous(intakeId);
       const saveStore = saveStoreFor(consumed, adapter);
-      const outcome = await adapter.execute({ value: consumed.value, kind: consumed.kind, saveStore });
+      const executed = await adapter.execute({
+        value: consumed.value, kind: consumed.kind, saveStore, intakeId, operationId: consumed.operationId,
+      });
+      const outcome = typeof executed === 'string' ? executed : executed.outcome;
       if (outcome !== 'succeeded' && outcome !== 'failed') return this.#markAmbiguous(intakeId);
-      return await this.#complete(intakeId, consumed.receipt, outcome);
+      let operationResult: SecretInputOperationResult | null = null;
+      if (typeof executed !== 'string') {
+        if ('challenge' in executed) {
+          await this.#registerMfaChallenge(intakeId, adapter, executed.challenge);
+          operationResult = { phase: 'password', outcome: 'mfa_required' };
+        } else {
+          operationResult = parseSecretInputOperationResult(executed.operationResult, consumed.kind, outcome);
+        }
+      }
+      return await this.#complete(intakeId, consumed.receipt, consumed.kind, outcome, operationResult);
     } catch {
       return this.#markAmbiguous(intakeId);
     }
   }
 
-  async #complete(id: string, receipt: string, outcome: Exclude<ConsumerOutcome, 'ambiguous'>): Promise<PublicOutcome> {
+  async #complete(
+    id: string,
+    receipt: string,
+    kind: ConsumerKind,
+    outcome: Exclude<ConsumerOutcome, 'ambiguous'>,
+    operationResult: SecretInputOperationResult | null,
+  ): Promise<PublicOutcome> {
     try {
+      const body = operationResult === null ? { receipt, outcome } : { receipt, outcome, operationResult };
       const response = requireRecord(await this.#request(`/intakes/${encodeURIComponent(id)}/complete`, {
-        method: 'POST', body: JSON.stringify({ receipt, outcome }),
+        method: 'POST', body: JSON.stringify(body),
       }), 'Links completion');
       if (response.id !== id || response.state !== outcome) throw new Error('invalid completion');
-      return { id, state: outcome };
+      const recorded = parseSecretInputOperationResult(response.operationResult, kind, outcome);
+      if ((recorded === null && operationResult !== null)
+        || (recorded !== null && (operationResult === null || recorded.phase !== operationResult.phase || recorded.outcome !== operationResult.outcome))) {
+        throw new Error('invalid completion operation result');
+      }
+      return recorded === null ? { id, state: outcome } : { id, state: outcome, operationResult: recorded };
     } catch {
       return this.#markAmbiguous(id);
     }
@@ -186,6 +243,24 @@ export class FixedIntakeConsumer {
       // intentional: reconciliation failure must still return ambiguous; never replay a consumed value or claim success.
     }
     return { id, state: 'ambiguous' };
+  }
+
+  async #registerMfaChallenge(intakeId: string, adapter: FixedConsumerAdapter, challenge: RegisteredChallenge): Promise<void> {
+    const transition = adapter.mfaTransition;
+    if (!transition || challenge.resourceId !== transition.resourceId || challenge.principal !== adapter.principal) {
+      throw new Error('fixed MFA challenge is invalid');
+    }
+    const response = requireRecord(await this.#request(`/resources/${encodeURIComponent(challenge.resourceId)}/challenges`, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': challengeIdempotencyKey(intakeId, challenge.operationId) },
+      body: JSON.stringify({ principal: challenge.principal, operationId: challenge.operationId, expiresAt: challenge.expiresAt }),
+    }), 'Links challenge registration');
+    if (!exactKeys(response, ['id', 'resourceId', 'operationId', 'expiresAt', 'state'])
+      || typeof response.id !== 'string' || !OPAQUE_ID.test(response.id)
+      || response.resourceId !== challenge.resourceId || response.operationId !== challenge.operationId
+      || response.expiresAt !== challenge.expiresAt || response.state !== 'open') {
+      throw new Error('Links challenge registration is invalid');
+    }
   }
 
   async #request(path: string, init: RequestInit): Promise<unknown> {
@@ -219,7 +294,13 @@ export function createFixedHttpLoginAdapter(options: FixedHttpLoginOptions): Fix
     throw new Error('fixed HTTP login adapter is invalid');
   }
   const store = options.store ?? null;
+  const transition = options.mfaTransition === undefined
+    ? undefined
+    : Object.freeze({ resourceId: options.mfaTransition.resourceId, account: options.mfaTransition.account });
   if (store !== null && (store.resourceId !== resourceId || store.principal !== principal || store.action !== action)) {
+    throw new Error('fixed HTTP login adapter is invalid');
+  }
+  if (transition !== undefined && (!validMfaTransition(transition) || action !== 'Verify password for two-step sign-in' || store !== null)) {
     throw new Error('fixed HTTP login adapter is invalid');
   }
   const fetchFn = options.fetch ?? fetch;
@@ -229,21 +310,32 @@ export function createFixedHttpLoginAdapter(options: FixedHttpLoginOptions): Fix
     action,
     kinds: Object.freeze(['password'] as const),
     approvedSaveStore: store?.name ?? null,
+    ...(transition === undefined ? {} : { mfaTransition: transition }),
     async execute(input) {
       if (input.kind !== 'password' || (input.saveStore !== null && input.saveStore !== store?.name)) {
+        throw new Error('fixed login outcome is ambiguous');
+      }
+      if (transition !== undefined && (!input.intakeId || !OPAQUE_ID.test(input.intakeId))) {
         throw new Error('fixed login outcome is ambiguous');
       }
       try {
         const response = await fetchFn(endpoint, {
           method: 'POST',
           headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
-          body: JSON.stringify({ username, password: input.value }),
+          body: JSON.stringify(transition === undefined
+            ? { username, password: input.value }
+            : { username, password: input.value, intakeId: input.intakeId }),
           redirect: 'error',
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
-        if (response.status === 200 || response.status === 204) {
+        if (transition !== undefined && response.status === 202) {
+          const challenge = await parseSourceChallenge(response, input.intakeId, principal, transition);
+          if (echoesSubmittedValue(challenge.operationId, input.value)) throw new Error('fixed MFA source response is invalid');
+          return { outcome: 'succeeded', challenge };
+        }
+        if (transition === undefined && (response.status === 200 || response.status === 204)) {
           if (input.saveStore !== null) await store?.save(input.value);
-          return 'succeeded';
+          return { outcome: 'succeeded', operationResult: { phase: 'password', outcome: 'completed' } };
         }
         if (response.status === 401 || response.status === 403) return 'failed';
         throw new Error('fixed login outcome is ambiguous');
@@ -267,6 +359,12 @@ function validAdapter(adapter: FixedConsumerAdapter): boolean {
     && adapter.kinds.length > 0
     && adapter.kinds.every(isKind)
     && (adapter.mfaOperationId === undefined || validOperationId(adapter.mfaOperationId))
+    && (adapter.acceptsRegisteredMfa === undefined || adapter.acceptsRegisteredMfa === true)
+    && (adapter.mfaTransition === undefined || validMfaTransition(adapter.mfaTransition))
+    && !(adapter.mfaOperationId !== undefined && adapter.acceptsRegisteredMfa === true)
+    && (adapter.mfaTransition === undefined || (adapter.kinds.length === 1 && adapter.kinds[0] === 'password'
+      && adapter.action === 'Verify password for two-step sign-in' && adapter.approvedSaveStore === null))
+    && (adapter.acceptsRegisteredMfa !== true || (adapter.kinds.length === 1 && adapter.kinds[0] === 'mfa'))
     && (adapter.approvedSaveStore === null || validText(adapter.approvedSaveStore));
 }
 
@@ -290,7 +388,10 @@ function parseConsumed(value: unknown): ConsumedBinding {
 function matchesAdapter(value: ConsumedBinding, intakeId: string, adapter: FixedConsumerAdapter): boolean {
   if (value.id !== intakeId || value.resourceId !== adapter.resourceId || value.principal !== adapter.principal
     || value.action !== adapter.action || !adapter.kinds.includes(value.kind)) return false;
-  if (value.kind === 'mfa') return adapter.mfaOperationId !== undefined && value.operationId === adapter.mfaOperationId;
+  if (value.kind === 'mfa') {
+    return typeof value.operationId === 'string'
+      && (adapter.acceptsRegisteredMfa === true || (adapter.mfaOperationId !== undefined && value.operationId === adapter.mfaOperationId));
+  }
   return value.operationId === null;
 }
 
@@ -322,6 +423,8 @@ function isFixedHttpLoginOptions(value: FixedHttpLoginOptions): boolean {
       || exactKeys(value, ['resourceId', 'principal', 'action', 'endpoint', 'username', 'fetch'])
       || exactKeys(value, ['resourceId', 'principal', 'action', 'endpoint', 'username', 'store'])
       || exactKeys(value, ['resourceId', 'principal', 'action', 'endpoint', 'username', 'store', 'fetch'])
+      || exactKeys(value, ['resourceId', 'principal', 'action', 'endpoint', 'username', 'mfaTransition'])
+      || exactKeys(value, ['resourceId', 'principal', 'action', 'endpoint', 'username', 'mfaTransition', 'fetch'])
     )
     && typeof value.resourceId === 'string'
     && typeof value.principal === 'string'
@@ -329,7 +432,44 @@ function isFixedHttpLoginOptions(value: FixedHttpLoginOptions): boolean {
     && typeof value.endpoint === 'string'
     && typeof value.username === 'string'
     && (value.store === undefined || isServiceOwnedCredentialStore(value.store))
+    && (value.mfaTransition === undefined || validMfaTransition(value.mfaTransition))
     && (value.fetch === undefined || typeof value.fetch === 'function');
+}
+
+function validMfaTransition(value: unknown): value is FixedMfaTransition {
+  return isRecord(value) && exactKeys(value, ['resourceId', 'account'])
+    && typeof value.resourceId === 'string' && RESOURCE_ID.test(value.resourceId)
+    && validText(value.account);
+}
+
+async function parseSourceChallenge(
+  response: Response,
+  intakeId: string | undefined,
+  principal: string,
+  transition: FixedMfaTransition,
+): Promise<RegisteredChallenge> {
+  const value = requireRecord(await readBoundedJson(response, MAX_CHALLENGE_RESPONSE_BYTES), 'fixed MFA source response');
+  if (!exactKeys(value, ['parentIntakeId', 'principal', 'account', 'resourceId', 'operationId', 'expiresAt'])
+    || value.parentIntakeId !== intakeId || value.principal !== principal || value.account !== transition.account
+    || value.resourceId !== transition.resourceId || !validOperationId(value.operationId)
+    || typeof value.expiresAt !== 'string') {
+    throw new Error('fixed MFA source response is invalid');
+  }
+  const expiresAt = Date.parse(value.expiresAt);
+  const now = systemClock.now();
+  if (!Number.isFinite(expiresAt) || expiresAt <= now || expiresAt > now + MAX_CHALLENGE_TTL_MS) {
+    throw new Error('fixed MFA source response is invalid');
+  }
+  return Object.freeze({ resourceId: value.resourceId, principal, operationId: value.operationId, expiresAt: new Date(expiresAt).toISOString() });
+}
+
+// A source operation ID is refused if it equals the submitted password, or contains it when the password is 4+ UTF-16 code units.
+function echoesSubmittedValue(operationId: string, value: string): boolean {
+  return operationId === value || (value.length >= 4 && operationId.includes(value));
+}
+
+function challengeIdempotencyKey(intakeId: string, operationId: string): string {
+  return createHash('sha256').update(`managed-mfa-challenge:${intakeId}:${operationId}`).digest('base64url');
 }
 
 function exactKeys(value: Record<string, unknown>, keys: string[]): boolean {
@@ -383,4 +523,29 @@ async function readJson(response: Response): Promise<unknown> {
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
   try { return JSON.parse(new TextDecoder().decode(bytes)); }
   catch { throw new Error('Links response is invalid'); }
+}
+
+async function readBoundedJson(response: Response, limit: number): Promise<unknown> {
+  const length = response.headers.get('content-length');
+  if (length !== null && (!/^\d+$/.test(length) || Number(length) > limit) || !response.body) {
+    throw new Error('fixed MFA source response is invalid');
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const next = await reader.read();
+    if (next.done) break;
+    size += next.value.byteLength;
+    if (size > limit) {
+      await reader.cancel();
+      throw new Error('fixed MFA source response is invalid');
+    }
+    chunks.push(next.value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  try { return JSON.parse(new TextDecoder().decode(bytes)); }
+  catch { throw new Error('fixed MFA source response is invalid'); }
 }

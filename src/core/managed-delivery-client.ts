@@ -1,9 +1,12 @@
+import { parseSecretInputOperationResult } from './secret-input-operation-result.ts';
 import type {
   DeliveryEventStatus,
   ManagedDeliveryClient,
   ManagedDeliveryStatus,
   ProtectedDeliveryPurpose,
   ManagedSecretInputMetadata,
+  ManagedSecretInputResource,
+  ManagedSecretInputResourcePage,
   ProtectedSecretInputKind,
 } from './protected-delivery.ts';
 import { PROTECTED_DELIVERY_PINS, type ProtectedDeliveryPins } from './protected-delivery-pins.ts';
@@ -147,6 +150,17 @@ export class HttpManagedDeliveryClient implements ManagedDeliveryClient {
     return requireSecretInput(body);
   }
 
+  async listSecretInputResources(request: {
+    principal: string;
+    cursor?: string;
+    limit?: number;
+  }): Promise<ManagedSecretInputResourcePage> {
+    const query = new URLSearchParams({ principal: request.principal });
+    if (request.cursor !== undefined) query.set('cursor', request.cursor);
+    if (request.limit !== undefined) query.set('limit', String(request.limit));
+    return requireSecretInputResourcePage(await this.request(`/resources?${query.toString()}`, { method: 'GET' }));
+  }
+
   private async mutate(path: string, operationId: string, body: Record<string, unknown>): Promise<unknown> {
     return this.request(path, {
       method: 'POST',
@@ -217,6 +231,53 @@ function requireSecretInput(value: unknown): ManagedSecretInputMetadata {
     saveAllowed,
     expiresAt: requiredInstant(record['expiresAt'], 'expiresAt'),
     state,
+    operationResult: parseSecretInputOperationResult(record['operationResult'], kind, state),
+  };
+}
+
+function requireSecretInputResourcePage(value: unknown): ManagedSecretInputResourcePage {
+  const record = asRecord(value);
+  if (!exactKeys(record, ['resources', 'cursor']) || !Array.isArray(record['resources']) || record['resources'].length > 50) {
+    throw new Error('managed delivery response has an invalid secret resource page');
+  }
+  const cursor = record['cursor'];
+  if (cursor !== null && (typeof cursor !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(cursor))) {
+    throw new Error('managed delivery response has an invalid secret resource page');
+  }
+  return {
+    resources: record['resources'].map(requireSecretInputResource),
+    cursor,
+  };
+}
+
+function requireSecretInputResource(value: unknown): ManagedSecretInputResource {
+  const record = asRecord(value);
+  if (!exactKeys(record, ['resourceId', 'accountLabel', 'consumerLabel', 'action', 'kinds', 'saveAllowed', 'revision'])) {
+    throw new Error('managed delivery response has an invalid secret resource metadata');
+  }
+  const kinds = record['kinds'];
+  const revision = record['revision'];
+  if (
+    !Array.isArray(kinds) ||
+    kinds.length === 0 ||
+    kinds.length > 3 ||
+    !kinds.every(isSecretInputKind) ||
+    new Set(kinds).size !== kinds.length ||
+    typeof record['saveAllowed'] !== 'boolean' ||
+    typeof revision !== 'number' ||
+    !Number.isSafeInteger(revision) ||
+    revision < 1
+  ) {
+    throw new Error('managed delivery response has an invalid secret resource metadata');
+  }
+  return {
+    resourceId: requiredResourceId(record['resourceId']),
+    accountLabel: requiredBoundedLabel(record['accountLabel'], 'accountLabel'),
+    consumerLabel: requiredBoundedLabel(record['consumerLabel'], 'consumerLabel'),
+    action: requiredBoundedLabel(record['action'], 'action'),
+    kinds: [...kinds],
+    saveAllowed: record['saveAllowed'],
+    revision,
   };
 }
 
@@ -225,6 +286,11 @@ function asRecord(value: unknown): Record<string, unknown> {
     throw new Error('managed delivery response has an invalid shape');
   }
   return value as Record<string, unknown>;
+}
+
+function exactKeys(value: Record<string, unknown>, expected: string[]): boolean {
+  const keys = Object.keys(value);
+  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }
 
 function requiredString(value: unknown, field: string): string {
