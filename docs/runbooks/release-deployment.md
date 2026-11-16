@@ -203,6 +203,11 @@ npm --silent run release:activate -- \
   that differ from the installed plist beyond the release root), and the ordered
   actions. It exits `0` only when every precondition holds. It runs the new
   release's renderers to capture their output, and writes nothing.
+- `--backup-dir` must either be absent, in which case `--apply` creates it with
+  mode 0700, or be a real directory (not a symlink) owned by the current user
+  with no group or other permission bits. Planning (precondition
+  `backup-dir-private-owned`) and `--apply` both refuse any other directory;
+  neither changes its mode.
 - `--apply` re-checks every precondition, then:
   1. takes a quick_check-verified SQLite backup, records the backup's schema
      migration level (`schemaMigration.before` in the receipt), records
@@ -494,6 +499,11 @@ installed consumer of a selected shared wrapper is declared (the limits are
 below). It prints only paths,
 digests, membership, port numbers, and state; it never prints health tokens,
 config contents, plist environment values, or health bodies.
+`--backup-dir` has the `release:activate` rule: absent, or a real directory
+owned by the current user with no group or other access, checked for each
+member (`<instance>:backup-dir-private-owned`) when planning and again by
+`--apply`. Its parent directory must also be owned by the current user with no
+group or other access (`backup-root-private-owned`).
 
 Schema version 2 adds an explicit `hostAuxiliaries` array for the closed host
 jobs that are not owned by one member. It accepts only these label/mode pairs:
@@ -633,10 +643,19 @@ those inputs separately before a native apply.
 refuses before any effect. It rebuilds that proof, snapshots every database
 with `quick_check`, backs up all changed plists and each shared link, then
 changes the group. Before the switch it makes the `release:activate` checks: a
-root-owned plist needs the pinned root helper installed, each member's
-candidate refresh rollback fence must be unchanged, a sealed BOT ERRORS health
-consumer must be unchanged, and every link and plist must still be what the
-plan read. Any of these refuses with no selector moved. It reloads all primary
+root-owned plist that it writes needs the pinned root helper installed, each
+member's candidate refresh rollback fence must be unchanged, a sealed BOT
+ERRORS health consumer must be unchanged, and the live identity must still be
+what the plan read. The identity is every shared wrapper link and the fleet
+wrapper link on its planned old release, and the digest of every plist the
+plan read: the member and host auxiliary plists it writes, and the fleet
+wrapper and watchdog plists it only reloads. The identity is checked before any
+watchdog is stopped and again immediately before the switch. Any of these
+refuses with no selector moved. The fleet wrapper and watchdog plists are also
+checked against their planned digest before each reload and again immediately
+before each `launchctl bootstrap`, so a changed one is never loaded: after the
+switch, that fails the activation into the group rollback, whose identity
+check then ends it `rollback-unverified`. It reloads all primary
 labels before auxiliaries and verifies each primary's new pid, argv,
 authenticated commit and WhatsApp connection. Any failure checks the schema
 level of every member before restoration and again after quiescing the group.
@@ -654,6 +673,9 @@ Schema-v2 watchdogs are quiesced before selectors move. They are restored only
 after the new terminal is verified, or after every old member, auxiliary, and
 host selector is verified during rollback. A migration block or an unverified
 old terminal leaves them stopped and reports the non-success rollback outcome.
+A watchdog whose plist no longer has its planned digest is never restored: it
+stays stopped and the outcome is `rollback-unverified`, also when no selector
+moved. A change found before the watchdogs are stopped refuses instead.
 
 #### Health invariants verdict (report-only, #2481)
 
@@ -786,8 +808,9 @@ It relies on the instance being the launchd job's own process:
 module in that same process, and `src/core/health.ts` reports that
 `process.pid` as `instance.pid`.
 
-**What the receipt holds.** `receipt.json` is a local operator record in the
-private backup directory (mode 0600). The activation record already carries
+**What the receipt holds.** `receipt.json` (mode 0600) is a local operator
+record in the activation's mode-0700 directory under the private
+`--backup-dir`. The activation record already carries
 host data: release and backup paths, commits, the instance name, and the
 launchd pids. Nothing #2481 adds carries a producer string, a pid, or host
 data: the added fields are the tool's constants (schema, floor ids), enums
