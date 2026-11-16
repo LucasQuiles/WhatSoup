@@ -1575,9 +1575,12 @@ JID. For a LID DM mapped to a phone, the phone key and the LID key both name the
 socket's conversation, each written as a JID or as an encoded key. A read
 returns the rows stored under the key it passes. The two keys are not merged and
 stored rows are not re-keyed, so messages journaled under the LID before the
-mapping are read with the LID key. A tool that checks a stored message's
-conversation, such as `transcribe_audio`, admits a row under either key. A
-scheduled message stored under the LID delivery JID stays visible to its own
+mapping are read with the LID key. Tools that look up a stored message through
+the shared conversation check, such as `transcribe_audio`, `download_media` and
+`forward_message`, admit a row under either key. `reply_message`,
+`react_message`, `edit_message`, `delete_message` and `pin_message` match the
+session's canonical key only, so they refuse a message journaled under the LID
+before the mapping. A scheduled message stored under the LID delivery JID stays visible to its own
 chat. The delivery JID remains the outbound address. When LID resolution
 re-keys a live socket, its binding and delivery JID move to the new JID, and the
 socket then accepts that JID's key only. A `sandboxPerChat` runtime keys the
