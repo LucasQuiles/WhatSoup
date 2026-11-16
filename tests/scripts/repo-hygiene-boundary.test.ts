@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { parseBoundaryBaseline, refNamesByLine } from '../../scripts/lib/repo-hygiene-boundary.ts';
+import { parseBoundaryBaseline, refNamesByLine, splitLiteralViews } from '../../scripts/lib/repo-hygiene-boundary.ts';
 import {
   canonicalRepoHygienePolicyProjection,
   createRepoHygieneExactRangeArtifact,
@@ -702,6 +702,74 @@ describe('exact-range receipts carry term-rule causes without term text', () => 
       expect(validateRepoHygieneExactRangeArtifact(built.artifact, expected).ok).toBe(true);
       expect(adaptRepoHygieneExactRangeReportOnly(built.artifact, expected).outcome).toBe('pass');
     }
+  });
+});
+
+describe('split literals: a term stored as fragments joined at run time', () => {
+  // Each line joins fragments of a synthetic term; no whole-term matcher sees one.
+  const SPLIT_LINES = [
+    "const host = ['zor', 'blab'].join('');",
+    "const bot = 'qx' + '-bot';",
+    "const ip = ['100', '1', '2', '3'].join('.');",
+  ].join('\n');
+  // An ordinary list of unrelated short strings: its joined forms hold no term.
+  const CONTROL = "const flags = ['ab', 'cd', 'ef'];";
+  const SPLIT_CODES = ['private-host-label', 'private-instance-label', 'private-tailnet-ip'];
+  const HOST_MESSAGE = 'Public repo text must not include private host labels.';
+
+  it('builds the joined view of a line: lists with four joiners, chains with none', () => {
+    expect(splitLiteralViews("x = ['zor', 'blab'].join('')")).toContain('zorblab');
+    expect(splitLiteralViews('x = "qx" + `-bot`')).toEqual(['qx-bot']);
+    expect(splitLiteralViews("x = ['100', '1', '2', '3',]")).toContain('100.1.2.3');
+    expect(splitLiteralViews(CONTROL)).toEqual(['abcdef', 'ab.cd.ef', 'ab-cd-ef', 'ab_cd_ef']);
+    // One literal is not split, and a template with a substitution is not a literal.
+    expect(splitLiteralViews("x = ['zorblab']")).toEqual([]);
+    expect(splitLiteralViews('x = `zor${y}` + `blab`')).toEqual([]);
+  });
+
+  it('finds a split term in --staged, --branch-diff, --tree, --text and --commit-msg; an ordinary list passes', () => {
+    useTerms();
+    vi.stubEnv('WHATSOUP_BOUNDARY_BASELINE_FILE', join(tmp.make('split-baseline'), 'boundary-baseline.json'));
+    const repo = makeRepo();
+    commit(repo, { 'README.md': '# fixture\n' });
+    git(repo, ['checkout', '-b', 'feature']);
+    writeFiles(repo, { 'src/split.ts': `${SPLIT_LINES}\n${CONTROL}\n` });
+    git(repo, ['add', '-A']);
+
+    const staged = capture(['--staged'], repo);
+    expect(staged.exitCode).toBe(1);
+    expect([...new Set(staged.codes)]).toEqual(SPLIT_CODES);
+    expect(staged.lines).toContain(`src/split.ts:1 private-host-label: [split] ${HOST_MESSAGE}`);
+    expect(staged.lines.some((line) => line.startsWith('src/split.ts:4 '))).toBe(false);
+
+    git(repo, ['commit', '-m', 'test: split fixture']);
+    const branch = capture(['--branch-diff', '--base', 'main'], repo);
+    expect(branch.exitCode).toBe(1);
+    expect([...new Set(branch.codes)]).toEqual(SPLIT_CODES);
+
+    const tree = capture(['--tree'], repo);
+    expect(tree.exitCode).toBe(1);
+    expect(tree.lines).toContain('  src/split.ts:2 private-instance-label: [split] Public repo text must not include private instance labels.');
+    expect(tree.lines.some((line) => line.includes('src/split.ts:4 '))).toBe(false);
+
+    const cwd = tmp.make('split-text');
+    const textFile = join(cwd, 'body.md');
+    // Line 5 shows the term itself as well: one hit, no split marker.
+    writeFileSync(textFile, `${SPLIT_LINES}\n${CONTROL}\nssh zorblab ['zor', 'blab']\n`);
+    const text = capture(['--text', textFile], cwd);
+    expect(text.exitCode).toBe(1);
+    expect([...new Set(text.codes)]).toEqual(SPLIT_CODES);
+    expect(text.lines).toContain(`text:1 private-host-label: [split] ${HOST_MESSAGE}`);
+    expect(text.lines).toContain(`text:5 private-host-label: ${HOST_MESSAGE}`);
+    expect(text.lines.some((line) => line.startsWith('text:4 '))).toBe(false);
+
+    const messageFile = join(cwd, 'COMMIT_EDITMSG');
+    writeFileSync(messageFile, "fix: notes\n\nrename 'zor' + 'blab'\n");
+    const message = capture(['--commit-msg', messageFile], cwd);
+    expect(message.exitCode).toBe(1);
+    expect(message.lines).toContain(`commit-msg:3 private-host-label: [split] ${HOST_MESSAGE}`);
+
+    expectNoTermText([...staged.lines, ...branch.lines, ...tree.lines, ...text.lines, ...message.lines]);
   });
 });
 

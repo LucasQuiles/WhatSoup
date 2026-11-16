@@ -112,6 +112,62 @@ export function boundaryCodesInLine(
 }
 
 // ---------------------------------------------------------------------------
+// Split literals: the joined view of a line
+// ---------------------------------------------------------------------------
+
+// A quoted literal: single, double or backtick quotes (a backtick template with `${` is not one).
+const QUOTED_LITERAL = [
+  String.raw`'(?:[^'\\\r\n]|\\.)*'`,
+  String.raw`"(?:[^"\\\r\n]|\\.)*"`,
+  '`(?:[^`\\\\$\\r\\n]|\\\\.)*`',
+].join('|');
+const SPLIT_LIST = new RegExp(String.raw`\[\s*(?:${QUOTED_LITERAL})(?:\s*,\s*(?:${QUOTED_LITERAL}))+\s*,?\s*\]`, 'g');
+const SPLIT_CHAIN = new RegExp(String.raw`(?:${QUOTED_LITERAL})(?:\s*\+\s*(?:${QUOTED_LITERAL}))+`, 'g');
+const QUOTED_PART = new RegExp(QUOTED_LITERAL, 'g');
+const SPLIT_JOINERS = ['', '.', '-', '_'] as const;
+
+function literalParts(text: string): string[] {
+  return [...text.matchAll(QUOTED_PART)].map((part) => part[0].slice(1, -1).replace(/\\(.)/g, '$1'));
+}
+
+/**
+ * The joined view of one line: each bracketed list of two or more quoted literals joined with
+ * '', '.', '-' and '_', and each chain of quoted literals joined by `+`. Source that stores a
+ * name as short fragments joined at run time hides it from a whole-term matcher, while any
+ * reader reassembles it at a glance; this view shows it to the matcher too.
+ */
+export function splitLiteralViews(line: string): string[] {
+  if (!/['"`]/.test(line)) return [];
+  const views = new Set<string>();
+  for (const list of line.matchAll(SPLIT_LIST)) {
+    const parts = literalParts(list[0]);
+    for (const joiner of SPLIT_JOINERS) views.add(parts.join(joiner));
+  }
+  for (const chain of line.matchAll(SPLIT_CHAIN)) views.add(literalParts(chain[0]).join(''));
+  return [...views];
+}
+
+/**
+ * Codes of `patterns` found only in the joined view of `text`, never one in `alreadyReported`
+ * (the codes the line itself shows). Such a hit is reported with the same code and a split marker.
+ */
+export function splitCodesInLine(
+  filePath: string,
+  text: string,
+  patterns: readonly GuardPattern[],
+  alreadyReported: ReadonlySet<string> = new Set(),
+): string[] {
+  const views = splitLiteralViews(text);
+  if (views.length === 0) return [];
+  const codes = new Set<string>();
+  for (const pattern of patterns) {
+    if (codes.has(pattern.code) || alreadyReported.has(pattern.code)) continue;
+    if (views.some((view) => findDisallowedMatch(filePath, pattern, view) !== null)) codes.add(pattern.code);
+  }
+  return [...codes];
+}
+
+// ---------------------------------------------------------------------------
 // The single finding formatter
 // ---------------------------------------------------------------------------
 
@@ -122,6 +178,8 @@ export interface FindingLocation {
   readonly line?: number;
   /** For a history finding: the commit that added the line (hex; anything else is dropped). */
   readonly history?: { readonly kind: 'history' | 'branch history'; readonly commit: string };
+  /** The hit appears only in the joined view of split literals on that line. */
+  readonly split?: boolean;
 }
 
 const COMMIT_ID = /^[0-9a-f]{7,64}$/;
@@ -195,7 +253,8 @@ export function createFindingFormatter(termRules: readonly PrivateTermRule[]): F
     const history = location.history !== undefined && COMMIT_ID.test(location.history.commit)
       ? `[${location.history.kind} ${maskPrivateText(location.history.commit, termRules)}] `
       : '';
-    return `${where} ${safeCode}: ${history}${RULE_MESSAGES.get(safeCode) ?? 'See the rule code.'}`;
+    const split = location.split === true ? '[split] ' : '';
+    return `${where} ${safeCode}: ${history}${split}${RULE_MESSAGES.get(safeCode) ?? 'See the rule code.'}`;
   };
 }
 
@@ -207,6 +266,8 @@ export interface BoundaryHit {
   readonly source: string;
   readonly line: number;
   readonly code: string;
+  /** Found only in the joined view of split literals. */
+  readonly split?: boolean;
 }
 
 /** Generic boundary rules plus the fallback and term rules. */
@@ -223,10 +284,13 @@ const REF_PATH_LABEL = '<refs>';
 /** Scan free text (a PR title or body, an issue, a comment), one hit per line and code. */
 export function scanPublicText(source: string, text: string, termRules: readonly PrivateTermRule[]): BoundaryHit[] {
   const patterns = publicTextPatterns(termRules);
+  const splitPatterns = [...fallbackPrivatePatterns, ...termRules];
   const hits: BoundaryHit[] = [];
   text.split(/\r?\n/).forEach((row, index) => {
-    for (const code of boundaryCodesInLine(TEXT_PATH_LABEL, row, patterns)) {
-      hits.push({ source, line: index + 1, code });
+    const codes = boundaryCodesInLine(TEXT_PATH_LABEL, row, patterns);
+    for (const code of codes) hits.push({ source, line: index + 1, code });
+    for (const code of splitCodesInLine(TEXT_PATH_LABEL, row, splitPatterns, new Set(codes))) {
+      hits.push({ source, line: index + 1, code, split: true });
     }
   });
   return hits;
@@ -560,6 +624,8 @@ export interface TreeScan {
   readonly trackedPaths: readonly string[];
   readonly textFileCount: number;
   readonly hits: TreeHits;
+  /** The part of `hits` found only in a line's joined view of split literals (for the split marker). */
+  readonly splitHits: TreeHits;
 }
 
 function addHit(hits: Map<string, Map<CountKey, Set<number>>>, filePath: string, key: CountKey, line: number): void {
@@ -580,6 +646,8 @@ interface TreeRules {
   readonly soundTerms: readonly PrivateTermRule[];
   readonly lineTerms: readonly PrivateTermRule[];
   readonly termFilters: readonly RegExp[];
+  /** Combined filters over every term rule, tested on the joined views of a line. */
+  readonly viewFilters: readonly RegExp[];
 }
 
 // Term and fallback rules only: generic shapes stay with the diff modes, and fixture paths get
@@ -589,6 +657,7 @@ function scanTreeContent(
   text: string,
   rules: TreeRules,
   hits: Map<string, Map<CountKey, Set<number>>>,
+  splitHits: Map<string, Map<CountKey, Set<number>>>,
 ): void {
   let rows: string[] | null = null;
   const scan = (pattern: GuardPattern, key: CountKey, prefilter: boolean): void => {
@@ -603,6 +672,29 @@ function scanTreeContent(
     for (const rule of rules.soundTerms) scan(rule, `term:${rule.code}`, true);
   }
   for (const rule of rules.lineTerms) scan(rule, `term:${rule.code}`, false);
+
+  // Split literals: a hit found only in a line's joined view counts under the same key; the line
+  // is also kept in `splitHits` for the split marker. A whole-blob prefilter cannot see a
+  // joined name, so every line that holds a quote is viewed.
+  if (!/['"`]/.test(text)) return;
+  rows ??= text.split(/\r?\n/);
+  const termRules = [...rules.soundTerms, ...rules.lineTerms];
+  rows.forEach((row, index) => {
+    const views = splitLiteralViews(row);
+    if (views.length === 0) return;
+    const line = index + 1;
+    const test = (pattern: GuardPattern, key: CountKey): void => {
+      if (hits.get(filePath)?.get(key)?.has(line) === true) return;
+      if (views.some((view) => findDisallowedMatch(filePath, pattern, view) !== null)) {
+        addHit(hits, filePath, key, line);
+        addHit(splitHits, filePath, key, line);
+      }
+    };
+    for (const pattern of fallbackPrivatePatterns) test(pattern, `fallback:${pattern.code}`);
+    if (termRules.length > 0 && views.some((view) => rules.viewFilters.some((filter) => filter.test(view)))) {
+      for (const rule of termRules) test(rule, `term:${rule.code}`);
+    }
+  });
 }
 
 /** Scan every tracked entry at HEAD (read from git, never the working tree): each path name, and the content of each blob. */
@@ -616,8 +708,10 @@ export function scanHeadTree(cwd: string, termRules: readonly PrivateTermRule[])
     soundTerms,
     lineTerms: termRules.filter((rule) => !blobPrefilterIsSound(rule.regex)),
     termFilters: termPrefilters(soundTerms),
+    viewFilters: termPrefilters(termRules),
   };
   const hits = new Map<string, Map<CountKey, Set<number>>>();
+  const splitHits = new Map<string, Map<CountKey, Set<number>>>();
   let textFileCount = 0;
   for (const entry of entries) {
     for (const pattern of fallbackPrivatePatterns) {
@@ -631,9 +725,9 @@ export function scanHeadTree(cwd: string, termRules: readonly PrivateTermRule[])
     if (bytes === undefined) throw new TreeScanInconclusive('a tracked blob could not be read');
     if (bytes.includes(0)) continue;
     textFileCount += 1;
-    scanTreeContent(entry.path, bytes.toString('utf8'), rules, hits);
+    scanTreeContent(entry.path, bytes.toString('utf8'), rules, hits, splitHits);
   }
-  return { trackedPaths: entries.map((entry) => entry.path), textFileCount, hits };
+  return { trackedPaths: entries.map((entry) => entry.path), textFileCount, hits, splitHits };
 }
 
 export interface BaselineDelta {
@@ -724,8 +818,10 @@ function printDelta(delta: BaselineDelta, scan: TreeScan, format: FindingFormatt
     ? `${head} (${originOf(delta.key)}: count rose from ${delta.baseline} to ${delta.current})`
     : `${head} (${originOf(delta.key)}: ${delta.current} hit(s) in a file with no baseline entry)`);
   const lines = [...(scan.hits.get(delta.path)?.get(delta.key) ?? [])].sort((left, right) => left - right);
+  const splitLines = scan.splitHits.get(delta.path)?.get(delta.key);
   for (const line of lines) {
-    console.error(`  ${format(line === 0 ? { file: delta.path } : { file: delta.path, line }, code)}`);
+    const location = line === 0 ? { file: delta.path } : { file: delta.path, line, split: splitLines?.has(line) === true };
+    console.error(`  ${format(location, code)}`);
   }
 }
 

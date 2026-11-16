@@ -73,10 +73,12 @@ import {
 import {
   boundaryCodesInLine,
   createFindingFormatter,
+  fallbackPrivatePatterns,
   resolveBoundaryTerms,
   runTreeCheck,
   scanPublicText,
   scanRefNames,
+  splitCodesInLine,
   type BoundaryHit,
   type FindingFormatter,
 } from './lib/repo-hygiene-boundary.ts';
@@ -159,6 +161,8 @@ export interface GuardIssue {
    * block it only in commits from BOUNDARY_COMMIT_MESSAGE_EPOCH on.
    */
   termHit?: true;
+  /** Found only in the joined view of split literals on that line; printed with a split marker. */
+  split?: true;
 }
 
 export interface CommitAuthor {
@@ -332,7 +336,9 @@ export function scanProjectedFileSecretLines(lines: AddedLine[]): GuardIssue[] {
 }
 
 // Term rules join the patterns a mode already applies. A code the inline fallback rules already
-// reported for the same line is not reported twice.
+// reported for the same line is not reported twice. The joined view of split literals adds the
+// fallback and term codes the line itself does not show, with a split marker; like a term hit,
+// such a hit is new since main, so commit-text range scans block it only from the epoch on.
 function termRuleIssues(
   filePath: string,
   text: string,
@@ -340,11 +346,37 @@ function termRuleIssues(
   termRules: readonly PrivateTermRule[],
   reported: ReadonlySet<string>,
 ): GuardIssue[] {
-  return boundaryCodesInLine(filePath, text, termRules, reported).map((code) => ({
+  const direct = boundaryCodesInLine(filePath, text, termRules, reported);
+  const split = splitCodesInLine(filePath, text, [...fallbackPrivatePatterns, ...termRules], new Set([...reported, ...direct]));
+  return [
+    ...direct.map((code) => ({ code, message: PRIVATE_TERM_CODE_MESSAGES[code] ?? code, ...location, termHit: true as const })),
+    ...split.map((code) => ({
+      code,
+      message: PRIVATE_TERM_CODE_MESSAGES[code] ?? code,
+      ...location,
+      termHit: true as const,
+      split: true as const,
+    })),
+  ];
+}
+
+/** Term codes found only in the joined view of a history line (the history scans apply term rules, not the fallback lists). */
+function splitHistoryIssues(
+  filePath: string,
+  line: AddedLine,
+  termRules: readonly PrivateTermRule[],
+  found: ReadonlySet<string>,
+  history: 'history' | 'branch history',
+  sha: string,
+): GuardIssue[] {
+  return splitCodesInLine(filePath, line.text, termRules, found).map((code) => ({
     code,
-    message: PRIVATE_TERM_CODE_MESSAGES[code] ?? code,
-    ...location,
-    termHit: true as const,
+    message: `[${history} ${sha.slice(0, 12)}] ${PRIVATE_TERM_CODE_MESSAGES[code] ?? code}`,
+    filePath: line.filePath,
+    line: line.line,
+    commit: sha.slice(0, 12),
+    history,
+    split: true as const,
   }));
 }
 
@@ -605,8 +637,10 @@ export function scanCommitHistory(
     for (const line of parseUnifiedDiffAddedLines(diff)) {
       const filePath = normalizeRepoPath(line.filePath);
       if (isFixtureFile(filePath)) continue;
+      const found = new Set<string>();
       for (const pattern of historyPatterns(termRules)) {
         if (findDisallowedMatch(filePath, pattern, line.text)) {
+          found.add(pattern.code);
           issues.push({
             code: pattern.code,
             message: `[history ${sha.slice(0, 12)}] ${pattern.message}`,
@@ -617,6 +651,7 @@ export function scanCommitHistory(
           });
         }
       }
+      issues.push(...splitHistoryIssues(filePath, line, termRules, found, 'history', sha));
     }
   }
 
@@ -687,8 +722,10 @@ function scanBranchCommitSecretLines(
     ) {
       continue;
     }
+    const found = new Set<string>();
     for (const pattern of historyPatterns(termRules)) {
       if (findDisallowedMatch(filePath, pattern, line.text)) {
+        found.add(pattern.code);
         issues.push({
           code: pattern.code,
           message: `[branch history ${sha.slice(0, 12)}] ${pattern.message}`,
@@ -699,6 +736,7 @@ function scanBranchCommitSecretLines(
         });
       }
     }
+    issues.push(...splitHistoryIssues(filePath, line, termRules, found, 'branch history', sha));
   }
 
   return issues;
@@ -1356,10 +1394,13 @@ interface HistoryLineCandidate {
 }
 
 function secretCauses(line: ExactAddedLineV1, termRules: readonly PrivateTermRule[] = []): string[] {
-  if (isFixtureFile(normalizeRepoPath(line.path))) return [];
-  return historyPatterns(termRules)
-    .filter((pattern) => findDisallowedMatch(normalizeRepoPath(line.path), pattern, line.text) !== null)
+  const filePath = normalizeRepoPath(line.path);
+  if (isFixtureFile(filePath)) return [];
+  const causes = historyPatterns(termRules)
+    .filter((pattern) => findDisallowedMatch(filePath, pattern, line.text) !== null)
     .map((pattern) => pattern.code);
+  // A term found only in the joined view of split literals is a cause like any other.
+  return [...causes, ...splitCodesInLine(filePath, line.text, termRules, new Set(causes))];
 }
 
 function baseLineSets(
@@ -2201,6 +2242,7 @@ function printIssues(issues: GuardIssue[], format: FindingFormatter): void {
       ...(issue.commit !== undefined && issue.history !== undefined
         ? { history: { kind: issue.history, commit: issue.commit } }
         : {}),
+      ...(issue.split === true ? { split: true } : {}),
     }, issue.code));
   }
 }
@@ -2213,6 +2255,7 @@ function issueForHit(hit: BoundaryHit): GuardIssue {
       ?? hit.code,
     filePath: hit.source,
     line: hit.line,
+    ...(hit.split === true ? { split: true as const } : {}),
   };
 }
 
