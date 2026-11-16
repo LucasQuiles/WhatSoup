@@ -6,6 +6,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { escapeRegExp } from '../src/lib/regex-utils.ts';
 import { cleanGitEnv, normalizeRepoPath } from './lib/guard-core.ts';
+import {
+  PRIVATE_TERMS_ABSENT_NOTICE,
+  PrivateTermsError,
+  expandPrivateTermReplacement,
+  loadPrivateTerms,
+  requirePrivateTermsUsable,
+  type PrivateTermRule,
+} from './lib/private-terms.ts';
 
 interface ParsedArgs {
   help: boolean;
@@ -60,6 +68,8 @@ const skippedPathPatterns = [
   /^tests\/scripts\/(?:repo-hygiene-guard|publication-guard|anonymize-private-literals)\.test\.ts$/,
 ];
 
+// Fallback lists: they run with or without a private term file.
+// TODO(PB2): remove these lists once the term-aware hosted check is required.
 const privateInstanceLabels = [
   ['mw', '-bot'],
   ['sh', 'android'],
@@ -140,7 +150,10 @@ function replacePattern(
   });
 }
 
-export function anonymizeText(text: string): AnonymizedText {
+// With a loaded term file, its terms run before the built-in label lists, each replaced by its
+// own `replace` value (`{1}` is the term regex's first group); a context term replaces only the
+// term inside its context. Without one, behaviour is unchanged.
+export function anonymizeText(text: string, termRules: readonly PrivateTermRule[] = []): AnonymizedText {
   const state: ReplacementState = {
     records: new Map(),
     counters: new Map(),
@@ -182,6 +195,10 @@ export function anonymizeText(text: string): AnonymizedText {
     /\b1(?!555)\d{10}\b/g,
     () => nextSynthetic(state, 'phone-like-id', '1555555'),
   );
+
+  for (const rule of termRules) {
+    next = replacePattern(next, state, rule.code, rule.replaceRegex, (match) => expandPrivateTermReplacement(rule, match[0]));
+  }
 
   next = replacePattern(
     next,
@@ -289,11 +306,22 @@ function run(argv = process.argv.slice(2), cwd = process.cwd()): number {
     return 0;
   }
 
+  const terms = loadPrivateTerms(process.env);
+  let termRules: readonly PrivateTermRule[];
+  try {
+    termRules = requirePrivateTermsUsable(terms);
+  } catch (err) {
+    if (!(err instanceof PrivateTermsError)) throw err;
+    console.error(err.message);
+    return 2;
+  }
+  if (terms.status === 'absent') console.error(PRIVATE_TERMS_ABSENT_NOTICE);
+
   const changes = [];
   for (const filePath of listCandidateFiles(cwd, args)) {
     const fullPath = path.join(cwd, filePath);
     const original = readFileSync(fullPath, 'utf8');
-    const anonymized = anonymizeText(original);
+    const anonymized = anonymizeText(original, termRules);
     if (anonymized.replacements.length === 0) continue;
 
     changes.push({ filePath, replacements: anonymized.replacements });

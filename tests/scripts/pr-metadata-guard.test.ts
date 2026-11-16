@@ -2,12 +2,17 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parse } from 'yaml';
 
 import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
 import { runPrMetadataGuard } from '../../scripts/pr-metadata-guard.ts';
+import { SYNTHETIC_PRIVATE_TERMS_FILE, privateTermsTestEnv } from '../helpers/private-terms-env.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 const tmp = trackTmpDirs('');
 const REPO_ROOT = path.resolve(import.meta.dirname, '../..');
@@ -572,7 +577,7 @@ describe('PR metadata guard', () => {
       {
         cwd: repo,
         encoding: 'utf8',
-        env: cleanGitEnv(),
+        env: { ...cleanGitEnv(), ...privateTermsTestEnv() },
         input: `This change does not fix #135. ${canary}\n`,
       },
     );
@@ -580,6 +585,7 @@ describe('PR metadata guard', () => {
     expect(result.status).toBe(1);
     expect(result.stderr).not.toContain(canary);
     expect(result.stdout).not.toContain(canary);
+    expect(JSON.parse(result.stdout)).toMatchObject({ textRules: 'generic-only', textFindings: [] });
     expect(JSON.parse(result.stdout)).toMatchObject({
       decision: 'fail',
       findings: [
@@ -588,6 +594,71 @@ describe('PR metadata guard', () => {
           issueNumbers: [135],
         },
       ],
+    });
+  });
+});
+
+describe('PR metadata guard — public-boundary text in the PR title and body', () => {
+  function eventFor(baseOid: string, headOid: string, title: string, body: string): string {
+    const eventPath = path.join(tmp.make('pr-event'), 'event.json');
+    writeFileSync(eventPath, JSON.stringify({
+      number: 7,
+      pull_request: { title, body, base: { ref: 'main', sha: baseOid }, head: { sha: headOid } },
+      repository: { default_branch: 'main' },
+    }));
+    return eventPath;
+  }
+
+  it('reports a private term in the title or body when the term file is present, by source, line and code only', () => {
+    vi.stubEnv('WHATSOUP_PRIVATE_TERMS_FILE', SYNTHETIC_PRIVATE_TERMS_FILE);
+    const { repo, baseOid, headOid } = makeRangeRepo();
+    const eventPath = eventFor(baseOid, headOid, 'Fix the zorblab restart', 'Clean summary.\nAsked Quorpine first.\n');
+
+    const result = runPrMetadataGuard(['--github-event', eventPath], repo);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.receipt).toMatchObject({
+      decision: 'fail',
+      findings: [{ code: 'pr-metadata.public-boundary-text', issueNumbers: [] }],
+      textRules: 'generic-and-private-terms',
+      textFindings: [
+        { source: 'title', line: 1, code: 'private-host-label' },
+        { source: 'body', line: 2, code: 'private-person' },
+      ],
+    });
+    const serialized = JSON.stringify(result.receipt);
+    for (const value of ['zorblab', 'Quorpine', 'M001', 'P001']) expect(serialized).not.toContain(value);
+  });
+
+  it('fails a public-boundary hit even on a non-default target', () => {
+    vi.stubEnv('WHATSOUP_PRIVATE_TERMS_FILE', SYNTHETIC_PRIVATE_TERMS_FILE);
+    const { repo, baseOid, headOid } = makeRangeRepo();
+    const result = runPrMetadataGuard([
+      '--stdin', '--base', baseOid, '--head', headOid, '--target', 'release-candidate', '--default-branch', 'main',
+    ], repo, 'ssh zorblab\n');
+    expect(result).toMatchObject({ exitCode: 1, receipt: { decision: 'fail', warnings: ['pr-metadata.nondefault-target'] } });
+  });
+
+  it('runs only the generic rules without a term file and says so in the receipt', () => {
+    const { repo, baseOid, headOid } = makeRangeRepo();
+    const homePath = ['', 'Users', 'zzhomeuser', 'x'].join('/');
+    const clean = runPrMetadataGuard(['--github-event', eventFor(baseOid, headOid, 'Fix the zorblab restart', 'Body.\n')], repo);
+    expect(clean).toMatchObject({ exitCode: 0, receipt: { decision: 'pass', textRules: 'generic-only', textFindings: [] } });
+
+    const generic = runPrMetadataGuard(['--github-event', eventFor(baseOid, headOid, 'Title', `Log at ${homePath}\n`)], repo);
+    expect(generic).toMatchObject({
+      exitCode: 1,
+      receipt: { textRules: 'generic-only', textFindings: [{ source: 'body', line: 1, code: 'local-home-path' }] },
+    });
+  });
+
+  it('is inconclusive when the require switch finds no term file', () => {
+    vi.stubEnv('WHATSOUP_REQUIRE_PRIVATE_TERMS', '1');
+    const { repo, baseOid, headOid } = makeRangeRepo();
+    const result = runPrMetadataGuard(['--github-event', eventFor(baseOid, headOid, 'Title', 'Body.\n')], repo);
+    expect(result).toMatchObject({
+      exitCode: 2,
+      receipt: { decision: 'inconclusive', errors: ['pr-metadata.private-terms-unavailable'] },
     });
   });
 });
