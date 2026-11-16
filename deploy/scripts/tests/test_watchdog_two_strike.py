@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import stat
@@ -220,7 +221,7 @@ _LAUNCHCTL_STUB = '''#!/bin/sh
 printf '%s\\n' "$*" >> "{events}"
 conf="{conf}"
 if [ "$1" = print ]; then
-  if [ -f "$conf/target_label" ] && [ "$2" != "gui/501/$(cat "$conf/target_label")" ]; then
+  if [ -f "$conf/target_label" ] && [ "$2" != "gui/$(id -u)/$(cat "$conf/target_label")" ]; then
     printf 'pid = 4242\\n'
     exit 0
   fi
@@ -816,7 +817,8 @@ def _identity_prints(h: ConfirmHarness, target: str) -> tuple[list[int], list[in
     confirm reads), in the run's event order."""
     port = _BOT_PORT if target == "bot" else _FLEET_PORT
     events = h.events()
-    prints = _index(events, lambda row: row == f"print gui/501/{h.label(target)}")
+    # The script's domain is gui/$(id -u); CI runners do not run as uid 501.
+    prints = _index(events, lambda row: row == f"print gui/{os.getuid()}/{h.label(target)}")
     if target == "fleet":
         # Exclude PID queries immediately paired with liveness reads; retain
         # every restart gate and start/end identity query for ordering proof.
