@@ -168,4 +168,33 @@ describe('anonymizer selection, caching, re-emission and report', () => {
     expect(usage.output).toContain('position 1');
     expect(usage.output).not.toContain('zorblab');
   });
+
+  it('refuses a term file whose id holds a term value, so the JSON report never prints it', () => {
+    const termsFile = join(tmp.make('id-terms'), 'private-terms.json');
+    writeFileSync(termsFile, JSON.stringify({
+      schema: 'whatsoup-private-terms',
+      version: 1,
+      terms: [{ id: 'zorblab', class: 'machine', value: 'zorblab', match: 'word', case: 'sensitive', replace: 'host-a' }],
+    }));
+    vi.stubEnv('WHATSOUP_PRIVATE_TERMS_FILE', termsFile);
+    const repo = tmp.make('id-repo');
+    execFileSync('git', ['init', '--quiet'], { cwd: repo, env: isolatedGitEnv(), stdio: 'ignore' });
+    mkdirSync(join(repo, 'notes'));
+    writeFileSync(join(repo, 'notes', 'host.md'), 'ssh zorblab\n');
+    execFileSync('git', ['add', 'notes'], { cwd: repo, env: isolatedGitEnv(), stdio: 'ignore' });
+    const lines: string[] = [];
+    const record = (...args: unknown[]) => {
+      lines.push(args.map(String).join(' '));
+    };
+    vi.spyOn(console, 'log').mockImplementation(record);
+    vi.spyOn(console, 'error').mockImplementation(record);
+    const exitCode = main(['--json', 'notes'], repo);
+    vi.restoreAllMocks();
+
+    expect(exitCode).toBe(2);
+    expect(lines).toEqual([
+      'private term file is invalid (the file named by WHATSOUP_PRIVATE_TERMS_FILE): terms[0]: id holds the private term of terms[0]',
+    ]);
+    expect(readFileSync(join(repo, 'notes', 'host.md'), 'utf8')).toBe('ssh zorblab\n');
+  });
 });

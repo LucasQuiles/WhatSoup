@@ -14,6 +14,7 @@ import {
   requirePrivateTermsUsable,
   type PrivateTermRule,
 } from '../../../scripts/lib/private-terms.ts';
+import { privateHostLabels } from '../../../scripts/lib/repo-hygiene-policy.ts';
 import {
   ABSENT_PRIVATE_TERMS_FILE,
   SYNTHETIC_PRIVATE_TERMS_FILE,
@@ -308,6 +309,65 @@ describe('private term file loader', () => {
     }
     expect(message).toMatch(/private term file is (?:invalid|not valid JSON)/);
     for (const secret of SYNTHETIC_SECRETS) expect(message).not.toContain(secret);
+  });
+
+  // Ids are printed (the anonymizer's report counts by id), so the loader refuses any id that is
+  // not a short neutral code. Every refusal names indexes only, never the id.
+  const INVALID_PREFIX = 'private term file is invalid (the file named by WHATSOUP_PRIVATE_TERMS_FILE): ';
+  const machine = (id: unknown) => ({ id, class: 'machine', value: 'zorblab', match: 'word', case: 'sensitive', replace: 'host-a' });
+  const loadDocument = (document: unknown) => loadPrivateTerms({ WHATSOUP_PRIVATE_TERMS_FILE: writeTerms(document) });
+
+  it.each([
+    ['a space', 'M 001'],
+    ['a slash', 'M001/x'],
+    ['a dot', 'M001.x'],
+    ['33 characters', 'M'.repeat(33)],
+    ['a trailing newline', 'M001\n'],
+    ['a letter outside A-Z', 'Mé01'],
+  ])('refuses an id with %s, naming only its index', (_label, id) => {
+    const load = loadDocument(term(machine(id)));
+    expect(load.status).toBe('invalid');
+    expect(load.problem).toBe(`${INVALID_PREFIX}terms[0]: id must be 1 to 32 characters of A-Z, a-z, 0-9, _ or -`);
+  });
+
+  it('accepts an id of 1 to 32 characters of A-Z, a-z, 0-9, _ or -', () => {
+    for (const id of ['M', 'M'.repeat(32), 'bot_a-1', 'M001']) {
+      expect(loadDocument(term(machine(id))).status, id).toBe('loaded');
+    }
+  });
+
+  it.each<{ label: string; contexts: string[]; terms: unknown[]; problem: string }>([
+    { label: 'its own value', contexts: [], terms: [machine('zorblab')], problem: 'terms[0]: id holds the private term of terms[0]' },
+    { label: 'its own value inside a longer word', contexts: [], terms: [machine('zorblab1')], problem: 'terms[0]: id holds the private term of terms[0]' },
+    {
+      label: 'another term\'s value in another case',
+      contexts: [],
+      terms: [
+        { id: 'P001', class: 'person', value: 'quorpine', match: 'word', case: 'insensitive', replace: 'user-a' },
+        machine('Quorpine_2'),
+      ],
+      problem: 'terms[1]: id holds the private term of terms[0]',
+    },
+    {
+      label: 'a context term\'s value outside its contexts',
+      contexts: ['whatsoup@{t}'],
+      terms: [{ id: 'zqline', class: 'instance', value: 'zqline', match: 'context', case: 'sensitive', replace: 'line-a' }],
+      problem: 'terms[0]: id holds the private term of terms[0]',
+    },
+  ])('refuses an id that holds $label, naming only indexes', ({ contexts, terms, problem }) => {
+    const load = loadDocument({ ...baseDocument, contexts, terms });
+    expect(load.status).toBe('invalid');
+    expect(load.problem).toBe(`${INVALID_PREFIX}${problem}`);
+    for (const secret of [...SYNTHETIC_SECRETS, 'zorblab1', 'Quorpine_2']) expect(load.problem ?? '').not.toContain(secret);
+  });
+
+  it('refuses an id that a fallback rule detects, naming only its index', () => {
+    // A fallback label read from the inline list at runtime, never spelled in this file.
+    const label = privateHostLabels[0]!;
+    const load = loadDocument(term(machine(label)));
+    expect(load.status).toBe('invalid');
+    expect(load.problem).toBe(`${INVALID_PREFIX}terms[0]: id holds a private name a fallback rule detects`);
+    expect((load.problem ?? '').toLowerCase()).not.toContain(label.toLowerCase());
   });
 
   it('reports an unreadable path as unusable, never as absent', () => {

@@ -38,7 +38,10 @@ An example with invented names:
 ```
 
 - `schema` and `version` are fixed: `whatsoup-private-terms`, `1`.
-- `id`: unique per term. Findings never print it, nor the value.
+- `id`: unique per term, 1 to 32 characters of `A-Z`, `a-z`, `0-9`, `_` or `-`.
+  Ids are printed (the anonymizer's report counts replacements by id), so use a
+  neutral code such as `M001`. The loader refuses an id that any term rule or
+  fallback rule matches. Findings never print the value.
 - `class`: `machine`, `instance`, `person`, `person-user`, `person-surname`,
   `private-domain`, `account-id` or `address`. It picks the rule code a finding
   reports (for example `private-host-label` for `machine`).

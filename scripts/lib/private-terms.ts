@@ -26,6 +26,8 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
+import { addedLinePatterns } from './repo-hygiene-policy.ts';
+
 export const PRIVATE_TERMS_FILE_ENV = 'WHATSOUP_PRIVATE_TERMS_FILE';
 export const REQUIRE_PRIVATE_TERMS_ENV = 'WHATSOUP_REQUIRE_PRIVATE_TERMS';
 export const PRIVATE_TERMS_SCHEMA = 'whatsoup-private-terms';
@@ -78,7 +80,11 @@ export interface PrivateTermRule {
   readonly message: string;
   /** Marks a term-file rule: no environment-token allowance applies to it (repo-hygiene-policy). */
   readonly privateTerm: true;
-  /** The term's id. Guard output never prints it; only the anonymizer's local report counts by it. */
+  /**
+   * The term's id. Guard output never prints it, but the anonymizer's report counts by it, so
+   * the loader accepts only a neutral code: 1 to 32 characters of A-Z, a-z, 0-9, _ or -, that no
+   * term rule and no fallback rule matches.
+   */
   readonly termId: string;
   readonly match: PrivateTermMatch;
   /**
@@ -167,6 +173,23 @@ interface ValidTerm {
 
 class InvalidTermsFile extends Error {}
 
+/** A term id: reports print it, so it is a short neutral code such as M001. */
+const TERM_ID = /^[A-Za-z0-9_-]{1,32}$/;
+
+/**
+ * The inline fallback rules: the policy's added-line rules that report a private-term code (the
+ * set repo-hygiene-boundary.ts calls FALLBACK_PRIVATE_CODES). A term id must not match one.
+ */
+const FALLBACK_RULE_REGEXES: readonly RegExp[] = addedLinePatterns
+  .filter((pattern) => PRIVATE_TERM_CODES.includes(pattern.code))
+  .map((pattern) => pattern.regex);
+
+/** Whether `regex` has a non-empty match in `text`; never reads or moves the regex's lastIndex. */
+function holdsMatch(text: string, regex: RegExp): boolean {
+  const everywhere = new RegExp(regex.source, regex.flags.includes('g') ? regex.flags : `${regex.flags}g`);
+  return [...text.matchAll(everywhere)].some((match) => match[0] !== '');
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -179,6 +202,7 @@ function validateTerm(raw: unknown, index: number): ValidTerm {
   const where = `terms[${index}]`;
   if (!isRecord(raw)) throw new InvalidTermsFile(`${where} is not an object`);
   if (!nonEmptyString(raw.id)) throw new InvalidTermsFile(`${where}: id must be a non-empty string`);
+  if (!TERM_ID.test(raw.id)) throw new InvalidTermsFile(`${where}: id must be 1 to 32 characters of A-Z, a-z, 0-9, _ or -`);
   if (typeof raw.class !== 'string' || !(TERM_CLASSES as readonly string[]).includes(raw.class)) {
     throw new InvalidTermsFile(`${where}: class must be one of ${TERM_CLASSES.join(', ')}`);
   }
@@ -332,8 +356,27 @@ export function compilePrivateTerms(document: unknown): PrivateTermRule[] {
     firstIndexById.set(term.id, term.index);
   }
   const compiled = terms.map((term) => ({ term, rules: compileTerm(term, contexts) }));
+  for (const { term } of compiled) checkTermId(term, compiled);
   for (const { term } of compiled) checkReplacement(term, term.contexts ?? contexts, compiled);
   return compiled.flatMap(({ rules }) => rules);
+}
+
+// An id is printed (the anonymizer's report counts by it), so no loaded term rule and no fallback
+// rule may match it: neither a rule's detection form nor its mask form, which finds the bare term
+// inside a longer word and outside its contexts. The refusal names indexes only.
+function checkTermId(
+  term: ValidTerm,
+  compiled: ReadonlyArray<{ readonly term: ValidTerm; readonly rules: readonly PrivateTermRule[] }>,
+): void {
+  const where = `terms[${term.index}]`;
+  for (const other of compiled) {
+    if (other.rules.some((rule) => holdsMatch(term.id, rule.regex) || holdsMatch(term.id, rule.maskRegex))) {
+      throw new InvalidTermsFile(`${where}: id holds the private term of terms[${other.term.index}]`);
+    }
+  }
+  if (FALLBACK_RULE_REGEXES.some((regex) => holdsMatch(term.id, regex))) {
+    throw new InvalidTermsFile(`${where}: id holds a private name a fallback rule detects`);
+  }
 }
 
 /** Capture groups of a term's core (0 for literal and address terms, and for a plain value). */
