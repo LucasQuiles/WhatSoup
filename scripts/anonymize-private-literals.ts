@@ -10,7 +10,6 @@ import { maskPrivateText } from './lib/repo-hygiene-boundary.ts';
 import {
   PRIVATE_TERMS_ABSENT_NOTICE,
   PrivateTermsError,
-  expandPrivateTermReplacement,
   loadPrivateTerms,
   requirePrivateTermsUsable,
   type PrivateTermRule,
@@ -27,6 +26,8 @@ interface ParsedArgs {
 
 export interface AnonymizedReplacement {
   code: string;
+  /** The term id, for a replacement taken from the private term file; absent for the built-in rewrites. */
+  term?: string;
   count: number;
   fingerprint: string;
   replacement: string;
@@ -35,13 +36,13 @@ export interface AnonymizedReplacement {
 export interface AnonymizedRefusal {
   code: string;
   count: number;
-  reason: 'would-create-mention';
+  reason: 'would-create-mention' | 'would-re-emit-term';
 }
 
 export interface AnonymizedText {
   text: string;
   replacements: AnonymizedReplacement[];
-  /** Replacements left undone because they would have created a new `@login` mention. */
+  /** Replacements left undone: they would have created a new `@login` mention or put a term back. */
   refused: AnonymizedRefusal[];
 }
 
@@ -51,7 +52,7 @@ interface ReplacementState {
   values: Map<string, string>;
   /** Lower-cased logins the original text already mentions. */
   mentions: ReadonlySet<string>;
-  refused: Map<string, number>;
+  refused: Map<string, AnonymizedRefusal>;
 }
 
 const textExtensions = new Set([
@@ -122,29 +123,112 @@ function nextSynthetic(state: ReplacementState, code: string, prefix: string, su
   return `${prefix}${String(next).padStart(4, '0')}${suffix}`;
 }
 
-function replacementFor(
-  state: ReplacementState,
-  code: string,
-  original: string,
-  createReplacement: () => string,
-): string {
-  const key = `${code}\0${original}`;
-  const existing = state.values.get(key);
-  if (existing) {
-    const record = state.records.get(`${code}\0${fingerprint(original)}\0${existing}`);
-    if (record) record.count += 1;
-    return existing;
-  }
+interface Candidate {
+  /** The span the match claims: a context term claims its context text as well. */
+  readonly start: number;
+  readonly end: number;
+  /** The span the replacement rewrites, inside the claim. */
+  readonly from: number;
+  readonly to: number;
+  /** Rule order: term rules come first, so a term wins a tie with a built-in rewrite. */
+  readonly order: number;
+  readonly code: string;
+  readonly term: PrivateTermRule | null;
+  readonly match: RegExpMatchArray;
+  readonly create: ((match: RegExpMatchArray) => string) | null;
+}
 
-  const replacement = createReplacement();
+interface BuiltInRewrite {
+  readonly code: string;
+  readonly regex: RegExp;
+  readonly create: (match: RegExpMatchArray) => string;
+}
+
+// The cache and the records are keyed by rule code (built-in rewrites) or by term id and match
+// mode (term-file replacements), plus the original text: two terms sharing a value keep their
+// own replacements.
+function recordReplacement(state: ReplacementState, candidate: Candidate, key: string, original: string, replacement: string): void {
   state.values.set(key, replacement);
-  state.records.set(`${code}\0${fingerprint(original)}\0${replacement}`, {
-    code,
+  const record = state.records.get(key);
+  if (record !== undefined) {
+    record.count += 1;
+    return;
+  }
+  state.records.set(key, {
+    code: candidate.code,
+    ...(candidate.term === null ? {} : { term: candidate.term.termId }),
     count: 1,
     fingerprint: fingerprint(original),
     replacement,
   });
-  return replacement;
+}
+
+function globalCopy(regex: RegExp): RegExp {
+  return new RegExp(regex.source, regex.flags.includes('g') ? regex.flags : `${regex.flags}g`);
+}
+
+function collectCandidates(text: string, termRules: readonly PrivateTermRule[], rewrites: readonly BuiltInRewrite[]): Candidate[] {
+  const candidates: Candidate[] = [];
+  const add = (match: RegExpMatchArray, order: number, code: string, term: PrivateTermRule | null, create: Candidate['create']): void => {
+    if (match[0] === '') return;
+    const start = match.index ?? 0;
+    const end = start + match[0].length;
+    const from = term === null ? start : start + term.contextBefore;
+    const to = term === null ? end : end - term.contextAfter;
+    candidates.push({ start, end, from, to, order, code, term, match, create });
+  };
+  termRules.forEach((rule, order) => {
+    for (const match of text.matchAll(globalCopy(rule.regex))) add(match, order, rule.code, rule, null);
+  });
+  rewrites.forEach((rewrite, index) => {
+    for (const match of text.matchAll(globalCopy(rewrite.regex))) add(match, termRules.length + index, rewrite.code, null, rewrite.create);
+  });
+  return candidates;
+}
+
+// Across every term and built-in rewrite the longest claim wins, then the earlier start, then
+// the earlier rule (terms first). Claims never overlap.
+function selectCandidates(candidates: readonly Candidate[]): Candidate[] {
+  const ranked = [...candidates].sort((left, right) =>
+    (right.end - right.start) - (left.end - left.start) || left.start - right.start || left.order - right.order);
+  const taken: Candidate[] = [];
+  for (const candidate of ranked) {
+    if (taken.every((other) => candidate.end <= other.start || other.end <= candidate.start)) taken.push(candidate);
+  }
+  return taken.sort((left, right) => left.start - right.start);
+}
+
+// `{N}` is group N of the term's own match in every match mode (each compiled form keeps the
+// core's group numbers); a group the match lacks expands to nothing.
+function expandTerm(rule: PrivateTermRule, match: RegExpMatchArray): string {
+  return rule.replace.replace(/\{([1-9])\}/g, (_whole, digit: string) => match[Number(digit)] ?? '');
+}
+
+const alphanumeric = (value: string): string => value.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+// A replacement that holds the matched value (ignoring case and punctuation) publishes it again.
+// Values under three letters and digits would match inside ordinary replacement words; the rescan
+// in anonymizeText covers them.
+function reEmitsValue(original: string, replacement: string): boolean {
+  const value = alphanumeric(original);
+  return value.length >= 3 && alphanumeric(replacement).includes(value);
+}
+
+/** Term hits in `output` that touch a replaced span: a replacement, alone or with its neighbours, put a term back. */
+function reintroducedTermHits(
+  output: string,
+  termRules: readonly PrivateTermRule[],
+  placed: ReadonlyArray<readonly [number, number]>,
+): number {
+  let count = 0;
+  for (const rule of termRules) {
+    for (const match of output.matchAll(globalCopy(rule.regex))) {
+      const start = match.index ?? 0;
+      const end = start + match[0].length;
+      if (placed.some(([from, to]) => start <= to && end >= from)) count += 1;
+    }
+  }
+  return count;
 }
 
 // GitHub notifies the owner of every `@login` it finds, so a replacement must never create a
@@ -178,33 +262,10 @@ function createsMention(
   return false;
 }
 
-function replacePattern(
-  text: string,
-  state: ReplacementState,
-  code: string,
-  regex: RegExp,
-  createReplacement: (match: RegExpMatchArray) => string,
-): string {
-  return text.replace(regex, (...args: unknown[]) => {
-    const original = String(args[0]);
-    // The callback arguments end with (offset, input), plus a groups object for named groups.
-    const tail = typeof args[args.length - 1] === 'object' && args[args.length - 1] !== null ? 3 : 2;
-    const offset = args[args.length - tail] as number;
-    const input = args[args.length - tail + 1] as string;
-    const groups = args.slice(1, args.length - tail) as string[];
-    const match = [original, ...groups] as RegExpMatchArray;
-    const candidate = state.values.get(`${code}\0${original}`) ?? createReplacement(match);
-    if (createsMention(input, offset, original, candidate, state.mentions)) {
-      state.refused.set(code, (state.refused.get(code) ?? 0) + 1);
-      return original;
-    }
-    return replacementFor(state, code, original, () => candidate);
-  });
-}
-
-// With a loaded term file, its terms run before the built-in label lists, each replaced by its
-// own `replace` value (`{1}` is the term regex's first group); a context term replaces only the
-// term inside its context. Without one, behaviour is unchanged.
+// With a loaded term file, its terms join the built-in rewrites in one pass over the original
+// text: the longest match wins, then the earlier start (a term's context counts toward its
+// length, and a context term replaces only the term inside its context). Each term is replaced
+// by its own `replace` value. Without a term file, behaviour is unchanged.
 export function anonymizeText(text: string, termRules: readonly PrivateTermRule[] = []): AnonymizedText {
   const state: ReplacementState = {
     records: new Map(),
@@ -213,96 +274,97 @@ export function anonymizeText(text: string, termRules: readonly PrivateTermRule[
     mentions: mentionsIn(text),
     refused: new Map(),
   };
+  const synthetic = (code: string, prefix: string, suffix = '') => (): string => nextSynthetic(state, code, prefix, suffix);
+  const rewrites: BuiltInRewrite[] = [
+    {
+      code: 'local-home-path',
+      regex: /\/(?:Users|home)\/(?!runner(?:\/|$)|testuser(?:\/|$)|whatsoup(?:\/|$))[A-Za-z0-9._-]+(?=\/|$)/g,
+      create: () => '/home/whatsoup',
+    },
+    { code: 'whatsapp-group-jid', regex: /\b120363\d{6,}@g\.us\b/g, create: synthetic('whatsapp-group-jid', '111111100000000', '@g.us') },
+    {
+      code: 'whatsapp-user-jid',
+      regex: /\b(?!(?:1555\d{4,}|1111111\d+|9990\d+)@(s\.whatsapp\.net|lid)\b)\d{8,}@(s\.whatsapp\.net|lid)\b/g,
+      create: (match) => match[0].endsWith('@lid')
+        ? nextSynthetic(state, 'whatsapp-lid-jid', '9990000', '@lid')
+        : nextSynthetic(state, 'whatsapp-user-jid', '1555555', '@s.whatsapp.net'),
+    },
+    { code: 'phone-like-id', regex: /\b1(?!555)\d{10}\b/g, create: synthetic('phone-like-id', '1555555') },
+    {
+      code: 'private-instance-label',
+      regex: new RegExp(`\\b(?:${privateInstanceLabels.map(escapeRegExp).join('|')})\\b`, 'gi'),
+      create: () => 'test-agent',
+    },
+    {
+      code: 'private-host-label',
+      regex: new RegExp(`\\b(?:${privateHostLabels.map(escapeRegExp).join('|')})\\b`, 'gi'),
+      create: () => 'test-host',
+    },
+    {
+      code: 'pinecone-project-id',
+      regex: new RegExp(`\\b(?:${privatePineconeProjectIds.map(escapeRegExp).join('|')})\\b`, 'gi'),
+      create: () => 'project-placeholder',
+    },
+    { code: 'github-token', regex: /\bgh[pousr]_[A-Za-z0-9_]{12,}\b/g, create: () => '<github-token>' },
+    { code: 'openai-key', regex: /\bsk-(?!ant-)[A-Za-z0-9_-]{16,}\b/g, create: () => '<openai-key>' },
+    { code: 'pinecone-key', regex: /\bpcsk_[A-Za-z0-9_-]{12,}\b/g, create: () => '<pinecone-key>' },
+    { code: 'slack-token', regex: /\bxox[baprs]-[A-Za-z0-9-]{12,}\b/g, create: () => '<slack-token>' },
+    { code: 'anthropic-key', regex: /\bsk-ant-[a-zA-Z0-9_-]{32,}\b/g, create: () => '<anthropic-key>' },
+    { code: 'stripe-key', regex: /\b(?:sk|pk)_(?:live|test)_[a-zA-Z0-9]{20,}\b/g, create: () => '<stripe-key>' },
+    { code: 'twilio-account-sid', regex: /\bAC[a-f0-9]{32}\b/g, create: () => '<twilio-account-sid>' },
+    { code: 'huggingface-token', regex: /\bhf_[a-zA-Z0-9]{20,}\b/g, create: () => '<huggingface-token>' },
+    { code: 'jwt-token', regex: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, create: () => '<jwt-token>' },
+    { code: 'bearer-token', regex: /\bAuthorization:\s*Bearer\s+[A-Za-z0-9._\-+/=]{40,}\b/gi, create: () => 'Authorization: Bearer <bearer-token>' },
+    { code: 'aws-secret', regex: /((?:SECRET|AWS)[_A-Z]*[=:]\s*)([A-Za-z0-9/+=]{40})\b/g, create: (match) => `${match[1]}<aws-secret>` },
+    { code: 'private-key', regex: /\b(BEGIN|END) (?:RSA |OPENSSH |EC )?PRIVATE KEY\b/g, create: (match) => `${match[1]} REDACTED PRIVATE KEY` },
+  ];
 
-  let next = text;
-
-  next = replacePattern(
-    next,
-    state,
-    'local-home-path',
-    /\/(?:Users|home)\/(?!runner(?:\/|$)|testuser(?:\/|$)|whatsoup(?:\/|$))[A-Za-z0-9._-]+(?=\/|$)/g,
-    () => '/home/whatsoup',
-  );
-
-  next = replacePattern(
-    next,
-    state,
-    'whatsapp-group-jid',
-    /\b120363\d{6,}@g\.us\b/g,
-    () => nextSynthetic(state, 'whatsapp-group-jid', '111111100000000', '@g.us'),
-  );
-
-  next = replacePattern(
-    next,
-    state,
-    'whatsapp-user-jid',
-    /\b(?!(?:1555\d{4,}|1111111\d+|9990\d+)@(s\.whatsapp\.net|lid)\b)\d{8,}@(s\.whatsapp\.net|lid)\b/g,
-    (match) => match[0].endsWith('@lid')
-      ? nextSynthetic(state, 'whatsapp-lid-jid', '9990000', '@lid')
-      : nextSynthetic(state, 'whatsapp-user-jid', '1555555', '@s.whatsapp.net'),
-  );
-
-  next = replacePattern(
-    next,
-    state,
-    'phone-like-id',
-    /\b1(?!555)\d{10}\b/g,
-    () => nextSynthetic(state, 'phone-like-id', '1555555'),
-  );
-
-  for (const rule of termRules) {
-    next = replacePattern(next, state, rule.code, rule.replaceRegex, (match) => expandPrivateTermReplacement(rule, match[0]));
+  const refuse = (code: string, reason: AnonymizedRefusal['reason']): void => {
+    const key = `${code}\0${reason}`;
+    state.refused.set(key, { code, reason, count: (state.refused.get(key)?.count ?? 0) + 1 });
+  };
+  let output = '';
+  let cursor = 0;
+  const placed: Array<readonly [number, number]> = [];
+  for (const candidate of selectCandidates(collectCandidates(text, termRules, rewrites))) {
+    const original = text.slice(candidate.from, candidate.to);
+    const key = candidate.term === null
+      ? `rule\0${candidate.code}\0${original}`
+      : `term\0${candidate.term.termId}\0${candidate.term.match}\0${original}`;
+    const replacement = state.values.get(key)
+      ?? (candidate.term !== null ? expandTerm(candidate.term, candidate.match) : candidate.create?.(candidate.match) ?? original);
+    if (candidate.term !== null && reEmitsValue(original, replacement)) {
+      refuse(candidate.code, 'would-re-emit-term');
+      continue;
+    }
+    if (createsMention(text, candidate.from, original, replacement, state.mentions)) {
+      refuse(candidate.code, 'would-create-mention');
+      continue;
+    }
+    recordReplacement(state, candidate, key, original, replacement);
+    output += text.slice(cursor, candidate.from);
+    placed.push([output.length, output.length + replacement.length]);
+    output += replacement;
+    cursor = candidate.to;
   }
+  output += text.slice(cursor);
 
-  next = replacePattern(
-    next,
-    state,
-    'private-instance-label',
-    new RegExp(`\\b(?:${privateInstanceLabels.map(escapeRegExp).join('|')})\\b`, 'gi'),
-    () => 'test-agent',
-  );
-
-  next = replacePattern(
-    next,
-    state,
-    'private-host-label',
-    new RegExp(`\\b(?:${privateHostLabels.map(escapeRegExp).join('|')})\\b`, 'gi'),
-    () => 'test-host',
-  );
-
-  next = replacePattern(
-    next,
-    state,
-    'pinecone-project-id',
-    new RegExp(`\\b(?:${privatePineconeProjectIds.map(escapeRegExp).join('|')})\\b`, 'gi'),
-    () => 'project-placeholder',
-  );
-
-  next = replacePattern(next, state, 'github-token', /\bgh[pousr]_[A-Za-z0-9_]{12,}\b/g, () => '<github-token>');
-  next = replacePattern(next, state, 'openai-key', /\bsk-(?!ant-)[A-Za-z0-9_-]{16,}\b/g, () => '<openai-key>');
-  next = replacePattern(next, state, 'pinecone-key', /\bpcsk_[A-Za-z0-9_-]{12,}\b/g, () => '<pinecone-key>');
-  next = replacePattern(next, state, 'slack-token', /\bxox[baprs]-[A-Za-z0-9-]{12,}\b/g, () => '<slack-token>');
-  next = replacePattern(next, state, 'anthropic-key', /\bsk-ant-[a-zA-Z0-9_-]{32,}\b/g, () => '<anthropic-key>');
-  next = replacePattern(next, state, 'stripe-key', /\b(?:sk|pk)_(?:live|test)_[a-zA-Z0-9]{20,}\b/g, () => '<stripe-key>');
-  next = replacePattern(next, state, 'twilio-account-sid', /\bAC[a-f0-9]{32}\b/g, () => '<twilio-account-sid>');
-  next = replacePattern(next, state, 'huggingface-token', /\bhf_[a-zA-Z0-9]{20,}\b/g, () => '<huggingface-token>');
-  next = replacePattern(next, state, 'jwt-token', /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, () => '<jwt-token>');
-  next = replacePattern(next, state, 'bearer-token', /\bAuthorization:\s*Bearer\s+[A-Za-z0-9._\-+/=]{40,}\b/gi, () => 'Authorization: Bearer <bearer-token>');
-  next = replacePattern(next, state, 'aws-secret', /((?:SECRET|AWS)[_A-Z]*[=:]\s*)([A-Za-z0-9/+=]{40})\b/g, (match) => `${match[1]}<aws-secret>`);
-  next = replacePattern(next, state, 'private-key', /\b(BEGIN|END) (?:RSA |OPENSSH |EC )?PRIVATE KEY\b/g, (match) => `${match[1]} REDACTED PRIVATE KEY`);
-
-  const refused: AnonymizedRefusal[] = [...state.refused]
-    .map(([code, count]) => ({ code, count, reason: 'would-create-mention' as const }))
-    .sort((a, b) => a.code.localeCompare(b.code));
-  // Each replacement is checked on its own; two replacements in one pass could still form a
-  // mention together. Then nothing in this text is replaced, and the refusal says so.
-  const created = [...mentionsIn(next)].filter((login) => !state.mentions.has(login)).length;
+  const refused: AnonymizedRefusal[] = [...state.refused.values()]
+    .sort((a, b) => a.code.localeCompare(b.code) || a.reason.localeCompare(b.reason));
+  // Each replacement is checked on its own; two replacements, or one and its neighbours, could
+  // still form a mention or a term together. Then nothing in this text is replaced.
+  const created = [...mentionsIn(output)].filter((login) => !state.mentions.has(login)).length;
   if (created > 0) {
     return { text, replacements: [], refused: [...refused, { code: 'mention-guard', count: created, reason: 'would-create-mention' }] };
   }
+  const reintroduced = reintroducedTermHits(output, termRules, placed);
+  if (reintroduced > 0) {
+    return { text, replacements: [], refused: [...refused, { code: 'term-guard', count: reintroduced, reason: 'would-re-emit-term' }] };
+  }
   return {
-    text: next,
-    replacements: [...state.records.values()].sort((a, b) => a.code.localeCompare(b.code)),
+    text: output,
+    replacements: [...state.records.values()]
+      .sort((a, b) => a.code.localeCompare(b.code) || (a.term ?? '').localeCompare(b.term ?? '')),
     refused,
   };
 }
@@ -317,17 +379,37 @@ function parseArgs(argv: string[]): ParsedArgs {
     paths: [],
   };
 
-  for (const arg of argv) {
+  argv.forEach((arg, index) => {
     if (arg === '--help' || arg === '-h') args.help = true;
     else if (arg === '--include-tests') args.includeTests = true;
     else if (arg === '--json') args.json = true;
     else if (arg === '--staged') args.staged = true;
     else if (arg === '--write') args.write = true;
-    else if (arg.startsWith('--')) throw new Error(`Unknown argument: ${arg}`);
+    // An argument can hold a private name: name it by position only.
+    else if (arg.startsWith('--')) throw new AnonymizerUsageError(`unknown argument at position ${index + 1}; see --help`);
     else args.paths.push(normalizeRepoPath(arg));
-  }
+  });
 
   return args;
+}
+
+class AnonymizerUsageError extends Error {}
+
+// The report counts per term id (term-file replacements) or per rule code with the short
+// fingerprint (built-in rewrites). It never prints replacement text: that is the operator's own
+// and could itself be private.
+function reportChange(change: { filePath: string; replacements: AnonymizedReplacement[]; refused: AnonymizedRefusal[] }) {
+  const terms = new Map<string, number>();
+  const rewrites: Array<{ code: string; count: number; fingerprint: string }> = [];
+  for (const replacement of change.replacements) {
+    if (replacement.term !== undefined) terms.set(replacement.term, (terms.get(replacement.term) ?? 0) + replacement.count);
+    else rewrites.push({ code: replacement.code, count: replacement.count, fingerprint: replacement.fingerprint });
+  }
+  return {
+    filePath: change.filePath,
+    replacements: [...[...terms].map(([term, count]) => ({ term, count })), ...rewrites],
+    refused: change.refused,
+  };
 }
 
 function listPathCandidates(cwd: string, args: ParsedArgs): string[] {
@@ -356,13 +438,14 @@ function listCandidateFiles(cwd: string, args: ParsedArgs): string[] {
     .sort();
 }
 
-function run(argv = process.argv.slice(2), cwd = process.cwd()): number {
+export function run(argv = process.argv.slice(2), cwd = process.cwd()): number {
   let args: ParsedArgs;
   try {
     args = parseArgs(argv);
   } catch (err) {
-    console.error((err as Error).message);
-    return 1;
+    if (!(err instanceof AnonymizerUsageError)) throw err;
+    console.error(`anonymize-private-literals: ${err.message}`);
+    return 2;
   }
 
   if (args.help) {
@@ -390,12 +473,16 @@ function run(argv = process.argv.slice(2), cwd = process.cwd()): number {
 
     // The printed path masks every term or fallback match: a file name can be a private name.
     changes.push({ filePath: maskPrivateText(filePath, termRules), replacements: anonymized.replacements, refused: anonymized.refused });
-    if (args.write && anonymized.replacements.length > 0) writeFileSync(fullPath, anonymized.text);
+    // A file with a refused replacement keeps its original text: writing the rest would leave a
+    // private literal in a file the run reports as anonymized.
+    if (args.write && anonymized.replacements.length > 0 && anonymized.refused.length === 0) {
+      writeFileSync(fullPath, anonymized.text);
+    }
   }
   const refusedAny = changes.some((change) => change.refused.length > 0);
 
   if (args.json) {
-    console.log(JSON.stringify({ ok: changes.length === 0, write: args.write, files: changes.length, changes }, null, 2));
+    console.log(JSON.stringify({ ok: changes.length === 0, write: args.write, files: changes.length, changes: changes.map(reportChange) }, null, 2));
   } else if (changes.length === 0) {
     console.log('No private literals found by anonymizer.');
   } else {
@@ -406,7 +493,7 @@ function run(argv = process.argv.slice(2), cwd = process.cwd()): number {
       const parts = [summary, refusedSummary === '' ? '' : `refused (would create a new GitHub mention): ${refusedSummary}`];
       console.log(`  ${change.filePath}: ${parts.filter((part) => part !== '').join('; ')}`);
     }
-    if (refusedAny) console.log('Refused replacements leave the original text; edit those lines by hand.');
+    if (refusedAny) console.log('A file with a refused replacement is left unchanged; edit those lines by hand, then run again.');
     if (!args.write) console.log('Run again with --write to update files.');
   }
 
@@ -414,15 +501,31 @@ function run(argv = process.argv.slice(2), cwd = process.cwd()): number {
   return (args.write || changes.length === 0) && !refusedAny ? 0 : 1;
 }
 
+/**
+ * The command-line entry. An unexpected error prints its class and a fixed sentence only: its
+ * message (a file system or git error) can quote a private path or name.
+ */
+export function main(argv = process.argv.slice(2), cwd = process.cwd()): number {
+  try {
+    return run(argv, cwd);
+  } catch (error) {
+    const errorClass = error instanceof Error ? error.constructor.name : typeof error;
+    console.error(`anonymize-private-literals: unexpected ${errorClass}; its text is withheld because it can quote a private path or name`);
+    return 1;
+  }
+}
+
 function printHelp(): void {
   console.log(`Usage: npm run leaks:anonymize -- [--write] [--staged] [--include-tests] [--json] [paths...]
 
 Default mode is report-only and exits non-zero when replacements are available.
-Reports never print original private values; fingerprints are short hashes for correlation.`);
+Reports count replacements per term id or rule code; they never print an original private
+value or replacement text (fingerprints are short hashes for correlation). With --write, a
+file with a refused replacement is left unchanged. Usage errors exit 2.`);
 }
 
 const isDirectRun = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
 
 if (isDirectRun) {
-  process.exitCode = run();
+  process.exitCode = main();
 }
