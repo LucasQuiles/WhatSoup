@@ -337,8 +337,11 @@ export function scanProjectedFileSecretLines(lines: AddedLine[]): GuardIssue[] {
 
 // Term rules join the patterns a mode already applies. A code the inline fallback rules already
 // reported for the same line is not reported twice. The joined view of split literals adds the
-// fallback and term codes the line itself does not show, with a split marker; like a term hit,
-// such a hit is new since main, so commit-text range scans block it only from the epoch on.
+// fallback and term codes the line itself does not show, with a split marker. A joined view that
+// a fallback rule matches is a fallback hit like the line's own: it blocks at every commit date
+// and is never a term hit, so it never counts as an older term hit (a receipt made without a term
+// file must count none). A term rule's hit, in the line or in its joined view, is new since main,
+// so commit-text range scans block it only from the epoch on.
 function termRuleIssues(
   filePath: string,
   text: string,
@@ -347,16 +350,15 @@ function termRuleIssues(
   reported: ReadonlySet<string>,
 ): GuardIssue[] {
   const direct = boundaryCodesInLine(filePath, text, termRules, reported);
-  const split = splitCodesInLine(filePath, text, [...fallbackPrivatePatterns, ...termRules], new Set([...reported, ...direct]));
+  const shown = new Set([...reported, ...direct]);
+  // Fallback rules first, so a code both rule sets find in the joined view stays a fallback hit.
+  const fallbackSplit = splitCodesInLine(filePath, text, fallbackPrivatePatterns, shown);
+  const termSplit = splitCodesInLine(filePath, text, termRules, new Set([...shown, ...fallbackSplit]));
+  const issue = (code: string) => ({ code, message: PRIVATE_TERM_CODE_MESSAGES[code] ?? code, ...location });
   return [
-    ...direct.map((code) => ({ code, message: PRIVATE_TERM_CODE_MESSAGES[code] ?? code, ...location, termHit: true as const })),
-    ...split.map((code) => ({
-      code,
-      message: PRIVATE_TERM_CODE_MESSAGES[code] ?? code,
-      ...location,
-      termHit: true as const,
-      split: true as const,
-    })),
+    ...direct.map((code) => ({ ...issue(code), termHit: true as const })),
+    ...fallbackSplit.map((code) => ({ ...issue(code), split: true as const })),
+    ...termSplit.map((code) => ({ ...issue(code), termHit: true as const, split: true as const })),
   ];
 }
 

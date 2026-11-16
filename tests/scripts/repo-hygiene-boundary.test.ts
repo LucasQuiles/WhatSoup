@@ -884,6 +884,45 @@ describe('commit identities and the commit-text epoch', () => {
     const newerPayload = JSON.parse(Buffer.from(newer.artifact.payloadBytes).toString('utf8')) as { nativeCauses: string[] };
     expect(newerPayload.nativeCauses).toEqual(['private-host-label']);
   });
+
+  // A fallback label read from the inline list at runtime, never spelled in this file, and the
+  // same label as two fragments joined by `+`.
+  const fallbackLabel = privateHostLabels[0]!;
+  const splitFallbackLabel = `'${fallbackLabel.slice(0, 2)}' + '${fallbackLabel.slice(2)}'`;
+
+  it.each([
+    ['with', SYNTHETIC_PRIVATE_TERMS_FILE],
+    ['without', ABSENT_PRIVATE_TERMS_FILE],
+  ])('blocks a fallback label in an older commit message, split or plain, in a receipt that validates (%s a term file)', (_with, termsFile) => {
+    useTerms(termsFile);
+    // The plain label keeps main's outcome (block); the split label must get the same outcome.
+    for (const message of [`fix: rename ${splitFallbackLabel}`, `fix: rename ${fallbackLabel}`]) {
+      const repo = makeRepo();
+      const baseOid = commit(repo, { 'README.md': '# fixture\n' });
+      const localOid = commit(repo, { 'src/x.ts': 'const clean = 1;\n' }, message, BEFORE_EPOCH);
+
+      const built = createRepoHygieneExactRangeArtifact(repo, { baseOid, remoteOid: null, localOid });
+      expect(built.ok).toBe(true);
+      if (!built.ok) return;
+      const payloadText = Buffer.from(built.artifact.payloadBytes).toString('utf8');
+      const payload = JSON.parse(payloadText) as { nativeCauses: string[]; privateTerms: { preEpochTermHits: number } };
+      // A fallback hit is never a term hit: it blocks at any commit date and is never counted.
+      expect(payload.nativeCauses).toEqual(['private-host-label']);
+      expect(payload.privateTerms.preEpochTermHits).toBe(0);
+      const expected = {
+        baseOid,
+        remoteOid: null,
+        localOid,
+        currentToolDigest: currentRepoHygieneToolDigest(),
+        currentPolicyDigest: currentRepoHygienePolicyDigest(),
+        expectedPayloadByteLength: built.artifact.binding.payloadByteLength,
+        expectedPayloadSha256: built.artifact.binding.payloadSha256,
+      };
+      expect(validateRepoHygieneExactRangeArtifact(built.artifact, expected).ok).toBe(true);
+      expect(adaptRepoHygieneExactRangeReportOnly(built.artifact, expected).outcome).toBe('block');
+      expect(payloadText.toLowerCase()).not.toContain(fallbackLabel.toLowerCase());
+    }
+  });
 });
 
 describe('the git environment every test subprocess gets', () => {
