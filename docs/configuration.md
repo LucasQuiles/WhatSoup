@@ -1570,19 +1570,22 @@ proof unless a WhatSoup-specific proof artifact says so.
 
 A per-chat actor socket in a non-sandbox `per_chat` runtime binds to the logical
 chat's canonical identity, including when WhatsApp delivers the chat's messages
-through a different LID. The socket also accepts the key of its own delivery
-JID. For a LID DM mapped to a phone, the phone key and the LID key both name the
-socket's conversation, each written as a JID or as an encoded key. A read
-returns the rows stored under the key it passes. The two keys are not merged and
-stored rows are not re-keyed, so messages journaled under the LID before the
-mapping are read with the LID key. Tools that look up a stored message through
-the shared conversation check, such as `transcribe_audio`, `download_media` and
-`forward_message`, admit a row under either key. `reply_message`,
-`react_message`, `edit_message`, `delete_message` and `pin_message` match the
-session's canonical key only, so they refuse a message journaled under the LID
-before the mapping. A scheduled message stored under the LID delivery JID stays visible to its own
-chat. The delivery JID remains the outbound address. When LID resolution
-re-keys a live socket, its binding and delivery JID move to the new JID, and the
+through a different LID. With `perChatConversationBound: true`, caller-supplied
+conversation keys are confined to the socket's own conversation: its canonical
+key or the key of its own delivery JID. For a LID DM mapped to a phone, the
+phone key and the LID key both name the socket's conversation, each written as a
+JID or as an encoded key. A read returns the rows stored under the key it
+passes. The two keys are not merged and stored rows are not re-keyed, so
+messages journaled under the LID before the mapping are read with the LID key.
+`transcribe_audio`, the one global tool a bound session may call, admits a
+stored message under either key. `reply_message`, `edit_message`,
+`delete_message`, `pin_message`, and `react_message` given a `messageId`, match
+the session's conversation key only, so they refuse a message journaled under
+the LID before the mapping. `react_message` without a `messageId` reacts to the
+latest inbound message from the delivery JID, whichever key it is stored under.
+A scheduled message stored under the LID delivery JID stays visible to its own
+chat. The delivery JID remains the outbound address. When LID resolution re-keys
+a live bound socket, its binding and delivery JID move to the new JID, and the
 socket then accepts that JID's key only. A `sandboxPerChat` runtime keys the
 socket by its already-folded workspace key, so that socket binds to the
 delivery JID.
