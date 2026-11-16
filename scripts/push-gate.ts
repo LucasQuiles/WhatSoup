@@ -286,6 +286,7 @@ export const CI_ONLY_GUARDS: ReadonlyArray<{ readonly name: string; readonly rea
   { name: 'guard:repo', reason: 'umbrella entry point, not a push-gate step' },
   { name: 'guard:repo:commit-msg', reason: 'commit-msg hook lane, not a push-gate step' },
   { name: 'guard:repo:scan-history', reason: 'history-scan sweep in CI' },
+  { name: 'guard:repo:tree:write-baseline', reason: 'writes the private tree baseline outside the repository; a mutation lane, not a push-gate step' },
   { name: 'guard:restart-preflight', reason: 'deploy/restart lane, not a push-gate step' },
   { name: 'guard:ring-boundaries', reason: 'CI ring check; the ratchet variant runs in the gate' },
   { name: 'guard:semantic-quality', reason: 'CI semantic-quality lane' },

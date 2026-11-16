@@ -446,7 +446,7 @@ describe('repo hygiene --tree and its private baseline', () => {
 
     expect(result.exitCode).toBe(1);
     const output = result.lines.join('\n');
-    expect(output).toContain('--write-baseline -- --allow-increase');
+    expect(output).toContain('build the first one with npm run guard:repo:tree:write-baseline -- --allow-increase');
     expect(output).toContain('src/a.ts private-host-label: Public repo text must not include private host labels. (term rules: 2 hit(s) in a file with no baseline entry)');
     expect(output).toContain('  src/a.ts:1 private-host-label:');
     expect(output).toContain('notes/<private>.md private-host-label:');
