@@ -1,11 +1,11 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
 import { pathKey, parseBoundaryBaseline } from '../../scripts/lib/repo-hygiene-boundary.ts';
 import {
   canonicalRepoHygienePolicyProjection,
@@ -14,6 +14,7 @@ import {
   run,
   validateRepoHygieneExactRangeArtifact,
 } from '../../scripts/repo-hygiene-guard.ts';
+import { isolatedGitEnv } from '../helpers/isolated-git-env.ts';
 import { ABSENT_PRIVATE_TERMS_FILE, SYNTHETIC_PRIVATE_TERMS_FILE } from '../helpers/private-terms-env.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
@@ -44,7 +45,7 @@ function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, {
     cwd,
     encoding: 'utf8',
-    env: cleanGitEnv(),
+    env: isolatedGitEnv(),
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trim();
 }
@@ -450,5 +451,20 @@ describe('exact-range receipts carry term-rule causes without term text', () => 
       status: 'loaded',
       termsSha256: createHash('sha256').update(readFileSync(SYNTHETIC_PRIVATE_TERMS_FILE)).digest('hex'),
     });
+  });
+});
+
+describe('the git environment every test subprocess gets', () => {
+  it('has a temporary HOME, no system or global configuration and an empty hooks folder', () => {
+    const env = isolatedGitEnv();
+    expect(env.HOME).not.toBe(homedir());
+    expect(env.GIT_CONFIG_NOSYSTEM).toBe('1');
+    expect(env.WHATSOUP_PRIVATE_TERMS_FILE).toBe(ABSENT_PRIVATE_TERMS_FILE);
+    expect(env.WHATSOUP_REQUIRE_PRIVATE_TERMS).toBe('');
+    const repo = makeRepo();
+    const hooksPath = execFileSync('git', ['config', '--get', 'core.hooksPath'], { cwd: repo, encoding: 'utf8', env }).trim();
+    expect(readdirSync(hooksPath)).toEqual([]);
+    const globalConfig = spawnSync('git', ['config', '--global', '--list'], { cwd: repo, encoding: 'utf8', env });
+    expect(globalConfig.stdout.trim()).toBe('');
   });
 });

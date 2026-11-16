@@ -15,7 +15,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { cleanGitEnv, git } from './guard-core.ts';
@@ -403,9 +403,10 @@ function readBlobs(cwd: string, entries: readonly TreeEntry[]): Map<string, Buff
   let batchBytes = 0;
   const flush = (): void => {
     if (batch.length === 0) return;
+    // No `encoding` option: the default returns a Buffer on every Node version, while
+    // `encoding: 'buffer'` is rejected by Node 26 (TypeError: Unknown encoding).
     const output = execFileSync('git', ['cat-file', '--batch'], {
       cwd,
-      encoding: 'buffer',
       env: cleanGitEnv(),
       input: `${batch.join('\n')}\n`,
       maxBuffer: batchBytes + batch.length * 160 + 4096,
@@ -687,7 +688,9 @@ function writeBaseline(cwd: string, scan: TreeScan, mode: TreeCompareMode, terms
       return 1;
     }
   }
-  writeFileSync(path.join(cwd, BOUNDARY_BASELINE_PATH), serializeBoundaryBaseline(next));
+  const target = path.join(cwd, BOUNDARY_BASELINE_PATH);
+  mkdirSync(path.dirname(target), { recursive: true });
+  writeFileSync(target, serializeBoundaryBaseline(next));
   const entries = [...next.files.values()].filter((counts) => counts.size > 0).length;
   console.log(
     `repo hygiene tree: wrote ${BOUNDARY_BASELINE_PATH} (${entries} file entries, weight ${boundaryBaselineWeight(next)}, `

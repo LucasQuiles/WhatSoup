@@ -7,6 +7,7 @@ import { parse } from 'yaml';
 
 import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
 import { runPrMetadataGuard } from '../../scripts/pr-metadata-guard.ts';
+import { isolatedGitEnv } from '../helpers/isolated-git-env.ts';
 import { SYNTHETIC_PRIVATE_TERMS_FILE, privateTermsTestEnv } from '../helpers/private-terms-env.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
@@ -26,7 +27,7 @@ function git(repo: string, args: string[]): string {
   ], {
     cwd: repo,
     encoding: 'utf8',
-    env: cleanGitEnv(),
+    env: isolatedGitEnv(),
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trim();
 }
