@@ -4,14 +4,17 @@
  * - `.gitleaks.toml` allowlists exactly the tracked paths the repository hygiene check exempts
  *   from secret shapes, judged path by path, because gitleaks reads its config from the tree it
  *   scans and a change can edit it.
- * - The Quality workflow's `gitleaks` job keeps its supply-chain and output contract.
+ * - The Quality workflow's `gitleaks` job keeps its supply-chain and output contract: its scan
+ *   step prints the finding count only and keeps the scanner's own output in RUNNER_TEMP (the
+ *   step's script runs here under bash with a fake gitleaks).
  * - The pre-push step (scripts/pre-push-guard.ts) runs only the pinned release, scans exactly
- *   the pushed commits and prints counts and rule ids only.
+ *   the pushed commits and prints counts, and only rule ids of a neutral shape that no term or
+ *   fallback rule matches.
  *
  * No test runs a real gitleaks: the suite setup points WHATSOUP_GITLEAKS at an absent path and
- * these tests point it at a fake script.
+ * these tests point it, or PATH, at a fake script.
  */
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -20,9 +23,10 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parse } from 'yaml';
 
-import { isFixtureFile } from '../../scripts/lib/repo-hygiene-policy.ts';
+import { isFixtureFile, privateHostLabels } from '../../scripts/lib/repo-hygiene-policy.ts';
 import { GITLEAKS_VERSION, runGitleaksStep, runPrePushGuard, ZERO_SHA } from '../../scripts/pre-push-guard.ts';
 import { isolatedGitEnv } from '../helpers/isolated-git-env.ts';
+import { SYNTHETIC_PRIVATE_TERMS_FILE } from '../helpers/private-terms-env.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const PINNED_ARCHIVE_SHA256 = '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb';
@@ -114,7 +118,7 @@ describe('Quality workflow gitleaks job', () => {
     expect(run.indexOf('tar -xzf')).toBeGreaterThan(run.indexOf('sha256sum -c -'));
   });
 
-  it('scans each event range redacted, prints counts per rule id and publishes nothing', () => {
+  it('scans each event range redacted, prints the finding count only and publishes nothing', () => {
     const run = String(step('Scan the change range')?.['run']);
     for (const fragment of [
       'set -euo pipefail',
@@ -122,11 +126,16 @@ describe('Quality workflow gitleaks job', () => {
       'merge_group) base="$MERGE_GROUP_BASE_SHA"; head="$MERGE_GROUP_HEAD_SHA"',
       'push) base="$PUSH_BEFORE_SHA"; head="$PUSH_AFTER_SHA"',
       '--log-opts="${base}..${head}" --config .gitleaks.toml --redact --no-banner',
-      '--report-format json --report-path "$report" --exit-code 42',
-      'group_by(.RuleID)',
+      '--report-format json --report-path "$report" --exit-code 42 . > "$scan_log" 2>&1',
+      `count="$(jq 'length' "$report" 2>/dev/null)"`,
+      'echo "gitleaks: the pre-push secret scan shows the rule ids on a local push"',
     ]) {
       expect(run, fragment).toContain(fragment);
     }
+    // No rule id reaches the log (a custom rule's id can itself be a secret or a private name),
+    // and the scanner runs only once, with its output captured.
+    expect(run).not.toContain('RuleID');
+    expect(run.match(/^[ \t]*gitleaks /gm)).toHaveLength(1);
     // Event values reach the shell through env only, never as expressions inside run:.
     expect(steps.filter((entry) => /\$\{\{/.test(String(entry['run'] ?? ''))).map((entry) => entry['name'])).toEqual([]);
     const jobText = JSON.stringify(job);
@@ -141,9 +150,15 @@ interface FakeGitleaks {
   calls: string;
 }
 
-/** A stand-in for gitleaks: prints a version, logs its arguments, may copy a report, exits as told. */
-function writeFakeGitleaks(dir: string, options: { version: string; exit?: number; report?: unknown }): FakeGitleaks {
-  const bin = join(dir, 'fake-gitleaks');
+/**
+ * A stand-in for gitleaks: prints a version, logs its arguments, may copy a report, may print
+ * `noise` on stdout and stderr (as a scanner error would), exits as told.
+ */
+function writeFakeGitleaks(
+  dir: string,
+  options: { version: string; exit?: number; report?: unknown; noise?: string; name?: string },
+): FakeGitleaks {
+  const bin = join(dir, options.name ?? 'fake-gitleaks');
   const calls = join(dir, 'fake-gitleaks-calls.log');
   const reportSource = join(dir, 'fake-gitleaks-report.json');
   if (options.report !== undefined) writeFileSync(reportSource, JSON.stringify(options.report));
@@ -157,12 +172,110 @@ function writeFakeGitleaks(dir: string, options: { version: string; exit?: numbe
     '  shift',
     'done',
     options.report === undefined ? ':' : `cp '${reportSource}' "$report"`,
+    options.noise === undefined ? ':' : `printf '%s\\n' '${options.noise}'; printf '%s\\n' '${options.noise}' >&2`,
     `exit ${options.exit ?? 0}`,
     '',
   ].join('\n'));
   chmodSync(bin, 0o755);
   return { bin, calls };
 }
+
+describe('Quality workflow scan step, run under bash with a fake gitleaks on PATH', () => {
+  const workflow = parse(readFileSync(resolve(repoRoot, '.github/workflows/quality.yml'), 'utf8')) as {
+    jobs: Record<string, { steps: Array<Record<string, unknown>> }>;
+  };
+  const scanScript = String(workflow.jobs['gitleaks']!.steps.find((entry) => entry['name'] === 'Scan the change range')?.['run']);
+  let root: string;
+  let repo: string;
+  let bin: string;
+  let runnerTemp: string;
+  const commits: Record<'plain' | 'base' | 'head', string> = { plain: '', base: '', head: '' };
+
+  // Three commits: `plain` has no .gitleaks.toml, `base` adds one, `head` changes it.
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'whatsoup-gitleaks-ci-'));
+    repo = join(root, 'repo');
+    bin = join(root, 'bin');
+    runnerTemp = join(root, 'runner-temp');
+    for (const dir of [repo, bin, runnerTemp]) mkdirSync(dir);
+    const git = (...args: string[]): string => execFileSync('git', args, {
+      cwd: repo,
+      env: isolatedGitEnv(),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+    git('init', '-q');
+    git('config', 'user.name', 'Guard Test');
+    git('config', 'user.email', 'guard@users.noreply.github.com');
+    writeFileSync(join(repo, 'notes.txt'), 'one\n');
+    git('add', 'notes.txt');
+    git('commit', '-q', '-m', 'plain');
+    commits.plain = git('rev-parse', 'HEAD');
+    writeFileSync(join(repo, '.gitleaks.toml'), '# base config\n');
+    git('add', '.gitleaks.toml');
+    git('commit', '-q', '-m', 'base');
+    commits.base = git('rev-parse', 'HEAD');
+    writeFileSync(join(repo, '.gitleaks.toml'), '# head config\n');
+    git('commit', '-q', '-am', 'head');
+    commits.head = git('rev-parse', 'HEAD');
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  /** Runs the step's script as the job does: bash, the step's env values, RUNNER_TEMP, PATH. */
+  const runScan = (event: Record<string, string>): { status: number | null; lines: string[] } => {
+    const result = spawnSync('bash', ['-c', scanScript], {
+      cwd: repo,
+      env: {
+        ...isolatedGitEnv(),
+        PATH: `${bin}:${process.env['PATH'] ?? ''}`,
+        RUNNER_TEMP: runnerTemp,
+        PR_BASE_SHA: '',
+        PR_HEAD_SHA: '',
+        MERGE_GROUP_BASE_SHA: '',
+        MERGE_GROUP_HEAD_SHA: '',
+        PUSH_BEFORE_SHA: '',
+        PUSH_AFTER_SHA: '',
+        ...event,
+      },
+      encoding: 'utf8',
+      timeout: 60_000,
+    });
+    return { status: result.status, lines: `${result.stdout}${result.stderr}`.split('\n').filter((line) => line !== '') };
+  };
+  const pushEvent = (): Record<string, string> => ({ EVENT_NAME: 'push', PUSH_BEFORE_SHA: commits.base, PUSH_AFTER_SHA: commits.head });
+
+  it('prints one fixed line with the exit code on a scanner error, never the scanner\'s own output', () => {
+    writeFakeGitleaks(bin, { name: 'gitleaks', version: GITLEAKS_VERSION, exit: 1, noise: 'config error in zorblab.toml near zqline' });
+    const result = runScan(pushEvent());
+    expect(result.status).toBe(1);
+    expect(result.lines).toEqual(['gitleaks: the scan did not complete (exit 1)']);
+  });
+
+  it('prints the finding count only: no rule id, no report text and no scanner output', () => {
+    const finding = { File: 'conf/zorblab.env', Secret: 'REDACTED', Match: 'value zqline', Commit: commits.head, Author: 'quorpine' };
+    writeFakeGitleaks(bin, {
+      name: 'gitleaks',
+      version: GITLEAKS_VERSION,
+      exit: 42,
+      noise: 'leak in zorblab',
+      report: [{ ...finding, RuleID: 'zorblab-token' }, { ...finding, RuleID: 'generic-api-key' }],
+    });
+    const result = runScan(pushEvent());
+    expect(result.status).toBe(1);
+    // The count comes from jq, as in the job; it reads '?' where no jq can read the report.
+    expect(result.lines).toEqual([
+      expect.stringMatching(new RegExp(`^gitleaks: (?:2|\\?) finding\\(s\\) in ${commits.base}\\.\\.${commits.head}; rule ids and matched text withheld$`)),
+      'gitleaks: the pre-push secret scan shows the rule ids on a local push',
+    ]);
+    const output = result.lines.join('\n');
+    for (const leaked of ['zorblab', 'zqline', 'quorpine', 'generic-api-key', 'conf/', 'REDACTED']) {
+      expect(output, leaked).not.toContain(leaked);
+    }
+  });
+});
 
 describe('pre-push gitleaks step', () => {
   let root: string;
@@ -278,12 +391,64 @@ describe('pre-push gitleaks step', () => {
       }
     });
     expect(message).toBe(
-      'pre-push guard: gitleaks found 3 leak(s) in the pushed commits (generic-api-key 2, unnamed-rule 1); push refused',
+      'pre-push guard: gitleaks found 3 leak(s) in the pushed commits (custom-rule 1, generic-api-key 2); push refused',
     );
     expect(errors).toEqual([]);
     for (const leaked of ['zorblab', 'zqline', 'quorpine', 'conf/', 'REDACTED', first, second]) {
       expect(message, leaked).not.toContain(leaked);
     }
+  });
+
+  it('prints a rule id only in a neutral shape that no term or fallback rule matches, and never the scanner\'s output', () => {
+    // A fallback label read from the inline list at runtime, never spelled in this file.
+    const fallbackLabel = privateHostLabels[0]!;
+    const finding = { File: 'notes.txt', Secret: 'REDACTED', Commit: second };
+    const fake = writeFakeGitleaks(root, {
+      version: GITLEAKS_VERSION,
+      exit: 42,
+      noise: 'leak in zorblab',
+      report: [
+        { ...finding, RuleID: 'generic-api-key' },
+        { ...finding, RuleID: 'zorblab-token' },
+        { ...finding, RuleID: `${fallbackLabel}-token` },
+        { ...finding, RuleID: 'Generic-Api-Key' },
+        { ...finding, RuleID: 'generic--key' },
+        { ...finding, RuleID: 'generic.key' },
+        { ...finding, RuleID: 'k'.repeat(65) },
+        { ...finding, RuleID: 7 },
+      ],
+    });
+    const env = isolatedGitEnv({
+      WHATSOUP_GITLEAKS: fake.bin,
+      WHATSOUP_REQUIRE_GITLEAKS: '',
+      WHATSOUP_PRIVATE_TERMS_FILE: SYNTHETIC_PRIVATE_TERMS_FILE,
+    });
+    const refusal = (stepEnv: NodeJS.ProcessEnv): { message: string; errors: string[] } => {
+      let message = '';
+      const errors = captureErrors(() => {
+        try {
+          runGitleaksStep(update(second, first), repo, 'origin', stepEnv);
+        } catch (error) {
+          message = (error as Error).message;
+        }
+      });
+      return { message, errors };
+    };
+
+    const leaks = refusal(env);
+    expect(leaks).toEqual({
+      message: 'pre-push guard: gitleaks found 8 leak(s) in the pushed commits (custom-rule 7, generic-api-key 1); push refused',
+      errors: [],
+    });
+    expect(leaks.message.toLowerCase()).not.toContain(fallbackLabel.toLowerCase());
+
+    // A term file that cannot be loaded leaves no way to check an id, so none is printed.
+    const brokenTerms = join(root, 'broken-terms.json');
+    writeFileSync(brokenTerms, '{');
+    expect(refusal({ ...env, WHATSOUP_PRIVATE_TERMS_FILE: brokenTerms })).toEqual({
+      message: 'pre-push guard: gitleaks found 8 leak(s) in the pushed commits (custom-rule 8); push refused',
+      errors: [],
+    });
   });
 
   it.each([

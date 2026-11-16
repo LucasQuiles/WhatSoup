@@ -606,9 +606,10 @@ jobs:
 
   # Secret scan of the change range with the pinned gitleaks release and .gitleaks.toml (the
   # default rules plus the hygiene check's fixture paths). The archive is checked against its
-  # published sha256 before it is extracted; a mismatch fails the job. The JSON report stays in
-  # RUNNER_TEMP and the log shows counts per rule id only, never matched text: no PR comment, no
-  # SARIF upload, no artifact. Ranges: a pull request's base..head; a merge group's base..head (a
+  # published sha256 before it is extracted; a mismatch fails the job. The JSON report and the
+  # scanner's own output stay in RUNNER_TEMP, and the log shows the finding count only, never a
+  # rule id or matched text: no PR comment, no SARIF upload, no artifact. A scanner error prints
+  # one fixed line with its exit code. Ranges: a pull request's base..head; a merge group's base..head (a
   # required check must report on merge_group or the queue stalls); a push's before..after. Any
   # other event (schedule, a new tag) names no range and scans nothing.
   gitleaks:
@@ -661,15 +662,19 @@ jobs:
             echo "gitleaks: the ${EVENT_NAME} event names no change range; nothing to scan"
             exit 0
           fi
-          gitleaks version
           report="$RUNNER_TEMP/gitleaks-report.json"
+          # The scanner's own output stays in RUNNER_TEMP: its errors can quote paths, refs and config text.
+          scan_log="$RUNNER_TEMP/gitleaks-output.txt"
           # Exit 42 marks leaks; gitleaks exits 1 on its own errors too, so leaks get their own code.
           status=0
           gitleaks git --log-opts="${base}..${head}" --config .gitleaks.toml --redact --no-banner \
-            --log-level error --report-format json --report-path "$report" --exit-code 42 . || status=$?
+            --log-level error --report-format json --report-path "$report" --exit-code 42 . > "$scan_log" 2>&1 || status=$?
           if [ "$status" -eq 42 ]; then
-            echo "gitleaks: findings per rule id (matched text withheld):"
-            jq -r 'group_by(.RuleID)[] | "  \(.[0].RuleID): \(length)"' "$report"
+            # The count only: a custom rule's id can itself be a secret or a private name.
+            count="$(jq 'length' "$report" 2>/dev/null)" || count='?'
+            case "$count" in ''|*[!0-9]*) count='?' ;; esac
+            echo "gitleaks: ${count} finding(s) in ${base}..${head}; rule ids and matched text withheld"
+            echo "gitleaks: the pre-push secret scan shows the rule ids on a local push"
             exit 1
           fi
           if [ "$status" -ne 0 ]; then

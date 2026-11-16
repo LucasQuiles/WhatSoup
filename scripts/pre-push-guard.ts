@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { maskPrivateText, resolveBoundaryTerms } from './lib/repo-hygiene-boundary.ts';
 import {
   classifyPushRemote,
   isPreserveMirrorUrl,
@@ -163,7 +164,11 @@ const GITLEAKS_LEAK_EXIT = 42;
 const GITLEAKS_TIMEOUT_MS = 300_000;
 /** A remote named on the command line; a push to a URL has no remote-tracking refs of its own. */
 const REMOTE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-const GITLEAKS_RULE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+/** A gitleaks rule id printed as is: lower-case words joined by single hyphens, at most 64 characters. */
+const NEUTRAL_RULE_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const MAX_PRINTED_RULE_ID_LENGTH = 64;
+/** Every other rule id is counted under this label: a custom rule's id can itself be a secret or a private name. */
+const CUSTOM_RULE_LABEL = 'custom-rule';
 const SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
 
 /** WHATSOUP_GITLEAKS when set and non-empty (the WHATSOUP_NODE convention), else `gitleaks` on PATH. */
@@ -213,8 +218,25 @@ function pushedLogOptions(update: RefUpdate, remoteName: string, cwd: string, en
   return `${update.localSha} --not ${remoteTrackingRefs(remoteName)}`;
 }
 
-/** Findings per rule id from a gitleaks JSON report; null when the report is unreadable. */
-function leakCountsByRule(reportPath: string): Map<string, number> | null {
+/**
+ * Whether a gitleaks rule id may be printed: a neutral shape that no loaded term rule and no
+ * fallback rule matches (masking leaves it unchanged). A term file that cannot be loaded leaves
+ * no way to check, so then no id is printed.
+ */
+function ruleIdPrinter(env: NodeJS.ProcessEnv): (ruleId: string) => boolean {
+  let terms: ReturnType<typeof resolveBoundaryTerms>;
+  try {
+    terms = resolveBoundaryTerms(env);
+  } catch {
+    return () => false;
+  }
+  return (ruleId) => ruleId.length <= MAX_PRINTED_RULE_ID_LENGTH
+    && NEUTRAL_RULE_ID_PATTERN.test(ruleId)
+    && maskPrivateText(ruleId, terms.rules) === ruleId;
+}
+
+/** Findings per printable rule id from a gitleaks JSON report; null when the report is unreadable. */
+function leakCountsByRule(reportPath: string, printable: (ruleId: string) => boolean): Map<string, number> | null {
   let findings: unknown;
   try {
     findings = JSON.parse(readFileSync(reportPath, 'utf8'));
@@ -225,8 +247,7 @@ function leakCountsByRule(reportPath: string): Map<string, number> | null {
   const counts = new Map<string, number>();
   for (const finding of findings) {
     const ruleId = (finding as { RuleID?: unknown } | null)?.RuleID;
-    // Only a plain rule id is printed; anything else is counted under one fixed label.
-    const label = typeof ruleId === 'string' && GITLEAKS_RULE_ID_PATTERN.test(ruleId) ? ruleId : 'unnamed-rule';
+    const label = typeof ruleId === 'string' && printable(ruleId) ? ruleId : CUSTOM_RULE_LABEL;
     counts.set(label, (counts.get(label) ?? 0) + 1);
   }
   return counts;
@@ -265,8 +286,9 @@ function gitleaksExit(
  * The pre-push secret scan: gitleaks over exactly the commits this push sends.
  *
  * Only the pinned release runs. A missing or different binary skips the step with one line, or
- * refuses the push under WHATSOUP_REQUIRE_GITLEAKS=1. Every line and error is counts and rule ids
- * only; a failure is rethrown as fixed text, because a child process error quotes its arguments.
+ * refuses the push under WHATSOUP_REQUIRE_GITLEAKS=1. Every line and error is counts and neutral
+ * rule ids only (see ruleIdPrinter); the scanner's own stdout and stderr are discarded, and a
+ * failure is rethrown as fixed text, because a child process error quotes its arguments.
  */
 export function runGitleaksStep(
   input: string,
@@ -300,11 +322,13 @@ export function runGitleaksStep(
   const reportDir = mkdtempSync(join(tmpdir(), 'whatsoup-gitleaks-'));
   try {
     const leaks = new Map<string, number>();
+    // The term file is read only when there is a rule id to check.
+    let printable: ((ruleId: string) => boolean) | undefined;
     ranges.forEach((logOptions, index) => {
       const reportPath = join(reportDir, `report-${index}.json`);
       const status = gitleaksExit(command, cwd, env, logOptions, reportPath);
       if (status === 0) return;
-      const counts = status === GITLEAKS_LEAK_EXIT ? leakCountsByRule(reportPath) : null;
+      const counts = status === GITLEAKS_LEAK_EXIT ? leakCountsByRule(reportPath, printable ??= ruleIdPrinter(env)) : null;
       if (counts === null || counts.size === 0) {
         throw new Error(`pre-push guard: gitleaks did not complete (exit ${status}); push refused`);
       }
