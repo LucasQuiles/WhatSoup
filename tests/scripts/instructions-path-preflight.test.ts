@@ -66,6 +66,28 @@ describe('inspectInstructionsPathConfig', () => {
     });
   });
 
+  it('leaves a path a sandboxPerChat session reads only from its chat workspace to that session, as config load does', () => {
+    const { home, configPath } = fixture({
+      name: 'agent',
+      agentOptions: { cwd: 'workspace', instructionsPath: 'runtime.md', sandboxPerChat: true },
+    });
+    expect(inspectInstructionsPathConfig(configPath, home)).toMatchObject({
+      ok: true,
+      decision: 'allow',
+      reason: 'read_from_chat_workspace',
+    });
+
+    // Config load still checks these forms, so the preflight blocks them too.
+    for (const agentOptions of [
+      { cwd: 'workspace', instructionsPath: 'runtime.md', sandboxPerChat: false },
+      { cwd: home, instructionsPath: 'CLAUDE.md', sandboxPerChat: true },
+      { cwd: home, instructionsPath: path.join(home, 'runtime.md'), sandboxPerChat: true },
+    ]) {
+      writeFileSync(configPath, JSON.stringify({ name: 'agent', agentOptions }), { mode: 0o600 });
+      expect(inspectInstructionsPathConfig(configPath, home)).toMatchObject({ ok: false, decision: 'block' });
+    }
+  });
+
   it('fails closed for a symlinked config file', () => {
     const { root, home, configPath } = fixture({ name: 'agent', agentOptions: {} });
     const linkPath = path.join(root, 'config-link.json');

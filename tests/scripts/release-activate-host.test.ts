@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import os from 'node:os';
@@ -29,7 +30,7 @@ vi.mock('../../scripts/lib/release-activation/root-helper-interpreter.ts', async
 });
 
 import * as fs from 'node:fs';
-import { parseLoadedDomain, parseLoadedJob } from '../../scripts/lib/release-activation/host.ts';
+import { createDefaultActivationHost, parseLoadedDomain, parseLoadedJob } from '../../scripts/lib/release-activation/host.ts';
 import { acquireActivationLock } from '../../scripts/lib/release-activation/lock.ts';
 import { readInstalledRootHelper, ROOT_HELPER_SUDO } from '../../scripts/lib/release-activation/root-helper-interpreter.ts';
 import { releaseProcessLock } from '../../src/lib/process-lock.ts';
@@ -164,7 +165,8 @@ function twoMemberWorld({ sharedFirst = true }: { sharedFirst?: boolean } = {}):
       return { status: 200, body: diagnosticBody(rootForJob === newRelease ? NEXT : OLD, !failedSecond && !failedOld, undefined, { pid }) };
     },
     exec: async (file, args, options) => {
-      if (file === 'git') return { code: 0, stdout: `${OLD}\n`, stderr: '' };
+      // A work tree at each asked root, at OLD: with --show-toplevel, rev-parse prints that root before HEAD.
+      if (file === 'git') return { code: 0, stdout: `${args.includes('--show-toplevel') ? `${args[1]}\n` : ''}${OLD}\n`, stderr: '' };
       if (file === 'plutil') return { code: 0, stdout: '', stderr: '' };
       if (file === 'ps') { const job = [...jobs.values()].find((candidate) => candidate.pid === Number(args[1]) && candidate.alive); return job === undefined ? { code: 1, stdout: '', stderr: '' } : { code: 0, stdout: `node ${rootFor(job)}/src/bootstrap.ts\n`, stderr: '' }; }
       if (file === '/bin/launchctl' && args[0] === 'print' && args[1] === 'gui/501') {
@@ -211,6 +213,24 @@ async function planHostUnit(world: TwoMemberWorld, declaration: unknown): Promis
   vi.stubEnv('HOME', world.home); vi.stubEnv('XDG_CONFIG_HOME', path.join(world.home, '.config')); vi.stubEnv('XDG_DATA_HOME', path.join(world.home, '.local', 'share'));
   try { return await buildHostUnitPlan(world.host, { unitPath: unit, release: world.newRelease, backupDir: path.join(world.root, 'backups'), mode: 'plan', exitTimeoutSeconds: 1, verifyTimeoutSeconds: 1 }); }
   finally { vi.unstubAllEnvs(); }
+}
+
+/** A real repository with one empty commit; its git runs with no inherited GIT_* state and no user or system config. */
+function commitRepository(directory: string, message: string): string {
+  const env = {
+    PATH: process.env['PATH'] ?? '', HOME: directory, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 'fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid', GIT_COMMITTER_NAME: 'fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
+  };
+  execFileSync('git', ['-C', directory, 'init', '--quiet', '--initial-branch=main'], { env });
+  execFileSync('git', ['-C', directory, 'commit', '--quiet', '--allow-empty', '-m', message], { env });
+  return execFileSync('git', ['-C', directory, 'rev-parse', 'HEAD'], { env, encoding: 'utf8' }).trim();
+}
+
+/** The world's fakes, except git: the real binary, run through the production exec adapter. */
+function withRealGit(world: TwoMemberWorld): void {
+  const fake = world.host.exec;
+  const real = createDefaultActivationHost().exec;
+  world.host.exec = (file, args, options) => (file === 'git' ? real(file, args, options) : fake(file, args, options));
 }
 
 describe('release:activate-host loaded launchd contract', () => {
@@ -331,6 +351,55 @@ describe('release:activate-host group transaction', () => {
     expect(plan.document).toMatchObject({ members: expect.arrayContaining([expect.objectContaining({ selectorMode: 'shared-link', oldCommit: OLD }), expect.objectContaining({ selectorMode: 'direct', oldCommit: OLD })]) });
   });
 
+  describe('a manifestless old release resolved by the real git', () => {
+    const noHead = (instance: string) => ({ id: `old-commit:${instance}`, ok: false, detail: 'manifestless old release has no exact Git HEAD' });
+    const manifestless = (world: TwoMemberWorld): void => {
+      unlinkSync(path.join(world.oldRelease, '.whatsoup-release-manifest.json'));
+      withRealGit(world);
+    };
+
+    it('gives no commit when an inherited GIT_DIR/GIT_WORK_TREE names another repository', async () => {
+      const world = twoMemberWorld(); manifestless(world);
+      const foreign = path.join(world.root, 'foreign'); mkdirSync(foreign);
+      const foreignHead = commitRepository(foreign, 'foreign');
+      vi.stubEnv('GIT_DIR', path.join(foreign, '.git')); vi.stubEnv('GIT_WORK_TREE', foreign);
+      const plan = await planTwoMemberWorld(world); // its finally unstubs these too
+      expect(plan.ready).toBe(false);
+      expect(plan.document.preconditions).toEqual(expect.arrayContaining([noHead('shared'), noHead('direct')]));
+      expect(JSON.stringify(plan.document)).not.toContain(foreignHead);
+    });
+
+    it('gives no commit when the release is nested in another work tree', async () => {
+      const world = twoMemberWorld(); manifestless(world);
+      const enclosingHead = commitRepository(world.root, 'enclosing');
+      const plan = await planTwoMemberWorld(world);
+      expect(plan.ready).toBe(false);
+      expect(plan.document.preconditions).toEqual(expect.arrayContaining([noHead('shared'), noHead('direct')]));
+      expect(JSON.stringify(plan.document)).not.toContain(enclosingHead);
+    });
+
+    it('admits the HEAD of the release work tree itself, also under an inherited GIT_DIR/GIT_WORK_TREE', async () => {
+      const world = twoMemberWorld(); manifestless(world);
+      const releaseHead = commitRepository(world.oldRelease, 'old release');
+      const foreign = path.join(world.root, 'foreign'); mkdirSync(foreign);
+      commitRepository(foreign, 'foreign');
+      // The fabricated old-release health reports the release's own HEAD.
+      const fetchHealth = world.host.fetchHealth;
+      world.host.fetchHealth = async (port, token) => {
+        const response = await fetchHealth(port, token);
+        return { ...response, body: response.body.replaceAll(OLD, releaseHead) };
+      };
+      vi.stubEnv('GIT_DIR', path.join(foreign, '.git')); vi.stubEnv('GIT_WORK_TREE', foreign);
+      const plan = await planTwoMemberWorld(world);
+      expect(plan.document.preconditions).toEqual(expect.arrayContaining([
+        { id: 'old-commit:shared', ok: true, detail: releaseHead },
+        { id: 'old-commit:direct', ok: true, detail: releaseHead },
+      ]));
+      expect(plan.ready).toBe(true);
+      expect(plan.document).toMatchObject({ members: [expect.objectContaining({ oldCommit: releaseHead }), expect.objectContaining({ oldCommit: releaseHead })] });
+    });
+  });
+
   it('switches and rolls back a direct-only operator launcher that selects a declared old release', async () => {
     const world = twoMemberWorld({ sharedFirst: false }); world.setFailure('second-health');
     const plan = await planTwoMemberWorld(world);
@@ -441,6 +510,63 @@ describe('release:activate-host group transaction', () => {
     } finally { vi.unstubAllEnvs(); receiptFault.fail = false; }
     expect(stderr).toBe('release:activate-host: receipt-write-failed\n');
     expect(JSON.parse(stdout)).toMatchObject({ outcome: { outcome: 'activated' } });
+  });
+
+  it('refuses a backup path another run already created and leaves that run\'s receipt byte-identical', async () => {
+    const world = twoMemberWorld();
+    await planTwoMemberWorld(world); // writes the declaration
+    world.host.now = () => 1_700_000_000_000;
+    const backups = path.join(world.root, 'backups');
+    // This run's backup path at that clock (2023-11-14T22:13:20Z), created by an earlier run in the same second.
+    const collision = path.join(backups, `activation-host-${NEXT.slice(0, 12)}-20231114T221320Z`);
+    mkdirSync(collision, { recursive: true, mode: 0o700 }); chmodSync(backups, 0o700);
+    const priorReceipt = `${JSON.stringify({ mode: 'apply', outcome: { outcome: 'activated' } }, null, 2)}\n`;
+    writeFileSync(path.join(collision, 'receipt.json'), priorReceipt, { mode: 0o600 });
+    let stdout = '';
+    vi.stubEnv('HOME', world.home); vi.stubEnv('XDG_CONFIG_HOME', path.join(world.home, '.config')); vi.stubEnv('XDG_DATA_HOME', path.join(world.home, '.local', 'share'));
+    try {
+      const code = await runReleaseActivateHostCli(['--unit', path.join(world.root, 'host-unit.json'), '--release', world.newRelease, '--backup-dir', backups, '--apply'], world.host, { stdout: (text) => { stdout += text; }, stderr: () => undefined });
+      expect(code).toBe(RELEASE_ACTIVATE_HOST_EXIT.refused);
+    } finally { vi.unstubAllEnvs(); }
+    expect(JSON.parse(stdout)).toMatchObject({ outcome: { outcome: 'refused', backupPath: null } });
+    expect(readFileSync(path.join(collision, 'receipt.json'), 'utf8')).toBe(priorReceipt);
+    expect(readdirSync(backups)).toEqual([path.basename(collision)]);
+    expect(readlinkSync(world.link)).toBe(path.join(world.oldRelease, 'deploy', 'whatsoup'));
+    expect(world.calls).toEqual([]);
+  });
+
+  it('refuses, before any write, a release-drift auxiliary declared under another instance\'s label', async () => {
+    const world = twoMemberWorld();
+    const foreign = 'com.whatsoup.personal';
+    // A configured instance outside the member set whose primary job runs the old release directly.
+    const config = path.join(world.home, '.config', 'whatsoup', 'instances', 'personal'); mkdirSync(config, { recursive: true });
+    writeFileSync(path.join(config, 'config.json'), JSON.stringify({ healthPort: 19003 }));
+    const foreignPlist = world.addJob(foreign, plist(foreign, [path.join(world.oldRelease, 'deploy', 'whatsoup'), 'personal'], world.oldRelease));
+    const foreignBefore = readFileSync(foreignPlist, 'utf8');
+    // The release-drift renderer renders its own fixed label, whatever label it is declared under.
+    const fake = world.host.exec;
+    world.host.exec = (file, args, options) => (file === 'bash' && args[0]?.endsWith('render-release-drift-launchd.sh')
+      ? Promise.resolve({ code: 0, stdout: plist('com.whatsoup.release-drift-check', ['/bin/bash', `${world.newRelease}/deploy/scripts/run-release-drift-schedule.sh`, '--instance', 'direct'], world.newRelease), stderr: '' })
+      : fake(file, args, options));
+    const plan = await planHostUnit(world, { schemaVersion: 1, members: [
+      { instance: 'shared', expectCurrent: world.oldRelease, auxLabels: [] },
+      { instance: 'direct', expectCurrent: world.oldRelease, auxLabels: [{ label: foreign, renderer: 'release-drift' }] },
+    ] });
+    expect(plan.ready).toBe(false);
+    expect(plan.document.preconditions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: `direct:aux-plist-staged:${foreign}`, ok: false, detail: 'rendered plist Label is not the declared auxiliary label' }),
+      expect.objectContaining({ id: `member-aux-not-instance:${foreign}`, ok: false }),
+    ]));
+    let stdout = '';
+    vi.stubEnv('HOME', world.home); vi.stubEnv('XDG_CONFIG_HOME', path.join(world.home, '.config')); vi.stubEnv('XDG_DATA_HOME', path.join(world.home, '.local', 'share'));
+    try {
+      const code = await runReleaseActivateHostCli(['--unit', path.join(world.root, 'host-unit.json'), '--release', world.newRelease, '--backup-dir', path.join(world.root, 'backups'), '--apply'], world.host, { stdout: (text) => { stdout += text; }, stderr: () => undefined });
+      expect(code).toBe(RELEASE_ACTIVATE_HOST_EXIT.refused);
+    } finally { vi.unstubAllEnvs(); }
+    expect(JSON.parse(stdout)).toMatchObject({ ready: false, outcome: 'refused' });
+    expect(readFileSync(foreignPlist, 'utf8')).toBe(foreignBefore);
+    expect(existsSync(path.join(world.root, 'backups'))).toBe(false);
+    expect(world.calls).toEqual([]);
   });
 
   it('switches a shared selector once and a direct selector in the same successful transaction', async () => {
@@ -1095,6 +1221,43 @@ describe('release:activate-host closed host auxiliaries', () => {
     }
   });
 
+  it('rewrites no shell text outside the legacy wrapper, and refuses a target release that is not a shell token', async () => {
+    const world = twoMemberWorld();
+    const checkout = path.join(world.root, 'shell-checkout'); writeRelease(checkout, OLD, true);
+    const label = 'com.bot-errors.health';
+    const declaration = { schemaVersion: 2, members: members(world), hostAuxiliaries: [{ label, mode: 'path-rebase', expectCurrent: checkout }] };
+    const script = `${checkout}/deploy/scripts/bot-errors-health-check.py`;
+
+    // A non-legacy shell command that starts with the root is shell text, even toward a shell-token release.
+    world.addJob(label, plist(label, ['/bin/bash', '-c', `${script} --daily`], checkout));
+    const command = await planHostUnit(world, declaration);
+    expect(command.ready).toBe(false);
+    expect(command.document.preconditions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: `host-aux-plist-staged:${label}`, ok: false, detail: expect.stringContaining('embedded') }),
+    ]));
+
+    // A bare root path in that shell argument is rebased, but only toward a shell-token release.
+    world.addJob(label, plist(label, ['/bin/bash', '-c', script], checkout));
+    expect((await planHostUnit(world, declaration)).ready).toBe(true);
+    const unit = path.join(world.root, 'host-unit-shell-release.json');
+    writeFileSync(unit, JSON.stringify(declaration));
+    for (const name of ['new release', 'new;injected']) {
+      const unsafeRelease = path.join(world.root, 'releases', name); writeRelease(unsafeRelease, NEXT, true);
+      vi.stubEnv('HOME', world.home); vi.stubEnv('XDG_CONFIG_HOME', path.join(world.home, '.config')); vi.stubEnv('XDG_DATA_HOME', path.join(world.home, '.local', 'share'));
+      try {
+        const unsafe = await buildHostUnitPlan(world.host, {
+          unitPath: unit, release: unsafeRelease, backupDir: path.join(world.root, 'backups'), mode: 'plan', exitTimeoutSeconds: 1, verifyTimeoutSeconds: 1,
+        });
+        expect(unsafe.ready).toBe(false);
+        expect(unsafe.document.preconditions).toEqual(expect.arrayContaining([
+          expect.objectContaining({ id: `host-aux-plist-staged:${label}`, ok: false, detail: expect.stringContaining('shell-token') }),
+        ]));
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    }
+  });
+
   it('refuses a host setup timer when its rendered argv drops an external guard', async () => {
     const world = twoMemberWorld();
     const label = 'com.whatsoup.harness-maintenance';
@@ -1114,6 +1277,21 @@ describe('release:activate-host closed host auxiliaries', () => {
     expect(plan.ready).toBe(false);
     expect(plan.document.preconditions).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: `host-aux-plist-staged:${label}`, ok: false, detail: 'rendered ProgramArguments drift after exact root rebase' }),
+    ]));
+  });
+
+  it('refuses a host setup timer whose rendered plist carries another label', async () => {
+    const world = twoMemberWorld();
+    const label = 'com.whatsoup.harness-maintenance';
+    writeFileSync(path.join(world.newRelease, 'deploy', `${label}.plist`),
+      plist('com.whatsoup.personal', ['/bin/bash', `${world.newRelease}/deploy/scripts/harness-maintenance.sh`], world.newRelease));
+    world.addJob(label, plist(label, ['/bin/bash', `${world.oldRelease}/deploy/scripts/harness-maintenance.sh`], world.oldRelease));
+    const plan = await planHostUnit(world, { schemaVersion: 2, members: members(world), hostAuxiliaries: [
+      { label, mode: 'setup-timer', expectCurrent: world.oldRelease },
+    ] });
+    expect(plan.ready).toBe(false);
+    expect(plan.document.preconditions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: `host-aux-plist-staged:${label}`, ok: false, detail: 'staged plist Label is not the declared host auxiliary label' }),
     ]));
   });
 
