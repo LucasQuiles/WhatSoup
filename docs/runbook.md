@@ -1054,9 +1054,11 @@ path when no stronger credential, health-evidence, or restart outcome applies.
     bot and the fleet console can both read silent in one run (the
     fleet console is read after the bot section, as before). That can exceed
     the 120 s `StartInterval`: launchd never runs two instances of one job, so
-    the next run then starts late. The invocation lock is reclaimed as stale
-    only after 600 s, which is not an execution deadline, and the restart
-    mutex is not held during the window.
+    the next run then starts late. The invocation lock is reclaimed at once
+    when its stamped holder process has exited; while the holder is alive, or
+    when no valid pid is stamped yet, it is reclaimed only after 600 s. That
+    age is not an execution deadline, and the restart mutex is not held during
+    the window.
 - `<label> restart deferred: job changed during the confirm window` (state
   `RESTART-SUPPRESSED`) → the job was unloaded, loaded or respawned while a
   silent read was being confirmed, for example by an operator, a release
