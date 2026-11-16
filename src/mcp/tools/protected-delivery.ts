@@ -40,6 +40,28 @@ export function registerProtectedDeliveryTools(
   });
 
   registry.register({
+    name: 'list_secret_input_resources',
+    description: 'List the safe metadata for resources authorized to this direct conversation. Use returned resource IDs only after matching the requested account.',
+    scope: 'chat',
+    targetMode: 'injected',
+    replayPolicy: 'read_only',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'none' },
+    schema: z.object({
+      chatJid: z.string(),
+      cursor: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(),
+      limit: z.number().int().min(1).max(50).optional(),
+    }).strict(),
+    handler: async (params, session) => {
+      const identity = directRecipient(session, deps.db);
+      return deps.service.listSecretInputResources({
+        principal: identity.principal,
+        ...(params['cursor'] === undefined ? {} : { cursor: params['cursor'] as string }),
+        ...(params['limit'] === undefined ? {} : { limit: params['limit'] as number }),
+      });
+    },
+  });
+
+  registry.register({
     name: 'request_secret_input',
     description: 'Request a one-use password, token, or challenge-backed MFA input for a bound resource in this direct conversation.',
     scope: 'chat',
@@ -66,7 +88,7 @@ export function registerProtectedDeliveryTools(
 
   registry.register({
     name: 'get_secret_input_status',
-    description: 'Get metadata-only input and delivery status for a secret-input request in this direct conversation.',
+    description: 'Get metadata-only input, delivery status, and the recorded fixed-consumer operationResult for this direct conversation. A null result leaves completion unknown; mfa_required does not mean login completed or that a challenge is still open.',
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'read_only',

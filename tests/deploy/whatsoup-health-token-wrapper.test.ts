@@ -81,7 +81,7 @@ function runRuntimePathProbe(root: string, helperPath: string, binDir: string): 
 function runKeyringLookupProbe(
   platform: 'Darwin' | 'Linux',
   scenario: 'canonical-hit' | 'canonical-miss-legacy-hit' = 'canonical-hit',
-): { stdout: string; log: string } {
+): { status: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string; log: string } {
   const tmpDir = tmp.make('whatsoup-wrapper-health-token');
   const fixture = writeKeychainFixture(tmpDir);
   const keychainResponses = scenario === 'canonical-hit'
@@ -95,14 +95,20 @@ function runKeyringLookupProbe(
   writeExecutable(path.join(binDir, 'uname'), `#!/usr/bin/env bash\nprintf '%s\\n' '${platform}'\n`);
   writeExecutable(path.join(binDir, 'security'), `#!/usr/bin/env bash\nprintf 'security %s\\n' "$*" >> "$LOG_PATH"\nif [ "$SCENARIO" = "canonical-hit" ] && [ "$1" = "find-generic-password" ] && [ "$3" = "whatsoup-health-token" ] && [ "$5" = "test-instance" ]; then\n  printf 'canonical-secret\\n'\n  exit 0\nfi\nif [ "$SCENARIO" = "canonical-miss-legacy-hit" ] && [ "$1" = "find-generic-password" ] && [ "$3" = "whatsoup_health" ]; then\n  printf 'legacy-keyring-token\\n'\n  exit 0\nfi\nexit 1\n`);
   writeExecutable(path.join(binDir, 'timeout'), `#!/usr/bin/env bash\n${fakeTimeoutBody()}\n`);
+  const nodeProbePath = path.join(binDir, 'node-probe');
+  writeExecutable(nodeProbePath, `#!/usr/bin/env bash\n"$REAL_NODE" "$@"\nstatus=$?\nprintf 'node-probe status=%s args=%s\\n' "$status" "$*" >> "$LOG_PATH"\nexit "$status"\n`);
   writeExecutable(path.join(binDir, 'secret-tool'), `#!/usr/bin/env bash\nprintf 'secret-tool %s\\n' "$*" >> "$LOG_PATH"\nif [ "$SCENARIO" = "canonical-hit" ] && [ "$1" = "lookup" ] && [ "$3" = "whatsoup-health-token" ] && [ "$4" = "user" ] && [ "$5" = "test-instance" ]; then\n  printf 'canonical-secret\\n'\n  exit 0\nfi\nif [ "$SCENARIO" = "canonical-miss-legacy-hit" ] && [ "$1" = "lookup" ] && [ "$3" = "whatsoup_health" ]; then\n  printf 'legacy-keyring-token\\n'\n  exit 0\nfi\nexit 1\n`);
 
   const scriptPath = path.join(tmpDir, 'probe.sh');
-  fs.writeFileSync(scriptPath, `#!/usr/bin/env bash\nset -euo pipefail\nPATH="${binDir}:$PATH"\nexport LOG_PATH="${logPath}"\nexport SCENARIO="${scenario}"\nUSER=local-user\nNODE="${fixture.node}"\nSCRIPT_DIR="${path.resolve('deploy')}"\nWHATSOUP_HEALTH_TOKEN=shared-env-token\n. "${path.resolve('deploy/lib/bounded-exec.sh')}"\n${extractKeyringLookup(source)}\nTOKEN="$(keyring_lookup whatsoup-health-token "" user test-instance)"\nif [ -z "$TOKEN" ]; then\n  TOKEN="$(keyring_lookup whatsoup_health WHATSOUP_HEALTH_TOKEN)"\nfi\nprintf '%s\\n' "$TOKEN"\n`, 'utf8');
+  // The node probe wraps the keychain fixture's node so the test sees the
+  // helper's own exit status instead of only the token it printed.
+  fs.writeFileSync(scriptPath, `#!/usr/bin/env bash\nset -euo pipefail\nPATH="${binDir}:$PATH"\nexport LOG_PATH="${logPath}"\nexport SCENARIO="${scenario}"\nexport REAL_NODE="${fixture.node}"\nUSER=local-user\nNODE="${nodeProbePath}"\nSCRIPT_DIR="${path.resolve('deploy')}"\nWHATSOUP_HEALTH_TOKEN=shared-env-token\n. "${path.resolve('deploy/lib/bounded-exec.sh')}"\n${extractKeyringLookup(source)}\nTOKEN="$(keyring_lookup whatsoup-health-token "" user test-instance)"\nif [ -z "$TOKEN" ]; then\n  TOKEN="$(keyring_lookup whatsoup_health WHATSOUP_HEALTH_TOKEN)"\nfi\nprintf '%s\\n' "$TOKEN"\n`, 'utf8');
   fs.chmodSync(scriptPath, 0o700);
 
-  const stdout = execFileSync('bash', [scriptPath], {
+  const startedAt = performance.now();
+  const result = spawnSync('/bin/bash', [scriptPath], {
     encoding: 'utf8',
+    timeout: PROBE_HARNESS_TIMEOUT_MS,
     env: {
       ...process.env,
       WHATSOUP_TEST_KEYCHAIN_PROBE_ARMED: '1',
@@ -111,9 +117,16 @@ function runKeyringLookupProbe(
       WHATSOUP_TEST_KEYCHAIN_PROBE_RESPONSES: keychainResponses,
       WHATSOUP_TEST_KEYCHAIN_COMPAT_LOG: logPath,
     },
-  }).trim();
+  });
+  requireProbeCompletion(result, PROBE_HARNESS_TIMEOUT_MS, performance.now() - startedAt);
   const log = fs.readFileSync(logPath, 'utf8');
-  return { stdout, log };
+  return {
+    status: result.status,
+    signal: result.signal,
+    stdout: result.stdout.trim(),
+    stderr: result.stderr.trim(),
+    log,
+  };
 }
 
 // #3561: 5 s killed even fast scenarios (special-dir-mode, duplicate) under
@@ -485,24 +498,34 @@ describe('health token shell wrappers', () => {
   });
 
   it('deploy/whatsoup uses the instance account for scoped macOS lookup before shared env fallback', () => {
-    const { stdout, log } = runKeyringLookupProbe('Darwin');
+    const { status, signal, stdout, stderr, log } = runKeyringLookupProbe('Darwin');
 
+    expect(status).toBe(0);
+    expect(signal).toBe(null);
+    expect(stderr).toBe('');
+    expect(log).toContain('node-probe status=0');
     expect(stdout).toBe('canonical-secret');
     expect(log).toContain('security find-generic-password -s whatsoup-health-token -a test-instance -w');
     expect(log).not.toContain('-a local-user');
   });
 
   it('deploy/whatsoup uses the instance secret-tool attributes before shared env fallback', () => {
-    const { stdout, log } = runKeyringLookupProbe('Linux');
+    const { status, signal, stdout, stderr, log } = runKeyringLookupProbe('Linux');
 
+    expect(status).toBe(0);
+    expect(signal).toBe(null);
+    expect(stderr).toBe('');
     expect(stdout).toBe('canonical-secret');
     expect(log.trim()).toBe('secret-tool lookup service whatsoup-health-token user test-instance');
     expect(stdout).not.toBe('shared-env-token');
   });
 
   it('deploy/whatsoup checks legacy keyring before shared env after scoped canonical miss', () => {
-    const { stdout, log } = runKeyringLookupProbe('Linux', 'canonical-miss-legacy-hit');
+    const { status, signal, stdout, stderr, log } = runKeyringLookupProbe('Linux', 'canonical-miss-legacy-hit');
 
+    expect(status).toBe(0);
+    expect(signal).toBe(null);
+    expect(stderr).toBe('');
     expect(stdout).toBe('legacy-keyring-token');
     expect(log.trim().split('\n')).toEqual([
       'secret-tool lookup service whatsoup-health-token user test-instance',

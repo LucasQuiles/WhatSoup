@@ -88,7 +88,9 @@ describe('fixed token and MFA HTTP adapters', () => {
     const adapter = createFixedHttpTokenAdapter(options);
     options.endpoint = 'https://fixed-target.invalid/changed-after-registration';
 
-    await expect(adapter.execute({ value: TOKEN_VALUE, kind: 'token', saveStore: null })).resolves.toBe('succeeded');
+    await expect(adapter.execute({ value: TOKEN_VALUE, kind: 'token', saveStore: null })).resolves.toEqual({
+      outcome: 'succeeded', operationResult: { phase: 'token', outcome: 'completed' },
+    });
 
     expect(adapter).toMatchObject({
       resourceId: 'fixed-token-resource', principal: 'fixed-principal', action: 'validate_token',
@@ -137,8 +139,12 @@ describe('fixed token and MFA HTTP adapters', () => {
     });
     const adapter = createFixedHttpTokenAdapter({ ...tokenOptions(httpsFixtureSeam(fixture.origin, [])), store });
 
-    await expect(adapter.execute({ value: TOKEN_VALUE, kind: 'token', saveStore: null })).resolves.toBe('succeeded');
-    await expect(adapter.execute({ value: TOKEN_VALUE, kind: 'token', saveStore: 'fixed-token-store' })).resolves.toBe('succeeded');
+    await expect(adapter.execute({ value: TOKEN_VALUE, kind: 'token', saveStore: null })).resolves.toEqual({
+      outcome: 'succeeded', operationResult: { phase: 'token', outcome: 'completed' },
+    });
+    await expect(adapter.execute({ value: TOKEN_VALUE, kind: 'token', saveStore: 'fixed-token-store' })).resolves.toEqual({
+      outcome: 'succeeded', operationResult: { phase: 'token', outcome: 'completed' },
+    });
     await expect(adapter.execute({ value: TOKEN_VALUE, kind: 'token', saveStore: 'fixed-token-store' })).resolves.toBe('failed');
     await expect(adapter.execute({ value: TOKEN_VALUE, kind: 'token', saveStore: 'different-store' })).rejects.toThrow('fixed token outcome is ambiguous');
 
@@ -161,7 +167,9 @@ describe('fixed token and MFA HTTP adapters', () => {
     options.username = 'changed-username';
     options.mfaOperationId = 'changed-operation';
 
-    await expect(adapter.execute({ value: MFA_CODE, kind: 'mfa', saveStore: null })).resolves.toBe('succeeded');
+    await expect(adapter.execute({ value: MFA_CODE, kind: 'mfa', saveStore: null })).resolves.toEqual({
+      outcome: 'succeeded', operationResult: { phase: 'mfa', outcome: 'completed' },
+    });
     await expect(adapter.execute({ value: 'wrong-code', kind: 'mfa', saveStore: null })).resolves.toBe('failed');
     await expect(adapter.execute({ value: MFA_CODE, kind: 'mfa', saveStore: 'any-store' })).rejects.toThrow('fixed MFA outcome is ambiguous');
     await expect(adapter.execute({ value: MFA_CODE, kind: 'token', saveStore: null })).rejects.toThrow('fixed MFA outcome is ambiguous');
@@ -174,6 +182,32 @@ describe('fixed token and MFA HTTP adapters', () => {
       { method: 'POST', path: '/mfa', contentType: 'application/json', body: { username: 'fixed-username', code: MFA_CODE, operationId: 'fixed-operation-123' } },
       { method: 'POST', path: '/mfa', contentType: 'application/json', body: { username: 'fixed-username', code: 'wrong-code', operationId: 'fixed-operation-123' } },
     ]);
+  });
+
+  it('uses an operation only when the registered MFA consumer supplies it from Links', async () => {
+    const received: CapturedRequest[] = [];
+    const fixture = await localHttpFixture(async (request, response) => {
+      received.push(await capture(request));
+      response.writeHead(204).end();
+    });
+    const requested: URL[] = [];
+    const adapter = createFixedHttpMfaAdapter({
+      resourceId: 'fixed-mfa-resource', principal: 'fixed-principal', action: 'confirm_mfa',
+      endpoint: 'https://fixed-target.invalid/mfa', username: 'fixed-username', operationMode: 'links_registered',
+      fetch: httpsFixtureSeam(fixture.origin, requested),
+    } as unknown as Parameters<typeof createFixedHttpMfaAdapter>[0]);
+
+    await expect(adapter.execute({ value: MFA_CODE, kind: 'mfa', saveStore: null, operationId: 'live-source-operation' }))
+      .resolves.toEqual({ outcome: 'succeeded', operationResult: { phase: 'mfa', outcome: 'completed' } });
+    await expect(adapter.execute({ value: MFA_CODE, kind: 'mfa', saveStore: null }))
+      .rejects.toThrow('fixed MFA outcome is ambiguous');
+
+    expect(adapter).toMatchObject({ kinds: ['mfa'], acceptsRegisteredMfa: true, approvedSaveStore: null });
+    expect(adapter.mfaOperationId).toBeUndefined();
+    expect(requested.map(String)).toEqual(['https://fixed-target.invalid/mfa']);
+    expect(JSON.parse(received[0]?.body ?? '{}')).toEqual({
+      username: 'fixed-username', code: MFA_CODE, operationId: 'live-source-operation',
+    });
   });
 
   it('rejects untrusted endpoints, unregistered store scope, and unknown configuration keys without echoing a value', () => {

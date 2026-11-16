@@ -1,8 +1,8 @@
 # WhatSoup MCP Tool API Reference
 
-Complete reference for all 177 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
+Complete reference for all 178 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
 
-> **Conditionally-registered tools.** Of the 177 documented tools, 166 are always registered at startup and 11 are conditionally registered. Provider-gated modules are tagged `core: false` so that absence on an instance which does not meet their gate is tolerated. Protected delivery is absent until its service is injected, then registers as a core module so a registration failure aborts startup (see `src/mcp/types.ts`).
+> **Conditionally-registered tools.** Of the 178 documented tools, 166 are always registered at startup and 12 are conditionally registered. Provider-gated modules are tagged `core: false` so that absence on an instance which does not meet their gate is tolerated. Protected delivery is absent until its service is injected, then registers as a core module so a registration failure aborts startup (see `src/mcp/types.ts`).
 >
 > **`knowledge_search`** is registered only when all of the following hold:
 >
@@ -38,7 +38,7 @@ Complete reference for all 177 MCP tools exposed by WhatSoup. Tools are grouped 
 > Microsoft plugin has the admitted fixed launcher and environment. See
 > [`microsoft365`](#microsoft365) for its call-time authority checks.
 >
-> The total of 177 describes the full declaration surface, including all eleven
+> The total of 178 describes the full declaration surface, including all twelve
 > conditional tools. An instance's available tools depend on registration gates,
 > session scope and authorization. Instance names do not confer these capabilities.
 
@@ -103,14 +103,14 @@ A conversation-bound session's caller-supplied `conversation_key` must name its 
 | [audit.ts](#auditts) | 3 |
 | [substrate.ts](#substratets) | 23 |
 | [memory-write.ts](#memory-writets) | 1 |
-| [protected-delivery.ts](#protected-deliveryts) | 6 |
-| **Total** | **177** |
+| [protected-delivery.ts](#protected-deliveryts) | 7 |
+| **Total** | **178** |
 
 > All 22 rows are registered through `registerAllTools`. The protected-delivery
 > module is registered only after an agent runtime injects its protected-delivery
 > service; passive and default agent runtimes omit that option.
 >
-> The total above (`177`) includes `174` declarations wired through
+> The total above (`178`) includes `175` declarations wired through
 > `src/mcp/register-all.ts` and three tools registered by the agent runtime:
 > [`emit_heal_result`](#emit_heal_result), [`restart_self`](#restart_self), and
 > [`microsoft365`](#microsoft365). `registerRuntimeInlineTools` wires the first
@@ -3709,13 +3709,48 @@ Update a pending scheduled message. Can change time, text, or recurrence.
 
 ## protected-delivery.ts
 
-These agent-only tools stage or deliver a managed protected secret, including
-a RustDesk access session, to the caller's bound direct WhatsApp conversation. They are absent unless
+These agent-only tools list safe managed-resource metadata or stage and deliver a
+managed protected secret, including a RustDesk access session, to the caller's
+bound direct WhatsApp conversation. They are absent unless
 `agentOptions.protectedDelivery.enabled` is `true`. Calls require resolved
 direct identities for both the actor and recipient; groups, unbound sessions,
 and unresolved LID identities are rejected. Results contain metadata only: a
 delivery reference, identifier, state, and expiry where applicable. They never
 return a RustDesk code, browser URL, seed, or credential.
+
+This managed-input boundary does not prohibit authorized browser logins,
+registration, existing authenticated sessions, or credential helpers that consume
+saved secrets internally without returning them to the model. Resource discovery
+does not categorically forbid authorized token creation or storage
+inside a tool or service; account, permissions and storage consent must be known.
+Missing resource discovery blocks that managed request, not the whole account workflow. Inspect
+the existing integration and complete authorized setup before collecting input;
+recipient binding, consent, tool scope and secret-read denials still apply.
+The agent performs technical steps itself. WhatsApp users receive only decisions
+or human-required phone steps, never terminal commands or instructions to operate
+the agent's browser. An actual site rejection must be reported as the observed
+attempt result, not a general inability to automate authentication.
+
+### list_secret_input_resources
+
+Lists metadata for enabled managed resources authorized to the caller's resolved
+direct conversation. For a named account, call this tool before
+`request_secret_input` and use only a returned `resourceId`. If multiple labels
+could match, ask the caller which account they mean. Listing a resource does not
+prove that an MFA challenge is live or that a login has completed.
+
+| | |
+|---|---|
+| **Scope** | `chat` |
+| **Target Mode** | `injected` |
+| **Replay Policy** | `read_only` |
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| cursor | string | no | Opaque cursor returned by a prior call. |
+| limit | integer | no | Page size from 1 through 50. |
+
+**Returns:** `{ resources: [{ resourceId, accountLabel, consumerLabel, action, kinds, saveAllowed, revision }], cursor }`.
 
 ### request_secret_input
 
@@ -3735,7 +3770,7 @@ the protected WhatsApp transport and never returned by the tool.
 | kind | enum | yes | `password`, `token`, or `mfa`. MFA requires a current consumer-side challenge; callers cannot supply a challenge. |
 | purpose | string | yes | Reason for the one-use input request. |
 
-**Returns:** `{ id, resourceId, accountLabel, consumerLabel, action, kind, saveAllowed, expiresAt, inputState, deliveryStatus }`.
+**Returns:** `{ id, resourceId, accountLabel, consumerLabel, action, kind, saveAllowed, expiresAt, inputState, deliveryStatus, operationResult }`. This tool always returns `operationResult: null`; read the recorded result with `get_secret_input_status`.
 
 ### get_secret_input_status
 
@@ -3753,7 +3788,12 @@ separate WhatsApp transport receipt state.
 |---|---|---|---|
 | input_id | string | yes | Opaque secret-input identifier. |
 
-**Returns:** `{ id, resourceId, accountLabel, consumerLabel, action, kind, saveAllowed, expiresAt, inputState, deliveryStatus }`.
+**Returns:** `{ id, resourceId, accountLabel, consumerLabel, action, kind, saveAllowed, expiresAt, inputState, deliveryStatus, operationResult }`.
+`operationResult` is `null`, `{ phase: "password", outcome: "mfa_required" }`, or
+`{ phase, outcome: "completed" }` with `phase` equal to `kind`. It is read from the
+managed service on every call and is non-null only when `inputState` is `succeeded`.
+`null` leaves completion unknown, and `mfa_required` does not mean that a login
+completed or that a challenge is still open.
 
 ### cancel_secret_input
 
@@ -3771,7 +3811,7 @@ managed delivery service.
 |---|---|---|---|
 | input_id | string | yes | Opaque secret-input identifier. |
 
-**Returns:** `{ id, resourceId, accountLabel, consumerLabel, action, kind, saveAllowed, expiresAt, inputState, deliveryStatus }`.
+**Returns:** `{ id, resourceId, accountLabel, consumerLabel, action, kind, saveAllowed, expiresAt, inputState, deliveryStatus, operationResult }`, with `operationResult` as for `get_secret_input_status`.
 
 ### request_rustdesk_access
 

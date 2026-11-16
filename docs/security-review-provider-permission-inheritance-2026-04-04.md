@@ -21,6 +21,7 @@ Recommendation: do not make spawned Codex/Gemini agents "mirror our access, perm
 ## Evidence In Repo
 
 - Agent subprocesses are launched with `--permission-mode bypassPermissions` and the prompt states "full access to the local machine": `src/runtimes/agent/session.ts:153-169`.
+  - Later change (2026-11): the agent prompt no longer contains that sentence; the `bypassPermissions` launch mode is unchanged.
 - Default agent settings also use `defaultMode: 'bypassPermissions'` and broad MCP wildcards: `src/core/settings-template.ts:19-50`.
 - Shared keyring secrets can be exported into the service environment:
   - chat instances export `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `PINECONE_API_KEY`: `deploy/whatsoup:37-56`

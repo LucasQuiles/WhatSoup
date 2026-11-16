@@ -3074,7 +3074,7 @@ not forward the reserved namespace, but that does not limit a different local
 process running as the same OS user from potentially inspecting the service
 environment. Treat same-user shell access as trusted operator access.
 
-The six protected-delivery tools exist only in agent runtimes and require a
+The seven protected-delivery tools exist only in agent runtimes and require a
 resolved, bound direct WhatsApp conversation. Configuration must use
 `sessionScope: "per_chat"`. If the primary provider and all static fallbacks use
 the in-process `managed_loop`, the runtime supplies the bound conversation.
@@ -3100,6 +3100,11 @@ links: inbound text is redacted at ingest and every MCP tool response is
 redacted, so these tools can carry a link only if the caller already holds it
 from outside WhatSoup. A fleet config save refuses a value containing the
 redaction marker, so saving a redacted projection cannot overwrite a stored link.
+
+For a named account, first use `list_secret_input_resources`; it returns only
+authorized resource metadata. Do not invent a resource ID, and ask for
+clarification when labels are ambiguous. Listing a resource does not prove an
+MFA challenge is live or that a login completed.
 
 The tool resolves both the actor and destination to the same verified phone
 identity before recording its canonical WhatsApp address. A mapped LID and that
@@ -3145,6 +3150,27 @@ checks the link again against the pinned hosts and records `failed` when a
 client returns any other link. Neither refusal sends a message or writes an
 outbound audit row. Status and cancellation require the verified requesting principal, so a
 different bound user is rejected before an intake API call.
+`get_secret_input_status` also returns nullable `operationResult`, read from the
+authenticated Links status on every request. This is the fixed consumer's recorded
+result at settlement: `mfa_required` means the password step required MFA;
+`completed` means the registered action completed. It does not establish that a
+challenge remains open, a login session remains active, or a credential was saved.
+Legacy completions and unknown outcomes return null; never infer completion from
+`inputState: succeeded`. Links owns this durable result. WhatSoup refreshes it after
+restart and fails the status request if Links is unavailable, without a local
+completion fallback. Deploy the Links side first: the additive completion
+contract (the old endpoint rejects the new result field), resource listing
+(`GET /resources`, used by `list_secret_input_resources`) and challenge
+registration (`POST /resources/<id>/challenges`, used by a paired password
+adapter). Without listing, the tool fails closed. Without challenge
+registration, a paired password intake is consumed and then marked
+`ambiguous`, so configure an `mfaTransition` pair only after Links supports it.
+The order also holds in reverse: roll the consumer back before rolling Links
+back to an endpoint without these contracts, and restore the previous consumer
+configuration with it, because the previous release refuses an adapter that
+declares `mfaTransition` or `operationMode`. Otherwise Links refuses each
+completion that carries a result, the consumer marks that intake `ambiguous`,
+and the result is not recorded.
 On restart, an intake left in `resolving` becomes locally `ambiguous` and is never
 replayed; pending intakes are not sent by maintenance recovery.
 The daily unified database-retention transaction deletes protected-delivery
@@ -3187,15 +3213,45 @@ action, and calls the consumer only for `submitted` rows. The fixed adapters
 perform these exact operations:
 
 - Password: `POST` the configured username and the one-time password value to
-  the configured login target.
+  the configured login target. A paired password precursor (below) also sends
+  the consumed intake ID.
 - Token: `GET` the configured validation target with the one-time token as its
   bearer credential.
-- MFA: `POST` the configured username, one-time code, and fixed operation ID
-  to the configured challenge target. The request must match the live,
-  consumer-registered challenge; this worker neither creates nor extends one.
+- MFA, legacy static mode: `POST` the configured username, one-time code, and
+  fixed operation ID to the configured challenge target. The request must match
+  the live, consumer-registered challenge; in this mode the worker neither
+  creates nor extends one. In paired mode (below) the MFA adapter sends the
+  operation ID that Links supplies with the consumed MFA intake instead.
+
+A fixed password precursor may use action `Verify password for two-step sign-in` and a
+configured `mfaTransition` pair. Its direct fixed HTTPS source returns a
+strictly bound `202` response only after accepting the password and creating
+the source-side MFA operation. The consumer validates the echoed intake ID,
+principal, account, paired resource, operation ID, and a deadline no more than
+ten minutes away (a later deadline is refused, not shortened), then
+uses the consumer bearer to register the existing Links challenge. It refuses
+an operation ID that equals the submitted password, or that contains it when
+the password is four or more UTF-16 code units long; the intake is then marked
+ambiguous and no challenge is registered. The paired
+MFA adapter uses `operationMode: "links_registered"`; Links supplies its
+operation ID only when the exact MFA intake is consumed. A password `202` is
+not a completed account sign-in. Registered-mode MFA cannot run without its
+one configured password pair. The fixed MFA target alone performs the account
+action after an accepted code.
+
+Do not configure a store for this password precursor or any MFA adapter. If
+the source response, Links registration, target request, completion, or
+restart is uncertain, the worker marks that intake ambiguous and does not
+repeat the password source or MFA target request. A registered challenge may
+expire; inspect the fixed account source before any operator-directed recovery.
+The Links `accountLabel` for either paired resource must equal the configured
+pair account; a changed label is rejected before consume.
 
 The consumer verifies the returned intake ID, resource, principal, kind,
-action, and MFA operation ID before an adapter receives a value. It reports
+action, and MFA operation ID before an adapter receives a value. In legacy
+static mode the MFA operation ID must equal the configured one; in paired mode
+it is the operation ID that Links returns with the consumed MFA intake. Password
+and token intakes must carry no operation ID. The consumer reports
 success or failure with the returned receipt. A transport or consumer failure,
 unexpected binding, unexpected response, or fixed-target uncertainty is
 ambiguous. In particular, after a restart a row already in `consuming` is only

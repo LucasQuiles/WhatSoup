@@ -42,11 +42,11 @@ afterEach(async () => {
 });
 
 type RemoteState = 'awaiting_input' | 'submitted' | 'consuming' | 'succeeded' | 'failed' | 'expired' | 'revoked' | 'ambiguous' | 'cancelled';
-type Intake = { id: string; resourceId: string; action: string; kind: 'password'; state: RemoteState; expiresAt?: string };
+type Intake = { id: string; resourceId: string; action: string; kind: 'password' | 'mfa'; state: RemoteState; expiresAt?: string };
 
 function makeDatabase(rows: Array<{
   intakeId: string; principal?: string; resourceId?: string; action?: string | null;
-  state?: 'awaiting_input' | 'submitted' | 'consuming' | 'cancelled'; expiresAt?: string;
+  kind?: 'password' | 'mfa'; state?: 'awaiting_input' | 'submitted' | 'consuming' | 'cancelled'; expiresAt?: string;
 }>): string {
   const directory = mkdtempSync(join(tmpdir(), 'secure-handoff-worker-'));
   directories.push(directory);
@@ -63,10 +63,10 @@ function makeDatabase(rows: Array<{
       create_operation_id, resolve_operation_id, intake_id, principal, recipient_jid,
       resource_id, kind, purpose, account_label, consumer_label, action, save_allowed,
       input_state, delivery_status, whatsapp_message_id, expires_at, issued_at
-    ) VALUES (?, ?, ?, ?, ?, ?, 'password', 'fixed sign in', 'Dummy', 'Fixed consumer', ?, 0, ?, 'submitted', ?, ?, ?)`)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'fixed sign in', 'Dummy', 'Fixed consumer', ?, 0, ?, 'submitted', ?, ?, ?)`)
       .run(
         `create-${index}`, `resolve-${index}`, row.intakeId, row.principal ?? 'alice', 'alice@example.test',
-        row.resourceId ?? 'dummy-login', row.action ?? 'sign_in', row.state ?? 'awaiting_input',
+        row.resourceId ?? 'dummy-login', row.kind ?? 'password', row.action ?? 'sign_in', row.state ?? 'awaiting_input',
         `message-${index}`, row.expiresAt ?? '2026-10-30T13:00:00.000Z', NOW,
       );
   }
@@ -86,6 +86,25 @@ function config(databasePath: string): SecureHandoffWorkerConfig {
   });
 }
 
+function pairedConfig(databasePath: string): SecureHandoffWorkerConfig {
+  return parseSecureHandoffWorkerConfig({
+    databasePath,
+    linksBaseUrl: LINKS_BASE_URL,
+    pollIntervalMs: 60_000,
+    adapters: [
+      {
+        kind: 'password', resourceId: 'dummy-password', principal: 'alice', action: 'Verify password for two-step sign-in',
+        endpoint: 'https://fixed-dummy.invalid/password', username: 'dummy-user',
+        mfaTransition: { resourceId: 'dummy-mfa', account: 'dummy-account' },
+      },
+      {
+        kind: 'mfa', resourceId: 'dummy-mfa', principal: 'alice', action: 'confirm_mfa',
+        endpoint: 'https://fixed-dummy.invalid/mfa', username: 'dummy-user', account: 'dummy-account', operationMode: 'links_registered',
+      },
+    ],
+  });
+}
+
 function environment(): Record<string, string> {
   return {
     LINKS_MANAGED_TRANSPORT_TOKEN: 'transport-only-token',
@@ -93,9 +112,9 @@ function environment(): Record<string, string> {
   };
 }
 
-function metadata(input: Intake): Record<string, unknown> {
+function metadata(input: Intake, accountLabel = 'Dummy'): Record<string, unknown> {
   return {
-    id: input.id, resourceId: input.resourceId, accountLabel: 'Dummy', consumerLabel: 'Fixed consumer',
+    id: input.id, resourceId: input.resourceId, accountLabel, consumerLabel: 'Fixed consumer',
     action: input.action, kind: input.kind, saveAllowed: false,
     expiresAt: input.expiresAt ?? '2026-10-30T13:00:00.000Z', state: input.state,
   };
@@ -132,7 +151,12 @@ async function loginFixture(): Promise<{ endpoint: string; accepted: Array<Recor
   return { endpoint: `http://127.0.0.1:${address.port}/login`, accepted };
 }
 
-function fetchFixture(loginEndpoint: string, intakes: Map<string, Intake>, calls: string[]): typeof fetch {
+function fetchFixture(
+  loginEndpoint: string,
+  intakes: Map<string, Intake>,
+  calls: string[],
+  completions: Array<Record<string, unknown>> = [],
+): typeof fetch {
   return async (input, init) => {
     const url = new URL(String(input));
     if (url.hostname === 'fixed-dummy.invalid') return fetch(loginEndpoint, init);
@@ -146,7 +170,9 @@ function fetchFixture(loginEndpoint: string, intakes: Map<string, Intake>, calls
       return new Response(JSON.stringify(consumed(id)), { status: 200 });
     }
     if (init?.method === 'POST' && url.pathname.endsWith('/complete') && id) {
-      return new Response(JSON.stringify({ id, state: 'succeeded' }), { status: 200 });
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      completions.push(body);
+      return new Response(JSON.stringify({ id, state: 'succeeded', operationResult: body.operationResult ?? null }), { status: 200 });
     }
     if (init?.method === 'POST' && url.pathname.endsWith('/ambiguous') && id) {
       return new Response(JSON.stringify({ id, state: 'ambiguous' }), { status: 200 });
@@ -182,6 +208,68 @@ describe('secure handoff worker', () => {
     expect(() => parseSecureHandoffWorkerConfig({
       databasePath: '/var/lib/whatsoup/bot.db', linksBaseUrl: 'http://links.example.test/s/api/v1', pollIntervalMs: 60_000,
       adapters: [],
+    })).toThrow('secure handoff worker configuration is invalid');
+    expect(() => parseSecureHandoffWorkerConfig({
+      databasePath: '/var/lib/whatsoup/bot.db', linksBaseUrl: LINKS_BASE_URL, pollIntervalMs: 60_000,
+      adapters: [{
+        kind: 'mfa', resourceId: 'dummy-mfa', principal: 'alice', action: 'confirm_mfa',
+        endpoint: 'https://fixed.test/mfa', username: 'dummy', account: 'dummy-account', operationMode: 'links_registered',
+      }],
+    })).toThrow('secure handoff worker configuration is invalid');
+  });
+
+  it('admits a password-to-MFA pair only when its fixed account, principal, and target origin agree', () => {
+    const parsed = parseSecureHandoffWorkerConfig({
+      databasePath: '/var/lib/whatsoup/bot.db', linksBaseUrl: LINKS_BASE_URL, pollIntervalMs: 60_000,
+      adapters: [
+        {
+          kind: 'password', resourceId: 'dummy-password', principal: 'alice', action: 'Verify password for two-step sign-in',
+          endpoint: 'https://fixed.test/login', username: 'dummy',
+          mfaTransition: { resourceId: 'dummy-mfa', account: 'dummy-account' },
+        },
+        {
+          kind: 'mfa', resourceId: 'dummy-mfa', principal: 'alice', action: 'confirm_mfa',
+          endpoint: 'https://fixed.test/mfa', username: 'dummy', account: 'dummy-account', operationMode: 'links_registered',
+        },
+      ],
+    });
+
+    expect(parsed.adapters[0]).toMatchObject({
+      action: 'Verify password for two-step sign-in',
+      mfaTransition: { resourceId: 'dummy-mfa', account: 'dummy-account' },
+    });
+    expect(() => parseSecureHandoffWorkerConfig({
+      databasePath: '/var/lib/whatsoup/bot.db', linksBaseUrl: LINKS_BASE_URL, pollIntervalMs: 60_000,
+      adapters: [
+        {
+          kind: 'password', resourceId: 'dummy-password', principal: 'alice', action: 'Verify password for two-step sign-in',
+          endpoint: 'https://fixed.test/login', username: 'dummy',
+          mfaTransition: { resourceId: 'dummy-mfa', account: 'dummy-account' },
+        },
+        {
+          kind: 'mfa', resourceId: 'dummy-mfa', principal: 'alice', action: 'confirm_mfa',
+          endpoint: 'https://different.test/mfa', username: 'other-account', account: 'dummy-account', operationMode: 'links_registered',
+        },
+      ],
+    })).toThrow('secure handoff worker configuration is invalid');
+    expect(() => parseSecureHandoffWorkerConfig({
+      databasePath: '/var/lib/whatsoup/bot.db', linksBaseUrl: LINKS_BASE_URL, pollIntervalMs: 60_000,
+      adapters: [
+        {
+          kind: 'password', resourceId: 'dummy-password', principal: 'alice', action: 'Verify password for two-step sign-in',
+          endpoint: 'https://fixed.test/login', username: 'dummy',
+          mfaTransition: { resourceId: 'dummy-mfa', account: 'dummy-account' },
+        },
+        {
+          kind: 'password', resourceId: 'dummy-password-retry', principal: 'alice', action: 'Verify password for two-step sign-in',
+          endpoint: 'https://fixed.test/other-login', username: 'dummy',
+          mfaTransition: { resourceId: 'dummy-mfa', account: 'dummy-account' },
+        },
+        {
+          kind: 'mfa', resourceId: 'dummy-mfa', principal: 'alice', action: 'confirm_mfa',
+          endpoint: 'https://fixed.test/mfa', username: 'dummy', account: 'dummy-account', operationMode: 'links_registered',
+        },
+      ],
     })).toThrow('secure handoff worker configuration is invalid');
   });
 
@@ -237,9 +325,10 @@ describe('secure handoff worker', () => {
     ]);
     const fixture = await loginFixture();
     const calls: string[] = [];
+    const completions: Array<Record<string, unknown>> = [];
     const worker = createSecureHandoffWorker({
       config: config(dbPath), environment: environment(), clock: fixedClock(),
-      fetch: fetchFixture(fixture.endpoint, new Map([[INTAKE_ID, { id: INTAKE_ID, resourceId: 'dummy-login', action: 'sign_in', kind: 'password', state: 'submitted' }]]), calls),
+      fetch: fetchFixture(fixture.endpoint, new Map([[INTAKE_ID, { id: INTAKE_ID, resourceId: 'dummy-login', action: 'sign_in', kind: 'password', state: 'submitted' }]]), calls, completions),
     });
     await worker.start();
     await worker.tick();
@@ -251,6 +340,120 @@ describe('secure handoff worker', () => {
       `POST /s/api/v1/intakes/${INTAKE_ID}/consume`,
       `POST /s/api/v1/intakes/${INTAKE_ID}/complete`,
     ]);
+    expect(completions).toEqual([{
+      receipt: RECEIPT,
+      outcome: 'succeeded',
+      operationResult: { phase: 'password', outcome: 'completed' },
+    }]);
+  });
+
+  it('registers a direct source 202 as one paired MFA challenge before completing the password precursor', async () => {
+    const expiresAt = new Date(Date.now() + 5 * 60_000).toISOString();
+    const dbPath = makeDatabase([{ intakeId: INTAKE_ID, resourceId: 'dummy-password', action: 'Verify password for two-step sign-in', expiresAt }]);
+    const calls: Array<{ method: string; path: string; body: string | undefined }> = [];
+    const worker = createSecureHandoffWorker({
+      config: pairedConfig(dbPath), environment: environment(), clock: {
+        now: () => Date.now(), nowIso: () => new Date().toISOString(),
+      },
+      fetch: async (input, init) => {
+        const url = new URL(String(input));
+        if (url.hostname === 'fixed-dummy.invalid') {
+          expect(url.pathname).toBe('/password');
+          expect(JSON.parse(String(init?.body))).toEqual({ username: 'dummy-user', password: SECRET, intakeId: INTAKE_ID });
+          return new Response(JSON.stringify({
+            parentIntakeId: INTAKE_ID, principal: 'alice', account: 'dummy-account', resourceId: 'dummy-mfa',
+            operationId: 'source-operation-1', expiresAt,
+          }), { status: 202, headers: { 'content-type': 'application/json' } });
+        }
+        calls.push({ method: init?.method ?? 'GET', path: url.pathname, body: typeof init?.body === 'string' ? init.body : undefined });
+        const id = url.pathname.split('/')[5];
+        if (init?.method === 'GET' && id) {
+          return new Response(JSON.stringify(metadata({
+            id, resourceId: 'dummy-password', action: 'Verify password for two-step sign-in', kind: 'password', state: 'submitted', expiresAt,
+          }, 'dummy-account')), { status: 200 });
+        }
+        if (init?.method === 'POST' && url.pathname.endsWith('/consume') && id) {
+          return new Response(JSON.stringify({
+            ...consumed(id), resourceId: 'dummy-password', action: 'Verify password for two-step sign-in',
+          }), { status: 200 });
+        }
+        if (init?.method === 'POST' && url.pathname === '/s/api/v1/resources/dummy-mfa/challenges') {
+          return new Response(JSON.stringify({
+            id: 'C'.repeat(22), resourceId: 'dummy-mfa', operationId: 'source-operation-1', expiresAt, state: 'open',
+          }), { status: 201 });
+        }
+        if (init?.method === 'POST' && url.pathname.endsWith('/complete') && id) {
+          const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+          return new Response(JSON.stringify({ id, state: 'succeeded', operationResult: body.operationResult ?? null }), { status: 200 });
+        }
+        return new Response('{}', { status: 404 });
+      },
+    });
+
+    await worker.start();
+    await worker.tick();
+    await worker.stop();
+
+    expect(calls).toEqual([
+      { method: 'GET', path: `/s/api/v1/intakes/${INTAKE_ID}`, body: undefined },
+      { method: 'POST', path: `/s/api/v1/intakes/${INTAKE_ID}/consume`, body: '{}' },
+      {
+        method: 'POST', path: '/s/api/v1/resources/dummy-mfa/challenges',
+        body: JSON.stringify({ principal: 'alice', operationId: 'source-operation-1', expiresAt }),
+      },
+      {
+        method: 'POST', path: `/s/api/v1/intakes/${INTAKE_ID}/complete`,
+        body: JSON.stringify({
+          receipt: RECEIPT,
+          outcome: 'succeeded',
+          operationResult: { phase: 'password', outcome: 'mfa_required' },
+        }),
+      },
+    ]);
+  });
+
+  it('rejects paired password and registered-MFA metadata whose account label changed before consume', async () => {
+    const passwordId = 'P'.repeat(22);
+    const mfaId = 'M'.repeat(22);
+    const dbPath = makeDatabase([
+      { intakeId: passwordId, resourceId: 'dummy-password', action: 'Verify password for two-step sign-in', kind: 'password', state: 'submitted' },
+      { intakeId: mfaId, resourceId: 'dummy-mfa', action: 'confirm_mfa', kind: 'mfa', state: 'submitted' },
+    ]);
+    const remotes = new Map<string, Intake>([
+      [passwordId, { id: passwordId, resourceId: 'dummy-password', action: 'Verify password for two-step sign-in', kind: 'password', state: 'submitted' }],
+      [mfaId, { id: mfaId, resourceId: 'dummy-mfa', action: 'confirm_mfa', kind: 'mfa', state: 'submitted' }],
+    ]);
+    const linksCalls: string[] = [];
+    let targetCalls = 0;
+    const worker = createSecureHandoffWorker({
+      config: pairedConfig(dbPath), environment: environment(), clock: fixedClock(),
+      fetch: async (input, init) => {
+        const url = new URL(String(input));
+        if (url.hostname === 'fixed-dummy.invalid') {
+          targetCalls += 1;
+          return new Response(null, { status: 500 });
+        }
+        linksCalls.push(`${init?.method ?? 'GET'} ${url.pathname}${url.search}`);
+        const id = url.pathname.split('/')[5];
+        if (init?.method === 'GET' && id) {
+          const remote = remotes.get(id);
+          return remote === undefined
+            ? new Response('{}', { status: 404 })
+            : new Response(JSON.stringify(metadata(remote, 'changed-account')), { status: 200 });
+        }
+        return new Response('{}', { status: 500 });
+      },
+    });
+
+    await worker.start();
+    await worker.tick();
+    await worker.stop();
+
+    expect(linksCalls).toHaveLength(2);
+    expect(linksCalls).toContain(`GET /s/api/v1/intakes/${passwordId}?principal=alice`);
+    expect(linksCalls).toContain(`GET /s/api/v1/intakes/${mfaId}?principal=alice`);
+    expect(linksCalls.some((call) => call.includes('/consume') || call.includes('/ambiguous'))).toBe(false);
+    expect(targetCalls).toBe(0);
   });
 
   it('does not consume awaiting, cancelled, expired, ambiguous, or cross-bound metadata', async () => {

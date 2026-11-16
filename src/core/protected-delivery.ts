@@ -7,6 +7,7 @@ import { createOutboundSendsWriter, type OutboundSendsWriter } from './outbound-
 import { PROTECTED_DELIVERY_PINS, type ProtectedDeliveryPins } from './protected-delivery-pins.ts';
 import { isCanonicalManagedLink, isCanonicalSecretInputLink } from './protected-message.ts';
 import type { SendOptions, SubmissionReceipt } from './types.ts';
+import { parseSecretInputOperationResult, type SecretInputOperationResult } from './secret-input-operation-result.ts';
 
 export type ProtectedDeliveryPurpose = 'login' | 'recovery';
 export type ProtectedDeliveryKind = 'rustdesk' | 'secret';
@@ -21,6 +22,14 @@ export interface ManagedDeliveryStatus {
 export interface ManagedSecretInputMetadata {
   id: string; resourceId: string; accountLabel: string; consumerLabel: string; action: string;
   kind: ProtectedSecretInputKind; saveAllowed: boolean; expiresAt: string; state: ProtectedSecretInputState;
+  operationResult?: SecretInputOperationResult | null;
+}
+export interface ManagedSecretInputResource {
+  resourceId: string; accountLabel: string; consumerLabel: string; action: string;
+  kinds: ProtectedSecretInputKind[]; saveAllowed: boolean; revision: number;
+}
+export interface ManagedSecretInputResourcePage {
+  resources: ManagedSecretInputResource[]; cursor: string | null;
 }
 export interface ManagedDeliveryClient {
   stageRustdesk(r: { deviceId: string; purpose: ProtectedDeliveryPurpose; principal: string; operationId: string }): Promise<{ deliveryRef: string; id: string; expiresAt: string; state: string }>;
@@ -31,6 +40,7 @@ export interface ManagedDeliveryClient {
   resolveSecretInput?(r: { id: string; principal: string; operationId: string }): Promise<ManagedSecretInputMetadata & { link: string }>;
   getSecretInput?(r: { id: string; principal: string }): Promise<ManagedSecretInputMetadata>;
   cancelSecretInput?(r: { id: string; principal: string }): Promise<ManagedSecretInputMetadata>;
+  listSecretInputResources?(r: { principal: string; cursor?: string; limit?: number }): Promise<ManagedSecretInputResourcePage>;
 }
 export interface ProtectedDeliveryMessenger {
   sendRaw(jid: string, content: Record<string, unknown>, options?: SendOptions): Promise<SubmissionReceipt>;
@@ -221,7 +231,7 @@ export class ProtectedDeliveryService {
       throw new Error('protected secret input status is unavailable');
     }
     this.updateSecretInputMetadata(row.id, remote);
-    return publicSecretInput(this.findSecretInputById(row.id) ?? row);
+    return publicSecretInput(this.findSecretInputById(row.id) ?? row, remote.operationResult);
   }
 
   async cancelSecretInput(input: { id: string; principal: string }): Promise<PublicSecretInput> {
@@ -236,7 +246,16 @@ export class ProtectedDeliveryService {
       throw new Error('protected secret input cancellation failed');
     }
     this.updateSecretInputMetadata(row.id, remote);
-    return publicSecretInput(this.findSecretInputById(row.id) ?? row);
+    return publicSecretInput(this.findSecretInputById(row.id) ?? row, remote.operationResult);
+  }
+
+  async listSecretInputResources(input: { principal: string; cursor?: string; limit?: number }): Promise<ManagedSecretInputResourcePage> {
+    if (!input.principal) throw new Error('protected secret input principal is invalid');
+    try {
+      return await this.secretInputResourceClient().listSecretInputResources(input);
+    } catch {
+      throw new Error('protected secret resource discovery is unavailable');
+    }
   }
 
   async deliver(input: { deliveryRef: string; principal: string; recipientJid: string }): Promise<{ deliveryRef: string; id: string; state: string }> {
@@ -388,6 +407,12 @@ export class ProtectedDeliveryService {
     return client as Required<Pick<ManagedDeliveryClient, 'createSecretInput' | 'resolveSecretInput' | 'getSecretInput' | 'cancelSecretInput'>>;
   }
 
+  private secretInputResourceClient(): Required<Pick<ManagedDeliveryClient, 'listSecretInputResources'>> {
+    const client = this.deps.client;
+    if (client.listSecretInputResources === undefined) throw new Error('protected secret resource client is unavailable');
+    return client as Required<Pick<ManagedDeliveryClient, 'listSecretInputResources'>>;
+  }
+
   private async refreshSecretInputForRequest(
     row: SecretInputRow,
     client: Required<Pick<ManagedDeliveryClient, 'createSecretInput' | 'resolveSecretInput' | 'getSecretInput' | 'cancelSecretInput'>>,
@@ -458,6 +483,7 @@ export class ProtectedDeliveryService {
   }
 
   private assertSecretInputMetadata(row: Pick<SecretInputRow, 'intake_id' | 'resource_id' | 'kind'>, metadata: ManagedSecretInputMetadata): void {
+    parseSecretInputOperationResult(metadata.operationResult, metadata.kind, metadata.state);
     if (
       (row.intake_id !== null && metadata.id !== row.intake_id)
       || metadata.resourceId !== row.resource_id
@@ -654,8 +680,9 @@ function publicRow(row: Row): { deliveryRef: string; id: string; state: string }
 type PublicSecretInput = {
   id: string; resourceId: string; accountLabel: string; consumerLabel: string; action: string;
   kind: ProtectedSecretInputKind; saveAllowed: boolean; expiresAt: string; inputState: string; deliveryStatus: string;
+  operationResult: SecretInputOperationResult | null;
 };
-function publicSecretInput(row: SecretInputRow): PublicSecretInput {
+function publicSecretInput(row: SecretInputRow, operationResult?: SecretInputOperationResult | null): PublicSecretInput {
   if (
     row.intake_id === null || row.account_label === null || row.consumer_label === null || row.action === null
     || row.save_allowed === null || row.expires_at === null || row.input_state === 'creating'
@@ -671,6 +698,7 @@ function publicSecretInput(row: SecretInputRow): PublicSecretInput {
     expiresAt: row.expires_at,
     inputState: row.input_state,
     deliveryStatus: row.delivery_status,
+    operationResult: parseSecretInputOperationResult(operationResult, row.kind, row.input_state),
   };
 }
 function grantState(value: string): boolean { return value === 'unclaimed' || value === 'claimed' || value === 'revoked' || value === 'expired' || value === 'done' || value === 'replaced'; }

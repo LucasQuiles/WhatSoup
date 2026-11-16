@@ -27,10 +27,16 @@ type AdapterBinding = Readonly<{
   endpoint: string;
 }>;
 
+export type FixedMfaTransitionConfig = Readonly<{
+  resourceId: string;
+  account: string;
+}>;
+
 export type FixedPasswordAdapterConfig = AdapterBinding & Readonly<{
   kind: 'password';
   username: string;
   saveStore?: FixedSaveStoreConfig;
+  mfaTransition?: FixedMfaTransitionConfig;
 }>;
 
 export type FixedTokenAdapterConfig = AdapterBinding & Readonly<{
@@ -38,11 +44,20 @@ export type FixedTokenAdapterConfig = AdapterBinding & Readonly<{
   saveStore?: FixedSaveStoreConfig;
 }>;
 
-export type FixedMfaAdapterConfig = AdapterBinding & Readonly<{
+export type FixedStaticMfaAdapterConfig = AdapterBinding & Readonly<{
   kind: 'mfa';
   username: string;
   operationId: string;
 }>;
+
+export type FixedRegisteredMfaAdapterConfig = AdapterBinding & Readonly<{
+  kind: 'mfa';
+  username: string;
+  account: string;
+  operationMode: 'links_registered';
+}>;
+
+export type FixedMfaAdapterConfig = FixedStaticMfaAdapterConfig | FixedRegisteredMfaAdapterConfig;
 
 export type FixedAdapterConfig = FixedPasswordAdapterConfig | FixedTokenAdapterConfig | FixedMfaAdapterConfig;
 
@@ -73,6 +88,7 @@ export function parseSecureHandoffWorkerConfig(
   if (new Set(adapters.map((adapter) => adapter.resourceId)).size !== adapters.length) {
     throw new Error('secure handoff worker configuration is invalid');
   }
+  validateMfaTransitions(adapters);
   return Object.freeze({
     databasePath: value.databasePath,
     linksBaseUrl: canonicalUrl(value.linksBaseUrl),
@@ -89,6 +105,9 @@ function parseAdapter(value: unknown): FixedAdapterConfig {
   if (value.kind === 'password' && exactKeys(value, ['kind', 'resourceId', 'principal', 'action', 'endpoint', 'username', 'saveStore'])) {
     return password(value, parseSaveStore(value.saveStore));
   }
+  if (value.kind === 'password' && exactKeys(value, ['kind', 'resourceId', 'principal', 'action', 'endpoint', 'username', 'mfaTransition'])) {
+    return password(value, undefined, parseMfaTransition(value.mfaTransition));
+  }
   if (value.kind === 'token' && exactKeys(value, ['kind', 'resourceId', 'principal', 'action', 'endpoint'])) {
     return token(value, undefined);
   }
@@ -98,13 +117,21 @@ function parseAdapter(value: unknown): FixedAdapterConfig {
   if (value.kind === 'mfa' && exactKeys(value, ['kind', 'resourceId', 'principal', 'action', 'endpoint', 'username', 'operationId'])) {
     return mfa(value);
   }
+  if (value.kind === 'mfa' && exactKeys(value, ['kind', 'resourceId', 'principal', 'action', 'endpoint', 'username', 'account', 'operationMode'])) {
+    return registeredMfa(value);
+  }
   throw new Error('secure handoff worker configuration is invalid');
 }
 
-function password(value: Record<string, unknown>, saveStore: FixedSaveStoreConfig | undefined): FixedPasswordAdapterConfig {
+function password(
+  value: Record<string, unknown>,
+  saveStore: FixedSaveStoreConfig | undefined,
+  mfaTransition?: FixedMfaTransitionConfig,
+): FixedPasswordAdapterConfig {
   if (!validBinding(value) || !validText(value.username)) throw new Error('secure handoff worker configuration is invalid');
   return Object.freeze({ kind: 'password', resourceId: value.resourceId, principal: value.principal, action: value.action,
-    endpoint: canonicalUrl(value.endpoint), username: value.username, ...(saveStore === undefined ? {} : { saveStore }) });
+    endpoint: canonicalUrl(value.endpoint), username: value.username, ...(saveStore === undefined ? {} : { saveStore }),
+    ...(mfaTransition === undefined ? {} : { mfaTransition }) });
 }
 
 function token(value: Record<string, unknown>, saveStore: FixedSaveStoreConfig | undefined): FixedTokenAdapterConfig {
@@ -119,6 +146,45 @@ function mfa(value: Record<string, unknown>): FixedMfaAdapterConfig {
   }
   return Object.freeze({ kind: 'mfa', resourceId: value.resourceId, principal: value.principal, action: value.action,
     endpoint: canonicalUrl(value.endpoint), username: value.username, operationId: value.operationId });
+}
+
+function registeredMfa(value: Record<string, unknown>): FixedMfaAdapterConfig {
+  if (!validBinding(value) || !validText(value.username) || !validText(value.account) || value.operationMode !== 'links_registered') {
+    throw new Error('secure handoff worker configuration is invalid');
+  }
+  return Object.freeze({ kind: 'mfa', resourceId: value.resourceId, principal: value.principal, action: value.action,
+    endpoint: canonicalUrl(value.endpoint), username: value.username, account: value.account, operationMode: 'links_registered' });
+}
+
+function parseMfaTransition(value: unknown): FixedMfaTransitionConfig {
+  if (!isRecord(value) || !exactKeys(value, ['resourceId', 'account'])
+    || typeof value.resourceId !== 'string' || !RESOURCE_ID.test(value.resourceId) || !validText(value.account)) {
+    throw new Error('secure handoff worker configuration is invalid');
+  }
+  return Object.freeze({ resourceId: value.resourceId, account: value.account });
+}
+
+function validateMfaTransitions(adapters: readonly FixedAdapterConfig[]): void {
+  const byResource = new Map(adapters.map((adapter) => [adapter.resourceId, adapter]));
+  const claimedMfaResources = new Set<string>();
+  for (const passwordAdapter of adapters) {
+    if (passwordAdapter.kind !== 'password' || passwordAdapter.mfaTransition === undefined) continue;
+    const mfaAdapter = byResource.get(passwordAdapter.mfaTransition.resourceId);
+    if (passwordAdapter.action !== 'Verify password for two-step sign-in' || !mfaAdapter || mfaAdapter.kind !== 'mfa'
+      || !('operationMode' in mfaAdapter) || mfaAdapter.operationMode !== 'links_registered'
+      || claimedMfaResources.has(mfaAdapter.resourceId)
+      || mfaAdapter.principal !== passwordAdapter.principal || mfaAdapter.username !== passwordAdapter.username
+      || mfaAdapter.account !== passwordAdapter.mfaTransition.account
+      || new URL(mfaAdapter.endpoint).origin !== new URL(passwordAdapter.endpoint).origin) {
+      throw new Error('secure handoff worker configuration is invalid');
+    }
+    claimedMfaResources.add(mfaAdapter.resourceId);
+  }
+  for (const adapter of adapters) {
+    if (adapter.kind === 'mfa' && 'operationMode' in adapter && !claimedMfaResources.has(adapter.resourceId)) {
+      throw new Error('secure handoff worker configuration is invalid');
+    }
+  }
 }
 
 function parseSaveStore(value: unknown): FixedSaveStoreConfig {
