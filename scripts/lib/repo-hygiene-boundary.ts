@@ -1,9 +1,11 @@
 /**
  * Public-boundary scanning for the repository hygiene guard (one check, several inputs).
  *
- * Shared by scripts/repo-hygiene-guard.ts (its --tree, --text and --refs modes and the term
- * rules every other mode adds), scripts/pre-push-guard.ts (pushed ref names) and
- * scripts/pr-metadata-guard.ts (PR title and body). It holds:
+ * Shared by scripts/repo-hygiene-guard.ts (its --tree, --text and --refs modes, and the term
+ * rules that every mode except --release-hygiene adds; that mode loads and validates the term
+ * file but applies its own, wider rule set), scripts/pre-push-guard.ts (pushed ref names),
+ * scripts/pr-metadata-guard.ts (PR title and body) and scripts/boundary-private-scan.ts (the
+ * hosted checks). It holds:
  *
  * - the single finding formatter: it accepts only a location and a rule code and prints a
  *   static message chosen by code, with every private match in the location masked, so no

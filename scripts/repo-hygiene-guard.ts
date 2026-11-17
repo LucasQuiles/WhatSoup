@@ -575,6 +575,8 @@ function scanStagedSensitiveArtifacts(cwd: string): GuardIssue[] {
 
 // The issue-triage callers and the release-hygiene mode scan with the generic and fallback
 // patterns only; term coverage of tracked files comes from --tree against the private baseline.
+// --release-hygiene calls this without term rules: that mode applies its own rule set. The
+// parameter stays for a caller that adds the term rules to whole-file content.
 export function scanContentLines(
   lines: AddedLine[],
   termRules: readonly PrivateTermRule[] = [],
@@ -2326,7 +2328,8 @@ Modes:
 
 Every mode but --release-hygiene also applies the private term file (WHATSOUP_PRIVATE_TERMS_FILE,
 else ~/.config/whatsoup/private-terms.json) when it exists; WHATSOUP_REQUIRE_PRIVATE_TERMS=1 makes
-an absent file a failure. Findings print a location and a rule code only.
+an absent file a failure. --release-hygiene still loads and validates the file, then applies its
+own rule set. Findings print a location and a rule code only.
 Exit codes: 0 clean, 1 findings, 2 usage or term-file failure, or an inconclusive scan.
 
 By default, this guard is changed-content only. Use --release-hygiene for the release-hygiene file gate.`);
