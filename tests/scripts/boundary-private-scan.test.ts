@@ -113,7 +113,10 @@ const candidateDirs = (): { gitDir: string; home: string } => {
   return { gitDir: join(root, 'candidate.git'), home };
 };
 
-function scan(candidate: Candidate, text = { title: 'Add notes', body: 'A plain body.' }): CandidateScanResult {
+const NO_COUNTS = { 'added-lines': {}, 'path-names': {}, 'sensitive-paths': {}, 'commit-lines': {}, commits: {}, 'head-ref': {}, 'pr-text': {} };
+const PLAIN_TEXT = { title: 'Add notes', body: 'A plain body.', headRef: 'feature-a' };
+
+function scan(candidate: Candidate, text: { title: string; body: string; headRef: string } = PLAIN_TEXT): CandidateScanResult {
   const dirs = candidateDirs();
   fetchCandidateObjects({ ...dirs, remote: candidate.remote, base: candidate.base, head: candidate.head });
   return scanCandidate({ ...dirs, base: candidate.base, head: candidate.head, ...text, termRules });
@@ -126,8 +129,66 @@ describe('boundary (private) candidate scan', () => {
       commitAll(git);
     }));
     expect(result.conclusion).toBe('pass');
-    expect(result.scanned).toEqual({ addedLines: 1, pathNames: 1, commits: 1, texts: 2 });
-    expect(result.counts).toEqual({ 'added-lines': {}, 'path-names': {}, commits: {}, 'pr-text': {} });
+    expect(result.scanned).toEqual({ addedLines: 1, pathNames: 1, changedPaths: 1, commits: 1, commitLines: 1, commitPaths: 1, refNames: 1, texts: 2 });
+    expect(result.counts).toEqual(NO_COUNTS);
+  });
+
+  it('fails on a term that one commit adds and a later commit removes', () => {
+    const result = scan(makeCandidate((write, git) => {
+      write('docs/notes.md', 'deploy on zorblab\n');
+      commitAll(git, 'add notes');
+      write('docs/notes.md', 'deploy on host-a\n');
+      commitAll(git, 'reword notes');
+    }));
+    expect(result.counts['added-lines']).toEqual({});
+    expect(result.counts['commit-lines']).toEqual({ 'private-host-label': 1 });
+    expect(result.conclusion).toBe('fail');
+  });
+
+  it('does not count the lines a merge from the base brings back unchanged', () => {
+    const candidate = makeCandidate((write, git) => {
+      write('docs/notes.md', 'plain notes\n');
+      commitAll(git, 'add notes');
+      git('checkout', '-q', 'main');
+      write('main-only.txt', 'a published zorblab line\n');
+      commitAll(git, 'main moves on');
+      git('checkout', '-q', 'feature');
+      git('merge', '-q', '--no-ff', '-m', 'merge main', 'main');
+    });
+    const result = scan({ ...candidate, base: repoGit(candidate.remote)('rev-parse', 'main') });
+    expect(result.scanned.commits).toBe(2);
+    expect(result.counts).toEqual(NO_COUNTS);
+  });
+
+  it('classifies a sensitive artifact path that the candidate adds', () => {
+    const result = scan(makeCandidate((write, git) => {
+      write('.mcp.json', '{}\n');
+      commitAll(git, 'add config');
+    }));
+    expect(result.counts['sensitive-paths']).toEqual({ 'branch-sensitive-artifact': 1 });
+    expect(result.conclusion).toBe('fail');
+  });
+
+  it('classifies a sensitive artifact path that one commit adds and a later commit removes', () => {
+    const result = scan(makeCandidate((write, git) => {
+      write('.mcp.json', '{}\n');
+      write('docs/notes.md', 'plain notes\n');
+      commitAll(git, 'add config');
+      git('rm', '-q', '.mcp.json');
+      git('commit', '-q', '-m', 'drop config');
+    }));
+    expect(result.counts['sensitive-paths']).toEqual({ 'branch-history-sensitive-artifact': 1 });
+    expect(result.conclusion).toBe('fail');
+  });
+
+  it('counts a term in the pull request head branch name', () => {
+    const candidate = makeCandidate((write, git) => {
+      write('a.txt', 'plain\n');
+      commitAll(git);
+    });
+    const result = scan(candidate, { ...PLAIN_TEXT, headRef: 'feature/zorblab-notes' });
+    expect(result.counts['head-ref']).toEqual({ 'private-host-label': 1 });
+    expect(result.conclusion).toBe('fail');
   });
 
   it.each<[string, 'added-lines' | 'path-names', (write: Write) => void]>([
@@ -221,7 +282,7 @@ describe('boundary (private) candidate scan', () => {
       write('a.txt', 'plain\n');
       commitAll(git);
     });
-    const result = scan(candidate, { title: 'Deploy to zorblab', body: 'First line\nruns on zorblab' });
+    const result = scan(candidate, { ...PLAIN_TEXT, title: 'Deploy to zorblab', body: 'First line\nruns on zorblab' });
     expect(result.counts['pr-text']).toEqual({ 'private-host-label': 2 });
   });
 
@@ -236,7 +297,7 @@ describe('boundary (private) candidate scan', () => {
         write('notes/zorblab.txt', 'runs on zorblab\n');
         git('add', '-A');
         git('-c', 'user.name=Zorblab Builder', 'commit', '-q', '-m', 'notes for zorblab');
-      }), { title: 'Deploy to zorblab', body: 'runs on zorblab' });
+      }), { title: 'Deploy to zorblab', body: 'runs on zorblab', headRef: 'zorblab-notes' });
       lines = formatCandidateResult(result);
     } finally {
       errorSpy.mockRestore();
@@ -245,7 +306,9 @@ describe('boundary (private) candidate scan', () => {
     expect(lines).toEqual(expect.arrayContaining([
       'boundary (private): added-lines private-host-label 1',
       'boundary (private): path-names private-host-label 1',
+      'boundary (private): commit-lines private-host-label 1',
       'boundary (private): commits private-host-label 2',
+      'boundary (private): head-ref private-host-label 1',
       'boundary (private): pr-text private-host-label 2',
     ]));
     expectNoSyntheticTerm([...lines, ...logs, ...errors].join('\n'));
@@ -267,7 +330,7 @@ describe('boundary (private) candidate binding to the fetched objects', () => {
       [candidate.base, `${candidate.head} --all`],
     ] as const) {
       expect(() => fetchCandidateObjects({ ...dirs, remote: candidate.remote, base, head })).toThrow(BoundaryRefusal);
-      expect(() => scanCandidate({ ...dirs, base, head, title: '', body: '', termRules })).toThrow(BoundaryRefusal);
+      expect(() => scanCandidate({ ...dirs, base, head, title: '', body: '', headRef: 'feature-a', termRules })).toThrow(BoundaryRefusal);
     }
   });
 
@@ -356,7 +419,7 @@ function pullRequest(overrides: Record<string, unknown> = {}): Record<string, un
     state: 'open',
     title: 'A title',
     body: 'A body',
-    head: { sha: HEAD, repo: { full_name: 'fork-a/repo-a' } },
+    head: { sha: HEAD, ref: 'feature-a', repo: { full_name: 'fork-a/repo-a' } },
     base: { ref: 'main', sha: 'd'.repeat(40), repo: { full_name: REPOSITORY } },
     ...overrides,
   };
@@ -400,7 +463,12 @@ const bind = (api: GitHubApi, headSha = HEAD) => bindPullRequestCandidate(api, {
 
 describe('boundary (private) pull request binding', () => {
   it('binds a fork pull request through the commit association, with the base tip read at run time', async () => {
-    await expect(bind(bindingApi())).resolves.toEqual({ head: HEAD, base: BASE, number: 7, title: 'A title', body: 'A body' });
+    await expect(bind(bindingApi())).resolves.toEqual({ head: HEAD, base: BASE, number: 7, title: 'A title', body: 'A body', headRef: 'feature-a' });
+  });
+
+  it('refuses a pull request whose head branch name is not a string', async () => {
+    const pull = pullRequest({ head: { sha: HEAD, repo: { full_name: 'fork-a/repo-a' } } });
+    await expect(bind(bindingApi({ 'pulls/7': pull }))).rejects.toBeInstanceOf(BoundaryRefusal);
   });
 
   it.each<[string, Record<string, unknown>]>([
@@ -442,17 +510,16 @@ function publishApi(): { api: GitHubApi; posts: Array<{ path: string; body: Reco
 }
 
 const failing: CandidateScanResult = {
-  version: 1,
+  version: 2,
   conclusion: 'fail',
-  counts: { 'added-lines': { 'private-host-label': 2 }, 'path-names': {}, commits: { 'private-person': 1 }, 'pr-text': {} },
-  olderTermHits: 0,
-  scanned: { addedLines: 4, pathNames: 2, commits: 1, texts: 2 },
+  counts: { ...NO_COUNTS, 'added-lines': { 'private-host-label': 2 }, commits: { 'private-person': 1 } },
+  scanned: { addedLines: 4, pathNames: 2, changedPaths: 2, commits: 1, commitLines: 4, commitPaths: 2, refNames: 1, texts: 2 },
 };
 
 describe('boundary (private) check run publication', () => {
   it('publishes success on the candidate head for a passing result', async () => {
     const { api, posts } = publishApi();
-    const passing: CandidateScanResult = { ...failing, conclusion: 'pass', counts: { 'added-lines': {}, 'path-names': {}, commits: {}, 'pr-text': {} } };
+    const passing: CandidateScanResult = { ...failing, conclusion: 'pass', counts: NO_COUNTS };
     await expect(publishCheckRun(api, { headSha: HEAD, result: passing })).resolves.toBe('success');
     expect(posts).toHaveLength(1);
     expect(posts[0]!.path).toBe('check-runs');
