@@ -58,7 +58,9 @@ const API_MAX_BYTES = 16 * 1024 * 1024;
 const PAGE_SIZE = 100;
 const MAX_PAGES = 10;
 const SCHEDULE_OVERLAP_MS = 15 * 60 * 1000;
-const SCHEDULE_DEFAULT_MS = 2 * 60 * 60 * 1000;
+// Where the hourly text listing starts while no scheduled run has succeeded: the day every open item was cleaned. A
+// fixed start, not a clock-relative one, keeps a finding from the first runs failing every run until it is cleaned.
+const TEXT_WATERMARK = '2026-11-17T00:00:00Z';
 const TERMS_LINE = 'the private term file is missing, unreadable or invalid; the check fails closed';
 const INCOMPLETE_LINE = `${PREFIX} the check could not complete; an earlier step refused its input or failed, and the run log names it. The check fails closed.`;
 const REMOVAL_LINE = `${PREFIX} the step that removes the private term file did not succeed; the check fails closed.`;
@@ -123,6 +125,27 @@ export interface GitHubApi {
   postJson(pathname: string, body: unknown): Promise<unknown>;
 }
 
+/** One page of a listing, and the next page's address from the Link header, or null on the last page. */
+export interface GitHubPage {
+  readonly body: unknown;
+  readonly next: string | null;
+}
+
+/** Paged reads for the text listings: a path relative to the repository, or a next-page link from a previous page. */
+export interface GitHubPagedApi {
+  getPage(pathOrUrl: string): Promise<GitHubPage>;
+}
+
+/** The `rel="next"` address of a Link header, or null when there is none. */
+function nextPageLink(header: string | null): string | null {
+  if (header === null) return null;
+  for (const part of header.split(',')) {
+    const match = /^\s*<([^>]*)>\s*;(.*)$/.exec(part);
+    if (match !== null && /(?:^|;)\s*rel="?(?:[^";]*\s)?next(?:\s[^";]*)?"?\s*(?:;|$)/.test(match[2]!)) return match[1]!;
+  }
+  return null;
+}
+
 async function readBounded(response: Response, limit: number): Promise<string> {
   if (Number(response.headers.get('content-length') ?? '0') > limit) throw new GitHubApiError('a GitHub API response exceeds its size bound');
   if (response.body === null) return '';
@@ -142,8 +165,11 @@ async function readBounded(response: Response, limit: number): Promise<string> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-/** The repository's REST API, with requests relative to `repos/<owner>/<name>/`. */
-export function createGitHubApi(env: NodeJS.ProcessEnv): GitHubApi {
+/**
+ * The repository's REST API, with requests relative to `repos/<owner>/<name>/`. A next-page link may be absolute, but
+ * the token goes only to the API's own origin: any other origin, or plain http, is refused before a request is sent.
+ */
+export function createGitHubApi(env: NodeJS.ProcessEnv): GitHubApi & GitHubPagedApi {
   const token = env['GITHUB_TOKEN'] ?? '';
   const repository = env['GITHUB_REPOSITORY'] ?? '';
   const apiUrl = env['GITHUB_API_URL'] || 'https://api.github.com';
@@ -151,8 +177,11 @@ export function createGitHubApi(env: NodeJS.ProcessEnv): GitHubApi {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new BoundaryRefusal('the repository name is malformed');
   if (!/^https:\/\/[A-Za-z0-9.-]+(?::[0-9]+)?(?:\/[A-Za-z0-9._-]+)*\/?$/.test(apiUrl)) throw new BoundaryRefusal('the GitHub API address is malformed');
   const base = `${apiUrl.replace(/\/+$/, '')}/repos/${repository}/`;
-  const request = async (pathname: string, method: 'GET' | 'POST', body?: unknown): Promise<unknown> => {
-    const response = await fetch(new URL(pathname, base), {
+  const origin = new URL(base).origin;
+  const send = async (pathname: string, method: 'GET' | 'POST', body?: unknown): Promise<{ value: unknown; link: string | null }> => {
+    const url = new URL(pathname, base);
+    if (url.origin !== origin) throw new GitHubApiError('a GitHub API address names another origin');
+    const response = await fetch(url, {
       method,
       redirect: 'error',
       signal: AbortSignal.timeout(30_000),
@@ -167,11 +196,15 @@ export function createGitHubApi(env: NodeJS.ProcessEnv): GitHubApi {
     });
     const text = await readBounded(response, API_MAX_BYTES);
     if (!response.ok) throw new GitHubApiError(`a GitHub API request failed with status ${response.status}`);
-    return JSON.parse(text) as unknown;
+    return { value: JSON.parse(text) as unknown, link: response.headers.get('link') };
   };
   return {
-    getJson: (pathname) => request(pathname, 'GET'),
-    postJson: (pathname, body) => request(pathname, 'POST', body),
+    getJson: async (pathname) => (await send(pathname, 'GET')).value,
+    postJson: async (pathname, body) => (await send(pathname, 'POST', body)).value,
+    getPage: async (pathOrUrl) => {
+      const { value, link } = await send(pathOrUrl, 'GET');
+      return { body: value, next: nextPageLink(link) };
+    },
   };
 }
 
@@ -684,26 +717,35 @@ export function collectEventItems(eventName: string, payload: unknown): TextItem
   throw new BoundaryRefusal('the event is not one the text check reads from its payload');
 }
 
-/** Where the hourly listing starts: the last successful scheduled run less an overlap, else two hours back. */
+/**
+ * Where the hourly listing starts: the last successful scheduled run less an overlap, else the fixed start. A failed
+ * run never moves the start, so an unresolved finding fails every run until it is cleaned.
+ */
 export async function scheduleSince(api: GitHubApi, now: Date): Promise<string> {
   const runs = field(await api.getJson(`actions/workflows/${TEXT_WORKFLOW_FILE}/runs?event=schedule&status=success&per_page=1`), 'workflow_runs');
   if (!Array.isArray(runs)) throw new BoundaryRefusal('the scheduled run listing is malformed');
-  if (runs.length === 0) return new Date(now.getTime() - SCHEDULE_DEFAULT_MS).toISOString();
+  if (runs.length === 0) return new Date(TEXT_WATERMARK).toISOString();
   const createdAt = field(runs[0], 'created_at');
   const time = typeof createdAt === 'string' ? Date.parse(createdAt) : Number.NaN;
   if (!Number.isFinite(time) || time > now.getTime()) throw new BoundaryRefusal('the last scheduled run time is malformed');
   return new Date(time - SCHEDULE_OVERLAP_MS).toISOString();
 }
 
-async function listPages(api: GitHubApi, pathname: string, query: string): Promise<unknown[]> {
+/**
+ * Every entry of a listing, page by page through each Link `rel="next"` address. A short page is not taken as the
+ * last: only a page with no next link ends the listing. A next link that remains after `MAX_PAGES` pages fails closed.
+ */
+async function listPages(api: GitHubPagedApi, pathname: string, query: string): Promise<unknown[]> {
   const entries: unknown[] = [];
+  let address = `${pathname}?${query === '' ? '' : `${query}&`}per_page=${PAGE_SIZE}`;
   for (let page = 1; page <= MAX_PAGES; page += 1) {
-    const answer = await api.getJson(`${pathname}?${query === '' ? '' : `${query}&`}per_page=${PAGE_SIZE}&page=${page}`);
-    if (!Array.isArray(answer)) throw new BoundaryRefusal('a listing is malformed');
-    entries.push(...answer);
-    if (answer.length < PAGE_SIZE) return entries;
+    const { body, next } = await api.getPage(address);
+    if (!Array.isArray(body)) throw new BoundaryRefusal('a listing is malformed');
+    entries.push(...body);
+    if (next === null) return entries;
+    address = next;
   }
-  throw new BoundaryRefusal(`a listing holds more than ${MAX_PAGES * PAGE_SIZE} items; the run fails closed`);
+  throw new BoundaryRefusal(`a listing continues past ${MAX_PAGES} pages; the run fails closed`);
 }
 
 function trailingNumber(url: unknown, segment: 'issues' | 'pulls'): number {
@@ -714,10 +756,10 @@ function trailingNumber(url: unknown, segment: 'issues' | 'pulls'): number {
 
 /**
  * Every issue and pull request (title and body), issue comment and review comment changed since
- * `since`, and every review of each pull request that changed. A listing that fills every page
- * it may read fails closed.
+ * `since`, and every review of each pull request that changed. A listing whose next-page links
+ * continue past the pages it may read fails closed.
  */
-export async function collectChangedItems(api: GitHubApi, since: string): Promise<TextItem[]> {
+export async function collectChangedItems(api: GitHubPagedApi, since: string): Promise<TextItem[]> {
   if (Number.isNaN(Date.parse(since))) throw new BoundaryRefusal('the listing start time is malformed');
   const changed = `since=${encodeURIComponent(since)}&sort=updated&direction=asc`;
   const items: TextItem[] = [];
