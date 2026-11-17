@@ -184,26 +184,32 @@ describe('producer admin routes', () => {
     expect(replayExchange.status).toBe(401);
   });
 
-  it('treats a whitespace-only enrollment secret as absent (#2871 trim-tightening)', async () => {
-    // Discriminator for the isNonEmptyString migration: the old length>0 check
-    // admitted whitespace-only secrets, which were then submitted to
-    // exchangeEnrollmentSecret and failed as 'enrollment_rejected' (401 with a
-    // rejection audit). The SSOT helper trims and treats whitespace as absent,
-    // so the request falls through to the bearer-credential path and returns
-    // 'credential_required' (401, no rejection audit) — the correct posture for
-    // a missing secret, not a rejected one.
+  it('exchanges, rejects and audits a whitespace-only enrollment secret', async () => {
+    // A present secret is always exchanged, even when it is whitespace-only, so
+    // it is rejected and audited like any other wrong secret. It must not fall
+    // through to the bearer-credential path, where a valid bearer would rotate
+    // the credential and no rejection would be recorded.
+    const events: Array<Record<string, unknown>> = [];
+    const audited = deps({
+      securityAudit: (event) => events.push(event as unknown as Record<string, unknown>),
+    });
     const reg = await call('postProducer', {
       body: registrationBody(),
       headers: { authorization: `Bearer ${ROOT}` },
-    });
+    }, audited);
     expect(reg.status).toBe(201);
 
-    const wsOut = await call('postProducerCredential', {
+    const blank = await call('postProducerCredential', {
       body: JSON.stringify({ enrollmentSecret: '   ' }),
-      headers: {}, // no bearer either → credential_required
+      headers: {},
+    }, audited);
+    expect(blank.status).toBe(401);
+    expect((blank.body as { error: { code: string } }).error.code).toBe('enrollment_rejected');
+    expect(events).toContainEqual({
+      type: 'enrollment_rejected',
+      producerId: 'prod-alpha',
+      reason: 'secret_mismatch',
     });
-    expect(wsOut.status).toBe(401);
-    expect((wsOut.body as { error: { code: string } }).error.code).toBe('credential_required');
   });
 
   it('rotates under the current credential and revocation kills access', async () => {
