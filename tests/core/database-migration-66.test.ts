@@ -40,13 +40,14 @@ function ledgerVersions(raw: DatabaseSync): number[] {
 
 /**
  * Tables that migrations after 65 add: 66 the closure ledger, 67 protected
- * delivery, 68 protected secret input staging.
+ * delivery, 68 protected secret input staging, 69 operator catch-up resolutions.
  */
 const TABLES_AFTER_65 = [
   'continuity_gap_closures',
   'protected_deliveries',
   'protected_delivery_events',
   'protected_secret_inputs',
+  'operator_catchup_resolutions',
 ];
 
 function presentTables(raw: DatabaseSync, names: readonly string[]): string[] {
@@ -58,13 +59,13 @@ function presentTables(raw: DatabaseSync, names: readonly string[]): string[] {
 const versionsThrough = (last: number): number[] => Array.from({ length: last }, (_, i) => i + 1);
 
 describe('migration 66 through the registry', () => {
-  it('a fresh database opens at the current schema, 68, with the closure table and its guards', () => {
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(68);
+  it('a fresh database opens at the current schema, 69, with the closure table and its guards', () => {
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(69);
     const db = new Database(':memory:');
     db.open();
     try {
       const raw = db.raw;
-      expect(ledgerVersions(raw)).toEqual(versionsThrough(68));
+      expect(ledgerVersions(raw)).toEqual(versionsThrough(69));
       expect(objectNames(raw, 'table')).toEqual(['continuity_gap_closures']);
       expect(objectNames(raw, 'trigger')).toEqual([
         'continuity_gap_closures_append_only_delete',
@@ -88,7 +89,11 @@ describe('migration 66 through the registry', () => {
     // Emulate a schema-65 file, as the close-continuity-gap fixture does: remove
     // every version above 65 and the objects those migrations add (66: the
     // closure ledger; 67: the protected-delivery tables and their indexes; 68:
-    // the protected-secret input table and its indexes).
+    // the protected-secret input table and its indexes; 69: catch-up resolutions).
+    first.raw.exec('DROP TRIGGER operator_catchup_resolution_outbound_immutable');
+    first.raw.exec('DROP TRIGGER operator_catchup_resolution_source_immutable');
+    first.raw.exec('DROP TRIGGER operator_catchup_resolution_no_legacy_close');
+    first.raw.exec('DROP TABLE operator_catchup_resolutions');
     first.raw.exec('DROP TABLE continuity_gap_closures');
     first.raw.exec('DROP TABLE protected_delivery_events');
     first.raw.exec('DROP TABLE protected_deliveries');
@@ -103,7 +108,7 @@ describe('migration 66 through the registry', () => {
     upgraded.open();
     try {
       const raw = upgraded.raw;
-      expect(ledgerVersions(raw)).toEqual(versionsThrough(68));
+      expect(ledgerVersions(raw)).toEqual(versionsThrough(69));
       expect(objectNames(raw, 'table')).toEqual(['continuity_gap_closures']);
       expect(presentTables(raw, TABLES_AFTER_65)).toEqual(TABLES_AFTER_65);
       const plans = (raw.prepare(`

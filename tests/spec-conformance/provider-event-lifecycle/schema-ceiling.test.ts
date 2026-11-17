@@ -12,7 +12,7 @@ import {
 const repoRoot = resolve(import.meta.dirname, '../../..');
 const specFiles = ['requirements.md', 'design.md', 'tasks.md'];
 const allocationPattern = /Schema allocation:\*{0,2}\s+current canonical schema is migration (?<current>\d+); bounded terminal recovery\/canonical `not_sent` is forward migration (?<terminal>\d+); the provider-event lifecycle ledger is migration (?<ledger>\d+)\./i;
-const allocationPointerPattern = /Schema allocation:\*{0,2}\s+see \[[^\]]+\]\(requirements\.md#schema-allocation\)\. At the audited schema-(?<current>\d+) base, terminal recovery is planned as (?<terminal>\d+) and the provider lifecycle ledger as (?<ledger>\d+);/i;
+const allocationPointerPattern = /Schema allocation:\*{0,2}\s+see \[[^\]]+\]\(requirements\.md#schema-allocation\)\. At the current schema-(?<current>\d+) base, terminal recovery is planned as (?<terminal>\d+) and the provider lifecycle ledger as (?<ledger>\d+);/i;
 const bodyAllocationExpectations = [
   {
     file: 'design.md',

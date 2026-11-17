@@ -136,7 +136,7 @@ describe('turn-recovery supervisor catch-up reconciliation wiring', () => {
     });
   }
 
-  it('auto-closes a caught-up group during a scan when the gate is on', async () => {
+  it('keeps original failures open when a later reply has no fulfillment evidence', async () => {
     const fixture = installCaughtUpGroup({ planId: 'wiring-on' });
     const supervisor = makeSupervisor({ catchupReconcile: {} });
 
@@ -144,18 +144,25 @@ describe('turn-recovery supervisor catch-up reconciliation wiring', () => {
 
     expect(result.scanned).toBe(0); // no replay jobs; the reconciler is the only work
     expect(result.catchupReconcileAttempted).toBe(1);
-    expect(result.catchupReconcileClosed).toBe(1);
-    expect(result.catchupReconcileSkipped).toBe(0);
-    expect(pendingSeqs()).toEqual([]);
-    expect(closedLinks().map((link) => link.inbound_seq)).toEqual(fixture.sourceSeqs);
-    for (const link of closedLinks()) expect(link.superseded_by_seq).toBe(fixture.catchupSeq);
-    expect(new Set(closedLinks().map((link) => link.actor))).toEqual(new Set(['auto_reconciler']));
+    expect(result.catchupReconcileClosed).toBe(0);
+    expect(result.catchupReconcileSkipped).toBe(1);
+    expect(pendingSeqs()).toEqual(fixture.sourceSeqs);
+    expect(closedLinks()).toEqual([]);
     expect(supervisor.health().lastScanFailureReason).toBeNull();
 
-    // Idempotent: a second scan finds nothing left and reports zeros.
+    // Re-observing the later reply cannot manufacture fulfillment evidence.
     const second = await supervisor.scanOnce();
-    expect(second.catchupReconcileAttempted).toBe(0);
+    expect(second.catchupReconcileAttempted).toBe(1);
     expect(second.catchupReconcileClosed).toBe(0);
+    expect(second.catchupReconcileSkipped).toBe(1);
+    expect(pendingSeqs()).toEqual(fixture.sourceSeqs);
+    expect(closedLinks()).toEqual([]);
+    expect(db.raw.prepare(`
+      SELECT seq, processing_status, terminal_reason FROM inbound_events
+      WHERE seq < ? ORDER BY seq
+    `).all(fixture.catchupSeq)).toEqual(fixture.sourceSeqs.map((seq) => ({
+      seq, processing_status: 'failed', terminal_reason: 'error',
+    })));
   });
 
   it('stays on pre-PR2 behavior when the gate is off (default)', async () => {
@@ -171,19 +178,23 @@ describe('turn-recovery supervisor catch-up reconciliation wiring', () => {
     expect(closedLinks()).toEqual([]);
   });
 
-  it('forwards the group limit and drains remaining groups next cycle', async () => {
-    installCaughtUpGroup({ planId: 'wiring-lim-a' });
-    installCaughtUpGroup({ planId: 'wiring-lim-b' });
+  it('bounds each scan without draining groups that lack fulfillment evidence', async () => {
+    const a = installCaughtUpGroup({ planId: 'wiring-lim-a' });
+    const b = installCaughtUpGroup({ planId: 'wiring-lim-b' });
     const supervisor = makeSupervisor({ catchupReconcile: { groupLimit: 1 } });
 
     const first = await supervisor.scanOnce();
     expect(first.catchupReconcileAttempted).toBe(1);
-    expect(first.catchupReconcileClosed).toBe(1);
-    expect(pendingSeqs().length).toBe(2); // one group of two links still pending
+    expect(first.catchupReconcileClosed).toBe(0);
+    expect(first.catchupReconcileSkipped).toBe(1);
+    expect(pendingSeqs()).toEqual([...a.sourceSeqs, ...b.sourceSeqs]);
 
     const second = await supervisor.scanOnce();
-    expect(second.catchupReconcileClosed).toBe(1);
-    expect(pendingSeqs()).toEqual([]);
+    expect(second.catchupReconcileAttempted).toBe(1);
+    expect(second.catchupReconcileClosed).toBe(0);
+    expect(second.catchupReconcileSkipped).toBe(1);
+    expect(pendingSeqs()).toEqual([...a.sourceSeqs, ...b.sourceSeqs]);
+    expect(closedLinks()).toEqual([]);
   });
 
   it('survives a whole-call reconciler failure and records a scan failure reason', async () => {
@@ -231,15 +242,16 @@ describe('turn-recovery supervisor catch-up reconciliation wiring', () => {
       return built.state.turnRecoverySupervisor;
     }
 
-    it('closes a caught-up group when enabled', async () => {
+    it('runs reconciliation when enabled while retaining unproved original failures', async () => {
       const fixture = installCaughtUpGroup({ planId: 'runtime-gate-on' });
+      const reconcile = vi.spyOn(durability, 'reconcileOperatorCatchupRecoveries');
       const supervisor = runtimeSupervisor({ turnRecoveryCatchupReconcile: { enabled: true } });
 
       await supervisor.scanOnce();
 
-      expect(pendingSeqs()).toEqual([]);
-      expect(closedLinks().map((link) => link.inbound_seq)).toEqual(fixture.sourceSeqs);
-      expect(new Set(closedLinks().map((link) => link.actor))).toEqual(new Set(['auto_reconciler']));
+      expect(reconcile).toHaveBeenCalledWith({ groupLimit: undefined });
+      expect(pendingSeqs()).toEqual(fixture.sourceSeqs);
+      expect(closedLinks()).toEqual([]);
     });
 
     it.each([
@@ -262,10 +274,17 @@ describe('turn-recovery supervisor catch-up reconciliation wiring', () => {
         turnRecoveryCatchupReconcile: { enabled: true, groupLimit: 1 },
       });
 
-      const first = await supervisor.scanOnce() as { catchupReconcileClosed: number };
+      const first = await supervisor.scanOnce() as {
+        catchupReconcileAttempted: number;
+        catchupReconcileClosed: number;
+        catchupReconcileSkipped: number;
+      };
 
-      expect(first.catchupReconcileClosed).toBe(1);
-      expect(pendingSeqs().length).toBe(2);
+      expect(first.catchupReconcileAttempted).toBe(1);
+      expect(first.catchupReconcileClosed).toBe(0);
+      expect(first.catchupReconcileSkipped).toBe(1);
+      expect(pendingSeqs().length).toBe(4);
+      expect(closedLinks()).toEqual([]);
     });
   });
 });

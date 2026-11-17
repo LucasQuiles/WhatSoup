@@ -1,8 +1,100 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine, sendTrackedWithReceipt as sendTracked } from '../../src/core/durability.ts';
 import { resolveOperatorCatchup, inspectOperatorCatchupResolution } from '../../src/core/operator-catchup-resolution.ts';
 import { DEFAULT_DATABASE_RETENTION, runDatabaseRetention } from '../../src/core/database-retention.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
+
+describe('operator catch-up schema upgrade', () => {
+  const tmp = trackTmpDirs('operator-catchup-upgrade-');
+  const originalRows = (raw: DatabaseSync) => ({
+    inbound: raw.prepare('SELECT * FROM inbound_events').all(),
+    outbound: raw.prepare('SELECT * FROM outbound_ops').all(),
+    plans: raw.prepare('SELECT * FROM recovery_plans').all(),
+    links: raw.prepare('SELECT * FROM inbound_disposition_links').all(),
+  });
+
+  function populatedSchema68() {
+    const path = join(tmp.make('schema68'), 'bot.db');
+    const db = new Database(path);
+    db.open();
+    try {
+      const engine = new DurabilityEngine(db);
+      const jid = '15550000003@s.whatsapp.net';
+      const seq = engine.journalInbound('unanswered-request', '15550000003', jid, 'agent');
+      engine.markInboundFailed(seq);
+      db.raw.exec(`INSERT INTO recovery_plans (plan_id, origin, actor, summary)
+        VALUES ('upgrade-plan', 'operator', 'operator:test', 'Unresolved request')`);
+      db.raw.prepare(`INSERT INTO inbound_disposition_links
+        (inbound_seq, recovery_plan_id, disposition, reason, actor)
+        VALUES (?, 'upgrade-plan', 'recovery_pending_operator_catchup', 'No reply', 'operator:test')`).run(seq);
+      const op = engine.createOutboundOp({
+        conversationKey: '15550000003', chatJid: jid, opType: 'text',
+        payload: '{"text":"Uncertain response"}', replayPolicy: 'unsafe', sourceInboundSeq: seq,
+      });
+      engine.markSending(op);
+      engine.markMaybeSent(op, 'ambiguous transport');
+      db.raw.exec(`
+        DROP TRIGGER operator_catchup_resolution_outbound_immutable;
+        DROP TRIGGER operator_catchup_resolution_source_immutable;
+        DROP TRIGGER operator_catchup_resolution_no_legacy_close;
+        DROP TABLE operator_catchup_resolutions;
+        DELETE FROM schema_migrations WHERE version = 69;
+      `);
+      expect(db.raw.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: 68 });
+      return { path, before: originalRows(db.raw) };
+    } finally {
+      db.close();
+    }
+  }
+
+  it('upgrades populated schema 68 without resolving or rewriting ambiguous original work', () => {
+    const { path, before } = populatedSchema68();
+    const upgraded = new Database(path);
+    try {
+      upgraded.open();
+      expect(upgraded.raw.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: 69 });
+      expect(originalRows(upgraded.raw)).toEqual(before);
+      expect(upgraded.raw.prepare('SELECT * FROM operator_catchup_resolutions').all()).toEqual([]);
+      expect(new DurabilityEngine(upgraded).getTurnRecoverySupervisorCounts().openRecoveries).toBe(1);
+    } finally {
+      upgraded.close();
+    }
+  });
+
+  it('rolls back partial migration DDL and leaves schema 68 and its evidence intact', () => {
+    const { path, before } = populatedSchema68();
+    const exec = DatabaseSync.prototype.exec;
+    const fault = vi.spyOn(DatabaseSync.prototype, 'exec').mockImplementation(function (this: DatabaseSync, sql: string) {
+      if (sql.includes('CREATE TRIGGER operator_catchup_resolution_no_delete')) {
+        throw new Error('injected migration DDL failure');
+      }
+      return exec.call(this, sql);
+    });
+    const upgraded = new Database(path);
+    try {
+      expect(() => upgraded.open()).toThrow('Migration 69 failed');
+    } finally {
+      fault.mockRestore();
+      upgraded.close();
+    }
+    const raw = new DatabaseSync(path);
+    try {
+      expect(originalRows(raw)).toEqual(before);
+      expect(raw.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: 68 });
+      expect(raw.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'operator_catchup_resolution%'").all())
+        .toEqual([]);
+      expect(raw.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    } finally {
+      raw.close();
+    }
+  });
+});
 
 describe('bound operator catch-up resolution', () => {
   let db: Database;
