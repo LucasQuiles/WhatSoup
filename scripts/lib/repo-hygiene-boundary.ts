@@ -18,6 +18,7 @@ import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'n
 import { homedir } from 'node:os';
 import path from 'node:path';
 
+import { isRecord } from '../../src/lib/type-guards.ts';
 import { cleanGitEnv, git } from './guard-core.ts';
 import {
   addedLinePatterns,
@@ -424,10 +425,6 @@ export class BoundaryBaselineError extends Error {}
 
 /** The tree cannot be scanned (no HEAD, no tracked files, unreadable objects): exit 2. */
 export class TreeScanInconclusive extends Error {}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 // Messages name no path: a path can hold a private name.
 export function parseBoundaryBaseline(text: string): BoundaryBaseline {

@@ -19,13 +19,14 @@
  * rule code. Never the matched text, a term id or a term value. Every message
  * this module produces names a term only by its index in the `terms` array.
  *
- * Node built-ins only, so every guard and hook can import it.
+ * No npm packages: Node built-ins and dependency-free repository modules only, so every guard and hook can import it.
  */
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
+import { isRecord } from '../../src/lib/type-guards.ts';
 import { addedLinePatterns } from './repo-hygiene-policy.ts';
 
 export const PRIVATE_TERMS_FILE_ENV = 'WHATSOUP_PRIVATE_TERMS_FILE';
@@ -188,10 +189,6 @@ const FALLBACK_RULE_REGEXES: readonly RegExp[] = addedLinePatterns
 function holdsMatch(text: string, regex: RegExp): boolean {
   const everywhere = new RegExp(regex.source, regex.flags.includes('g') ? regex.flags : `${regex.flags}g`);
   return [...text.matchAll(everywhere)].some((match) => match[0] !== '');
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function nonEmptyString(value: unknown): value is string {
