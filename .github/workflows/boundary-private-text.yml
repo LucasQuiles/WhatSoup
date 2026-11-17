@@ -1,7 +1,8 @@
 name: Private boundary text
 
 # The hosted text check: issue text, comments, reviews and review comments against the private
-# term list, which only this job holds (environment secret WHATSOUP_PRIVATE_TERMS_JSON).
+# term list, which only this job holds (environment secret WHATSOUP_PRIVATE_TERMS_JSON, the base64
+# of the minified term file).
 #
 # - issues and issue_comment run this file from the default branch with the secret, also for an
 #   outside contributor; the item comes from the event payload file.
@@ -117,6 +118,8 @@ jobs:
             GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_EVENT_PATH="$GITHUB_EVENT_PATH" \
             node "$scratch/trusted/scripts/boundary-private-scan.ts" collect-text --out "$scratch"
 
+      # The secret is the base64 of the minified term file on one line, so log masking matches it
+      # exactly. The step decodes it into the term file and prints neither form.
       - name: Write the private term file
         shell: bash
         env:
@@ -130,7 +133,11 @@ jobs:
           umask 077
           terms_file="$RUNNER_TEMP/private-terms.json"
           test ! -e "$terms_file"
-          printf '%s' "$WHATSOUP_PRIVATE_TERMS_JSON" > "$terms_file"
+          if ! printf '%s' "$WHATSOUP_PRIVATE_TERMS_JSON" | base64 -d > "$terms_file" 2> /dev/null || [ ! -s "$terms_file" ]; then
+            rm -f -- "$terms_file"
+            echo "boundary text: the private term secret is not the base64 of a non-empty term file; the check fails closed"
+            exit 1
+          fi
           chmod 600 "$terms_file"
           test -n "$(find "$terms_file" -maxdepth 0 -type f -perm 600)"
 
