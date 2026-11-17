@@ -798,6 +798,19 @@ describe('AddLineWizard — tool update defaults', () => {
     expect((screen.getByLabelText('Tool update verbosity') as HTMLSelectElement).value).toBe('minimal')
   })
 
+  it('creates a default line without storing a tool update mode', async () => {
+    render(<AddLineWizard open={true} onClose={vi.fn()} />)
+
+    await advanceToReviewStep()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /create line/i }))
+    })
+
+    await waitFor(() => expect(mockUpdateConfig).toHaveBeenCalledTimes(1))
+    expect(mockCreateLine.mock.calls[0]?.[0]).not.toHaveProperty('toolUpdateMode')
+    expect(mockUpdateConfig.mock.calls[0]?.[1]).not.toHaveProperty('toolUpdateMode')
+  })
+
   it('resets a reopened form to minimal tool updates', async () => {
     const { rerender } = render(<AddLineWizard open={true} onClose={vi.fn()} />)
 

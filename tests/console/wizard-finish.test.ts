@@ -26,4 +26,9 @@ describe('buildFinishPatch', () => {
     expect(patch).toEqual(formData);
     expect(credentials).toEqual([]);
   });
+
+  it('stores the tool update mode only when it differs from the minimal default', () => {
+    expect(buildFinishPatch({ name: 'w', toolUpdateMode: 'minimal' }).patch).not.toHaveProperty('toolUpdateMode');
+    expect(buildFinishPatch({ name: 'w', toolUpdateMode: 'full' }).patch).toMatchObject({ toolUpdateMode: 'full' });
+  });
 });
