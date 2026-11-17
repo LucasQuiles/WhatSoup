@@ -33,6 +33,21 @@ describe('git public remote helpers', () => {
     expect(shouldRetryWithPublicHttps(new Error('fatal: could not read from remote repository.'))).toBe(false);
   });
 
+  it('treats whitespace-only error fields as empty (#2871 trim-tightening)', () => {
+    // Discriminator for the isNonEmptyString migration: the old length>0
+    // check admitted whitespace-only strings into the joined error text; the
+    // SSOT helper trims and excludes them. Feed a whitespace-only stderr plus
+    // a real stdout signal to prove the join still surfaces the signal and the
+    // whitespace field contributes no noise (no false retry from bare spaces).
+    const err: any = new Error('   ');
+    err.stderr = '   ';
+    err.stdout = 'git@github.com: Permission denied (publickey).';
+    expect(shouldRetryWithPublicHttps(err)).toBe(true);
+    // Whitespace-only fields alone must not produce a retry signal.
+    const noise: any = { stderr: '   ', stdout: '  ', message: '\t\n' };
+    expect(shouldRetryWithPublicHttps(noise)).toBe(false);
+  });
+
   it('builds a deterministic fetch refspec for the update branch', () => {
     expect(publicFetchArgs('https://github.com/LucasQuiles/WhatSoup.git')).toEqual([
       'fetch',
