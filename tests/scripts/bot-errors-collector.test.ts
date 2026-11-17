@@ -514,14 +514,13 @@ describe('bot-errors-collector', () => {
     mkdirSync(join(tmpRoot, 'outbox'), { recursive: true, mode: 0o700 });
     const fakeSsh = writeFakeSsh(tmpRoot);
 
-    // Failure 1: tier 1 (remote-claim-failed) opens -- below the escalation
-    // threshold, unchanged from before.
+    // Failure 1: tier 1 opens at warning below the sustained-failure threshold.
     const firstFailure = runCollector(fakeSsh, 'fail');
     expect(firstFailure.status).toBe(1);
     expect(outboxEvents()).toHaveLength(1);
     expect(outboxEvents()[0]).toMatchObject({
       eventType: 'alert',
-      severity: 'critical',
+      severity: 'warning',
       instance: 'bot-errors-collector',
       source: 'remote-claim-failed',
       summary: 'BOT ERRORS collector cannot claim remote outbox: mini5',

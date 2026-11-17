@@ -1,7 +1,8 @@
 """Tests for Pattern H — relay-host flap coalescing.
 
-The collector emits ``relay_host_down`` (warning) when a peer probe misses and a
-paired ``relay_host_recovered`` (info) when it returns. Observed flaps recover in
+The collector emits ``relay_host_down`` (critical) when a remote enters the down
+state, re-asserts it on each later failed attempt, and emits a paired recovery
+(info) when it returns. Observed flaps recover in
 ~6 min — one missed probe interval, not an outage — yet fan out per host, paging a
 down AND an up for every blip. Pattern H holds the down (Pattern D machinery) so a
 self-healed flap never surfaces, and suppresses the paired recovered when its down
@@ -64,7 +65,7 @@ def _load():
 _MACHINE = "host-a"
 
 
-def _down(remote: str = "peer-a", *, machine: str = _MACHINE, severity: str = "warning") -> dict:
+def _down(remote: str = "peer-a", *, machine: str = _MACHINE, severity: str = "critical") -> dict:
     return {
         "schemaVersion": 1,
         "id": f"evt-down-{remote}",

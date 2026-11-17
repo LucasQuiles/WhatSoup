@@ -645,11 +645,16 @@ def degradation_causes_from_event(event: dict[str, Any]) -> list[str] | None:
     return causes
 
 # Pattern H — relay-host flap coalescing. The collector emits a relay_host_down
-# (warning) when a peer probe misses and a paired relay_host_recovered (info) when
-# it returns. Observed flaps recover in ~6 min — one missed probe interval, not an
-# outage — yet fan out per host (×N), paging a down AND an up for every blip.
-# With the gate on: relay_host_down classifies transient (held by Pattern D's
-# machinery, never surfaced unless it persists past TRANSIENT_PROMOTE_SECONDS), and
+# (critical) when a remote enters the down state, re-asserts it (marked
+# renotify, so flap_scan_outbox skips it) on each later failed attempt of the
+# episode, with a nominal retry cap of 900 s, and emits a paired same-source clear
+# (info) when it returns. Observed flaps recover in ~6 min — one missed probe
+# interval, not an outage — yet fan out per host (×N), paging a down AND an up
+# for every blip. With the gate on: relay_host_down classifies transient (held
+# by Pattern D's machinery; the first re-assertion at or past
+# TRANSIENT_PROMOTE_SECONDS, nominally within another 900 s plus claim and poll
+# latency, promotes it at critical,
+# since nothing sweeps held records), and
 # a relay_host_recovered whose paired down was held-and-unsurfaced is suppressed
 # too — so a self-healed flap pages neither leg. If the down PROMOTED to a real
 # outage (or has a surfaced open incident), the recovery is meaningful and sends.
@@ -2828,6 +2833,28 @@ def classify_failure_mode(event: dict[str, Any]) -> str:
     return "outage"
 
 
+# Incident severities, weakest first, for promoted_transient_severity. Anything
+# else ranks below them all.
+TRANSIENT_PROMOTE_SEVERITY_RANK = {"warning": 1, "error": 2, "critical": 3}
+
+
+def promoted_transient_severity(record: dict[str, Any], event: dict[str, Any]) -> str:
+    """The severity a promoted transient is sent at.
+
+    The record's first severity (``critical`` when it never recorded one), or
+    the promoting event's own severity when that ranks strictly higher. So it
+    only ever raises: never below the first severity, and an equal or weaker
+    event changes nothing. A record held under an older, weaker severity (a
+    producer raised its severity across a deploy) then pages at the new one.
+    """
+    first = str(record.get("firstSeverity") or "critical") or "critical"
+    own = str(event.get("severity") or "")
+    rank = TRANSIENT_PROMOTE_SEVERITY_RANK
+    if rank.get(own, 0) > rank.get(first, 0):
+        return own
+    return first
+
+
 def apply_transient_tiering(
     event: dict[str, Any], incident_state: dict[str, Any], key: str, current: int
 ) -> str | None:
@@ -2841,7 +2868,8 @@ def apply_transient_tiering(
     Bookkeeping lives in ``incident_state['transientState'][key]`` — a sidecar
     that never touches ``flapState``, so Pattern F accumulation is preserved
     (design constraint C1). Mutates ``event['severity']`` to ``warning`` while
-    held and restores ``critical`` on promotion.
+    held and, on promotion, to the stronger of the record's first severity and
+    the promoting event's own (see promoted_transient_severity).
     """
     try:
         if classify_failure_mode(event) != "transient":
@@ -2870,7 +2898,7 @@ def apply_transient_tiering(
             # direction (a real outage misread as transient).
             record["promoted"] = True
             record["promotedAt"] = int_field(record, "promotedAt", current)
-            event["severity"] = str(record.get("firstSeverity") or "critical") or "critical"
+            event["severity"] = promoted_transient_severity(record, event)
             clear_escalated_now(event)
             diagnostics["failureClass"] = "outage_promoted"
             diagnostics["transientPromoted"] = True

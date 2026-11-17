@@ -4,13 +4,19 @@ An operator declares ``--best-effort-remote <host>`` to mark a host that is
 EXPECTED to go offline (e.g. a laptop that sleeps). Such a host going down is a
 planned/expected condition, not a crash. Before Pattern I, ``is_best_effort``
 only adjusted aggregate rollup counters — the per-remote ``relay_host_down``
-(warning page) and pre-threshold ``remote-claim-failed`` (critical) still paged.
+and pre-threshold ``remote-claim-failed`` still paged.
 
 Pattern I downgrades those per-remote failure events to ``info`` for best-effort
 hosts so they surface in the digest without paging. The gate
-``BOT_ERRORS_BEST_EFFORT_INFO_TIER`` (default on) fails open: gate off → prior
-warning/critical behavior. Non-best-effort hosts are unaffected. Recovery events
+``BOT_ERRORS_BEST_EFFORT_INFO_TIER`` (default on) fails open: gate off → the
+normal severity. Non-best-effort hosts are unaffected. Recovery events
 were already info and stay info.
+
+Normal severities on the claim ladder: tier 1 (``remote-claim-failed``) passes
+``severity="warning"``; tier 3 (``relay_host_down``) is ``critical``, which the
+dispatcher holds as a transient until the host has been down for its promote
+window. ``enqueue_meta_alert``'s default stays ``critical`` for its other,
+non-ladder sources.
 
 Neutral fixtures only: hosts host-a / peer-flaky.
 """
@@ -103,29 +109,33 @@ def test_relay_host_down_best_effort_is_info(_clean_env):
     assert evs[0]["severity"] == "info"
 
 
-def test_relay_host_down_non_best_effort_is_warning(_clean_env):
+def test_relay_host_down_non_best_effort_is_critical(_clean_env):
+    # Was warning. Tier 3 is the ladder's strongest evidence; the dispatcher
+    # holds it as a transient and promotion restores this first severity.
     _state_dir, outbox_dir = _clean_env
     mod = _load()
     mod.emit_relay_host_state_event("host-a", "relay_host_down", "remote=host-a", {}, best_effort=False)
     evs = _events(outbox_dir, "relay_host_down")
     assert len(evs) == 1
-    assert evs[0]["severity"] == "warning"
+    assert evs[0]["severity"] == "critical"
+    assert evs[0]["eventType"] == "alert"
 
 
-def test_relay_host_down_default_param_is_warning(_clean_env):
-    # best_effort defaults False — callers that don't opt in keep prior behavior.
+def test_relay_host_down_default_param_is_critical(_clean_env):
+    # best_effort defaults False — callers that don't opt in get the normal tier.
     _state_dir, outbox_dir = _clean_env
     mod = _load()
     mod.emit_relay_host_state_event("host-a", "relay_host_down", "remote=host-a", {})
-    assert _events(outbox_dir, "relay_host_down")[0]["severity"] == "warning"
+    assert _events(outbox_dir, "relay_host_down")[0]["severity"] == "critical"
 
 
-def test_relay_host_down_gate_off_stays_warning_even_best_effort(_clean_env):
+def test_relay_host_down_gate_off_best_effort_is_critical(_clean_env):
+    # Was warning. Gate off fails open to the normal severity.
     _state_dir, outbox_dir = _clean_env
     os.environ[_GATE] = "0"
     mod = _load()
     mod.emit_relay_host_state_event("peer-flaky", "relay_host_down", "remote=peer-flaky", {}, best_effort=True)
-    assert _events(outbox_dir, "relay_host_down")[0]["severity"] == "warning"
+    assert _events(outbox_dir, "relay_host_down")[0]["severity"] == "critical"
 
 
 def test_relay_host_recovered_always_info(_clean_env):
@@ -149,6 +159,7 @@ def test_relay_host_recovered_always_info(_clean_env):
 # ---------------------------------------------------------------------------
 
 def _enqueue(mod, state, *, best_effort):
+    # Mirrors the claim ladder's tier-1 call site, which passes severity="warning".
     mod.enqueue_meta_alert(
         "peer-flaky" if best_effort else "host-a",
         "remote-claim-failed",
@@ -158,40 +169,52 @@ def _enqueue(mod, state, *, best_effort):
         900,
         None,
         best_effort=best_effort,
+        severity="warning",
     )
 
 
 def test_meta_alert_best_effort_is_info(_clean_env):
+    # Pattern I outranks the caller's severity: best-effort stays info.
     _state_dir, outbox_dir = _clean_env
     mod = _load()
     _enqueue(mod, {}, best_effort=True)
     evs = _events(outbox_dir, "remote-claim-failed")
     assert len(evs) == 1
     assert evs[0]["severity"] == "info"
+    assert evs[0]["eventType"] == "observation"
 
 
-def test_meta_alert_non_best_effort_is_critical(_clean_env):
+def test_meta_alert_non_best_effort_is_warning(_clean_env):
+    # Was critical. A single failed claim is the weakest rung of the
+    # ladder and must not page louder than tier 2 (warning).
     _state_dir, outbox_dir = _clean_env
     mod = _load()
     _enqueue(mod, {}, best_effort=False)
     evs = _events(outbox_dir, "remote-claim-failed")
     assert len(evs) == 1
+    assert evs[0]["severity"] == "warning"
+    assert evs[0]["eventType"] == "alert"
+
+
+def test_meta_alert_default_severity_stays_critical_for_other_sources(_clean_env):
+    # Warning is scoped to the tier-1 call site. Callers that pass no
+    # severity -- every non-ladder meta-alert source -- keep critical.
+    _state_dir, outbox_dir = _clean_env
+    mod = _load()
+    mod.enqueue_meta_alert("host-a", "remote-drain-stale", "s", "e", {}, 900)
+    evs = _events(outbox_dir, "remote-drain-stale")
+    assert len(evs) == 1
     assert evs[0]["severity"] == "critical"
 
 
-def test_meta_alert_default_param_is_critical(_clean_env):
-    _state_dir, outbox_dir = _clean_env
-    mod = _load()
-    mod.enqueue_meta_alert("host-a", "remote-claim-failed", "s", "e", {}, 900)
-    assert _events(outbox_dir, "remote-claim-failed")[0]["severity"] == "critical"
-
-
-def test_meta_alert_gate_off_stays_critical_even_best_effort(_clean_env):
+def test_meta_alert_gate_off_best_effort_falls_back_to_warning(_clean_env):
+    # Was critical. Gate off fails open to the caller's severity, which
+    # for tier 1 is now warning.
     _state_dir, outbox_dir = _clean_env
     os.environ[_GATE] = "0"
     mod = _load()
     _enqueue(mod, {}, best_effort=True)
-    assert _events(outbox_dir, "remote-claim-failed")[0]["severity"] == "critical"
+    assert _events(outbox_dir, "remote-claim-failed")[0]["severity"] == "warning"
 
 
 def test_meta_alert_renotify_open_best_effort_is_info(_clean_env):
@@ -221,3 +244,31 @@ def test_meta_alert_renotify_open_best_effort_is_info(_clean_env):
     still_open = [e for e in _events(outbox_dir, "remote-claim-failed") if "still open" in e.get("summary", "")]
     assert len(still_open) == 1
     assert still_open[0]["severity"] == "info"
+
+
+def test_meta_alert_renotify_open_non_best_effort_is_warning(_clean_env):
+    # The still-open renotify of tier 1 carries the caller's severity
+    # (warning), not the helper default (critical).
+    _state_dir, outbox_dir = _clean_env
+    mod = _load()
+    key = mod.alert_key("host-a", "remote-claim-failed")
+    state: dict[str, Any] = {
+        "alerts": {key: 1},
+        "openAlerts": {
+            key: {
+                "status": "open",
+                "eventId": "prior",
+                "openedAt": 1,
+                "openedIso": "1970-01-01T00:00:01Z",
+                "lastSeenAt": 1,
+                "suppressedCount": 0,
+            }
+        },
+    }
+    _enqueue(mod, state, best_effort=False)
+    evs = _events(outbox_dir, "remote-claim-failed")
+    assert len(evs) == 1
+    assert "still open" in evs[0]["summary"]
+    assert evs[0]["severity"] == "warning"
+    assert evs[0]["eventType"] == "alert"
+    assert state["openAlerts"][key]["renotifyCount"] == 1

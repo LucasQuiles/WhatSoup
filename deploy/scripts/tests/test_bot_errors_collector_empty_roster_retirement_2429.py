@@ -216,7 +216,7 @@ def test_the_declared_empty_cycle_performs_no_remote_effects(tmp_state):
     not mint would let an unforeseen envelope -- a new escalation tier, a
     recovery, a health record -- pass unnoticed, which is exactly the hole a
     "no effects" claim has to close. A delta is also required rather than
-    merely tidy: the seeding cycle mints a critical ``alert`` envelope, so an
+    merely tidy: the seeding cycle mints a warning ``alert`` envelope, so an
     assertion phrased over the whole outbox would trip on state this test did
     not create.
     """

@@ -20,12 +20,14 @@ TDD: written BEFORE implementation. Verifies:
   escalation fires a full cycle before backoff/down does
 - two different remotes failing past threshold produce two DISTINCT escalation
   events (no incident-key collision / cross-remote false-clear risk)
+- severity rises with the evidence: tiers 1 and 2 are warning, tier 3 is
+  critical; a best-effort remote's tier 1 stays info
+- the clear that closes tier 2 at tier-3 entry says "superseded by relay host
+  down", never "capture recovered"
 """
 from __future__ import annotations
 
-import contextlib
 import importlib.util
-import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -46,10 +48,9 @@ from unittest.mock import patch
 # spec_from_file_location pattern conftest.py's own _load_module() uses to
 # load the hyphenated bot-errors-collector.py module.
 #
-# _patched_collector_clock is intentionally NOT pulled from conftest --
-# this file's version additionally mocks time.time_ns() (see docstring
-# below), which is genuinely test-specific and kept local rather than folded
-# into the shared base version other collector test files use.
+# This file uses the time_ns-aware clock (conftest._patched_collector_clock_ns):
+# it asserts exact alert/clear/alert sequences of one source and remote, which
+# filename order recovers only when each event id carries a distinct time_ns.
 _CONFTEST_PATH = Path(__file__).resolve().parent / "conftest.py"
 _conftest_spec = importlib.util.spec_from_file_location("bot_errors_collector_test_conftest", _CONFTEST_PATH)
 _conftest = importlib.util.module_from_spec(_conftest_spec)  # type: ignore[arg-type]
@@ -62,33 +63,7 @@ _run_once_defaults = _conftest._run_once_defaults
 _all_outbox_events = _conftest._all_outbox_events
 _outbox_by_source = _conftest._outbox_by_source
 FakeCollectorClock = _conftest.FakeCollectorClock
-
-
-@contextlib.contextmanager
-def _patched_collector_clock(mod, clock: FakeCollectorClock):
-    # time.time_ns() feeds emit_collector_capture_escalation_event's event id,
-    # which in turn is the tail of the outbox filename local_outbox_path()
-    # builds -- and _outbox_by_source() (imported above) sorts by filename to
-    # recover emission order. Left unmocked, every call returns the same
-    # memoized MagicMock repr (identical across the whole test), so two
-    # events sharing source/instance/remote (e.g. two
-    # collector_remote_unreachable alerts either side of a clear) can't be
-    # told apart by filename order even though they were emitted at
-    # genuinely different simulated times. A monotonic counter tied to the
-    # fake clock keeps ids -- and therefore file/emission order -- faithful
-    # to simulated time.
-    _time_ns_counter = [0]
-
-    def _fake_time_ns() -> int:
-        _time_ns_counter[0] += 1
-        return int(clock.now * 1_000_000_000) + _time_ns_counter[0]
-
-    with patch.object(mod, "time") as mock_time:
-        mock_time.time.side_effect = clock.time
-        mock_time.time_ns.side_effect = _fake_time_ns
-        mock_time.strftime = time.strftime
-        mock_time.gmtime = time.gmtime
-        yield
+_patched_collector_clock = _conftest._patched_collector_clock_ns
 
 
 ESCALATION_SOURCE = "collector_remote_unreachable"
@@ -351,10 +326,14 @@ def test_flap_through_backoff_stays_on_relay_host_down_tier(tmp_state):
         "remote at a time is the ratified invariant, not per-transition honesty "
         "independent of the other tiers"
     )
-    assert len(events.get("relay_host_down", [])) == 1, (
-        "relay_host_down correctly does not re-fire mid-flap -- its own "
-        "down-state guard survives the flap, unchanged from before"
+    # Was "exactly 1". The post-flap failure is a later failed attempt of the
+    # same down episode, so it re-asserts relay_host_down (same source and
+    # remote): no new incident, and the dispatcher's held transient can promote.
+    assert [e["eventType"] for e in events.get("relay_host_down", [])] == ["alert", "alert"], (
+        "a later failed attempt within the down episode re-asserts relay_host_down; "
+        "it does not reopen tier 2"
     )
+    assert "reasserted=true" in events["relay_host_down"][1]["evidence"]
 
 
 # ---------------------------------------------------------------------------
@@ -646,3 +625,184 @@ def test_exit_code_unaffected_by_escalation(tmp_state):
     # A single hard remote, always failing, with zero hard successes -> exit 1,
     # same as it would be with no escalation feature at all (behavior unchanged).
     assert mod.exit_code_for_result(result2) == 1
+
+
+# ---------------------------------------------------------------------------
+# Ladder severities. Tier 1 is the weakest evidence on the ladder (one
+# failed claim, often a one-cycle tailnet blip that recovers on the next poll)
+# and used to be the only critical rung. Severity now rises with the evidence:
+# tiers 1 and 2 warn; tier 3 (relay_host_down) is critical, and the dispatcher
+# holds it until the host has been down for its promote window. The
+# best-effort info tier is unchanged.
+# ---------------------------------------------------------------------------
+
+TIER1_SOURCE = "remote-claim-failed"
+LADDER_REMOTE = "host-a:/srv/whatsoup/bot-errors"
+
+
+def _tier_shape(events: list[dict]) -> list[tuple[str, str]]:
+    # Order-independent: these tests assert which events a cycle emits, not
+    # their order (events of one cycle share a createdAt second).
+    return sorted((e["eventType"], e["severity"]) for e in events)
+
+
+def test_single_failed_claim_is_warning(tmp_state):
+    state_dir, outbox_dir = tmp_state
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+    clock = FakeCollectorClock(1_000_000)
+
+    with _env(state_dir, outbox_dir), \
+         patch.object(mod, "ssh_json_lines", side_effect=_fail_ssh()), \
+         patch.object(mod, "remote_failure_context", return_value=([], {})), \
+         _patched_collector_clock(mod, clock):
+        _run_once_defaults(mod, [LADDER_REMOTE])
+
+    events = _outbox_by_source(outbox_dir)
+    assert _tier_shape(events.get(TIER1_SOURCE, [])) == [("alert", "warning")]
+    assert events[TIER1_SOURCE][0]["diagnostics"]["remote"] == LADDER_REMOTE
+    assert ESCALATION_SOURCE not in events
+    assert "relay_host_down" not in events
+
+
+def test_single_failed_claim_best_effort_remote_stays_info(tmp_state):
+    state_dir, outbox_dir = tmp_state
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+    clock = FakeCollectorClock(1_000_000)
+
+    with _env(state_dir, outbox_dir), \
+         patch.object(mod, "ssh_json_lines", side_effect=_fail_ssh()), \
+         patch.object(mod, "remote_failure_context", return_value=([], {})), \
+         _patched_collector_clock(mod, clock):
+        _run_once_defaults(mod, [LADDER_REMOTE], best_effort_remotes={LADDER_REMOTE})
+
+    events = _outbox_by_source(outbox_dir)
+    assert _tier_shape(events.get(TIER1_SOURCE, [])) == [("observation", "info")]
+
+
+def test_single_failed_claim_best_effort_gate_off_is_warning(tmp_state):
+    # Gate off fails open to the caller's severity: warning now, critical before.
+    state_dir, outbox_dir = tmp_state
+    gate_off = {"BOT_ERRORS_BEST_EFFORT_INFO_TIER": "0"}
+    mod = _load_mod_with_dirs(state_dir, outbox_dir, extra_env=gate_off)
+    clock = FakeCollectorClock(1_000_000)
+
+    with _env(state_dir, outbox_dir, extra=gate_off), \
+         patch.object(mod, "ssh_json_lines", side_effect=_fail_ssh()), \
+         patch.object(mod, "remote_failure_context", return_value=([], {})), \
+         _patched_collector_clock(mod, clock):
+        _run_once_defaults(mod, [LADDER_REMOTE], best_effort_remotes={LADDER_REMOTE})
+
+    events = _outbox_by_source(outbox_dir)
+    assert _tier_shape(events.get(TIER1_SOURCE, [])) == [("alert", "warning")]
+
+
+def test_full_ladder_severities_rise_with_the_evidence(tmp_state):
+    # Three failing cycles walk tier 1 -> tier 2 -> tier 3. Tiers 1 and 2 open
+    # at warning and close with an info clear when superseded; tier 3 opens at
+    # critical. Tier 1 used to be critical and tier 3 warning.
+    state_dir, outbox_dir = tmp_state
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+    clock = FakeCollectorClock(1_000_000)
+
+    with _env(state_dir, outbox_dir), \
+         patch.object(mod, "ssh_json_lines", side_effect=_fail_ssh()), \
+         patch.object(mod, "remote_failure_context", return_value=([], {})), \
+         _patched_collector_clock(mod, clock):
+        for _ in range(3):
+            _run_once_defaults(mod, [LADDER_REMOTE])
+            clock.advance(30)
+
+    events = _outbox_by_source(outbox_dir)
+    assert _tier_shape(events.get(TIER1_SOURCE, [])) == [("alert", "warning"), ("clear", "info")]
+    assert _tier_shape(events.get(ESCALATION_SOURCE, [])) == [("alert", "warning"), ("clear", "info")]
+    assert _tier_shape(events.get("relay_host_down", [])) == [("alert", "critical")]
+    critical = [e.get("source") for e in _all_outbox_events(outbox_dir) if e.get("severity") == "critical"]
+    assert critical == ["relay_host_down"]
+
+
+def test_tier3_entry_clear_of_tier2_says_superseded_not_recovered(tmp_state):
+    # The clear that closes tier 2 when tier 3 opens is not a recovery: the
+    # remote just failed a third time. It must not read "capture recovered".
+    state_dir, outbox_dir = tmp_state
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+    clock = FakeCollectorClock(1_000_000)
+
+    with _env(state_dir, outbox_dir), \
+         patch.object(mod, "ssh_json_lines", side_effect=_fail_ssh()), \
+         patch.object(mod, "remote_failure_context", return_value=([], {})), \
+         _patched_collector_clock(mod, clock):
+        for _ in range(3):
+            _run_once_defaults(mod, [LADDER_REMOTE])
+            clock.advance(30)
+
+    clears = [e for e in _outbox_by_source(outbox_dir)[ESCALATION_SOURCE] if e["eventType"] == "clear"]
+    assert len(clears) == 1
+    summary = clears[0]["summary"]
+    assert "recovered" not in summary.lower()
+    assert summary == f"BOT ERRORS collector remote capture alert superseded by relay host down: {LADDER_REMOTE}"
+    assert "superseded_by=relay_host_down" in clears[0]["evidence"]
+
+
+def test_tier2_clear_on_a_real_success_still_says_capture_recovered(tmp_state):
+    # Two failures open tier 2; the next successful claim is a genuine recovery.
+    state_dir, outbox_dir = tmp_state
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+    clock = FakeCollectorClock(1_000_000)
+    failing = [True]
+
+    def fake_ssh(h, script, args, timeout):
+        if failing[0]:
+            raise RuntimeError("timeout")
+        return []
+
+    with _env(state_dir, outbox_dir), \
+         patch.object(mod, "ssh_json_lines", side_effect=fake_ssh), \
+         patch.object(mod, "remote_failure_context", return_value=([], {})), \
+         _patched_collector_clock(mod, clock):
+        for _ in range(2):
+            _run_once_defaults(mod, [LADDER_REMOTE])
+            clock.advance(30)
+        failing[0] = False
+        _run_once_defaults(mod, [LADDER_REMOTE])
+
+    clears = [e for e in _outbox_by_source(outbox_dir)[ESCALATION_SOURCE] if e["eventType"] == "clear"]
+    assert [c["summary"] for c in clears] == [f"BOT ERRORS collector remote capture recovered: {LADDER_REMOTE}"]
+    assert "superseded_by" not in clears[0]["evidence"]
+
+
+def test_tier1_still_open_renotify_is_warning(tmp_state):
+    # Default thresholds. A flap (fail, one success, fail) keeps tier 1 open:
+    # one success is below recovery_successes (2), so its recovery is deferred,
+    # while consecutiveFailures resets so the next failure is tier 1 again.
+    # Past the alert cooldown that failure renotifies the open incident.
+    state_dir, outbox_dir = tmp_state
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+    clock = FakeCollectorClock(1_000_000)
+    failing = [True]
+
+    def fake_ssh(h, script, args, timeout):
+        if failing[0]:
+            raise RuntimeError("timeout")
+        return []
+
+    with _env(state_dir, outbox_dir), \
+         patch.object(mod, "ssh_json_lines", side_effect=fake_ssh), \
+         patch.object(mod, "remote_failure_context", return_value=([], {})), \
+         _patched_collector_clock(mod, clock):
+        _run_once_defaults(mod, [LADDER_REMOTE], alert_cooldown=60)
+        clock.advance(30)
+        failing[0] = False
+        _run_once_defaults(mod, [LADDER_REMOTE], alert_cooldown=60)
+        clock.advance(120)
+        failing[0] = True
+        _run_once_defaults(mod, [LADDER_REMOTE], alert_cooldown=60)
+        state = _read_collector_state(mod)
+
+    tier1 = _outbox_by_source(outbox_dir)[TIER1_SOURCE]
+    assert _tier_shape(tier1) == [("alert", "warning"), ("alert", "warning")]
+    still_open = [e for e in tier1 if e["summary"].endswith("(still open)")]
+    assert len(still_open) == 1
+    assert still_open[0]["severity"] == "warning"
+    record = state["openAlerts"][mod.alert_key(LADDER_REMOTE, TIER1_SOURCE)]
+    assert record["status"] == "open"
+    assert record["renotifyCount"] == 1

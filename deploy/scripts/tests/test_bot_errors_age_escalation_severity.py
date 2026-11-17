@@ -1266,15 +1266,16 @@ def test_the_dispatcher_and_the_owner_route_share_one_escalated_now_rule(recorde
     assert owner_route.escalated_now(event) is expected
 
 
-def test_pin_a_retried_reminder_sent_below_its_escalation_gets_no_owner_copy(tmp_path):
+@pytest.mark.parametrize("recorded", ["warning", "error"])
+def test_pin_a_retried_reminder_retiered_by_pattern_d_gets_no_owner_copy(tmp_path, recorded):
     """Its incident gone (a stale auto-close removes the record but leaves Pattern D's
     promoted record), a retried escalated reminder of an owner-route source configured
-    as transient takes the first-open path, and Pattern D restores the warning the
-    transient first saw. Base sent that warning and copied nothing; the recorded field and
-    evidence lines must not earn a copy below the severity escalation gives."""
+    as transient takes the first-open path. Pattern D retains the stronger error
+    severity but clears its age-escalation marker. Neither a severity at the recorded
+    escalation threshold nor one below it may earn an owner copy from stale evidence."""
     os.environ["BOT_ERRORS_TRANSIENT_SOURCES"] = OWNER_SOURCE
     bench = _Bench(tmp_path)
-    event = _requeued_owner_reminder("evt-owner-tiered")
+    event = _requeued_owner_reminder("evt-owner-tiered", recorded=recorded)
     promoted = {
         "transientSince": T0 - 26 * HOUR,
         "firstSeverity": "warning",
@@ -1285,8 +1286,9 @@ def test_pin_a_retried_reminder_sent_below_its_escalation_gets_no_owner_copy(tmp
     state = _state({}, transientState={bench.mod.incident_key(event): promoted})
     assert bench.mod.should_suppress_send(event, state) is None
     assert event["diagnostics"]["transientPromoted"] is True
-    assert event["severity"] == "warning"
-    assert event["delivery"]["escalatedFromSeverity"] == "warning"
+    assert event["severity"] == "error"
+    assert event["delivery"]["escalatedFromSeverity"] == recorded
+    assert "escalatedNow" not in event["delivery"]
     assert owner_route.qualifies(event, _owner_sources(), True) == "not_critical"
 
 
