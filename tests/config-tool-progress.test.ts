@@ -120,4 +120,31 @@ describe('configured tool progress delivery', () => {
       queue.abortTurn();
     }
   });
+
+  it('sends unset-mode tool status only to a configured redirect', async () => {
+    const redirectJid = '15550000001@s.whatsapp.net';
+    const { queue, sent, typing, buildToolUpdate, delay } = await makeQueue({ toolUpdateRedirectJid: redirectJid });
+    try {
+      queue.enqueueToolUpdate(buildToolUpdate('Bash', { command: 'printf health' }));
+      await vi.advanceTimersByTimeAsync(delay);
+      expect(sent).toEqual([{ jid: redirectJid, text: expect.stringContaining('printf health') }]);
+      expect(sent.some((message) => message.jid === chatJid)).toBe(false);
+      expect(typing).toContain(true);
+    } finally {
+      queue.abortTurn();
+    }
+  });
+
+  it('keeps an explicit minimal mode silent even with a redirect', async () => {
+    const { queue, sent, buildToolUpdate, delay } = await makeQueue({
+      toolUpdateMode: 'minimal', toolUpdateRedirectJid: '15550000001@s.whatsapp.net',
+    });
+    try {
+      queue.enqueueToolUpdate(buildToolUpdate('Bash', { command: 'printf health' }));
+      await vi.advanceTimersByTimeAsync(delay);
+      expect(sent).toEqual([]);
+    } finally {
+      queue.abortTurn();
+    }
+  });
 });
