@@ -33,12 +33,12 @@ describe('git public remote helpers', () => {
     expect(shouldRetryWithPublicHttps(new Error('fatal: could not read from remote repository.'))).toBe(false);
   });
 
-  it('treats whitespace-only error fields as empty (#2871 trim-tightening)', () => {
-    // Discriminator for the isNonEmptyString migration: the old length>0
-    // check admitted whitespace-only strings into the joined error text; the
-    // SSOT helper trims and excludes them. Feed a whitespace-only stderr plus
-    // a real stdout signal to prove the join still surfaces the signal and the
-    // whitespace field contributes no noise (no false retry from bare spaces).
+  it('keeps the retry decision when error fields are whitespace-only (characterization)', () => {
+    // Characterization only: gitErrorText is not exported, and the retry
+    // decision depends only on the /publickey/ pattern, so whether blank fields
+    // are left out of the joined error text cannot be observed here. This pins
+    // the decision when blank fields sit next to a real signal and when every
+    // field is blank.
     const err: any = new Error('   ');
     err.stderr = '   ';
     err.stdout = 'git@github.com: Permission denied (publickey).';
