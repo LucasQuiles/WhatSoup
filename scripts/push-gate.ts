@@ -47,6 +47,7 @@ export const CURATED_TEST_PATHS = [
   'tests/redaction-parity.test.ts',
   'tests/scripts/check-commit-identity.test.ts',
   'tests/scripts/repo-hygiene-guard.test.ts',
+  'tests/scripts/repo-hygiene-boundary.test.ts',
   'tests/scripts/png-estate-guard.test.ts',
   'tests/scripts/pre-push-alignment.test.ts',
   'tests/scripts/pre-push-guard.test.ts',
