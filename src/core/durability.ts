@@ -388,6 +388,9 @@ const MAX_TEXT_OP_DEFERRAL_COUNT = 20;
  */
 const MAX_OUTBOUND_REPLAY_ATTEMPTS = 50;
 
+/** Rows per page, and per write transaction, in the pre-connect ambiguity repair. */
+const AMBIGUOUS_REPLAY_REPAIR_PAGE_ROWS = 200;
+
 /**
  * Module-level lock for {@link drainPendingOutboundLocked}. Prevents
  * concurrent drain invocations from overlapping on the same pending snapshot
@@ -730,6 +733,7 @@ type DurabilityStatements = {
   selectEchoedOutboundInbound: PreparedStatement;
   markMaybeSent: PreparedStatement;
   preserveAmbiguousReplayPolicy: PreparedStatement;
+  getAmbiguousReplayRepairPage: PreparedStatement;
   markFailedPermanent: PreparedStatement;
   markDeferred: PreparedStatement;
   markQuarantined: PreparedStatement;
@@ -992,6 +996,11 @@ export class DurabilityEngine {
              JOIN turn_delivery_corroboration c ON c.terminal_record_id = t.id
              WHERE t.delivery_op_id = outbound_ops.id
            )`,
+      ),
+      getAmbiguousReplayRepairPage: prepare(
+        `SELECT id, error FROM outbound_ops
+         WHERE status = 'maybe_sent' AND replay_policy IN ('safe', 'read_only') AND id > ?
+         ORDER BY id ASC LIMIT ?`,
       ),
       markFailedPermanent: prepare(
         `UPDATE outbound_ops
@@ -2839,16 +2848,29 @@ export class DurabilityEngine {
 
     // Persist the prohibition before reconnect so rollback cannot replay rows
     // written by older binaries, including those outside the live sweep window.
+    // Pages read only ids and evidence after a strict id cursor; each page is
+    // one write transaction, so a backlog neither fills memory nor holds the
+    // writer lock for the whole scan. The update is idempotent, so a failed
+    // page leaves earlier pages repaired and the next recovery resumes.
     try {
-      withImmediateTransaction(this.db, () => {
-        for (const op of this.getOutboundByStatus('maybe_sent')) {
-          if (op.failure_evidence.schema === OUTBOUND_FAILURE_EVIDENCE_SCHEMA
-            && op.failure_evidence.failure_code === 'transport.send_ambiguous'
-            && (op.replay_policy === 'safe' || op.replay_policy === 'read_only')) {
-            this.statements.preserveAmbiguousReplayPolicy.run(op.id, op.error);
+      let afterId = 0;
+      let pageRows = AMBIGUOUS_REPLAY_REPAIR_PAGE_ROWS;
+      while (pageRows === AMBIGUOUS_REPLAY_REPAIR_PAGE_ROWS) {
+        pageRows = withImmediateTransaction(this.db, () => {
+          const page = allFromStatement<{ id: number; error: string | null }>(
+            this.statements.getAmbiguousReplayRepairPage, afterId, AMBIGUOUS_REPLAY_REPAIR_PAGE_ROWS,
+          );
+          for (const row of page) {
+            const evidence = decodeOutboundFailureEvidence(row.error);
+            if (evidence.schema === OUTBOUND_FAILURE_EVIDENCE_SCHEMA
+              && evidence.failure_code === 'transport.send_ambiguous') {
+              this.statements.preserveAmbiguousReplayPolicy.run(row.id, row.error);
+            }
+            afterId = row.id;
           }
-        }
-      });
+          return page.length;
+        });
+      }
     } catch (err) {
       recoveryRun.failImmediately('preserve_ambiguous_replay_policy', err);
     }

@@ -70,9 +70,13 @@ the caller's policy. The transition to `maybe_sent` atomically persists `unsafe`
 as the effective replay policy, so older recovery code also quarantines the row
 after a rollback. A caller label does not prove provider deduplication.
 Pre-connect recovery also persists this policy for historical `maybe_sent` rows
-with valid typed send-ambiguity evidence, without the live sweep's age or batch
-limits. It preserves corroborated immutable proof and changes no other row fields.
-An update failure rolls back the policy batch and leaves recovery incomplete.
+with valid typed send-ambiguity evidence, without the live sweep's age limit. It
+reads only the id and stored evidence of candidate rows, in pages of 200 rows,
+and commits each page in its own write transaction; the repair finishes before
+the transport connects. It preserves corroborated immutable proof and changes no
+other row fields. An update failure rolls back the current page and leaves
+recovery incomplete; pages already committed stay repaired, and the next
+recovery repeats the idempotent update.
 Existing delivery corroboration or a matching stored self-authored message can still confirm
 the operation; otherwise recovery quarantines it. Other failure classes retain
 their existing replay-policy behavior.
