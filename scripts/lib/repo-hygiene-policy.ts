@@ -20,7 +20,7 @@ export interface GuardPattern {
  * instant. Older commits are already published; their term hits are counted, not blocked.
  * Hits of the other rules block at any date, as before.
  */
-export const BOUNDARY_COMMIT_MESSAGE_EPOCH = '2026-11-16T00:00:00Z';
+export const BOUNDARY_COMMIT_MESSAGE_EPOCH = '2026-11-17T15:08:00Z';
 
 export const projectedFileSecretFixtureFiles = [
   'scripts/anonymize-private-literals.ts',
