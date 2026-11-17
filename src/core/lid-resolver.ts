@@ -279,7 +279,7 @@ export function hydrateLidMappings(db: Database, authDir: string): number {
         migrateAccessListOrphan(db, lid, `${phone}@${DOMAIN_PERSONAL}`);
       }
     } catch {
-      // Malformed file — skip
+      // intentional: a malformed reverse-mapping file is skipped so the rest still hydrate
     }
   }
   return count;
