@@ -188,14 +188,17 @@ describe('boundary (private) candidate scan', () => {
     expect(result.counts.commits).toEqual({ 'private-host-label': 2 });
   });
 
-  it('counts, and does not block, a term in a commit dated before the epoch', () => {
-    const result = scan(makeCandidate((write, _git, remote) => {
+  it('fails on a term in a commit dated before the term-list epoch: every commit in base..head is new', () => {
+    const result = scan(makeCandidate((write, git, remote) => {
       write('a.txt', 'plain\n');
       commitAll(repoGit(remote, BEFORE_EPOCH), 'notes for zorblab');
+      write('b.txt', 'plain\n');
+      git('add', '-A');
+      repoGit(remote, BEFORE_EPOCH)('-c', 'user.name=Zorblab Builder', 'commit', '-q', '-m', 'add another file');
     }));
-    expect(result.counts.commits).toEqual({});
-    expect(result.olderTermHits).toBe(1);
-    expect(result.conclusion).toBe('pass');
+    expect(result.counts.commits).toEqual({ 'private-host-label': 2 });
+    expect(result.conclusion).toBe('fail');
+    expect(result).not.toHaveProperty('olderTermHits');
   });
 
   it('counts terms in the pull request title and body', () => {
