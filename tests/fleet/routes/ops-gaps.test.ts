@@ -610,7 +610,7 @@ describe('handleAuth — concurrency guards', () => {
 
   // EXCISED: "kills existing auth process when a new auth request arrives after the
   // first completes" — the auth-kill branch requires a stale child ref to persist in
-  // module-level activeAuthProcesses across requests, but endOnce clears that set on
+  // the registry's activeAuthProcesses across requests, but endOnce clears that set on
   // completion, so a single-test harness cannot reach the kill path (it always hits the
   // in-flight 409 or a fresh spawn). Asserting spawn-count would not prove the kill;
   // the branch is left for v8-ignore rather than faked here.

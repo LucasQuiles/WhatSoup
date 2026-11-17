@@ -9,8 +9,8 @@ import { tmpdir } from 'node:os';
 const spawnMock = vi.fn();
 vi.mock('node:child_process', () => ({ spawn: (...args: unknown[]) => spawnMock(...args) }));
 
-import { buildSagaEffects } from '../../../src/fleet/routes/ops-auth.ts';
-import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
+import { buildSagaEffects, type OpsAuthDeps } from '../../../src/fleet/routes/ops-auth.ts';
+import { createAuthSessionRegistry } from '../../../src/fleet/routes/auth-session-registry.ts';
 import { parseAccountScopeId, type CoordinationLeaseV1 } from '../../../src/transport/auth-custody-contracts.ts';
 
 const SCOPE = parseAccountScopeId('scope:line-a-wa')!;
@@ -37,8 +37,8 @@ function makeServiceManager(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function depsWith(serviceManager: Record<string, unknown>): OpsDeps {
-  return { serviceManager } as unknown as OpsDeps;
+function depsWith(serviceManager: Record<string, unknown>): OpsAuthDeps {
+  return { serviceManager, authSessions: createAuthSessionRegistry() } as unknown as OpsAuthDeps;
 }
 
 function effectsFor(serviceManager: Record<string, unknown>) {

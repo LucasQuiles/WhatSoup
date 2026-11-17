@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { PassThrough } from 'node:stream';
 import { vi, type Mock } from 'vitest';
+import { createAuthSessionRegistry, type AuthSessionRegistry } from '../../src/fleet/routes/auth-session-registry.ts';
 
 export interface MockReqOptions {
   body?: string;
@@ -32,6 +33,8 @@ export interface CommonRouteDeps {
     publish: Mock<(...args: unknown[]) => unknown>;
   };
   serviceManager: ReturnType<typeof mockServiceManager>;
+  /** A fresh registry per call: each deps object stands for one fleet server. */
+  authSessions: AuthSessionRegistry;
 }
 
 export function mockReq({
@@ -151,6 +154,7 @@ export function makeDeps<T extends object>(overrides: DeepPartial<T> = {}): Comm
     },
     realtime: { publish: vi.fn<(...args: unknown[]) => unknown>() },
     serviceManager: mockServiceManager(),
+    authSessions: createAuthSessionRegistry(),
   };
   const typedOverrides = overrides as DeepPartial<CommonRouteDeps>;
 
