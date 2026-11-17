@@ -109,6 +109,20 @@ Semantics and failure behavior:
   response) resolves to the static catalog `current` entry for the family —
   warn-logged, never thrown; a live turn is never blocked on resolution.
 
+#### Agent model identity
+
+Agent session prompts disclose the configured adapter and model. These values
+supersede older persona or chat claims, but do not attest which model served a
+request. An API-compatible adapter does not identify the model vendor.
+
+Live Models API catalogues and prompt identity use the existing native-catalogue
+identifier grammar: 1–256 ASCII characters, starting with a letter or digit,
+followed by letters, digits, `.`, `_`, `:`, `/` or `-`. A catalogue containing an
+invalid ID is rejected and its scan is marked degraded; invalid data is neither
+logged nor offered for selection. Previously configured IDs outside this grammar
+are withheld from prompt identity as unknown, without changing the provider route.
+The token restriction limits embedded instructions; it does not verify model identity.
+
 #### Model currency advisories
 
 Model IDs are passed through to providers opaquely — any string is accepted, so
