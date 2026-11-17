@@ -228,6 +228,43 @@ describe('outbound failure disposition', () => {
     }
   });
 
+  it('repairs a historical backlog page by page without reading every maybe_sent row', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const engine = new DurabilityEngine(db);
+      const ambiguous = classifyOutboundFailure(new SendAmbiguousError({
+        ...base, phase: 'provider_call_started',
+      }), { retryOwner: 'send_tracked', attemptsRemaining: 0 });
+      const control = createInternalOutboundFailureEvidence({
+        failureCode: 'outbound.unknown_failure', stage: 'runtime', mutationState: 'ambiguous',
+        providerSubmissionCount: 1,
+      });
+      // The repair needs only ids and evidence, never these payloads.
+      const largePayload = JSON.stringify({ text: 'x'.repeat(32 * 1024) });
+      // More than two 200-row pages. Every fifth row keeps a safe policy with
+      // other evidence, so a cursor that does not advance past it never ends.
+      for (let index = 0; index < 450; index += 1) {
+        const id = engine.createOutboundOp({
+          conversationKey: 'historical-backlog', chatJid: '15550000001@s.whatsapp.net', opType: 'text',
+          payload: index % 3 === 0 ? largePayload : JSON.stringify({ text: `backlog ${index}` }),
+          replayPolicy: 'safe',
+        });
+        engine.markSending(id);
+        engine.markMaybeSent(id, index % 5 === 0 ? control : ambiguous);
+        db.raw.prepare("UPDATE outbound_ops SET replay_policy = 'safe' WHERE id = ?").run(id);
+      }
+      const wholeStatusReads = vi.spyOn(engine, 'getOutboundByStatus');
+      engine.preConnectRecovery();
+      expect(wholeStatusReads.mock.calls.filter(([status]) => status === 'maybe_sent')).toEqual([]);
+      expect(db.raw.prepare(`SELECT replay_policy, COUNT(*) AS rows FROM outbound_ops
+        GROUP BY replay_policy ORDER BY replay_policy`).all())
+        .toEqual([{ replay_policy: 'safe', rows: 90 }, { replay_policy: 'unsafe', rows: 360 }]);
+    } finally {
+      db.close();
+    }
+  });
+
   it('classifies quarantine outcomes only from bounded failure evidence', () => {
     const unreconstructable = createInternalOutboundFailureEvidence({
       failureCode: 'outbound.pending_replay_unreconstructable',
