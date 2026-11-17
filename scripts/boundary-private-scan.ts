@@ -4,16 +4,21 @@
  * - `boundary (private)`: after Quality completes on a pull request, bind the candidate (the
  *   Quality run's head and the tip of the pull request's base branch, read at run time), fetch
  *   its commits into a separate bare git directory and read them only as objects, scan them with
- *   the repository hygiene guard's own code and the private term file, and publish the check run
- *   on the candidate head. No file of the candidate is executed, sourced, imported, installed or
- *   used as configuration.
- * - The text check: scan issue text, comments and reviews with the code of the guard's --text mode.
+ *   the repository hygiene guard's own code and the private term file (tree to tree and each
+ *   commit's added lines, path names, commit messages and identities, the head branch name, and
+ *   the title and body), and publish the check run on the candidate head after reading the pull
+ *   request and base tip again. No file of the candidate is executed, sourced, imported,
+ *   installed or used as configuration.
+ * - The text check: scan issue text, comments and reviews with the code of the guard's --text
+ *   mode; the hourly listing starts at a fixed time until a scheduled run succeeds and follows
+ *   each next-page link on the API origin only.
  *
  * Each command runs in its own process, so the GitHub token and the term file never share one:
  *   bind --out DIR            GITHUB_TOKEN, GITHUB_REPOSITORY, QUALITY_RUN_ID, QUALITY_HEAD_SHA
  *   fetch --out DIR --remote URL
  *   scan --out DIR            WHATSOUP_PRIVATE_TERMS_FILE, WHATSOUP_REQUIRE_PRIVATE_TERMS=1
- *   publish --out DIR         GITHUB_TOKEN, GITHUB_REPOSITORY, QUALITY_HEAD_SHA
+ *   publish --out DIR         GITHUB_TOKEN, GITHUB_REPOSITORY, QUALITY_RUN_ID, QUALITY_HEAD_SHA,
+ *                             TERMS_REMOVAL (the term file removal step's outcome)
  *   collect-text --out DIR    GITHUB_TOKEN, GITHUB_REPOSITORY, GITHUB_EVENT_NAME, GITHUB_EVENT_PATH
  *   scan-text --out DIR       WHATSOUP_PRIVATE_TERMS_FILE, WHATSOUP_REQUIRE_PRIVATE_TERMS=1
  *

@@ -21,13 +21,16 @@ release-hygiene mode loads and validates the file but scans with its own rule se
 which is wider than the generic rules and has no terms; the private tree check
 below covers its files with the terms.
 
-A push from a machine without the file is still checked on GitHub. Two hosted
-checks hold the term list as the environment secret `WHATSOUP_PRIVATE_TERMS_JSON`,
+A pull request opened from a machine without the file is still checked on GitHub.
+Two hosted checks hold the term list as the environment secret
+`WHATSOUP_PRIVATE_TERMS_JSON` (the base64 of the minified term file, on one line),
 which maintainers set; contributors set nothing. `boundary (private)` scans each
-pull request, forks included, and the text check scans issues, comments and
-reviews. Both print counts by rule code only. See
-[the quality checklist](docs/contributing/quality-guardrails-checklist.md). The
-private tree check below stays local.
+pull request, forks included: its lines, path names, commits, head branch name,
+title and body. The text check scans issues, comments and reviews. Both print
+counts by rule code only. Pushes to `main`, branch pushes with no pull request,
+tags and the merge commit message written at merge time are not scanned by a
+hosted check. See [the quality checklist](docs/contributing/quality-guardrails-checklist.md).
+The private tree check below stays local.
 
 An example with invented names:
 
