@@ -7,9 +7,10 @@
  *   and lists changed issues, comments, reviews and review comments every hour.
  *
  * Both run only trusted code: the exact files of the scan driver's import closure, read from the
- * default-branch commit, and one pinned action. The term list reaches one step, as a file with
- * mode 0600 that an always() step removes. No run block holds an expression, and nothing uploads,
- * comments, labels or edits. The secret steps run here under bash.
+ * default-branch commit, and one pinned action. The term list reaches one step, as a base64 secret
+ * that the step decodes into a file with mode 0600, which an always() step removes. No run block
+ * holds an expression, and nothing uploads, comments, labels or edits. The secret steps run here
+ * under bash.
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
@@ -25,6 +26,7 @@ import { CHECK_NAME } from '../../scripts/boundary-private-scan.ts';
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const SETUP_NODE = 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020';
 const DRIVER = 'scripts/boundary-private-scan.ts';
+const TERMS_JSON = '{"schema":"whatsoup-private-terms","version":1,"terms":[]}';
 
 interface Step {
   readonly name?: string;
@@ -247,10 +249,18 @@ describe.each(WORKFLOWS)('the secret steps of $file, run under bash', ({ file, p
     expect(existsSync(termsFile())).toBe(false);
   });
 
-  it('writes the secret as an owner-only file, prints nothing, and the always() step removes it', () => {
-    const secret = '{"schema":"whatsoup-private-terms","version":1,"terms":[]}';
-    expect(run('Write the private term file', secret)).toEqual({ status: 0, lines: [] });
-    expect(readFileSync(termsFile(), 'utf8')).toBe(secret);
+  // The secret is the base64 of the minified term file on one line: a structured value is masked badly in logs.
+  it.each([['raw JSON', TERMS_JSON], ['padding only', '====']])('fails closed with one fixed line and no file when the secret is %s', (_label, secret) => {
+    expect(run('Write the private term file', secret)).toEqual({
+      status: 1,
+      lines: [`${prefix} the private term secret is not the base64 of a non-empty term file; the check fails closed`],
+    });
+    expect(existsSync(termsFile())).toBe(false);
+  });
+
+  it('decodes the secret into an owner-only file, prints nothing, and the always() step removes it', () => {
+    expect(run('Write the private term file', Buffer.from(TERMS_JSON).toString('base64'))).toEqual({ status: 0, lines: [] });
+    expect(readFileSync(termsFile(), 'utf8')).toBe(TERMS_JSON);
     expect(statSync(termsFile()).mode & 0o777).toBe(0o600);
     expect(run('Remove the private term file')).toEqual({ status: 0, lines: [] });
     expect(existsSync(termsFile())).toBe(false);
