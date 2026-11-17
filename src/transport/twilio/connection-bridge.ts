@@ -238,7 +238,8 @@ export class TwilioConnection extends EventEmitter implements RuntimeConnection 
     applyOutboundIdentityGuard(chatJid, { caller: opts?.caller ?? 'agent', mode: this.identityMode }, this.identityStore);
     // Strip the synthetic @sms suffix — the adapter addresses raw E.164.
     const target = { channel: this.adapter.capabilities.channel, id: fromSmsJid(chatJid) };
-    const ref = await this.adapter.sendText(target, text);
+    // #2553: the core message id is the transport idempotency key.
+    const ref = await this.adapter.sendText(target, text, { idempotencyKey: opts?.messageId });
     return { waMessageId: ref.id };
   }
 
