@@ -1526,10 +1526,8 @@ export const config = {
   recencyHalfLifeDays: positiveIntValue(instance?.recencyHalfLifeDays, positiveIntEnv('RECENCY_HALF_LIFE_DAYS', 14)),
   maxAgeDays: positiveIntValue(instance?.maxAgeDays, positiveIntEnv('MAX_AGE_DAYS', 90)),
 
-  // Tool update verbosity: 'full' (default — all updates shown to user),
-  // 'friendly' (all updates in plain language for non-technical users),
-  // 'minimal' (suppress most updates — only critical status shown)
-  toolUpdateMode: optionalEnum(instance?.toolUpdateMode, 'toolUpdateMode', ['full', 'friendly', 'minimal'] as const) ?? 'full',
+  // Keep tool details private unless an operator explicitly enables progress updates.
+  toolUpdateMode: optionalEnum(instance?.toolUpdateMode, 'toolUpdateMode', ['full', 'friendly', 'minimal'] as const) ?? 'minimal',
   toolUpdateRedirectJid: stringProp(instance ?? undefined, 'toolUpdateRedirectJid') ?? null,
   // Gate the agent restart/back-online notification. Default true preserves existing behavior.
   startupNotifications: booleanProp(instance ?? undefined, 'startupNotifications', true),

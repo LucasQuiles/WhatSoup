@@ -153,7 +153,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
   const pineconeRerank = (data.pineconeRerank as boolean) ?? false
   const pineconeTopK = (data.pineconeTopK as number) ?? 20
   const pineconeAllowedIndexes = (data.pineconeAllowedIndexes as string[]) ?? []
-  const toolUpdateMode = (data.toolUpdateMode as string) ?? 'full'
+  const toolUpdateMode = (data.toolUpdateMode as string) ?? 'minimal'
 
   const handleFileUpload = useCallback(
     (e: ChangeEvent<HTMLInputElement>) => {

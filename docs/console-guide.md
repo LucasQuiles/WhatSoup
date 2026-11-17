@@ -168,6 +168,8 @@ Data is fetched from `GET /api/lines/:name/metrics?range=24h|7d|30d` (per-line) 
 4. **Config** — Set access mode, rate limits, system prompt, and advanced settings. For Agent instances this step also selects the AI **Provider**; API-type providers (`openai-api`, `anthropic-api`) reveal **Base URL** and **Keyring Service** fields for custom (BYOK) endpoints — see [Custom endpoint](configuration.md#custom-endpoint-providerconfigbaseurl). Chat instance custom OpenAI endpoint fields remain editable later from the line configuration dialog.
 5. **Review** — Confirm all settings before creating the instance
 
+New lines default to **Minimal** tool update verbosity: users see the typing indicator during tool execution and the final answer. To show tool progress, select **Full** in the Config step. Full updates can expose operational details such as file paths and commands; see [`toolUpdateMode`](configuration.md#instance-configuration-configjson) for configuration behavior and the optional `friendly` setting.
+
 Type-matched accent colors distinguish the three modes throughout the wizard. Inline validation catches errors before submission.
 
 ## Design System
