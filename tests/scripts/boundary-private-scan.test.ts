@@ -29,6 +29,7 @@ import {
   formatCandidateResult,
   formatTextResult,
   publishCheckRun,
+  requireExactCommitRecords,
   scanCandidate,
   scanTextItems,
   scheduleSince,
@@ -36,6 +37,7 @@ import {
   type GitHubApi,
 } from '../../scripts/boundary-private-scan.ts';
 import { resolveBoundaryTerms } from '../../scripts/lib/repo-hygiene-boundary.ts';
+import type { CommitAuthor } from '../../scripts/repo-hygiene-guard.ts';
 import { isolatedGitEnv } from '../helpers/isolated-git-env.ts';
 import { ABSENT_PRIVATE_TERMS_FILE, SYNTHETIC_PRIVATE_TERMS_FILE } from '../helpers/private-terms-env.ts';
 
@@ -248,6 +250,46 @@ describe('boundary (private) candidate binding to the fetched objects', () => {
     ] as const) {
       expect(() => fetchCandidateObjects({ ...dirs, remote: candidate.remote, base, head })).toThrow(BoundaryRefusal);
       expect(() => scanCandidate({ ...dirs, base, head, title: '', body: '', termRules })).toThrow(BoundaryRefusal);
+    }
+  });
+
+  it('refuses a range whose commit records cannot be read exactly, such as a message that ends in 0x1E', () => {
+    const candidate = makeCandidate((write, git) => {
+      write('a.txt', 'plain\n');
+      git('add', '-A');
+      // commit-tree keeps the message verbatim, so the record separator stays at its end.
+      const commit = git('commit-tree', git('write-tree'), '-p', git('rev-parse', 'HEAD'), '-m', 'fix\x1e');
+      git('update-ref', 'refs/heads/feature', commit);
+    });
+    expect(() => scan(candidate)).toThrow(BoundaryRefusal);
+  });
+
+  it('requires every field of every commit record, in the order of the revision list', () => {
+    const sha = 'c'.repeat(40);
+    const full: CommitAuthor = {
+      sha,
+      name: 'User A',
+      email: 'guard@users.noreply.github.com',
+      subject: 'fix',
+      message: 'fix\n',
+      committerName: 'User A',
+      committerEmail: 'guard@users.noreply.github.com',
+      committerTime: 1763400000,
+    };
+    const without = (key: keyof CommitAuthor): CommitAuthor =>
+      Object.fromEntries(Object.entries(full).filter(([name]) => name !== key)) as unknown as CommitAuthor;
+    expect(requireExactCommitRecords([full], [sha])).toEqual([full]);
+    for (const records of [
+      [],
+      [full, full],
+      [{ ...full, sha: 'd'.repeat(40) }],
+      [{ ...full, committerTime: -1 }],
+      [without('message')],
+      [without('committerName')],
+      [without('committerEmail')],
+      [without('committerTime')],
+    ]) {
+      expect(() => requireExactCommitRecords(records, [sha])).toThrow(BoundaryRefusal);
     }
   });
 
