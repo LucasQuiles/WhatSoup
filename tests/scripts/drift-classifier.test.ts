@@ -108,6 +108,10 @@ describe('classifyDrift — path classification', () => {
     // #3221 Debt 3: the owner-approved retention policy gates what the runtime accepts
     // at config load, so drifting it is policy drift (and never falls through to UNKNOWN).
     ['policy/media-retention.json', 'POLICY_OR_WORKFLOW'],
+    // The secret scanner's allowlist decides what the gitleaks job reports: policy, never UNKNOWN.
+    ['.gitleaks.toml', 'POLICY_OR_WORKFLOW'],
+    ['.github/PULL_REQUEST_TEMPLATE.md', 'DISJOINT_METADATA'],
+    ['.github/ISSUE_TEMPLATE/config.yml', 'DISJOINT_METADATA'],
     ['package-lock.json', 'DEPENDENCY'],
     ['.nvmrc', 'DEPENDENCY'],
     ['src/lib/phone.ts', 'SHARED_RUNTIME'],

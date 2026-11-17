@@ -197,6 +197,8 @@ const PATH_RULES: ReadonlyArray<{ test: (p: string) => boolean; drift: DriftClas
       /^eslint\.config\./.test(p) ||
       /^vitest(\.[a-z.]+)?\.config\.ts$/.test(p) ||
       p === 'stryker.conf.json' ||
+      // The secret scanner's rule set and path allowlist decide what the gitleaks scan reports.
+      p === '.gitleaks.toml' ||
       p.startsWith('.claude/') ||
       p.startsWith('.arc/') ||
       // The canonical control inventory: which controls exist, their stages, trust

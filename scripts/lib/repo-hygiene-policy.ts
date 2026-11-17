@@ -10,7 +10,17 @@ export interface GuardPattern {
   code: string;
   message: string;
   regex: RegExp;
+  /** True for a rule built from the private term file: the environment-token allowance never applies to it. */
+  readonly privateTerm?: boolean;
 }
+
+/**
+ * Range scans of commit text (messages and identities, in --commit-authors and exact-range
+ * receipts) block private-term hits only in commits whose committer date is at or after this
+ * instant. Older commits are already published; their term hits are counted, not blocked.
+ * Hits of the other rules block at any date, as before.
+ */
+export const BOUNDARY_COMMIT_MESSAGE_EPOCH = '2026-11-17T15:08:00Z';
 
 export const projectedFileSecretFixtureFiles = [
   'scripts/anonymize-private-literals.ts',
@@ -26,8 +36,8 @@ export const fixtureFiles = new Set([
   'tests/eslint-rules/categorized-skips.test.ts',
   // BEAD-052 redaction-parity corpus: intentionally secret-, email-, and
   // path-SHAPED inputs that exercise the bot-errors redactor on both the TS and
-  // Python sides. NOTE: no external secret scanner backstops this repo (the
-  // repo hooksPath shadows the global git hooks; CI runs none) - keep this
+  // Python sides. gitleaks (.gitleaks.toml) allowlists exactly these fixture
+  // paths too, so an entry here also leaves the external secret scan: keep this
   // blanket set minimal and prefer the code-scoped
   // selfReferentialAllowlistFiles mechanism below.
   'tests/fixtures/redaction-parity-corpus.jsonl',
@@ -36,8 +46,8 @@ export const fixtureFiles = new Set([
 // The CAPE agent-runtime probe suite (tools/agent-runtime-probes/) is security/masking tooling:
 // its corpus is intentionally secret-, email-, and path-SHAPED test fixtures. Treat the whole
 // subtree as fixtures for these hygiene SHAPE patterns; the suite's own corpus_guard /
-// sensitive_pattern_loader covers its corpus. NOTE: no external secret scanner backstops this
-// repo (the repo hooksPath shadows the global git hooks) - keep exemptions minimal.
+// sensitive_pattern_loader covers its corpus. gitleaks (.gitleaks.toml) allowlists the same
+// subtree, so it leaves the external secret scan too - keep exemptions minimal.
 export const isFixtureFile = (filePath: string): boolean =>
   fixtureFiles.has(filePath)
   || filePath.startsWith('tools/agent-runtime-probes/');
@@ -74,6 +84,9 @@ export const allowedMessagingAddressRhs = /@(?:s\.whatsapp\.net|c\.us|lid)$/i;
 
 // SSOT for the fleet private-host labels: the publication detection rule below,
 // and consumers like the bot-errors collector-unit hygiene test, import this.
+// Fallback rule set: privateHostLabels and privateTailnetIps run alone when no private term file
+// is loaded (CI today) and join the term rules, under the same codes, when one is.
+// TODO(PB2): remove both lists once the term-aware hosted check is required.
 export const privateHostLabels = [
   ['mw', 'lab'],
   ['nuc', 'les'],
@@ -146,8 +159,10 @@ export const disallowedCommitAuthorPatterns: GuardPattern[] = [
   },
 ];
 
-export function isAllowedPatternMatch(filePath: string, code: string, token: string): boolean {
-  if (allowedEnvVarNameToken.test(token)) return true;
+export function isAllowedPatternMatch(filePath: string, code: string, token: string, privateTerm = false): boolean {
+  // A private term is a name the operator listed explicitly: an environment-variable shape
+  // (ZQ_ACCOUNT_KEY) is no reason to let it through.
+  if (!privateTerm && allowedEnvVarNameToken.test(token)) return true;
   if (code === 'personal-email' && allowedMessagingAddressRhs.test(token)) return true;
   if (code === 'personal-email' && isGitHubSshTransportPrincipal(token)) return true;
   // GitHub's support service mailbox appears in every dependabot commit's
@@ -258,6 +273,8 @@ export const addedLinePatterns: GuardPattern[] = [
   {
     code: 'private-instance-label',
     message: 'Public repo text must not include private instance labels.',
+    // Fallback rule set: the literal labels below run alone without a private term file.
+    // TODO(PB2): remove the literal labels once the term-aware hosted check is required.
     regex: /\b(?:BES Bot|Loops-managed|mw-bot|whatsapp:mw-bot|whatsapp-bot@(?:personal|loops|besbot)|whatsoup@(?:q|loops|besbot|personal)|whatsoup-personal|Q's (?:number|WhatsApp number))\b|instances\/personal\/(?:whatsoup\.sock|bot\.db)|\/home\/q\//,
   },
   {
@@ -407,7 +424,7 @@ export function patternMatches(pattern: GuardPattern, text: string): GuardPatter
 
 export function findDisallowedMatch(filePath: string, pattern: GuardPattern, text: string): string | null {
   for (const match of patternMatches(pattern, text)) {
-    if (!isAllowedPatternMatch(filePath, pattern.code, match.allowlistToken)) {
+    if (!isAllowedPatternMatch(filePath, pattern.code, match.allowlistToken, pattern.privateTerm === true)) {
       return match.token;
     }
   }

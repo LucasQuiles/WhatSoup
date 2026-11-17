@@ -173,6 +173,10 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
   'repo:staged': { class: 'skip-alias', reason: 'alias -> guard:repo (staged; empty index legitimately clean)' },
   'repo:branch-diff': { class: 'skip-alias', reason: 'alias -> guard:repo (branch-diff-scoped)' },
   'repo:scan-history': { class: 'skip-alias', reason: 'alias -> guard:repo (history-scoped)' },
+  'repo:tree:write-baseline': { class: 'skip-alias', reason: 'alias -> guard:repo --tree --write-baseline (HEAD-tree-scoped; writes the private baseline outside the repository, and without a private term file the tree mode skips with exit 0 by design, so it never certifies an empty tree)' },
+  'repo:tree': { class: 'skip-alias', reason: 'alias -> guard:repo --tree (HEAD-tree-scoped; without a private term file it skips with exit 0 by design, so it never certifies an empty tree)' },
+  'repo:text': { class: 'skip-alias', reason: 'alias -> guard:repo --text <file> (one-named-file-scoped; it refuses to run without the file argument)' },
+  'repo:refs': { class: 'skip-alias', reason: 'alias -> guard:repo --refs (ref-name-scoped: the names in a file or on stdin; empty input is legitimately nothing)' },
   'ring-boundaries': { class: 'skip-alias', reason: 'alias -> guard:boundaries (probe-refuse)' },
   'test-integrity:required': { class: 'skip-alias', reason: 'alias -> guard:test-integrity with WHATSOUP_REQUIRE_TEST_INTEGRITY=1' },
 };

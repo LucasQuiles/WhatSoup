@@ -1,0 +1,15 @@
+{
+  "schema": "whatsoup-private-terms",
+  "version": 1,
+  "contexts": ["com.whatsoup.{t}", "whatsoup@{t}", "instances/{t}/", "/Users/{t}/"],
+  "terms": [
+    {"id": "M001", "class": "machine", "value": "zorblab", "match": "word", "case": "insensitive", "replace": "host-a"},
+    {"id": "F001", "class": "machine", "regex": "zmini([0-9]{1,2})", "match": "word", "case": "insensitive", "replace": "host-{1}"},
+    {"id": "B001", "class": "instance", "value": "qx-bot", "match": "word", "case": "insensitive", "variants": true, "replace": "bot-a"},
+    {"id": "C001", "class": "instance", "value": "zqline", "match": "context", "case": "sensitive", "replace": "line-a"},
+    {"id": "P001", "class": "person", "value": "quorpine", "match": "word", "case": "insensitive", "replace": "user-a"},
+    {"id": "D001", "class": "private-domain", "value": "corp-zz.example", "match": "literal", "case": "insensitive", "replace": "corp.example"},
+    {"id": "A001", "class": "account-id", "value": "acct-zq-4471", "match": "literal", "case": "sensitive", "replace": "account-a"},
+    {"id": "N001", "class": "address", "value": "100.1.2.3", "match": "address", "case": "sensitive", "replace": "192.0.2.1"}
+  ]
+}

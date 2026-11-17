@@ -31,6 +31,7 @@ import { canonicalizeBoundaryRun } from './lib/verification/boundary-run/shared.
 import { parseBoundaryJsonBytes } from './lib/verification/boundary-run/schema.ts';
 import { validateExactRangeProvenance } from './lib/ci-control/exact-range-provenance.ts';
 import {
+  BOUNDARY_COMMIT_MESSAGE_EPOCH,
   addedLinePatterns,
   allowedEnvVarNameToken,
   allowedMessagingAddressRhs,
@@ -62,6 +63,25 @@ import {
   trackedSensitiveArtifactPatterns,
   type GuardPattern,
 } from './lib/repo-hygiene-policy.ts';
+import {
+  PRIVATE_TERM_CODE_MESSAGES,
+  PRIVATE_TERM_CODES,
+  PRIVATE_TERMS_ABSENT_NOTICE,
+  PrivateTermsError,
+  type PrivateTermRule,
+} from './lib/private-terms.ts';
+import {
+  boundaryCodesInLine,
+  createFindingFormatter,
+  fallbackPrivatePatterns,
+  resolveBoundaryTerms,
+  runTreeCheck,
+  scanPublicText,
+  scanRefNames,
+  splitCodesInLine,
+  type BoundaryHit,
+  type FindingFormatter,
+} from './lib/repo-hygiene-boundary.ts';
 
 export {
   privateHostLabels,
@@ -79,14 +99,47 @@ export type GuardMode =
   | 'commit-msg'
   | 'release-hygiene'
   | 'commit-authors'
-  | 'scan-history';
+  | 'scan-history'
+  | 'tree'
+  | 'text'
+  | 'refs';
 
 export interface ParsedArgs {
   mode: GuardMode;
   messageFile?: string;
   baseRef?: string;
   historyDepth?: number;
+  textFile?: string;
+  refsFile?: string;
+  writeBaseline?: boolean;
+  allowIncrease?: boolean;
   help: boolean;
+}
+
+/** A command-line usage error: exit code 2. Its message never quotes an argument. */
+export class UsageError extends Error {
+  readonly exitCode = 2;
+}
+
+/**
+ * An input the guard cannot use: a missing ref, an unreadable file, no merge base. Exit code 1,
+ * as before. The message is fixed text: a ref name, a path or git's own error text can hold a
+ * private name, so none is quoted.
+ */
+export class GuardInputError extends Error {
+  readonly exitCode = 1;
+}
+
+function readInputFile(file: string | number, flag: string): string {
+  try {
+    return readFileSync(file, 'utf8');
+  } catch {
+    throw new GuardInputError(`the ${flag} input cannot be read`);
+  }
+}
+
+function errorClass(error: unknown): string {
+  return error instanceof Error ? error.constructor.name : typeof error;
 }
 
 export interface AddedLine {
@@ -100,6 +153,16 @@ export interface GuardIssue {
   message: string;
   filePath?: string;
   line?: number;
+  /** The commit a history finding came from (12 hex characters); printed with the finding. */
+  commit?: string;
+  history?: 'history' | 'branch history';
+  /**
+   * A hit only the private-term layer finds (a term-file rule). Range scans of commit text
+   * block it only in commits from BOUNDARY_COMMIT_MESSAGE_EPOCH on.
+   */
+  termHit?: true;
+  /** Found only in the joined view of split literals on that line; printed with a split marker. */
+  split?: true;
 }
 
 export interface CommitAuthor {
@@ -108,6 +171,15 @@ export interface CommitAuthor {
   email: string;
   subject: string;
   message?: string;
+  committerName?: string;
+  committerEmail?: string;
+  /** Committer time in seconds; an unknown time is treated as at or after the epoch (blocking). */
+  committerTime?: number;
+}
+
+/** Term hits in commits older than the epoch: counted, not blocked. */
+export interface CommitTermTally {
+  olderTermHits: number;
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
@@ -124,7 +196,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     } else if (arg === '--base') {
       const next = argv[i + 1];
       if (!next || next.startsWith('--')) {
-        throw new Error('--base requires a git ref');
+        throw new UsageError('--base requires a git ref');
       }
       args.baseRef = next;
       i += 1;
@@ -138,9 +210,31 @@ export function parseArgs(argv: string[]): ParsedArgs {
       if (next && !next.startsWith('--')) {
         const depth = Number(next);
         if (!Number.isInteger(depth) || depth <= 0) {
-          throw new Error(`--scan-history depth must be a positive integer: ${next}`);
+          // The value is not echoed: an argument can hold a private name.
+          throw new UsageError('--scan-history depth must be a positive integer');
         }
         args.historyDepth = depth;
+        i += 1;
+      }
+    } else if (arg === '--tree') {
+      args.mode = 'tree';
+    } else if (arg === '--write-baseline') {
+      args.writeBaseline = true;
+    } else if (arg === '--allow-increase') {
+      args.allowIncrease = true;
+    } else if (arg === '--text') {
+      args.mode = 'text';
+      const next = argv[i + 1];
+      if (!next || next.startsWith('--')) {
+        throw new UsageError('--text requires a file');
+      }
+      args.textFile = next;
+      i += 1;
+    } else if (arg === '--refs') {
+      args.mode = 'refs';
+      const next = argv[i + 1];
+      if (next && !next.startsWith('--')) {
+        args.refsFile = next;
         i += 1;
       }
     } else if (arg === '--commit-msg') {
@@ -153,15 +247,30 @@ export function parseArgs(argv: string[]): ParsedArgs {
     } else if (args.mode === 'commit-msg' && !args.messageFile) {
       args.messageFile = arg;
     } else {
-      throw new Error(`Unknown argument: ${arg}`);
+      throw new UsageError(`Unknown argument at position ${i + 1}; see --help`);
     }
   }
 
   if (args.baseRef && args.mode !== 'branch-diff') {
-    throw new Error('--base is only valid with --branch-diff');
+    throw new UsageError('--base is only valid with --branch-diff');
+  }
+  if (args.writeBaseline && args.mode !== 'tree') {
+    throw new UsageError('--write-baseline is only valid with --tree');
+  }
+  if (args.allowIncrease && !args.writeBaseline) {
+    throw new UsageError('--allow-increase is only valid with --tree --write-baseline');
   }
 
   return args;
+}
+
+/**
+ * Term rules for this process: the private term file named by the environment, compiled.
+ * Read per call, so a test can switch WHATSOUP_PRIVATE_TERMS_FILE between calls; an unusable
+ * file throws PrivateTermsError (exit 2).
+ */
+function activePrivateTermRules(): readonly PrivateTermRule[] {
+  return resolveBoundaryTerms(process.env).rules;
 }
 
 function stripDiffPath(filePath: string): string {
@@ -226,7 +335,57 @@ export function scanProjectedFileSecretLines(lines: AddedLine[]): GuardIssue[] {
   return issues;
 }
 
-export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
+// Term rules join the patterns a mode already applies. A code the inline fallback rules already
+// reported for the same line is not reported twice. The joined view of split literals adds the
+// fallback and term codes the line itself does not show, with a split marker. A joined view that
+// a fallback rule matches is a fallback hit like the line's own: it blocks at every commit date
+// and is never a term hit, so it never counts as an older term hit (a receipt made without a term
+// file must count none). A term rule's hit, in the line or in its joined view, is new since main,
+// so commit-text range scans block it only from the epoch on.
+function termRuleIssues(
+  filePath: string,
+  text: string,
+  location: { filePath?: string; line: number },
+  termRules: readonly PrivateTermRule[],
+  reported: ReadonlySet<string>,
+): GuardIssue[] {
+  const direct = boundaryCodesInLine(filePath, text, termRules, reported);
+  const shown = new Set([...reported, ...direct]);
+  // Fallback rules first, so a code both rule sets find in the joined view stays a fallback hit.
+  const fallbackSplit = splitCodesInLine(filePath, text, fallbackPrivatePatterns, shown);
+  const termSplit = splitCodesInLine(filePath, text, termRules, new Set([...shown, ...fallbackSplit]));
+  const issue = (code: string) => ({ code, message: PRIVATE_TERM_CODE_MESSAGES[code] ?? code, ...location });
+  return [
+    ...direct.map((code) => ({ ...issue(code), termHit: true as const })),
+    ...fallbackSplit.map((code) => ({ ...issue(code), split: true as const })),
+    ...termSplit.map((code) => ({ ...issue(code), termHit: true as const, split: true as const })),
+  ];
+}
+
+/** Term codes found only in the joined view of a history line (the history scans apply term rules, not the fallback lists). */
+function splitHistoryIssues(
+  filePath: string,
+  line: AddedLine,
+  termRules: readonly PrivateTermRule[],
+  found: ReadonlySet<string>,
+  history: 'history' | 'branch history',
+  sha: string,
+): GuardIssue[] {
+  return splitCodesInLine(filePath, line.text, termRules, found).map((code) => ({
+    code,
+    message: `[${history} ${sha.slice(0, 12)}] ${PRIVATE_TERM_CODE_MESSAGES[code] ?? code}`,
+    filePath: line.filePath,
+    line: line.line,
+    commit: sha.slice(0, 12),
+    history,
+    split: true as const,
+  }));
+}
+
+export function scanAddedLines(
+  lines: AddedLine[],
+  termRules: readonly PrivateTermRule[] = activePrivateTermRules(),
+): GuardIssue[] {
   const issues: GuardIssue[] = [];
 
   for (const line of lines) {
@@ -281,11 +440,13 @@ export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
         line: line.line,
       });
     }
+    const reported = new Set<string>();
     for (const pattern of addedLinePatterns) {
       if (pattern.code === 'internal-workstream-label' && isPackageLockResolvedUrlLine(filePath, line.text)) {
         continue;
       }
       if (findDisallowedMatch(filePath, pattern, line.text)) {
+        reported.add(pattern.code);
         issues.push({
           code: pattern.code,
           message: pattern.message,
@@ -294,6 +455,7 @@ export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
         });
       }
     }
+    issues.push(...termRuleIssues(filePath, line.text, { filePath: line.filePath, line: line.line }, termRules, reported));
   }
 
   return issues;
@@ -310,16 +472,22 @@ function hasSuppressionRationaleAndExpiry(text: string): boolean {
   return /--\s+\S.*\bexpires\s+\d{4}-\d{2}-\d{2}\b/.test(text);
 }
 
-export function scanCommitMessage(message: string): GuardIssue[] {
+export function scanCommitMessage(
+  message: string,
+  termRules: readonly PrivateTermRule[] = activePrivateTermRules(),
+): GuardIssue[] {
   const issues: GuardIssue[] = [];
   const lines = message.split(/\r?\n/);
 
   lines.forEach((text, index) => {
+    const reported = new Set<string>();
     for (const pattern of commitMessagePatterns) {
       if (findDisallowedMatch('', pattern, text)) {
+        reported.add(pattern.code);
         issues.push({ code: pattern.code, message: pattern.message, line: index + 1 });
       }
     }
+    issues.push(...termRuleIssues('', text, { line: index + 1 }, termRules, reported));
   });
 
   return issues;
@@ -375,14 +543,21 @@ function scanStagedSensitiveArtifacts(cwd: string): GuardIssue[] {
   );
 }
 
-export function scanContentLines(lines: AddedLine[]): GuardIssue[] {
+// The issue-triage callers and the release-hygiene mode scan with the generic and fallback
+// patterns only; term coverage of tracked files comes from --tree against the private baseline.
+export function scanContentLines(
+  lines: AddedLine[],
+  termRules: readonly PrivateTermRule[] = [],
+): GuardIssue[] {
   const issues: GuardIssue[] = [];
 
   for (const line of lines) {
     const filePath = normalizeRepoPath(line.filePath);
     if (isFixtureFile(filePath)) continue;
+    const reported = new Set<string>();
     for (const pattern of addedLinePatterns) {
       if (findDisallowedMatch(filePath, pattern, line.text)) {
+        reported.add(pattern.code);
         issues.push({
           code: pattern.code,
           message: pattern.message,
@@ -391,6 +566,7 @@ export function scanContentLines(lines: AddedLine[]): GuardIssue[] {
         });
       }
     }
+    issues.push(...termRuleIssues(filePath, line.text, { filePath: line.filePath, line: line.line }, termRules, reported));
   }
 
   return issues;
@@ -430,12 +606,22 @@ const secretPatternCodes = new Set([
 
 const secretPatterns = addedLinePatterns.filter((pattern) => secretPatternCodes.has(pattern.code));
 
+// History scans apply the secret-shaped subset plus the term rules: a private name added and
+// removed again on a branch is still published by that branch's history.
+function historyPatterns(termRules: readonly PrivateTermRule[]): readonly GuardPattern[] {
+  return [...secretPatterns, ...termRules];
+}
+
 /**
  * Advisory-only: scan added lines of recent commits for leaked secret shapes.
  * Report-only — never mutates exitCode in run() for this mode. Fail-closed: a
  * git/parse failure throws rather than returning a silent empty result.
  */
-export function scanCommitHistory(cwd: string, depth: number): GuardIssue[] {
+export function scanCommitHistory(
+  cwd: string,
+  depth: number,
+  termRules: readonly PrivateTermRule[] = activePrivateTermRules(),
+): GuardIssue[] {
   const shas = git(['log', `-${depth}`, '--format=%H'], cwd)
     .split(/\r?\n/)
     .filter(Boolean);
@@ -450,16 +636,21 @@ export function scanCommitHistory(cwd: string, depth: number): GuardIssue[] {
     for (const line of parseUnifiedDiffAddedLines(diff)) {
       const filePath = normalizeRepoPath(line.filePath);
       if (isFixtureFile(filePath)) continue;
-      for (const pattern of secretPatterns) {
+      const found = new Set<string>();
+      for (const pattern of historyPatterns(termRules)) {
         if (findDisallowedMatch(filePath, pattern, line.text)) {
+          found.add(pattern.code);
           issues.push({
             code: pattern.code,
             message: `[history ${sha.slice(0, 12)}] ${pattern.message}`,
             filePath: line.filePath,
             line: line.line,
+            commit: sha.slice(0, 12),
+            history: 'history',
           });
         }
       }
+      issues.push(...splitHistoryIssues(filePath, line, termRules, found, 'history', sha));
     }
   }
 
@@ -508,8 +699,9 @@ function baseRefFileLines(
 function scanBranchCommitSecretLines(
   cwd: string,
   sha: string,
-  baseRef?: string,
-  baseLineCache?: Map<string, Set<string>>,
+  baseRef: string | undefined,
+  baseLineCache: Map<string, Set<string>> | undefined,
+  termRules: readonly PrivateTermRule[],
 ): GuardIssue[] {
   const issues: GuardIssue[] = [];
   const diff = git(['show', '--format=', '--unified=0', '--no-ext-diff', '-m', sha], cwd);
@@ -529,16 +721,21 @@ function scanBranchCommitSecretLines(
     ) {
       continue;
     }
-    for (const pattern of secretPatterns) {
+    const found = new Set<string>();
+    for (const pattern of historyPatterns(termRules)) {
       if (findDisallowedMatch(filePath, pattern, line.text)) {
+        found.add(pattern.code);
         issues.push({
           code: pattern.code,
           message: `[branch history ${sha.slice(0, 12)}] ${pattern.message}`,
           filePath: line.filePath,
           line: line.line,
+          commit: sha.slice(0, 12),
+          history: 'branch history',
         });
       }
     }
+    issues.push(...splitHistoryIssues(filePath, line, termRules, found, 'branch history', sha));
   }
 
   return issues;
@@ -554,20 +751,21 @@ function scanBranchCommitSensitiveArtifacts(cwd: string, sha: string): GuardIssu
     changedFiles,
     'branch-history-sensitive-artifact',
     `Runtime credential, database, key, workspace, or scratch artifact was committed in branch history ${sha.slice(0, 12)}.`,
-  );
+  ).map((issue) => ({ ...issue, commit: sha.slice(0, 12), history: 'branch history' as const }));
 }
 
 export function scanBranchSecretHistory(
   cwd: string,
   mergeBase: string,
   baseRef?: string,
+  termRules: readonly PrivateTermRule[] = activePrivateTermRules(),
 ): GuardIssue[] {
   const issues: GuardIssue[] = [];
   const baseLineCache = new Map<string, Set<string>>();
   for (const sha of branchCommitShas(cwd, mergeBase)) {
     issues.push(
       ...scanBranchCommitSensitiveArtifacts(cwd, sha),
-      ...scanBranchCommitSecretLines(cwd, sha, baseRef, baseLineCache),
+      ...scanBranchCommitSecretLines(cwd, sha, baseRef, baseLineCache, termRules),
     );
   }
   return issues;
@@ -579,40 +777,79 @@ export function parseCommitAuthorLog(log: string): CommitAuthor[] {
     .map((record) => record.trim())
     .filter(Boolean)
     .map((record) => {
-      const [sha, name, email, subject, message] = record.split('\x00');
+      // The message (%B) cannot hold a NUL, so the committer fields after it split cleanly.
+      const [sha, name, email, subject, message, committerName, committerEmail, committerTime] = record.split('\x00');
       return {
         sha: sha ?? '',
         name: name ?? '',
         email: email ?? '',
         subject: subject ?? '',
         ...(message === undefined ? {} : { message }),
+        ...(committerName === undefined ? {} : { committerName }),
+        ...(committerEmail === undefined ? {} : { committerEmail }),
+        ...(committerTime === undefined || !/^[0-9]+$/.test(committerTime) ? {} : { committerTime: Number(committerTime) }),
       };
     })
     .filter((commit) => commit.sha !== '');
 }
 
-export function scanCommitAuthors(commits: CommitAuthor[]): GuardIssue[] {
+/** The epoch in seconds; an unparsable constant yields NaN, so every commit counts as recent (blocking). */
+function epochSeconds(epoch: string): number {
+  return Date.parse(epoch) / 1000;
+}
+
+// Identities get every term code except person names: the sanctioned public author identity
+// is a person's name by design, while a default `user@<host>.local` identity carries a machine
+// name and an address can carry a private domain or account.
+export function scanCommitAuthors(
+  commits: CommitAuthor[],
+  termRules: readonly PrivateTermRule[] = activePrivateTermRules(),
+  epoch: string = BOUNDARY_COMMIT_MESSAGE_EPOCH,
+  tally?: CommitTermTally,
+): GuardIssue[] {
   const issues: GuardIssue[] = [];
+  const identityRules = termRules.filter((rule) => rule.code !== 'private-person');
+  const since = epochSeconds(epoch);
 
   for (const commit of commits) {
+    const location = `commit:${commit.sha.slice(0, 12)}`;
     const author = `${commit.name} ${commit.email}`;
     for (const pattern of disallowedCommitAuthorPatterns) {
       if (pattern.regex.test(author)) {
         issues.push({
           code: pattern.code,
           message: `${pattern.message} (${commit.subject || 'no subject'})`,
-          filePath: `commit:${commit.sha.slice(0, 12)}`,
+          filePath: location,
         });
         break;
       }
     }
 
-    for (const issue of scanCommitMessage(commit.message ?? commit.subject)) {
-      issues.push({
+    const commitIssues: GuardIssue[] = [];
+    const identityCodes = new Set<string>();
+    const identities = [commit.name, commit.email, commit.committerName ?? '', commit.committerEmail ?? ''];
+    for (const text of identities.filter((identity) => identity !== '')) {
+      for (const code of boundaryCodesInLine('', text, identityRules, identityCodes)) {
+        identityCodes.add(code);
+        commitIssues.push({ code, message: PRIVATE_TERM_CODE_MESSAGES[code] ?? code, filePath: location, termHit: true });
+      }
+    }
+    for (const issue of scanCommitMessage(commit.message ?? commit.subject, termRules)) {
+      commitIssues.push({
         ...issue,
         message: `${issue.message} (${commit.subject || 'no subject'})`,
-        filePath: `commit:${commit.sha.slice(0, 12)}`,
+        filePath: location,
       });
+    }
+
+    // Only a known committer time before the epoch exempts a term hit; the other rules block at any date.
+    const older = commit.committerTime !== undefined && commit.committerTime < since;
+    for (const issue of commitIssues) {
+      if (older && issue.termHit === true) {
+        if (tally !== undefined) tally.olderTermHits += 1;
+        continue;
+      }
+      issues.push(issue);
     }
   }
 
@@ -632,7 +869,7 @@ function branchDiffBaseRef(cwd: string, requestedBaseRef?: string): string | nul
   const explicitBaseRef = requestedBaseRef?.trim();
   if (explicitBaseRef) {
     if (!gitRefExists(cwd, explicitBaseRef)) {
-      throw new Error(`--base ref does not exist: ${explicitBaseRef}`);
+      throw new GuardInputError('the --base ref does not exist');
     }
     return explicitBaseRef;
   }
@@ -660,15 +897,19 @@ function branchDiffBaseRef(cwd: string, requestedBaseRef?: string): string | nul
 function branchMergeBase(cwd: string, baseRef: string): string {
   const mergeBase = git(['merge-base', baseRef, 'HEAD'], cwd).trim();
   if (!mergeBase) {
-    throw new Error(`No merge base found between ${baseRef} and HEAD`);
+    throw new GuardInputError('No merge base found between the base ref and HEAD');
   }
   return mergeBase;
 }
 
-export function scanBranchDiff(cwd: string, requestedBaseRef?: string): GuardIssue[] {
+export function scanBranchDiff(
+  cwd: string,
+  requestedBaseRef?: string,
+  termRules: readonly PrivateTermRule[] = activePrivateTermRules(),
+): GuardIssue[] {
   const baseRef = branchDiffBaseRef(cwd, requestedBaseRef);
   if (!baseRef) {
-    throw new Error('No branch-diff base ref found; pass --base <ref> or fetch origin/main');
+    throw new GuardInputError('No branch-diff base ref found; pass --base <ref> or fetch origin/main');
   }
 
   const mergeBase = branchMergeBase(cwd, baseRef);
@@ -684,7 +925,7 @@ export function scanBranchDiff(cwd: string, requestedBaseRef?: string): GuardIss
       'branch-sensitive-artifact',
       'Runtime credential, database, key, workspace, or scratch artifact must not be committed in the branch diff.',
     ),
-    ...scanAddedLines(parseUnifiedDiffAddedLines(diff)),
+    ...scanAddedLines(parseUnifiedDiffAddedLines(diff), termRules),
   ];
   const finalSensitiveArtifactPaths = new Set(
     finalDiffIssues
@@ -692,7 +933,7 @@ export function scanBranchDiff(cwd: string, requestedBaseRef?: string): GuardIss
       .map((issue) => issue.filePath),
   );
   const seen = new Set(finalDiffIssues.map((issue) => `${issue.code}:${issue.filePath ?? ''}:${issue.line ?? 0}`));
-  const historyIssues = scanBranchSecretHistory(cwd, mergeBase, baseRef)
+  const historyIssues = scanBranchSecretHistory(cwd, mergeBase, baseRef, termRules)
     .filter((issue) => {
       if (
         issue.code === 'branch-history-sensitive-artifact'
@@ -735,10 +976,13 @@ function commitAuthorBaseRef(cwd: string): string | null {
   return null;
 }
 
+// sha, author name and email, subject, message, committer name, email and time (seconds).
+const COMMIT_AUTHOR_LOG_FORMAT = '%H%x00%an%x00%ae%x00%s%x00%B%x00%cn%x00%ce%x00%ct%x1e';
+
 export function readCommitAuthors(cwd: string): CommitAuthor[] {
   const baseRef = commitAuthorBaseRef(cwd);
   if (!baseRef) {
-    const log = git(['log', '--format=%H%x00%an%x00%ae%x00%s%x00%B%x1e', '-1', 'HEAD'], cwd);
+    const log = git(['log', `--format=${COMMIT_AUTHOR_LOG_FORMAT}`, '-1', 'HEAD'], cwd);
     return parseCommitAuthorLog(log);
   }
   // Exclude commits already reachable from origin/main.  This matters when the
@@ -755,7 +999,7 @@ export function readCommitAuthors(cwd: string): CommitAuthor[] {
   // generated trailer automatically.
   const excludeArgs = gitRefExists(cwd, 'origin/main') ? ['--not', 'origin/main'] : [];
   const log = git(
-    ['log', '--format=%H%x00%an%x00%ae%x00%s%x00%B%x1e', `${baseRef}..HEAD`, ...excludeArgs],
+    ['log', `--format=${COMMIT_AUTHOR_LOG_FORMAT}`, `${baseRef}..HEAD`, ...excludeArgs],
     cwd,
   );
   return parseCommitAuthorLog(log);
@@ -775,6 +1019,10 @@ const REPO_HYGIENE_POLICY_MODULE_PATH = fileURLToPath(
 );
 const EXACT_RANGE_PROVENANCE_MODULE_PATH = fileURLToPath(
   new URL('./lib/ci-control/exact-range-provenance.ts', import.meta.url),
+);
+const PRIVATE_TERMS_MODULE_PATH = fileURLToPath(new URL('./lib/private-terms.ts', import.meta.url));
+const REPO_HYGIENE_BOUNDARY_MODULE_PATH = fileURLToPath(
+  new URL('./lib/repo-hygiene-boundary.ts', import.meta.url),
 );
 const REPO_HYGIENE_POLICY_PROJECTION_COVERAGE = Object.freeze([
   'base-line-sets',
@@ -850,6 +1098,8 @@ export interface RepoHygieneExactRangeReceiptV1 {
   localOid: string;
   toolDigest: `sha256:${string}`;
   policyDigest: `sha256:${string}`;
+  /** The term file this receipt's scan loaded; recorded beside the policy digest, never inside it. */
+  privateTerms: RepoHygieneExactRangePrivateTermsV1;
   commitBindings: RepoHygieneExactRangeCommitBindingV1[];
   commitRangeDigest: `sha256:${string}`;
   metadataDigest: `sha256:${string}`;
@@ -990,6 +1240,25 @@ function readToolBytes(): Buffer {
   return Buffer.concat(chunks);
 }
 
+// The compared policy digest covers the public policy only: the loader and boundary module
+// bytes and the term codes. Whether a term file was loaded, and its digest, sit in the receipt's
+// own privateTerms field, so a receipt made where a term file exists validates where none does,
+// and the reverse. Regex sources of term rules are never serialized: they hold private names.
+function privateTermsPolicyBinding(): unknown {
+  return {
+    loaderDigest: sha256Bytes(readFileSync(PRIVATE_TERMS_MODULE_PATH)),
+    boundaryDigest: sha256Bytes(readFileSync(REPO_HYGIENE_BOUNDARY_MODULE_PATH)),
+    codes: [...PRIVATE_TERM_CODES],
+  };
+}
+
+export interface RepoHygieneExactRangePrivateTermsV1 {
+  status: 'loaded' | 'absent';
+  termsSha256: `sha256:${string}` | null;
+  /** Term hits in commit text older than BOUNDARY_COMMIT_MESSAGE_EPOCH: counted here, not findings. */
+  preEpochTermHits: number;
+}
+
 function repoHygienePolicyProjection(): unknown {
   const project = (patterns: readonly GuardPattern[]) => patterns.map((pattern) => ({
     code: pattern.code,
@@ -1025,6 +1294,8 @@ function repoHygienePolicyProjection(): unknown {
       operationalReleaseHygieneFiles: [...operationalReleaseHygieneFiles].sort(),
     },
     sourceConsoleAllowedFiles: [...srcConsoleAllowedFiles].sort(),
+    privateTerms: privateTermsPolicyBinding(),
+    commitTextTermEpoch: BOUNDARY_COMMIT_MESSAGE_EPOCH,
     historyPolicy: {
       patterns: [...secretPatternCodes].sort(),
       baselineSuppression: 'range-start-same-path-byte-identical-crlf-line',
@@ -1121,11 +1392,14 @@ interface HistoryLineCandidate {
   text: string;
 }
 
-function secretCauses(line: ExactAddedLineV1): string[] {
-  if (isFixtureFile(normalizeRepoPath(line.path))) return [];
-  return secretPatterns
-    .filter((pattern) => findDisallowedMatch(normalizeRepoPath(line.path), pattern, line.text) !== null)
+function secretCauses(line: ExactAddedLineV1, termRules: readonly PrivateTermRule[] = []): string[] {
+  const filePath = normalizeRepoPath(line.path);
+  if (isFixtureFile(filePath)) return [];
+  const causes = historyPatterns(termRules)
+    .filter((pattern) => findDisallowedMatch(filePath, pattern, line.text) !== null)
     .map((pattern) => pattern.code);
+  // A term found only in the joined view of split literals is a cause like any other.
+  return [...causes, ...splitCodesInLine(filePath, line.text, termRules, new Set(causes))];
 }
 
 function baseLineSets(
@@ -1193,6 +1467,7 @@ function nativeCauseCodes(): ReadonlySet<string> {
     'unbounded-suppression',
     'branch-sensitive-artifact',
     'branch-history-sensitive-artifact',
+    ...PRIVATE_TERM_CODES,
   ]);
 }
 
@@ -1226,6 +1501,7 @@ function scanNetAddedLineFindingsIncrementally(
   findings: RepoHygieneExactRangeFindingV1[],
   projectedFindingKeys: Set<string>,
   rawFindingKeys: Set<string>,
+  termRules: readonly PrivateTermRule[],
 ): void {
   for (const change of changes) {
     for (const exactLine of change.addedLines) {
@@ -1233,7 +1509,7 @@ function scanNetAddedLineFindingsIncrementally(
         filePath: exactLine.path,
         line: exactLine.newLineNumber,
         text: exactLine.text,
-      }])) {
+      }], termRules)) {
         const finding: RepoHygieneExactRangeFindingV1 = {
           cause: issue.code,
           observationKind: 'net-added-line',
@@ -1298,6 +1574,15 @@ export function createRepoHygieneExactRangeArtifact(
   if (validated === null) return exactRangeFailure('repo-hygiene.exact-range.input-malformed');
 
   try {
+    // One term-file snapshot for the whole range: the rules and the recorded digest come from
+    // the same bytes (the loader hashes and compiles one read).
+    const terms = resolveBoundaryTerms(process.env);
+    const termRules = terms.rules;
+    const termsStatus: Pick<RepoHygieneExactRangePrivateTermsV1, 'status' | 'termsSha256'> =
+      terms.load.status === 'loaded' && terms.load.sha256 !== null
+        ? { status: 'loaded', termsSha256: `sha256:${terms.load.sha256}` }
+        : { status: 'absent', termsSha256: null };
+    const commitTermTally: CommitTermTally = { olderTermHits: 0 };
     const initialToolBytes = readToolBytes();
     const initialPolicyDigest = policyDigest();
     const range = readExactCommitRange(cwd, validated);
@@ -1372,6 +1657,7 @@ export function createRepoHygieneExactRangeArtifact(
       findings,
       projectedFindingKeys,
       rawFindingKeys,
+      termRules,
     );
 
     const historyLines: HistoryLineCandidate[] = [];
@@ -1395,7 +1681,7 @@ export function createRepoHygieneExactRangeArtifact(
           if (change.oldOid !== '0'.repeat(40)) observedBlobOids.add(change.oldOid);
           if (change.newOid !== '0'.repeat(40)) observedBlobOids.add(change.newOid);
           for (const line of change.addedLines) {
-            for (const cause of secretCauses(line)) {
+            for (const cause of secretCauses(line, termRules)) {
               appendHistoryLineCandidate(historyLines, historyArtifacts.length, {
                 cause,
                 commitOid: commit.oid,
@@ -1461,7 +1747,10 @@ export function createRepoHygieneExactRangeArtifact(
         email: metadata.authorEmail,
         subject: metadata.subject,
         message: metadata.message,
-      }])) {
+        committerName: metadata.committerName,
+        committerEmail: metadata.committerEmail,
+        committerTime: metadata.committerTime,
+      }], termRules, BOUNDARY_COMMIT_MESSAGE_EPOCH, commitTermTally)) {
         appendExactRangeFinding(findings, projectedFindingKeys, {
           cause: issue.code,
           observationKind: 'commit-metadata',
@@ -1503,6 +1792,7 @@ export function createRepoHygieneExactRangeArtifact(
       localOid: range.localOid,
       toolDigest: sha256Bytes(initialToolBytes),
       policyDigest: initialPolicyDigest,
+      privateTerms: { ...termsStatus, preEpochTermHits: commitTermTally.olderTermHits },
       commitBindings,
       commitRangeDigest: sha256Canonical(range),
       metadataDigest: sha256Canonical(commitBindings),
@@ -1696,11 +1986,21 @@ function validateExactRangeReceipt(value: unknown): RepoHygieneExactRangeReceipt
   const record = strictRecord(value, [
     'schemaVersion', 'detectorId', 'decisionOwner', 'authorization', 'outcome', 'exitCode',
     'completeness', 'baseOid', 'remoteOid', 'rangeStartOid', 'localOid', 'toolDigest',
-    'policyDigest', 'commitBindings', 'commitRangeDigest', 'metadataDigest',
+    'policyDigest', 'privateTerms', 'commitBindings', 'commitRangeDigest', 'metadataDigest',
     'observedPathDisclosure', 'observedPathDigest', 'observedBlobOidDigest', 'budget', 'claimedScope', 'observedScope',
     'nativeCauses', 'findings', 'limitations', 'createdAt', 'validUntil',
   ]);
   if (record === null) return null;
+  const privateTerms = strictRecord(record.privateTerms, ['status', 'termsSha256', 'preEpochTermHits']);
+  if (
+    privateTerms === null
+    || !safeInteger(privateTerms.preEpochTermHits)
+    // Without a term file no rule can produce a term hit.
+    || (privateTerms.status === 'absent' && (privateTerms.termsSha256 !== null || privateTerms.preEpochTermHits !== 0))
+    || (privateTerms.status === 'loaded'
+      && (typeof privateTerms.termsSha256 !== 'string' || !SHA256.test(privateTerms.termsSha256)))
+    || (privateTerms.status !== 'absent' && privateTerms.status !== 'loaded')
+  ) return null;
   const commitBindings = validateCommitBindings(record.commitBindings);
   const findings = validateFindings(record.findings);
   const nativeCauses = validateStringArray(record.nativeCauses, MAX_REPO_HYGIENE_EXACT_RANGE_FINDINGS);
@@ -1931,13 +2231,31 @@ export function validateRepoHygieneExactRangeArtifact(
   }
 }
 
-function printIssues(issues: GuardIssue[]): void {
+// Every finding of every mode goes out through the boundary formatter, which receives only a
+// location and a rule code. An issue's message can quote a commit subject, so it is never printed.
+function printIssues(issues: GuardIssue[], format: FindingFormatter): void {
   for (const issue of issues) {
-    const location = issue.filePath
-      ? `${issue.filePath}:${issue.line ?? 1}`
-      : `commit-msg:${issue.line ?? 1}`;
-    console.error(`${location} ${issue.code}: ${issue.message}`);
+    console.error(format({
+      file: issue.filePath || 'commit-msg',
+      line: issue.line ?? 1,
+      ...(issue.commit !== undefined && issue.history !== undefined
+        ? { history: { kind: issue.history, commit: issue.commit } }
+        : {}),
+      ...(issue.split === true ? { split: true } : {}),
+    }, issue.code));
   }
+}
+
+function issueForHit(hit: BoundaryHit): GuardIssue {
+  return {
+    code: hit.code,
+    message: addedLinePatterns.find((pattern) => pattern.code === hit.code)?.message
+      ?? PRIVATE_TERM_CODE_MESSAGES[hit.code]
+      ?? hit.code,
+    filePath: hit.source,
+    line: hit.line,
+    ...(hit.split === true ? { split: true as const } : {}),
+  };
 }
 
 function printHelp(): void {
@@ -1946,6 +2264,9 @@ function printHelp(): void {
        npm run guard:repo -- --release-hygiene
        npm run guard:repo -- --commit-authors
        npm run guard:repo:commit-msg -- <message-file>
+       npm run guard:repo:tree [-- --write-baseline [--allow-increase]]
+       npm run guard:repo:text -- <file>
+       npm run guard:repo:refs [-- <file>]
 
 Modes:
   --staged              Scan staged added lines. This is the default.
@@ -1958,7 +2279,25 @@ Modes:
   --scan-history [N]    Advisory: scan added lines of the last N commits (default 50)
                         for leaked secret shapes. Report-only; exit code stays 0.
   --commit-msg <file>   Scan a commit message file.
+  --tree                Scan every tracked file at HEAD (from git, not the working tree) and
+                        every tracked path name with the term and fallback rules; compare per
+                        path and rule with the private baseline (WHATSOUP_BOUNDARY_BASELINE_FILE,
+                        else ~/.config/whatsoup/boundary-baseline.json, never committed). A rise
+                        or a new file with hits fails; a fall passes with one advisory line.
+                        Skipped (exit 0) without a private term file. A finding with no line
+                        number is the path name itself.
+  --write-baseline      With --tree: rewrite the private baseline from HEAD. Refuses to raise a
+                        count, add a path or follow a new term file, and refuses unless
+                        origin/main is an ancestor of HEAD.
+  --allow-increase      With --write-baseline: accept rises (first baseline, term-list revision).
+  --text <file>         Scan one text file (a PR title and body, an issue, a comment).
+  --refs [file]         Scan ref names, one per line, or pre-push hook lines from stdin.
   --help                Show this help.
+
+Every mode but --release-hygiene also applies the private term file (WHATSOUP_PRIVATE_TERMS_FILE,
+else ~/.config/whatsoup/private-terms.json) when it exists; WHATSOUP_REQUIRE_PRIVATE_TERMS=1 makes
+an absent file a failure. Findings print a location and a rule code only.
+Exit codes: 0 clean, 1 findings, 2 usage or term-file failure, or an inconclusive scan.
 
 By default, this guard is changed-content only. Use --release-hygiene for the release-hygiene file gate.`);
 }
@@ -1970,21 +2309,58 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
     return [];
   }
 
+  // One term-file load per run; every scan below but release-hygiene receives these rules explicitly.
+  let terms: ReturnType<typeof resolveBoundaryTerms>;
+  try {
+    terms = resolveBoundaryTerms(process.env);
+  } catch (err) {
+    if (!(err instanceof PrivateTermsError)) throw err;
+    console.error(`repo hygiene guard: ${err.message}`);
+    process.exitCode = 2;
+    return [];
+  }
+  const termRules = terms.rules;
+  const format = createFindingFormatter(termRules);
+  if (terms.load.status === 'absent' && args.mode !== 'tree') console.error(PRIVATE_TERMS_ABSENT_NOTICE);
+
+  if (args.mode === 'tree') {
+    process.exitCode = runTreeCheck(cwd, terms, {
+      writeBaseline: args.writeBaseline === true,
+      allowIncrease: args.allowIncrease === true,
+    });
+    return [];
+  }
+
+  if (args.mode === 'text' || args.mode === 'refs') {
+    const hits = args.mode === 'text'
+      ? scanPublicText('text', readInputFile(args.textFile ?? '', '--text'), termRules)
+      : scanRefNames(readInputFile(args.refsFile ?? 0, '--refs'), termRules);
+    const hitIssues = hits.map(issueForHit);
+    if (hitIssues.length > 0) {
+      printIssues(hitIssues, format);
+      process.exitCode = 1;
+    } else {
+      console.log(`repo hygiene ${args.mode} check passed`);
+    }
+    return hitIssues;
+  }
+
   if (args.mode === 'scan-history') {
     const depth = args.historyDepth ?? 50;
     // Advisory-only: a git failure (e.g. shallow clone with no history) must NOT
     // fail the build, so we never let the throw reach the top-level exit-1 handler.
     let historyIssues: GuardIssue[];
     try {
-      historyIssues = scanCommitHistory(cwd, depth);
+      historyIssues = scanCommitHistory(cwd, depth, termRules);
     } catch (err) {
+      // git's error text can quote a path or ref; name the error class only.
       console.error(
-        `repo hygiene history scan (advisory): skipped — ${(err as Error).message}`,
+        `repo hygiene history scan (advisory): skipped — the history could not be read (${errorClass(err)})`,
       );
       return [];
     }
     if (historyIssues.length > 0) {
-      printIssues(historyIssues);
+      printIssues(historyIssues, format);
       console.error(
         `repo hygiene history scan (advisory): ${historyIssues.length} secret-shaped finding(s) in last ${depth} commits`,
       );
@@ -2001,28 +2377,35 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
   if (args.mode === 'release-hygiene' && trackedFiles(cwd, releaseHygieneFiles).length === 0) {
     console.error(
       `repo hygiene guard: INCONCLUSIVE — none of the ${releaseHygieneFiles.length} release-hygiene ` +
-        `file(s) are tracked under ${cwd}. A release-hygiene scan over an empty tree certifies ` +
+        'file(s) are tracked in this repository. A release-hygiene scan over an empty tree certifies ' +
         'nothing, which is not a pass.',
     );
     process.exitCode = 2;
     return [];
   }
 
+  const commitTermTally: CommitTermTally = { olderTermHits: 0 };
   const issues = args.mode === 'commit-msg'
-    ? scanCommitMessage(readFileSync(args.messageFile ?? '', 'utf8'))
+    ? scanCommitMessage(readInputFile(args.messageFile ?? '', '--commit-msg'), termRules)
     : args.mode === 'release-hygiene'
       ? scanTrackedFiles(cwd)
       : args.mode === 'commit-authors'
-        ? scanCommitAuthors(readCommitAuthors(cwd))
+        ? scanCommitAuthors(readCommitAuthors(cwd), termRules, BOUNDARY_COMMIT_MESSAGE_EPOCH, commitTermTally)
         : args.mode === 'branch-diff'
-          ? scanBranchDiff(cwd, args.baseRef)
+          ? scanBranchDiff(cwd, args.baseRef, termRules)
           : [
               ...scanStagedSensitiveArtifacts(cwd),
-              ...scanAddedLines(parseUnifiedDiffAddedLines(stagedDiff(cwd))),
+              ...scanAddedLines(parseUnifiedDiffAddedLines(stagedDiff(cwd)), termRules),
             ];
 
+  if (commitTermTally.olderTermHits > 0) {
+    console.log(
+      `repo hygiene guard: ${commitTermTally.olderTermHits} private-term hit(s) in commits older than the term-list epoch `
+        + `(${BOUNDARY_COMMIT_MESSAGE_EPOCH}) were counted, not blocked`,
+    );
+  }
   if (issues.length > 0) {
-    printIssues(issues);
+    printIssues(issues, format);
     process.exitCode = 1;
   } else {
     console.log('repo hygiene guard passed');
@@ -2031,11 +2414,28 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
   return issues;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+/**
+ * The command-line entry. A usage, input or term-file error prints its own fixed message and
+ * exits with its code (2 usage or term file, 1 input). Any other error prints its class and a
+ * fixed sentence only: its message (git's stderr, a file system error) can quote a private path,
+ * ref or name, and the stack goes nowhere.
+ */
+export function main(argv: string[] = process.argv.slice(2), cwd: string = process.cwd()): void {
   try {
-    run();
-  } catch (err) {
-    console.error((err as Error).message);
+    run(argv, cwd);
+  } catch (error) {
+    if (error instanceof UsageError || error instanceof GuardInputError || error instanceof PrivateTermsError) {
+      console.error(`repo hygiene guard: ${error.message}`);
+      process.exitCode = error.exitCode;
+      return;
+    }
+    console.error(
+      `repo hygiene guard: unexpected ${errorClass(error)}; its text is withheld because it can quote a private path, ref or name`,
+    );
     process.exitCode = 1;
   }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
 }

@@ -43,6 +43,7 @@ export default defineConfig({
     setupFiles: [
       './tests/setup/bot-errors-vitest-isolation.ts',
       './tests/setup/source-mutation-tripwire.ts',
+      './tests/setup/private-terms-isolation.ts',
     ],
     coverage: {
       provider: 'v8',

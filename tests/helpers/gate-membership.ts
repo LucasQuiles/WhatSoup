@@ -121,6 +121,10 @@ export const CI_EXEMPT_PUSH_GATE_GUARDS: Readonly<
     backedBy: null,
     why: 'quality.yml runs guard:publication:all (--all), which scans every tracked doc and is a strict superset of the --staged subset. No test backs this; the CI step does.',
   },
+  'guard:repo:tree': {
+    backedBy: null,
+    why: 'NOTHING server-side runs it yet. The tree check needs the private term file, which a hosted runner lacks, so a quality.yml step would only print its skip line and certify nothing. A hosted term-aware check replaces this exemption later; until then the local push gate alone runs it, so scriptReachability overstates it as reachable on the pull-request path.',
+  },
 };
 
 /**

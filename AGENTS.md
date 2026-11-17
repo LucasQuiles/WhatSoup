@@ -48,6 +48,36 @@ Preserve relevant negative cases; report skipped, masked and environment-blocked
 checks as inconclusive. Follow [objective tracking](docs/runbooks/objective-tracking.md)
 and [the quality checklist](docs/contributing/quality-guardrails-checklist.md).
 
+## Public boundary
+
+The GitHub remote is public. Never put these in a file, a file name, a commit
+message, a branch or tag name, a pull request, an issue or a comment: machine
+and host names, bot and instance names, people's names, phone numbers, chat ids,
+home folders, private addresses, account ids or secrets. Use neutral names such
+as `host-a`, `bot-a`, `user-a`, `192.0.2.10` and `example.invalid`.
+
+Private data lives outside the repository, in `~/.config/whatsoup/`: the private
+term file that names what must never appear (`private-terms.json`, or the path in
+`WHATSOUP_PRIVATE_TERMS_FILE`) and the private tree baseline
+(`boundary-baseline.json`, or `WHATSOUP_BOUNDARY_BASELINE_FILE`).
+[CONTRIBUTING.md](CONTRIBUTING.md#private-term-file) explains both.
+
+The checks:
+
+- `npm run guard:repo:staged` and `npm run guard:repo:branch-diff`: added lines.
+- `npm run guard:repo:tree`: the text of every tracked file and every tracked
+  path name at `HEAD`, against the private baseline; binary files are checked
+  by path name only. It skips without a private term file.
+- `npm run guard:repo:text -- <file>`: one text file, such as a PR body or an
+  issue draft, before you post it.
+- `npm run guard:repo:refs -- <file>`: ref names; the pre-push hook runs it.
+- gitleaks: the pre-push hook and the Quality job `gitleaks` scan new commits
+  for secrets. The Quality job prints a count only.
+
+The `guard:repo` checks print a file, a line where one applies, and a rule code,
+with the matched text masked. A term regex with anchors (`^`, `$`) or lookarounds
+may not be masked inside a longer file name, so write term regexes without them.
+
 ## Release convergence
 
 `main` is the only release line. Every host must run a release exported from

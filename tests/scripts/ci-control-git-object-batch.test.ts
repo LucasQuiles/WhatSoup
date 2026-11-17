@@ -270,6 +270,10 @@ describe('exact object reads through cat-file batches', () => {
         parentOids: position === 0 ? [] : [repository.chain[position - 1]!],
         authorName: repository.env.GIT_AUTHOR_NAME,
         authorEmail: repository.env.GIT_AUTHOR_EMAIL,
+        committerName: repository.env.GIT_COMMITTER_NAME,
+        committerEmail: repository.env.GIT_COMMITTER_EMAIL,
+        // GIT_COMMITTER_DATE above: 2023-11-14 22:13:20 +0000.
+        committerTime: 1_700_000_000,
         subject: `c${position + 1}`,
         message: `c${position + 1}\n`,
         byteLength: oracle.byteLength,

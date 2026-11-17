@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join as joinPath } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
+import { privateTermsTestEnv } from '../helpers/private-terms-env.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
 import { anonymizeText } from '../../scripts/anonymize-private-literals.ts';
@@ -118,6 +119,7 @@ describe('anonymize-private-literals', () => {
     const script = joinPath(process.cwd(), 'scripts/anonymize-private-literals.ts');
     const hookEnv = {
       ...cleanGitEnv(),
+      ...privateTermsTestEnv(),
       GIT_DIR: execFileSync('git', ['rev-parse', '--git-dir'], {
         cwd: process.cwd(),
         encoding: 'utf8',

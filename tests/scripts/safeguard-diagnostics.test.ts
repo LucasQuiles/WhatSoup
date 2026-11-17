@@ -94,6 +94,7 @@ const requiredPackageScripts = {
     'unset WHATSOUP_SKIP_DOC_DRIFT WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT WHATSOUP_SKIP_NODE_PIN_CHECK WHATSOUP_SKIP_BOUNDARY_CHECK',
     'npm run guard:repo:release-hygiene',
     'npm run guard:repo:commit-authors',
+    'npm run guard:repo:tree',
     'npm run guard:publication:all',
     'npm run guard:doc-drift',
     'npm run guard:public-surface-drift',
@@ -288,7 +289,7 @@ const requiredQualityWorkflow = [
   '  compatibility:',
   '    name: quality (25.x)',
   '    runs-on: ubuntu-24.04',
-  '    timeout-minutes: 40',
+  '    timeout-minutes: 55',
   '    steps:',
   '      - name: Setup Node 25',
   '        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
@@ -308,6 +309,8 @@ const requiredQualityWorkflow = [
   '      - name: Install console dependencies',
   '        run: npm --prefix console ci',
   '      - name: Full compatibility test suite',
+  '        env:',
+  "          WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS: '2700000'",
   '        run: npm test -- --pool=forks',
   '      - name: Console compatibility build',
   '        run: npm --prefix console run build',
@@ -1057,10 +1060,34 @@ describe('safeguard diagnostics', () => {
     {
       name: 'makes the Node 25 lane advisory',
       mutate: (workflow: string) => workflow.replace(
-        '    timeout-minutes: 40\n    steps:',
-        '    timeout-minutes: 40\n    continue-on-error: true\n    steps:',
+        '    timeout-minutes: 55\n    steps:',
+        '    timeout-minutes: 55\n    continue-on-error: true\n    steps:',
       ),
       evidence: 'quality (25.x) compatibility job must be blocking',
+    },
+    {
+      name: 'restores the 40-minute Node 25 cap, below the 45-minute suite bound',
+      mutate: (workflow: string) => workflow.replace(
+        '    timeout-minutes: 55\n    steps:',
+        '    timeout-minutes: 40\n    steps:',
+      ),
+      evidence: 'quality (25.x) compatibility timeout must be exactly 55 minutes',
+    },
+    {
+      name: 'drops the Node 25 full-suite battery bound',
+      mutate: (workflow: string) => workflow.replace(
+        "        env:\n          WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS: '2700000'\n        run: npm test -- --pool=forks",
+        '        run: npm test -- --pool=forks',
+      ),
+      evidence: 'quality (25.x) full suite must set WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS to exactly 2700000',
+    },
+    {
+      name: 'raises the Node 25 battery bound to the job cap',
+      mutate: (workflow: string) => workflow.replace(
+        "WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS: '2700000'",
+        "WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS: '3300000'",
+      ),
+      evidence: 'quality (25.x) full suite must set WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS to exactly 2700000',
     },
     {
       name: 'conditions the Node 25 full suite',

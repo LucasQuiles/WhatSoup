@@ -5,6 +5,14 @@ import { pathToFileURL } from 'node:url';
 
 import { parseClosedOptions } from './lib/cli-args.ts';
 import { cleanGitEnv } from './lib/guard-core.ts';
+import { PrivateTermsError } from './lib/private-terms.ts';
+import { maskPrivateText, resolveBoundaryTerms, scanPublicText } from './lib/repo-hygiene-boundary.ts';
+
+// An issue or PR number can be a private account number that the term file names. The receipt
+// then withholds that number: the finding code stays, the number does not.
+function publicNumbers(numbers: readonly number[], rules: Parameters<typeof maskPrivateText>[1]): number[] {
+  return numbers.filter((value) => maskPrivateText(String(value), rules) === String(value));
+}
 
 export type GuardDecision = 'pass' | 'warn' | 'fail' | 'inconclusive';
 
@@ -12,9 +20,23 @@ export interface PrMetadataFinding {
   code:
     | 'pr-metadata.closing-directive-outside-section'
     | 'pr-metadata.invalid-directive-section'
-    | 'pr-metadata.commit-closing-directive';
+    | 'pr-metadata.commit-closing-directive'
+    | 'pr-metadata.public-boundary-text';
   issueNumbers: number[];
 }
+
+/** A public-boundary hit in the PR title or body: location and rule code only, never the text. */
+export interface PrTextFinding {
+  source: 'title' | 'body';
+  line: number;
+  code: string;
+}
+
+/**
+ * Which rules scanned the title and body. Without a private term file (CI today) only the
+ * generic rules ran; the term-aware run happens where the term file exists.
+ */
+export type PrTextRules = 'not-run' | 'generic-only' | 'generic-and-private-terms';
 
 export interface PrMetadataReceipt {
   decision: GuardDecision;
@@ -23,6 +45,8 @@ export interface PrMetadataReceipt {
   findings: PrMetadataFinding[];
   warnings: string[];
   errors: string[];
+  textRules: PrTextRules;
+  textFindings: PrTextFinding[];
 }
 
 export interface PrMetadataGuardResult {
@@ -31,6 +55,7 @@ export interface PrMetadataGuardResult {
 }
 
 interface GuardInput {
+  title: string;
   body: string;
   base: string;
   head: string;
@@ -57,6 +82,10 @@ const USAGE = [
   '  --target <branch>        Target branch for --stdin/--body-file.',
   '  --default-branch <name>  Default branch for --stdin/--body-file.',
   '  --json                   Print the bounded receipt as JSON.',
+  '',
+  'The PR title (from --github-event) and body are also scanned with the public-boundary text',
+  'rules; the receipt names the rule set that ran (generic-only without a private term file)',
+  'and lists hits by source, line and rule code only.',
   '  --help, -h               Print this usage text.',
 ].join('\n');
 
@@ -78,6 +107,7 @@ function receipt(
   warnings: string[] = [],
   errors: string[] = [],
   pullRequestNumber: number | null = null,
+  text: { textRules: PrTextRules; textFindings: PrTextFinding[] } = { textRules: 'not-run', textFindings: [] },
 ): PrMetadataReceipt {
   return {
     decision,
@@ -86,6 +116,8 @@ function receipt(
     findings,
     warnings,
     errors,
+    textRules: text.textRules,
+    textFindings: text.textFindings,
   };
 }
 
@@ -215,6 +247,7 @@ function readPullRequestEvent(eventPath: string): GuardInputResult {
   const base = asRecord(pullRequest?.base);
   const head = asRecord(pullRequest?.head);
   const number = event?.number;
+  const title = pullRequest?.title;
   const body = pullRequest?.body;
   const target = base?.ref;
   const baseOid = base?.sha;
@@ -238,6 +271,7 @@ function readPullRequestEvent(eventPath: string): GuardInputResult {
   return {
     ok: true,
     value: {
+      title: typeof title === 'string' ? title : '',
       body: body ?? '',
       base: baseOid,
       head: headOid,
@@ -282,10 +316,11 @@ export function runPrMetadataGuard(
         return inconclusive('pr-metadata.body-unavailable');
       }
     }
-    input = { body, base, head, target, defaultBranch, pullRequestNumber: null };
+    input = { title: '', body, base, head, target, defaultBranch, pullRequestNumber: null };
   }
 
-  const { base, head, target, defaultBranch, pullRequestNumber } = input;
+  const { base, head, target, defaultBranch } = input;
+  let { pullRequestNumber } = input;
   if (!isFullObjectId(base) || !isFullObjectId(head)) return inconclusive('pr-metadata.revision-invalid');
 
   // GitHub event payloads freeze base.sha at the base branch's tip when the event
@@ -320,24 +355,50 @@ export function runPrMetadataGuard(
     return inconclusive('pr-metadata.commit-range-unavailable');
   }
 
-  const body = scanBody(input.body);
-  const findings: PrMetadataFinding[] = [...body.findings];
+  // The title and body are public: scan them with the repository hygiene guard's --text rules
+  // (generic boundary rules, plus the private term rules when a term file is present).
+  let terms: ReturnType<typeof resolveBoundaryTerms>;
+  try {
+    terms = resolveBoundaryTerms(process.env);
+  } catch (error) {
+    if (error instanceof PrivateTermsError) return inconclusive('pr-metadata.private-terms-unavailable', pullRequestNumber);
+    throw error;
+  }
+  const text = {
+    textRules: (terms.load.status === 'loaded' ? 'generic-and-private-terms' : 'generic-only') as PrTextRules,
+    textFindings: [
+      ...scanPublicText('title', input.title, terms.rules),
+      ...scanPublicText('body', input.body, terms.rules),
+    ].map(({ source, line, code }) => ({ source: source as PrTextFinding['source'], line, code })),
+  };
+
+  const keep = (numbers: readonly number[]): number[] => publicNumbers(numbers, terms.rules);
+  if (pullRequestNumber !== null && keep([pullRequestNumber]).length === 0) pullRequestNumber = null;
+  const scanned = scanBody(input.body);
+  const body = { ...scanned, intentionalIssueNumbers: keep(scanned.intentionalIssueNumbers) };
+  const findings: PrMetadataFinding[] = scanned.findings.map((finding) => ({
+    ...finding,
+    issueNumbers: keep(finding.issueNumbers),
+  }));
 
   const commitIssues = issueNumbers(commits);
   if (commitIssues.length > 0) {
-    findings.push({ code: 'pr-metadata.commit-closing-directive', issueNumbers: commitIssues });
+    findings.push({ code: 'pr-metadata.commit-closing-directive', issueNumbers: keep(commitIssues) });
   }
+  if (text.textFindings.length > 0) findings.push({ code: 'pr-metadata.public-boundary-text', issueNumbers: [] });
 
-  if (target !== defaultBranch) {
+  // A non-default target relaxes closing directives to a warning, never a public-boundary hit.
+  const targetWarnings = target !== defaultBranch ? ['pr-metadata.nondefault-target'] : [];
+  if (target !== defaultBranch && text.textFindings.length === 0) {
     return {
       exitCode: 0,
-      receipt: receipt('warn', findings, body.intentionalIssueNumbers, ['pr-metadata.nondefault-target'], [], pullRequestNumber),
+      receipt: receipt('warn', findings, body.intentionalIssueNumbers, targetWarnings, [], pullRequestNumber, text),
     };
   }
   if (findings.length === 0) {
-    return { exitCode: 0, receipt: receipt('pass', [], body.intentionalIssueNumbers, [], [], pullRequestNumber) };
+    return { exitCode: 0, receipt: receipt('pass', [], body.intentionalIssueNumbers, [], [], pullRequestNumber, text) };
   }
-  return { exitCode: 1, receipt: receipt('fail', findings, body.intentionalIssueNumbers, [], [], pullRequestNumber) };
+  return { exitCode: 1, receipt: receipt('fail', findings, body.intentionalIssueNumbers, targetWarnings, [], pullRequestNumber, text) };
 }
 
 function isHelpRequest(argv: readonly string[]): boolean {
@@ -362,7 +423,13 @@ function main(argv: readonly string[]): void {
     }
   }
 
-  const result = runPrMetadataGuard(argv, process.cwd(), stdin);
+  let result: PrMetadataGuardResult;
+  try {
+    result = runPrMetadataGuard(argv, process.cwd(), stdin);
+  } catch {
+    // An unexpected error's text can quote a path or the PR text; the receipt names a code only.
+    result = inconclusive('pr-metadata.unexpected-error');
+  }
   process.stdout.write(`${argv.includes('--json') ? JSON.stringify(result.receipt) : formatPrMetadataReceipt(result.receipt)}\n`);
   process.exitCode = result.exitCode;
 }

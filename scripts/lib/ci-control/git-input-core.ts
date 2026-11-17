@@ -140,6 +140,10 @@ export interface ExactCommitMetadataV1 {
   parentOids: string[];
   authorName: string;
   authorEmail: string;
+  committerName: string;
+  committerEmail: string;
+  /** Committer time, seconds since the epoch, as the commit object records it. */
+  committerTime: number;
   subject: string;
   message: string;
   byteLength: number;
@@ -1040,8 +1044,8 @@ function preflightCommitMetadata(
   return preflight;
 }
 
-function parseCommitIdentity(value: string): { name: string; email: string } {
-  const match = /^([^<>\u0000-\u001f\u007f]{1,1024}) <([^<>\s]{1,320})> [0-9]+ [+-][0-9]{4}$/u.exec(value);
+function parseCommitIdentity(value: string): { name: string; email: string; time: number } {
+  const match = /^([^<>\u0000-\u001f\u007f]{1,1024}) <([^<>\s]{1,320})> ([0-9]+) [+-][0-9]{4}$/u.exec(value);
   if (
     match === null
     || Buffer.byteLength(match[1]!, "utf8") > 1_024
@@ -1049,7 +1053,7 @@ function parseCommitIdentity(value: string): { name: string; email: string } {
   ) {
     throw commitMetadataError("ci.input.commit-metadata-malformed");
   }
-  return { name: match[1]!, email: match[2]! };
+  return { name: match[1]!, email: match[2]!, time: Number(match[3]!) };
 }
 
 function parseCommitMetadataBody(
@@ -1095,7 +1099,7 @@ function parseCommitMetadataBody(
     throw commitMetadataError("ci.input.commit-metadata-malformed");
   }
   const author = parseCommitIdentity(authorHeader.slice("author ".length));
-  parseCommitIdentity(committerHeader.slice("committer ".length));
+  const committer = parseCommitIdentity(committerHeader.slice("committer ".length));
 
   let optionalHeaderSeen = false;
   for (; index < headers.length; index += 1) {
@@ -1126,6 +1130,9 @@ function parseCommitMetadataBody(
     parentOids,
     authorName: author.name,
     authorEmail: author.email,
+    committerName: committer.name,
+    committerEmail: committer.email,
+    committerTime: committer.time,
     subject,
     message,
     byteLength: bytes.byteLength,

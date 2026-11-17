@@ -496,7 +496,11 @@ jobs:
   compatibility:
     name: quality (25.x)
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    # The full-suite step bounds the suite at 45 minutes (2700000 ms below). Setup, the two
+    # dependency installs and the console build add about 10 minutes, so this cap sits above
+    # both and the battery's own bound (exit 124, attributed to the suite) fires before the
+    # runner kills the job.
+    timeout-minutes: 55
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
@@ -530,6 +534,8 @@ jobs:
         run: npm --prefix console ci
 
       - name: Full compatibility test suite
+        env:
+          WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS: '2700000'
         run: npm test -- --pool=forks
 
       - name: Console compatibility build
@@ -597,3 +603,135 @@ jobs:
 
       - name: Perf lane (report-only)
         run: npm --prefix console run perf:lane -- --json
+
+  # Secret scan of the change range with the pinned gitleaks release and .gitleaks.toml (the
+  # default rules plus the hygiene check's fixture paths). The archive is checked against its
+  # published sha256 before it is extracted; a mismatch fails the job. The JSON report and the
+  # scanner's own output stay in RUNNER_TEMP, and the log shows the finding count only, never a
+  # rule id or matched text: no PR comment, no SARIF upload, no artifact. A scanner error prints
+  # one fixed line with its exit code. Ranges: a pull request's base..head; a merge group's base..head (a
+  # required check must report on merge_group or the queue stalls); a push's before..after. Any
+  # other event (schedule, a new tag) names no range and scans nothing. A pull request or merge
+  # group is judged by the base commit's .gitleaks.toml (fail closed), a push by its own; no
+  # gitleaks:allow comment and no .gitleaksignore can suppress a finding.
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install gitleaks 8.30.1
+        env:
+          GITLEAKS_VERSION: '8.30.1'
+          GITLEAKS_ARCHIVE_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          set -euo pipefail
+          install_dir="$RUNNER_TEMP/gitleaks"
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          mkdir -p "$install_dir"
+          curl --fail --silent --show-error --location --retry 3 \
+            --output "$install_dir/$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          printf '%s  %s\n' "$GITLEAKS_ARCHIVE_SHA256" "$install_dir/$archive" | sha256sum -c -
+          tar -xzf "$install_dir/$archive" -C "$install_dir" gitleaks
+          echo "$install_dir" >> "$GITHUB_PATH"
+
+      - name: Scan the change range
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MERGE_GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_AFTER_SHA: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request) base="$PR_BASE_SHA"; head="$PR_HEAD_SHA" ;;
+            merge_group) base="$MERGE_GROUP_BASE_SHA"; head="$MERGE_GROUP_HEAD_SHA" ;;
+            push) base="$PUSH_BEFORE_SHA"; head="$PUSH_AFTER_SHA" ;;
+            *) base=""; head="" ;;
+          esac
+          zero="0000000000000000000000000000000000000000"
+          refuse_range() {
+            echo "gitleaks: the event gives no usable change range (a base or head that is missing, malformed, all-zero or not a commit); the scan fails closed"
+            exit 1
+          }
+          # Base and head reach git and --log-opts only as 40-character lower-case hex commit ids: a
+          # space or an option in a value (such as --max-count=0) could make the scan cover nothing.
+          # The characters are listed, not ranged, so no locale widens the class.
+          for value in "$base" "$head"; do
+            if [ -n "$value" ] && ! [[ "$value" =~ ^[0123456789abcdef]{40}$ ]]; then
+              refuse_range
+            fi
+          done
+          if [ -z "$base" ] || [ -z "$head" ] || [ "$base" = "$zero" ]; then
+            # A pull request or merge group always names a base and a head, so a missing one fails closed.
+            if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "merge_group" ]; then
+              refuse_range
+            fi
+            echo "gitleaks: the ${EVENT_NAME} event names no change range; nothing to scan"
+            exit 0
+          fi
+          # A pull request or merge group must name a base and a head that are commit objects
+          # themselves, with no peeling: a tree id as the base would let git show below read a
+          # .gitleaks.toml that no commit holds. An unknown id or an all-zero head fails here too.
+          if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "merge_group" ]; then
+            for value in "$base" "$head"; do
+              if ! [ "$(git cat-file -t "$value" 2>/dev/null)" = commit ]; then
+                refuse_range
+              fi
+            done
+          fi
+          # A pull request or merge group is judged by the base commit's .gitleaks.toml, so a change
+          # cannot edit the rules or the allowlist that judge it. Only the change that adds the file
+          # finds no base copy; any other failure to read one fails closed. A push uses its own copy.
+          config=".gitleaks.toml"
+          if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "merge_group" ]; then
+            if git cat-file -e "${base}^{commit}" 2>/dev/null && ! git cat-file -e "${base}:.gitleaks.toml" 2>/dev/null; then
+              echo "gitleaks: the base commit has no .gitleaks.toml, so the change's own copy is used (true only for the change that adds it)"
+            else
+              config="$RUNNER_TEMP/gitleaks-base.toml"
+              if ! git show "${base}:.gitleaks.toml" > "$config" 2>/dev/null; then
+                echo "gitleaks: cannot read .gitleaks.toml from the base commit; the scan fails closed"
+                exit 1
+              fi
+            fi
+          fi
+          # gitleaks reads .gitleaksignore from the folder it scans whatever --gitleaks-ignore-path
+          # names, so a change could suppress its own findings with one. The repository tracks none.
+          if [ -e .gitleaksignore ] || [ -L .gitleaksignore ]; then
+            echo "gitleaks: the checkout holds a .gitleaksignore, which would suppress findings; the scan fails closed"
+            exit 1
+          fi
+          # Neither an inline gitleaks:allow comment nor an ignore file may suppress a finding.
+          ignore_dir="$(mktemp -d "$RUNNER_TEMP/gitleaks-ignore.XXXXXX")"
+          report="$RUNNER_TEMP/gitleaks-report.json"
+          # The scanner's own output stays in RUNNER_TEMP: its errors can quote paths, refs and config text.
+          scan_log="$RUNNER_TEMP/gitleaks-output.txt"
+          # Exit 42 marks leaks; gitleaks exits 1 on its own errors too, so leaks get their own code.
+          status=0
+          gitleaks git --log-opts="${base}..${head}" --config "$config" --ignore-gitleaks-allow \
+            --gitleaks-ignore-path "$ignore_dir" --redact --no-banner \
+            --log-level error --report-format json --report-path "$report" --exit-code 42 . > "$scan_log" 2>&1 || status=$?
+          if [ "$status" -eq 42 ]; then
+            # The count only: a custom rule's id can itself be a secret or a private name.
+            count="$(jq 'length' "$report" 2>/dev/null)" || count='?'
+            case "$count" in ''|*[!0-9]*) count='?' ;; esac
+            echo "gitleaks: ${count} finding(s) in ${base}..${head}; rule ids and matched text withheld"
+            echo "gitleaks: the pre-push secret scan shows the rule ids on a local push"
+            exit 1
+          fi
+          if [ "$status" -ne 0 ]; then
+            echo "gitleaks: the scan did not complete (exit ${status})"
+            exit "$status"
+          fi
+          echo "gitleaks: no findings in ${base}..${head}"
