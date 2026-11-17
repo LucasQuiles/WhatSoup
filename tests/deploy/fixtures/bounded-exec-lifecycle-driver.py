@@ -1,5 +1,6 @@
 
 import fcntl, hashlib, json, os, pathlib, pty, select, signal, subprocess, sys, termios, time
+DRIVER_STARTED = time.monotonic()
 root, helper, bash, mode, terminal = sys.argv[1:]
 root = pathlib.Path(root)
 # Opening a FIFO O_WRONLY|O_NONBLOCK while no reader holds it fails with ENXIO,
@@ -23,10 +24,116 @@ def members(session):
             if os.getsid(pid) == session: found.append({'pid': pid, 'ppid': int(fields[1]), 'pgid': int(fields[2]), 'state': fields[3], 'identity': row})
         except ProcessLookupError: pass
     return found
+def usr1_resume_timing(root):
+    # File times: the guard's USR1 call and the worker's first post-trap check.
+    try:
+        sent = (root / 'guard-usr1-sent').stat().st_mtime_ns
+        resumed = (root / 'worker-resumed-after-usr1').stat().st_mtime_ns
+    except FileNotFoundError: return None
+    return (resumed - sent) // 1_000_000
+# runLifecycleProbe sends TERM LIFECYCLE_DRIVER_TIMEOUT_MS after it spawns this
+# driver. The USR1 diagnosis may use only what is left after the cleanup
+# reserve: the finally block's child wait (3 s) and session drain (2 s), plus
+# 1 s for the record.
+DRIVER_LIMIT_S = int(os.environ.get('LIFECYCLE_DRIVER_TIMEOUT_MS', '15000')) / 1000
+CLEANUP_RESERVE_S = 6
+DIAGNOSIS_DEADLINE = DRIVER_STARTED + DRIVER_LIMIT_S - CLEANUP_RESERVE_S
+def bounded_diagnostic(root, name, argv, cap_s):
+    # Own session and file output: a timeout kills the whole group and no pipe
+    # left open by a descendant can hold the wait.
+    global DIAGNOSIS_DEADLINE
+    remaining = DIAGNOSIS_DEADLINE - time.monotonic()
+    result = {'argv0': argv[0], 'budget_s': round(min(cap_s, remaining), 3)}
+    if remaining < 0.2:
+        result['skipped'] = 'driver budget spent'
+        return result
+    out_path, err_path = root / f'diagnosis-{name}.out', root / f'diagnosis-{name}.err'
+    with open(out_path, 'wb') as out, open(err_path, 'wb') as err:
+        process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=err, start_new_session=True)
+    try:
+        result['returncode'] = process.wait(timeout=min(cap_s, remaining))
+    except subprocess.TimeoutExpired:
+        result['timed_out'] = 'budget'
+    except TimeoutError:
+        # The outer TERM arrived: skip the remaining diagnosis and clean up.
+        DIAGNOSIS_DEADLINE = 0
+        result['timed_out'] = 'outer TERM'
+    finally:
+        try: os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+        process.wait()
+        drain = time.monotonic() + 0.5
+        while members(process.pid) and time.monotonic() < drain: time.sleep(0.01)
+        result['survivors'] = members(process.pid)
+    result['stdout'] = out_path.read_text(errors='replace').splitlines()
+    result['stderr'] = err_path.read_text(errors='replace')[-400:]
+    return result
+def usr1_resume_diagnosis(root, worker, processes, found):
+    # Diagnosis only; the driver still raises. It separates a USR1 that was not
+    # delivered (kill status), a worker that is late (state, witness after
+    # cleanup) and a worker that is stuck (stack sample). `found` is already in
+    # the record, so a diagnosis cut short keeps what it has.
+    found['usr1_marker'] = (root / 'guard-usr1-sent').read_text().strip()
+    try: found['usr1_sent_age_ms'] = (time.time_ns() - (root / 'guard-usr1-sent').stat().st_mtime_ns) // 1_000_000
+    except FileNotFoundError: found['usr1_sent_age_ms'] = None
+    group = next((item['pgid'] for item in processes if item['pid'] == worker), None)
+    pids = sorted({worker} | {item['pid'] for item in processes if item['pgid'] == group or item['ppid'] == worker})
+    found['worker_family'] = bounded_diagnostic(root, 'ps', ['/bin/ps', '-o', 'pid=,ppid=,pgid=,stat=,time=,command=', '-p', ','.join(map(str, pids))], 3)
+    # The test substitutes the sample command to prove a blocked diagnosis.
+    sample = json.loads(os.environ['USR1_DIAGNOSIS_SAMPLE']) if os.environ.get('USR1_DIAGNOSIS_SAMPLE') else None
+    if sample is None and sys.platform == 'darwin' and os.path.exists('/usr/bin/sample'):
+        sample = ['/usr/bin/sample', str(worker), '1', '-mayDie']
+    if sample is not None:
+        found['worker_sample'] = bounded_diagnostic(root, 'sample', sample, 15)
+        lines = found['worker_sample'].get('stdout', [])
+        start = next((index for index, line in enumerate(lines) if line.startswith('Call graph:')), 0)
+        found['worker_sample']['stdout'] = lines[start:start + 60]
 # Modes that count groups outliving the call. Their injections wait for the
 # command to start and the watchdog to enter its budget sleep, not for the
 # record's release line, which the worker writes before releasing either.
 GROUP_MODES = ('control-tokenless-worker-stopped', 'control-tokenless-cleanup-interrupted', 'authorization-unreadable-cleanup-interrupted', 'authorization-valid-cleanup-interrupted', 'authorization-valid-outer-terminated-after-reap', 'guard-terminated', 'outer-terminated')
+def release_budget():
+    # holdBudgetForDriver in credential-probe-stopped-worker.ts holds the budget
+    # until this, so a slow host cannot let it overtake the driver's identity read.
+    (root / 'budget-hold-release').write_text('release')
+# Modes whose helper stalls in a TERM-ignoring setup child (issue #3554). The
+# test sets EVENT_ORDER_TRACE=1 for them only under
+# WHATSOUP_SETUP_STALL_EVENT_TRACE=1; then the driver records when it observed
+# each event line and each setup process's reap. Otherwise the probe runs the
+# untraced path, the same-host control. It only observes: no event waits for it.
+SETUP_STALL_MODES = ('setup-mktemp-term-ignoring', 'setup-mkfifo-term-ignoring', 'setup-ps-term-ignoring')
+setup_stall_trace = mode in SETUP_STALL_MODES and os.environ.get('EVENT_ORDER_TRACE') == '1'
+def observe_setup_stall(child, timeout):
+    # Every recorded time is an observation time: when this poll loop saw an event
+    # line or found a pid gone, not when the event happened and not how long any
+    # phase took. An event happened at or before its observed time. An interval
+    # between two observed times is accurate only to within
+    # observation_poll_max_gap_ms (plus 1 ms for whole-ms truncation).
+    # Returns the unused part of the timeout, so the probe's total wait is unchanged.
+    deadline = time.monotonic() + timeout
+    log = root / 'event-order.log'
+    observations = record.setdefault('event_observations', [])
+    gone = record.setdefault('setup_reap_observed_ms', {})
+    record['observation_poll_max_gap_ms'] = 0.0
+    previous_poll = None
+    while True:
+        poll_at = time.monotonic()
+        if previous_poll is not None:
+            record['observation_poll_max_gap_ms'] = max(record['observation_poll_max_gap_ms'], round((poll_at - previous_poll) * 1000, 3))
+        previous_poll = poll_at
+        exited = child.poll() is not None
+        # Take whole lines only: a read can land inside an append.
+        text = log.read_text() if log.exists() else ''
+        for line in text[:text.rfind('\n') + 1].splitlines()[len(observations):]:
+            observations.append({'event': line, 'observed_monotonic_ns': time.monotonic_ns()})
+        for name in ('setup-pid', 'setup-child-pid'):
+            pid_text = (root / name).read_text() if name not in gone and (root / name).exists() else ''
+            if not pid_text.endswith('\n') or not pid_text.strip().isdecimal(): continue
+            # A zombie still answers, so this is when the process was reaped.
+            try: os.kill(int(pid_text), 0)
+            except ProcessLookupError: gone[name] = int((time.monotonic() - started) * 1000)
+        if exited or time.monotonic() >= deadline: return max(0.0, deadline - time.monotonic())
+        time.sleep(0.005)
 def wait_ready():
     deadline = time.monotonic() + 3
     while not ((root / 'command-started').exists() and (root / 'watchdog-sleep-started').exists()) and time.monotonic() < deadline:
@@ -330,6 +437,14 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             if mode != 'cleanup-child-group':
                 os.kill(worker, signal.SIGSTOP)
                 record['stopped_worker'] = worker
+            release_budget()
+            if mode in ('worker-stopped-after-authorization', 'forged-completion-worker-stopped'):
+                # Start the guard's budget only now, so a slow host cannot let
+                # the deadline overtake the stop.
+                with (root / 'event-order.log').open('a') as log: log.write('H_WORKER_STOPPED worker=%d\n' % worker)
+                release = os.open(root / 'event-order-authority-release', os.O_WRONLY | os.O_NONBLOCK)
+                try: os.write(release, b'release\n')
+                finally: os.close(release)
         if mode in ('dead-leader-before-authorization', 'dead-leader-clean-cleanup', 'dead-leader-finishing-cleanup', 'deadline-fifo-after-cleanup', 'authorization-unreadable-after-cleanup'):
             deadline = time.monotonic() + 3
             authorization = None
@@ -355,6 +470,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             (root / 'expected-guard-pid').write_text(str(guard))
             os.kill(guard, signal.SIGSTOP)
             record['stopped_guard'] = guard
+            release_budget()
             while not (root / 'authorization-rm-ready').exists() and time.monotonic() < deadline + 5:
                 time.sleep(0.01)
             if not (root / 'authorization-rm-ready').exists(): raise RuntimeError('worker cleanup did not retain authorization')
@@ -433,6 +549,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             worker_record = next((item for item in processes if item['pid'] == worker), None)
             if worker is None or worker == child.pid or worker_record is None: raise RuntimeError('worker identity unavailable')
             outer = worker_record['ppid']
+            release_budget()
             if mode == 'authorization-unreadable-cleanup-interrupted':
                 guard_timer_deadline = time.monotonic() + 3
                 while not (root / 'guard-timer-entered').exists() and child.poll() is None and time.monotonic() < guard_timer_deadline:
@@ -451,6 +568,21 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                 while not (root / 'guard-usr1-sent').exists() and child.poll() is None and time.monotonic() < usr1_deadline:
                     time.sleep(0.01)
                 if not (root / 'guard-usr1-sent').exists(): raise RuntimeError('guard USR1 unavailable')
+                record['usr1_observed_ms'] = int((time.monotonic() - started) * 1000)
+                # /bin/bash 3.2 runs a trap inside the signal handler while read
+                # waits, and after an exit from there it keeps doing so. A TERM
+                # landing in the USR1 trap can then leave malloc with its lock
+                # held, or one landing in a fork can allocate during it, and the
+                # worker aborts. The probe holds the worker out of read, past the
+                # return of its USR1 trap, so each TERM runs its trap normally.
+                resumed_deadline = time.monotonic() + 3
+                while not (root / 'worker-resumed-after-usr1').exists() and child.poll() is None and time.monotonic() < resumed_deadline:
+                    time.sleep(0.01)
+                if not (root / 'worker-resumed-after-usr1').exists():
+                    record['usr1_resume_missing'] = {}
+                    usr1_resume_diagnosis(root, worker, processes, record['usr1_resume_missing'])
+                    raise RuntimeError('worker did not resume after USR1')
+                record['usr1_resume_ms'] = usr1_resume_timing(root)
                 os.kill(worker, signal.SIGTERM)
             if mode.endswith('-cleanup-interrupted') or mode.startswith('authorization-valid-'):
                 # The probe holds the worker's cleanup at its first step. A TERM
@@ -502,8 +634,12 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             record['supervisor_pid'] = supervisor
             if mode == 'parent-stopped':
                 os.kill(supervisor, signal.SIGSTOP)
+                release_budget()
                 try:
-                    time.sleep(1.5)
+                    # The budget starts at the release, so wait for its effect, not a fixed time.
+                    gone_deadline = time.monotonic() + 6
+                    while any(item['pid'] == command_pid for item in members(session)) and time.monotonic() < gone_deadline:
+                        time.sleep(0.01)
                     record['command_alive_while_parent_stopped'] = any(item['pid'] == command_pid for item in members(session))
                 finally: os.kill(supervisor, signal.SIGCONT)
             else: os.kill(supervisor, signal.SIGTERM)
@@ -515,8 +651,11 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             timer_group = int((root / 'timer-partial-signal').read_text())
             record['timer_survivors_after_return'] = [item for item in members(session) if item['pgid'] == timer_group]
         record['before_child_wait_ms'] = int((time.monotonic() - started) * 1000)
-        child.wait(timeout=6 if mode in ('worker-stopped-after-authorization', 'forged-completion-worker-stopped') else 8)
+        child.wait(timeout=observe_setup_stall(child, 8) if setup_stall_trace else 8)
         record['child_exit_ms'] = int((time.monotonic() - started) * 1000)
+        if setup_stall_trace:
+            started_ns = int(started * 1_000_000_000)
+            record['setup_event_observed_ms'] = [[(item['observed_monotonic_ns'] - started_ns) // 1_000_000, item['event']] for item in record['event_observations']]
         record['exit'] = child.returncode
         record['sentinel_alive_before_cleanup'] = sentinel.poll() is None
         record['survivors_before_cleanup'] = members(session)
@@ -547,6 +686,10 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
         if frame_holder is not None: os.close(frame_holder)
         for holder in release_holders: os.close(holder)
 record['duration_ms'] = int((time.monotonic() - started) * 1000)
+if 'usr1_resume_missing' in record:
+    # A witness written after the driver gave up shows a late worker, not a stuck one.
+    record['usr1_resume_missing']['witness_after_cleanup'] = (root / 'worker-resumed-after-usr1').exists()
+    record['usr1_resume_missing']['resume_ms_after_cleanup'] = usr1_resume_timing(root)
 record['stdout'] = (root / 'stdout').read_text()
 record['stderr'] = (root / 'stderr').read_text()
 record['command_started'] = (root / 'command-started').exists()
@@ -579,6 +722,7 @@ record['fork_race_intercept'] = (root / 'fork-race-intercept').read_text() if (r
 record['record_read_trap'] = (root / 'record-read-trap').read_text() if (root / 'record-read-trap').exists() else None
 record.setdefault('worker_cut_observed', False)
 record['barrier_expired'] = sorted(item.name for item in root.glob('barrier-expired-*'))
+record['sleep_ledger'] = (root / 'sleep-ledger').read_text().splitlines() if (root / 'sleep-ledger').exists() else []
 if mode.startswith('event-order-') or os.environ.get('EVENT_ORDER_TRACE') == '1':
     record['events'] = (root / 'event-order.log').read_text().splitlines()
     record.setdefault('event_observations', [])
