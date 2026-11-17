@@ -433,6 +433,27 @@ describe('ConfigStep — real React handler wiring', () => {
     })
   })
 
+  describe('tool update verbosity', () => {
+    it('uses minimal updates when the form has no configured mode', () => {
+      renderConfigStep({ initialData: { type: 'passive', name: 'watcher' } })
+      fireEvent.click(screen.getByRole('tab', { name: /limits/i }))
+
+      expect((screen.getByLabelText('Tool update verbosity') as HTMLSelectElement).value).toBe('minimal')
+    })
+
+    it('writes full updates only when the operator selects them', () => {
+      const { onChange } = renderConfigStep({
+        initialData: { type: 'passive', name: 'watcher', toolUpdateMode: 'minimal' },
+      })
+      fireEvent.click(screen.getByRole('tab', { name: /limits/i }))
+      onChange.mockClear()
+
+      fireEvent.change(screen.getByLabelText('Tool update verbosity'), { target: { value: 'full' } })
+
+      expect(onChange).toHaveBeenCalledWith({ toolUpdateMode: 'full' })
+    })
+  })
+
   describe('TagInput accessibility wiring', () => {
     it('labels the allowlist contacts input and describes it with helper text', () => {
       renderConfigStep({

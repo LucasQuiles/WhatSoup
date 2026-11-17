@@ -786,6 +786,36 @@ describe('AddLineWizard — reset-on-open (C-B3W4-3)', () => {
   })
 })
 
+describe('AddLineWizard — tool update defaults', () => {
+  it('uses minimal tool updates for a new form', async () => {
+    render(<AddLineWizard open={true} onClose={vi.fn()} />)
+
+    await advanceToConfigStep()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('tab', { name: /limits/i }))
+    })
+
+    expect((screen.getByLabelText('Tool update verbosity') as HTMLSelectElement).value).toBe('minimal')
+  })
+
+  it('resets a reopened form to minimal tool updates', async () => {
+    const { rerender } = render(<AddLineWizard open={true} onClose={vi.fn()} />)
+
+    await advanceToConfigStep()
+    rerender(<AddLineWizard open={false} onClose={vi.fn()} />)
+    mockCreateLine.mockClear()
+    wizardEventSources = []
+    rerender(<AddLineWizard open={true} onClose={vi.fn()} />)
+
+    await advanceToConfigStep()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('tab', { name: /limits/i }))
+    })
+
+    expect((screen.getByLabelText('Tool update verbosity') as HTMLSelectElement).value).toBe('minimal')
+  })
+})
+
 describe('AddLineWizard — step strip step labels', () => {
   it('renders step labels: Identity, Link, Model, Config, Review', () => {
     render(<AddLineWizard open={true} onClose={vi.fn()} />)
