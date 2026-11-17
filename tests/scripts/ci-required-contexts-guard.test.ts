@@ -283,7 +283,7 @@ describe('run() integration with mock deps', () => {
     const result = makeOutput();
     const code = run(['--head-sha', HEAD_SHA], repoRoot, deps, result.out);
     expect(code).toBe(0);
-    expect(result.stdout).toContain('all 2 required context(s) present');
+    expect(result.stdout).toContain('all 3 required context(s) present');
     expect(result.stderr).toBe('');
   });
 
