@@ -9,7 +9,8 @@
  *   malformed id, a base that is not an ancestor of the head, a commit the fetch did not bring.
  * - Output and the published check give counts by mode and rule code, never a matched text.
  * - The text check reads issues and comments from the event payload, and lists changed items
- *   for the hourly run.
+ *   for the hourly run from a fixed start, page by page through each next-page link, with the
+ *   token sent to the API origin only.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -25,6 +26,7 @@ import {
   bindPullRequestCandidate,
   collectChangedItems,
   collectEventItems,
+  createGitHubApi,
   fetchCandidateObjects,
   formatCandidateResult,
   formatTextResult,
@@ -35,6 +37,7 @@ import {
   scheduleSince,
   type CandidateScanResult,
   type GitHubApi,
+  type GitHubPagedApi,
 } from '../../scripts/boundary-private-scan.ts';
 import { resolveBoundaryTerms } from '../../scripts/lib/repo-hygiene-boundary.ts';
 import { scanAddedLines, type CommitAuthor } from '../../scripts/repo-hygiene-guard.ts';
@@ -629,19 +632,29 @@ describe('boundary text check', () => {
     expect(formatTextResult(result)).toEqual(['boundary text: 1 item(s) scanned; no findings']);
   });
 
-  const listingApi = (handler: (name: string, params: URLSearchParams) => unknown): GitHubApi => ({
-    async getJson(path) {
+  // A handler answers one request: an array is a last page; `{ body, next }` is a page with a next-page link.
+  const listingApi = (handler: (name: string, params: URLSearchParams) => unknown): GitHubApi & GitHubPagedApi => {
+    const answer = (path: string): unknown => {
       const [name, query = ''] = path.split('?');
-      const answer = handler(name!, new URLSearchParams(query));
-      if (answer === undefined) throw new Error('unexpected request');
-      return answer;
-    },
-    async postJson() {
-      throw new Error('unexpected post');
-    },
-  });
+      const found = handler(name!, new URLSearchParams(query));
+      if (found === undefined) throw new Error('unexpected request');
+      return found;
+    };
+    return {
+      async getJson(path) {
+        return answer(path);
+      },
+      async getPage(path) {
+        const found = answer(path);
+        return Array.isArray(found) ? { body: found, next: null } : found as { body: unknown; next: string | null };
+      },
+      async postJson() {
+        throw new Error('unexpected post');
+      },
+    };
+  };
 
-  it('starts the hourly listing at the last successful scheduled run, else two hours back', async () => {
+  it('starts the hourly listing at the last successful scheduled run, else at the fixed start', async () => {
     const now = new Date('2026-11-17T12:00:00Z');
     const runs = (workflowRuns: unknown[]) => listingApi((name, params) => (
       name === 'actions/workflows/boundary-private-text.yml/runs' && params.get('status') === 'success' && params.get('event') === 'schedule'
@@ -649,14 +662,16 @@ describe('boundary text check', () => {
         : undefined
     ));
     await expect(scheduleSince(runs([{ created_at: '2026-11-17T10:00:00Z' }]), now)).resolves.toBe('2026-11-17T09:45:00.000Z');
-    await expect(scheduleSince(runs([]), now)).resolves.toBe('2026-11-17T10:00:00.000Z');
+    // With no successful scheduled run, the window never moves with the clock, so a finding the first runs report
+    // keeps failing every run until the item is cleaned.
+    await expect(scheduleSince(runs([]), now)).resolves.toBe('2026-11-17T00:00:00.000Z');
+    await expect(scheduleSince(runs([]), new Date('2026-11-20T12:00:00Z'))).resolves.toBe('2026-11-17T00:00:00.000Z');
   });
 
   it('collects issues, pull requests, comments, review comments and reviews changed since a time', async () => {
     const since = '2026-11-17T09:45:00.000Z';
     const api = listingApi((name, params) => {
       if (name !== 'pulls/2/reviews' && params.get('since') !== since) return undefined;
-      if (params.get('page') !== '1') return [];
       if (name === 'issues') return [{ number: 1, id: 10, title: 'An issue', body: null }, { number: 2, id: 20, title: 'A pull', body: 'Its body', pull_request: {} }];
       if (name === 'issues/comments') return [{ id: 30, body: 'A comment', issue_url: 'https://api.github.com/repos/owner-a/repo-a/issues/1' }];
       if (name === 'pulls/comments') return [{ id: 40, body: 'A review comment', pull_request_url: 'https://api.github.com/repos/owner-a/repo-a/pulls/2' }];
@@ -672,9 +687,60 @@ describe('boundary text check', () => {
     ]);
   });
 
-  it('fails closed when a listing fills every page it may read', async () => {
-    const full = Array.from({ length: 100 }, (_unused, index) => ({ number: index + 1, id: index + 1, title: 'An issue', body: '' }));
-    const api = listingApi((name) => (name === 'issues' ? full : []));
+  it('follows each next-page link, also after a short page', async () => {
+    const since = '2026-11-17T09:45:00.000Z';
+    const api = listingApi((name, params) => {
+      if (name === 'issues' && params.get('page') === null) {
+        return { body: [{ number: 1, id: 10, title: 'First', body: '' }], next: 'issues?page=2' };
+      }
+      if (name === 'issues' && params.get('page') === '2') return [{ number: 3, id: 30, title: 'Second', body: '' }];
+      if (name === 'issues/comments' || name === 'pulls/comments') return [];
+      return undefined;
+    });
+    await expect(collectChangedItems(api, since)).resolves.toEqual([
+      { kind: 'issue', number: 1, id: 10, text: 'First\n' },
+      { kind: 'issue', number: 3, id: 30, text: 'Second\n' },
+    ]);
+  });
+
+  it('fails closed when next-page links continue past ten pages', async () => {
+    let issuePages = 0;
+    const api = listingApi((name, params) => {
+      if (name !== 'issues') return [];
+      issuePages += 1;
+      const page = Number(params.get('page') ?? '1');
+      return { body: [{ number: page, id: page, title: 'An issue', body: '' }], next: `issues?page=${page + 1}` };
+    });
     await expect(collectChangedItems(api, '2026-11-17T09:45:00.000Z')).rejects.toBeInstanceOf(BoundaryRefusal);
+    // Every one of the ten pages is read through its link before the listing is refused.
+    expect(issuePages).toBe(10);
+  });
+
+  describe('the REST client', () => {
+    const env = { GITHUB_TOKEN: 'token-a', GITHUB_REPOSITORY: 'owner-a/repo-a', GITHUB_API_URL: 'https://api.example.invalid' };
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it('reads the next-page link from the Link header', async () => {
+      const fetchStub = vi.fn(async () => new Response('[]', {
+        status: 200,
+        headers: { Link: '<https://api.example.invalid/repositories/7/issues?page=2>; rel="next", <https://api.example.invalid/repositories/7/issues?page=5>; rel="last"' },
+      }));
+      vi.stubGlobal('fetch', fetchStub);
+      await expect(createGitHubApi(env).getPage('issues?per_page=100')).resolves.toEqual({
+        body: [],
+        next: 'https://api.example.invalid/repositories/7/issues?page=2',
+      });
+      expect(String(fetchStub.mock.calls[0]?.[0])).toBe('https://api.example.invalid/repos/owner-a/repo-a/issues?per_page=100');
+    });
+
+    it('sends the token to the API origin only', async () => {
+      const fetchStub = vi.fn(async () => new Response('[]', { status: 200 }));
+      vi.stubGlobal('fetch', fetchStub);
+      await expect(createGitHubApi(env).getPage('https://other.example.invalid/repos/owner-a/repo-a/issues?page=2')).rejects.toThrow();
+      await expect(createGitHubApi(env).getPage('http://api.example.invalid/repos/owner-a/repo-a/issues?page=2')).rejects.toThrow();
+      expect(fetchStub).not.toHaveBeenCalled();
+    });
   });
 });
