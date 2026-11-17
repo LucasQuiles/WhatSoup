@@ -435,6 +435,49 @@ def test_event_permission_finalization_failure_does_not_publish(
     assert not (tmp_path / "state/event.json").exists()
 
 
+def _publish_event_at(module: object, root: Path, relative: str) -> object:
+    target = module.durable_json_target(trusted_root=root, relative_path=relative)
+    payload = {"id": "event-1"}
+    op_id = module.operation_id(
+        target,
+        payload,
+        component="fixture.event",
+        predecessor=module.JsonVersion(False, None, None, None),
+    )
+    return module.publish_event_json(
+        target, payload, component="fixture.event", operation_id=op_id
+    )
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions")
+def test_durable_write_works_beneath_search_only_ancestor(tmp_path: Path) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    searchonly = tmp_path / "searchonly"
+    searchonly.mkdir()
+    inner = searchonly / "inner"
+    inner.mkdir(mode=0o700)
+    searchonly.chmod(0o311)  # search-only for its owner too: no read bit
+    try:
+        result = _publish_event_at(module, inner, "x.json")
+        assert result.advance_allowed, result
+        assert json.loads((inner / "x.json").read_text()) == {"id": "event-1"}
+    finally:
+        searchonly.chmod(0o700)
+
+
+def test_durable_write_refuses_symlinked_ancestor(tmp_path: Path) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    (tmp_path / "real" / "inner").mkdir(parents=True, mode=0o700)
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    try:
+        result = _publish_event_at(module, tmp_path / "link" / "inner", "x.json")
+    except module.DurableWriteError:
+        pass
+    else:
+        assert not result.advance_allowed
+    assert not (tmp_path / "real" / "inner" / "x.json").exists()
+
+
 def test_event_final_mode_ignores_ambient_umask(tmp_path: Path) -> None:
     module = importlib.import_module("deploy.scripts.lib.durable_json")
     (tmp_path / "state").mkdir(mode=0o700)
