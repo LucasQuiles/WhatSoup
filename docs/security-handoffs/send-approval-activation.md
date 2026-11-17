@@ -62,8 +62,9 @@ the inbound completion; the existing degraded-scope contract requires operator
 recovery or restart.
 
 This bounds waiting between ingest admission and runtime admission, not all
-registered leases or provider work. Registration RPCs and approved automation
-run before ingest; their capacity and ambiguous-close recovery remain unqualified.
+registered leases or provider work. Registration RPCs run before ingest, and
+approved automation runs separately in the approved-operation dispatcher; the
+capacity and ambiguous-close recovery of both remain unqualified.
 Existing ingest overflow selection is unchanged: displaced messages are neither
 stored nor dispatched. Protected control-message routing, overlapping duplicate
 close ownership, and cancellation before the single-session provider boundary
