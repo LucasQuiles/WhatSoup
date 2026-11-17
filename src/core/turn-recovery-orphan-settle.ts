@@ -275,6 +275,11 @@ export class OrphanTransferSettler {
              AND closure.recovery_plan_id = pending.recovery_plan_id
              AND closure.disposition = 'superseded_by_operator_catchup'
          )
+         AND NOT EXISTS (
+           SELECT 1 FROM operator_catchup_resolutions resolved
+           WHERE resolved.source_seq = pending.inbound_seq
+             AND resolved.recovery_plan_id = pending.recovery_plan_id
+         )
        LIMIT 1`,
     );
     this.insertPlan = raw.prepare(

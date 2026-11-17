@@ -2465,6 +2465,30 @@ there.
 
 #### Close a proven operator catch-up recovery (admitted inbound sequences)
 
+A later successful reply establishes delivery of that later reply, not fulfillment of an older
+request. Closure now requires `--confirm-original-fulfillment` and an `--evidence-ref` documenting
+that the original request was addressed. The periodic reconciler and bulk closure tool cannot
+supply that confirmation from ordinary later traffic; those recoveries remain pending.
+
+For a new authorized operator response, authenticated `POST /send` accepts `operatorCatchup`:
+`{ "planId": "RECOVERY_PLAN_ID", "sourceSeq": 101, "actor": "operator:IDENTITY", "evidenceRef": "evidence:AUTHORIZATION" }`.
+The resolved recipient must match the pending original request and its canonical conversation.
+The send is recorded once with unsafe replay policy, the original source sequence and plan binding.
+A repeated request is refused even after a transport failure: inspect the existing operation;
+do not retry an ambiguous send. The response's `operatorOpId` identifies the new operation;
+`fulfillment: "unverified"` is deliberate. Submission or echo does not establish fulfillment.
+The original failed turn, quarantined operation and exhausted recovery attempts remain intact.
+
+After the bound operation is echoed and original fulfillment is independently established,
+use the same command below with `--source-seqs 101 --operator-op OP_ID` instead of `--catchup-seq`.
+This path requires schema 69, supports exactly one original request per operation, and records
+an append-only resolution with retained delivery proof. It never fabricates a new inbound turn.
+The direct-operation output contains keyed fingerprints and counts, not raw identifiers.
+First inspect without `--confirm`; repeat the same tuple with `--confirm` only under authority.
+Existing unbound sends cannot be retroactively claimed by this path. Preserve their open outcome
+until separate evidence and an authorized repair establish it; never resend merely to obtain a binding.
+
+
 This command records that a newer, independently delivered operator catch-up supersedes an exact set
 of pending source inbounds. It never sends or replays a message. The database must already exist
 and its migration ledger must be contiguous from 1 through the current migration, with at least 43
@@ -2485,7 +2509,8 @@ npm run close-recovery-catchup -- \
   --source-seqs 101,102 \
   --catchup-seq 110 \
   --actor operator:IDENTITY \
-  --evidence-ref evidence:REFERENCE
+  --evidence-ref evidence:REFERENCE \
+  --confirm-original-fulfillment
 ```
 
 A successful dry run emits a redacted `ready: true` inspection and changes no rows. It contains
@@ -2515,6 +2540,7 @@ npm run close-recovery-catchup -- \
   --catchup-seq 110 \
   --actor operator:IDENTITY \
   --evidence-ref evidence:REFERENCE \
+  --confirm-original-fulfillment \
   --confirm
 ```
 
@@ -2556,15 +2582,13 @@ back it up alongside the database if you rely on cross-run fingerprint correlati
 identifying information by itself and only lets past/future runs against the SAME database correlate —
 it does not need to be treated as a credential, but if it changes, expect fingerprints to change with it.
 
-#### Close every caught-up operator catch-up recovery (batch)
+#### Inspect operator catch-up recovery candidates (batch)
 
-`npm run close-recovery-catchups` closes every open `recovery_pending_operator_catchup` group whose
-conversation has caught up, in one pass. It selects each group's target with the automatic reconciler's
-rule (`selectOperatorCatchupCandidates`: the earliest same-chat `operator_catchup_delivery_proofs` target
-later than every source sequence). Each group is then proven with `inspectOperatorCatchupRecovery` or
-closed with `closeOperatorCatchupRecoveryRaw`, the same primitive as the single-group command above, so it
-adds no proof rule of its own. Closures record the operator's `--actor` and `--evidence-ref`, not the
-reconciler's.
+`npm run close-recovery-catchups` enumerates pending groups and later same-chat delivery candidates.
+It cannot attest fulfillment of each original request, so those groups remain pending with
+`closure_rejected`. A later reply, or one evidence reference for the whole batch, is insufficient.
+Use the single-group command above with specific original-request evidence to close a recovery.
+The batch command does not accept `--confirm-original-fulfillment`.
 
 ```bash
 npm --silent run close-recovery-catchups -- \
@@ -2572,12 +2596,9 @@ npm --silent run close-recovery-catchups -- \
 ```
 
 The dry run (the default) changes no database rows. It still creates the redaction salt file described
-above on first use. Add `--confirm --backup-dir /abs/dir` to close. `--confirm` without `--backup-dir` is a
-usage error. The confirmed pass first writes a quick_check-verified, mode-0600 backup into that directory.
-If the backup fails, nothing is closed. The pass then re-enumerates the groups on the writable connection,
-and each group closes in its own writer transaction. Groups that are already closed no longer appear, so
-repeating the command closes nothing more. `--group-limit N` (default 50) applies the reconciler's two
-budgets.
+above on first use. The existing `--confirm --backup-dir /abs/dir` mode still creates a verified backup,
+but cannot bypass the original-fulfillment requirement and closes no unconfirmed group.
+`--group-limit N` (default 50) applies the reconciler's two budgets.
 
 Output is one JSON document: `ok`, `dryRun`, `groupLimit`, `backup`, `summary` (`examined`, `ready`,
 `closed`, `idempotent`, `skipped`, `linksClosed`, `errors`), and `groups[]`. Each group carries the same

@@ -306,6 +306,15 @@ export function runDatabaseRetention(
     const outboundOps = changes(db.raw.prepare(`
       DELETE FROM outbound_ops
        WHERE status IN ('echoed', 'failed_permanent', 'quarantined')
+         AND NOT EXISTS (SELECT 1 FROM operator_catchup_resolutions resolved
+                         WHERE resolved.outbound_op_id = outbound_ops.id)
+         AND NOT EXISTS (
+           SELECT 1 FROM inbound_disposition_links pending
+           WHERE pending.inbound_seq = outbound_ops.source_inbound_seq
+             AND pending.disposition = 'recovery_pending_operator_catchup'
+             AND pending.recovery_plan_id = CASE WHEN json_valid(outbound_ops.payload)
+               THEN json_extract(outbound_ops.payload, '$.operatorCatchup.planId') END
+         )
          AND CASE
            WHEN status = 'quarantined' THEN CASE
              -- An ambiguous or legacy quarantine remains an open incident

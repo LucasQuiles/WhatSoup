@@ -41,7 +41,7 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
   afterEach(() => db.close());
 
   it('installs schema 42 with shared admission proof and persisted witness enforcement', () => {
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(68);
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(69);
     expect(db.raw.prepare(`
       SELECT name FROM sqlite_master
       WHERE type = 'view' AND name = 'operator_catchup_delivery_proofs'
@@ -112,7 +112,7 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
   it('closes against a completed echo-recovery transfer without rewriting terminal delivery kind', () => {
     const fixture = installEchoTransferFixture();
 
-    const receipt = closeOperatorCatchupRecovery(db, {
+    const receipt = closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true,
       planId: fixture.planId,
       conversationKey: fixture.conversationKey,
       expectedSourceSeqs: [fixture.sourceSeq],
@@ -149,7 +149,7 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
     });
 
     const fixture = installEchoTransferFixture();
-    const receipt = closeOperatorCatchupRecovery(db, {
+    const receipt = closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true,
       planId: fixture.planId,
       conversationKey: fixture.conversationKey,
       expectedSourceSeqs: [fixture.sourceSeq],
@@ -251,7 +251,7 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
                 '2026-07-13 05:25:17')
     `).run(conversationKey, chatJid);
 
-    expect(closeOperatorCatchupRecovery(db, {
+    expect(closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true,
       planId,
       conversationKey,
       expectedSourceSeqs: [47706],
@@ -603,6 +603,7 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
       catchupSeq: fixture.targetSeq,
       actor: 'operator:test',
       evidenceRef: 'test://persisted-witness',
+      originalFulfillmentConfirmed: true,
     };
     const first = closeOperatorCatchupRecovery(db, params);
     installSecondEchoTransferProof(fixture);
@@ -622,7 +623,7 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
 
   it('persists an append-only reconstructable witness for the accepted proof', () => {
     const fixture = installEchoTransferFixture();
-    closeOperatorCatchupRecovery(db, {
+    closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true,
       planId: fixture.planId,
       conversationKey: fixture.conversationKey,
       expectedSourceSeqs: [fixture.sourceSeq],

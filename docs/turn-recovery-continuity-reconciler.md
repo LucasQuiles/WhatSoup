@@ -1,54 +1,34 @@
-# Turn-recovery continuity: automatic catch-up reconciler
+# Turn-recovery continuity: catch-up reconciler
 
-## Why
+Current contract: later traffic proves delivery only. The selector below still identifies delivery
+candidates, but closure requires explicit per-request `confirmedFulfillments` evidence matching
+the plan, conversation, exact source set and selected catch-up sequence. Periodic calls supply
+none and leave these groups pending. Historical claims below that conversation resumption alone
+proves no lost request are superseded; they do not establish original fulfillment. For bound
+operator sends and the explicit closure command, see [the runbook](runbook.md#close-a-proven-operator-catch-up-recovery-admitted-inbound-sequences).
 
-The turn-recovery subsystem does the **pend** half of *pend-and-release* correctly:
-when the agent crashes mid-turn it detects the orphaned inbound, refuses an unsafe
-replay, and records an open `recovery_pending_operator_catchup` disposition link.
-It never did the **release** half automatically.
+## Selection and fulfillment
 
-Ground-truth from the live `q` instance (2026-09-03, read-only):
+`selectOperatorCatchupCandidates` identifies later delivered replies in the same conversation
+and chat. This is a delivery candidate, not evidence that an earlier request was fulfilled.
+`reconcileOperatorCatchupRecoveries` closes a candidate only when its caller also supplies
+`confirmedFulfillments`: an exact plan, conversation, source sequence set, target sequence and
+reference to independent original-fulfillment evidence. A routine periodic pass supplies none;
+it reports `closure_rejected` and leaves the original request pending. The bulk closure CLI
+also leaves these groups pending; use the per-request operator command with reviewed evidence.
 
-- **27 open catch-up links** and **24 `blocked_unsafe` job tombstones** had
-  accumulated over ~6 weeks. Every one of the 8
-  `crash_reclaim_no_terminal_outbound` inbounds was checked against the message
-  log: **all 8 saw the conversation resume** — the 8/16 crash-storm cluster got
-  delivered replies within ~60–90s; the three older ones are followed by
-  hundreds of later in-thread replies. **No third-party user was silently
-  dropped; no live reply was lost.** The backlog is *stale ledger residue*, not
-  live message loss.
+A new authenticated operator send can instead bind directly to the original request and plan.
+Its schema-69 resolution requires the exact echoed operation plus explicit fulfillment confirmation.
+It preserves the failed inbound and all original recovery attempts. Resolved operator operations
+are excluded from pending counts and retained as proof. See the runbook linked above.
 
-The root cause of the residue: an open catch-up link could be closed **only** by
-a human running `scripts/close-recovery-catchup.ts` with the exact
-`--plan-id / --conversation-key / --source-seqs / --catchup-seq` tuple. There is
-no automatic closer, so links pile up indefinitely even after the conversation
-has demonstrably caught up.
-
-## What this adds (PR1 — primitive only)
-
-`reconcileOperatorCatchupRecoveries(raw, …)` in
-`src/core/recovery-catchup-closure.ts` — a **pure selector** on top of the
-existing, hardened closure primitive. It does **not** invent any new proof or
-closure semantics.
-
-For each open pending `(recovery_plan_id, conversation_key)` group it:
-
-1. Reads the exact set of still-open source seqs (`superseded_by_seq IS NULL`,
-   not already closed).
-2. Finds the **earliest later inbound on the sources' own `chat_jid`** that
-   carries a *unique* delivery proof — `MIN(target_seq)` from the fail-closed
-   `operator_catchup_delivery_proofs` view (`HAVING COUNT(*) = 1`) with
-   `target_seq > max(source seqs)`. The chat filter mirrors the closure trigger,
-   which requires `target.chat_jid = source.chat_jid` for every source: a proof
-   from another chat under the same `conversation_key` can never close the
-   group, so picking one would wedge the group on every pass.
-3. Calls `closeOperatorCatchupRecoveryRaw` **verbatim** with
-   `actor = 'auto_reconciler'` and an `auto://catchup-delivery-proof:seq=<n>`
-   evidence reference.
+The selector retains its stable enumeration and bounded attempt/examination budgets. It finds the
+earliest later inbound with unique delivery proof on the source chat; none of these predicates
+establishes semantic fulfillment. A caller's explicit evidence must match that exact tuple.
 
 ### Why this is safe
 
-The closure is defended three ways, all of which still apply unchanged:
+Closure requires explicit original-fulfillment confirmation in addition to these delivery checks:
 
 - The app-layer `inspectOperatorCatchupRecovery` re-validates the exact pending
   set, `catchupSeq > every source`, target completeness, and a unique delivery
@@ -62,8 +42,7 @@ The closure is defended three ways, all of which still apply unchanged:
 
 Because of this, the reconciler is intentionally *best-effort*: it picks a
 candidate, attempts the closure, and on any rejection records a bounded skip
-reason and moves on. Groups that are not yet provably superseded (no delivered
-catch-up reply) simply stay pending — which is correct.
+reason and moves on. Groups without both delivery proof and original-fulfillment confirmation stay pending.
 
 Groups whose source inbounds span multiple `chat_jid`s cannot be covered by a
 single catch-up (the trigger requires `target.chat_jid = source.chat_jid` for

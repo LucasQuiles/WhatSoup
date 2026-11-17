@@ -4735,6 +4735,36 @@ describe('POST /send — Authorization header check', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
+  it('refuses malformed operator catch-up metadata before sending', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
+    const result = await httpReq(port, '/send', 'POST', JSON.stringify({
+      chatJid: '15550100001@s.whatsapp.net', text: 'result',
+      operatorCatchup: { sourceSeq: 0 },
+    }), { authorization: 'Bearer test-health-token-2515' });
+    expect(result.status).toBe(400);
+    expect(deps.connectionManager.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('persists the operator source binding through authenticated HTTP and reports fulfillment unverified', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
+    deps.durability = new DurabilityEngine(db);
+    const jid = '15550100001@s.whatsapp.net';
+    const seq = deps.durability.journalInbound('missed-http-request', '15550100001', jid, 'agent');
+    db.raw.exec(`INSERT INTO recovery_plans (plan_id, origin, actor, summary)
+      VALUES ('http-plan', 'operator', 'operator:test', 'Pending request')`);
+    db.raw.prepare(`INSERT INTO inbound_disposition_links (inbound_seq, recovery_plan_id, disposition, reason, actor)
+      VALUES (?, 'http-plan', 'recovery_pending_operator_catchup', 'No reply', 'operator:test')`).run(seq);
+    const payload = JSON.stringify({ chatJid: jid, text: 'Requested result', operatorCatchup: {
+      planId: 'http-plan', sourceSeq: seq, actor: 'operator:test', evidenceRef: 'test://authorized-response',
+    } });
+    const result = await httpReq(port, '/send', 'POST', payload, { authorization: 'Bearer test-health-token-2515' });
+    expect(result.status).toBe(200);
+    const body = JSON.parse(result.body);
+    expect(body.fulfillment).toBe('unverified');
+    expect(db.raw.prepare('SELECT source_inbound_seq, conversation_key FROM outbound_ops WHERE id = ?').get(body.operatorOpId))
+      .toEqual({ source_inbound_seq: seq, conversation_key: '15550100001' });
+  });
+
   it('returns 401 when WHATSOUP_HEALTH_TOKEN is set and Authorization header is missing', async () => {
     process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
     const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net', text: 'hi' });

@@ -11,6 +11,8 @@ export interface CloseOperatorCatchupRecoveryParams {
   catchupSeq: number;
   actor: string;
   evidenceRef: string;
+  /** The evidence reference must establish fulfillment of the original requests. */
+  originalFulfillmentConfirmed?: boolean;
 }
 
 export interface CloseOperatorCatchupRecoveryReceipt {
@@ -114,6 +116,9 @@ export function inspectOperatorCatchupRecovery(
   const conversationKey = requiredText(params.conversationKey, 'Conversation key');
   const actor = requiredText(params.actor, 'Recovery actor');
   const evidenceRef = requiredText(params.evidenceRef, 'Recovery evidence reference', 8192);
+  if (params.originalFulfillmentConfirmed !== true) {
+    throw new Error('Original request fulfillment must be confirmed');
+  }
   const catchupSeq = positiveSeq(params.catchupSeq, 'Catch-up sequence');
   const expectedSourceSeqs = normalizedSourceSeqs(params.expectedSourceSeqs);
 
@@ -382,6 +387,14 @@ export const RECONCILE_DEFAULT_ACTOR = 'auto_reconciler';
 export const RECONCILE_EXAMINATION_MULTIPLIER = 20;
 
 export interface ReconcileOperatorCatchupParams {
+  /** Explicit, per-request operator evidence; ordinary later traffic supplies none. */
+  confirmedFulfillments?: ReadonlyArray<{
+    planId: string;
+    conversationKey: string;
+    sourceSeqs: number[];
+    catchupSeq: number;
+    evidenceRef: string;
+  }>;
   /** Ledger actor recorded on auto-closed links. Defaults to 'auto_reconciler'. */
   actor?: string;
   /**
@@ -429,6 +442,7 @@ interface PendingGroupRow {
 // unexpected bug) is reported as 'error' so the caller can alert rather than
 // silently treat it as a normal not-yet-superseded group.
 const BENIGN_CLOSURE_REJECTIONS: ReadonlySet<string> = new Set([
+  'Original request fulfillment must be confirmed',
   'Recovery plan does not exist',
   'Expected source sequences must exactly match the pending recovery set',
   'Catch-up sequence must be later than every source sequence',
@@ -507,6 +521,11 @@ export function selectOperatorCatchupCandidates(
         WHERE closed.inbound_seq = links.inbound_seq
           AND closed.recovery_plan_id = links.recovery_plan_id
           AND closed.disposition = 'superseded_by_operator_catchup'
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM operator_catchup_resolutions resolved
+        WHERE resolved.source_seq = links.inbound_seq
+          AND resolved.recovery_plan_id = links.recovery_plan_id
       )
     ORDER BY links.recovery_plan_id, source.conversation_key, links.inbound_seq
   `));
@@ -623,13 +642,18 @@ export function reconcileOperatorCatchupRecoveries(
     }
     report.attempted += 1;
     try {
+      const fulfillment = params.confirmedFulfillments?.find((proof) =>
+        proof.planId === group.planId && proof.conversationKey === group.conversationKey
+        && proof.catchupSeq === catchupSeq && sameNumbers(proof.sourceSeqs, group.sourceSeqs));
       const receipt = closeOperatorCatchupRecoveryRaw(raw, {
         planId: group.planId,
         conversationKey: group.conversationKey,
         expectedSourceSeqs: group.sourceSeqs,
         catchupSeq,
         actor,
-        evidenceRef: `auto://catchup-delivery-proof:seq=${catchupSeq}`,
+        evidenceRef: fulfillment?.evidenceRef
+          ?? `auto://catchup-delivery-proof:seq=${catchupSeq}`,
+        originalFulfillmentConfirmed: !!fulfillment?.evidenceRef.trim(),
       });
       report.closed += 1;
       report.linksClosed += receipt.inserted;

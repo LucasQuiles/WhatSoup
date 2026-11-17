@@ -4,7 +4,14 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Database } from '../../src/core/database.ts';
-import { reconcileOperatorCatchupRecoveries } from '../../src/core/recovery-catchup-closure.ts';
+import { reconcileOperatorCatchupRecoveries, selectOperatorCatchupCandidates, type ReconcileOperatorCatchupParams } from '../../src/core/recovery-catchup-closure.ts';
+
+function reconcileWithFixtureFulfillment(raw: DatabaseSync, params: ReconcileOperatorCatchupParams = {}) {
+  const confirmedFulfillments = selectOperatorCatchupCandidates(raw, params.groupLimit)
+    .filter((group) => group.catchupSeq !== null)
+    .map((group) => ({ ...group, catchupSeq: group.catchupSeq!, evidenceRef: 'test://original-requests-fulfilled' }));
+  return reconcileOperatorCatchupRecoveries(raw, { ...params, confirmedFulfillments });
+}
 
 describe('automatic operator catch-up reconciler', () => {
   let db: Database;
@@ -16,10 +23,18 @@ describe('automatic operator catch-up reconciler', () => {
 
   afterEach(() => db.close());
 
-  it('auto-closes a group once its conversation has a delivered catch-up', () => {
+  it('does not infer original fulfillment from later successful traffic', () => {
+    installFixture({ echoed: true });
+    const report = reconcileOperatorCatchupRecoveries(db.raw);
+    expect(report).toMatchObject({ attempted: 1, closed: 0, linksClosed: 0, skipped: 1 });
+    expect(report.skips[0].reason).toBe('closure_rejected');
+    expect(linkRows('superseded_by_operator_catchup')).toEqual([]);
+  });
+
+  it('closes a group with explicit original-fulfillment evidence and a delivered catch-up', () => {
     const fixture = installFixture({ echoed: true });
 
-    const report = reconcileOperatorCatchupRecoveries(db.raw);
+    const report = reconcileWithFixtureFulfillment(db.raw);
 
     expect(report).toMatchObject({
       attempted: 1,
@@ -40,7 +55,7 @@ describe('automatic operator catch-up reconciler', () => {
   it('leaves a group pending when no delivered catch-up exists yet', () => {
     installFixture({ echoed: false });
 
-    const report = reconcileOperatorCatchupRecoveries(db.raw);
+    const report = reconcileWithFixtureFulfillment(db.raw);
 
     expect(report).toMatchObject({ attempted: 0, closed: 0, linksClosed: 0, skipped: 1 });
     expect(report.skips).toEqual([
@@ -52,10 +67,10 @@ describe('automatic operator catch-up reconciler', () => {
   it('is idempotent: a second pass finds nothing left to close', () => {
     installFixture({ echoed: true });
 
-    const first = reconcileOperatorCatchupRecoveries(db.raw);
+    const first = reconcileWithFixtureFulfillment(db.raw);
     expect(first).toMatchObject({ closed: 1 });
 
-    const second = reconcileOperatorCatchupRecoveries(db.raw);
+    const second = reconcileWithFixtureFulfillment(db.raw);
     expect(second).toMatchObject({ attempted: 0, closed: 0, linksClosed: 0, skipped: 0 });
     expect(second.skips).toEqual([]);
   });
@@ -64,18 +79,18 @@ describe('automatic operator catch-up reconciler', () => {
     installFixture({ echoed: true, planId: 'plan-a', conversationKey: 'conv-a', chat: 'a@g.us' });
     installFixture({ echoed: true, planId: 'plan-b', conversationKey: 'conv-b', chat: 'b@g.us' });
 
-    const bounded = reconcileOperatorCatchupRecoveries(db.raw, { groupLimit: 1 });
+    const bounded = reconcileWithFixtureFulfillment(db.raw, { groupLimit: 1 });
     expect(bounded).toMatchObject({ closed: 1, linksClosed: 2 });
     // One group remains for the next pass.
     expect(linkRows('superseded_by_operator_catchup')).toHaveLength(2);
 
-    const rest = reconcileOperatorCatchupRecoveries(db.raw);
+    const rest = reconcileWithFixtureFulfillment(db.raw);
     expect(rest).toMatchObject({ closed: 1, linksClosed: 2 });
     expect(linkRows('superseded_by_operator_catchup')).toHaveLength(4);
   });
 
   it('rejects a non-positive group limit', () => {
-    expect(() => reconcileOperatorCatchupRecoveries(db.raw, { groupLimit: 0 }))
+    expect(() => reconcileWithFixtureFulfillment(db.raw, { groupLimit: 0 }))
       .toThrow(/group limit must be a positive safe integer/i);
   });
 
@@ -92,7 +107,7 @@ describe('automatic operator catch-up reconciler', () => {
     // whole closure rolls back — no partial close — and is classified benign.
     installFixture({ echoed: true, sourceChats: ['reconciler@g.us', 'other@g.us'] });
 
-    const report = reconcileOperatorCatchupRecoveries(db.raw);
+    const report = reconcileWithFixtureFulfillment(db.raw);
 
     // A candidate proof exists (for the target's own chat_jid), so a closure IS
     // attempted — this reaches the catch block, unlike no_catchup_candidate.
@@ -126,7 +141,7 @@ describe('automatic operator catch-up reconciler', () => {
 
       // Fail fast instead of waiting out the 5s default busy_timeout.
       fileDb.raw.exec('PRAGMA busy_timeout = 0');
-      const report = reconcileOperatorCatchupRecoveries(fileDb.raw);
+      const report = reconcileWithFixtureFulfillment(fileDb.raw);
 
       expect(report).toMatchObject({ attempted: 1, closed: 0, linksClosed: 0, skipped: 1 });
       expect(report.skips).toEqual([
@@ -137,7 +152,7 @@ describe('automatic operator catch-up reconciler', () => {
       blocker.exec('ROLLBACK');
       blocker.close();
       blocker = undefined;
-      const retry = reconcileOperatorCatchupRecoveries(fileDb.raw);
+      const retry = reconcileWithFixtureFulfillment(fileDb.raw);
       expect(retry).toMatchObject({ attempted: 1, closed: 1, linksClosed: 2, skipped: 0 });
     } finally {
       try { blocker?.close(); } catch { /* already closed */ }
@@ -161,7 +176,7 @@ describe('automatic operator catch-up reconciler', () => {
       { target_seq: fixture.catchupSeq, chat_jid: 'reconciler@g.us' },
     ]);
 
-    const report = reconcileOperatorCatchupRecoveries(db.raw);
+    const report = reconcileWithFixtureFulfillment(db.raw);
 
     expect(report).toMatchObject({ attempted: 1, closed: 1, linksClosed: 2, skipped: 0 });
     expect(report.skips).toEqual([]);
@@ -183,7 +198,7 @@ describe('automatic operator catch-up reconciler', () => {
       echoed: true, planId: 'plan-b-closable', conversationKey: 'conv-b', chat: 'b@g.us',
     });
 
-    const report = reconcileOperatorCatchupRecoveries(db.raw, { groupLimit: 1 });
+    const report = reconcileWithFixtureFulfillment(db.raw, { groupLimit: 1 });
 
     expect(report).toMatchObject({ attempted: 1, closed: 1, linksClosed: 2, skipped: 1 });
     expect(report.skips).toEqual([
@@ -213,7 +228,7 @@ describe('automatic operator catch-up reconciler', () => {
       echoed: true, planId: 'plan-zz-closable', conversationKey: 'conv-zz', chat: 'zz@g.us',
     });
 
-    const capped = reconcileOperatorCatchupRecoveries(db.raw, { groupLimit: 1 });
+    const capped = reconcileWithFixtureFulfillment(db.raw, { groupLimit: 1 });
 
     expect(capped).toMatchObject({ attempted: 0, closed: 0, linksClosed: 0, skipped: 20 });
     // The cap is deliberate: the closable group waits for a later pass rather
@@ -223,7 +238,7 @@ describe('automatic operator catch-up reconciler', () => {
 
     // The cap is the only thing that stopped the pass: the same fixture with a
     // budget of two allows forty examinations, and the closable group closes.
-    const roomier = reconcileOperatorCatchupRecoveries(db.raw, { groupLimit: 2 });
+    const roomier = reconcileWithFixtureFulfillment(db.raw, { groupLimit: 2 });
 
     expect(roomier).toMatchObject({ attempted: 1, closed: 1, linksClosed: 2, skipped: 21 });
     expect(linkRows('superseded_by_operator_catchup')).toEqual([
@@ -242,7 +257,7 @@ describe('automatic operator catch-up reconciler', () => {
     db.raw.exec('PRAGMA foreign_keys = OFF');
 
     try {
-      const report = reconcileOperatorCatchupRecoveries(db.raw);
+      const report = reconcileWithFixtureFulfillment(db.raw);
 
       // The attempt counter is charged before the closure is tried, so an
       // erroring group spends the attempt budget even though nothing closed.

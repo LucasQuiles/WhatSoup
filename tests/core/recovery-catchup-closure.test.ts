@@ -15,10 +15,20 @@ describe('operator catch-up recovery closure', () => {
 
   afterEach(() => db.close());
 
+  it('does not close an original request from an unrelated later echoed answer', () => {
+    const fixture = installFixture('complete', true);
+    expect(() => closeOperatorCatchupRecovery(db, {
+      planId: fixture.planId, conversationKey: fixture.conversationKey,
+      expectedSourceSeqs: fixture.sourceSeqs, catchupSeq: fixture.catchupSeq,
+      actor: 'operator:test', evidenceRef: 'test://later-delivery-only',
+    })).toThrow('Original request fulfillment must be confirmed');
+    expect(linkRows('superseded_by_operator_catchup')).toEqual([]);
+  });
+
   it('atomically closes the exact open source set only after an echoed catch-up reply', () => {
     const fixture = installFixture('complete', true);
 
-    const receipt = closeOperatorCatchupRecovery(db, {
+    const receipt = closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true,
       planId: fixture.planId,
       conversationKey: fixture.conversationKey,
       expectedSourceSeqs: fixture.sourceSeqs,
@@ -50,7 +60,7 @@ describe('operator catch-up recovery closure', () => {
       { inbound_seq: fixture.sourceSeqs[1], superseded_by_seq: fixture.catchupSeq },
     ]);
 
-    expect(closeOperatorCatchupRecovery(db, {
+    expect(closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true,
       planId: fixture.planId,
       conversationKey: fixture.conversationKey,
       expectedSourceSeqs: fixture.sourceSeqs,
@@ -71,7 +81,7 @@ describe('operator catch-up recovery closure', () => {
       END;
     `);
 
-    expect(() => inspectOperatorCatchupRecovery(db.raw, {
+    expect(() => inspectOperatorCatchupRecovery(db.raw, { originalFulfillmentConfirmed: true,
       planId: fixture.planId,
       conversationKey: fixture.conversationKey,
       expectedSourceSeqs: fixture.sourceSeqs,
@@ -92,7 +102,7 @@ describe('operator catch-up recovery closure', () => {
   ) => {
     const fixture = installFixture(status, echoed);
 
-    expect(() => closeOperatorCatchupRecovery(db, {
+    expect(() => closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true,
       planId: fixture.planId,
       conversationKey: fixture.conversationKey,
       expectedSourceSeqs: fixture.sourceSeqs,
@@ -105,7 +115,7 @@ describe('operator catch-up recovery closure', () => {
 
   it('rejects a partial source set and a mismatched idempotent replay without partial inserts', () => {
     const fixture = installFixture('complete', true);
-    expect(() => closeOperatorCatchupRecovery(db, {
+    expect(() => closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true,
       planId: fixture.planId,
       conversationKey: fixture.conversationKey,
       expectedSourceSeqs: [fixture.sourceSeqs[0]],
@@ -115,7 +125,7 @@ describe('operator catch-up recovery closure', () => {
     })).toThrow('exactly match');
     expect(linkRows('superseded_by_operator_catchup')).toEqual([]);
 
-    closeOperatorCatchupRecovery(db, {
+    closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true,
       planId: fixture.planId,
       conversationKey: fixture.conversationKey,
       expectedSourceSeqs: fixture.sourceSeqs,
@@ -127,7 +137,7 @@ describe('operator catch-up recovery closure', () => {
       INSERT INTO inbound_events (message_id, conversation_key, chat_jid, processing_status, completed_at)
       VALUES ('later-catchup', ?, 'closure@g.us', 'complete', datetime('now'))
     `).run(fixture.conversationKey).lastInsertRowid);
-    expect(() => closeOperatorCatchupRecovery(db, {
+    expect(() => closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true,
       planId: fixture.planId,
       conversationKey: fixture.conversationKey,
       expectedSourceSeqs: fixture.sourceSeqs,
@@ -147,7 +157,7 @@ describe('operator catch-up recovery closure', () => {
     const fixture = installFixture('complete', true);
     db.raw.prepare(sql).run(fixture.opId);
 
-    expect(() => closeOperatorCatchupRecovery(db, {
+    expect(() => closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true,
       planId: fixture.planId,
       conversationKey: fixture.conversationKey,
       expectedSourceSeqs: fixture.sourceSeqs,
@@ -183,7 +193,7 @@ describe('operator catch-up recovery closure', () => {
       FROM operator_catchup_delivery_proof_candidates
       WHERE target_seq = ?
     `).get(fixture.catchupSeq)).toEqual({ evidence_basis: 'selected_corroborated' });
-    expect(() => closeOperatorCatchupRecovery(db, {
+    expect(() => closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true,
       planId: fixture.planId,
       conversationKey: fixture.conversationKey,
       expectedSourceSeqs: fixture.sourceSeqs,
@@ -199,7 +209,7 @@ describe('operator catch-up recovery closure', () => {
     ['evidence', 'operator:test', 'test://different-evidence'],
   ] as const)('rejects an idempotent replay with changed %s', (_case, actor, evidenceRef) => {
     const fixture = installFixture('complete', true);
-    closeOperatorCatchupRecovery(db, {
+    closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true,
       planId: fixture.planId,
       conversationKey: fixture.conversationKey,
       expectedSourceSeqs: fixture.sourceSeqs,
@@ -208,7 +218,7 @@ describe('operator catch-up recovery closure', () => {
       evidenceRef: 'test://echoed-ack',
     });
 
-    expect(() => closeOperatorCatchupRecovery(db, {
+    expect(() => closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true,
       planId: fixture.planId,
       conversationKey: fixture.conversationKey,
       expectedSourceSeqs: fixture.sourceSeqs,

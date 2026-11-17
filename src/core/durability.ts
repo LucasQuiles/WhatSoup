@@ -31,7 +31,8 @@ import type { InboundStatus } from './inbound-status.ts';
 import type { Messenger } from './types.ts';
 import { hasProtectedManagedLink } from './protected-message.ts';
 import type { GuardCaller } from './outbound-identity/types.ts';
-import { toConversationKey } from './conversation-key.ts';
+import { canonicalConversationKey } from './access-list.ts';
+import { z } from 'zod';
 import { getImmediateTransactionRunner, withImmediateTransaction, withTransaction } from './db-tx.ts';
 import {
   createRecoveryStats,
@@ -777,6 +778,14 @@ type DurabilityStatements = {
   selectNow: PreparedStatement;
 };
 
+export const operatorCatchupBindingSchema = z.object({
+  planId: z.string().trim().min(1).max(2048),
+  sourceSeq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  actor: z.string().trim().min(1).max(2048),
+  evidenceRef: z.string().trim().min(1).max(8192),
+}).strict();
+export type OperatorCatchupBinding = z.infer<typeof operatorCatchupBindingSchema>;
+
 export class DurabilityEngine {
   private db: Database;
   private readonly statements: DurabilityStatements;
@@ -790,6 +799,47 @@ export class DurabilityEngine {
   readonly deferredTurns: DeferredTurnStore;
   private readonly sessionLifecycle: SessionLifecycleStore;
   private readonly confirmedOutboundProbe: (seconds: number) => boolean;
+  conversationKeyForJid(chatJid: string): string {
+    return canonicalConversationKey(chatJid, this.db);
+  }
+
+  createOperatorCatchupOp(chatJid: string, text: string, binding: OperatorCatchupBinding): number {
+    const parsed = operatorCatchupBindingSchema.parse(binding);
+    return withImmediateTransaction(this.db, () => {
+      const source = this.db.raw.prepare(`
+        SELECT source.conversation_key, source.chat_jid
+        FROM inbound_disposition_links pending
+        JOIN inbound_events source ON source.seq = pending.inbound_seq
+        WHERE pending.recovery_plan_id = ? AND pending.inbound_seq = ?
+          AND pending.disposition = 'recovery_pending_operator_catchup'
+          AND NOT EXISTS (
+            SELECT 1 FROM inbound_disposition_links closed
+            WHERE closed.recovery_plan_id = pending.recovery_plan_id
+              AND closed.inbound_seq = pending.inbound_seq
+              AND closed.disposition = 'superseded_by_operator_catchup'
+          )
+      `).get(parsed.planId, parsed.sourceSeq) as { conversation_key: string; chat_jid: string } | undefined;
+      if (!source || source.chat_jid !== chatJid
+        || source.conversation_key !== this.conversationKeyForJid(chatJid)) {
+        throw new Error('Operator catch-up must match the pending plan, request and conversation');
+      }
+      const existing = this.db.raw.prepare(`
+        SELECT id FROM outbound_ops WHERE source_inbound_seq = ?
+          AND json_valid(payload)
+          AND json_extract(payload, '$.operatorCatchup.planId') = ?
+        LIMIT 1
+      `).get(parsed.sourceSeq, parsed.planId);
+      if (existing) throw new Error('Operator catch-up already has a bound operation; inspect it before any new send');
+      // A new operator response does not replace the failed turn or its selected
+      // unsafe operation. Fulfillment is a separate, explicit closure decision.
+      return this.createOutboundOp({
+        conversationKey: source.conversation_key, chatJid, opType: 'text',
+        payload: JSON.stringify({ text, operatorCatchup: parsed }),
+        replayPolicy: 'unsafe', sourceInboundSeq: parsed.sourceSeq, isTerminal: false,
+      });
+    });
+  }
+
   constructor(db: Database) {
     this.db = db;
     const prepare = db.raw.prepare.bind(db.raw);
@@ -3867,17 +3917,29 @@ export class DurabilityEngine {
  * Send a message and record it as an outbound op with full durability wiring.
  * Shared helper extracted from admin.ts, health.ts, and chat runtime.
  */
-export async function sendTracked(
+export async function sendTracked(...args: Parameters<typeof sendTrackedWithReceipt>): Promise<void> {
+  await sendTrackedWithReceipt(...args);
+}
+
+export async function sendTrackedWithReceipt(
   messenger: Messenger,
   chatJid: string,
   text: string,
   durability: DurabilityEngine | undefined,
-  opts: { replayPolicy: 'safe' | 'unsafe' | 'read_only'; isTerminal?: boolean; sourceInboundSeq?: number; caller?: GuardCaller; opType?: 'text' | 'status_ping' },
-): Promise<void> {
+  opts: { replayPolicy: 'safe' | 'unsafe' | 'read_only'; isTerminal?: boolean; sourceInboundSeq?: number; caller?: GuardCaller; opType?: 'text' | 'status_ping'; operatorCatchup?: OperatorCatchupBinding },
+): Promise<number | undefined> {
   let opId: number | undefined;
+  if (opts.operatorCatchup && (!durability || opts.caller !== 'health'
+    || opts.replayPolicy !== 'unsafe' || opts.isTerminal === true
+    || (opts.opType !== undefined && opts.opType !== 'text')
+    || (opts.sourceInboundSeq !== undefined && opts.sourceInboundSeq !== opts.operatorCatchup.sourceSeq))) {
+    throw new Error('Operator catch-up requires durable unsafe operator delivery');
+  }
   if (durability) {
-    const conversationKey = toConversationKey(chatJid);
-    opId = durability.createOutboundOp({
+    const conversationKey = durability.conversationKeyForJid(chatJid);
+    opId = opts.operatorCatchup
+      ? durability.createOperatorCatchupOp(chatJid, text, opts.operatorCatchup)
+      : durability.createOutboundOp({
       conversationKey,
       chatJid,
       opType: opts.opType ?? 'text',
@@ -3898,6 +3960,7 @@ export async function sendTracked(
     if (opId !== undefined && durability) {
       durability.markSubmitted(opId, receipt.waMessageId);
     }
+    return opId;
   } catch (err) {
     if (opId !== undefined && durability) {
       const evidence = classifyOutboundFailure(err, {

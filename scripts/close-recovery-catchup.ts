@@ -11,6 +11,7 @@ import {
   type OperatorCatchupRecoveryInspection,
 } from '../src/core/recovery-catchup-closure.ts';
 import { SQLITE_BUSY_TIMEOUT_PRAGMA } from '../src/lib/sqlite-constants.ts';
+import { inspectOperatorCatchupResolution, resolveOperatorCatchup } from '../src/core/operator-catchup-resolution.ts';
 
 interface CliArgs {
   dbPath: string;
@@ -18,6 +19,8 @@ interface CliArgs {
   conversationKey: string;
   sourceSeqs: number[];
   catchupSeq: number;
+  operatorOpId?: number;
+  originalFulfillmentConfirmed: boolean;
   actor: string;
   evidenceRef: string;
   confirm: boolean;
@@ -31,7 +34,9 @@ export interface FileIdentity {
 function usage(): string {
   return [
     'Usage: close-recovery-catchup --db PATH --plan-id ID --conversation-key KEY',
-    '  --source-seqs 1,2,3 --catchup-seq N --actor ID --evidence-ref REF [--confirm]',
+    '  --source-seqs 1,2,3 (--catchup-seq N | --operator-op N) --actor ID --evidence-ref REF',
+    '  --confirm-original-fulfillment [--confirm]',
+    'Operator-op closure requires exactly one original source sequence.',
     '',
     'Without --confirm this command is a non-mutating dry run.',
   ].join('\n');
@@ -43,6 +48,7 @@ const VALUE_FLAGS = new Set([
   '--conversation-key',
   '--source-seqs',
   '--catchup-seq',
+  '--operator-op',
   '--actor',
   '--evidence-ref',
 ]);
@@ -75,13 +81,18 @@ export function parseCloseRecoveryArgs(argv: string[]): CliArgs {
   const values = new Map<string, string>();
   const seen = new Set<string>();
   let confirm = false;
+  let originalFulfillmentConfirmed = false;
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
-    if (flag !== '--confirm' && !VALUE_FLAGS.has(flag)) {
+    if (flag !== '--confirm' && flag !== '--confirm-original-fulfillment' && !VALUE_FLAGS.has(flag)) {
       throw new Error(`Unknown argument: ${flag}`);
     }
     if (seen.has(flag)) throw new Error(`Duplicate argument: ${flag}`);
     seen.add(flag);
+    if (flag === '--confirm-original-fulfillment') {
+      originalFulfillmentConfirmed = true;
+      continue;
+    }
     if (flag === '--confirm') {
       confirm = true;
       continue;
@@ -101,12 +112,19 @@ export function parseCloseRecoveryArgs(argv: string[]): CliArgs {
     }
     return value;
   };
+  const operatorOpId = values.has('--operator-op')
+    ? positiveSequence(required('--operator-op'), 'Operator outbound operation') : undefined;
+  if (operatorOpId !== undefined && values.has('--catchup-seq')) throw new Error('Choose exactly one catch-up proof');
+  const sourceSeqs = sourceSequences(required('--source-seqs'));
+  if (operatorOpId !== undefined && sourceSeqs.length !== 1) throw new Error('Operator-op closure requires exactly one source');
   return {
     dbPath: resolve(required('--db')),
     planId: required('--plan-id'),
     conversationKey: required('--conversation-key'),
-    sourceSeqs: sourceSequences(required('--source-seqs')),
-    catchupSeq: positiveSequence(required('--catchup-seq'), 'Catch-up sequence'),
+    sourceSeqs,
+    catchupSeq: operatorOpId === undefined ? positiveSequence(required('--catchup-seq'), 'Catch-up sequence') : 0,
+    operatorOpId,
+    originalFulfillmentConfirmed,
     actor: required('--actor'),
     evidenceRef: required('--evidence-ref'),
     confirm,
@@ -183,6 +201,7 @@ function closureParams(args: CliArgs): CloseOperatorCatchupRecoveryParams {
     catchupSeq: args.catchupSeq,
     actor: args.actor,
     evidenceRef: args.evidenceRef,
+    originalFulfillmentConfirmed: args.originalFulfillmentConfirmed,
   };
 }
 
@@ -333,6 +352,7 @@ function publicReceipt(salt: Buffer, receipt: CloseOperatorCatchupRecoveryReceip
 }
 
 function runCloseRecoveryCatchupWithArgs(args: CliArgs): number {
+  if (args.operatorOpId !== undefined) return runBoundOperatorCatchup(args);
   const params = closureParams(args);
   const { inspection, identity, salt } = inspectReadOnly(args.dbPath, params);
   if (!args.confirm) {
@@ -365,6 +385,47 @@ function runCloseRecoveryCatchupWithArgs(args: CliArgs): number {
   } finally {
     raw.close();
   }
+}
+
+function runBoundOperatorCatchup(args: CliArgs): number {
+  const identity = assertExistingRegularDatabase(args.dbPath);
+  const salt = loadOrCreateRedactionSalt(args.dbPath);
+  const params = {
+    planId: args.planId, sourceSeq: args.sourceSeqs[0], opId: args.operatorOpId!,
+    conversationKey: args.conversationKey, actor: args.actor, evidenceRef: args.evidenceRef,
+    originalFulfillmentConfirmed: args.originalFulfillmentConfirmed,
+  };
+  const readOnly = new DatabaseSync(args.dbPath, { readOnly: true });
+  let inspection;
+  try {
+    readOnly.exec('PRAGMA foreign_keys = ON');
+    assertSchema43Foundation(readOnly);
+    inspection = inspectOperatorCatchupResolution(readOnly, params);
+    assertSameDatabaseFile(identity, assertExistingRegularDatabase(args.dbPath));
+  } finally { readOnly.close(); }
+  let inserted = 0;
+  if (args.confirm) {
+    const writable = openExistingWritableDatabase(args.dbPath, identity);
+    try {
+      writable.exec(SQLITE_BUSY_TIMEOUT_PRAGMA);
+      writable.exec('PRAGMA foreign_keys = ON');
+      const receipt = resolveOperatorCatchup(writable, params, () => {
+        assertSameDatabaseFile(identity, assertExistingRegularDatabase(args.dbPath));
+        assertSchema43Foundation(writable);
+      });
+      inspection = receipt;
+      inserted = receipt.inserted;
+    } finally { writable.close(); }
+  }
+  process.stdout.write(`${JSON.stringify({
+    ok: true, dryRun: !args.confirm, ready: true, inserted, idempotent: inspection.idempotent,
+    evidenceBasis: 'bound_operator_echo_with_original_fulfillment',
+    planFingerprint: redactFingerprint(salt, 'plan', args.planId),
+    conversationFingerprint: redactFingerprint(salt, 'conversation', args.conversationKey),
+    nSourceSeqs: 1,
+    operatorOpFingerprint: redactFingerprint(salt, 'operator-op', args.operatorOpId!),
+  })}\n`);
+  return 0;
 }
 
 export function runCloseRecoveryCatchupCli(argv: string[]): number {
@@ -443,7 +504,12 @@ const ERROR_CLASSIFIERS: ReadonlyArray<{
   },
   {
     code: 'invalid_proof',
-    test: (m) => m.startsWith('Database must include canonical schema 43 receipts')
+    test: (m) => m.startsWith('Operator catch-up requires')
+      || m.startsWith('Operator catch-up resolution requires')
+      || m === 'Operator catch-up resolution schema drift'
+      || m === 'Operator catch-up conversation does not match its source'
+      || m === 'Original request fulfillment must be confirmed'
+      || m.startsWith('Database must include canonical schema 43 receipts')
       || m.startsWith('Database must include contiguous schema 43+ receipts')
       || m === 'canonical schema 43 receipt is missing'
       || m.startsWith('canonical schema 43 objects are missing or drifted')

@@ -78,7 +78,7 @@ describe('migration 43 upgrade from historical schema 42', () => {
         SELECT COUNT(*) AS count FROM operator_catchup_delivery_proofs
         WHERE target_seq = ?
       `).get(fixture.targetSeq)).toEqual({ count: 0 });
-      expect(closeOperatorCatchupRecovery(db, {
+      expect(closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true,
         planId: fixture.planId,
         conversationKey: fixture.conversationKey,
         expectedSourceSeqs: [fixture.sourceSeq],
@@ -128,7 +128,7 @@ describe('migration 43 upgrade from historical schema 42', () => {
         terminal_record_id: fixture.terminalRecordId,
         selected_op_id: fixture.selectedOpId,
       });
-      expect(closeOperatorCatchupRecovery(db, {
+      expect(closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true,
         planId: fixture.planId,
         conversationKey: fixture.conversationKey,
         expectedSourceSeqs: [fixture.sourceSeq],
@@ -214,7 +214,7 @@ describe('migration 43 upgrade from historical schema 42', () => {
         FROM operator_catchup_closure_witnesses
         WHERE recovery_plan_id = ? AND conversation_key = ?
       `).get(fixture.planId, fixture.conversationKey)).toEqual(originalWitness);
-      expect(closeOperatorCatchupRecovery(upgraded, {
+      expect(closeOperatorCatchupRecovery(upgraded, { originalFulfillmentConfirmed: true,
         planId: fixture.planId,
         conversationKey: fixture.conversationKey,
         expectedSourceSeqs: [fixture.sourceSeq],
@@ -497,7 +497,7 @@ describe('migration 43 upgrade from historical schema 42', () => {
     const db = new Database(path);
     db.open();
     try {
-      expect(closeOperatorCatchupRecovery(db, {
+      expect(closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true,
         planId: fixture.planId,
         conversationKey: fixture.conversationKey,
         expectedSourceSeqs: [fixture.sourceSeq],
