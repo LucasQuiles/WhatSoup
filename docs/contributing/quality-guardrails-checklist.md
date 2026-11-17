@@ -51,6 +51,24 @@ read-only scanner deploy key stored in that environment. Completed same-reposito
 pull request, main and tag runs of Quality trigger trusted default-branch code. Candidate test
 files are retrieved as immutable Git data; candidate code, hooks, configuration and
 package scripts are not executed. The scanner and its diagnostics remain private.
+
+### Hosted private boundary checks (not required for merge yet)
+
+Two workflows hold the private term list as the `private-scanner-trusted` environment
+secret `WHATSOUP_PRIVATE_TERMS_JSON`; only its name is public. Neither is in Layer 1:
+`boundary (private)` joins the required checks after its first passing run on `main`.
+Each reads only the exact files of `scripts/boundary-private-scan.ts` and its import
+closure at the default-branch commit, plus one pinned action; no candidate file is
+executed, sourced, imported, installed or used as configuration. The term file is
+written with mode 0600 under the runner's temporary folder, given to the scan process
+only (never to a process that holds the GitHub token), and removed in an `always()`
+step. Both print counts by rule code only, never a matched text, term, path or line.
+The whole-tree baseline check (`guard:repo:tree`) stays local; no hosted job runs it.
+
+| Check | Workflow | What it runs |
+|---|---|---|
+| `boundary (private)` check run | `.github/workflows/boundary-private.yml` | After Quality completes on a pull request, forks included. Binds the Quality run's head to exactly one open pull request through the API and reads the tip of its base branch at run time; that tip must be an ancestor of the head, so a pull request behind its base fails until the branch is updated. Base = head, an all-zero or malformed id, and a commit the fetch did not bring are refused. Fetches both into a separate bare git directory as data, then scans, with the repository hygiene guard's own code: the added lines tree to tree with text forced for every path (no attribute or NUL byte hides a file, and content only a merge commit adds is covered), every added or renamed path name, every commit message and author and committer identity in base..head, and the pull request title and body. Publishes the check run on the head: success, or failure with counts by mode and rule code; a refusal or fault publishes failure. Only `pull_request` runs of Quality are bound: before this check is required with a merge queue, it needs a `merge_group` binding. |
+| Text check | `.github/workflows/boundary-private-text.yml` | On `issues` (opened, edited) and `issue_comment` (created, edited), the item from the event payload. Hourly, every issue and pull request (title and body), issue comment, review and review comment changed since the last successful hourly run, else the last two hours; a listing that fills ten pages fails closed. Review events are not triggers: GitHub runs them from the pull request's merge commit, without secrets for a fork. A finding fails the run and prints the item kind and number with counts by rule code. It never edits, hides, labels or comments. |
 The driver validates the current pull request head and base, qualifies the pinned
 Linux/Python 3.12 scanner runtime, removes its owned private checkout and temporary
 bundle, and rechecks the pull request before publishing `test-integrity (private)`.
@@ -430,6 +448,7 @@ headroom above every enforced V8 threshold.
 
 `verify:push:branch` runs this targeted guard-test list:
 - `repo-hygiene-guard.test.ts`
+- `repo-hygiene-boundary.test.ts`
 - `pre-push-alignment.test.ts`
 - `pre-push-guard.test.ts`
 - `gitleaks-wiring.test.ts`

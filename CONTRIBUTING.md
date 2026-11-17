@@ -17,8 +17,17 @@ hygiene mode, the pre-commit and pre-push hooks and the PR metadata check load i
 Without the file, the checks run only their generic and fallback rules and say so
 in one line; `WHATSOUP_REQUIRE_PRIVATE_TERMS=1` makes a missing file a failure
 (exit 2). A file that exists but cannot be read or applied always fails. The
-release-hygiene mode scans with the generic and fallback rules only; the private
-tree check below covers its files with the terms.
+release-hygiene mode loads and validates the file but scans with its own rule set,
+which is wider than the generic rules and has no terms; the private tree check
+below covers its files with the terms.
+
+A push from a machine without the file is still checked on GitHub. Two hosted
+checks hold the term list as the environment secret `WHATSOUP_PRIVATE_TERMS_JSON`,
+which maintainers set; contributors set nothing. `boundary (private)` scans each
+pull request, forks included, and the text check scans issues, comments and
+reviews. Both print counts by rule code only. See
+[the quality checklist](docs/contributing/quality-guardrails-checklist.md). The
+private tree check below stays local.
 
 An example with invented names:
 
