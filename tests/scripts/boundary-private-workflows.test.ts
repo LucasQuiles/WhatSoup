@@ -41,6 +41,7 @@ interface Workflow {
   readonly name: string;
   readonly on: Record<string, unknown>;
   readonly permissions: unknown;
+  readonly concurrency?: unknown;
   readonly jobs: Record<string, Record<string, unknown> & { steps: Step[] }>;
 }
 
@@ -184,6 +185,16 @@ describe('boundary-private.yml triggers and publication', () => {
     });
     expect(steps.at(-1)?.run).toContain(' publish --out "$scratch"');
     expect(CHECK_NAME).toBe('boundary (private)');
+  });
+
+  it('queues the runs for one head so they publish in order, and lets publication re-read the pull request', () => {
+    expect(workflow.concurrency).toEqual({
+      group: 'boundary-private-${{ github.event.workflow_run.head_sha }}',
+      'cancel-in-progress': false,
+    });
+    const publish = steps.at(-1);
+    expect(publish?.env).toMatchObject({ QUALITY_RUN_ID: '${{ github.event.workflow_run.id }}' });
+    expect(publish?.run).toContain('QUALITY_RUN_ID="$QUALITY_RUN_ID"');
   });
 });
 

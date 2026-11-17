@@ -436,11 +436,11 @@ const QUALITY_RUN = {
   pull_requests: [],
 };
 
-/** A fake API: GET answers by path, and every request outside the table fails the test. */
+/** A fake API: GET answers by path; a request outside the table, or to an undefined entry, fails. */
 function routedApi(routes: Record<string, unknown>): GitHubApi {
   return {
     async getJson(path) {
-      if (!(path in routes)) throw new Error('unexpected request');
+      if (routes[path] === undefined) throw new Error('unexpected request');
       return routes[path];
     },
     async postJson() {
@@ -449,21 +449,33 @@ function routedApi(routes: Record<string, unknown>): GitHubApi {
   };
 }
 
-function bindingApi(overrides: Record<string, unknown> = {}): GitHubApi {
-  return routedApi({
+const ASSOCIATIONS = `commits/${HEAD}/pulls?per_page=100`;
+
+function bindingRoutes(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
     'actions/runs/99': QUALITY_RUN,
-    [`commits/${HEAD}/pulls?per_page=100`]: [pullRequest()],
+    [ASSOCIATIONS]: [pullRequest()],
     'pulls/7': pullRequest(),
     'git/ref/heads/main': { ref: 'refs/heads/main', object: { type: 'commit', sha: BASE } },
     ...overrides,
-  });
+  };
 }
+
+const bindingApi = (overrides: Record<string, unknown> = {}): GitHubApi => routedApi(bindingRoutes(overrides));
 
 const bind = (api: GitHubApi, headSha = HEAD) => bindPullRequestCandidate(api, { runId: '99', headSha, repository: REPOSITORY });
 
+const BOUND = { head: HEAD, base: BASE, baseRef: 'main', number: 7, title: 'A title', body: 'A body', headRef: 'feature-a' };
+
 describe('boundary (private) pull request binding', () => {
   it('binds a fork pull request through the commit association, with the base tip read at run time', async () => {
-    await expect(bind(bindingApi())).resolves.toEqual({ head: HEAD, base: BASE, number: 7, title: 'A title', body: 'A body', headRef: 'feature-a' });
+    await expect(bind(bindingApi())).resolves.toEqual(BOUND);
+  });
+
+  it('refuses an association listing that fills a whole page, so exactly one open pull request is proven', async () => {
+    const closed = Array.from({ length: 99 }, (_unused, index) => pullRequest({ number: 100 + index, state: 'closed' }));
+    await expect(bind(bindingApi({ [ASSOCIATIONS]: [pullRequest(), ...closed] }))).rejects.toBeInstanceOf(BoundaryRefusal);
+    await expect(bind(bindingApi({ [ASSOCIATIONS]: [pullRequest(), ...closed.slice(1)] }))).resolves.toEqual(BOUND);
   });
 
   it('refuses a pull request whose head branch name is not a string', async () => {
@@ -493,21 +505,26 @@ describe('boundary (private) pull request binding', () => {
   });
 });
 
-function publishApi(): { api: GitHubApi; posts: Array<{ path: string; body: Record<string, unknown> }> } {
+/** The binding routes for the re-read before publication, plus the check run read-back. */
+function publishApi(overrides: Record<string, unknown> = {}): { api: GitHubApi; posts: Array<{ path: string; body: Record<string, unknown> }> } {
   const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+  const routes = routedApi(bindingRoutes(overrides));
   const api: GitHubApi = {
     async postJson(path, body) {
       posts.push({ path, body: body as Record<string, unknown> });
       return { id: 11 };
     },
     async getJson(path) {
-      if (path !== 'check-runs/11') throw new Error('unexpected request');
+      if (path !== 'check-runs/11') return routes.getJson(path);
       const last = posts.at(-1)!.body;
       return { id: 11, name: last['name'], head_sha: last['head_sha'], status: 'completed', conclusion: last['conclusion'] };
     },
   };
   return { api, posts };
 }
+
+const publish = (api: GitHubApi, result: CandidateScanResult | null, binding: typeof BOUND | null = BOUND, headSha = HEAD) =>
+  publishCheckRun(api, { headSha, result, binding, runId: '99', repository: REPOSITORY });
 
 const failing: CandidateScanResult = {
   version: 2,
@@ -516,33 +533,58 @@ const failing: CandidateScanResult = {
   scanned: { addedLines: 4, pathNames: 2, changedPaths: 2, commits: 1, commitLines: 4, commitPaths: 2, refNames: 1, texts: 2 },
 };
 
+const passing: CandidateScanResult = { ...failing, conclusion: 'pass', counts: NO_COUNTS };
+
 describe('boundary (private) check run publication', () => {
-  it('publishes success on the candidate head for a passing result', async () => {
+  it('publishes success on the candidate head for a passing result when the pull request is as bound', async () => {
     const { api, posts } = publishApi();
-    const passing: CandidateScanResult = { ...failing, conclusion: 'pass', counts: NO_COUNTS };
-    await expect(publishCheckRun(api, { headSha: HEAD, result: passing })).resolves.toBe('success');
+    await expect(publish(api, passing)).resolves.toBe('success');
     expect(posts).toHaveLength(1);
     expect(posts[0]!.path).toBe('check-runs');
     expect(posts[0]!.body).toMatchObject({ name: CHECK_NAME, head_sha: HEAD, status: 'completed', conclusion: 'success' });
   });
 
+  it.each<[string, Record<string, unknown>]>([
+    ['a new title', { 'pulls/7': pullRequest({ title: 'Another title' }) }],
+    ['a new body', { 'pulls/7': pullRequest({ body: 'Another body' }) }],
+    ['a new head branch name', { 'pulls/7': pullRequest({ head: { sha: HEAD, ref: 'feature-b', repo: { full_name: 'fork-a/repo-a' } } }) }],
+    ['a new base branch', {
+      'pulls/7': pullRequest({ base: { ref: 'release', repo: { full_name: REPOSITORY } } }),
+      'git/ref/heads/release': { ref: 'refs/heads/release', object: { type: 'commit', sha: BASE } },
+    }],
+    ['a base tip that moved', { 'git/ref/heads/main': { ref: 'refs/heads/main', object: { type: 'commit', sha: 'e'.repeat(40) } } }],
+    ['a closed pull request', { [ASSOCIATIONS]: [pullRequest({ state: 'closed' })], 'pulls/7': pullRequest({ state: 'closed' }) }],
+    ['a second open pull request on the head', { [ASSOCIATIONS]: [pullRequest(), pullRequest({ number: 8 })] }],
+    ['a re-read that fails', { 'pulls/7': undefined }],
+  ])('publishes failure with one fixed line after %s', async (_label, overrides) => {
+    const { api, posts } = publishApi(overrides);
+    await expect(publish(api, passing)).resolves.toBe('failure');
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.body).toMatchObject({
+      conclusion: 'failure',
+      output: { title: 'boundary (private): the pull request changed while the check ran' },
+    });
+  });
+
   it('publishes failure with counts by mode and rule code', async () => {
     const { api, posts } = publishApi();
-    await expect(publishCheckRun(api, { headSha: HEAD, result: failing })).resolves.toBe('failure');
+    await expect(publish(api, failing)).resolves.toBe('failure');
     const summary = JSON.stringify(posts[0]!.body['output']);
     expect(summary).toContain('added-lines private-host-label 2');
     expect(summary).toContain('commits private-person 1');
   });
 
-  it('publishes failure with one fixed line when the scan left no result', async () => {
-    const { api, posts } = publishApi();
-    await expect(publishCheckRun(api, { headSha: HEAD, result: null })).resolves.toBe('failure');
-    expect(posts[0]!.body).toMatchObject({ conclusion: 'failure', output: { title: 'boundary (private): the check could not complete' } });
+  it('publishes failure with one fixed line when the scan left no result or no binding', async () => {
+    for (const [result, binding] of [[null, BOUND], [passing, null]] as const) {
+      const { api, posts } = publishApi();
+      await expect(publish(api, result, binding)).resolves.toBe('failure');
+      expect(posts[0]!.body).toMatchObject({ conclusion: 'failure', output: { title: 'boundary (private): the check could not complete' } });
+    }
   });
 
   it('refuses to publish on a malformed head', async () => {
     const { api, posts } = publishApi();
-    await expect(publishCheckRun(api, { headSha: 'not-a-sha', result: failing })).rejects.toBeInstanceOf(BoundaryRefusal);
+    await expect(publish(api, failing, BOUND, 'not-a-sha')).rejects.toBeInstanceOf(BoundaryRefusal);
     expect(posts).toHaveLength(0);
   });
 });
