@@ -61,6 +61,7 @@ const SCHEDULE_OVERLAP_MS = 15 * 60 * 1000;
 const SCHEDULE_DEFAULT_MS = 2 * 60 * 60 * 1000;
 const TERMS_LINE = 'the private term file is missing, unreadable or invalid; the check fails closed';
 const INCOMPLETE_LINE = `${PREFIX} the check could not complete; an earlier step refused its input or failed, and the run log names it. The check fails closed.`;
+const REMOVAL_LINE = `${PREFIX} the step that removes the private term file did not succeed; the check fails closed.`;
 const CHANGED_LINE = `${PREFIX} the pull request or its base branch changed while the check ran, or could not be read again; the check fails closed until a run checks the current state.`;
 
 export const SCAN_MODES = ['added-lines', 'path-names', 'sensitive-paths', 'commit-lines', 'commits', 'head-ref', 'pr-text'] as const;
@@ -585,6 +586,8 @@ interface PublishInput {
   readonly binding: CandidateBinding | null;
   readonly runId: string;
   readonly repository: string;
+  /** Whether the step that removes the private term file succeeded before this one. */
+  readonly termsRemoved: boolean;
 }
 
 /**
@@ -609,13 +612,15 @@ async function stillBound(api: GitHubApi, input: PublishInput): Promise<boolean>
 export async function publishCheckRun(api: GitHubApi, input: PublishInput): Promise<'success' | 'failure'> {
   const head = fullSha(input.headSha, 'the head');
   const result = input.result === null || input.binding?.head !== head ? null : parseCandidateResult(input.result);
-  const changed = result?.conclusion === 'pass' && !(await stillBound(api, input));
-  const conclusion = result?.conclusion === 'pass' && !changed ? 'success' : 'failure';
+  const unremoved = result !== null && !input.termsRemoved;
+  const changed = !unremoved && result?.conclusion === 'pass' && !(await stillBound(api, input));
+  const conclusion = result?.conclusion === 'pass' && !unremoved && !changed ? 'success' : 'failure';
   const title = result === null
     ? `${PREFIX} the check could not complete`
-    : changed ? `${PREFIX} the pull request changed while the check ran`
-      : result.conclusion === 'pass' ? `${PREFIX} no findings` : `${PREFIX} ${totalOf(result.counts)} finding(s)`;
-  const lines = result === null ? [INCOMPLETE_LINE] : changed ? [CHANGED_LINE] : formatCandidateResult(result);
+    : unremoved ? `${PREFIX} the private term file was not removed`
+      : changed ? `${PREFIX} the pull request changed while the check ran`
+        : result.conclusion === 'pass' ? `${PREFIX} no findings` : `${PREFIX} ${totalOf(result.counts)} finding(s)`;
+  const lines = result === null ? [INCOMPLETE_LINE] : unremoved ? [REMOVAL_LINE] : changed ? [CHANGED_LINE] : formatCandidateResult(result);
   const summary = lines.map((line) => line.slice(PREFIX.length + 1)).join('\n');
   const created = await api.postJson('check-runs', {
     name: CHECK_NAME,
@@ -908,6 +913,7 @@ async function runCommand(command: string, outDir: string, remote: string | unde
         binding,
         runId: env['QUALITY_RUN_ID'] ?? '',
         repository: env['GITHUB_REPOSITORY'] ?? '',
+        termsRemoved: env['TERMS_REMOVAL'] === 'success',
       });
       console.log(`${PREFIX} published the ${CHECK_NAME} check run as ${conclusion}`);
       return conclusion === 'success' ? 0 : 1;

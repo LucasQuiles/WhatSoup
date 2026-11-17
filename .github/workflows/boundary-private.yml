@@ -164,6 +164,7 @@ jobs:
             node "$scratch/trusted/scripts/boundary-private-scan.ts" scan --out "$scratch"
 
       - name: Remove the private term file
+        id: remove-terms
         if: always()
         shell: bash
         run: |
@@ -171,7 +172,8 @@ jobs:
           rm -f -- "$RUNNER_TEMP/private-terms.json"
           test ! -e "$RUNNER_TEMP/private-terms.json"
 
-      # Success only for a passing scan result; any earlier refusal or fault publishes failure.
+      # Success only for a passing scan result, after the removal step succeeded, for a pull request
+      # that still matches its binding; any earlier refusal or fault publishes failure.
       - name: Publish the boundary (private) check run
         if: always()
         shell: bash
@@ -179,6 +181,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           QUALITY_RUN_ID: ${{ github.event.workflow_run.id }}
           QUALITY_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          TERMS_REMOVAL: ${{ steps.remove-terms.outcome }}
         run: |
           set -euo pipefail
           scratch="$RUNNER_TEMP/boundary-private"
