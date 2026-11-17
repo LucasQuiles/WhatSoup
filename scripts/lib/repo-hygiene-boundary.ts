@@ -374,6 +374,24 @@ export function scanRefNames(input: string, termRules: readonly PrivateTermRule[
   return hits;
 }
 
+/**
+ * Rule codes in one path name: the fallback rules, then the term rules. The tree scan counts them
+ * for every tracked path name, and the hosted candidate check for every added or renamed one.
+ */
+export function pathNameCodes(
+  filePath: string,
+  termRules: readonly PrivateTermRule[],
+): Array<{ readonly origin: CountOrigin; readonly code: string }> {
+  const codes: Array<{ readonly origin: CountOrigin; readonly code: string }> = [];
+  for (const pattern of fallbackPrivatePatterns) {
+    if (findDisallowedMatch(filePath, pattern, filePath) !== null) codes.push({ origin: 'fallback', code: pattern.code });
+  }
+  for (const rule of termRules) {
+    if (findDisallowedMatch(filePath, rule, filePath) !== null) codes.push({ origin: 'term', code: rule.code });
+  }
+  return codes;
+}
+
 // ---------------------------------------------------------------------------
 // Whole tree (--tree) and its private baseline
 // ---------------------------------------------------------------------------
@@ -745,12 +763,7 @@ export function scanHeadTree(cwd: string, termRules: readonly PrivateTermRule[])
   const splitHits = new Map<string, Map<CountKey, Set<number>>>();
   let textFileCount = 0;
   for (const entry of entries) {
-    for (const pattern of fallbackPrivatePatterns) {
-      if (findDisallowedMatch(entry.path, pattern, entry.path) !== null) addHit(hits, entry.path, `fallback:${pattern.code}`, 0);
-    }
-    for (const rule of termRules) {
-      if (findDisallowedMatch(entry.path, rule, entry.path) !== null) addHit(hits, entry.path, `term:${rule.code}`, 0);
-    }
+    for (const { origin, code } of pathNameCodes(entry.path, termRules)) addHit(hits, entry.path, `${origin}:${code}`, 0);
     if (entry.type !== 'blob') continue;
     const bytes = blobs.get(entry.oid);
     if (bytes === undefined) throw new TreeScanInconclusive('a tracked blob could not be read');

@@ -1007,7 +1007,7 @@ function commitAuthorBaseRef(cwd: string): string | null {
 }
 
 // sha, author name and email, subject, message, committer name, email and time (seconds).
-const COMMIT_AUTHOR_LOG_FORMAT = '%H%x00%an%x00%ae%x00%s%x00%B%x00%cn%x00%ce%x00%ct%x1e';
+export const COMMIT_AUTHOR_LOG_FORMAT = '%H%x00%an%x00%ae%x00%s%x00%B%x00%cn%x00%ce%x00%ct%x1e';
 
 export function readCommitAuthors(cwd: string): CommitAuthor[] {
   const baseRef = commitAuthorBaseRef(cwd);
