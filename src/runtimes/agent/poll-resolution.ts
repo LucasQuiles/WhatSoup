@@ -12,6 +12,7 @@
 import { config } from '../../config.ts';
 import { redactInternalArtifacts, type OutboundAudience } from '../../core/outbound-message-safety.ts';
 import { sanitizeProtectedMessageText } from '../../core/protected-message.ts';
+import { POLL_QUESTION_MAX_CHARS, POLL_OPTION_MAX_CHARS } from '../../lib/poll-limits.ts';
 
 /**
  * Poll text bound for WhatsApp or the provider: protected links first (the
@@ -26,9 +27,8 @@ function pollSafeText(text: string, audience: OutboundAudience): string {
 // AskUserQuestion → Poll formatting
 // ---------------------------------------------------------------------------
 
-/** Conservative WhatsApp poll limits. */
-export const POLL_QUESTION_MAX_CHARS = 900;
-export const POLL_OPTION_MAX_CHARS = 95;  // leave margin under WhatsApp's ~100 char limit
+/** Conservative WhatsApp poll limits (defined in lib/poll-limits.ts; re-exported for existing importers). */
+export { POLL_QUESTION_MAX_CHARS, POLL_OPTION_MAX_CHARS };
 export const POLL_DETAIL_DESCRIPTION_MIN_CHARS = 72;
 import { MS_PER_HOUR } from '../../lib/time-units.ts';
 
