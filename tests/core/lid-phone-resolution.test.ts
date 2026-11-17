@@ -290,6 +290,27 @@ describe('resolveLid', () => {
     expect(hydrateLidMappings(tempDb, '/nonexistent/dir')).toBe(0);
     tempDb.close();
   });
+
+  it('hydrateLidMappings skips whitespace-only phone strings (#2871 trim-tightening)', () => {
+    // Discriminator for the isNonEmptyString migration: the old length>0 check
+    // admitted whitespace-only strings, which would then be written as corrupt
+    // jids ("   @s.whatsapp.net"). The SSOT helper trims and rejects them, so
+    // the file is skipped and count stays 0 — no corrupt mapping persisted.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lid-ws-'));
+    const tempDb = createTestDb();
+
+    fs.writeFileSync(
+      path.join(tmpDir, 'lid-mapping-77777_reverse.json'),
+      JSON.stringify('   '),
+    );
+
+    const count = hydrateLidMappings(tempDb, tmpDir);
+    expect(count).toBe(0);
+    expect(resolveLid(tempDb, '77777')).toBeNull();
+
+    tempDb.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
