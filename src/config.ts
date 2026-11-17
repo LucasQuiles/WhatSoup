@@ -1537,7 +1537,10 @@ export const config = {
   // The admin back-online notice and the status redirect follow this, so an
   // unset mode keeps both as they were before the default became minimal.
   configuredToolUpdateMode: readConfiguredToolUpdateMode(),
-  toolUpdateRedirectJid: stringProp(instance ?? undefined, 'toolUpdateRedirectJid') ?? null,
+  // An explicit minimal mode sends tool status nowhere, as before; an unset mode keeps the redirect.
+  toolUpdateRedirectJid: readConfiguredToolUpdateMode() === 'minimal'
+    ? null
+    : stringProp(instance ?? undefined, 'toolUpdateRedirectJid') ?? null,
   // Gate the agent restart/back-online notification. Default true preserves existing behavior.
   startupNotifications: booleanProp(instance ?? undefined, 'startupNotifications', true),
   // How long the instance must stay up AND connected before the back-online

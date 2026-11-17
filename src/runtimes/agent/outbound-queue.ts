@@ -1076,12 +1076,12 @@ export class OutboundQueue implements IOutboundQueue {
    * 3-second idle gap between tool calls, or after 30 seconds maximum —
    * whichever comes first. This prevents silent gaps during long tool chains.
    *
-   * In minimal mode, updates are suppressed to keep the user experience clean.
+   * In minimal mode, updates reach only a configured redirect; the user chat stays clean.
    * The typing indicator remains active while work is in progress.
    */
   enqueueToolUpdate(update: ToolUpdate): void {
     if (this.rejectPostClosureEnqueue()) return;
-    if (this.toolUpdateMode === 'minimal') {
+    if (this.toolUpdateMode === 'minimal' && this.toolUpdateRedirectJid === null) {
       this.startTyping();
       return;
     }
