@@ -640,6 +640,48 @@ describe('repo hygiene --tree and its private baseline', () => {
   });
 });
 
+describe('--release-hygiene scans with the rules main uses', () => {
+  // A repository that tracks one release-hygiene file. The term rules never reach this mode:
+  // term coverage of the file comes from --tree against the private baseline.
+  function releaseHygieneRepo(text: string): string {
+    const repo = makeRepo();
+    commit(repo, { 'scripts/migrate-namespace.sh': text });
+    return repo;
+  }
+
+  it('passes a term in a release-hygiene file while the term file is loaded', () => {
+    useTerms();
+    const result = capture(['--release-hygiene'], releaseHygieneRepo('ssh zorblab\n'));
+
+    expect(result.exitCode).toBe(0);
+    expect(result.codes).toEqual([]);
+    expect(result.lines).toContain('repo hygiene guard passed');
+    expect(result.lines.join('\n')).not.toContain(ABSENT_NOTICE);
+    expectNoTermText(result.lines);
+  });
+
+  it('still fails a generic hit in a release-hygiene file', () => {
+    useTerms();
+    const result = capture(['--release-hygiene'], releaseHygieneRepo(`cd ${HOME_PATH}\n`));
+
+    expect(result.exitCode).toBe(1);
+    expect(result.codes).toEqual(['local-home-path']);
+    expect(result.lines.some((line) => line.startsWith('scripts/migrate-namespace.sh:1 local-home-path:'))).toBe(true);
+  });
+
+  it('leaves that term to --tree, which fails the file with no baseline entry and masks the term', () => {
+    useTerms();
+    vi.stubEnv('WHATSOUP_BOUNDARY_BASELINE_FILE', join(tmp.make('release-hygiene-baseline'), 'boundary-baseline.json'));
+    const result = capture(['--tree'], releaseHygieneRepo('ssh zorblab\n'));
+
+    expect(result.exitCode).toBe(1);
+    const output = result.lines.join('\n');
+    expect(output).toContain('scripts/migrate-namespace.sh private-host-label: Public repo text must not include private host labels. (term rules: 1 hit(s) in a file with no baseline entry)');
+    expect(output).toContain('  scripts/migrate-namespace.sh:1 private-host-label:');
+    expectNoTermText(result.lines);
+  });
+});
+
 describe('exact-range receipts carry term-rule causes without term text', () => {
   it('reports a term-only cause that validates, and the policy projection holds no term text', () => {
     useTerms();
