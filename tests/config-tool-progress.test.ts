@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { join } from 'node:path';
-import type { Messenger } from '../src/core/types.ts';
+import type { Messenger, TypingState } from '../src/core/types.ts';
+import { toConversationKey } from '../src/core/conversation-key.ts';
 import { trackTmpDirs } from './helpers/tmp-dir.ts';
 
 vi.mock('../src/logger.ts', async () => {
@@ -52,7 +53,7 @@ async function makeQueue(overrides: Record<string, unknown> = {}) {
   const { OutboundQueue, TOOL_BATCH_DELAY_MS } = await import('../src/runtimes/agent/outbound-queue.ts');
   const { buildToolUpdate } = await import('../src/runtimes/agent/tool-update.ts');
   const sent: Array<{ jid: string; text: string }> = [];
-  const typing: boolean[] = [];
+  const typing: TypingState[] = [];
   const messenger: Messenger = {
     sendMessage: async (jid, text) => {
       sent.push({ jid, text });
@@ -62,6 +63,7 @@ async function makeQueue(overrides: Record<string, unknown> = {}) {
     setTyping: async (_jid, active) => { typing.push(active); },
   };
   const queue = new OutboundQueue(messenger, chatJid, {
+    conversationKey: toConversationKey(chatJid),
     peerIsAdmin: () => false,
     peerIsTrustedInternal: () => false,
     fallbackActive: () => false,
