@@ -13,6 +13,7 @@ import type { Database } from '../../../../src/core/database.ts';
 import type { IOutboundQueue } from '../../../../src/runtimes/agent/outbound-queue.ts';
 import { AgentRuntime, type AgentRuntimeOptions } from '../../../../src/runtimes/agent/runtime.ts';
 import { createRuntimeTurnContext, type RuntimeTurnContext } from '../../../../src/runtimes/agent/runtime-turn-context.ts';
+import type { ProviderFallbackActivation } from '../../../../src/runtimes/agent/runtime-turn-result-handler.ts';
 import type { AgentEvent } from '../../../../src/runtimes/agent/stream-parser.ts';
 import type { SessionOwnershipRegistry } from '../../../../src/runtimes/agent/session-ownership.ts';
 import type { QueuedTurn } from '../../../../src/runtimes/agent/turn-queue.ts';
@@ -47,17 +48,8 @@ export interface RuntimeState {
   pendingTurnText: Map<string, string>;
   runtimeTurnAfterTerminal: Map<string, (result: unknown) => void | Promise<void>>;
   scheduleFallbackReplay(args: {
-    activation: {
-      primaryProvider: string;
-      fallbackProvider: string;
-      fallbackModel: string | undefined;
-      reason: 'usage-limit';
-      resetAt: Date | null;
-      activeUntil: number;
-      extended: boolean;
-      keyPresent: boolean | null;
-      recoveryProbeRequired: boolean;
-    };
+    // The production type, so a new activation field cannot drift from this harness.
+    activation: ProviderFallbackActivation;
     chatJid: string;
     mapKey?: string;
     oldSession: ReturnType<typeof sessionStub> | null;
@@ -66,17 +58,7 @@ export interface RuntimeState {
   replayTurnOnFallback(args: unknown): Promise<void>;
   notifyProviderFallbackActivated(
     queue: IOutboundQueue,
-    activation: {
-      primaryProvider: string;
-      fallbackProvider: string;
-      fallbackModel: string | undefined;
-      reason: 'usage-limit';
-      resetAt: Date | null;
-      activeUntil: number;
-      extended: boolean;
-      keyPresent: boolean | null;
-      recoveryProbeRequired: boolean;
-    },
+    activation: ProviderFallbackActivation,
     replay: { replayScheduled: boolean; blockedByToolActivity?: boolean },
   ): void;
   runtimeTurnCoordinator: {
