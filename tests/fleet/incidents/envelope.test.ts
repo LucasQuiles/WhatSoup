@@ -96,7 +96,7 @@ describe('parseSignalEnvelope', () => {
   });
 });
 
-describe('extractSignalId (#2871 trim-tightening)', () => {
+describe('extractSignalId', () => {
   it('returns the id for a non-empty string candidate', () => {
     expect(extractSignalId({ signalId: 'sig-001' })).toBe('sig-001');
   });
@@ -105,13 +105,5 @@ describe('extractSignalId (#2871 trim-tightening)', () => {
     expect(extractSignalId({})).toBeNull();
     expect(extractSignalId({ signalId: 42 })).toBeNull();
     expect(extractSignalId({ signalId: '' })).toBeNull();
-  });
-
-  it('returns null for a whitespace-only candidate (DISCRIMINATOR)', () => {
-    // Fails against the pre-migration length>0 check, which admitted '   ' as a
-    // valid id. The isNonEmptyString SSOT helper trims and rejects it, so a
-    // whitespace-only signalId is treated as absent — no corrupt id propagated.
-    expect(extractSignalId({ signalId: '   ' })).toBeNull();
-    expect(extractSignalId({ signalId: '\t\n' })).toBeNull();
   });
 });

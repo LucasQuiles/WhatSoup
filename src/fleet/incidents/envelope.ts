@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { isRecord, isNonEmptyString } from '../../lib/type-guards.ts';
+import { isRecord } from '../../lib/type-guards.ts';
 import { isStrictIsoUtcTimestamp } from '../time-utils.ts';
 
 export const SIGNAL_KINDS = [
@@ -103,5 +103,6 @@ export function parseSignalEnvelope(rawJsonText: string): EnvelopeResult {
 export function extractSignalId(parsed: unknown): string | null {
   if (!isRecord(parsed)) return null;
   const candidate = parsed.signalId;
-  return isNonEmptyString(candidate) ? candidate : null;
+  // Must accept exactly the ids the schema accepts (boundedId: min length 1, no trim).
+  return typeof candidate === 'string' && candidate.length > 0 ? candidate : null;
 }
