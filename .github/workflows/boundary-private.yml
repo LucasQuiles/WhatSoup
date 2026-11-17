@@ -21,6 +21,12 @@ on:
 
 permissions: {}
 
+# Runs for one head publish in order: a later run waits for the running one (a newer pending run
+# replaces an older pending one), and each run reads the pull request again before it publishes.
+concurrency:
+  group: boundary-private-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
 jobs:
   scan:
     if: >-
@@ -171,6 +177,7 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          QUALITY_RUN_ID: ${{ github.event.workflow_run.id }}
           QUALITY_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
@@ -181,5 +188,5 @@ jobs:
           fi
           env -i PATH="$PATH" HOME="$scratch" LANG=C LC_ALL=C \
             GITHUB_TOKEN="$GITHUB_TOKEN" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_API_URL="$GITHUB_API_URL" \
-            QUALITY_HEAD_SHA="$QUALITY_HEAD_SHA" \
+            QUALITY_RUN_ID="$QUALITY_RUN_ID" QUALITY_HEAD_SHA="$QUALITY_HEAD_SHA" \
             node "$scratch/trusted/scripts/boundary-private-scan.ts" publish --out "$scratch"

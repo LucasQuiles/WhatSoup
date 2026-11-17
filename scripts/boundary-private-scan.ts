@@ -61,6 +61,7 @@ const SCHEDULE_OVERLAP_MS = 15 * 60 * 1000;
 const SCHEDULE_DEFAULT_MS = 2 * 60 * 60 * 1000;
 const TERMS_LINE = 'the private term file is missing, unreadable or invalid; the check fails closed';
 const INCOMPLETE_LINE = `${PREFIX} the check could not complete; an earlier step refused its input or failed, and the run log names it. The check fails closed.`;
+const CHANGED_LINE = `${PREFIX} the pull request or its base branch changed while the check ran, or could not be read again; the check fails closed until a run checks the current state.`;
 
 export const SCAN_MODES = ['added-lines', 'path-names', 'sensitive-paths', 'commit-lines', 'commits', 'head-ref', 'pr-text'] as const;
 export type ScanMode = (typeof SCAN_MODES)[number];
@@ -180,6 +181,7 @@ export function createGitHubApi(env: NodeJS.ProcessEnv): GitHubApi {
 export interface CandidateBinding {
   readonly head: string;
   readonly base: string;
+  readonly baseRef: string;
   readonly number: number;
   readonly title: string;
   readonly body: string;
@@ -212,8 +214,12 @@ export async function bindPullRequestCandidate(
     throw new BoundaryRefusal('the triggering run is not the completed Quality pull_request run for this head');
   }
 
-  const associations = await api.getJson(`commits/${head}/pulls?per_page=100`);
+  const associations = await api.getJson(`commits/${head}/pulls?per_page=${PAGE_SIZE}`);
   if (!Array.isArray(associations)) throw new BoundaryRefusal('the pull request association is malformed');
+  // A full page may go on to a next one, so it cannot prove that exactly one pull request is open.
+  if (associations.length >= PAGE_SIZE) {
+    throw new BoundaryRefusal('the pull requests associated with the head fill a whole page; the check fails closed');
+  }
   const matching = associations.filter((entry) => field(entry, 'state') === 'open'
     && field(entry, 'head', 'sha') === head
     && field(entry, 'base', 'repo', 'full_name') === input.repository);
@@ -243,7 +249,7 @@ export async function bindPullRequestCandidate(
   }
   const base = fullSha(field(tip, 'object', 'sha'), 'the base branch tip');
   if (base === head) throw new BoundaryRefusal('the base branch tip equals the head; there is no change to check');
-  return { head, base, number, title, body: textOf(body), headRef };
+  return { head, base, baseRef, number, title, body: textOf(body), headRef };
 }
 
 // ---------------------------------------------------------------------------
@@ -566,18 +572,50 @@ export function parseCandidateResult(value: unknown): CandidateScanResult | null
   return { version: 2, conclusion, counts: parsed, scanned };
 }
 
-/** Publish `boundary (private)` on the candidate head: success only for a passing result. */
-export async function publishCheckRun(
-  api: GitHubApi,
-  input: { readonly headSha: string; readonly result: CandidateScanResult | null },
-): Promise<'success' | 'failure'> {
+export function sameBinding(left: CandidateBinding, right: CandidateBinding): boolean {
+  return left.head === right.head && left.base === right.base && left.baseRef === right.baseRef
+    && left.number === right.number && left.title === right.title && left.body === right.body
+    && left.headRef === right.headRef;
+}
+
+interface PublishInput {
+  readonly headSha: string;
+  readonly result: CandidateScanResult | null;
+  /** The binding the scan used; null when none was written. */
+  readonly binding: CandidateBinding | null;
+  readonly runId: string;
+  readonly repository: string;
+}
+
+/**
+ * Whether the pull request is still exactly as bound, read again now with the binding's own code:
+ * one open pull request for the head, the same base ref and tip, title, body and head branch name.
+ * A refusal or a failed request cannot confirm it.
+ */
+async function stillBound(api: GitHubApi, input: PublishInput): Promise<boolean> {
+  if (input.binding === null) return false;
+  try {
+    return sameBinding(await bindPullRequestCandidate(api, input), input.binding);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Publish `boundary (private)` on the candidate head. Success needs a passing result for the bound
+ * head and a pull request that still matches its binding when read again here. The workflow's
+ * concurrency group makes a later run for the same head wait, so the runs publish in order.
+ */
+export async function publishCheckRun(api: GitHubApi, input: PublishInput): Promise<'success' | 'failure'> {
   const head = fullSha(input.headSha, 'the head');
-  const result = input.result === null ? null : parseCandidateResult(input.result);
-  const conclusion = result?.conclusion === 'pass' ? 'success' : 'failure';
+  const result = input.result === null || input.binding?.head !== head ? null : parseCandidateResult(input.result);
+  const changed = result?.conclusion === 'pass' && !(await stillBound(api, input));
+  const conclusion = result?.conclusion === 'pass' && !changed ? 'success' : 'failure';
   const title = result === null
     ? `${PREFIX} the check could not complete`
-    : result.conclusion === 'pass' ? `${PREFIX} no findings` : `${PREFIX} ${totalOf(result.counts)} finding(s)`;
-  const lines = result === null ? [INCOMPLETE_LINE] : formatCandidateResult(result);
+    : changed ? `${PREFIX} the pull request changed while the check ran`
+      : result.conclusion === 'pass' ? `${PREFIX} no findings` : `${PREFIX} ${totalOf(result.counts)} finding(s)`;
+  const lines = result === null ? [INCOMPLETE_LINE] : changed ? [CHANGED_LINE] : formatCandidateResult(result);
   const summary = lines.map((line) => line.slice(PREFIX.length + 1)).join('\n');
   const created = await api.postJson('check-runs', {
     name: CHECK_NAME,
@@ -797,6 +835,19 @@ function readBinding(file: string): { head: string; base: string } {
   return requireRange(String(field(value, 'base')), String(field(value, 'head')));
 }
 
+/** The whole binding that `bind` wrote, for the comparison before publication. */
+function readFullBinding(out: (name: string) => string): CandidateBinding {
+  const value = readJson(out('binding.json'));
+  return {
+    ...readBinding(out('binding.json')),
+    baseRef: baseRefName(field(value, 'baseRef')),
+    number: positiveInt(field(value, 'number'), 'the pull request number'),
+    title: readFileSync(out('pr-title.txt'), 'utf8'),
+    body: readFileSync(out('pr-body.txt'), 'utf8'),
+    headRef: readFileSync(out('pr-head-ref.txt'), 'utf8'),
+  };
+}
+
 async function runCommand(command: string, outDir: string, remote: string | undefined, env: NodeJS.ProcessEnv): Promise<number> {
   const out = (name: string): string => path.join(outDir, name);
   const git = { gitDir: out('candidate.git'), home: out('git-home') };
@@ -807,7 +858,7 @@ async function runCommand(command: string, outDir: string, remote: string | unde
         headSha: env['QUALITY_HEAD_SHA'] ?? '',
         repository: env['GITHUB_REPOSITORY'] ?? '',
       });
-      writePrivate(out('binding.json'), JSON.stringify({ head: binding.head, base: binding.base, number: binding.number }));
+      writePrivate(out('binding.json'), JSON.stringify({ head: binding.head, base: binding.base, baseRef: binding.baseRef, number: binding.number }));
       writePrivate(out('pr-title.txt'), binding.title);
       writePrivate(out('pr-body.txt'), binding.body);
       writePrivate(out('pr-head-ref.txt'), binding.headRef);
@@ -844,8 +895,20 @@ async function runCommand(command: string, outDir: string, remote: string | unde
       } catch {
         result = null;
       }
-      if (result === null) console.log(INCOMPLETE_LINE);
-      const conclusion = await publishCheckRun(api, { headSha: env['QUALITY_HEAD_SHA'] ?? '', result });
+      let binding: CandidateBinding | null;
+      try {
+        binding = readFullBinding(out);
+      } catch {
+        binding = null;
+      }
+      if (result === null || binding === null) console.log(INCOMPLETE_LINE);
+      const conclusion = await publishCheckRun(api, {
+        headSha: env['QUALITY_HEAD_SHA'] ?? '',
+        result,
+        binding,
+        runId: env['QUALITY_RUN_ID'] ?? '',
+        repository: env['GITHUB_REPOSITORY'] ?? '',
+      });
       console.log(`${PREFIX} published the ${CHECK_NAME} check run as ${conclusion}`);
       return conclusion === 'success' ? 0 : 1;
     }
