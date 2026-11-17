@@ -108,6 +108,23 @@ If error reporting itself throws, the dispatcher stops and emits the fixed
 `TRANSPORT_DISPATCH_REPORTING_FAILED` process warning. Investigate the reporting
 failure before reconnecting or restarting the dispatcher.
 
+Ordinary inbound automation is delivered only by that dispatcher. After trusted
+registration succeeds, the conversational callback runs independently of an
+automation claim conflict, pause or provider failure. Its settlement still owns
+the inbound lease close. Automation admission uses the exact approved operation,
+not the conversational lease, so closing that lease does not revoke the operation.
+Mail automation remains with its own executor. Review cards, decision commands
+and the fixed stop receipt retain their separate command handling; in particular,
+the stop receipt cannot be discovered by the approved-work endpoint.
+
+Automation is no longer ordered before the conversational reply. Before
+activation, qualify any rule that depends on that order, and measure serial
+dispatcher backlog against the authority's approval deadline. An operation that
+expires before claim must remain visible through the authority's existing
+recovery or audit contract; input delivery is not evidence of automation delivery.
+Fake-provider tests establish this callback separation, not real authority
+transaction races, durable ingest ownership, expiry observability or fleet parity.
+
 ## Open activation requirements
 
 1. Deploy and independently verify the protected authority service contract,
