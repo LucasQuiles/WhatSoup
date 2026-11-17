@@ -10,5 +10,8 @@ export function buildFinishPatch(
   const patch = { ...formData };
   delete patch.apiKey;
   delete patch.openaiKey;
+  // Minimal is the default. Storing it would make the line explicitly minimal,
+  // which also turns off the admin back-online notice and the status redirect.
+  if (patch.toolUpdateMode === 'minimal') delete patch.toolUpdateMode;
   return { patch, credentials };
 }
