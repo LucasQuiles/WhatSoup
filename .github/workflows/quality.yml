@@ -673,8 +673,9 @@ jobs:
               refuse_range
             fi
           done
-          if [ -z "$base" ] || [ -z "$head" ] || [ "$base" = "$zero" ]; then
-            # A pull request or merge group always names a base and a head, so a missing one fails closed.
+          # A push with an all-zero after-value deletes a ref (such as a v* tag) and adds no commit.
+          if [ -z "$base" ] || [ -z "$head" ] || [ "$base" = "$zero" ] || [ "$head" = "$zero" ]; then
+            # A pull request or merge group always names a base and a head, so a missing or all-zero one fails closed.
             if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "merge_group" ]; then
               refuse_range
             fi
