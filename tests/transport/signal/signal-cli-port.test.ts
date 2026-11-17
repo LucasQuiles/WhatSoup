@@ -264,6 +264,16 @@ describe('SignalCliPort — RPC contract', () => {
       .toThrow(/absolute/);
   });
 
+  it('rejects a whitespace-only socketPath as a missing endpoint (#2871 trim-tightening)', () => {
+    // Discriminator for the isNonEmptyString migration: the old length>0 check
+    // counted a whitespace-only socketPath (e.g. '   ') as a socket endpoint, so
+    // the constructor failed later with the absolute-path error. The shared
+    // guard trims and treats it as absent, so with no tcpPort the constructor
+    // throws the exactly-one-endpoint error.
+    expect(() => new SignalCliPort(config({ socketPath: '   ' }))).toThrow(/exactly one/);
+    expect(() => new SignalCliPort(config({ socketPath: '\t\n' }))).toThrow(/exactly one/);
+  });
+
   it('ignores a stale terminal callback from an older connection generation', async () => {
     const terminalCallbacks: Array<() => void> = [];
     const connections: ScriptedConnection[] = [];

@@ -1,5 +1,6 @@
 import net from 'node:net';
 import { isAbsolute } from 'node:path';
+import { isNonEmptyString } from '../../lib/type-guards.ts';
 import type { SignalConfig } from './types.ts';
 import type {
   InboundSignal,
@@ -35,7 +36,7 @@ function isLoopbackHost(host: string): boolean {
 export const MAX_UNIX_SOCKET_PATH_BYTES = 104;
 
 function assertEndpoint(config: SignalConfig): void {
-  const hasSocket = typeof config.socketPath === 'string' && config.socketPath.length > 0;
+  const hasSocket = isNonEmptyString(config.socketPath);
   const hasTcp = Number.isInteger(config.tcpPort)
     && (config.tcpPort ?? 0) >= 1
     && (config.tcpPort ?? 0) <= 65_535;
@@ -237,7 +238,7 @@ function normalizeEnvelope(envelope: RpcEnvelope, ownNumber: string): InboundSig
       ?? sent.destinationUuid
       ?? sent.destination;
     if (!Number.isSafeInteger(timestamp) || (timestamp ?? 0) <= 0) return null;
-    if (typeof destination !== 'string' || destination.length === 0) return null;
+    if (!isNonEmptyString(destination)) return null;
     return {
       timestamp: timestamp!,
       source: ownNumber,
@@ -253,7 +254,7 @@ function normalizeEnvelope(envelope: RpcEnvelope, ownNumber: string): InboundSig
     const source = envelope.sourceNumber ?? envelope.sourceUuid ?? envelope.source;
     const groupId = envelope.dataMessage.groupInfo?.groupId;
     if (!Number.isSafeInteger(timestamp) || (timestamp ?? 0) <= 0) return null;
-    if (typeof source !== 'string' || source.length === 0) return null;
+    if (!isNonEmptyString(source)) return null;
     if (groupId !== undefined && groupId.length === 0) return null;
     return {
       timestamp: timestamp!,
