@@ -84,7 +84,7 @@ export async function handlePostApprovalDecision(
     if (!isNonEmptyString(p.mapKey)) throw new Error('mapKey');
     if (typeof p.questionIndex !== 'number' || p.questionIndex < 0) throw new Error('questionIndex');
     if (!Array.isArray(p.selectedOptions) || p.selectedOptions.length === 0
-        || !p.selectedOptions.every((o) => isNonEmptyString(o))) {
+        || !p.selectedOptions.every((o) => typeof o === 'string' && o.length > 0)) {
       throw new Error('selectedOptions');
     }
     decision = p as DecisionBody;
