@@ -543,8 +543,8 @@ function scanStagedSensitiveArtifacts(cwd: string): GuardIssue[] {
   );
 }
 
-// Term rules are explicit here: the issue-triage callers scan with the generic and fallback
-// patterns only, and the release-hygiene mode passes the loaded term rules.
+// The issue-triage callers and the release-hygiene mode scan with the generic and fallback
+// patterns only; term coverage of tracked files comes from --tree against the private baseline.
 export function scanContentLines(
   lines: AddedLine[],
   termRules: readonly PrivateTermRule[] = [],
@@ -572,10 +572,7 @@ export function scanContentLines(
   return issues;
 }
 
-export function scanTrackedFiles(
-  cwd: string,
-  termRules: readonly PrivateTermRule[] = activePrivateTermRules(),
-): GuardIssue[] {
+export function scanTrackedFiles(cwd: string): GuardIssue[] {
   const lines: AddedLine[] = [];
 
   for (const filePath of trackedFiles(cwd, releaseHygieneFiles)) {
@@ -585,7 +582,7 @@ export function scanTrackedFiles(
     });
   }
 
-  return scanContentLines(lines, termRules);
+  return scanContentLines(lines);
 }
 
 // Secret-shaped detector codes — the high-signal subset used for advisory
@@ -2297,8 +2294,8 @@ Modes:
   --refs [file]         Scan ref names, one per line, or pre-push hook lines from stdin.
   --help                Show this help.
 
-Every mode also applies the private term file (WHATSOUP_PRIVATE_TERMS_FILE, else
-~/.config/whatsoup/private-terms.json) when it exists; WHATSOUP_REQUIRE_PRIVATE_TERMS=1 makes
+Every mode but --release-hygiene also applies the private term file (WHATSOUP_PRIVATE_TERMS_FILE,
+else ~/.config/whatsoup/private-terms.json) when it exists; WHATSOUP_REQUIRE_PRIVATE_TERMS=1 makes
 an absent file a failure. Findings print a location and a rule code only.
 Exit codes: 0 clean, 1 findings, 2 usage or term-file failure, or an inconclusive scan.
 
@@ -2312,7 +2309,7 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
     return [];
   }
 
-  // One term-file load per run; every scan below receives these rules explicitly.
+  // One term-file load per run; every scan below but release-hygiene receives these rules explicitly.
   let terms: ReturnType<typeof resolveBoundaryTerms>;
   try {
     terms = resolveBoundaryTerms(process.env);
@@ -2391,7 +2388,7 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
   const issues = args.mode === 'commit-msg'
     ? scanCommitMessage(readInputFile(args.messageFile ?? '', '--commit-msg'), termRules)
     : args.mode === 'release-hygiene'
-      ? scanTrackedFiles(cwd, termRules)
+      ? scanTrackedFiles(cwd)
       : args.mode === 'commit-authors'
         ? scanCommitAuthors(readCommitAuthors(cwd), termRules, BOUNDARY_COMMIT_MESSAGE_EPOCH, commitTermTally)
         : args.mode === 'branch-diff'

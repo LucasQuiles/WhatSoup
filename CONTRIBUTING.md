@@ -16,7 +16,9 @@ outside the repository: `~/.config/whatsoup/private-terms.json`, or the path in
 hygiene mode, the pre-commit and pre-push hooks and the PR metadata check load it.
 Without the file, the checks run only their generic and fallback rules and say so
 in one line; `WHATSOUP_REQUIRE_PRIVATE_TERMS=1` makes a missing file a failure
-(exit 2). A file that exists but cannot be read or applied always fails.
+(exit 2). A file that exists but cannot be read or applied always fails. The
+release-hygiene mode scans with the generic and fallback rules only; the private
+tree check below covers its files with the terms.
 
 An example with invented names:
 
