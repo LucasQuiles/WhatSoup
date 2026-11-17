@@ -594,6 +594,13 @@ jobs:
         timeout-minutes: 10
         run: docker build --file docker/Dockerfile --target deps --build-arg RE2_DOWNLOAD_FORCE_BUILD=1 --tag whatsoup-ci-deps-native .
 
+      - name: Load the source-built re2 module
+        # The forced build must leave a binding that loads and matches, not only an exit code of 0.
+        timeout-minutes: 2
+        run: |
+          docker run --rm --network none whatsoup-ci-deps-native \
+            node -e 'const RE2 = require("re2"); if (!new RE2("a+").test("baaa")) process.exit(1);'
+
   # Perf lane (T5 b-12; 19-performance-budget §2). Report-only while the §1
   # numbers await owner sign-off; PERF_LANE_ENFORCE=1 flips it blocking.
   perf-lane:
