@@ -38,7 +38,6 @@ import {
   scanAddedLines,
   scanCommitAuthors,
   type CommitAuthor,
-  type CommitTermTally,
 } from './repo-hygiene-guard.ts';
 
 export const CHECK_NAME = 'boundary (private)';
@@ -348,8 +347,6 @@ export interface CandidateScanResult {
   readonly version: 1;
   readonly conclusion: 'pass' | 'fail';
   readonly counts: Readonly<Record<ScanMode, Readonly<Record<string, number>>>>;
-  /** Term hits in commits dated before the term-list epoch: counted, not blocked, as in every range scan. */
-  readonly olderTermHits: number;
   readonly scanned: { readonly addedLines: number; readonly pathNames: number; readonly commits: number; readonly texts: number };
 }
 
@@ -359,6 +356,10 @@ const totalOf = (counts: Readonly<Record<ScanMode, Readonly<Record<string, numbe
   SCAN_MODES.reduce((sum, mode) => sum + Object.values(counts[mode]).reduce((part, count) => part + count, 0), 0);
 
 const COMMIT_RECORDS_LINE = 'the commit records of the range could not be read exactly';
+
+// Every commit in base..head is new to the base by ancestry, whatever date its committer gave it,
+// so no commit date exempts a term hit here. The local range modes keep the term-list epoch.
+const HOSTED_COMMIT_EPOCH = '1970-01-01T00:00:00Z';
 
 /**
  * The commit records of base..head, read exactly: one per listed commit, in the order of the
@@ -435,8 +436,7 @@ export function scanCandidate(input: CandidateGit & {
   }
   const listed = gitText(input, ['rev-list', `${base}..${head}`], 'the commit range could not be read').split('\n').filter((entry) => entry !== '');
   const commits = requireExactCommitRecords(records, listed);
-  const tally: CommitTermTally = { olderTermHits: 0 };
-  for (const issue of scanCommitAuthors(commits, input.termRules, undefined, tally)) add('commits', issue.code);
+  for (const issue of scanCommitAuthors(commits, input.termRules, HOSTED_COMMIT_EPOCH)) add('commits', issue.code);
 
   for (const text of [input.title, input.body]) {
     for (const hit of scanPublicText('text', text, input.termRules)) add('pr-text', hit.code);
@@ -446,7 +446,6 @@ export function scanCandidate(input: CandidateGit & {
     version: 1,
     conclusion: totalOf(counts) > 0 ? 'fail' : 'pass',
     counts,
-    olderTermHits: tally.olderTermHits,
     scanned: { addedLines: lines.length, pathNames: paths.length, commits: commits.length, texts: 2 },
   };
 }
@@ -459,9 +458,6 @@ export function formatCandidateResult(result: CandidateScanResult): string[] {
   ];
   for (const mode of SCAN_MODES) {
     for (const code of Object.keys(result.counts[mode]).sort()) lines.push(`${PREFIX} ${mode} ${code} ${result.counts[mode][code]}`);
-  }
-  if (result.olderTermHits > 0) {
-    lines.push(`${PREFIX} ${result.olderTermHits} private-term hit(s) in commits dated before the term-list epoch were counted, not blocked`);
   }
   lines.push(result.conclusion === 'pass'
     ? `${PREFIX} no findings`
@@ -486,17 +482,16 @@ export function parseCandidateResult(value: unknown): CandidateScanResult | null
     }
   }
   const count = (key: string): number | null => {
-    const entry = key === 'olderTermHits' ? field(value, key) : field(value, 'scanned', key);
+    const entry = field(value, 'scanned', key);
     return typeof entry === 'number' && Number.isSafeInteger(entry) && entry >= 0 ? entry : null;
   };
-  const older = count('olderTermHits');
   const addedLines = count('addedLines');
   const pathNames = count('pathNames');
   const commits = count('commits');
   const texts = count('texts');
-  if (older === null || addedLines === null || pathNames === null || commits === null || texts === null) return null;
+  if (addedLines === null || pathNames === null || commits === null || texts === null) return null;
   if ((conclusion === 'fail') !== (totalOf(parsed) > 0)) return null;
-  return { version: 1, conclusion, counts: parsed, olderTermHits: older, scanned: { addedLines, pathNames, commits, texts } };
+  return { version: 1, conclusion, counts: parsed, scanned: { addedLines, pathNames, commits, texts } };
 }
 
 /** Publish `boundary (private)` on the candidate head: success only for a passing result. */
