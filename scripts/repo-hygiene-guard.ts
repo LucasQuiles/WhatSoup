@@ -282,17 +282,47 @@ export function parseUnifiedDiffAddedLines(diff: string): AddedLine[] {
   const addedLines: AddedLine[] = [];
   let filePath: string | null = null;
   let nextLine = 0;
+  // Lines still due in the current hunk, from its header counts. Inside them every line is
+  // content: an added line whose text starts with '++ ' prints as '+++ …', and read as a header
+  // it would drop or move every later added line of the file. Past the counts the handling
+  // below is unchanged.
+  let oldDue = 0;
+  let newDue = 0;
 
   for (const rawLine of diff.split(/\r?\n/)) {
+    if (oldDue > 0 || newDue > 0) {
+      if (newDue > 0 && rawLine.startsWith('+')) {
+        if (filePath && nextLine !== 0) addedLines.push({ filePath, line: nextLine, text: rawLine.slice(1) });
+        nextLine += 1;
+        newDue -= 1;
+        continue;
+      }
+      if (oldDue > 0 && rawLine.startsWith('-')) {
+        oldDue -= 1;
+        continue;
+      }
+      if (oldDue > 0 && newDue > 0 && rawLine.startsWith(' ')) {
+        nextLine += 1;
+        oldDue -= 1;
+        newDue -= 1;
+        continue;
+      }
+      if (rawLine.startsWith('\\')) continue;
+      oldDue = 0;
+      newDue = 0;
+    }
+
     if (rawLine.startsWith('+++ ')) {
       const candidate = rawLine.slice(4).trim();
       filePath = candidate === '/dev/null' ? null : stripDiffPath(candidate);
       continue;
     }
 
-    const hunk = rawLine.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    const hunk = rawLine.match(/^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
     if (hunk) {
-      nextLine = Number(hunk[1]);
+      nextLine = Number(hunk[2]);
+      oldDue = hunk[1] === undefined ? 1 : Number(hunk[1]);
+      newDue = hunk[3] === undefined ? 1 : Number(hunk[3]);
       continue;
     }
 
