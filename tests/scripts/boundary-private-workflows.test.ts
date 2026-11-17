@@ -196,6 +196,13 @@ describe('boundary-private.yml triggers and publication', () => {
     expect(publish?.env).toMatchObject({ QUALITY_RUN_ID: '${{ github.event.workflow_run.id }}' });
     expect(publish?.run).toContain('QUALITY_RUN_ID="$QUALITY_RUN_ID"');
   });
+
+  it('publishes success only after the term file removal step succeeded', () => {
+    expect(steps.find((entry) => entry.name === 'Remove the private term file')?.id).toBe('remove-terms');
+    const publish = steps.at(-1);
+    expect(publish?.env?.['TERMS_REMOVAL']).toBe('${{ steps.remove-terms.outcome }}');
+    expect(publish?.run).toContain('TERMS_REMOVAL="$TERMS_REMOVAL"');
+  });
 });
 
 describe('boundary-private-text.yml triggers', () => {

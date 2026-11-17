@@ -523,8 +523,17 @@ function publishApi(overrides: Record<string, unknown> = {}): { api: GitHubApi; 
   return { api, posts };
 }
 
-const publish = (api: GitHubApi, result: CandidateScanResult | null, binding: typeof BOUND | null = BOUND, headSha = HEAD) =>
-  publishCheckRun(api, { headSha, result, binding, runId: '99', repository: REPOSITORY });
+const publish = (api: GitHubApi, result: CandidateScanResult | null, binding: typeof BOUND | null = BOUND, headSha = HEAD, termsRemoved = true) =>
+  publishCheckRun(api, { headSha, result, binding, runId: '99', repository: REPOSITORY, termsRemoved });
+
+describe('boundary (private) publication after the term file removal', () => {
+  it('publishes failure with one fixed line when the removal step did not succeed', async () => {
+    const { api, posts } = publishApi();
+    const clean: CandidateScanResult = { ...failing, conclusion: 'pass', counts: NO_COUNTS };
+    await expect(publish(api, clean, BOUND, HEAD, false)).resolves.toBe('failure');
+    expect(posts[0]!.body).toMatchObject({ conclusion: 'failure', output: { title: 'boundary (private): the private term file was not removed' } });
+  });
+});
 
 const failing: CandidateScanResult = {
   version: 2,
