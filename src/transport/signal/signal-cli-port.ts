@@ -43,6 +43,11 @@ function assertEndpoint(config: SignalConfig): void {
   if (hasSocket === hasTcp) {
     throw new Error('SignalCliPort requires exactly one valid socketPath or tcpPort endpoint');
   }
+  // A present but blank socketPath is never an endpoint: the connection factory
+  // picks the socket whenever socketPath is defined, so it must not reach TCP use.
+  if (!hasSocket && config.socketPath !== undefined) {
+    throw new Error('SignalCliPort socketPath must not be blank');
+  }
   if (hasSocket && !isAbsolute(config.socketPath!)) {
     throw new Error('SignalCliPort socketPath must be absolute');
   }

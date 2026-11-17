@@ -274,6 +274,13 @@ describe('SignalCliPort — RPC contract', () => {
     expect(() => new SignalCliPort(config({ socketPath: '\t\n' }))).toThrow(/exactly one/);
   });
 
+  it('rejects a whitespace-only socketPath next to a valid tcpPort', () => {
+    // With a valid tcpPort the exactly-one-endpoint check alone would pass, while
+    // the connection factory would still choose the blank socket path because it
+    // is defined. The constructor must refuse the combination, as it does on main.
+    expect(() => new SignalCliPort(config({ socketPath: '   ', tcpPort: 7583 }))).toThrow(/socketPath/);
+  });
+
   it('ignores a stale terminal callback from an older connection generation', async () => {
     const terminalCallbacks: Array<() => void> = [];
     const connections: ScriptedConnection[] = [];
