@@ -755,33 +755,38 @@ function baseRefFileLines(
   return lines;
 }
 
-function scanBranchCommitSecretLines(
-  cwd: string,
+/** Options of the per-commit history line scan. */
+export interface CommitLineScanOptions extends AddedLineScanOptions {
+  /** True for a line byte-identical to a line of the same file at the base ref. */
+  readonly isBaseLine?: (filePath: string, text: string) => boolean;
+}
+
+/**
+ * The lines one branch commit adds, through the history rules (the secret shapes plus the term
+ * rules). --branch-diff reads each commit with `git show`; the hosted candidate check reads it
+ * from its bare candidate directory; both share this scan. With `fixturePrivateNames`, a fixture
+ * path gets the term rules and no secret shape.
+ */
+export function scanCommitAddedLines(
+  lines: readonly AddedLine[],
   sha: string,
-  baseRef: string | undefined,
-  baseLineCache: Map<string, Set<string>> | undefined,
   termRules: readonly PrivateTermRule[],
+  options: CommitLineScanOptions = {},
 ): GuardIssue[] {
   const issues: GuardIssue[] = [];
-  const diff = git(['show', '--format=', '--unified=0', '--no-ext-diff', '-m', sha], cwd);
 
-  for (const line of parseUnifiedDiffAddedLines(diff)) {
+  for (const line of lines) {
     const filePath = normalizeRepoPath(line.filePath);
-    if (isFixtureFile(filePath)) continue;
+    const fixture = isFixtureFile(filePath);
+    if (fixture && options.fixturePrivateNames !== true) continue;
     // Correctness (not a detection weakening): a line byte-identical to the base ref
     // (origin/main) is already-published content, not branch-introduced. Merge commits
     // re-expose the base's own lines as branch-unique per-commit diffs; skipping those
     // removes that false-positive class. A genuinely new secret cannot already exist in
     // origin/main, so every real introduction is still flagged.
-    if (
-      baseRef
-      && baseLineCache
-      && baseRefFileLines(cwd, baseRef, line.filePath, baseLineCache).has(line.text)
-    ) {
-      continue;
-    }
+    if (options.isBaseLine?.(line.filePath, line.text) === true) continue;
     const found = new Set<string>();
-    for (const pattern of historyPatterns(termRules)) {
+    for (const pattern of fixture ? termRules : historyPatterns(termRules)) {
       if (findDisallowedMatch(filePath, pattern, line.text)) {
         found.add(pattern.code);
         issues.push({
@@ -798,6 +803,20 @@ function scanBranchCommitSecretLines(
   }
 
   return issues;
+}
+
+function scanBranchCommitSecretLines(
+  cwd: string,
+  sha: string,
+  baseRef: string | undefined,
+  baseLineCache: Map<string, Set<string>> | undefined,
+  termRules: readonly PrivateTermRule[],
+): GuardIssue[] {
+  const diff = git(['show', '--format=', '--unified=0', '--no-ext-diff', '-m', sha], cwd);
+  const options: CommitLineScanOptions = baseRef && baseLineCache
+    ? { isBaseLine: (filePath, text) => baseRefFileLines(cwd, baseRef, filePath, baseLineCache).has(text) }
+    : {};
+  return scanCommitAddedLines(parseUnifiedDiffAddedLines(diff), sha, termRules, options);
 }
 
 function scanBranchCommitSensitiveArtifacts(cwd: string, sha: string): GuardIssue[] {

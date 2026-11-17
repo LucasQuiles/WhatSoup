@@ -29,13 +29,15 @@ import { parseArgs } from 'node:util';
 
 import { isRecord } from '../src/lib/type-guards.ts';
 import { PrivateTermsError, type PrivateTermRule } from './lib/private-terms.ts';
-import { pathNameCodes, resolveBoundaryTerms, scanPublicText } from './lib/repo-hygiene-boundary.ts';
+import { pathNameCodes, resolveBoundaryTerms, scanPublicText, scanRefNames } from './lib/repo-hygiene-boundary.ts';
 import {
   COMMIT_AUTHOR_LOG_FORMAT,
   GuardInputError,
+  isTrackedSensitiveArtifact,
   parseCommitAuthorLog,
   parseUnifiedDiffAddedLines,
   scanAddedLines,
+  scanCommitAddedLines,
   scanCommitAuthors,
   type CommitAuthor,
 } from './repo-hygiene-guard.ts';
@@ -60,7 +62,7 @@ const SCHEDULE_DEFAULT_MS = 2 * 60 * 60 * 1000;
 const TERMS_LINE = 'the private term file is missing, unreadable or invalid; the check fails closed';
 const INCOMPLETE_LINE = `${PREFIX} the check could not complete; an earlier step refused its input or failed, and the run log names it. The check fails closed.`;
 
-export const SCAN_MODES = ['added-lines', 'path-names', 'commits', 'pr-text'] as const;
+export const SCAN_MODES = ['added-lines', 'path-names', 'sensitive-paths', 'commit-lines', 'commits', 'head-ref', 'pr-text'] as const;
 export type ScanMode = (typeof SCAN_MODES)[number];
 
 /** An input the check cannot bind or use. Its message is fixed text and is printed as is. */
@@ -181,6 +183,8 @@ export interface CandidateBinding {
   readonly number: number;
   readonly title: string;
   readonly body: string;
+  /** The pull request's head branch name: free text for a fork, and merge commit messages quote it. */
+  readonly headRef: string;
 }
 
 /**
@@ -228,8 +232,9 @@ export async function bindPullRequestCandidate(
   const baseRef = baseRefName(field(pull, 'base', 'ref'));
   const title = field(pull, 'title');
   const body = field(pull, 'body');
-  if (typeof title !== 'string' || (body !== null && body !== undefined && typeof body !== 'string')) {
-    throw new BoundaryRefusal('the pull request title or body is malformed');
+  const headRef = field(pull, 'head', 'ref');
+  if (typeof title !== 'string' || typeof headRef !== 'string' || (body !== null && body !== undefined && typeof body !== 'string')) {
+    throw new BoundaryRefusal('the pull request title, body or head branch name is malformed');
   }
 
   const tip = await api.getJson(`git/ref/heads/${baseRef}`);
@@ -238,7 +243,7 @@ export async function bindPullRequestCandidate(
   }
   const base = fullSha(field(tip, 'object', 'sha'), 'the base branch tip');
   if (base === head) throw new BoundaryRefusal('the base branch tip equals the head; there is no change to check');
-  return { head, base, number, title, body: textOf(body) };
+  return { head, base, number, title, body: textOf(body), headRef };
 }
 
 // ---------------------------------------------------------------------------
@@ -344,13 +349,17 @@ function isAncestor(git: CandidateGit, ancestor: string, descendant: string): bo
 // ---------------------------------------------------------------------------
 
 export interface CandidateScanResult {
-  readonly version: 1;
+  readonly version: 2;
   readonly conclusion: 'pass' | 'fail';
   readonly counts: Readonly<Record<ScanMode, Readonly<Record<string, number>>>>;
-  readonly scanned: { readonly addedLines: number; readonly pathNames: number; readonly commits: number; readonly texts: number };
+  readonly scanned: Readonly<Record<ScannedKey, number>>;
 }
 
-const emptyCounts = (): Record<ScanMode, Record<string, number>> => ({ 'added-lines': {}, 'path-names': {}, commits: {}, 'pr-text': {} });
+const SCANNED_KEYS = ['addedLines', 'pathNames', 'changedPaths', 'commits', 'commitLines', 'commitPaths', 'refNames', 'texts'] as const;
+type ScannedKey = (typeof SCANNED_KEYS)[number];
+
+const emptyCounts = (): Record<ScanMode, Record<string, number>> =>
+  Object.fromEntries(SCAN_MODES.map((mode) => [mode, {}])) as Record<ScanMode, Record<string, number>>;
 
 const totalOf = (counts: Readonly<Record<ScanMode, Readonly<Record<string, number>>>>): number =>
   SCAN_MODES.reduce((sum, mode) => sum + Object.values(counts[mode]).reduce((part, count) => part + count, 0), 0);
@@ -388,16 +397,19 @@ export function requireExactCommitRecords(records: CommitAuthor[], listed: reado
 }
 
 /**
- * Scan the candidate with the guard's own code: the added lines (the --branch-diff and --staged
- * scan), each added or renamed path name (the --tree path-name scan), every commit message and
- * author and committer identity in base..head (the --commit-authors scan), and the pull request
- * title and body (the --text scan).
+ * Scan the candidate with the guard's own code: the lines added from base to head and the lines
+ * each commit adds (both halves of --branch-diff), each added or renamed path name (the --tree
+ * path-name scan), the sensitive-artifact paths (--staged and --branch-diff), every commit message
+ * and author and committer identity in base..head (the --commit-authors scan), the head branch
+ * name (the --refs scan), and the pull request title and body (the --text scan). Unlike the local
+ * modes, no commit date exempts a term hit, and fixture paths are exempt from generic shapes only.
  */
 export function scanCandidate(input: CandidateGit & {
   readonly base: string;
   readonly head: string;
   readonly title: string;
   readonly body: string;
+  readonly headRef: string;
   readonly termRules: readonly PrivateTermRule[];
 }): CandidateScanResult {
   const { base, head } = requireRange(input.base, input.head);
@@ -411,23 +423,29 @@ export function scanCandidate(input: CandidateGit & {
     counts[mode][code] = (counts[mode][code] ?? 0) + 1;
   };
 
-  // Tree to tree, so content that only a merge commit introduces is in the diff. Text is forced
-  // for every path and neither textconv nor an external diff runs, so no attribute and no NUL
-  // byte turns a file into "Binary files differ".
-  const diff = gitText(input, [
+  // Text is forced for every path and neither textconv nor an external diff runs, so no attribute
+  // and no NUL byte turns a file into "Binary files differ".
+  const addedBetween = (from: string, to: string, refusal: string) => parseUnifiedDiffAddedLines(gitText(input, [
     'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--text', '--find-renames', '--unified=0',
-    '--src-prefix=a/', '--dst-prefix=b/', `${base}^{tree}`, `${head}^{tree}`, '--',
-  ], 'the candidate diff could not be read within its bound', DIFF_MAX_BYTES);
-  const lines = parseUnifiedDiffAddedLines(diff);
+    '--src-prefix=a/', '--dst-prefix=b/', from, to, '--',
+  ], refusal, DIFF_MAX_BYTES));
+  const pathsBetween = (from: string, to: string, filter: 'AR' | 'ACMR'): string[] => gitText(input, [
+    'diff', '--no-color', '--no-ext-diff', '--name-only', '-z', '--find-renames', `--diff-filter=${filter}`, from, to, '--',
+  ], 'the changed path names could not be read').split('\0').filter((entry) => entry !== '');
+
+  // Tree to tree, so content that only a merge commit introduces is in the diff.
+  const lines = addedBetween(`${base}^{tree}`, `${head}^{tree}`, 'the candidate diff could not be read within its bound');
   for (const issue of scanAddedLines(lines, input.termRules, HOSTED_SCAN_OPTIONS)) add('added-lines', issue.code);
 
-  const paths = gitText(input, [
-    'diff', '--no-color', '--no-ext-diff', '--name-only', '-z', '--find-renames', '--diff-filter=AR',
-    `${base}^{tree}`, `${head}^{tree}`, '--',
-  ], 'the added path names could not be read').split('\0').filter((entry) => entry !== '');
+  const paths = pathsBetween(`${base}^{tree}`, `${head}^{tree}`, 'AR');
   for (const filePath of paths) {
     for (const code of new Set(pathNameCodes(filePath, input.termRules).map((hit) => hit.code))) add('path-names', code);
   }
+  // The sensitive-artifact path classification of --staged and --branch-diff: every path the
+  // candidate adds, copies, modifies or renames to, then each commit's own paths below.
+  const changedPaths = pathsBetween(`${base}^{tree}`, `${head}^{tree}`, 'ACMR');
+  const sensitive = new Set(changedPaths.filter((filePath) => isTrackedSensitiveArtifact(filePath)));
+  sensitive.forEach(() => add('sensitive-paths', 'branch-sensitive-artifact'));
 
   const log = gitText(input, ['log', `--format=${COMMIT_AUTHOR_LOG_FORMAT}`, `${base}..${head}`], 'the commit range could not be read');
   let records: CommitAuthor[];
@@ -437,27 +455,81 @@ export function scanCandidate(input: CandidateGit & {
     if (error instanceof GuardInputError) throw new BoundaryRefusal(COMMIT_RECORDS_LINE);
     throw error;
   }
-  const listed = gitText(input, ['rev-list', `${base}..${head}`], 'the commit range could not be read').split('\n').filter((entry) => entry !== '');
-  const commits = requireExactCommitRecords(records, listed);
+  // Each line: the commit, then its parents.
+  const revisions = gitText(input, ['rev-list', '--parents', `${base}..${head}`], 'the commit range could not be read')
+    .split('\n').filter((entry) => entry !== '').map((entry) => entry.split(' '));
+  if (revisions.some((ids) => ids.some((id) => !FULL_SHA.test(id)))) throw new BoundaryRefusal(COMMIT_RECORDS_LINE);
+  const commits = requireExactCommitRecords(records, revisions.map((ids) => ids[0] ?? ''));
   for (const issue of scanCommitAuthors(commits, input.termRules, HOSTED_COMMIT_EPOCH)) add('commits', issue.code);
+
+  // Every commit's own lines and paths, against its first parent (a root commit against the empty
+  // tree), as --branch-diff scans branch history: a term or an artifact that one commit adds and a
+  // later commit removes is still published by the branch. A line byte-identical to a line of the
+  // same file at the base tip is already published, so a merge from the base adds nothing.
+  const baseLines = new Map<string, ReadonlySet<string>>();
+  const isBaseLine = (filePath: string, text: string): boolean => {
+    let known = baseLines.get(filePath);
+    if (known === undefined) {
+      let content = '';
+      try {
+        content = gitBytes(input, ['cat-file', 'blob', `${base}:${filePath}`], DIFF_MAX_BYTES).toString('utf8');
+      } catch {
+        content = '';
+      }
+      known = new Set(content.split(/\r?\n/));
+      baseLines.set(filePath, known);
+    }
+    return known.has(text);
+  };
+  let emptyTree: string | undefined;
+  const historySensitive = new Set<string>();
+  let commitLines = 0;
+  let commitPaths = 0;
+  for (const [sha = '', parent] of revisions) {
+    const from = parent ?? (emptyTree ??= gitText(input, ['hash-object', '-t', 'tree', '/dev/null'], 'the empty tree could not be named').trim());
+    const added = addedBetween(from, sha, 'a commit diff could not be read within its bound');
+    commitLines += added.length;
+    for (const issue of scanCommitAddedLines(added, sha, input.termRules, { ...HOSTED_SCAN_OPTIONS, isBaseLine })) add('commit-lines', issue.code);
+    const touched = pathsBetween(from, sha, 'ACMR');
+    commitPaths += touched.length;
+    for (const filePath of touched) {
+      if (!isTrackedSensitiveArtifact(filePath) || sensitive.has(filePath) || historySensitive.has(filePath)) continue;
+      historySensitive.add(filePath);
+      add('sensitive-paths', 'branch-history-sensitive-artifact');
+    }
+  }
+
+  // The head branch name: GitHub's merge commit message quotes it.
+  for (const hit of scanRefNames(input.headRef, input.termRules)) add('head-ref', hit.code);
 
   for (const text of [input.title, input.body]) {
     for (const hit of scanPublicText('text', text, input.termRules)) add('pr-text', hit.code);
   }
 
   return {
-    version: 1,
+    version: 2,
     conclusion: totalOf(counts) > 0 ? 'fail' : 'pass',
     counts,
-    scanned: { addedLines: lines.length, pathNames: paths.length, commits: commits.length, texts: 2 },
+    scanned: {
+      addedLines: lines.length,
+      pathNames: paths.length,
+      changedPaths: changedPaths.length,
+      commits: commits.length,
+      commitLines,
+      commitPaths,
+      refNames: 1,
+      texts: 2,
+    },
   };
 }
 
 export function formatCandidateResult(result: CandidateScanResult): string[] {
   const { scanned } = result;
   const lines = [
-    `${PREFIX} scanned ${scanned.addedLines} added line(s), ${scanned.pathNames} added or renamed path name(s), `
-      + `${scanned.commits} commit(s) and ${scanned.texts} pull request text(s)`,
+    `${PREFIX} scanned ${scanned.addedLines} added line(s), ${scanned.pathNames} added or renamed path name(s) and `
+      + `${scanned.changedPaths} changed path(s) from base to head; ${scanned.commits} commit(s) with `
+      + `${scanned.commitLines} added line(s) and ${scanned.commitPaths} changed path(s); ${scanned.refNames} head `
+      + `branch name and ${scanned.texts} pull request text(s)`,
   ];
   for (const mode of SCAN_MODES) {
     for (const code of Object.keys(result.counts[mode]).sort()) lines.push(`${PREFIX} ${mode} ${code} ${result.counts[mode][code]}`);
@@ -470,7 +542,7 @@ export function formatCandidateResult(result: CandidateScanResult): string[] {
 
 /** A scan result read back from its file: every field checked, or null. */
 export function parseCandidateResult(value: unknown): CandidateScanResult | null {
-  if (field(value, 'version') !== 1) return null;
+  if (field(value, 'version') !== 2) return null;
   const conclusion = field(value, 'conclusion');
   const counts = field(value, 'counts');
   if ((conclusion !== 'pass' && conclusion !== 'fail') || !isRecord(counts)) return null;
@@ -484,17 +556,14 @@ export function parseCandidateResult(value: unknown): CandidateScanResult | null
       parsed[mode][code] = hits;
     }
   }
-  const count = (key: string): number | null => {
+  const scanned = {} as Record<ScannedKey, number>;
+  for (const key of SCANNED_KEYS) {
     const entry = field(value, 'scanned', key);
-    return typeof entry === 'number' && Number.isSafeInteger(entry) && entry >= 0 ? entry : null;
-  };
-  const addedLines = count('addedLines');
-  const pathNames = count('pathNames');
-  const commits = count('commits');
-  const texts = count('texts');
-  if (addedLines === null || pathNames === null || commits === null || texts === null) return null;
+    if (typeof entry !== 'number' || !Number.isSafeInteger(entry) || entry < 0) return null;
+    scanned[key] = entry;
+  }
   if ((conclusion === 'fail') !== (totalOf(parsed) > 0)) return null;
-  return { version: 1, conclusion, counts: parsed, scanned: { addedLines, pathNames, commits, texts } };
+  return { version: 2, conclusion, counts: parsed, scanned };
 }
 
 /** Publish `boundary (private)` on the candidate head: success only for a passing result. */
@@ -741,6 +810,7 @@ async function runCommand(command: string, outDir: string, remote: string | unde
       writePrivate(out('binding.json'), JSON.stringify({ head: binding.head, base: binding.base, number: binding.number }));
       writePrivate(out('pr-title.txt'), binding.title);
       writePrivate(out('pr-body.txt'), binding.body);
+      writePrivate(out('pr-head-ref.txt'), binding.headRef);
       console.log(`${PREFIX} bound pull request #${binding.number}: head ${binding.head}, base branch tip ${binding.base}`);
       return 0;
     }
@@ -759,6 +829,7 @@ async function runCommand(command: string, outDir: string, remote: string | unde
         ...binding,
         title: readFileSync(out('pr-title.txt'), 'utf8'),
         body: readFileSync(out('pr-body.txt'), 'utf8'),
+        headRef: readFileSync(out('pr-head-ref.txt'), 'utf8'),
         termRules,
       });
       writePrivate(out('result.json'), JSON.stringify(result));
