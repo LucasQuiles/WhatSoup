@@ -723,7 +723,7 @@ describe('boundary text check', () => {
     });
 
     it('reads the next-page link from the Link header', async () => {
-      const fetchStub = vi.fn(async () => new Response('[]', {
+      const fetchStub = vi.fn(async (_input: unknown, _init?: unknown) => new Response('[]', {
         status: 200,
         headers: { Link: '<https://api.example.invalid/repositories/7/issues?page=2>; rel="next", <https://api.example.invalid/repositories/7/issues?page=5>; rel="last"' },
       }));
@@ -736,7 +736,7 @@ describe('boundary text check', () => {
     });
 
     it('sends the token to the API origin only', async () => {
-      const fetchStub = vi.fn(async () => new Response('[]', { status: 200 }));
+      const fetchStub = vi.fn(async (_input: unknown, _init?: unknown) => new Response('[]', { status: 200 }));
       vi.stubGlobal('fetch', fetchStub);
       await expect(createGitHubApi(env).getPage('https://other.example.invalid/repos/owner-a/repo-a/issues?page=2')).rejects.toThrow();
       await expect(createGitHubApi(env).getPage('http://api.example.invalid/repos/owner-a/repo-a/issues?page=2')).rejects.toThrow();
