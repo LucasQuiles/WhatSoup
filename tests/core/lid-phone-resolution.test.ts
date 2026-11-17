@@ -298,18 +298,19 @@ describe('resolveLid', () => {
     // the file is skipped and count stays 0 — no corrupt mapping persisted.
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lid-ws-'));
     const tempDb = createTestDb();
+    try {
+      fs.writeFileSync(
+        path.join(tmpDir, 'lid-mapping-77777_reverse.json'),
+        JSON.stringify('   '),
+      );
 
-    fs.writeFileSync(
-      path.join(tmpDir, 'lid-mapping-77777_reverse.json'),
-      JSON.stringify('   '),
-    );
-
-    const count = hydrateLidMappings(tempDb, tmpDir);
-    expect(count).toBe(0);
-    expect(resolveLid(tempDb, '77777')).toBeNull();
-
-    tempDb.close();
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+      const count = hydrateLidMappings(tempDb, tmpDir);
+      expect(count).toBe(0);
+      expect(resolveLid(tempDb, '77777')).toBeNull();
+    } finally {
+      tempDb.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
 

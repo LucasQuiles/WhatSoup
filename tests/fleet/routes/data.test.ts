@@ -341,7 +341,6 @@ describe('handleGetChats', () => {
       } as any,
     });
 
-
     const res = mockRes();
     handleGetChats(mockReq({ url: '/api/lines/test-line/chats' }), res, deps, { name: 'test-line' });
 
