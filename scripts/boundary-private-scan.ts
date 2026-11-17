@@ -32,10 +32,12 @@ import { PrivateTermsError, type PrivateTermRule } from './lib/private-terms.ts'
 import { pathNameCodes, resolveBoundaryTerms, scanPublicText } from './lib/repo-hygiene-boundary.ts';
 import {
   COMMIT_AUTHOR_LOG_FORMAT,
+  GuardInputError,
   parseCommitAuthorLog,
   parseUnifiedDiffAddedLines,
   scanAddedLines,
   scanCommitAuthors,
+  type CommitAuthor,
   type CommitTermTally,
 } from './repo-hygiene-guard.ts';
 
@@ -356,6 +358,31 @@ const emptyCounts = (): Record<ScanMode, Record<string, number>> => ({ 'added-li
 const totalOf = (counts: Readonly<Record<ScanMode, Readonly<Record<string, number>>>>): number =>
   SCAN_MODES.reduce((sum, mode) => sum + Object.values(counts[mode]).reduce((part, count) => part + count, 0), 0);
 
+const COMMIT_RECORDS_LINE = 'the commit records of the range could not be read exactly';
+
+/**
+ * The commit records of base..head, read exactly: one per listed commit, in the order of the
+ * revision list, each with every field of the log format. A record separator or a NUL inside a
+ * message or an identity would cut or shift the fields after it, so a record that lacks one, or
+ * holds one of the wrong shape, refuses the range.
+ */
+export function requireExactCommitRecords(records: CommitAuthor[], listed: readonly string[]): CommitAuthor[] {
+  const exact = records.length > 0 && records.length === listed.length && records.every((record, index) =>
+    record.sha === listed[index]
+    && FULL_SHA.test(record.sha)
+    && typeof record.name === 'string'
+    && typeof record.email === 'string'
+    && typeof record.subject === 'string'
+    && typeof record.message === 'string'
+    && typeof record.committerName === 'string'
+    && typeof record.committerEmail === 'string'
+    && typeof record.committerTime === 'number'
+    && Number.isSafeInteger(record.committerTime)
+    && record.committerTime >= 0);
+  if (!exact) throw new BoundaryRefusal(COMMIT_RECORDS_LINE);
+  return records;
+}
+
 /**
  * Scan the candidate with the guard's own code: the added lines (the --branch-diff and --staged
  * scan), each added or renamed path name (the --tree path-name scan), every commit message and
@@ -398,13 +425,16 @@ export function scanCandidate(input: CandidateGit & {
     for (const code of new Set(pathNameCodes(filePath, input.termRules).map((hit) => hit.code))) add('path-names', code);
   }
 
-  // A record separator inside a message would shift the fields after it; the shas must match
-  // the plain revision list exactly, or the range is refused.
-  const commits = parseCommitAuthorLog(gitText(input, ['log', `--format=${COMMIT_AUTHOR_LOG_FORMAT}`, `${base}..${head}`], 'the commit range could not be read'));
-  const listed = gitText(input, ['rev-list', `${base}..${head}`], 'the commit range could not be read').split('\n').filter((entry) => entry !== '');
-  if (commits.length === 0 || commits.length !== listed.length || commits.some((commit, index) => commit.sha !== listed[index])) {
-    throw new BoundaryRefusal('the commit records of the range could not be read exactly');
+  const log = gitText(input, ['log', `--format=${COMMIT_AUTHOR_LOG_FORMAT}`, `${base}..${head}`], 'the commit range could not be read');
+  let records: CommitAuthor[];
+  try {
+    records = parseCommitAuthorLog(log);
+  } catch (error) {
+    if (error instanceof GuardInputError) throw new BoundaryRefusal(COMMIT_RECORDS_LINE);
+    throw error;
   }
+  const listed = gitText(input, ['rev-list', `${base}..${head}`], 'the commit range could not be read').split('\n').filter((entry) => entry !== '');
+  const commits = requireExactCommitRecords(records, listed);
   const tally: CommitTermTally = { olderTermHits: 0 };
   for (const issue of scanCommitAuthors(commits, input.termRules, undefined, tally)) add('commits', issue.code);
 

@@ -803,26 +803,31 @@ export function scanBranchSecretHistory(
   return issues;
 }
 
+const COMMIT_AUTHOR_FIELD_COUNT = 8;
+const COMMIT_OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/**
+ * Parse a COMMIT_AUTHOR_LOG_FORMAT log. Every record must hold exactly its eight fields, a full
+ * commit id and a numeric committer time. A record separator (0x1E) inside a message or an
+ * identity cuts its record in two, and dropping either part would drop the fields it holds (a
+ * message that ends in 0x1E lost its committer name, email and time). So a malformed record fails
+ * the scan (exit 1) instead; only the empty tail after the last separator is skipped.
+ */
 export function parseCommitAuthorLog(log: string): CommitAuthor[] {
-  return log
-    .split('\x1e')
-    .map((record) => record.trim())
-    .filter(Boolean)
-    .map((record) => {
-      // The message (%B) cannot hold a NUL, so the committer fields after it split cleanly.
-      const [sha, name, email, subject, message, committerName, committerEmail, committerTime] = record.split('\x00');
-      return {
-        sha: sha ?? '',
-        name: name ?? '',
-        email: email ?? '',
-        subject: subject ?? '',
-        ...(message === undefined ? {} : { message }),
-        ...(committerName === undefined ? {} : { committerName }),
-        ...(committerEmail === undefined ? {} : { committerEmail }),
-        ...(committerTime === undefined || !/^[0-9]+$/.test(committerTime) ? {} : { committerTime: Number(committerTime) }),
-      };
-    })
-    .filter((commit) => commit.sha !== '');
+  const fragments = log.split('\x1e');
+  const commits: CommitAuthor[] = [];
+  fragments.forEach((fragment, index) => {
+    const record = fragment.trim();
+    if (record === '' && index === fragments.length - 1) return;
+    const fields = record.split('\x00');
+    const [sha = '', name = '', email = '', subject = '', message = '', committerName = '', committerEmail = '', committerTime = ''] = fields;
+    const time = /^[0-9]+$/.test(committerTime) ? Number(committerTime) : Number.NaN;
+    if (fields.length !== COMMIT_AUTHOR_FIELD_COUNT || !COMMIT_OBJECT_ID.test(sha) || !Number.isSafeInteger(time)) {
+      throw new GuardInputError('a commit record in the log is malformed; the commit scan fails closed');
+    }
+    commits.push({ sha, name, email, subject, message, committerName, committerEmail, committerTime: time });
+  });
+  return commits;
 }
 
 /** The epoch in seconds; an unparsable constant yields NaN, so every commit counts as recent (blocking). */
