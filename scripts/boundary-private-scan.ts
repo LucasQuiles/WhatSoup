@@ -361,6 +361,9 @@ const COMMIT_RECORDS_LINE = 'the commit records of the range could not be read e
 // so no commit date exempts a term hit here. The local range modes keep the term-list epoch.
 const HOSTED_COMMIT_EPOCH = '1970-01-01T00:00:00Z';
 
+// Fixture paths are exempt from the generic shapes only: the private names apply under them too.
+const HOSTED_SCAN_OPTIONS = { fixturePrivateNames: true } as const;
+
 /**
  * The commit records of base..head, read exactly: one per listed commit, in the order of the
  * revision list, each with every field of the log format. A record separator or a NUL inside a
@@ -416,7 +419,7 @@ export function scanCandidate(input: CandidateGit & {
     '--src-prefix=a/', '--dst-prefix=b/', `${base}^{tree}`, `${head}^{tree}`, '--',
   ], 'the candidate diff could not be read within its bound', DIFF_MAX_BYTES);
   const lines = parseUnifiedDiffAddedLines(diff);
-  for (const issue of scanAddedLines(lines, input.termRules)) add('added-lines', issue.code);
+  for (const issue of scanAddedLines(lines, input.termRules, HOSTED_SCAN_OPTIONS)) add('added-lines', issue.code);
 
   const paths = gitText(input, [
     'diff', '--no-color', '--no-ext-diff', '--name-only', '-z', '--find-renames', '--diff-filter=AR',

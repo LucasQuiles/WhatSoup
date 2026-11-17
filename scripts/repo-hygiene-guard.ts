@@ -412,9 +412,35 @@ function splitHistoryIssues(
   }));
 }
 
+/** Options of the added-line scans that only the hosted candidate check sets. */
+export interface AddedLineScanOptions {
+  /**
+   * Apply the private-name rules under fixture paths too. A fixture is exempt from the generic
+   * shapes only, never from private names, as --tree applies it; the local diff modes keep their
+   * whole fixture exemption.
+   */
+  readonly fixturePrivateNames?: boolean;
+}
+
+/** The private-name part of the added-line scan for one line: the fallback rules, then the term rules. */
+function privateNameIssues(filePath: string, line: AddedLine, termRules: readonly PrivateTermRule[]): GuardIssue[] {
+  const location = { filePath: line.filePath, line: line.line };
+  const reported = new Set<string>();
+  const issues: GuardIssue[] = [];
+  for (const pattern of fallbackPrivatePatterns) {
+    if (findDisallowedMatch(filePath, pattern, line.text)) {
+      reported.add(pattern.code);
+      issues.push({ code: pattern.code, message: pattern.message, ...location });
+    }
+  }
+  issues.push(...termRuleIssues(filePath, line.text, location, termRules, reported));
+  return issues;
+}
+
 export function scanAddedLines(
   lines: AddedLine[],
   termRules: readonly PrivateTermRule[] = activePrivateTermRules(),
+  options: AddedLineScanOptions = {},
 ): GuardIssue[] {
   const issues: GuardIssue[] = [];
 
@@ -424,6 +450,7 @@ export function scanAddedLines(
 
     if (isFixtureFile(filePath)) {
       issues.push(...scanProjectedFileSecretLines([line]));
+      if (options.fixturePrivateNames === true) issues.push(...privateNameIssues(filePath, line, termRules));
       continue;
     }
     if (isSourceConsoleCall(filePath, line.text)) {
