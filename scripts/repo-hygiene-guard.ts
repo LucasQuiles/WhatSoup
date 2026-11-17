@@ -1053,6 +1053,8 @@ const EXACT_RANGE_PROVENANCE_MODULE_PATH = fileURLToPath(
   new URL('./lib/ci-control/exact-range-provenance.ts', import.meta.url),
 );
 const PRIVATE_TERMS_MODULE_PATH = fileURLToPath(new URL('./lib/private-terms.ts', import.meta.url));
+// The term loader and the boundary module both import isRecord from here.
+const TYPE_GUARDS_MODULE_PATH = fileURLToPath(new URL('../src/lib/type-guards.ts', import.meta.url));
 const REPO_HYGIENE_BOUNDARY_MODULE_PATH = fileURLToPath(
   new URL('./lib/repo-hygiene-boundary.ts', import.meta.url),
 );
@@ -1273,13 +1275,15 @@ function readToolBytes(): Buffer {
 }
 
 // The compared policy digest covers the public policy only: the loader and boundary module
-// bytes and the term codes. Whether a term file was loaded, and its digest, sit in the receipt's
-// own privateTerms field, so a receipt made where a term file exists validates where none does,
-// and the reverse. Regex sources of term rules are never serialized: they hold private names.
+// bytes, the shared type guards both import, and the term codes. Whether a term file was loaded,
+// and its digest, sit in the receipt's own privateTerms field, so a receipt made where a term
+// file exists validates where none does, and the reverse. Regex sources of term rules are never
+// serialized: they hold private names.
 function privateTermsPolicyBinding(): unknown {
   return {
     loaderDigest: sha256Bytes(readFileSync(PRIVATE_TERMS_MODULE_PATH)),
     boundaryDigest: sha256Bytes(readFileSync(REPO_HYGIENE_BOUNDARY_MODULE_PATH)),
+    typeGuardsDigest: sha256Bytes(readFileSync(TYPE_GUARDS_MODULE_PATH)),
     codes: [...PRIVATE_TERM_CODES],
   };
 }
