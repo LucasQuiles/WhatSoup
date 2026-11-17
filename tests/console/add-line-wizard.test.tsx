@@ -815,6 +815,13 @@ describe('AddLineWizard — tool update defaults', () => {
     const { rerender } = render(<AddLineWizard open={true} onClose={vi.fn()} />)
 
     await advanceToConfigStep()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('tab', { name: /limits/i }))
+    })
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Tool update verbosity'), { target: { value: 'full' } })
+    })
+    expect((screen.getByLabelText('Tool update verbosity') as HTMLSelectElement).value).toBe('full')
     rerender(<AddLineWizard open={false} onClose={vi.fn()} />)
     mockCreateLine.mockClear()
     wizardEventSources = []
