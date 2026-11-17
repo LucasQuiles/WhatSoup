@@ -103,6 +103,6 @@ export function parseSignalEnvelope(rawJsonText: string): EnvelopeResult {
 export function extractSignalId(parsed: unknown): string | null {
   if (!isRecord(parsed)) return null;
   const candidate = parsed.signalId;
-  // Must accept exactly the ids the schema accepts (boundedId: min length 1, no trim).
+  // Same emptiness rule as the schema's boundedId (min 1, no trim); its max length is left to full validation.
   return typeof candidate === 'string' && candidate.length > 0 ? candidate : null;
 }
