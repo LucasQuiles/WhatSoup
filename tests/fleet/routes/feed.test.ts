@@ -1464,16 +1464,21 @@ describe('noise suppression via handleGetFeed', () => {
     expect(sessionEvents.every((event) => event.text === 'xi: session start')).toBe(true);
   });
 
-  it('keeps equal-time equal-message non-message events from two instances apart', () => {
+  it('keeps equal-time events with identical text from two instances apart', () => {
+    // Feed text starts with the instance name, so only a name that runs into
+    // the other line's message gives two instances the same text: 'xi' logging
+    // 'yo: session start' and 'xi: yo' logging 'session start' both render
+    // 'xi: yo: session start'. Same time, no component: only the instance in
+    // the dedupe key keeps them apart.
     const otherLogDir = path.join(tmpDir, 'logs-other');
     fs.mkdirSync(otherLogDir, { recursive: true });
-    const line = makeLine({ msg: 'session start', sessionId: 'same' }) + '\n';
-    fs.writeFileSync(logFile, line);
-    fs.writeFileSync(path.join(otherLogDir, 'app.log'), line);
+    const time = 1700000000000;
+    fs.writeFileSync(logFile, makeLine({ msg: 'yo: session start', sessionId: 'same', time }) + '\n');
+    fs.writeFileSync(path.join(otherLogDir, 'app.log'), makeLine({ msg: 'session start', sessionId: 'same', time }) + '\n');
 
     const instances = new Map([
       ['xi', fakeInstance({ name: 'xi', type: 'agent', logDir })],
-      ['yo', fakeInstance({ name: 'yo', type: 'agent', logDir: otherLogDir })],
+      ['xi: yo', fakeInstance({ name: 'xi: yo', type: 'agent', logDir: otherLogDir })],
     ]);
     const deps = makeDeps({
       discovery: { getInstances: vi.fn(() => instances) } as any,
@@ -1484,7 +1489,8 @@ describe('noise suppression via handleGetFeed', () => {
     handleGetFeed(mockReq({ url: '/api/feed?limit=10' }), res, deps);
 
     const sessionEvents = (JSON.parse(res._body) as any[]).filter((event) => event.detail?.type === 'session');
-    expect(sessionEvents.map((event) => event.instance).sort()).toEqual(['xi', 'yo']);
+    expect(sessionEvents.map((event) => event.text)).toEqual(['xi: yo: session start', 'xi: yo: session start']);
+    expect(sessionEvents.map((event) => event.instance).sort()).toEqual(['xi', 'xi: yo']);
   });
 
   it('preserves equal-time distinct events through final sorting', () => {
