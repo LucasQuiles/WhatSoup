@@ -902,7 +902,10 @@ export function handleGetFeed(
     log.warn({ err: errorMessage(err) }, 'feed: outbound collapse failed');
   }
 
-  // 6. Deduplicate identical events (messageId-aware)
+  // 6. Deduplicate identical events (messageId-aware). Non-message events
+  // collapse only as exact duplicates: same exact timestamp, instance,
+  // component and text. Equal text at a different time is a separate
+  // occurrence and is kept (#2525).
   let deduped = collapsed;
   try {
     const seen = new Set<string>();
@@ -911,7 +914,7 @@ export function handleGetFeed(
       const msgId = d?.type === 'message' ? (d as { messageId?: string }).messageId : undefined;
       const key = msgId
         ? `msg:${e.instance}|${msgId}`
-        : `${e.text}|${e.time.slice(0, 16)}`;
+        : `ev:${JSON.stringify([e.time, e.instance ?? null, e.component ?? null, e.text])}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;

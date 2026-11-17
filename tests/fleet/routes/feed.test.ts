@@ -1412,7 +1412,7 @@ describe('noise suppression via handleGetFeed', () => {
     ]);
   });
 
-  it('dedupes repeated non-message events within the same minute', () => {
+  it('dedupes exact duplicate non-message events (same time, instance, and text)', () => {
     const lines = [
       makeLine({ msg: 'session start', sessionId: 'same' }),
       makeLine({ msg: 'session start', sessionId: 'same' }),
@@ -1435,6 +1435,56 @@ describe('noise suppression via handleGetFeed', () => {
       text: 'xi: session start',
       detail: { type: 'session', sessionId: 'same' },
     });
+  });
+
+  // #2525 acceptance 1: equal text in the same minute is not the same occurrence.
+  it('keeps two equal-text non-message events 39 seconds apart in the same minute', () => {
+    const first = 1700000000000; // 22:13:20Z
+    const second = first + 39_000; // 22:13:59Z, same minute
+    const lines = [
+      makeLine({ msg: 'session start', sessionId: 'same', time: first }),
+      makeLine({ msg: 'session start', sessionId: 'same', time: second }),
+    ].join('\n') + '\n';
+    fs.writeFileSync(logFile, lines);
+
+    const inst = fakeInstance({ name: 'xi', type: 'agent', logDir });
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => new Map([['xi', inst]])) } as any,
+      healthPoller: { getStatus: vi.fn(() => undefined) } as any,
+    });
+
+    const res = mockRes();
+    handleGetFeed(mockReq({ url: '/api/feed?limit=10' }), res, deps);
+
+    const sessionEvents = (JSON.parse(res._body) as any[]).filter((event) => event.detail?.type === 'session');
+    expect(sessionEvents.map((event) => event.time)).toEqual([
+      new Date(second).toISOString(),
+      new Date(first).toISOString(),
+    ]);
+    expect(sessionEvents.every((event) => event.text === 'xi: session start')).toBe(true);
+  });
+
+  it('keeps equal-time equal-message non-message events from two instances apart', () => {
+    const otherLogDir = path.join(tmpDir, 'logs-other');
+    fs.mkdirSync(otherLogDir, { recursive: true });
+    const line = makeLine({ msg: 'session start', sessionId: 'same' }) + '\n';
+    fs.writeFileSync(logFile, line);
+    fs.writeFileSync(path.join(otherLogDir, 'app.log'), line);
+
+    const instances = new Map([
+      ['xi', fakeInstance({ name: 'xi', type: 'agent', logDir })],
+      ['yo', fakeInstance({ name: 'yo', type: 'agent', logDir: otherLogDir })],
+    ]);
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+      healthPoller: { getStatus: vi.fn(() => undefined) } as any,
+    });
+
+    const res = mockRes();
+    handleGetFeed(mockReq({ url: '/api/feed?limit=10' }), res, deps);
+
+    const sessionEvents = (JSON.parse(res._body) as any[]).filter((event) => event.detail?.type === 'session');
+    expect(sessionEvents.map((event) => event.instance).sort()).toEqual(['xi', 'yo']);
   });
 
   it('preserves equal-time distinct events through final sorting', () => {
