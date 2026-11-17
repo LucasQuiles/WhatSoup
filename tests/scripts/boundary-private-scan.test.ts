@@ -37,7 +37,7 @@ import {
   type GitHubApi,
 } from '../../scripts/boundary-private-scan.ts';
 import { resolveBoundaryTerms } from '../../scripts/lib/repo-hygiene-boundary.ts';
-import type { CommitAuthor } from '../../scripts/repo-hygiene-guard.ts';
+import { scanAddedLines, type CommitAuthor } from '../../scripts/repo-hygiene-guard.ts';
 import { isolatedGitEnv } from '../helpers/isolated-git-env.ts';
 import { ABSENT_PRIVATE_TERMS_FILE, SYNTHETIC_PRIVATE_TERMS_FILE } from '../helpers/private-terms-env.ts';
 
@@ -48,6 +48,8 @@ const SYNTHETIC_VALUES = ['zorblab', 'zmini', 'qx-bot', 'zqline', 'quorpine', 'c
 const AFTER_EPOCH = '2026-12-01T12:00:00Z';
 const BEFORE_EPOCH = '2026-10-01T12:00:00Z';
 const ZERO = '0'.repeat(40);
+// A fixture path of the hygiene policy: exempt from the generic shapes in every diff mode.
+const FIXTURE_DIR = 'tools/agent-runtime-probes';
 
 function expectNoSyntheticTerm(text: string): void {
   for (const value of SYNTHETIC_VALUES) expect(text.toLowerCase(), value).not.toContain(value);
@@ -175,6 +177,19 @@ describe('boundary (private) candidate scan', () => {
     }));
     expect(result.counts['added-lines']).toEqual({ 'private-host-label': 1 });
     expect(result.scanned.commits).toBe(3);
+  });
+
+  it('applies private names under fixture paths, which stay exempt from the generic shapes only', () => {
+    const token = ['ghp', 'SyntheticToken1234567890'].join('_');
+    const result = scan(makeCandidate((write, git) => {
+      write(`${FIXTURE_DIR}/corpus.txt`, `runs on zorblab\nexample ${token}\n`);
+      write('docs/token.txt', `example ${token}\n`);
+      commitAll(git);
+    }));
+    expect(result.counts['added-lines']).toEqual({ 'github-token': 1, 'private-host-label': 1 });
+    // The local diff modes keep their fixture exemption.
+    const fixtureLine = { filePath: `${FIXTURE_DIR}/corpus.txt`, line: 1, text: 'runs on zorblab' };
+    expect(scanAddedLines([fixtureLine], termRules)).toEqual([]);
   });
 
   it('counts a term in a commit message and in an author identity', () => {
