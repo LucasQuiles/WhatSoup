@@ -55,7 +55,10 @@ import { createChildLogger } from '../../../src/logger.ts';
 // readonly type) instead of the env var.
 import { config as runtimeConfig } from '../../../src/config.ts';
 
-const mutableRuntimeConfig = runtimeConfig as unknown as { oneMessageHandoff: boolean };
+const mutableRuntimeConfig = runtimeConfig as unknown as {
+  oneMessageHandoff: boolean;
+  toolUpdateMode: typeof runtimeConfig.toolUpdateMode;
+};
 const runtimeLogger = createChildLogger('test');
 
 function queuedTurn(runtimeContext: RuntimeTurnContext): QueuedTurn {
@@ -1604,11 +1607,13 @@ describe('runtime terminal coordinator integration', () => {
     }
   });
 
-  it('marks replay unsafe as soon as partial assistant output is accepted', () => {
+  it.each(['minimal', 'full'] as const)('marks replay unsafe when partial output is accepted in %s mode', (toolUpdateMode) => {
+    const priorToolUpdateMode = mutableRuntimeConfig.toolUpdateMode;
     const db = new Database(':memory:');
     db.open();
     try {
-      const { runtime, state } = makeRuntimeState(db, {
+      mutableRuntimeConfig.toolUpdateMode = toolUpdateMode;
+      const { state } = makeRuntimeState(db, {
         sessionScope: 'per_chat',
       });
       const mapKey = '15550190003';
@@ -1627,10 +1632,21 @@ describe('runtime terminal coordinator integration', () => {
         `${mapKey}#session`,
       );
 
-      expect(queue.enqueueStreamingText).toHaveBeenCalledWith('partial answer', 'answer');
+      expect(queue.enqueueStreamingText).toHaveBeenCalledTimes(1);
+      if (toolUpdateMode === 'minimal') {
+        expect(queue.enqueueStreamingText).toHaveBeenCalledWith('partial answer', 'answer', expect.any(Function));
+        expect(state.perChatRuntimeTurnContexts.get(mapKey)?.[0]).toBe(runtimeContext);
+        expect(runtimeContext.replay.replaySafe).toBe(true);
+        const onCommit = vi.mocked(queue.enqueueStreamingText).mock.calls[0]?.[2];
+        expect(onCommit).toBeTypeOf('function');
+        onCommit?.();
+      } else {
+        expect(queue.enqueueStreamingText).toHaveBeenCalledWith('partial answer', 'answer');
+      }
       expect(state.perChatRuntimeTurnContexts.get(mapKey)?.[0]?.replay.replaySafe).toBe(false);
       expect(runtimeContext.replay.replaySafe).toBe(true);
     } finally {
+      mutableRuntimeConfig.toolUpdateMode = priorToolUpdateMode;
       db.close();
     }
   });
