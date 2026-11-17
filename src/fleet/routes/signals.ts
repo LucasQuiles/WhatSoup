@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extractBearer, jsonResponse, readBody, readBodyBytes } from '../../lib/http.ts';
+import { isNonEmptyString } from '../../lib/type-guards.ts';
 import { parseSignalEnvelopeValue } from '../incidents/envelope.ts';
 import { IncidentStoreCorruptError } from '../incidents/db.ts';
 import type { IncidentStore } from '../incidents/store.ts';
@@ -273,7 +274,7 @@ export function createSignalsHandlers(deps: SignalsDeps): {
 
     const at = now();
     const secret = (body as { enrollmentSecret?: unknown }).enrollmentSecret;
-    if (typeof secret === 'string' && secret.length > 0) {
+    if (isNonEmptyString(secret)) {
       const exchanged = producerStore.exchangeEnrollmentSecret(params.id, secret, at);
       if (!exchanged.ok) {
         deps.securityAudit({
