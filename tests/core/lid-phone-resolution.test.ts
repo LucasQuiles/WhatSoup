@@ -343,6 +343,25 @@ describe('resolveLid — L1.5 disk fallback', () => {
     db.close();
   });
 
+  it('skips a reverse file holding a whitespace-only phone and stores no mapping', () => {
+    // A whitespace-only phone is not a phone number. Storing it would also block
+    // a valid reverse file written later, because the DB row would then win.
+    const db = createTestDb();
+    const lid = '77778';
+    const reverseFile = path.join(tmpDir, `lid-mapping-${lid}_reverse.json`);
+    try {
+      fs.writeFileSync(reverseFile, JSON.stringify('   '));
+      expect(resolveLid(db, lid)).toBeNull();
+      const stored = db.raw.prepare('SELECT COUNT(*) AS n FROM lid_mappings WHERE lid = ?').get(lid) as { n: number };
+      expect(stored.n).toBe(0);
+
+      fs.writeFileSync(reverseFile, JSON.stringify('15555550102'));
+      expect(resolveLid(db, lid)).toBe('15555550102');
+    } finally {
+      db.close();
+    }
+  });
+
   it('back-fills the DB so subsequent lookups hit the fast path', () => {
     const db = createTestDb();
     const lid = '77777';

@@ -180,6 +180,24 @@ describe('SignalCliPort — RPC contract', () => {
     ]);
   });
 
+  it('drops envelopes whose source or sync destination is whitespace-only', async () => {
+    const rpc = new ScriptedConnection(() => [
+      { envelope: { sourceNumber: '   ', timestamp: 5, dataMessage: { message: 'drop' } } },
+      {
+        envelope: {
+          timestamp: 6,
+          syncMessage: { sentMessage: { timestamp: 6, destinationNumber: '   ', message: 'drop' } },
+        },
+      },
+      { envelope: { sourceUuid: 'valid-source', timestamp: 7, dataMessage: { message: 'keep' } } },
+    ]);
+    const port = new SignalCliPort(config(), () => rpc);
+
+    await expect(port.listInboundSince(new Date(0))).resolves.toEqual([
+      expect.objectContaining({ timestamp: 7, source: 'valid-source', body: 'keep' }),
+    ]);
+  });
+
   it('uses a provider E.164 identity when exposed and otherwise falls back to UUID', async () => {
     const uuid = '01234567-89ab-cdef-0123-456789abcdef';
     const rpc = new ScriptedConnection(() => [
