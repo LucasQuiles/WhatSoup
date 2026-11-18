@@ -391,7 +391,7 @@ describe('durable recovery evidence ordering', () => {
     expect(engine.getHealthStats().openRecoveries).toBe(1);
   });
 
-  function seedIncident(): { terminalRecordId: number; recoveryJobId: number } {
+  function seedIncident(): { terminalRecordId: number; recoveryJobId: number; owner: RecoveryOwnerIdentity } {
     db.raw.prepare(`
       INSERT INTO inbound_events (
         seq, message_id, conversation_key, chat_jid, routed_to, processing_status
@@ -457,6 +457,7 @@ describe('durable recovery evidence ordering', () => {
     return {
       terminalRecordId: receipt.recordId,
       recoveryJobId: receipt.recoveryJob!.jobId,
+      owner,
     };
   }
 
@@ -553,16 +554,28 @@ describe('durable recovery evidence ordering', () => {
     expect(evidence.hasDeliveryCorroboration(selectedOpId)).toBe(false);
   });
 
-  it('does not use a bound catch-up as corroboration for the original uncertain delivery', () => {
-    const { terminalRecordId, recoveryJobId } = seedIncident();
+  it.each(['blocked_unsafe', 'exhausted'] as const)(
+    'does not use a bound catch-up as corroboration with an original %s recovery job', (state) => {
+    const { terminalRecordId, recoveryJobId, owner } = seedIncident();
     const payload = JSON.stringify({ text: 'Operator follow-up', operatorCatchup: {
       planId: 'pending-plan', sourceSeq: INCIDENT_INBOUND_SEQ,
       actor: 'operator:test', evidenceRef: 'test://approved-followup',
     } });
     db.raw.prepare('UPDATE outbound_ops SET payload = ? WHERE id > ?').run(payload, INCIDENT_SELECTED_OP_ID);
-    // Match the incident's unsafe quarantine and consumed recovery attempts.
-    db.raw.prepare("UPDATE outbound_ops SET status = 'quarantined' WHERE id = ?").run(INCIDENT_SELECTED_OP_ID);
-    db.raw.prepare("UPDATE turn_recovery_jobs SET state = 'exhausted', attempt_count = 5, claim_epoch = 5 WHERE id = ?").run(recoveryJobId);
+    expect(engine.markQuarantined(INCIDENT_SELECTED_OP_ID)).toBe(true);
+    if (state === 'exhausted') {
+      // Exhaustion requires a replay-safety proof and five fenced attempts.
+      engine.promoteBlockedTurnRecoveryJob(recoveryJobId, owner,
+        { claimEpoch: 0, assignmentEpoch: 0 }, { idempotencyProofId: 'test:replay-safety-proof' });
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        const claim = engine.claimTurnRecoveryJob(recoveryJobId, owner,
+          { claimToken: `test-claim-${attempt}`, leaseSeconds: 60 });
+        engine.requeueTurnRecoveryJob(recoveryJobId, owner, claim, 0);
+      }
+    }
+    expect(engine.getTurnRecoveryJob(recoveryJobId)).toMatchObject({
+      state, attempt_count: state === 'exhausted' ? 5 : 0,
+    });
     const original = rowJson(db, 'outbound_ops', 'id', INCIDENT_SELECTED_OP_ID);
     const job = rowJson(db, 'turn_recovery_jobs', 'id', recoveryJobId);
     engine.postConnectRecovery();
