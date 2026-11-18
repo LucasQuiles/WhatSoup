@@ -57,8 +57,8 @@ const DEFAULT_MAX_AGE_MS = 5 * MS_PER_MINUTE;
 export const OWED_REPLY_FLUSH_GRACE_MS = 10 * MS_PER_SECOND;
 
 /**
- * #3829: outcome of the owed-reply flush before a restart. `delivered` means the
- * flush settled inside OWED_REPLY_FLUSH_GRACE_MS and every send in it reached
+ * #3829: outcome of the owed-reply flushes before a restart. `delivered` means
+ * they settled inside OWED_REPLY_FLUSH_GRACE_MS and every send in them reached
  * provider submission. Any other outcome must stop the restart.
  */
 export type OwedReplyDelivery =
@@ -226,47 +226,66 @@ export function consumeIntentionalRestartMarker(
 
 /**
  * #3829: deliver the text the running turn owes before its process is replaced.
- * Text the model wrote before calling restart_self is still in the queue — in
- * minimal mode it is deferred at the tool boundary — and the turn abort in the
- * restart's graceful shutdown destroys it. Commit the live stream buffer as a
- * normal send, let the #3398 salvage path send the deferred text of a turn that
- * has shown nothing yet, and wait up to OWED_REPLY_FLUSH_GRACE_MS for the sends.
+ * Text the model wrote before calling restart_self is still in the queue: every
+ * runtime turn begins turn evidence, so the queue holds the turn's streamed
+ * answer until the turn ends, and minimal mode moves pre-tool text into the
+ * deferred pen at the tool boundary. The turn abort in the restart's graceful
+ * shutdown would destroy both.
+ *
+ * Step 1 commits the live stream buffer, the held answer included, as normal
+ * messages (the answer keeps its `answer` role, so it is the turn's answer) and
+ * waits for those sends. Only when they are confirmed does step 2 abort the turn,
+ * so that the #3398 salvage path sends the pen of a turn that has shown nothing,
+ * and wait for that send. Both steps share one OWED_REPLY_FLUSH_GRACE_MS window.
  *
  * A send that stops with a failure disposition, or that the echo guard drops,
  * returns without throwing, so a resolved flush alone does not prove delivery;
- * the queue's send-failure count is compared across the flush. The result is
- * `delivered: false` when the flush is still pending at the grace limit,
- * rejects, or any send in it failed or was dropped. The
- * caller must then not restart. Pending sends stay in the queue and finish on
- * their own; nothing is re-enqueued, so the reply is never sent twice.
+ * the queue's send-failure count is compared across the flushes. The result is
+ * `delivered: false` when a flush is still pending at the grace limit, rejects,
+ * or any send in it failed or was dropped. The caller must then not restart. A
+ * refusal in step 1 leaves the turn un-aborted, so the turn continues as it was.
+ * Pending sends stay in the queue and finish on their own; nothing is
+ * re-enqueued, so the reply is never sent twice.
  */
 export async function deliverOwedReplyBeforeRestart(queue: IOutboundQueue | null): Promise<OwedReplyDelivery> {
   if (!queue) return { delivered: true };
   let graceTimer: NodeJS.Timeout | undefined;
   try {
     const failuresBefore = queue.getSendFailureCount();
-    queue.commitStreamingText();
-    queue.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
     const grace = new Promise<'timeout'>((resolve) => {
       graceTimer = setTimeout(() => resolve('timeout'), OWED_REPLY_FLUSH_GRACE_MS);
       graceTimer.unref?.();
     });
-    if (await Promise.race([queue.flush(), grace]) === 'timeout') {
-      log.warn({ chatJid: queue.targetChatJid }, 'owed reply still sending at the self-restart grace limit; restart not started');
-      return { delivered: false, cause: 'timeout' };
-    }
-    const failedSends = queue.getSendFailureCount() - failuresBefore;
-    if (failedSends > 0) {
-      log.warn({ chatJid: queue.targetChatJid, failedSends }, 'owed reply send stopped without provider submission; restart not started');
-      return { delivered: false, cause: 'send_failed' };
-    }
-    return { delivered: true };
+    queue.commitStreamingText(true);
+    const answer = await settleOwedSends(queue, grace, failuresBefore, 'answer');
+    if (!answer.delivered) return answer;
+    queue.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
+    return await settleOwedSends(queue, grace, failuresBefore, 'salvage');
   } catch (err) {
     log.warn({ chatJid: queue.targetChatJid, err }, 'owed reply flush rejected; restart not started');
     return { delivered: false, cause: 'flush_rejected' };
   } finally {
     if (graceTimer) clearTimeout(graceTimer);
   }
+}
+
+/** Wait for the queue's sends within the shared grace window; a failure counted since `failuresBefore` refuses. */
+async function settleOwedSends(
+  queue: IOutboundQueue,
+  grace: Promise<'timeout'>,
+  failuresBefore: number,
+  step: 'answer' | 'salvage',
+): Promise<OwedReplyDelivery> {
+  if (await Promise.race([queue.flush(), grace]) === 'timeout') {
+    log.warn({ chatJid: queue.targetChatJid, step }, 'owed reply still sending at the self-restart grace limit; restart not started');
+    return { delivered: false, cause: 'timeout' };
+  }
+  const failedSends = queue.getSendFailureCount() - failuresBefore;
+  if (failedSends > 0) {
+    log.warn({ chatJid: queue.targetChatJid, step, failedSends }, 'owed reply send stopped without provider submission; restart not started');
+    return { delivered: false, cause: 'send_failed' };
+  }
+  return { delivered: true };
 }
 
 // ---------------------------------------------------------------------------

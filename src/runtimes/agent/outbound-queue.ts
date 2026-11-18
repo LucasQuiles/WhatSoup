@@ -269,8 +269,8 @@ export interface IOutboundQueue {
   enqueueText(text: string, role: OutboundMessageRole): void;
   /** Enqueue streaming text delta — aggregated with debounce to prevent per-token message spam from streaming providers. */
   enqueueStreamingText(text: string, role: OutboundMessageRole, onCommit?: () => void): void;
-  /** Commit buffered streaming text at the outbound-queue delivery boundary. */
-  commitStreamingText(): void;
+  /** Commit buffered streaming text; `true` also commits the answer an active turn defers to its end. */
+  commitStreamingText(includeDeferredAnswers?: boolean): void;
   /** Drop provisional assistant narration when a real tool call follows it in minimal mode. */
   discardPreToolAssistantText(): void;
   /** Enqueue result/summary text. In minimal mode, suppressed if the turn already sent visible output. */
@@ -896,8 +896,8 @@ export class OutboundQueue implements IOutboundQueue {
     flushGroup();
   }
 
-  commitStreamingText(): void {
-    this.flushStreamBuffer();
+  commitStreamingText(includeDeferredAnswers?: boolean): void {
+    this.flushStreamBuffer(includeDeferredAnswers);
   }
 
   discardPreToolAssistantText(): void {
