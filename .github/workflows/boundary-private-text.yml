@@ -10,7 +10,7 @@ name: Private boundary text
 #   the pull request's merge commit, with that commit's copy of this file, and without secrets
 #   for a fork. The hourly run lists every review and review comment instead, together with
 #   every issue, pull request and comment changed since the last successful hourly run.
-# - A finding fails the run and prints the item kind and number with counts by rule code. The
+# - A finding fails the run and prints the item kind, number and id with counts by rule code. The
 #   run never edits, hides, labels or comments on anything.
 
 on:
