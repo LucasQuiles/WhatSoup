@@ -574,11 +574,8 @@ must have one exact index-and-path binding: `review-file` must name a hashed
 source input, and `runtime-data` explicitly declares a generated data path.
 Runtime data is checked against selected roots and launchers by its lexical
 path and nearest existing realpath ancestor; it cannot reuse a reviewed source
-path. Every loaded interpreter needs at least one reviewed source input. The
-only accepted ordinary script forms are `python` (optionally `-I`) followed by
-an absolute script, `node`/`nodejs` followed by an absolute script, and
-`bash`/`sh`/`zsh` followed by an absolute script; that script has to use a
-`review-file` binding. Shell `-c` and `-lc` forms remain opaque commands pinned
+path. Every loaded interpreter needs at least one reviewed source input.
+Shell `-c` and `-lc` forms remain opaque commands pinned
 by the reviewed plist and still need a reviewed source input. The sole module
 form is exact Python `[python, -m, dotted.package.module]`, with no other
 argument. Its normalized absolute installed `WorkingDirectory` must be an
@@ -780,10 +777,7 @@ text, so a job whose plist hides a release path in a binary or encoded form
 is not detected and keeps running what it ran before; writing such a plist
 needs the same user's access.
 
-A standard `~/.local/bin/whatsoup`
-link that has no launchd consumer still joins the transaction when it already
-resolves exactly to a declared old release; a link to any other root remains
-outside the transaction. A missing link is also outside the transaction, but
+A missing link is also outside the transaction, but
 an unreadable path or a non-symlink is a preflight refusal rather than evidence
 that no launcher exists. A declaration with `outsideUnits` cannot use the
 missing-link case today: the review `links` must still list the standard link,

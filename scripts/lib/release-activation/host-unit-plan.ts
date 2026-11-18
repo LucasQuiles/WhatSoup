@@ -283,8 +283,7 @@ function stagePathRebase(installed: string, expectCurrent: string, release: stri
 }
 /**
  * A selector parser rejecting an unrelated app is not itself evidence that it
- * consumes a unit release. Admit only an absolute non-shell executable whose
- * argv contains neither a selected root nor a selected shared launcher.
+ * consumes a unit release.
  */
 function provenOutsideUnit(installed: ReturnType<typeof parsePlist>, installedText: string | null, roots: readonly string[], links: readonly string[]): boolean {
   const argv = installed?.programArguments ?? [];
