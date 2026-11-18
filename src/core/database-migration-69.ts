@@ -38,7 +38,7 @@ const OBJECTS: ReadonlyArray<[string, string]> = [
   ['operator_catchup_resolution_fulfillment_required', `CREATE TRIGGER operator_catchup_resolution_fulfillment_required
     BEFORE INSERT ON inbound_disposition_links
     WHEN NEW.disposition = 'superseded_by_operator_catchup'
-      AND NEW.original_fulfillment_confirmed <> 1
+      AND NEW.original_fulfillment_confirmed IS NOT 1
     BEGIN SELECT RAISE(ABORT, 'Original request fulfillment must be confirmed'); END`],
   ['operator_catchup_resolution_no_corroboration', `CREATE TRIGGER operator_catchup_resolution_no_corroboration
     BEFORE INSERT ON turn_delivery_corroboration

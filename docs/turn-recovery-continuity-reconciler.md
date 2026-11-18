@@ -14,7 +14,8 @@ and chat. This is a delivery candidate, not evidence that an earlier request was
 `reconcileOperatorCatchupRecoveries` closes a candidate only when its caller also supplies
 `confirmedFulfillments`: an exact plan, conversation, source sequence set, target sequence and
 reference to independent original-fulfillment evidence. A routine periodic pass supplies none;
-it reports `closure_rejected` and leaves the original request pending. The bulk closure CLI
+it reports `closure_rejected` and leaves the original request pending without acquiring a writer
+reservation or running schema integrity checks. The bulk closure CLI
 also leaves these groups pending; use the per-request operator command with reviewed evidence.
 
 A new authenticated operator send can instead bind directly to the original request and plan.
@@ -47,15 +48,16 @@ reason and moves on. Groups without both delivery proof and original-fulfillment
 Groups whose source inbounds span multiple `chat_jid`s cannot be covered by a
 single catch-up (the trigger requires `target.chat_jid = source.chat_jid` for
 every source). Selection uses the earliest source's chat, so such a group is
-still attempted whenever that chat has a candidate and then fails closed as
+attempted only when that chat has a candidate and matching fulfillment confirmation, then fails closed as
 `closure_rejected`; with no candidate there it is reported as
 `no_catchup_candidate`. Either way it remains pending.
 
 ### Bounding a pass
 
-`groupLimit` (default `RECONCILE_DEFAULT_GROUP_LIMIT = 50`) caps closure
-*attempts*, not groups looked at: a group with no candidate is skipped without
-charging it. A second budget keeps the pass bounded — at most
+`groupLimit` (default `RECONCILE_DEFAULT_GROUP_LIMIT = 50`) caps selected delivery
+candidates, not groups looked at: a group with no candidate is skipped without
+charging it. Only candidates with matching fulfillment confirmation count as
+`attempted` in the reconciliation report. A second budget keeps the pass bounded — at most
 `groupLimit × RECONCILE_EXAMINATION_MULTIPLIER` (20) groups are examined per
 pass. Groups are enumerated in a stable `recovery_plan_id` order, so the budgets
 raise the starvation threshold rather than removing it. Two classes of
@@ -64,12 +66,12 @@ unattemptable group sort ahead of a closable one, with different thresholds:
 | Prefix class | Groups that hide the next one | Budget charged |
 | --- | --- | --- |
 | No catch-up candidate | `groupLimit × 20` (1000 by default) | examination |
-| Candidate the closure always rejects | `groupLimit` (50 by default) | attempt |
+| Candidate without confirmation or with rejected proof | `groupLimit` (50 by default) | candidate |
 
 The examination cap is tested before the counter is charged, so a prefix of
 *exactly* `groupLimit × 20` candidate-less groups already hides the next group.
-A group whose candidate is permanently rejected charges the attempt budget
-before the closure is tried, so it starves a closable group twenty times sooner
+A group with a delivery candidate charges the candidate budget
+before fulfillment confirmation or closure is checked, so it starves a closable group twenty times sooner
 than the candidate-less class. Neither case is reported: the report carries no
 truncation signal for a pass that stopped on either budget. Both are properties
 of the selection order, unchanged by this PR. The budgets bound the per-group
@@ -238,10 +240,11 @@ counts and the recovery-evidence ledger) reports them apart:
 count user-facing links only, and `turnRecoveryOpenRecoveriesSynthetic`
 counts the synthetic residue. Synthetic residue no longer raises
 `historical_turn_catchup`. Pre-fix residue inside the 7-day window appears in
-both synthetic counts, so the two must not be summed. The automatic
-reconciler can still close a synthetic group when its chat has a later
-delivered reply (the issue proposed excluding them; keeping them closable
-costs nothing and lets real proof retire residue).
+both synthetic counts, so the two must not be summed. Synthetic groups follow
+the same fulfillment contract as user-facing groups. A later delivered reply
+is only a candidate; closure requires matching, explicit original-fulfillment
+confirmation. Periodic scans supply no confirmation and leave synthetic groups
+pending without taking a writer reservation.
 
 ## Follow-ups (separate PRs)
 

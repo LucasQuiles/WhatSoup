@@ -1400,7 +1400,10 @@ export class DurabilityEngine {
          WHERE status = 'submitted' AND submitted_at < datetime('now', '-30 seconds')`,
       ),
       getMessageByWaMessageId: prepare(
-        `SELECT pk, is_from_me FROM messages WHERE message_id = ?`,
+        `SELECT m.pk, m.is_from_me FROM messages m
+         JOIN outbound_ops o ON o.chat_jid = m.chat_jid
+           AND o.conversation_key = m.conversation_key
+         WHERE m.message_id = ? AND o.id = ?`,
       ),
       resetMaybeSentWithWaToPending: prepare(
         `UPDATE outbound_ops
@@ -3358,7 +3361,7 @@ export class DurabilityEngine {
         }
 
         if (op.wa_message_id) {
-          const found = this.statements.getMessageByWaMessageId.get(op.wa_message_id) as
+          const found = this.statements.getMessageByWaMessageId.get(op.wa_message_id, op.id) as
             | { pk: number; is_from_me: number }
             | undefined;
 

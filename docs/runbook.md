@@ -2441,7 +2441,7 @@ the protected-delivery tables; migration 68 adds only the protected secret-input
 migration is recorded, a binary whose ceiling is below it refuses the database and will not write: a
 schema-65 binary refuses a schema-66 database, a schema-66 binary refuses a schema-67 database, and a
 schema-67 binary refuses a schema-68 database, all as `future_schema`. **Binary-only rollback is
-unavailable** for any of them. Migration 69 adds operator catch-up resolution evidence; a schema-68 binary likewise refuses schema 69. Keep the 69-aware release for containment or forward repair. Restoring a pre-migration
+unavailable** for any of them. Migration 69 adds operator catch-up resolution evidence; a schema-68 runtime likewise refuses schema 69. Raw closure tools use their own schema and proof checks and can open supported schema-69 files. Keep the 69-aware runtime for containment or forward repair. Restoring a pre-migration
 backup is an owner decision that requires a proven zero-new-writes window. **Never overwrite a newer
 database with an older backup**: messages received after the upgrade would be lost.
 
@@ -2493,7 +2493,8 @@ until separate evidence and an authorized repair establish it; never resend mere
 This command records that a newer, independently delivered operator catch-up supersedes an exact set
 of pending source inbounds. It never sends or replays a message. The database must already exist
 and its migration ledger must be contiguous from 1 through the current migration, with at least 43
-entries; any later schema, including 66, is accepted. The command neither creates a database nor runs
+entries; supported schemas 43 through 69 are accepted, and schemas above 69 are rejected.
+The command neither creates a database nor runs
 migrations. It closes only sources that were admitted as `inbound_events` with pending disposition
 links; a continuity gap whose source was never admitted cannot use it. Use `close-continuity-gap` for
 those gaps.

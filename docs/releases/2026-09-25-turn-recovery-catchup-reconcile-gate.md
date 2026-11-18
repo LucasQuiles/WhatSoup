@@ -13,6 +13,11 @@
 
 ## Behavioral changes
 
+Historical behavior below is superseded by the
+[current fulfillment contract](../turn-recovery-continuity-reconciler.md#selection-and-fulfillment).
+A delivered catch-up alone cannot close an original request. Current periodic
+scans supply no fulfillment confirmation and leave those groups pending.
+
 - None by default. Without the block, or with `enabled: false`, the supervisor
   behaves exactly as before. The value is read once at startup, so enabling or
   disabling it takes an instance restart.
