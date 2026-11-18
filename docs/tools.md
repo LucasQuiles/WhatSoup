@@ -26,7 +26,8 @@ Complete reference for all 178 MCP tools exposed by WhatSoup. Tools are grouped 
 > credential resolver used by `knowledge_search`.
 >
 > **`restart_self`** is registered when the runtime is neither sandboxed nor in
-> `sandboxPerChat` mode and a `restartSelf` capability is supplied. Control-plane
+> `sandboxPerChat` mode, its `sessionScope` is not `per_chat`, and a `restartSelf`
+> capability is supplied. Control-plane
 > peers are not required for this tool. Calls also require an authenticated admin.
 >
 > **Protected-delivery tools** are registered only for an agent runtime with an
@@ -3923,8 +3924,10 @@ Signal completion of a repair cycle. Only callable during an active repair sessi
 
 Requests a graceful restart of this instance through its injected service manager.
 Invoke only for an explicit trusted operator request. `registerRuntimeInlineTools`
-registers the tool only when `sandbox` and `sandboxPerChat` are both disabled and
-the runtime supplies `restartSelf`. The declaration and input schema live in
+registers the tool only when `sandbox` and `sandboxPerChat` are both disabled, the
+runtime's `sessionScope` is not `per_chat`, and the runtime supplies `restartSelf`.
+A per-chat runtime keeps one outbound queue per chat, and the restart flushes only
+the global turn's queue, so a restart there would discard owed text. The declaration and input schema live in
 [`self-restart.ts`](../src/runtimes/agent/self-restart.ts).
 
 | | |

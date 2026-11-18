@@ -4887,6 +4887,26 @@ describe('AgentRuntime', () => {
     expect(mockQueue.endTurn).toHaveBeenCalledOnce();
   });
 
+  it('registers restart_self for a single-scope runtime but not for a per_chat runtime', async () => {
+    const registeredNames = (runtime: AgentRuntime): string[] =>
+      (runtime as unknown as { registry: { register: ReturnType<typeof vi.fn> } })
+        .registry.register.mock.calls.map(([tool]) => (tool as RegisteredTool).name);
+    const serviceRestarter = { restartSelf: vi.fn(async (_name: string) => {}) };
+    // per_chat first: if the mocked registry is shared, the single-scope
+    // registration below must not mask a per_chat registration.
+    const perChat = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', {
+      sessionScope: 'per_chat',
+      serviceRestarter,
+    });
+    await perChat.start();
+    expect(registeredNames(perChat)).not.toContain('restart_self');
+
+    const single = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { serviceRestarter });
+    await single.start();
+    expect(registeredNames(single)).toContain('restart_self');
+    expect(serviceRestarter.restartSelf).not.toHaveBeenCalled();
+  });
+
   it('emit_heal_result rejects when no repair session is active', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();

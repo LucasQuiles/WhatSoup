@@ -4531,6 +4531,7 @@ export class AgentRuntime implements Runtime {
       // original guards; coerce to the boolean the guard actually consumed.
       sandbox: !!this.sandbox,
       sandboxPerChat: this.sandboxPerChat,
+      perChat: this.sessionScope === 'per_chat',
       emitHealResult: {
         getActiveControlReportId: () => this.activeControlReportId,
         isControlReportCompleted: (reportId) => this.controlProtocolCompletedReportId === reportId,
