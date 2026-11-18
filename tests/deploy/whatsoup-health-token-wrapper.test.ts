@@ -349,7 +349,7 @@ function runHealthTokenCheckerProbe(platform: 'Darwin' | 'Linux' = 'Darwin'): {
   } else {
     writeExecutable(
       path.join(binDir, 'secret-tool'),
-      `#!/usr/bin/env bash\nprintf 'secret-tool %s\\n' "$*" >> ${JSON.stringify(logPath)}\nexec sleep 30\n`,
+      `#!/usr/bin/env bash\nprintf 'secret-tool %s\\n' "$*" >> ${JSON.stringify(logPath)}\ntrap '' TERM\nexec sleep 30\n`,
     );
   }
   // read-private-health-token.sh reads the directory metadata with `stat -f` on
@@ -672,8 +672,10 @@ describe('health token shell wrappers', () => {
     expect(result.status).toBe(1);
     expect(result.stdout).toContain('scoped keyring mirror is missing');
     expect(result.stderr).toBe('');
-    // The Linux branch reaches secret-tool through whatsoup_run_bounded, not the
-    // pinned-Node helper and not a bare `timeout`.
+    // The stub ignores TERM, so only a KILL ends it: whatsoup_run_bounded sends one
+    // after its 3 s budget and 2 s grace, inside the 15 s harness cap. A bare
+    // `timeout 3s` (no -k) would wait out the 30 s sleep and trip that cap. The
+    // log shows the one lookup reached secret-tool, not the pinned-Node helper.
     expect(result.log.trim()).toBe(
       'secret-tool lookup service whatsoup-health-token user fixture-checker',
     );
