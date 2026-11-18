@@ -27,7 +27,12 @@ const osMocks = vi.hoisted(() => ({
   homedir: vi.fn(),
 }));
 
+const flagsMocks = vi.hoisted(() => ({
+  readFileFlags: vi.fn(),
+}));
+
 vi.mock('node:child_process', () => childProcessMocks);
+vi.mock('../../src/fleet/launchd-plist-flags.ts', () => flagsMocks);
 vi.mock('node:fs', async (importOriginal) => ({
   ...(await importOriginal<typeof import('node:fs')>()),
   existsSync: fsMocks.existsSync,
@@ -144,10 +149,11 @@ describe('release-pinned launchd plists (#3829)', () => {
     SERVICE_HOME = realFs.realpathSync.native(realFs.mkdtempSync(realPath.join(realOs.tmpdir(), 'whatsoup-home-')));
     OUTSIDE_ROOT = realFs.realpathSync.native(realFs.mkdtempSync(realPath.join(realOs.tmpdir(), 'whatsoup-outside-')));
 
-    for (const mock of [...Object.values(childProcessMocks), ...Object.values(fsMocks), osMocks.homedir]) {
+    for (const mock of [...Object.values(childProcessMocks), ...Object.values(fsMocks), osMocks.homedir, flagsMocks.readFileFlags]) {
       mock.mockReset();
     }
     osMocks.homedir.mockReturnValue(SERVICE_HOME);
+    flagsMocks.readFileFlags.mockReturnValue(0);
     fsMocks.readFileSync.mockImplementation(absentFile);
     // existsSync is not part of the release check; a permissive mock proves the
     // guard does not lean on it.
@@ -266,5 +272,67 @@ describe('release-pinned launchd plists (#3829)', () => {
     expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
     expect(fsMocks.renameSync).not.toHaveBeenCalled();
     expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  const plistPath = (): string => `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
+
+  // A root-owned uchg release plist is a documented protected configuration
+  // (docs/runbooks/release-deployment.md). unlink(2) fails while one of these is set.
+  const protectedFlags: Array<[string, number]> = [
+    ['uchg', 0x2],
+    ['uappnd', 0x4],
+    ['schg', 0x20000],
+    ['sappnd', 0x40000],
+  ];
+
+  for (const [flag, value] of protectedFlags) {
+    it(`refuses to disable a release-pinned plist with ${flag} before any launchctl call, and still stops it`, async () => {
+      fsMocks.readFileSync.mockReturnValue(pinnedPlist(await makeRelease(releases())));
+      flagsMocks.readFileFlags.mockReturnValue(value);
+      const { createServiceManager } = await importPlatform();
+      const manager = createServiceManager();
+
+      expect(() => manager.assertCanDisable?.('agent')).toThrow('cannot be removed');
+      await expect(manager.disable('agent')).rejects.toThrow('cannot be removed');
+      expect(flagsMocks.readFileFlags).toHaveBeenCalledWith(plistPath());
+      expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+      expect(fsMocks.unlinkSync).not.toHaveBeenCalled();
+
+      // Stopping a protected job stays allowed; only its removal is refused.
+      await expect(manager.stop('agent')).resolves.toBeUndefined();
+      expect(launchctlSubcommands()).toEqual(['bootout']);
+    });
+  }
+
+  it('refuses to disable when the plist file flags cannot be read', async () => {
+    fsMocks.readFileSync.mockReturnValue(pinnedPlist(await makeRelease(releases())));
+    flagsMocks.readFileFlags.mockImplementation(() => { throw new Error('stat timed out'); });
+    const { createServiceManager } = await importPlatform();
+    const manager = createServiceManager();
+
+    expect(() => manager.assertCanDisable?.('agent')).toThrow('cannot read the file flags');
+    await expect(manager.disable('agent')).rejects.toThrow('cannot read the file flags');
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+    expect(fsMocks.unlinkSync).not.toHaveBeenCalled();
+  });
+
+  it('disables a release-pinned plist whose flags do not block removal: bootout, then unlink', async () => {
+    fsMocks.readFileSync.mockReturnValue(pinnedPlist(await makeRelease(releases())));
+    // UF_NODUMP (0x1) and UF_HIDDEN (0x8000) do not stop unlink(2).
+    flagsMocks.readFileFlags.mockReturnValue(0x1 | 0x8000);
+    const { createServiceManager } = await importPlatform();
+    const manager = createServiceManager();
+
+    expect(() => manager.assertCanDisable?.('agent')).not.toThrow();
+    await expect(manager.disable('agent')).resolves.toBeUndefined();
+    expect(launchctlSubcommands()).toEqual(['bootout']);
+    expect(fsMocks.unlinkSync).toHaveBeenCalledWith(plistPath());
+  });
+
+  it('reads no file flags when no plist is installed', async () => {
+    const { createServiceManager } = await importPlatform();
+
+    expect(() => createServiceManager().assertCanDisable?.('agent')).not.toThrow();
+    expect(flagsMocks.readFileFlags).not.toHaveBeenCalled();
   });
 });

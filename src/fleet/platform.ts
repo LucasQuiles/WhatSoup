@@ -23,6 +23,7 @@ import {
 import { admitHomeConfinedPath, isCanonicalAbsolutePath, isPhysicallyInsideHome } from '../lib/home-confinement.ts';
 import { resolveLaunchdPlistRenderOptions } from './launchd-render-options.ts';
 import { compareGovernedLaunchdEnv, type GovernedEnvComparison } from './launchd-env-drift.ts';
+import { readFileFlags } from './launchd-plist-flags.ts';
 import { repoRoot, tmpRoot, xdgDir } from './paths.ts';
 import { SIGNAL } from '../lib/signals.ts';
 
@@ -445,6 +446,32 @@ function readOwnedLaunchdPlist(name: string, filePath: string): string | null {
   return contents;
 }
 
+/** sys/stat.h UF_IMMUTABLE, UF_APPEND, SF_IMMUTABLE, SF_APPEND and SF_NOUNLINK: unlink(2) fails while one is set. */
+const UNLINK_BLOCKING_FILE_FLAGS = 0x2 | 0x4 | 0x20000 | 0x40000 | 0x100000;
+
+/**
+ * #3829: disable() boots the job out and then unlinks its plist. A protected
+ * plist (a root-owned `uchg` plist is a documented configuration, see
+ * docs/runbooks/release-deployment.md) cannot be unlinked, so the bootout would
+ * leave the job stopped with its plist kept. Refuse first, leaving the job
+ * loaded; flags that cannot be read refuse too.
+ */
+function assertLaunchdPlistRemovable(name: string, filePath: string): void {
+  let flags: number;
+  try {
+    flags = readFileFlags(filePath);
+  } catch (error) {
+    throw new Error(
+      `cannot read the file flags of the launchd plist for ${launchdLabel(name)}; the job was left loaded and the plist kept: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if ((flags & UNLINK_BLOCKING_FILE_FLAGS) !== 0) {
+    throw new Error(
+      `launchd plist for ${launchdLabel(name)} carries an immutable, append-only or no-unlink file flag and cannot be removed; the job was left loaded`,
+    );
+  }
+}
+
 /**
  * launchd rejects job definitions that are group- or world-writable, so no
  * plist writer installs anything wider than this.
@@ -847,6 +874,11 @@ export interface ServiceManager {
   stopForAuth?(name: string): Promise<boolean | void>;
   /** Optional authenticated-only activation hook for platforms that defer installation until pairing succeeds. */
   startAfterAuthFire?(name: string, onError?: (err: Error | null) => void): void;
+  /**
+   * #3829: throw when disable() could not remove the service definition, so a
+   * caller can refuse before it stops anything. The delete route calls it first.
+   */
+  assertCanDisable?(name: string): void;
 }
 
 export function systemdUnitName(name: string): string {
@@ -968,6 +1000,7 @@ class LaunchdServiceManager extends BaseServiceManager {
     assertValidLaunchdInstanceName(name);
     const dest = plistPath(name);
     if (readOwnedLaunchdPlist(name, dest) === null) return;
+    assertLaunchdPlistRemovable(name, dest);
     await this.bootout(name);
     try {
       fs.unlinkSync(dest);
@@ -975,6 +1008,14 @@ class LaunchdServiceManager extends BaseServiceManager {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
     this.bootedOutServices.delete(name);
+  }
+
+  /** Only the file flags are checked here; stop() and disable() still check the identity. */
+  assertCanDisable(name: string): void {
+    assertValidLaunchdInstanceName(name);
+    const dest = plistPath(name);
+    if (readExistingLaunchdPlist(dest) === null) return;
+    assertLaunchdPlistRemovable(name, dest);
   }
 
   async start(name: string): Promise<void> {
