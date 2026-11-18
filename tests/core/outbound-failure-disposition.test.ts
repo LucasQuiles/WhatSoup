@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { SQLInputValue, StatementSync } from 'node:sqlite';
 import { describe, expect, it, vi } from 'vitest';
 import {
   AuthRequiredError,
@@ -39,6 +40,35 @@ const base = {
   scope: 'request' as const,
   message: 'synthetic provider prose that must not persist',
 };
+
+/**
+ * Wraps the engine's repair page statement to record each page's row count.
+ * The repair loop is synchronous, so a test timeout cannot stop a loop that
+ * never ends; the wrapper throws once reads pass `maxReads` instead. It can
+ * also fail one chosen read.
+ */
+function boundRepairPageReads(
+  engine: DurabilityEngine,
+  options: { maxReads: number; failOnRead?: number },
+): number[] {
+  const statements = (engine as unknown as {
+    statements: { getAmbiguousReplayRepairPage: StatementSync };
+  }).statements;
+  const page = statements.getAmbiguousReplayRepairPage;
+  const pageRows: number[] = [];
+  let reads = 0;
+  statements.getAmbiguousReplayRepairPage = {
+    all: (...params: SQLInputValue[]) => {
+      reads += 1;
+      if (reads > options.maxReads) throw new Error(`repair page reads passed ${options.maxReads}`);
+      if (reads === options.failOnRead) throw new Error('repair page read denied');
+      const rows = page.all(...params);
+      pageRows.push(rows.length);
+      return rows;
+    },
+  } as unknown as StatementSync;
+  return pageRows;
+}
 
 describe('outbound failure disposition', () => {
   it.each(
@@ -242,8 +272,9 @@ describe('outbound failure disposition', () => {
       });
       // The repair needs only ids and evidence, never these payloads.
       const largePayload = JSON.stringify({ text: 'x'.repeat(32 * 1024) });
-      // More than two 200-row pages. Every fifth row keeps a safe policy with
-      // other evidence, so a cursor that does not advance past it never ends.
+      // The first 200 rows keep a safe policy with other evidence, so the first
+      // 200-row page repairs nothing. A cursor that does not advance past them
+      // reads that page again until the read bound stops it.
       for (let index = 0; index < 450; index += 1) {
         const id = engine.createOutboundOp({
           conversationKey: 'historical-backlog', chatJid: '15550000001@s.whatsapp.net', opType: 'text',
@@ -251,15 +282,58 @@ describe('outbound failure disposition', () => {
           replayPolicy: 'safe',
         });
         engine.markSending(id);
-        engine.markMaybeSent(id, index % 5 === 0 ? control : ambiguous);
+        engine.markMaybeSent(id, index < 200 ? control : ambiguous);
         db.raw.prepare("UPDATE outbound_ops SET replay_policy = 'safe' WHERE id = ?").run(id);
       }
       const wholeStatusReads = vi.spyOn(engine, 'getOutboundByStatus');
+      // Three pages are expected; the bound allows one read more.
+      const pageRows = boundRepairPageReads(engine, { maxReads: 4 });
       engine.preConnectRecovery();
+      expect(pageRows).toEqual([200, 200, 50]);
       expect(wholeStatusReads.mock.calls.filter(([status]) => status === 'maybe_sent')).toEqual([]);
       expect(db.raw.prepare(`SELECT replay_policy, COUNT(*) AS rows FROM outbound_ops
         GROUP BY replay_policy ORDER BY replay_policy`).all())
-        .toEqual([{ replay_policy: 'safe', rows: 90 }, { replay_policy: 'unsafe', rows: 360 }]);
+        .toEqual([{ replay_policy: 'safe', rows: 200 }, { replay_policy: 'unsafe', rows: 250 }]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('keeps committed pages repaired when a later page read fails, and the next start finishes', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const engine = new DurabilityEngine(db);
+      const ambiguous = classifyOutboundFailure(new SendAmbiguousError({
+        ...base, phase: 'provider_call_started',
+      }), { retryOwner: 'send_tracked', attemptsRemaining: 0 });
+      for (let index = 0; index < 250; index += 1) {
+        const id = engine.createOutboundOp({
+          conversationKey: 'historical-partial', chatJid: '15550000001@s.whatsapp.net', opType: 'text',
+          payload: JSON.stringify({ text: `partial ${index}` }), replayPolicy: 'safe',
+        });
+        engine.markSending(id);
+        engine.markMaybeSent(id, ambiguous);
+        db.raw.prepare("UPDATE outbound_ops SET replay_policy = 'safe' WHERE id = ?").run(id);
+      }
+      const policies = db.raw.prepare(`SELECT replay_policy, COUNT(*) AS rows FROM outbound_ops
+        GROUP BY replay_policy ORDER BY replay_policy`);
+      boundRepairPageReads(engine, { maxReads: 3, failOnRead: 2 });
+      expect(() => engine.preConnectRecovery()).toThrow('repair page read denied');
+      // Page 1 committed in its own transaction before the page 2 read failed.
+      expect(policies.all()).toEqual([{ replay_policy: 'safe', rows: 50 }, { replay_policy: 'unsafe', rows: 200 }]);
+      const run = db.raw.prepare("SELECT completed_at, notes FROM recovery_runs WHERE trigger = 'pre_connect' ORDER BY id DESC LIMIT 1")
+        .get() as { completed_at: string | null; notes: string };
+      expect(run.completed_at).toBeNull();
+      expect(JSON.parse(run.notes)).toEqual({
+        status: 'incomplete', failedPhases: ['preserve_ambiguous_replay_policy'], openRecoveries: null,
+      });
+      // The next start reads only the rows that still need the repair.
+      const restarted = new DurabilityEngine(db);
+      const resumedPages = boundRepairPageReads(restarted, { maxReads: 2 });
+      restarted.preConnectRecovery();
+      expect(resumedPages).toEqual([50]);
+      expect(policies.all()).toEqual([{ replay_policy: 'unsafe', rows: 250 }]);
     } finally {
       db.close();
     }
