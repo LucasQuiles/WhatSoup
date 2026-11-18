@@ -767,7 +767,7 @@ describe('Echo correlation: isFromMe messages', () => {
     const msg = makeIncomingMessage({ isFromMe: true });
     await runIngest(handler, msg);
 
-    expect(matchEchoSpy).toHaveBeenCalledWith(msg.messageId);
+    expect(matchEchoSpy).toHaveBeenCalledWith(msg.messageId, msg.chatJid);
   });
 
   it('isFromMe message calls durabilityEngine.matchEcho with messageId', async () => {
@@ -783,7 +783,7 @@ describe('Echo correlation: isFromMe messages', () => {
     await runIngest(handler, msg);
 
     expect(matchEchoSpy).toHaveBeenCalledOnce();
-    expect(matchEchoSpy).toHaveBeenCalledWith(msg.messageId);
+    expect(matchEchoSpy).toHaveBeenCalledWith(msg.messageId, msg.chatJid);
   });
 
   it('isFromMe message does NOT dispatch to runtime', async () => {
@@ -1290,7 +1290,7 @@ describe('ingest.ts uncovered-branch coverage', () => {
     const lid = '15550000011@lid';
     const phone = '15550000009';
     db.raw.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
-      .run(lid, `${phone}@s.whatsapp.net`);
+      .run(lid.split('@')[0], `${phone}@s.whatsapp.net`);
     const actual = await vi.importActual<typeof import('../../src/core/access-list.ts')>(
       '../../src/core/access-list.ts',
     );
@@ -1343,7 +1343,7 @@ describe('ingest.ts uncovered-branch coverage', () => {
     const lid = '15550000012@lid';
     const phone = '15550000009';
     db.raw.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
-      .run(lid, `${phone}@s.whatsapp.net`);
+      .run(lid.split('@')[0], `${phone}@s.whatsapp.net`);
     const originalPeers = Object.getOwnPropertyDescriptor(config, 'controlPeers');
     Object.defineProperty(config, 'controlPeers', {
       configurable: true, value: new Map([['peer', phone]]),

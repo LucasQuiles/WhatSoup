@@ -51,11 +51,12 @@ function createCurrentDatabase(dbPath: string): void {
 
 function removeSchema69Objects(raw: DatabaseSync): void {
   // Rewinding the ledger alone leaves a newer schema in the legacy fixture.
+  for (const { name } of raw.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'operator_catchup_resolution_%'").all() as Array<{ name: string }>) {
+    raw.exec(`DROP TRIGGER ${name}`);
+  }
   raw.exec(`
-    DROP TRIGGER operator_catchup_resolution_outbound_immutable;
-    DROP TRIGGER operator_catchup_resolution_source_immutable;
-    DROP TRIGGER operator_catchup_resolution_no_legacy_close;
     DROP TABLE operator_catchup_resolutions;
+    ALTER TABLE inbound_disposition_links DROP COLUMN original_fulfillment_confirmed;
   `);
 }
 

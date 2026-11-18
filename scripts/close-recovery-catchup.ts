@@ -184,9 +184,6 @@ export function assertSchema43Foundation(raw: DatabaseSync): void {
     FROM schema_migrations
     ORDER BY version
   `).all() as Array<{ version: number }>).map((row) => Number(row.version));
-  if (versions.some((version) => version > CURRENT_SCHEMA_MIGRATION)) {
-    throw new Error('Database schema is newer than supported by this binary');
-  }
   if (
     versions.length < 43
     || versions.some((version, index) => version !== index + 1)
@@ -194,6 +191,9 @@ export function assertSchema43Foundation(raw: DatabaseSync): void {
     throw new Error(
       'Database must include contiguous schema 43+ receipts (migrations 1 through current)',
     );
+  }
+  if (versions.some((version) => version > CURRENT_SCHEMA_MIGRATION)) {
+    throw new Error('Database schema is newer than supported by this binary');
   }
 }
 

@@ -581,9 +581,9 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
     expect(() => db.raw.prepare(`
       INSERT INTO inbound_disposition_links (
         inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
-        reason, evidence_ref, actor
+        reason, evidence_ref, actor, original_fulfillment_confirmed
       ) VALUES (?, ?, 'superseded_by_operator_catchup', ?,
-                'operator catch-up completed with echoed reply', ?, ?)
+                'operator catch-up completed with echoed reply', ?, ?, 1)
     `).run(
       fixture.sourceSeq,
       fixture.planId,
@@ -881,10 +881,10 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
     db.raw.prepare(`
       INSERT INTO inbound_disposition_links (
         inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
-        reason, evidence_ref, actor
+        reason, evidence_ref, actor, original_fulfillment_confirmed
       ) VALUES (?, ?, 'superseded_by_operator_catchup', ?,
                 'operator catch-up completed with echoed reply',
-                'test://direct-closure', 'test')
+                'test://direct-closure', 'test', 1)
     `).run(fixture.sourceSeq, fixture.planId, fixture.targetSeq);
   }
 

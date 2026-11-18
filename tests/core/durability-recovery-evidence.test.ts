@@ -560,6 +560,9 @@ describe('durable recovery evidence ordering', () => {
       actor: 'operator:test', evidenceRef: 'test://approved-followup',
     } });
     db.raw.prepare('UPDATE outbound_ops SET payload = ? WHERE id > ?').run(payload, INCIDENT_SELECTED_OP_ID);
+    // Match the incident's unsafe quarantine and consumed recovery attempts.
+    db.raw.prepare("UPDATE outbound_ops SET status = 'quarantined' WHERE id = ?").run(INCIDENT_SELECTED_OP_ID);
+    db.raw.prepare("UPDATE turn_recovery_jobs SET state = 'exhausted', attempt_count = 5 WHERE id = ?").run(recoveryJobId);
     const original = rowJson(db, 'outbound_ops', 'id', INCIDENT_SELECTED_OP_ID);
     const job = rowJson(db, 'turn_recovery_jobs', 'id', recoveryJobId);
     engine.postConnectRecovery();

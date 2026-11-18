@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { withoutOperatorCatchupResolutionSql } from './open-recoveries-sql.ts';
 import type { DatabaseSync } from 'node:sqlite';
 
 const REQUIRED_TABLES = [
@@ -270,6 +271,7 @@ function assertSchema42ClosuresCanUpgrade(db: DatabaseSync): void {
           AND pending.disposition = 'recovery_pending_operator_catchup'
           AND pending.superseded_by_seq IS NULL
           AND pending_source.conversation_key = source.conversation_key
+          AND ${withoutOperatorCatchupResolutionSql(db, 'pending')}
           AND NOT EXISTS (
             SELECT 1
             FROM inbound_disposition_links matched_closure
@@ -385,6 +387,7 @@ function assertHardenedSchema42CanAdvance(db: DatabaseSync): void {
           AND pending.disposition = 'recovery_pending_operator_catchup'
           AND pending.superseded_by_seq IS NULL
           AND pending_source.conversation_key = source.conversation_key
+          AND ${withoutOperatorCatchupResolutionSql(db, 'pending')}
           AND NOT EXISTS (
             SELECT 1
             FROM inbound_disposition_links matched_closure

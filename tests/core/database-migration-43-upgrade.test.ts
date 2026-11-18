@@ -314,9 +314,9 @@ describe('migration 43 upgrade from historical schema 42', () => {
     db.raw.prepare(`
       INSERT INTO inbound_disposition_links (
         inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
-        reason, evidence_ref, actor
+        reason, evidence_ref, actor, original_fulfillment_confirmed
       ) VALUES (?, ?, 'superseded_by_operator_catchup', ?,
-                'partial closure', 'test://hardened-partial', 'operator:test')
+                'partial closure', 'test://hardened-partial', 'operator:test', 1)
     `).run(sourceOne, planId, target.targetSeq);
     db.close();
 
@@ -455,8 +455,8 @@ describe('migration 43 upgrade from historical schema 42', () => {
     raw.prepare(`
       INSERT INTO inbound_disposition_links (
         inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
-        reason, evidence_ref, actor
-      ) VALUES (?, ?, 'superseded_by_operator_catchup', ?, 'second closure', ?, ?)
+        reason, evidence_ref, actor, original_fulfillment_confirmed
+      ) VALUES (?, ?, 'superseded_by_operator_catchup', ?, 'second closure', ?, ?, 1)
     `).run(
       fixture.sourceSeq,
       fixture.planId,
@@ -567,9 +567,9 @@ describe('migration 43 upgrade from historical schema 42', () => {
     raw.prepare(`
       INSERT INTO inbound_disposition_links (
         inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
-        reason, evidence_ref, actor
+        reason, evidence_ref, actor, original_fulfillment_confirmed
       ) VALUES (?, ?, 'superseded_by_operator_catchup', ?,
-                'partial closure', 'test://partial-upgrade', 'operator:test')
+                'partial closure', 'test://partial-upgrade', 'operator:test', 1)
     `).run(sourceOne, planId, target.targetSeq);
     raw.close();
 
@@ -742,9 +742,9 @@ describe('migration 43 upgrade from historical schema 42', () => {
     raw.prepare(`
       INSERT INTO inbound_disposition_links (
         inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
-        reason, evidence_ref, actor
+        reason, evidence_ref, actor, original_fulfillment_confirmed
       ) VALUES (?, ?, 'superseded_by_operator_catchup', ?,
-                'operator catch-up completed with echoed reply', ?, ?)
+                'operator catch-up completed with echoed reply', ?, ?, 1)
     `).run(sourceSeq, planId, target.targetSeq, evidenceRef, actor);
     return {
       planId,
@@ -827,9 +827,9 @@ describe('migration 43 upgrade from historical schema 42', () => {
     raw.prepare(`
       INSERT INTO inbound_disposition_links (
         inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
-        reason, evidence_ref, actor
+        reason, evidence_ref, actor, original_fulfillment_confirmed
       ) VALUES (?, ?, 'superseded_by_operator_catchup', ?,
-                'historical corroborated closure', ?, ?)
+                'historical corroborated closure', ?, ?, 1)
     `).run(sourceSeq, planId, targetSeq, evidenceRef, actor);
     return {
       planId,
