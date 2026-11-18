@@ -851,22 +851,10 @@ watchdog is stopped and again immediately before the switch. Any of these
 stops the activation with no selector moved: it refuses, unless a stopped
 watchdog cannot be restored (for example, its plist changed while it was
 stopped, or its bootstrap or kickstart failed), which ends it
-`rollback-unverified` (below). The fleet wrapper and watchdog plists are also
-checked against their planned digest before each reload and again immediately
-before each `launchctl bootstrap`, so a plist changed before that last check is
-not loaded. `launchctl bootstrap` reads the plist by path, so a writer running
-as the same user that swaps the file during the bootstrap call itself is not
-detected. The plists this run writes (the member plists, and the host
-auxiliary plists other than the fleet wrapper's and the watchdogs') get no such
-check before `launchctl bootstrap`. When the root helper writes a root-owned
-plist, apply reads it back right after the write. A later identity check
+`rollback-unverified` (below). A later identity check
 (`verify-live-identity`) compares a digest of each plist's text on disk with
 the digest this activation expects: it can find a rewrite only while the
-rewrite is still on disk, and it cannot show what launchd loaded. A change
-found after the switch fails the activation into the group
-rollback; unless the rollback's schema or refresh-fence checks have already
-ended it `rollback-blocked-*`, its identity check ends it
-`rollback-unverified`. It reloads all primary
+rewrite is still on disk, and it cannot show what launchd loaded. It reloads all primary
 labels before auxiliaries and verifies each primary's new pid, argv,
 authenticated commit and WhatsApp connection. Any failure checks the schema
 level of every member before restoration and again after quiescing the group.
