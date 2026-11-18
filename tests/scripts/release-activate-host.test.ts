@@ -1193,8 +1193,8 @@ describe('release:activate-host closed host auxiliaries', () => {
     ]));
   });
 
-  // With no closed contract (only com.bot-errors.health reaches it), every value must name the path it spells
-  // and the file launchd starts must be in the target release.
+  // With no closed contract (only com.bot-errors.health reaches it), every value must name the path it spells,
+  // and the interpreter, the file it runs, and the bot-errors runner's forwarded command must be in the target release.
   const BOT_ERRORS = 'com.bot-errors.health';
   const pathRebaseWorld = () => {
     const world = twoMemberWorld();
@@ -1209,6 +1209,11 @@ describe('release:activate-host closed host auxiliaries', () => {
   const OUTSIDE_RELEASE = 'executed program or script is not a closed-form path under the target release';
   const NO_SCRIPT = 'interpreter launch form names no script argument (inline, module, or option form)';
   const INTERPRETER_ENVIRONMENT = 'EnvironmentVariables are malformed or set an interpreter-affecting key';
+  const OUTSIDE_INTERPRETER = 'interpreter is not a closed-form system interpreter or a path under the target release';
+  const RUNNER_AGAIN = 'bot-errors runner command runs the runner again';
+  const RUNNER_FORM = 'bot-errors runner arguments are not reviewed options followed by -- and a command';
+  // The runner's required options, as the installer passes them.
+  const RUNNER_OPTIONS = ['--instance', 'bot-errors-health', '--summary', 'BOT ERRORS daily health command failed'];
   const pathRebaseRefusals: Array<{ name: string; detail: string; build: (root: string, runner: string) => string }> = [
     { name: 'a dot-segment script beside the rebased runner (the reviewed hostile argv)', detail: NOT_CLOSED, build: (root, runner) => plist(BOT_ERRORS, ['/usr/bin/python3', `${root}/../../../../tmp/evil.py`, runner], root) },
     { name: 'a script at <root>/./deploy', detail: NOT_CLOSED, build: (root) => plist(BOT_ERRORS, ['/usr/bin/python3', `${root}/./deploy/scripts/bot-errors-runner.py`], root) },
@@ -1221,7 +1226,14 @@ describe('release:activate-host closed host auxiliaries', () => {
     { name: 'a non-interpreter program outside the release', detail: OUTSIDE_RELEASE, build: (root, runner) => plist(BOT_ERRORS, ['/opt/example/bin/launcher', runner], root) },
     { name: 'python3 -c', detail: NO_SCRIPT, build: (root, runner) => plist(BOT_ERRORS, ['/usr/bin/python3', '-c', 'import runpy', runner], root) },
     { name: 'python3 -m', detail: NO_SCRIPT, build: (root) => plist(BOT_ERRORS, [`${root}/venv/bin/python3`, '-m', 'bot_errors.runner'], root) },
-    ...['PYTHONPATH', 'BASH_ENV', 'LD_PRELOAD'].map((key) => ({
+    { name: 'an interpreter binary outside the release that is only named python3', detail: OUTSIDE_INTERPRETER, build: (root, runner) => plist(BOT_ERRORS, ['/tmp/x/python3', runner], root) },
+    { name: 'a relative interpreter', detail: OUTSIDE_INTERPRETER, build: (root, runner) => plist(BOT_ERRORS, ['python3', runner], root) },
+    { name: 'the runner forwarding a script outside the release', detail: `bot-errors runner command: ${OUTSIDE_RELEASE}`, build: (root, runner) => plist(BOT_ERRORS, ['/usr/bin/python3', runner, ...RUNNER_OPTIONS, '--', '/usr/bin/python3', '/tmp/x.py'], root) },
+    { name: 'the runner forwarding a relative command', detail: `bot-errors runner command: ${OUTSIDE_INTERPRETER}`, build: (root, runner) => plist(BOT_ERRORS, ['/usr/bin/python3', runner, ...RUNNER_OPTIONS, '--', 'python3', `${root}/deploy/scripts/bot-errors-health-check.py`], root) },
+    { name: 'the runner forwarding the runner', detail: RUNNER_AGAIN, build: (root, runner) => plist(BOT_ERRORS, ['/usr/bin/python3', runner, ...RUNNER_OPTIONS, '--', '/usr/bin/python3', runner, ...RUNNER_OPTIONS, '--', '/usr/bin/python3', '/tmp/x.py'], root) },
+    // argparse REMAINDER: the runner also runs the first non-option argument when no -- precedes it.
+    { name: 'the runner running a command without --', detail: RUNNER_FORM, build: (root, runner) => plist(BOT_ERRORS, ['/usr/bin/python3', runner, ...RUNNER_OPTIONS, '/usr/bin/python3', '/tmp/x.py'], root) },
+    ...['PYTHONPATH', 'BASH_ENV', 'LD_PRELOAD', 'HOME', 'ZDOTDIR'].map((key) => ({
       name: `the environment key ${key}`, detail: INTERPRETER_ENVIRONMENT,
       build: (root: string, runner: string) => withLines(plist(BOT_ERRORS, ['/usr/bin/python3', runner], root), ...environment(`<key>${key}</key><string>/tmp/lib</string>`)),
     })),
@@ -1234,6 +1246,19 @@ describe('release:activate-host closed host auxiliaries', () => {
     const plan = await planHostUnit(world, declaration);
     expect(plan.ready).toBe(false);
     expect(plan.document.preconditions).toEqual(expect.arrayContaining([{ id: `host-aux-plist-staged:${BOT_ERRORS}`, ok: false, detail }]));
+  });
+
+  it.each([
+    { name: 'a closed-set system interpreter', args: (root: string) => ['/bin/sh', `${root}/deploy/scripts/bot-errors-health.sh`] },
+    { name: 'an interpreter under the release', args: (root: string) => [`${root}/venv/bin/python3`, `${root}/deploy/scripts/bot-errors-health-check.py`, '--daily'] },
+  ])('admits path-rebase where $name runs a script in the release', async ({ args }) => {
+    const { world, checkout, declaration } = pathRebaseWorld();
+    const source = plist(BOT_ERRORS, args(checkout), checkout);
+    world.addJob(BOT_ERRORS, source);
+    const plan = await planHostUnit(world, declaration);
+    expect(plan.ready).toBe(true);
+    const staged = (plan.applyContext as unknown as { hostAuxiliaries: Array<{ label: string; staged: string }> }).hostAuxiliaries.find((entry) => entry.label === BOT_ERRORS)!.staged;
+    expect(staged).toBe(source.replaceAll(checkout, world.newRelease));
   });
 
   it('admits the installer plain form and retains a closed-form prefix sibling unrewritten', async () => {
