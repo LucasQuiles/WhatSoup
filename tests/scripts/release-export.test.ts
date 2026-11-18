@@ -4,10 +4,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   exportRelease,
+  run,
   type ReleaseExportReport,
 } from '../../scripts/release-export.ts';
 import {
@@ -375,6 +376,34 @@ describe('exportRelease', () => {
       JSON.parse(readFileSync(path.join(report.releasePath, RELEASE_MANIFEST_FILE), 'utf8')),
     );
     expect(manifest.requiredOutputs).toEqual(['dist/index.html']);
+  });
+
+  it('prints the pending host build in the summary instead of a self-check ok=<bool> line', () => {
+    const fixture = makeGitFixture();
+    const cli = (commit: string) => run([
+      '--commit', commit,
+      '--release-root', fixture.releaseRoot,
+      '--repo-root', fixture.sourceRoot,
+      '--build-time', '2026-08-26T17:00:00.000Z',
+    ]);
+    const printed: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((line?: unknown) => {
+      printed.push(String(line));
+    });
+    try {
+      cli(fixture.commit);
+      mkdirSync(path.join(fixture.sourceRoot, 'console'), { recursive: true });
+      writeFileSync(path.join(fixture.sourceRoot, 'console/package.json'), '{"name":"console-fixture"}\n', 'utf8');
+      recommitFixture(fixture, 'console package');
+      cli(fixture.commit);
+    } finally {
+      log.mockRestore();
+    }
+
+    expect(printed.filter((line) => line.startsWith('self-check'))).toEqual([
+      'self-check ok',
+      'self-check ok except pending host build: dist/index.html (build them on the host: docs/runbooks/release-deployment.md)',
+    ]);
   });
 
   it('a post-export tamper is caught by the standard drift check', () => {
