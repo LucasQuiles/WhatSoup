@@ -1848,9 +1848,11 @@ export class Database {
    * {@link migratedSchemaSnapshot}), so EVERY migrated table is protected — the
    * next missing table is found by this guard, not by a health-probe error storm
    * (#1778). Any table present in the canonical snapshot but missing from the
-   * live database is recreated idempotently along with its indexes. Recreation is
-   * best-effort per object so one failure cannot abort healing the rest or block
-   * startup.
+   * live database is recreated idempotently along with its indexes; its triggers
+   * are not recreated. Recreation is best-effort per object so one failure cannot
+   * abort healing the rest. A failure can still stop startup afterwards: while
+   * `turn_terminal_records` stays missing, the reply-debt index check cannot
+   * create its index and the whole start rolls back.
    */
   private verifyRequiredTables(): void {
     const live = new Set(
@@ -1865,9 +1867,10 @@ export class Database {
     try {
       snapshot = migratedSchemaSnapshot();
     } catch (err) {
-      // Deriving the canonical schema must never block startup. Fall back to the
-      // hardcoded critical-table DDL so we are never worse than the pre-#1778
-      // one-table guard.
+      // A snapshot failure does not stop this repair: fall back to the hardcoded
+      // critical-table DDL so we are never worse than the pre-#1778 one-table
+      // guard. Startup still fails afterwards if `turn_terminal_records` is
+      // missing, because the reply-debt index check cannot create its index.
       log.error(
         { err },
         'Failed to derive canonical schema for integrity check — falling back to critical-table DDL',
