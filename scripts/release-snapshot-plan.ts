@@ -366,12 +366,32 @@ function fileTypeName(stat: Stats): string {
 }
 
 /**
- * The manifest's required outputs absent from a release. The one definition of
- * "present" shared by the drift check, export's pending list and
- * release:activate. Paths are repo-relative (normalized by the manifest parser).
+ * A required output counts only as the fleet serves it: a regular file reached
+ * from the release root without passing through a symlink, so it cannot resolve
+ * outside the release (src/fleet/static.ts serves only a confined regular file).
+ */
+function isRegularOutputInRelease(releasePath: string, relPath: string): boolean {
+  let current = releasePath;
+  let stat: Stats | undefined;
+  for (const part of relPath.split('/')) {
+    current = path.join(current, part);
+    try {
+      stat = lstatSync(current);
+    } catch {
+      return false;
+    }
+    if (stat.isSymbolicLink()) return false;
+  }
+  return stat?.isFile() === true;
+}
+
+/**
+ * The manifest's required outputs a release lacks: absent, not a regular file,
+ * or reached through a symlink. The one definition of "present". Paths are
+ * repo-relative (normalized by the manifest parser).
  */
 export function missingRequiredOutputs(releasePath: string, manifest: ReleaseSnapshotManifest): string[] {
-  return manifest.requiredOutputs.filter((relPath) => !existsSync(path.join(releasePath, relPath)));
+  return manifest.requiredOutputs.filter((relPath) => !isRegularOutputInRelease(releasePath, relPath));
 }
 
 export function collectReleaseSnapshotDrift(
@@ -447,7 +467,7 @@ export function collectReleaseSnapshotDrift(
     issues.push({
       kind: 'required-output-missing',
       path: relPath,
-      message: `required build output missing from release: ${relPath}`,
+      message: `required build output missing from release, or not a regular file inside it: ${relPath}`,
     });
   }
 

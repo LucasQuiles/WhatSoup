@@ -180,7 +180,8 @@ host-built outputs described below):
   ```
 
   The restart preflight blocks a release without `node_modules`, and
-  `release:activate` refuses a release whose required outputs are missing.
+  `release:activate` refuses a release whose required outputs are missing or are
+  not regular files inside the release (a directory or a symlink does not count).
 
 The export creates release bytes only. Repointing a service at the new release
 and restarting it remain separately-approved host mutations, and must preserve
@@ -252,7 +253,9 @@ Preconditions include: the wrapper symlink points at
 `<expect-current>/deploy/whatsoup`; the new manifest is schema-valid, names
 `--release` as its path and carries a full commit; the new release has
 `deploy/whatsoup`, `src/bootstrap.ts` and `node_modules`; every manifest
-`requiredOutputs` path (the built console) exists in the new release; each auxiliary job
+`requiredOutputs` path (the built console) is a regular file inside the new release,
+reached without a symlinked path component, checked again under the activation lock
+just before the switch; each auxiliary job
 currently runs from `--expect-current`; a health token and port resolve; the
 database exists; and no staged plist still references `--expect-current`.
 

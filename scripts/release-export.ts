@@ -31,7 +31,6 @@ import {
   collectReleaseSnapshotDrift,
   createReleaseSnapshotDriftReport,
   createReleaseSnapshotPlan,
-  missingRequiredOutputs,
   type ReleaseSnapshotDriftReport,
   type ReleaseSnapshotManifest,
 } from './release-snapshot-plan.ts';
@@ -354,7 +353,7 @@ export function exportRelease(options: ReleaseExportOptions): ReleaseExportRepor
       treeSha256: manifestTreeSha256(manifest),
       selfCheck,
       sourceOnMain,
-      pendingHostOutputs: missingRequiredOutputs(releasePath, manifest),
+      pendingHostOutputs: selfCheck.issues.filter(isPendingHostOutput).flatMap((issue) => (issue.path ? [issue.path] : [])),
       qualificationBundle: stagedQualificationBundle
         ? {
           ...stagedQualificationBundle.report,
@@ -499,7 +498,7 @@ export function run(argv: string[] = process.argv.slice(2), cwd = process.cwd())
     if (report.pendingHostOutputs.length > 0) {
       console.log(`self-check ok except pending host build: ${report.pendingHostOutputs.join(', ')} (build them on the host: docs/runbooks/release-deployment.md)`);
     } else {
-      console.log(`self-check ok=${report.selfCheck.ok}`);
+      console.log('self-check ok');
     }
     if (report.qualificationBundle) {
       console.log(`qualification bundle=${report.qualificationBundle.manifestPath} sha256=${report.qualificationBundle.manifestSha256}`);
