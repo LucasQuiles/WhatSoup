@@ -308,7 +308,7 @@ export function validateDatabase(database: DatabaseSync, databasePath: string): 
   assertSchemaCeiling(database, databasePath);
   const migration = database.prepare('SELECT 1 AS ok FROM schema_migrations WHERE version = ? LIMIT 1')
     .get(CURRENT_SCHEMA_MIGRATION) as { ok?: unknown } | undefined;
-  if (migration?.ok !== 1) throw new Error('protected secret input migration is missing');
+  if (migration?.ok !== 1) throw new Error('database has not applied the current schema migration of this binary');
   database.prepare(`SELECT id, intake_id, principal, resource_id, kind, action
     FROM protected_secret_inputs
     WHERE input_state IN ('awaiting_input', 'submitted', 'consuming')
