@@ -4,9 +4,12 @@
 # Linux (systemd) parity for macOS com.whatsoup.release-drift-check.plist.
 # ----------------------------------------------------------------------------
 # The macOS plist derives the CURRENTLY-DEPLOYED release from the launchd job's
-# ProgramArguments (--launchd-plist). The Linux analog is to derive it from the
-# live service launcher symlink each run, so the check always tracks whatever
-# whatsoup@<instance> is actually running — surviving cutovers without edits.
+# ProgramArguments (--launchd-plist). The Linux analog derives it from the
+# launcher symlink ~/.local/bin/whatsoup on each run, so it follows cutovers that
+# re-point the launcher without edits. It observes the release the launcher
+# points into, which a running whatsoup@<instance> may not have restarted into
+# yet; that release must hold .whatsoup-release-manifest.json, which an exported
+# release has and a clone does not, or every run is inconclusive (exit 2).
 #
 # Emits release-integrity (drift) + release-currency (behind origin/main) alerts
 # through the existing BOT ERRORS outbox pipeline (deploy/scripts/bot-errors-emit.py),

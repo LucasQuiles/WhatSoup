@@ -23,8 +23,15 @@ ExecStart=%h/.local/bin/whatsoup-release-drift-linux.sh
 #   1 integrity drift. The observer has emitted the alert through the BOT ERRORS
 #     outbox (the dispatcher suppresses duplicates while the incident is open),
 #     so the outbox is the single alert channel and the unit stays green.
-#   2 inconclusive: wrapper or configuration error, observer crash, or either
-#     outbox emit (drift or currency) failed. No outbox alert can be relied on,
-#     so the unit must fail where failed-unit monitoring sees it.
+#   2 inconclusive, and the unit fails (systemctl --user and the journal show
+#     it): the label is missing or unsafe; the launcher resolves into no
+#     release; the release's runner or observer failed; the currency check was
+#     inconclusive (no release manifest, a network failure or a timeout), which
+#     still emits its alert; either outbox emit failed; or exit 1 came from a
+#     release whose scheduler predates --bootstrap-exit-code 2.
+# The observer needs ~/.local/bin/whatsoup to point into an exported release
+# that holds .whatsoup-release-manifest.json. deploy/setup.sh points it at the
+# tree setup runs from, so on a host installed from a clone every run raises
+# manifest-missing and inconclusive alerts and exits 2.
 SuccessExitStatus=0 1
 Nice=10
