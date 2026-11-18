@@ -72,6 +72,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { allFromStatement } from '../lib/db-query.ts';
 import { validDeliveryCorroborationForTerminalSql } from './delivery-corroboration-sql.ts';
 import { isGroupJid } from './jid-constants.ts';
+import { withoutOperatorCatchupResolutionSql } from './open-recoveries-sql.ts';
 
 type PreparedStatement = ReturnType<DatabaseSync['prepare']>;
 
@@ -275,11 +276,7 @@ export class OrphanTransferSettler {
              AND closure.recovery_plan_id = pending.recovery_plan_id
              AND closure.disposition = 'superseded_by_operator_catchup'
          )
-         AND NOT EXISTS (
-           SELECT 1 FROM operator_catchup_resolutions resolved
-           WHERE resolved.source_seq = pending.inbound_seq
-             AND resolved.recovery_plan_id = pending.recovery_plan_id
-         )
+         AND ${withoutOperatorCatchupResolutionSql(raw, 'pending')}
        LIMIT 1`,
     );
     this.insertPlan = raw.prepare(

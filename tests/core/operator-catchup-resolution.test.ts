@@ -15,7 +15,8 @@ describe('operator catch-up schema upgrade', () => {
     inbound: raw.prepare('SELECT * FROM inbound_events').all(),
     outbound: raw.prepare('SELECT * FROM outbound_ops').all(),
     plans: raw.prepare('SELECT * FROM recovery_plans').all(),
-    links: raw.prepare('SELECT * FROM inbound_disposition_links').all(),
+    links: raw.prepare(`SELECT id, inbound_seq, recovery_plan_id, disposition,
+      superseded_by_seq, reason, evidence_ref, actor, created_at FROM inbound_disposition_links`).all(),
   });
 
   function populatedSchema68() {
@@ -43,6 +44,7 @@ describe('operator catch-up schema upgrade', () => {
       }
       db.raw.exec(`
         DROP TABLE operator_catchup_resolutions;
+        ALTER TABLE inbound_disposition_links DROP COLUMN original_fulfillment_confirmed;
         DELETE FROM schema_migrations WHERE version = 69;
       `);
       expect(db.raw.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())

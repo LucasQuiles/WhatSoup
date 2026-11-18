@@ -3,6 +3,7 @@ import type { Database } from './database.ts';
 import { assertCanonicalSchema43 } from './database-migration-43.ts';
 import { withTransaction } from './db-tx.ts';
 import { allFromStatement } from '../lib/db-query.ts';
+import { withoutOperatorCatchupResolutionSql } from './open-recoveries-sql.ts';
 
 export interface CloseOperatorCatchupRecoveryParams {
   planId: string;
@@ -136,6 +137,7 @@ export function inspectOperatorCatchupRecovery(
     WHERE links.recovery_plan_id = ?
       AND links.disposition = 'recovery_pending_operator_catchup'
       AND source.conversation_key = ?
+      AND ${withoutOperatorCatchupResolutionSql(raw, 'links')}
     ORDER BY links.inbound_seq
   `), planId, conversationKey);
   const pendingSeqs = pending.map((row) => row.inbound_seq);
@@ -256,12 +258,13 @@ function closeInspectedOperatorCatchupRecovery(
     return { ...receipt, inserted: 0 };
   }
 
+  const storesFulfillment = raw.prepare('SELECT 1 FROM schema_migrations WHERE version = 69').get() !== undefined;
   const insert = raw.prepare(`
     INSERT INTO inbound_disposition_links (
       inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
-      reason, evidence_ref, actor
+      reason, evidence_ref, actor${storesFulfillment ? ', original_fulfillment_confirmed' : ''}
     ) VALUES (?, ?, 'superseded_by_operator_catchup', ?,
-              ?, ?, ?)
+              ?, ?, ?${storesFulfillment ? ', 1' : ''})
   `);
   let inserted = 0;
   for (const seq of inspection.sourceSeqs) {
@@ -281,6 +284,7 @@ function closeInspectedOperatorCatchupRecovery(
     WHERE pending_link.recovery_plan_id = ?
       AND pending_link.disposition = 'recovery_pending_operator_catchup'
       AND source.conversation_key = ?
+      AND ${withoutOperatorCatchupResolutionSql(raw, 'pending_link')}
       AND NOT EXISTS (
         SELECT 1
         FROM inbound_disposition_links closure
@@ -522,11 +526,7 @@ export function selectOperatorCatchupCandidates(
           AND closed.recovery_plan_id = links.recovery_plan_id
           AND closed.disposition = 'superseded_by_operator_catchup'
       )
-      AND NOT EXISTS (
-        SELECT 1 FROM operator_catchup_resolutions resolved
-        WHERE resolved.source_seq = links.inbound_seq
-          AND resolved.recovery_plan_id = links.recovery_plan_id
-      )
+      AND ${withoutOperatorCatchupResolutionSql(raw, 'links')}
     ORDER BY links.recovery_plan_id, source.conversation_key, links.inbound_seq
   `));
 

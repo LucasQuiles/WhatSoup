@@ -1058,7 +1058,8 @@ export class DurabilityEngine {
       selectOutboundForEchoMatch: prepare(
         `SELECT id FROM outbound_ops
          WHERE wa_message_id = ?
-           AND status IN ('submitted', 'maybe_sent', 'quarantined', 'failed_permanent')`,
+           AND (? IS NULL OR chat_jid = ?)
+           AND status IN ('submitted', 'maybe_sent', 'quarantined', 'failed_permanent') LIMIT 2`,
       ),
       recordToolCall: prepare(
         `INSERT INTO tool_calls (
@@ -2624,10 +2625,10 @@ export class DurabilityEngine {
   }
 
   // ── Echo matching ──
-  matchEcho(waMessageId: string): boolean {
-    const row = this.statements.selectOutboundForEchoMatch.get(waMessageId) as { id: number } | undefined;
-    if (row) {
-      this.markEchoed(row.id);
+  matchEcho(waMessageId: string, chatJid?: string): boolean {
+    const rows = this.statements.selectOutboundForEchoMatch.all(waMessageId, chatJid ?? null, chatJid ?? null) as { id: number }[];
+    if (rows.length === 1) {
+      this.markEchoed(rows[0].id);
       return true;
     }
     return false;

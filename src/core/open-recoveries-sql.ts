@@ -1,4 +1,14 @@
 import { syntheticSourceMessageIdSql } from './synthetic-turn-source.ts';
+import type { DatabaseSync } from 'node:sqlite';
+
+/** Older read-only stores have no direct-resolution ledger; their links stay pending. */
+export function withoutOperatorCatchupResolutionSql(raw: DatabaseSync, linkAlias: string): string {
+  if (!/^[a-z_][a-z0-9_]*$/i.test(linkAlias)) throw new Error('Invalid disposition SQL alias');
+  if (!raw.prepare('SELECT 1 FROM schema_migrations WHERE version = 69').get()) return '1';
+  return `NOT EXISTS (SELECT 1 FROM operator_catchup_resolutions resolved
+    WHERE resolved.source_seq = ${linkAlias}.inbound_seq
+      AND resolved.recovery_plan_id = ${linkAlias}.recovery_plan_id)`;
+}
 
 /**
  * The open operator catch-up selector, shared by the turn-recovery store's

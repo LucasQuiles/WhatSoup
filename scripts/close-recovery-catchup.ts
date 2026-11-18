@@ -11,6 +11,7 @@ import {
   type OperatorCatchupRecoveryInspection,
 } from '../src/core/recovery-catchup-closure.ts';
 import { SQLITE_BUSY_TIMEOUT_PRAGMA } from '../src/lib/sqlite-constants.ts';
+import { CURRENT_SCHEMA_MIGRATION } from '../src/core/database-schema-version.ts';
 import { inspectOperatorCatchupResolution, resolveOperatorCatchup } from '../src/core/operator-catchup-resolution.ts';
 
 interface CliArgs {
@@ -183,6 +184,9 @@ export function assertSchema43Foundation(raw: DatabaseSync): void {
     FROM schema_migrations
     ORDER BY version
   `).all() as Array<{ version: number }>).map((row) => Number(row.version));
+  if (versions.some((version) => version > CURRENT_SCHEMA_MIGRATION)) {
+    throw new Error('Database schema is newer than supported by this binary');
+  }
   if (
     versions.length < 43
     || versions.some((version, index) => version !== index + 1)
@@ -507,10 +511,12 @@ const ERROR_CLASSIFIERS: ReadonlyArray<{
     test: (m) => m.startsWith('Operator catch-up requires')
       || m.startsWith('Operator catch-up resolution requires')
       || m === 'Operator catch-up resolution schema drift'
+      || m === 'Operator catch-up fulfillment schema drift'
       || m === 'Operator catch-up conversation does not match its source'
       || m === 'Original request fulfillment must be confirmed'
       || m.startsWith('Database must include canonical schema 43 receipts')
       || m.startsWith('Database must include contiguous schema 43+ receipts')
+      || m === 'Database schema is newer than supported by this binary'
       || m === 'canonical schema 43 receipt is missing'
       || m.startsWith('canonical schema 43 objects are missing or drifted')
       || m === 'Recovery plan does not exist'

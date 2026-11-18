@@ -12,6 +12,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import { Database } from '../../src/core/database.ts';
+import { CURRENT_SCHEMA_MIGRATION } from '../../src/core/database-schema-version.ts';
 import { DurabilityEngine, sendTrackedWithReceipt } from '../../src/core/durability.ts';
 import { closeOperatorCatchupRecoveryRaw } from '../../src/core/recovery-catchup-closure.ts';
 import {
@@ -50,7 +51,7 @@ function runCliSubprocess(args: string[]): { code: number; stdout: string; stder
 it('refuses a future schema instead of treating a contiguous ledger as compatible', () => {
   const db = new Database(':memory:'); db.open();
   try {
-    db.raw.exec('INSERT INTO schema_migrations(version) VALUES (70)');
+    db.raw.prepare('INSERT INTO schema_migrations(version) VALUES (?)').run(CURRENT_SCHEMA_MIGRATION + 1);
     expect(() => assertSchema43Foundation(db.raw)).toThrow(/newer than supported/i);
   } finally { db.close(); }
 });
@@ -828,6 +829,8 @@ describe('classifyError (bounded error-code taxonomy)', () => {
     ['Usage: close-recovery-catchup --db PATH ...', 'invalid_args'],
     ['Database must include canonical schema 43 receipts', 'invalid_proof'],
     ['Database must include contiguous schema 43+ receipts (migrations 1 through current)', 'invalid_proof'],
+    ['Database schema is newer than supported by this binary', 'invalid_proof'],
+    ['Operator catch-up fulfillment schema drift', 'invalid_proof'],
     ['canonical schema 43 receipt is missing', 'invalid_proof'],
     ['canonical schema 43 objects are missing or drifted: operator_catchup_closure_witness_append_only_update', 'invalid_proof'],
     ['Recovery plan does not exist', 'invalid_proof'],

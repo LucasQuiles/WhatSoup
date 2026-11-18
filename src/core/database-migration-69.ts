@@ -1,4 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
+import { notOperatorCatchupSql } from './delivery-corroboration-sql.ts';
 
 export const OPERATOR_CATCHUP_PROOF_SQL = `
   SELECT op.id
@@ -34,6 +35,16 @@ const proofForInsert = OPERATOR_CATCHUP_PROOF_SQL
   .replaceAll('$planId', 'NEW.recovery_plan_id');
 
 const OBJECTS: ReadonlyArray<[string, string]> = [
+  ['operator_catchup_resolution_fulfillment_required', `CREATE TRIGGER operator_catchup_resolution_fulfillment_required
+    BEFORE INSERT ON inbound_disposition_links
+    WHEN NEW.disposition = 'superseded_by_operator_catchup'
+      AND NEW.original_fulfillment_confirmed <> 1
+    BEGIN SELECT RAISE(ABORT, 'Original request fulfillment must be confirmed'); END`],
+  ['operator_catchup_resolution_no_corroboration', `CREATE TRIGGER operator_catchup_resolution_no_corroboration
+    BEFORE INSERT ON turn_delivery_corroboration
+    WHEN EXISTS (SELECT 1 FROM outbound_ops candidate
+      WHERE candidate.id = NEW.corroborating_op_id AND NOT (${notOperatorCatchupSql('candidate')}))
+    BEGIN SELECT RAISE(ABORT, 'Operator catch-up cannot corroborate the original delivery'); END`],
   ['operator_catchup_resolutions', `CREATE TABLE operator_catchup_resolutions (
     recovery_plan_id TEXT NOT NULL REFERENCES recovery_plans(plan_id) ON DELETE RESTRICT,
     source_seq INTEGER NOT NULL REFERENCES inbound_events(seq) ON DELETE RESTRICT,
@@ -90,6 +101,8 @@ const OBJECTS: ReadonlyArray<[string, string]> = [
 export function runMigration69(db: DatabaseSync): void {
   db.exec('SAVEPOINT migration_69');
   try {
+    db.exec(`ALTER TABLE inbound_disposition_links ADD COLUMN original_fulfillment_confirmed
+      INTEGER NOT NULL DEFAULT 0 CHECK(original_fulfillment_confirmed IN (0, 1))`);
     for (const [, sql] of OBJECTS) db.exec(sql);
     db.exec('RELEASE migration_69');
   } catch (error) {
@@ -102,6 +115,11 @@ export function runMigration69(db: DatabaseSync): void {
 export function assertOperatorCatchupResolutionSchema(db: DatabaseSync): void {
   if (!db.prepare('SELECT version FROM schema_migrations WHERE version = 69').get()) {
     throw new Error('Operator catch-up resolution requires schema 69');
+  }
+  const fulfillment = db.prepare("SELECT type, \"notnull\", dflt_value FROM pragma_table_info('inbound_disposition_links') WHERE name = 'original_fulfillment_confirmed'").get() as
+    { type: string; notnull: number; dflt_value: string } | undefined;
+  if (!fulfillment || fulfillment.type !== 'INTEGER' || fulfillment.notnull !== 1 || fulfillment.dflt_value !== '0') {
+    throw new Error('Operator catch-up fulfillment schema drift');
   }
   const normalize = (sql: string) => sql.replace(/\s+/g, ' ').trim();
   for (const [name, sql] of OBJECTS) {
