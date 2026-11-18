@@ -41,7 +41,7 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   createSession: vi.fn(() => 9), incrementMessageCount: vi.fn(), updateSessionId: vi.fn(),
   updateSessionStatus: vi.fn(), updateTranscriptPath: vi.fn(), backfillSessionProvider: vi.fn(),
   resolveResumableAgentSession: vi.fn(() => null), updateResumedSessionStatus: vi.fn(),
-  getSessionTurnCount: vi.fn(() => null),
+  getSessionTurnCount: vi.fn(() => null), resetSessionTurnCount: vi.fn(),
 }));
 vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts', () => ({
   sha256File: vi.fn(() => 'a'.repeat(64)),
