@@ -23,7 +23,7 @@ import {
 import { admitHomeConfinedPath, isCanonicalAbsolutePath, isPhysicallyInsideHome } from '../lib/home-confinement.ts';
 import { resolveLaunchdPlistRenderOptions } from './launchd-render-options.ts';
 import { compareGovernedLaunchdEnv, type GovernedEnvComparison } from './launchd-env-drift.ts';
-import { readFileFlags } from './launchd-plist-flags.ts';
+import { canWriteFolder, readFileFlags } from './launchd-plist-flags.ts';
 import { repoRoot, tmpRoot, xdgDir } from './paths.ts';
 import { SIGNAL } from '../lib/signals.ts';
 
@@ -448,13 +448,16 @@ function readOwnedLaunchdPlist(name: string, filePath: string): string | null {
 
 /** sys/stat.h UF_IMMUTABLE, UF_APPEND, SF_IMMUTABLE, SF_APPEND and SF_NOUNLINK: unlink(2) fails while one is set. */
 const UNLINK_BLOCKING_FILE_FLAGS = 0x2 | 0x4 | 0x20000 | 0x40000 | 0x100000;
+/** UF_IMMUTABLE, UF_APPEND, SF_IMMUTABLE and SF_APPEND on a folder: unlink(2) of an entry in it fails while one is set. */
+const UNLINK_BLOCKING_FOLDER_FLAGS = 0x2 | 0x4 | 0x20000 | 0x40000;
 
 /**
  * #3829: disable() boots the job out and then unlinks its plist. A protected
  * plist (a root-owned `uchg` plist is a documented configuration, see
- * docs/runbooks/release-deployment.md) cannot be unlinked, so the bootout would
- * leave the job stopped with its plist kept. Refuse first, leaving the job
- * loaded; flags that cannot be read refuse too.
+ * docs/runbooks/release-deployment.md) cannot be unlinked, and neither can a
+ * plist whose LaunchAgents folder is immutable, append-only or not writable, so
+ * the bootout would leave the job stopped with its plist kept. Refuse first,
+ * leaving the job loaded; flags that cannot be read refuse too.
  */
 function assertLaunchdPlistRemovable(name: string, filePath: string): void {
   let flags: number;
@@ -468,6 +471,20 @@ function assertLaunchdPlistRemovable(name: string, filePath: string): void {
   if ((flags & UNLINK_BLOCKING_FILE_FLAGS) !== 0) {
     throw new Error(
       `launchd plist for ${launchdLabel(name)} carries an immutable, append-only or no-unlink file flag and cannot be removed; the job was left loaded`,
+    );
+  }
+  const folder = path.dirname(filePath);
+  let folderFlags: number;
+  try {
+    folderFlags = readFileFlags(folder);
+  } catch (error) {
+    throw new Error(
+      `cannot read the file flags of the folder that holds the launchd plist for ${launchdLabel(name)}; the job was left loaded and the plist kept: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if ((folderFlags & UNLINK_BLOCKING_FOLDER_FLAGS) !== 0 || !canWriteFolder(folder)) {
+    throw new Error(
+      `the folder that holds the launchd plist for ${launchdLabel(name)} is immutable, append-only or not writable, so the plist cannot be removed; the job was left loaded`,
     );
   }
 }
@@ -1010,7 +1027,7 @@ class LaunchdServiceManager extends BaseServiceManager {
     this.bootedOutServices.delete(name);
   }
 
-  /** Only the file flags are checked here; stop() and disable() still check the identity. */
+  /** Only the removal checks of the plist and its folder run here; stop() and disable() still check the identity. */
   assertCanDisable(name: string): void {
     assertValidLaunchdInstanceName(name);
     const dest = plistPath(name);
