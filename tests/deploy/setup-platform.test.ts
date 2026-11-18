@@ -144,6 +144,10 @@ afterEach(() => {
 
 const releaseDriftUnits = ['whatsoup-release-drift.service', 'whatsoup-release-drift.timer'];
 const releaseDriftWrapper = 'whatsoup-release-drift-linux.sh';
+// The migration warning for a label still set as WHATSOUP_INSTANCE, and the command it prints.
+const oldLabelWarning = 'no longer reads WHATSOUP_INSTANCE';
+const labelFileCommand =
+  '(set -C; umask 077; echo WHATSOUP_RELEASE_DRIFT_INSTANCE=<instance> > ~/.config/whatsoup/release-drift.env)';
 
 /** A release whose drift scheduler records its arguments instead of observing anything. */
 function fakeObservedRelease(): { launcher: string; argsFile: string } {
@@ -700,6 +704,9 @@ describe('deploy/setup.sh platform portability', () => {
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(fs.existsSync(path.join(home, '.config', 'whatsoup', 'release-drift.env'))).toBe(false);
     expect(result.stdout).toContain('~/.config/whatsoup/release-drift.env');
+    // Nothing set WHATSOUP_INSTANCE before setup ran: the plain note, not the migration warning.
+    expect(result.stdout).toContain('Release-drift instance label not set');
+    expect(result.stdout).not.toContain(oldLabelWarning);
 
     // Other sources set WHATSOUP_INSTANCE for other purposes: the shared file that
     // every BOT ERRORS unit loads, and the user manager's environment.
@@ -857,6 +864,104 @@ describe('deploy/setup.sh platform portability', () => {
     expect(fs.existsSync(path.join(home, '.config', 'whatsoup', 'release-drift.env'))).toBe(false);
     // Refused before the host dependency plan, so not even that ran.
     expect(fs.existsSync(path.join(home, 'setup-events.log'))).toBe(false);
+  });
+
+  // A unit installed by hand took its label from WHATSOUP_INSTANCE, set in a drop-in
+  // or in bot-errors.env, which that unit loaded. Setup replaces the unit and keeps
+  // both, and the wrapper reads only the label file.
+  it.each([
+    {
+      source: 'a drop-in of the unit',
+      file: ['.config', 'systemd', 'user', 'whatsoup-release-drift.service.d', 'instance.conf'],
+      content: '[Service]\nEnvironment=WHATSOUP_INSTANCE=bot-a\n',
+      named: 'whatsoup-release-drift.service.d',
+    },
+    {
+      source: 'bot-errors.env',
+      file: ['.config', 'whatsoup', 'bot-errors.env'],
+      content: 'WHATSOUP_INSTANCE=bot-a\n',
+      named: 'bot-errors.env',
+    },
+  ])('Linux setup replay without a label file warns with the label-file command when $source sets WHATSOUP_INSTANCE', ({ file, content, named }) => {
+    const home = makeTempRoot('whatsoup-setup-home-');
+    const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    const profile = path.join(home, 'profiles', 'testhost.json');
+    const oldSetting = path.join(home, ...file);
+    writeHealthProfile(profile);
+    writeLinuxSetupShims(shimDir);
+    fs.mkdirSync(path.dirname(oldSetting), { recursive: true });
+    fs.writeFileSync(oldSetting, content, 'utf8');
+
+    const result = runLinuxSetupReplay(home, shimDir, {
+      BOT_ERRORS_HEALTH_PROFILE: profile,
+      WHATSOUP_RELEASE_DRIFT_INSTANCE: '',
+    });
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const lines = result.stdout.split('\n');
+    const warning = lines.findIndex((line) => line.includes(oldLabelWarning));
+    expect(warning, result.stdout).toBeGreaterThanOrEqual(0);
+    expect(lines[warning]).toContain('⚠');
+    expect(lines[warning]).toContain(named);
+    // The warning's own copy of the command, so the closing hint cannot satisfy this case.
+    expect(lines[warning + 1]?.trim()).toBe(labelFileCommand);
+    // Setup copies no label from the old setting.
+    expect(fs.existsSync(path.join(home, '.config', 'whatsoup', 'release-drift.env'))).toBe(false);
+  });
+
+  it('Linux setup replay gives no WHATSOUP_INSTANCE migration warning when the label file exists', () => {
+    const home = makeTempRoot('whatsoup-setup-home-');
+    const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    const profile = path.join(home, 'profiles', 'testhost.json');
+    const dropIn = path.join(home, '.config', 'systemd', 'user', 'whatsoup-release-drift.service.d', 'instance.conf');
+    const labelFile = path.join(home, '.config', 'whatsoup', 'release-drift.env');
+    writeHealthProfile(profile);
+    writeLinuxSetupShims(shimDir);
+    fs.mkdirSync(path.dirname(dropIn), { recursive: true });
+    fs.writeFileSync(dropIn, '[Service]\nEnvironment=WHATSOUP_INSTANCE=bot-a\n', 'utf8');
+    fs.mkdirSync(path.dirname(labelFile), { recursive: true });
+    fs.writeFileSync(labelFile, 'WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-a\n', 'utf8');
+
+    const result = runLinuxSetupReplay(home, shimDir, {
+      BOT_ERRORS_HEALTH_PROFILE: profile,
+      WHATSOUP_RELEASE_DRIFT_INSTANCE: '',
+    });
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain('Existing release-drift instance label preserved');
+    expect(result.stdout).not.toContain(oldLabelWarning);
+  });
+
+  it('Linux setup replay warns about a label file it cannot read and still completes', () => {
+    // Root can read a mode-000 file, so this case cannot be built as root.
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      return;
+    }
+    const home = makeTempRoot('whatsoup-setup-home-');
+    const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    const profile = path.join(home, 'profiles', 'testhost.json');
+    const labelFile = path.join(home, '.config', 'whatsoup', 'release-drift.env');
+    writeHealthProfile(profile);
+    writeLinuxSetupShims(shimDir);
+    fs.mkdirSync(path.dirname(labelFile), { recursive: true });
+    fs.writeFileSync(labelFile, 'WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-b\n', 'utf8');
+    fs.chmodSync(labelFile, 0o000);
+    const before = fs.statSync(labelFile);
+
+    const result = runLinuxSetupReplay(home, shimDir, {
+      BOT_ERRORS_HEALTH_PROFILE: profile,
+      WHATSOUP_RELEASE_DRIFT_INSTANCE: '',
+    });
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain('cannot read ~/.config/whatsoup/release-drift.env');
+    // Setup went on past the label block: it wrote bot-errors.env and reached its last step.
+    expect(fs.existsSync(path.join(home, '.config', 'whatsoup', 'bot-errors.env'))).toBe(true);
+    expect(result.stdout).toContain('[7/7] Checking API keys');
+    const after = fs.statSync(labelFile);
+    expect(after.ino, 'setup replaced the label file').toBe(before.ino);
+    expect(after.size, 'setup changed the label file').toBe(before.size);
+    expect(after.mode, 'setup changed the label file mode').toBe(before.mode);
   });
 });
 
