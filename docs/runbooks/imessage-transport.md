@@ -209,7 +209,7 @@ The iMessage chat.db `SUBMESSAGES_TYPE_TABLE` codes the parser accepts:
 |---|---|
 | `2000`-`2005` | tapback add: love, like, dislike, laugh, emphasize, question (in that order) |
 | `3000`-`3005` | tapback removal counterparts (same emoji ordering) |
-| `0`, null, anything else | not a reaction — falls through to text surfacing |
+| `0`, null, anything else | not a reaction: parsed as an ordinary message (kind `text` when it has text, otherwise kind `other`, for which the adapter emits no message or reaction event) |
 
 The port (`reactionTypeToEmoji` in `bluebubbles-port.ts`) emits a
 `ReactionEvent` with the canonical tapback emoji + `removed` flag for codes
@@ -217,8 +217,11 @@ in the valid ranges. Removal events retain the emoji being removed rather
 than replacing it with an empty string. Non-integer numeric values (NaN,
 2000.5, etc.) and out-of-range codes (1999, 2006, 4000, negative numbers)
 are handled the same way: `reactionTypeToEmoji` returns `null` and the record
-is parsed as an ordinary message, which surfaces as text when it carries
-text and as kind `other` when it does not.
+is parsed as an ordinary message. With text it becomes kind `text` and goes
+through normal message handling; without text it becomes kind `other`, for
+which the adapter emits no message or reaction event. The adapter checks an
+outbound record for a read receipt before it checks the kind, so an
+outbound `other` record can still emit a read receipt.
 
 **Outbound symmetry note:** the OUTBOUND `/message/react` endpoint uses
 string reaction kinds (`'love'`, `'-like'`, etc.) — see
@@ -229,23 +232,45 @@ BlueBubbles response representations round-trip through one mapping.
 
 - The adapter classifies backend failures (`mapPortError` and
   `isImessageTransient` in `adapter.ts`), rather than the bot-errors
-  dispatcher. BlueBubbles 5xx responses except 501, BlueBubbles request
-  failures (the port wraps every HTTP client error as a 503
-  `TransportError`), and imsg socket failures and RPC timeouts map to
-  `TransientProviderError`; `UnsupportedMethod` is permanent.
-- An imsg send whose request was already written is the exception: a
-  socket error, end or close, or an RPC timeout after the write maps to
-  `SendAmbiguousError` (the port reports `RequestAbortedAfterWrite`). So do
-  an internal RPC error (`-32603`) on a send and a send acknowledged with
-  `ok: true` but no message id. Treat each of these as unknown delivery and
-  do not retry it: a retry could duplicate the message. A socket failure
-  before the request was written stays transient.
-- The bot-errors dispatcher does not classify iMessage provider errors. It
-  treats a failed delivery of its own as transient when the error text
-  contains one of its generic transport signatures
-  (`_TRANSIENT_TRANSPORT_SIGNATURES` in `bot-errors-dispatcher.py`, which
-  include `connection lost` and `connection closed`); such a failure spends
-  the separate transient retry budget instead of a permanent attempt.
+  dispatcher. These map to `TransientProviderError`, which is marked
+  retryable: a BlueBubbles answer with a 5xx status other than 501 (the
+  port keeps the status of any non-2xx answer as `HttpError`), a
+  BlueBubbles request that the HTTP client rejects, for example when no
+  answer arrives within 30 seconds (only that rejection becomes a 503
+  `TransportError`), a BlueBubbles answer that is not valid JSON or a send
+  answer without a message GUID (`MalformedResponse`, 502), an imsg send
+  answer with neither a message id nor `ok: true` (502), and imsg socket
+  failures and RPC timeouts before the request was written.
+  `UnsupportedMethod` is permanent.
+- An imsg send whose request was already written maps to
+  `SendAmbiguousError` instead: a socket error, end or close, or an RPC
+  timeout after the write (the port reports `RequestAbortedAfterWrite`).
+  So do an internal RPC error (`-32603`) on a send and a send acknowledged
+  with `ok: true` but no message id. Treat each of these as unknown
+  delivery and do not retry it: a retry could duplicate the message.
+- A submitted send whose answer was lost or unusable may already have
+  been delivered, whatever class the adapter gives it. For BlueBubbles,
+  that is a rejected or timed-out request, a 5xx answer other than 501, a
+  `POST /message/text` answer that is not valid JSON or has no GUID (all
+  transient), or an answer whose body could not be read, which the adapter
+  classes as permanent. For imsg, it is a 502 send answer. On either
+  backend, corroborate delivery in the conversation before you resend such
+  a send.
+- The bot-errors dispatcher does not classify iMessage provider errors.
+  When a delivery of its own fails, it first checks for an
+  `AmbiguousSendOutcome` raised after its JSON-RPC request went out and
+  holds that delivery (`hold_ambiguous_send`) instead of requeuing it,
+  before any signature check. Any other failure is counted as a permanent
+  attempt, and its error text is then checked against the generic
+  transport signatures (`_TRANSIENT_TRANSPORT_SIGNATURES` in
+  `bot-errors-dispatcher.py`, which include `connection lost` and
+  `connection closed`). A match is requeued with that attempt rolled back
+  only while the separate transient budget
+  (`BOT_ERRORS_TRANSIENT_MAX_ATTEMPTS`) lasts; once it is spent, the
+  failure takes the permanent path: further retries with backoff, an email
+  fallback that can start at the third permanent attempt, and a dead
+  letter only when the permanent budget
+  (`BOT_ERRORS_DELIVERY_MAX_ATTEMPTS`) is spent.
 - No iMessage source is auto-close-protected today: the dispatcher's
   `AUTOCLOSE_PROTECTED_SOURCES` set in `bot-errors-dispatcher.py` names no
   BlueBubbles or iMessage source, and neither `bluebubbles_connection_lost`
