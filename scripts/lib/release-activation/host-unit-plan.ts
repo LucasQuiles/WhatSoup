@@ -72,8 +72,13 @@ const INTERPRETER = /^(?:ba|z|da|k|fi)?sh$|^(?:env|node|nodejs|osascript|perl|ru
 const PYTHON_MODULE = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/;
 const ENVIRONMENT_VARIABLES = /<key>\s*EnvironmentVariables\s*<\/key>\s*<dict>([\s\S]*?)<\/dict>/g;
 const ENVIRONMENT_VARIABLE = /<key>\s*([A-Za-z_][A-Za-z0-9_]*)\s*<\/key>\s*<string>[\s\S]*?<\/string>/g;
-// Each makes an interpreter, or the dynamic loader under it, read code or options from outside the launched script.
-const INTERPRETER_ENVIRONMENT_KEY = /^(?:PYTHON|DYLD_|LD_)|^(?:NODE_OPTIONS|NODE_PATH|BASH_ENV|ENV|PERL5LIB|PERL5OPT|PERLLIB|RUBYOPT|RUBYLIB)$/;
+// Each makes an interpreter, or the dynamic loader under it, read code or options from outside the launched
+// script; HOME and ZDOTDIR move zsh startup files and Python's user site directory.
+const INTERPRETER_ENVIRONMENT_KEY = /^(?:PYTHON|DYLD_|LD_)|^(?:NODE_OPTIONS|NODE_PATH|BASH_ENV|ENV|PERL5LIB|PERL5OPT|PERLLIB|RUBYOPT|RUBYLIB|HOME|ZDOTDIR)$/;
+// The only interpreters outside the target release that a path-rebase job with no closed contract may name.
+const SYSTEM_INTERPRETERS = new Set(['/usr/bin/python3', '/bin/bash', '/bin/sh', '/bin/zsh']);
+// Every option of deploy/scripts/bot-errors-runner.py parse_args besides --help; each takes exactly one value.
+const RUNNER_VALUE_OPTIONS: readonly string[] = ['--instance', '--source', '--summary', '--severity', '--event-id', '--cwd', '--timeout', '--capture-limit', '--log-hint', '--diagnostic'];
 
 function absolute(value: unknown): string | null {
   return typeof value === 'string' && path.isAbsolute(value) ? path.normalize(value).replace(/\/+$/, '') || '/' : null;
@@ -289,10 +294,21 @@ function stagePathRebase(installed: string, expectCurrent: string, release: stri
       ? { staged, error: null }
       : { staged: null, error: 'staged ProgramArguments do not select the target release' };
   }
-  // No closed contract matched (only com.bot-errors.health reaches here): the file launchd starts must be in
-  // the release, and no environment variable may make its interpreter load code from anywhere else.
-  const executed = executedPathError(stagedParsed.programArguments, release);
-  if (executed !== null) return { staged: null, error: executed };
+  // No closed contract matched (only com.bot-errors.health reaches here). This proves the interpreter binary, the
+  // file it runs, and the one command the release's bot-errors runner forwards, under an environment that cannot
+  // redirect an interpreter. It does not prove what those release files start later.
+  const executed = executedFile(stagedParsed.programArguments, release);
+  if ('error' in executed) return { staged: null, error: executed.error };
+  const runner = `${release}/deploy/scripts/bot-errors-runner.py`;
+  if (executed.file === runner) {
+    const forwarded = runnerCommand(stagedParsed.programArguments.slice(executed.index + 1));
+    if (forwarded === null) return { staged: null, error: 'bot-errors runner arguments are not reviewed options followed by -- and a command' };
+    if (forwarded.command !== null) {
+      const command = executedFile(forwarded.command, release);
+      if ('error' in command) return { staged: null, error: `bot-errors runner command: ${command.error}` };
+      if (command.file === runner) return { staged: null, error: 'bot-errors runner command runs the runner again' };
+    }
+  }
   if (!installedEnvironmentClear(staged, (key) => INTERPRETER_ENVIRONMENT_KEY.test(key))) {
     return { staged: null, error: 'EnvironmentVariables are malformed or set an interpreter-affecting key' };
   }
@@ -300,21 +316,43 @@ function stagePathRebase(installed: string, expectCurrent: string, release: stri
 }
 
 /**
- * The file launchd starts: the script argument when argv[0] is an interpreter, otherwise argv[0]. It
- * must be a closed-form path under the release. Inline (`-c`, `-lc`), module (`-m`) and other option
- * forms name no script file, so they refuse.
+ * The file an argv runs and its index. An interpreter, recognized by basename, must itself be a closed-form
+ * path in SYSTEM_INTERPRETERS or under the release, and runs the script argument of a bounded launch form;
+ * inline (`-c`, `-lc`), module (`-m`) and other option forms name no script file. Any other program runs
+ * itself. The file run must be a closed-form path under the release.
  */
-function executedPathError(programArguments: readonly string[], release: string): string | null {
+function executedFile(programArguments: readonly string[], release: string): { file: string; index: number } | { error: string } {
   const executable = programArguments[0] ?? '';
-  let executed: string | undefined = executable;
+  let index = 0;
   if (INTERPRETER.test(path.basename(executable))) {
+    if (!closedFormPath(executable) || !(SYSTEM_INTERPRETERS.has(executable) || hasPathUnder(executable, release))) {
+      return { error: 'interpreter is not a closed-form system interpreter or a path under the target release' };
+    }
     const scriptIndex = interpreterScriptIndex(programArguments);
-    if (typeof scriptIndex !== 'number') return 'interpreter launch form names no script argument (inline, module, or option form)';
-    executed = programArguments[scriptIndex];
+    if (typeof scriptIndex !== 'number') return { error: 'interpreter launch form names no script argument (inline, module, or option form)' };
+    index = scriptIndex;
   }
-  return executed !== undefined && closedFormPath(executed) && hasPathUnder(executed, release)
-    ? null
-    : 'executed program or script is not a closed-form path under the target release';
+  const file = programArguments[index];
+  return file !== undefined && closedFormPath(file) && hasPathUnder(file, release)
+    ? { file, index }
+    : { error: 'executed program or script is not a closed-form path under the target release' };
+}
+
+/**
+ * The command deploy/scripts/bot-errors-runner.py passes to subprocess.run. Its argparse `command` is a
+ * REMAINDER: it starts at the first argument not taken as an option or an option value, with or without `--`.
+ * Only three forms are read: option-value pairs, then `--` and the command; option pairs alone, which run
+ * nothing ("command required"); or only unrecognized long options such as `--daily`, which argparse rejects
+ * before anything runs. Any other form returns null.
+ */
+function runnerCommand(runnerArguments: readonly string[]): { command: readonly string[] | null } | null {
+  const unrecognized = (token: string): boolean => /^--[a-z][a-z0-9-]*$/.test(token)
+    && ![...RUNNER_VALUE_OPTIONS, '--help'].some((option) => option.startsWith(token));
+  if (runnerArguments.length > 0 && runnerArguments.every(unrecognized)) return { command: null };
+  let index = 0;
+  while (RUNNER_VALUE_OPTIONS.includes(runnerArguments[index] ?? '') && /^[^-]/.test(runnerArguments[index + 1] ?? '-')) index += 2;
+  if (index === runnerArguments.length) return { command: null };
+  return runnerArguments[index] === '--' && index + 1 < runnerArguments.length ? { command: runnerArguments.slice(index + 1) } : null;
 }
 /**
  * A selector parser rejecting an unrelated app is not itself evidence that it
