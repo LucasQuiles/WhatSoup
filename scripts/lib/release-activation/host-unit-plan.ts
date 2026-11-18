@@ -298,9 +298,11 @@ function stagePathRebase(installed: string, expectCurrent: string, release: stri
       ? { staged, error: null }
       : { staged: null, error: 'staged ProgramArguments do not select the target release' };
   }
-  // No closed contract matched (only com.bot-errors.health reaches here). This proves the interpreter binary, the
-  // file it runs, and the one command the release's bot-errors runner forwards, under an environment that cannot
-  // redirect an interpreter. It does not prove what those release files start later.
+  // No closed contract matched (only com.bot-errors.health reaches here). This proves the interpreter binary's
+  // path, the file it runs, and the one command the release's bot-errors runner forwards, and it refuses the listed
+  // environment keys that redirect an interpreter or a developer-tools stub such as /usr/bin/python3. It does not
+  // prove what those release files start later, or the startup files under the job's real home folder (Python's
+  // user-site .pth files without -I or -s, zsh's ~/.zshenv): writing those takes the same user's own access.
   const executed = executedFile(stagedParsed.programArguments, release);
   if ('error' in executed) return { staged: null, error: executed.error };
   const runner = `${release}/deploy/scripts/bot-errors-runner.py`;

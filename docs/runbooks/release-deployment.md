@@ -631,17 +631,29 @@ The job's `EnvironmentVariables` must be one well-formed block with unique keys,
 read as for the Python module form above, and may not set `PYTHON*`,
 `NODE_OPTIONS`, `NODE_PATH`, `BASH_ENV`, `ENV`, `PERL5LIB`, `PERL5OPT`,
 `PERLLIB`, `RUBYOPT`, `RUBYLIB`, `DYLD_*`, `LD_*`, `HOME` or `ZDOTDIR`, each of
-which can make an interpreter load code from outside the release. The plain form
+which can make an interpreter load code from outside the release. Nor may it set
+`DEVELOPER_DIR`, `TOOLCHAINS`, `SDKROOT` or any `xcrun_` key in any spelling:
+`/usr/bin/python3` is a developer-tools stub that runs the matching tool from the
+active developer directory, and `xcrun(1)` and `xcode-select(1)` document those
+keys as choosing that directory, toolchain or SDK. Changing the system-wide
+selection (`xcode-select --switch`) needs superuser rights. The plain form
 that `deploy/scripts/install-bot-errors-health-launchd.sh` installs passes:
 `/usr/bin/python3` runs the release's runner, the runner forwards
 `/usr/bin/python3` with the release's `bot-errors-health-check.py`, and the
 environment sets only `PATH` and `BOT_ERRORS_*` keys. A job installed with
 another interpreter through `BOT_ERRORS_PYTHON` refuses: rerun the installer
 without `BOT_ERRORS_PYTHON`, with `BOT_ERRORS_REPO_ROOT` set to the job's current
-root, then plan again. Planning proves the interpreter binary, the file it runs,
-and the runner's one forwarded command. It does not prove what those release
-files start later. It also leaves two kinds of value as they are: a value outside
-the shell-token grammar that names the old release without its root string (for
+root, then plan again.
+
+Planning proves the interpreter binary's path, the file it runs, and the
+runner's one forwarded command, and it refuses the environment keys above that
+redirect an interpreter or the stub. It does not prove what those release files
+start later. It does not check startup files under the job's real home folder,
+such as Python's user-site `.pth` files when the interpreter runs without `-I`
+or `-s`, or zsh's `~/.zshenv`. Writing them takes the same user's own access,
+which, like the other same-user writers this runbook names, planning does not
+detect. It also leaves two kinds of value as they are: a value outside the
+shell-token grammar that names the old release without its root string (for
 example `--config=<parent>/./<name>/x`), and a closed-form `WorkingDirectory` or
 runner `--cwd` outside the release.
 
