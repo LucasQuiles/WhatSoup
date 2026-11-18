@@ -1725,6 +1725,16 @@
       "disposition": "identity_receipt_unverifiable_fail_closed_until_fresh_match_no_automatic_credential_write",
       "owner": "src/runtimes/agent/account-identity-verifier.ts",
       "test": "tests/runtimes/agent/account-identity-verifier.test.ts"
+    },
+    "codex_resume_needs_per_chat_scope": {
+      "disposition": "startup_config_warning_per_restart_until_codex_single_or_shared_scope_resume_proven_no_clear",
+      "owner": "src/runtimes/agent/codex-deferred-defect-check.ts",
+      "test": "tests/runtimes/agent/codex-deferred-defect-check.test.ts"
+    },
+    "codex_resume_unproven_under_host_admission": {
+      "disposition": "startup_config_warning_per_restart_until_codex_host_admission_resume_proven_no_clear",
+      "owner": "src/runtimes/agent/codex-deferred-defect-check.ts",
+      "test": "tests/runtimes/agent/codex-deferred-defect-check.test.ts"
     }
   }
 }
