@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule WhatSoup release drift+currency observer (5-min parity with macOS StartInterval=300)
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+RandomizedDelaySec=45
+Persistent=true
+
+[Install]
+WantedBy=timers.target
