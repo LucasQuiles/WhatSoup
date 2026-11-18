@@ -2407,9 +2407,9 @@ The queue checks a message under two keys when its own conversation key and the 
 
 **Unsupported setting.** `authorization` is rejected. It does not authorize client output. Earlier releases accepted the field and never checked it, so a stored policy can still contain it. Config load, API writes and the restart preflight all reject such a policy, so the instance does not start. Upgrade in this order:
 
-1. **Inventory.** Before the switch, run the new release's side-effect-free instance preflight for each agent instance: `<pinned-node> --experimental-strip-types deploy/preflight-instance-check.ts <instance-name>`. Exit code 3 with a field of `clientOutputPolicies[N].authorization` names each policy to change.
+1. **Inventory.** Before the switch, run the new release's side-effect-free instance preflight for every instance: `<pinned-node> --experimental-strip-types deploy/preflight-instance-check.ts <instance-name>`. Run it as the service's user with the service's `XDG_CONFIG_HOME`. It reads `$XDG_CONFIG_HOME/whatsoup/instances/<instance-name>/config.json` (see [Instance Configuration](#instance-configuration-configjson)), so in another environment it checks another file or none. Each run reports only the first error. Exit code 3 with a field of `clientOutputPolicies[N].authorization` names one policy to change. A non-zero exit can also name another field, or a `config.json` that is missing, unreadable or not valid JSON.
 2. **Migrate.** On the running release, delete the `authorization` object from each named policy in the instance's `config.json` and keep the policy's other fields. That release ignores the field, so the edit changes no output decision and needs no restart.
-3. **Deploy.** Run the inventory again until it reports no `authorization` field, then deploy the new release and restart the instances.
+3. **Deploy.** Run the inventory again after each change. Deploy the new release and restart the instances only when the preflight exits 0 and prints `PREFLIGHT-INSTANCE: VALID` for every instance.
 4. **Recover.** If an instance still fails its preflight or config load at `clientOutputPolicies[N].authorization`, delete that object from `config.json` and restart the instance. No other field needs a change.
 
 Not covered:
