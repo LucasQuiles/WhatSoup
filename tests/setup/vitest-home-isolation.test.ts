@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { accessSync, constants, existsSync, realpathSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { accessSync, constants, existsSync, lstatSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, delimiter, dirname, isAbsolute, join, relative } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
+import { resolveWorkerTempRoot } from './vitest-run-root.ts';
+
+const root = process.cwd();
+const tmp = trackTmpDirs('home-cleanup-');
 
 describe('Vitest filesystem isolation', () => {
   it('routes HOME and XDG roots into a worker-owned temporary directory', () => {
@@ -53,4 +59,67 @@ describe('Vitest filesystem isolation', () => {
       expect(() => accessSync(join(credentialBin, command), constants.X_OK)).not.toThrow();
     }
   });
+
+  // A nested run whose config has no globalSetup inherits this run's root through
+  // its environment, so its worker HOME nests there (else under /tmp). The child's
+  // own afterAll must still remove that exact HOME once its test file finishes.
+  it('removes the exact owned HOME after the child test process exits', () => {
+    const dir = tmp.make('child');
+    const expectedParent = resolveWorkerTempRoot();
+    const witnessPath = join(dir, 'home-witness.json');
+    const config = join(dir, 'vitest.config.mts');
+    writeFileSync(config, `export default ${JSON.stringify({
+      root: dir,
+      cacheDir: join(dir, '.vite'),
+      test: {
+        include: ['probe.test.mjs'],
+        setupFiles: [resolve(root, 'tests/setup/bot-errors-vitest-isolation.ts')],
+        maxWorkers: 1,
+        fileParallelism: false,
+      },
+    })};`);
+    writeFileSync(join(dir, 'probe.test.mjs'), [
+      `import { it, expect } from ${JSON.stringify(resolve(root, 'node_modules/vitest/dist/index.js'))};`,
+      "import { lstatSync, readFileSync, writeFileSync } from 'node:fs';",
+      "import { join } from 'node:path';",
+      "it('records the live owned HOME', () => {",
+      '  const home = process.env.WHATSOUP_VITEST_HOME;',
+      '  expect(lstatSync(home).isDirectory()).toBe(true);',
+      "  const token = readFileSync(join(home, '.whatsoup-vitest-home'), 'utf8');",
+      '  expect(token.length).toBeGreaterThan(0);',
+      '  writeFileSync(process.env.WHATSOUP_HOME_WITNESS, JSON.stringify({ home, token }));',
+      '});',
+    ].join('\n'));
+    const child = spawnSync(process.execPath, [
+      resolve(root, 'node_modules/vitest/vitest.mjs'), 'run', '--config', config, '--pool=forks',
+    ], {
+      cwd: root,
+      env: { ...process.env, WHATSOUP_HOME_WITNESS: witnessPath },
+      encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024,
+    });
+    const output = child.stdout + child.stderr;
+    let witness: { home: string; token: string } | undefined;
+    try {
+      if (existsSync(witnessPath)) {
+        witness = JSON.parse(readFileSync(witnessPath, 'utf8')) as { home: string; token: string };
+      }
+      expect(child.error, output).toBeUndefined();
+      expect(child.signal, output).toBeNull();
+      expect(child.status, output).toBe(0);
+      expect(witness, `the child did not record its live HOME:\n${output}`).toBeDefined();
+      expect(dirname(witness!.home)).toBe(expectedParent);
+      expect(basename(witness!.home)).toMatch(/^ws-vh-/);
+      expect(lstatSync(witness!.home, { throwIfNoEntry: false }), `child HOME survived process exit: ${witness!.home}`).toBeUndefined();
+    } finally {
+      // A failing regression must not leave its own witnessed fixture behind.
+      if (witness && dirname(witness.home) === expectedParent && basename(witness.home).startsWith('ws-vh-')) {
+        const stat = lstatSync(witness.home, { throwIfNoEntry: false });
+        if (stat?.isDirectory() && !stat.isSymbolicLink()
+          && realpathSync(witness.home) === witness.home
+          && readFileSync(join(witness.home, '.whatsoup-vitest-home'), 'utf8') === witness.token) {
+          rmSync(witness.home, { recursive: true, force: true });
+        }
+      }
+    }
+  }, 45_000);
 });
