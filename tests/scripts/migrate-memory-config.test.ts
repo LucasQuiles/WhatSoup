@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -6,6 +6,7 @@ import {
   findConfigFiles,
   migrateMemoryConfigFile,
   parseArgs,
+  rollbackConfigFile,
   runMigration,
   runRollback,
 } from '../../scripts/migrate-memory-config.ts';
@@ -227,9 +228,14 @@ describe('migrate-memory-config rollback mode', () => {
       expect(results).toHaveLength(1);
       expect(results[0].configPath).toBe(configPath);
       expect(results[0].backupPath).toContain(backupStamp);
+      expect(results[0].safetySnapshotPath).toBeNull();
       expect(results[0].wouldRestore).toBe(true);
       expect(results[0].restored).toBe(false);
       expect(fs.readFileSync(configPath, 'utf-8')).toBe(currentContent);
+      expect(fs.existsSync(results[0].backupPath)).toBe(true);
+      expect(
+        fs.readdirSync(path.dirname(configPath)).filter((name) => name.includes('.rollback-')),
+      ).toEqual([]);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
@@ -237,6 +243,7 @@ describe('migrate-memory-config rollback mode', () => {
 
   it('write mode restores the newest backup atomically', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-rollback-test-'));
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     try {
       const { configPath, backupPath } = makeRollbackFixture(tmp, 'test-bot');
 
@@ -246,7 +253,72 @@ describe('migrate-memory-config rollback mode', () => {
       expect(results[0].backupPath).toBe(backupPath);
       expect(results[0].restored).toBe(true);
       expect(fs.readFileSync(configPath, 'utf-8')).toBe(backupContent);
-      expect(fs.existsSync(backupPath)).toBe(false);
+      // Rollback no longer consumes the backup it restores from.
+      expect(fs.readFileSync(backupPath, 'utf-8')).toBe(backupContent);
+      const snapshotPath = results[0].safetySnapshotPath;
+      expect(snapshotPath).toMatch(/config\.json\.rollback-safety-/);
+      expect(fs.readFileSync(String(snapshotPath), 'utf-8')).toBe(currentContent);
+      const printed = log.mock.calls.flat().join('\n');
+      expect(printed).toContain(backupPath);
+      expect(printed).toContain(String(snapshotPath));
+    } finally {
+      log.mockRestore();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  // @skip-env Windows does not preserve POSIX file modes.
+  it.skipIf(isWindows)('write mode leaves the restored config and its safety snapshot owner-only', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-rollback-test-'));
+    try {
+      const { configPath, backupPath } = makeRollbackFixture(tmp, 'test-bot');
+      fs.chmodSync(configPath, 0o644);
+      fs.chmodSync(backupPath, 0o644);
+
+      const result = rollbackConfigFile(configPath, { write: true });
+
+      expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
+      expect(fs.statSync(String(result.safetySnapshotPath)).mode & 0o777).toBe(0o600);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('prints one JSON array that matches the returned results in JSON mode', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-rollback-test-'));
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      makeRollbackFixture(tmp, 'test-bot');
+
+      const results = runRollback(['--root', tmp, '--instance', 'test-bot', '--json']);
+
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toEqual(results);
+      expect(results[0].safetySnapshotPath).toBeNull();
+    } finally {
+      log.mockRestore();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('repeated rollback keeps every backup and never selects a safety snapshot', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-rollback-test-'));
+    try {
+      const { configPath, backupPath: newestBackupPath } = makeRollbackFixture(tmp, 'test-bot');
+      const olderBackupPath = `${configPath}.bak-2026-04-25T11-00-00-000Z`;
+      fs.writeFileSync(olderBackupPath, '{"older":true}\n');
+      const older = new Date(Date.now() - 120_000);
+      fs.utimesSync(olderBackupPath, older, older);
+
+      const first = rollbackConfigFile(configPath, { write: true });
+      const second = rollbackConfigFile(configPath, { write: true });
+
+      expect(first.backupPath).toBe(newestBackupPath);
+      expect(second.backupPath).toBe(newestBackupPath);
+      expect(first.safetySnapshotPath).not.toBe(second.safetySnapshotPath);
+      expect(fs.existsSync(newestBackupPath)).toBe(true);
+      expect(fs.existsSync(olderBackupPath)).toBe(true);
+      expect(fs.readFileSync(configPath, 'utf-8')).toBe(backupContent);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
@@ -356,6 +428,39 @@ describe('migrate-memory-config rollback operator errors', () => {
       expect(() =>
         runRollback(['--root', tmp, '--instance', 'no-bak-bot', '--write']),
       ).toThrowError(/no backups found/i);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the config and backup and removes its temp file when the replace fails', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-rollback-error-'));
+    try {
+      const dir = path.join(tmp, 'replace-failure-bot');
+      fs.mkdirSync(dir, { recursive: true });
+      const configPath = path.join(dir, 'config.json');
+      const backupPath = `${configPath}.bak-2026-04-25T12-00-00-000Z`;
+      fs.writeFileSync(configPath, currentContent);
+      fs.writeFileSync(backupPath, '{"restored":true}\n');
+      const past = new Date(Date.now() - 60_000);
+      fs.utimesSync(backupPath, past, past);
+      const failure = Object.assign(new Error('injected replace failure'), { code: 'EACCES' });
+
+      expect(() =>
+        rollbackConfigFile(
+          configPath,
+          { write: true },
+          {
+            replace: () => {
+              throw failure;
+            },
+          },
+        ),
+      ).toThrowError(/cannot restore backup \(permission denied\)/i);
+
+      expect(fs.readFileSync(configPath, 'utf-8')).toBe(currentContent);
+      expect(fs.readFileSync(backupPath, 'utf-8')).toBe('{"restored":true}\n');
+      expect(fs.readdirSync(dir).filter((name) => name.includes('.rollback-tmp-'))).toEqual([]);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
