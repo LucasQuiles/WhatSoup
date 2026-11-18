@@ -423,4 +423,44 @@ describe('OutboundQueue client output policy enforcement (#3613)', () => {
     expect(serializedAudits).not.toContain('A short reply.');
     expect(serializedAudits).not.toContain('policy evaluator unavailable');
   });
+
+  it('logs one warn line naming both keys when both distinct policy keys reject', async () => {
+    const questionPolicy = registryFor({
+      ...STRICT_POLICY,
+      conversationKey: OTHER_KEY,
+      maxQuestionMarks: 0,
+      blockedTerms: [],
+      rejectInternalArtifacts: false,
+      rejectWhatsAppJids: false,
+    }).get(OTHER_KEY)!;
+    const registry = new Map([
+      [CONVERSATION_KEY, rejectingPolicy(CONVERSATION_KEY)],
+      [OTHER_KEY, questionPolicy],
+    ]) as unknown as ClientOutputPolicyRegistry;
+    const { queue, messenger, durability } = makeQueue(registry);
+    queue.beginTurnEvidence('turn-dual-rejection', {
+      conversationKey: OTHER_KEY,
+      chatJid: OTHER_JID,
+    });
+
+    queue.enqueueText('A short reply?', 'answer');
+    const evidence = await queue.flushTurnEvidence('turn-dual-rejection');
+
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+    expect(durability.createOutboundOp).not.toHaveBeenCalled();
+    expect(evidence.withheldAnswerCount).toBe(1);
+    const warns = policyCalls('warn');
+    expect(warns).toHaveLength(1);
+    expect(warns[0]![0]).toEqual({
+      operation: 'client_output_policy',
+      decision: 'rejected',
+      conversationKey: CONVERSATION_KEY,
+      conversationKeys: [CONVERSATION_KEY, OTHER_KEY],
+      reason: 'client_output_policy',
+      violationCodes: ['max_code_points', 'max_question_marks'],
+      messageKind: 'answer',
+    });
+    expect(policyCalls('error')).toHaveLength(0);
+    expect(JSON.stringify(warns)).not.toContain('A short reply');
+  });
 });
