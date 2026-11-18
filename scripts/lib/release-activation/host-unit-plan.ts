@@ -73,8 +73,12 @@ const PYTHON_MODULE = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/;
 const ENVIRONMENT_VARIABLES = /<key>\s*EnvironmentVariables\s*<\/key>\s*<dict>([\s\S]*?)<\/dict>/g;
 const ENVIRONMENT_VARIABLE = /<key>\s*([A-Za-z_][A-Za-z0-9_]*)\s*<\/key>\s*<string>[\s\S]*?<\/string>/g;
 // Each makes an interpreter, or the dynamic loader under it, read code or options from outside the launched
-// script; HOME and ZDOTDIR move zsh startup files and Python's user site directory.
-const INTERPRETER_ENVIRONMENT_KEY = /^(?:PYTHON|DYLD_|LD_)|^(?:NODE_OPTIONS|NODE_PATH|BASH_ENV|ENV|PERL5LIB|PERL5OPT|PERLLIB|RUBYOPT|RUBYLIB|HOME|ZDOTDIR)$/;
+// script; HOME and ZDOTDIR move zsh startup files and Python's user site directory. DEVELOPER_DIR, TOOLCHAINS
+// and SDKROOT choose the developer directory, toolchain or SDK that a developer-tools stub such as
+// /usr/bin/python3 runs from (xcrun(1), xcode-select(1)).
+const INTERPRETER_ENVIRONMENT_KEY = /^(?:PYTHON|DYLD_|LD_)|^(?:NODE_OPTIONS|NODE_PATH|BASH_ENV|ENV|PERL5LIB|PERL5OPT|PERLLIB|RUBYOPT|RUBYLIB|HOME|ZDOTDIR|DEVELOPER_DIR|TOOLCHAINS|SDKROOT)$/;
+// xcrun(1) also reads xcrun_* settings in a stub's environment; any spelling of the prefix refuses.
+const XCRUN_ENVIRONMENT_KEY = /^xcrun_/i;
 // The only interpreters outside the target release that a path-rebase job with no closed contract may name.
 const SYSTEM_INTERPRETERS = new Set(['/usr/bin/python3', '/bin/bash', '/bin/sh', '/bin/zsh']);
 // Every option of deploy/scripts/bot-errors-runner.py parse_args besides --help; each takes exactly one value.
@@ -309,7 +313,7 @@ function stagePathRebase(installed: string, expectCurrent: string, release: stri
       if (command.file === runner) return { staged: null, error: 'bot-errors runner command runs the runner again' };
     }
   }
-  if (!installedEnvironmentClear(staged, (key) => INTERPRETER_ENVIRONMENT_KEY.test(key))) {
+  if (!installedEnvironmentClear(staged, (key) => INTERPRETER_ENVIRONMENT_KEY.test(key) || XCRUN_ENVIRONMENT_KEY.test(key))) {
     return { staged: null, error: 'EnvironmentVariables are malformed or set an interpreter-affecting key' };
   }
   return { staged, error: null };
