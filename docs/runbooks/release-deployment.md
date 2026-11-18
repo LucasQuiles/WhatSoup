@@ -770,7 +770,7 @@ Both selected release roots must also be normalized absolute
 shell-token paths matching `^/[A-Za-z0-9._/-]+$`; whitespace or shell metacharacters
 refuse rather than being interpolated into the wrapper.
 
-The only other `path-rebase` forms are the observed legacy timer argv contracts.
+The two legacy timer contracts pin the observed installed argv.
 `com.whatsoup.harness-maintenance` must be exactly
 `[/bin/bash, <home>/.local/libexec/fleet-reauth/maint-ccd-guard.sh, /bin/bash,
 <expect-current>/deploy/scripts/harness-maintenance.sh]`.
