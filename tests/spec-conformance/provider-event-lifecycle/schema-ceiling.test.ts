@@ -44,6 +44,64 @@ const bodyAllocationExpectations: ReadonlyArray<{
   { file: 'all', pattern: /schema_migrations\(version=(?<ledger>\d+)\)/g },
   { file: 'all', pattern: /\bv(?<ledger>\d+) write(?:-\s*| )compatib/g },
 ];
+// Every other statement that names a schema number, one pattern each, unique in its file, so
+// renumbering or dropping any single statement fails. `current` follows the code.
+const roles: Record<string, string> = { ...planned, current: String(CURRENT_SCHEMA_MIGRATION) };
+const statementPins: Readonly<Record<(typeof specFiles)[number], readonly RegExp[]>> = {
+  'requirements.md': [
+    /audited at schema 66; the current canonical schema is (?<current>\d+)\./g,
+    /Migration (?<reserved>\d+) is reserved for another pending migration batch, so the still-unpublished forward allocations move to migrations (?<terminal>\d+) and (?<ledger>\d+)\./g,
+    /reserved (?<reserved>\d+) and the forward (?<terminal>\d+)\/(?<ledger>\d+) allocations are planning numbers/g,
+    /migration (?<terminal>\d+) backfills legacy transfers/g,
+    /for migration-(?<ledger>\d+) turns, the final attempt/g,
+    /included in migration-(?<terminal>\d+) storage\/retention accounting/g,
+    /and migration (?<reserved>\d+) is reserved for another pending migration batch\. Historical lineage/g,
+    /Migration (?<ledger>\d+) may leave its immutable/g,
+    /The migration-(?<ledger>\d+)\s+marker may exist in the pre-restore source/g,
+    /the sole permitted removal of that v(?<ledger>\d+) row/g,
+    /leave v(?<ledger>\d+) drained\/read-only and roll forward/g,
+  ],
+  'design.md': [
+    /audited at schema 66; the current canonical schema is (?<current>\d+)\./g,
+    /lifecycle ledger as (?<ledger>\d+); migration (?<reserved>\d+) is reserved for another pending batch; recheck before implementation/g,
+    /and migration (?<reserved>\d+) is reserved for another pending migration batch\. The terminal-recovery prerequisite uses migration (?<terminal>\d+) for/g,
+    /Migration (?<terminal>\d+) does not alter historical 37-53/g,
+    /deletes it last\. Migration-(?<terminal>\d+)\s+storage accounting includes these rows/g,
+    /After the migration-(?<terminal>\d+) prerequisite merges, the lifecycle branch rebases/g,
+    /and allocates provider-event lifecycle\s+migration (?<ledger>\d+)\. It extends terminal\/job\/closure ownership/g,
+    /registered history through (?<terminal>\d+); deployed v42 databases/g,
+    /deployed v42 databases apply 43-(?<terminal>\d+), v40 databases/g,
+    /apply 41-(?<terminal>\d+), and the audited v66 baseline/g,
+    /the audited v66 baseline applies 67-(?<terminal>\d+)\./g,
+    /Migration (?<ledger>\d+) creates an\s+empty `provider_lifecycle_activation` table/g,
+    /and migration (?<reserved>\d+) is reserved for another pending migration batch\. Land the terminal recovery prerequisite on migration (?<terminal>\d+),/g,
+    /Migration (?<ledger>\d+) creates this singleton table empty/g,
+    /migration-(?<terminal>\d+) proof is single-op only, while migration-(?<ledger>\d+) multi-op proof requires/g,
+    /current fleet compatibility before any schema-(?<terminal>\d+)\s+writer; missing evidence remains open/g,
+    /recovery-owner prerequisite as\s+migration (?<terminal>\d+)\./g,
+    /onto that canonical main and implement migration (?<ledger>\d+)\./g,
+    /source v(?<ledger>\d+) marker occurs only as part of that whole-database restore/g,
+    /immutable migration-(?<ledger>\d+) schema marker may exist in the pre-restore source/g,
+    /backup restore returns schema history to (?<terminal>\d+)/g,
+  ],
+  'tasks.md': [
+    /audited at schema 66; the current canonical schema is (?<current>\d+)\./g,
+    /lifecycle ledger as (?<ledger>\d+); migration (?<reserved>\d+) is reserved for another pending batch; recheck before implementation/g,
+    /forward migration (?<terminal>\d+) on current\s+canonical source \(schema (?<current>\d+) here; migration (?<reserved>\d+) is reserved for another pending\s+batch\); do not alter/g,
+    /permits the immutable migration-(?<ledger>\d+) marker/g,
+    /removes the source\s+v(?<ledger>\d+) row as part of that atomic state replacement/g,
+    /canonical source is at schema (?<current>\d+); the specified canonical.*forward allocation (?<terminal>\d+) \(migration (?<reserved>\d+) is reserved for another pending batch\)/g,
+    /deliveryKind=not_sent`\. Migration (?<terminal>\d+) permits/g,
+    /until migration (?<ledger>\d+)\S* immutable sealed expected set/g,
+    /Base this work on current canonical source \(schema (?<current>\d+) here; migration (?<reserved>\d+) is\s+reserved for another pending batch\) and allocate forward migration (?<terminal>\d+) for/g,
+    /closure-eligibility index and migration-(?<terminal>\d+) storage accounting/g,
+    /current canonical source is at schema (?<current>\d+), where protected-delivery.*the failed-terminal reply-debt index occupies migration 69; migration (?<reserved>\d+) is reserved for another pending migration batch/g,
+    /the shared (?<current>\d+)\/(?<reserved>\d+)\/(?<terminal>\d+)\/(?<ledger>\d+) allocation/g,
+    /After TSK-010 merges migration (?<terminal>\d+), rebase this lifecycle branch/g,
+    /the migration-(?<ledger>\d+) marker may exist in the source;/g,
+  ],
+};
+const statementExpectations = specFiles.flatMap((file) => statementPins[file].map((pattern) => ({ file, pattern })));
 
 describe('provider-event lifecycle schema allocation', () => {
   // @check CHK-071
@@ -99,7 +157,7 @@ describe('provider-event lifecycle schema allocation', () => {
   // @traces CON-005.AC-01
   it('keeps normative body allocations aligned with the canonical migration sequence', () => {
     const texts = new Map(specFiles.map((file) => [file, readFileSync(join(specDir, file), 'utf8')] as const));
-    const results = bodyAllocationExpectations.map(({ file, pattern }) => {
+    const results = [...bodyAllocationExpectations, ...statementExpectations].map(({ file, pattern }) => {
       const text = file === 'all' ? [...texts.values()].join('\n') : texts.get(file) ?? '';
       const matches = [...text.matchAll(pattern)].map((match) => ({ ...match.groups }));
       return { file, pattern: pattern.source, matches };
@@ -110,7 +168,7 @@ describe('provider-event lifecycle schema allocation', () => {
       .toEqual([]);
     expect(results.filter(({ matches }) => matches.length === 0)).toEqual([]);
     expect(results.flatMap(({ file, pattern, matches }) => matches
-      .filter((groups) => Object.entries(groups).some(([role, migration]) => migration !== planned[role]))
+      .filter((groups) => Object.entries(groups).some(([role, migration]) => migration !== roles[role]))
       .map((groups) => ({ file, pattern, groups })))).toEqual([]);
   });
 });
