@@ -459,6 +459,20 @@ describe('MemoryConsolidationScheduler', () => {
         chatJid: 'chat',
         senderJid: 'sender',
       },
+    }, {
+      // Two promotions need two source sets: one set is one lineage (#2569 A0).
+      id: 'record-2',
+      score: 0.9,
+      record: {
+        id: 'record-2',
+        text: 'bounded input',
+        claim: 'bounded input',
+        evidence: '',
+        createdAt,
+        confidence: 0.9,
+        chatJid: 'chat',
+        senderJid: 'sender',
+      },
     }]));
     provider.generate.mockResolvedValue({
       content: JSON.stringify({
@@ -473,7 +487,7 @@ describe('MemoryConsolidationScheduler', () => {
             claim: 'bounded durable claim two',
             promotionReason: 'bounded reason',
             confidence: 0.8,
-            sourceRecordIds: ['record-1'],
+            sourceRecordIds: ['record-2'],
           },
         ],
         discarded: [],
@@ -525,6 +539,20 @@ describe('MemoryConsolidationScheduler', () => {
         chatJid: 'chat',
         senderJid: 'sender',
       },
+    }, {
+      // Two promotions need two source sets: one set is one lineage (#2569 A0).
+      id: 'record-2',
+      score: 0.9,
+      record: {
+        id: 'record-2',
+        text: 'bounded input',
+        claim: 'bounded input',
+        evidence: '',
+        createdAt,
+        confidence: 0.9,
+        chatJid: 'chat',
+        senderJid: 'sender',
+      },
     }]));
     provider.generate.mockResolvedValue({
       content: JSON.stringify({
@@ -539,7 +567,7 @@ describe('MemoryConsolidationScheduler', () => {
             claim: 'bounded durable claim two',
             promotionReason: 'bounded reason',
             confidence: 0.8,
-            sourceRecordIds: ['record-1'],
+            sourceRecordIds: ['record-2'],
           },
         ],
         discarded: [],

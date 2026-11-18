@@ -278,6 +278,32 @@ describe('consolidateCluster', () => {
       }],
       discarded: [],
     }],
+    ['one source both promoted and discarded', {
+      durableKnowledge: [{
+        claim: 'valid claim',
+        promotionReason: 'valid reason',
+        confidence: 0.8,
+        sourceRecordIds: ['source-1'],
+      }],
+      discarded: [{ recordId: 'source-1', reason: 'valid reason' }],
+    }],
+    ['two promotions citing the same source set', {
+      durableKnowledge: [
+        {
+          claim: 'valid claim',
+          promotionReason: 'valid reason',
+          confidence: 0.8,
+          sourceRecordIds: ['source-1'],
+        },
+        {
+          claim: 'another valid claim',
+          promotionReason: 'valid reason',
+          confidence: 0.8,
+          sourceRecordIds: ['source-1'],
+        },
+      ],
+      discarded: [],
+    }],
     ['too many promoted items', {
       durableKnowledge: Array.from({ length: 33 }, (_, index) => ({
         claim: `claim ${index}`,
