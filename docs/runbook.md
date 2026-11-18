@@ -2277,7 +2277,8 @@ or clearing recovery records.
 
 Fleet health polling and the shared Python health validator also reject a compact or extended
 projection whose `continuity.open` is not `unresolved + ambiguous`: the producer derives `open` as
-that sum, so a mismatch is a contradiction, not a debt count.
+that sum, so a mismatch is a contradiction, not a debt count. The startup-notification release
+validator (`scripts/validate-startup-notification-release.ts`) does not check this sum yet.
 
 If any required recovery evidence cannot be parsed exactly, health fails closed with
 `status: "degraded"`, `status_reasons: ["recovery_debt_blocking"]`,
