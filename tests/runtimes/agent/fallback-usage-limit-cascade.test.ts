@@ -20,9 +20,9 @@
  *
  * Notice ETA provenance is pinned at the production notifier
  * (notifyProviderFallbackActivated via handleEventWithContext): only a reset
- * parsed from the PRIMARY's own failure yields "until about <time>"; an
- * unknown reset, the fallback-window end, or a fallback entry's parsed reset
- * never does.
+ * from a failure attributed to the PRIMARY yields "until about <time>"; an
+ * unknown reset, the fallback-window end, a fallback entry's parsed reset, or
+ * a reset from a session whose route attribution fails closed never does.
  *
  * Harness mirrors fallback-reason-provenance.test.ts.
  */
@@ -513,5 +513,85 @@ describe('fallback-provider usage-limit cascade', () => {
       expect(notice).not.toContain('until about');
       expect(notice).not.toContain(formatClockForUser(fallbackResetMs));
     }
+  });
+
+  // A wildcard (model-undefined) entry on the primary's own provider matches
+  // every claude-cli session, so each such session also matches the primary
+  // route; only the exact configured primary model resolves it to the primary.
+  const WILDCARD_SAME_PROVIDER_CHAIN = [{ provider: 'claude-cli' }];
+
+  /** Session double on the shared provider; only the model ref varies. */
+  function sameProviderSession(modelRef: string | undefined) {
+    return new Proxy(
+      {
+        getProviderId: vi.fn(() => 'claude-cli'),
+        getModelRef: vi.fn(() => modelRef),
+        getStatus: vi.fn(() => ({
+          active: true,
+          pid: null,
+          sessionId: 'claude-cli-1',
+          startedAt: new Date().toISOString(),
+          messageCount: 1,
+          lastMessageAt: new Date().toISOString(),
+        })),
+        getDbRowId: vi.fn(() => null),
+        clearTurnWatchdog: vi.fn(),
+        completeProviderTurn: vi.fn(),
+        shutdown: vi.fn(async () => {}),
+      } as Record<string, unknown>,
+      { get: (t, p) => (p in t ? t[p as string] : () => undefined) },
+    );
+  }
+
+  it('an ambiguous same-provider failure with no window state arms a window but gives the notice no time', () => {
+    const runtime = makeRuntime(WILDCARD_SAME_PROVIDER_CHAIN);
+    expect(cv(runtime).fallbackWindow.activeUntil).toBeNull();
+    // A provider-default session (undefined model ref), for example one the
+    // wildcard entry started during an earlier window, cannot be told apart
+    // from the primary, so its parsed reset is not proven to be the primary's.
+    const resetMs = parsedResetMs(USAGE_LIMIT_TEXT);
+
+    const queue = makeFakeQueue();
+    cv(runtime).handleEventWithContext(
+      { type: 'result', text: USAGE_LIMIT_TEXT },
+      queue,
+      sameProviderSession(undefined),
+      'conv-key',
+      1,
+      'mapkey-ambiguous-no-window',
+    );
+
+    // Failover still works: the failure armed a fresh window and the notice
+    // names the switch (not the credentials-missing template).
+    expect(cv(runtime).fallbackWindow.activeUntil).not.toBeNull();
+    const notices = enqueuedNotices(queue);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain('Primary model hit a usage/quota limit');
+    expect(notices[0]).toContain('Switching to');
+    expect(notices[0]).not.toContain('until about');
+    expect(notices[0]).not.toContain(formatClockForUser(resetMs));
+  });
+
+  it('a same-provider failure proven primary by the exact configured model still shows its reset as the time', () => {
+    const runtime = makeRuntime(WILDCARD_SAME_PROVIDER_CHAIN);
+    expect(cv(runtime).fallbackWindow.activeUntil).toBeNull();
+    const resetMs = parsedResetMs(USAGE_LIMIT_TEXT);
+
+    const queue = makeFakeQueue();
+    cv(runtime).handleEventWithContext(
+      { type: 'result', text: USAGE_LIMIT_TEXT },
+      queue,
+      sameProviderSession('claude-opus-4-8[1m]'),
+      'conv-key',
+      1,
+      'mapkey-proven-primary-no-window',
+    );
+
+    expect(cv(runtime).fallbackWindow.activeUntil).not.toBeNull();
+    const notices = enqueuedNotices(queue);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain(
+      `Primary model hit a usage/quota limit until about ${formatClockForUser(resetMs)}.`,
+    );
   });
 });

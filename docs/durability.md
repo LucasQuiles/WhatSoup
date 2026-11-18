@@ -206,6 +206,14 @@ echo-timeout interval — so a reset op does not wait for a future restart to be
 
 Runs **synchronously** at startup, after the database is opened but _before_ `connectionManager.connect()` is called. All operations are SQLite reads and writes — no network calls.
 
+**Before Step 1 — Persist the typed send-ambiguity policy**
+
+The paged repair described in §2.4 runs first. It sets `replay_policy = 'unsafe'` on
+`maybe_sent` ops still marked `safe`/`read_only` whose stored evidence is typed
+`transport.send_ambiguous`, unless turn delivery corroboration exists. A failed page ends
+the run at once as incomplete (see the receipt rules at the end of this section), so the
+later steps do not run in that attempt.
+
 **Step 1 — Orphaned session detection**
 
 Iterates `session_checkpoints` rows with `session_status = 'active'`. For each, calls `process.kill(claude_pid, 0)`. If the signal raises `ESRCH` (no such process), the session is marked `orphaned`. This prevents the checkpoint from blocking a new agent session from starting.
@@ -398,8 +406,11 @@ For each op in `status='pending'`:
 One failing op never aborts the rest of the drain. The function returns
 `{ resent, expired }`: `resent` = ops transitioned out of `pending` via `markSubmitted`;
 `expired` = `status_ping` ops aged out past the TTL. **Duplicate-delivery tradeoff:** see
-§2.4 — only `safe`/`read_only` ambiguity recovery is reset to `pending`, so a replay that
-duplicates an already-delivered message is the accepted tradeoff for those policies.
+§2.4 — only `safe`/`read_only` ambiguity recovery without typed `transport.send_ambiguous`
+evidence is reset to `pending`, so a replay that duplicates an already-delivered message is
+the accepted tradeoff for those ops. Typed send ambiguity persists `unsafe`, on the
+transition to `maybe_sent` and, for older rows, in the paged pre-connect repair (§2.4,
+§4.1), so with missing evidence those ops quarantine instead.
 An `unsafe` op may also be `pending` only after a deterministic non-send with a producer
 deadline; retrying it cannot duplicate a prior provider submission. The drainer does not
 widen replay eligibility for ambiguous unsafe replies.

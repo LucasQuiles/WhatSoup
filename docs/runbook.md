@@ -1718,17 +1718,25 @@ test ! -e ~/.local/state/whatsoup/instances/$INSTANCE/whatsoup.lock || \
 sqlite3 $DB ".backup '${DB}.pre-recovery'"
 
 # 4. The next startup will run preConnectRecovery() automatically:
+#    - First sets replay policy 'unsafe' on 'maybe_sent' ops still marked
+#      safe/read_only whose typed failure evidence is transport.send_ambiguous,
+#      except rows with turn delivery corroboration. It reads 200 rows per
+#      page and commits each page in its own write transaction. A failed page
+#      ends this recovery run as incomplete; committed pages stay repaired and
+#      the next recovery repeats the idempotent update (docs/durability.md §2.4)
 #    - Marks orphaned sessions (dead claude_pid)
 #    - Promotes 'sending' outbound ops to 'maybe_sent'
 #    - Quarantines unsafe tool calls that were mid-execution
 #    - Marks inbound events stuck in 'processing' as failed
 #
 # Then postConnectRecovery() runs after reconnect:
-#    - Reconciles 'maybe_sent' ops against the messages table
+#    - Leaves 'maybe_sent' ops with delivery corroboration unchanged
+#    - Reconciles the other 'maybe_sent' ops against the messages table
 #    - Settles matching self-authored rows as 'echoed'
 #    - Quarantines conflicting stored rows regardless of replay policy
-#    - With missing evidence only: resets safe/read_only ops to 'pending';
-#      quarantines unsafe ops (see docs/durability.md §4.2)
+#    - With missing evidence only: resets safe/read_only ops to 'pending'
+#      unless their typed failure evidence is transport.send_ambiguous;
+#      quarantines unsafe and typed send-ambiguous ops (see docs/durability.md §4.2)
 #
 # Immediately after, and on the live 10s echo-timeout interval,
 # drainPendingOutbound() actually re-sends the 'pending' (reset) ops:
@@ -1742,8 +1750,9 @@ sqlite3 $DB ".backup '${DB}.pre-recovery'"
 # reconciles up to 200 oldest live `maybe_sent` rows after each current
 # ambiguity_at episode has aged 30 seconds (not from queue creation).
 # Matching self-authored rows settle; conflicting stored rows quarantine under
-# every policy. Only missing evidence returns safe/read_only sends to the pending
-# drainer; unsafe sends quarantine. The existing stuck-inbound sweep can then
+# every policy. Only missing evidence returns safe/read_only sends without typed
+# transport.send_ambiguous evidence to the pending drainer; unsafe and typed
+# send-ambiguous sends quarantine. The existing stuck-inbound sweep can then
 # release a terminally non-echoed recovery owner.
 
 # 5. Start the service
