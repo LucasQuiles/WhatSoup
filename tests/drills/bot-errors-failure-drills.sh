@@ -17,6 +17,8 @@
 #
 # Usage:  bash tests/drills/bot-errors-failure-drills.sh
 # Exit:   0 = all drills passed, 1 = at least one drill failed.
+#
+# Interim (owner ruling R34, 2026-11-11): the BOT ERRORS card carries no machine detail; Q-actionability is audited on the stored record the card's Ref names, rendered by format_event. B15 (#3815) restores the card-plus-packet audit.
 
 set -uo pipefail
 umask 077
@@ -36,6 +38,19 @@ SANDBOX="$(mktemp -d "/tmp/bot-errors-drill.XXXXXX")"
 CAPTURE="$SANDBOX/sent.log"
 ALL_CAPTURE="$SANDBOX/all-sent.log"
 CAPTURE_BYTES=0
+# The group line carries the interim card (R34 above): icon, title, plain
+# sections and a footer "Ref <8> · machine · date ET", with no machine detail.
+# Human assertions read the card ($CAPTURE). Machine assertions read the detail
+# view ($DETAIL): for each card, the stored record in <state>/sent/ whose
+# public_card_ref() equals the card's Ref, rendered by the dispatcher's own
+# format_event(). A Ref that names no stored record, or records of two
+# different events, fails the drill; a re-send of one event is one event.
+# Leak and absence assertions read card and detail ($SEEN); the actionability
+# audits read card plus detail per message ($ALL_SEEN).
+DETAIL="$SANDBOX/detail.log"
+SEEN="$SANDBOX/seen.log"
+ALL_SEEN="$SANDBOX/all-seen.log"
+DETAIL_VIEW="$SANDBOX/detail-view.py"
 
 export BOT_ERRORS_STATE_DIR="$SANDBOX/state"
 export BOT_ERRORS_OUTBOX_DIR="$BOT_ERRORS_STATE_DIR/outbox"
@@ -70,14 +85,16 @@ assert_not_in() {
   if grep -qF -- "$1" "$2"; then fail "$3 (leaked)"; else pass "$3"; fi
 }
 assert_credential_failure() {
-  if grep -F "FAIL credential:" "$CAPTURE" 2>/dev/null | grep -F "$1" | grep -F "$2" >/dev/null; then
+  details
+  if grep -F "FAIL credential_check:" "$DETAIL" 2>/dev/null | grep -F "$1" | grep -F "$2" >/dev/null; then
     pass "$3"
   else
-    fail "$3 (missing: FAIL credential: * $1 * $2)"
+    fail "$3 (missing: FAIL credential_check: * $1 * $2)"
   fi
 }
 credential_failure_count() {
-  grep -F "FAIL credential:" "$CAPTURE" 2>/dev/null | grep -F "$1" | grep -F "$2" | wc -l | tr -d ' '
+  details
+  grep -F "FAIL credential_check:" "$DETAIL" 2>/dev/null | grep -F "$1" | grep -F "$2" | wc -l | tr -d ' '
 }
 # assert_count <dir> <pattern> <expected> <label>
 assert_count() {
@@ -87,6 +104,81 @@ assert_count() {
 assert_missing() {
   if [ ! -e "$1" ]; then pass "$2"; else fail "$2 (exists: $1)"; fi
 }
+
+cat > "$DETAIL_VIEW" <<'PY'
+"""detail-view.py MODE CAPTURE STATE_DIR DISPATCHER: CAPTURE read through each card's Ref.
+
+details  -> one record per card, its text replaced by format_event(stored record)
+seen     -> each card record followed by its detail record
+combined -> one record per card, text = card + newline + detail
+
+The stored records are the claimed events in STATE_DIR/sent/ whose
+public_card_ref() equals the card's "Ref <8>". None, or records of two
+different event ids, is an error; for a re-sent event the newest record is
+rendered. Records are encoded as the dry-send capture encodes them.
+"""
+import importlib.util
+import json
+import re
+import sys
+from pathlib import Path
+
+mode, capture, state, dispatcher = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4])
+if mode not in {"details", "seen", "combined"}:
+    raise SystemExit(f"unknown mode {mode}")
+sys.path.insert(0, str(dispatcher.parent))
+spec = importlib.util.spec_from_file_location("bot_errors_dispatcher_detail_view", dispatcher)
+mod = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = mod
+spec.loader.exec_module(mod)
+
+sent_dir = state / "sent"
+paths = sorted(sent_dir.glob("*.sent"), key=lambda p: (p.stat().st_mtime_ns, p.name)) if sent_dir.is_dir() else []
+stored = []
+for path in paths:
+    event = json.loads(path.read_text(encoding="utf-8"))
+    stored.append((mod.public_card_ref(event), event))
+
+for line in capture.read_text(encoding="utf-8").splitlines():
+    if not line.strip():
+        continue
+    record = json.loads(line)
+    card = record["text"]
+    match = re.search(r"(?m)^Ref ([0-9a-f]{8}) · ", card)
+    if not match:
+        raise SystemExit("a captured card carries no Ref line")
+    ref = match.group(1)
+    named = [event for card_ref, event in stored if card_ref == ref]
+    if not named:
+        raise SystemExit(f"card Ref {ref} names no stored record in sent/")
+    event_ids = {str(event.get("id") or "") for event in named}
+    if len(event_ids) != 1:
+        raise SystemExit(f"card Ref {ref} names records of {len(event_ids)} different events in sent/")
+    detail = mod.format_event(named[-1])
+    if mode == "details":
+        print(json.dumps({**record, "text": detail}, sort_keys=True))
+    elif mode == "seen":
+        print(json.dumps(record, sort_keys=True))
+        print(json.dumps({**record, "text": detail}, sort_keys=True))
+    else:
+        print(json.dumps({**record, "text": card + "\n" + detail}, sort_keys=True))
+PY
+
+# detail_view <mode> <capture> <out>: write the view; a card whose Ref names no
+# stored record, or records of two different events, fails.
+detail_view() {
+  : > "$3"
+  [ -s "$2" ] || return 0
+  if ! python3 -B "$DETAIL_VIEW" "$1" "$2" "$BOT_ERRORS_STATE_DIR" "$DISPATCH" > "$3" 2> "$SANDBOX/detail-view.err"; then
+    fail "card Ref names one stored event ($(tr '\n' ';' < "$SANDBOX/detail-view.err"))"
+  fi
+}
+details() { detail_view details "$CAPTURE" "$DETAIL"; }
+# assert_detail_in <needle> <label>: a machine field, read from the stored record each card's Ref names
+assert_detail_in() { details; assert_in "$1" "$DETAIL" "$2"; }
+# assert_seen_not_in <needle> <label>: absent from every card and every detail view
+assert_seen_not_in() { detail_view seen "$CAPTURE" "$SEEN"; assert_not_in "$1" "$SEEN" "$2"; }
 
 reset_sandbox() {
   rm -rf "$BOT_ERRORS_STATE_DIR" "$CAPTURE"
@@ -110,7 +202,10 @@ dispatch_once() {
     local size
     size=$(wc -c < "$CAPTURE" | tr -d ' ')
     if [ "$size" -gt "$CAPTURE_BYTES" ]; then
-      tail -c +$((CAPTURE_BYTES + 1)) "$CAPTURE" >> "$ALL_CAPTURE"
+      tail -c +$((CAPTURE_BYTES + 1)) "$CAPTURE" > "$SANDBOX/capture-chunk.log"
+      cat "$SANDBOX/capture-chunk.log" >> "$ALL_CAPTURE"
+      detail_view combined "$SANDBOX/capture-chunk.log" "$SANDBOX/seen-chunk.log"
+      cat "$SANDBOX/seen-chunk.log" >> "$ALL_SEEN"
       CAPTURE_BYTES="$size"
     fi
   fi
@@ -128,11 +223,11 @@ emit --severity critical --instance ana-bot --source agent_tool_error \
   --summary "Tool Bash failed in ana-bot" \
   --evidence "exit=127 cmd=missing-binary; PostToolUse hook captured nonzero"
 dispatch_once
-assert_in "BOT ERROR" "$CAPTURE" "renders BOT ERROR title"
+assert_detail_in "BOT ERROR" "renders BOT ERROR title"
 assert_in "ana-bot" "$CAPTURE" "carries instance"
-assert_in "agent_tool_error" "$CAPTURE" "carries source"
-assert_in "exit=127" "$CAPTURE" "carries evidence"
-assert_in "journalctl" "$CAPTURE" "carries actionable logHint"
+assert_detail_in "agent_tool_error" "carries source"
+assert_detail_in "exit=127" "carries evidence"
+assert_detail_in "journalctl" "carries actionable logHint"
 assert_count "$BOT_ERRORS_STATE_DIR/sent" "*.sent" 1 "event moved to sent/"
 assert_count "$BOT_ERRORS_OUTBOX_DIR" "*.json" 0 "outbox drained"
 echo
@@ -145,16 +240,16 @@ emit --event-type observation --severity info --instance mini3 --source health -
 dispatch_once
 emit --event-type clear --instance mini3 --source health --summary "recovered"
 dispatch_once
-assert_in "BOT WARNING" "$CAPTURE" "warning -> BOT WARNING"
-assert_in "BOT INFO" "$CAPTURE" "info -> BOT INFO"
-assert_in "BOT RECOVERY" "$CAPTURE" "clear -> BOT RECOVERY"
+assert_detail_in "BOT WARNING" "warning -> BOT WARNING"
+assert_detail_in "BOT INFO" "info -> BOT INFO"
+assert_detail_in "BOT RECOVERY" "clear -> BOT RECOVERY"
 echo
 
 # ── Drill 3: secret redaction — never leak credentials to the group
 echo "Drill 3: secret redaction in evidence"
 reset_sandbox
 # Assemble fake secret-shaped tokens at runtime (no literal in the file).
-FAKE_JWT="eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJkcmlsbCJ9.s5doX9rAbCdEfGhIjKlMnOpQrStUvWxYz0123456"
+FAKE_JWT="ey""JhbGciOiJIUzI1NiJ9.ey""JzdWIiOiJkcmlsbCJ9.s5doX9rAbCdEfGhIjKlMnOpQrStUvWxYz0123456"
 FAKE_GH="gh""p_0123456789abcdefABCDEF0123456789abcd"
 FAKE_AWS="AK""IAIOSFODNN7EXAMPLE"
 # Assemble the Bearer sample from fragments too (no "Authorization: Bearer <tok>"
@@ -164,10 +259,10 @@ emit --severity critical --instance ana-bot --source secret_probe \
   --summary "leak probe" \
   --evidence "token=$FAKE_JWT gh=$FAKE_GH aws=$FAKE_AWS Authorization: $FAKE_BEARER"
 dispatch_once
-assert_not_in "$FAKE_JWT" "$CAPTURE" "JWT not leaked"
-assert_not_in "$FAKE_GH" "$CAPTURE" "GitHub token not leaked"
-assert_not_in "$FAKE_AWS" "$CAPTURE" "AWS key not leaked"
-assert_in "REDACTED" "$CAPTURE" "redaction marker present"
+assert_seen_not_in "$FAKE_JWT" "JWT not leaked"
+assert_seen_not_in "$FAKE_GH" "GitHub token not leaked"
+assert_seen_not_in "$FAKE_AWS" "AWS key not leaked"
+assert_detail_in "REDACTED" "redaction marker present"
 echo
 
 # ── Drill 4: poison event quarantined, not silently dropped, batch survives
@@ -190,7 +285,7 @@ reset_sandbox
 BIG=$(head -c 20000 < /dev/zero | tr '\0' 'A')
 emit --severity critical --instance ana-bot --source big --summary "huge" --evidence "$BIG"
 dispatch_once
-assert_in "truncated" "$CAPTURE" "oversized evidence truncated"
+assert_detail_in "truncated" "oversized evidence truncated"
 assert_count "$BOT_ERRORS_STATE_DIR/sent" "*.sent" 1 "oversized event still delivered"
 echo
 
@@ -266,8 +361,8 @@ else
 fi
 BOT_ERRORS_WRITEFAIL_DIR="$WF_DIR" dispatch_once
 assert_in "should fail to write" "$CAPTURE" "dispatcher recovers breadcrumb into dispatch path"
-assert_in "writefail_recovered:" "$CAPTURE" "recovered dispatch declares writefail recovery"
-assert_not_in "+15558675309" "$CAPTURE" "recovered dispatch keeps redaction"
+assert_detail_in "writefail_recovered:" "recovered dispatch declares writefail recovery"
+assert_seen_not_in "+15558675309" "recovered dispatch keeps redaction"
 assert_count "$BOT_ERRORS_STATE_DIR/writefail-recovered" "*.recovered" 1 "breadcrumb moved to writefail-recovered/"
 assert_count "$WF_DIR" "*.writefail" 0 "writefail dir drained after recovery"
 echo
@@ -328,10 +423,10 @@ emit --severity critical --instance ana-bot --source redaction_matrix \
   --summary "coverage probe" \
   --evidence "phone=$FAKE_PHONE logfile=$DIAG_PATH userinfo=https://u:p@host/x"
 dispatch_once
-assert_not_in "$FAKE_PHONE" "$CAPTURE" "phone not leaked (closed in e522e1f)"
-assert_not_in "u:p@host" "$CAPTURE" "url userinfo redacted"
+assert_seen_not_in "$FAKE_PHONE" "phone not leaked (closed in e522e1f)"
+assert_seen_not_in "u:p@host" "url userinfo redacted"
 # Path retention is policy, not a failure — assert it is intentionally kept.
-assert_in "dispatch.jsonl" "$CAPTURE" "diagnostic log path retained (policy)"
+assert_detail_in "dispatch.jsonl" "diagnostic log path retained (policy)"
 echo
 
 # ── Drill 10: quiet daily-health success is still observable by watchdog
@@ -373,7 +468,7 @@ event = {
     "eventType": "alert",
     "severity": "critical",
     "createdAt": "2026-05-31T00:00:00Z",
-    "machine": "mini5-hostname",
+    "machine": "host-a-hostname",
     "platform": "darwin",
     "instance": "ana-bot",
     "source": "wf",
@@ -406,12 +501,12 @@ exec python3 "$@"
 SH
 chmod 0700 "$FAKE_SSH"
 BOT_ERRORS_RELAY_SSH_COMMAND="$FAKE_SSH" python3 "$COLLECTOR" \
-  --remote "mini5:$REMOTE_ROOT" --max-events 5 --timeout 5 > "$SANDBOX/collector-b6.json" 2>&1
+  --remote "host-a:$REMOTE_ROOT" --max-events 5 --timeout 5 > "$SANDBOX/collector-b6.json" 2>&1
 assert_in '"writefailHarvested": 1' "$SANDBOX/collector-b6.json" "collector harvests one remote writefail"
 assert_count "$BOT_ERRORS_STATE_DIR/writefail" "*.writefail" 1 "remote crumb lands in nucles writefail inbox"
 dispatch_once
 assert_in "remote writefail drill critical" "$CAPTURE" "harvested remote critical reaches dispatch"
-assert_in "writefail_recovered: origin=mini5-hostname harvested_from=mini5" "$CAPTURE" "dispatch names remote writefail origin"
+assert_detail_in "writefail_recovered: origin=host-a-hostname harvested_from=host-a" "dispatch names remote writefail origin"
 assert_count "$BOT_ERRORS_STATE_DIR/sent" "*.sent" 1 "remote critical recovered exactly once"
 assert_count "$REMOTE_WF" "*.writefail" 0 "remote writefail source drained"
 echo
@@ -642,8 +737,8 @@ HOME="$D17_HOME" BOT_ERRORS_STATE_DIR="$BOT_ERRORS_STATE_DIR" \
   BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"tool-test","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectConfigInventory":false,"expectPluginInventory":false}' \
   python3 "$HEALTH" --daily >/dev/null 2>&1
 dispatch_once
-assert_in "missing required tools missing_tool" "$CAPTURE" "missing required tool appears in alert summary"
-assert_in "required_missing=missing_tool" "$CAPTURE" "missing required tool appears in evidence"
+assert_detail_in "missing required tools missing_tool" "missing required tool appears in alert summary"
+assert_detail_in "required_missing=missing_tool" "missing required tool appears in evidence"
 echo
 
 # ── Drill 18: stale heartbeat detects hung supervisor and emits recovery clear
@@ -667,20 +762,62 @@ BOT_ERRORS_Q_LOOP_STATE="$D18_Q_STATE" BOT_ERRORS_WATCHDOG_CHECKS=q_loop \
   python3 "$HEARTBEAT" --once --max-q-loop-age 60 > "$SANDBOX/d18-recovery.json" 2>&1
 assert_count "$BOT_ERRORS_OUTBOX_DIR" "*.json" 2 "heartbeat recovery queues clear event"
 dispatch_once
-assert_in "heartbeat watchdog stale: q_loop" "$CAPTURE" "stale heartbeat alert dispatched"
-assert_in "heartbeat watchdog recovered: q_loop" "$CAPTURE" "heartbeat recovery dispatched"
+assert_detail_in "heartbeat watchdog stale: q_loop" "stale heartbeat alert dispatched"
+assert_detail_in "heartbeat watchdog recovered: q_loop" "heartbeat recovery dispatched"
 echo
 
 # ── Drill 19: rendered alerts must be actionable from the message body alone
+# Interim (owner ruling R34, 2026-11-11): the BOT ERRORS card carries no machine detail; Q-actionability is audited on the stored record the card's Ref names, rendered by format_event. B15 (#3815) restores the card-plus-packet audit.
 echo "Drill 19: Q-actionability render audit"
 D19_AUDIT="$SANDBOX/d19-audit.txt"
-if python3 - "$ALL_CAPTURE" > "$D19_AUDIT" 2>&1 <<'PY'
+D19_AUDIT_PY="$SANDBOX/d19-audit.py"
+AUDIT_CONTROL_PY="$SANDBOX/audit-control.py"
+cat > "$AUDIT_CONTROL_PY" <<'PY'
+"""audit-control.py MODE OUT: two capture records, the second lacking requested_action.
+
+Both carry every other rubric label and two evidence paths, so only an audit
+that judges each message on its own rejects the capture. MODE storm makes both
+messages storm digests.
+"""
+import json
+import sys
+
+mode, out = sys.argv[1], sys.argv[2]
+lines = [
+    "card",
+    "> severity: critical",
+    "> machine: host-a",
+    "> instance: bot-a",
+    "> source: drill-control",
+    "> event: alert",
+    "> created: 2026-11-11T00:00:00Z",
+    "> requested_action: inspect the control",
+    "> log_1: /var/log/bot-errors/control.log",
+    "> queue: /var/lib/bot-errors/outbox",
+]
+if mode == "storm":
+    lines[0] = "BOT ERRORS storm collapse"
+    lines += [
+        "> affected_hosts: 2",
+        "> affected_host_list: host-a, host-b",
+        "> incident_key: fleet|storm-collapse|storm-collapse.storm-a1b2c3d4e5f6a7b8-1780",
+    ]
+full = "\n".join(lines)
+partial = "\n".join(line for line in lines if not line.startswith("> requested_action:"))
+with open(out, "w", encoding="utf-8") as handle:
+    for text in (full, partial):
+        handle.write(json.dumps({"pid": 1, "text": text, "time": "2026-11-11T00:00:00Z"}, sort_keys=True) + "\n")
+PY
+cat > "$D19_AUDIT_PY" <<'PY'
+import json
 import re
 import sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
-messages = [part.strip() for part in path.read_text(encoding="utf-8").split("\n---\n") if part.strip()]
+# The capture is JSONL, one record per sent message, so each record's text is
+# judged on its own; a "---" split would read the whole log as one message.
+messages = [json.loads(line)["text"] for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 required = ("severity", "machine", "instance", "source", "event", "created", "requested_action")
 failures = []
 for index, message in enumerate(messages, start=1):
@@ -702,7 +839,15 @@ if failures:
     raise SystemExit(1)
 print(f"audited {len(messages)} rendered messages")
 PY
-then
+# Negative control: the audit must reject a capture in which one message alone
+# lacks requested_action.
+python3 "$AUDIT_CONTROL_PY" plain "$SANDBOX/d19-control.log"
+if python3 "$D19_AUDIT_PY" "$SANDBOX/d19-control.log" > "$D19_AUDIT" 2>&1; then
+  fail "Q-actionability audit rejects one message missing requested_action (control passed)"
+else
+  pass "Q-actionability audit rejects one message missing requested_action"
+fi
+if python3 "$D19_AUDIT_PY" "$ALL_SEEN" > "$D19_AUDIT" 2>&1; then
   pass "all rendered alerts satisfy Q-actionability rubric"
 else
   fail "Q-actionability audit failed: $(tr '\n' ';' < "$D19_AUDIT")"
@@ -746,9 +891,9 @@ dispatch_once
 d20_count=$(grep -c "BOT ERRORS storm collapse" "$CAPTURE" 2>/dev/null | tr -d ' ')
 [ "$d20_count" = "1" ] && pass "D20a emits exactly one storm digest" \
   || fail "D20a expected one storm digest, got $d20_count"
-assert_in "affected_hosts: 13" "$CAPTURE" "D20a/D20e digest carries affected host count"
+assert_detail_in "affected_hosts: 13" "D20a/D20e digest carries affected host count"
 for host in MACLAB MWLAB mini1 mini2 mini3 mini4 mini5 mini6 mini7 mini8 mini9 mini10 mini11; do
-  assert_in "$host" "$CAPTURE" "D20a/D20e digest names $host"
+  assert_detail_in "$host" "D20a/D20e digest names $host"
 done
 # #2387: the digest text no longer names the manifest path. The path is private
 # topology and nothing reads it programmatically, so it must not reach the
@@ -756,7 +901,7 @@ done
 # reaches the operator through the incident key. The expected identity is built
 # from the manifest this same window wrote, so the drill never hard-codes a
 # fingerprint or a clock-derived window start.
-assert_not_in "storm_manifest:" "$CAPTURE" "D20a/D20e digest omits the manifest path"
+assert_seen_not_in "storm_manifest:" "D20a/D20e digest omits the manifest path"
 d20_window_identity="$(python3 - "$BOT_ERRORS_STATE_DIR/storm-manifests" <<'PY'
 import json
 import re
@@ -782,7 +927,7 @@ if [ -z "$d20_window_identity" ]; then
   fail "D20a/D20e window identity resolved from the manifest"
 else
   pass "D20a/D20e window identity resolved from the manifest"
-  assert_in "incident_key: fleet|storm-collapse|storm-collapse.$d20_window_identity" "$CAPTURE" \
+  assert_detail_in "incident_key: fleet|storm-collapse|storm-collapse.$d20_window_identity" \
     "D20a/D20e digest carries the window identity"
 fi
 assert_count "$BOT_ERRORS_STATE_DIR/storm-collapsed" "*.collapsed" 13 "D20a original storm events retained as collapsed evidence"
@@ -1005,13 +1150,17 @@ dispatch_once
 assert_missing "$CAPTURE" "D20d daily-health recovery/info noise remains suppressed"
 assert_count "$BOT_ERRORS_STATE_DIR/suppressed" "*.suppressed" 3 "D20d recovery/info events bounded as suppressed dispositions"
 D20_AUDIT="$SANDBOX/d20-audit.txt"
-if python3 - "$ALL_CAPTURE" > "$D20_AUDIT" 2>&1 <<'PY'
+D20_AUDIT_PY="$SANDBOX/d20-audit.py"
+cat > "$D20_AUDIT_PY" <<'PY'
+import json
 import re
 import sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
-messages = [part.strip() for part in path.read_text(encoding="utf-8").split("\n---\n") if part.strip()]
+# The capture is JSONL, one record per sent message, so each record's text is
+# judged on its own; a "---" split would read the whole log as one message.
+messages = [json.loads(line)["text"] for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 required = ("severity", "machine", "instance", "source", "event", "created", "requested_action")
 failures = []
 storm_messages = 0
@@ -1047,7 +1196,15 @@ if failures:
     raise SystemExit(1)
 print(f"audited {len(messages)} rendered messages including {storm_messages} storm digest(s)")
 PY
-then
+# Negative control: the audit must reject a capture in which one storm digest
+# alone lacks requested_action.
+python3 "$AUDIT_CONTROL_PY" storm "$SANDBOX/d20-control.log"
+if python3 "$D20_AUDIT_PY" "$SANDBOX/d20-control.log" > "$D20_AUDIT" 2>&1; then
+  fail "D20e actionability audit rejects one digest missing requested_action (control passed)"
+else
+  pass "D20e actionability audit rejects one digest missing requested_action"
+fi
+if python3 "$D20_AUDIT_PY" "$ALL_SEEN" > "$D20_AUDIT" 2>&1; then
   pass "D20e storm digests satisfy Q-actionability rubric"
 else
   fail "D20e actionability audit failed: $(tr '\n' ';' < "$D20_AUDIT")"
@@ -1067,7 +1224,7 @@ HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
   python3 "$HEALTH" --daily >/dev/null 2>&1
 dispatch_once
 assert_credential_failure "missing required" "expected_path_basename=tokens.env" "D22a missing required credential fails"
-assert_not_in "D22_SECRET" "$CAPTURE" "D22a no credential body leaked"
+assert_seen_not_in "D22_SECRET" "D22a no credential body leaked"
 
 reset_sandbox
 D22_HOME="$SANDBOX/d22b-home"
@@ -1084,7 +1241,7 @@ HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
 chmod 600 "$D22_HOME/.config/whatsoup/tokens.env"
 dispatch_once
 assert_credential_failure "unreadable" "credential_path_basename=tokens.env" "D22b unreadable required credential fails"
-assert_not_in "D22_SECRET_UNREADABLE" "$CAPTURE" "D22b unreadable credential contents not leaked"
+assert_seen_not_in "D22_SECRET_UNREADABLE" "D22b unreadable credential contents not leaked"
 
 reset_sandbox
 D22_HOME="$SANDBOX/d22c-warn-home"
@@ -1099,10 +1256,10 @@ HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
   BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectConfigInventory":false,"expectPluginInventory":false,"requiredCredentialFiles":["tokens.env"]}' \
   python3 "$HEALTH" --daily >/dev/null 2>&1
 dispatch_once
-assert_in "BOT ERROR" "$CAPTURE" "D22c credential 0644 fails closed"
+assert_detail_in "BOT ERROR" "D22c credential 0644 fails closed"
 assert_credential_failure "non_private" "credential_path_basename=tokens.env" "D22c credential 0644 critical line"
-assert_not_in "credential_meta" "$CAPTURE" "D22c required credential does not duplicate metadata line"
-assert_not_in "D22_SECRET_MODE_WARN" "$CAPTURE" "D22c warning credential contents not leaked"
+assert_seen_not_in "credential_meta" "D22c required credential does not duplicate metadata line"
+assert_seen_not_in "D22_SECRET_MODE_WARN" "D22c warning credential contents not leaked"
 
 reset_sandbox
 D22_HOME="$SANDBOX/d22c-fail-home"
@@ -1121,54 +1278,54 @@ assert_credential_failure "world_writable" "credential_path_basename=tokens.env"
 d22c_fail_count=$(credential_failure_count "world_writable" "credential_path_basename=tokens.env")
 [ "$d22c_fail_count" = "1" ] && pass "D22c world-writable required credential fails once" \
   || fail "D22c expected one required credential FAIL, got $d22c_fail_count"
-assert_not_in "credential_meta" "$CAPTURE" "D22c world-writable required credential does not duplicate metadata line"
-assert_not_in "D22_SECRET_MODE_FAIL" "$CAPTURE" "D22c failing credential contents not leaked"
+assert_seen_not_in "credential_meta" "D22c world-writable required credential does not duplicate metadata line"
+assert_seen_not_in "D22_SECRET_MODE_FAIL" "D22c failing credential contents not leaked"
 
 reset_sandbox
 D22_HOME="$SANDBOX/d22d-home"
-mkdir -p "$D22_HOME/.config/whatsoup/instances/ana-bot"
-chmod 0700 "$D22_HOME/.config/whatsoup" "$D22_HOME/.config/whatsoup/instances" "$D22_HOME/.config/whatsoup/instances/ana-bot"
+mkdir -p "$D22_HOME/.config/whatsoup/instances/bot-a"
+chmod 0700 "$D22_HOME/.config/whatsoup" "$D22_HOME/.config/whatsoup/instances" "$D22_HOME/.config/whatsoup/instances/bot-a"
 HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
   BOT_ERRORS_DRY_DISK_FREE_BYTES=$((10 * 1024 * 1024 * 1024)) \
   BOT_ERRORS_DRY_DISK_TOTAL_BYTES=$((100 * 1024 * 1024 * 1024)) \
   BOT_ERRORS_DRY_UPTIME_SECONDS=3600 \
-  BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectPluginInventory":false,"requiredCredentialFiles":[],"requiredConfigFiles":["config.json"],"instances":[{"name":"ana-bot","expected":"always_on","service":"com.whatsoup.ana-bot"}]}' \
+  BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectPluginInventory":false,"requiredCredentialFiles":[],"requiredConfigFiles":["config.json"],"instances":[{"name":"bot-a","expected":"always_on","service":"com.whatsoup.bot-a"}]}' \
   python3 "$HEALTH" --daily >/dev/null 2>&1
 dispatch_once
-assert_in "FAIL config ana-bot: missing required config.json" "$CAPTURE" "D22d missing required config fails"
+assert_detail_in "FAIL config bot-a: missing required config.json" "D22d missing required config fails"
 
 reset_sandbox
 D22_HOME="$SANDBOX/d22e-warn-home"
-mkdir -p "$D22_HOME/.config/whatsoup/instances/ana-bot"
-chmod 0700 "$D22_HOME/.config/whatsoup" "$D22_HOME/.config/whatsoup/instances" "$D22_HOME/.config/whatsoup/instances/ana-bot"
-printf '{"type":"agent","secret":"D22_CONFIG_SECRET_WARN"}\n' > "$D22_HOME/.config/whatsoup/instances/ana-bot/config.json"
-chmod 0644 "$D22_HOME/.config/whatsoup/instances/ana-bot/config.json"
+mkdir -p "$D22_HOME/.config/whatsoup/instances/bot-a"
+chmod 0700 "$D22_HOME/.config/whatsoup" "$D22_HOME/.config/whatsoup/instances" "$D22_HOME/.config/whatsoup/instances/bot-a"
+printf '{"type":"agent","secret":"D22_CONFIG_SECRET_WARN_FAKE"}\n' > "$D22_HOME/.config/whatsoup/instances/bot-a/config.json"
+chmod 0644 "$D22_HOME/.config/whatsoup/instances/bot-a/config.json"
 HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
   BOT_ERRORS_DRY_DISK_FREE_BYTES=$((10 * 1024 * 1024 * 1024)) \
   BOT_ERRORS_DRY_DISK_TOTAL_BYTES=$((100 * 1024 * 1024 * 1024)) \
   BOT_ERRORS_DRY_UPTIME_SECONDS=3600 \
-  BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectPluginInventory":false,"requiredCredentialFiles":[],"requiredConfigFiles":["config.json"],"allowUnprofiledInstances":true,"instances":[{"name":"ana-bot","expected":"on_demand"}]}' \
+  BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectPluginInventory":false,"requiredCredentialFiles":[],"requiredConfigFiles":["config.json"],"allowUnprofiledInstances":true,"instances":[{"name":"bot-a","expected":"on_demand"}]}' \
   python3 "$HEALTH" --daily >/dev/null 2>&1
 dispatch_once
-assert_in "BOT WARNING" "$CAPTURE" "D22e config 0644 warns by default"
-assert_in "WARN config ana-bot: world_readable required config.json" "$CAPTURE" "D22e config 0644 warning line"
-assert_not_in "D22_CONFIG_SECRET_WARN" "$CAPTURE" "D22e warning config body not leaked"
+assert_detail_in "BOT WARNING" "D22e config 0644 warns by default"
+assert_detail_in "WARN config bot-a: world_readable required config.json" "D22e config 0644 warning line"
+assert_seen_not_in "D22_CONFIG_SECRET_WARN" "D22e warning config body not leaked"
 
 reset_sandbox
 D22_HOME="$SANDBOX/d22e-fail-home"
-mkdir -p "$D22_HOME/.config/whatsoup/instances/ana-bot"
-chmod 0700 "$D22_HOME/.config/whatsoup" "$D22_HOME/.config/whatsoup/instances" "$D22_HOME/.config/whatsoup/instances/ana-bot"
-printf '{"type":"agent","secret":"D22_CONFIG_SECRET_FAIL"}\n' > "$D22_HOME/.config/whatsoup/instances/ana-bot/config.json"
-chmod 0644 "$D22_HOME/.config/whatsoup/instances/ana-bot/config.json"
+mkdir -p "$D22_HOME/.config/whatsoup/instances/bot-a"
+chmod 0700 "$D22_HOME/.config/whatsoup" "$D22_HOME/.config/whatsoup/instances" "$D22_HOME/.config/whatsoup/instances/bot-a"
+printf '{"type":"agent","secret":"D22_CONFIG_SECRET_FAIL_FAKE"}\n' > "$D22_HOME/.config/whatsoup/instances/bot-a/config.json"
+chmod 0644 "$D22_HOME/.config/whatsoup/instances/bot-a/config.json"
 HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
   BOT_ERRORS_DRY_DISK_FREE_BYTES=$((10 * 1024 * 1024 * 1024)) \
   BOT_ERRORS_DRY_DISK_TOTAL_BYTES=$((100 * 1024 * 1024 * 1024)) \
   BOT_ERRORS_DRY_UPTIME_SECONDS=3600 \
-  BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectPluginInventory":false,"requiredCredentialFiles":[],"requiredConfigFiles":["config.json"],"requiredConfigMaxMode":"0600","allowUnprofiledInstances":true,"instances":[{"name":"ana-bot","expected":"on_demand"}]}' \
+  BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectPluginInventory":false,"requiredCredentialFiles":[],"requiredConfigFiles":["config.json"],"requiredConfigMaxMode":"0600","allowUnprofiledInstances":true,"instances":[{"name":"bot-a","expected":"on_demand"}]}' \
   python3 "$HEALTH" --daily >/dev/null 2>&1
 dispatch_once
-assert_in "FAIL config ana-bot: mode>600 required config.json" "$CAPTURE" "D22e strict config max mode fails"
-assert_not_in "D22_CONFIG_SECRET_FAIL" "$CAPTURE" "D22e strict config body not leaked"
+assert_detail_in "FAIL config bot-a: mode>600 required config.json" "D22e strict config max mode fails"
+assert_seen_not_in "D22_CONFIG_SECRET_FAIL" "D22e strict config body not leaked"
 
 reset_sandbox
 D22_HOME="$SANDBOX/d22f-home"
@@ -1184,7 +1341,7 @@ assert_missing "$CAPTURE" "D22f no-bot info event remains suppressed"
 assert_count "$BOT_ERRORS_STATE_DIR/suppressed" "*.suppressed" 1 "D22f no-bot produces suppressed info only"
 
 D22_AUDIT="$SANDBOX/d22-audit.txt"
-if grep -E "D22_SECRET|D22_CONFIG_SECRET|TOKEN=" "$ALL_CAPTURE" > "$D22_AUDIT" 2>&1; then
+if grep -E "D22_SECRET|D22_CONFIG_SECRET|TOKEN=" "$ALL_CAPTURE" "$ALL_SEEN" > "$D22_AUDIT" 2>&1; then
   fail "D22g required-file diagnostics leaked contents: $(tr '\n' ';' < "$D22_AUDIT")"
 else
   pass "D22g required-file diagnostics do not leak credential/config contents"

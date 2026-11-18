@@ -69,6 +69,64 @@ function captureMessages(path: string): string[] {
     .map((line) => (JSON.parse(line) as { text: string }).text);
 }
 
+// Interim (owner ruling R34, 2026-11-11): the BOT ERRORS card carries no machine
+// detail; each card ends in "Ref <8>". Machine detail is asserted on the stored
+// sent/ record that Ref names, rendered by the dispatcher's own format_event
+// (one detail per captured card, in capture order). A Ref naming no record, or
+// records of two events, throws. Deliveries are counted as captured cards, and
+// absence checks read cards and details together. B15 (#3815) restores packets.
+const STORED_DETAIL_PY = `
+import importlib.util
+import json
+import re
+import sys
+from pathlib import Path
+
+capture, root = Path(sys.argv[1]), Path(sys.argv[2])
+sys.path.insert(0, "deploy/scripts")
+spec = importlib.util.spec_from_file_location("bot_errors_dispatcher_stored_detail", "deploy/scripts/bot-errors-dispatcher.py")
+mod = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = mod
+spec.loader.exec_module(mod)
+paths = sorted((root / "sent").glob("*.sent"), key=lambda p: (p.stat().st_mtime_ns, p.name))
+stored = [json.loads(p.read_text(encoding="utf-8")) for p in paths]
+details = []
+for line in capture.read_text(encoding="utf-8").splitlines():
+    if not line.strip():
+        continue
+    card = json.loads(line)["text"]
+    match = re.search(r"(?m)^Ref ([0-9a-f]{8}) · ", card)
+    if not match:
+        raise SystemExit("a captured card carries no Ref line")
+    named = [event for event in stored if mod.public_card_ref(event) == match.group(1)]
+    if not named or len({str(event.get("id") or "") for event in named}) != 1:
+        raise SystemExit(f"card Ref {match.group(1)} names {len(named)} stored records")
+    details.append(mod.format_event(named[-1]))
+print(json.dumps(details))
+`;
+
+function storedDetails(root: string, capturePath: string): string[] {
+  const result = spawnSync('python3', ['-B', '-c', STORED_DETAIL_PY, capturePath, root], {
+    cwd: process.cwd(),
+    env: { ...process.env, BOT_ERRORS_STATE_DIR: root },
+    encoding: 'utf8',
+  });
+  if (result.status !== 0) throw new Error(`stored detail view failed: ${result.stderr}`);
+  return JSON.parse(result.stdout) as string[];
+}
+
+function storedDetail(root: string, capturePath: string): string {
+  return storedDetails(root, capturePath).join('\n');
+}
+
+function cardsContaining(capturePath: string, needle: string): string[] {
+  return captureMessages(capturePath).filter((card) => card.includes(needle));
+}
+
+function cardsAndDetails(root: string, capturePath: string): string {
+  return [...captureMessages(capturePath), ...storedDetails(root, capturePath)].join('\n');
+}
+
 function writeStormEvent(root: string, machine: string, overrides: Record<string, unknown> = {}) {
   const outbox = join(root, 'outbox');
   mkdirSync(outbox, { recursive: true, mode: 0o700 });
@@ -278,9 +336,9 @@ describe('bot-errors-dispatcher', () => {
       },
     });
 
-    expect(readFileSync(capturePath, 'utf8')).toContain('dispatcher_attempts: 1');
-    expect(readFileSync(capturePath, 'utf8')).toContain('dispatch_log:');
-    expect(readFileSync(capturePath, 'utf8')).toContain('requested_action: Q investigate, remediate');
+    expect(storedDetail(tmpRoot, capturePath)).toContain('dispatcher_attempts: 1');
+    expect(storedDetail(tmpRoot, capturePath)).toContain('dispatch_log:');
+    expect(storedDetail(tmpRoot, capturePath)).toContain('requested_action: Q investigate, remediate');
     expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "sent"');
     const sentFiles = readdirSync(sent);
     expect(sentFiles).toHaveLength(1);
@@ -407,8 +465,8 @@ describe('bot-errors-dispatcher', () => {
     const result = dispatchCaptured(tmpRoot, capturePath);
 
     expect(result).toMatchObject({ processed: 1, sent: 1, failed: 0 });
-    expect(readFileSync(capturePath, 'utf8')).toContain('BOT INFO');
-    expect(readFileSync(capturePath, 'utf8')).not.toContain('BOT RECOVERY');
+    expect(storedDetail(tmpRoot, capturePath)).toContain('BOT INFO');
+    expect(cardsAndDetails(tmpRoot, capturePath)).not.toContain('BOT RECOVERY');
     const sent = join(tmpRoot, 'sent');
     const [file] = readdirSync(sent);
     const event = JSON.parse(readFileSync(join(sent, file!), 'utf8')) as Record<string, unknown>;
@@ -484,7 +542,7 @@ describe('bot-errors-dispatcher', () => {
     });
 
     expect(JSON.parse(recovered)).toMatchObject({ processed: 1, sent: 1, failed: 0 });
-    expect(readFileSync(capturePath, 'utf8').match(/socket unavailable must stay durable/g)).toHaveLength(1);
+    expect(cardsContaining(capturePath, 'socket unavailable must stay durable')).toHaveLength(1);
     expect(readdirSync(outbox).filter((file) => file.endsWith('.json'))).toHaveLength(0);
     expect(readdirSync(sent)).toHaveLength(1);
   });
@@ -527,7 +585,7 @@ describe('bot-errors-dispatcher', () => {
     });
 
     expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, reclaimed: 1, failed: 0 });
-    expect(readFileSync(capturePath, 'utf8').match(/crash mid-claim must replay once/g)).toHaveLength(1);
+    expect(cardsContaining(capturePath, 'crash mid-claim must replay once')).toHaveLength(1);
     expect(dataEntries(processing)).toHaveLength(0);
     expect(readdirSync(sent)).toHaveLength(1);
     const [sentFile] = readdirSync(sent);
@@ -553,10 +611,10 @@ describe('bot-errors-dispatcher', () => {
       },
     });
 
-    const rendered = readFileSync(capturePath, 'utf8');
+    const rendered = storedDetail(tmpRoot, capturePath);
     expect(rendered).toContain('BOT INFO - attempt counter test');
     expect(rendered).toContain('requested_action: none');
-    expect(rendered).not.toContain('requested_action: Q investigate');
+    expect(cardsAndDetails(tmpRoot, capturePath)).not.toContain('requested_action: Q investigate');
   });
 
   it('suppresses daily-health info sends with a distinct auditable disposition', () => {
@@ -741,7 +799,7 @@ describe('bot-errors-dispatcher', () => {
     });
 
     expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, suppressed: 0, failed: 0 });
-    expect(readFileSync(capturePath, 'utf8')).toContain('BOT WARNING - BOT ERRORS daily health found issues');
+    expect(storedDetail(tmpRoot, capturePath)).toContain('BOT WARNING - BOT ERRORS daily health found issues');
   });
 
   it('collapses same-fingerprint storms into one manifest-backed digest', () => {
@@ -774,8 +832,8 @@ describe('bot-errors-dispatcher', () => {
     });
 
     expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, stormCollapsed: 13, failed: 0 });
-    const rendered = readFileSync(capturePath, 'utf8');
-    expect(rendered.match(/BOT ERRORS storm collapse/g)).toHaveLength(1);
+    const rendered = storedDetail(tmpRoot, capturePath);
+    expect(cardsContaining(capturePath, 'BOT ERRORS storm collapse')).toHaveLength(1);
     expect(rendered).toContain('affected_hosts: 13');
     expect(rendered).toContain('affected_host_list:');
     hosts.forEach((host) => expect(rendered).toContain(host));
@@ -783,7 +841,7 @@ describe('bot-errors-dispatcher', () => {
     // private topology and nothing reads it programmatically, so it must not
     // reach the operator page. What ties the page to its window is the window
     // identity, asserted below against the manifest the same window wrote.
-    expect(rendered).not.toContain('storm_manifest:');
+    expect(cardsAndDetails(tmpRoot, capturePath)).not.toContain('storm_manifest:');
     expect(rendered).toContain('requested_action: Q investigate');
     expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "storm_digest_queued"');
     expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "storm_collapsed"');
@@ -870,7 +928,7 @@ describe('bot-errors-dispatcher', () => {
     });
 
     expect(JSON.parse(output)).toMatchObject({ processed: 2, sent: 2, stormCollapsed: 6, failed: 0 });
-    expect(readFileSync(capturePath, 'utf8').match(/BOT ERRORS storm collapse/g)).toHaveLength(2);
+    expect(cardsContaining(capturePath, 'BOT ERRORS storm collapse')).toHaveLength(2);
   });
 
   it('collapses storms that straddle a fixed bucket boundary inside the sliding window', () => {
@@ -899,7 +957,7 @@ describe('bot-errors-dispatcher', () => {
     });
 
     expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, stormCollapsed: 3, failed: 0 });
-    expect(readFileSync(capturePath, 'utf8').match(/BOT ERRORS storm collapse/g)).toHaveLength(1);
+    expect(cardsContaining(capturePath, 'BOT ERRORS storm collapse')).toHaveLength(1);
   });
 
   it('collapses trickle storms across a fixed boundary when the rolling span is inside the window', () => {
@@ -970,7 +1028,7 @@ describe('bot-errors-dispatcher', () => {
     });
 
     expect(JSON.parse(replay)).toMatchObject({ processed: 1, sent: 1, stormCollapsed: 3, failed: 0 });
-    expect(readFileSync(capturePath, 'utf8').match(/BOT ERRORS storm collapse/g)).toHaveLength(1);
+    expect(cardsContaining(capturePath, 'BOT ERRORS storm collapse')).toHaveLength(1);
     expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "storm_digest_reused"');
     expect(readdirSync(outbox).filter((file) => file.endsWith('.json'))).toHaveLength(0);
     expect(readdirSync(collapsed)).toHaveLength(16);
@@ -1047,7 +1105,7 @@ describe('bot-errors-dispatcher', () => {
       recoveryDeduped: 11,
       failed: 0,
     });
-    expect(readFileSync(capturePath, 'utf8').match(/BOT RECOVERY/g)).toHaveLength(1);
+    expect(storedDetails(tmpRoot, capturePath).filter((detail) => detail.includes('BOT RECOVERY'))).toHaveLength(1);
     expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "recovery_duplicate_suppressed"');
     expect(readdirSync(sent)).toHaveLength(1);
     expect(readdirSync(suppressed)).toHaveLength(11);
@@ -1198,9 +1256,9 @@ describe('bot-errors-dispatcher', () => {
     });
 
     expect(JSON.parse(output)).toMatchObject({ processed: 3, sent: 3, suppressed: 0, recoveryDeduped: 0, failed: 0 });
-    const rendered = readFileSync(capturePath, 'utf8');
-    expect(rendered.match(/BOT RECOVERY/g)).toHaveLength(2);
-    expect(rendered).toContain('BOT ERROR - flapping source restored');
+    const details = storedDetails(tmpRoot, capturePath);
+    expect(details.filter((detail) => detail.includes('BOT RECOVERY'))).toHaveLength(2);
+    expect(details.join('\n')).toContain('BOT ERROR - flapping source restored');
   });
 
   it('retires a retrying alert when its later clear arrives before delivery', () => {
@@ -1292,9 +1350,9 @@ describe('bot-errors-dispatcher', () => {
       recoveredBeforeDelivery: 1,
     });
     expect(dataEntries(join(tmpRoot, 'outbox'))).toHaveLength(0);
-    const rendered = readFileSync(capturePath, 'utf8');
+    const rendered = storedDetail(tmpRoot, capturePath);
     expect(rendered).toContain('BOT RECOVERY');
-    expect(rendered).not.toContain('BOT ERROR');
+    expect(cardsAndDetails(tmpRoot, capturePath)).not.toContain('BOT ERROR');
   });
 
   it('keeps a qualified recovery visible for a legacy-unqualified open incident', () => {
@@ -1339,9 +1397,9 @@ describe('bot-errors-dispatcher', () => {
       recoveredBeforeDelivery: 1,
     });
     expect(dataEntries(join(tmpRoot, 'outbox'))).toHaveLength(0);
-    const rendered = readFileSync(capturePath, 'utf8');
+    const rendered = storedDetail(tmpRoot, capturePath);
     expect(rendered).toContain('BOT RECOVERY');
-    expect(rendered).not.toContain('BOT ERROR');
+    expect(cardsAndDetails(tmpRoot, capturePath)).not.toContain('BOT ERROR');
   });
 
   it('does not retire a retrying alert created after an older orphan clear', () => {
@@ -1508,12 +1566,12 @@ describe('bot-errors-dispatcher', () => {
       failed: 0,
     });
     expect(readdirSync(suppressed)).toHaveLength(2);
-    const rendered = readFileSync(capturePath, 'utf8');
-    expect(rendered.match(/dispatcher refused test-provenance events/g)).toHaveLength(1);
-    expect(rendered).toContain('refused_events:2');
-    expect(rendered).not.toContain(tmpRoot);
-    expect(rendered).not.toContain('/home/');
-    expect(rendered).not.toContain('resolvedOutbox');
+    const seen = cardsAndDetails(tmpRoot, capturePath);
+    expect(cardsContaining(capturePath, 'dispatcher refused test-provenance events')).toHaveLength(1);
+    expect(storedDetail(tmpRoot, capturePath)).toContain('refused_events:2');
+    expect(seen).not.toContain(tmpRoot);
+    expect(seen).not.toContain('/home/');
+    expect(seen).not.toContain('resolvedOutbox');
 
     writeStormEvent(tmpRoot, 'mini1', {
       id: 'test-provenance-3',
@@ -1541,7 +1599,7 @@ describe('bot-errors-dispatcher', () => {
       testProvenanceMetaAlerted: 0,
       failed: 0,
     });
-    expect(readFileSync(capturePath, 'utf8').match(/dispatcher refused test-provenance events/g)).toHaveLength(1);
+    expect(cardsContaining(capturePath, 'dispatcher refused test-provenance events')).toHaveLength(1);
   });
 
   it('recovers writefail breadcrumbs into the normal dispatch path', () => {
@@ -1564,9 +1622,9 @@ describe('bot-errors-dispatcher', () => {
     });
 
     expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, writefailRecovered: 1, failed: 0 });
-    expect(readFileSync(capturePath, 'utf8')).toContain('BOT ERROR - recovered from writefail');
-    expect(readFileSync(capturePath, 'utf8')).toContain('writefail_recovered:');
-    expect(readFileSync(capturePath, 'utf8')).toContain('already redacted phone=[REDACTED PHONE]');
+    expect(storedDetail(tmpRoot, capturePath)).toContain('BOT ERROR - recovered from writefail');
+    expect(storedDetail(tmpRoot, capturePath)).toContain('writefail_recovered:');
+    expect(storedDetail(tmpRoot, capturePath)).toContain('already redacted phone=[REDACTED PHONE]');
     expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "writefail_recovered"');
     expect(readdirSync(recovered)).toHaveLength(1);
     const sentFiles = readdirSync(sent);
@@ -1799,7 +1857,8 @@ describe('bot-errors-dispatcher', () => {
       },
     });
 
-    const rendered = readFileSync(capturePath, 'utf8');
+    const rendered = storedDetail(tmpRoot, capturePath);
+    const seen = cardsAndDetails(tmpRoot, capturePath);
     expect(rendered).toContain('whatsoup at [REDACTED PHONE].service');
     expect(rendered).toContain('q at s.whatsapp.net');
     expect(rendered).toContain('[REDACTED AWS ACCESS KEY]');
@@ -1808,14 +1867,14 @@ describe('bot-errors-dispatcher', () => {
     expect(rendered).toContain('[REDACTED PEM PRIVATE KEY]');
     expect(rendered).toContain(REDACTED_URL_USERINFO);
     expect(rendered).toContain('[REDACTED PHONE]');
-    expect(rendered).not.toContain(TEST_SERVICE_NAME.replace(/\.service$/, ''));
-    expect(rendered).not.toContain(TEST_CHAT_JID);
-    expect(rendered).not.toContain(AWS_KEY_SAMPLE);
-    expect(rendered).not.toContain(GITHUB_TOKEN_SAMPLE);
-    expect(rendered).not.toContain('eyJhbGci');
-    expect(rendered).not.toContain('-----BEGIN');
-    expect(rendered).not.toContain(URL_USERINFO_SAMPLE);
-    expect(rendered).not.toContain(PHONE_SAMPLE);
+    expect(seen).not.toContain(TEST_SERVICE_NAME.replace(/\.service$/, ''));
+    expect(seen).not.toContain(TEST_CHAT_JID);
+    expect(seen).not.toContain(AWS_KEY_SAMPLE);
+    expect(seen).not.toContain(GITHUB_TOKEN_SAMPLE);
+    expect(seen).not.toContain('eyJhbGci');
+    expect(seen).not.toContain('-----BEGIN');
+    expect(seen).not.toContain(URL_USERINFO_SAMPLE);
+    expect(seen).not.toContain(PHONE_SAMPLE);
   });
 
   it('ignores partial temp files in the outbox without delivery or quarantine', () => {
@@ -2122,8 +2181,9 @@ describe('release-proof drill: two-run alert/clear traversal', () => {
     expect(incidentsAfterClear.openIncidents).not.toHaveProperty(incidentKey);
     const messagesAfterClear = captureMessages(capture);
     expect(messagesAfterClear).toHaveLength(2);
-    expect(messagesAfterClear[1]).toContain('BOT RECOVERY');
-    expect(messagesAfterClear[1]).toContain(DRILL_SOURCE);
+    const detailsAfterClear = storedDetails(tmpRoot, capture);
+    expect(detailsAfterClear[1]).toContain('BOT RECOVERY');
+    expect(detailsAfterClear[1]).toContain(DRILL_SOURCE);
 
     // Orphan clear: the incident is already closed, so this clear has no open
     // incident to recover. should_suppress_send's "clear has no open incident
@@ -2228,7 +2288,7 @@ describe('still-open reminder exponential backoff', () => {
     patchOpenRecord(tmpRoot, key, { openedAt: now - 100000, lastNotifiedAt: now - 90, lastSentAt: now - 90 });
     emitBackoffAlert(tmpRoot);
     expect(JSON.parse(dispatchBackoff(tmpRoot, capture))).toMatchObject({ processed: 1, sent: 1, suppressed: 0 });
-    const reminders = captureMessages(capture).filter((text) => text.includes('ESCALATED still open'));
+    const reminders = storedDetails(tmpRoot, capture).filter((text) => text.includes('ESCALATED still open'));
     expect(reminders).toHaveLength(1);
     // The doubled interval is durably recorded on the open incident record.
     expect(readIncidentState(tmpRoot).openIncidents[key]!.renotifyIntervalSeconds).toBe(120);
@@ -2239,7 +2299,7 @@ describe('still-open reminder exponential backoff', () => {
     patchOpenRecord(tmpRoot, key, { lastNotifiedAt: now - 90, lastSentAt: now - 90 });
     emitBackoffAlert(tmpRoot);
     expect(JSON.parse(dispatchBackoff(tmpRoot, capture))).toMatchObject({ processed: 1, sent: 0, suppressed: 1 });
-    expect(captureMessages(capture).filter((text) => text.includes('ESCALATED still open'))).toHaveLength(1);
+    expect(storedDetails(tmpRoot, capture).filter((text) => text.includes('ESCALATED still open'))).toHaveLength(1);
 
     // 130s since the first reminder: past the doubled interval -> second
     // reminder sends and the interval doubles again.
@@ -2247,7 +2307,7 @@ describe('still-open reminder exponential backoff', () => {
     patchOpenRecord(tmpRoot, key, { lastNotifiedAt: now - 130, lastSentAt: now - 130 });
     emitBackoffAlert(tmpRoot);
     expect(JSON.parse(dispatchBackoff(tmpRoot, capture))).toMatchObject({ processed: 1, sent: 1, suppressed: 0 });
-    expect(captureMessages(capture).filter((text) => text.includes('ESCALATED still open'))).toHaveLength(2);
+    expect(storedDetails(tmpRoot, capture).filter((text) => text.includes('ESCALATED still open'))).toHaveLength(2);
     expect(readIncidentState(tmpRoot).openIncidents[key]!.renotifyIntervalSeconds).toBe(240);
   });
 

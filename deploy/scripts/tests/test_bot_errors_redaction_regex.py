@@ -181,7 +181,7 @@ def test_operational_diagnostics_remain_actionable(script_name: str, func_name: 
     redact: Callable[[str], str] = getattr(mod, func_name)
 
     samples = [
-        "credential: credential_requirement=fleet-token credential_path_redacted=true",
+        "credential_check: credential_requirement=fleet-token credential_path_redacted=true",
         "baileys_version=2.3000.1020194169",
         "outbound_success_at=2026-06-11 10:15:02",
     ]

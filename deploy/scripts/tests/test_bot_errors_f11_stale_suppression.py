@@ -93,7 +93,7 @@ def test_nonactionable_stale_is_suppressed_and_autoclosed(tmp_path):
     # exactly one consolidated auto-close summary, no per-incident renotify
     assert len(sends) == 1
     assert "Auto-closed" in sends[0]
-    assert "none — informational" in sends[0]
+    assert "*What we are doing:* No action is needed." in sends[0]
     # incident terminally removed from open state
     assert key not in _open_incidents(mod)
 

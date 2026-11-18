@@ -223,8 +223,8 @@ def test_malformed_attempts_does_not_wedge_later_valid_event(tmp_path):
     assert result.get("sent", 0) >= 1, (
         "the later valid event must still be delivered in the same cycle"
     )
-    assert any("test-2437-b2-good" in t for t in sent_paths), (
-        "the valid event's evidence must appear in the delivered WhatsApp text"
+    assert any("*Who is affected:* The bot-errors-test bot." in t for t in sent_paths), (
+        "the later valid event must reach the public WhatsApp renderer"
     )
     assert not good.exists(), "the valid event must have been claimed and sent"
 

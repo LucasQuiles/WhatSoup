@@ -41,7 +41,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "d0c937b2b30bce03cfd94deeb8e92ccdf437bb229f7baef500b69be50f0a96a7",
+      "sha256": "fcfe289fbe77e0b897174211d54557855679ead9547d07481932281f78f42517",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -67,7 +67,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "b81b5fc962b249573e87bbc7ecf59b8b302f8685359103bc6ff7ac7a9eb8e2f0",
+      "sha256": "2c79dbf53464f45377642ceda0549987a63fb0195b3985ab5a8e01703677467d",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",
@@ -177,7 +177,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "6dd613813c1db15015e5595ee285ba25124b6038a5be28db907a0b2b796c1212",
+      "sha256": "bbb2c87d8392f6b505e542dcfb6be7ccfd0837886d1c586a47f6d2346dbbcb12",
       "mustContain": [
         "critical_file_problem",
         "CLAUDE_SECURESTORAGE_CONFIG_DIR",
@@ -321,7 +321,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-q-loop.py",
-      "sha256": "fe83c46b3ac0f4ff5881214f1a3232cf6398a743ac20cdb106aad9f539084f8e",
+      "sha256": "091a825e0491eb5eec4e822e5cd504db813069ff7ab597808425df6bbb8b191d",
       "mustContain": [
         "q_unavailable_reason",
         "session_limit",
@@ -501,6 +501,16 @@
       ]
     },
     {
+      "path": "deploy/scripts/lib/bot_errors_card_keys.py",
+      "sha256": "cff1e0ec972d5a3c632bcca3a4c7b2893dcd8ed777dccbe8fa3a3535e1d4bc05",
+      "mustContain": [
+        "CARD_SECRET_KEY_WORDS",
+        "def secret_key_pattern(",
+        "class FoldedLineEnds",
+        "def keyed_value_span("
+      ]
+    },
+    {
       "path": "deploy/scripts/lib/bot_errors_daily_health.py",
       "sha256": "eb750aab0f6ddb1589236027fa508dfd48a8f2d432035401015369a474e0efe0",
       "mustContain": [
@@ -572,7 +582,7 @@
     },
     {
       "path": "deploy/scripts/lib/classify_health.py",
-      "sha256": "856f8dacc62673133db4fad6f79ee1409182c59d71f75fc13806f7a8ce01233c",
+      "sha256": "c1fad9106ab47f15a2ea191473deefc7d8f98927a642c247eb772546d8b3885e",
       "mustContain": [
         "def classify(d: object) -> str:",
         "def recovery_debt_issue(d: object) -> Optional[str]:"
@@ -811,7 +821,7 @@
     },
     {
       "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "f2000451bdb02083841c9bdf113f2202c5bc2eec3b6395515dbe91bf4b16bc87",
+      "sha256": "8d0cc4c4de2aba8d24a3902a9651686943673a93987a14a9f69264dbe8019a77",
       "mustContain": [
         "import { redactText } from './redaction-text.ts';",
         "export { redactText as redactBotErrorsText } from './redaction-text.ts';",
@@ -831,6 +841,13 @@
         "confineConversationScope",
         "CONVERSATION_SCOPE_TAG",
         "bot-errors-evidence:"
+      ]
+    },
+    {
+      "path": "src/lib/clock.ts",
+      "sha256": "0578a473c0ba79f155a4c4653e6d634c650c5b2dee0292bb1cccfaeea64f3c4c",
+      "mustContain": [
+        "export const systemClock"
       ]
     },
     {

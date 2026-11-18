@@ -354,6 +354,14 @@ const RECOVERY_DEBT_BLOCKING_REASONS = new Set([
   'turn_recovery_unclassified',
   'completed_delivery_identity_unclassified',
 ]);
+const RECOVERY_DEBT_EXTENDED_FIELDS = [
+  'service_blocking',
+  'attention',
+  'reasons',
+  'turn_recovery',
+  'completed_delivery_identity',
+  'delivery',
+] as const;
 
 function recoveryDebtCount(value: unknown, errors: string[], field: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 0) {
@@ -375,10 +383,79 @@ function recoveryDebtReadable(
   return value['readable'];
 }
 
+/**
+ * The continuity counts. The producer defines open as unresolved + ambiguous
+ * (src/core/continuity-gap-ledger.ts), so valid counts that disagree are a
+ * contradiction, and a contradictory projection is not valid evidence
+ * (docs/runbook.md).
+ */
+function continuityCounts(
+  continuity: Record<string, unknown> | undefined,
+  errors: string[],
+): [open: number, unresolved: number, ambiguous: number] {
+  const errorsBefore = errors.length;
+  const open = recoveryDebtCount(continuity?.['open'], errors, 'recovery_debt.continuity.open');
+  const unresolved = recoveryDebtCount(continuity?.['unresolved'], errors, 'recovery_debt.continuity.unresolved');
+  const ambiguous = recoveryDebtCount(continuity?.['ambiguous'], errors, 'recovery_debt.continuity.ambiguous');
+  if (errors.length === errorsBefore && open !== unresolved + ambiguous) {
+    errors.push('recovery_debt.continuity.open_contradiction');
+  }
+  return [open, unresolved, ambiguous];
+}
+
+function parseContinuityOnlyRecoveryDebt(
+  health: Record<string, unknown>,
+  debt: Record<string, unknown>,
+): RecoveryDebtParseResult {
+  const errors: string[] = [];
+  const open = debt['open'];
+  if (typeof open !== 'boolean') errors.push('recovery_debt.open');
+
+  const continuity = asRecord(debt['continuity']);
+  const continuityReadable = recoveryDebtReadable(continuity, errors, 'recovery_debt.continuity');
+  const [continuityOpen] = continuityCounts(continuity, errors);
+
+  const reason = debt['reason'];
+  if (
+    reason !== null
+    && reason !== 'continuity_gap_open'
+    && reason !== 'continuity_gap_unreadable'
+  ) errors.push('recovery_debt.reason');
+  const expectedReason = !continuityReadable
+    ? 'continuity_gap_unreadable'
+    : continuityOpen > 0
+      ? 'continuity_gap_open'
+      : null;
+  if (reason !== expectedReason) errors.push('recovery_debt.reason_contradiction');
+
+  const serviceBlocking = !continuityReadable;
+  if (open !== (serviceBlocking || continuityOpen > 0)) {
+    errors.push('recovery_debt.open_contradiction');
+  }
+  if (health['status'] === 'healthy' && serviceBlocking) {
+    errors.push('recovery_debt_status_contradiction');
+  }
+  if (errors.length > 0) return { kind: 'invalid', errors };
+
+  return {
+    kind: 'valid',
+    summary: {
+      open: open as boolean,
+      serviceBlocking,
+      attention: serviceBlocking ? 'urgent' : open ? 'routine' : 'none',
+      reasons: expectedReason === null ? [] : [expectedReason],
+      gaugeTotal: continuityOpen,
+    },
+  };
+}
+
 export function parseRecoveryDebtHealth(health: Record<string, unknown>): RecoveryDebtParseResult {
   if (!Object.hasOwn(health, 'recovery_debt')) return { kind: 'absent' };
   const debt = asRecord(health['recovery_debt']);
   if (!debt) return { kind: 'invalid', errors: ['recovery_debt'] };
+  if (!RECOVERY_DEBT_EXTENDED_FIELDS.some((field) => Object.hasOwn(debt, field))) {
+    return parseContinuityOnlyRecoveryDebt(health, debt);
+  }
   const errors: string[] = [];
   const open = debt['open'];
   const serviceBlocking = debt['service_blocking'];
@@ -424,9 +501,7 @@ export function parseRecoveryDebtHealth(health: Record<string, unknown>): Recove
   );
   const deliveryReadable = recoveryDebtReadable(delivery, errors, 'recovery_debt.delivery');
   const counts = [
-    recoveryDebtCount(continuity?.['open'], errors, 'recovery_debt.continuity.open'),
-    recoveryDebtCount(continuity?.['unresolved'], errors, 'recovery_debt.continuity.unresolved'),
-    recoveryDebtCount(continuity?.['ambiguous'], errors, 'recovery_debt.continuity.ambiguous'),
+    ...continuityCounts(continuity, errors),
     recoveryDebtCount(
       turnRecovery?.['blocking_outstanding'],
       errors,

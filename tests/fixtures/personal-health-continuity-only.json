@@ -1,0 +1,33 @@
+{
+  "status": "healthy",
+  "generated_at": "2026-10-29T03:16:00.000Z",
+  "runtime": {},
+  "whatsapp": {
+    "connected": true,
+    "account_jid": "redacted-personal@s.whatsapp.net",
+    "connection": {
+      "state": "connected",
+      "reconnect_phase": null,
+      "reconnect_attempts": 0,
+      "auth_failure_class": "none",
+      "recent_disconnects": {
+        "count": 0,
+        "degraded_threshold": 3,
+        "window_ms": 600000,
+        "last_at": null,
+        "last_reason": null,
+        "last_status_code": null
+      }
+    }
+  },
+  "recovery_debt": {
+    "open": false,
+    "reason": null,
+    "continuity": {
+      "readable": true,
+      "open": 0,
+      "unresolved": 0,
+      "ambiguous": 0
+    }
+  }
+}

@@ -1154,7 +1154,7 @@ def test_a_retried_event_at_the_escalation_threshold_still_escalates(tmp_path):
     bench.cycle((bench.queued(path), "ok"))
     assert bench.record(key).get("suppressedCount") == bench.mod.INCIDENT_ESCALATE_SUPPRESSED
     assert len(bench.delivered) == 1
-    assert "ESCALATED still open" in bench.delivered[0]
+    assert bench.delivered[0].startswith("🔴 ↻ *Still open:")
 
 
 # --- an ambiguous send is held and records nothing -----------------------------------------
@@ -1194,26 +1194,39 @@ def test_deferred_renotify_chains_collapse_to_one_page_on_recovery(tmp_path):
     assert len(list(bench.paths["suppressed"].glob("*.evt-renotify-*"))) == 2
 
 
-# --- the page text names the previous delivery -------------------------------------------------
+# --- the page names the previous delivery; the public card omits it ------------------------------
+# Interim (owner ruling R34, 2026-11-11): the card carries no machine detail, so the previous
+# delivery is read from format_event of the stored record the card's Ref names.
 
 
 def _last_notified_values(text: str) -> list[str]:
     return re.findall(r"last_notified=(\S+)", text)
 
 
-def test_a_renotify_names_the_previous_delivery_and_carries_no_intent(tmp_path):
+def _stored_detail(bench: _Bench, card: str) -> str:
+    match = re.search(r"(?m)^Ref ([0-9a-f]{8}) · ", card)
+    assert match is not None, card
+    stored = [json.loads(path.read_text(encoding="utf-8")) for path in sorted(bench.paths["sent"].glob("*.sent"))]
+    named = [event for event in stored if bench.mod.public_card_ref(event) == match.group(1)]
+    assert len({event.get("id") for event in named}) == 1, "the card's Ref names one stored event"
+    return bench.mod.format_event(named[-1])
+
+
+def test_a_renotify_keeps_status_without_exposing_delivery_fields(tmp_path):
     bench = _Bench(tmp_path)
     _key, event = _page(bench, "renotify")
     path = _deliver(bench, event)
     text = bench.delivered[0]
-    assert _last_notified_values(text) == [_iso(T0 - 7 * HOUR)]
+    assert text.startswith("🔴 ↻ *Still open:")
+    assert "last_notified=" not in text
+    assert _last_notified_values(_stored_detail(bench, text)) == [_iso(T0 - 7 * HOUR)]
     assert "renotifyGeneration" not in text and TOKEN_A not in text
     archived = sorted(bench.paths["sent"].glob(f"{path.name}.*.sent"))
     nonce = json.loads(archived[0].read_text(encoding="utf-8"))["delivery"].get("nonce")
     assert nonce is None or nonce not in text
 
 
-def test_a_retried_renotify_names_the_previous_delivery(tmp_path):
+def test_a_retried_renotify_keeps_public_status_without_delivery_fields(tmp_path):
     bench = _Bench(tmp_path)
     _key, event = _page(bench, "renotify")
     path = bench.put(event)
@@ -1221,4 +1234,6 @@ def test_a_retried_renotify_names_the_previous_delivery(tmp_path):
     bench.clock.now = T0 + 60
     bench.cycle((bench.queued(path), "ok"))
     assert len(bench.delivered) == 1
-    assert _last_notified_values(bench.delivered[0])[-1] == _iso(T0 - 7 * HOUR)
+    assert bench.delivered[0].startswith("🔴 ↻ *Still open:")
+    assert "last_notified=" not in bench.delivered[0]
+    assert _last_notified_values(_stored_detail(bench, bench.delivered[0]))[-1] == _iso(T0 - 7 * HOUR)

@@ -9,6 +9,10 @@ import importlib.util
 import json
 import pathlib
 import pytest
+from hypothesis import given, settings, strategies as st
+
+# Finite field and value domains: Hypothesis exhausts them, so every case runs.
+_exhaustive = settings(derandomize=True, database=None, deadline=None)
 
 _MOD_PATH = pathlib.Path(__file__).resolve().parents[1] / "lib" / "classify_health.py"
 _spec = importlib.util.spec_from_file_location("classify_health", _MOD_PATH)
@@ -78,6 +82,120 @@ def _debt(**over):
 
 def test_healthy_fresh_usable_is_ok():
     assert classify({"status": "healthy", "turn_capability": _tc()}) == "ok"
+
+
+def _compact_debt():
+    return {
+        "open": True,
+        "reason": "continuity_gap_open",
+        "continuity": {"readable": True, "open": 2, "unresolved": 1, "ambiguous": 1},
+    }
+
+
+@pytest.mark.parametrize("count", [0, 2])
+def test_healthy_compact_continuity_is_accepted_without_clearing_debt(count):
+    debt = _compact_debt()
+    debt.update(open=count > 0, reason="continuity_gap_open" if count else None)
+    debt["continuity"].update(open=count, unresolved=count, ambiguous=0)
+    body = {"status": "healthy", "turn_capability": _tc(), "recovery_debt": debt}
+    before = json.dumps(body, sort_keys=True)
+    assert recovery_debt_issue(body) is None
+    assert classify(body) == "ok"
+    assert json.dumps(body, sort_keys=True) == before
+
+
+@pytest.mark.parametrize("status,expected", [
+    ("healthy", "recovery_debt_status_contradiction"), ("degraded", None),
+])
+def test_compact_unreadable_continuity_cannot_support_healthy_status(status, expected):
+    debt = _compact_debt()
+    debt["continuity"]["readable"] = False
+    debt["reason"] = "continuity_gap_unreadable"
+    body = {"status": status, "turn_capability": _tc(), "recovery_debt": debt}
+    assert recovery_debt_issue(body) == expected
+    assert classify(body) == ("fields" if status == "healthy" else "non_model")
+
+
+@pytest.mark.parametrize("value", [None, True, -1, 1.5, "1", 9_007_199_254_740_992, float("inf"), float("nan")])
+@_exhaustive
+@given(field=st.sampled_from(("open", "unresolved", "ambiguous")))
+def test_compact_counts_require_safe_nonnegative_integers(value, field):
+    debt = _compact_debt()
+    debt["continuity"][field] = value
+    assert recovery_debt_issue({"status": "healthy", "recovery_debt": debt}) == "recovery_debt_invalid"
+
+
+def test_compact_integer_valued_json_numbers_match_javascript_contract():
+    debt = json.loads('{"open":true,"reason":"continuity_gap_open",'
+                      '"continuity":{"readable":true,"open":2.0,"unresolved":1e0,"ambiguous":1.0}}')
+    assert recovery_debt_issue({"status": "healthy", "recovery_debt": debt}) is None
+
+
+@pytest.mark.parametrize("field,value", [
+    ("open", False), ("open", 1), ("reason", None), ("reason", "continuity_gap_unreadable"),
+    ("continuity", None), ("continuity", {}),
+])
+def test_compact_contradictions_and_missing_evidence_are_rejected(field, value):
+    debt = _compact_debt()
+    debt[field] = value
+    assert recovery_debt_issue({"status": "healthy", "recovery_debt": debt}) == "recovery_debt_invalid"
+
+
+@_exhaustive
+@given(field=st.sampled_from(("open", "reason", "continuity")))
+def test_compact_required_fields_cannot_be_omitted(field):
+    debt = _compact_debt()
+    del debt[field]
+    assert recovery_debt_issue({"status": "healthy", "recovery_debt": debt}) == "recovery_debt_invalid"
+
+
+@_exhaustive
+@given(value=st.sampled_from((None, 1, "true")))
+def test_compact_readability_requires_a_boolean(value):
+    debt = _compact_debt()
+    debt["continuity"]["readable"] = value
+    assert recovery_debt_issue({"status": "healthy", "recovery_debt": debt}) == "recovery_debt_invalid"
+
+
+@_exhaustive
+@given(field=st.sampled_from((
+    "service_blocking", "attention", "reasons", "turn_recovery", "completed_delivery_identity", "delivery",
+)))
+def test_partial_extended_debt_cannot_use_compact_compatibility(field):
+    debt = _compact_debt()
+    debt[field] = None
+    assert recovery_debt_issue({"status": "healthy", "recovery_debt": debt}) == "recovery_debt_invalid"
+
+
+# The producer defines continuity open as unresolved + ambiguous
+# (src/core/continuity-gap-ledger.ts), so counts that disagree are a
+# contradiction in either direction. Without the check the first compact case
+# reads as zero debt.
+@pytest.mark.parametrize("debt_open,reason,counts", [
+    (False, None, (0, 1, 0)),
+    (True, "continuity_gap_open", (3, 1, 1)),
+])
+def test_compact_continuity_open_must_be_unresolved_plus_ambiguous(debt_open, reason, counts):
+    debt = _compact_debt()
+    debt.update(open=debt_open, reason=reason)
+    debt["continuity"].update(zip(("open", "unresolved", "ambiguous"), counts))
+    body = {"status": "healthy", "turn_capability": _tc(), "recovery_debt": debt}
+    assert recovery_debt_issue(body) == "recovery_debt_invalid"
+    assert classify(body) == "fields"
+
+
+@pytest.mark.parametrize("over", [
+    {"continuity": {"readable": True, "open": 0, "unresolved": 1, "ambiguous": 0}},
+    {
+        "reason": "continuity_gap_open",
+        "reasons": ["continuity_gap_open", "historical_turn_catchup"],
+        "continuity": {"readable": True, "open": 3, "unresolved": 1, "ambiguous": 1},
+    },
+])
+def test_extended_continuity_open_must_be_unresolved_plus_ambiguous(over):
+    body = {"status": "healthy", "turn_capability": _tc(), "recovery_debt": _debt(**over)}
+    assert recovery_debt_issue(body) == "recovery_debt_invalid"
+    assert classify(body) == "fields"
 
 
 def test_healthy_retained_recovery_debt_is_ok():

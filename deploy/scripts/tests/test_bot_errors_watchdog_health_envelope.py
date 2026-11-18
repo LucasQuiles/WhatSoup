@@ -21,6 +21,7 @@ import importlib.util
 from pathlib import Path
 
 import pytest
+from hypothesis import given, settings, strategies as st
 
 _SCRIPT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -94,6 +95,31 @@ def test_privileged_body_classification_is_unchanged():
     assert "degradation_causes=turn_recovery_degraded" in reasons
     assert "health_body_not_disclosed=public_envelope" not in reasons
     assert ctx["bond_status"] == "present"
+
+
+@settings(derandomize=True, database=None, deadline=None)
+@given(case=st.sampled_from((
+    (True, "healthy", None),
+    (False, "healthy", "recovery_debt_status_contradiction"),
+    (False, "degraded", "health_status=degraded"),
+)))
+def test_compact_continuity_contract_reaches_watchdog(case):
+    # A finite table of readability and status; Hypothesis exhausts it.
+    readable, status, expected = case
+    body = _privileged_degraded()
+    body.update(status=status, degradation_causes=[], status_reasons=[])
+    body["recovery_debt"] = {
+        "open": True,
+        "reason": "continuity_gap_open" if readable else "continuity_gap_unreadable",
+        "continuity": {"readable": readable, "open": 1, "unresolved": 1, "ambiguous": 0},
+    }
+    reasons, ctx = wd.health_reasons_from_payload(body, "a-bot")
+    if expected is None:
+        assert reasons == []
+    else:
+        assert expected in reasons
+    assert ctx["bond_status"] == "present"
+    assert body["recovery_debt"]["continuity"]["open"] == 1
 
 
 @pytest.mark.parametrize(

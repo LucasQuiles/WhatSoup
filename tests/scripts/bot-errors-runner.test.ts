@@ -338,8 +338,15 @@ describe('bot-errors-runner', () => {
     });
     expect(dispatch.status).toBe(0);
     expect(readFileSync(capture, 'utf8')).toContain('runner outbox failed');
-    expect(readFileSync(capture, 'utf8')).toContain('writefail_recovered');
-    expect(readdirSync(join(tmpRoot, 'sent')).filter((name) => name.endsWith('.sent'))).toHaveLength(1);
+    const sentNames = readdirSync(join(tmpRoot, 'sent')).filter((name) => name.endsWith('.sent'));
+    expect(sentNames).toHaveLength(1);
+    // Interim (owner ruling R34, 2026-11-11): the BOT ERRORS card carries no
+    // machine detail, so the writefail recovery provenance is read from the
+    // archived .sent record the card was rendered from.
+    const sentEvent = JSON.parse(readFileSync(join(tmpRoot, 'sent', sentNames[0]!), 'utf8')) as {
+      diagnostics?: { writefailRecovery?: Record<string, unknown> };
+    };
+    expect(sentEvent.diagnostics?.writefailRecovery).toMatchObject({ breadcrumb: expect.any(String) });
   });
 
   it('prefers HOME writefail fallback before TMPDIR when runner state writefail is blocked', () => {

@@ -2260,6 +2260,25 @@ closure history is unknown). `recovery_debt.continuity` keeps its four-field sha
 from the same reading, so a closed gap leaves its open counts too; the closure counts appear only in
 the top-level block.
 
+Fleet health polling also accepts the earlier continuity-only recovery-debt projection with just
+`open`, `reason`, and `continuity`. A readable open continuity count maps to routine debt; unreadable
+continuity maps to blocking debt and cannot support a healthy status. Once any extended field
+(`service_blocking`, `attention`, `reasons`, `turn_recovery`, `completed_delivery_identity`, or
+`delivery`) is present, fleet requires the complete extended projection and rejects partial or
+malformed data.
+
+The shared Python health validator also accepts the earlier continuity-only recovery-debt
+projection with just `open`, `reason`, and `continuity`. Readable open continuity remains
+routine debt; unreadable continuity cannot support a healthy status. If any extended field
+(`service_blocking`, `attention`, `reasons`, `turn_recovery`, `completed_delivery_identity`, or
+`delivery`) is present, the complete extended projection is required. The watchdog and daily
+health check therefore accept complete older responses without accepting partial newer ones
+or clearing recovery records.
+
+Fleet health polling and the shared Python health validator also reject a compact or extended
+projection whose `continuity.open` is not `unresolved + ambiguous`: the producer derives `open` as
+that sum, so a mismatch is a contradiction, not a debt count.
+
 If any required recovery evidence cannot be parsed exactly, health fails closed with
 `status: "degraded"`, `status_reasons: ["recovery_debt_blocking"]`,
 `recovery_debt.service_blocking: true`, and `attention: "urgent"`. A malformed or contradictory

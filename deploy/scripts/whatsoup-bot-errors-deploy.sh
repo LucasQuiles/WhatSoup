@@ -79,6 +79,7 @@ FILES=(
   # crash on load while do_verify still prints VERIFY_OK. Kept managed by
   # tests/scripts/deployer-import-closure.test.ts, which derives the required
   # set from the parsed import graph -- never from this array.
+  "deploy/scripts/lib/bot_errors_card_keys.py"
   # classify_health.py: bot-errors-health-check.py and
   # bot-errors-heartbeat-watchdog.py import recovery_debt_issue from it at
   # module scope to validate the /health recovery_debt contract (#3224).
@@ -110,6 +111,7 @@ FILES=(
   # src/lib/bot-errors-outbox.ts -- imported for value at its top, not as
   # `import type` -- and not build-time artifacts.
   "src/lib/alert-evidence.ts"
+  "src/lib/clock.ts"
   "src/lib/private-fs.ts"
   "src/lib/redaction-patterns.ts"
   "src/lib/redaction-text.ts"

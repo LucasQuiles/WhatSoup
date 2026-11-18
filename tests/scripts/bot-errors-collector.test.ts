@@ -275,6 +275,33 @@ function runCollector(fakeSsh: string, mode: 'fail' | 'success') {
   );
 }
 
+/** As runCollectorWithRemote, harvesting through the given remote alias (a neutral placeholder). */
+function runCollectorWithRemoteAlias(fakeSsh: string, remoteAlias: string, remoteRoot: string) {
+  return spawnSync(
+    'python3',
+    [
+      'deploy/scripts/bot-errors-collector.py',
+      '--remote',
+      `${remoteAlias}:${remoteRoot}`,
+      '--max-events',
+      '10',
+      '--timeout',
+      '5',
+      '--alert-cooldown',
+      '1',
+    ],
+    {
+      cwd: process.cwd(),
+      env: collectorEnv({
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_RELAY_SSH_COMMAND: fakeSsh,
+        BOT_ERRORS_TAILSCALE_STATUS_COMMAND: '',
+      }),
+      encoding: 'utf8',
+    },
+  );
+}
+
 function runCollectorWithRemote(fakeSsh: string, remoteRoot: string, env: Record<string, string> = {}) {
   return spawnSync(
     'python3',
@@ -944,16 +971,32 @@ print(Path(found).name if found else "NONE")
     expect(readdirSync(remoteOutbox).filter((file) => file.endsWith('.json'))).toEqual(['aaa-bad.json']);
   });
 
+  // The dispatcher sends the public alert card, which shows neither evidence
+  // nor diagnostics and repeats its summary. Provenance is therefore read from
+  // the archived .sent event, and deliveries are counted as captured cards:
+  // the dry-send capture appends one JSON record per send.
+  function capturedCards(capturePath: string): string[] {
+    return readFileSync(capturePath, 'utf8').split('\n').filter((line) => line.trim())
+      .map((line) => String((JSON.parse(line) as { text?: unknown }).text ?? ''));
+  }
+
+  function sentEvents(root: string): Array<Record<string, any>> {
+    const sentDir = join(root, 'sent');
+    return readdirSync(sentDir).filter((file) => file.endsWith('.sent'))
+      .map((file) => JSON.parse(readFileSync(join(sentDir, file), 'utf8')) as Record<string, any>);
+  }
+
   it('lets dispatcher recover a harvested critical remote writefail end to end', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
     const remoteRoot = join(tmpRoot, 'remote');
     writeRemoteWritefail(join(remoteRoot, 'writefail'), 'remote-critical-e2e', {
       summary: 'remote harvested critical alert',
+      machine: 'host-e-hostname',
     });
     const fakeSsh = writeExecFakeSsh(tmpRoot);
     const capturePath = join(tmpRoot, 'capture.txt');
 
-    const collector = runCollectorWithRemote(fakeSsh, remoteRoot);
+    const collector = runCollectorWithRemoteAlias(fakeSsh, 'host-e', remoteRoot);
     expect(collector.status).toBe(0);
     const dispatcher = spawnSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
       cwd: process.cwd(),
@@ -962,9 +1005,14 @@ print(Path(found).name if found else "NONE")
     });
 
     expect(dispatcher.status).toBe(0);
-    expect(readFileSync(capturePath, 'utf8')).toContain('remote harvested critical alert');
-    expect(readFileSync(capturePath, 'utf8')).toContain('writefail_recovered: origin=mini5-hostname harvested_from=mini5');
-    expect(readdirSync(join(tmpRoot, 'sent')).filter((file) => file.endsWith('.sent'))).toHaveLength(1);
+    expect(capturedCards(capturePath).filter((card) => card.includes('remote harvested critical alert'))).toHaveLength(1);
+    const [sent] = sentEvents(tmpRoot);
+    expect(sentEvents(tmpRoot)).toHaveLength(1);
+    // The full event keeps the provenance the old banner printed as
+    // "writefail_recovered: origin=<machine> harvested_from=<remote alias>".
+    expect(sent?.machine).toBe('host-e-hostname');
+    expect(sent?.diagnostics?.writefailRecovery?.harvest?.fromHost).toBe('host-e');
+    expect(sent?.diagnostics?.writefailRecovery?.recordedAt).toEqual(expect.any(String));
   });
 
   it('does not double-send a remote writefail re-harvest with the same event id', () => {
@@ -993,7 +1041,7 @@ print(Path(found).name if found else "NONE")
       encoding: 'utf8',
     }).status).toBe(0);
     expect(readdirSync(join(tmpRoot, 'sent')).filter((file) => file.endsWith('.sent'))).toHaveLength(1);
-    expect((readFileSync(capturePath, 'utf8').match(/remote writefail critical/g) ?? [])).toHaveLength(1);
+    expect(capturedCards(capturePath).filter((card) => card.includes('remote writefail critical'))).toHaveLength(1);
   });
 
   it('dedupes a stale remote writefail claim left behind by ack archive failure', () => {
@@ -1053,7 +1101,7 @@ print(Path(found).name if found else "NONE")
     }).status).toBe(0);
     // One extra sent event: the writefail ack recovery observation (#2405).
     expect(readdirSync(join(tmpRoot, 'sent')).filter((file) => file.endsWith('.sent'))).toHaveLength(3);
-    expect((readFileSync(capturePath, 'utf8').match(/remote writefail critical/g) ?? [])).toHaveLength(1);
+    expect(capturedCards(capturePath).filter((card) => card.includes('remote writefail critical'))).toHaveLength(1);
   });
 
   it('alerts distinct remote writefail ack failures independently by payload hash', () => {

@@ -415,19 +415,22 @@ def _run_credential_case(tmp_path, mode, classification):
         if classification is None:
             assert event["eventType"] == "clear"
             assert event["severity"] == "info"
-            assert "OK credential: credential_requirement=tokens.env" in event["evidence"]
+            assert "OK credential_check: credential_requirement=tokens.env" in event["evidence"]
             assert not capture.exists()
         else:
             records = [json.loads(line) for line in capture.read_text(encoding="utf-8").splitlines()]
             (tmp_path / "delivered.json").write_text(json.dumps(records), encoding="utf-8")
             assert len(records) == 1
             text = records[0]["text"]
-            for evidence in (event["evidence"], text):
-                matches = [line for line in evidence.splitlines() if "FAIL credential:" in line]
-                assert len(matches) == 1
-                assert classification in matches[0]
-                assert "credential_path_basename=tokens.env" in matches[0]
-                assert "synthetic-credential-body" not in evidence
+            matches = [line for line in event["evidence"].splitlines() if "FAIL credential_check:" in line]
+            assert len(matches) == 1
+            assert classification in matches[0]
+            assert "credential_path_basename=tokens.env" in matches[0]
+            assert "synthetic-credential-body" not in event["evidence"]
+            assert text.startswith("🔴 *")
+            assert "*What happened:*" in text
+            assert "FAIL credential_check:" not in text
+            assert "synthetic-credential-body" not in text
         return counts
 
 

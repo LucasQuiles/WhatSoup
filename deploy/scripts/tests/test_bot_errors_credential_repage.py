@@ -29,8 +29,10 @@ bots `bot-one`, `bot-two`, `dup-bot`. No real host name, number or chat id.
 from __future__ import annotations
 
 import calendar
+import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -93,6 +95,8 @@ HUMAN_ACTION_DIGEST = (
     "(owner). No automated remediation."
 )
 Q_INVESTIGATE = "Q investigate"
+PUBLIC_CREDENTIAL_ACTION = "Restore the affected AI service sign-in."
+PUBLIC_REVIEW_ACTION = "Nothing now."
 
 # Group meta-alerts raised by the class, by source.
 META_STATE_LOST = "credential-repage-state-lost"
@@ -220,7 +224,35 @@ _loads = iter(range(1, 1_000_000))
 
 
 def new_id() -> str:
-    return str(uuid.UUID(int=next(_ids)))
+    # Public cards identify UUID events by their leading eight hexadecimal
+    # characters. Keep synthetic IDs distinct on that operator-visible surface.
+    return str(uuid.UUID(int=next(_ids) << 96))
+
+
+_PUBLIC_CARD_UUID = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z",
+    re.IGNORECASE,
+)
+
+
+def public_card_ref(event_id: str) -> str:
+    """The public-card identity contract, independent of the dispatcher module."""
+    if _PUBLIC_CARD_UUID.fullmatch(event_id):
+        return event_id[:8].lower()
+    return hashlib.sha256((event_id or "missing").encode("utf-8")).hexdigest()[:8]
+
+
+_PUBLIC_META_MARKERS = {
+    "credential-repage-state-lost": "credential re-page state was lost",
+    "credential-repage-pass-error": "credential re-page passes absorbed an error",
+    "credential-repage-roster-unreadable": "fleet roster could not be read",
+    "poison-event-quarantine": "dispatcher quarantined an unreadable event",
+}
+
+
+def public_meta_marker(source: str) -> str:
+    """Stable human-visible text for a source-less public meta card."""
+    return _PUBLIC_META_MARKERS[source]
 
 
 # ---------------------------------------------------------------------------
@@ -732,14 +764,20 @@ class Rig:
         return [send["text"] for send in self.group if needle in send["text"]]
 
     def group_for(self, event_id: str) -> list[str]:
-        return self.group_texts(f"event: {event_id}")
+        return self.group_texts(f"Ref {public_card_ref(event_id)}")
+
+    def group_attempts_for(self, event_id: str) -> list[dict[str, Any]]:
+        return [send for send in self.group_attempts if f"Ref {public_card_ref(event_id)}" in send["text"]]
+
+    def copy_emails_for(self, event_id: str) -> list[dict[str, Any]]:
+        return self.copy_emails(f"Ref {public_card_ref(event_id)}")
 
     def meta_alerts(self, source: str) -> list[dict[str, Any]]:
-        return [send for send in self.group if f"source: {source}" in send["text"]]
+        return [send for send in self.group if public_meta_marker(source) in send["text"]]
 
     def meta_attempts(self, source: str) -> list[dict[str, Any]]:
         """Every started group send of the meta-alert `source`, taken or not."""
-        return [send for send in self.group_attempts if f"source: {source}" in send["text"]]
+        return [send for send in self.group_attempts if public_meta_marker(source) in send["text"]]
 
     def log(self) -> list[dict[str, Any]]:
         return dispatcher_fixtures.dispatch_log_records(self.paths)
@@ -893,9 +931,9 @@ def test_t0b_the_incident_is_paged_every_four_hours_with_a_readable_roster(make_
     # The fleet probe's copy is still sent, and while the condition is pending
     # its e-mail asks for a human, not for Q.
     assert [send["at"] for send in rig.legacy_copies("primary model check failed")] == [T_PROBE]
-    probe_mail = rig.copy_emails(f"event: {probe_id}")
+    probe_mail = rig.copy_emails_for(probe_id)
     assert len(probe_mail) == 1
-    assert HUMAN_ACTION in probe_mail[0]["body"]
+    assert PUBLIC_CREDENTIAL_ACTION in probe_mail[0]["body"]
     assert Q_INVESTIGATE not in probe_mail[0]["body"]
 
     replay_the_day(rig, relay_host="hosta.example", probe_host="hosta")
@@ -914,9 +952,9 @@ def test_t0b_the_incident_is_paged_the_same_with_the_roster_unreadable(make_rig)
     assert rig.phase("hosta|bot-one") == "pending"
     assert rig.phase("hostalias|bot-one") == "latent"
     assert [send["at"] for send in rig.legacy_copies("primary model check failed")] == [T_PROBE]
-    probe_mail = rig.copy_emails(f"event: {probe_id}")
+    probe_mail = rig.copy_emails_for(probe_id)
     assert len(probe_mail) == 1
-    assert HUMAN_ACTION in probe_mail[0]["body"]
+    assert PUBLIC_CREDENTIAL_ACTION in probe_mail[0]["body"]
     assert Q_INVESTIGATE not in probe_mail[0]["body"]
 
     replay_the_day(rig, relay_host="hosta.example", probe_host="hostalias")
@@ -1132,10 +1170,10 @@ def test_t5_pin_the_fleet_probe_alone_keeps_its_copy_and_todays_sentence(make_ri
     probe_id = rig.put(probe_event("hosta", "bot-one", T0))
     assert rig.cycle() is None
     assert [send["at"] for send in rig.legacy_copies("primary model check failed")] == [T0]
-    mail = rig.copy_emails(f"event: {probe_id}")
+    mail = rig.copy_emails_for(probe_id)
     assert len(mail) == 1
-    assert Q_INVESTIGATE in mail[0]["body"]
-    assert "Human action required" not in mail[0]["body"]
+    assert PUBLIC_REVIEW_ACTION in mail[0]["body"]
+    assert PUBLIC_CREDENTIAL_ACTION not in mail[0]["body"]
     rig.cycle_at(T0 + INTERVAL)
     assert rig.pages() == []
     assert rig.open_scopes() == []
@@ -1151,9 +1189,9 @@ def test_t5_the_fleet_probe_beside_an_opener_joins_and_its_copy_asks_for_a_human
     assert rig.members("hosta|bot-one") == sorted([MANUAL, probe_source("hosta", "bot-one")])
     # It keeps its own owner copy, with the human sentence.
     assert [send["at"] for send in rig.legacy_copies("primary model check failed")] == [T0 + 60]
-    mail = rig.copy_emails(f"event: {probe_id}")
+    mail = rig.copy_emails_for(probe_id)
     assert len(mail) == 1
-    assert HUMAN_ACTION in mail[0]["body"]
+    assert PUBLIC_CREDENTIAL_ACTION in mail[0]["body"]
     assert Q_INVESTIGATE not in mail[0]["body"]
     # And the next page's e-mail names it among the members.
     rig.cycle_at(T0 + INTERVAL)
@@ -1171,9 +1209,9 @@ def test_t5_with_the_roster_unreadable_the_probe_sits_in_its_own_latent_entry(ma
     assert rig.members("hostalias|bot-one") == [probe_source("hostalias", "bot-one")]
     assert rig.phase("hostalias|bot-one") == "latent"
     assert rig.members("hosta|bot-one") == [MANUAL]
-    mail = rig.copy_emails(f"event: {probe_id}")
+    mail = rig.copy_emails_for(probe_id)
     assert len(mail) == 1
-    assert HUMAN_ACTION in mail[0]["body"]
+    assert PUBLIC_CREDENTIAL_ACTION in mail[0]["body"]
     assert Q_INVESTIGATE not in mail[0]["body"]
     rig.cycle_at(T0 + INTERVAL)
     page_mail = rig.page_emails("page 2")
@@ -1191,7 +1229,7 @@ def test_t5_the_unverified_form_joins_the_same_way_and_has_no_owner_copy(make_ri
     assert rig.members("hosta|bot-one") == sorted([MANUAL, unverified])
     group = rig.group_for(warning_id)
     assert len(group) == 1
-    assert HUMAN_ACTION in group[0]
+    assert PUBLIC_CREDENTIAL_ACTION in group[0]
     assert Q_INVESTIGATE not in group[0]
     # Its owner copy is what the legacy route gives it today: none. The verified
     # form, beside it, has one.
@@ -2236,7 +2274,7 @@ META_GROUP = 8
 
 def meta_down(rig: Rig, source: str, verdict: str) -> None:
     """Both channels of the class's meta-alert `source` refuse it ("fail") or time out ("timeout")."""
-    rig.group_rule = lambda text: verdict if f"source: {source}" in text else "ok"
+    rig.group_rule = lambda text: verdict if public_meta_marker(source) in text else "ok"
     rig.email_rule = lambda subject, body: verdict if source in subject else "ok"
 
 
@@ -2306,7 +2344,7 @@ def test_t96_an_owed_page_keeps_its_whole_budget_and_the_class_meta_alert_has_it
     rig.owner_rule = lambda text: "timeout" if is_class_page(text) else "ok"
     rig.email_rule = lambda subject, body: (
         "timeout" if is_class_page(subject) or META_ROSTER_UNREADABLE in subject else "ok")
-    rig.group_rule = lambda text: "timeout" if f"source: {META_ROSTER_UNREADABLE}" in text else "ok"
+    rig.group_rule = lambda text: "timeout" if public_meta_marker(META_ROSTER_UNREADABLE) in text else "ok"
     assert rig.cycle() is None
     # The page's attempt is the one the class's 20 s give it: 8 s, then the 12 s left for its e-mail.
     assert [send["timeout"] for send in rig.owner if is_class_page(send["text"])] == [8]
@@ -2397,7 +2435,7 @@ def test_t97_pin_an_owed_pass_error_alert_ends_with_its_utc_day(make_rig):
 
 def test_t97_a_stuck_group_line_leaves_the_class_meta_alert_its_email(make_rig):
     rig = make_rig(fleet=UNREADABLE, start=clock_at(10))
-    rig.group_rule = lambda text: "timeout" if f"source: {META_ROSTER_UNREADABLE}" in text else "ok"
+    rig.group_rule = lambda text: "timeout" if public_meta_marker(META_ROSTER_UNREADABLE) in text else "ok"
     assert rig.cycle() is None
     # The group send stops at its cap, and the e-mail takes the alert in the time left.
     assert [mail["timeout"] for mail in meta_emails(rig, META_ROSTER_UNREADABLE)] == [META_BUDGET - META_GROUP]
@@ -2407,7 +2445,7 @@ def test_t97_a_stuck_group_line_leaves_the_class_meta_alert_its_email(make_rig):
 
 def test_t97_a_class_meta_alert_whose_group_reply_is_lost_is_taken_once(make_rig):
     rig = make_rig(fleet=UNREADABLE, start=clock_at(10))
-    rig.group_rule = lambda text: "ambiguous" if f"source: {META_ROSTER_UNREADABLE}" in text else "ok"
+    rig.group_rule = lambda text: "ambiguous" if public_meta_marker(META_ROSTER_UNREADABLE) in text else "ok"
     rig.email_rule = lambda subject, body: "fail" if META_ROSTER_UNREADABLE in subject else "ok"
     for offset in (0, 60, 120):
         assert rig.cycle_at(clock_at(10) + offset) is None
@@ -2424,7 +2462,7 @@ def test_t97_a_class_meta_alert_whose_group_reply_is_lost_is_taken_once(make_rig
 def test_t97_pin_a_class_meta_alert_whose_handshake_failed_is_tried_again(make_rig):
     rig = make_rig(fleet=UNREADABLE, start=clock_at(10))
     rig.group_rule = lambda text: (
-        "ambiguous-handshake" if f"source: {META_ROSTER_UNREADABLE}" in text else "ok")
+        "ambiguous-handshake" if public_meta_marker(META_ROSTER_UNREADABLE) in text else "ok")
     rig.email_rule = lambda subject, body: "fail" if META_ROSTER_UNREADABLE in subject else "ok"
     for offset in (0, 60):
         assert rig.cycle_at(clock_at(10) + offset) is None
@@ -2450,7 +2488,9 @@ def test_t97_a_class_meta_alert_delivered_after_midnight_counts_for_the_new_day(
 def test_t97_pin_the_owed_class_meta_alerts_share_one_budget(make_rig):
     rig = make_rig(fleet=UNREADABLE, start=clock_at(10))
     rig.monkeypatch.setattr(rig.d, "_credential_send_fault", True)
-    rig.group_rule = lambda text: "timeout" if "source: credential-repage-" in text else "ok"
+    rig.group_rule = lambda text: "timeout" if any(
+        public_meta_marker(source) in text for source in CLASS_META_SOURCES
+    ) else "ok"
     rig.email_rule = lambda subject, body: "timeout" if "credential-repage-" in subject else "ok"
     assert rig.cycle() is None
     assert len(rig.meta_attempts(META_ROSTER_UNREADABLE)) == 1
@@ -2469,7 +2509,7 @@ def test_t97_pin_a_taken_class_meta_alert_is_marked_by_the_next_pass(make_rig):
 
 def test_t97_pin_a_class_meta_alert_the_email_took_is_not_sent_again(make_rig):
     rig = make_rig(fleet=UNREADABLE, start=clock_at(10))
-    rig.group_rule = lambda text: "fail" if f"source: {META_ROSTER_UNREADABLE}" in text else "ok"
+    rig.group_rule = lambda text: "fail" if public_meta_marker(META_ROSTER_UNREADABLE) in text else "ok"
     for offset in (0, 60):
         assert rig.cycle_at(clock_at(10) + offset) is None
     assert len(meta_emails(rig, META_ROSTER_UNREADABLE)) == 1
@@ -2500,7 +2540,9 @@ def test_t97_pin_a_new_loss_after_a_late_state_lost_alert_is_alerted_too(make_ri
 
 def test_t97_pin_every_owed_kind_of_class_meta_alert_is_sent_in_one_cycle_in_order(make_rig):
     rig = make_rig(fleet=UNREADABLE, start=clock_at(10))
-    rig.group_rule = lambda text: "fail" if "source: credential-repage-" in text else "ok"
+    rig.group_rule = lambda text: "fail" if any(
+        public_meta_marker(source) in text for source in CLASS_META_SOURCES
+    ) else "ok"
     rig.email_rule = lambda subject, body: "fail" if "credential-repage-" in subject else "ok"
     assert rig.cycle() is None
     rig.monkeypatch.setattr(rig.d, "_credential_send_fault", True)
@@ -2508,7 +2550,7 @@ def test_t97_pin_every_owed_kind_of_class_meta_alert_is_sent_in_one_cycle_in_ord
     rig.group_rule = lambda text: "ok"
     rig.email_rule = lambda subject, body: "ok"
     assert rig.cycle_at(clock_at(10) + 60) is None
-    sent = [source for send in rig.group for source in CLASS_META_SOURCES if f"source: {source}" in send["text"]]
+    sent = [source for send in rig.group for source in CLASS_META_SOURCES if public_meta_marker(source) in send["text"]]
     assert sent == [META_STATE_LOST, META_ROSTER_UNREADABLE, META_PASS_ERROR]
 
 
@@ -2575,7 +2617,7 @@ def test_t98_a_group_take_before_midnight_keeps_its_day_when_the_email_ends_afte
     rig = make_rig(fleet=UNREADABLE, start=clock_at(23, 59, 58))
     # The group's answer is lost at 23:59:58, so the group took it (#2424); its e-mail then runs its
     # 20 s past midnight.
-    rig.group_rule = lambda text: "ambiguous" if f"source: {META_ROSTER_UNREADABLE}" in text else "ok"
+    rig.group_rule = lambda text: "ambiguous" if public_meta_marker(META_ROSTER_UNREADABLE) in text else "ok"
     rig.email_rule = lambda subject, body: "timeout" if META_ROSTER_UNREADABLE in subject else "ok"
     assert rig.cycle() is None
     assert rig.cycle_at(clock_at(0, 0, 30, day=1)) is None
@@ -2639,7 +2681,7 @@ def test_t98_pin_an_owed_roster_alert_keeps_the_time_it_was_first_owed(make_rig)
 def test_t98_pin_a_lost_group_reply_of_a_pass_error_alert_is_logged_with_its_kind(make_rig):
     rig = make_rig(fleet=ROSTER_ONE, start=clock_at(10))
     rig.monkeypatch.setattr(rig.d, "_credential_send_fault", True)
-    rig.group_rule = lambda text: "ambiguous" if f"source: {META_PASS_ERROR}" in text else "ok"
+    rig.group_rule = lambda text: "ambiguous" if public_meta_marker(META_PASS_ERROR) in text else "ok"
     rig.email_rule = lambda subject, body: "fail" if META_PASS_ERROR in subject else "ok"
     assert rig.cycle() is None
     assert len(rig.meta_attempts(META_PASS_ERROR)) == 1
@@ -2650,7 +2692,7 @@ def test_t98_pin_a_lost_group_reply_of_a_state_lost_alert_is_logged_with_its_kin
     rig = make_rig()
     open_now(rig, T0)
     rig.cycle_at(T0 + 60)
-    rig.group_rule = lambda text: "ambiguous" if f"source: {META_STATE_LOST}" in text else "ok"
+    rig.group_rule = lambda text: "ambiguous" if public_meta_marker(META_STATE_LOST) in text else "ok"
     rig.email_rule = lambda subject, body: "fail" if META_STATE_LOST in subject else "ok"
     rig.edit_state(lambda payload: payload.update({SECTION: [LOST]}))
     assert rig.cycle_at(T0 + 120) is None
@@ -2667,8 +2709,7 @@ def test_t99_the_class_messages_use_the_public_wording(make_rig):
     observer_moves_to(rig, INDETERMINATE, T_UNVERIFIED)
     for step in (1, 2, 3):
         rig.cycle_at(T_OPEN + step * INTERVAL)
-    action = ("requested_action: Human action required: restore this bot's provider credential (owner). "
-              "No automated remediation.")
+    action = "*What you need to do:* " + PUBLIC_CREDENTIAL_ACTION
     observer = "; the re-auth observer now reports indeterminate_investigate — human action required;"
     assert (any(action in text for text in rig.group_texts()),
             any(observer in text for text in rig.page_texts())) == (True, True)
@@ -3233,7 +3274,8 @@ def clock_runs_on(rig: Rig) -> None:
 
 
 def fail_group_sends_of(rig: Rig, *event_ids: str) -> None:
-    rig.group_rule = lambda text: "fail" if any(f"event: {event_id}" in text for event_id in event_ids) else "ok"
+    references = {public_card_ref(event_id) for event_id in event_ids}
+    rig.group_rule = lambda text: "fail" if any(f"Ref {reference}" in text for reference in references) else "ok"
 
 
 def untimed(event: dict[str, Any]) -> dict[str, Any]:
@@ -4505,7 +4547,7 @@ def test_t73_no_fallback_alone_opens_nothing_and_opens_when_the_runtime_signal_a
     assert rig.phase("hosta|bot-one") == "latent"
     group = rig.group_for(alone)
     assert len(group) == 1
-    assert action_sentence(group[0]) == HUMAN_ACTION
+    assert action_sentence(group[0]) == PUBLIC_CREDENTIAL_ACTION
     rig.cycle_at(T0 + HOUR)
     assert rig.phase("hosta|bot-one") == "latent"
     assert rig.pages() == []
@@ -4570,9 +4612,10 @@ def provider_words_in(text: str) -> list[str]:
 
 
 def action_sentence(group_text: str) -> str:
-    """The action sentence of a group text: what follows `requested_action:` on its one line."""
-    found = [line.split("requested_action:", 1)[1].strip() for line in group_text.splitlines()
-             if "requested_action:" in line]
+    """The fixed public action from its labeled card line."""
+    prefix = "*What you need to do:* "
+    found = [line.removeprefix(prefix).strip() for line in group_text.splitlines()
+             if line.startswith(prefix)]
     return found[0] if len(found) == 1 else ""
 
 
@@ -4591,7 +4634,7 @@ def test_t26_every_opener_source_asks_for_a_human_and_never_for_q(make_rig):
     # The action sentence of each group text, read from its own line and not from the event's evidence.
     sentences = {source: [action_sentence(text) for text in rig.group_for(event_id)]
                  for source, event_id in ids.items()}
-    assert sentences == {source: [HUMAN_ACTION] for source in events}
+    assert sentences == {source: [PUBLIC_CREDENTIAL_ACTION] for source in events}
     # The two that open at once are paged: the direct message and the e-mail body.
     assert sorted(rig.page_texts()) == [page_line("hosta/bot-1", 0, 1), page_line("hosta/bot-2", 0, 1)]
     written = rig.page_texts() + [mail["body"] for mail in rig.page_emails()]
@@ -4610,9 +4653,9 @@ def test_t26_the_copy_of_a_routed_opener_carries_the_human_sentence_in_its_e_mai
     assert rig.cycle() is None
     assert rig.page_times() == [T0]
     # The page was refused, so the opener's own copy went out; its e-mail holds the group text.
-    mails = rig.copy_emails(f"event: {opener}")
+    mails = rig.copy_emails_for(opener)
     assert len(mails) == 1
-    assert (HUMAN_ACTION in mails[0]["body"], Q_INVESTIGATE in mails[0]["body"]) == (True, False)
+    assert (PUBLIC_CREDENTIAL_ACTION in mails[0]["body"], Q_INVESTIGATE in mails[0]["body"]) == (True, False)
 
 
 def test_t26_pin_a_non_member_critical_event_keeps_todays_sentence(make_rig):
@@ -4622,10 +4665,10 @@ def test_t26_pin_a_non_member_critical_event_keeps_todays_sentence(make_rig):
     assert rig.cycle() is None
     group = rig.group_for(other)
     assert len(group) == 1
-    assert action_sentence(group[0]) == rig.d.INVESTIGATE_ACTION
-    mails = rig.copy_emails(f"event: {other}")
+    assert action_sentence(group[0]) == PUBLIC_REVIEW_ACTION
+    mails = rig.copy_emails_for(other)
     assert len(mails) == 1
-    assert (Q_INVESTIGATE in mails[0]["body"], HUMAN_ACTION in mails[0]["body"]) == (True, False)
+    assert (PUBLIC_REVIEW_ACTION in mails[0]["body"], PUBLIC_CREDENTIAL_ACTION in mails[0]["body"]) == (True, False)
 
 
 def storm_of(rig: Rig, source: str) -> list[str]:
@@ -4649,7 +4692,7 @@ def test_t79_a_digest_of_an_opener_source_storm_asks_for_a_human(make_rig):
     rig = make_rig(fleet=ROSTER_THREE)
     digests = storm_of(rig, MANUAL)
     assert len(digests) == 1
-    assert action_sentence(digests[0]) == HUMAN_ACTION_DIGEST
+    assert action_sentence(digests[0]) == PUBLIC_CREDENTIAL_ACTION
     assert Q_INVESTIGATE not in digests[0]
 
 
@@ -4657,11 +4700,9 @@ def test_t79_pin_a_digest_of_a_non_member_storm_keeps_todays_sentence(make_rig):
     rig = make_rig(fleet=ROSTER_THREE)
     digests = storm_of(rig, OTHER_CRITICAL)
     assert len(digests) == 1
-    # Today's sentence, read from the code at commit 0b2506a5: a critical digest with no operator
-    # action gets INVESTIGATE_ACTION (requested_action_text, bot-errors-dispatcher.py:4026-4047),
-    # printed on the "  > requested_action: " line (:4246).
-    assert action_sentence(digests[0]) == rig.d.INVESTIGATE_ACTION
-    assert HUMAN_ACTION_DIGEST not in digests[0]
+    # A critical digest without dispatcher-verified owner action asks for review.
+    assert action_sentence(digests[0]) == PUBLIC_REVIEW_ACTION
+    assert PUBLIC_CREDENTIAL_ACTION not in digests[0]
 
 
 def test_t27_the_thirty_minute_opener_is_pending_at_29_minutes_and_opens_at_30(make_rig):
@@ -4789,7 +4830,7 @@ def test_t32_a_bot_on_another_provider_opens_a_condition_and_the_class_names_no_
     group = rig.group_for(opener)
     mails = rig.page_emails()
     assert (len(group), len(mails)) == (1, 1)
-    assert action_sentence(group[0]) == HUMAN_ACTION
+    assert action_sentence(group[0]) == PUBLIC_CREDENTIAL_ACTION
     sentences = [rig.page_texts()[0], mails[0]["subject"], mails[0]["body"], action_sentence(group[0])]
     assert [provider_words_in(sentence) for sentence in sentences] == [[], [], [], []]
 
@@ -4801,7 +4842,7 @@ def test_t32_pin_a_fleet_probe_event_for_it_sends_its_alert_and_opens_nothing(ma
     assert rig.cycle() is None
     group = rig.group_for(probe)
     assert len(group) == 1
-    assert action_sentence(group[0]) == rig.d.INVESTIGATE_ACTION
+    assert action_sentence(group[0]) == PUBLIC_REVIEW_ACTION
     assert copy_heads(rig) == ["hostb/bot-two: primary model check failed"]
     assert rig.open_scopes() == []
     assert rig.pages() == []
@@ -4814,7 +4855,7 @@ def test_t32_pin_a_non_member_diagnosis_for_it_sends_its_alert_and_opens_nothing
     assert rig.cycle() is None
     group = rig.group_for(warning)
     assert len(group) == 1
-    assert action_sentence(group[0]) == rig.d.INVESTIGATE_ACTION
+    assert action_sentence(group[0]) == PUBLIC_REVIEW_ACTION
     assert rig.conditions() == {}
     assert (rig.owner, rig.emails) == ([], [])
 
@@ -4911,10 +4952,11 @@ def test_t36_pin_with_only_latent_entries_the_cycle_is_todays(make_rig):
     # Three group alerts, each with today's sentence.
     assert len(rig.group) == 3
     assert [[action_sentence(text) for text in rig.group_for(event_id)] for event_id in ids] == [
-        [rig.d.INVESTIGATE_ACTION]] * 3
+        [PUBLIC_REVIEW_ACTION]] * 3
     # One owner copy, the fleet probe's, saying what it says today.
     assert copy_heads(rig) == ["hosta/bot-one: primary model check failed"]
-    assert [(Q_INVESTIGATE in mail["body"], HUMAN_ACTION in mail["body"]) for mail in rig.emails] == [(True, False)]
+    assert [(PUBLIC_REVIEW_ACTION in mail["body"], PUBLIC_CREDENTIAL_ACTION in mail["body"])
+            for mail in rig.emails] == [(True, False)]
     assert rig.pages() == []
     assert rig.open_scopes() == []
     # The dispatch log holds today's record types and none of the class's. Read from the code at

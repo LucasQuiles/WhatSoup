@@ -108,14 +108,19 @@ SELF_REMINDER_PREFIXES = (
 # contain "reply"/"approve"/"blocked" in remediation text (observed live
 # 2026-07-18 19:16:49Z — an ESCALATED bead-backlog alert armed the clock and
 # restarted the nudge cycle on a non-ask). They must never arm awaiting-Q.
+# The public alert card opens with one of the icons below; only a message that
+# STARTS with one is excluded, so an ask that merely contains an icon still arms.
 ALERT_BANNER_PREFIXES = (
     "BOT ERROR",
     "BOT WARNING",
     "BOT INFO",
     "BOT RECOVERY",
-    "\U0001f534",  # red-circle bridge lines
-    "\u2705",  # check-mark bridge resolves
+    "\U0001f534",  # red-circle bridge lines and critical cards
+    "\u2705",  # check-mark bridge resolves and proven-fix cards
     "\u26a0",  # warning-sign bridge lines
+    "\U0001f7e0",  # orange-circle warning cards
+    "\U0001f7e1",  # yellow-circle reminder cards
+    "\u2139",  # information cards; also prefixes the emoji form U+2139 U+FE0F
 )
 
 NUDGE_AFTER_SECONDS = 20 * 60

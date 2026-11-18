@@ -654,6 +654,35 @@
       "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
     },
     {
+      "site_id": "dispatcher-synthesized-sent-state",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "archive_sent_synthesized_event",
+      "logical_publication": "dispatcher.synthesized_sent_state",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "aggregate_all",
+      "result_consumer": "archive_sent_synthesized_event",
+      "fault_test_ids": [
+        "deploy/scripts/tests/test_bot_errors_meta_alert_archive.py::test_meta_archive_failure_keeps_quarantine_and_send",
+        "deploy/scripts/tests/test_bot_errors_synthesized_send_refs.py::test_synthesized_archive_failure_never_raises_or_unsends"
+      ]
+    },
+    {
+      "site_id": "dispatcher-synthesized-pending-state",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "stage_synthesized_event",
+      "logical_publication": "dispatcher.synthesized_pending_state",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "aggregate_all",
+      "result_consumer": "stage_synthesized_event",
+      "fault_test_ids": [
+        "deploy/scripts/tests/test_bot_errors_synthesized_send_refs.py::test_pending_write_failure_still_sends_and_archives",
+        "deploy/scripts/tests/test_bot_errors_synthesized_send_refs.py::test_crash_after_archive_keeps_the_sent_record_only",
+        "deploy/scripts/tests/test_bot_errors_synthesized_send_refs.py::test_ambiguous_send_is_stored_unconfirmed"
+      ]
+    },
+    {
       "site_id": "dispatcher-send-issued-state",
       "script": "deploy/scripts/bot-errors-dispatcher.py",
       "function": "process_one",

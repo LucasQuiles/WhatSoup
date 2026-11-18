@@ -16,7 +16,7 @@ import hashlib
 import json
 import math
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 import secrets
@@ -29,6 +29,7 @@ import time
 from collections.abc import Mapping
 from contextlib import contextmanager
 from typing import Any
+from zoneinfo import ZoneInfo
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -46,11 +47,20 @@ from lib.bounded_jsonl import (
 from lib.bot_errors_envelope import SEVERITIES, EnvelopeError, classify_event, event_machine, new_event_fields, normalize_event
 from lib.bot_errors_redaction import (
     LEGACY_FAILURE_CLASSES,
+    PEM_PRIVATE_KEY_RE,
     alert_text,
     alert_text_for_fingerprint,
     alert_text_kind,
     redact_bot_errors_text,
     redact_json_value as redact_shared_json_value,
+)
+from lib.bot_errors_card_keys import (
+    CARD_GLUED_KEY_WORDS,
+    CARD_SECRET_KEY_WORDS,
+    FoldedLineEnds,
+    is_authorization_key,
+    keyed_value_span,
+    secret_key_pattern,
 )
 from lib.controller_log import (
     ControllerLogContext,
@@ -1322,6 +1332,7 @@ def state_paths() -> dict[str, Path]:
         "outbox": Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", root / "outbox")),
         "processing": root / "processing",
         "sent": root / "sent",
+        "synthesized_pending": root / "synthesized-pending",
         "storm_collapsed": root / "storm-collapsed",
         "storm_manifests": root / "storm-manifests",
         "storm_receipts": root / "storm-receipts",
@@ -3938,10 +3949,15 @@ def append_still_open_context(
     digest: bool = True,
     sender_severity: Any = None,
 ) -> None:
+    # This object never crosses a serialization boundary.  Rendering may trust
+    # it because only this state-decision path can construct its identity.
+    event[_PUBLIC_CARD_REMINDER_CONTEXT] = _PUBLIC_CARD_REMINDER_TOKEN
     opened = int_field(open_record, "openedAt", current)
     last_notified = int_field(open_record, "lastNotifiedAt", int_field(open_record, "lastSentAt", opened))
     status = str(open_record.get("status") or "open")
     awaiting_physical = status == "awaiting_physical"
+    if awaiting_physical:
+        event[_PUBLIC_CARD_PHYSICAL_CONTEXT] = _PUBLIC_CARD_PHYSICAL_TOKEN
     additions = [
         "incident_still_open=true",
         f"incident_key={key}",
@@ -4010,7 +4026,7 @@ def safe_filename(value: str, max_length: int = 180) -> str:
     cleaned = cleaned or "unknown"
     if len(cleaned) <= max_length:
         return cleaned
-    for suffix in (".writefail", ".processing", ".suppressed", ".collapsed", ".recovered", ".duplicate", ".poison", ".sent", ".json"):
+    for suffix in (".writefail", ".processing", ".suppressed", ".collapsed", ".recovered", ".duplicate", ".poison", ".sent", ".unconfirmed", ".json"):
         if cleaned.endswith(suffix) and len(suffix) < max_length:
             stem = cleaned[: max_length - len(suffix)].rstrip("._-:")
             return f"{stem or 'unknown'}{suffix}"
@@ -4589,6 +4605,11 @@ def format_event(event: dict[str, Any]) -> str:
         event_line("closes_incident", retired_stronger_incidents_text(diagnostics), 300),
     ]
     freshness_lines = [
+        event_line(
+            "delivery",
+            (UNCONFIRMED_DELIVERY_TEXT if delivery.get("status") == UNCONFIRMED_DELIVERY_STATUS else None),
+            200,
+        ),
         event_line("dispatcher_attempts", delivery.get("attempts")),
         event_line("delivery_age_seconds", delivery.get("ageAtDeliverySeconds")),
         event_line(
@@ -4639,6 +4660,414 @@ def format_event(event: dict[str, Any]) -> str:
     ])
     text = "\n".join(line for line in lines if line)
     return truncate(text, MAX_MESSAGE_CHARS)
+
+
+PUBLIC_CARD_MAX_CHARS = 600
+PUBLIC_CARD_MAX_LINES = 12
+# The most text the card's own steps read, after main's redactor has run on
+# the whole text. A card shows at most PUBLIC_CARD_MAX_CHARS characters and a
+# summary line at most 75, so text past the cap is never shown; the cap keeps
+# a wide margin because a removed value can shrink the text before it is cut
+# to its width. It also bounds the closing-quote search in keyed_value_span,
+# which rescans every later quote on an escaped-quote ladder (about 5 s at
+# 300 KB without the cap).
+PUBLIC_CARD_SCAN_MAX_CHARS = 4096
+_PUBLIC_CARD_JID = re.compile(
+    r"(?<![A-Za-z0-9])\d{5,}(?:-\d+)?(?::\d+)?@(?:s\.whatsapp\.net|g\.us|lid)\b",
+    re.IGNORECASE,
+)
+_PUBLIC_CARD_PID = re.compile(r"(?i)\bpid(?:\s*[=:]\s*|\s+)\d+\b")
+_PUBLIC_CARD_RELATIVE_PATH = re.compile(r"(?<![A-Za-z0-9@._/-])[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+")
+
+
+def _public_card_relative_path(match: re.Match[str]) -> str:
+    """Omit a slash-joined token only when it reads as a path, so "and/or" stays."""
+    token = match.group(0)
+    if token.count("/") >= 2 or re.search(r"\.[A-Za-z0-9]{1,6}$", token):
+        return "[path omitted]"
+    return token
+
+
+# A secret key's value goes whole on the card, after main's redactor has run
+# on the raw text, so no scheme word or credential fragment is left for later
+# rules to split. The keys are the card's key words
+# (lib/bot_errors_card_keys.py) in every spelling
+# (HTTP_AUTHORIZATION, proxyAuthorization, sessionToken, rawHeaders pairs). A
+# quoted value runs to its own closing quote, so an escaped quote inside it
+# stays inside. An unquoted Authorization-type value runs to the end of its
+# line plus folded continuation lines; any other unquoted value runs to the
+# next ",", ";", "&" or that end, past any "&" it starts with. A quoted value
+# that ends in a secret key with ":" or "=" after its closing quote is a
+# chained key: the value after that key goes too, down the chain. The shared
+# redactor masks only the first word after a secret key, so
+# "api_key: Custom <credential>" needs this rule; prose such as
+# "token: expired yesterday" is over-redacted on the card by design, and the
+# text after the delimiter stays.
+_PUBLIC_CARD_SECRET_KEY = secret_key_pattern(CARD_SECRET_KEY_WORDS, CARD_GLUED_KEY_WORDS)
+_PUBLIC_CARD_VALUE_STOP = re.compile(r"[,;&]")
+_PUBLIC_CARD_LEADING_AMPERSANDS = re.compile(r"&+")
+# Where a key can start inside a quoted value: after any character that is not
+# a key character, as in the key pattern's first group.
+_PUBLIC_CARD_KEY_START = re.compile(r"[^A-Za-z0-9_]")
+
+
+def public_card_keyed_values(text: str) -> str:
+    """Replace each secret key and its whole value with "<key>=[REDACTED]".
+
+    A chained key ('"token" = "api_key": <credential>', '"secret": "<a>, retry
+    api_key": "<b>"') goes with its value. Stopping at the closing quote took
+    the inner key away and left its value with no key in front of it, where
+    the shared redactor no longer finds it. A value that starts with "&" is not
+    empty: the shared redactor reads "&Bearer" as a one-word value and keeps
+    the credential after it.
+    """
+    line_ends = FoldedLineEnds(text)
+
+    def value_span(key: re.Match[str]) -> tuple[int, int, str]:
+        whole = is_authorization_key(key.group(2))
+        start, end, opener = keyed_value_span(
+            text, key, whole=whole, line_ends=line_ends, stops=None if whole else _PUBLIC_CARD_VALUE_STOP
+        )
+        if end <= start and not whole:
+            ampersands = _PUBLIC_CARD_LEADING_AMPERSANDS.match(text, start)
+            if ampersands is not None:
+                line_end = line_ends.at(start)
+                stop = _PUBLIC_CARD_VALUE_STOP.search(text, ampersands.end(), line_end)
+                end = stop.start() if stop is not None else line_end
+        return start, end, opener
+
+    def chained_key(start: int, end: int) -> re.Match[str] | None:
+        """The secret key a quoted value ends in, when ":" or "=" follows its closing quote."""
+        key_starts = (found.start() for found in _PUBLIC_CARD_KEY_START.finditer(text, start, end))
+        for at in (start - 1, *key_starts):
+            key = _PUBLIC_CARD_SECRET_KEY.match(text, at)
+            if key is not None and key.group(3) is not None and key.end(2) == end:
+                return key
+        return None
+
+    pieces: list[str] = []
+    cursor = 0
+    position = 0
+    while True:
+        match = _PUBLIC_CARD_SECRET_KEY.search(text, position)
+        if match is None:
+            break
+        value_start, value_end, opener = value_span(match)
+        if value_end <= value_start:
+            position = match.end()
+            continue
+        end = value_end + len(opener)
+        while opener:
+            inner = chained_key(value_start, value_end)
+            if inner is None:
+                break
+            value_start, value_end, opener = value_span(inner)
+            if value_end <= value_start:
+                break
+            end = value_end + len(opener)
+        pieces.append(text[cursor:match.start(2)])
+        pieces.append(f"{match.group(2)}=[REDACTED]")
+        cursor = position = end
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+# A host path that carries a fragment: a host of two or more labels, then "#",
+# or a "/" path and then "#", and a fragment that runs to the next space. A host
+# starts where neither a label character nor a "." after a label character
+# precedes it: a dotted run ("a.a.a…") has one start, as with the earlier
+# lookbehind, while "my_svc.example.org" and "...example.org" start after the
+# "_" and the dots again (B7 re-gate M6). Only the longest host can be followed
+# by "/" or "#", so the host expression fails fast inside a run.
+_PUBLIC_CARD_FRAGMENT_HOST = re.compile(
+    r"(?<![A-Za-z0-9-])(?<![A-Za-z0-9-]\.)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?=[/#])"
+)
+_PUBLIC_CARD_PATH_END = re.compile(r"[\s#]")
+_PUBLIC_CARD_SPACE = re.compile(r"\s")
+
+
+class _PublicCardHostFragmentRule:
+    """`host(/path)?#fragment` → replacement, in time linear in the text.
+
+    The same as re.sub with
+    `(?<![A-Za-z0-9-])(?<![A-Za-z0-9-]\\.)[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+(?:/[^\\s#]*)?#\\S+`.
+    That expression searched the path after each host to its end, so a run of
+    "a.a/" rescanned the rest of the run from every "/" (9dbb5a5d7: 25 s at
+    128 KB). Here the end of the path, the next space or "#", is found once and
+    reused by every host whose path ends at the same place.
+    """
+
+    def sub(self, replacement: str, text: str) -> str:
+        pieces: list[str] = []
+        cursor = position = 0
+        # text[searched_from:path_end] holds no space and no "#"; path_end is the
+        # first of either at or after searched_from, or the end of the text.
+        searched_from = path_end = -1
+        while True:
+            host = _PUBLIC_CARD_FRAGMENT_HOST.search(text, position)
+            if host is None:
+                break
+            hash_at = host.end()
+            if text[hash_at] == "/":
+                if not searched_from <= hash_at + 1 <= path_end:
+                    found = _PUBLIC_CARD_PATH_END.search(text, hash_at + 1)
+                    searched_from, path_end = hash_at + 1, (found.start() if found is not None else len(text))
+                hash_at = path_end
+            fragment = hash_at + 1
+            if (
+                hash_at < len(text) and text[hash_at] == "#"
+                and fragment < len(text) and _PUBLIC_CARD_SPACE.match(text, fragment) is None
+            ):
+                space = _PUBLIC_CARD_SPACE.search(text, fragment)
+                end = space.start() if space is not None else len(text)
+                pieces.append(text[cursor:host.start()])
+                pieces.append(replacement)
+                cursor = position = end
+            else:
+                position = host.start() + 1
+        pieces.append(text[cursor:])
+        return "".join(pieces)
+
+
+# The public card's content boundary, applied in order after the shared
+# redactor. Each rule removes one class of machine detail the card must never
+# carry; together they are the only place card text is narrowed.
+_PUBLIC_CARD_BOUNDARY: tuple[tuple[re.Pattern[str] | _PublicCardHostFragmentRule, Any], ...] = (
+    # Credentials: the key, an optional auth scheme and the credential go as one.
+    (re.compile(
+        r"(?i)\b(password|passwd|pwd|token|secret|authorization|api[_-]?key|cookie)\s*[=:]\s*"
+        r"(?:(?:bearer|basic|token|digest|negotiate)\s+)?(?:\"[^\"]*\"|'[^']*'|\S+)"
+    ), lambda match: f"{match.group(1)}=[REDACTED]"),
+    (re.compile(r"(?i)\bbearer\s+\S+"), "Bearer [REDACTED]"),
+    # Any base64 run of 8 or more after Basic, letters-only included; the card
+    # accepts over-redacting a long word after "Basic".
+    (re.compile(r"(?i)\bbasic\s+[A-Za-z0-9+/]{8,}={0,2}"), "Basic [REDACTED]"),
+    # Links, with any userinfo or fragment: scheme URLs, scheme-relative URLs,
+    # and host paths that carry a fragment. A scheme starts only where no
+    # scheme character precedes it: starting at every "a-" or "a." boundary
+    # rescanned a long run from each one (2.3 s on 16 KB). The host-path rule
+    # is _PublicCardHostFragmentRule.
+    (re.compile(r"(?i)(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*://\S+"), "[link omitted]"),
+    (re.compile(r"(?<![A-Za-z0-9:])//[A-Za-z0-9.-]+\S*"), "[link omitted]"),
+    (_PublicCardHostFragmentRule(), "[link omitted]"),
+    # Paths: Windows drive and UNC paths, then absolute, home and dot-relative
+    # paths (also after a "file:" style prefix), then slash-joined relative paths.
+    (re.compile(r"(?i)(?<![A-Za-z0-9])[a-z]:\\\S*"), "[path omitted]"),
+    (re.compile(r"\\\\\S+"), "[path omitted]"),
+    # No "/" before the start, so a run of slashes is scanned once, not from each slash.
+    (re.compile(r"(?<![A-Za-z0-9@._/-])(?:~|\.{1,2})?/[A-Za-z0-9_.~/-]*[A-Za-z0-9_.-]"), "[path omitted]"),
+    (_PUBLIC_CARD_RELATIVE_PATH, _public_card_relative_path),
+    # Chats (the redactor's own marker reads as the card's wording), process ids
+    # and phone-shaped numbers (10-15 digits, any separators).
+    (re.compile(r"\[REDACTED WHATSAPP [A-Z]+\]"), "[chat omitted]"),
+    (_PUBLIC_CARD_JID, "[chat omitted]"),
+    (_PUBLIC_CARD_PID, "process id omitted"),
+    (re.compile(r"(?<![\w])\+?\d(?:[\s().-]*\d){9,14}(?![\w])"), "[number omitted]"),
+    # Operator commands: the card never carries a runnable instruction.
+    (re.compile(
+        r"(?i)\b(?:sudo\s+)?(?:systemctl|launchctl|journalctl|pkill|killall|kubectl|docker|ssh)\b"
+        r"(?:\s+(?!and\b|or\b|then\b|to\b)[-\w.@:=]+){0,3}"
+    ), "[command omitted]"),
+)
+
+
+def public_card_boundary(text: str) -> str:
+    """Remove every machine-detail class the public card must not carry."""
+    for pattern, replacement in _PUBLIC_CARD_BOUNDARY:
+        text = pattern.sub(replacement, text)
+    return text
+_PUBLIC_CARD_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z", re.IGNORECASE)
+_PUBLIC_CARD_REMINDER_CONTEXT = "_publicCardKnownOpenReminder"
+_PUBLIC_CARD_RECOVERY_CONTEXT = "_publicCardVerifiedRecovery"
+_PUBLIC_CARD_PHYSICAL_CONTEXT = "_publicCardVerifiedPhysicalAction"
+_PUBLIC_CARD_REMINDER_TOKEN = object()
+_PUBLIC_CARD_RECOVERY_TOKEN = object()
+_PUBLIC_CARD_PHYSICAL_TOKEN = object()
+
+
+def public_card_text(value: Any, limit: int) -> str:
+    """Return one display line without raw credentials or local machine detail."""
+    text = "" if value is None else str(value)
+    # Main's redactor runs first, on the raw text, so every shape it knows is
+    # intact when it looks and the card hides at least what main's group
+    # message hides. Every later step only removes more. (The card's key rule
+    # used to run first: its marker, glued to the next word, cost main's
+    # redactor the scheme word or key name it needed.) The private-key rule
+    # follows, so a whole block goes before the key rule even if main stops
+    # removing blocks first: the key rule must never take a block's header
+    # line as its value and leave the key body. The cap then bounds every card
+    # step after it. The key rule removes each secret key's whole value, so no
+    # scheme word or credential fragment is left; main's redactor runs again
+    # on its result, then the card boundary.
+    text = redact(text)
+    text = PEM_PRIVATE_KEY_RE.sub("[REDACTED PEM PRIVATE KEY]", text)
+    text = text[:PUBLIC_CARD_SCAN_MAX_CHARS]
+    text = public_card_keyed_values(text)
+    text = public_card_boundary(redact(text))
+    text = text.replace("@", " at ").replace("*", "")
+    text = re.sub(r"\b[A-Za-z][A-Za-z0-9_]{1,40}\s*=\s*\S+", "[detail omitted]", text)
+    text = re.sub(r"\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+\b", lambda match: match.group(0).replace("_", " "), text)
+    text = re.sub(r"\b(?:ESCALATED\s+)?still[- ]open(?:\s+digest)?\b", "Still open", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bawaiting physical action\b", "needs a person", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bremediate\b", "fix", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bdisposition\b", "outcome", text, flags=re.IGNORECASE)
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def public_card_ref(event: dict[str, Any]) -> str:
+    """Prefer an existing short UUID so the card points back to its event."""
+    event_id = str(event.get("id") or "")
+    if _PUBLIC_CARD_UUID.fullmatch(event_id):
+        return event_id[:8].lower()
+    return hashlib.sha256((event_id or "missing").encode("utf-8")).hexdigest()[:8]
+
+
+def public_card_footer_time(value: Any) -> str:
+    """Render the alert footer time in the standard's default time zone."""
+    try:
+        timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        return timestamp.astimezone(ZoneInfo("America/New_York")).strftime("%m/%d/%Y %-I:%M %p ET")
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: an accepted year-1 or year-9999 instant leaves the
+        # datetime range in the zone conversion; rendering runs outside the
+        # send handler, so it must not abort the dispatch pass.
+        return "Date unavailable"
+
+
+def public_card_is_reminder(event: dict[str, Any]) -> bool:
+    """Only an in-process incident-state decision can select the repeat prefix."""
+    return event.get(_PUBLIC_CARD_REMINDER_CONTEXT) is _PUBLIC_CARD_REMINDER_TOKEN
+
+
+def public_card_recovery_verified(event: dict[str, Any], classification: Any) -> bool:
+    """A Fixed card needs the dispatcher's daily-health recovery proof token."""
+    return (
+        classification.kind == "incident_recovery"
+        and event.get(_PUBLIC_CARD_RECOVERY_CONTEXT) is _PUBLIC_CARD_RECOVERY_TOKEN
+    )
+
+
+def public_card_title(event: dict[str, Any], summary: str, classification: Any) -> str:
+    """Retain repeat and pause meaning while the severity icon handles escalation."""
+    lower = summary.lower()
+    if "paused" in lower:
+        remainder = re.sub(r"^\s*paused\s*:\s*", "", summary, flags=re.IGNORECASE)
+        return public_card_text(f"Paused: {remainder or source_headline(event.get('source'))}", 64)
+    if "still open" in lower or "awaiting physical" in lower:
+        remainder = re.sub(
+            r"^\s*(?:escalated\s+)?(?:still[- ]open(?:\s+digest)?|awaiting physical action)\s*:?\s*",
+            "",
+            summary,
+            flags=re.IGNORECASE,
+        )
+        return public_card_text(f"Still open: {remainder or source_headline(event.get('source'))}", 64)
+    if public_card_recovery_verified(event, classification):
+        return public_card_text(f"Fixed: {summary or source_headline(event.get('source'))}", 64)
+    if classification.kind == "incident_recovery":
+        return "Closed: recovery not confirmed"
+    return public_card_text(summary or source_headline(event.get("source")), 64)
+
+
+def public_card_summary(event: dict[str, Any]) -> str:
+    """Keep a storm handoff distinct from a confirmed recovery in the public card."""
+    if event.get("source") == "flap_storm_resolved":
+        evidence = event_text(event, "evidence")
+        if "underlying_incident_open=true" in evidence:
+            return "Repeated alerts stopped. The problem is still open."
+        return "Repeated alerts stopped. Recovery is not confirmed."
+    if event.get("source") == "stale-autoclose":
+        raw = event_display_summary(event)
+        match = re.search(r"\bAuto-closed\s+(\d+)\s+non-actionable", raw, re.IGNORECASE)
+        if match:
+            return f"Auto-closed {match.group(1)} non-actionable; unverified; reopens if needed."
+        return "Old alerts were closed; recovery is not confirmed."
+    return public_card_text(event_display_summary(event), 68)
+
+
+def public_card_affected(event: dict[str, Any]) -> str:
+    """Name a known bot without claiming an unmeasured impact."""
+    instance = safe_alert_label(event.get("instance"))
+    if instance and instance.lower() != "unknown":
+        return public_card_text(f"The {instance} bot.", 64)
+    return "Not yet confirmed."
+
+
+def public_card_has_physical_owner_action(event: dict[str, Any]) -> bool:
+    """Allow the fixed relink copy only after a dispatcher state decision."""
+    return event.get(_PUBLIC_CARD_PHYSICAL_CONTEXT) is _PUBLIC_CARD_PHYSICAL_TOKEN
+
+
+def public_card_has_credential_owner_action(event: dict[str, Any]) -> bool:
+    """Use the credential re-page source classifier, never a raw operator action."""
+    return credential_action_sentence(event) in {
+        credential_repage.HUMAN_ACTION,
+        credential_repage.HUMAN_ACTION_DIGEST,
+    }
+
+
+def public_card_roles(event: dict[str, Any], classification: Any) -> tuple[str, str]:
+    """Separate an internal review from a confirmed owner action."""
+    if classification.kind == "incident_recovery":
+        if public_card_recovery_verified(event, classification):
+            return "No action is needed.", "Nothing now."
+        return "Needs review: recovery is not confirmed.", "Nothing now."
+    if public_card_has_physical_owner_action(event):
+        return "A person needs to act.", "Relink or retire the WhatsApp line."
+    if public_card_has_credential_owner_action(event):
+        return "A person needs to act.", "Restore the affected AI service sign-in."
+    if classification.kind == "observation":
+        if (event.get("source") == "flap_storm_resolved"
+                and "underlying_incident_open=true" in event_text(event, "evidence")):
+            return "Needs review: the problem is still open.", "Nothing now."
+        return "No action is needed.", "Nothing now."
+    return "Needs review.", "Nothing now."
+
+
+def format_public_message(event: dict[str, Any]) -> str:
+    """Render the fixed public card while leaving state, dedupe, and raw records unchanged."""
+    classification = classify_event(event)
+    summary = public_card_summary(event)
+    reminder = public_card_is_reminder(event)
+    if reminder:
+        icon = "🔴 ↻" if classification.severity == "critical" else "🟡 ↻"
+    elif classification.kind == "incident_recovery" and public_card_recovery_verified(event, classification):
+        icon = "✅"
+    elif classification.kind == "incident_recovery":
+        icon = "ℹ️"
+    elif classification.kind == "observation":
+        icon = "ℹ️"
+    elif classification.severity == "warning":
+        icon = "🟠"
+    else:
+        icon = "🔴"
+    title = public_card_title(event, summary, classification)
+    handling, action = public_card_roles(event, classification)
+    machine = public_card_text(event.get("machine") or event.get("machineName") or "Unknown", 24)
+    created = public_card_footer_time(event.get("createdAt"))
+    lines = [
+        f"{icon} *{title}*",
+        f"_{summary or 'The alert needs review.'}_",
+        "",
+        f"*What happened:* {public_card_text(summary, 75)}",
+        f"*Who is affected:* {public_card_affected(event)}",
+        f"*What we are doing:* {handling}",
+        f"*What you need to do:* {action}",
+        "",
+        f"Ref {public_card_ref(event)} · {machine} · {created}",
+    ]
+    message = "\n".join(lines)
+    if len(message) > PUBLIC_CARD_MAX_CHARS:
+        overflow = len(message) - PUBLIC_CARD_MAX_CHARS
+        lines[3] = f"*What happened:* {public_card_text(summary, max(16, 75 - overflow))}"
+        message = "\n".join(lines)
+    if len(message) > PUBLIC_CARD_MAX_CHARS or len(lines) > PUBLIC_CARD_MAX_LINES:
+        raise ValueError("public BOT ERRORS card exceeds its delivery limit")
+    return message
 
 
 def next_backoff(attempts: int) -> int | None:
@@ -5651,6 +6080,10 @@ def append_clear_context(event: dict[str, Any], incident_state: dict[str, Any]) 
                 f" note=advisory_only_incident_still_closed"
             )
     if recovered_keys:
+        # ``daily_health_recovered_incident_keys`` has checked the source,
+        # probe, incident timing and any extra physical proof.  Keep that proof
+        # in-memory for the card; producer text cannot forge this identity.
+        event[_PUBLIC_CARD_RECOVERY_CONTEXT] = _PUBLIC_CARD_RECOVERY_TOKEN
         additions.append("recovered_incidents=" + ",".join(recovered_keys))
     evidence = event_text(event, "evidence").strip()
     event["evidence"] = "\n".join(part for part in [evidence, *additions] if part)
@@ -6744,9 +7177,13 @@ def flap_scan_outbox(paths: dict[str, Path], incident: IncidentStateCycle | None
             storm_before = {field: entry[field] for field in FLAP_STORM_LIFECYCLE_FIELDS if field in entry}
             decision = flap_evaluate(entry, now)
             if decision.get("emit"):
+                storm_event = flap_storm_event(key, entry, str(decision["severity"]), now)
                 try:
-                    send_whatsapp(format_event(flap_storm_event(key, entry, str(decision["severity"]), now)))
-                except Exception:
+                    # A refused pending record is a send that did not happen.
+                    stage_synthesized_event(storm_event)
+                    send_whatsapp(format_public_message(storm_event))
+                except Exception as exc:
+                    discard_synthesized_pending(storm_event, exc)
                     for field in FLAP_STORM_LIFECYCLE_FIELDS:
                         if field in storm_before:
                             entry[field] = storm_before[field]
@@ -6754,6 +7191,7 @@ def flap_scan_outbox(paths: dict[str, Path], incident: IncidentStateCycle | None
                             entry.pop(field, None)
                     raise
                 emitted += 1
+                archive_sent_synthesized_event(storm_event)
                 append_dispatch_log(paths, {
                     "type": "flap_storm",
                     "incidentKey": key,
@@ -6832,9 +7270,13 @@ def sweep_flap_storms(paths: dict[str, Path], incident: IncidentStateCycle | Non
                     (isinstance(open_incidents, dict) and isinstance(open_incidents.get(key), dict))
                     or not flap_source_went_quiet(entry, now)
                 )
+                resolve_event: dict[str, Any] = {}
                 try:
-                    send_whatsapp(format_event(flap_resolve_event(str(key), entry, now, underlying_open)))
+                    resolve_event = flap_resolve_event(str(key), entry, now, underlying_open)
+                    stage_synthesized_event(resolve_event)
+                    send_whatsapp(format_public_message(resolve_event))
                 except Exception as exc:  # noqa: BLE001 - back off, never retry every cycle
+                    discard_synthesized_pending(resolve_event, exc)
                     errors += 1
                     prior = entry.get("resolveAttempts")
                     finite_prior = isinstance(prior, (int, float)) and math.isfinite(prior)
@@ -6871,6 +7313,7 @@ def sweep_flap_storms(paths: dict[str, Path], incident: IncidentStateCycle | Non
                         })
                     append_dispatch_log(paths, error_record)
                     continue
+                archive_sent_synthesized_event(resolve_event)
                 append_dispatch_log(paths, {
                     "type": "flap_storm_resolved",
                     "incidentKey": key,
@@ -7145,10 +7588,24 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                 "failed": failed,
             })
             break
-        text = format_event(event)
+        # This sweep event is built from the current incident record, so it is
+        # a dispatcher-known reminder rather than a producer claim. The record's
+        # awaiting_physical status is the same trusted state, so it selects the
+        # physical owner action too.
+        event[_PUBLIC_CARD_REMINDER_CONTEXT] = _PUBLIC_CARD_REMINDER_TOKEN
+        if str(record.get("status") or "") == "awaiting_physical":
+            event[_PUBLIC_CARD_PHYSICAL_CONTEXT] = _PUBLIC_CARD_PHYSICAL_TOKEN
         try:
+            text = format_public_message(event)
+        finally:
+            event.pop(_PUBLIC_CARD_REMINDER_CONTEXT, None)
+            event.pop(_PUBLIC_CARD_PHYSICAL_CONTEXT, None)
+        try:
+            # A refused pending record is a failed reminder, retried next sweep.
+            stage_synthesized_event(event)
             send_whatsapp(text)
         except Exception as exc:
+            discard_synthesized_pending(event, exc)
             failed += 1
             last_error = str(exc)
             mark_stale_incident_failed(record, event, current, str(exc))
@@ -7163,6 +7620,7 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
         mark_stale_incident_notified(record, event, current)
         sent += 1
         changed = True
+        archive_sent_synthesized_event(event)
         append_dispatch_log(paths, {
             "type": "stale_renotify",
             "incidentKey": key,
@@ -7217,8 +7675,13 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
             summary_event["summary"] = (
                 f"Auto-closed {digest_count} non-actionable stale incident(s)"
             )
+            summary_sent = False
             try:
-                send_whatsapp(format_event(summary_event))
+                # A refused pending record leaves the digest pending for the next sweep.
+                stage_synthesized_event(summary_event)
+                send_whatsapp(format_public_message(summary_event))
+                summary_sent = True
+                archive_sent_synthesized_event(summary_event)
                 append_dispatch_log(paths, {
                     "type": "stale_autoclosed",
                     "count": digest_count,
@@ -7231,6 +7694,8 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                 accum["lastDigestAt"] = current
                 changed = True
             except Exception as exc:
+                if not summary_sent:
+                    discard_synthesized_pending(summary_event, exc)
                 last_error = str(exc)
                 append_dispatch_log(paths, {
                     "type": "stale_autoclose_summary_failed",
@@ -9789,21 +10254,256 @@ def _state_paths_for(quarantine_dir: Path) -> dict[str, Path]:
     return {"unrenderable_signals": quarantine_dir.parent / "unrenderable-signals"}
 
 
-def send_meta_alert(meta: dict[str, Any], email_subject: str) -> tuple[str, str, str | None]:
+# A synthesized event whose send outcome is unknown: a previous pass staged it
+# and ended before it archived it (a crash, an ambiguous send, or a failed
+# archive). It is stored under this status, never as sent, and never resent.
+UNCONFIRMED_DELIVERY_STATUS = "unconfirmed"
+UNCONFIRMED_DELIVERY_TEXT = (
+    "unconfirmed — the dispatcher stopped before it recorded this alert's send; "
+    "it may not have reached the group, and it was not sent again"
+)
+
+
+class SynthesizedStagingFailed(Exception):
+    """A synthesized event's pending record was not written, so the event is not sent."""
+
+
+def _log_synthesized_failure(
+    failure_type: str, event: dict[str, Any], exc: BaseException, *, level: str = "info"
+) -> None:
+    try:
+        append_dispatch_log(state_paths(), {
+            "type": failure_type,
+            "eventId": event.get("id"),
+            "error": f"{type(exc).__name__}: {exc}",
+        }, level=level, outcome="failed" if level == "error" else "observed")
+    except Exception:
+        # Deliberately: a log write that fails here has no further place to
+        # report to, and it must not turn a stored or refused send into a crash.
+        pass
+
+
+def _synthesized_record(event: dict[str, Any]) -> dict[str, Any]:
+    """The stored copy: in-process card tokens are dropped."""
+    return {key: value for key, value in event.items() if not str(key).startswith("_publicCard")}
+
+
+def _synthesized_pending_path(event: dict[str, Any]) -> Path:
+    return state_paths()["synthesized_pending"] / safe_filename(f"{safe_filename(str(event.get('id') or 'synthesized'))}.json")
+
+
+def _remove_synthesized_pending(event: dict[str, Any]) -> None:
+    path = _synthesized_pending_path(event)
+    if safe_is_regular_entry(path):
+        path.unlink()
+        fsync_parent(path)
+
+
+def stage_synthesized_event(event: dict[str, Any]) -> None:
+    """Write the pending record of a synthesized event before its send.
+
+    A pending record that outlives its pass (a crash between the send and the
+    archive, or before the send) is stored by recover_synthesized_pending as
+    unconfirmed, so a card that went out still has a stored record behind its
+    Ref. A card must never go out without that record, so a failure raises
+    SynthesizedStagingFailed after an error-level local record: the caller
+    sends nothing on any channel, counts nothing as sent, and leaves the alert
+    owed to a later pass (the flap lifecycle is rolled back, the resolve and
+    the stale reminder are retried, the digest stays pending, a credential
+    meta alert is owed again next cycle).
+    """
+    try:
+        record = _synthesized_record(event)
+        if not record.get("id"):
+            raise ValueError("a synthesized event without an id has no pending record")
+        # One name per event id (never safe_child_path's renamed alternative),
+        # so the archive step and the recovery pass find exactly this record.
+        target = _durable_target(_synthesized_pending_path(record))
+        observation = observe_json(target)
+        operation = operation_id(
+            target,
+            record,
+            component="dispatcher.synthesized_pending_state",
+            predecessor=observation.version,
+        )
+        publication = publish_state_json(
+            target,
+            record,
+            component="dispatcher.synthesized_pending_state",
+            operation_id=operation,
+            expected=observation.version,
+            generation=(observation.version.generation or 0) + 1,
+        )
+        require_all_advance([publication])
+    except Exception as exc:
+        _log_synthesized_failure("synthesized_pending_failed", event, exc, level="error")
+        raise SynthesizedStagingFailed(f"pending record not written: {type(exc).__name__}") from exc
+
+
+def discard_synthesized_pending(event: dict[str, Any], error: BaseException | None = None) -> None:
+    """Drop a staged event's pending record once no channel can have taken it.
+
+    An AmbiguousSendOutcome (the request left and its answer did not come)
+    keeps the record: the card may be in the group, so the next pass stores it
+    as unconfirmed. Never raises.
+    """
+    if isinstance(error, AmbiguousSendOutcome) or not event.get("id"):
+        return
+    try:
+        _remove_synthesized_pending(event)
+    except Exception as exc:
+        _log_synthesized_failure("synthesized_pending_discard_failed", event, exc)
+
+
+def archive_sent_synthesized_event(
+    event: dict[str, Any],
+    *,
+    failure_type: str = "synthesized_archive_failed",
+    status: str = "sent",
+) -> bool:
+    """Archive an event the dispatcher built and delivered itself, so its card's Ref resolves.
+
+    process_one archives every queued event it delivers; flap storms and their
+    resolution, stale reminders, the auto-close digest and the meta alerts are
+    built here and sent directly, so each caller archives the event after a
+    channel took it, with process_one's writer, and the event's pending record
+    is removed. The name comes from the event's own id: daily_health_events
+    (heartbeat watchdog) globs sent/ by name, so a borrowed file name could pass
+    the event off as a daily-health event. recover_synthesized_pending stores
+    an orphaned pending record through this step with status "unconfirmed". A
+    failure is logged under failure_type and never raises, so it cannot undo a
+    delivered send or the caller's own state change; the pending record then
+    stays, and the next pass stores it as unconfirmed. Returns True once the
+    record is stored.
+    """
+    try:
+        archived = _synthesized_record(event)
+        sent_path = archive_path(
+            state_paths()["sent"], f"{safe_filename(str(archived.get('id') or 'synthesized'))}.json", status, archived
+        )
+        target = _durable_target(sent_path)
+        observation = observe_json(target)
+        operation = operation_id(
+            target,
+            archived,
+            component="dispatcher.synthesized_sent_state",
+            predecessor=observation.version,
+        )
+        publication = publish_state_json(
+            target,
+            archived,
+            component="dispatcher.synthesized_sent_state",
+            operation_id=operation,
+            expected=observation.version,
+            generation=(observation.version.generation or 0) + 1,
+        )
+        require_all_advance([publication])
+    except Exception as exc:
+        _log_synthesized_failure(failure_type, event, exc)
+        return False
+    try:
+        _remove_synthesized_pending(archived)
+    except Exception as exc:
+        # The record is stored; the next pass finds it and drops the pending copy.
+        _log_synthesized_failure("synthesized_pending_discard_failed", event, exc)
+    return True
+
+
+def _synthesized_already_stored(sent_dir: Path, event_id: str) -> bool:
+    """Whether sent/ already holds this event: a crash between the archive and the pending removal."""
+    prefix = f"{safe_filename(event_id)}.json."
+    for entry in sent_dir.iterdir():
+        if not entry.name.startswith(prefix) or not safe_is_data_entry(entry):
+            continue
+        try:
+            if safe_read_json(entry).get("id") == event_id:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def recover_synthesized_pending(paths: dict[str, Path]) -> int:
+    """Store each synthesized event an earlier pass staged and never archived, as unconfirmed.
+
+    Runs under dispatcher.lock before any pass that can send, so every pending
+    record belongs to a pass that has ended. Whether its card reached the group
+    is unknown, so it is NEVER sent again and never stored as sent: it goes to
+    sent/ under the "unconfirmed" status, with delivery.status "unconfirmed",
+    which format_event renders, and a card that did go out keeps a Ref that
+    resolves. A record already in sent/ only loses its pending copy. A lost
+    alert recurs from its source (the stale sweep, flap state, the credential
+    timers), not from here. Never raises. Returns how many records it stored.
+    """
+    stored = 0
+    directory = paths["synthesized_pending"]
+    try:
+        if not directory.exists():
+            return 0
+        entries = sorted(
+            entry for entry in directory.iterdir()
+            if entry.name.endswith(".json") and not entry.name.startswith(".") and safe_is_data_entry(entry)
+        )
+    except Exception as exc:
+        _log_synthesized_failure("synthesized_pending_recovery_failed", {}, exc)
+        return 0
+    for entry in entries:
+        event: dict[str, Any] = {}
+        try:
+            event = safe_read_json(entry)
+            event_id = str(event.get("id") or "")
+            if not event_id or _synthesized_pending_path(event).name != entry.name:
+                raise ValueError("pending record does not carry the id its name was built from")
+            if _synthesized_already_stored(paths["sent"], event_id):
+                _remove_synthesized_pending(event)
+                continue
+            delivery = dict(event.get("delivery")) if isinstance(event.get("delivery"), dict) else {}
+            staged_status = delivery.get("status")
+            delivery.update(status=UNCONFIRMED_DELIVERY_STATUS, stagedStatus=staged_status, unconfirmedAt=now_iso())
+            record = {**event, "delivery": delivery}
+            if archive_sent_synthesized_event(
+                record, failure_type="synthesized_unconfirmed_archive_failed", status=UNCONFIRMED_DELIVERY_STATUS
+            ):
+                stored += 1
+                append_dispatch_log(paths, {
+                    "type": "synthesized_stored_unconfirmed",
+                    "eventId": event_id,
+                    "stagedStatus": staged_status,
+                })
+        except Exception as exc:
+            _log_synthesized_failure("synthesized_pending_recovery_failed", event, exc)
+    return stored
+
+
+def send_meta_alert(
+    meta: dict[str, Any], email_subject: str, *, staged: bool = False
+) -> tuple[str, str, str | None]:
     """Send a dispatcher meta-alert straight to the group, by e-mail when that fails.
 
-    Returns (direct WhatsApp status, e-mail fallback status, the direct send's error text).
+    `staged` says the caller already wrote the pending record
+    (quarantine_poison stages it before it moves the poison file), so it is
+    not written twice. Returns (direct WhatsApp status, e-mail fallback
+    status, the direct send's error text).
     """
-    text = format_event(meta)
+    text = format_public_message(meta)
     direct_whatsapp = "not_attempted"
     email_status = "not_attempted"
     direct_error = None
+    direct_exception: Exception | None = None
+    if not staged:
+        try:
+            stage_synthesized_event(meta)
+        except SynthesizedStagingFailed as exc:
+            # No channel is tried: a card or e-mail without a stored record behind
+            # its Ref cannot be traced. The error-level record is the local alert.
+            return direct_whatsapp, email_status, str(exc)
     try:
         send_whatsapp(text)
         direct_whatsapp = "sent"
     except Exception as exc:
         direct_whatsapp = "failed"
         direct_error = str(exc)
+        direct_exception = exc
         # #3070: classify an accepted email fallback as TERMINAL here, not
         # accepted_unconfirmed. A meta-alert has no queued event behind it
         # (a poison event is already moved to quarantine, no requeue path), so
@@ -9811,16 +10511,27 @@ def send_meta_alert(meta: dict[str, Any], email_subject: str) -> tuple[str, str,
         # #3024 delivery-site semantics so the dispatch log never reports a
         # delivered meta-alert as unconfirmed/retryable.
         email_status = "email_delivered" if email_fallback(email_subject, text) else "failed"
+    if direct_whatsapp == "sent" or email_status == "email_delivered":
+        archive_sent_synthesized_event(meta, failure_type="meta_alert_archive_failed")
+    else:
+        discard_synthesized_pending(meta, direct_exception)
     return direct_whatsapp, email_status, direct_error
 
 
 def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
+    """Move an unreadable event to quarantine and tell the group once.
+
+    The notice's pending record is staged BEFORE the move. When it cannot be
+    written, nothing is sent and the poison stays where it is: in the outbox,
+    or in processing/, which reclaim_processing returns to the outbox. The
+    queued file is what keeps the notice owed, so a later pass quarantines it
+    and sends the notice once storage works. A move that fails after staging
+    drops the pending record, so a card that never went out is never stored
+    as unconfirmed. Returns the quarantine path, or `path` while the poison
+    stays queued.
+    """
     ensure_private_dir(quarantine_dir)
     dest = quarantine_dir / f"{path.name}.{int(time.time())}.{os.getpid()}.poison"
-    try:
-        shutil.move(str(path), str(dest))
-    except FileNotFoundError:
-        return dest
     meta = {
         **new_event_fields("alert", "critical"),
         "id": f"poison-{int(time.time())}-{os.getpid()}",
@@ -9836,7 +10547,23 @@ def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
         },
         "delivery": {"attempts": 0, "status": "meta"},
     }
-    direct_whatsapp, email_status, direct_error = send_meta_alert(meta, "BOT ERRORS poison event quarantine")
+    try:
+        stage_synthesized_event(meta)
+    except SynthesizedStagingFailed:
+        # stage_synthesized_event wrote the error-level local record; nothing
+        # was quarantined, so no quarantine record is written.
+        return path
+    try:
+        shutil.move(str(path), str(dest))
+    except FileNotFoundError:
+        discard_synthesized_pending(meta)
+        return dest
+    except Exception:
+        discard_synthesized_pending(meta)
+        raise
+    direct_whatsapp, email_status, direct_error = send_meta_alert(
+        meta, "BOT ERRORS poison event quarantine", staged=True
+    )
     try:
         log_record = {
             "type": "quarantine",
@@ -10577,6 +11304,12 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
     if is_held_delivery(event):
         return False, f"held_outcome_unknown; deliveryStatus={delivery_status_of(event)}"
 
+    # Renderer-only trust markers are never accepted from a producer or written
+    # back to a queue record.  State transitions below install their own opaque
+    # tokens only after their existing decisions succeed.
+    event.pop(_PUBLIC_CARD_REMINDER_CONTEXT, None)
+    event.pop(_PUBLIC_CARD_RECOVERY_CONTEXT, None)
+    event.pop(_PUBLIC_CARD_PHYSICAL_CONTEXT, None)
     event = mark_attempt(event)
     attempt_target = _durable_target(claimed)
     attempt_observation = observe_json(attempt_target)
@@ -10637,6 +11370,9 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
     absorb_daily_health_signal(event, incident_state)
     suppress_reason = should_suppress_send(event, incident_state)
     if suppress_reason:
+        event.pop(_PUBLIC_CARD_REMINDER_CONTEXT, None)
+        event.pop(_PUBLIC_CARD_RECOVERY_CONTEXT, None)
+        event.pop(_PUBLIC_CARD_PHYSICAL_CONTEXT, None)
         event = mark_suppressed(event, suppress_reason)
         suppressed_target = _durable_target(claimed)
         suppressed_observation = observe_json(suppressed_target)
@@ -10680,7 +11416,12 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
 
     append_clear_context(event, incident_state)
     stamp_delivery_freshness(event, int(time.time()))
-    text = format_event(event)
+    try:
+        text = format_public_message(event)
+    finally:
+        event.pop(_PUBLIC_CARD_REMINDER_CONTEXT, None)
+        event.pop(_PUBLIC_CARD_RECOVERY_CONTEXT, None)
+        event.pop(_PUBLIC_CARD_PHYSICAL_CONTEXT, None)
     # #2424: publish the intent-to-issue durably BEFORE the external effect. The
     # attempt publication above cannot serve as this marker: it lands long
     # before this point, so a crash anywhere in between would be indistinguishable
@@ -11316,18 +12057,26 @@ def credential_meta_alert(source: str, summary: str, deadline: float, *, log: An
             },
             "delivery": {"attempts": 0, "status": "meta"},
         }
-        text = format_event(meta)
+        text = format_public_message(meta)
     except Exception:  # noqa: BLE001 - it is owed again in the next cycle
+        return None
+    try:
+        stage_synthesized_event(meta)
+    except SynthesizedStagingFailed:
+        # No channel took it, so it is owed again in the next cycle.
         return None
     taken = False
     try:
         send_whatsapp(text, deadline=min(deadline, time.monotonic() + CREDENTIAL_META_GROUP_SECONDS))
+        archive_sent_synthesized_event(meta)
         return _utc_day()
     except AmbiguousSendOutcome as exc:
         # #2424: the request left and its answer did not come. Taken, so it is never sent again.
         taken = exc.phase == JSON_RPC_POST_REQUEST_PHASE
     except Exception:  # noqa: BLE001 - the e-mail is the fallback, as in send_meta_alert
         pass
+    # Unless the group may hold the card (taken), its pending record goes once
+    # the e-mail is refused or skipped; a taken one is stored as unconfirmed.
     # Read when the group leg ends, before the e-mail can carry the take past midnight.
     taken_day = _utc_day() if taken else None
     if taken and log is not None:
@@ -11338,11 +12087,17 @@ def credential_meta_alert(source: str, summary: str, deadline: float, *, log: An
             pass
     email_timeout = min(EMAIL_TIMEOUT_SECONDS, deadline - time.monotonic())
     if email_timeout < 1:
+        if not taken:
+            discard_synthesized_pending(meta)
         return taken_day
     try:
         sent = email_fallback(f"BOT ERRORS {source}", text, timeout=email_timeout)
     except Exception:  # noqa: BLE001
-        return taken_day
+        sent = False
+    if sent:
+        archive_sent_synthesized_event(meta)
+    elif not taken:
+        discard_synthesized_pending(meta)
     return taken_day or (_utc_day() if sent else None)
 
 
@@ -11601,6 +12356,10 @@ def run_once(max_events: int) -> dict[str, Any]:
             # not pinned by a test: moving the call changes no observable
             # behaviour, so there is no difference for a test to hold.
             reconcile_storm_digest_receipts(paths)
+            # A synthesized event an earlier pass staged and never archived is
+            # stored as unconfirmed, never resent. Before every pass that can
+            # send, so this cycle's own pending records are not yet written.
+            recover_synthesized_pending(paths)
             writefail_recovered = recover_writefail_breadcrumbs(paths)
             reclaimed = reclaim_processing(paths)
             test_provenance_suppressed, test_provenance_meta_alerted = suppress_test_provenance_events(paths)
@@ -11869,7 +12628,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.format_event:
-        print(format_event(read_json(Path(args.format_event))))
+        print(format_public_message(read_json(Path(args.format_event))))
         return 0
 
     if args.daemon:
