@@ -1233,7 +1233,9 @@ describe('release:activate-host closed host auxiliaries', () => {
     { name: 'the runner forwarding the runner', detail: RUNNER_AGAIN, build: (root, runner) => plist(BOT_ERRORS, ['/usr/bin/python3', runner, ...RUNNER_OPTIONS, '--', '/usr/bin/python3', runner, ...RUNNER_OPTIONS, '--', '/usr/bin/python3', '/tmp/x.py'], root) },
     // argparse REMAINDER: the runner also runs the first non-option argument when no -- precedes it.
     { name: 'the runner running a command without --', detail: RUNNER_FORM, build: (root, runner) => plist(BOT_ERRORS, ['/usr/bin/python3', runner, ...RUNNER_OPTIONS, '/usr/bin/python3', '/tmp/x.py'], root) },
-    ...['PYTHONPATH', 'BASH_ENV', 'LD_PRELOAD', 'HOME', 'ZDOTDIR'].map((key) => ({
+    // /usr/bin/python3 is a developer-tools stub: xcrun(1) and xcode-select(1) document DEVELOPER_DIR, TOOLCHAINS,
+    // SDKROOT and xcrun_* settings as steering it, so each refuses (xcrun_ in any case).
+    ...['PYTHONPATH', 'BASH_ENV', 'LD_PRELOAD', 'HOME', 'ZDOTDIR', 'DEVELOPER_DIR', 'TOOLCHAINS', 'SDKROOT', 'xcrun_log', 'XCRUN_NOCACHE'].map((key) => ({
       name: `the environment key ${key}`, detail: INTERPRETER_ENVIRONMENT,
       build: (root: string, runner: string) => withLines(plist(BOT_ERRORS, ['/usr/bin/python3', runner], root), ...environment(`<key>${key}</key><string>/tmp/lib</string>`)),
     })),
