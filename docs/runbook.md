@@ -3131,8 +3131,8 @@ an ambiguous submission; later receipt evidence is preserved.
 
 Migration 68 is additive: it adds secret-input metadata alongside the existing
 protected-delivery tables and audit retention. Do not remove its table or rows to
-roll back an application. Use only a binary verified against a schema-68 database,
-or restore a verified pre-migration database backup through the normal rollback
+roll back an application. Use only a binary verified against the database's current schema
+(its highest recorded migration), or restore a verified pre-migration database backup through the normal rollback
 procedure. This migration does not add operating-system isolation; processes running
 under the same operating-system account remain trusted operators.
 
