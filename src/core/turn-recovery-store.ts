@@ -7,7 +7,7 @@ import {
   validDeliveryCorroborationForJobSql,
   validDeliveryCorroborationForTerminalSql,
 } from './delivery-corroboration-sql.ts';
-import { OPEN_RECOVERIES_CTE_SQL } from './open-recoveries-sql.ts';
+import { OPEN_RECOVERIES_CTE_SQL, UNOWNED_FAILED_TERMINALS_CTE_SQL } from './open-recoveries-sql.ts';
 import { syntheticSourceMessageIdSql } from './synthetic-turn-source.ts';
 import { promoteEchoedCheckpointIdentitySql } from './turn-recovery-checkpoint-identity.ts';
 
@@ -241,7 +241,7 @@ export interface TurnRecoverySupervisorCounts {
    * orphan transfers without valid later-echo proof.
    */
   blockingOutstanding?: number;
-  /** Terminal blocked/exhausted rows retained for operator audit. */
+  /** Blocked/exhausted jobs and unowned failed user replies retained for operator audit. */
   retainedTerminal?: number;
   /**
    * Pending/claimed rows and orphan transfers made unclaimable by valid
@@ -957,7 +957,8 @@ export class TurnRecoveryStore {
           WHERE terminal.inbound_disposition = 'transferred_to_recovery_owner'
             AND linked.id IS NULL
         ),
-        ${OPEN_RECOVERIES_CTE_SQL}
+        ${OPEN_RECOVERIES_CTE_SQL},
+        ${UNOWNED_FAILED_TERMINALS_CTE_SQL}
         SELECT
           COALESCE(SUM(CASE WHEN j.state IN ('pending', 'claimed') THEN 1 ELSE 0 END), 0)
             + (SELECT count FROM orphan_transfers)
@@ -1010,7 +1011,7 @@ export class TurnRecoveryStore {
             + (SELECT count - corroborated FROM orphan_transfers) AS blocking_outstanding,
           COALESCE(SUM(CASE
             WHEN j.state IN ('blocked_unsafe', 'exhausted') THEN 1 ELSE 0
-          END), 0) AS retained_terminal,
+          END), 0) + (SELECT count FROM unowned_failed_terminals) AS retained_terminal,
           COALESCE(SUM(CASE
             WHEN j.state IN ('pending', 'claimed')
               AND ${validDeliveryCorroborationForJobSql('j')}

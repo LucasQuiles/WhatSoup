@@ -8,6 +8,7 @@ import { deleteOldMessages } from './messages.ts';
 import { maintainOutboundSends } from './outbound-sends.ts';
 import { deleteExpiredProtectedDeliveries } from './protected-delivery.ts';
 import { systemClock } from '../lib/clock.ts';
+import { UNOWNED_FAILED_TERMINAL_SOURCES_SQL } from './open-recoveries-sql.ts';
 import {
   HANDOFF_ARTIFACT_RETENTION_MS,
   deleteExpiredHandoffArtifacts,
@@ -236,6 +237,11 @@ export function runDatabaseRetention(
        WHERE created_at < datetime('now', ?)
          AND inbound_disposition IN (
            'finalized_replied', 'finalized_no_reply_policy', 'failed_terminal'
+         )
+         -- Age alone cannot discharge an unanswered user reply obligation.
+         AND NOT EXISTS (
+           SELECT 1 FROM (${UNOWNED_FAILED_TERMINAL_SOURCES_SQL}) obligation
+           WHERE obligation.inbound_seq = turn_terminal_records.inbound_seq
          )
          AND NOT EXISTS (
            SELECT 1
