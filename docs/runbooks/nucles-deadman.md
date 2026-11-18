@@ -61,12 +61,15 @@ both files:
   group or other permission;
 - the file and its directory can be inspected, and the file's modification
   time is not in the future;
-- its age is no more than the watchdog's limit: 300 seconds for the
-  dispatcher and 180 for the collector by default
-  (`BOT_ERRORS_MAX_DISPATCHER_AGE`, `BOT_ERRORS_MAX_COLLECTOR_AGE`).
+- its age is no more than the limit the hub's watchdog uses: the
+  effective `BOT_ERRORS_MAX_DISPATCHER_AGE` for the dispatcher and
+  `BOT_ERRORS_MAX_COLLECTOR_AGE` for the collector (defaults 300 and 180
+  seconds).
 
-Any other result fails the probe, and so does a check that does not
-finish, connection included, within `PROBE_TIMEOUT_SECONDS` (default 10).
+As in `file_age`, the future-time test and the age use whole epoch
+seconds. An attempt fails on any other result, and also when it does not
+finish, connection included, within `PROBE_TIMEOUT_SECONDS` (default 10);
+the probe fails only when every attempt fails.
 The `sent/` age of check 2 is not part of the pass condition: the
 dispatcher moves an event into `sent/` when it delivers it, so a quiet
 period with nothing to deliver leaves the newest file old. The script
@@ -112,21 +115,24 @@ Script: `~/.local/bin/nucles-deadman`
 ```
 HUB=<hub SSH alias>           # the host that runs the dispatcher and collector
 STATE_DIR=<hub BOT ERRORS state directory>
-PROBE_TIMEOUT_SECONDS=10      # deadline for the whole check, connection included
-MAX_DISPATCHER_AGE=300        # same value as the hub's BOT_ERRORS_MAX_DISPATCHER_AGE
-MAX_COLLECTOR_AGE=180         # same value as the hub's BOT_ERRORS_MAX_COLLECTOR_AGE
+PROBE_TIMEOUT_SECONDS=10      # deadline for each attempt, connection included
+MAX_DISPATCHER_AGE=<the hub's effective BOT_ERRORS_MAX_DISPATCHER_AGE>   # default 300
+MAX_COLLECTOR_AGE=<the hub's effective BOT_ERRORS_MAX_COLLECTOR_AGE>     # default 180
 ALERT_COOLDOWN=3600           # 1 hour: suppress repeated alerts for the same failure
 
 each run:
-  run one heartbeat check on $HUB over SSH, stopped after PROBE_TIMEOUT_SECONDS;
-  no answer in time is a failure. On the hub, for each pair
+  try the heartbeat check over SSH on each network path to $HUB (see below),
+  one attempt at a time, until an attempt passes; stop each attempt after
+  PROBE_TIMEOUT_SECONDS (no answer in time fails that attempt). The check
+  fails only when every attempt fails. In an attempt, on the hub, for each pair
   (dispatcher-state.json, MAX_DISPATCHER_AGE) and (collector-state.json, MAX_COLLECTOR_AGE):
     -> fail if STATE_DIR is missing, a symlink or not a directory,
        or grants any group or other permission
     -> fail if the file is missing, a symlink or not a regular file,
        or grants any group or other permission
     -> fail if the file or STATE_DIR cannot be inspected
-    -> fail if the file's mtime is later than now
+    -> take now and the file's mtime in whole epoch seconds, as file_age does
+    -> fail if mtime is later than now
     -> fail if now - mtime > its limit
   (sent/ is not checked: a quiet hub has nothing to deliver)
 
@@ -149,7 +155,9 @@ limit blast radius if mini9 is compromised.
 Steps to provision (during host-ops batch):
 1. On mini9: `ssh-keygen -t ed25519 -f ~/.ssh/nucles_deadman_ed25519 -N "" -C "nucles-deadman@mini9"`
 2. On nucles: append the public key to `~/.ssh/authorized_keys` with a
-   `command=""` restriction that runs only the heartbeat check.
+   `no-pty,no-X11-forwarding,command="<heartbeat check>"` restriction (the
+   same options as the restricted key above), so the key runs only the
+   heartbeat check.
 
 ### Dependency on nucles Tailscale
 
