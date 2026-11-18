@@ -579,7 +579,9 @@ jobs:
   # Forced native build of the Docker dependency stage (#3889): re2 is built from source as
   # if its prebuilt download had failed. It runs as its own job, in parallel with
   # quality (24.x), so the authority job keeps the time budget main sets for it. It is not
-  # one of the required contexts.
+  # one of the required contexts, so it does not block merges. It has no continue-on-error,
+  # so its failure fails this workflow run, and a release tag's Quality run must succeed
+  # (scripts/private-integrity-release.ts, requireQuality).
   native-build-fallback:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
