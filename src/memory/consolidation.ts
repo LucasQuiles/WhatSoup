@@ -8,6 +8,7 @@ import {
   type MemoryOperationFailureCode,
 } from '../lib/memory-operation-telemetry.ts';
 import type { LLMProvider } from '../runtimes/chat/providers/types.ts';
+import { canonicalSourceRecordIds } from './consolidation-lineage.ts';
 import type {
   ClusterConsolidationOutcome,
   ClusterConsolidationStatus,
@@ -77,15 +78,25 @@ function outputMatchesCluster(
   result: ConsolidationResult,
   clusterRecordIds: ReadonlySet<string>,
 ): boolean {
+  // Promotion identity is the canonical source set (#2569 A0): two promotions
+  // citing one set would resolve to one remote record, and the second write
+  // would silently replace the first. A source also cannot be both promoted
+  // and discarded. Either fails the whole cluster closed, before any write.
+  const promotedIds = new Set<string>();
+  const sourceSets = new Set<string>();
   for (const durable of result.durableKnowledge) {
     const uniqueIds = new Set(durable.sourceRecordIds);
     if (uniqueIds.size !== durable.sourceRecordIds.length) return false;
     if (durable.sourceRecordIds.some((id) => !clusterRecordIds.has(id))) return false;
+    const sourceSet = JSON.stringify(canonicalSourceRecordIds(durable.sourceRecordIds));
+    if (sourceSets.has(sourceSet)) return false;
+    sourceSets.add(sourceSet);
+    for (const id of uniqueIds) promotedIds.add(id);
   }
 
   const discardedIds = result.discarded.map((item) => item.recordId);
   if (new Set(discardedIds).size !== discardedIds.length) return false;
-  return discardedIds.every((id) => clusterRecordIds.has(id));
+  return discardedIds.every((id) => clusterRecordIds.has(id) && !promotedIds.has(id));
 }
 
 const CONSOLIDATION_PROMPT = `You are a memory consolidation engine. Given a cluster of related memories from an AI agent's episodic history, identify which patterns represent durable knowledge worth keeping long-term.
@@ -113,6 +124,10 @@ Promotion criteria:
 - Consistent over weeks = lasting truth
 - Single mentions of time-bound facts (e.g. "meeting at 3pm") = discard
 - Preferences and identity facts = promote even on single mention if high confidence
+
+Output rules:
+- Each durableKnowledge item must cite a different set of sourceRecordIds; combine facts drawn from exactly the same records into one claim
+- Never list a record in both a sourceRecordIds array and discarded
 
 Output ONLY valid JSON. No markdown.`;
 
