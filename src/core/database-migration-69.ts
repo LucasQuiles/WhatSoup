@@ -13,14 +13,15 @@ import type { DatabaseSync } from 'node:sqlite';
  * trigger changes. IF NOT EXISTS makes a re-run on a database that already has
  * the index a no-op.
  */
-const SCHEMA = `
-  CREATE INDEX IF NOT EXISTS idx_turn_terminal_failed_reply_debt
-    ON turn_terminal_records(inbound_seq)
+const INDEX = 'idx_turn_terminal_failed_reply_debt';
+const DEFINITION = `ON turn_terminal_records(inbound_seq)
     WHERE inbound_disposition = 'failed_terminal'
       AND reply_guarantee_disarmed = 0
       AND delivery_kind <> 'echoed'
-      AND COALESCE(attempt_failure_class, '') <> 'operator_cancelled';
-`;
+      AND COALESCE(attempt_failure_class, '') <> 'operator_cancelled'`;
+const collapse = (sql: string): string => sql.replace(/\s+/g, ' ').trim();
+// sqlite_master keeps the statement from the index name on, without IF NOT EXISTS.
+const STORED_SQL = collapse(`CREATE INDEX ${INDEX} ${DEFINITION}`);
 
 export function runMigration69(db: DatabaseSync): void {
   // A damaged file can lack the table while its ledger is current. Skip it, as
@@ -32,11 +33,29 @@ export function runMigration69(db: DatabaseSync): void {
   if (!table) return;
   db.exec('SAVEPOINT failed_terminal_debt_index');
   try {
-    db.exec(SCHEMA);
+    db.exec(`CREATE INDEX IF NOT EXISTS ${INDEX} ${DEFINITION}`);
     db.exec('RELEASE failed_terminal_debt_index');
   } catch (error) {
     db.exec('ROLLBACK TO failed_terminal_debt_index');
     db.exec('RELEASE failed_terminal_debt_index');
     throw error;
   }
+}
+
+/**
+ * Startup check, run in the schema transaction after the table repair. The
+ * ledger is keyed by number alone, and IF NOT EXISTS keeps a same-name index of
+ * any definition, so neither a recorded migration nor the name proves this
+ * index. A missing index, or one whose stored definition differs, is rebuilt; an
+ * index holds only data derived from its table, so the rebuild loses nothing. A
+ * failure throws, so the transaction never commits the receipt without the index.
+ * Returns what it found when it rebuilt, or null when the index was exact.
+ */
+export function ensureFailedTerminalDebtIndex(db: DatabaseSync): 'missing' | 'different' | null {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?")
+    .get(INDEX) as { sql: string | null } | undefined;
+  if (row !== undefined && collapse(row.sql ?? '') === STORED_SQL) return null;
+  db.exec(`DROP INDEX IF EXISTS ${INDEX}`);
+  db.exec(`CREATE INDEX ${INDEX} ${DEFINITION}`);
+  return row === undefined ? 'missing' : 'different';
 }

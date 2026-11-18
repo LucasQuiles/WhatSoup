@@ -60,7 +60,7 @@ import { runMigration65 as runMigration65Impl } from './database-migration-65.ts
 import { runMigration66 as runMigration66Impl } from './database-migration-66.ts';
 import { runMigration67 as runMigration67Impl } from './database-migration-67.ts';
 import { runMigration68 as runMigration68Impl } from './database-migration-68.ts';
-import { runMigration69 as runMigration69Impl } from './database-migration-69.ts';
+import { ensureFailedTerminalDebtIndex, runMigration69 as runMigration69Impl } from './database-migration-69.ts';
 
 export { CURRENT_SCHEMA_MIGRATION } from './database-schema-version.ts';
 export {
@@ -1714,6 +1714,8 @@ export class Database {
       `);
       this.runPendingMigrations();
       this.verifyRequiredTables();
+      const debtIndex = ensureFailedTerminalDebtIndex(this.db);
+      if (debtIndex) log.warn({ found: debtIndex }, 'Failed-terminal reply-debt index rebuilt');
       this.assertDatabaseIdentity();
       this.db.exec('COMMIT');
       transactionOpen = false;
