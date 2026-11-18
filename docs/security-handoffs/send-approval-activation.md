@@ -112,8 +112,10 @@ failure before reconnecting or restarting the dispatcher.
 Ordinary inbound automation is delivered only by that dispatcher. After trusted
 registration succeeds, the conversational callback runs independently of an
 automation claim conflict, pause or provider failure. Its settlement still owns
-the inbound lease close. Automation admission uses the exact approved operation,
-not the conversational lease, so closing that lease does not revoke the operation.
+the inbound lease close. Automation admission names the exact approved operation
+and sends no inbound context, so this client does not tie it to the conversational
+lease. Whether the authority still admits it after that lease closes is part of
+activation requirement 1.
 Mail automation remains with its own executor. Review cards, decision commands
 and the fixed stop receipt retain their separate command handling; in particular,
 the stop receipt cannot be discovered by the approved-work endpoint.
@@ -135,6 +137,11 @@ transaction races, durable ingest ownership, expiry observability or fleet parit
    Qualify overlapping duplicate deliveries: a duplicate callback must not close
    another delivery's active reply lease. Event deduplication and completion
    ownership require separate proof.
+   Rule-created automation reaches recipients only through the approved-operation
+   dispatcher, so also verify that the service lists operations created by
+   automation rules on the approved-work endpoint (`readyOperations`), and that it
+   admits them without an inbound context, including after the inbound lease
+   closes. The fake providers in the repository's tests establish neither.
 2. Prove that every production send route converges at an equivalent final
    authority seam, including provider options that affect audience. A raw route
    without a semantic adapter remains held instead of receiving an opaque
