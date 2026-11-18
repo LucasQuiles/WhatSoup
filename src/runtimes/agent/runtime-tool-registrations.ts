@@ -182,7 +182,7 @@ export function registerRuntimeInlineTools(registry: ToolRegistry, deps: Runtime
 
   // Register restart_self MCP tool (agent instance only — sandboxed instances
   // are repair targets, not self-restarters). Routes through the existing
-  // graceful shutdown via ServiceManager.restart; logic lives in self-restart.ts.
+  // graceful shutdown via ServiceManager.restartSelf; logic lives in self-restart.ts.
   // Requires the fleet-owned restarter injected from the composition root.
   if (!deps.sandbox && !deps.sandboxPerChat && deps.restartSelf) {
     registry.register(buildRestartSelfTool(deps.restartSelf));

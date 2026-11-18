@@ -309,7 +309,7 @@ export interface IOutboundQueue {
    * is for PROVIDER-CRASH finalization only: when the dying turn produced no
    * visible text, its undelivered buffered/deferred narration is delivered as a
    * status-role salvage message (never answer evidence) instead of being
-   * destroyed. Interrupt/reset/fence-lost callers must NOT pass it.
+   * destroyed. Interrupt/reset/fence-lost callers must NOT pass it; restart_self does (#3829).
    */
   abortTurn(options?: { preserveEvidence?: boolean; salvageOwedReply?: boolean }): void;
   /** The chat JID this queue is currently targeting. */
@@ -341,6 +341,8 @@ export interface IOutboundQueue {
   hasPendingWork?(): boolean;
   /** Whether a genuine send or durability failure has permanently poisoned this queue. */
   isPoisoned(): boolean;
+  /** Sends that ended unsubmitted (failed or echo-guard drop); restart_self compares it across its flush. */
+  getSendFailureCount(): number;
   /**
    * Turn-end choke point. Called unconditionally when a `result` event is
    * received, so the typing indicator is cleared even on early-return branches
@@ -435,6 +437,7 @@ export class OutboundQueue implements IOutboundQueue {
   private readonly shutdownDeadlineSignal: Promise<typeof OUTBOUND_SHUTDOWN_DEADLINE>;
   private resolveShutdownDeadlineSignal: (() => void) | null = null;
   private shutdownDeadlineReached = false;
+  private sendFailureCount = 0;
 
   /** Controls tool update verbosity. 'minimal' suppresses noise, 'friendly' shows all in plain language. */
   private toolUpdateMode: 'full' | 'minimal' | 'friendly' = 'full';
@@ -1499,6 +1502,10 @@ export class OutboundQueue implements IOutboundQueue {
     return this.drainFailure !== undefined;
   }
 
+  getSendFailureCount(): number {
+    return this.sendFailureCount;
+  }
+
   /** Retarget subsequent sends without changing durable conversation attribution. */
   updateDeliveryJid(jid: string): void {
     this.deliveryJid = jid;
@@ -1942,10 +1949,12 @@ export class OutboundQueue implements IOutboundQueue {
     // AE4: Echo guard — suppress cross-session group echo loops.
     // Passes senderToken so intra-session rapid sends (tool status + text) are exempt.
     if (!canSendToGroup(chunk.chatJid, config.echoGuard, this.senderToken)) {
+      this.sendFailureCount += 1;
       this.notifyDelivery(chunk.deliveryObserver, { outcome: 'not_sent' });
-      return; // silently drop
+      return;
     }
     const outcome = await this.sendWithRetry(chunk);
+    if (outcome.outcome !== 'submitted') this.sendFailureCount += 1;
     this.notifyDelivery(chunk.deliveryObserver, outcome);
     this.lastSentAt = Date.now();
     recordGroupOutbound(chunk.chatJid, this.senderToken);

@@ -2,12 +2,16 @@
 // Agent-triggered safe self-restart.
 //
 // Routes a deliberate restart through the EXISTING graceful shutdown by asking
-// the ServiceManager to restart the instance's own unit (systemctl --user
-// restart whatsoup@<name>). A private intentional-restart marker is written
-// first so the error taxonomy (heal-notify / bot-errors) can distinguish a
-// deliberate restart from a crash, and so the next boot can announce continuity
-// with a measured downtime. No new child-process usage and no parallel teardown
-// — the marker + ServiceManager.restart are the whole mechanism.
+// the service manager to restart the instance's own job with one command that
+// it carries out by itself: `systemctl --user restart` on systemd and
+// `launchctl kickstart -k` on launchd (ServiceManager.restartSelf, #3829). The
+// manager sends SIGTERM to this process and starts the job again, so nothing
+// has to run here after the request. A private intentional-restart marker is
+// written first so the error taxonomy (heal-notify / bot-errors) can distinguish
+// a deliberate restart from a crash, and so the next boot can announce
+// continuity with a measured downtime. No new child-process usage and no
+// parallel teardown — the marker + ServiceManager.restartSelf are the whole
+// mechanism.
 
 import { unlinkSync } from 'node:fs';
 import { join } from 'node:path';
@@ -17,24 +21,30 @@ import { z } from 'zod';
 import { emitAlertChecked } from '../../lib/emit-alert.ts';
 import { readFreshMarkerSync, writePrivateJsonMarkerSync } from '../../lib/private-fs.ts';
 import { createChildLogger } from '../../logger.ts';
-import { isPnJid, isGroupJid } from '../../core/jid-constants.ts';
+import { isPnJid, isGroupJid, isLidJid } from '../../core/jid-constants.ts';
 import { resolvePhoneFromJidForGrant } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
 import { MS_PER_MINUTE, MS_PER_SECOND } from '../../lib/time-units.ts';
 import type { Database } from '../../core/database.ts';
 import type { SessionContext, ToolDeclaration } from '../../mcp/types.ts';
+import type { IOutboundQueue } from './outbound-queue.ts';
 
 const log = createChildLogger('self-restart');
 
 /**
- * Minimal structural capability the self-restart needs: restart a named unit.
- * The fleet `ServiceManager` satisfies this interface, but we declare it locally
- * (rather than importing fleet/platform) so the runtimes layer does not depend
- * on the fleet layer — the concrete manager is injected from the composition
- * root (main.ts), which owns the systemd binding. See the import-boundary matrix.
+ * Minimal structural capability the self-restart needs: restart the job of the
+ * calling process. The fleet `ServiceManager` satisfies this interface, but we
+ * declare it locally (rather than importing fleet/platform) so the runtimes
+ * layer does not depend on the fleet layer — the concrete manager is injected
+ * from the composition root (main.ts), which owns the platform binding. See the
+ * import-boundary matrix.
+ *
+ * #3829: only `restartSelf` is exposed. `ServiceManager.restart` is for
+ * restarting another process; on launchd it boots out the job and bootstraps it
+ * from the caller, and the bootout kills a caller inside that job first.
  */
 export interface ServiceRestarter {
-  restart(name: string): Promise<void>;
+  restartSelf(name: string): Promise<void>;
 }
 
 /** Stable filename of the intentional-restart marker inside an instance dataRoot. */
@@ -42,6 +52,18 @@ export const INTENTIONAL_RESTART_MARKER = 'intentional-restart.marker';
 
 /** Default freshness window for the marker (matches the exhausted.marker window). */
 const DEFAULT_MAX_AGE_MS = 5 * MS_PER_MINUTE;
+
+/** Longest wait for owed text before the restart; past it the restart is not started. */
+export const OWED_REPLY_FLUSH_GRACE_MS = 10 * MS_PER_SECOND;
+
+/**
+ * #3829: outcome of the owed-reply flush before a restart. `delivered` means the
+ * flush settled inside OWED_REPLY_FLUSH_GRACE_MS and every send in it reached
+ * provider submission. Any other outcome must stop the restart.
+ */
+export type OwedReplyDelivery =
+  | { delivered: true }
+  | { delivered: false; cause: 'timeout' | 'send_failed' | 'flush_rejected' };
 
 /** Taxonomy code distinguishing deliberate restart causes. */
 export type RestartReasonCode = 'self_restart' | 'redeploy' | 'config_reload';
@@ -89,10 +111,13 @@ export interface TriggerSelfRestartOptions {
 
 /**
  * Write the intentional-restart marker, emit an info-severity alert, then ask the
- * ServiceManager to restart this instance's own unit. The restart routes through
- * systemd's SIGTERM into the existing graceful shutdown (exit 0), so no crash
- * alert fires. A module-level guard makes a repeat call a no-op. If the restart
- * call throws, the marker stays written and a clear error is rethrown.
+ * service manager to restart this instance's own job (`restartSelf`). On systemd
+ * and launchd the manager sends SIGTERM into the existing graceful shutdown
+ * (exit 0) and then starts the job again itself, so no crash alert fires.
+ * Platforms that cannot restart the calling process (docker supervisor, Linux
+ * without systemd) reject the request instead. A module-level guard makes a
+ * repeat call a no-op. If the restart call throws, the marker is marked rejected
+ * and a clear error is rethrown.
  */
 export async function triggerSelfRestart(
   opts: TriggerSelfRestartOptions,
@@ -110,7 +135,9 @@ export async function triggerSelfRestart(
 
   let chatJid: string | undefined;
   if (opts.chatJid !== undefined) {
-    if (isPnJid(opts.chatJid) || isGroupJid(opts.chatJid)) {
+    // #3829: a DM can be addressed by its @lid JID; dropping it lost the
+    // "back online" notice for that chat.
+    if (isPnJid(opts.chatJid) || isLidJid(opts.chatJid) || isGroupJid(opts.chatJid)) {
       chatJid = opts.chatJid;
     } else {
       log.warn({ instance: opts.instance, chatJidSuffix: opts.chatJid.split('@').at(-1) ?? 'missing' }, 'self-restart chatJid is not a valid WhatsApp JID; dropping continuity target');
@@ -138,18 +165,19 @@ export async function triggerSelfRestart(
     'info',
   );
 
-  // `systemctl --user restart` delivers SIGTERM to THIS process and blocks until
-  // we exit, so on a successful restart the call is torn down mid-flight and never
-  // resolves here — awaiting it would surface a spurious failure on EVERY good
-  // restart. Race the invocation against a short grace timer: still-pending at the
-  // timer means the restart is underway (success); a fast rejection means a real
-  // invocation failure (masked/unknown unit, missing systemctl) worth surfacing.
-  // Either way the marker stays written for crash suppression.
+  // The restart delivers SIGTERM to THIS process, and `systemctl --user restart`
+  // also blocks until we exit, so on a successful restart the call may be torn
+  // down mid-flight and never resolve here — awaiting it would surface a spurious
+  // failure on a good restart. Race the invocation against a short grace timer:
+  // resolved or still pending at the timer means the restart is underway
+  // (success); a fast rejection means a real invocation failure (masked/unknown
+  // unit or job, missing systemctl/launchctl, unsupported platform) worth
+  // surfacing. Either way the marker stays written for crash suppression.
   const RESTART_INVOKE_GRACE_MS = 2 * MS_PER_SECOND;
   let invocationError: unknown;
   let graceTimer: NodeJS.Timeout | undefined;
   const restartCall = opts.serviceManager
-    .restart(opts.instance)
+    .restartSelf(opts.instance)
     .catch((err: unknown) => { invocationError = err; });
   const grace = new Promise<void>((resolve) => {
     graceTimer = setTimeout(resolve, RESTART_INVOKE_GRACE_MS);
@@ -194,6 +222,51 @@ export function consumeIntentionalRestartMarker(
   if (marker?.rejected) return null;
 
   return marker;
+}
+
+/**
+ * #3829: deliver the text the running turn owes before its process is replaced.
+ * Text the model wrote before calling restart_self is still in the queue — in
+ * minimal mode it is deferred at the tool boundary — and the turn abort in the
+ * restart's graceful shutdown destroys it. Commit the live stream buffer as a
+ * normal send, let the #3398 salvage path send the deferred text of a turn that
+ * has shown nothing yet, and wait up to OWED_REPLY_FLUSH_GRACE_MS for the sends.
+ *
+ * A send that stops with a failure disposition, or that the echo guard drops,
+ * returns without throwing, so a resolved flush alone does not prove delivery;
+ * the queue's send-failure count is compared across the flush. The result is
+ * `delivered: false` when the flush is still pending at the grace limit,
+ * rejects, or any send in it failed or was dropped. The
+ * caller must then not restart. Pending sends stay in the queue and finish on
+ * their own; nothing is re-enqueued, so the reply is never sent twice.
+ */
+export async function deliverOwedReplyBeforeRestart(queue: IOutboundQueue | null): Promise<OwedReplyDelivery> {
+  if (!queue) return { delivered: true };
+  let graceTimer: NodeJS.Timeout | undefined;
+  try {
+    const failuresBefore = queue.getSendFailureCount();
+    queue.commitStreamingText();
+    queue.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
+    const grace = new Promise<'timeout'>((resolve) => {
+      graceTimer = setTimeout(() => resolve('timeout'), OWED_REPLY_FLUSH_GRACE_MS);
+      graceTimer.unref?.();
+    });
+    if (await Promise.race([queue.flush(), grace]) === 'timeout') {
+      log.warn({ chatJid: queue.targetChatJid }, 'owed reply still sending at the self-restart grace limit; restart not started');
+      return { delivered: false, cause: 'timeout' };
+    }
+    const failedSends = queue.getSendFailureCount() - failuresBefore;
+    if (failedSends > 0) {
+      log.warn({ chatJid: queue.targetChatJid, failedSends }, 'owed reply send stopped without provider submission; restart not started');
+      return { delivered: false, cause: 'send_failed' };
+    }
+    return { delivered: true };
+  } catch (err) {
+    log.warn({ chatJid: queue.targetChatJid, err }, 'owed reply flush rejected; restart not started');
+    return { delivered: false, cause: 'flush_rejected' };
+  } finally {
+    if (graceTimer) clearTimeout(graceTimer);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -244,17 +317,24 @@ export const RestartSelfSchema = z.object({
 
 /**
  * Runtime-supplied bindings for the `restart_self` tool. The runtime injects its
- * own instance name, dataRoot, originating-chat resolver, an ack sender, and the
- * trigger fn so the tool declaration stays thin and unit-testable.
+ * own instance name, dataRoot, originating-chat resolver, an owed-reply flush,
+ * an ack sender, and the trigger fn so the tool declaration stays thin and
+ * unit-testable.
  */
 export interface RestartSelfToolDeps {
   instanceName: string;
   dataRoot: string;
   /** Resolve the originating chat for the current turn, or undefined if none. */
   resolveChatJid: () => string | undefined;
+  /**
+   * #3829: send the text the current turn owes before the restart destroys it.
+   * Wired by the runtime to `deliverOwedReplyBeforeRestart` on the turn's queue.
+   * The restart proceeds only on `{ delivered: true }`.
+   */
+  deliverOwedReply: () => Promise<OwedReplyDelivery>;
   /** Send the immediate pre-restart ack to the originating chat. */
   sendAck: (chatJid: string, text: string) => Promise<void>;
-  /** Systemd restart capability, injected from the composition root (fleet-owned). */
+  /** Self-restart capability, injected from the composition root (fleet-owned). */
   serviceManager: ServiceRestarter;
   /** Injected for tests; defaults to the real triggerSelfRestart bound by the runtime. */
   trigger: (opts: TriggerSelfRestartOptions) => Promise<{ ok: boolean; markerPath: string }>;
@@ -270,8 +350,10 @@ export interface RestartSelfToolDeps {
 
 /**
  * Build the `restart_self` tool declaration. The handler is intentionally thin:
- * resolve the originating chat, send an immediate ack, then delegate to
- * `triggerSelfRestart` (marker write + alert + ServiceManager.restart).
+ * resolve the originating chat, deliver the turn's owed text, send an immediate
+ * ack, then delegate to `triggerSelfRestart` (marker write + alert +
+ * ServiceManager.restartSelf). If the owed text is not confirmed sent, it stops
+ * before the ack and returns `ok: false` / `restarting: false`.
  */
 export function buildRestartSelfTool(deps: RestartSelfToolDeps): ToolDeclaration {
   return {
@@ -297,12 +379,37 @@ export function buildRestartSelfTool(deps: RestartSelfToolDeps): ToolDeclaration
       const { reason, code } = RestartSelfSchema.parse(params);
       const chatJid = deps.resolveChatJid();
 
+      // #3829: before the ack, so the reply the model wrote arrives first and
+      // before the restart, whose shutdown abort would destroy or orphan it. An
+      // unconfirmed reply stops the restart: no ack, no marker, no restartSelf.
+      let owed: OwedReplyDelivery;
+      try {
+        owed = await deps.deliverOwedReply();
+      } catch (err) {
+        log.warn({ instance: deps.instanceName, err }, 'owed reply delivery threw before restart');
+        owed = { delivered: false, cause: 'flush_rejected' };
+      }
+      if (!owed.delivered) {
+        log.warn({ instance: deps.instanceName, cause: owed.cause }, 'owed reply not confirmed sent; restart not started');
+        return {
+          ok: false,
+          restarting: false,
+          reason,
+          code: code ?? 'self_restart',
+          cause: owed.cause,
+          text: `Restart not started: the reply could not be confirmed sent (${owed.cause}), so the service was not restarted for: ${reason}.`,
+        };
+      }
+
       if (chatJid) {
         try {
           await deps.sendAck(chatJid, `🔄 Restarting to apply: ${reason} — back shortly.`);
         } catch (err) {
           log.warn({ instance: deps.instanceName, chatJid, err }, 'failed to send pre-restart ack; continuing with restart');
         }
+      } else {
+        // #3829: make a missing continuity target visible in the log.
+        log.warn({ instance: deps.instanceName }, 'restart_self found no originating chat; no pre-restart ack or back-online notice will be sent');
       }
 
       const result = await deps.trigger({

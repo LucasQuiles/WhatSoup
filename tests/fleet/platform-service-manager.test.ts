@@ -333,6 +333,87 @@ describe('platform service managers', () => {
     expect(childProcessMocks.execFile).not.toHaveBeenCalled();
   });
 
+  // #3829: restart() from inside the job booted out the caller, which then
+  // never ran its bootstrap, so the job stayed unloaded. restartSelf issues one
+  // kickstart -k and leaves the kill and relaunch to launchd.
+  it('restarts its own launchd job with exactly one kickstart -k and no bootout or bootstrap', async () => {
+    setPlatform('darwin');
+    fsMocks.existsSync.mockReturnValue(true);
+    fsMocks.readFileSync.mockReturnValue(generatedPlistIdentity());
+    const { createServiceManager } = await importPlatform();
+
+    await expect(createServiceManager().restartSelf('agent')).resolves.toBeUndefined();
+
+    const domain = `gui/${currentUid()}`;
+    expect(childProcessMocks.execFile).toHaveBeenCalledTimes(1);
+    expect(childProcessMocks.execFile).toHaveBeenCalledWith(
+      'launchctl',
+      ['kickstart', '-k', `${domain}/com.whatsoup.agent`],
+      expect.any(Function),
+    );
+    const subcommands = childProcessMocks.execFile.mock.calls.map((call) => (call[1] as string[])[0]);
+    expect(subcommands).not.toContain('bootout');
+    expect(subcommands).not.toContain('bootstrap');
+  });
+
+  it('does not bootstrap a launchd job on a failed self-restart kickstart', async () => {
+    setPlatform('darwin');
+    fsMocks.existsSync.mockReturnValue(true);
+    fsMocks.readFileSync.mockReturnValue(generatedPlistIdentity());
+    const absent = launchdAbsentError();
+    childProcessMocks.execFile.mockImplementationOnce((_cmd, _args, optionsOrCallback, maybeCallback) => {
+      const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
+      queueMicrotask(() => callback?.(absent, '', ''));
+      return new EventEmitter();
+    });
+    const { createServiceManager } = await importPlatform();
+
+    await expect(createServiceManager().restartSelf('agent')).rejects.toThrow('no service');
+
+    expect(childProcessMocks.execFile).toHaveBeenCalledTimes(1);
+    expect(childProcessMocks.execFile).toHaveBeenCalledWith(
+      'launchctl',
+      ['kickstart', '-k', `gui/${currentUid()}/com.whatsoup.agent`],
+      expect.any(Function),
+    );
+  });
+
+  it('refuses a launchd self-restart when no generated plist is installed', async () => {
+    setPlatform('darwin');
+    const { createServiceManager } = await importPlatform();
+
+    await expect(createServiceManager().restartSelf('agent')).rejects.toThrow('authenticate the instance before starting');
+
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it('restarts its own systemd unit with one systemctl --user restart', async () => {
+    setPlatform('linux');
+    childProcessMocks.execFileSync.mockReturnValue(Buffer.from('DISPLAY=:0'));
+    const { createServiceManager } = await importPlatform();
+    const templateUnit = (name: string) => ['whatsoup', name].join('@') + '.service';
+
+    await expect(createServiceManager().restartSelf('alpha')).resolves.toBeUndefined();
+
+    expect(childProcessMocks.execFile).toHaveBeenCalledTimes(1);
+    expect(childProcessMocks.execFile).toHaveBeenCalledWith(
+      'systemctl',
+      ['--user', 'restart', templateUnit('alpha')],
+      expect.any(Function),
+    );
+  });
+
+  it('refuses a self-restart without systemd', async () => {
+    setPlatform('linux');
+    childProcessMocks.execFileSync.mockImplementation(() => {
+      throw new Error('systemd unavailable');
+    });
+    const { createServiceManager } = await importPlatform();
+
+    await expect(createServiceManager().restartSelf('alpha')).rejects.toThrow('Service management requires systemd');
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
   it('boots out a loaded macOS job for authentication instead of letting KeepAlive relaunch it', async () => {
     setPlatform('darwin');
     fsMocks.readFileSync.mockReturnValue(generatedPlistIdentity());
@@ -1713,5 +1794,16 @@ describe('platform service managers', () => {
     children[1].emit('spawn');
     await restart;
     expect(childProcessMocks.spawn).toHaveBeenCalledTimes(2);
+  });
+
+  // #3829: an instance's own docker manager holds no child for itself, so a
+  // restart() there would spawn a second copy beside the running process.
+  it('refuses a docker self-restart without spawning or signalling a child', async () => {
+    const { DockerSupervisorServiceManager } = await importPlatform();
+    const manager = new DockerSupervisorServiceManager();
+
+    await expect(manager.restartSelf('bot-a')).rejects.toThrow('not supported under the docker supervisor');
+
+    expect(childProcessMocks.spawn).not.toHaveBeenCalled();
   });
 });
