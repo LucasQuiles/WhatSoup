@@ -78,8 +78,10 @@ const INVALID_POLICY_CASES: readonly {
       }],
     }],
   },
+  // Ids stay short: every route name built from them must fit the instance-name
+  // limit, or the route refuses the name before it validates any policy.
   {
-    id: 'legacy-authorization-empty',
+    id: 'legacy-auth-empty',
     label: 'an empty legacy authorization object',
     policies: [{
       ...policy('unknown-authorization'),
@@ -87,7 +89,7 @@ const INVALID_POLICY_CASES: readonly {
     }],
   },
   {
-    id: 'legacy-authorization-populated',
+    id: 'legacy-auth-populated',
     label: 'a populated legacy authorization object',
     policies: [{
       ...policy('populated-authorization'),
@@ -274,6 +276,7 @@ describe('fleet client-output policy config admission and projection', () => {
       }), res, deps);
 
       expect(res._status).toBe(400);
+      expect(res._body).toMatch(/clientOutputPolicies/);
       expect(fs.existsSync(configDir(name))).toBe(false);
       expect(deps.serviceManager.enable).not.toHaveBeenCalled();
       expect(deps.realtime.publish).not.toHaveBeenCalled();
@@ -350,6 +353,7 @@ describe('fleet client-output policy config admission and projection', () => {
       }), res, deps, { name });
 
       expect(res._status).toBe(400);
+      expect(res._body).toMatch(/clientOutputPolicies/);
       expect(fs.readFileSync(targetPath)).toEqual(beforeConfig);
       expect(fs.readFileSync(siblingPath)).toEqual(beforeSibling);
       expect(fs.readdirSync(configDir(name)).sort()).toEqual(beforeEntries);
@@ -358,26 +362,31 @@ describe('fleet client-output policy config admission and projection', () => {
   );
 
   const LEGACY_AUTHORIZATION_CASES = INVALID_POLICY_CASES
-    .filter(({ id }) => id.startsWith('legacy-authorization-'))
-    .map((entry) => ({ ...entry, suffix: entry.id.slice('legacy-authorization-'.length) }));
+    .filter(({ id }) => id.startsWith('legacy-auth-'))
+    .map((entry) => ({ ...entry, suffix: entry.id.slice('legacy-auth-'.length) }));
 
   it.each(LEGACY_AUTHORIZATION_CASES)(
     'names the unsupported authorization field for $label on CREATE',
     async ({ suffix, policies }) => {
+      const name = `auth-create-${suffix}`;
+      const deps = createDeps();
       const res = mockRes();
 
       await handleCreateLine(mockReq({
         method: 'POST',
         body: JSON.stringify({
-          name: `auth-create-${suffix}`,
+          name,
           type: 'agent',
           adminPhones: [SYNTHETIC_PHONE],
           clientOutputPolicies: policies,
         }),
-      }), res, createDeps());
+      }), res, deps);
 
       expect(res._status).toBe(400);
       expect(res._body).toMatch(UNSUPPORTED_AUTHORIZATION);
+      expect(fs.existsSync(configDir(name))).toBe(false);
+      expect(deps.serviceManager.enable).not.toHaveBeenCalled();
+      expect(deps.realtime.publish).not.toHaveBeenCalled();
     },
   );
 
@@ -386,15 +395,25 @@ describe('fleet client-output policy config admission and projection', () => {
     async ({ suffix, policies }) => {
       const name = `auth-patch-${suffix}`;
       const targetPath = writeAgent(name, [policy('original')]);
+      const siblingPath = path.join(configDir(name), 'sibling-evidence.txt');
+      fs.writeFileSync(siblingPath, `sibling-${suffix}\n`, { mode: 0o600 });
+      const beforeConfig = fs.readFileSync(targetPath);
+      const beforeSibling = fs.readFileSync(siblingPath);
+      const beforeEntries = fs.readdirSync(configDir(name)).sort();
+      const deps = patchDeps(name, targetPath);
       const res = mockRes();
 
       await handleConfigUpdate(mockReq({
         method: 'PATCH',
         body: JSON.stringify({ clientOutputPolicies: policies }),
-      }), res, patchDeps(name, targetPath), { name });
+      }), res, deps, { name });
 
       expect(res._status).toBe(400);
       expect(res._body).toMatch(UNSUPPORTED_AUTHORIZATION);
+      expect(fs.readFileSync(targetPath)).toEqual(beforeConfig);
+      expect(fs.readFileSync(siblingPath)).toEqual(beforeSibling);
+      expect(fs.readdirSync(configDir(name)).sort()).toEqual(beforeEntries);
+      expect(deps.realtime.publish).not.toHaveBeenCalled();
     },
   );
 });
