@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -26,10 +26,34 @@ describe('automatic operator catch-up reconciler', () => {
   it('does not infer original fulfillment from later successful traffic', () => {
     installFixture({ echoed: true });
     const report = reconcileOperatorCatchupRecoveries(db.raw);
-    expect(report).toMatchObject({ attempted: 1, closed: 0, linksClosed: 0, skipped: 1 });
+    expect(report).toMatchObject({ attempted: 0, closed: 0, linksClosed: 0, skipped: 1 });
     expect(report.skips[0].reason).toBe('closure_rejected');
     expect(linkRows('superseded_by_operator_catchup')).toEqual([]);
   });
+
+  it.each(['absent', 'different source', 'blank evidence'] as const)(
+    'skips writer acquisition and integrity checks when fulfillment is %s', (condition) => {
+      const fixture = installFixture({ echoed: true });
+      const confirmations = condition === 'absent' ? [] : [{
+        planId: fixture.planId, conversationKey: fixture.conversationKey,
+        catchupSeq: fixture.catchupSeq,
+        sourceSeqs: condition === 'different source' ? [999999] : fixture.sourceSeqs,
+        evidenceRef: condition === 'blank evidence' ? '  ' : 'test://different-source',
+      }];
+      const exec = vi.spyOn(db.raw, 'exec');
+      const prepare = vi.spyOn(db.raw, 'prepare');
+      try {
+        const report = reconcileOperatorCatchupRecoveries(db.raw, { confirmedFulfillments: confirmations });
+        // These observe real SQLite operations; an unconfirmed scan has no write work.
+        expect(exec.mock.calls.filter(([sql]) => /BEGIN|SAVEPOINT/i.test(sql))).toEqual([]);
+        expect(prepare.mock.calls.filter(([sql]) => /integrity_check/i.test(sql))).toEqual([]);
+        expect(report).toMatchObject({ attempted: 0, closed: 0, linksClosed: 0, skipped: 1 });
+        expect(linkRows('superseded_by_operator_catchup')).toEqual([]);
+      } finally {
+        exec.mockRestore();
+        prepare.mockRestore();
+      }
+    });
 
   it('closes a group with explicit original-fulfillment evidence and a delivered catch-up', () => {
     const fixture = installFixture({ echoed: true });

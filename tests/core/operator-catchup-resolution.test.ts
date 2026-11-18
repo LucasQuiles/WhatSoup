@@ -166,6 +166,37 @@ describe('bound operator catch-up resolution', () => {
     expect(() => resolveOperatorCatchup(db.raw, resolution(opId))).toThrow('bound echoed');
   });
 
+  it.each([
+    ['another chat', '15550000004@s.whatsapp.net', '15550000004'],
+    ['another conversation in the same chat', jid, 'different-conversation'],
+  ])('does not recover a bound operation from an identical provider id in %s', async (_case, chat, conversation) => {
+    const opId = await send(false);
+    engine.markMaybeSent(opId, 'ambiguous transport');
+    db.raw.prepare(`INSERT INTO messages
+      (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp)
+      VALUES (?, ?, 'bot@s.whatsapp.net', 'WA_CATCHUP', 'text', 1, ?)`)
+      .run(chat, conversation, Date.now());
+
+    engine.postConnectRecovery();
+
+    expect(db.raw.prepare('SELECT status FROM outbound_ops WHERE id = ?').get(opId))
+      .toEqual({ status: 'quarantined' });
+    expect(() => resolveOperatorCatchup(db.raw, resolution(opId))).toThrow('bound echoed');
+    expect(db.raw.prepare('SELECT * FROM operator_catchup_resolutions').all()).toEqual([]);
+    expect(engine.getTurnRecoverySupervisorCounts().openRecoveries).toBe(1);
+  });
+
+  it('recovers a bound operation only from its same-chat and same-conversation self echo', async () => {
+    const opId = await send(false);
+    engine.markMaybeSent(opId, 'ambiguous transport');
+    db.raw.prepare(`INSERT INTO messages
+      (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp)
+      VALUES (?, '15550000003', 'bot@s.whatsapp.net', 'WA_CATCHUP', 'text', 1, ?)`)
+      .run(jid, Date.now());
+    engine.postConnectRecovery();
+    expect(resolveOperatorCatchup(db.raw, resolution(opId))).toMatchObject({ inserted: 1 });
+  });
+
   it('rejects a new send after an ambiguous first attempt without resetting its evidence', async () => {
     const failed = { ...messenger, sendMessage: async () => { throw new Error('uncertain transport'); } };
     await expect(sendTracked(failed, jid, 'The requested result', engine, {

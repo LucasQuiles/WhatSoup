@@ -51,6 +51,18 @@ describe('operator catch-up recovery closure', () => {
     ]);
   });
 
+  it('rejects explicit NULL fulfillment even through INSERT OR REPLACE', () => {
+    const f = installFixture('complete', true);
+    expect(() => db.raw.prepare(`INSERT OR REPLACE INTO inbound_disposition_links
+      (inbound_seq, recovery_plan_id, disposition, superseded_by_seq, reason, evidence_ref, actor,
+       original_fulfillment_confirmed)
+      VALUES (?, ?, 'superseded_by_operator_catchup', ?, ?, ?, 'operator:test', NULL)`)
+      .run(f.sourceSeqs[0], f.planId, f.catchupSeq,
+        'operator catch-up completed with proven echoed reply', 'test://no-fulfillment'))
+      .toThrow(/fulfillment/i);
+    expect(linkRows('superseded_by_operator_catchup')).toEqual([]);
+  });
+
   it('does not close an original request from an unrelated later echoed answer', () => {
     const fixture = installFixture('complete', true);
     expect(() => closeOperatorCatchupRecovery(db, {

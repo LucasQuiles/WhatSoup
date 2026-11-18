@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { runMigration45 } from '../../src/core/database-migration-45.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
+import { createInternalOutboundFailureEvidence } from '../../src/core/outbound-failure-disposition.ts';
 import {
   createRecoveryStats,
   DurabilityRecoveryEvidence,
@@ -32,7 +33,7 @@ vi.mock('../../src/lib/fleet-health-gate.ts', () => ({ gateQuarantineClear }));
 const INCIDENT_INBOUND_SEQ = 47_645;
 const INCIDENT_SELECTED_OP_ID = 103_541;
 const INCIDENT_ECHOED_OP_IDS = [103_542, 103_543, 103_544, 103_545, 103_548, 103_551, 103_552];
-const CONVERSATION_KEY = 'recovery-proof-group';
+const CONVERSATION_KEY = 'recovery-proof-group_at_g.us';
 const DELIVERY_JID = 'recovery-proof-group@g.us';
 
 function rowJson(db: Database, table: string, idColumn: string, id: number): string {
@@ -391,7 +392,7 @@ describe('durable recovery evidence ordering', () => {
     expect(engine.getHealthStats().openRecoveries).toBe(1);
   });
 
-  function seedIncident(): { terminalRecordId: number; recoveryJobId: number; owner: RecoveryOwnerIdentity } {
+  function seedIncident(includeLaterEchoes = true): { terminalRecordId: number; recoveryJobId: number; owner: RecoveryOwnerIdentity } {
     db.raw.prepare(`
       INSERT INTO inbound_events (
         seq, message_id, conversation_key, chat_jid, routed_to, processing_status
@@ -438,7 +439,7 @@ describe('durable recovery evidence ordering', () => {
       }),
     });
 
-    for (const id of INCIDENT_ECHOED_OP_IDS) {
+    for (const id of includeLaterEchoes ? INCIDENT_ECHOED_OP_IDS : []) {
       db.raw.prepare(`
         INSERT INTO outbound_ops (
           id, conversation_key, chat_jid, op_type, payload, payload_hash, status,
@@ -556,13 +557,26 @@ describe('durable recovery evidence ordering', () => {
 
   it.each(['blocked_unsafe', 'exhausted'] as const)(
     'does not use a bound catch-up as corroboration with an original %s recovery job', (state) => {
-    const { terminalRecordId, recoveryJobId, owner } = seedIncident();
-    const payload = JSON.stringify({ text: 'Operator follow-up', operatorCatchup: {
+    const { terminalRecordId, recoveryJobId, owner } = seedIncident(false);
+    db.raw.exec(`INSERT INTO recovery_plans (plan_id, origin, actor, summary)
+      VALUES ('pending-plan', 'operator', 'operator:test', 'Original result still owed')`);
+    db.raw.prepare(`INSERT INTO inbound_disposition_links
+      (inbound_seq, recovery_plan_id, disposition, reason, actor)
+      VALUES (?, 'pending-plan', 'recovery_pending_operator_catchup', 'No confirmed result', 'operator:test')`)
+      .run(INCIDENT_INBOUND_SEQ);
+    const bound = engine.createOperatorCatchupOp(DELIVERY_JID, 'Operator follow-up', {
       planId: 'pending-plan', sourceSeq: INCIDENT_INBOUND_SEQ,
       actor: 'operator:test', evidenceRef: 'test://approved-followup',
-    } });
-    db.raw.prepare('UPDATE outbound_ops SET payload = ? WHERE id > ?').run(payload, INCIDENT_SELECTED_OP_ID);
-    expect(engine.markQuarantined(INCIDENT_SELECTED_OP_ID)).toBe(true);
+    });
+    engine.markSending(bound);
+    engine.markSubmitted(bound, 'WA_BOUND_FOLLOWUP');
+    expect(engine.matchEcho('WA_BOUND_FOLLOWUP', DELIVERY_JID)).toBe(true);
+    expect(engine.markQuarantined(INCIDENT_SELECTED_OP_ID, createInternalOutboundFailureEvidence({
+      failureCode: 'outbound.unsafe_delivery_unconfirmed', stage: 'runtime', mutationState: 'ambiguous',
+      logicalAttemptCount: 1, providerSubmissionCount: 1,
+    }))).toBe(true);
+    expect(db.raw.prepare('SELECT quarantine_disposition FROM outbound_ops WHERE id = ?').get(INCIDENT_SELECTED_OP_ID))
+      .toEqual({ quarantine_disposition: 'delivery_ambiguous_unsafe' });
     if (state === 'exhausted') {
       // Exhaustion requires a replay-safety proof and five fenced attempts.
       engine.promoteBlockedTurnRecoveryJob(recoveryJobId, owner,

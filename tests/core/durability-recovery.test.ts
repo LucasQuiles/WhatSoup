@@ -38,11 +38,11 @@ function makeDb(): Database {
 }
 
 /** Insert a raw message into the messages table (simulating an ingest echo). */
-function insertMessage(db: Database, messageId: string, chatJid = 'jid-1@s.whatsapp.net'): void {
+function insertMessage(db: Database, messageId: string, chatJid = 'jid-1@s.whatsapp.net', conversationKey = chatJid): void {
   db.raw.prepare(
     `INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp)
      VALUES (?, ?, ?, ?, 'text', 1, ?)`,
-  ).run(chatJid, chatJid, 'bot@s.whatsapp.net', messageId, Date.now());
+  ).run(chatJid, conversationKey, 'bot@s.whatsapp.net', messageId, Date.now());
 }
 
 /** Read a single row from tool_calls by id. */
@@ -382,7 +382,7 @@ describe('DurabilityEngine — postConnectRecovery()', () => {
     engine.markMaybeSent(opId, 'crash-in-flight');
 
     // Simulate the echo arriving via normal ingest
-    insertMessage(db, 'WA_MSG_FOUND_1');
+    insertMessage(db, 'WA_MSG_FOUND_1', 'j1', 'k1');
 
     const stats = engine.postConnectRecovery();
 
