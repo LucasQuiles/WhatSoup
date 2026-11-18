@@ -387,10 +387,10 @@ export class RuntimeFallbackCoordinator {
 
   /**
    * Pure marking predicate: does `session` serve the ACTIVE fallback entry?
-   * Only markActiveFallbackFailed reads it. The failure tier is a separate
-   * attribution (failureTierForSession), so the two can differ: a PRIOR
-   * entry's still-running session can be fallback-tier without serving the
-   * active entry, and with no active window this predicate is always false.
+   * Read by markActiveFallbackFailed and the empty-turn count; always false
+   * with no active window. The tier (failureTierForSession) can differ: a
+   * PRIOR entry's running session is fallback-tier yet not serving, and a
+   * wildcard entry matches a primary-model session the tier calls primary.
    */
   private sessionServesActiveFallbackEntry(session: SessionManager | null): boolean {
     if (!this.host.isFallbackWindowActive || !this.host.fallbackWindow.activeEntry || !session) return false;
@@ -1073,7 +1073,6 @@ export class RuntimeFallbackCoordinator {
       return;
     }
     this.host.fallbackMetrics.recordEmptyTurn();
-    this.host.fallbackEmptyAdvance.recordEmpty();
     const entry = this.host.fallbackWindow.activeEntry ?? this.host.agentFallbacks[0] ?? null;
     log.warn({
       chatJid: queue.targetChatJid,
@@ -1100,25 +1099,26 @@ export class RuntimeFallbackCoordinator {
       );
     }
 
-    // Advance the chain when the ACTIVE fallback entry is structurally empty.
-    // An entry that connects but emits no assistant text (e.g. a broken
-    // opencode provider integration) produces no terminal-failure MESSAGE, so
-    // the text-driven advance path (activateProviderFallbackAfterTerminalResult
-    // on a classified failure) never fires and the bot pins to the dead entry,
-    // emitting "_backup returned no reply — resend_" every turn while a working
-    // entry sits behind it. Mirror the PRIMARY empty-output trigger: after
-    // EMPTY_OUTPUT_FALLBACK_THRESHOLD consecutive empty turns on the same entry,
-    // route it through the SAME advance path terminal failures use — mark the
-    // entry failed and re-select the next eligible entry. Preserve the window's
-    // original arm reason so selection keeps skipping same-as-primary entries
-    // (an auth-required window must not advance back onto a dead primary
-    // provider). The attempted-key guard stops re-advancing (and re-alerting)
-    // the same entry when no alternate exists. Reuses the terminal path's
-    // single-fallback preservation: when no alternate remains the window keeps
-    // the current entry rather than reverting to a known-bad primary.
+    // Advance the chain when the ACTIVE fallback entry is structurally empty:
+    // an entry that connects but emits no assistant text produces no terminal
+    // failure MESSAGE, so the text-driven advance never fires and the bot pins
+    // to the dead entry while a working entry sits behind it. Count a turn only
+    // from a session that serves the active entry (the marking predicate, as in
+    // recordFallbackTurnProcessFailure) and that route attribution does not
+    // assign to the primary. A primary or prior-entry turn still in flight is
+    // no evidence against the entry, and a primary-tier advance would move an
+    // operator-forced window end out to the default. So every activation below
+    // is fallback-tier with the window active, and it keeps the window clocks.
+    // After EMPTY_OUTPUT_FALLBACK_THRESHOLD consecutive counted turns, take the
+    // SAME advance path terminal failures use: mark the entry failed and
+    // re-select. The window's original arm reason keeps an auth-required window
+    // skipping same-as-primary entries. The attempted-key guard stops
+    // re-advancing (and re-alerting) the same entry; with no alternate left,
+    // the terminal path's single-fallback preservation keeps the current entry.
+    if (!this.sessionServesActiveFallbackEntry(session) || this.failureTierForSession(session) === 'primary') return;
+    this.host.fallbackEmptyAdvance.recordEmpty();
     const entryKey = entry ? this.host.fallbackChain.entryKey(entry) : null;
     if (
-      session !== null &&
       entryKey !== null &&
       this.host.fallbackEmptyAdvance.shouldAttemptAdvance(entryKey, EMPTY_OUTPUT_FALLBACK_THRESHOLD)
     ) {
