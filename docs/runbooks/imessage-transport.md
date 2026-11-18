@@ -223,13 +223,25 @@ BlueBubbles response representations round-trip through one mapping.
 
 ## Health + recovery
 
-- The adapter classifies backend failures (`isImessageTransient` in
-  `adapter.ts`), rather than the bot-errors dispatcher. BlueBubbles 5xx
-  responses except 501, HTTP transport failures and imsg socket failures
-  map to `TransientProviderError`; `UnsupportedMethod` is permanent.
-  An imsg RPC timeout before a send is written is transient, but a timeout
-  after the send request was written maps to `SendAmbiguousError`. Treat
-  that outcome as unknown delivery; a retry could duplicate the message.
+- The adapter classifies backend failures (`mapPortError` and
+  `isImessageTransient` in `adapter.ts`), rather than the bot-errors
+  dispatcher. BlueBubbles 5xx responses except 501, BlueBubbles request
+  failures (the port wraps every HTTP client error as a 503
+  `TransportError`), and imsg socket failures and RPC timeouts map to
+  `TransientProviderError`; `UnsupportedMethod` is permanent.
+- An imsg send whose request was already written is the exception: a
+  socket error, end or close, or an RPC timeout after the write maps to
+  `SendAmbiguousError` (the port reports `RequestAbortedAfterWrite`). So do
+  an internal RPC error (`-32603`) on a send and a send acknowledged with
+  `ok: true` but no message id. Treat each of these as unknown delivery and
+  do not retry it: a retry could duplicate the message. A socket failure
+  before the request was written stays transient.
+- The bot-errors dispatcher does not classify iMessage provider errors. It
+  treats a failed delivery of its own as transient when the error text
+  contains one of its generic transport signatures
+  (`_TRANSIENT_TRANSPORT_SIGNATURES` in `bot-errors-dispatcher.py`, which
+  include `connection lost` and `connection closed`); such a failure spends
+  the separate transient retry budget instead of a permanent attempt.
 - No iMessage source is auto-close-protected today: the dispatcher's
   `AUTOCLOSE_PROTECTED_SOURCES` set in `bot-errors-dispatcher.py` names no
   BlueBubbles or iMessage source, and neither `bluebubbles_connection_lost`
