@@ -23,6 +23,13 @@ const SCHEMA = `
 `;
 
 export function runMigration69(db: DatabaseSync): void {
+  // A damaged file can lack the table while its ledger is current. Skip it, as
+  // the migrations for other absent tables do: the registry-backed table repair
+  // after the migrations recreates the table together with this index.
+  const table = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'turn_terminal_records'")
+    .get() as { name: string } | undefined;
+  if (!table) return;
   db.exec('SAVEPOINT failed_terminal_debt_index');
   try {
     db.exec(SCHEMA);
