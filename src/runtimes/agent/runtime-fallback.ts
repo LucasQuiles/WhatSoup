@@ -106,8 +106,8 @@ const log = createChildLogger('agent-runtime');
 
 /**
  * Which provider tier produced the failure driving a (re-)activation, derived
- * in ONE place from route identity (failureTierForSession); the reason
- * taxonomy only says WHY the primary was left. A fallback-tier failure carries
+ * in ONE place from route identity (failureTierForSession); the reason names
+ * the current failure and armReason the first. A fallback-tier failure carries
  * no evidence about the PRIMARY: it never gives the notice a primary ETA, arms
  * like a primary failure when no window state exists, and otherwise is handled
  * without extending the window, overwriting the stored resetAt, or
@@ -428,22 +428,22 @@ export class RuntimeFallbackCoordinator {
    * Failure-tier derivation by ROUTE identity — a different question from the
    * marking predicate above. Marking asks "does this session serve the ACTIVE
    * entry?" (evidence against that entry). The tier asks "is this session NOT
-   * the primary?" — a session attributable to ANY configured fallback entry,
-   * active or a PRIOR entry still running across a chain advance, is
-   * fallback-tier evidence and must not move the window clocks.
+   * the primary?" — a session that only fallback entries match (the active one,
+   * or a PRIOR entry still running across a chain advance) is fallback-tier
+   * evidence and must not move the window clocks.
    *
-   * Attribution mirrors the route-currency compare (sessionMatchesCurrentRoute):
-   * the primary compare is provider-only (isCrossProviderSession's inverse) and
+   * The primary compare is provider-only (isCrossProviderSession's inverse);
    * the fallback-entry side is model-aware, since a same-provider chain differs
    * from the primary only by model. Two tiebreaks attribute a session matching
-   * both to the primary: its model equals the EXPLICITLY configured primary
-   * model; or the primary has no configured model, the session has none, and
-   * every same-provider entry names a model (a window route on a named entry
-   * carries that model, so only a primary route starts such a session). Any
-   * other match of both or neither fails CLOSED to the fallback tier: with
-   * window state present the failure cannot move the clocks; with none,
-   * activation still arms (the no-arm and clock-preserving rules need window
-   * state), but the unproven reset never becomes the user-facing primary ETA.
+   * both to the primary's provider and model: its model equals the EXPLICITLY
+   * configured primary model; or the primary has no configured model, the
+   * session has none, and every same-provider entry names a model. A window
+   * route on a named entry carries that model or a verified pinned one, so such
+   * a session came from a non-window route on the primary provider (a default,
+   * provider-only pin or primary-mapped tier route). Any other match of both or
+   * neither fails CLOSED to the fallback tier: with window state the failure
+   * cannot move the clocks; with none, it still arms a window, but the unproven
+   * reset never becomes the user-facing primary ETA.
    */
   private failureTierForSession(session: SessionManager | null): FallbackFailureTier {
     if (!session) return 'primary';
@@ -472,13 +472,13 @@ export class RuntimeFallbackCoordinator {
     const matchesPrimary = provider === this.host.agentProvider;
     if (matchesFallback && !matchesPrimary) return 'fallback';
     if (matchesPrimary && !matchesFallback) return 'primary';
-    // Exact-primary tiebreaks (review 2) for a session matching both routes.
-    // A wildcard (model-undefined) entry matches ANY session on its provider,
-    // so a session model equal to an EXPLICITLY configured primary model is
-    // the proof. A provider-default primary starts null-model sessions, while
-    // resolveRoute gives a window route on a named entry that entry's (or a
-    // pinned) model, so with no wildcard same-provider entry a null-model
-    // session is the primary. Any other both-or-neither match fails closed.
+    // Primary tiebreaks for a session matching both routes. A wildcard
+    // (model-undefined) entry matches ANY session on its provider, so a
+    // session model equal to an EXPLICITLY configured primary model is the
+    // proof. With a provider-default primary, resolveRoute gives a window
+    // route on a named entry that entry's (or a pinned) model, so with no
+    // wildcard same-provider entry a null-model session runs on the primary's
+    // provider and model. Any other both-or-neither match fails closed.
     const explicitPrimary = this.host.model !== undefined && model === this.host.model;
     const defaultPrimary = this.host.model === undefined && model === null
       && this.host.agentFallbacks.every((entry) => entry.provider !== provider || entry.model !== undefined);

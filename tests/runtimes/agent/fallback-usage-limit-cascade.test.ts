@@ -662,8 +662,9 @@ describe('fallback-provider usage-limit cascade', () => {
     const runtime = makeRuntime(NAMED_SAME_PROVIDER_CHAIN, null);
     expect(cv(runtime).fallbackWindow.activeUntil).toBeNull();
     // A session on a provider that is neither the primary's nor in the chain
-    // (for example a chat pinned to it) matches neither route, so its reset is
-    // not the primary's, even with a provider-default primary.
+    // (a pin cannot target one; a chain change can leave one running) matches
+    // neither route, so its reset is not the primary's, even with a
+    // provider-default primary.
     const resetMs = parsedResetMs(USAGE_LIMIT_TEXT);
 
     const queue = makeFakeQueue();

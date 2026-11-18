@@ -876,8 +876,9 @@ describe('tier attribution by route identity', () => {
 // the clocks and its parsed resetAt evidence was discarded under a LEGAL
 // config. When the primary route carries an EXPLICITLY configured model and
 // the session's model equals it, the session IS the primary: the exact match
-// beats the wildcard. The genuinely ambiguous remainder (null session model,
-// or a provider-default primary) keeps the fail-closed rule.
+// beats the wildcard. Beside a wildcard entry the ambiguous remainder (a null
+// session model, or a provider-default primary) keeps the fail-closed rule; the
+// last case covers a provider-default primary beside named entries only.
 
 describe('exact-primary-model disambiguation', () => {
   beforeEach(() => {
