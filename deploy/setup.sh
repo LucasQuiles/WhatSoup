@@ -639,8 +639,15 @@ else
   # appears after this check is refused too.
   release_drift_env="$HOME/.config/whatsoup/release-drift.env"
   if [ -e "$release_drift_env" ] || [ -L "$release_drift_env" ]; then
-    release_drift_existing="$(read_env_file_value "$release_drift_env" WHATSOUP_RELEASE_DRIFT_INSTANCE)"
-    if [ -z "$release_drift_existing" ]; then
+    # A failed read warns and never ends setup (set -e), which has already
+    # linked the launchers, installed the units and reloaded systemd. Only a
+    # regular file is read, so any other path reads as a file without a label.
+    if ! release_drift_existing="$(read_env_file_value "$release_drift_env" WHATSOUP_RELEASE_DRIFT_INSTANCE 2>/dev/null)"; then
+      echo "  ⚠ setup cannot read ~/.config/whatsoup/release-drift.env: whatsoup-release-drift.service will fail until that file can be read and sets WHATSOUP_RELEASE_DRIFT_INSTANCE"
+      if [ -n "$release_drift_instance" ]; then
+        echo "    The requested label was not applied: setup never replaces an existing file."
+      fi
+    elif [ -z "$release_drift_existing" ]; then
       echo "  ⚠ ~/.config/whatsoup/release-drift.env exists but sets no WHATSOUP_RELEASE_DRIFT_INSTANCE: whatsoup-release-drift.service will fail until it does"
       if [ -n "$release_drift_instance" ]; then
         echo "    The requested label was not applied: setup never replaces an existing file."
