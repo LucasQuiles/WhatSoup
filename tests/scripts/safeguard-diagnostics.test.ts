@@ -1130,6 +1130,14 @@ describe('safeguard diagnostics', () => {
       evidence: 'bot-errors-health-macos runs-on must be exactly macos-15',
     },
     {
+      name: 'changes the macOS prerequisite test command',
+      mutate: (workflow: string) => workflow.replace(
+        'tests/scripts/bot-errors-release-proof-run.test.ts',
+        'tests/scripts/bot-errors-release-proof-run-retired.test.ts',
+      ),
+      evidence: 'bot-errors-health-macos must run the portable Python and release-proof prerequisite suites exactly once',
+    },
+    {
       name: 'floats the Node 25 lane back to ubuntu-latest',
       mutate: (workflow: string) => workflow.replace(
         '    name: quality (25.x)\n    runs-on: ubuntu-24.04',
@@ -1147,6 +1155,14 @@ describe('safeguard diagnostics', () => {
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.id === 'quality-ci-lane-partition'))
       .toMatchObject({ status: 'fail', evidence: expect.arrayContaining([evidence]) });
+  });
+
+  // The rejecting cases above are only meaningful while the unmutated lane passes.
+  it('accepts the macOS lane with its exact runner and prerequisite test command', () => {
+    const result = checkSafeguards(makeRepo());
+
+    expect(result.checks.find((check) => check.id === 'quality-ci-lane-partition'))
+      .toMatchObject({ status: 'pass' });
   });
 
   it('fails when the quality job loses its bounded timeout', () => {
