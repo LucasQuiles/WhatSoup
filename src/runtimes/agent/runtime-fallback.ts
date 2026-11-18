@@ -106,11 +106,14 @@ const log = createChildLogger('agent-runtime');
 
 /**
  * Which provider tier produced the failure driving a (re-)activation, derived
- * in ONE place from route identity (failureTierForSession); the reason names
- * the current failure and armReason the first. A fallback-tier failure carries
- * no evidence about the PRIMARY: it never gives the notice a primary ETA, arms
- * like a primary failure when no window state exists, and otherwise is handled
- * without extending the window, overwriting the stored resetAt, or
+ * in ONE place from route identity (failureTierForSession); only the empty-turn
+ * advance fixes it, to 'fallback'. The reason names the current failure and
+ * armReason the first, except that the empty and process advances pass the
+ * window's arm reason as the reason, with 'auth-required' in place of one that
+ * is not a provider reason (such as 'admin-forced'). A fallback-tier failure
+ * carries no evidence about the PRIMARY: it never gives the notice a primary
+ * ETA, arms like a primary failure when no window state exists, and otherwise
+ * is handled without extending the window, overwriting the stored resetAt, or
  * restarting the primary recovery clocks (live ph-bot 2026-08-26: a dead
  * fallback tier plus user traffic postponed primary recovery indefinitely).
  */
@@ -389,8 +392,10 @@ export class RuntimeFallbackCoordinator {
    * Pure marking predicate: does `session` serve the ACTIVE fallback entry?
    * Read by markActiveFallbackFailed and the empty-turn count; always false
    * with no active window. The tier (failureTierForSession) can differ: a
-   * PRIOR entry's running session is fallback-tier yet not serving, and a
-   * wildcard entry matches a primary-model session the tier calls primary.
+   * PRIOR entry's running session is fallback-tier yet does not serve a named
+   * active entry with another model (it does serve a same-provider wildcard
+   * entry), and a wildcard entry matches a primary-model session the tier
+   * calls primary.
    */
   private sessionServesActiveFallbackEntry(session: SessionManager | null): boolean {
     if (!this.host.isFallbackWindowActive || !this.host.fallbackWindow.activeEntry || !session) return false;

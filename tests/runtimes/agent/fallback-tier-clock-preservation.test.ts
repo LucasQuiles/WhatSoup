@@ -877,8 +877,9 @@ describe('tier attribution by route identity', () => {
 // config. When the primary route carries an EXPLICITLY configured model and
 // the session's model equals it, the session IS the primary: the exact match
 // beats the wildcard. Beside a wildcard entry the ambiguous remainder (a null
-// session model, or a provider-default primary) keeps the fail-closed rule; the
-// last case covers a provider-default primary beside named entries only.
+// session model, or a provider-default primary) keeps the fail-closed rule. The
+// last case runs a provider-default primary beside a named entry (primary tier)
+// and beside a wildcard entry (fail-closed).
 
 describe('exact-primary-model disambiguation', () => {
   beforeEach(() => {
@@ -1101,7 +1102,10 @@ describe('no-arm scoped to existing window state', () => {
 // operator forces a window carries the primary's model or none, so it does not
 // serve a named entry with another model and is not counted. A wildcard
 // entry's window keeps the primary manager as its session, so that session
-// serves the entry and its empty turns advance the chain.
+// serves the entry and its empty turns advance the chain. A forced window
+// keeps its end through empty turns and fallback-tier failures only: a
+// classified failure attributed to the primary extends it, as documented in
+// docs/configuration.md.
 
 describe('empty-turn accounting during an operator-forced window', () => {
   beforeEach(() => {
