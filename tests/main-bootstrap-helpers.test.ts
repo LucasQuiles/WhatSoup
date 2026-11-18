@@ -1680,7 +1680,7 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       const h = await importMainWithMocks({
         adminPhones: [],
         instanceConfig: {
-          name: 'q',
+          name: 'bot-a',
           type: 'agent',
           introSent: true,
           agentOptions: { sessionScope: 'shared' },

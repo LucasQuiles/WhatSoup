@@ -1,12 +1,18 @@
 // #3829 review items (a) and (b): restart_self's owed-reply gate driven through a
 // REAL OutboundQueue, not a queue double. deliverOwedReplyBeforeRestart
-// (src/runtimes/agent/self-restart.ts:242-266) treats a settled flush with an
+// (src/runtimes/agent/self-restart.ts) treats flushes that settle with an
 // unchanged getSendFailureCount() as delivered, so every queue path that ends a
 // send without counting a failure is checked here against the owed reply.
 //
+// Every case begins turn evidence, as each admitted runtime turn does
+// (runtime-turn-coordinator.ts). The queue then holds the turn's streamed answer
+// until the turn ends, which is the state restart_self meets.
+//
 // Each test is marked:
-//   guard        - expected to pass on d95f9f19; protects current behaviour.
-//   expected-red - expected to fail on d95f9f19; proves a defect before its fix.
+//   guard        - holds whether or not restart_self commits the deferred answer.
+//   expected-red - fails while restart_self leaves the deferred answer to the turn
+//                  abort, which salvages it as status text or drops it; passes
+//                  once restart_self sends it as the turn's answer first.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
@@ -91,11 +97,11 @@ async function settle<T>(pending: Promise<T>, ms = SETTLE_MS): Promise<T> {
 
 /** Call restart_self wired to the real queue exactly as runtime.ts wires it; only the trigger is a double. */
 async function callRestart(queue: OutboundQueue, advanceMs = SETTLE_MS) {
-  const trigger = vi.fn(async (_opts: TriggerSelfRestartOptions) => ({ ok: true, markerPath: '/data/q/m' }));
+  const trigger = vi.fn(async (_opts: TriggerSelfRestartOptions) => ({ ok: true, markerPath: '/data/bot-a/m' }));
   const sendAck = vi.fn(async (_chatJid: string, _text: string) => {});
   const tool = buildRestartSelfTool({
-    instanceName: 'q',
-    dataRoot: '/data/q',
+    instanceName: 'bot-a',
+    dataRoot: '/data/bot-a',
     resolveChatJid: () => queue.targetChatJid,
     deliverOwedReply: () => deliverOwedReplyBeforeRestart(queue),
     sendAck,
@@ -105,6 +111,19 @@ async function callRestart(queue: OutboundQueue, advanceMs = SETTLE_MS) {
   });
   const result = await settle(tool.handler({ reason: 'load merged main' }, SESSION), advanceMs);
   return { result: result as RestartSelfResult, trigger, sendAck };
+}
+
+/** A full-mode turn whose first tool status was already sent, so the turn counts as visible. */
+async function queueAfterVisibleToolStatus(messenger: Messenger, durability: ReturnType<typeof makeDurabilityStub>) {
+  const queue = new OutboundQueue(messenger, DM_JID);
+  queue.setDurability(durability as unknown as DurabilityEngine);
+  queue.beginTurnEvidence('turn-1');
+  queue.enqueueToolUpdate({ category: 'running', detail: 'Running deploy check' });
+  // The tool batch timer sends the status. No queue.flush() here: it would reset
+  // the turn's visible-output flag that the restart path meets in a live turn.
+  await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+  queue.enqueueStreamingText(OWED, 'answer');
+  return queue;
 }
 
 describe('restart_self owed reply through a real OutboundQueue (#3829)', () => {
@@ -121,13 +140,13 @@ describe('restart_self owed reply through a real OutboundQueue (#3829)', () => {
   });
 
   describe('(a) continuity after a refused restart', () => {
-    // guard: abortTurn (outbound-queue.ts:1272-1355) clears per-turn buffers but
-    // leaves lifecycle 'open' (only shutdown changes it, 1256), keeps sendQueue and
-    // drainFailure (1353), and preserveEvidence keeps the turn's evidence. A
-    // terminal send failure returns normally (1910-1925) and does not poison it.
+    // expected-red: the failure is injected into whichever send carries the owed
+    // text. A refused restart keeps the queue open and unpoisoned, keeps the
+    // failed op attributed to its turn as an answer op, and keeps delivering for
+    // the rest of the turn and the next turn.
     it('keeps the queue usable for the rest of the turn and the next turn after an owed send fails', async () => {
       const { messenger, attempts } = makeMessenger(async (_jid, text) => {
-        if (text === OWED) throw governorShed();
+        if (text.includes(OWED)) throw governorShed();
         return { waMessageId: null };
       });
       const durability = makeDurabilityStub();
@@ -170,16 +189,17 @@ describe('restart_self owed reply through a real OutboundQueue (#3829)', () => {
       expect(queue.isPoisoned()).toBe(false);
     });
 
-    // guard: on 'timeout' the pending send stays on the queue chain and finishes
-    // on its own (self-restart.ts:239-240, 253-256); nothing is re-enqueued.
+    // expected-red: on 'timeout' the pending owed send stays on the queue chain and
+    // finishes on its own (self-restart.ts); nothing is re-enqueued.
     it('lets an owed send still pending at the grace limit finish once, then keeps delivering', async () => {
       const owedSend = deferred<SubmissionReceipt>();
       const { messenger, attempts } = makeMessenger((_jid, text) => (
-        text === OWED ? owedSend.promise : Promise.resolve({ waMessageId: null })
+        text.includes(OWED) ? owedSend.promise : Promise.resolve({ waMessageId: null })
       ));
       const durability = makeDurabilityStub();
       const queue = new OutboundQueue(messenger, DM_JID);
       queue.setDurability(durability as unknown as DurabilityEngine);
+      queue.beginTurnEvidence('turn-1');
       queue.enqueueStreamingText(OWED, 'answer');
 
       const { result, trigger } = await callRestart(queue, OWED_REPLY_FLUSH_GRACE_MS);
@@ -211,6 +231,7 @@ describe('restart_self owed reply through a real OutboundQueue (#3829)', () => {
       recordGroupOutbound(GROUP_JID, 'another-queue-token');
       const { messenger, attempts } = makeMessenger();
       const queue = new OutboundQueue(messenger, GROUP_JID);
+      queue.beginTurnEvidence('turn-1');
       queue.enqueueStreamingText(OWED, 'answer');
 
       const { result, trigger, sendAck } = await callRestart(queue);
@@ -223,18 +244,18 @@ describe('restart_self owed reply through a real OutboundQueue (#3829)', () => {
       expect(trigger).not.toHaveBeenCalled();
     });
 
-    // guard: enqueue drops a chunk at outbound-queue.ts:1669 only when the same
-    // chat + text key was promoted by markLastTerminal({ dedupeText: true })
-    // (655-664) after a provider submission (1832), inside
-    // TERMINAL_TEXT_DEDUPE_WINDOW_MS. The user already holds that exact text, so
-    // delivered: true and a restart are correct. (No src caller passes
-    // dedupeText: true at d95f9f19.)
+    // expected-red: enqueue drops a chunk only when the same chat + text key was
+    // promoted by markLastTerminal({ dedupeText: true }) after a provider
+    // submission, inside TERMINAL_TEXT_DEDUPE_WINDOW_MS. The user already holds
+    // that exact text, so delivered: true and a restart are correct. (No src
+    // caller passes dedupeText: true at d95f9f19.)
     it('dedupe: an owed reply identical to terminal text already submitted to the chat counts as delivered', async () => {
       const { messenger, attempts } = makeMessenger();
       const queue = new OutboundQueue(messenger, DM_JID);
       queue.enqueueText(OWED, 'answer');
       await settle(queue.flush());
       queue.markLastTerminal({ dedupeText: true });
+      queue.beginTurnEvidence('turn-1');
       queue.enqueueStreamingText(OWED, 'answer');
 
       const { result, trigger } = await callRestart(queue);
@@ -244,8 +265,8 @@ describe('restart_self owed reply through a real OutboundQueue (#3829)', () => {
       expect(trigger).toHaveBeenCalledTimes(1);
     });
 
-    // guard: the dedupe key is set only on submission (outbound-queue.ts:1832), so
-    // an earlier failed send of the same text cannot make dedupe hide the owed reply.
+    // expected-red: the dedupe key is set only on submission, so an earlier failed
+    // send of the same text cannot make dedupe hide the owed reply.
     it('dedupe: an earlier failed send of the same text does not suppress the owed reply', async () => {
       let calls = 0;
       const { messenger, attempts } = makeMessenger(async () => {
@@ -257,6 +278,7 @@ describe('restart_self owed reply through a real OutboundQueue (#3829)', () => {
       queue.enqueueText(OWED, 'answer');
       await settle(queue.flush());
       queue.markLastTerminal({ dedupeText: true });
+      queue.beginTurnEvidence('turn-1');
       queue.enqueueStreamingText(OWED, 'answer');
 
       const { result, trigger } = await callRestart(queue);
@@ -267,15 +289,16 @@ describe('restart_self owed reply through a real OutboundQueue (#3829)', () => {
       expect(trigger).toHaveBeenCalledTimes(1);
     });
 
-    // guard: the redirect send at outbound-queue.ts:1612-1626 swallows its error
-    // and is not counted. It carries tool status only, never the owed reply, so
-    // it must not change the owed-reply outcome.
+    // expected-red: the tool-status redirect send swallows its error and is not
+    // counted. It carries tool status only, never the owed reply, so it must not
+    // change the owed-reply outcome.
     it('redirect: a rejected tool-status redirect send neither blocks nor fails the owed reply', async () => {
       const { messenger, attempts } = makeMessenger(async (jid) => {
         if (jid === STATUS_JID) throw new Error('status channel down');
         return { waMessageId: null };
       });
       const queue = new OutboundQueue(messenger, DM_JID);
+      queue.beginTurnEvidence('turn-1');
       queue.setToolUpdateRedirectJid(STATUS_JID);
       queue.enqueueToolUpdate({ category: 'running', detail: 'Running deploy check' });
       await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
@@ -290,15 +313,16 @@ describe('restart_self owed reply through a real OutboundQueue (#3829)', () => {
       expect(trigger).toHaveBeenCalledTimes(1);
     });
 
-    // guard: the redirect send is chained on this.chain (outbound-queue.ts:1619)
-    // with no SEND_TIMEOUT_MS race (1621), so the owed send waits behind a hung
-    // one; flush() stays pending and self-restart.ts:253-256 refuses at the grace.
+    // expected-red: the redirect send is chained on the queue chain with no
+    // SEND_TIMEOUT_MS race, so the owed send waits behind a hung one; the flush
+    // stays pending and self-restart.ts refuses at the grace limit.
     it('redirect: an owed reply queued behind a hung redirect send stops the restart, then sends once', async () => {
       const statusSend = deferred<SubmissionReceipt>();
       const { messenger, attempts } = makeMessenger((jid) => (
         jid === STATUS_JID ? statusSend.promise : Promise.resolve({ waMessageId: null })
       ));
       const queue = new OutboundQueue(messenger, DM_JID);
+      queue.beginTurnEvidence('turn-1');
       queue.setToolUpdateRedirectJid(STATUS_JID);
       queue.enqueueToolUpdate({ category: 'running', detail: 'Running deploy check' });
       await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
@@ -319,9 +343,10 @@ describe('restart_self owed reply through a real OutboundQueue (#3829)', () => {
       ]);
     });
 
-    // guard: abortTurn re-roles the salvage to 'status' (outbound-queue.ts:1310)
-    // but sends it through enqueuePreparedText and sendWithRetry, which counts the
-    // failure (1920). The pen is emptied, so endTurn's path C cannot resend it.
+    // guard: minimal mode moves the streamed text into the deferred pen at the
+    // tool boundary. The restart's abort salvages it with the status role and
+    // sends it through enqueuePreparedText and sendWithRetry, which counts the
+    // failure. The pen is emptied, so endTurn's path C cannot resend it.
     it('status role: a failed salvage send of deferred owed text stops the restart and is not resent', async () => {
       const { messenger, attempts } = makeMessenger(async (_jid, text) => {
         if (text.includes(SALVAGED_REPLY_NOTICE)) throw governorShed();
@@ -331,6 +356,7 @@ describe('restart_self owed reply through a real OutboundQueue (#3829)', () => {
       const queue = new OutboundQueue(messenger, DM_JID);
       queue.setDurability(durability as unknown as DurabilityEngine);
       queue.setToolUpdateMode('minimal');
+      queue.beginTurnEvidence('turn-1');
       queue.enqueueStreamingText(OWED, 'answer');
       queue.discardPreToolAssistantText();
 
@@ -346,6 +372,52 @@ describe('restart_self owed reply through a real OutboundQueue (#3829)', () => {
       expect(attempts).toHaveLength(1);
       expect(attempts[0]?.text).toContain(SALVAGED_REPLY_NOTICE);
       expect(attempts[0]?.text).toContain(OWED);
+    });
+  });
+
+  describe('(c) owed answer after a visible tool status in full mode', () => {
+    // expected-red: the default full mode sends tool statuses, and the first one
+    // marks the turn visible. The turn abort then drops a deferred answer instead
+    // of salvaging it, so the restart went ahead with the answer never sent.
+    it('sends the deferred answer as a normal answer message before the restart', async () => {
+      const { messenger, attempts } = makeMessenger();
+      const durability = makeDurabilityStub();
+      const queue = await queueAfterVisibleToolStatus(messenger, durability);
+      expect(attempts).toEqual([{ jid: DM_JID, text: expect.stringContaining('Running deploy check') }]);
+
+      const { result, trigger } = await callRestart(queue);
+
+      expect(result).toMatchObject({ ok: true, restarting: true });
+      expect(trigger).toHaveBeenCalledTimes(1);
+      expect(attempts.at(-1)).toEqual({ jid: DM_JID, text: OWED });
+      expect(attempts.some((attempt) => attempt.text.includes(SALVAGED_REPLY_NOTICE))).toBe(false);
+      const sendOrder = vi.mocked(messenger.sendMessage).mock.invocationCallOrder;
+      expect(sendOrder.at(-1)).toBeLessThan(trigger.mock.invocationCallOrder[0] ?? 0);
+      // The status took op 1; the owed text is the turn's answer op.
+      const evidence = await settle(queue.flushTurnEvidence('turn-1'));
+      expect(evidence.answerOpIds).toEqual([2]);
+    });
+
+    // expected-red: the same turn with the answer send failing must refuse.
+    it('refuses the restart with send_failed when that answer send fails', async () => {
+      const { messenger, attempts } = makeMessenger(async (_jid, text) => {
+        if (text.includes(OWED)) throw governorShed();
+        return { waMessageId: null };
+      });
+      const durability = makeDurabilityStub();
+      const queue = await queueAfterVisibleToolStatus(messenger, durability);
+
+      const { result, trigger, sendAck } = await callRestart(queue);
+
+      expect(result).toMatchObject({ ok: false, restarting: false, cause: 'send_failed' });
+      expect(trigger).not.toHaveBeenCalled();
+      expect(sendAck).not.toHaveBeenCalled();
+      expect(attempts.at(-1)).toEqual({ jid: DM_JID, text: OWED });
+      expect(durability.markFailedPermanent).toHaveBeenCalledWith(
+        2,
+        expect.objectContaining({ failure_code: 'outbound.governor_shed' }),
+      );
+      expect(queue.getSendFailureCount()).toBe(1);
     });
   });
 });

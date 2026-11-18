@@ -155,6 +155,7 @@ describe('restart_self MCP tool', () => {
     it('acks an @lid DM and keeps it in the marker for the back-online notice', async () => {
       const lidJid = '111111100000001@lid';
       const { deps: d, sendAck, serviceManager } = deps({
+        instanceName: 'bot-a',
         dataRoot,
         resolveChatJid: () => lidJid,
         trigger: triggerSelfRestart,
@@ -165,7 +166,7 @@ describe('restart_self MCP tool', () => {
       expect(result).toMatchObject({ ok: true, restarting: true });
       expect(sendAck).toHaveBeenCalledTimes(1);
       expect(sendAck.mock.calls[0][0]).toBe(lidJid);
-      expect(serviceManager.restartSelf).toHaveBeenCalledWith('q');
+      expect(serviceManager.restartSelf).toHaveBeenCalledWith('bot-a');
       const marker = JSON.parse(
         readFileSync(join(dataRoot, 'intentional-restart.marker'), 'utf-8'),
       ) as IntentionalRestartMarker;
@@ -287,6 +288,8 @@ describe('restart_self MCP tool', () => {
       };
       const queue = new OutboundQueue(messenger, '15550100111@s.whatsapp.net');
       queue.setDurability(durability as unknown as DurabilityEngine);
+      // As in the runtime: every admitted turn begins turn evidence first.
+      queue.beginTurnEvidence('turn-1');
       queue.enqueueStreamingText(owedText, 'answer');
 
       const { deps: d, sendAck, serviceManager } = deps({
@@ -319,9 +322,14 @@ describe('restart_self MCP tool', () => {
       try {
         const order: string[] = [];
         let settleFlush!: () => void;
-        const queue = flushQueue(() => new Promise<void>((resolve) => {
-          settleFlush = () => { order.push('owed'); resolve(); };
-        }));
+        let flushCalls = 0;
+        // Only the first flush, which carries the owed text, waits; a later
+        // flush after the turn abort has nothing left to send.
+        const queue = flushQueue(() => (++flushCalls === 1
+          ? new Promise<void>((resolve) => {
+              settleFlush = () => { order.push('owed'); resolve(); };
+            })
+          : Promise.resolve()));
         const { deps: d } = deps({
           dataRoot,
           trigger: triggerSelfRestart,
@@ -361,6 +369,7 @@ describe('restart_self MCP tool', () => {
       };
       const queue = new OutboundQueue(messenger, '15550100111@s.whatsapp.net');
       queue.setToolUpdateMode('minimal');
+      queue.beginTurnEvidence('turn-1');
       queue.enqueueStreamingText('Restarting now to load the fix.', 'answer');
       queue.discardPreToolAssistantText();
       expect(sent).toEqual([]);
@@ -391,6 +400,8 @@ describe('restart_self MCP tool', () => {
         setTyping: vi.fn(async () => {}),
       };
       const queue = new OutboundQueue(messenger, '15550100111@s.whatsapp.net');
+      // The turn's evidence makes the queue defer the streamed answer to the turn end.
+      queue.beginTurnEvidence('turn-1');
       queue.enqueueStreamingText('On it, restarting.', 'answer');
 
       expect(await deliverOwedReplyBeforeRestart(queue)).toEqual({ delivered: true });

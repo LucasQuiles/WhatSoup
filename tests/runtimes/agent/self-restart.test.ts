@@ -135,7 +135,7 @@ describe('self-restart core', () => {
   // #3829: an @lid DM lost its "back online" notice because the marker dropped it.
   it('keeps an @lid DM chatJid as the continuity target', async () => {
     const result = await triggerSelfRestart({
-      instance: 'q',
+      instance: 'bot-a',
       dataRoot,
       reason: 'r',
       chatJid: '111111100000001@lid',
