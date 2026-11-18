@@ -89,13 +89,33 @@ describe('live release observers', () => {
     expect(result.currency).toMatchObject({ state: 'current', healthImpact: 'none' });
   });
 
-  it('returns advisory exit 1 for a different target while integrity remains green', () => {
+  it('returns exit 0 for a different target while integrity remains green', () => {
     const { releasePath, fakeBin, fakeGit } = fixture();
     const proc = runObserver(releasePath, fakeBin, fakeGit, '2222222222222222222222222222222222222222');
 
-    expect(proc.status).toBe(1);
+    expect(proc.status, proc.stderr || proc.stdout).toBe(0);
     const result = JSON.parse(proc.stdout) as any;
     expect(result.drift.ok).toBe(true);
+    expect(result.currency.state).toBe('target-differs');
+  });
+
+  it('still returns exit 1 for real integrity drift when the target matches', () => {
+    const { releasePath, fakeBin, fakeGit } = fixture(true);
+    const proc = runObserver(releasePath, fakeBin, fakeGit, DEPLOYED);
+
+    expect(proc.status, proc.stderr || proc.stdout).toBe(1);
+    const result = JSON.parse(proc.stdout) as any;
+    expect(result.drift.ok).toBe(false);
+    expect(result.currency.state).toBe('current');
+  });
+
+  it('still returns exit 1 for real drift even when the target also differs', () => {
+    const { releasePath, fakeBin, fakeGit } = fixture(true);
+    const proc = runObserver(releasePath, fakeBin, fakeGit, '2222222222222222222222222222222222222222');
+
+    expect(proc.status, proc.stderr || proc.stdout).toBe(1);
+    const result = JSON.parse(proc.stdout) as any;
+    expect(result.drift.ok).toBe(false);
     expect(result.currency.state).toBe('target-differs');
   });
 
