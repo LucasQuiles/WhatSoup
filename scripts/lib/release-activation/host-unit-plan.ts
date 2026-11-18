@@ -72,6 +72,8 @@ const INTERPRETER = /^(?:ba|z|da|k|fi)?sh$|^(?:env|node|nodejs|osascript|perl|ru
 const PYTHON_MODULE = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/;
 const ENVIRONMENT_VARIABLES = /<key>\s*EnvironmentVariables\s*<\/key>\s*<dict>([\s\S]*?)<\/dict>/g;
 const ENVIRONMENT_VARIABLE = /<key>\s*([A-Za-z_][A-Za-z0-9_]*)\s*<\/key>\s*<string>[\s\S]*?<\/string>/g;
+// Each makes an interpreter, or the dynamic loader under it, read code or options from outside the launched script.
+const INTERPRETER_ENVIRONMENT_KEY = /^(?:PYTHON|DYLD_|LD_)|^(?:NODE_OPTIONS|NODE_PATH|BASH_ENV|ENV|PERL5LIB|PERL5OPT|PERLLIB|RUBYOPT|RUBYLIB)$/;
 
 function absolute(value: unknown): string | null {
   return typeof value === 'string' && path.isAbsolute(value) ? path.normalize(value).replace(/\/+$/, '') || '/' : null;
@@ -221,6 +223,15 @@ function digestFile(filePath: string): string | null {
 function hasPathUnder(value: string, root: string): boolean {
   return value === root || value.startsWith(`${root}/`);
 }
+/**
+ * A closed-form path names exactly the path it spells: absolute, unchanged by normalization, and
+ * with no trailing slash (the root aside), so it has no empty, `.` or `..` segment. Path-rebase
+ * decides "below the root" only for closed-form paths. hasPathUnder stays lexical: the outside-unit
+ * proofs use it in the refusing direction, where a stricter check would admit more.
+ */
+function closedFormPath(value: string): boolean {
+  return path.posix.isAbsolute(value) && path.posix.normalize(value) === value && (value === '/' || !value.endsWith('/'));
+}
 function programArgumentsUnder(programArguments: readonly string[], root: string): boolean {
   return programArguments.some((argument) => path.isAbsolute(argument) && hasPathUnder(argument, root));
 }
@@ -253,24 +264,57 @@ function stagePathRebase(installed: string, expectCurrent: string, release: stri
   // starts with the root is refused below like any other embedded reference.
   for (const match of source.matchAll(/<string>([\s\S]*?)<\/string>/g)) {
     const value = match[1]!;
-    const selectedPath = (value === encodedCurrent || value.startsWith(`${encodedCurrent}/`)) && SHELL_TOKEN_PATH.test(value);
-    if (selectedPath || !value.includes(encodedCurrent)) continue;
-    // A distinct path that merely shares the prefix is not a selected root.
-    // Embedded shell fragments and other opaque strings are unsafe to rewrite.
-    const suffix = value.slice(encodedCurrent.length);
-    if (value.startsWith(encodedCurrent) && /^[A-Za-z0-9._-]+(?:\/[^<]*)?$/.test(suffix)) continue;
+    // A shell token holds no XML reference, so its text is the value launchd reads. Outside closed form it
+    // names a path other than its spelling, whether or not it contains the root: <root>/../x leaves the
+    // root, and <root>.bak/../<name>/x or <parent>/./<name>/x name it without being "below" it.
+    const shellToken = SHELL_TOKEN_PATH.test(value);
+    if (shellToken && !closedFormPath(value)) return { staged: null, error: 'absolute plist string value is not in closed form (empty, . or .. segment, or trailing slash)' };
+    if (!value.includes(encodedCurrent)) continue;
+    // A closed-form shell token starting with the root is the root, a path below it (rewritten below),
+    // or a distinct prefix sibling such as <root>2/x (retained). Embedded shell fragments and other
+    // opaque strings, including a sibling outside the shell-token grammar, are unsafe to rewrite.
+    if (shellToken && value.startsWith(encodedCurrent)) continue;
     return { staged: null, error: 'expected-current root is embedded in a non-path string value' };
   }
-  // The target release then lands in each rewritten value, so it must be a shell token too.
-  if (!SHELL_TOKEN_PATH.test(release)) return { staged: null, error: 'target release is not a shell-token path (^/[A-Za-z0-9._/-]+$)' };
+  // The target release then lands in each rewritten value, so it must be a closed-form shell token too.
+  if (!SHELL_TOKEN_PATH.test(release) || !closedFormPath(release)) return { staged: null, error: 'target release is not a closed-form shell-token path (^/[A-Za-z0-9._/-]+$)' };
   const rootString = new RegExp(`(<string>)${escapeForRegExp(encodedCurrent)}((?:/[^<]*)?)(</string>)`, 'g');
   const staged = source.replace(rootString, (_match, open: string, suffix: string, close: string) => `${open}${encodedRelease}${suffix}${close}`);
   if (staged === source || mentionsReleaseRoot(staged, expectCurrent)) return { staged: null, error: 'staged plist did not remove the declared expected-current root' };
   const stagedParsed = parsePlist(staged);
-  if (stagedParsed === null || !programArgumentsUnder(stagedParsed.programArguments, release)) {
-    return { staged: null, error: 'staged ProgramArguments do not select the target release' };
+  if (stagedParsed === null) return { staged: null, error: 'staged ProgramArguments do not select the target release' };
+  if (compatible !== null) {
+    // Each closed contract pins an exact argv, which may start a reviewed program outside the release first.
+    return programArgumentsUnder(stagedParsed.programArguments, release)
+      ? { staged, error: null }
+      : { staged: null, error: 'staged ProgramArguments do not select the target release' };
+  }
+  // No closed contract matched (only com.bot-errors.health reaches here): the file launchd starts must be in
+  // the release, and no environment variable may make its interpreter load code from anywhere else.
+  const executed = executedPathError(stagedParsed.programArguments, release);
+  if (executed !== null) return { staged: null, error: executed };
+  if (!installedEnvironmentClear(staged, (key) => INTERPRETER_ENVIRONMENT_KEY.test(key))) {
+    return { staged: null, error: 'EnvironmentVariables are malformed or set an interpreter-affecting key' };
   }
   return { staged, error: null };
+}
+
+/**
+ * The file launchd starts: the script argument when argv[0] is an interpreter, otherwise argv[0]. It
+ * must be a closed-form path under the release. Inline (`-c`, `-lc`), module (`-m`) and other option
+ * forms name no script file, so they refuse.
+ */
+function executedPathError(programArguments: readonly string[], release: string): string | null {
+  const executable = programArguments[0] ?? '';
+  let executed: string | undefined = executable;
+  if (INTERPRETER.test(path.basename(executable))) {
+    const scriptIndex = interpreterScriptIndex(programArguments);
+    if (typeof scriptIndex !== 'number') return 'interpreter launch form names no script argument (inline, module, or option form)';
+    executed = programArguments[scriptIndex];
+  }
+  return executed !== undefined && closedFormPath(executed) && hasPathUnder(executed, release)
+    ? null
+    : 'executed program or script is not a closed-form path under the target release';
 }
 /**
  * A selector parser rejecting an unrelated app is not itself evidence that it
@@ -304,8 +348,8 @@ function isDirectory(directoryPath: string): boolean {
   try { return statSync(directoryPath).isDirectory(); } catch { return false; }
 }
 
-/** Reject malformed or duplicate plist environment data in the closed Python-module form. */
-function installedPythonEnvironmentClear(plistText: string): boolean {
+/** Reject malformed or duplicate plist environment data, and any key that `refusedKey` names. */
+function installedEnvironmentClear(plistText: string, refusedKey: (key: string) => boolean): boolean {
   const text = withoutXmlComments(plistText);
   const declarations = [...text.matchAll(/<key>\s*EnvironmentVariables\s*<\/key>/g)];
   ENVIRONMENT_VARIABLES.lastIndex = 0;
@@ -319,7 +363,7 @@ function installedPythonEnvironmentClear(plistText: string): boolean {
   for (let entry: RegExpExecArray | null; (entry = ENVIRONMENT_VARIABLE.exec(body)) !== null;) {
     if (body.slice(offset, entry.index).trim() !== '') return false;
     const key = entry[1]!;
-    if (keys.has(key) || key.startsWith('PYTHON')) return false;
+    if (keys.has(key) || refusedKey(key)) return false;
     keys.add(key); offset = entry.index + entry[0].length;
   }
   return body.slice(offset).trim() === '';
@@ -484,7 +528,7 @@ export async function verifyReviewedOutsideUnits(
         const cwdLocation = workingDirectory === null ? null : underSelectedPath(workingDirectory, selected, resolvedSelected, false);
         const sources = workingDirectory === null ? null : reviewedPythonModuleSources(workingDirectory, installed.programArguments[2]!);
         if (workingDirectory === null || workingDirectory !== plistWorkingDirectory || installed.scalarKeys['WorkingDirectory'] !== plistWorkingDirectory || cwdLocation !== false
-          || !isDirectory(workingDirectory) || sources === null || !installedPythonEnvironmentClear(plistText)
+          || !isDirectory(workingDirectory) || sources === null || !installedEnvironmentClear(plistText, (key) => key.startsWith('PYTHON'))
           || sources.some((source) => !reviewedFiles.has(source) || !isRegularFile(source))) {
           fail('loaded Python module lacks an exact outside working-directory, environment, or reviewed package source proof'); continue;
         }
