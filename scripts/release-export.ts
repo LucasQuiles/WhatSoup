@@ -75,6 +75,8 @@ export interface ReleaseExportReport {
   selfCheck: ReleaseSnapshotDriftReport;
   /** The main commit the source was proven to be (an ancestor of) at export time. */
   sourceOnMain: { ref: string; mainCommit: string };
+  /** Required outputs still to be built on the host; release:activate refuses the release until they exist. */
+  pendingHostOutputs: string[];
   qualificationBundle?: DeploymentQualificationBundleReport;
   approvalPending: string;
 }
@@ -192,6 +194,15 @@ function stageCommitTree(repoRoot: string, commit: string, stagingSource: string
   }
 }
 
+/**
+ * Required outputs (the built console) are produced on the host after export, so
+ * export can never see them. Their absence is pending work, not an export
+ * failure; release:activate is where it blocks.
+ */
+function isPendingHostOutput(issue: { kind: string }): boolean {
+  return issue.kind === 'required-output-missing';
+}
+
 function manifestTreeSha256(manifest: ReleaseSnapshotManifest): string {
   return sha256(manifest.files.map((file) => `${file.path}\n${file.sha256}\n`).join(''));
 }
@@ -292,7 +303,7 @@ export function exportRelease(options: ReleaseExportOptions): ReleaseExportRepor
     const stagedIssues = collectReleaseSnapshotDrift(stagingRelease, {
       ...manifest,
       release: { ...manifest.release, path: stagingRelease },
-    });
+    }).filter((issue) => !isPendingHostOutput(issue));
     if (stagedIssues.length > 0) {
       const kinds = [...new Set(stagedIssues.map((issue) => issue.kind))].sort().join(', ');
       throw new Error(`release export self-check failed (${kinds}): ${stagedIssues[0]?.message ?? ''}`);
@@ -324,7 +335,7 @@ export function exportRelease(options: ReleaseExportOptions): ReleaseExportRepor
     }
 
     const selfCheck = createReleaseSnapshotDriftReport(releasePath);
-    if (!selfCheck.ok) {
+    if (selfCheck.issues.some((issue) => !isPendingHostOutput(issue))) {
       const quarantine = `${releasePath}.quarantine-${Date.now()}`;
       renameSync(releasePath, quarantine);
       if (rollbackPath && existsSync(rollbackPath)) renameSync(rollbackPath, releasePath);
@@ -341,6 +352,7 @@ export function exportRelease(options: ReleaseExportOptions): ReleaseExportRepor
       treeSha256: manifestTreeSha256(manifest),
       selfCheck,
       sourceOnMain,
+      pendingHostOutputs: selfCheck.issues.filter(isPendingHostOutput).flatMap((issue) => (issue.path ? [issue.path] : [])),
       qualificationBundle: stagedQualificationBundle
         ? {
           ...stagedQualificationBundle.report,
@@ -483,6 +495,9 @@ export function run(argv: string[] = process.argv.slice(2), cwd = process.cwd())
     console.log(`files=${report.fileCount} tree=${report.treeSha256}`);
     console.log(`source on main: ${report.sourceOnMain.ref} ${report.sourceOnMain.mainCommit}`);
     console.log(`self-check ok=${report.selfCheck.ok}`);
+    if (report.pendingHostOutputs.length > 0) {
+      console.log(`pending host build: ${report.pendingHostOutputs.join(', ')} (docs/runbooks/release-deployment.md)`);
+    }
     if (report.qualificationBundle) {
       console.log(`qualification bundle=${report.qualificationBundle.manifestPath} sha256=${report.qualificationBundle.manifestSha256}`);
     }

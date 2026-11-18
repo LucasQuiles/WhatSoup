@@ -286,6 +286,25 @@ describe('release:activate --plan', () => {
     expect(failed).toEqual(['release-manifest-path']);
   });
 
+  it('refuses a new release until the host-built outputs its manifest requires exist', async () => {
+    const world = new SimulatedLaunchd(fixture);
+    const manifestPath = path.join(fixture.newRelease, '.whatsoup-release-manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { requiredOutputs?: string[] };
+    manifest.requiredOutputs = ['dist/index.html'];
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+
+    const refused = await run(world, activationArgs(fixture));
+    expect(refused.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    const failed = (refused.json.preconditions as Array<{ id: string; ok: boolean; detail: string }>).filter((entry) => !entry.ok);
+    expect(failed.map((entry) => entry.id)).toEqual(['release-required-outputs-present']);
+    expect(failed[0]?.detail).toContain('dist/index.html');
+
+    mkdirSync(path.join(fixture.newRelease, 'dist'), { recursive: true });
+    writeFileSync(path.join(fixture.newRelease, 'dist/index.html'), '<!doctype html><html></html>\n');
+    const planned = await run(world, activationArgs(fixture));
+    expect((planned.json.preconditions as Array<{ id: string; ok: boolean }>).filter((entry) => !entry.ok)).toEqual([]);
+  });
+
   it('refuses clearly on a platform other than macOS launchd', async () => {
     const world = new SimulatedLaunchd(fixture, { platform: 'linux' });
     const result = await run(world, activationArgs(fixture));
