@@ -365,6 +365,15 @@ function fileTypeName(stat: Stats): string {
   return 'non-file';
 }
 
+/**
+ * The manifest's required outputs absent from a release. The one definition of
+ * "present" shared by the drift check, export's pending list and
+ * release:activate. Paths are repo-relative (normalized by the manifest parser).
+ */
+export function missingRequiredOutputs(releasePath: string, manifest: ReleaseSnapshotManifest): string[] {
+  return manifest.requiredOutputs.filter((relPath) => !existsSync(path.join(releasePath, relPath)));
+}
+
 export function collectReleaseSnapshotDrift(
   releasePath: string,
   manifestPayload: ReleaseSnapshotManifest | unknown,
@@ -434,14 +443,12 @@ export function collectReleaseSnapshotDrift(
   // and so never appear in `files`. Their absence is the packaging blind spot a
   // files-only manifest cannot see — a release that omits the console build
   // reads clean without this check.
-  for (const relPath of manifest.requiredOutputs) {
-    if (!existsSync(path.join(absoluteReleasePath, relPath))) {
-      issues.push({
-        kind: 'required-output-missing',
-        path: relPath,
-        message: `required build output missing from release: ${relPath}`,
-      });
-    }
+  for (const relPath of missingRequiredOutputs(absoluteReleasePath, manifest)) {
+    issues.push({
+      kind: 'required-output-missing',
+      path: relPath,
+      message: `required build output missing from release: ${relPath}`,
+    });
   }
 
   return issues;
