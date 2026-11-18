@@ -80,6 +80,53 @@ The installers attempt to auto-detect a host profile at
 falling back to the env file, but this auto-detection only populates
 `HEALTH_PROFILE` if the file already exists — it does not suppress the guard.
 
+### Preserve an existing daily-health job when changing its release
+
+Use `install-bot-errors-health-launchd.sh --repin-existing` for an existing
+macOS health job. The normal installation path renders a fresh configuration;
+it does not preserve host-specific wrappers or additional environment keys.
+
+First verify the target release with the existing release verifier and inspect
+the effective health profile and runtime manifest. Re-pinning is a configuration
+transaction, not proof that the release or bot runtime is healthy. It preserves
+the profile path, including references into an older release; retain that source
+while the job still depends on it. Run outside the job's scheduled execution.
+
+```bash
+BOT_ERRORS_REPO_ROOT=/absolute/reviewed-release \
+  bash deploy/scripts/install-bot-errors-health-launchd.sh --repin-existing \
+  --expected-plist-sha256 <reviewed-original-sha256>
+```
+
+This prints a JSON plan without writing the plist or reloading the service.
+It changes only `WorkingDirectory` and the exact runner/checker arguments.
+An optional `--runtime-manifest /absolute/reviewed-manifest.json` changes that
+environment key for this job only. Verify that any preserved environment-file
+wrapper does not override it. Other arguments, environment values, schedule,
+permissions and ownership are retained. Plan output excludes environment values.
+Jobs with extended attributes, file flags, or file/parent access-control lists
+are refused because this installer cannot preserve those settings. An absent
+enabled-state entry also requires inspection; it is not treated as permission
+to enable the job.
+
+Review the plan, then repeat the same command with `--apply` and
+`--expected-candidate-sha256 <candidate_sha256-from-plan>`. The installer refuses
+a changed plist, a running or disabled job, or another active re-pin. It validates
+a staged plist, keeps an original backup and restores the original configuration
+and service after a failed activation. It never enables a disabled service or
+restarts bot instances. A successful apply still requires live configuration and
+authenticated runtime verification.
+Immediately before applying, verify that the loaded definition still matches
+the reviewed plist. The installer's label and idle checks do not prove that
+launchd loaded the current on-disk definition.
+
+Exit status: `0` means planned/applied as stated in JSON; `1` means activation
+failed and rollback was verified; `2` means refused or unchanged; `3` means
+rollback remains unverified and needs investigation. Preserve the reported backup
+until recovery is verified. Forced termination or host failure can interrupt
+restoration; the backup is the manual recovery source. Do not treat a successful
+re-pin as permission to clear existing incidents or recovery debt.
+
 ### NORMATIVE — D3 `validate_calendar_integer` (health installer only)
 
 `install-bot-errors-health-launchd.sh` exposes `BOT_ERRORS_HEALTH_HOUR`
