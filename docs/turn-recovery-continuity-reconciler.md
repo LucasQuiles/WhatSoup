@@ -147,8 +147,8 @@ The reconciler is off unless the instance's `config.json` opts in:
 
 - `enabled` (boolean, required inside the block): `true` turns the
   reconciler on; `false`, or no block at all, keeps it off.
-- `groupLimit` (integer 1–1000, optional): the maximum closure attempts
-  per scan cycle. Defaults to the reconciler's own
+- `groupLimit` (integer 1–1000, optional): the maximum selected delivery candidates
+  per scan cycle, including candidates without fulfillment confirmation. Defaults to the reconciler's own
   `RECONCILE_DEFAULT_GROUP_LIMIT` (50). The reconciler examines at most
   `groupLimit × 20` groups per pass.
 - The block is a closed shape validated at config load

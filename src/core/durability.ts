@@ -1402,7 +1402,6 @@ export class DurabilityEngine {
       getMessageByWaMessageId: prepare(
         `SELECT m.pk, m.is_from_me FROM messages m
          JOIN outbound_ops o ON o.chat_jid = m.chat_jid
-           AND o.conversation_key = m.conversation_key
          WHERE m.message_id = ? AND o.id = ?`,
       ),
       resetMaybeSentWithWaToPending: prepare(

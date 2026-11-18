@@ -2480,6 +2480,11 @@ do not retry an ambiguous send. The response's `operatorOpId` identifies the new
 `fulfillment: "unverified"` is deliberate. Submission or echo does not establish fulfillment.
 The original failed turn, quarantined operation and exhausted recovery attempts remain intact.
 
+Stored-echo recovery requires the provider message ID and the operation's exact chat. It does not
+require the message's derived conversation key to equal the older operation key: a phone mapping
+can arrive between the send and history ingestion. History-body upgrades must stay in the
+placeholder's original chat so a provider-ID collision cannot supply another chat's authorship.
+
 After the bound operation is echoed and original fulfillment is independently established,
 use the same command below with `--source-seqs 101 --operator-op OP_ID` instead of `--catchup-seq`.
 This path requires schema 69, supports exactly one original request per operation, and records
