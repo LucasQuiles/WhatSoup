@@ -4,6 +4,8 @@ import { describe, expect, it } from 'vitest';
 import { readStrictPlist, strictPlistStrings, strictStringArray, strictStringDict } from '../../scripts/lib/release-activation/strict-plist.ts';
 import { plist } from '../helpers/release-activate-world.ts';
 
+// Written as code points so the source holds no invisible character.
+const BOM = String.fromCharCode(0xfeff);
 const PROLOG = '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n';
 /** One plist document around a root dict body. */
 const document = (body: string, prolog = PROLOG): string => `${prolog}<plist version="1.0">\n<dict>\n${body}\n</dict>\n</plist>\n`;
@@ -60,13 +62,13 @@ describe('strict plist reader', () => {
 
   it.each([
     { name: 'a binary plist', text: `bplist00${document('')}`, error: 'plist is a binary property list; only XML is admitted' },
-    { name: 'a byte-order mark', text: `﻿${document('')}`, error: 'plist starts with a byte-order mark' },
+    { name: 'a byte-order mark', text: `${BOM}${document('')}`, error: 'plist starts with a byte-order mark' },
     { name: 'leading whitespace', text: ` ${document('')}`, error: 'plist does not start with an XML declaration or <plist>' },
-    { name: 'UTF-16 text read as UTF-8', text: Buffer.from(`﻿${document('')}`, 'utf16le').toString('utf8'), error: 'plist does not start with an XML declaration or <plist>' },
+    { name: 'UTF-16 text read as UTF-8', text: Buffer.from(`${BOM}${document('')}`, 'utf16le').toString('utf8'), error: 'plist does not start with an XML declaration or <plist>' },
     { name: 'XML version 1.1', text: document('', '<?xml version="1.1"?>\n'), error: 'plist XML declaration is malformed' },
     { name: 'a declared UTF-16 encoding', text: document('', '<?xml version="1.0" encoding="UTF-16"?>\n'), error: 'plist declares encoding UTF-16; only UTF-8 is admitted' },
     { name: 'a control character', text: document('<key>A</key><string>\u0001</string>'), error: 'plist holds a control character or an undecodable byte' },
-    { name: 'an undecodable byte', text: document('<key>A</key><string>�</string>'), error: 'plist holds a control character or an undecodable byte' },
+    { name: 'an undecodable byte', text: document(`<key>A</key><string>${String.fromCharCode(0xfffd)}</string>`), error: 'plist holds a control character or an undecodable byte' },
     { name: 'a DOCTYPE internal subset', text: document('<key>&k;</key><string>x</string>', '<?xml version="1.0"?>\n<!DOCTYPE plist [<!ENTITY k "Label">]>\n'), error: 'plist DOCTYPE has an internal subset or entity declaration' },
     { name: 'an entity declaration in the content', text: document('<!ENTITY k "Label"><key>A</key><string>x</string>'), error: 'plist DOCTYPE has an internal subset or entity declaration' },
     { name: 'a malformed DOCTYPE', text: document('', '<?xml version="1.0"?>\n<!DOCTYPE plist PUBLIC>\n'), error: 'plist DOCTYPE is malformed' },

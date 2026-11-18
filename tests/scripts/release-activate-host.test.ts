@@ -1346,7 +1346,7 @@ describe('release:activate-host closed host auxiliaries', () => {
   };
   it.each<{ name: string; build: Build; detail: string }>([
     { name: 'bplist00 bytes holding a valid XML plist as a string object', build: (root, home) => binaryPlist(installerForm(root, home)), detail: 'plist is a binary property list; only XML is admitted' },
-    { name: 'a UTF-16 plist', build: (root, home) => Buffer.from(`﻿${installerForm(root, home).replace('encoding="UTF-8"', 'encoding="UTF-16"')}`, 'utf16le'), detail: 'plist does not start with an XML declaration or <plist>' },
+    { name: 'a UTF-16 plist', build: (root, home) => Buffer.from(`${String.fromCharCode(0xfeff)}${installerForm(root, home).replace('encoding="UTF-8"', 'encoding="UTF-16"')}`, 'utf16le'), detail: 'plist does not start with an XML declaration or <plist>' },
     { name: 'a ProgramArguments entry that is not a <string>', build: (root, home) => installerForm(root, home).replace('<string>--instance</string>', '<integer>1</integer>'), detail: 'plist ProgramArguments entry 2 is not a <string>' },
   ])('refuses $name', async ({ build, detail }) => {
     expectStaged((await planWith(BOT_ERRORS, build)).plan, BOT_ERRORS, detail);
