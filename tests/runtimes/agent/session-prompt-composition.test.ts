@@ -13,7 +13,9 @@ import type { ProtectedDeliveryService } from '../../../src/core/protected-deliv
 import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 
 const CHAT_JID = 'test@s.whatsapp.net';
-const BASE_TRANSPORT_PROMPT_BYTES = 4100;
+// Reserve 250 bytes for configured route identity and its uncertainty, retaining
+// the existing polling and delivery instructions. Model IDs have a separate bound.
+const BASE_TRANSPORT_PROMPT_BYTES = 4350;
 
 const tmp = trackTmpDirs('');
 

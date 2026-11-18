@@ -41,7 +41,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "8228c77aefb01a2b6fae6debd07b2980505982274dc0f9e55ad3e6f4c07ed947",
+      "sha256": "d0c937b2b30bce03cfd94deeb8e92ccdf437bb229f7baef500b69be50f0a96a7",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -602,7 +602,7 @@
     },
     {
       "path": "deploy/scripts/lib/durable_json.py",
-      "sha256": "898a216383f40f0e93107eeddd1c3112fed2650250af4c37390b04d9809cb32f",
+      "sha256": "81b1c2d61cf3131830c3bf1b4e1a75b432f04b6bb383c8e2d71e813def538767",
       "mustContain": [
         "publish_event_json",
         "publish_state_json",
@@ -633,7 +633,7 @@
     },
     {
       "path": "deploy/scripts/lib/durable_json_remote.py",
-      "sha256": "42f20f670d53b1acaef5a457b088d38a4e85629f6045ac13cb78e71df3832571",
+      "sha256": "2622dab5932b992db84a83f5621e381e2b44e1f3cad53a71e733960ff0d866ed",
       "mustContain": [
         "publish_event_json",
         "DurabilityProof",

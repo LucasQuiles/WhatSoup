@@ -236,6 +236,32 @@ BlueBubbles response representations round-trip through one mapping.
 
 ## Troubleshooting
 
+An imsg `send` response with JSON-RPC internal-error code `-32603` does not
+prove that nothing was sent. The port reports `SendRpcOutcomeUnknown`, mapped
+to `transport.send_ambiguous` at `provider_call_started`. Sends enter `maybe_sent`;
+without delivery corroboration, recovery preserves their uncertain effect and
+quarantines them instead of recording deterministic non-delivery. Numeric and string forms
+of the code are accepted. Read-operation errors and deterministic invalid-request,
+method-not-found and invalid-params refusals keep their existing classification.
+
+The typed `transport.send_ambiguous` result prevents automatic durable replay even
+when a caller declares `replayPolicy: safe` or `read_only`: that label does not
+prove provider deduplication. Existing matching delivery evidence may still
+confirm the send. Socket-to-SQLite tests prove one send across database reopen
+and pending drain for these policies, not a real process kill or the complete
+turn-finalizer/supervisor lifecycle. Typed ambiguity atomically persists an
+`unsafe` replay policy that older recovery code understands. Pre-connect recovery
+applies the same policy to historical typed `maybe_sent` rows, while retaining
+immutable corroborated proof. Before rollback, require successful pre-connect
+recovery and qualification of the target version. Rows already reset to `pending`
+by older recovery, or written after the last successful upgrade recovery, are
+outside that historical-row protection.
+Service-route qualification remains separate: this mapping does not force
+iMessage, prevent upstream bridge/AppleScript fallback or prove delivery. See
+[#3841](https://github.com/LucasQuiles/WhatSoup/issues/3841) and
+[#3844](https://github.com/LucasQuiles/WhatSoup/issues/3844), plus the
+[`transport.send_ambiguous` runbook](transport-error-send-ambiguous.md).
+
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `imessageConfig is required when transport is "imessage"` | missing config block | add `imessageConfig` to instance.json |

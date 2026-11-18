@@ -1,4 +1,14 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest';
+import { rmSync } from 'node:fs';
+import { defineInboundAutomationIsolationCases } from './helpers/inbound-automation-isolation-cases.ts';
+
+const testPaths = await vi.hoisted(async () => {
+  const { mkdtempSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { tmpdir } = await import('node:os');
+  return { root: mkdtempSync(join(tmpdir(), 'connection-dispatch-')) };
+});
+afterAll(() => rmSync(testPaths.root, { recursive: true, force: true }));
 
 vi.mock('@whiskeysockets/baileys', async () => {
   const { baileysMock } = await import('../helpers/baileys-mock.ts');
@@ -8,9 +18,9 @@ vi.mock('@whiskeysockets/baileys', async () => {
 vi.mock('../../src/config.ts', () => ({
   config: {
     adminPhones: new Set(['15550100001']),
-    authDir: '/tmp/wa-test-auth-connection-message-dispatch',
+    authDir: testPaths.root + '/auth',
     dbPath: ':memory:',
-    mediaDir: '/tmp/whatsoup-test-media-connection-message-dispatch/tmp',
+    mediaDir: testPaths.root + '/media',
     botName: 'WhatSoup',
     accessMode: 'allowlist',
     healthPort: 9090,
@@ -483,58 +493,20 @@ describe('ConnectionManager — messages.upsert dispatch', () => {
     expect(mockSock.sendMessage).toHaveBeenCalledWith('15551234567@s.whatsapp.net', { text: 'Notifications paused.' });
   });
 
-  it('retries only server-created approved WhatsApp automation before the normal inbound turn', async () => {
-    // Break caught: agent text can manufacture automation facts, or an approved
-    // mail operation is incorrectly pushed through the WhatsApp socket.
+  defineInboundAutomationIsolationCases(() => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
-    const onMessage = vi.fn();
-    const authority = {
-      readyOperations: vi.fn(async () => []),
-      readyOperation: vi.fn(async () => { throw new Error("no approved work"); }),
-      registerInbound: vi.fn(async () => ({
-        kind: 'inbound' as const,
-        automationOperations: [
-          {
-            id: 'auto-whatsapp-1', accountId: 'pilot-account', action: 'whatsapp.send',
-            payload: { recipient: '15551230000@s.whatsapp.net', content: { text: 'server automation' } },
-            digest: 'sha256:auto', state: 'approved',
-          },
-          {
-            id: 'auto-mail-1', accountId: 'pilot-account', action: 'mail.send',
-            payload: { subject: 'executor only' }, digest: 'sha256:mail', state: 'approved',
-          },
-        ],
-        automationHolds: [{ ruleId: 'rule-hold-1', reason: 'needs_review' }],
-      })),
-      closeInbound: vi.fn(async () => undefined),
-      admit: vi.fn(async () => ({ attemptId: 'attempt-auto', payloadDigest: 'sha256:auto' })),
-      recordReceipt: vi.fn(async () => undefined),
-      recordDecision: vi.fn(async () => undefined),
-      pause: vi.fn(async () => undefined),
+    return {
+      manager: new ConnectionManager(),
+      send: mockSock.sendMessage,
+      open: () => emit(openEvent()),
+      inbound: () => emit({
+        'messages.upsert': {
+          type: 'notify',
+          messages: [makeTextMessage({ id: 'inbound-auto', remoteJid: '15551234567@s.whatsapp.net', text: 'trigger' })],
+        },
+      }),
     };
-    const manager = new ConnectionManager();
-    manager.setOperationsAuthorityClient(authority);
-    manager.onMessage = onMessage;
-
-    await manager.connect();
-    emit(openEvent());
-    emit({
-      'messages.upsert': {
-        type: 'notify',
-        messages: [makeTextMessage({ id: 'inbound-auto', remoteJid: '15551234567@s.whatsapp.net', text: 'trigger' })],
-      },
-    });
-
-    await vi.waitFor(() => expect(authority.recordReceipt).toHaveBeenCalledTimes(1));
-    expect(authority.admit).toHaveBeenCalledWith({
-      recipient: '15551230000@s.whatsapp.net',
-      content: { text: 'server automation' },
-      context: { inbound_event_id: 'inbound-auto' },
-      operationId: 'auto-whatsapp-1',
-    });
-    expect(mockSock.sendMessage).toHaveBeenCalledWith('15551230000@s.whatsapp.net', { text: 'server automation' });
-    expect(onMessage).toHaveBeenCalledTimes(1);
   });
 
   it('keeps an authority inbound lease open until the asynchronous ingest turn settles', async () => {

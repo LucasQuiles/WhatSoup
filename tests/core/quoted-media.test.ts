@@ -258,6 +258,33 @@ describe('extractQuotedMedia — synthetic message shape', () => {
     expect(result!.key.id).toBe('quoted');
   });
 
+  it('falls back remoteJid/stanzaId when their values are whitespace-only (#2871 trim-tightening)', () => {
+    // Discriminator for the isNonEmptyString migration of asString(): the old
+    // length>0 check admitted whitespace-only strings; the SSOT helper trims
+    // and excludes them. A whitespace-only remoteJid must now fall through to
+    // the "unknown@s.whatsapp.net" default, and a whitespace-only stanzaId to
+    // "quoted" — NOT survive as a corrupt identifier.
+    const raw = {
+      key: { remoteJid: '   ' },
+      message: {
+        extendedTextMessage: {
+          contextInfo: {
+            stanzaId: '\t\n',
+            quotedMessage: {
+              imageMessage: { mimetype: 'image/png', url: 'https://example.com/img.png' },
+            },
+          },
+        },
+      },
+    };
+
+    const result = extractQuotedMedia(raw);
+
+    expect(result).not.toBeNull();
+    expect(result!.key.remoteJid).toBe('unknown@s.whatsapp.net');
+    expect(result!.key.id).toBe('quoted');
+  });
+
   it('returns the first downloadable type when quotedMessage has multiple media keys', () => {
     // quotedMessage with two downloadable keys — should return the first one in DOWNLOADABLE_KEYS order
     const raw = {

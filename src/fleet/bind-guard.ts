@@ -1,4 +1,5 @@
 import { createChildLogger } from '../logger.ts';
+import { LOOPBACK_HOSTS } from '../lib/loopback.ts';
 
 const log = createChildLogger('fleet:bind-guard');
 
@@ -7,8 +8,6 @@ const log = createChildLogger('fleet:bind-guard');
  * Value must be the literal string "1".
  */
 export const FLEET_UNSAFE_REMOTE_CONSOLE_ENV = 'WHATSOUP_FLEET_UNSAFE_REMOTE_CONSOLE';
-
-const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
 
 /**
  * Fail startup when the fleet server would bind a non-loopback address
