@@ -33,6 +33,8 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=deploy/lib/bounded-exec.sh
+. "$SCRIPT_DIR/lib/bounded-exec.sh"
 # shellcheck source=deploy/lib/resolve-node.sh
 . "$SCRIPT_DIR/lib/resolve-node.sh"
 if ! NODE="$(whatsoup_resolve_node "$REPO_ROOT")"; then
@@ -48,7 +50,7 @@ read_scoped_keyring_token() {
         "$SERVICE" "$INSTANCE" || true
       ;;
     *)
-      timeout 3s secret-tool lookup \
+      whatsoup_run_bounded 3 secret-tool lookup \
         service "$SERVICE" \
         user "$INSTANCE" 2>/dev/null || true
       ;;

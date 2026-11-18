@@ -105,7 +105,7 @@ local vector embedding or scheduled Pinecone export.
 | --- | --- | --- |
 | `com.whatsoup.<agent-instance>.plist` | Agent runtime | instance health port |
 | `com.whatsoup.<passive-instance>.plist` | Passive capture/runtime instance | instance health port |
-| `com.whatsoup.whatsoup-fleet.plist` | Fleet server, health polling, proxy routing, discovery | 9099 via argv (`whatsoup-fleet <port>`); no `FLEET_PORT` env var exists |
+| `com.whatsoup.whatsoup-fleet.plist` | Fleet server, health polling, proxy routing, discovery | 9099 via argv (`whatsoup-fleet <port>`); the service reads no `FLEET_PORT` env var (the operator helper `deploy/scripts/whatsoup-up` defines its own for the console URL) |
 | `com.whatsoup.<embed-service>.plist` | Optional local embed service for vector profiles | service-owned |
 | `com.whatsoup.<bridge>.plist` | Optional scheduled bridge that drains `fact_export_queue` when explicitly deployed | none |
 

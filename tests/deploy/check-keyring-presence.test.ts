@@ -267,3 +267,86 @@ describe('deploy keyring probes without USER', () => {
     );
   });
 });
+
+// keyring_present() takes its Linux branch wherever `uname -s` is not Darwin. A
+// stub `uname` reporting Linux makes the real script take it, and a stub
+// `secret-tool` stands in for libsecret. PATH holds only the stubs and the system
+// directories. The hanging stub ignores TERM, as a wedged keyring client can: a
+// bare `timeout 3s` (no -k) only sends TERM and then waits for the child, while
+// whatsoup_run_bounded sends KILL after its grace.
+const LINUX_SPAWN_TIMEOUT_MS = 30_000;
+const LINUX_TEST_TIMEOUT_MS = 40_000;
+const LINUX_LOOKUPS =
+  'secret-tool lookup service anthropic\n'
+  + 'secret-tool lookup service openai\n'
+  + 'secret-tool lookup service pinecone\n';
+
+function runLinuxPresenceProbe(scenario: 'present' | 'missing' | 'hang') {
+  const root = makeRoot();
+  const bin = path.join(root, 'bin');
+  const calls = path.join(root, 'secret-tool-calls.log');
+  mkdirSync(bin);
+  writeExecutable(path.join(bin, 'uname'), `#!/usr/bin/env bash\nprintf 'Linux\\n'\n`);
+  writeExecutable(
+    path.join(bin, 'secret-tool'),
+    [
+      '#!/usr/bin/env bash',
+      `printf 'secret-tool %s\\n' "$*" >> ${JSON.stringify(calls)}`,
+      `if [ "$1" = lookup ] && [ ${JSON.stringify(scenario)} = present ]; then printf 'synthetic-value\\n'; exit 0; fi`,
+      `if [ "$1" = lookup ] && [ ${JSON.stringify(scenario)} = hang ]; then trap '' TERM; exec sleep 30; fi`,
+      'exit 1',
+      '',
+    ].join('\n'),
+  );
+
+  const startedAt = performance.now();
+  const result = spawnSync('/bin/bash', [checkerPath], {
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` },
+    timeout: LINUX_SPAWN_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
+  });
+  return {
+    error: result.error,
+    status: result.status,
+    stdout: result.stdout,
+    calls: existsSync(calls) ? readFileSync(calls, 'utf8') : '',
+    wallMs: performance.now() - startedAt,
+  };
+}
+
+describe('check-keyring-presence.sh Linux branch', () => {
+  it('reports every provider key present when the bounded secret-tool lookup returns a value', () => {
+    const result = runLinuxPresenceProbe('present');
+
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stdout).toBe(0);
+    expect(result.stdout).toContain('All provider keys are in the keyring');
+    expect(result.stdout).not.toContain('synthetic-value');
+    expect(result.calls).toBe(LINUX_LOOKUPS);
+  }, LINUX_TEST_TIMEOUT_MS);
+
+  it('reports each provider key missing when the secret-tool lookup is empty', () => {
+    const result = runLinuxPresenceProbe('missing');
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('✗ anthropic — NOT in keyring');
+    expect(result.stdout).toContain('✗ openai — NOT in keyring');
+    expect(result.stdout).toContain('✗ pinecone — NOT in keyring');
+    expect(result.calls).toBe(LINUX_LOOKUPS);
+  }, LINUX_TEST_TIMEOUT_MS);
+
+  it('bounds a hanging secret-tool lookup for each of the three providers', () => {
+    const result = runLinuxPresenceProbe('hang');
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('✗ pinecone — NOT in keyring');
+    expect(result.calls).toBe(LINUX_LOOKUPS);
+    // Each lookup ends at the helper's KILL: 3 s budget + 2 s grace, about 15 s for
+    // three. A bare `timeout 3s` would wait out the TERM-ignoring 30 s sleep, so
+    // the 30 s spawn cap would kill the check during its first lookup.
+    expect(result.wallMs).toBeLessThan(25_000);
+  }, LINUX_TEST_TIMEOUT_MS);
+});
