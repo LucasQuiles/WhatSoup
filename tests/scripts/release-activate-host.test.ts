@@ -89,7 +89,7 @@ interface TwoMemberWorld {
   secondDb: string;
   contexts: ActivationContext[];
   host: ActivationHost;
-  addJob: (label: string, contents: string) => string;
+  addJob: (label: string, contents: string | Uint8Array) => string;
   calls: string[];
   linkTargetsAtHealth: string[];
   migrate: (which: 'first' | 'second') => void;
@@ -135,7 +135,7 @@ function twoMemberWorld({ sharedFirst = true }: { sharedFirst?: boolean } = {}):
   ]);
   const calls: string[] = [];
   const linkTargetsAtHealth: string[] = [];
-  const addJob = (name: string, contents: string): string => {
+  const addJob = (name: string, contents: string | Uint8Array): string => {
     const plistPath = path.join(agents, `${name}.plist`);
     writeFileSync(plistPath, contents);
     jobs.set(name, { pid: nextPid++, alive: true, plist: plistPath });
@@ -1118,6 +1118,18 @@ describe('release:activate-host reviewed outside-unit declarations', () => {
     expect(world.calls).toEqual([]);
   });
 
+  it('reads an outside plist strictly, so a character reference cannot hide a Python environment key', async () => {
+    const world = twoMemberWorld(); const outside = reviewedPythonModule(world);
+    const source = outside.source.replace('  <key>WorkingDirectory</key>',
+      '  <key>EnvironmentVariable&#115;</key>\n  <dict><key>PYTHONPATH</key><string>/opt/example/lib</string></dict>\n  <key>WorkingDirectory</key>');
+    writeFileSync(outside.plistPath, source);
+    const plan = await planHostUnit(world, { ...outside.declaration, outsideUnits: [{ ...outside.declaration.outsideUnits[0], plistSha256: digest(source) }] });
+    expect(plan.ready).toBe(false);
+    expect(plan.document.preconditions).toEqual(expect.arrayContaining([
+      { id: `outside-unit:${outside.label}`, ok: false, detail: 'installed loaded plist is unreadable: plist holds a numeric character reference' },
+    ]));
+  });
+
   it('retains the normalized reviewed tuple digest in the plan and successful apply receipt', async () => {
     const world = twoMemberWorld(); const outside = reviewedInterpreter(world);
     const plan = await planHostUnit(world, outside.declaration);
@@ -1157,114 +1169,220 @@ describe('release:activate-host closed host auxiliaries', () => {
     ] })).toBeNull();
   });
 
-  it('stages a declared bot-errors checkout outside every member root without losing its fields', async () => {
-    const world = twoMemberWorld();
-    const checkout = path.join(world.root, 'checkout'); writeRelease(checkout, OLD, true);
-    const label = 'com.bot-errors.health';
-    const sibling = `${checkout}-cache/log`;
-    const source = plist(label, ['/usr/bin/python3', `${checkout}/deploy/scripts/bot-errors-runner.py`, '--daily'], checkout)
-      .replace('  <key>WorkingDirectory</key>', `  <key>OpaqueHostField</key>\n  <string>preserve-me</string>\n  <key>SiblingLog</key>\n  <string>${sibling}</string>\n  <key>WorkingDirectory</key>`);
-    world.addJob(label, source);
-    const plan = await planHostUnit(world, { schemaVersion: 2, members: members(world), hostAuxiliaries: [
-      { label, mode: 'path-rebase', expectCurrent: checkout },
-    ] });
-    expect(plan.ready).toBe(true);
-    const auxiliary = (plan.applyContext as unknown as { hostAuxiliaries: Array<{ label: string; staged: string }> }).hostAuxiliaries.find((entry) => entry.label === label)!;
-    expect(auxiliary.staged).toContain('preserve-me');
-    expect(auxiliary.staged).toContain(sibling);
-    expect(auxiliary.staged).toContain(world.newRelease);
-    expect(auxiliary.staged).not.toContain(`${checkout}/`);
-
-    const wrongRoot = await planHostUnit(world, { schemaVersion: 2, members: members(world), hostAuxiliaries: [
-      { label, mode: 'path-rebase', expectCurrent: `${checkout}-other` },
-    ] });
-    expect(wrongRoot.ready).toBe(false);
-    expect(wrongRoot.document.preconditions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: `host-aux-on-expected-release:${label}`, ok: false }),
-    ]));
-
-    world.addJob(label, source.replace('preserve-me', `cd ${checkout} && run`));
-    const embeddedRoot = await planHostUnit(world, { schemaVersion: 2, members: members(world), hostAuxiliaries: [
-      { label, mode: 'path-rebase', expectCurrent: checkout },
-    ] });
-    expect(embeddedRoot.ready).toBe(false);
-    expect(embeddedRoot.document.preconditions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: `host-aux-plist-staged:${label}`, ok: false, detail: expect.stringContaining('embedded') }),
-    ]));
-  });
-
-  // With no closed contract (only com.bot-errors.health reaches it), every value must name the path it spells,
-  // and the interpreter, the file it runs, and the bot-errors runner's forwarded command must be in the target release.
+  // Path-rebase admits four closed contracts: the BOT ERRORS installer form and legacy wrapper, and the two legacy
+  // timers. Each refusal names its reason; any other health-job shape names the reinstall route.
   const BOT_ERRORS = 'com.bot-errors.health';
-  const pathRebaseWorld = () => {
+  const MAINTENANCE = 'com.whatsoup.harness-maintenance';
+  const REPLY = 'com.whatsoup.reply-guarantee';
+  const HEALTH_SHAPE = 'bot-errors health job is neither the installer form nor the legacy wrapper; reinstall it with deploy/scripts/install-bot-errors-health-launchd.sh or deploy/scripts/install-bot-errors-launchd.sh';
+  const rootKey = (key: string): string => `plist root key ${key} is not admitted for a path-rebase job`;
+  const pathRebaseWorld = (label = BOT_ERRORS) => {
     const world = twoMemberWorld();
     const checkout = path.join(world.root, 'checkout'); writeRelease(checkout, OLD, true);
-    const runner = `${checkout}/deploy/scripts/bot-errors-runner.py`;
-    return { world, checkout, runner, declaration: { schemaVersion: 2, members: members(world), hostAuxiliaries: [{ label: BOT_ERRORS, mode: 'path-rebase', expectCurrent: checkout }] } };
+    return { world, checkout, declaration: { schemaVersion: 2, members: members(world), hostAuxiliaries: [{ label, mode: 'path-rebase', expectCurrent: checkout }] } };
   };
-  /** Insert plist lines before WorkingDirectory, as the plain bot-errors case does. */
+  /** Insert plist lines before WorkingDirectory. */
   const withLines = (source: string, ...lines: string[]): string => source.replace('  <key>WorkingDirectory</key>', [...lines, '  <key>WorkingDirectory</key>'].join('\n'));
   const environment = (...entries: string[]): string[] => ['  <key>EnvironmentVariables</key>', `  <dict>${entries.join('')}</dict>`];
-  const NOT_CLOSED = 'absolute plist string value is not in closed form (empty, . or .. segment, or trailing slash)';
-  const OUTSIDE_RELEASE = 'executed program or script is not a closed-form path under the target release';
-  const NO_SCRIPT = 'interpreter launch form names no script argument (inline, module, or option form)';
-  const INTERPRETER_ENVIRONMENT = 'EnvironmentVariables are malformed or set an interpreter-affecting key';
-  const OUTSIDE_INTERPRETER = 'interpreter is not a closed-form system interpreter or a path under the target release';
-  const RUNNER_AGAIN = 'bot-errors runner command runs the runner again';
-  const RUNNER_FORM = 'bot-errors runner arguments are not reviewed options followed by -- and a command';
-  // The runner's required options, as the installer passes them.
-  const RUNNER_OPTIONS = ['--instance', 'bot-errors-health', '--summary', 'BOT ERRORS daily health command failed'];
-  const pathRebaseRefusals: Array<{ name: string; detail: string; build: (root: string, runner: string) => string }> = [
-    { name: 'a dot-segment script beside the rebased runner (the reviewed hostile argv)', detail: NOT_CLOSED, build: (root, runner) => plist(BOT_ERRORS, ['/usr/bin/python3', `${root}/../../../../tmp/evil.py`, runner], root) },
-    { name: 'a script at <root>/./deploy', detail: NOT_CLOSED, build: (root) => plist(BOT_ERRORS, ['/usr/bin/python3', `${root}/./deploy/scripts/bot-errors-runner.py`], root) },
-    { name: 'a script at <root>//deploy', detail: NOT_CLOSED, build: (root) => plist(BOT_ERRORS, ['/usr/bin/python3', `${root}//deploy/scripts/bot-errors-runner.py`], root) },
-    { name: 'a WorkingDirectory <root>/../x', detail: NOT_CLOSED, build: (root, runner) => plist(BOT_ERRORS, ['/usr/bin/python3', runner], `${root}/../x`) },
-    { name: 'an environment value <root>/../x', detail: NOT_CLOSED, build: (root, runner) => withLines(plist(BOT_ERRORS, ['/usr/bin/python3', runner], root), ...environment(`<key>BOT_ERRORS_STATE_DIR</key><string>${root}/../x</string>`)) },
-    { name: 'a prefix sibling whose dot segments name the old release', detail: NOT_CLOSED, build: (root, runner) => withLines(plist(BOT_ERRORS, ['/usr/bin/python3', runner], root), '  <key>SiblingLog</key>', `  <string>${root}.bak/../${path.basename(root)}/log</string>`) },
-    { name: 'a <parent>/./<basename> value that never contains the root string', detail: NOT_CLOSED, build: (root, runner) => withLines(plist(BOT_ERRORS, ['/usr/bin/python3', runner], root), '  <key>Profile</key>', `  <string>${path.dirname(root)}/./${path.basename(root)}/deploy/health-profiles/host-a.json</string>`) },
-    { name: 'a Python script outside the release ahead of a rebased argument', detail: OUTSIDE_RELEASE, build: (root, runner) => plist(BOT_ERRORS, ['/usr/bin/python3', '/tmp/x.py', runner], root) },
-    { name: 'a non-interpreter program outside the release', detail: OUTSIDE_RELEASE, build: (root, runner) => plist(BOT_ERRORS, ['/opt/example/bin/launcher', runner], root) },
-    { name: 'python3 -c', detail: NO_SCRIPT, build: (root, runner) => plist(BOT_ERRORS, ['/usr/bin/python3', '-c', 'import runpy', runner], root) },
-    { name: 'python3 -m', detail: NO_SCRIPT, build: (root) => plist(BOT_ERRORS, [`${root}/venv/bin/python3`, '-m', 'bot_errors.runner'], root) },
-    { name: 'an interpreter binary outside the release that is only named python3', detail: OUTSIDE_INTERPRETER, build: (root, runner) => plist(BOT_ERRORS, ['/tmp/x/python3', runner], root) },
-    { name: 'a relative interpreter', detail: OUTSIDE_INTERPRETER, build: (root, runner) => plist(BOT_ERRORS, ['python3', runner], root) },
-    { name: 'the runner forwarding a script outside the release', detail: `bot-errors runner command: ${OUTSIDE_RELEASE}`, build: (root, runner) => plist(BOT_ERRORS, ['/usr/bin/python3', runner, ...RUNNER_OPTIONS, '--', '/usr/bin/python3', '/tmp/x.py'], root) },
-    { name: 'the runner forwarding a relative command', detail: `bot-errors runner command: ${OUTSIDE_INTERPRETER}`, build: (root, runner) => plist(BOT_ERRORS, ['/usr/bin/python3', runner, ...RUNNER_OPTIONS, '--', 'python3', `${root}/deploy/scripts/bot-errors-health-check.py`], root) },
-    { name: 'the runner forwarding the runner', detail: RUNNER_AGAIN, build: (root, runner) => plist(BOT_ERRORS, ['/usr/bin/python3', runner, ...RUNNER_OPTIONS, '--', '/usr/bin/python3', runner, ...RUNNER_OPTIONS, '--', '/usr/bin/python3', '/tmp/x.py'], root) },
-    // argparse REMAINDER: the runner also runs the first non-option argument when no -- precedes it.
-    { name: 'the runner running a command without --', detail: RUNNER_FORM, build: (root, runner) => plist(BOT_ERRORS, ['/usr/bin/python3', runner, ...RUNNER_OPTIONS, '/usr/bin/python3', '/tmp/x.py'], root) },
-    // /usr/bin/python3 is a developer-tools stub: xcrun(1) and xcode-select(1) document DEVELOPER_DIR, TOOLCHAINS,
-    // SDKROOT and xcrun_* settings as steering it, so each refuses (xcrun_ in any case).
-    ...['PYTHONPATH', 'BASH_ENV', 'LD_PRELOAD', 'HOME', 'ZDOTDIR', 'DEVELOPER_DIR', 'TOOLCHAINS', 'SDKROOT', 'xcrun_log', 'XCRUN_NOCACHE'].map((key) => ({
-      name: `the environment key ${key}`, detail: INTERPRETER_ENVIRONMENT,
-      build: (root: string, runner: string) => withLines(plist(BOT_ERRORS, ['/usr/bin/python3', runner], root), ...environment(`<key>${key}</key><string>/tmp/lib</string>`)),
-    })),
-    { name: 'a duplicate environment key', detail: INTERPRETER_ENVIRONMENT, build: (root, runner) => withLines(plist(BOT_ERRORS, ['/usr/bin/python3', runner], root), ...environment('<key>PATH</key><string>/usr/bin</string>', '<key>PATH</key><string>/bin</string>')) },
+  /** The argv both BOT ERRORS installers write by default (deploy/scripts/install-bot-errors-health-launchd.sh, install-bot-errors-launchd.sh). */
+  const installerArgs = (root: string, home: string, python = '/usr/bin/python3'): string[] => [
+    python, `${root}/deploy/scripts/bot-errors-runner.py`, '--instance', 'bot-errors-health', '--source', 'service-exit', '--summary', 'BOT ERRORS daily health command failed',
+    '--log-hint', `${home}/.local/state/bot-errors/logs/health.err.log`, '--diagnostic', `launchd_label=${BOT_ERRORS}`, '--', python, `${root}/deploy/scripts/bot-errors-health-check.py`, '--daily',
   ];
-
-  it.each(pathRebaseRefusals)('refuses path-rebase with no closed contract for $name', async ({ build, detail }) => {
-    const { world, checkout, runner, declaration } = pathRebaseWorld();
-    world.addJob(BOT_ERRORS, build(checkout, runner));
-    const plan = await planHostUnit(world, declaration);
+  const installerForm = (root: string, home: string, python?: string): string => withLines(plist(BOT_ERRORS, installerArgs(root, home, python), root), ...environment(
+    `<key>PATH</key><string>${home}/.local/bin:/usr/bin:/bin</string>`, `<key>BOT_ERRORS_STATE_DIR</key><string>${home}/.local/state/bot-errors</string>`,
+    `<key>BOT_ERRORS_HEALTH_PROFILE</key><string>${root}/deploy/health-profiles/host-a.json</string>`,
+  ));
+  /** The reviewed legacy wrapper shell; its profile default names a profile below the selected root. */
+  const legacyShell = (root: string, home: string): string => [
+    `BOT_ERRORS_ENV_FILE=${home}/.config/whatsoup/bot-errors.env; export BOT_ERRORS_ENV_FILE; `,
+    'if [[ ! -r "$BOT_ERRORS_ENV_FILE" ]]; then printf "%s\\n" "missing BOT_ERRORS_ENV_FILE=$BOT_ERRORS_ENV_FILE" >/dev/stderr; exit 64; fi; ',
+    'set -a; source "$BOT_ERRORS_ENV_FILE"; set +a; ',
+    'if [[ -z "${BOT_ERRORS_JID:-}" ]]; then printf "%s\\n" "missing BOT_ERRORS_JID in $BOT_ERRORS_ENV_FILE" >/dev/stderr; exit 65; fi; ',
+    'if [[ -z "${BOT_ERRORS_EXPECTED_JID:-}" ]]; then printf "%s\\n" "missing BOT_ERRORS_EXPECTED_JID in $BOT_ERRORS_ENV_FILE" >/dev/stderr; exit 65; fi; ',
+    'if [[ "$BOT_ERRORS_JID" != *@g.us ]]; then printf "%s\\n" "BOT_ERRORS_JID must be a WhatsApp group JID" >/dev/stderr; exit 65; fi; ',
+    'if [[ "$BOT_ERRORS_JID" != "$BOT_ERRORS_EXPECTED_JID" ]]; then printf "%s\\n" "BOT_ERRORS_JID does not match BOT_ERRORS_EXPECTED_JID" >/dev/stderr; exit 65; fi; ',
+    `if [[ -z "\${BOT_ERRORS_STATE_DIR:-}" ]]; then export BOT_ERRORS_STATE_DIR=${home}/.local/state/bot-errors; fi; `,
+    'if [[ -z "${BOT_ERRORS_HEALTH_PROFILE:-}" ]]; then export BOT_ERRORS_HEALTH_PROFILE=', `${root}/deploy/health-profiles/edge9.json`, '; fi;  exec "$@"',
+  ].join('');
+  const legacyWrapper = (root: string, home: string, ...environmentEntries: string[]): string => plist(BOT_ERRORS, [
+    '/bin/bash', '-c', legacyShell(root, home), 'bot-errors-health', '/usr/bin/python3', `${root}/deploy/scripts/bot-errors-runner.py`,
+    '--instance', 'bot-errors-health', '--source', 'service-exit', '--summary', 'BOT ERRORS daily health command failed',
+    '--log-hint', `${home}/.local/state/bot-errors/logs/health.err.log`, '--diagnostic', 'launchd_label=com.bot-errors.health',
+    '--', '/usr/bin/python3', `${root}/deploy/scripts/bot-errors-health-check.py`, '--daily',
+  ], root).replace('  <key>WorkingDirectory</key>', [
+    ...environment(...(environmentEntries.length > 0 ? environmentEntries : ['<key>BOT_ERRORS_DB</key><string>preserve-me</string>'])),
+    '  <key>StartCalendarInterval</key>', '  <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>20</integer></dict>',
+    '  <key>WorkingDirectory</key>',
+  ].join('\n'));
+  const timerLines = (interval: number): string[] => ['  <key>RunAtLoad</key>', '  <true/>', '  <key>StartInterval</key>', `  <integer>${interval}</integer>`, '  <key>KeepAlive</key>', '  <false/>'];
+  const maintenanceForm = (root: string, home: string, ...lines: string[]): string => withLines(plist(MAINTENANCE, [
+    '/bin/bash', `${home}/.local/libexec/fleet-reauth/maint-ccd-guard.sh`, '/bin/bash', `${root}/deploy/scripts/harness-maintenance.sh`,
+  ], root), ...timerLines(3600), ...lines);
+  const replyForm = (root: string, home: string, ...lines: string[]): string => withLines(plist(REPLY, [
+    `${home}/.nvm/versions/node/v24.15.0/bin/node`, `${root}/deploy/hooks/drain-stuck-replies.mjs`, '--once',
+  ], root), ...timerLines(300), ...lines);
+  type HostUnitPlanResult = Awaited<ReturnType<typeof buildHostUnitPlan>>;
+  const stagedFor = (plan: HostUnitPlanResult, label: string): string =>
+    (plan.applyContext as unknown as { hostAuxiliaries: Array<{ label: string; staged: string }> }).hostAuxiliaries.find((entry) => entry.label === label)!.staged;
+  type Build = (root: string, home: string, world: TwoMemberWorld) => string | Uint8Array;
+  /** Plan one path-rebase job, declared at a fresh checkout, whose installed plist `build` writes. */
+  const planWith = async (label: string, build: Build) => {
+    const { world, checkout, declaration } = pathRebaseWorld(label);
+    world.addJob(label, build(checkout, world.home, world));
+    return { world, checkout, plan: await planHostUnit(world, declaration) };
+  };
+  const expectStaged = (plan: HostUnitPlanResult, label: string, detail: string): void => {
     expect(plan.ready).toBe(false);
-    expect(plan.document.preconditions).toEqual(expect.arrayContaining([{ id: `host-aux-plist-staged:${BOT_ERRORS}`, ok: false, detail }]));
-  });
+    expect(plan.document.preconditions).toEqual(expect.arrayContaining([{ id: `host-aux-plist-staged:${label}`, ok: false, detail }]));
+  };
 
-  it.each([
-    { name: 'a closed-set system interpreter', args: (root: string) => ['/bin/sh', `${root}/deploy/scripts/bot-errors-health.sh`] },
-    { name: 'an interpreter under the release', args: (root: string) => [`${root}/venv/bin/python3`, `${root}/deploy/scripts/bot-errors-health-check.py`, '--daily'] },
-  ])('admits path-rebase where $name runs a script in the release', async ({ args }) => {
+  it('stages a declared bot-errors checkout outside every member root without losing its fields', async () => {
     const { world, checkout, declaration } = pathRebaseWorld();
-    const source = plist(BOT_ERRORS, args(checkout), checkout);
+    const sibling = `${checkout}-cache/log`;
+    const source = withLines(installerForm(checkout, world.home), '  <key>StandardOutPath</key>', `  <string>${sibling}</string>`, '  <key>StandardErrorPath</key>', '  <string>preserve-me</string>');
     world.addJob(BOT_ERRORS, source);
     const plan = await planHostUnit(world, declaration);
     expect(plan.ready).toBe(true);
-    const staged = (plan.applyContext as unknown as { hostAuxiliaries: Array<{ label: string; staged: string }> }).hostAuxiliaries.find((entry) => entry.label === BOT_ERRORS)!.staged;
-    expect(staged).toBe(source.replaceAll(checkout, world.newRelease));
+    const staged = stagedFor(plan, BOT_ERRORS);
+    expect(staged).toContain('preserve-me');
+    expect(staged).toContain(sibling);
+    expect(staged).toContain(world.newRelease);
+    expect(staged).not.toContain(`${checkout}/`);
+
+    const wrongRoot = await planHostUnit(world, { ...declaration, hostAuxiliaries: [{ label: BOT_ERRORS, mode: 'path-rebase', expectCurrent: `${checkout}-other` }] });
+    expect(wrongRoot.ready).toBe(false);
+    expect(wrongRoot.document.preconditions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: `host-aux-on-expected-release:${BOT_ERRORS}`, ok: false }),
+    ]));
+
+    world.addJob(BOT_ERRORS, source.replace('preserve-me', `cd ${checkout} &amp;&amp; run`));
+    expectStaged(await planHostUnit(world, declaration), BOT_ERRORS, 'expected-current root is embedded in a non-path string value');
+  });
+
+  // A python3 file this user owns: isTrustedHealthPython admits it, so only the /usr/bin/python3 pin refuses it.
+  const ownedPython = (file: string): string => {
+    mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, '', { mode: 0o700 });
+    return file;
+  };
+  it.each<{ name: string; build: Build }>([
+    { name: 'a direct script at [0]', build: (root) => plist(BOT_ERRORS, [`${root}/deploy/scripts/bot-errors-health-check.py`, '--daily'], root) },
+    { name: 'the short runner form', build: (root) => plist(BOT_ERRORS, ['/usr/bin/python3', `${root}/deploy/scripts/bot-errors-runner.py`, '--daily'], root) },
+    { name: '/bin/sh running a release script', build: (root) => plist(BOT_ERRORS, ['/bin/sh', `${root}/deploy/scripts/bot-errors-health.sh`], root) },
+    { name: '/bin/bash running a release script', build: (root) => plist(BOT_ERRORS, ['/bin/bash', `${root}/deploy/scripts/bot-errors-health-check.py`], root) },
+    { name: 'a bash -c command that starts with the root', build: (root) => plist(BOT_ERRORS, ['/bin/bash', '-c', `${root}/deploy/scripts/bot-errors-health-check.py --daily`], root) },
+    { name: 'a bash -c command that is a bare root path', build: (root) => plist(BOT_ERRORS, ['/bin/bash', '-c', `${root}/deploy/scripts/bot-errors-health-check.py`], root) },
+    { name: 'an in-release Python with the installer suffix', build: (root, home) => installerForm(root, home, ownedPython(`${root}/venv/bin/python3`)) },
+    { name: 'another trusted python3 with the installer suffix', build: (root, home, world) => installerForm(root, home, ownedPython(`${world.root}/bin/python3`)) },
+    { name: 'the installer form under a case variant of the declared root', build: (root, home) => installerForm(path.join(path.dirname(root), path.basename(root).toUpperCase()), home) },
+  ])('refuses the health job as $name, naming the reinstall route', async ({ build }) => {
+    expectStaged((await planWith(BOT_ERRORS, build)).plan, BOT_ERRORS, HEALTH_SHAPE);
+  });
+
+  const contracts: Array<{ name: string; label: string; build: (root: string, home: string) => string; first: (home: string) => string }> = [
+    { name: 'the installer form', label: BOT_ERRORS, build: (root, home) => installerForm(root, home), first: () => '/usr/bin/python3' },
+    { name: 'the legacy wrapper', label: BOT_ERRORS, build: (root, home) => legacyWrapper(root, home), first: () => '/bin/bash' },
+    { name: 'harness maintenance', label: MAINTENANCE, build: (root, home) => maintenanceForm(root, home), first: () => '/bin/bash' },
+    { name: 'reply guarantee', label: REPLY, build: (root, home) => replyForm(root, home), first: (home) => `${home}/.nvm/versions/node/v24.15.0/bin/node` },
+  ];
+  it.each(contracts.flatMap((contract) => [
+    { ...contract, which: 'equal to ProgramArguments[0]', program: contract.first },
+    { ...contract, which: 'naming another program', program: () => '/opt/example/bin/other' },
+  ]))('refuses a Program key $which in $name while the loaded definition still matches', async ({ label, build, program }) => {
+    const { plan } = await planWith(label, (root, home) => withLines(build(root, home), '  <key>Program</key>', `  <string>${program(home)}</string>`));
+    expect(plan.document.preconditions).toEqual(expect.arrayContaining([{ id: `host-aux-installed-loaded-match:${label}`, ok: true, detail: 'exact path/program/arguments' }]));
+    expectStaged(plan, label, rootKey('Program'));
+  });
+
+  it.each([
+    { key: 'UserName', value: '<string>root</string>' },
+    { key: 'EnableGlobbing', value: '<true/>' },
+    { key: 'BundleProgram', value: '<string>/opt/example/bin/other</string>' },
+  ])('refuses the root key $key, naming it', async ({ key, value }) => {
+    expectStaged((await planWith(BOT_ERRORS, (root, home) => withLines(installerForm(root, home), `  <key>${key}</key>`, `  ${value}`))).plan, BOT_ERRORS, rootKey(key));
+  });
+
+  it.each(['DYLD_INSERT_LIBRARIES', '__PYVENV_LAUNCHER__', 'SHELLOPTS', 'PS4', 'BASH_ENV', 'HOME', 'UNRELATED', 'CLAUDE_CONFIG_DIR'].flatMap((key) => [
+    { key, form: 'the installer form', build: (root: string, home: string) => withLines(plist(BOT_ERRORS, installerArgs(root, home), root), ...environment('<key>PATH</key><string>/usr/bin:/bin</string>', `<key>${key}</key><string>/opt/example/lib</string>`)) },
+    { key, form: 'the legacy wrapper', build: (root: string, home: string) => legacyWrapper(root, home, `<key>${key}</key><string>/opt/example/lib</string>`) },
+  ]))('refuses the environment key $key in $form, naming it', async ({ key, build }) => {
+    expectStaged((await planWith(BOT_ERRORS, build)).plan, BOT_ERRORS, `environment key ${key} is not admitted for ${BOT_ERRORS}`);
+  });
+
+  // Names only: each timer admits exactly the keys the repository's render writes for that job (deploy/setup.sh through
+  // scripts/launchd-claude-config-env.ts), and no key of another contract.
+  it.each([
+    { label: MAINTENANCE, build: maintenanceForm, keys: ['PATH', 'CLAUDE_CONFIG_DIR', 'CLAUDE_SECURESTORAGE_CONFIG_DIR'], refused: 'BOT_ERRORS_DB' },
+    { label: REPLY, build: replyForm, keys: ['PATH', 'CLAUDE_CONFIG_DIR'], refused: 'CLAUDE_SECURESTORAGE_CONFIG_DIR' },
+  ])('admits only the environment keys the repository writes for $label', async ({ label, build, keys, refused }) => {
+    const entries = keys.map((key) => `<key>${key}</key><string>/opt/example/${key.toLowerCase()}</string>`);
+    expect((await planWith(label, (root, home) => build(root, home, ...environment(...entries)))).plan.ready).toBe(true);
+    expectStaged((await planWith(label, (root, home) => build(root, home, ...environment(...entries, `<key>${refused}</key><string>/opt/example/x</string>`)))).plan,
+      label, `environment key ${refused} is not admitted for ${label}`);
+  });
+
+  const strictRefusals = [
+    { name: 'a character reference in the EnvironmentVariables key', edit: (source: string) => source.replace('<key>EnvironmentVariables</key>', '<key>EnvironmentVariable&#115;</key>'), detail: 'plist holds a numeric character reference' },
+    { name: 'a CDATA EnvironmentVariables key', edit: (source: string) => source.replace('<key>EnvironmentVariables</key>', '<key><![CDATA[EnvironmentVariables]]></key>'), detail: 'plist holds a CDATA section' },
+    { name: 'a DOCTYPE entity for the EnvironmentVariables key', edit: (source: string) => source.replace(/<!DOCTYPE[^>]*>/, '<!DOCTYPE plist [<!ENTITY environment "EnvironmentVariables">]>').replace('<key>EnvironmentVariables</key>', '<key>&environment;</key>'), detail: 'plist DOCTYPE has an internal subset or entity declaration' },
+    { name: 'an entity in the EnvironmentVariables key', edit: (source: string) => source.replace('<key>EnvironmentVariables</key>', '<key>Environment&amp;Variables</key>'), detail: 'plist <key> holds an entity reference' },
+    { name: 'whitespace around the EnvironmentVariables key', edit: (source: string) => source.replace('<key>EnvironmentVariables</key>', '<key> EnvironmentVariables </key>'), detail: 'plist <key> text has surrounding whitespace' },
+    { name: 'a comment inside the EnvironmentVariables key', edit: (source: string) => source.replace('<key>EnvironmentVariables</key>', '<key>Environment<!-- hidden -->Variables</key>'), detail: 'plist <key> holds markup' },
+  ];
+  it.each([
+    ...strictRefusals.map((row) => ({ ...row, form: 'the installer form', label: BOT_ERRORS, build: (root: string, home: string) => row.edit(installerForm(root, home)) })),
+    ...strictRefusals.map((row) => ({ ...row, form: 'harness maintenance', label: MAINTENANCE, build: (root: string, home: string) => row.edit(maintenanceForm(root, home, ...environment('<key>PATH</key><string>/usr/bin:/bin</string>'))) })),
+  ])('refuses $name in $form', async ({ label, build, detail }) => {
+    expectStaged((await planWith(label, build)).plan, label, detail);
+  });
+
+  /** A bplist00 whose one object, the top object, is the ASCII string `text`. */
+  const binaryPlist = (text: string): Buffer => {
+    const body = Buffer.from(text, 'ascii');
+    const trailer = Buffer.alloc(32);
+    trailer.writeUInt8(1, 6); trailer.writeUInt8(1, 7); // offset and object-reference sizes
+    trailer.writeBigUInt64BE(1n, 8); trailer.writeBigUInt64BE(0n, 16); trailer.writeBigUInt64BE(BigInt(8 + 4 + body.length), 24);
+    return Buffer.concat([Buffer.from('bplist00', 'ascii'), Buffer.from([0x5f, 0x11, body.length >> 8, body.length & 0xff]), body, Buffer.from([8]), trailer]);
+  };
+  it.each<{ name: string; build: Build; detail: string }>([
+    { name: 'bplist00 bytes holding a valid XML plist as a string object', build: (root, home) => binaryPlist(installerForm(root, home)), detail: 'plist is a binary property list; only XML is admitted' },
+    { name: 'a UTF-16 plist', build: (root, home) => Buffer.from(`﻿${installerForm(root, home).replace('encoding="UTF-8"', 'encoding="UTF-16"')}`, 'utf16le'), detail: 'plist does not start with an XML declaration or <plist>' },
+    { name: 'a ProgramArguments entry that is not a <string>', build: (root, home) => installerForm(root, home).replace('<string>--instance</string>', '<integer>1</integer>'), detail: 'plist ProgramArguments entry 2 is not a <string>' },
+  ])('refuses $name', async ({ build, detail }) => {
+    expectStaged((await planWith(BOT_ERRORS, build)).plan, BOT_ERRORS, detail);
+  });
+
+  it('admits an installer-form plist whose comment holds a non-canonical <string>', async () => {
+    const { plan } = await planWith(BOT_ERRORS, (root, home) => withLines(installerForm(root, home), '  <!-- <string>/tmp/../x</string> -->'));
+    expect(plan.ready).toBe(true);
+    expect(stagedFor(plan, BOT_ERRORS)).toContain('<!-- <string>/tmp/../x</string> -->');
+  });
+
+  it.each([
+    { installer: 'install-bot-errors-health-launchd.sh', others: [] as string[] },
+    { installer: 'install-bot-errors-launchd.sh', others: ['dispatcher', 'deadman', 'heartbeat-watchdog'] },
+  ])('admits the health job exactly as deploy/scripts/$installer writes it by default', async ({ installer, others }) => {
+    const { world, checkout, declaration } = pathRebaseWorld();
+    const shims = path.join(world.root, 'installer-shims'); mkdirSync(shims);
+    for (const command of ['launchctl', 'plutil']) writeFileSync(path.join(shims, command), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+    for (const script of ['bot-errors-runner.py', 'bot-errors-health-check.py', 'bot-errors-dispatcher.py', 'bot-errors-heartbeat-watchdog.py']) writeFileSync(path.join(checkout, 'deploy', 'scripts', script), '');
+    const profile = path.join(checkout, 'deploy', 'health-profiles', 'host-a.json');
+    mkdirSync(path.dirname(profile), { recursive: true }); writeFileSync(profile, '{}\n');
+    execFileSync('/bin/bash', [path.join(process.cwd(), 'deploy', 'scripts', installer)], {
+      env: { HOME: world.home, PATH: `${shims}:/usr/bin:/bin`, BOT_ERRORS_REPO_ROOT: checkout, BOT_ERRORS_HEALTH_PROFILE: profile }, stdio: 'pipe', timeout: 5_000,
+    });
+    // The combined installer also writes three other jobs; this unit declares only the health job.
+    for (const name of others) unlinkSync(path.join(world.launchAgents, `com.bot-errors.${name}.plist`));
+    const source = readFileSync(path.join(world.launchAgents, `${BOT_ERRORS}.plist`), 'utf8');
+    world.addJob(BOT_ERRORS, source);
+    const plan = await planHostUnit(world, declaration);
+    expect(plan.ready).toBe(true);
+    expect(stagedFor(plan, BOT_ERRORS)).toBe(source.replaceAll(`${checkout}/`, `${world.newRelease}/`).replace(`<string>${checkout}</string>`, `<string>${world.newRelease}</string>`));
   });
 
   it('admits the installer plain form and retains a closed-form prefix sibling unrewritten', async () => {
-    const { world, checkout, runner, declaration } = pathRebaseWorld();
+    const { world, checkout, declaration } = pathRebaseWorld();
+    const runner = `${checkout}/deploy/scripts/bot-errors-runner.py`;
     const state = `${world.home}/.local/state/bot-errors`;
     const sibling = `${checkout}2/log`;
     // The argv and environment keys that deploy/scripts/install-bot-errors-health-launchd.sh writes.
@@ -1274,11 +1392,11 @@ describe('release:activate-host closed host auxiliaries', () => {
     ], checkout), ...environment(
       `<key>PATH</key><string>${world.home}/.local/bin:/usr/bin:/bin</string>`, `<key>BOT_ERRORS_STATE_DIR</key><string>${state}</string>`,
       '<key>BOT_ERRORS_SOCKET_PATH</key><string></string>', `<key>BOT_ERRORS_HEALTH_PROFILE</key><string>${checkout}/deploy/health-profiles/host-a.json</string>`,
-    ), '  <key>SiblingLog</key>', `  <string>${sibling}</string>`);
+    ), '  <key>StandardOutPath</key>', `  <string>${sibling}</string>`);
     world.addJob(BOT_ERRORS, source);
     const plan = await planHostUnit(world, declaration);
     expect(plan.ready).toBe(true);
-    const staged = (plan.applyContext as unknown as { hostAuxiliaries: Array<{ label: string; staged: string }> }).hostAuxiliaries.find((entry) => entry.label === BOT_ERRORS)!.staged;
+    const staged = stagedFor(plan, BOT_ERRORS);
     expect(staged).toBe(source.replaceAll(`${checkout}/`, `${world.newRelease}/`).replace(`<string>${checkout}</string>`, `<string>${world.newRelease}</string>`));
     expect(staged).toContain(`<string>${sibling}</string>`);
   });
@@ -1286,29 +1404,10 @@ describe('release:activate-host closed host auxiliaries', () => {
   it('rebases only the closed legacy bot-errors health profile default inside its reviewed shell wrapper', async () => {
     const world = twoMemberWorld();
     const checkout = path.join(world.root, 'legacy-checkout'); writeRelease(checkout, OLD, true);
-    const label = 'com.bot-errors.health';
-    const profile = `${checkout}/deploy/health-profiles/edge9.json`;
-    const shell = [
-      `BOT_ERRORS_ENV_FILE=${world.home}/.config/whatsoup/bot-errors.env; export BOT_ERRORS_ENV_FILE; `,
-      'if [[ ! -r "$BOT_ERRORS_ENV_FILE" ]]; then printf "%s\\n" "missing BOT_ERRORS_ENV_FILE=$BOT_ERRORS_ENV_FILE" >/dev/stderr; exit 64; fi; ',
-      'set -a; source "$BOT_ERRORS_ENV_FILE"; set +a; ',
-      'if [[ -z "${BOT_ERRORS_JID:-}" ]]; then printf "%s\\n" "missing BOT_ERRORS_JID in $BOT_ERRORS_ENV_FILE" >/dev/stderr; exit 65; fi; ',
-      'if [[ -z "${BOT_ERRORS_EXPECTED_JID:-}" ]]; then printf "%s\\n" "missing BOT_ERRORS_EXPECTED_JID in $BOT_ERRORS_ENV_FILE" >/dev/stderr; exit 65; fi; ',
-      'if [[ "$BOT_ERRORS_JID" != *@g.us ]]; then printf "%s\\n" "BOT_ERRORS_JID must be a WhatsApp group JID" >/dev/stderr; exit 65; fi; ',
-      'if [[ "$BOT_ERRORS_JID" != "$BOT_ERRORS_EXPECTED_JID" ]]; then printf "%s\\n" "BOT_ERRORS_JID does not match BOT_ERRORS_EXPECTED_JID" >/dev/stderr; exit 65; fi; ',
-      `if [[ -z "\${BOT_ERRORS_STATE_DIR:-}" ]]; then export BOT_ERRORS_STATE_DIR=${world.home}/.local/state/bot-errors; fi; `,
-      'if [[ -z "${BOT_ERRORS_HEALTH_PROFILE:-}" ]]; then export BOT_ERRORS_HEALTH_PROFILE=', profile, '; fi;  exec "$@"',
-    ].join('');
-    const source = plist(label, [
-      '/bin/bash', '-c', shell, 'bot-errors-health', '/usr/bin/python3', `${checkout}/deploy/scripts/bot-errors-runner.py`,
-      '--instance', 'bot-errors-health', '--source', 'service-exit', '--summary', 'BOT ERRORS daily health command failed',
-      '--log-hint', `${world.home}/.local/state/bot-errors/logs/health.err.log`, '--diagnostic', 'launchd_label=com.bot-errors.health',
-      '--', '/usr/bin/python3', `${checkout}/deploy/scripts/bot-errors-health-check.py`, '--daily',
-    ], checkout).replace('  <key>WorkingDirectory</key>', [
-      '  <key>EnvironmentVariables</key>', '  <dict><key>UNRELATED</key><string>preserve-me</string></dict>',
-      '  <key>StartCalendarInterval</key>', '  <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>20</integer></dict>',
-      '  <key>WorkingDirectory</key>',
-    ].join('\n'));
+    const label = BOT_ERRORS;
+    const shell = legacyShell(checkout, world.home);
+    // The environment key is one the installers write (BOT_ERRORS_DB); the wrapper admits no other.
+    const source = legacyWrapper(checkout, world.home);
     const declaration = { schemaVersion: 2, members: members(world), hostAuxiliaries: [
       { label, mode: 'path-rebase', expectCurrent: checkout },
     ] };
@@ -1350,7 +1449,13 @@ describe('release:activate-host closed host auxiliaries', () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
 
+  it('refuses a legacy wrapper that differs from the reviewed shell, naming the reinstall route', async () => {
+    const world = twoMemberWorld();
+    const checkout = path.join(world.root, 'legacy-checkout'); writeRelease(checkout, OLD, true);
+    const source = legacyWrapper(checkout, world.home);
+    const declaration = { schemaVersion: 2, members: members(world), hostAuxiliaries: [{ label: BOT_ERRORS, mode: 'path-rebase', expectCurrent: checkout }] };
     for (const malformed of [
       source.replace('/health-profiles/edge9.json', '/health-profiles/not-edge9.json'),
       source.replace('/health-profiles/edge9.json', '/health-profiles/Edge9.json'),
@@ -1359,40 +1464,17 @@ describe('release:activate-host closed host auxiliaries', () => {
       source.replace('BOT_ERRORS_JID must be a WhatsApp group JID" >/dev/stderr; exit 65;', 'BOT_ERRORS_JID must be a WhatsApp group JID" >/dev/stderr; exit 0;'),
       source.replace('  exec "$@"', ' ; printf injected;  exec "$@"'),
     ]) {
-      world.addJob(label, malformed);
-      const refused = await planHostUnit(world, declaration);
-      expect(refused.ready).toBe(false);
-      expect(refused.document.preconditions).toEqual(expect.arrayContaining([
-        expect.objectContaining({ id: `host-aux-plist-staged:${label}`, ok: false, detail: expect.stringContaining('embedded') }),
-      ]));
+      world.addJob(BOT_ERRORS, malformed);
+      expectStaged(await planHostUnit(world, declaration), BOT_ERRORS, HEALTH_SHAPE);
     }
   });
 
-  it('rewrites no shell text outside the legacy wrapper, and refuses a target release that is not a shell token', async () => {
+  it('refuses a target release that is not a closed-form shell-token path', async () => {
     const world = twoMemberWorld();
     const checkout = path.join(world.root, 'shell-checkout'); writeRelease(checkout, OLD, true);
-    const label = 'com.bot-errors.health';
+    const label = BOT_ERRORS;
     const declaration = { schemaVersion: 2, members: members(world), hostAuxiliaries: [{ label, mode: 'path-rebase', expectCurrent: checkout }] };
-    const script = `${checkout}/deploy/scripts/bot-errors-health-check.py`;
-
-    // A non-legacy shell command that starts with the root is shell text, even toward a shell-token release.
-    world.addJob(label, plist(label, ['/bin/bash', '-c', `${script} --daily`], checkout));
-    const command = await planHostUnit(world, declaration);
-    expect(command.ready).toBe(false);
-    expect(command.document.preconditions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: `host-aux-plist-staged:${label}`, ok: false, detail: expect.stringContaining('embedded') }),
-    ]));
-
-    // A bare root path in that shell argument is still a shell command: with no closed contract it names no script file.
-    world.addJob(label, plist(label, ['/bin/bash', '-c', script], checkout));
-    const inline = await planHostUnit(world, declaration);
-    expect(inline.ready).toBe(false);
-    expect(inline.document.preconditions).toEqual(expect.arrayContaining([
-      { id: `host-aux-plist-staged:${label}`, ok: false, detail: 'interpreter launch form names no script argument (inline, module, or option form)' },
-    ]));
-
-    // A script file the shell runs is rebased, but only toward a closed-form shell-token release.
-    world.addJob(label, plist(label, ['/bin/bash', script], checkout));
+    world.addJob(label, installerForm(checkout, world.home));
     expect((await planHostUnit(world, declaration)).ready).toBe(true);
     const unit = path.join(world.root, 'host-unit-shell-release.json');
     writeFileSync(unit, JSON.stringify(declaration));
@@ -1481,22 +1563,11 @@ describe('release:activate-host closed host auxiliaries', () => {
 
   it('path-rebases only the reviewed native maintenance and reply timer argv contracts', async () => {
     const world = twoMemberWorld();
-    const maintenanceLabel = 'com.whatsoup.harness-maintenance';
-    const replyLabel = 'com.whatsoup.reply-guarantee';
+    const maintenanceLabel = MAINTENANCE;
+    const replyLabel = REPLY;
     const guard = `${world.home}/.local/libexec/fleet-reauth/maint-ccd-guard.sh`;
-    const node = `${world.home}/.nvm/versions/node/v24.15.0/bin/node`;
-    const maintenanceSource = plist(maintenanceLabel, [
-      '/bin/bash', guard, '/bin/bash', `${world.oldRelease}/deploy/scripts/harness-maintenance.sh`,
-    ], world.oldRelease).replace('  <key>WorkingDirectory</key>', [
-      '  <key>RunAtLoad</key>', '  <true/>', '  <key>StartInterval</key>', '  <integer>3600</integer>',
-      '  <key>KeepAlive</key>', '  <false/>', '  <key>WorkingDirectory</key>',
-    ].join('\n'));
-    const replySource = plist(replyLabel, [
-      node, `${world.oldRelease}/deploy/hooks/drain-stuck-replies.mjs`, '--once',
-    ], world.oldRelease).replace('  <key>WorkingDirectory</key>', [
-      '  <key>RunAtLoad</key>', '  <true/>', '  <key>StartInterval</key>', '  <integer>300</integer>',
-      '  <key>KeepAlive</key>', '  <false/>', '  <key>WorkingDirectory</key>',
-    ].join('\n'));
+    const maintenanceSource = maintenanceForm(world.oldRelease, world.home);
+    const replySource = replyForm(world.oldRelease, world.home);
     const declaration = { schemaVersion: 2, members: members(world), hostAuxiliaries: [
       { label: maintenanceLabel, mode: 'path-rebase', expectCurrent: world.oldRelease },
       { label: replyLabel, mode: 'path-rebase', expectCurrent: world.oldRelease },
@@ -1522,7 +1593,7 @@ describe('release:activate-host closed host auxiliaries', () => {
       [replyLabel, replySource.replace('    <string>--once</string>\n', '    <string>--unknown</string>\n'), 'reviewed path-rebase contract'],
       [replyLabel, replySource.replace('    <string>--once</string>\n', '    <string>--once</string>\n    <string>--unknown</string>\n'), 'reviewed path-rebase contract'],
       [replyLabel, replySource.replace('v24.15.0/bin/node', 'v24.15/bin/node'), 'reviewed path-rebase contract'],
-      [maintenanceLabel, maintenanceSource.replace('  <key>WorkingDirectory</key>', `  <key>Opaque</key>\n  <string>cd ${world.oldRelease} &amp;&amp; run</string>\n  <key>WorkingDirectory</key>`), 'embedded'],
+      [maintenanceLabel, withLines(maintenanceSource, '  <key>StandardOutPath</key>', `  <string>cd ${world.oldRelease} &amp;&amp; run</string>`), 'embedded'],
     ] as const) {
       world.addJob(maintenanceLabel, maintenanceSource);
       world.addJob(replyLabel, replySource);
@@ -1533,6 +1604,28 @@ describe('release:activate-host closed host auxiliaries', () => {
         expect.objectContaining({ id: `host-aux-plist-staged:${label}`, ok: false, detail: expect.stringContaining(detail) }),
       ]));
     }
+  });
+
+  it('refuses at apply, before any write, a staged path-rebase plist changed after planning', async () => {
+    const { world, checkout, declaration } = pathRebaseWorld();
+    const source = installerForm(checkout, world.home);
+    const plistPath = world.addJob(BOT_ERRORS, source);
+    const plan = await planHostUnit(world, declaration);
+    expect(plan.ready).toBe(true);
+    // launchd would run Program in place of ProgramArguments[0]; the selector check before the switch reads only the latter.
+    const changed = { ...plan.applyContext!, hostAuxiliaries: plan.applyContext!.hostAuxiliaries!.map((entry) => ({
+      ...entry, staged: withLines(entry.staged, '  <key>Program</key>', '  <string>/opt/example/bin/other</string>'),
+    })) };
+    const result = await (async () => {
+      vi.stubEnv('HOME', world.home); vi.stubEnv('XDG_CONFIG_HOME', path.join(world.home, '.config')); vi.stubEnv('XDG_DATA_HOME', path.join(world.home, '.local', 'share'));
+      try { return await applyHostUnitActivation(world.host, changed); } finally { vi.unstubAllEnvs(); }
+    })();
+    expect(result.outcome).toBe('refused');
+    expect(result.failure).toBe(`${BOT_ERRORS}: staged plist does not match its path-rebase contract: ${rootKey('Program')}`);
+    expect(result.steps).toEqual(expect.arrayContaining([{ step: `recheck-staged-path-rebase:${BOT_ERRORS}`, ok: false, detail: rootKey('Program') }]));
+    expect(readFileSync(plistPath, 'utf8')).toBe(source);
+    expect(readlinkSync(world.link)).toBe(path.join(world.oldRelease, 'deploy', 'whatsoup'));
+    expect(world.calls.filter((call) => /^(?:bootout|bootstrap|kickstart):/.test(call))).toEqual([]);
   });
 
   it('requires the complete loaded consumer union for a separate fleet wrapper', async () => {
