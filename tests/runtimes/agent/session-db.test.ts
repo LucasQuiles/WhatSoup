@@ -21,10 +21,12 @@ import {
   backfillWorkspaceKeys,
   markOrphaned,
   getResumableSessionForChat,
+  getSessionTurnCount,
   resolveResumableAgentSession,
   restoreOrphanedResidentSessionStatus,
   backfillSessionProvider,
   listActiveSessionRows,
+  updateResumedSessionStatus,
 } from '../../../src/runtimes/agent/session-db.ts';
 
 vi.mock('../../../src/logger.ts', async () => (await import('../../helpers/logger-mock.ts')).loggerMock());
@@ -375,6 +377,40 @@ describe('agent session-db', () => {
     expect(resumable?.session_id).toBe(codexThreadId);
     expect(resumable?.chat_jid).toBe(jid);
     expect(resumable?.id).toBe(id);
+  });
+
+  // A failed Codex resume decides between "nothing to lose" and "history lost"
+  // from the turns written on the stored thread's exact row.
+  it('getSessionTurnCount reads message_count for the exact row, provider session and provider', () => {
+    const wk = 'codex-turn-count';
+    const id = createSession(db, 70002, '/tmp/codex-turn-count', 'turn-count@s.whatsapp.net', wk, 'codex-cli');
+    updateSessionId(db, id, 'thread-counted');
+    expect(getSessionTurnCount(db, id, 'thread-counted', 'codex-cli')).toBe(0);
+
+    incrementMessageCount(db, id);
+    incrementMessageCount(db, id);
+    expect(getSessionTurnCount(db, id, 'thread-counted', 'codex-cli')).toBe(2);
+
+    expect(getSessionTurnCount(db, id, 'thread-other', 'codex-cli')).toBeNull();
+    expect(getSessionTurnCount(db, id, 'thread-counted', 'claude-cli')).toBeNull();
+    expect(getSessionTurnCount(db, id + 1000, 'thread-counted', 'codex-cli')).toBeNull();
+  });
+
+  it('a Codex row closed as resume_failed is returned by no resume selector', () => {
+    // Characterization: also passes before the resume change. It pins the
+    // selectors the host-admission close relies on, so a rejected thread is
+    // not resumed again.
+    const wk = 'codex-resume-failed-retired';
+    const jid = 'resume-failed@s.whatsapp.net';
+    const id = createSession(db, 70003, '/tmp/codex-resume-failed', jid, wk, 'codex-cli');
+    updateSessionId(db, id, 'thread-retired');
+    updateSessionStatus(db, id, 'suspended');
+    expect(getResumableSessionForChat(db, wk, 'codex-cli')?.session_id).toBe('thread-retired');
+
+    updateResumedSessionStatus(db, id, 'thread-retired', 'codex-cli', 'resume_failed');
+
+    expect(getResumableSessionForChat(db, wk, 'codex-cli')).toBeNull();
+    expect(getActiveSession(db, 'codex-cli')).toBeNull();
   });
 
   it('getResumableSessionForChat does not return active sessions', () => {

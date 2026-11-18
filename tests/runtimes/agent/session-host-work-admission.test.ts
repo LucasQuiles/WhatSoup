@@ -20,7 +20,15 @@ const processIsolation = vi.hoisted(() => ({
   launch: vi.fn(),
 }));
 
-vi.mock('../../../src/logger.ts', async () => (await import('../../helpers/logger-mock.ts')).loggerMock());
+// One shared, inspectable logger so the Codex resume tests can assert on log lines.
+const { mockLogger } = vi.hoisted(() => ({
+  mockLogger: {} as Record<string, ReturnType<typeof vi.fn>>,
+}));
+
+vi.mock('../../../src/logger.ts', async () => {
+  const { hoistedLoggerMock } = await import('../../helpers/logger-mock.ts');
+  return { createChildLogger: hoistedLoggerMock(mockLogger).createChildLogger };
+});
 vi.mock('node:os', () => ({ homedir: vi.fn(() => '/mock/home'), userInfo: vi.fn(() => ({ username: 'test' })) }));
 vi.mock('node:fs', () => ({ readFileSync: vi.fn() }));
 vi.mock('node:child_process', () => ({ spawn: vi.fn() }));
@@ -33,6 +41,7 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   createSession: vi.fn(() => 9), incrementMessageCount: vi.fn(), updateSessionId: vi.fn(),
   updateSessionStatus: vi.fn(), updateTranscriptPath: vi.fn(), backfillSessionProvider: vi.fn(),
   resolveResumableAgentSession: vi.fn(() => null), updateResumedSessionStatus: vi.fn(),
+  getSessionTurnCount: vi.fn(() => null),
 }));
 vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts', () => ({
   sha256File: vi.fn(() => 'a'.repeat(64)),
@@ -55,7 +64,12 @@ import { spawn } from 'node:child_process';
 import type { M365MutationPolicy } from '../../../src/core/m365-bridge-policy.ts';
 import { M365_ACCOUNT_SELECTION_DENY, M365_MUTATION_DENY } from '../../../src/core/settings-template.ts';
 import { killSessionTree } from '../../../src/runtimes/agent/process-tree.ts';
-import { resolveResumableAgentSession, updateResumedSessionStatus } from '../../../src/runtimes/agent/session-db.ts';
+import {
+  getSessionTurnCount,
+  resolveResumableAgentSession,
+  updateResumedSessionStatus,
+  updateSessionId,
+} from '../../../src/runtimes/agent/session-db.ts';
 import { SessionManager, type SessionManagerOptions } from '../../../src/runtimes/agent/session.ts';
 import { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
 import type { Database } from '../../../src/core/database.ts';
@@ -130,6 +144,10 @@ describe('SessionManager host work admission', () => {
     admission.spawn.mockReset();
     admission.enabled.mockReturnValue(true);
     processIsolation.launch.mockReset();
+    // null = an unknown turn count. An unknown count counts as lost history for
+    // every failed resume, so an admitted close with this default logs the
+    // ERROR line and sends the "could not be restored" notice.
+    vi.mocked(getSessionTurnCount).mockReturnValue(null);
   });
 
   it('routes spawn-per-turn providers through the checked UID/GID launcher instead of the host-admission or direct-spawn path', async () => {
@@ -663,7 +681,22 @@ describe('SessionManager host work admission', () => {
     expect(admission.spawn).not.toHaveBeenCalled();
   });
 
-  it('resumes the exact Codex thread at its next admitted turn boundary', async () => {
+  function codexRequests(child: ReturnType<typeof makeChild>): Array<{ id: string; method?: string; params?: Record<string, unknown> }> {
+    return child.stdin.write.mock.calls.map(([payload]) => JSON.parse(String(payload)));
+  }
+
+  // The app-server may omit the jsonrpc field on the wire, so replies are
+  // headerless unless a test asks for the header.
+  function emitCodexLine(
+    child: ReturnType<typeof makeChild>,
+    message: Record<string, unknown>,
+    opts: { headed?: boolean } = {},
+  ): void {
+    const line = opts.headed === true ? { jsonrpc: '2.0', ...message } : message;
+    child.stdout.emit('data', Buffer.from(`${JSON.stringify(line)}\n`));
+  }
+
+  it('resumes the exact Codex thread with thread/resume at its next admitted turn boundary', async () => {
     const first = makeChild();
     const second = makeChild();
     admission.spawn.mockImplementation((options: { onSpawned?: (value: typeof first) => void }) => {
@@ -683,24 +716,209 @@ describe('SessionManager host work admission', () => {
 
     const secondTurn = session.sendTurn('second turn');
     await vi.waitFor(() => expect(admission.spawn).toHaveBeenCalledTimes(2));
-    expect(second.stdin.write).toHaveBeenCalledWith(expect.stringContaining('"threadId":"codex-thread-a"'));
+    const secondRequests = codexRequests(second);
+    expect(secondRequests.find((request) => request.method === 'thread/resume'))
+      .toMatchObject({ params: { threadId: 'codex-thread-a' } });
+    expect(secondRequests.filter((request) => request.method === 'thread/start')).toEqual([]);
     second.stdout.emit('data', Buffer.from('{"jsonrpc":"2.0","method":"thread/started","params":{"thread":{"id":"codex-thread-a"}}}\n'));
     await secondTurn;
     await session.shutdown(false);
   });
 
-  it('rejects the waiting admitted Codex turn on exact-resume rejection without starting fresh', async () => {
+  it('starts a fresh admitted Codex thread without closing when a stored thread with no turns has no rollout', async () => {
     const child = makeChild();
     admitPersistentChild(child);
     vi.mocked(resolveResumableAgentSession).mockReturnValueOnce({ id: 9 } as never);
+    vi.mocked(getSessionTurnCount).mockReturnValue(0);
     const session = makeSession('codex-cli');
+    await session.spawnSession('codex-empty-thread', 9);
+    const turn = session.sendTurn('first turn after restart');
+    await vi.waitFor(() => expect(admission.spawn).toHaveBeenCalledOnce());
+
+    const resumeRequest = codexRequests(child).find((request) => request.method === 'thread/resume');
+    expect(resumeRequest).toMatchObject({ params: { threadId: 'codex-empty-thread' } });
+    emitCodexLine(child, {
+      id: resumeRequest!.id,
+      error: { code: -32600, message: 'no rollout found for thread id codex-empty-thread' },
+    });
+
+    const freshStart = codexRequests(child).find((request) => request.method === 'thread/start');
+    expect(freshStart).toBeDefined();
+    expect(freshStart!.params).not.toHaveProperty('threadId');
+    emitCodexLine(child, { id: freshStart!.id, result: { thread: { id: 'codex-fresh-thread' } } });
+    await turn;
+
+    expect(codexRequests(child).find((request) => request.method === 'turn/start'))
+      .toMatchObject({ params: { threadId: 'codex-fresh-thread' } });
+    expect(getSessionTurnCount).toHaveBeenCalledWith(sessionDb, 9, 'codex-empty-thread', 'codex-cli');
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ storedThreadId: 'codex-empty-thread', turnCount: 0 }),
+      'codex: stored thread has no rollout - starting fresh',
+    );
+    // The row keeps the stored id until the fresh thread's init replaces it.
+    expect(updateSessionId).not.toHaveBeenCalledWith(sessionDb, 9, '');
+    expect(updateSessionId).toHaveBeenLastCalledWith(sessionDb, 9, 'codex-fresh-thread');
+    expect(updateResumedSessionStatus).not.toHaveBeenCalledWith(
+      sessionDb, 9, 'codex-empty-thread', 'codex-cli', 'resume_failed',
+    );
+    expect(child.kill).not.toHaveBeenCalled();
+    await session.shutdown(false);
+  }, 1_000);
+
+  const ADMITTED_LOST_NOTICE = '_Previous session could not be restored_ — your next message starts a fresh session.';
+
+  it.each([
+    {
+      count: 'a positive turn count',
+      expectedTurnCount: 4,
+      message: 'codex: stored thread had turns but its rollout is missing - session closed',
+      arrange: () => { vi.mocked(getSessionTurnCount).mockReturnValue(4); },
+    },
+    {
+      count: 'an unreadable turn count',
+      expectedTurnCount: null,
+      // An unknown count is treated as lost but does not prove turns.
+      message: 'codex: stored thread may have had turns but its rollout is missing - session closed',
+      arrange: () => {
+        vi.mocked(getSessionTurnCount).mockImplementationOnce(() => { throw new Error('database is locked'); });
+      },
+    },
+  ])('closes the admitted Codex session and notifies the user once when a stored thread with $count has no rollout', async ({ expectedTurnCount, message, arrange }) => {
+    const child = makeChild();
+    admitPersistentChild(child);
+    vi.mocked(resolveResumableAgentSession).mockReturnValueOnce({ id: 9 } as never);
+    arrange();
+    const notifyUser = vi.fn();
+    const session = makeSession('codex-cli', { notifyUser });
+    await session.spawnSession('codex-lost-thread', 9);
+    const turn = session.sendTurn('turn after restart');
+    await vi.waitFor(() => expect(admission.spawn).toHaveBeenCalledOnce());
+
+    const resumeRequest = codexRequests(child).find((request) => request.method === 'thread/resume');
+    expect(resumeRequest).toMatchObject({ params: { threadId: 'codex-lost-thread' } });
+    emitCodexLine(child, {
+      id: resumeRequest!.id,
+      error: { code: -32600, message: 'no rollout found for thread id codex-lost-thread' },
+    });
+
+    await expect(turn).rejects.toThrow('HOST_WORK_ADMISSION_CODEX_RESUME_REJECTED');
+    await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith('SIGTERM'), { timeout: 500 });
+    expect(notifyUser).toHaveBeenCalledTimes(1);
+    expect(notifyUser).toHaveBeenCalledWith(ADMITTED_LOST_NOTICE);
+    // No turn reaches the provider and no fresh thread replaces the lost one.
+    const methods = codexRequests(child).map((request) => request.method);
+    expect(methods).not.toContain('turn/start');
+    expect(methods).not.toContain('thread/start');
+    expect(updateResumedSessionStatus).toHaveBeenCalledWith(
+      sessionDb, 9, 'codex-lost-thread', 'codex-cli', 'resume_failed',
+    );
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        storedThreadId: 'codex-lost-thread',
+        turnCount: expectedTurnCount,
+        error: 'no rollout found for thread id codex-lost-thread',
+      }),
+      message,
+    );
+    expect(session.getStatus()).toMatchObject({ active: false, providerTerminated: true });
+  }, 1_000);
+
+  it('closes the admitted Codex session and notifies the user once when another resume failure abandons a thread with turns', async () => {
+    const child = makeChild();
+    admitPersistentChild(child);
+    vi.mocked(resolveResumableAgentSession).mockReturnValueOnce({ id: 9 } as never);
+    vi.mocked(getSessionTurnCount).mockReturnValue(2);
+    const notifyUser = vi.fn();
+    const session = makeSession('codex-cli', { notifyUser });
+    await session.spawnSession('codex-unloadable-thread', 9);
+    const turn = session.sendTurn('turn after restart');
+    await vi.waitFor(() => expect(admission.spawn).toHaveBeenCalledOnce());
+
+    const resumeRequest = codexRequests(child).find((request) => request.method === 'thread/resume');
+    emitCodexLine(child, { id: resumeRequest!.id, error: { code: -32603, message: 'failed to load thread' } });
+
+    await expect(turn).rejects.toThrow('HOST_WORK_ADMISSION_CODEX_RESUME_REJECTED');
+    await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith('SIGTERM'), { timeout: 500 });
+    expect(notifyUser).toHaveBeenCalledTimes(1);
+    expect(notifyUser).toHaveBeenCalledWith(ADMITTED_LOST_NOTICE);
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ storedThreadId: 'codex-unloadable-thread', turnCount: 2 }),
+      'codex: stored thread had turns but thread/resume failed - session closed',
+    );
+    const methods = codexRequests(child).map((request) => request.method);
+    expect(methods).not.toContain('turn/start');
+    expect(methods).not.toContain('thread/start');
+  }, 1_000);
+
+  it('keeps no in-memory identity of a rejected Codex thread after the admitted close', async () => {
+    const first = makeChild();
+    const second = makeChild();
+    admission.spawn.mockImplementation((options: { onSpawned?: (value: typeof first) => void }) => {
+      const child = admission.spawn.mock.calls.length === 1 ? first : second;
+      options.onSpawned?.(child);
+      return Promise.resolve(child);
+    });
+    vi.mocked(resolveResumableAgentSession).mockReturnValueOnce({ id: 9 } as never);
+    const session = makeSession('codex-cli');
+    await session.spawnSession('codex-rejected-thread', 9);
+    const turn = session.sendTurn('resume turn');
+    await vi.waitFor(() => expect(admission.spawn).toHaveBeenCalledOnce());
+
+    const resumeRequest = codexRequests(first).find((request) => request.method === 'thread/resume');
+    expect(resumeRequest).toMatchObject({ params: { threadId: 'codex-rejected-thread' } });
+    emitCodexLine(first, { id: resumeRequest!.id, error: { code: -32603, message: 'thread store unavailable' } });
+
+    await expect(turn).rejects.toThrow('HOST_WORK_ADMISSION_CODEX_RESUME_REJECTED');
+    await vi.waitFor(() => expect(first.kill).toHaveBeenCalledWith('SIGTERM'), { timeout: 500 });
+    expect(updateResumedSessionStatus).toHaveBeenCalledWith(
+      sessionDb, 9, 'codex-rejected-thread', 'codex-cli', 'resume_failed',
+    );
+    // Relies on the null default (unknown count), which counts as lost, so the
+    // close logs the ERROR line rather than the plain WARN, and that line does
+    // not claim the thread had turns.
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        storedThreadId: 'codex-rejected-thread',
+        turnCount: null,
+        error: 'thread store unavailable',
+      }),
+      'codex: stored thread may have had turns but thread/resume failed - session closed',
+    );
+
+    // The closed identity is not kept in memory, so the next turn cannot restart it.
+    await expect(session.sendTurn('turn without a session')).rejects.toThrow('No active session');
+    expect(admission.spawn).toHaveBeenCalledOnce();
+
+    // This spawn passes no stored id, so it shows only that the manager kept
+    // no identity of the rejected thread. That no resume selector returns a
+    // 'resume_failed' row is proved on a real database in session-db.test.ts.
+    await session.spawnSession();
+    const freshTurn = session.sendTurn('fresh turn');
+    await vi.waitFor(() => expect(admission.spawn).toHaveBeenCalledTimes(2));
+    const secondRequests = codexRequests(second);
+    expect(secondRequests.filter((request) => request.method === 'thread/resume')).toEqual([]);
+    expect(JSON.stringify(secondRequests)).not.toContain('codex-rejected-thread');
+    const freshStart = secondRequests.find((request) => request.method === 'thread/start');
+    expect(freshStart).toBeDefined();
+    emitCodexLine(second, { id: freshStart!.id, result: { thread: { id: 'codex-next-thread' } } });
+    await freshTurn;
+    await session.shutdown(false);
+  }, 1_000);
+
+  it('rejects the waiting admitted Codex turn on exact-resume rejection without starting fresh and, with an unknown count, notifies once', async () => {
+    const child = makeChild();
+    admitPersistentChild(child);
+    vi.mocked(resolveResumableAgentSession).mockReturnValueOnce({ id: 9 } as never);
+    // Relies on the null default (unknown count), which counts as lost.
+    const notifyUser = vi.fn();
+    const session = makeSession('codex-cli', { notifyUser });
     await session.spawnSession('codex-old-thread', 9);
     const turn = session.sendTurn('resume turn');
     await vi.waitFor(() => expect(admission.spawn).toHaveBeenCalledOnce());
 
     const resumeRequest = child.stdin.write.mock.calls
       .map(([payload]) => JSON.parse(String(payload)))
-      .find((request) => request.method === 'thread/start');
+      .find((request) => request.method === 'thread/resume');
     expect(resumeRequest).toMatchObject({ params: { threadId: 'codex-old-thread' } });
     child.stdout.emit('data', Buffer.from(JSON.stringify({
       jsonrpc: '2.0', id: resumeRequest.id, error: { message: 'thread unavailable' },
@@ -713,7 +931,80 @@ describe('SessionManager host work admission', () => {
     expect(updateResumedSessionStatus).toHaveBeenCalledWith(
       sessionDb, 9, 'codex-old-thread', 'codex-cli', 'resume_failed',
     );
+    // In per_chat the rejected turn itself sends the user no text, so this
+    // notice is the only line the user gets. An unknown count counts as lost
+    // history, so it is the "could not be restored" notice.
+    expect(notifyUser).toHaveBeenCalledTimes(1);
+    expect(notifyUser).toHaveBeenCalledWith(ADMITTED_LOST_NOTICE);
     expect(session.getStatus()).toMatchObject({ active: false, providerTerminated: true });
+  }, 1_000);
+
+  it('closes the admitted Codex session and sends one neutral line when another resume failure hits a thread with zero counted turns', async () => {
+    const child = makeChild();
+    admitPersistentChild(child);
+    vi.mocked(resolveResumableAgentSession).mockReturnValueOnce({ id: 9 } as never);
+    vi.mocked(getSessionTurnCount).mockReturnValue(0);
+    const notifyUser = vi.fn();
+    const session = makeSession('codex-cli', { notifyUser });
+    await session.spawnSession('codex-empty-unavailable-thread', 9);
+    const turn = session.sendTurn('turn after restart');
+    await vi.waitFor(() => expect(admission.spawn).toHaveBeenCalledOnce());
+
+    const resumeRequest = codexRequests(child).find((request) => request.method === 'thread/resume');
+    expect(resumeRequest).toMatchObject({ params: { threadId: 'codex-empty-unavailable-thread' } });
+    emitCodexLine(child, { id: resumeRequest!.id, error: { code: -32603, message: 'thread store unavailable' } });
+
+    await expect(turn).rejects.toThrow('HOST_WORK_ADMISSION_CODEX_RESUME_REJECTED');
+    await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith('SIGTERM'), { timeout: 500 });
+    // Nothing was lost, but the turn was rejected and per_chat sends no text
+    // for it, so exactly one neutral line asks the user to send it again.
+    expect(notifyUser).toHaveBeenCalledTimes(1);
+    expect(notifyUser).toHaveBeenCalledWith('_Your message was not processed_ — please send it again.');
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ storedThreadId: 'codex-empty-unavailable-thread', turnCount: 0 }),
+      'codex: host-admission thread resume rejected — session closed',
+    );
+    expect(mockLogger.error).not.toHaveBeenCalled();
+    const methods = codexRequests(child).map((request) => request.method);
+    expect(methods).not.toContain('turn/start');
+    expect(methods).not.toContain('thread/start');
+    expect(updateResumedSessionStatus).toHaveBeenCalledWith(
+      sessionDb, 9, 'codex-empty-unavailable-thread', 'codex-cli', 'resume_failed',
+    );
+    expect(session.getStatus()).toMatchObject({ active: false, providerTerminated: true });
+  }, 1_000);
+
+  it('still closes the admitted Codex session when the resume notice throws', async () => {
+    const child = makeChild();
+    admitPersistentChild(child);
+    vi.mocked(resolveResumableAgentSession).mockReturnValueOnce({ id: 9 } as never);
+    vi.mocked(getSessionTurnCount).mockReturnValue(2);
+    const notifyUser = vi.fn(() => { throw new Error('outbound queue closed'); });
+    const session = makeSession('codex-cli', { notifyUser });
+    await session.spawnSession('codex-notice-throws-thread', 9);
+    const turn = session.sendTurn('turn after restart');
+    await vi.waitFor(() => expect(admission.spawn).toHaveBeenCalledOnce());
+
+    const resumeRequest = codexRequests(child).find((request) => request.method === 'thread/resume');
+    expect(resumeRequest).toMatchObject({ params: { threadId: 'codex-notice-throws-thread' } });
+    emitCodexLine(child, { id: resumeRequest!.id, error: { code: -32603, message: 'failed to load thread' } });
+
+    // A notifier throw must not escape to the intercept's catch, which would
+    // skip the close and hand the reply to the parser, quarantining the child.
+    await expect(turn).rejects.toThrow('HOST_WORK_ADMISSION_CODEX_RESUME_REJECTED');
+    await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith('SIGTERM'), { timeout: 500 });
+    expect(child.kill).not.toHaveBeenCalledWith('SIGKILL');
+    expect(notifyUser).toHaveBeenCalledTimes(1);
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) }),
+      'codex: resume notice could not be sent',
+    );
+    expect(updateResumedSessionStatus).toHaveBeenCalledWith(
+      sessionDb, 9, 'codex-notice-throws-thread', 'codex-cli', 'resume_failed',
+    );
+    const methods = codexRequests(child).map((request) => request.method);
+    expect(methods).not.toContain('turn/start');
+    expect(methods).not.toContain('thread/start');
   }, 1_000);
 
   it('keeps replacement closed after persistent host-admission cleanup is unproven', async () => {
