@@ -1094,10 +1094,11 @@ describe('no-arm scoped to existing window state', () => {
 //
 // recordFallbackTurnOutcome counts an empty turn toward the active entry's
 // advance run only when the session that produced it serves that entry (the
-// marking predicate). A primary turn already in flight when an operator forces
-// a window still finishes on the primary route. Counted, its empty turns
-// re-activated the window as a primary-tier failure, which moved the
-// operator's deadline out to the five-hour default.
+// marking predicate) and route attribution does not assign it to the primary.
+// A primary turn already in flight when an operator forces a window still
+// finishes on the primary route. Counted, its empty turns re-activated the
+// window as a primary-tier failure, which moved the operator's deadline out to
+// the five-hour default.
 
 describe('empty-turn accounting during an operator-forced window', () => {
   beforeEach(() => {
@@ -1116,7 +1117,11 @@ describe('empty-turn accounting during an operator-forced window', () => {
     const config = mockConfigRef();
     config['agentProvider'] = 'claude-cli';
     config['agentFallbacks'] = chain;
-    const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
+    return forceFiveMinuteWindow(new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' }));
+  }
+
+  /** `FALLBACK ON 5m` on the given runtime; returns the forced end. */
+  function forceFiveMinuteWindow(runtime: AgentRuntime) {
     const rv = v(runtime);
     rv.probePrimaryProviderRecovered = vi.fn(() => false) as unknown as () => boolean;
     expect(runtime.forceFallback(FORCED_WINDOW_MS)).toMatchObject({ ok: true });
@@ -1167,5 +1172,56 @@ describe('empty-turn accounting during an operator-forced window', () => {
     expect(rv.fallbackWindow.activeEntry?.model).toBe('claude-sonnet-4-6');
     expect(rv.fallbackChain.failedKeys.size).toBe(1);
     expect(rv.fallbackWindow.activeUntil).toBe(forcedUntil);
+  });
+
+  it('empty turns from an explicit-model primary session beside a wildcard same-provider entry leave the forced end unchanged', async () => {
+    // The marking predicate matches a wildcard entry on any model, but that
+    // entry's window route carries no model: a session with the configured
+    // primary model is the primary, and route attribution says so.
+    const { rv, forcedUntil, queue } = forceFiveMinuteWindow(makeRuntime([{ provider: 'claude-cli' }]));
+    const primarySession = {
+      getProviderId: () => 'claude-cli',
+      getStatus: () => ({ sessionId: 'claude-cli-1' }),
+      getModelRef: () => 'claude-opus-4-8[1m]',
+    };
+
+    await vi.advanceTimersByTimeAsync(60 * 1000);
+    for (let i = 0; i < 3; i++) {
+      rv.recordFallbackTurnOutcome(queue, false, false, primarySession);
+    }
+
+    expect(rv.fallbackWindow.activeUntil).toBe(forcedUntil);
+    expect(rv.fallbackChain.failedKeys.size).toBe(0);
+  });
+
+  it("an empty turn from a prior entry's session does not count toward the active entry's run", async () => {
+    const { rv, queue } = forceWindowBesideNamedEntries([
+      { provider: 'claude-cli', model: 'claude-haiku-4-5' },
+      { provider: 'claude-cli', model: 'claude-sonnet-4-6' },
+    ]);
+    const firstEntrySession = {
+      getProviderId: () => 'claude-cli',
+      getStatus: () => ({ sessionId: 'claude-cli-2' }),
+      getModelRef: () => 'claude-haiku-4-5',
+    };
+    const secondEntrySession = {
+      getProviderId: () => 'claude-cli',
+      getStatus: () => ({ sessionId: 'claude-cli-3' }),
+      getModelRef: () => 'claude-sonnet-4-6',
+    };
+
+    await vi.advanceTimersByTimeAsync(60 * 1000);
+    rv.recordFallbackTurnOutcome(queue, false, false, firstEntrySession);
+    rv.recordFallbackTurnOutcome(queue, false, false, firstEntrySession);
+    expect(rv.fallbackWindow.activeEntry?.model).toBe('claude-sonnet-4-6');
+
+    // The first entry's session is still in flight after the advance. Its
+    // empty turn is no evidence against the second entry, so one empty turn
+    // from the second entry's own session stays below the threshold.
+    rv.recordFallbackTurnOutcome(queue, false, false, firstEntrySession);
+    rv.recordFallbackTurnOutcome(queue, false, false, secondEntrySession);
+
+    expect(rv.fallbackWindow.activeEntry?.model).toBe('claude-sonnet-4-6');
+    expect(rv.fallbackChain.failedKeys.size).toBe(1);
   });
 });
