@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { Database } from './database.ts';
-import { assertCanonicalSchema43 } from './database-migration-43.ts';
+import { assertRecoveryCatchupSchema } from './recovery-catchup-schema.ts';
 import { withTransaction } from './db-tx.ts';
 import { allFromStatement } from '../lib/db-query.ts';
 import { withoutOperatorCatchupResolutionSql } from './open-recoveries-sql.ts';
@@ -112,7 +112,7 @@ export function inspectOperatorCatchupRecovery(
   raw: DatabaseSync,
   params: CloseOperatorCatchupRecoveryParams,
 ): OperatorCatchupRecoveryInspection {
-  assertCanonicalSchema43(raw);
+  assertRecoveryCatchupSchema(raw);
   const planId = requiredText(params.planId, 'Recovery plan ID');
   const conversationKey = requiredText(params.conversationKey, 'Conversation key');
   const actor = requiredText(params.actor, 'Recovery actor');

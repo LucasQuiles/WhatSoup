@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
-import { assertCanonicalSchema43 } from './database-migration-43.ts';
+import { assertRecoveryCatchupSchema } from './recovery-catchup-schema.ts';
 import { assertOperatorCatchupResolutionSchema, OPERATOR_CATCHUP_PROOF_SQL } from './database-migration-69.ts';
 
 export interface OperatorCatchupResolutionParams {
@@ -20,7 +20,7 @@ function requiredText(value: string, limit: number): string {
 }
 
 export function inspectOperatorCatchupResolution(raw: DatabaseSync, params: OperatorCatchupResolutionParams) {
-  assertCanonicalSchema43(raw);
+  assertRecoveryCatchupSchema(raw);
   assertOperatorCatchupResolutionSchema(raw);
   if (params.originalFulfillmentConfirmed !== true) throw new Error('Original request fulfillment must be confirmed');
   const planId = requiredText(params.planId, 2048);
