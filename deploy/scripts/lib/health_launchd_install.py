@@ -75,6 +75,9 @@ def supported_metadata(path: Path, info: os.stat_result) -> None:
 
 def candidate(raw: bytes, root: Path, label: str, manifest: str | None) -> tuple[bytes, list[str]]:
     before = plistlib.loads(raw)
+    # Exit 1 means a verified rollback, so malformed input must be a refusal, not an AttributeError.
+    if not isinstance(before, dict):
+        raise Refused("expected a plist whose top level is a dict")
     if before.get("Label") != label or before.get("RunAtLoad") is not False or before.get("KeepAlive", False):
         raise Refused("expected an existing health job with RunAtLoad=false and no KeepAlive")
     if "Program" in before or not isinstance(before.get("StartCalendarInterval"), (dict, list)):
@@ -101,6 +104,8 @@ def candidate(raw: bytes, root: Path, label: str, manifest: str | None) -> tuple
         if not path.is_absolute() or not path.is_file() or not os.access(path, os.R_OK):
             raise Refused("runtime manifest must be an existing readable absolute path")
         env = after.setdefault("EnvironmentVariables", {})
+        if not isinstance(env, dict):
+            raise Refused("EnvironmentVariables must be a dict")
         env["BOT_ERRORS_RUNTIME_MANIFEST"] = str(path)
         changes.append("EnvironmentVariables.BOT_ERRORS_RUNTIME_MANIFEST")
     return plistlib.dumps(after, sort_keys=False), changes
@@ -166,9 +171,14 @@ def apply(path: Path, raw: bytes, data: bytes, info: os.stat_result, domain: str
         try:
             idle_job(domain, label)
             backup = stage(path, current, info, path.name + ".backup-")
-            _, current_info = read_original(path, sha(raw))
-            same_permissions(current_info, info)
-            supported_metadata(path, current_info)
+            try:
+                _, current_info = read_original(path, sha(raw))
+                same_permissions(current_info, info)
+                supported_metadata(path, current_info)
+            except BaseException:
+                # Nothing has changed yet, and the refusal receipt names no backup.
+                backup.unlink(missing_ok=True)
+                raise
             try:
                 result = command("launchctl", "bootout", domain, str(path))
                 if result.returncode:
