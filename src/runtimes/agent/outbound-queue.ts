@@ -290,7 +290,7 @@ export interface IOutboundQueue {
   enqueueToolUpdate(update: ToolUpdate): void;
   enqueueProgressUpdate(event: ProgressEvent, instanceName: string): void;
   /** Set the tool update display mode. 'minimal' hides technical details, 'friendly' shows all in plain language. */
-  setToolUpdateMode(mode: 'full' | 'minimal' | 'friendly'): void;
+  setToolUpdateMode(mode: 'full' | 'minimal' | 'friendly' | 'unset'): void;
   /** Set an optional redirect JID for tool-status batches. */
   setToolUpdateRedirectJid(jid: string | null): void;
   /** Override the streaming-text aggregation window in milliseconds. */
@@ -436,8 +436,8 @@ export class OutboundQueue implements IOutboundQueue {
   private resolveShutdownDeadlineSignal: (() => void) | null = null;
   private shutdownDeadlineReached = false;
 
-  /** Controls tool update verbosity. 'minimal' suppresses noise, 'friendly' shows all in plain language. */
-  private toolUpdateMode: 'full' | 'minimal' | 'friendly' = 'full';
+  /** Controls tool update verbosity. 'minimal' suppresses noise, 'friendly' shows all in plain language; 'unset' hides only tool progress. */
+  private toolUpdateMode: 'full' | 'minimal' | 'friendly' | 'unset' = 'full';
   /** Optional destination for tool-status batches; regular text still uses chatJid. */
   private toolUpdateRedirectJid: string | null = null;
   /** Debounce window for streaming text fragments. */
@@ -492,7 +492,7 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   /** Set the tool update display mode. 'minimal' hides technical details, 'friendly' shows all in plain language. */
-  setToolUpdateMode(mode: 'full' | 'minimal' | 'friendly'): void {
+  setToolUpdateMode(mode: 'full' | 'minimal' | 'friendly' | 'unset'): void {
     this.toolUpdateMode = mode;
   }
 
@@ -1076,12 +1076,12 @@ export class OutboundQueue implements IOutboundQueue {
    * 3-second idle gap between tool calls, or after 30 seconds maximum —
    * whichever comes first. This prevents silent gaps during long tool chains.
    *
-   * In minimal mode, updates reach only a configured redirect; the user chat stays clean.
+   * Minimal mode suppresses updates; an unset mode sends them only to a configured redirect.
    * The typing indicator remains active while work is in progress.
    */
   enqueueToolUpdate(update: ToolUpdate): void {
     if (this.rejectPostClosureEnqueue()) return;
-    if (this.toolUpdateMode === 'minimal' && this.toolUpdateRedirectJid === null) {
+    if (this.toolUpdateMode === 'minimal' || (this.toolUpdateMode === 'unset' && this.toolUpdateRedirectJid === null)) {
       this.startTyping();
       return;
     }
@@ -1115,7 +1115,7 @@ export class OutboundQueue implements IOutboundQueue {
 
     switch (event.type) {
       case 'thinking_long': {
-        if (this.toolUpdateMode === 'minimal') {
+        if (this.toolUpdateMode === 'minimal' || this.toolUpdateMode === 'unset') {
           this.startTyping();
           return;
         }
@@ -1124,7 +1124,7 @@ export class OutboundQueue implements IOutboundQueue {
       }
 
       case 'thinking_stalled': {
-        if (this.toolUpdateMode === 'minimal') {
+        if (this.toolUpdateMode === 'minimal' || this.toolUpdateMode === 'unset') {
           this.startTyping();
         } else {
           this.enqueueProgress(`_${name} has gone silent \u2014 checking..._`);
@@ -1137,7 +1137,7 @@ export class OutboundQueue implements IOutboundQueue {
           this.startTyping();
           return;
         }
-        if (this.toolUpdateMode === 'minimal') {
+        if (this.toolUpdateMode === 'minimal' || this.toolUpdateMode === 'unset') {
           this.startTyping();
           return;
         }
@@ -1163,7 +1163,7 @@ export class OutboundQueue implements IOutboundQueue {
           return;
         }
         // One-shot slow timer fires once at the fixed threshold, so elapsed is constant \u2014 a threshold, not a live clock (#1843; mirrors #1777).
-        if (this.toolUpdateMode === 'minimal') {
+        if (this.toolUpdateMode === 'minimal' || this.toolUpdateMode === 'unset') {
           this.startTyping();
         } else if (this.toolUpdateMode === 'friendly') {
           this.enqueueProgress(`_${name} is still working on it..._`);
@@ -1179,7 +1179,7 @@ export class OutboundQueue implements IOutboundQueue {
           return;
         }
         // One-shot stall timer fires once at the fixed threshold, so elapsed is constant \u2014 a threshold, not a live clock (#1777).
-        if (this.toolUpdateMode === 'minimal') {
+        if (this.toolUpdateMode === 'minimal' || this.toolUpdateMode === 'unset') {
           this.startTyping();
         } else if (this.toolUpdateMode === 'friendly') {
           this.enqueueProgress(`_${name}: still working \u2014 this is taking a while..._`);

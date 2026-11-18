@@ -1400,8 +1400,8 @@ function configProtectedDelivery() {
   }
 }
 
-// The configured tool update mode, null when unset. End users get the effective
-// mode (unset runs as minimal); operator-facing behaviour follows this value.
+// The configured tool update mode, null when unset. The effective mode maps unset
+// to 'unset'; the admin notice and the status redirect follow this value.
 function readConfiguredToolUpdateMode(): 'full' | 'friendly' | 'minimal' | null {
   return optionalEnum(instance?.toolUpdateMode, 'toolUpdateMode', ['full', 'friendly', 'minimal'] as const) ?? null;
 }
@@ -1532,10 +1532,10 @@ export const config = {
   recencyHalfLifeDays: positiveIntValue(instance?.recencyHalfLifeDays, positiveIntEnv('RECENCY_HALF_LIFE_DAYS', 14)),
   maxAgeDays: positiveIntValue(instance?.maxAgeDays, positiveIntEnv('MAX_AGE_DAYS', 90)),
 
-  // Keep tool details private unless an operator explicitly enables progress updates.
-  toolUpdateMode: readConfiguredToolUpdateMode() ?? 'minimal',
+  // Unset keeps tool progress private, as minimal does, but handles text as full does.
+  toolUpdateMode: readConfiguredToolUpdateMode() ?? 'unset',
   // The admin back-online notice and the status redirect follow this, so an
-  // unset mode keeps both as they were before the default became minimal.
+  // unset mode keeps both, as full does.
   configuredToolUpdateMode: readConfiguredToolUpdateMode(),
   // An explicit minimal mode sends tool status nowhere, as before; an unset mode keeps the redirect.
   toolUpdateRedirectJid: readConfiguredToolUpdateMode() === 'minimal'
