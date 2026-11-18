@@ -659,9 +659,8 @@ Apple's: `<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
 `-//Apple Computer//DTD PLIST 1.0//EN` public identifier with the same system
 identifier, in double quotes with any whitespace between the tokens. Both BOT
 ERRORS installers write it on one line and the timer templates on two. Any
-other DOCTYPE refuses, with `plist DOCTYPE has an internal subset or entity
-declaration` when its text before the first `>` holds `[`, and otherwise with
-`plist DOCTYPE is not the Apple PLIST 1.0 DOCTYPE`: a quoted literal can hold `>` and a whole plist, `plutil -p` reads a plist
+other DOCTYPE refuses: a quoted literal can hold `>` and a whole plist,
+`plutil -p` reads a plist
 written inside a `SYSTEM` literal as the document, and `plutil -lint` passes
 those bytes, so this reader, not `plutil -lint`, refuses them. A comment
 that starts with `<!---` refuses too (`plist holds a comment that starts with
@@ -858,16 +857,13 @@ before each `launchctl bootstrap`, so a plist changed before that last check is
 not loaded. `launchctl bootstrap` reads the plist by path, so a writer running
 as the same user that swaps the file during the bootstrap call itself is not
 detected. The plists this run writes (the member plists, and the host
-auxiliary plists other than the fleet wrapper's and the watchdogs') have no
-such check. When the root helper writes a root-owned plist, apply reads it back
-right after; nothing reads a written plist again before `launchctl bootstrap`
-loads it by path, so a same-user rewrite in that window is what launchd loads
-and `kickstart -k` starts. `kickstart -k` restarts the job launchd already
-holds and does not read the plist again. Once the reloads and every
-verification below pass, one identity check (`verify-live-identity`) compares
-the bytes of each plist on disk with the planned bytes: it finds a rewrite only
-while the rewritten bytes are still on disk, and it does not show what launchd
-loaded. A change found after the switch fails the activation into the group
+auxiliary plists other than the fleet wrapper's and the watchdogs') get no such
+check before `launchctl bootstrap`. When the root helper writes a root-owned
+plist, apply reads it back right after the write. A later identity check
+(`verify-live-identity`) compares a digest of each plist's text on disk with
+the digest this activation expects: it can find a rewrite only while the
+rewrite is still on disk, and it cannot show what launchd loaded. A change
+found after the switch fails the activation into the group
 rollback; unless the rollback's schema or refresh-fence checks have already
 ended it `rollback-blocked-*`, its identity check ends it
 `rollback-unverified`. It reloads all primary
