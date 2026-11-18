@@ -2206,13 +2206,9 @@ export class DurabilityEngine {
   }
 
   /**
-   * Automatic catch-up reconciliation (turn-recovery continuity PR2): close
-   * open `recovery_pending_operator_catchup` links whose conversation has a
-   * delivered catch-up reply. Pure delegation to the hardened core selector —
-   * every closure is still independently re-proven by the closure primitive
-   * and the `inbound_disposition_closure_validate_insert` trigger. Never
-   * throws for per-group rejections (recorded as bounded skips in the report);
-   * see src/core/recovery-catchup-closure.ts.
+   * Inspect catch-up candidates and close only tuples with explicit original
+   * fulfillment evidence. The supervisor provides none, so its periodic scan
+   * leaves candidates pending. Per-group rejections become bounded skips.
    */
   reconcileOperatorCatchupRecoveries(
     params: ReconcileOperatorCatchupParams = {},

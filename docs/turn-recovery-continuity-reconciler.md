@@ -126,15 +126,10 @@ before job enumeration (so the cycle's totals include its outcome):
   skipped }`; the periodic timer discards the scan result, so this log line
   and the database rows are the live observation surfaces.
 - **Tests:** `tests/runtimes/agent/turn-recovery-catchup-reconcile-wiring.test.ts`
-  drives a REAL `Database` + `DurabilityEngine` + `TurnRecoverySupervisor`
-  end-to-end (only the socket is absent): gate-on closes a caught-up group
-  with `auto_reconciler` actors and is idempotent; gate-off (default) leaves
-  everything pending; `groupLimit` bounds a cycle and the next cycle drains
-  the remainder; a throwing reconciler resolves the scan, keeps everything
-  pending, and lands `catchup_reconcile_failed` in health. The same file
-  proves the config gate on the supervisor `AgentRuntime` actually builds:
-  enabled closes the group, absent or `enabled: false` leaves it pending, and
-  `groupLimit` is forwarded.
+  uses a real database, durability engine and supervisor. Enabling the scan
+  leaves original requests pending because the supervisor supplies no fulfillment
+  evidence. Core reconciler tests provide explicit tuple-specific confirmation
+  to exercise successful closure, idempotency and bounded failures.
 
 ### Enabling per instance
 
@@ -150,7 +145,7 @@ The reconciler is off unless the instance's `config.json` opts in:
 
 - `enabled` (boolean, required inside the block): `true` turns the
   reconciler on; `false`, or no block at all, keeps it off.
-- `groupLimit` (integer 1–1000, optional): the most caught-up groups closed
+- `groupLimit` (integer 1–1000, optional): the maximum closure attempts
   per scan cycle. Defaults to the reconciler's own
   `RECONCILE_DEFAULT_GROUP_LIMIT` (50). The reconciler examines at most
   `groupLimit × 20` groups per pass.
@@ -163,22 +158,17 @@ The reconciler is off unless the instance's `config.json` opts in:
   rollback is `enabled: false` (or remove the block) and restart.
 - The code must also be live on the host: see the Deploy note below.
 
-**Observing it.** After a restart with the gate on:
+**Observing it.** Enabling the periodic scan supplies no original-request
+fulfillment confirmation. Expect zero closed groups; ordinary later replies
+remain delivery candidates only. A zero-error scan is not recovery evidence.
+A whole-call failure sets `lastScanFailureReason` to `catchup_reconcile_failed`;
+the turn-recovery deadman carries it as `last_failure=`. Unexpected-error skips
+are logged separately. To close a recovery, use the single-group operator
+workflow with exact original-request evidence and delivery proof.
 
-1. Logs: an info line `turn recovery catch-up reconciler closed caught-up
-   groups` for each pass that closed something. Warnings `turn recovery
-   supervisor catch-up reconciliation failed`, or errors `... recorded
-   unexpected-error skips`, mean something is wrong.
-2. Supervisor health: a whole-call failure sets the supervisor's
-   `lastScanFailureReason` to `catchup_reconcile_failed`. The turn-recovery
-   deadman carries that value in its alert text as `last_failure=`.
-3. Database: the reconciler's closures are
-   `inbound_disposition_links` rows with
-   `disposition = 'superseded_by_operator_catchup' AND actor = 'auto_reconciler'`.
-   The still-open backlog is every `recovery_pending_operator_catchup` link
-   without a matching `superseded_by_operator_catchup` row for the same
-   `(inbound_seq, recovery_plan_id)`. The wiring test's `pendingSeqs()` is
-   that selector.
+Open recovery counts exclude both matching legacy closure rows and direct
+`operator_catchup_resolutions` for the same source and plan. Original terminal,
+quarantine and recovery-attempt records remain unchanged.
 
 The per-scan counters `catchupReconcileAttempted / Closed / Skipped` are part
 of `TurnRecoverySupervisor.scanOnce()`'s result. They are visible to a direct

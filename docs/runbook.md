@@ -2441,7 +2441,7 @@ the protected-delivery tables; migration 68 adds only the protected secret-input
 migration is recorded, a binary whose ceiling is below it refuses the database and will not write: a
 schema-65 binary refuses a schema-66 database, a schema-66 binary refuses a schema-67 database, and a
 schema-67 binary refuses a schema-68 database, all as `future_schema`. **Binary-only rollback is
-unavailable** for any of them. Keep the 68-aware release for containment or forward repair. Restoring a pre-migration
+unavailable** for any of them. Migration 69 adds operator catch-up resolution evidence; a schema-68 binary likewise refuses schema 69. Keep the 69-aware release for containment or forward repair. Restoring a pre-migration
 backup is an owner decision that requires a proven zero-new-writes window. **Never overwrite a newer
 database with an older backup**: messages received after the upgrade would be lost.
 
@@ -2455,10 +2455,10 @@ bash scripts/run-with-pinned-node.sh scripts/schema-rollback-rehearsal.ts \
   --old-root "$OLD" --new-root "$PWD" --work-dir "$SCRATCH/rehearsal"
 ```
 
-The old binary creates the database at its own ceiling, this release migrates it to 68, and the old
-binary reopens it. From a schema-67 previous release, exit `0` means the old binary refused with
-`DatabaseCompatibilityError` reason `future_schema` ("Database schema migration 68 exceeds binary
-ceiling 67; refusing writes") and `rehearsal.db` stayed byte-identical. The output also reports the
+The old binary creates the database at its own ceiling, this release migrates it to 69, and the old
+binary reopens it. From a schema-68 previous release, exit `0` means the old binary refused with
+`DatabaseCompatibilityError` reason `future_schema` ("Database schema migration 69 exceeds binary
+ceiling 68; refusing writes") and `rehearsal.db` stayed byte-identical. The output also reports the
 hashes of every file in the work directory, including the WAL and shared-memory sidecars, as
 `filesBeforeOldReopen` and `filesAfterOldReopen`; the exit code does not compare them, so read them
 there.
@@ -2467,7 +2467,8 @@ there.
 
 A later successful reply establishes delivery of that later reply, not fulfillment of an older
 request. Closure now requires `--confirm-original-fulfillment` and an `--evidence-ref` documenting
-that the original request was addressed. The periodic reconciler and bulk closure tool cannot
+that the original request was addressed. Both are required for dry runs and idempotent repeats,
+not only writes. The periodic reconciler and bulk closure tool cannot
 supply that confirmation from ordinary later traffic; those recoveries remain pending.
 
 For a new authorized operator response, authenticated `POST /send` accepts `operatorCatchup`:
