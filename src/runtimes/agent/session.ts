@@ -3372,6 +3372,11 @@ export class SessionManager {
         this.providerReadyResolve = resolve;
         this.providerReadyReject = reject;
       });
+      // A rejection can come when no turn waits on readiness (a turn throttled
+      // by the budget returns before it awaits), and main.ts shuts the process
+      // down on an unhandled rejection. Each waiting turn still gets the
+      // rejection through its own await.
+      void this.providerReadyPromise.catch(() => undefined);
     }
 
     // Codex app-server: send initialize, then thread/resume for a stored
