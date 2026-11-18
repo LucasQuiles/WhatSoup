@@ -13,7 +13,7 @@ import { createChildLogger } from '../../logger.ts';
 import { canSendToGroup, recordGroupOutbound } from '../../core/echo-guard.ts';
 import { redactInternalArtifacts, resolveOutboundAudience } from '../../core/outbound-message-safety.ts';
 import type { ClientOutputPolicyRegistry } from '../../core/client-output-policy-config.ts';
-import { enforceClientOutputPolicy } from '../../core/client-output-policy-gate.ts';
+import { enforceClientOutputPolicyForKeys } from '../../core/client-output-policy-gate.ts';
 import { isNonEmptyString } from '../../lib/type-guards.ts';
 import { MS_PER_SECOND, MS_PER_MINUTE } from '../../lib/time-units.ts';
 import { isGroupJid } from '../../core/jid-constants.ts';
@@ -728,17 +728,15 @@ export class OutboundQueue implements IOutboundQueue {
   ): boolean {
     // The queue's key and a turn's key can name one chat by two aliases, or two chats in single
     // scope; a policy under either one applies.
-    const keys = new Set([this.conversationKey, attribution.conversationKey]);
-    const decisions = [...keys].map((conversationKey) => enforceClientOutputPolicy({
+    const decision = enforceClientOutputPolicyForKeys({
       registry: this.clientOutputPolicies,
-      conversationKey,
+      conversationKeys: [this.conversationKey, attribution.conversationKey],
       sourceText,
       finalText,
       messageKind: attribution.role,
       log,
-    }));
-    const admitted = decisions.every((decision) => decision.admitted);
-    if (admitted) return true;
+    });
+    if (decision.admitted) return true;
     if (attribution.role === 'answer') {
       this.clientOutputWithheld = true;
       if (

@@ -2389,16 +2389,19 @@ Optional per-conversation output policies for an agent instance. Only `type: "ag
 - **Agent outbound queue.** It checks each logical message before splitting it into chunks. This covers assistant replies, streamed text, tool-update batches and progress placeholders. A withheld placeholder still takes the rate-floor slot, so repeated stalls log once per floor window.
 - **MCP tools.** `send_message`, `reply_message`, `edit_message`, `send_poll` (question and options judged together), `send_media` (the caption only) and `send_voice_reply` (before synthesis) withhold the send. The tool returns an error result to the agent: `{ "sent": false, "withheld": true, "reason": "client_output_policy", "violationCodes": [...] }`. It never echoes the text. An evaluator error returns `evaluationFailed: true` instead of `violationCodes`.
 
-Each withheld message leaves one warn-level log line. The line never contains the message text or blocked-term values. Its fields are:
+Each message that a policy rejects leaves one warn-level log line. The line never contains the message text or blocked-term values. Its fields are:
 
 - `operation`: `client_output_policy`
 - `decision`: `rejected`
 - `conversationKey`: the canonical conversation key
+- `conversationKeys`: only when the queue checked the message under two keys and both policies rejected it; it lists both keys, and `conversationKey` is the first of them
 - `reason`: `client_output_policy`
-- `violationCodes`: one or more of `max_code_points`, `max_question_marks`, `blocked_term`, `internal_artifact` and `whatsapp_jid`
+- `violationCodes`: one or more of `max_code_points`, `max_question_marks`, `blocked_term`, `internal_artifact` and `whatsapp_jid`; with two rejecting keys, the codes of both policies
 - `messageKind`: `answer`, `lifecycle` or `status` from the queue, or the tool name from an MCP tool
 
 If the evaluator throws for a conversation that has a policy, the message is also withheld. The error-level line has `decision: "error"` and `errorName` instead of `reason` and `violationCodes`.
+
+The queue checks a message under two keys when its own conversation key and the turn's key differ: two aliases of one chat, or two chats in single scope. A policy under either key applies, and both keys are evaluated. Each key whose evaluator fails leaves its own error-level line. So one message can also leave one warn-level and one error-level line (one key rejected it and the evaluator failed for the other), or two error-level lines (the evaluator failed for both).
 
 **Turn outcome.** A turn whose answers were all withheld ends as a deliberate terminal outcome, not a delivery failure. The terminal record has attempt kind `withheld_by_policy` under the `finalized_no_reply_policy` disposition. The inbound message completes with terminal reason `client_output_withheld`. The turn is not handed to recovery, is not replayed, raises no reply-guarantee breach alert and is not marked for catch-up. The policy decision satisfies the reply guarantee, which is disarmed. A turn that also delivered another answer finalizes as replied. Withheld text never becomes an automatic voice reply.
 
