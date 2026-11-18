@@ -234,6 +234,27 @@ export function incrementMessageCount(db: Database, rowId: number): void {
 }
 
 /**
+ * Turns written to the provider on this exact row and provider session
+ * (message_count), or null when no row matches that identity. A resumed
+ * session keeps its row, so 0 means the stored session never received a turn.
+ */
+export function getSessionTurnCount(
+  db: Database,
+  rowId: number,
+  sessionId: string,
+  provider: string,
+): number | null {
+  const row = db.raw
+    .prepare(
+      `SELECT message_count
+       FROM agent_sessions
+       WHERE id = ? AND session_id = ? AND provider = ?`,
+    )
+    .get(rowId, sessionId, provider) as { message_count: number | null } | undefined;
+  return typeof row?.message_count === 'number' ? row.message_count : null;
+}
+
+/**
  * Accumulate token usage for a session row (adds to existing totals).
  * `inputTokens` is the genuinely-new portion only (base + cache_creation) —
  * callers must have already subtracted cache_read via
