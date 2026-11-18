@@ -101,6 +101,19 @@ describe('whatsoup-release-drift systemd unit', () => {
     expect([...successExitStatuses()].sort()).toEqual([0, 1]);
   });
 
+  it('reads the instance label from its own optional file, loaded after the shared BOT ERRORS file', () => {
+    const environmentFiles = readFileSync(unitPath, 'utf8').split('\n')
+      .map((line) => /^EnvironmentFile=(.*)$/.exec(line.trim())?.[1])
+      .filter((file): file is string => file !== undefined);
+    // Every BOT ERRORS unit loads bot-errors.env, so the label lives elsewhere. A later
+    // file overrides an earlier one, and "-" lets a missing file reach the wrapper,
+    // whose exit 2 fails the unit with a readable message.
+    expect(environmentFiles).toEqual([
+      '%h/.config/whatsoup/bot-errors.env',
+      '-%h/.config/whatsoup/release-drift.env',
+    ]);
+  });
+
   it('a wrapper configuration error fails the unit visibly', () => {
     const missingInstance = runWrapper({ WHATSOUP_LAUNCHER: '/nonexistent/whatsoup' });
     expect(missingInstance.stderr).toContain('WHATSOUP_INSTANCE is not set');

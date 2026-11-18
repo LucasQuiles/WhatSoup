@@ -18,8 +18,23 @@ function makeFixture(): { repo: string; systemd: string; bin: string } {
   mkdirSync(systemd, { recursive: true });
   mkdirSync(bin, { recursive: true });
   writeEnsureNode(repo, bin, true);
+  writeReleaseDriftWrapper(repo, bin, RELEASE_DRIFT_WRAPPER_BODY);
   chmodSync(SCRIPT, 0o755);
   return { repo, systemd, bin };
+}
+
+// The Linux release-drift unit executes this wrapper from the bin dir, so the
+// default scope checks it; the fixture installs it unchanged.
+const RELEASE_DRIFT_WRAPPER = 'whatsoup-release-drift-linux.sh';
+const RELEASE_DRIFT_WRAPPER_BODY = '#!/usr/bin/env bash\nexit 0\n';
+
+function writeReleaseDriftWrapper(repo: string, bin: string, installedBody: string): void {
+  const repoScript = join(repo, 'deploy/scripts', RELEASE_DRIFT_WRAPPER);
+  const installed = join(bin, RELEASE_DRIFT_WRAPPER);
+  writeFileSync(repoScript, RELEASE_DRIFT_WRAPPER_BODY);
+  writeFileSync(installed, installedBody);
+  chmodSync(repoScript, 0o755);
+  chmodSync(installed, 0o755);
 }
 
 function ensureNodeBody(hasFastPath: boolean): string {
@@ -367,6 +382,53 @@ describe('check-unit-drift.sh', () => {
     expect(result.stderr).toContain('deploy/scripts/ensure-node-installed.sh');
     expect(result.stdout).not.toContain('wrapper checks: not applicable');
     expect(result.stdout).not.toContain('all selected systemd units match');
+  });
+
+  it('the default unit scope includes the Linux release-drift service and timer', () => {
+    const { repo, systemd, bin } = makeFixture();
+
+    const result = run(['--repo-root', repo, '--systemd-dir', systemd, '--bin-dir', bin]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('missing repo unit: deploy/whatsoup-release-drift.service');
+    expect(result.stderr).toContain('missing repo unit: deploy/whatsoup-release-drift.timer');
+  });
+
+  it('fails when the release-drift wrapper its unit executes is not installed', () => {
+    const { repo, systemd, bin } = makeFixture();
+    const content = '[Unit]\nDescription=Match\n';
+    writeFileSync(join(repo, 'deploy/example.service'), content);
+    writeFileSync(join(systemd, 'example.service'), content);
+    rmSync(join(bin, RELEASE_DRIFT_WRAPPER));
+
+    const result = run([
+      '--repo-root', repo,
+      '--systemd-dir', systemd,
+      '--bin-dir', bin,
+      '--unit', 'example.service',
+    ]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`missing or non-executable installed wrapper: ${join(bin, RELEASE_DRIFT_WRAPPER)}`);
+  });
+
+  it('fails and prints a diff when the installed release-drift wrapper has drifted', () => {
+    const { repo, systemd, bin } = makeFixture();
+    const content = '[Unit]\nDescription=Match\n';
+    writeFileSync(join(repo, 'deploy/example.service'), content);
+    writeFileSync(join(systemd, 'example.service'), content);
+    writeReleaseDriftWrapper(repo, bin, '#!/usr/bin/env bash\nexit 1\n');
+
+    const result = run([
+      '--repo-root', repo,
+      '--systemd-dir', systemd,
+      '--bin-dir', bin,
+      '--unit', 'example.service',
+    ]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`drift: ${RELEASE_DRIFT_WRAPPER}`);
+    expect(result.stderr).toContain('+exit 1');
   });
 });
 
