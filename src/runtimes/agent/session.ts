@@ -34,6 +34,7 @@ import {
   endAbandonedActiveSession,
   getSessionTurnCount,
   incrementMessageCount,
+  resetSessionTurnCount,
   resolveResumableAgentSession,
   updateResumedSessionStatus,
   updateSessionId,
@@ -929,6 +930,10 @@ export class SessionManager {
   private codexResumeRequestId: string | null = null;
   /** The stored thread ID sent in that thread/resume call. */
   private codexResumeStoredThreadId: string | null = null;
+  /** The stored thread ID whose failed resume started a fresh thread in this
+   *  child. The row's message_count still counts that thread's turns until
+   *  the fresh thread's init resets it. */
+  private codexAbandonedThreadId: string | null = null;
   /** Called instead of the crash message when a --resume attempt is rejected. */
   private readonly onResumeFailed: (() => void) | undefined;
   /** Called when the session crashes unexpectedly (not for resume failures). */
@@ -1813,6 +1818,20 @@ export class SessionManager {
       this.sessionId = event.sessionId;
       log.info({ provider: this.provider, chatJid: this.chatJid, sessionId: event.sessionId }, 'provider: captured sessionId');
       updateSessionId(this.db, this.dbRowId, event.sessionId);
+      if (
+        this.codexAbandonedThreadId !== null
+        && event.sessionId
+        && event.sessionId !== this.codexAbandonedThreadId
+      ) {
+        // The row now names the fresh thread that replaced a failed resume,
+        // but its message_count still counts the abandoned thread's turns, so
+        // a later "no rollout found" for this unused thread would report lost
+        // history. Reset once: a turn counted after this init must stay.
+        const abandonedThreadId = this.codexAbandonedThreadId;
+        this.codexAbandonedThreadId = null;
+        resetSessionTurnCount(this.db, this.dbRowId, event.sessionId, this.provider);
+        log.info({ chatJid: this.chatJid, rowId: this.dbRowId, abandonedThreadId, threadId: event.sessionId }, 'codex: replacement thread starts with no counted turns');
+      }
 
       // Codex app-server: capture the thread id from a thread/start or
       // thread/resume response, or from a thread/started notification. A
@@ -2147,7 +2166,7 @@ export class SessionManager {
       // No turn was ever written to this thread: Codex has nothing to load and
       // nothing is lost, in either admission mode.
       log.warn(fields, 'codex: stored thread has no rollout - starting fresh');
-      this.startFreshCodexThreadAfterResume(child, systemPrompt);
+      this.startFreshCodexThreadAfterResume(child, systemPrompt, storedThreadId);
       return 'restarted';
     }
 
@@ -2177,7 +2196,7 @@ export class SessionManager {
       this.closeRejectedCodexResume(reqId);
       return 'closed';
     }
-    this.startFreshCodexThreadAfterResume(child, systemPrompt);
+    this.startFreshCodexThreadAfterResume(child, systemPrompt, storedThreadId);
     return 'restarted';
   }
 
@@ -2210,11 +2229,18 @@ export class SessionManager {
    * resumed. The row, the checkpoint and resumeAttemptId keep the stored id
    * until the new thread's init event replaces it in the row and the
    * checkpoint, so an exit or shutdown before that init closes the exact
-   * identity the row still holds. The spawn-time system prompt is passed in
-   * because the persistent path never sets this.systemPrompt.
+   * identity the row still holds. That init also resets the row's turn count,
+   * which still counts the abandoned thread's turns. The spawn-time system
+   * prompt is passed in because the persistent path never sets
+   * this.systemPrompt.
    */
-  private startFreshCodexThreadAfterResume(child: ReturnType<typeof spawn>, systemPrompt: string): void {
+  private startFreshCodexThreadAfterResume(
+    child: ReturnType<typeof spawn>,
+    systemPrompt: string,
+    abandonedThreadId: string | null,
+  ): void {
     this.sendCodexRequest(child, 'thread/start', codexThreadStartParams(this.admitConfiguredCwd(), systemPrompt));
+    this.codexAbandonedThreadId = abandonedThreadId;
   }
 
   /**
@@ -2751,6 +2777,7 @@ export class SessionManager {
     this.resumeAttemptId = null;
     this.codexResumeRequestId = null;
     this.codexResumeStoredThreadId = null;
+    this.codexAbandonedThreadId = null;
   }
 
   private admitEvidenceGeneration(): void {
@@ -3354,6 +3381,7 @@ export class SessionManager {
       this.codexRequestSeq = 0;
       this.codexResumeRequestId = null;
       this.codexResumeStoredThreadId = null;
+      this.codexAbandonedThreadId = null;
       this.sendCodexRequest(child, 'initialize', {
         clientInfo: { name: 'WhatSoup', title: null, version: '1.0.0' },
         capabilities: { experimentalApi: true },
@@ -5329,6 +5357,7 @@ export class SessionManager {
     this.codexThreadId = null;
     this.codexResumeRequestId = null;
     this.codexResumeStoredThreadId = null;
+    this.codexAbandonedThreadId = null;
     this.providerReadyPromise = null;
     this.providerReadyResolve = null;
   }

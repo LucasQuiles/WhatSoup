@@ -255,6 +255,27 @@ export function getSessionTurnCount(
 }
 
 /**
+ * Set message_count to 0 on a row that has just moved to a provider session
+ * with no turns yet. The count belongs to the row, so a row moved to a new
+ * session otherwise keeps the previous session's turns. The row is changed only
+ * while it still names this session and provider.
+ */
+export function resetSessionTurnCount(
+  db: Database,
+  rowId: number,
+  sessionId: string,
+  provider: string,
+): void {
+  db.raw
+    .prepare(
+      `UPDATE agent_sessions
+       SET message_count = 0
+       WHERE id = ? AND session_id = ? AND provider = ?`,
+    )
+    .run(rowId, sessionId, provider);
+}
+
+/**
  * Accumulate token usage for a session row (adds to existing totals).
  * `inputTokens` is the genuinely-new portion only (base + cache_creation) —
  * callers must have already subtracted cache_read via
