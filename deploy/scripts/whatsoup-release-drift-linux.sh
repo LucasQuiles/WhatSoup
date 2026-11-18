@@ -11,8 +11,10 @@
 # Emits release-integrity (drift) + release-currency (behind origin/main) alerts
 # through the existing BOT ERRORS outbox pipeline (deploy/scripts/bot-errors-emit.py),
 # and clears them on a clean run (--clear-on-ok). Fail-closed exit codes:
-#   0 clean · 1 drifted/behind-target (alert emitted) · 2 inconclusive
-# (fails the systemd unit; see deploy/whatsoup-release-drift.service).
+#   0 clean, or target differs (advisory; the currency finding is emitted)
+#   1 integrity drift (alert emitted)
+#   2 inconclusive, either emit failure included (fails the systemd unit;
+#     see deploy/whatsoup-release-drift.service)
 # ============================================================================
 set -uo pipefail
 
