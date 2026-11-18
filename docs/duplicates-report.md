@@ -8,6 +8,13 @@
 > Closed note: access-mode / validation-set duplication references in this
 > historical report were superseded by PR #369 at commit `9b828823`; do not
 > treat those references as current actionable backlog.
+>
+> Closed note (2026-09-27, origin/main `cdbfdc1c`): the "Tool execution not
+> yet wired" placeholder comments cited in §2.2 no longer exist anywhere under
+> `src/runtimes/agent/providers/`, and `src/runtimes/agent/providers/claude.ts`
+> cited in §2.3 no longer exists (the provider child environment is now built
+> in `src/runtimes/agent/providers/child-env.ts`). Do not treat either
+> reference as current.
 
 Generated: 2026-04-04
 Scanned: 696 functions across 20 categories

@@ -101,6 +101,14 @@ Without `RunAtLoad=true`, a hand-maintained protective service does not start
 after reboot until the next scheduled interval fires or launchd is manually
 triggered.
 
+This rule covers watchdog-class services, which must be running from boot.
+It does not cover the interval-scheduled checks shipped in `deploy/`, which
+deliberately ship `RunAtLoad=false` and rely on their schedule instead:
+`deploy/com.whatsoup.reply-guarantee.plist` (`StartInterval` 60),
+`deploy/com.whatsoup.release-drift-check.plist` (`StartInterval` 300) and
+`deploy/templates/com.whatsoup.bot-errors-j1-collector.plist`
+(`StartCalendarInterval`; a load must not produce an off-slot bundle).
+
 Generated per-instance WhatSoup plists are a separate, code-owned contract;
 do not copy the hand-maintained template into them. They retain an explicit
 `RunAtLoad=false`, install only after successful pairing, and use:

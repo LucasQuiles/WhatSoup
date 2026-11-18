@@ -102,7 +102,7 @@ Both backends use **config-only auth** (matches the Twilio precedent — no
 | `bluebubblesUrl` | backend=bluebubbles | http(s) URL of the Server |
 | `bluebubblesPasswordService` | backend=bluebubbles | Keyring service name for the Server password |
 | `imsgSocketPath` | no (imsg only) | UNIX path exposed by the WhatSoup relay; default `/tmp/imsg.sock`, but an owner-only Application Support directory is recommended |
-| `inboundMode` | no | `poll` (default) or `webhook` (**bluebubbles only**) |
+| `inboundMode` | no | `poll` (default). `webhook` is **not implemented**: the config validator accepts it for bluebubbles, but the adapter throws at construction for any mode other than `poll` |
 | `pollIntervalMs` | no | Default 15000 |
 | `rateLimit.messagesPerMinute` | no | Default 30; per-destination safety cap |
 
@@ -117,8 +117,10 @@ Both backends use **config-only auth** (matches the Twilio precedent — no
   `iMessage;-;<address>` (DM form, constructed by the port for 1:1 sends).
   Group envelopes thread under the chat GUID; the sender field carries the
   member address.
-- **Message ids:** provider GUIDs (BlueBubbles) or stringified `chat.db`
-  ROWIDs (imsg), surfaced as `MessageRef.id`.
+- **Message ids:** provider GUIDs on both backends, surfaced as
+  `MessageRef.id`. The imsg `chat.db` ROWID is used only as the poll cursor;
+  the one exception is an imsg send reply that carries only a numeric `id`,
+  which is stringified.
 
 ## Capabilities (v1)
 
@@ -129,12 +131,12 @@ Both backends use **config-only auth** (matches the Twilio precedent — no
 | Reactions — inbound (tapback surfacing) | ✅ BlueBubbles (`associatedMessageGuid` + documented numeric `associatedMessageType`; named compatibility values are also tolerated); ❌ imsg RPC relay (needs relay-side reaction surfacing) |
 | Typing indicators — outbound (composing/stopped) | ✅ BlueBubbles; not advertised for imsg without IMCore attestation |
 | Typing indicators — inbound | ❌ deferred (BlueBubbles surfaces typing only via socket/SSE push events, not in `/message/query`; needs webhook/socket mode) |
-| Read receipts — outbound (per conversation, coalesced GUIDs) | ✅ BlueBubbles; not advertised for imsg without IMCore attestation |
-| Read receipts — inbound | ✅ BlueBubbles (`dateRead` on outbound messages; piggybacked on the inbound poll — see below); ❌ imsg RPC relay (no `date_read` surfaced) |
+| Read receipts — outbound (per conversation; `markRead` sends the one target message GUID) | ✅ BlueBubbles; not advertised for imsg without IMCore attestation |
+| Read receipts — inbound | ✅ BlueBubbles (`dateRead` on outbound messages; piggybacked on the inbound poll — see below); imsg: not advertised (`readReceipts: 'none'`), although the imsg port does parse the relay's `date_read` on outbound records and the adapter's emission path is not backend-gated, so a relay that supplies it produces `ReadEvent`s |
 | Remote delete | ❌ iMessage has no remote-delete protocol (documented parity gap) |
 | Media attachments | ❌ deferred (adapter declares `media.maxBytes: 0`) |
 | Polls | ❌ rejected (WhatsApp-only feature) |
-| `webhook` inbound mode | BlueBubbles only |
+| `webhook` inbound mode | ❌ not implemented; validation-only (the adapter supports only `poll`) |
 
 ## Inbound envelope routing
 
@@ -172,8 +174,9 @@ envelope. When the peer reads an outbound message, the backend updates the
 The inbound path piggybacks on the existing `/message/query` cursor poll:
 when an outbound record is fetched with `dateRead` set, the adapter checks
 the `emittedReadReceipts` set (session-level exactly-once dedup) and a
-time filter (`dateRead > lastPolledAt`, restart-safe dedup) before emitting
-a `ReadEvent`.
+time filter (`dateRead > sessionStartedAt`, restart-safe dedup; the
+timestamp is frozen at connect, so mid-session reads always pass) before
+emitting a `ReadEvent`.
 
 **Limitation**: the cursor-based poll is forward-only (ROWID advancing).
 Messages read AFTER the cursor advances past their ROWID are not re-fetched,
@@ -209,9 +212,9 @@ The port (`reactionTypeToEmoji` in `bluebubbles-port.ts`) emits a
 `ReactionEvent` with the canonical tapback emoji + `removed` flag for codes
 in the valid ranges. Removal events retain the emoji being removed rather
 than replacing it with an empty string. Non-integer numeric values (NaN,
-2000.5, etc.) are rejected as corrupt data — the schema is integer-only.
-Out-of-range codes (1999, 2006, 4000, negative numbers) fall through to text
-surfacing.
+2000.5, etc.) and out-of-range codes (1999, 2006, 4000, negative numbers)
+are handled the same way: `reactionTypeToEmoji` returns `null` and the record
+falls through to text surfacing.
 
 **Outbound symmetry note:** the OUTBOUND `/message/react` endpoint uses
 string reaction kinds (`'love'`, `'-like'`, etc.) — see
@@ -220,13 +223,17 @@ BlueBubbles response representations round-trip through one mapping.
 
 ## Health + recovery
 
-- Transient backend failures (`bluebubbles http error`,
-  `bluebubbles connection lost`, `imsg socket error`, `imsg rpc timeout`)
-  classify as **transient** in the bot-errors dispatcher and ride the long
-  retry budget; they never burn the permanent dead-letter cap.
-- `bluebubbles_connection_lost` and `imessage_device_delinked` are
-  auto-close-protected sources: a dead backend means the monitoring path
-  itself is down — silence is not proof of repair.
+- The adapter classifies backend failures (`isImessageTransient` in
+  `adapter.ts`), rather than the bot-errors dispatcher. BlueBubbles 5xx
+  responses except 501, HTTP transport failures and imsg socket failures
+  map to `TransientProviderError`; `UnsupportedMethod` is permanent.
+  An imsg RPC timeout before a send is written is transient, but a timeout
+  after the send request was written maps to `SendAmbiguousError`. Treat
+  that outcome as unknown delivery; a retry could duplicate the message.
+- No iMessage source is auto-close-protected today: the dispatcher's
+  `AUTOCLOSE_PROTECTED_SOURCES` set in `bot-errors-dispatcher.py` names no
+  BlueBubbles or iMessage source, and neither `bluebubbles_connection_lost`
+  nor `imessage_device_delinked` is emitted anywhere in the code.
 - BlueBubbles HTTP 401 = bad/expired Server password → check the keyring
   entry for `bluebubblesPasswordService`.
 - The imsg backend advertises no reaction, typing, or read-receipt extension

@@ -11,7 +11,10 @@ per-principal bots whose Pinecone project is separate from the mw-only built-ins
 The bot's knowledge search tool (`knowledge_search`) queries Pinecone indexes
 that are declared in `memory.pinecone.allowedIndexes`. For each index name in
 that list, a matching entry in `memory.pinecone.knowledgeProfiles` (or a
-built-in profile) must exist — the config validator enforces this.
+built-in profile) must exist. Nothing rejects a missing one at config load:
+when the knowledge tools register, an index with no matching profile is
+skipped with an `Unknown index in memory.pinecone.allowedIndexes — skipping`
+warning, and if none remain the tool is not registered.
 
 Built-in profiles (`oneplatform-search`, `oneplatform-entities`, `mw-mind`)
 are defined in `src/config.ts:defaultKnowledgeProfiles`. They target the
@@ -34,9 +37,12 @@ the index host and verifies it ends with the configured suffix.
 }
 ```
 
-**Do not set `projectId`** (the UUID form). The host URL embeds a short slug,
-not the project UUID, so `host.endsWith(projectId)` would never match. Use
-the suffix from the Pinecone console's index host field.
+**If you set `projectId`, use the short slug, not the project UUID.** The
+guard matches it as a host segment (`host.includes("-<projectId>.")`,
+`matchesPineconeProjectGuard` in `src/lib/pinecone-project-guard.ts`), and
+the host URL embeds the short slug, so a UUID never matches. When both
+fields are set, both must match. The suffix above, copied from the Pinecone
+console's index host field, is the simplest guard.
 
 Setting a wrong or missing suffix causes `pineconeReadiness` to report
 `project_mismatch` and the memory layer is disabled for that instance. This

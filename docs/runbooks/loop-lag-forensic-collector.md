@@ -48,6 +48,7 @@ The default artifact cap is 50 MiB. The parent is forced to mode `0700`; the JSO
 
 ## Interpret records and exits
 
+- `run_started`: the first record of each run, with the loopback origin, mode, interval, duration, limit, output cap and the declared effects.
 - `sample`: one process-incarnation sequence with monotonic and wall timestamps.
 - `gap(cursor_evicted)`: required samples left the ring before capture.
 - `gap(process_changed)`: the producer restarted; the collector reset to cursor zero and refetched the new incarnation.

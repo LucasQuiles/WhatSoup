@@ -10,7 +10,7 @@ on the Linux collector host). This README establishes the repo as the source of 
 
 | Installer | Purpose |
 |-----------|---------|
-| `install-bot-errors-launchd.sh` | Installs the dispatcher, deadman, and health agents on macOS bot/relay hosts (three plists in one run). |
+| `install-bot-errors-launchd.sh` | Installs the dispatcher, deadman, health, and heartbeat-watchdog agents on the macOS host it runs on (four plists in one run, the dispatcher included on every host). Only the hub's health profile expects a dispatcher (`"expectDispatcher": true`); the dispatcher itself is hub-side, see `bot-errors-dispatcher.py` below. |
 | `install-bot-errors-health-launchd.sh` | Installs only the daily health timer on a host that does not run the full dispatcher stack. Accepts `BOT_ERRORS_HEALTH_HOUR` / `BOT_ERRORS_HEALTH_MINUTE` overrides. |
 | `install-bot-errors-gui-monitor-launchd.sh` | Installs the external GUI-session monitor on the central hub. OS-aware: writes a systemd service+timer pair on Linux or a launchd plist on macOS. Accepts `--dry-run`. |
 

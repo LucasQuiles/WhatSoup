@@ -35,6 +35,13 @@ The deadman checks two things:
    `~/.local/state/bot-errors/` on nucles). A 200 response with
    `{"status":"healthy"}` is passing. Non-200 or connection refused is failing.
 
+   **Correction (2026-09-27): this endpoint does not exist.** The collector
+   (`deploy/scripts/bot-errors-collector.py`) runs no HTTP server, and its CLI
+   is relay-only (`--remote`, `--daemon` and the relay tuning flags). Check 1
+   requires a new endpoint before it can be built as written; until one
+   exists, check 2 is the only probe here that works against existing
+   surfaces.
+
 2. **Outbox drain age**: SSH into nucles and check the mtime of the most-recent
    file in `~/.local/state/bot-errors/sent/` (hub operator account). If the newest file is older
    than `DRAIN_STALE_THRESHOLD` (default 2 hours), the dispatcher may be stuck.
