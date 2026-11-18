@@ -145,8 +145,9 @@ export type PathRebasePlistCheck = { readonly ok: true; readonly programArgument
 /**
  * One path-rebase plist against its closed contract, with `root` as the release it selects: the declared
  * expected-current root before staging, and the target release for the staged plist at planning and again at apply.
- * It proves the text launchd reads (strict-plist.ts), the root keys, the environment key names, and the exact argv of
- * one of four contracts: the BOT ERRORS installer form or legacy wrapper, harness maintenance, or reply guarantee.
+ * `home` is the planning user's home folder. It reads the plist with the strict reader (strict-plist.ts) and proves
+ * the root keys, the environment key names, and the exact argv of one of four contracts: the BOT ERRORS installer form
+ * or legacy wrapper (whose sourced environment file must be in `home`), harness maintenance, or reply guarantee.
  */
 export function checkPathRebasePlist(label: string, text: string, root: string, home: string): PathRebasePlistCheck {
   if (!isLegacyPathRebaseLabel(label)) return { ok: false, error: 'undeclared legacy path-rebase label' };

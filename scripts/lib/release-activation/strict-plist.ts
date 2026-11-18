@@ -4,12 +4,13 @@
  * launchd reads a job through CFPropertyList, which also accepts binary plists, other encodings, numeric character
  * references and CDATA sections. check-service-units.ts parsePlist reads text with regular expressions, so it can read
  * text launchd never sees (a binary plist's string object) or miss text launchd does see (a character reference that
- * spells a key). This reader admits only the one form it reads exactly: UTF-8 XML from the first byte; the five
- * predefined entities in values and no other reference; no CDATA section, DOCTYPE internal subset or processing
- * instruction besides the XML declaration; key text with no entity, markup or surrounding whitespace; no markup
- * inside a value; unique keys at every level; and exactly one root <dict> inside <plist version="1.0">. Comments
- * between elements are skipped, as launchd skips them. Callers read files as UTF-8, so an invalid byte sequence
- * arrives as U+FFFD, which this reader refuses.
+ * spells a key). This reader admits only this form: UTF-8 XML from the first byte; no DOCTYPE, or only Apple's PLIST
+ * 1.0 DOCTYPE; the five predefined entities in values and no other reference; no CDATA section, DOCTYPE internal
+ * subset or processing instruction besides the XML declaration; no comment that starts with <!---; key text with no
+ * entity, markup or surrounding whitespace; no markup inside a value; unique keys at every level; and exactly one root
+ * <dict> inside <plist version="1.0">. It skips other comments outside a key or value, each ending at the first -->
+ * after its opener. It does not prove that launchd reads the same dictionary from the bytes it admits. Callers read
+ * files as UTF-8, so an invalid byte sequence arrives as U+FFFD, which this reader refuses.
  */
 
 export type StrictPlistValue =

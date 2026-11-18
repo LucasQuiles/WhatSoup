@@ -266,8 +266,9 @@ async function applyHoldingLock(host: ActivationHost, context: HostUnitApplyCont
   }
   // No await from this recheck into the first writePlist, which then rechecks each plist against its backup.
   if (refusal === null && !identityHolds('recheck-live-identity-before-switch', ['previous'], steps)) refusal = steps.at(-1)!.detail!;
-  // The bytes about to be written must still pass the closed contract planning proved; a staged plist changed since
-  // (an added Program key, say, which launchd would run first) refuses here, before the first write.
+  // Before the first write, re-read the staged text this apply writes (the in-memory string from the plan, not a file)
+  // with the strict reader and check it against the closed contract planning proved. Nothing re-reads a written plist
+  // between its write and launchd's bootstrap.
   if (refusal === null) for (const auxiliary of hostAuxiliaries) {
     if (auxiliary.mode !== 'path-rebase') continue;
     const contract = checkPathRebasePlist(auxiliary.label, auxiliary.staged, context.release, auxiliary.home);

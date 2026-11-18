@@ -563,7 +563,33 @@ program, and argv. Planning reads a `loaded` entry's plist with the strict
 plist reader described under `path-rebase` below; a plist it cannot read
 exactly refuses (`installed loaded plist is unreadable: <reason>`), for
 example one that spells a `PYTHON*` environment key with a numeric character
-reference. For an interpreter, every absolute argv value after argv[0]
+reference. Against the regular-expression readings this proof used before
+(`parsePlist` in `scripts/check-service-units.ts` for argv, and text searches
+for the environment keys and working directory), the strict reading changes
+these verdicts:
+
+- a plist outside the reader's form refuses, including any DOCTYPE other
+  than Apple's PLIST 1.0 DOCTYPE and a comment that starts with `<!---`;
+- a `ProgramArguments` entry that is not a `<string>` refuses (`installed
+  loaded plist is unreadable or has a mismatched label`), where the earlier
+  reading dropped it;
+- the Python module proof reads an empty `<dict/>` environment and empty
+  `<string/>` values, which the earlier reading refused; a `PYTHON*` key still
+  refuses;
+- an environment key name outside `[A-Za-z_][A-Za-z0-9_]*`, such as `A-B`, is
+  read as a name, where the earlier reading refused the entry; only a name
+  that starts with `PYTHON` refuses, and Python reads only identifier names;
+- only the root-level `EnvironmentVariables` and `WorkingDirectory` keys count,
+  where the earlier reading counted them at any depth, an environment variable
+  named `WorkingDirectory` included; launchd honours only root-level keys;
+- the root-level `ProgramArguments` is the one read, where the earlier reading
+  took the first match anywhere in the text; launchd honours only that key.
+
+The first two refuse more. The other four admit more without weakening the
+proof: the loaded argv, working-directory and `PYTHON*` environment
+comparisons are unchanged.
+
+For an interpreter, every absolute argv value after argv[0]
 must have one exact index-and-path binding: `review-file` must name a hashed
 source input, and `runtime-data` explicitly declares a generated data path.
 Runtime data is checked against selected roots and launchers by its lexical
@@ -645,20 +671,37 @@ numeric character references and CDATA, so the reader admits only UTF-8 XML
 that starts at its first byte with an XML declaration or `<plist>`, holds
 exactly one root `<dict>` inside `<plist version="1.0">`, has unique keys at
 every level, and has `<string>` entries in `ProgramArguments` and `<string>`
-environment values. Among other forms, it refuses a binary plist, a
-byte-order mark, a declared encoding other than UTF-8, a numeric character
-reference, a CDATA section, a DOCTYPE internal subset or entity declaration, a
-processing instruction other than the XML declaration, an entity, comment,
-other markup or surrounding whitespace in key text, and markup inside a value.
-Comments between elements are skipped. Planning reports the reader's refusals,
-like the contract, key and path refusals in this section, under
-`host-aux-plist-staged:<label>`.
+environment values. A DOCTYPE is optional, and the only one admitted is
+Apple's: `<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+"http://www.apple.com/DTDs/PropertyList-1.0.dtd">`, or the older
+`-//Apple Computer//DTD PLIST 1.0//EN` public identifier with the same system
+identifier, in double quotes with any whitespace between the tokens. Both BOT
+ERRORS installers write it on one line and the timer templates on two. Any
+other DOCTYPE refuses (`plist DOCTYPE is not the Apple PLIST 1.0 DOCTYPE`): a
+quoted literal can hold `>` and a whole plist, `plutil -p` reads a plist
+written inside a `SYSTEM` literal as the document, and `plutil -lint` passes
+those bytes, so this reader, not `plutil -lint`, refuses them. A comment
+that starts with `<!---` refuses too (`plist holds a comment that starts with
+<!---`). That narrows the form; it does not fix an observed difference:
+`plutil -p` ended such a comment where this reader does, but a reader that
+starts its search for `-->` at the opener's second dash ends `<!--->` at once
+and reads what follows. No repository writer emits either form. Among other
+forms, it refuses a binary plist, a byte-order mark, a declared encoding other
+than UTF-8, a numeric character reference, a CDATA section, a DOCTYPE internal
+subset or entity declaration, a processing instruction other than the XML
+declaration, an entity, comment, other markup or surrounding whitespace in key
+text, and markup inside a value. Other comments outside a key or value are
+skipped, each ending at the first `-->` after its opener. The reader does not
+prove that launchd reads the same dictionary from the bytes it admits.
+Planning reports the reader's refusals, like the contract, key and path
+refusals in this section, under `host-aux-plist-staged:<label>`.
 
 The root keys may only be `Label`, `ProgramArguments`, `EnvironmentVariables`,
 `WorkingDirectory`, `RunAtLoad`, `KeepAlive`, `StartCalendarInterval`,
 `StartInterval`, `StandardOutPath` and `StandardErrorPath`. Any other key
-refuses, and the detail names it (`plist root key <key> is not admitted for a
-path-rebase job`): for example `Program`, which launchd runs in place of
+refuses, and the detail names it under the key rule below (`plist root key
+<key> is not admitted for a path-rebase job`): for example `Program`, which
+launchd runs in place of
 `ProgramArguments[0]`, whether or not it equals that argument and even while
 the loaded definition still matches the installed argv; `BundleProgram`;
 `UserName`; or `EnableGlobbing`. Environment key names are pinned per job to
@@ -677,7 +720,13 @@ Any other key refuses, naming it (`environment key <key> is not admitted for
 <label>`): for example `BASH_ENV`, `SHELLOPTS`, `PS4`, `DYLD_INSERT_LIBRARIES`,
 `__PYVENV_LAUNCHER__`, `HOME`, or a key from another job's list. Reinstall the
 health job or re-render the timer in `setup-timer` mode, as for a shape
-refusal.
+refusal. A detail names a key only when the key matches
+`^[A-Za-z_][A-Za-z0-9_.-]{0,63}$`. Any other key, one that holds a path for
+example, prints as `(a name outside [A-Za-z_][A-Za-z0-9_.-]{0,63}, not shown)`,
+so key text cannot carry a host path into plan output or the receipt. The same
+rule covers the reader's duplicate-key detail (`plist has a duplicate key
+<key>`), which the outside-unit refusal also prints, and its detail for an
+environment value that is not a `<string>`.
 
 `path-rebase` changes only plist string values that are exactly the reviewed
 root or a path below it, and only when the value is a shell-token path matching
@@ -693,24 +742,29 @@ when its value is such a closed-form shell-token path. Any other value that
 contains the root, including a command that starts with it, is an embedded
 shell-style reference and refuses. The target release lands in every rewritten
 value, so a release that is not a closed-form shell-token path refuses too. The
-closed-form rule covers every string value of the three legacy contracts as
-well, so a legacy plist with a trailing slash or a `.`, `..` or empty segment
-in a path (in `WorkingDirectory` or a log path, for example) refuses at
-planning where `bfc01318` admitted it; reinstall the health job or re-render
-the timer from its template. `--apply` checks the staged bytes against the
+closed-form rule covers the shell-token string values of the three legacy
+contracts as well, so a legacy plist with a trailing slash or a `.`, `..` or
+empty segment in a shell-token path (in `WorkingDirectory` or a log path, for
+example) refuses at planning where `bfc01318` admitted it; reinstall the health
+job or re-render the timer from its template. A value outside the shell-token
+grammar, such as a path with a space, is not checked for closed form; it
+refuses only if it contains the root. `--apply` checks the staged bytes
+against the
 same contract, with the target release as the root, before its first write
 (`recheck-staged-path-rebase:<label>`).
 
 For these four contracts, planning proves that the plist is in the strict form
 above, that its argv is exactly the contract's, that its root keys and
-environment key names are in the closed sets, and that every shell-token
-string value is in closed form. It does not prove:
+environment key names are in the closed sets, that every shell-token string
+value is in closed form, and that the legacy wrapper sources the environment
+file in the planning user's home folder. It does not prove:
 
 - what the release's own scripts start later;
-- files in the job's home folder that a contract names or an interpreter
-  reads: the legacy wrapper's environment file, the maintenance guard script
-  and the pinned node binary (all three below), and Python's user-site `.pth`
-  files (`/usr/bin/python3` runs without `-I` or `-s`);
+- the contents of files in the job user's home folder that a contract names
+  or an interpreter reads: the legacy wrapper's environment file, the
+  maintenance guard script and the pinned node binary (all three below), and
+  Python's user-site `.pth` files (`/usr/bin/python3` runs without `-I` or
+  `-s`);
 - environment values, including `PATH` and the data paths
   `BOT_ERRORS_HEALTH_PROFILE`, `CLAUDE_CONFIG_DIR` and
   `CLAUDE_SECURESTORAGE_CONFIG_DIR`; the last two choose the agent
@@ -719,8 +773,12 @@ string value is in closed form. It does not prove:
 - that no folder in a rewritten path is a symlink; the path rules compare
   strings.
 
-Writing those files and folders takes the job user's own access, which, like
-the other same-user writers this runbook names, planning does not detect.
+The three named files are bound to the planning user's home folder: the
+contracts fix the guard script's and the node binary's paths under `<home>`,
+and the legacy wrapper must source `<home>/.config/whatsoup/bot-errors.env`.
+Writing those files, or the folders of a rewritten path, takes the job user's
+own access, which, like the other same-user writers this runbook names,
+planning does not detect. Environment values are not bound to any folder.
 
 The shared-wrapper consumer proof reads installed plists only. For each
 selected shared wrapper, the plists in `~/Library/LaunchAgents` whose
@@ -763,7 +821,11 @@ changes only that default to the target release, then applies the
 ordinary embedded-reference refusal to every remaining value. A malformed
 wrapper, non-canonical profile path, or any additional embedded release
 reference refuses. The wrapper runs `source` on
-`<home>/.config/whatsoup/bot-errors.env` under `set -a`: that file is shell
+`<home>/.config/whatsoup/bot-errors.env` under `set -a`, where `<home>` is the
+planning user's home folder, and its log hint and `BOT_ERRORS_STATE_DIR`
+default must name `<home>/.local/state/bot-errors`. A wrapper that sources
+another file refuses (`bot-errors health legacy wrapper does not source the BOT
+ERRORS environment file in the job user's home folder`). That file is shell
 code planning does not read, and the variables it sets reach the runner
 without passing the environment-key allowlist, which reads only the plist.
 Both selected release roots must also be normalized absolute
@@ -808,7 +870,13 @@ checked against their planned digest before each reload and again immediately
 before each `launchctl bootstrap`, so a plist changed before that last check is
 not loaded. `launchctl bootstrap` reads the plist by path, so a writer running
 as the same user that swaps the file during the bootstrap call itself is not
-detected. A change found after the switch fails the activation into the group
+detected. The plists this run writes, the member plists and the host auxiliary
+plists other than the fleet wrapper's and the watchdogs', have no such check:
+nothing re-reads one between apply's write and launchd's `bootstrap` and
+`kickstart -k`. A rewrite by the same user in that window is loaded and
+started; the identity check after every reload (`verify-live-identity`) sees
+it only then and fails the activation into the group rollback. A change found
+after the switch fails the activation into the group
 rollback; unless the rollback's schema or refresh-fence checks have already
 ended it `rollback-blocked-*`, its identity check ends it
 `rollback-unverified`. It reloads all primary
