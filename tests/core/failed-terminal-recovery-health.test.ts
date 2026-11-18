@@ -149,6 +149,31 @@ describe('failed terminal reply obligations in recovery health', () => {
     expect(health().turn_recovery.retained_terminal).toBe(1);
   });
 
+  it('counts one inbound with several failed generations once and retention keeps every sibling', () => {
+    const seq = terminal('sibling-generations');
+    // Copies of generation 1: a second failed generation that owes the same reply, and an
+    // operator-cancelled sibling that fails the debt predicates itself.
+    const sibling = db.raw.prepare(`INSERT INTO turn_terminal_records
+      (scope, conversation_key, delivery_jid, inbound_seq, inbound_seq_key, logical_turn_id, manager_id,
+        generation, attempt_kind, attempt_failure_class, inbound_disposition, delivery_kind,
+        reply_guarantee_disarmed)
+      SELECT scope, conversation_key, delivery_jid, inbound_seq, inbound_seq_key, logical_turn_id, manager_id,
+        ?, attempt_kind, ?, inbound_disposition, delivery_kind, reply_guarantee_disarmed
+      FROM turn_terminal_records WHERE inbound_seq = ? AND generation = 1`);
+    sibling.run(2, 'crash', seq);
+    sibling.run(3, 'operator_cancelled', seq);
+    ageDurabilityRows();
+
+    expect(health().turn_recovery.retained_terminal).toBe(1);
+    expect(runDatabaseRetention(db)).toMatchObject({ turnTerminalRecords: 0, inboundEvents: 0 });
+    expect(db.raw.prepare(`SELECT generation, attempt_failure_class FROM turn_terminal_records
+      WHERE inbound_seq = ? ORDER BY generation`).all(seq)).toEqual([
+      { generation: 1, attempt_failure_class: 'crash' },
+      { generation: 2, attempt_failure_class: 'crash' },
+      { generation: 3, attempt_failure_class: 'operator_cancelled' },
+    ]);
+  });
+
   it('hands accounting to an operator catch-up and closes only through its durable proof', () => {
     const seq = terminal('catchup-source');
     ageDurabilityRows();
