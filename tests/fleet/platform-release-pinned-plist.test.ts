@@ -29,6 +29,7 @@ const osMocks = vi.hoisted(() => ({
 
 const flagsMocks = vi.hoisted(() => ({
   readFileFlags: vi.fn(),
+  canWriteFolder: vi.fn(),
 }));
 
 vi.mock('node:child_process', () => childProcessMocks);
@@ -153,11 +154,12 @@ describe('release-pinned launchd plists (#3829)', () => {
     SERVICE_HOME = realFs.realpathSync.native(realFs.mkdtempSync(realPath.join(realOs.tmpdir(), 'whatsoup-home-')));
     OUTSIDE_ROOT = realFs.realpathSync.native(realFs.mkdtempSync(realPath.join(realOs.tmpdir(), 'whatsoup-outside-')));
 
-    for (const mock of [...Object.values(childProcessMocks), ...Object.values(fsMocks), osMocks.homedir, flagsMocks.readFileFlags]) {
+    for (const mock of [...Object.values(childProcessMocks), ...Object.values(fsMocks), osMocks.homedir, ...Object.values(flagsMocks)]) {
       mock.mockReset();
     }
     osMocks.homedir.mockReturnValue(SERVICE_HOME);
     flagsMocks.readFileFlags.mockReturnValue(0);
+    flagsMocks.canWriteFolder.mockReturnValue(true);
     fsMocks.readFileSync.mockImplementation(absentFile);
     // existsSync is not part of the release check; a permissive mock proves the
     // guard does not lean on it.
@@ -332,6 +334,54 @@ describe('release-pinned launchd plists (#3829)', () => {
   it('refuses to disable when the plist file flags cannot be read', async () => {
     fsMocks.readFileSync.mockReturnValue(pinnedPlist(await makeRelease(releases())));
     flagsMocks.readFileFlags.mockImplementation(() => { throw new Error('stat timed out'); });
+    const { createServiceManager } = await importPlatform();
+    const manager = createServiceManager();
+
+    expect(() => manager.assertCanDisable?.('agent')).toThrow('cannot read the file flags');
+    await expect(manager.disable('agent')).rejects.toThrow('cannot read the file flags');
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+    expect(fsMocks.unlinkSync).not.toHaveBeenCalled();
+  });
+
+  const launchAgentsPath = (): string => `${SERVICE_HOME}/Library/LaunchAgents`;
+  const unreadable = (): never => { throw new Error('stat timed out'); };
+
+  // unlink(2) also fails when the plist's folder is immutable or append-only, or
+  // when this process cannot write it, whatever the plist's own flags are.
+  for (const [flag, value] of protectedFlags) {
+    it(`refuses to disable when the LaunchAgents folder has ${flag}, before any launchctl call`, async () => {
+      fsMocks.readFileSync.mockReturnValue(pinnedPlist(await makeRelease(releases())));
+      flagsMocks.readFileFlags.mockImplementation((filePath: string) => (filePath === launchAgentsPath() ? value : 0));
+      const { createServiceManager } = await importPlatform();
+      const manager = createServiceManager();
+
+      expect(() => manager.assertCanDisable?.('agent')).toThrow('cannot be removed');
+      await expect(manager.disable('agent')).rejects.toThrow('cannot be removed');
+      expect(flagsMocks.readFileFlags).toHaveBeenCalledWith(launchAgentsPath());
+      expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+      expect(fsMocks.unlinkSync).not.toHaveBeenCalled();
+
+      await expect(manager.stop('agent')).resolves.toBeUndefined();
+      expect(launchctlSubcommands()).toEqual(['bootout']);
+    });
+  }
+
+  it('refuses to disable when this process cannot write the LaunchAgents folder, before any launchctl call', async () => {
+    fsMocks.readFileSync.mockReturnValue(pinnedPlist(await makeRelease(releases())));
+    flagsMocks.canWriteFolder.mockReturnValue(false);
+    const { createServiceManager } = await importPlatform();
+    const manager = createServiceManager();
+
+    expect(() => manager.assertCanDisable?.('agent')).toThrow('cannot be removed');
+    await expect(manager.disable('agent')).rejects.toThrow('cannot be removed');
+    expect(flagsMocks.canWriteFolder).toHaveBeenCalledWith(launchAgentsPath());
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+    expect(fsMocks.unlinkSync).not.toHaveBeenCalled();
+  });
+
+  it('refuses to disable when the LaunchAgents folder flags cannot be read', async () => {
+    fsMocks.readFileSync.mockReturnValue(pinnedPlist(await makeRelease(releases())));
+    flagsMocks.readFileFlags.mockImplementation((filePath: string) => (filePath === launchAgentsPath() ? unreadable() : 0));
     const { createServiceManager } = await importPlatform();
     const manager = createServiceManager();
 

@@ -34,9 +34,10 @@ vi.mock('node:os', async (importOriginal) => ({
   ...(await importOriginal<typeof import('node:os')>()),
   homedir: osMocks.homedir,
 }));
-// launchd disable reads the plist's BSD file flags first; these plists carry none.
+// launchd disable first reads the BSD file flags of the plist and its folder and
+// checks that the folder is writable; these plists and folders block nothing.
 // platform-release-pinned-plist.test.ts covers the protected-plist refusals.
-vi.mock('../../src/fleet/launchd-plist-flags.ts', () => ({ readFileFlags: () => 0 }));
+vi.mock('../../src/fleet/launchd-plist-flags.ts', () => ({ readFileFlags: () => 0, canWriteFolder: () => true }));
 
 class MockChild extends EventEmitter {
   kill = vi.fn();
