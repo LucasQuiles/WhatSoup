@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { resolveOperatorCatchup } from '../../src/core/operator-catchup-resolution.ts';
 import { Database } from '../../src/core/database.ts';
 import {
   closeOperatorCatchupRecovery,
@@ -14,6 +15,41 @@ describe('operator catch-up recovery closure', () => {
   });
 
   afterEach(() => db.close());
+
+  it('blocks an old writer from closing a schema-69 request without fulfillment evidence', () => {
+    const f = installFixture('complete', true);
+    const insert = db.raw.prepare(`INSERT INTO inbound_disposition_links
+      (inbound_seq, recovery_plan_id, disposition, superseded_by_seq, reason, evidence_ref, actor)
+      VALUES (?, ?, 'superseded_by_operator_catchup', ?, ?, ?, 'operator:test')`);
+    expect(() => insert.run(f.sourceSeqs[0], f.planId, f.catchupSeq,
+      'operator catch-up completed with proven echoed reply', 'test://later-reply'))
+      .toThrow(/fulfillment/i);
+    expect(linkRows('superseded_by_operator_catchup')).toEqual([]);
+  });
+
+  it('closes the remaining sources after one source was directly resolved', () => {
+    const f = installFixture('complete', true);
+    const sourceSeq = f.sourceSeqs[0];
+    const payload = JSON.stringify({ text: 'Requested result', operatorCatchup: {
+      planId: f.planId, sourceSeq, actor: 'operator:test', evidenceRef: 'test://send-approved',
+    } });
+    const opId = Number(db.raw.prepare(`INSERT INTO outbound_ops
+      (conversation_key, chat_jid, op_type, payload, status, source_inbound_seq,
+       is_terminal, replay_policy, wa_message_id, submitted_at, echoed_at)
+      VALUES (?, 'closure@g.us', 'text', ?, 'echoed', ?, 0, 'unsafe',
+              'BOUND-RESULT', datetime('now'), datetime('now'))`)
+      .run(f.conversationKey, payload, sourceSeq).lastInsertRowid);
+    resolveOperatorCatchup(db.raw, { planId: f.planId, sourceSeq, opId,
+      actor: 'operator:test', evidenceRef: 'test://original-fulfilled', originalFulfillmentConfirmed: true });
+    const params = { planId: f.planId, conversationKey: f.conversationKey,
+      expectedSourceSeqs: [f.sourceSeqs[1]], catchupSeq: f.catchupSeq,
+      actor: 'operator:test', evidenceRef: 'test://remaining-fulfilled', originalFulfillmentConfirmed: true };
+    expect(closeOperatorCatchupRecovery(db, params)).toMatchObject({ inserted: 1, openBefore: 1, openAfter: 0 });
+    expect(closeOperatorCatchupRecovery(db, params)).toMatchObject({ inserted: 0, idempotent: true });
+    expect(linkRows('superseded_by_operator_catchup')).toEqual([
+      { inbound_seq: f.sourceSeqs[1], superseded_by_seq: f.catchupSeq },
+    ]);
+  });
 
   it('does not close an original request from an unrelated later echoed answer', () => {
     const fixture = installFixture('complete', true);

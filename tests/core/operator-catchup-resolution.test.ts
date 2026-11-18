@@ -1,6 +1,8 @@
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { selectOperatorCatchupCandidates } from '../../src/core/recovery-catchup-closure.ts';
+import { OrphanTransferSettler } from '../../src/core/turn-recovery-orphan-settle.ts';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine, sendTrackedWithReceipt as sendTracked } from '../../src/core/durability.ts';
 import { resolveOperatorCatchup, inspectOperatorCatchupResolution } from '../../src/core/operator-catchup-resolution.ts';
@@ -36,10 +38,10 @@ describe('operator catch-up schema upgrade', () => {
       });
       engine.markSending(op);
       engine.markMaybeSent(op, 'ambiguous transport');
+      for (const { name } of db.raw.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'operator_catchup_resolution_%'").all() as Array<{ name: string }>) {
+        db.raw.exec(`DROP TRIGGER ${name}`);
+      }
       db.raw.exec(`
-        DROP TRIGGER operator_catchup_resolution_outbound_immutable;
-        DROP TRIGGER operator_catchup_resolution_source_immutable;
-        DROP TRIGGER operator_catchup_resolution_no_legacy_close;
         DROP TABLE operator_catchup_resolutions;
         DELETE FROM schema_migrations WHERE version = 69;
       `);
@@ -50,6 +52,20 @@ describe('operator catch-up schema upgrade', () => {
       db.close();
     }
   }
+
+  it('inspects pending catch-ups and orphan transfers on a read-only schema-68 database', () => {
+    const { path, before } = populatedSchema68();
+    const raw = new DatabaseSync(path, { readOnly: true });
+    try {
+      const selected = selectOperatorCatchupCandidates(raw, 10);
+      expect(selected).toEqual([{ planId: 'upgrade-plan', conversationKey: '15550000003',
+        chatJid: '15550000003@s.whatsapp.net', sourceSeqs: [1], catchupSeq: null }]);
+      const settler = new OrphanTransferSettler(raw);
+      expect(settler.orphanTerminalIds()).toEqual([]);
+      expect(settler.evaluate(999)).toMatchObject({ verdict: 'refused', reason: 'terminal_not_found' });
+      expect(originalRows(raw)).toEqual(before);
+    } finally { raw.close(); }
+  });
 
   it('upgrades populated schema 68 without resolving or rewriting ambiguous original work', () => {
     const { path, before } = populatedSchema68();

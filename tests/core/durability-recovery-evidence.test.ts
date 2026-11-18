@@ -553,6 +553,33 @@ describe('durable recovery evidence ordering', () => {
     expect(evidence.hasDeliveryCorroboration(selectedOpId)).toBe(false);
   });
 
+  it('does not use a bound catch-up as corroboration for the original uncertain delivery', () => {
+    const { terminalRecordId, recoveryJobId } = seedIncident();
+    const payload = JSON.stringify({ text: 'Operator follow-up', operatorCatchup: {
+      planId: 'pending-plan', sourceSeq: INCIDENT_INBOUND_SEQ,
+      actor: 'operator:test', evidenceRef: 'test://approved-followup',
+    } });
+    db.raw.prepare('UPDATE outbound_ops SET payload = ? WHERE id > ?').run(payload, INCIDENT_SELECTED_OP_ID);
+    const original = rowJson(db, 'outbound_ops', 'id', INCIDENT_SELECTED_OP_ID);
+    const job = rowJson(db, 'turn_recovery_jobs', 'id', recoveryJobId);
+    engine.postConnectRecovery();
+    expect(db.raw.prepare('SELECT * FROM turn_delivery_corroboration WHERE terminal_record_id = ?')
+      .all(terminalRecordId)).toEqual([]);
+    expect(rowJson(db, 'outbound_ops', 'id', INCIDENT_SELECTED_OP_ID)).toBe(original);
+    expect(rowJson(db, 'turn_recovery_jobs', 'id', recoveryJobId)).toBe(job);
+  });
+
+  it('rejects raw corroboration inserts that borrow a bound catch-up echo', () => {
+    const { terminalRecordId } = seedIncident();
+    db.raw.prepare('UPDATE outbound_ops SET payload = ? WHERE id = ?')
+      .run(JSON.stringify({ text: 'Follow-up', operatorCatchup: { sourceSeq: INCIDENT_INBOUND_SEQ } }), INCIDENT_ECHOED_OP_IDS[0]);
+    expect(() => db.raw.prepare(`INSERT INTO turn_delivery_corroboration
+      (terminal_record_id, corroborating_op_id, basis, actor)
+      VALUES (?, ?, 'same_source_later_echoed_op', 'operator:test')`)
+      .run(terminalRecordId, INCIDENT_ECHOED_OP_IDS[0])).toThrow(/operator catch-up/i);
+    expect(db.raw.prepare('SELECT * FROM turn_delivery_corroboration').all()).toEqual([]);
+  });
+
   it('corroborates all seven later echoes and preserves the selected delivery and owner receipt', () => {
     const { terminalRecordId, recoveryJobId } = seedIncident();
     const selectedBefore = rowJson(db, 'outbound_ops', 'id', INCIDENT_SELECTED_OP_ID);

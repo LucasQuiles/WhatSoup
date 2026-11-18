@@ -15,6 +15,7 @@ import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine, sendTrackedWithReceipt } from '../../src/core/durability.ts';
 import { closeOperatorCatchupRecoveryRaw } from '../../src/core/recovery-catchup-closure.ts';
 import {
+  assertSchema43Foundation,
   classifyError,
   loadOrCreateRedactionSalt,
   openExistingWritableDatabase,
@@ -45,6 +46,14 @@ function runCliSubprocess(args: string[]): { code: number; stdout: string; stder
   );
   return { code: result.status ?? -1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
 }
+
+it('refuses a future schema instead of treating a contiguous ledger as compatible', () => {
+  const db = new Database(':memory:'); db.open();
+  try {
+    db.raw.exec('INSERT INTO schema_migrations(version) VALUES (70)');
+    expect(() => assertSchema43Foundation(db.raw)).toThrow(/newer than supported/i);
+  } finally { db.close(); }
+});
 
 const tmp = trackTmpDirs('whatsoup-close-');
 

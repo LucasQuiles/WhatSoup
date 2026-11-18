@@ -43,7 +43,8 @@ vi.mock('../../src/core/access-policy.ts', () => ({
   shouldRespond: vi.fn(),
 }));
 
-vi.mock('../../src/core/access-list.ts', () => ({
+vi.mock('../../src/core/access-list.ts', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   extractLocal: vi.fn((jid: string) => jid.split('@')[0]),
   resolvePhoneFromJid: vi.fn((jid: string) => jid.split('@')[0]),
   // QR-143 (B4): grant primitive — authenticated transports resolve to the
@@ -815,6 +816,23 @@ describe('Echo correlation: isFromMe messages', () => {
     expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
   });
 
+  it('does not borrow an echo from another chat with the same provider message ID', async () => {
+    const db = makeTempDb();
+    const durability = new DurabilityEngine(db);
+    const ids = ['15551230007@s.whatsapp.net', '15551230008@s.whatsapp.net'].map((chatJid) => {
+      const id = durability.createOutboundOp({ conversationKey: chatJid.split('@')[0], chatJid,
+        opType: 'text', payload: '{"text":"Reply"}', replayPolicy: 'unsafe' });
+      durability.markSending(id);
+      durability.markSubmitted(id, 'COLLIDING-PROVIDER-ID');
+      return id;
+    });
+    const handler = makeIngest(db, makeMessenger(), makeRuntime(), BOT_JID, BOT_LID, durability);
+    await runIngest(handler, makeIncomingMessage({ isFromMe: true, messageId: 'COLLIDING-PROVIDER-ID' }));
+    expect(db.raw.prepare('SELECT id, status FROM outbound_ops ORDER BY id').all()).toEqual([
+      { id: ids[0], status: 'submitted' }, { id: ids[1], status: 'echoed' },
+    ]);
+  });
+
   it('matchEcho returns true when a submitted outbound_op matches', async () => {
     const db = makeTempDb();
     const messenger = makeMessenger();
@@ -1267,6 +1285,88 @@ import { resolvePhoneFromJid } from '../../src/core/access-list.ts';
 const mockResolvePhoneFromJid = vi.mocked(resolvePhoneFromJid);
 
 describe('ingest.ts uncovered-branch coverage', () => {
+  it('keeps mapped-LID ingest and the real ChatRuntime reply on the same conversation', async () => {
+    const db = makeTempDb();
+    const lid = '15550000011@lid';
+    const phone = '15550000009';
+    db.raw.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+      .run(lid, `${phone}@s.whatsapp.net`);
+    const actual = await vi.importActual<typeof import('../../src/core/access-list.ts')>(
+      '../../src/core/access-list.ts',
+    );
+    const previous = mockResolvePhoneFromJid.getMockImplementation()!;
+    mockResolvePhoneFromJid.mockImplementation(actual.resolvePhoneFromJid);
+    const messenger = makeMessenger();
+    vi.mocked(messenger.sendMessage).mockResolvedValue({ waMessageId: 'mapped-reply' });
+    const provider: LLMProvider = {
+      name: 'test-provider',
+      generate: vi.fn().mockResolvedValue({
+        content: 'Reply to the mapped conversation', inputTokens: 10,
+        outputTokens: 5, model: 'test-model', durationMs: 1,
+      }),
+    };
+    const memory = {
+      searchForChat: vi.fn().mockResolvedValue([]),
+      searchForSender: vi.fn().mockResolvedValue([]),
+      searchSelfFacts: vi.fn().mockResolvedValue([]),
+    } as unknown as PineconeMemory;
+    const queue = new ChatQueue();
+    const durability = new DurabilityEngine(db);
+    const runtime = new ChatRuntime(db, messenger, memory, provider, provider, {
+      enableEnrichment: false, chatQueue: queue,
+    });
+    runtime.setDurability(durability);
+    try {
+      const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
+      await runIngest(handler, makeIncomingMessage({
+        messageId: 'mapped-request', chatJid: lid, senderJid: `${phone}@s.whatsapp.net`,
+      }));
+      await vi.waitFor(() => expect(queue.stats.trackedChats).toBe(0));
+      expect(provider.generate).toHaveBeenCalledOnce();
+      const source = db.raw.prepare(
+        'SELECT seq, conversation_key FROM inbound_events WHERE message_id = ?',
+      ).get('mapped-request') as { seq: number; conversation_key: string };
+      expect(source.conversation_key).toBe(phone);
+      expect(db.raw.prepare(
+        'SELECT conversation_key, chat_jid, source_inbound_seq FROM outbound_ops WHERE wa_message_id = ?',
+      ).get('mapped-reply')).toEqual({
+        conversation_key: phone, chat_jid: lid, source_inbound_seq: source.seq,
+      });
+    } finally {
+      mockResolvePhoneFromJid.mockImplementation(previous);
+      db.close();
+    }
+  });
+
+  it('journals a mapped-LID control message under its canonical conversation', async () => {
+    const db = makeTempDb();
+    const lid = '15550000012@lid';
+    const phone = '15550000009';
+    db.raw.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+      .run(lid, `${phone}@s.whatsapp.net`);
+    const originalPeers = Object.getOwnPropertyDescriptor(config, 'controlPeers');
+    Object.defineProperty(config, 'controlPeers', {
+      configurable: true, value: new Map([['peer', phone]]),
+    });
+    const runtime = makeRuntime();
+    try {
+      const handler = makeIngest(db, makeMessenger(), runtime, BOT_JID, BOT_LID, new DurabilityEngine(db));
+      await runIngest(handler, makeIncomingMessage({
+        messageId: 'mapped-control', chatJid: lid, senderJid: `${phone}@s.whatsapp.net`,
+        content: '[LOOPS_HEAL] control-only',
+      }));
+      expect(db.raw.prepare(
+        'SELECT conversation_key, routed_to, terminal_reason FROM inbound_events WHERE message_id = ?',
+      ).get('mapped-control')).toEqual({
+        conversation_key: phone, routed_to: 'control', terminal_reason: 'control_message',
+      });
+      expect(runtime.handleMessage).not.toHaveBeenCalled();
+    } finally {
+      if (originalPeers) Object.defineProperty(config, 'controlPeers', originalPeers);
+      db.close();
+    }
+  });
+
   /**
    * Override config.ingest for the duration of fn(), restoring the original
    * property descriptor on exit. Mirrors the pattern used in the backpressure
