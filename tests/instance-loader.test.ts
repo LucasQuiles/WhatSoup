@@ -1020,47 +1020,47 @@ describe('passive instance type', () => {
 });
 
 // ---------------------------------------------------------------------------
-// loops instance config loads and validates correctly
+// per-chat sandbox agent instance config loads and validates correctly
 // ---------------------------------------------------------------------------
 
-describe('loadInstance — loops instance config', () => {
-  it('loads the loops instance.json from repo and validates correctly', () => {
+describe('loadInstance — per-chat sandbox agent config', () => {
+  it('loads a per-chat sandbox agent instance.json and validates correctly', () => {
     // HOME is tmpDir, so the runtime expands the `~` cwd below to this directory.
-    const cwd = path.join(tmpDir, 'whatsoup', 'loops');
+    const cwd = path.join(tmpDir, 'whatsoup', 'bot-a');
     fs.mkdirSync(cwd, { recursive: true });
     fs.writeFileSync(path.join(cwd, 'CLAUDE.md'), 'instructions', 'utf8');
-    // Sanitized fixture — mirrors the real loops config shape without committing
+    // Sanitized fixture — the shape of a real per-chat agent config, without
     // phone numbers or API keys. Real instances/*/instance.json is .gitignored.
-    const loops: Record<string, unknown> = {
-      name: 'loops',
+    const agentConfig: Record<string, unknown> = {
+      name: 'bot-a',
       type: 'agent',
       adminPhones: ['+15555550100'],
       accessMode: 'allowlist',
       agentOptions: {
         sessionScope: 'per_chat',
         sandboxPerChat: true,
-        cwd: '~/whatsoup/loops',
+        cwd: '~/whatsoup/bot-a',
         instructionsPath: 'CLAUDE.md',
       },
     };
 
     // Write to temp dir and load
-    writeInstance(path.join(tmpDir, 'config'), 'loops', loops);
-    loadInstance('loops');
+    writeInstance(path.join(tmpDir, 'config'), 'bot-a', agentConfig);
+    loadInstance('bot-a');
 
     const config = JSON.parse(process.env.INSTANCE_CONFIG!);
-    expect(config.name).toBe('loops');
+    expect(config.name).toBe('bot-a');
     expect(config.type).toBe('agent');
     expect(config.accessMode).toBe('allowlist');
     expect(config.agentOptions).toBeDefined();
     expect(config.agentOptions.sessionScope).toBe('per_chat');
     expect(config.agentOptions.sandboxPerChat).toBe(true);
-    expect(config.agentOptions.cwd).toBe('~/whatsoup/loops');
+    expect(config.agentOptions.cwd).toBe('~/whatsoup/bot-a');
     expect(config.agentOptions.instructionsPath).toBe('CLAUDE.md');
 
     // The same `~` cwd is still checked: without the file there, load refuses.
     fs.rmSync(path.join(cwd, 'CLAUDE.md'));
-    expect(() => loadInstance('loops')).toThrow(/readable regular file/);
+    expect(() => loadInstance('bot-a')).toThrow(/readable regular file/);
   });
 });
 

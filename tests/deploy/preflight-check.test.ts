@@ -669,13 +669,13 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate
   it('blocks restart when any replay-safe outbound operation is nonterminal', () => {
     const root = makeFixtureTree('export const mainOk = true;\n');
     const dataHome = makeTmpDir();
-    createRestartSafetyFixture(dataHome, 'q-bot', {
+    createRestartSafetyFixture(dataHome, 'bot-a', {
       status: 'maybe_sent',
       replayPolicy: 'safe',
       isTerminal: 0,
     });
 
-    const { status, stderr } = runPreflight(root, 'q-bot', { XDG_DATA_HOME: dataHome });
+    const { status, stderr } = runPreflight(root, 'bot-a', { XDG_DATA_HOME: dataHome });
 
     expect(status).toBe(3);
     expect(stderr).toContain('safe_nonterminal_outbound');
@@ -685,15 +685,15 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate
   it('allows unsafe maybe-sent debt but reports it without replaying', () => {
     const root = makeFixtureTree('export const mainOk = true;\n');
     const dataHome = makeTmpDir();
-    createRestartSafetyFixture(dataHome, 'q-bot', {
+    createRestartSafetyFixture(dataHome, 'bot-a', {
       status: 'maybe_sent',
       replayPolicy: 'unsafe',
       isTerminal: 1,
     });
     const configHome = makeTmpDir();
-    writeInstanceConfig(configHome, 'q-bot', validInstanceConfig);
+    writeInstanceConfig(configHome, 'bot-a', { ...validInstanceConfig, name: 'bot-a' });
 
-    const { status, stderr } = runPreflight(root, 'q-bot', {
+    const { status, stderr } = runPreflight(root, 'bot-a', {
       XDG_DATA_HOME: dataHome,
       XDG_CONFIG_HOME: configHome,
     });
@@ -729,10 +729,10 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate
   it('fails closed when the restart-safety checker is missing', () => {
     const root = makeFixtureTree('export const mainOk = true;\n');
     const dataHome = makeTmpDir();
-    createRestartSafetyFixture(dataHome, 'q-bot');
+    createRestartSafetyFixture(dataHome, 'bot-a');
     rmSync(join(root, 'scripts', 'restart-safety-preflight.ts'));
 
-    const { status, stderr } = runPreflight(root, 'q-bot', { XDG_DATA_HOME: dataHome });
+    const { status, stderr } = runPreflight(root, 'bot-a', { XDG_DATA_HOME: dataHome });
 
     expect(status).toBe(1);
     expect(stderr).toContain('restart-safety checker not found');
@@ -744,13 +744,13 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate
       `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(sentinel)}, 'ran');\n`,
     );
     const dataHome = makeTmpDir();
-    createRestartSafetyFixture(dataHome, 'q-bot', {
+    createRestartSafetyFixture(dataHome, 'bot-a', {
       status: 'pending',
       replayPolicy: 'read_only',
       isTerminal: 0,
     });
 
-    const { status, stderr } = runPreflight(root, 'q-bot', { XDG_DATA_HOME: dataHome });
+    const { status, stderr } = runPreflight(root, 'bot-a', { XDG_DATA_HOME: dataHome });
 
     expect(status).toBe(3);
     expect(stderr).toContain('safe_nonterminal_outbound');
@@ -760,16 +760,16 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate
   it('defers the ledger gate to the launch wrapper, which owns the terminal exit 78', () => {
     const root = makeFixtureTree('export const mainOk = true;\n');
     const dataHome = makeTmpDir();
-    createRestartSafetyFixture(dataHome, 'q-bot', {
+    createRestartSafetyFixture(dataHome, 'bot-a', {
       status: 'maybe_sent',
       replayPolicy: 'safe',
       isTerminal: 0,
     });
 
     const configHome = makeTmpDir();
-    writeInstanceConfig(configHome, 'q-bot', validInstanceConfig);
+    writeInstanceConfig(configHome, 'bot-a', { ...validInstanceConfig, name: 'bot-a' });
 
-    const { status, stderr } = runPreflight(root, 'q-bot', {
+    const { status, stderr } = runPreflight(root, 'bot-a', {
       XDG_DATA_HOME: dataHome,
       XDG_CONFIG_HOME: configHome,
       WHATSOUP_PREFLIGHT_RESTART_SAFETY: 'wrapper',
@@ -783,13 +783,13 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate
   it('runs the ledger gate for any other deferral value', () => {
     const root = makeFixtureTree('export const mainOk = true;\n');
     const dataHome = makeTmpDir();
-    createRestartSafetyFixture(dataHome, 'q-bot', {
+    createRestartSafetyFixture(dataHome, 'bot-a', {
       status: 'maybe_sent',
       replayPolicy: 'safe',
       isTerminal: 0,
     });
 
-    const { status, stderr } = runPreflight(root, 'q-bot', {
+    const { status, stderr } = runPreflight(root, 'bot-a', {
       XDG_DATA_HOME: dataHome,
       WHATSOUP_PREFLIGHT_RESTART_SAFETY: '1',
     });

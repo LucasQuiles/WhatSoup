@@ -104,15 +104,15 @@ describe('deploy/preflight-instance-check.ts (#1862)', () => {
     const home = makeConfigHome();
     const cwd = join(home, 'workspace');
     mkdirSync(cwd);
-    const config = validAgentConfig({ agentOptions: { sessionScope: 'single', cwd, instructionsPath: 'missing.md' } });
-    writeInstance(configHome, 'q-bot', config);
-    const missing = runInstanceCheck('q-bot', { XDG_CONFIG_HOME: configHome, HOME: home });
+    const config = validAgentConfig({ name: 'bot-a', agentOptions: { sessionScope: 'single', cwd, instructionsPath: 'missing.md' } });
+    writeInstance(configHome, 'bot-a', config);
+    const missing = runInstanceCheck('bot-a', { XDG_CONFIG_HOME: configHome, HOME: home });
     expect(missing.status).toBe(3);
     expect(missing.stderr).toContain('agentOptions.instructionsPath');
     expect(missing.stderr).not.toContain(home);
 
     writeFileSync(join(cwd, 'missing.md'), 'instructions\n', 'utf8');
-    const ready = runInstanceCheck('q-bot', { XDG_CONFIG_HOME: configHome, HOME: home });
+    const ready = runInstanceCheck('bot-a', { XDG_CONFIG_HOME: configHome, HOME: home });
     expect(ready.status, ready.stderr).toBe(0);
   });
 
