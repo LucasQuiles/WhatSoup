@@ -232,11 +232,16 @@ export function consumeIntentionalRestartMarker(
  * deferred pen at the tool boundary. The turn abort in the restart's graceful
  * shutdown would destroy both.
  *
- * Step 1 commits the live stream buffer, the held answer included, as normal
- * messages (the answer keeps its `answer` role, so it is the turn's answer) and
- * waits for those sends. Only when they are confirmed does step 2 abort the turn,
- * so that the #3398 salvage path sends the pen of a turn that has shown nothing,
- * and wait for that send. Both steps share one OWED_REPLY_FLUSH_GRACE_MS window.
+ * Step 1 commits the live stream buffer, the held answer included, and waits for
+ * those sends. The held answer goes out unchanged but with the `status` role, as
+ * the #3398 salvage does, so it never becomes the turn's answer evidence: the
+ * restart's shutdown finalizes this turn as a crash, and an answer op that is
+ * submitted but not yet echoed would move the inbound to a recovery job that
+ * blocks a singleton or shared scope. Without answer evidence the turn ends
+ * failed_terminal with no recovery job. Only when the step-1 sends are confirmed
+ * does step 2 abort the turn, so that the #3398 salvage path sends the pen of a
+ * turn that has shown nothing, and wait for that send. Both steps share one
+ * OWED_REPLY_FLUSH_GRACE_MS window.
  *
  * A send that stops with a failure disposition, or that the echo guard drops,
  * returns without throwing, so a resolved flush alone does not prove delivery;

@@ -269,7 +269,7 @@ export interface IOutboundQueue {
   enqueueText(text: string, role: OutboundMessageRole): void;
   /** Enqueue streaming text delta — aggregated with debounce to prevent per-token message spam from streaming providers. */
   enqueueStreamingText(text: string, role: OutboundMessageRole, onCommit?: () => void): void;
-  /** Commit buffered streaming text; `true` also commits the answer an active turn defers to its end. */
+  /** Commit buffered streaming text; `true` also sends the answer an active turn defers, with the status role, so it is never answer evidence. */
   commitStreamingText(includeDeferredAnswers?: boolean): void;
   /** Drop provisional assistant narration when a real tool call follows it in minimal mode. */
   discardPreToolAssistantText(): void;
@@ -854,7 +854,7 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   /** Flush the streaming text buffer into the send queue. */
-  private flushStreamBuffer(includeDeferredAnswers = !this.isDeferringActiveAnswer()): void {
+  private flushStreamBuffer(includeDeferredAnswers = !this.isDeferringActiveAnswer(), heldAnswerAsStatus = false): void {
     if (this.streamTimer) {
       clearTimeout(this.streamTimer);
       this.streamTimer = null;
@@ -879,7 +879,7 @@ export class OutboundQueue implements IOutboundQueue {
         // them as "the agent produced output", which must block a fallback
         // replay and the empty-turn fallback. The policy decision satisfies the
         // reply guarantee (#3613); the turn evidence records the withholding.
-        this.enqueuePreparedText(text, attribution);
+        this.enqueuePreparedText(text, heldAnswerAsStatus && attribution.role === 'answer' ? { ...attribution, role: 'status' } : attribution);
         for (const part of group) {
           withTransportInboundContext(part.authorityContext, () => part.onCommit?.());
         }
@@ -897,7 +897,7 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   commitStreamingText(includeDeferredAnswers?: boolean): void {
-    this.flushStreamBuffer(includeDeferredAnswers);
+    this.flushStreamBuffer(includeDeferredAnswers, includeDeferredAnswers === true);
   }
 
   discardPreToolAssistantText(): void {
