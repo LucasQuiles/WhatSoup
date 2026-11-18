@@ -2402,7 +2402,12 @@ If the evaluator throws for a conversation that has a policy, the message is als
 
 **Turn outcome.** A turn whose answers were all withheld ends as a deliberate terminal outcome, not a delivery failure. The terminal record has attempt kind `withheld_by_policy` under the `finalized_no_reply_policy` disposition. The inbound message completes with terminal reason `client_output_withheld`. The turn is not handed to recovery, is not replayed, raises no reply-guarantee breach alert and is not marked for catch-up. The policy decision satisfies the reply guarantee, which is disarmed. A turn that also delivered another answer finalizes as replied. Withheld text never becomes an automatic voice reply.
 
-**Unsupported setting.** `authorization` is rejected. It does not authorize client output.
+**Unsupported setting.** `authorization` is rejected. It does not authorize client output. Earlier releases accepted the field and never checked it, so a stored policy can still contain it. Config load, API writes and the restart preflight all reject such a policy, so the instance does not start. Upgrade in this order:
+
+1. **Inventory.** Before the switch, run the new release's side-effect-free instance preflight for each agent instance: `<pinned-node> --experimental-strip-types deploy/preflight-instance-check.ts <instance-name>`. Exit code 3 with a field of `clientOutputPolicies[N].authorization` names each policy to change.
+2. **Migrate.** On the running release, delete the `authorization` object from each named policy in the instance's `config.json` and keep the policy's other fields. That release ignores the field, so the edit changes no output decision and needs no restart.
+3. **Deploy.** Run the inventory again until it reports no `authorization` field, then deploy the new release and restart the instances.
+4. **Recover.** If an instance still fails its preflight or config load at `clientOutputPolicies[N].authorization`, delete that object from `config.json` and restart the instance. No other field needs a change.
 
 Not covered:
 
@@ -2431,6 +2436,7 @@ Fields (every object is closed; unknown keys are rejected):
 - `maxQuestionMarks`: an integer from 0 to 20. ASCII, fullwidth and Arabic question marks all count.
 - `blockedTerms`: up to 64 terms. Each term has a `value` (NFC, no surrounding whitespace, 1 to 128 code points), a `match` of `whole_word` or `substring`, and a boolean `caseSensitive`.
 - `rejectInternalArtifacts` and `rejectWhatsAppJids`: booleans.
+
 The fleet API returns blocked-term values as `[redacted]` in line detail and config-update responses. The full values stay in `config.json`.
 
 ### `chatOptions`
