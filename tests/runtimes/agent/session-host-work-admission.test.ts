@@ -1007,6 +1007,71 @@ describe('SessionManager host work admission', () => {
     expect(methods).not.toContain('thread/start');
   }, 1_000);
 
+  /** Runs body and returns the process-level unhandled rejections it caused; main.ts shuts the bot down on one. */
+  async function collectUnhandledRejections(body: () => Promise<void>): Promise<unknown[]> {
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => { rejections.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await body();
+      // Node reports an unhandled rejection only after the microtask queue drains.
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    return rejections;
+  }
+
+  it('leaves no unhandled rejection when an admitted Codex resume is rejected while no turn waits for readiness', async () => {
+    const child = makeChild();
+    admitPersistentChild(child);
+    vi.mocked(resolveResumableAgentSession).mockReturnValueOnce({ id: 9 } as never);
+    const onEvent = vi.fn();
+    const session = makeSession('codex-cli', { onEvent, providerConfig: { budget: { requestsPerMinute: 1 } } });
+    // Use up the one slot, so the turn is throttled after it starts the
+    // deferred child and before anything awaits readiness.
+    (session as unknown as { budget: { checkBudget(): unknown } }).budget.checkBudget();
+
+    const rejections = await collectUnhandledRejections(async () => {
+      await session.spawnSession('codex-throttled-thread', 9);
+      await session.sendTurn('throttled turn');
+      expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'result',
+        text: expect.stringContaining('_Throttled:'),
+      }));
+      expect(admission.spawn).toHaveBeenCalledOnce();
+      const resumeRequest = codexRequests(child).find((request) => request.method === 'thread/resume');
+      expect(resumeRequest).toMatchObject({ params: { threadId: 'codex-throttled-thread' } });
+      emitCodexLine(child, { id: resumeRequest!.id, error: { code: -32603, message: 'thread store unavailable' } });
+      await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith('SIGTERM'), { timeout: 500 });
+    });
+
+    expect(rejections).toEqual([]);
+    expect(updateResumedSessionStatus).toHaveBeenCalledWith(
+      sessionDb, 9, 'codex-throttled-thread', 'codex-cli', 'resume_failed',
+    );
+  }, 1_000);
+
+  it('still rejects the waiting admitted Codex turn with the resume rejection and leaves no unhandled rejection', async () => {
+    const child = makeChild();
+    admitPersistentChild(child);
+    vi.mocked(resolveResumableAgentSession).mockReturnValueOnce({ id: 9 } as never);
+    const session = makeSession('codex-cli');
+
+    const rejections = await collectUnhandledRejections(async () => {
+      await session.spawnSession('codex-waiting-thread', 9);
+      const turn = session.sendTurn('waiting turn');
+      await vi.waitFor(() => expect(admission.spawn).toHaveBeenCalledOnce());
+      const resumeRequest = codexRequests(child).find((request) => request.method === 'thread/resume');
+      expect(resumeRequest).toMatchObject({ params: { threadId: 'codex-waiting-thread' } });
+      emitCodexLine(child, { id: resumeRequest!.id, error: { code: -32603, message: 'thread store unavailable' } });
+      await expect(turn).rejects.toThrow('HOST_WORK_ADMISSION_CODEX_RESUME_REJECTED');
+      await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith('SIGTERM'), { timeout: 500 });
+    });
+
+    expect(rejections).toEqual([]);
+  }, 1_000);
+
   it('keeps replacement closed after persistent host-admission cleanup is unproven', async () => {
     const child = makeChild();
     admitPersistentChild(child);
