@@ -652,7 +652,8 @@ interpreter positions, and that file must also pass the interpreter check of
 the shared grammar (`isTrustedHealthPython`). Single-member activation
 (`release:activate`) still reads the loaded health job with that grammar
 alone, so its interpreter needs only to pass `isTrustedHealthPython`. Any other
-health-job shape refuses with a detail that names the two installers: a script
+health-job shape, except a legacy wrapper that sources another environment
+file (below), refuses with a detail that names the two installers: a script
 run directly, the short runner form, a `/bin/sh` or `/bin/bash` script, a
 `bash -c` command, another interpreter (one inside the release, or another
 trusted `python3` such as one set through `BOT_ERRORS_PYTHON`), a log hint from
@@ -825,7 +826,8 @@ reference refuses. The wrapper runs `source` on
 planning user's home folder, and its log hint and `BOT_ERRORS_STATE_DIR`
 default must name `<home>/.local/state/bot-errors`. A wrapper that sources
 another file refuses (`bot-errors health legacy wrapper does not source the BOT
-ERRORS environment file in the job user's home folder`). That file is shell
+ERRORS environment file in the job user's home folder`); reinstall the health
+job with either installer, as for a shape refusal. The sourced file is shell
 code planning does not read, and the variables it sets reach the runner
 without passing the environment-key allowlist, which reads only the plist.
 Both selected release roots must also be normalized absolute
