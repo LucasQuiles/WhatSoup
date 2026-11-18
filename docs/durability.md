@@ -1706,8 +1706,10 @@ the work. Fully autonomous re-adoption is a deliberate later decision, not a def
 
 The trigger poller commits durable evidence of every execution BEFORE the executor runs, and
 isolates hung executors from unrelated work. Slices 1–2 of #2566 implement the claim/lease,
-concurrency, and liveness-observation layers documented here; delivery separation, replay policy,
-and retention are later slices and are NOT yet implemented.
+concurrency, and liveness-observation layers (§8.1–8.3). Later slices added delivery separation
+with a no-re-send policy for unknown delivery outcomes (§8.4, `reconcileDeliveryIntents` in
+`src/core/substrate/poller.ts`) and history retention (§8.6, `triggerRunDays` /
+`triggerOccurrenceDays` in `src/core/database-retention.ts`).
 
 ### 8.1 Fenced occurrence claim (migration 57)
 

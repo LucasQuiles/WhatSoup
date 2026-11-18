@@ -101,6 +101,16 @@ Without `RunAtLoad=true`, a hand-maintained protective service does not start
 after reboot until the next scheduled interval fires or launchd is manually
 triggered.
 
+This rule covers hand-maintained protective services. It does not cover
+these interval-scheduled jobs, which ship with `RunAtLoad=false` and rely
+on their schedule instead:
+`deploy/com.whatsoup.reply-guarantee.plist` (`StartInterval` 60),
+`deploy/com.whatsoup.release-drift-check.plist` (`StartInterval` 300),
+`deploy/templates/com.whatsoup.bot-errors-j1-collector.plist`
+(`StartCalendarInterval`; a load must not produce an off-slot bundle) and
+the BOT ERRORS heartbeat watchdog that
+`deploy/scripts/install-bot-errors-launchd.sh` writes (`StartInterval` 300).
+
 Generated per-instance WhatSoup plists are a separate, code-owned contract;
 do not copy the hand-maintained template into them. They retain an explicit
 `RunAtLoad=false`, install only after successful pairing, and use:
@@ -161,11 +171,14 @@ appropriate service name) that delegates to the repository's fleet launcher:
 exec /bin/bash "$HOME/LAB/WhatSoup/deploy/whatsoup-fleet" "$@"
 ```
 
-`deploy/whatsoup-fleet` reads `.nvmrc` for its default NVM binary, checks the
-resolved Node version against the repository's engine range, and launches
-`src/fleet/standalone.ts` with native type stripping. Install the repository pin
-first and verify the service's resolved binary; the launcher can fall back to
-`PATH` if the default binary is absent.
+`deploy/whatsoup-fleet` reads `.nvmrc` for its default NVM binary; a
+non-empty `WHATSOUP_NODE` replaces that default. When the chosen binary is
+not executable, including an unusable `WHATSOUP_NODE`, the launcher falls
+back to `node` on `PATH`. It then requires the resolved Node major version
+to be at least the `.nvmrc` major and below the upper bound of
+`engines.node` in `package.json`, and launches `src/fleet/standalone.ts`
+with native type stripping. Install the repository pin first and verify
+the service's resolved binary.
 
 Then reference only the wrapper in the plist `ProgramArguments`:
 
