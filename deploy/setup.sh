@@ -113,7 +113,7 @@ if [ "${1:-}" = "--remove-timers" ]; then
   if [ "$PLATFORM" != "Darwin" ]; then
     echo "--remove-timers applies to macOS launchd timers only." >&2
     echo "On Linux, disable the systemd timers instead:" >&2
-    echo "  systemctl --user disable --now harness-maintenance.timer whatsoup-reply-guarantee.timer" >&2
+    echo "  systemctl --user disable --now harness-maintenance.timer whatsoup-reply-guarantee.timer whatsoup-release-drift.timer" >&2
     exit 1
   fi
   for label in "${LAUNCHD_TIMER_LABELS[@]}"; do
@@ -633,10 +633,13 @@ else
   # WHATSOUP_RELEASE_DRIFT_INSTANCE, from this file, never from bot-errors.env:
   # every BOT ERRORS unit loads that file. The wrapper ignores WHATSOUP_INSTANCE,
   # which also selects per-instance agent state (deploy/hooks). Setup writes the
-  # file only from an explicit label and never replaces or follows an existing
-  # path: any entry, a symlink or a dangling symlink included, counts as present,
-  # and noclobber (set -C) creates the file with O_CREAT|O_EXCL, so a path that
-  # appears after this check is refused too.
+  # file only from an explicit label and never writes to a path that exists at
+  # this check: any entry, a symlink or a dangling symlink included, counts as
+  # present (a label is read through a symlink, as systemd reads it). Under
+  # noclobber (set -C), a regular file, a link to one or a dangling symlink that
+  # appears after this check is refused too; a FIFO or device that appears, or a
+  # link to one, is written into, since bash adds O_EXCL only when stat finds
+  # nothing.
   release_drift_env="$HOME/.config/whatsoup/release-drift.env"
   if [ -e "$release_drift_env" ] || [ -L "$release_drift_env" ]; then
     # A failed read warns and never ends setup (set -e), which has already
@@ -846,7 +849,9 @@ else
   echo "  the observer needs ~/.local/bin/whatsoup to point into an exported release that holds"
   echo "  .whatsoup-release-manifest.json. Setup has just pointed it at this tree, so on a host"
   echo "  installed from a clone every run raises manifest-missing and inconclusive alerts and"
-  echo "  exits 2; a missing or unsafe label, a network failure or a timeout also exits 2."
+  echo "  exits 2. Other causes fail the unit too, among them a missing or unsafe label, a runner,"
+  echo "  observer or emit failure, a network failure or a timeout, and exit 1 from a release whose"
+  echo "  scheduler predates --bootstrap-exit-code 2; docs/runbook.md describes each exit status."
   echo "  Give the timer the bot instance that labels its BOT ERRORS alerts (unless setup wrote"
   echo "  it from WHATSOUP_RELEASE_DRIFT_INSTANCE; this command never replaces an existing file):"
   echo "     (set -C; umask 077; echo WHATSOUP_RELEASE_DRIFT_INSTANCE=<instance> > ~/.config/whatsoup/release-drift.env)"

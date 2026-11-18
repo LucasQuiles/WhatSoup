@@ -11,7 +11,7 @@
 # yet; that release must hold .whatsoup-release-manifest.json, which an exported
 # release has and a clone does not, or every run is inconclusive (exit 2).
 #
-# Emits release-integrity (drift) + release-currency (behind origin/main) alerts
+# Emits release-integrity (drift) + release-currency (differs from the target ref) alerts
 # through the existing BOT ERRORS outbox pipeline (deploy/scripts/bot-errors-emit.py),
 # and clears them on a clean run (--clear-on-ok). Fail-closed exit codes:
 #   0 clean, or target differs (advisory; the currency finding is emitted)
@@ -82,10 +82,11 @@ bash "$SCHEDULER" \
   --clear-on-ok
 status=$?
 # Exit 1 is alerted drift only when the observer ran. A scheduler that starts its
-# runner with --bootstrap-exit-code 2 gets 2 for every runner and loading failure
-# (scripts/run-with-pinned-node.sh), so its exit 1 comes from the observer. A
-# release exported before that contract has a runner that also exits 1 when Node
-# is missing or its bootstrap fails, so exit 1 from it is reported as 2.
+# runner with --bootstrap-exit-code 2 never gets 1 from a runner or loading failure
+# (scripts/run-with-pinned-node.sh turns that 1 into 2), so its exit 1 comes from
+# the observer. A release exported before that contract has a runner that also
+# exits 1 when Node is missing or its bootstrap fails, so exit 1 from it is
+# reported as 2.
 if [ "$status" -eq 1 ] && ! grep -Eq '^[[:space:]]+--bootstrap-exit-code 2([[:space:]]|$)' "$SCHEDULER"; then
   fail "exit 1 from a release whose scheduler predates --bootstrap-exit-code 2 cannot show that the observer ran: $RELEASE_ROOT"
 fi

@@ -19,16 +19,21 @@ ExecStart=%h/.local/bin/whatsoup-release-drift-linux.sh
 # Exit statuses of deploy/scripts/whatsoup-release-drift-linux.sh:
 #   0 clean, or the deployed release differs from the target ref. A differing
 #     target is advisory: its currency finding goes through the BOT ERRORS
-#     outbox, and the unit stays green.
+#     outbox, and the unit stays green. A release whose scheduler predates
+#     --bootstrap-exit-code 2 may exit 1 for a differing target, and that 1
+#     becomes 2 as below.
 #   1 integrity drift. The observer has emitted the alert through the BOT ERRORS
 #     outbox (the dispatcher suppresses duplicates while the incident is open),
 #     so the outbox is the single alert channel and the unit stays green.
 #   2 inconclusive, and the unit fails (systemctl --user and the journal show
 #     it): the label is missing or unsafe; the launcher resolves into no
 #     release; the release's runner or observer failed; the currency check was
-#     inconclusive (no release manifest, a network failure or a timeout), which
-#     still emits its alert; either outbox emit failed; or exit 1 came from a
-#     release whose scheduler predates --bootstrap-exit-code 2.
+#     inconclusive (for example a missing or invalid release manifest, a failed
+#     git ls-remote or a timeout), which still emits its alert; either outbox
+#     emit failed; or exit 1 came from a release whose scheduler predates
+#     --bootstrap-exit-code 2.
+#   Any other status fails the unit too, such as 127 when the release has no
+#   runner script.
 # The observer needs ~/.local/bin/whatsoup to point into an exported release
 # that holds .whatsoup-release-manifest.json. deploy/setup.sh points it at the
 # tree setup runs from, so on a host installed from a clone every run raises
