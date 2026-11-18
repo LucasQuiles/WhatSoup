@@ -118,9 +118,11 @@ Both backends use **config-only auth** (matches the Twilio precedent — no
   Group envelopes thread under the chat GUID; the sender field carries the
   member address.
 - **Message ids:** provider GUIDs on both backends, surfaced as
-  `MessageRef.id`. The imsg `chat.db` ROWID is used only as the poll cursor;
-  the one exception is an imsg send reply that carries only a numeric `id`,
-  which is stringified.
+  `MessageRef.id`. The imsg `chat.db` ROWID serves as the poll cursor and
+  keys and orders the port's inbound queue; it is not a message id. The
+  exception is an imsg send reply whose `guid` is missing or empty: the
+  port then uses a non-empty string `message_id`, else a safe-integer `id`,
+  stringified.
 
 ## Capabilities (v1)
 
@@ -173,7 +175,8 @@ envelope. When the peer reads an outbound message, the backend updates the
 
 The inbound path piggybacks on the existing `/message/query` cursor poll:
 when an outbound record is fetched with `dateRead` set, the adapter checks
-the `emittedReadReceipts` set (session-level exactly-once dedup) and a
+the `emittedReadReceipts` set (in-memory dedup of the GUIDs of the 5,000
+most recently emitted receipts; older entries are evicted) and a
 time filter (`dateRead > sessionStartedAt`, restart-safe dedup; the
 timestamp is frozen at connect, so mid-session reads always pass) before
 emitting a `ReadEvent`.
@@ -214,7 +217,8 @@ in the valid ranges. Removal events retain the emoji being removed rather
 than replacing it with an empty string. Non-integer numeric values (NaN,
 2000.5, etc.) and out-of-range codes (1999, 2006, 4000, negative numbers)
 are handled the same way: `reactionTypeToEmoji` returns `null` and the record
-falls through to text surfacing.
+is parsed as an ordinary message, which surfaces as text when it carries
+text and as kind `other` when it does not.
 
 **Outbound symmetry note:** the OUTBOUND `/message/react` endpoint uses
 string reaction kinds (`'love'`, `'-like'`, etc.) — see

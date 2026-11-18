@@ -38,9 +38,8 @@ The deadman checks two things:
    **Correction (2026-09-27): this endpoint does not exist.** The collector
    (`deploy/scripts/bot-errors-collector.py`) runs no HTTP server, and its CLI
    is relay-only (`--remote`, `--daemon` and the relay tuning flags). Check 1
-   requires a new endpoint before it can be built as written; until one
-   exists, check 2 is the only probe here that works against existing
-   surfaces.
+   cannot be built as written; the corrected success condition below
+   replaces it.
 
 2. **Outbox drain age**: SSH into nucles and check the mtime of the most-recent
    file in `~/.local/state/bot-errors/sent/` (hub operator account). If the newest file is older
@@ -48,8 +47,21 @@ The deadman checks two things:
    This catches a process that is alive and responding to health checks but has
    stopped draining.
 
-Both checks must pass within `PROBE_TIMEOUT_SECONDS` (default 10) or the probe
-is treated as failed.
+**Corrected success condition (2026-11-18).** Judge liveness by the files
+that the `dispatcher` and `collector` checks of
+`deploy/scripts/bot-errors-heartbeat-watchdog.py` treat as heartbeats, in
+the BOT ERRORS state directory: `dispatcher-state.json` and
+`collector-state.json` (`deploy/scripts/lib/state_files.py`). The probe
+passes when both files exist and their modification times are no older
+than the watchdog's limits, 300 seconds for the dispatcher and 180 for the
+collector by default (`BOT_ERRORS_MAX_DISPATCHER_AGE`,
+`BOT_ERRORS_MAX_COLLECTOR_AGE`), read within `PROBE_TIMEOUT_SECONDS`
+(default 10). The `sent/` age of check 2 is not a liveness signal on its
+own: the dispatcher moves an event into `sent/` when it delivers it, so a
+quiet period with nothing to deliver leaves the newest file old. In the
+script logic below, step 1 cannot run until a collector endpoint exists,
+so use the heartbeat ages in its place, and do not fail the probe on step
+2's `sent/` age alone.
 
 ### Alert channel requirement
 

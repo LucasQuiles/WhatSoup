@@ -343,5 +343,8 @@ rule is wired warn-level in `eslint.config.fitness.mjs:47`.
   13 test files. Two carry no adjacent `@skip-env` / `@skip-timing` comment, so
   they remain uncategorized: `tests/core/provider-mcp-config-fs.test.ts:37` and
   `tests/deploy/preflight-check.test.ts:1466`. The categorization rule is wired
-  at `eslint.config.fitness.mjs:51`; the other skip sites have nearby category
-  comments in their current files.
+  at `eslint.config.fitness.mjs:51`; the other 23 `skipIf` lines carry a
+  category comment. The rule also covers `runIf`
+  (`eslint-rules/categorized-skips.mjs`), which this re-count does not
+  include; some `runIf` sites carry no category comment, for example
+  `tests/deploy/harness-maintenance-claude-e2e.test.ts:48`.

@@ -91,12 +91,15 @@ with `READ_ONLY_DATABASE_OPTIONS` and does not migrate instance DBs.
 |---|---|---|
 | Configured primary instance | `<instance-state-dir>/bot.db` | Yes — writable `Database.open()` on startup |
 | `com.whatsoup.mw-cell` | `~/.local/share/whatsoup/instances/mw-cell/` | Separate DB — writes to mw-bot path would be a bug |
-| `com.whatsoup.whatsoup-fleet` | opens instance DBs via `src/fleet/db-reader.ts` | Read-only (`READ_ONLY_DATABASE_OPTIONS`) — never migrates |
+| `com.whatsoup.whatsoup-fleet` | opens instance DBs via `src/fleet/db-reader.ts` | Ordinary reads are read-only (`READ_ONLY_DATABASE_OPTIONS`) and never migrate; `queryWrite` opens a writable connection for the two cross-instance writers named below |
 
 Runtime startup uses `openDatabaseForStartup()` in `src/main.ts`, which
 checks database compatibility before opening the writable database. The
-fleet reader opens instance databases with `READ_ONLY_DATABASE_OPTIONS`
-in `src/fleet/db-reader.ts`.
+fleet reader's ordinary queries open instance databases with
+`READ_ONLY_DATABASE_OPTIONS` in `src/fleet/db-reader.ts`. Its `queryWrite`
+opens a writable connection for two callers: the health poller's
+auth-loss state (`src/fleet/health-poller.ts`) and LID synchronization
+(`src/fleet/routes/lid-sync.ts`).
 
 ### Operator procedure
 

@@ -67,4 +67,6 @@ counters; "Soup Kitchen" ×5 → C3/C4; protected contracts all present).
 | DD-10 | Touch-target floor unmeasured | C2 | primitive test assertions |
 | WVR-001..006 | see console/eslint-waivers.yaml | various | 2026-12-31 |
 
-## Verdict: D1.3 **PASS**, D1.4 **PASS** — D1 (token foundation stage) complete. DD-6 is resolved by the StatusCell-backed StatusDot re-check above. Next: C2 primitive consolidation, first slice = Badge/StatusChip + Button primitives feeding the Fleet pilot.
+## Verdict: D1.3 **PASS**, D1.4 **PASS** — D1 (token foundation stage) complete. Next: C2 primitive consolidation, first slice = Badge/StatusChip + Button primitives feeding the Fleet pilot (resolves DD-6 first, the audit's sharpest open conflict).
+
+Later status: that first C2 slice is recorded in `c2-1-evidence.md` (C2.1), which resolves DD-6; see the DD-6 rows above.

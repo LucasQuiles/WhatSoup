@@ -32,7 +32,7 @@ the index host and verifies it ends with the configured suffix.
 ```json
 "memory": {
   "pinecone": {
-    "expectedHostSuffix": "qkdgrnz.svc.aped-4627-b74a.pinecone.io"
+    "expectedHostSuffix": "-qkdgrnz.svc.aped-4627-b74a.pinecone.io"
   }
 }
 ```
@@ -41,11 +41,19 @@ the index host and verifies it ends with the configured suffix.
 guard matches it as a host segment (`host.includes("-<projectId>.")`,
 `matchesPineconeProjectGuard` in `src/lib/pinecone-project-guard.ts`), and
 the host URL embeds the short slug, so a UUID never matches. When both
-fields are set, both must match. The suffix above, copied from the Pinecone
-console's index host field, is the simplest guard.
+fields are set, both must match, and a matching `projectId` alone also
+satisfies the runtime guard. The suffix above, copied from the Pinecone
+console's index host field, is the simplest guard. Keep its leading `-`:
+for agent and chat instances, the instance-config checker
+(`scripts/check-instance-config.ts`) expects the
+`-<slug>.svc.<env>.pinecone.io` shape and reports a `memory.pinecone` block
+without `expectedHostSuffix`, even when `projectId` is set.
 
-Setting a wrong or missing suffix causes `pineconeReadiness` to report
-`project_mismatch` and the memory layer is disabled for that instance. This
+A suffix that the index host does not end with, a `projectId` that the
+host does not contain as that segment, or, on every named instance except
+the operator instance, neither field set causes `pineconeReadiness` to
+report `project_mismatch`, and the memory layer is disabled for that
+instance. This
 is the correct fail-safe: a wrong-project query returns unrelated data, which
 is worse than no data.
 
@@ -63,7 +71,7 @@ is worse than no data.
 "memory": {
   "pinecone": {
     "apiKeyEnv": "PINECONE_API_KEY",
-    "expectedHostSuffix": "qkdgrnz.svc.aped-4627-b74a.pinecone.io",
+    "expectedHostSuffix": "-qkdgrnz.svc.aped-4627-b74a.pinecone.io",
     "index": "whatsapp-bot",
     "allowedIndexes": ["whatsapp-bot", "claude", "codex", "rb-mind"],
     "knowledgeSearch": {
