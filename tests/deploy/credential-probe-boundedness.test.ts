@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { trackedShellFiles, unboundedProbes } from './credential-probe-scan.ts';
 
 // Incident 2026-07-24 (mini11 / ph-bot, ~45h outage): an unbounded
 // `security find-generic-password` blocked the launcher forever because macOS
@@ -15,72 +16,6 @@ import path from 'node:path';
 //   2. whatsoup_run_bounded actually bounds, on a host with AND without timeout(1)
 
 const BOUNDED_LIB = 'deploy/lib/bounded-exec.sh';
-
-/**
- * Every tracked shell file, repo-wide — not just deploy/. A new script anywhere
- * that reaches for a credential store has to be bounded too, and scoping the
- * scan to one directory would let that regression land silently.
- */
-function trackedShellFiles(): string[] {
-  const out = execFileSync('git', ['ls-files', '-z'], {
-    encoding: 'utf8',
-    maxBuffer: 32 * 1024 * 1024,
-  });
-  return out
-    .split('\0')
-    .filter(Boolean)
-    .filter((f) => f.endsWith('.sh') || f === 'deploy/whatsoup');
-}
-
-/**
- * Matches `security`/`secret-tool` in *command position* — start of line, or
- * after a pipe/`&&`/`;`/subshell open. Occurrences inside echoed help text and
- * comments sit mid-line and are correctly ignored. A `timeout`/`gtimeout` prefix
- * is matched too: stock macOS lacks timeout(1), and a bare timeout only sends SIGTERM.
- */
-const COMMAND_POSITION =
-  /(?:^|[|&;(]|\bthen\b|\bdo\b|\bif\b|\belif\b|!)\s*(?:(?:timeout|gtimeout)(?:\s+[^\s;|&()]+)*\s+)?(security|secret-tool)\s/;
-
-/** True when `index` is quoted in its own command context; `$(` opens a new
- *  context, except inside single quotes where it is literal text. */
-function insideQuotedString(code: string, index: number): boolean {
-  let single = false;
-  let double = false;
-  let subst = 0;
-  for (let i = 0; i < index; i++) {
-    const ch = code[i];
-    const opensSubst = ch === '(' && code[i - 1] === '$';
-    if (subst > 0) {
-      if (opensSubst) subst += 1;
-      else if (ch === ')') subst -= 1;
-    } else if (single) {
-      if (ch === "'") single = false;
-    } else if (double) {
-      if (ch === '"') double = false;
-      else if (opensSubst) subst += 1;
-    } else if (ch === "'") single = true;
-    else if (ch === '"') double = true;
-    else if (opensSubst) subst += 1;
-  }
-  return subst === 0 && (single || double);
-}
-
-function unboundedProbes(file: string): string[] {
-  const findings: string[] = [];
-  const lines = fs.readFileSync(file, 'utf8').split('\n');
-  lines.forEach((line, index) => {
-    const code = line.replace(/^\s*#.*$/, '');
-    const match = COMMAND_POSITION.exec(code);
-    if (!match) return;
-    // Quoted matches are data/help text. Measure at the command name, after any timeout prefix.
-    if (insideQuotedString(code, match.index + match[0].indexOf(match[1]))) return;
-    // `command -v security` only asks whether the binary exists; it cannot block.
-    if (/command\s+-v\s+(security|secret-tool)\b/.test(code)) return;
-    if (code.includes('whatsoup_run_bounded')) return;
-    findings.push(`${file}:${index + 1}: ${line.trim()}`);
-  });
-  return findings;
-}
 
 /**
  * CRED-1: `security add-generic-password ... -w <value>` puts the secret on argv,
@@ -114,6 +49,30 @@ describe('credential-store probes are bounded on every platform', () => {
 
     try {
       expect(unboundedProbes(fixture)).toEqual([]);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('flags a probe bounded by hand with timeout, also inside a command substitution', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'credential-probe-scan-'));
+    const fixture = path.join(tmpDir, 'probe.sh');
+    fs.writeFileSync(
+      fixture,
+      [
+        'timeout 3s secret-tool lookup service svc-a',
+        'value="$(gtimeout 3 security find-generic-password -s svc-a -w)"',
+        // Single quotes keep `$(` literal, so this line is data, not a call.
+        "printf '%s\\n' '$(timeout 3s secret-tool lookup service svc-a)'",
+        '',
+      ].join('\n'),
+    );
+
+    try {
+      expect(unboundedProbes(fixture)).toEqual([
+        `${fixture}:1: timeout 3s secret-tool lookup service svc-a`,
+        `${fixture}:2: value="$(gtimeout 3 security find-generic-password -s svc-a -w)"`,
+      ]);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
