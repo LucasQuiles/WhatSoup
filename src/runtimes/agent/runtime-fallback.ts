@@ -740,15 +740,33 @@ export class RuntimeFallbackCoordinator {
     session: SessionManager | null,
     evidenceText?: string,
   ): ProviderFallbackActivation | null {
-    const failedKey = this.markActiveFallbackFailed(session, reason, evidenceText);
     // SINGLE tier source: route-identity attribution (failureTierForSession).
-    // Deliberately NOT derived from failedKey — marking answers "serves the
+    // Deliberately NOT derived from marking — marking answers "serves the
     // ACTIVE entry" while the tier must answer "is NOT the primary": a stale
     // PRIOR-entry session left running across a chain advance is unmarked
     // (correctly) yet still fallback-tier. Callers never pass a tier, so no
     // call site can disagree with the attribution and every future call site
-    // is clock-safe by construction.
-    const tier = this.failureTierForSession(session);
+    // is clock-safe by construction. Only the empty-turn advance fixes the
+    // tier, through the private body below, and only to 'fallback'.
+    return this.markAndActivateAtTier(resetAt, reason, session, this.failureTierForSession(session), evidenceText);
+  }
+
+  /**
+   * Body of {@link activateProviderFallbackAfterTerminalResult} at a given
+   * tier: mark the active entry failed when `session` serves it, re-select,
+   * and keep the current entry when no alternate exists. Its one other caller
+   * is the empty-turn advance in recordFallbackTurnOutcome, which passes
+   * 'fallback'. A 'fallback' activation with window state never moves a
+   * window clock, so a new caller that fixes the tier may pass only that.
+   */
+  private markAndActivateAtTier(
+    resetAt: Date | null,
+    reason: ProviderFallbackReason,
+    session: SessionManager | null,
+    tier: FallbackFailureTier,
+    evidenceText?: string,
+  ): ProviderFallbackActivation | null {
+    const failedKey = this.markActiveFallbackFailed(session, reason, evidenceText);
     const activation = this.activateProviderFallback(resetAt, reason, tier);
     if (activation || !failedKey) return activation;
 
@@ -1104,18 +1122,20 @@ export class RuntimeFallbackCoordinator {
     // failure MESSAGE, so the text-driven advance never fires and the bot pins
     // to the dead entry while a working entry sits behind it. Count a turn only
     // from a session that serves the active entry (the marking predicate, as in
-    // recordFallbackTurnProcessFailure) and that route attribution does not
-    // assign to the primary. A primary or prior-entry turn still in flight is
-    // no evidence against the entry, and a primary-tier advance would move an
-    // operator-forced window end out to the default. So every activation below
-    // is fallback-tier with the window active, and it keeps the window clocks.
-    // After EMPTY_OUTPUT_FALLBACK_THRESHOLD consecutive counted turns, take the
-    // SAME advance path terminal failures use: mark the entry failed and
-    // re-select. The window's original arm reason keeps an auth-required window
+    // recordFallbackTurnProcessFailure), whatever route started it: a wildcard
+    // entry's window keeps a same-provider primary manager as its session. An
+    // in-flight primary turn or a prior entry's late turn whose model differs
+    // from a named active entry does not serve it and is no evidence against
+    // it. After EMPTY_OUTPUT_FALLBACK_THRESHOLD consecutive counted turns, mark
+    // the entry failed and re-select through the terminal path's body at the
+    // FALLBACK tier: the run is evidence against the entry, not the primary, so
+    // the advance keeps the window end, the stored reset, the revert timer and
+    // the probe countdown even where route attribution would call the session
+    // primary. The window's original arm reason keeps an auth-required window
     // skipping same-as-primary entries. The attempted-key guard stops
     // re-advancing (and re-alerting) the same entry; with no alternate left,
-    // the terminal path's single-fallback preservation keeps the current entry.
-    if (!this.sessionServesActiveFallbackEntry(session) || this.failureTierForSession(session) === 'primary') return;
+    // the single-fallback preservation keeps the current entry.
+    if (!this.sessionServesActiveFallbackEntry(session)) return;
     this.host.fallbackEmptyAdvance.recordEmpty();
     const entryKey = entry ? this.host.fallbackChain.entryKey(entry) : null;
     if (
@@ -1126,10 +1146,11 @@ export class RuntimeFallbackCoordinator {
         ? this.host.fallbackWindow.armReason
         : 'auth-required';
       const resetAt = this.host.fallbackWindow.resetAt !== null ? new Date(this.host.fallbackWindow.resetAt) : null;
-      const activation = this.activateProviderFallbackAfterTerminalResult(
+      const activation = this.markAndActivateAtTier(
         resetAt,
         advanceReason,
         session,
+        'fallback',
         'fallback entry returned empty output',
       );
       if (activation) {
