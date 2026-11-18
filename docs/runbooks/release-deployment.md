@@ -559,7 +559,11 @@ An outside label cannot be `com.whatsoup.*` or a closed host consumer such as
 `com.bot-errors.health`. The pinned plist and every reviewed input must contain
 no raw or XML-escaped reference to a selected root or launcher. A `loaded`
 entry must have a matching plist label and exact installed/loaded path,
-program, and argv. For an interpreter, every absolute argv value after argv[0]
+program, and argv. Planning reads a `loaded` entry's plist with the strict
+plist reader described under `path-rebase` below; a plist it cannot read
+exactly refuses (`installed loaded plist is unreadable: <reason>`), for
+example one that spells a `PYTHON*` environment key with a numeric character
+reference. For an interpreter, every absolute argv value after argv[0]
 must have one exact index-and-path binding: `review-file` must name a hashed
 source input, and `runtime-data` explicitly declares a generated data path.
 Runtime data is checked against selected roots and launchers by its lexical
@@ -594,68 +598,129 @@ consumer refuses the transaction and requires a new review declaration. Plan
 output and the apply receipt retain `reviewTupleSha256`, over the normalized
 label, plist digest, load state, roots, links, files, and argument bindings.
 
+`path-rebase` admits exactly four closed contracts; planning refuses any other
+plist declared in that mode:
+
+- `com.bot-errors.health` as both BOT ERRORS installers write it
+  (`deploy/scripts/install-bot-errors-health-launchd.sh` and
+  `deploy/scripts/install-bot-errors-launchd.sh`): `/usr/bin/python3` runs the
+  root's `deploy/scripts/bot-errors-runner.py`, and the runner forwards
+  `/usr/bin/python3` with the root's
+  `deploy/scripts/bot-errors-health-check.py --daily`. Host activation reads
+  this argv with the runner grammar of single-member activation
+  (`parseHealthRunnerSuffix` in `scripts/lib/release-activation/plan.ts`),
+  including its fixed `--log-hint`
+  (`<home>/.local/state/bot-errors/logs/health.err.log`, where `<home>` is the
+  planning user's home folder) and `launchd_label=com.bot-errors.health`. The
+  root the runner names must equal the declared `expectCurrent` byte for byte,
+  so a case variant of the path refuses, and `WorkingDirectory` must equal
+  that root;
+- the closed legacy `com.bot-errors.health` shell wrapper;
+- the closed legacy argv of `com.whatsoup.harness-maintenance`;
+- the closed legacy argv of `com.whatsoup.reply-guarantee`.
+
+The last three are described below.
+
+In the installer form, host activation admits only `/usr/bin/python3`, at both
+interpreter positions, and that file must also pass the interpreter check of
+the shared grammar (`isTrustedHealthPython`). Single-member activation
+(`release:activate`) still reads the loaded health job with that grammar
+alone, so its interpreter needs only to pass `isTrustedHealthPython`. Any other
+health-job shape refuses with a detail that names the two installers: a script
+run directly, the short runner form, a `/bin/sh` or `/bin/bash` script, a
+`bash -c` command, another interpreter (one inside the release, or another
+trusted `python3` such as one set through `BOT_ERRORS_PYTHON`), a log hint from
+a non-default `BOT_ERRORS_STATE_DIR`, or a `WorkingDirectory` other than the
+root. Rerun either installer with `BOT_ERRORS_REPO_ROOT` set to the job's
+current root and without `BOT_ERRORS_PYTHON`, `BOT_ERRORS_STATE_DIR` or
+`BOT_ERRORS_HEALTH_LABEL`, then plan again. A timer outside its contract
+refuses (`legacy host auxiliary does not match reviewed path-rebase
+contract`): re-render it from the repository template and declare it in
+`setup-timer` mode instead.
+
+Planning reads every path-rebase plist with a strict reader
+(`scripts/lib/release-activation/strict-plist.ts`). launchd reads plists
+through CFPropertyList, which also accepts binary plists, other encodings,
+numeric character references and CDATA, so the reader admits only UTF-8 XML
+that starts at its first byte with an XML declaration or `<plist>`, holds
+exactly one root `<dict>` inside `<plist version="1.0">`, has unique keys at
+every level, and has `<string>` entries in `ProgramArguments` and `<string>`
+environment values. Among other forms, it refuses a binary plist, a
+byte-order mark, a declared encoding other than UTF-8, a numeric character
+reference, a CDATA section, a DOCTYPE internal subset or entity declaration, a
+processing instruction other than the XML declaration, an entity, comment,
+other markup or surrounding whitespace in key text, and markup inside a value.
+Comments between elements are skipped. Planning reports the reader's refusals,
+like the contract, key and path refusals in this section, under
+`host-aux-plist-staged:<label>`.
+
+The root keys may only be `Label`, `ProgramArguments`, `EnvironmentVariables`,
+`WorkingDirectory`, `RunAtLoad`, `KeepAlive`, `StartCalendarInterval`,
+`StartInterval`, `StandardOutPath` and `StandardErrorPath`. Any other key
+refuses, and the detail names it (`plist root key <key> is not admitted for a
+path-rebase job`): for example `Program`, which launchd runs in place of
+`ProgramArguments[0]`, whether or not it equals that argument and even while
+the loaded definition still matches the installed argv; `BundleProgram`;
+`UserName`; or `EnableGlobbing`. Environment key names are pinned per job to
+the keys some committed version of that job's repository writer set; only the
+path rules below read their values:
+
+- the health job, in both forms: `PATH`, `BOT_ERRORS_STATE_DIR`,
+  `BOT_ERRORS_JID`, `BOT_ERRORS_EXPECTED_JID`, `BOT_ERRORS_SOCKET_PATH`,
+  `BOT_ERRORS_SOCKET`, `BOT_ERRORS_DB`, `BOT_ERRORS_HEALTH_PROFILE` and
+  `BOT_ERRORS_DISPATCHER_SERVICE`;
+- harness maintenance: `PATH`, `CLAUDE_CONFIG_DIR` and
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR`;
+- reply guarantee: `PATH` and `CLAUDE_CONFIG_DIR`.
+
+Any other key refuses, naming it (`environment key <key> is not admitted for
+<label>`): for example `BASH_ENV`, `SHELLOPTS`, `PS4`, `DYLD_INSERT_LIBRARIES`,
+`__PYVENV_LAUNCHER__`, `HOME`, or a key from another job's list. Reinstall the
+health job or re-render the timer in `setup-timer` mode, as for a shape
+refusal.
+
 `path-rebase` changes only plist string values that are exactly the reviewed
 root or a path below it, and only when the value is a shell-token path matching
 `^/[A-Za-z0-9._/-]+$`, because no value can be proven never to reach a shell.
-Every shell-token value, whether or not it contains the root, must also be in
-closed form: `path.posix.normalize` leaves it unchanged and it has no trailing
-slash, so it has no empty, `.` or `..` segment. Otherwise it names a path other
-than its spelling and refuses: `<root>/../x` leaves the root, while
-`<root>.bak/../<name>/x` and `<parent>/./<name>/x` name it. A field containing
-a prefix-sibling path such as `<root>2/x` is retained unchanged only when its
-value is such a closed-form shell-token path. Any other value that contains the
-root, including a command that starts with it, is an embedded shell-style
-reference and refuses. The target release lands in every rewritten value, so a
-release that is not a closed-form shell-token path refuses too.
+The values are the strict reader's decoded strings, so text inside a comment is
+not a value. Every shell-token value, whether or not it contains the root,
+must also be in closed form: `path.posix.normalize` leaves it unchanged and it
+has no trailing slash, so it has no empty, `.` or `..` segment. Otherwise it
+names a path other than its spelling and refuses: `<root>/../x` leaves the
+root, while `<root>.bak/../<name>/x` and `<parent>/./<name>/x` name it. A field
+containing a prefix-sibling path such as `<root>2/x` is retained unchanged only
+when its value is such a closed-form shell-token path. Any other value that
+contains the root, including a command that starts with it, is an embedded
+shell-style reference and refuses. The target release lands in every rewritten
+value, so a release that is not a closed-form shell-token path refuses too. The
+closed-form rule covers every string value of the three legacy contracts as
+well, so a legacy plist with a trailing slash or a `.`, `..` or empty segment
+in a path (in `WorkingDirectory` or a log path, for example) refuses at
+planning where `bfc01318` admitted it; reinstall the health job or re-render
+the timer from its template. `--apply` checks the staged bytes against the
+same contract, with the target release as the root, before its first write
+(`recheck-staged-path-rebase:<label>`).
 
-A `com.bot-errors.health` job that matches no closed contract below must also
-run only release files, after the rebase. When `ProgramArguments[0]` is an
-interpreter by file name, that binary must be exactly `/usr/bin/python3`,
-`/bin/bash`, `/bin/sh` or `/bin/zsh`, or a closed-form path under the target
-release; any other path, including a relative one, refuses. The script argument
-of a bounded launch form (`python`, optionally with `-I`, `node`/`nodejs`, or
-`bash`/`sh`/`zsh`, followed by a script) must be a closed-form path under the
-target release; shell `-c` and `-lc`, Python `-c` and `-m`, other options, and
-other interpreters refuse. Otherwise `ProgramArguments[0]` itself must be a
-closed-form path under the target release. When the file run is the release's
-`deploy/scripts/bot-errors-runner.py`, the command the runner passes to
-`subprocess.run` must pass the same rule and must not be the runner again. That
-command is the runner's argparse remainder: the first argument not taken as an
-option or an option value, and everything after it, with or without `--` (a
-leading `--` is dropped). Planning reads only option-value pairs followed by
-`--` and the command, option pairs alone, or only unrecognized long options such
-as `--daily`; the last two run nothing, because the runner's parser exits first.
-Any other runner argument list refuses.
+For these four contracts, planning proves that the plist is in the strict form
+above, that its argv is exactly the contract's, that its root keys and
+environment key names are in the closed sets, and that every shell-token
+string value is in closed form. It does not prove:
 
-The job's `EnvironmentVariables` must be one well-formed block with unique keys,
-read as for the Python module form above, and may not set `PYTHON*`,
-`NODE_OPTIONS`, `NODE_PATH`, `BASH_ENV`, `ENV`, `PERL5LIB`, `PERL5OPT`,
-`PERLLIB`, `RUBYOPT`, `RUBYLIB`, `DYLD_*`, `LD_*`, `HOME` or `ZDOTDIR`, each of
-which can make an interpreter load code from outside the release. Nor may it set
-`DEVELOPER_DIR`, `TOOLCHAINS`, `SDKROOT` or any `xcrun_` key in any spelling:
-`/usr/bin/python3` is a developer-tools stub that runs the matching tool from the
-active developer directory, and `xcrun(1)` and `xcode-select(1)` document those
-keys as choosing that directory, toolchain or SDK. Changing the system-wide
-selection (`xcode-select --switch`) needs superuser rights. The plain form
-that `deploy/scripts/install-bot-errors-health-launchd.sh` installs passes:
-`/usr/bin/python3` runs the release's runner, the runner forwards
-`/usr/bin/python3` with the release's `bot-errors-health-check.py`, and the
-environment sets only `PATH` and `BOT_ERRORS_*` keys. A job installed with
-another interpreter through `BOT_ERRORS_PYTHON` refuses: rerun the installer
-without `BOT_ERRORS_PYTHON`, with `BOT_ERRORS_REPO_ROOT` set to the job's current
-root, then plan again.
+- what the release's own scripts start later;
+- files in the job's home folder that a contract names or an interpreter
+  reads: the legacy wrapper's environment file, the maintenance guard script
+  and the pinned node binary (all three below), and Python's user-site `.pth`
+  files (`/usr/bin/python3` runs without `-I` or `-s`);
+- environment values, including `PATH` and the data paths
+  `BOT_ERRORS_HEALTH_PROFILE`, `CLAUDE_CONFIG_DIR` and
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR`; the last two choose the agent
+  command-line tool's configuration and credential folders, whose settings
+  can start commands;
+- that no folder in a rewritten path is a symlink; the path rules compare
+  strings.
 
-Planning proves the interpreter binary's path, the file it runs, and the
-runner's one forwarded command, and it refuses the environment keys above that
-redirect an interpreter or the stub. It does not prove what those release files
-start later. It does not check startup files under the job's real home folder,
-such as Python's user-site `.pth` files when the interpreter runs without `-I`
-or `-s`, or zsh's `~/.zshenv`. Writing them takes the same user's own access,
-which, like the other same-user writers this runbook names, planning does not
-detect. It also leaves two kinds of value as they are: a value outside the
-shell-token grammar that names the old release without its root string (for
-example `--config=<parent>/./<name>/x`), and a closed-form `WorkingDirectory` or
-runner `--cwd` outside the release.
+Writing those files and folders takes the job user's own access, which, like
+the other same-user writers this runbook names, planning does not detect.
 
 The shared-wrapper consumer proof reads installed plists only. For each
 selected shared wrapper, the plists in `~/Library/LaunchAgents` whose
@@ -668,7 +733,12 @@ only `com.whatsoup.*` labels and `com.bot-errors.health`, which planning
 proves against their installed plists or refuses; a loaded job under any
 other label, for
 example one bootstrapped from a plist outside `~/Library/LaunchAgents`, can
-use a selected wrapper without being detected.
+use a selected wrapper without being detected. Planning's proof that an
+undeclared job or a watchdog uses no release root
+(`unowned-selector:<label>`, `host-watchdog-outside-unit:<label>`) reads XML
+text, so a job whose plist hides a release path in a binary or encoded form
+is not detected and keeps running what it ran before; writing such a plist
+needs the same user's access.
 
 A standard `~/.local/bin/whatsoup`
 link that has no launchd consumer still joins the transaction when it already
@@ -692,7 +762,11 @@ the shell wrapper; which profiles exist is host inventory, not code. Planning
 changes only that default to the target release, then applies the
 ordinary embedded-reference refusal to every remaining value. A malformed
 wrapper, non-canonical profile path, or any additional embedded release
-reference refuses. Both selected release roots must also be normalized absolute
+reference refuses. The wrapper runs `source` on
+`<home>/.config/whatsoup/bot-errors.env` under `set -a`: that file is shell
+code planning does not read, and the variables it sets reach the runner
+without passing the environment-key allowlist, which reads only the plist.
+Both selected release roots must also be normalized absolute
 shell-token paths matching `^/[A-Za-z0-9._/-]+$`; whitespace or shell metacharacters
 refuse rather than being interpolated into the wrapper.
 
