@@ -17,6 +17,14 @@ import {
 } from '../../../src/fleet/routes/ops.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
 import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
+import { generateKeyPairSync } from 'node:crypto';
+
+// A canonical Ed25519 SPKI key, which the former parser accepted: a rejection
+// of this fixture proves the unsupported-field rule, not key validation.
+const CANONICAL_LEGACY_PUBLIC_KEY = generateKeyPairSync('ed25519')
+  .publicKey.export({ format: 'der', type: 'spki' })
+  .toString('base64url');
+const UNSUPPORTED_AUTHORIZATION = /clientOutputPolicies\[0\]\.authorization is unsupported/;
 
 const SYNTHETIC_PHONE = ['1555', '020', '0001'].join('');
 
@@ -85,7 +93,7 @@ const INVALID_POLICY_CASES: readonly {
       ...policy('populated-authorization'),
       authorization: {
         keyId: 'legacy-key',
-        publicKey: 'legacy-public-key',
+        publicKey: CANONICAL_LEGACY_PUBLIC_KEY,
         requiredActions: ['send_message'],
       },
     }],
@@ -346,6 +354,47 @@ describe('fleet client-output policy config admission and projection', () => {
       expect(fs.readFileSync(siblingPath)).toEqual(beforeSibling);
       expect(fs.readdirSync(configDir(name)).sort()).toEqual(beforeEntries);
       expect(deps.realtime.publish).not.toHaveBeenCalled();
+    },
+  );
+
+  const LEGACY_AUTHORIZATION_CASES = INVALID_POLICY_CASES
+    .filter(({ id }) => id.startsWith('legacy-authorization-'))
+    .map((entry) => ({ ...entry, suffix: entry.id.slice('legacy-authorization-'.length) }));
+
+  it.each(LEGACY_AUTHORIZATION_CASES)(
+    'names the unsupported authorization field for $label on CREATE',
+    async ({ suffix, policies }) => {
+      const res = mockRes();
+
+      await handleCreateLine(mockReq({
+        method: 'POST',
+        body: JSON.stringify({
+          name: `auth-create-${suffix}`,
+          type: 'agent',
+          adminPhones: [SYNTHETIC_PHONE],
+          clientOutputPolicies: policies,
+        }),
+      }), res, createDeps());
+
+      expect(res._status).toBe(400);
+      expect(res._body).toMatch(UNSUPPORTED_AUTHORIZATION);
+    },
+  );
+
+  it.each(LEGACY_AUTHORIZATION_CASES)(
+    'names the unsupported authorization field for $label on PATCH',
+    async ({ suffix, policies }) => {
+      const name = `auth-patch-${suffix}`;
+      const targetPath = writeAgent(name, [policy('original')]);
+      const res = mockRes();
+
+      await handleConfigUpdate(mockReq({
+        method: 'PATCH',
+        body: JSON.stringify({ clientOutputPolicies: policies }),
+      }), res, patchDeps(name, targetPath), { name });
+
+      expect(res._status).toBe(400);
+      expect(res._body).toMatch(UNSUPPORTED_AUTHORIZATION);
     },
   );
 });
