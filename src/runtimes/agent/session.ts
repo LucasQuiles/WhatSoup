@@ -588,8 +588,8 @@ function codexModelTomlString(model: string): string {
 
 /**
  * Codex thread/start params, for a new session and for the fresh thread after
- * a failed resume. persistExtendedHistory stays for app-server versions that
- * read it; older ones ignore it.
+ * a failed resume. codex-cli 0.153.1 has no persistExtendedHistory field and
+ * ignores it.
  */
 function codexThreadStartParams(cwd: string, systemPrompt: string): Record<string, unknown> {
   return {
@@ -2144,9 +2144,9 @@ export class SessionManager {
       failure = isRecord(error) ? String(error['message'] ?? 'unknown') : String(error);
     }
 
-    // The app-server answers "no rollout found for thread id <id>" when the
-    // thread has no stored history. JSON-RPC codes are generic, so the message
-    // is the only signal for this case.
+    // Observed on codex-cli 0.153.1: the app-server answers "no rollout found
+    // for thread id <id>" when the thread has no stored history. JSON-RPC
+    // codes are generic, so the message is the only signal for this case.
     const noRollout = error !== undefined && /no rollout found/i.test(failure);
     const rowId = this.dbRowId;
     const turnCount = storedThreadId !== null
@@ -2244,10 +2244,13 @@ export class SessionManager {
   }
 
   /**
-   * A host-admitted child must resume its exact thread or close; a silent fresh
-   * thread would drop the conversation history. The row closes as
-   * 'resume_failed', which no resume selector returns, so the next spawn starts
-   * fresh instead of retrying this thread.
+   * Close a host-admitted child whose stored thread was not resumed, rather
+   * than start a silent fresh thread that would drop the conversation history.
+   * Only a thread with no rollout and no counted turns starts fresh instead.
+   * A resume reply whose thread names another thread is still accepted, with
+   * a warning (handleCodexResumeResponse), so the exact thread is not
+   * guaranteed. The row closes as 'resume_failed', which no resume selector
+   * returns, so the next spawn starts fresh instead of retrying this thread.
    */
   private closeRejectedCodexResume(reqId: unknown): void {
     const failedSessionId = this.resumeAttemptId ?? this.sessionId;
@@ -3392,10 +3395,11 @@ export class SessionManager {
         capabilities: { experimentalApi: true },
       });
       if (resumeSessionId) {
-        // The app-server ignores a threadId inside thread/start and starts a
-        // new thread without an error; only thread/resume loads the stored one.
-        // excludeTurns keeps the whole history out of the response line, which
-        // could otherwise pass MAX_STDOUT_LINE_BYTES and be dropped.
+        // Observed on codex-cli 0.153.1: the app-server ignores a threadId
+        // inside thread/start and starts a new thread without an error; only
+        // thread/resume loads the stored one. excludeTurns keeps the whole
+        // history out of the response line, which could otherwise pass
+        // MAX_STDOUT_LINE_BYTES and be dropped.
         this.codexResumeStoredThreadId = resumeSessionId;
         this.codexResumeRequestId = this.sendCodexRequest(child, 'thread/resume', {
           threadId: resumeSessionId,
