@@ -4964,7 +4964,46 @@ describe('__provider_switch_for_test', () => {
 
   it('getProviderArgs for codex-cli includes model when provided', () => {
     const args = __provider_switch_for_test.getProviderArgs('codex-cli', '', '/cwd', undefined, 'gpt-4o', []);
-    expect(args).toEqual(['app-server', '--listen', 'stdio://', '--model', 'gpt-4o']);
+    expect(args).toEqual(['app-server', '--listen', 'stdio://', '-c', 'model="gpt-4o"']);
+  });
+
+  it('getProviderArgs for codex-cli passes the model as a -c TOML override, never --model', () => {
+    // The app-server subcommand has no --model option, so the child would exit
+    // at spawn; the model must be a -c config override.
+    const mcpArgs = ['-c', 'mcp_servers.whatsoup.command="proxy"'];
+    const args = __provider_switch_for_test.getProviderArgs(
+      'codex-cli',
+      '',
+      '/cwd',
+      undefined,
+      'gpt-5.6-terra',
+      [],
+      undefined,
+      mcpArgs,
+    );
+    expect(args).toEqual([
+      'app-server',
+      ...mcpArgs,
+      '--listen',
+      'stdio://',
+      '-c',
+      'model="gpt-5.6-terra"',
+    ]);
+    expect(args).not.toContain('--model');
+    expect(args).not.toContain('-m');
+    expect(args.some((arg) => arg.startsWith('--model='))).toBe(false);
+  });
+
+  it('getProviderArgs for codex-cli writes DEL in the model as a TOML \\u007F escape', () => {
+    // TOML refuses a raw DEL in a basic string; Codex would then keep the raw
+    // text, quotes included, as the model name.
+    const args = __provider_switch_for_test.getProviderArgs('codex-cli', '', '/cwd', undefined, 'x\u007Fy', []);
+    expect(args).toEqual(['app-server', '--listen', 'stdio://', '-c', 'model="x\\u007Fy"']);
+  });
+
+  it('getProviderArgs for codex-cli refuses a model with a lone surrogate', () => {
+    expect(() => __provider_switch_for_test.getProviderArgs('codex-cli', '', '/cwd', undefined, 'x\uD800y', []))
+      .toThrow(/\[session-manager:resolveProviderArgs\] codex-cli model is not well-formed Unicode/);
   });
 
   it('getProviderArgs for codex-cli consumes canonical MCP config overrides', () => {
