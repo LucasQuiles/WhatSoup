@@ -20,6 +20,7 @@ import {
 } from './plan.ts';
 import { parsePlist } from '../../check-service-units.ts';
 import { verifyReviewedOutsideUnits, type ReviewedOutsideUnit } from './host-unit-plan.ts';
+import { checkPathRebasePlist } from './legacy-host-auxiliaries.ts';
 
 const PRIVATE_FILE_MODE = 0o600;
 
@@ -30,8 +31,11 @@ export interface HostUnitApplyContext {
   members: ActivationContext[];
   /** A wrapper path has one backup and one atomic repoint, even when several jobs consume it. */
   sharedLaunchers: ReadonlyMap<string, readonly string[]>;
-  /** Explicit host jobs whose ProgramArguments are staged outside a member surface. */
-  hostAuxiliaries?: readonly { label: string; plistPath: string; installedSha256: string; staged: string; expectCurrent: string }[];
+  /**
+   * Explicit host jobs whose ProgramArguments are staged outside a member surface. A path-rebase entry keeps the
+   * home its closed contract was proven with, so apply proves the staged bytes again before it writes them.
+   */
+  hostAuxiliaries?: readonly { label: string; mode: 'path-rebase' | 'setup-timer'; home: string; plistPath: string; installedSha256: string; staged: string; expectCurrent: string }[];
   /**
    * The fleet console has a separate wrapper link and is never inferred from the bot wrapper.
    * Its plist is reloaded but never written, so it must keep the digest the plan read.
@@ -262,6 +266,14 @@ async function applyHoldingLock(host: ActivationHost, context: HostUnitApplyCont
   }
   // No await from this recheck into the first writePlist, which then rechecks each plist against its backup.
   if (refusal === null && !identityHolds('recheck-live-identity-before-switch', ['previous'], steps)) refusal = steps.at(-1)!.detail!;
+  // The bytes about to be written must still pass the closed contract planning proved; a staged plist changed since
+  // (an added Program key, say, which launchd would run first) refuses here, before the first write.
+  if (refusal === null) for (const auxiliary of hostAuxiliaries) {
+    if (auxiliary.mode !== 'path-rebase') continue;
+    const contract = checkPathRebasePlist(auxiliary.label, auxiliary.staged, context.release, auxiliary.home);
+    steps.push(contract.ok ? { step: `recheck-staged-path-rebase:${auxiliary.label}`, ok: true } : { step: `recheck-staged-path-rebase:${auxiliary.label}`, ok: false, detail: contract.error });
+    if (!contract.ok) { refusal = `${auxiliary.label}: staged plist does not match its path-rebase contract: ${contract.error}`; break; }
+  }
   if (refusal !== null) {
     const restored = await restoreWatchdogs(steps);
     return fail(restored ? 'refused' : 'rollback-unverified', refusal);

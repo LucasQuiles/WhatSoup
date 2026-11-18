@@ -11,7 +11,8 @@ import { configRoot } from '../../../src/fleet/paths.ts';
 import { isNonEmptyString } from '../../../src/lib/type-guards.ts';
 import { AUX_RENDERERS, LABEL_PATTERN, mentionsReleaseRoot, renderAuxPlist, type AuxRenderer } from './plan.ts';
 import { buildActivationContext, plistDigest, preconditionsMet, wrapperTargetFor, type ActivationArgs, type ActivationContext } from './plan.ts';
-import { isLegacyPathRebaseLabel, rebaseLegacyHostAuxiliaryForPathRebase, SHELL_TOKEN_PATH, type LegacyPathRebaseLabel } from './legacy-host-auxiliaries.ts';
+import { checkPathRebasePlist, isLegacyPathRebaseLabel, rebaseLegacyHostAuxiliaryForPathRebase, SHELL_TOKEN_PATH, type LegacyPathRebaseLabel } from './legacy-host-auxiliaries.ts';
+import { readStrictPlist, strictPlistStrings, strictStringArray, strictStringDict, type StrictPlistDict } from './strict-plist.ts';
 import { checkoutCommit } from './tool-commit.ts';
 import type { HostUnitApplyContext } from './host-unit-apply.ts';
 
@@ -70,19 +71,6 @@ const HOST_TIMER_LABELS = new Set(['com.whatsoup.harness-maintenance', 'com.what
 const SHA256 = /^sha256:[0-9a-f]{64}$/;
 const INTERPRETER = /^(?:ba|z|da|k|fi)?sh$|^(?:env|node|nodejs|osascript|perl|ruby)$|^python(?:\d+(?:\.\d+)*)?$/;
 const PYTHON_MODULE = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/;
-const ENVIRONMENT_VARIABLES = /<key>\s*EnvironmentVariables\s*<\/key>\s*<dict>([\s\S]*?)<\/dict>/g;
-const ENVIRONMENT_VARIABLE = /<key>\s*([A-Za-z_][A-Za-z0-9_]*)\s*<\/key>\s*<string>[\s\S]*?<\/string>/g;
-// Each makes an interpreter, or the dynamic loader under it, read code or options from outside the launched
-// script; HOME and ZDOTDIR move zsh startup files and Python's user site directory. DEVELOPER_DIR, TOOLCHAINS
-// and SDKROOT choose the developer directory, toolchain or SDK that a developer-tools stub such as
-// /usr/bin/python3 runs from (xcrun(1), xcode-select(1)).
-const INTERPRETER_ENVIRONMENT_KEY = /^(?:PYTHON|DYLD_|LD_)|^(?:NODE_OPTIONS|NODE_PATH|BASH_ENV|ENV|PERL5LIB|PERL5OPT|PERLLIB|RUBYOPT|RUBYLIB|HOME|ZDOTDIR|DEVELOPER_DIR|TOOLCHAINS|SDKROOT)$/;
-// xcrun(1) also reads xcrun_* settings in a stub's environment; any spelling of the prefix refuses.
-const XCRUN_ENVIRONMENT_KEY = /^xcrun_/i;
-// The only interpreters outside the target release that a path-rebase job with no closed contract may name.
-const SYSTEM_INTERPRETERS = new Set(['/usr/bin/python3', '/bin/bash', '/bin/sh', '/bin/zsh']);
-// Every option of deploy/scripts/bot-errors-runner.py parse_args besides --help; each takes exactly one value.
-const RUNNER_VALUE_OPTIONS: readonly string[] = ['--instance', '--source', '--summary', '--severity', '--event-id', '--cwd', '--timeout', '--capture-limit', '--log-hint', '--diagnostic'];
 
 function absolute(value: unknown): string | null {
   return typeof value === 'string' && path.isAbsolute(value) ? path.normalize(value).replace(/\/+$/, '') || '/' : null;
@@ -256,109 +244,42 @@ function escapeForRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** Rebase only a declared selected root and retain every other plist field byte-for-byte. */
+/**
+ * Rebase only a declared selected root and retain every other plist field byte-for-byte. The installed plist, with
+ * the declared root, and the staged result, with the target release, must each pass checkPathRebasePlist: the strict
+ * reading, the closed root and environment key sets, and the exact argv of one of the four closed contracts.
+ */
 function stagePathRebase(installed: string, expectCurrent: string, release: string, label: LegacyPathRebaseLabel, home: string): { staged: string | null; error: string | null } {
-  const parsed = parsePlist(installed);
-  if (parsed === null || !programArgumentsUnder(parsed.programArguments, expectCurrent)) {
-    return { staged: null, error: 'ProgramArguments do not select the declared expected-current root' };
-  }
-  const compatible = rebaseLegacyHostAuxiliaryForPathRebase(installed, parsed.programArguments, label, expectCurrent, release, home);
-  if (label !== 'com.bot-errors.health' && compatible === null) return { staged: null, error: 'legacy host auxiliary does not match reviewed path-rebase contract' };
-  const source = compatible ?? installed;
-  const encodedCurrent = escapeXml(expectCurrent);
-  const encodedRelease = escapeXml(release);
-  // docs/runbooks/release-deployment.md:626-637: the closed legacy wrapper above is the only shell-style
-  // exception, and a root that lands in a shell argument must be a shell token. No value can be proven
-  // never to reach a shell, so only a bare shell-token path is rewritten (:592-598); a command that merely
-  // starts with the root is refused below like any other embedded reference.
-  for (const match of source.matchAll(/<string>([\s\S]*?)<\/string>/g)) {
-    const value = match[1]!;
-    // A shell token holds no XML reference, so its text is the value launchd reads. Outside closed form it
-    // names a path other than its spelling, whether or not it contains the root: <root>/../x leaves the
-    // root, and <root>.bak/../<name>/x or <parent>/./<name>/x name it without being "below" it.
+  const current = checkPathRebasePlist(label, installed, expectCurrent, home);
+  if (!current.ok) return { staged: null, error: current.error };
+  const source = rebaseLegacyHostAuxiliaryForPathRebase(installed, current.programArguments, label, expectCurrent, release, home) ?? installed;
+  const read = readStrictPlist(source);
+  if (!read.ok) return { staged: null, error: read.error };
+  // The legacy wrapper's profile default, rewritten above, is the only shell-style exception, and a root that lands in
+  // a shell argument must be a shell token. No value can be proven never to reach a shell, so only a bare shell-token
+  // path is rewritten; a command that merely starts with the root is refused below like any other embedded
+  // reference. The values are the strict reader's decoded strings, so text inside a comment is not a value.
+  for (const value of strictPlistStrings(read.root)) {
+    // Outside closed form a shell token names a path other than its spelling, whether or not it contains the root:
+    // <root>/../x leaves the root, and <root>.bak/../<name>/x or <parent>/./<name>/x name it without being "below" it.
     const shellToken = SHELL_TOKEN_PATH.test(value);
     if (shellToken && !closedFormPath(value)) return { staged: null, error: 'absolute plist string value is not in closed form (empty, . or .. segment, or trailing slash)' };
-    if (!value.includes(encodedCurrent)) continue;
-    // A closed-form shell token starting with the root is the root, a path below it (rewritten below),
-    // or a distinct prefix sibling such as <root>2/x (retained). Embedded shell fragments and other
-    // opaque strings, including a sibling outside the shell-token grammar, are unsafe to rewrite.
-    if (shellToken && value.startsWith(encodedCurrent)) continue;
+    if (!value.includes(expectCurrent)) continue;
+    // A closed-form shell token starting with the root is the root, a path below it (rewritten below), or a
+    // distinct prefix sibling such as <root>2/x (retained). Embedded shell fragments and other opaque strings,
+    // including a sibling outside the shell-token grammar, are unsafe to rewrite.
+    if (shellToken && value.startsWith(expectCurrent)) continue;
     return { staged: null, error: 'expected-current root is embedded in a non-path string value' };
   }
   // The target release then lands in each rewritten value, so it must be a closed-form shell token too.
   if (!SHELL_TOKEN_PATH.test(release) || !closedFormPath(release)) return { staged: null, error: 'target release is not a closed-form shell-token path (^/[A-Za-z0-9._/-]+$)' };
+  const encodedCurrent = escapeXml(expectCurrent);
+  const encodedRelease = escapeXml(release);
   const rootString = new RegExp(`(<string>)${escapeForRegExp(encodedCurrent)}((?:/[^<]*)?)(</string>)`, 'g');
   const staged = source.replace(rootString, (_match, open: string, suffix: string, close: string) => `${open}${encodedRelease}${suffix}${close}`);
   if (staged === source || mentionsReleaseRoot(staged, expectCurrent)) return { staged: null, error: 'staged plist did not remove the declared expected-current root' };
-  const stagedParsed = parsePlist(staged);
-  if (stagedParsed === null) return { staged: null, error: 'staged ProgramArguments do not select the target release' };
-  if (compatible !== null) {
-    // Each closed contract pins an exact argv, which may start a reviewed program outside the release first.
-    return programArgumentsUnder(stagedParsed.programArguments, release)
-      ? { staged, error: null }
-      : { staged: null, error: 'staged ProgramArguments do not select the target release' };
-  }
-  // No closed contract matched (only com.bot-errors.health reaches here). This proves the interpreter binary's
-  // path, the file it runs, and the one command the release's bot-errors runner forwards, and it refuses the listed
-  // environment keys that redirect an interpreter or a developer-tools stub such as /usr/bin/python3. It does not
-  // prove what those release files start later, or the startup files under the job's real home folder (Python's
-  // user-site .pth files without -I or -s, zsh's ~/.zshenv): writing those takes the same user's own access.
-  const executed = executedFile(stagedParsed.programArguments, release);
-  if ('error' in executed) return { staged: null, error: executed.error };
-  const runner = `${release}/deploy/scripts/bot-errors-runner.py`;
-  if (executed.file === runner) {
-    const forwarded = runnerCommand(stagedParsed.programArguments.slice(executed.index + 1));
-    if (forwarded === null) return { staged: null, error: 'bot-errors runner arguments are not reviewed options followed by -- and a command' };
-    if (forwarded.command !== null) {
-      const command = executedFile(forwarded.command, release);
-      if ('error' in command) return { staged: null, error: `bot-errors runner command: ${command.error}` };
-      if (command.file === runner) return { staged: null, error: 'bot-errors runner command runs the runner again' };
-    }
-  }
-  if (!installedEnvironmentClear(staged, (key) => INTERPRETER_ENVIRONMENT_KEY.test(key) || XCRUN_ENVIRONMENT_KEY.test(key))) {
-    return { staged: null, error: 'EnvironmentVariables are malformed or set an interpreter-affecting key' };
-  }
-  return { staged, error: null };
-}
-
-/**
- * The file an argv runs and its index. An interpreter, recognized by basename, must itself be a closed-form
- * path in SYSTEM_INTERPRETERS or under the release, and runs the script argument of a bounded launch form;
- * inline (`-c`, `-lc`), module (`-m`) and other option forms name no script file. Any other program runs
- * itself. The file run must be a closed-form path under the release.
- */
-function executedFile(programArguments: readonly string[], release: string): { file: string; index: number } | { error: string } {
-  const executable = programArguments[0] ?? '';
-  let index = 0;
-  if (INTERPRETER.test(path.basename(executable))) {
-    if (!closedFormPath(executable) || !(SYSTEM_INTERPRETERS.has(executable) || hasPathUnder(executable, release))) {
-      return { error: 'interpreter is not a closed-form system interpreter or a path under the target release' };
-    }
-    const scriptIndex = interpreterScriptIndex(programArguments);
-    if (typeof scriptIndex !== 'number') return { error: 'interpreter launch form names no script argument (inline, module, or option form)' };
-    index = scriptIndex;
-  }
-  const file = programArguments[index];
-  return file !== undefined && closedFormPath(file) && hasPathUnder(file, release)
-    ? { file, index }
-    : { error: 'executed program or script is not a closed-form path under the target release' };
-}
-
-/**
- * The command deploy/scripts/bot-errors-runner.py passes to subprocess.run. Its argparse `command` is a
- * REMAINDER: it starts at the first argument not taken as an option or an option value, with or without `--`.
- * Only three forms are read: option-value pairs, then `--` and the command; option pairs alone, which run
- * nothing ("command required"); or only unrecognized long options such as `--daily`, which argparse rejects
- * before anything runs. Any other form returns null.
- */
-function runnerCommand(runnerArguments: readonly string[]): { command: readonly string[] | null } | null {
-  const unrecognized = (token: string): boolean => /^--[a-z][a-z0-9-]*$/.test(token)
-    && ![...RUNNER_VALUE_OPTIONS, '--help'].some((option) => option.startsWith(token));
-  if (runnerArguments.length > 0 && runnerArguments.every(unrecognized)) return { command: null };
-  let index = 0;
-  while (RUNNER_VALUE_OPTIONS.includes(runnerArguments[index] ?? '') && /^[^-]/.test(runnerArguments[index + 1] ?? '-')) index += 2;
-  if (index === runnerArguments.length) return { command: null };
-  return runnerArguments[index] === '--' && index + 1 < runnerArguments.length ? { command: runnerArguments.slice(index + 1) } : null;
+  const target = checkPathRebasePlist(label, staged, release, home);
+  return target.ok ? { staged, error: null } : { staged: null, error: `staged plist: ${target.error}` };
 }
 /**
  * A selector parser rejecting an unrelated app is not itself evidence that it
@@ -392,43 +313,28 @@ function isDirectory(directoryPath: string): boolean {
   try { return statSync(directoryPath).isDirectory(); } catch { return false; }
 }
 
-/** Reject malformed or duplicate plist environment data, and any key that `refusedKey` names. */
-function installedEnvironmentClear(plistText: string, refusedKey: (key: string) => boolean): boolean {
-  const text = withoutXmlComments(plistText);
-  const declarations = [...text.matchAll(/<key>\s*EnvironmentVariables\s*<\/key>/g)];
-  ENVIRONMENT_VARIABLES.lastIndex = 0;
-  const blocks = [...text.matchAll(ENVIRONMENT_VARIABLES)];
-  if (blocks.length > 1 || declarations.length !== blocks.length) return false;
-  if (blocks.length === 0) return true;
-  const body = blocks[0]![1]!;
-  const keys = new Set<string>();
-  let offset = 0;
-  ENVIRONMENT_VARIABLE.lastIndex = 0;
-  for (let entry: RegExpExecArray | null; (entry = ENVIRONMENT_VARIABLE.exec(body)) !== null;) {
-    if (body.slice(offset, entry.index).trim() !== '') return false;
-    const key = entry[1]!;
-    if (keys.has(key) || refusedKey(key)) return false;
-    keys.add(key); offset = entry.index + entry[0].length;
-  }
-  return body.slice(offset).trim() === '';
+/**
+ * Clear when no environment key the strict reader decoded is one that `refusedKey` names. Null keys mean
+ * EnvironmentVariables is not a dict of strings; the reader has already refused a duplicate key and any markup.
+ */
+function installedEnvironmentClear(environmentKeys: readonly string[] | null, refusedKey: (key: string) => boolean): boolean {
+  return environmentKeys !== null && !environmentKeys.some(refusedKey);
 }
 
-function withoutXmlComments(plistText: string): string {
-  let text = plistText;
-  for (let previous = ''; previous !== text;) {
-    previous = text;
-    text = text.replace(/<!--[\s\S]*?-->/g, '');
-  }
-  return text;
-}
-
-/** The generic plist shape takes its first scalar; module cwd proof needs exactly one. */
-function installedWorkingDirectory(plistText: string): string | null {
-  const text = withoutXmlComments(plistText);
-  const declarations = [...text.matchAll(/<key>\s*WorkingDirectory\s*<\/key>/g)];
-  const values = [...text.matchAll(/<key>\s*WorkingDirectory\s*<\/key>\s*<string>([\s\S]*?)<\/string>/g)];
-  if (declarations.length !== 1 || values.length !== 1) return null;
-  return values[0]![1]!.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+/** What the outside-unit proofs read from a strictly read plist; null when ProgramArguments holds a non-string. */
+function outsideUnitDefinition(plist: StrictPlistDict): { label: string | null; programArguments: string[]; workingDirectory: string | null; environmentKeys: string[] | null } | null {
+  const programArguments = strictStringArray(plist, 'ProgramArguments');
+  if ('error' in programArguments) return null;
+  const label = plist.get('Label');
+  const workingDirectory = plist.get('WorkingDirectory');
+  const environment = strictStringDict(plist, 'EnvironmentVariables');
+  return {
+    // Trimmed as parsePlist trims it, so a strict-form plist keeps the verdict it had.
+    label: label?.kind === 'string' ? label.value.trim() : null,
+    programArguments: programArguments.values,
+    workingDirectory: workingDirectory?.kind === 'string' ? workingDirectory.value : null,
+    environmentKeys: 'error' in environment ? null : [...environment.entries.keys()],
+  };
 }
 
 function reviewedPythonModuleSources(workingDirectory: string, moduleName: string): string[] | null {
@@ -538,12 +444,16 @@ export async function verifyReviewedOutsideUnits(
       if (location !== false || source === null || source.sha256 !== file.sha256 || selected.some((root) => mentionsReleaseRoot(source.bytes.toString('utf8'), root))) { filesValid = false; break; }
     }
     if (!filesValid) { fail('reviewed source input is unavailable, changed, or selects a unit root'); continue; }
-    const installed = parsePlist(plistText);
     if (outsideUnit.loadState === 'unloaded-113') {
       const unloaded = await host.exec('/bin/launchctl', ['print', `${outsideUnit.domain}/${outsideUnit.label}`], { timeoutMs: 5_000 });
       if (unloaded.code !== 113 || unloaded.timedOut === true) { fail('job is not the reviewed explicit launchctl exit 113 state'); continue; }
       results.push({ label: outsideUnit.label, ok: true, detail: 'reviewed explicit exit 113' }); continue;
     }
+    // A loaded unit's plist is read strictly, so a character reference or a CDATA section cannot hide an environment
+    // key or a working directory from the proofs below. The zero-byte unloaded-113 stub above is never parsed.
+    const read = readStrictPlist(plistText);
+    if (!read.ok) { fail(`installed loaded plist is unreadable: ${read.error}`); continue; }
+    const installed = outsideUnitDefinition(read.root);
     if (installed === null || installed.label !== outsideUnit.label || installed.programArguments.length === 0) { fail('installed loaded plist is unreadable or has a mismatched label'); continue; }
     const interpreter = INTERPRETER.test(path.basename(installed.programArguments[0]!));
     const reviewedFiles = new Set(outsideUnit.reviewInputs.files.map((file) => file.path));
@@ -569,12 +479,12 @@ export async function verifyReviewedOutsideUnits(
       }
       if (!bindingsValid) { fail('loaded interpreter binding is not a reviewed source or declared outside runtime data path'); continue; }
       if (scriptIndex === 'python-module') {
-        const plistWorkingDirectory = installedWorkingDirectory(plistText);
+        const plistWorkingDirectory = installed.workingDirectory;
         const workingDirectory = plistWorkingDirectory === null ? null : absolute(plistWorkingDirectory);
         const cwdLocation = workingDirectory === null ? null : underSelectedPath(workingDirectory, selected, resolvedSelected, false);
         const sources = workingDirectory === null ? null : reviewedPythonModuleSources(workingDirectory, installed.programArguments[2]!);
-        if (workingDirectory === null || workingDirectory !== plistWorkingDirectory || installed.scalarKeys['WorkingDirectory'] !== plistWorkingDirectory || cwdLocation !== false
-          || !isDirectory(workingDirectory) || sources === null || !installedEnvironmentClear(plistText, (key) => key.startsWith('PYTHON'))
+        if (workingDirectory === null || workingDirectory !== plistWorkingDirectory || cwdLocation !== false
+          || !isDirectory(workingDirectory) || sources === null || !installedEnvironmentClear(installed.environmentKeys, (key) => key.startsWith('PYTHON'))
           || sources.some((source) => !reviewedFiles.has(source) || !isRegularFile(source))) {
           fail('loaded Python module lacks an exact outside working-directory, environment, or reviewed package source proof'); continue;
         }
@@ -778,7 +688,7 @@ export async function buildHostUnitPlan(
       auxiliaries: context.staged.filter((entry) => entry.label !== context.instanceLabel).map((entry) => entry.label),
     });
   }
-  const hostAuxiliaryApply: Array<{ label: string; plistPath: string; installedSha256: string; staged: string; expectCurrent: string }> = [];
+  const hostAuxiliaryApply: Array<{ label: string; mode: 'path-rebase' | 'setup-timer'; home: string; plistPath: string; installedSha256: string; staged: string; expectCurrent: string }> = [];
   // Launcher and watchdog plists are loaded but never written: apply rechecks them against the digest read here.
   const hostLaunchers: Array<{ label: string; plistPath: string; installedSha256: string; link: string; wrapper: 'whatsoup-fleet'; expectCurrent: string }> = [];
   const watchdogs: Array<{ label: string; plistPath: string; installedSha256: string }> = [];
@@ -790,6 +700,10 @@ export async function buildHostUnitPlan(
     const exactLoaded = parsed !== null && loaded !== null && loaded.path === plistPath
       && loaded.program === parsed.programArguments[0] && sameArgs(loaded.arguments, parsed.programArguments);
     check(`host-aux-installed-loaded-match:${auxiliary.label}`, exactLoaded, 'exact path/program/arguments');
+    // A path-rebase plist is read strictly before any other proof reads it: the regular-expression reader can read
+    // text launchd never sees (a binary plist's string object) and miss text launchd does see (a UTF-16 plist).
+    const strict = installed !== null && auxiliary.mode === 'path-rebase' ? readStrictPlist(installed) : null;
+    if (strict !== null && !strict.ok) { check(`host-aux-plist-staged:${auxiliary.label}`, false, strict.error); continue; }
     if (installed === null || parsed === null || loaded === null) continue;
     if (auxiliary.mode === 'quiesce') {
       check(`host-watchdog-outside-unit:${auxiliary.label}`, provenOutsideUnit(parsed, installed, selectionRoots, selectionLinks), 'watchdog must not select a member, host auxiliary, or managed launcher root');
@@ -836,7 +750,7 @@ export async function buildHostUnitPlan(
       }
     }
     check(`host-aux-plist-staged:${auxiliary.label}`, stagedOk, stagedDetail);
-    if (stagedOk) hostAuxiliaryApply.push({ label: auxiliary.label, plistPath, installedSha256: plistDigest(installed), staged: staged!, expectCurrent });
+    if (stagedOk) hostAuxiliaryApply.push({ label: auxiliary.label, mode: auxiliary.mode, home: os.homedir(), plistPath, installedSha256: plistDigest(installed), staged: staged!, expectCurrent });
   }
 
   // A host operator may use the standard launcher even when every member

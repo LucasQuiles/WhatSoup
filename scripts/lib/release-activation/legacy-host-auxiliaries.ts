@@ -1,5 +1,8 @@
 /** Closed installed-argv contracts for legacy macOS host auxiliaries. */
 import path from 'node:path';
+import { parseHealthRunnerSuffix } from './plan.ts';
+import { ROOT_HELPER_PYTHON } from './root-helper-interpreter.ts';
+import { readStrictPlist, strictStringArray, strictStringDict, type StrictPlistDict } from './strict-plist.ts';
 
 export type LegacyPathRebaseLabel =
   | 'com.bot-errors.health'
@@ -14,6 +17,26 @@ const LEGACY_PATH_REBASE_LABELS = new Set<LegacyPathRebaseLabel>([
 // The profile basename is spliced into a shell wrapper, so it is limited to a
 // shell-inert grammar; which profiles exist is host inventory, not code.
 const LEGACY_BOT_ERRORS_HEALTH_PROFILE = /^[a-z][a-z0-9]{0,31}\.json$/;
+// launchd starts Program or BundleProgram in place of ProgramArguments[0], and other root keys (UserName,
+// EnableGlobbing, ...) change what runs or as whom. No contract below pins them, so a path-rebase plist may set only these.
+const PATH_REBASE_ROOT_KEYS: ReadonlySet<string> = new Set([
+  'Label', 'ProgramArguments', 'EnvironmentVariables', 'WorkingDirectory', 'RunAtLoad', 'KeepAlive',
+  'StartCalendarInterval', 'StartInterval', 'StandardOutPath', 'StandardErrorPath',
+]);
+// Per job, the environment key names that a committed version of its repository writer set; values differ by host
+// and are not proven. The two BOT ERRORS installers wrote the nine health keys. deploy/setup.sh renders the timers
+// through scripts/launchd-claude-config-env.ts, which adds the agent CLI's config and credential-store selectors.
+const PATH_REBASE_ENVIRONMENT_KEYS: Readonly<Record<LegacyPathRebaseLabel, ReadonlySet<string>>> = {
+  'com.bot-errors.health': new Set([
+    'PATH', 'BOT_ERRORS_STATE_DIR', 'BOT_ERRORS_JID', 'BOT_ERRORS_EXPECTED_JID', 'BOT_ERRORS_SOCKET_PATH',
+    'BOT_ERRORS_SOCKET', 'BOT_ERRORS_DB', 'BOT_ERRORS_HEALTH_PROFILE', 'BOT_ERRORS_DISPATCHER_SERVICE',
+  ]),
+  'com.whatsoup.harness-maintenance': new Set(['PATH', 'CLAUDE_CONFIG_DIR', 'CLAUDE_SECURESTORAGE_CONFIG_DIR']),
+  'com.whatsoup.reply-guarantee': new Set(['PATH', 'CLAUDE_CONFIG_DIR']),
+};
+const BOT_ERRORS_HEALTH_SHAPE = 'bot-errors health job is neither the installer form nor the legacy wrapper; '
+  + 'reinstall it with deploy/scripts/install-bot-errors-health-launchd.sh or deploy/scripts/install-bot-errors-launchd.sh';
+const LEGACY_TIMER_SHAPE = 'legacy host auxiliary does not match reviewed path-rebase contract';
 
 export function isLegacyPathRebaseLabel(label: string): label is LegacyPathRebaseLabel {
   return LEGACY_PATH_REBASE_LABELS.has(label as LegacyPathRebaseLabel);
@@ -24,7 +47,7 @@ function absolute(value: unknown): string | null {
 }
 
 /**
- * The shell-token path grammar of docs/runbooks/release-deployment.md:635-637:
+ * The shell-token path grammar of the path-rebase section of docs/runbooks/release-deployment.md:
  * such a path is one inert word wherever a shell reads it.
  */
 export const SHELL_TOKEN_PATH = /^\/[A-Za-z0-9._/-]+$/;
@@ -103,8 +126,53 @@ function hasPinnedNodeUnderHome(node: string, home: string): boolean {
 }
 
 /**
- * Validates only observed legacy argv contracts. This module never resolves,
- * executes, or selects an executable; callers retain ordinary plist staging.
+ * The 16-element form both BOT ERRORS installers write, read with plan.ts's runner grammar so host and single-member
+ * activation share it (the grammar checks the interpreter file through isTrustedHealthPython). Both interpreter
+ * positions must be /usr/bin/python3. The runner names the root, so a case variant would match its own expected
+ * strings: the root must equal `root` byte for byte, and WorkingDirectory must equal it too.
+ */
+function botErrorsInstallerForm(plist: StrictPlistDict, programArguments: string[], root: string, home: string): boolean {
+  if (programArguments[0] !== ROOT_HELPER_PYTHON) return false;
+  const suffix = parseHealthRunnerSuffix(programArguments, 0, home);
+  const workingDirectory = plist.get('WorkingDirectory');
+  return suffix !== null && suffix.root === root && workingDirectory?.kind === 'string' && workingDirectory.value === root;
+}
+
+export type PathRebasePlistCheck = { readonly ok: true; readonly programArguments: string[] } | { readonly ok: false; readonly error: string };
+
+/**
+ * One path-rebase plist against its closed contract, with `root` as the release it selects: the declared
+ * expected-current root before staging, and the target release for the staged plist at planning and again at apply.
+ * It proves the text launchd reads (strict-plist.ts), the root keys, the environment key names, and the exact argv of
+ * one of four contracts: the BOT ERRORS installer form or legacy wrapper, harness maintenance, or reply guarantee.
+ */
+export function checkPathRebasePlist(label: string, text: string, root: string, home: string): PathRebasePlistCheck {
+  if (!isLegacyPathRebaseLabel(label)) return { ok: false, error: 'undeclared legacy path-rebase label' };
+  const read = readStrictPlist(text);
+  if (!read.ok) return read;
+  for (const key of read.root.keys()) {
+    if (!PATH_REBASE_ROOT_KEYS.has(key)) return { ok: false, error: `plist root key ${key} is not admitted for a path-rebase job` };
+  }
+  const declared = read.root.get('Label');
+  if (declared?.kind !== 'string' || declared.value !== label) return { ok: false, error: 'plist Label is not the declared host auxiliary label' };
+  const programArguments = strictStringArray(read.root, 'ProgramArguments');
+  if ('error' in programArguments) return { ok: false, error: programArguments.error };
+  const environment = strictStringDict(read.root, 'EnvironmentVariables');
+  if ('error' in environment) return { ok: false, error: environment.error };
+  for (const key of environment.entries.keys()) {
+    if (!PATH_REBASE_ENVIRONMENT_KEYS[label].has(key)) return { ok: false, error: `environment key ${key} is not admitted for ${label}` };
+  }
+  const argv = programArguments.values;
+  const legacy = rebaseLegacyHostAuxiliaryForPathRebase(text, argv, label, root, root, home) !== null;
+  if (label !== 'com.bot-errors.health') return legacy ? { ok: true, programArguments: argv } : { ok: false, error: LEGACY_TIMER_SHAPE };
+  return legacy || botErrorsInstallerForm(read.root, argv, root, home)
+    ? { ok: true, programArguments: argv }
+    : { ok: false, error: BOT_ERRORS_HEALTH_SHAPE };
+}
+
+/**
+ * Validates only observed legacy argv contracts and rewrites only the legacy wrapper's profile default. This
+ * function never resolves, executes, or selects an executable; callers retain ordinary plist staging.
  */
 export function rebaseLegacyHostAuxiliaryForPathRebase(
   installed: string,

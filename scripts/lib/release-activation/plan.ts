@@ -400,8 +400,11 @@ function isTrustedHealthPython(python: string): boolean {
   }
 }
 
-/** Validate the immutable runner/checker suffix shared by the historical wrapper and direct installer grammars. */
-function parseHealthRunnerSuffix(values: string[], start: number, home: string): { root: string } | null {
+/**
+ * Validate the immutable runner/checker suffix shared by the historical wrapper and direct installer grammars.
+ * Host activation reuses it for the installer form (legacy-host-auxiliaries.ts), so both read one grammar.
+ */
+export function parseHealthRunnerSuffix(values: string[], start: number, home: string): { root: string } | null {
   const python = values[start];
   if (python === undefined || !isTrustedHealthPython(python)) return null;
   const runner = values[start + 1];
