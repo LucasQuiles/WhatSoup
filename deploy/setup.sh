@@ -658,7 +658,22 @@ else
       echo "  ⚠ Release-drift instance label was not written: ~/.config/whatsoup/release-drift.env appeared after setup's check or cannot be created, and setup never replaces it"
     fi
   else
-    echo "  - Release-drift instance label not set: write WHATSOUP_RELEASE_DRIFT_INSTANCE=<instance> to ~/.config/whatsoup/release-drift.env before enabling whatsoup-release-drift.timer"
+    # A unit installed by hand took its label from WHATSOUP_INSTANCE, set in a
+    # drop-in or in bot-errors.env, which it loaded. Setup has just replaced that
+    # unit but keeps the setting, so every run exits 2 until the label file exists.
+    # Both checks sit in if conditions: a file setup cannot read must not end setup.
+    release_drift_old_label=""
+    if grep -qsE '^[[:space:]]*Environment[[:space:]]*=.*WHATSOUP_INSTANCE=' "$SYSTEMD_DIR/whatsoup-release-drift.service.d"/*.conf; then
+      release_drift_old_label="a drop-in in ~/.config/systemd/user/whatsoup-release-drift.service.d"
+    elif env_file_has_key "$HOME/.config/whatsoup/bot-errors.env" WHATSOUP_INSTANCE 2>/dev/null; then
+      release_drift_old_label="the file ~/.config/whatsoup/bot-errors.env"
+    fi
+    if [ -n "$release_drift_old_label" ]; then
+      echo "  ⚠ whatsoup-release-drift.service no longer reads WHATSOUP_INSTANCE, which $release_drift_old_label sets: every run exits 2 without observing until ~/.config/whatsoup/release-drift.env holds the label. Write that file once, with the same instance:"
+      echo "     (set -C; umask 077; echo WHATSOUP_RELEASE_DRIFT_INSTANCE=<instance> > ~/.config/whatsoup/release-drift.env)"
+    else
+      echo "  - Release-drift instance label not set: write WHATSOUP_RELEASE_DRIFT_INSTANCE=<instance> to ~/.config/whatsoup/release-drift.env before enabling whatsoup-release-drift.timer"
+    fi
   fi
 fi
 mkdir -p "$HOME/.config/whatsoup"
