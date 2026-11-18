@@ -143,7 +143,7 @@ describe('turn-recovery supervisor catch-up reconciliation wiring', () => {
     const result = await supervisor.scanOnce();
 
     expect(result.scanned).toBe(0); // no replay jobs; the reconciler is the only work
-    expect(result.catchupReconcileAttempted).toBe(1);
+    expect(result.catchupReconcileAttempted).toBe(0);
     expect(result.catchupReconcileClosed).toBe(0);
     expect(result.catchupReconcileSkipped).toBe(1);
     expect(pendingSeqs()).toEqual(fixture.sourceSeqs);
@@ -152,7 +152,7 @@ describe('turn-recovery supervisor catch-up reconciliation wiring', () => {
 
     // Re-observing the later reply cannot manufacture fulfillment evidence.
     const second = await supervisor.scanOnce();
-    expect(second.catchupReconcileAttempted).toBe(1);
+    expect(second.catchupReconcileAttempted).toBe(0);
     expect(second.catchupReconcileClosed).toBe(0);
     expect(second.catchupReconcileSkipped).toBe(1);
     expect(pendingSeqs()).toEqual(fixture.sourceSeqs);
@@ -184,13 +184,13 @@ describe('turn-recovery supervisor catch-up reconciliation wiring', () => {
     const supervisor = makeSupervisor({ catchupReconcile: { groupLimit: 1 } });
 
     const first = await supervisor.scanOnce();
-    expect(first.catchupReconcileAttempted).toBe(1);
+    expect(first.catchupReconcileAttempted).toBe(0);
     expect(first.catchupReconcileClosed).toBe(0);
     expect(first.catchupReconcileSkipped).toBe(1);
     expect(pendingSeqs()).toEqual([...a.sourceSeqs, ...b.sourceSeqs]);
 
     const second = await supervisor.scanOnce();
-    expect(second.catchupReconcileAttempted).toBe(1);
+    expect(second.catchupReconcileAttempted).toBe(0);
     expect(second.catchupReconcileClosed).toBe(0);
     expect(second.catchupReconcileSkipped).toBe(1);
     expect(pendingSeqs()).toEqual([...a.sourceSeqs, ...b.sourceSeqs]);
@@ -280,7 +280,7 @@ describe('turn-recovery supervisor catch-up reconciliation wiring', () => {
         catchupReconcileSkipped: number;
       };
 
-      expect(first.catchupReconcileAttempted).toBe(1);
+      expect(first.catchupReconcileAttempted).toBe(0);
       expect(first.catchupReconcileClosed).toBe(0);
       expect(first.catchupReconcileSkipped).toBe(1);
       expect(pendingSeqs().length).toBe(4);

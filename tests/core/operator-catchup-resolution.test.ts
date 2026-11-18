@@ -7,6 +7,7 @@ import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine, sendTrackedWithReceipt as sendTracked } from '../../src/core/durability.ts';
 import { resolveOperatorCatchup, inspectOperatorCatchupResolution } from '../../src/core/operator-catchup-resolution.ts';
 import { DEFAULT_DATABASE_RETENTION, runDatabaseRetention } from '../../src/core/database-retention.ts';
+import { processHistoryBatch } from '../../src/core/history-sync.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 describe('operator catch-up schema upgrade', () => {
@@ -166,16 +167,13 @@ describe('bound operator catch-up resolution', () => {
     expect(() => resolveOperatorCatchup(db.raw, resolution(opId))).toThrow('bound echoed');
   });
 
-  it.each([
-    ['another chat', '15550000004@s.whatsapp.net', '15550000004'],
-    ['another conversation in the same chat', jid, 'different-conversation'],
-  ])('does not recover a bound operation from an identical provider id in %s', async (_case, chat, conversation) => {
+  it('rejects a provider id from another chat even when its conversation key matches', async () => {
     const opId = await send(false);
     engine.markMaybeSent(opId, 'ambiguous transport');
     db.raw.prepare(`INSERT INTO messages
       (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp)
       VALUES (?, ?, 'bot@s.whatsapp.net', 'WA_CATCHUP', 'text', 1, ?)`)
-      .run(chat, conversation, Date.now());
+      .run('15550000004@s.whatsapp.net', '15550000003', Date.now());
 
     engine.postConnectRecovery();
 
@@ -186,15 +184,49 @@ describe('bound operator catch-up resolution', () => {
     expect(engine.getTurnRecoverySupervisorCounts().openRecoveries).toBe(1);
   });
 
-  it('recovers a bound operation only from its same-chat and same-conversation self echo', async () => {
+  it.each(['15550000003', 'different-conversation'])('recovers a same-chat self echo with stored conversation key %s', async (conversation) => {
     const opId = await send(false);
     engine.markMaybeSent(opId, 'ambiguous transport');
     db.raw.prepare(`INSERT INTO messages
       (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp)
-      VALUES (?, '15550000003', 'bot@s.whatsapp.net', 'WA_CATCHUP', 'text', 1, ?)`)
-      .run(jid, Date.now());
+      VALUES (?, ?, 'bot@s.whatsapp.net', 'WA_CATCHUP', 'text', 1, ?)`)
+      .run(jid, conversation, Date.now());
     engine.postConnectRecovery();
     expect(resolveOperatorCatchup(db.raw, resolution(opId))).toMatchObject({ inserted: 1 });
+  });
+
+  it.each([
+    { chat: jid, upgraded: 1, status: 'echoed' },
+    { chat: '15550000004@s.whatsapp.net', upgraded: 0, status: 'quarantined' },
+  ])('binds placeholder upgrades to the original chat: $chat', async ({ chat, upgraded, status }) => {
+    const opId = await send(false);
+    engine.markMaybeSent(opId, 'ambiguous transport');
+    expect(processHistoryBatch(db, [{
+      key: { id: 'WA_CATCHUP', remoteJid: jid, fromMe: false },
+      messageTimestamp: 1,
+    }])).toMatchObject({ placeholders: 1, failed: 0 });
+    const before = db.raw.prepare('SELECT * FROM messages WHERE message_id = ?').get('WA_CATCHUP');
+
+    const stats = processHistoryBatch(db, [{
+      key: { id: 'WA_CATCHUP', remoteJid: chat, fromMe: true },
+      messageTimestamp: 2,
+      message: { conversation: 'The requested result' },
+    }]);
+    engine.postConnectRecovery();
+
+    expect(db.raw.prepare('SELECT status FROM outbound_ops WHERE id = ?').get(opId))
+      .toEqual({ status });
+    expect(stats).toMatchObject({ upgraded, noop: 1 - upgraded, failed: 0 });
+    if (upgraded) {
+      expect(resolveOperatorCatchup(db.raw, resolution(opId))).toMatchObject({ inserted: 1 });
+      expect(db.raw.prepare('SELECT content_type, is_from_me FROM messages WHERE message_id = ?').get('WA_CATCHUP'))
+        .toEqual({ content_type: 'text', is_from_me: 1 });
+    } else {
+      expect(() => resolveOperatorCatchup(db.raw, resolution(opId))).toThrow('bound echoed');
+      expect(db.raw.prepare('SELECT * FROM operator_catchup_resolutions').all()).toEqual([]);
+      expect(db.raw.prepare('SELECT * FROM messages WHERE message_id = ?').get('WA_CATCHUP')).toEqual(before);
+      expect(engine.getTurnRecoverySupervisorCounts().openRecoveries).toBe(1);
+    }
   });
 
   it('rejects a new send after an ambiguous first attempt without resetting its evidence', async () => {

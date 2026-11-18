@@ -6,6 +6,7 @@ import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
 import { storeMessageIfNew } from '../../src/core/messages.ts';
 import { processHistoryBatch } from '../../src/core/history-sync.ts';
+import { upsertLidMapping } from '../../src/core/lid-resolver.ts';
 import { canonicalConversationKey } from '../../src/core/access-list.ts';
 
 describe.each(['startup', 'live'] as const)('%s stored echo reconciliation', (phase) => {
@@ -73,6 +74,39 @@ describe.each(['startup', 'live'] as const)('%s stored echo reconciliation', (ph
       content_type: 'text',
       is_from_me: (placeholder ? bodyFromMe : initialFromMe) ? 1 : 0,
     });
+  });
+
+  it.each(['safe', 'unsafe'] as const)('recovers a %s send after the same chat gains a phone mapping', (replayPolicy) => {
+    const chatJid = 'peer-a@lid';
+    const op = engine.createOutboundOp({
+      conversationKey: 'peer-a', chatJid, opType: 'text',
+      payload: '{"text":"answer"}', replayPolicy,
+    });
+    expect(engine.markSending(op)).toBe(true);
+    expect(engine.markMaybeSent(op, 'transport interrupted', 'mapped-receipt')).toBe(true);
+    upsertLidMapping(db, 'peer-a', '15550000003@s.whatsapp.net');
+    expect(processHistoryBatch(db, [{
+      key: { id: 'mapped-receipt', remoteJid: chatJid, fromMe: true },
+      messageTimestamp: 1, message: { conversation: 'answer' },
+    }])).toMatchObject({ inserted: 1, failed: 0 });
+    expect(db.raw.prepare('SELECT conversation_key FROM messages WHERE message_id = ?').get('mapped-receipt'))
+      .toEqual({ conversation_key: '15550000003' });
+
+    let recovery;
+    if (phase === 'startup') {
+      db.close();
+      db = new Database(join(directory, 'test.db'));
+      db.open();
+      engine = new DurabilityEngine(db);
+      recovery = engine.postConnectRecovery();
+    } else {
+      db.raw.prepare("UPDATE outbound_ops SET ambiguity_at = datetime('now', '-60 seconds') WHERE id = ?").run(op);
+      recovery = engine.reconcileLiveMaybeSent();
+    }
+
+    expect(db.raw.prepare('SELECT status FROM outbound_ops WHERE id = ?').get(op)).toEqual({ status: 'echoed' });
+    expect(recovery.outboundReplayed).toBe(0);
+    expect(recovery.outboundQuarantined).toBe(0);
   });
 
   it.each([
