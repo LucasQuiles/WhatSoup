@@ -153,8 +153,10 @@ not substitute for a real primary-failure degrade/recover test.
 ## Outbound Client-Safety Guard
 
 Mechanically enforces, for client-bound output, the Operating Rule that raw
-provider/runtime diagnostics and internal artifacts must never reach a user
-(see the diagnostics rule above; the client-bound behavior is pinned by
+provider/runtime diagnostics and internal artifacts must never reach a user,
+for the text its classifiers and redaction patterns match; text they do not
+match passes unchanged (see the diagnostics rule above; the client-bound
+behavior is pinned by
 `tests/core/outbound-message-safety.test.ts` and
 `tests/core/outbound-message-safety-prose-secrets.test.ts`). Other audiences
 are filtered less: internal agent groups keep ordinary operator paths and
