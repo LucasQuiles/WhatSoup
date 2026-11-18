@@ -3944,10 +3944,12 @@ the global turn's queue, so a restart there would discard owed text. The declara
 | `code` | enum | no | `self_restart` (default), `redeploy`, or `config_reload`. |
 
 The handler first sends the text the current turn still owes. The queue holds the
-turn's streamed answer until the turn ends, so the handler sends that answer as a
-normal answer message and waits for it before it aborts the turn. Only after that
-does text that minimal mode deferred at the tool boundary, in a turn that has shown
-nothing yet, go out as an interrupted-turn salvage message. Both waits share one
+turn's streamed answer until the turn ends, so the handler sends that answer
+unchanged, with the status role rather than as the turn's recorded answer, and
+waits for it before it aborts the turn. The restart's shutdown therefore still ends
+the turn as failed, with no recovery job. Only after that does text that minimal
+mode deferred at the tool boundary, in a turn that has shown nothing yet, go out as
+an interrupted-turn salvage message. Both waits share one
 10-second limit, and the restart continues only when every send reached provider
 submission in time. If the wait expires, a flush rejects, or a send ends failed,
 ambiguous or dropped by the group echo guard, the handler sends no acknowledgement,
