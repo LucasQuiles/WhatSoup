@@ -105,11 +105,11 @@ import type { RuntimePrimaryModelUsability, RuntimeTurnCapability } from './runt
 const log = createChildLogger('agent-runtime');
 
 /**
- * Which provider tier produced the failure driving a (re-)activation. The
- * reason taxonomy (ProviderFallbackReason) encodes WHY the primary was left,
- * never WHICH TIER just failed — so the tier is derived, in ONE place, from
- * route-identity attribution (failureTierForSession). A fallback-tier
- * failure carries no evidence about the PRIMARY: it must advance the chain
+ * Which provider tier produced the failure driving a (re-)activation, derived
+ * in ONE place from route identity (failureTierForSession); the reason
+ * taxonomy only says WHY the primary was left. A fallback-tier failure carries
+ * no evidence about the PRIMARY: it never gives the notice a primary ETA, arms
+ * like a primary failure when no window state exists, and otherwise is handled
  * without extending the window, overwriting the stored resetAt, or
  * restarting the primary recovery clocks (live ph-bot 2026-08-26: a dead
  * fallback tier plus user traffic postponed primary recovery indefinitely).
@@ -386,11 +386,11 @@ export class RuntimeFallbackCoordinator {
   }
 
   /**
-   * Pure attribution predicate: does `session` serve the ACTIVE fallback
-   * entry? The SINGLE identity mechanism behind both failed-entry marking
-   * (markActiveFallbackFailed) and failure-tier derivation — a session is
-   * fallback-tier evidence exactly when this holds, so the two can never
-   * disagree. No side effects.
+   * Pure marking predicate: does `session` serve the ACTIVE fallback entry?
+   * Only markActiveFallbackFailed reads it. The failure tier is a separate
+   * attribution (failureTierForSession), so the two can differ: a PRIOR
+   * entry's still-running session can be fallback-tier without serving the
+   * active entry, and with no active window this predicate is always false.
    */
   private sessionServesActiveFallbackEntry(session: SessionManager | null): boolean {
     if (!this.host.isFallbackWindowActive || !this.host.fallbackWindow.activeEntry || !session) return false;
@@ -1995,7 +1995,7 @@ export class RuntimeFallbackCoordinator {
       reason,
       resetAt,
       // Tier, not the stored window value, decides provenance: a no-window
-      // fallback-tier arm (an ambiguous session fails closed to that tier) also
+      // fallback-tier arm (an attributed or fail-closed fallback session) also
       // stores its resetAt, so only a primary-tier activation gives the user an ETA.
       primaryResetAt: failureTier === 'primary' ? (resetAt?.getTime() ?? null) : null,
       activeUntil: until,
