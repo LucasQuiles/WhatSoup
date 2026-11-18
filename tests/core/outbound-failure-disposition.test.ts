@@ -1,7 +1,8 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import type { SQLInputValue, StatementSync } from 'node:sqlite';
+import { describe, expect, it, vi } from 'vitest';
 import {
   AuthRequiredError,
   PayloadTooLargeError,
@@ -40,7 +41,304 @@ const base = {
   message: 'synthetic provider prose that must not persist',
 };
 
+/**
+ * Wraps the engine's repair page statement to record each page's row count.
+ * The repair loop is synchronous, so a test timeout cannot stop a loop that
+ * never ends; the wrapper throws once reads pass `maxReads` instead. It can
+ * also fail one chosen read.
+ */
+function boundRepairPageReads(
+  engine: DurabilityEngine,
+  options: { maxReads: number; failOnRead?: number },
+): number[] {
+  const statements = (engine as unknown as {
+    statements: { getAmbiguousReplayRepairPage: StatementSync };
+  }).statements;
+  const page = statements.getAmbiguousReplayRepairPage;
+  const pageRows: number[] = [];
+  let reads = 0;
+  statements.getAmbiguousReplayRepairPage = {
+    all: (...params: SQLInputValue[]) => {
+      reads += 1;
+      if (reads > options.maxReads) throw new Error(`repair page reads passed ${options.maxReads}`);
+      if (reads === options.failOnRead) throw new Error('repair page read denied');
+      const rows = page.all(...params);
+      pageRows.push(rows.length);
+      return rows;
+    },
+  } as unknown as StatementSync;
+  return pageRows;
+}
+
 describe('outbound failure disposition', () => {
+  it.each(
+    (['safe', 'read_only'] as const).flatMap((replayPolicy) =>
+      (['post-connect', 'live'] as const).flatMap((recovery) =>
+        (['absent', 'unmatched', 'matched'] as const).map((correlation) => ({ replayPolicy, recovery, correlation })))),
+  )('preserves explicit send ambiguity: $replayPolicy / $recovery / $correlation', async ({ replayPolicy, recovery, correlation }) => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const engine = new DurabilityEngine(db);
+      const chatJid = '15550000001@s.whatsapp.net';
+      const opId = engine.createOutboundOp({
+        conversationKey: 'ambiguity-test', chatJid, opType: 'text',
+        payload: JSON.stringify({ text: 'uncertain effect' }), replayPolicy,
+      });
+      engine.markSending(opId);
+      const evidence = classifyOutboundFailure(new SendAmbiguousError({
+        ...base, phase: 'provider_call_started',
+      }), { retryOwner: 'send_tracked', attemptsRemaining: 0 });
+      persistOutboundFailureDisposition(engine, opId, evidence,
+        correlation === 'absent' ? undefined : 'known-provider-id');
+      expect(db.raw.prepare('SELECT replay_policy FROM outbound_ops WHERE id = ?').get(opId))
+        .toEqual({ replay_policy: 'unsafe' });
+      if (correlation === 'matched') {
+        db.raw.prepare(`INSERT INTO messages
+          (chat_jid, conversation_key, sender_jid, message_id, timestamp, is_from_me)
+          VALUES (?, 'ambiguity-test', ?, 'known-provider-id', 1, 1)`).run(chatJid, chatJid);
+      }
+      if (recovery === 'live') {
+        db.raw.prepare("UPDATE outbound_ops SET ambiguity_at = datetime('now', '-31 seconds') WHERE id = ?").run(opId);
+      }
+
+      const stats = recovery === 'post-connect' ? engine.postConnectRecovery() : engine.reconcileLiveMaybeSent();
+      const sendMessage = vi.fn(async () => ({ waMessageId: 'unexpected-replay' }));
+      expect(await drainPendingOutbound({ sendMessage } as unknown as Messenger, engine))
+        .toEqual({ resent: 0, expired: 0 });
+      expect(sendMessage).not.toHaveBeenCalled();
+      expect(stats.outboundReconciled).toBe(1);
+      expect(stats.outboundReplayed).toBe(0);
+      const row = db.raw.prepare('SELECT status FROM outbound_ops WHERE id = ?').get(opId) as { status: string };
+      expect(row.status).toBe(correlation === 'matched' ? 'echoed' : 'quarantined');
+    } finally {
+      db.close();
+    }
+  });
+
+  it.each(
+    (['safe', 'read_only'] as const).flatMap((replayPolicy) =>
+      (['outbound.unknown_failure', 'outbound.crash_in_flight', 'outbound.echo_timeout'] as const)
+        .map((failureCode) => ({ replayPolicy, failureCode }))),
+  )('retains caller replay policy for $failureCode / $replayPolicy', async ({ replayPolicy, failureCode }) => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const engine = new DurabilityEngine(db);
+      const opId = engine.createOutboundOp({
+        conversationKey: 'replay-control', chatJid: '15550000001@s.whatsapp.net', opType: 'text',
+        payload: JSON.stringify({ text: 'replay control' }), replayPolicy,
+      });
+      engine.markSending(opId);
+      engine.markMaybeSent(opId, createInternalOutboundFailureEvidence({
+        failureCode, stage: 'runtime', mutationState: 'ambiguous', providerSubmissionCount: 1,
+      }));
+      expect(db.raw.prepare('SELECT replay_policy FROM outbound_ops WHERE id = ?').get(opId))
+        .toEqual({ replay_policy: replayPolicy });
+      engine.preConnectRecovery();
+      expect(engine.postConnectRecovery().outboundReplayed).toBe(1);
+      const sent: string[] = [];
+      const messenger: Messenger = {
+        async sendMessage(_chatJid, text) {
+          sent.push(text);
+          return { waMessageId: 'replayed-control' };
+        },
+        async sendMedia() { throw new Error('unexpected media replay'); },
+      };
+      expect(await drainPendingOutbound(messenger, engine)).toEqual({ resent: 1, expired: 0 });
+      expect(sent).toEqual(['replay control']);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('persists the replay prohibition for all recent historical ambiguous rows before reconnect', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'historical-ambiguity-'));
+    const path = join(directory, 'outbound.db');
+    let db = new Database(path);
+    try {
+      db.open();
+      const engine = new DurabilityEngine(db);
+      const evidence = classifyOutboundFailure(new SendAmbiguousError({
+        ...base, phase: 'provider_call_started',
+      }), { retryOwner: 'send_tracked', attemptsRemaining: 0 });
+      for (let index = 0; index < 205; index += 1) {
+        const policy = index % 2 === 0 ? 'safe' : 'read_only';
+        const id = engine.createOutboundOp({
+          conversationKey: 'historical-ambiguity', chatJid: '15550000001@s.whatsapp.net',
+          opType: 'text', payload: JSON.stringify({ text: `uncertain ${index}` }), replayPolicy: policy,
+        });
+        engine.markSending(id);
+        engine.markMaybeSent(id, evidence, index % 2 === 0 ? `provider-${index}` : undefined);
+        // Older writers persisted the caller policy even with typed ambiguity.
+        db.raw.prepare('UPDATE outbound_ops SET replay_policy = ? WHERE id = ?').run(policy, id);
+      }
+      const before = db.raw.prepare('SELECT * FROM outbound_ops ORDER BY id').all();
+      expect(engine.reconcileLiveMaybeSent().outboundReconciled).toBe(0);
+      engine.preConnectRecovery();
+      const expected = before.map(row => ({ ...row, replay_policy: 'unsafe' }));
+      expect(db.raw.prepare('SELECT * FROM outbound_ops ORDER BY id').all()).toEqual(expected);
+      engine.preConnectRecovery();
+      db.close();
+      db = new Database(path);
+      db.open();
+      expect(db.raw.prepare('SELECT * FROM outbound_ops ORDER BY id').all()).toEqual(expected);
+    } finally {
+      db.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves historical non-ambiguity, malformed evidence and pending rows unchanged', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const engine = new DurabilityEngine(db);
+      const ambiguous = encodeOutboundFailureEvidence(classifyOutboundFailure(new SendAmbiguousError({
+        ...base, phase: 'provider_call_started',
+      }), { retryOwner: 'send_tracked', attemptsRemaining: 0 }));
+      const controls = [
+        { status: 'maybe_sent', error: 'legacy provider error' },
+        { status: 'maybe_sent', error: '{' },
+        { status: 'maybe_sent', error: JSON.stringify({ schema: 'whatsoup-outbound-failure-v1', failure_code: 'transport.send_ambiguous' }) },
+        { status: 'maybe_sent', error: encodeOutboundFailureEvidence(createInternalOutboundFailureEvidence({
+          failureCode: 'outbound.unknown_failure', stage: 'runtime', mutationState: 'ambiguous',
+          providerSubmissionCount: 1,
+        })) },
+        { status: 'pending', error: ambiguous },
+      ];
+      for (const [index, control] of controls.entries()) {
+        const id = engine.createOutboundOp({
+          conversationKey: 'historical-control', chatJid: '15550000001@s.whatsapp.net',
+          opType: 'text', payload: JSON.stringify({ text: `control ${index}` }), replayPolicy: 'safe',
+        });
+        db.raw.prepare('UPDATE outbound_ops SET status = ?, error = ? WHERE id = ?')
+          .run(control.status, control.error, id);
+      }
+      const before = db.raw.prepare('SELECT * FROM outbound_ops ORDER BY id').all();
+      engine.preConnectRecovery();
+      expect(db.raw.prepare('SELECT * FROM outbound_ops ORDER BY id').all()).toEqual(before);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('rolls back historical policy updates and records incomplete recovery when a write fails', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const engine = new DurabilityEngine(db);
+      const evidence = classifyOutboundFailure(new SendAmbiguousError({
+        ...base, phase: 'provider_call_started',
+      }), { retryOwner: 'send_tracked', attemptsRemaining: 0 });
+      for (let index = 0; index < 2; index += 1) {
+        const id = engine.createOutboundOp({
+          conversationKey: 'historical-denied', chatJid: '15550000001@s.whatsapp.net',
+          opType: 'text', payload: JSON.stringify({ text: `denied ${index}` }), replayPolicy: 'safe',
+        });
+        engine.markSending(id);
+        engine.markMaybeSent(id, evidence);
+        db.raw.prepare("UPDATE outbound_ops SET replay_policy = 'safe' WHERE id = ?").run(id);
+      }
+      const before = db.raw.prepare('SELECT * FROM outbound_ops ORDER BY id').all();
+      db.raw.exec(`CREATE TRIGGER deny_second_policy_update
+        BEFORE UPDATE OF replay_policy ON outbound_ops
+        WHEN OLD.id = (SELECT MAX(id) FROM outbound_ops)
+        BEGIN SELECT RAISE(ABORT, 'historical policy update denied'); END`);
+      expect(() => engine.preConnectRecovery()).toThrow('historical policy update denied');
+      expect(db.raw.prepare('SELECT * FROM outbound_ops ORDER BY id').all()).toEqual(before);
+      const run = db.raw.prepare("SELECT completed_at, notes FROM recovery_runs WHERE trigger = 'pre_connect' ORDER BY id DESC LIMIT 1")
+        .get() as { completed_at: string | null; notes: string };
+      expect(run.completed_at).toBeNull();
+      expect(JSON.parse(run.notes)).toEqual({
+        status: 'incomplete', failedPhases: ['preserve_ambiguous_replay_policy'], openRecoveries: null,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('repairs a historical backlog page by page without reading every maybe_sent row', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const engine = new DurabilityEngine(db);
+      const ambiguous = classifyOutboundFailure(new SendAmbiguousError({
+        ...base, phase: 'provider_call_started',
+      }), { retryOwner: 'send_tracked', attemptsRemaining: 0 });
+      const control = createInternalOutboundFailureEvidence({
+        failureCode: 'outbound.unknown_failure', stage: 'runtime', mutationState: 'ambiguous',
+        providerSubmissionCount: 1,
+      });
+      // The repair needs only ids and evidence, never these payloads.
+      const largePayload = JSON.stringify({ text: 'x'.repeat(32 * 1024) });
+      // The first 200 rows keep a safe policy with other evidence, so the first
+      // 200-row page repairs nothing. A cursor that does not advance past them
+      // reads that page again until the read bound stops it.
+      for (let index = 0; index < 450; index += 1) {
+        const id = engine.createOutboundOp({
+          conversationKey: 'historical-backlog', chatJid: '15550000001@s.whatsapp.net', opType: 'text',
+          payload: index % 3 === 0 ? largePayload : JSON.stringify({ text: `backlog ${index}` }),
+          replayPolicy: 'safe',
+        });
+        engine.markSending(id);
+        engine.markMaybeSent(id, index < 200 ? control : ambiguous);
+        db.raw.prepare("UPDATE outbound_ops SET replay_policy = 'safe' WHERE id = ?").run(id);
+      }
+      const wholeStatusReads = vi.spyOn(engine, 'getOutboundByStatus');
+      // Three pages are expected; the bound allows one read more.
+      const pageRows = boundRepairPageReads(engine, { maxReads: 4 });
+      engine.preConnectRecovery();
+      expect(pageRows).toEqual([200, 200, 50]);
+      expect(wholeStatusReads.mock.calls.filter(([status]) => status === 'maybe_sent')).toEqual([]);
+      expect(db.raw.prepare(`SELECT replay_policy, COUNT(*) AS rows FROM outbound_ops
+        GROUP BY replay_policy ORDER BY replay_policy`).all())
+        .toEqual([{ replay_policy: 'safe', rows: 200 }, { replay_policy: 'unsafe', rows: 250 }]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('keeps committed pages repaired when a later page read fails, and the next start finishes', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const engine = new DurabilityEngine(db);
+      const ambiguous = classifyOutboundFailure(new SendAmbiguousError({
+        ...base, phase: 'provider_call_started',
+      }), { retryOwner: 'send_tracked', attemptsRemaining: 0 });
+      for (let index = 0; index < 250; index += 1) {
+        const id = engine.createOutboundOp({
+          conversationKey: 'historical-partial', chatJid: '15550000001@s.whatsapp.net', opType: 'text',
+          payload: JSON.stringify({ text: `partial ${index}` }), replayPolicy: 'safe',
+        });
+        engine.markSending(id);
+        engine.markMaybeSent(id, ambiguous);
+        db.raw.prepare("UPDATE outbound_ops SET replay_policy = 'safe' WHERE id = ?").run(id);
+      }
+      const policies = db.raw.prepare(`SELECT replay_policy, COUNT(*) AS rows FROM outbound_ops
+        GROUP BY replay_policy ORDER BY replay_policy`);
+      boundRepairPageReads(engine, { maxReads: 3, failOnRead: 2 });
+      expect(() => engine.preConnectRecovery()).toThrow('repair page read denied');
+      // Page 1 committed in its own transaction before the page 2 read failed.
+      expect(policies.all()).toEqual([{ replay_policy: 'safe', rows: 50 }, { replay_policy: 'unsafe', rows: 200 }]);
+      const run = db.raw.prepare("SELECT completed_at, notes FROM recovery_runs WHERE trigger = 'pre_connect' ORDER BY id DESC LIMIT 1")
+        .get() as { completed_at: string | null; notes: string };
+      expect(run.completed_at).toBeNull();
+      expect(JSON.parse(run.notes)).toEqual({
+        status: 'incomplete', failedPhases: ['preserve_ambiguous_replay_policy'], openRecoveries: null,
+      });
+      // The next start reads only the rows that still need the repair.
+      const restarted = new DurabilityEngine(db);
+      const resumedPages = boundRepairPageReads(restarted, { maxReads: 2 });
+      restarted.preConnectRecovery();
+      expect(resumedPages).toEqual([50]);
+      expect(policies.all()).toEqual([{ replay_policy: 'unsafe', rows: 250 }]);
+    } finally {
+      db.close();
+    }
+  });
+
   it('classifies quarantine outcomes only from bounded failure evidence', () => {
     const unreconstructable = createInternalOutboundFailureEvidence({
       failureCode: 'outbound.pending_replay_unreconstructable',

@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { runMigration45 } from '../../src/core/database-migration-45.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
+import { classifyOutboundFailure, encodeOutboundFailureEvidence } from '../../src/core/outbound-failure-disposition.ts';
+import { SendAmbiguousError } from '../../src/transport/contract/errors.ts';
+import { makeChannelId } from '../../src/core/transport-refs.ts';
 import {
   createRecoveryStats,
   DurabilityRecoveryEvidence,
@@ -618,6 +621,38 @@ describe('durable recovery evidence ordering', () => {
     expect(db.raw.prepare(
       'SELECT COUNT(*) AS count FROM turn_delivery_corroboration',
     ).get()).toEqual(proofCount);
+  });
+
+  it('preserves corroborated historical ambiguity while protecting uncorroborated rows at startup', () => {
+    const { terminalRecordId } = seedIncident();
+    const evidence = classifyOutboundFailure(new SendAmbiguousError({
+      channelId: makeChannelId('imessage', 'primary'), operation: 'sendText',
+      correlationId: 'historical-proof', scope: 'request', phase: 'provider_call_started',
+      message: 'result unknown',
+    }), { retryOwner: 'send_tracked', attemptsRemaining: 0 });
+    db.raw.prepare("UPDATE outbound_ops SET error = ?, replay_policy = 'safe' WHERE id = ?")
+      .run(encodeOutboundFailureEvidence(evidence), INCIDENT_SELECTED_OP_ID);
+    engine.postConnectRecovery();
+    const selectedBefore = rowJson(db, 'outbound_ops', 'id', INCIDENT_SELECTED_OP_ID);
+    const terminalBefore = rowJson(db, 'turn_terminal_records', 'id', terminalRecordId);
+    const proofBefore = db.raw.prepare('SELECT * FROM turn_delivery_corroboration ORDER BY corroborating_op_id').all();
+    expect(proofBefore).toHaveLength(INCIDENT_ECHOED_OP_IDS.length);
+    const id = engine.createOutboundOp({
+      conversationKey: 'unconfirmed-history', chatJid: 'unconfirmed-history@g.us',
+      opType: 'text', payload: '{"text":"unconfirmed"}', replayPolicy: 'safe',
+    });
+    engine.markSending(id);
+    engine.markMaybeSent(id, evidence);
+    db.raw.prepare("UPDATE outbound_ops SET replay_policy = 'safe' WHERE id = ?").run(id);
+
+    expect(() => engine.preConnectRecovery()).not.toThrow();
+
+    expect(db.raw.prepare('SELECT replay_policy FROM outbound_ops WHERE id = ?').get(id))
+      .toEqual({ replay_policy: 'unsafe' });
+    expect(rowJson(db, 'outbound_ops', 'id', INCIDENT_SELECTED_OP_ID)).toBe(selectedBefore);
+    expect(rowJson(db, 'turn_terminal_records', 'id', terminalRecordId)).toBe(terminalBefore);
+    expect(db.raw.prepare('SELECT * FROM turn_delivery_corroboration ORDER BY corroborating_op_id').all())
+      .toEqual(proofBefore);
   });
 
   it('does not create recurring live-recovery evidence for corroborated maybe_sent proof', () => {
