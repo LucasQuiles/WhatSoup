@@ -1275,6 +1275,8 @@ describe('release:activate-host closed host auxiliaries', () => {
     { name: 'an in-release Python with the installer suffix', build: (root, home) => installerForm(root, home, ownedPython(`${root}/venv/bin/python3`)) },
     { name: 'another trusted python3 with the installer suffix', build: (root, home, world) => installerForm(root, home, ownedPython(`${world.root}/bin/python3`)) },
     { name: 'the installer form under a case variant of the declared root', build: (root, home) => installerForm(path.join(path.dirname(root), path.basename(root).toUpperCase()), home) },
+    { name: 'the installer form with WorkingDirectory below the root', build: (root, home) => installerForm(root, home).replace(`<string>${root}</string>`, `<string>${root}/deploy</string>`) },
+    { name: 'the installer form with a non-default log hint', build: (root, home) => installerForm(root, home).replace(`${home}/.local/state/bot-errors/logs/health.err.log`, `${home}/.local/state/other/logs/health.err.log`) },
   ])('refuses the health job as $name, naming the reinstall route', async ({ build }) => {
     expectStaged((await planWith(BOT_ERRORS, build)).plan, BOT_ERRORS, HEALTH_SHAPE);
   });
@@ -1350,6 +1352,18 @@ describe('release:activate-host closed host auxiliaries', () => {
     { name: 'a ProgramArguments entry that is not a <string>', build: (root, home) => installerForm(root, home).replace('<string>--instance</string>', '<integer>1</integer>'), detail: 'plist ProgramArguments entry 2 is not a <string>' },
   ])('refuses $name', async ({ build, detail }) => {
     expectStaged((await planWith(BOT_ERRORS, build)).plan, BOT_ERRORS, detail);
+  });
+
+  // Every decoded string value of every contract must name the path it spells.
+  it.each<{ name: string; label: string; build: (root: string, home: string) => string }>([
+    { name: 'an installer environment value <root>/../x', label: BOT_ERRORS, build: (root, home) => installerForm(root, home).replace(`<string>${home}/.local/state/bot-errors</string>`, `<string>${root}/../x</string>`) },
+    { name: 'an installer log path <root>.bak/../<name>/log', label: BOT_ERRORS, build: (root, home) => withLines(installerForm(root, home), '  <key>StandardOutPath</key>', `  <string>${root}.bak/../${path.basename(root)}/log</string>`) },
+    { name: 'an installer profile at <parent>/./<name>', label: BOT_ERRORS, build: (root, home) => installerForm(root, home).replace(`${root}/deploy/health-profiles/`, `${path.dirname(root)}/./${path.basename(root)}/deploy/health-profiles/`) },
+    { name: 'an installer log path with a trailing slash', label: BOT_ERRORS, build: (root, home) => withLines(installerForm(root, home), '  <key>StandardErrorPath</key>', `  <string>${root}/logs/</string>`) },
+    { name: 'a maintenance WorkingDirectory <root>/../x', label: MAINTENANCE, build: (root, home) => maintenanceForm(root, home).replace(`<string>${root}</string>`, `<string>${root}/../x</string>`) },
+    { name: 'a maintenance WorkingDirectory <root>/./deploy', label: MAINTENANCE, build: (root, home) => maintenanceForm(root, home).replace(`<string>${root}</string>`, `<string>${root}/./deploy</string>`) },
+  ])('refuses $name as not in closed form', async ({ label, build }) => {
+    expectStaged((await planWith(label, build)).plan, label, 'absolute plist string value is not in closed form (empty, . or .. segment, or trailing slash)');
   });
 
   it('admits an installer-form plist whose comment holds a non-canonical <string>', async () => {
