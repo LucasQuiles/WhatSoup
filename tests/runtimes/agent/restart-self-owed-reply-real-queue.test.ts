@@ -11,8 +11,9 @@
 // Each test is marked:
 //   guard        - holds whether or not restart_self commits the deferred answer.
 //   expected-red - fails while restart_self leaves the deferred answer to the turn
-//                  abort, which salvages it as status text or drops it; passes
-//                  once restart_self sends it as the turn's answer first.
+//                  abort, which salvages it as status text or drops it, or while
+//                  it records that answer as the turn's answer evidence; passes
+//                  once restart_self sends it first with the status role.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
@@ -142,7 +143,7 @@ describe('restart_self owed reply through a real OutboundQueue (#3829)', () => {
   describe('(a) continuity after a refused restart', () => {
     // expected-red: the failure is injected into whichever send carries the owed
     // text. A refused restart keeps the queue open and unpoisoned, keeps the
-    // failed op attributed to its turn as an answer op, and keeps delivering for
+    // failed op attributed to its turn as a status op, and keeps delivering for
     // the rest of the turn and the next turn.
     it('keeps the queue usable for the rest of the turn and the next turn after an owed send fails', async () => {
       const { messenger, attempts } = makeMessenger(async (_jid, text) => {
@@ -182,8 +183,10 @@ describe('restart_self owed reply through a real OutboundQueue (#3829)', () => {
         { jid: DM_JID, text: NEXT },
       ]);
       expect(durability.markSubmitted.mock.calls.map((call) => call[0])).toEqual([2, 3]);
-      // The failed owed op stays attributed to its turn so finalization sees it.
-      expect(turnOne.answerOpIds).toEqual([1, 2]);
+      // The failed owed op stays attributed to its turn as a status op, so only
+      // the later answer is the turn's answer evidence.
+      expect(turnOne.statusOpIds).toEqual([1]);
+      expect(turnOne.answerOpIds).toEqual([2]);
       expect(turnTwo.answerOpIds).toEqual([3]);
       expect(queue.getSendFailureCount()).toBe(1);
       expect(queue.isPoisoned()).toBe(false);
@@ -393,9 +396,13 @@ describe('restart_self owed reply through a real OutboundQueue (#3829)', () => {
       expect(attempts.some((attempt) => attempt.text.includes(SALVAGED_REPLY_NOTICE))).toBe(false);
       const sendOrder = vi.mocked(messenger.sendMessage).mock.invocationCallOrder;
       expect(sendOrder.at(-1)).toBeLessThan(trigger.mock.invocationCallOrder[0] ?? 0);
-      // The status took op 1; the owed text is the turn's answer op.
+      // The tool status took op 1. The owed text, op 2, goes out with the status
+      // role: the restart's shutdown finalizes this turn as a crash, and an answer
+      // op that is submitted but not yet echoed would move the inbound to a
+      // recovery job (restart-self-shutdown-finalization.test.ts).
       const evidence = await settle(queue.flushTurnEvidence('turn-1'));
-      expect(evidence.answerOpIds).toEqual([2]);
+      expect(evidence.statusOpIds).toEqual([1, 2]);
+      expect(evidence.answerOpIds).toEqual([]);
     });
 
     // expected-red: the same turn with the answer send failing must refuse.
@@ -418,6 +425,32 @@ describe('restart_self owed reply through a real OutboundQueue (#3829)', () => {
         expect.objectContaining({ failure_code: 'outbound.governor_shed' }),
       );
       expect(queue.getSendFailureCount()).toBe(1);
+    });
+  });
+
+  describe('(d) owed answer still in the live buffer in minimal mode', () => {
+    // expected-red: minimal mode moves streamed text into the deferred pen at a
+    // tool boundary, but an answer that is still in the live buffer when
+    // restart_self runs is sent by its first step. It reaches the user unchanged,
+    // with no salvage notice, and with the status role, so it is not the turn's
+    // answer evidence.
+    it('sends the buffered answer unchanged and outside the turn answer evidence', async () => {
+      const { messenger, attempts } = makeMessenger();
+      const durability = makeDurabilityStub();
+      const queue = new OutboundQueue(messenger, DM_JID);
+      queue.setDurability(durability as unknown as DurabilityEngine);
+      queue.setToolUpdateMode('minimal');
+      queue.beginTurnEvidence('turn-1');
+      queue.enqueueStreamingText(OWED, 'answer');
+
+      const { result, trigger } = await callRestart(queue);
+
+      expect(result).toMatchObject({ ok: true, restarting: true });
+      expect(trigger).toHaveBeenCalledTimes(1);
+      expect(attempts).toEqual([{ jid: DM_JID, text: OWED }]);
+      const evidence = await settle(queue.flushTurnEvidence('turn-1'));
+      expect(evidence.statusOpIds).toEqual([1]);
+      expect(evidence.answerOpIds).toEqual([]);
     });
   });
 });
