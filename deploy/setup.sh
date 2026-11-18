@@ -575,6 +575,13 @@ else
   # --- linux (systemd) unit install ---
   bot_errors_required_health_profile="$(require_readable_bot_errors_health_profile)"
   echo "  ✓ BOT ERRORS health profile readable: $bot_errors_required_health_profile"
+  # The release-drift instance label is checked before any unit is installed,
+  # with the character set deploy/scripts/render-release-drift-launchd.sh allows.
+  release_drift_instance="${WHATSOUP_RELEASE_DRIFT_INSTANCE:-}"
+  if [ -n "$release_drift_instance" ] && [[ ! "$release_drift_instance" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "  ✗ unsafe WHATSOUP_RELEASE_DRIFT_INSTANCE: use only letters, digits, dot, underscore, and dash" >&2
+    exit 2
+  fi
   mkdir -p "$SYSTEMD_DIR"
   cp "$REPO_ROOT/deploy/whatsoup@.service" "$SYSTEMD_DIR/whatsoup@.service"
   cp "$REPO_ROOT/deploy/whatsoup-fleet.service" "$SYSTEMD_DIR/whatsoup-fleet.service"
@@ -618,6 +625,20 @@ else
   echo "  ✓ harness-maintenance.{service,timer} installed"
   echo "  ✓ whatsoup-release-drift.{service,timer} installed"
   echo "  ✓ BOT ERRORS service/timer units installed"
+  # whatsoup-release-drift.service reads its BOT ERRORS instance label from this
+  # file, never from bot-errors.env: every BOT ERRORS unit loads that file, and
+  # WHATSOUP_INSTANCE also selects per-instance agent state (deploy/hooks). Setup
+  # writes the file only from an explicit label and never replaces one.
+  release_drift_env="$HOME/.config/whatsoup/release-drift.env"
+  if [ -f "$release_drift_env" ]; then
+    echo "  ✓ Existing release-drift instance label preserved at ~/.config/whatsoup/release-drift.env"
+  elif [ -n "$release_drift_instance" ]; then
+    mkdir -p "$HOME/.config/whatsoup"
+    (umask 077 && printf 'WHATSOUP_INSTANCE=%s\n' "$release_drift_instance" > "$release_drift_env")
+    echo "  ✓ Release-drift instance label written to ~/.config/whatsoup/release-drift.env"
+  else
+    echo "  - Release-drift instance label not set: write WHATSOUP_INSTANCE=<instance> to ~/.config/whatsoup/release-drift.env before enabling whatsoup-release-drift.timer"
+  fi
 fi
 mkdir -p "$HOME/.config/whatsoup"
 if [ ! -f "$HOME/.config/whatsoup/fleet.env" ]; then
@@ -778,7 +799,10 @@ else
   echo "     systemctl --user enable --now bot-errors-dispatcher.service bot-errors-q-loop.service bot-errors-collector.service"
   echo "     systemctl --user enable --now bot-errors-deadman.timer bot-errors-health-check.timer bot-errors-heartbeat-watchdog.timer bot-errors-runtime-staleness.timer"
   echo ""
-  echo "  To check the deployed release for drift and currency every 5 minutes (once per host):"
+  echo "  To check the deployed release for drift and currency every 5 minutes (once per host),"
+  echo "  give the timer the bot instance that labels its BOT ERRORS alerts (unless setup wrote"
+  echo "  it from WHATSOUP_RELEASE_DRIFT_INSTANCE), then enable it:"
+  echo "     echo WHATSOUP_INSTANCE=<instance> > ~/.config/whatsoup/release-drift.env"
   echo "     systemctl --user enable --now whatsoup-release-drift.timer"
 fi
 echo ""
