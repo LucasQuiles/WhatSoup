@@ -433,18 +433,17 @@ export class RuntimeFallbackCoordinator {
    * fallback-tier evidence and must not move the window clocks.
    *
    * Attribution mirrors the route-currency compare (sessionMatchesCurrentRoute):
-   * the primary compare is provider-only (isCrossProviderSession's inverse) —
-   * disambiguation comes from the model-aware fallback-entry side, because a
-   * same-provider chain differs from the primary only by model, plus one
-   * tiebreak: a session whose model exactly equals the EXPLICITLY configured
-   * primary model is the primary even when a wildcard (model-undefined)
-   * same-provider entry also matches it. When positive attribution is
-   * impossible (ambiguous same-provider session with a null model ref, a
-   * provider-default primary beside a wildcard same-provider entry, or a
-   * foreign provider), fail CLOSED to the fallback tier: with window state
-   * present the failure cannot move the clocks; with none, activation still
-   * arms (the no-arm and clock-preserving rules need window state), but the
-   * unproven reset never becomes the user-facing primary ETA.
+   * the primary compare is provider-only (isCrossProviderSession's inverse) and
+   * the fallback-entry side is model-aware, since a same-provider chain differs
+   * from the primary only by model. Two tiebreaks attribute a session matching
+   * both to the primary: its model equals the EXPLICITLY configured primary
+   * model; or the primary has no configured model, the session has none, and
+   * every same-provider entry names a model (a window route on a named entry
+   * carries that model, so only a primary route starts such a session). Any
+   * other match of both or neither fails CLOSED to the fallback tier: with
+   * window state present the failure cannot move the clocks; with none,
+   * activation still arms (the no-arm and clock-preserving rules need window
+   * state), but the unproven reset never becomes the user-facing primary ETA.
    */
   private failureTierForSession(session: SessionManager | null): FallbackFailureTier {
     if (!session) return 'primary';
@@ -473,18 +472,17 @@ export class RuntimeFallbackCoordinator {
     const matchesPrimary = provider === this.host.agentProvider;
     if (matchesFallback && !matchesPrimary) return 'fallback';
     if (matchesPrimary && !matchesFallback) return 'primary';
-    // Exact-primary disambiguation (review 2): a wildcard (model-undefined)
-    // fallback entry matches ANY session on its provider, which used to drop
-    // a failing PRIMARY session into the ambiguous bucket and discard its
-    // resetAt evidence under a legal config. When the primary route carries
-    // an EXPLICITLY configured model and the session's model equals it, the
-    // session IS the primary — the exact match beats the wildcard. The
-    // remainder stays fail-closed: a null session model on a same-provider
-    // chain, or a provider-default primary (host.model undefined) beside a
-    // wildcard same-provider entry, cannot be positively attributed.
-    if (matchesPrimary && matchesFallback && this.host.model !== undefined && model === this.host.model) {
-      return 'primary';
-    }
+    // Exact-primary tiebreaks (review 2) for a session matching both routes.
+    // A wildcard (model-undefined) entry matches ANY session on its provider,
+    // so a session model equal to an EXPLICITLY configured primary model is
+    // the proof. A provider-default primary starts null-model sessions, while
+    // resolveRoute gives a window route on a named entry that entry's (or a
+    // pinned) model, so with no wildcard same-provider entry a null-model
+    // session is the primary. Any other both-or-neither match fails closed.
+    const explicitPrimary = this.host.model !== undefined && model === this.host.model;
+    const defaultPrimary = this.host.model === undefined && model === null
+      && this.host.agentFallbacks.every((entry) => entry.provider !== provider || entry.model !== undefined);
+    if (matchesPrimary && matchesFallback && (explicitPrimary || defaultPrimary)) return 'primary';
     return 'fallback';
   }
 
