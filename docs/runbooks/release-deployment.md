@@ -582,10 +582,12 @@ environment, or other input that can affect release selection as `review-file`;
 the bounded checker does not discover arbitrary dynamic dependencies. It does
 not prove Python import hooks, `sitecustomize`, `.pth` files, native extensions,
 or same-name package precedence; those remain separate transitive review
-inputs. An `unloaded-113` entry may
-use `files: []` and `argumentBindings: []` for a digest-pinned empty stub, but
-only if the bounded
-`launchctl print gui/<uid>/<label>` check returns exactly exit 113. This is a
+inputs. An `unloaded-113` entry is accepted only for a digest-pinned zero-byte
+plist stub, which may use `files: []` and `argumentBindings: []`, and only if
+the bounded `launchctl print gui/<uid>/<label>` check returns exactly exit 113.
+Any other plist under `unloaded-113`, whatever its content, refuses before that
+check (`unloaded-113 plist is not a zero-byte stub`): a non-empty plist left in
+`~/Library/LaunchAgents` can load at the next login. This is a
 review-bound exception, not general dependency discovery: any changed plist,
 runtime definition, review input, root/link tuple, unreadable input, or new
 consumer refuses the transaction and requires a new review declaration. Plan
@@ -595,10 +597,34 @@ label, plist digest, load state, roots, links, files, and argument bindings.
 `path-rebase` changes only plist string values that are exactly the reviewed
 root or a path below it, and only when the value is a shell-token path matching
 `^/[A-Za-z0-9._/-]+$`, because no value can be proven never to reach a shell.
-Fields containing a prefix-sibling path are retained. Any other value that
-contains the root, including a command that starts with it, is an embedded
-shell-style reference and refuses. The target release lands in every rewritten
-value, so a release outside that grammar refuses too.
+Every shell-token value, whether or not it contains the root, must also be in
+closed form: `path.posix.normalize` leaves it unchanged and it has no trailing
+slash, so it has no empty, `.` or `..` segment. Otherwise it names a path other
+than its spelling and refuses: `<root>/../x` leaves the root, while
+`<root>.bak/../<name>/x` and `<parent>/./<name>/x` name it. A field containing
+a prefix-sibling path such as `<root>2/x` is retained unchanged only when its
+value is such a closed-form shell-token path. Any other value that contains the
+root, including a command that starts with it, is an embedded shell-style
+reference and refuses. The target release lands in every rewritten value, so a
+release that is not a closed-form shell-token path refuses too.
+
+A `com.bot-errors.health` job that matches no closed contract below must also
+start a file inside the target release. When `ProgramArguments[0]` is an
+interpreter, the script argument of a bounded launch form (`python`, optionally
+with `-I`, `node`/`nodejs`, or `bash`/`sh`/`zsh`, followed by a script) must be
+a closed-form path under the target release after the rebase; shell `-c` and
+`-lc`, Python `-c` and `-m`, other options, and other interpreters refuse.
+Otherwise `ProgramArguments[0]` itself must be a closed-form path under the
+target release. Its `EnvironmentVariables` must be one well-formed block with
+unique keys, read as for the Python module form above, and may not set
+`PYTHON*`, `NODE_OPTIONS`, `NODE_PATH`, `BASH_ENV`, `ENV`, `PERL5LIB`,
+`PERL5OPT`, `PERLLIB`, `RUBYOPT`, `RUBYLIB`, `DYLD_*` or `LD_*`, each of which
+can make an interpreter load code from outside the release. The plain form that
+`deploy/scripts/install-bot-errors-health-launchd.sh` installs passes: `python3`
+runs the release's `bot-errors-runner.py`, and its environment sets only `PATH`
+and `BOT_ERRORS_*` keys. This proves which file launchd starts, not what that
+file runs next: the runner executes the command after its `--`, and planning
+does not check that command.
 
 The shared-wrapper consumer proof reads installed plists only. For each
 selected shared wrapper, the plists in `~/Library/LaunchAgents` whose
