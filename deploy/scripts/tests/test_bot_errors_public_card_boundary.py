@@ -46,7 +46,7 @@ def _card(summary: str, evidence: str = "ignored by the public card") -> str:
         "id": "evt-public-card-boundary",
         "createdAt": "2026-11-11T00:00:00Z",
         "machine": "host-a",
-        "instance": "q",
+        "instance": "bot-a",
         "source": "agent_reply_guarantee_breach",
         "summary": summary,
         "evidence": evidence,
@@ -97,7 +97,7 @@ def test_card_hides_the_whole_authorization_value_for_every_scheme(key, scheme, 
     event = {
         "schemaVersion": 2, "eventKind": "incident_alert", "eventType": "alert", "severity": "critical",
         "id": "evt-authorization-scheme", "createdAt": "2026-11-11T00:00:00Z", "machine": "host-a",
-        "instance": "q", "source": "agent_reply_guarantee_breach", "summary": text, "evidence": text,
+        "instance": "bot-a", "source": "agent_reply_guarantee_breach", "summary": text, "evidence": text,
     }
 
     card = _mod.format_public_message(event)
@@ -187,7 +187,7 @@ def test_card_footer_survives_a_year_one_timestamp() -> None:
         "id": "evt-public-card-year-one",
         "createdAt": "0001-01-01T00:00:00Z",
         "machine": "host-a",
-        "instance": "q",
+        "instance": "bot-a",
         "source": "agent_reply_guarantee_breach",
         "summary": "reply queue is delayed",
     })

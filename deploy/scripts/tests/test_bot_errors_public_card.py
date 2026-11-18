@@ -38,7 +38,7 @@ def _event(**overrides: object) -> dict[str, object]:
         "id": "evt-public-card-001",
         "createdAt": "2026-10-29T00:00:00Z",
         "machine": "host-a",
-        "instance": "q",
+        "instance": "bot-a",
         "source": "agent_reply_guarantee_breach",
         "summary": "ESCALATED still open: reply queue is delayed",
         "evidence": "ignored by the public card",
@@ -70,7 +70,7 @@ def test_public_card_redacts_sensitive_details_without_forwarding_raw_owner_acti
     assert "Owner should restore the bot sign-in." not in card
     assert "*What we are doing:* Needs review." in card
     assert "*What you need to do:* Nothing now." in card
-    assert "*Who is affected:* The q bot." in card
+    assert "*Who is affected:* The bot-a bot." in card
     assert card.endswith("host-a · 10/28/2026 8:00 PM ET")
     for forbidden in (
         "p@ss", "url-secret", "/etc/private", "pid 304914", "123456", "open-123",
@@ -107,8 +107,8 @@ def test_unbound_device_bond_fields_cannot_create_a_manual_instruction() -> None
 
 
 def test_untrusted_reminder_words_and_marker_keep_a_new_critical_alert_admitted() -> None:
-    """Only an in-process dispatcher token may select the Q-excluded repeat prefix."""
-    patterns = _live_q_paused_admission_patterns()
+    """Only an in-process dispatcher token may select the repeat prefix that paused-chat admission excludes."""
+    patterns = _paused_chat_admission_patterns()
     card = _mod.format_public_message(_event(
         summary="PAUSED: operator action is waiting",
         evidence="incident_still_open=true\nstill_open_digest=true",
@@ -140,26 +140,26 @@ def test_dispatch_path_sends_the_public_card(monkeypatch: pytest.MonkeyPatch, tm
     assert "_publicCardKnownOpenReminder" not in archived.read_text(encoding="utf-8")
 
 
-def _live_q_paused_admission_patterns() -> list[str]:
-    """The five regexes from q's live paused-chat configuration on 2026-10-29.
+def _paused_chat_admission_patterns() -> list[str]:
+    """Five admission regexes of the shape a paused agent chat uses.
 
-    The two mention ids are synthetic placeholders: only their absence from
-    reminder and paused cards matters here, not their values.
+    The bot name and the two mention ids are neutral placeholders: only their
+    absence from reminder and paused cards matters here, not their values.
     """
-    q_one = "1" * 11  # placeholder; the live ids are not published
-    q_two = "2" * 14  # placeholder; the live ids are not published
+    mention_a = "1" * 6  # placeholder id
+    mention_b = "2" * 6  # placeholder id
     return [
         r"^BOT ERROR - ",
-        r"^\s*@?q[:,]\s",
-        rf"@(?:{q_one}|{q_two})\b",
+        r"^\s*@?bot-a[:,]\s",
+        rf"@(?:{mention_a}|{mention_b})\b",
         r"^🔴 \*",
         r"^🔴 ⚡ ",
     ]
 
 
-def test_new_critical_alerts_match_the_live_q_paused_admission_patterns() -> None:
+def test_new_critical_alerts_match_the_paused_chat_admission_patterns() -> None:
     """Raw event text cannot suppress admission for a new critical alert."""
-    patterns = _live_q_paused_admission_patterns()
+    patterns = _paused_chat_admission_patterns()
     new_critical = _mod.format_public_message(_event(
         id="0e42cead-c770-4200-9c35-6d6d2a7e58c1",
         source="flap_storm",
@@ -171,7 +171,7 @@ def test_new_critical_alerts_match_the_live_q_paused_admission_patterns() -> Non
     assert "Ref 0e42cead" in new_critical
 
 
-def test_info_and_unproven_recovery_do_not_claim_q_work_or_a_fix() -> None:
+def test_info_and_unproven_recovery_do_not_claim_agent_work_or_a_fix() -> None:
     """Typed clear events need dispatcher proof before the card says Fixed."""
     info = _mod.format_public_message(_event(
         eventKind="observation", eventType="observation", severity="info",
@@ -207,17 +207,17 @@ def test_verified_daily_health_recovery_uses_dispatcher_proof_for_fixed_card() -
         source="daily-health",
         summary="The bot is healthy again.",
         evidence=(
-            "health q: 200 status=healthy wa_connected=true state=connected "
+            "health bot-a: 200 status=healthy wa_connected=true state=connected "
             "auth_bond_status=present auth_bond_creds_exists=true "
             "auth_bond_creds_size=128 auth_failure_class=none"
         ),
     )
     state = {
         "openIncidents": {
-            "host-a|q|daily-health-fail:q": {
+            "host-a|bot-a|daily-health-fail:bot-a": {
                 "status": "open",
                 "openedAt": 1,
-                "lastEvidence": "FAIL health q: socket disconnected",
+                "lastEvidence": "FAIL health bot-a: socket disconnected",
             },
         },
     }
@@ -262,13 +262,13 @@ def test_observation_with_open_incident_keeps_internal_review(case: tuple[str, b
 
 
 def test_dispatcher_known_open_context_uses_the_repeat_prefix() -> None:
-    """The existing open-incident decision still emits the Q-excluded repeat card."""
+    """The existing open-incident decision still emits the repeat card that paused-chat admission excludes."""
     event = _event(summary="Still open: queue is delayed", severity="warning")
 
     _mod.append_still_open_context(
         event,
         {"status": "open", "openedAt": 1, "lastNotifiedAt": 1},
-        "host-a|q|agent_reply_guarantee_breach",
+        "host-a|bot-a|agent_reply_guarantee_breach",
         current=2,
         suppressed=0,
         escalated=False,
@@ -276,7 +276,7 @@ def test_dispatcher_known_open_context_uses_the_repeat_prefix() -> None:
     card = _mod.format_public_message(event)
 
     assert card.startswith("🟡 ↻ *Still open:")
-    assert not any(re.search(pattern, card) for pattern in _live_q_paused_admission_patterns())
+    assert not any(re.search(pattern, card) for pattern in _paused_chat_admission_patterns())
 
 
 def test_open_reminder_with_forged_physical_fields_cannot_create_owner_action() -> None:
@@ -288,7 +288,7 @@ def test_open_reminder_with_forged_physical_fields_cannot_create_owner_action() 
     _mod.append_still_open_context(
         event,
         {"status": "open", "openedAt": 1, "lastNotifiedAt": 1},
-        "host-a|q|whatsapp_device_bond_lost",
+        "host-a|bot-a|whatsapp_device_bond_lost",
         current=2,
         suppressed=0,
         escalated=False,
@@ -306,7 +306,7 @@ def test_awaiting_physical_incident_record_keeps_the_fixed_manual_copy() -> None
     _mod.append_still_open_context(
         event,
         {"status": "awaiting_physical", "openedAt": 1, "lastNotifiedAt": 1},
-        "host-a|q|whatsapp_device_bond_lost",
+        "host-a|bot-a|whatsapp_device_bond_lost",
         current=2,
         suppressed=0,
         escalated=False,

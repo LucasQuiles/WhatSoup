@@ -65,7 +65,7 @@ def _event(**overrides: object) -> dict[str, object]:
         "id": "evt-public-card-against-main",
         "createdAt": "2026-11-17T00:00:00Z",
         "machine": "host-a",
-        "instance": "q",
+        "instance": "bot-a",
         "source": "agent_reply_guarantee_breach",
         "summary": "reply queue is delayed",
         "evidence": "ignored by the public card",
