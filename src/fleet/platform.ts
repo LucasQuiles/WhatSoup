@@ -8,7 +8,7 @@
  *  - Linux without systemd (WSL1): throws descriptive errors
  */
 import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -152,6 +152,8 @@ function isExpectedGeneratedLaunchdPlist(name: string, contents: string): boolea
 const RELEASE_DIRECTORY_NAME = /^WhatSoup-release-[0-9a-f]{7,40}$/u;
 /** Same value as RELEASE_MANIFEST_FILE in scripts/release-snapshot-plan.ts, which src does not import. */
 const RELEASE_MANIFEST_FILE = '.whatsoup-release-manifest.json';
+/** Upper bound for the launcher and manifest reads; a release manifest is far smaller. */
+const RELEASE_FILE_MAX_BYTES = 16 * 1024 * 1024;
 
 /**
  * #3829: a release-pinned plist runs `<release>/deploy/whatsoup <instance>`
@@ -177,16 +179,63 @@ function isReleasePinnedLaunchdPlist(name: string, contents: string): boolean {
     // intentional: a release path that does not resolve is not a release we can confirm.
     return false;
   }
-  return isRegularFile(program) && isRegularFile(path.join(release, RELEASE_MANIFEST_FILE));
+  return isLauncherBoundToReleaseManifest(release, program);
 }
 
-/** True only for an existing regular file (after symlinks); absent or unreadable is false. */
-function isRegularFile(filePath: string): boolean {
+/**
+ * The release and deploy directories, the launcher and the manifest must not be
+ * symlinks; the manifest's source commit must start with the directory's sha;
+ * and its single `deploy/whatsoup` row must carry the launcher's sha256.
+ * Otherwise an in-home directory with a matching name could pair any launcher
+ * with a stand-in manifest and still be treated as a job this manager owns.
+ */
+function isLauncherBoundToReleaseManifest(release: string, program: string): boolean {
   try {
-    return fs.statSync(filePath).isFile();
+    if (!fs.lstatSync(release).isDirectory() || !fs.lstatSync(path.dirname(program)).isDirectory()) return false;
   } catch {
-    // intentional: absent or unreadable means the release cannot be confirmed.
+    // intentional: an absent directory means the release cannot be confirmed.
     return false;
+  }
+  const launcher = readRegularFileNoFollow(program);
+  const manifestBytes = readRegularFileNoFollow(path.join(release, RELEASE_MANIFEST_FILE));
+  if (launcher === null || manifestBytes === null) return false;
+  let manifest: { source?: { commit?: unknown }; files?: unknown } | null;
+  try {
+    manifest = JSON.parse(manifestBytes.toString('utf8')) as typeof manifest;
+  } catch {
+    // intentional: a manifest that is not JSON is not this release's manifest.
+    return false;
+  }
+  const commit = manifest?.source?.commit;
+  const directorySha = path.basename(release).slice('WhatSoup-release-'.length);
+  if (typeof commit !== 'string' || !/^[0-9a-f]{40}$/u.test(commit) || !commit.startsWith(directorySha)) return false;
+  const files = manifest?.files;
+  const rows = Array.isArray(files) ? (files as Array<{ path?: unknown; sha256?: unknown } | null>) : [];
+  const launcherRows = rows.filter((row) => row?.path === 'deploy/whatsoup');
+  return launcherRows.length === 1 && launcherRows[0]?.sha256 === createHash('sha256').update(launcher).digest('hex');
+}
+
+/** Bytes of a regular file opened without following a final symlink; null otherwise. */
+function readRegularFileNoFollow(filePath: string): Buffer | null {
+  let fd: number | undefined;
+  try {
+    // O_NONBLOCK keeps a substituted FIFO from blocking before fstat rejects it.
+    fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    const info = fs.fstatSync(fd);
+    if (!info.isFile() || info.size > RELEASE_FILE_MAX_BYTES) return null;
+    const bytes = Buffer.alloc(info.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const read = fs.readSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (read === 0) return null;
+      offset += read;
+    }
+    return bytes;
+  } catch {
+    // intentional: absent, symlinked or unreadable means the release cannot be confirmed.
+    return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
   }
 }
 

@@ -711,7 +711,12 @@ these hold; otherwise they refuse the job as not theirs (#3829):
 - `ProgramArguments` is exactly two entries, `<release>/deploy/whatsoup` then
   `<instance>`, and `Label` is `com.whatsoup.<instance>`.
 - `<release>` is named `WhatSoup-release-<sha>`; `deploy/whatsoup` and
-  `.whatsoup-release-manifest.json` in it are both regular files.
+  `.whatsoup-release-manifest.json` in it are both regular files, and neither
+  they nor `<release>` and `<release>/deploy` are symlinks.
+- The manifest's `source.commit` is a full commit id that starts with `<sha>`,
+  and its one `deploy/whatsoup` entry carries the launcher's sha256. A release
+  exported by `scripts/release-export.ts` meets this; a hand-edited launcher
+  does not.
 - The path is canonical and physically inside the service user's home (no
   symlink out of home).
 

@@ -4,6 +4,7 @@
  * documents) only when its release identity is validated, and the writers that
  * re-render the generated form refuse it instead of repointing the job.
  */
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
@@ -73,27 +74,46 @@ function absentFile(): never {
   throw error;
 }
 
-type Shape = 'file' | 'directory' | 'absent';
+type Shape = 'file' | 'directory' | 'absent' | 'symlink';
+
+const LAUNCHER_BODY = '#!/bin/sh\n';
+const LAUNCHER_SHA256 = createHash('sha256').update(LAUNCHER_BODY).digest('hex');
+
+/** A release manifest as the exporter writes it: full commit, deploy/whatsoup digest. */
+function manifestFor(releaseName: string, launcherSha256 = LAUNCHER_SHA256, commit?: string): string {
+  const sha = releaseName.replace(/^WhatSoup-release-/u, '');
+  return `${JSON.stringify({
+    schemaVersion: 2,
+    source: { ref: 'main', commit: commit ?? sha.padEnd(40, '0') },
+    files: [{ path: 'deploy/whatsoup', sha256: launcherSha256 }],
+  })}\n`;
+}
 
 /**
  * Create a real `<root>/<releaseName>` on disk and return its launcher path.
  * The guard checks real file types, so nothing here is mocked: the launcher and
- * the manifest are each a regular file, a directory, or absent.
+ * the manifest are each a regular file, a directory, absent, or a symlink to a
+ * regular file with the same bytes.
  */
 async function makeRelease(
   root: string,
-  options: { releaseName?: string; launcher?: Shape; manifest?: Shape } = {},
+  options: { releaseName?: string; launcher?: Shape; manifest?: Shape; manifestBody?: string } = {},
 ): Promise<string> {
   const [realFs, realPath] = await Promise.all([realFsPromise, realPathPromise]);
-  const release = realPath.join(root, options.releaseName ?? RELEASE_NAME);
+  const releaseName = options.releaseName ?? RELEASE_NAME;
+  const release = realPath.join(root, releaseName);
   const program = realPath.join(release, 'deploy', 'whatsoup');
   realFs.mkdirSync(realPath.join(release, 'deploy'), { recursive: true });
   const place = (target: string, shape: Shape, body: string): void => {
     if (shape === 'file') realFs.writeFileSync(target, body);
     if (shape === 'directory') realFs.mkdirSync(target);
+    if (shape === 'symlink') {
+      realFs.writeFileSync(`${target}.real`, body);
+      realFs.symlinkSync(`${target}.real`, target);
+    }
   };
-  place(program, options.launcher ?? 'file', '#!/bin/sh\n');
-  place(realPath.join(release, MANIFEST), options.manifest ?? 'file', '{}\n');
+  place(program, options.launcher ?? 'file', LAUNCHER_BODY);
+  place(realPath.join(release, MANIFEST), options.manifest ?? 'file', options.manifestBody ?? manifestFor(releaseName));
   return program;
 }
 
@@ -186,6 +206,14 @@ describe('release-pinned launchd plists (#3829)', () => {
     ['the manifest is a directory', async () => pinnedPlist(await makeRelease(releases(), { manifest: 'directory' }))],
     ['the launcher is absent', async () => pinnedPlist(await makeRelease(releases(), { launcher: 'absent' }))],
     ['the launcher is a directory', async () => pinnedPlist(await makeRelease(releases(), { launcher: 'directory' }))],
+    ['the launcher is a symlink to matching bytes', async () => pinnedPlist(await makeRelease(releases(), { launcher: 'symlink' }))],
+    ['the manifest is a symlink to a matching manifest', async () => pinnedPlist(await makeRelease(releases(), { manifest: 'symlink' }))],
+    ['the manifest is an empty object', async () => pinnedPlist(await makeRelease(releases(), { manifestBody: '{}\n' }))],
+    ['the manifest is not JSON', async () => pinnedPlist(await makeRelease(releases(), { manifestBody: 'not json\n' }))],
+    ['the manifest names another commit', async () =>
+      pinnedPlist(await makeRelease(releases(), { manifestBody: manifestFor(RELEASE_NAME, LAUNCHER_SHA256, 'f'.repeat(40)) }))],
+    ['the manifest digest does not match the launcher', async () =>
+      pinnedPlist(await makeRelease(releases(), { manifestBody: manifestFor(RELEASE_NAME, '0'.repeat(64)) }))],
     ['the launcher directory is absent', async () => {
       const program = await makeRelease(releases());
       const realFs = await realFsPromise;
