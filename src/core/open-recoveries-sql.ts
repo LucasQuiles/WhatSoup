@@ -77,3 +77,19 @@ export const UNOWNED_FAILED_TERMINAL_SOURCES_SQL = `
 export const UNOWNED_FAILED_TERMINALS_CTE_SQL = `unowned_failed_terminals AS (
           SELECT COUNT(*) AS count FROM (${UNOWNED_FAILED_TERMINAL_SOURCES_SQL})
         )`;
+
+/**
+ * Whether the inbound at `inboundSeqSql` is owed a reply: the selector's
+ * predicates as one keyed probe, a row-id lookup plus a debt-index search.
+ * Any failed generation of that inbound makes it owed, so a caller that keeps
+ * rows by this probe keeps every terminal record of an owed inbound.
+ */
+export function unownedFailedTerminalExistsSql(inboundSeqSql: string): string {
+  return `EXISTS (
+            SELECT 1
+            FROM inbound_events debt_source
+            JOIN turn_terminal_records debt_terminal ON debt_terminal.inbound_seq = debt_source.seq
+            WHERE debt_source.seq = ${inboundSeqSql}
+              AND ${UNOWNED_FAILED_TERMINAL_PREDICATES_SQL}
+          )`;
+}
