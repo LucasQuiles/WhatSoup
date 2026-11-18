@@ -5,6 +5,7 @@
 import { z } from 'zod';
 import type { DatabaseSync } from 'node:sqlite';
 import { MS_PER_HOUR } from '../../lib/time-units.ts';
+import { POLL_QUESTION_MAX_CHARS, POLL_OPTION_MAX_CHARS } from '../../lib/poll-limits.ts';
 import type { ToolRegistry } from '../registry.ts';
 import { clientOutputWithheldResult, errorResult, toolError, type SessionContext } from '../types.ts';
 import type { ClientOutputPolicyRegistry } from '../../core/client-output-policy-config.ts';
@@ -185,9 +186,6 @@ export interface MessagingDeps {
    */
   clientOutputPolicies?: ClientOutputPolicyRegistry;
 }
-
-const POLL_QUESTION_MAX_CHARS = 900;
-const POLL_OPTION_MAX_CHARS = 95;
 
 type OwnershipRow = Pick<MessageRow, 'conversation_key' | 'is_from_me' | 'chat_jid' | 'message_id' | 'sender_jid' | 'content'>;
 

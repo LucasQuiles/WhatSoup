@@ -33,6 +33,21 @@ describe('git public remote helpers', () => {
     expect(shouldRetryWithPublicHttps(new Error('fatal: could not read from remote repository.'))).toBe(false);
   });
 
+  it('keeps the retry decision when error fields are whitespace-only (characterization)', () => {
+    // Characterization only: gitErrorText is not exported, and the retry
+    // decision depends only on the /publickey/ pattern, so whether blank fields
+    // are left out of the joined error text cannot be observed here. This pins
+    // the decision when blank fields sit next to a real signal and when every
+    // field is blank.
+    const err: any = new Error('   ');
+    err.stderr = '   ';
+    err.stdout = 'git@github.com: Permission denied (publickey).';
+    expect(shouldRetryWithPublicHttps(err)).toBe(true);
+    // Whitespace-only fields alone must not produce a retry signal.
+    const noise: any = { stderr: '   ', stdout: '  ', message: '\t\n' };
+    expect(shouldRetryWithPublicHttps(noise)).toBe(false);
+  });
+
   it('builds a deterministic fetch refspec for the update branch', () => {
     expect(publicFetchArgs('https://github.com/LucasQuiles/WhatSoup.git')).toEqual([
       'fetch',

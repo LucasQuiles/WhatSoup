@@ -7,7 +7,6 @@ import type { ServerResponse } from 'node:http';
 import { lookupCredential } from '../../src/lib/keyring.ts';
 import { handleCreateLine } from '../../src/fleet/routes/ops.ts';
 import { makeDeps } from '../helpers/http-mocks.ts';
-import type { OpsDeps } from '../../src/fleet/routes/ops.ts';
 
 vi.mock('../../src/lib/keyring.ts', () => ({
   lookupCredential: vi.fn(),
@@ -19,10 +18,6 @@ import { mockReq, mockRes } from '../helpers/http-mocks.ts';
 
 function fileMode(filePath: string): number {
   return fs.statSync(filePath).mode & 0o777;
-}
-
-function depsFor(): OpsDeps {
-  return makeDeps<any>({});
 }
 
 describe('fleet ops health token service', () => {
