@@ -61,6 +61,34 @@ function registryFor(policy: Record<string, unknown>): ClientOutputPolicyRegistr
   return parsed.registry;
 }
 
+function rejectingPolicy(conversationKey: string): ConfiguredClientOutputPolicy {
+  return registryFor({
+    ...STRICT_POLICY,
+    conversationKey,
+    maxCodePoints: 1,
+    maxQuestionMarks: 10,
+    blockedTerms: [],
+    rejectInternalArtifacts: false,
+    rejectWhatsAppJids: false,
+  }).get(conversationKey)!;
+}
+
+function throwingPolicy(conversationKey: string): ConfiguredClientOutputPolicy {
+  const allowed = registryFor({
+    ...STRICT_POLICY,
+    conversationKey,
+    blockedTerms: [],
+    rejectInternalArtifacts: false,
+    rejectWhatsAppJids: false,
+  }).get(conversationKey)!;
+  return {
+    ...allowed,
+    get blockedTerms(): never {
+      throw new TypeError('policy evaluator unavailable');
+    },
+  } as unknown as ConfiguredClientOutputPolicy;
+}
+
 const STRICT_POLICY = {
   conversationKey: CONVERSATION_KEY,
   maxCodePoints: 4000,
@@ -360,5 +388,39 @@ describe('OutboundQueue client output policy enforcement (#3613)', () => {
     expect(serialized).not.toContain('harmless reply');
     expect(serialized.toLowerCase()).not.toContain(BLOCKED_TERM);
     expect(policyCalls('warn')).toHaveLength(0);
+  });
+
+  it.each([
+    ['rejection before evaluator error', rejectingPolicy(CONVERSATION_KEY), throwingPolicy(OTHER_KEY)],
+    ['evaluator error before rejection', throwingPolicy(CONVERSATION_KEY), rejectingPolicy(OTHER_KEY)],
+  ])('evaluates both distinct policy keys when there is a %s', async (_order, queuePolicy, attributionPolicy) => {
+    const registry = new Map([
+      [CONVERSATION_KEY, queuePolicy],
+      [OTHER_KEY, attributionPolicy],
+    ]) as unknown as ClientOutputPolicyRegistry;
+    const { queue, messenger, durability } = makeQueue(registry);
+    queue.beginTurnEvidence('turn-dual-policy', {
+      conversationKey: OTHER_KEY,
+      chatJid: OTHER_JID,
+    });
+
+    queue.enqueueText('A short reply.', 'answer');
+    const evidence = await queue.flushTurnEvidence('turn-dual-policy');
+
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+    expect(durability.createOutboundOp).not.toHaveBeenCalled();
+    expect(evidence.answerOpIds).toEqual([]);
+    expect(evidence.withheldAnswerCount).toBe(1);
+    const warns = policyCalls('warn');
+    const errors = policyCalls('error');
+    expect(warns).toHaveLength(1);
+    expect(errors).toHaveLength(1);
+    const auditedConversationKeys = [...warns, ...errors]
+      .map(([fields]) => (fields as Record<string, unknown>)['conversationKey'])
+      .sort();
+    expect(auditedConversationKeys).toEqual([CONVERSATION_KEY, OTHER_KEY].sort());
+    const serializedAudits = JSON.stringify([...warns, ...errors]);
+    expect(serializedAudits).not.toContain('A short reply.');
+    expect(serializedAudits).not.toContain('policy evaluator unavailable');
   });
 });

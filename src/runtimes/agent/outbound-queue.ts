@@ -729,14 +729,15 @@ export class OutboundQueue implements IOutboundQueue {
     // The queue's key and a turn's key can name one chat by two aliases, or two chats in single
     // scope; a policy under either one applies.
     const keys = new Set([this.conversationKey, attribution.conversationKey]);
-    const admitted = [...keys].every((conversationKey) => enforceClientOutputPolicy({
+    const decisions = [...keys].map((conversationKey) => enforceClientOutputPolicy({
       registry: this.clientOutputPolicies,
       conversationKey,
       sourceText,
       finalText,
       messageKind: attribution.role,
       log,
-    }).admitted);
+    }));
+    const admitted = decisions.every((decision) => decision.admitted);
     if (admitted) return true;
     if (attribution.role === 'answer') {
       this.clientOutputWithheld = true;
