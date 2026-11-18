@@ -183,6 +183,16 @@ host-built outputs described below):
   `release:activate` refuses a release whose required outputs are missing or are
   not regular files inside the release (a directory or a symlink does not count).
 
+Reading the export result: `ok: true` means the release was published. While
+any required output is pending, `selfCheck.ok` in the JSON report is `false`,
+because `selfCheck` is the plain drift report and still lists
+`required-output-missing`; `pendingHostOutputs` names the paths still to build.
+Without `--json`, the summary prints `self-check ok` when nothing is pending.
+Otherwise it prints `self-check ok except pending host build: <paths>`,
+followed by a pointer to this runbook. The former `self-check ok=<true|false>`
+line is no longer printed: a script that parsed it must read
+`pendingHostOutputs` from the JSON report instead.
+
 The export creates release bytes only. Repointing a service at the new release
 and restarting it remain separately-approved host mutations, and must preserve
 instance config, auth, logs, DBs, token files, and keychain material outside
@@ -194,6 +204,17 @@ Activation is the separately-approved host mutation the section above stops
 short of. Having exported a release is not approval to activate it: activation
 needs named approval in the current turn, naming the instance, the target
 release, and the prepared rollback target.
+
+A release exported from a commit that tracks `console/package.json` (every
+current `main` commit) cannot be activated until the host has built its
+console. First run the host step from [Dry-Run Planning](#dry-run-planning)
+inside the new release: both `ci` installs, then the console build. Until
+`<release>/dist/index.html` is a regular file inside the release, `--plan`
+lists the precondition `release-required-outputs-present` as failed and exits
+`2`, and `--apply` refuses the same way. `--apply` checks the outputs again
+under the activation lock, just before the switch. A release whose manifest
+lists no `requiredOutputs`, such as one exported before this requirement, is
+not affected.
 
 ### `npm run release:activate`
 
