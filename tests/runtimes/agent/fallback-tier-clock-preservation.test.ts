@@ -995,13 +995,13 @@ describe('exact-primary-model disambiguation', () => {
       );
 
       await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
-      rv.fallback.activateProviderFallbackAfterTerminalResult(
+      const activation = rv.fallback.activateProviderFallbackAfterTerminalResult(
         resetAt,
         'usage-limit',
         providerDefaultSession,
         'usage limit reached',
       );
-      return { rv, armedUntil, resetAt };
+      return { rv, armedUntil, resetAt, activation };
     };
 
     // Primary tier: the window end extends to the parsed reset, which is stored.
@@ -1009,8 +1009,11 @@ describe('exact-primary-model disambiguation', () => {
     expect(named.rv.fallbackWindow.resetAt).toBe(named.resetAt.getTime());
     expect(named.rv.fallbackWindow.activeUntil).toBe(named.resetAt.getTime());
 
-    // Fail-closed: no stored reset, and the window end is unchanged.
+    // Fail-closed: no stored reset, and the window end is unchanged. The
+    // activation itself succeeds with the kept end and no primary time, so a
+    // dropped activation cannot pass for kept clocks.
     const wildcard = await failModelLessSessionInOpenWindow(WILDCARD_SAME_PROVIDER_CHAIN);
+    expect(wildcard.activation).toMatchObject({ activeUntil: wildcard.armedUntil, primaryResetAt: null });
     expect(wildcard.rv.fallbackWindow.resetAt).toBeNull();
     expect(wildcard.rv.fallbackWindow.activeUntil).toBe(wildcard.armedUntil);
   });
@@ -1084,5 +1087,85 @@ describe('no-arm scoped to existing window state', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(rv.fallbackWindow.activeUntil).toBeNull();
     expect(rv.effectiveProvider).toBe('claude-cli');
+  });
+});
+
+// ─── Empty turns count only against the entry their session serves ───────────
+//
+// recordFallbackTurnOutcome counts an empty turn toward the active entry's
+// advance run only when the session that produced it serves that entry (the
+// marking predicate). A primary turn already in flight when an operator forces
+// a window still finishes on the primary route. Counted, its empty turns
+// re-activated the window as a primary-tier failure, which moved the
+// operator's deadline out to the five-hour default.
+
+describe('empty-turn accounting during an operator-forced window', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-26T20:00:00Z'));
+    lookupCredentialMock.mockReturnValue('present-key');
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const FORCED_WINDOW_MS = 5 * 60 * 1000;
+
+  /** Provider-default primary (no configured model), then `FALLBACK ON 5m`. */
+  function forceWindowBesideNamedEntries(chain: FallbackEntry[]) {
+    const config = mockConfigRef();
+    config['agentProvider'] = 'claude-cli';
+    config['agentFallbacks'] = chain;
+    const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
+    const rv = v(runtime);
+    rv.probePrimaryProviderRecovered = vi.fn(() => false) as unknown as () => boolean;
+    expect(runtime.forceFallback(FORCED_WINDOW_MS)).toMatchObject({ ok: true });
+    const forcedUntil = rv.fallbackWindow.activeUntil!;
+    expect(forcedUntil).toBe(Date.now() + FORCED_WINDOW_MS);
+    return { rv, forcedUntil, queue: makeFakeQueue(CHAT) };
+  }
+
+  it('empty turns from a model-less primary session leave the forced window end unchanged', async () => {
+    const { rv, forcedUntil, queue } = forceWindowBesideNamedEntries([
+      { provider: 'claude-cli', model: 'claude-haiku-4-5' },
+    ]);
+    // Production shape of a provider-default primary session: getModelRef()
+    // returns undefined, never null.
+    const primarySession = {
+      getProviderId: () => 'claude-cli',
+      getStatus: () => ({ sessionId: 'claude-cli-1' }),
+      getModelRef: () => undefined,
+    };
+
+    await vi.advanceTimersByTimeAsync(60 * 1000);
+    // Past the empty-advance threshold (2).
+    for (let i = 0; i < 3; i++) {
+      rv.recordFallbackTurnOutcome(queue, false, false, primarySession);
+    }
+
+    expect(rv.fallbackWindow.activeUntil).toBe(forcedUntil);
+    expect(rv.fallbackWindow.activeEntry?.model).toBe('claude-haiku-4-5');
+    expect(rv.fallbackChain.failedKeys.size).toBe(0);
+  });
+
+  it('control: empty turns from a session serving the active entry still advance the chain and keep the forced end', async () => {
+    const { rv, forcedUntil, queue } = forceWindowBesideNamedEntries([
+      { provider: 'claude-cli', model: 'claude-haiku-4-5' },
+      { provider: 'claude-cli', model: 'claude-sonnet-4-6' },
+    ]);
+    const entrySession = {
+      getProviderId: () => 'claude-cli',
+      getStatus: () => ({ sessionId: 'claude-cli-2' }),
+      getModelRef: () => 'claude-haiku-4-5',
+    };
+
+    await vi.advanceTimersByTimeAsync(60 * 1000);
+    rv.recordFallbackTurnOutcome(queue, false, false, entrySession);
+    expect(rv.fallbackWindow.activeEntry?.model).toBe('claude-haiku-4-5');
+    rv.recordFallbackTurnOutcome(queue, false, false, entrySession);
+
+    expect(rv.fallbackWindow.activeEntry?.model).toBe('claude-sonnet-4-6');
+    expect(rv.fallbackChain.failedKeys.size).toBe(1);
+    expect(rv.fallbackWindow.activeUntil).toBe(forcedUntil);
   });
 });
