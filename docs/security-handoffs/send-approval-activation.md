@@ -137,11 +137,13 @@ transaction races, durable ingest ownership, expiry observability or fleet parit
    Qualify overlapping duplicate deliveries: a duplicate callback must not close
    another delivery's active reply lease. Event deduplication and completion
    ownership require separate proof.
-   Rule-created automation reaches recipients only through the approved-operation
-   dispatcher, so also verify that the service lists operations created by
-   automation rules on the approved-work endpoint (`readyOperations`), and that it
-   admits them without an inbound context, including after the inbound lease
-   closes. The fake providers in the repository's tests establish neither.
+   Rule-created automation reaches recipients through the approved-operation
+   dispatcher; a decision command's reply also sends whatever approved operations
+   the authority returns for it, without checking what created them. So also
+   verify that the service lists operations created by automation rules on the
+   approved-work endpoint (`readyOperations`), and that it admits them without an
+   inbound context, including after the inbound lease closes. The fake providers
+   in the repository's tests establish neither.
 2. Prove that every production send route converges at an equivalent final
    authority seam, including provider options that affect audience. A raw route
    without a semantic adapter remains held instead of receiving an opaque
