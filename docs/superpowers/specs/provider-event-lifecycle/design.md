@@ -1,8 +1,8 @@
 # Provider-Event Lifecycle Design
 
-**Status:** Active specification — the source reconciliation at `59cc562bc` (2026-10-06) was audited at schema 66; the current canonical schema is 68. Provider-lifecycle implementation and activation remain unauthorized until the terminal-recovery prerequisite and the existing owner authorization requirements are satisfied.
+**Status:** Active specification — the source reconciliation at `59cc562bc` (2026-10-06) was audited at schema 66; the current canonical schema is 69. Provider-lifecycle implementation and activation remain unauthorized until the terminal-recovery prerequisite and the existing owner authorization requirements are satisfied.
 
-**Schema allocation:** see [the shared allocation and history](requirements.md#schema-allocation). At the audited schema-68 base, terminal recovery is planned as 69 and the provider lifecycle ledger as 70; recheck before implementation. The 2026-10-06 reconciliation remains historical schema-66 audit evidence.
+**Schema allocation:** see [the shared allocation and history](requirements.md#schema-allocation). At the audited schema-69 base, terminal recovery is planned as 70 and the provider lifecycle ledger as 71; recheck before implementation. The 2026-10-06 reconciliation remains historical schema-66 audit evidence.
 
 ## Context
 
@@ -110,7 +110,7 @@ provider-content replay path.
 
 #### DES-003: Add a child receipt ledger inside `DurabilityEngine`
 - **Traces-from:** REQ-002, REQ-004, REQ-006, CON-002, CON-004, CON-007
-- **Rationale:** Migration 70 adds one empty activation marker table plus nine
+- **Rationale:** Migration 71 adds one empty activation marker table plus nine
   content-free lifecycle tables: `provider_request_attempts`, immutable
   `provider_attempt_handoffs`, `provider_request_segments`,
   `provider_continuation_obligations`, `provider_event_receipts`, append-only
@@ -432,9 +432,9 @@ provider-content replay path.
   settles consumed only from terminal already-effectful proof, otherwise quarantine/
   failed uncertainty. Canonical `not_sent` is a distinct pre-send-rejection operation
   status and terminal evidence retains the exact op ID/status proof; generic
-  `failed_permanent` is not. Migration 69 enables aggregate no-send only for proved
+  `failed_permanent` is not. Migration 70 enables aggregate no-send only for proved
   single-op answers; pre-lifecycle multi-op answers remain uncertain because they lack
-  a sealed expected set. Migration 70 may prove multi-op no-send only from an immutable
+  a sealed expected set. Migration 71 may prove multi-op no-send only from an immutable
   complete effect plan where every expected sibling is not-sent—missing, late-created,
   echoed, or ambiguous siblings dominate. No-send never clears an
   independent provider/tool/lifecycle replay veto. A receipt in a mixed/shared plan settles consumed only

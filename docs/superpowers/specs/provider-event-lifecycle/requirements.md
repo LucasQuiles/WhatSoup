@@ -2,11 +2,11 @@
 
 **Note:** Migrations 69 and 70 are reserved for other pending work; the numbers in this spec are planning placeholders; final numbers are assigned at landing by the migration register, in batch order.
 
-**Status:** Active specification — the source reconciliation at `59cc562bc` (2026-10-06) was audited at schema 66; the current canonical schema is 68. Provider-lifecycle implementation and activation remain unauthorized until the terminal-recovery prerequisite and the existing owner authorization requirements are satisfied.
+**Status:** Active specification — the source reconciliation at `59cc562bc` (2026-10-06) was audited at schema 66; the current canonical schema is 69. Provider-lifecycle implementation and activation remain unauthorized until the terminal-recovery prerequisite and the existing owner authorization requirements are satisfied.
 
 ## Schema allocation
 
-**Schema allocation:** current canonical schema is migration 68; bounded terminal recovery/canonical `not_sent` is forward migration 69; the provider-event lifecycle ledger is migration 70. Migrations 50 and 51 are consumed by metadata-only durability evidence, migration 52 by outbound ambiguity-episode timing, migration 53 by outbound quarantine disposition/retirement receipts, migration 54 by the completed-delivery identity-admission ledger, migration 55 by typed online enrichment-cycle receipts, migration 56 by the inbound_events processing-status CHECK constraint (#2250), migration 57 by the durable trigger-occurrence ledger (#2566), migration 58 by the capability-obligation replay ledger, migration 59 by the fact-export queue state machine and lease durability (#2567), migration 60 by the capability-obligation audit hotfix (execution reservations + creation-reason honesty rebuild), migration 61 by completed-delivery identity-admission terminalization (expired state + preserved receipt), migration 62 by the durable deferred_turn_obligations lane (#3295 S1), migration 63 by the capability-obligation attestation-evidence columns (#3221), migration 64 by the continuity-candidate consumer stamp, migration 65 by the tool-call caller-attribution columns (#3421), migration 66 by the append-only continuity-gap closure ledger (#3638), migration 67 by protected-delivery staging and receipt-outbox persistence, and migration 68 by protected-secret input staging persistence, so the still-unpublished forward allocations move to migrations 69 and 70.
+**Schema allocation:** current canonical schema is migration 69; bounded terminal recovery/canonical `not_sent` is forward migration 70; the provider-event lifecycle ledger is migration 71. Migrations 50 and 51 are consumed by metadata-only durability evidence, migration 52 by outbound ambiguity-episode timing, migration 53 by outbound quarantine disposition/retirement receipts, migration 54 by the completed-delivery identity-admission ledger, migration 55 by typed online enrichment-cycle receipts, migration 56 by the inbound_events processing-status CHECK constraint (#2250), migration 57 by the durable trigger-occurrence ledger (#2566), migration 58 by the capability-obligation replay ledger, migration 59 by the fact-export queue state machine and lease durability (#2567), migration 60 by the capability-obligation audit hotfix (execution reservations + creation-reason honesty rebuild), migration 61 by completed-delivery identity-admission terminalization (expired state + preserved receipt), migration 62 by the durable deferred_turn_obligations lane (#3295 S1), migration 63 by the capability-obligation attestation-evidence columns (#3221), migration 64 by the continuity-candidate consumer stamp, migration 65 by the tool-call caller-attribution columns (#3421), migration 66 by the append-only continuity-gap closure ledger (#3638), migration 67 by protected-delivery staging and receipt-outbox persistence, migration 68 by protected-secret input staging persistence, and migration 69 by the failed-terminal reply-debt index, so the still-unpublished forward allocations move to migrations 70 and 71.
 
 This is the shared allocation owner for all three lifecycle documents. The
 forward 69/70 reservations are planning allocations, not applied migrations.
@@ -825,13 +825,13 @@ unproved child origins default to internal no-send/no-effect handling.
     never proves no transmission.
     `not_sent` is a distinct outbound operation status emitted only by typed pre-send
     rejection, and terminal `deliveryKind=not_sent` retains exact operation/status and
-    singleton-set proof. Migration 69 permits aggregate `not_sent` only for
+    singleton-set proof. Migration 70 permits aggregate `not_sent` only for
     an immutable singleton answer-set seal created atomically with terminalization;
     database triggers reject a racing/later answer sibling. Without that seal, even one
     not-sent operation remains aggregate uncertain. No-send delivery evidence never clears provider/tool/
     lifecycle replay vetoes. Both lockstepped terminal validators, database triggers,
     recovery queries, and retention prove and preserve the referenced operation state.
-  - **CON-002.AC-07:** Migration 70 replaces the singleton seal with immutable fields on
+  - **CON-002.AC-07:** Migration 71 replaces the singleton seal with immutable fields on
     the final attempt: publication-seal ID/kind, owner, invocation epoch, exact count,
     canonical membership fingerprint, and sealed time. Membership is restart-rederived
     from every reply-bearing/external outbound link across all sealed plans; terminal

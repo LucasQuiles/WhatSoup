@@ -1,8 +1,8 @@
 # Provider-Event Lifecycle Implementation Tasks
 
-**Status:** Active specification — the source reconciliation at `59cc562bc` (2026-10-06) was audited at schema 66; the current canonical schema is 68. Provider-lifecycle implementation and activation remain unauthorized until the terminal-recovery prerequisite and the existing owner authorization requirements are satisfied.
+**Status:** Active specification — the source reconciliation at `59cc562bc` (2026-10-06) was audited at schema 66; the current canonical schema is 69. Provider-lifecycle implementation and activation remain unauthorized until the terminal-recovery prerequisite and the existing owner authorization requirements are satisfied.
 
-**Schema allocation:** see [the shared allocation and history](requirements.md#schema-allocation). At the audited schema-68 base, terminal recovery is planned as 69 and the provider lifecycle ledger as 70; recheck before implementation. The 2026-10-06 reconciliation remains historical schema-66 audit evidence.
+**Schema allocation:** see [the shared allocation and history](requirements.md#schema-allocation). At the audited schema-69 base, terminal recovery is planned as 70 and the provider lifecycle ledger as 71; recheck before implementation. The 2026-10-06 reconciliation remains historical schema-66 audit evidence.
 
 > **REQUIRED COMPANION SKILL:** superpowers:spec-driven-development
 
