@@ -329,7 +329,7 @@ function outsideUnitDefinition(plist: StrictPlistDict): { label: string | null; 
   const workingDirectory = plist.get('WorkingDirectory');
   const environment = strictStringDict(plist, 'EnvironmentVariables');
   return {
-    // Trimmed as parsePlist trims it, so a strict-form plist keeps the verdict it had.
+    // Trimmed as parsePlist trims it. Only the root dictionary's Label is read; a nested Label does not count.
     label: label?.kind === 'string' ? label.value.trim() : null,
     programArguments: programArguments.values,
     workingDirectory: workingDirectory?.kind === 'string' ? workingDirectory.value : null,

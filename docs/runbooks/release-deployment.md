@@ -563,31 +563,11 @@ program, and argv. Planning reads a `loaded` entry's plist with the strict
 plist reader described under `path-rebase` below; a plist it cannot read
 exactly refuses (`installed loaded plist is unreadable: <reason>`), for
 example one that spells a `PYTHON*` environment key with a numeric character
-reference. Against the regular-expression readings this proof used before
-(`parsePlist` in `scripts/check-service-units.ts` for argv, and text searches
-for the environment keys and working directory), the strict reading changes
-these verdicts:
-
-- a plist outside the reader's form refuses, including any DOCTYPE other
-  than Apple's PLIST 1.0 DOCTYPE and a comment that starts with `<!---`;
-- a `ProgramArguments` entry that is not a `<string>` refuses (`installed
-  loaded plist is unreadable or has a mismatched label`), where the earlier
-  reading dropped it;
-- the Python module proof reads an empty `<dict/>` environment and empty
-  `<string/>` values, which the earlier reading refused; a `PYTHON*` key still
-  refuses;
-- an environment key name outside `[A-Za-z_][A-Za-z0-9_]*`, such as `A-B`, is
-  read as a name, where the earlier reading refused the entry; only a name
-  that starts with `PYTHON` refuses, and Python reads only identifier names;
-- only the root-level `EnvironmentVariables` and `WorkingDirectory` keys count,
-  where the earlier reading counted them at any depth, an environment variable
-  named `WorkingDirectory` included; launchd honours only root-level keys;
-- the root-level `ProgramArguments` is the one read, where the earlier reading
-  took the first match anywhere in the text; launchd honours only that key.
-
-The first two refuse more. The other four admit more without weakening the
-proof: the loaded argv, working-directory and `PYTHON*` environment
-comparisons are unchanged.
+reference. The reader takes `Label`, `ProgramArguments`,
+`EnvironmentVariables` and `WorkingDirectory` only from the root dictionary of
+the plist; the same keys at any other depth do not count. A `ProgramArguments`
+entry that is not a `<string>` refuses (`installed loaded plist is unreadable
+or has a mismatched label`).
 
 For an interpreter, every absolute argv value after argv[0]
 must have one exact index-and-path binding: `review-file` must name a hashed
@@ -652,8 +632,9 @@ interpreter positions, and that file must also pass the interpreter check of
 the shared grammar (`isTrustedHealthPython`). Single-member activation
 (`release:activate`) still reads the loaded health job with that grammar
 alone, so its interpreter needs only to pass `isTrustedHealthPython`. Any other
-health-job shape, except a legacy wrapper that sources another environment
-file (below), refuses with a detail that names the two installers: a script
+health-job shape, except a `/bin/bash -c` wrapper whose script starts with a
+`BOT_ERRORS_ENV_FILE=` assignment other than the expected one (below), refuses
+with a detail that names the two installers: a script
 run directly, the short runner form, a `/bin/sh` or `/bin/bash` script, a
 `bash -c` command, another interpreter (one inside the release, or another
 trusted `python3` such as one set through `BOT_ERRORS_PYTHON`), a log hint from
@@ -678,8 +659,9 @@ Apple's: `<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
 `-//Apple Computer//DTD PLIST 1.0//EN` public identifier with the same system
 identifier, in double quotes with any whitespace between the tokens. Both BOT
 ERRORS installers write it on one line and the timer templates on two. Any
-other DOCTYPE refuses (`plist DOCTYPE is not the Apple PLIST 1.0 DOCTYPE`): a
-quoted literal can hold `>` and a whole plist, `plutil -p` reads a plist
+other DOCTYPE refuses, with `plist DOCTYPE has an internal subset or entity
+declaration` when its text before the first `>` holds `[`, and otherwise with
+`plist DOCTYPE is not the Apple PLIST 1.0 DOCTYPE`: a quoted literal can hold `>` and a whole plist, `plutil -p` reads a plist
 written inside a `SYSTEM` literal as the document, and `plutil -lint` passes
 those bytes, so this reader, not `plutil -lint`, refuses them. A comment
 that starts with `<!---` refuses too (`plist holds a comment that starts with
@@ -824,10 +806,13 @@ wrapper, non-canonical profile path, or any additional embedded release
 reference refuses. The wrapper runs `source` on
 `<home>/.config/whatsoup/bot-errors.env` under `set -a`, where `<home>` is the
 planning user's home folder, and its log hint and `BOT_ERRORS_STATE_DIR`
-default must name `<home>/.local/state/bot-errors`. A wrapper that sources
-another file refuses (`bot-errors health legacy wrapper does not source the BOT
-ERRORS environment file in the job user's home folder`); reinstall the health
-job with either installer, as for a shape refusal. The sourced file is shell
+default must name `<home>/.local/state/bot-errors`. A `/bin/bash -c` wrapper
+whose script starts with `BOT_ERRORS_ENV_FILE=` but not with exactly
+`BOT_ERRORS_ENV_FILE=<home>/.config/whatsoup/bot-errors.env; ` refuses
+(`bot-errors health legacy wrapper does not source the BOT ERRORS environment
+file in the job user's home folder`), whether it names another file or spells
+this one another way, quoted for example; reinstall the health job with either
+installer, as for a shape refusal. The sourced file is shell
 code planning does not read, and the variables it sets reach the runner
 without passing the environment-key allowlist, which reads only the plist.
 Both selected release roots must also be normalized absolute
@@ -872,13 +857,17 @@ checked against their planned digest before each reload and again immediately
 before each `launchctl bootstrap`, so a plist changed before that last check is
 not loaded. `launchctl bootstrap` reads the plist by path, so a writer running
 as the same user that swaps the file during the bootstrap call itself is not
-detected. The plists this run writes, the member plists and the host auxiliary
-plists other than the fleet wrapper's and the watchdogs', have no such check:
-nothing re-reads one between apply's write and launchd's `bootstrap` and
-`kickstart -k`. A rewrite by the same user in that window is loaded and
-started; the identity check after every reload (`verify-live-identity`) sees
-it only then and fails the activation into the group rollback. A change found
-after the switch fails the activation into the group
+detected. The plists this run writes (the member plists, and the host
+auxiliary plists other than the fleet wrapper's and the watchdogs') have no
+such check. When the root helper writes a root-owned plist, apply reads it back
+right after; nothing reads a written plist again before `launchctl bootstrap`
+loads it by path, so a same-user rewrite in that window is what launchd loads
+and `kickstart -k` starts. `kickstart -k` restarts the job launchd already
+holds and does not read the plist again. Once the reloads and every
+verification below pass, one identity check (`verify-live-identity`) compares
+the bytes of each plist on disk with the planned bytes: it finds a rewrite only
+while the rewritten bytes are still on disk, and it does not show what launchd
+loaded. A change found after the switch fails the activation into the group
 rollback; unless the rollback's schema or refresh-fence checks have already
 ended it `rollback-blocked-*`, its identity check ends it
 `rollback-unverified`. It reloads all primary
