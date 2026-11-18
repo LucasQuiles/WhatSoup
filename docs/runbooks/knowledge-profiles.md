@@ -59,11 +59,17 @@ to no guard. Readiness reports `disabled` first when the index name is
 empty or the API key is missing. Otherwise it reports `project_mismatch`
 when a named instance other than the operator instance has no resolved
 guard, when the index host does not end with the suffix, or when the host
-does not contain the `projectId` as that segment. The same guard refuses
-this instance's guarded Pinecone calls (they report `project_guard_failed`
-or throw `PINECONE_UNAVAILABLE`), and memory consolidation does not start
-unless readiness is `ready`; enrichment, which needs only an index name,
-is still enabled. This
+does not contain the `projectId` as that segment. In each of these
+`project_mismatch` cases the memory provider refuses its guarded Pinecone
+calls (they report `project_guard_failed` or throw `PINECONE_UNAVAILABLE`).
+The chat runtime and the `memory_write` tool make those calls. Two other
+searches resolve the same guard but do not refuse a missing one: when the
+index host does not match, `knowledge_search` returns a tool error and the
+Pinecone watch search (`createPineconeWatchSearch`) throws, and when no
+guard resolves, both search unchecked. Readiness alone therefore does not
+show that these searches were refused. On a chat instance, memory
+consolidation does not start unless readiness is `ready`, while
+enrichment, which needs only an index name, is still enabled. This
 is the correct fail-safe: a wrong-project query returns unrelated data, which
 is worse than no data.
 
@@ -72,7 +78,7 @@ is worse than no data.
 ## Worked example: rb-bot (RBLab project)
 
 **Pinecone project:** RBLab (project id 921d6052, internal reference only)  
-**Index host suffix:** `-example-project.svc.example-region.pinecone.io`  
+**Index host suffix:** `-example-project.svc.example-region.pinecone.io`\
 **Indexes created:** `claude`, `codex`, `whatsapp-bot`, `rb-mind`
 
 `~/.config/whatsoup/instances/rb-bot/config.json` (memory.pinecone block):
