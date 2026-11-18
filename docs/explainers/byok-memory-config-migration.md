@@ -482,6 +482,8 @@ Every write creates `config.json.bak-<timestamp>` unless `--no-backup` is passed
 
 Preview restoration of the most recent backup with `npm run migrate-memory-config -- --instance <name> --rollback`; add `--write` only after reviewing the preview. The helper refuses a backup whose modification time is newer than the current config. Preserve intervening changes and coordinate the instance restart before applying a rollback. Manual restoration is also possible after comparing the backup with the current file. Auth state remains in place because the migrator never touched it.
 
+A write-mode rollback keeps the backup it restores from, so running it again selects the same backup rather than an older one. Before it replaces `config.json`, it copies the current file to `config.json.rollback-safety-<timestamp>`; backup selection never picks those copies. The restore goes through a temporary copy in the same directory and a single rename, and the restored config and the safety copy are owner-only (mode `0600`). The text output and `--json` both report the backup used and the safety copy created.
+
 ## Remaining Work
 
 This change makes memory configuration-first inside WhatSoup. It does not yet solve every memory isolation concern:
