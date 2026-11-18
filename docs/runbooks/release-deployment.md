@@ -203,6 +203,16 @@ npm --silent run release:activate -- \
   that differ from the installed plist beyond the release root), and the ordered
   actions. It exits `0` only when every precondition holds. It runs the new
   release's renderers to capture their output, and writes nothing.
+- `--backup-dir` must either be absent, in which case `--apply` creates it with
+  mode 0700, or be a real directory (not a symlink) owned by the current user
+  with no group or other permission bits. Planning (precondition
+  `backup-dir-private-owned`) and `--apply` both refuse any other directory;
+  neither changes its mode. `--apply` re-runs that precondition and makes its
+  last check just after creating or finding the directory, before the first
+  backup write; a process running as the same user that replaces or loosens it
+  after that last check is not detected. Each
+  activation writes its backups into a new child directory created with mode
+  0700 (the process umask can only remove bits from that mode).
 - `--apply` re-checks every precondition, then:
   1. takes a quick_check-verified SQLite backup, records the backup's schema
      migration level (`schemaMigration.before` in the receipt), records
@@ -473,6 +483,235 @@ restore required; `5` activation failed and the automatic rollback was blocked
 by an incompatible or unreadable sealed refresh fence — outcome
 `rollback-blocked-refresh-fence`, manual recovery required.
 
+### `npm run release:activate-host`
+
+Host activation is a separate, explicitly declared transaction for one or
+more launchd members and their declared shared host consumers. It is not
+permission to discover a wider member set or to run `release:activate --apply`
+once per instance:
+
+```bash
+npm --silent run release:activate-host -- \
+  --unit /absolute/path/host-unit.json \
+  --release /absolute/path/to/exported-release \
+  --backup-dir /absolute/private/retained-backups --plan
+```
+
+The schema-v1 declaration lists each instance, its reviewed current release,
+and each owned auxiliary label plus its renderer. An auxiliary label cannot be
+another configured instance's primary label (`com.whatsoup.<name>` where
+`<name>/config.json` exists under the instance config root): a declared
+member's label refuses when the declaration is read, any other instance's when
+planning. A rendered auxiliary plist must carry the declared `Label`, because
+`--apply` writes it to `<label>.plist` and reloads that label.
+Planning re-reads installed and loaded launchd definitions, refuses disagreement, and proves every
+installed consumer of a selected shared wrapper is declared (the limits are
+below). It prints only paths,
+digests, membership, port numbers, and state; it never prints health tokens,
+config contents, plist environment values, or health bodies.
+`--backup-dir` has the `release:activate` rule: absent, or a real directory
+owned by the current user with no group or other access, checked for each
+member (`<instance>:backup-dir-private-owned`) when planning and again by
+`--apply`. Its parent directory must also be owned by the current user with no
+group or other access (`backup-root-private-owned`).
+
+Schema version 2 adds an explicit `hostAuxiliaries` array for the closed host
+jobs that are not owned by one member. It accepts only these label/mode pairs:
+`com.bot-errors.health` with `path-rebase`;
+`com.whatsoup.harness-maintenance` or `com.whatsoup.reply-guarantee` with
+`setup-timer` or their closed legacy `path-rebase` form;
+`com.whatsoup.whatsoup-fleet` with `fleet-wrapper`; and a declared member's
+`com.whatsoup.<instance>-watchdog` with `quiesce`.
+Planning gives each host auxiliary label the member auxiliary check above: one
+that is another configured instance's primary label refuses
+(`host-aux-not-instance:<label>`).
+Selector-bearing entries name their reviewed `expectCurrent`; the fleet entry
+also names its absolute wrapper link. The planner proves the installed and
+loaded path, executable, and complete argument list agree before switching.
+A staged host-auxiliary plist must carry its declared `Label`.
+For a host `setup-timer`, its newly rendered complete `ProgramArguments` must
+also equal the installed list after only exact `expectCurrent` path values are
+rebased to the target release. An external guard or other argument the template
+does not render is a drift refusal; this coordinator does not preserve or
+reconstruct it.
+It refuses an undeclared loaded `com.bot-errors.health` job, including when
+its definition cannot be read reliably.
+
+Schema version 3 adds a closed `outsideUnits` array for reviewed, unrelated
+LaunchAgents that the transaction must prove are outside the host unit but must
+never edit, reload, stop, or start. Each entry pins `label`, the installed
+`plistSha256`, and either `loadState: "loaded"` or `"unloaded-113"`. Its
+`reviewInputs` lists lexically ordered, normalized absolute `roots`, `links`,
+and `{ path, sha256 }` source files, plus ordered
+`argumentBindings: [{ index, path, kind }]`. The roots must exactly equal the
+target release plus every declared `expectCurrent` (members and host
+auxiliaries). The links must exactly equal the members' standard
+`~/.local/bin/whatsoup` launcher path (listed once) plus every declared
+host-auxiliary link, whether or not that standard launcher joins the
+transaction.
+Each source file must remain outside those paths both by spelling and after
+symlink resolution; it is reread and rehashed from the same bytes during
+planning and immediately before the first `--apply` filesystem or launchd
+mutation. Every selected root and launcher must itself resolve, so an
+unresolvable selected path is a refusal.
+
+An outside label cannot be `com.whatsoup.*` or a closed host consumer such as
+`com.bot-errors.health`. The pinned plist and every reviewed input must contain
+no raw or XML-escaped reference to a selected root or launcher. A `loaded`
+entry must have a matching plist label and exact installed/loaded path,
+program, and argv. For an interpreter, every absolute argv value after argv[0]
+must have one exact index-and-path binding: `review-file` must name a hashed
+source input, and `runtime-data` explicitly declares a generated data path.
+Runtime data is checked against selected roots and launchers by its lexical
+path and nearest existing realpath ancestor; it cannot reuse a reviewed source
+path. Every loaded interpreter needs at least one reviewed source input. The
+only accepted ordinary script forms are `python` (optionally `-I`) followed by
+an absolute script, `node`/`nodejs` followed by an absolute script, and
+`bash`/`sh`/`zsh` followed by an absolute script; that script has to use a
+`review-file` binding. Shell `-c` and `-lc` forms remain opaque commands pinned
+by the reviewed plist and still need a reviewed source input. The sole module
+form is exact Python `[python, -m, dotted.package.module]`, with no other
+argument. Its normalized absolute installed `WorkingDirectory` must be an
+existing directory outside every selected root and launcher, must exactly match
+the loaded working directory, and must have no `PYTHON*` variable in the plist
+or the loaded inherited, default, or explicit environment. The reviewed files
+must hash-bind the resulting `module.py` and every parent package
+`__init__.py`; namespace packages and package-as-entry forms refuse. Other module
+or option forms refuse. The reviewed declaration must classify any script,
+environment, or other input that can affect release selection as `review-file`;
+the bounded checker does not discover arbitrary dynamic dependencies. It does
+not prove Python import hooks, `sitecustomize`, `.pth` files, native extensions,
+or same-name package precedence; those remain separate transitive review
+inputs. An `unloaded-113` entry may
+use `files: []` and `argumentBindings: []` for a digest-pinned empty stub, but
+only if the bounded
+`launchctl print gui/<uid>/<label>` check returns exactly exit 113. This is a
+review-bound exception, not general dependency discovery: any changed plist,
+runtime definition, review input, root/link tuple, unreadable input, or new
+consumer refuses the transaction and requires a new review declaration. Plan
+output and the apply receipt retain `reviewTupleSha256`, over the normalized
+label, plist digest, load state, roots, links, files, and argument bindings.
+
+`path-rebase` changes only plist string values that are exactly the reviewed
+root or a path below it, and only when the value is a shell-token path matching
+`^/[A-Za-z0-9._/-]+$`, because no value can be proven never to reach a shell.
+Fields containing a prefix-sibling path are retained. Any other value that
+contains the root, including a command that starts with it, is an embedded
+shell-style reference and refuses. The target release lands in every rewritten
+value, so a release outside that grammar refuses too.
+
+The shared-wrapper consumer proof reads installed plists only. For each
+selected shared wrapper, the plists in `~/Library/LaunchAgents` whose
+`ProgramArguments[0]` is that link must be exactly the declared members'
+primary plists that use it, and an unreadable installed plist refuses. For
+the fleet wrapper's declared link they must be exactly that auxiliary's plist;
+there an unreadable plist is not counted. Loaded
+definitions are not read for this proof. The loaded-domain inventory keeps
+only `com.whatsoup.*` labels and `com.bot-errors.health`, which planning
+proves against their installed plists or refuses; a loaded job under any
+other label, for
+example one bootstrapped from a plist outside `~/Library/LaunchAgents`, can
+use a selected wrapper without being detected.
+
+A standard `~/.local/bin/whatsoup`
+link that has no launchd consumer still joins the transaction when it already
+resolves exactly to a declared old release; a link to any other root remains
+outside the transaction. A missing link is also outside the transaction, but
+an unreadable path or a non-symlink is a preflight refusal rather than evidence
+that no launcher exists. A declaration with `outsideUnits` cannot use the
+missing-link case today: the review `links` must still list the standard link,
+and every listed link must resolve, so a missing standard link, or one whose
+target does not exist, refuses every outside unit (`selected root or launcher
+unavailable`) and with it the plan. A standard link that resolves to an
+existing undeclared root passes that check, but it stays in the outside units'
+review tuple and their no-reference checks.
+
+The only shell-style exception is the closed, legacy
+`com.bot-errors.health` host wrapper: its exact reviewed argv and wrapper shape
+may carry the default `BOT_ERRORS_HEALTH_PROFILE` at
+`<expect-current>/deploy/health-profiles/<profile>.json`, where the file name
+matches `^[a-z][a-z0-9]{0,31}\.json$`. The grammar only keeps the name inert in
+the shell wrapper; which profiles exist is host inventory, not code. Planning
+changes only that default to the target release, then applies the
+ordinary embedded-reference refusal to every remaining value. A malformed
+wrapper, non-canonical profile path, or any additional embedded release
+reference refuses. Both selected release roots must also be normalized absolute
+shell-token paths matching `^/[A-Za-z0-9._/-]+$`; whitespace or shell metacharacters
+refuse rather than being interpolated into the wrapper.
+
+The only other `path-rebase` forms are the observed legacy timer argv contracts.
+`com.whatsoup.harness-maintenance` must be exactly
+`[/bin/bash, <home>/.local/libexec/fleet-reauth/maint-ccd-guard.sh, /bin/bash,
+<expect-current>/deploy/scripts/harness-maintenance.sh]`.
+`com.whatsoup.reply-guarantee` must be exactly
+`[<home>/.nvm/versions/node/vX.Y.Z/bin/node,
+<expect-current>/deploy/hooks/drain-stuck-replies.mjs]`, optionally followed by
+the sole literal `--once`. The planner rebases only the exact selected-root path
+and preserves every other installed plist byte, including launchd schedule
+fields and the optional-argument form. A mismatched home, node shape, guard,
+hook, extra argument, or embedded selected-root reference refuses. These are
+closed installed-argv validators, not a general wrapper-preservation facility.
+
+The guard script and the pinned node executable are transitive reviewed inputs.
+This path-rebase check intentionally validates their literal installed paths and
+does not read, hash, execute, or resolve their symlinks; the owner must qualify
+those inputs separately before a native apply.
+
+`--apply` takes the same activation lock as `release:activate`, so a held lock
+refuses before any effect. It rebuilds that proof, snapshots every database
+with `quick_check`, backs up all changed plists and each shared link, then
+changes the group. Before the switch it makes the `release:activate` checks: a
+root-owned plist that it writes needs the pinned root helper installed, each
+member's candidate refresh rollback fence must be unchanged, a sealed BOT
+ERRORS health consumer must be unchanged, and the live identity must still be
+what the plan read. The identity is every shared wrapper link and the fleet
+wrapper link on its planned old release, and the digest of every plist the
+plan read: the member and host auxiliary plists it writes, and the fleet
+wrapper and watchdog plists it only reloads. The identity is checked before any
+watchdog is stopped and again immediately before the switch. Any of these
+stops the activation with no selector moved: it refuses, unless a stopped
+watchdog cannot be restored (for example, its plist changed while it was
+stopped, or its bootstrap or kickstart failed), which ends it
+`rollback-unverified` (below). The fleet wrapper and watchdog plists are also
+checked against their planned digest before each reload and again immediately
+before each `launchctl bootstrap`, so a plist changed before that last check is
+not loaded. `launchctl bootstrap` reads the plist by path, so a writer running
+as the same user that swaps the file during the bootstrap call itself is not
+detected. A change found after the switch fails the activation into the group
+rollback; unless the rollback's schema or refresh-fence checks have already
+ended it `rollback-blocked-*`, its identity check ends it
+`rollback-unverified`. It reloads all primary
+labels before auxiliaries and verifies each primary's new pid, argv,
+authenticated commit and WhatsApp connection. Any failure checks the schema
+level of every member before restoration and again after quiescing the group.
+A change or unreadable schema blocks restoration for the whole host; no old
+member is restarted. Each member's rollback target must also still provide the
+candidate's refresh rollback fence, checked before the group is stopped and
+again before restoration; otherwise the rollback stops with the new release
+selected (`rollback-blocked-refresh-fence`). A root-helper run that did not
+confirm plist protection makes the rollback `rollback-unverified`. One private
+`receipt.json` in the host backup directory records the group outcome, written
+only when this run created that directory. The directory is created
+exclusively: a path that already exists, such as one an earlier run made in
+the same second, refuses and keeps that run's receipt unchanged. A refusal
+before the directory exists prints the outcome without writing a receipt. The
+exit codes are those of `release:activate`: 0 activated, 1 rolled back,
+2 refused, 3 rollback unverified, 4 rollback blocked by a migration and 5
+rollback blocked by the refresh rollback fence. A receipt write that fails
+prints `release:activate-host: receipt-write-failed <ERRNO>` with the errno
+name only (never the path or the error text). As for `release:activate`, the
+exit code is unchanged, because it reports the live activation, which a lost
+receipt does not change.
+Schema-v2 watchdogs are quiesced before selectors move. They are restored only
+after the new terminal is verified, or after every old member, auxiliary, and
+host selector is verified during rollback. A migration block or an unverified
+old terminal leaves them stopped and reports the non-success rollback outcome.
+A watchdog whose plist no longer has its planned digest at the checks before
+its bootout and bootstrap is not restored: it stays stopped and the outcome is
+`rollback-unverified`, also when no selector moved, unless a migration or
+refresh-fence block already set a `rollback-blocked-*` outcome. A change found
+before the watchdogs are stopped refuses instead.
+
 #### Health invariants verdict (report-only, #2481)
 
 Under `--apply`, after the outcome is final, `receipt.json` (and the stdout
@@ -604,8 +843,9 @@ It relies on the instance being the launchd job's own process:
 module in that same process, and `src/core/health.ts` reports that
 `process.pid` as `instance.pid`.
 
-**What the receipt holds.** `receipt.json` is a local operator record in the
-private backup directory (mode 0600). The activation record already carries
+**What the receipt holds.** `receipt.json` (mode 0600) is a local operator
+record in the activation's mode-0700 directory under the private
+`--backup-dir`. The activation record already carries
 host data: release and backup paths, commits, the instance name, and the
 launchd pids. Nothing #2481 adds carries a producer string, a pid, or host
 data: the added fields are the tool's constants (schema, floor ids), enums

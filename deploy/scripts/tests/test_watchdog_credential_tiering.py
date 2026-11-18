@@ -172,6 +172,7 @@ class Harness:
             f"echo \"$@\" >> '{self.calls}'\n"
             'if [ "$1" = print ]; then\n'
             f"  printf '%s\\n' '{print_body}'\n"
+            "  printf '%s\\n' '  pid = 4242'\n"
             f"{readonly_line}"
             f"  exit {print_rc}\n"
             "fi\n"
@@ -220,8 +221,18 @@ def fetch_loopback_health(port, path, headers, **kwargs):
     if port == 9998:
         assert not token
         if not {fleet_ok!r}: raise HealthTransportError("connect", errno.ECONNREFUSED)
-        return 200, "ok"
+        return 200, '{{"alive":true,"pid":4242}}'
     raise ValueError("unexpected test target")
+def verify_fleet_liveness(status, body, expected_pid):
+    if status != 200: return False, "http_status"
+    try: payload=json.loads(body)
+    except Exception: return False, "invalid_json"
+    if not isinstance(payload, dict): return False, "body_not_object"
+    if payload.get("alive") is not True: return False, "alive_not_true"
+    pid=payload.get("pid")
+    if type(pid) is not int or pid <= 0: return False, "pid_invalid"
+    if pid != expected_pid: return False, "pid_mismatch"
+    return True, "verified"
 ''', encoding="utf-8")
         rendered = (
             _TEMPLATE.read_text(encoding="utf-8")

@@ -26,6 +26,7 @@ import type { ProtectedDeliveryService } from '../../core/protected-delivery.ts'
 import type { SessionContext } from '../../mcp/types.ts';
 import type { SessionTokenLease } from '../../mcp/caller-attribution.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
+import { resolveAgentInstructionsPath, sandboxInstructionsPathKind } from '../../core/agent-instructions-path.ts';
 import { createChildLogger } from '../../logger.ts';
 import { MS_PER_HOUR } from '../../lib/time-units.ts';
 import {
@@ -328,6 +329,8 @@ export interface SessionManagerOptions {
   configRoot?: string;
   configSystemPrompt?: string;
   instructionsPath?: string;
+  /** The runtime's sandboxPerChat: cwd is this chat's workspace, and a relative instructionsPath must stay lexically inside it. */
+  sandboxPerChat?: boolean;
   model?: string;
   routePolicy?: ProviderRoutePolicy;
   pluginDirs?: string[];
@@ -763,6 +766,7 @@ export class SessionManager {
   private readonly configRoot: string | undefined;
   private readonly configSystemPrompt: string | undefined;
   private readonly instructionsPath: string | undefined;
+  private readonly sandboxPerChat: boolean;
   private readonly model: string | undefined;
   private readonly routePolicy: ProviderRoutePolicy | undefined;
   private readonly pluginDirs: string[];
@@ -977,6 +981,7 @@ export class SessionManager {
     this.configRoot = opts.configRoot;
     this.configSystemPrompt = opts.configSystemPrompt;
     this.instructionsPath = opts.instructionsPath;
+    this.sandboxPerChat = opts.sandboxPerChat === true;
     this.model = opts.model;
     this.routePolicy = opts.routePolicy;
     this.pluginDirs = opts.pluginDirs ?? [];
@@ -1341,7 +1346,16 @@ export class SessionManager {
     }
 
     if (this.instructionsPath) {
-      const fullInstructionsPath = join(cwd, this.instructionsPath);
+      // Resolve exactly as config load validated it: an absolute path stays absolute.
+      const fullInstructionsPath = resolveAgentInstructionsPath({
+        instructionsPath: this.instructionsPath,
+        cwd,
+        homeDirectory: homedir(),
+      });
+      // Config load and the restart preflight refuse this path too; here it is a failed read.
+      if (this.sandboxPerChat && sandboxInstructionsPathKind(this.instructionsPath) === 'outside_chat_workspace') {
+        throw new Error(`Failed to read instructionsPath "${fullInstructionsPath}": not inside the chat workspace (a sandboxPerChat path must be in normal form with no ".." segment)`);
+      }
       let instructionsContent: string;
       try {
         instructionsContent = readFileSync(fullInstructionsPath, 'utf8');

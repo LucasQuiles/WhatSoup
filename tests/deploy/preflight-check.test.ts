@@ -33,6 +33,7 @@ import {
 import { homedir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import { cleanGitEnv } from '../../src/lib/git-env.ts';
 import { SERVICE_ENV_MAP } from '../../src/lib/provider-key-service.ts';
@@ -62,8 +63,12 @@ const TYPE_GUARDS = join(REPO_ROOT, 'src/lib/type-guards.ts');
 const M365_CREDENTIAL_PROJECTION = join(REPO_ROOT, 'deploy/m365-bridge-credential-projection.ts');
 const M365_BRIDGE_POLICY = join(REPO_ROOT, 'src/core/m365-bridge-policy.ts');
 const INSTANCE_NAME = join(REPO_ROOT, 'src/fleet/instance-name.ts');
+const RESTART_SAFETY_CHECK = join(REPO_ROOT, 'scripts/restart-safety-preflight.ts');
+const SQLITE_CONSTANTS = join(REPO_ROOT, 'src/lib/sqlite-constants.ts');
 const SOURCE_RUNTIME_MANIFEST = join(REPO_ROOT, 'deploy/source-runtime-manifest.json');
 const SPAWN_TIMEOUT_MS = 15_000;
+const WRAPPER_PREFLIGHT_CALL = 'if ! WHATSOUP_NODE="$NODE" WHATSOUP_PREFLIGHT_RESTART_SAFETY=wrapper '
+  + '"$SCRIPT_DIR/preflight-check.sh" "$REPO_ROOT" "$INSTANCE"; then';
 const PROTECTED_ENV_NAMES = [...new Set([
   ...Object.values(SERVICE_ENV_MAP),
   'GOOGLE_GENERATIVE_AI_API_KEY',
@@ -180,6 +185,9 @@ function makeFixtureTree(
     'src/core/private-config-file.ts': readFileSync(join(REPO_ROOT, 'src/core/private-config-file.ts'), 'utf8'),
     'src/lib/process-lock.ts': readFileSync(join(REPO_ROOT, 'src/lib/process-lock.ts'), 'utf8'),
     'src/lib/private-fs.ts': readFileSync(join(REPO_ROOT, 'src/lib/private-fs.ts'), 'utf8'),
+    // The restart-safety ledger checker and its whole import closure.
+    'scripts/restart-safety-preflight.ts': readFileSync(RESTART_SAFETY_CHECK, 'utf8'),
+    'src/lib/sqlite-constants.ts': readFileSync(SQLITE_CONSTANTS, 'utf8'),
   };
   for (const [rel, contents] of Object.entries(integrityFiles)) {
     const abs = join(root, rel);
@@ -252,14 +260,60 @@ function makeIntegrityReleaseTree(): string {
   return root;
 }
 
+/**
+ * Creates the instance database the restart-safety ledger gate inspects, at
+ * the canonical `<XDG_DATA_HOME>/whatsoup/instances/<instance>/bot.db` path.
+ * The schema is the minimal one scripts/restart-safety-preflight.ts requires.
+ */
+function createRestartSafetyFixture(
+  dataHome: string,
+  instance: string,
+  outbound?: { status: string; replayPolicy: string; isTerminal: number },
+): string {
+  const instanceRoot = join(dataHome, 'whatsoup', 'instances', instance);
+  mkdirSync(instanceRoot, { recursive: true });
+  const dbPath = join(instanceRoot, 'bot.db');
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE inbound_events (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      processing_status TEXT NOT NULL DEFAULT 'pending',
+      received_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE outbound_ops (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      replay_policy TEXT NOT NULL DEFAULT 'unsafe',
+      is_terminal INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+  if (outbound) {
+    db.prepare(`
+      INSERT INTO outbound_ops (status, replay_policy, is_terminal)
+      VALUES (?, ?, ?)
+    `).run(outbound.status, outbound.replayPolicy, outbound.isTerminal);
+  }
+  db.close();
+  return dbPath;
+}
+
 function runPreflight(
   repoRoot: string,
   instance = '',
   env: Record<string, string> = {},
 ): { status: number; stderr: string; stdout: string } {
+  // A named instance reaches the restart-safety ledger gate, which fails closed
+  // on a missing database. Tests that do not exercise that gate get an empty,
+  // restart-safe database of their own.
+  const effectiveEnv = { ...env };
+  if (instance && effectiveEnv.XDG_DATA_HOME === undefined) {
+    effectiveEnv.XDG_DATA_HOME = makeTmpDir();
+    createRestartSafetyFixture(effectiveEnv.XDG_DATA_HOME, instance);
+  }
   const result = spawnSync('bash', [PREFLIGHT, repoRoot, instance], {
     encoding: 'utf8',
-    env: { ...cleanGitEnv(), WHATSOUP_NODE: PINNED_NODE, ...env },
+    env: { ...cleanGitEnv(), WHATSOUP_NODE: PINNED_NODE, ...effectiveEnv },
     timeout: SPAWN_TIMEOUT_MS,
   });
   return {
@@ -610,6 +664,138 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate
 
     expect(status).toBe(0);
     expect(stderr).toContain('PREFLIGHT-OK');
+  });
+
+  it('blocks restart when any replay-safe outbound operation is nonterminal', () => {
+    const root = makeFixtureTree('export const mainOk = true;\n');
+    const dataHome = makeTmpDir();
+    createRestartSafetyFixture(dataHome, 'q-bot', {
+      status: 'maybe_sent',
+      replayPolicy: 'safe',
+      isTerminal: 0,
+    });
+
+    const { status, stderr } = runPreflight(root, 'q-bot', { XDG_DATA_HOME: dataHome });
+
+    expect(status).toBe(3);
+    expect(stderr).toContain('safe_nonterminal_outbound');
+    expect(stderr).toContain('REFUSING TO START');
+  });
+
+  it('allows unsafe maybe-sent debt but reports it without replaying', () => {
+    const root = makeFixtureTree('export const mainOk = true;\n');
+    const dataHome = makeTmpDir();
+    createRestartSafetyFixture(dataHome, 'q-bot', {
+      status: 'maybe_sent',
+      replayPolicy: 'unsafe',
+      isTerminal: 1,
+    });
+    const configHome = makeTmpDir();
+    writeInstanceConfig(configHome, 'q-bot', validInstanceConfig);
+
+    const { status, stderr } = runPreflight(root, 'q-bot', {
+      XDG_DATA_HOME: dataHome,
+      XDG_CONFIG_HOME: configHome,
+    });
+
+    expect(status, stderr).toBe(0);
+    expect(stderr).toContain('restart_safe_with_unsafe_debt');
+    expect(stderr).toContain('PREFLIGHT-OK');
+  });
+
+  it('blocks a missing database unless CREATE left a matching private first-start marker', () => {
+    const root = makeFixtureTree('export const mainOk = true;\n');
+    const dataHome = makeTmpDir();
+    const instanceRoot = join(dataHome, 'whatsoup', 'instances', 'new-bot');
+    mkdirSync(instanceRoot, { recursive: true });
+    const configHome = makeTmpDir();
+    writeInstanceConfig(configHome, 'new-bot', { ...validInstanceConfig, name: 'new-bot' });
+    const env = { XDG_DATA_HOME: dataHome, XDG_CONFIG_HOME: configHome };
+
+    const blocked = runPreflight(root, 'new-bot', env);
+    expect(blocked.status).toBe(3);
+    expect(blocked.stderr).toContain('missing_database');
+
+    writeFileSync(
+      join(instanceRoot, '.initial-database-create-approved'),
+      'new-bot\n',
+      { mode: 0o600 },
+    );
+    const allowed = runPreflight(root, 'new-bot', env);
+    expect(allowed.status, allowed.stderr).toBe(0);
+    expect(allowed.stderr).toContain('initial_database_create');
+  });
+
+  it('fails closed when the restart-safety checker is missing', () => {
+    const root = makeFixtureTree('export const mainOk = true;\n');
+    const dataHome = makeTmpDir();
+    createRestartSafetyFixture(dataHome, 'q-bot');
+    rmSync(join(root, 'scripts', 'restart-safety-preflight.ts'));
+
+    const { status, stderr } = runPreflight(root, 'q-bot', { XDG_DATA_HOME: dataHome });
+
+    expect(status).toBe(1);
+    expect(stderr).toContain('restart-safety checker not found');
+  });
+
+  it('runs the ledger gate before the import probe executes release-owned code', () => {
+    const sentinel = join(makeTmpDir(), 'import-probe-ran');
+    const root = makeFixtureTree(
+      `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(sentinel)}, 'ran');\n`,
+    );
+    const dataHome = makeTmpDir();
+    createRestartSafetyFixture(dataHome, 'q-bot', {
+      status: 'pending',
+      replayPolicy: 'read_only',
+      isTerminal: 0,
+    });
+
+    const { status, stderr } = runPreflight(root, 'q-bot', { XDG_DATA_HOME: dataHome });
+
+    expect(status).toBe(3);
+    expect(stderr).toContain('safe_nonterminal_outbound');
+    expect(existsSync(sentinel)).toBe(false);
+  });
+
+  it('defers the ledger gate to the launch wrapper, which owns the terminal exit 78', () => {
+    const root = makeFixtureTree('export const mainOk = true;\n');
+    const dataHome = makeTmpDir();
+    createRestartSafetyFixture(dataHome, 'q-bot', {
+      status: 'maybe_sent',
+      replayPolicy: 'safe',
+      isTerminal: 0,
+    });
+
+    const configHome = makeTmpDir();
+    writeInstanceConfig(configHome, 'q-bot', validInstanceConfig);
+
+    const { status, stderr } = runPreflight(root, 'q-bot', {
+      XDG_DATA_HOME: dataHome,
+      XDG_CONFIG_HOME: configHome,
+      WHATSOUP_PREFLIGHT_RESTART_SAFETY: 'wrapper',
+    });
+
+    expect(status, stderr).toBe(0);
+    expect(stderr).toContain('PREFLIGHT-RESTART-SAFETY: deferred to the launch wrapper');
+    expect(stderr).not.toContain('safe_nonterminal_outbound');
+  });
+
+  it('runs the ledger gate for any other deferral value', () => {
+    const root = makeFixtureTree('export const mainOk = true;\n');
+    const dataHome = makeTmpDir();
+    createRestartSafetyFixture(dataHome, 'q-bot', {
+      status: 'maybe_sent',
+      replayPolicy: 'safe',
+      isTerminal: 0,
+    });
+
+    const { status, stderr } = runPreflight(root, 'q-bot', {
+      XDG_DATA_HOME: dataHome,
+      WHATSOUP_PREFLIGHT_RESTART_SAFETY: '1',
+    });
+
+    expect(status).toBe(3);
+    expect(stderr).toContain('safe_nonterminal_outbound');
   });
 
   it('fails closed when the required database compatibility entrypoint is missing', () => {
@@ -1323,9 +1509,7 @@ describe('deploy/whatsoup — source wiring', () => {
     const skipRestartPreflight = wrapper.indexOf(
       'if [ "${WHATSOUP_SKIP_PREFLIGHT:-}" = "1" ]; then',
     );
-    const restartPreflight = wrapper.indexOf(
-      'WHATSOUP_NODE="$NODE" "$SCRIPT_DIR/preflight-check.sh" "$REPO_ROOT" "$INSTANCE"',
-    );
+    const restartPreflight = wrapper.indexOf(WRAPPER_PREFLIGHT_CALL);
     expect(nodeResolution).toBeGreaterThan(-1);
     expect(databaseCheck).toBeGreaterThan(-1);
     expect(skipRestartPreflight).toBeGreaterThan(-1);
@@ -1402,7 +1586,7 @@ describe('deploy/whatsoup — source wiring', () => {
 
   it('fails closed when preflight-check refuses wrapper startup', () => {
     const wrapper = readFileSync(WRAPPER, 'utf8');
-    const preflightStart = wrapper.indexOf('if ! WHATSOUP_NODE="$NODE" "$SCRIPT_DIR/preflight-check.sh" "$REPO_ROOT" "$INSTANCE"; then');
+    const preflightStart = wrapper.indexOf(WRAPPER_PREFLIGHT_CALL);
     const bootstrapExec = wrapper.indexOf('"$REPO_ROOT/src/bootstrap.ts" "$INSTANCE"');
     expect(preflightStart).toBeGreaterThan(-1);
     expect(bootstrapExec).toBeGreaterThan(preflightStart);
@@ -1410,6 +1594,24 @@ describe('deploy/whatsoup — source wiring', () => {
     const preBootstrap = wrapper.slice(preflightStart, bootstrapExec);
     expect(preBootstrap).toContain('FATAL: restart-safety pre-flight gate refused to start');
     expect(preBootstrap).toMatch(/\n\s*exit 1\n/);
+  });
+
+  it('keeps a boot-time ledger refusal terminal (exit 78), not restartable', () => {
+    // preflight-check.sh failures collapse to exit 1, which the service manager
+    // restarts. The wrapper therefore owns the ledger gate at boot: it defers
+    // preflight-check's copy and runs its own gate right after, which exits 78.
+    const wrapper = readFileSync(WRAPPER, 'utf8');
+    const preflightCall = wrapper.indexOf(WRAPPER_PREFLIGHT_CALL);
+    const ledgerBegin = wrapper.indexOf('# --- restart-safety ledger preflight (begin)');
+    const ledgerEnd = wrapper.indexOf('# --- restart-safety ledger preflight (end)');
+    expect(preflightCall).toBeGreaterThan(-1);
+    expect(ledgerBegin).toBeGreaterThan(preflightCall);
+    expect(ledgerEnd).toBeGreaterThan(ledgerBegin);
+    const ledgerGate = wrapper.slice(ledgerBegin, ledgerEnd);
+    expect(ledgerGate).toContain('scripts/restart-safety-preflight.ts');
+    expect(ledgerGate).toMatch(/blocked instance[^\n]*\n\s*exit 78\n/);
+    // Exactly one preflight-check.sh call: splitting on it yields two parts.
+    expect(wrapper.split('preflight-check.sh" "$REPO_ROOT"')).toHaveLength(2);
   });
 
   it('wires preflight-check BEFORE the node exec of bootstrap.ts', () => {

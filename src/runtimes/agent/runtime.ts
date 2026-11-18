@@ -10560,6 +10560,7 @@ export class AgentRuntime implements Runtime {
       configRoot: this.sandboxPerChat && opts.cwd ? join(opts.cwd, '.agent-home') : undefined,
       configSystemPrompt: this.configSystemPrompt,
       instructionsPath: this.instructionsPath,
+      sandboxPerChat: this.sandboxPerChat,
       model: route.model,
       pluginDirs: this.pluginDirs,
       allowM365Mutations: sessionM365Policy?.status === 'rejected' ? false : this.allowM365Mutations,

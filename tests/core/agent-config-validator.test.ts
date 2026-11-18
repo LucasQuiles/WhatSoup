@@ -6,6 +6,7 @@
  * across the 4 modes (create/patch/load/discovery) and the type-specific rules
  * (chat/agent/passive) and cross-field constraints (sessionScope/accessMode).
  */
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -806,6 +807,49 @@ describe('agent type rules', () => {
     const result = validateInstanceConfig(raw, ctx('create'));
     expect(result?.field).toBe('agentOptions.instructionsPath');
     expect(result?.message).toContain('must be a string');
+  });
+
+  it('keeps schema-only validation filesystem-independent but rejects missing live instructions', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-validator-home-'));
+    const cwd = path.join(home, 'workspace');
+    fs.mkdirSync(cwd);
+    const raw = baseAgent({
+      agentOptions: { sessionScope: 'single', cwd, instructionsPath: 'missing.md' },
+    });
+    try {
+      expect(validateInstanceConfig(raw, ctx('load'))).toBeNull();
+      const result = validateInstanceConfig(raw, { ...ctx('load'), filesystem: { homeDirectory: home } });
+      expect(result?.field).toBe('agentOptions.instructionsPath');
+      expect(result?.message).toContain('readable regular file');
+      expect(result?.message).not.toContain(home);
+      fs.writeFileSync(path.join(cwd, 'missing.md'), 'instructions\n');
+      expect(validateInstanceConfig(raw, { ...ctx('load'), filesystem: { homeDirectory: home } })).toBeNull();
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('checks sandboxPerChat instructions only where the per-chat session reads them', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-validator-home-'));
+    const cwd = path.join(home, 'workspace');
+    // A per-chat session reads a relative path from its chat workspace under cwd.
+    fs.mkdirSync(path.join(cwd, 'users', 'chat-key'), { recursive: true });
+    fs.writeFileSync(path.join(cwd, 'users', 'chat-key', 'persona.md'), 'instructions\n');
+    const live = { ...ctx('load'), filesystem: { homeDirectory: home } };
+    const field = (instructionsPath: string, sandboxPerChat = true) => validateInstanceConfig(baseAgent({
+      agentOptions: { sessionScope: 'per_chat', ...(sandboxPerChat ? { sandboxPerChat } : {}), cwd, instructionsPath } }), live)?.field ?? null;
+    try {
+      // Not knowable at load time: the session reads <chat workspace>/persona.md, never <cwd>/persona.md.
+      expect(field('persona.md')).toBeNull();
+      // CLAUDE.md is: every chat workspace links it to <cwd>/CLAUDE.md. An absolute path is read as given.
+      for (const known of ['CLAUDE.md', './CLAUDE.md', path.join(cwd, 'persona.md')]) expect(field(known)).toBe('agentOptions.instructionsPath');
+      // Without sandboxPerChat the session reads <cwd>/persona.md, which is missing.
+      expect(field('persona.md', false)).toBe('agentOptions.instructionsPath');
+      fs.writeFileSync(path.join(cwd, 'CLAUDE.md'), 'instructions\n');
+      expect(field('CLAUDE.md')).toBeNull();
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it('accepts minimal valid agent on create (any accessMode with or without agentOptions)', () => {

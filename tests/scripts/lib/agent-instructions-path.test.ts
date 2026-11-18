@@ -42,6 +42,28 @@ describe('validateAgentInstructionsPath', () => {
     ).toEqual({ ok: true, resolvedPath: filePath });
   });
 
+  it('expands a leading tilde in cwd against the service-user home, as the runtime does', () => {
+    const { home } = fixture();
+    const cwd = path.join(home, 'whatsoup');
+    mkdirSync(cwd);
+    const filePath = path.join(cwd, 'CLAUDE.md');
+    writeFileSync(filePath, 'instructions', { mode: 0o600 });
+
+    expect(
+      validateAgentInstructionsPath({ instructionsPath: 'CLAUDE.md', cwd: '~/whatsoup', homeDirectory: home }),
+    ).toEqual({ ok: true, resolvedPath: filePath });
+    expect(
+      validateAgentInstructionsPath({ instructionsPath: 'whatsoup/CLAUDE.md', cwd: '~', homeDirectory: home }),
+    ).toEqual({ ok: true, resolvedPath: filePath });
+    expect(
+      validateAgentInstructionsPath({ instructionsPath: 'missing.md', cwd: '~/whatsoup', homeDirectory: home }),
+    ).toMatchObject({ ok: false, reason: 'missing' });
+    // The runtime does not expand `~user` or a relative cwd, so neither is a known read location.
+    expect(
+      validateAgentInstructionsPath({ instructionsPath: 'CLAUDE.md', cwd: '~other/whatsoup', homeDirectory: home }),
+    ).toMatchObject({ ok: false, reason: 'ambiguous_cwd' });
+  });
+
   it('accepts an absolute readable file within the service-user home', () => {
     const { home, cwd } = fixture();
     const filePath = path.join(home, 'runtime.md');
