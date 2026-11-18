@@ -101,13 +101,34 @@ describe('loadInstance — client-output policy hydration', () => {
     expect(Object.isFrozen(direct?.clientOutputPolicies)).toBe(true);
   });
 
+  it.each([
+    ['null', null],
+    ['an empty object', {}],
+    ['a populated legacy object', {
+      keyId: 'legacy-key',
+      publicKey: 'legacy-public-key',
+      requiredActions: ['send_message'],
+    }],
+  ])('rejects a persisted policy with authorization set to %s before publishing either compatibility surface', (_shape, authorization) => {
+    writeInstance(path.join(tmpDir, 'config'), 'test-agent', {
+      ...minimalAgent,
+      clientOutputPolicies: [{ ...clientOutputPolicies[0], authorization }],
+    });
+
+    expect(() => loadInstance('test-agent')).toThrow(
+      /clientOutputPolicies\[0\]\.authorization is unsupported because client-output authorization is not enforced/,
+    );
+    expect(process.env.INSTANCE_CONFIG).toBeUndefined();
+    expect(getLoadedInstanceConfigOrNull()).toBeNull();
+  });
+
   it('rejects invalid policy config before publishing either compatibility surface', () => {
     writeInstance(path.join(tmpDir, 'config'), 'test-agent', {
       ...minimalAgent,
       clientOutputPolicies: null,
     });
 
-    expect(() => loadInstance('test-agent')).toThrow(/clientOutputPolicies/);
+    expect(() => loadInstance('test-agent')).toThrow(/clientOutputPolicies must be an array when present/);
     expect(process.env.INSTANCE_CONFIG).toBeUndefined();
     expect(getLoadedInstanceConfigOrNull()).toBeNull();
   });

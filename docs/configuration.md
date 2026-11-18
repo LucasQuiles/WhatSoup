@@ -2389,23 +2389,32 @@ Optional per-conversation output policies for an agent instance. Only `type: "ag
 - **Agent outbound queue.** It checks each logical message before splitting it into chunks. This covers assistant replies, streamed text, tool-update batches and progress placeholders. A withheld placeholder still takes the rate-floor slot, so repeated stalls log once per floor window.
 - **MCP tools.** `send_message`, `reply_message`, `edit_message`, `send_poll` (question and options judged together), `send_media` (the caption only) and `send_voice_reply` (before synthesis) withhold the send. The tool returns an error result to the agent: `{ "sent": false, "withheld": true, "reason": "client_output_policy", "violationCodes": [...] }`. It never echoes the text. An evaluator error returns `evaluationFailed: true` instead of `violationCodes`.
 
-Each withheld message leaves one warn-level log line. The line never contains the message text or blocked-term values. Its fields are:
+Each message that a policy rejects leaves one warn-level log line. The line never contains the message text or blocked-term values. Its fields are:
 
 - `operation`: `client_output_policy`
 - `decision`: `rejected`
 - `conversationKey`: the canonical conversation key
+- `conversationKeys`: only when the queue checked the message under two keys and both policies rejected it; it lists both keys, and `conversationKey` is the first of them
 - `reason`: `client_output_policy`
-- `violationCodes`: one or more of `max_code_points`, `max_question_marks`, `blocked_term`, `internal_artifact` and `whatsapp_jid`
+- `violationCodes`: one or more of `max_code_points`, `max_question_marks`, `blocked_term`, `internal_artifact` and `whatsapp_jid`; with two rejecting keys, the codes of both policies
 - `messageKind`: `answer`, `lifecycle` or `status` from the queue, or the tool name from an MCP tool
 
 If the evaluator throws for a conversation that has a policy, the message is also withheld. The error-level line has `decision: "error"` and `errorName` instead of `reason` and `violationCodes`.
 
+The queue checks a message under two keys when its own conversation key and the turn's key differ: two aliases of one chat, or two chats in single scope. A policy under either key applies, and both keys are evaluated. Each key whose evaluator fails leaves its own error-level line. So one message can also leave one warn-level and one error-level line (one key rejected it and the evaluator failed for the other), or two error-level lines (the evaluator failed for both).
+
 **Turn outcome.** A turn whose answers were all withheld ends as a deliberate terminal outcome, not a delivery failure. The terminal record has attempt kind `withheld_by_policy` under the `finalized_no_reply_policy` disposition. The inbound message completes with terminal reason `client_output_withheld`. The turn is not handed to recovery, is not replayed, raises no reply-guarantee breach alert and is not marked for catch-up. The policy decision satisfies the reply guarantee, which is disarmed. A turn that also delivered another answer finalizes as replied. Withheld text never becomes an automatic voice reply.
+
+**Unsupported setting.** `authorization` is rejected. It does not authorize client output. Earlier releases accepted the field and never checked it, so a stored policy can still contain it. Config load, API writes and the restart preflight all reject such a policy, so the instance does not start. Upgrade in this order:
+
+1. **Inventory.** Before the switch, run the new release's side-effect-free instance preflight for every instance: `<pinned-node> --experimental-strip-types deploy/preflight-instance-check.ts <instance-name>`. Run it as the service's user with the service's `XDG_CONFIG_HOME`. It reads `$XDG_CONFIG_HOME/whatsoup/instances/<instance-name>/config.json` (see [Instance Configuration](#instance-configuration-configjson)), so in another environment it checks another file or none. Each run reports only the first error. Exit code 3 with a field of `clientOutputPolicies[N].authorization` names one policy to change. A non-zero exit can also name another field, or a `config.json` that is missing, unreadable or not valid JSON.
+2. **Migrate.** On the running release, delete the `authorization` object from each named policy in the instance's `config.json` and keep the policy's other fields. That release ignores the field, so the edit changes no output decision and needs no restart.
+3. **Deploy.** Run the inventory again after each change. Deploy the new release and restart the instances only when the preflight exits 0 and prints `PREFLIGHT-INSTANCE: VALID` for every instance.
+4. **Recover.** If an instance still fails its preflight or config load at `clientOutputPolicies[N].authorization`, delete that object from `config.json` and restart the instance. No other field needs a change.
 
 Not covered:
 
 - The redirect status send, which goes to the separate status JID, and the fixed "could not be delivered" notice are not checked.
-- `authorization` is parsed but not yet checked.
 - Matching is exact on the canonical conversation key. A chat whose key stays an unresolved LID does not match a policy keyed by phone number.
 - An automatic voice reply of admitted text is not checked again as one combined message.
 
@@ -2430,9 +2439,8 @@ Fields (every object is closed; unknown keys are rejected):
 - `maxQuestionMarks`: an integer from 0 to 20. ASCII, fullwidth and Arabic question marks all count.
 - `blockedTerms`: up to 64 terms. Each term has a `value` (NFC, no surrounding whitespace, 1 to 128 code points), a `match` of `whole_word` or `substring`, and a boolean `caseSensitive`.
 - `rejectInternalArtifacts` and `rejectWhatsAppJids`: booleans.
-- `authorization` (optional): `keyId`, `publicKey` (an unpadded base64url Ed25519 SPKI key) and `requiredActions`, drawn from `assistant_text`, `send_message`, `reply_message`, `edit_message`, `send_poll` and `send_media`.
 
-The fleet API returns blocked-term values and public keys as `[redacted]` in line detail and config-update responses. The full values stay in `config.json`.
+The fleet API returns blocked-term values as `[redacted]` in line detail and config-update responses. The full values stay in `config.json`.
 
 ### `chatOptions`
 
