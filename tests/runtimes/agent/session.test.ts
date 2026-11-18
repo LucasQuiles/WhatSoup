@@ -4877,7 +4877,7 @@ describe('Codex session resume via thread ID', () => {
     type ThreadStart = { id: string; method?: string; params?: { threadId?: string; baseInstructions?: string } };
     const resumeRequest = mockChild.stdin.write.mock.calls
       .map(call => JSON.parse(String(call[0])) as ThreadStart)
-      .find(call => call.method === 'thread/start');
+      .find(call => call.method === 'thread/resume');
     expect(resumeRequest?.params?.threadId).toBe('thread_rejected_777');
     const composed = resumeRequest?.params?.baseInstructions;
     expect(composed).toContain('a personal Codex CLI agent');
