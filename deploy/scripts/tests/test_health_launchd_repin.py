@@ -59,6 +59,9 @@ with (h / "calls.jsonl").open("a") as f: f.write(json.dumps(args) + "\\n")
 if mode == "print-disabled":
     print('disabled services = { }' if os.environ.get("DISABLED") == "omit" else 'disabled services = { "com.bot-errors.health" => ' + os.environ.get("DISABLED", "enabled") + ' }')
 elif mode == "list":
+    lists = sum(1 for line in (h / "calls.jsonl").read_text().splitlines() if json.loads(line)[0] == "list")
+    if os.environ.get("EDIT_ON_LIST") == str(lists):
+        with (h / "Library/LaunchAgents/com.bot-errors.health.plist").open("ab") as f: f.write(b"\\n")
     if os.environ.get("LIST_FAIL") or not state.exists(): sys.exit(113)
     print('{ "Label" = "com.bot-errors.health"; ' + ('"PID" = 123;' if os.environ.get("BUSY") else '') + ' }')
 elif mode == "bootout":
@@ -91,7 +94,20 @@ else: sys.exit(64)
                               capture_output=True, text=True, timeout=15)
 
     return {"run": run, "plist": plist, "raw": raw, "original": original, "new": new,
-            "home": tmp_path, "state": state}
+            "home": tmp_path, "state": state, "env": env}
+
+
+def run_installer(job, *args):
+    """Run the installer with exactly these arguments (run() always adds --repin-existing)."""
+    return subprocess.run(["bash", str(INSTALLER), *args], env=job["env"],
+                          capture_output=True, text=True, timeout=15)
+
+
+def repin_plan(job, value):
+    """Install `value` as the reviewed plist and plan a re-pin of it."""
+    raw = plistlib.dumps(value)
+    job["plist"].write_bytes(raw)
+    return raw, ("--repin-existing", "--expected-plist-sha256", hashlib.sha256(raw).hexdigest())
 
 
 def apply(job, **env):
@@ -216,6 +232,44 @@ def test_unknown_argument_does_not_fall_through_to_fresh_install(job):
     result = job["run"]("--misspelled-option")
     assert result.returncode == 2
     assert job["plist"].read_bytes() == job["raw"]
+
+
+def test_unknown_argument_without_repin_exits_before_fresh_install(job):
+    # Reaches the shell's own argument guard: no --repin-existing comes first.
+    result = run_installer(job, "--misspelled-option")
+    assert result.returncode == 2
+    assert job["plist"].read_bytes() == job["raw"]
+    assert sorted(p.name for p in job["plist"].parent.iterdir()) == [LABEL + ".plist"]
+    assert not (job["home"] / "calls.jsonl").exists()
+
+
+@pytest.mark.parametrize("value", [["not", "a", "dict"], "plain string"])
+def test_plist_without_a_top_level_dict_is_refused_with_a_receipt(job, value):
+    raw, args = repin_plan(job, value)
+    result = run_installer(job, *args)
+    assert result.returncode == 2, result.stderr
+    assert json.loads(result.stdout)["status"] == "refused"
+    assert job["plist"].read_bytes() == raw
+
+
+def test_environment_variables_that_are_not_a_dict_are_refused_with_a_receipt(job):
+    manifest = job["new"] / "manifest.json"
+    manifest.write_text('{}\n')
+    raw, args = repin_plan(job, {**job["original"], "EnvironmentVariables": "not a dict"})
+    result = run_installer(job, *args, "--runtime-manifest", str(manifest))
+    assert result.returncode == 2, result.stderr
+    assert json.loads(result.stdout)["status"] == "refused"
+    assert job["plist"].read_bytes() == raw
+
+
+def test_refusal_after_the_backup_is_staged_leaves_no_backup(job):
+    # List calls: 1 plan, 2 apply's plan check, 3 the idle check right before the
+    # backup is staged. The edit then fails the re-read that follows the backup.
+    result = apply(job, EDIT_ON_LIST="3")
+    assert result.returncode == 2, result.stderr
+    assert json.loads(result.stdout) == {"status": "refused", "reason": "plist changed since review"}
+    assert sorted(p.name for p in job["plist"].parent.iterdir()) == [LABEL + ".plist", LABEL + ".plist.repin.lock"]
+    assert "bootout" not in (job["home"] / "calls.jsonl").read_text()
 
 
 def test_competing_repin_cannot_acquire_lock(job):

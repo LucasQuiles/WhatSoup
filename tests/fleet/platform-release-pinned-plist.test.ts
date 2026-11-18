@@ -122,9 +122,12 @@ async function makeRelease(
   return program;
 }
 
+/** A loadable instance plist: one top-level dict holding Label and ProgramArguments. */
 function pinnedPlist(program: string, extraArguments: string[] = []): string {
   return [
-    '<plist>',
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<plist version="1.0">',
+    '<dict>',
     '<key>Label</key>',
     '<string>com.whatsoup.agent</string>',
     '<key>ProgramArguments</key>',
@@ -135,6 +138,7 @@ function pinnedPlist(program: string, extraArguments: string[] = []): string {
     '</array>',
     '<key>EnvironmentVariables</key>',
     '<dict><key>PATH</key><string>/usr/bin</string></dict>',
+    '</dict>',
     '</plist>',
   ].join('\n');
 }
@@ -235,6 +239,27 @@ describe('release-pinned launchd plists (#3829)', () => {
       await makeRelease(OUTSIDE_ROOT);
       realFs.symlinkSync(OUTSIDE_ROOT, `${SERVICE_HOME}/releases`);
       return pinnedPlist(`${SERVICE_HOME}/releases/${RELEASE_NAME}/deploy/whatsoup`);
+    }],
+    // The next two pass every other check (in-home target, name, manifest,
+    // digest), so only the lstat checks on the two directories refuse them.
+    ['the release directory is a symlink to a release inside home', async () => {
+      const realFs = await realFsPromise;
+      const held = `${SERVICE_HOME}/.local/opt/whatsoup/held`;
+      await makeRelease(held);
+      realFs.mkdirSync(releases(), { recursive: true });
+      realFs.symlinkSync(`${held}/${RELEASE_NAME}`, `${releases()}/${RELEASE_NAME}`);
+      return pinnedPlist(`${releases()}/${RELEASE_NAME}/deploy/whatsoup`);
+    }],
+    ['the deploy directory is a symlink to a directory inside home', async () => {
+      const realFs = await realFsPromise;
+      const release = `${releases()}/${RELEASE_NAME}`;
+      const heldDeploy = `${SERVICE_HOME}/.local/opt/whatsoup/held-deploy`;
+      realFs.mkdirSync(heldDeploy, { recursive: true });
+      realFs.writeFileSync(`${heldDeploy}/whatsoup`, LAUNCHER_BODY);
+      realFs.mkdirSync(release, { recursive: true });
+      realFs.writeFileSync(`${release}/${MANIFEST}`, manifestFor(RELEASE_NAME));
+      realFs.symlinkSync(heldDeploy, `${release}/deploy`);
+      return pinnedPlist(`${release}/deploy/whatsoup`);
     }],
     ['the program is not deploy/whatsoup', async () =>
       pinnedPlist((await makeRelease(releases())).replace('/deploy/whatsoup', '/deploy/whatsoup-fleet'))],
