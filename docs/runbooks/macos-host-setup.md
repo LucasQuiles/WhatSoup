@@ -20,8 +20,12 @@ The canonical install pattern depends on how the host was originally set up:
 | **LaunchDaemon** (CLI install) | `/Library/LaunchDaemons/com.tailscale.tailscaled.plist` | `/var/run/tailscaled.socket` (default) |
 | **Tailscale.app** (GUI install) | `/Applications/Tailscale.app` present | managed by app |
 
-mini7 uses the LaunchDaemon pattern; mini8 and mini9 use Tailscale.app.
-Do not mix patterns on a single host.
+Hosts differ: some use the LaunchDaemon pattern and others use Tailscale.app.
+Identify the active backend before changing a host. Do not mix active backends
+on a single host. An app process and its network extension are parts of one
+backend, not evidence of two daemons. An installer that accepts only one backend
+type is not a reason to add a second daemon or to migrate a healthy app
+installation.
 
 ### LaunchDaemon pattern — socket pitfall
 
@@ -30,13 +34,15 @@ plist passes `--socket=/var/run/tailscale/tailscaled.sock` (note the extra
 `tailscale/` path component), the CLI cannot reach the daemon even though the
 data plane works fine.
 
-Fix: remove the `--socket` argument from the plist so the daemon binds the
-default path. After editing the plist, **`launchctl kickstart` does not re-read
-the plist** — you must `bootout` then `bootstrap` (or use `launchctl unload` /
-`launchctl load`).
+First identify the installed socket and its clients. Some hosts pass the explicit
+socket path above and others use the default socket, so supply the matching CLI
+`--socket` argument. Do not remove a working socket override without updating its
+consumers. If a coordinated plist change is needed, **`launchctl kickstart` does
+not re-read the plist** — use `bootout` then `bootstrap` in the correct launchd
+domain.
 
 ```sh
-# Correct reload after plist edit (GUI domain example):
+# System LaunchDaemon reload after a coordinated plist edit:
 sudo launchctl bootout system /Library/LaunchDaemons/com.tailscale.tailscaled.plist
 sudo launchctl bootstrap system /Library/LaunchDaemons/com.tailscale.tailscaled.plist
 ```
@@ -198,7 +204,7 @@ The bot wrapper (`~/.local/bin/whatsoup`) follows the same pattern and resolves
 
 | Service | Default port | Notes |
 |---|---|---|
-| WhatSoup Console (fleet) | **9099** | Standard across monitored macOS hosts |
+| WhatSoup Console (fleet) | **9099** | Common default; some hosts use another port |
 | ew-bot health endpoint | **9098** | mini9; kept below the fleet console port |
 | rb-bot health endpoint | **9095** | mini7 |
 | ml-bot health endpoint | **9098** | mini8 |
@@ -207,3 +213,78 @@ When adding a host to monitoring or writing a watchdog, verify the port map
 rather than assuming only the fleet standard. Instance health ports must stay
 inside the `[9090, 9098]` band and must not squat the fleet console port
 (`9099`).
+
+---
+
+## Monitoring and recovery checks
+
+### Deployment identity
+
+- One host does not imply one deployment artifact. Launch agents on one host can
+  run different releases, and a reported commit alone does not identify a locally
+  patched artifact. Keep each release path separate until a qualified deployment
+  reconciles them.
+- The SSH login account is not always the bot's service account. Read the service
+  account's config, keychain context, home and GUI-domain launch agents; a
+  successful SSH login does not qualify those surfaces.
+- Hosts can use different Node version managers. Do not copy one manager's Node
+  path onto a host that uses another.
+
+### Monitor jobs and profiles
+
+- A launchd job whose last exit code is 0 has run. That alone does not establish
+  application health or successful alert delivery.
+- Keep monitor scopes and release paths separate. Copying a `no-bot` profile from
+  a checkout onto the active monitor removes bot coverage.
+- Environment overrides and the private per-user health profile take precedence
+  over tracked profile copies. Identify the active source before deploying a
+  tracked change.
+- A set `BOT_ERRORS_HEALTH_PROFILE` is authoritative: if the file it names is
+  missing or unreadable, the check fails instead of falling back to another copy.
+  The tracked profile copy is used only when that variable is unset and the
+  private per-user profile is absent. A stale path in the variable therefore stops
+  the check until the path is corrected.
+
+### Watchdog acceptance
+
+Prefer the fleet server's `/livez` endpoint when the installed server implements it.
+Require JSON with `alive: true` and a positive PID that matches the fleet process,
+and probe an invalid path as a negative control. Where `/livez` and an invalid
+path return the same HTML page with HTTP 200, keep the legacy check until the
+console receives a qualified upgrade; changing the URL alone would create a false
+liveness claim.
+
+An authenticated check of a fleet API route, such as `GET /api/version`, is also
+valid. Without a token or ticket that route returns 401, which is expected and
+does not justify a restart, so its watchdog must not restart on HTTP
+authorization errors. A bot's `GET /health` differs: without credentials it
+returns the public 200/503 envelope, not 401. A watchdog that checks only the
+bot leaves fleet-process supervision as a separate gap.
+
+### Health and recovery limits
+
+Public health responses establish transport liveness only. Before declaring
+application health, read `status_reasons` and `degradation_causes` from
+authenticated health:
+
+| Diagnostic finding | Recovery boundary |
+|---|---|
+| Turn finalization or completed-delivery identity debt | Inspect retained turn and delivery evidence before any data repair. Do not erase debt or resend messages to clear health; a connected transport does not establish completed delivery. |
+| `degradation_silence_unproven` | Recovery evidence is missing; a restart that only clears the latch does not prove recovery. |
+| `memory_readiness_unknown` | Qualify memory readiness through the installed release's diagnostics. |
+| Healthy authenticated response | A point-in-time observation, not an end-to-end message test. |
+
+A memory readiness value that a release captures once at startup and reuses in
+health responses does not prove a current provider outage. Do not query the
+provider live, rotate credentials or restart only to clear that warning.
+
+A 503 after a recorded WhatsApp logout does not by itself confirm that the linked
+device was removed. Read `auth_failure_class` from authenticated health and follow
+the recovery table in [the main runbook](../runbook.md), section 5.3: re-pair
+only for confirmed removal, with the phone owner's approval; for the parked and
+uninspected 401 classes, check Linked Devices on the primary phone first.
+
+The release observer (`scripts/live-release-observers.ts`) prints release
+integrity and release currency separately. An exit status of 1 with
+`release integrity: clean` and `release currency: target-differs` reports a
+difference from the moving target branch, not drifted release files.

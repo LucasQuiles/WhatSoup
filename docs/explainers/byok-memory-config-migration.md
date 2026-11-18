@@ -478,9 +478,13 @@ After restart:
 
 ## Rollback
 
-Every write creates `config.json.bak-<timestamp>` unless `--no-backup` is passed.
+Every migration write creates `config.json.bak-<timestamp>` unless `--no-backup` is passed.
 
 Preview restoration of the most recent backup with `npm run migrate-memory-config -- --instance <name> --rollback`; add `--write` only after reviewing the preview. The helper refuses a backup whose modification time is newer than the current config. Preserve intervening changes and coordinate the instance restart before applying a rollback. Manual restoration is also possible after comparing the backup with the current file. Auth state remains in place because the migrator never touched it.
+
+A write-mode rollback keeps the backup it restores from, so running it again selects the same backup rather than an older one. Before it replaces `config.json`, it copies the current file to `config.json.rollback-safety-<timestamp>` (with a `-1`, `-2` suffix if that name is taken); backup selection never picks those copies. The restore goes through a temporary copy in the same directory and a single rename. Each new file is created owner-only (mode `0600`) before any byte is written, and the restored config belongs to the account that ran the rollback. The text output and `--json` both report the backup used and the safety copy created.
+
+The rollback refuses before it writes anything when the config or the selected backup belongs to another account than the one running it, so run it as the account that owns the instance config, not as an administrator. In write mode it holds the per-config lock that the fleet's config route also takes, from backup selection to the final rename: while that lock is held, or was left in the current boot by a writer that stopped, the rollback restores nothing. Like other private config writers, a write-mode rollback also refuses a `config.json` or an instance directory that is a symbolic link. If the final rename fails, `config.json` is unchanged and the error names the safety copy that was kept. Nothing removes safety copies automatically; delete them by hand once the restored config is confirmed. A run over several instances stops at the first failure, and still prints the instances it already restored.
 
 ## Remaining Work
 
