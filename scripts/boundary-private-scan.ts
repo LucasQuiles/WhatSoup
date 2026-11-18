@@ -4,11 +4,13 @@
  * - `boundary (private)`: after Quality completes on a pull request, bind the candidate (the
  *   Quality run's head and the tip of the pull request's base branch, read at run time), fetch
  *   its commits into a separate bare git directory and read them only as objects, scan them with
- *   the repository hygiene guard's own code and the private term file (tree to tree and each
- *   commit's added lines, path names, commit messages and identities, the head branch name, and
- *   the title and body), and publish the check run on the candidate head after reading the pull
- *   request and base tip again. No file of the candidate is executed, sourced, imported,
- *   installed or used as configuration.
+ *   the repository hygiene guard's own code and the private term file (the added lines and path
+ *   names base to head; each commit's added lines, sensitive path classes, message and
+ *   identities; the head branch name; and the title and body), and publish the check run on the
+ *   candidate head after reading the pull request and base tip again. A path name that one
+ *   commit adds and a later commit renames or deletes is not scanned. A failed check-run request
+ *   publishes nothing. No file of the candidate is executed, sourced, imported, installed or
+ *   used as configuration.
  * - The text check: scan issue text, comments and reviews with the code of the guard's --text
  *   mode; the hourly listing starts at a fixed time until a scheduled run succeeds and follows
  *   each next-page link on the API origin only.

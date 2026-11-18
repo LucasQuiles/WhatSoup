@@ -180,7 +180,8 @@ jobs:
           test ! -e "$RUNNER_TEMP/private-terms.json"
 
       # Success only for a passing scan result, after the removal step succeeded, for a pull request
-      # that still matches its binding; any earlier refusal or fault publishes failure.
+      # that still matches its binding. Once the trusted files are in place, any earlier refusal or
+      # fault publishes failure; a failed check-run request publishes nothing.
       - name: Publish the boundary (private) check run
         if: always()
         shell: bash

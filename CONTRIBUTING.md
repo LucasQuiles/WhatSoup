@@ -25,11 +25,16 @@ A pull request opened from a machine without the file is still checked on GitHub
 Two hosted checks hold the term list as the environment secret
 `WHATSOUP_PRIVATE_TERMS_JSON` (the base64 of the minified term file, on one line),
 which maintainers set; contributors set nothing. `boundary (private)` scans each
-pull request, forks included: its lines, path names, commits, head branch name,
-title and body. The text check scans issues, comments and reviews. Both print
-counts by rule code only. Pushes to `main`, branch pushes with no pull request,
-tags and the merge commit message written at merge time are not scanned by a
-hosted check. See [the quality checklist](docs/contributing/quality-guardrails-checklist.md).
+pull request, forks included: the lines it adds and the path names it adds or
+renames, base to head; the lines each of its commits adds; its commit messages
+and identities; its head branch name; and its title and body. A path name that
+one commit adds and a later commit renames or deletes is not scanned. The text
+check scans issues, comments and reviews. Both print counts by rule code, with
+item numbers or commit ids, never a matched text. A run whose check-run request
+fails, or that is cancelled or times out, posts no result. Pushes to `main`,
+branch pushes with no pull request, tags and the merge commit message written at
+merge time are not scanned by a hosted check. See
+[the quality checklist](docs/contributing/quality-guardrails-checklist.md).
 The private tree check below stays local.
 
 An example with invented names:
