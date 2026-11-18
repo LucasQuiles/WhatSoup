@@ -629,14 +629,30 @@ else
   # WHATSOUP_RELEASE_DRIFT_INSTANCE, from this file, never from bot-errors.env:
   # every BOT ERRORS unit loads that file. The wrapper ignores WHATSOUP_INSTANCE,
   # which also selects per-instance agent state (deploy/hooks). Setup writes the
-  # file only from an explicit label and never replaces one.
+  # file only from an explicit label and never replaces or follows an existing
+  # path: any entry, a symlink or a dangling symlink included, counts as present,
+  # and noclobber (set -C) creates the file with O_CREAT|O_EXCL, so a path that
+  # appears after this check is refused too.
   release_drift_env="$HOME/.config/whatsoup/release-drift.env"
-  if [ -f "$release_drift_env" ]; then
-    echo "  ✓ Existing release-drift instance label preserved at ~/.config/whatsoup/release-drift.env"
+  if [ -e "$release_drift_env" ] || [ -L "$release_drift_env" ]; then
+    release_drift_existing="$(read_env_file_value "$release_drift_env" WHATSOUP_RELEASE_DRIFT_INSTANCE)"
+    if [ -z "$release_drift_existing" ]; then
+      echo "  ⚠ ~/.config/whatsoup/release-drift.env exists but sets no WHATSOUP_RELEASE_DRIFT_INSTANCE: whatsoup-release-drift.service will fail until it does"
+      if [ -n "$release_drift_instance" ]; then
+        echo "    The requested label was not applied: setup never replaces an existing file."
+      fi
+    elif [ -n "$release_drift_instance" ] && [ "$release_drift_existing" != "$release_drift_instance" ]; then
+      echo "  ⚠ Existing release-drift instance label kept at ~/.config/whatsoup/release-drift.env: the requested WHATSOUP_RELEASE_DRIFT_INSTANCE was ignored"
+    else
+      echo "  ✓ Existing release-drift instance label preserved at ~/.config/whatsoup/release-drift.env"
+    fi
   elif [ -n "$release_drift_instance" ]; then
     mkdir -p "$HOME/.config/whatsoup"
-    (umask 077 && printf 'WHATSOUP_RELEASE_DRIFT_INSTANCE=%s\n' "$release_drift_instance" > "$release_drift_env")
-    echo "  ✓ Release-drift instance label written to ~/.config/whatsoup/release-drift.env"
+    if (set -C; umask 077; printf 'WHATSOUP_RELEASE_DRIFT_INSTANCE=%s\n' "$release_drift_instance" > "$release_drift_env"); then
+      echo "  ✓ Release-drift instance label written to ~/.config/whatsoup/release-drift.env"
+    else
+      echo "  ⚠ Release-drift instance label was not written: ~/.config/whatsoup/release-drift.env appeared after setup's check or cannot be created, and setup never replaces it"
+    fi
   else
     echo "  - Release-drift instance label not set: write WHATSOUP_RELEASE_DRIFT_INSTANCE=<instance> to ~/.config/whatsoup/release-drift.env before enabling whatsoup-release-drift.timer"
   fi
@@ -802,8 +818,9 @@ else
   echo ""
   echo "  To check the deployed release for drift and currency every 5 minutes (once per host),"
   echo "  give the timer the bot instance that labels its BOT ERRORS alerts (unless setup wrote"
-  echo "  it from WHATSOUP_RELEASE_DRIFT_INSTANCE), then enable it:"
-  echo "     echo WHATSOUP_RELEASE_DRIFT_INSTANCE=<instance> > ~/.config/whatsoup/release-drift.env"
+  echo "  it from WHATSOUP_RELEASE_DRIFT_INSTANCE; this command never replaces an existing file),"
+  echo "  then enable it:"
+  echo "     (set -C; umask 077; echo WHATSOUP_RELEASE_DRIFT_INSTANCE=<instance> > ~/.config/whatsoup/release-drift.env)"
   echo "     systemctl --user enable --now whatsoup-release-drift.timer"
 fi
 echo ""
