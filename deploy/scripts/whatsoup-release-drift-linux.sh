@@ -21,14 +21,18 @@ set -uo pipefail
 LAUNCHER="${WHATSOUP_LAUNCHER:-$HOME/.local/bin/whatsoup}"
 TARGET_URL="${WHATSOUP_RELEASE_TARGET_URL:-git@github.com:LucasQuiles/WhatSoup.git}"
 TARGET_REF="${WHATSOUP_RELEASE_TARGET_REF:-refs/heads/main}"
-# The BOT ERRORS instance label of this host's release alerts. The systemd unit
-# reads it from ~/.config/whatsoup/release-drift.env (see the unit file).
-INSTANCE="${WHATSOUP_INSTANCE:-}"
+# The BOT ERRORS instance label of this host's release alerts and clears. The
+# systemd unit loads it from ~/.config/whatsoup/release-drift.env (see the unit
+# file), the one file deploy/setup.sh writes this name to. WHATSOUP_INSTANCE is
+# never read: bot-errors.env, the user manager or a drop-in can set it for other
+# units and per-instance agent state, which would label alerts for another
+# instance.
+INSTANCE="${WHATSOUP_RELEASE_DRIFT_INSTANCE:-}"
 export WHATSOUP_RELEASE_DRIFT_LOG_DIR="${WHATSOUP_RELEASE_DRIFT_LOG_DIR:-$HOME/.local/state/whatsoup/logs}"
 
 fail(){ echo "whatsoup-release-drift-linux: $1" >&2; exit "${2:-2}"; }
 
-[ -n "$INSTANCE" ] || fail "WHATSOUP_INSTANCE is not set; write WHATSOUP_INSTANCE=<instance> to ~/.config/whatsoup/release-drift.env"
+[ -n "$INSTANCE" ] || fail "WHATSOUP_RELEASE_DRIFT_INSTANCE is not set; write WHATSOUP_RELEASE_DRIFT_INSTANCE=<instance> to ~/.config/whatsoup/release-drift.env"
 
 # Resolve deployed release root from the launcher symlink:
 #   <root>/deploy/whatsoup  ->  strip trailing /deploy/whatsoup

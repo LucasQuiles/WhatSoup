@@ -7,11 +7,12 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 EnvironmentFile=%h/.config/whatsoup/bot-errors.env
-# WHATSOUP_INSTANCE, the BOT ERRORS instance label of this host's release alerts,
-# comes from its own file and never from bot-errors.env: every BOT ERRORS unit
-# loads that file, and the same variable selects per-instance agent state
-# elsewhere. deploy/setup.sh writes it from WHATSOUP_RELEASE_DRIFT_INSTANCE. A
-# later file overrides an earlier one, and the "-" lets a missing file reach the
+# WHATSOUP_RELEASE_DRIFT_INSTANCE, the BOT ERRORS instance label of this host's
+# release alerts, comes from its own file and never from bot-errors.env, which
+# every BOT ERRORS unit loads. deploy/setup.sh writes this name to that file and
+# nowhere else. The wrapper never reads WHATSOUP_INSTANCE, which bot-errors.env,
+# the user manager or a drop-in can set for per-instance agent state. A later
+# file overrides an earlier one, and the "-" lets a missing file reach the
 # wrapper, whose exit 2 fails the unit.
 EnvironmentFile=-%h/.config/whatsoup/release-drift.env
 ExecStart=%h/.local/bin/whatsoup-release-drift-linux.sh
