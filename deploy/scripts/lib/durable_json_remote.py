@@ -184,8 +184,12 @@ def durable_json_target(
     )
 
 
-def _open_directory(name: str, *, dir_fd: int) -> int:
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(
+def _open_directory(name: str, *, dir_fd: int, search_only: bool = False) -> int:
+    # search_only descriptors only traverse (openat, fstat), so they need search
+    # permission, not read permission; O_PATH keeps drwx--x--x ancestors usable.
+    # The returned write parent is fsynced and stays a real O_RDONLY descriptor.
+    access = (getattr(os, "O_PATH", 0) if search_only else 0) or os.O_RDONLY
+    flags = access | os.O_DIRECTORY | os.O_CLOEXEC | getattr(
         os,
         "O_NOFOLLOW",
         0,
@@ -207,10 +211,24 @@ def _open_directory(name: str, *, dir_fd: int) -> int:
 
 
 def _open_target_parent(target: DurableJsonTarget) -> tuple[int, str]:
-    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    relative_parts = target.relative_path.parts
+    root_parts = target.trusted_root.parts[1:]
+    # The last directory opened is the returned (fsynced) parent; every earlier
+    # one is traversal-only.
+    final_is_root = len(relative_parts) <= 1
+    root_access = (
+        os.O_RDONLY
+        if final_is_root and not root_parts
+        else getattr(os, "O_PATH", 0) or os.O_RDONLY
+    )
+    descriptor = os.open("/", root_access | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
-        for component in target.trusted_root.parts[1:]:
-            next_descriptor = _open_directory(component, dir_fd=descriptor)
+        for index, component in enumerate(root_parts):
+            next_descriptor = _open_directory(
+                component,
+                dir_fd=descriptor,
+                search_only=not (final_is_root and index == len(root_parts) - 1),
+            )
             os.close(descriptor)
             descriptor = next_descriptor
         root_stat = os.fstat(descriptor)
@@ -219,9 +237,12 @@ def _open_target_parent(target: DurableJsonTarget) -> tuple[int, str]:
             or stat.S_IMODE(root_stat.st_mode) & 0o077
         ):
             raise DurableWriteError(ErrorClass.PERMISSION.value)
-        relative_parts = target.relative_path.parts
-        for component in relative_parts[:-1]:
-            next_descriptor = _open_directory(component, dir_fd=descriptor)
+        for index, component in enumerate(relative_parts[:-1]):
+            next_descriptor = _open_directory(
+                component,
+                dir_fd=descriptor,
+                search_only=index < len(relative_parts) - 2,
+            )
             component_stat = os.fstat(next_descriptor)
             if (
                 component_stat.st_uid != os.getuid()

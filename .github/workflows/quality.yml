@@ -32,7 +32,7 @@ permissions:
 jobs:
   quality:
     name: quality (24.x)
-    # The three Ubuntu jobs here pin ubuntu-24.04: ubuntu-26.04 (now ubuntu-latest) breaks
+    # The Ubuntu jobs here pin ubuntu-24.04: ubuntu-26.04 (now ubuntu-latest) breaks
     # the re2 build on Node 25 (GCC 15), the GNU coreutils timeout the boundary-run
     # validator requires, and the Playwright Chromium install. Move back once those work.
     runs-on: ubuntu-24.04
@@ -575,6 +575,31 @@ jobs:
       # on is covered by the platform itself rather than by simulation.
       - name: Credential-probe boundedness (real macOS)
         run: npm run test:credential-probe-boundedness
+
+  # Forced native build of the Docker dependency stage (#3889): re2 is built from source as
+  # if its prebuilt download had failed. It runs as its own job, in parallel with
+  # quality (24.x), so the authority job keeps the time budget main sets for it. It is not
+  # one of the required contexts.
+  native-build-fallback:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Build Docker dependency stage with native builds forced
+        # Proves the source-build fallback works when a prebuilt download fails (#3889).
+        timeout-minutes: 10
+        run: docker build --file docker/Dockerfile --target deps --build-arg RE2_DOWNLOAD_FORCE_BUILD=1 --tag whatsoup-ci-deps-native .
+
+      - name: Load the source-built re2 module
+        # The forced build must leave a binding that loads and matches, not only an exit code of 0.
+        timeout-minutes: 2
+        run: |
+          docker run --rm --network none whatsoup-ci-deps-native \
+            node -e 'const RE2 = require("re2"); if (!new RE2("a+").test("baaa")) process.exit(1);'
 
   # Perf lane (T5 b-12; 19-performance-budget §2). Report-only while the §1
   # numbers await owner sign-off; PERF_LANE_ENFORCE=1 flips it blocking.
