@@ -5,12 +5,12 @@
  *   Quality run's head and the tip of the pull request's base branch, read at run time), fetch
  *   its commits into a separate bare git directory and read them only as objects, scan them with
  *   the repository hygiene guard's own code and the private term file (the added lines and path
- *   names base to head; each commit's added lines, sensitive path classes, message and
- *   identities; the head branch name; and the title and body), and publish the check run on the
- *   candidate head after reading the pull request and base tip again. A path name that one
- *   commit adds and a later commit renames or deletes is not scanned. A failed check-run request
- *   publishes nothing. No file of the candidate is executed, sourced, imported, installed or
- *   used as configuration.
+ *   names base to head; each commit's added lines, sensitive path classes, message, and
+ *   identities without the person-name rule; the head branch name; and the title and body), and
+ *   publish the check run on the candidate head after reading the pull request and base tip
+ *   again. A path name that one commit adds and a later commit renames or deletes is not scanned
+ *   for private names. A run that ends before it creates the check run publishes nothing. No file
+ *   of the candidate is executed, sourced, imported, installed or used as configuration.
  * - The text check: scan issue text, comments and reviews with the code of the guard's --text
  *   mode; the hourly listing starts at a fixed time until a scheduled run succeeds and follows
  *   each next-page link on the API origin only.
@@ -24,8 +24,9 @@
  *   collect-text --out DIR    GITHUB_TOKEN, GITHUB_REPOSITORY, GITHUB_EVENT_NAME, GITHUB_EVENT_PATH
  *   scan-text --out DIR       WHATSOUP_PRIVATE_TERMS_FILE, WHATSOUP_REQUIRE_PRIVATE_TERMS=1
  *
- * Output is public: fixed lines, counts by mode and rule code, item kinds and numbers. Never a
- * matched text, a term, a path, a line of a scanned file or an error's own text.
+ * Output is public: fixed lines, counts by mode and rule code, item kinds, numbers and ids, and
+ * the bound pull request number and commit ids. Never a matched text, a term, a path, a line of a
+ * scanned file or an error's own text.
  * Exit codes: 0 pass, 1 findings, 2 refusal or fault.
  */
 import { execFileSync } from 'node:child_process';

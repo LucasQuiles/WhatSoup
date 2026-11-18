@@ -10,8 +10,9 @@ name: Private boundary
 #   commit, and one pinned action.
 # - The candidate is data: the Quality run's head and the tip of the pull request's base branch,
 #   bound through the API and fetched into a separate bare git directory.
-# - The log and the check run give counts by mode and rule code only. The whole-tree baseline
-#   check (guard:repo:tree) stays local and does not run here.
+# - The log gives the bound pull request number, commit ids and counts by mode and rule code; the
+#   check run gives the counts. Neither gives a matched text. The whole-tree baseline check
+#   (guard:repo:tree) stays local and does not run here.
 # - Only pull_request runs of Quality are bound. Before this check is required with a merge
 #   queue, it needs a merge_group binding, or the queue waits for a check that never comes.
 
@@ -180,8 +181,9 @@ jobs:
           test ! -e "$RUNNER_TEMP/private-terms.json"
 
       # Success only for a passing scan result, after the removal step succeeded, for a pull request
-      # that still matches its binding. Once the trusted files are in place, any earlier refusal or
-      # fault publishes failure; a failed check-run request publishes nothing.
+      # that still matches its binding. With Node, the trusted scanner and a well-formed head id in
+      # place, an earlier refusal or fault publishes failure; a run that ends before it creates the
+      # check run publishes nothing.
       - name: Publish the boundary (private) check run
         if: always()
         shell: bash
