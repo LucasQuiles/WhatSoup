@@ -21,7 +21,11 @@ const SCOPE_FIX = 'Set agentOptions.sessionScope to per_chat, or remove codex-cl
   + ' fallbacks, then restart.';
 const ADMISSION_FIX = 'Remove codex-cli from the provider and the fallbacks, or run the host without host work'
   + ' admission, then restart. Changing sessionScope does not stop this warning.';
-const CLEAR_RULE = 'Clears at the next start whose configuration no longer carries this risk.';
+// The dispatcher's clearRequirement check looks for the clear's source in the
+// text; a rule without it adds a mismatch note to the closing card.
+function clearRule(source: string): string {
+  return `cleared by ${source} at the next start whose configuration no longer carries this risk`;
+}
 
 function captureLogger() {
   return { error: vi.fn() };
@@ -259,7 +263,7 @@ describe('codex deferred-defect startup check', () => {
         recoverability: 'operator_recoverable',
         confidence: 'confirmed',
         operatorAction: SCOPE_FIX,
-        clearRequirement: CLEAR_RULE,
+        clearRequirement: clearRule('codex_resume_needs_per_chat_scope'),
       },
     });
     expect(cards.get('codex_resume_unproven_under_host_admission')).toEqual({
@@ -270,7 +274,7 @@ describe('codex deferred-defect startup check', () => {
         recoverability: 'operator_recoverable',
         confidence: 'confirmed',
         operatorAction: ADMISSION_FIX,
-        clearRequirement: CLEAR_RULE,
+        clearRequirement: clearRule('codex_resume_unproven_under_host_admission'),
       },
     });
   });
