@@ -142,7 +142,7 @@ if [ "${1:-}" = "--reconcile" ]; then
   fi
 
   # Expected service sets — MUST mirror the step-4 install surface:
-  # the 7 named systemd cp targets enumerated below + every entry of
+  # the 9 named systemd cp targets enumerated below + every entry of
   # BOT_ERRORS_SYSTEMD_UNITS, and the launchd labels in LAUNCHD_TIMER_LABELS.
   # Per-instance units (whatsoup@<name>.service, the fleet-generated
   # com.whatsoup.<name>.plist) are intentionally OUT of the expected set —
@@ -158,6 +158,8 @@ if [ "${1:-}" = "--reconcile" ]; then
     "whatsoup-reply-guarantee.timer"
     "harness-maintenance.service"
     "harness-maintenance.timer"
+    "whatsoup-release-drift.service"
+    "whatsoup-release-drift.timer"
   )
   RECONCILE_SYSTEMD_EXPECTED+=("${BOT_ERRORS_SYSTEMD_UNITS[@]}")
 
@@ -496,6 +498,10 @@ echo "  ✓ whatsoup-reply-guarantee-drain → $REPO_ROOT/deploy/scripts/reply-g
 ln -sf "$REPO_ROOT/deploy/scripts/heal-notify.sh" "$BIN_DIR/whatsoup-heal-notify"
 chmod +x "$REPO_ROOT/deploy/scripts/heal-notify.sh"
 echo "  ✓ whatsoup-heal-notify → $REPO_ROOT/deploy/scripts/heal-notify.sh"
+# Keeps its .sh name: deploy/whatsoup-release-drift.service executes it by that name.
+ln -sf "$REPO_ROOT/deploy/scripts/whatsoup-release-drift-linux.sh" "$BIN_DIR/whatsoup-release-drift-linux.sh"
+chmod +x "$REPO_ROOT/deploy/scripts/whatsoup-release-drift-linux.sh"
+echo "  ✓ whatsoup-release-drift-linux.sh → $REPO_ROOT/deploy/scripts/whatsoup-release-drift-linux.sh"
 
 # Ensure ~/.local/bin is on PATH
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
@@ -577,6 +583,8 @@ else
   cp "$REPO_ROOT/deploy/whatsoup-reply-guarantee.timer" "$SYSTEMD_DIR/whatsoup-reply-guarantee.timer"
   cp "$REPO_ROOT/deploy/harness-maintenance.service" "$SYSTEMD_DIR/harness-maintenance.service"
   cp "$REPO_ROOT/deploy/harness-maintenance.timer" "$SYSTEMD_DIR/harness-maintenance.timer"
+  cp "$REPO_ROOT/deploy/whatsoup-release-drift.service" "$SYSTEMD_DIR/whatsoup-release-drift.service"
+  cp "$REPO_ROOT/deploy/whatsoup-release-drift.timer" "$SYSTEMD_DIR/whatsoup-release-drift.timer"
   for unit in "${BOT_ERRORS_SYSTEMD_UNITS[@]}"; do
     cp "$REPO_ROOT/deploy/$unit" "$SYSTEMD_DIR/$unit"
   done
@@ -608,6 +616,7 @@ else
   echo "  ✓ whatsoup-heal-notify@.service installed"
   echo "  ✓ whatsoup-reply-guarantee.{service,timer} installed"
   echo "  ✓ harness-maintenance.{service,timer} installed"
+  echo "  ✓ whatsoup-release-drift.{service,timer} installed"
   echo "  ✓ BOT ERRORS service/timer units installed"
 fi
 mkdir -p "$HOME/.config/whatsoup"
@@ -768,5 +777,8 @@ else
   echo "  To run BOT ERRORS monitoring after filling ~/.config/whatsoup/bot-errors.env:"
   echo "     systemctl --user enable --now bot-errors-dispatcher.service bot-errors-q-loop.service bot-errors-collector.service"
   echo "     systemctl --user enable --now bot-errors-deadman.timer bot-errors-health-check.timer bot-errors-heartbeat-watchdog.timer bot-errors-runtime-staleness.timer"
+  echo ""
+  echo "  To check the deployed release for drift and currency every 5 minutes (once per host):"
+  echo "     systemctl --user enable --now whatsoup-release-drift.timer"
 fi
 echo ""
