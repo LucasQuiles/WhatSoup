@@ -40,9 +40,9 @@ export const OPEN_RECOVERIES_CTE_SQL = `open_recoveries AS (
  * immutable pending links also keep proven closed catch-ups out of this count.
  *
  * The four `debt_terminal` terms repeat, term for term, the WHERE clause of the
- * partial index `idx_turn_terminal_failed_reply_debt`. SQLite uses a partial
- * index only when the query's WHERE implies the index's, so change both
- * together; `tests/core/failed-terminal-debt-index.test.ts` fails on drift.
+ * partial index `idx_turn_terminal_failed_reply_debt`. SQLite uses it only when
+ * the query's WHERE implies the index's, so change both together; the plan test
+ * fails when the selector stops implying it, not when a term is only added.
  */
 const UNOWNED_FAILED_TERMINAL_PREDICATES_SQL = `debt_terminal.inbound_disposition = 'failed_terminal'
             AND debt_terminal.reply_guarantee_disarmed = 0
@@ -62,9 +62,9 @@ const UNOWNED_FAILED_TERMINAL_PREDICATES_SQL = `debt_terminal.inbound_dispositio
             )`;
 
 /**
- * Each inbound owed a reply, once. CROSS JOIN fixes the debt index as the outer
- * loop, so the read visits debt rows only and finds each source inbound by row
- * id; DISTINCT folds several failed generations of one inbound into one debt.
+ * Each inbound owed a reply, once. CROSS JOIN fixes debt_terminal as the outer
+ * loop; SQLite picks its access path (the plan test expects the debt index). Each
+ * source is found by row id; DISTINCT folds failed generations into one debt.
  */
 export const UNOWNED_FAILED_TERMINAL_SOURCES_SQL = `
           SELECT DISTINCT debt_source.seq AS inbound_seq

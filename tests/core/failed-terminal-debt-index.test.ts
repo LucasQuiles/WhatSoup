@@ -1,9 +1,14 @@
 /**
- * The failed-terminal reply-debt selector runs on every supervisor health read
- * and, keyed per aged record, inside the terminal-records retention DELETE.
- * Both must reach debt rows through the partial debt index: no full scan of
- * terminal history or inbound events for this term, and no per-candidate
- * re-run of the whole debt set inside the retention write transaction.
+ * Plan checks for the two failed-terminal reply-debt statements: the health read
+ * and the terminal-records retention DELETE. They run EXPLAIN QUERY PLAN on an
+ * empty, fully migrated database with SQLite's default estimates (production code
+ * runs no ANALYZE) and match plan detail lines only, not the plan tree. The health
+ * read must name the debt index once, find each source by row id, and show no bare
+ * scan of either debt alias. The DELETE must show no co-routine or materialized
+ * subquery anywhere, one keyed debt-index search and the row-id lookup. They do
+ * not show that the probe is keyed on the outer candidate (the retention cases in
+ * failed-terminal-recovery-health.test.ts check the rows kept) or the cost on a
+ * populated database, and an equally efficient plan of another shape fails them.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Database } from '../../src/core/database.ts';
