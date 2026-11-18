@@ -226,24 +226,27 @@ inside the `[9090, 9098]` band and must not squat the fleet console port
 - Environment overrides and the private per-user health profile take precedence
   over tracked profile copies. Identify the active source before deploying a
   tracked change.
-- An environment file sourced after the plist environment overrides the plist's
-  profile path. A stale path there is configuration drift that a script-relative
-  fallback can hide: correct the path, then verify that the profile resolves
-  without the fallback.
+- A set `BOT_ERRORS_HEALTH_PROFILE` is authoritative: if the file it names is
+  missing or unreadable, the check fails instead of falling back to another copy.
+  The tracked profile copy is used only when that variable is unset and the
+  private per-user profile is absent. A stale path in the variable therefore stops
+  the check until the path is corrected.
 
 ### Watchdog acceptance
 
-Prefer the rendered `/livez` endpoint when the installed server implements it.
+Prefer the fleet server's `/livez` endpoint when the installed server implements it.
 Require JSON with `alive: true` and a positive PID that matches the fleet process,
 and probe an invalid path as a negative control. Where `/livez` and an invalid
 path return the same HTML page with HTTP 200, keep the legacy check until the
 console receives a qualified upgrade; changing the URL alone would create a false
 liveness claim.
 
-An authenticated check is also valid. Without credentials it returns 401, which is
-expected and does not justify a restart, so its watchdog must not restart on HTTP
-authorization errors. A watchdog that checks only the bot leaves fleet-process
-supervision as a separate gap.
+An authenticated check of a fleet API route, such as `GET /api/version`, is also
+valid. Without a token or ticket that route returns 401, which is expected and
+does not justify a restart, so its watchdog must not restart on HTTP
+authorization errors. A bot's `GET /health` differs: without credentials it
+returns the public 200/503 envelope, not 401. A watchdog that checks only the
+bot leaves fleet-process supervision as a separate gap.
 
 ### Health and recovery limits
 
@@ -262,8 +265,13 @@ A memory readiness value that a release captures once at startup and reuses in
 health responses does not prove a current provider outage. Do not query the
 provider live, rotate credentials or restart only to clear that warning.
 
-An instance that returns 503 after a recorded WhatsApp logout needs its phone
-owner to pair it again under Linked Devices.
+A 503 after a recorded WhatsApp logout does not by itself confirm that the linked
+device was removed. Read `auth_failure_class` from authenticated health and follow
+the recovery table in [the main runbook](../runbook.md), section 5.3: re-pair
+only for confirmed removal, with the phone owner's approval; for the parked and
+uninspected 401 classes, check Linked Devices on the primary phone first.
 
-A release integrity check that fails only because the release differs from a
-moving target branch reports that difference, not corrupt files.
+The release observer (`scripts/live-release-observers.ts`) prints release
+integrity and release currency separately. An exit status of 1 with
+`release integrity: clean` and `release currency: target-differs` reports a
+difference from the moving target branch, not drifted release files.
