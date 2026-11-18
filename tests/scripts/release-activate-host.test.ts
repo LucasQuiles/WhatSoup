@@ -1047,6 +1047,32 @@ describe('release:activate-host reviewed outside-unit declarations', () => {
     expect((await planHostUnit(world, declaration)).ready).toBe(true);
   });
 
+  // A non-empty plist left in ~/Library/LaunchAgents can load at the next login, so only the stub skips review.
+  it.each([
+    { name: 'an interpreter plist', args: ['/usr/bin/python3', '/tmp/evil.py'] },
+    { name: 'a non-interpreter plist', args: ['/opt/example/bin/agent', '--run'] },
+  ])('refuses $name under unloaded-113 before reading launchd', async ({ args }) => {
+    const world = twoMemberWorld(); const label = 'com.google.keystone.agent';
+    const source = plist(label, args, path.join(world.root, 'outside')); world.addJob(label, source); world.setFailure('outside-unloaded-113');
+    const printed: string[] = []; const baseExec = world.host.exec;
+    world.host.exec = async (file, execArgs, options) => {
+      if (file === '/bin/launchctl' && execArgs[1] === `gui/501/${label}`) printed.push(execArgs.join(' '));
+      return baseExec(file, execArgs, options);
+    };
+    const declaration = {
+      schemaVersion: 3, members: members(world), hostAuxiliaries: [], outsideUnits: [{
+        label, plistSha256: digest(source), loadState: 'unloaded-113',
+        reviewInputs: { roots: [world.newRelease, world.oldRelease].sort(), links: [world.link], files: [], argumentBindings: [] },
+      }],
+    };
+    const plan = await planHostUnit(world, declaration);
+    expect(plan.ready).toBe(false);
+    expect(plan.document.preconditions).toEqual(expect.arrayContaining([
+      { id: `outside-unit:${label}`, ok: false, detail: 'unloaded-113 plist is not a zero-byte stub' },
+    ]));
+    expect(printed).toEqual([]);
+  });
+
   it('rejects an XML-escaped reference to a selected host launcher', async () => {
     const world = twoMemberWorld(); const outside = reviewedInterpreter(world);
     writeFileSync(path.join(world.oldRelease, 'deploy', 'whatsoup-fleet'), '#!/bin/bash\n', { mode: 0o755 });
@@ -1167,6 +1193,69 @@ describe('release:activate-host closed host auxiliaries', () => {
     ]));
   });
 
+  // With no closed contract (only com.bot-errors.health reaches it), every value must name the path it spells
+  // and the file launchd starts must be in the target release.
+  const BOT_ERRORS = 'com.bot-errors.health';
+  const pathRebaseWorld = () => {
+    const world = twoMemberWorld();
+    const checkout = path.join(world.root, 'checkout'); writeRelease(checkout, OLD, true);
+    const runner = `${checkout}/deploy/scripts/bot-errors-runner.py`;
+    return { world, checkout, runner, declaration: { schemaVersion: 2, members: members(world), hostAuxiliaries: [{ label: BOT_ERRORS, mode: 'path-rebase', expectCurrent: checkout }] } };
+  };
+  /** Insert plist lines before WorkingDirectory, as the plain bot-errors case does. */
+  const withLines = (source: string, ...lines: string[]): string => source.replace('  <key>WorkingDirectory</key>', [...lines, '  <key>WorkingDirectory</key>'].join('\n'));
+  const environment = (...entries: string[]): string[] => ['  <key>EnvironmentVariables</key>', `  <dict>${entries.join('')}</dict>`];
+  const NOT_CLOSED = 'absolute plist string value is not in closed form (empty, . or .. segment, or trailing slash)';
+  const OUTSIDE_RELEASE = 'executed program or script is not a closed-form path under the target release';
+  const NO_SCRIPT = 'interpreter launch form names no script argument (inline, module, or option form)';
+  const INTERPRETER_ENVIRONMENT = 'EnvironmentVariables are malformed or set an interpreter-affecting key';
+  const pathRebaseRefusals: Array<{ name: string; detail: string; build: (root: string, runner: string) => string }> = [
+    { name: 'a dot-segment script beside the rebased runner (the reviewed hostile argv)', detail: NOT_CLOSED, build: (root, runner) => plist(BOT_ERRORS, ['/usr/bin/python3', `${root}/../../../../tmp/evil.py`, runner], root) },
+    { name: 'a script at <root>/./deploy', detail: NOT_CLOSED, build: (root) => plist(BOT_ERRORS, ['/usr/bin/python3', `${root}/./deploy/scripts/bot-errors-runner.py`], root) },
+    { name: 'a script at <root>//deploy', detail: NOT_CLOSED, build: (root) => plist(BOT_ERRORS, ['/usr/bin/python3', `${root}//deploy/scripts/bot-errors-runner.py`], root) },
+    { name: 'a WorkingDirectory <root>/../x', detail: NOT_CLOSED, build: (root, runner) => plist(BOT_ERRORS, ['/usr/bin/python3', runner], `${root}/../x`) },
+    { name: 'an environment value <root>/../x', detail: NOT_CLOSED, build: (root, runner) => withLines(plist(BOT_ERRORS, ['/usr/bin/python3', runner], root), ...environment(`<key>BOT_ERRORS_STATE_DIR</key><string>${root}/../x</string>`)) },
+    { name: 'a prefix sibling whose dot segments name the old release', detail: NOT_CLOSED, build: (root, runner) => withLines(plist(BOT_ERRORS, ['/usr/bin/python3', runner], root), '  <key>SiblingLog</key>', `  <string>${root}.bak/../${path.basename(root)}/log</string>`) },
+    { name: 'a <parent>/./<basename> value that never contains the root string', detail: NOT_CLOSED, build: (root, runner) => withLines(plist(BOT_ERRORS, ['/usr/bin/python3', runner], root), '  <key>Profile</key>', `  <string>${path.dirname(root)}/./${path.basename(root)}/deploy/health-profiles/host-a.json</string>`) },
+    { name: 'a Python script outside the release ahead of a rebased argument', detail: OUTSIDE_RELEASE, build: (root, runner) => plist(BOT_ERRORS, ['/usr/bin/python3', '/tmp/x.py', runner], root) },
+    { name: 'a non-interpreter program outside the release', detail: OUTSIDE_RELEASE, build: (root, runner) => plist(BOT_ERRORS, ['/opt/example/bin/launcher', runner], root) },
+    { name: 'python3 -c', detail: NO_SCRIPT, build: (root, runner) => plist(BOT_ERRORS, ['/usr/bin/python3', '-c', 'import runpy', runner], root) },
+    { name: 'python3 -m', detail: NO_SCRIPT, build: (root) => plist(BOT_ERRORS, [`${root}/venv/bin/python3`, '-m', 'bot_errors.runner'], root) },
+    ...['PYTHONPATH', 'BASH_ENV', 'LD_PRELOAD'].map((key) => ({
+      name: `the environment key ${key}`, detail: INTERPRETER_ENVIRONMENT,
+      build: (root: string, runner: string) => withLines(plist(BOT_ERRORS, ['/usr/bin/python3', runner], root), ...environment(`<key>${key}</key><string>/tmp/lib</string>`)),
+    })),
+    { name: 'a duplicate environment key', detail: INTERPRETER_ENVIRONMENT, build: (root, runner) => withLines(plist(BOT_ERRORS, ['/usr/bin/python3', runner], root), ...environment('<key>PATH</key><string>/usr/bin</string>', '<key>PATH</key><string>/bin</string>')) },
+  ];
+
+  it.each(pathRebaseRefusals)('refuses path-rebase with no closed contract for $name', async ({ build, detail }) => {
+    const { world, checkout, runner, declaration } = pathRebaseWorld();
+    world.addJob(BOT_ERRORS, build(checkout, runner));
+    const plan = await planHostUnit(world, declaration);
+    expect(plan.ready).toBe(false);
+    expect(plan.document.preconditions).toEqual(expect.arrayContaining([{ id: `host-aux-plist-staged:${BOT_ERRORS}`, ok: false, detail }]));
+  });
+
+  it('admits the installer plain form and retains a closed-form prefix sibling unrewritten', async () => {
+    const { world, checkout, runner, declaration } = pathRebaseWorld();
+    const state = `${world.home}/.local/state/bot-errors`;
+    const sibling = `${checkout}2/log`;
+    // The argv and environment keys that deploy/scripts/install-bot-errors-health-launchd.sh writes.
+    const source = withLines(plist(BOT_ERRORS, [
+      '/usr/bin/python3', runner, '--instance', 'bot-errors-health', '--source', 'service-exit', '--summary', 'BOT ERRORS daily health command failed',
+      '--log-hint', `${state}/logs/health.err.log`, '--diagnostic', `launchd_label=${BOT_ERRORS}`, '--', '/usr/bin/python3', `${checkout}/deploy/scripts/bot-errors-health-check.py`, '--daily',
+    ], checkout), ...environment(
+      `<key>PATH</key><string>${world.home}/.local/bin:/usr/bin:/bin</string>`, `<key>BOT_ERRORS_STATE_DIR</key><string>${state}</string>`,
+      '<key>BOT_ERRORS_SOCKET_PATH</key><string></string>', `<key>BOT_ERRORS_HEALTH_PROFILE</key><string>${checkout}/deploy/health-profiles/host-a.json</string>`,
+    ), '  <key>SiblingLog</key>', `  <string>${sibling}</string>`);
+    world.addJob(BOT_ERRORS, source);
+    const plan = await planHostUnit(world, declaration);
+    expect(plan.ready).toBe(true);
+    const staged = (plan.applyContext as unknown as { hostAuxiliaries: Array<{ label: string; staged: string }> }).hostAuxiliaries.find((entry) => entry.label === BOT_ERRORS)!.staged;
+    expect(staged).toBe(source.replaceAll(`${checkout}/`, `${world.newRelease}/`).replace(`<string>${checkout}</string>`, `<string>${world.newRelease}</string>`));
+    expect(staged).toContain(`<string>${sibling}</string>`);
+  });
+
   it('rebases only the closed legacy bot-errors health profile default inside its reviewed shell wrapper', async () => {
     const world = twoMemberWorld();
     const checkout = path.join(world.root, 'legacy-checkout'); writeRelease(checkout, OLD, true);
@@ -1267,13 +1356,25 @@ describe('release:activate-host closed host auxiliaries', () => {
       expect.objectContaining({ id: `host-aux-plist-staged:${label}`, ok: false, detail: expect.stringContaining('embedded') }),
     ]));
 
-    // A bare root path in that shell argument is rebased, but only toward a shell-token release.
+    // A bare root path in that shell argument is still a shell command: with no closed contract it names no script file.
     world.addJob(label, plist(label, ['/bin/bash', '-c', script], checkout));
+    const inline = await planHostUnit(world, declaration);
+    expect(inline.ready).toBe(false);
+    expect(inline.document.preconditions).toEqual(expect.arrayContaining([
+      { id: `host-aux-plist-staged:${label}`, ok: false, detail: 'interpreter launch form names no script argument (inline, module, or option form)' },
+    ]));
+
+    // A script file the shell runs is rebased, but only toward a closed-form shell-token release.
+    world.addJob(label, plist(label, ['/bin/bash', script], checkout));
     expect((await planHostUnit(world, declaration)).ready).toBe(true);
     const unit = path.join(world.root, 'host-unit-shell-release.json');
     writeFileSync(unit, JSON.stringify(declaration));
-    for (const name of ['new release', 'new;injected']) {
-      const unsafeRelease = path.join(world.root, 'releases', name); writeRelease(unsafeRelease, NEXT, true);
+    for (const [unsafeRelease, detail] of [
+      [path.join(world.root, 'releases', 'new release'), 'shell-token'],
+      [path.join(world.root, 'releases', 'new;injected'), 'shell-token'],
+      [`${world.root}/releases/./new-dot`, 'target release is not a closed-form shell-token path'],
+    ] as const) {
+      writeRelease(unsafeRelease, NEXT, true);
       vi.stubEnv('HOME', world.home); vi.stubEnv('XDG_CONFIG_HOME', path.join(world.home, '.config')); vi.stubEnv('XDG_DATA_HOME', path.join(world.home, '.local', 'share'));
       try {
         const unsafe = await buildHostUnitPlan(world.host, {
@@ -1281,7 +1382,7 @@ describe('release:activate-host closed host auxiliaries', () => {
         });
         expect(unsafe.ready).toBe(false);
         expect(unsafe.document.preconditions).toEqual(expect.arrayContaining([
-          expect.objectContaining({ id: `host-aux-plist-staged:${label}`, ok: false, detail: expect.stringContaining('shell-token') }),
+          expect.objectContaining({ id: `host-aux-plist-staged:${label}`, ok: false, detail: expect.stringContaining(detail) }),
         ]));
       } finally {
         vi.unstubAllEnvs();
