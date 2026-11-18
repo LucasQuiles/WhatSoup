@@ -121,6 +121,17 @@ describe('loadInstance — client-output policy hydration', () => {
     expect(process.env.INSTANCE_CONFIG).toBeUndefined();
     expect(getLoadedInstanceConfigOrNull()).toBeNull();
   });
+
+  it('rejects invalid policy config before publishing either compatibility surface', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'test-agent', {
+      ...minimalAgent,
+      clientOutputPolicies: null,
+    });
+
+    expect(() => loadInstance('test-agent')).toThrow(/clientOutputPolicies must be an array when present/);
+    expect(process.env.INSTANCE_CONFIG).toBeUndefined();
+    expect(getLoadedInstanceConfigOrNull()).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
