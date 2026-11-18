@@ -38,27 +38,40 @@ export const OPEN_RECOVERIES_CTE_SQL = `open_recoveries AS (
  * A notice echo or newer conversation activity does not fulfill that debt.
  * Jobs and operator catch-ups already have their own health accounting;
  * immutable pending links also keep proven closed catch-ups out of this count.
+ *
+ * The four `debt_terminal` terms repeat, term for term, the WHERE clause of the
+ * partial index `idx_turn_terminal_failed_reply_debt`. SQLite uses a partial
+ * index only when the query's WHERE implies the index's, so change both
+ * together; `tests/core/failed-terminal-debt-index.test.ts` fails on drift.
  */
-export const UNOWNED_FAILED_TERMINAL_SOURCES_SQL = `
-          SELECT DISTINCT source.seq AS inbound_seq
-          FROM inbound_events source
-          JOIN turn_terminal_records terminal ON terminal.inbound_seq = source.seq
-          WHERE source.processing_status = 'failed'
-            AND terminal.inbound_disposition = 'failed_terminal'
-            AND terminal.reply_guarantee_disarmed = 0
-            AND terminal.delivery_kind <> 'echoed'
-            AND COALESCE(terminal.attempt_failure_class, '') <> 'operator_cancelled'
-            AND NOT ${syntheticSourceMessageIdSql('source.message_id')}
+const UNOWNED_FAILED_TERMINAL_PREDICATES_SQL = `debt_terminal.inbound_disposition = 'failed_terminal'
+            AND debt_terminal.reply_guarantee_disarmed = 0
+            AND debt_terminal.delivery_kind <> 'echoed'
+            AND COALESCE(debt_terminal.attempt_failure_class, '') <> 'operator_cancelled'
+            AND debt_source.processing_status = 'failed'
+            AND NOT ${syntheticSourceMessageIdSql('debt_source.message_id')}
             AND NOT EXISTS (
               SELECT 1 FROM turn_recovery_jobs job
-              WHERE job.source_inbound_seq_key = source.seq
+              WHERE job.source_inbound_seq_key = debt_source.seq
             )
             AND NOT EXISTS (
               SELECT 1 FROM inbound_disposition_links pending
-              WHERE pending.inbound_seq = source.seq
+              WHERE pending.inbound_seq = debt_source.seq
                 AND pending.disposition = 'recovery_pending_operator_catchup'
                 AND pending.superseded_by_seq IS NULL
-            )
+            )`;
+
+/**
+ * Each inbound owed a reply, once. CROSS JOIN fixes the debt index as the outer
+ * loop, so the read visits debt rows only and finds each source inbound by row
+ * id; DISTINCT folds several failed generations of one inbound into one debt.
+ */
+export const UNOWNED_FAILED_TERMINAL_SOURCES_SQL = `
+          SELECT DISTINCT debt_source.seq AS inbound_seq
+          FROM turn_terminal_records debt_terminal
+          CROSS JOIN inbound_events debt_source
+          WHERE debt_source.seq = debt_terminal.inbound_seq
+            AND ${UNOWNED_FAILED_TERMINAL_PREDICATES_SQL}
         `;
 
 export const UNOWNED_FAILED_TERMINALS_CTE_SQL = `unowned_failed_terminals AS (
