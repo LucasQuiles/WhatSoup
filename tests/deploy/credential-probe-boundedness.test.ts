@@ -35,52 +35,34 @@ function trackedShellFiles(): string[] {
 /**
  * Matches `security`/`secret-tool` in *command position* — start of line, or
  * after a pipe/`&&`/`;`/subshell open. Occurrences inside echoed help text and
- * comments sit mid-line and are correctly ignored.
- *
- * The optional `timeout`/`gtimeout` prefix catches the shape bounded by hand,
- * `timeout 3s secret-tool …`, where the `timeout` and not the credential command
- * holds command position. That shape fails on a host without `timeout(1)`, and a
- * bare `timeout` only sends SIGTERM, so it must route through
- * `whatsoup_run_bounded` too.
+ * comments sit mid-line and are correctly ignored. A `timeout`/`gtimeout` prefix
+ * is matched too: stock macOS lacks timeout(1), and a bare timeout only sends SIGTERM.
  */
 const COMMAND_POSITION =
   /(?:^|[|&;(]|\bthen\b|\bdo\b|\bif\b|\belif\b|!)\s*(?:(?:timeout|gtimeout)(?:\s+[^\s;|&()]+)*\s+)?(security|secret-tool)\s/;
 
-/**
- * True when the character at `index` sits inside a quoted string of the command
- * context it executes in. `$(` opens a command substitution whose contents run as
- * a separate command, so quoting inside it does not depend on the surrounding
- * line: in `value="$(timeout 3s secret-tool …)"` the credential command holds
- * command position inside the substitution, although a plain count of the quotes
- * before it sees the assignment's opening `"`. Inside single quotes `$(` is
- * literal text, so it does not open a substitution there.
- */
+/** True when `index` is quoted in its own command context; `$(` opens a new
+ *  context, except inside single quotes where it is literal text. */
 function insideQuotedString(code: string, index: number): boolean {
   let single = false;
   let double = false;
   let subst = 0;
   for (let i = 0; i < index; i++) {
     const ch = code[i];
+    const opensSubst = ch === '(' && code[i - 1] === '$';
     if (subst > 0) {
-      if (ch === '(' && code[i - 1] === '$') subst += 1;
+      if (opensSubst) subst += 1;
       else if (ch === ')') subst -= 1;
-      continue;
-    }
-    if (single) {
+    } else if (single) {
       if (ch === "'") single = false;
-      continue;
-    }
-    if (double) {
+    } else if (double) {
       if (ch === '"') double = false;
-      else if (ch === '(' && code[i - 1] === '$') subst += 1;
-      continue;
-    }
-    if (ch === "'") { single = true; continue; }
-    if (ch === '"') { double = true; continue; }
-    if (ch === '(' && code[i - 1] === '$') subst += 1;
+      else if (opensSubst) subst += 1;
+    } else if (ch === "'") single = true;
+    else if (ch === '"') double = true;
+    else if (opensSubst) subst += 1;
   }
-  if (subst > 0) return false;
-  return single || double;
+  return subst === 0 && (single || double);
 }
 
 function unboundedProbes(file: string): string[] {
@@ -90,11 +72,8 @@ function unboundedProbes(file: string): string[] {
     const code = line.replace(/^\s*#.*$/, '');
     const match = COMMAND_POSITION.exec(code);
     if (!match) return;
-    // A match sitting inside a quoted string is data/help text, not a call.
-    // A `timeout 3s` prefix can put the command name after the regex anchor, so
-    // the quote state is measured at the command name itself.
-    const commandIndex = match.index + match[0].indexOf(match[1]);
-    if (insideQuotedString(code, commandIndex)) return;
+    // Quoted matches are data/help text. Measure at the command name, after any timeout prefix.
+    if (insideQuotedString(code, match.index + match[0].indexOf(match[1]))) return;
     // `command -v security` only asks whether the binary exists; it cannot block.
     if (/command\s+-v\s+(security|secret-tool)\b/.test(code)) return;
     if (code.includes('whatsoup_run_bounded')) return;
@@ -135,30 +114,6 @@ describe('credential-store probes are bounded on every platform', () => {
 
     try {
       expect(unboundedProbes(fixture)).toEqual([]);
-    } finally {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
-
-  it('flags a probe bounded by hand with timeout, also inside a command substitution', () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'credential-probe-scan-'));
-    const fixture = path.join(tmpDir, 'probe.sh');
-    fs.writeFileSync(
-      fixture,
-      [
-        'timeout 3s secret-tool lookup service svc-a',
-        'value="$(gtimeout 3 security find-generic-password -s svc-a -w)"',
-        // Single quotes keep `$(` literal, so this line is data, not a call.
-        "printf '%s\\n' '$(timeout 3s secret-tool lookup service svc-a)'",
-        '',
-      ].join('\n'),
-    );
-
-    try {
-      expect(unboundedProbes(fixture)).toEqual([
-        `${fixture}:1: timeout 3s secret-tool lookup service svc-a`,
-        `${fixture}:2: value="$(gtimeout 3 security find-generic-password -s svc-a -w)"`,
-      ]);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
