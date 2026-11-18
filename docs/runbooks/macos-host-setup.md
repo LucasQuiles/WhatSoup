@@ -102,8 +102,8 @@ after reboot until the next scheduled interval fires or launchd is manually
 triggered.
 
 This rule covers hand-maintained protective services. It does not cover
-these scheduled jobs, which ship with `RunAtLoad=false` and rely on their
-schedule instead:
+scheduled jobs that ship with `RunAtLoad=false` and rely on their schedule
+instead, for example:
 `deploy/com.whatsoup.reply-guarantee.plist` (`StartInterval` 60),
 `deploy/com.whatsoup.release-drift-check.plist` (`StartInterval` 300),
 `deploy/templates/com.whatsoup.bot-errors-j1-collector.plist`
