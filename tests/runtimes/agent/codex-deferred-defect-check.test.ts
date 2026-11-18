@@ -3,9 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../../src/logger.ts', async () => (await import('../../helpers/logger-mock.ts')).loggerMock());
 // No test here may write a real BOT ERRORS outbox event.
-vi.mock('../../../src/lib/emit-alert.ts', () => ({ emitAlert: vi.fn() }));
+vi.mock('../../../src/lib/emit-alert.ts', () => ({ emitAlert: vi.fn(), clearAlertSource: vi.fn() }));
 
-import { emitAlert } from '../../../src/lib/emit-alert.ts';
+import { clearAlertSource, emitAlert } from '../../../src/lib/emit-alert.ts';
 import { reportCodexDeferredDefects } from '../../../src/runtimes/agent/codex-deferred-defect-check.ts';
 
 // Startup check for the Codex resume risks that the thread/resume change left
@@ -14,6 +14,14 @@ import { reportCodexDeferredDefects } from '../../../src/runtimes/agent/codex-de
 // the bot.
 const INSTANCE = 'bot-a';
 const QUEUED = { ok: true, channel: 'outbox', status: 'durably_queued' } as const;
+// The outbox confines summary and evidence to a digest, so the fix reaches the
+// card through the critical-asset fields: the dispatcher renders operatorAction
+// as the requested action and clearRequirement as the clear_requirement line.
+const SCOPE_FIX = 'Set agentOptions.sessionScope to per_chat, or remove codex-cli from the provider and the'
+  + ' fallbacks, then restart.';
+const ADMISSION_FIX = 'Remove codex-cli from the provider and the fallbacks, or run the host without host work'
+  + ' admission, then restart. Changing sessionScope does not stop this warning.';
+const CLEAR_RULE = 'Clears at the next start whose configuration no longer carries this risk.';
 
 function captureLogger() {
   return { error: vi.fn() };
@@ -22,6 +30,8 @@ function captureLogger() {
 beforeEach(() => {
   vi.mocked(emitAlert).mockReset();
   vi.mocked(emitAlert).mockReturnValue(QUEUED);
+  vi.mocked(clearAlertSource).mockReset();
+  vi.mocked(clearAlertSource).mockReturnValue(QUEUED);
 });
 
 describe('codex deferred-defect startup check', () => {
@@ -52,6 +62,7 @@ describe('codex deferred-defect startup check', () => {
       'bot-a: codex-cli resume needs sessionScope per_chat',
       expect.stringContaining('check=codex_single_or_shared_scope'),
       'warning',
+      expect.anything(),
     );
   });
 
@@ -98,6 +109,7 @@ describe('codex deferred-defect startup check', () => {
       'bot-a: codex-cli resume is unproven under host work admission',
       expect.stringContaining('check=codex_host_work_admission'),
       'warning',
+      expect.anything(),
     );
   });
 
@@ -226,6 +238,122 @@ describe('codex deferred-defect startup check', () => {
     expect(logger.error).toHaveBeenCalledWith(
       expect.objectContaining({ check: 'codex_single_or_shared_scope', alertStatus: 'failed' }),
       'codex deferred-defect alert was not queued',
+    );
+  });
+
+  it('puts the fix and the clear rule for each risk on the card through the critical-asset fields', () => {
+    reportCodexDeferredDefects({
+      instance: INSTANCE,
+      provider: 'codex-cli',
+      fallbacks: [],
+      sessionScope: 'single',
+      hostWorkAdmission: true,
+    }, captureLogger());
+
+    const cards = new Map(vi.mocked(emitAlert).mock.calls.map((call) => [call[1], call[5]]));
+    expect(cards.get('codex_resume_needs_per_chat_scope')).toEqual({
+      asset: { kind: 'runtime_session', instance: INSTANCE },
+      failure: {
+        code: 'CODEX_RESUME_NEEDS_PER_CHAT_SCOPE',
+        domain: 'runtime_configuration',
+        recoverability: 'operator_recoverable',
+        confidence: 'confirmed',
+        operatorAction: SCOPE_FIX,
+        clearRequirement: CLEAR_RULE,
+      },
+    });
+    expect(cards.get('codex_resume_unproven_under_host_admission')).toEqual({
+      asset: { kind: 'runtime_session', instance: INSTANCE },
+      failure: {
+        code: 'CODEX_RESUME_UNPROVEN_UNDER_HOST_ADMISSION',
+        domain: 'runtime_configuration',
+        recoverability: 'operator_recoverable',
+        confidence: 'confirmed',
+        operatorAction: ADMISSION_FIX,
+        clearRequirement: CLEAR_RULE,
+      },
+    });
+  });
+
+  it('emits each warning and clears neither source when the configuration carries both risks', () => {
+    reportCodexDeferredDefects({
+      instance: INSTANCE,
+      provider: 'codex-cli',
+      fallbacks: [],
+      sessionScope: 'shared',
+      hostWorkAdmission: true,
+    }, captureLogger());
+
+    expect(emitAlert).toHaveBeenCalledTimes(2);
+    expect(clearAlertSource).not.toHaveBeenCalled();
+  });
+
+  it('clears only the source whose risk the configuration does not carry', () => {
+    reportCodexDeferredDefects({
+      instance: INSTANCE,
+      provider: 'codex-cli',
+      fallbacks: [],
+      sessionScope: 'single',
+      hostWorkAdmission: false,
+    }, captureLogger());
+
+    expect(vi.mocked(emitAlert).mock.calls.map((call) => call[1])).toEqual(['codex_resume_needs_per_chat_scope']);
+    expect(clearAlertSource).toHaveBeenCalledExactlyOnceWith(
+      INSTANCE,
+      'codex_resume_unproven_under_host_admission',
+      expect.stringContaining('host_work_admission=false'),
+    );
+  });
+
+  it.each([
+    {
+      config: 'codex-cli with per_chat scope and no host work admission',
+      provider: 'codex-cli',
+      fallbacks: [] as { provider: string }[],
+      sessionScope: 'per_chat' as string | undefined,
+      hostWorkAdmission: false,
+    },
+    {
+      config: 'no codex-cli at all',
+      provider: 'claude-cli',
+      fallbacks: [{ provider: 'opencode-cli' }],
+      sessionScope: undefined,
+      hostWorkAdmission: true,
+    },
+  ])('clears both sources once and emits no warning when the configuration carries neither risk: $config', ({ provider, fallbacks, sessionScope, hostWorkAdmission }) => {
+    const logger = captureLogger();
+
+    const defects = reportCodexDeferredDefects({
+      instance: INSTANCE, provider, fallbacks, sessionScope, hostWorkAdmission,
+    }, logger);
+
+    expect(defects).toEqual([]);
+    expect(emitAlert).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(vi.mocked(clearAlertSource).mock.calls.map((call) => [call[0], call[1]])).toEqual([
+      [INSTANCE, 'codex_resume_needs_per_chat_scope'],
+      [INSTANCE, 'codex_resume_unproven_under_host_admission'],
+    ]);
+  });
+
+  it('does not stop startup when a clear throws: it logs the failure and still tries the next clear', () => {
+    const logger = captureLogger();
+    vi.mocked(clearAlertSource)
+      .mockImplementationOnce(() => { throw new Error('outbox directory missing'); })
+      .mockReturnValueOnce(QUEUED);
+
+    expect(() => reportCodexDeferredDefects({
+      instance: INSTANCE,
+      provider: 'claude-cli',
+      fallbacks: [],
+      sessionScope: 'per_chat',
+      hostWorkAdmission: false,
+    }, logger)).not.toThrow();
+
+    expect(clearAlertSource).toHaveBeenCalledTimes(2);
+    expect(logger.error).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ check: 'codex_single_or_shared_scope', err: expect.any(Error) }),
+      'codex deferred-defect clear could not be emitted',
     );
   });
 
