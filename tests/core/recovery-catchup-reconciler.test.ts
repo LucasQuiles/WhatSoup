@@ -45,8 +45,9 @@ describe('automatic operator catch-up reconciler', () => {
       try {
         const report = reconcileOperatorCatchupRecoveries(db.raw, { confirmedFulfillments: confirmations });
         // These observe real SQLite operations; an unconfirmed scan has no write work.
-        expect(exec.mock.calls.filter(([sql]) => /BEGIN|SAVEPOINT/i.test(sql))).toEqual([]);
-        expect(prepare.mock.calls.filter(([sql]) => /integrity_check/i.test(sql))).toEqual([]);
+        const statements = [...exec.mock.calls, ...prepare.mock.calls].map(([sql]) => sql);
+        expect(statements.filter((sql) => /BEGIN|SAVEPOINT/i.test(sql))).toEqual([]);
+        expect(statements.filter((sql) => /integrity_check|quick_check/i.test(sql))).toEqual([]);
         expect(report).toMatchObject({ attempted: 0, closed: 0, linksClosed: 0, skipped: 1 });
         expect(linkRows('superseded_by_operator_catchup')).toEqual([]);
       } finally {
