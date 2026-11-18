@@ -1715,10 +1715,11 @@ export class Database {
       this.runPendingMigrations();
       this.verifyRequiredTables();
       const debtIndex = ensureFailedTerminalDebtIndex(this.db);
-      if (debtIndex) log.warn({ found: debtIndex }, 'Failed-terminal reply-debt index rebuilt');
       this.assertDatabaseIdentity();
       this.db.exec('COMMIT');
       transactionOpen = false;
+      // Reported only once committed: a start that rolls back claims no rebuild.
+      if (debtIndex) log.warn({ found: debtIndex }, 'Failed-terminal reply-debt index rebuilt');
     } catch (err) {
       if (transactionOpen) {
         try {
