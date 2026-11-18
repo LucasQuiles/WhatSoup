@@ -568,6 +568,21 @@ export function getProviderBinary(provider: string): string | null {
  */
 export { opencodeUsesConfigModel } from './providers/opencode-execution-profile.ts';
 
+/**
+ * The codex-cli model as a TOML basic string for `-c model=...`. JSON escapes
+ * are valid TOML escapes, but JSON.stringify leaves DEL (U+007F) raw and writes
+ * a lone surrogate as `\udXXX`; TOML rejects both, and Codex then keeps the raw
+ * text, quotes included, as the model name.
+ */
+function codexModelTomlString(model: string): string {
+  if (!model.isWellFormed()) {
+    throw new Error(
+      '[session-manager:resolveProviderArgs] codex-cli model is not well-formed Unicode (lone surrogate)',
+    );
+  }
+  return JSON.stringify(model).replaceAll('\u007F', '\\u007F');
+}
+
 /** Resolve the argv for a CLI-backed provider. */
 function resolveProviderArgs(
   provider: ProviderId,
@@ -645,7 +660,9 @@ function resolveProviderArgs(
         'app-server',
         ...providerMcpConfigArgs,
         '--listen', 'stdio://',
-        ...(model ? ['--model', model] : []),
+        // `codex app-server` has no --model flag (passing one fails at spawn);
+        // the model is a -c config override, whose value Codex parses as TOML.
+        ...(model ? ['-c', `model=${codexModelTomlString(model)}`] : []),
       ];
     case 'gemini-cli':
       return ['--acp'];
