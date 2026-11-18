@@ -484,6 +484,8 @@ export async function verifyReviewedOutsideUnits(
     if (plist === null) { fail('installed plist is unavailable'); continue; }
     const plistText = plist.bytes.toString('utf8');
     if (plist.sha256 !== outsideUnit.plistSha256) { fail('installed plist digest differs from the reviewed declaration'); continue; }
+    // Only the empty stub is exempt from review: any other plist left installed can load at the next login.
+    if (outsideUnit.loadState === 'unloaded-113' && plist.bytes.length !== 0) { fail('unloaded-113 plist is not a zero-byte stub'); continue; }
     if (selected.some((root) => mentionsReleaseRoot(plistText, root))) { fail('installed plist references a selected root or launcher'); continue; }
     let filesValid = true;
     for (const file of outsideUnit.reviewInputs.files) {
