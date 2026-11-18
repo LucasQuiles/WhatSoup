@@ -338,10 +338,10 @@ rule is wired warn-level in `eslint.config.fitness.mjs:47`.
 - `tests/browser/` additions are outside this jsdom coverage run by design (D7 lane).
 - The skip-categorization sweep ("Five live `it.skipIf` sites", "no uncategorized
   skips") and its line references are true only at that snapshot. Re-count at
-  canonical main `a689a2139f3caba50b89b9bfad0f7db9742ee83d` (2026-10-24),
-  excluding the rule fixtures in `tests/eslint-rules/`: 22 `skipIf` lines across
-  12 test files. Two carry no adjacent `@skip-env` / `@skip-timing` comment, so
+  canonical main `6ad62499ee46ad2a5b23bf080d27b1c348c5f560` (checked 2026-11-18),
+  excluding the rule fixtures in `tests/eslint-rules/`: 25 `skipIf` lines across
+  13 test files. Two carry no adjacent `@skip-env` / `@skip-timing` comment, so
   they remain uncategorized: `tests/core/provider-mcp-config-fs.test.ts:37` and
-  `tests/deploy/preflight-check.test.ts:1422`. The categorization rule is wired
+  `tests/deploy/preflight-check.test.ts:1466`. The categorization rule is wired
   at `eslint.config.fitness.mjs:51`; the other skip sites have nearby category
   comments in their current files.

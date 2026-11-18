@@ -169,7 +169,8 @@ appropriate service name) that delegates to the repository's fleet launcher:
 exec /bin/bash "$HOME/LAB/WhatSoup/deploy/whatsoup-fleet" "$@"
 ```
 
-`deploy/whatsoup-fleet` reads `.nvmrc` for its default NVM binary, checks the
+`deploy/whatsoup-fleet` reads `.nvmrc` for its default NVM binary (a set
+`WHATSOUP_NODE` overrides it), checks the
 resolved Node version against the repository's engine range, and launches
 `src/fleet/standalone.ts` with native type stripping. Install the repository pin
 first and verify the service's resolved binary; the launcher can fall back to
