@@ -966,6 +966,54 @@ describe('exact-primary-model disambiguation', () => {
     expect(rv.fallbackWindow.resetAt).toBeNull();
     expect(rv.fallbackWindow.activeUntil).toBe(armedUntil);
   });
+
+  it('open window, provider-default PRIMARY: a model-less session is primary-tier when every same-provider entry names a model, and stays fail-closed beside a wildcard entry', async () => {
+    // Primary model unconfigured (host.model undefined). A window route on a
+    // NAMED entry carries that entry's model, so a model-less claude-cli
+    // session can only come from a primary route: its usage-limit is primary
+    // evidence and moves the open window's clocks. A WILDCARD entry's window
+    // route also starts model-less sessions, so there it stays the ambiguous
+    // remainder above and the clocks stay put.
+    const failModelLessSessionInOpenWindow = async (chain: FallbackEntry[]) => {
+      const config = mockConfigRef();
+      config['agentProvider'] = 'claude-cli';
+      config['agentFallbacks'] = chain;
+      const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
+      const rv = v(runtime);
+      rv.probePrimaryProviderRecovered = vi.fn(() => false) as unknown as () => boolean;
+      expect(rv.activateProviderFallback(null, 'usage-limit')).not.toBeNull();
+      const armedUntil = rv.fallbackWindow.activeUntil!;
+      const resetAt = new Date(armedUntil + 60 * 60 * 1000);
+      const providerDefaultSession = new Proxy(
+        {
+          getProviderId: () => 'claude-cli',
+          getStatus: () => ({ sessionId: 'claude-cli-1' }),
+          getDbRowId: () => null,
+          getModelRef: () => undefined,
+        } as Record<string, unknown>,
+        { get: (t, p) => (p in t ? t[p as string] : () => undefined) },
+      );
+
+      await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+      rv.fallback.activateProviderFallbackAfterTerminalResult(
+        resetAt,
+        'usage-limit',
+        providerDefaultSession,
+        'usage limit reached',
+      );
+      return { rv, armedUntil, resetAt };
+    };
+
+    // Primary tier: the window end extends to the parsed reset, which is stored.
+    const named = await failModelLessSessionInOpenWindow([{ provider: 'claude-cli', model: 'claude-haiku-4-5' }]);
+    expect(named.rv.fallbackWindow.resetAt).toBe(named.resetAt.getTime());
+    expect(named.rv.fallbackWindow.activeUntil).toBe(named.resetAt.getTime());
+
+    // Fail-closed: no stored reset, and the window end is unchanged.
+    const wildcard = await failModelLessSessionInOpenWindow(WILDCARD_SAME_PROVIDER_CHAIN);
+    expect(wildcard.rv.fallbackWindow.resetAt).toBeNull();
+    expect(wildcard.rv.fallbackWindow.activeUntil).toBe(wildcard.armedUntil);
+  });
 });
 
 // ─── No-arm scoped to EXISTING window state (increment 5) ─────────────────────
