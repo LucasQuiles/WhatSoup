@@ -13,7 +13,8 @@
 # and clears them on a clean run (--clear-on-ok). Fail-closed exit codes:
 #   0 clean, or target differs (advisory; the currency finding is emitted)
 #   1 integrity drift (alert emitted)
-#   2 inconclusive, either emit failure included (fails the systemd unit;
+#   2 inconclusive, either emit failure included, and exit 1 from a release
+#     whose scheduler predates --bootstrap-exit-code 2 (fails the systemd unit;
 #     see deploy/whatsoup-release-drift.service)
 # ============================================================================
 set -uo pipefail
@@ -68,10 +69,21 @@ esac
   [ -f "$RELEASE_ROOT/deploy/scripts/run-release-drift-schedule.sh" ] || \
   fail "release root missing observer entrypoints: $RELEASE_ROOT"
 
-exec bash "$RELEASE_ROOT/deploy/scripts/run-release-drift-schedule.sh" \
+SCHEDULER="$RELEASE_ROOT/deploy/scripts/run-release-drift-schedule.sh"
+bash "$SCHEDULER" \
   --release "$RELEASE_ROOT" \
   --repo-root "$RELEASE_ROOT" \
   --target-url "$TARGET_URL" \
   --target-ref "$TARGET_REF" \
   --instance "$INSTANCE" \
   --clear-on-ok
+status=$?
+# Exit 1 is alerted drift only when the observer ran. A scheduler that starts its
+# runner with --bootstrap-exit-code 2 gets 2 for every runner and loading failure
+# (scripts/run-with-pinned-node.sh), so its exit 1 comes from the observer. A
+# release exported before that contract has a runner that also exits 1 when Node
+# is missing or its bootstrap fails, so exit 1 from it is reported as 2.
+if [ "$status" -eq 1 ] && ! grep -Eq '^[[:space:]]+--bootstrap-exit-code 2([[:space:]]|$)' "$SCHEDULER"; then
+  fail "exit 1 from a release whose scheduler predates --bootstrap-exit-code 2 cannot show that the observer ran: $RELEASE_ROOT"
+fi
+exit "$status"
