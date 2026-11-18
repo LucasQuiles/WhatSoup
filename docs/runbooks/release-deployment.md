@@ -609,22 +609,41 @@ reference and refuses. The target release lands in every rewritten value, so a
 release that is not a closed-form shell-token path refuses too.
 
 A `com.bot-errors.health` job that matches no closed contract below must also
-start a file inside the target release. When `ProgramArguments[0]` is an
-interpreter, the script argument of a bounded launch form (`python`, optionally
-with `-I`, `node`/`nodejs`, or `bash`/`sh`/`zsh`, followed by a script) must be
-a closed-form path under the target release after the rebase; shell `-c` and
-`-lc`, Python `-c` and `-m`, other options, and other interpreters refuse.
-Otherwise `ProgramArguments[0]` itself must be a closed-form path under the
-target release. Its `EnvironmentVariables` must be one well-formed block with
-unique keys, read as for the Python module form above, and may not set
-`PYTHON*`, `NODE_OPTIONS`, `NODE_PATH`, `BASH_ENV`, `ENV`, `PERL5LIB`,
-`PERL5OPT`, `PERLLIB`, `RUBYOPT`, `RUBYLIB`, `DYLD_*` or `LD_*`, each of which
-can make an interpreter load code from outside the release. The plain form that
-`deploy/scripts/install-bot-errors-health-launchd.sh` installs passes: `python3`
-runs the release's `bot-errors-runner.py`, and its environment sets only `PATH`
-and `BOT_ERRORS_*` keys. This proves which file launchd starts, not what that
-file runs next: the runner executes the command after its `--`, and planning
-does not check that command.
+run only release files, after the rebase. When `ProgramArguments[0]` is an
+interpreter by file name, that binary must be exactly `/usr/bin/python3`,
+`/bin/bash`, `/bin/sh` or `/bin/zsh`, or a closed-form path under the target
+release; any other path, including a relative one, refuses. The script argument
+of a bounded launch form (`python`, optionally with `-I`, `node`/`nodejs`, or
+`bash`/`sh`/`zsh`, followed by a script) must be a closed-form path under the
+target release; shell `-c` and `-lc`, Python `-c` and `-m`, other options, and
+other interpreters refuse. Otherwise `ProgramArguments[0]` itself must be a
+closed-form path under the target release. When the file run is the release's
+`deploy/scripts/bot-errors-runner.py`, the command the runner passes to
+`subprocess.run` must pass the same rule and must not be the runner again. That
+command is the runner's argparse remainder: the first argument not taken as an
+option or an option value, and everything after it, with or without `--` (a
+leading `--` is dropped). Planning reads only option-value pairs followed by
+`--` and the command, option pairs alone, or only unrecognized long options such
+as `--daily`; the last two run nothing, because the runner's parser exits first.
+Any other runner argument list refuses.
+
+The job's `EnvironmentVariables` must be one well-formed block with unique keys,
+read as for the Python module form above, and may not set `PYTHON*`,
+`NODE_OPTIONS`, `NODE_PATH`, `BASH_ENV`, `ENV`, `PERL5LIB`, `PERL5OPT`,
+`PERLLIB`, `RUBYOPT`, `RUBYLIB`, `DYLD_*`, `LD_*`, `HOME` or `ZDOTDIR`, each of
+which can make an interpreter load code from outside the release. The plain form
+that `deploy/scripts/install-bot-errors-health-launchd.sh` installs passes:
+`/usr/bin/python3` runs the release's runner, the runner forwards
+`/usr/bin/python3` with the release's `bot-errors-health-check.py`, and the
+environment sets only `PATH` and `BOT_ERRORS_*` keys. A job installed with
+another interpreter through `BOT_ERRORS_PYTHON` refuses: rerun the installer
+without `BOT_ERRORS_PYTHON`, with `BOT_ERRORS_REPO_ROOT` set to the job's current
+root, then plan again. Planning proves the interpreter binary, the file it runs,
+and the runner's one forwarded command. It does not prove what those release
+files start later. It also leaves two kinds of value as they are: a value outside
+the shell-token grammar that names the old release without its root string (for
+example `--config=<parent>/./<name>/x`), and a closed-form `WorkingDirectory` or
+runner `--cwd` outside the release.
 
 The shared-wrapper consumer proof reads installed plists only. For each
 selected shared wrapper, the plists in `~/Library/LaunchAgents` whose
