@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseSignalEnvelope } from '../../../src/fleet/incidents/envelope.ts';
+import { parseSignalEnvelope, extractSignalId } from '../../../src/fleet/incidents/envelope.ts';
 
 function base(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -93,5 +93,17 @@ describe('parseSignalEnvelope', () => {
   it('rejects date-only and non-UTC observedAt timestamps', () => {
     expect(parseSignalEnvelope(base({ observedAt: '2026-07-28' })).ok).toBe(false);
     expect(parseSignalEnvelope(base({ observedAt: '2026-07-28T12:00:00+02:00' })).ok).toBe(false);
+  });
+});
+
+describe('extractSignalId', () => {
+  it('returns the id for a non-empty string candidate', () => {
+    expect(extractSignalId({ signalId: 'sig-001' })).toBe('sig-001');
+  });
+
+  it('returns null for a missing, non-string, or empty candidate', () => {
+    expect(extractSignalId({})).toBeNull();
+    expect(extractSignalId({ signalId: 42 })).toBeNull();
+    expect(extractSignalId({ signalId: '' })).toBeNull();
   });
 });

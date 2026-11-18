@@ -159,10 +159,14 @@ export function createSocketConnection(
       if (frame.error) {
         const code = frame.error.code;
         const isMethodMissing = code === -32601 || code === 'MethodNotFound';
+        // An internal send error can follow a provider effect; it is not proof of rejection.
+        const isSendOutcomeUnknown = p.method === 'send' && (code === -32603 || code === '-32603');
         p.reject({
           message: typeof frame.error.message === 'string' ? frame.error.message : 'imsg RPC error',
-          code: isMethodMissing ? 'UnsupportedMethod' : code !== undefined ? String(code) : undefined,
+          code: isSendOutcomeUnknown ? 'SendRpcOutcomeUnknown'
+            : isMethodMissing ? 'UnsupportedMethod' : code !== undefined ? String(code) : undefined,
           status: isMethodMissing ? 501 : undefined,
+          phase: isSendOutcomeUnknown ? 'provider_call_started' : undefined,
         });
       } else {
         p.resolve(frame.result);

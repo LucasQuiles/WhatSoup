@@ -417,8 +417,8 @@ export class RuntimeFallbackCoordinator {
    * in-flight revert-probe gap, where the deadline is past but the window's
    * state (activeEntry, resetAt, activatedAt, the probe's own pending
    * decision) is still live. Clock/window state worth protecting exists
-   * exactly when this holds — the tier fail-closed scope and the no-arm scope
-   * both key on it, and MUST stay on the same predicate.
+   * exactly when this holds — activateProviderFallback's no-arm scope and its
+   * clock-preserving scope both key on it, and MUST stay on the same predicate.
    */
   private fallbackWindowStateExists(): boolean {
     return this.host.fallbackWindow.activeUntil !== null;
@@ -441,15 +441,13 @@ export class RuntimeFallbackCoordinator {
    * same-provider entry also matches it. When positive attribution is
    * impossible (ambiguous same-provider session with a null model ref, a
    * provider-default primary beside a wildcard same-provider entry, or a
-   * foreign provider), fail CLOSED for CLOCKS: with window state present the
-   * failure must not be able to move it; with no window at all there are no
-   * clocks to protect, and refusing to arm would break primary failover — so
-   * the legacy primary tier applies there.
+   * foreign provider), fail CLOSED to the fallback tier: with window state
+   * present the failure cannot move the clocks; with none, activation still
+   * arms (the no-arm and clock-preserving rules need window state), but the
+   * unproven reset never becomes the user-facing primary ETA.
    */
   private failureTierForSession(session: SessionManager | null): FallbackFailureTier {
     if (!session) return 'primary';
-    const failClosedTier: FallbackFailureTier =
-      this.fallbackWindowStateExists() ? 'fallback' : 'primary';
     const provider = typeof session.getProviderId === 'function' ? session.getProviderId() : null;
     if (provider === null) {
       // Last-resort sessionId-prefix attribution, mirroring the marking
@@ -460,7 +458,7 @@ export class RuntimeFallbackCoordinator {
       const prefixPrimary = sessionId.startsWith(`${this.host.agentProvider}-`);
       if (prefixFallback && !prefixPrimary) return 'fallback';
       if (prefixPrimary && !prefixFallback) return 'primary';
-      return failClosedTier;
+      return 'fallback';
     }
     // getModelRef() returns `string | undefined` — a provider-default spawn
     // returns UNDEFINED (the common real case). Normalize at the read: a
@@ -487,7 +485,7 @@ export class RuntimeFallbackCoordinator {
     if (matchesPrimary && matchesFallback && this.host.model !== undefined && model === this.host.model) {
       return 'primary';
     }
-    return failClosedTier;
+    return 'fallback';
   }
 
   private markActiveFallbackFailed(
@@ -1998,6 +1996,10 @@ export class RuntimeFallbackCoordinator {
       fallbackModel: fallbackEntry.model,
       reason,
       resetAt,
+      // Tier, not the stored window value, decides provenance: a no-window
+      // fallback-tier arm (an ambiguous session fails closed to that tier) also
+      // stores its resetAt, so only a primary-tier activation gives the user an ETA.
+      primaryResetAt: failureTier === 'primary' ? (resetAt?.getTime() ?? null) : null,
       activeUntil: until,
       extended: wasActive,
       keyPresent,

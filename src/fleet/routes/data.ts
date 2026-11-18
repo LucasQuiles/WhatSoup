@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { jsonResponse, parseQueryString, requireInstance, parseIntParam } from '../../lib/http.ts';
+import { isNonEmptyString } from '../../lib/type-guards.ts';
 import type { FleetDiscovery } from '../discovery.ts';
 import type { FleetDbReader, MessageRow } from '../db-reader.ts';
 import { proxyToInstance } from '../http-proxy.ts';
@@ -89,7 +90,7 @@ function stringOrEmpty(value: unknown): string {
 }
 
 function requiredString(value: unknown, fallback: string): string {
-  return typeof value === 'string' && value.length > 0 ? value : fallback;
+  return isNonEmptyString(value) ? value : fallback;
 }
 
 function isoFromMaybeUnix(value: unknown): string {

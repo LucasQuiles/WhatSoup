@@ -18,6 +18,12 @@
  * Also documents: credential validity is probed asynchronously after the window
  * arms — see docs/configuration.md §"Provider fallback behavior" point 4.
  *
+ * Notice ETA provenance is pinned at the production notifier
+ * (notifyProviderFallbackActivated via handleEventWithContext): only a reset
+ * from a failure attributed to the PRIMARY yields "until about <time>"; an
+ * unknown reset, the fallback-window end, a fallback entry's parsed reset, or
+ * a reset from a session whose route attribution fails closed never does.
+ *
  * Harness mirrors fallback-reason-provenance.test.ts.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -111,6 +117,8 @@ import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import { emitAlertChecked } from '../../../src/lib/emit-alert.ts';
+import { formatClockForUser } from '../../../src/runtimes/agent/runtime-presentation.ts';
+import { extractUsageLimitResetTime } from '../../../src/runtimes/agent/usage-limit-reset-time.ts';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -192,8 +200,24 @@ function makeFakeQueue(targetChatJid = 'user@s.whatsapp.net') {
   };
 }
 
+function enqueuedNotices(queue: ReturnType<typeof makeFakeQueue>): string[] {
+  return [
+    ...queue.enqueueText.mock.calls.map((c: unknown[]) => String(c[0])),
+    ...queue.enqueueResultText.mock.calls.map((c: unknown[]) => String(c[0])),
+  ];
+}
+
+/** The reset the handler parses from `text` at the current (fake) clock. */
+function parsedResetMs(text: string): number {
+  const reset = extractUsageLimitResetTime(text);
+  if (reset === null) throw new Error(`fixture carries no parseable reset: ${text}`);
+  return reset.getTime();
+}
+
 // Provider-agnostic usage-limit notice text (matches the runtime's detector).
+// "reset at 3pm" IS machine-readable: extractUsageLimitResetTime parses it.
 const USAGE_LIMIT_TEXT = 'Claude usage limit reached. Your limit will reset at 3pm.';
+const USAGE_LIMIT_NO_RESET_TEXT = 'Claude usage limit reached.';
 const ANTHROPIC_LOW_CREDIT_TEXT = 'Insufficient credits for Anthropic API request.';
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -263,12 +287,15 @@ describe('fallback-provider usage-limit cascade', () => {
     expect(cv(runtime).effectiveProvider).toBe('opencode-cli');
   });
 
-  it('usage-limit notice is enqueued to the user queue on cascade', () => {
+  it('usage-limit notice shows the known primary reset as its ETA', () => {
     const runtime = makeRuntime();
     cv(runtime).activateProviderFallback(null);
 
     vi.advanceTimersByTime(60 * 60 * 1000);
+    const primaryResetMs = parsedResetMs(USAGE_LIMIT_TEXT);
 
+    // A null session is attributed to the PRIMARY tier, so the parsed reset is
+    // the primary's own and must reach the notice.
     const queue = makeFakeQueue();
     cv(runtime).handleEventWithContext(
       { type: 'result', text: USAGE_LIMIT_TEXT },
@@ -279,15 +306,39 @@ describe('fallback-provider usage-limit cascade', () => {
       'mapkey-notice-check',
     );
 
-    const allEnqueued = [
-      ...queue.enqueueText.mock.calls.map((c: unknown[]) => c[0]),
-      ...queue.enqueueResultText.mock.calls.map((c: unknown[]) => c[0]),
-    ];
-    expect(allEnqueued).toHaveLength(1);
-    const notice = String(allEnqueued[0]);
-    expect(notice).toContain('Primary model hit a usage/quota limit until about');
-    expect(notice).toContain('Switching to OpenCode / minimax/minimax-m2.');
-    expect(notice).toContain('Please resend your last message.');
+    const notices = enqueuedNotices(queue);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain(
+      `Primary model hit a usage/quota limit until about ${formatClockForUser(primaryResetMs)}.`,
+    );
+    expect(notices[0]).toContain('Switching to OpenCode / minimax/minimax-m2.');
+    expect(notices[0]).toContain('Please resend your last message.');
+  });
+
+  it('usage-limit notice states no ETA when the primary reset is unknown, and never the window end', () => {
+    const runtime = makeRuntime();
+    cv(runtime).activateProviderFallback(null);
+
+    vi.advanceTimersByTime(60 * 60 * 1000);
+
+    const queue = makeFakeQueue();
+    cv(runtime).handleEventWithContext(
+      { type: 'result', text: USAGE_LIMIT_NO_RESET_TEXT },
+      queue,
+      null,
+      'conv-key',
+      1,
+      'mapkey-notice-unknown-reset',
+    );
+
+    const activeUntil = cv(runtime).fallbackWindow.activeUntil;
+    expect(activeUntil).not.toBeNull();
+    const notices = enqueuedNotices(queue);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain('Primary model hit a usage/quota limit.');
+    expect(notices[0]).not.toContain('until about');
+    // The fallback window is still armed, yet its end must not pose as a quota expiry.
+    expect(notices[0]).not.toContain(formatClockForUser(activeUntil as number));
   });
 
   it('does not throw when fallback provider hits usage limit during active fallback window', () => {
@@ -414,5 +465,133 @@ describe('fallback-provider usage-limit cascade', () => {
       { provider: 'opencode-cli', model: 'minimax/minimax-m2', eligible: false },
       { provider: 'openai-api', model: 'gpt-5.5', eligible: true },
     ]);
+  });
+
+  it('a fallback-tier usage-limit with a parsed reset gives the notice no primary ETA', () => {
+    const runtime = makeRuntime([
+      { provider: 'opencode-cli', model: 'minimax/minimax-m2' },
+      { provider: 'openai-api', model: 'gpt-5.5' },
+    ]);
+    cv(runtime).activateProviderFallback(null, 'auth-required');
+    expect(cv(runtime).effectiveProvider).toBe('opencode-cli');
+
+    vi.advanceTimersByTime(60 * 60 * 1000);
+    // The reset parsed from the FALLBACK entry's message describes that
+    // entry's quota, not the primary's.
+    const fallbackResetMs = parsedResetMs(USAGE_LIMIT_TEXT);
+
+    const queue = makeFakeQueue();
+    const fallbackSession = {
+      getProviderId: vi.fn(() => 'opencode-cli'),
+      getStatus: vi.fn(() => ({
+        active: true,
+        pid: null,
+        sessionId: 'raw-opencode-session-id',
+        startedAt: new Date().toISOString(),
+        messageCount: 1,
+        lastMessageAt: new Date().toISOString(),
+      })),
+      getDbRowId: vi.fn(() => null),
+      clearTurnWatchdog: vi.fn(),
+      completeProviderTurn: vi.fn(),
+      shutdown: vi.fn(async () => {}),
+    };
+    cv(runtime).handleEventWithContext(
+      { type: 'result', text: USAGE_LIMIT_TEXT },
+      queue,
+      fallbackSession,
+      'conv-key',
+      1,
+      'mapkey-fallback-tier-reset',
+    );
+
+    // Fallback-tier attribution held: the chain advanced past the failing entry.
+    expect(cv(runtime).effectiveProvider).toBe('openai-api');
+    const notices = enqueuedNotices(queue);
+    expect(notices.filter((n) => n.includes('Primary model hit a usage/quota limit.'))).toHaveLength(1);
+    for (const notice of notices) {
+      expect(notice).not.toContain('until about');
+      expect(notice).not.toContain(formatClockForUser(fallbackResetMs));
+    }
+  });
+
+  // A wildcard (model-undefined) entry on the primary's own provider matches
+  // every claude-cli session, so each such session also matches the primary
+  // route; only the exact configured primary model resolves it to the primary.
+  const WILDCARD_SAME_PROVIDER_CHAIN = [{ provider: 'claude-cli' }];
+
+  /** Session double on the shared provider; only the model ref varies. */
+  function sameProviderSession(modelRef: string | undefined) {
+    return new Proxy(
+      {
+        getProviderId: vi.fn(() => 'claude-cli'),
+        getModelRef: vi.fn(() => modelRef),
+        getStatus: vi.fn(() => ({
+          active: true,
+          pid: null,
+          sessionId: 'claude-cli-1',
+          startedAt: new Date().toISOString(),
+          messageCount: 1,
+          lastMessageAt: new Date().toISOString(),
+        })),
+        getDbRowId: vi.fn(() => null),
+        clearTurnWatchdog: vi.fn(),
+        completeProviderTurn: vi.fn(),
+        shutdown: vi.fn(async () => {}),
+      } as Record<string, unknown>,
+      { get: (t, p) => (p in t ? t[p as string] : () => undefined) },
+    );
+  }
+
+  it('an ambiguous same-provider failure with no window state arms a window but gives the notice no time', () => {
+    const runtime = makeRuntime(WILDCARD_SAME_PROVIDER_CHAIN);
+    expect(cv(runtime).fallbackWindow.activeUntil).toBeNull();
+    // A provider-default session (undefined model ref), for example one the
+    // wildcard entry started during an earlier window, cannot be told apart
+    // from the primary, so its parsed reset is not proven to be the primary's.
+    const resetMs = parsedResetMs(USAGE_LIMIT_TEXT);
+
+    const queue = makeFakeQueue();
+    cv(runtime).handleEventWithContext(
+      { type: 'result', text: USAGE_LIMIT_TEXT },
+      queue,
+      sameProviderSession(undefined),
+      'conv-key',
+      1,
+      'mapkey-ambiguous-no-window',
+    );
+
+    // Failover still works: the failure armed a fresh window and the notice
+    // names the switch (not the credentials-missing template).
+    expect(cv(runtime).fallbackWindow.activeUntil).not.toBeNull();
+    const notices = enqueuedNotices(queue);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain('Primary model hit a usage/quota limit');
+    expect(notices[0]).toContain('Switching to');
+    expect(notices[0]).not.toContain('until about');
+    expect(notices[0]).not.toContain(formatClockForUser(resetMs));
+  });
+
+  it('a same-provider failure proven primary by the exact configured model still shows its reset as the time', () => {
+    const runtime = makeRuntime(WILDCARD_SAME_PROVIDER_CHAIN);
+    expect(cv(runtime).fallbackWindow.activeUntil).toBeNull();
+    const resetMs = parsedResetMs(USAGE_LIMIT_TEXT);
+
+    const queue = makeFakeQueue();
+    cv(runtime).handleEventWithContext(
+      { type: 'result', text: USAGE_LIMIT_TEXT },
+      queue,
+      sameProviderSession('claude-opus-4-8[1m]'),
+      'conv-key',
+      1,
+      'mapkey-proven-primary-no-window',
+    );
+
+    expect(cv(runtime).fallbackWindow.activeUntil).not.toBeNull();
+    const notices = enqueuedNotices(queue);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain(
+      `Primary model hit a usage/quota limit until about ${formatClockForUser(resetMs)}.`,
+    );
   });
 });

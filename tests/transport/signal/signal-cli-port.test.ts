@@ -180,6 +180,24 @@ describe('SignalCliPort — RPC contract', () => {
     ]);
   });
 
+  it('drops envelopes whose source or sync destination is whitespace-only', async () => {
+    const rpc = new ScriptedConnection(() => [
+      { envelope: { sourceNumber: '   ', timestamp: 5, dataMessage: { message: 'drop' } } },
+      {
+        envelope: {
+          timestamp: 6,
+          syncMessage: { sentMessage: { timestamp: 6, destinationNumber: '   ', message: 'drop' } },
+        },
+      },
+      { envelope: { sourceUuid: 'valid-source', timestamp: 7, dataMessage: { message: 'keep' } } },
+    ]);
+    const port = new SignalCliPort(config(), () => rpc);
+
+    await expect(port.listInboundSince(new Date(0))).resolves.toEqual([
+      expect.objectContaining({ timestamp: 7, source: 'valid-source', body: 'keep' }),
+    ]);
+  });
+
   it('uses a provider E.164 identity when exposed and otherwise falls back to UUID', async () => {
     const uuid = '01234567-89ab-cdef-0123-456789abcdef';
     const rpc = new ScriptedConnection(() => [
@@ -262,6 +280,23 @@ describe('SignalCliPort — RPC contract', () => {
     }))).toThrow(/loopback/);
     expect(() => new SignalCliPort(config({ socketPath: 'relative/signal.sock' })))
       .toThrow(/absolute/);
+  });
+
+  it('rejects a whitespace-only socketPath as a missing endpoint (#2871 trim-tightening)', () => {
+    // Discriminator for the isNonEmptyString migration: the old length>0 check
+    // counted a whitespace-only socketPath (e.g. '   ') as a socket endpoint, so
+    // the constructor failed later with the absolute-path error. The shared
+    // guard trims and treats it as absent, so with no tcpPort the constructor
+    // throws the exactly-one-endpoint error.
+    expect(() => new SignalCliPort(config({ socketPath: '   ' }))).toThrow(/exactly one/);
+    expect(() => new SignalCliPort(config({ socketPath: '\t\n' }))).toThrow(/exactly one/);
+  });
+
+  it('rejects a whitespace-only socketPath next to a valid tcpPort', () => {
+    // With a valid tcpPort the exactly-one-endpoint check alone would pass, while
+    // the connection factory would still choose the blank socket path because it
+    // is defined. The constructor must refuse the combination, as it does on main.
+    expect(() => new SignalCliPort(config({ socketPath: '   ', tcpPort: 7583 }))).toThrow(/socketPath/);
   });
 
   it('ignores a stale terminal callback from an older connection generation', async () => {

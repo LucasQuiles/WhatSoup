@@ -54,7 +54,7 @@ const SUPPORT_REQUEST_ID_RE = /(?:request[\s_-]*id)\s*[:#]?\s*([a-z0-9][a-z0-9_-
 const GENERIC_PROVIDER_INTERNAL_ERROR_USER_MESSAGE =
   'The AI service returned an internal error. Please try again in a moment.';
 
-export const MALFORMED_STREAMING_FRAGMENT_ERROR_MESSAGE =
+const MALFORMED_STREAMING_FRAGMENT_ERROR_MESSAGE =
   'malformed_streaming_fragment';
 const MALFORMED_STREAMING_FRAGMENT_USER_MESSAGE =
   'The streaming response contained a malformed fragment. Please try again.';
