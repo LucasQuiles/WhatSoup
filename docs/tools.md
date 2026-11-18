@@ -3943,22 +3943,27 @@ the global turn's queue, so a restart there would discard owed text. The declara
 | `reason` | string | yes | Non-empty reason for the restart. |
 | `code` | enum | no | `self_restart` (default), `redeploy`, or `config_reload`. |
 
-The handler first sends the text the current turn still owes: buffered streaming
-text goes out as a normal message, and text that minimal mode deferred at the tool
-boundary goes out as an interrupted-turn salvage message. It waits up to 10 seconds
-for those sends. The restart continues only when every one of those sends reached
-provider submission within that time. If the wait expires, the flush rejects, or
-a send ends failed or ambiguous, the handler sends no acknowledgement, writes no
-marker, does not restart, and returns `ok: false` / `restarting: false` with a
-`cause` of `timeout`, `flush_rejected` or `send_failed`. Pending sends stay in the
-queue and finish on their own; nothing is sent again. Otherwise it attempts an
-acknowledgement to the originating chat, which can be a phone, `@lid` or group
-JID. It writes an intentional-restart marker, emits an alert and asks the service
-manager to restart its own job: `systemctl --user restart` on systemd and one
-`launchctl kickstart -k` on launchd, so the manager both stops and starts the
-job. The docker supervisor and Linux without systemd reject the request. An
-acknowledgement failure is logged and does not stop the restart. A repeated
-request in the same process returns `ok: false` / `restarting: false`.
+The handler first sends the text the current turn still owes. The queue holds the
+turn's streamed answer until the turn ends, so the handler sends that answer as a
+normal answer message and waits for it before it aborts the turn. Only after that
+does text that minimal mode deferred at the tool boundary, in a turn that has shown
+nothing yet, go out as an interrupted-turn salvage message. Both waits share one
+10-second limit, and the restart continues only when every send reached provider
+submission in time. If the wait expires, a flush rejects, or a send ends failed,
+ambiguous or dropped by the group echo guard, the handler sends no acknowledgement,
+writes no marker, does not restart, and returns `ok: false` / `restarting: false`
+with a `cause` of `timeout`, `flush_rejected` or `send_failed`. A refusal before the
+abort leaves the turn running. Pending sends stay in the queue and finish on their
+own; nothing is sent again. Otherwise it attempts an acknowledgement to the
+originating chat, which can be a phone, `@lid` or group JID. It writes an
+intentional-restart marker, emits an alert and asks the service manager to restart
+its own job: `systemctl --user restart` on systemd and one `launchctl kickstart -k`
+on launchd, so the manager both stops and starts the job. On launchd this restarts
+the job as launchd loaded it, so a plist edited on disk is not picked up; see
+[the macOS launchd runbook](runbooks/macos-launchd-deployment.md). The docker
+supervisor and Linux without systemd reject the request. An acknowledgement
+failure is logged and does not stop the restart. A repeated request in the same
+process returns `ok: false` / `restarting: false`.
 
 **Returns:** `{ ok, restarting, reason, code, text }`, plus `cause` when an
 unconfirmed owed reply stopped the restart, when the caller survives long

@@ -127,6 +127,13 @@ until recovery is verified. Forced termination or host failure can interrupt
 restoration; the backup is the manual recovery source. Do not treat a successful
 re-pin as permission to clear existing incidents or recovery debt.
 
+A refusal prints a JSON receipt with `"status": "refused"`, including for a plist
+whose top level or `EnvironmentVariables` is not a dictionary. A refusal before
+the bootout removes the backup it staged. Without `--repin-existing` the
+installer takes no arguments: it renders a fresh installation only when called
+with none, and any other argument exits 2 before anything is written or loaded.
+Earlier versions ignored such arguments.
+
 ### NORMATIVE — D3 `validate_calendar_integer` (health installer only)
 
 `install-bot-errors-health-launchd.sh` exposes `BOT_ERRORS_HEALTH_HOUR`
