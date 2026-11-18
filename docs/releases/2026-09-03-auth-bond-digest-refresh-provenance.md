@@ -147,3 +147,15 @@
 - A refusal raised on the auth ROOT no longer reports `creds.exists: true` for
   a credential it never examined, and no longer lets a root-side fault be
   described as a missing credential.
+
+## Correction (2026-09-27)
+
+The RETRACTION bullet above says the recovery marker "is in the same unwired
+cluster". That is no longer true on origin/main `cdbfdc1c`: `HealthPoller`
+(`src/fleet/health-poller.ts`) instantiates `AuthLossSignalTransitionController`
+and feeds it health samples, and it imports the recovery-marker observability
+module. Only the auth-loss mode-bucket contract, mapper and producer modules
+remain without a runtime importer (they stay listed in
+`tests/scripts/orphan-reachability-guard.test.ts`). The rest of the
+retraction is unchanged by this correction. The release record above is left as
+written.

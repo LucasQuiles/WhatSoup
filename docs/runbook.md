@@ -2471,12 +2471,13 @@ Output is one JSON line with `ok`, `mode`, `decision` (`ready`, `applied`, `alre
 contradicts the recorded gap or an existing closure); `1` usage or I/O error. Output never contains
 message text, JIDs, or media.
 
-**Schema 66, 67 and 68 rollback.** Migration 66 adds only the closure table; migration 67 adds only
-the protected-delivery tables; migration 68 adds only the protected secret-input table. After a
-migration is recorded, a binary whose ceiling is below it refuses the database and will not write: a
-schema-65 binary refuses a schema-66 database, a schema-66 binary refuses a schema-67 database, and a
-schema-67 binary refuses a schema-68 database, all as `future_schema`. **Binary-only rollback is
-unavailable** for any of them. Keep the 68-aware release for containment or forward repair. Restoring a pre-migration
+**Schema 66 to 69 rollback.** Migration 66 adds only the closure table; migration 67 adds only the
+protected-delivery tables; migration 68 adds only the protected secret-input table; migration 69 adds
+only the failed-terminal reply-debt index. After a migration is recorded, a binary whose ceiling is
+below it refuses the database and will not write: a schema-65 binary refuses a schema-66 database, a
+schema-66 binary refuses a schema-67 database, a schema-67 binary refuses a schema-68 database, and a
+schema-68 binary refuses a schema-69 database, all as `future_schema`. **Binary-only rollback is
+unavailable** for any of them. Keep the 69-aware release for containment or forward repair. Restoring a pre-migration
 backup is an owner decision that requires a proven zero-new-writes window. **Never overwrite a newer
 database with an older backup**: messages received after the upgrade would be lost.
 
@@ -2490,10 +2491,10 @@ bash scripts/run-with-pinned-node.sh scripts/schema-rollback-rehearsal.ts \
   --old-root "$OLD" --new-root "$PWD" --work-dir "$SCRATCH/rehearsal"
 ```
 
-The old binary creates the database at its own ceiling, this release migrates it to 68, and the old
-binary reopens it. From a schema-67 previous release, exit `0` means the old binary refused with
-`DatabaseCompatibilityError` reason `future_schema` ("Database schema migration 68 exceeds binary
-ceiling 67; refusing writes") and `rehearsal.db` stayed byte-identical. The output also reports the
+The old binary creates the database at its own ceiling, this release migrates it to 69, and the old
+binary reopens it. From a schema-68 previous release, exit `0` means the old binary refused with
+`DatabaseCompatibilityError` reason `future_schema` ("Database schema migration 69 exceeds binary
+ceiling 68; refusing writes") and `rehearsal.db` stayed byte-identical. The output also reports the
 hashes of every file in the work directory, including the WAL and shared-memory sidecars, as
 `filesBeforeOldReopen` and `filesAfterOldReopen`; the exit code does not compare them, so read them
 there.
@@ -3165,8 +3166,8 @@ an ambiguous submission; later receipt evidence is preserved.
 
 Migration 68 is additive: it adds secret-input metadata alongside the existing
 protected-delivery tables and audit retention. Do not remove its table or rows to
-roll back an application. Use only a binary verified against a schema-68 database,
-or restore a verified pre-migration database backup through the normal rollback
+roll back an application. Use only a binary verified against the database's current schema
+(its highest recorded migration), or restore a verified pre-migration database backup through the normal rollback
 procedure. This migration does not add operating-system isolation; processes running
 under the same operating-system account remain trusted operators.
 
@@ -3224,11 +3225,11 @@ fixed adapter set. It is started with:
 npm run secure-handoff:consumer -- --config /absolute/private/consumer.json
 ```
 
-Use the schema-68 database for the same instance and a private, owner-controlled
+Use the instance's migrated database and a private, owner-controlled
 configuration file. The worker rejects a relative, unreadable, over-16-KiB,
 symlinked, non-regular, non-private, or malformed configuration file. It also
-rejects a database that lacks migration 68 or exceeds the running binary's
-schema ceiling. Complete the instance's schema migration and verify the
+rejects a database that lacks the running binary's current migration or exceeds
+its schema ceiling. Complete the instance's schema migration and verify the
 compatible binary before starting the worker.
 
 Before starting, provision `LINKS_MANAGED_TRANSPORT_TOKEN` and

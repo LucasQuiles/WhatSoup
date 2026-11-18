@@ -319,7 +319,7 @@ printf 'resolved=%s\\n' "\${WHATSOUP_HEALTH_TOKEN-}"
   };
 }
 
-function runHealthTokenCheckerProbe(): {
+function runHealthTokenCheckerProbe(platform: 'Darwin' | 'Linux' = 'Darwin'): {
   status: number | null;
   stdout: string;
   stderr: string;
@@ -343,13 +343,22 @@ function runHealthTokenCheckerProbe(): {
   fs.chmodSync(instanceDir, 0o700);
   fs.chmodSync(tokenPath, 0o600);
 
-  writeExecutable(path.join(binDir, 'uname'), `#!/usr/bin/env bash\nprintf 'Darwin\\n'\n`);
-  writeExecutable(path.join(binDir, 'security'), `#!/usr/bin/env bash\nprintf 'security %s\\n' "$*" >> "$LOG_PATH"\nexec sleep 30\n`);
+  writeExecutable(path.join(binDir, 'uname'), `#!/usr/bin/env bash\nprintf '${platform}\\n'\n`);
+  if (platform === 'Darwin') {
+    writeExecutable(path.join(binDir, 'security'), `#!/usr/bin/env bash\nprintf 'security %s\\n' "$*" >> "$LOG_PATH"\nexec sleep 30\n`);
+  } else {
+    writeExecutable(
+      path.join(binDir, 'secret-tool'),
+      `#!/usr/bin/env bash\nprintf 'secret-tool %s\\n' "$*" >> ${JSON.stringify(logPath)}\ntrap '' TERM\nexec sleep 30\n`,
+    );
+  }
+  // read-private-health-token.sh reads the directory metadata with `stat -f` on
+  // Darwin and `stat -c` on Linux, so the stub answers both spellings.
   writeExecutable(path.join(binDir, 'stat'), `#!/usr/bin/env bash
 set -euo pipefail
 case "$1:$2" in
-  '-f:%u') printf '%s\n' "$(id -u)" ;;
-  '-f:%Lp') printf '700\n' ;;
+  '-f:%u'|'-c:%u') printf '%s\n' "$(id -u)" ;;
+  '-f:%Lp'|'-c:%a') printf '700\n' ;;
   *) exit 64 ;;
 esac
 `);
@@ -653,6 +662,22 @@ describe('health token shell wrappers', () => {
     expect(result.stderr).toBe('');
     expect(result.log.trim()).toBe(
       'security find-generic-password -s whatsoup-health-token -a fixture-checker -w',
+    );
+    expect(`${result.stdout}\n${result.stderr}\n${result.log}`).not.toContain('a'.repeat(64));
+  }, PROBE_TEST_TIMEOUT_MS);
+
+  it('bounds a hanging secret-tool in the Linux branch of the parity checker', () => {
+    const result = runHealthTokenCheckerProbe('Linux');
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('scoped keyring mirror is missing');
+    expect(result.stderr).toBe('');
+    // The stub ignores TERM, so only a KILL ends it: whatsoup_run_bounded sends one
+    // after its 3 s budget and 2 s grace, inside the 15 s harness cap. A bare
+    // `timeout 3s` (no -k) would wait out the 30 s sleep and trip that cap. The
+    // log shows the one lookup reached secret-tool, not the pinned-Node helper.
+    expect(result.log.trim()).toBe(
+      'secret-tool lookup service whatsoup-health-token user fixture-checker',
     );
     expect(`${result.stdout}\n${result.stderr}\n${result.log}`).not.toContain('a'.repeat(64));
   }, PROBE_TEST_TIMEOUT_MS);
