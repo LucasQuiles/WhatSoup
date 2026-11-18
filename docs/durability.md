@@ -1364,11 +1364,11 @@ and historical catch-ups remain visible as retained recovery debt without making
 guarantee and no terminal echo, recovery job, or operator catch-up link. A retry notice or unrelated
 later reply does not clear that obligation. Operator cancellation, deliberate no-reply policy and
 synthetic scheduled turns are excluded. Enrollment in an operator catch-up moves the obligation
-to `open_catchups`. The retention sweep uses the same failed-source selector to preserve unanswered
-terminal records and their source inbounds beyond the normal age window; age alone cannot clear debt.
-The selector uses the checked recovery-source key and pending-link shape for indexed exclusion
-lookups. It still scans terminal history; a dedicated failed-terminal index remains an open
-qualification item pending schema-lineage allocation. Counts are not truncated to hide that cost.
+to `open_catchups`. The retention sweep applies the same failed-source predicates as a keyed probe
+on each aged record's inbound to preserve unanswered terminal records and their source inbounds
+beyond the normal age window; age alone cannot clear debt. Both reads reach debt rows through the
+partial index `idx_turn_terminal_failed_reply_debt`, whose WHERE clause repeats the selector's terminal
+predicates, then use row-id, recovery-source-key and pending-link lookups. Counts are not truncated.
 Only the existing proof-based closure removes a catch-up from that gauge. These reads
 neither reset attempts nor replay work. The reply-guarantee observer's `failedTerminalDebt` is a
 raw terminal-row diagnostic; its count may overlap jobs or catch-ups and is not added to this health gauge.
