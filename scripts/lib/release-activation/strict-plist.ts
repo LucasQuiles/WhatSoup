@@ -27,7 +27,12 @@ const MAX_DEPTH = 32;
 const ROOT_SHAPE = 'plist root is not exactly one <dict> inside <plist version="1.0">';
 const ENTITIES = new Map([['lt', '<'], ['gt', '>'], ['amp', '&'], ['quot', '"'], ['apos', "'"]]);
 const XML_DECLARATION = /<\?xml[ \t\r\n]+version=(["'])1\.0\1(?:[ \t\r\n]+encoding=(["'])([A-Za-z][A-Za-z0-9._-]*)\2)?(?:[ \t\r\n]+standalone=(["'])(?:yes|no)\4)?[ \t\r\n]*\?>/y;
-const DOCTYPE = /<!DOCTYPE[ \t\r\n]+plist(?:[ \t\r\n]+(?:PUBLIC[ \t\r\n]+(?:"[^"]*"|'[^']*')[ \t\r\n]+(?:"[^"]*"|'[^']*')|SYSTEM[ \t\r\n]+(?:"[^"]*"|'[^']*')))?[ \t\r\n]*>/y;
+// Apple's PLIST 1.0 DOCTYPE, on one line or two as the repository writers emit it, with the older Apple Computer public
+// identifier that plist(5) shows. A quoted literal can hold `>` and a whole plist, and plutil reads a plist written
+// inside a SYSTEM literal as the document, so no other DOCTYPE is admitted.
+const APPLE_DOCTYPE = /<!DOCTYPE[ \t\r\n]+plist[ \t\r\n]+PUBLIC[ \t\r\n]+"-\/\/Apple(?: Computer)?\/\/DTD PLIST 1\.0\/\/EN"[ \t\r\n]+"http:\/\/www\.apple\.com\/DTDs\/PropertyList-1\.0\.dtd"[ \t\r\n]*>/y;
+// Key text can hold a path or other host text, so a refusal detail prints a key only in this bounded identifier form.
+const DETAIL_KEY = /^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/;
 const PLIST_OPEN = /<plist[ \t\r\n]+version=(["'])1\.0\1[ \t\r\n]*>/y;
 const ROOT_DICT = /<dict[ \t\r\n]*\/?>/y;
 const START_TAG = /<([A-Za-z][A-Za-z0-9]*)[ \t\r\n]*(\/?)>/y;
@@ -38,6 +43,11 @@ class StrictPlistRefusal extends Error {}
 
 function refuse(message: string): never {
   throw new StrictPlistRefusal(message);
+}
+
+/** A key as a refusal detail prints it: the key itself in DETAIL_KEY's form, otherwise a fixed phrase that prints none of it. */
+export function detailKey(key: string): string {
+  return DETAIL_KEY.test(key) ? key : '(a name outside [A-Za-z_][A-Za-z0-9_.-]{0,63}, not shown)';
 }
 
 /** XML 1.0 forbids these code units in a document; U+FFFD is what an undecodable UTF-8 byte reads as. */
@@ -85,11 +95,11 @@ class Reader {
     }
     this.misc();
     if (text.startsWith('<!DOCTYPE', this.position)) {
-      if (this.sticky(DOCTYPE) === null) {
+      if (this.sticky(APPLE_DOCTYPE) === null) {
         const close = text.indexOf('>', this.position);
         refuse(text.slice(this.position, close < 0 ? undefined : close).includes('[')
           ? 'plist DOCTYPE has an internal subset or entity declaration'
-          : 'plist DOCTYPE is malformed');
+          : 'plist DOCTYPE is not the Apple PLIST 1.0 DOCTYPE');
       }
       this.misc();
     }
@@ -120,6 +130,9 @@ class Reader {
   }
 
   private comment(): void {
+    // This reader ends a comment at the first --> after its <!-- opener. A reader that starts that search at the
+    // opener's second dash ends <!---> at once and reads what follows. No repository writer emits <!---.
+    if (this.text.startsWith('<!---', this.position)) refuse('plist holds a comment that starts with <!---');
     const end = this.text.indexOf('-->', this.position + 4);
     if (end < 0) refuse('plist is malformed: unterminated comment');
     this.position = end + 3;
@@ -203,7 +216,7 @@ class Reader {
           this.between();
           if (this.text.startsWith('</', this.position)) { this.end('dict'); return { kind: 'dict', entries }; }
           const key = this.key();
-          if (entries.has(key)) refuse(`plist has a duplicate key ${key}`);
+          if (entries.has(key)) refuse(`plist has a duplicate key ${detailKey(key)}`);
           this.between();
           if (this.text.startsWith('</', this.position)) refuse('plist is malformed: <key> without a value');
           entries.set(key, this.value(depth + 1));
@@ -264,7 +277,7 @@ export function strictStringDict(dict: StrictPlistDict, key: string): { entries:
   if (value.kind !== 'dict') return { error: `plist ${key} is not a <dict>` };
   const entries = new Map<string, string>();
   for (const [entry, item] of value.entries) {
-    if (item.kind !== 'string') return { error: `plist ${key} value for ${entry} is not a <string>` };
+    if (item.kind !== 'string') return { error: `plist ${key} value for ${detailKey(entry)} is not a <string>` };
     entries.set(entry, item.value);
   }
   return { entries };

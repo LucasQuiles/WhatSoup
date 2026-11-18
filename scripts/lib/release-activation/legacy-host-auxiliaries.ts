@@ -2,7 +2,7 @@
 import path from 'node:path';
 import { parseHealthRunnerSuffix } from './plan.ts';
 import { ROOT_HELPER_PYTHON } from './root-helper-interpreter.ts';
-import { readStrictPlist, strictStringArray, strictStringDict, type StrictPlistDict } from './strict-plist.ts';
+import { detailKey, readStrictPlist, strictStringArray, strictStringDict, type StrictPlistDict } from './strict-plist.ts';
 
 export type LegacyPathRebaseLabel =
   | 'com.bot-errors.health'
@@ -36,6 +36,7 @@ const PATH_REBASE_ENVIRONMENT_KEYS: Readonly<Record<LegacyPathRebaseLabel, Reado
 };
 const BOT_ERRORS_HEALTH_SHAPE = 'bot-errors health job is neither the installer form nor the legacy wrapper; '
   + 'reinstall it with deploy/scripts/install-bot-errors-health-launchd.sh or deploy/scripts/install-bot-errors-launchd.sh';
+const BOT_ERRORS_WRAPPER_HOME = 'bot-errors health legacy wrapper does not source the BOT ERRORS environment file in the job user\'s home folder';
 const LEGACY_TIMER_SHAPE = 'legacy host auxiliary does not match reviewed path-rebase contract';
 
 export function isLegacyPathRebaseLabel(label: string): label is LegacyPathRebaseLabel {
@@ -69,20 +70,21 @@ function escapeXml(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 }
 
-function rebaseBotErrorsHealthProfileDefault(installed: string, args: readonly string[], expectCurrent: string, release: string): string | null {
+/**
+ * The file the legacy wrapper sources under `set -a`. It is shell code, so it is bound to the job user's home folder,
+ * as single-member activation binds it (plan.ts botErrorsHealthWrapper).
+ */
+function botErrorsEnvironmentFile(home: string): string {
+  return `${home}/.config/whatsoup/bot-errors.env`;
+}
+
+function rebaseBotErrorsHealthProfileDefault(installed: string, args: readonly string[], expectCurrent: string, release: string, home: string): string | null {
   const runner = `${expectCurrent}/deploy/scripts/bot-errors-runner.py`;
   const health = `${expectCurrent}/deploy/scripts/bot-errors-health-check.py`;
   const shell = args[2];
-  const envPrefix = 'BOT_ERRORS_ENV_FILE=';
-  const envSuffix = '; export BOT_ERRORS_ENV_FILE;';
-  if (shell === undefined || !shell.startsWith(envPrefix)) return null;
-  const envEnd = shell.indexOf(envSuffix, envPrefix.length);
-  if (envEnd < 0) return null;
-  const envFile = safeShellAbsolutePath(shell.slice(envPrefix.length, envEnd));
-  const configSuffix = '/.config/whatsoup/bot-errors.env';
-  if (envFile === null || !envFile.endsWith(configSuffix)) return null;
-  const home = safeShellAbsolutePath(envFile.slice(0, -configSuffix.length));
-  if (home === null || envFile !== `${home}${configSuffix}`) return null;
+  if (shell === undefined) return null;
+  // The sourced file, the state-directory default and the log hint all derive from the planning home.
+  const envFile = botErrorsEnvironmentFile(home);
   const stateDir = `${home}/.local/state/bot-errors`;
   if (args.length !== 20 || args[0] !== '/bin/bash' || args[1] !== '-c' || args[3] !== 'bot-errors-health'
     || args[4] !== '/usr/bin/python3' || args[5] !== runner || args[6] !== '--instance' || args[7] !== 'bot-errors-health'
@@ -97,7 +99,7 @@ function rebaseBotErrorsHealthProfileDefault(installed: string, args: readonly s
   if (profileBasename === null || !LEGACY_BOT_ERRORS_HEALTH_PROFILE.test(profileBasename)) return null;
   const oldDefault = `${profilePrefix}${profileBasename}; fi;`;
   const expectedShell = [
-    `${envPrefix}${envFile}${envSuffix} `,
+    `BOT_ERRORS_ENV_FILE=${envFile}; export BOT_ERRORS_ENV_FILE; `,
     'if [[ ! -r "$BOT_ERRORS_ENV_FILE" ]]; then printf "%s\\n" "missing BOT_ERRORS_ENV_FILE=$BOT_ERRORS_ENV_FILE" >/dev/stderr; exit 64; fi; ',
     'set -a; source "$BOT_ERRORS_ENV_FILE"; set +a; ',
     'if [[ -z "${BOT_ERRORS_JID:-}" ]]; then printf "%s\\n" "missing BOT_ERRORS_JID in $BOT_ERRORS_ENV_FILE" >/dev/stderr; exit 65; fi; ',
@@ -151,7 +153,7 @@ export function checkPathRebasePlist(label: string, text: string, root: string, 
   const read = readStrictPlist(text);
   if (!read.ok) return read;
   for (const key of read.root.keys()) {
-    if (!PATH_REBASE_ROOT_KEYS.has(key)) return { ok: false, error: `plist root key ${key} is not admitted for a path-rebase job` };
+    if (!PATH_REBASE_ROOT_KEYS.has(key)) return { ok: false, error: `plist root key ${detailKey(key)} is not admitted for a path-rebase job` };
   }
   const declared = read.root.get('Label');
   if (declared?.kind !== 'string' || declared.value !== label) return { ok: false, error: 'plist Label is not the declared host auxiliary label' };
@@ -160,14 +162,16 @@ export function checkPathRebasePlist(label: string, text: string, root: string, 
   const environment = strictStringDict(read.root, 'EnvironmentVariables');
   if ('error' in environment) return { ok: false, error: environment.error };
   for (const key of environment.entries.keys()) {
-    if (!PATH_REBASE_ENVIRONMENT_KEYS[label].has(key)) return { ok: false, error: `environment key ${key} is not admitted for ${label}` };
+    if (!PATH_REBASE_ENVIRONMENT_KEYS[label].has(key)) return { ok: false, error: `environment key ${detailKey(key)} is not admitted for ${label}` };
   }
   const argv = programArguments.values;
   const legacy = rebaseLegacyHostAuxiliaryForPathRebase(text, argv, label, root, root, home) !== null;
   if (label !== 'com.bot-errors.health') return legacy ? { ok: true, programArguments: argv } : { ok: false, error: LEGACY_TIMER_SHAPE };
-  return legacy || botErrorsInstallerForm(read.root, argv, root, home)
-    ? { ok: true, programArguments: argv }
-    : { ok: false, error: BOT_ERRORS_HEALTH_SHAPE };
+  if (legacy || botErrorsInstallerForm(read.root, argv, root, home)) return { ok: true, programArguments: argv };
+  // A wrapper script that sets BOT_ERRORS_ENV_FILE to another file gets its own detail, which names no path.
+  const shell = argv[0] === '/bin/bash' && argv[1] === '-c' ? (argv[2] ?? '') : '';
+  const foreignEnvironment = shell.startsWith('BOT_ERRORS_ENV_FILE=') && !shell.startsWith(`BOT_ERRORS_ENV_FILE=${botErrorsEnvironmentFile(home)}; `);
+  return { ok: false, error: foreignEnvironment ? BOT_ERRORS_WRAPPER_HOME : BOT_ERRORS_HEALTH_SHAPE };
 }
 
 /**
@@ -183,8 +187,8 @@ export function rebaseLegacyHostAuxiliaryForPathRebase(
   home: string,
 ): string | null {
   if (safeShellAbsolutePath(expectCurrent) !== expectCurrent || safeShellAbsolutePath(release) !== release) return null;
-  if (label === 'com.bot-errors.health') return rebaseBotErrorsHealthProfileDefault(installed, programArguments, expectCurrent, release);
   if (safeShellAbsolutePath(home) !== home) return null;
+  if (label === 'com.bot-errors.health') return rebaseBotErrorsHealthProfileDefault(installed, programArguments, expectCurrent, release, home);
   if (label === 'com.whatsoup.harness-maintenance') {
     return sameArgs(programArguments, [
       '/bin/bash', `${home}/.local/libexec/fleet-reauth/maint-ccd-guard.sh`, '/bin/bash', `${expectCurrent}/deploy/scripts/harness-maintenance.sh`,
