@@ -33,6 +33,11 @@ export WHATSOUP_RELEASE_DRIFT_LOG_DIR="${WHATSOUP_RELEASE_DRIFT_LOG_DIR:-$HOME/.
 fail(){ echo "whatsoup-release-drift-linux: $1" >&2; exit "${2:-2}"; }
 
 [ -n "$INSTANCE" ] || fail "WHATSOUP_RELEASE_DRIFT_INSTANCE is not set; write WHATSOUP_RELEASE_DRIFT_INSTANCE=<instance> to ~/.config/whatsoup/release-drift.env"
+# The label follows --instance, where a leading dash reads as another option:
+# the scheduler answers --help with exit 0 and observes nothing. deploy/setup.sh
+# refuses the same labels.
+[[ "$INSTANCE" =~ ^[A-Za-z0-9._][A-Za-z0-9._-]*$ ]] \
+  || fail "unsafe WHATSOUP_RELEASE_DRIFT_INSTANCE: use only letters, digits, dot, underscore, and dash, and do not begin with a dash"
 
 # Resolve deployed release root from the launcher symlink:
 #   <root>/deploy/whatsoup  ->  strip trailing /deploy/whatsoup

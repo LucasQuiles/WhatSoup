@@ -346,6 +346,17 @@ if [ "$assume_yes" -eq 1 ] && [ "$install_host_dependencies" -ne 1 ]; then
   echo "--yes requires --install-host-dependencies" >&2
   exit 2
 fi
+# The Linux release-drift unit labels its BOT ERRORS alerts with this value, so
+# it is checked here, before setup changes anything. The wrapper passes it after
+# --instance, where a leading dash reads as another option (the scheduler's
+# --help, or isFlagToken in scripts/lib/cli-args.ts for the observer).
+# deploy/scripts/whatsoup-release-drift-linux.sh refuses the same labels.
+release_drift_instance="${WHATSOUP_RELEASE_DRIFT_INSTANCE:-}"
+if [ "$PLATFORM" != "Darwin" ] && [ -n "$release_drift_instance" ] \
+  && [[ ! "$release_drift_instance" =~ ^[A-Za-z0-9._][A-Za-z0-9._-]*$ ]]; then
+  echo "  ✗ unsafe WHATSOUP_RELEASE_DRIFT_INSTANCE: use only letters, digits, dot, underscore, and dash, and do not begin with a dash" >&2
+  exit 2
+fi
 
 echo "WhatSoup Setup"
 echo "=============="
@@ -575,13 +586,6 @@ else
   # --- linux (systemd) unit install ---
   bot_errors_required_health_profile="$(require_readable_bot_errors_health_profile)"
   echo "  ✓ BOT ERRORS health profile readable: $bot_errors_required_health_profile"
-  # The release-drift instance label is checked before any unit is installed,
-  # with the character set deploy/scripts/render-release-drift-launchd.sh allows.
-  release_drift_instance="${WHATSOUP_RELEASE_DRIFT_INSTANCE:-}"
-  if [ -n "$release_drift_instance" ] && [[ ! "$release_drift_instance" =~ ^[A-Za-z0-9._-]+$ ]]; then
-    echo "  ✗ unsafe WHATSOUP_RELEASE_DRIFT_INSTANCE: use only letters, digits, dot, underscore, and dash" >&2
-    exit 2
-  fi
   mkdir -p "$SYSTEMD_DIR"
   cp "$REPO_ROOT/deploy/whatsoup@.service" "$SYSTEMD_DIR/whatsoup@.service"
   cp "$REPO_ROOT/deploy/whatsoup-fleet.service" "$SYSTEMD_DIR/whatsoup-fleet.service"
