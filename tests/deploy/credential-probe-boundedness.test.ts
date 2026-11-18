@@ -36,9 +36,52 @@ function trackedShellFiles(): string[] {
  * Matches `security`/`secret-tool` in *command position* — start of line, or
  * after a pipe/`&&`/`;`/subshell open. Occurrences inside echoed help text and
  * comments sit mid-line and are correctly ignored.
+ *
+ * The optional `timeout`/`gtimeout` prefix catches the shape bounded by hand,
+ * `timeout 3s secret-tool …`, where the `timeout` and not the credential command
+ * holds command position. That shape fails on a host without `timeout(1)`, and a
+ * bare `timeout` only sends SIGTERM, so it must route through
+ * `whatsoup_run_bounded` too.
  */
 const COMMAND_POSITION =
-  /(?:^|[|&;(]|\bthen\b|\bdo\b|\bif\b|\belif\b|!)\s*(security|secret-tool)\s/;
+  /(?:^|[|&;(]|\bthen\b|\bdo\b|\bif\b|\belif\b|!)\s*(?:(?:timeout|gtimeout)(?:\s+[^\s;|&()]+)*\s+)?(security|secret-tool)\s/;
+
+/**
+ * True when the character at `index` sits inside a quoted string of the command
+ * context it executes in. `$(` opens a command substitution whose contents run as
+ * a separate command, so quoting inside it does not depend on the surrounding
+ * line: in `value="$(timeout 3s secret-tool …)"` the credential command holds
+ * command position inside the substitution, although a plain count of the quotes
+ * before it sees the assignment's opening `"`. Inside single quotes `$(` is
+ * literal text, so it does not open a substitution there.
+ */
+function insideQuotedString(code: string, index: number): boolean {
+  let single = false;
+  let double = false;
+  let subst = 0;
+  for (let i = 0; i < index; i++) {
+    const ch = code[i];
+    if (subst > 0) {
+      if (ch === '(' && code[i - 1] === '$') subst += 1;
+      else if (ch === ')') subst -= 1;
+      continue;
+    }
+    if (single) {
+      if (ch === "'") single = false;
+      continue;
+    }
+    if (double) {
+      if (ch === '"') double = false;
+      else if (ch === '(' && code[i - 1] === '$') subst += 1;
+      continue;
+    }
+    if (ch === "'") { single = true; continue; }
+    if (ch === '"') { double = true; continue; }
+    if (ch === '(' && code[i - 1] === '$') subst += 1;
+  }
+  if (subst > 0) return false;
+  return single || double;
+}
 
 function unboundedProbes(file: string): string[] {
   const findings: string[] = [];
@@ -48,15 +91,10 @@ function unboundedProbes(file: string): string[] {
     const match = COMMAND_POSITION.exec(code);
     if (!match) return;
     // A match sitting inside a quoted string is data/help text, not a call.
-    // Continuation lines of a multi-line message read as an odd quote count.
-    const prefix = code.slice(0, match.index);
-    const doubleQuotesBefore = (prefix.match(/"/g) ?? []).length;
-    const singleQuotesBefore = (prefix.match(/'/g) ?? []).length;
-    if (
-      doubleQuotesBefore % 2 === 1
-      || singleQuotesBefore % 2 === 1
-      || /^["']/.test(code.trimStart())
-    ) return;
+    // A `timeout 3s` prefix can put the command name after the regex anchor, so
+    // the quote state is measured at the command name itself.
+    const commandIndex = match.index + match[0].indexOf(match[1]);
+    if (insideQuotedString(code, commandIndex)) return;
     // `command -v security` only asks whether the binary exists; it cannot block.
     if (/command\s+-v\s+(security|secret-tool)\b/.test(code)) return;
     if (code.includes('whatsoup_run_bounded')) return;
@@ -97,6 +135,30 @@ describe('credential-store probes are bounded on every platform', () => {
 
     try {
       expect(unboundedProbes(fixture)).toEqual([]);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('flags a probe bounded by hand with timeout, also inside a command substitution', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'credential-probe-scan-'));
+    const fixture = path.join(tmpDir, 'probe.sh');
+    fs.writeFileSync(
+      fixture,
+      [
+        'timeout 3s secret-tool lookup service svc-a',
+        'value="$(gtimeout 3 security find-generic-password -s svc-a -w)"',
+        // Single quotes keep `$(` literal, so this line is data, not a call.
+        "printf '%s\\n' '$(timeout 3s secret-tool lookup service svc-a)'",
+        '',
+      ].join('\n'),
+    );
+
+    try {
+      expect(unboundedProbes(fixture)).toEqual([
+        `${fixture}:1: timeout 3s secret-tool lookup service svc-a`,
+        `${fixture}:2: value="$(gtimeout 3 security find-generic-password -s svc-a -w)"`,
+      ]);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
