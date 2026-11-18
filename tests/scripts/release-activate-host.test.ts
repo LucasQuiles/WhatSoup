@@ -244,7 +244,7 @@ describe('release:activate-host loaded launchd contract', () => {
   it('requires explicit unique member and auxiliary ownership', () => {
     expect(parseHostUnitDeclaration({ schemaVersion: 1, members: [
       { instance: 'alpha-line', expectCurrent: '/releases/old-a', auxLabels: [{ label: 'com.whatsoup.reply-guarantee', renderer: 'setup-timer' }] },
-      { instance: 'personal', expectCurrent: '/releases/old-b', auxLabels: [] },
+      { instance: 'line-a', expectCurrent: '/releases/old-b', auxLabels: [] },
     ] })).not.toBeNull();
     expect(parseHostUnitDeclaration({ schemaVersion: 1, members: [
       { instance: 'alpha-line', expectCurrent: '/releases/old-a', auxLabels: [] },
@@ -252,7 +252,7 @@ describe('release:activate-host loaded launchd contract', () => {
     ] })).toBeNull();
     expect(parseHostUnitDeclaration({ schemaVersion: 1, members: [
       { instance: 'alpha-line', expectCurrent: '/releases/old-a', auxLabels: [{ label: 'com.whatsoup.line-a', renderer: 'setup-timer' }] },
-      { instance: 'personal', expectCurrent: '/releases/old-b', auxLabels: [] },
+      { instance: 'line-a', expectCurrent: '/releases/old-b', auxLabels: [] },
     ] })).toBeNull();
   });
 
@@ -570,9 +570,9 @@ describe('release:activate-host group transaction', () => {
     const world = twoMemberWorld();
     const foreign = 'com.whatsoup.line-a';
     // A configured instance outside the member set whose primary job runs the old release directly.
-    const config = path.join(world.home, '.config', 'whatsoup', 'instances', 'personal'); mkdirSync(config, { recursive: true });
+    const config = path.join(world.home, '.config', 'whatsoup', 'instances', 'line-a'); mkdirSync(config, { recursive: true });
     writeFileSync(path.join(config, 'config.json'), JSON.stringify({ healthPort: 19003 }));
-    const foreignPlist = world.addJob(foreign, plist(foreign, [path.join(world.oldRelease, 'deploy', 'whatsoup'), 'personal'], world.oldRelease));
+    const foreignPlist = world.addJob(foreign, plist(foreign, [path.join(world.oldRelease, 'deploy', 'whatsoup'), 'line-a'], world.oldRelease));
     const foreignBefore = readFileSync(foreignPlist, 'utf8');
     // The release-drift renderer renders its own fixed label, whatever label it is declared under.
     const fake = world.host.exec;
