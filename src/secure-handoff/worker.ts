@@ -304,7 +304,7 @@ function requiredEnvironment(environment: Readonly<Record<string, string | undef
   return value;
 }
 
-function validateDatabase(database: DatabaseSync, databasePath: string): void {
+export function validateDatabase(database: DatabaseSync, databasePath: string): void {
   assertSchemaCeiling(database, databasePath);
   const migration = database.prepare('SELECT 1 AS ok FROM schema_migrations WHERE version = ? LIMIT 1')
     .get(CURRENT_SCHEMA_MIGRATION) as { ok?: unknown } | undefined;
