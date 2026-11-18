@@ -18,6 +18,21 @@ const rootOf = (text: string) => {
   if (!read.ok) throw new Error(read.error);
   return read.root;
 };
+const DOCTYPE_REFUSAL = 'plist DOCTYPE is not the Apple PLIST 1.0 DOCTYPE';
+const COMMENT_REFUSAL = 'plist holds a comment that starts with <!---';
+/** What a detail prints in place of a key outside the bounded identifier form. */
+const KEY_NOT_SHOWN = '(a name outside [A-Za-z_][A-Za-z0-9_.-]{0,63}, not shown)';
+// The two round-2 review fixtures: a whole plist inside a DOCTYPE SYSTEM literal, and a key after a comment opened as <!--->.
+const FIXTURE_A = [
+  '<?xml version="1.0" encoding="UTF-8"?>',
+  `<!DOCTYPE plist SYSTEM '><plist version="1.0"><dict><key>Label</key><string>example.hidden</string><key>Program</key><string>/opt/example/hidden</string></dict></plist>'>`,
+  '<plist version="1.0">', '<dict>', '<key>Label</key>', '<string>example.visible</string>', '</dict>', '</plist>', '',
+].join('\n');
+const FIXTURE_B = [
+  '<?xml version="1.0" encoding="UTF-8"?>', '<plist version="1.0">', '<dict>', '<key>Label</key>', '<string>example.visible</string>',
+  '<!--->', '<key>Program</key>', '<string>/opt/example/hidden</string>', '<!-- -->', '</dict>', '</plist>', '',
+].join('\n');
+const XML = '<?xml version="1.0" encoding="UTF-8"?>\n';
 
 describe('strict plist reader', () => {
   it('reads every plist value type, decodes the five predefined entities, and skips comments between elements', () => {
@@ -71,7 +86,15 @@ describe('strict plist reader', () => {
     { name: 'an undecodable byte', text: document(`<key>A</key><string>${String.fromCharCode(0xfffd)}</string>`), error: 'plist holds a control character or an undecodable byte' },
     { name: 'a DOCTYPE internal subset', text: document('<key>&k;</key><string>x</string>', '<?xml version="1.0"?>\n<!DOCTYPE plist [<!ENTITY k "Label">]>\n'), error: 'plist DOCTYPE has an internal subset or entity declaration' },
     { name: 'an entity declaration in the content', text: document('<!ENTITY k "Label"><key>A</key><string>x</string>'), error: 'plist DOCTYPE has an internal subset or entity declaration' },
-    { name: 'a malformed DOCTYPE', text: document('', '<?xml version="1.0"?>\n<!DOCTYPE plist PUBLIC>\n'), error: 'plist DOCTYPE is malformed' },
+    { name: 'a malformed DOCTYPE', text: document('', '<?xml version="1.0"?>\n<!DOCTYPE plist PUBLIC>\n'), error: DOCTYPE_REFUSAL },
+    { name: 'a whole plist inside a DOCTYPE SYSTEM literal (fixture A)', text: FIXTURE_A, error: DOCTYPE_REFUSAL },
+    { name: 'a SYSTEM-only DOCTYPE with a plain URL', text: document('', `${XML}<!DOCTYPE plist SYSTEM "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n`), error: DOCTYPE_REFUSAL },
+    { name: 'a PUBLIC DOCTYPE with another public identifier', text: document('', `${XML}<!DOCTYPE plist PUBLIC "-//Example//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n`), error: DOCTYPE_REFUSAL },
+    { name: 'a PUBLIC DOCTYPE with another system identifier', text: document('', `${XML}<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://example.invalid/PropertyList-1.0.dtd">\n`), error: DOCTYPE_REFUSAL },
+    { name: 'a DOCTYPE with no identifier', text: document('', `${XML}<!DOCTYPE plist>\n`), error: DOCTYPE_REFUSAL },
+    { name: 'the Apple identifiers in single quotes', text: document('', `${XML}<!DOCTYPE plist PUBLIC '-//Apple//DTD PLIST 1.0//EN' 'http://www.apple.com/DTDs/PropertyList-1.0.dtd'>\n`), error: DOCTYPE_REFUSAL },
+    { name: 'a key after a comment opened as <!---> (fixture B)', text: FIXTURE_B, error: COMMENT_REFUSAL },
+    { name: 'a comment that starts with <!--- before the root', text: document('', `${XML}<!--- x -->\n`), error: COMMENT_REFUSAL },
     { name: 'a processing instruction in the prolog', text: document('', '<?xml version="1.0"?>\n<?xml-stylesheet href="x"?>\n'), error: 'plist holds a processing instruction' },
     { name: 'a processing instruction in a dict', text: document('<?pi x?><key>A</key><string>x</string>'), error: 'plist holds a processing instruction' },
     { name: 'a CDATA string value', text: document('<key>A</key><string><![CDATA[x]]></string>'), error: 'plist holds a CDATA section' },
@@ -101,6 +124,46 @@ describe('strict plist reader', () => {
     { name: 'nesting deeper than 32', text: document(`<key>A</key>${'<array>'.repeat(40)}${'</array>'.repeat(40)}`), error: 'plist is malformed: nesting is deeper than 32' },
   ])('refuses $name', ({ text, error }) => {
     expect(refusal(text)).toBe(error);
+  });
+
+  // Each repository writer of a path-rebase plist: both BOT ERRORS installers on one line, the timer templates on two.
+  it.each([
+    { file: 'deploy/scripts/install-bot-errors-health-launchd.sh', count: 1 },
+    { file: 'deploy/scripts/install-bot-errors-launchd.sh', count: 4 },
+    { file: 'deploy/com.whatsoup.harness-maintenance.plist', count: 1 },
+    { file: 'deploy/com.whatsoup.reply-guarantee.plist', count: 1 },
+  ])('admits every DOCTYPE that $file writes', ({ file, count }) => {
+    const doctypes = readFileSync(path.join(process.cwd(), file), 'utf8').match(/<!DOCTYPE[^>]*>/g) ?? [];
+    expect(doctypes).toHaveLength(count);
+    for (const doctype of doctypes) expect(refusal(document('<key>A</key><string>x</string>', `${XML}${doctype}\n`))).toBeNull();
+  });
+
+  it('admits the older Apple Computer public identifier as plist(5) shows it, no DOCTYPE, and a <!-- --> comment', () => {
+    const appleComputer = '<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN"\n        "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n';
+    expect(refusal(document('<key>A</key><string>x</string>', `${XML}${appleComputer}`))).toBeNull();
+    expect(refusal(document('<key>A</key><string>x</string>', XML))).toBeNull();
+    expect(refusal(document('<!-- --><key>A</key><string>x</string>'))).toBeNull();
+  });
+
+  it.each([
+    { name: 'a path', key: '/opt/example/key-marker' },
+    { name: '65 characters', key: 'K'.repeat(65) },
+    { name: 'a leading digit', key: '1key' },
+  ])('refuses a duplicate key holding $name without printing it', ({ key }) => {
+    const error = refusal(document(`<key>${key}</key><string>x</string><key>${key}</key><string>y</string>`));
+    expect(error).toBe(`plist has a duplicate key ${KEY_NOT_SHOWN}`);
+    expect(error).not.toContain(key);
+  });
+
+  it('names a duplicate key of 64 characters in the identifier form, a dot and a dash included', () => {
+    const key = `K${'k'.repeat(60)}.-_`;
+    expect(key).toHaveLength(64);
+    expect(refusal(document(`<key>${key}</key><string>x</string><key>${key}</key><string>y</string>`))).toBe(`plist has a duplicate key ${key}`);
+  });
+
+  it('does not print an environment key that holds a path when its value is not a <string>', () => {
+    const root = rootOf(document('<key>EnvironmentVariables</key><dict><key>/opt/example/key-marker</key><integer>1</integer></dict>'));
+    expect(strictStringDict(root, 'EnvironmentVariables')).toEqual({ error: `plist EnvironmentVariables value for ${KEY_NOT_SHOWN} is not a <string>` });
   });
 
   it('reads string arrays and string dicts, naming the first value of another type', () => {

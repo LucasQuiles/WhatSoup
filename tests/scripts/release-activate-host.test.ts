@@ -1304,7 +1304,7 @@ describe('release:activate-host closed host auxiliaries', () => {
     expectStaged((await planWith(BOT_ERRORS, (root, home) => withLines(installerForm(root, home), `  <key>${key}</key>`, `  ${value}`))).plan, BOT_ERRORS, rootKey(key));
   });
 
-  it.each(['DYLD_INSERT_LIBRARIES', '__PYVENV_LAUNCHER__', 'SHELLOPTS', 'PS4', 'BASH_ENV', 'HOME', 'UNRELATED', 'CLAUDE_CONFIG_DIR'].flatMap((key) => [
+  it.each(['DYLD_INSERT_LIBRARIES', '__PYVENV_LAUNCHER__', 'SHELLOPTS', 'PS4', 'BASH_ENV', 'HOME', 'UNRELATED', 'CLAUDE_CONFIG_DIR', 'X.Y-Z'].flatMap((key) => [
     { key, form: 'the installer form', build: (root: string, home: string) => withLines(plist(BOT_ERRORS, installerArgs(root, home), root), ...environment('<key>PATH</key><string>/usr/bin:/bin</string>', `<key>${key}</key><string>/opt/example/lib</string>`)) },
     { key, form: 'the legacy wrapper', build: (root: string, home: string) => legacyWrapper(root, home, `<key>${key}</key><string>/opt/example/lib</string>`) },
   ]))('refuses the environment key $key in $form, naming it', async ({ key, build }) => {
@@ -1323,6 +1323,31 @@ describe('release:activate-host closed host auxiliaries', () => {
       label, `environment key ${refused} is not admitted for ${label}`);
   });
 
+  // The startup keys of the interpreter each timer runs: /bin/bash for harness maintenance, node for reply guarantee.
+  it.each([
+    { label: MAINTENANCE, build: maintenanceForm, key: 'BASH_ENV' },
+    { label: MAINTENANCE, build: maintenanceForm, key: 'SHELLOPTS' },
+    { label: REPLY, build: replyForm, key: 'NODE_OPTIONS' },
+  ])('refuses the environment key $key for $label, naming it', async ({ label, build, key }) => {
+    expectStaged((await planWith(label, (root, home) => build(root, home, ...environment(`<key>${key}</key><string>/opt/example/x</string>`)))).plan,
+      label, `environment key ${key} is not admitted for ${label}`);
+  });
+
+  // A key may print only in the bounded identifier form, so a key that holds a path never reaches plan output.
+  const KEY_MARKER = '/opt/example/key-marker';
+  const KEY_NOT_SHOWN = '(a name outside [A-Za-z_][A-Za-z0-9_.-]{0,63}, not shown)';
+  const withEnvironmentEntry = (entry: string): Build => (root, home) => withLines(plist(BOT_ERRORS, installerArgs(root, home), root), ...environment('<key>PATH</key><string>/usr/bin:/bin</string>', entry));
+  it.each<{ name: string; build: Build; detail: string }>([
+    { name: 'a root key', build: (root, home) => withLines(installerForm(root, home), `  <key>${KEY_MARKER}</key>`, '  <string>x</string>'), detail: rootKey(KEY_NOT_SHOWN) },
+    { name: 'an environment key', build: withEnvironmentEntry(`<key>${KEY_MARKER}</key><string>x</string>`), detail: `environment key ${KEY_NOT_SHOWN} is not admitted for ${BOT_ERRORS}` },
+    { name: 'an environment key whose value is not a <string>', build: withEnvironmentEntry(`<key>${KEY_MARKER}</key><integer>1</integer>`), detail: `plist EnvironmentVariables value for ${KEY_NOT_SHOWN} is not a <string>` },
+    { name: 'a duplicate root key', build: (root, home) => withLines(installerForm(root, home), `  <key>${KEY_MARKER}</key>`, '  <string>x</string>', `  <key>${KEY_MARKER}</key>`, '  <string>y</string>'), detail: `plist has a duplicate key ${KEY_NOT_SHOWN}` },
+  ])('refuses $name that holds a path without printing it', async ({ build, detail }) => {
+    const { plan } = await planWith(BOT_ERRORS, build);
+    expectStaged(plan, BOT_ERRORS, detail);
+    expect(JSON.stringify(plan.document)).not.toContain(KEY_MARKER);
+  });
+
   const strictRefusals = [
     { name: 'a character reference in the EnvironmentVariables key', edit: (source: string) => source.replace('<key>EnvironmentVariables</key>', '<key>EnvironmentVariable&#115;</key>'), detail: 'plist holds a numeric character reference' },
     { name: 'a CDATA EnvironmentVariables key', edit: (source: string) => source.replace('<key>EnvironmentVariables</key>', '<key><![CDATA[EnvironmentVariables]]></key>'), detail: 'plist holds a CDATA section' },
@@ -1330,6 +1355,9 @@ describe('release:activate-host closed host auxiliaries', () => {
     { name: 'an entity in the EnvironmentVariables key', edit: (source: string) => source.replace('<key>EnvironmentVariables</key>', '<key>Environment&amp;Variables</key>'), detail: 'plist <key> holds an entity reference' },
     { name: 'whitespace around the EnvironmentVariables key', edit: (source: string) => source.replace('<key>EnvironmentVariables</key>', '<key> EnvironmentVariables </key>'), detail: 'plist <key> text has surrounding whitespace' },
     { name: 'a comment inside the EnvironmentVariables key', edit: (source: string) => source.replace('<key>EnvironmentVariables</key>', '<key>Environment<!-- hidden -->Variables</key>'), detail: 'plist <key> holds markup' },
+    // The hidden plist holds no Label or ProgramArguments, so every regular-expression check still reads the visible one.
+    { name: 'a DOCTYPE SYSTEM literal holding a plist with a Program key', edit: (source: string) => source.replace(/<!DOCTYPE[^>]*>/, `<!DOCTYPE plist SYSTEM '><plist version="1.0"><dict><key>Program</key><string>/opt/example/hidden</string></dict></plist>'>`), detail: 'plist DOCTYPE is not the Apple PLIST 1.0 DOCTYPE' },
+    { name: 'a Program key after a comment opened as <!--->', edit: (source: string) => source.replace('<key>EnvironmentVariables</key>', '<!---><key>Program</key><string>/opt/example/hidden</string><!-- --><key>EnvironmentVariables</key>'), detail: 'plist holds a comment that starts with <!---' },
   ];
   it.each([
     ...strictRefusals.map((row) => ({ ...row, form: 'the installer form', label: BOT_ERRORS, build: (root: string, home: string) => row.edit(installerForm(root, home)) })),
@@ -1481,6 +1509,11 @@ describe('release:activate-host closed host auxiliaries', () => {
       world.addJob(BOT_ERRORS, malformed);
       expectStaged(await planHostUnit(world, declaration), BOT_ERRORS, HEALTH_SHAPE);
     }
+  });
+
+  it('refuses a legacy wrapper whose environment file and log hint name a folder other than the job user\'s home', async () => {
+    const { plan } = await planWith(BOT_ERRORS, (root, _home, world) => legacyWrapper(root, `${world.root}/other-home`));
+    expectStaged(plan, BOT_ERRORS, 'bot-errors health legacy wrapper does not source the BOT ERRORS environment file in the job user\'s home folder');
   });
 
   it('refuses a target release that is not a closed-form shell-token path', async () => {
