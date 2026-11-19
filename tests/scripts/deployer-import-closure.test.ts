@@ -297,4 +297,29 @@ describe('bot-errors deployer allowlist is closed under import', () => {
       `allowlisted without a runtime-manifest hash (deployer exits 3): ${unpinned.join(', ')}`,
     ).toEqual([]);
   });
+
+  it('ships every pinned library module unless it is listed with its reason', () => {
+    // The health check's runtime-manifest comparison fails on any pinned path a
+    // root lacks, so a host upgraded through FILES alone needs every pinned
+    // library module. The four listed modules were pinned before this check and
+    // no shipped file loads them; hosts receive them through the full deploy
+    // contract, which copies every manifest-tracked script. A newly pinned
+    // library module must be shipped here or listed with its reason.
+    const listedNotShipped = new Set([
+      'deploy/scripts/lib/deployment_effective_config.py', // imported by qualify-health-deployment.py
+      'deploy/scripts/lib/deployment_qualification_bundle.py', // imported by qualify-health-deployment.py
+      'deploy/scripts/lib/durable_json_remote.py', // loaded by path by generate-bot-errors-remote-durability.py
+      'deploy/scripts/lib/observation_contract.py', // mirror of scripts/lib/observation-contract.ts
+    ]);
+    const shipped = new Set(pinPaths);
+    const unshipped = [...manifestPaths]
+      .filter((pinned) => pinned.startsWith('deploy/scripts/lib/') && pinned.endsWith('.py'))
+      .filter((pinned) => !shipped.has(pinned) && !listedNotShipped.has(pinned))
+      .sort();
+    expect(unshipped, `pinned but not shipped by the deployer: ${unshipped.join(', ')}`).toEqual([]);
+    for (const listed of listedNotShipped) {
+      // A listed module that is now shipped, or no longer pinned, is a stale entry.
+      expect(manifestPaths.has(listed) && !shipped.has(listed), listed).toBe(true);
+    }
+  });
 });

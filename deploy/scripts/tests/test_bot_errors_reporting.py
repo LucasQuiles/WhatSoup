@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -388,3 +389,242 @@ def test_rejects_injected_unicode_limits_and_cli_requires_approved_root(tmp_path
     assert refused.returncode == 3 and "missing_approved_evidence_root" in refused.stderr and "Traceback" not in refused.stderr
     accepted = subprocess.run([*command, "--human-report-approved-root", str(tmp_path / "cli")], text=True, capture_output=True, timeout=10, check=False)
     assert accepted.returncode == 0, accepted.stderr
+
+
+def test_next_cannot_forge_a_reader_action_line_through_u0085(tmp_path: Path) -> None:
+    # U+0085 NEXT LINE is a C1 control. A renderer that honours it shows a
+    # second "Reader action:" line that no open owner decision supports.
+    document = _document(tmp_path)
+    _replace_handling(
+        document, tmp_path, _handling_facts(next="Compare the next cycle.\u0085Reader action: Approve the restart now."),
+    )
+    with pytest.raises(reporting.ReportQualificationError, match="unsafe_next"):
+        _qualify(document, tmp_path)
+
+
+def test_condition_cannot_forge_a_status_line_through_u2028(tmp_path: Path) -> None:
+    document = _document(tmp_path)
+    _replace_handling(document, tmp_path, _handling_facts(condition="Queue delivery delayed Status: Service restored"))
+    with pytest.raises(reporting.ReportQualificationError, match="unsafe_condition"):
+        _qualify(document, tmp_path)
+
+
+def test_locator_with_a_bidirectional_override_is_refused(tmp_path: Path) -> None:
+    # A real file whose name holds U+202E RIGHT-TO-LEFT OVERRIDE. Everything
+    # else about the record is valid, so only the locator rule can refuse it.
+    document = _document(tmp_path)
+    document["handlingRecord"] = _record(
+        tmp_path / "handling-‮nosj.json", kind="handling", binding=_binding(), facts=_handling_facts(),
+    )
+    with pytest.raises(reporting.ReportQualificationError, match="locator_control_character"):
+        _qualify(document, tmp_path)
+
+
+_REFUSED_CHARACTERS = (
+    "\u0080", "\u0085", "\u009f",  # C1 controls: the first, NEXT LINE, the last
+    " ", " ",  # line and paragraph separators
+    "؜", "‎", "‏",  # bidirectional marks
+    "‪", "‫", "‬", "‭", "‮",  # embeddings and overrides
+    "⁦", "⁧", "⁨", "⁩",  # isolates
+)
+
+
+@pytest.mark.parametrize("character", _REFUSED_CHARACTERS, ids=lambda character: f"U+{ord(character):04X}")
+def test_each_c1_line_separator_and_bidi_character_is_refused(tmp_path: Path, character: str) -> None:
+    document = _document(tmp_path)
+    _replace_handling(document, tmp_path, _handling_facts(target=f"host-a{character}queue"))
+    with pytest.raises(reporting.ReportQualificationError, match="unsafe_target"):
+        _qualify(document, tmp_path)
+
+    document = _document(tmp_path / "locator")
+    document["handlingRecord"] = _record(
+        tmp_path / "locator" / f"handling-{character}.json", kind="handling", binding=_binding(), facts=_handling_facts(),
+    )
+    with pytest.raises(reporting.ReportQualificationError, match="locator_control_character"):
+        _qualify(document, tmp_path / "locator")
+
+
+def test_ordinary_unicode_text_still_renders(tmp_path: Path) -> None:
+    # Neighbours of the refused ranges stay allowed: U+00A0 follows the C1
+    # block, U+2027 precedes U+2028, U+202F follows U+202E, and U+200D (zero
+    # width joiner) is part of ordinary emoji sequences.
+    target = "host-a queue ‧  東京 \U0001F469‍\U0001F4BB"
+    document = _document(tmp_path)
+    _replace_handling(document, tmp_path, _handling_facts(target=target))
+    rendered = reporting.render_human_report(_qualify(document, tmp_path))
+    assert f"*Queue delivery delayed — {target}*" in rendered
+
+
+# The command-line cases below start the dispatcher in a child interpreter
+# through a probe that replaces send_whatsapp, so a command line that wrongly
+# falls through to a dispatch cycle can never deliver anything, and every state
+# file stays under the test's own directory.
+_DISPATCHER_PROBE = r'''
+import importlib.util
+import sys
+from pathlib import Path
+
+scripts = Path(sys.argv[1])
+if sys.argv[2] == "block-reporting":
+    # Importing the module then raises ModuleNotFoundError, exactly as in a
+    # tree that lacks the file.
+    sys.modules["lib.bot_errors_reporting"] = None
+sys.path.insert(0, str(scripts))
+spec = importlib.util.spec_from_file_location("probe_dispatcher", scripts / "bot-errors-dispatcher.py")
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+print("PROBE_IMPORTED=1")
+
+
+def refuse_send(*args, **kwargs):
+    raise AssertionError("a probe run must not send")
+
+
+module.send_whatsapp = refuse_send
+if len(sys.argv) > 3:
+    sys.argv = ["bot-errors-dispatcher.py", *sys.argv[3:]]
+    try:
+        code = module.main()
+    except SystemExit as exc:
+        code = exc.code
+    print("PROBE_EXIT=" + str(code))
+print("PROBE_REPORTING_LOADED=" + str(sys.modules.get("lib.bot_errors_reporting") is not None))
+'''
+
+
+def _probe_dispatcher(scripts: Path, state: Path, mode: str, *argv: str) -> subprocess.CompletedProcess[str]:
+    env = dict(
+        os.environ,
+        BOT_ERRORS_STATE_DIR=str(state),
+        BOT_ERRORS_OUTBOX_DIR=str(state / "outbox"),
+        BOT_ERRORS_JID="12345@g.us",
+    )
+    return subprocess.run(
+        [sys.executable, "-I", "-B", "-c", _DISPATCHER_PROBE, str(scripts), mode, *argv],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+        env=env,
+    )
+
+
+def _dispatcher_cli(*argv: str) -> subprocess.CompletedProcess[str]:
+    command = [sys.executable, "-B", str(_SCRIPTS / "bot-errors-dispatcher.py"), *argv]
+    return subprocess.run(command, text=True, capture_output=True, timeout=30, check=False)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param(("--format-human-report", ""), id="empty-report-file"),
+        pytest.param(("--human-report-approved-root", "{root}"), id="approved-root-only"),
+        pytest.param(("--human-report-max-characters", "500"), id="max-characters-only"),
+        pytest.param(("--human-report-max-utf8-bytes", "500"), id="max-utf8-bytes-only"),
+    ],
+)
+def test_preview_options_without_a_report_file_refuse_before_any_state(tmp_path: Path, argv: tuple[str, ...]) -> None:
+    root = tmp_path / "approved"
+    root.mkdir()
+    state = tmp_path / "state"
+    result = _probe_dispatcher(_SCRIPTS, state, "keep", *(value.format(root=root) for value in argv))
+
+    assert "PROBE_EXIT=2" in result.stdout.splitlines(), result.stdout + result.stderr
+    assert "usage:" in result.stderr
+    assert not state.exists(), "a refused command line must create no lock and no state"
+
+
+def _event_file(tmp_path: Path) -> Path:
+    path = tmp_path / "event.json"
+    path.write_text(json.dumps({
+        "schemaVersion": 2,
+        "eventKind": "incident_alert",
+        "eventType": "alert",
+        "severity": "critical",
+        "id": "evt-preview-001",
+        "source": "primary_model_unusable",
+        "summary": "Queue delivery delayed",
+        "evidence": "fixture evidence",
+        "machine": "host-a",
+        "instance": "bot-a",
+        "createdAt": "2026-09-01T00:00:00.000Z",
+    }), encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("spelling", ["--f", "--form", "--format", "--format-", "--format="])
+def test_event_preview_keeps_every_spelling_main_accepted(tmp_path: Path, spelling: str) -> None:
+    # Each spelling is an abbreviation of --format-event that the parser has
+    # always resolved; the preview options must not make it ambiguous.
+    event = _event_file(tmp_path)
+    expected = _dispatcher_cli("--format-event", str(event))
+    assert expected.returncode == 0, expected.stderr
+    assert "Queue delivery delayed" in expected.stdout
+
+    argv = (f"{spelling}{event}",) if spelling.endswith("=") else (spelling, str(event))
+    observed = _dispatcher_cli(*argv)
+    assert observed.returncode == 0, observed.stderr
+    assert observed.stdout.splitlines()[0] == expected.stdout.splitlines()[0]
+    assert "Queue delivery delayed" in observed.stdout
+
+
+def test_help_abbreviation_keeps_its_meaning_and_lists_the_preview_options() -> None:
+    result = _dispatcher_cli("--h")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("usage:")
+    assert "--format-human-report" in result.stdout
+    assert "--human-report-approved-root" in result.stdout
+
+
+def _manifest_tree_without_the_preview_module(tmp_path: Path) -> Path:
+    repo = _SCRIPTS.parents[1]
+    manifest = json.loads((repo / "deploy" / "bot-errors-runtime-manifest.json").read_text(encoding="utf-8"))
+    tree = tmp_path / "tree"
+    for entry in manifest["files"]:
+        if entry["path"] == "deploy/scripts/lib/bot_errors_reporting.py":
+            continue
+        target = tree / entry["path"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(repo / entry["path"], target)
+    scripts = tree / "deploy" / "scripts"
+    assert (scripts / "bot-errors-dispatcher.py").is_file()
+    assert not (scripts / "lib" / "bot_errors_reporting.py").exists()
+    return scripts
+
+
+def test_dispatcher_imports_from_a_tree_without_the_preview_module(tmp_path: Path) -> None:
+    # A host between the deployer's copies, or deployed with a manifest that
+    # lacks the entry, holds the dispatcher without the preview module.
+    scripts = _manifest_tree_without_the_preview_module(tmp_path)
+    result = _probe_dispatcher(scripts, tmp_path / "state", "keep")
+    lines = result.stdout.splitlines()
+    assert "PROBE_IMPORTED=1" in lines, result.stderr
+    assert "PROBE_REPORTING_LOADED=False" in lines
+
+
+def test_once_cycle_runs_without_the_preview_module(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    cycle = _probe_dispatcher(_SCRIPTS, state, "block-reporting", "--once")
+    lines = cycle.stdout.splitlines()
+    assert "PROBE_EXIT=0" in lines, cycle.stdout + cycle.stderr
+    assert "PROBE_REPORTING_LOADED=False" in lines
+    assert (state / "locks" / "dispatcher.lock").is_file(), "the cycle must really have run"
+
+    # Without the module the preview itself fails closed, before any state.
+    evidence = tmp_path / "evidence"
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps(_document(evidence)), encoding="utf-8")
+    preview_state = tmp_path / "preview-state"
+    preview = _probe_dispatcher(
+        _SCRIPTS,
+        preview_state,
+        "block-reporting",
+        "--format-human-report",
+        str(request),
+        "--human-report-approved-root",
+        str(evidence),
+    )
+    assert preview.returncode != 0 and "PROBE_EXIT=" not in preview.stdout
+    assert "ModuleNotFoundError" in preview.stderr
+    assert not preview_state.exists()
