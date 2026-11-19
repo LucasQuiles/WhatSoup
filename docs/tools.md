@@ -3943,7 +3943,12 @@ the global turn's queue, so a restart there would discard owed text. The declara
 | `reason` | string | yes | Non-empty reason for the restart. |
 | `code` | enum | no | `self_restart` (default), `redeploy`, or `config_reload`. |
 
-The handler first sends the text the current turn still owes. The queue holds the
+On launchd the handler first runs the boot preflight of the release its job starts
+(`deploy/preflight-check.sh <root> <instance>`, with the outbound-ledger check) and
+refuses without stopping the service when that check exits non-zero, runs past 120
+seconds or cannot start: it sends nothing, writes no marker and returns `ok: false` /
+`restarting: false` with the `cause` `restart_preflight_refused`. Next the handler
+sends the text the current turn still owes. The queue holds the
 turn's streamed answer until the turn ends, so the handler sends that answer
 unchanged, with the status role rather than as the turn's recorded answer, and
 waits for it before it aborts the turn. The restart's shutdown therefore still ends
@@ -3967,8 +3972,11 @@ supervisor and Linux without systemd reject the request. An acknowledgement
 failure is logged and does not stop the restart. A repeated request in the same
 process returns `ok: false` / `restarting: false`.
 
-**Returns:** `{ ok, restarting, reason, code, text }`, plus `cause` when an
-unconfirmed owed reply stopped the restart, when the caller survives long
-enough to receive a result. A fast service-manager rejection throws and marks
+**Returns:** `{ ok, restarting, reason, code, text }`, plus `cause` when the boot
+preflight or an unconfirmed owed reply stopped the restart, when the caller
+survives long enough to receive a result. A `restart_preflight_refused` result
+also carries `preflightExitCode`: the check's exit status, or `null` when it timed
+out or did not start. The check's output is never returned. A fast service-manager
+rejection throws and marks
 the intent rejected. A successful request is not proof of a healthy reboot;
 verify service health and continuity after startup.

@@ -748,8 +748,10 @@ health job or re-render the timer in `setup-timer` mode, as for a shape
 refusal. A health job re-pinned with `install-bot-errors-health-launchd.sh
 --repin-existing --runtime-manifest` sets `BOT_ERRORS_RUNTIME_MANIFEST`, which
 is not in its list, so reinstall such a job before host activation. Host
-planning also refuses a re-pinned environment-file wrapper job, because re-pin
-leaves its profile default under the old release; reinstall it too. A detail
+planning also refuses an environment-file wrapper job re-pinned to another
+release, because re-pin leaves its profile default under the release it was
+installed from; reinstall it too. A re-pin back to that release clears this
+refusal. A detail
 names a key only when the key matches
 `^[A-Za-z_][A-Za-z0-9_.-]{0,63}$`. Any other key, one that holds a path for
 example, prints as `(a name outside [A-Za-z_][A-Za-z0-9_.-]{0,63}, not shown)`,
