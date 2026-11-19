@@ -724,8 +724,8 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.whatsoup.<instance>.
 A **release-pinned** instance plist runs
 `<release>/deploy/whatsoup <instance>` directly instead of the
 `~/.local/bin/whatsoup` symlink. WhatSoup's own service commands (start, stop,
-restart, the in-job `restart_self`, disable) accept that form only when all of
-these hold; otherwise they refuse the job as not theirs (#3829):
+restart, disable) accept that form only when all of these hold; otherwise they
+refuse the job as not theirs (#3829):
 
 - `ProgramArguments` is exactly two entries, `<release>/deploy/whatsoup` then
   `<instance>`, and `Label` is `com.whatsoup.<instance>`.
@@ -738,6 +738,11 @@ these hold; otherwise they refuse the job as not theirs (#3829):
   does not.
 - The path is canonical and physically inside the service user's home (no
   symlink out of home).
+
+The in-job `restart_self` tool refuses a release-pinned job even when all of
+these hold, before it sends anything or stops the job: `kickstart -k` would stop
+the running process before the launcher's boot checks run. Restart such a job
+through [the release procedure](release-deployment.md#activating-a-release).
 
 `reconcile-launchd-restart-policy` re-renders the symlink form, so it refuses a
 release-pinned plist instead of repointing the job. Switch releases with

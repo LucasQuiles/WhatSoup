@@ -3943,7 +3943,12 @@ the global turn's queue, so a restart there would discard owed text. The declara
 | `reason` | string | yes | Non-empty reason for the restart. |
 | `code` | enum | no | `self_restart` (default), `redeploy`, or `config_reload`. |
 
-The handler first sends the text the current turn still owes. The queue holds the
+A release-pinned launchd job, whose plist runs `<release>/deploy/whatsoup`
+directly, refuses self-restart: the handler checks this first and returns
+`ok: false` / `restarting: false` with the `cause` `release_pinned` without
+sending anything, writing a marker or stopping the service, so restart such a
+job through [the release procedure](runbooks/release-deployment.md#activating-a-release).
+Otherwise the handler first sends the text the current turn still owes. The queue holds the
 turn's streamed answer until the turn ends, so the handler sends that answer
 unchanged, with the status role rather than as the turn's recorded answer, and
 waits for it before it aborts the turn. The restart's shutdown therefore still ends
@@ -3967,8 +3972,8 @@ supervisor and Linux without systemd reject the request. An acknowledgement
 failure is logged and does not stop the restart. A repeated request in the same
 process returns `ok: false` / `restarting: false`.
 
-**Returns:** `{ ok, restarting, reason, code, text }`, plus `cause` when an
-unconfirmed owed reply stopped the restart, when the caller survives long
-enough to receive a result. A fast service-manager rejection throws and marks
+**Returns:** `{ ok, restarting, reason, code, text }`, plus `cause` when a
+release-pinned job or an unconfirmed owed reply stopped the restart, when the
+caller survives long enough to receive a result. A fast service-manager rejection throws and marks
 the intent rejected. A successful request is not proof of a healthy reboot;
 verify service health and continuity after startup.
