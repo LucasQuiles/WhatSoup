@@ -739,10 +739,12 @@ refuse the job as not theirs (#3829):
 - The path is canonical and physically inside the service user's home (no
   symlink out of home).
 
-The in-job `restart_self` tool refuses a release-pinned job even when all of
-these hold, before it sends anything or stops the job: `kickstart -k` would stop
-the running process before the launcher's boot checks run. Restart such a job
-through [the release procedure](release-deployment.md#activating-a-release).
+The in-job `restart_self` tool refuses a job whose plist on disk is
+release-pinned, even when all of these hold, before it sends anything or stops
+the job: `kickstart -k` would stop the running process before the launcher's
+boot checks run. It reads the plist on disk, not the definition launchd has
+loaded. Restart such a job through
+[the release procedure](release-deployment.md#activating-a-release).
 
 `reconcile-launchd-restart-policy` re-renders the symlink form, so it refuses a
 release-pinned plist instead of repointing the job. Switch releases with

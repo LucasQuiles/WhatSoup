@@ -3943,11 +3943,11 @@ the global turn's queue, so a restart there would discard owed text. The declara
 | `reason` | string | yes | Non-empty reason for the restart. |
 | `code` | enum | no | `self_restart` (default), `redeploy`, or `config_reload`. |
 
-A release-pinned launchd job, whose plist runs `<release>/deploy/whatsoup`
-directly, refuses self-restart: the handler checks this first and returns
-`ok: false` / `restarting: false` with the `cause` `release_pinned` without
-sending anything, writing a marker or stopping the service, so restart such a
-job through [the release procedure](runbooks/release-deployment.md#activating-a-release).
+A release-pinned launchd job, one whose plist on disk runs
+`<release>/deploy/whatsoup` directly, refuses self-restart: the handler checks
+this first and returns `ok: false` / `restarting: false` with the `cause`
+`release_pinned` without sending anything, writing a marker or stopping the
+service, so restart such a job through [the release procedure](runbooks/release-deployment.md#activating-a-release).
 Otherwise the handler first sends the text the current turn still owes. The queue holds the
 turn's streamed answer until the turn ends, so the handler sends that answer
 unchanged, with the status role rather than as the turn's recorded answer, and
