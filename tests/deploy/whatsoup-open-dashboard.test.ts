@@ -20,7 +20,9 @@ beforeEach(() => {
 });
 
 describe('whatsoup-console-unlock', () => {
-  it('falls back to the private canonical token file when the login keychain is unavailable', () => {
+  // The helper reads the token file itself (tests/deploy/whatsoup-console-unlock.test.ts);
+  // the wrapper must neither look the token up nor hand it over.
+  it('starts the helper without a keychain lookup and without a token in argv or the environment', () => {
     const token = 'a'.repeat(64);
     const configDir = join(dir, '.config', 'whatsoup');
     const binDir = join(dir, 'bin');
@@ -31,11 +33,12 @@ describe('whatsoup-console-unlock', () => {
     mkdirSync(localBin, { recursive: true });
     writeFileSync(join(configDir, 'fleet-tokens.json'), JSON.stringify({ active: token, accept: [], rotatedAt: 'now' }));
     writeFileSync(join(localBin, 'whatsoup-console-unlock.mjs'), '');
-    executable('security', 'exit 1');
+    // A keychain that would answer, so any lookup shows up in the log.
+    executable('security', `printf 'security %s\\n' "$*" >> ${JSON.stringify(log)}\nprintf '%s\\n' ${JSON.stringify(token)}`);
     executable('curl', 'exit 0');
     executable(
       'node',
-      `if [ "$1" = "-e" ]; then /usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["active"])' "$3"; exit; fi\n[ "$WHATSOUP_CONSOLE_TOKEN" = ${JSON.stringify(token)} ] || exit 9\nprintf 'fallback-token-used\\n' > ${JSON.stringify(log)}`,
+      `printf 'node %s token=%s cdp=%s fleet=%s\\n' "$*" "\${WHATSOUP_CONSOLE_TOKEN-unset}" "$CDP_PORT" "$FLEET" >> ${JSON.stringify(log)}`,
     );
     for (const name of ['security', 'curl', 'node']) {
       const source = join(dir, name);
@@ -46,11 +49,13 @@ describe('whatsoup-console-unlock', () => {
 
     const result = spawnSync('bash', [UNLOCK_SCRIPT], {
       encoding: 'utf8',
-      env: { ...process.env, HOME: dir, PATH: `${binDir}:/usr/bin:/bin` },
+      env: { HOME: dir, PATH: `${binDir}:/usr/bin:/bin`, CDP_PORT: '9333', FLEET: 'http://127.0.0.1:9099' },
     });
 
     expect(result.status).toBe(0);
-    expect(readFileSync(log, 'utf8')).toBe('fallback-token-used\n');
+    expect(readFileSync(log, 'utf8')).toBe(
+      `node ${join(localBin, 'whatsoup-console-unlock.mjs')} token=unset cdp=9333 fleet=http://127.0.0.1:9099\n`,
+    );
   });
 });
 
