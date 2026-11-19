@@ -56,6 +56,7 @@ const originalPlatform = process.platform;
 const MANIFEST = '.whatsoup-release-manifest.json';
 const RELEASE_NAME = 'WhatSoup-release-d7c775a746bd';
 const RELEASE_REFUSAL = 'does not match the generated WhatSoup instance identity or a release-pinned one';
+const PINNED_SELF_RESTART_REFUSAL = 'is release-pinned, so self-restart is refused';
 
 let SERVICE_HOME: string;
 let OUTSIDE_ROOT: string;
@@ -182,20 +183,15 @@ describe('release-pinned launchd plists (#3829)', () => {
 
   const releases = (): string => `${SERVICE_HOME}/.local/opt/whatsoup/releases`;
 
-  it('self-restarts a release-pinned job with exactly one kickstart -k and no bootout or bootstrap', async () => {
+  // kickstart -k would stop the running process before the launcher's boot
+  // checks run, so restartSelf refuses a validated release-pinned job itself.
+  it('refuses to self-restart a validated release-pinned job, with no launchctl call', async () => {
     fsMocks.readFileSync.mockReturnValue(pinnedPlist(await makeRelease(releases())));
     const { createServiceManager } = await importPlatform();
 
-    await expect(createServiceManager().restartSelf('agent')).resolves.toBeUndefined();
+    await expect(createServiceManager().restartSelf('agent')).rejects.toThrow(PINNED_SELF_RESTART_REFUSAL);
 
-    expect(childProcessMocks.execFile).toHaveBeenCalledTimes(1);
-    expect(childProcessMocks.execFile).toHaveBeenCalledWith(
-      'launchctl',
-      ['kickstart', '-k', `gui/${currentUid()}/com.whatsoup.agent`],
-      expect.any(Function),
-    );
-    expect(launchctlSubcommands()).not.toContain('bootout');
-    expect(launchctlSubcommands()).not.toContain('bootstrap');
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
   });
 
   it('restarts a release-pinned job from another process by bootout, bootstrap of the same plist, then kickstart -k', async () => {
@@ -213,23 +209,26 @@ describe('release-pinned launchd plists (#3829)', () => {
     expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
   });
 
-  // restart_self asks isReleasePinned first and refuses a release-pinned job
-  // before it sends or stops anything: kickstart -k would stop the running
-  // process before the launcher's boot checks run.
-  it('reports a validated release-pinned plist as release-pinned, with no launchctl call', async () => {
+  // restart_self asks selfRestartRefusal first and refuses, before it sends or
+  // stops anything, every job that restartSelf would refuse. Each case below
+  // pairs the answer with restartSelf: null goes with exactly one kickstart -k,
+  // and every cause goes with a restartSelf that throws before any launchctl call.
+  it('answers release_pinned for a validated release-pinned plist, with no launchctl call', async () => {
     fsMocks.readFileSync.mockReturnValue(pinnedPlist(await makeRelease(releases())));
     const { createServiceManager } = await importPlatform();
+    const manager = createServiceManager();
 
-    expect(createServiceManager().isReleasePinned?.('agent')).toBe(true);
+    expect(manager.selfRestartRefusal?.('agent')).toBe('release_pinned');
+    await expect(manager.restartSelf('agent')).rejects.toThrow(PINNED_SELF_RESTART_REFUSAL);
     expect(childProcessMocks.execFile).not.toHaveBeenCalled();
   });
 
-  it('reports a shared-wrapper plist as not release-pinned, and its self-restart is one kickstart -k', async () => {
+  it('answers null for a shared-wrapper plist, and its self-restart is one kickstart -k', async () => {
     fsMocks.readFileSync.mockReturnValue(pinnedPlist(`${SERVICE_HOME}/.local/bin/whatsoup`));
     const { createServiceManager } = await importPlatform();
     const manager = createServiceManager();
 
-    expect(manager.isReleasePinned?.('agent')).toBe(false);
+    expect(manager.selfRestartRefusal?.('agent')).toBeNull();
     await expect(manager.restartSelf('agent')).resolves.toBeUndefined();
 
     expect(childProcessMocks.execFile.mock.calls.map((call) => [call[0], call[1]])).toEqual([
@@ -237,15 +236,56 @@ describe('release-pinned launchd plists (#3829)', () => {
     ]);
   });
 
-  it('leaves an unreadable plist to restartSelf, which refuses it as before', async () => {
+  it('answers plist_unreadable for an unreadable plist, which restartSelf refuses before any launchctl call', async () => {
     const { createServiceManager } = await importPlatform();
     const manager = createServiceManager();
     fsMocks.readFileSync.mockImplementation(() => {
       throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
     });
 
-    expect(manager.isReleasePinned?.('agent')).toBe(false);
+    expect(manager.selfRestartRefusal?.('agent')).toBe('plist_unreadable');
     await expect(manager.restartSelf('agent')).rejects.toThrow('permission denied');
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it('answers plist_absent when no plist is installed, which restartSelf refuses before any launchctl call', async () => {
+    const { createServiceManager } = await importPlatform();
+    const manager = createServiceManager();
+
+    expect(manager.selfRestartRefusal?.('agent')).toBe('plist_absent');
+    await expect(manager.restartSelf('agent')).rejects.toThrow('authenticate the instance before starting');
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it('answers invalid_instance for an invalid instance name, which restartSelf refuses before any launchctl call', async () => {
+    const { createServiceManager } = await importPlatform();
+    const manager = createServiceManager();
+
+    expect(manager.selfRestartRefusal?.('../agent')).toBe('invalid_instance');
+    await expect(manager.restartSelf('../agent')).rejects.toThrow('invalid instance name');
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  // The plist can change between restart_self's question and restartSelf. The
+  // ownership check's own read decides, so a plist that became release-pinned
+  // in between never reaches kickstart -k.
+  it('refuses a plist that is the shared-wrapper form at the question and release-pinned at restartSelf, with no launchctl call', async () => {
+    const wrapper = pinnedPlist(`${SERVICE_HOME}/.local/bin/whatsoup`);
+    const pinned = pinnedPlist(await makeRelease(releases()));
+    let plistReads = 0;
+    fsMocks.readFileSync.mockImplementation((target: unknown) => {
+      if (!String(target).endsWith('.plist')) return absentFile();
+      plistReads += 1;
+      return plistReads === 1 ? wrapper : pinned;
+    });
+    const { createServiceManager } = await importPlatform();
+    const manager = createServiceManager();
+
+    expect(manager.selfRestartRefusal?.('agent')).toBeNull();
+    await expect(manager.restartSelf('agent')).rejects.toThrow(PINNED_SELF_RESTART_REFUSAL);
+
+    // One read for the question and one for restartSelf's ownership check.
+    expect(plistReads).toBe(2);
     expect(childProcessMocks.execFile).not.toHaveBeenCalled();
   });
 
@@ -315,8 +355,8 @@ describe('release-pinned launchd plists (#3829)', () => {
       const { createServiceManager } = await importPlatform();
       const manager = createServiceManager();
 
-      // Not a release this manager can confirm, so restartSelf refuses it as before.
-      expect(manager.isReleasePinned?.('agent')).toBe(false);
+      // Not a release this manager can confirm, so restartSelf refuses it as not owned.
+      expect(manager.selfRestartRefusal?.('agent')).toBe('plist_not_owned');
       await expect(manager.restartSelf('agent')).rejects.toThrow(RELEASE_REFUSAL);
       await expect(manager.stop('agent')).rejects.toThrow(RELEASE_REFUSAL);
       await expect(manager.disable('agent')).rejects.toThrow(RELEASE_REFUSAL);
