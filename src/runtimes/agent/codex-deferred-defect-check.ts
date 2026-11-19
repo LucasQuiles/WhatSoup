@@ -25,7 +25,7 @@
  * single and shared scope and under host work admission.
  */
 import { createChildLogger } from '../../logger.ts';
-import { clearAlertSource, emitAlert } from '../../lib/emit-alert.ts';
+import { clearAlertSourceChecked, emitAlertChecked } from '../../lib/emit-alert.ts';
 import type { BotErrorsCriticalAssetDiagnostic } from '../../lib/bot-errors-outbox.ts';
 
 const log = createChildLogger('codex-deferred-defects');
@@ -127,7 +127,7 @@ function deferredDefectCard(instance: string, check: CodexDeferredDefect['check'
  */
 function emitDeferredDefectAlert(instance: string, defect: CodexDeferredDefect, evidence: string) {
   if (defect.check === 'codex_single_or_shared_scope') {
-    return emitAlert(
+    return emitAlertChecked(
       instance,
       'codex_resume_needs_per_chat_scope',
       `${instance}: codex-cli resume needs sessionScope per_chat`,
@@ -136,7 +136,7 @@ function emitDeferredDefectAlert(instance: string, defect: CodexDeferredDefect, 
       deferredDefectCard(instance, defect.check),
     );
   }
-  return emitAlert(
+  return emitAlertChecked(
     instance,
     'codex_resume_unproven_under_host_admission',
     `${instance}: codex-cli resume is unproven under host work admission`,
@@ -149,9 +149,9 @@ function emitDeferredDefectAlert(instance: string, defect: CodexDeferredDefect, 
 /** Clears one risk's source; literal sources, as for the warnings. */
 function clearDeferredDefectSource(instance: string, check: CodexDeferredDefect['check'], evidence: string) {
   if (check === 'codex_single_or_shared_scope') {
-    return clearAlertSource(instance, 'codex_resume_needs_per_chat_scope', evidence);
+    return clearAlertSourceChecked(instance, 'codex_resume_needs_per_chat_scope', evidence);
   }
-  return clearAlertSource(instance, 'codex_resume_unproven_under_host_admission', evidence);
+  return clearAlertSourceChecked(instance, 'codex_resume_unproven_under_host_admission', evidence);
 }
 
 const ALL_CHECKS: readonly CodexDeferredDefect['check'][] = ['codex_single_or_shared_scope', 'codex_host_work_admission'];
@@ -192,9 +192,9 @@ export function reportCodexDeferredDefects(
     try {
       const evidence = `check=${defect.check} codex_roles=${roles.join(',')}`
         + ` session_scope=${sessionScope} host_work_admission=${input.hostWorkAdmission}`;
-      const result = emitDeferredDefectAlert(input.instance, defect, evidence);
-      if (!result.ok) {
-        logger.error({ ...fields, alertStatus: result.status }, 'codex deferred-defect alert was not queued');
+      const queued = emitDeferredDefectAlert(input.instance, defect, evidence);
+      if (!queued) {
+        logger.error(fields, 'codex deferred-defect alert was not queued');
       }
     } catch (err) {
       try {
@@ -213,9 +213,9 @@ export function reportCodexDeferredDefects(
     if (carried.has(check)) continue;
     const fields = { event: 'codex_deferred_defect_clear', check };
     try {
-      const result = clearDeferredDefectSource(input.instance, check, clearEvidence);
-      if (!result.ok) {
-        logger.error({ ...fields, clearStatus: result.status }, 'codex deferred-defect clear was not queued');
+      const queued = clearDeferredDefectSource(input.instance, check, clearEvidence);
+      if (!queued) {
+        logger.error(fields, 'codex deferred-defect clear was not queued');
       }
     } catch (err) {
       try {

@@ -3,9 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../../src/logger.ts', async () => (await import('../../helpers/logger-mock.ts')).loggerMock());
 // No test here may write a real BOT ERRORS outbox event.
-vi.mock('../../../src/lib/emit-alert.ts', () => ({ emitAlert: vi.fn(), clearAlertSource: vi.fn() }));
+vi.mock('../../../src/lib/emit-alert.ts', () => ({ emitAlertChecked: vi.fn(), clearAlertSourceChecked: vi.fn() }));
 
-import { clearAlertSource, emitAlert } from '../../../src/lib/emit-alert.ts';
+import { clearAlertSourceChecked, emitAlertChecked } from '../../../src/lib/emit-alert.ts';
 import { reportCodexDeferredDefects } from '../../../src/runtimes/agent/codex-deferred-defect-check.ts';
 
 // Startup check for the Codex resume risks that the thread/resume change left
@@ -13,7 +13,6 @@ import { reportCodexDeferredDefects } from '../../../src/runtimes/agent/codex-de
 // (nothing reads WhatSoup logs by level), and the check never refuses to start
 // the bot.
 const INSTANCE = 'bot-a';
-const QUEUED = { ok: true, channel: 'outbox', status: 'durably_queued' } as const;
 // The outbox confines summary and evidence to a digest, so the fix reaches the
 // card through the critical-asset fields: the dispatcher renders operatorAction
 // as the requested action and clearRequirement as the clear_requirement line.
@@ -32,10 +31,10 @@ function captureLogger() {
 }
 
 beforeEach(() => {
-  vi.mocked(emitAlert).mockReset();
-  vi.mocked(emitAlert).mockReturnValue(QUEUED);
-  vi.mocked(clearAlertSource).mockReset();
-  vi.mocked(clearAlertSource).mockReturnValue(QUEUED);
+  vi.mocked(emitAlertChecked).mockReset();
+  vi.mocked(emitAlertChecked).mockReturnValue(true);
+  vi.mocked(clearAlertSourceChecked).mockReset();
+  vi.mocked(clearAlertSourceChecked).mockReturnValue(true);
 });
 
 describe('codex deferred-defect startup check', () => {
@@ -60,7 +59,7 @@ describe('codex deferred-defect startup check', () => {
       expect.stringMatching(/not proven for this scope/),
     );
     // One incident per instance and risk: the dispatcher keys on the source.
-    expect(emitAlert).toHaveBeenCalledExactlyOnceWith(
+    expect(emitAlertChecked).toHaveBeenCalledExactlyOnceWith(
       INSTANCE,
       'codex_resume_needs_per_chat_scope',
       'bot-a: codex-cli resume needs sessionScope per_chat',
@@ -107,7 +106,7 @@ describe('codex deferred-defect startup check', () => {
       }),
       expect.stringMatching(/WHATSOUP_WORK_ADMISSION=systemd.*not proven under host work admission/),
     );
-    expect(emitAlert).toHaveBeenCalledExactlyOnceWith(
+    expect(emitAlertChecked).toHaveBeenCalledExactlyOnceWith(
       INSTANCE,
       'codex_resume_unproven_under_host_admission',
       'bot-a: codex-cli resume is unproven under host work admission',
@@ -128,8 +127,8 @@ describe('codex deferred-defect startup check', () => {
       hostWorkAdmission: true,
     }, logger);
 
-    expect(emitAlert).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(emitAlert).mock.calls.map((call) => [call[0], call[1], call[4]])).toEqual([
+    expect(emitAlertChecked).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(emitAlertChecked).mock.calls.map((call) => [call[0], call[1], call[4]])).toEqual([
       [INSTANCE, 'codex_resume_needs_per_chat_scope', 'warning'],
       [INSTANCE, 'codex_resume_unproven_under_host_admission', 'warning'],
     ]);
@@ -148,7 +147,7 @@ describe('codex deferred-defect startup check', () => {
       hostWorkAdmission: true,
     }, captureLogger());
 
-    const calls = vi.mocked(emitAlert).mock.calls;
+    const calls = vi.mocked(emitAlertChecked).mock.calls;
     expect(calls).toHaveLength(2);
     for (const [, source, title] of calls) {
       expect(source).toMatch(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$/);
@@ -175,7 +174,7 @@ describe('codex deferred-defect startup check', () => {
 
     expect(defects).toEqual([]);
     expect(logger.error).not.toHaveBeenCalled();
-    expect(emitAlert).not.toHaveBeenCalled();
+    expect(emitAlertChecked).not.toHaveBeenCalled();
   });
 
   it('never throws when the logger does, and still raises every alert', () => {
@@ -190,14 +189,14 @@ describe('codex deferred-defect startup check', () => {
     }, logger)).not.toThrow();
     expect(logger.error).toHaveBeenCalled();
     // A failed log line must not hide the risk from the operator.
-    expect(emitAlert).toHaveBeenCalledTimes(2);
+    expect(emitAlertChecked).toHaveBeenCalledTimes(2);
   });
 
-  it('does not stop startup when emitAlert throws: it logs the failure and still tries the next alert', () => {
+  it('does not stop startup when emitAlertChecked throws: it logs the failure and still tries the next alert', () => {
     const logger = captureLogger();
-    vi.mocked(emitAlert)
+    vi.mocked(emitAlertChecked)
       .mockImplementationOnce(() => { throw new Error('outbox directory missing'); })
-      .mockReturnValueOnce(QUEUED);
+      .mockReturnValueOnce(true);
 
     let defects: ReturnType<typeof reportCodexDeferredDefects> = [];
     expect(() => {
@@ -211,7 +210,7 @@ describe('codex deferred-defect startup check', () => {
     }).not.toThrow();
 
     expect(defects).toHaveLength(2);
-    expect(emitAlert).toHaveBeenCalledTimes(2);
+    expect(emitAlertChecked).toHaveBeenCalledTimes(2);
     expect(logger.error).toHaveBeenCalledWith(
       expect.objectContaining({ check: 'codex_single_or_shared_scope', err: expect.any(Error) }),
       'codex deferred-defect alert could not be emitted',
@@ -227,9 +226,9 @@ describe('codex deferred-defect startup check', () => {
     );
   });
 
-  it('logs an alert that emitAlert reports as not queued', () => {
+  it('logs an alert that emitAlertChecked reports as not queued', () => {
     const logger = captureLogger();
-    vi.mocked(emitAlert).mockReturnValueOnce({ ok: false, channel: 'none', status: 'failed' });
+    vi.mocked(emitAlertChecked).mockReturnValueOnce(false);
 
     reportCodexDeferredDefects({
       instance: INSTANCE,
@@ -240,7 +239,7 @@ describe('codex deferred-defect startup check', () => {
     }, logger);
 
     expect(logger.error).toHaveBeenCalledWith(
-      expect.objectContaining({ check: 'codex_single_or_shared_scope', alertStatus: 'failed' }),
+      expect.objectContaining({ check: 'codex_single_or_shared_scope' }),
       'codex deferred-defect alert was not queued',
     );
   });
@@ -254,7 +253,7 @@ describe('codex deferred-defect startup check', () => {
       hostWorkAdmission: true,
     }, captureLogger());
 
-    const cards = new Map(vi.mocked(emitAlert).mock.calls.map((call) => [call[1], call[5]]));
+    const cards = new Map(vi.mocked(emitAlertChecked).mock.calls.map((call) => [call[1], call[5]]));
     expect(cards.get('codex_resume_needs_per_chat_scope')).toEqual({
       asset: { kind: 'runtime_session', instance: INSTANCE },
       failure: {
@@ -288,8 +287,8 @@ describe('codex deferred-defect startup check', () => {
       hostWorkAdmission: true,
     }, captureLogger());
 
-    expect(emitAlert).toHaveBeenCalledTimes(2);
-    expect(clearAlertSource).not.toHaveBeenCalled();
+    expect(emitAlertChecked).toHaveBeenCalledTimes(2);
+    expect(clearAlertSourceChecked).not.toHaveBeenCalled();
   });
 
   it('clears only the source whose risk the configuration does not carry', () => {
@@ -301,8 +300,8 @@ describe('codex deferred-defect startup check', () => {
       hostWorkAdmission: false,
     }, captureLogger());
 
-    expect(vi.mocked(emitAlert).mock.calls.map((call) => call[1])).toEqual(['codex_resume_needs_per_chat_scope']);
-    expect(clearAlertSource).toHaveBeenCalledExactlyOnceWith(
+    expect(vi.mocked(emitAlertChecked).mock.calls.map((call) => call[1])).toEqual(['codex_resume_needs_per_chat_scope']);
+    expect(clearAlertSourceChecked).toHaveBeenCalledExactlyOnceWith(
       INSTANCE,
       'codex_resume_unproven_under_host_admission',
       expect.stringContaining('host_work_admission=false'),
@@ -332,9 +331,9 @@ describe('codex deferred-defect startup check', () => {
     }, logger);
 
     expect(defects).toEqual([]);
-    expect(emitAlert).not.toHaveBeenCalled();
+    expect(emitAlertChecked).not.toHaveBeenCalled();
     expect(logger.error).not.toHaveBeenCalled();
-    expect(vi.mocked(clearAlertSource).mock.calls.map((call) => [call[0], call[1]])).toEqual([
+    expect(vi.mocked(clearAlertSourceChecked).mock.calls.map((call) => [call[0], call[1]])).toEqual([
       [INSTANCE, 'codex_resume_needs_per_chat_scope'],
       [INSTANCE, 'codex_resume_unproven_under_host_admission'],
     ]);
@@ -342,9 +341,9 @@ describe('codex deferred-defect startup check', () => {
 
   it('does not stop startup when a clear throws: it logs the failure and still tries the next clear', () => {
     const logger = captureLogger();
-    vi.mocked(clearAlertSource)
+    vi.mocked(clearAlertSourceChecked)
       .mockImplementationOnce(() => { throw new Error('outbox directory missing'); })
-      .mockReturnValueOnce(QUEUED);
+      .mockReturnValueOnce(true);
 
     expect(() => reportCodexDeferredDefects({
       instance: INSTANCE,
@@ -354,7 +353,7 @@ describe('codex deferred-defect startup check', () => {
       hostWorkAdmission: false,
     }, logger)).not.toThrow();
 
-    expect(clearAlertSource).toHaveBeenCalledTimes(2);
+    expect(clearAlertSourceChecked).toHaveBeenCalledTimes(2);
     expect(logger.error).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ check: 'codex_single_or_shared_scope', err: expect.any(Error) }),
       'codex deferred-defect clear could not be emitted',
