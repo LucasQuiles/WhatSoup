@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { assertRecoveryCatchupSchema } from './recovery-catchup-schema.ts';
-import { assertOperatorCatchupResolutionSchema, OPERATOR_CATCHUP_PROOF_SQL } from './database-migration-69.ts';
+import { assertOperatorCatchupResolutionSchema, OPERATOR_CATCHUP_PROOF_SQL } from './database-migration-70.ts';
 
 export interface OperatorCatchupResolutionParams {
   planId: string;

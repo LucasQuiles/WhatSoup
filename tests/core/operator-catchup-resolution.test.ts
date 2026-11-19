@@ -20,8 +20,8 @@ describe('operator catch-up schema upgrade', () => {
       superseded_by_seq, reason, evidence_ref, actor, created_at FROM inbound_disposition_links`).all(),
   });
 
-  function populatedSchema68() {
-    const path = join(tmp.make('schema68'), 'bot.db');
+  function populatedSchema69() {
+    const path = join(tmp.make('schema69'), 'bot.db');
     const db = new Database(path);
     db.open();
     try {
@@ -46,18 +46,18 @@ describe('operator catch-up schema upgrade', () => {
       db.raw.exec(`
         DROP TABLE operator_catchup_resolutions;
         ALTER TABLE inbound_disposition_links DROP COLUMN original_fulfillment_confirmed;
-        DELETE FROM schema_migrations WHERE version = 69;
+        DELETE FROM schema_migrations WHERE version = 70;
       `);
       expect(db.raw.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 68 });
+        .toEqual({ version: 69 });
       return { path, before: originalRows(db.raw) };
     } finally {
       db.close();
     }
   }
 
-  it('inspects pending catch-ups and orphan transfers on a read-only schema-68 database', () => {
-    const { path, before } = populatedSchema68();
+  it('inspects pending catch-ups and orphan transfers on a read-only schema-69 database', () => {
+    const { path, before } = populatedSchema69();
     const raw = new DatabaseSync(path, { readOnly: true });
     try {
       const selected = selectOperatorCatchupCandidates(raw, 10);
@@ -70,13 +70,13 @@ describe('operator catch-up schema upgrade', () => {
     } finally { raw.close(); }
   });
 
-  it('upgrades populated schema 68 without resolving or rewriting ambiguous original work', () => {
-    const { path, before } = populatedSchema68();
+  it('upgrades populated schema 69 without resolving or rewriting ambiguous original work', () => {
+    const { path, before } = populatedSchema69();
     const upgraded = new Database(path);
     try {
       upgraded.open();
       expect(upgraded.raw.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 69 });
+        .toEqual({ version: 70 });
       expect(originalRows(upgraded.raw)).toEqual(before);
       expect(upgraded.raw.prepare('SELECT * FROM operator_catchup_resolutions').all()).toEqual([]);
       expect(new DurabilityEngine(upgraded).getTurnRecoverySupervisorCounts().openRecoveries).toBe(1);
@@ -85,8 +85,8 @@ describe('operator catch-up schema upgrade', () => {
     }
   });
 
-  it('rolls back partial migration DDL and leaves schema 68 and its evidence intact', () => {
-    const { path, before } = populatedSchema68();
+  it('rolls back partial migration DDL and leaves schema 69 and its evidence intact', () => {
+    const { path, before } = populatedSchema69();
     const exec = DatabaseSync.prototype.exec;
     const fault = vi.spyOn(DatabaseSync.prototype, 'exec').mockImplementation(function (this: DatabaseSync, sql: string) {
       if (sql.includes('CREATE TRIGGER operator_catchup_resolution_no_delete')) {
@@ -96,7 +96,7 @@ describe('operator catch-up schema upgrade', () => {
     });
     const upgraded = new Database(path);
     try {
-      expect(() => upgraded.open()).toThrow('Migration 69 failed');
+      expect(() => upgraded.open()).toThrow('Migration 70 failed');
     } finally {
       fault.mockRestore();
       upgraded.close();
@@ -105,7 +105,7 @@ describe('operator catch-up schema upgrade', () => {
     try {
       expect(originalRows(raw)).toEqual(before);
       expect(raw.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
-        .toEqual({ version: 68 });
+        .toEqual({ version: 69 });
       expect(raw.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'operator_catchup_resolution%'").all())
         .toEqual([]);
       expect(raw.prepare('PRAGMA foreign_key_check').all()).toEqual([]);

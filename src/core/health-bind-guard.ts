@@ -1,4 +1,5 @@
 import { createChildLogger } from '../logger.ts';
+import { LOOPBACK_HOSTS } from '../lib/loopback.ts';
 
 const log = createChildLogger('health:bind-guard');
 
@@ -7,8 +8,6 @@ const log = createChildLogger('health:bind-guard');
  * Value must be the literal string "1".
  */
 export const HEALTH_UNSAFE_REMOTE_ENV = 'WHATSOUP_HEALTH_UNSAFE_REMOTE';
-
-const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
 
 /**
  * Fail startup when the health server would bind a non-loopback address without

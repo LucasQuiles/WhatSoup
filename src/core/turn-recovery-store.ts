@@ -7,7 +7,7 @@ import {
   validDeliveryCorroborationForJobSql,
   validDeliveryCorroborationForTerminalSql,
 } from './delivery-corroboration-sql.ts';
-import { OPEN_RECOVERIES_CTE_SQL } from './open-recoveries-sql.ts';
+import { OPEN_RECOVERIES_CTE_SQL, UNOWNED_FAILED_TERMINALS_CTE_SQL } from './open-recoveries-sql.ts';
 import { syntheticSourceMessageIdSql } from './synthetic-turn-source.ts';
 import { promoteEchoedCheckpointIdentitySql } from './turn-recovery-checkpoint-identity.ts';
 
@@ -241,7 +241,7 @@ export interface TurnRecoverySupervisorCounts {
    * orphan transfers without valid later-echo proof.
    */
   blockingOutstanding?: number;
-  /** Terminal blocked/exhausted rows retained for operator audit. */
+  /** Blocked/exhausted jobs and unowned failed user replies retained for operator audit. */
   retainedTerminal?: number;
   /**
    * Pending/claimed rows and orphan transfers made unclaimable by valid
@@ -542,6 +542,111 @@ const OUTSTANDING_RECOVERY_FOR_SCOPE_WHERE = `
   WHERE outstanding.scope = ?
     AND (outstanding.scope <> 'per_chat' OR outstanding.conversation_key = ?)
     AND (? IS NULL OR outstanding.job_id IS NULL OR outstanding.job_id != ?)
+`;
+export const TURN_RECOVERY_SUPERVISOR_COUNTS_SQL = `WITH orphan_transfers AS (
+          -- corroborated: a later echoed op proves delivery, so the orphan is
+          -- retained audit debt that OUTSTANDING_RECOVERY_FOR_SCOPE_FROM also
+          -- excludes from admission; it stays integrity debt (corrupt_links).
+          SELECT
+            COUNT(*) AS count,
+            COALESCE(SUM(CASE
+              WHEN ${validDeliveryCorroborationForTerminalSql('terminal')} THEN 1 ELSE 0
+            END), 0) AS corroborated
+          FROM turn_terminal_records terminal
+          LEFT JOIN turn_recovery_jobs linked
+            ON linked.terminal_record_id = terminal.id
+          WHERE terminal.inbound_disposition = 'transferred_to_recovery_owner'
+            AND linked.id IS NULL
+        ),
+        ${OPEN_RECOVERIES_CTE_SQL},
+        ${UNOWNED_FAILED_TERMINALS_CTE_SQL}
+        SELECT
+          COALESCE(SUM(CASE WHEN j.state IN ('pending', 'claimed') THEN 1 ELSE 0 END), 0)
+            + (SELECT count FROM orphan_transfers)
+            AS outstanding,
+          COALESCE(SUM(CASE WHEN j.state = 'blocked_unsafe' THEN 1 ELSE 0 END), 0)
+            AS blocked_unsafe,
+          COALESCE(SUM(CASE WHEN j.state = 'pending' THEN 1 ELSE 0 END), 0)
+            AS pending,
+          COALESCE(SUM(CASE
+            WHEN j.state = 'claimed' AND j.claim_expires_at > datetime('now') THEN 1
+            ELSE 0
+          END), 0) AS live_claimed,
+          COALESCE(SUM(CASE
+            WHEN j.state = 'claimed' AND j.claim_expires_at <= datetime('now') THEN 1
+            ELSE 0
+          END), 0) AS expired_claimed,
+          COALESCE(SUM(CASE WHEN j.state = 'exhausted' THEN 1 ELSE 0 END), 0)
+            AS exhausted,
+          COALESCE(SUM(CASE
+            WHEN j.state <> 'completed' AND o.status = 'quarantined' THEN 1
+            ELSE 0
+          END), 0) AS quarantined_delivery,
+          -- Live jobs only feed turn_recovery_integrity; completed/exhausted
+          -- residue goes to the diagnostic *_settled counters. Orphan transfers
+          -- have no job row, so corrupt_links adds them unfiltered.
+          COALESCE(SUM(CASE
+            WHEN j.state NOT IN ${SETTLED_RECOVERY_JOB_STATES_SQL} AND ${RECOVERY_JOB_LINK_BROKEN_SQL} THEN 1
+            ELSE 0
+          END), 0) + (SELECT count FROM orphan_transfers) AS corrupt_links,
+          COALESCE(SUM(CASE
+            WHEN j.state IN ${SETTLED_RECOVERY_JOB_STATES_SQL} AND ${RECOVERY_JOB_LINK_BROKEN_SQL} THEN 1
+            ELSE 0
+          END), 0) AS corrupt_links_settled,
+          (SELECT count FROM orphan_transfers) AS orphan_transfers,
+          COALESCE(SUM(CASE
+            WHEN j.state NOT IN ${SETTLED_RECOVERY_JOB_STATES_SQL} AND j.echo_conflict_at IS NOT NULL THEN 1
+            ELSE 0
+          END), 0) AS echo_conflicts,
+          COALESCE(SUM(CASE
+            WHEN j.state IN ${SETTLED_RECOVERY_JOB_STATES_SQL} AND j.echo_conflict_at IS NOT NULL THEN 1
+            ELSE 0
+          END), 0) AS echo_conflicts_settled,
+          (SELECT count FROM open_recoveries) AS open_recoveries,
+          (SELECT synthetic FROM open_recoveries) AS open_recoveries_synthetic,
+          COALESCE(SUM(CASE
+            WHEN j.state IN ('pending', 'claimed')
+              AND NOT ${validDeliveryCorroborationForJobSql('j')}
+            THEN 1 ELSE 0
+          END), 0)
+            + (SELECT count - corroborated FROM orphan_transfers) AS blocking_outstanding,
+          COALESCE(SUM(CASE
+            WHEN j.state IN ('blocked_unsafe', 'exhausted') THEN 1 ELSE 0
+          END), 0) + (SELECT count FROM unowned_failed_terminals) AS retained_terminal,
+          COALESCE(SUM(CASE
+            WHEN j.state IN ('pending', 'claimed')
+              AND ${validDeliveryCorroborationForJobSql('j')}
+            THEN 1 ELSE 0
+          END), 0)
+            + (SELECT corroborated FROM orphan_transfers) AS corroborated_retained,
+          COALESCE(SUM(CASE
+            WHEN j.state = 'blocked_unsafe' AND ${syntheticSourceMessageIdSql('j.source_message_id')} THEN 1
+            ELSE 0
+          END), 0) AS blocked_unsafe_synthetic,
+          COALESCE(SUM(CASE
+            WHEN j.state = 'blocked_unsafe'
+              AND NOT ${syntheticSourceMessageIdSql('j.source_message_id')}
+              AND EXISTS (
+                SELECT 1 FROM inbound_events i2
+                WHERE i2.conversation_key = j.conversation_key
+                  AND i2.seq > j.source_inbound_seq
+              ) THEN 1
+            ELSE 0
+          END), 0) AS blocked_unsafe_superseded,
+          COALESCE(SUM(CASE
+            WHEN j.state = 'blocked_unsafe'
+              AND NOT ${syntheticSourceMessageIdSql('j.source_message_id')}
+              AND NOT EXISTS (
+                SELECT 1 FROM inbound_events i2
+                WHERE i2.conversation_key = j.conversation_key
+                  AND i2.seq > j.source_inbound_seq
+              ) THEN 1
+            ELSE 0
+          END), 0) AS blocked_unsafe_stranded
+        FROM turn_recovery_jobs j
+        LEFT JOIN turn_terminal_records t ON t.id = j.terminal_record_id
+        LEFT JOIN inbound_events i ON i.seq = j.source_inbound_seq
+        LEFT JOIN outbound_ops o ON o.id = t.delivery_op_id
 `;
 
 type TurnRecoveryStatements = {
@@ -941,111 +1046,7 @@ export class TurnRecoveryStore {
       getNewestInboundSeqForConversation: prepare(`
         SELECT MAX(seq) AS newest FROM inbound_events WHERE conversation_key = ?
       `),
-      getTurnRecoverySupervisorCounts: prepare(`
-        WITH orphan_transfers AS (
-          -- corroborated: a later echoed op proves delivery, so the orphan is
-          -- retained audit debt that OUTSTANDING_RECOVERY_FOR_SCOPE_FROM also
-          -- excludes from admission; it stays integrity debt (corrupt_links).
-          SELECT
-            COUNT(*) AS count,
-            COALESCE(SUM(CASE
-              WHEN ${validDeliveryCorroborationForTerminalSql('terminal')} THEN 1 ELSE 0
-            END), 0) AS corroborated
-          FROM turn_terminal_records terminal
-          LEFT JOIN turn_recovery_jobs linked
-            ON linked.terminal_record_id = terminal.id
-          WHERE terminal.inbound_disposition = 'transferred_to_recovery_owner'
-            AND linked.id IS NULL
-        ),
-        ${OPEN_RECOVERIES_CTE_SQL}
-        SELECT
-          COALESCE(SUM(CASE WHEN j.state IN ('pending', 'claimed') THEN 1 ELSE 0 END), 0)
-            + (SELECT count FROM orphan_transfers)
-            AS outstanding,
-          COALESCE(SUM(CASE WHEN j.state = 'blocked_unsafe' THEN 1 ELSE 0 END), 0)
-            AS blocked_unsafe,
-          COALESCE(SUM(CASE WHEN j.state = 'pending' THEN 1 ELSE 0 END), 0)
-            AS pending,
-          COALESCE(SUM(CASE
-            WHEN j.state = 'claimed' AND j.claim_expires_at > datetime('now') THEN 1
-            ELSE 0
-          END), 0) AS live_claimed,
-          COALESCE(SUM(CASE
-            WHEN j.state = 'claimed' AND j.claim_expires_at <= datetime('now') THEN 1
-            ELSE 0
-          END), 0) AS expired_claimed,
-          COALESCE(SUM(CASE WHEN j.state = 'exhausted' THEN 1 ELSE 0 END), 0)
-            AS exhausted,
-          COALESCE(SUM(CASE
-            WHEN j.state <> 'completed' AND o.status = 'quarantined' THEN 1
-            ELSE 0
-          END), 0) AS quarantined_delivery,
-          -- Live jobs only feed turn_recovery_integrity; completed/exhausted
-          -- residue goes to the diagnostic *_settled counters. Orphan transfers
-          -- have no job row, so corrupt_links adds them unfiltered.
-          COALESCE(SUM(CASE
-            WHEN j.state NOT IN ${SETTLED_RECOVERY_JOB_STATES_SQL} AND ${RECOVERY_JOB_LINK_BROKEN_SQL} THEN 1
-            ELSE 0
-          END), 0) + (SELECT count FROM orphan_transfers) AS corrupt_links,
-          COALESCE(SUM(CASE
-            WHEN j.state IN ${SETTLED_RECOVERY_JOB_STATES_SQL} AND ${RECOVERY_JOB_LINK_BROKEN_SQL} THEN 1
-            ELSE 0
-          END), 0) AS corrupt_links_settled,
-          (SELECT count FROM orphan_transfers) AS orphan_transfers,
-          COALESCE(SUM(CASE
-            WHEN j.state NOT IN ${SETTLED_RECOVERY_JOB_STATES_SQL} AND j.echo_conflict_at IS NOT NULL THEN 1
-            ELSE 0
-          END), 0) AS echo_conflicts,
-          COALESCE(SUM(CASE
-            WHEN j.state IN ${SETTLED_RECOVERY_JOB_STATES_SQL} AND j.echo_conflict_at IS NOT NULL THEN 1
-            ELSE 0
-          END), 0) AS echo_conflicts_settled,
-          (SELECT count FROM open_recoveries) AS open_recoveries,
-          (SELECT synthetic FROM open_recoveries) AS open_recoveries_synthetic,
-          COALESCE(SUM(CASE
-            WHEN j.state IN ('pending', 'claimed')
-              AND NOT ${validDeliveryCorroborationForJobSql('j')}
-            THEN 1 ELSE 0
-          END), 0)
-            + (SELECT count - corroborated FROM orphan_transfers) AS blocking_outstanding,
-          COALESCE(SUM(CASE
-            WHEN j.state IN ('blocked_unsafe', 'exhausted') THEN 1 ELSE 0
-          END), 0) AS retained_terminal,
-          COALESCE(SUM(CASE
-            WHEN j.state IN ('pending', 'claimed')
-              AND ${validDeliveryCorroborationForJobSql('j')}
-            THEN 1 ELSE 0
-          END), 0)
-            + (SELECT corroborated FROM orphan_transfers) AS corroborated_retained,
-          COALESCE(SUM(CASE
-            WHEN j.state = 'blocked_unsafe' AND ${syntheticSourceMessageIdSql('j.source_message_id')} THEN 1
-            ELSE 0
-          END), 0) AS blocked_unsafe_synthetic,
-          COALESCE(SUM(CASE
-            WHEN j.state = 'blocked_unsafe'
-              AND NOT ${syntheticSourceMessageIdSql('j.source_message_id')}
-              AND EXISTS (
-                SELECT 1 FROM inbound_events i2
-                WHERE i2.conversation_key = j.conversation_key
-                  AND i2.seq > j.source_inbound_seq
-              ) THEN 1
-            ELSE 0
-          END), 0) AS blocked_unsafe_superseded,
-          COALESCE(SUM(CASE
-            WHEN j.state = 'blocked_unsafe'
-              AND NOT ${syntheticSourceMessageIdSql('j.source_message_id')}
-              AND NOT EXISTS (
-                SELECT 1 FROM inbound_events i2
-                WHERE i2.conversation_key = j.conversation_key
-                  AND i2.seq > j.source_inbound_seq
-              ) THEN 1
-            ELSE 0
-          END), 0) AS blocked_unsafe_stranded
-        FROM turn_recovery_jobs j
-        LEFT JOIN turn_terminal_records t ON t.id = j.terminal_record_id
-        LEFT JOIN inbound_events i ON i.seq = j.source_inbound_seq
-        LEFT JOIN outbound_ops o ON o.id = t.delivery_op_id
-      `),
+      getTurnRecoverySupervisorCounts: prepare(TURN_RECOVERY_SUPERVISOR_COUNTS_SQL),
       // job_id is carried through both arms (NULL in the second: a terminal
       // record not yet promoted to a job row can never BE the excluded job)
       // so the exclusion is one uniform outer-query predicate instead of two

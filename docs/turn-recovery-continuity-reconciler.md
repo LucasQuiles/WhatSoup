@@ -19,7 +19,7 @@ reservation or running schema integrity checks. The bulk closure CLI
 also leaves these groups pending; use the per-request operator command with reviewed evidence.
 
 A new authenticated operator send can instead bind directly to the original request and plan.
-Its schema-69 resolution requires the exact echoed operation plus explicit fulfillment confirmation.
+Its schema-70 resolution requires the exact echoed operation plus explicit fulfillment confirmation.
 It preserves the failed inbound and all original recovery attempts. Resolved operator operations
 are excluded from pending counts and retained as proof. See the runbook linked above.
 

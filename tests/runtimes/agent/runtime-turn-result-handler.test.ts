@@ -89,6 +89,7 @@ function activation(reason: FailureReason): ProviderFallbackActivation {
     fallbackModel: 'minimax/test-model',
     reason,
     resetAt: null,
+    primaryResetAt: null,
     activeUntil: Date.now() + 60_000,
     extended: false,
     keyPresent: true,

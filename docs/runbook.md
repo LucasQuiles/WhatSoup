@@ -878,6 +878,16 @@ also covers a loopback read that could not start: a connect-stage
 `EADDRNOTAVAIL` (local ephemeral-port exhaustion) on the bot or fleet-console
 read, or a bound health reader that is missing or fails its digest check at
 the run's start or when a confirm window ends (below).
+The fleet console's main read is healthy only for an HTTP 200 `/livez`
+body that is a JSON object with `alive: true` and a `pid` equal to the single
+running pid launchd reports for the fleet job (`launchctl print`, 15 s
+limit). An HTTP answer below 400 without that proof restarts nothing and logs
+`HEALTH-UNKNOWN: fleet liveness contract or PID unverified`, or `HEALTH-UNKNOWN:
+fleet loaded PID unavailable or invalid` when launchd reports no single
+running pid (not running, more than one pid, or the limit); when the run's
+state so far is `ERROR`, that missing-pid case only logs its line. An HTTP
+400-599 answer restarts the fleet console whatever its body says, also when
+the launchd pid cannot be read.
 Ordinary connection refusal, and every other connect- or request-stage
 failure, is still restart evidence on its first observation. A target that
 accepts the connection but does not answer gives a *silent* read: an OS-level
@@ -906,15 +916,20 @@ acts:
   at that moment or starts then. Each read logs `<label> confirm read N: …`.
 - A trusted answer ends the window and cancels the restart: `<label> answered
   on confirm read N; restart avoided: …` and the state `RESTART-AVOIDED`. A
-  trusted answer is an HTTP status below 400 from the fleet console, or a bot
-  body the decision block reads without a restart verdict (healthy,
-  credential-dead, credential-unknown or outbound-poison). That read's own
+  trusted answer is, from the fleet console, an HTTP 200 `/livez` body that is
+  a JSON object with `alive: true` and a `pid` equal to the single running pid
+  launchd reports for the fleet job, read first with an 8 s limit (`<label>
+  confirm read N: loaded process liveness verified`); or a bot body the
+  decision block reads without a restart verdict (healthy, credential-dead,
+  credential-unknown or outbound-poison). That read's own
   verdict is not acted on in this run: a credential-dead or outbound-poisoned
   bot is reported by the next run whose main read answers.
 - Every other result continues the window and changes nothing else in the run:
   another silent read, a refusal, `EADDRNOTAVAIL`, an unavailable or
   unverifiable reader or token, an empty, oversized or untrusted body, a bot
-  restart verdict, or a fleet HTTP error status.
+  restart verdict, or any other fleet answer: an HTTP error or any other
+  status, a body without that proof, or a fleet launchd pid that cannot be
+  read (`<label> confirm read N: liveness unverified (reader exit N)`).
 - A `sleep` that fails ends the window at once: `<label> confirm window ended:
   sleep failed (exit N) after M confirm reads; restart still due: …`. The
   checks below follow as at any window's end.
@@ -980,18 +995,24 @@ on a read in the same run, through the gates as they stand at that moment.
 Compared with restarting at once:
 
 - A restart comes later, or not at all when the target answers within the
-  window. On a steady clock the window lasts at most 90 s plus one 8 s read
-  deadline. It is measured by the clock, with at most six confirm reads: a
+  window. A bot confirm read has an 8 s read deadline. A fleet console
+  confirm read first queries the launchd pid (8 s limit), then reads with the
+  same 8 s deadline, so it takes up to 16 s. On a steady clock the window
+  lasts at most 90 s plus one confirm read: 8 s for the bot, 16 s for the
+  fleet console. It is measured by the clock, with at most six confirm reads: a
   forward clock step shortens it, and a backward one lengthens it up to six
-  full 15 s steps and 8 s reads, about 138 s. `launchctl print` for the job's
+  full 15 s steps and confirm reads, about 138 s for the bot and 186 s for the
+  fleet console. `launchctl print` for the job's
   identity at both ends and for the second gate pass (15 s limit each) and the
   binding check (8 s) add to that, so a restart comes at most about 191 s
-  later than an immediate restart, and about 90 to 100 s later when nothing
-  hangs. These figures count the timed reads, the `launchctl print` queries
-  and the binding check only. The per-read token and decision steps, and the
-  restart path's own `launchctl print` in `ensure_loaded` (as at base), have
-  no deadline. Counting the bounded steps alone, a run with a bot and a fleet
-  window takes at most about 500 s, inside the invocation lock's 600 s.
+  (bot) or 239 s (fleet console) later than an immediate restart, and about
+  90 to 100 s later when nothing hangs. These figures count the timed reads,
+  the `launchctl print` queries and the binding check only. The per-read token
+  and decision steps, and the restart path's own `launchctl print` in
+  `ensure_loaded` (as at base), have no deadline, so no figure here bounds a
+  whole run. The invocation lock's 600 s is the age after which another
+  invocation may reclaim it as stale; it is not an execution deadline, and
+  nothing stops a run at 600 s.
 - An avoided restart arms no cooldown, so a restart-worthy read in the next 5
   minutes (a refusal, an HTTP error, a silent read confirmed silent) is not
   held back by the cooldown an immediate restart would have armed.
@@ -1006,8 +1027,9 @@ Compared with restarting at once:
   verifies at the window's end ends the run.
 
 Every recorded restart of a live target followed a silence of 20.5 to 83.2 s.
-On a steady clock the last confirm read starts about 82 to 90 s after the
-window opens (the window less one read deadline, up to the window). Before
+On a steady clock the last confirm read starts about 82 to 90 s (bot) or 74
+to 90 s (fleet console) after the window opens (the window less one confirm
+read's 8 s or 16 s limit, up to the window). Before
 the window opened, the silence had already lasted the silent read's own wait:
 5 s for a reader timeout, 8 s at the deadline, none for a reset or EOF.
 
@@ -1027,12 +1049,16 @@ path when no stronger credential, health-evidence, or restart outcome applies.
     (subject to the cooldown). This is intended: each answer shows the target
     serving. The `restart avoided` lines in the watchdog log are where to see
     it; nothing alerts on them.
-  - Each silent target adds about 90 to 100 s to a run, at most about 191 s,
-    and the bot and the fleet console can both read silent in one run (the
+  - Each silent target adds about 90 to 100 s to a run, at most about 191 s
+    for the bot or 239 s for the fleet console (bounded steps only), and the
+    bot and the fleet console can both read silent in one run (the
     fleet console is read after the bot section, as before). That can exceed
     the 120 s `StartInterval`: launchd never runs two instances of one job, so
-    the next run then starts late. The invocation lock is reclaimed as stale
-    only after 600 s, and the restart mutex is not held during the window.
+    the next run then starts late. The invocation lock is reclaimed at once
+    when its stamped holder process has exited; while the holder is alive, or
+    when no valid pid is stamped yet, it is reclaimed only after 600 s. That
+    age is not an execution deadline, and the restart mutex is not held during
+    the window.
 - `<label> restart deferred: job changed during the confirm window` (state
   `RESTART-SUPPRESSED`) → the job was unloaded, loaded or respawned while a
   silent read was being confirmed, for example by an operator, a release
@@ -1718,17 +1744,25 @@ test ! -e ~/.local/state/whatsoup/instances/$INSTANCE/whatsoup.lock || \
 sqlite3 $DB ".backup '${DB}.pre-recovery'"
 
 # 4. The next startup will run preConnectRecovery() automatically:
+#    - First sets replay policy 'unsafe' on 'maybe_sent' ops still marked
+#      safe/read_only whose typed failure evidence is transport.send_ambiguous,
+#      except rows with turn delivery corroboration. It reads 200 rows per
+#      page and commits each page in its own write transaction. A failed page
+#      ends this recovery run as incomplete; committed pages stay repaired and
+#      the next recovery repeats the idempotent update (docs/durability.md §2.4)
 #    - Marks orphaned sessions (dead claude_pid)
 #    - Promotes 'sending' outbound ops to 'maybe_sent'
 #    - Quarantines unsafe tool calls that were mid-execution
 #    - Marks inbound events stuck in 'processing' as failed
 #
 # Then postConnectRecovery() runs after reconnect:
-#    - Reconciles 'maybe_sent' ops against the messages table
+#    - Leaves 'maybe_sent' ops with delivery corroboration unchanged
+#    - Reconciles the other 'maybe_sent' ops against the messages table
 #    - Settles matching self-authored rows as 'echoed'
 #    - Quarantines conflicting stored rows regardless of replay policy
-#    - With missing evidence only: resets safe/read_only ops to 'pending';
-#      quarantines unsafe ops (see docs/durability.md §4.2)
+#    - With missing evidence only: resets safe/read_only ops to 'pending'
+#      unless their typed failure evidence is transport.send_ambiguous;
+#      quarantines unsafe and typed send-ambiguous ops (see docs/durability.md §4.2)
 #
 # Immediately after, and on the live 10s echo-timeout interval,
 # drainPendingOutbound() actually re-sends the 'pending' (reset) ops:
@@ -1742,8 +1776,9 @@ sqlite3 $DB ".backup '${DB}.pre-recovery'"
 # reconciles up to 200 oldest live `maybe_sent` rows after each current
 # ambiguity_at episode has aged 30 seconds (not from queue creation).
 # Matching self-authored rows settle; conflicting stored rows quarantine under
-# every policy. Only missing evidence returns safe/read_only sends to the pending
-# drainer; unsafe sends quarantine. The existing stuck-inbound sweep can then
+# every policy. Only missing evidence returns safe/read_only sends without typed
+# transport.send_ambiguous evidence to the pending drainer; unsafe and typed
+# send-ambiguous sends quarantine. The existing stuck-inbound sweep can then
 # release a terminally non-echoed recovery owner.
 
 # 5. Start the service
@@ -2436,12 +2471,16 @@ Output is one JSON line with `ok`, `mode`, `decision` (`ready`, `applied`, `alre
 contradicts the recorded gap or an existing closure); `1` usage or I/O error. Output never contains
 message text, JIDs, or media.
 
-**Schema 66, 67 and 68 rollback.** Migration 66 adds only the closure table; migration 67 adds only
-the protected-delivery tables; migration 68 adds only the protected secret-input table. After a
-migration is recorded, a binary whose ceiling is below it refuses the database and will not write: a
-schema-65 binary refuses a schema-66 database, a schema-66 binary refuses a schema-67 database, and a
-schema-67 binary refuses a schema-68 database, all as `future_schema`. **Binary-only rollback is
-unavailable** for any of them. Migration 69 adds operator catch-up resolution evidence; a schema-68 runtime likewise refuses schema 69. Raw closure tools use their own schema and proof checks and can open supported schema-69 files. Keep the 69-aware runtime for containment or forward repair. Restoring a pre-migration
+**Schema 66 to 70 rollback.** Migration 66 adds only the closure table; migration 67 adds only the
+protected-delivery tables; migration 68 adds only the protected secret-input table; migration 69 adds
+only the failed-terminal reply-debt index; migration 70 adds operator catch-up resolution evidence.
+After a migration is recorded, a binary whose ceiling is below it refuses the database and will not
+write: a schema-65 binary refuses a schema-66 database, a schema-66 binary refuses a schema-67
+database, a schema-67 binary refuses a schema-68 database, a schema-68 binary refuses a schema-69
+database, and a schema-69 runtime refuses a schema-70 database, all as `future_schema`.
+**Binary-only rollback is unavailable** for any of them. Raw closure tools use their own schema and
+proof checks and can open supported schema-70 files. Keep the 70-aware runtime for containment or
+forward repair. Restoring a pre-migration
 backup is an owner decision that requires a proven zero-new-writes window. **Never overwrite a newer
 database with an older backup**: messages received after the upgrade would be lost.
 
@@ -2455,9 +2494,9 @@ bash scripts/run-with-pinned-node.sh scripts/schema-rollback-rehearsal.ts \
   --old-root "$OLD" --new-root "$PWD" --work-dir "$SCRATCH/rehearsal"
 ```
 
-The old binary creates the database at its own ceiling, this release migrates it to 69, and the old
+The old binary creates the database at its own ceiling, this release migrates it to 70, and the old
 binary reopens it. From a schema-68 previous release, exit `0` means the old binary refused with
-`DatabaseCompatibilityError` reason `future_schema` ("Database schema migration 69 exceeds binary
+`DatabaseCompatibilityError` reason `future_schema` ("Database schema migration 70 exceeds binary
 ceiling 68; refusing writes") and `rehearsal.db` stayed byte-identical. The output also reports the
 hashes of every file in the work directory, including the WAL and shared-memory sidecars, as
 `filesBeforeOldReopen` and `filesAfterOldReopen`; the exit code does not compare them, so read them
@@ -2487,7 +2526,7 @@ placeholder's original chat so a provider-ID collision cannot supply another cha
 
 After the bound operation is echoed and original fulfillment is independently established,
 use the same command below with `--source-seqs 101 --operator-op OP_ID` instead of `--catchup-seq`.
-This path requires schema 69, supports exactly one original request per operation, and records
+This path requires schema 70, supports exactly one original request per operation, and records
 an append-only resolution with retained delivery proof. It never fabricates a new inbound turn.
 The direct-operation output contains keyed fingerprints and counts, not raw identifiers.
 First inspect without `--confirm`; repeat the same tuple with `--confirm` only under authority.
@@ -2498,7 +2537,7 @@ until separate evidence and an authorized repair establish it; never resend mere
 This command records that a newer, independently delivered operator catch-up supersedes an exact set
 of pending source inbounds. It never sends or replays a message. The database must already exist
 and its migration ledger must be contiguous from 1 through the current migration, with at least 43
-entries; supported schemas 43 through 69 are accepted, and schemas above 69 are rejected.
+entries; supported schemas 43 through 70 are accepted, and schemas above 70 are rejected.
 The command neither creates a database nor runs
 migrations. It closes only sources that were admitted as `inbound_events` with pending disposition
 links; a continuity gap whose source was never admitted cannot use it. Use `close-continuity-gap` for
@@ -3158,8 +3197,8 @@ an ambiguous submission; later receipt evidence is preserved.
 
 Migration 68 is additive: it adds secret-input metadata alongside the existing
 protected-delivery tables and audit retention. Do not remove its table or rows to
-roll back an application. Use only a binary verified against a schema-68 database,
-or restore a verified pre-migration database backup through the normal rollback
+roll back an application. Use only a binary verified against the database's current schema
+(its highest recorded migration), or restore a verified pre-migration database backup through the normal rollback
 procedure. This migration does not add operating-system isolation; processes running
 under the same operating-system account remain trusted operators.
 
@@ -3217,11 +3256,11 @@ fixed adapter set. It is started with:
 npm run secure-handoff:consumer -- --config /absolute/private/consumer.json
 ```
 
-Use the schema-68 database for the same instance and a private, owner-controlled
+Use the instance's migrated database and a private, owner-controlled
 configuration file. The worker rejects a relative, unreadable, over-16-KiB,
 symlinked, non-regular, non-private, or malformed configuration file. It also
-rejects a database that lacks migration 68 or exceeds the running binary's
-schema ceiling. Complete the instance's schema migration and verify the
+rejects a database that lacks the running binary's current migration or exceeds
+its schema ceiling. Complete the instance's schema migration and verify the
 compatible binary before starting the worker.
 
 Before starting, provision `LINKS_MANAGED_TRANSPORT_TOKEN` and
@@ -3820,7 +3859,10 @@ recovery have been verified; stopping containers alone does not migrate their da
 
 ## Restart-safety preflight blocked a start
 
-`deploy/whatsoup` exits `78` when `scripts/restart-safety-preflight.ts` blocks a boot. Recovery:
+`deploy/whatsoup` exits `78` when `scripts/restart-safety-preflight.ts` blocks a boot. To see this
+refusal before stopping a running instance, run `deploy/preflight-check.sh <repo-root> <instance>`: it
+runs the same start check and exits `3` on a block (at boot the wrapper defers that copy to its own
+exit-`78` gate). Recovery:
 
 - `reason=missing_database` without the `initial-database-create` marker: an instance DB is expected but
   absent — restore the DB from the host backup path before restarting; creating a fresh DB silently

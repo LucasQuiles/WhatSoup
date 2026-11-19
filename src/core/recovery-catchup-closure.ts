@@ -258,7 +258,7 @@ function closeInspectedOperatorCatchupRecovery(
     return { ...receipt, inserted: 0 };
   }
 
-  const storesFulfillment = raw.prepare('SELECT 1 FROM schema_migrations WHERE version = 69').get() !== undefined;
+  const storesFulfillment = raw.prepare('SELECT 1 FROM schema_migrations WHERE version = 70').get() !== undefined;
   const insert = raw.prepare(`
     INSERT INTO inbound_disposition_links (
       inbound_seq, recovery_plan_id, disposition, superseded_by_seq,

@@ -21,6 +21,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import { createChildLogger } from '../logger.ts';
+import { isNonEmptyString } from '../lib/type-guards.ts';
 import { DOMAIN_PERSONAL, DOMAIN_GROUP, DOMAIN_LID, bareNumber, normalizeLid, isLidJid, isPnJid, isGroupJid } from './jid-constants.ts';
 import type { Database } from './database.ts';
 import { sqliteUtcToEpochMs } from '../lib/sqlite-time.ts';
@@ -260,7 +261,7 @@ export function hydrateLidMappings(db: Database, authDir: string): number {
     try {
       const raw = readFileSync(join(authDir, entry), 'utf8').trim();
       const phone = JSON.parse(raw);
-      if (typeof phone === 'string' && phone.length > 0) {
+      if (isNonEmptyString(phone)) {
         // Preserve historic semantics: skip if existing row (INSERT OR IGNORE).
         const result = writeLidMapping(
           db.raw,
@@ -278,7 +279,7 @@ export function hydrateLidMappings(db: Database, authDir: string): number {
         migrateAccessListOrphan(db, lid, `${phone}@${DOMAIN_PERSONAL}`);
       }
     } catch {
-      // Malformed file — skip
+      // intentional: a malformed reverse-mapping file is skipped so the rest still hydrate
     }
   }
   return count;
@@ -785,7 +786,7 @@ function lookupLidFromDisk(db: Database, lid: string): string | null {
   } catch {
     return null;
   }
-  if (typeof phone !== 'string' || phone.length === 0) return null;
+  if (!isNonEmptyString(phone)) return null;
 
   // Route through the unified seam. Safe inside a caller's transaction — the
   // seam itself does not BEGIN/COMMIT. Mode is 'overwrite' to preserve the

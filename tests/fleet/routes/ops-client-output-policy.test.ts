@@ -17,13 +17,16 @@ import {
 } from '../../../src/fleet/routes/ops.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
 import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
+import { generateKeyPairSync } from 'node:crypto';
 
-const DER_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
+// A canonical Ed25519 SPKI key, which the former parser accepted: a rejection
+// of this fixture proves the unsupported-field rule, not key validation.
+const CANONICAL_LEGACY_PUBLIC_KEY = generateKeyPairSync('ed25519')
+  .publicKey.export({ format: 'der', type: 'spki' })
+  .toString('base64url');
+const UNSUPPORTED_AUTHORIZATION = /clientOutputPolicies\[0\]\.authorization is unsupported/;
+
 const SYNTHETIC_PHONE = ['1555', '020', '0001'].join('');
-
-function syntheticPublicKey(): string {
-  return Buffer.concat([DER_PREFIX, Buffer.alloc(32, 13)]).toString('base64url');
-}
 
 function policy(conversationKey: string, privateTerm = 'restricted') {
   return {
@@ -33,11 +36,6 @@ function policy(conversationKey: string, privateTerm = 'restricted') {
     blockedTerms: [{ value: privateTerm, match: 'whole_word', caseSensitive: false }],
     rejectInternalArtifacts: true,
     rejectWhatsAppJids: true,
-    authorization: {
-      keyId: 'synthetic-key',
-      publicKey: syntheticPublicKey(),
-      requiredActions: ['send_message'],
-    },
   };
 }
 
@@ -80,16 +78,25 @@ const INVALID_POLICY_CASES: readonly {
       }],
     }],
   },
+  // Ids stay short: every route name built from them must fit the instance-name
+  // limit, or the route refuses the name before it validates any policy.
   {
-    id: 'unknown-auth',
-    label: 'an unknown authorization field',
+    id: 'legacy-auth-empty',
+    label: 'an empty legacy authorization object',
     policies: [{
       ...policy('unknown-authorization'),
+      authorization: {},
+    }],
+  },
+  {
+    id: 'legacy-auth-populated',
+    label: 'a populated legacy authorization object',
+    policies: [{
+      ...policy('populated-authorization'),
       authorization: {
-        keyId: 'synthetic-key',
-        publicKey: syntheticPublicKey(),
+        keyId: 'legacy-key',
+        publicKey: CANONICAL_LEGACY_PUBLIC_KEY,
         requiredActions: ['send_message'],
-        unsupportedAuthorizationField: true,
       },
     }],
   },
@@ -249,7 +256,6 @@ describe('fleet client-output policy config admission and projection', () => {
     expect(res._status).toBe(201);
     expect(JSON.parse(fs.readFileSync(configPath(name), 'utf8')).clientOutputPolicies).toEqual(policies);
     expect(res._body).not.toContain(privateTerm);
-    expect(res._body).not.toContain(syntheticPublicKey());
   });
 
   it.each(INVALID_POLICY_CASES)(
@@ -270,6 +276,7 @@ describe('fleet client-output policy config admission and projection', () => {
       }), res, deps);
 
       expect(res._status).toBe(400);
+      expect(res._body).toMatch(/clientOutputPolicies/);
       expect(fs.existsSync(configDir(name))).toBe(false);
       expect(deps.serviceManager.enable).not.toHaveBeenCalled();
       expect(deps.realtime.publish).not.toHaveBeenCalled();
@@ -297,10 +304,8 @@ describe('fleet client-output policy config admission and projection', () => {
     expect(response.clientOutputPolicies[0]).toMatchObject({
       conversationKey: 'replacement',
       blockedTerms: [{ value: '[redacted]', match: 'whole_word', caseSensitive: false }],
-      authorization: { keyId: 'synthetic-key', publicKey: '[redacted]' },
     });
     expect(res._body).not.toContain(privateTerm);
-    expect(res._body).not.toContain(syntheticPublicKey());
   });
 
   it('leaves config bytes and auxiliary state unchanged when PATCH validation fails', async () => {
@@ -348,6 +353,63 @@ describe('fleet client-output policy config admission and projection', () => {
       }), res, deps, { name });
 
       expect(res._status).toBe(400);
+      expect(res._body).toMatch(/clientOutputPolicies/);
+      expect(fs.readFileSync(targetPath)).toEqual(beforeConfig);
+      expect(fs.readFileSync(siblingPath)).toEqual(beforeSibling);
+      expect(fs.readdirSync(configDir(name)).sort()).toEqual(beforeEntries);
+      expect(deps.realtime.publish).not.toHaveBeenCalled();
+    },
+  );
+
+  const LEGACY_AUTHORIZATION_CASES = INVALID_POLICY_CASES
+    .filter(({ id }) => id.startsWith('legacy-auth-'))
+    .map((entry) => ({ ...entry, suffix: entry.id.slice('legacy-auth-'.length) }));
+
+  it.each(LEGACY_AUTHORIZATION_CASES)(
+    'names the unsupported authorization field for $label on CREATE',
+    async ({ suffix, policies }) => {
+      const name = `auth-create-${suffix}`;
+      const deps = createDeps();
+      const res = mockRes();
+
+      await handleCreateLine(mockReq({
+        method: 'POST',
+        body: JSON.stringify({
+          name,
+          type: 'agent',
+          adminPhones: [SYNTHETIC_PHONE],
+          clientOutputPolicies: policies,
+        }),
+      }), res, deps);
+
+      expect(res._status).toBe(400);
+      expect(res._body).toMatch(UNSUPPORTED_AUTHORIZATION);
+      expect(fs.existsSync(configDir(name))).toBe(false);
+      expect(deps.serviceManager.enable).not.toHaveBeenCalled();
+      expect(deps.realtime.publish).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(LEGACY_AUTHORIZATION_CASES)(
+    'names the unsupported authorization field for $label on PATCH',
+    async ({ suffix, policies }) => {
+      const name = `auth-patch-${suffix}`;
+      const targetPath = writeAgent(name, [policy('original')]);
+      const siblingPath = path.join(configDir(name), 'sibling-evidence.txt');
+      fs.writeFileSync(siblingPath, `sibling-${suffix}\n`, { mode: 0o600 });
+      const beforeConfig = fs.readFileSync(targetPath);
+      const beforeSibling = fs.readFileSync(siblingPath);
+      const beforeEntries = fs.readdirSync(configDir(name)).sort();
+      const deps = patchDeps(name, targetPath);
+      const res = mockRes();
+
+      await handleConfigUpdate(mockReq({
+        method: 'PATCH',
+        body: JSON.stringify({ clientOutputPolicies: policies }),
+      }), res, deps, { name });
+
+      expect(res._status).toBe(400);
+      expect(res._body).toMatch(UNSUPPORTED_AUTHORIZATION);
       expect(fs.readFileSync(targetPath)).toEqual(beforeConfig);
       expect(fs.readFileSync(siblingPath)).toEqual(beforeSibling);
       expect(fs.readdirSync(configDir(name)).sort()).toEqual(beforeEntries);

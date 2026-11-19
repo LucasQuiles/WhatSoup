@@ -99,7 +99,15 @@ export interface ProviderFallbackActivation {
   fallbackProvider: string;
   fallbackModel: string | undefined;
   reason: ProviderFallbackReason;
+  /** The reset passed to this activation, whatever its tier (may be a fallback entry's estimate). */
   resetAt: Date | null;
+  /**
+   * Reset parsed from the PRIMARY provider's own failure (epoch ms), else null.
+   * The only source of the user-facing ETA: a fallback-tier reset describes
+   * the fallback entry's quota, and `activeUntil` is the window end.
+   */
+  primaryResetAt: number | null;
+  /** Fallback-window expiry (epoch ms). Never a quota-reset ETA. */
   activeUntil: number;
   extended: boolean;
   keyPresent: boolean | null;

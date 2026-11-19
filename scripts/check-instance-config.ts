@@ -30,6 +30,7 @@
  */
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
@@ -115,7 +116,18 @@ export interface CheckOptions {
    * are flagged rather than silently passing.
    */
   defaultPort?: number;
+  /**
+   * Home directory of the service user. When set, the check also validates
+   * filesystem state (agentOptions.instructionsPath) the way config load does.
+   * Set it only for a live config root: committed examples name paths that do
+   * not exist on the machine running the check.
+   */
+  filesystemHome?: string;
 }
+
+type PortCheckOptions = Required<
+  Pick<CheckOptions, 'fleetPort' | 'portMin' | 'portMax' | 'defaultPort'>
+>;
 
 type PortConfig = { instance: string; filePath: string; healthPort?: number };
 
@@ -243,7 +255,7 @@ export function checkMemoryIntegrity(
  */
 export function checkPortMap(
   configs: PortConfig[],
-  options: Required<CheckOptions>,
+  options: PortCheckOptions,
 ): ConfigFinding[] {
   const findings: ConfigFinding[] = [];
   const byPort = new Map<number, { instance: string; filePath: string; explicit: boolean }[]>();
@@ -316,10 +328,12 @@ export function checkSchema(
   raw: Record<string, unknown>,
   instance: string,
   filePath: string,
+  filesystemHome?: string,
 ): ConfigFinding[] {
   const err: ValidationError | null = validateInstanceConfig(raw, {
     name: instance,
     mode: 'load',
+    ...(filesystemHome ? { filesystem: { homeDirectory: filesystemHome } } : {}),
   });
   if (!err) return [];
   return [
@@ -342,7 +356,7 @@ function parseConfig(filePath: string): Record<string, unknown> {
   return parsed;
 }
 
-function defaultCheckOptions(options: CheckOptions = {}): Required<CheckOptions> {
+function defaultCheckOptions(options: CheckOptions = {}): PortCheckOptions {
   return {
     fleetPort: options.fleetPort ?? DEFAULT_FLEET_PORT,
     portMin: options.portMin ?? INSTANCE_HEALTH_PORT_MIN,
@@ -419,7 +433,7 @@ export function checkInstanceConfigs(
     scanned.push({ instance: name, filePath, healthPort });
     portConfigs.push({ instance: name, filePath, healthPort });
 
-    findings.push(...checkSchema(raw, name, filePath));
+    findings.push(...checkSchema(raw, name, filePath, options.filesystemHome));
     findings.push(...checkMemoryIntegrity(raw, name, filePath));
     warnings.push(...checkM365UpgradeWarnings(raw, name, filePath));
   }
@@ -624,7 +638,10 @@ health-port map integrity (Class B). With no --root, validates both committed
 example configs under deploy/examples/instances and checked-in health profiles
 under deploy/health-profiles. Pass --root to validate a host's live
 ~/.config/whatsoup/instances tree offline; explicit roots retain the historical
-config-tree behavior and do not also scan health profiles.
+config-tree behavior and do not also scan health profiles. An explicit root is
+also checked against the filesystem of the user running the check, as config
+load does: agentOptions.instructionsPath must resolve within that user's home
+to a readable regular file. Run it as the service user.
 
 Exit code 1 on any finding.`;
 
@@ -643,7 +660,13 @@ export function run(
     portMin: args.portMin,
     portMax: args.portMax,
   };
-  const instanceResult = checkInstanceConfigs(args.root, options);
+  // An explicit --root names a live config root, so check it against the
+  // filesystem of the user running the check; the default examples root is
+  // schema-only.
+  const instanceResult = checkInstanceConfigs(args.root, {
+    ...options,
+    ...(args.explicitRoot ? { filesystemHome: homedir() } : {}),
+  });
   const result = args.explicitRoot
     ? instanceResult
     : (() => {

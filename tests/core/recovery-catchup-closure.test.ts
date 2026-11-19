@@ -16,7 +16,7 @@ describe('operator catch-up recovery closure', () => {
 
   afterEach(() => db.close());
 
-  it('blocks an old writer from closing a schema-69 request without fulfillment evidence', () => {
+  it('blocks an old writer from closing a schema-70 request without fulfillment evidence', () => {
     const f = installFixture('complete', true);
     const insert = db.raw.prepare(`INSERT INTO inbound_disposition_links
       (inbound_seq, recovery_plan_id, disposition, superseded_by_seq, reason, evidence_ref, actor)

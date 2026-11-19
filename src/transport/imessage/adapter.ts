@@ -122,7 +122,7 @@ function mapPortError(
   };
   const msg = (typeof pe?.message === 'string' && pe.message) ? pe.message : String(err);
 
-  if (pe.code === 'SendAcceptedWithoutId' || pe.code === 'RequestAbortedAfterWrite') {
+  if (pe.code === 'SendAcceptedWithoutId' || pe.code === 'RequestAbortedAfterWrite' || pe.code === 'SendRpcOutcomeUnknown') {
     return new SendAmbiguousError({
       ...base,
       message: `iMessage send outcome is ambiguous: ${msg}`,

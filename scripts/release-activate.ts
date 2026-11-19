@@ -367,7 +367,7 @@ async function sendInvariantsEvent(
 }
 
 /** The errno name of a failed write (e.g. EACCES), never its message, which carries the path. */
-function errnoName(error: unknown): string {
+export function errnoName(error: unknown): string {
   const code = (error as { code?: unknown } | null)?.code;
   return typeof code === 'string' && /^E[A-Z0-9]+$/.test(code) ? code : 'UNKNOWN';
 }

@@ -40,7 +40,8 @@ function ledgerVersions(raw: DatabaseSync): number[] {
 
 /**
  * Tables that migrations after 65 add: 66 the closure ledger, 67 protected
- * delivery, 68 protected secret input staging, 69 operator catch-up resolutions.
+ * delivery, 68 protected secret input staging, 70 operator catch-up resolutions
+ * (69 adds only the failed-terminal reply-debt index).
  */
 const TABLES_AFTER_65 = [
   'continuity_gap_closures',
@@ -59,13 +60,13 @@ function presentTables(raw: DatabaseSync, names: readonly string[]): string[] {
 const versionsThrough = (last: number): number[] => Array.from({ length: last }, (_, i) => i + 1);
 
 describe('migration 66 through the registry', () => {
-  it('a fresh database opens at the current schema, 69, with the closure table and its guards', () => {
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(69);
+  it('a fresh database opens at the current schema with the closure table and its guards', () => {
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(70);
     const db = new Database(':memory:');
     db.open();
     try {
       const raw = db.raw;
-      expect(ledgerVersions(raw)).toEqual(versionsThrough(69));
+      expect(ledgerVersions(raw)).toEqual(versionsThrough(CURRENT_SCHEMA_MIGRATION));
       expect(objectNames(raw, 'table')).toEqual(['continuity_gap_closures']);
       expect(objectNames(raw, 'trigger')).toEqual([
         'continuity_gap_closures_append_only_delete',
@@ -89,8 +90,9 @@ describe('migration 66 through the registry', () => {
     // Emulate a schema-65 file, as the close-continuity-gap fixture does: remove
     // every version above 65 and the objects those migrations add (66: the
     // closure ledger; 67: the protected-delivery tables and their indexes; 68:
-    // the protected-secret input table and its indexes; 69: catch-up resolutions,
-    // fulfillment proof column and guards on pre-existing tables).
+    // the protected-secret input table and its indexes; 69: the failed-terminal
+    // reply-debt index; 70: catch-up resolutions, fulfillment proof column and
+    // guards on pre-existing tables).
     first.raw.exec('DROP TRIGGER operator_catchup_resolution_outbound_immutable');
     first.raw.exec('DROP TRIGGER operator_catchup_resolution_source_immutable');
     first.raw.exec('DROP TRIGGER operator_catchup_resolution_no_legacy_close');
@@ -102,6 +104,7 @@ describe('migration 66 through the registry', () => {
     first.raw.exec('DROP TABLE protected_delivery_events');
     first.raw.exec('DROP TABLE protected_deliveries');
     first.raw.exec('DROP TABLE protected_secret_inputs');
+    first.raw.exec('DROP INDEX idx_turn_terminal_failed_reply_debt');
     first.raw.prepare('DELETE FROM schema_migrations WHERE version >= 66').run();
     // The fixture must really be a schema-65 file before the upgrade.
     expect(ledgerVersions(first.raw)).toEqual(versionsThrough(65));
@@ -118,7 +121,7 @@ describe('migration 66 through the registry', () => {
     upgraded.open();
     try {
       const raw = upgraded.raw;
-      expect(ledgerVersions(raw)).toEqual(versionsThrough(69));
+      expect(ledgerVersions(raw)).toEqual(versionsThrough(CURRENT_SCHEMA_MIGRATION));
       expect(objectNames(raw, 'table')).toEqual(['continuity_gap_closures']);
       expect(presentTables(raw, TABLES_AFTER_65)).toEqual(TABLES_AFTER_65);
       const plans = (raw.prepare(`

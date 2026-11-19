@@ -8,12 +8,56 @@ import { deleteOldMessages } from './messages.ts';
 import { maintainOutboundSends } from './outbound-sends.ts';
 import { deleteExpiredProtectedDeliveries } from './protected-delivery.ts';
 import { systemClock } from '../lib/clock.ts';
+import { unownedFailedTerminalExistsSql } from './open-recoveries-sql.ts';
 import {
   HANDOFF_ARTIFACT_RETENTION_MS,
   deleteExpiredHandoffArtifacts,
 } from './handoff-artifact-retention.ts';
 
 const log = createChildLogger('database:retention');
+
+/**
+ * Deletes aged settled terminal records. Age alone cannot discharge an
+ * unanswered user reply obligation: every terminal record of an owed inbound,
+ * sibling generations included, stays. The debt probe is keyed on each
+ * candidate's inbound, so the write transaction reads one inbound's debt rows
+ * per candidate instead of re-running the whole debt set.
+ */
+export const AGED_TERMINAL_RECORDS_DELETE_SQL = `
+      DELETE FROM turn_terminal_records
+       WHERE created_at < datetime('now', ?)
+         AND inbound_disposition IN (
+           'finalized_replied', 'finalized_no_reply_policy', 'failed_terminal'
+         )
+         AND NOT ${unownedFailedTerminalExistsSql('turn_terminal_records.inbound_seq')}
+         AND NOT EXISTS (
+           SELECT 1
+             FROM turn_recovery_jobs
+            WHERE terminal_record_id = turn_terminal_records.id
+         )
+         AND NOT EXISTS (
+           SELECT 1
+             FROM turn_delivery_corroboration
+            WHERE terminal_record_id = turn_terminal_records.id
+         )
+         AND NOT EXISTS (
+           SELECT 1
+             FROM inbound_disposition_links
+            WHERE superseded_by_seq = turn_terminal_records.inbound_seq
+         )
+         AND (
+           (
+             inbound_seq IS NULL
+             AND inbound_disposition = 'finalized_no_reply_policy'
+           )
+           OR EXISTS (
+             SELECT 1
+             FROM inbound_events
+             WHERE seq = turn_terminal_records.inbound_seq
+               AND processing_status IN ('complete', 'failed')
+           )
+         )
+    `;
 
 export interface DatabaseRetentionConfig {
   intervalMs: number;
@@ -231,40 +275,7 @@ export function runDatabaseRetention(
       turnTerminalRecords += changes(deleteCompletedRecoveryTerminal.run(terminalRecordId));
     }
 
-    turnTerminalRecords += changes(db.raw.prepare(`
-      DELETE FROM turn_terminal_records
-       WHERE created_at < datetime('now', ?)
-         AND inbound_disposition IN (
-           'finalized_replied', 'finalized_no_reply_policy', 'failed_terminal'
-         )
-         AND NOT EXISTS (
-           SELECT 1
-             FROM turn_recovery_jobs
-            WHERE terminal_record_id = turn_terminal_records.id
-         )
-         AND NOT EXISTS (
-           SELECT 1
-             FROM turn_delivery_corroboration
-            WHERE terminal_record_id = turn_terminal_records.id
-         )
-         AND NOT EXISTS (
-           SELECT 1
-             FROM inbound_disposition_links
-            WHERE superseded_by_seq = turn_terminal_records.inbound_seq
-         )
-         AND (
-           (
-             inbound_seq IS NULL
-             AND inbound_disposition = 'finalized_no_reply_policy'
-           )
-           OR EXISTS (
-             SELECT 1
-             FROM inbound_events
-             WHERE seq = turn_terminal_records.inbound_seq
-               AND processing_status IN ('complete', 'failed')
-           )
-         )
-    `).run(terminalCutoff));
+    turnTerminalRecords += changes(db.raw.prepare(AGED_TERMINAL_RECORDS_DELETE_SQL).run(terminalCutoff));
 
     const inboundEvents = changes(db.raw.prepare(`
       DELETE FROM inbound_events

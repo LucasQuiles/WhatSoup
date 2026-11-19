@@ -33,6 +33,7 @@ import { errorMessage } from './error-message.ts';
 import { resolveApiKey } from './api-key-resolver.ts';
 import { MS_PER_DAY } from './time-units.ts';
 import { isNonEmptyString } from './type-guards.ts';
+import { isModelId } from './model-id.ts';
 
 const log = createChildLogger('model-advisor');
 
@@ -165,9 +166,10 @@ async function fetchModelIdsOnce(
     }
     const body = await readModelsResponse(res);
     parsed = true;
-    const ids = (body.data ?? [])
-      .map((m) => m.id)
-      .filter((id): id is string => typeof id === 'string');
+    const ids = (body.data ?? []).map((m) => m.id);
+    if (!ids.every(isModelId)) {
+      throw new SyntaxError('models API returned invalid model IDs');
+    }
     log.debug({ vendor, count: ids.length }, 'live model list fetched');
     return { ids, failure: null, retryable: false };
   } catch (err) {

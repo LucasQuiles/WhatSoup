@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { assertCanonicalSchema43 } from './database-migration-43.ts';
-import { assertOperatorCatchupResolutionSchema } from './database-migration-69.ts';
+import { assertOperatorCatchupResolutionSchema } from './database-migration-70.ts';
 import { withoutOperatorCatchupResolutionSql } from './open-recoveries-sql.ts';
 
 // Applied migration 43 is frozen. Runtime attestation retains its proof checks,
-// while schema 69 permits a pending group member to have a direct resolution.
+// while schema 70 permits a pending group member to have a direct resolution.
 const HARDENED_SCHEMA_42_OBJECTS = [
   ['table', 'operator_catchup_closure_witnesses', 'afd9c7cf0ec3647f721f517abb17865e4c8885544bddcf06bb9977de7c4583b4'],
   ['view', 'operator_catchup_delivery_proof_candidates', 'f8f6d3c57c03bbd39c51f88710e4edb401c8a55291ea36b16adbb0bb213d4b2f'],
@@ -258,7 +258,7 @@ function assertClosureWitnessCoverage(db: DatabaseSync): void {
  * still match the canonical schema-43 contract.
  */
 export function assertRecoveryCatchupSchema(db: DatabaseSync): void {
-  if (!db.prepare('SELECT version FROM schema_migrations WHERE version = 69').get()) {
+  if (!db.prepare('SELECT version FROM schema_migrations WHERE version = 70').get()) {
     assertCanonicalSchema43(db);
     return;
   }
