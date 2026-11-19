@@ -74,6 +74,10 @@ FILES=(
   "deploy/scripts/lib/bot_errors_roster.py"
   "deploy/scripts/lib/controller_log.py"
   "deploy/scripts/lib/controller_state.py"
+  # bot_errors_submission.py has no runtime caller yet. It is shipped because
+  # the runtime manifest pins it, and the health check's manifest comparison
+  # fails on any pinned path missing from the root.
+  "deploy/scripts/lib/bot_errors_submission.py"
   # Closure members. Everything above is imported BY something; everything here
   # is imported by something above, and a root that omits it makes the importer
   # crash on load while do_verify still prints VERIFY_OK. Kept managed by
