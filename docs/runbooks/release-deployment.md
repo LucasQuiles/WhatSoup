@@ -446,9 +446,12 @@ capability it needs in its sealed runtime manifest:
 ```
 
 When this positive requirement is present, `release:activate` reads the loaded
-`com.bot-errors.health` definition and accepts only the supported bash wrapper
-shape. It reads the consumer manifest, runner and checker through bounded,
-no-follow file descriptors below one consumer root. Each read requires stable
+`com.bot-errors.health` definition and accepts two shapes: the direct form that
+`install-bot-errors-health-launchd.sh` renders (the runner as the program and its
+release as the working directory), and the older bash wrapper form whose health
+profile path lies under that same release. It reads the consumer manifest,
+runner and checker through bounded, no-follow file descriptors below one
+consumer root. Each read requires stable
 file identity and metadata, plus stable root and ancestor directory identities.
 The manifest must record matching runner and checker hashes. The consumer must
 advertise `consumerCapabilities.botErrorsHealth.secureStorageSelector` at or

@@ -100,7 +100,13 @@ release declares a
 exit 2 before any change. For such a job, run this installer without arguments
 and with `BOT_ERRORS_REPO_ROOT` set to the new release instead: it renders a
 fresh job whose runner, checker and working directory are in that release,
-without the wrapper.
+without the wrapper. That reinstall replaces the job file without keeping a
+backup, then reloads and enables the job. It takes the health profile from
+`BOT_ERRORS_HEALTH_PROFILE` (the environment first, then `bot-errors.env`), or
+else the host's profile in the new release, and it writes the settings it reads
+into the job at install time. A wrapper job that is not re-pinned is read as
+before: activation accepts it when the release it runs from meets the
+requirement.
 
 ```bash
 BOT_ERRORS_REPO_ROOT=/absolute/reviewed-release \
