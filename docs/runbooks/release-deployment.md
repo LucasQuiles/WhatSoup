@@ -123,7 +123,8 @@ each selected file is read into memory for hashing. There is no aggregate stagin
 quota or file-count limit. A process crash can leave staging for later inspection;
 it is not evidence of a published or qualified release.
 
-Export properties under those preconditions (all fail closed):
+Export properties under those preconditions (all fail closed, except the pending
+host-built outputs described below):
 
 - the commit must be `refs/remotes/origin/main` or an ancestor of it, in a
   clone whose `origin` resolves (after `insteadOf` rewrites) to
@@ -150,7 +151,14 @@ Export properties under those preconditions (all fail closed):
   never leak into a release;
 - the release is assembled in a staging directory and self-checked with the
   SAME drift checker the fleet runs (`--check-release` semantics) BEFORE it is
-  atomically renamed into place — a failed export leaves no release;
+  atomically renamed into place — a failed export leaves no release. The one
+  tolerated finding is `required-output-missing` (next item);
+- required outputs are built on the host after export, so export cannot see
+  them. They are the `--required-output` paths, plus `dist/index.html`
+  automatically when the commit tracks `console/package.json`. Export publishes
+  the release without them and lists them in the report as
+  `pendingHostOutputs`. The drift check keeps reporting `required-output-missing`
+  until they exist, and `release:activate` refuses the release meanwhile;
 - when `deploy/source-runtime-manifest.json` is present, its pinned entrypoint
   graph is also checked against the staged release and its release manifest;
   a stale source hash refuses publication before restart preflight;
@@ -162,8 +170,28 @@ Export properties under those preconditions (all fail closed):
   second `--replace` of the same release name refuses while
   `.rollback/<name>-before` is occupied — verify the preserved copy is no
   longer needed, then remove it manually before re-running;
-- dependencies are NOT installed by the export: run `npm ci` inside the release
-  on the host (the restart preflight blocks a release without `node_modules`).
+- dependencies and the console build are NOT produced by the export. On the
+  host, inside the release, run:
+
+  ```bash
+  bash scripts/run-with-pinned-npm.sh ci
+  bash scripts/run-with-pinned-npm.sh --prefix console ci
+  bash scripts/run-with-pinned-npm.sh --prefix console run build   # writes <release>/dist, served by the fleet
+  ```
+
+  The restart preflight blocks a release without `node_modules`, and
+  `release:activate` refuses a release whose required outputs are missing or are
+  not regular files inside the release (a directory or a symlink does not count).
+
+Reading the export result: `ok: true` means the release was published. While
+any required output is pending, `selfCheck.ok` in the JSON report is `false`,
+because `selfCheck` is the plain drift report and still lists
+`required-output-missing`; `pendingHostOutputs` names the paths still to build.
+Without `--json`, the summary prints `self-check ok` when nothing is pending.
+Otherwise it prints `self-check ok except pending host build: <paths>`,
+followed by a pointer to this runbook. The former `self-check ok=<true|false>`
+line is no longer printed: a script that parsed it must read
+`pendingHostOutputs` from the JSON report instead.
 
 The export creates release bytes only. Repointing a service at the new release
 and restarting it remain separately-approved host mutations, and must preserve
@@ -176,6 +204,17 @@ Activation is the separately-approved host mutation the section above stops
 short of. Having exported a release is not approval to activate it: activation
 needs named approval in the current turn, naming the instance, the target
 release, and the prepared rollback target.
+
+A release exported from a commit that tracks `console/package.json` (every
+current `main` commit) cannot be activated until the host has built its
+console. First run the host step from [Dry-Run Planning](#dry-run-planning)
+inside the new release: both `ci` installs, then the console build. Until
+`<release>/dist/index.html` is a regular file inside the release, `--plan`
+lists the precondition `release-required-outputs-present` as failed and exits
+`2`, and `--apply` refuses the same way. `--apply` checks the outputs again
+under the activation lock, just before the switch. A release whose manifest
+lists no `requiredOutputs`, such as one exported before this requirement, is
+not affected.
 
 ### `npm run release:activate`
 
@@ -234,7 +273,10 @@ npm --silent run release:activate -- \
 Preconditions include: the wrapper symlink points at
 `<expect-current>/deploy/whatsoup`; the new manifest is schema-valid, names
 `--release` as its path and carries a full commit; the new release has
-`deploy/whatsoup`, `src/bootstrap.ts` and `node_modules`; each auxiliary job
+`deploy/whatsoup`, `src/bootstrap.ts` and `node_modules`; every manifest
+`requiredOutputs` path (the built console) is a regular file inside the new release,
+reached without a symlinked path component, checked again under the activation lock
+just before the switch; each auxiliary job
 currently runs from `--expect-current`; a health token and port resolve; the
 database exists; and no staged plist still references `--expect-current`.
 
@@ -926,7 +968,11 @@ Older release snapshots without a manifest are reported as `manifest-missing`
 drift. That finding is evidence to re-cut from reviewed source; it is not
 approval to overwrite the release.
 
-Drift findings mean the release is no longer a faithful copy of reviewed source.
+`required-output-missing` on a freshly exported release is not tampering: the
+host build step (the console under `dist/`) has not run yet. Run it as described
+under Dry-Run Planning; `release:activate` refuses the release until then.
+
+All other drift findings mean the release is no longer a faithful copy of reviewed source.
 They do not by themselves authorize deleting the release or replacing it. Decide
 whether to port the lesson back to source, re-cut from merged source, or roll
 back to the prior release path.
