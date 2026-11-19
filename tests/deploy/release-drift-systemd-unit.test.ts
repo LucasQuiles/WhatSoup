@@ -251,6 +251,35 @@ describe('whatsoup-release-drift systemd unit', () => {
     expect(successExitStatuses().has(result.status ?? -1)).toBe(true);
   });
 
+  it('runs the selected release runner and returns its observer status when an inherited WHATSOUP_REPO_ROOT names another tree', () => {
+    // bot-errors.env, the user manager or a drop-in can set WHATSOUP_REPO_ROOT,
+    // for example to the previous release. The scheduler takes its runner from
+    // that root. A runner from before --bootstrap-exit-code reads the option as
+    // its script path and exits 1 without starting the observer, which systemd
+    // would record as alerted drift.
+    const release = actualRelease("process.stdout.write('fixture-selected-observer-ran\\n');\nprocess.exitCode = 0;\n");
+    const inheritedRoot = tmp.make('inherited-root');
+    mkdirSync(path.join(inheritedRoot, 'scripts'), { recursive: true });
+    writeFileSync(path.join(inheritedRoot, 'scripts/run-with-pinned-node.sh'), [
+      '#!/usr/bin/env bash',
+      "echo 'fixture-inherited-runner-ran' >&2",
+      'echo "FATAL: script not found: $1" >&2',
+      'exit 1',
+      '',
+    ].join('\n'));
+    const result = runWrapper({
+      WHATSOUP_RELEASE_DRIFT_INSTANCE: 'test',
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+      WHATSOUP_NODE: process.execPath,
+      WHATSOUP_REPO_ROOT: inheritedRoot,
+    });
+
+    expect(result.stdout).toContain('fixture-selected-observer-ran');
+    expect(result.status).toBe(0);
+    expect(result.stderr).not.toContain('fixture-inherited-runner-ran');
+  });
+
   it('keeps the runner default bootstrap exit and rejects unsupported bootstrap classifications', () => {
     const release = actualRelease('process.exitCode = 0;\n');
     const defaultFailure = runPinnedRunner(release.releaseRoot, ['scripts/missing-observer.ts']);
