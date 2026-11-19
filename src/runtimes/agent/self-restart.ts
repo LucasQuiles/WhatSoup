@@ -11,8 +11,7 @@
 // a deliberate restart from a crash, and so the next boot can announce
 // continuity with a measured downtime. No new child-process usage and no
 // parallel teardown — the marker + ServiceManager.restartSelf are the whole
-// mechanism. Before any of it, a manager that offers checkRestartSelf (launchd)
-// is asked whether the restart would boot; a refusal stops nothing.
+// mechanism.
 
 import { unlinkSync } from 'node:fs';
 import { join } from 'node:path';
@@ -46,19 +45,7 @@ const log = createChildLogger('self-restart');
  */
 export interface ServiceRestarter {
   restartSelf(name: string): Promise<void>;
-  /**
-   * Ask, before anything is sent or stopped, whether a restart would boot.
-   * launchd implements it: its restartSelf stops this process before the
-   * launcher's boot preflight runs. A manager without it is not asked.
-   */
-  checkRestartSelf?(name: string): Promise<RestartSelfCheck>;
 }
-
-/**
- * Outcome of the boot preflight: its exit status only, because its output can
- * name paths, or null when it timed out, did not start or could not be asked.
- */
-export type RestartSelfCheck = { ok: true } | { ok: false; exitCode: number | null };
 
 /** Stable filename of the intentional-restart marker inside an instance dataRoot. */
 export const INTENTIONAL_RESTART_MARKER = 'intentional-restart.marker';
@@ -385,24 +372,12 @@ export interface RestartSelfToolDeps {
   assertAdmin: (session: SessionContext) => void;
 }
 
-/** Ask the service manager's boot preflight; a manager without one is not asked, and a throw refuses. */
-async function checkBootPreflight(deps: RestartSelfToolDeps): Promise<RestartSelfCheck> {
-  if (!deps.serviceManager.checkRestartSelf) return { ok: true };
-  try {
-    return await deps.serviceManager.checkRestartSelf(deps.instanceName);
-  } catch (err) {
-    log.warn({ instance: deps.instanceName, err }, 'boot preflight could not be asked; restart not started');
-    return { ok: false, exitCode: null };
-  }
-}
-
 /**
  * Build the `restart_self` tool declaration. The handler is intentionally thin:
- * ask the boot preflight, resolve the originating chat, deliver the turn's owed
- * text, send an immediate ack, then delegate to `triggerSelfRestart` (marker
- * write + alert + ServiceManager.restartSelf). If the preflight refuses or the
- * owed text is not confirmed sent, it stops before the ack and returns
- * `ok: false` / `restarting: false`.
+ * resolve the originating chat, deliver the turn's owed text, send an immediate
+ * ack, then delegate to `triggerSelfRestart` (marker write + alert +
+ * ServiceManager.restartSelf). If the owed text is not confirmed sent, it stops
+ * before the ack and returns `ok: false` / `restarting: false`.
  */
 export function buildRestartSelfTool(deps: RestartSelfToolDeps): ToolDeclaration {
   return {
@@ -426,27 +401,6 @@ export function buildRestartSelfTool(deps: RestartSelfToolDeps): ToolDeclaration
       // Matches the assertAdmin discipline of substrate.ts.
       deps.assertAdmin(session);
       const { reason, code } = RestartSelfSchema.parse(params);
-
-      // Before the owed reply: deliverOwedReply sends the held answer with the
-      // status role and then aborts the turn (deliverOwedReplyBeforeRestart), so
-      // a restart refused after it would leave the answer already sent as status.
-      // A refusal here sends nothing, writes no marker and stops nothing, and the
-      // turn finishes normally.
-      const preflight = await checkBootPreflight(deps);
-      if (!preflight.ok) {
-        log.warn({ instance: deps.instanceName, preflightExitCode: preflight.exitCode }, 'boot preflight refused; restart not started');
-        const exit = preflight.exitCode === null ? 'no exit status' : `exit ${preflight.exitCode}`;
-        return {
-          ok: false,
-          restarting: false,
-          reason,
-          code: code ?? 'self_restart',
-          cause: 'restart_preflight_refused',
-          preflightExitCode: preflight.exitCode,
-          text: `Restart not started: the boot preflight refused (${exit}), so the service was left running for: ${reason}.`,
-        };
-      }
-
       const chatJid = deps.resolveChatJid();
 
       // #3829: before the ack, so the reply the model wrote arrives first and
