@@ -72,8 +72,12 @@ import {
 } from './fallback-discovery.ts';
 import { verifyFallbackCredential } from './providers/credential-verify.ts';
 import type { OpencodeProviderConfig } from './providers/mcp-bridge.ts';
-import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
 import {
+  createPrimaryModelProbeAdapters,
+  type PrimaryModelProbeAdapterDeps,
+} from './providers/primary-model-usability-adapters.ts';
+import {
+  isPrimaryProbeContextRefusal,
   primaryModelUsabilityRequiresAlert,
   probeIncompatibilityAlertAction,
   probePrimaryModelUsability,
@@ -236,6 +240,8 @@ export interface RuntimeFallbackPort {
   /** Optional for older hand-built coordinator fixtures; production supplies it. */
   readonly primaryProbeServiceContext?: PrimaryProbeServiceContext | null;
   currentPrimaryProbeServiceContext?: () => PrimaryProbeServiceContext | null;
+  /** Lets a scheduled probe adopt an in-place CLI update; absent in older fixtures. */
+  primaryProbeRebindDeps?: () => Pick<PrimaryModelProbeAdapterDeps, 'rebindServiceContext' | 'providerCanaryAdmission'>;
   readonly controlSession: SessionManager | null;
   readonly fallbackWindow: FallbackWindowState;
   readonly fallbackMetrics: FallbackWindowMetrics;
@@ -1257,6 +1263,8 @@ export class RuntimeFallbackCoordinator {
   private chainCanarySweepInFlight = false;
   /** This process raised the alert for a CLI that cannot run an MCP-free model probe. */
   private probeIncompatibleAlertActive = false;
+  /** The last probe result refused on its service context; only a later probe result resets it. */
+  private probeContextRefusalActive = false;
   /**
    * `fallback_chain_entry_unhealthy` incident state. The dispatcher keys the
    * incident per instance+source, not per entry, so one field covers every
@@ -2241,17 +2249,20 @@ export class RuntimeFallbackCoordinator {
 
     const adapters = createPrimaryModelProbeAdapters(
       this.host.agentProviderConfig,
-      buildPrimaryProbeAdapterDeps(
-        this.host.agentProvider,
-        this.host.model,
-        this.host.cwd,
-        this.host.egressProxy?.port,
-        this.host.providerExecutionGate,
-        trigger,
-        this.host.primaryProbeServiceContext ?? undefined,
-        this.host.primaryProbeServiceContext !== undefined,
-        () => this.host.currentPrimaryProbeServiceContext?.() ?? null,
-      ),
+      {
+        ...buildPrimaryProbeAdapterDeps(
+          this.host.agentProvider,
+          this.host.model,
+          this.host.cwd,
+          this.host.egressProxy?.port,
+          this.host.providerExecutionGate,
+          trigger,
+          this.host.primaryProbeServiceContext ?? undefined,
+          this.host.primaryProbeServiceContext !== undefined,
+          () => this.host.currentPrimaryProbeServiceContext?.() ?? null,
+        ),
+        ...this.host.primaryProbeRebindDeps?.(),
+      },
     );
     void Promise.resolve()
       .then(() => probePrimaryModelUsability(target, adapters))
@@ -2298,6 +2309,11 @@ export class RuntimeFallbackCoordinator {
       log.debug({ trigger, status: result.status }, 'primary model usability result dropped after shutdown');
       return;
     }
+    // A turn success is not a probe and says nothing about the probe's service
+    // context; an older child may still be serving. A context refusal keeps its
+    // record and alert until a probe result replaces them.
+    if (source === 'turn-success' && this.probeContextRefusalActive) return;
+    if (source === 'probe') this.probeContextRefusalActive = isPrimaryProbeContextRefusal(result);
     this.host.primaryModelUsability = {
       ...result,
       checkedAt: Date.now(),

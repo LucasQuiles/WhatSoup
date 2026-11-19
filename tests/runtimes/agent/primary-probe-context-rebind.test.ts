@@ -274,8 +274,6 @@ describe('primary probe service context after an in-place CLI update', () => {
     // A second adoption from the same stale previous context loses to the first.
     expect(deps.rebindServiceContext?.(previous, { ...next, binarySha256: 'c'.repeat(64) })).toBe(false);
     expect(state.primaryProbeServiceContext).toBe(next);
-    // No canary store exists for this runtime, so no canary gates the rebind.
-    expect(deps.providerCanaryAdmission).toBeUndefined();
   });
 
   it.each([

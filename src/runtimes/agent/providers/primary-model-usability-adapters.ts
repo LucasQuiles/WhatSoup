@@ -2,6 +2,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { buildChildEnv, getProviderBinary } from '../session.ts';
 import {
   resolveProviderBinaryIdentity,
+  type ProviderAdmission,
   type ProviderBinaryIdentity,
 } from '../provider-canary-proof.ts';
 import { scrubbedAuthStatusEnv } from './account-auth-status.ts';
@@ -54,8 +55,13 @@ function selectorFingerprint(value: string, length = 12): string {
 /** Why a primary-model probe runs; carried into its lifecycle log lines. */
 export type PrimaryModelProbeTrigger = 'startup' | 'manual' | 'periodic' | 'recovery' | 'diagnostic';
 
-/** Sink for the probe child's spawn and exit lines (a pino logger in production). */
-export type PrimaryModelProbeLog = ProbeLifecycleLog;
+/**
+ * Sink for the probe child's spawn and exit lines, the rebind line and the
+ * context-refusal warn line (a pino logger in production).
+ */
+export type PrimaryModelProbeLog = ProbeLifecycleLog & {
+  warn?: (obj: Record<string, unknown>, msg: string) => void;
+};
 
 export interface PrimaryModelProbeAdapterDeps {
   cwd?: string;
@@ -110,6 +116,19 @@ export interface PrimaryModelProbeAdapterDeps {
   requireServiceContext?: boolean;
   /** Test seam for context comparison; production builds this from the final invocation. */
   currentServiceContext?: () => PrimaryProbeServiceContext | null;
+  /**
+   * Adopt a context whose only change is the resolved CLI binary. Agent
+   * children resolve the CLI on every spawn, so after an in-place update new
+   * children already run the new binary. Returns false when the runtime no
+   * longer holds `previous`. Absent: a binary change stays a refusal.
+   */
+  rebindServiceContext?: (previous: PrimaryProbeServiceContext, next: PrimaryProbeServiceContext) => boolean;
+  /**
+   * The provider canary admission a new primary session must pass. When it
+   * reports the canary as required, a rebind needs it to admit the probe's
+   * binary; a throw declines. Absent: no canary applies.
+   */
+  providerCanaryAdmission?: () => ProviderAdmission | Promise<ProviderAdmission>;
   /** Why this probe runs. Logged with each CLI probe child; 'unspecified' when absent. */
   probeTrigger?: PrimaryModelProbeTrigger;
   /** Lifecycle log sink for CLI probe children. Injectable for tests. */
@@ -257,6 +276,134 @@ function comparePrimaryProbeContext(
   return null;
 }
 
+/**
+ * A binary-only change that a required provider canary does not admit: new
+ * sessions refuse the binary, so the probe keeps refusing under its own reason
+ * until the service restarts with a fresh canary receipt.
+ */
+export const CONTEXT_BINARY_CHANGED_RESTART_REQUIRED = 'context-binary-changed-restart-required';
+
+/** The service-context field each refusal reason names. */
+const CONTEXT_REFUSAL_FIELDS: Readonly<Record<string, string>> = {
+  'context-missing-service': 'serviceContext',
+  'context-missing-current': 'serviceContext',
+  'context-mismatch-provider': 'provider',
+  'context-mismatch-model': 'model',
+  'context-mismatch-generation': 'serviceGeneration',
+  'context-mismatch-launch': 'launchContextHash',
+  'context-mismatch-binary-state': 'binaryState',
+  'context-binary-missing': 'binaryIdentity',
+  'context-mismatch-binary-path': 'resolvedBinaryPathHash',
+  'context-mismatch-binary-sha': 'binarySha256',
+};
+const HASHED_CONTEXT_FIELDS: ReadonlySet<string> = new Set(['launchContextHash', 'resolvedBinaryPathHash', 'binarySha256']);
+const BINARY_CHANGE_REASONS: ReadonlySet<string> = new Set(['context-mismatch-binary-path', 'context-mismatch-binary-sha']);
+const VERSION_LABEL = /^\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.-]{1,32})?$/;
+
+/** The executable's file name when it is a version label (versioned installs); never a path. */
+function binaryVersionLabel(executablePath: string | null): string | null {
+  const name = executablePath?.split(/[\\/]/).pop() ?? '';
+  return VERSION_LABEL.test(name) ? name : null;
+}
+
+function contextHashPrefix(context: PrimaryProbeServiceContext | null | undefined, field: string | null): string | null {
+  if (!context || field === null || !HASHED_CONTEXT_FIELDS.has(field)) return null;
+  const value = (context as unknown as Record<string, unknown>)[field];
+  return typeof value === 'string' ? value.slice(0, 8) : null;
+}
+
+/** One content-free warn line per context refusal: a field name, short hash prefixes and a version label. */
+function logContextRefusal(
+  deps: PrimaryModelProbeAdapterDeps,
+  provider: string,
+  reason: string,
+  expected: PrimaryProbeServiceContext | null | undefined,
+  current: PrimaryProbeServiceContext | null,
+  executablePath: string | null,
+): void {
+  const field = CONTEXT_REFUSAL_FIELDS[reason] ?? null;
+  const fields = {
+    event: 'primary_model_probe_context_refused',
+    trigger: deps.probeTrigger ?? 'unspecified',
+    provider,
+    reason,
+    field,
+    expectedPrefix: contextHashPrefix(expected, field),
+    currentPrefix: contextHashPrefix(current, field),
+    currentBinaryLabel: binaryVersionLabel(executablePath),
+  };
+  const message = 'primary model probe refused: service context changed';
+  if (deps.log?.warn) deps.log.warn(fields, message);
+  else log.warn(fields, message);
+}
+
+/** True when `current` differs from `expected` only in the resolved binary (path and/or SHA). */
+function binaryOnlyContextChange(
+  target: { provider: string; model: string | null },
+  expected: PrimaryProbeServiceContext,
+  current: PrimaryProbeServiceContext,
+): boolean {
+  return expected.provider === target.provider
+    && current.provider === target.provider
+    && (expected.model ?? null) === (target.model ?? null)
+    && (current.model ?? null) === (target.model ?? null)
+    && expected.serviceGeneration === current.serviceGeneration
+    && expected.launchContextHash === current.launchContextHash
+    && expected.binaryState === 'resolved'
+    && current.binaryState === 'resolved'
+    && current.resolvedBinaryPathHash !== null
+    && current.binarySha256 !== null;
+}
+
+/** Whether a required provider canary admits the binary the probe would run. */
+async function canaryAdmitsBinary(deps: PrimaryModelProbeAdapterDeps, binarySha256: string | null): Promise<boolean> {
+  if (!deps.providerCanaryAdmission) return true;
+  try {
+    const admission = await deps.providerCanaryAdmission();
+    if (!admission.allowed) return false;
+    return !admission.required || (binarySha256 !== null && admission.binarySha256 === binarySha256);
+  } catch {
+    // intentional: the canary gate throws when it does not admit the binary, so the rebind fails closed.
+    return false;
+  }
+}
+
+type BinaryContextRebind =
+  | { readonly kind: 'adopted'; readonly context: PrimaryProbeServiceContext }
+  | { readonly kind: 'declined'; readonly reason: string };
+
+/**
+ * Adopt the probe's fresh context when only the resolved binary changed and
+ * any required canary admits the new binary. Null keeps the refusal as it is;
+ * 'declined' carries the reason for a binary change the canary does not admit.
+ */
+async function rebindBinaryContext(
+  target: { provider: string; model: string | null },
+  deps: PrimaryModelProbeAdapterDeps,
+  invocation: PrimaryProbeInvocation,
+): Promise<BinaryContextRebind | null> {
+  const expected = deps.serviceContext;
+  if (!deps.rebindServiceContext || !expected || invocation.blockedReason === null) return null;
+  if (!BINARY_CHANGE_REASONS.has(invocation.blockedReason)) return null;
+  if (!binaryOnlyContextChange(target, expected, invocation.context)) return null;
+  if (!(await canaryAdmitsBinary(deps, invocation.binarySha256))) {
+    return { kind: 'declined', reason: CONTEXT_BINARY_CHANGED_RESTART_REQUIRED };
+  }
+  if (!deps.rebindServiceContext(expected, invocation.context)) return null;
+  const sink: ProbeLifecycleLog = deps.log ?? log;
+  sink.info({
+    event: 'primary_model_probe_context_rebound',
+    trigger: deps.probeTrigger ?? 'unspecified',
+    provider: target.provider,
+    fromPathPrefix: contextHashPrefix(expected, 'resolvedBinaryPathHash'),
+    toPathPrefix: contextHashPrefix(invocation.context, 'resolvedBinaryPathHash'),
+    fromShaPrefix: contextHashPrefix(expected, 'binarySha256'),
+    toShaPrefix: contextHashPrefix(invocation.context, 'binarySha256'),
+    currentBinaryLabel: binaryVersionLabel(invocation.executablePath),
+  }, 'primary model probe adopted the updated service binary');
+  return { kind: 'adopted', context: invocation.context };
+}
+
 // #3017 AXIS C: verify the probe target against the immutable runtime-primary
 // service context. A current context callback is retained as a test seam;
 // production CLI probes use the invocation snapshot below so the compared
@@ -349,6 +496,7 @@ export function createPrimaryModelProbeAdapters(
         deps.requireServiceContext === true,
       );
       if (mismatch !== null) {
+        logContextRefusal(deps, target.provider, mismatch, deps.serviceContext, current, null);
         return Promise.resolve({ status: 'unknown', reason: mismatch });
       }
       return probeApiModelAccess(target.provider, target.model, providerConfig, deps, signal, onStage);
@@ -452,10 +600,28 @@ async function probeCliModel(
     // post-acquire setup step in this cleanup scope: environment construction,
     // lifecycle observer construction, and context mapping can all throw before
     // probeBinaryCommand gets a chance to invoke onProcessClosed.
-    let invocation = buildPrimaryProbeInvocation({ provider, model }, providerConfig, deps);
+    // After a rebind, every later check compares against the adopted context.
+    let probeDeps = deps;
+    let invocation = buildPrimaryProbeInvocation({ provider, model }, providerConfig, probeDeps);
     if (invocation.blockedReason !== null) {
-      releaseExecutionLease();
-      return { status: 'unknown', reason: invocation.blockedReason };
+      logContextRefusal(probeDeps, provider, invocation.blockedReason, probeDeps.serviceContext, invocation.context, invocation.executablePath);
+      // At most one rebind per probe: no check below rebinds again.
+      const rebind = await rebindBinaryContext({ provider, model }, probeDeps, invocation);
+      if (rebind === null || rebind.kind === 'declined') {
+        releaseExecutionLease();
+        return { status: 'unknown', reason: rebind?.reason ?? invocation.blockedReason };
+      }
+      if (signal?.aborted) {
+        releaseExecutionLease();
+        return { status: 'timeout' };
+      }
+      probeDeps = { ...probeDeps, serviceContext: rebind.context };
+      invocation = buildPrimaryProbeInvocation({ provider, model }, providerConfig, probeDeps);
+      if (invocation.blockedReason !== null) {
+        logContextRefusal(probeDeps, provider, invocation.blockedReason, probeDeps.serviceContext, invocation.context, invocation.executablePath);
+        releaseExecutionLease();
+        return { status: 'unknown', reason: invocation.blockedReason };
+      }
     }
     if (!invocation.binaryToken || !invocation.executablePath || !invocation.binarySha256) {
       releaseExecutionLease();
@@ -463,7 +629,7 @@ async function probeCliModel(
     }
     let executablePath = invocation.executablePath;
     if (provider === 'claude-cli') {
-      const support = await claudeStrictMcpConfigSupport(invocation, deps, signal, onStage);
+      const support = await claudeStrictMcpConfigSupport(invocation, probeDeps, signal, onStage);
       if (signal?.aborted) {
         releaseExecutionLease();
         return { status: 'timeout' };
@@ -471,8 +637,9 @@ async function probeCliModel(
 
       // Help is an await boundary. Re-resolve the canonical identity and
       // compare its complete serving context before a model child can start.
-      const afterHelp = buildPrimaryProbeInvocation({ provider, model }, providerConfig, deps);
+      const afterHelp = buildPrimaryProbeInvocation({ provider, model }, providerConfig, probeDeps);
       if (afterHelp.blockedReason !== null) {
+        logContextRefusal(probeDeps, provider, afterHelp.blockedReason, probeDeps.serviceContext, afterHelp.context, afterHelp.executablePath);
         releaseExecutionLease();
         return { status: 'unknown', reason: afterHelp.blockedReason };
       }
@@ -482,6 +649,7 @@ async function probeCliModel(
       }
       const identityDrift = primaryProbeIdentityDriftReason(invocation, afterHelp);
       if (identityDrift !== null) {
+        logContextRefusal(probeDeps, provider, identityDrift, invocation.context, afterHelp.context, afterHelp.executablePath);
         releaseExecutionLease();
         return { status: 'unknown', reason: identityDrift };
       }

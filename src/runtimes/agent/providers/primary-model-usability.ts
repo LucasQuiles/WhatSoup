@@ -407,3 +407,14 @@ export function primaryModelUsabilityRequiresAlert(result: PrimaryModelUsability
   }
   return result.status !== 'usable';
 }
+
+/**
+ * A probe that refused before spawning because its service context changed
+ * (every `context-*` reason). Only a later probe result can resolve it: a turn
+ * success says nothing about the probe's binding.
+ */
+export function isPrimaryProbeContextRefusal(result: PrimaryModelUsabilityResult): boolean {
+  return result.status === 'unknown'
+    && typeof result.reason === 'string'
+    && result.reason.startsWith('context-');
+}
