@@ -455,8 +455,8 @@ describe('migration 43 upgrade from historical schema 42', () => {
     raw.prepare(`
       INSERT INTO inbound_disposition_links (
         inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
-        reason, evidence_ref, actor, original_fulfillment_confirmed
-      ) VALUES (?, ?, 'superseded_by_operator_catchup', ?, 'second closure', ?, ?, 1)
+        reason, evidence_ref, actor
+      ) VALUES (?, ?, 'superseded_by_operator_catchup', ?, 'second closure', ?, ?)
     `).run(
       fixture.sourceSeq,
       fixture.planId,
@@ -567,9 +567,9 @@ describe('migration 43 upgrade from historical schema 42', () => {
     raw.prepare(`
       INSERT INTO inbound_disposition_links (
         inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
-        reason, evidence_ref, actor, original_fulfillment_confirmed
+        reason, evidence_ref, actor
       ) VALUES (?, ?, 'superseded_by_operator_catchup', ?,
-                'partial closure', 'test://partial-upgrade', 'operator:test', 1)
+                'partial closure', 'test://partial-upgrade', 'operator:test')
     `).run(sourceOne, planId, target.targetSeq);
     raw.close();
 
@@ -595,6 +595,41 @@ describe('migration 43 upgrade from historical schema 42', () => {
     expectRolledBackSchema42(path);
   });
 
+  // Receipts a schema-42 fixture keeps: 1 to 42, plus 44 to 69, which schema42Path
+  // cannot remove (see its comment). No 43 and no 70.
+  const SCHEMA_42_FIXTURE_LEDGER = Array.from({ length: 69 }, (_, i) => i + 1)
+    .filter((version) => version !== 43);
+
+  function ledgerVersions(raw: DatabaseSync): number[] {
+    return (raw.prepare('SELECT version FROM schema_migrations ORDER BY version')
+      .all() as Array<{ version: number }>).map((row) => Number(row.version));
+  }
+
+  // What a schema-42 fixture holds: exactly the receipts above, no migration-43
+  // witness table, and no migration-70 table, trigger or column.
+  function expectSchema42Fixture(raw: DatabaseSync): void {
+    expect(ledgerVersions(raw)).toEqual(SCHEMA_42_FIXTURE_LEDGER);
+    expect(raw.prepare(`
+      SELECT type, name FROM sqlite_master
+      WHERE name = 'operator_catchup_closure_witnesses'
+        OR name LIKE 'operator_catchup_resolution%'
+    `).all()).toEqual([]);
+    expect(raw.prepare(
+      "SELECT name FROM pragma_table_info('inbound_disposition_links') WHERE name = 'original_fulfillment_confirmed'",
+    ).all()).toEqual([]);
+  }
+
+  /**
+   * A historical schema-42 file for migration 43's upgrade. It starts from a
+   * current file and removes migration 70 (its guards on pre-existing tables,
+   * its table, its column and its receipt) and migration 43 (its objects and
+   * receipt), then re-runs migrations 41 and 42 to restore their definitions.
+   * Migrations 44 to 69 keep their objects and receipts: several rebuild or
+   * extend tables that existed at 42, and their 42-era definitions are not
+   * reachable from a test. Their only triggers on the tables these fixtures
+   * write (47 on inbound_events, 53 on outbound_ops) do not fire for these
+   * inserts; migration 70's fulfillment guard did.
+   */
   function schema42Path(historicalIndex: boolean): string {
     const dir = tmp.make('whatsoup-migration-43-upgrade');
     const path = join(dir, 'bot.db');
@@ -604,8 +639,16 @@ describe('migration 43 upgrade from historical schema 42', () => {
 
     const raw = new DatabaseSync(path);
     raw.exec('PRAGMA foreign_keys = ON');
+    // Migration 70 first, newest to oldest; its triggers go before the column they name.
     raw.exec(`
-      DELETE FROM schema_migrations WHERE version = 43;
+      DELETE FROM schema_migrations WHERE version IN (43, 70);
+      DROP TRIGGER operator_catchup_resolution_outbound_immutable;
+      DROP TRIGGER operator_catchup_resolution_source_immutable;
+      DROP TRIGGER operator_catchup_resolution_no_legacy_close;
+      DROP TRIGGER operator_catchup_resolution_fulfillment_required;
+      DROP TRIGGER operator_catchup_resolution_no_corroboration;
+      DROP TABLE operator_catchup_resolutions;
+      ALTER TABLE inbound_disposition_links DROP COLUMN original_fulfillment_confirmed;
       DROP TRIGGER IF EXISTS inbound_disposition_closure_validate_insert;
       DROP TRIGGER IF EXISTS operator_catchup_closure_materialize_witness;
       DROP TRIGGER IF EXISTS operator_catchup_closed_group_reject_pending;
@@ -633,6 +676,7 @@ describe('migration 43 upgrade from historical schema 42', () => {
             AND superseded_by_seq IS NOT NULL;
       `);
     }
+    expectSchema42Fixture(raw);
     raw.close();
     return path;
   }
@@ -739,12 +783,18 @@ describe('migration 43 upgrade from historical schema 42', () => {
       conversationKey,
       chatJid,
     }, suffix);
+    // Like the closure writer (src/core/recovery-catchup-closure.ts), name migration
+    // 70's column only in a file that recorded it: the hardened cases install here
+    // before rewinding a current file, where 70's fulfillment guard requires it.
+    const storesFulfillment = raw.prepare(
+      'SELECT 1 FROM schema_migrations WHERE version = 70',
+    ).get() !== undefined;
     raw.prepare(`
       INSERT INTO inbound_disposition_links (
         inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
-        reason, evidence_ref, actor, original_fulfillment_confirmed
+        reason, evidence_ref, actor${storesFulfillment ? ', original_fulfillment_confirmed' : ''}
       ) VALUES (?, ?, 'superseded_by_operator_catchup', ?,
-                'operator catch-up completed with echoed reply', ?, ?, 1)
+                'operator catch-up completed with echoed reply', ?, ?${storesFulfillment ? ', 1' : ''})
     `).run(sourceSeq, planId, target.targetSeq, evidenceRef, actor);
     return {
       planId,
@@ -827,9 +877,9 @@ describe('migration 43 upgrade from historical schema 42', () => {
     raw.prepare(`
       INSERT INTO inbound_disposition_links (
         inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
-        reason, evidence_ref, actor, original_fulfillment_confirmed
+        reason, evidence_ref, actor
       ) VALUES (?, ?, 'superseded_by_operator_catchup', ?,
-                'historical corroborated closure', ?, ?, 1)
+                'historical corroborated closure', ?, ?)
     `).run(sourceSeq, planId, targetSeq, evidenceRef, actor);
     return {
       planId,
@@ -954,6 +1004,8 @@ describe('migration 43 upgrade from historical schema 42', () => {
         WHERE type = 'index' AND name = 'idx_inbound_disposition_closure_unique'
       `).get() as { sql: string };
       expect(index.sql).toContain('superseded_by_seq');
+      // The failed upgrade left the whole fixture as built, migration 70 included.
+      expectSchema42Fixture(raw);
     } finally {
       raw.close();
     }
