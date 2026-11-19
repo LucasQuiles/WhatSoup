@@ -28,10 +28,13 @@ SERVICES=(
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=deploy/lib/bounded-exec.sh
+. "$SCRIPT_DIR/lib/bounded-exec.sh"
 # On macOS, security(1) has no timeout and can hang inside a launchd process when
 # the login keychain cannot present UI. Route the read through the pinned-Node
 # helper, which bounds it with a 3s SIGKILL (same seam as check-health-token-keyring.sh
-# and the health-token checker). Linux keeps the native `timeout 3s secret-tool`.
+# and the health-token checker). Linux routes secret-tool through whatsoup_run_bounded
+# with the same 3s budget, never a bare `timeout`.
 NODE=""
 if [ "$(uname -s)" = "Darwin" ]; then
   # shellcheck source=deploy/lib/resolve-node.sh
@@ -51,7 +54,7 @@ keyring_present() {
       value="$("$NODE" "$SCRIPT_DIR/lib/read-keychain-secret.mjs" "$service" "${USER:-}" || true)"
       ;;
     *)
-      value="$(timeout 3s secret-tool lookup service "$service" 2>/dev/null || true)"
+      value="$(whatsoup_run_bounded 3 secret-tool lookup service "$service" 2>/dev/null || true)"
       ;;
   esac
   # Return 0 if non-empty, 1 if empty. NEVER print the value.

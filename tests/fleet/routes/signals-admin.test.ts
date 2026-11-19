@@ -184,6 +184,34 @@ describe('producer admin routes', () => {
     expect(replayExchange.status).toBe(401);
   });
 
+  it('exchanges, rejects and audits a whitespace-only enrollment secret', async () => {
+    // A present secret is always exchanged, even when it is whitespace-only, so
+    // it is rejected and audited like any other wrong secret. It must not fall
+    // through to the bearer-credential path, where a valid bearer would rotate
+    // the credential and no rejection would be recorded.
+    const events: Array<Record<string, unknown>> = [];
+    const audited = deps({
+      securityAudit: (event) => events.push(event as unknown as Record<string, unknown>),
+    });
+    const reg = await call('postProducer', {
+      body: registrationBody(),
+      headers: { authorization: `Bearer ${ROOT}` },
+    }, audited);
+    expect(reg.status).toBe(201);
+
+    const blank = await call('postProducerCredential', {
+      body: JSON.stringify({ enrollmentSecret: '   ' }),
+      headers: {},
+    }, audited);
+    expect(blank.status).toBe(401);
+    expect((blank.body as { error: { code: string } }).error.code).toBe('enrollment_rejected');
+    expect(events).toContainEqual({
+      type: 'enrollment_rejected',
+      producerId: 'prod-alpha',
+      reason: 'secret_mismatch',
+    });
+  });
+
   it('rotates under the current credential and revocation kills access', async () => {
     const reg = await call('postProducer', {
       body: registrationBody(),

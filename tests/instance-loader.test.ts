@@ -57,6 +57,7 @@ beforeEach(() => {
   process.env.XDG_CONFIG_HOME = path.join(tmpDir, 'config');
   process.env.XDG_DATA_HOME = path.join(tmpDir, 'data');
   process.env.XDG_STATE_HOME = path.join(tmpDir, 'state');
+  process.env.HOME = tmpDir;
 
   // Clear any existing INSTANCE_CONFIG
   delete process.env.INSTANCE_CONFIG;
@@ -101,13 +102,34 @@ describe('loadInstance — client-output policy hydration', () => {
     expect(Object.isFrozen(direct?.clientOutputPolicies)).toBe(true);
   });
 
+  it.each([
+    ['null', null],
+    ['an empty object', {}],
+    ['a populated legacy object', {
+      keyId: 'legacy-key',
+      publicKey: 'legacy-public-key',
+      requiredActions: ['send_message'],
+    }],
+  ])('rejects a persisted policy with authorization set to %s before publishing either compatibility surface', (_shape, authorization) => {
+    writeInstance(path.join(tmpDir, 'config'), 'test-agent', {
+      ...minimalAgent,
+      clientOutputPolicies: [{ ...clientOutputPolicies[0], authorization }],
+    });
+
+    expect(() => loadInstance('test-agent')).toThrow(
+      /clientOutputPolicies\[0\]\.authorization is unsupported because client-output authorization is not enforced/,
+    );
+    expect(process.env.INSTANCE_CONFIG).toBeUndefined();
+    expect(getLoadedInstanceConfigOrNull()).toBeNull();
+  });
+
   it('rejects invalid policy config before publishing either compatibility surface', () => {
     writeInstance(path.join(tmpDir, 'config'), 'test-agent', {
       ...minimalAgent,
       clientOutputPolicies: null,
     });
 
-    expect(() => loadInstance('test-agent')).toThrow(/clientOutputPolicies/);
+    expect(() => loadInstance('test-agent')).toThrow(/clientOutputPolicies must be an array when present/);
     expect(process.env.INSTANCE_CONFIG).toBeUndefined();
     expect(getLoadedInstanceConfigOrNull()).toBeNull();
   });
@@ -536,6 +558,9 @@ describe('loadInstance — agentOptions: cwd is optional', () => {
 
 describe('loadInstance — agentOptions: valid single scope + self_only', () => {
   it('accepts agent with agentOptions + sessionScope:"single" + accessMode:"self_only"', () => {
+    const cwd = path.join(tmpDir, 'workspace');
+    fs.mkdirSync(cwd);
+    fs.writeFileSync(path.join(cwd, 'CLAUDE.md'), 'instructions', 'utf8');
     writeInstance(path.join(tmpDir, 'config'), 'single-self-agent', {
       name: 'single-self-agent',
       type: 'agent',
@@ -543,15 +568,33 @@ describe('loadInstance — agentOptions: valid single scope + self_only', () => 
       accessMode: 'self_only',
       agentOptions: {
         sessionScope: 'single',
-        cwd: '/tmp',
+        cwd,
         instructionsPath: 'CLAUDE.md',
       },
     });
     loadInstance('single-self-agent');
     const parsed = JSON.parse(process.env.INSTANCE_CONFIG!);
     expect(parsed.agentOptions.sessionScope).toBe('single');
-    expect(parsed.agentOptions.cwd).toBe('/tmp');
+    expect(parsed.agentOptions.cwd).toBe(cwd);
     expect(parsed.agentOptions.instructionsPath).toBe('CLAUDE.md');
+  });
+
+  it('rejects an agent whose configured instructions file is missing', () => {
+    const cwd = path.join(tmpDir, 'missing-instructions-workspace');
+    fs.mkdirSync(cwd);
+    writeInstance(path.join(tmpDir, 'config'), 'missing-instructions-agent', {
+      name: 'missing-instructions-agent',
+      type: 'agent',
+      adminPhones: ['15551234567'],
+      accessMode: 'self_only',
+      agentOptions: {
+        sessionScope: 'single',
+        cwd,
+        instructionsPath: 'missing.md',
+      },
+    });
+
+    expect(() => loadInstance('missing-instructions-agent')).toThrow(/readable regular file/);
   });
 });
 
@@ -998,39 +1041,47 @@ describe('passive instance type', () => {
 });
 
 // ---------------------------------------------------------------------------
-// loops instance config loads and validates correctly
+// per-chat sandbox agent instance config loads and validates correctly
 // ---------------------------------------------------------------------------
 
-describe('loadInstance — loops instance config', () => {
-  it('loads the loops instance.json from repo and validates correctly', () => {
-    // Sanitized fixture — mirrors the real loops config shape without committing
+describe('loadInstance — per-chat sandbox agent config', () => {
+  it('loads a per-chat sandbox agent instance.json and validates correctly', () => {
+    // HOME is tmpDir, so the runtime expands the `~` cwd below to this directory.
+    const cwd = path.join(tmpDir, 'whatsoup', 'bot-a');
+    fs.mkdirSync(cwd, { recursive: true });
+    fs.writeFileSync(path.join(cwd, 'CLAUDE.md'), 'instructions', 'utf8');
+    // Sanitized fixture — the shape of a real per-chat agent config, without
     // phone numbers or API keys. Real instances/*/instance.json is .gitignored.
-    const loops: Record<string, unknown> = {
-      name: 'loops',
+    const agentConfig: Record<string, unknown> = {
+      name: 'bot-a',
       type: 'agent',
       adminPhones: ['+15555550100'],
       accessMode: 'allowlist',
       agentOptions: {
         sessionScope: 'per_chat',
         sandboxPerChat: true,
-        cwd: '~/LAB/Loops',
+        cwd: '~/whatsoup/bot-a',
         instructionsPath: 'CLAUDE.md',
       },
     };
 
     // Write to temp dir and load
-    writeInstance(path.join(tmpDir, 'config'), 'loops', loops);
-    loadInstance('loops');
+    writeInstance(path.join(tmpDir, 'config'), 'bot-a', agentConfig);
+    loadInstance('bot-a');
 
     const config = JSON.parse(process.env.INSTANCE_CONFIG!);
-    expect(config.name).toBe('loops');
+    expect(config.name).toBe('bot-a');
     expect(config.type).toBe('agent');
     expect(config.accessMode).toBe('allowlist');
     expect(config.agentOptions).toBeDefined();
     expect(config.agentOptions.sessionScope).toBe('per_chat');
     expect(config.agentOptions.sandboxPerChat).toBe(true);
-    expect(config.agentOptions.cwd).toBe('~/LAB/Loops');
+    expect(config.agentOptions.cwd).toBe('~/whatsoup/bot-a');
     expect(config.agentOptions.instructionsPath).toBe('CLAUDE.md');
+
+    // The same `~` cwd is still checked: without the file there, load refuses.
+    fs.rmSync(path.join(cwd, 'CLAUDE.md'));
+    expect(() => loadInstance('bot-a')).toThrow(/readable regular file/);
   });
 });
 

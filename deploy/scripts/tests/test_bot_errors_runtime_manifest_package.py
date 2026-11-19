@@ -28,6 +28,29 @@ _SOURCE_SHA = "a" * 40
 _ARCHIVE_SHA = "b" * 64
 _PIN_OWNER = "health_reporter"
 _PIN_MODE = "no-bot"
+_GIT_FAILURES = st.sampled_from(("malformed_head", "git_unavailable", "git_timeout", "git_failed"))
+_INVALID_SOURCE_SHA = st.one_of(
+    st.text(alphabet="ghijklmnopqrstuvwxyz!_-", min_size=1, max_size=64),
+    st.text(alphabet="0123456789abcdef", min_size=0, max_size=39),
+    st.text(alphabet="0123456789abcdef", min_size=41, max_size=64),
+)
+_MALFORMED_PIN_JSON = st.dictionaries(
+    keys=st.sampled_from(("unexpected", "owner", "schemaVersion")),
+    values=st.one_of(st.none(), st.integers(), st.text(max_size=32)),
+    max_size=3,
+).map(json.dumps)
+
+
+@st.composite
+def _binding_fault_cases(draw):
+    fault = draw(st.sampled_from(("missing_pin", "malformed_pin", "corrupt_file", "changed_manifest")))
+    if fault == "missing_pin":
+        return fault, None
+    if fault == "malformed_pin":
+        return fault, draw(_MALFORMED_PIN_JSON)
+    if fault == "corrupt_file":
+        return fault, draw(st.binary(min_size=1, max_size=128))
+    return fault, draw(st.text(alphabet="bcdef0123456789", min_size=40, max_size=40))
 
 
 def _load_module():
@@ -520,19 +543,21 @@ def test_runtime_manifest_cli_fails_for_a_checkout_head_mismatch(tmp_path, monke
 
 
 @properties
-@given(git_failure=st.sampled_from(['malformed_head', 'git_unavailable', 'git_timeout', 'git_failed']))
-@example(git_failure='malformed_head')
-@example(git_failure='git_unavailable')
-@example(git_failure='git_timeout')
-@example(git_failure='git_failed')
-def test_runtime_manifest_cli_rejects_package_when_git_provenance_is_malformed_or_unavailable(git_failure):
+@example(git_failure="malformed_head", invalid_expected="not-a-sha!")
+@example(git_failure="git_unavailable", invalid_expected="not-a-sha!")
+@example(git_failure="git_timeout", invalid_expected="not-a-sha!")
+@example(git_failure="git_failed", invalid_expected="not-a-sha!")
+@given(git_failure=_GIT_FAILURES, invalid_expected=_INVALID_SOURCE_SHA)
+def test_runtime_manifest_cli_rejects_package_when_git_provenance_is_malformed_or_unavailable(
+    git_failure, invalid_expected
+):
     with private_case() as (tmp_path, monkeypatch):
         module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
         manifest_path = _write_manifest(root, _entries(checker))
         _write_package_pin(pin_path, root, manifest_path)
         monkeypatch.setattr(module, "load_health_profile", lambda: {"expectRuntimeManifest": True, "role": _PIN_MODE})
         if git_failure == "malformed_head":
-            _write_manifest(root, _entries(checker), expected="not-a-sha!")
+            _write_manifest(root, _entries(checker), expected=invalid_expected)
         elif git_failure == "git_unavailable":
             monkeypatch.setattr(module, "_run_git_rev_parse", lambda _root: (_ for _ in ()).throw(FileNotFoundError()))
         elif git_failure == "git_timeout":
@@ -545,20 +570,22 @@ def test_runtime_manifest_cli_rejects_package_when_git_provenance_is_malformed_o
             monkeypatch.setattr(module, "_run_git_rev_parse", lambda _root: ("", "transport failed", 3))
         monkeypatch.setattr(module.sys, "argv", [str(_SCRIPT), "--runtime-manifest"])
 
-        output = StringIO()
-        with redirect_stdout(output):
+        captured = StringIO()
+        with redirect_stdout(captured):
             exit_code = module.main()
+
         assert exit_code == 2
-        assert "FAIL runtime_manifest package_source:" in output.getvalue()
+        assert "FAIL runtime_manifest package_source:" in captured.getvalue()
 
 
 @properties
-@given(fault=st.sampled_from(['missing_pin', 'malformed_pin', 'corrupt_file', 'changed_manifest']))
-@example(fault='missing_pin')
-@example(fault='malformed_pin')
-@example(fault='corrupt_file')
-@example(fault='changed_manifest')
-def test_runtime_manifest_cli_rejects_package_binding_faults(fault):
+@example(fault_case=("missing_pin", None))
+@example(fault_case=("malformed_pin", "[]"))
+@example(fault_case=("corrupt_file", b"corrupt\n"))
+@example(fault_case=("changed_manifest", "c" * 40))
+@given(fault_case=_binding_fault_cases())
+def test_runtime_manifest_cli_rejects_package_binding_faults(fault_case):
+    fault, detail = fault_case
     with private_case() as (tmp_path, monkeypatch):
         module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
         manifest_path = _write_manifest(root, _entries(checker))
@@ -566,19 +593,21 @@ def test_runtime_manifest_cli_rejects_package_binding_faults(fault):
         if fault == "missing_pin":
             pin_path.unlink()
         elif fault == "malformed_pin":
-            pin_path.write_text("[]", encoding="utf-8")
+            pin_path.write_text(detail, encoding="utf-8")
         elif fault == "corrupt_file":
-            checker.write_text("corrupt\n", encoding="utf-8")
+            checker.write_bytes(detail)
         else:
-            _write_manifest(root, _entries(checker), expected="c" * 40)
+            _write_manifest(root, _entries(checker), expected=detail)
         monkeypatch.setattr(module, "load_health_profile", lambda: {"expectRuntimeManifest": True, "role": _PIN_MODE})
         monkeypatch.setattr(module.sys, "argv", [str(_SCRIPT), "--runtime-manifest"])
 
-        output = StringIO()
-        with redirect_stdout(output):
+        captured = StringIO()
+        with redirect_stdout(captured):
             exit_code = module.main()
+
         assert exit_code == 2
-        assert "FAIL runtime_manifest" in output.getvalue()
+        assert "FAIL runtime_manifest" in captured.getvalue()
+
 
 def test_runtime_manifest_cli_ignores_environment_pin_override(tmp_path, monkeypatch, capsys):
     module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)

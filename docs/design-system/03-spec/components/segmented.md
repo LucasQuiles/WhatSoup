@@ -78,6 +78,7 @@ No CSS changes, no new tokens, no consumer signature churn.
 
 ## Enforcement hooks
 
-`soup/no-inline-seg` (the `soup-toolbar-seg` class may only be applied by the
+`soup/no-inline-seg` (candidate, not yet wired: no such rule exists in
+`console/eslint-rules/`; the `soup-toolbar-seg` class may only be applied by the
 `Segmented` / `ToolbarTimeRange` primitive), `seg-aria-pressed-exactly-one`
 (review + behavioural tests), `seg-uses-aria-label` (review).

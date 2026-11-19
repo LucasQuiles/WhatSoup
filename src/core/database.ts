@@ -60,6 +60,7 @@ import { runMigration65 as runMigration65Impl } from './database-migration-65.ts
 import { runMigration66 as runMigration66Impl } from './database-migration-66.ts';
 import { runMigration67 as runMigration67Impl } from './database-migration-67.ts';
 import { runMigration68 as runMigration68Impl } from './database-migration-68.ts';
+import { ensureFailedTerminalDebtIndex, runMigration69 as runMigration69Impl } from './database-migration-69.ts';
 
 export { CURRENT_SCHEMA_MIGRATION } from './database-schema-version.ts';
 export {
@@ -858,6 +859,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [66, runMigration66],
   [67, runMigration67],
   [68, runMigration68],
+  [69, runMigration69],
 ]);
 
 if (Math.max(...MIGRATIONS.keys()) !== CURRENT_SCHEMA_MIGRATION) {
@@ -1305,6 +1307,10 @@ function runMigration68(db: DatabaseSync): void {
   runMigration68Impl(db);
 }
 
+function runMigration69(db: DatabaseSync): void {
+  runMigration69Impl(db);
+}
+
 function runMigration60(db: DatabaseSync): void {
   runMigration60Impl(db);
 }
@@ -1708,9 +1714,12 @@ export class Database {
       `);
       this.runPendingMigrations();
       this.verifyRequiredTables();
+      const debtIndex = ensureFailedTerminalDebtIndex(this.db);
       this.assertDatabaseIdentity();
       this.db.exec('COMMIT');
       transactionOpen = false;
+      // Reported only once committed: a start that rolls back claims no rebuild.
+      if (debtIndex) log.warn({ found: debtIndex }, 'Failed-terminal reply-debt index rebuilt');
     } catch (err) {
       if (transactionOpen) {
         try {
@@ -1839,9 +1848,11 @@ export class Database {
    * {@link migratedSchemaSnapshot}), so EVERY migrated table is protected — the
    * next missing table is found by this guard, not by a health-probe error storm
    * (#1778). Any table present in the canonical snapshot but missing from the
-   * live database is recreated idempotently along with its indexes. Recreation is
-   * best-effort per object so one failure cannot abort healing the rest or block
-   * startup.
+   * live database is recreated idempotently along with its indexes; its triggers
+   * are not recreated. Recreation is best-effort per object so one failure cannot
+   * abort healing the rest. A failure can still stop startup afterwards: while
+   * `turn_terminal_records` stays missing, the reply-debt index check cannot
+   * create its index and the whole start rolls back.
    */
   private verifyRequiredTables(): void {
     const live = new Set(
@@ -1856,9 +1867,10 @@ export class Database {
     try {
       snapshot = migratedSchemaSnapshot();
     } catch (err) {
-      // Deriving the canonical schema must never block startup. Fall back to the
-      // hardcoded critical-table DDL so we are never worse than the pre-#1778
-      // one-table guard.
+      // A snapshot failure does not stop this repair: fall back to the hardcoded
+      // critical-table DDL so we are never worse than the pre-#1778 one-table
+      // guard. Startup still fails afterwards if `turn_terminal_records` is
+      // missing, because the reply-debt index check cannot create its index.
       log.error(
         { err },
         'Failed to derive canonical schema for integrity check — falling back to critical-table DDL',

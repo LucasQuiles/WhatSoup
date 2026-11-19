@@ -10,7 +10,6 @@ import {
   selectClientOutputPolicy,
 } from '../../src/core/client-output-policy-config.ts';
 
-const DER_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 const SYNTHETIC_PHONE = ['1555', '010', '0001'].join('');
 const SYNTHETIC_LID = ['1111', '010', '0002'].join('');
 const SYNTHETIC_GROUP = ['120363', '999', '000000000'].join('');
@@ -18,10 +17,6 @@ const PHONE_JID = [SYNTHETIC_PHONE, 's.whatsapp.net'].join('@');
 const LID_JID = [SYNTHETIC_LID, 'lid'].join('@');
 const GROUP_JID = [SYNTHETIC_GROUP, 'g.us'].join('@');
 const GROUP_CONVERSATION_KEY = `${SYNTHETIC_GROUP}_at_g.us`;
-
-function syntheticPublicKey(seed = 7): string {
-  return Buffer.concat([DER_PREFIX, Buffer.alloc(32, seed)]).toString('base64url');
-}
 
 function policy(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -31,11 +26,6 @@ function policy(overrides: Record<string, unknown> = {}): Record<string, unknown
     blockedTerms: [{ value: 'restricted', match: 'whole_word', caseSensitive: false }],
     rejectInternalArtifacts: true,
     rejectWhatsAppJids: true,
-    authorization: {
-      keyId: 'synthetic-key.1',
-      publicKey: syntheticPublicKey(),
-      requiredActions: ['send_message', 'reply_message'],
-    },
     ...overrides,
   };
 }
@@ -48,7 +38,7 @@ function expectIssue(value: unknown, field: string): void {
 }
 
 describe('parseClientOutputPolicies', () => {
-  it('accepts a closed valid policy and builds a deeply frozen exact-key registry', () => {
+  it('accepts a closed valid policy and builds a frozen exact-key registry', () => {
     const parsed = parseClientOutputPolicies([policy()]);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) throw new Error('expected valid client-output policy configuration');
@@ -60,8 +50,6 @@ describe('parseClientOutputPolicies', () => {
     expect(Object.isFrozen(active)).toBe(true);
     expect(Object.isFrozen(active!.blockedTerms)).toBe(true);
     expect(Object.isFrozen(active!.blockedTerms[0])).toBe(true);
-    expect(Object.isFrozen(active!.authorization)).toBe(true);
-    expect(Object.isFrozen(active!.authorization!.requiredActions)).toBe(true);
   });
 
   it('treats an absent field as an empty immutable registry but rejects explicit null', () => {
@@ -199,13 +187,25 @@ describe('parseClientOutputPolicies', () => {
     },
   );
 
-  it('enforces authorization closure, key ID, canonical Ed25519 SPKI, and unique allowed actions', () => {
-    expectIssue([policy({ authorization: { keyId: 'key:colon', publicKey: syntheticPublicKey(), requiredActions: ['send_message'] } })], 'clientOutputPolicies[0].authorization.keyId');
-    expectIssue([policy({ authorization: { keyId: 'key', publicKey: `${syntheticPublicKey()}=`, requiredActions: ['send_message'] } })], 'clientOutputPolicies[0].authorization.publicKey');
-    expectIssue([policy({ authorization: { keyId: 'key', publicKey: Buffer.alloc(44).toString('base64url'), requiredActions: ['send_message'] } })], 'clientOutputPolicies[0].authorization.publicKey');
-    expectIssue([policy({ authorization: { keyId: 'key', publicKey: syntheticPublicKey(), requiredActions: ['send_message', 'send_message'] } })], 'clientOutputPolicies[0].authorization.requiredActions[1]');
-    expectIssue([policy({ authorization: { keyId: 'key', publicKey: syntheticPublicKey(), requiredActions: ['unknown'] } })], 'clientOutputPolicies[0].authorization.requiredActions[0]');
-    expectIssue([policy({ authorization: { keyId: 'key', publicKey: syntheticPublicKey(), requiredActions: ['send_message'], extra: true } })], 'clientOutputPolicies[0].authorization');
+  it.each([
+    ['undefined', undefined],
+    ['null', null],
+    ['an empty object', {}],
+    ['a populated legacy object', {
+      keyId: 'legacy-key',
+      publicKey: 'legacy-public-key',
+      requiredActions: ['send_message'],
+    }],
+  ])('rejects an own authorization property set to %s because it is not enforced', (_shape, authorization) => {
+    const parsed = parseClientOutputPolicies([policy({ authorization })]);
+
+    expect(parsed).toEqual({
+      ok: false,
+      error: {
+        field: 'clientOutputPolicies[0].authorization',
+        reason: 'is unsupported because client-output authorization is not enforced',
+      },
+    });
   });
 
   it('rejects unknown nested fields without echoing attacker-controlled field names', () => {
@@ -220,14 +220,6 @@ describe('parseClientOutputPolicies', () => {
           [privateField]: true,
         }],
       }), 'clientOutputPolicies[0].blockedTerms[0]'],
-      [policy({
-        authorization: {
-          keyId: 'synthetic-key',
-          publicKey: syntheticPublicKey(),
-          requiredActions: ['send_message'],
-          [privateField]: true,
-        },
-      }), 'clientOutputPolicies[0].authorization'],
     ];
 
     for (const [candidate, expectedField] of candidates) {
@@ -239,20 +231,18 @@ describe('parseClientOutputPolicies', () => {
     }
   });
 
-  it('projects term values and public keys with one stable marker while retaining non-secret policy shape', () => {
+  it('projects blocked-term values with one stable marker while retaining policy shape', () => {
     const raw = { name: 'synthetic-agent', clientOutputPolicies: [policy()] };
     const projected = projectClientOutputPolicyConfig(raw);
     const serialized = JSON.stringify(projected);
 
     expect(projected).not.toBe(raw);
     expect(serialized).not.toContain('restricted');
-    expect(serialized).not.toContain(syntheticPublicKey());
     expect(projected).toMatchObject({
       name: 'synthetic-agent',
       clientOutputPolicies: [{
         conversationKey: 'synthetic-conversation',
         blockedTerms: [{ value: CLIENT_OUTPUT_POLICY_REDACTION, match: 'whole_word', caseSensitive: false }],
-        authorization: { keyId: 'synthetic-key.1', publicKey: CLIENT_OUTPUT_POLICY_REDACTION },
       }],
     });
   });

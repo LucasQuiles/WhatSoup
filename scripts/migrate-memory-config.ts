@@ -3,6 +3,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { migrateLegacyMemoryConfig } from '../src/config-memory-migration.ts';
+import { withPrivateConfigLockSync } from '../src/core/private-config-file.ts';
+import { isProcessLockError } from '../src/lib/process-lock.ts';
 import { isNonEmptyString } from '../src/lib/type-guards.ts';
 
 interface ParsedArgs {
@@ -20,9 +22,20 @@ interface ParsedArgs {
 export interface RollbackResult {
   configPath: string;
   backupPath: string;
+  /** Copy of the config that a write-mode rollback replaced; null in dry-run mode. */
+  safetySnapshotPath: string | null;
   wouldRestore: boolean;
   restored: boolean;
 }
+
+/** The final replace step of a rollback, injectable so a test can make it fail. */
+export interface RollbackFileOps {
+  replace(source: string, destination: string): void;
+}
+
+const DEFAULT_ROLLBACK_FILE_OPS: RollbackFileOps = {
+  replace: (source, destination) => fs.renameSync(source, destination),
+};
 
 export interface ConfigMigrationFileResult {
   configPath: string;
@@ -123,6 +136,10 @@ export function findConfigFiles(args: Pick<ParsedArgs, 'root' | 'configs' | 'ins
     .sort();
 }
 
+function timestampSlug(): string {
+  return new Date().toISOString().replace(/[:.]/g, '-');
+}
+
 function writeAtomic(configPath: string, contents: string): void {
   const tmpPath = `${configPath}.tmp-${process.pid}`;
   try {
@@ -181,8 +198,7 @@ export function migrateMemoryConfigFile(
   let wrote = false;
   if (options.write && migration.changed) {
     if (options.backup !== false) {
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-      backupPath = `${configPath}.bak-${stamp}`;
+      backupPath = `${configPath}.bak-${timestampSlug()}`;
       fs.copyFileSync(configPath, backupPath);
     }
     writeAtomic(configPath, JSON.stringify(migration.config, null, 2) + '\n');
@@ -215,10 +231,81 @@ function findMostRecentBackup(configPath: string): string | null {
   return path.join(dir, backups[backups.length - 1]);
 }
 
-export function rollbackConfigFile(
-  configPath: string,
-  options: { write?: boolean } = {},
-): RollbackResult {
+/** Opens a new owner-only (mode 0600) file for writing, or returns null when the name is taken. */
+function openNewOwnerOnlyFile(filePath: string): number | null {
+  try {
+    return fs.openSync(filePath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return null;
+    throw err;
+  }
+}
+
+/**
+ * Copies `sourcePath` to `basePath`, or to `basePath-1`, `basePath-2` and so on when
+ * that name is taken, and never overwrites an existing file. Each copy is created
+ * owner-only before any byte is written, so no other account can read it, even if
+ * the process stops partway.
+ */
+function copyRollbackFileExclusive(sourcePath: string, basePath: string): string {
+  const contents = fs.readFileSync(sourcePath);
+  for (let suffix = 0; suffix < 10_000; suffix += 1) {
+    const candidate = suffix === 0 ? basePath : `${basePath}-${suffix}`;
+    const fd = openNewOwnerOnlyFile(candidate);
+    if (fd === null) continue;
+    try {
+      // The umask can only narrow 0600; pin it exactly before the first byte.
+      fs.fchmodSync(fd, 0o600);
+      fs.writeFileSync(fd, contents);
+      fs.fsyncSync(fd);
+    } catch (err) {
+      fs.closeSync(fd);
+      try {
+        fs.unlinkSync(candidate);
+      } catch {
+        // Best-effort cleanup only; the write failure is the error to report.
+      }
+      throw err;
+    }
+    fs.closeSync(fd);
+    return candidate;
+  }
+  throw new Error(`Cannot allocate a unique rollback path beside ${basePath}`);
+}
+
+function restoreError(configPath: string, err: unknown, safetySnapshotPath?: string): Error {
+  const error =
+    (err as NodeJS.ErrnoException).code === 'EACCES'
+      ? new Error(`Cannot restore backup (permission denied): ${configPath}`)
+      : err instanceof Error
+        ? err
+        : new Error(String(err));
+  if (safetySnapshotPath === undefined) return error;
+  // The replace did not happen, so the config is as it was. Name the snapshot so the
+  // operator can find it and remove it.
+  return new Error(
+    `${error.message}; ${configPath} is unchanged and its safety snapshot was kept at ${safetySnapshotPath}`,
+  );
+}
+
+/**
+ * Refuses a file owned by another account. A restore writes a new config.json owned by
+ * the account that runs the rollback, so a rollback run as another account (an
+ * administrator, for example) could leave a config the instance's account cannot read.
+ */
+function assertRollbackOwner(filePath: string, stat: fs.Stats): void {
+  if (typeof process.getuid !== 'function') return; // No POSIX owners on Windows.
+  const uid = process.getuid();
+  if (stat.uid !== uid) {
+    throw new Error(
+      `Refusing rollback: ${filePath} is owned by uid ${stat.uid}, but this rollback runs as uid ${uid}; ` +
+        'run it as the account that owns the instance config',
+    );
+  }
+}
+
+/** Selects the newest backup, or refuses a rollback that must not run. */
+function selectRollbackBackup(configPath: string): string {
   const backupPath = findMostRecentBackup(configPath);
   if (!backupPath) {
     throw new Error(`No backups found for ${configPath}`);
@@ -226,25 +313,87 @@ export function rollbackConfigFile(
 
   const configStat = fs.statSync(configPath);
   const backupStat = fs.statSync(backupPath);
+  assertRollbackOwner(configPath, configStat);
+  assertRollbackOwner(backupPath, backupStat);
   if (backupStat.mtimeMs > configStat.mtimeMs) {
     throw new Error(
       `Backup ${backupPath} is newer than current config ${configPath}; refusing to clobber a concurrent write`,
     );
   }
+  return backupPath;
+}
 
+export function rollbackConfigFile(
+  configPath: string,
+  options: { write?: boolean } = {},
+  fileOps: RollbackFileOps = DEFAULT_ROLLBACK_FILE_OPS,
+): RollbackResult {
+  // Checked before the lock is taken: the lock file is itself a write, and a refused
+  // rollback writes nothing.
+  const backupPath = selectRollbackBackup(configPath);
   if (!options.write) {
-    return { configPath, backupPath, wouldRestore: true, restored: false };
+    return {
+      configPath,
+      backupPath,
+      safetySnapshotPath: null,
+      wouldRestore: true,
+      restored: false,
+    };
   }
 
+  // The fleet config route holds the same per-config lock for each read-modify-write,
+  // so no edit can land between the safety snapshot and the final rename.
   try {
-    fs.renameSync(backupPath, configPath);
+    return withPrivateConfigLockSync(configPath, () => restoreBackup(configPath, fileOps));
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'EACCES') {
-      throw new Error(`Cannot restore backup (permission denied): ${configPath}`);
+    if (isProcessLockError(err)) {
+      throw new Error(
+        `Cannot roll back ${configPath} while its config lock is ${err.reason} (${err.lockPath}); nothing was restored`,
+      );
     }
-    throw err;
+    throw restoreError(configPath, err);
   }
-  return { configPath, backupPath, wouldRestore: true, restored: true };
+}
+
+function restoreBackup(configPath: string, fileOps: RollbackFileOps): RollbackResult {
+  // Selected again under the lock: a writer may have changed the config since the
+  // first check.
+  const backupPath = selectRollbackBackup(configPath);
+
+  // The selected backup stays in place, so a repeated rollback selects it again
+  // instead of walking back through older backups. The config being replaced is
+  // copied to a rollback-safety snapshot first; that name never matches the `.bak-`
+  // prefix, so backup selection never picks the snapshot.
+  let safetySnapshotPath: string;
+  try {
+    safetySnapshotPath = copyRollbackFileExclusive(
+      configPath,
+      `${configPath}.rollback-safety-${timestampSlug()}`,
+    );
+  } catch (err) {
+    throw restoreError(configPath, err);
+  }
+
+  // Restore through a same-directory temp copy and one rename, so config.json is
+  // either the old file or the restored one, never a partial write.
+  let tempPath: string | null = null;
+  try {
+    tempPath = copyRollbackFileExclusive(
+      backupPath,
+      `${configPath}.rollback-tmp-${process.pid}-${timestampSlug()}`,
+    );
+    fileOps.replace(tempPath, configPath);
+  } catch (err) {
+    if (tempPath) {
+      try {
+        fs.unlinkSync(tempPath);
+      } catch {
+        // Best-effort cleanup only; the restore failure is the error to report.
+      }
+    }
+    throw restoreError(configPath, err, safetySnapshotPath);
+  }
+  return { configPath, backupPath, safetySnapshotPath, wouldRestore: true, restored: true };
 }
 
 export function runRollback(argv: string[]): RollbackResult[] {
@@ -255,13 +404,28 @@ export function runRollback(argv: string[]): RollbackResult[] {
   }
 
   const configFiles = findConfigFiles(args);
-  const results = configFiles.map((configPath) =>
-    rollbackConfigFile(configPath, { write: args.write }),
-  );
+  const results: RollbackResult[] = [];
+  try {
+    for (const configPath of configFiles) {
+      results.push(rollbackConfigFile(configPath, { write: args.write }));
+    }
+  } finally {
+    // The run stops at the first failure. Printing here keeps that error from hiding
+    // what the instances before it already restored.
+    printRollbackResults(results, args);
+  }
+  return results;
+}
 
+function printRollbackResults(results: RollbackResult[], args: Pick<ParsedArgs, 'json' | 'write'>): void {
+  if (args.json) {
+    console.log(JSON.stringify(results, null, 2));
+    return;
+  }
   for (const result of results) {
     if (result.restored) {
       console.log(`restored: ${result.configPath} <- ${result.backupPath}`);
+      console.log(`  safety snapshot: ${result.safetySnapshotPath}`);
     } else {
       console.log(`would restore: ${result.configPath} <- ${result.backupPath}`);
     }
@@ -269,8 +433,6 @@ export function runRollback(argv: string[]): RollbackResult[] {
   if (!args.write) {
     console.log('dry run only; pass --write to apply rollback');
   }
-
-  return results;
 }
 
 export function runMigration(argv: string[] = process.argv.slice(2)): ConfigMigrationFileResult[] {
@@ -318,8 +480,9 @@ Options:
   --no-backup         Skip config.json.bak-* backup in --write mode.
   --keep-legacy       Keep legacy flat fields after projecting memory.*.
   --json              Print JSON results.
-  --rollback          Restore the most recent config.json.bak-* backup.
-                      Defaults to dry-run; pass --write to apply.
+  --rollback          Restore the most recent config.json.bak-* backup and keep it.
+                      Defaults to dry-run; pass --write to apply. Write mode first
+                      copies config.json to a config.json.rollback-safety-* file.
   --help              Show this help.
 
 The migrator only reads and writes config.json files. It does not touch

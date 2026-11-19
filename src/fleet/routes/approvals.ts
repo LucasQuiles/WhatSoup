@@ -25,6 +25,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { jsonResponse, readBody, requireInstance } from '../../lib/http.ts';
 import { SQLITE_BUSY_TIMEOUT_PRAGMA } from '../../lib/sqlite-constants.ts';
 import { errorMessage } from '../../lib/error-message.ts';
+import { isNonEmptyString } from '../../lib/type-guards.ts';
 import { createChildLogger } from '../../logger.ts';
 import { proxyToInstance } from '../http-proxy.ts';
 import { validationError } from '../response-error-projection.ts';
@@ -80,7 +81,7 @@ export async function handlePostApprovalDecision(
   try {
     const parsed: unknown = JSON.parse(await readBody(req));
     const p = parsed as Partial<DecisionBody>;
-    if (typeof p.mapKey !== 'string' || p.mapKey.length === 0) throw new Error('mapKey');
+    if (!isNonEmptyString(p.mapKey)) throw new Error('mapKey');
     if (typeof p.questionIndex !== 'number' || p.questionIndex < 0) throw new Error('questionIndex');
     if (!Array.isArray(p.selectedOptions) || p.selectedOptions.length === 0
         || !p.selectedOptions.every((o) => typeof o === 'string' && o.length > 0)) {

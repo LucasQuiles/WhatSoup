@@ -117,6 +117,13 @@ socket error/close/end/write and RPC-timeout messages use the transport retry
 budget. An unrelated service's `ECONNREFUSED` or timeout is not classified as a
 Signal recovery event.
 
+Successful account verification hands off an exact-source recovery clear.
+If that handoff is rejected, later transport activity retries it without
+repeating account repair. A newer authentication failure invalidates the
+pending clear even when the original alert is still open and deduplicated;
+another successful account verification is then required to restore recovery
+authority. Transient receive errors do not invalidate that account proof.
+
 The automated boundary test uses a hermetic local JSON-RPC server. A live
 provider send/receive remains unproven unless an operator separately authorizes
 disposable Signal credentials.

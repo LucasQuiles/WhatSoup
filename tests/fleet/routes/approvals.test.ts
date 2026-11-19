@@ -255,6 +255,17 @@ describe('POST /api/lines/:name/approvals/decision (handlePostApprovalDecision)'
     expect(proxyMock).not.toHaveBeenCalled();
   });
 
+  it('400s on a whitespace-only mapKey (isNonEmptyString trim validation)', async () => {
+    const deps = makeDeps(fakeInstance(), vi.fn());
+    const res = mockRes();
+    await handlePostApprovalDecision(
+      mockReq({ method: 'POST', body: JSON.stringify({ mapKey: '   ', questionIndex: 0, selectedOptions: ['Deploy now'] }) }),
+      res, deps, { name: 'agent-line' },
+    );
+    expect(res._status).toBe(400);
+    expect(proxyMock).not.toHaveBeenCalled();
+  });
+
   it('proxies a valid decision to the instance health server and returns 202', async () => {
     proxyMock.mockResolvedValue({ status: 200, body: JSON.stringify({ ok: true }) });
     const deps = makeDeps(fakeInstance(), vi.fn());

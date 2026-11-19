@@ -1,3 +1,5 @@
+import { isNonEmptyString } from './type-guards.ts';
+
 export const DEFAULT_UPDATE_BRANCH = 'main';
 
 function gitErrorText(err: unknown): string {
@@ -7,7 +9,7 @@ function gitErrorText(err: unknown): string {
 
   const record = err as Record<string, unknown>;
   return [record.stderr, record.stdout, record.message]
-    .filter((value): value is string => typeof value === 'string' && value.length > 0)
+    .filter(isNonEmptyString)
     .join('\n');
 }
 

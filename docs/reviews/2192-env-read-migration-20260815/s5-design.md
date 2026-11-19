@@ -106,6 +106,7 @@ B and C convert the ratchet's core property — *adding a sanctioned site is a r
 4. Gate touches: none beyond the test file itself.
 
 **Car 5c (optional, doc-only, S)** — taxonomy rows if not ridden in 5a; `docs/configuration.md` env-table annotations pointing at markers. CLAUDE.md PR discipline check: no runbook "not yet wired" markers reference these files (the allowlist test header's "arrive with the final slice" promise is DISCHARGED by 5b — update that header in the same diff).
+*Post-landing note (2026-09-27):* done. Car 5b landed as #3249, and the "arrive with the final slice" header wording no longer exists on main.
 
 ## 4. Risks / open questions
 

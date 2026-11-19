@@ -62,8 +62,9 @@ the inbound completion; the existing degraded-scope contract requires operator
 recovery or restart.
 
 This bounds waiting between ingest admission and runtime admission, not all
-registered leases or provider work. Registration RPCs and approved automation
-run before ingest; their capacity and ambiguous-close recovery remain unqualified.
+registered leases or provider work. Registration RPCs run before ingest, and
+approved automation runs separately in the approved-operation dispatcher; the
+capacity and ambiguous-close recovery of both remain unqualified.
 Existing ingest overflow selection is unchanged: displaced messages are neither
 stored nor dispatched. Protected control-message routing, overlapping duplicate
 close ownership, and cancellation before the single-session provider boundary
@@ -108,6 +109,25 @@ If error reporting itself throws, the dispatcher stops and emits the fixed
 `TRANSPORT_DISPATCH_REPORTING_FAILED` process warning. Investigate the reporting
 failure before reconnecting or restarting the dispatcher.
 
+Ordinary inbound automation is delivered only by that dispatcher. After trusted
+registration succeeds, the conversational callback runs independently of an
+automation claim conflict, pause or provider failure. Its settlement still owns
+the inbound lease close. Automation admission names the exact approved operation
+and sends no inbound context, so this client does not tie it to the conversational
+lease. Whether the authority still admits it after that lease closes is part of
+activation requirement 1.
+Mail automation remains with its own executor. Review cards, decision commands
+and the fixed stop receipt retain their separate command handling; in particular,
+the stop receipt cannot be discovered by the approved-work endpoint.
+
+Automation is no longer ordered before the conversational reply. Before
+activation, qualify any rule that depends on that order, and measure serial
+dispatcher backlog against the authority's approval deadline. An operation that
+expires before claim must remain visible through the authority's existing
+recovery or audit contract; input delivery is not evidence of automation delivery.
+Fake-provider tests establish this callback separation, not real authority
+transaction races, durable ingest ownership, expiry observability or fleet parity.
+
 ## Open activation requirements
 
 1. Deploy and independently verify the protected authority service contract,
@@ -117,6 +137,13 @@ failure before reconnecting or restarting the dispatcher.
    Qualify overlapping duplicate deliveries: a duplicate callback must not close
    another delivery's active reply lease. Event deduplication and completion
    ownership require separate proof.
+   Rule-created automation reaches recipients through the approved-operation
+   dispatcher; a decision command's reply also sends whatever approved operations
+   the authority returns for it, without checking what created them. So also
+   verify that the service lists operations created by automation rules on the
+   approved-work endpoint (`readyOperations`), and that it admits them without an
+   inbound context, including after the inbound lease closes. The fake providers
+   in the repository's tests establish neither.
 2. Prove that every production send route converges at an equivalent final
    authority seam, including provider options that affect audience. A raw route
    without a semantic adapter remains held instead of receiving an opaque

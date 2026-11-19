@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -128,6 +128,75 @@ describe('check-instance-config — committed examples (self-run gate)', () => {
       /rustdesk/i.test(readFileSync(path.join(HEALTH_PROFILES_ROOT, name), 'utf8')),
     );
     expect(offenders).toEqual([]);
+  });
+
+  it('uses schema-only mode by default and filesystem-aware mode for a live root', () => {
+    const home = mkdtempSync(path.join(tmpdir(), 'whatsoup-live-config-home-'));
+    const cwd = path.join(home, 'workspace');
+    mkdirSync(cwd);
+    const root = makeRoot({
+      'live-agent': {
+        name: 'live-agent',
+        type: 'agent',
+        accessMode: 'self_only',
+        adminPhones: ['15555550100'],
+        healthPort: 9095,
+        agentOptions: {
+          sessionScope: 'single',
+          cwd,
+          instructionsPath: 'missing.md',
+        },
+      },
+    });
+
+    try {
+      expect(checkInstanceConfigs(root).findings).toEqual([]);
+      const result = checkInstanceConfigs(root, { filesystemHome: home });
+      expect(result.findings).toContainEqual(
+        expect.objectContaining({
+          instance: 'live-agent',
+          field: 'agentOptions.instructionsPath',
+        }),
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('checks an explicit --root against the filesystem of the service user', () => {
+    // With no cwd, a relative instructionsPath resolves against the home of the
+    // user running the check. A unique name cannot exist there, so only the
+    // filesystem-aware mode reports it.
+    const missingName = `missing-instructions-${process.pid}-${Date.now()}.md`;
+    const root = makeRoot({
+      'live-agent': {
+        name: 'live-agent',
+        type: 'agent',
+        accessMode: 'self_only',
+        adminPhones: ['15555550100'],
+        healthPort: 9095,
+        agentOptions: { sessionScope: 'single', instructionsPath: missingName },
+      },
+    });
+    const previousExitCode = process.exitCode;
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      expect(checkInstanceConfigs(root).findings).toEqual([]);
+      const result = run(['--root', root], root);
+      expect(result.findings).toContainEqual(
+        expect.objectContaining({
+          instance: 'live-agent',
+          field: 'agentOptions.instructionsPath',
+        }),
+      );
+    } finally {
+      process.exitCode = previousExitCode;
+      errorSpy.mockRestore();
+      logSpy.mockRestore();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

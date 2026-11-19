@@ -10,6 +10,7 @@ import { CURRENT_SCHEMA_MIGRATION } from '../../src/core/database-schema-version
 import {
   createSecureHandoffWorker,
   type SecureHandoffWorkerConfig,
+  validateDatabase,
 } from '../../src/secure-handoff/worker.ts';
 import { parseSecureHandoffWorkerConfig } from '../../src/secure-handoff/worker-config.ts';
 import {
@@ -555,6 +556,22 @@ describe('secure handoff worker', () => {
 
     await expect(worker.start()).rejects.toThrow('secure handoff worker database is incompatible');
     await expect(worker.tick()).rejects.toThrow('secure handoff worker is not started');
+  });
+
+  it('refuses a database one schema behind and names the unapplied current migration', async () => {
+    const path = makeDatabase([]);
+    const behind = new DatabaseSync(path);
+    try {
+      // The protected secret input table exists; only the current migration is missing.
+      behind.prepare('UPDATE schema_migrations SET version = ? WHERE version = ?')
+        .run(CURRENT_SCHEMA_MIGRATION - 1, CURRENT_SCHEMA_MIGRATION);
+      expect(() => validateDatabase(behind, path))
+        .toThrow('database has not applied the current schema migration of this binary');
+    } finally {
+      behind.close();
+    }
+    const worker = createSecureHandoffWorker({ config: config(path), environment: environment(), clock: fixedClock() });
+    await expect(worker.start()).rejects.toThrow('secure handoff worker database is incompatible');
   });
 
   it('advances past malformed newest intake metadata', async () => {

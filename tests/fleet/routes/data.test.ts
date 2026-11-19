@@ -278,6 +278,59 @@ describe('handleGetChats', () => {
     expect(JSON.stringify(JSON.parse(res._body))).not.toContain('_needsBackfill');
   });
 
+  it('falls back to conversationKey when the stored chat name is whitespace-only (#2871 trim-tightening)', () => {
+    // Discriminator for the isNonEmptyString migration of requiredString(): the
+    // old length>0 check admitted whitespace-only names, which then survived as
+    // the chat's display name (a blank-looking entry in the fleet console). The
+    // SSOT helper trims and rejects them, so a whitespace-only name falls back to
+    // the stable conversationKey — NOT a corrupt blank label.
+    const inst = fakeInstance({ healthToken: 'token' });
+    const chatData = [
+      { conversationKey: 'ws_only@s.whatsapp.net', messageCount: 1, senderName: null, lastMessageAt: 1712332800 },
+    ];
+    const db = {
+      prepare: vi.fn((sql: string) => {
+        if (sql.includes('SELECT content, sender_name, is_from_me')) {
+          return { get: () => undefined }; // no preview
+        }
+        if (sql.includes('SELECT unread_count')) {
+          return { get: () => undefined }; // no unread
+        }
+        if (sql.includes('SELECT subject FROM groups')) {
+          return { get: () => undefined }; // no group subject
+        }
+        if (sql.includes('SELECT name FROM chats')) {
+          return { get: () => ({ name: '   ' }) }; // whitespace-only stored name
+        }
+        if (sql.includes('SELECT sender_name FROM messages')) {
+          return { get: () => undefined };
+        }
+        if (sql.includes('SELECT DISTINCT sender_name')) {
+          return { all: () => [] };
+        }
+        throw new Error(`unexpected SQL: ${sql}`);
+      }),
+    };
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+      dbReader: {
+        getChats: vi.fn(() => ({ ok: true, data: chatData })),
+        query: vi.fn((_name, _dbPath, fn) => ({ ok: true, data: fn(db as any) })),
+      } as any,
+    });
+
+    const res = mockRes();
+    handleGetChats(mockReq({ url: '/api/lines/test-line/chats' }), res, deps, { name: 'test-line' });
+
+    expect(res._status).toBe(200);
+    expect(JSON.parse(res._body)).toEqual([
+      expect.objectContaining({
+        conversationKey: 'ws_only@s.whatsapp.net',
+        name: 'ws_only@s.whatsapp.net', // fell back, not '   '
+      }),
+    ]);
+  });
+
   it('returns 500 when chat enrichment fails after the base query succeeds', () => {
     const inst = fakeInstance();
     const deps = makeDeps({
