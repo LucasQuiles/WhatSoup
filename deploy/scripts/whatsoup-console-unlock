@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 # Console auto-unlock wrapper: waits for the console browser's CDP endpoint,
-# then runs the CDP helper. Token source, keychain first as before: the login
-# keychain item whatsoup-console-token, handed to the helper in
-# WHATSOUP_CONSOLE_TOKEN (never argv, a URL or the clipboard); otherwise the
-# helper reads the private fleet-token file itself (WHATSOUP_FLEET_TOKEN_FILE,
-# default ~/.config/whatsoup/fleet-tokens.json), so that token passes through
-# no shell variable and no environment.
-# Token file preconditions: a regular file, not a symlink, owned by this user,
-# with no group or other permission bits (0600 or 0400), at most 64 KiB, JSON
-# with a 64-hex "active" token. The fleet server writes it that way.
+# then runs the CDP helper. Token source, keychain first as before: the
+# keychain item whatsoup-console-token (security's default keychain search
+# list), handed to the helper in WHATSOUP_CONSOLE_TOKEN (never argv, a URL or
+# the clipboard); otherwise the helper reads the private fleet-token file
+# itself (WHATSOUP_FLEET_TOKEN_FILE, default ~/.config/whatsoup/fleet-tokens.json),
+# so that token passes through no shell variable and no environment.
+# Token file preconditions: a regular file, not a symlink, that this user can
+# read, with no group or other permission bits (0600 or 0400), at most 1 MiB,
+# JSON whose "active" field is 64 lowercase hex characters. The fleet server
+# writes it that way. Owner and folder are not checked.
+# FLEET: https on any host, or plain http on a loopback address (localhost,
+# 127.0.0.0/8, [::1] or an IPv4-mapped 127.0.0.0/8 literal). Any other plain-http
+# host, a host name for loopback included, prints
+# "insecure-fleet-url: use https, or a loopback address".
 # Deploy order: install whatsoup-console-unlock.mjs first, then this wrapper.
 # An older helper reads only WHATSOUP_CONSOLE_TOKEN: with it, a host without a
 # keychain token gets "helper-outdated". An older wrapper works with the newer
