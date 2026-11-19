@@ -455,7 +455,7 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
     anchors: [],
     validate: privateTestIntegrityGateFailures,
     remediation:
-      'Restore the trusted private test-integrity workflow: workflow_run on Quality, the same-repository condition, and the pinned scanner checkout with persist-credentials: false.',
+      'Restore the trusted private test-integrity workflow exactly: only completed workflow_run events of Quality, the reviewed same-repository job condition, and one checkout of the private repository at the pinned commit with persist-credentials: false.',
   },
   {
     id: 'quality-ci-console-design-chain',
@@ -817,12 +817,30 @@ function hasOwn(value: Record<string, unknown>, key: string): boolean {
 // Quality workflow runs pull-request code, so none of its jobs may hold the deploy key, fetch or
 // install the private plugin, or run the test-integrity guard.
 const TEST_INTEGRITY_PIN = 'ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c';
+const PRIVATE_TEST_INTEGRITY_REPOSITORY = 'LucasQuiles/test-integrity';
 const QUALITY_FORBIDDEN_TEST_INTEGRITY_REFERENCES = [
   'TEST_INTEGRITY_DEPLOY_KEY',
-  'LucasQuiles/test-integrity',
+  PRIVATE_TEST_INTEGRITY_REPOSITORY,
   '.claude/plugins/test-integrity',
   'guard:test-integrity',
 ];
+// Compared whole, with whitespace runs collapsed, so neither an appended `|| true` nor a negated
+// comparison passes as the same-repository gate (tests/scripts/private-test-integrity.test.ts pins
+// the same text).
+const PRIVATE_SCANNER_CONDITION = [
+  "github.repository == 'LucasQuiles/WhatSoup' &&",
+  "github.event.workflow_run.status == 'completed' &&",
+  'github.event.workflow_run.head_repository.full_name == github.repository && (',
+  "github.event.workflow_run.event == 'pull_request' ||",
+  "(github.event.workflow_run.event == 'push' && (github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'v'))) ||",
+  "(github.event.workflow_run.event == 'schedule' && github.event.workflow_run.head_branch == 'main') )",
+].join(' ');
+
+function isExactList(value: unknown, expected: readonly string[]): boolean {
+  return Array.isArray(value)
+    && value.length === expected.length
+    && value.every((entry, index) => entry === expected[index]);
+}
 
 function containsMappingKey(value: unknown, key: string, seen = new WeakSet<object>()): boolean {
   if (value === null || typeof value !== 'object') return false;
@@ -1139,18 +1157,31 @@ function privateTestIntegrityGateFailures(text: string): string[] {
   const { root, failures: parseFailures } = parseWorkflow(text, 'private test-integrity workflow');
   if (!root) return parseFailures;
   const failures: string[] = [];
-  const workflows = asRecord(asRecord(root.on)?.workflow_run)?.workflows;
-  if (!Array.isArray(workflows) || workflows.length !== 1 || workflows[0] !== 'Quality') {
+  const triggers = asRecord(root.on);
+  const workflowRun = asRecord(triggers?.workflow_run);
+  if (!triggers || Object.keys(triggers).some((trigger) => trigger !== 'workflow_run')) {
+    failures.push('private test-integrity workflow must declare no trigger other than workflow_run');
+  }
+  if (!isExactList(workflowRun?.workflows, ['Quality'])) {
     failures.push('private test-integrity workflow must start on workflow_run of Quality');
   }
+  if (!isExactList(workflowRun?.types, ['completed'])) {
+    failures.push('private test-integrity workflow must start only on completed Quality runs');
+  }
+  if (Object.keys(workflowRun ?? {}).some((key) => key !== 'workflows' && key !== 'types')) {
+    failures.push('private test-integrity workflow_run must declare only workflows and types');
+  }
   const scanner = asRecord(asRecord(root.jobs)?.['private-scanner']);
-  const condition = typeof scanner?.if === 'string' ? scanner.if : '';
-  if (!condition.includes('github.event.workflow_run.head_repository.full_name == github.repository')) {
+  const condition = typeof scanner?.if === 'string' ? scanner.if.replace(/\s+/g, ' ').trim() : '';
+  if (condition !== PRIVATE_SCANNER_CONDITION) {
     failures.push('private-scanner must run only for same-repository Quality runs');
   }
   const checkouts = (Array.isArray(scanner?.steps) ? scanner.steps.map(asRecord) : [])
     .filter((step) => typeof step?.uses === 'string' && step.uses.startsWith('actions/checkout@'));
   const checkout = asRecord(checkouts[0]?.with);
+  if (checkout?.repository !== PRIVATE_TEST_INTEGRITY_REPOSITORY) {
+    failures.push('private-scanner must check out the private test-integrity repository');
+  }
   if (checkouts.length !== 1 || checkout?.ref !== TEST_INTEGRITY_PIN) {
     failures.push('Test Integrity commit pin must match the reviewed 40-hex object');
   }
