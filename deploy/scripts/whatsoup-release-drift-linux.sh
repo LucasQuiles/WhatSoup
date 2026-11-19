@@ -38,8 +38,8 @@ export WHATSOUP_RELEASE_DRIFT_LOG_DIR="${WHATSOUP_RELEASE_DRIFT_LOG_DIR:-$HOME/.
 
 # The BOT ERRORS instance label of this host's release alerts and clears. systemd
 # is the only parser of its value: the label is WHATSOUP_RELEASE_DRIFT_INSTANCE as
-# systemd hands it over, and it is used only when the label file named by the
-# only argument assigns that same value. Otherwise the run exits 2: no label
+# systemd hands it over, and it is used only when the label file named by
+# --label-file assigns that same value. Otherwise the run exits 2: no label
 # file, a file that cannot be read, no assignment there, or a different value.
 # The unit also loads bot-errors.env, which every BOT ERRORS unit loads, so a
 # label set only there is refused, and a value this reader takes differently
@@ -70,13 +70,13 @@ read_env_label() {
   ' "$1"
 }
 
-# The label file is the only argument. The unit passes
-# %h/.config/whatsoup/release-drift.env, the specifier and path of its own
-# EnvironmentFile line, so both name the file systemd loaded. bot-errors.env or
-# a drop-in can change HOME but not this argument; there is no default.
-[ "$#" -eq 1 ] && [[ "$1" == /* ]] \
-  || fail "pass the label file as the only argument, an absolute path, as whatsoup-release-drift.service passes %h/.config/whatsoup/release-drift.env"
-LABEL_FILE="$1"
+# The label file comes only from --label-file. The unit passes
+# %h/.config/whatsoup/release-drift.env, the same text as its EnvironmentFile
+# line, so systemd resolves both to the file it loaded. Nothing is looked up,
+# and HOME, PATH or another variable cannot change the path; there is no default.
+[ "$#" -eq 2 ] && [ "$1" = --label-file ] && [[ "$2" == /* ]] \
+  || fail "pass --label-file with an absolute path, as whatsoup-release-drift.service passes --label-file %h/.config/whatsoup/release-drift.env"
+LABEL_FILE="$2"
 ENV_LABEL="${WHATSOUP_RELEASE_DRIFT_INSTANCE:-}"
 ignored=""
 [ -z "$ENV_LABEL" ] || ignored=" (the value in the environment is ignored: bot-errors.env can set it)"
