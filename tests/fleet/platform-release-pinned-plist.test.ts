@@ -148,6 +148,24 @@ function launchctlSubcommands(): string[] {
   return childProcessMocks.execFile.mock.calls.map((call) => (call[1] as string[])[0]);
 }
 
+function launchctlCalls(): string[][] {
+  return childProcessMocks.execFile.mock.calls.filter((call) => call[0] === 'launchctl').map((call) => call[1] as string[]);
+}
+
+/** Answer the boot preflight with `failure` (null is exit 0); every other command succeeds. */
+function preflightAnswers(failure: Error | null): void {
+  childProcessMocks.execFile.mockImplementation((command: string, _args, optionsOrCallback, maybeCallback) => {
+    const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
+    queueMicrotask(() => callback?.(command.endsWith('/preflight-check.sh') ? failure : null, '', ''));
+    return new EventEmitter();
+  });
+}
+
+/** The error execFile reports for a non-zero exit: `code` is the exit status. */
+function exitStatus(code: number): Error {
+  return Object.assign(new Error('Command failed'), { code });
+}
+
 describe('release-pinned launchd plists (#3829)', () => {
   beforeEach(async () => {
     const [realFs, realPath, realOs] = await Promise.all([realFsPromise, realPathPromise, realOsPromise]);
@@ -177,6 +195,7 @@ describe('release-pinned launchd plists (#3829)', () => {
     realFs.rmSync(SERVICE_HOME, { recursive: true, force: true });
     realFs.rmSync(OUTSIDE_ROOT, { recursive: true, force: true });
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     setPlatform(originalPlatform);
   });
 
@@ -211,6 +230,92 @@ describe('release-pinned launchd plists (#3829)', () => {
     // bootstrapLaunchdService always follows bootstrap with kickstart -k (same contract as platform-service-manager.test.ts).
     expect(childProcessMocks.execFile.mock.calls[2][1]).toEqual(['kickstart', '-k', `gui/${currentUid()}/com.whatsoup.agent`]);
     expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+  });
+
+  // kickstart -k stops the running process before the launcher's boot
+  // preflight runs, so restart_self asks the job's own release first.
+  describe('boot preflight before a self-restart', () => {
+    const release = (): string => `${releases()}/${RELEASE_NAME}`;
+
+    it('runs the release-pinned release preflight, then a self-restart issues exactly one kickstart -k', async () => {
+      fsMocks.readFileSync.mockReturnValue(pinnedPlist(await makeRelease(releases())));
+      const { createServiceManager, RESTART_SELF_PREFLIGHT_TIMEOUT_MS } = await importPlatform();
+      const manager = createServiceManager();
+
+      await expect(manager.checkRestartSelf?.('agent')).resolves.toEqual({ ok: true });
+      await expect(manager.restartSelf('agent')).resolves.toBeUndefined();
+
+      expect(childProcessMocks.execFile.mock.calls.map((call) => call[0])).toEqual([
+        `${release()}/deploy/preflight-check.sh`,
+        'launchctl',
+      ]);
+      expect(childProcessMocks.execFile.mock.calls[0][1]).toEqual([release(), 'agent']);
+      expect(childProcessMocks.execFile.mock.calls[0][2]).toMatchObject({
+        cwd: release(),
+        timeout: RESTART_SELF_PREFLIGHT_TIMEOUT_MS,
+      });
+      expect(launchctlCalls()).toEqual([['kickstart', '-k', `gui/${currentUid()}/com.whatsoup.agent`]]);
+    });
+
+    it('refuses with the exit code when the release preflight exits 3, before any launchctl call', async () => {
+      fsMocks.readFileSync.mockReturnValue(pinnedPlist(await makeRelease(releases())));
+      preflightAnswers(exitStatus(3));
+      const { createServiceManager } = await importPlatform();
+
+      await expect(createServiceManager().checkRestartSelf?.('agent')).resolves.toEqual({ ok: false, exitCode: 3 });
+      expect(childProcessMocks.execFile).toHaveBeenCalledTimes(1);
+      expect(launchctlCalls()).toEqual([]);
+    });
+
+    it('runs the standalone form: no ledger deferral, no credential, and the job interpreter', async () => {
+      vi.stubEnv('WHATSOUP_PREFLIGHT_RESTART_SAFETY', 'wrapper');
+      vi.stubEnv('ANTHROPIC_API_KEY', 'placeholder-value');
+      vi.stubEnv('WHATSOUP_NODE', '/opt/node-a/bin/node');
+      vi.stubEnv('XDG_DATA_HOME', `${SERVICE_HOME}/data-a`);
+      fsMocks.readFileSync.mockReturnValue(pinnedPlist(await makeRelease(releases())));
+      const { createServiceManager } = await importPlatform();
+
+      await expect(createServiceManager().checkRestartSelf?.('agent')).resolves.toEqual({ ok: true });
+
+      const { env } = childProcessMocks.execFile.mock.calls[0][2] as { env: NodeJS.ProcessEnv };
+      expect(env).not.toHaveProperty('WHATSOUP_PREFLIGHT_RESTART_SAFETY');
+      expect(env).not.toHaveProperty('ANTHROPIC_API_KEY');
+      expect(env.WHATSOUP_NODE).toBe('/opt/node-a/bin/node');
+      expect(env.XDG_DATA_HOME).toBe(`${SERVICE_HOME}/data-a`);
+    });
+
+    const notRun: Array<[string, Error]> = [
+      // At its timeout execFile kills the child and reports no exit status.
+      ['times out', Object.assign(new Error('Command failed'), { killed: true, signal: 'SIGTERM', code: null })],
+      ['cannot start', Object.assign(new Error('spawn failed'), { code: 'EACCES' })],
+    ];
+
+    for (const [outcome, failure] of notRun) {
+      it(`refuses with no exit code when the release preflight ${outcome}, before any launchctl call`, async () => {
+        fsMocks.readFileSync.mockReturnValue(pinnedPlist(await makeRelease(releases())));
+        preflightAnswers(failure);
+        const { createServiceManager } = await importPlatform();
+
+        await expect(createServiceManager().checkRestartSelf?.('agent')).resolves.toEqual({ ok: false, exitCode: null });
+        expect(childProcessMocks.execFile).toHaveBeenCalledTimes(1);
+        expect(launchctlCalls()).toEqual([]);
+      });
+    }
+
+    it('checks the release the shared wrapper resolves to for a generated plist', async () => {
+      const realFs = await realFsPromise;
+      const program = await makeRelease(releases());
+      realFs.mkdirSync(`${SERVICE_HOME}/.local/bin`, { recursive: true });
+      realFs.symlinkSync(program, `${SERVICE_HOME}/.local/bin/whatsoup`);
+      fsMocks.readFileSync.mockReturnValue(pinnedPlist(`${SERVICE_HOME}/.local/bin/whatsoup`));
+      const { createServiceManager } = await importPlatform();
+
+      await expect(createServiceManager().checkRestartSelf?.('agent')).resolves.toEqual({ ok: true });
+
+      expect(childProcessMocks.execFile).toHaveBeenCalledTimes(1);
+      expect(childProcessMocks.execFile.mock.calls[0][0]).toBe(`${release()}/deploy/preflight-check.sh`);
+      expect(childProcessMocks.execFile.mock.calls[0][1]).toEqual([release(), 'agent']);
+    });
   });
 
   const refusals: Array<[string, () => Promise<string>]> = [
@@ -279,6 +384,7 @@ describe('release-pinned launchd plists (#3829)', () => {
       const { createServiceManager } = await importPlatform();
       const manager = createServiceManager();
 
+      await expect(manager.checkRestartSelf?.('agent')).rejects.toThrow(RELEASE_REFUSAL);
       await expect(manager.restartSelf('agent')).rejects.toThrow(RELEASE_REFUSAL);
       await expect(manager.stop('agent')).rejects.toThrow(RELEASE_REFUSAL);
       await expect(manager.disable('agent')).rejects.toThrow(RELEASE_REFUSAL);

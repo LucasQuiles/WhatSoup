@@ -19,6 +19,7 @@ import {
   OWED_REPLY_FLUSH_GRACE_MS,
   type IntentionalRestartMarker,
   type OwedReplyDelivery,
+  type RestartSelfCheck,
   type RestartSelfToolDeps,
   type TriggerSelfRestartOptions,
 } from '../../../src/runtimes/agent/self-restart.ts';
@@ -59,6 +60,7 @@ interface RestartSelfResult {
   ok: boolean;
   restarting: boolean;
   cause?: string;
+  preflightExitCode?: number | null;
   text: string;
 }
 
@@ -138,6 +140,40 @@ describe('restart_self MCP tool', () => {
     expect(opts.reason).toBe('r');
   });
 
+  // The boot preflight runs before the owed reply: a restart refused after it
+  // would leave the turn's answer already sent with the status role.
+  it('refuses before the owed reply, the ack and the trigger when the boot preflight refuses', async () => {
+    const restartSelf = vi.fn(async (_name: string) => {});
+    const checkRestartSelf = vi.fn(async (_name: string): Promise<RestartSelfCheck> => ({ ok: false, exitCode: 3 }));
+    const { deps: d, trigger, sendAck, deliverOwedReply } = deps({ serviceManager: { restartSelf, checkRestartSelf } });
+
+    const result = await buildRestartSelfTool(d).handler({ reason: 'load merged main' }, SESSION) as RestartSelfResult;
+
+    expect(checkRestartSelf).toHaveBeenCalledWith('q');
+    expect(result).toMatchObject({ ok: false, restarting: false, cause: 'restart_preflight_refused', preflightExitCode: 3 });
+    expect(result.text).toContain('exit 3');
+    expect(deliverOwedReply).not.toHaveBeenCalled();
+    expect(sendAck).not.toHaveBeenCalled();
+    expect(trigger).not.toHaveBeenCalled();
+    expect(restartSelf).not.toHaveBeenCalled();
+  });
+
+  it('refuses with no exit code when the boot preflight cannot run', async () => {
+    const restartSelf = vi.fn(async (_name: string) => {});
+    const checkRestartSelf = vi.fn(async (_name: string): Promise<RestartSelfCheck> => {
+      throw new Error('launchd plist is not owned');
+    });
+    const { deps: d, trigger, sendAck, deliverOwedReply } = deps({ serviceManager: { restartSelf, checkRestartSelf } });
+
+    const result = await buildRestartSelfTool(d).handler({ reason: 'r' }, SESSION);
+
+    expect(result).toMatchObject({ ok: false, restarting: false, cause: 'restart_preflight_refused', preflightExitCode: null });
+    expect(deliverOwedReply).not.toHaveBeenCalled();
+    expect(sendAck).not.toHaveBeenCalled();
+    expect(trigger).not.toHaveBeenCalled();
+    expect(restartSelf).not.toHaveBeenCalled();
+  });
+
   describe('with the real trigger', () => {
     let dataRoot: string;
 
@@ -198,6 +234,43 @@ describe('restart_self MCP tool', () => {
       await buildRestartSelfTool(d).handler({ reason: 'r' }, SESSION);
 
       expect(order).toEqual(['owed', 'ack', 'restartSelf']);
+    });
+
+    it('runs the boot preflight before the owed text, the ack and restartSelf', async () => {
+      const order: string[] = [];
+      const { deps: d } = deps({
+        dataRoot,
+        trigger: triggerSelfRestart,
+        deliverOwedReply: vi.fn(async (): Promise<OwedReplyDelivery> => { order.push('owed'); return { delivered: true }; }),
+        sendAck: vi.fn(async () => { order.push('ack'); }),
+        serviceManager: {
+          checkRestartSelf: vi.fn(async (): Promise<RestartSelfCheck> => { order.push('preflight'); return { ok: true }; }),
+          restartSelf: vi.fn(async () => { order.push('restartSelf'); }),
+        },
+      });
+
+      const result = await buildRestartSelfTool(d).handler({ reason: 'r' }, SESSION);
+
+      expect(result).toMatchObject({ ok: true, restarting: true });
+      expect(order).toEqual(['preflight', 'owed', 'ack', 'restartSelf']);
+    });
+
+    it('writes no marker and starts no restart when the boot preflight refuses', async () => {
+      const restartSelf = vi.fn(async () => {});
+      const { deps: d } = deps({
+        dataRoot,
+        trigger: triggerSelfRestart,
+        serviceManager: {
+          checkRestartSelf: vi.fn(async (): Promise<RestartSelfCheck> => ({ ok: false, exitCode: 3 })),
+          restartSelf,
+        },
+      });
+
+      const result = await buildRestartSelfTool(d).handler({ reason: 'r' }, SESSION);
+
+      expect(result).toMatchObject({ ok: false, restarting: false, cause: 'restart_preflight_refused' });
+      expect(restartSelf).not.toHaveBeenCalled();
+      expect(existsSync(join(dataRoot, 'intentional-restart.marker'))).toBe(false);
     });
 
     // #3829: an unconfirmed owed reply must stop the restart — no ack, no
