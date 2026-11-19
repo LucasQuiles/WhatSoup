@@ -47,21 +47,33 @@ The deadman checks two things:
    This catches a process that is alive and responding to health checks but has
    stopped draining.
 
-**Corrected success condition (2026-11-18).** Judge liveness by the files
-that the `dispatcher` and `collector` checks of
-`deploy/scripts/bot-errors-heartbeat-watchdog.py` treat as heartbeats, in
-the BOT ERRORS state directory: `dispatcher-state.json` and
-`collector-state.json` (`deploy/scripts/lib/state_files.py`). The probe
-passes when both files exist and their modification times are no older
-than the watchdog's limits, 300 seconds for the dispatcher and 180 for the
-collector by default (`BOT_ERRORS_MAX_DISPATCHER_AGE`,
-`BOT_ERRORS_MAX_COLLECTOR_AGE`), read within `PROBE_TIMEOUT_SECONDS`
-(default 10). The `sent/` age of check 2 is not a liveness signal on its
-own: the dispatcher moves an event into `sent/` when it delivers it, so a
-quiet period with nothing to deliver leaves the newest file old. In the
-script logic below, step 1 cannot run until a collector endpoint exists,
-so use the heartbeat ages in its place, and do not fail the probe on step
-2's `sent/` age alone.
+**Corrected success condition (2026-11-18).** Apply the same trust checks
+as the `dispatcher` and `collector` checks of
+`deploy/scripts/bot-errors-heartbeat-watchdog.py` (`critical_file_problem`
+and `file_age`) to the files they treat as heartbeats, in the BOT ERRORS
+state directory: `dispatcher-state.json` and `collector-state.json`
+(`deploy/scripts/lib/state_files.py`). The probe passes only when, for
+both files:
+
+- the file exists, is a regular file and not a symlink, and grants no
+  group or other permission;
+- its directory exists, is a directory and not a symlink, and grants no
+  group or other permission;
+- the file and its directory can be inspected, and the file's modification
+  time is not in the future;
+- its age is no more than the limit the hub's watchdog uses: the
+  effective `BOT_ERRORS_MAX_DISPATCHER_AGE` for the dispatcher and
+  `BOT_ERRORS_MAX_COLLECTOR_AGE` for the collector (defaults 300 and 180
+  seconds).
+
+As in `file_age`, the future-time test and the age use whole epoch
+seconds. An attempt fails on any other result, and also when it does not
+finish, connection included, within `PROBE_TIMEOUT_SECONDS` (default 10);
+the probe fails only when every attempt fails.
+The `sent/` age of check 2 is not part of the pass condition: the
+dispatcher moves an event into `sent/` when it delivers it, so a quiet
+period with nothing to deliver leaves the newest file old. The script
+logic below checks only the heartbeat files.
 
 ### Alert channel requirement
 
@@ -101,26 +113,34 @@ Script: `~/.local/bin/nucles-deadman`
 ### Script logic (pseudocode)
 
 ```
-NUCLES_HOST=nucles (or Tailscale hostname / IP)
-NUCLES_COLLECTOR_PORT=<configured>
-PROBE_TIMEOUT=10
-DRAIN_STALE_THRESHOLD=7200   # 2 hours in seconds
-ALERT_COOLDOWN=3600          # 1 hour: suppress repeated alerts for the same failure
+HUB=<hub SSH alias>           # the host that runs the dispatcher and collector
+STATE_DIR=<hub BOT ERRORS state directory>
+PROBE_TIMEOUT_SECONDS=10      # deadline for each attempt, connection included
+MAX_DISPATCHER_AGE=<the hub's effective BOT_ERRORS_MAX_DISPATCHER_AGE>   # default 300
+MAX_COLLECTOR_AGE=<the hub's effective BOT_ERRORS_MAX_COLLECTOR_AGE>     # default 180
+ALERT_COOLDOWN=3600           # 1 hour: suppress repeated alerts for the same failure
 
-for each probe:
-  1. curl --max-time $PROBE_TIMEOUT http://$NUCLES_HOST:$NUCLES_COLLECTOR_PORT/health
-     -> fail if non-200 or no response
+each run:
+  try the heartbeat check over SSH on each network path to $HUB (see below),
+  one attempt at a time, until an attempt passes; stop each attempt after
+  PROBE_TIMEOUT_SECONDS (no answer in time fails that attempt). The check
+  fails only when every attempt fails. In an attempt, on the hub, for each pair
+  (dispatcher-state.json, MAX_DISPATCHER_AGE) and (collector-state.json, MAX_COLLECTOR_AGE):
+    -> fail if STATE_DIR is missing, a symlink or not a directory,
+       or grants any group or other permission
+    -> fail if the file is missing, a symlink or not a regular file,
+       or grants any group or other permission
+    -> fail if the file or STATE_DIR cannot be inspected
+    -> take now and the file's mtime in whole epoch seconds, as file_age does
+    -> fail if mtime is later than now
+    -> fail if now - mtime > its limit
+  (sent/ is not checked: a quiet hub has nothing to deliver)
 
-  2. ssh -o ConnectTimeout=$PROBE_TIMEOUT q@$NUCLES_HOST \
-       'cd ~/.local/state/bot-errors/sent && stat -c %Y "$(ls -t | head -1)"'
-     # NOTE single quotes: the $(ls ...) subshell MUST expand on nucles, not on mini9
-     -> fail if mtime < now - DRAIN_STALE_THRESHOLD
-
-if any probe failed AND cooldown not active:
-  record failure timestamp in ~/.local/state/nucles-deadman/last-alert
+if the check failed AND cooldown not active:
+  record the failure time in the deadman's own last-alert file
   send alert via independent channel (WhatsApp-direct preferred)
 
-if all probes passed AND last-alert exists:
+if the check passed AND last-alert exists:
   clear last-alert (recovery)
   send recovery notification
 ```
@@ -129,13 +149,15 @@ if all probes passed AND last-alert exists:
 
 The deadman script SSHs into nucles as the `q` user. Mini9 must have a
 dedicated keypair authorized in `q@nucles:~/.ssh/authorized_keys`. Use a
-read-only restricted key (`no-pty,no-X11-forwarding,command="stat ..."`) to
+read-only restricted key (`no-pty,no-X11-forwarding,command="<heartbeat check>"`) to
 limit blast radius if mini9 is compromised.
 
 Steps to provision (during host-ops batch):
 1. On mini9: `ssh-keygen -t ed25519 -f ~/.ssh/nucles_deadman_ed25519 -N "" -C "nucles-deadman@mini9"`
 2. On nucles: append the public key to `~/.ssh/authorized_keys` with a
-   `command=""` restriction scoped to the mtime stat call.
+   `no-pty,no-X11-forwarding,command="<heartbeat check>"` restriction (the
+   same options as the restricted key above), so the key runs only the
+   heartbeat check.
 
 ### Dependency on nucles Tailscale
 
@@ -180,10 +202,11 @@ Once installed, register in `deploy/managed-components.json` under
 - **mini9 is itself a SPOF**: if mini9 dies, the deadman dies with it. A second
   deadman on mini7 or mini8 would provide N+1 redundancy but doubles the SSH
   key provisioning footprint. Defer until the first instance is proven reliable.
-- **Outbox drain age vs. actual delivery**: a stuck drain (check 2) catches
-  dispatcher failures but not failures where messages are drained but not
-  delivered (e.g., Resend API outage). The latter is out of scope for a deadman;
-  it belongs in delivery-receipt tracking.
+- **Heartbeat age vs. actual delivery**: the heartbeat check catches a
+  dispatcher or collector whose heartbeat file goes stale, but not one that
+  keeps its heartbeat fresh while deliveries fail (e.g., Resend API outage).
+  The latter is out of scope for a deadman; it belongs in delivery-receipt
+  tracking.
 - **Cooldown calibration**: 1-hour cooldown suppresses alert spam during a
   prolonged outage. The tradeoff is that a recurring flap (nucles dies and
   recovers every 45 minutes) might be masked. The recovery notification clears

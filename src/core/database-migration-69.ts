@@ -1,5 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+import { WhatSoupError } from '../errors.ts';
+
 /**
  * Failed-terminal reply-debt index.
  *
@@ -14,7 +16,8 @@ import type { DatabaseSync } from 'node:sqlite';
  * the index a no-op.
  */
 const INDEX = 'idx_turn_terminal_failed_reply_debt';
-const DEFINITION = `ON turn_terminal_records(inbound_seq)
+const TABLE = 'turn_terminal_records';
+const DEFINITION = `ON ${TABLE}(inbound_seq)
     WHERE inbound_disposition = 'failed_terminal'
       AND reply_guarantee_disarmed = 0
       AND delivery_kind <> 'echoed'
@@ -46,14 +49,29 @@ export function runMigration69(db: DatabaseSync): void {
  * Startup check, run in the schema transaction after the table repair. The
  * ledger is keyed by number alone, and IF NOT EXISTS keeps a same-name index of
  * any definition, so neither a recorded migration nor the name proves this
- * index. A missing index, or one whose stored definition differs, is rebuilt; an
- * index holds only data derived from its table, so the rebuild loses nothing. A
- * failure throws, so the transaction never commits the receipt without the index.
- * Returns what it found when it rebuilt, or null when the index was exact.
+ * index. A missing index, or one on this table whose stored definition differs,
+ * is rebuilt; an index holds only data derived from its table, so the rebuild
+ * loses nothing. Index, table and view names share one namespace per database
+ * and match without case, so the name can belong to an object on another table.
+ * Such an object is never dropped: the check throws before any change. Any
+ * failure throws, so the transaction never commits the receipt without the
+ * index. Returns what it found when it rebuilt, or null when the index was exact.
+ *
+ * Every open enforces this definition, whatever the ledger says. A later
+ * migration that changes or drops the index must change this check with it;
+ * the registry case in `tests/core/database-migration-69.test.ts` fails until
+ * both agree.
  */
 export function ensureFailedTerminalDebtIndex(db: DatabaseSync): 'missing' | 'different' | null {
-  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?")
-    .get(INDEX) as { sql: string | null } | undefined;
+  const row = db.prepare(
+    "SELECT type, tbl_name AS tableName, sql FROM sqlite_master WHERE name = ? COLLATE NOCASE AND type <> 'trigger'",
+  ).get(INDEX) as { type: string; tableName: string; sql: string | null } | undefined;
+  if (row !== undefined && (row.type !== 'index' || row.tableName !== TABLE)) {
+    throw new WhatSoupError(
+      `Index name ${INDEX} is in use on table ${row.tableName} (${row.type}); startup will not replace it`,
+      'DATABASE_ERROR',
+    );
+  }
   if (row !== undefined && collapse(row.sql ?? '') === STORED_SQL) return null;
   db.exec(`DROP INDEX IF EXISTS ${INDEX}`);
   db.exec(`CREATE INDEX ${INDEX} ${DEFINITION}`);

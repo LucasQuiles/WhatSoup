@@ -152,10 +152,17 @@ not substitute for a real primary-failure degrade/recover test.
 
 ## Outbound Client-Safety Guard
 
-Mechanically enforces the Operating Rule that raw provider/runtime diagnostics
-and internal artifacts must never reach a user (see the diagnostics rule
-above; the behavior is pinned by `tests/core/outbound-message-safety.test.ts`
-and `tests/core/outbound-message-safety-prose-secrets.test.ts`). The guard is a content filter on the
+Mechanically enforces, for client-bound output, the Operating Rule that raw
+provider/runtime diagnostics and internal artifacts must never reach a user,
+for the text its classifiers and redaction patterns match; text they do not
+match passes unchanged (see the diagnostics rule above; the client-bound
+behavior is pinned by
+`tests/core/outbound-message-safety.test.ts` and
+`tests/core/outbound-message-safety-prose-secrets.test.ts`). Other audiences
+are filtered less: internal agent groups keep ordinary operator paths and
+identifiers, with secrets still masked, and the ops audience receives the
+text verbatim (`redactInternalArtifacts` in
+`src/core/outbound-message-safety.ts`). The guard is a content filter on the
 outbound send path, not a model behavior — it holds even while a bot runs on a
 degraded fallback model.
 

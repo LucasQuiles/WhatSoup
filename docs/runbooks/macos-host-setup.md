@@ -108,14 +108,15 @@ after reboot until the next scheduled interval fires or launchd is manually
 triggered.
 
 This rule covers hand-maintained protective services. It does not cover
-these interval-scheduled jobs, which ship with `RunAtLoad=false` and rely
-on their schedule instead:
+scheduled jobs that ship with `RunAtLoad=false` and rely on their schedule
+instead, for example:
 `deploy/com.whatsoup.reply-guarantee.plist` (`StartInterval` 60),
 `deploy/com.whatsoup.release-drift-check.plist` (`StartInterval` 300),
 `deploy/templates/com.whatsoup.bot-errors-j1-collector.plist`
-(`StartCalendarInterval`; a load must not produce an off-slot bundle) and
-the BOT ERRORS heartbeat watchdog that
-`deploy/scripts/install-bot-errors-launchd.sh` writes (`StartInterval` 300).
+(`StartCalendarInterval`; a load must not produce an off-slot bundle), and
+two agents that `deploy/scripts/install-bot-errors-launchd.sh` writes: the
+BOT ERRORS heartbeat watchdog (`StartInterval` 300) and the daily BOT
+ERRORS health check (`StartCalendarInterval`, 07:20).
 
 Generated per-instance WhatSoup plists are a separate, code-owned contract;
 do not copy the hand-maintained template into them. They retain an explicit
