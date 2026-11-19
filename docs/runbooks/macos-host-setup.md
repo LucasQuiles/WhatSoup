@@ -286,6 +286,10 @@ only for confirmed removal, with the phone owner's approval; for the parked and
 uninspected 401 classes, check Linked Devices on the primary phone first.
 
 The release observer (`scripts/live-release-observers.ts`) prints release
-integrity and release currency separately. An exit status of 1 with
-`release integrity: clean` and `release currency: target-differs` reports a
-difference from the moving target branch, not drifted release files.
+integrity and release currency separately. Exit status 0 means clean release
+files, including when `release currency: target-differs` reports a difference
+from the moving target branch; that difference is advisory. Exit status 1 means
+drifted release files. Exit status 2 means an inconclusive integrity or currency
+observation, even when release files also drifted. An observer from before
+`target-differs` became advisory exits 1 for clean files and a differing target,
+so read the `release integrity` line before treating exit 1 as drift.
