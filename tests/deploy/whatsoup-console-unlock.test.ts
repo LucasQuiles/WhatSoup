@@ -334,3 +334,102 @@ describe('whatsoup-console-unlock.mjs fleet-token file', () => {
     expectRefused(runHelper());
   });
 });
+
+describe('whatsoup-console-unlock.mjs fleet target', () => {
+  it('refuses a FLEET URL whose host is not loopback before contacting CDP', () => {
+    writeTokenFile(join(configDir, 'fleet-tokens.json'));
+
+    expect(runHelper({ FLEET: 'http://localhost.example.invalid:9227/agents' }))
+      .toEqual({ status: 1, stdout: 'invalid-fleet-url\n', stderr: '' });
+  });
+
+  it('refuses a CDP_PORT that is not a port number', () => {
+    writeTokenFile(join(configDir, 'fleet-tokens.json'));
+
+    // Spliced into http://localhost:<port>/json this would name another host.
+    expect(runHelper({ CDP_PORT: '1@example.invalid' }))
+      .toEqual({ status: 1, stdout: 'invalid-cdp-port\n', stderr: '' });
+  });
+
+  it('selects the tab on the exact fleet origin, not one whose URL only starts with the FLEET text', async () => {
+    writeTokenFile(join(configDir, 'fleet-tokens.json'));
+    const cdp = await startMockCdp((origin) => ({
+      lists: [[
+        // Begins with the FLEET text, but its host is example.invalid (userinfo form).
+        { id: 'lookalike', url: `${origin}@example.invalid/` },
+        { id: 'fleet', url: `${origin}/` },
+      ]],
+      authTicket: 'valid',
+    }));
+    try {
+      const result = await runHelperAsync(cdpEnv(cdp));
+
+      expect(result).toEqual({ status: 0, stdout: 'already-valid\n', stderr: '' });
+      expect(cdp.record.connectionPaths).toEqual(['/devtools/page/fleet']);
+      expect(cdp.record.tokensSent).toEqual([]);
+    } finally {
+      await cdp.close();
+    }
+  });
+
+  it('treats a FLEET path as a path boundary, not a text prefix', async () => {
+    writeTokenFile(join(configDir, 'fleet-tokens.json'));
+    const cdp = await startMockCdp((origin) => ({
+      lists: [[
+        { id: 'lookalike', url: `${origin}/agents.example` },
+        { id: 'fleet', url: `${origin}/agents` },
+      ]],
+      authTicket: 'valid',
+    }));
+    try {
+      const result = await runHelperAsync(cdpEnv(cdp, { FLEET: `${cdp.origin}/agents` }));
+
+      expect(result).toEqual({ status: 0, stdout: 'already-valid\n', stderr: '' });
+      expect(cdp.record.connectionPaths).toEqual(['/devtools/page/fleet']);
+      expect(cdp.record.tokensSent).toEqual([]);
+    } finally {
+      await cdp.close();
+    }
+  });
+
+  it('withholds the token when CDP reports that the tab left the fleet target before the unlock', async () => {
+    writeTokenFile(join(configDir, 'fleet-tokens.json'));
+    const cdp = await startMockCdp((origin) => ({
+      // Selection and the check before the session probe see the fleet tab;
+      // the check right before the unlock sees it on another site.
+      lists: [
+        [{ id: 'fleet', url: `${origin}/` }],
+        [{ id: 'fleet', url: `${origin}/` }],
+        [{ id: 'fleet', url: 'http://example.invalid/' }],
+      ],
+      authTicket: 'locked',
+    }));
+    try {
+      const result = await runHelperAsync(cdpEnv(cdp));
+
+      expect(result).toEqual({ status: 1, stdout: 'origin-mismatch\n', stderr: '' });
+      expect(cdp.record.tokensSent).toEqual([]);
+      expect(cdp.record.frames.join('\n')).not.toContain(FILE_TOKEN);
+    } finally {
+      await cdp.close();
+    }
+  });
+
+  it('withholds the token when the live document left the fleet origin before the unlock', async () => {
+    writeTokenFile(join(configDir, 'fleet-tokens.json'));
+    const cdp = await startMockCdp((origin) => ({
+      lists: [[{ id: 'fleet', url: `${origin}/` }]],
+      authTicket: 'locked',
+      liveOriginMatches: false,
+    }));
+    try {
+      const result = await runHelperAsync(cdpEnv(cdp));
+
+      expect(result).toEqual({ status: 1, stdout: 'origin-mismatch\n', stderr: '' });
+      expect(cdp.record.tokensSent).toEqual([]);
+      expect(cdp.record.frames.join('\n')).not.toContain(FILE_TOKEN);
+    } finally {
+      await cdp.close();
+    }
+  });
+});
