@@ -10,6 +10,7 @@ const unitPath = path.join(repoRoot, 'deploy/whatsoup-release-drift.service');
 const wrapperPath = path.join(repoRoot, 'deploy/scripts/whatsoup-release-drift-linux.sh');
 const runnerPath = path.join(repoRoot, 'scripts/run-with-pinned-node.sh');
 const schedulerPath = path.join(repoRoot, 'deploy/scripts/run-release-drift-schedule.sh');
+const rendererPath = path.join(repoRoot, 'deploy/scripts/render-release-drift-launchd.sh');
 const tmp = trackTmpDirs('release-drift-unit-');
 const MAIN_GUARD_MARKER = 'fixture-observer-main-guard-ran';
 // The scheduler line that makes the runner report every bootstrap and loading
@@ -290,6 +291,30 @@ describe('whatsoup-release-drift systemd unit', () => {
       return successExitStatuses().has(code);
     });
     expect(outcomes).toEqual([true, true, false]);
+  });
+
+  it('defaults the currency target to the HTTPS URL the macOS renderer uses, and passes a set one through', () => {
+    // A systemd user unit has no SSH agent socket, so an SSH default is
+    // inconclusive on every host without a usable key.
+    const rendererDefault = /^target_url="\$\{WHATSOUP_RELEASE_TARGET_URL:-([^}]+)\}"$/m
+      .exec(readFileSync(rendererPath, 'utf8'))?.[1];
+    expect(rendererDefault).toMatch(/^https:\/\//);
+    const targetUrl = (env: Record<string, string>): string | undefined => {
+      const release = fakeRelease(0);
+      const result = runWrapper({
+        WHATSOUP_RELEASE_DRIFT_INSTANCE: 'test',
+        WHATSOUP_LAUNCHER: release.launcher,
+        WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+        ...env,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const args = readFileSync(release.argsFile, 'utf8').trim().split('\n');
+      return args[args.indexOf('--target-url') + 1];
+    };
+
+    expect(targetUrl({})).toBe(rendererDefault);
+    const ssh = 'ssh://git@example.invalid/owner/repo.git';
+    expect(targetUrl({ WHATSOUP_RELEASE_TARGET_URL: ssh })).toBe(ssh);
   });
 
   it('rejects a release with a scheduler but no observer before systemd can accept exit 1', () => {
