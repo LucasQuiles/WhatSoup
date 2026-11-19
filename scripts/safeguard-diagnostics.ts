@@ -446,7 +446,16 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
     anchors: [],
     validate: qualityCiLanePartitionFailures,
     remediation:
-      'Restore the exact quality (24.x) authority job, quality (25.x) compatibility job, pinned Test Integrity checkout, and measured disk-budget step.',
+      'Restore the exact quality (24.x) authority job, quality (25.x) compatibility job, and measured disk-budget step; keep the test-integrity deploy key, private plugin and guard out of quality.yml.',
+  },
+  {
+    id: 'private-test-integrity-gate',
+    category: 'guard-chain',
+    file: '.github/workflows/private-test-integrity.yml',
+    anchors: [],
+    validate: privateTestIntegrityGateFailures,
+    remediation:
+      'Restore the trusted private test-integrity workflow: workflow_run on Quality, the same-repository condition, and the pinned scanner checkout with persist-credentials: false.',
   },
   {
     id: 'quality-ci-console-design-chain',
@@ -804,6 +813,17 @@ function hasOwn(value: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
 }
 
+// The private test-integrity check runs only in the trusted private-test-integrity workflow. The
+// Quality workflow runs pull-request code, so none of its jobs may hold the deploy key, fetch or
+// install the private plugin, or run the test-integrity guard.
+const TEST_INTEGRITY_PIN = 'ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c';
+const QUALITY_FORBIDDEN_TEST_INTEGRITY_REFERENCES = [
+  'TEST_INTEGRITY_DEPLOY_KEY',
+  'LucasQuiles/test-integrity',
+  '.claude/plugins/test-integrity',
+  'guard:test-integrity',
+];
+
 function containsMappingKey(value: unknown, key: string, seen = new WeakSet<object>()): boolean {
   if (value === null || typeof value !== 'object') return false;
   if (seen.has(value)) return false;
@@ -888,11 +908,7 @@ function qualityCiSemanticShadowFailures(text: string): string[] {
   }
   const semantic = semanticSteps[0]!;
   const semanticIndex = stepRecords.indexOf(semantic);
-  const integrityIndex = stepRecords.findIndex((step) => step.name === 'Install test-integrity plugin');
   const suiteIndex = stepRecords.findIndex((step) => step.name === 'Test suite + coverage thresholds');
-  if (integrityIndex < 0 || semanticIndex > integrityIndex) {
-    failures.push('Semantic quality (shadow) must run before Install test-integrity plugin');
-  }
   if (suiteIndex < 0 || semanticIndex > suiteIndex) {
     failures.push('Semantic quality (shadow) must run before Test suite + coverage thresholds');
   }
@@ -1108,29 +1124,38 @@ function qualityCiLanePartitionFailures(text: string): string[] {
     failures.push('quality workflow must not retain masked unconditional disk cleanup');
   }
 
-  const integritySteps = authority.filter((step) => step.name === 'Install test-integrity plugin');
-  const integrity = integritySteps[0];
-  if (integritySteps.length !== 1 || !integrity) {
-    failures.push('quality (24.x) must install Test Integrity exactly once');
-  } else {
-    const env = asRecord(integrity.env);
-    const pin = env?.TEST_INTEGRITY_COMMIT;
-    if (pin !== 'ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c') {
-      failures.push('Test Integrity commit pin must match the reviewed 40-hex object');
-    }
-    const run = typeof integrity.run === 'string' ? integrity.run : '';
-    for (const required of [
-      'mkdir -p "$plugin_dir" "$HOME/.ssh"',
-      'fetch --depth 1 origin "$TEST_INTEGRITY_COMMIT"',
-      'switch --detach FETCH_HEAD',
-      'observed_commit="$(git -C "$plugin_dir" rev-parse HEAD)"',
-      'if [ "$observed_commit" != "$TEST_INTEGRITY_COMMIT" ]; then',
-    ]) {
-      if (!run.includes(required)) failures.push(`Test Integrity install is missing ${required}`);
-    }
-    if (/\bgit\b[^\n]*\b(?:push|clone)\b/.test(run)) {
-      failures.push('Test Integrity install must not use floating clone or any push command');
-    }
+  // Parsed keys and values, not comments: a comment may name what it explains.
+  const workflowValues = JSON.stringify(root);
+  for (const reference of QUALITY_FORBIDDEN_TEST_INTEGRITY_REFERENCES) {
+    if (workflowValues.includes(reference)) failures.push(`quality workflow must not reference ${reference}`);
+  }
+  return failures;
+}
+
+// The trusted workflow that runs the private plugin after Quality completes. It posts the required
+// test-integrity (private) check for same-repository pull requests and records a receipt for other
+// runs: same-repository runs only, pinned scanner commit, no persisted checkout credentials.
+function privateTestIntegrityGateFailures(text: string): string[] {
+  const { root, failures: parseFailures } = parseWorkflow(text, 'private test-integrity workflow');
+  if (!root) return parseFailures;
+  const failures: string[] = [];
+  const workflows = asRecord(asRecord(root.on)?.workflow_run)?.workflows;
+  if (!Array.isArray(workflows) || workflows.length !== 1 || workflows[0] !== 'Quality') {
+    failures.push('private test-integrity workflow must start on workflow_run of Quality');
+  }
+  const scanner = asRecord(asRecord(root.jobs)?.['private-scanner']);
+  const condition = typeof scanner?.if === 'string' ? scanner.if : '';
+  if (!condition.includes('github.event.workflow_run.head_repository.full_name == github.repository')) {
+    failures.push('private-scanner must run only for same-repository Quality runs');
+  }
+  const checkouts = (Array.isArray(scanner?.steps) ? scanner.steps.map(asRecord) : [])
+    .filter((step) => typeof step?.uses === 'string' && step.uses.startsWith('actions/checkout@'));
+  const checkout = asRecord(checkouts[0]?.with);
+  if (checkouts.length !== 1 || checkout?.ref !== TEST_INTEGRITY_PIN) {
+    failures.push('Test Integrity commit pin must match the reviewed 40-hex object');
+  }
+  if (checkout?.['persist-credentials'] !== false) {
+    failures.push('private-scanner checkout must set persist-credentials: false');
   }
   return failures;
 }
