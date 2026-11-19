@@ -2097,8 +2097,8 @@ owner-decision facts. Its permitted lifecycle states are `accepted`,
 required `workStarted` flag: `accepted` requires it false and `investigating`
 requires it true. `closed` requires `administrativeClosure: true`, and no other
 state may set it true. `accepted` and `investigating` each require an ownership
-record with `facts.acceptance: "accepted"` and a nonblank
-`facts.ownerIdentity`; that is a consistency check over retained local bytes,
+record with `facts.acceptance: "accepted"` and a `facts.ownerIdentity` with a
+visible character; that is a consistency check over retained local bytes,
 not authenticated permission or caller identity. `open` owner decisions require
 an owner action and render it as the sole reader action. If a `readerAction` is
 also supplied, it must be byte-for-byte the same action; closed or not-required
@@ -2128,14 +2128,23 @@ The optional `--human-report-max-characters` and
 claim a universal WhatsApp limit and the renderer rejects an over-limit report
 instead of truncating its required facts or evidence locator.
 
-Rendered condition, target, impact, and action fields reject the C0 and C1
-control characters with DEL (U+0000-U+001F, U+007F-U+009F), the Unicode line
-and paragraph separators (U+2028, U+2029), the bidirectional formatting
-characters (U+061C, U+200E, U+200F, U+202A-U+202E, U+2066-U+2069), WhatsApp
-markup delimiters, and raw 64-hex SHA-256 values. The same rules apply to the
-incident id, the condition ids and the owner identity. They do not reject other
-Unicode text or incidental words such as `Haystack`. The host-qualified
-evidence locator refuses the same control, separator and bidirectional
-characters (`locator_control_character`); otherwise it remains the exact
-verified local path and may contain Unicode or ordinary path components such
-as `stack` or `receiptsha`.
+The rules below apply to the rendered condition, target, impact, and action
+fields, and to the incident id, the condition ids and the owner identity. Each
+such field that is present must hold at least one visible character: a value
+made only of white space and characters that render as nothing counts as
+missing. The characters that render as nothing are the soft hyphen (U+00AD),
+U+180E, U+200B-U+200D, U+2060, U+FEFF, the variation selectors (U+180B-U+180D,
+U+180F, U+FE00-U+FE0F, U+E0100-U+E01EF) and the tag characters
+(U+E0000-U+E007F). The fields also reject the C0 and C1 control characters with
+DEL (U+0000-U+001F, U+007F-U+009F), the Unicode line and paragraph separators
+(U+2028, U+2029), the bidirectional formatting characters (U+061C, U+200E,
+U+200F, U+202A-U+202E, U+2066-U+2069), U+FEFF, U+180E and the tag characters
+(which have no ordinary use in this text), WhatsApp markup delimiters, and raw
+64-hex SHA-256 values. The other characters that render as nothing stay
+accepted beside visible text: emoji and ideographic variation sequences need
+U+200D and the variation selectors. Other Unicode text and incidental words
+such as `Haystack` are not rejected. The host-qualified evidence locator
+refuses the same control, separator and bidirectional characters, and U+FEFF,
+U+180E and the tag characters (`locator_control_character`); otherwise it
+remains the exact verified local path and may contain Unicode or ordinary path
+components such as `stack` or `receiptsha`.

@@ -44,6 +44,10 @@ _RAW_SHA256_RE = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])")
 # Bidirectional formatting characters reorder how the rest of a line displays,
 # so a field holding one can show text in an order its bytes do not have.
 _BIDI_FORMATTING = frozenset("؜‎‏‪‫‬‭‮⁦⁧⁨⁩")
+# Characters that occupy no visible space: soft hyphen, Mongolian vowel
+# separator, zero width space, non-joiner and joiner, word joiner, zero width
+# no-break space. The variation selectors and tag characters are ranges, below.
+_INVISIBLE = frozenset(chr(code) for code in (0x00AD, 0x180E, 0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF))
 
 
 class ReportQualificationError(ValueError):
@@ -116,17 +120,42 @@ def _mapping(value: object, code: str) -> Mapping[str, Any]:
 
 
 def _unsafe_character(character: str) -> bool:
-    """C0 and C1 controls with DEL, the line and paragraph separators, bidi formatting.
+    """C0 and C1 controls with DEL, the line and paragraph separators, bidi
+    formatting, and U+FEFF, U+180E and the tag characters.
 
-    Each can start a new rendered line or reorder one, so a field holding it
-    could forge a status or reader-action line.
+    Each of the first three can start a new rendered line or reorder one, so a
+    field holding it could forge a status or reader-action line. The last three
+    have no ordinary use in this text and render as nothing, so they could
+    carry words a reader does not see.
     """
     code = ord(character)
-    return code < 0x20 or 0x7F <= code <= 0x9F or code in (0x2028, 0x2029) or character in _BIDI_FORMATTING
+    return (
+        code < 0x20
+        or 0x7F <= code <= 0x9F
+        or code in (0x2028, 0x2029, 0x180E, 0xFEFF)
+        or 0xE0000 <= code <= 0xE007F
+        or character in _BIDI_FORMATTING
+    )
+
+
+def _renders_as_nothing(character: str) -> bool:
+    """White space, the invisible characters, the variation selectors and tag characters."""
+    code = ord(character)
+    return (
+        character.isspace()
+        or character in _INVISIBLE
+        or 0x180B <= code <= 0x180D
+        or code == 0x180F
+        or 0xFE00 <= code <= 0xFE0F
+        or 0xE0000 <= code <= 0xE007F
+        or 0xE0100 <= code <= 0xE01EF
+    )
 
 
 def _safe_text(value: object, code: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    # A field with no visible character would render an empty line, so it
+    # counts as missing, as a blank one always did.
+    if not isinstance(value, str) or all(_renders_as_nothing(character) for character in value):
         raise ReportQualificationError(code)
     text = value
     if any(_unsafe_character(character) for character in text):

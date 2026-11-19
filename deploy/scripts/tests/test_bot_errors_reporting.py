@@ -458,12 +458,12 @@ def test_ordinary_unicode_text_still_renders(tmp_path: Path) -> None:
 
 # Characters that render as nothing, as escapes so the bytes stay reviewable.
 _INVISIBLE_CHARACTERS = (
-    "­",  # soft hyphen
-    "᠎",  # Mongolian vowel separator
-    "​", "‌", "‍",  # zero width space, non-joiner, joiner
-    "⁠",  # word joiner
-    "﻿",  # zero width no-break space
-    "᠋", "️", "\U000e0100",  # variation selectors
+    "\U000000ad",  # soft hyphen
+    "\U0000180e",  # Mongolian vowel separator
+    "\U0000200b", "\U0000200c", "\U0000200d",  # zero width space, non-joiner, joiner
+    "\U00002060",  # word joiner
+    "\U0000feff",  # zero width no-break space
+    "\U0000180b", "\U0000fe0f", "\U000e0100",  # variation selectors
     "\U000e0041",  # a tag character
 )
 
@@ -478,8 +478,8 @@ def test_a_field_made_only_of_invisible_characters_counts_as_missing(tmp_path: P
 
 
 _WITHOUT_ORDINARY_USE = (
-    "﻿",  # zero width no-break space
-    "᠎",  # Mongolian vowel separator
+    "\U0000feff",  # zero width no-break space
+    "\U0000180e",  # Mongolian vowel separator
     "\U000e0001", "\U000e0020", "\U000e0041", "\U000e007f",  # tag characters: first, space, letter, cancel
 )
 
@@ -503,7 +503,10 @@ def test_characters_without_ordinary_use_are_refused_in_text_and_locators(tmp_pa
 def test_joiners_and_variation_selectors_stay_accepted_inside_visible_text(tmp_path: Path) -> None:
     # Emoji and ideographic variation sequences need U+200D and the variation
     # selectors; soft hyphen and non-joiner stay accepted beside visible text.
-    target = "host-a queue ❤️ \U0001F469‍\U0001F4BB 葛\U000e0100 re­try می‌خواهم"
+    target = (
+        "host-a queue \U00002764\U0000fe0f \U0001F469\U0000200d\U0001F4BB \U0000845b\U000e0100 re\U000000adtry "
+        "\U00000645\U000006cc\U0000200c\U0000062e\U00000648\U00000627\U00000647\U00000645"
+    )
     document = _document(tmp_path)
     _replace_handling(document, tmp_path, _handling_facts(target=target))
     rendered = reporting.render_human_report(_qualify(document, tmp_path))
