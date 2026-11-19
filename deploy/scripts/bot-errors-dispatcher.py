@@ -11865,39 +11865,73 @@ def run_daemon(interval: int, max_events: int) -> None:
         time.sleep(interval)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Drain local BOT ERRORS outbox")
-    parser.add_argument("--once", action="store_true", help="process ready events once and exit")
-    parser.add_argument("--daemon", action="store_true", help="run continuously")
-    parser.add_argument("--interval", type=int, default=30)
-    parser.add_argument("--max-events", type=int, default=25)
-    parser.add_argument("--format-event", help="format one event JSON file without sending")
-    parser.add_argument(
+def _human_report_preview_parser() -> argparse.ArgumentParser:
+    """Options of the non-emitting human-report preview, accepted by full name only.
+
+    They stay off the dispatcher's own parser: registered there, they would make
+    abbreviations that parser has always resolved ambiguous (``--format`` for
+    ``--format-event``, ``--h`` for ``--help``).
+    """
+    preview = argparse.ArgumentParser(
+        description="human-report preview options (full option names only):",
+        usage=argparse.SUPPRESS,
+        add_help=False,
+        allow_abbrev=False,
+    )
+    preview.add_argument(
         "--format-human-report",
         help="qualify and render one retained-evidence human report JSON file without sending",
     )
-    parser.add_argument(
+    preview.add_argument(
         "--human-report-approved-root",
         action="append",
         default=[],
         metavar="DIR",
         help="trusted configuration root allowed to contain human-report evidence (repeatable)",
     )
-    parser.add_argument("--human-report-max-characters", type=int)
-    parser.add_argument("--human-report-max-utf8-bytes", type=int)
-    args = parser.parse_args()
+    preview.add_argument("--human-report-max-characters", type=int)
+    preview.add_argument("--human-report-max-utf8-bytes", type=int)
+    return preview
 
-    if args.format_human_report:
+
+def main() -> int:
+    preview_parser = _human_report_preview_parser()
+    preview, remaining = preview_parser.parse_known_args()
+    parser = argparse.ArgumentParser(
+        description="Drain local BOT ERRORS outbox",
+        epilog=preview_parser.format_help(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--once", action="store_true", help="process ready events once and exit")
+    parser.add_argument("--daemon", action="store_true", help="run continuously")
+    parser.add_argument("--interval", type=int, default=30)
+    parser.add_argument("--max-events", type=int, default=25)
+    parser.add_argument("--format-event", help="format one event JSON file without sending")
+    args = parser.parse_args(remaining)
+
+    # Without these refusals an empty report name, or a preview option given
+    # without a report file, would fall through to a live dispatch cycle. They
+    # exit before any lock, state or outbox is touched.
+    if preview.format_human_report == "":
+        parser.error("--format-human-report needs a file name")
+    if preview.format_human_report is None and (
+        preview.human_report_approved_root
+        or preview.human_report_max_characters is not None
+        or preview.human_report_max_utf8_bytes is not None
+    ):
+        parser.error("--human-report-approved-root and the --human-report-max-* limits need --format-human-report")
+
+    if preview.format_human_report is not None:
         try:
             report = qualify_report_file(
-                Path(args.format_human_report),
-                approved_roots=tuple(Path(root) for root in args.human_report_approved_root),
+                Path(preview.format_human_report),
+                approved_roots=tuple(Path(root) for root in preview.human_report_approved_root),
             )
             print(render_human_report(
                 report,
                 limits=ReportLimits(
-                    max_characters=args.human_report_max_characters,
-                    max_utf8_bytes=args.human_report_max_utf8_bytes,
+                    max_characters=preview.human_report_max_characters,
+                    max_utf8_bytes=preview.human_report_max_utf8_bytes,
                 ),
             ))
         except ReportQualificationError as exc:
