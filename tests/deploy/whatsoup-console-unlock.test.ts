@@ -64,8 +64,10 @@ function expectRefused(result: HelperRun, reason: string): void {
   expect(result).toEqual({ status: 1, stdout: `no-fleet-token:${reason}\n`, stderr: '' });
 }
 
-// The helper's size bound; a real token file is under 1 KiB.
-const MAX_TOKEN_FILE_BYTES = 64 * 1024;
+// The helper's size bound, a guard against a wrong file; a real token file is
+// under 1 KiB. The round before set 64 KiB, which main did not have.
+const MAX_TOKEN_FILE_BYTES = 1024 * 1024;
+const EARLIER_BOUND_BYTES = 64 * 1024;
 
 function writePaddedTokenFile(path: string, size: number): void {
   const base = JSON.stringify({ active: FILE_TOKEN, accept: [], rotatedAt: '1970-01-01T00:00:00.000Z', padding: '' });
@@ -89,9 +91,9 @@ function statPreload(name: string, call: 'lstatSync' | 'fstatSync', change: stri
   return pathToFileURL(file).href;
 }
 
-function runHelperAsync(env: NodeJS.ProcessEnv): Promise<HelperRun> {
+function runHelperAsync(env: NodeJS.ProcessEnv, nodeArgs: string[] = []): Promise<HelperRun> {
   return new Promise((resolveRun, rejectRun) => {
-    const child = spawn(process.execPath, [HELPER], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [...nodeArgs, HELPER], { env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => child.kill('SIGKILL'), 8_000);
@@ -134,8 +136,10 @@ interface MockCdpConfig {
   settleUrl?: string;
   /** The live document moves here right after the session probe is answered. */
   moveAfterProbe?: string;
-  /** The live document moves here when the helper asks for `window`. */
+  /** The live document moves here when the helper asks for the window object, before that call is evaluated. */
   moveOnWindow?: string;
+  /** The live document moves here right after the window object is answered, before the unlock call. */
+  moveAfterWindow?: string;
   /** The page's unlock request rejects with this text. */
   unlockFetchError?: string;
   /** The unlock call throws in the page with this text. */
@@ -158,6 +162,8 @@ interface MockCdpRecord {
   connectionPaths: string[];
   /** First argument of every Runtime.callFunctionOn (the unlock call). */
   tokensSent: unknown[];
+  /** First argument of each unlock call that ran in a document. */
+  tokensDelivered: unknown[];
   /** Every text frame the helper sent. */
   frames: string[];
   /** Every fetch the page made. */
@@ -181,6 +187,7 @@ interface CdpMessage {
   params?: {
     expression?: string;
     url?: string;
+    returnByValue?: boolean;
     objectId?: string;
     functionDeclaration?: string;
     arguments?: Array<{ value?: unknown }>;
@@ -202,6 +209,10 @@ interface PageFetchInit {
   headers?: Record<string, string>;
   mode?: string;
 }
+
+// The page's `window` inside the vm context; an evaluation that yields it is
+// answered with an object id, as CDP answers a remote object.
+const PAGE_WINDOW = Object.freeze({ pageWindow: true });
 
 function pageContext(live: LiveDocument, config: MockCdpConfig, record: MockCdpRecord): Context {
   const documentUrl = live.url;
@@ -231,6 +242,7 @@ function pageContext(live: LiveDocument, config: MockCdpConfig, record: MockCdpR
     location: { origin: location.origin, href: location.href, pathname: location.pathname },
     document: { readyState: 'complete' },
     fetch: pageFetch,
+    window: PAGE_WINDOW,
   });
 }
 
@@ -252,10 +264,12 @@ async function answerCdp(live: LiveDocument, config: MockCdpConfig, record: Mock
   if (message.method === 'Runtime.callFunctionOn') {
     const values = (params.arguments ?? []).map((argument) => argument.value);
     record.tokensSent.push(values[0]);
-    // As in a browser, a window object of an earlier document is gone.
+    // As in a browser, a window object of an earlier document is gone, so the
+    // call fails and no document receives its arguments.
     if (params.objectId !== `window-${live.generation}`) {
       return { error: { code: -32000, message: 'Cannot find context with specified id' } };
     }
+    record.tokensDelivered.push(values[0]);
     if (config.unlockException) {
       const text = config.unlockException;
       return { result: { result: { type: 'object' }, exceptionDetails: { text, exception: { description: text } } } };
@@ -266,9 +280,22 @@ async function answerCdp(live: LiveDocument, config: MockCdpConfig, record: Mock
   }
   if (message.method !== 'Runtime.evaluate') return { result: {} };
   const expression = params.expression ?? '';
-  if (expression === 'window') {
+  if (params.returnByValue !== true) {
+    // The window lookup, evaluated in the live document like any expression.
+    // A navigation can commit right before it (moveOnWindow) or right after
+    // its answer (moveAfterWindow).
     moveOnce(live, 'window', config.moveOnWindow);
-    return { result: { result: { type: 'object', objectId: `window-${live.generation}` } } };
+    let found: unknown;
+    try {
+      found = runInContext(expression, pageContext(live, config, record));
+    } catch (error) {
+      return { result: { result: { type: 'undefined' }, exceptionDetails: { text: String(error) } } };
+    }
+    const answer = found === PAGE_WINDOW
+      ? { type: 'object', objectId: `window-${live.generation}` }
+      : found === null ? { type: 'object', subtype: 'null', value: null } : { type: typeof found, value: found };
+    moveOnce(live, 'after-window', config.moveAfterWindow);
+    return { result: { result: answer } };
   }
   live.evaluations += 1;
   if (live.evaluations > (config.settleAfter ?? 0)) moveOnce(live, 'settle', config.settleUrl);
@@ -321,7 +348,15 @@ function readClientFrames(reader: FrameReader, chunk: Buffer, onText: (text: str
 }
 
 async function startMockCdp(configure: (origin: string) => MockCdpConfig): Promise<MockCdp> {
-  const record: MockCdpRecord = { connectionPaths: [], tokensSent: [], frames: [], requests: [], newTabs: [], navigations: [] };
+  const record: MockCdpRecord = {
+    connectionPaths: [],
+    tokensSent: [],
+    tokensDelivered: [],
+    frames: [],
+    requests: [],
+    newTabs: [],
+    navigations: [],
+  };
   const sockets = new Set<Duplex>();
   const tabUrls = new Map<string, string>();
   const live: LiveDocument = { url: 'about:blank', generation: 0, evaluations: 0, moves: new Set() };
@@ -469,9 +504,9 @@ describe('whatsoup-console-unlock.mjs token source', () => {
 });
 
 // main refused only group or other permission bits on the file. The head keeps
-// that, adds what blocks a real exposure or a hang (leaf symlink, non-regular
-// file, another owner, a swapped file, an unbounded read), and checks nothing
-// on the folder.
+// that, adds what blocks a misdirected read or a hang (leaf symlink,
+// non-regular file, a file swapped twice, a read past 1 MiB), and checks
+// neither the owner nor the folder.
 describe('whatsoup-console-unlock.mjs fleet-token file checks', () => {
   it('accepts a token file with mode 0600 or 0400 in a folder that group and others can open', () => {
     const tokenFile = join(configDir, 'fleet-tokens.json');
@@ -533,8 +568,11 @@ describe('whatsoup-console-unlock.mjs fleet-token file checks', () => {
     expectRefused(runHelper(), 'not-a-file');
   });
 
-  it('accepts a token file at the size bound and refuses one byte more', () => {
+  it('accepts a token file over the earlier 64 KiB bound, up to 1 MiB, and refuses one byte more', () => {
     const tokenFile = join(configDir, 'fleet-tokens.json');
+    writePaddedTokenFile(tokenFile, EARLIER_BOUND_BYTES + 1);
+    expectPastTokenRead(runHelper());
+
     writePaddedTokenFile(tokenFile, MAX_TOKEN_FILE_BYTES);
     expectPastTokenRead(runHelper());
 
@@ -542,23 +580,33 @@ describe('whatsoup-console-unlock.mjs fleet-token file checks', () => {
     expectRefused(runHelper(), 'too-large');
   });
 
-  it('refuses a token file that the check before opening sees owned by another user', () => {
+  it('accepts a private token file owned by another user, before and after the open, as main did', () => {
     writeTokenFile(join(configDir, 'fleet-tokens.json'));
-    expectPastTokenRead(runHelper({}, ['--import', statPreload('lstat-control', 'lstatSync', '')]));
 
-    const otherOwner = statPreload('lstat-owner', 'lstatSync', "if (String(target).endsWith('fleet-tokens.json')) stat.uid += 1;");
-    expectRefused(runHelper({}, ['--import', otherOwner]), 'owner');
+    const otherOwnerBefore = statPreload('lstat-owner', 'lstatSync', "if (String(target).endsWith('fleet-tokens.json')) stat.uid += 1;");
+    expectPastTokenRead(runHelper({}, ['--import', otherOwnerBefore]));
+    expectPastTokenRead(runHelper({}, ['--import', statPreload('fstat-owner', 'fstatSync', 'stat.uid += 1;')]));
   });
 
-  it('refuses a token file that the check after opening sees owned by another user', () => {
+  it('reads a token file replaced between the check and the open once more, as an atomic rotation does', async () => {
+    writeTokenFile(join(configDir, 'fleet-tokens.json'));
+    // Only the first opened descriptor shows another inode: the file was
+    // renamed over between the lstat and the open, then stays put.
+    const swapOnce = statPreload('fstat-swap-once', 'fstatSync', 'if (!globalThis.swapSeen) { globalThis.swapSeen = true; stat.ino += 1; }');
+    const cdp = await startMockCdp((origin) => ({ lists: [[{ id: 'fleet', url: `${origin}/` }]], authTicket: 'locked' }));
+    try {
+      const result = await runHelperAsync(cdpEnv(cdp), ['--import', swapOnce]);
+
+      expect(result).toEqual({ status: 0, stdout: 'unlocked\n', stderr: '' });
+      expect(cdp.record.tokensSent).toEqual([FILE_TOKEN]);
+    } finally {
+      await cdp.close();
+    }
+  });
+
+  it('refuses a token file whose opened inode differs from the checked one on the second read too', () => {
     writeTokenFile(join(configDir, 'fleet-tokens.json'));
     expectPastTokenRead(runHelper({}, ['--import', statPreload('fstat-control', 'fstatSync', '')]));
-
-    expectRefused(runHelper({}, ['--import', statPreload('fstat-owner', 'fstatSync', 'stat.uid += 1;')]), 'owner');
-  });
-
-  it('refuses a token file whose opened inode differs from the checked one', () => {
-    writeTokenFile(join(configDir, 'fleet-tokens.json'));
 
     expectRefused(runHelper({}, ['--import', statPreload('fstat-inode', 'fstatSync', 'stat.ino += 1;')]), 'changed');
   });
@@ -591,17 +639,27 @@ describe('whatsoup-console-unlock.mjs fleet target', () => {
       'http://127.0.0.2:9227',
       'http://[::1]:9227',
       'http://localhost.:9227',
+      // IPv4-mapped loopback literals; the URL parser writes them as [::ffff:7f00:1].
+      'http://[::ffff:127.0.0.1]:9227',
+      'http://[0:0:0:0:0:ffff:7f00:2]:9227',
     ]) {
       expectPastTokenRead(runHelper({ FLEET: fleetUrl }));
     }
   });
 
-  it('refuses a plain-http FLEET on a host that is not loopback before contacting CDP', () => {
+  it('refuses a plain-http FLEET on a host that is not a loopback address, names the fix and contacts no CDP', () => {
     writeTokenFile(join(configDir, 'fleet-tokens.json'));
 
-    // The root token would cross the network unencrypted.
-    expect(runHelper({ FLEET: 'http://localhost.example.invalid:9227/agents' }))
-      .toEqual({ status: 1, stdout: 'insecure-fleet-url\n', stderr: '' });
+    // The helper looks up no names: a host name that may resolve to loopback
+    // is refused as well, and the operator writes a loopback address instead.
+    for (const fleetUrl of [
+      'http://localhost.example.invalid:9227/agents',
+      'http://console.localhost:9227',
+      'http://[::ffff:192.0.2.10]:9227',
+    ]) {
+      expect(runHelper({ FLEET: fleetUrl }))
+        .toEqual({ status: 1, stdout: 'insecure-fleet-url: use https, or a loopback address\n', stderr: '' });
+    }
   });
 
   it('refuses a FLEET that is not an http or https URL', () => {
@@ -744,6 +802,27 @@ describe('whatsoup-console-unlock.mjs fleet target', () => {
       await cdp.close();
     }
   });
+
+  it('accepts a console that the FLEET path redirects to on the same origin, as main did', async () => {
+    writeTokenFile(join(configDir, 'fleet-tokens.json'));
+    const cdp = await startMockCdp((origin) => ({
+      // No tab is open. The new tab's FLEET page redirects on the same origin
+      // to a path that begins with the FLEET path text, and CDP then lists it there.
+      lists: [[], [{ id: 'new', url: `${origin}/agents-v2/` }]],
+      authTicket: 'locked',
+      settleUrl: `${origin}/agents-v2/`,
+    }));
+    try {
+      const result = await runHelperAsync(cdpEnv(cdp, { FLEET: `${cdp.origin}/agents` }));
+
+      expect(result).toEqual({ status: 0, stdout: 'unlocked\n', stderr: '' });
+      expect(cdp.record.navigations).toEqual([`${cdp.origin}/agents/`]);
+      expect(unlockRequests(cdp).map((request) => request.documentUrl)).toEqual([`${cdp.origin}/agents-v2/`]);
+      expect(unlockRequests(cdp).map((request) => request.url)).toEqual([`${cdp.origin}/api/console-session`]);
+    } finally {
+      await cdp.close();
+    }
+  });
 });
 
 describe('whatsoup-console-unlock.mjs unlock call', () => {
@@ -769,18 +848,40 @@ describe('whatsoup-console-unlock.mjs unlock call', () => {
     }
   });
 
-  it('sends nothing when the document changes between the last check and the unlock call', async () => {
+  it('sends the token in no frame when the document changes before the window lookup', async () => {
     writeTokenFile(join(configDir, 'fleet-tokens.json'));
     const cdp = await startMockCdp((origin) => ({
       lists: [[{ id: 'fleet', url: `${origin}/` }]],
       authTicket: 'locked',
-      // A navigation commits after the last check, before the helper asks for window.
+      // A navigation commits after the last tab check, before the helper asks for window.
       moveOnWindow: 'http://example.invalid/',
     }));
     try {
       const result = await runHelperAsync(cdpEnv(cdp));
 
+      // The window lookup itself checks the origin and carries no token.
       expect(result).toEqual({ status: 1, stdout: 'origin-mismatch\n', stderr: '' });
+      expect(cdp.record.tokensSent).toEqual([]);
+      expect(cdp.record.frames.join('\n')).not.toContain(FILE_TOKEN);
+      expect(unlockRequests(cdp)).toEqual([]);
+    } finally {
+      await cdp.close();
+    }
+  });
+
+  it('fails the unlock call, and no document receives the token, when a navigation commits after the window lookup', async () => {
+    writeTokenFile(join(configDir, 'fleet-tokens.json'));
+    const cdp = await startMockCdp((origin) => ({
+      lists: [[{ id: 'fleet', url: `${origin}/` }]],
+      authTicket: 'locked',
+      moveAfterWindow: 'http://example.invalid/',
+    }));
+    try {
+      const result = await runHelperAsync(cdpEnv(cdp));
+
+      // The call names the checked document's window object, which is gone.
+      expect(result).toEqual({ status: 1, stdout: 'err:empty-cdp-result\n', stderr: '' });
+      expect(cdp.record.tokensDelivered).toEqual([]);
       expect(unlockRequests(cdp)).toEqual([]);
     } finally {
       await cdp.close();
