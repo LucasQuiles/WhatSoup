@@ -64,23 +64,27 @@ The 20-minute watchdog can leave an inconclusive or missing check; a failed read
 after a remote write is an observability gap, not proof that no check was created.
 Fork and merge-queue inputs remain unsupported by this workflow.
 
-Keep the existing Quality scanner step and required checks during qualification.
+Quality no longer runs the scanner: no Quality job holds the deploy key, installs
+the private plugin or runs `guard:test-integrity`, so `test-integrity (private)` is
+the only server-side test-integrity check. Classic branch protection requires it,
+and since 2026-11-19 the ruleset does too, so admins cannot merge past it either
+(see Branch Protection).
 Quality runs full validation daily at 06:23 UTC. It compares tags and scheduled
 runs against `HEAD^` for baseline growth;
 a new tag's all-zero `before` value cannot identify a previous revision. PRs,
 merge groups and main pushes retain their event-provided base revisions.
 The guard's JSON receipt and reproduction command name the resolved commit OIDs,
 including when the input base is a relative revision such as `HEAD^`.
-Only after hosted canaries prove current-head publication, stale-head refusal,
-credential confinement, cleanup and failure handling should the private check be
-required. Qualify the tag receipt with the existing `scripts/private-integrity-release.ts`
+Qualify the tag receipt with the existing `scripts/private-integrity-release.ts`
 `select` and `verify` commands before the testing pipeline connects that consumer
 as its release gate. Quality tags run the full existing suite during this staged
 qualification; the existing tag guard workflow remains active. This is temporary
 overlap owned by the testing pipeline cutover and ends when its receipt-based tag
-gate is verified. Remove the repository-scoped scanner secret only after the trusted check
-is operational and Quality no longer consumes that secret. Local adapter tests or
-a parsed workflow contract do not establish those hosted guarantees.
+gate is verified. Quality no longer consumes the repository-scoped scanner secret.
+The remaining owner step comes after this change is on `main`: delete that
+repository-scoped `TEST_INTEGRITY_DEPLOY_KEY` secret and rotate the read-only deploy
+key kept in the `private-scanner-trusted` environment. Local adapter tests or a
+parsed workflow contract do not establish the hosted guarantees described above.
 
 Public native capture fixtures run separately from the pure adapter tests:
 `npm test -- --pool=forks tests/scripts/private-test-integrity-native.test.ts`.
@@ -571,12 +575,14 @@ Main thread should `grep` to spot-check whenever a reviewer claims a previously-
 **Ruleset "Lock"** (id `16319133`, enforcement `active`, `bypass_actors=[]` so it binds admins), scoped to `~DEFAULT_BRANCH`, four rules:
 - `deletion` — branch deletion blocked
 - `non_fast_forward` — force-pushes blocked
-- `required_status_checks` — `quality (24.x)` and `quality (25.x)` must pass (strict=false; branch need not be up to date)
+- `required_status_checks` — `quality (24.x)` and `quality (25.x)` must pass (strict=false; branch need not be up to date); since 2026-11-19 also `test-integrity (private)`, bound to GitHub Actions
 - `pull_request` — a PR is required, **with 0 required approvals**
 
 **Classic branch protection** (same branch) additionally requires the **`CodeQL`** check, with `strict=true` (branch must be up to date), and — since the R-02 remediation — **`required_pull_request_reviews.required_approving_review_count = 1`** with `dismiss_stale_reviews=true` (an approval does not survive later commits). Its `enforce_admins=false`, so an admin can bypass the classic surface (including CodeQL *and* the approval requirement); the ruleset still binds admins to the quality checks, the PR requirement, and the non-fast-forward/deletion blocks.
 
 **Net effect** — a non-admin contributor must pass `quality (24.x)` + `quality (25.x)` + `CodeQL`, have an up-to-date branch, **and obtain one approving review**; `CodeQL` and the approval are admin-bypassable. **`CodeQL` has no in-repo workflow** — it is GitHub *default code-scanning setup* (state=configured; languages actions/javascript/javascript-typescript/python/typescript; weekly + PR), so it is invisible to an in-repo-only search.
+
+**Update 2026-11-19.** The ruleset's `required_status_checks` rule now also requires `test-integrity (private)`, bound to the GitHub Actions app, because the Quality job no longer runs the test-integrity scan. The ruleset's other rules and its empty bypass list are unchanged, so admins cannot merge past that check either. Classic branch protection is unchanged: it requires five checks (`quality (24.x)`, `quality (25.x)`, `CodeQL`, `test-integrity (private)` and `gitleaks`) with `strict=true` and `enforce_admins=false`. A non-admin therefore needs all five checks; an admin still needs the three ruleset checks.
 
 ⚠️ **Admin self-merge remains possible — deliberately.** R-02 closed the self-merge gap for *non-admins* by setting 1 required approval on the classic surface. It does **not** bind admins: classic `enforce_admins=false`, and the ruleset's `pull_request` rule (which does bind admins) still requires **0** approvals. So a repo admin can still merge their own PR. This is an accepted residual — raising the ruleset's approval count would block every solo merge on a single-maintainer repo. To close it fully, set the approval count on ruleset `16319133` instead.
 
