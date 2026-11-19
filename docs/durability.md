@@ -291,7 +291,7 @@ For each `maybe_sent` op (including those promoted in Step 1):
   - `safe`/`read_only`, without typed `transport.send_ambiguous`: reset to `pending` for replay (re-sent by the drainer, §4.4).
   - `unsafe` or typed `transport.send_ambiguous`: `markQuarantined()`.
 
-Self-authorship is necessary but does not establish provider account or conversation identity. The chat binding means a self message in a different conversation never confirms the send; it holds the op for quarantine review instead. This check does not resolve Signal UUID/number aliases or rows lost to the message store's global ID uniqueness; those remain tracked in #3841. A provider or historical row that omits self-authorship is conflicting evidence and requires quarantine review, including for caller-declared safe/read-only operations. Only an absent matching row retains the existing missing-evidence replay policy. This can increase manual recovery work for legacy history; qualify adapter history behavior before rollout.
+Self-authorship is necessary but does not establish provider account or conversation identity. The chat binding means a self message in a different chat (exact `chat_jid`, whatever its conversation key) never confirms the send; it holds the op for quarantine review instead. This check does not resolve Signal UUID/number aliases or rows lost to the message store's global ID uniqueness; those remain tracked in #3841. A provider or historical row that omits self-authorship is conflicting evidence and requires quarantine review, including for caller-declared safe/read-only operations. Only an absent matching row retains the existing missing-evidence replay policy. This can increase manual recovery work for legacy history; qualify adapter history behavior before rollout.
 
 A full history message replaces an envelope-only placeholder only when it comes from the placeholder's chat;
 its `fromMe` value then replaces the placeholder's persisted authorship together with the body.
@@ -302,7 +302,7 @@ Here, a conflict means a row occupying the exact stored `message_id` used by the
 outbound receipt, in any chat, unless it is a self-authored row in the op's own chat. Ordinary Signal peer messages use a composite `signal:` storage
 key; self syncs and outbound receipts retain the raw provider timestamp. A peer
 message with the same timestamp therefore does not occupy the self-echo key and
-does not by itself require quarantine. Without a matching self echo, the existing
+does not by itself require quarantine. With no row at that raw key, the existing
 missing-evidence replay policy still applies. The composed Signal recovery tests
 cover both arrival orders and database reopening; they use controlled provider
 records, not live delivery evidence. Conversation/account correlation remains #3841.
