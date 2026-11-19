@@ -92,6 +92,16 @@ transaction, not proof that the release or bot runtime is healthy. It preserves
 the profile path, including references into an older release; retain that source
 while the job still depends on it. Run outside the job's scheduled execution.
 
+Re-pin does not change an environment-file wrapper (`/bin/bash -c`), whose
+`BOT_ERRORS_HEALTH_PROFILE` path stays under the older release; when the new
+release declares a
+[BOT ERRORS health-consumer requirement](../../docs/runbooks/release-deployment.md#bot-errors-health-consumer-prerequisite),
+`release:activate` reads such a job as unrecognized and refuses activation with
+exit 2 before any change. For such a job, run this installer without arguments
+and with `BOT_ERRORS_REPO_ROOT` set to the new release instead: it renders a
+fresh job whose runner, checker and working directory are in that release,
+without the wrapper.
+
 ```bash
 BOT_ERRORS_REPO_ROOT=/absolute/reviewed-release \
   bash deploy/scripts/install-bot-errors-health-launchd.sh --repin-existing \
