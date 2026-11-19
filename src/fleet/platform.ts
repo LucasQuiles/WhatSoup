@@ -15,6 +15,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { isValidInstanceName } from './instance-name.ts';
 import { escapeRegExp } from '../lib/regex-utils.ts';
+import { cleanGitEnv } from '../lib/git-env.ts';
 import {
   assertValidLaunchdPlistRenderOptions,
   LaunchdRenderConfigError,
@@ -30,6 +31,18 @@ import { SIGNAL } from '../lib/signals.ts';
 const execFileAsync = promisify(execFile);
 export const LAUNCHD_BOOTSTRAP_RETRY_LIMIT = 10;
 export const LAUNCHD_BOOTSTRAP_RETRY_DELAY_MS = 1_000;
+/**
+ * Bound for the boot preflight that restart_self runs before it sends or stops
+ * anything. The run starts several Node processes, probes the import graph and
+ * quick-checks the live database; a run past this bound refuses the restart.
+ */
+export const RESTART_SELF_PREFLIGHT_TIMEOUT_MS = 120_000;
+
+/**
+ * Outcome of ServiceManager.checkRestartSelf: the boot preflight's exit status
+ * only (its output can name paths), or null when it timed out or did not start.
+ */
+export type RestartSelfCheck = { ok: true } | { ok: false; exitCode: number | null };
 
 // ---------------------------------------------------------------------------
 // Platform detection
@@ -255,13 +268,23 @@ function assertExpectedGeneratedLaunchdPlist(name: string, contents: string): vo
   throw new Error(`launchd plist for ${launchdLabel(name)} does not match the generated WhatSoup instance identity`);
 }
 
-/** Lifecycle commands (start, stop, restart, restartSelf, disable) accept either owned form. */
+/** Lifecycle commands (start, stop, restart, restartSelf, checkRestartSelf, disable) accept either owned form. */
 function assertOwnedLaunchdPlist(name: string, contents: string): void {
   if (!isExpectedGeneratedLaunchdPlist(name, contents) && !isReleasePinnedLaunchdPlist(name, contents)) {
     throw new Error(
       `launchd plist for ${launchdLabel(name)} does not match the generated WhatSoup instance identity or a release-pinned one`,
     );
   }
+}
+
+/**
+ * WHATSOUP_NODE, the interpreter deploy/lib/resolve-node.sh takes before its
+ * `.nvmrc` default. Inside an instance it is the job's own value, which the
+ * launcher reads again when the job next starts.
+ */
+function launcherNodeOverride(): string | undefined {
+  // env-allowed: host-level generating-shell platform detection; pre-instance by design
+  return process.env.WHATSOUP_NODE;
 }
 
 /**
@@ -292,8 +315,7 @@ export function buildPlist(name: string, renderOptions: LaunchdPlistRenderOption
   // non-empty: launchctl drops empty-valued keys, so an empty rendered value
   // would read back as absent and report as permanent drift.
   const governedPathPrepend = (renderOptions.pathPrepend ?? []).join(':');
-  // env-allowed: host-level generating-shell platform detection; pre-instance by design
-  const whatsoupNode = process.env.WHATSOUP_NODE;
+  const whatsoupNode = launcherNodeOverride();
 
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
@@ -444,6 +466,49 @@ function readOwnedLaunchdPlist(name: string, filePath: string): string | null {
   const contents = readExistingLaunchdPlist(filePath);
   if (contents !== null) assertOwnedLaunchdPlist(name, contents);
   return contents;
+}
+
+/**
+ * The launcher an owned plist starts, resolved as deploy/whatsoup resolves
+ * itself: the release-pinned program, or the file that the generated plist's
+ * `~/.local/bin/whatsoup` wrapper resolves to. The launcher's folder holds the
+ * boot preflight, and the folder above it is the root the job boots from.
+ */
+function launchdBootLauncher(name: string, contents: string): string {
+  if (isExpectedGeneratedLaunchdPlist(name, contents)) {
+    return fs.realpathSync.native(path.join(os.homedir(), '.local', 'bin', 'whatsoup'));
+  }
+  // assertOwnedLaunchdPlist admitted this plist, so the program is the validated
+  // release-pinned launcher, which holds no XML entity.
+  const program = launchdPlistProgram(name, contents, true);
+  if (program === null) throw new Error(`launchd plist for ${launchdLabel(name)} names no launcher`);
+  return program;
+}
+
+/**
+ * Run `preflight-check.sh <root> <instance>` from the launcher's folder in its
+ * standalone form: without the launcher's WHATSOUP_PREFLIGHT_RESTART_SAFETY=
+ * wrapper, so it also runs the outbound-ledger check. The environment is
+ * cleanGitEnv's bounded key list, which leaves out the credentials the launcher
+ * scrubs before its own preflight, plus the job's WHATSOUP_NODE; without one,
+ * the script resolves the launcher's default for this root through the same
+ * deploy/lib/resolve-node.sh. Only the exit status is kept.
+ */
+async function runRestartSelfPreflight(launcher: string, name: string): Promise<RestartSelfCheck> {
+  const root = path.dirname(path.dirname(launcher));
+  const node = launcherNodeOverride();
+  try {
+    await execFileAsync(path.join(path.dirname(launcher), 'preflight-check.sh'), [root, name], {
+      cwd: root,
+      env: { ...cleanGitEnv(), ...(node ? { WHATSOUP_NODE: node } : {}) },
+      timeout: RESTART_SELF_PREFLIGHT_TIMEOUT_MS,
+    });
+    return { ok: true };
+  } catch (error) {
+    // A non-zero exit carries its status; a timeout kill or a failed spawn does not.
+    const status = (error as { code?: unknown }).code;
+    return { ok: false, exitCode: typeof status === 'number' ? status : null };
+  }
 }
 
 /** sys/stat.h UF_IMMUTABLE, UF_APPEND, SF_IMMUTABLE, SF_APPEND and SF_NOUNLINK: unlink(2) fails while one is set. */
@@ -885,6 +950,12 @@ export interface ServiceManager {
    * run in the caller. Restarts issued from another process use restart().
    */
   restartSelf(name: string): Promise<void>;
+  /**
+   * Ask, before anything is sent or stopped, whether restartSelf() would boot.
+   * launchd implements it, because its restartSelf stops the running process
+   * before the launcher's boot preflight runs. Throws when no owned job exists.
+   */
+  checkRestartSelf?(name: string): Promise<RestartSelfCheck>;
   /** Fire-and-forget start with optional error callback (used in auth flow). */
   startFire(name: string, onError?: (err: Error | null) => void): void;
   /** Optional auth teardown hook; false means there was no job to restore after a failed pairing. */
@@ -1102,12 +1173,28 @@ class LaunchdServiceManager extends BaseServiceManager {
   }
 
   /**
+   * kickstart -k stops this process before the launcher's boot preflight runs
+   * (deploy/whatsoup), so a refused instance check or a blocking outbound ledger
+   * would end that boot with the job down. restart_self asks this before it
+   * sends anything. It reads the same owned plist that restartSelf reads.
+   */
+  async checkRestartSelf(name: string): Promise<RestartSelfCheck> {
+    assertValidLaunchdInstanceName(name);
+    const contents = readOwnedLaunchdPlist(name, plistPath(name));
+    if (contents === null) {
+      throw new Error('launchd plist is installed only after successful authentication; authenticate the instance before starting');
+    }
+    return runRestartSelfPreflight(launchdBootLauncher(name, contents), name);
+  }
+
+  /**
    * #3829: restart() boots out the job and then bootstraps it from the calling
    * process. Called from inside the job, the bootout terminates the caller, so
    * the bootstrap never runs and the job stays unloaded (KeepAlive does not
    * apply to an unloaded job). `kickstart -k` asks launchd to kill and relaunch
    * the loaded job itself; the caller issues nothing after it. There is no
    * bootstrap fallback: an absent job means this process is not that job.
+   * restart_self calls checkRestartSelf first.
    */
   async restartSelf(name: string): Promise<void> {
     assertValidLaunchdInstanceName(name);
