@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const SCRIPT = join(process.cwd(), 'deploy/scripts/whatsoup-open-dashboard');
 const UNLOCK_SCRIPT = join(process.cwd(), 'deploy/scripts/whatsoup-console-unlock');
+const UNLOCK_HELPER = join(process.cwd(), 'deploy/scripts/whatsoup-console-unlock.mjs');
 let dir: string;
 
 function executable(name: string, body: string): string {
@@ -20,42 +21,68 @@ beforeEach(() => {
 });
 
 describe('whatsoup-console-unlock', () => {
-  // The helper reads the token file itself (tests/deploy/whatsoup-console-unlock.test.ts);
-  // the wrapper must neither look the token up nor hand it over.
-  it('starts the helper without a keychain lookup and without a token in argv or the environment', () => {
-    const token = 'a'.repeat(64);
-    const configDir = join(dir, '.config', 'whatsoup');
+  // The token source keeps main's order: the login keychain first, handed to
+  // the helper in WHATSOUP_CONSOLE_TOKEN; otherwise the helper reads the token
+  // file itself (tests/deploy/whatsoup-console-unlock.test.ts). Every case puts a
+  // fake security first on PATH, so the real keychain is never asked.
+  const keychainToken = 'd'.repeat(64);
+  const exportedToken = 'e'.repeat(64);
+  const securityCall = 'security find-generic-password -s whatsoup-console-token -w\n';
+
+  function runWrapper({ keychain, helperText }: { keychain: string | null; helperText: string }) {
     const binDir = join(dir, 'bin');
     const localBin = join(dir, '.local', 'bin');
     const log = join(dir, 'unlock.log');
-    mkdirSync(configDir, { recursive: true });
     mkdirSync(binDir, { recursive: true });
     mkdirSync(localBin, { recursive: true });
-    writeFileSync(join(configDir, 'fleet-tokens.json'), JSON.stringify({ active: token, accept: [], rotatedAt: 'now' }));
-    writeFileSync(join(localBin, 'whatsoup-console-unlock.mjs'), '');
-    // A keychain that would answer, so any lookup shows up in the log.
-    executable('security', `printf 'security %s\\n' "$*" >> ${JSON.stringify(log)}\nprintf '%s\\n' ${JSON.stringify(token)}`);
+    const helper = join(localBin, 'whatsoup-console-unlock.mjs');
+    writeFileSync(helper, helperText);
+    const answer = keychain === null ? 'exit 44' : `printf '%s\\n' ${JSON.stringify(keychain)}`;
+    executable('security', `printf 'security %s\\n' "$*" >> ${JSON.stringify(log)}\n${answer}`);
     executable('curl', 'exit 0');
     executable(
       'node',
       `printf 'node %s token=%s cdp=%s fleet=%s\\n' "$*" "\${WHATSOUP_CONSOLE_TOKEN-unset}" "$CDP_PORT" "$FLEET" >> ${JSON.stringify(log)}`,
     );
     for (const name of ['security', 'curl', 'node']) {
-      const source = join(dir, name);
       const target = join(binDir, name);
-      writeFileSync(target, readFileSync(source));
+      writeFileSync(target, readFileSync(join(dir, name)));
       chmodSync(target, 0o700);
     }
 
     const result = spawnSync('bash', [UNLOCK_SCRIPT], {
       encoding: 'utf8',
-      env: { HOME: dir, PATH: `${binDir}:/usr/bin:/bin`, CDP_PORT: '9333', FLEET: 'http://127.0.0.1:9099' },
+      env: {
+        HOME: dir,
+        PATH: `${binDir}:/usr/bin:/bin`,
+        CDP_PORT: '9333',
+        FLEET: 'http://127.0.0.1:9099',
+        // A token exported by the caller is never a source, as on main.
+        WHATSOUP_CONSOLE_TOKEN: exportedToken,
+      },
     });
+    return { result, helper, log: existsSync(log) ? readFileSync(log, 'utf8') : '' };
+  }
+
+  it('hands the login keychain token to the helper in the environment, as main did, even to an older helper', () => {
+    const { result, helper, log } = runWrapper({ keychain: keychainToken, helperText: '' });
 
     expect(result.status).toBe(0);
-    expect(readFileSync(log, 'utf8')).toBe(
-      `node ${join(localBin, 'whatsoup-console-unlock.mjs')} token=unset cdp=9333 fleet=http://127.0.0.1:9099\n`,
-    );
+    expect(log).toBe(`${securityCall}node ${helper} token=${keychainToken} cdp=9333 fleet=http://127.0.0.1:9099\n`);
+  });
+
+  it('starts the helper with no token in argv or the environment when the keychain has none', () => {
+    const { result, helper, log } = runWrapper({ keychain: null, helperText: readFileSync(UNLOCK_HELPER, 'utf8') });
+
+    expect(result.status).toBe(0);
+    expect(log).toBe(`${securityCall}node ${helper} token=unset cdp=9333 fleet=http://127.0.0.1:9099\n`);
+  });
+
+  it('names an older helper that cannot read the token file instead of starting it', () => {
+    const { result, log } = runWrapper({ keychain: null, helperText: '' });
+
+    expect(result).toMatchObject({ status: 1, stdout: 'helper-outdated\n' });
+    expect(log).toBe(securityCall);
   });
 });
 

@@ -43,7 +43,7 @@ function helperEnv(overrides: Record<string, string> = {}): NodeJS.ProcessEnv {
 
 // Nothing listens on CDP_PORT=1, so a helper that accepts the token file stops
 // at its first CDP request with "err:..."; a helper that refuses the file
-// prints "no-fleet-token" before any request.
+// prints "no-fleet-token:<reason>" before any request.
 function runHelper(overrides: Record<string, string> = {}, nodeArgs: string[] = []): HelperRun {
   const result = spawnSync(process.execPath, [...nodeArgs, HELPER], {
     env: helperEnv(overrides),
@@ -58,8 +58,34 @@ function expectPastTokenRead(result: HelperRun): void {
   expect(result.stdout).toMatch(/^err:/);
 }
 
-function expectRefused(result: HelperRun): void {
-  expect(result).toEqual({ status: 1, stdout: 'no-fleet-token\n', stderr: '' });
+// Each refusal names its reason and never the path.
+function expectRefused(result: HelperRun, reason: string): void {
+  expect(result).toEqual({ status: 1, stdout: `no-fleet-token:${reason}\n`, stderr: '' });
+}
+
+// The helper's size bound; a real token file is under 1 KiB.
+const MAX_TOKEN_FILE_BYTES = 64 * 1024;
+
+function writePaddedTokenFile(path: string, size: number): void {
+  const base = JSON.stringify({ active: FILE_TOKEN, accept: [], rotatedAt: '1970-01-01T00:00:00.000Z', padding: '' });
+  writeFileSync(path, base.replace('"padding":""', `"padding":"${'x'.repeat(size - base.length)}"`));
+  chmodSync(path, 0o600);
+}
+
+// A preload that wraps one node:fs stat call. The test can only create files
+// it owns, so a changed uid or inode stands in for another owner or a swapped
+// file. With an empty change it only wraps, which is the control.
+function statPreload(name: string, call: 'lstatSync' | 'fstatSync', change: string): string {
+  const file = join(home, `${name}.mjs`);
+  writeFileSync(file, [
+    "import fs from 'node:fs';",
+    "import { syncBuiltinESMExports } from 'node:module';",
+    `const real = fs.${call};`,
+    `fs.${call} = (target, ...rest) => { const stat = real(target, ...rest); ${change} return stat; };`,
+    'syncBuiltinESMExports();',
+    '',
+  ].join('\n'));
+  return pathToFileURL(file).href;
 }
 
 function runHelperAsync(env: NodeJS.ProcessEnv): Promise<HelperRun> {
@@ -244,17 +270,43 @@ beforeEach(() => {
 
 afterEach(() => rmSync(home, { recursive: true, force: true }));
 
-describe('whatsoup-console-unlock.mjs fleet-token file', () => {
-  it('reads the active token from the private fleet-token file and sends only that token to the page', async () => {
+describe('whatsoup-console-unlock.mjs token source', () => {
+  // The wrapper hands over the login keychain token in WHATSOUP_CONSOLE_TOKEN,
+  // as on main; the helper reads the file only when nothing was handed over.
+  it('uses a token handed over in WHATSOUP_CONSOLE_TOKEN before the token file', async () => {
     writeTokenFile(join(configDir, 'fleet-tokens.json'));
     const cdp = await startMockCdp((origin) => ({ lists: [[{ id: 'fleet', url: `${origin}/` }]], authTicket: 'locked' }));
     try {
-      // A token in the environment is not a token source any more.
       const result = await runHelperAsync(cdpEnv(cdp, { WHATSOUP_CONSOLE_TOKEN: ENV_TOKEN }));
 
       expect(result).toEqual({ status: 0, stdout: 'unlocked\n', stderr: '' });
+      expect(cdp.record.tokensSent).toEqual([ENV_TOKEN]);
+      expect(cdp.record.frames.join('\n')).not.toContain(FILE_TOKEN);
+    } finally {
+      await cdp.close();
+    }
+  });
+
+  it('unlocks with a handed-over token when no token file exists', async () => {
+    const cdp = await startMockCdp((origin) => ({ lists: [[{ id: 'fleet', url: `${origin}/` }]], authTicket: 'locked' }));
+    try {
+      const result = await runHelperAsync(cdpEnv(cdp, { WHATSOUP_CONSOLE_TOKEN: ENV_TOKEN }));
+
+      expect(result).toEqual({ status: 0, stdout: 'unlocked\n', stderr: '' });
+      expect(cdp.record.tokensSent).toEqual([ENV_TOKEN]);
+    } finally {
+      await cdp.close();
+    }
+  });
+
+  it('reads the active token from the fleet-token file when no token is handed over', async () => {
+    writeTokenFile(join(configDir, 'fleet-tokens.json'));
+    const cdp = await startMockCdp((origin) => ({ lists: [[{ id: 'fleet', url: `${origin}/` }]], authTicket: 'locked' }));
+    try {
+      const result = await runHelperAsync(cdpEnv(cdp));
+
+      expect(result).toEqual({ status: 0, stdout: 'unlocked\n', stderr: '' });
       expect(cdp.record.tokensSent).toEqual([FILE_TOKEN]);
-      expect(cdp.record.frames.join('\n')).not.toContain(ENV_TOKEN);
     } finally {
       await cdp.close();
     }
@@ -275,13 +327,49 @@ describe('whatsoup-console-unlock.mjs fleet-token file', () => {
     }
   });
 
-  it('refuses a token file that group or others can read', () => {
+});
+
+// main refused only group or other permission bits on the file. The head keeps
+// that, adds what blocks a real exposure or a hang (leaf symlink, non-regular
+// file, another owner, a swapped file, an unbounded read), and checks nothing
+// on the folder.
+describe('whatsoup-console-unlock.mjs fleet-token file checks', () => {
+  it('accepts a token file with mode 0600 or 0400 in a folder that group and others can open', () => {
+    const tokenFile = join(configDir, 'fleet-tokens.json');
+    chmodSync(configDir, 0o755);
+    writeTokenFile(tokenFile);
+    expectPastTokenRead(runHelper());
+
+    chmodSync(tokenFile, 0o400);
+    expectPastTokenRead(runHelper());
+  });
+
+  it('accepts a token file reached through a symlinked folder', () => {
+    const realDir = privateDir(join(home, 'real-config'));
+    writeTokenFile(join(realDir, 'fleet-tokens.json'));
+    rmSync(configDir, { recursive: true });
+    symlinkSync(realDir, configDir);
+
+    expectPastTokenRead(runHelper());
+  });
+
+  it('reports a missing token file', () => {
+    expectRefused(runHelper(), 'missing');
+  });
+
+  it('refuses a token file that group can read', () => {
     const tokenFile = join(configDir, 'fleet-tokens.json');
     writeTokenFile(tokenFile);
     expectPastTokenRead(runHelper());
 
     chmodSync(tokenFile, 0o640);
-    expectRefused(runHelper());
+    expectRefused(runHelper(), 'mode');
+  });
+
+  it('refuses a token file that only others can read', () => {
+    writeTokenFile(join(configDir, 'fleet-tokens.json'), { mode: 0o604 });
+
+    expectRefused(runHelper(), 'mode');
   });
 
   it('refuses a token file reached through a symlink', () => {
@@ -290,39 +378,50 @@ describe('whatsoup-console-unlock.mjs fleet-token file', () => {
     expectPastTokenRead(runHelper({ WHATSOUP_FLEET_TOKEN_FILE: target }));
 
     symlinkSync(target, join(configDir, 'fleet-tokens.json'));
-    expectRefused(runHelper());
+    expectRefused(runHelper(), 'symlink');
   });
 
-  it('refuses a token folder that group or others can open', () => {
-    writeTokenFile(join(configDir, 'fleet-tokens.json'));
+  it('refuses a directory in place of the token file', () => {
+    privateDir(join(configDir, 'fleet-tokens.json'));
+
+    expectRefused(runHelper(), 'not-a-file');
+  });
+
+  it('refuses a FIFO in place of the token file without waiting for a writer', () => {
+    const fifo = join(configDir, 'fleet-tokens.json');
+    expect(spawnSync('mkfifo', ['-m', '600', fifo]).status).toBe(0);
+
+    expectRefused(runHelper(), 'not-a-file');
+  });
+
+  it('accepts a token file at the size bound and refuses one byte more', () => {
+    const tokenFile = join(configDir, 'fleet-tokens.json');
+    writePaddedTokenFile(tokenFile, MAX_TOKEN_FILE_BYTES);
     expectPastTokenRead(runHelper());
 
-    chmodSync(configDir, 0o755);
-    expectRefused(runHelper());
+    writePaddedTokenFile(tokenFile, MAX_TOKEN_FILE_BYTES + 1);
+    expectRefused(runHelper(), 'too-large');
   });
 
-  it('refuses a token folder reached through a symlink', () => {
-    const realDir = privateDir(join(home, 'real-config'));
-    writeTokenFile(join(realDir, 'fleet-tokens.json'));
-    expectPastTokenRead(runHelper({ WHATSOUP_FLEET_TOKEN_FILE: join(realDir, 'fleet-tokens.json') }));
-
-    rmSync(configDir, { recursive: true });
-    symlinkSync(realDir, configDir);
-    expectRefused(runHelper());
-  });
-
-  it('refuses a token file and folder owned by another user', () => {
+  it('refuses a token file that the check before opening sees owned by another user', () => {
     writeTokenFile(join(configDir, 'fleet-tokens.json'));
-    // The test can only create files it owns, so a preload makes the helper
-    // see another uid. The control preload keeps the real uid and shows that
-    // the preload alone changes nothing.
-    const sameUid = join(home, 'uid-same.mjs');
-    const otherUid = join(home, 'uid-other.mjs');
-    writeFileSync(sameUid, 'const realUid = process.getuid();\nprocess.getuid = () => realUid;\n');
-    writeFileSync(otherUid, 'const realUid = process.getuid();\nprocess.getuid = () => realUid + 1;\n');
+    expectPastTokenRead(runHelper({}, ['--import', statPreload('lstat-control', 'lstatSync', '')]));
 
-    expectPastTokenRead(runHelper({}, ['--import', pathToFileURL(sameUid).href]));
-    expectRefused(runHelper({}, ['--import', pathToFileURL(otherUid).href]));
+    const otherOwner = statPreload('lstat-owner', 'lstatSync', "if (String(target).endsWith('fleet-tokens.json')) stat.uid += 1;");
+    expectRefused(runHelper({}, ['--import', otherOwner]), 'owner');
+  });
+
+  it('refuses a token file that the check after opening sees owned by another user', () => {
+    writeTokenFile(join(configDir, 'fleet-tokens.json'));
+    expectPastTokenRead(runHelper({}, ['--import', statPreload('fstat-control', 'fstatSync', '')]));
+
+    expectRefused(runHelper({}, ['--import', statPreload('fstat-owner', 'fstatSync', 'stat.uid += 1;')]), 'owner');
+  });
+
+  it('refuses a token file whose opened inode differs from the checked one', () => {
+    writeTokenFile(join(configDir, 'fleet-tokens.json'));
+
+    expectRefused(runHelper({}, ['--import', statPreload('fstat-inode', 'fstatSync', 'stat.ino += 1;')]), 'changed');
   });
 
   it('refuses a token file whose active token is not 64 lowercase hex characters', () => {
@@ -331,7 +430,15 @@ describe('whatsoup-console-unlock.mjs fleet-token file', () => {
     expectPastTokenRead(runHelper());
 
     writeTokenFile(tokenFile, { active: FILE_TOKEN.toUpperCase() });
-    expectRefused(runHelper());
+    expectRefused(runHelper(), 'shape');
+  });
+
+  it('refuses a token file that is not JSON', () => {
+    const tokenFile = join(configDir, 'fleet-tokens.json');
+    writeFileSync(tokenFile, 'not json');
+    chmodSync(tokenFile, 0o600);
+
+    expectRefused(runHelper(), 'shape');
   });
 });
 
