@@ -113,7 +113,7 @@ if [ "${1:-}" = "--remove-timers" ]; then
   if [ "$PLATFORM" != "Darwin" ]; then
     echo "--remove-timers applies to macOS launchd timers only." >&2
     echo "On Linux, disable the systemd timers instead:" >&2
-    echo "  systemctl --user disable --now harness-maintenance.timer whatsoup-reply-guarantee.timer" >&2
+    echo "  systemctl --user disable --now harness-maintenance.timer whatsoup-reply-guarantee.timer whatsoup-release-drift.timer" >&2
     exit 1
   fi
   for label in "${LAUNCHD_TIMER_LABELS[@]}"; do
@@ -142,7 +142,7 @@ if [ "${1:-}" = "--reconcile" ]; then
   fi
 
   # Expected service sets — MUST mirror the step-4 install surface:
-  # the 7 named systemd cp targets enumerated below + every entry of
+  # the 9 named systemd cp targets enumerated below + every entry of
   # BOT_ERRORS_SYSTEMD_UNITS, and the launchd labels in LAUNCHD_TIMER_LABELS.
   # Per-instance units (whatsoup@<name>.service, the fleet-generated
   # com.whatsoup.<name>.plist) are intentionally OUT of the expected set —
@@ -158,6 +158,8 @@ if [ "${1:-}" = "--reconcile" ]; then
     "whatsoup-reply-guarantee.timer"
     "harness-maintenance.service"
     "harness-maintenance.timer"
+    "whatsoup-release-drift.service"
+    "whatsoup-release-drift.timer"
   )
   RECONCILE_SYSTEMD_EXPECTED+=("${BOT_ERRORS_SYSTEMD_UNITS[@]}")
 
@@ -344,6 +346,17 @@ if [ "$assume_yes" -eq 1 ] && [ "$install_host_dependencies" -ne 1 ]; then
   echo "--yes requires --install-host-dependencies" >&2
   exit 2
 fi
+# The Linux release-drift unit labels its BOT ERRORS alerts with this value, so
+# it is checked here, before setup changes anything. The wrapper passes it after
+# --instance, where a leading dash reads as another option (the scheduler's
+# --help, or isFlagToken in scripts/lib/cli-args.ts for the observer).
+# deploy/scripts/whatsoup-release-drift-linux.sh refuses the same labels.
+release_drift_instance="${WHATSOUP_RELEASE_DRIFT_INSTANCE:-}"
+if [ "$PLATFORM" != "Darwin" ] && [ -n "$release_drift_instance" ] \
+  && [[ ! "$release_drift_instance" =~ ^[A-Za-z0-9._][A-Za-z0-9._-]*$ ]]; then
+  echo "  ✗ unsafe WHATSOUP_RELEASE_DRIFT_INSTANCE: use only letters, digits, dot, underscore, and dash, and do not begin with a dash" >&2
+  exit 2
+fi
 
 echo "WhatSoup Setup"
 echo "=============="
@@ -496,6 +509,10 @@ echo "  ✓ whatsoup-reply-guarantee-drain → $REPO_ROOT/deploy/scripts/reply-g
 ln -sf "$REPO_ROOT/deploy/scripts/heal-notify.sh" "$BIN_DIR/whatsoup-heal-notify"
 chmod +x "$REPO_ROOT/deploy/scripts/heal-notify.sh"
 echo "  ✓ whatsoup-heal-notify → $REPO_ROOT/deploy/scripts/heal-notify.sh"
+# Keeps its .sh name: deploy/whatsoup-release-drift.service executes it by that name.
+ln -sf "$REPO_ROOT/deploy/scripts/whatsoup-release-drift-linux.sh" "$BIN_DIR/whatsoup-release-drift-linux.sh"
+chmod +x "$REPO_ROOT/deploy/scripts/whatsoup-release-drift-linux.sh"
+echo "  ✓ whatsoup-release-drift-linux.sh → $REPO_ROOT/deploy/scripts/whatsoup-release-drift-linux.sh"
 
 # Ensure ~/.local/bin is on PATH
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
@@ -577,6 +594,8 @@ else
   cp "$REPO_ROOT/deploy/whatsoup-reply-guarantee.timer" "$SYSTEMD_DIR/whatsoup-reply-guarantee.timer"
   cp "$REPO_ROOT/deploy/harness-maintenance.service" "$SYSTEMD_DIR/harness-maintenance.service"
   cp "$REPO_ROOT/deploy/harness-maintenance.timer" "$SYSTEMD_DIR/harness-maintenance.timer"
+  cp "$REPO_ROOT/deploy/whatsoup-release-drift.service" "$SYSTEMD_DIR/whatsoup-release-drift.service"
+  cp "$REPO_ROOT/deploy/whatsoup-release-drift.timer" "$SYSTEMD_DIR/whatsoup-release-drift.timer"
   for unit in "${BOT_ERRORS_SYSTEMD_UNITS[@]}"; do
     cp "$REPO_ROOT/deploy/$unit" "$SYSTEMD_DIR/$unit"
   done
@@ -608,7 +627,64 @@ else
   echo "  ✓ whatsoup-heal-notify@.service installed"
   echo "  ✓ whatsoup-reply-guarantee.{service,timer} installed"
   echo "  ✓ harness-maintenance.{service,timer} installed"
+  echo "  ✓ whatsoup-release-drift.{service,timer} installed"
   echo "  ✓ BOT ERRORS service/timer units installed"
+  # whatsoup-release-drift.service reads its BOT ERRORS instance label,
+  # WHATSOUP_RELEASE_DRIFT_INSTANCE, from this file, never from bot-errors.env:
+  # every BOT ERRORS unit loads that file. The wrapper ignores WHATSOUP_INSTANCE,
+  # which also selects per-instance agent state (deploy/hooks). Setup writes the
+  # file only from an explicit label and never writes to a path that exists at
+  # this check: any entry, a symlink or a dangling symlink included, counts as
+  # present (a label is read through a symlink, as systemd reads it). Under
+  # noclobber (set -C), a regular file, a link to one or a dangling symlink that
+  # appears after this check is refused too; a FIFO or device that appears, or a
+  # link to one, is written into, since bash adds O_EXCL only when stat finds
+  # nothing.
+  release_drift_env="$HOME/.config/whatsoup/release-drift.env"
+  if [ -e "$release_drift_env" ] || [ -L "$release_drift_env" ]; then
+    # A failed read warns and never ends setup (set -e), which has already
+    # linked the launchers, installed the units and reloaded systemd. Only a
+    # regular file is read, so any other path reads as a file without a label.
+    if ! release_drift_existing="$(read_env_file_value "$release_drift_env" WHATSOUP_RELEASE_DRIFT_INSTANCE 2>/dev/null)"; then
+      echo "  ⚠ setup cannot read ~/.config/whatsoup/release-drift.env: whatsoup-release-drift.service will fail until that file can be read and sets WHATSOUP_RELEASE_DRIFT_INSTANCE"
+      if [ -n "$release_drift_instance" ]; then
+        echo "    The requested label was not applied: setup never replaces an existing file."
+      fi
+    elif [ -z "$release_drift_existing" ]; then
+      echo "  ⚠ ~/.config/whatsoup/release-drift.env exists but sets no WHATSOUP_RELEASE_DRIFT_INSTANCE: whatsoup-release-drift.service will fail until it does"
+      if [ -n "$release_drift_instance" ]; then
+        echo "    The requested label was not applied: setup never replaces an existing file."
+      fi
+    elif [ -n "$release_drift_instance" ] && [ "$release_drift_existing" != "$release_drift_instance" ]; then
+      echo "  ⚠ Existing release-drift instance label kept at ~/.config/whatsoup/release-drift.env: the requested WHATSOUP_RELEASE_DRIFT_INSTANCE was ignored"
+    else
+      echo "  ✓ Existing release-drift instance label preserved at ~/.config/whatsoup/release-drift.env"
+    fi
+  elif [ -n "$release_drift_instance" ]; then
+    mkdir -p "$HOME/.config/whatsoup"
+    if (set -C; umask 077; printf 'WHATSOUP_RELEASE_DRIFT_INSTANCE=%s\n' "$release_drift_instance" > "$release_drift_env"); then
+      echo "  ✓ Release-drift instance label written to ~/.config/whatsoup/release-drift.env"
+    else
+      echo "  ⚠ Release-drift instance label was not written: ~/.config/whatsoup/release-drift.env appeared after setup's check or cannot be created, and setup never replaces it"
+    fi
+  else
+    # A unit installed by hand took its label from WHATSOUP_INSTANCE, set in a
+    # drop-in or in bot-errors.env, which it loaded. Setup has just replaced that
+    # unit but keeps the setting, so every run exits 2 until the label file exists.
+    # Both checks sit in if conditions: a file setup cannot read must not end setup.
+    release_drift_old_label=""
+    if grep -qsE '^[[:space:]]*Environment[[:space:]]*=.*WHATSOUP_INSTANCE=' "$SYSTEMD_DIR/whatsoup-release-drift.service.d"/*.conf; then
+      release_drift_old_label="a drop-in in ~/.config/systemd/user/whatsoup-release-drift.service.d"
+    elif env_file_has_key "$HOME/.config/whatsoup/bot-errors.env" WHATSOUP_INSTANCE 2>/dev/null; then
+      release_drift_old_label="the file ~/.config/whatsoup/bot-errors.env"
+    fi
+    if [ -n "$release_drift_old_label" ]; then
+      echo "  ⚠ whatsoup-release-drift.service no longer reads WHATSOUP_INSTANCE, which $release_drift_old_label sets: every run exits 2 without observing until ~/.config/whatsoup/release-drift.env holds the label. Write that file once, with the same instance:"
+      echo "     (set -C; umask 077; echo WHATSOUP_RELEASE_DRIFT_INSTANCE=<instance> > ~/.config/whatsoup/release-drift.env)"
+    else
+      echo "  - Release-drift instance label not set: write WHATSOUP_RELEASE_DRIFT_INSTANCE=<instance> to ~/.config/whatsoup/release-drift.env before enabling whatsoup-release-drift.timer"
+    fi
+  fi
 fi
 mkdir -p "$HOME/.config/whatsoup"
 if [ ! -f "$HOME/.config/whatsoup/fleet.env" ]; then
@@ -768,5 +844,18 @@ else
   echo "  To run BOT ERRORS monitoring after filling ~/.config/whatsoup/bot-errors.env:"
   echo "     systemctl --user enable --now bot-errors-dispatcher.service bot-errors-q-loop.service bot-errors-collector.service"
   echo "     systemctl --user enable --now bot-errors-deadman.timer bot-errors-health-check.timer bot-errors-heartbeat-watchdog.timer bot-errors-runtime-staleness.timer"
+  echo ""
+  echo "  To check the deployed release for drift and currency every 5 minutes (once per host):"
+  echo "  the observer needs ~/.local/bin/whatsoup to point into an exported release that holds"
+  echo "  .whatsoup-release-manifest.json. Setup has just pointed it at this tree, so on a host"
+  echo "  installed from a clone every run raises manifest-missing and inconclusive alerts and"
+  echo "  exits 2. Other causes fail the unit too, among them a missing or unsafe label, a runner,"
+  echo "  observer or emit failure, a network failure or a timeout, and exit 1 from a release whose"
+  echo "  scheduler predates --bootstrap-exit-code 2; docs/runbook.md describes each exit status."
+  echo "  Give the timer the bot instance that labels its BOT ERRORS alerts (unless setup wrote"
+  echo "  it from WHATSOUP_RELEASE_DRIFT_INSTANCE; this command never replaces an existing file):"
+  echo "     (set -C; umask 077; echo WHATSOUP_RELEASE_DRIFT_INSTANCE=<instance> > ~/.config/whatsoup/release-drift.env)"
+  echo "  then enable it:"
+  echo "     systemctl --user enable --now whatsoup-release-drift.timer"
 fi
 echo ""

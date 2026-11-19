@@ -1107,6 +1107,11 @@ bash deploy/scripts/render-release-drift-launchd.sh \
   --output /tmp/com.whatsoup.release-drift-check.plist
 ```
 
+Exit codes: `target-differs` is advisory and exits 0; the `release-currency`
+finding is still emitted and printed. Real integrity drift exits 1 and an
+`inconclusive` observation exits 2, so a host that only differs from the target
+does not read as a failed job.
+
 The same schedule emits integrity findings under `release-drift` and currency
 findings under `release-currency`. `--clear-on-ok` clears each source only from
 its own successful observation. Installing or updating the rendered job remains

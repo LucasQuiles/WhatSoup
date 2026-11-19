@@ -1999,12 +1999,18 @@ loaded fragment paths and drop-ins via `systemctl --user show`, and requires
 both monitor timers to be enabled and active.
 
 `check-unit-drift.sh` also accepts `--no-wrappers`, which skips wrapper
-verification entirely instead of checking the default `whatsoup-ensure-node`
-wrapper (or an explicit `--wrapper NAME:REL_PATH` list). It is mutually
+verification entirely instead of checking the default wrappers,
+`whatsoup-ensure-node` and `whatsoup-release-drift-linux.sh` (or an explicit
+`--wrapper NAME:REL_PATH` list). It is mutually
 exclusive with `--wrapper` and may not be repeated; combining the two, or
 repeating either flag, exits `2` before any check runs. Use it only for a
 host/context where the pilot units run without the wrapper layer, so there
 is nothing for the script to verify.
+
+Without `--wrapper` or `--no-wrappers`, both default wrappers are checked
+whatever `--unit` selects: an explicit `--unit` run also checks
+`whatsoup-release-drift-linux.sh` and fails when it is missing or has
+drifted, even when no selected unit executes it.
 
 ### Producer cadence receipt (dark, no reader yet)
 
