@@ -125,3 +125,62 @@ describe('runHandoffDistill', () => {
   });
 
 });
+
+describe('runHandoffDistill failure warn line', () => {
+  // Built from parts so no credential-shaped literal sits in the source.
+  const token = ['sk', 'test', 'abcdefghijklmnopqrstuvwx'].join('-');
+  const bearerValue = ['abcdefghij', 'klmnop0123'].join('');
+
+  function warnLines(warn: ReturnType<typeof vi.fn>): Array<[Record<string, unknown>, string]> {
+    return warn.mock.calls as Array<[Record<string, unknown>, string]>;
+  }
+
+  it('logs one sanitized warn line per failure, with no path or secret in it', async () => {
+    const warn = vi.fn();
+    const d = deps({
+      conversationKey: 'conversation-key-a',
+      log: { warn },
+      distill: async () => {
+        throw new Error(
+          `upstream refused Bearer ${bearerValue} reading /srv/app-a/state/session.json with ${token} ${'x'.repeat(400)}`,
+        );
+      },
+    } as Partial<RunHandoffDistillDeps>);
+
+    const result = await runHandoffDistill(d);
+
+    expect(result).toMatchObject({ ran: false, failed: true });
+    expect(warn).toHaveBeenCalledTimes(1);
+    const [fields, message] = warnLines(warn)[0]!;
+    expect(fields).toMatchObject({ event: 'handoff_distill_failed', reasonClass: 'provider' });
+    expect(typeof fields.conversationKeyHash).toBe('string');
+    expect(typeof fields.reason).toBe('string');
+    expect((fields.reason as string).length).toBeLessThanOrEqual(160);
+    const line = JSON.stringify([fields, message]);
+    expect(line).not.toContain('conversation-key-a');
+    expect(line).not.toContain('/srv/');
+    expect(line).not.toContain('app-a');
+    expect(line).not.toContain(token);
+    expect(line).not.toContain(bearerValue);
+  });
+
+  it('classes a persistence failure as persist in its one warn line', async () => {
+    const warn = vi.fn();
+    const d = deps({
+      log: { warn },
+      persist: () => { throw new Error('storage unavailable'); },
+    } as Partial<RunHandoffDistillDeps>);
+
+    await runHandoffDistill(d);
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warnLines(warn)[0]![0]).toMatchObject({ event: 'handoff_distill_failed', reasonClass: 'persist' });
+  });
+
+  it('logs no warn line when the distill succeeds or the gate denies it', async () => {
+    const warn = vi.fn();
+    await runHandoffDistill(deps({ log: { warn } } as Partial<RunHandoffDistillDeps>));
+    await runHandoffDistill(deps({ log: { warn }, globalInFlight: 5 } as Partial<RunHandoffDistillDeps>));
+    expect(warn).not.toHaveBeenCalled();
+  });
+});
