@@ -2124,8 +2124,14 @@ The optional `--human-report-max-characters` and
 claim a universal WhatsApp limit and the renderer rejects an over-limit report
 instead of truncating its required facts or evidence locator.
 
-Rendered condition, target, impact, and action fields reject controls, WhatsApp
-markup delimiters, and raw 64-hex SHA-256 values. They do not reject incidental
-words such as `Haystack`; the host-qualified evidence locator remains the exact
-verified local path and may contain Unicode or ordinary path components such as
-`stack` or `receiptsha`.
+Rendered condition, target, impact, and action fields reject the C0 and C1
+control characters with DEL (U+0000-U+001F, U+007F-U+009F), the Unicode line
+and paragraph separators (U+2028, U+2029), the bidirectional formatting
+characters (U+061C, U+200E, U+200F, U+202A-U+202E, U+2066-U+2069), WhatsApp
+markup delimiters, and raw 64-hex SHA-256 values. The same rules apply to the
+incident id, the condition ids and the owner identity. They do not reject other
+Unicode text or incidental words such as `Haystack`. The host-qualified
+evidence locator refuses the same control, separator and bidirectional
+characters (`locator_control_character`); otherwise it remains the exact
+verified local path and may contain Unicode or ordinary path components such
+as `stack` or `receiptsha`.

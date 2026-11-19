@@ -554,7 +554,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_reporting.py",
-      "sha256": "d3f2e17df329e60d4d11c0dc85206b34d3963252b58d87452c4cbc1e6d576ca4",
+      "sha256": "4f3bfa315cd52429f448845c570847f99e900131c17fad5a625d3dbd66b156b3",
       "mustContain": [
         "bot-errors-human-report/v2",
         "bot-errors-human-report-record/v1",

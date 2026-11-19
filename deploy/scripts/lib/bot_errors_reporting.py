@@ -41,6 +41,9 @@ _STATES = frozenset((
 _SEVERITIES = frozenset(("critical", "error", "warning", "info"))
 _MARKUP = ("*", "_", "`", "~", "|")
 _RAW_SHA256_RE = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])")
+# Bidirectional formatting characters reorder how the rest of a line displays,
+# so a field holding one can show text in an order its bytes do not have.
+_BIDI_FORMATTING = frozenset("؜‎‏‪‫‬‭‮⁦⁧⁨⁩")
 
 
 class ReportQualificationError(ValueError):
@@ -112,11 +115,21 @@ def _mapping(value: object, code: str) -> Mapping[str, Any]:
     return value
 
 
+def _unsafe_character(character: str) -> bool:
+    """C0 and C1 controls with DEL, the line and paragraph separators, bidi formatting.
+
+    Each can start a new rendered line or reorder one, so a field holding it
+    could forge a status or reader-action line.
+    """
+    code = ord(character)
+    return code < 0x20 or 0x7F <= code <= 0x9F or code in (0x2028, 0x2029) or character in _BIDI_FORMATTING
+
+
 def _safe_text(value: object, code: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ReportQualificationError(code)
     text = value
-    if any(ord(character) < 32 or ord(character) == 127 for character in text):
+    if any(_unsafe_character(character) for character in text):
         raise ReportQualificationError(f"unsafe_{code.removeprefix('missing_')}")
     if any(character in text for character in _MARKUP):
         raise ReportQualificationError(f"unsafe_{code.removeprefix('missing_')}")
@@ -245,7 +258,7 @@ def _load_record(value: object, *, expected_kind: str, expected_binding: Inciden
     digest = reference.get("sha256")
     if not isinstance(locator, str):
         raise ReportQualificationError("invalid_evidence_locator")
-    if any(ord(character) < 32 or ord(character) == 127 for character in locator):
+    if any(_unsafe_character(character) for character in locator):
         raise ReportQualificationError("locator_control_character")
     match = _LOCATOR_RE.fullmatch(locator)
     if match is None:
